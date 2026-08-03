@@ -1,0 +1,705 @@
+From 09e2895e37d120a90ea889017ad730e1dbf0f7a3 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Thu, 30 Jul 2026 16:10:31 +0200
+Subject: [PATCH] feat(ir): add typed indirect calls
+
+---
+ crates/codegen/src/isa/cranelift/translate.rs |   2 +
+ crates/codegen/src/isa/wasm/translate.rs      |   6 ++
+ crates/codegen/src/module_analysis.rs         |  67 +++++++++++-
+ crates/codegen/tests/wasm_backend.rs          |  32 ++++++
+ crates/ir/src/effects.rs                      |   5 +
+ crates/ir/src/inst/control_flow.rs            |  13 +++
+ crates/ir/src/inst/evm/inst_set.rs            |   1 +
+ crates/ir/src/inst/inst_set.rs                |   1 +
+ crates/ir/src/inst/native/inst_set.rs         |   1 +
+ crates/ir/src/interpret/control_flow.rs       |  16 +++
+ crates/ir/src/interpret/data.rs               |   6 +-
+ crates/ir/src/interpret/mod.rs                |   7 ++
+ crates/ir/tests/indirect_call.rs              | 101 ++++++++++++++++++
+ crates/parser/src/inst/control_flow.rs        |  22 ++++
+ .../verify/function/type_rules/dispatch.rs    |  59 ++++++++++
+ .../verifier/src/verify/module_invariants.rs  |  10 ++
+ crates/verifier/tests/indirect_call.rs        |  58 ++++++++++
+ 17 files changed, 403 insertions(+), 4 deletions(-)
+ create mode 100644 crates/ir/tests/indirect_call.rs
+ create mode 100644 crates/verifier/tests/indirect_call.rs
+
+diff --git a/crates/codegen/src/isa/cranelift/translate.rs b/crates/codegen/src/isa/cranelift/translate.rs
+index 87255560..42c10728 100644
+--- a/crates/codegen/src/isa/cranelift/translate.rs
++++ b/crates/codegen/src/isa/cranelift/translate.rs
+@@ -391,6 +391,8 @@ fn translate_function(
+                         .collect();
+                     builder.ins().return_(&args);
+                 }
++            } else if <&sonatina_ir::inst::control_flow::CallIndirect as sonatina_ir::InstDowncast>::downcast(inst_set, inst_data).is_some() {
++                return Err("cranelift translation: call_indirect is not lowered yet".to_string());
+             } else if let Some(call) = <&sonatina_ir::inst::control_flow::Call as sonatina_ir::InstDowncast>::downcast(inst_set, inst_data) {
+                 let callee = *call.callee();
+                 let callee_name = module.ctx.func_sig(callee, |sig| sig.name().to_string());
+diff --git a/crates/codegen/src/isa/wasm/translate.rs b/crates/codegen/src/isa/wasm/translate.rs
+index 4e28a77e..7354ddcf 100644
+--- a/crates/codegen/src/isa/wasm/translate.rs
++++ b/crates/codegen/src/isa/wasm/translate.rs
+@@ -1562,6 +1562,12 @@ fn translate_function(
+                             value_map.insert(result, wval);
+                         }
+                     }
++                    else if <&sonatina_ir::inst::control_flow::CallIndirect as InstDowncast>::downcast(inst_set, inst_data).is_some() {
++                        return Err(
++                            "wasm translation: call_indirect requires function-table lowering"
++                                .to_string(),
++                        );
++                    }
+                     // Call — direct call to another translated function.
+                     else if let Some(call) = <&sonatina_ir::inst::control_flow::Call as InstDowncast>::downcast(inst_set, inst_data) {
+                         let callee = *call.callee();
+diff --git a/crates/codegen/src/module_analysis.rs b/crates/codegen/src/module_analysis.rs
+index 31e02b13..0f2e1a95 100644
+--- a/crates/codegen/src/module_analysis.rs
++++ b/crates/codegen/src/module_analysis.rs
+@@ -4,7 +4,8 @@ use cranelift_entity::{PrimaryMap, SecondaryMap, entity_impl};
+ use dashmap::{DashMap, ReadOnlyView};
+ use rustc_hash::FxHashSet;
+ use sonatina_ir::{
+-    Linkage, Module,
++    InstDowncast, Linkage, Module,
++    inst::{control_flow::CallIndirect, data::GetFunctionPtr},
+     module::{FuncRef, ModuleCtx},
+ };
+ 
+@@ -110,6 +111,7 @@ impl CallGraph {
+     /// Builds a call graph from a module.
+     pub fn build_graph(module: &Module) -> Self {
+         let funcs = module.func_store.funcs();
++        let indirect_targets = address_taken_functions(module);
+         let d_nodes = DashMap::new();
+         module.func_store.par_for_each(|func_ref, func| {
+             let mut callees = FxHashSet::default();
+@@ -118,6 +120,14 @@ impl CallGraph {
+                     if let Some(call) = func.dfg.call_info(inst_id) {
+                         callees.insert(call.callee());
+                     }
++                    if <&CallIndirect as InstDowncast>::downcast(
++                        func.inst_set(),
++                        func.dfg.inst(inst_id),
++                    )
++                    .is_some()
++                    {
++                        callees.extend(indirect_targets.iter().copied());
++                    }
+                 }
+             }
+ 
+@@ -142,6 +152,7 @@ impl CallGraph {
+     ///
+     /// Any call edges to functions outside `funcs` are ignored.
+     pub fn build_graph_subset(module: &Module, funcs: &FxHashSet<FuncRef>) -> Self {
++        let indirect_targets = address_taken_functions(module);
+         let mut nodes = SecondaryMap::new();
+ 
+         let mut ordered: Vec<FuncRef> = funcs.iter().copied().collect();
+@@ -158,6 +169,19 @@ impl CallGraph {
+                                 callees.insert(callee);
+                             }
+                         }
++                        if <&CallIndirect as InstDowncast>::downcast(
++                            func.inst_set(),
++                            func.dfg.inst(inst_id),
++                        )
++                        .is_some()
++                        {
++                            callees.extend(
++                                indirect_targets
++                                    .iter()
++                                    .copied()
++                                    .filter(|target| funcs.contains(target)),
++                            );
++                        }
+                     }
+                 }
+ 
+@@ -191,6 +215,25 @@ impl CallGraph {
+     }
+ }
+ 
++fn address_taken_functions(module: &Module) -> FxHashSet<FuncRef> {
++    let mut targets = FxHashSet::default();
++    for func_ref in module.func_store.funcs() {
++        module.func_store.view(func_ref, |function| {
++            for block in function.layout.iter_block() {
++                for inst_id in function.layout.iter_inst(block) {
++                    if let Some(ptr) = <&GetFunctionPtr as InstDowncast>::downcast(
++                        function.inst_set(),
++                        function.dfg.inst(inst_id),
++                    ) {
++                        targets.insert(*ptr.func());
++                    }
++                }
++            }
++        });
++    }
++    targets
++}
++
+ /// Represents the strongly connected components of a call graph in a module.
+ #[derive(Debug, Clone)]
+ pub struct CallGraphSccs {
+@@ -558,6 +601,28 @@ func private %live() -> i32 {
+         assert_eq!(funcs, vec![entry, live]);
+     }
+ 
++    #[test]
++    fn indirect_call_conservatively_targets_address_taken_functions() {
++        let parsed = parse_module(
++            r#"
++target = "wasm32-unknown-native"
++func private %target(v0.i32) -> i32 {
++    block0:
++        return v0;
++}
++func public %entry(v0.i32) -> i32 {
++    block0:
++        v1.*(i32) -> i32 = get_function_ptr %target;
++        v2.i32 = call_indirect v1 *(i32) -> i32 v0;
++        return v2;
++}
++"#,
++        );
++        let entry = find_func(&parsed.module, "entry");
++        let target = find_func(&parsed.module, "target");
++        assert_eq!(CallGraph::build_graph(&parsed.module).callee_of(entry), [target]);
++    }
++
+     #[test]
+     fn module_analysis_handles_sparse_func_ref_space() {
+         let parsed = parse_module(
+diff --git a/crates/codegen/tests/wasm_backend.rs b/crates/codegen/tests/wasm_backend.rs
+index 02897734..5e32856a 100644
+--- a/crates/codegen/tests/wasm_backend.rs
++++ b/crates/codegen/tests/wasm_backend.rs
+@@ -130,6 +130,38 @@ fn wasm_scalar_global_support_does_not_perturb_default_bytes() {
+     );
+ }
+ 
++#[test]
++fn wasm_indirect_call_fails_closed_until_table_lowering_exists() {
++    let parsed = sonatina_parser::parse_module(
++        r#"
++target = "wasm32-unknown-native"
++func private %id(v0.i32) -> i32 {
++    block0:
++        return v0;
++}
++func public %run(v0.i32) -> i32 {
++    block0:
++        v1.*(i32) -> i32 = get_function_ptr %id;
++        v2.i32 = call_indirect v1 *(i32) -> i32 v0;
++        return v2;
++}
++"#,
++    )
++    .unwrap();
++    let errors = match WasmBackend::new().compile_module(&parsed.module) {
++        Ok(_) => panic!("indirect call must fail before table lowering exists"),
++        Err(errors) => errors,
++    };
++    assert!(
++        errors.iter().any(|error| {
++            let error = error.to_string();
++            error.contains("function-table lowering")
++                || error.contains("unsupported instruction `get_function_ptr`")
++        }),
++        "{errors:?}"
++    );
++}
++
+ #[test]
+ fn wasm_bitwise_and_i32_i64_execute() {
+     let isa = Wasm32::new(wasm32_triple());
+diff --git a/crates/ir/src/effects.rs b/crates/ir/src/effects.rs
+index 83067f35..d0682553 100644
+--- a/crates/ir/src/effects.rs
++++ b/crates/ir/src/effects.rs
+@@ -632,6 +632,11 @@ fn classify_inst_effects_with<S: EffectSink>(
+         record_func_summary(&mut sink, &dfg.ctx.func_effects(call.callee()), spaces);
+         return sink.finish();
+     }
++    if <&control_flow::CallIndirect as InstDowncast>::downcast(is, inst).is_some() {
++        record_fallback_from_declared_effect_hint(&mut sink, SideEffect::Write, spaces);
++        sink.add_other(OtherEffects::CONTROL | OtherEffects::ALLOC);
++        return sink.finish();
++    }
+ 
+     if let Some(mstore8) = <&EvmMstore8 as InstDowncast>::downcast(is, inst) {
+         sink.write_exact(MEMORY, *mstore8.addr(), 1, Type::I8);
+diff --git a/crates/ir/src/inst/control_flow.rs b/crates/ir/src/inst/control_flow.rs
+index df58234d..2f7ef431 100644
+--- a/crates/ir/src/inst/control_flow.rs
++++ b/crates/ir/src/inst/control_flow.rs
+@@ -71,6 +71,19 @@ pub struct Call {
+     args: SmallVec<[ValueId; 8]>,
+ }
+ 
++/// Invoke a function-pointer value using an explicit function type.
++///
++/// The signature is carried independently from the callee value so verification
++/// and target lowering never have to infer a callable ABI from pointer bits.
++#[derive(Debug, Clone, PartialEq, Eq, Hash, Inst)]
++#[inst(side_effect(super::SideEffect::Write))]
++#[inst(arity(at_least(2)))]
++pub struct CallIndirect {
++    callee: ValueId,
++    signature: crate::Type,
++    args: SmallVec<[ValueId; 8]>,
++}
++
+ #[derive(Debug, Clone, PartialEq, Eq, Hash, Inst)]
+ #[inst(side_effect(super::SideEffect::Control))]
+ #[inst(terminator)]
+diff --git a/crates/ir/src/inst/evm/inst_set.rs b/crates/ir/src/inst/evm/inst_set.rs
+index 9121da91..2c2dd95b 100644
+--- a/crates/ir/src/inst/evm/inst_set.rs
++++ b/crates/ir/src/inst/evm/inst_set.rs
+@@ -50,6 +50,7 @@ pub struct EvmInstSet(
+     control_flow::Phi,
+     control_flow::BrTable,
+     control_flow::Call,
++    control_flow::CallIndirect,
+     control_flow::Return,
+     control_flow::Unreachable,
+     data::Mload,
+diff --git a/crates/ir/src/inst/inst_set.rs b/crates/ir/src/inst/inst_set.rs
+index 353252cd..613f32af 100644
+--- a/crates/ir/src/inst/inst_set.rs
++++ b/crates/ir/src/inst/inst_set.rs
+@@ -107,6 +107,7 @@ define_inst_set_base! {
+         data::InsertValue,
+         data::ExtractValue,
+         control_flow::Call,
++        control_flow::CallIndirect,
+         control_flow::Jump,
+         control_flow::Br,
+         control_flow::BrTable,
+diff --git a/crates/ir/src/inst/native/inst_set.rs b/crates/ir/src/inst/native/inst_set.rs
+index 8d21002c..e941be49 100644
+--- a/crates/ir/src/inst/native/inst_set.rs
++++ b/crates/ir/src/inst/native/inst_set.rs
+@@ -63,6 +63,7 @@ pub struct NativeInstSet(
+     control_flow::Phi,
+     control_flow::BrTable,
+     control_flow::Call,
++    control_flow::CallIndirect,
+     control_flow::Return,
+     control_flow::Unreachable,
+     data::Mload,
+diff --git a/crates/ir/src/interpret/control_flow.rs b/crates/ir/src/interpret/control_flow.rs
+index fcf6b159..6d024077 100644
+--- a/crates/ir/src/interpret/control_flow.rs
++++ b/crates/ir/src/interpret/control_flow.rs
+@@ -82,6 +82,22 @@ impl Interpret for Call {
+     }
+ }
+ 
++impl Interpret for CallIndirect {
++    fn interpret(&self, state: &mut dyn State) -> super::EvalResults {
++        let EvalValue::Func(func) = state.lookup_val(*self.callee()) else {
++            state.set_action(Action::Continue);
++            return single_result(EvalValue::Undef);
++        };
++        let args = self
++            .args()
++            .iter()
++            .map(|arg| state.lookup_val(*arg))
++            .collect();
++        state.set_action(Action::Continue);
++        state.call_func(func, args)
++    }
++}
++
+ impl Interpret for Return {
+     fn interpret(&self, state: &mut dyn State) -> super::EvalResults {
+         let ret_vals = self
+diff --git a/crates/ir/src/interpret/data.rs b/crates/ir/src/interpret/data.rs
+index 39ca9bef..26e6f4e8 100644
+--- a/crates/ir/src/interpret/data.rs
++++ b/crates/ir/src/interpret/data.rs
+@@ -122,7 +122,7 @@ impl Interpret for Gep {
+ impl Interpret for GetFunctionPtr {
+     fn interpret(&self, state: &mut dyn State) -> super::EvalResults {
+         state.set_action(Action::Continue);
+-        single_result(EvalValue::Undef)
++        single_result(EvalValue::Func(*self.func()))
+     }
+ }
+ 
+@@ -169,7 +169,7 @@ impl Interpret for InsertValue {
+                 vec![EvalValue::Undef; len]
+             }
+ 
+-            EvalValue::Imm(_) => {
++            EvalValue::Imm(_) | EvalValue::Func(_) => {
+                 unreachable!()
+             }
+         };
+@@ -215,7 +215,7 @@ impl Interpret for ExtractValue {
+                 return single_result(EvalValue::Undef);
+             }
+ 
+-            EvalValue::Imm(_) => {
++            EvalValue::Imm(_) | EvalValue::Func(_) => {
+                 unreachable!()
+             }
+         };
+diff --git a/crates/ir/src/interpret/mod.rs b/crates/ir/src/interpret/mod.rs
+index 08da53dd..496541e3 100644
+--- a/crates/ir/src/interpret/mod.rs
++++ b/crates/ir/src/interpret/mod.rs
+@@ -102,6 +102,7 @@ pub trait Interpret {
+         inst::control_flow::BrTable,
+         inst::control_flow::Phi,
+         inst::control_flow::Call,
++        inst::control_flow::CallIndirect,
+         inst::control_flow::Return,
+         inst::control_flow::Unreachable,
+         inst::evm::EvmUdiv,
+@@ -178,6 +179,7 @@ pub enum Action {
+ #[derive(Debug, Clone, Default, PartialEq, Eq)]
+ pub enum EvalValue {
+     Imm(Immediate),
++    Func(FuncRef),
+     Aggregate {
+         fields: Vec<EvalValue>,
+         ty: Type,
+@@ -195,6 +197,7 @@ impl EvalValue {
+         match self {
+             EvalValue::Imm(value) => f(value).into(),
+             EvalValue::Aggregate { .. } => panic!("Type checker needs to handle this!"),
++            EvalValue::Func(_) => panic!("function value used as an immediate"),
+             EvalValue::Undef => EvalValue::Undef,
+         }
+     }
+@@ -208,6 +211,9 @@ impl EvalValue {
+             (EvalValue::Imm(l), EvalValue::Imm(r)) => f(l, r).into(),
+             (EvalValue::Aggregate { .. }, _) => panic!("Type checker needs to handle this!"),
+             (_, EvalValue::Aggregate { .. }) => panic!("Type checker needs to handle this!"),
++            (EvalValue::Func(_), _) | (_, EvalValue::Func(_)) => {
++                panic!("function value used as an immediate")
++            }
+             _ => EvalValue::Undef,
+         }
+     }
+@@ -239,6 +245,7 @@ impl fmt::Display for EvalValue {
+                 }
+                 write!(f, " }}")
+             }
++            Self::Func(func) => write!(f, "%{}", func.as_u32()),
+             Self::Undef => write!(f, "undef"),
+         }
+     }
+diff --git a/crates/ir/tests/indirect_call.rs b/crates/ir/tests/indirect_call.rs
+new file mode 100644
+index 00000000..e75a2edf
+--- /dev/null
++++ b/crates/ir/tests/indirect_call.rs
+@@ -0,0 +1,101 @@
++use std::collections::HashMap;
++
++use smallvec::smallvec;
++use sonatina_ir::{
++    BlockId, DataFlowGraph, Immediate, Type, Value, ValueId,
++    inst::{control_flow::CallIndirect, data::GetFunctionPtr},
++    interpret::{Action, EvalResults, EvalValue, Interpret, State},
++    isa::wasm32::Wasm32,
++    module::{FuncRef, ModuleCtx},
++};
++use sonatina_triple::{Architecture, OperatingSystem, TargetTriple, Vendor};
++
++struct TestState {
++    dfg: DataFlowGraph,
++    values: HashMap<ValueId, EvalValue>,
++    called: Option<(FuncRef, Vec<EvalValue>)>,
++}
++
++impl State for TestState {
++    fn lookup_val(&mut self, value: ValueId) -> EvalValue {
++        self.values.get(&value).cloned().unwrap_or_default()
++    }
++    fn call_func(&mut self, func: FuncRef, args: Vec<EvalValue>) -> EvalResults {
++        self.called = Some((func, args));
++        smallvec![EvalValue::Imm(Immediate::I32(9))]
++    }
++    fn set_action(&mut self, action: Action) {
++        assert_eq!(action, Action::Continue);
++    }
++    fn prev_block(&mut self) -> BlockId {
++        unreachable!()
++    }
++    fn load(&mut self, _: EvalValue, _: Type) -> EvalValue {
++        unreachable!()
++    }
++    fn store(&mut self, _: EvalValue, _: EvalValue, _: Type) -> EvalValue {
++        unreachable!()
++    }
++    fn alloca(&mut self, _: Type) -> EvalValue {
++        unreachable!()
++    }
++    fn dfg(&self) -> &DataFlowGraph {
++        &self.dfg
++    }
++}
++
++#[test]
++fn indirect_call_invokes_function_value_and_returns_results() {
++    let isa = Wasm32::new(TargetTriple::new(
++        Architecture::Wasm32,
++        Vendor::Unknown,
++        OperatingSystem::Native,
++    ));
++    let mut dfg = DataFlowGraph::new(ModuleCtx::new(&isa));
++    let callee = dfg.make_value(Value::Arg {
++        ty: Type::I32,
++        idx: 0,
++    });
++    let arg = dfg.make_value(Value::Arg {
++        ty: Type::I32,
++        idx: 1,
++    });
++    let target = FuncRef::from_u32(7);
++    let mut state = TestState {
++        dfg,
++        values: HashMap::from([
++            (callee, EvalValue::Func(target)),
++            (arg, EvalValue::Imm(Immediate::I32(4))),
++        ]),
++        called: None,
++    };
++    let results =
++        CallIndirect::new(state.dfg.inst_set(), callee, Type::I32, smallvec![arg])
++            .interpret(&mut state);
++    assert_eq!(
++        results.as_slice(),
++        &[EvalValue::Imm(Immediate::I32(9))]
++    );
++    assert_eq!(
++        state.called,
++        Some((target, vec![EvalValue::Imm(Immediate::I32(4))]))
++    );
++}
++
++#[test]
++fn get_function_ptr_interprets_as_a_function_value() {
++    let isa = Wasm32::new(TargetTriple::new(
++        Architecture::Wasm32,
++        Vendor::Unknown,
++        OperatingSystem::Native,
++    ));
++    let dfg = DataFlowGraph::new(ModuleCtx::new(&isa));
++    let target = FuncRef::from_u32(11);
++    let mut state = TestState {
++        dfg,
++        values: HashMap::new(),
++        called: None,
++    };
++    let result = GetFunctionPtr::new(state.dfg.inst_set(), target).interpret(&mut state);
++    assert_eq!(result.as_slice(), &[EvalValue::Func(target)]);
++}
+diff --git a/crates/parser/src/inst/control_flow.rs b/crates/parser/src/inst/control_flow.rs
+index 35bc9481..27622ad7 100644
+--- a/crates/parser/src/inst/control_flow.rs
++++ b/crates/parser/src/inst/control_flow.rs
+@@ -8,6 +8,7 @@ super::impl_inst_build! {Br, (cond: ValueId, nz_dest: BlockId, z_dest: BlockId)}
+ super::impl_inst_build_common! {BrTable, build_br_table}
+ super::impl_inst_build_common! {Phi, build_phi}
+ super::impl_inst_build_common! {Call, build_call}
++super::impl_inst_build_common! {CallIndirect, build_call_indirect}
+ super::impl_inst_build_common! {Return, build_return}
+ super::impl_inst_build! {Unreachable, ()}
+ 
+@@ -95,6 +96,27 @@ fn build_call(
+     }
+ }
+ 
++fn build_call_indirect(
++    ctx: &mut BuildCtx,
++    fb: &mut FunctionBuilder<ir::func_cursor::InstInserter>,
++    args: &[ast::InstArg],
++    _has_inst: &dyn HasInst<CallIndirect>,
++) -> Result<CallIndirect, Box<Error>> {
++    let mut ast_args = args.iter().peekable();
++    let callee = super::process_arg!(ctx, fb, ast_args, ValueId);
++    let signature = super::process_arg!(ctx, fb, ast_args, Type);
++    let mut call_args = SmallVec::new();
++    while let Some(arg) = ast_args.next() {
++        call_args.push(ctx.value(fb, arg.try_into()?));
++    }
++    Ok(CallIndirect::new(
++        fb.inst_set(),
++        callee,
++        signature,
++        call_args,
++    ))
++}
++
+ fn build_return(
+     ctx: &mut BuildCtx,
+     fb: &mut FunctionBuilder<ir::func_cursor::InstInserter>,
+diff --git a/crates/verifier/src/verify/function/type_rules/dispatch.rs b/crates/verifier/src/verify/function/type_rules/dispatch.rs
+index 22287869..5eabb8ab 100644
+--- a/crates/verifier/src/verify/function/type_rules/dispatch.rs
++++ b/crates/verifier/src/verify/function/type_rules/dispatch.rs
+@@ -2560,6 +2560,65 @@ impl VerifyInst for control_flow::Call {
+     }
+ }
+ 
++impl VerifyInst for control_flow::CallIndirect {
++    fn verify_inst(&self, verifier: &mut FunctionVerifier<'_>, inst_id: InstId) {
++        let location = verifier.inst_location(inst_id);
++        let Some(Type::Compound(signature_ref)) = verifier.pointee_ty(*self.signature()) else {
++            verifier.emit(Diagnostic::error(
++                DiagnosticCode::InstOperandTypeMismatch,
++                "indirect call signature must be a pointer to function type",
++                location,
++            ));
++            return;
++        };
++        let signature = verifier.ctx.with_ty_store(|store| {
++            store.get_compound(signature_ref).cloned()
++        });
++        let Some(CompoundType::Func { args, ret_tys }) = signature else {
++            verifier.emit(Diagnostic::error(
++                DiagnosticCode::InstOperandTypeMismatch,
++                "indirect call signature must be a pointer to function type",
++                verifier.inst_location(inst_id),
++            ));
++            return;
++        };
++        if let Some(callee_ty) = verifier.value_ty(*self.callee())
++            && callee_ty != *self.signature()
++        {
++            verifier.emit(Diagnostic::error(
++                DiagnosticCode::CallArgTypeMismatch,
++                "indirect call callee must point to the explicit function type",
++                verifier.inst_location(inst_id),
++            ));
++        }
++        if self.args().len() != args.len() {
++            verifier.emit(Diagnostic::error(
++                DiagnosticCode::CallArityMismatch,
++                "indirect call argument count does not match explicit signature",
++                verifier.inst_location(inst_id),
++            ));
++        }
++        for (index, (arg, expected_ty)) in self.args().iter().zip(&args).enumerate() {
++            if let Some(actual_ty) = verifier.value_ty(*arg)
++                && actual_ty != *expected_ty
++            {
++                verifier.emit(
++                    Diagnostic::error(
++                        DiagnosticCode::CallArgTypeMismatch,
++                        "indirect call argument type does not match explicit signature",
++                        verifier.inst_location(inst_id),
++                    )
++                    .with_note(format!(
++                        "arg {index}: expected {:?}, found {:?}",
++                        expected_ty, actual_ty
++                    )),
++                );
++            }
++        }
++        verifier.expect_result_tys(inst_id, &ret_tys, verifier.inst_location(inst_id));
++    }
++}
++
+ impl VerifyInst for control_flow::Return {
+     fn verify_inst(&self, verifier: &mut FunctionVerifier<'_>, inst_id: InstId) {
+         let location = verifier.inst_location(inst_id);
+diff --git a/crates/verifier/src/verify/module_invariants.rs b/crates/verifier/src/verify/module_invariants.rs
+index 38d49c18..ce08c4bc 100644
+--- a/crates/verifier/src/verify/module_invariants.rs
++++ b/crates/verifier/src/verify/module_invariants.rs
+@@ -142,6 +142,16 @@ pub(super) fn collect_module_invariants(
+                 continue;
+             }
+ 
++            // Function signatures are type identities, not by-value data.
++            // Their pointer wrappers have a layout; the signature itself does
++            // not and must not be sent through data-layout computation.
++            if matches!(
++                ty.resolve_compound(&module.ctx),
++                Some(sonatina_ir::types::CompoundType::Func { .. })
++            ) {
++                continue;
++            }
++
+             let size_res = catch_unwind(AssertUnwindSafe(|| module.ctx.size_of(ty)));
+             if !matches!(
+                 size_res,
+diff --git a/crates/verifier/tests/indirect_call.rs b/crates/verifier/tests/indirect_call.rs
+new file mode 100644
+index 00000000..af059ca5
+--- /dev/null
++++ b/crates/verifier/tests/indirect_call.rs
+@@ -0,0 +1,58 @@
++use sonatina_parser::parse_module;
++use sonatina_verifier::{VerificationLevel, VerifierConfig, verify_module};
++
++fn verify(source: &str) -> sonatina_verifier::VerificationReport {
++    let parsed = parse_module(source).expect("indirect-call module should parse");
++    verify_module(
++        &parsed.module,
++        &VerifierConfig::for_level(VerificationLevel::Standard),
++    )
++}
++
++#[test]
++fn typed_indirect_call_verifies() {
++    let report = verify(
++        r#"
++target = "wasm32-unknown-native"
++func private %add_one(v0.i32) -> i32 {
++    block0:
++        v1.i32 = add v0 1.i32;
++        return v1;
++}
++func public %run(v0.i32) -> i32 {
++    block0:
++        v1.*(i32) -> i32 = get_function_ptr %add_one;
++        v2.i32 = call_indirect v1 *(i32) -> i32 v0;
++        return v2;
++}
++"#,
++    );
++    assert!(report.is_ok(), "{report}");
++}
++
++#[test]
++fn indirect_call_rejects_pointer_signature_and_argument_drift() {
++    let report = verify(
++        r#"
++target = "wasm32-unknown-native"
++func private %id(v0.i32) -> i32 {
++    block0:
++        return v0;
++}
++func public %bad(v0.i64) -> i32 {
++    block0:
++        v1.*(i32) -> i32 = get_function_ptr %id;
++        v2.i32 = call_indirect v1 *(i64) -> i32 v0;
++        return v2;
++}
++"#,
++    );
++    assert!(!report.is_ok());
++    assert!(
++        report
++            .diagnostics
++            .iter()
++            .any(|diagnostic| diagnostic.code.as_str() == "IR0602"),
++        "{report}"
++    );
++}
+-- 
+2.53.0
+

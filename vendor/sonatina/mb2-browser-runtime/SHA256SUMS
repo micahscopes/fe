@@ -26,3 +26,7 @@ c2db7f104f7e63672c433f39c2f8fe41418e49eadb43e84c43470001e42ed3c5  0020-feat-spir
 ffd4c0d953af0e806dd6bec9e391008f6764883133491825acdc7949775a95af  0026-fix-wasm-lower-narrow-integer-truncation-by-carrier.patch
 5994d346cc761f011fa8cc37f430fd048e0ef4f49f09470639282c2f170519c9  0027-feat-wasm-lower-integer-extension-by-carrier.patch
 0f6b8312e8e0cbcb419ba9108b13f63252c7bbf93de1f9b1ab62aff130112da0  0028-fix-wasm-keep-private-functions-out-of-exports.patch
+c262b113f08e3473ae785021ed6915689a2259d5574ce115a43e357680df7ca9  0029-feat-wasm-emit-checked-canonical-memory-surface.patch
+c92db7d5cb42980aec656910c69ffee79334aaeb0583fda6226b1edb3d4d33de  0030-feat-wasm-lower-scalar-globals-to-wasm-state.patch
+0c86b7a42226b9ac3563a770b5152d036dca3901dd0468133d7edbf210a8e836  0031-feat-ir-add-typed-indirect-calls.patch
+e9eccc781b20b1df26097171e47e888319dd6c8e10beb8c4d90e5e5d7c284353  0032-feat-wasm-lower-typed-indirect-calls-through-tables.patch

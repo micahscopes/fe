@@ -1,0 +1,430 @@
+From a170ef047a1a16ae170f9bbbe3b9dfa9879edf15 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Fri, 31 Jul 2026 20:30:54 +0200
+Subject: [PATCH] feat(wasm): lower typed indirect calls through tables
+
+---
+ crates/codegen/src/isa/wasm/translate.rs | 205 +++++++++++++++++++++--
+ crates/codegen/tests/wasm_backend.rs     |  96 +++++++++--
+ 2 files changed, 274 insertions(+), 27 deletions(-)
+
+diff --git a/crates/codegen/src/isa/wasm/translate.rs b/crates/codegen/src/isa/wasm/translate.rs
+index 7354ddcf..8bbe009c 100644
+--- a/crates/codegen/src/isa/wasm/translate.rs
++++ b/crates/codegen/src/isa/wasm/translate.rs
+@@ -8,14 +8,16 @@ use std::collections::HashMap;
+ 
+ use waffle::{
+     BlockTarget, ExportKind, Func, FuncDecl, FunctionBody, GlobalData, Module as WaffleModule,
+-    Operator, SignatureData, Terminator, Type as WType, ValueDef,
++    Operator, SignatureData, TableData, Terminator, Type as WType, ValueDef,
++    entity::EntityRef,
+ };
+ 
+ use sonatina_ir::{
+     BlockId, Function, GlobalVariableRef, Immediate, InstDowncast, InstSetBase, Linkage, Module,
+     Type, Value, ValueId,
+     global_variable::GvInitializer,
+-    module::FuncRef,
++    module::{FuncRef, ModuleCtx},
++    types::CompoundType,
+ };
+ use super::CanonicalStackMemoryManifest;
+ 
+@@ -31,6 +33,45 @@ fn sonatina_to_waffle_type(ty: Type) -> Option<WType> {
+     }
+ }
+ 
++fn sonatina_to_waffle_type_in_ctx(ctx: &ModuleCtx, ty: Type) -> Option<WType> {
++    if matches!(
++        ty.resolve_compound(ctx),
++        Some(CompoundType::Ptr(pointee))
++            if matches!(pointee.resolve_compound(ctx), Some(CompoundType::Func { .. }))
++    ) {
++        Some(WType::I32)
++    } else {
++        sonatina_to_waffle_type(ty)
++    }
++}
++
++fn indirect_signature(ctx: &ModuleCtx, ty: Type) -> Result<SignatureData, String> {
++    let Some(CompoundType::Ptr(pointee)) = ty.resolve_compound(ctx) else {
++        return Err(format!("wasm call_indirect signature `{ty:?}` is not a pointer"));
++    };
++    let Some(CompoundType::Func { args, ret_tys }) = pointee.resolve_compound(ctx) else {
++        return Err(format!(
++            "wasm call_indirect signature `{ty:?}` does not point to a function"
++        ));
++    };
++    let map = |types: &[Type], position: &str| -> Result<Vec<WType>, String> {
++        types
++            .iter()
++            .map(|ty| {
++                sonatina_to_waffle_type_in_ctx(ctx, *ty).ok_or_else(|| {
++                    format!(
++                        "wasm call_indirect {position} type `{ty:?}` is not representable in wasm"
++                    )
++                })
++            })
++            .collect()
++    };
++    Ok(SignatureData {
++        params: map(&args, "parameter")?,
++        returns: map(&ret_tys, "result")?,
++    })
++}
++
+ fn scalar_memory_arg(memory: waffle::Memory, ty: Type) -> Result<waffle::MemoryArg, String> {
+     // WebAssembly encodes alignment as log2(bytes). These are natural
+     // alignments, but unaligned runtime addresses remain legal in Wasm.
+@@ -136,7 +177,7 @@ pub(super) fn translate_module(
+         let sig_data = module.ctx.func_sig(func_ref, |sig| {
+             let mut params = Vec::with_capacity(sig.args().len());
+             for ty in sig.args() {
+-                match sonatina_to_waffle_type(*ty) {
++                match sonatina_to_waffle_type_in_ctx(&module.ctx, *ty) {
+                     Some(wty) => params.push(wty),
+                     None => {
+                         return Err(format!(
+@@ -148,7 +189,7 @@ pub(super) fn translate_module(
+             }
+             let mut returns = Vec::with_capacity(sig.ret_tys().len());
+             for ty in sig.ret_tys() {
+-                match sonatina_to_waffle_type(*ty) {
++                match sonatina_to_waffle_type_in_ctx(&module.ctx, *ty) {
+                     Some(wty) => returns.push(wty),
+                     None => {
+                         return Err(format!(
+@@ -214,12 +255,12 @@ pub(super) fn translate_module(
+             let params: Vec<WType> = sig
+                 .args()
+                 .iter()
+-                .filter_map(|ty| sonatina_to_waffle_type(*ty))
++                .filter_map(|ty| sonatina_to_waffle_type_in_ctx(&module.ctx, *ty))
+                 .collect();
+             let results: Vec<WType> = sig
+                 .ret_tys()
+                 .iter()
+-                .filter_map(|ty| sonatina_to_waffle_type(*ty))
++                .filter_map(|ty| sonatina_to_waffle_type_in_ctx(&module.ctx, *ty))
+                 .collect();
+             (params, results)
+         });
+@@ -246,6 +287,72 @@ pub(super) fn translate_module(
+         pending.push((func_ref, wfunc, wsig, name));
+     }
+ 
++    // Assign deterministic, non-zero table indexes to address-taken functions.
++    // Slot zero is null, preserving WebAssembly's native null-pointer trap.
++    let mut address_taken = Vec::new();
++    let mut signature_types = Vec::new();
++    for &func_ref in &funcs {
++        module.func_store.try_view(func_ref, |function| {
++            for block in function.layout.iter_block() {
++                for inst_id in function.layout.iter_inst(block) {
++                    let inst = function.dfg.inst(inst_id);
++                    if let Some(ptr) =
++                        <&sonatina_ir::inst::data::GetFunctionPtr as InstDowncast>::downcast(
++                            function.inst_set(),
++                            inst,
++                        )
++                    {
++                        address_taken.push(*ptr.func());
++                    }
++                    if let Some(call) =
++                        <&sonatina_ir::inst::control_flow::CallIndirect as InstDowncast>::downcast(
++                            function.inst_set(),
++                            inst,
++                        )
++                    {
++                        signature_types.push(*call.signature());
++                    }
++                }
++            }
++        });
++    }
++    address_taken.sort_by_key(|func| func.as_u32());
++    address_taken.dedup();
++    signature_types.sort_by_key(|ty| format!("{ty:?}"));
++    signature_types.dedup();
++
++    let mut target_slots = HashMap::new();
++    let needs_table = !address_taken.is_empty() || !signature_types.is_empty();
++    let table = if !needs_table {
++        None
++    } else {
++        let mut elements = vec![Func::invalid()];
++        for target in address_taken {
++            let wfunc = func_map.get(&target).copied().ok_or_else(|| {
++                format!(
++                    "wasm translation: address-taken function %{} has no wasm body or import",
++                    target.as_u32()
++                )
++            })?;
++            let slot = elements.len() as u32;
++            target_slots.insert(target, slot);
++            elements.push(wfunc);
++        }
++        let len = elements.len() as u64;
++        Some(wmod.tables.push(TableData {
++            ty: WType::FuncRef,
++            initial: len,
++            max: Some(len),
++            func_elements: Some(elements),
++        }))
++    };
++
++    let mut indirect_signatures = HashMap::new();
++    for ty in signature_types {
++        let signature = wmod.signatures.push(indirect_signature(&module.ctx, ty)?);
++        indirect_signatures.insert(ty, signature);
++    }
++
+     // Pass 2: translate each body, now that every callee has a WAFFLE `Func`.
+     for (func_ref, wfunc, wsig, name) in pending {
+         let body = translate_function(
+@@ -257,6 +364,9 @@ pub(super) fn translate_module(
+             &func_map,
+             &global_map,
+             canonical_alloc,
++            table,
++            &target_slots,
++            &indirect_signatures,
+         )?;
+         wmod.funcs[wfunc] = FuncDecl::Body(wsig, name, body);
+     }
+@@ -810,6 +920,9 @@ fn translate_function(
+     func_map: &HashMap<FuncRef, Func>,
+     global_map: &HashMap<GlobalVariableRef, waffle::Global>,
+     canonical_alloc: Option<Func>,
++    table: Option<waffle::Table>,
++    target_slots: &HashMap<FuncRef, u32>,
++    indirect_signatures: &HashMap<Type, waffle::Signature>,
+ ) -> Result<FunctionBody, String> {
+     let mut body = FunctionBody::new(wmod, wsig);
+     // Stack pointer for bump allocation in linear memory (starts at 1024 to leave space)
+@@ -856,7 +969,9 @@ fn translate_function(
+                     if let Some(_phi) = <&sonatina_ir::inst::control_flow::Phi as InstDowncast>::downcast(inst_set, inst_data) {
+                         if let Some(result) = function.dfg.inst_result(inst_id) {
+                             let ty = function.dfg.value_ty(result);
+-                            let wty = sonatina_to_waffle_type(ty).unwrap_or(WType::I64);
++                            let wty =
++                                sonatina_to_waffle_type_in_ctx(function.ctx(), ty)
++                                    .unwrap_or(WType::I64);
+                             let param = body.add_blockparam(wb, wty);
+                             value_map.insert(result, param);
+                         }
+@@ -1562,11 +1677,77 @@ fn translate_function(
+                             value_map.insert(result, wval);
+                         }
+                     }
+-                    else if <&sonatina_ir::inst::control_flow::CallIndirect as InstDowncast>::downcast(inst_set, inst_data).is_some() {
+-                        return Err(
+-                            "wasm translation: call_indirect requires function-table lowering"
+-                                .to_string(),
++                    else if let Some(get_fn) = <&sonatina_ir::inst::data::GetFunctionPtr as InstDowncast>::downcast(inst_set, inst_data) {
++                        let result = function
++                            .dfg
++                            .inst_result(inst_id)
++                            .ok_or("get_function_ptr has no result")?;
++                        let slot = target_slots.get(get_fn.func()).copied().ok_or_else(|| {
++                            format!(
++                                "wasm translation: function %{} has no table slot",
++                                get_fn.func().as_u32()
++                            )
++                        })?;
++                        let value = body.add_op(
++                            wb,
++                            Operator::I32Const { value: slot },
++                            &[],
++                            &[WType::I32],
+                         );
++                        value_map.insert(result, value);
++                    }
++                    else if let Some(call) = <&sonatina_ir::inst::control_flow::CallIndirect as InstDowncast>::downcast(inst_set, inst_data) {
++                        let table = table.ok_or(
++                            "wasm translation: call_indirect has no function table",
++                        )?;
++                        let sig_index = indirect_signatures
++                            .get(call.signature())
++                            .copied()
++                            .ok_or("wasm translation: call_indirect signature was not declared")?;
++                        let mut args = Vec::with_capacity(call.args().len() + 1);
++                        for arg in call.args() {
++                            args.push(
++                                resolve_value(function, *arg, &value_map, &mut body, wb)
++                                    .ok_or("wasm translation: unresolved call_indirect argument")?,
++                            );
++                        }
++                        // WAFFLE follows Wasm stack order: parameters, then table index.
++                        args.push(
++                            resolve_value(function, *call.callee(), &value_map, &mut body, wb)
++                                .ok_or("wasm translation: unresolved call_indirect callee")?,
++                        );
++                        let op = Operator::CallIndirect {
++                            sig_index,
++                            table_index: table,
++                        };
++                        let results = function.dfg.inst_results(inst_id);
++                        if results.is_empty() {
++                            body.add_op(wb, op, &args, &[]);
++                        } else {
++                            let result_tys: Vec<WType> = results
++                                .iter()
++                                .map(|result| result_waffle_type(function, *result))
++                                .collect();
++                            let physical_tys: Vec<WType> =
++                                result_tys.iter().copied().rev().collect();
++                            let call_value = body.add_op(wb, op, &args, &physical_tys);
++                            if results.len() == 1 {
++                                value_map.insert(results[0], call_value);
++                            } else {
++                                let result_count = results.len();
++                                for (index, (result, ty)) in
++                                    results.iter().zip(result_tys).enumerate()
++                                {
++                                    let picked = body.add_value(ValueDef::PickOutput(
++                                        call_value,
++                                        (result_count - 1 - index) as u32,
++                                        ty,
++                                    ));
++                                    body.append_to_block(wb, picked);
++                                    value_map.insert(*result, picked);
++                                }
++                            }
++                        }
+                     }
+                     // Call — direct call to another translated function.
+                     else if let Some(call) = <&sonatina_ir::inst::control_flow::Call as InstDowncast>::downcast(inst_set, inst_data) {
+@@ -1685,7 +1866,7 @@ fn resolve_value(
+ 
+ fn result_waffle_type(function: &Function, result: ValueId) -> WType {
+     let ty = function.dfg.value_ty(result);
+-    sonatina_to_waffle_type(ty).unwrap_or(WType::I64)
++    sonatina_to_waffle_type_in_ctx(function.ctx(), ty).unwrap_or(WType::I64)
+ }
+ 
+ fn collect_phi_args(
+diff --git a/crates/codegen/tests/wasm_backend.rs b/crates/codegen/tests/wasm_backend.rs
+index 5e32856a..2c1c51ce 100644
+--- a/crates/codegen/tests/wasm_backend.rs
++++ b/crates/codegen/tests/wasm_backend.rs
+@@ -131,34 +131,100 @@ fn wasm_scalar_global_support_does_not_perturb_default_bytes() {
+ }
+ 
+ #[test]
+-fn wasm_indirect_call_fails_closed_until_table_lowering_exists() {
++fn wasm_indirect_call_executes_and_preserves_multi_result_order() {
+     let parsed = sonatina_parser::parse_module(
+         r#"
+ target = "wasm32-unknown-native"
+-func private %id(v0.i32) -> i32 {
++func private %pair(v0.i32) -> (i32, i64) {
+     block0:
++        v1.i32 = add v0 1.i32;
++        return (v1, 99.i64);
++}
++func public %run(v0.i32) -> (i32, i64) {
++    block0:
++        v1.*(i32) -> (i32, i64) = get_function_ptr %pair;
++        (v2.i32, v3.i64) = call_indirect v1 *(i32) -> (i32, i64) v0;
++        return (v2, v3);
++}
++"#,
++    )
++    .unwrap();
++    let artifact = WasmBackend::new().compile_module(&parsed.module).unwrap();
++    wasmparser::validate(&artifact.bytes).unwrap();
++    let engine = wasmtime::Engine::default();
++    let module = wasmtime::Module::new(&engine, &artifact.bytes).unwrap();
++    let mut store = wasmtime::Store::new(&engine, ());
++    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
++    let run = instance
++        .get_typed_func::<i32, (i32, i64)>(&mut store, "run")
++        .unwrap();
++    assert_eq!(run.call(&mut store, 41).unwrap(), (42, 99));
++}
++
++#[test]
++fn wasm_indirect_call_uses_stable_slots_and_native_wasm_traps() {
++    let parsed = sonatina_parser::parse_module(
++        r#"
++target = "wasm32-unknown-native"
++func private %good(v0.i32) -> i32 {
++    block0:
++        v1.i32 = add v0 1.i32;
++        return v1;
++}
++func private %wrong(v0.i64) -> i64 {
++    block0:
++        return v0;
++}
++func public %good_slot() -> *(i32) -> i32 {
++    block0:
++        v0.*(i32) -> i32 = get_function_ptr %good;
++        return v0;
++}
++func public %wrong_slot() -> *(i64) -> i64 {
++    block0:
++        v0.*(i64) -> i64 = get_function_ptr %wrong;
+         return v0;
+ }
+-func public %run(v0.i32) -> i32 {
++func public %dispatch(v0.*(i32) -> i32, v1.i32) -> i32 {
+     block0:
+-        v1.*(i32) -> i32 = get_function_ptr %id;
+-        v2.i32 = call_indirect v1 *(i32) -> i32 v0;
++        v2.i32 = call_indirect v0 *(i32) -> i32 v1;
+         return v2;
+ }
+ "#,
+     )
+     .unwrap();
+-    let errors = match WasmBackend::new().compile_module(&parsed.module) {
+-        Ok(_) => panic!("indirect call must fail before table lowering exists"),
+-        Err(errors) => errors,
+-    };
++    let first = WasmBackend::new().compile_module(&parsed.module).unwrap();
++    let second = WasmBackend::new().compile_module(&parsed.module).unwrap();
++    assert_eq!(first.bytes, second.bytes, "table slots and elements must be stable");
++    wasmparser::validate(&first.bytes).unwrap();
++
++    let engine = wasmtime::Engine::default();
++    let module = wasmtime::Module::new(&engine, &first.bytes).unwrap();
++    let mut store = wasmtime::Store::new(&engine, ());
++    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
++    let good_slot = instance
++        .get_typed_func::<(), i32>(&mut store, "good_slot")
++        .unwrap()
++        .call(&mut store, ())
++        .unwrap();
++    let wrong_slot = instance
++        .get_typed_func::<(), i32>(&mut store, "wrong_slot")
++        .unwrap()
++        .call(&mut store, ())
++        .unwrap();
++    let dispatch = instance
++        .get_typed_func::<(i32, i32), i32>(&mut store, "dispatch")
++        .unwrap();
++
++    assert_eq!(dispatch.call(&mut store, (good_slot, 41)).unwrap(), 42);
++    assert!(dispatch.call(&mut store, (0, 41)).is_err(), "null must trap");
++    assert!(
++        dispatch.call(&mut store, (i32::MAX, 41)).is_err(),
++        "out-of-bounds table index must trap"
++    );
+     assert!(
+-        errors.iter().any(|error| {
+-            let error = error.to_string();
+-            error.contains("function-table lowering")
+-                || error.contains("unsupported instruction `get_function_ptr`")
+-        }),
+-        "{errors:?}"
++        dispatch.call(&mut store, (wrong_slot, 41)).is_err(),
++        "signature mismatch must trap"
+     );
+ }
+ 
+-- 
+2.53.0
+
