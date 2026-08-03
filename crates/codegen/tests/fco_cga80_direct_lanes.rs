@@ -23,8 +23,7 @@ fn canonical_source() -> String {
     assert!(
         interpreter.contains(
             "for Canonical50Term<Candidate, Left, Point, Right, Output, Magnitude, Negative>",
-        )
-            && interpreter.contains("impl<L: Eval5, R: Eval5> Eval5 for Add<L, R>")
+        ) && interpreter.contains("impl<L: Eval5, R: Eval5> Eval5 for Add<L, R>")
             && interpreter.contains("<Canonical50TypedBalancedSchedule32 as Eval5>::eval5(")
             && !interpreter.contains("ObserveCanonical")
             && !interpreter.contains("ImplBuilder")

@@ -55,7 +55,10 @@ fn build_entry_wasm(db: &DriverDataBase, top_mod: TopLevelMod<'_>, entry: &str) 
 fn dec_top_mod<'db>(db: &'db DriverDataBase, url: &Url) -> TopLevelMod<'db> {
     let top_mod = ingot_top_mod(db, url);
     let diagnostics = db.run_on_top_mod(top_mod).format_diags(db);
-    assert!(diagnostics.is_empty(), "unexpected dec diagnostics:\n{diagnostics}");
+    assert!(
+        diagnostics.is_empty(),
+        "unexpected dec diagnostics:\n{diagnostics}"
+    );
     top_mod
 }
 
@@ -66,7 +69,10 @@ fn dec_actor_reproduces_the_flag_built_bundle() {
     // derivation path reproduces exactly the build inputs the flag path used.
     let mut db = DriverDataBase::default();
     let url = ingot_root("../../demos/sketches/dec");
-    assert!(!driver::init_ingot(&mut db, &url), "dec ingot init diagnostics");
+    assert!(
+        !driver::init_ingot(&mut db, &url),
+        "dec ingot init diagnostics"
+    );
     let top_mod = dec_top_mod(&db, &url);
 
     // Zero-config: no flags supplied, entry + mode derived from the actor.
@@ -107,7 +113,10 @@ fn flags_contradicting_the_actor_are_rejected() {
     )
     .unwrap_err();
     let text = format!("{err}");
-    assert!(text.contains("not_dec_render") && text.contains("dec_render"), "{text}");
+    assert!(
+        text.contains("not_dec_render") && text.contains("dec_render"),
+        "{text}"
+    );
 
     // An explicit mode that contradicts the derived render mode.
     let err = resolve_web_entry(
@@ -149,15 +158,27 @@ fn desugar_reproduces_the_handwritten_kernel_byte_for_byte() {
     let mut db = DriverDataBase::default();
     let actor_url = ingot_root("tests/fixtures/actor_repro_actor");
     let free_url = ingot_root("tests/fixtures/actor_repro_free");
-    assert!(!driver::init_ingot(&mut db, &actor_url), "actor fixture diagnostics");
-    assert!(!driver::init_ingot(&mut db, &free_url), "free fixture diagnostics");
+    assert!(
+        !driver::init_ingot(&mut db, &actor_url),
+        "actor fixture diagnostics"
+    );
+    assert!(
+        !driver::init_ingot(&mut db, &free_url),
+        "free fixture diagnostics"
+    );
 
     let actor_mod = ingot_top_mod(&db, &actor_url);
     let free_mod = ingot_top_mod(&db, &free_url);
     let actor_diags = db.run_on_top_mod(actor_mod).format_diags(&db);
-    assert!(actor_diags.is_empty(), "actor fixture diagnostics:\n{actor_diags}");
+    assert!(
+        actor_diags.is_empty(),
+        "actor fixture diagnostics:\n{actor_diags}"
+    );
     let free_diags = db.run_on_top_mod(free_mod).format_diags(&db);
-    assert!(free_diags.is_empty(), "free fixture diagnostics:\n{free_diags}");
+    assert!(
+        free_diags.is_empty(),
+        "free fixture diagnostics:\n{free_diags}"
+    );
 
     let actor_wasm = build_entry_wasm(&db, actor_mod, "paint");
     let free_wasm = build_entry_wasm(&db, free_mod, "paint");

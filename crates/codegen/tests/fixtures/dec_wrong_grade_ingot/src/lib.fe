@@ -1,0 +1,23 @@
+// Negative fixture for the DEC operator suite: the grade STRUCTURE, not any
+// name, must reject an exterior derivative applied at the top grade of the
+// complex.
+//
+// `<D2 as OnComplex>::Up` is `DTop`, and `DTop` deliberately has no
+// `OnComplex` impl, so the bound on `dec::d` cannot be satisfied. The
+// acceptance test asserts these bodies produce readable diagnostics naming
+// `OnComplex`, and that analysis completes without an ICE.
+
+use dec::{Cochain0, D2, Form, d, form0}
+
+// Direct application at the top grade: d on a 2-form of a 2-complex.
+pub fn wrong_grade_direct(f: Form<D2>) -> f32 {
+    let over = d(f: f)
+    0.0
+}
+
+// The same wall reached by honest composition: three derivatives climb
+// 0 -> 1 -> 2 -> (off the complex).
+pub fn wrong_grade_composed(c: Cochain0) -> f32 {
+    let over = d(f: d(f: d(f: form0(c: c))))
+    0.0
+}

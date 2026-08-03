@@ -47,11 +47,15 @@ pub fn staged_payload_entry() -> i32 {
 
     let mut db = DriverDataBase::default();
     let url = Url::parse("file:///staged_type_fn_payload_e2e.fe").unwrap();
-    db.workspace().touch(&mut db, url.clone(), Some(source.to_string()));
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(source.to_string()));
     let file = db.workspace().get(&db, &url).unwrap();
     let top_mod = db.top_mod(file);
     let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
-    assert!(diagnostics.is_empty(), "unexpected fixture diagnostics:\n{diagnostics}");
+    assert!(
+        diagnostics.is_empty(),
+        "unexpected fixture diagnostics:\n{diagnostics}"
+    );
     let bytes = BackendKind::Wasm
         .create()
         .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
@@ -76,11 +80,15 @@ fn staged_recursive_type_fn_payload_executes_through_generic_methods() {
     let source = include_str!("fixtures/staged_type_fn_payload_generic_method.fe");
     let mut db = DriverDataBase::default();
     let url = Url::parse("file:///staged_type_fn_payload_generic_method.fe").unwrap();
-    db.workspace().touch(&mut db, url.clone(), Some(source.to_string()));
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(source.to_string()));
     let file = db.workspace().get(&db, &url).unwrap();
     let top_mod = db.top_mod(file);
     let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
-    assert!(diagnostics.is_empty(), "unexpected fixture diagnostics:\n{diagnostics}");
+    assert!(
+        diagnostics.is_empty(),
+        "unexpected fixture diagnostics:\n{diagnostics}"
+    );
     let bytes = BackendKind::Wasm
         .create()
         .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
@@ -112,7 +120,8 @@ pub fn run() -> i32 { <Term<10> as Eval>::eval() }
 "#;
     let mut db = DriverDataBase::default();
     let url = Url::parse("file:///invalid_generic_const_cast.fe").unwrap();
-    db.workspace().touch(&mut db, url.clone(), Some(source.to_string()));
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(source.to_string()));
     let file = db.workspace().get(&db, &url).unwrap();
     let top_mod = db.top_mod(file);
     let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);

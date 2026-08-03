@@ -130,5 +130,8 @@ pub fn recur_entry(x: i32) -> i32 { recur(x: x) }
         Err(error) => error.to_string(),
     };
     assert!(error.contains("not call-free"), "unexpected error: {error}");
-    assert!(error.contains("recur"), "callee missing from error: {error}");
+    assert!(
+        error.contains("recur"),
+        "callee missing from error: {error}"
+    );
 }

@@ -415,12 +415,36 @@ pub fn le_u32(a: u32, b: u32) -> bool { a <= b }
     let lt_u32 = int_cmp(&instance, &mut store, "lt_u32");
     let ge_i32 = int_cmp(&instance, &mut store, "ge_i32");
     let le_u32 = int_cmp(&instance, &mut store, "le_u32");
-    assert_eq!(gt_i32.call(&mut store, (-1, 1)).unwrap(), 0, "-1 > 1 signed");
-    assert_eq!(gt_u32.call(&mut store, (-1, 1)).unwrap(), 1, "0xFFFFFFFF > 1 unsigned");
-    assert_eq!(lt_i32.call(&mut store, (-1, 1)).unwrap(), 1, "-1 < 1 signed");
-    assert_eq!(lt_u32.call(&mut store, (-1, 1)).unwrap(), 0, "0xFFFFFFFF < 1 unsigned");
-    assert_eq!(ge_i32.call(&mut store, (-1, 1)).unwrap(), 0, "-1 >= 1 signed");
-    assert_eq!(le_u32.call(&mut store, (-1, 1)).unwrap(), 0, "0xFFFFFFFF <= 1 unsigned");
+    assert_eq!(
+        gt_i32.call(&mut store, (-1, 1)).unwrap(),
+        0,
+        "-1 > 1 signed"
+    );
+    assert_eq!(
+        gt_u32.call(&mut store, (-1, 1)).unwrap(),
+        1,
+        "0xFFFFFFFF > 1 unsigned"
+    );
+    assert_eq!(
+        lt_i32.call(&mut store, (-1, 1)).unwrap(),
+        1,
+        "-1 < 1 signed"
+    );
+    assert_eq!(
+        lt_u32.call(&mut store, (-1, 1)).unwrap(),
+        0,
+        "0xFFFFFFFF < 1 unsigned"
+    );
+    assert_eq!(
+        ge_i32.call(&mut store, (-1, 1)).unwrap(),
+        0,
+        "-1 >= 1 signed"
+    );
+    assert_eq!(
+        le_u32.call(&mut store, (-1, 1)).unwrap(),
+        0,
+        "0xFFFFFFFF <= 1 unsigned"
+    );
 }
 
 /// R2 bitwise: `& | ^ << >>` on i32 and u32 through the R1 wasm path, each
@@ -541,7 +565,11 @@ pub fn main() -> u32 {
     // out, proving Sar vs Shr is chosen by operand class.
     let shr_i32 = int_cmp(&instance, &mut store, "shr_i32");
     let shr_u32 = int_cmp(&instance, &mut store, "shr_u32");
-    assert_eq!(shr_i32.call(&mut store, (-1, 1)).unwrap(), -1, "-1 >> 1 signed (Sar)");
+    assert_eq!(
+        shr_i32.call(&mut store, (-1, 1)).unwrap(),
+        -1,
+        "-1 >> 1 signed (Sar)"
+    );
     assert_eq!(
         shr_u32.call(&mut store, (-1, 1)).unwrap(),
         0x7FFF_FFFF,
@@ -550,8 +578,16 @@ pub fn main() -> u32 {
     // `<<` agrees bit-for-bit across widths: 1 << 31 = 0x80000000 either way.
     let shl_i32 = int_cmp(&instance, &mut store, "shl_i32");
     let shl_u32 = int_cmp(&instance, &mut store, "shl_u32");
-    assert_eq!(shl_i32.call(&mut store, (1, 31)).unwrap(), i32::MIN, "1 << 31 i32");
-    assert_eq!(shl_u32.call(&mut store, (1, 31)).unwrap(), i32::MIN, "1 << 31 u32 (same bits)");
+    assert_eq!(
+        shl_i32.call(&mut store, (1, 31)).unwrap(),
+        i32::MIN,
+        "1 << 31 i32"
+    );
+    assert_eq!(
+        shl_u32.call(&mut store, (1, 31)).unwrap(),
+        i32::MIN,
+        "1 << 31 u32 (same bits)"
+    );
 
     // Cross-backend twin: one source, both backends. `main` folds `& | ^ << >>`
     // into the EVM root object, and the EVM path already lowers all five
@@ -615,15 +651,36 @@ pub fn g_mix(a: u32, b: u32, c: u32, d: u32, mx: u32, my: u32) -> u32 {
     let vectors: [[u32; 6]; 4] = [
         [0, 0, 0, 0, 0, 0],
         [1, 2, 3, 4, 5, 6],
-        [0x8000_0000, 0xFFFF_FFFF, 0x1234_5678, 0x9ABC_DEF0, 0xDEAD_BEEF, 0xCAFE_BABE],
-        [0x0102_0408, 0x1020_4080, 0xFEDC_BA98, 0x7654_3210, 0xA5A5_A5A5, 0x5A5A_5A5A],
+        [
+            0x8000_0000,
+            0xFFFF_FFFF,
+            0x1234_5678,
+            0x9ABC_DEF0,
+            0xDEAD_BEEF,
+            0xCAFE_BABE,
+        ],
+        [
+            0x0102_0408,
+            0x1020_4080,
+            0xFEDC_BA98,
+            0x7654_3210,
+            0xA5A5_A5A5,
+            0x5A5A_5A5A,
+        ],
     ];
     for v in vectors {
         let expected = g_oracle(v[0], v[1], v[2], v[3], v[4], v[5]) as i32;
         let got = g
             .call(
                 &mut store,
-                (v[0] as i32, v[1] as i32, v[2] as i32, v[3] as i32, v[4] as i32, v[5] as i32),
+                (
+                    v[0] as i32,
+                    v[1] as i32,
+                    v[2] as i32,
+                    v[3] as i32,
+                    v[4] as i32,
+                    v[5] as i32,
+                ),
             )
             .unwrap();
         assert_eq!(got, expected, "g_mix{v:08x?}");
@@ -761,8 +818,16 @@ pub fn accumulate(n: i32, x: f32) -> f32 {
         .get_typed_func::<(i32, f32), f32>(&mut store, "accumulate")
         .expect("accumulate export");
     // n iterations add x each time: acc[0] = n*x; result = n*x*0.5.
-    assert_eq!(f.call(&mut store, (4, 1.5)).unwrap(), 4.0 * 1.5 * 0.5, "4 iters");
-    assert_eq!(f.call(&mut store, (0, 1.5)).unwrap(), 0.0, "0 iters stays seed");
+    assert_eq!(
+        f.call(&mut store, (4, 1.5)).unwrap(),
+        4.0 * 1.5 * 0.5,
+        "4 iters"
+    );
+    assert_eq!(
+        f.call(&mut store, (0, 1.5)).unwrap(),
+        0.0,
+        "0 iters stays seed"
+    );
 }
 
 fn int_cmp<'a>(
@@ -945,10 +1010,7 @@ fn recursive_mvt2_f32_helper_call_executes_on_wasm() {
     let wasm = compile_to_wasm("wasm_mvt2_f32_helper_render.fe", source);
     let (mut store, instance) = instantiate(&wasm);
     let render = instance
-        .get_typed_func::<(i32, i32, f32, f32, f32, f32), i32>(
-            &mut store,
-            "mvt2_f32_helper_render",
-        )
+        .get_typed_func::<(i32, i32, f32, f32, f32, f32), i32>(&mut store, "mvt2_f32_helper_render")
         .expect("inlined recursive aggregate helper export");
     let got = render
         .call(&mut store, (2, 3, 11.0, 22.0, 33.0, 44.0))
@@ -1128,15 +1190,10 @@ fn qcga3d_sparse_planner_fco_matches_independent_raw_expansion_on_wasm() {
     let sparse_api = fe_codegen::standalone_ctfe_ingot_source(include_str!(
         "../../../ingots/sparse_clifford/src/lib.fe"
     ));
-    let source = format!(
-        "{}\n{}",
-        sparse_api,
-        fixture,
-    );
+    let source = format!("{}\n{}", sparse_api, fixture,);
     let mut db = DriverDataBase::default();
     let url = Url::parse("file:///qcga3d_sparse_planned_incidence.fe").unwrap();
-    db.workspace()
-        .touch(&mut db, url.clone(), Some(source));
+    db.workspace().touch(&mut db, url.clone(), Some(source));
     let file = db.workspace().get(&db, &url).expect("planner fixture");
     let top_mod = db.top_mod(file);
     let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
@@ -1147,13 +1204,10 @@ fn qcga3d_sparse_planner_fco_matches_independent_raw_expansion_on_wasm() {
     let compile_entry = |entry: &str| {
         let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, entry)
             .unwrap_or_else(|err| panic!("runtime package for `{entry}` failed: {err}"));
-        let bytes = compile_runtime_package_wasm_with_options(
-            &db,
-            &package,
-            WasmCompileOptions::default(),
-        )
-        .unwrap_or_else(|err| panic!("entry-rooted wasm for `{entry}` failed: {err}"))
-        .bytes;
+        let bytes =
+            compile_runtime_package_wasm_with_options(&db, &package, WasmCompileOptions::default())
+                .unwrap_or_else(|err| panic!("entry-rooted wasm for `{entry}` failed: {err}"))
+                .bytes;
         wasmparser::validate(&bytes).expect("produced invalid entry-rooted wasm");
         bytes
     };
@@ -1196,19 +1250,54 @@ fn qcga3d_sparse_planner_fco_matches_independent_raw_expansion_on_wasm() {
         .get_typed_func::<Inputs, f32>(&mut raw_store, "qcga3d_incidence_raw")
         .expect("independent raw polynomial ABI");
     let polynomial = polynomial_instance
-        .get_typed_func::<Inputs, f32>(
-            &mut polynomial_store,
-            "qcga3d_incidence_polynomial",
-        )
+        .get_typed_func::<Inputs, f32>(&mut polynomial_store, "qcga3d_incidence_polynomial")
         .expect("independent fused polynomial ABI");
     let cases: [Inputs; 7] = [
-        (3.0, 4.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -25.0),
-        (0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -25.0),
-        (2.0, -1.0, 2.0, 1.0, 2.0, 3.0, 0.0, 0.0, 0.0, -2.0, 8.0, -6.0, 0.0),
-        (2.0, -1.0, 3.0, 5.0, 5.0, 2.0, 6.0, -4.0, 2.0, -3.0, 7.0, 1.0, 5.0 / 3.0),
-        (1.0, 2.0, -1.0, 2.0, -1.0, 3.0, 1.0, -2.0, 4.0, 5.0, -3.0, 2.0, 1.0 / 7.0),
-        (0.25, -0.75, 1.5, 0.85, 1.25, 0.65, 0.55, -0.40, 0.30, -0.16, 0.1375, -0.04, -0.979125),
-        (-2.25, 0.5, 3.75, -1.5, 2.25, 0.125, -0.75, 1.5, -2.0, 0.375, -1.25, 2.5, 0.0625),
+        (
+            3.0, 4.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -25.0,
+        ),
+        (
+            0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -25.0,
+        ),
+        (
+            2.0, -1.0, 2.0, 1.0, 2.0, 3.0, 0.0, 0.0, 0.0, -2.0, 8.0, -6.0, 0.0,
+        ),
+        (
+            2.0,
+            -1.0,
+            3.0,
+            5.0,
+            5.0,
+            2.0,
+            6.0,
+            -4.0,
+            2.0,
+            -3.0,
+            7.0,
+            1.0,
+            5.0 / 3.0,
+        ),
+        (
+            1.0,
+            2.0,
+            -1.0,
+            2.0,
+            -1.0,
+            3.0,
+            1.0,
+            -2.0,
+            4.0,
+            5.0,
+            -3.0,
+            2.0,
+            1.0 / 7.0,
+        ),
+        (
+            0.25, -0.75, 1.5, 0.85, 1.25, 0.65, 0.55, -0.40, 0.30, -0.16, 0.1375, -0.04, -0.979125,
+        ),
+        (
+            -2.25, 0.5, 3.75, -1.5, 2.25, 0.125, -0.75, 1.5, -2.0, 0.375, -1.25, 2.5, 0.0625,
+        ),
     ];
     for (case_index, inputs) in cases.into_iter().enumerate() {
         let planned_value = planned
@@ -1245,7 +1334,10 @@ fn qcga3d_sparse_planned_render_preserves_current_frame_on_wasm() {
     let mut db = DriverDataBase::default();
     let url = Url::parse("file:///qcga3d_sparse_planned_render.fe").unwrap();
     db.workspace().touch(&mut db, url.clone(), Some(source));
-    let file = db.workspace().get(&db, &url).expect("planned render fixture");
+    let file = db
+        .workspace()
+        .get(&db, &url)
+        .expect("planned render fixture");
     let top_mod = db.top_mod(file);
     let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
     assert!(
@@ -1288,16 +1380,10 @@ fn qcga3d_sparse_planned_render_preserves_current_frame_on_wasm() {
         f32,
     );
     let planned = planned_instance
-        .get_typed_func::<PlannedInputs, i32>(
-            &mut planned_store,
-            "qcga3d_sparse_planned_render",
-        )
+        .get_typed_func::<PlannedInputs, i32>(&mut planned_store, "qcga3d_sparse_planned_render")
         .expect("planned render ABI");
     let old = old_instance
-        .get_typed_func::<(i32, i32), i32>(
-            &mut old_store,
-            "qcga3d_rotated_quadric_render",
-        )
+        .get_typed_func::<(i32, i32), i32>(&mut old_store, "qcga3d_rotated_quadric_render")
         .expect("current render ABI");
     let mut hash = 0x811c9dc5u32;
     for py in 0..128 {
@@ -1306,8 +1392,8 @@ fn qcga3d_sparse_planned_render_preserves_current_frame_on_wasm() {
                 .call(
                     &mut planned_store,
                     (
-                        px, py, 0.0, 0.0, -4.0, 3.24, 0.018, 0.85, 1.25, 0.65, 0.55, -0.40,
-                        0.30, -0.16, 0.1375, -0.04, -0.979125,
+                        px, py, 0.0, 0.0, -4.0, 3.24, 0.018, 0.85, 1.25, 0.65, 0.55, -0.40, 0.30,
+                        -0.16, 0.1375, -0.04, -0.979125,
                     ),
                 )
                 .expect("planned pixel") as u32;
@@ -1322,9 +1408,7 @@ fn qcga3d_sparse_planned_render_preserves_current_frame_on_wasm() {
         }
     }
     assert_eq!(hash, 2_368_784_280);
-    eprintln!(
-        "QCGA planned frame bit-exact; Wasm shape (add,sub,mul,call,loop)={planned_shape:?}"
-    );
+    eprintln!("QCGA planned frame bit-exact; Wasm shape (add,sub,mul,call,loop)={planned_shape:?}");
 }
 
 fn qcga3d_quadric_field_oracle(x: f32, y: f32, z: f32) -> f32 {
@@ -1463,7 +1547,11 @@ fn clifford_gp_cl11_oracle(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
                 }
             }
             let metric_neg = ((left & right) >> 1) & 1;
-            let sign = if (swaps + metric_neg as u32) & 1 == 0 { 1.0 } else { -1.0 };
+            let sign = if (swaps + metric_neg as u32) & 1 == 0 {
+                1.0
+            } else {
+                -1.0
+            };
             out[left ^ right] += sign * a[left] * b[right];
         }
     }
@@ -1494,7 +1582,10 @@ fn recursive_cl11_gp_f32_coefficients_execute_on_wasm() {
         let mut got = [0.0; 4];
         for (index, (px, py)) in [(0, 0), (1, 0), (0, 1), (1, 1)].into_iter().enumerate() {
             let word = gp
-                .call(&mut store, (px, py, a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3]))
+                .call(
+                    &mut store,
+                    (px, py, a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3]),
+                )
                 .expect("recursive Cl(1,1) GP coefficient execution");
             got[index] = word as f32;
         }
@@ -1513,7 +1604,11 @@ fn clifford_gp_cl41_oracle(a: [f32; 32], b: [f32; 32]) -> [f32; 32] {
                 }
             }
             let metric_neg = ((left & right) >> 4) & 1;
-            let sign = if (swaps + metric_neg as u32) & 1 == 0 { 1.0 } else { -1.0 };
+            let sign = if (swaps + metric_neg as u32) & 1 == 0 {
+                1.0
+            } else {
+                -1.0
+            };
             out[left ^ right] += sign * a[left] * b[right];
         }
     }
@@ -1522,8 +1617,7 @@ fn clifford_gp_cl41_oracle(a: [f32; 32], b: [f32; 32]) -> [f32; 32] {
 
 #[test]
 fn generated_recursive_cl41_gp_f32_coefficients_execute_on_wasm() {
-    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/spirv");
+    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/spirv");
     let status = std::process::Command::new("python3")
         .arg(fixture_dir.join("gen_clifford_gp_f32_mvt5.py"))
         .arg("--check")
@@ -1532,7 +1626,10 @@ fn generated_recursive_cl41_gp_f32_coefficients_execute_on_wasm() {
     assert!(status.success(), "generated Cl(4,1) GP fixture is stale");
     let source = include_str!("fixtures/spirv/clifford_gp_recursive_f32_mvt5.fe");
     let wasm = compile_to_wasm("clifford_gp_recursive_f32_mvt5.fe", source);
-    assert!(func_imports(&wasm).is_empty(), "recursive GP must not retain imports");
+    assert!(
+        func_imports(&wasm).is_empty(),
+        "recursive GP must not retain imports"
+    );
     let (mut store, instance) = instantiate(&wasm);
     let gp = instance
         .get_func(&mut store, "clifford_gp_cl41_mvt5_render")
@@ -1546,7 +1643,13 @@ fn generated_recursive_cl41_gp_f32_coefficients_execute_on_wasm() {
     }
     let dense_expected = clifford_gp_cl41_oracle(dense_a, dense_b);
     assert_eq!(
-        [dense_expected[0], dense_expected[1], dense_expected[4], dense_expected[17], dense_expected[31]],
+        [
+            dense_expected[0],
+            dense_expected[1],
+            dense_expected[4],
+            dense_expected[17],
+            dense_expected[31]
+        ],
         [268.0, 540.0, -2964.0, -3220.0, 2244.0],
         "dense Cl(4,1) oracle must retain the independent pinned components",
     );
@@ -1573,7 +1676,11 @@ fn generated_recursive_cl41_gp_f32_coefficients_execute_on_wasm() {
                 wasmtime::Val::I32((index % 8) as i32),
                 wasmtime::Val::I32((index / 8) as i32),
             ];
-            args.extend(a.into_iter().chain(b).map(|value| wasmtime::Val::F32(value.to_bits())));
+            args.extend(
+                a.into_iter()
+                    .chain(b)
+                    .map(|value| wasmtime::Val::F32(value.to_bits())),
+            );
             let mut results = [wasmtime::Val::I32(0)];
             gp.call(&mut store, &args, &mut results)
                 .expect("recursive Cl(4,1) GP coefficient execution");
@@ -1601,17 +1708,18 @@ fn conformal_point_cl41(x: f32, y: f32, z: f32) -> [f32; 32] {
 fn authored_generic_mvt5_cga_sandwich_executes_full_coefficient_frame_on_wasm() {
     let source = include_str!("fixtures/spirv/cga_sandwich_authored_generic_mvt5.fe");
     let wasm = compile_to_wasm("cga_sandwich_authored_generic_mvt5.fe", source);
-    assert!(func_imports(&wasm).is_empty(), "authored generic sandwich must have zero imports");
+    assert!(
+        func_imports(&wasm).is_empty(),
+        "authored generic sandwich must have zero imports"
+    );
     let (mut store, instance) = instantiate(&wasm);
     let sandwich = instance
         .get_typed_func::<(i32, i32, f32, f32, f32, f32, f32), i32>(
-            &mut store, "cga_sandwich_authored_generic_mvt5",
+            &mut store,
+            "cga_sandwich_authored_generic_mvt5",
         )
         .expect("authored generic MvT<5> sandwich ABI");
-    for (x, y, z, cx, cy) in [
-        (2.5, 0.25, 0.0, 0.5, 0.25),
-        (0.5, 2.25, 0.0, 0.5, 0.25),
-    ] {
+    for (x, y, z, cx, cy) in [(2.5, 0.25, 0.0, 0.5, 0.25), (0.5, 2.25, 0.0, 0.5, 0.25)] {
         let mut sphere = [0.0; 32];
         let center2 = cx * cx + cy * cy;
         sphere[1] = cx;
@@ -1619,12 +1727,16 @@ fn authored_generic_mvt5_cga_sandwich_executes_full_coefficient_frame_on_wasm() 
         sphere[8] = center2 * 0.5 - 1.0;
         sphere[16] = center2 * 0.5;
         let expected = clifford_gp_cl41_oracle(
-            clifford_gp_cl41_oracle(sphere, conformal_point_cl41(x, y, z)), sphere,
+            clifford_gp_cl41_oracle(sphere, conformal_point_cl41(x, y, z)),
+            sphere,
         );
         for (index, coefficient) in expected.into_iter().enumerate() {
-            let got = sandwich.call(
-                &mut store, ((index % 8) as i32, (index / 8) as i32, x, y, z, cx, cy),
-            ).expect("authored generic CGA coefficient");
+            let got = sandwich
+                .call(
+                    &mut store,
+                    ((index % 8) as i32, (index / 8) as i32, x, y, z, cx, cy),
+                )
+                .expect("authored generic CGA coefficient");
             assert_eq!(got, (coefficient * 256.0) as i32, "coefficient {index}");
         }
     }
@@ -1632,8 +1744,7 @@ fn authored_generic_mvt5_cga_sandwich_executes_full_coefficient_frame_on_wasm() 
 
 #[test]
 fn generated_recursive_cl41_cga_sandwich_executes_on_wasm() {
-    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/spirv");
+    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/spirv");
     let status = std::process::Command::new("python3")
         .arg(fixture_dir.join("gen_cga_sandwich_f32_mvt5.py"))
         .arg("--check")
@@ -1642,7 +1753,10 @@ fn generated_recursive_cl41_cga_sandwich_executes_on_wasm() {
     assert!(status.success(), "generated CGA sandwich fixture is stale");
     let source = include_str!("fixtures/spirv/cga_sandwich_recursive_f32_mvt5.fe");
     let wasm = compile_to_wasm("cga_sandwich_recursive_f32_mvt5.fe", source);
-    assert!(func_imports(&wasm).is_empty(), "recursive sandwich must not retain imports");
+    assert!(
+        func_imports(&wasm).is_empty(),
+        "recursive sandwich must not retain imports"
+    );
     let (mut store, instance) = instantiate(&wasm);
     let sandwich = instance
         .get_func(&mut store, "cga_sandwich_cl41_mvt5_render")
@@ -1663,7 +1777,11 @@ fn generated_recursive_cl41_cga_sandwich_executes_on_wasm() {
         for (index, coefficient) in expected.iter().copied().enumerate() {
             let scaled = coefficient * 256.0;
             assert!(scaled.is_finite(), "coefficient {index} must be finite");
-            assert_eq!(scaled.fract(), 0.0, "coefficient {index} must be exactly observable");
+            assert_eq!(
+                scaled.fract(),
+                0.0,
+                "coefficient {index} must be exactly observable"
+            );
             assert_eq!(
                 (scaled as i32) as f32,
                 scaled,
@@ -1683,13 +1801,18 @@ fn generated_recursive_cl41_cga_sandwich_executes_on_wasm() {
                 wasmtime::Val::F32(s16.to_bits()),
             ];
             let mut results = [wasmtime::Val::I32(0)];
-            sandwich.call(&mut store, &args, &mut results)
+            sandwich
+                .call(&mut store, &args, &mut results)
                 .expect("recursive CGA sandwich coefficient execution");
             let wasmtime::Val::I32(word) = results[0] else {
                 panic!("CGA sandwich Render result must be i32")
             };
             got_words[index] = word;
-            assert_eq!(word, (expected[index] * 256.0) as i32, "coefficient {index}");
+            assert_eq!(
+                word,
+                (expected[index] * 256.0) as i32,
+                "coefficient {index}"
+            );
         }
         for index in 0..32 {
             if ![1, 2, 4, 8, 16].contains(&index) {
@@ -1699,7 +1822,11 @@ fn generated_recursive_cl41_cga_sandwich_executes_on_wasm() {
         let weight = expected[16] - expected[8];
         assert_ne!(weight, 0.0, "normalization case must be finite");
         assert_eq!(
-            (expected[1] / weight, expected[2] / weight, expected[4] / weight),
+            (
+                expected[1] / weight,
+                expected[2] / weight,
+                expected[4] / weight
+            ),
             expected_q,
         );
     }
@@ -1707,8 +1834,7 @@ fn generated_recursive_cl41_cga_sandwich_executes_on_wasm() {
 
 #[test]
 fn generated_support_cl41_cga_sandwich_executes_on_wasm() {
-    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/spirv");
+    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/spirv");
     let status = std::process::Command::new("python3")
         .arg(fixture_dir.join("gen_cga_sandwich_support_cl41.py"))
         .arg("--check")
@@ -1733,10 +1859,7 @@ fn generated_support_cl41_cga_sandwich_executes_on_wasm() {
     // Both cases use a nonzero-y dyadic center. Their exact binary inputs keep
     // the independent flat-Cl(4,1) oracle and generated operation tree directly
     // comparable, including the raw homogeneous weight.
-    let cases = [
-        (2.5, 0.25, 0.0, 0.5, 0.25),
-        (0.5, 2.25, 0.0, 0.5, 0.25),
-    ];
+    let cases = [(2.5, 0.25, 0.0, 0.5, 0.25), (0.5, 2.25, 0.0, 0.5, 0.25)];
     for (x, y, z, cx, cy) in cases {
         let mut sphere = [0.0; 32];
         let center2 = cx * cx + cy * cy;
@@ -1747,7 +1870,12 @@ fn generated_support_cl41_cga_sandwich_executes_on_wasm() {
         let first = clifford_gp_cl41_oracle(sphere, conformal_point_cl41(x, y, z));
         let expected = clifford_gp_cl41_oracle(first, sphere);
         let weight = expected[16] - expected[8];
-        let outputs = [expected[1] / weight, expected[2] / weight, expected[4] / weight, weight];
+        let outputs = [
+            expected[1] / weight,
+            expected[2] / weight,
+            expected[4] / weight,
+            weight,
+        ];
 
         for (index, expected_value) in outputs.into_iter().enumerate() {
             let px = (index % 2) as i32;
@@ -1800,8 +1928,7 @@ fn cga_recursive_support_scalar_oracle(
         if distance < 0.0022 {
             let shade = 38 + 24 * (i >> 3);
             if qy > 0.0 {
-                return (shade + 88 * 256 + (255 - shade) * 65_536 - 16_777_216_i32)
-                    as u32;
+                return (shade + 88 * 256 + (255 - shade) * 65_536 - 16_777_216_i32) as u32;
             }
             return (56 + shade * 256 + 224 * 65_536 - 16_777_216_i32) as u32;
         }
@@ -1815,14 +1942,16 @@ fn generated_recursive_support_cyclide_executes_full_frame_on_wasm() {
     const W: i32 = 128;
     const H: i32 = 128;
     const VALUES: [f32; 5] = [0.0, 0.0, 0.0125, 0.5, 0.0];
-    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/spirv");
+    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/spirv");
     let status = std::process::Command::new("python3")
         .arg(fixture_dir.join("gen_cga_inversion_cyclide_recursive_support.py"))
         .arg("--check")
         .status()
         .expect("recursive-support cyclide generator should run");
-    assert!(status.success(), "recursive-support cyclide fixture is stale");
+    assert!(
+        status.success(),
+        "recursive-support cyclide fixture is stale"
+    );
 
     let source = include_str!("fixtures/spirv/cga_inversion_cyclide_recursive_support.fe");
     let started = std::time::Instant::now();
@@ -1832,7 +1961,10 @@ fn generated_recursive_support_cyclide_executes_full_frame_on_wasm() {
         wasm.len(),
         started.elapsed()
     );
-    assert!(func_imports(&wasm).is_empty(), "recursive-support cyclide must have zero imports");
+    assert!(
+        func_imports(&wasm).is_empty(),
+        "recursive-support cyclide must have zero imports"
+    );
     let (mut store, instance) = instantiate(&wasm);
     let render = instance
         .get_typed_func::<(i32, i32, f32, f32, f32, f32, f32), i32>(
@@ -1842,10 +1974,14 @@ fn generated_recursive_support_cyclide_executes_full_frame_on_wasm() {
         .expect("recursive-support ABI must be exactly two i32 builtins plus five f32 values");
     for py in 0..H {
         for px in 0..W {
-            let got = render.call(
-                &mut store,
-                (px, py, VALUES[0], VALUES[1], VALUES[2], VALUES[3], VALUES[4]),
-            ).expect("recursive-support cyclide Wasm pixel") as u32;
+            let got = render
+                .call(
+                    &mut store,
+                    (
+                        px, py, VALUES[0], VALUES[1], VALUES[2], VALUES[3], VALUES[4],
+                    ),
+                )
+                .expect("recursive-support cyclide Wasm pixel") as u32;
             let expected = cga_recursive_support_scalar_oracle(
                 px, py, VALUES[0], VALUES[1], VALUES[2], VALUES[3], VALUES[4],
             );
@@ -1856,8 +1992,7 @@ fn generated_recursive_support_cyclide_executes_full_frame_on_wasm() {
 
 #[test]
 fn generated_recursive_mvt5_f32_render_is_current_and_executes_on_wasm() {
-    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/spirv");
+    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/spirv");
     let status = std::process::Command::new("python3")
         .arg(fixture_dir.join("gen_mvt5_f32_render.py"))
         .arg("--check")
@@ -2022,15 +2157,16 @@ fn fe_extern_host_import_runs_on_wasm() {
     assert_eq!(main.call(&mut store, ()).unwrap(), 5, "main() should be 5");
 }
 
-/// R3.3 THE MILESTONE: `#[wasm_import(module = "fe:host")]` on an extern block
-/// names the wasm import MODULE. `host_log` becomes a `("fe:host", "host_log")`
+/// `#[host_import(module = "fe:host")]` on an extern block names the generic
+/// host namespace. The Wasm backend realizes `host_log` as
+/// `("fe:host", "host_log")`
 /// import instead of the flat `("fe", "host_log")` v0 default. The module string
 /// threads HIR (block attribute propagated onto the extern `Func`) -> runtime
 /// package -> the WasmBackend side table -> WAFFLE import emission. wasmtime
 /// satisfies the import through a `Linker` bound at `("fe:host", "host_log")`.
 #[test]
-fn fe_wasm_import_module_attribute_names_module() {
-    let source = "#[wasm_import(module = \"fe:host\")]\n\
+fn fe_host_import_module_attribute_names_module() {
+    let source = "#[host_import(module = \"fe:host\")]\n\
                   extern {\n\
                   \x20   pub unsafe fn host_log(a: u64, b: u64) -> u64\n\
                   }\n\
@@ -2070,6 +2206,308 @@ fn fe_wasm_import_module_attribute_names_module() {
         main.call(&mut store, ()).unwrap(),
         5,
         "main() should call the fe:host import and return 5"
+    );
+}
+
+#[test]
+fn host_import_rejects_simultaneous_compatibility_alias() {
+    let error = compile_to_wasm_err(
+        "duplicate_host_import.fe",
+        "#[host_import(module = \"fe:host\")]\n\
+         #[wasm_import(module = \"legacy\")]\n\
+         extern { pub unsafe fn host_log(value: u32) }\n\
+         pub fn main() { host_log(1) }\n",
+    );
+    assert!(
+        error.contains("declares both `#[host_import]`")
+            && error.contains("`#[wasm_import]` compatibility alias"),
+        "mixed generic and compatibility attributes must fail deterministically: {error}"
+    );
+}
+
+/// Generated Web IDL bindings are ordinary Fe declarations: they pass through
+/// the existing generic Wasm import path without codegen knowing `Window` or
+/// any other Web API name.
+#[test]
+fn generated_webidl_binding_uses_generic_wasm_imports() {
+    let world = fe_webidl_bindgen::parse(
+        "interface Window { readonly attribute unsigned long innerWidth; };",
+    )
+    .expect("fixture Web IDL should parse");
+    let adapter = fe_webidl_bindgen::build_adapter_plan(&world, "web-e2e", "fe:web")
+        .expect("fixture should normalize to the generic host ABI");
+    let transport = fe_webidl_bindgen::build_transport_plan(&adapter)
+        .expect("fixture should produce a core-Wasm transport plan");
+    let planned = transport
+        .functions
+        .iter()
+        .find(|function| function.import_name == "window_get_inner_width")
+        .expect("transport should contain the generated attribute getter");
+    assert_eq!(
+        planned.core,
+        Some(fe_webidl_bindgen::CoreSignature {
+            params: vec![fe_webidl_bindgen::CoreValueType::I32],
+            results: vec![fe_webidl_bindgen::CoreValueType::I32],
+        }),
+        "transport planner should describe the executable receiver/result lanes"
+    );
+    let mut source = fe_webidl_bindgen::emit_fe_raw(&world, "fe:web")
+        .expect("scalar Web IDL fixture should lower to the v0 ABI");
+    assert!(source.contains("#[host_import(module = \"fe:web\")]"));
+    assert!(
+        !source.contains("wasm_import"),
+        "generated Fe must use target-neutral host vocabulary"
+    );
+    source.push_str(
+        "\npub fn read_inner_width(window: Window) -> u32 {\n\
+         \x20   window_get_inner_width(window)\n\
+         }\n",
+    );
+
+    let wasm = compile_to_wasm("generated_webidl_window.fe", &source);
+    let imports = func_imports(&wasm);
+    assert!(
+        imports.contains(&("fe:web".to_owned(), "window_get_inner_width".to_owned())),
+        "generated binding should be a normal namespaced Wasm import, found {imports:?}"
+    );
+
+    // Execute the same generic import path. The interface value is the
+    // transport's borrowed i32 session token; neither MIR nor Wasm codegen
+    // contains a Window- or WebIDL-specific case.
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &wasm).expect("wasmtime should load the module");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let mut linker = wasmtime::Linker::new(&engine);
+    linker
+        .func_wrap(
+            "fe:web",
+            "window_get_inner_width",
+            |window_token: u32| -> u32 {
+                assert_eq!(window_token, 17, "receiver token should cross as one i32");
+                1440
+            },
+        )
+        .expect("binding the generated Web IDL import should succeed");
+    let instance = linker
+        .instantiate(&mut store, &module)
+        .expect("generated Web IDL module should instantiate");
+    let read_inner_width = instance
+        .get_typed_func::<u32, u32>(&mut store, "read_inner_width")
+        .expect("generated binding caller should be exported");
+    assert_eq!(
+        read_inner_width.call(&mut store, 17).unwrap(),
+        1440,
+        "Fe should pass the borrowed receiver token to the host and return its scalar result"
+    );
+}
+
+/// The checked-in `std::web` facade remains an ordinary consumer of generated
+/// host imports. This executes the currently honest resource/u32 subset without
+/// teaching MIR or Wasm codegen any Web API names.
+#[test]
+fn std_web_safe_resource_facade_uses_generated_generic_imports() {
+    let idl = include_str!("../../../ingots/std/web-minimal.webidl");
+    let world = fe_webidl_bindgen::parse(idl).expect("minimal std Web IDL should parse");
+    let generated =
+        fe_webidl_bindgen::emit_fe_raw(&world, "fe:web").expect("resource/scalar IDL should emit");
+    assert_eq!(
+        generated,
+        include_str!("../../../ingots/std/src/web/raw.fe"),
+        "checked-in raw declarations must be generator output, never hand-maintained DOM bindings"
+    );
+    let adapter =
+        fe_webidl_bindgen::emit_js_adapter(&world, "fe:web").expect("v0 adapter should emit");
+    assert!(adapter.contains(
+        "window_get_document(selfHandle) { return handles.insert(handles.get(selfHandle).document); }"
+    ));
+    assert!(adapter.contains(
+        "document_get_document_element(selfHandle) { return handles.insert(handles.get(selfHandle).documentElement); }"
+    ));
+
+    let source = "\
+use std::web\n\
+\n\
+pub fn safe_child_count(_ raw: own web::raw::Window) -> u32 {\n\
+\x20   let window = web::Window::from_raw(raw)\n\
+\x20   window.document().document_element().child_element_count()\n\
+}\n";
+    let wasm = compile_to_wasm("std_web_safe_facade.fe", source);
+    let imports = func_imports(&wasm);
+    for name in [
+        "window_get_document",
+        "document_get_document_element",
+        "element_get_child_element_count",
+    ] {
+        assert!(
+            imports.contains(&("fe:web".to_owned(), name.to_owned())),
+            "safe facade should lower through generic import `{name}`, found {imports:?}"
+        );
+    }
+
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &wasm).expect("wasmtime should load facade module");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let mut linker = wasmtime::Linker::new(&engine);
+    linker
+        .func_wrap("fe:web", "window_get_document", |window: u32| -> u32 {
+            assert_eq!(window, 17);
+            23
+        })
+        .unwrap();
+    linker
+        .func_wrap(
+            "fe:web",
+            "document_get_document_element",
+            |document: u32| -> u32 {
+                assert_eq!(document, 23);
+                41
+            },
+        )
+        .unwrap();
+    linker
+        .func_wrap(
+            "fe:web",
+            "element_get_child_element_count",
+            |element: u32| -> u32 {
+                assert_eq!(element, 41);
+                7
+            },
+        )
+        .unwrap();
+    let instance = linker.instantiate(&mut store, &module).unwrap();
+    let call = instance
+        .get_typed_func::<u32, u32>(&mut store, "safe_child_count")
+        .expect("safe facade function should export one resource-token lane");
+    assert_eq!(call.call(&mut store, 17).unwrap(), 7);
+}
+
+#[test]
+fn generated_domstring_host_import_uses_flat_canonical_lanes() {
+    let world = fe_webidl_bindgen::parse("interface Channel { DOMString echo(DOMString value); };")
+        .expect("DOMString fixture should parse");
+    let adapter = fe_webidl_bindgen::build_adapter_plan(&world, "string-e2e", "fe:web")
+        .expect("DOMString fixture should normalize");
+    let transport = fe_webidl_bindgen::build_transport_plan(&adapter)
+        .expect("DOMString fixture should produce a transport plan");
+    let planned = transport
+        .functions
+        .iter()
+        .find(|function| function.import_name == "channel_echo")
+        .expect("transport should contain Channel.echo");
+    assert_eq!(
+        planned.core,
+        Some(fe_webidl_bindgen::CoreSignature {
+            params: vec![
+                fe_webidl_bindgen::CoreValueType::I32,
+                fe_webidl_bindgen::CoreValueType::I32,
+                fe_webidl_bindgen::CoreValueType::I32,
+            ],
+            results: vec![
+                fe_webidl_bindgen::CoreValueType::I32,
+                fe_webidl_bindgen::CoreValueType::I32,
+            ],
+        })
+    );
+
+    let mut source = fe_webidl_bindgen::emit_fe_flat_host_imports(&world, "fe:web")
+        .expect("DOMString should lower to a generic flat host signature");
+    source.push_str(
+        "\npub fn call_echo(channel: Channel, value: own BrowserUtf16String) -> BrowserUtf16String {\n\
+         \x20   channel_echo(channel, value)\n\
+         }\n",
+    );
+    let wasm = compile_to_wasm("generated_webidl_domstring.fe", &source);
+    assert!(func_imports(&wasm).contains(&("fe:web".to_owned(), "channel_echo".to_owned())));
+
+    let engine = wasmtime::Engine::default();
+    let module =
+        wasmtime::Module::new(&engine, &wasm).expect("wasmtime should load DOMString wasm");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let mut linker = wasmtime::Linker::new(&engine);
+    linker
+        .func_wrap(
+            "fe:web",
+            "channel_echo",
+            |channel: u32, ptr: u32, len: u32| -> (u32, u32) {
+                assert_eq!(channel, 23);
+                assert_eq!((ptr, len), (4096, 5));
+                // This compiler-lane test returns the borrowed input descriptor.
+                // Owned result allocation/post-return is tested at the codec
+                // boundary and is not yet expressible by the safe Fe wrapper.
+                (ptr, len)
+            },
+        )
+        .expect("binding flat DOMString import should succeed");
+    let instance = linker
+        .instantiate(&mut store, &module)
+        .expect("flat DOMString module should instantiate");
+    let call_echo = instance
+        .get_typed_func::<(u32, u32, u32), (u32, u32)>(&mut store, "call_echo")
+        .expect("DOMString wrapper should expose flattened lanes");
+    assert_eq!(
+        call_echo.call(&mut store, (23, 4096, 5)).unwrap(),
+        (4096, 5)
+    );
+}
+
+#[test]
+fn u32_iterator_enum_result_identifies_indirect_host_import_gap() {
+    let source = r#"
+use core::BrowserString
+
+pub struct CountersIterator { handle: u32 }
+pub enum CountersIteratorOption {
+    None,
+    Some { value: u32 }
+}
+pub enum CountersIteratorNext {
+    Ok { value: CountersIteratorOption },
+    Error { error: BrowserString }
+}
+
+#[host_import(module = "fe:web")]
+extern {
+    #[host_result(codec = "fe:host-wasm-codec/v1")]
+    pub unsafe fn counters_iterator_next(
+        self_: CountersIterator
+    ) -> CountersIteratorNext
+}
+
+pub fn next_counter(value: CountersIterator) -> CountersIteratorNext {
+    counters_iterator_next(value)
+}
+"#;
+    let error = compile_to_wasm_err("generated_webidl_u32_iterator.fe", source);
+    assert!(
+        error.contains(
+            "extern host import `counters_iterator_next` uses indirect host result codec \
+             `fe:host-wasm-codec/v1`, but the Wasm backend is missing required capabilities: \
+             realloc, post-return"
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn indirect_host_result_rejects_non_aggregate_authored_return() {
+    let source = r#"
+#[host_import(module = "fe:web")]
+extern {
+    #[host_result(codec = "fe:host-wasm-codec/v1")]
+    pub unsafe fn invalid_scalar_result() -> u32
+}
+
+pub fn call_invalid() -> u32 {
+    invalid_scalar_result()
+}
+"#;
+    let error = compile_to_wasm_err("invalid_indirect_host_result.fe", source);
+    assert!(
+        error.contains(
+            "extern host import `invalid_scalar_result` declares an indirect host result, but \
+             authored return type `u32` is not an aggregate"
+        ),
+        "{error}"
     );
 }
 
@@ -2555,10 +2993,7 @@ pub fn ordinary_roundtrip(_ ptr: MemPtr<u32>, value: u32) -> u32 {
         roundtrip.call(&mut store, (19, 0x78563412)).unwrap(),
         0x78563412
     );
-    assert_eq!(
-        &memory.data(&store)[19..23],
-        &0x78563412_u32.to_le_bytes()
-    );
+    assert_eq!(&memory.data(&store)[19..23], &0x78563412_u32.to_le_bytes());
 }
 
 #[test]
@@ -3932,4 +4367,3 @@ fn pub_fn_reachable_as_callee_is_still_exported() {
         "`pub fn add` should be exported even though `main` calls it; got {exports:?}"
     );
 }
-

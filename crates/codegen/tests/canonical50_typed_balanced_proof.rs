@@ -1,6 +1,6 @@
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::{compile_runtime_package_wasm_with_options, WasmCompileOptions};
+use fe_codegen::{WasmCompileOptions, compile_runtime_package_wasm_with_options};
 use url::Url;
 
 fn gp_negative_cl41(a: usize, b: usize) -> bool {

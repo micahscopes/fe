@@ -10,7 +10,10 @@ fn real_ingot_dependency_materializes_shared_sparse_plan_and_executes_wasm() {
         .join("tests/fixtures/sparse_clifford_consumer_ingot");
     let url = Url::from_directory_path(path.canonicalize().unwrap()).unwrap();
     let mut db = DriverDataBase::default();
-    assert!(!driver::init_ingot(&mut db, &url), "ingot initialization diagnostics");
+    assert!(
+        !driver::init_ingot(&mut db, &url),
+        "ingot initialization diagnostics"
+    );
     let ingot = db
         .workspace()
         .containing_ingot(&db, url)

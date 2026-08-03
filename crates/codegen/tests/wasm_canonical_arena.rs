@@ -1,8 +1,8 @@
 use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
-    CanonicalInterfaceManifest, CanonicalShape, WasmCompileOptions,
-    canonical_lane_decl_from_entry, compile_runtime_package_wasm_with_options,
+    CanonicalInterfaceManifest, CanonicalShape, WasmCompileOptions, canonical_lane_decl_from_entry,
+    compile_runtime_package_wasm_with_options,
 };
 use url::Url;
 
@@ -168,7 +168,10 @@ pub fn echo(request: own Request) -> Response {
     let CanonicalShape::Record { fields } = &lane.request.shape else {
         panic!("request record")
     };
-    assert!(matches!(fields[0].layout.shape, CanonicalShape::Bytes { .. }));
+    assert!(matches!(
+        fields[0].layout.shape,
+        CanonicalShape::Bytes { .. }
+    ));
     assert!(matches!(
         fields[1].layout.shape,
         CanonicalShape::String { ref encoding, .. } if encoding == "utf-8"
@@ -214,9 +217,8 @@ pub fn echo(request: own Request) -> Response {
     let response_ptr = echo.call(&mut store, request_ptr as i32).unwrap() as usize;
     let mut response = [0u8; 16];
     memory.read(&store, response_ptr, &mut response).unwrap();
-    let word = |offset| {
-        u32::from_le_bytes(response[offset..offset + 4].try_into().unwrap()) as usize
-    };
+    let word =
+        |offset| u32::from_le_bytes(response[offset..offset + 4].try_into().unwrap()) as usize;
     let copied_bytes_ptr = word(0);
     let copied_bytes_len = word(4);
     let copied_text_ptr = word(8);
@@ -336,7 +338,11 @@ pub fn echo_empty(request: own EmptyRequest) -> BrowserList<u32, 0> {
     memory.write(&mut store, request_ptr, &request).unwrap();
     let response = echo_u32.call(&mut store, request_ptr as i32).unwrap();
     let (copied_ptr, copied_len) = read_descriptor(&store, response);
-    assert_eq!(copied_len, values.len() as u32, "length is an element count");
+    assert_eq!(
+        copied_len,
+        values.len() as u32,
+        "length is an element count"
+    );
     assert_eq!(copied_ptr % 4, 0);
     assert_ne!(copied_ptr, payload_ptr as u32);
     let mut copied = vec![0; payload.len()];
@@ -374,8 +380,7 @@ pub fn echo_empty(request: own EmptyRequest) -> BrowserList<u32, 0> {
     assert_eq!(copied_len, 0);
 
     // Compile each lane from its own MIR root, matching production's one-entry package.
-    let f32_package =
-        mir::build_wasm_runtime_package_for_entry(&db, top_mod, "echo_f32").unwrap();
+    let f32_package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "echo_f32").unwrap();
     let f32_artifact = compile_runtime_package_wasm_with_options(
         &db,
         &f32_package,
@@ -403,15 +408,12 @@ pub fn echo_empty(request: own EmptyRequest) -> BrowserList<u32, 0> {
     f32_memory
         .write(&mut f32_store, request_ptr, &f32_request)
         .unwrap();
-    let f32_response = echo_f32
-        .call(&mut f32_store, request_ptr as i32)
-        .unwrap();
+    let f32_response = echo_f32.call(&mut f32_store, request_ptr as i32).unwrap();
     let mut f32_descriptor = [0u8; 8];
     f32_memory
         .read(&f32_store, f32_response as usize, &mut f32_descriptor)
         .unwrap();
-    let f32_copied_ptr =
-        u32::from_le_bytes(f32_descriptor[0..4].try_into().unwrap()) as usize;
+    let f32_copied_ptr = u32::from_le_bytes(f32_descriptor[0..4].try_into().unwrap()) as usize;
     let f32_copied_len = u32::from_le_bytes(f32_descriptor[4..8].try_into().unwrap());
     assert_eq!(f32_copied_len, f32_bits.len() as u32);
     assert_eq!(f32_copied_ptr % 4, 0);
@@ -436,7 +438,9 @@ pub fn echo_empty(request: own EmptyRequest) -> BrowserList<u32, 0> {
     let empty_module = wasmtime::Module::new(&engine, &empty_artifact.bytes).unwrap();
     let mut empty_store = wasmtime::Store::new(&engine, ());
     let empty_instance = wasmtime::Instance::new(&mut empty_store, &empty_module, &[]).unwrap();
-    let empty_memory = empty_instance.get_memory(&mut empty_store, "memory").unwrap();
+    let empty_memory = empty_instance
+        .get_memory(&mut empty_store, "memory")
+        .unwrap();
     let echo_empty = empty_instance
         .get_typed_func::<i32, i32>(&mut empty_store, "fe_cabi_echo_empty")
         .unwrap();
@@ -448,11 +452,7 @@ pub fn echo_empty(request: own EmptyRequest) -> BrowserList<u32, 0> {
         .unwrap();
     let mut empty_descriptor = [0u8; 8];
     empty_memory
-        .read(
-            &empty_store,
-            empty_response as usize,
-            &mut empty_descriptor,
-        )
+        .read(&empty_store, empty_response as usize, &mut empty_descriptor)
         .unwrap();
     assert_eq!(
         u32::from_le_bytes(empty_descriptor[4..8].try_into().unwrap()),

@@ -230,7 +230,9 @@ fn main() {
         "render fragment export `{FRAG_NAME}` must be (i32 x6) -> i32 (px, py + 4 broadcast rotor \
          members); got {frag_sig:?}"
     );
-    eprintln!("  wasm export `{FRAG_NAME}` signature is exactly (i32 x6) -> i32 (2 coords + 4 rotor)");
+    eprintln!(
+        "  wasm export `{FRAG_NAME}` signature is exactly (i32 x6) -> i32 (2 coords + 4 rotor)"
+    );
 
     // --- 3. Fe -> wasm (the controls). --------------------------------------
     let ctl_wasm = compile_to_wasm(CTL_SOURCE, "gen_ctl_wasm");
@@ -418,8 +420,12 @@ fn assert_browser_profile_wgsl(wgsl: &str) {
 fn compile_to_wasm(source: &str, tag: &str) -> Vec<u8> {
     let mut db = DriverDataBase::default();
     let url = Url::parse(&format!("file:///{tag}.fe")).expect("wasm gen URL should parse");
-    db.workspace().touch(&mut db, url.clone(), Some(source.to_string()));
-    let file = db.workspace().get(&db, &url).expect("wasm gen file should load");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(source.to_string()));
+    let file = db
+        .workspace()
+        .get(&db, &url)
+        .expect("wasm gen file should load");
     let top_mod = db.top_mod(file);
     let bytes = BackendKind::Wasm
         .create()
@@ -442,7 +448,13 @@ enum WasmTy {
 fn export_signature(bytes: &[u8], export_name: &str) -> (Vec<WasmTy>, Vec<WasmTy>) {
     use wasmparser::{ExternalKind, Payload, TypeRef, ValType};
 
-    let map = |v: &ValType| if matches!(v, ValType::I32) { WasmTy::I32 } else { WasmTy::Other };
+    let map = |v: &ValType| {
+        if matches!(v, ValType::I32) {
+            WasmTy::I32
+        } else {
+            WasmTy::Other
+        }
+    };
 
     let mut func_sigs: Vec<(Vec<WasmTy>, Vec<WasmTy>)> = Vec::new();
     let mut func_type_indices: Vec<u32> = Vec::new();
@@ -536,7 +548,15 @@ fn parse_fn_params(source: &str, fn_name: &str) -> Vec<String> {
 
 /// Run the Fe render fragment (the 6-arg typed func) over the FULL grid for one
 /// rotor, returning the per-pixel packed RGBA8 grid (row-major, u32).
-fn run_wasm_frag(bytes: &[u8], width: u32, height: u32, rc: i32, r12: i32, r13: i32, r23: i32) -> Vec<u32> {
+fn run_wasm_frag(
+    bytes: &[u8],
+    width: u32,
+    height: u32,
+    rc: i32,
+    r12: i32,
+    r13: i32,
+    r23: i32,
+) -> Vec<u32> {
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, bytes).expect("wasmtime should load the module");
     let mut store = wasmtime::Store::new(&engine, ());

@@ -67,12 +67,9 @@ fn canonical_provider_drives_full_conformal_inversion_de_wgsl() {
     // fco_cga_sparse_facade.rs consumes the same fixture and already names its
     // entry this way; the assertions below (fullscreen vertex + fragment, one
     // DE loop) presuppose exactly one render entry.
-    let package = mir::build_wasm_runtime_package_for_entry(
-        &db,
-        top_mod,
-        "cga_schedule32_vec5_de_render",
-    )
-    .expect("direct CGA DE runtime package");
+    let package =
+        mir::build_wasm_runtime_package_for_entry(&db, top_mod, "cga_schedule32_vec5_de_render")
+            .expect("direct CGA DE runtime package");
     let artifact = fe_codegen::compile_runtime_package_spirv_render(&db, &package)
         .expect("direct CGA DE should compile through Render SPIR-V");
     let backend_elapsed = backend_started.elapsed();

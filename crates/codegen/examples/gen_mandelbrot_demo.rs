@@ -15,6 +15,7 @@
 //! | `kernel.wgsl`    | the naga-emitted WGSL from the Grid SPIR-V artifact            |
 //! | `layout.json`    | the compiler-stated `SpirvLayout` (Grid schema, result absent)|
 //! | `kernel.wasm`    | the Fe -> wasm build (`BackendKind::Wasm`)                     |
+//! | `kernel.manifest.json` | digest-bound loader metadata for `kernel.wasm`          |
 //! | `reference.json` | width/height/max_iter/FNV-1a-32/samples from kernel.wasm here  |
 //!
 //! HARD-FAIL discipline (EVERY gate passes before a single file is written):
@@ -42,6 +43,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use common::InputDb;
 use driver::DriverDataBase;
+use fe_codegen::capstone_evidence::{
+    ArtifactEvidence, CAPSTONE_EVIDENCE_PROTOCOL, CAPSTONE_EVIDENCE_VERSION,
+    CapstoneEvidenceManifest, InterfaceSnapshot, SourceEvidence, TargetEvidence,
+    VerificationEvidence, VerificationStatus, sha256_hex,
+};
 use fe_codegen::{BackendKind, OptLevel, compile_runtime_package_spirv_grid, layout_for};
 use sonatina_codegen::isa::spirv::{Access, LayoutMode, Role, SpirvLayout, WordKind};
 use url::Url;
@@ -49,7 +55,8 @@ use url::Url;
 /// The SSOT fractal kernel source: the exact fixture the M2 e2e tests
 /// `include_str!`, so the tested source and the shipped source are byte-identical
 /// by construction.
-const KERNEL_SOURCE: &str = include_str!("../tests/fixtures/spirv/mandelbrot_q12.fe");
+const KERNEL_SOURCE: &str = include_str!("../../../demos/capstones/mandelbrot/kernel.fe");
+const FE_BOOTSTRAP_SOURCE: &str = include_str!("../../html-precompile/assets/bootstrap.js");
 
 /// The kernel/export name (the Fe `pub fn`), used for the wasm export lookup and
 /// stated in `layout.json` so `wasm-runner.js` calls the right export.
@@ -261,8 +268,7 @@ fn main() {
 
     // --- 4. Write gen/ (only after every gate passed). ----------------------
     // Samples recomputed FROM the executed grid, never copied from a doc.
-    let sample_coords: [(u32, u32); 5] =
-        [(0, 0), (511, 0), (0, 511), (511, 511), (256, 256)];
+    let sample_coords: [(u32, u32); 5] = [(0, 0), (511, 0), (0, 511), (511, 511), (256, 256)];
     let samples: Vec<serde_json::Value> = sample_coords
         .iter()
         .map(|&(x, y)| {
@@ -281,22 +287,171 @@ fn main() {
         "runtime": "wasmtime (Fe -> wasm), executed at generation time",
     }))
     .expect("reference.json should serialize");
+    let artifact_manifest_json = serde_json::to_string_pretty(&serde_json::json!({
+        "protocol": { "major": 1, "minor": 1 },
+        "entry": KERNEL_NAME,
+        "source": {
+            "path": "demos/capstones/mandelbrot/kernel.fe",
+            "sha256": sha256_hex(KERNEL_SOURCE.as_bytes()),
+        },
+        "interface": {
+            "imports": [],
+            "exports": [{
+                "name": KERNEL_NAME,
+                "params": ["i32", "i32"],
+                "result": "i32",
+            }],
+            "resources": [],
+        },
+        "artifacts": [{
+            "kind": "wasm_module",
+            "byte_len": wasm_bytes.len(),
+            "sha256": sha256_hex(&wasm_bytes),
+        }],
+    }))
+    .expect("kernel.manifest.json should serialize");
 
     write_file(&gen_dir.join("kernel.fe"), KERNEL_SOURCE.as_bytes());
     write_file(&gen_dir.join("kernel.wgsl"), wgsl.as_bytes());
     write_file(&gen_dir.join("layout.json"), layout_json.as_bytes());
     write_file(&gen_dir.join("kernel.wasm"), &wasm_bytes);
+    write_file(
+        &gen_dir.join("kernel.manifest.json"),
+        artifact_manifest_json.as_bytes(),
+    );
     write_file(&gen_dir.join("reference.json"), reference_json.as_bytes());
+    write_file(
+        &gen_dir.join("fe-bootstrap.js"),
+        FE_BOOTSTRAP_SOURCE.as_bytes(),
+    );
+
+    // The capstone record contains no clock, git state, absolute path, or host
+    // adapter result: identical compiler output yields byte-identical evidence.
+    // EVM and Native have executable gates but do not expose a portable artifact
+    // through this browser-oriented command, so they are reported honestly as
+    // not-run with no invented artifact hash.
+    let evidence = capstone_evidence(&wasm_bytes, wgsl.as_bytes(), hash);
+    evidence
+        .validate()
+        .expect("the generated capstone evidence must satisfy protocol v1");
+    let capstone_dir = repo_root.join("demos/capstones/mandelbrot");
+    write_file(
+        &capstone_dir.join("evidence.json"),
+        evidence.to_pretty_json().as_bytes(),
+    );
 
     eprintln!(
-        "gen_mandelbrot_demo: wrote 5 files to {}\n  \
-         kernel.fe  kernel.wgsl  layout.json  kernel.wasm  reference.json",
-        gen_dir.display()
+        "gen_mandelbrot_demo: wrote 7 browser files to {} and deterministic \
+         capstone evidence to {}\n  kernel.fe  kernel.wgsl  layout.json  \
+         kernel.wasm  kernel.manifest.json  reference.json  fe-bootstrap.js",
+        gen_dir.display(),
+        capstone_dir.join("evidence.json").display(),
     );
     eprintln!(
         "  serve: `cd {} && ./serve.sh` then open http://localhost:8788/webgpu-mandelbrot/",
         repo_root.join("demos").display()
     );
+}
+
+fn capstone_evidence(
+    wasm_bytes: &[u8],
+    wgsl_bytes: &[u8],
+    frame_hash: u32,
+) -> CapstoneEvidenceManifest {
+    let source = SourceEvidence {
+        path: "demos/capstones/mandelbrot/kernel.fe",
+        sha256: sha256_hex(KERNEL_SOURCE.as_bytes()),
+    };
+    let interface = InterfaceSnapshot {
+        version: 1,
+        export: KERNEL_NAME,
+        parameters: vec!["i32", "i32"],
+        result: "u32",
+    };
+    let pending = |scope, command, test, note| VerificationEvidence {
+        status: VerificationStatus::NotRun,
+        scope,
+        command,
+        test,
+        result: None,
+        note: Some(note),
+    };
+
+    CapstoneEvidenceManifest {
+        protocol: CAPSTONE_EVIDENCE_PROTOCOL,
+        version: CAPSTONE_EVIDENCE_VERSION,
+        capstone: "mandelbrot-q12",
+        source,
+        interface,
+        targets: vec![
+            TargetEvidence {
+                target: "evm",
+                runtime: "revm",
+                imports: vec![],
+                exports: vec!["MandelExec.run()"],
+                artifact: None,
+                verification: pending(
+                    "four corners and centre",
+                    "cargo test -p fe-codegen --test spirv_e2e mandelbrot_q12_evm_spot_check",
+                    "mandelbrot_q12_evm_spot_check",
+                    "The test adds a generated contract envelope to the unchanged canonical source; this command does not persist its EVM bytecode.",
+                ),
+            },
+            TargetEvidence {
+                target: "native",
+                runtime: "Cranelift JIT",
+                imports: vec![],
+                exports: vec![KERNEL_NAME],
+                artifact: None,
+                verification: pending(
+                    "full 512x512 frame",
+                    "cargo test -p fe-codegen --features native-backend --test native_e2e native_mandelbrot_capstone_matches_the_full_frame_oracle",
+                    "native_mandelbrot_capstone_matches_the_full_frame_oracle",
+                    "The Native backend is an opt-in in-process JIT and has no portable artifact in this browser-oriented command.",
+                ),
+            },
+            TargetEvidence {
+                target: "wasm",
+                runtime: "wasmtime",
+                imports: vec![],
+                exports: vec![KERNEL_NAME],
+                artifact: Some(ArtifactEvidence::from_bytes(
+                    "wasm-module",
+                    "demos/webgpu-mandelbrot/gen/kernel.wasm",
+                    wasm_bytes,
+                )),
+                verification: VerificationEvidence {
+                    status: VerificationStatus::Verified,
+                    scope: "full 512x512 frame",
+                    command: "cargo run -p fe-codegen --example gen_mandelbrot_demo",
+                    test: "generator exhaustive oracle gate",
+                    result: Some(format!("FNV-1a-32 0x{frame_hash:08x}")),
+                    note: None,
+                },
+            },
+            TargetEvidence {
+                target: "webgpu",
+                runtime: "browser WebGPU",
+                imports: vec!["global_invocation_id", "num_workgroups", "storage output"],
+                exports: vec!["main"],
+                artifact: Some(ArtifactEvidence::from_bytes(
+                    "wgsl-shader",
+                    "demos/webgpu-mandelbrot/gen/kernel.wgsl",
+                    wgsl_bytes,
+                )),
+                verification: VerificationEvidence {
+                    status: VerificationStatus::Validated,
+                    scope: "WGSL parse and browser-profile validation",
+                    command: "cargo run -p fe-codegen --example gen_mandelbrot_demo",
+                    test: "generator browser-profile WGSL gate",
+                    result: Some("naga validation with default browser capabilities".to_string()),
+                    note: Some(
+                        "This is not a live GPU execution claim. Run mandelbrot_q12_executes_on_lavapipe_browser_profile on a host with an adapter to earn one.",
+                    ),
+                },
+            },
+        ],
+    }
 }
 
 /// The browser-profile WGSL gate (static, GPU-free), verbatim in spirit with the
@@ -429,7 +584,9 @@ fn run_wasm_grid(bytes: &[u8], width: u32, height: u32) -> Vec<u32> {
         wasmtime::Instance::new(&mut store, &module, &[]).expect("wasmtime should instantiate");
     let f = instance
         .get_typed_func::<(i32, i32), i32>(&mut store, KERNEL_NAME)
-        .unwrap_or_else(|e| panic!("`{KERNEL_NAME}` export should exist as (i32, i32) -> i32: {e}"));
+        .unwrap_or_else(|e| {
+            panic!("`{KERNEL_NAME}` export should exist as (i32, i32) -> i32: {e}")
+        });
     let mut out = Vec::with_capacity((width * height) as usize);
     for y in 0..height {
         for x in 0..width {

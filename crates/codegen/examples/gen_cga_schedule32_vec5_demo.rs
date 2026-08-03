@@ -12,10 +12,9 @@ use std::{
 use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
-    CanonicalCapability, CanonicalExecution, CanonicalInterfaceManifest, CanonicalPlacement,
-    WasmCompileOptions, WebBuildOptions, WebBundle, WebCanonicalPolicy,
-    canonical_lane_decl_from_entry, compile_runtime_package_spirv_render,
-    compile_runtime_package_wasm_with_options,
+    CanonicalExecution, CanonicalInterfaceManifest, CanonicalPlacement, WasmCompileOptions,
+    WebBuildOptions, WebBundle, WebCanonicalPolicy, canonical_lane_decl_from_entry,
+    compile_runtime_package_spirv_render, compile_runtime_package_wasm_with_options,
 };
 use hir::hir_def::HirIngot;
 use sonatina_codegen::isa::spirv::{
@@ -156,9 +155,7 @@ fn app_source() -> String {
     assert!(CANONICAL50_API.matches(".clifford_gp(").count() == 2);
     assert!(CANONICAL50_API.contains("pub type Canonical50Schedule32 = SparsePlan<"));
     assert!(CANONICAL50_API.contains("pub struct Canonical50Term<"));
-    assert!(CANONICAL50_API.contains(
-        "pub type Canonical50TypedBalancedSchedule32"
-    ));
+    assert!(CANONICAL50_API.contains("pub type Canonical50TypedBalancedSchedule32"));
     assert!(CANONICAL50_API.contains("CANONICAL50_KEEP_VALID"));
     assert!(source.contains(
         "for Canonical50Term<Candidate, Left, Point, Right, Output, Magnitude, Negative>"
@@ -271,8 +268,8 @@ fn main() {
         assert_eq!(declaration.intent.placement, CanonicalPlacement::MainThread);
         assert_eq!(declaration.intent.capabilities.len(), 1);
         assert_eq!(
-            declaration.intent.capabilities[0].capability,
-            CanonicalCapability::WebgpuDispatch
+            declaration.intent.capabilities[0].capability.as_str(),
+            "webgpu_dispatch"
         );
         assert!(declaration.intent.capabilities[0].mutable);
     }

@@ -1,0 +1,6 @@
+[ingot]
+name = "dec_wrong_grade"
+version = "0.1.0"
+
+[dependencies]
+dec = "../../../../../demos/sketches/dec"

@@ -62,7 +62,8 @@ fn semantic_sparse_facade_erases_to_the_direct_schedule32_kernel_shape() {
         "the compact semantic records must feed the specialized aggregate method",
     );
     assert_eq!(
-        BODY.matches("<ConformalVector as Sandwich>::sandwich").count(),
+        BODY.matches("<ConformalVector as Sandwich>::sandwich")
+            .count(),
         sandwich_calls,
         "every aggregate call must go through the one ConformalVector aggregate",
     );

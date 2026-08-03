@@ -28,9 +28,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::{
-    BackendKind, OptLevel, compile_runtime_package_spirv_with_workgroup, layout_for,
-};
+use fe_codegen::{BackendKind, OptLevel, compile_runtime_package_spirv_with_workgroup, layout_for};
 use sonatina_codegen::isa::spirv::{Access, LayoutMode, Role, SpirvLayout, WordKind};
 use url::Url;
 

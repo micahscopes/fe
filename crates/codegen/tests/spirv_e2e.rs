@@ -151,8 +151,11 @@ const ESCAPE_TIME_U32_SOURCE: &str = include_str!("fixtures/spirv/escape_time_u3
 fn escape_time_u32_lowers_to_naga_validated_spirv() {
     let mut db = DriverDataBase::default();
     let url = Url::parse("file:///escape_time_u32.fe").expect("test URL should parse");
-    db.workspace()
-        .touch(&mut db, url.clone(), Some(ESCAPE_TIME_U32_SOURCE.to_string()));
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(ESCAPE_TIME_U32_SOURCE.to_string()),
+    );
     let file = db.workspace().get(&db, &url).expect("file should load");
     let top_mod = db.top_mod(file);
 
@@ -253,7 +256,9 @@ fn compile_keystone_to_wasm() -> Vec<u8> {
         .create()
         .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
         .expect("keystone should compile Fe -> wasm");
-    output.into_bytecode().expect("wasm output should be bytecode")
+    output
+        .into_bytecode()
+        .expect("wasm output should be bytecode")
 }
 
 /// Execute the keystone wasm under wasmtime and read back `poseidon_sigma()`.
@@ -324,13 +329,11 @@ fn run_spirv_poseidon_on_lavapipe() -> Option<u64> {
     let allow_skip = std::env::var_os("MB2_ALLOW_GPU_SKIP").is_some();
 
     let instance = wgpu::Instance::default();
-    let adapter = match pollster::block_on(instance.request_adapter(
-        &wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            force_fallback_adapter: false,
-            ..Default::default()
-        },
-    )) {
+    let adapter = match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::LowPower,
+        force_fallback_adapter: false,
+        ..Default::default()
+    })) {
         Ok(a) => a,
         Err(e) => {
             if allow_skip {
@@ -347,24 +350,23 @@ fn run_spirv_poseidon_on_lavapipe() -> Option<u64> {
         }
     };
 
-    let (device, queue) = match pollster::block_on(adapter.request_device(
-        &wgpu::DeviceDescriptor {
+    let (device, queue) =
+        match pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             required_features: wgpu::Features::SHADER_INT64,
             ..Default::default()
-        },
-    )) {
-        Ok(dq) => dq,
-        Err(e) => {
-            if allow_skip {
-                eprintln!("  SPIR-V leg SKIPPED (MB2_ALLOW_GPU_SKIP): no SHADER_INT64: {e:?}");
-                return None;
-            }
-            panic!(
-                "SPIR-V leg: adapter has no SHADER_INT64 support ({e:?}). The keystone \
+        })) {
+            Ok(dq) => dq,
+            Err(e) => {
+                if allow_skip {
+                    eprintln!("  SPIR-V leg SKIPPED (MB2_ALLOW_GPU_SKIP): no SHADER_INT64: {e:?}");
+                    return None;
+                }
+                panic!(
+                    "SPIR-V leg: adapter has no SHADER_INT64 support ({e:?}). The keystone \
                  executes i64 in-sandbox; this is a hard failure, not a skip."
-            );
-        }
-    };
+                );
+            }
+        };
 
     eprintln!("  SPIR-V leg GPU adapter: {}", adapter.get_info().name);
 
@@ -463,7 +465,8 @@ fn run_spirv_poseidon_on_lavapipe() -> Option<u64> {
     let slice = staging_buf.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |r| {
-        tx.send(r).expect("map_async callback channel should be open");
+        tx.send(r)
+            .expect("map_async callback channel should be open");
     });
     let _ = device.poll(wgpu::PollType::Wait {
         submission_index: None,
@@ -613,7 +616,9 @@ fn compile_keystone_u32_to_wasm() -> Vec<u8> {
         .create()
         .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
         .expect("u32 keystone should compile Fe -> wasm");
-    output.into_bytecode().expect("wasm output should be bytecode")
+    output
+        .into_bytecode()
+        .expect("wasm output should be bytecode")
 }
 
 /// Execute the u32 keystone wasm under wasmtime. Fe `u32` lowers to wasm `i32`,
@@ -721,17 +726,17 @@ fn run_wgsl_u32_on_lavapipe(wgsl: &str) -> Option<u32> {
     let allow_skip = std::env::var_os("MB2_ALLOW_GPU_SKIP").is_some();
 
     let instance = wgpu::Instance::default();
-    let adapter = match pollster::block_on(instance.request_adapter(
-        &wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            force_fallback_adapter: false,
-            ..Default::default()
-        },
-    )) {
+    let adapter = match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::LowPower,
+        force_fallback_adapter: false,
+        ..Default::default()
+    })) {
         Ok(a) => a,
         Err(e) => {
             if allow_skip {
-                eprintln!("  u32 SPIR-V leg SKIPPED (MB2_ALLOW_GPU_SKIP): no Vulkan adapter: {e:?}");
+                eprintln!(
+                    "  u32 SPIR-V leg SKIPPED (MB2_ALLOW_GPU_SKIP): no Vulkan adapter: {e:?}"
+                );
                 return None;
             }
             panic!(
@@ -867,7 +872,8 @@ fn run_wgsl_u32_on_lavapipe(wgsl: &str) -> Option<u32> {
     let slice = staging_buf.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |r| {
-        tx.send(r).expect("map_async callback channel should be open");
+        tx.send(r)
+            .expect("map_async callback channel should be open");
     });
     let _ = device.poll(wgpu::PollType::Wait {
         submission_index: None,
@@ -1028,7 +1034,9 @@ fn compile_grid_gradient_to_wasm() -> Vec<u8> {
         .create()
         .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
         .expect("grid gradient should compile Fe -> wasm");
-    output.into_bytecode().expect("wasm output should be bytecode")
+    output
+        .into_bytecode()
+        .expect("wasm output should be bytecode")
 }
 
 /// Execute a `(i32, i32) -> i32` grid wasm export over the whole
@@ -1052,7 +1060,8 @@ fn wasm_grid_all(bytes: &[u8], width: u32, height: u32, export: &str) -> Vec<u32
         for x in 0..width {
             let v = f
                 .call(&mut store, (x as i32, y as i32))
-                .unwrap_or_else(|e| panic!("{export}(px, py) should run: {e:?}")) as u32;
+                .unwrap_or_else(|e| panic!("{export}(px, py) should run: {e:?}"))
+                as u32;
             out.push(v);
         }
     }
@@ -1141,13 +1150,11 @@ fn run_grid_u32_on_lavapipe(
     let out_bytes = u64::from(width * height * 4);
 
     let instance = wgpu::Instance::default();
-    let adapter = match pollster::block_on(instance.request_adapter(
-        &wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            force_fallback_adapter: false,
-            ..Default::default()
-        },
-    )) {
+    let adapter = match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::LowPower,
+        force_fallback_adapter: false,
+        ..Default::default()
+    })) {
         Ok(a) => a,
         Err(e) => {
             if allow_skip {
@@ -1302,7 +1309,8 @@ fn run_grid_u32_on_lavapipe(
     let slice = staging_buf.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |r| {
-        tx.send(r).expect("map_async callback channel should be open");
+        tx.send(r)
+            .expect("map_async callback channel should be open");
     });
     let _ = device.poll(wgpu::PollType::Wait {
         submission_index: None,
@@ -1463,7 +1471,7 @@ fn grid_gradient_u32_executes_on_lavapipe_browser_profile() {
 /// generator) so the tested source and the shipped source are byte-identical by
 /// construction. Under `fixtures/spirv/` so the top-level `*.fe` dir-test glob
 /// does not mint an incidental EVM-IR snapshot.
-const MANDELBROT_Q12_SOURCE: &str = include_str!("fixtures/spirv/mandelbrot_q12.fe");
+const MANDELBROT_Q12_SOURCE: &str = include_str!("../../../demos/capstones/mandelbrot/kernel.fe");
 
 /// The independent Q12 escape-time oracle, re-derived HERE from the kernel logic
 /// (never trusted from the spec), integer-identical to the fixture: `i32`
@@ -1505,8 +1513,11 @@ fn compile_mandelbrot_q12_to_wasm() -> Vec<u8> {
 
     let mut db = DriverDataBase::default();
     let url = Url::parse("file:///mandelbrot_q12_wasm.fe").expect("test URL should parse");
-    db.workspace()
-        .touch(&mut db, url.clone(), Some(MANDELBROT_Q12_SOURCE.to_string()));
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(MANDELBROT_Q12_SOURCE.to_string()),
+    );
     let file = db.workspace().get(&db, &url).expect("file should load");
     let top_mod = db.top_mod(file);
 
@@ -1514,7 +1525,9 @@ fn compile_mandelbrot_q12_to_wasm() -> Vec<u8> {
         .create()
         .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
         .expect("mandelbrot Q12 should compile Fe -> wasm");
-    output.into_bytecode().expect("wasm output should be bytecode")
+    output
+        .into_bytecode()
+        .expect("wasm output should be bytecode")
 }
 
 /// M2b wasm leg (GPU-FREE, runs everywhere): compile the Q12 fractal kernel via
@@ -1628,8 +1641,7 @@ fn mandelbrot_q12_evm_spot_check() {
 
     // The 5 probe pixels, in the SAME order and base-1000 positions as the Fe
     // `mandel_probe()` fn: p0..p4 = corners + center.
-    const PROBE_PIXELS: [(i32, i32); 5] =
-        [(0, 0), (511, 0), (0, 511), (511, 511), (256, 256)];
+    const PROBE_PIXELS: [(i32, i32); 5] = [(0, 0), (511, 0), (0, 511), (511, 511), (256, 256)];
     let mut want: u64 = 0;
     let mut scale: u64 = 1;
     for (px, py) in PROBE_PIXELS {
@@ -1696,8 +1708,11 @@ fn mandelbrot_q12_executes_on_lavapipe_browser_profile() {
     // --- Compile the Q12 fractal through the Grid driver seam. ---
     let mut db = DriverDataBase::default();
     let url = Url::parse("file:///mandelbrot_q12_gpu.fe").expect("test URL should parse");
-    db.workspace()
-        .touch(&mut db, url.clone(), Some(MANDELBROT_Q12_SOURCE.to_string()));
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(MANDELBROT_Q12_SOURCE.to_string()),
+    );
     let file = db.workspace().get(&db, &url).expect("file should load");
     let top_mod = db.top_mod(file);
     let package = mir::build_wasm_runtime_package(&db, top_mod)
@@ -1966,7 +1981,9 @@ fn compile_clifford_q12_to_wasm() -> Vec<u8> {
         .create()
         .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
         .expect("clifford Q12 should compile Fe -> wasm");
-    output.into_bytecode().expect("wasm output should be bytecode")
+    output
+        .into_bytecode()
+        .expect("wasm output should be bytecode")
 }
 
 /// C1 wasm leg (GPU-FREE, runs everywhere): compile the rotor-sandwich kernel
@@ -2020,9 +2037,15 @@ fn clifford_rotor_q12_wasm_leg() {
         let t3 = (rc * z - 0 * ((px - 256) * 16) - 0 * ((py - 256) * 16)) >> 12;
         let tw = (r12 * z - 0 * ((py - 256) * 16) + 0 * ((px - 256) * 16)) >> 12;
         assert_eq!(t3, 0, "e12_180: the grade-1 t3 vanishes");
-        assert_eq!(tw, 2048, "e12_180: the grade-3 trivector tw == z0 (nonzero)");
+        assert_eq!(
+            tw, 2048,
+            "e12_180: the grade-3 trivector tw == z0 (nonzero)"
+        );
         let sz = (rc * t3 + r12 * tw) >> 12;
-        assert_eq!(sz, 2048, "e12_180: z' is reconstructed from the trivector alone");
+        assert_eq!(
+            sz, 2048,
+            "e12_180: z' is reconstructed from the trivector alone"
+        );
     }
 
     // --- The FULL 512x512 frame, every pixel == the oracle, for each rotor.
@@ -2096,7 +2119,8 @@ fn clifford_rotor_q12_wasm_leg() {
             let s180 = clifford_oracle_q12(px, py, 0, 4096, 0, 0);
             let s_id_reflected = clifford_oracle_q12(512 - px, 512 - py, 4096, 0, 0, 0);
             assert_eq!(
-                s180, s_id_reflected,
+                s180,
+                s_id_reflected,
                 "e12_180 at ({px},{py}) must equal identity at the reflected ({}, {})",
                 512 - px,
                 512 - py
@@ -2392,7 +2416,8 @@ fn clifford_rotor_q12_executes_on_lavapipe_browser_profile() {
                     for x in 0..MANDEL_W {
                         let idx = (y * MANDEL_W + x) as usize;
                         let got = grid[idx];
-                        let oracle = clifford_oracle_q12(x as i32, y as i32, rc, r12, r13, r23) as u32;
+                        let oracle =
+                            clifford_oracle_q12(x as i32, y as i32, rc, r12, r13, r23) as u32;
                         assert_eq!(
                             got, oracle,
                             "lavapipe clifford[{y}*512+{x}; {name}] = {got} must equal the oracle \
@@ -2495,8 +2520,8 @@ const MVT5_F32_NESTED_HELPER_SOURCE: &str =
 #[test]
 fn authored_nested_mvt5_helper_emits_bounded_browser_wgsl() {
     let mut db = DriverDataBase::default();
-    let url = Url::parse("file:///mvt5_f32_nested_helper_render.fe")
-        .expect("test URL should parse");
+    let url =
+        Url::parse("file:///mvt5_f32_nested_helper_render.fe").expect("test URL should parse");
     db.workspace().touch(
         &mut db,
         url.clone(),
@@ -2507,7 +2532,10 @@ fn authored_nested_mvt5_helper_emits_bounded_browser_wgsl() {
         .expect("authored nested MvT5 helper should build a runtime package");
     let artifact = fe_codegen::compile_runtime_package_spirv_render(&db, &package)
         .expect("authored nested MvT5 helper should compile as Render SPIR-V");
-    let wgsl = artifact.wgsl.as_deref().expect("Render compilation emits WGSL");
+    let wgsl = artifact
+        .wgsl
+        .as_deref()
+        .expect("Render compilation emits WGSL");
     assert_browser_profile_wgsl(wgsl);
     assert!(
         wgsl.len() <= 800 && wgsl.lines().count() <= 20,
@@ -2557,12 +2585,17 @@ fn conditional_f32_select_materializes_typed_spirv_result_slot() {
         .find(|binding| binding.role == sonatina_codegen::isa::spirv::Role::Input)
         .expect("low/high require a broadcast Input binding");
     assert_eq!((input.span, input.stride), (8, 8));
-    assert!(input
-        .members
-        .iter()
-        .all(|member| member.scalar == sonatina_codegen::isa::spirv::SpirvScalarKind::F32));
+    assert!(
+        input
+            .members
+            .iter()
+            .all(|member| member.scalar == sonatina_codegen::isa::spirv::SpirvScalarKind::F32)
+    );
 
-    let wgsl = artifact.wgsl.as_ref().expect("Render compilation emits WGSL");
+    let wgsl = artifact
+        .wgsl
+        .as_ref()
+        .expect("Render compilation emits WGSL");
     assert_browser_profile_wgsl(wgsl);
     let mut input_bytes = Vec::with_capacity(8);
     input_bytes.extend_from_slice(&LOW.to_bits().to_le_bytes());
@@ -2607,14 +2640,22 @@ fn conditional_f32_selection_feeds_loop_carry_and_both_render_exits() {
         .expect("low/high require a broadcast Input binding");
     assert_eq!((input.span, input.stride), (8, 8));
     assert_eq!(input.members.len(), 2);
-    assert!(input
-        .members
-        .iter()
-        .all(|member| member.scalar == sonatina_codegen::isa::spirv::SpirvScalarKind::F32));
+    assert!(
+        input
+            .members
+            .iter()
+            .all(|member| member.scalar == sonatina_codegen::isa::spirv::SpirvScalarKind::F32)
+    );
 
-    let wgsl = artifact.wgsl.as_ref().expect("Render compilation emits WGSL");
+    let wgsl = artifact
+        .wgsl
+        .as_ref()
+        .expect("Render compilation emits WGSL");
     assert_browser_profile_wgsl(wgsl);
-    assert!(wgsl.contains("loop"), "the f32 accumulator must remain loop-carried");
+    assert!(
+        wgsl.contains("loop"),
+        "the f32 accumulator must remain loop-carried"
+    );
     let mut input_bytes = Vec::with_capacity(8);
     input_bytes.extend_from_slice(&LOW.to_bits().to_le_bytes());
     input_bytes.extend_from_slice(&HIGH.to_bits().to_le_bytes());
@@ -2678,8 +2719,11 @@ fn compile_mandel_frag_rgba_to_wasm() -> Vec<u8> {
 
     let mut db = DriverDataBase::default();
     let url = Url::parse("file:///mandel_frag_rgba_wasm.fe").expect("test URL should parse");
-    db.workspace()
-        .touch(&mut db, url.clone(), Some(MANDEL_FRAG_RGBA_SOURCE.to_string()));
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(MANDEL_FRAG_RGBA_SOURCE.to_string()),
+    );
     let file = db.workspace().get(&db, &url).expect("file should load");
     let top_mod = db.top_mod(file);
 
@@ -2687,7 +2731,9 @@ fn compile_mandel_frag_rgba_to_wasm() -> Vec<u8> {
         .create()
         .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
         .expect("mandel_frag_rgba should compile Fe -> wasm");
-    output.into_bytecode().expect("wasm output should be bytecode")
+    output
+        .into_bytecode()
+        .expect("wasm output should be bytecode")
 }
 
 /// Count the `OpEntryPoint` (opcode 15) instructions in a raw SPIR-V word stream
@@ -2724,13 +2770,11 @@ fn run_render_rgba8_on_lavapipe(wgsl: &str, w: u32, h: u32, input: &[u8]) -> Opt
     let allow_skip = std::env::var_os("MB2_ALLOW_GPU_SKIP").is_some();
 
     let instance = wgpu::Instance::default();
-    let adapter = match pollster::block_on(instance.request_adapter(
-        &wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            force_fallback_adapter: false,
-            ..Default::default()
-        },
-    )) {
+    let adapter = match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::LowPower,
+        force_fallback_adapter: false,
+        ..Default::default()
+    })) {
         Ok(a) => a,
         Err(e) => {
             if allow_skip {
@@ -2927,7 +2971,8 @@ fn run_render_rgba8_on_lavapipe(wgsl: &str, w: u32, h: u32, input: &[u8]) -> Opt
     let slice = staging.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |r| {
-        tx.send(r).expect("map_async callback channel should be open");
+        tx.send(r)
+            .expect("map_async callback channel should be open");
     });
     let _ = device.poll(wgpu::PollType::Wait {
         submission_index: None,
@@ -2975,8 +3020,11 @@ fn f32_render_probe_executes_on_lavapipe_against_independent_oracle() {
 
     let mut db = DriverDataBase::default();
     let url = Url::parse("file:///f32_render_probe.fe").expect("test URL should parse");
-    db.workspace()
-        .touch(&mut db, url.clone(), Some(F32_RENDER_PROBE_SOURCE.to_string()));
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(F32_RENDER_PROBE_SOURCE.to_string()),
+    );
     let file = db.workspace().get(&db, &url).expect("file should load");
     let package = mir::build_wasm_runtime_package(&db, db.top_mod(file))
         .expect("the f32 Render probe should compile from Fe source");
@@ -2996,8 +3044,14 @@ fn f32_render_probe_executes_on_lavapipe_against_independent_oracle() {
         .expect("three f32 broadcast arguments require an Input binding");
     assert_eq!((input.group, input.binding), (0, 1));
     assert_eq!(input.access, sonatina_codegen::isa::spirv::Access::Read);
-    assert_eq!(input.stride, 12, "three packed f32 broadcasts occupy 12 bytes");
-    assert_eq!(input.span, 12, "the broadcast struct occupies exactly 12 bytes");
+    assert_eq!(
+        input.stride, 12,
+        "three packed f32 broadcasts occupy 12 bytes"
+    );
+    assert_eq!(
+        input.span, 12,
+        "the broadcast struct occupies exactly 12 bytes"
+    );
     assert_eq!(input.members.len(), 3);
     for (member, arg_index) in input.members.iter().zip(2..=4) {
         assert_eq!(member.arg_index, arg_index);
@@ -3028,9 +3082,15 @@ fn f32_render_probe_executes_on_lavapipe_against_independent_oracle() {
         sonatina_codegen::isa::spirv::SpirvBuiltinSource::FragmentPositionY,
     );
 
-    let wgsl = artifact.wgsl.as_ref().expect("Render compilation emits WGSL");
+    let wgsl = artifact
+        .wgsl
+        .as_ref()
+        .expect("Render compilation emits WGSL");
     assert_browser_profile_wgsl(wgsl);
-    assert!(wgsl.contains("loop"), "loop-carried f32 must survive into WGSL");
+    assert!(
+        wgsl.contains("loop"),
+        "loop-carried f32 must survive into WGSL"
+    );
 
     let values = [GAIN, BIAS, CUTOFF];
     let mut input_bytes = vec![0u8; input.span as usize];
@@ -3055,14 +3115,8 @@ fn f32_render_probe_executes_on_lavapipe_against_independent_oracle() {
     for y in 0..H {
         for x in 0..W {
             let offset = ((y * W + x) * 4) as usize;
-            let expected = f32_render_probe_oracle(
-                x as i32,
-                y as i32,
-                GAIN,
-                BIAS,
-                CUTOFF,
-            )
-            .to_le_bytes();
+            let expected =
+                f32_render_probe_oracle(x as i32, y as i32, GAIN, BIAS, CUTOFF).to_le_bytes();
             assert_eq!(
                 &rgba[offset..offset + 4],
                 &expected,
@@ -3089,7 +3143,10 @@ fn recursive_mvt2_f32_helper_call_executes_on_lavapipe() {
         .expect("recursive aggregate helper should build a runtime package");
     let artifact = fe_codegen::compile_runtime_package_spirv_render(&db, &package)
         .expect("straight-line recursive aggregate helper should inline before Render lowering");
-    let input = artifact.layout.bindings.iter()
+    let input = artifact
+        .layout
+        .bindings
+        .iter()
         .find(|binding| binding.role == sonatina_codegen::isa::spirv::Role::Input)
         .expect("four f32 coefficients require an Input binding");
     let mut input_bytes = vec![0u8; input.span as usize];
@@ -3098,14 +3155,20 @@ fn recursive_mvt2_f32_helper_call_executes_on_lavapipe() {
         input_bytes[member.offset as usize..member.offset as usize + 4]
             .copy_from_slice(&value.to_bits().to_le_bytes());
     }
-    let wgsl = artifact.wgsl.as_deref().expect("Render compilation emits WGSL");
+    let wgsl = artifact
+        .wgsl
+        .as_deref()
+        .expect("Render compilation emits WGSL");
     assert_browser_profile_wgsl(wgsl);
     let rgba = run_render_rgba8_on_lavapipe(wgsl, W, H, &input_bytes)
         .expect("inlined MvT<2> helper requires GPU execution");
     for y in 0..H {
         for x in 0..W {
             let offset = ((y * W + x) * 4) as usize;
-            assert_eq!(&rgba[offset..offset + 4], &[44 + x as u8, 22 + y as u8, 55, 255]);
+            assert_eq!(
+                &rgba[offset..offset + 4],
+                &[44 + x as u8, 22 + y as u8, 55, 255]
+            );
         }
     }
 }
@@ -3121,7 +3184,11 @@ fn clifford_gp_cl11_f32_oracle(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
                 }
             }
             let metric_neg = ((left & right) >> 1) & 1;
-            let sign = if (swaps + metric_neg as u32) & 1 == 0 { 1.0 } else { -1.0 };
+            let sign = if (swaps + metric_neg as u32) & 1 == 0 {
+                1.0
+            } else {
+                -1.0
+            };
             out[left ^ right] += sign * a[left] * b[right];
         }
     }
@@ -3135,8 +3202,8 @@ fn recursive_cl11_gp_f32_render_executes_on_lavapipe() {
     const A: [f32; 4] = [1.0, 2.0, 3.0, 4.0];
     const B: [f32; 4] = [5.0, 6.0, 7.0, 8.0];
     let mut db = DriverDataBase::default();
-    let url = Url::parse("file:///clifford_gp_recursive_f32_mvt2.fe")
-        .expect("test URL should parse");
+    let url =
+        Url::parse("file:///clifford_gp_recursive_f32_mvt2.fe").expect("test URL should parse");
     db.workspace().touch(
         &mut db,
         url.clone(),
@@ -3147,13 +3214,22 @@ fn recursive_cl11_gp_f32_render_executes_on_lavapipe() {
         .expect("recursive Cl(1,1) GP should build a runtime package");
     let artifact = fe_codegen::compile_runtime_package_spirv_render(&db, &package)
         .expect("recursive Cl(1,1) GP helpers should inline before Render lowering");
-    let input = artifact.layout.bindings.iter()
+    let input = artifact
+        .layout
+        .bindings
+        .iter()
         .find(|binding| binding.role == sonatina_codegen::isa::spirv::Role::Input)
         .expect("eight GP coefficients require an Input binding");
     assert_eq!((input.span, input.stride, input.members.len()), (32, 32, 8));
     for (member, arg_index) in input.members.iter().zip(2..=9) {
-        assert_eq!((member.arg_index, member.offset, member.width), (arg_index, (arg_index - 2) * 4, 4));
-        assert_eq!(member.scalar, sonatina_codegen::isa::spirv::SpirvScalarKind::F32);
+        assert_eq!(
+            (member.arg_index, member.offset, member.width),
+            (arg_index, (arg_index - 2) * 4, 4)
+        );
+        assert_eq!(
+            member.scalar,
+            sonatina_codegen::isa::spirv::SpirvScalarKind::F32
+        );
     }
     let coeffs = [A, B].concat();
     let mut input_bytes = vec![0u8; input.span as usize];
@@ -3162,7 +3238,10 @@ fn recursive_cl11_gp_f32_render_executes_on_lavapipe() {
         input_bytes[member.offset as usize..member.offset as usize + 4]
             .copy_from_slice(&value.to_bits().to_le_bytes());
     }
-    let wgsl = artifact.wgsl.as_deref().expect("Render compilation emits WGSL");
+    let wgsl = artifact
+        .wgsl
+        .as_deref()
+        .expect("Render compilation emits WGSL");
     assert_browser_profile_wgsl(wgsl);
     let rgba = run_render_rgba8_on_lavapipe(wgsl, W, H, &input_bytes)
         .expect("recursive Cl(1,1) GP requires GPU execution");
@@ -3188,7 +3267,11 @@ fn clifford_gp_cl41_f32_oracle(a: [f32; 32], b: [f32; 32]) -> [f32; 32] {
                 }
             }
             let metric_neg = ((left & right) >> 4) & 1;
-            let sign = if (swaps + metric_neg as u32) & 1 == 0 { 1.0 } else { -1.0 };
+            let sign = if (swaps + metric_neg as u32) & 1 == 0 {
+                1.0
+            } else {
+                -1.0
+            };
             out[left ^ right] += sign * a[left] * b[right];
         }
     }
@@ -3210,8 +3293,7 @@ fn conformal_point_cl41_f32(x: f32, y: f32, z: f32) -> [f32; 32] {
 fn generated_recursive_cl41_gp_f32_render_executes_on_lavapipe() {
     const W: u32 = 8;
     const H: u32 = 4;
-    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/spirv");
+    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/spirv");
     let status = std::process::Command::new("python3")
         .arg(fixture_dir.join("gen_clifford_gp_f32_mvt5.py"))
         .arg("--check")
@@ -3225,8 +3307,8 @@ fn generated_recursive_cl41_gp_f32_render_executes_on_lavapipe() {
         b[i] = (2 * i + 3) as f32;
     }
     let mut db = DriverDataBase::default();
-    let url = Url::parse("file:///clifford_gp_recursive_f32_mvt5.fe")
-        .expect("test URL should parse");
+    let url =
+        Url::parse("file:///clifford_gp_recursive_f32_mvt5.fe").expect("test URL should parse");
     db.workspace().touch(
         &mut db,
         url.clone(),
@@ -3237,13 +3319,25 @@ fn generated_recursive_cl41_gp_f32_render_executes_on_lavapipe() {
         .expect("recursive Cl(4,1) GP should build a runtime package");
     let artifact = fe_codegen::compile_runtime_package_spirv_render(&db, &package)
         .expect("generated recursive Cl(4,1) GP should inline before Render lowering");
-    let input = artifact.layout.bindings.iter()
+    let input = artifact
+        .layout
+        .bindings
+        .iter()
         .find(|binding| binding.role == sonatina_codegen::isa::spirv::Role::Input)
         .expect("64 GP coefficients require an Input binding");
-    assert_eq!((input.span, input.stride, input.members.len()), (256, 256, 64));
+    assert_eq!(
+        (input.span, input.stride, input.members.len()),
+        (256, 256, 64)
+    );
     for (member, arg_index) in input.members.iter().zip(2..=65) {
-        assert_eq!((member.arg_index, member.offset, member.width), (arg_index, (arg_index - 2) * 4, 4));
-        assert_eq!(member.scalar, sonatina_codegen::isa::spirv::SpirvScalarKind::F32);
+        assert_eq!(
+            (member.arg_index, member.offset, member.width),
+            (arg_index, (arg_index - 2) * 4, 4)
+        );
+        assert_eq!(
+            member.scalar,
+            sonatina_codegen::isa::spirv::SpirvScalarKind::F32
+        );
     }
     let coeffs = [a, b].concat();
     let mut input_bytes = vec![0u8; input.span as usize];
@@ -3252,7 +3346,10 @@ fn generated_recursive_cl41_gp_f32_render_executes_on_lavapipe() {
         input_bytes[member.offset as usize..member.offset as usize + 4]
             .copy_from_slice(&value.to_bits().to_le_bytes());
     }
-    let wgsl = artifact.wgsl.as_deref().expect("Render compilation emits WGSL");
+    let wgsl = artifact
+        .wgsl
+        .as_deref()
+        .expect("Render compilation emits WGSL");
     assert_browser_profile_wgsl(wgsl);
     let rgba = run_render_rgba8_on_lavapipe(wgsl, W, H, &input_bytes)
         .expect("generated recursive Cl(4,1) GP requires GPU execution");
@@ -3275,8 +3372,7 @@ fn generated_recursive_cl41_cga_sandwich_executes_on_lavapipe() {
     const S8: f32 = -0.875;
     const S16: f32 = 0.125;
 
-    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/spirv");
+    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/spirv");
     let status = std::process::Command::new("python3")
         .arg(fixture_dir.join("gen_cga_sandwich_f32_mvt5.py"))
         .arg("--check")
@@ -3285,8 +3381,8 @@ fn generated_recursive_cl41_cga_sandwich_executes_on_lavapipe() {
     assert!(status.success(), "generated CGA sandwich fixture is stale");
 
     let mut db = DriverDataBase::default();
-    let url = Url::parse("file:///cga_sandwich_recursive_f32_mvt5.fe")
-        .expect("test URL should parse");
+    let url =
+        Url::parse("file:///cga_sandwich_recursive_f32_mvt5.fe").expect("test URL should parse");
     db.workspace().touch(
         &mut db,
         url.clone(),
@@ -3298,15 +3394,24 @@ fn generated_recursive_cl41_cga_sandwich_executes_on_lavapipe() {
     let artifact = fe_codegen::compile_runtime_package_spirv_render(&db, &package)
         .expect("recursive CGA sandwich should compile as Render SPIR-V");
 
-    let input = artifact.layout.bindings.iter()
+    let input = artifact
+        .layout
+        .bindings
+        .iter()
         .find(|binding| binding.role == sonatina_codegen::isa::spirv::Role::Input)
         .expect("six sandwich parameters require an Input binding");
     assert_eq!((input.group, input.binding), (0, 1));
     assert_eq!(input.access, sonatina_codegen::isa::spirv::Access::Read);
     assert_eq!((input.span, input.stride, input.members.len()), (24, 24, 6));
     for (member, arg_index) in input.members.iter().zip(2..=7) {
-        assert_eq!((member.arg_index, member.offset, member.width), (arg_index, (arg_index - 2) * 4, 4));
-        assert_eq!(member.scalar, sonatina_codegen::isa::spirv::SpirvScalarKind::F32);
+        assert_eq!(
+            (member.arg_index, member.offset, member.width),
+            (arg_index, (arg_index - 2) * 4, 4)
+        );
+        assert_eq!(
+            member.scalar,
+            sonatina_codegen::isa::spirv::SpirvScalarKind::F32
+        );
     }
     assert_eq!(artifact.layout.builtin_inputs.len(), 2);
     assert_eq!(artifact.layout.builtin_inputs[0].arg_index, 0);
@@ -3338,7 +3443,11 @@ fn generated_recursive_cl41_cga_sandwich_executes_on_lavapipe() {
     for (index, coefficient) in expected.iter().copied().enumerate() {
         let scaled = coefficient * 256.0;
         assert!(scaled.is_finite(), "coefficient {index} must be finite");
-        assert_eq!(scaled.fract(), 0.0, "coefficient {index} must be exactly observable");
+        assert_eq!(
+            scaled.fract(),
+            0.0,
+            "coefficient {index} must be exactly observable"
+        );
         assert_eq!(
             (scaled as i32) as f32,
             scaled,
@@ -3356,7 +3465,10 @@ fn generated_recursive_cl41_cga_sandwich_executes_on_lavapipe() {
         (1.0, 0.0, 0.0),
     );
 
-    let wgsl = artifact.wgsl.as_deref().expect("Render compilation emits WGSL");
+    let wgsl = artifact
+        .wgsl
+        .as_deref()
+        .expect("Render compilation emits WGSL");
     assert_browser_profile_wgsl(wgsl);
     let rgba = run_render_rgba8_on_lavapipe(wgsl, W, H, &input_bytes)
         .expect("recursive CGA sandwich requires GPU execution");
@@ -3378,8 +3490,7 @@ fn generated_recursive_cl41_cga_sandwich_executes_on_lavapipe() {
 fn generated_support_cl41_cga_sandwich_executes_on_lavapipe() {
     const W: u32 = 2;
     const H: u32 = 2;
-    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/spirv");
+    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/spirv");
     let status = std::process::Command::new("python3")
         .arg(fixture_dir.join("gen_cga_sandwich_support_cl41.py"))
         .arg("--check")
@@ -3400,15 +3511,24 @@ fn generated_support_cl41_cga_sandwich_executes_on_lavapipe() {
     let artifact = fe_codegen::compile_runtime_package_spirv_render(&db, &package)
         .expect("support-specialized CGA sandwich should compile as Render SPIR-V");
 
-    let input = artifact.layout.bindings.iter()
+    let input = artifact
+        .layout
+        .bindings
+        .iter()
         .find(|binding| binding.role == sonatina_codegen::isa::spirv::Role::Input)
         .expect("five f32 sandwich parameters require an Input binding");
     assert_eq!((input.group, input.binding), (0, 1));
     assert_eq!(input.access, sonatina_codegen::isa::spirv::Access::Read);
     assert_eq!((input.span, input.stride, input.members.len()), (20, 20, 5));
     for (member, arg_index) in input.members.iter().zip(2..=6) {
-        assert_eq!((member.arg_index, member.offset, member.width), (arg_index, (arg_index - 2) * 4, 4));
-        assert_eq!(member.scalar, sonatina_codegen::isa::spirv::SpirvScalarKind::F32);
+        assert_eq!(
+            (member.arg_index, member.offset, member.width),
+            (arg_index, (arg_index - 2) * 4, 4)
+        );
+        assert_eq!(
+            member.scalar,
+            sonatina_codegen::isa::spirv::SpirvScalarKind::F32
+        );
     }
     assert_eq!(artifact.layout.builtin_inputs.len(), 2);
     assert_eq!(artifact.layout.builtin_inputs[0].arg_index, 0);
@@ -3422,13 +3542,13 @@ fn generated_support_cl41_cga_sandwich_executes_on_lavapipe() {
         sonatina_codegen::isa::spirv::SpirvBuiltinSource::FragmentPositionY,
     );
     assert_eq!(count_spirv_entry_points(&artifact.words), 2);
-    let wgsl = artifact.wgsl.as_deref().expect("Render compilation emits WGSL");
+    let wgsl = artifact
+        .wgsl
+        .as_deref()
+        .expect("Render compilation emits WGSL");
     assert_browser_profile_wgsl(wgsl);
 
-    let cases = [
-        (2.5, 0.25, 0.0, 0.5, 0.25),
-        (0.5, 2.25, 0.0, 0.5, 0.25),
-    ];
+    let cases = [(2.5, 0.25, 0.0, 0.5, 0.25), (0.5, 2.25, 0.0, 0.5, 0.25)];
     for (x, y, z, cx, cy) in cases {
         let params = [x, y, z, cx, cy];
         let mut input_bytes = vec![0u8; input.span as usize];
@@ -3447,7 +3567,12 @@ fn generated_support_cl41_cga_sandwich_executes_on_lavapipe() {
         let first = clifford_gp_cl41_f32_oracle(sphere, conformal_point_cl41_f32(x, y, z));
         let expected = clifford_gp_cl41_f32_oracle(first, sphere);
         let weight = expected[16] - expected[8];
-        let outputs = [expected[1] / weight, expected[2] / weight, expected[4] / weight, weight];
+        let outputs = [
+            expected[1] / weight,
+            expected[2] / weight,
+            expected[4] / weight,
+            weight,
+        ];
 
         let rgba = run_render_rgba8_on_lavapipe(wgsl, W, H, &input_bytes)
             .expect("support-specialized recursive CGA sandwich requires GPU execution");
@@ -3470,8 +3595,11 @@ fn recursive_mvt2_f32_render_executes_on_lavapipe() {
 
     let mut db = DriverDataBase::default();
     let url = Url::parse("file:///mvt2_f32_render.fe").expect("test URL should parse");
-    db.workspace()
-        .touch(&mut db, url.clone(), Some(MVT2_F32_RENDER_SOURCE.to_string()));
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(MVT2_F32_RENDER_SOURCE.to_string()),
+    );
     let file = db.workspace().get(&db, &url).expect("file should load");
     let package = mir::build_wasm_runtime_package(&db, db.top_mod(file))
         .expect("call-free recursive f32 tree should build a runtime package");
@@ -3521,7 +3649,10 @@ fn recursive_mvt2_f32_render_executes_on_lavapipe() {
         input_bytes[member.offset as usize..member.offset as usize + 4]
             .copy_from_slice(&value.to_bits().to_le_bytes());
     }
-    let wgsl = artifact.wgsl.as_deref().expect("Render compilation emits WGSL");
+    let wgsl = artifact
+        .wgsl
+        .as_deref()
+        .expect("Render compilation emits WGSL");
     assert_browser_profile_wgsl(wgsl);
     let rgba = run_render_rgba8_on_lavapipe(wgsl, W, H, &input_bytes)
         .expect("MvT<2> f32 Render regression requires GPU execution");
@@ -3544,8 +3675,11 @@ fn generated_recursive_mvt5_f32_render_executes_on_lavapipe() {
 
     let mut db = DriverDataBase::default();
     let url = Url::parse("file:///mvt5_f32_render.fe").expect("test URL should parse");
-    db.workspace()
-        .touch(&mut db, url.clone(), Some(MVT5_F32_RENDER_SOURCE.to_string()));
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(MVT5_F32_RENDER_SOURCE.to_string()),
+    );
     let file = db.workspace().get(&db, &url).expect("file should load");
     let package = mir::build_wasm_runtime_package(&db, db.top_mod(file))
         .expect("call-free depth-5 f32 tree should build a runtime package");
@@ -3574,12 +3708,18 @@ fn generated_recursive_mvt5_f32_render_executes_on_lavapipe() {
         .expect("32 f32 leaves require an Input binding");
     assert_eq!((input.group, input.binding), (0, 1));
     assert_eq!(input.access, sonatina_codegen::isa::spirv::Access::Read);
-    assert_eq!((input.span, input.stride, input.members.len()), (128, 128, 32));
+    assert_eq!(
+        (input.span, input.stride, input.members.len()),
+        (128, 128, 32)
+    );
     for (member, arg_index) in input.members.iter().zip(2..=33) {
         assert_eq!(member.arg_index, arg_index);
         assert_eq!(member.offset, (arg_index - 2) * 4);
         assert_eq!(member.width, 4);
-        assert_eq!(member.scalar, sonatina_codegen::isa::spirv::SpirvScalarKind::F32);
+        assert_eq!(
+            member.scalar,
+            sonatina_codegen::isa::spirv::SpirvScalarKind::F32
+        );
     }
     assert_eq!(artifact.layout.builtin_inputs.len(), 2);
     assert_eq!(artifact.layout.builtin_inputs[0].arg_index, 0);
@@ -3607,7 +3747,10 @@ fn generated_recursive_mvt5_f32_render_executes_on_lavapipe() {
         input_bytes[member.offset as usize..member.offset as usize + 4]
             .copy_from_slice(&value.to_bits().to_le_bytes());
     }
-    let wgsl = artifact.wgsl.as_deref().expect("Render compilation emits WGSL");
+    let wgsl = artifact
+        .wgsl
+        .as_deref()
+        .expect("Render compilation emits WGSL");
     assert_browser_profile_wgsl(wgsl);
     let rgba = run_render_rgba8_on_lavapipe(wgsl, W, H, &input_bytes)
         .expect("MvT<5> f32 Render regression requires GPU execution");
@@ -3628,13 +3771,7 @@ fn generated_recursive_mvt5_f32_render_executes_on_lavapipe() {
 /// Independent scalar oracle for D1. Keep the operation grouping identical to
 /// the Fe source and avoid `mul_add`: this models the actual f32 program, not a
 /// higher-precision restatement of its geometry.
-fn cga_inversion_de_oracle(
-    px: i32,
-    py: i32,
-    cam_x: f32,
-    cam_y: f32,
-    zoom: f32,
-) -> (u32, u8) {
+fn cga_inversion_de_oracle(px: i32, py: i32, cam_x: f32, cam_y: f32, zoom: f32) -> (u32, u8) {
     let fx = px as f32;
     let fy = py as f32;
     let sx = (fx - 64.0) * zoom;
@@ -3672,8 +3809,7 @@ fn cga_inversion_de_oracle(
             let shade = 32 + i * 3;
             if a_is_closer {
                 return (
-                    (shade + (255 - shade) * 256 + 224 * 65_536 - 16_777_216_i32)
-                        as u32,
+                    (shade + (255 - shade) * 256 + 224 * 65_536 - 16_777_216_i32) as u32,
                     1,
                 );
             }
@@ -3752,7 +3888,10 @@ fn cga_inversion_de_render_executes_on_lavapipe_against_f32_oracle() {
         );
     }
 
-    let wgsl = artifact.wgsl.as_ref().expect("Render compilation emits WGSL");
+    let wgsl = artifact
+        .wgsl
+        .as_ref()
+        .expect("Render compilation emits WGSL");
     assert_browser_profile_wgsl(wgsl);
     assert!(wgsl.contains("loop"), "D1 must retain its raymarch loop");
     assert!(wgsl.contains("sqrt("), "D1 must use native f32 sqrt");
@@ -3785,13 +3924,8 @@ fn cga_inversion_de_render_executes_on_lavapipe_against_f32_oracle() {
         for x in 0..W {
             let offset = ((y * W + x) * 4) as usize;
             let actual = &rgba[offset..offset + 4];
-            let (expected, material) = cga_inversion_de_oracle(
-                x as i32,
-                y as i32,
-                CAM_X,
-                CAM_Y,
-                ZOOM,
-            );
+            let (expected, material) =
+                cga_inversion_de_oracle(x as i32, y as i32, CAM_X, CAM_Y, ZOOM);
             let expected = expected.to_le_bytes();
             assert_eq!(
                 actual, &expected,
@@ -3807,8 +3941,14 @@ fn cga_inversion_de_render_executes_on_lavapipe_against_f32_oracle() {
         }
     }
     assert!(sky_count > 0, "D1 image must contain background");
-    assert!(material_a_count > 0, "D1 image must contain inverted sphere A");
-    assert!(material_b_count > 0, "D1 image must contain inverted sphere B");
+    assert!(
+        material_a_count > 0,
+        "D1 image must contain inverted sphere A"
+    );
+    assert!(
+        material_b_count > 0,
+        "D1 image must contain inverted sphere B"
+    );
     assert!(
         distinct.len() >= 8,
         "step shading must expose a non-degenerate 3D surface ({} colors)",
@@ -3861,15 +4001,11 @@ fn cga_inversion_cyclide_runtime_center_oracle(
             let shade = 38 + 24 * (i >> 3);
             if qy > 0.0 {
                 return (
-                    (shade + 88 * 256 + (255 - shade) * 65_536 - 16_777_216_i32)
-                        as u32,
+                    (shade + 88 * 256 + (255 - shade) * 65_536 - 16_777_216_i32) as u32,
                     1,
                 );
             }
-            return (
-                (56 + shade * 256 + 224 * 65_536 - 16_777_216_i32) as u32,
-                2,
-            );
+            return ((56 + shade * 256 + 224 * 65_536 - 16_777_216_i32) as u32, 2);
         }
         i += 1;
     }
@@ -3903,7 +4039,10 @@ fn cga_inversion_cyclide_runtime_center_executes_full_frame_on_lavapipe() {
     let artifact = fe_codegen::compile_runtime_package_spirv_render(&db, &package)
         .expect("runtime-center cyclide should lower to naga-validated Render SPIR-V");
 
-    assert_eq!(artifact.layout.mode, sonatina_codegen::isa::spirv::LayoutMode::Render);
+    assert_eq!(
+        artifact.layout.mode,
+        sonatina_codegen::isa::spirv::LayoutMode::Render
+    );
     assert_eq!(count_spirv_entry_points(&artifact.words), 2);
     let input = artifact
         .layout
@@ -3919,23 +4058,40 @@ fn cga_inversion_cyclide_runtime_center_executes_full_frame_on_lavapipe() {
         assert_eq!(member.arg_index, arg_index);
         assert_eq!(member.offset, (arg_index - 2) * 4);
         assert_eq!(member.width, 4);
-        assert_eq!(member.scalar, sonatina_codegen::isa::spirv::SpirvScalarKind::F32);
+        assert_eq!(
+            member.scalar,
+            sonatina_codegen::isa::spirv::SpirvScalarKind::F32
+        );
     }
     assert_eq!(artifact.layout.builtin_inputs.len(), 2);
     for (builtin, arg_index) in artifact.layout.builtin_inputs.iter().zip(0..=1) {
         assert_eq!(builtin.arg_index, arg_index);
-        assert_eq!(builtin.scalar, sonatina_codegen::isa::spirv::SpirvScalarKind::I32);
+        assert_eq!(
+            builtin.scalar,
+            sonatina_codegen::isa::spirv::SpirvScalarKind::I32
+        );
     }
 
-    let wgsl = artifact.wgsl.as_ref().expect("Render compilation emits WGSL");
+    let wgsl = artifact
+        .wgsl
+        .as_ref()
+        .expect("Render compilation emits WGSL");
     assert_browser_profile_wgsl(wgsl);
-    assert!(wgsl.contains("loop"), "cyclide study must retain its raymarch loop");
-    assert!(wgsl.contains("sqrt("), "cyclide study must use native f32 sqrt");
+    assert!(
+        wgsl.contains("loop"),
+        "cyclide study must retain its raymarch loop"
+    );
+    assert!(
+        wgsl.contains("sqrt("),
+        "cyclide study must use native f32 sqrt"
+    );
     let mut input_bytes = vec![0_u8; input.span as usize];
     for member in &input.members {
         let start = member.offset as usize;
         input_bytes[start..start + 4].copy_from_slice(
-            &VALUES[(member.arg_index - 2) as usize].to_bits().to_le_bytes(),
+            &VALUES[(member.arg_index - 2) as usize]
+                .to_bits()
+                .to_le_bytes(),
         );
     }
     let rgba = run_render_rgba8_on_lavapipe(wgsl, W, H, &input_bytes)
@@ -3948,13 +4104,7 @@ fn cga_inversion_cyclide_runtime_center_executes_full_frame_on_lavapipe() {
     for y in 0..H {
         for x in 0..W {
             let (pixel, material) = cga_inversion_cyclide_runtime_center_oracle(
-                x as i32,
-                y as i32,
-                VALUES[0],
-                VALUES[1],
-                VALUES[2],
-                VALUES[3],
-                VALUES[4],
+                x as i32, y as i32, VALUES[0], VALUES[1], VALUES[2], VALUES[3], VALUES[4],
             );
             let bytes = pixel.to_le_bytes();
             expected.extend_from_slice(&bytes);
@@ -3976,9 +4126,18 @@ fn cga_inversion_cyclide_runtime_center_executes_full_frame_on_lavapipe() {
             &expected[offset..offset + 4],
         );
     }
-    assert!(material_counts[0] > 0, "cyclide image must contain background");
-    assert!(material_counts[1] > 0, "cyclide image must contain upper material");
-    assert!(material_counts[2] > 0, "cyclide image must contain lower material");
+    assert!(
+        material_counts[0] > 0,
+        "cyclide image must contain background"
+    );
+    assert!(
+        material_counts[1] > 0,
+        "cyclide image must contain upper material"
+    );
+    assert!(
+        material_counts[2] > 0,
+        "cyclide image must contain lower material"
+    );
     assert!(
         distinct.len() >= 8,
         "step shading must expose a non-degenerate cyclide surface ({} colors)",
@@ -3991,14 +4150,16 @@ fn cga_inversion_cyclide_recursive_support_executes_full_frame_on_lavapipe() {
     const W: u32 = 128;
     const H: u32 = 128;
     const VALUES: [f32; 5] = [0.0, 0.0, 0.0125, 0.5, 0.0];
-    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/spirv");
+    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/spirv");
     let status = std::process::Command::new("python3")
         .arg(fixture_dir.join("gen_cga_inversion_cyclide_recursive_support.py"))
         .arg("--check")
         .status()
         .expect("recursive-support cyclide generator should run");
-    assert!(status.success(), "recursive-support cyclide fixture is stale");
+    assert!(
+        status.success(),
+        "recursive-support cyclide fixture is stale"
+    );
 
     let mut db = DriverDataBase::default();
     let url = Url::parse("file:///cga_inversion_cyclide_recursive_support.fe")
@@ -4012,9 +4173,10 @@ fn cga_inversion_cyclide_recursive_support_executes_full_frame_on_lavapipe() {
     let package = mir::build_wasm_runtime_package(&db, db.top_mod(file))
         .expect("recursive-support cyclide should build a runtime package");
     assert!(
-        package.functions(&db).iter().all(|function| {
-            function.linkage(&db) != mir::RuntimeLinkage::External
-        }),
+        package
+            .functions(&db)
+            .iter()
+            .all(|function| { function.linkage(&db) != mir::RuntimeLinkage::External }),
         "recursive-support cyclide must lower all helpers intrinsically or inline them",
     );
     let started = std::time::Instant::now();
@@ -4026,28 +4188,52 @@ fn cga_inversion_cyclide_recursive_support_executes_full_frame_on_lavapipe() {
         started.elapsed()
     );
 
-    assert_eq!(artifact.layout.mode, sonatina_codegen::isa::spirv::LayoutMode::Render);
+    assert_eq!(
+        artifact.layout.mode,
+        sonatina_codegen::isa::spirv::LayoutMode::Render
+    );
     assert_eq!(count_spirv_entry_points(&artifact.words), 2);
-    let input = artifact.layout.bindings.iter()
+    let input = artifact
+        .layout
+        .bindings
+        .iter()
         .find(|binding| binding.role == sonatina_codegen::isa::spirv::Role::Input)
         .expect("five runtime controls require a broadcast Input binding");
     assert_eq!((input.group, input.binding), (0, 1));
     assert_eq!(input.access, sonatina_codegen::isa::spirv::Access::Read);
     assert_eq!((input.span, input.stride, input.members.len()), (20, 20, 5));
     for (member, arg_index) in input.members.iter().zip(2..=6) {
-        assert_eq!((member.arg_index, member.offset, member.width), (arg_index, (arg_index - 2) * 4, 4));
-        assert_eq!(member.scalar, sonatina_codegen::isa::spirv::SpirvScalarKind::F32);
+        assert_eq!(
+            (member.arg_index, member.offset, member.width),
+            (arg_index, (arg_index - 2) * 4, 4)
+        );
+        assert_eq!(
+            member.scalar,
+            sonatina_codegen::isa::spirv::SpirvScalarKind::F32
+        );
     }
     assert_eq!(artifact.layout.builtin_inputs.len(), 2);
     for (builtin, arg_index) in artifact.layout.builtin_inputs.iter().zip(0..=1) {
         assert_eq!(builtin.arg_index, arg_index);
-        assert_eq!(builtin.scalar, sonatina_codegen::isa::spirv::SpirvScalarKind::I32);
+        assert_eq!(
+            builtin.scalar,
+            sonatina_codegen::isa::spirv::SpirvScalarKind::I32
+        );
     }
 
-    let wgsl = artifact.wgsl.as_ref().expect("Render compilation emits WGSL");
+    let wgsl = artifact
+        .wgsl
+        .as_ref()
+        .expect("Render compilation emits WGSL");
     assert_browser_profile_wgsl(wgsl);
-    assert!(wgsl.contains("loop"), "recursive-support DE must retain its raymarch loop");
-    assert!(wgsl.contains("sqrt("), "recursive-support DE must retain native f32 sqrt");
+    assert!(
+        wgsl.contains("loop"),
+        "recursive-support DE must retain its raymarch loop"
+    );
+    assert!(
+        wgsl.contains("sqrt("),
+        "recursive-support DE must retain native f32 sqrt"
+    );
     // Helper names disappear after the required backend-overlay inline. The
     // unusually multiplication-rich loop body is durable emitted evidence that
     // the recurrence-derived typed sandwich, rather than scalar D1, survived.
@@ -4060,7 +4246,9 @@ fn cga_inversion_cyclide_recursive_support_executes_full_frame_on_lavapipe() {
     for member in &input.members {
         let start = member.offset as usize;
         input_bytes[start..start + 4].copy_from_slice(
-            &VALUES[(member.arg_index - 2) as usize].to_bits().to_le_bytes(),
+            &VALUES[(member.arg_index - 2) as usize]
+                .to_bits()
+                .to_le_bytes(),
         );
     }
     let rgba = run_render_rgba8_on_lavapipe(wgsl, W, H, &input_bytes)
@@ -4071,7 +4259,9 @@ fn cga_inversion_cyclide_recursive_support_executes_full_frame_on_lavapipe() {
             let offset = ((y * W + x) * 4) as usize;
             let expected = cga_inversion_cyclide_runtime_center_oracle(
                 x as i32, y as i32, VALUES[0], VALUES[1], VALUES[2], VALUES[3], VALUES[4],
-            ).0.to_le_bytes();
+            )
+            .0
+            .to_le_bytes();
             assert_eq!(
                 &rgba[offset..offset + 4],
                 &expected,
@@ -4090,8 +4280,11 @@ fn cga_inversion_cyclide_recursive_support_executes_full_frame_on_lavapipe() {
 fn mandel_frag_rgba_compiles_to_render_spirv() {
     let mut db = DriverDataBase::default();
     let url = Url::parse("file:///mandel_frag_rgba_render.fe").expect("test URL should parse");
-    db.workspace()
-        .touch(&mut db, url.clone(), Some(MANDEL_FRAG_RGBA_SOURCE.to_string()));
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(MANDEL_FRAG_RGBA_SOURCE.to_string()),
+    );
     let file = db.workspace().get(&db, &url).expect("file should load");
     let top_mod = db.top_mod(file);
     let package = mir::build_wasm_runtime_package(&db, top_mod)
@@ -4211,8 +4404,11 @@ fn mandel_frag_rgba_renders_on_lavapipe_browser_profile() {
     // --- Compile the fragment through the Render driver seam. ---
     let mut db = DriverDataBase::default();
     let url = Url::parse("file:///mandel_frag_rgba_lavapipe.fe").expect("test URL should parse");
-    db.workspace()
-        .touch(&mut db, url.clone(), Some(MANDEL_FRAG_RGBA_SOURCE.to_string()));
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(MANDEL_FRAG_RGBA_SOURCE.to_string()),
+    );
     let file = db.workspace().get(&db, &url).expect("file should load");
     let top_mod = db.top_mod(file);
     let package = mir::build_wasm_runtime_package(&db, top_mod)
@@ -4390,8 +4586,11 @@ fn compile_mandel_view_frag_to_wasm() -> Vec<u8> {
 
     let mut db = DriverDataBase::default();
     let url = Url::parse("file:///mandel_view_frag_wasm.fe").expect("test URL should parse");
-    db.workspace()
-        .touch(&mut db, url.clone(), Some(MANDEL_VIEW_FRAG_SOURCE.to_string()));
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(MANDEL_VIEW_FRAG_SOURCE.to_string()),
+    );
     let file = db.workspace().get(&db, &url).expect("file should load");
     let top_mod = db.top_mod(file);
 
@@ -4399,7 +4598,9 @@ fn compile_mandel_view_frag_to_wasm() -> Vec<u8> {
         .create()
         .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
         .expect("mandel_view_frag should compile Fe -> wasm");
-    output.into_bytecode().expect("wasm output should be bytecode")
+    output
+        .into_bytecode()
+        .expect("wasm output should be bytecode")
 }
 
 /// Run the Fe view fragment (the 5-arg typed func) over the FULL 512x512 grid for
@@ -4448,8 +4649,11 @@ const VIEW_PINS: [(&str, i32, i32, i32, usize); 4] = [
 fn mandel_view_frag_compiles_to_render_spirv() {
     let mut db = DriverDataBase::default();
     let url = Url::parse("file:///mandel_view_frag_render.fe").expect("test URL should parse");
-    db.workspace()
-        .touch(&mut db, url.clone(), Some(MANDEL_VIEW_FRAG_SOURCE.to_string()));
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(MANDEL_VIEW_FRAG_SOURCE.to_string()),
+    );
     let file = db.workspace().get(&db, &url).expect("file should load");
     let top_mod = db.top_mod(file);
     let package = mir::build_wasm_runtime_package(&db, top_mod)
@@ -4556,8 +4760,11 @@ fn mandel_view_frag_renders_on_lavapipe_browser_profile() {
     // --- Compile the view fragment through the Render driver seam. ---
     let mut db = DriverDataBase::default();
     let url = Url::parse("file:///mandel_view_frag_lavapipe.fe").expect("test URL should parse");
-    db.workspace()
-        .touch(&mut db, url.clone(), Some(MANDEL_VIEW_FRAG_SOURCE.to_string()));
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(MANDEL_VIEW_FRAG_SOURCE.to_string()),
+    );
     let file = db.workspace().get(&db, &url).expect("file should load");
     let top_mod = db.top_mod(file);
     let package = mir::build_wasm_runtime_package(&db, top_mod)
@@ -4628,7 +4835,9 @@ fn mandel_view_frag_renders_on_lavapipe_browser_profile() {
                     for x in 0..FRAG_W {
                         let idx = (y * FRAG_W + x) as usize;
                         let px = &rgba[idx * 4..idx * 4 + 4];
-                        let oracle = mandel_view_frag_oracle(x as i32, y as i32, center_re, center_im, scale_q);
+                        let oracle = mandel_view_frag_oracle(
+                            x as i32, y as i32, center_re, center_im, scale_q,
+                        );
                         let oracle_bytes = oracle.to_le_bytes();
                         let wasm_bytes_px = wasm_colors[idx].to_le_bytes();
                         assert_eq!(
@@ -4666,7 +4875,11 @@ fn mandel_view_frag_renders_on_lavapipe_browser_profile() {
                      on lavapipe (browser profile, 512x512) with the view as 3 broadcast params; ALL \
                      262,144 pixels TRI-EQUAL (texture == oracle == wasm); {} distinct colors.{}",
                     distinct.len(),
-                    if name == "default" { " DEFAULT view is BYTE-IDENTICAL to R1." } else { "" }
+                    if name == "default" {
+                        " DEFAULT view is BYTE-IDENTICAL to R1."
+                    } else {
+                        ""
+                    }
                 );
             }
             None => {
@@ -4721,8 +4934,14 @@ const VIEW_INIT: (i32, i32, i32) = (-2048, 0, 384);
 /// 1/8-per-notch, the anchor correction uses the OLD scale minus the NEW clamped
 /// scale, and the clamps are applied last. All `>>` are arithmetic i32.
 fn update_view_oracle(
-    center_re: i32, center_im: i32, scale_q: i32,
-    dx: i32, dy: i32, dzoom: i32, mx: i32, my: i32,
+    center_re: i32,
+    center_im: i32,
+    scale_q: i32,
+    dx: i32,
+    dy: i32,
+    dzoom: i32,
+    mx: i32,
+    my: i32,
 ) -> (i32, i32, i32) {
     let mut re: i32 = center_re - ((dx * scale_q) >> 4);
     let mut im: i32 = center_im - ((dy * scale_q) >> 4);
@@ -4762,8 +4981,11 @@ fn compile_mandel_view_ctl_to_wasm() -> Vec<u8> {
 
     let mut db = DriverDataBase::default();
     let url = Url::parse("file:///mandel_view_ctl_wasm.fe").expect("test URL should parse");
-    db.workspace()
-        .touch(&mut db, url.clone(), Some(MANDEL_VIEW_CTL_SOURCE.to_string()));
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(MANDEL_VIEW_CTL_SOURCE.to_string()),
+    );
     let file = db.workspace().get(&db, &url).expect("file should load");
     let top_mod = db.top_mod(file);
 
@@ -4771,7 +4993,9 @@ fn compile_mandel_view_ctl_to_wasm() -> Vec<u8> {
         .create()
         .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
         .expect("mandel_view_ctl should compile Fe -> wasm");
-    let bytes = output.into_bytecode().expect("wasm output should be bytecode");
+    let bytes = output
+        .into_bytecode()
+        .expect("wasm output should be bytecode");
     wasmparser::validate(&bytes).expect("Fe-emitted control wasm should be valid");
     bytes
 }
@@ -4938,20 +5162,38 @@ fn update_view_directed_clamps_and_anchor() {
     // pinned exactly at +-10240. dx>0 pans re negative (image follows pointer), so
     // to push re to +10240 use dx<0. ---
     let (re_hi, _, _) = call(10000, 0, 384, -64, 0, 0, 256, 256);
-    assert_eq!(re_hi, 10240, "a large +re pan must clamp center_re to +10240");
+    assert_eq!(
+        re_hi, 10240,
+        "a large +re pan must clamp center_re to +10240"
+    );
     let (re_lo, _, _) = call(-10000, 0, 384, 64, 0, 0, 256, 256);
-    assert_eq!(re_lo, -10240, "a large -re pan must clamp center_re to -10240");
+    assert_eq!(
+        re_lo, -10240,
+        "a large -re pan must clamp center_re to -10240"
+    );
     let (_, im_hi, _) = call(0, 10000, 384, 0, -64, 0, 256, 256);
-    assert_eq!(im_hi, 10240, "a large +im pan must clamp center_im to +10240");
+    assert_eq!(
+        im_hi, 10240,
+        "a large +im pan must clamp center_im to +10240"
+    );
     let (_, im_lo, _) = call(0, -10000, 384, 0, 64, 0, 256, 256);
-    assert_eq!(im_lo, -10240, "a large -im pan must clamp center_im to -10240");
+    assert_eq!(
+        im_lo, -10240,
+        "a large -im pan must clamp center_im to -10240"
+    );
 
     // --- (2) Both scale clamps. Zoom out from 384 stays at 384 (ceiling); zoom in
     // from 16 stays at 16 (floor). ---
     let (_, _, sq_ceiling) = call(0, 0, 384, 0, 0, 1, 256, 256);
-    assert_eq!(sq_ceiling, 384, "zoom-out from the ceiling scale 384 must stay clamped at 384");
+    assert_eq!(
+        sq_ceiling, 384,
+        "zoom-out from the ceiling scale 384 must stay clamped at 384"
+    );
     let (_, _, sq_floor) = call(0, 0, 16, 0, 0, -1, 256, 256);
-    assert_eq!(sq_floor, 16, "zoom-in from the floor scale 16 must stay clamped at 16");
+    assert_eq!(
+        sq_floor, 16,
+        "zoom-in from the floor scale 16 must stay clamped at 16"
+    );
 
     // --- (3) The 26-notch descent (spec section 2): 26 zoom-in notches at the
     // center cursor (no anchor drift) carry scale_q from 384 down to the floor 16.
@@ -4960,12 +5202,21 @@ fn update_view_directed_clamps_and_anchor() {
     let mut notches = 0;
     while sq > 16 {
         let (_, _, nsq) = call(0, 0, sq, 0, 0, -1, 256, 256);
-        assert!(nsq < sq || nsq == 16, "each zoom-in notch must decrease scale_q (or clamp to 16)");
+        assert!(
+            nsq < sq || nsq == 16,
+            "each zoom-in notch must decrease scale_q (or clamp to 16)"
+        );
         sq = nsq;
         notches += 1;
-        assert!(notches <= 40, "the descent must terminate at the floor well within 40 notches");
+        assert!(
+            notches <= 40,
+            "the descent must terminate at the floor well within 40 notches"
+        );
     }
-    assert_eq!(sq, 16, "the notch descent must land exactly on the floor scale 16");
+    assert_eq!(
+        sq, 16,
+        "the notch descent must land exactly on the floor scale 16"
+    );
     assert_eq!(
         notches, 26,
         "the 7/8-per-notch descent from 384 must reach the floor 16 in exactly 26 notches (spec 2)"
@@ -5058,8 +5309,11 @@ fn compile_clifford_frag_rgba_to_wasm() -> Vec<u8> {
 
     let mut db = DriverDataBase::default();
     let url = Url::parse("file:///clifford_frag_rgba_wasm.fe").expect("test URL should parse");
-    db.workspace()
-        .touch(&mut db, url.clone(), Some(CLIFFORD_FRAG_RGBA_SOURCE.to_string()));
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(CLIFFORD_FRAG_RGBA_SOURCE.to_string()),
+    );
     let file = db.workspace().get(&db, &url).expect("file should load");
     let top_mod = db.top_mod(file);
 
@@ -5067,7 +5321,9 @@ fn compile_clifford_frag_rgba_to_wasm() -> Vec<u8> {
         .create()
         .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
         .expect("clifford_frag_rgba should compile Fe -> wasm");
-    output.into_bytecode().expect("wasm output should be bytecode")
+    output
+        .into_bytecode()
+        .expect("wasm output should be bytecode")
 }
 
 /// Run the C3 fragment (the 6-arg typed func) over the FULL 512x512 grid for one
@@ -5162,8 +5418,11 @@ fn clifford_frag_rgba_wasm_leg() {
 fn clifford_frag_rgba_compiles_to_render_spirv() {
     let mut db = DriverDataBase::default();
     let url = Url::parse("file:///clifford_frag_rgba_render.fe").expect("test URL should parse");
-    db.workspace()
-        .touch(&mut db, url.clone(), Some(CLIFFORD_FRAG_RGBA_SOURCE.to_string()));
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(CLIFFORD_FRAG_RGBA_SOURCE.to_string()),
+    );
     let file = db.workspace().get(&db, &url).expect("file should load");
     let top_mod = db.top_mod(file);
     let package = mir::build_wasm_runtime_package(&db, top_mod)
@@ -5257,8 +5516,11 @@ fn clifford_frag_rgba_compiles_to_render_spirv() {
 fn clifford_frag_rgba_renders_on_lavapipe_browser_profile() {
     let mut db = DriverDataBase::default();
     let url = Url::parse("file:///clifford_frag_rgba_lavapipe.fe").expect("test URL should parse");
-    db.workspace()
-        .touch(&mut db, url.clone(), Some(CLIFFORD_FRAG_RGBA_SOURCE.to_string()));
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(CLIFFORD_FRAG_RGBA_SOURCE.to_string()),
+    );
     let file = db.workspace().get(&db, &url).expect("file should load");
     let top_mod = db.top_mod(file);
     let package = mir::build_wasm_runtime_package(&db, top_mod)
@@ -5302,7 +5564,8 @@ fn clifford_frag_rgba_renders_on_lavapipe_browser_profile() {
                     for x in 0..FRAG_W {
                         let idx = (y * FRAG_W + x) as usize;
                         let px = &rgba[idx * 4..idx * 4 + 4];
-                        let oracle = clifford_frag_rgba_oracle(x as i32, y as i32, rc, r12, r13, r23);
+                        let oracle =
+                            clifford_frag_rgba_oracle(x as i32, y as i32, rc, r12, r13, r23);
                         let oracle_bytes = oracle.to_le_bytes();
                         let wasm_bytes_px = wasm_colors[idx].to_le_bytes();
                         assert_eq!(
@@ -5361,7 +5624,12 @@ const ROTOR_INIT: (i32, i32, i32, i32) = (3712, 577, 1154, 1154);
 /// 12` (a no-drag axis uses cosine 4096 = exact identity), and the [-8192, 8192]
 /// component clamp. All `>>` are arithmetic i32 (Sar), matching Fe.
 fn update_rotor_oracle(
-    rc: i32, r12: i32, r13: i32, r23: i32, dx: i32, dy: i32,
+    rc: i32,
+    r12: i32,
+    r13: i32,
+    r23: i32,
+    dx: i32,
+    dy: i32,
 ) -> (i32, i32, i32, i32) {
     let is_neg = |d: i32| if d < 0 { 1 } else { 0 };
     let is_pos = |d: i32| if d > 0 { 1 } else { 0 };
@@ -5412,7 +5680,9 @@ fn compile_clifford_ctl_to_wasm() -> Vec<u8> {
         .create()
         .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
         .expect("clifford_ctl should compile Fe -> wasm");
-    let bytes = output.into_bytecode().expect("wasm output should be bytecode");
+    let bytes = output
+        .into_bytecode()
+        .expect("wasm output should be bytecode");
     wasmparser::validate(&bytes).expect("Fe-emitted control wasm should be valid");
     bytes
 }
@@ -5564,9 +5834,15 @@ fn update_rotor_directed_rotation_and_clamp() {
     // within ~1% of the Q12 unit. dx < 0 spins one way, dx > 0 the other. ---
     let unit_sq: i64 = 4096 * 4096;
     let pos = call(4096, 0, 0, 0, 8, 0);
-    assert!(pos.1 < 0, "dx>0 must rotate the identity rotor to a NEGATIVE r12; got {pos:?}");
+    assert!(
+        pos.1 < 0,
+        "dx>0 must rotate the identity rotor to a NEGATIVE r12; got {pos:?}"
+    );
     let neg = call(4096, 0, 0, 0, -8, 0);
-    assert!(neg.1 > 0, "dx<0 must rotate the identity rotor to a POSITIVE r12; got {neg:?}");
+    assert!(
+        neg.1 > 0,
+        "dx<0 must rotate the identity rotor to a POSITIVE r12; got {neg:?}"
+    );
     for r in [pos, neg] {
         let n = rotor_norm_sq(r);
         assert!(
@@ -5574,13 +5850,24 @@ fn update_rotor_directed_rotation_and_clamp() {
             "a single yaw step must keep the rotor within ~2% of unit norm^2 ({unit_sq}); got {n}"
         );
         // The e13/e23 plane is untouched by a pure-yaw (dy=0) step.
-        assert_eq!((r.2, r.3), (0, 0), "a pure-yaw step must leave r13, r23 at zero; got {r:?}");
+        assert_eq!(
+            (r.2, r.3),
+            (0, 0),
+            "a pure-yaw step must leave r13, r23 at zero; got {r:?}"
+        );
     }
 
     // --- (2) A pitch drag rotates in the e13 plane (r13 becomes nonzero). ---
     let pitch = call(4096, 0, 0, 0, 0, 8);
-    assert!(pitch.2 < 0, "dy>0 must rotate the identity rotor to a NEGATIVE r13; got {pitch:?}");
-    assert_eq!((pitch.1, pitch.3), (0, 0), "a pure-pitch step must leave r12, r23 at zero; got {pitch:?}");
+    assert!(
+        pitch.2 < 0,
+        "dy>0 must rotate the identity rotor to a NEGATIVE r13; got {pitch:?}"
+    );
+    assert_eq!(
+        (pitch.1, pitch.3),
+        (0, 0),
+        "a pure-pitch step must leave r12, r23 at zero; got {pitch:?}"
+    );
 
     // --- (3) The component clamp holds: a long same-direction drag grows the rotor
     // toward the clamp, and every component is pinned in [-8192, 8192] (the
@@ -5722,7 +6009,9 @@ fn compile_source_to_wasm(source: &str, tag: &str) -> Vec<u8> {
         .create()
         .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
         .expect("field-mul kernel should compile Fe -> wasm");
-    output.into_bytecode().expect("wasm output should be bytecode")
+    output
+        .into_bytecode()
+        .expect("wasm output should be bytecode")
 }
 
 /// Execute the wasm field-mul over all `n` limb indices (arg0 = k = limb index)
@@ -5741,8 +6030,7 @@ fn wasm_field_mul_limbs(
     let engine = Engine::default();
     let module = Module::new(&engine, bytes).expect("wasmtime should load the module");
     let mut store = Store::new(&engine, ());
-    let instance =
-        Instance::new(&mut store, &module, &[]).expect("wasmtime should instantiate");
+    let instance = Instance::new(&mut store, &module, &[]).expect("wasmtime should instantiate");
     let f = instance
         .get_func(&mut store, fn_name)
         .unwrap_or_else(|| panic!("`{fn_name}` export should exist"));
@@ -5794,17 +6082,17 @@ fn run_grid_batches_on_lavapipe(
     let input_bytes = std::cmp::max(4u64, 4 * param_len as u64);
 
     let instance = wgpu::Instance::default();
-    let adapter = match pollster::block_on(instance.request_adapter(
-        &wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            force_fallback_adapter: false,
-            ..Default::default()
-        },
-    )) {
+    let adapter = match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::LowPower,
+        force_fallback_adapter: false,
+        ..Default::default()
+    })) {
         Ok(a) => a,
         Err(e) => {
             if allow_skip {
-                eprintln!("  {label} SPIR-V leg SKIPPED (MB2_ALLOW_GPU_SKIP): no Vulkan adapter: {e:?}");
+                eprintln!(
+                    "  {label} SPIR-V leg SKIPPED (MB2_ALLOW_GPU_SKIP): no Vulkan adapter: {e:?}"
+                );
                 return None;
             }
             panic!(
@@ -5824,7 +6112,9 @@ fn run_grid_batches_on_lavapipe(
         Ok(dq) => dq,
         Err(e) => {
             if allow_skip {
-                eprintln!("  {label} SPIR-V leg SKIPPED (MB2_ALLOW_GPU_SKIP): device request failed: {e:?}");
+                eprintln!(
+                    "  {label} SPIR-V leg SKIPPED (MB2_ALLOW_GPU_SKIP): device request failed: {e:?}"
+                );
                 return None;
             }
             panic!(
@@ -5932,7 +6222,8 @@ fn run_grid_batches_on_lavapipe(
         let slice = staging_buf.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| {
-            tx.send(r).expect("map_async callback channel should be open");
+            tx.send(r)
+                .expect("map_async callback channel should be open");
         });
         let _ = device.poll(wgpu::PollType::Wait {
             submission_index: None,
@@ -6123,7 +6414,13 @@ fn field_mul_lavapipe_gate(
 /// oracle at every operand pair.
 #[test]
 fn field_mul_probe_wasm_leg() {
-    field_mul_wasm_gate(FIELD_MUL_PROBE_SOURCE, "field_mul_probe", &probe_prime(), 4, "MSM-P probe");
+    field_mul_wasm_gate(
+        FIELD_MUL_PROBE_SOURCE,
+        "field_mul_probe",
+        &probe_prime(),
+        4,
+        "MSM-P probe",
+    );
 }
 
 /// MSM-P headline: the 4-limb probe field-mul EXECUTES on lavapipe, tri-equal.
@@ -6181,8 +6478,8 @@ fn qcga3d_rotated_quadric_render_executes_wasm_equal_on_lavapipe() {
     const SOURCE: &str = include_str!("fixtures/spirv/qcga3d_rotated_quadric_render.fe");
     const EXPORT: &str = "qcga3d_rotated_quadric_render";
     let mut db = DriverDataBase::default();
-    let url = Url::parse("file:///qcga3d_rotated_quadric_render.fe")
-        .expect("test URL should parse");
+    let url =
+        Url::parse("file:///qcga3d_rotated_quadric_render.fe").expect("test URL should parse");
     db.workspace()
         .touch(&mut db, url.clone(), Some(SOURCE.to_string()));
     let file = db.workspace().get(&db, &url).expect("file should load");
@@ -6245,8 +6542,14 @@ fn qcga3d_sparse_planned_render_emits_browser_profile_wgsl() {
     assert_eq!((input.span, input.stride), (60, 60));
     let wgsl = artifact.wgsl.expect("planned QCGA WGSL");
     assert_browser_profile_wgsl(&wgsl);
-    assert!(!wgsl.contains("loop {"), "planner must not become a runtime loop");
-    assert!(!wgsl.contains("32768"), "planner must not materialize dense Cl(9,6)");
+    assert!(
+        !wgsl.contains("loop {"),
+        "planner must not become a runtime loop"
+    );
+    assert!(
+        !wgsl.contains("32768"),
+        "planner must not materialize dense Cl(9,6)"
+    );
     eprintln!(
         "QCGA planned WGSL bytes={}, functions={}",
         wgsl.len(),

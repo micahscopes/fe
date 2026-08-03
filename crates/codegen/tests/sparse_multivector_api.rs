@@ -1,6 +1,6 @@
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::{compile_runtime_package_wasm_with_options, WasmCompileOptions};
+use fe_codegen::{WasmCompileOptions, compile_runtime_package_wasm_with_options};
 use url::Url;
 
 const SPARSE_CLIFFORD_API: &str = include_str!("../../../ingots/sparse_clifford/src/lib.fe");

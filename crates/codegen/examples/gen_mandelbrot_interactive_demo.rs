@@ -50,9 +50,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
-    BackendKind, CanonicalCapability, CanonicalExecution, CanonicalPlacement, OptLevel,
-    WebBuildOptions, WebBundle, WebCanonicalPolicy, compile_runtime_package_spirv_render,
-    layout_for,
+    BackendKind, CanonicalExecution, CanonicalPlacement, OptLevel, WebBuildOptions, WebBundle,
+    WebCanonicalPolicy, compile_runtime_package_spirv_render, layout_for,
 };
 use sonatina_codegen::isa::spirv::{Access, LayoutMode, Role, SpirvLayout, WordKind};
 use url::Url;
@@ -299,8 +298,8 @@ fn main() {
         assert_eq!(lane.intent.placement, CanonicalPlacement::MainThread);
         assert_eq!(lane.intent.capabilities.len(), 1);
         assert_eq!(
-            lane.intent.capabilities[0].capability,
-            CanonicalCapability::WebgpuDispatch
+            lane.intent.capabilities[0].capability.as_str(),
+            "webgpu_dispatch"
         );
         assert!(lane.intent.capabilities[0].mutable);
         assert!(lane.export.is_none());
