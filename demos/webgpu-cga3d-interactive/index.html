@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Interactive Fe cga3d Pencil: Fe render + Fe controls</title>
+  <style>
+    :root {
+      --bg: #0e1116; --panel: #161b22; --line: #2b333d; --fg: #e6edf3;
+      --muted: #8b949e; --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      --green: #2ea043; --amber: #bf8700; --red: #da3633;
+      --green-bg: #12241a; --amber-bg: #241d0e; --red-bg: #2a1414;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--fg);
+      font: 15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    }
+    main { max-width: 820px; margin: 0 auto; padding: 32px 20px 64px; }
+    h1 { font-size: 22px; margin: 0 0 4px; }
+    .sub { color: var(--muted); margin: 0 0 24px; font-size: 14px; }
+    .sub code { font-family: var(--mono); color: var(--fg); }
+
+    .banner {
+      border: 1px solid var(--line); border-left-width: 5px; border-radius: 8px;
+      padding: 16px 18px; margin-bottom: 22px; background: var(--panel);
+    }
+    .banner.green { border-left-color: var(--green); background: var(--green-bg); }
+    .banner.amber { border-left-color: var(--amber); background: var(--amber-bg); }
+    .banner.red   { border-left-color: var(--red);   background: var(--red-bg); }
+    .banner-top { display: flex; align-items: baseline; gap: 12px; }
+    #banner-state {
+      font-family: var(--mono); font-weight: 700; font-size: 13px; letter-spacing: .06em;
+      padding: 2px 8px; border-radius: 4px; border: 1px solid var(--line);
+    }
+    .banner.green #banner-state { color: var(--green); border-color: var(--green); }
+    .banner.amber #banner-state { color: var(--amber); border-color: var(--amber); }
+    .banner.red   #banner-state { color: var(--red);   border-color: var(--red); }
+    #banner-headline { font-size: 17px; font-weight: 600; }
+    #banner-detail { color: var(--muted); margin-top: 8px; font-size: 14px; white-space: pre-wrap; }
+
+    .image-wrap {
+      border: 1px solid var(--line); border-radius: 8px; overflow: hidden;
+      margin-bottom: 10px; background: #000; display: flex; justify-content: center;
+    }
+    #view-canvas {
+      width: 100%; max-width: 512px; height: auto; image-rendering: pixelated;
+      display: block; touch-action: none; cursor: grab;
+    }
+    .controls-hint {
+      color: var(--muted); font-size: 13px; margin: 0 2px 8px; display: flex;
+      gap: 14px; flex-wrap: wrap; align-items: center;
+    }
+    .controls-hint b { color: var(--fg); font-weight: 600; }
+    .presets { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 16px; }
+    .presets button {
+      font: 13px var(--mono); color: var(--fg); background: var(--panel);
+      border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; cursor: pointer;
+    }
+    .presets button:hover { border-color: var(--muted); }
+    #view-readout { font-family: var(--mono); font-size: 12.5px; color: var(--muted); margin-left: auto; }
+
+    .rows { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; margin-bottom: 8px; }
+    .row {
+      display: grid; grid-template-columns: 220px 1fr; gap: 14px;
+      padding: 12px 16px; border-bottom: 1px solid var(--line); align-items: center;
+    }
+    .row:last-child { border-bottom: 0; }
+    .row .label { color: var(--muted); font-size: 14px; }
+    .row .label small { display: block; color: #6a737d; font-size: 12px; }
+    .val { font-family: var(--mono); font-size: 14px; white-space: pre-wrap; word-break: break-word; }
+    .val.ok  { color: var(--green); }
+    .val.bad { color: var(--red); }
+
+    .meta { color: var(--muted); font-size: 12.5px; font-family: var(--mono);
+      margin: 4px 2px 26px; word-break: break-word; }
+    #adapter { margin: 8px 2px 4px; }
+
+    details {
+      border: 1px solid var(--line); border-radius: 8px; margin-bottom: 12px; background: var(--panel);
+    }
+    summary { cursor: pointer; padding: 12px 16px; font-weight: 600; user-select: none; }
+    summary::marker { color: var(--muted); }
+    pre {
+      margin: 0; padding: 0 16px 16px; overflow-x: auto;
+      font-family: var(--mono); font-size: 13px; color: var(--fg);
+    }
+    .foot { color: #6a737d; font-size: 12.5px; margin-top: 28px; line-height: 1.6; }
+    .foot code { font-family: var(--mono); }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Interactive Fe cga3d Pencil</h1>
+  <p class="sub">
+    The Fe compiler compiled <b>both</b> the pencil-of-spheres fragment <em>and</em> the drag controls.
+    The picture is a Fe <code>@fragment</code> shader (a REAL sparse Cl(4,1) incidence contraction, five
+    planned products, not a hand-derived formula), Fe -&gt; SPIR-V-IR -&gt; WGSL, drawing the y = 0 slice of
+    a pencil of spheres; the controls are the Fe fn <code>update_pencil</code> (Fe -&gt; wasm) your browser
+    runs - drag composes the next <code>(lambda, theta, zoom)</code>, the SAME three uniforms the fragment
+    reads. JavaScript only forwards pointer/wheel events - it does no pencil math, no pixels, no color.
+  </p>
+
+  <div id="banner" class="banner amber">
+    <div class="banner-top">
+      <span id="banner-state">...</span>
+      <span id="banner-headline">Loading generated artifacts...</span>
+    </div>
+    <div id="banner-detail"></div>
+  </div>
+
+  <div class="image-wrap">
+    <canvas id="view-canvas" width="128" height="128"></canvas>
+  </div>
+  <div class="controls-hint">
+    <span><b>Drag</b> horizontally to sweep lambda (sphere &rarr; sphere &rarr; radical plane), vertically to turn theta &middot; <b>wheel</b> to zoom</span>
+    <span id="view-readout">lambda=0.350  theta=0.500  zoom=1.100</span>
+  </div>
+  <div class="presets">
+    <button data-view="[0.0, 0.0, 1.1]">pure S1</button>
+    <button data-view="[0.35, 0.5, 1.1]">blend (default)</button>
+    <button data-view="[0.75, 0.0, 1.1]">radical plane</button>
+    <button data-view="[1.0, 0.0, 1.1]">pure S2</button>
+    <button data-view="[0.35, 1.2, 1.6]">rotated + zoomed</button>
+  </div>
+
+  <div class="rows">
+    <div class="row">
+      <div class="label">Fe controls in V8
+        <small>update_pencil vs oracle, synthetic gestures</small></div>
+      <div id="row-ctl" class="val">-</div>
+    </div>
+    <div class="row">
+      <div class="label">render
+        <small>WebGPU vs Fe-wasm V8 fallback</small></div>
+      <div id="row-render" class="val">-</div>
+    </div>
+  </div>
+  <div id="adapter" class="meta">adapter: -</div>
+  <div id="prov" class="meta"></div>
+
+  <details>
+    <summary>kernel.fe - the Fe render fragment (demos/sketches/cga3d/src/lib.fe, the pencil-of-spheres actor)</summary>
+    <pre id="kernel-src">loading...</pre>
+  </details>
+  <details>
+    <summary>ctl.fe - the Fe drag controls (compiled to ctl.wasm's update_pencil)</summary>
+    <pre id="ctl-src">loading...</pre>
+  </details>
+  <details>
+    <summary>frag.wgsl - the naga-emitted WGSL (@vertex vs_fullscreen + @fragment fs_main)</summary>
+    <pre id="wgsl-src">loading...</pre>
+  </details>
+
+  <div class="foot">
+    Provenance: the render fragment (<code>frag.wasm</code> / <code>frag.wgsl</code> / <code>manifest.json</code>)
+    is produced by the shipped <code>fe web build</code> CLI against <code>demos/sketches/cga3d</code>; the
+    drag controls (<code>ctl.wasm</code> / <code>ctl.json</code>) are produced by <code>cargo run -p
+    fe-codegen --example gen_cga3d_interactive_ctl</code>, which hard-fails unless the wasm export signature
+    is exactly <code>(f32,f32,f32,i32,i32,i32) -&gt; (f32,f32,f32)</code> and wasmtime's execution matches an
+    independent Rust oracle bit-for-bit across directed cases plus a 2,000-step random walk. Both halves are
+    regenerated by <code>./generate.sh</code> (gitignored <code>gen/</code>, never hand-edited).<br />
+    WEBGPU "your GPU drew every pixel" is earned only when a live WebGPU adapter renders the canvas. No
+    WebGPU shows AMBER (the Fe fragment still computes every pixel in V8, the Fe controls still run in V8;
+    the GPU claim is withheld). A shader error or a controls/oracle mismatch shows RED.
+  </div>
+</main>
+<script type="module" src="./main.js"></script>
+</body>
+</html>
