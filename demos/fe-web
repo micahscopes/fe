@@ -3,6 +3,7 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo="$(cd "$here/.." && pwd)"
 if [ "$#" -eq 0 ]; then
   echo "usage: $0 {build|serve} FE_WEB_ARG [FE_WEB_ARG ...]" >&2
   exit 2
@@ -15,4 +16,8 @@ case "$1" in
     ;;
 esac
 
-exec "$here/with-browser-cargo.sh" run --quiet -p fe --features web-server -- web "$@"
+# The workspace pins the reviewed browser backend directly (see demos/serve.sh),
+# so this is plain locked cargo; the with-browser-cargo.sh path-patch bounce it
+# used to exec through was deleted with the Sonatina overlay.
+cd "$repo"
+exec cargo run --locked --quiet -p fe --features web-server -- web "$@"

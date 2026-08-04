@@ -69,6 +69,31 @@ generate_example() {
   fi
 }
 
+generate_via_script() {
+  local key="$1"
+  local script="$2"
+  shift 2
+  if [ "${FORCE_DEMO_REGEN:-0}" != 1 ]; then
+    local complete=1
+    local marker
+    for marker in "$@"; do
+      if [ ! -f "$marker" ]; then
+        complete=0
+        break
+      fi
+    done
+    if [ "$complete" = 1 ]; then
+      return
+    fi
+  fi
+  echo "generating $key..."
+  if [ -n "${FE_DEMO_GENERATE_CMD:-}" ]; then
+    "$FE_DEMO_GENERATE_CMD" "$key"
+  else
+    "$script"
+  fi
+}
+
 bundle_needs_generation() {
   local force="$1"
   local directory="$2"
@@ -105,6 +130,21 @@ generate_one() {
       generate_example clifford-interactive gen_clifford_interactive_demo \
         "$here/webgpu-clifford-interactive/gen/layout.json"
       ;;
+    cga3d-interactive)
+      generate_via_script cga3d-interactive "$here/webgpu-cga3d-interactive/generate.sh" \
+        "$here/webgpu-cga3d-interactive/gen/manifest.json" \
+        "$here/webgpu-cga3d-interactive/gen/ctl.json"
+      ;;
+    qcga-interactive)
+      generate_via_script qcga-interactive "$here/webgpu-qcga-interactive/generate.sh" \
+        "$here/webgpu-qcga-interactive/gen/manifest.json" \
+        "$here/webgpu-qcga-interactive/gen/ctl.json"
+      ;;
+    desargues-interactive)
+      generate_via_script desargues-interactive "$here/webgpu-desargues-interactive/generate.sh" \
+        "$here/webgpu-desargues-interactive/gen/manifest.json" \
+        "$here/webgpu-desargues-interactive/gen/ctl.json"
+      ;;
     cga)
       if [ -n "${FE_DEMO_GENERATE_CMD:-}" ]; then
         "$FE_DEMO_GENERATE_CMD" cga
@@ -140,7 +180,7 @@ generate_one() {
       ;;
     *)
       echo "unknown demo '$1'" >&2
-      echo "choose: all, keystone, mandelbrot, mandelbrot-interactive, clifford-interactive, cga, cga-d1, cga-schedule32, qcga" >&2
+      echo "choose: all, keystone, mandelbrot, mandelbrot-interactive, clifford-interactive, cga, cga-d1, cga-schedule32, qcga, cga3d-interactive, qcga-interactive, desargues-interactive" >&2
       exit 2
       ;;
   esac
@@ -148,7 +188,8 @@ generate_one() {
 
 if [ "$demo" = all ]; then
   for selected in keystone mandelbrot mandelbrot-interactive \
-    clifford-interactive cga qcga
+    clifford-interactive cga qcga \
+    cga3d-interactive qcga-interactive desargues-interactive
   do
     generate_one "$selected"
   done

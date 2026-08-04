@@ -1,142 +1,128 @@
 # Browser demos
 
-Generate/preflight the selected tracked bundle, then serve every demo from one
-common origin with Trunk live reload:
+Compiler-produced Wasm/WGSL artifacts, served from one isolated origin via Trunk.
 
 ```sh
-demos/serve.sh cga --serve
+demos/serve.sh --serve
 ```
 
-Open `http://127.0.0.1:8788/`. The landing page links to every demo and selects
-the tracked recursive Schedule32 CGA bundle. The selector remains explicit:
-use `qcga`, `mandelbrot-interactive`, or another selector in place of `cga`.
-Pass `--no-watch` after `--serve` for a fixed server. This command performs the
-same fail-closed generation/preflight described below and then directly execs
-the visible `trunk serve --config demos/Trunk.toml` step; there is no project
-manifest or implicit framework hook.
+Open `http://127.0.0.1:8788/`. The landing page (`demos/index.html`) links every
+demo, including the curated `gallery/`. Pass `--no-watch` after `--serve` for a
+fixed (non-live-reload) server:
 
-Trunk supplies the Wasm MIME type,
-live reload, and these response headers from `demos/Trunk.toml`:
+```sh
+demos/serve.sh cga3d-interactive --serve --no-watch
+```
+
+Trunk supplies the Wasm MIME type, live reload, and these response headers from
+`demos/Trunk.toml`:
 
 - `Cross-Origin-Opener-Policy: same-origin`
 - `Cross-Origin-Embedder-Policy: require-corp`
 - `Cross-Origin-Resource-Policy: same-origin`
 - `Cache-Control: no-store`
 
-The lower-level `trunk serve --config demos/Trunk.toml` command remains
-available when generation/preflight is intentionally unnecessary. A fresh
-checkout can serve complete tracked assets—especially the default Schedule32
-CGA bundle—without `SONATINA_DIR`.
+## Layout
 
-## Generation and preflight
-
-Without `--serve`, `demos/serve.sh` remains an explicit generation/preflight
-command for scripts and CI:
-
-```sh
-demos/serve.sh                 # validate tracked Schedule32 CGA
-demos/serve.sh cga
-demos/serve.sh mandelbrot-interactive
-demos/serve.sh qcga
+```
+demos/
+  sketches/<name>/            source of truth: one actor-declaring Fe ingot per feature
+  webgpu-<name>-interactive/  generate.sh (fe web build + gated ctl codegen) + live-pump.js + main.js
+  capstones/<name>/           non-actor, multi-backend-target kernels + evidence.json
+  shared/                     cross-demo JS: host-runtime, gpu-timestamp, live-pump.js, ...
+  gallery/                    curated geometric-algebra showcase (static page, no build step)
+  fe-sandbox/                 highlighted-editor / compiler-in-the-browser page
+  webgpu-keystone/            gen/ (scalar cross-backend bundle) + webgpu-runner.js/wasm-runner.js,
+                               the shared kernel-blind runners imported by 6+ other demo dirs
+  index.html, serve.sh, Trunk.toml, README.md
 ```
 
-`cga` means Schedule32; `cga-schedule32` is a compatibility alias. Legacy D1
-requires the explicit `cga-d1` selector. `FORCE_DEMO_REGEN=1` requests
-regeneration. On the first generation without `SONATINA_DIR`, the command
-fetches only the pinned `mb2-render-mode` base
-`150d327edfa88374802a6cc8089fd77da5fa818b` from
-`https://github.com/micahscopes/sonatina.git` into
-`target/fe-browser-cache/sonatina.git`. The commit is checked exactly; the
-tracked, checksum-verified 25-patch series then reconstructs reviewed commit
-`ac266c210cad7872fc98380a73b4ca363877bc1f` in an isolated temporary checkout.
-Warm generation reuses the cache without contacting the remote.
+`webgpu-keystone` no longer ships its own demo page (retired 2026-08-04 as a
+duplicate of `fe-sandbox`'s "poseidon" kernel option, same `gen/` bundle, same
+runners). The directory stays: `webgpu-runner.js` and `wasm-runner.js` are load-
+bearing shared infrastructure, and its `gen/` bundle is still what `fe-sandbox`'s
+"poseidon" dropdown option loads.
 
-Set `FE_BROWSER_CACHE_DIR` to relocate that cache. Set
-`FE_BROWSER_OFFLINE=1` to forbid a cache miss from fetching; a missing pinned
-base then fails with an actionable error. `SONATINA_DIR` remains an optional
-source/offline override: it may name either a clean reviewed checkout or a
-checkout containing the pinned base, and is never modified. Concurrent
-generations serialize both cache mutation and the temporary `Cargo.lock`
-rewrite with `flock`; the generation lock is acquired before source cleanliness
-is checked, so one build cannot make another clean checkout appear dirty. Every
-reconstructed checkout is removed after the command. Temporary overlay checkouts, browser profiles, and
-lockfile backups stay under the ignored workspace-local `output/demo-tmp`
-directory by default; set `FE_DEMO_TMPDIR` to another explicit workspace path
-when needed. Demo generation disables an inherited `RUSTC_WRAPPER` by default,
-preventing a long-lived compiler-cache daemon from silently putting build
-temporaries outside that workspace; opt in explicitly with
-`FE_DEMO_RUSTC_WRAPPER`. The wrapper is invoked internally by
-`demos/serve.sh`, so users do not need another build command. This is temporary
-infrastructure until `ac266c210cad7872fc98380a73b4ca363877bc1f` (or its
-upstream replacement) is directly
-fetchable. Legacy `cga-d1` remains the one exception and requires its older
-reviewed `ed43625b` checkout explicitly.
+## Demo selectors (`demos/serve.sh [SELECTOR] [--serve] [--no-watch]`)
 
-The specialized generators remain authoritative because they produce
-independent oracle/reference data, legacy layout contracts, control modules, or
-canonical actor artifacts beyond the standard `WebBundle`.
+New generation (2026-08-03), gallery-linked, sourced from `demos/sketches/*` via
+`fe web build` + a gated Fe-codegen `ctl` example, 2-file `live-pump.js` + `main.js`
+harness:
 
-`demos/serve.sh all` also performs a cross-application runtime gate after
-generation. It validates every compiler-declared runtime artifact against its
-byte count and SHA-256 digest, then requires Schedule32 CGA and QCGA to package
-the same eight-module `fe-browser-actor-runtime` identity. This proves both
-demos consume one compiler-owned coordinator, endpoint, router, MessagePort,
-module-Worker, GPU-actor, generated Worker host, and generated actor-client
-surface. Their concrete WebGPU device handlers and application lifecycle remain
-explicit and demo-owned; this gate does not claim that Fe code directly owns or
-invokes the browser's WebGPU device.
+- `cga3d-interactive` - CGA3D pencil of spheres, Cl(4,1)
+- `qcga-interactive` - QCGA quadric pencil, Cl(9,6)
+- `desargues-interactive` - Desargues' theorem, PGA-2D, via `gaplay::{meet,join}`
+- `mandelbrot` - the four-backend capstone (EVM, Wasm, Native, WebGPU), source in
+  `demos/capstones/mandelbrot/`
 
-For a single-source application that consumes the standard `WebBundle`
-contract, the temporary compatibility launcher is:
+Older generation (2026-07), `KEEP-MODERNIZE` per the demo audit (real, non-duplicate
+content; legacy JS-harness weight, no `actor` declaration yet):
+
+- `clifford-interactive` - Cl(3) rotor sandwich `v' = R v ~R`
+- `mandelbrot-interactive` - draggable pan/zoom fractal (the only draggable
+  Mandelbrot; distinct from the static `mandelbrot` capstone above)
+- `qcga` - a single fixed general quadric, raymarched (distinct scene from
+  `qcga-interactive`'s pencil; both live under `webgpu-qcga3d-quadric/`)
+- `cga` / `cga-schedule32` - CGA inversion (Dupin cyclide), recursive typed
+  Schedule32 sandwich; this is the default selector
+- `cga-d1` - the same demo's legacy D1 bundle (pinned to an older reviewed
+  Sonatina commit; kept as an explicit comparison path, not the default)
+- `keystone` - regenerates `webgpu-keystone/gen/` only; there is no page for this
+  selector to serve, but `fe-sandbox` depends on the bundle it produces
+
+```sh
+demos/serve.sh                       # validate the default (cga = Schedule32)
+demos/serve.sh cga3d-interactive
+demos/serve.sh qcga-interactive
+demos/serve.sh desargues-interactive
+demos/serve.sh mandelbrot
+demos/serve.sh mandelbrot-interactive
+demos/serve.sh clifford-interactive
+demos/serve.sh qcga
+demos/serve.sh cga-d1
+demos/serve.sh all                   # every selector above, then a cross-app runtime gate
+```
+
+`FORCE_DEMO_REGEN=1` forces regeneration even when the tracked `gen/` bundle looks
+complete. Generation is plain `cargo run --locked -p fe-codegen --example ...` (or,
+for the 3 new demos, the demo's own `generate.sh`, which itself calls the release
+`fe` CLI plus a gated codegen example) - no external checkout, no `SONATINA_DIR`,
+no overlay. `demos/serve.sh all` additionally runs
+`demos/shared/verify_cga_runtime_reuse.py`, which validates every compiler-declared
+runtime artifact against its byte count and SHA-256 digest and requires Schedule32
+CGA and QCGA3D to package the same eight-module `fe-browser-actor-runtime`
+identity.
+
+`gallery/` and `fe-sandbox/` have no `serve.sh` selector: the gallery is a static
+page with no generation step, and `fe-sandbox` builds its own prebuilt kernel
+bundle via `fe-sandbox/build-browser-compiler.sh` (self-contained).
+
+## Single-source compat launcher
+
+For a single `.fe` file or ingot that only needs the standard `WebBundle`
+contract (not one of the flagship generators' extra evidence jobs), `demos/fe-web`
+wraps the real `fe web build|serve` CLI directly (plain locked cargo, same pin as
+`serve.sh`):
 
 ```sh
 demos/fe-web serve path/to/kernel.fe --entry kernel --mode render \
   --root path/to/static-app
+demos/fe-web build path/to/kernel.fe --entry kernel --mode render \
+  --out path/to/bundle
 ```
 
-Use `build ... --out path/to/bundle` for an atomic on-disk bundle. The launcher
-invokes the real `fe web build|serve` CLI; `demos/with-browser-cargo.sh` only supplies
-the checksum-verified, clean Sonatina `ac266c21` overlay that the unpublished
-workspace dependency cannot yet fetch. It owns the six Cargo path patches,
-workspace-local temporary/target directories, generation lock, inherited
-`RUSTC_WRAPPER` removal, and byte-for-byte `Cargo.lock` restoration. A wrong or
-dirty `SONATINA_DIR` fails closed.
+The flagship generators (`webgpu-*-interactive/generate.sh`, the `gen_*_demo`
+codegen examples) remain authoritative for demos that need an independent Rust
+oracle, typed-plan witness/provenance, or a legacy `layout.json`/`actor-source.fe`
+contract beyond the generic `shader.wgsl`/`manifest.json` bundle.
 
-`fe web serve` also exposes a deliberately explicit live-reload client. Add
-this one line to the static application's HTML when browser reload after a
-successful Fe rebuild is wanted:
+## Tests
 
-```html
-<script type="module" src="/.fe/live-reload.js"></script>
-```
-
-There is no HTML injection or project convention behind it. The client polls
-the compiler-owned `/.fe/generation` endpoint and reloads only after an atomic
-successful bundle publication. A diagnostic-producing edit leaves both the
-last good bundle and browser page running. `--no-watch` keeps serving the
-one-shot generation, so the same HTML remains valid in fixed-server mode.
-
-Canonical lanes remain explicit and inspectable rather than name-inferred:
-
-```sh
-demos/fe-web build path/to/kernel.fe --entry render_kernel --mode render \
-  --canonical required --canonical-entry render --canonical-entry verify \
-  --canonical-entry oracle --out path/to/bundle
-```
-
-This standard bundle contains compiler-derived Wasm, WGSL, manifest,
-interfaces, and actor runtime modules. The Schedule32 generator remains
-necessary for source composition, its independently executed Rust oracle,
-typed-plan witness/provenance, and separate entry-rooted Wasm proof. Publishing
-and repinning the backend is required for the intended direct `fe web` UX and
-removes this compatibility launcher; it does not erase those
-application-specific evidence jobs.
-
-The compiler command itself already accepts either a standalone `.fe` file or
-an ordinary Fe ingot directory; an ingot does not need a web-specific project
-manifest. The flagship generators are retained for the additional evidence
-jobs above, not because `fe web` is limited to single-file programs. Their
-current pages also consume the legacy `frag.wgsl`/`layout.json` contract and
-independent `reference.json`, whereas the generic bundle deliberately exposes
-`shader.wgsl`/`manifest.json`. Repointing those pages without migrating and
-re-proving that contract would hide work rather than simplify it.
+- `demos/test_serve_sh.py` - `serve.sh` selector routing and `--serve`/`--no-watch`
+  argument plumbing (subprocess, no cargo/trunk needed; hooks generation via
+  `FE_DEMO_GENERATE_CMD`).
+- `demos/test_trunk.py` - asserts the built `target/trunk-demos/` dist tree.
+- `demos/test_sonatina_overlay.py` - covers `with-sonatina-overlay.sh`, a separate
+  isolated-build tool for vendoring Sonatina backend patches
+  (`vendor/sonatina/mb2-browser-runtime/`); unrelated to demo generation, which no
+  longer touches it.
