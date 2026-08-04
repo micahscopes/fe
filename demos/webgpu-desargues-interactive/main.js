@@ -20,7 +20,7 @@
 // pixel -> world map; this page dispatches at 128x128 to match, the CSS scales
 // the canvas up for display.
 
-import { createLivePump } from "./live-pump.js";
+import { createLivePump } from "../shared/live-pump.js";
 
 const $ = (id) => document.getElementById(id);
 

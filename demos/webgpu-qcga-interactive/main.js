@@ -30,7 +30,7 @@
 // match RESOLUTION exactly, without touching the Fe algebra; the CSS scales
 // the canvas up for display.
 
-import { createLivePump } from "./live-pump.js";
+import { createLivePump } from "../shared/live-pump.js";
 
 const $ = (id) => document.getElementById(id);
 
