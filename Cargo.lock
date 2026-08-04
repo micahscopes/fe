@@ -2761,6 +2761,7 @@ dependencies = [
  "fe-common",
  "fe-compiler-db",
  "fe-compiler-protocol",
+ "naga",
  "url",
  "wasmparser 0.248.0",
  "wasmtime",

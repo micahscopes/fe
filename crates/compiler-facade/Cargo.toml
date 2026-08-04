@@ -13,5 +13,15 @@ fe-compiler-protocol = { path = "../compiler-protocol" }
 url.workspace = true
 wasmparser = "0.248.0"
 
+[features]
+# Wires `CompileTarget::Webgpu` through to the render lowering (Fe -> WGSL).
+# Off by default: the root workspace pins `codegen` with
+# `default-features = false`, so `spirv-backend` (and naga) are not pulled in
+# unless a consumer opts in. The wasm32 browser-compiler turns this on; other
+# consumers (native tools, tests) get `Webgpu` failing closed with
+# `UnsupportedTarget` when it is off.
+webgpu-target = ["codegen/spirv-backend"]
+
 [dev-dependencies]
 wasmtime = "44.0.1"
+naga = { version = "29", features = ["wgsl-in"] }

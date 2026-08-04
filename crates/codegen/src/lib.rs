@@ -44,7 +44,7 @@ pub use sonatina::{
 pub use sonatina::{NativeI32EntryArtifact, compile_runtime_package_native_i32_entry};
 #[cfg(feature = "spirv-backend")]
 pub use sonatina::{
-    compile_runtime_package_spirv, compile_runtime_package_spirv_grid,
+    compile_render_wgsl, compile_runtime_package_spirv, compile_runtime_package_spirv_grid,
     compile_runtime_package_spirv_render, compile_runtime_package_spirv_with_workgroup,
 };
 pub use test_output::{ExpectedRevert, TestMetadata, TestModuleOutput, parse_expected_revert};

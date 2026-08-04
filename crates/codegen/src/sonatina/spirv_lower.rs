@@ -15,7 +15,8 @@
 //! a real GPU runtime (lavapipe) is a later slice.
 
 use compiler_db::DriverDataBase;
-use mir::RuntimePackage;
+use hir::hir_def::TopLevelMod;
+use mir::{RuntimePackage, build_wasm_runtime_package_for_entry};
 use sonatina_codegen::Backend as _;
 use sonatina_codegen::isa::spirv::{SpirvArtifact, SpirvBackend};
 use sonatina_codegen::optim::{Pass, Pipeline, Step, inliner::InlinerConfig};
@@ -191,6 +192,24 @@ pub fn compile_runtime_package_spirv_render(
                     .join("; "),
             )
         })
+}
+
+/// Build the render-shaped MIR runtime package rooted at `entry` and lower it
+/// straight to naga-validated WGSL, in one call. Composes
+/// [`mir::build_wasm_runtime_package_for_entry`] (the package boundary) with
+/// [`compile_runtime_package_spirv_render`] (the render lowering), so a caller
+/// that only needs WGSL out of a Fe source (the in-browser Fe -> WGSL facade
+/// path) does not need `mir` on its own dependency graph. The two crates'
+/// `LowerError` types differ; the existing `From<mir::LowerError> for
+/// LowerError` conversion (see the top of this module) makes `?` compose them
+/// without an explicit map here, same as every other call site in this file.
+pub fn compile_render_wgsl<'db>(
+    db: &'db DriverDataBase,
+    top_mod: TopLevelMod<'db>,
+    entry: &str,
+) -> Result<SpirvArtifact, LowerError> {
+    let package = build_wasm_runtime_package_for_entry(db, top_mod, entry)?;
+    compile_runtime_package_spirv_render(db, &package)
 }
 
 fn inline_spirv_calls(module: &mut sonatina_ir::Module) {

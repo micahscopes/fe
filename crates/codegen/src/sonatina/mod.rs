@@ -17,7 +17,7 @@ mod wasm_lower;
 pub use native::{NativeI32EntryArtifact, compile_runtime_package_native_i32_entry};
 #[cfg(feature = "spirv-backend")]
 pub use spirv_lower::{
-    compile_runtime_package_spirv, compile_runtime_package_spirv_grid,
+    compile_render_wgsl, compile_runtime_package_spirv, compile_runtime_package_spirv_grid,
     compile_runtime_package_spirv_render, compile_runtime_package_spirv_with_workgroup,
 };
 pub use wasm_lower::compile_runtime_package_wasm;

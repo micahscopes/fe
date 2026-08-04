@@ -45,15 +45,39 @@ impl From<ProtocolError> for CompileFacadeError {
 
 /// Compile virtual Fe sources without project discovery or filesystem access.
 ///
-/// Only the Wasm target is wired in this initial facade slice. Other semantic
-/// targets are protocol-valid but fail explicitly until their artifact
-/// adapters land.
+/// Dispatches on `request.target`. `Wasm` is always wired. `Webgpu` is wired
+/// only when this crate's `webgpu-target` feature is on (the wasm32
+/// browser-compiler turns it on; native tools may not); when it is off, and
+/// for every other semantic target, `compile` fails explicitly rather than
+/// emitting nothing.
 pub fn compile(request: &CompileRequest) -> Result<CompileResult, CompileFacadeError> {
     request.validate()?;
-    if request.target != CompileTarget::Wasm {
-        return Err(CompileFacadeError::UnsupportedTarget(request.target));
+    match request.target {
+        CompileTarget::Wasm => compile_wasm(request),
+        #[cfg(feature = "webgpu-target")]
+        CompileTarget::Webgpu => compile_webgpu(request),
+        _ => Err(CompileFacadeError::UnsupportedTarget(request.target)),
     }
+}
 
+/// Shared prologue: build the in-memory db from the request's virtual
+/// sources, run diagnostics on the root module once, and hand back the
+/// pieces both target backends need. `root_file` (not `top_mod`) is returned
+/// because `top_mod` borrows `db` for the lifetime of that borrow; callers
+/// re-derive it locally with `db.top_mod(root_file)`, which is a cheap
+/// re-query, not re-work.
+fn compile_prologue(
+    request: &CompileRequest,
+) -> Result<
+    (
+        DriverDataBase,
+        common::file::File,
+        Vec<Diagnostic>,
+        bool,
+        SourceDependencyInventory,
+    ),
+    CompileFacadeError,
+> {
     let mut db = DriverDataBase::default();
     for source in &request.sources {
         let url = parse_url(&source.url)?;
@@ -72,11 +96,16 @@ pub fn compile(request: &CompileRequest) -> Result<CompileResult, CompileFacadeE
         .iter()
         .map(|diagnostic| protocol_diagnostic(&db, diagnostic))
         .collect::<Vec<_>>();
-
-    if complete
+    let has_error = complete
         .iter()
-        .any(|diagnostic| diagnostic.severity == Severity::Error)
-    {
+        .any(|diagnostic| diagnostic.severity == Severity::Error);
+    Ok((db, root_file, diagnostics, has_error, source_dependencies))
+}
+
+fn compile_wasm(request: &CompileRequest) -> Result<CompileResult, CompileFacadeError> {
+    let (db, root_file, diagnostics, has_error, source_dependencies) =
+        compile_prologue(request)?;
+    if has_error {
         return Ok(result(
             request,
             diagnostics,
@@ -85,6 +114,7 @@ pub fn compile(request: &CompileRequest) -> Result<CompileResult, CompileFacadeE
             source_dependencies,
         ));
     }
+    let top_mod = db.top_mod(root_file);
 
     let output = BackendKind::Wasm
         .create()
@@ -116,6 +146,49 @@ pub fn compile(request: &CompileRequest) -> Result<CompileResult, CompileFacadeE
         diagnostics,
         artifacts,
         interface,
+        source_dependencies,
+    ))
+}
+
+/// `CompileTarget::Webgpu`: lower the requested entry through the render
+/// (Fe -> SPIR-V/WGSL) path and emit the WGSL side artifact. There is no
+/// wasm import/export table for a shader, so the interface manifest stays
+/// the v0 default; a richer WGSL-shaped interface (bind group layout) is a
+/// later increment, not a protocol gap.
+#[cfg(feature = "webgpu-target")]
+fn compile_webgpu(request: &CompileRequest) -> Result<CompileResult, CompileFacadeError> {
+    let (db, root_file, diagnostics, has_error, source_dependencies) =
+        compile_prologue(request)?;
+    if has_error {
+        return Ok(result(
+            request,
+            diagnostics,
+            Vec::new(),
+            InterfaceManifest::default(),
+            source_dependencies,
+        ));
+    }
+    let entry = request.entries.first().ok_or_else(|| {
+        CompileFacadeError::Backend("webgpu target requires at least one entry".to_owned())
+    })?;
+    let top_mod = db.top_mod(root_file);
+
+    let artifact = codegen::compile_render_wgsl(&db, top_mod, entry)
+        .map_err(|error| CompileFacadeError::Backend(error.to_string()))?;
+    let wgsl = artifact.wgsl.ok_or_else(|| {
+        CompileFacadeError::Artifact("render lowering produced no WGSL".to_owned())
+    })?;
+    let artifacts = vec![Artifact::new(
+        "shader.wgsl",
+        ArtifactKind::WgslModule,
+        "text/wgsl",
+        wgsl.into_bytes(),
+    )];
+    Ok(result(
+        request,
+        diagnostics,
+        artifacts,
+        InterfaceManifest::default(),
         source_dependencies,
     ))
 }
@@ -335,6 +408,43 @@ mod tests {
             compile(&request),
             Err(CompileFacadeError::UnsupportedTarget(CompileTarget::Native))
         ));
+    }
+
+    #[test]
+    #[cfg(not(feature = "webgpu-target"))]
+    fn webgpu_target_fails_closed_without_feature() {
+        let mut request = request("pub fn main() -> u32 { 42 }");
+        request.target = CompileTarget::Webgpu;
+        assert!(matches!(
+            compile(&request),
+            Err(CompileFacadeError::UnsupportedTarget(CompileTarget::Webgpu))
+        ));
+    }
+
+    #[test]
+    #[cfg(feature = "webgpu-target")]
+    fn compiles_render_entry_to_naga_valid_wgsl() {
+        let mut request = request(
+            r#"
+pub fn shade(x: u32, y: u32) -> u32 {
+    4278190080 + x * 65536 + y * 256
+}
+"#,
+        );
+        request.target = CompileTarget::Webgpu;
+        request.entries = vec!["shade".to_owned()];
+        let result = compile(&request).unwrap();
+        result.validate().unwrap();
+        assert!(result.diagnostics.is_empty());
+        let wgsl_artifact = result
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.kind == ArtifactKind::WgslModule)
+            .unwrap();
+        assert_eq!(wgsl_artifact.name, "shader.wgsl");
+        assert!(!wgsl_artifact.bytes.is_empty());
+        let wgsl = std::str::from_utf8(&wgsl_artifact.bytes).unwrap();
+        naga::front::wgsl::parse_str(wgsl).unwrap();
     }
 
     #[test]
