@@ -82,6 +82,101 @@ struct AbiTypeDesc {
     components: Option<Vec<AbiParam>>,
 }
 
+/// How one target's ABI encodes a primitive scalar.
+///
+/// `Unrepresentable` is the structural form of "nothing fudged": a target that
+/// cannot carry a scalar says so by construction, and the caller renders a named
+/// reject. It replaces a hand-written `PrimTy::F32 => Err(...)` arm that had to
+/// be remembered.
+enum ScalarAbi {
+    /// The target encodes this scalar under the given ABI type name.
+    Encoded(&'static str),
+    /// The target has no representation for this scalar. EVM and f32, today.
+    Unrepresentable,
+    /// Not a scalar at all; handled by the aggregate paths before this point.
+    NotAScalar,
+    /// Not a value type (pointers, views, borrows).
+    NotAValue,
+}
+
+/// A target's ABI.
+///
+/// This is the seam that makes the target a PARAMETER rather than a premise.
+/// `semantic_ty_to_abi_desc` used to inline one target's answers; it now asks an
+/// `Abi`. `EvmAbi` is the only instance today, which is honest: the EVM is one
+/// target among several, not the definition of "ABI". A wasm instance would map
+/// scalars to `i32`/`i64`/`f32`/`f64` and report `Unrepresentable` for `u256`,
+/// exactly inverting EVM's answer for `f32`.
+trait Abi {
+    /// Human-readable name, used in reject messages so diagnostics name the
+    /// target that refused rather than saying "the ABI".
+    const NAME: &'static str;
+
+    fn scalar_abi(prim: PrimTy) -> ScalarAbi;
+}
+
+/// The EVM/Solidity contract ABI. 256-bit words, Solidity type names.
+struct EvmAbi;
+
+impl Abi for EvmAbi {
+    const NAME: &'static str = "EVM ABI";
+
+    fn scalar_abi(prim: PrimTy) -> ScalarAbi {
+        match prim {
+            PrimTy::Bool => ScalarAbi::Encoded("bool"),
+            PrimTy::U8 => ScalarAbi::Encoded("uint8"),
+            PrimTy::U16 => ScalarAbi::Encoded("uint16"),
+            PrimTy::U32 => ScalarAbi::Encoded("uint32"),
+            PrimTy::U64 => ScalarAbi::Encoded("uint64"),
+            PrimTy::U128 => ScalarAbi::Encoded("uint128"),
+            // `usize` folds to the 256-bit word: an EVM fact, not a Fe one.
+            PrimTy::U256 | PrimTy::Usize => ScalarAbi::Encoded("uint256"),
+            PrimTy::I8 => ScalarAbi::Encoded("int8"),
+            PrimTy::I16 => ScalarAbi::Encoded("int16"),
+            PrimTy::I32 => ScalarAbi::Encoded("int32"),
+            PrimTy::I64 => ScalarAbi::Encoded("int64"),
+            PrimTy::I128 => ScalarAbi::Encoded("int128"),
+            PrimTy::I256 | PrimTy::Isize => ScalarAbi::Encoded("int256"),
+            // The EVM has no floats. A wasm ABI would encode this and reject
+            // u256 instead.
+            PrimTy::F32 => ScalarAbi::Unrepresentable,
+            PrimTy::String | PrimTy::Array | PrimTy::Tuple(_) => ScalarAbi::NotAScalar,
+            PrimTy::Ptr | PrimTy::View | PrimTy::BorrowMut | PrimTy::BorrowRef => {
+                ScalarAbi::NotAValue
+            }
+        }
+    }
+}
+
+/// Fe-level name for a primitive, for target-neutral diagnostics.
+fn prim_scalar_name(prim: PrimTy) -> &'static str {
+    match prim {
+        PrimTy::Bool => "bool",
+        PrimTy::U8 => "u8",
+        PrimTy::U16 => "u16",
+        PrimTy::U32 => "u32",
+        PrimTy::U64 => "u64",
+        PrimTy::U128 => "u128",
+        PrimTy::U256 => "u256",
+        PrimTy::Usize => "usize",
+        PrimTy::I8 => "i8",
+        PrimTy::I16 => "i16",
+        PrimTy::I32 => "i32",
+        PrimTy::I64 => "i64",
+        PrimTy::I128 => "i128",
+        PrimTy::I256 => "i256",
+        PrimTy::Isize => "isize",
+        PrimTy::F32 => "f32",
+        PrimTy::String => "String",
+        PrimTy::Array => "Array",
+        PrimTy::Tuple(_) => "tuple",
+        PrimTy::Ptr => "Ptr",
+        PrimTy::View => "View",
+        PrimTy::BorrowMut => "BorrowMut",
+        PrimTy::BorrowRef => "BorrowRef",
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct NamedAbiParamDesc {
     name: String,
@@ -711,26 +806,16 @@ fn semantic_ty_to_abi_desc(db: &DriverDataBase, ty: TyId<'_>) -> Result<AbiTypeD
     }
 
     match ty.base_ty(db).data(db) {
-        TyData::TyBase(TyBase::Prim(prim)) => match prim {
-            PrimTy::Bool => Ok(AbiTypeDesc::simple("bool")),
-            PrimTy::U8 => Ok(AbiTypeDesc::simple("uint8")),
-            PrimTy::U16 => Ok(AbiTypeDesc::simple("uint16")),
-            PrimTy::U32 => Ok(AbiTypeDesc::simple("uint32")),
-            PrimTy::U64 => Ok(AbiTypeDesc::simple("uint64")),
-            PrimTy::U128 => Ok(AbiTypeDesc::simple("uint128")),
-            PrimTy::U256 | PrimTy::Usize => Ok(AbiTypeDesc::simple("uint256")),
-            PrimTy::I8 => Ok(AbiTypeDesc::simple("int8")),
-            PrimTy::I16 => Ok(AbiTypeDesc::simple("int16")),
-            PrimTy::I32 => Ok(AbiTypeDesc::simple("int32")),
-            PrimTy::I64 => Ok(AbiTypeDesc::simple("int64")),
-            PrimTy::I128 => Ok(AbiTypeDesc::simple("int128")),
-            PrimTy::I256 | PrimTy::Isize => Ok(AbiTypeDesc::simple("int256")),
-            PrimTy::F32 => Err(format!(
-                "unsupported ABI type `{}` (f32 has no EVM ABI representation)",
-                ty.pretty_print(db)
+        TyData::TyBase(TyBase::Prim(prim)) => match <EvmAbi as Abi>::scalar_abi(*prim) {
+            ScalarAbi::Encoded(name) => Ok(AbiTypeDesc::simple(name)),
+            ScalarAbi::Unrepresentable => Err(format!(
+                "unsupported ABI type `{}` ({} has no {} representation)",
+                ty.pretty_print(db),
+                prim_scalar_name(*prim),
+                EvmAbi::NAME,
             )),
-            PrimTy::String | PrimTy::Array | PrimTy::Tuple(_) => unreachable!(),
-            PrimTy::Ptr | PrimTy::View | PrimTy::BorrowMut | PrimTy::BorrowRef => {
+            ScalarAbi::NotAScalar => unreachable!(),
+            ScalarAbi::NotAValue => {
                 Err(format!("unsupported ABI type `{}`", ty.pretty_print(db)))
             }
         },
