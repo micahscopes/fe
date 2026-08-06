@@ -40,14 +40,21 @@
   header h1 { font-size: 16px; font-weight: 600; margin: 0 0 4px; color: #e6ecf7; letter-spacing: .02em; }
   header p { margin: 0; color: #8a93a6; font-size: 12.5px; }
   header code { color: #b7c2d8; background: #171a21; padding: 1px 6px; border-radius: 4px; }
-  .grid { max-width: 1100px; margin: 0 auto;
+  .grid { max-width: 1200px; margin: 0 auto;
           display: grid; gap: 20px;
-          grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
-  figure { margin: 0; background: #12151b; border: 1px solid #1e232d; border-radius: 10px;
-           padding: 12px; display: flex; flex-direction: column; gap: 10px; align-items: center; }
-  figure canvas { border-radius: 6px; background: #000; max-width: 100%; height: auto; }
-  figcaption { font-size: 12.5px; color: #aeb8cc; align-self: flex-start; }
+          grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
+  /* Scope tile chrome to DIRECT children so it never bleeds into the runtime's
+     own nested <figure class="fe-render">. */
+  .grid > figure { margin: 0; background: #12151b; border: 1px solid #1e232d;
+           border-radius: 10px; padding: 12px; display: flex; flex-direction: column;
+           gap: 10px; align-items: stretch; }
+  figcaption { font-size: 12.5px; color: #aeb8cc; }
   figcaption b { color: #e6ecf7; font-weight: 600; }
+  /* Override the render runtime's side-by-side (canvas | 180-260px controls)
+     grid: in a gallery tile the control column starves the canvas to a few px,
+     so stack the canvas ON TOP of the controls and let it fill the tile. */
+  .fe-render { grid-template-columns: 1fr !important; gap: 10px !important; }
+  .fe-render canvas { max-width: 100% !important; }
 </style>
 </head>
 <body>
