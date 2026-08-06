@@ -21,15 +21,20 @@ pub fn precompile(html_path: &Utf8Path, output: &Utf8Path) -> Result<(), String>
         .map_err(|error| format!("failed to read HTML entry {canonical_html}: {error}"))?;
     let document_url = url::Url::from_file_path(&canonical_html)
         .map_err(|_| format!("HTML entry cannot be represented as a file URL: {canonical_html}"))?;
-    let result =
-        fe_html_precompile::precompile_html(document_url.as_str(), &source_html, |source_url| {
+    let result = fe_html_precompile::precompile_html_with_render_lane(
+        document_url.as_str(),
+        &source_html,
+        codegen::render_runtime_js(),
+        |source_url| {
             let path = source_url
                 .to_file_path()
                 .map_err(|_| format!("unsupported non-file Fe source URL: {source_url}"))?;
             fs::read_to_string(&path)
                 .map_err(|error| format!("failed to read {}: {error}", path.display()))
-        })
-        .map_err(|error| error.to_string())?;
+        },
+        crate::web::render_compile,
+    )
+    .map_err(|error| error.to_string())?;
 
     let parent = publication_parent(output);
     fs::create_dir_all(parent)

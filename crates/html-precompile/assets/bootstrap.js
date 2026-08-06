@@ -38,6 +38,35 @@ async function sha256Hex(bytes) {
   return Array.from(digest, byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
+/**
+ * `data-fe-render` handoff: a render bundle's manifest/wasm/wgsl fetching,
+ * pipeline setup, and per-pixel wasm fallback all live in the ONE shipped
+ * `fe-render-runtime.js` module (the same module the legacy `fe web build
+ * --mode render` bundle's emitted index.html imports), not here. This
+ * function only locates that published module and hands off; it never calls
+ * a render entry with zero arguments the way the plain Wasm lane below does.
+ */
+async function runRenderSurface(element, manifestUrl) {
+  const runtimeReference = element.dataset.feRenderRuntime;
+  if (!runtimeReference) {
+    throw new Error("data-fe-render requires data-fe-render-runtime");
+  }
+  const runtimeUrl = new URL(runtimeReference, element.baseURI);
+  const { mountRenderSurface } = await import(runtimeUrl);
+  const canvasSelector = element.dataset.feCanvas;
+  const surface = await mountRenderSurface({
+    manifestUrl,
+    // With no `data-fe-canvas`, mount a generated <figure> immediately after
+    // the script element (page authors keep layout control via HTML when
+    // they DO adopt a canvas by selector).
+    canvas: canvasSelector ? document.querySelector(canvasSelector) : undefined,
+    mountAfter: canvasSelector ? undefined : element,
+    width: element.dataset.feWidth ? Number(element.dataset.feWidth) : undefined,
+    height: element.dataset.feHeight ? Number(element.dataset.feHeight) : undefined,
+  });
+  return { manifest: surface.manifest, surface, instance: null, module: null, value: undefined };
+}
+
 async function run(element) {
   if (element.dataset.feState === "complete") return element.feResult;
   if (element.dataset.feState === "running") return element.fePromise;
@@ -45,6 +74,13 @@ async function run(element) {
     element.dataset.feState = "running";
     try {
       const manifestUrl = new URL(element.dataset.feManifest, element.baseURI);
+      if (element.dataset.feRender !== undefined) {
+        const result = await runRenderSurface(element, manifestUrl);
+        element.feResult = result;
+        element.dataset.feState = "complete";
+        element.dispatchEvent(new CustomEvent("fe:load", { detail: result }));
+        return result;
+      }
       const wasmUrl = new URL(element.dataset.feSrc, element.baseURI);
       const [manifestResponse, wasmResponse] = await Promise.all([
         fetch(manifestUrl, { mode: "cors", credentials: "same-origin" }),

@@ -48,6 +48,23 @@ const CANONICAL_INTERFACE_JS: &str = include_str!("../assets/canonical-interface
 /// the bundle so `--mode render` output is directly openable, not hand-authored.
 const RENDER_INDEX_FILE: &str = "index.html";
 const RENDER_RUNTIME_HTML: &str = include_str!("../assets/render-runtime/index.html");
+/// The ONE fixed, versioned, demo-blind render kernel driver (fetch manifest,
+/// drive WebGPU via the binding table, fall back to per-pixel wasm, generate
+/// uniform controls). `RENDER_INDEX_FILE` imports it as a sibling file; the
+/// standards `fe web dev` gallery path publishes this SAME text
+/// content-addressed and hands a `data-fe-render` script element to it
+/// (crates/html-precompile/assets/bootstrap.js), so both paths share one
+/// render runtime instead of maintaining two.
+const RENDER_RUNTIME_JS_FILE: &str = "fe-render-runtime.js";
+const RENDER_RUNTIME_JS: &str = include_str!("../assets/render-runtime/fe-render-runtime.js");
+
+/// The fixed render runtime module's source text, for hosts (the standards
+/// `fe web dev`/`fe web precompile` bundle lane) that publish it
+/// content-addressed alongside a render bundle they compile outside
+/// [`WebBundle::write_atomic`]/[`WebBundle::materialized_files`].
+pub fn render_runtime_js() -> &'static str {
+    RENDER_RUNTIME_JS
+}
 const WEB_ACTOR_RUNTIME: &[(&str, &str)] = &[
     (
         "runtime/actor-coordinator.js",
@@ -723,8 +740,13 @@ impl WebBundle {
         }
         push(MANIFEST_FILE, Arc::from(self.manifest_json()?))?;
         // Render bundles ship a compiler-emitted host page so the directory is
-        // directly openable (WebGPU shader.wgsl, with a wasm per-pixel fallback).
+        // directly openable (WebGPU shader.wgsl, with a wasm per-pixel fallback),
+        // plus the one shipped render runtime module that page imports.
         if self.manifest.layout.mode == WebBundleMode::Render {
+            push(
+                RENDER_RUNTIME_JS_FILE,
+                Arc::from(RENDER_RUNTIME_JS.as_bytes()),
+            )?;
             push(RENDER_INDEX_FILE, Arc::from(RENDER_RUNTIME_HTML.as_bytes()))?;
         }
         Ok(files)
@@ -1568,6 +1590,7 @@ pub fn shade(x: u32, y: u32) -> u32 {
                 "runtime/worker-host.js",
                 "runtime/actor-client.js",
                 MANIFEST_FILE,
+                RENDER_RUNTIME_JS_FILE,
                 RENDER_INDEX_FILE,
             ]
         );

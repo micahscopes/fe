@@ -13,7 +13,8 @@ use std::sync::Arc;
 use base64::Engine;
 use fe_compiler_protocol::{
     ArtifactKind, CompileOptions, CompileRequest, CompileTarget, Diagnostic, ProtocolVersion,
-    PublishedArtifact, PublishedModuleManifest, VirtualSource, sha256_hex,
+    PublishedArtifact, PublishedModuleManifest, SourceDependencyInventory, VirtualSource,
+    sha256_hex,
 };
 use fe_webidl_bindgen::{
     AdapterOperationMetadata, AdapterPlan, World as WebIdlWorld, adapter_operation_metadata,
@@ -32,7 +33,35 @@ pub const SOURCE_SCRIPT_TYPE: &str = "application/fe";
 pub const ARTIFACT_SCRIPT_TYPE: &str = "application/fe+wasm";
 pub const BOOTSTRAP_MARKER: &str = "data-fe-bootstrap";
 pub const BOOTSTRAP_META_NAME: &str = "fe-bootstrap";
+/// Valueless marker on a rewritten `application/fe+wasm` script: the bootstrap
+/// hands this module to `mountRenderSurface` from the render runtime module
+/// instead of instantiating it and calling its entry with zero arguments.
+pub const RENDER_SCRIPT_MARKER: &str = "data-fe-render";
+/// Points at the published, content-addressed render runtime module
+/// (`fe_codegen::render_runtime_js()`) a `data-fe-render` script hands off to.
+pub const RENDER_RUNTIME_ATTR: &str = "data-fe-render-runtime";
 const BOOTSTRAP_SOURCE: &str = include_str!("../assets/bootstrap.js");
+
+/// A compiled render bundle for one `data-fe-src` naming a GpuProgram-actor
+/// ingot, produced through the SAME seam `fe web build` uses
+/// (`resolve_web_entry` + `WebBundle::compile`), ready for content-addressed
+/// publication by [`precompile_html_with_render_lane`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderBundleArtifact {
+    pub wasm: Vec<u8>,
+    pub wgsl: Vec<u8>,
+    /// The bundle's fe-web-bundle v4 manifest exactly as
+    /// `WebBundle::manifest_json()` produces it: `artifacts.wasm` /
+    /// `artifacts.wgsl` still name the bundle-local `module.wasm` /
+    /// `shader.wgsl` placeholders. Publication rewrites those two fields to
+    /// the content-addressed published names, the same precedent as the
+    /// wasm lane's `PublishedArtifact::from_artifact`.
+    pub manifest_json: Vec<u8>,
+    /// The render source's structural dependency closure (ingot files),
+    /// folded into the development watch graph exactly like the wasm lane's
+    /// `PublishedModuleManifest::source_dependencies`.
+    pub source_dependencies: Option<SourceDependencyInventory>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerificationReport {
@@ -60,6 +89,11 @@ pub struct PrecompileOutput {
     /// URL-path relative artifact files, ordered for deterministic publication.
     pub assets: BTreeMap<String, Vec<u8>>,
     pub modules: Vec<PublishedModuleManifest>,
+    /// Structural dependency inventories contributed by render-lane sources
+    /// (see [`RenderBundleArtifact::source_dependencies`]). Always empty when
+    /// no script routed through the render lane. Folded into the development
+    /// watch graph alongside `modules[].source_dependencies`.
+    pub render_dependencies: Vec<SourceDependencyInventory>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -298,14 +332,29 @@ impl DevelopmentRebuildCoordinator {
         })
     }
 
-    /// Execute a ready batch in document URL order.
+    /// Execute a ready batch in document URL order, wasm-only lane.
     ///
     /// A stale generation is cancelled before any loader or compiler work.
     pub fn execute(
         &mut self,
         batch: DevelopmentRebuildBatch,
+        load_document: impl FnMut(&str) -> Result<String, String>,
+        load_source: impl FnMut(&Url) -> Result<String, String>,
+    ) -> Vec<DevelopmentRebuildEvent> {
+        self.execute_with_render_lane(batch, load_document, "", load_source, |_, _| Ok(None))
+    }
+
+    /// Execute a ready batch in document URL order, with the render-bundle
+    /// lane wired in (see [`DevelopmentPrecompiler::build_with_render_lane`]).
+    ///
+    /// A stale generation is cancelled before any loader or compiler work.
+    pub fn execute_with_render_lane(
+        &mut self,
+        batch: DevelopmentRebuildBatch,
         mut load_document: impl FnMut(&str) -> Result<String, String>,
+        render_runtime_js: &str,
         mut load_source: impl FnMut(&Url) -> Result<String, String>,
+        mut render_compile: impl FnMut(&Url, Option<&str>) -> Result<Option<RenderBundleArtifact>, String>,
     ) -> Vec<DevelopmentRebuildEvent> {
         if batch.generation != self.generation {
             return vec![DevelopmentRebuildEvent::Cancelled {
@@ -332,9 +381,13 @@ impl DevelopmentRebuildCoordinator {
                     continue;
                 }
             };
-            let report = self
-                .precompiler
-                .build(&document_url, &html, &mut load_source);
+            let report = self.precompiler.build_with_render_lane(
+                &document_url,
+                &html,
+                render_runtime_js,
+                &mut load_source,
+                &mut render_compile,
+            );
             append_build_events(&mut events, document_url, report);
         }
         events
@@ -400,11 +453,32 @@ impl DevelopmentPrecompiler {
         self.last_good.get(document_url).cloned()
     }
 
+    /// Build using only the wasm-only facade lane (no render bundle lane).
+    /// Directory `data-fe-src` sources fail via `load` exactly as before this
+    /// crate grew a render lane.
     pub fn build(
         &mut self,
         document_url: &str,
         html: &str,
         load: impl FnMut(&Url) -> Result<String, String>,
+    ) -> DevelopmentBuildReport {
+        self.build_with_render_lane(document_url, html, "", load, |_, _| Ok(None))
+    }
+
+    /// Build with the render-bundle lane wired in. `render_compile` is asked
+    /// about every external `data-fe-src`: `Ok(None)` falls through to the
+    /// unchanged wasm-only lane; `Ok(Some(_))` publishes a render bundle and
+    /// marks the script `data-fe-render`. `render_runtime_js` is the fixed
+    /// render runtime module's source text (`fe_codegen::render_runtime_js()`),
+    /// published once, content-addressed, the first time any script routes
+    /// through the render lane.
+    pub fn build_with_render_lane(
+        &mut self,
+        document_url: &str,
+        html: &str,
+        render_runtime_js: &str,
+        load: impl FnMut(&Url) -> Result<String, String>,
+        render_compile: impl FnMut(&Url, Option<&str>) -> Result<Option<RenderBundleArtifact>, String>,
     ) -> DevelopmentBuildReport {
         match discover_external_dependencies(document_url, html) {
             Ok(dependencies) => {
@@ -414,7 +488,13 @@ impl DevelopmentPrecompiler {
             Err(error) => return self.failed(document_url, error),
         }
 
-        match precompile_html(document_url, html, load) {
+        match precompile_html_with_render_lane(
+            document_url,
+            html,
+            render_runtime_js,
+            load,
+            render_compile,
+        ) {
             Ok(output) => {
                 let mut dependencies = self
                     .graph
@@ -430,6 +510,13 @@ impl DevelopmentPrecompiler {
                     if !dependency.url.starts_with("fe-inline:") {
                         dependencies.insert(dependency.url.clone());
                     }
+                }
+                for dependency in output
+                    .render_dependencies
+                    .iter()
+                    .flat_map(|inventory| &inventory.sources)
+                {
+                    dependencies.insert(dependency.url.clone());
                 }
                 self.graph.replace(document_url.to_owned(), dependencies);
                 let digest = publication_digest(&output);
@@ -873,7 +960,7 @@ pub fn precompile_html(
     html: &str,
     load: impl FnMut(&Url) -> Result<String, String>,
 ) -> Result<PrecompileOutput, PrecompileError> {
-    precompile_html_impl(document_url, html, None, None, load)
+    precompile_html_impl(document_url, html, None, None, "", load, |_, _| Ok(None))
 }
 
 /// Precompile and publish a versioned, minimal adapter selection inventory for
@@ -885,7 +972,15 @@ pub fn precompile_html_with_adapter_metadata(
     adapter_metadata: &[AdapterOperationMetadata],
     load: impl FnMut(&Url) -> Result<String, String>,
 ) -> Result<PrecompileOutput, PrecompileError> {
-    precompile_html_impl(document_url, html, Some(adapter_metadata), None, load)
+    precompile_html_impl(
+        document_url,
+        html,
+        Some(adapter_metadata),
+        None,
+        "",
+        load,
+        |_, _| Ok(None),
+    )
 }
 
 /// Precompile and publish both the minimal selection inventory and an
@@ -904,16 +999,61 @@ pub fn precompile_html_with_adapter_plan(
         html,
         Some(&metadata),
         Some((world, plan, provider)),
+        "",
         load,
+        |_, _| Ok(None),
     )
 }
 
+/// Precompile Fe script elements, additionally routing any `data-fe-src` that
+/// names an ingot directory (rather than a single `.fe` file) through a
+/// render-bundle lane instead of the wasm-only facade lane.
+///
+/// `render_compile` is asked about every EXTERNAL `data-fe-src`, before
+/// `load` is ever called: `Ok(None)` means "not a render source," falling
+/// through to the unchanged wasm lane; `Ok(Some(_))` publishes the render
+/// bundle and marks the rewritten script `data-fe-render`; `Err` fails the
+/// whole document build (the same last-good-serving posture as a compile
+/// error). This is what fixes directory `data-fe-src` crashing `load` with a
+/// raw filesystem error: a directory source is routed to `render_compile`
+/// before `load` ever sees it.
+///
+/// `render_runtime_js` is the fixed render runtime module's source text
+/// (`fe_codegen::render_runtime_js()`); it is published once, content
+/// addressed, the first time any script routes through the render lane. Same
+/// posture as `load`: this crate assumes nothing about a filesystem or a
+/// particular compiler; the native `fe web dev`/`fe web precompile` host
+/// supplies both. A caller with no render sources (or the future
+/// browser-Worker path, which fails closed on directory sources) can pass
+/// `render_runtime_js = ""` and `render_compile = |_, _| Ok(None)`, exactly
+/// [`precompile_html`]'s behavior.
+pub fn precompile_html_with_render_lane(
+    document_url: &str,
+    html: &str,
+    render_runtime_js: &str,
+    load: impl FnMut(&Url) -> Result<String, String>,
+    render_compile: impl FnMut(&Url, Option<&str>) -> Result<Option<RenderBundleArtifact>, String>,
+) -> Result<PrecompileOutput, PrecompileError> {
+    precompile_html_impl(
+        document_url,
+        html,
+        None,
+        None,
+        render_runtime_js,
+        load,
+        render_compile,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn precompile_html_impl(
     document_url: &str,
     html: &str,
     adapter_metadata: Option<&[AdapterOperationMetadata]>,
     adapter_plan: Option<(&WebIdlWorld, &AdapterPlan, &str)>,
+    render_runtime_js: &str,
     mut load: impl FnMut(&Url) -> Result<String, String>,
+    mut render_compile: impl FnMut(&Url, Option<&str>) -> Result<Option<RenderBundleArtifact>, String>,
 ) -> Result<PrecompileOutput, PrecompileError> {
     let document_url = Url::parse(document_url)
         .map_err(|error| PrecompileError::InvalidDocumentUrl(error.to_string()))?;
@@ -924,8 +1064,47 @@ fn precompile_html_impl(
 
     let mut assets = BTreeMap::new();
     let mut modules = Vec::new();
+    let mut render_dependencies = Vec::new();
+    let mut render_runtime_asset: Option<String> = None;
     for (index, script) in scripts.into_iter().enumerate() {
         let src = attr(&script, "data-fe-src");
+        let entry_attr = attr(&script, "data-fe-entry");
+
+        if let Some(src) = src.as_deref() {
+            let url = base_url
+                .join(src)
+                .map_err(|error| PrecompileError::SourceLoad {
+                    url: src.to_owned(),
+                    detail: error.to_string(),
+                })?;
+            if let Some(bundle) =
+                render_compile(&url, entry_attr.as_deref()).map_err(|detail| {
+                    PrecompileError::Compile {
+                        source_url: url.to_string(),
+                        detail,
+                    }
+                })?
+            {
+                if let Some(dependencies) = &bundle.source_dependencies {
+                    render_dependencies.push(dependencies.clone());
+                }
+                let runtime_path = publish_render_runtime(
+                    render_runtime_js,
+                    &mut assets,
+                    &mut render_runtime_asset,
+                )?;
+                publish_render_bundle(
+                    &script,
+                    &base_url,
+                    &document_url,
+                    bundle,
+                    &runtime_path,
+                    &mut assets,
+                )?;
+                continue;
+            }
+        }
+
         let (source_url, source) = if let Some(src) = src {
             let url = base_url
                 .join(&src)
@@ -945,7 +1124,7 @@ fn precompile_html_impl(
                 text_content(&script),
             )
         };
-        let entry = attr(&script, "data-fe-entry").unwrap_or_else(|| "main".to_owned());
+        let entry = entry_attr.unwrap_or_else(|| "main".to_owned());
         let request = CompileRequest {
             protocol: ProtocolVersion::CURRENT,
             root: source_url.clone(),
@@ -1055,7 +1234,84 @@ fn precompile_html_impl(
         html,
         assets,
         modules,
+        render_dependencies,
     })
+}
+
+/// Publish the fixed render runtime module once, content-addressed. Returns
+/// its (document-relative, un-retargeted) publication path, from cache after
+/// the first call.
+fn publish_render_runtime(
+    render_runtime_js: &str,
+    assets: &mut BTreeMap<String, Vec<u8>>,
+    published: &mut Option<String>,
+) -> Result<String, PrecompileError> {
+    if let Some(path) = published {
+        return Ok(path.clone());
+    }
+    if render_runtime_js.is_empty() {
+        return Err(PrecompileError::Serialize(
+            "a render script requires a render runtime module, but the host supplied none \
+             (render_runtime_js was empty)"
+                .to_owned(),
+        ));
+    }
+    let digest = sha256_hex(render_runtime_js.as_bytes());
+    let path = format!("assets/fe-render-runtime-{}.js", &digest[..16]);
+    insert_identical(assets, path.clone(), render_runtime_js.as_bytes().to_vec())?;
+    *published = Some(path.clone());
+    Ok(path)
+}
+
+/// Publish one render bundle's wasm/wgsl/manifest content-addressed, rewrite
+/// its manifest's `artifacts.wasm`/`artifacts.wgsl` to the published names
+/// (the same precedent as the wasm lane's `PublishedArtifact::from_artifact`
+/// rewriting paths), and rewrite the script tag to `data-fe-render`.
+fn publish_render_bundle(
+    script: &Handle,
+    base_url: &Url,
+    document_url: &Url,
+    bundle: RenderBundleArtifact,
+    render_runtime_path: &str,
+    assets: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<(), PrecompileError> {
+    let wasm_sha256 = sha256_hex(&bundle.wasm);
+    let wasm_path = format!("assets/fe-render-{}.wasm", &wasm_sha256[..16]);
+    insert_identical(assets, wasm_path.clone(), bundle.wasm)?;
+
+    let wgsl_sha256 = sha256_hex(&bundle.wgsl);
+    let wgsl_path = format!("assets/fe-render-{}.wgsl", &wgsl_sha256[..16]);
+    insert_identical(assets, wgsl_path.clone(), bundle.wgsl)?;
+
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&bundle.manifest_json).map_err(|error| {
+            PrecompileError::Serialize(format!(
+                "render bundle manifest is not valid JSON: {error}"
+            ))
+        })?;
+    let artifacts = manifest.get_mut("artifacts").ok_or_else(|| {
+        PrecompileError::Serialize("render bundle manifest has no `artifacts`".to_owned())
+    })?;
+    artifacts["wasm"] = serde_json::Value::String(basename(&wasm_path).to_owned());
+    artifacts["wgsl"] = serde_json::Value::String(basename(&wgsl_path).to_owned());
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest)
+        .map_err(|error| PrecompileError::Serialize(error.to_string()))?;
+    let manifest_sha256 = sha256_hex(&manifest_bytes);
+    let manifest_path = format!("assets/fe-render-{}.json", &manifest_sha256[..16]);
+    insert_identical(assets, manifest_path.clone(), manifest_bytes)?;
+
+    rewrite_render_script(
+        script,
+        &published_reference(base_url, document_url, &wasm_path),
+        &published_reference(base_url, document_url, &manifest_path),
+        &published_reference(base_url, document_url, render_runtime_path),
+        &wasm_sha256,
+    );
+    Ok(())
+}
+
+fn basename(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
 }
 
 fn published_reference(base_url: &Url, document_url: &Url, path: &str) -> String {
@@ -1270,6 +1526,39 @@ fn rewrite_script(
     } else {
         remove_attr(node, "data-fe-adapter");
     }
+    let digest = hex_to_bytes(sha256);
+    set_attr(
+        node,
+        "data-fe-integrity",
+        &format!(
+            "sha256-{}",
+            base64::engine::general_purpose::STANDARD.encode(digest)
+        ),
+    );
+    node.children.borrow_mut().clear();
+}
+
+/// Rewrite a render-lane script: no adapter machinery (WebGPU bundles have no
+/// Web IDL interface), and a `data-fe-render` marker plus
+/// `data-fe-render-runtime` pointing the bootstrap at the published render
+/// runtime module, so it hands the element to `mountRenderSurface` instead
+/// of instantiating the module and calling its entry with zero arguments.
+fn rewrite_render_script(
+    node: &Handle,
+    wasm_path: &str,
+    manifest_path: &str,
+    render_runtime_path: &str,
+    sha256: &str,
+) {
+    set_attr(node, "type", ARTIFACT_SCRIPT_TYPE);
+    remove_attr(node, "src");
+    remove_attr(node, "integrity");
+    set_attr(node, "data-fe-src", wasm_path);
+    set_attr(node, "data-fe-manifest", manifest_path);
+    set_attr(node, RENDER_SCRIPT_MARKER, "");
+    set_attr(node, RENDER_RUNTIME_ATTR, render_runtime_path);
+    remove_attr(node, "data-fe-adapter-selection");
+    remove_attr(node, "data-fe-adapter");
     let digest = hex_to_bytes(sha256);
     set_attr(
         node,
@@ -1693,6 +1982,7 @@ pub fn main() -> u32 { 42 }
                 html: String::new(),
                 assets: BTreeMap::new(),
                 modules: Vec::new(),
+                render_dependencies: Vec::new(),
             }),
         };
         let mut events = Vec::new();

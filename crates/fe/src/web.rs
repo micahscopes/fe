@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use camino::Utf8PathBuf;
 use codegen::{WebBuildOptions, WebBundle, WebBundleMode, resolve_web_entry};
@@ -7,6 +7,8 @@ use driver::{
     DriverDataBase,
     cli_target::{CliTarget, resolve_cli_target},
 };
+use fe_compiler_protocol::{SOURCE_DEPENDENCY_INVENTORY_VERSION, SourceDependency, sha256_hex};
+use fe_html_precompile::RenderBundleArtifact;
 use hir::hir_def::HirIngot;
 use url::Url;
 
@@ -186,6 +188,143 @@ pub fn compile(request: &CompileRequest) -> Result<WebBundle, String> {
     });
     options = options.with_canonical_entries(canonical_entries.iter().cloned());
     WebBundle::compile(&db, top_mod, options).map_err(|error| error.to_string())
+}
+
+/// The native bundle-lane compiler for the standards `fe web dev`/`fe web
+/// precompile` render lane (`fe_html_precompile::precompile_html_with_render_lane`'s
+/// `render_compile` closure): the SAME seam `fe web build` uses
+/// (`resolve_web_entry` + `WebBundle::compile`, via [`compile`] above), for a
+/// `data-fe-src` naming a GpuProgram-actor ingot DIRECTORY. Callers dispatch
+/// on `path.is_dir()` before calling this; a standalone `.fe` file stays on
+/// the wasm-only facade lane untouched.
+pub fn compile_render_bundle(
+    path: &Utf8PathBuf,
+    entry: Option<&str>,
+) -> Result<RenderBundleArtifact, String> {
+    let bundle = compile(&CompileRequest {
+        path: path.clone(),
+        entry: entry.map(str::to_owned),
+        mode: None,
+        workgroup: [None, None, None],
+        source_id: None,
+        canonical: WebCanonicalPolicy::Disabled,
+        canonical_entries: Vec::new(),
+    })?;
+    let manifest_json = bundle.manifest_json().map_err(|error| error.to_string())?;
+    Ok(RenderBundleArtifact {
+        wasm: bundle.wasm,
+        wgsl: bundle.wgsl.into_bytes(),
+        manifest_json,
+        source_dependencies: ingot_source_dependencies(path),
+    })
+}
+
+/// The `render_compile` closure `fe web dev`/`fe web precompile` hand to
+/// `fe_html_precompile`'s render lane
+/// (`precompile_html_with_render_lane`/`DevelopmentPrecompiler::build_with_render_lane`):
+/// a `data-fe-src` that resolves to a filesystem DIRECTORY is an ingot,
+/// compiled through [`compile_render_bundle`] above; anything else (a single
+/// `.fe` file, a non-file URL, a path that does not exist) returns `Ok(None)`
+/// and falls through to the unchanged wasm-only facade lane. This is what
+/// keeps `data-fe-src="sketches/cga3d"` from ever reaching a plain
+/// `fs::read_to_string`, which cannot read a directory.
+pub fn render_compile(
+    url: &Url,
+    entry: Option<&str>,
+) -> Result<Option<RenderBundleArtifact>, String> {
+    let Ok(path) = url.to_file_path() else {
+        return Ok(None);
+    };
+    let Ok(path) = Utf8PathBuf::from_path_buf(path) else {
+        return Ok(None);
+    };
+    if !path.is_dir() {
+        return Ok(None);
+    }
+    compile_render_bundle(&path, entry).map(Some)
+}
+
+/// Best-effort structural dependency inventory for the bundle lane's watch
+/// graph: every `.fe` file and `fe.toml` under the ingot directory, plus the
+/// same under every LOCAL path dependency it declares (recursively), so
+/// editing a shared library ingot (e.g. `demos/sketches/fmath`) is proven to
+/// affect every sketch that depends on it. Remote/registry dependencies are
+/// not walked (their sources are not local files to watch). `None` when the
+/// directory has no readable sources or would not validate as an inventory;
+/// callers treat this as "no extra watch entries," not a hard failure.
+fn ingot_source_dependencies(
+    ingot_dir: &Utf8PathBuf,
+) -> Option<fe_compiler_protocol::SourceDependencyInventory> {
+    let root_dir = ingot_dir.canonicalize_utf8().ok()?;
+    let mut visited = BTreeSet::new();
+    let mut sources = BTreeMap::new();
+    collect_ingot_sources(&root_dir, &mut visited, &mut sources);
+    let root = sources.keys().next()?.clone();
+    let inventory = fe_compiler_protocol::SourceDependencyInventory {
+        version: SOURCE_DEPENDENCY_INVENTORY_VERSION,
+        root,
+        sources: sources
+            .into_iter()
+            .map(|(url, sha256)| SourceDependency { url, sha256 })
+            .collect(),
+    };
+    inventory.validate().ok()?;
+    Some(inventory)
+}
+
+fn collect_ingot_sources(
+    dir: &Utf8PathBuf,
+    visited: &mut BTreeSet<Utf8PathBuf>,
+    sources: &mut BTreeMap<String, String>,
+) {
+    let Ok(canonical) = dir.canonicalize_utf8() else {
+        return;
+    };
+    if !visited.insert(canonical.clone()) {
+        return;
+    }
+    for entry in walkdir::WalkDir::new(canonical.as_std_path())
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let is_source = entry.path().extension().is_some_and(|extension| extension == "fe")
+            || entry.file_name() == "fe.toml";
+        if !is_source {
+            continue;
+        }
+        let (Ok(path), Ok(bytes)) = (
+            Utf8PathBuf::from_path_buf(entry.path().to_path_buf()),
+            std::fs::read(entry.path()),
+        ) else {
+            continue;
+        };
+        if let Ok(url) = Url::from_file_path(path.as_std_path()) {
+            sources.insert(url.to_string(), sha256_hex(&bytes));
+        }
+    }
+
+    let Ok(content) = std::fs::read_to_string(canonical.join("fe.toml")) else {
+        return;
+    };
+    let Ok(common::config::Config::Ingot(ingot_config)) = common::config::Config::parse(&content)
+    else {
+        return;
+    };
+    let Ok(base_url) = Url::from_directory_path(canonical.as_str()) else {
+        return;
+    };
+    let (dependencies, _diagnostics) = ingot_config.dependencies(&base_url);
+    for dependency in dependencies {
+        if let common::dependencies::DependencyLocation::Local(local) = &dependency.location
+            && let Ok(dependency_path) = local.url.to_file_path()
+            && let Ok(dependency_path) = Utf8PathBuf::from_path_buf(dependency_path)
+        {
+            collect_ingot_sources(&dependency_path, visited, sources);
+        }
+    }
 }
 
 #[cfg(test)]

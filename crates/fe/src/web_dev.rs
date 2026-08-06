@@ -92,9 +92,13 @@ pub async fn serve(config: DevConfig) -> Result<(), String> {
 
     let mut coordinator =
         DevelopmentRebuildCoordinator::new(config.poll_interval.as_millis() as u64);
-    let initial = coordinator
-        .precompiler_mut()
-        .build(&document_url, &html, load_file_url);
+    let initial = coordinator.precompiler_mut().build_with_render_lane(
+        &document_url,
+        &html,
+        codegen::render_runtime_js(),
+        load_file_url,
+        crate::web::render_compile,
+    );
     let publication = initial.active.ok_or_else(|| {
         initial
             .diagnostics
@@ -229,10 +233,12 @@ async fn watch(
         let Some(batch) = coordinator.take_ready(now) else {
             continue;
         };
-        let emitted = coordinator.execute(
+        let emitted = coordinator.execute_with_render_lane(
             batch,
             |_| std::fs::read_to_string(&html_path).map_err(|error| error.to_string()),
+            codegen::render_runtime_js(),
             load_file_url,
+            crate::web::render_compile,
         );
         for event in emitted {
             if matches!(
@@ -295,6 +301,7 @@ fn load_file_url(url: &Url) -> Result<String, String> {
     std::fs::read_to_string(&path)
         .map_err(|error| format!("failed to read {}: {error}", path.display()))
 }
+
 
 fn publish_event(sender: &broadcast::Sender<String>, event: &DevelopmentRebuildEvent) {
     if let Ok(json) = serde_json::to_string(event) {

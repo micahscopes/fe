@@ -1,15 +1,15 @@
 <!doctype html>
 <!--
-  fe web render runtime (compiler-emitted, protocol fe-web-bundle v4).
+  fe web render runtime page (compiler-emitted, protocol fe-web-bundle v4).
 
-  This page is NOT hand-written per demo: `fe web build --mode render` emits it
-  verbatim next to the bundle it describes. It reads ./manifest.json and drives
-  the two lowerings of the same render kernel the compiler produced:
-    - the GPU render lane: ./shader.wgsl via WebGPU (vertex + fragment entries
-      and the uniform binding table are read from the manifest layout);
-    - a CPU fallback when WebGPU is unavailable (e.g. an insecure origin): the
-      ./module.wasm kernel invoked per pixel into a 2D canvas.
-  Uniform controls are generated from the manifest's input binding members.
+  This page is NOT hand-written per demo: `fe web build --mode render` emits
+  it verbatim next to the bundle it describes, alongside its sibling
+  `fe-render-runtime.js`. All render logic (fetch manifest.json, drive
+  WebGPU via ./shader.wgsl, fall back to a per-pixel ./module.wasm kernel,
+  generate uniform controls) lives in that ONE shipped module, not this page:
+  it is the same module the standards `fe web dev` gallery path imports via
+  its `data-fe-render` handoff (crates/html-precompile/assets/bootstrap.js),
+  so the legacy bundle and the gallery share one render kernel driver.
 -->
 <html lang="en">
 <head>
@@ -20,186 +20,14 @@
   body { margin: 0; font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
          background: #0d0f13; color: #cfd6e4; display: grid; place-items: center;
          min-height: 100vh; gap: 18px; padding: 24px; }
-  h1 { font-size: 15px; font-weight: 600; margin: 0; color: #e6ecf7; letter-spacing: .02em;
-       display: flex; align-items: center; gap: 10px; }
-  #wrap { display: grid; gap: 16px; grid-template-columns: auto 260px; align-items: start; }
-  canvas { image-rendering: pixelated; width: 384px; height: 384px; border-radius: 10px;
-           box-shadow: 0 8px 40px #0008; background: #000; }
-  .panel { display: grid; gap: 12px; }
-  .ctl { display: grid; gap: 4px; }
-  .ctl label { display: flex; justify-content: space-between; color: #96a0b5; }
-  .ctl b { color: #cfd6e4; font-weight: 600; }
-  input[type=range] { width: 100%; accent-color: #5b8cff; }
-  .meta { font-size: 12px; color: #6b7688; }
-  .badge { display:inline-block; padding:2px 7px; border-radius:6px; font-size:11px; font-weight:600; }
-  .badge.webgpu { background:#10281a; color:#5bffa0; }
-  .badge.wasm { background:#1a2030; color:#8fb0ff; }
-  code { color: #a9d3ff; }
+  h1 { font-size: 15px; font-weight: 600; margin: 0; color: #e6ecf7; letter-spacing: .02em; }
 </style>
 </head>
 <body>
-  <h1>fe web · render <span class="badge wasm" id="mode">…</span></h1>
-  <div id="wrap">
-    <canvas id="c" width="256" height="256"></canvas>
-    <div class="panel" id="panel"><div class="meta" id="status">loading bundle…</div></div>
-  </div>
-<script type="module">
-const N = 256;                                    // render resolution
-const canvas = document.getElementById('c');
-const modeEl = document.getElementById('mode');
-const panel  = document.getElementById('panel');
-
-const manifest = await (await fetch('./manifest.json')).json();
-const layout   = manifest.layout;
-const inputBinding = layout.bindings.find(b => b.role === 'input');
-const members  = inputBinding ? inputBinding.members : [];        // uniform scalars
-const builtins = layout.builtin_inputs || [];                    // pixel coords (px, py)
-const argc = 1 + Math.max(-1, ...builtins.map(b => b.arg_index), ...members.map(m => m.arg_index));
-
-// Uniform state: one value per input-binding member.
-let uni = members.map(() => 1);
-
-// --- CPU kernel (module.wasm): also used for the fallback path and auto-tune. ---
-const wasmBytes = await (await fetch('./' + manifest.artifacts.wasm)).arrayBuffer();
-const { instance } = await WebAssembly.instantiate(wasmBytes, {});
-const kernel = instance.exports[manifest.source_entry];
-
-function callKernel(px, py, u) {
-  const args = new Array(argc).fill(0);
-  for (const b of builtins) args[b.arg_index] = b.source.endsWith('_y') ? py : px;
-  members.forEach((m, i) => { args[m.arg_index] = u[i]; });
-  return kernel(...args) >>> 0;                                  // 0xAARRGGBB
-}
-
-// Pick uniforms that make the kernel vary spatially (bounded random search over
-// presets) so any render bundle shows something meaningful on first load.
-function autoTune() {
-  if (members.length === 0) return uni;
-  const presets = [0, 0.5, 1, 2, 4, 8, 16, 32, 64];
-  const S = 48, rng = () => presets[(Math.random() * presets.length) | 0];
-  let best = uni, bestVar = -1;
-  for (let t = 0; t < 96; t++) {
-    const cand = members.map(rng);
-    let sum = 0, sum2 = 0, n = 0; const seen = new Set();
-    for (let py = 0; py < S; py += 2) for (let px = 0; px < S; px += 2) {
-      const v = callKernel(px, py, cand); seen.add(v);
-      const lum = ((v >>> 16) & 255) + ((v >>> 8) & 255) + (v & 255);
-      sum += lum; sum2 += lum * lum; n++;
-    }
-    const varc = sum2 / n - (sum / n) ** 2;
-    if (seen.size > 3 && varc > bestVar) { bestVar = varc; best = cand; }
-  }
-  return best;
-}
-
-// --- GPU render lane (shader.wgsl via WebGPU). Returns null if unavailable. ---
-async function initWebGPU() {
-  if (!navigator.gpu) return null;
-  try {
-    const adapter = await navigator.gpu.requestAdapter();
-    if (!adapter) return null;
-    const device = await adapter.requestDevice();
-    const wgsl = await (await fetch('./' + manifest.artifacts.wgsl)).text();
-    const module = device.createShaderModule({ code: wgsl });
-    const format = layout.color_target_format || navigator.gpu.getPreferredCanvasFormat();
-    const ctx = canvas.getContext('webgpu');
-    ctx.configure({ device, format, alphaMode: 'opaque' });
-
-    let bindGroup = null, ubuf = null, layoutDesc = 'auto';
-    if (inputBinding) {
-      ubuf = device.createBuffer({
-        size: Math.max(16, inputBinding.span),
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-      });
-      const bgl = device.createBindGroupLayout({
-        entries: [{ binding: inputBinding.binding, visibility: GPUShaderStage.FRAGMENT,
-                    buffer: { type: 'read-only-storage' } }],
-      });
-      bindGroup = device.createBindGroup({
-        layout: bgl, entries: [{ binding: inputBinding.binding, resource: { buffer: ubuf } }],
-      });
-      layoutDesc = device.createPipelineLayout({ bindGroupLayouts: [bgl] });
-    }
-    const pipeline = device.createRenderPipeline({
-      layout: layoutDesc,
-      vertex: { module, entryPoint: layout.vertex_entry },
-      fragment: { module, entryPoint: layout.fragment_entry, targets: [{ format }] },
-      primitive: { topology: 'triangle-list' },
-    });
-
-    return {
-      mode: 'webgpu',
-      render(u) {
-        if (ubuf) {
-          const buf = new ArrayBuffer(Math.max(16, inputBinding.span));
-          const dv = new DataView(buf);
-          members.forEach((m, i) => {
-            if (m.scalar === 'f32') dv.setFloat32(m.offset, u[i], true);
-            else if (m.scalar === 'u32') dv.setUint32(m.offset, u[i] >>> 0, true);
-            else dv.setInt32(m.offset, u[i] | 0, true);
-          });
-          device.queue.writeBuffer(ubuf, 0, buf);
-        }
-        const enc = device.createCommandEncoder();
-        const pass = enc.beginRenderPass({
-          colorAttachments: [{
-            view: canvas.getContext('webgpu').getCurrentTexture().createView(),
-            clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: 'clear', storeOp: 'store',
-          }],
-        });
-        pass.setPipeline(pipeline);
-        if (bindGroup) pass.setBindGroup(0, bindGroup);
-        pass.draw(3); pass.end();
-        device.queue.submit([enc.finish()]);
-      },
-    };
-  } catch (e) { console.warn('[fe web] WebGPU init failed, using wasm fallback:', e); return null; }
-}
-
-// --- CPU fallback (module.wasm per pixel into a 2D canvas). ---
-function initWasmFallback() {
-  const ctx = canvas.getContext('2d');
-  const img = ctx.createImageData(N, N);
-  return {
-    mode: 'wasm',
-    render(u) {
-      const d = img.data;
-      for (let py = 0; py < N; py++) for (let px = 0; px < N; px++) {
-        const rgba = callKernel(px, py, u);
-        const i = (py * N + px) * 4;
-        d[i] = (rgba >>> 16) & 255; d[i+1] = (rgba >>> 8) & 255; d[i+2] = rgba & 255; d[i+3] = (rgba >>> 24) & 255;
-      }
-      ctx.putImageData(img, 0, 0);
-    },
-  };
-}
-
-const renderer = (await initWebGPU()) || initWasmFallback();
-uni = autoTune();
-modeEl.textContent = renderer.mode === 'webgpu' ? 'WebGPU · shader.wgsl' : 'wasm · module.wasm';
-modeEl.className = 'badge ' + renderer.mode;
-
-// One slider per uniform member, labelled by scalar type + arg index.
-panel.innerHTML = '';
-members.forEach((m, i) => {
-  const ctl = document.createElement('div'); ctl.className = 'ctl';
-  const lab = document.createElement('label');
-  const b = document.createElement('b'); b.textContent = (+uni[i]).toFixed(m.scalar === 'f32' ? 2 : 0);
-  lab.append(Object.assign(document.createElement('span'), { textContent: `${m.scalar} @${m.arg_index}` }), b);
-  const r = document.createElement('input');
-  r.type = 'range'; r.min = 0; r.max = 128; r.step = m.scalar === 'f32' ? 0.25 : 1; r.value = uni[i];
-  r.oninput = () => { uni[i] = +r.value; b.textContent = (+r.value).toFixed(m.scalar === 'f32' ? 2 : 0); renderer.render(uni); };
-  ctl.append(lab, r); panel.append(ctl);
-});
-const meta = document.createElement('div'); meta.className = 'meta';
-meta.innerHTML = `entry <code>${manifest.source_entry}</code> · wasm ${manifest.artifacts.wasm_bytes} B`
-  + ` · wgsl ${manifest.artifacts.wgsl_bytes} B<br>secureContext ${window.isSecureContext}`
-  + ` · path <b>${renderer.mode}</b> · fe ${manifest.provenance.compiler_version}`;
-panel.append(meta);
-
-renderer.render(uni);
-window.__feReady = true;
-window.__feMode = renderer.mode;
-</script>
+  <h1>fe web · render</h1>
+  <script type="module">
+    import { mountRenderSurface } from "./fe-render-runtime.js";
+    await mountRenderSurface({ manifestUrl: "./manifest.json", container: document.body });
+  </script>
 </body>
 </html>

@@ -2783,6 +2783,7 @@ dependencies = [
  "ethers-core",
  "fe-codegen",
  "fe-common",
+ "fe-compiler-protocol",
  "fe-contract-harness",
  "fe-driver",
  "fe-fmt",
