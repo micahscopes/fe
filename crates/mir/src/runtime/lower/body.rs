@@ -3301,6 +3301,24 @@ impl<'db> RmirEmitter<'db> {
                     rhs: *rhs,
                 }
             }
+            F32IntrinsicKind::MinRelaxed => {
+                let [lhs, rhs] = args.as_slice() else {
+                    return None;
+                };
+                crate::runtime::RuntimeBuiltin::F32MinRelaxed {
+                    lhs: *lhs,
+                    rhs: *rhs,
+                }
+            }
+            F32IntrinsicKind::MaxRelaxed => {
+                let [lhs, rhs] = args.as_slice() else {
+                    return None;
+                };
+                crate::runtime::RuntimeBuiltin::F32MaxRelaxed {
+                    lhs: *lhs,
+                    rhs: *rhs,
+                }
+            }
             F32IntrinsicKind::Clamp => {
                 let [value, lo, hi] = args.as_slice() else {
                     return None;

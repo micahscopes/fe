@@ -775,6 +775,16 @@ fn format_builtin<'db>(db: &'db dyn MirDb, builtin: &RuntimeBuiltin<'db>) -> Str
             format_local_id(*lhs),
             format_local_id(*rhs)
         ),
+        RuntimeBuiltin::F32MinRelaxed { lhs, rhs } => format!(
+            "min_relaxed_f32 {}, {}",
+            format_local_id(*lhs),
+            format_local_id(*rhs)
+        ),
+        RuntimeBuiltin::F32MaxRelaxed { lhs, rhs } => format!(
+            "max_relaxed_f32 {}, {}",
+            format_local_id(*lhs),
+            format_local_id(*rhs)
+        ),
         RuntimeBuiltin::F32Clamp { value, lo, hi } => format!(
             "clamp_f32 {}, {}, {}",
             format_local_id(*value),

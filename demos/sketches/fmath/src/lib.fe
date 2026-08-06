@@ -12,6 +12,16 @@
 //! `abs()`/`min()`/`max()`/`clamp()`, wasm `f32.abs`/`f32.min`/`f32.max` (+
 //! composed clamp), cranelift `fabs`/`fmin`/`fmax` (+ composed clamp)).
 //!
+//! `abs`/`min`/`max`/`clamp` are now thin wrappers over `core::num`'s
+//! `Abs`/`MinMax` trait methods rather than calling the `__*_f32` externs
+//! directly (float-semantics type API, slice 1:
+//! `/workspace/mb2/FLOAT_SEMANTICS_TYPE_API_DESIGN.md`). This ingot stays on
+//! plain `f32` throughout -- exact, pinned "WebAssembly rules" semantics on
+//! every backend, unchanged -- it never imports `core::num::Regular`, the
+//! relaxed single-native-instruction GPU opt-in. Same surface, same
+//! semantics, same generated code; only the indirection through the trait
+//! changed.
+//!
 //! `floor`/`ceil`/`trunc`/`round` similarly graduated to `Ffloor`/`Fceil`/
 //! `Ftrunc`/`Fround`: a single native instruction on every backend (naga
 //! `floor()`/`ceil()`/`trunc()`/`round()`, wasm `f32.floor`/`f32.ceil`/
@@ -33,14 +43,13 @@
 //! ordinary Fe (a hand-chosen parabola approximation): no backend has a
 //! native `sin`/`cos` instruction, so there is no intrinsic to graduate to.
 
+use core::num::Abs
+use core::ops::MinMax
+
 extern {
     fn __f32_from_i32(_: i32) -> f32
     fn __i32_from_f32(_: f32) -> i32
     fn __sqrt_f32(_: f32) -> f32
-    fn __abs_f32(_: f32) -> f32
-    fn __min_f32(_: f32, _: f32) -> f32
-    fn __max_f32(_: f32, _: f32) -> f32
-    fn __clamp_f32(_: f32, _: f32, _: f32) -> f32
     fn __floor_f32(_: f32) -> f32
     fn __ceil_f32(_: f32) -> f32
     fn __trunc_f32(_: f32) -> f32
@@ -67,19 +76,19 @@ pub fn to_i32(_ x: f32) -> i32 {
 }
 
 pub fn abs(_ x: f32) -> f32 {
-    __abs_f32(x)
+    x.abs()
 }
 
 pub fn min(_ a: f32, _ b: f32) -> f32 {
-    __min_f32(a, b)
+    a.min(b)
 }
 
 pub fn max(_ a: f32, _ b: f32) -> f32 {
-    __max_f32(a, b)
+    a.max(b)
 }
 
 pub fn clamp(_ x: f32, _ lo: f32, _ hi: f32) -> f32 {
-    __clamp_f32(x, lo, hi)
+    x.clamp(lo, hi)
 }
 
 pub fn clamp01(_ x: f32) -> f32 {

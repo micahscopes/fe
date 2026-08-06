@@ -742,7 +742,10 @@ fn verify_builtin<'db>(
             verify_scalar_repr(body, *value, ScalarRepr::Float { bits: 32 })?;
             Ok(Some(RuntimeClass::Scalar(f32_scalar_class())))
         }
-        RuntimeBuiltin::F32Min { lhs, rhs } | RuntimeBuiltin::F32Max { lhs, rhs } => {
+        RuntimeBuiltin::F32Min { lhs, rhs }
+        | RuntimeBuiltin::F32Max { lhs, rhs }
+        | RuntimeBuiltin::F32MinRelaxed { lhs, rhs }
+        | RuntimeBuiltin::F32MaxRelaxed { lhs, rhs } => {
             verify_scalar_repr(body, *lhs, ScalarRepr::Float { bits: 32 })?;
             verify_scalar_repr(body, *rhs, ScalarRepr::Float { bits: 32 })?;
             Ok(Some(RuntimeClass::Scalar(f32_scalar_class())))

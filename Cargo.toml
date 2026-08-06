@@ -50,10 +50,10 @@ tracing-tree = "0.4.0"
 wasm-bindgen-test = "0.3"
 semver = "1.0.26"
 petgraph = "0.8"
-sonatina-ir = { git = "https://github.com/micahscopes/sonatina", rev = "c6378ea4b3a2eb54dd6c83e7a5c9cbc4c91a2ba7" }
-sonatina-triple = { git = "https://github.com/micahscopes/sonatina", rev = "c6378ea4b3a2eb54dd6c83e7a5c9cbc4c91a2ba7" }
-sonatina-codegen = { git = "https://github.com/micahscopes/sonatina", rev = "c6378ea4b3a2eb54dd6c83e7a5c9cbc4c91a2ba7", features = ["wasm"] }
-sonatina-verifier = { git = "https://github.com/micahscopes/sonatina", rev = "c6378ea4b3a2eb54dd6c83e7a5c9cbc4c91a2ba7" }
+sonatina-ir = { git = "https://github.com/micahscopes/sonatina", rev = "22a9569653ff47b259ad3c542540b74678379657" }
+sonatina-triple = { git = "https://github.com/micahscopes/sonatina", rev = "22a9569653ff47b259ad3c542540b74678379657" }
+sonatina-codegen = { git = "https://github.com/micahscopes/sonatina", rev = "22a9569653ff47b259ad3c542540b74678379657", features = ["wasm"] }
+sonatina-verifier = { git = "https://github.com/micahscopes/sonatina", rev = "22a9569653ff47b259ad3c542540b74678379657" }
 
 [profile.dev]
 # Set to 0 to make the build faster and debugging more difficult.

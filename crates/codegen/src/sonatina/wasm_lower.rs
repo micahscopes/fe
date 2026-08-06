@@ -53,8 +53,8 @@ use sonatina_ir::{
     func_cursor::InstInserter,
     inst::{
         arith::{
-            Add, Fabs, Fadd, Fceil, Fclamp, Fdiv, Ffloor, Fmax, Fmin, Fmul, Fneg, Fround, Fsqrt,
-            Fsub, Ftrunc, Mul, Sar, Shl, Shr, Sub,
+            Add, Fabs, Fadd, Fceil, Fclamp, Fdiv, Ffloor, Fmax, FmaxRelaxed, Fmin, FminRelaxed,
+            Fmul, Fneg, Fround, Fsqrt, Fsub, Ftrunc, Mul, Sar, Shl, Shr, Sub,
         },
         cast::{F32ToI32, I32ToF32, Sext, Trunc, Zext},
         cmp::{Eq as CmpEq, Feq, Fle, Flt, Lt, Slt},
@@ -799,6 +799,8 @@ fn inline_value_call<'db>(
                                 | RuntimeBuiltin::F32Abs { .. }
                                 | RuntimeBuiltin::F32Min { .. }
                                 | RuntimeBuiltin::F32Max { .. }
+                                | RuntimeBuiltin::F32MinRelaxed { .. }
+                                | RuntimeBuiltin::F32MaxRelaxed { .. }
                                 | RuntimeBuiltin::F32Clamp { .. }
                                 | RuntimeBuiltin::F32Floor { .. }
                                 | RuntimeBuiltin::F32Ceil { .. }
@@ -933,6 +935,14 @@ fn remap_inline_expr<'db>(
                 rhs: map(*rhs)?,
             },
             RuntimeBuiltin::F32Max { lhs, rhs } => RuntimeBuiltin::F32Max {
+                lhs: map(*lhs)?,
+                rhs: map(*rhs)?,
+            },
+            RuntimeBuiltin::F32MinRelaxed { lhs, rhs } => RuntimeBuiltin::F32MinRelaxed {
+                lhs: map(*lhs)?,
+                rhs: map(*rhs)?,
+            },
+            RuntimeBuiltin::F32MaxRelaxed { lhs, rhs } => RuntimeBuiltin::F32MaxRelaxed {
                 lhs: map(*lhs)?,
                 rhs: map(*rhs)?,
             },
@@ -1762,7 +1772,10 @@ fn collect_builtin_uses(builtin: &RuntimeBuiltin<'_>, used: &mut FxHashMap<RLoca
         RuntimeBuiltin::I32FromF32 { value } => mark(value),
         RuntimeBuiltin::F32Sqrt { value } => mark(value),
         RuntimeBuiltin::F32Abs { value } => mark(value),
-        RuntimeBuiltin::F32Min { lhs, rhs } | RuntimeBuiltin::F32Max { lhs, rhs } => {
+        RuntimeBuiltin::F32Min { lhs, rhs }
+        | RuntimeBuiltin::F32Max { lhs, rhs }
+        | RuntimeBuiltin::F32MinRelaxed { lhs, rhs }
+        | RuntimeBuiltin::F32MaxRelaxed { lhs, rhs } => {
             mark(lhs);
             mark(rhs);
         }
@@ -4295,6 +4308,22 @@ where
                 let rhs = self.local_value(*rhs)?;
                 Ok(self.fb.insert_inst(Fmax::new(is, lhs, rhs), Type::F32))
             }
+            RuntimeBuiltin::F32MinRelaxed { lhs, rhs } => {
+                let is = self.inst_set();
+                let lhs = self.local_value(*lhs)?;
+                let rhs = self.local_value(*rhs)?;
+                Ok(self
+                    .fb
+                    .insert_inst(FminRelaxed::new(is, lhs, rhs), Type::F32))
+            }
+            RuntimeBuiltin::F32MaxRelaxed { lhs, rhs } => {
+                let is = self.inst_set();
+                let lhs = self.local_value(*lhs)?;
+                let rhs = self.local_value(*rhs)?;
+                Ok(self
+                    .fb
+                    .insert_inst(FmaxRelaxed::new(is, lhs, rhs), Type::F32))
+            }
             RuntimeBuiltin::F32Clamp { value, lo, hi } => {
                 let is = self.inst_set();
                 let value = self.local_value(*value)?;
@@ -4662,6 +4691,8 @@ where
                     | "__abs_f32"
                     | "__min_f32"
                     | "__max_f32"
+                    | "__min_relaxed_f32"
+                    | "__max_relaxed_f32"
                     | "__clamp_f32"
                     | "__floor_f32"
                     | "__ceil_f32"

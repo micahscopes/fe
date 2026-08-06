@@ -2532,6 +2532,8 @@ pub(super) enum F32IntrinsicKind {
     Abs,
     Min,
     Max,
+    MinRelaxed,
+    MaxRelaxed,
     Clamp,
     Floor,
     Ceil,
@@ -2871,6 +2873,8 @@ pub(super) fn f32_intrinsic_kind(name: &str) -> Option<F32IntrinsicKind> {
         "__abs_f32" => F32IntrinsicKind::Abs,
         "__min_f32" => F32IntrinsicKind::Min,
         "__max_f32" => F32IntrinsicKind::Max,
+        "__min_relaxed_f32" => F32IntrinsicKind::MinRelaxed,
+        "__max_relaxed_f32" => F32IntrinsicKind::MaxRelaxed,
         "__clamp_f32" => F32IntrinsicKind::Clamp,
         "__floor_f32" => F32IntrinsicKind::Floor,
         "__ceil_f32" => F32IntrinsicKind::Ceil,
@@ -3127,6 +3131,14 @@ mod tests {
         assert_eq!(f32_intrinsic_kind("__abs_f32"), Some(F32IntrinsicKind::Abs));
         assert_eq!(f32_intrinsic_kind("__min_f32"), Some(F32IntrinsicKind::Min));
         assert_eq!(f32_intrinsic_kind("__max_f32"), Some(F32IntrinsicKind::Max));
+        assert_eq!(
+            f32_intrinsic_kind("__min_relaxed_f32"),
+            Some(F32IntrinsicKind::MinRelaxed)
+        );
+        assert_eq!(
+            f32_intrinsic_kind("__max_relaxed_f32"),
+            Some(F32IntrinsicKind::MaxRelaxed)
+        );
         assert_eq!(
             f32_intrinsic_kind("__clamp_f32"),
             Some(F32IntrinsicKind::Clamp)

@@ -1579,6 +1579,8 @@ impl<'ctx, 'db, 'a> FunctionLowerer<'ctx, 'db, 'a> {
             | RuntimeBuiltin::F32Abs { .. }
             | RuntimeBuiltin::F32Min { .. }
             | RuntimeBuiltin::F32Max { .. }
+            | RuntimeBuiltin::F32MinRelaxed { .. }
+            | RuntimeBuiltin::F32MaxRelaxed { .. }
             | RuntimeBuiltin::F32Clamp { .. }
             | RuntimeBuiltin::F32Floor { .. }
             | RuntimeBuiltin::F32Ceil { .. }

@@ -360,6 +360,13 @@ extern {
     const fn __abs_f32(_: f32) -> f32
     const fn __min_f32(_: f32, _: f32) -> f32
     const fn __max_f32(_: f32, _: f32) -> f32
+    // RELAXED min/max: IEEE minNum/maxNum-family latitude on NaN operands and
+    // signed-zero ties, exact otherwise (sonatina `FminRelaxed`/
+    // `FmaxRelaxed`). Reached only through `Regular::min`/`max`, never
+    // through `f32::min`/`max` above. CTFE evaluates these the same as
+    // `__min_f32`/`__max_f32` (the canonical exact refinement).
+    const fn __min_relaxed_f32(_: f32, _: f32) -> f32
+    const fn __max_relaxed_f32(_: f32, _: f32) -> f32
     const fn __clamp_f32(_: f32, _: f32, _: f32) -> f32
     const fn __floor_f32(_: f32) -> f32
     const fn __ceil_f32(_: f32) -> f32
@@ -1915,3 +1922,118 @@ impl Ord for f32 {
     const fn ge(self, _ other: f32) -> bool { __ge_f32(self, other) }
 }
 impl Default for f32 { fn default() -> Self { 0.0 } }
+
+// f32's min/max/clamp: the EXACT, PINNED "WebAssembly rules" op family
+// (sonatina `Fmin`/`Fmax`/`Fclamp`), safe-by-default on every backend
+// including GPU. A naive `a.min(b)` on plain `f32` is always this impl;
+// silent relaxation is unreachable from here. See `Regular` below for the
+// typed opt-in to the single-native-instruction relaxed family.
+impl MinMax for f32 {
+    const fn min(self, _ other: f32) -> f32 { __min_f32(self, other) }
+    const fn max(self, _ other: f32) -> f32 { __max_f32(self, other) }
+    const fn clamp(self, _ lo: f32, _ hi: f32) -> f32 { __clamp_f32(self, lo, hi) }
+}
+
+// `Abs` (declared above for the signed integer words, with the
+// checked/wrapping/saturating/overflowing family motivated by the `T::MIN`
+// asymmetric-magnitude edge case) is reused here, not re-declared: f32's
+// `abs` is a pure bitwise sign-clear with no such edge case (there is no
+// "unrepresentable magnitude" for a float the way there is for `i8::MIN`),
+// so every variant below degenerates to the same one-op `__abs_f32` call.
+impl Abs for f32 {
+    const fn abs(self) -> f32 { __abs_f32(self) }
+    const fn checked_abs(self) -> Option<f32> { Option::Some(__abs_f32(self)) }
+    const fn wrapping_abs(self) -> f32 { __abs_f32(self) }
+    const fn saturating_abs(self) -> f32 { __abs_f32(self) }
+    const fn overflowing_abs(self) -> (f32, bool) { (__abs_f32(self), false) }
+}
+
+// `Regular`: the float-semantics type API's domain newtype (slice 1,
+// `/workspace/mb2/FLOAT_SEMANTICS_TYPE_API_DESIGN.md`). A private-field
+// wrapper over `f32`, zero-cost through codegen (single-scalar-field struct
+// collapse, wasm_lower.rs `single_scalar_field`), whose contract is: no NaN
+// reaches a `min`/`max`/`clamp` call, and the sign of a zero result is never
+// observed downstream. Under that contract, `min`/`max`/`clamp` on `Regular`
+// resolve (ordinary coherent trait dispatch, the SAME `MinMax` trait `f32`
+// implements above) to the RELAXED IR ops, which lower to a single native
+// GPU instruction instead of the ~15-20-op exact expansion `f32` pays.
+// `+ - * /` are NOT relaxed: they delegate to the exact SAME `__*_f32`
+// externs `f32` uses; only min/max/clamp resolution differs. NOT "finite":
+// +/-inf order correctly through `Regular` and are allowed.
+pub struct Regular {
+    val: f32
+}
+
+impl Regular {
+    /// Zero-cost entry: the author asserts the domain contract (no NaN, no
+    /// observed zero-sign) holds for `x`. Plain `pub fn` in this slice --
+    /// UNGATED (open question: whether a GPU-kernel entry can carry a
+    /// `uses (FloatAssume)` capability with the ZST fully erased from the
+    /// naga ABI is unverified; `assume` ships ungated here and slice 3 adds
+    /// the `uses`-threaded gate once that is checked). Still explicit and
+    /// greppable: `Regular`/`assume` never appear in code that does not
+    /// import them.
+    pub fn assume(_ x: f32) -> Regular {
+        Regular { val: x }
+    }
+
+    /// Unwrap back to plain `f32` (exact semantics from here on).
+    pub fn get(self) -> f32 {
+        self.val
+    }
+}
+
+impl Copy for Regular {}
+
+impl MinMax for Regular {
+    const fn min(self, _ other: Regular) -> Regular {
+        Regular { val: __min_relaxed_f32(self.val, other.val) }
+    }
+    const fn max(self, _ other: Regular) -> Regular {
+        Regular { val: __max_relaxed_f32(self.val, other.val) }
+    }
+    // Composed IN FE from the relaxed min/max, mirroring `f32::clamp`'s own
+    // composition story (no ternary relaxed IR op exists): `lo > hi` stays
+    // DEFINED as `hi` (never FClamp-style poison), and GPU cost is 2 relaxed
+    // ops, matching today's composed-`Fclamp` shape.
+    const fn clamp(self, _ lo: Regular, _ hi: Regular) -> Regular {
+        self.max(lo).min(hi)
+    }
+}
+
+// `abs` is exact AND 1-op everywhere -- no relaxation needed or offered.
+impl Abs for Regular {
+    const fn abs(self) -> Regular { Regular { val: __abs_f32(self.val) } }
+    const fn checked_abs(self) -> Option<Regular> { Option::Some(Regular { val: __abs_f32(self.val) }) }
+    const fn wrapping_abs(self) -> Regular { Regular { val: __abs_f32(self.val) } }
+    const fn saturating_abs(self) -> Regular { Regular { val: __abs_f32(self.val) } }
+    const fn overflowing_abs(self) -> (Regular, bool) { (Regular { val: __abs_f32(self.val) }, false) }
+}
+
+// Arithmetic passthrough: `+ - * /` on `Regular` delegate to the SAME
+// `__*_f32` externs plain `f32` uses (never relaxed).
+impl Add for Regular {
+    const fn add(own self, _ other: own Regular) -> Regular { Regular { val: __add_f32(self.val, other.val) } }
+}
+impl Sub for Regular {
+    const fn sub(own self, _ other: own Regular) -> Regular { Regular { val: __sub_f32(self.val, other.val) } }
+}
+impl Mul for Regular {
+    const fn mul(own self, _ other: own Regular) -> Regular { Regular { val: __mul_f32(self.val, other.val) } }
+}
+impl Div for Regular {
+    const fn div(own self, _ other: own Regular) -> Regular { Regular { val: __div_f32(self.val, other.val) } }
+}
+impl Neg for Regular {
+    const fn neg(own self) -> Regular { Regular { val: __neg_f32(self.val) } }
+}
+impl Eq for Regular {
+    const fn eq(self, _ other: Regular) -> bool { __eq_f32(self.val, other.val) }
+    const fn ne(self, _ other: Regular) -> bool { __ne_f32(self.val, other.val) }
+}
+impl Ord for Regular {
+    const fn lt(self, _ other: Regular) -> bool { __lt_f32(self.val, other.val) }
+    const fn le(self, _ other: Regular) -> bool { __le_f32(self.val, other.val) }
+    const fn gt(self, _ other: Regular) -> bool { __gt_f32(self.val, other.val) }
+    const fn ge(self, _ other: Regular) -> bool { __ge_f32(self.val, other.val) }
+}

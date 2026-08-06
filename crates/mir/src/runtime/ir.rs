@@ -1285,6 +1285,28 @@ pub enum RuntimeBuiltin<'db> {
         lhs: RValueId,
         rhs: RValueId,
     },
+    /// Floating point minimum, RELAXED contract: "any behavior within IEEE
+    /// 754-2019 `minNum`/`maxNum`-family latitude on NaN operands and
+    /// signed-zero ties; exact otherwise". A DIFFERENT, honestly weaker
+    /// contract than [`RuntimeBuiltin::F32Min`] -- reached only through
+    /// `core::num::Regular` (the float-semantics type API's domain newtype),
+    /// never from plain `f32`. wasm/cranelift lower this to the SAME native
+    /// `f32.min`/`fmin` instruction as `F32Min` (native already conforms to
+    /// the relaxed latitude); naga/SPIR-V lowers it to a single
+    /// `MathFunction::Min` GLSL op instead of the ~15-20-op exact expansion.
+    /// Interpreter/CTFE evaluate this AS EXACT (the canonical refinement, for
+    /// deterministic const-eval). See sonatina's
+    /// `docs/numeric-intrinsics-semantics.md` ("The relaxed pair").
+    F32MinRelaxed {
+        lhs: RValueId,
+        rhs: RValueId,
+    },
+    /// Floating point maximum, RELAXED contract. See
+    /// [`RuntimeBuiltin::F32MinRelaxed`] for the pinned latitude.
+    F32MaxRelaxed {
+        lhs: RValueId,
+        rhs: RValueId,
+    },
     /// Floating point clamp: `clamp(value, lo, hi)`. A dedicated ternary
     /// builtin (not composed from min/max at this layer) so the IR carries
     /// clamp semantics as a unit; every backend composes it as
@@ -1481,6 +1503,8 @@ impl<'db> RuntimeBuiltin<'db> {
             | RuntimeBuiltin::F32Abs { .. }
             | RuntimeBuiltin::F32Min { .. }
             | RuntimeBuiltin::F32Max { .. }
+            | RuntimeBuiltin::F32MinRelaxed { .. }
+            | RuntimeBuiltin::F32MaxRelaxed { .. }
             | RuntimeBuiltin::F32Clamp { .. }
             | RuntimeBuiltin::F32Floor { .. }
             | RuntimeBuiltin::F32Ceil { .. }

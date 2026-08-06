@@ -130,6 +130,22 @@ pub trait Ord<T = Self> {
     fn ge(self, _ other: T) -> bool
 }
 
+// Value-domain min/max/clamp: a THIRD, separate op family from `Ord`
+// (deliberately not default-derived from `lt`/`le`, so a type can choose a
+// dedicated min/max primitive with different rounding/NaN/tie-breaking
+// behavior than its ordering comparisons -- f32's `min`/`max`/`clamp` are the
+// PINNED "WebAssembly rules" IEEE 754 op family, not `if self.lt(other)
+// { self } else { other }`). One name, resolved per type by ordinary
+// coherent trait dispatch: `f32`'s impl is exact everywhere;
+// `core::num::Regular`'s impl resolves to the relaxed, single-native-
+// instruction-on-GPU op family instead. See
+// `/workspace/mb2/FLOAT_SEMANTICS_TYPE_API_DESIGN.md`.
+pub trait MinMax<T = Self> {
+    const fn min(self, _ other: T) -> Self
+    const fn max(self, _ other: T) -> Self
+    const fn clamp(self, _ lo: T, _ hi: T) -> Self
+}
+
 // Indexing operator
 pub trait Index<I> {
     type Output

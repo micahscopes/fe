@@ -178,7 +178,10 @@ fn rewrite_alias_inputs(
             | RuntimeBuiltin::F32Ceil { value }
             | RuntimeBuiltin::F32Trunc { value }
             | RuntimeBuiltin::F32Round { value } => resolve(value),
-            RuntimeBuiltin::F32Min { lhs, rhs } | RuntimeBuiltin::F32Max { lhs, rhs } => {
+            RuntimeBuiltin::F32Min { lhs, rhs }
+            | RuntimeBuiltin::F32Max { lhs, rhs }
+            | RuntimeBuiltin::F32MinRelaxed { lhs, rhs }
+            | RuntimeBuiltin::F32MaxRelaxed { lhs, rhs } => {
                 resolve(lhs);
                 resolve(rhs);
             }
@@ -213,6 +216,8 @@ fn is_pure_inline_expr(expr: &RExpr<'_>) -> bool {
                     | RuntimeBuiltin::F32Abs { .. }
                     | RuntimeBuiltin::F32Min { .. }
                     | RuntimeBuiltin::F32Max { .. }
+                    | RuntimeBuiltin::F32MinRelaxed { .. }
+                    | RuntimeBuiltin::F32MaxRelaxed { .. }
                     | RuntimeBuiltin::F32Clamp { .. }
             )
             | RExpr::AggregateMake { .. }
@@ -240,7 +245,10 @@ fn add_expr_inputs(expr: &RExpr<'_>, live: &mut FxHashSet<RLocalId>) -> Option<(
             | RuntimeBuiltin::F32Abs { value } => {
                 live.insert(*value);
             }
-            RuntimeBuiltin::F32Min { lhs, rhs } | RuntimeBuiltin::F32Max { lhs, rhs } => {
+            RuntimeBuiltin::F32Min { lhs, rhs }
+            | RuntimeBuiltin::F32Max { lhs, rhs }
+            | RuntimeBuiltin::F32MinRelaxed { lhs, rhs }
+            | RuntimeBuiltin::F32MaxRelaxed { lhs, rhs } => {
                 live.insert(*lhs);
                 live.insert(*rhs);
             }
