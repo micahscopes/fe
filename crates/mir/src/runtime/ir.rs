@@ -1266,6 +1266,63 @@ pub enum RuntimeBuiltin<'db> {
     F32Sqrt {
         value: RValueId,
     },
+    /// Floating point absolute value: a pure bitwise sign-clear.
+    F32Abs {
+        value: RValueId,
+    },
+    /// Floating point minimum. PINNED semantics: the "WebAssembly rules"
+    /// (NaN-propagating, -0.0 < +0.0), matching wasm's `f32.min` and
+    /// cranelift's `fmin` bit-for-bit, AND (via sonatina's branch-free
+    /// integer key-compare-and-select naga/SPIR-V expansion) the GPU
+    /// backend too. See sonatina's `docs/numeric-intrinsics-semantics.md`.
+    F32Min {
+        lhs: RValueId,
+        rhs: RValueId,
+    },
+    /// Floating point maximum. See [`RuntimeBuiltin::F32Min`] for the pinned
+    /// semantics.
+    F32Max {
+        lhs: RValueId,
+        rhs: RValueId,
+    },
+    /// Floating point clamp: `clamp(value, lo, hi)`. A dedicated ternary
+    /// builtin (not composed from min/max at this layer) so the IR carries
+    /// clamp semantics as a unit; every backend composes it as
+    /// `min(max(value, lo), hi)` (branch-free, and defined for `lo > hi`
+    /// unlike a single native `clamp()`/`FClamp`, which is poison in that
+    /// case). See sonatina's `docs/numeric-intrinsics-semantics.md`.
+    F32Clamp {
+        value: RValueId,
+        lo: RValueId,
+        hi: RValueId,
+    },
+    /// Floating point floor: round to integral, towards negative infinity.
+    /// A single native instruction on every backend (naga
+    /// `MathFunction::Floor`, wasm `f32.floor`, cranelift `floor`); no
+    /// bit-twiddling, no NaN/-0 subtlety. See sonatina's
+    /// `docs/numeric-intrinsics-semantics.md`.
+    F32Floor {
+        value: RValueId,
+    },
+    /// Floating point ceiling: round to integral, towards positive infinity.
+    /// See [`RuntimeBuiltin::F32Floor`] for the pinned semantics.
+    F32Ceil {
+        value: RValueId,
+    },
+    /// Floating point truncation: round to integral, towards zero. See
+    /// [`RuntimeBuiltin::F32Floor`] for the pinned semantics.
+    F32Trunc {
+        value: RValueId,
+    },
+    /// Floating point round: round to integral, towards the nearest value,
+    /// ties to even (`roundTiesToEven`, IEEE 754). PINNED: wasm's
+    /// `f32.nearest`, cranelift's `nearest`, and naga/SPIR-V's
+    /// `MathFunction::Round` (-> GLSL.std.450 `RoundEven`) all agree
+    /// exactly; unlike `F32Min`/`F32Max` there is no cross-backend
+    /// divergence to pin around.
+    F32Round {
+        value: RValueId,
+    },
     Address,
     Caller,
     Origin,
@@ -1420,7 +1477,15 @@ impl<'db> RuntimeBuiltin<'db> {
             | RuntimeBuiltin::Saturating { .. }
             | RuntimeBuiltin::F32FromI32 { .. }
             | RuntimeBuiltin::I32FromF32 { .. }
-            | RuntimeBuiltin::F32Sqrt { .. } => PortableCompute,
+            | RuntimeBuiltin::F32Sqrt { .. }
+            | RuntimeBuiltin::F32Abs { .. }
+            | RuntimeBuiltin::F32Min { .. }
+            | RuntimeBuiltin::F32Max { .. }
+            | RuntimeBuiltin::F32Clamp { .. }
+            | RuntimeBuiltin::F32Floor { .. }
+            | RuntimeBuiltin::F32Ceil { .. }
+            | RuntimeBuiltin::F32Trunc { .. }
+            | RuntimeBuiltin::F32Round { .. } => PortableCompute,
 
             // Persistent storage.
             RuntimeBuiltin::Sload { .. } | RuntimeBuiltin::Sstore { .. } => EvmHost,

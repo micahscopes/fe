@@ -738,6 +738,28 @@ fn verify_builtin<'db>(
             verify_scalar_repr(body, *value, ScalarRepr::Float { bits: 32 })?;
             Ok(Some(RuntimeClass::Scalar(f32_scalar_class())))
         }
+        RuntimeBuiltin::F32Abs { value } => {
+            verify_scalar_repr(body, *value, ScalarRepr::Float { bits: 32 })?;
+            Ok(Some(RuntimeClass::Scalar(f32_scalar_class())))
+        }
+        RuntimeBuiltin::F32Min { lhs, rhs } | RuntimeBuiltin::F32Max { lhs, rhs } => {
+            verify_scalar_repr(body, *lhs, ScalarRepr::Float { bits: 32 })?;
+            verify_scalar_repr(body, *rhs, ScalarRepr::Float { bits: 32 })?;
+            Ok(Some(RuntimeClass::Scalar(f32_scalar_class())))
+        }
+        RuntimeBuiltin::F32Clamp { value, lo, hi } => {
+            verify_scalar_repr(body, *value, ScalarRepr::Float { bits: 32 })?;
+            verify_scalar_repr(body, *lo, ScalarRepr::Float { bits: 32 })?;
+            verify_scalar_repr(body, *hi, ScalarRepr::Float { bits: 32 })?;
+            Ok(Some(RuntimeClass::Scalar(f32_scalar_class())))
+        }
+        RuntimeBuiltin::F32Floor { value }
+        | RuntimeBuiltin::F32Ceil { value }
+        | RuntimeBuiltin::F32Trunc { value }
+        | RuntimeBuiltin::F32Round { value } => {
+            verify_scalar_repr(body, *value, ScalarRepr::Float { bits: 32 })?;
+            Ok(Some(RuntimeClass::Scalar(f32_scalar_class())))
+        }
         RuntimeBuiltin::BlockHash { block } => {
             verify_word_value(body, *block)?;
             Ok(Some(RuntimeClass::Scalar(word_scalar_class())))

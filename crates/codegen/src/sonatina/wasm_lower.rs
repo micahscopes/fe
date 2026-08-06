@@ -52,7 +52,10 @@ use sonatina_ir::{
     builder::{FunctionBuilder, ModuleBuilder, Variable},
     func_cursor::InstInserter,
     inst::{
-        arith::{Add, Fadd, Fdiv, Fmul, Fneg, Fsqrt, Fsub, Mul, Sar, Shl, Shr, Sub},
+        arith::{
+            Add, Fabs, Fadd, Fceil, Fclamp, Fdiv, Ffloor, Fmax, Fmin, Fmul, Fneg, Fround, Fsqrt,
+            Fsub, Ftrunc, Mul, Sar, Shl, Shr, Sub,
+        },
         cast::{F32ToI32, I32ToF32, Sext, Trunc, Zext},
         cmp::{Eq as CmpEq, Feq, Fle, Flt, Lt, Slt},
         control_flow::{Br, Call, Jump, Phi, Return, Unreachable},
@@ -793,6 +796,14 @@ fn inline_value_call<'db>(
                                 | RuntimeBuiltin::F32FromI32 { .. }
                                 | RuntimeBuiltin::I32FromF32 { .. }
                                 | RuntimeBuiltin::F32Sqrt { .. }
+                                | RuntimeBuiltin::F32Abs { .. }
+                                | RuntimeBuiltin::F32Min { .. }
+                                | RuntimeBuiltin::F32Max { .. }
+                                | RuntimeBuiltin::F32Clamp { .. }
+                                | RuntimeBuiltin::F32Floor { .. }
+                                | RuntimeBuiltin::F32Ceil { .. }
+                                | RuntimeBuiltin::F32Trunc { .. }
+                                | RuntimeBuiltin::F32Round { .. }
                         )
                         | RExpr::AggregateMake { .. }
                         | RExpr::AggregateExtract { .. }
@@ -912,6 +923,34 @@ fn remap_inline_expr<'db>(
                 value: map(*value)?,
             },
             RuntimeBuiltin::F32Sqrt { value } => RuntimeBuiltin::F32Sqrt {
+                value: map(*value)?,
+            },
+            RuntimeBuiltin::F32Abs { value } => RuntimeBuiltin::F32Abs {
+                value: map(*value)?,
+            },
+            RuntimeBuiltin::F32Min { lhs, rhs } => RuntimeBuiltin::F32Min {
+                lhs: map(*lhs)?,
+                rhs: map(*rhs)?,
+            },
+            RuntimeBuiltin::F32Max { lhs, rhs } => RuntimeBuiltin::F32Max {
+                lhs: map(*lhs)?,
+                rhs: map(*rhs)?,
+            },
+            RuntimeBuiltin::F32Clamp { value, lo, hi } => RuntimeBuiltin::F32Clamp {
+                value: map(*value)?,
+                lo: map(*lo)?,
+                hi: map(*hi)?,
+            },
+            RuntimeBuiltin::F32Floor { value } => RuntimeBuiltin::F32Floor {
+                value: map(*value)?,
+            },
+            RuntimeBuiltin::F32Ceil { value } => RuntimeBuiltin::F32Ceil {
+                value: map(*value)?,
+            },
+            RuntimeBuiltin::F32Trunc { value } => RuntimeBuiltin::F32Trunc {
+                value: map(*value)?,
+            },
+            RuntimeBuiltin::F32Round { value } => RuntimeBuiltin::F32Round {
                 value: map(*value)?,
             },
             _ => return None,
@@ -1722,6 +1761,20 @@ fn collect_builtin_uses(builtin: &RuntimeBuiltin<'_>, used: &mut FxHashMap<RLoca
         RuntimeBuiltin::F32FromI32 { value } => mark(value),
         RuntimeBuiltin::I32FromF32 { value } => mark(value),
         RuntimeBuiltin::F32Sqrt { value } => mark(value),
+        RuntimeBuiltin::F32Abs { value } => mark(value),
+        RuntimeBuiltin::F32Min { lhs, rhs } | RuntimeBuiltin::F32Max { lhs, rhs } => {
+            mark(lhs);
+            mark(rhs);
+        }
+        RuntimeBuiltin::F32Clamp { value, lo, hi } => {
+            mark(value);
+            mark(lo);
+            mark(hi);
+        }
+        RuntimeBuiltin::F32Floor { value } => mark(value),
+        RuntimeBuiltin::F32Ceil { value } => mark(value),
+        RuntimeBuiltin::F32Trunc { value } => mark(value),
+        RuntimeBuiltin::F32Round { value } => mark(value),
         RuntimeBuiltin::Address => {}
         RuntimeBuiltin::Caller => {}
         RuntimeBuiltin::Origin => {}
@@ -4225,6 +4278,52 @@ where
                 let value = self.local_value(*value)?;
                 Ok(self.fb.insert_inst(Fsqrt::new(is, value), Type::F32))
             }
+            RuntimeBuiltin::F32Abs { value } => {
+                let is = self.inst_set();
+                let value = self.local_value(*value)?;
+                Ok(self.fb.insert_inst(Fabs::new(is, value), Type::F32))
+            }
+            RuntimeBuiltin::F32Min { lhs, rhs } => {
+                let is = self.inst_set();
+                let lhs = self.local_value(*lhs)?;
+                let rhs = self.local_value(*rhs)?;
+                Ok(self.fb.insert_inst(Fmin::new(is, lhs, rhs), Type::F32))
+            }
+            RuntimeBuiltin::F32Max { lhs, rhs } => {
+                let is = self.inst_set();
+                let lhs = self.local_value(*lhs)?;
+                let rhs = self.local_value(*rhs)?;
+                Ok(self.fb.insert_inst(Fmax::new(is, lhs, rhs), Type::F32))
+            }
+            RuntimeBuiltin::F32Clamp { value, lo, hi } => {
+                let is = self.inst_set();
+                let value = self.local_value(*value)?;
+                let lo = self.local_value(*lo)?;
+                let hi = self.local_value(*hi)?;
+                Ok(self
+                    .fb
+                    .insert_inst(Fclamp::new(is, value, lo, hi), Type::F32))
+            }
+            RuntimeBuiltin::F32Floor { value } => {
+                let is = self.inst_set();
+                let value = self.local_value(*value)?;
+                Ok(self.fb.insert_inst(Ffloor::new(is, value), Type::F32))
+            }
+            RuntimeBuiltin::F32Ceil { value } => {
+                let is = self.inst_set();
+                let value = self.local_value(*value)?;
+                Ok(self.fb.insert_inst(Fceil::new(is, value), Type::F32))
+            }
+            RuntimeBuiltin::F32Trunc { value } => {
+                let is = self.inst_set();
+                let value = self.local_value(*value)?;
+                Ok(self.fb.insert_inst(Ftrunc::new(is, value), Type::F32))
+            }
+            RuntimeBuiltin::F32Round { value } => {
+                let is = self.inst_set();
+                let value = self.local_value(*value)?;
+                Ok(self.fb.insert_inst(Fround::new(is, value), Type::F32))
+            }
             RuntimeBuiltin::Malloc { size } => {
                 let is = self.inst_set();
                 let size = self.local_value(*size)?;
@@ -4563,7 +4662,11 @@ where
                     | "__abs_f32"
                     | "__min_f32"
                     | "__max_f32"
+                    | "__clamp_f32"
                     | "__floor_f32"
+                    | "__ceil_f32"
+                    | "__trunc_f32"
+                    | "__round_f32"
                     | "__f32_from_i32"
                     | "__i32_from_f32"
             ) {

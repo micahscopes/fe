@@ -1575,9 +1575,17 @@ impl<'ctx, 'db, 'a> FunctionLowerer<'ctx, 'db, 'a> {
             } => self.lower_intrinsic_arith_builtin(*op, *checked, *lhs, *rhs, class)?,
             RuntimeBuiltin::F32FromI32 { .. }
             | RuntimeBuiltin::I32FromF32 { .. }
-            | RuntimeBuiltin::F32Sqrt { .. } => {
+            | RuntimeBuiltin::F32Sqrt { .. }
+            | RuntimeBuiltin::F32Abs { .. }
+            | RuntimeBuiltin::F32Min { .. }
+            | RuntimeBuiltin::F32Max { .. }
+            | RuntimeBuiltin::F32Clamp { .. }
+            | RuntimeBuiltin::F32Floor { .. }
+            | RuntimeBuiltin::F32Ceil { .. }
+            | RuntimeBuiltin::F32Trunc { .. }
+            | RuntimeBuiltin::F32Round { .. } => {
                 return Err(LowerError::Unsupported(
-                    "f32 conversion and sqrt builtins are not supported by the EVM backend"
+                    "f32 conversion, sqrt, abs, min, max, clamp and rounding builtins are not supported by the EVM backend"
                         .to_string(),
                 ));
             }

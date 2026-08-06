@@ -764,6 +764,27 @@ fn format_builtin<'db>(db: &'db dyn MirDb, builtin: &RuntimeBuiltin<'db>) -> Str
             format!("i32_from_f32 {}", format_local_id(*value))
         }
         RuntimeBuiltin::F32Sqrt { value } => format!("sqrt_f32 {}", format_local_id(*value)),
+        RuntimeBuiltin::F32Abs { value } => format!("abs_f32 {}", format_local_id(*value)),
+        RuntimeBuiltin::F32Min { lhs, rhs } => format!(
+            "min_f32 {}, {}",
+            format_local_id(*lhs),
+            format_local_id(*rhs)
+        ),
+        RuntimeBuiltin::F32Max { lhs, rhs } => format!(
+            "max_f32 {}, {}",
+            format_local_id(*lhs),
+            format_local_id(*rhs)
+        ),
+        RuntimeBuiltin::F32Clamp { value, lo, hi } => format!(
+            "clamp_f32 {}, {}, {}",
+            format_local_id(*value),
+            format_local_id(*lo),
+            format_local_id(*hi)
+        ),
+        RuntimeBuiltin::F32Floor { value } => format!("floor_f32 {}", format_local_id(*value)),
+        RuntimeBuiltin::F32Ceil { value } => format!("ceil_f32 {}", format_local_id(*value)),
+        RuntimeBuiltin::F32Trunc { value } => format!("trunc_f32 {}", format_local_id(*value)),
+        RuntimeBuiltin::F32Round { value } => format!("round_f32 {}", format_local_id(*value)),
         RuntimeBuiltin::Address => "address".to_string(),
         RuntimeBuiltin::Caller => "caller".to_string(),
         RuntimeBuiltin::Origin => "origin".to_string(),

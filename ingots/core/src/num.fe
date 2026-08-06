@@ -360,7 +360,11 @@ extern {
     const fn __abs_f32(_: f32) -> f32
     const fn __min_f32(_: f32, _: f32) -> f32
     const fn __max_f32(_: f32, _: f32) -> f32
+    const fn __clamp_f32(_: f32, _: f32, _: f32) -> f32
     const fn __floor_f32(_: f32) -> f32
+    const fn __ceil_f32(_: f32) -> f32
+    const fn __trunc_f32(_: f32) -> f32
+    const fn __round_f32(_: f32) -> f32
 
     const fn __eq_f32(_: f32, _: f32) -> bool
     const fn __ne_f32(_: f32, _: f32) -> bool

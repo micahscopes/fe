@@ -319,6 +319,194 @@ pub fn ge(a: f32, b: f32) -> bool { a >= b }
     }
 }
 
+/// `abs`/`min`/`max`/`clamp` f32 intrinsics (`Fabs`/`Fmin`/`Fmax`/`Fclamp`),
+/// executed end-to-end Fe source -> wasm -> wasmtime. Oracle values are
+/// checked bit-exact against a plain Rust reference (normal values only; the
+/// NaN/-0.0 cross-backend PINNED-semantics differential lives in Sonatina's
+/// own test suite at `cranelift_backend.rs`, since that needs both the wasm
+/// AND cranelift backends side by side on the same IR).
+#[test]
+fn f32_abs_min_max_clamp_intrinsics_execute_on_wasm() {
+    let source = r#"
+extern {
+    fn __abs_f32(_: f32) -> f32
+    fn __min_f32(_: f32, _: f32) -> f32
+    fn __max_f32(_: f32, _: f32) -> f32
+    fn __clamp_f32(_: f32, _: f32, _: f32) -> f32
+}
+pub fn abs(x: f32) -> f32 { __abs_f32(x) }
+pub fn min(a: f32, b: f32) -> f32 { __min_f32(a, b) }
+pub fn max(a: f32, b: f32) -> f32 { __max_f32(a, b) }
+pub fn clamp(x: f32, lo: f32, hi: f32) -> f32 { __clamp_f32(x, lo, hi) }
+"#;
+    let wasm = compile_to_wasm("wasm_f32_abs_min_max_clamp.fe", source);
+    assert!(
+        func_imports(&wasm)
+            .iter()
+            .all(|(_, name)| !name.ends_with("_f32")),
+        "f32 abs/min/max/clamp intrinsics must lower to Sonatina ops, not wasm host imports"
+    );
+
+    let operators = wasmparser::Parser::new(0)
+        .parse_all(&wasm)
+        .filter_map(|payload| match payload.expect("valid wasm") {
+            wasmparser::Payload::CodeSectionEntry(body) => Some(
+                body.get_operators_reader()
+                    .expect("operator reader")
+                    .into_iter()
+                    .map(|op| format!("{:?}", op.expect("valid operator")))
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n");
+    for opcode in ["F32Abs", "F32Min", "F32Max"] {
+        assert!(
+            operators.contains(opcode),
+            "generated wasm lacks {opcode} (branchy fallback?):\n{operators}"
+        );
+    }
+    // `clamp` has no native wasm instruction; it must compose from exactly the
+    // two native ops above (`min(max(x, lo), hi)`), never a branch.
+    assert!(
+        !operators.contains("If") && !operators.contains("Select"),
+        "clamp must be branch-free (min/max composition), found a branch:\n{operators}"
+    );
+
+    let (mut store, instance) = instantiate(&wasm);
+    let abs = instance
+        .get_typed_func::<f32, f32>(&mut store, "abs")
+        .expect("abs export");
+    let min = instance
+        .get_typed_func::<(f32, f32), f32>(&mut store, "min")
+        .expect("min export");
+    let max = instance
+        .get_typed_func::<(f32, f32), f32>(&mut store, "max")
+        .expect("max export");
+    let clamp = instance
+        .get_typed_func::<(f32, f32, f32), f32>(&mut store, "clamp")
+        .expect("clamp export");
+
+    for x in [-3.5f32, 3.5, 0.0, -0.0, -1.0, 1.0] {
+        assert_eq!(abs.call(&mut store, x).unwrap(), x.abs(), "abs({x})");
+    }
+    for (a, b) in [(1.0f32, 2.0), (2.0, 1.0), (-5.0, 5.0), (3.0, 3.0)] {
+        assert_eq!(min.call(&mut store, (a, b)).unwrap(), a.min(b), "min({a}, {b})");
+        assert_eq!(max.call(&mut store, (a, b)).unwrap(), a.max(b), "max({a}, {b})");
+    }
+    for (x, lo, hi, expected) in [
+        (5.0f32, 0.0, 1.0, 1.0),
+        (-5.0, 0.0, 1.0, 0.0),
+        (0.5, 0.0, 1.0, 0.5),
+        (0.0, 0.0, 1.0, 0.0),
+        (1.0, 0.0, 1.0, 1.0),
+    ] {
+        assert_eq!(
+            clamp.call(&mut store, (x, lo, hi)).unwrap(),
+            expected,
+            "clamp({x}, {lo}, {hi})"
+        );
+    }
+}
+
+/// `floor`/`ceil`/`trunc`/`round` f32 intrinsics (`Ffloor`/`Fceil`/`Ftrunc`/
+/// `Fround`), executed end-to-end Fe source -> wasm -> wasmtime. Oracle
+/// values are checked bit-exact against a plain Rust reference
+/// (`f32::round_ties_even`, NOT `f32::round`, for `round` -- ties-to-even is
+/// the pinned semantics). The full NaN/-0.0/+-inf/ties differential across
+/// wasm AND cranelift lives in Sonatina's own test suite
+/// (`cranelift_backend.rs`'s `cross_backend_f32_rounding_differential`).
+#[test]
+fn f32_rounding_intrinsics_execute_on_wasm() {
+    let source = r#"
+extern {
+    fn __floor_f32(_: f32) -> f32
+    fn __ceil_f32(_: f32) -> f32
+    fn __trunc_f32(_: f32) -> f32
+    fn __round_f32(_: f32) -> f32
+}
+pub fn floor(x: f32) -> f32 { __floor_f32(x) }
+pub fn ceil(x: f32) -> f32 { __ceil_f32(x) }
+pub fn trunc(x: f32) -> f32 { __trunc_f32(x) }
+pub fn round(x: f32) -> f32 { __round_f32(x) }
+"#;
+    let wasm = compile_to_wasm("wasm_f32_rounding.fe", source);
+    assert!(
+        func_imports(&wasm)
+            .iter()
+            .all(|(_, name)| !name.ends_with("_f32")),
+        "f32 rounding intrinsics must lower to Sonatina ops, not wasm host imports"
+    );
+
+    let operators = wasmparser::Parser::new(0)
+        .parse_all(&wasm)
+        .filter_map(|payload| match payload.expect("valid wasm") {
+            wasmparser::Payload::CodeSectionEntry(body) => Some(
+                body.get_operators_reader()
+                    .expect("operator reader")
+                    .into_iter()
+                    .map(|op| format!("{:?}", op.expect("valid operator")))
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n");
+    for opcode in ["F32Floor", "F32Ceil", "F32Trunc", "F32Nearest"] {
+        assert!(
+            operators.contains(opcode),
+            "generated wasm lacks {opcode} (branchy fallback?):\n{operators}"
+        );
+    }
+    // Every one of these ops is a single native instruction; none should
+    // need a branch.
+    assert!(
+        !operators.contains("If") && !operators.contains("Select"),
+        "rounding family must be branch-free (single native instruction each), found a branch:\n{operators}"
+    );
+
+    let (mut store, instance) = instantiate(&wasm);
+    let floor = instance
+        .get_typed_func::<f32, f32>(&mut store, "floor")
+        .expect("floor export");
+    let ceil = instance
+        .get_typed_func::<f32, f32>(&mut store, "ceil")
+        .expect("ceil export");
+    let trunc = instance
+        .get_typed_func::<f32, f32>(&mut store, "trunc")
+        .expect("trunc export");
+    let round = instance
+        .get_typed_func::<f32, f32>(&mut store, "round")
+        .expect("round export");
+
+    for x in [
+        0.0f32, -0.0, 1.0, -1.0, 0.5, 1.5, 2.5, 3.5, -0.5, -1.5, -2.5, -3.5, 3.14159, -3.14159,
+        42.0, -42.0,
+    ] {
+        assert_eq!(floor.call(&mut store, x).unwrap(), x.floor(), "floor({x})");
+        assert_eq!(ceil.call(&mut store, x).unwrap(), x.ceil(), "ceil({x})");
+        assert_eq!(trunc.call(&mut store, x).unwrap(), x.trunc(), "trunc({x})");
+        assert_eq!(
+            round.call(&mut store, x).unwrap(),
+            x.round_ties_even(),
+            "round({x}) [ties-to-even]"
+        );
+    }
+
+    // The exact roundTiesToEven answers, spelled out.
+    assert_eq!(round.call(&mut store, 0.5).unwrap(), 0.0, "round(0.5) == 0");
+    assert_eq!(round.call(&mut store, 1.5).unwrap(), 2.0, "round(1.5) == 2");
+    assert_eq!(round.call(&mut store, 2.5).unwrap(), 2.0, "round(2.5) == 2");
+    assert_eq!(
+        round.call(&mut store, -0.5).unwrap().to_bits(),
+        (-0.0f32).to_bits(),
+        "round(-0.5) == -0"
+    );
+}
+
 /// R1 integer compare matrix: the four ops the arm now derives (`>`, `!=`,
 /// `>=`, `<=`) on BOTH `i32` and `u32`, executed on wasm against Rust's own
 /// integer semantics as an independent oracle. The signed/unsigned distinction
@@ -2039,13 +2227,14 @@ fn conditional_f32_selection_feeds_loop_carry_and_both_exits_on_wasm() {
 
 #[test]
 fn unsupported_f32_helpers_fail_closed_by_name() {
-    for (name, params, args) in [
-        ("__rsqrt_f32", "_: f32", "value"),
-        ("__abs_f32", "_: f32", "value"),
-        ("__min_f32", "_: f32, _: f32", "value, value"),
-        ("__max_f32", "_: f32, _: f32", "value, value"),
-        ("__floor_f32", "_: f32", "value"),
-    ] {
+    // `__abs_f32`/`__min_f32`/`__max_f32`/`__clamp_f32` graduated to
+    // dedicated Sonatina lowering (`Fabs`/`Fmin`/`Fmax`/`Fclamp`); see
+    // `f32_abs_min_max_clamp_intrinsics_execute_on_wasm` above for their
+    // positive execution coverage. `__floor_f32`/`__ceil_f32`/`__trunc_f32`/
+    // `__round_f32` similarly graduated (`Ffloor`/`Fceil`/`Ftrunc`/`Fround`);
+    // see `f32_rounding_intrinsics_execute_on_wasm` below. `__rsqrt_f32`
+    // remains deliberately unsupported.
+    for (name, params, args) in [("__rsqrt_f32", "_: f32", "value")] {
         let source = format!(
             "extern {{ fn {name}({params}) -> f32 }}\npub fn probe(value: f32) -> f32 {{ {name}({args}) }}\n"
         );

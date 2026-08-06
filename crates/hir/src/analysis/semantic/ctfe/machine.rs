@@ -171,7 +171,11 @@ enum FloatOp {
     Abs,
     Min,
     Max,
+    Clamp,
     Floor,
+    Ceil,
+    Trunc,
+    Round,
     Eq,
     Ne,
     Lt,
@@ -1043,7 +1047,11 @@ fn numeric_extern_intrinsic(name: &str) -> Option<NumericExternIntrinsic> {
         "__abs_f32" => NumericExternIntrinsic::Float(FloatOp::Abs),
         "__min_f32" => NumericExternIntrinsic::Float(FloatOp::Min),
         "__max_f32" => NumericExternIntrinsic::Float(FloatOp::Max),
+        "__clamp_f32" => NumericExternIntrinsic::Float(FloatOp::Clamp),
         "__floor_f32" => NumericExternIntrinsic::Float(FloatOp::Floor),
+        "__ceil_f32" => NumericExternIntrinsic::Float(FloatOp::Ceil),
+        "__trunc_f32" => NumericExternIntrinsic::Float(FloatOp::Trunc),
+        "__round_f32" => NumericExternIntrinsic::Float(FloatOp::Round),
         "__eq_f32" => NumericExternIntrinsic::Float(FloatOp::Eq),
         "__ne_f32" => NumericExternIntrinsic::Float(FloatOp::Ne),
         "__lt_f32" => NumericExternIntrinsic::Float(FloatOp::Lt),
@@ -2121,8 +2129,30 @@ impl<'db> CtfeMachine<'db> {
                 };
                 Ok(CtfeConstValue::float(result_ty, value.to_bits()))
             }
+            // f32 x f32 x f32 -> f32. Composed as `min(max(value, lo), hi)`,
+            // matching the runtime contract (sonatina `Fclamp`/every
+            // backend): `lo > hi` is defined as `hi`, never poison.
+            FloatOp::Clamp => {
+                let [value, lo, hi] = args else {
+                    return Err(CtfeError::NotConstEvaluable { origin });
+                };
+                let x = self.expect_f32(value, origin)?;
+                let lo = self.expect_f32(lo, origin)?;
+                let hi = self.expect_f32(hi, origin)?;
+                Ok(CtfeConstValue::float(
+                    result_ty,
+                    x.max(lo).min(hi).to_bits(),
+                ))
+            }
             // f32 -> f32
-            FloatOp::Neg | FloatOp::Sqrt | FloatOp::Rsqrt | FloatOp::Abs | FloatOp::Floor => {
+            FloatOp::Neg
+            | FloatOp::Sqrt
+            | FloatOp::Rsqrt
+            | FloatOp::Abs
+            | FloatOp::Floor
+            | FloatOp::Ceil
+            | FloatOp::Trunc
+            | FloatOp::Round => {
                 let [value] = args else {
                     return Err(CtfeError::NotConstEvaluable { origin });
                 };
@@ -2133,6 +2163,13 @@ impl<'db> CtfeMachine<'db> {
                     FloatOp::Rsqrt => 1.0f32 / a.sqrt(),
                     FloatOp::Abs => a.abs(),
                     FloatOp::Floor => a.floor(),
+                    FloatOp::Ceil => a.ceil(),
+                    FloatOp::Trunc => a.trunc(),
+                    // `roundTiesToEven`, NOT Rust's `f32::round()` (which is
+                    // ties-away-from-zero): matches the runtime contract
+                    // (sonatina `Fround`/wasm `f32.nearest`/cranelift
+                    // `nearest`/naga `RoundEven`) exactly.
+                    FloatOp::Round => a.round_ties_even(),
                     _ => unreachable!(),
                 };
                 Ok(CtfeConstValue::float(result_ty, value.to_bits()))

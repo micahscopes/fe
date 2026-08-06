@@ -1,23 +1,50 @@
 //! Float math for sketches, written in Fe.
 //!
-//! The compiler recognizes exactly three `f32` intrinsics today:
+//! The compiler recognizes these `f32` intrinsics today:
 //!
 //!     __f32_from_i32   __i32_from_f32   __sqrt_f32
+//!     __abs_f32        __min_f32        __max_f32   __clamp_f32
+//!     __floor_f32      __ceil_f32       __trunc_f32 __round_f32
 //!
-//! `__abs_f32`, `__floor_f32`, `__min_f32`, `__max_f32` and `__rsqrt_f32` are
-//! declared but deliberately unrecognized (`classify.rs:2882`, with a test
-//! pinning the set): they stay externs "until they each have an explicit
-//! runtime and backend lowering".
+//! `abs`/`min`/`max`/`clamp` graduated from hand-written Fe (`if a < b {a}
+//! else {b}`, branchy WGSL) to dedicated Sonatina IR ops (`Fabs`/`Fmin`/
+//! `Fmax`/`Fclamp`) mapped to a native instruction on every backend (naga
+//! `abs()`/`min()`/`max()`/`clamp()`, wasm `f32.abs`/`f32.min`/`f32.max` (+
+//! composed clamp), cranelift `fabs`/`fmin`/`fmax` (+ composed clamp)).
 //!
-//! So this ingot builds them out of the three that exist. Everything here is
-//! ordinary Fe, and every function is exact about what it costs. When the
-//! intrinsics do land, these become one-line wrappers and the call sites do not
-//! move.
+//! `floor`/`ceil`/`trunc`/`round` similarly graduated to `Ffloor`/`Fceil`/
+//! `Ftrunc`/`Fround`: a single native instruction on every backend (naga
+//! `floor()`/`ceil()`/`trunc()`/`round()`, wasm `f32.floor`/`f32.ceil`/
+//! `f32.trunc`/`f32.nearest`, cranelift `floor`/`ceil`/`trunc`/`nearest`), no
+//! bit-twiddling, no NaN/-0 subtlety. `floor` used to be a hand-written
+//! branch (`let t = trunc(x); if t > x { t - 1.0 } else { t }`, itself built
+//! on a round-trip through `__i32_from_f32`/`__f32_from_i32`); it is now
+//! branch-free, which makes `fract`/`wrap_pi`/`sin` branch-free too since
+//! they build on `floor`. `round` is `roundTiesToEven` (IEEE 754): all three
+//! backends agree exactly (wasm `f32.nearest`, cranelift `nearest`, and naga
+//! `MathFunction::Round` -> SPIR-V `GLSL.std.450 RoundEven`), so there is no
+//! divergence to pin around, unlike `min`/`max`.
+//!
+//! See `NUMERIC_INTRINSICS_STAGING.md` at the Fe repo root.
+//!
+//! `__rsqrt_f32` is still declared but deliberately unrecognized
+//! (`classify.rs`, with a test pinning the set): it stays an extern "until it
+//! has an explicit runtime and backend lowering". `sin`/`cos` below remain
+//! ordinary Fe (a hand-chosen parabola approximation): no backend has a
+//! native `sin`/`cos` instruction, so there is no intrinsic to graduate to.
 
 extern {
     fn __f32_from_i32(_: i32) -> f32
     fn __i32_from_f32(_: f32) -> i32
     fn __sqrt_f32(_: f32) -> f32
+    fn __abs_f32(_: f32) -> f32
+    fn __min_f32(_: f32, _: f32) -> f32
+    fn __max_f32(_: f32, _: f32) -> f32
+    fn __clamp_f32(_: f32, _: f32, _: f32) -> f32
+    fn __floor_f32(_: f32) -> f32
+    fn __ceil_f32(_: f32) -> f32
+    fn __trunc_f32(_: f32) -> f32
+    fn __round_f32(_: f32) -> f32
 }
 
 pub const PI: f32 = 3.14159265
@@ -40,37 +67,45 @@ pub fn to_i32(_ x: f32) -> i32 {
 }
 
 pub fn abs(_ x: f32) -> f32 {
-    if x < 0.0 { -x } else { x }
+    __abs_f32(x)
 }
 
 pub fn min(_ a: f32, _ b: f32) -> f32 {
-    if a < b { a } else { b }
+    __min_f32(a, b)
 }
 
 pub fn max(_ a: f32, _ b: f32) -> f32 {
-    if a > b { a } else { b }
+    __max_f32(a, b)
 }
 
 pub fn clamp(_ x: f32, _ lo: f32, _ hi: f32) -> f32 {
-    min(max(x, lo), hi)
+    __clamp_f32(x, lo, hi)
 }
 
 pub fn clamp01(_ x: f32) -> f32 {
     clamp(x, 0.0, 1.0)
 }
 
-/// Truncate toward zero. This is what `__i32_from_f32` already does; naming it
-/// separates "round toward zero" from "round toward negative infinity", which
-/// is the distinction `floor` turns on.
+/// Truncate toward zero. Naming it separates "round toward zero" from
+/// "round toward negative infinity", which is the distinction `floor` turns
+/// on.
 pub fn trunc(_ x: f32) -> f32 {
-    __f32_from_i32(__i32_from_f32(x))
+    __trunc_f32(x)
 }
 
-/// Round toward negative infinity. Truncation already gives this for x >= 0;
-/// for negative x with a fractional part it overshoots by one.
+/// Round toward negative infinity.
 pub fn floor(_ x: f32) -> f32 {
-    let t: f32 = trunc(x)
-    if t > x { t - 1.0 } else { t }
+    __floor_f32(x)
+}
+
+/// Round toward positive infinity.
+pub fn ceil(_ x: f32) -> f32 {
+    __ceil_f32(x)
+}
+
+/// Round to the nearest integer, ties to even (IEEE 754 `roundTiesToEven`).
+pub fn round(_ x: f32) -> f32 {
+    __round_f32(x)
 }
 
 pub fn fract(_ x: f32) -> f32 {

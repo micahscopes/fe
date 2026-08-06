@@ -3255,18 +3255,86 @@ impl<'db> RmirEmitter<'db> {
             &mut boundary_sites,
         );
         let (args, _) = self.lower_visible_call_args(bb, args, &input_plan);
-        let [value] = args.as_slice() else {
-            return None;
-        };
         let ret_ty = semantic_return_ty(self.db, semantic);
         let ret_class = self.top_level_class_for_ty(ret_ty, AddressSpaceKind::Memory)?;
         let ret = self.alloc_runtime_temp(ret_ty, RuntimeCarrier::Value(ret_class));
         let builtin = match kind {
             F32IntrinsicKind::FromI32 => {
+                let [value] = args.as_slice() else {
+                    return None;
+                };
                 crate::runtime::RuntimeBuiltin::F32FromI32 { value: *value }
             }
-            F32IntrinsicKind::ToI32 => crate::runtime::RuntimeBuiltin::I32FromF32 { value: *value },
-            F32IntrinsicKind::Sqrt => crate::runtime::RuntimeBuiltin::F32Sqrt { value: *value },
+            F32IntrinsicKind::ToI32 => {
+                let [value] = args.as_slice() else {
+                    return None;
+                };
+                crate::runtime::RuntimeBuiltin::I32FromF32 { value: *value }
+            }
+            F32IntrinsicKind::Sqrt => {
+                let [value] = args.as_slice() else {
+                    return None;
+                };
+                crate::runtime::RuntimeBuiltin::F32Sqrt { value: *value }
+            }
+            F32IntrinsicKind::Abs => {
+                let [value] = args.as_slice() else {
+                    return None;
+                };
+                crate::runtime::RuntimeBuiltin::F32Abs { value: *value }
+            }
+            F32IntrinsicKind::Min => {
+                let [lhs, rhs] = args.as_slice() else {
+                    return None;
+                };
+                crate::runtime::RuntimeBuiltin::F32Min {
+                    lhs: *lhs,
+                    rhs: *rhs,
+                }
+            }
+            F32IntrinsicKind::Max => {
+                let [lhs, rhs] = args.as_slice() else {
+                    return None;
+                };
+                crate::runtime::RuntimeBuiltin::F32Max {
+                    lhs: *lhs,
+                    rhs: *rhs,
+                }
+            }
+            F32IntrinsicKind::Clamp => {
+                let [value, lo, hi] = args.as_slice() else {
+                    return None;
+                };
+                crate::runtime::RuntimeBuiltin::F32Clamp {
+                    value: *value,
+                    lo: *lo,
+                    hi: *hi,
+                }
+            }
+            F32IntrinsicKind::Floor => {
+                let [value] = args.as_slice() else {
+                    return None;
+                };
+                crate::runtime::RuntimeBuiltin::F32Floor { value: *value }
+            }
+            F32IntrinsicKind::Ceil => {
+                let [value] = args.as_slice() else {
+                    return None;
+                };
+                crate::runtime::RuntimeBuiltin::F32Ceil { value: *value }
+            }
+            F32IntrinsicKind::Trunc => {
+                let [value] = args.as_slice() else {
+                    return None;
+                };
+                crate::runtime::RuntimeBuiltin::F32Trunc { value: *value }
+            }
+            F32IntrinsicKind::Round => {
+                let [value] = args.as_slice() else {
+                    return None;
+                };
+                crate::runtime::RuntimeBuiltin::F32Round { value: *value }
+            }
         };
         self.push_stmt(
             bb,

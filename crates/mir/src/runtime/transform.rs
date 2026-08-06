@@ -172,7 +172,21 @@ fn rewrite_alias_inputs(
             }
             RuntimeBuiltin::F32FromI32 { value }
             | RuntimeBuiltin::I32FromF32 { value }
-            | RuntimeBuiltin::F32Sqrt { value } => resolve(value),
+            | RuntimeBuiltin::F32Sqrt { value }
+            | RuntimeBuiltin::F32Abs { value }
+            | RuntimeBuiltin::F32Floor { value }
+            | RuntimeBuiltin::F32Ceil { value }
+            | RuntimeBuiltin::F32Trunc { value }
+            | RuntimeBuiltin::F32Round { value } => resolve(value),
+            RuntimeBuiltin::F32Min { lhs, rhs } | RuntimeBuiltin::F32Max { lhs, rhs } => {
+                resolve(lhs);
+                resolve(rhs);
+            }
+            RuntimeBuiltin::F32Clamp { value, lo, hi } => {
+                resolve(value);
+                resolve(lo);
+                resolve(hi);
+            }
             _ => return None,
         },
         RExpr::AggregateMake { fields, .. } => fields.iter_mut().for_each(resolve),
@@ -196,6 +210,10 @@ fn is_pure_inline_expr(expr: &RExpr<'_>) -> bool {
                     | RuntimeBuiltin::F32FromI32 { .. }
                     | RuntimeBuiltin::I32FromF32 { .. }
                     | RuntimeBuiltin::F32Sqrt { .. }
+                    | RuntimeBuiltin::F32Abs { .. }
+                    | RuntimeBuiltin::F32Min { .. }
+                    | RuntimeBuiltin::F32Max { .. }
+                    | RuntimeBuiltin::F32Clamp { .. }
             )
             | RExpr::AggregateMake { .. }
             | RExpr::AggregateExtract { .. }
@@ -218,8 +236,18 @@ fn add_expr_inputs(expr: &RExpr<'_>, live: &mut FxHashSet<RLocalId>) -> Option<(
             }
             RuntimeBuiltin::F32FromI32 { value }
             | RuntimeBuiltin::I32FromF32 { value }
-            | RuntimeBuiltin::F32Sqrt { value } => {
+            | RuntimeBuiltin::F32Sqrt { value }
+            | RuntimeBuiltin::F32Abs { value } => {
                 live.insert(*value);
+            }
+            RuntimeBuiltin::F32Min { lhs, rhs } | RuntimeBuiltin::F32Max { lhs, rhs } => {
+                live.insert(*lhs);
+                live.insert(*rhs);
+            }
+            RuntimeBuiltin::F32Clamp { value, lo, hi } => {
+                live.insert(*value);
+                live.insert(*lo);
+                live.insert(*hi);
             }
             _ => return None,
         },

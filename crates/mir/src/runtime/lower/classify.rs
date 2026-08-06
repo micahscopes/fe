@@ -2529,6 +2529,14 @@ pub(super) enum F32IntrinsicKind {
     FromI32,
     ToI32,
     Sqrt,
+    Abs,
+    Min,
+    Max,
+    Clamp,
+    Floor,
+    Ceil,
+    Trunc,
+    Round,
 }
 
 fn runtime_callee_assumptions<'db>(
@@ -2860,8 +2868,16 @@ pub(super) fn f32_intrinsic_kind(name: &str) -> Option<F32IntrinsicKind> {
         "__f32_from_i32" => F32IntrinsicKind::FromI32,
         "__i32_from_f32" => F32IntrinsicKind::ToI32,
         "__sqrt_f32" => F32IntrinsicKind::Sqrt,
-        // rsqrt/abs/min/max/floor intentionally remain unrecognized externs
-        // until they each have an explicit runtime and backend lowering.
+        "__abs_f32" => F32IntrinsicKind::Abs,
+        "__min_f32" => F32IntrinsicKind::Min,
+        "__max_f32" => F32IntrinsicKind::Max,
+        "__clamp_f32" => F32IntrinsicKind::Clamp,
+        "__floor_f32" => F32IntrinsicKind::Floor,
+        "__ceil_f32" => F32IntrinsicKind::Ceil,
+        "__trunc_f32" => F32IntrinsicKind::Trunc,
+        "__round_f32" => F32IntrinsicKind::Round,
+        // rsqrt intentionally remains an unrecognized extern until it has an
+        // explicit runtime and backend lowering.
         _ => return None,
     })
 }
@@ -3108,14 +3124,31 @@ mod tests {
             f32_intrinsic_kind("__sqrt_f32"),
             Some(F32IntrinsicKind::Sqrt)
         );
+        assert_eq!(f32_intrinsic_kind("__abs_f32"), Some(F32IntrinsicKind::Abs));
+        assert_eq!(f32_intrinsic_kind("__min_f32"), Some(F32IntrinsicKind::Min));
+        assert_eq!(f32_intrinsic_kind("__max_f32"), Some(F32IntrinsicKind::Max));
+        assert_eq!(
+            f32_intrinsic_kind("__clamp_f32"),
+            Some(F32IntrinsicKind::Clamp)
+        );
+        assert_eq!(
+            f32_intrinsic_kind("__floor_f32"),
+            Some(F32IntrinsicKind::Floor)
+        );
+        assert_eq!(
+            f32_intrinsic_kind("__ceil_f32"),
+            Some(F32IntrinsicKind::Ceil)
+        );
+        assert_eq!(
+            f32_intrinsic_kind("__trunc_f32"),
+            Some(F32IntrinsicKind::Trunc)
+        );
+        assert_eq!(
+            f32_intrinsic_kind("__round_f32"),
+            Some(F32IntrinsicKind::Round)
+        );
 
-        for unsupported in [
-            "__rsqrt_f32",
-            "__abs_f32",
-            "__min_f32",
-            "__max_f32",
-            "__floor_f32",
-        ] {
+        for unsupported in ["__rsqrt_f32"] {
             assert_eq!(f32_intrinsic_kind(unsupported), None, "{unsupported}");
         }
     }
