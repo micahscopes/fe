@@ -413,10 +413,17 @@ export async function mountRenderSurface(options) {
     buildControls(dom.panel, members, () => uniforms, (next) => render(next));
   }
   if (dom.metaEl) {
-    dom.metaEl.textContent =
-      `entry ${manifest.source_entry} · wasm ${manifest.artifacts.wasm_bytes} B` +
-      ` · wgsl ${manifest.artifacts.wgsl_bytes} B · path ${renderer.mode}` +
-      ` · fe ${manifest.provenance.compiler_version}`;
+    // Unobtrusive links to the generated artifacts the toolchain emitted from
+    // the same source: the wasm kernel, the wgsl shader, and the v-manifest.
+    const link = (href, text) =>
+      `<a href="${href}" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline dotted">${text}</a>`;
+    dom.metaEl.innerHTML =
+      `entry ${manifest.source_entry} · ` +
+      link(wasmUrl.href, `wasm ${manifest.artifacts.wasm_bytes} B`) +
+      ` · ` +
+      link(wgslUrl.href, `wgsl ${manifest.artifacts.wgsl_bytes} B`) +
+      ` · path ${renderer.mode} · fe ${manifest.provenance.compiler_version} · ` +
+      link(resolvedManifestUrl.href, `manifest`);
   }
 
   render(uniforms);
