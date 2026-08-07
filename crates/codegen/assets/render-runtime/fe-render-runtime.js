@@ -53,7 +53,7 @@ function ensureStyle() {
   style.textContent = `
 .fe-render { display: grid; gap: 16px; grid-template-columns: auto minmax(180px, 260px);
              align-items: start; font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
-             color: #cfd6e4; }
+             color: #cfd6e4; margin: 0; }
 .fe-render canvas, .fe-render-controls canvas { image-rendering: pixelated; width: 100%;
              max-width: 384px; aspect-ratio: 1; border-radius: 10px; box-shadow: 0 8px 40px #0008;
              background: #000; }
