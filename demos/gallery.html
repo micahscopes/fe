@@ -47,7 +47,13 @@
      own nested <figure class="fe-render">. */
   .grid > figure { margin: 0; background: #12151b; border: 1px solid #1e232d;
            border-radius: 10px; padding: 12px; display: flex; flex-direction: column;
-           gap: 10px; align-items: stretch; }
+           gap: 10px; align-items: stretch;
+           /* Skip compositing off-screen tiles so scrolling a page of live
+              WebGPU canvases stays smooth (the wasm 2D fallback is already a
+              cheap retained bitmap; this makes the WebGPU path behave the same
+              during scroll). contain-intrinsic-size reserves each tile's height
+              so the scrollbar does not jump as tiles enter/leave. */
+           content-visibility: auto; contain-intrinsic-size: auto 500px; }
   figcaption { font-size: 12.5px; color: #aeb8cc; }
   figcaption b { color: #e6ecf7; font-weight: 600; }
   /* Override the render runtime's side-by-side (canvas | 180-260px controls)
