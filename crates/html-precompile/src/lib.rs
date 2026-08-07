@@ -40,6 +40,17 @@ pub const RENDER_SCRIPT_MARKER: &str = "data-fe-render";
 /// Points at the published, content-addressed render runtime module
 /// (`fe_codegen::render_runtime_js()`) a `data-fe-render` script hands off to.
 pub const RENDER_RUNTIME_ATTR: &str = "data-fe-render-runtime";
+/// The authored web-component render lane's tag name: `<fe-surface src="...">`
+/// is walked exactly like `script[data-fe-src]` and rewritten to
+/// `<fe-surface manifest="...">` (FE_WEB_V5_ORCHESTRATION_DESIGN.md 3.3, form 2).
+pub const SURFACE_ELEMENT_TAG: &str = "fe-surface";
+/// Valueless marker on the injected `<script type="module">` that loads the
+/// render runtime for a document whose ONLY render sources are authored
+/// `<fe-surface src>` elements (no `data-fe-render` script to carry the
+/// dynamic-import handoff, so the element's defining side effect needs a
+/// static import instead). Injected at most once per document, the same
+/// idempotent posture as [`BOOTSTRAP_MARKER`].
+pub const SURFACE_RUNTIME_MARKER: &str = "data-fe-surface-runtime";
 const BOOTSTRAP_SOURCE: &str = include_str!("../assets/bootstrap.js");
 
 /// A compiled render bundle for one `data-fe-src` naming a GpuProgram-actor
@@ -560,7 +571,12 @@ impl std::fmt::Display for PrecompileError {
 impl std::error::Error for PrecompileError {}
 
 /// Discover external Fe source dependencies using the same HTML5 and URL rules
-/// as [`precompile_html`].
+/// as [`precompile_html`]. Walks both `script[data-fe-src]` (the facade/render
+/// script lanes) and authored `fe-surface[src]` elements (the render web
+/// component lane, FE_WEB_V5_ORCHESTRATION_DESIGN.md 3.3 form 2), so the
+/// development watch graph tracks an authored surface's source from the very
+/// first build, not only after a first successful compile populates
+/// `render_dependencies`.
 pub fn discover_external_dependencies(
     document_url: &str,
     html: &str,
@@ -571,9 +587,13 @@ pub fn discover_external_dependencies(
     let base_url = document_base_url(&dom.document, &document_url)?;
     let mut scripts = Vec::new();
     collect_fe_scripts(&dom.document, &mut scripts);
-    let dependencies = scripts
-        .into_iter()
-        .filter_map(|script| attr(&script, "data-fe-src"))
+    let mut surfaces = Vec::new();
+    collect_elements_with_attr(&dom.document, SURFACE_ELEMENT_TAG, "src", &mut surfaces);
+    let sources = scripts
+        .iter()
+        .filter_map(|script| attr(script, "data-fe-src"))
+        .chain(surfaces.iter().filter_map(|surface| attr(surface, "src")));
+    let dependencies = sources
         .map(|source| {
             base_url
                 .join(&source)
@@ -1219,6 +1239,57 @@ fn precompile_html_impl(
         );
         modules.push(manifest);
     }
+
+    // Authored `<fe-surface src="...">` elements (the render web component
+    // lane, FE_WEB_V5_ORCHESTRATION_DESIGN.md 3.3 form 2): walked exactly like
+    // `script[data-fe-src]` above (collect, compile via the SAME
+    // `render_compile` closure), but rewritten to `manifest="..."` on the
+    // element itself instead of a script-tag rewrite. Unlike a script's
+    // `data-fe-src`, a bare `fe-surface[src]` is ALWAYS a render source (there
+    // is no wasm-only facade fallback for this tag), so `render_compile`
+    // returning `Ok(None)` (a single `.fe` file, not an ingot directory) is a
+    // hard error naming the source, not a silent fall-through.
+    let mut surface_elements = Vec::new();
+    collect_elements_with_attr(&dom.document, SURFACE_ELEMENT_TAG, "src", &mut surface_elements);
+    let mut published_a_surface = false;
+    for element in surface_elements {
+        let src = attr(&element, "src").expect("collected `fe-surface[src]` elements have `src`");
+        let url = base_url
+            .join(&src)
+            .map_err(|error| PrecompileError::SourceLoad {
+                url: src.clone(),
+                detail: error.to_string(),
+            })?;
+        let entry_attr = attr(&element, "entry");
+        let bundle = render_compile(&url, entry_attr.as_deref())
+            .map_err(|detail| PrecompileError::Compile {
+                source_url: url.to_string(),
+                detail,
+            })?
+            .ok_or_else(|| PrecompileError::SourceLoad {
+                url: url.to_string(),
+                detail: "`fe-surface[src]` must name a render-bundle ingot directory (a single \
+                          .fe file has no `actor` declaration to derive a surface from)"
+                    .to_owned(),
+            })?;
+        if let Some(dependencies) = &bundle.source_dependencies {
+            render_dependencies.push(dependencies.clone());
+        }
+        publish_authored_surface(&element, &base_url, &document_url, bundle, &mut assets)?;
+        published_a_surface = true;
+    }
+    if published_a_surface {
+        // The element's defining `customElements.define("fe-surface", ...)`
+        // is a side effect of importing the runtime module; a `<script
+        // data-fe-render>` handoff triggers that import dynamically at
+        // runtime (bootstrap.js), but a page with ONLY authored `fe-surface`
+        // elements has no such script, so a static module import is injected
+        // once instead.
+        let runtime_path =
+            publish_render_runtime(render_runtime_js, &mut assets, &mut render_runtime_asset)?;
+        publish_surface_runtime_loader(&dom.document, &document_url, &base_url, &runtime_path)?;
+    }
+
     publish_bootstrap(&dom.document, &document_url, &base_url, &mut assets)?;
 
     let mut serialized = Vec::new();
@@ -1263,18 +1334,22 @@ fn publish_render_runtime(
     Ok(path)
 }
 
-/// Publish one render bundle's wasm/wgsl/manifest content-addressed, rewrite
-/// its manifest's `artifacts.wasm`/`artifacts.wgsl` to the published names
-/// (the same precedent as the wasm lane's `PublishedArtifact::from_artifact`
-/// rewriting paths), and rewrite the script tag to `data-fe-render`.
-fn publish_render_bundle(
-    script: &Handle,
+/// Publish one render bundle's wasm/wgsl/manifest content-addressed and
+/// rewrite its manifest's `artifacts.wasm`/`artifacts.wgsl` to the published
+/// names (the same precedent as the wasm lane's
+/// `PublishedArtifact::from_artifact` rewriting paths). Shared by both render
+/// authoring forms: the `<script data-fe-render>` lane
+/// ([`publish_render_bundle`]) and the authored `<fe-surface src>` lane
+/// ([`publish_authored_surface`]); both converge on identical per-tile
+/// artifacts, only the tag rewrite at the end differs
+/// (FE_WEB_V5_ORCHESTRATION_DESIGN.md 3.3: "one pipeline, two idioms, never
+/// two runtimes").
+fn publish_render_artifacts(
     base_url: &Url,
     document_url: &Url,
     bundle: RenderBundleArtifact,
-    render_runtime_path: &str,
     assets: &mut BTreeMap<String, Vec<u8>>,
-) -> Result<(), PrecompileError> {
+) -> Result<(String, String, String), PrecompileError> {
     let wasm_sha256 = sha256_hex(&bundle.wasm);
     let wasm_path = format!("assets/fe-render-{}.wasm", &wasm_sha256[..16]);
     insert_identical(assets, wasm_path.clone(), bundle.wasm)?;
@@ -1300,13 +1375,54 @@ fn publish_render_bundle(
     let manifest_path = format!("assets/fe-render-{}.json", &manifest_sha256[..16]);
     insert_identical(assets, manifest_path.clone(), manifest_bytes)?;
 
+    Ok((
+        published_reference(base_url, document_url, &wasm_path),
+        published_reference(base_url, document_url, &manifest_path),
+        wasm_sha256,
+    ))
+}
+
+/// Form 1 (`<script type="application/fe" data-fe-src=DIR data-fe-render>`):
+/// publish the bundle and rewrite the script tag to `data-fe-render`.
+fn publish_render_bundle(
+    script: &Handle,
+    base_url: &Url,
+    document_url: &Url,
+    bundle: RenderBundleArtifact,
+    render_runtime_path: &str,
+    assets: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<(), PrecompileError> {
+    let (wasm_ref, manifest_ref, wasm_sha256) =
+        publish_render_artifacts(base_url, document_url, bundle, assets)?;
     rewrite_render_script(
         script,
-        &published_reference(base_url, document_url, &wasm_path),
-        &published_reference(base_url, document_url, &manifest_path),
+        &wasm_ref,
+        &manifest_ref,
         &published_reference(base_url, document_url, render_runtime_path),
         &wasm_sha256,
     );
+    Ok(())
+}
+
+/// Form 2 (`<fe-surface src=DIR>`): publish the bundle and rewrite the
+/// element to `<fe-surface manifest="...">`. Unlike the script lane, the
+/// element resolves its wasm/wgsl artifacts RELATIVE TO THE MANIFEST itself
+/// (the runtime's own rule, fe-render-runtime.js), so only the manifest
+/// reference is written back onto the element; no integrity attribute either
+/// (the render lane carries none: WebGPU bundles have no Web IDL interface,
+/// the same posture [`rewrite_render_script`] already takes).
+fn publish_authored_surface(
+    element: &Handle,
+    base_url: &Url,
+    document_url: &Url,
+    bundle: RenderBundleArtifact,
+    assets: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<(), PrecompileError> {
+    let (_wasm_ref, manifest_ref, _wasm_sha256) =
+        publish_render_artifacts(base_url, document_url, bundle, assets)?;
+    remove_attr(element, "src");
+    remove_attr(element, "entry");
+    set_attr(element, "manifest", &manifest_ref);
     Ok(())
 }
 
@@ -1351,6 +1467,53 @@ fn publish_bootstrap(
         published_reference(base_url, document_url, &path)
     };
     inject_bootstrap(root, &source)
+}
+
+/// Ensure a static `<script type="module">` importing the render runtime is
+/// present exactly once, so its `customElements.define("fe-surface", ...)`
+/// side effect runs even for a page whose ONLY render sources are authored
+/// `<fe-surface src>` elements (no `data-fe-render` script exists to carry
+/// bootstrap.js's dynamic-import handoff). Idempotent per parsed document,
+/// the same posture as [`publish_bootstrap`]; loading the runtime module
+/// twice (this static tag plus a script's dynamic import, on a page that
+/// mixes both authoring forms) is harmless, since ES modules are cached by
+/// URL and `customElements.define` only ever runs once per module evaluation.
+fn publish_surface_runtime_loader(
+    root: &Handle,
+    document_url: &Url,
+    base_url: &Url,
+    runtime_path: &str,
+) -> Result<(), PrecompileError> {
+    if find_attr_element(root, SURFACE_RUNTIME_MARKER).is_some() {
+        return Ok(());
+    }
+    let parent = find_first_element(root, "head")
+        .or_else(|| find_first_element(root, "body"))
+        .ok_or_else(|| {
+            PrecompileError::Serialize("HTML document has no head or body".to_owned())
+        })?;
+    let script = Node::new(NodeData::Element {
+        name: QualName::new(None, ns!(html), LocalName::from("script")),
+        attrs: RefCell::new(vec![
+            Attribute {
+                name: QualName::new(None, ns!(), LocalName::from("type")),
+                value: "module".into(),
+            },
+            Attribute {
+                name: QualName::new(None, ns!(), LocalName::from("src")),
+                value: published_reference(base_url, document_url, runtime_path).into(),
+            },
+            Attribute {
+                name: QualName::new(None, ns!(), LocalName::from(SURFACE_RUNTIME_MARKER)),
+                value: String::new().into(),
+            },
+        ]),
+        template_contents: RefCell::new(None),
+        mathml_annotation_xml_integration_point: false,
+    });
+    script.parent.set(Some(Rc::downgrade(&parent)));
+    parent.children.borrow_mut().push(script);
+    Ok(())
 }
 
 fn inject_bootstrap(root: &Handle, source: &str) -> Result<(), PrecompileError> {
@@ -1409,6 +1572,19 @@ fn collect_scripts_of_type(root: &Handle, script_type: &str, output: &mut Vec<Ha
     }
     for child in root.children.borrow().iter() {
         collect_scripts_of_type(child, script_type, output);
+    }
+}
+
+/// Collect every `<tag attribute="...">` element in tree order (used for
+/// `fe-surface[src]`, the authored render web component lane; unknown tags
+/// like `fe-surface` parse as ordinary generic HTML elements, so this walks
+/// them the same way [`collect_scripts_of_type`] walks `<script>`).
+fn collect_elements_with_attr(root: &Handle, tag: &str, attribute: &str, output: &mut Vec<Handle>) {
+    if is_element(root, tag) && attr(root, attribute).is_some() {
+        output.push(root.clone());
+    }
+    for child in root.children.borrow().iter() {
+        collect_elements_with_attr(child, tag, attribute, output);
     }
 }
 
@@ -1621,6 +1797,110 @@ mod tests {
         .unwrap();
         write_publication(root, &output);
         output
+    }
+
+    fn fake_render_bundle() -> RenderBundleArtifact {
+        RenderBundleArtifact {
+            wasm: b"wasm-bytes".to_vec(),
+            wgsl: b"wgsl-source".to_vec(),
+            manifest_json: br#"{"artifacts":{}}"#.to_vec(),
+            source_dependencies: None,
+        }
+    }
+
+    #[test]
+    fn authored_fe_surface_src_routes_through_the_render_lane_and_rewrites_to_manifest() {
+        let html = r#"<!doctype html>
+<html><body>
+<fe-surface src="sketches/cga3d"><span slot="caption">cga3d</span></fe-surface>
+</body></html>"#;
+        let output = precompile_html_with_render_lane(
+            "https://example.test/index.html",
+            html,
+            "export function mountRenderSurface() {}\n",
+            |_| panic!("no application/fe script sources to load"),
+            |url, entry| {
+                assert_eq!(url.as_str(), "https://example.test/sketches/cga3d");
+                assert_eq!(entry, None);
+                Ok(Some(fake_render_bundle()))
+            },
+        )
+        .unwrap();
+
+        assert!(output.html.contains("<fe-surface"));
+        assert!(!output.html.contains(r#"src="sketches/cga3d""#));
+        assert!(output.html.contains(r#"manifest="assets/fe-render-"#));
+        // The caption's light-DOM content survives the rewrite untouched.
+        assert!(output.html.contains(r#"<span slot="caption">cga3d</span>"#));
+        // A static runtime-loader module script is injected exactly once.
+        assert_eq!(output.html.matches(SURFACE_RUNTIME_MARKER).count(), 1);
+        assert!(output.html.contains(r#"type="module""#));
+        assert!(
+            output
+                .assets
+                .keys()
+                .any(|path| path.ends_with(".wasm") && path.contains("fe-render-"))
+        );
+        assert!(
+            output
+                .assets
+                .keys()
+                .any(|path| path.ends_with(".wgsl") && path.contains("fe-render-"))
+        );
+        assert!(
+            output
+                .assets
+                .keys()
+                .any(|path| path.contains("fe-render-runtime-"))
+        );
+    }
+
+    #[test]
+    fn authored_fe_surface_entry_attribute_is_forwarded_and_stripped() {
+        let html = r#"<fe-surface src="sketches/qcga" entry="shade"></fe-surface>"#;
+        let output = precompile_html_with_render_lane(
+            "https://example.test/index.html",
+            html,
+            "runtime-js",
+            |_| panic!("no application/fe script sources"),
+            |_url, entry| {
+                assert_eq!(entry, Some("shade"));
+                Ok(Some(fake_render_bundle()))
+            },
+        )
+        .unwrap();
+        assert!(!output.html.contains("entry="));
+        assert!(output.html.contains("manifest="));
+    }
+
+    #[test]
+    fn authored_fe_surface_requires_a_render_bundle_source() {
+        let html = r#"<fe-surface src="sketches/plain.fe"></fe-surface>"#;
+        let error = precompile_html_with_render_lane(
+            "https://example.test/index.html",
+            html,
+            "runtime-js",
+            |_| panic!("no application/fe script sources"),
+            |_, _| Ok(None),
+        )
+        .unwrap_err();
+        assert!(matches!(error, PrecompileError::SourceLoad { .. }));
+        assert!(error.to_string().contains("render-bundle ingot directory"));
+    }
+
+    #[test]
+    fn discover_external_dependencies_includes_authored_fe_surface_sources() {
+        let html = r#"<fe-surface src="sketches/cga3d"></fe-surface>
+                      <script type="application/fe" data-fe-src="other.fe"></script>"#;
+        let dependencies =
+            discover_external_dependencies("https://example.test/index.html", html).unwrap();
+        assert_eq!(
+            dependencies,
+            [
+                "https://example.test/other.fe",
+                "https://example.test/sketches/cga3d",
+            ]
+        );
     }
 
     #[test]
