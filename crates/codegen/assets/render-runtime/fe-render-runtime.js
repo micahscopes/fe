@@ -186,7 +186,7 @@ function buildDom({ canvasOption, container, mountAfter, controls }) {
   return { root: figure, canvas, panel, modeEl, metaEl };
 }
 
-function buildControls(panel, members, uniforms, onChange) {
+function buildControls(panel, members, current, onChange) {
   panel.innerHTML = "";
   members.forEach((member, index) => {
     const row = document.createElement("div");
@@ -194,7 +194,7 @@ function buildControls(panel, members, uniforms, onChange) {
     const label = document.createElement("label");
     const value = document.createElement("b");
     const format = (v) => (+v).toFixed(member.scalar === "f32" ? 2 : 0);
-    value.textContent = format(uniforms[index]);
+    value.textContent = format(current()[index]);
     const name = document.createElement("span");
     name.textContent = `${member.scalar} @${member.arg_index}`;
     label.append(name, value);
@@ -203,9 +203,11 @@ function buildControls(panel, members, uniforms, onChange) {
     input.min = "0";
     input.max = "128";
     input.step = member.scalar === "f32" ? "0.25" : "1";
-    input.value = String(uniforms[index]);
+    input.value = String(current()[index]);
     input.oninput = () => {
-      const next = uniforms.slice();
+      // Slice the LIVE uniform vector, not a snapshot captured at build time,
+      // so moving one slider preserves every other slider's current value.
+      const next = current().slice();
       next[index] = +input.value;
       value.textContent = format(input.value);
       onChange(next);
@@ -408,7 +410,7 @@ export async function mountRenderSurface(options) {
   }
 
   if (dom.panel && controls) {
-    buildControls(dom.panel, members, uniforms, (next) => render(next));
+    buildControls(dom.panel, members, () => uniforms, (next) => render(next));
   }
   if (dom.metaEl) {
     dom.metaEl.textContent =
