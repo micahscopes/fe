@@ -3086,6 +3086,18 @@ impl<'db> CtfeMachine<'db> {
                 {
                     return Ok(CtfeValue::Value(value));
                 }
+                // Syntactic unary minus on a float operand (e.g. a negative
+                // float literal like `-1.0` in a const `view()` range) negates
+                // as a float, mirroring the `__neg_f32` intrinsic
+                // (`FloatOp::Neg`), instead of coercing to int (which raised
+                // "expected int"). Surfaced by v5 `view()` const-projection.
+                if self.is_float_like(&value) {
+                    let a = self.expect_f32(&value, origin)?;
+                    return Ok(CtfeValue::Value(CtfeConstValue::float(
+                        result_ty,
+                        (-a).to_bits(),
+                    )));
+                }
                 let arithmetic_mode = self.frames[frame_idx]
                     .body
                     .template_owner
