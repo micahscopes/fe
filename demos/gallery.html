@@ -3,8 +3,12 @@
   The all-demos page. `fe web dev demos/gallery.html` compiles and renders
   EVERY render sketch on one page, script-free: each `<script
   type="application/fe" data-fe-render>` is a standalone render bundle, and the
-  fe-render-runtime mounts one canvas per script while sharing a single WebGPU
-  device across all of them (acquireSharedGpu).
+  bootstrap handoff inserts a `<fe-surface>` custom element after each script,
+  which mounts and drives its own lifecycle (poster first, live on pointer
+  intent, suspended off-viewport) while sharing a single WebGPU device across
+  every tile on the page (acquireSharedGpu). See
+  crates/codegen/assets/render-runtime/fe-render-runtime.js and
+  FE_WEB_V5_ORCHESTRATION_DESIGN.md section 3/6 for the element/lifecycle.
 
   This is the standards-based successor to the Trunk gallery in `index.html`
   (which is a `data-trunk rel="copy-dir"` manifest, NOT application/fe, so
@@ -22,9 +26,14 @@
   Each caption carries a `source` link (the dev server serves the raw .fe); the
   runtime's meta line links the generated wgsl/wasm/manifest.
 
+  Tile restyling uses `fe-surface::part(...)` (canvas/panel/control/badge/meta)
+  instead of piercing the runtime's internal layout with `!important`: the
+  element's shadow DOM is not reachable any other way, which is the point (R2
+  retires the old override hack this file used to carry).
+
   qcga_pencil is intentionally absent: it is the interactive vertex+fragment+drag
   actor the current fragment-only runtime cannot drive yet. It enters the gallery
-  at v5 build slice L4.
+  at v5 build slice R6.
 -->
 <html lang="en">
 <head>
@@ -43,16 +52,17 @@
   .grid { max-width: 1200px; margin: 0 auto;
           display: grid; gap: 20px;
           grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
-  /* Scope tile chrome to DIRECT children so it never bleeds into the runtime's
-     own nested <figure class="fe-render">. */
+  /* Scope tile chrome to DIRECT children so it never bleeds into the
+     `<fe-surface>` element's own shadow DOM. */
   .grid > figure { margin: 0; background: #12151b; border: 1px solid #1e232d;
            border-radius: 10px; padding: 12px; display: flex; flex-direction: column;
            gap: 10px; align-items: stretch;
            /* Skip compositing off-screen tiles so scrolling a page of live
-              WebGPU canvases stays smooth (the wasm 2D fallback is already a
-              cheap retained bitmap; this makes the WebGPU path behave the same
-              during scroll). contain-intrinsic-size reserves each tile's height
-              so the scrollbar does not jump as tiles enter/leave. */
+              WebGPU canvases stays smooth (belt-and-suspenders alongside the
+              element's own IntersectionObserver suspend/poster lifecycle,
+              FE_WEB_V5_ORCHESTRATION_DESIGN.md section 6). contain-intrinsic-size
+              reserves each tile's height so the scrollbar does not jump as
+              tiles enter/leave. */
            content-visibility: auto; contain-intrinsic-size: auto 560px; }
   figcaption { font-size: 12.5px; color: #aeb8cc; display: flex; align-items: baseline; gap: 8px; }
   figcaption b { color: #e6ecf7; font-weight: 600; }
@@ -60,11 +70,12 @@
   /* Unobtrusive source link. */
   figcaption a { color: #6b7688; text-decoration: underline dotted; font-size: 11.5px; }
   figcaption a:hover { color: #b7c2d8; }
-  /* Override the render runtime's side-by-side (canvas | 180-260px controls)
-     grid: in a gallery tile the control column starves the canvas to a few px,
-     so stack the canvas ON TOP of the controls and let it fill the tile. */
-  .fe-render { grid-template-columns: 1fr !important; gap: 10px !important; }
-  .fe-render canvas { max-width: 100% !important; }
+  /* The element already defaults to a vertical (canvas-atop-controls) layout
+     that fills its box, so a gallery tile needs only ordinary box-model CSS
+     on the host, no shadow-piercing `!important` hack. `::part(canvas)` is
+     available for anything more than "fill the tile", e.g.
+     `fe-surface::part(canvas) { border-radius: 6px; }`. */
+  .grid > figure fe-surface { width: 100%; max-width: none; }
 </style>
 </head>
 <body>

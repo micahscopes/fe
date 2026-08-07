@@ -40,11 +40,17 @@ async function sha256Hex(bytes) {
 
 /**
  * `data-fe-render` handoff: a render bundle's manifest/wasm/wgsl fetching,
- * pipeline setup, and per-pixel wasm fallback all live in the ONE shipped
- * `fe-render-runtime.js` module (the same module the legacy `fe web build
- * --mode render` bundle's emitted index.html imports), not here. This
- * function only locates that published module and hands off; it never calls
- * a render entry with zero arguments the way the plain Wasm lane below does.
+ * pipeline setup, lifecycle, and per-pixel wasm fallback all live in the ONE
+ * shipped `fe-render-runtime.js` module (the same module the legacy `fe web
+ * build --mode render` bundle's emitted index.html imports), not here. This
+ * function locates that published module (importing it defines the
+ * `<fe-surface>` custom element as a side effect) and inserts a
+ * `<fe-surface manifest=...>` element after the script, letting the element
+ * mount and drive its own lifecycle rather than calling `mountRenderSurface`
+ * imperatively (FE_WEB_V5_ORCHESTRATION_DESIGN.md 3.3). `fe:load` resolves
+ * once the element reaches `ready` (manifest fetched, poster rendered); it no
+ * longer waits for the surface to go live, since v5 tiles are poster-first by
+ * design.
  */
 async function runRenderSurface(element, manifestUrl) {
   const runtimeReference = element.dataset.feRenderRuntime;
@@ -52,17 +58,30 @@ async function runRenderSurface(element, manifestUrl) {
     throw new Error("data-fe-render requires data-fe-render-runtime");
   }
   const runtimeUrl = new URL(runtimeReference, element.baseURI);
-  const { mountRenderSurface } = await import(runtimeUrl);
+  await import(runtimeUrl); // defines `<fe-surface>`; no other export is needed here.
+
+  const surface = document.createElement("fe-surface");
+  surface.setAttribute("manifest", manifestUrl.href);
+  if (element.dataset.feWidth) surface.setAttribute("width", element.dataset.feWidth);
+  if (element.dataset.feHeight) surface.setAttribute("height", element.dataset.feHeight);
+
   const canvasSelector = element.dataset.feCanvas;
-  const surface = await mountRenderSurface({
-    manifestUrl,
-    // With no `data-fe-canvas`, mount a generated <figure> immediately after
-    // the script element (page authors keep layout control via HTML when
-    // they DO adopt a canvas by selector).
-    canvas: canvasSelector ? document.querySelector(canvasSelector) : undefined,
-    mountAfter: canvasSelector ? undefined : element,
-    width: element.dataset.feWidth ? Number(element.dataset.feWidth) : undefined,
-    height: element.dataset.feHeight ? Number(element.dataset.feHeight) : undefined,
+  const adopted = canvasSelector ? document.querySelector(canvasSelector) : null;
+  if (adopted) {
+    // `data-fe-canvas` adoption keeps working: the element accepts an
+    // adopted canvas instead of generating its own poster/live pair.
+    surface.adoptCanvas(adopted);
+    adopted.insertAdjacentElement("afterend", surface);
+  } else {
+    // With no `data-fe-canvas`, mount immediately after the script element
+    // (page authors keep layout control via HTML when they DO adopt a
+    // canvas by selector).
+    element.insertAdjacentElement("afterend", surface);
+  }
+
+  await new Promise((resolve, reject) => {
+    surface.addEventListener("fe-ready", () => resolve(), { once: true });
+    surface.addEventListener("fe-error", (event) => reject(event.detail), { once: true });
   });
   return { manifest: surface.manifest, surface, instance: null, module: null, value: undefined };
 }
