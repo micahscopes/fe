@@ -250,6 +250,9 @@ class FeSurfaceElement extends HTMLElement {
     this._controlRows = [];
     this._manifest = null;
     this._surface = null;
+    this._control = null; // R3 param gestures: the projected `control` manifest section.
+    this._controlKernel = null; // the resolved wasm control export, or null (no gestures).
+    this._gestureListeners = null; // { canvas, onPointerDown, onPointerMove, onPointerUp, onWheel }
     this._gpu = null; // { device, format, pipeline, bindGroup, uniformBuffer }
     this._liveContext = null; // GPUCanvasContext on `_liveCanvas`
     this._adoptedContext = null; // GPUCanvasContext on `_adoptedCanvas`
@@ -377,6 +380,7 @@ class FeSurfaceElement extends HTMLElement {
       this._manifest = deepFreeze(manifest);
       this._layout = manifest.layout;
       this._surface = manifest.surface || null;
+      this._control = manifest.control || null;
       const inputBinding = this._layout.bindings.find((binding) => binding.role === "input");
       this._inputBinding = inputBinding ?? null;
       this._members = inputBinding ? inputBinding.members : [];
@@ -393,6 +397,21 @@ class FeSurfaceElement extends HTMLElement {
       this._kernel = instance.exports[manifest.source_entry];
       if (typeof this._kernel !== "function") {
         throw new Error(`fe render runtime: wasm export \`${manifest.source_entry}\` not found`);
+      }
+      // R3 param gestures: the SAME wasm instance carries the control export
+      // (already part of the root set the compiler emitted `module.wasm`
+      // with). No control block, or an export it doesn't actually find,
+      // means gestures stay off -- never a JS reimplementation fallback.
+      this._controlKernel = null;
+      if (this._control) {
+        const controlFn = instance.exports[this._control.export];
+        if (typeof controlFn === "function") {
+          this._controlKernel = controlFn;
+        } else {
+          console.warn(
+            `[fe web] fe-surface: control export \`${this._control.export}\` not found; gestures disabled`,
+          );
+        }
       }
 
       this._uniforms =
@@ -737,6 +756,7 @@ class FeSurfaceElement extends HTMLElement {
   _enterLive() {
     this._fsm = "live";
     this._wireSuspendObserver();
+    this._wireGestures();
     this._updateBadge();
     this._resolveLive();
     this._dispatch("fe-live", { mode: this._mode });
@@ -894,6 +914,113 @@ class FeSurfaceElement extends HTMLElement {
     this._suspendObserver = null;
     this._activationObserver?.disconnect();
     this._activationObserver = null;
+    this._unwireGestures();
+  }
+
+  // -- gestures: drag pans, wheel zooms (R3 param gestures) ------------------
+  //
+  // Fe owns ALL gesture semantics (pan sensitivity, the zoom curve, the
+  // cursor anchor, the clamps): this element delivers only raw pointer/wheel
+  // deltas to `manifest.control.export` and blits the returned state back by
+  // NAME. No pan/zoom arithmetic lives here.
+
+  /** Attach drag/wheel listeners on the current live/adopted canvas, once per
+   * canvas identity (idempotent across suspend/resume within one boot). */
+  _wireGestures() {
+    if (!this._control || !this._controlKernel) return;
+    const canvas = this._adoptedCanvas || (this._mode === "webgpu" ? this._liveCanvas : this._posterCanvas);
+    if (!canvas || this._gestureListeners?.canvas === canvas) return;
+    this._unwireGestures();
+
+    let dragging = false;
+    let dragPointerId = null;
+
+    const backingPoint = (event) => {
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = this._backingWidth / (rect.width || 1);
+      const scaleY = this._backingHeight / (rect.height || 1);
+      return { mx: (event.clientX - rect.left) * scaleX, my: (event.clientY - rect.top) * scaleY, scaleX, scaleY };
+    };
+
+    const onPointerDown = (event) => {
+      if (event.button !== 0) return;
+      dragging = true;
+      dragPointerId = event.pointerId;
+      canvas.setPointerCapture(event.pointerId);
+      event.preventDefault();
+    };
+    const onPointerMove = (event) => {
+      if (!dragging || event.pointerId !== dragPointerId) return;
+      const { mx, my, scaleX, scaleY } = backingPoint(event);
+      this._applyGesture({ dx: event.movementX * scaleX, dy: event.movementY * scaleY, dzoom: 0, mx, my });
+    };
+    const onPointerUp = (event) => {
+      if (event.pointerId !== dragPointerId) return;
+      dragging = false;
+      dragPointerId = null;
+      try {
+        canvas.releasePointerCapture(event.pointerId);
+      } catch {
+        // capture already released (e.g. pointercancel).
+      }
+    };
+    const onWheel = (event) => {
+      event.preventDefault();
+      const { mx, my } = backingPoint(event);
+      this._applyGesture({ dx: 0, dy: 0, dzoom: Math.sign(event.deltaY), mx, my });
+    };
+
+    canvas.addEventListener("pointerdown", onPointerDown);
+    canvas.addEventListener("pointermove", onPointerMove);
+    canvas.addEventListener("pointerup", onPointerUp);
+    canvas.addEventListener("pointercancel", onPointerUp);
+    canvas.addEventListener("wheel", onWheel, { passive: false });
+    this._gestureListeners = { canvas, onPointerDown, onPointerMove, onPointerUp, onWheel };
+  }
+
+  _unwireGestures() {
+    const listeners = this._gestureListeners;
+    if (!listeners) return;
+    const { canvas, onPointerDown, onPointerMove, onPointerUp, onWheel } = listeners;
+    canvas.removeEventListener("pointerdown", onPointerDown);
+    canvas.removeEventListener("pointermove", onPointerMove);
+    canvas.removeEventListener("pointerup", onPointerUp);
+    canvas.removeEventListener("pointercancel", onPointerUp);
+    canvas.removeEventListener("wheel", onWheel);
+    this._gestureListeners = null;
+  }
+
+  /** One raw gesture in: build `control.export`'s positional args from
+   * `control.args` (live state by name, or the raw delta), call it, and blit
+   * the reply back into `_uniforms` by `control.result`'s names. No writes
+   * while cold/error/not presenting. */
+  _applyGesture(raw) {
+    if (this._fsm !== "live" || !this._controlKernel) return;
+    const control = this._control;
+    const args = control.args.map((arg) => {
+      switch (arg.source) {
+        case "state": {
+          const index = this._memberIndexByName.get(arg.name);
+          return index === undefined ? 0 : this._uniforms[index];
+        }
+        case "drag":
+          return arg.axis === "x" ? raw.dx : raw.dy;
+        case "wheel":
+          return raw.dzoom;
+        case "pointer":
+          return arg.axis === "x" ? raw.mx : raw.my;
+        default:
+          return 0;
+      }
+    });
+    const reply = this._controlKernel(...args);
+    const results = Array.isArray(reply) ? reply : [reply];
+    const next = this._uniforms.slice();
+    control.result.forEach((name, index) => {
+      const memberIndex = this._memberIndexByName.get(name);
+      if (memberIndex !== undefined) next[memberIndex] = results[index];
+    });
+    this._render(next);
   }
 
   // -- chrome: badge / controls / meta --------------------------------------

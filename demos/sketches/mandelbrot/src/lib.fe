@@ -16,11 +16,48 @@
 //! Software rendering (lavapipe/SwiftShader) in the sandbox; no performance or
 //! parallelism claim (VISION 3.1).
 
-use std::webgpu::{FragmentSurface, GpuProgram, WebGpuBackend}
+use std::webgpu::{FragmentSurface, GpuProgram, UpdateSurface, WebGpuBackend}
 use std::web::view::{Extent, Param, Surface}
 use fmath::{from_i32, palette}
 
 const MAX_ITER: i32 = 96
+
+// `update_view`'s clamps (mirrors `view()`'s declared ranges below; kept as
+// named consts so the two cannot silently drift).
+const CENTER_X_MIN: f32 = -2.5
+const CENTER_X_MAX: f32 = 1.0
+const CENTER_Y_MIN: f32 = -1.5
+const CENTER_Y_MAX: f32 = 1.5
+const ZOOM_MIN: f32 = 0.0005
+const ZOOM_MAX: f32 = 3.0
+
+/// One wheel notch: `dzoom < 0` zooms IN (7/8), `dzoom > 0` zooms OUT (9/8),
+/// `dzoom == 0` leaves `zoom` unchanged. Same per-notch ratios as
+/// `update_view` in `mandel_view_ctl.fe` (there `scale_q -+ (scale_q>>3)`,
+/// integer 7/8 and 9/8).
+fn zoom_step(_ zoom: f32, _ dzoom: f32) -> f32 {
+    if dzoom < 0.0 {
+        zoom * 0.875
+    } else {
+        if dzoom > 0.0 {
+            zoom * 1.125
+        } else {
+            zoom
+        }
+    }
+}
+
+fn clamp_f(_ v: f32, _ lo: f32, _ hi: f32) -> f32 {
+    if v < lo {
+        lo
+    } else {
+        if v > hi {
+            hi
+        } else {
+            v
+        }
+    }
+}
 
 /// The per-demo params record: field names bind, by name identity, to the
 /// actor's state fields (checked at projection time).
@@ -91,5 +128,53 @@ actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
             // Inside the set: opaque black (0xFF000000).
             -16777216
         }
+    }
+
+    /// Pan/zoom the view from one raw gesture. Fe owns ALL gesture math here
+    /// (pan sensitivity, the zoom curve, the cursor anchor, and the clamps);
+    /// the runtime delivers only raw pointer deltas and blits the returned
+    /// triple back into `(center_x, center_y, zoom)`. No JS gesture math.
+    ///
+    /// Same SHAPE as `update_view` in `mandel_view_ctl.fe` (the oracle-proven
+    /// Q12 fixed-point pan/zoom/anchor/clamp algorithm): pan follows the
+    /// pointer (the center moves opposite the drag, scaled by the CURRENT
+    /// per-pixel step); one wheel notch is a fixed +-1/8 zoom; the anchor
+    /// correction uses the OLD zoom minus the NEW (clamped) zoom so the point
+    /// under the cursor stays put; clamps apply last. Ported to this actor's
+    /// own f32 `(center_x, center_y, zoom)` state and `view()` ranges (a
+    /// structural port, not a literal reuse: the fixture's state is i32 Q12
+    /// fixed point over a fixed [-2.5, 2.5]-ish square; this actor's state is
+    /// f32 over its own declared, asymmetric ranges).
+    ///
+    /// `dx`/`dy`: pixel drag delta (image follows the pointer). `dzoom`: one
+    /// wheel notch, < 0 in / > 0 out / 0 none. `mx`/`my`: the pointer's
+    /// CURRENT position in the same pixel frame as `res` (the anchor point;
+    /// unused when `dzoom == 0`, since the anchor term is then scaled by
+    /// zero).
+    fn update_view(self, dx: f32, dy: f32, dzoom: f32, mx: f32, my: f32) -> (f32, f32, f32)
+        uses (UpdateSurface)
+    {
+        // pixel -> complex-plane step at the CURRENT zoom: `escape`'s own
+        // u map is `u = (px + 0.5) / res * 2 - 1`, so `d(cx)/d(px) = 2 *
+        // zoom / res`. `escape`'s v map is Y-FLIPPED (`v = 1 - (py+0.5)/res*2`:
+        // screen row increases downward, complex y increases upward), so a
+        // downward drag (dy > 0) must INCREASE center_y, not decrease it.
+        let step: f32 = 2.0 * self.zoom / self.res
+        let cx0: f32 = self.center_x - dx * step
+        let cy0: f32 = self.center_y + dy * step
+
+        let z_c: f32 = clamp_f(zoom_step(self.zoom, dzoom), ZOOM_MIN, ZOOM_MAX)
+
+        // The complex point under the cursor's CURRENT (mx, my), via the
+        // EXACT SAME u/v map `escape` uses, times the zoom CHANGE (old minus
+        // new): keeps that point fixed under the new zoom.
+        let u: f32 = (mx + 0.5) * 2.0 / self.res - 1.0
+        let v: f32 = 1.0 - (my + 0.5) * 2.0 / self.res
+        let cx_a: f32 = cx0 + u * (self.zoom - z_c)
+        let cy_a: f32 = cy0 + v * (self.zoom - z_c)
+
+        let cx_c: f32 = clamp_f(cx_a, CENTER_X_MIN, CENTER_X_MAX)
+        let cy_c: f32 = clamp_f(cy_a, CENTER_Y_MIN, CENTER_Y_MAX)
+        (cx_c, cy_c, z_c)
     }
 }

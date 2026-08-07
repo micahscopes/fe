@@ -366,6 +366,233 @@ fn project_actor_field_metadata(
 /// interactive surface (design 1.2).
 const VIEW_BEHAVIOR: &str = "view";
 
+/// The reserved role marker naming a `self`-taking actor behavior that maps a
+/// raw gesture (plus the actor's current state) to the next state (R3 param
+/// gestures). Structurally recognized exactly like `FRAGMENT_SURFACE_MARKER`:
+/// no fixed function NAME, so it generalizes across demos (`update_view` here,
+/// `update_rotor` for the Cl(3) rotor demo).
+const UPDATE_SURFACE_MARKER: &str = "UpdateSurface";
+
+/// The reserved gesture-argument name vocabulary an `UpdateSurface` behavior's
+/// own declared (pre-flatten) params must draw from, kept IDENTICAL to the
+/// `mandel_view_ctl.fe` / `clifford_ctl.fe` fixtures' established convention.
+/// Anything else is a projection error (an unrecognized gesture arg name),
+/// never a silent guess.
+fn gesture_arg_source(name: &str) -> Option<WebControlArgSource> {
+    match name {
+        "dx" => Some(WebControlArgSource::Drag {
+            axis: "x".to_string(),
+        }),
+        "dy" => Some(WebControlArgSource::Drag {
+            axis: "y".to_string(),
+        }),
+        "dzoom" => Some(WebControlArgSource::Wheel),
+        "mx" => Some(WebControlArgSource::Pointer {
+            axis: "x".to_string(),
+        }),
+        "my" => Some(WebControlArgSource::Pointer {
+            axis: "y".to_string(),
+        }),
+        _ => None,
+    }
+}
+
+/// Finds the render actor's (at most one) `UpdateSurface`-marked behavior and
+/// returns its export NAME, or `Ok(None)` when the actor declares none (the
+/// non-interactive path: today's sketches, byte-stable). Errors naming the
+/// actor when more than one is declared (a render program has at most one
+/// control behavior, mirroring `actor_web_entry`'s `FragmentSurface` rule).
+fn actor_update_export_name(
+    db: &DriverDataBase,
+    top_mod: TopLevelMod<'_>,
+    source_entry: &str,
+) -> Result<Option<String>, WebBundleError> {
+    let decls = hir::lower::module_actor_decls(db, top_mod);
+    let Some(actor) = decls.iter().find(|actor| {
+        actor
+            .row_markers
+            .iter()
+            .any(|marker| marker == GPU_PROGRAM_MARKER)
+            && actor
+                .behaviors
+                .iter()
+                .any(|behavior| behavior.name == source_entry)
+    }) else {
+        return Ok(None);
+    };
+    let update_behaviors: Vec<&hir::lower::ActorBehaviorDecl> = actor
+        .behaviors
+        .iter()
+        .filter(|behavior| {
+            behavior
+                .role_markers
+                .iter()
+                .any(|marker| marker == UPDATE_SURFACE_MARKER)
+        })
+        .collect();
+    match update_behaviors.as_slice() {
+        [] => Ok(None),
+        [behavior] => Ok(Some(behavior.name.clone())),
+        _ => Err(WebBundleError::SurfaceProjection(format!(
+            "actor `{}` declares {} `UpdateSurface` behaviors; a render program has at most one",
+            actor.name,
+            update_behaviors.len()
+        ))),
+    }
+}
+
+/// Projects the render actor's `UpdateSurface`-marked behavior (already named
+/// by `actor_update_export_name`) into the manifest `control` section (R3
+/// param gestures): the compiled wasm export name, its positional argument
+/// sources (gesture deltas or current state, in the EXACT order the export
+/// expects them), and which leading state fields (declaration order) its
+/// reply feeds back. Reconciles against the ACTUAL compiled wasm export
+/// signature (wasmparser), never assumed, mirroring `project_surface`'s own
+/// "measured, not assumed" reconciliation against the lowered layout.
+fn project_control(
+    db: &DriverDataBase,
+    top_mod: TopLevelMod<'_>,
+    source_entry: &str,
+    control_export: &str,
+    wasm: &[u8],
+) -> Result<WebControl, WebBundleError> {
+    let decls = hir::lower::module_actor_decls(db, top_mod);
+    let actor = decls
+        .iter()
+        .find(|actor| {
+            actor
+                .row_markers
+                .iter()
+                .any(|marker| marker == GPU_PROGRAM_MARKER)
+                && actor
+                    .behaviors
+                    .iter()
+                    .any(|behavior| behavior.name == source_entry)
+        })
+        .ok_or_else(|| {
+            WebBundleError::SurfaceProjection(format!(
+                "control export `{control_export}` was named but its actor could not be re-found"
+            ))
+        })?;
+    let behavior = actor
+        .behaviors
+        .iter()
+        .find(|behavior| behavior.name == control_export)
+        .ok_or_else(|| {
+            WebBundleError::SurfaceProjection(format!(
+                "actor `{}`: update behavior `{control_export}` was named but not found among its behaviors",
+                actor.name
+            ))
+        })?;
+
+    let field_names: Vec<&str> = actor.fields.iter().map(|field| field.name.as_str()).collect();
+    let mut args = Vec::with_capacity(behavior.context_params.len() + field_names.len());
+    for name in &behavior.context_params {
+        let source = gesture_arg_source(name).ok_or_else(|| {
+            WebBundleError::SurfaceProjection(format!(
+                "actor `{}`: update behavior `{control_export}` has an unrecognized gesture arg \
+                 `{name}` (expected one of dx, dy, dzoom, mx, my)",
+                actor.name
+            ))
+        })?;
+        args.push(source);
+    }
+    for name in &field_names {
+        args.push(WebControlArgSource::State {
+            name: (*name).to_string(),
+        });
+    }
+
+    let (param_count, result_count) = wasm_export_signature(wasm, control_export).ok_or_else(|| {
+        WebBundleError::SurfaceProjection(format!(
+            "actor `{}`: update behavior `{control_export}` has no matching wasm export",
+            actor.name
+        ))
+    })?;
+    if param_count != args.len() {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "actor `{}`: update export `{control_export}` takes {param_count} wasm params but the \
+             behavior's gesture args ({}) + state fields ({}) = {}",
+            actor.name,
+            behavior.context_params.len(),
+            field_names.len(),
+            args.len()
+        )));
+    }
+    if result_count == 0 || result_count > field_names.len() {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "actor `{}`: update export `{control_export}` returns {result_count} values; expected \
+             1..={} (a leading subset of the actor's state fields, declaration order)",
+            actor.name,
+            field_names.len()
+        )));
+    }
+    let result: Vec<String> = field_names[..result_count]
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
+
+    Ok(WebControl {
+        export: control_export.to_string(),
+        args,
+        result,
+    })
+}
+
+/// The (param count, result count) of a named function export in a compiled
+/// wasm module, measured with `wasmparser` (never assumed). `None` when the
+/// export is absent or not a function.
+fn wasm_export_signature(wasm: &[u8], export_name: &str) -> Option<(usize, usize)> {
+    use wasmparser::{ExternalKind, Payload, TypeRef};
+
+    let mut func_sigs: Vec<(usize, usize)> = Vec::new();
+    let mut func_type_indices: Vec<u32> = Vec::new();
+    let mut imported_func_count: u32 = 0;
+    let mut export_func_index: Option<u32> = None;
+
+    for payload in wasmparser::Parser::new(0).parse_all(wasm) {
+        match payload.ok()? {
+            Payload::TypeSection(reader) => {
+                for rec in reader {
+                    for sub in rec.ok()?.into_types() {
+                        let ft = sub.unwrap_func();
+                        func_sigs.push((ft.params().len(), ft.results().len()));
+                    }
+                }
+            }
+            Payload::ImportSection(reader) => {
+                for import in reader.into_imports() {
+                    if let TypeRef::Func(_) = import.ok()?.ty {
+                        imported_func_count += 1;
+                    }
+                }
+            }
+            Payload::FunctionSection(reader) => {
+                for tyidx in reader {
+                    func_type_indices.push(tyidx.ok()?);
+                }
+            }
+            Payload::ExportSection(reader) => {
+                for export in reader {
+                    let export = export.ok()?;
+                    if export.name == export_name && matches!(export.kind, ExternalKind::Func) {
+                        export_func_index = Some(export.index);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let fidx = export_func_index?;
+    if fidx < imported_func_count {
+        return None;
+    }
+    let defined = (fidx - imported_func_count) as usize;
+    let tyidx = *func_type_indices.get(defined)? as usize;
+    func_sigs.get(tyidx).copied()
+}
+
 /// Projects the render actor's `const fn view()` behavior into the manifest
 /// `surface` section (protocol v5, R1b; design decision 2). CTFE-evaluates the
 /// behavior to a value (via the semantic const machine), walks it, and
@@ -664,6 +891,13 @@ pub struct WebBundleManifest {
     /// manifests still parse structurally.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub surface: Option<WebSurface>,
+    /// The projected `UpdateSurface` control behavior (R3 param gestures):
+    /// the wasm export the runtime calls per raw gesture, its positional
+    /// argument sources, and which state fields its reply writes back.
+    /// `serde` default/omit so a non-interactive demo's manifest stays
+    /// byte-identical to before this section existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control: Option<WebControl>,
     pub provenance: WebProvenance,
     pub canonical_interface: Option<CanonicalInterfaceManifest>,
     pub canonical_status: WebCanonicalStatus,
@@ -748,6 +982,51 @@ pub struct WebSurfaceState {
     pub kind: String,
 }
 
+/// The `control` section (R3 param gestures, protocol v5): the render actor's
+/// gesture-driven state update, projected from its `UpdateSurface`-marked
+/// behavior. Absent for a demo with no such behavior (the pre-R3-compatible
+/// path). Every value here traces to the compiled wasm export's OWN measured
+/// signature (`wasm_export_signature`) and the actor's structural field/
+/// behavior declarations; nothing is guessed by the runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebControl {
+    /// The wasm export name the runtime calls once per raw gesture (e.g.
+    /// `update_view`), taking `args` positionally and returning a tuple the
+    /// runtime writes back by `result`'s names (native wasm multi-value).
+    pub export: String,
+    /// Positional argument sources, in the EXACT order the wasm export
+    /// expects them.
+    pub args: Vec<WebControlArgSource>,
+    /// The reply tuple's positional mapping: each element's target state-field
+    /// NAME (a leading, declaration-order subset of the actor's fields; e.g.
+    /// `res` is read via `args` but not itself gesture-updated, so it is
+    /// absent here).
+    pub result: Vec<String>,
+}
+
+/// Where one positional argument of a `control.export` call comes from. The
+/// runtime accumulates raw pointer/wheel deltas and reads live state; it does
+/// NOT compute pan sensitivity, a zoom curve, or a clamp -- that is exactly
+/// what `control.export` (Fe) owns.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum WebControlArgSource {
+    /// The actor's CURRENT value of the state field named `name` (read from
+    /// the live uniform vector by name, exactly like a `surface.params[]`
+    /// member).
+    State { name: String },
+    /// Accumulated pointer movement while dragging (primary button held), in
+    /// the SAME pixel frame as an `extent_x`/`extent_y` state field; `axis`
+    /// is `"x"` or `"y"`.
+    Drag { axis: String },
+    /// One wheel gesture's notch direction: `Math.sign(deltaY)`, so -1 (in),
+    /// 0 (unused; wheel events always carry a nonzero delta), or 1 (out).
+    Wheel,
+    /// The pointer's CURRENT position, in the same pixel frame as `Drag`
+    /// (not normalized); `axis` is `"x"` or `"y"`.
+    Pointer { axis: String },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebCanonicalStatus {
     pub policy: WebCanonicalPolicy,
@@ -798,11 +1077,25 @@ impl WebBundle {
         top_mod: TopLevelMod<'_>,
         options: WebBuildOptions,
     ) -> Result<Self, WebBundleError> {
+        // Structurally recognized like `view()`: an `UpdateSurface`-marked
+        // behavior joins the wasm root set automatically (no caller opt-in),
+        // so a demo with none stays byte-identical. It is a PLAIN multi-scalar
+        // wasm export (native multi-value reply, R2.1), never a canonical
+        // message lane (that machinery demands a single nominal request/
+        // response record), so this is exercised under `Disabled` canonical
+        // policy today (`demos/sketches/mandelbrot`); a demo combining
+        // `UpdateSurface` with `Optional`/`Required` canonical policy would
+        // need `control_export` routed around canonical-lane derivation too,
+        // which no demo does yet, so that combination is left unhandled here.
+        let control_export = actor_update_export_name(db, top_mod, &options.source_entry)?;
         let mut canonical_entries = if options.canonical_entries.is_empty() {
             vec![options.source_entry.clone()]
         } else {
             options.canonical_entries.clone()
         };
+        if let Some(name) = &control_export {
+            canonical_entries.push(name.clone());
+        }
         let mut seen_entries = std::collections::BTreeSet::new();
         canonical_entries.retain(|entry| seen_entries.insert(entry.clone()));
         let (canonical_candidate, mut canonical_status) = match options.canonical_policy {
@@ -889,6 +1182,10 @@ impl WebBundle {
         .bytes;
         wasmparser::validate(&wasm)
             .map_err(|error| WebBundleError::WasmValidation(error.to_string()))?;
+        let control = control_export
+            .as_deref()
+            .map(|export| project_control(db, top_mod, &options.source_entry, export, &wasm))
+            .transpose()?;
         let canonical_interface =
             verify_canonical_candidate(&wasm, canonical_candidate, &mut canonical_status)?;
         let (interface_js, interface_d_ts, canonical_adapters) =
@@ -924,6 +1221,7 @@ impl WebBundle {
             },
             layout,
             surface,
+            control,
             provenance: options.provenance,
             canonical_interface,
             canonical_status,

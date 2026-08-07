@@ -236,6 +236,224 @@ fn mandelbrot_sketch_compiles() {
     wasmparser::validate(&bundle.wasm).expect("mandelbrot sketch wasm should be valid");
 }
 
+// ---------------------------------------------------------------------------
+// R3 step 1 (param gestures, mandelbrot): the gallery `demos/sketches/
+// mandelbrot` actor's `update_view` behavior (the `UpdateSurface` role
+// marker) is projected into the manifest `control` section AND compiled into
+// `bundle.wasm` as a real, callable export. Fe owns pan sensitivity, the zoom
+// curve, the cursor anchor, and the clamps; JS delivers only raw deltas.
+//
+// Gate: the manifest `control` section has the exact shape the runtime reads
+// (measured, not assumed), and the wasmtime-executed `update_view` export
+// matches an oracle over a seeded synthetic gesture tape at EVERY step,
+// mirroring `spirv_e2e.rs`'s `update_view_matches_oracle_over_gesture_tape`
+// rigor for the `mandel_view_ctl.fe` fixture's i32 Q12 sibling.
+// ---------------------------------------------------------------------------
+
+const MANDELBROT_CENTER_X_RANGE: (f32, f32) = (-2.5, 1.0);
+const MANDELBROT_CENTER_Y_RANGE: (f32, f32) = (-1.5, 1.5);
+const MANDELBROT_ZOOM_RANGE: (f32, f32) = (0.0005, 3.0);
+const MANDELBROT_RES: f32 = 512.0;
+
+/// The independent oracle (re-derived from the pan/zoom/anchor/clamp spec:
+/// pan follows the pointer via the actor's own pixel/complex-plane map, one
+/// wheel notch is a fixed 7/8-in / 9/8-out zoom step, the anchor correction
+/// uses the OLD zoom minus the NEW (clamped) zoom via that SAME map, clamps
+/// apply last to the actor's declared `view()` ranges): `escape`'s own u/v
+/// map is `u(px) = (px+0.5)/res*2-1` (screen right = complex right) and
+/// `v(py) = 1-(py+0.5)/res*2` (screen DOWN = complex UP, the Y-flip), so a
+/// downward drag increases `center_y` (opposite of the `dx`/`center_x` sign).
+fn mandelbrot_update_view_oracle(
+    center_x: f32,
+    center_y: f32,
+    zoom: f32,
+    res: f32,
+    dx: f32,
+    dy: f32,
+    dzoom: f32,
+    mx: f32,
+    my: f32,
+) -> (f32, f32, f32) {
+    let step = 2.0 * zoom / res;
+    let cx0 = center_x - dx * step;
+    let cy0 = center_y + dy * step;
+
+    let stepped = if dzoom < 0.0 {
+        zoom * 0.875
+    } else if dzoom > 0.0 {
+        zoom * 1.125
+    } else {
+        zoom
+    };
+    let z_c = stepped.clamp(MANDELBROT_ZOOM_RANGE.0, MANDELBROT_ZOOM_RANGE.1);
+
+    let u = (mx + 0.5) * 2.0 / res - 1.0;
+    let v = 1.0 - (my + 0.5) * 2.0 / res;
+    let cx_a = cx0 + u * (zoom - z_c);
+    let cy_a = cy0 + v * (zoom - z_c);
+
+    let cx_c = cx_a.clamp(MANDELBROT_CENTER_X_RANGE.0, MANDELBROT_CENTER_X_RANGE.1);
+    let cy_c = cy_a.clamp(MANDELBROT_CENTER_Y_RANGE.0, MANDELBROT_CENTER_Y_RANGE.1);
+    (cx_c, cy_c, z_c)
+}
+
+/// The manifest `control` section has EXACTLY the shape the render runtime
+/// reads: the `update_view` export, its 9 positional arg sources (5 raw
+/// gesture deltas, then the actor's 4 state fields by name, in declaration
+/// order), and the 3-value reply's target field names.
+#[test]
+fn mandelbrot_control_manifest_projects_gesture_bindings() {
+    use fe_codegen::WebControlArgSource as Src;
+
+    let bundle = compile_actor_ingot("demos/sketches/mandelbrot");
+    let control = bundle
+        .manifest
+        .control
+        .as_ref()
+        .expect("demos/sketches/mandelbrot should project an `UpdateSurface` control section");
+    assert_eq!(control.export, "update_view");
+    assert_eq!(
+        control.args,
+        vec![
+            Src::Drag { axis: "x".to_string() },
+            Src::Drag { axis: "y".to_string() },
+            Src::Wheel,
+            Src::Pointer { axis: "x".to_string() },
+            Src::Pointer { axis: "y".to_string() },
+            Src::State { name: "center_x".to_string() },
+            Src::State { name: "center_y".to_string() },
+            Src::State { name: "zoom".to_string() },
+            Src::State { name: "res".to_string() },
+        ],
+        "control.args must be exactly [dx, dy, dzoom, mx, my] (the reserved gesture-arg \
+         vocabulary) followed by the actor's state fields in declaration order"
+    );
+    assert_eq!(
+        control.result,
+        vec!["center_x".to_string(), "center_y".to_string(), "zoom".to_string()],
+        "control.result must be the LEADING 3 state fields (declaration order); `res` is read \
+         but not itself gesture-updated"
+    );
+
+    // Non-interactive sketches carry no `control` section at all (this is
+    // exactly what keeps their manifests byte-stable): spot-check a sibling.
+    let plain = compile_actor_ingot("demos/sketches/plasma");
+    assert!(
+        plain.manifest.control.is_none(),
+        "a sketch with no `UpdateSurface` behavior must project no `control` section"
+    );
+}
+
+/// The wasmtime-executed `update_view` export matches the independent oracle
+/// over a deterministic synthetic gesture tape (seeded LCG, mixed drag/wheel
+/// events), feeding each reply forward as the next state -- the exact
+/// runtime round-trip `fe-render-runtime.js`'s `_applyGesture` performs.
+/// Asserts the clamps hold at every step and that the tape visits every
+/// clamp arm (coverage, not just "never observed to escape").
+#[test]
+fn mandelbrot_update_view_matches_oracle_over_gesture_tape() {
+    let bundle = compile_actor_ingot("demos/sketches/mandelbrot");
+    let engine = wasmtime::Engine::default();
+    let module =
+        wasmtime::Module::new(&engine, &bundle.wasm).expect("wasmtime should load the module");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("wasmtime should instantiate the mandelbrot sketch wasm");
+    let update_view = instance
+        .get_typed_func::<(f32, f32, f32, f32, f32, f32, f32, f32, f32), (f32, f32, f32)>(
+            &mut store,
+            "update_view",
+        )
+        .expect(
+            "`update_view` export should exist as (f32 x9) -> (f32, f32, f32): 5 gesture args \
+             then the 4 flattened actor state fields",
+        );
+
+    let (mut cx, mut cy, mut zoom) = (-0.5f32, 0.0f32, 1.5f32); // view()'s declared init.
+    let res = MANDELBROT_RES;
+
+    let mut s: u64 = 0x5EED_1234_CAFE_F00D;
+    let (mut hit_cx_lo, mut hit_cx_hi, mut hit_cy_lo, mut hit_cy_hi) = (0u32, 0u32, 0u32, 0u32);
+    let (mut hit_zoom_lo, mut hit_zoom_hi) = (0u32, 0u32);
+    const STEPS: usize = 3_000;
+    for step in 0..STEPS {
+        s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let r = s;
+        // Wide pixel deltas (up to +-127px) and an occasionally out-of-frame
+        // cursor so the walk actually reaches every clamp, not just wanders
+        // near the default view.
+        let dx = (((r >> 8) & 255) as i32 - 128) as f32;
+        let dy = (((r >> 16) & 255) as i32 - 128) as f32;
+        let dzoom = match (r >> 24) & 3 {
+            0 => -1.0,
+            1 => 1.0,
+            _ => 0.0,
+        };
+        let mx = ((r >> 32) & 1023) as f32 - 256.0;
+        let my = ((r >> 42) & 1023) as f32 - 256.0;
+
+        let got = update_view
+            .call(&mut store, (dx, dy, dzoom, mx, my, cx, cy, zoom, res))
+            .expect("update_view should run");
+        let want = mandelbrot_update_view_oracle(cx, cy, zoom, res, dx, dy, dzoom, mx, my);
+        assert_eq!(
+            got, want,
+            "gesture-tape step {step}: wasm update_view(cx={cx},cy={cy},zoom={zoom}; \
+             dx={dx},dy={dy},dz={dzoom},mx={mx},my={my}) = {got:?} must equal the oracle {want:?}"
+        );
+
+        (cx, cy, zoom) = got;
+        if cx <= MANDELBROT_CENTER_X_RANGE.0 {
+            hit_cx_lo += 1;
+        }
+        if cx >= MANDELBROT_CENTER_X_RANGE.1 {
+            hit_cx_hi += 1;
+        }
+        if cy <= MANDELBROT_CENTER_Y_RANGE.0 {
+            hit_cy_lo += 1;
+        }
+        if cy >= MANDELBROT_CENTER_Y_RANGE.1 {
+            hit_cy_hi += 1;
+        }
+        if zoom <= MANDELBROT_ZOOM_RANGE.0 {
+            hit_zoom_lo += 1;
+        }
+        if zoom >= MANDELBROT_ZOOM_RANGE.1 {
+            hit_zoom_hi += 1;
+        }
+        assert!(
+            (MANDELBROT_CENTER_X_RANGE.0..=MANDELBROT_CENTER_X_RANGE.1).contains(&cx),
+            "step {step}: center_x {cx} escaped its view() range"
+        );
+        assert!(
+            (MANDELBROT_CENTER_Y_RANGE.0..=MANDELBROT_CENTER_Y_RANGE.1).contains(&cy),
+            "step {step}: center_y {cy} escaped its view() range"
+        );
+        assert!(
+            (MANDELBROT_ZOOM_RANGE.0..=MANDELBROT_ZOOM_RANGE.1).contains(&zoom),
+            "step {step}: zoom {zoom} escaped its view() range"
+        );
+    }
+
+    assert!(
+        hit_cx_lo > 0 && hit_cx_hi > 0 && hit_cy_lo > 0 && hit_cy_hi > 0,
+        "the gesture tape must visit all four center clamps (cx_lo={hit_cx_lo}, cx_hi={hit_cx_hi}, \
+         cy_lo={hit_cy_lo}, cy_hi={hit_cy_hi})"
+    );
+    assert!(
+        hit_zoom_lo > 0 && hit_zoom_hi > 0,
+        "the gesture tape must visit both zoom clamps (zoom_lo={hit_zoom_lo}, zoom_hi={hit_zoom_hi})"
+    );
+    eprintln!(
+        "R3 step 1 tape: {STEPS} mixed pan/zoom/anchor events under wasmtime; the mandelbrot \
+         update_view triple equals the independent oracle at EVERY step. Clamp coverage: \
+         cx_lo={hit_cx_lo} cx_hi={hit_cx_hi} cy_lo={hit_cy_lo} cy_hi={hit_cy_hi} \
+         zoom_lo={hit_zoom_lo} zoom_hi={hit_zoom_hi}."
+    );
+}
+
 #[test]
 fn plasma_sketch_compiles() {
     let bundle = compile_actor_ingot("demos/sketches/plasma");

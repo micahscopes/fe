@@ -58,6 +58,20 @@ pub struct GpuProgram<B> {}
 /// The per-pixel fragment stage role of an actor behavior.
 pub struct FragmentSurface {}
 
+/// The gesture-driven control-state role of an actor behavior (R3 param
+/// gestures): a `self`-taking behavior that maps raw gesture deltas (pan
+/// `dx`/`dy`, wheel `dzoom`, cursor `mx`/`my`; the reserved gesture-argument
+/// vocabulary) plus the actor's own current state onto the next state, e.g.
+/// `fn update_view(self, dx: f32, dy: f32, dzoom: f32, mx: f32, my: f32) ->
+/// (f32, f32, f32) uses (UpdateSurface)`. Consumed STRUCTURALLY, exactly like
+/// `FragmentSurface` above: `fe web` reads it off the `actor` declaration by
+/// name to recover the control export and project the manifest `control`
+/// section (gesture -> arg bindings, return -> state-field bindings), so no
+/// trait obligation is raised here either. Fe owns ALL gesture math (pan
+/// sensitivity, the zoom curve, clamps); the runtime delivers only raw deltas
+/// and blits the returned state (no gesture math in JS).
+pub struct UpdateSurface {}
+
 /// WebGPU class-typed reference: a bind-group BINDING INDEX, which is what a
 /// WebGPU resource honestly is at the API boundary (not a pointer). `T` and `S`
 /// are phantom (representation-only stand-in, like the other backends' refs); the

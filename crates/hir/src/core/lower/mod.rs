@@ -275,6 +275,14 @@ pub struct ActorBehaviorDecl {
     pub name: String,
     /// Last path segment of each role-row entry, e.g. `FragmentSurface`.
     pub role_markers: Vec<String>,
+    /// The behavior's own declared parameter names, in source order, AFTER
+    /// `self` (empty for a `self`-less behavior, e.g. the reserved `view()`).
+    /// These are exactly the params `lower_actor_behavior` keeps BEFORE
+    /// appending the actor's flattened state fields, read here structurally
+    /// (no HIR lowering) so `fe web` control projection can recover which
+    /// flattened positional args are gesture inputs vs. state fields without
+    /// re-deriving the desugaring.
+    pub context_params: Vec<String>,
 }
 
 /// The `actor` declarations reachable from `top_mod`'s source, in declaration
@@ -327,6 +335,7 @@ fn actor_decl(actor: &ast::Actor) -> ActorDecl {
                     .map(|token| token.text().to_string())
                     .unwrap_or_default(),
                 role_markers: uses_markers(sig.uses_clause()),
+                context_params: behavior_context_params(&sig),
             })
         })
         .collect();
@@ -352,6 +361,22 @@ fn actor_field_doc(field: &ast::RecordFieldDef) -> Option<String> {
         })
         .collect();
     (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+/// The behavior's own declared parameter NAMES, in source order, skipping
+/// `self` (structural AST read, mirroring [`lower_actor_behavior`]'s own
+/// "everything after `self`" context-param rule; see [`ActorBehaviorDecl`]).
+fn behavior_context_params(sig: &ast::FuncSignature) -> Vec<String> {
+    let Some(params) = sig.params() else {
+        return Vec::new();
+    };
+    params
+        .into_iter()
+        .filter_map(|param| match param.name()? {
+            ast::FuncParamName::Ident(token) => Some(token.text().to_string()),
+            ast::FuncParamName::SelfParam(_) | ast::FuncParamName::Underscore(_) => None,
+        })
+        .collect()
 }
 
 /// The last path segment identifier of each entry in a `uses` clause.
