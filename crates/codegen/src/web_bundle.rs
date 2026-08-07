@@ -16,6 +16,7 @@ use std::{
 };
 
 use compiler_db::DriverDataBase;
+use hir::analysis::semantic::{ViewParam, ViewParamKind, project_view_surface};
 use hir::hir_def::TopLevelMod;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -361,6 +362,172 @@ fn project_actor_field_metadata(
     }
 }
 
+/// The reserved const behavior a render actor declares to project its
+/// interactive surface (design 1.2).
+const VIEW_BEHAVIOR: &str = "view";
+
+/// Projects the render actor's `const fn view()` behavior into the manifest
+/// `surface` section (protocol v5, R1b; design decision 2). CTFE-evaluates the
+/// behavior to a value (via the semantic const machine), walks it, and
+/// RECONCILES the params-record field names against the actor's state fields and
+/// the lowered uniform binding members: all three must name the same set, or
+/// this errors naming every source.
+///
+/// Returns `Ok(None)` for a render entry whose actor declares no `view()`
+/// behavior (the v4-compatible path: legacy non-actor bundles, and sketches not
+/// yet migrated). There is deliberately no fabricated fallback: a real
+/// evaluation gap surfaces as a `SurfaceProjection` error, never a guess.
+fn project_surface(
+    db: &DriverDataBase,
+    top_mod: TopLevelMod<'_>,
+    source_entry: &str,
+    layout: &WebLayout,
+) -> Result<Option<WebSurface>, WebBundleError> {
+    let decls = hir::lower::module_actor_decls(db, top_mod);
+    let Some(actor) = decls.iter().find(|actor| {
+        actor
+            .row_markers
+            .iter()
+            .any(|marker| marker == GPU_PROGRAM_MARKER)
+            && actor
+                .behaviors
+                .iter()
+                .any(|behavior| behavior.name == source_entry)
+    }) else {
+        return Ok(None);
+    };
+    // Recognize the reserved `view()` behavior structurally.
+    if !actor
+        .behaviors
+        .iter()
+        .any(|behavior| behavior.name == VIEW_BEHAVIOR)
+    {
+        return Ok(None);
+    }
+
+    // The desugared `view` free function (same module, named `view`).
+    let view_func = top_mod
+        .all_funcs(db)
+        .iter()
+        .copied()
+        .find(|func| {
+            func.top_mod(db) == top_mod
+                && func
+                    .name(db)
+                    .to_opt()
+                    .is_some_and(|name| name.data(db) == VIEW_BEHAVIOR)
+        })
+        .ok_or_else(|| {
+            WebBundleError::SurfaceProjection(format!(
+                "actor `{}` declares a `view()` behavior but its lowered function was not found",
+                actor.name
+            ))
+        })?;
+
+    let view = project_view_surface(db, view_func).map_err(|error| {
+        WebBundleError::SurfaceProjection(format!("actor `{}`: {error}", actor.name))
+    })?;
+
+    // The uniform binding members, in arg_index order (== actor field order via
+    // the R0 anchor); their names were projected in L0.
+    let mut members: Vec<&WebBindingMember> = layout
+        .bindings
+        .iter()
+        .filter(|binding| binding.role == WebBindingRole::Input)
+        .flat_map(|binding| binding.members.iter())
+        .collect();
+    members.sort_by_key(|member| member.arg_index);
+
+    // Reconcile view params <-> actor fields <-> binding members by name.
+    let view_names: Vec<&str> = view.params.iter().map(|param| param.name.as_str()).collect();
+    let field_names: Vec<&str> = actor.fields.iter().map(|field| field.name.as_str()).collect();
+    let member_names: Vec<&str> = members.iter().map(|member| member.name.as_str()).collect();
+    let mismatch = || {
+        WebBundleError::SurfaceProjection(format!(
+            "actor `{}`: the `view()` params {view_names:?} do not reconcile with the actor state fields {field_names:?} and the lowered uniform members {member_names:?} (all three must name the same set)",
+            actor.name
+        ))
+    };
+    if view.params.len() != members.len() || view.params.len() != actor.fields.len() {
+        return Err(mismatch());
+    }
+
+    // Emit params in member (arg_index) order so `surface.params[i]` aligns with
+    // `members[i]`, matching each member name to exactly one `view()` param.
+    let mut params = Vec::with_capacity(members.len());
+    for &member in &members {
+        if !field_names.contains(&member.name.as_str()) {
+            return Err(mismatch());
+        }
+        let Some(view_param) = view.params.iter().find(|param| param.name == member.name) else {
+            return Err(mismatch());
+        };
+        params.push(web_surface_param(view_param, member)?);
+    }
+
+    Ok(Some(WebSurface {
+        extent: WebExtent {
+            width: view.extent_width,
+            height: view.extent_height,
+            dpr: "auto".to_string(),
+            filter: "smooth".to_string(),
+        },
+        pipeline: WebPipeline {
+            kind: "fullscreen_fragment".to_string(),
+        },
+        params,
+        state: WebSurfaceState {
+            kind: "params".to_string(),
+        },
+        activate: "pointer".to_string(),
+    }))
+}
+
+/// Builds one manifest param from an evaluated `view()` param and the uniform
+/// member it binds. Range sanity is checked here, at the projection boundary
+/// (ranges are data), with a structured diagnostic.
+fn web_surface_param(
+    view_param: &ViewParam,
+    member: &WebBindingMember,
+) -> Result<WebSurfaceParam, WebBundleError> {
+    let kind = view_param.kind;
+    let (min, max, init, visible) = if kind.is_extent() {
+        // Extent-bound: the runtime writes the live canvas size into the member.
+        (None, None, None, false)
+    } else if matches!(kind, ViewParamKind::Fixed) {
+        // Projected constant: carried into the uniform record, no control.
+        (None, None, Some(view_param.init), false)
+    } else {
+        if view_param.min >= view_param.max {
+            return Err(WebBundleError::SurfaceProjection(format!(
+                "param `{}`: min ({}) must be less than max ({})",
+                view_param.name, view_param.min, view_param.max
+            )));
+        }
+        if view_param.init < view_param.min || view_param.init > view_param.max {
+            return Err(WebBundleError::SurfaceProjection(format!(
+                "param `{}`: init ({}) must be within [{}, {}]",
+                view_param.name, view_param.init, view_param.min, view_param.max
+            )));
+        }
+        (
+            Some(view_param.min),
+            Some(view_param.max),
+            Some(view_param.init),
+            true,
+        )
+    };
+    Ok(WebSurfaceParam {
+        name: member.name.clone(),
+        doc: member.doc.clone(),
+        kind: kind.as_str().to_string(),
+        min,
+        max,
+        init,
+        visible,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebArtifactManifest {
     pub wasm: String,
@@ -481,13 +648,22 @@ pub struct WebLayout {
     pub color_target_format: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// The manifest carries floating-point param ranges/inits in its `surface`
+// section (protocol v5, R1b), so it can no longer be `Eq`; `PartialEq` is
+// retained for the round-trip tests. Nothing keys a manifest by hash/equality.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WebBundleManifest {
     pub protocol: String,
     pub protocol_version: u32,
     pub source_entry: String,
     pub artifacts: WebArtifactManifest,
     pub layout: WebLayout,
+    /// The CTFE-projected `view()` surface (extent + per-param range/init/kind),
+    /// added in protocol v5 (R1b). Absent for a render entry with no `view()`
+    /// behavior (the v4-compatible path); serde-defaulted on read so v4
+    /// manifests still parse structurally.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface: Option<WebSurface>,
     pub provenance: WebProvenance,
     pub canonical_interface: Option<CanonicalInterfaceManifest>,
     pub canonical_status: WebCanonicalStatus,
@@ -498,6 +674,80 @@ pub struct WebBundleManifest {
     pub browser_runtime: Option<WebBrowserRuntimeManifest>,
 }
 
+/// The `surface` section (protocol v5): the render actor's interactive boundary,
+/// CTFE-projected from its `const fn view()` behavior. Every value here traces
+/// to the evaluated `Surface` record; nothing is guessed by the runtime.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WebSurface {
+    pub extent: WebExtent,
+    pub pipeline: WebPipeline,
+    pub params: Vec<WebSurfaceParam>,
+    pub state: WebSurfaceState,
+    /// When the surface goes live: `"pointer"` (on hover/focus/tap). The
+    /// lifecycle vocabulary opens in R2.
+    pub activate: String,
+}
+
+/// The dispatch/canvas extent in pixels, plus the presentation policy. Replaces
+/// the page's `data-fe-width/height` attributes and `const RESOLUTION`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebExtent {
+    pub width: u32,
+    pub height: u32,
+    /// Device-pixel-ratio policy: `"auto"` (backing store scales with DPR,
+    /// honored in R2) for now.
+    pub dpr: String,
+    /// Canvas filtering: `"smooth"` or `"pixelated"` (per-surface; R2 lifts the
+    /// runtime's global default).
+    pub filter: String,
+}
+
+/// The render pipeline kind. An open vocabulary: `"fullscreen_fragment"` today;
+/// `"mesh_gpu"` etc. join in later rungs without a manifest-format change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebPipeline {
+    pub kind: String,
+}
+
+/// One projected interactive parameter. `min`/`max`/`init` are absent for a
+/// non-slider kind (extent-bound or fixed). `doc` is reused from the L0 field
+/// projection (the actor field's doc comment).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WebSurfaceParam {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc: Option<String>,
+    /// The kind vocabulary: `range` | `unit` | `angle` | `log` | `int` |
+    /// `fixed` | `extent_x` | `extent_y`.
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub init: Option<f32>,
+    /// Whether the runtime renders a control for this param. Omitted (defaults
+    /// true) for ordinary sliders; `false` for extent-bound and fixed params.
+    #[serde(default = "web_surface_param_visible_default", skip_serializing_if = "is_true")]
+    pub visible: bool,
+}
+
+fn web_surface_param_visible_default() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
+/// The surface's held-state model. `"params"` = the uniform record IS the whole
+/// state (all fragment sketches); `"record"` joins in R3 for message-driven
+/// state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebSurfaceState {
+    pub kind: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebCanonicalStatus {
     pub policy: WebCanonicalPolicy,
@@ -505,7 +755,9 @@ pub struct WebCanonicalStatus {
     pub omission_reason: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+// `WebBundle` embeds the v5 manifest (which carries f32 surface ranges), so it
+// is `PartialEq` but not `Eq`.
+#[derive(Debug, Clone, PartialEq)]
 pub struct WebBundle {
     pub wasm: Vec<u8>,
     pub wgsl: String,
@@ -657,6 +909,7 @@ impl WebBundle {
         validate_browser_wgsl(&wgsl)?;
         let mut layout = WebLayout::from_spirv(&artifact.layout)?;
         project_actor_field_metadata(db, top_mod, &options.source_entry, &mut layout);
+        let surface = project_surface(db, top_mod, &options.source_entry, &layout)?;
 
         let manifest = WebBundleManifest {
             protocol: WEB_BUNDLE_PROTOCOL.to_string(),
@@ -670,6 +923,7 @@ impl WebBundle {
                 canonical_adapters,
             },
             layout,
+            surface,
             provenance: options.provenance,
             canonical_interface,
             canonical_status,
@@ -1262,6 +1516,10 @@ pub enum WebBundleError {
     /// The `--entry`/`--mode` could not be derived from (or contradict) the
     /// module's `actor` declaration.
     EntryDerivation(String),
+    /// The render actor's `view()` behavior could not be CTFE-projected into
+    /// the manifest `surface` section, or the projected params fail to reconcile
+    /// against the actor's state fields and the lowered uniform binding members.
+    SurfaceProjection(String),
     DestinationExists(PathBuf),
     Io(io::Error),
 }
@@ -1292,6 +1550,9 @@ impl fmt::Display for WebBundleError {
             }
             Self::EntryDerivation(error) => {
                 write!(f, "web entry derivation failed: {error}")
+            }
+            Self::SurfaceProjection(error) => {
+                write!(f, "web surface projection failed: {error}")
             }
             Self::DestinationExists(path) => {
                 write!(

@@ -223,6 +223,68 @@ function buildControls(panel, members, current, onChange) {
   });
 }
 
+/**
+ * The initial uniform vector from the declared v5 `surface`: each member takes
+ * its param's `init`, and an extent-bound member (`extent_x`/`extent_y`) takes
+ * the live canvas size. No search, no guessing.
+ */
+function surfaceInitialUniforms(members, surface, width, height) {
+  const byName = new Map(surface.params.map((param) => [param.name, param]));
+  return members.map((member) => {
+    const param = byName.get(member.name);
+    if (!param) return 0;
+    if (param.kind === "extent_x") return width;
+    if (param.kind === "extent_y") return height;
+    return typeof param.init === "number" ? param.init : 0;
+  });
+}
+
+/**
+ * Build controls from the declared v5 `surface.params`: real label (the field
+ * name), doc hover, range/step/init by kind. Extent-bound and fixed params are
+ * not user-visible and get no control. Each param maps to its uniform member by
+ * NAME (the reconciled binding key).
+ */
+function buildSurfaceControls(panel, members, surface, current, onChange) {
+  panel.innerHTML = "";
+  const indexByName = new Map(members.map((member, index) => [member.name, index]));
+  surface.params.forEach((param) => {
+    if (param.visible === false) return;
+    const index = indexByName.get(param.name);
+    if (index === undefined) return;
+    const member = members[index];
+    const row = document.createElement("div");
+    row.className = "fe-render-ctl";
+    const doc = member.doc || param.doc;
+    if (doc) row.title = doc;
+    const label = document.createElement("label");
+    const value = document.createElement("b");
+    const isInt = param.kind === "int";
+    const format = (v) => (+v).toFixed(isInt ? 0 : 2);
+    value.textContent = format(current()[index]);
+    const name = document.createElement("span");
+    name.textContent = param.name;
+    label.append(name, value);
+    const input = document.createElement("input");
+    input.type = "range";
+    const min = typeof param.min === "number" ? param.min : 0;
+    const max = typeof param.max === "number" ? param.max : 1;
+    input.min = String(min);
+    input.max = String(max);
+    input.step = isInt ? "1" : String((max - min) / 200 || 0.01);
+    input.value = String(current()[index]);
+    input.oninput = () => {
+      // Slice the LIVE uniform vector so moving one slider preserves the rest.
+      const next = current().slice();
+      next[index] = +input.value;
+      value.textContent = format(input.value);
+      onChange(next);
+    };
+    row.append(label, input);
+    panel.append(row);
+  });
+}
+
 async function initWebGpu({ canvas, layout, inputBinding, members, gpuOption, wgslUrl }) {
   const gpu = gpuOption ?? (await acquireSharedGpu());
   if (!gpu) return null;
@@ -357,8 +419,8 @@ export async function mountRenderSurface(options) {
     canvas: canvasOption,
     container,
     mountAfter,
-    width = DEFAULT_SIZE,
-    height = width,
+    width: widthOption,
+    height: heightOption,
     initial,
     gpu: gpuOption,
     controls = true,
@@ -367,6 +429,10 @@ export async function mountRenderSurface(options) {
   const resolvedManifestUrl = new URL(manifestUrl, document.baseURI);
   const manifest = await (await fetchOrThrow(resolvedManifestUrl, "manifest")).json();
   const layout = manifest.layout;
+  // Protocol v5 `surface` section (projected from the actor's `view()`): real
+  // param ranges/init/kind and the dispatch extent. When present the runtime
+  // guesses NOTHING: no [0,128] slider, no uniform search, no page-attr size.
+  const surface = manifest.surface || null;
   const inputBinding = layout.bindings.find((binding) => binding.role === "input");
   const members = inputBinding ? inputBinding.members : [];
   const builtins = layout.builtin_inputs || [];
@@ -394,6 +460,12 @@ export async function mountRenderSurface(options) {
     return kernel(...args) >>> 0; // 0xAARRGGBB
   }
 
+  // Dispatch/canvas extent: the declared `surface.extent` when present (the
+  // page carries no sizes in v5), else the caller's width/height, else the
+  // legacy default.
+  const width = surface?.extent?.width ?? widthOption ?? DEFAULT_SIZE;
+  const height = surface?.extent?.height ?? heightOption ?? widthOption ?? DEFAULT_SIZE;
+
   ensureStyle();
   const dom = buildDom({ canvasOption, container, mountAfter, controls });
   dom.canvas.width = width;
@@ -403,7 +475,11 @@ export async function mountRenderSurface(options) {
     (await initWebGpu({ canvas: dom.canvas, layout, inputBinding, members, gpuOption, wgslUrl })) ??
     initWasmFallback({ canvas: dom.canvas, width, height, callKernel });
 
-  let uniforms = initial ?? deterministicInitialUniforms(members, callKernel);
+  // Initial uniform vector: from the declared `surface` (init values, with
+  // extent-bound members fed the live canvas size), else the legacy path.
+  let uniforms = surface
+    ? surfaceInitialUniforms(members, surface, width, height)
+    : (initial ?? deterministicInitialUniforms(members, callKernel));
 
   function render(nextUniforms) {
     if (nextUniforms) uniforms = nextUniforms;
@@ -416,7 +492,11 @@ export async function mountRenderSurface(options) {
   }
 
   if (dom.panel && controls) {
-    buildControls(dom.panel, members, () => uniforms, (next) => render(next));
+    if (surface) {
+      buildSurfaceControls(dom.panel, members, surface, () => uniforms, (next) => render(next));
+    } else {
+      buildControls(dom.panel, members, () => uniforms, (next) => render(next));
+    }
   }
   if (dom.metaEl) {
     // Unobtrusive links to the generated artifacts the toolchain emitted from

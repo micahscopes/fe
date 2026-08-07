@@ -618,16 +618,23 @@ impl super::Parse for ActorScope {
                     Some(SyntaxKind::RBrace) | None => break,
                     // A behavior with no leading attributes/doc. Behaviors parse
                     // like impl methods so a `self` receiver is admitted; the
-                    // desugar flattens it away.
+                    // desugar flattens it away. A `const fn` behavior (the
+                    // reserved `view()` surface projection) is admitted too:
+                    // `is_fn_item_head` recognizes the `const fn` head and
+                    // `FuncScope` consumes the `const` modifier.
                     Some(SyntaxKind::FnKw) => {
                         parser.parse(FuncScope::new(FuncDefScope::Impl))?;
                     }
+                    Some(SyntaxKind::ConstKw) if is_fn_item_head(parser) => {
+                        parser.parse(FuncScope::new(FuncDefScope::Impl))?;
+                    }
                     // Leading attributes or a doc comment: they belong to a
-                    // behavior `fn` when one follows, otherwise to a field.
+                    // behavior `fn` (including `const fn`) when one follows,
+                    // otherwise to a field.
                     Some(SyntaxKind::Pound) | Some(SyntaxKind::DocComment) => {
                         let precedes_fn = parser.dry_run(|p| {
                             let _ = attr::parse_attr_list(p);
-                            p.current_kind() == Some(SyntaxKind::FnKw)
+                            is_fn_item_head(p)
                         });
                         if precedes_fn {
                             let checkpoint = parse_attr_list(parser)?;

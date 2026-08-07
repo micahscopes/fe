@@ -139,28 +139,40 @@ fn lower_actor_behavior<'db>(
     let generic_params = GenericParamListId::lower_ast_opt(ctxt, sig.generic_params());
     let where_clause = WhereClauseId::lower_ast_opt(ctxt, sig.where_clause());
 
-    // Context parameters: everything the behavior declares after `self`.
-    let mut params: Vec<FuncParam<'db>> = match sig.params() {
+    // Lower the declared parameters once, then note whether the behavior takes
+    // `self`. A behavior WITHOUT `self` is a reserved static declaration (the
+    // const `view()` surface projection, web v5): it cannot read actor state,
+    // so its state fields are NOT flattened in and no `self.<field>` rewrite is
+    // installed. A behavior WITH `self` (a `FragmentSurface` stage) flattens the
+    // state fields into trailing positional params exactly as before.
+    let declared_params: Vec<FuncParam<'db>> = match sig.params() {
         Some(params_ast) => FuncParamListId::lower_ast(ctxt, params_ast)
             .data(ctxt.db())
-            .iter()
-            .filter(|param| !param.is_self_param(ctxt.db()))
-            .cloned()
-            .collect(),
+            .to_vec(),
         None => Vec::new(),
     };
-    // The actor's state fields, flattened into positional parameters.
-    for (field_name, ty) in field_specs.iter().copied() {
-        params.push(FuncParam {
-            mode: FuncParamMode::View,
-            is_mut: false,
-            has_ref_prefix: false,
-            has_own_prefix: false,
-            is_label_suppressed: false,
-            name: Partial::Present(FuncParamName::Ident(field_name)),
-            ty,
-            self_ty_fallback: false,
-        });
+    let has_self = declared_params
+        .iter()
+        .any(|param| param.is_self_param(ctxt.db()));
+    // Context parameters: everything the behavior declares after `self`.
+    let mut params: Vec<FuncParam<'db>> = declared_params
+        .into_iter()
+        .filter(|param| !param.is_self_param(ctxt.db()))
+        .collect();
+    if has_self {
+        // The actor's state fields, flattened into positional parameters.
+        for (field_name, ty) in field_specs.iter().copied() {
+            params.push(FuncParam {
+                mode: FuncParamMode::View,
+                is_mut: false,
+                has_ref_prefix: false,
+                has_own_prefix: false,
+                is_label_suppressed: false,
+                name: Partial::Present(FuncParamName::Ident(field_name)),
+                ty,
+                self_ty_fallback: false,
+            });
+        }
     }
     let params = Partial::Present(FuncParamListId::new(ctxt.db(), params));
 
@@ -169,15 +181,20 @@ fn lower_actor_behavior<'db>(
     // The role marker in the behavior's `uses` row is intentionally dropped.
     let effects = EffectParamListId::new(ctxt.db(), vec![]);
     // Behaviors are the actor's public surface, so the flattened kernel is
-    // public regardless of how the behavior was written.
-    let modifiers = FuncModifiers::new(Visibility::Public, false, false, false);
+    // public regardless of how the behavior was written. A `const` behavior
+    // (the reserved `view()`) stays const so the const-projection seam can
+    // CTFE-evaluate it; a plain stage behavior stays non-const.
+    let is_const = behavior.const_kw().is_some();
+    let modifiers = FuncModifiers::new(Visibility::Public, false, is_const, false);
 
-    // Rewrite `self.<field>` to the flattened parameter while lowering the body.
+    // Rewrite `self.<field>` to the flattened parameter while lowering the body,
+    // but only for a `self`-taking behavior; a self-less behavior has no state
+    // access to rewrite.
     let field_idents = field_specs
         .iter()
         .map(|(name, _)| *name)
         .collect::<Vec<_>>();
-    let previous = ctxt.set_actor_self_fields(Some(field_idents));
+    let previous = ctxt.set_actor_self_fields(has_self.then_some(field_idents));
     let body = behavior
         .body()
         .map(|body| Body::lower_ast(ctxt, ast::Expr::cast(body.syntax().clone()).unwrap()));

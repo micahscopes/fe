@@ -6,6 +6,7 @@ pub mod instance;
 pub mod ir;
 pub mod lower;
 mod verify;
+pub mod view_projection;
 
 pub use borrowck::*;
 pub use consts::*;
@@ -29,3 +30,6 @@ pub use lower::{
     effect_param_site, lower_to_smir, owner_effect_bindings, same_owner_effect_binding,
 };
 pub use verify::{SemanticVerifyError, verify_semantic_body};
+pub use view_projection::{
+    ViewParam, ViewParamKind, ViewProjectionError, ViewSurface, project_view_surface,
+};
