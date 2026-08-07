@@ -1,0 +1,124 @@
+//! The `view()` surface-declaration vocabulary (web v5, slice R1).
+//!
+//! A render `actor` declares its interactive boundary with one reserved const
+//! behavior `const fn view() -> Surface<Params>`. The compiler CTFE-evaluates
+//! that behavior at bundle time and projects the resulting value into the
+//! fe-web-bundle manifest `surface` section (extent + per-param range / init /
+//! kind); the fixed render runtime consumes it for real sliders, initial
+//! uniforms, and dispatch size. Nothing here is known to the compiler as a
+//! special type: these are ORDINARY const-constructible Fe library types (the
+//! vocabulary lives in std, not the compiler; design 1.2 / 1.4). The only new
+//! compiler capability is the generic const-projection seam that evaluates the
+//! behavior and walks the record.
+//!
+//! `Param` values carry no gesture bindings yet: input gestures (`.wheel()`,
+//! `.drag_x()`, ...) are the R3 (L3) param-gesture slice and attach here later
+//! without perturbing this shape.
+
+/// How a param presents and is driven by the runtime. The variant NAME is the
+/// projected `kind` string (snake_cased), so this enum is the single source of
+/// the kind vocabulary; the compiler reads the variant name off the evaluated
+/// value, there is no numeric channel.
+pub enum ParamKind {
+    /// A linear slider over `[min, max]`.
+    Range,
+    /// A linear slider over `[0, 1]`.
+    Unit,
+    /// An angle in radians, slider over `[0, TAU]`, wrapping.
+    Angle,
+    /// A logarithmic slider over `[min, max]`.
+    Log,
+    /// An integer slider over `[min, max]`, whole steps.
+    Int,
+    /// A projected-but-not-user-visible constant.
+    Fixed,
+    /// Bound to the live canvas width in pixels (replaces `const RESOLUTION`).
+    ExtentX,
+    /// Bound to the live canvas height in pixels.
+    ExtentY,
+}
+
+/// One declared interactive parameter. `min`/`max`/`init` are plain data; range
+/// sanity (min < max, init in range) is checked at the projection boundary, not
+/// in the type (ranges are data). Fields are private: a `Param` is only ever
+/// built through the const constructors below.
+pub struct Param {
+    kind: ParamKind,
+    min: f32,
+    max: f32,
+    init: f32,
+}
+
+impl Param {
+    /// A linear slider over `[min, max]`, starting at `init`.
+    pub const fn range(min: f32, max: f32, init: f32) -> Param {
+        Param { kind: ParamKind::Range, min: min, max: max, init: init }
+    }
+
+    /// A linear slider over `[0, 1]`, starting at `init`.
+    pub const fn unit(init: f32) -> Param {
+        Param { kind: ParamKind::Unit, min: 0.0, max: 1.0, init: init }
+    }
+
+    /// An angle in radians over `[0, TAU]`, starting at `init`.
+    pub const fn angle(init: f32) -> Param {
+        Param { kind: ParamKind::Angle, min: 0.0, max: 6.2831855, init: init }
+    }
+
+    /// A logarithmic slider over `[min, max]`, starting at `init`.
+    pub const fn log(min: f32, max: f32, init: f32) -> Param {
+        Param { kind: ParamKind::Log, min: min, max: max, init: init }
+    }
+
+    /// An integer slider over `[min, max]`, starting at `init`.
+    pub const fn int(min: f32, max: f32, init: f32) -> Param {
+        Param { kind: ParamKind::Int, min: min, max: max, init: init }
+    }
+
+    /// A constant value carried into the uniform record but not shown as a
+    /// control.
+    pub const fn fixed(_ value: f32) -> Param {
+        Param { kind: ParamKind::Fixed, min: value, max: value, init: value }
+    }
+
+    /// Bound to the live canvas width in pixels. The runtime writes the actual
+    /// backing-store width into this member each configure, so the kernel is
+    /// resolution-exact with no `const RESOLUTION` and no ABI change.
+    pub const fn extent_x() -> Param {
+        Param { kind: ParamKind::ExtentX, min: 0.0, max: 0.0, init: 0.0 }
+    }
+
+    /// Bound to the live canvas height in pixels.
+    pub const fn extent_y() -> Param {
+        Param { kind: ParamKind::ExtentY, min: 0.0, max: 0.0, init: 0.0 }
+    }
+}
+
+/// The dispatch/canvas extent in pixels. Built through the constructors so the
+/// fields stay private; the page carries no sizes, the manifest does.
+pub struct Extent {
+    width: u32,
+    height: u32,
+}
+
+impl Extent {
+    /// A square extent of `n` by `n` pixels.
+    pub const fn square(_ n: u32) -> Extent {
+        Extent { width: n, height: n }
+    }
+
+    /// A rectangular extent, `width` by `height` pixels.
+    pub const fn rect(_ width: u32, _ height: u32) -> Extent {
+        Extent { width: width, height: height }
+    }
+}
+
+/// The surface declaration: the extent plus a per-demo params record `V` whose
+/// FIELD NAMES bind, by name identity, to the actor's state fields (checked at
+/// projection time, erroring and naming all sources on any mismatch). Fields
+/// are public so an actor's `view()` constructs one with an ordinary struct
+/// literal.
+pub struct Surface<V> {
+    pub extent: Extent,
+    pub params: V,
+}

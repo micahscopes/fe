@@ -188,6 +188,21 @@ fn compile_standalone_grid(rel_path: &str, entry: &str, workgroup: [u32; 3]) -> 
 }
 
 // ---------------------------------------------------------------------------
+// R1a: the `std::web::view` vocabulary (Param/Extent/Surface) is ordinary
+// const-constructible Fe living in std, not the compiler. This fixture
+// const-constructs a `Surface` value through every constructor and must
+// type-check clean with no compiler change.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn view_vocabulary_const_constructs_a_surface() {
+    with_standalone_file(
+        "crates/codegen/tests/fixtures/view/view_surface_smoke.fe",
+        |_db, _top_mod| {},
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Sketches (demos/sketches/*/src/lib.fe): each declares an `actor ... uses
 // (GpuProgram<WebGpuBackend>)` with a single `FragmentSurface` behavior, so
 // entry/mode are always DERIVED, never hardcoded here.
