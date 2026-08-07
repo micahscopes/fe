@@ -14,17 +14,20 @@
   `data-fe-entry` is OMITTED on purpose: the entry is derived from each sketch's
   `actor` declaration (Cga3dSurface, QcgaSurface, ...), never guessed here.
 
-  `data-fe-width/height="128"` matches the `const RESOLUTION: f32 = 128.0` that
-  every one of these sketches already declares (cga3d:269, desargues:42,
-  plasma:17, qcga:282, mandelbrot:22, dec:743) - a shared convention, not a
-  per-page guess. gradient declares no RESOLUTION and adapts to the dispatch
-  size. The do-it-right that deletes even these attrs is manifest v5: project
-  the actor's declared dispatch size into the manifest so the page carries no
-  size at all (FE_WEB_GALLERY_ORCHESTRATION_DESIGN.md section 7). Until then
-  this is the same short-term per-page fix one.html uses, applied uniformly.
+  `data-fe-width/height="512"` must match each sketch's `const RESOLUTION`,
+  because the shaders normalize pixel coords by RESOLUTION (e.g. cga3d:285
+  `/ RESOLUTION`); buffer size and that const are coupled, so both were bumped
+  128 -> 512 together. This coupling (and this whole per-page size attr) is
+  exactly what manifest v5 removes: the actor declares its own dispatch size,
+  projected into the manifest, so the page carries no size at all
+  (FE_WEB_V5_ORCHESTRATION_DESIGN.md). Interim until then.
 
-  qcga_pencil is intentionally absent: it is a compute sketch with no render
-  actor (it has no `shade`/GpuProgram entry), so it is not a gallery tile.
+  Each caption carries a `source` link (the dev server serves the raw .fe); the
+  runtime's meta line links the generated wgsl/wasm/manifest.
+
+  qcga_pencil is intentionally absent: it is the interactive vertex+fragment+drag
+  actor the current fragment-only runtime cannot drive yet. It enters the gallery
+  at v5 build slice L4.
 -->
 <html lang="en">
 <head>
@@ -36,7 +39,7 @@
   * { box-sizing: border-box; }
   body { margin: 0; font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
          background: #0d0f13; color: #cfd6e4; padding: 24px; }
-  header { max-width: 1100px; margin: 0 auto 22px; }
+  header { max-width: 1200px; margin: 0 auto 22px; }
   header h1 { font-size: 16px; font-weight: 600; margin: 0 0 4px; color: #e6ecf7; letter-spacing: .02em; }
   header p { margin: 0; color: #8a93a6; font-size: 12.5px; }
   header code { color: #b7c2d8; background: #171a21; padding: 1px 6px; border-radius: 4px; }
@@ -53,9 +56,13 @@
               cheap retained bitmap; this makes the WebGPU path behave the same
               during scroll). contain-intrinsic-size reserves each tile's height
               so the scrollbar does not jump as tiles enter/leave. */
-           content-visibility: auto; contain-intrinsic-size: auto 500px; }
-  figcaption { font-size: 12.5px; color: #aeb8cc; }
+           content-visibility: auto; contain-intrinsic-size: auto 560px; }
+  figcaption { font-size: 12.5px; color: #aeb8cc; display: flex; align-items: baseline; gap: 8px; }
   figcaption b { color: #e6ecf7; font-weight: 600; }
+  figcaption .desc { flex: 1; }
+  /* Unobtrusive source link. */
+  figcaption a { color: #6b7688; text-decoration: underline dotted; font-size: 11.5px; }
+  figcaption a:hover { color: #b7c2d8; }
   /* Override the render runtime's side-by-side (canvas | 180-260px controls)
      grid: in a gallery tile the control column starves the canvas to a few px,
      so stack the canvas ON TOP of the controls and let it fill the tile. */
@@ -71,32 +78,32 @@
 
   <div class="grid">
     <figure>
-      <figcaption><b>cga3d</b> · sparse Clifford sphere pencil</figcaption>
-      <script type="application/fe" data-fe-src="sketches/cga3d" data-fe-render data-fe-width="128" data-fe-height="128"></script>
+      <figcaption><b>cga3d</b><span class="desc">sparse Clifford sphere pencil</span><a href="sketches/cga3d/src/lib.fe" target="_blank" rel="noopener">source</a></figcaption>
+      <script type="application/fe" data-fe-src="sketches/cga3d" data-fe-render data-fe-width="512" data-fe-height="512"></script>
     </figure>
     <figure>
-      <figcaption><b>qcga</b> · quadric conformal surface</figcaption>
-      <script type="application/fe" data-fe-src="sketches/qcga" data-fe-render data-fe-width="128" data-fe-height="128"></script>
+      <figcaption><b>qcga</b><span class="desc">quadric conformal surface</span><a href="sketches/qcga/src/lib.fe" target="_blank" rel="noopener">source</a></figcaption>
+      <script type="application/fe" data-fe-src="sketches/qcga" data-fe-render data-fe-width="512" data-fe-height="512"></script>
     </figure>
     <figure>
-      <figcaption><b>desargues</b> · projective incidence</figcaption>
-      <script type="application/fe" data-fe-src="sketches/desargues" data-fe-render data-fe-width="128" data-fe-height="128"></script>
+      <figcaption><b>desargues</b><span class="desc">projective incidence</span><a href="sketches/desargues/src/lib.fe" target="_blank" rel="noopener">source</a></figcaption>
+      <script type="application/fe" data-fe-src="sketches/desargues" data-fe-render data-fe-width="512" data-fe-height="512"></script>
     </figure>
     <figure>
-      <figcaption><b>plasma</b> · branch-free field</figcaption>
-      <script type="application/fe" data-fe-src="sketches/plasma" data-fe-render data-fe-width="128" data-fe-height="128"></script>
+      <figcaption><b>plasma</b><span class="desc">branch-free field</span><a href="sketches/plasma/src/lib.fe" target="_blank" rel="noopener">source</a></figcaption>
+      <script type="application/fe" data-fe-src="sketches/plasma" data-fe-render data-fe-width="512" data-fe-height="512"></script>
     </figure>
     <figure>
-      <figcaption><b>mandelbrot</b> · escape-time set</figcaption>
-      <script type="application/fe" data-fe-src="sketches/mandelbrot" data-fe-render data-fe-width="128" data-fe-height="128"></script>
+      <figcaption><b>mandelbrot</b><span class="desc">escape-time set</span><a href="sketches/mandelbrot/src/lib.fe" target="_blank" rel="noopener">source</a></figcaption>
+      <script type="application/fe" data-fe-src="sketches/mandelbrot" data-fe-render data-fe-width="512" data-fe-height="512"></script>
     </figure>
     <figure>
-      <figcaption><b>dec</b> · discrete exterior calculus</figcaption>
-      <script type="application/fe" data-fe-src="sketches/dec" data-fe-render data-fe-width="128" data-fe-height="128"></script>
+      <figcaption><b>dec</b><span class="desc">discrete exterior calculus</span><a href="sketches/dec/src/lib.fe" target="_blank" rel="noopener">source</a></figcaption>
+      <script type="application/fe" data-fe-src="sketches/dec" data-fe-render data-fe-width="512" data-fe-height="512"></script>
     </figure>
     <figure>
-      <figcaption><b>gradient</b> · runtime-default surface</figcaption>
-      <script type="application/fe" data-fe-src="sketches/gradient" data-fe-render data-fe-width="128" data-fe-height="128"></script>
+      <figcaption><b>gradient</b><span class="desc">runtime-default surface</span><a href="sketches/gradient/src/lib.fe" target="_blank" rel="noopener">source</a></figcaption>
+      <script type="application/fe" data-fe-src="sketches/gradient" data-fe-render data-fe-width="512" data-fe-height="512"></script>
     </figure>
   </div>
 </body>

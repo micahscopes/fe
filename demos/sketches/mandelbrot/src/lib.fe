@@ -19,7 +19,7 @@
 use std::webgpu::{FragmentSurface, GpuProgram, WebGpuBackend}
 use fmath::{from_i32, palette}
 
-const RESOLUTION: f32 = 128.0
+const RESOLUTION: f32 = 512.0
 const MAX_ITER: i32 = 96
 
 actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {

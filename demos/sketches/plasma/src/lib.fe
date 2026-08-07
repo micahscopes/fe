@@ -14,7 +14,7 @@
 use std::webgpu::{FragmentSurface, GpuProgram, WebGpuBackend}
 use fmath::{from_i32, palette, sin, sqrt}
 
-const RESOLUTION: f32 = 128.0
+const RESOLUTION: f32 = 512.0
 
 actor PlasmaSurface uses (GpuProgram<WebGpuBackend>) {
     /// Advances the animation; `zoom` and `warp` are exposed for the page.

@@ -279,7 +279,7 @@ pub fn eval_quadric(_ q: Quadric, _ x: f32, _ y: f32, _ z: f32) -> f32 {
 // THE ACTOR: one program, one per-pixel behavior, three uniforms.
 // ---------------------------------------------------------------------------
 
-const RESOLUTION: f32 = 128.0
+const RESOLUTION: f32 = 512.0
 
 actor QcgaSurface uses (GpuProgram<WebGpuBackend>) {
     /// Pencil parameter: [0, 1] sweeps cylinder -> sphere-like -> plane pair.
