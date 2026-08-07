@@ -32,7 +32,7 @@ use crate::{
 };
 
 pub const WEB_BUNDLE_PROTOCOL: &str = "fe-web-bundle";
-pub const WEB_BUNDLE_PROTOCOL_VERSION: u32 = 4;
+pub const WEB_BUNDLE_PROTOCOL_VERSION: u32 = 5;
 pub const WEB_ACTOR_RUNTIME_PROTOCOL: &str = "fe-browser-actor-runtime";
 pub const WEB_ACTOR_RUNTIME_VERSION: u32 = 4;
 
@@ -305,6 +305,62 @@ pub fn resolve_web_entry(
     }
 }
 
+/// Projects each render actor's state-field NAME and doc comment onto the
+/// uniform binding members those fields flattened into (web-bundle protocol
+/// v5, slice L0). A no-op for a non-actor render entry: the members keep the
+/// empty name / absent doc that [`WebLayout::from_spirv`] gave them.
+///
+/// Correspondence. [`hir::lower`]'s `lower_actor_behavior` flattens a
+/// behavior's `self` state fields, in declaration order, into positional
+/// parameters AFTER the behavior's own explicit params. For a `FragmentSurface`
+/// behavior those explicit params are the fragment-position builtins, so the
+/// actor fields are exactly the input-binding uniform members and carry the
+/// trailing, ascending arg_indices. Field `d` (declaration order) therefore
+/// owns the member whose `arg_index` sits `d` positions above the binding's
+/// lowest member arg_index; we map by that offset rather than by vec position
+/// so the field-to-member correspondence is explicit and order-independent.
+fn project_actor_field_metadata(
+    db: &DriverDataBase,
+    top_mod: TopLevelMod<'_>,
+    source_entry: &str,
+    layout: &mut WebLayout,
+) {
+    let decls = hir::lower::module_actor_decls(db, top_mod);
+    // Bind the fields of the actor whose behavior IS this render entry, exactly
+    // the unique GpuProgram actor `resolve_web_entry` derived `source_entry`
+    // from.
+    let Some(actor) = decls.iter().find(|actor| {
+        actor
+            .row_markers
+            .iter()
+            .any(|marker| marker == GPU_PROGRAM_MARKER)
+            && actor
+                .behaviors
+                .iter()
+                .any(|behavior| behavior.name == source_entry)
+    }) else {
+        return;
+    };
+    if actor.fields.is_empty() {
+        return;
+    }
+    for binding in &mut layout.bindings {
+        if binding.role != WebBindingRole::Input {
+            continue;
+        }
+        let Some(base) = binding.members.iter().map(|member| member.arg_index).min() else {
+            continue;
+        };
+        for member in &mut binding.members {
+            let field_index = (member.arg_index - base) as usize;
+            if let Some(field) = actor.fields.get(field_index) {
+                member.name = field.name.clone();
+                member.doc = field.doc.clone();
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebArtifactManifest {
     pub wasm: String,
@@ -360,6 +416,16 @@ pub struct WebBinding {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebBindingMember {
+    /// The actor state field this member projects (empty for a non-actor
+    /// render entry). Added in web-bundle protocol v5; the serde default keeps
+    /// compiler tooling able to inspect v4 manifests structurally (the v3
+    /// `canonical_adapters` precedent), and lets the render runtime label a
+    /// control by its real name instead of `scalar @arg_index`.
+    #[serde(default)]
+    pub name: String,
+    /// The projected field's doc comment, when the source declared one. Also v5.
+    #[serde(default)]
+    pub doc: Option<String>,
     pub arg_index: u32,
     pub offset: u32,
     pub width: u32,
@@ -589,7 +655,8 @@ impl WebBundle {
         .map_err(|error| WebBundleError::Lower(error.to_string()))?;
         let wgsl = normalize_generated_text(&artifact.wgsl.ok_or(WebBundleError::MissingWgsl)?);
         validate_browser_wgsl(&wgsl)?;
-        let layout = WebLayout::from_spirv(&artifact.layout)?;
+        let mut layout = WebLayout::from_spirv(&artifact.layout)?;
+        project_actor_field_metadata(db, top_mod, &options.source_entry, &mut layout);
 
         let manifest = WebBundleManifest {
             protocol: WEB_BUNDLE_PROTOCOL.to_string(),
@@ -1090,6 +1157,12 @@ impl WebLayout {
                         .members
                         .iter()
                         .map(|member| WebBindingMember {
+                            // Names/docs are projected from the actor field
+                            // declarations after the layout is built (protocol
+                            // v5, `project_actor_field_metadata`); the SPIR-V
+                            // layout itself carries no source-level names.
+                            name: String::new(),
+                            doc: None,
                             arg_index: member.arg_index,
                             offset: member.offset,
                             width: member.width,

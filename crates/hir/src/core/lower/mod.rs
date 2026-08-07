@@ -252,7 +252,21 @@ pub struct ActorDecl {
     pub name: String,
     /// Last path segment of each placement-row entry, e.g. `GpuProgram`.
     pub row_markers: Vec<String>,
+    /// State fields in declaration order, each with its name and doc comment.
+    /// A behavior's `self.<field>` accesses flatten into positional parameters
+    /// in THIS order (see `lower_actor_behavior`), so `fe web` projects field
+    /// `i` onto the uniform binding member it flattened into (web-bundle v5).
+    pub fields: Vec<ActorFieldDecl>,
     pub behaviors: Vec<ActorBehaviorDecl>,
+}
+
+/// One state field of an [`ActorDecl`], read structurally with its doc comment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActorFieldDecl {
+    pub name: String,
+    /// The field's doc comment with the leading `///` stripped, or `None` when
+    /// the field carries no doc comment.
+    pub doc: Option<String>,
 }
 
 /// One behavior of an [`ActorDecl`].
@@ -293,6 +307,16 @@ fn actor_decl(actor: &ast::Actor) -> ActorDecl {
         .map(|token| token.text().to_string())
         .unwrap_or_default();
     let row_markers = uses_markers(actor.uses_clause());
+    let fields = actor
+        .fields()
+        .map(|field| ActorFieldDecl {
+            name: field
+                .name()
+                .map(|token| token.text().to_string())
+                .unwrap_or_default(),
+            doc: actor_field_doc(&field),
+        })
+        .collect();
     let behaviors = actor
         .behaviors()
         .filter_map(|behavior| {
@@ -309,8 +333,25 @@ fn actor_decl(actor: &ast::Actor) -> ActorDecl {
     ActorDecl {
         name,
         row_markers,
+        fields,
         behaviors,
     }
+}
+
+/// The field's doc comment, each line with the leading `///` stripped (the
+/// `[3..]` convention of `DocCommentAttr::lower_ast`) and one leading space
+/// removed, joined by newlines. `None` when the field carries no doc comment.
+fn actor_field_doc(field: &ast::RecordFieldDef) -> Option<String> {
+    let lines: Vec<String> = field
+        .attr_list()?
+        .doc_attrs()
+        .filter_map(|attr| attr.doc())
+        .map(|token| {
+            let raw = &token.text()[3..];
+            raw.strip_prefix(' ').unwrap_or(raw).trim_end().to_string()
+        })
+        .collect();
+    (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
 /// The last path segment identifier of each entry in a `uses` clause.

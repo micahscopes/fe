@@ -1,9 +1,10 @@
-// fe render runtime (compiler-emitted, protocol fe-web-bundle v4).
+// fe render runtime (compiler-emitted, protocol fe-web-bundle v4/v5).
 //
 // The ONE fixed, versioned, demo-blind WebGPU/wasm render kernel driver
 // shipped by the Fe toolchain. It is not hand-written per demo: it reads a
-// fe-web-bundle v4 manifest and drives the two lowerings of the render
-// kernel the compiler produced from the SAME source:
+// fe-web-bundle manifest (v4, or v5 which additionally carries each uniform
+// member's source field name + doc comment) and drives the two lowerings of
+// the render kernel the compiler produced from the SAME source:
 //   - the GPU lane: shader.wgsl via WebGPU (vertex/fragment entries and the
 //     uniform binding table are read from manifest.layout);
 //   - a CPU fallback when WebGPU is unavailable (e.g. an insecure origin):
@@ -191,12 +192,17 @@ function buildControls(panel, members, current, onChange) {
   members.forEach((member, index) => {
     const row = document.createElement("div");
     row.className = "fe-render-ctl";
+    // Protocol v5 projects each actor field's NAME and doc comment onto its
+    // uniform member: label the control by the real field name and surface the
+    // doc as a hover title, falling back to the raw `scalar @arg_index` when a
+    // v4 manifest carries neither.
+    if (member.doc) row.title = member.doc;
     const label = document.createElement("label");
     const value = document.createElement("b");
     const format = (v) => (+v).toFixed(member.scalar === "f32" ? 2 : 0);
     value.textContent = format(current()[index]);
     const name = document.createElement("span");
-    name.textContent = `${member.scalar} @${member.arg_index}`;
+    name.textContent = member.name ? member.name : `${member.scalar} @${member.arg_index}`;
     label.append(name, value);
     const input = document.createElement("input");
     input.type = "range";
