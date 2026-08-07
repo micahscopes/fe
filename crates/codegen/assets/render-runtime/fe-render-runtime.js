@@ -1,10 +1,13 @@
 // fe render runtime (compiler-emitted, protocol fe-web-bundle v4/v5).
 //
 // The ONE fixed, versioned, demo-blind WebGPU/wasm render kernel driver
-// shipped by the Fe toolchain. It is not hand-written per demo: it reads a
-// fe-web-bundle manifest (v4, or v5 which additionally carries each uniform
-// member's source field name + doc comment) and drives the two lowerings of
-// the render kernel the compiler produced from the SAME source:
+// shipped by the Fe toolchain. It defines the `<fe-surface>` custom element
+// (FE_WEB_V5_ORCHESTRATION_DESIGN.md section 3): a fe-web-bundle manifest in,
+// a live web component out. The element reads a manifest (v4, or v5 which
+// additionally carries each uniform member's source field name/doc comment
+// and a `surface` section projected from the actor's `view()`) and drives the
+// two lowerings of the render kernel the compiler produced from the SAME
+// source:
 //   - the GPU lane: shader.wgsl via WebGPU (vertex/fragment entries and the
 //     uniform binding table are read from manifest.layout);
 //   - a CPU fallback when WebGPU is unavailable (e.g. an insecure origin):
@@ -12,19 +15,31 @@
 // Uniform controls are generated from the manifest's input binding members.
 //
 // One shared WebGPU adapter/device serves every surface mounted on a page,
-// so a gallery of N demos (N `mountRenderSurface` calls, one per canvas)
-// costs one device, not N.
+// so a gallery of N demos (N `<fe-surface>` elements) costs one device, not
+// N, and a `device.lost` event on that shared device is recovered ONCE and
+// every attached element rebuilds from its own held state (section 6).
 //
-// This module is the ONLY copy of the render kernel's browser glue. Both the
+// This module is the ONLY copy of the render kernel's browser glue. The
 // legacy `fe web build --mode render` bundle (its emitted index.html imports
-// it as a sibling file) and the standards `application/fe` `data-fe-render`
-// handoff (crates/html-precompile/assets/bootstrap.js, dispatched instead of
-// calling a Wasm entry with zero arguments) import this SAME text.
+// `mountRenderSurface`, a thin compatibility wrapper around the element,
+// preserved below), the standards `application/fe` `data-fe-render` handoff
+// (crates/html-precompile/assets/bootstrap.js, which now inserts a
+// `<fe-surface>` element instead of calling `mountRenderSurface`
+// imperatively), and authored `<fe-surface src=...>` pages (rewritten by the
+// precompiler to `<fe-surface manifest=...>`, crates/html-precompile) all
+// import this SAME module and drive the SAME element. One mount path.
 
-const STYLE_ID = "fe-render-runtime-style";
-const DEFAULT_SIZE = 256; // dispatch/canvas size; matches the legacy bundle's prior default.
+const DEFAULT_SIZE = 256; // dispatch/canvas size for a v4 manifest with no declared `surface.extent`.
+
+// ---------------------------------------------------------------------------
+// Shared WebGPU device: one adapter/device for the whole page, requested at
+// most once, with `device.lost` recovery broadcast to every attached surface.
+// ---------------------------------------------------------------------------
 
 let sharedGpuPromise;
+/** Every currently connected `<fe-surface>`, live or not (module-level so a
+ * `device.lost` event, which is a page-wide fact, can reach every element). */
+const attachedSurfaces = new Set();
 
 /** One WebGPU adapter/device for the whole page, requested at most once. */
 function acquireSharedGpu() {
@@ -40,6 +55,7 @@ async function requestGpu() {
     const adapter = await navigator.gpu.requestAdapter();
     if (!adapter) return null;
     const device = await adapter.requestDevice();
+    device.lost.then((info) => handleSharedDeviceLoss(device, info));
     return { adapter, device };
   } catch (error) {
     console.warn("[fe web] WebGPU init failed, using wasm fallback:", error);
@@ -47,32 +63,30 @@ async function requestGpu() {
   }
 }
 
-function ensureStyle() {
-  if (document.getElementById(STYLE_ID)) return;
-  const style = document.createElement("style");
-  style.id = STYLE_ID;
-  style.textContent = `
-.fe-render { display: grid; gap: 16px; grid-template-columns: auto minmax(180px, 260px);
-             align-items: start; font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
-             color: #cfd6e4; margin: 0; }
-.fe-render canvas, .fe-render-controls canvas { image-rendering: auto; width: 100%;
-             max-width: 384px; aspect-ratio: 1; border-radius: 10px; box-shadow: 0 8px 40px #0008;
-             background: #000; }
-.fe-render-panel { display: grid; gap: 12px; }
-.fe-render-ctl { display: grid; gap: 4px; }
-.fe-render-ctl label { display: flex; justify-content: space-between; color: #96a0b5; }
-.fe-render-ctl b { color: #cfd6e4; font-weight: 600; }
-.fe-render input[type=range], .fe-render-controls input[type=range] { width: 100%; accent-color: #5b8cff; }
-.fe-render-meta { font-size: 12px; color: #6b7688; }
-.fe-render-badge { display: inline-block; padding: 2px 7px; border-radius: 6px;
-                    font-size: 11px; font-weight: 600; }
-.fe-render-badge.webgpu { background: #10281a; color: #5bffa0; }
-.fe-render-badge.wasm { background: #1a2030; color: #8fb0ff; }
-.fe-render-undeclared { color: #d9a441; font-size: 12px; padding: 6px 8px;
-             border: 1px dashed #4a3a1a; border-radius: 6px; background: #221a0c; }
-`;
-  document.head.appendChild(style);
+/**
+ * `device.lost` recovery (FE_WEB_V5_ORCHESTRATION_DESIGN.md section 6): drop
+ * the stale shared promise, re-request an adapter/device ONCE, and let every
+ * attached element rebuild its own pipeline/bind group and re-render from its
+ * own held params. A poster-only element holds no device-scoped resources (the
+ * whole point of releasing the GPU context at "ready"), so recovery is a
+ * cheap no-op for it; only elements that are actually `live` do real work.
+ */
+async function handleSharedDeviceLoss(deadDevice, info) {
+  console.warn(`[fe web] WebGPU device lost (${info?.reason ?? "unknown"}): ${info?.message ?? ""}`);
+  if (sharedGpuPromise) {
+    const current = await sharedGpuPromise.catch(() => null);
+    if (current && current.device !== deadDevice) return; // already recovered by a concurrent loss
+  }
+  sharedGpuPromise = undefined;
+  const fresh = await acquireSharedGpu();
+  for (const surface of attachedSurfaces) {
+    await surface._onDeviceLoss(fresh);
+  }
 }
+
+// ---------------------------------------------------------------------------
+// Manifest-derived helpers shared by the element and by `mountRenderSurface`.
+// ---------------------------------------------------------------------------
 
 async function fetchOrThrow(url, label) {
   const response = await fetch(url);
@@ -86,72 +100,6 @@ function resolveCanvas(canvasOption) {
   if (!canvasOption) return null;
   if (typeof canvasOption === "string") return document.querySelector(canvasOption);
   return canvasOption;
-}
-
-function buildDom({ canvasOption, container, mountAfter, controls }) {
-  const adopted = resolveCanvas(canvasOption);
-  if (adopted) {
-    let panel = null;
-    let modeEl = null;
-    let metaEl = null;
-    if (controls) {
-      const side = document.createElement("div");
-      side.className = "fe-render-controls";
-      modeEl = document.createElement("span");
-      modeEl.className = "fe-render-badge";
-      panel = document.createElement("div");
-      panel.className = "fe-render-panel";
-      metaEl = document.createElement("div");
-      metaEl.className = "fe-render-meta";
-      side.append(modeEl, panel, metaEl);
-      adopted.insertAdjacentElement("afterend", side);
-    }
-    return { root: adopted, canvas: adopted, panel, modeEl, metaEl };
-  }
-
-  const figure = document.createElement("figure");
-  figure.className = "fe-render";
-  const canvas = document.createElement("canvas");
-  const side = document.createElement("div");
-  const modeEl = document.createElement("span");
-  modeEl.className = "fe-render-badge";
-  const panel = document.createElement("div");
-  panel.className = "fe-render-panel";
-  const metaEl = document.createElement("div");
-  metaEl.className = "fe-render-meta";
-  side.append(modeEl, panel, metaEl);
-  figure.append(canvas, side);
-
-  if (container) {
-    container.appendChild(figure);
-  } else if (mountAfter && mountAfter.parentNode) {
-    mountAfter.parentNode.insertBefore(figure, mountAfter.nextSibling);
-  } else {
-    document.body.appendChild(figure);
-  }
-  return { root: figure, canvas, panel, modeEl, metaEl };
-}
-
-/**
- * A bundle with no `surface` section (no declared `view()`): every uniform
- * member is held at a fixed, honest default (1.0, not a guess and not
- * searched) and the panel shows why there is no slider, instead of a
- * fabricated [0,128] range. This is the visible pressure the v5 migration
- * posture calls for (FE_WEB_V5_ORCHESTRATION_DESIGN.md 4.2): an undeclared
- * view stays visibly undeclared rather than silently guessing one.
- */
-function undeclaredViewInitialUniforms(members) {
-  return members.map(() => 1);
-}
-
-function buildUndeclaredViewNotice(panel, members) {
-  panel.innerHTML = "";
-  const notice = document.createElement("div");
-  notice.className = "fe-render-ctl fe-render-undeclared";
-  notice.textContent = members.length
-    ? `no view() declared — ${members.length} uniform member(s) held at 1.0`
-    : "no view() declared";
-  panel.append(notice);
 }
 
 /**
@@ -171,173 +119,899 @@ function surfaceInitialUniforms(members, surface, width, height) {
 }
 
 /**
- * Build controls from the declared v5 `surface.params`: real label (the field
- * name), doc hover, range/step/init by kind. Extent-bound and fixed params are
- * not user-visible and get no control. Each param maps to its uniform member by
- * NAME (the reconciled binding key).
+ * A bundle with no `surface` section (no declared `view()`): every uniform
+ * member is held at a fixed, honest default (1.0, not a guess and not
+ * searched). This is the visible pressure the v5 migration posture calls for
+ * (FE_WEB_V5_ORCHESTRATION_DESIGN.md 4.2): an undeclared view stays visibly
+ * undeclared rather than silently guessing one.
  */
-function buildSurfaceControls(panel, members, surface, current, onChange) {
-  panel.innerHTML = "";
-  const indexByName = new Map(members.map((member, index) => [member.name, index]));
-  surface.params.forEach((param) => {
-    if (param.visible === false) return;
-    const index = indexByName.get(param.name);
-    if (index === undefined) return;
-    const member = members[index];
-    const row = document.createElement("div");
-    row.className = "fe-render-ctl";
-    const doc = member.doc || param.doc;
-    if (doc) row.title = doc;
-    const label = document.createElement("label");
-    const value = document.createElement("b");
-    const isInt = param.kind === "int";
-    const format = (v) => (+v).toFixed(isInt ? 0 : 2);
-    value.textContent = format(current()[index]);
-    const name = document.createElement("span");
-    name.textContent = param.name;
-    label.append(name, value);
-    const input = document.createElement("input");
-    input.type = "range";
-    const min = typeof param.min === "number" ? param.min : 0;
-    const max = typeof param.max === "number" ? param.max : 1;
-    input.min = String(min);
-    input.max = String(max);
-    input.step = isInt ? "1" : String((max - min) / 200 || 0.01);
-    input.value = String(current()[index]);
-    input.oninput = () => {
-      // Slice the LIVE uniform vector so moving one slider preserves the rest.
-      const next = current().slice();
-      next[index] = +input.value;
-      value.textContent = format(input.value);
-      onChange(next);
-    };
-    row.append(label, input);
-    panel.append(row);
-  });
+function undeclaredViewInitialUniforms(members) {
+  return members.map(() => 1);
 }
 
-async function initWebGpu({ canvas, layout, inputBinding, members, gpuOption, wgslUrl }) {
-  const gpu = gpuOption ?? (await acquireSharedGpu());
-  if (!gpu) return null;
-  const { device } = gpu;
-  try {
-    const wgsl = await (await fetchOrThrow(wgslUrl, "WGSL shader")).text();
-    const shaderModule = device.createShaderModule({ code: wgsl });
-    const format = layout.color_target_format || navigator.gpu.getPreferredCanvasFormat();
-    const context = canvas.getContext("webgpu");
-    context.configure({ device, format, alphaMode: "opaque" });
+/** Overwrite only the extent-bound members of `uniforms` (leaving every other
+ * live/user-adjusted value untouched); used on mount AND on every resize. */
+function withExtentUniforms(members, surface, uniforms, width, height) {
+  if (!surface) return uniforms;
+  const byName = new Map(surface.params.map((param) => [param.name, param]));
+  const next = uniforms.slice();
+  members.forEach((member, index) => {
+    const param = byName.get(member.name);
+    if (!param) return;
+    if (param.kind === "extent_x") next[index] = width;
+    else if (param.kind === "extent_y") next[index] = height;
+  });
+  return next;
+}
 
-    let bindGroup = null;
-    let uniformBuffer = null;
-    let pipelineLayout = "auto";
-    if (inputBinding) {
-      uniformBuffer = device.createBuffer({
-        size: Math.max(16, inputBinding.span),
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-      });
-      const bindGroupLayout = device.createBindGroupLayout({
-        entries: [
-          {
-            binding: inputBinding.binding,
-            visibility: GPUShaderStage.FRAGMENT,
-            buffer: { type: "read-only-storage" },
-          },
-        ],
-      });
-      bindGroup = device.createBindGroup({
-        layout: bindGroupLayout,
-        entries: [{ binding: inputBinding.binding, resource: { buffer: uniformBuffer } }],
-      });
-      pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] });
-    }
-    const pipeline = device.createRenderPipeline({
-      layout: pipelineLayout,
-      vertex: { module: shaderModule, entryPoint: layout.vertex_entry },
-      fragment: { module: shaderModule, entryPoint: layout.fragment_entry, targets: [{ format }] },
-      primitive: { topology: "triangle-list" },
+function writeUniformBuffer(device, uniformBuffer, span, members, uniforms) {
+  const buffer = new ArrayBuffer(Math.max(16, span));
+  const view = new DataView(buffer);
+  members.forEach((member, index) => {
+    const value = uniforms[index] ?? 0;
+    if (member.scalar === "f32") view.setFloat32(member.offset, value, true);
+    else if (member.scalar === "u32") view.setUint32(member.offset, value >>> 0, true);
+    else view.setInt32(member.offset, value | 0, true);
+  });
+  device.queue.writeBuffer(uniformBuffer, 0, buffer);
+}
+
+function presentFrame(device, context, pipeline, bindGroup) {
+  const encoder = device.createCommandEncoder();
+  const pass = encoder.beginRenderPass({
+    colorAttachments: [
+      {
+        view: context.getCurrentTexture().createView(),
+        clearValue: { r: 0, g: 0, b: 0, a: 1 },
+        loadOp: "clear",
+        storeOp: "store",
+      },
+    ],
+  });
+  pass.setPipeline(pipeline);
+  if (bindGroup) pass.setBindGroup(0, bindGroup);
+  pass.draw(3);
+  pass.end();
+  device.queue.submit([encoder.finish()]);
+}
+
+function deepFreeze(value) {
+  if (value && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const key of Object.keys(value)) deepFreeze(value[key]);
+  }
+  return value;
+}
+
+// ---------------------------------------------------------------------------
+// Shadow DOM: one fixed stylesheet, `part=` on every restylable node so pages
+// restyle with `fe-surface::part(canvas)` etc. instead of piercing `!important`
+// (FE_WEB_V5_ORCHESTRATION_DESIGN.md 3.2).
+// ---------------------------------------------------------------------------
+
+const SHADOW_CSS = `
+:host { display: block; max-width: 420px; font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: #cfd6e4; }
+.root { display: flex; flex-direction: column; gap: 10px; }
+.stage { position: relative; width: 100%; background: #000; border-radius: 10px; overflow: hidden;
+         box-shadow: 0 8px 40px #0008; }
+.surface-canvas { display: block; width: 100%; height: auto; }
+.surface-canvas[hidden] { display: none; }
+.side { display: grid; gap: 10px; }
+.badge { justify-self: start; display: inline-block; padding: 2px 7px; border-radius: 6px;
+         font-size: 11px; font-weight: 600; }
+.badge.webgpu { background: #10281a; color: #5bffa0; }
+.badge.wasm-2d { background: #1a2030; color: #8fb0ff; }
+.panel { display: grid; gap: 12px; }
+.control { display: grid; gap: 4px; }
+.control label { display: flex; justify-content: space-between; color: #96a0b5; }
+.control b { color: #cfd6e4; font-weight: 600; }
+.control input[type=range] { width: 100%; accent-color: #5b8cff; }
+.control.notice { color: #d9a441; font-size: 12px; padding: 6px 8px; border: 1px dashed #4a3a1a;
+                   border-radius: 6px; background: #221a0c; }
+.meta { font-size: 12px; color: #6b7688; }
+.meta a { color: inherit; text-decoration: underline dotted; }
+.caption ::slotted(*) { font-size: 12.5px; color: #aeb8cc; }
+`;
+
+/**
+ * `<fe-surface manifest="..." state="auto|preview|live|frozen" controls="auto|none">`
+ *
+ * The one custom element that turns any fe-web-bundle manifest into a live
+ * surface. Identity is DATA (the manifest URL); this class is machinery, not
+ * per-demo glue (FE_WEB_V5_ORCHESTRATION_DESIGN.md 3.1).
+ *
+ * Lifecycle (section 6): cold -> ready (fetch manifest, instantiate, render
+ * ONE frame at the declared initial state, capture an ImageBitmap poster,
+ * release the GPU context) -> live on declared intent (`surface.activate`) ->
+ * suspended off-viewport -> device.lost recovery (re-acquire the shared
+ * device, rebuild the pipeline, re-render from held params).
+ *
+ * `.state` additionally reports `"error"` when boot fails (fetch/compile/
+ * instantiate); this is not one of the FSM states section 6 names, but is a
+ * natural, harmless fifth value for observability (an `fe-error` event also
+ * fires, so nothing depends on polling `.state` to notice a failure).
+ */
+class FeSurfaceElement extends HTMLElement {
+  static get observedAttributes() {
+    return ["manifest", "state", "controls", "width", "height"];
+  }
+
+  constructor() {
+    super();
+    this._shadow = this.attachShadow({ mode: "open" });
+    this._fsm = "cold";
+    this._mode = null;
+    this._booted = false;
+    this._adoptedCanvas = null;
+    this._uniforms = [];
+    this._members = [];
+    this._memberIndexByName = new Map();
+    this._controlRows = [];
+    this._manifest = null;
+    this._surface = null;
+    this._gpu = null; // { device, format, pipeline, bindGroup, uniformBuffer }
+    this._liveContext = null; // GPUCanvasContext on `_liveCanvas`
+    this._adoptedContext = null; // GPUCanvasContext on `_adoptedCanvas`
+    this._resolveReady = null;
+    this._rejectReady = null;
+    this._resolveLive = null;
+    this._readyPromise = new Promise((resolve, reject) => {
+      this._resolveReady = resolve;
+      this._rejectReady = reject;
     });
+    this._livePromise = new Promise((resolve) => {
+      this._resolveLive = resolve;
+    });
+    // `mountRenderSurface` legacy-compatibility overrides (section 3.3),
+    // never part of the element's own attribute contract.
+    this._initialOverride = undefined;
+    this._gpuOverride = undefined;
+    this._buildChrome();
+  }
 
+  // -- public contract (FE_WEB_V5_ORCHESTRATION_DESIGN.md 3.2) --------------
+
+  /** A live object keyed by param NAME; `el.params.lambda = 0.3` re-renders. */
+  get params() {
+    return this._paramsProxy ?? (this._paramsProxy = this._buildParamsProxy());
+  }
+
+  get state() {
+    return this._fsm;
+  }
+
+  /** `"webgpu" | "wasm-2d"` (`"wasm-mesh"` joins with the mesh pipeline rungs). */
+  get mode() {
+    return this._mode;
+  }
+
+  /** The parsed, frozen manifest (`null` before `fe-ready`). */
+  get manifest() {
+    return this._manifest;
+  }
+
+  /** Force a transition to `live`, waiting for `ready` first if still cold. */
+  async live() {
+    if (this._fsm === "cold") await this._readyPromise.catch(() => {});
+    await this._goLive();
+  }
+
+  /** Capture the current frame as the poster, release GPU presentation, and
+   * stay there until `.live()` is called again (unlike `suspended`, which
+   * re-activates automatically when the surface re-enters the viewport). */
+  async freeze() {
+    if (this._fsm === "cold") await this._readyPromise.catch(() => {});
+    if (this._fsm !== "live") return;
+    await this._capturePosterFromLive();
+    this._fsm = "frozen";
+    this._dispatch("fe-statechange", { state: "frozen" });
+  }
+
+  // `.post()` (message lanes) is R3/R4 (FE_WEB_V5_BUILD_ORDER.md); deliberately
+  // not defined here rather than shipped as a stub with no lane to call.
+
+  /** Adopt an existing canvas element instead of generating one (the
+   * `data-fe-canvas` compatibility path). Must be called before the element
+   * connects; not part of the base attribute contract, kept for the legacy
+   * script-tag handoff and `mountRenderSurface`. */
+  adoptCanvas(canvas) {
+    if (this._booted) {
+      throw new Error("fe-surface: adoptCanvas must be called before the element connects");
+    }
+    this._adoptedCanvas = canvas ?? null;
+  }
+
+  // -- custom element lifecycle ----------------------------------------------
+
+  connectedCallback() {
+    attachedSurfaces.add(this);
+    if (this._booted) {
+      if (this._fsm === "live") this._wireSuspendObserver();
+      return;
+    }
+    this._booted = true;
+    this._bootSurface();
+  }
+
+  disconnectedCallback() {
+    this._suspendObserver?.disconnect();
+    this._activationObserver?.disconnect();
+    attachedSurfaces.delete(this);
+  }
+
+  attributeChangedCallback(name, oldValue, newValue) {
+    if (oldValue === newValue) return;
+    if (name === "width" || name === "height") {
+      if (newValue == null) this.style.removeProperty(name);
+      else this.style[name] = /^\d+$/.test(newValue) ? `${newValue}px` : newValue;
+      return;
+    }
+    if (name === "manifest") {
+      if (this.isConnected) this._bootSurface();
+      return;
+    }
+    if (name === "controls") {
+      if (this._fsm !== "cold") this._renderControls();
+      return;
+    }
+    if (name === "state" && this._fsm !== "cold") {
+      this._applyStatePolicy();
+    }
+  }
+
+  // -- boot: cold -> ready ----------------------------------------------------
+
+  async _bootSurface() {
+    this._teardown();
+    this._fsm = "cold";
+    const manifestAttr = this.getAttribute("manifest");
+    if (!manifestAttr) {
+      this._fail(new Error("fe-surface: `manifest` attribute is required"));
+      return;
+    }
+    try {
+      const manifestUrl = new URL(manifestAttr, this.baseURI);
+      const manifest = await (await fetchOrThrow(manifestUrl, "manifest")).json();
+      this._manifestUrl = manifestUrl;
+      this._manifest = deepFreeze(manifest);
+      this._layout = manifest.layout;
+      this._surface = manifest.surface || null;
+      const inputBinding = this._layout.bindings.find((binding) => binding.role === "input");
+      this._inputBinding = inputBinding ?? null;
+      this._members = inputBinding ? inputBinding.members : [];
+      this._memberIndexByName = new Map(this._members.map((member, index) => [member.name, index]));
+      this._builtins = this._layout.builtin_inputs || [];
+      this._argumentCount =
+        1 +
+        Math.max(-1, ...this._builtins.map((b) => b.arg_index), ...this._members.map((m) => m.arg_index));
+
+      this._wasmUrl = new URL(manifest.artifacts.wasm, manifestUrl);
+      this._wgslUrl = new URL(manifest.artifacts.wgsl, manifestUrl);
+      const wasmBytes = await (await fetchOrThrow(this._wasmUrl, "wasm module")).arrayBuffer();
+      const { instance } = await WebAssembly.instantiate(wasmBytes, {});
+      this._kernel = instance.exports[manifest.source_entry];
+      if (typeof this._kernel !== "function") {
+        throw new Error(`fe render runtime: wasm export \`${manifest.source_entry}\` not found`);
+      }
+
+      this._uniforms =
+        this._initialOverride ??
+        (this._surface
+          ? surfaceInitialUniforms(this._members, this._surface, DEFAULT_SIZE, DEFAULT_SIZE)
+          : undeclaredViewInitialUniforms(this._members));
+
+      if (!this._adoptedCanvas) this._ensureStage();
+      await this._renderPoster();
+      this._renderControls();
+      this._updateMeta();
+
+      this._fsm = "ready";
+      this._resolveReady();
+      this._dispatch("fe-ready", { mode: this._mode });
+      this._applyStatePolicy();
+    } catch (error) {
+      this._fail(error);
+    }
+  }
+
+  _fail(error) {
+    this._fsm = "error";
+    console.error("[fe web] fe-surface failed to mount:", error);
+    this._rejectReady?.(error);
+    this._dispatch("fe-error", error);
+  }
+
+  _applyStatePolicy() {
+    const policy = this.getAttribute("state") || "auto";
+    if (policy === "live") {
+      this._goLive();
+      return;
+    }
+    if (policy === "frozen") {
+      this._fsm = "frozen";
+      return;
+    }
+    if (policy === "preview") {
+      return; // poster only; `.live()` remains available programmatically.
+    }
+    this._wireActivation(); // "auto": poster first, live on declared intent.
+  }
+
+  // -- DOM construction ---------------------------------------------------
+
+  _buildChrome() {
+    const style = document.createElement("style");
+    style.textContent = SHADOW_CSS;
+    this._root = document.createElement("div");
+    this._root.className = "root";
+
+    this._side = document.createElement("div");
+    this._side.className = "side";
+    this._badge = document.createElement("span");
+    this._badge.className = "badge";
+    this._badge.setAttribute("part", "badge");
+    this._panel = document.createElement("div");
+    this._panel.className = "panel";
+    this._panel.setAttribute("part", "panel");
+    this._meta = document.createElement("div");
+    this._meta.className = "meta";
+    this._meta.setAttribute("part", "meta");
+    this._side.append(this._badge, this._panel, this._meta);
+
+    const captionWrap = document.createElement("div");
+    captionWrap.className = "caption";
+    const slot = document.createElement("slot");
+    slot.name = "caption";
+    captionWrap.append(slot);
+
+    this._root.append(this._side, captionWrap);
+    this._shadow.append(style, this._root);
+  }
+
+  /** Generated (non-adopted) canvases: a 2D poster canvas plus a lazily
+   * created WebGPU live canvas, stacked and toggled by `hidden` (a canvas's
+   * context type is permanent once created, so poster/live must be two
+   * elements, not one canvas swapping context type). */
+  _ensureStage() {
+    if (this._stage) return;
+    this._stage = document.createElement("div");
+    this._stage.className = "stage";
+    this._posterCanvas = document.createElement("canvas");
+    this._posterCanvas.className = "surface-canvas poster";
+    this._posterCanvas.setAttribute("part", "canvas");
+    this._stage.append(this._posterCanvas);
+    this._root.prepend(this._stage);
+  }
+
+  _createLiveCanvas() {
+    if (this._liveCanvas) return;
+    this._liveCanvas = document.createElement("canvas");
+    this._liveCanvas.className = "surface-canvas live";
+    this._liveCanvas.setAttribute("part", "canvas");
+    this._liveCanvas.hidden = true;
+    this._stage.append(this._liveCanvas);
+  }
+
+  // -- extent -----------------------------------------------------------
+
+  /** Backing store = min(declared surface.extent, css-px * devicePixelRatio):
+   * never upsampled past the kernel's declared resolution, never rendered
+   * larger than the box actually needs at the current DPR. */
+  _computeBackingExtent() {
+    const declaredWidth = this._surface?.extent?.width ?? DEFAULT_SIZE;
+    const declaredHeight = this._surface?.extent?.height ?? declaredWidth;
+    const dpr = window.devicePixelRatio || 1;
+    const probe = this._adoptedCanvas || this._stage || this;
+    const rect = probe.getBoundingClientRect();
+    const cssWidth = rect.width || declaredWidth;
+    const cssHeight = rect.height || declaredHeight;
     return {
-      mode: "webgpu",
-      render(uniforms) {
-        if (uniformBuffer) {
-          const buffer = new ArrayBuffer(Math.max(16, inputBinding.span));
-          const view = new DataView(buffer);
-          members.forEach((member, index) => {
-            if (member.scalar === "f32") view.setFloat32(member.offset, uniforms[index], true);
-            else if (member.scalar === "u32") view.setUint32(member.offset, uniforms[index] >>> 0, true);
-            else view.setInt32(member.offset, uniforms[index] | 0, true);
-          });
-          device.queue.writeBuffer(uniformBuffer, 0, buffer);
-        }
-        const encoder = device.createCommandEncoder();
-        const pass = encoder.beginRenderPass({
-          colorAttachments: [
+      width: Math.max(1, Math.min(declaredWidth, Math.round(cssWidth * dpr))),
+      height: Math.max(1, Math.min(declaredHeight, Math.round(cssHeight * dpr))),
+    };
+  }
+
+  async _resolveGpu() {
+    return this._gpuOverride ?? (await acquireSharedGpu());
+  }
+
+  async _ensurePipeline() {
+    const gpu = await this._resolveGpu();
+    if (!gpu) return null;
+    const { device } = gpu;
+    if (this._gpu && this._gpu.device === device) return this._gpu;
+    try {
+      const wgsl = await (await fetchOrThrow(this._wgslUrl, "WGSL shader")).text();
+      const shaderModule = device.createShaderModule({ code: wgsl });
+      const format = this._layout.color_target_format || navigator.gpu.getPreferredCanvasFormat();
+      let bindGroupLayout = null;
+      let bindGroup = null;
+      let uniformBuffer = null;
+      let pipelineLayout = "auto";
+      if (this._inputBinding) {
+        uniformBuffer = device.createBuffer({
+          size: Math.max(16, this._inputBinding.span),
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        });
+        bindGroupLayout = device.createBindGroupLayout({
+          entries: [
             {
-              view: canvas.getContext("webgpu").getCurrentTexture().createView(),
-              clearValue: { r: 0, g: 0, b: 0, a: 1 },
-              loadOp: "clear",
-              storeOp: "store",
+              binding: this._inputBinding.binding,
+              visibility: GPUShaderStage.FRAGMENT,
+              buffer: { type: "read-only-storage" },
             },
           ],
         });
-        pass.setPipeline(pipeline);
-        if (bindGroup) pass.setBindGroup(0, bindGroup);
-        pass.draw(3);
-        pass.end();
-        device.queue.submit([encoder.finish()]);
+        bindGroup = device.createBindGroup({
+          layout: bindGroupLayout,
+          entries: [{ binding: this._inputBinding.binding, resource: { buffer: uniformBuffer } }],
+        });
+        pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] });
+      }
+      const pipeline = device.createRenderPipeline({
+        layout: pipelineLayout,
+        vertex: { module: shaderModule, entryPoint: this._layout.vertex_entry },
+        fragment: { module: shaderModule, entryPoint: this._layout.fragment_entry, targets: [{ format }] },
+        primitive: { topology: "triangle-list" },
+      });
+      this._gpu = { device, format, pipeline, bindGroup, uniformBuffer };
+      return this._gpu;
+    } catch (error) {
+      console.warn("[fe web] WebGPU pipeline init failed, using wasm fallback:", error);
+      return null;
+    }
+  }
+
+  _presentOn(context, uniforms) {
+    const { device, pipeline, bindGroup, uniformBuffer } = this._gpu;
+    if (uniformBuffer) {
+      writeUniformBuffer(device, uniformBuffer, this._inputBinding.span, this._members, uniforms);
+    }
+    presentFrame(device, context, pipeline, bindGroup);
+  }
+
+  _callKernel(px, py, uniforms) {
+    const args = new Array(this._argumentCount).fill(0);
+    for (const builtin of this._builtins) {
+      args[builtin.arg_index] = builtin.source.endsWith("_y") ? py : px;
+    }
+    this._members.forEach((member, index) => {
+      args[member.arg_index] = uniforms[index];
+    });
+    return this._kernel(...args) >>> 0; // 0xAARRGGBB
+  }
+
+  _renderWasmInto(canvas, width, height, uniforms) {
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    const image = ctx.createImageData(width, height);
+    const data = image.data;
+    for (let py = 0; py < height; py++) {
+      for (let px = 0; px < width; px++) {
+        const rgba = this._callKernel(px, py, uniforms);
+        const i = (py * width + px) * 4;
+        data[i] = (rgba >>> 16) & 255;
+        data[i + 1] = (rgba >>> 8) & 255;
+        data[i + 2] = rgba & 255;
+        data[i + 3] = (rgba >>> 24) & 255;
+      }
+    }
+    ctx.putImageData(image, 0, 0);
+  }
+
+  _applyExtentAndFilter(width, height) {
+    const filter = this._surface?.extent?.filter === "pixelated" ? "pixelated" : "auto";
+    if (this._stage) this._stage.style.aspectRatio = `${width} / ${height}`;
+    for (const canvas of [this._posterCanvas, this._liveCanvas, this._adoptedCanvas]) {
+      if (canvas) canvas.style.imageRendering = filter;
+    }
+  }
+
+  // -- ready: render one frame, capture a poster, release the GPU context --
+
+  /** Render ONE frame at the current (initial) uniforms, capture it as a
+   * static poster, and release GPU presentation: the durable fix for a
+   * gallery of N tiles costing zero configured swap chains until a tile goes
+   * live (FE_WEB_V5_ORCHESTRATION_DESIGN.md section 6). */
+  async _renderPoster() {
+    const { width, height } = this._computeBackingExtent();
+    this._backingWidth = width;
+    this._backingHeight = height;
+    this._uniforms = withExtentUniforms(this._members, this._surface, this._uniforms, width, height);
+    this._applyExtentAndFilter(width, height);
+
+    const gpu = await this._ensurePipeline();
+    if (!gpu) {
+      this._mode = "wasm-2d";
+      this._renderWasmInto(this._adoptedCanvas || this._posterCanvas, width, height, this._uniforms);
+      return;
+    }
+    this._mode = "webgpu";
+    if (this._adoptedCanvas) {
+      // An adopted canvas opts OUT of the poster/live swap (its context type
+      // is the caller's to pick, and the caller owns exactly one canvas
+      // element): render straight onto it and leave it configured. This
+      // trades the gallery-scale "zero configured swap chains while off
+      // screen" property for the ability to hand callers a specific element.
+      const context = this._adoptedCanvas.getContext("webgpu");
+      context.configure({ device: gpu.device, format: gpu.format, alphaMode: "opaque" });
+      this._adoptedCanvas.width = width;
+      this._adoptedCanvas.height = height;
+      this._adoptedContext = context;
+      this._presentOn(context, this._uniforms);
+      return;
+    }
+    const offscreen = new OffscreenCanvas(width, height);
+    const context = offscreen.getContext("webgpu");
+    context.configure({ device: gpu.device, format: gpu.format, alphaMode: "opaque" });
+    this._presentOn(context, this._uniforms);
+    const bitmap = await createImageBitmap(offscreen);
+    context.unconfigure();
+    this._paintPoster(bitmap, width, height);
+  }
+
+  _paintPoster(bitmap, width, height) {
+    this._posterCanvas.width = width;
+    this._posterCanvas.height = height;
+    const ctx = this._posterCanvas.getContext("2d");
+    ctx.clearRect(0, 0, width, height);
+    ctx.drawImage(bitmap, 0, 0, width, height);
+    bitmap.close?.();
+  }
+
+  async _capturePosterFromLive() {
+    if (this._adoptedCanvas || this._mode !== "webgpu" || !this._liveContext) return;
+    const bitmap = await createImageBitmap(this._liveCanvas);
+    this._paintPoster(bitmap, this._backingWidth, this._backingHeight);
+    this._liveContext.unconfigure();
+    this._liveCanvas.hidden = true;
+    this._posterCanvas.hidden = false;
+  }
+
+  // -- ready -> live on declared intent -------------------------------------
+
+  _wireActivation() {
+    const activate = this._surface?.activate || "pointer";
+    if (activate === "manual") return; // caller drives `.live()` explicitly.
+    if (activate === "visible") {
+      this._activationObserver = new IntersectionObserver((entries) => {
+        for (const entry of entries) if (entry.isIntersecting) this._goLive();
+      });
+      this._activationObserver.observe(this);
+      return;
+    }
+    // "pointer" (default): pointerenter / focus / tap.
+    const onIntent = () => this._goLive();
+    this.addEventListener("pointerenter", onIntent, { once: true });
+    this.addEventListener("focusin", onIntent, { once: true });
+    this.addEventListener("click", onIntent, { once: true });
+    if (!this.hasAttribute("tabindex")) this.setAttribute("tabindex", "0");
+  }
+
+  async _goLive() {
+    if (this._fsm === "live") return;
+    if (this._fsm === "cold") await this._readyPromise.catch(() => {});
+    if (this._fsm === "error") return;
+
+    if (this._adoptedCanvas) {
+      // Already presenting (webgpu, kept configured) or cheap to re-run
+      // (wasm-2d); "live" is a state/event transition here, not new work.
+      if (this._mode === "wasm-2d") {
+        this._renderWasmInto(this._adoptedCanvas, this._backingWidth, this._backingHeight, this._uniforms);
+      }
+      this._enterLive();
+      return;
+    }
+
+    if (this._mode === "wasm-2d") {
+      // No swap chain, so no cost distinction between "ready" and "live":
+      // the poster canvas IS the live canvas in the CPU fallback.
+      this._renderWasmInto(this._posterCanvas, this._backingWidth, this._backingHeight, this._uniforms);
+      this._enterLive();
+      return;
+    }
+
+    const gpu = await this._ensurePipeline();
+    if (!gpu) {
+      // WebGPU became unavailable between poster and live (e.g. a
+      // pre-recovery device loss): fail over honestly, badge included.
+      this._mode = "wasm-2d";
+      this._renderWasmInto(this._posterCanvas, this._backingWidth, this._backingHeight, this._uniforms);
+      this._enterLive();
+      return;
+    }
+    this._createLiveCanvas();
+    this._liveCanvas.width = this._backingWidth;
+    this._liveCanvas.height = this._backingHeight;
+    const context = this._liveCanvas.getContext("webgpu");
+    context.configure({ device: gpu.device, format: gpu.format, alphaMode: "opaque" });
+    this._liveContext = context;
+    this._presentOn(context, this._uniforms);
+    this._posterCanvas.hidden = true;
+    this._liveCanvas.hidden = false;
+    this._enterLive();
+  }
+
+  _enterLive() {
+    this._fsm = "live";
+    this._wireSuspendObserver();
+    this._updateBadge();
+    this._resolveLive();
+    this._dispatch("fe-live", { mode: this._mode });
+    this._dispatch("fe-frame", { params: this._paramsSnapshot() });
+  }
+
+  // -- live <-> suspended off-viewport --------------------------------------
+
+  _wireSuspendObserver() {
+    if (this._suspendObserver) return;
+    this._suspendObserver = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting && this._fsm === "live") this._suspend();
+        else if (entry.isIntersecting && this._fsm === "suspended") this._goLive();
+      }
+    });
+    this._suspendObserver.observe(this);
+  }
+
+  async _suspend() {
+    await this._capturePosterFromLive();
+    this._fsm = "suspended";
+    this._dispatch("fe-statechange", { state: "suspended" });
+  }
+
+  // -- render (param write path: sliders, `.params`, gestures in R3) -------
+
+  _render(next) {
+    if (next) this._uniforms = next;
+    if (this._fsm !== "live") {
+      // Held (courier) state still updates while not presenting (section
+      // 5.2/11.4); no GPU/CPU work is spent while hidden or not yet live.
+      this._refreshControlValues();
+      return;
+    }
+    if (this._adoptedCanvas) {
+      if (this._mode === "webgpu") this._presentOn(this._adoptedContext, this._uniforms);
+      else this._renderWasmInto(this._adoptedCanvas, this._backingWidth, this._backingHeight, this._uniforms);
+    } else if (this._mode === "webgpu") {
+      this._presentOn(this._liveContext, this._uniforms);
+    } else {
+      this._renderWasmInto(this._posterCanvas, this._backingWidth, this._backingHeight, this._uniforms);
+    }
+    this._refreshControlValues();
+    this._dispatch("fe-frame", { params: this._paramsSnapshot() });
+  }
+
+  _paramsSnapshot() {
+    const snapshot = {};
+    this._members.forEach((member, index) => {
+      snapshot[member.name] = this._uniforms[index];
+    });
+    return snapshot;
+  }
+
+  _buildParamsProxy() {
+    const element = this;
+    return new Proxy(
+      {},
+      {
+        get(_target, prop) {
+          if (typeof prop !== "string") return undefined;
+          const index = element._memberIndexByName.get(prop);
+          return index === undefined ? undefined : element._uniforms[index];
+        },
+        set(_target, prop, value) {
+          if (typeof prop !== "string") return false;
+          if (element._fsm === "cold" || element._fsm === "error") {
+            throw new Error('fe-surface: params are not ready; await "fe-ready" first');
+          }
+          const index = element._memberIndexByName.get(prop);
+          if (index === undefined) return false;
+          const next = element._uniforms.slice();
+          next[index] = Number(value);
+          element._render(next);
+          return true;
+        },
+        has(_target, prop) {
+          return typeof prop === "string" && element._memberIndexByName.has(prop);
+        },
+        ownKeys() {
+          return [...element._memberIndexByName.keys()];
+        },
+        getOwnPropertyDescriptor(_target, prop) {
+          if (!element._memberIndexByName.has(prop)) return undefined;
+          return { enumerable: true, configurable: true, value: element.params[prop] };
+        },
       },
-    };
-  } catch (error) {
-    console.warn("[fe web] WebGPU pipeline init failed, using wasm fallback:", error);
-    return null;
+    );
+  }
+
+  // -- device loss -----------------------------------------------------------
+
+  async _onDeviceLoss(freshGpu) {
+    if (this._mode !== "webgpu") return; // wasm-2d surfaces hold no device resources.
+    this._gpu = null;
+    if (this._liveContext) {
+      try {
+        this._liveContext.unconfigure();
+      } catch {
+        // already invalid; nothing to release.
+      }
+      this._liveContext = null;
+    }
+    if (this._adoptedContext) {
+      try {
+        this._adoptedContext.unconfigure();
+      } catch {
+        // already invalid.
+      }
+      this._adoptedContext = null;
+    }
+    if (this._fsm !== "live") return; // posters rebuild lazily on the next `.live()`.
+    this._dispatch("fe-statechange", { state: this._fsm, reason: "device-lost" });
+    if (!freshGpu) {
+      this._mode = "wasm-2d";
+      this._renderWasmInto(
+        this._adoptedCanvas || this._posterCanvas,
+        this._backingWidth,
+        this._backingHeight,
+        this._uniforms,
+      );
+      if (!this._adoptedCanvas) {
+        this._liveCanvas.hidden = true;
+        this._posterCanvas.hidden = false;
+      }
+      this._updateBadge();
+      this._dispatch("fe-statechange", { state: this._fsm, reason: "device-unavailable" });
+      return;
+    }
+    this._fsm = "ready"; // force `_goLive` back through the real pipeline-build path.
+    await this._goLive();
+    this._dispatch("fe-statechange", { state: this._fsm, reason: "device-recovered" });
+  }
+
+  _teardown() {
+    if (this._liveContext) {
+      try {
+        this._liveContext.unconfigure();
+      } catch {
+        // already invalid.
+      }
+    }
+    if (this._adoptedContext) {
+      try {
+        this._adoptedContext.unconfigure();
+      } catch {
+        // already invalid.
+      }
+    }
+    this._liveContext = null;
+    this._adoptedContext = null;
+    this._gpu = null;
+    this._suspendObserver?.disconnect();
+    this._suspendObserver = null;
+    this._activationObserver?.disconnect();
+    this._activationObserver = null;
+  }
+
+  // -- chrome: badge / controls / meta --------------------------------------
+
+  _updateBadge() {
+    if (!this._badge) return;
+    this._badge.textContent = this._mode === "webgpu" ? "WebGPU · shader.wgsl" : "wasm · module.wasm";
+    this._badge.className = `badge ${this._mode === "webgpu" ? "webgpu" : "wasm-2d"}`;
+  }
+
+  /**
+   * Controls generated from the declared v5 `surface.params`: real label (the
+   * field name), doc hover, range/step/init by kind. Extent-bound and fixed
+   * params are not user-visible. Each param maps to its uniform member by
+   * NAME (the reconciled binding key).
+   */
+  _renderControls() {
+    this._updateBadge();
+    const controlsAttr = this.getAttribute("controls") || "auto";
+    this._panel.innerHTML = "";
+    this._controlRows = [];
+    if (controlsAttr === "none") return;
+    if (!this._surface) {
+      const notice = document.createElement("div");
+      notice.className = "control notice";
+      notice.setAttribute("part", "control");
+      notice.textContent = this._members.length
+        ? `no view() declared — ${this._members.length} uniform member(s) held at 1.0`
+        : "no view() declared";
+      this._panel.append(notice);
+      return;
+    }
+    this._surface.params.forEach((param) => {
+      if (param.visible === false) return;
+      const index = this._memberIndexByName.get(param.name);
+      if (index === undefined) return;
+      const member = this._members[index];
+      const row = document.createElement("div");
+      row.className = "control";
+      row.setAttribute("part", "control");
+      const doc = member.doc || param.doc;
+      if (doc) row.title = doc;
+      const label = document.createElement("label");
+      const value = document.createElement("b");
+      const isInt = param.kind === "int";
+      const format = (v) => (+v).toFixed(isInt ? 0 : 2);
+      value.textContent = format(this._uniforms[index]);
+      const name = document.createElement("span");
+      name.textContent = param.name;
+      label.append(name, value);
+      const input = document.createElement("input");
+      input.type = "range";
+      const min = typeof param.min === "number" ? param.min : 0;
+      const max = typeof param.max === "number" ? param.max : 1;
+      input.min = String(min);
+      input.max = String(max);
+      input.step = isInt ? "1" : String((max - min) / 200 || 0.01);
+      input.value = String(this._uniforms[index]);
+      input.oninput = () => {
+        const next = this._uniforms.slice();
+        next[index] = +input.value;
+        this._render(next);
+      };
+      row.append(label, input);
+      this._panel.append(row);
+      this._controlRows.push({ index, input, value, format });
+    });
+  }
+
+  _refreshControlValues() {
+    for (const row of this._controlRows) {
+      row.value.textContent = row.format(this._uniforms[row.index]);
+      row.input.value = String(this._uniforms[row.index]);
+    }
+  }
+
+  _updateMeta() {
+    if (!this._meta) return;
+    const link = (href, text) => `<a href="${href}" target="_blank" rel="noopener">${text}</a>`;
+    this._meta.innerHTML =
+      `entry ${this._manifest.source_entry} · ` +
+      link(this._wasmUrl.href, `wasm ${this._manifest.artifacts.wasm_bytes} B`) +
+      ` · ` +
+      link(this._wgslUrl.href, `wgsl ${this._manifest.artifacts.wgsl_bytes} B`) +
+      ` · path ${this._mode} · fe ${this._manifest.provenance.compiler_version} · ` +
+      link(this._manifestUrl.href, `manifest`);
+  }
+
+  _dispatch(type, detail) {
+    this.dispatchEvent(new CustomEvent(type, { detail, bubbles: true, composed: true }));
   }
 }
 
-function initWasmFallback({ canvas, width, height, callKernel }) {
-  const context = canvas.getContext("2d");
-  const image = context.createImageData(width, height);
-  return {
-    mode: "wasm",
-    render(uniforms) {
-      const data = image.data;
-      for (let py = 0; py < height; py++) {
-        for (let px = 0; px < width; px++) {
-          const rgba = callKernel(px, py, uniforms);
-          const i = (py * width + px) * 4;
-          data[i] = (rgba >>> 16) & 255;
-          data[i + 1] = (rgba >>> 8) & 255;
-          data[i + 2] = rgba & 255;
-          data[i + 3] = (rgba >>> 24) & 255;
-        }
-      }
-      context.putImageData(image, 0, 0);
-    },
-  };
-}
+customElements.define("fe-surface", FeSurfaceElement);
+
+// ---------------------------------------------------------------------------
+// `mountRenderSurface`: preserved for programmatic embedding (the legacy
+// `fe web build --mode render` bundle's emitted index.html imports it). Its
+// body is now a thin wrapper around the element: ONE mount path, not a fork
+// (FE_WEB_V5_ORCHESTRATION_DESIGN.md 3.3).
+// ---------------------------------------------------------------------------
 
 /**
- * Mount one render surface for a fe-web-bundle v4 manifest.
+ * Mount one render surface for a fe-web-bundle manifest via a `<fe-surface>`
+ * element, and wait for it to reach `live` (this function's historical
+ * contract: the returned surface is already rendering).
  *
  * @param {object} options
- * @param {string|URL} options.manifestUrl - fe-web-bundle v4 manifest URL.
- *   wasm/wgsl artifact paths named in the manifest are resolved RELATIVE TO
- *   THIS URL (not the page), so a manifest published anywhere (a co-located
- *   legacy bundle, or a content-addressed `assets/fe-render-<hash>.json`)
- *   resolves its sibling artifacts correctly.
+ * @param {string|URL} options.manifestUrl - fe-web-bundle manifest URL.
  * @param {HTMLCanvasElement|string} [options.canvas] - an existing canvas
  *   element (or CSS selector) to adopt; a new one is created otherwise.
- * @param {Element} [options.container] - parent to append a generated
- *   `<figure class="fe-render">` into, when `canvas` is not adopted.
- * @param {Node} [options.mountAfter] - insert the generated figure directly
- *   after this node when neither `canvas` nor `container` is given.
- * @param {number} [options.width=256] - dispatch/canvas resolution.
+ * @param {Element} [options.container] - parent to append the element into.
+ * @param {Node} [options.mountAfter] - insert the element directly after this
+ *   node when neither `canvas` nor `container` is given.
+ * @param {number} [options.width] - CSS presentation width (NOT dispatch size).
  * @param {number} [options.height=width]
  * @param {number[]} [options.initial] - explicit initial uniform vector,
- *   overriding the manifest. Real initial values normally come from the
- *   bundle's declared `surface.params[].init` (protocol v5, projected from
- *   the actor's `view()`); a bundle with no declared view holds every member
- *   at a fixed 1.0 (visibly undeclared, never searched or guessed).
+ *   overriding the manifest's declared `surface.params[].init`.
  * @param {{adapter: GPUAdapter, device: GPUDevice}} [options.gpu] - reuse an
  *   already-acquired adapter/device instead of the page-shared singleton.
  * @param {boolean} [options.controls=true] - generate uniform sliders and
@@ -360,106 +1034,40 @@ export async function mountRenderSurface(options) {
   } = options;
 
   const resolvedManifestUrl = new URL(manifestUrl, document.baseURI);
-  const manifest = await (await fetchOrThrow(resolvedManifestUrl, "manifest")).json();
-  const layout = manifest.layout;
-  // Protocol v5 `surface` section (projected from the actor's `view()`): real
-  // param ranges/init/kind and the dispatch extent. When present the runtime
-  // guesses NOTHING: no [0,128] slider, no uniform search, no page-attr size.
-  const surface = manifest.surface || null;
-  const inputBinding = layout.bindings.find((binding) => binding.role === "input");
-  const members = inputBinding ? inputBinding.members : [];
-  const builtins = layout.builtin_inputs || [];
-  const argumentCount =
-    1 + Math.max(-1, ...builtins.map((b) => b.arg_index), ...members.map((m) => m.arg_index));
+  const surface = document.createElement("fe-surface");
+  surface.setAttribute("manifest", resolvedManifestUrl.href);
+  surface.setAttribute("state", "live"); // historical contract: render immediately.
+  surface.setAttribute("controls", controls ? "auto" : "none");
+  if (widthOption) surface.setAttribute("width", String(widthOption));
+  if (heightOption ?? widthOption) surface.setAttribute("height", String(heightOption ?? widthOption));
+  if (initial) surface._initialOverride = initial;
+  if (gpuOption) surface._gpuOverride = gpuOption;
+  const adopted = resolveCanvas(canvasOption);
+  if (adopted) surface.adoptCanvas(adopted);
 
-  const wasmUrl = new URL(manifest.artifacts.wasm, resolvedManifestUrl);
-  const wgslUrl = new URL(manifest.artifacts.wgsl, resolvedManifestUrl);
-
-  const wasmBytes = await (await fetchOrThrow(wasmUrl, "wasm module")).arrayBuffer();
-  const { instance } = await WebAssembly.instantiate(wasmBytes, {});
-  const kernel = instance.exports[manifest.source_entry];
-  if (typeof kernel !== "function") {
-    throw new Error(`fe render runtime: wasm export \`${manifest.source_entry}\` not found`);
+  if (container) {
+    container.appendChild(surface);
+  } else if (mountAfter && mountAfter.parentNode) {
+    mountAfter.parentNode.insertBefore(surface, mountAfter.nextSibling);
+  } else {
+    document.body.appendChild(surface);
   }
 
-  function callKernel(px, py, uniforms) {
-    const args = new Array(argumentCount).fill(0);
-    for (const builtin of builtins) {
-      args[builtin.arg_index] = builtin.source.endsWith("_y") ? py : px;
-    }
-    members.forEach((member, index) => {
-      args[member.arg_index] = uniforms[index];
-    });
-    return kernel(...args) >>> 0; // 0xAARRGGBB
-  }
-
-  // Dispatch/canvas extent: the declared `surface.extent` when present (the
-  // page carries no sizes in v5), else the caller's width/height, else the
-  // legacy default.
-  const width = surface?.extent?.width ?? widthOption ?? DEFAULT_SIZE;
-  const height = surface?.extent?.height ?? heightOption ?? widthOption ?? DEFAULT_SIZE;
-
-  ensureStyle();
-  const dom = buildDom({ canvasOption, container, mountAfter, controls });
-  dom.canvas.width = width;
-  dom.canvas.height = height;
-
-  const renderer =
-    (await initWebGpu({ canvas: dom.canvas, layout, inputBinding, members, gpuOption, wgslUrl })) ??
-    initWasmFallback({ canvas: dom.canvas, width, height, callKernel });
-
-  // Initial uniform vector: from the declared `surface` (init values, with
-  // extent-bound members fed the live canvas size); an explicit `initial`
-  // override; or, for a bundle with no declared view(), a fixed 1.0 per
-  // member (visibly undeclared, never searched or guessed).
-  let uniforms = surface
-    ? surfaceInitialUniforms(members, surface, width, height)
-    : (initial ?? undeclaredViewInitialUniforms(members));
-
-  function render(nextUniforms) {
-    if (nextUniforms) uniforms = nextUniforms;
-    renderer.render(uniforms);
-    if (dom.modeEl) {
-      dom.modeEl.textContent = renderer.mode === "webgpu" ? "WebGPU · shader.wgsl" : "wasm · module.wasm";
-      dom.modeEl.className = `fe-render-badge ${renderer.mode}`;
-    }
-    return uniforms;
-  }
-
-  if (dom.panel && controls) {
-    if (surface) {
-      buildSurfaceControls(dom.panel, members, surface, () => uniforms, (next) => render(next));
-    } else {
-      buildUndeclaredViewNotice(dom.panel, members);
-    }
-  }
-  if (dom.metaEl) {
-    // Unobtrusive links to the generated artifacts the toolchain emitted from
-    // the same source: the wasm kernel, the wgsl shader, and the v-manifest.
-    const link = (href, text) =>
-      `<a href="${href}" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline dotted">${text}</a>`;
-    dom.metaEl.innerHTML =
-      `entry ${manifest.source_entry} · ` +
-      link(wasmUrl.href, `wasm ${manifest.artifacts.wasm_bytes} B`) +
-      ` · ` +
-      link(wgslUrl.href, `wgsl ${manifest.artifacts.wgsl_bytes} B`) +
-      ` · path ${renderer.mode} · fe ${manifest.provenance.compiler_version} · ` +
-      link(resolvedManifestUrl.href, `manifest`);
-  }
-
-  render(uniforms);
-  window.__feReady = true;
-  window.__feMode = renderer.mode;
+  await surface._readyPromise;
+  await surface._livePromise;
 
   return {
-    mode: renderer.mode,
-    canvas: dom.canvas,
-    element: dom.root,
-    manifest,
+    mode: surface.mode,
+    canvas: surface._adoptedCanvas || surface._liveCanvas || surface._posterCanvas,
+    element: surface,
+    manifest: surface.manifest,
     manifestUrl: resolvedManifestUrl,
     get uniforms() {
-      return uniforms;
+      return surface._uniforms;
     },
-    render,
+    render(next) {
+      surface._render(next);
+      return surface._uniforms;
+    },
   };
 }
