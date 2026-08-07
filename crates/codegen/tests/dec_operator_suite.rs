@@ -29,7 +29,7 @@ use hir::hir_def::HirIngot;
 use url::Url;
 
 const WASM_LANES: [&str; 6] = ["probe", "d0", "d1", "dd0", "laplace0", "hodge"];
-const ALL_LANES: [&str; 7] = ["probe", "d0", "d1", "dd0", "laplace0", "hodge", "view"];
+const ALL_LANES: [&str; 7] = ["probe", "d0", "d1", "dd0", "laplace0", "hodge", "submit_view"];
 
 fn ingot_root(relative: &str) -> Url {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
@@ -209,20 +209,24 @@ fn declared_topology_reaches_the_canonical_interface() {
         );
     }
 
-    let view = manifest
+    // The main-thread host-effect lane holding the WebGPU dispatch capability.
+    // Named `submit_view`, not `view`: `view` is the reserved const
+    // surface-declaration behavior (`const fn view() -> Surface<_>`), not a
+    // runtime lane, so the demo renames the dispatch entry to `submit_view`.
+    let submit_view = manifest
         .lanes
         .iter()
-        .find(|lane| lane.name == "view")
+        .find(|lane| lane.name == "submit_view")
         .unwrap();
-    assert_eq!(view.intent.execution, CanonicalExecution::HostEffect);
-    assert_eq!(view.intent.placement, CanonicalPlacement::MainThread);
-    assert_eq!(view.export, None);
-    assert_eq!(view.intent.capabilities.len(), 1);
+    assert_eq!(submit_view.intent.execution, CanonicalExecution::HostEffect);
+    assert_eq!(submit_view.intent.placement, CanonicalPlacement::MainThread);
+    assert_eq!(submit_view.export, None);
+    assert_eq!(submit_view.intent.capabilities.len(), 1);
     assert_eq!(
-        view.intent.capabilities[0].capability.as_str(),
+        submit_view.intent.capabilities[0].capability.as_str(),
         "webgpu_dispatch"
     );
-    assert!(view.intent.capabilities[0].mutable);
+    assert!(submit_view.intent.capabilities[0].mutable);
 
     // Pinned per-grade wire layouts: distinct nominal shapes per grade is the
     // point of the message design.
