@@ -12,22 +12,46 @@
 //! parallelism claim (VISION 3.1).
 
 use std::webgpu::{FragmentSurface, GpuProgram, WebGpuBackend}
+use std::web::view::{Extent, Param, Surface}
 use fmath::{from_i32, palette, sin, sqrt}
 
-const RESOLUTION: f32 = 512.0
+/// The per-demo params record: field names bind, by name identity, to the
+/// actor's state fields (checked at projection time).
+struct PlasmaParams {
+    time: Param,
+    zoom: Param,
+    warp: Param,
+    res: Param,
+}
 
 actor PlasmaSurface uses (GpuProgram<WebGpuBackend>) {
     /// Advances the animation; `zoom` and `warp` are exposed for the page.
     time: f32,
     zoom: f32,
     warp: f32,
+    /// Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).
+    res: f32,
+
+    /// The surface declaration: CTFE-evaluated at bundle time and projected
+    /// into the manifest `surface` section. Never lowered to wasm or WGSL.
+    const fn view() -> Surface<PlasmaParams> {
+        Surface {
+            extent: Extent::square(512),
+            params: PlasmaParams {
+                time: Param::range(min: 0.0, max: 20.0, init: 0.0),
+                zoom: Param::range(min: 1.0, max: 8.0, init: 3.0),
+                warp: Param::range(min: 0.0, max: 2.0, init: 0.8),
+                res: Param::extent_x(),
+            },
+        }
+    }
 
     /// Pixel coordinate in, packed RGBA8 word out. The uniform record is the
     /// actor's own fields, reached as `self.*`.
     fn plasma(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
         // Pixel centre to [-1, 1], y up.
-        let u: f32 = (from_i32(px) + 0.5) / RESOLUTION * 2.0 - 1.0
-        let v: f32 = 1.0 - (from_i32(py) + 0.5) / RESOLUTION * 2.0
+        let u: f32 = (from_i32(px) + 0.5) / self.res * 2.0 - 1.0
+        let v: f32 = 1.0 - (from_i32(py) + 0.5) / self.res * 2.0
 
         let x: f32 = u * self.zoom
         let y: f32 = v * self.zoom

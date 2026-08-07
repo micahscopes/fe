@@ -36,6 +36,7 @@ use core::marker::Copy
 use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
 use core::num::IntDowncast
 use std::webgpu::{FragmentSurface, GpuProgram, WebGpuBackend}
+use std::web::view::{Extent, Param, Surface}
 use sparse_clifford::{
     Nat, PlanLength, SparsePlan, Term, null_vector_pairing, plan_candidate_left,
     plan_candidate_right, plan_mask_candidate, plan_mask_cardinality,
@@ -276,10 +277,21 @@ pub fn eval_quadric(_ q: Quadric, _ x: f32, _ y: f32, _ z: f32) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
-// THE ACTOR: one program, one per-pixel behavior, three uniforms.
+// THE ACTOR: one program, one per-pixel behavior. The interactive boundary is
+// DECLARED in `view()` (web v5): the runtime reads real slider ranges/init/
+// kind and the dispatch extent from the projected manifest `surface` section,
+// mirroring cga3d's `Cga3dSurface`. `res` is bound to the live canvas width,
+// replacing the baked `const RESOLUTION`.
 // ---------------------------------------------------------------------------
 
-const RESOLUTION: f32 = 512.0
+/// The per-demo params record: field names bind, by name identity, to the
+/// actor's state fields (checked at projection time).
+struct QcgaParams {
+    lambda: Param,
+    theta: Param,
+    zoom: Param,
+    res: Param,
+}
 
 actor QcgaSurface uses (GpuProgram<WebGpuBackend>) {
     /// Pencil parameter: [0, 1] sweeps cylinder -> sphere-like -> plane pair.
@@ -288,6 +300,22 @@ actor QcgaSurface uses (GpuProgram<WebGpuBackend>) {
     theta: f32,
     /// Half-extent of the visible slice in world units.
     zoom: f32,
+    /// Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).
+    res: f32,
+
+    /// The surface declaration: CTFE-evaluated at bundle time and projected
+    /// into the manifest `surface` section. Never lowered to wasm or WGSL.
+    const fn view() -> Surface<QcgaParams> {
+        Surface {
+            extent: Extent::square(512),
+            params: QcgaParams {
+                lambda: Param::unit(init: 0.15),
+                theta: Param::angle(init: 0.6),
+                zoom: Param::range(min: 0.5, max: 4.0, init: 1.6),
+                res: Param::extent_x(),
+            },
+        }
+    }
 
     /// Pixel coordinate in, packed RGBA8 word out. Five planned contractions
     /// per pixel: the field and its exact slice gradient (central differences
@@ -295,8 +323,8 @@ actor QcgaSurface uses (GpuProgram<WebGpuBackend>) {
     fn shade(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
         // Pixel centre to the y = 0 slice plane: screen x -> world x, screen
         // y (up) -> world z.
-        let u: f32 = ((from_i32(px) + 0.5) / RESOLUTION * 2.0 - 1.0) * self.zoom
-        let v: f32 = (1.0 - (from_i32(py) + 0.5) / RESOLUTION * 2.0) * self.zoom
+        let u: f32 = ((from_i32(px) + 0.5) / self.res * 2.0 - 1.0) * self.zoom
+        let v: f32 = (1.0 - (from_i32(py) + 0.5) / self.res * 2.0) * self.zoom
 
         // Pencil member Q(lambda) = cos(PI l) Q0 + sin(PI l) Q1 with
         // Q0 = x^2 + y^2 - 1/2 (cylinder), Q1 = z^2 - 1/2 (plane pair):
@@ -330,7 +358,7 @@ actor QcgaSurface uses (GpuProgram<WebGpuBackend>) {
         // First-order distance to the zero set in world units, then a
         // resolution-aware curve mask.
         let dist: f32 = abs(f0) / gmag
-        let pixel_w: f32 = self.zoom * 2.0 / RESOLUTION
+        let pixel_w: f32 = self.zoom * 2.0 / self.res
         let curve: f32 = 1.0 - smoothstep(0.0, pixel_w * 1.5, dist)
 
         // Signed-field wash behind the curve: warm outside, cool inside.

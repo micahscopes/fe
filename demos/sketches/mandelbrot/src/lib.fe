@@ -17,22 +17,47 @@
 //! parallelism claim (VISION 3.1).
 
 use std::webgpu::{FragmentSurface, GpuProgram, WebGpuBackend}
+use std::web::view::{Extent, Param, Surface}
 use fmath::{from_i32, palette}
 
-const RESOLUTION: f32 = 512.0
 const MAX_ITER: i32 = 96
+
+/// The per-demo params record: field names bind, by name identity, to the
+/// actor's state fields (checked at projection time).
+struct MandelbrotParams {
+    center_x: Param,
+    center_y: Param,
+    zoom: Param,
+    res: Param,
+}
 
 actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
     /// Complex-plane centre and half-extent the page can pan and zoom.
     center_x: f32,
     center_y: f32,
     zoom: f32,
+    /// Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).
+    res: f32,
+
+    /// The surface declaration: CTFE-evaluated at bundle time and projected
+    /// into the manifest `surface` section. Never lowered to wasm or WGSL.
+    const fn view() -> Surface<MandelbrotParams> {
+        Surface {
+            extent: Extent::square(512),
+            params: MandelbrotParams {
+                center_x: Param::range(min: -2.5, max: 1.0, init: -0.5),
+                center_y: Param::range(min: -1.5, max: 1.5, init: 0.0),
+                zoom: Param::log(min: 0.0005, max: 3.0, init: 1.5),
+                res: Param::extent_x(),
+            },
+        }
+    }
 
     /// Pixel coordinate in, packed RGBA8 word out.
     fn escape(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
         // Pixel centre to [-1, 1], y up, then into the complex plane.
-        let u: f32 = (from_i32(px) + 0.5) / RESOLUTION * 2.0 - 1.0
-        let v: f32 = 1.0 - (from_i32(py) + 0.5) / RESOLUTION * 2.0
+        let u: f32 = (from_i32(px) + 0.5) / self.res * 2.0 - 1.0
+        let v: f32 = 1.0 - (from_i32(py) + 0.5) / self.res * 2.0
         let cx: f32 = self.center_x + u * self.zoom
         let cy: f32 = self.center_y + v * self.zoom
 

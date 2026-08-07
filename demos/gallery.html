@@ -14,13 +14,10 @@
   `data-fe-entry` is OMITTED on purpose: the entry is derived from each sketch's
   `actor` declaration (Cga3dSurface, QcgaSurface, ...), never guessed here.
 
-  `data-fe-width/height="512"` must match each sketch's `const RESOLUTION`,
-  because the shaders normalize pixel coords by RESOLUTION (e.g. cga3d:285
-  `/ RESOLUTION`); buffer size and that const are coupled, so both were bumped
-  128 -> 512 together. This coupling (and this whole per-page size attr) is
-  exactly what manifest v5 removes: the actor declares its own dispatch size,
-  projected into the manifest, so the page carries no size at all
-  (FE_WEB_V5_ORCHESTRATION_DESIGN.md). Interim until then.
+  No `data-fe-width`/`data-fe-height` either: every sketch below declares a
+  `const fn view()` (protocol v5), CTFE-projected into the manifest `surface`
+  section, so the runtime reads the real dispatch extent from there. The page
+  carries no sizes at all (FE_WEB_V5_ORCHESTRATION_DESIGN.md).
 
   Each caption carries a `source` link (the dev server serves the raw .fe); the
   runtime's meta line links the generated wgsl/wasm/manifest.
@@ -79,31 +76,31 @@
   <div class="grid">
     <figure>
       <figcaption><b>cga3d</b><span class="desc">sparse Clifford sphere pencil</span><a href="sketches/cga3d/src/lib.fe" target="_blank" rel="noopener">source</a></figcaption>
-      <script type="application/fe" data-fe-src="sketches/cga3d" data-fe-render data-fe-width="512" data-fe-height="512"></script>
+      <script type="application/fe" data-fe-src="sketches/cga3d" data-fe-render></script>
     </figure>
     <figure>
       <figcaption><b>qcga</b><span class="desc">quadric conformal surface</span><a href="sketches/qcga/src/lib.fe" target="_blank" rel="noopener">source</a></figcaption>
-      <script type="application/fe" data-fe-src="sketches/qcga" data-fe-render data-fe-width="512" data-fe-height="512"></script>
+      <script type="application/fe" data-fe-src="sketches/qcga" data-fe-render></script>
     </figure>
     <figure>
       <figcaption><b>desargues</b><span class="desc">projective incidence</span><a href="sketches/desargues/src/lib.fe" target="_blank" rel="noopener">source</a></figcaption>
-      <script type="application/fe" data-fe-src="sketches/desargues" data-fe-render data-fe-width="512" data-fe-height="512"></script>
+      <script type="application/fe" data-fe-src="sketches/desargues" data-fe-render></script>
     </figure>
     <figure>
       <figcaption><b>plasma</b><span class="desc">branch-free field</span><a href="sketches/plasma/src/lib.fe" target="_blank" rel="noopener">source</a></figcaption>
-      <script type="application/fe" data-fe-src="sketches/plasma" data-fe-render data-fe-width="512" data-fe-height="512"></script>
+      <script type="application/fe" data-fe-src="sketches/plasma" data-fe-render></script>
     </figure>
     <figure>
       <figcaption><b>mandelbrot</b><span class="desc">escape-time set</span><a href="sketches/mandelbrot/src/lib.fe" target="_blank" rel="noopener">source</a></figcaption>
-      <script type="application/fe" data-fe-src="sketches/mandelbrot" data-fe-render data-fe-width="512" data-fe-height="512"></script>
+      <script type="application/fe" data-fe-src="sketches/mandelbrot" data-fe-render></script>
     </figure>
     <figure>
       <figcaption><b>dec</b><span class="desc">discrete exterior calculus</span><a href="sketches/dec/src/lib.fe" target="_blank" rel="noopener">source</a></figcaption>
-      <script type="application/fe" data-fe-src="sketches/dec" data-fe-render data-fe-width="512" data-fe-height="512"></script>
+      <script type="application/fe" data-fe-src="sketches/dec" data-fe-render></script>
     </figure>
     <figure>
       <figcaption><b>gradient</b><span class="desc">runtime-default surface</span><a href="sketches/gradient/src/lib.fe" target="_blank" rel="noopener">source</a></figcaption>
-      <script type="application/fe" data-fe-src="sketches/gradient" data-fe-render data-fe-width="512" data-fe-height="512"></script>
+      <script type="application/fe" data-fe-src="sketches/gradient" data-fe-render></script>
     </figure>
   </div>
 </body>

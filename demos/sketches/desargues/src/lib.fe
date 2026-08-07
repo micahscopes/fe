@@ -37,9 +37,8 @@ use gaplay::{
     DESA_FB, DESA_FC, Line, Point, desa_a, desa_b, desa_c, desa_o, desargues_image,
     join, line_eval, meet, point_world_x, point_world_y,
 }
+use std::web::view::{Extent, Param, Surface}
 use fmath::{abs, clamp01, cos, from_i32, rgba, sin, smoothstep, sqrt}
-
-const RESOLUTION: f32 = 512.0
 
 /// Perpendicular distance-based line coverage: 1 on the line, fading over `w`.
 fn line_cover(_ l: Line, _ x: f32, _ y: f32, _ w: f32) -> f32 {
@@ -57,8 +56,19 @@ fn dot_cover(_ pwx: f32, _ pwy: f32, _ x: f32, _ y: f32, _ r: f32) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
-// THE ACTOR: three uniforms (sweep, spin, zoom), one per-pixel behaviour.
+// THE ACTOR: three uniforms (sweep, spin, zoom), one per-pixel behaviour. The
+// interactive boundary is DECLARED in `view()` (web v5); `res` is bound to
+// the live canvas width, replacing the baked `const RESOLUTION`.
 // ---------------------------------------------------------------------------
+
+/// The per-demo params record: field names bind, by name identity, to the
+/// actor's state fields (checked at projection time).
+struct DesarguesParams {
+    sweep: Param,
+    spin: Param,
+    zoom: Param,
+    res: Param,
+}
 
 actor Desargues2d uses (GpuProgram<WebGpuBackend>) {
     /// Perspective sweep: slides the second triangle along the rays from O.
@@ -67,13 +77,29 @@ actor Desargues2d uses (GpuProgram<WebGpuBackend>) {
     spin: f32,
     /// Half-extent of the visible square, in world units.
     zoom: f32,
+    /// Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).
+    res: f32,
+
+    /// The surface declaration: CTFE-evaluated at bundle time and projected
+    /// into the manifest `surface` section. Never lowered to wasm or WGSL.
+    const fn view() -> Surface<DesarguesParams> {
+        Surface {
+            extent: Extent::square(512),
+            params: DesarguesParams {
+                sweep: Param::range(min: 0.3, max: 1.6, init: 0.62),
+                spin: Param::angle(init: 0.0),
+                zoom: Param::range(min: 0.8, max: 5.0, init: 2.4),
+                res: Param::extent_x(),
+            },
+        }
+    }
 
     fn shade(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
         // Pixel centre -> view coordinates, then rotate by -spin into the
         // canonical frame the geometry is authored in (so the figure appears
         // rotated by +spin without touching the algebra).
-        let u: f32 = ((from_i32(px) + 0.5) / RESOLUTION * 2.0 - 1.0) * self.zoom
-        let v: f32 = (1.0 - (from_i32(py) + 0.5) / RESOLUTION * 2.0) * self.zoom
+        let u: f32 = ((from_i32(px) + 0.5) / self.res * 2.0 - 1.0) * self.zoom
+        let v: f32 = (1.0 - (from_i32(py) + 0.5) / self.res * 2.0) * self.zoom
         let cs: f32 = cos(self.spin)
         let sn: f32 = sin(self.spin)
         let x: f32 = cs * u + sn * v
@@ -108,7 +134,7 @@ actor Desargues2d uses (GpuProgram<WebGpuBackend>) {
         let pc: Point = meet(l_ab, l_apbp)
         let axis: Line = join(pa, pb)
 
-        let pw: f32 = self.zoom * 2.0 / RESOLUTION
+        let pw: f32 = self.zoom * 2.0 / self.res
         let thin: f32 = pw * 1.3
         let thick: f32 = pw * 2.1
         let rdot: f32 = pw * 3.4

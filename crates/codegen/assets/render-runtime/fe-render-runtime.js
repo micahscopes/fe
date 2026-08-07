@@ -68,65 +68,10 @@ function ensureStyle() {
                     font-size: 11px; font-weight: 600; }
 .fe-render-badge.webgpu { background: #10281a; color: #5bffa0; }
 .fe-render-badge.wasm { background: #1a2030; color: #8fb0ff; }
+.fe-render-undeclared { color: #d9a441; font-size: 12px; padding: 6px 8px;
+             border: 1px dashed #4a3a1a; border-radius: 6px; background: #221a0c; }
 `;
   document.head.appendChild(style);
-}
-
-/** Deterministic mulberry32 PRNG: same manifest -> same search -> same pixels. */
-function mulberry32(seed) {
-  let a = seed >>> 0;
-  return function next() {
-    a |= 0;
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-/**
- * Bounded, DETERMINISTIC search for a uniform vector that makes the kernel
- * vary spatially, so any render bundle shows something meaningful on first
- * load with no authored initial state.
- *
- * This is an interim default, not the destination: an actor's real initial
- * view belongs in Fe (a manifest `controls.initial` projection, the v5
- * ctl-lane work), not guessed by the runtime. It replaces a `Math.random()`
- * search that produced different, nondeterministic pixels on every reload
- * for the exact same bundle; a seeded search at least makes "first load"
- * reproducible in the meantime. Callers with a real initial state pass
- * `initial` to `mountRenderSurface` and this function is not consulted.
- */
-function deterministicInitialUniforms(members, callKernel) {
-  if (members.length === 0) return [];
-  const presets = [0, 0.5, 1, 2, 4, 8, 16, 32, 64];
-  const size = 48;
-  const random = mulberry32(0x9e3779b9);
-  let best = members.map(() => 1);
-  let bestVariance = -1;
-  for (let trial = 0; trial < 96; trial++) {
-    const candidate = members.map(() => presets[(random() * presets.length) | 0]);
-    let sum = 0;
-    let sumSquares = 0;
-    let count = 0;
-    const seen = new Set();
-    for (let py = 0; py < size; py += 2) {
-      for (let px = 0; px < size; px += 2) {
-        const value = callKernel(px, py, candidate);
-        seen.add(value);
-        const luminance = ((value >>> 16) & 255) + ((value >>> 8) & 255) + (value & 255);
-        sum += luminance;
-        sumSquares += luminance * luminance;
-        count += 1;
-      }
-    }
-    const variance = sumSquares / count - (sum / count) ** 2;
-    if (seen.size > 3 && variance > bestVariance) {
-      bestVariance = variance;
-      best = candidate;
-    }
-  }
-  return best;
 }
 
 async function fetchOrThrow(url, label) {
@@ -187,40 +132,26 @@ function buildDom({ canvasOption, container, mountAfter, controls }) {
   return { root: figure, canvas, panel, modeEl, metaEl };
 }
 
-function buildControls(panel, members, current, onChange) {
+/**
+ * A bundle with no `surface` section (no declared `view()`): every uniform
+ * member is held at a fixed, honest default (1.0, not a guess and not
+ * searched) and the panel shows why there is no slider, instead of a
+ * fabricated [0,128] range. This is the visible pressure the v5 migration
+ * posture calls for (FE_WEB_V5_ORCHESTRATION_DESIGN.md 4.2): an undeclared
+ * view stays visibly undeclared rather than silently guessing one.
+ */
+function undeclaredViewInitialUniforms(members) {
+  return members.map(() => 1);
+}
+
+function buildUndeclaredViewNotice(panel, members) {
   panel.innerHTML = "";
-  members.forEach((member, index) => {
-    const row = document.createElement("div");
-    row.className = "fe-render-ctl";
-    // Protocol v5 projects each actor field's NAME and doc comment onto its
-    // uniform member: label the control by the real field name and surface the
-    // doc as a hover title, falling back to the raw `scalar @arg_index` when a
-    // v4 manifest carries neither.
-    if (member.doc) row.title = member.doc;
-    const label = document.createElement("label");
-    const value = document.createElement("b");
-    const format = (v) => (+v).toFixed(member.scalar === "f32" ? 2 : 0);
-    value.textContent = format(current()[index]);
-    const name = document.createElement("span");
-    name.textContent = member.name ? member.name : `${member.scalar} @${member.arg_index}`;
-    label.append(name, value);
-    const input = document.createElement("input");
-    input.type = "range";
-    input.min = "0";
-    input.max = "128";
-    input.step = member.scalar === "f32" ? "0.25" : "1";
-    input.value = String(current()[index]);
-    input.oninput = () => {
-      // Slice the LIVE uniform vector, not a snapshot captured at build time,
-      // so moving one slider preserves every other slider's current value.
-      const next = current().slice();
-      next[index] = +input.value;
-      value.textContent = format(input.value);
-      onChange(next);
-    };
-    row.append(label, input);
-    panel.append(row);
-  });
+  const notice = document.createElement("div");
+  notice.className = "fe-render-ctl fe-render-undeclared";
+  notice.textContent = members.length
+    ? `no view() declared — ${members.length} uniform member(s) held at 1.0`
+    : "no view() declared";
+  panel.append(notice);
 }
 
 /**
@@ -402,9 +333,11 @@ function initWasmFallback({ canvas, width, height, callKernel }) {
  *   after this node when neither `canvas` nor `container` is given.
  * @param {number} [options.width=256] - dispatch/canvas resolution.
  * @param {number} [options.height=width]
- * @param {number[]} [options.initial] - explicit initial uniform vector (the
- *   landing hook for a future Fe-declared `controls.initial` manifest
- *   projection). Falls back to the deterministic search above when absent.
+ * @param {number[]} [options.initial] - explicit initial uniform vector,
+ *   overriding the manifest. Real initial values normally come from the
+ *   bundle's declared `surface.params[].init` (protocol v5, projected from
+ *   the actor's `view()`); a bundle with no declared view holds every member
+ *   at a fixed 1.0 (visibly undeclared, never searched or guessed).
  * @param {{adapter: GPUAdapter, device: GPUDevice}} [options.gpu] - reuse an
  *   already-acquired adapter/device instead of the page-shared singleton.
  * @param {boolean} [options.controls=true] - generate uniform sliders and
@@ -476,10 +409,12 @@ export async function mountRenderSurface(options) {
     initWasmFallback({ canvas: dom.canvas, width, height, callKernel });
 
   // Initial uniform vector: from the declared `surface` (init values, with
-  // extent-bound members fed the live canvas size), else the legacy path.
+  // extent-bound members fed the live canvas size); an explicit `initial`
+  // override; or, for a bundle with no declared view(), a fixed 1.0 per
+  // member (visibly undeclared, never searched or guessed).
   let uniforms = surface
     ? surfaceInitialUniforms(members, surface, width, height)
-    : (initial ?? deterministicInitialUniforms(members, callKernel));
+    : (initial ?? undeclaredViewInitialUniforms(members));
 
   function render(nextUniforms) {
     if (nextUniforms) uniforms = nextUniforms;
@@ -495,7 +430,7 @@ export async function mountRenderSurface(options) {
     if (surface) {
       buildSurfaceControls(dom.panel, members, surface, () => uniforms, (next) => render(next));
     } else {
-      buildControls(dom.panel, members, () => uniforms, (next) => render(next));
+      buildUndeclaredViewNotice(dom.panel, members);
     }
   }
   if (dom.metaEl) {

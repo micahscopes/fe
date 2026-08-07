@@ -7,12 +7,10 @@
   is optional (derived from the sketch's `actor` declaration) and shown here
   only because it is reconciled, never trusted over the declaration.
 
-  `data-fe-width`/`data-fe-height` match cga3d's baked `RESOLUTION: f32 =
-  128.0` (demos/sketches/cga3d/src/lib.fe:269); the runtime's own default is
-  256, which would silently stretch this sketch 2x. This is the short-term,
-  per-demo-authored fix documented in FE_WEB_GALLERY_ORCHESTRATION_DESIGN.md
-  section 7; the do-it-right ladder is an actor-declared dispatch size
-  projected into the manifest (a v5 field), not a page-authored guess.
+  No `data-fe-width`/`data-fe-height`: cga3d declares a `const fn view()`
+  (protocol v5), CTFE-projected into the manifest `surface` section, so the
+  runtime reads the real dispatch extent (512x512) from there instead of a
+  page-authored guess (FE_WEB_V5_ORCHESTRATION_DESIGN.md).
 -->
 <html lang="en">
 <head>
@@ -31,8 +29,6 @@
   <script type="application/fe"
           data-fe-src="sketches/cga3d"
           data-fe-entry="shade"
-          data-fe-render
-          data-fe-width="512"
-          data-fe-height="512"></script>
+          data-fe-render></script>
 </body>
 </html>

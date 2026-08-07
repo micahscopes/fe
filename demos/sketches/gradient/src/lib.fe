@@ -14,16 +14,40 @@
 //! claim, no parallelism claim (VISION 3.1).
 
 use std::webgpu::{FragmentSurface, GpuProgram, WebGpuBackend}
+use std::web::view::{Extent, Param, Surface}
 
 extern {
     fn __f32_from_i32(_: i32) -> f32
     fn __i32_from_f32(_: f32) -> i32
 }
 
+/// The per-demo params record: field names bind, by name identity, to the
+/// actor's state fields (checked at projection time). This kernel reads raw
+/// pixel coordinates directly (no resolution normalization), so there is no
+/// extent-bound param: the extent still sets the dispatch size below.
+struct GradientParams {
+    gain: Param,
+    bias: Param,
+    cutoff: Param,
+}
+
 actor GradientSurface uses (GpuProgram<WebGpuBackend>) {
     gain: f32,
     bias: f32,
     cutoff: f32,
+
+    /// The surface declaration: CTFE-evaluated at bundle time and projected
+    /// into the manifest `surface` section. Never lowered to wasm or WGSL.
+    const fn view() -> Surface<GradientParams> {
+        Surface {
+            extent: Extent::square(512),
+            params: GradientParams {
+                gain: Param::range(min: 0.0, max: 1.0, init: 0.12),
+                bias: Param::range(min: -50.0, max: 50.0, init: 0.0),
+                cutoff: Param::range(min: 0.0, max: 255.0, init: 96.0),
+            },
+        }
+    }
 
     /// The fragment behavior: pixel coordinate in, packed RGBA8 word out. The
     /// uniform record is the actor's own fields, reached as `self.*`.
