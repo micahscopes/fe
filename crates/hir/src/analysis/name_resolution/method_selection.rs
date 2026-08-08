@@ -192,7 +192,10 @@ impl<'db, 'a> CandidateAssembler<'db, 'a> {
                     ingot,
                     self.receiver.canonical(),
                     self.assumptions,
-                ) {
+                )
+                .iter()
+                .copied()
+                {
                     supplied_by_gated |=
                         self.insert_trait_method_cand(imp.skip_binder().trait_(self.db));
                 }

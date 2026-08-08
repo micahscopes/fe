@@ -1634,7 +1634,10 @@ fn select_assoc_const_candidate<'db>(
 
     let mut matches: IndexSet<TraitInstId<'db>> = IndexSet::default();
     for ingot in search_ingots.into_iter().flatten() {
-        for cand in impls_for_ty_with_constraints(db, ingot, canonical_receiver, assumptions) {
+        for cand in impls_for_ty_with_constraints(db, ingot, canonical_receiver, assumptions)
+            .iter()
+            .copied()
+        {
             // Recover the impl's concrete (const-)generic arguments by unifying its self type
             // against the receiver, so the selected trait instance carries the receiver's args
             // (e.g. `GenericForward<7>`, not the impl-parameter `GenericForward<N>`). The impls
@@ -1757,7 +1760,10 @@ pub(crate) fn find_associated_type<'db>(
             // Search both the call-site ingot and the receiver's ingot so local
             // traits on external types and external traits on local types are both visible.
             for ingot in search_ingots.into_iter().flatten() {
-                for impl_ in impls_for_ty_with_constraints(db, ingot, canonical_ty, assumptions) {
+                for impl_ in impls_for_ty_with_constraints(db, ingot, canonical_ty, assumptions)
+                    .iter()
+                    .copied()
+                {
                     if let Some(Some((inst, assoc_ty))) =
                         cx.with_impl_assoc_ty(impl_, lhs_ty, name, |cx, inst, assoc_ty| {
                             Some((

@@ -507,7 +507,10 @@ impl<'db> TypeNormalizer<'db> {
                     ingot,
                     canonical_self_ty,
                     self.assumptions,
-                ) {
+                )
+                .iter()
+                .copied()
+                {
                     if implementor.skip_binder().trait_def(self.db) != trait_def {
                         continue;
                     }

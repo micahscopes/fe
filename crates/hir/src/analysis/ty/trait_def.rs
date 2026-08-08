@@ -366,6 +366,26 @@ fn resolve_trait_method_against_implementor<'db>(
 }
 
 /// Returns all implementors for the given `ty` that satisfy the given assumptions.
+///
+/// Tracked so associated-type projection resolution (the MIR-hot multiplier of
+/// `field.fe`-style chained projections) memoizes the full env scan + solver
+/// filter per `(ingot, canonical ty, assumptions)` instead of recomputing it on
+/// every call. It joins the `{collect_trait_impls, ingot_trait_env}` fixpoint
+/// SCC: a concrete-receiver impl-header binding lowered during collection can
+/// re-enter this query with an identical key while `ingot_trait_env` is
+/// provisional (see `cross_ingot_concrete_projection_cycles_collect_trait_impls`
+/// and 5.1-5.2 of SALSA_TRACKED_NORMALIZATION_DESIGN.md). The handler is the
+/// exact sibling of `impls_for_trait_def`'s: `cycle_initial = Vec::new()` equals
+/// what today's code computes against the provisional empty env (an empty
+/// `ty_to_implementors` scan yields `[]`), the value is a candidate SET that
+/// only grows monotonically along the env iteration, and `Iterate` converges
+/// with the env. This is NOT the non-monotone normalization-value class that
+/// `normalize_ty` (tracked with NO handler) belongs to.
+#[salsa::tracked(
+    return_ref,
+    cycle_fn = impls_for_ty_with_constraints_cycle_recover,
+    cycle_initial = impls_for_ty_with_constraints_cycle_initial
+)]
 pub(crate) fn impls_for_ty_with_constraints<'db>(
     db: &'db dyn HirAnalysisDb,
     ingot: Ingot<'db>,
@@ -441,6 +461,31 @@ pub(crate) fn impls_for_ty_with_constraints<'db>(
             unifies
         })
         .collect()
+}
+
+/// Byte-for-byte the `impls_for_trait_def` handler pair, extended with the
+/// `assumptions` key: `cycle_initial` returns the same `[]` today's code
+/// computes at the provisional empty env, and recovery iterates the monotone
+/// candidate set to the env fixpoint. See the doc on
+/// `impls_for_ty_with_constraints` for why this is sound and required.
+fn impls_for_ty_with_constraints_cycle_initial<'db>(
+    _db: &'db dyn HirAnalysisDb,
+    _ingot: Ingot<'db>,
+    _ty: Canonical<TyId<'db>>,
+    _assumptions: PredicateListId<'db>,
+) -> Vec<Binder<ImplementorId<'db>>> {
+    Vec::new()
+}
+
+fn impls_for_ty_with_constraints_cycle_recover<'db>(
+    _db: &'db dyn HirAnalysisDb,
+    _value: &Vec<Binder<ImplementorId<'db>>>,
+    _count: u32,
+    _ingot: Ingot<'db>,
+    _ty: Canonical<TyId<'db>>,
+    _assumptions: PredicateListId<'db>,
+) -> salsa::CycleRecoveryAction<Vec<Binder<ImplementorId<'db>>>> {
+    salsa::CycleRecoveryAction::Iterate
 }
 
 /// Returns all implementors for the given `ty`.
