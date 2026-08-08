@@ -279,6 +279,23 @@ pub fn from_f32<const L: usize>(_ v: f32) -> (u32, Limbs<L>)
     (sign, mag)
 }
 
+/// Assemble a deep-zoom `Fixed<L>` coordinate from a df64 base `(hi, lo)` plus a
+/// small offset, all f32 sources: `from_f32(hi) + from_f32(lo) + from_f32(off)`.
+/// Each source drops its ~24 real bits at its own magnitude (bit-exact, since
+/// `from_f32` is exact for a float's mantissa) and the exact Fixed add stitches
+/// them, so a df64 center + f32 pixel offset lands ~72 real bits across the
+/// limbs. Lets a renderer keep an f32/df64 gesture-plumbing surface while the
+/// iteration runs in reassociation-immune integer `Fixed<L>`.
+pub fn from_df64_offset<const L: usize>(_ hi: f32, _ lo: f32, _ off: f32) -> (u32, Limbs<L>)
+    where Limbs<L>: FromReal + Mac + SubBorrow + Select + Copy,
+{
+    let (h_s, h) = from_f32<L>(hi)
+    let (l_s, l) = from_f32<L>(lo)
+    let (o_s, o) = from_f32<L>(off)
+    let (s1, m1) = add<Limbs<L>>(h_s, h, l_s, l)
+    add<Limbs<L>>(s1, m1, o_s, o)
+}
+
 // -----------------------------------------------------------------------------
 // Mandelbrot escape in `Fixed<L>`. Every quantity is a fixed-point integer, so
 // nothing the GPU shader compiler does can perturb the orbit.

@@ -11,50 +11,52 @@
 //! `&&`: an `i32` `done` flag freezes the orbit after escape (so the count is
 //! preserved and `z` never blows to NaN) and the loop runs a fixed trip count.
 //!
-//! DEEP ZOOM (`precision::Expansion<2>`): plain f32 loses `u*zoom` against an
-//! O(1) `center` once `zoom` drops below about `5e-5` (f32 carries ~7 decimal
-//! digits total, and the offset needs some of those digits just to survive
-//! the addition). The arithmetic that buys back the missing digits is the
-//! general, CTFE-derived `precision::Expansion<N>` non-overlapping float
-//! expansion, at `N = 2`: a value's true value is `hi + lo` (two f32 words),
-//! giving about 14 decimal digits. This actor used to carry its own
-//! hand-written double-single ("df64") arithmetic library, built from
-//! Knuth's exact-sum step, Dekker's exact-split and exact-product steps, and
-//! the add/subtract/multiply/square/plus-scalar combinators layered on top;
-//! that library is DELETED. `Expansion<2>` was proven bit-for-bit identical
-//! to it (oracle test
-//! `precision_expansion2_df64_oracle`, `crates/codegen/tests/
-//! precision_expansion2_df64_oracle.rs`, `.to_bits()` equality over every
-//! op), so this actor now calls the general form,
-//! `precision::{add, sub, mul, sqr, add_f32}` at `N = 2`, instead of a
-//! bespoke copy (ROLLCALL_GOAL.md THE PRINCIPLE: the general CTFE-derived
-//! form, not a one-off specific one).
+//! DEEP ZOOM, GPU-FAITHFUL (`precision::fixed::Fixed<8>`). A float expansion
+//! (df64 / `Expansion<2>`) is correct only under strict IEEE round-to-nearest,
+//! which wasm/native/CPU guarantee, but WGSL explicitly licenses the GPU shader
+//! compiler to REASSOCIATE and FUSE float ops (`t - (t - a)` folds to `a`),
+//! with no `precise` qualifier to stop it, so the error-free transforms df64
+//! depends on COLLAPSE on the actual GPU (memory:
+//! gpu-df64-dead-end-use-perturbation). Integer arithmetic carries no such
+//! license, so the escape orbit here runs entirely in the general, CTFE-derived
+//! `precision::fixed::Fixed<L>` integer fixed-point number at `L = 8` (13-bit
+//! limbs, ~2^-91 resolution): reassociation-immune and deterministic across
+//! Metal/Vulkan/D3D12. `Fixed<L>` shares `field.fe`'s limb kernel with the
+//! crypto `Field<p>` and is proven bit-for-bit against an independent num-bigint
+//! reference (`crates/codegen/tests/precision_fixed_oracle.rs`, mul/add/sub/sqr
+//! limb-for-limb + escape iteration counts, L=4 and L=8). This is the general
+//! CTFE form instantiated at 8, not a bespoke fixed-point copy.
 //!
-//! The COMPLEX-PLANE CENTER stays a flat `(hi, lo): (f32, f32)` pair per axis
-//! in actor state (`center_x_hi`/`center_x_lo`, `center_y_hi`/`center_y_lo`),
-//! NOT `Expansion<2>` directly: the wasm export signature and the web
-//! control-manifest projection both bind by these field names and types, so
-//! the layout stays flat and `precision::{from_pair, to_pair}` convert to and
-//! from `Expansion<2>` only around each arithmetic call (an ops-only
-//! migration). The iteration state `z` uses the same flat pair shape, since
-//! `z*z` is where the escape-time boundary actually lives.
+//! The COMPLEX-PLANE CENTER and the GESTURE/VIEW PLUMBING stay df64: the actor
+//! state is a flat `(hi, lo): (f32, f32)` pair per axis
+//! (`center_x_hi`/`center_x_lo`, `center_y_hi`/`center_y_lo`) that the wasm
+//! export signature and the web control-manifest bind by name, and `update_view`
+//! keeps folding pan/zoom/anchor deltas into that df64 center through
+//! `add_f32<2>` (unchanged, still oracle-gated). Only the per-pixel `escape`
+//! path changed: it assembles the df64 center + `u*zoom`/`v*zoom` offset into a
+//! deep `Fixed<8>` coordinate (`from_df64_offset`, each f32 source's bits
+//! stitched by the exact Fixed add) and iterates in integer `Fixed<8>`.
 //!
 //!     fe web build demos/sketches/mandelbrot --out <dir>
 //!
 //! Software rendering (lavapipe/SwiftShader) in the sandbox; no performance or
 //! parallelism claim (VISION 3.1).
 //!
-//! Honesty register: `Expansion<2>` buys about 14 significant digits, pushing
-//! the usable zoom floor from ~5e-5 to about 1e-11 (roughly a million times
-//! deeper), not to the 1e-100+ depths perturbation-theory (reference-orbit)
-//! renderers reach. That technique is a different, much larger undertaking
-//! (a reference orbit computed at arbitrary precision, then every pixel's
-//! orbit tracked as a perturbation from it) and is out of scope here.
+//! Honesty register: the center is seeded to df64 precision (the preserved
+//! gesture plumbing, ~14 digits / usable zoom floor ~1e-11), so absolute zoom
+//! depth is still df64-bounded; what `Fixed<8>` buys is that the render stays
+//! CORRECT ON THE GPU at that depth (df64 silently degrades to ~f32 there once
+//! the shader compiler reassociates), plus a full ~27-digit integer iteration.
+//! Going deeper than the df64 center floor needs the center supplied at
+//! `Fixed` precision from the host (per-limb view params) rather than as a df64
+//! pair, and the 1e-100+ regime needs perturbation (reference-orbit) rendering;
+//! both are out of scope here.
 
 use std::webgpu::{FragmentSurface, GpuProgram, UpdateSurface, WebGpuBackend}
 use std::web::view::{Extent, Param, Surface}
 use fmath::{from_i32, palette, to_i32}
-use precision::{add, add_f32, from_pair, mul, sub, sqr, to_pair}
+use precision::{add_f32, from_pair, to_pair}
+use precision::fixed::{from_df64_offset, escape as fx_escape}
 
 // Iteration-budget scaling: deeper zoom needs more iterations to resolve the
 // boundary. `max_iter_for_zoom` grows the trip count with how far `zoom` has
@@ -193,60 +195,33 @@ actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
         }
     }
 
-    /// Pixel coordinate in, packed RGBA8 word out.
+    /// Pixel coordinate in, packed RGBA8 word out. The orbit runs entirely in
+    /// integer `precision::fixed::Fixed<8>` (13-bit limbs, ~2^-91 resolution):
+    /// reassociation-immune, so unlike the df64 float expansion it stays
+    /// bit-correct through the browser's WGSL shader compiler and holds deep
+    /// zoom on the actual GPU where df64's error-free transforms collapse.
     fn escape(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
         // Pixel centre to [-1, 1], y up, then into the complex plane.
         let u: f32 = (from_i32(px) + 0.5) / self.res * 2.0 - 1.0
         let v: f32 = 1.0 - (from_i32(py) + 0.5) / self.res * 2.0
 
-        // `u * zoom` / `v * zoom` are small, self-contained quantities: f32's
-        // ~7-digit RELATIVE precision holds fine even at `zoom ~ 1e-11`, so
-        // plain f32 is enough for the offset itself. What deep zoom actually
-        // fights is adding that offset to an O(1) CENTER, which is why the
-        // center is carried as an `Expansion<2>` pair and the offset folds in
-        // through `add_f32<2>` rather than a plain f32 `+`.
-        let (cx_hi, cx_lo) = to_pair(add_f32<2>(from_pair(self.center_x_hi, self.center_x_lo), u * self.zoom))
-        let (cy_hi, cy_lo) = to_pair(add_f32<2>(from_pair(self.center_y_hi, self.center_y_lo), v * self.zoom))
+        // The per-pixel coordinate as a deep `Fixed<8>` value: the df64 center
+        // `(hi, lo)` plus the small `u*zoom`/`v*zoom` offset, each an f32 source
+        // whose ~24 real bits land at their own magnitude and are stitched by
+        // the exact Fixed add (`from_df64_offset`). The gesture/view plumbing
+        // stays df64 (`update_view` below), so the center is seeded to df64
+        // precision; the ITERATION then runs at full Fixed<8> width, integer
+        // and GPU-faithful.
+        let (cx_s, cx) = from_df64_offset<8>(self.center_x_hi, self.center_x_lo, u * self.zoom)
+        let (cy_s, cy) = from_df64_offset<8>(self.center_y_hi, self.center_y_lo, v * self.zoom)
 
-        let mut zx_hi: f32 = 0.0
-        let mut zx_lo: f32 = 0.0
-        let mut zy_hi: f32 = 0.0
-        let mut zy_lo: f32 = 0.0
-        let mut count: i32 = 0
-        // 0 while still iterating, 1 once the orbit has escaped.
-        let mut done: i32 = 0
-        let mut i: i32 = 0
         let max_iter: i32 = max_iter_for_zoom(self.zoom)
-        while i < max_iter {
-            if done == 0 {
-                let (xx_hi, xx_lo) = to_pair(sqr<2>(from_pair(zx_hi, zx_lo)))
-                let (yy_hi, yy_lo) = to_pair(sqr<2>(from_pair(zy_hi, zy_lo)))
-                // |z|^2 > 4: the hi word alone is plenty for a boolean
-                // escape test (it is accurate to ~7 digits, and the test
-                // only needs to know which side of 4.0 the sum lands on).
-                if xx_hi + yy_hi > 4.0 {
-                    done = 1
-                } else {
-                    // re(z*z) = zx*zx - zy*zy, then + cx.
-                    let (re_hi, re_lo) = to_pair(sub<2>(from_pair(xx_hi, xx_lo), from_pair(yy_hi, yy_lo)))
-                    let (new_zx_hi, new_zx_lo) = to_pair(add<2>(from_pair(re_hi, re_lo), from_pair(cx_hi, cx_lo)))
-                    // im(z*z) = 2*zx*zy, then + cy. Doubling an `Expansion<2>`
-                    // value is exact (a power-of-two scale never rounds), so
-                    // this just doubles both words rather than another
-                    // `add<2>`.
-                    let (m_hi, m_lo) = to_pair(mul<2>(from_pair(zx_hi, zx_lo), from_pair(zy_hi, zy_lo)))
-                    let (new_zy_hi, new_zy_lo) = to_pair(add<2>(from_pair(m_hi * 2.0, m_lo * 2.0), from_pair(cy_hi, cy_lo)))
-                    zx_hi = new_zx_hi
-                    zx_lo = new_zx_lo
-                    zy_hi = new_zy_hi
-                    zy_lo = new_zy_lo
-                    count = count + 1
-                }
-            }
-            i = i + 1
-        }
+        // The general integer escape loop (z <- z*z + c, strict |z|^2 > 4). It
+        // returns the iteration count; a point that never escapes runs the full
+        // budget, so `count == max_iter` marks the set interior.
+        let count: i32 = fx_escape<8>(cx_s, cx, cy_s, cy, max_iter)
 
-        if done == 1 {
+        if count < max_iter {
             // Escaped: colour by how long it survived.
             let t: f32 = from_i32(count) / from_i32(max_iter)
             palette(t, 0.0, 0.33, 0.67)
