@@ -41,10 +41,37 @@ type TraitImplTable<'db> = FxHashMap<Trait<'db>, Vec<Binder<ImplementorId<'db>>>
 /// - it does not pull in external ingot impls
 /// - it does not perform overlap/conflict checking
 ///
-/// Keeping impl collection free of trait solving avoids a query cycle between
-/// trait-environment construction and overlap checking. Visible trait
-/// environments are assembled later by [`TraitEnv`](super::trait_def::TraitEnv).
-#[salsa::tracked(return_ref)]
+/// `collect_trait_impls` and [`ingot_trait_env`](super::trait_def::ingot_trait_env)
+/// form a query SCC that salsa fixpoint-iterates. Whenever an impl HEADER's
+/// associated-type binding names a BARE projection (`type Out = LimbMore<T::Out>`,
+/// i.e. `T::Out` written without the `<T as Pad2>` qualifier), lowering that
+/// binding runs `find_associated_type`, whose impl search unconditionally
+/// consults `ingot_trait_env` even when the assumptions-only path already
+/// resolves the projection; and `TraitEnv::collect` (behind `ingot_trait_env`)
+/// calls `collect_trait_impls` for the same ingot. So the SCC exists for ANY
+/// ingot carrying such a binding -- it is not specific to any one program.
+///
+/// Salsa reports the cycle on whichever SCC member is the RE-ENTERED head, and
+/// that is fixed by entry TOPOLOGY, not program shape. `ingot_trait_env` has
+/// carried a `cycle_fn`/`cycle_initial` for years, so an ingot entered through
+/// it (the single-ingot case, and every conformance fixture of this shape) has
+/// been silently iterating this SCC all along: the "impl collection is
+/// solve-free" invariant the old doc here claimed has in fact never held.
+/// `collect_trait_impls` becomes the head only when its ingot is entered as a
+/// DEPENDENCY -- `TraitEnv::collect(consumer)` calls
+/// `collect_trait_impls(dependency)` directly, with no `ingot_trait_env` frame
+/// between, so the handler-less member is re-entered first and salsa panics.
+/// This handler completes the SCC's head coverage (the fixpoint model's
+/// contract is that EVERY possible head carries one), mirroring the sibling
+/// `ingot_trait_env` / `impls_for_trait_def` handlers. Convergence is the same
+/// dynamics the `ingot_trait_env`-headed iteration already exhibits on every
+/// test run; a two-ingot regression fixture pins it (red without this handler,
+/// green with it).
+#[salsa::tracked(
+    return_ref,
+    cycle_fn = collect_trait_impls_cycle_recover,
+    cycle_initial = collect_trait_impls_cycle_initial
+)]
 pub(crate) fn collect_trait_impls<'db>(
     db: &'db dyn HirAnalysisDb,
     ingot: Ingot<'db>,
@@ -61,6 +88,24 @@ pub(crate) fn collect_trait_impls<'db>(
     }
 
     impl_table
+}
+
+fn collect_trait_impls_cycle_initial<'db>(
+    _db: &'db dyn HirAnalysisDb,
+    _ingot: Ingot<'db>,
+) -> TraitImplTable<'db> {
+    // Empty table on cycle detection; the fixpoint iteration below fills it in.
+    TraitImplTable::default()
+}
+
+fn collect_trait_impls_cycle_recover<'db>(
+    _db: &'db dyn HirAnalysisDb,
+    _value: &TraitImplTable<'db>,
+    _count: u32,
+    _ingot: Ingot<'db>,
+) -> salsa::CycleRecoveryAction<TraitImplTable<'db>> {
+    // Keep iterating until the collected implementor set stabilizes.
+    salsa::CycleRecoveryAction::Iterate
 }
 
 /// Returns the corresponding implementors for the given [`ImplTrait`].

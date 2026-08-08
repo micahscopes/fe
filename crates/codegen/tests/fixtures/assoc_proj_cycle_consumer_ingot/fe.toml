@@ -1,0 +1,7 @@
+[ingot]
+name = "assoc_proj_cycle_consumer"
+version = "0.1.0"
+
+[dependencies]
+core = "../../../../../ingots/core"
+assoc_proj_cycle_dep = "../assoc_proj_cycle_dep_ingot"

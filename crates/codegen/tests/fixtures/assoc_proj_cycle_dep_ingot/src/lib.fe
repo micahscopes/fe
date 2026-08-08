@@ -1,0 +1,57 @@
+//! Minimal DEPENDENCY ingot for the cross-ingot `collect_trait_impls` salsa
+//! cycle regression (driven by
+//! `crates/codegen/tests/assoc_proj_cross_ingot_cycle.rs`; see the
+//! `collect_trait_impls` doc in
+//! `crates/hir/src/analysis/ty/trait_lower.rs`).
+//!
+//! The load-bearing line is the BARE associated-type projection in an impl
+//! HEADER: `impl<T: Tr + Copy> Tr for Wrap<T> { type Out = Wrap<T::Out> }`,
+//! with `T::Out` written WITHOUT the `<T as Tr>` qualifier. Lowering that
+//! binding during `collect_trait_impls` runs `find_associated_type`, whose
+//! impl search consults `ingot_trait_env` even when the assumptions-only path
+//! already resolves the projection, so the
+//! `{ingot_trait_env, collect_trait_impls}` query SCC exists for any ingot
+//! carrying this shape. It is exactly the shape of `precision::field`'s
+//! `Pad2 for LimbMore<T>` and the conformance fixture
+//! `associated_types_wrapper.fe`, reduced to the minimum (no crypto, a toy
+//! `Wrap<T>`).
+//!
+//! Compiled ALONE this ingot heads that SCC at `ingot_trait_env` (which has
+//! carried a cycle handler for years), so it converges silently. The
+//! regression only bites once a CONSUMER ingot enters this one as a
+//! dependency, moving the re-entered head to `collect_trait_impls`.
+
+use core::marker::Copy
+
+pub trait Tr {
+    type Out
+    fn grow(self) -> Self::Out
+}
+
+pub struct Base { pub value: u32 }
+pub struct Wrap<T> { pub lead: u32, pub tail: T }
+impl Copy for Base {}
+impl<T: Copy> Copy for Wrap<T> {}
+
+impl Tr for Base {
+    type Out = Wrap<Base>
+    fn grow(self) -> Wrap<Base> {
+        Wrap { lead: self.value, tail: Base { value: 0 } }
+    }
+}
+
+// The triggering impl: a BARE `T::Out` projection (no `<T as Tr>` qualifier)
+// in the associated-type binding of the impl header.
+impl<T: Tr + Copy> Tr for Wrap<T> {
+    type Out = Wrap<T::Out>
+    fn grow(self) -> Wrap<T::Out> {
+        Wrap { lead: self.lead, tail: self.tail.grow() }
+    }
+}
+
+/// Generic driver bounded on `Tr + Copy`, so a consumer ingot can force the
+/// projection to normalize (and a Copy check to run) at a CONCRETE
+/// instantiation without re-authoring the impl.
+pub fn grow_once<T: Tr + Copy>(_ x: T) -> <T as Tr>::Out {
+    x.grow()
+}

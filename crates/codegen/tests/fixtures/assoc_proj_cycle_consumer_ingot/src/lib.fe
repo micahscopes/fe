@@ -1,0 +1,38 @@
+//! CONSUMER ingot for the cross-ingot `collect_trait_impls` cycle regression.
+//! It depends on `assoc_proj_cycle_dep`, whose impl header carries the bare
+//! `type Out = Wrap<T::Out>` projection.
+//!
+//! The cycle head is `collect_trait_impls` only when the dependency's SCC is
+//! first entered through `collect_trait_impls` called DIRECTLY by
+//! `TraitEnv::collect(consumer)` (no `ingot_trait_env(dependency)` frame
+//! between). `search_ingots_for_trait_inst` picks the goal's PRIMARY ingot from
+//! the self type's ingot, so a goal on a DEPENDENCY type (`Wrap<Base>: Copy`)
+//! would demand `ingot_trait_env(dependency)` first and head the SCC at the
+//! handled `ingot_trait_env`. To land the head on `collect_trait_impls`, `drive`
+//! first solves a goal on a CONSUMER-owned type (`Local: Copy`, primary =
+//! consumer): that demands `ingot_trait_env(consumer)`, whose collect calls
+//! `collect_trait_impls(dependency)` directly and lowers the bare projection
+//! binding. Without a handler on `collect_trait_impls` salsa panics here naming
+//! that query; with the handler the SCC fixpoint-iterates and this compiles
+//! clean.
+
+use assoc_proj_cycle_dep::{Tr, Base, Wrap, grow_once}
+use core::marker::Copy
+
+struct Local { seed: u32 }
+impl Copy for Local {}
+
+fn needs_copy<T: Copy>(_ x: T) -> u32 { 0 }
+
+pub fn drive() -> u32 {
+    // Consumer-primary trait goal: demands `ingot_trait_env(consumer)`, whose
+    // `TraitEnv::collect` enters `collect_trait_impls(dependency)` directly.
+    let poke: u32 = needs_copy<Local>(Local { seed: 5 })
+
+    // A genuine cross-ingot use of the dependency's bare-projection trait at a
+    // concrete, Copy-bounded instantiation (normalizes `<Wrap<Base> as Tr>::Out`).
+    let grown: <Wrap<Base> as Tr>::Out =
+        grow_once<Wrap<Base>>(Wrap { lead: 7, tail: Base { value: 3 } })
+
+    poke + grown.lead
+}
