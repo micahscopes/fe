@@ -9,7 +9,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{
     CanonicalGoalQuery, GoalSatisfiability, TraitGoalSolution, TraitSolveCx, TraitSolverQuery,
-    normalize_trait_inst_preserving_validity,
+    normalize_trait_inst_preserving_validity_uncached,
 };
 use crate::analysis::{
     HirAnalysisDb,
@@ -390,7 +390,7 @@ impl GeneratorNode {
             pf.origin_ingot,
             extracted_goal,
         );
-        let normalized_goal = normalize_trait_inst_preserving_validity(
+        let normalized_goal = normalize_trait_inst_preserving_validity_uncached(
             db,
             g_node.extracted_query.goal,
             scope,
@@ -411,7 +411,7 @@ impl GeneratorNode {
 
             // TODO: require candidates to be pre-normalized
             // Normalize trait instance arguments before unification
-            let normalized_gen_cand = normalize_trait_inst_preserving_validity(
+            let normalized_gen_cand = normalize_trait_inst_preserving_validity_uncached(
                 db,
                 gen_cand.trait_inst(db),
                 scope,
@@ -707,7 +707,7 @@ impl ConsumerNode {
                 pending_inst,
             );
             let assumptions = pending_query.assumptions();
-            normalize_trait_inst_preserving_validity(
+            normalize_trait_inst_preserving_validity_uncached(
                 db,
                 pending_inst.fold_with(db, &mut table),
                 scope,
@@ -722,7 +722,7 @@ impl ConsumerNode {
                 solution,
             );
             let assumptions = pending_query.assumptions();
-            normalize_trait_inst_preserving_validity(
+            normalize_trait_inst_preserving_validity_uncached(
                 db,
                 solution.fold_with(db, &mut table),
                 scope,

@@ -33,7 +33,7 @@ use crate::analysis::{
         fold::TyFoldable as _,
         layout_holes::layout_hole_with_fallback_ty,
         method_table::probe_method,
-        normalize::normalize_ty,
+        normalize::normalize_ty_uncached,
         trait_def::{TraitInstId, impls_for_ty_with_constraints},
         trait_lower::{TraitArgError, TraitRefLowerError, lower_trait_ref, lower_trait_ref_impl},
         trait_resolution::{
@@ -1198,7 +1198,12 @@ where
                 let norm = if assoc_tys.len() == 1 {
                     applied
                 } else {
-                    normalize_ty(db, applied, scope, assumptions)
+                    // R1 (NO-REENTRY INVARIANT, see `normalize.rs`): this is the
+                    // sole `normalize_ty` call in name_resolution and the one
+                    // reachable under `collect_trait_impls` via impl-header
+                    // binding lowering, so it uses the UNCACHED engine to avoid
+                    // closing a salsa cycle on the tracked `normalize_ty`.
+                    normalize_ty_uncached(db, applied, scope, assumptions)
                 };
                 dedup.entry(norm).or_insert((inst, applied));
             }

@@ -32,7 +32,58 @@ use crate::analysis::{
 /// - Simple associated types (e.g., `T::Output`)
 /// - Nested associated types (e.g., `T::Encoder::Output`)
 /// - Associated types with generic parameters
+///
+/// # NO-REENTRY INVARIANT (salsa-tracked, NO cycle handler; §7 of
+/// `SALSA_TRACKED_NORMALIZATION_DESIGN.md`)
+///
+/// This is the compiler-phase normalization API. It is `#[salsa::tracked]` so
+/// that repeated `(ty, scope, assumptions)` demands across phases and instances
+/// collapse to a memo lookup, which is what retires the `field.fe`-style chained
+/// projection recompute (the accelerating super-linear compile curve).
+///
+/// It deliberately carries NO `cycle_fn`/`cycle_initial`. Normalization VALUES
+/// are non-monotone under growing information (the candidate-dedup consumers
+/// collapse 1 candidate -> resolved but 2+ -> unresolved, so more knowledge can
+/// flip resolved -> unresolved), so a salsa-recovered fixpoint value here would
+/// be unsound. Instead, re-entry is made structurally IMPOSSIBLE: every
+/// `normalize_ty` call reachable from INSIDE the trait-env / solver / CTFE
+/// subgraph is routed to the uncached engine [`normalize_ty_uncached`] so it
+/// never demands a salsa node that could close a cycle on this query:
+/// - R1: the name-resolution candidate-dedup normalization (the ONLY
+///   `normalize_ty` call under `name_resolution/`, in `path_resolver.rs`, taken
+///   only for multi-candidate lists post singleton-skip).
+/// - R2: the proof forest's per-arg normalization, via
+///   `normalize_trait_inst_preserving_validity_uncached`
+///   (`trait_resolution/mod.rs`) at the four `proof_forest.rs` sites; the forest
+///   runs inside memoized `is_query_satisfiable`, so this is paid once per
+///   canonical goal already (status quo).
+/// - R3: the CTFE machine's `size_of` type normalization (`ctfe/machine.rs`),
+///   inside memoized `evaluate_const_ty`.
+///
+/// With those three closed, no demand chain originating inside a tracked
+/// `normalize_ty` can reach a tracked `normalize_ty`, so same-key re-entry is
+/// impossible by construction (audit table, design §4). If it EVER fires anyway,
+/// salsa panics loudly naming `normalize_ty`: that is a TRIPWIRE for a missed
+/// channel, never a wrong or silently-recovered value. The only sanctioned
+/// response is to capture the two cycle legs and reroute the offending site to
+/// `normalize_ty_uncached`; never add a cycle handler to this query.
+#[salsa::tracked]
 pub fn normalize_ty<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ty: TyId<'db>,
+    scope: ScopeId<'db>,
+    assumptions: PredicateListId<'db>,
+) -> TyId<'db> {
+    normalize_ty_uncached(db, ty, scope, assumptions)
+}
+
+/// Uncached normalization engine: byte-for-byte the same semantics as
+/// [`normalize_ty`] with no salsa node. Reserved for the R1/R2/R3 call sites
+/// reachable from inside `collect_trait_impls`, `ProofForest::solve`, or the
+/// engine's own CTFE edge (the NO-REENTRY INVARIANT above), where a tracked
+/// demand could close a salsa query cycle on `normalize_ty`. Every other caller
+/// uses the tracked entry so it benefits from the memo.
+pub(crate) fn normalize_ty_uncached<'db>(
     db: &'db dyn HirAnalysisDb,
     ty: TyId<'db>,
     scope: ScopeId<'db>,
@@ -48,8 +99,14 @@ pub fn normalize_ty<'db>(
 /// in-progress cycle marker never revisits), so termination is by counter, not by
 /// structure. On exhaustion projection degrades to the OPAQUE canonical form (the
 /// same "leave unresolved" degrade the cycle guard uses). Constant and tunable;
-/// deliberately NOT part of any salsa memo key (`TypeNormalizer` is a plain
-/// folder, so this counter cannot poison a memo). Charged on the APPLIED
+/// deliberately NOT part of any salsa memo key. Now that `normalize_ty` is a
+/// tracked query, this matters concretely: the budget (and every other
+/// `TypeNormalizer` field) is born zero-initialized and dies within ONE tracked
+/// execution of a given `(ty, scope, assumptions)` key, so it cannot leak across
+/// keys or poison a memo, and the tracked boundary must stay AT the
+/// `normalize_ty` entry (never move inside the fold, or the per-execution state
+/// would straddle a memo boundary). `TypeNormalizer` is a plain folder, so this
+/// counter cannot poison a memo. Charged on the APPLIED
 /// projection route ONLY (see the measured deviation note at the applied
 /// projection site below); the BARE route keeps its pre-A3 in-progress
 /// cycle-marker discipline, so a breadth-heavy pass that legitimately resolves

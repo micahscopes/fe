@@ -703,6 +703,44 @@ pub(crate) fn normalize_trait_inst_preserving_validity<'db>(
     }
 }
 
+/// Uncached twin of [`normalize_trait_inst_preserving_validity`]: identical
+/// validity-preserving logic, but normalizes each arg through the UNCACHED
+/// normalization engine (`TraitInstId::normalize_uncached` ->
+/// `normalize_ty_uncached`). Reserved for the proof forest (R2 of the NO-REENTRY
+/// INVARIANT in `normalize.rs`): the forest runs inside memoized
+/// `is_query_satisfiable`, so this normalization is already paid once per
+/// canonical goal (status quo, no perf loss), and using the tracked entry here
+/// would risk closing a salsa cycle on `normalize_ty`.
+pub(crate) fn normalize_trait_inst_preserving_validity_uncached<'db>(
+    db: &'db dyn HirAnalysisDb,
+    inst: TraitInstId<'db>,
+    scope: ScopeId<'db>,
+    assumptions: PredicateListId<'db>,
+) -> TraitInstId<'db> {
+    let normalized = inst.normalize_uncached(db, scope, assumptions);
+    let original_has_invalid = inst.args(db).iter().copied().any(|ty| ty.has_invalid(db))
+        || inst
+            .assoc_type_bindings(db)
+            .values()
+            .copied()
+            .any(|ty| ty.has_invalid(db));
+    let normalized_has_invalid = normalized
+        .args(db)
+        .iter()
+        .copied()
+        .any(|ty| ty.has_invalid(db))
+        || normalized
+            .assoc_type_bindings(db)
+            .values()
+            .copied()
+            .any(|ty| ty.has_invalid(db));
+    if !original_has_invalid && normalized_has_invalid {
+        inst
+    } else {
+        normalized
+    }
+}
+
 // `pub(crate)` (steering-04 §5 "beyond a pub export if needed"): the type-fn
 // CTFE strict-satisfaction helper (`type_fn_induct::strict_prove`) calls this
 // tracked entry READ-ONLY. No behavior change: same tracked query every other

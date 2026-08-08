@@ -1076,6 +1076,34 @@ impl<'db> TraitInstId<'db> {
         )
     }
 
+    /// Uncached twin of [`normalize`](Self::normalize): normalizes each arg via
+    /// the uncached normalization engine (`normalize_ty_uncached`) rather than
+    /// the tracked `normalize_ty`. Reserved for the proof forest's per-arg
+    /// normalization (R2 of the NO-REENTRY INVARIANT in `normalize.rs`): the
+    /// forest runs inside memoized `is_query_satisfiable`, so a tracked
+    /// `normalize_ty` demand from there could close a salsa cycle on
+    /// `normalize_ty`. Semantics are otherwise identical.
+    pub(crate) fn normalize_uncached(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        scope: crate::core::hir_def::scope_graph::ScopeId<'db>,
+        assumptions: PredicateListId<'db>,
+    ) -> Self {
+        let normalized_args: Vec<_> = self
+            .args(db)
+            .iter()
+            .map(|&arg| {
+                crate::analysis::ty::normalize::normalize_ty_uncached(db, arg, scope, assumptions)
+            })
+            .collect();
+        Self::new(
+            db,
+            self.def(db),
+            normalized_args,
+            self.assoc_type_bindings(db).clone(),
+        )
+    }
+
     pub fn pretty_print(self, db: &dyn HirAnalysisDb, as_pred: bool) -> String {
         if as_pred {
             let inst = self.pretty_print(db, false);

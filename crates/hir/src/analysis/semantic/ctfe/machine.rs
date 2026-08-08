@@ -29,7 +29,7 @@ use crate::{
                 PrimitiveWrapperCallKind, RuntimeBuiltinFuncKind, core_primitive_wrapper_call_kind,
                 runtime_builtin_func_kind,
             },
-            normalize::normalize_ty,
+            normalize::normalize_ty_uncached,
             ty_check::{BodyOwner, check_anon_const_body, check_const_body, check_func_body},
             ty_def::{PrimTy, TyBase, TyData, TyId},
         },
@@ -2533,7 +2533,13 @@ impl<'db> CtfeMachine<'db> {
             .generic_args(self.db)
             .first()
             .ok_or(CtfeError::NotConstEvaluable { origin })?;
-        let ty = normalize_ty(
+        // R3 (NO-REENTRY INVARIANT, see `normalize.rs`): the CTFE machine runs
+        // inside memoized `evaluate_const_ty`, and the normalization engine
+        // itself demands `evaluate_const_ty` (via
+        // `normalize_const_tys_for_comparison`), so this size_of normalization
+        // uses the UNCACHED engine to close the
+        // engine -> const eval -> machine -> normalize back-edge structurally.
+        let ty = normalize_ty_uncached(
             self.db,
             ty,
             instance.key(self.db).owner(self.db).scope(),
