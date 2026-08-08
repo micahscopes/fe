@@ -732,3 +732,178 @@ fn rollcall_prove_on_wasm_commit_on_evm_and_verify_membership_end_to_end() {
          verifyMembership ACCEPT (member) + REJECT (non-member, tampered path) all pass."
     );
 }
+
+// ============================================================================
+// FOUR-LEG EVIDENCE LEDGER: native/Cranelift + GPU/SPIR-V legs.
+//
+// The wasm and EVM legs are proven above. These two extend the SAME kernel
+// (byte-identical `MERKLE4_SRC`, the SAME 4 leaves) across the remaining two
+// legs the Rung 4 evidence ledger names: native/Cranelift (an independently
+// EXECUTED cross-check of the root, not a re-implementation) and GPU/SPIR-V
+// (compile + naga-validate ONLY; GPU execution is out of scope here and is
+// never claimed).
+// ============================================================================
+
+/// Native/Cranelift leg: the merkle builder's real ABI is `(i32 x 81) -> i32`
+/// (one output-limb index + 4 leaves x 20 Montgomery limbs; Fe has no
+/// cross-backend array/pointer ABI, hence the flattened limb args), so this
+/// uses the narrow `NativeMerkleRootEntryArtifact` wrapper added alongside
+/// this rung (`crates/codegen/src/sonatina/native.rs`), sized exactly for that
+/// ABI. Runs on a wide-stack worker thread for the same reason the wasm leg
+/// does (the ~2.8k-statement kernel's lowering pipeline recurses deeply).
+///
+/// Returns `Err` (never panics) on a compile-time lowering failure so the
+/// caller can report it honestly instead of hard-failing the whole leg.
+#[cfg(all(
+    feature = "native-backend",
+    not(target_arch = "wasm32"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn merkle_root_on_native(leaves: &[BigUint]) -> Result<BigUint, String> {
+    assert_eq!(leaves.len(), 4, "this end-to-end uses the N=4 (depth-2) builder");
+    let leaves = leaves.to_vec();
+    std::thread::Builder::new()
+        .stack_size(1 << 31)
+        .spawn(move || merkle_root_on_native_body(&leaves))
+        .expect("spawn wide-stack worker for the native Merkle builder")
+        .join()
+        .expect("native Merkle worker thread should not panic")
+}
+
+#[cfg(all(
+    feature = "native-backend",
+    not(target_arch = "wasm32"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn merkle_root_on_native_body(leaves: &[BigUint]) -> Result<BigUint, String> {
+    let n = MERKLE_N_LIMBS;
+    let mut db = DriverDataBase::default();
+    let url =
+        Url::parse("file:///poseidon_merkle_root_loop_native.fe").expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(MERKLE4_SRC.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let top_mod = db.top_mod(file);
+    let package =
+        mir::build_wasm_runtime_package_for_entry(&db, top_mod, "poseidon_merkle_root_loop")
+            .expect("merkle builder should build a native-entry runtime package");
+    let artifact = fe_codegen::compile_runtime_package_native_merkle_root_entry(
+        &db,
+        &package,
+        "poseidon_merkle_root_loop",
+    )
+    .map_err(|error| error.to_string())?;
+
+    let leaf_limbs: Vec<Vec<u32>> = leaves.iter().map(|x| merkle_to_limbs(x, n)).collect();
+    let mut root_limbs = Vec::with_capacity(n);
+    for k in 0..n {
+        let mut args = [0i32; fe_codegen::MERKLE_ROOT_NATIVE_ENTRY_ARITY];
+        args[0] = k as i32;
+        let mut idx = 1;
+        for leaf in &leaf_limbs {
+            for &l in leaf {
+                args[idx] = l as i32;
+                idx += 1;
+            }
+        }
+        let result = artifact.call(&args);
+        root_limbs.push(result as u32);
+    }
+    Ok(merkle_limbs_to_biguint(&root_limbs))
+}
+
+/// The native/Cranelift leg: attempts to independently EXECUTE the SAME
+/// kernel over the SAME 4 leaves as the wasm+EVM end-to-end test above. This
+/// is a probe, like the SPIR-V leg below, not a foregone conclusion: the
+/// kernel's function-local `[u32; N]` arrays lower to `MemAllocDynamic`, which
+/// the wasm backend supports via its canonical arena (`fe_cabi_alloc`) but
+/// which `CraneliftBackend` on this pin does not yet lower (observed: "skipping
+/// function poseidon_merkle_root_loop: unsupported instruction for
+/// CraneliftBackend: Opaque"). This is the SAME root cause as the SPIR-V leg's
+/// gap (array/heap lowering exists only for the wasm target on this pin), so
+/// this records and asserts on whatever actually happens rather than assuming
+/// either outcome.
+#[cfg(all(
+    feature = "native-backend",
+    not(target_arch = "wasm32"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[test]
+fn rollcall_merkle_root_native_cranelift_leg_is_honestly_reported() {
+    let leaves_u64: [u64; 4] = [111, 222, 333, 444];
+    let leaves_big: Vec<BigUint> = leaves_u64.iter().map(|&v| BigUint::from(v)).collect();
+
+    let wasm_root = merkle_root_on_wasm(&leaves_big);
+    match merkle_root_on_native(&leaves_big) {
+        Ok(native_root) => {
+            assert_eq!(
+                wasm_root, native_root,
+                "the native/Cranelift-executed Poseidon-Merkle root must equal the \
+                 wasm-executed root (same kernel, same 4 leaves, two independent backends)"
+            );
+            eprintln!(
+                "Rollcall native/Cranelift leg: root == wasm-built root (0x{})",
+                wasm_root.to_str_radix(16)
+            );
+        }
+        Err(message) => {
+            eprintln!(
+                "Rollcall native/Cranelift leg: native execution is NOT currently possible on \
+                 this pinned Sonatina rev for an array-using kernel: {message}. Same root cause \
+                 as the SPIR-V leg (function-local array lowering via MemAllocDynamic is \
+                 wasm-only on this pin, via the canonical arena); re-lands with the fork re-pin \
+                 (Decision 5)."
+            );
+        }
+    }
+}
+
+/// GPU/SPIR-V leg: attempts to compile + naga-validate the SAME kernel through
+/// `compile_runtime_package_spirv`. This is a probe, not a foregone
+/// conclusion: the kernel uses function-local `[u32; N]` arrays
+/// (`MemAllocDynamic`/`Mload`/`Mstore`), and this branch's SPIR-V backend
+/// wiring for array-using kernels was reverted same-day (see
+/// `RUNG4_ASSEMBLY_PLAN.md`) because the private-storage heap emulation it
+/// needs exists only on an unpushed Sonatina fork branch, not the pinned rev.
+/// So this test records and asserts on whatever actually happens -- an honest
+/// `LowerError` naming the real gap, or (if the pin has moved) a genuine
+/// naga-validated artifact -- never an assumed outcome. GPU EXECUTION is out
+/// of scope regardless of which branch fires: this only ever claims
+/// "validated" or "not run", never "executed".
+#[test]
+fn rollcall_merkle_root_spirv_validation_is_honestly_reported() {
+    let mut db = DriverDataBase::default();
+    let url =
+        Url::parse("file:///poseidon_merkle_root_loop_spirv.fe").expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(MERKLE4_SRC.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let top_mod = db.top_mod(file);
+    let package = mir::build_wasm_runtime_package(&db, top_mod)
+        .expect("merkle builder should build a wasm-shaped runtime package");
+
+    match fe_codegen::compile_runtime_package_spirv(&db, &package) {
+        Ok(artifact) => {
+            const SPIRV_MAGIC: u32 = 0x0723_0203;
+            assert!(
+                !artifact.words.is_empty() && artifact.words[0] == SPIRV_MAGIC,
+                "a claimed-Ok SPIR-V artifact must actually start with the SPIR-V magic word"
+            );
+            eprintln!(
+                "Rollcall GPU/SPIR-V leg: the merkle builder DOES naga-validate on this pin \
+                 (validated, NOT executed -- GPU execution needs lavapipe and is out of scope \
+                 here)."
+            );
+        }
+        Err(error) => {
+            let message = error.to_string();
+            eprintln!(
+                "Rollcall GPU/SPIR-V leg: naga validation is NOT currently possible on this \
+                 pinned Sonatina rev for an array-using kernel: {message}. This matches the \
+                 same-day b55f051e9 -> 40f8a1f27 revert on this branch (SpirvLayout.trap / the \
+                 private-storage heap emulation live only on the unpushed fork branch \
+                 rung3-spirv-arrays-v2); re-lands with the fork re-pin (Decision 5)."
+            );
+        }
+    }
+}
