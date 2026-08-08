@@ -20,7 +20,7 @@ use std::webgpu::{FragmentSurface, GpuProgram, UpdateSurface, WebGpuBackend}
 use std::web::view::{Extent, Param, Surface}
 use fmath::{from_i32, palette}
 
-const MAX_ITER: i32 = 96
+const MAX_ITER: i32 = 256
 
 // `update_view`'s clamps (mirrors `view()`'s declared ranges below; kept as
 // named consts so the two cannot silently drift).
@@ -28,7 +28,7 @@ const CENTER_X_MIN: f32 = -2.5
 const CENTER_X_MAX: f32 = 1.0
 const CENTER_Y_MIN: f32 = -1.5
 const CENTER_Y_MAX: f32 = 1.5
-const ZOOM_MIN: f32 = 0.0005
+const ZOOM_MIN: f32 = 0.00005
 const ZOOM_MAX: f32 = 3.0
 
 /// One wheel notch: `dzoom < 0` zooms IN (7/8), `dzoom > 0` zooms OUT (9/8),
@@ -84,7 +84,7 @@ actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
             params: MandelbrotParams {
                 center_x: Param::range(min: -2.5, max: 1.0, init: -0.5),
                 center_y: Param::range(min: -1.5, max: 1.5, init: 0.0),
-                zoom: Param::log(min: 0.0005, max: 3.0, init: 1.5),
+                zoom: Param::log(min: 0.00005, max: 3.0, init: 1.5),
                 res: Param::extent_x(),
             },
         }
