@@ -11,29 +11,41 @@
 //! `&&`: an `i32` `done` flag freezes the orbit after escape (so the count is
 //! preserved and `z` never blows to NaN) and the loop runs a fixed trip count.
 //!
-//! DEEP ZOOM (double-single / df64): plain f32 loses `u*zoom` against an O(1)
-//! `center` once `zoom` drops below about `5e-5` (f32 carries ~7 decimal
+//! DEEP ZOOM (`precision::Expansion<2>`): plain f32 loses `u*zoom` against an
+//! O(1) `center` once `zoom` drops below about `5e-5` (f32 carries ~7 decimal
 //! digits total, and the offset needs some of those digits just to survive
-//! the addition). Below is a small, self-contained double-single ("df64")
-//! arithmetic library: a value is a pair `(hi, lo): (f32, f32)` with
-//! `hi + lo` (as reals) giving about 14 decimal digits. The COMPLEX-PLANE
-//! CENTER is stored as df64 actor state (`center_x_hi`/`center_x_lo`,
-//! `center_y_hi`/`center_y_lo`), so a deep-zoom location is itself
-//! representable, not just the per-pixel step; the iteration state `z` is
-//! df64 too, since `z*z` is where the escape-time boundary actually lives.
-//! `two_sum`/`split`/`two_product`/`df_add`/`df_sub`/`df_mul`/`df_sqr`/
-//! `df_from_f32`/`df_add_f32` are BRANCH-FREE: pure `+`/`-`/`*`, no `if`, no
-//! `select`, relying only on f32 being IEEE round-to-nearest (true of Fe/WGSL
-//! f32 on every backend this compiles to), which is exactly what makes
-//! Dekker's exact splitting and Knuth's exact summation work.
+//! the addition). The arithmetic that buys back the missing digits is the
+//! general, CTFE-derived `precision::Expansion<N>` non-overlapping float
+//! expansion, at `N = 2`: a value's true value is `hi + lo` (two f32 words),
+//! giving about 14 decimal digits. This actor used to carry its own
+//! hand-written double-single ("df64") arithmetic library, built from
+//! Knuth's exact-sum step, Dekker's exact-split and exact-product steps, and
+//! the add/subtract/multiply/square/plus-scalar combinators layered on top;
+//! that library is DELETED. `Expansion<2>` was proven bit-for-bit identical
+//! to it (oracle test
+//! `precision_expansion2_df64_oracle`, `crates/codegen/tests/
+//! precision_expansion2_df64_oracle.rs`, `.to_bits()` equality over every
+//! op), so this actor now calls the general form,
+//! `precision::{add, sub, mul, sqr, add_f32}` at `N = 2`, instead of a
+//! bespoke copy (ROLLCALL_GOAL.md THE PRINCIPLE: the general CTFE-derived
+//! form, not a one-off specific one).
+//!
+//! The COMPLEX-PLANE CENTER stays a flat `(hi, lo): (f32, f32)` pair per axis
+//! in actor state (`center_x_hi`/`center_x_lo`, `center_y_hi`/`center_y_lo`),
+//! NOT `Expansion<2>` directly: the wasm export signature and the web
+//! control-manifest projection both bind by these field names and types, so
+//! the layout stays flat and `precision::{from_pair, to_pair}` convert to and
+//! from `Expansion<2>` only around each arithmetic call (an ops-only
+//! migration). The iteration state `z` uses the same flat pair shape, since
+//! `z*z` is where the escape-time boundary actually lives.
 //!
 //!     fe web build demos/sketches/mandelbrot --out <dir>
 //!
 //! Software rendering (lavapipe/SwiftShader) in the sandbox; no performance or
 //! parallelism claim (VISION 3.1).
 //!
-//! Honesty register: df64 buys about 14 significant digits, pushing the
-//! usable zoom floor from ~5e-5 to about 1e-11 (roughly a million times
+//! Honesty register: `Expansion<2>` buys about 14 significant digits, pushing
+//! the usable zoom floor from ~5e-5 to about 1e-11 (roughly a million times
 //! deeper), not to the 1e-100+ depths perturbation-theory (reference-orbit)
 //! renderers reach. That technique is a different, much larger undertaking
 //! (a reference orbit computed at arbitrary precision, then every pixel's
@@ -42,6 +54,7 @@
 use std::webgpu::{FragmentSurface, GpuProgram, UpdateSurface, WebGpuBackend}
 use std::web::view::{Extent, Param, Surface}
 use fmath::{from_i32, palette, to_i32}
+use precision::{add, add_f32, from_pair, mul, sub, sqr, to_pair}
 
 // Iteration-budget scaling: deeper zoom needs more iterations to resolve the
 // boundary. `max_iter_for_zoom` grows the trip count with how far `zoom` has
@@ -57,98 +70,11 @@ const CENTER_X_MIN: f32 = -2.5
 const CENTER_X_MAX: f32 = 1.0
 const CENTER_Y_MIN: f32 = -1.5
 const CENTER_Y_MAX: f32 = 1.5
-// The df64 floor: about 14 significant digits of (hi, lo) f32 gets a usable
-// picture down to roughly 1e-11 before the per-pixel step underflows again.
+// The Expansion<2> floor: about 14 significant digits of (hi, lo) f32 gets a
+// usable picture down to roughly 1e-11 before the per-pixel step underflows
+// again.
 const ZOOM_MIN: f32 = 0.00000000001
 const ZOOM_MAX: f32 = 3.0
-
-// ---------------------------------------------------------------------------
-// df64: double-single (a.k.a. "double-double over f32") arithmetic. A value
-// is a pair `(hi, lo)` with true value `hi + lo`, giving about 14 significant
-// decimal digits from two IEEE f32s. Every function below is BRANCH-FREE:
-// only `+`, `-`, `*` (no `if`, no `select`), which is what makes them lower
-// to plain arithmetic on every backend (WGSL/SPIR-V, wasm, native) with no
-// divergence at all.
-// ---------------------------------------------------------------------------
-
-/// Knuth's TwoSum: exact `a + b` as `(s, e)` with `s + e == a + b` over the
-/// reals, for ANY `a`, `b` (no magnitude ordering required, unlike the
-/// cheaper "quick two-sum" that needs `|a| >= |b|`).
-fn two_sum(_ a: f32, _ b: f32) -> (f32, f32) {
-    let s: f32 = a + b
-    let bb: f32 = s - a
-    let err: f32 = (a - (s - bb)) + (b - bb)
-    (s, err)
-}
-
-/// Dekker's splitting: `a` as `hi + lo`, each carrying about half of `a`'s
-/// mantissa bits, exact under round-to-nearest. `4097 = 2^12 + 1` splits an
-/// f32's 24-bit mantissa (1 implicit + 23 stored) in half, 12 and 12.
-fn split(_ a: f32) -> (f32, f32) {
-    let t: f32 = a * 4097.0
-    let hi: f32 = t - (t - a)
-    let lo: f32 = a - hi
-    (hi, lo)
-}
-
-/// Dekker's TwoProduct: exact `a * b` as `(p, e)` with `p + e == a * b` over
-/// the reals, built from two `split`s and the residual cross terms.
-fn two_product(_ a: f32, _ b: f32) -> (f32, f32) {
-    let p: f32 = a * b
-    let (a_hi, a_lo) = split(a)
-    let (b_hi, b_lo) = split(b)
-    let err: f32 = ((a_hi * b_hi - p) + a_hi * b_lo + a_lo * b_hi) + a_lo * b_lo
-    (p, err)
-}
-
-/// Promote a plain f32 to df64 (`lo` starts at zero).
-fn df_from_f32(_ x: f32) -> (f32, f32) {
-    (x, 0.0)
-}
-
-/// `a + b`, both df64.
-fn df_add(_ a_hi: f32, _ a_lo: f32, _ b_hi: f32, _ b_lo: f32) -> (f32, f32) {
-    let (s, e0) = two_sum(a_hi, b_hi)
-    let e1: f32 = e0 + a_lo + b_lo
-    let (hi, lo) = two_sum(s, e1)
-    (hi, lo)
-}
-
-/// `a - b`, both df64.
-fn df_sub(_ a_hi: f32, _ a_lo: f32, _ b_hi: f32, _ b_lo: f32) -> (f32, f32) {
-    df_add(a_hi, a_lo, -b_hi, -b_lo)
-}
-
-/// df64 `a` plus a plain f32 `b`. This is the operation deep zoom actually
-/// leans on: folding a small per-pixel/per-gesture offset into a df64
-/// accumulator WITHOUT it being swallowed the way a naive `a_hi + b` would
-/// swallow it once `b` is far smaller than `a_hi`'s own f32 resolution.
-fn df_add_f32(_ a_hi: f32, _ a_lo: f32, _ b: f32) -> (f32, f32) {
-    let (s, e0) = two_sum(a_hi, b)
-    let e1: f32 = e0 + a_lo
-    let (hi, lo) = two_sum(s, e1)
-    (hi, lo)
-}
-
-/// `a * b`, both df64 (the two-term product; the dropped `a_lo * b_lo` term
-/// is below df64's own ~14-digit resolution).
-fn df_mul(_ a_hi: f32, _ a_lo: f32, _ b_hi: f32, _ b_lo: f32) -> (f32, f32) {
-    let (p, e0) = two_product(a_hi, b_hi)
-    let e1: f32 = e0 + a_hi * b_lo + a_lo * b_hi
-    let (hi, lo) = two_sum(p, e1)
-    (hi, lo)
-}
-
-/// `a * a`, df64 (one `two_product` instead of `df_mul`'s two, since a
-/// square's cross terms are equal: `2 * a_hi * a_lo`).
-fn df_sqr(_ a_hi: f32, _ a_lo: f32) -> (f32, f32) {
-    let (p, e0) = two_product(a_hi, a_hi)
-    let e1: f32 = e0 + 2.0 * a_hi * a_lo
-    let (hi, lo) = two_sum(p, e1)
-    (hi, lo)
-}
-
-// ---------------------------------------------------------------------------
 
 /// One wheel notch: `dzoom < 0` zooms IN (7/8), `dzoom > 0` zooms OUT (9/8),
 /// `dzoom == 0` leaves `zoom` unchanged. Same per-notch ratios as
@@ -178,11 +104,14 @@ fn clamp_f(_ v: f32, _ lo: f32, _ hi: f32) -> f32 {
     }
 }
 
-/// Clamp a df64 value to a plain f32 range, comparing on the `hi` part (the
-/// `lo` part is below the clamp bounds' own resolution). Landing exactly on a
-/// bound drops `lo` to zero, which is correct: the clamp itself is the more
-/// significant fact at that point, not the sub-ulp remainder.
-fn df_clamp(_ hi: f32, _ lo: f32, _ min_v: f32, _ max_v: f32) -> (f32, f32) {
+/// Clamp a flat `(hi, lo)` pair to a plain f32 range, comparing on the `hi`
+/// part (the `lo` part is below the clamp bounds' own resolution). Landing
+/// exactly on a bound drops `lo` to zero, which is correct: the clamp itself
+/// is the more significant fact at that point, not the sub-ulp remainder.
+/// This is representation-level, not `Expansion<2>` arithmetic (`precision`
+/// has no clamp of its own), so it stays local rather than moving to the
+/// general form.
+fn clamp_pair(_ hi: f32, _ lo: f32, _ min_v: f32, _ max_v: f32) -> (f32, f32) {
     if hi < min_v {
         (min_v, 0.0)
     } else {
@@ -222,9 +151,9 @@ fn max_iter_for_zoom(_ zoom: f32) -> i32 {
 /// The per-demo params record: field names bind, by name identity, to the
 /// actor's state fields (checked at projection time). `center_x_lo`/
 /// `center_y_lo` are `Param::fixed` (carried in the uniform record, gesture-
-/// updated, but not rendered as a slider): the LOW word of a df64 center is
-/// not a control a person turns, it is precision the `hi` slider alone can't
-/// hold.
+/// updated, but not rendered as a slider): the LOW word of the `Expansion<2>`
+/// center is not a control a person turns, it is precision the `hi` slider
+/// alone can't hold.
 struct MandelbrotParams {
     center_x_hi: Param,
     center_x_lo: Param,
@@ -235,9 +164,11 @@ struct MandelbrotParams {
 }
 
 actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
-    /// Complex-plane centre, as a double-single (df64) pair per axis: `_hi`
-    /// carries the visible position, `_lo` the extra ~7 digits deep zoom
-    /// needs to keep the per-pixel/per-gesture step from vanishing.
+    /// Complex-plane centre, as a flat `(hi, lo)` f32 pair per axis (the
+    /// `Expansion<2>` representation, kept flat here so the wasm export
+    /// signature and control-manifest layout stay unchanged): `_hi` carries
+    /// the visible position, `_lo` the extra ~7 digits deep zoom needs to
+    /// keep the per-pixel/per-gesture step from vanishing.
     center_x_hi: f32,
     center_x_lo: f32,
     center_y_hi: f32,
@@ -272,10 +203,10 @@ actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
         // ~7-digit RELATIVE precision holds fine even at `zoom ~ 1e-11`, so
         // plain f32 is enough for the offset itself. What deep zoom actually
         // fights is adding that offset to an O(1) CENTER, which is why the
-        // center is carried as df64 and the offset folds in through
-        // `df_add_f32` rather than a plain f32 `+`.
-        let (cx_hi, cx_lo) = df_add_f32(self.center_x_hi, self.center_x_lo, u * self.zoom)
-        let (cy_hi, cy_lo) = df_add_f32(self.center_y_hi, self.center_y_lo, v * self.zoom)
+        // center is carried as an `Expansion<2>` pair and the offset folds in
+        // through `add_f32<2>` rather than a plain f32 `+`.
+        let (cx_hi, cx_lo) = to_pair(add_f32<2>(from_pair(self.center_x_hi, self.center_x_lo), u * self.zoom))
+        let (cy_hi, cy_lo) = to_pair(add_f32<2>(from_pair(self.center_y_hi, self.center_y_lo), v * self.zoom))
 
         let mut zx_hi: f32 = 0.0
         let mut zx_lo: f32 = 0.0
@@ -288,8 +219,8 @@ actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
         let max_iter: i32 = max_iter_for_zoom(self.zoom)
         while i < max_iter {
             if done == 0 {
-                let (xx_hi, xx_lo) = df_sqr(zx_hi, zx_lo)
-                let (yy_hi, yy_lo) = df_sqr(zy_hi, zy_lo)
+                let (xx_hi, xx_lo) = to_pair(sqr<2>(from_pair(zx_hi, zx_lo)))
+                let (yy_hi, yy_lo) = to_pair(sqr<2>(from_pair(zy_hi, zy_lo)))
                 // |z|^2 > 4: the hi word alone is plenty for a boolean
                 // escape test (it is accurate to ~7 digits, and the test
                 // only needs to know which side of 4.0 the sum lands on).
@@ -297,13 +228,14 @@ actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
                     done = 1
                 } else {
                     // re(z*z) = zx*zx - zy*zy, then + cx.
-                    let (re_hi, re_lo) = df_sub(xx_hi, xx_lo, yy_hi, yy_lo)
-                    let (new_zx_hi, new_zx_lo) = df_add(re_hi, re_lo, cx_hi, cx_lo)
-                    // im(z*z) = 2*zx*zy, then + cy. Doubling a df64 value is
-                    // exact (a power-of-two scale never rounds), so this
-                    // just doubles both words rather than another df_add.
-                    let (m_hi, m_lo) = df_mul(zx_hi, zx_lo, zy_hi, zy_lo)
-                    let (new_zy_hi, new_zy_lo) = df_add(m_hi * 2.0, m_lo * 2.0, cy_hi, cy_lo)
+                    let (re_hi, re_lo) = to_pair(sub<2>(from_pair(xx_hi, xx_lo), from_pair(yy_hi, yy_lo)))
+                    let (new_zx_hi, new_zx_lo) = to_pair(add<2>(from_pair(re_hi, re_lo), from_pair(cx_hi, cx_lo)))
+                    // im(z*z) = 2*zx*zy, then + cy. Doubling an `Expansion<2>`
+                    // value is exact (a power-of-two scale never rounds), so
+                    // this just doubles both words rather than another
+                    // `add<2>`.
+                    let (m_hi, m_lo) = to_pair(mul<2>(from_pair(zx_hi, zx_lo), from_pair(zy_hi, zy_lo)))
+                    let (new_zy_hi, new_zy_lo) = to_pair(add<2>(from_pair(m_hi * 2.0, m_lo * 2.0), from_pair(cy_hi, cy_lo)))
                     zx_hi = new_zx_hi
                     zx_lo = new_zx_lo
                     zy_hi = new_zy_hi
@@ -337,9 +269,9 @@ actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
     /// correction uses the OLD zoom minus the NEW (clamped) zoom so the point
     /// under the cursor stays put; clamps apply last. The center's pan/anchor
     /// deltas are O(zoom) quantities the same way `escape`'s per-pixel offset
-    /// is, so they fold into the df64 center through `df_add_f32` for the
-    /// same reason: dropping them straight into an O(1) f32 center would
-    /// erase them at deep zoom.
+    /// is, so they fold into the `Expansion<2>` center through `add_f32<2>`
+    /// for the same reason: dropping them straight into an O(1) f32 center
+    /// would erase them at deep zoom.
     ///
     /// `dx`/`dy`: pixel drag delta (image follows the pointer). `dzoom`: one
     /// wheel notch, < 0 in / > 0 out / 0 none. `mx`/`my`: the pointer's
@@ -356,8 +288,8 @@ actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
         // screen row increases downward, complex y increases upward), so a
         // downward drag (dy > 0) must INCREASE center_y, not decrease it.
         let step: f32 = 2.0 * self.zoom / self.res
-        let (cx0_hi, cx0_lo) = df_add_f32(self.center_x_hi, self.center_x_lo, -dx * step)
-        let (cy0_hi, cy0_lo) = df_add_f32(self.center_y_hi, self.center_y_lo, dy * step)
+        let (cx0_hi, cx0_lo) = to_pair(add_f32<2>(from_pair(self.center_x_hi, self.center_x_lo), -dx * step))
+        let (cy0_hi, cy0_lo) = to_pair(add_f32<2>(from_pair(self.center_y_hi, self.center_y_lo), dy * step))
 
         let z_c: f32 = clamp_f(zoom_step(self.zoom, dzoom), ZOOM_MIN, ZOOM_MAX)
 
@@ -366,11 +298,11 @@ actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
         // new): keeps that point fixed under the new zoom.
         let u: f32 = (mx + 0.5) * 2.0 / self.res - 1.0
         let v: f32 = 1.0 - (my + 0.5) * 2.0 / self.res
-        let (cx_a_hi, cx_a_lo) = df_add_f32(cx0_hi, cx0_lo, u * (self.zoom - z_c))
-        let (cy_a_hi, cy_a_lo) = df_add_f32(cy0_hi, cy0_lo, v * (self.zoom - z_c))
+        let (cx_a_hi, cx_a_lo) = to_pair(add_f32<2>(from_pair(cx0_hi, cx0_lo), u * (self.zoom - z_c)))
+        let (cy_a_hi, cy_a_lo) = to_pair(add_f32<2>(from_pair(cy0_hi, cy0_lo), v * (self.zoom - z_c)))
 
-        let (cx_c_hi, cx_c_lo) = df_clamp(cx_a_hi, cx_a_lo, CENTER_X_MIN, CENTER_X_MAX)
-        let (cy_c_hi, cy_c_lo) = df_clamp(cy_a_hi, cy_a_lo, CENTER_Y_MIN, CENTER_Y_MAX)
+        let (cx_c_hi, cx_c_lo) = clamp_pair(cx_a_hi, cx_a_lo, CENTER_X_MIN, CENTER_X_MAX)
+        let (cy_c_hi, cy_c_lo) = clamp_pair(cy_a_hi, cy_a_lo, CENTER_Y_MIN, CENTER_Y_MAX)
         (cx_c_hi, cx_c_lo, cy_c_hi, cy_c_lo, z_c)
     }
 }
