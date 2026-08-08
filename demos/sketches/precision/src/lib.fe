@@ -59,6 +59,17 @@
 //! discriminate without specialization. Making "am I last" a distinct
 //! constructor (`Last` vs `More<T>`) turns it into ordinary, non-overlapping
 //! trait dispatch.
+//!
+//! P2 (`field.fe` / `bn254_fr.fe`, re-exported below as namespaced
+//! submodules, NOT globbed: `field::mul` would otherwise collide with this
+//! module's own `Expansion` `mul`) adds `Field<p>`, the general CTFE-derived
+//! Montgomery modular-multiplication engine; see `field.fe`'s own module doc.
+//! Callers reach it as `precision::field::{mul, Modulus, ...}` and the BN254
+//! Fr instance as `precision::bn254_fr::Bn254Fr`.
+
+pub use field
+pub use bn254_fr
+pub use fixed
 
 /// Knuth's TwoSum: exact `a + b` as `(s, e)` with `s + e == a + b` over the
 /// reals, for ANY `a`, `b`. Verbatim from the hand df64 (mandelbrot/src/lib.fe).

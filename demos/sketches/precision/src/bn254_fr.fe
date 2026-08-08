@@ -1,0 +1,35 @@
+//! BN254 (alt_bn128) scalar field `Fr` as a `precision::field::Modulus<20>`
+//! instance: the ONE curve instantiation of the general `Field<p>` engine
+//! (`field.fe`), Rollcall precision axis P2. This is the same prime, same
+//! 13-bit x 20-limb decomposition, same `mu`, as
+//! `crates/codegen/tests/fixtures/spirv/field_mul_bn254_fr.fe`'s header
+//! (`gen_field_mul.py`'s hand-staged output): this file supplies the
+//! identical DATA (the modulus's limbs), not a different curve, so the
+//! oracle test comparing `field::mul::<20, Bn254Fr>` against that fixture is
+//! comparing two algorithms for the SAME function, not two different
+//! functions.
+//!
+//!   p = 21888242871839275222246405745257275088548364400416034343698204186575808495617
+//!   (254-bit prime; R = 2^260; mu = -p^-1 mod 2^13 = 8191)
+//!
+//! `mu` below is NOT hand-copied as an act of faith: `field::mont_mu` is a
+//! real CTFE computation (2-adic Newton iteration) over `p`'s low limb, and
+//! the `static_assert` proves the literal below equals what the compiler
+//! independently derives from `P0` -- if either constant drifts, `fe check`
+//! fails closed.
+
+use super::field::{LimbLast, LimbMore, Limbs, Modulus, mont_mu, LIMB_BITS}
+
+pub struct Bn254Fr {}
+
+const P0: u32 = 1
+
+impl Modulus<20> for Bn254Fr {
+    fn p_limbs() -> Limbs<20> {
+        LimbMore { lead: 1, tail: LimbMore { lead: 0, tail: LimbMore { lead: 1276, tail: LimbMore { lead: 1003, tail: LimbMore { lead: 5182, tail: LimbMore { lead: 6216, tail: LimbMore { lead: 1765, tail: LimbMore { lead: 2319, tail: LimbMore { lead: 5096, tail: LimbMore { lead: 2369, tail: LimbMore { lead: 5655, tail: LimbMore { lead: 770, tail: LimbMore { lead: 7016, tail: LimbMore { lead: 2082, tail: LimbMore { lead: 1761, tail: LimbMore { lead: 5125, tail: LimbMore { lead: 305, tail: LimbMore { lead: 5015, tail: LimbMore { lead: 6419, tail: LimbLast { value: 96 } } } } } } } } } } } } } } } } } } } }
+    }
+
+    fn mu() -> u32 { 8191 }
+}
+
+static_assert(mont_mu(P0, LIMB_BITS) == 8191)

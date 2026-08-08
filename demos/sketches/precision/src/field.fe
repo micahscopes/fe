@@ -1,0 +1,344 @@
+//! `Field<p>`: the general, CTFE-derived Montgomery modular-multiplication
+//! engine. Rollcall precision axis, P2 (PRECISION_TYPES_RESEARCH.md P2;
+//! ROLLCALL_GOAL.md "Precision axis": "`Field<p>` proven == both BN254
+//! fixtures limb-for-limb, retiring gen_field_mul.py and unifying the
+//! 4-backend prover"). `Field<p>`'s multiply is the linchpin: it is both the
+//! prover's element type and the gate for the Conal Merkle slice.
+//!
+//! THE PRINCIPLE (ROLLCALL_GOAL.md): this file is authored ONCE, generic over
+//! the limb count `const L: usize` and a `Modulus<L>` instance (the trait
+//! carries the prime's limbs, exactly PRECISION_TYPES_RESEARCH.md P2's
+//! prescription: "`Montgomery` parameter block as trait consts"). BN254 Fr
+//! (`bn254_fr.fe`) is the first, and only required, instantiation; any other
+//! prime specializes the SAME code by picking `L` and a `Modulus<L>` impl.
+//! `mu` (the CIOS Montgomery constant) is not hand-supplied: it is DERIVED
+//! from the modulus's low limb by a real CTFE computation (`mont_mu`, a
+//! 2-adic Newton iteration), and `bn254_fr.fe` proves the derivation correct
+//! with a `static_assert` against the known constant, mirroring how
+//! `gen_field_mul.py` computed `mu` OUTSIDE Fe -- here the compiler computes
+//! it.
+//!
+//! REPRESENTATION AND THE BALANCED-TREE MANDATE (read before touching the
+//! shape; mirrors the `Expansion<N>` module doc in `lib.fe`, same reasoned
+//! exception, different root cause). `Limbs<L>` below is a LINEAR chain
+//! (`LimbLast | LimbMore<Limbs<{L-1}>>`), not a balanced binary tree, and
+//! this is deliberate:
+//!
+//!   1. CIOS Montgomery reduction has a genuine sequential CARRY-PROPAGATION
+//!      dependency: each limb position's result depends on the carry
+//!      produced by the position below it (`Mac`'s `carry_in`/`carry_out`
+//!      threading), exactly the species of position-sensitive fold
+//!      `Expansion<N>`'s renormalization chain is (there each level threads
+//!      a `corr` value; here each level threads a carry). A ripple-carry
+//!      dependency is NOT associative: you cannot compute limb k's carry
+//!      without first resolving limbs 0..k-1, so a balanced split cannot
+//!      reassociate this fold without a fundamentally different technique
+//!      (carry-save / redundant representations, deferred, see below).
+//!   2. What the P0 mandate's balanced-tree rule DOES bear on here, and is
+//!      honored: the SCHOOLBOOK CONVOLUTION underlying a schoolbook multiply
+//!      (`sum over i+j=k of a[i]*b[j]`, before any carry normalization) IS
+//!      associative/commutative as pure integer arithmetic, so CIOS's whole
+//!      *raison d'etre* is precisely to AVOID materializing that O(L^2)-term
+//!      sum by interleaving reduction row-by-row; this file follows that
+//!      same choice (CIOS, not a naive convolution-then-reduce), so there is
+//!      no separate associative fold sitting inside `mul` to balance. The
+//!      mandate's actual target (large-N shapes consumed by a trait fold
+//!      where the fold genuinely IS associative, e.g. Poseidon's MDS
+//!      contraction or a Merkle tree's combine) is untouched by this file.
+//!   3. The measured wall is N=255 for a linear chain under a trait fold (P0
+//!      Probe 1). BN254 Fr needs `L=20` (`Limbs<20>`) and the WORKING width
+//!      `L+2=22` (`Pad2::Out`, see below): both far below the wall, and in
+//!      the same safe range P0 Probe 3 and `Expansion<N>` already exercised.
+//!
+//! WORKING WIDTH (`Pad2`): CIOS needs 2 extra headroom limbs beyond the
+//! logical `L` during each row (the multiply-accumulate and reduce-accumulate
+//! carries can spill past position `L-1`), exactly as the existing kernels'
+//! own `t` arrays are `L+2` long (`field_mul_bn254_fr_loop.fe`). Rather than
+//! replicate that kernel's own shifted-index bookkeeping, this file reduces
+//! each CIOS row to ONE UNIFORM identity, `t := (t + a*b_i + m*p) / base`,
+//! computed as two full-width `Mac` passes over the padded `L+2` width
+//! followed by an EXACT division by `base` (dropping the guaranteed-zero low
+//! limb, i.e. `ShiftAppend`). This is mathematically equivalent to the
+//! existing kernels' piecewise shift (REDC has a UNIQUE correct output for
+//! given operands, unlike float expansions there is no op-order-dependent
+//! rounding to match), verified independently by the bit-identical oracle
+//! (`crates/codegen/tests/precision_field_bn254fr_oracle.rs`), not merely
+//! trusted by construction.
+//!
+//! `Field<p>`'s canonical VALUE representation is the WORKING width itself
+//! (`<Limbs<L> as Pad2>::Out`, i.e. `Limbs<{L+2}>`, with the top 2 limbs
+//! always zero for an in-range element): `mul` takes logical-width operands
+//! (`Limbs<L>`, what a caller/oracle harness naturally holds) and returns the
+//! padded width. A generic "drop the last 2 limbs" combinator was attempted
+//! and hits a genuine compiler limitation (see the task report): projecting
+//! an associated type through an ABSTRACT (not-yet-concrete) recursive bound
+//! -- `<More<T> as DropLast>::Out` for free `T` -- fails kind-checking
+//! (`expected a fully-applied type (kind *) here`), while the SAME shape
+//! projected through a bound on a bare type parameter (`Pad2`'s `T::Out`, or
+//! `<Limbs<L> as Pad2>::Out` for an abstract `const L`) works fine. Rather
+//! than force a workaround, this file keeps the padded width as the return
+//! type (mathematically sound: the top 2 limbs are always zero for any valid
+//! element) and lets concrete call sites (fixed `L`) extract individual
+//! limbs by direct, ground field access, exactly the same mechanism the
+//! oracle harness already needs for its own per-limb wasm export ABI.
+
+use core::marker::Copy
+
+// -----------------------------------------------------------------------------
+// Limb storage: a linear, LEAST-SIGNIFICANT-LIMB-FIRST HList (`lead` = limb 0).
+// -----------------------------------------------------------------------------
+
+pub struct LimbLast { pub value: u32 }
+pub struct LimbMore<T> { pub lead: u32, pub tail: T }
+impl Copy for LimbLast {}
+impl<T: Copy> Copy for LimbMore<T> {}
+
+/// `Limbs<L>`: `L` limbs, LSB-first. `Limbs<0>` and `Limbs<1>` both normalize
+/// to `LimbLast` (a single limb is its own base case; mirrors `Expansion<N>`).
+pub recursive type fn Limbs<const L: usize>() -> (*) {
+    match L {
+        0 => LimbLast
+        1 => LimbLast
+        _ => LimbMore<Limbs<{L - 1}>>
+    }
+}
+
+/// The one portable limb width (PRECISION_TYPES_RESEARCH.md section 4's limb
+/// width doctrine: portable 13 by default on every backend, digest-identical;
+/// a per-backend-Word fast tier is a later, measurement-gated opt-in, not
+/// built here). 13-bit limbs in u32 words is the only sound representation
+/// under browser WebGPU (no mul-hi, no u64; the ZPrize WebGPU-MSM house
+/// choice), exactly `field_mul_bn254_fr.fe`'s own convention.
+pub const LIMB_BITS: u32 = 13
+pub const LIMB_BASE: u32 = 8192
+
+// -----------------------------------------------------------------------------
+// The shared branch-free combinators (each a structural trait fold over
+// `Limbs<L>`, the same species of generic recursion `Expansion<N>`'s `Exp`
+// trait uses, specialized to integer carry/borrow arithmetic).
+// -----------------------------------------------------------------------------
+
+/// The least-significant limb (needed to compute the CIOS quotient digit `m`).
+pub trait Head { fn head(self) -> u32 }
+impl Head for LimbLast { fn head(self) -> u32 { self.value } }
+impl<T: Copy> Head for LimbMore<T> { fn head(self) -> u32 { self.lead } }
+
+/// All-zero limbs (the CIOS accumulator's initial state).
+pub trait Zero { fn zero() -> Self }
+impl Zero for LimbLast { fn zero() -> LimbLast { LimbLast { value: 0 } } }
+impl<T: Zero> Zero for LimbMore<T> {
+    fn zero() -> LimbMore<T> { LimbMore { lead: 0, tail: T::zero() } }
+}
+
+/// Branch-free carry-propagating multiply-accumulate: `t := t + x*scalar +
+/// carry_in`, per limb, returning the updated limbs and the final carry out
+/// of the most significant limb. THE reasoned-linear fold (module doc point
+/// 1): each level's `carry_in` is the PRIOR level's `carry_out`, a genuine
+/// ripple dependency.
+pub trait Mac {
+    fn mac(t: Self, x: Self, scalar: u32, carry_in: u32) -> (Self, u32)
+}
+impl Mac for LimbLast {
+    fn mac(t: LimbLast, x: LimbLast, scalar: u32, carry_in: u32) -> (LimbLast, u32) {
+        let s: u32 = t.value + x.value * scalar + carry_in
+        let c: u32 = s >> LIMB_BITS
+        (LimbLast { value: s - c * LIMB_BASE }, c)
+    }
+}
+impl<T: Mac + Copy> Mac for LimbMore<T> {
+    fn mac(t: LimbMore<T>, x: LimbMore<T>, scalar: u32, carry_in: u32) -> (LimbMore<T>, u32) {
+        let s: u32 = t.lead + x.lead * scalar + carry_in
+        let c: u32 = s >> LIMB_BITS
+        let lo: u32 = s - c * LIMB_BASE
+        let (tail2, c2) = <T as Mac>::mac(t: t.tail, x: x.tail, scalar: scalar, carry_in: c)
+        (LimbMore { lead: lo, tail: tail2 }, c2)
+    }
+}
+
+/// Exact division by `LIMB_BASE`: drop the (guaranteed-zero, by CIOS's
+/// construction of `m`) least-significant limb, shift every other limb down
+/// one position, and append `v` (always `0` at the call site in `row`) as the
+/// new most-significant limb.
+pub trait ShiftAppend {
+    fn shift_append(t: Self, v: u32) -> Self
+}
+impl ShiftAppend for LimbLast {
+    fn shift_append(t: LimbLast, v: u32) -> LimbLast { LimbLast { value: v } }
+}
+impl<T: ShiftAppend + Head + Copy> ShiftAppend for LimbMore<T> {
+    fn shift_append(t: LimbMore<T>, v: u32) -> LimbMore<T> {
+        LimbMore { lead: t.tail.head(), tail: <T as ShiftAppend>::shift_append(t: t.tail, v: v) }
+    }
+}
+
+/// Zero-extend `Limbs<L>` by exactly 2 limbs (the CIOS working-width
+/// headroom): `Limbs<L> -> Limbs<{L+2}>`. Structural recursion bounding the
+/// TYPE PARAMETER `T` (not the constructed type `LimbMore<T>`) so the
+/// associated-type projection stays over a bare type variable throughout --
+/// the shape that is proven to kind-check (see the module doc's account of
+/// why the mirror-image truncation was NOT built this way).
+pub trait Pad2 {
+    type Out
+    fn pad2(self) -> Self::Out
+}
+impl Pad2 for LimbLast {
+    type Out = LimbMore<LimbMore<LimbLast>>
+    fn pad2(self) -> LimbMore<LimbMore<LimbLast>> {
+        LimbMore { lead: self.value, tail: LimbMore { lead: 0, tail: LimbLast { value: 0 } } }
+    }
+}
+impl<T: Pad2 + Copy> Pad2 for LimbMore<T> {
+    type Out = LimbMore<T::Out>
+    fn pad2(self) -> LimbMore<T::Out> {
+        LimbMore { lead: self.lead, tail: self.tail.pad2() }
+    }
+}
+
+/// Constant-time `t - p - borrow_in`, per limb, base-complement technique
+/// (`t[j] + BASE - p[j] - borrow`, borrow bit read off the high side of the
+/// limb rather than a compare): verbatim the same idiom
+/// `field_mul_bn254_fr_loop.fe`'s own conditional-subtract uses.
+pub trait SubBorrow {
+    fn sub_borrow(t: Self, p: Self, borrow_in: u32) -> (Self, u32)
+}
+impl SubBorrow for LimbLast {
+    fn sub_borrow(t: LimbLast, p: LimbLast, borrow_in: u32) -> (LimbLast, u32) {
+        let dd: u32 = t.value + LIMB_BASE - p.value - borrow_in
+        let db: u32 = dd >> LIMB_BITS
+        let borrow: u32 = 1 - db
+        (LimbLast { value: dd - db * LIMB_BASE }, borrow)
+    }
+}
+impl<T: SubBorrow + Copy> SubBorrow for LimbMore<T> {
+    fn sub_borrow(t: LimbMore<T>, p: LimbMore<T>, borrow_in: u32) -> (LimbMore<T>, u32) {
+        let dd: u32 = t.lead + LIMB_BASE - p.lead - borrow_in
+        let db: u32 = dd >> LIMB_BITS
+        let borrow: u32 = 1 - db
+        let (tail2, borrow2) = <T as SubBorrow>::sub_borrow(t: t.tail, p: p.tail, borrow_in: borrow)
+        (LimbMore { lead: dd - db * LIMB_BASE, tail: tail2 }, borrow2)
+    }
+}
+
+/// Constant-time per-limb select (mask arithmetic, no branch): `keep_t*t +
+/// keep_diff*d`, `keep_t`/`keep_diff` each 0 or 1 and mutually exclusive.
+pub trait Select {
+    fn select(keep_t: u32, keep_diff: u32, t: Self, d: Self) -> Self
+}
+impl Select for LimbLast {
+    fn select(keep_t: u32, keep_diff: u32, t: LimbLast, d: LimbLast) -> LimbLast {
+        LimbLast { value: keep_t * t.value + keep_diff * d.value }
+    }
+}
+impl<T: Select + Copy> Select for LimbMore<T> {
+    fn select(keep_t: u32, keep_diff: u32, t: LimbMore<T>, d: LimbMore<T>) -> LimbMore<T> {
+        LimbMore {
+            lead: keep_t * t.lead + keep_diff * d.lead,
+            tail: <T as Select>::select(keep_t: keep_t, keep_diff: keep_diff, t: t.tail, d: d.tail),
+        }
+    }
+}
+
+/// Constant-time canonicalization: `t` if `t < p`, else `t - p` (at most one
+/// subtraction, per Montgomery's own bound on CIOS's output range).
+pub fn canonicalize<S: SubBorrow + Select + Copy>(_ t: S, _ p: S) -> S {
+    let (d, borrow) = <S as SubBorrow>::sub_borrow(t: t, p: p, borrow_in: 0)
+    let keep_t: u32 = borrow
+    let keep_diff: u32 = 1 - borrow
+    <S as Select>::select(keep_t: keep_t, keep_diff: keep_diff, t: t, d: d)
+}
+
+// -----------------------------------------------------------------------------
+// The CIOS row schedule.
+// -----------------------------------------------------------------------------
+
+/// One CIOS row over the WORKING width `W` (`= Pad2::Out`, logical limb
+/// count + 2 headroom limbs): `t := (t + a*b_i + m*p) / LIMB_BASE`, where `m
+/// = (t.head() * mu) mod LIMB_BASE` is chosen so the low limb of `t + m*p`
+/// is exactly zero (Montgomery's construction), making the division by
+/// `LIMB_BASE` exact.
+pub fn row<W: Mac + ShiftAppend + Head + Copy>(_ t: W, _ a: W, _ b_i: u32, _ p: W, _ mu: u32) -> W {
+    let (t1, _c1) = <W as Mac>::mac(t: t, x: a, scalar: b_i, carry_in: 0)
+    let m0: u32 = t1.head() * mu
+    let m: u32 = m0 - (m0 >> LIMB_BITS) * LIMB_BASE
+    let (t2, _c2) = <W as Mac>::mac(t: t1, x: p, scalar: m, carry_in: 0)
+    <W as ShiftAppend>::shift_append(t: t2, v: 0)
+}
+
+/// The OUTER row driver: run exactly `L` CIOS rows, one per limb of `b`
+/// (`Self`), each row folding into the fixed working-width accumulator `W`.
+/// `Self` (b's remaining rows) shrinks each level; `W` (the CIOS state,
+/// `a`, `p`) does NOT, hence the trait's own generic `W` parameter, resolved
+/// independently of `Self`'s structural depth at every level (proven not to
+/// hit a coherence/overlap wall in the task's incremental probes).
+pub trait Rows<W> {
+    fn rows(b: Self, t: W, a: W, p: W, mu: u32) -> W
+}
+impl<W: Mac + ShiftAppend + Head + Copy> Rows<W> for LimbLast {
+    fn rows(b: LimbLast, t: W, a: W, p: W, mu: u32) -> W {
+        row<W>(t, a, b.value, p, mu)
+    }
+}
+impl<T: Rows<W> + Copy, W: Mac + ShiftAppend + Head + Copy> Rows<W> for LimbMore<T> {
+    fn rows(b: LimbMore<T>, t: W, a: W, p: W, mu: u32) -> W {
+        let t1: W = row<W>(t, a, b.lead, p, mu)
+        <T as Rows<W>>::rows(b: b.tail, t: t1, a: a, p: p, mu: mu)
+    }
+}
+
+// -----------------------------------------------------------------------------
+// The Montgomery parameter block, as trait consts (PRECISION_TYPES_RESEARCH.md
+// P2's own prescription), and the CTFE derivation of `mu` from `p`'s low limb.
+// -----------------------------------------------------------------------------
+
+/// 2-adic Newton iteration for `p0^-1 mod 2^bits`: `x_{k+1} = x_k*(2 -
+/// p0*x_k) mod 2^bits`, doubling correct bits each step from `x0=1` (correct
+/// mod 2, since `p0` is odd for any prime modulus > 2). `mu = -x mod
+/// 2^bits`. Six iterations converges (and stays fixed) well past `bits=13`;
+/// every subtraction is restructured to add `base` first so CTFE's CHECKED
+/// arithmetic never sees an intermediate underflow.
+pub const fn mont_mu(_ p0: u32, _ bits: u32) -> u32 {
+    let base: u32 = 1 << bits
+    let mask: u32 = base - 1
+    let mut x: u32 = 1
+    let mut i: u32 = 0
+    while i < 6 {
+        let px: u32 = (p0 * x) & mask
+        let t: u32 = (base + 2 - px) & mask
+        x = (x * t) & mask
+        i = i + 1
+    }
+    (base - x) & mask
+}
+
+/// The Montgomery parameter block for a prime `p`, `L` limbs of `LIMB_BITS`
+/// each. `mu()` is expected to equal `mont_mu(p_limbs().head(), LIMB_BITS)`;
+/// instances prove this with a top-level `static_assert` (see `bn254_fr.fe`)
+/// rather than the trait deriving it inline, since a generic function body
+/// cannot fold a runtime call to a `const fn` into a compile-time constant
+/// without a literal in the generated kernel -- the `static_assert` gives
+/// the same CTFE-derivation guarantee (the compiler verifies the literal
+/// against the real computation) with zero runtime cost in the specialized
+/// kernel.
+pub trait Modulus<const L: usize> {
+    fn p_limbs() -> Limbs<L>
+    fn mu() -> u32
+}
+
+/// `Field<p>::mul`: the general entry point. `L` and `M` are explicit at
+/// every call site (mirrors `Expansion<N>`'s own doctrine: consts are not
+/// inferred from a concrete argument by this compiler). Returns the WORKING
+/// width (`Pad2::Out`, i.e. `Limbs<{L+2}>`, top 2 limbs always zero); see the
+/// module doc for why.
+pub fn mul<const L: usize, M: Modulus<L>>(_ a: Limbs<L>, _ b: Limbs<L>) -> <Limbs<L> as Pad2>::Out
+    where Limbs<L>: Pad2 + Rows< <Limbs<L> as Pad2>::Out > + Copy,
+          <Limbs<L> as Pad2>::Out: Mac + ShiftAppend + Head + Zero + SubBorrow + Select + Copy,
+{
+    let a2 = a.pad2()
+    let p: Limbs<L> = M::p_limbs()
+    let p2 = p.pad2()
+    let t0 = <<Limbs<L> as Pad2>::Out as Zero>::zero()
+    let t_final = <Limbs<L> as Rows< <Limbs<L> as Pad2>::Out > >::rows(
+        b: b, t: t0, a: a2, p: p2, mu: M::mu(),
+    )
+    canonicalize< <Limbs<L> as Pad2>::Out >(t_final, p2)
+}
