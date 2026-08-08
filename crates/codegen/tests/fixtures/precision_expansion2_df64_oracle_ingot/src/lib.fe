@@ -1,0 +1,207 @@
+//! Gate fixture for the precision axis P1 refactor-equivalence oracle
+//! (PRECISION_TYPES_RESEARCH.md P1 gate (i); ROLLCALL_GOAL.md "Precision
+//! axis"). NOT the source of truth for either side:
+//!
+//!   - `df64_*` below is a byte-for-byte TRANSCRIPTION of the hand-written
+//!     df64 arithmetic in `demos/sketches/mandelbrot/src/lib.fe` (its
+//!     `two_sum`/`split`/`two_product`/`df_*` section, verbatim, made `pub`
+//!     so this gate can call it directly), frozen here ONLY so the wasm
+//!     execution harness in `precision_expansion2_df64_oracle.rs` (staged at
+//!     `demos/sketches/precision/oracle.rs` pending a cargo lane) can export
+//!     it as its own wasm module. It is a copy, not a reimplementation: if
+//!     mandelbrot's df64 ever changes, this drifts and the gate goes stale by
+//!     construction (an intentional, cheap safety property: this fixture is
+//!     deleted the same day df64 is deleted from mandelbrot, per
+//!     PRECISION_TYPES_RESEARCH.md P1 gate (iv)).
+//!   - `expansion2_*` below are thin f32-in/f32-out wrappers around the real
+//!     general form, `precision::{add, sub, mul, sqr, add_f32}` at the
+//!     explicit `N = 2` instantiation, converting to/from `precision`'s
+//!     `Expansion<2>` via `precision::{from_pair, to_pair}`. This is the ONLY
+//!     new code in this file; everything it calls lives in
+//!     `demos/sketches/precision/src/lib.fe`.
+//!
+//! The gate this fixture exists for: `expansion2_add(a_hi,a_lo,b_hi,b_lo) ==
+//! df64_add(a_hi,a_lo,b_hi,b_lo)` bit-for-bit (and likewise sub/mul/sqr/
+//! add_f32), over representative + edge float vectors, run under wasmtime.
+//! Per PRECISION_TYPES_RESEARCH.md P1 gate (i): this is a TRANSIENT
+//! refactor-equivalence net (acceptance-criteria doctrine), not the enduring
+//! contract (that's an error-bound/property test against a high-precision
+//! oracle, a later slice).
+
+use precision::{add, add_f32, from_pair, mul, sqr, sub, to_pair}
+
+// ---------------------------------------------------------------------------
+// df64_*: verbatim transcription of demos/sketches/mandelbrot/src/lib.fe's
+// two_sum/split/two_product/df_add/df_sub/df_add_f32/df_mul/df_sqr. Diff
+// against that file if this ever looks wrong; this file is not authoritative.
+// ---------------------------------------------------------------------------
+
+pub fn df64_two_sum(_ a: f32, _ b: f32) -> (f32, f32) {
+    let s: f32 = a + b
+    let bb: f32 = s - a
+    let err: f32 = (a - (s - bb)) + (b - bb)
+    (s, err)
+}
+
+pub fn df64_split(_ a: f32) -> (f32, f32) {
+    let t: f32 = a * 4097.0
+    let hi: f32 = t - (t - a)
+    let lo: f32 = a - hi
+    (hi, lo)
+}
+
+pub fn df64_two_product(_ a: f32, _ b: f32) -> (f32, f32) {
+    let p: f32 = a * b
+    let (a_hi, a_lo) = df64_split(a)
+    let (b_hi, b_lo) = df64_split(b)
+    let err: f32 = ((a_hi * b_hi - p) + a_hi * b_lo + a_lo * b_hi) + a_lo * b_lo
+    (p, err)
+}
+
+pub fn df64_add(_ a_hi: f32, _ a_lo: f32, _ b_hi: f32, _ b_lo: f32) -> (f32, f32) {
+    let (s, e0) = df64_two_sum(a_hi, b_hi)
+    let e1: f32 = e0 + a_lo + b_lo
+    let (hi, lo) = df64_two_sum(s, e1)
+    (hi, lo)
+}
+
+pub fn df64_sub(_ a_hi: f32, _ a_lo: f32, _ b_hi: f32, _ b_lo: f32) -> (f32, f32) {
+    df64_add(a_hi, a_lo, -b_hi, -b_lo)
+}
+
+pub fn df64_add_f32(_ a_hi: f32, _ a_lo: f32, _ b: f32) -> (f32, f32) {
+    let (s, e0) = df64_two_sum(a_hi, b)
+    let e1: f32 = e0 + a_lo
+    let (hi, lo) = df64_two_sum(s, e1)
+    (hi, lo)
+}
+
+pub fn df64_mul(_ a_hi: f32, _ a_lo: f32, _ b_hi: f32, _ b_lo: f32) -> (f32, f32) {
+    let (p, e0) = df64_two_product(a_hi, b_hi)
+    let e1: f32 = e0 + a_hi * b_lo + a_lo * b_hi
+    let (hi, lo) = df64_two_sum(p, e1)
+    (hi, lo)
+}
+
+pub fn df64_sqr(_ a_hi: f32, _ a_lo: f32) -> (f32, f32) {
+    let (p, e0) = df64_two_product(a_hi, a_hi)
+    let e1: f32 = e0 + 2.0 * a_hi * a_lo
+    let (hi, lo) = df64_two_sum(p, e1)
+    (hi, lo)
+}
+
+// ---------------------------------------------------------------------------
+// expansion2_*: the general form (precision::Expansion<2>), thinly wrapped to
+// the same (f32, f32) hi/lo ABI so the oracle can call both sides identically.
+// ---------------------------------------------------------------------------
+
+pub fn expansion2_add(_ a_hi: f32, _ a_lo: f32, _ b_hi: f32, _ b_lo: f32) -> (f32, f32) {
+    to_pair(add<2>(from_pair(a_hi, a_lo), from_pair(b_hi, b_lo)))
+}
+
+pub fn expansion2_sub(_ a_hi: f32, _ a_lo: f32, _ b_hi: f32, _ b_lo: f32) -> (f32, f32) {
+    to_pair(sub<2>(from_pair(a_hi, a_lo), from_pair(b_hi, b_lo)))
+}
+
+pub fn expansion2_add_f32(_ a_hi: f32, _ a_lo: f32, _ b: f32) -> (f32, f32) {
+    to_pair(add_f32<2>(from_pair(a_hi, a_lo), b))
+}
+
+pub fn expansion2_mul(_ a_hi: f32, _ a_lo: f32, _ b_hi: f32, _ b_lo: f32) -> (f32, f32) {
+    to_pair(mul<2>(from_pair(a_hi, a_lo), from_pair(b_hi, b_lo)))
+}
+
+pub fn expansion2_sqr(_ a_hi: f32, _ a_lo: f32) -> (f32, f32) {
+    to_pair(sqr<2>(from_pair(a_hi, a_lo)))
+}
+
+// ---------------------------------------------------------------------------
+// Scalar-split wasm ABI. wasmtime's typed-func calling convention in this
+// codebase's OWN precedent (crates/codegen/tests/pga2d_meet_join_plan.rs,
+// `wedge_c0`/`wedge_c1`/`wedge_c2`) is one scalar-f32-return export per
+// component, not a tuple-return export, so the oracle test calls THESE, not
+// the `(f32, f32)`-returning functions above (which stay as the readable,
+// directly-diffable-against-mandelbrot core).
+// ---------------------------------------------------------------------------
+
+pub fn df64_add_hi(a_hi: f32, a_lo: f32, b_hi: f32, b_lo: f32) -> f32 {
+    let (hi, _lo) = df64_add(a_hi, a_lo, b_hi, b_lo)
+    hi
+}
+pub fn df64_add_lo(a_hi: f32, a_lo: f32, b_hi: f32, b_lo: f32) -> f32 {
+    let (_hi, lo) = df64_add(a_hi, a_lo, b_hi, b_lo)
+    lo
+}
+pub fn df64_sub_hi(a_hi: f32, a_lo: f32, b_hi: f32, b_lo: f32) -> f32 {
+    let (hi, _lo) = df64_sub(a_hi, a_lo, b_hi, b_lo)
+    hi
+}
+pub fn df64_sub_lo(a_hi: f32, a_lo: f32, b_hi: f32, b_lo: f32) -> f32 {
+    let (_hi, lo) = df64_sub(a_hi, a_lo, b_hi, b_lo)
+    lo
+}
+pub fn df64_add_f32_hi(a_hi: f32, a_lo: f32, b: f32) -> f32 {
+    let (hi, _lo) = df64_add_f32(a_hi, a_lo, b)
+    hi
+}
+pub fn df64_add_f32_lo(a_hi: f32, a_lo: f32, b: f32) -> f32 {
+    let (_hi, lo) = df64_add_f32(a_hi, a_lo, b)
+    lo
+}
+pub fn df64_mul_hi(a_hi: f32, a_lo: f32, b_hi: f32, b_lo: f32) -> f32 {
+    let (hi, _lo) = df64_mul(a_hi, a_lo, b_hi, b_lo)
+    hi
+}
+pub fn df64_mul_lo(a_hi: f32, a_lo: f32, b_hi: f32, b_lo: f32) -> f32 {
+    let (_hi, lo) = df64_mul(a_hi, a_lo, b_hi, b_lo)
+    lo
+}
+pub fn df64_sqr_hi(a_hi: f32, a_lo: f32) -> f32 {
+    let (hi, _lo) = df64_sqr(a_hi, a_lo)
+    hi
+}
+pub fn df64_sqr_lo(a_hi: f32, a_lo: f32) -> f32 {
+    let (_hi, lo) = df64_sqr(a_hi, a_lo)
+    lo
+}
+
+pub fn expansion2_add_hi(a_hi: f32, a_lo: f32, b_hi: f32, b_lo: f32) -> f32 {
+    let (hi, _lo) = expansion2_add(a_hi, a_lo, b_hi, b_lo)
+    hi
+}
+pub fn expansion2_add_lo(a_hi: f32, a_lo: f32, b_hi: f32, b_lo: f32) -> f32 {
+    let (_hi, lo) = expansion2_add(a_hi, a_lo, b_hi, b_lo)
+    lo
+}
+pub fn expansion2_sub_hi(a_hi: f32, a_lo: f32, b_hi: f32, b_lo: f32) -> f32 {
+    let (hi, _lo) = expansion2_sub(a_hi, a_lo, b_hi, b_lo)
+    hi
+}
+pub fn expansion2_sub_lo(a_hi: f32, a_lo: f32, b_hi: f32, b_lo: f32) -> f32 {
+    let (_hi, lo) = expansion2_sub(a_hi, a_lo, b_hi, b_lo)
+    lo
+}
+pub fn expansion2_add_f32_hi(a_hi: f32, a_lo: f32, b: f32) -> f32 {
+    let (hi, _lo) = expansion2_add_f32(a_hi, a_lo, b)
+    hi
+}
+pub fn expansion2_add_f32_lo(a_hi: f32, a_lo: f32, b: f32) -> f32 {
+    let (_hi, lo) = expansion2_add_f32(a_hi, a_lo, b)
+    lo
+}
+pub fn expansion2_mul_hi(a_hi: f32, a_lo: f32, b_hi: f32, b_lo: f32) -> f32 {
+    let (hi, _lo) = expansion2_mul(a_hi, a_lo, b_hi, b_lo)
+    hi
+}
+pub fn expansion2_mul_lo(a_hi: f32, a_lo: f32, b_hi: f32, b_lo: f32) -> f32 {
+    let (_hi, lo) = expansion2_mul(a_hi, a_lo, b_hi, b_lo)
+    lo
+}
+pub fn expansion2_sqr_hi(a_hi: f32, a_lo: f32) -> f32 {
+    let (hi, _lo) = expansion2_sqr(a_hi, a_lo)
+    hi
+}
+pub fn expansion2_sqr_lo(a_hi: f32, a_lo: f32) -> f32 {
+    let (_hi, lo) = expansion2_sqr(a_hi, a_lo)
+    lo
+}

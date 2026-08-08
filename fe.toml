@@ -6,6 +6,7 @@ members = [
   { path = "ingots/core_derives", name = "core_derives" },
   { path = "ingots/std", name = "std" },
   { path = "demos/sketches/fmath", name = "fmath" },
+  { path = "demos/sketches/precision", name = "precision" },
   { path = "demos/sketches/plasma", name = "plasma" },
   { path = "demos/sketches/dec", name = "dec" },
   { path = "demos/sketches/gradient", name = "gradient" },

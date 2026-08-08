@@ -1,0 +1,6 @@
+[ingot]
+name = "precision_expansion2_df64_oracle_gate"
+version = "0.1.0"
+
+[dependencies]
+precision = "../../../../../demos/sketches/precision"

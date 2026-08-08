@@ -1,0 +1,288 @@
+//! `Expansion<N>`: a general, CTFE-derived, length-N non-overlapping FLOAT
+//! EXPANSION (Dekker/Priest/Hida-Li-Bailey/CAMPARY style), parameterized by a
+//! `const N: usize`. `Expansion<2>` IS the hand-written df64 double-single
+//! from `demos/sketches/mandelbrot/src/lib.fe` (bit-identical at N=2, see the
+//! derivation below and the staged oracle in
+//! `demos/sketches/precision/oracle.rs`, destined for
+//! `crates/codegen/tests/precision_expansion2_df64_oracle.rs`), and
+//! `Expansion<3>`/`Expansion<4>` fall out of the SAME generic code, pushing
+//! the zoom floor deeper with zero new hand-written numerics (qf128 territory
+//! at N=4). Rollcall precision axis, P1 (PRECISION_TYPES_RESEARCH.md,
+//! PRECISION_P0_PROBES.md).
+//!
+//! THE PRINCIPLE (ROLLCALL_GOAL.md): this is authored ONCE as a general form;
+//! the N=2/3/4 instantiations are the compiler specializing it, not three
+//! bespoke functions. `two_sum`/`split`/`two_product` are the shared
+//! branch-free primitives (verbatim from df64: only `+`/`-`/`*`, no `if`, no
+//! `select`, relying only on f32 being IEEE round-to-nearest). `add`/`sub`/
+//! `mul`/`sqr`/`from_f32`/`add_f32` are ONE generic definition each, over
+//! `const N`, dispatched through the `Exp` trait's structural recursion.
+//!
+//! REPRESENTATION AND THE BALANCED-TREE MANDATE (read this before touching
+//! the shape). P0's mandatory rule is: materialize every CTFE type-fn as a
+//! balanced `{N/2}` tree, never a linear cons-chain, because a linear chain
+//! consumed by a trait fold hits an undocumented `MAXIMUM_TYPE_DEPTH=256`
+//! solver ceiling at N=255. `Expansion<N>` below is deliberately a LINEAR
+//! chain (`Last | More<Expansion<{N-1}>>`), not a balanced binary tree. This
+//! is a considered, measured exception, not an oversight:
+//!
+//!   1. Float-expansion renormalization is inherently POSITION-SENSITIVE, not
+//!      commutative/reassociable like the CGA schedule's polynomial sum. df64's
+//!      own `df_add` treats term 0 (the leading/most-significant limb) with an
+//!      EXACT `two_sum`, and every other term with a cheap approximate lump,
+//!      because term 0 alone can carry a cancellation that changes the exponent;
+//!      lower terms cannot. A symmetric balanced split (`Branch<L, R>`, each
+//!      holding half the terms) has no way to single out "the most significant
+//!      term" without degenerating into a linear-on-one-side shape anyway (a
+//!      left-leaning `Branch<Leaf, Branch<Leaf, ...>>` IS this same linear
+//!      chain, just spelled differently). A true symmetric split was tried by
+//!      hand (see the design log in the task report) and could not reproduce
+//!      df64's op sequence bit-for-bit; the linear chain can, exactly.
+//!   2. The measured wall is N=255 for a LINEAR chain under a trait fold (P0
+//!      Probe 1); `Expansion<N>` here targets N=2..~8 (df64 through octuple-
+//!      double). P0 Probe 3 independently proved an near-identical linear
+//!      `Cell<Storage<N-1>>` HList safe up to N=64 with wide headroom. This
+//!      chain is nowhere near the measured wall.
+//!   3. The mandate's actual target is large-N shapes consumed by a trait fold
+//!      (Field<p> at L=20, Poseidon-scale ~800-term schedules): THAT is where
+//!      balanced `{N/2}` materialization stays mandatory and unwaived.
+//!
+//! Flagged explicitly for review, per the task's own guardrail ("if you hit a
+//! wall, report it, don't work around it silently").
+//!
+//! WHY `Last | More<T>` AND NOT `Nil | Cell<T>` (the CGA fixture's own
+//! shape): the algorithm needs to know, AT THE TYPE LEVEL, whether "this is
+//! the last (least-significant, lump-only) term" versus "there is more after
+//! this term (needs its own exact combine step)". A `Nil | Cell<T>` chain
+//! only exposes that distinction by inspecting whether `T = Nil`, which two
+//! non-overlapping trait impls (`impl Exp for Cell<T>` for ALL `T`) cannot
+//! discriminate without specialization. Making "am I last" a distinct
+//! constructor (`Last` vs `More<T>`) turns it into ordinary, non-overlapping
+//! trait dispatch.
+
+/// Knuth's TwoSum: exact `a + b` as `(s, e)` with `s + e == a + b` over the
+/// reals, for ANY `a`, `b`. Verbatim from the hand df64 (mandelbrot/src/lib.fe).
+pub fn two_sum(_ a: f32, _ b: f32) -> (f32, f32) {
+    let s: f32 = a + b
+    let bb: f32 = s - a
+    let err: f32 = (a - (s - bb)) + (b - bb)
+    (s, err)
+}
+
+/// Dekker's splitting: `a` as `hi + lo`, each carrying about half of `a`'s
+/// mantissa bits, exact under round-to-nearest. Verbatim from the hand df64.
+pub fn split(_ a: f32) -> (f32, f32) {
+    let t: f32 = a * 4097.0
+    let hi: f32 = t - (t - a)
+    let lo: f32 = a - hi
+    (hi, lo)
+}
+
+/// Dekker's TwoProduct: exact `a * b` as `(p, e)` with `p + e == a * b` over
+/// the reals. Verbatim from the hand df64.
+pub fn two_product(_ a: f32, _ b: f32) -> (f32, f32) {
+    let p: f32 = a * b
+    let (a_hi, a_lo) = split(a)
+    let (b_hi, b_lo) = split(b)
+    let err: f32 = ((a_hi * b_hi - p) + a_hi * b_lo + a_lo * b_hi) + a_lo * b_lo
+    (p, err)
+}
+
+use core::marker::Copy
+
+/// The least-significant term of a chain: `N == 1`. Distinguished from `More`
+/// as its own constructor (see the module doc) so trait dispatch can tell
+/// "last term" from "more terms follow" without specialization.
+pub struct Last { value: f32 }
+/// A term with more, less-significant terms after it (`self.tail`).
+pub struct More<T> { lead: f32, tail: T }
+impl Copy for Last {}
+impl<T: Copy> Copy for More<T> {}
+
+/// `Expansion<N>`: N=1 is `Last` (a bare f32); N>=2 is `More` over
+/// `Expansion<{N-1}>`. `Expansion<2>` normalizes to `More<Last>`, exactly
+/// the `(hi, lo)` shape of df64.
+pub recursive type fn Expansion<const N: usize>() -> (*) {
+    match N {
+        0 => Last
+        1 => Last
+        _ => More<Expansion<{N - 1}>>
+    }
+}
+
+/// The one generic algebra, dispatched structurally over `Last` / `More<T>`.
+/// Every method takes an explicit ADDITIVE `corr` (correction) parameter
+/// where relevant: the value this call's result should have folded in
+/// already, threaded down from an enclosing (more significant) level. Top
+/// callers pass `0.0`.
+pub trait Exp {
+    /// The most significant term.
+    fn head(self) -> f32
+    /// Replace the most significant term, keep everything else.
+    fn with_head(self, _ v: f32) -> Self
+    /// Promote a plain f32 (`lo`-equivalent terms start at zero).
+    fn from_scalar(_ x: f32) -> Self
+    fn negate(self) -> Self
+    /// `self + other`, with `corr` folded into `self`'s leading term first.
+    fn add_corr(self, _ other: Self, _ corr: f32) -> Self
+    /// `c * self`, with `corr` folded into the leading product first.
+    fn scalar_mul(self, _ c: f32, _ corr: f32) -> Self
+    /// `self * other`, with `corr` folded into the leading product first.
+    fn mul_corr(self, _ other: Self, _ corr: f32) -> Self
+    /// `self * self`, with `corr` folded into the leading product first.
+    fn sqr_corr(self, _ corr: f32) -> Self
+}
+
+impl Exp for Last {
+    fn head(self) -> f32 { self.value }
+    fn with_head(self, _ v: f32) -> Last { Last { value: v } }
+    fn from_scalar(_ x: f32) -> Last { Last { value: x } }
+    fn negate(self) -> Last { Last { value: -self.value } }
+
+    /// The base case is exactly df64's "lump the rest" step: a PLAIN
+    /// (non-exact) sum, since a single trailing term is already below the
+    /// precision an exact `two_sum` would preserve.
+    fn add_corr(self, _ other: Last, _ corr: f32) -> Last {
+        Last { value: (corr + self.value) + other.value }
+    }
+    fn scalar_mul(self, _ c: f32, _ corr: f32) -> Last {
+        Last { value: corr + c * self.value }
+    }
+    fn mul_corr(self, _ other: Last, _ corr: f32) -> Last {
+        Last { value: corr + self.value * other.value }
+    }
+    fn sqr_corr(self, _ corr: f32) -> Last {
+        Last { value: corr + self.value * self.value }
+    }
+}
+
+impl<T: Exp + Copy> Exp for More<T> {
+    fn head(self) -> f32 { self.lead }
+    fn with_head(self, _ v: f32) -> More<T> { More { lead: v, tail: self.tail } }
+    fn from_scalar(_ x: f32) -> More<T> {
+        More { lead: x, tail: T::from_scalar(0.0) }
+    }
+    fn negate(self) -> More<T> { More { lead: -self.lead, tail: self.tail.negate() } }
+
+    /// EXACTLY df64's `df_add` shape, generalized: `two_sum` the leading
+    /// terms, fold the error down into the tail's own combine (which does
+    /// the same thing one level deeper, or lumps if it's `Last`), then a
+    /// FINAL `two_sum` re-normalizing this level's leading term against
+    /// whatever the tail settled on as ITS leading term. At N=2 this IS
+    /// `df_add` (see the oracle derivation in the task report / commit).
+    fn add_corr(self, _ other: More<T>, _ corr: f32) -> More<T> {
+        let (s, e) = two_sum(corr + self.lead, other.lead)
+        let tail_result = self.tail.add_corr(other.tail, e)
+        let (hi, lo) = two_sum(s, tail_result.head())
+        More { lead: hi, tail: tail_result.with_head(lo) }
+    }
+
+    fn scalar_mul(self, _ c: f32, _ corr: f32) -> More<T> {
+        let (p, e0) = two_product(c, self.lead)
+        let (s, e1) = two_sum(corr, p)
+        let tail_result = self.tail.scalar_mul(c, e0 + e1)
+        More { lead: s, tail: tail_result }
+    }
+
+    /// EXACTLY df64's `df_mul` shape, generalized: `two_product` the leading
+    /// terms exactly, then the two RANK-1 cross terms (`self.lead *
+    /// other.tail`, `other.lead * self.tail`, each a scalar multiply of the
+    /// OTHER operand's tail) are combined via `add_corr` (which folds `e0`
+    /// in at the right point in the same left-to-right order df64 uses:
+    /// `e0 + a_hi*b_lo + a_lo*b_hi`), then a final `two_sum` re-normalizes.
+    /// At N=2 this IS `df_mul` (see the oracle derivation).
+    fn mul_corr(self, _ other: More<T>, _ corr: f32) -> More<T> {
+        let (p, e0) = two_product(self.lead, other.lead)
+        let (s, e1) = two_sum(corr, p)
+        let cross_b: T = other.tail.scalar_mul(self.lead, 0.0)
+        let cross_a: T = self.tail.scalar_mul(other.lead, 0.0)
+        let cross: T = cross_b.add_corr(cross_a, e0 + e1)
+        let (hi, lo) = two_sum(s, cross.head())
+        More { lead: hi, tail: cross.with_head(lo) }
+    }
+
+    /// EXACTLY df64's `df_sqr` shape, generalized: one `two_product` (not
+    /// two, since a square's cross terms are equal: `2 * lead * tail`). At
+    /// N=2 this IS `df_sqr` (see the oracle derivation).
+    fn sqr_corr(self, _ corr: f32) -> More<T> {
+        let (p, e0) = two_product(self.lead, self.lead)
+        let (s, e1) = two_sum(corr, p)
+        let cross: T = self.tail.scalar_mul(self.lead, 0.0)
+        let doubled: T = cross.scalar_mul(2.0, e0 + e1)
+        let (hi, lo) = two_sum(s, doubled.head())
+        More { lead: hi, tail: doubled.with_head(lo) }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public API. `N` is not inferred from a concrete (already-normalized)
+// argument by this compiler (a measured limitation, see the task report), so
+// every call site spells it explicitly: `add<2>(a, b)`, not `add(a, b)`.
+// ---------------------------------------------------------------------------
+
+/// Promote a plain f32 to an N-term expansion (all lower terms zero).
+/// Mirrors df64's `df_from_f32` at N=2.
+pub fn from_f32<const N: usize>(_ x: f32) -> Expansion<N>
+    where Expansion<N>: Exp
+{
+    <Expansion<N> as Exp>::from_scalar(x)
+}
+
+/// `a + b`. Mirrors df64's `df_add` at N=2 (bit-identical, see module doc).
+pub fn add<const N: usize>(_ a: Expansion<N>, _ b: Expansion<N>) -> Expansion<N>
+    where Expansion<N>: Exp
+{
+    a.add_corr(b, 0.0)
+}
+
+/// `a - b`. Mirrors df64's `df_sub` at N=2.
+pub fn sub<const N: usize>(_ a: Expansion<N>, _ b: Expansion<N>) -> Expansion<N>
+    where Expansion<N>: Exp
+{
+    a.add_corr(b.negate(), 0.0)
+}
+
+/// `a + b` where `b` is a plain f32. Mirrors df64's `df_add_f32` at N=2
+/// (bit-identical: `add_f32::<2>(a, b) == add::<2>(a, from_f32::<2>(b))`,
+/// and both reduce to df64's exact `df_add_f32` formula).
+pub fn add_f32<const N: usize>(_ a: Expansion<N>, _ b: f32) -> Expansion<N>
+    where Expansion<N>: Exp
+{
+    a.add_corr(<Expansion<N> as Exp>::from_scalar(b), 0.0)
+}
+
+/// `a * b`. Mirrors df64's `df_mul` at N=2 (bit-identical, see module doc).
+pub fn mul<const N: usize>(_ a: Expansion<N>, _ b: Expansion<N>) -> Expansion<N>
+    where Expansion<N>: Exp
+{
+    a.mul_corr(b, 0.0)
+}
+
+/// `a * a`. Mirrors df64's `df_sqr` at N=2 (bit-identical, see module doc).
+pub fn sqr<const N: usize>(_ a: Expansion<N>) -> Expansion<N>
+    where Expansion<N>: Exp
+{
+    a.sqr_corr(0.0)
+}
+
+/// The most significant term, i.e. the value to compare/threshold on (the
+/// escape test's `xx_hi + yy_hi > 4.0` reads exactly this out of a squared
+/// expansion). Mirrors reading `.hi` off a df64 pair at N=2.
+pub fn hi<const N: usize>(_ a: Expansion<N>) -> f32
+    where Expansion<N>: Exp
+{
+    a.head()
+}
+
+/// N=2 constructor matching df64's `(hi, lo)` pair shape exactly (concrete,
+/// no generic bound needed: `Expansion<2>` is ground). This is the shim
+/// mandelbrot will use to swap `center_x_hi`/`center_x_lo` fields into
+/// `Expansion<2>` values without any generic-inference friction.
+pub fn from_pair(_ hi: f32, _ lo: f32) -> Expansion<2> {
+    More { lead: hi, tail: Last { value: lo } }
+}
+
+/// N=2 destructor matching df64's `(hi, lo)` pair shape exactly.
+pub fn to_pair(_ a: Expansion<2>) -> (f32, f32) {
+    (a.lead, a.tail.value)
+}
