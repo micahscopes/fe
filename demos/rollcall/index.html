@@ -1,0 +1,144 @@
+<!doctype html>
+<!--
+  Rollcall (Rung 4): a browser app driving the ALREADY-PROVEN
+  prove(wasm) -> commit(EVM/revm) -> verify(EVM/revm) flow
+  (crates/codegen/tests/rollcall_e2e.rs), plus a four-leg evidence ledger
+  (demos/rollcall/evidence.json).
+
+  Plain static HTML/JS, no `application/fe` script tags -- this is a
+  wasm-compute app, not a WebGPU render sketch, so it needs none of the
+  `fe web build`/`dev` render-bundle machinery and is served as an ordinary
+  site:
+
+    cargo run --locked -p fe --features web-server -- web dev \
+      demos/rollcall/index.html --no-watch --port 0
+
+  Functional over polished (v1): Micah will shape the UX later. This page
+  is deliberately honest about what runs live here versus what is a
+  build-time receipt -- see the notes inline below and in
+  RUNG4_ASSEMBLY_PLAN.md.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rollcall</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+         background: #0d0f13; color: #cfd6e4; }
+  main { max-width: 900px; margin: 0 auto; padding: 24px; }
+  h1 { font-size: 18px; font-weight: 600; margin: 0 0 6px; color: #e6ecf7; letter-spacing: .02em; }
+  h2 { font-size: 13px; font-weight: 600; margin: 28px 0 10px; color: #b7c2d8;
+       text-transform: uppercase; letter-spacing: .06em; }
+  p { color: #aeb8cc; }
+  p.lede { color: #8a93a6; font-size: 12.5px; max-width: 640px; }
+  section { background: #12151b; border: 1px solid #1e232d; border-radius: 10px;
+            padding: 16px 18px; margin-bottom: 18px; }
+  .honest { border-left: 3px solid #6b7688; padding-left: 12px; margin: 10px 0;
+            color: #8a93a6; font-size: 12.5px; }
+  .field-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+  .field-row label { width: 130px; color: #8a93a6; font-size: 12.5px; }
+  input[type="text"], input[type="number"] {
+    background: #0d0f13; border: 1px solid #2a3140; color: #e6ecf7;
+    border-radius: 6px; padding: 6px 8px; font: inherit; width: 160px;
+  }
+  button { background: #1c2331; border: 1px solid #33405a; color: #e6ecf7;
+           border-radius: 6px; padding: 7px 14px; font: inherit; cursor: pointer; }
+  button:hover:not(:disabled) { background: #232c40; }
+  button:disabled { opacity: .45; cursor: default; }
+  code, pre { font: inherit; }
+  .out { font-size: 13px; color: #e6ecf7; word-break: break-all; margin-top: 6px; }
+  .status { font-size: 12px; margin-top: 6px; color: #8a93a6; }
+  .status[data-kind="ok"] { color: #6fcf97; }
+  .status[data-kind="error"] { color: #eb6767; }
+  .status[data-kind="reject"] { color: #e0a262; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #1e232d; vertical-align: top; }
+  th { color: #8a93a6; font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: .04em; }
+  td.status-verified { color: #6fcf97; }
+  td.status-validated { color: #7aa2f7; }
+  td.status-not_run { color: #e0a262; }
+  footer { color: #6b7688; font-size: 11.5px; margin-top: 24px; }
+  a { color: #6b7688; }
+  a:hover { color: #b7c2d8; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Rollcall</h1>
+  <p class="lede">
+    A membership registry backed by a Poseidon-Merkle root. The SAME
+    circomlib Poseidon (t=3) kernel is proven, end to end, on wasm and
+    EVM/revm in <code>crates/codegen/tests/rollcall_e2e.rs</code>. This page
+    drives that same kernel live in your browser.
+  </p>
+
+  <div class="honest">
+    <strong>Honest about scope (v1):</strong> the root-building and
+    membership check below run the REAL compiled Fe kernel
+    (<code>gen/kernel.wasm</code>) live, in this page. The on-chain
+    commit/verify leg is <strong>revm, local</strong> (not a testnet or
+    mainnet deploy) and was executed at build time, not from this page --
+    see the evidence ledger below. GPU execution is pending lavapipe (no
+    Vulkan adapter in this environment), and GPU validation itself is
+    currently blocked upstream for this kernel on the pinned Sonatina rev
+    (see the ledger's <code>webgpu</code> row and
+    <code>RUNG4_ASSEMBLY_PLAN.md</code>).
+  </div>
+
+  <section>
+    <h2>1. Member list</h2>
+    <p class="lede">Four field-element members (non-negative integers). Prefilled from the proven end-to-end fixture.</p>
+    <div class="field-row"><label>member[0]</label><input type="text" id="member-0" inputmode="numeric"></div>
+    <div class="field-row"><label>member[1]</label><input type="text" id="member-1" inputmode="numeric"></div>
+    <div class="field-row"><label>member[2]</label><input type="text" id="member-2" inputmode="numeric"></div>
+    <div class="field-row"><label>member[3]</label><input type="text" id="member-3" inputmode="numeric"></div>
+    <button id="build-root">build root (live, wasm)</button>
+    <div class="out" id="root-out"></div>
+    <div class="status" id="root-status"></div>
+    <div class="status" id="kernel-status"></div>
+  </section>
+
+  <section>
+    <h2>2. Check membership</h2>
+    <p class="lede">
+      Substitutes a candidate leaf at an index into the member list and
+      recomputes the root live via the SAME kernel; accept iff it reproduces
+      the committed root. For this fully-known N=4 tree this is the same
+      computation as folding a Merkle sibling path.
+    </p>
+    <div class="field-row"><label>index (0-3)</label><input type="number" id="check-index" min="0" max="3" value="2"></div>
+    <div class="field-row"><label>candidate value</label><input type="text" id="check-value" inputmode="numeric"></div>
+    <button id="check-membership" disabled>check membership (live, wasm)</button>
+    <div class="status" id="check-result"></div>
+  </section>
+
+  <section>
+    <h2>3. Four-leg evidence ledger</h2>
+    <p class="lede">
+      Fetched from <code>evidence.json</code>, written once per coherent
+      generator run (<code>cargo run -p fe-codegen --features
+      native-backend --example gen_rollcall_evidence</code>), never baked
+      into this page. A verifier re-hashes the artifacts on disk against
+      the recorded SHA-256s and confirms the roots agree across legs
+      (<code>crates/codegen/tests/rollcall_evidence_verify.rs</code>).
+    </p>
+    <table>
+      <thead><tr><th>leg</th><th>runtime</th><th>status</th><th>result</th><th>note</th></tr></thead>
+      <tbody id="evidence-body"></tbody>
+    </table>
+    <div class="status" id="evidence-status"></div>
+  </section>
+
+  <footer>
+    Source: <a href="gen/kernel.fe" target="_blank" rel="noopener">gen/kernel.fe</a> ·
+    <a href="gen/kernel.wasm" target="_blank" rel="noopener">gen/kernel.wasm</a> ·
+    <a href="evidence.json" target="_blank" rel="noopener">evidence.json</a> ·
+    <a href="gen/reference.json" target="_blank" rel="noopener">gen/reference.json</a>
+  </footer>
+</main>
+<script type="module" src="app.js"></script>
+</body>
+</html>

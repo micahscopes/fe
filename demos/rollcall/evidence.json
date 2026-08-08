@@ -1,0 +1,173 @@
+{
+  "protocol": "fe-capstone-evidence",
+  "version": 1,
+  "capstone": "rollcall-poseidon-merkle",
+  "source": {
+    "path": "demos/rollcall/gen/kernel.fe",
+    "sha256": "8b8303603bd4937fb883c8d970a2fcd10e551ba8c424873f1e5f04eb15de06db"
+  },
+  "interface": {
+    "version": 1,
+    "export": "poseidon_merkle_root_loop",
+    "parameters": [
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32",
+      "u32"
+    ],
+    "result": "u32"
+  },
+  "targets": [
+    {
+      "target": "evm",
+      "runtime": "revm (local harness, NOT a testnet deploy)",
+      "imports": [],
+      "exports": [
+        "RollcallRegistry.commit(uint256)",
+        "RollcallRegistry.verifyMembership(uint256,uint256,uint256[2])"
+      ],
+      "artifact": null,
+      "verification": {
+        "status": "verified",
+        "scope": "commit + accept(member) + reject(tampered) + reject(non-member) + reject(unauthorized commit)",
+        "command": "cargo run -p fe-codegen --features native-backend --example gen_rollcall_evidence",
+        "test": "generator EVM/revm execution",
+        "result": "root == wasm root (0x5cf2d2ed8ae159967517ecc028e2991e2d0726659964184a65278f6dd580448); verifyMembership gas_used=387663",
+        "note": "revm local harness (FeContractHarness), the same harness path rollcall_e2e.rs uses. This is NOT a testnet or mainnet deploy."
+      }
+    },
+    {
+      "target": "native",
+      "runtime": "Cranelift JIT",
+      "imports": [],
+      "exports": [
+        "poseidon_merkle_root_loop"
+      ],
+      "artifact": null,
+      "verification": {
+        "status": "not_run",
+        "scope": "root(111,222,333,444), all 20 output limbs",
+        "command": "cargo run -p fe-codegen --features native-backend --example gen_rollcall_evidence",
+        "test": "generator native/Cranelift execution",
+        "result": null,
+        "note": "Native execution is not currently possible on the pinned Sonatina rev for this array-using kernel: internal error: native backend skipped definitions: poseidon_merkle_root_loop Same root cause as the SPIR-V leg (function-local array lowering via MemAllocDynamic is wasm-only on this pin); re-lands with the fork re-pin (Decision 5). See RUNG4_ASSEMBLY_PLAN.md."
+      }
+    },
+    {
+      "target": "wasm",
+      "runtime": "wasmtime",
+      "imports": [],
+      "exports": [
+        "poseidon_merkle_root_loop"
+      ],
+      "artifact": {
+        "kind": "wasm-module",
+        "path": "demos/rollcall/gen/kernel.wasm",
+        "bytes": 118115,
+        "sha256": "89e2bf35acea137b960fb9eb3d55718f78e0c7378d04221e330268ae7ddc6a2f"
+      },
+      "verification": {
+        "status": "verified",
+        "scope": "root(111,222,333,444), all 20 output limbs",
+        "command": "cargo run -p fe-codegen --features native-backend --example gen_rollcall_evidence",
+        "test": "generator wasm/wasmtime execution",
+        "result": "0x5cf2d2ed8ae159967517ecc028e2991e2d0726659964184a65278f6dd580448",
+        "note": null
+      }
+    },
+    {
+      "target": "webgpu",
+      "runtime": "browser WebGPU (naga SPIR-V -> WGSL)",
+      "imports": [],
+      "exports": [
+        "poseidon_merkle_root_loop"
+      ],
+      "artifact": null,
+      "verification": {
+        "status": "not_run",
+        "scope": "naga SPIR-V translation + validation",
+        "command": "cargo run -p fe-codegen --features native-backend --example gen_rollcall_evidence",
+        "test": "generator SPIR-V compile + naga validation",
+        "result": null,
+        "note": "GPU validation is not currently possible on the pinned Sonatina rev for this array-using kernel: spirv backend: spirv translation error: spirv: instruction `mem.alloc_dynamic` is unsupported by the SPIR-V translator The private-storage heap emulation it needs (SpirvLayout.trap) exists only on the unpushed fork branch rung3-spirv-arrays-v2 (same-day revert b55f051e9 -> 40f8a1f27 on this branch); re-lands with the fork re-pin (Decision 5). GPU EXECUTION would additionally need lavapipe, unavailable in this sandbox regardless. See RUNG4_ASSEMBLY_PLAN.md."
+      }
+    }
+  ]
+}
