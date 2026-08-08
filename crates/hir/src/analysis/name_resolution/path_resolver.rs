@@ -1188,7 +1188,18 @@ where
                     ));
                 }
 
-                let norm = normalize_ty(db, applied, scope, assumptions);
+                // Dedup by normalized result only when there is something to
+                // dedup: a singleton candidate list can never collapse or
+                // ambiguate, and the returned value is the UNNORMALIZED
+                // `applied` either way, so normalizing a singleton is dead work
+                // (and, during impl-header binding lowering, a gratuitous
+                // re-entry into the trait-env SCC via the normalizer's impl
+                // route).
+                let norm = if assoc_tys.len() == 1 {
+                    applied
+                } else {
+                    normalize_ty(db, applied, scope, assumptions)
+                };
                 dedup.entry(norm).or_insert((inst, applied));
             }
 
@@ -1727,19 +1738,36 @@ pub(crate) fn find_associated_type<'db>(
             }
         }
 
-        // Search both the call-site ingot and the receiver's ingot so local
-        // traits on external types and external traits on local types are both visible.
-        for ingot in search_ingots.into_iter().flatten() {
-            for impl_ in impls_for_ty_with_constraints(db, ingot, canonical_ty, assumptions) {
-                if let Some(Some((inst, assoc_ty))) =
-                    cx.with_impl_assoc_ty(impl_, lhs_ty, name, |cx, inst, assoc_ty| {
-                        Some((
-                            cx.try_extract::<TraitInstId<'db>>(inst)?,
-                            cx.try_extract::<TyId<'db>>(assoc_ty)?,
-                        ))
-                    })
-                {
-                    candidates.push((inst, assoc_ty));
+        // Bound-priority for abstract receivers: a rigid type-parameter
+        // receiver whose bounds already provide the associated type resolves
+        // through those bounds alone. The only impls whose self type can unify
+        // with a rigid param are bare-param blanket impls (rigid params survive
+        // canonicalization unchanged and unify only with fresh vars), and when
+        // a bound also matches, the blanket candidate is either normalize-equal
+        // (the dedup downstream already keeps the bound candidate, which is
+        // pushed first) or a bound-vs-blanket conflict, which bound-priority
+        // resolves the way Rust does (impls never participate in param-receiver
+        // projection resolution). Skipping the search here also keeps
+        // impl-header binding lowering out of the
+        // {collect_trait_impls, ingot_trait_env} query SCC for this shape.
+        let bound_resolved_param =
+            matches!(original_ty.data(db), TyData::TyParam(_)) && !candidates.is_empty();
+
+        if !bound_resolved_param {
+            // Search both the call-site ingot and the receiver's ingot so local
+            // traits on external types and external traits on local types are both visible.
+            for ingot in search_ingots.into_iter().flatten() {
+                for impl_ in impls_for_ty_with_constraints(db, ingot, canonical_ty, assumptions) {
+                    if let Some(Some((inst, assoc_ty))) =
+                        cx.with_impl_assoc_ty(impl_, lhs_ty, name, |cx, inst, assoc_ty| {
+                            Some((
+                                cx.try_extract::<TraitInstId<'db>>(inst)?,
+                                cx.try_extract::<TyId<'db>>(assoc_ty)?,
+                            ))
+                        })
+                    {
+                        candidates.push((inst, assoc_ty));
+                    }
                 }
             }
         }

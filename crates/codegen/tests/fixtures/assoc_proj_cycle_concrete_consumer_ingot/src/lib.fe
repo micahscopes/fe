@@ -1,0 +1,35 @@
+//! CONSUMER ingot for the CONCRETE-receiver companion cross-ingot
+//! `collect_trait_impls` cycle regression. It depends on
+//! `assoc_proj_cycle_concrete_dep`, whose `Anchor` impl header carries the bare
+//! `type Out = Base::Out` projection off a CONCRETE receiver.
+//!
+//! Same entry topology as the bare-param sibling: `drive` first solves a goal on
+//! a CONSUMER-owned type (`Local: Copy`, primary = consumer), which demands
+//! `ingot_trait_env(consumer)`, whose `TraitEnv::collect` calls
+//! `collect_trait_impls(dependency)` DIRECTLY (no `ingot_trait_env(dependency)`
+//! frame between) and lowers `Anchor`'s bare concrete-receiver binding. Because
+//! that binding genuinely needs the impl environment, the SCC forms and
+//! `collect_trait_impls` is the re-entered head. Without the cycle handler on
+//! `collect_trait_impls` salsa panics naming that query; with it the SCC
+//! fixpoint-iterates and this compiles clean.
+
+use assoc_proj_cycle_concrete_dep::{Tr, Base, Wrap, Anchor, grow_once}
+use core::marker::Copy
+
+struct Local { seed: u32 }
+impl Copy for Local {}
+
+fn needs_copy<T: Copy>(_ x: T) -> u32 { 0 }
+
+pub fn drive() -> u32 {
+    // Consumer-primary trait goal: demands `ingot_trait_env(consumer)`, whose
+    // `TraitEnv::collect` enters `collect_trait_impls(dependency)` directly.
+    let poke: u32 = needs_copy<Local>(Local { seed: 5 })
+
+    // Force the dependency's CONCRETE-receiver bare projection to normalize at a
+    // concrete instantiation: `<Anchor as Tr>::Out` = `Base::Out` = `Wrap<Base>`.
+    let anchored: <Anchor as Tr>::Out =
+        grow_once<Anchor>(Anchor { value: 7 })
+
+    poke + anchored.lead
+}

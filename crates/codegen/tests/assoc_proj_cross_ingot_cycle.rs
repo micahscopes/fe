@@ -9,27 +9,38 @@
 //! `TraitEnv::collect(consumer)` calls `collect_trait_impls(dependency)`
 //! directly and `collect_trait_impls` becomes the re-entered cycle head.
 //!
-//! With the `cycle_fn`/`cycle_initial` handler on `collect_trait_impls` this
-//! compiles clean. Remove those two attribute lines and this test panics
-//! inside salsa naming `collect_trait_impls`: that is the red-without-the-fix
-//! seal on the entry-topology analysis, not just a smoke test.
+//! Two witnesses, two shapes:
+//!
+//! - `cross_ingot_bare_projection_does_not_cycle_collect_trait_impls`
+//!   (bare-PARAM receiver, `type Out = Wrap<T::Out>`): after the bound-priority
+//!   fix (Leg 1 of the perf fix) this shape resolves through the receiver's
+//!   bounds alone and NO LONGER enters the SCC. It stays green with OR without
+//!   the `collect_trait_impls` handler; it is the witness that bound-priority
+//!   keeps this common shape out of the cycle env-free.
+//! - `cross_ingot_concrete_projection_cycles_collect_trait_impls`
+//!   (concrete RECEIVER, `type Out = Base::Out`): assumptions cannot resolve a
+//!   concrete-receiver projection and bound-priority does not fire, so the impl
+//!   search still consults `ingot_trait_env` during collection and the SCC
+//!   genuinely forms. This is the LIVE red-without-the-fix witness: remove the
+//!   two `cycle_fn`/`cycle_initial` attribute lines on `collect_trait_impls`
+//!   (`crates/hir/src/analysis/ty/trait_lower.rs`) and this test panics inside
+//!   salsa naming `collect_trait_impls`, while the bare-param test above stays
+//!   green.
 
 use common::InputDb;
 use driver::DriverDataBase;
 use hir::hir_def::HirIngot;
 use url::Url;
 
-fn consumer_url() -> Url {
+fn fixture_url(dir: &str) -> Url {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/assoc_proj_cycle_consumer_ingot");
+        .join("tests/fixtures")
+        .join(dir);
     Url::from_directory_path(path.canonicalize().unwrap()).unwrap()
 }
 
-/// Cross-ingot entry through the bare-projection dependency must fixpoint-iterate
-/// the `collect_trait_impls` SCC instead of panicking on an unhandled cycle head.
-#[test]
-fn cross_ingot_bare_projection_does_not_cycle_collect_trait_impls() {
-    let url = consumer_url();
+fn assert_consumer_compiles_clean(dir: &str) {
+    let url = fixture_url(dir);
     let mut db = DriverDataBase::default();
     assert!(
         !driver::init_ingot(&mut db, &url),
@@ -45,4 +56,19 @@ fn cross_ingot_bare_projection_does_not_cycle_collect_trait_impls() {
         diagnostics.is_empty(),
         "unexpected cross-ingot assoc-projection diagnostics:\n{diagnostics}"
     );
+}
+
+/// Bare-PARAM receiver: bound-priority keeps this shape out of the SCC entirely,
+/// so it resolves env-free and stays green regardless of the cycle handler.
+#[test]
+fn cross_ingot_bare_projection_does_not_cycle_collect_trait_impls() {
+    assert_consumer_compiles_clean("assoc_proj_cycle_consumer_ingot");
+}
+
+/// Concrete RECEIVER: the impl search is genuinely required, the SCC still forms,
+/// and `collect_trait_impls` must fixpoint-iterate instead of panicking on an
+/// unhandled cycle head. Live red-without-the-handler witness.
+#[test]
+fn cross_ingot_concrete_projection_cycles_collect_trait_impls() {
+    assert_consumer_compiles_clean("assoc_proj_cycle_concrete_consumer_ingot");
 }

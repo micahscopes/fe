@@ -42,20 +42,24 @@ type TraitImplTable<'db> = FxHashMap<Trait<'db>, Vec<Binder<ImplementorId<'db>>>
 /// - it does not perform overlap/conflict checking
 ///
 /// `collect_trait_impls` and [`ingot_trait_env`](super::trait_def::ingot_trait_env)
-/// form a query SCC that salsa fixpoint-iterates. Whenever an impl HEADER's
-/// associated-type binding names a BARE projection (`type Out = LimbMore<T::Out>`,
-/// i.e. `T::Out` written without the `<T as Pad2>` qualifier), lowering that
-/// binding runs `find_associated_type`, whose impl search unconditionally
-/// consults `ingot_trait_env` even when the assumptions-only path already
-/// resolves the projection; and `TraitEnv::collect` (behind `ingot_trait_env`)
-/// calls `collect_trait_impls` for the same ingot. So the SCC exists for ANY
+/// form a query SCC that salsa fixpoint-iterates. It is reached whenever lowering
+/// an impl HEADER's associated-type binding runs `find_associated_type` and that
+/// resolution consults `ingot_trait_env`; `TraitEnv::collect` (behind
+/// `ingot_trait_env`) in turn calls `collect_trait_impls` for the same ingot.
+/// Bare projections off a bounded rigid type parameter
+/// (`type Out = LimbMore<T::Out>`, i.e. `T::Out` written without the
+/// `<T as Pad2>` qualifier) now resolve through the bounds alone (bound-priority
+/// in `find_associated_type`) and no longer enter this SCC; the SCC remains
+/// reachable through impl-header bindings whose projections genuinely need the
+/// impl environment (concrete-receiver bare projections, multi-candidate dedup
+/// normalization), which is what this handler covers. So the SCC exists for ANY
 /// ingot carrying such a binding -- it is not specific to any one program.
 ///
 /// Salsa reports the cycle on whichever SCC member is the RE-ENTERED head, and
 /// that is fixed by entry TOPOLOGY, not program shape. `ingot_trait_env` has
 /// carried a `cycle_fn`/`cycle_initial` for years, so an ingot entered through
-/// it (the single-ingot case, and every conformance fixture of this shape) has
-/// been silently iterating this SCC all along: the "impl collection is
+/// it (the single-ingot case) has been silently iterating this SCC all along
+/// whenever a binding genuinely needs the env: the "impl collection is
 /// solve-free" invariant the old doc here claimed has in fact never held.
 /// `collect_trait_impls` becomes the head only when its ingot is entered as a
 /// DEPENDENCY -- `TraitEnv::collect(consumer)` calls

@@ -1,0 +1,6 @@
+[ingot]
+name = "assoc_proj_cycle_concrete_dep"
+version = "0.1.0"
+
+[dependencies]
+core = "../../../../../ingots/core"
