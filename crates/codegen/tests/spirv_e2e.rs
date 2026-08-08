@@ -6577,6 +6577,234 @@ fn field_mul_bn254_fr_executes_on_lavapipe_browser_profile() {
     );
 }
 
+// ===========================================================================
+// Rung 3 STEP 2: SPIR-V lowering of function-local [u32; N] arrays. Step 1
+// already proved (wasm_e2e.rs) that the ROLLED (loop-form, array-backed)
+// kernels below are bit-exact against their unrolled siblings / the
+// circomlib oracle, entirely on wasm; that gap was the fork's SPIR-V
+// translator having NO lowering at all for `MemAllocDynamic`/`Mload`/
+// `Mstore` (confirmed by RUNG3_SCOPING.md: zero matches, zero spirv_e2e.rs
+// references). The fork now emulates a private-storage heap for these ops
+// (`RUNG3_SPIRV_ARRAYS_DESIGN.md`); these tests wire the SAME authored
+// fixtures into the SPIR-V leg for the first time.
+//
+// `field_mul_bn254_fr_loop` reuses the EXACT `field_mul_wasm_gate` /
+// `field_mul_lavapipe_gate` helpers the unrolled `field_mul_bn254_fr` above
+// uses -- same signature shape (k, row, a0..a19, b0..b19), same oracle, same
+// grid driver seam -- so this is genuinely the SAME test, just now reaching
+// the array-lowering path through the private heap instead of the
+// scalar-only path the unrolled kernel takes.
+// ===========================================================================
+
+const FIELD_MUL_BN254_FR_LOOP_SOURCE: &str = include_str!("fixtures/spirv/field_mul_bn254_fr_loop.fe");
+
+/// Loop-form MSM-0a wasm leg (GPU-free): re-confirms the rolled kernel ==
+/// the bigint oracle (already proven in wasm_e2e.rs; re-checked here so this
+/// file's lavapipe gate below has a same-run wasm anchor).
+#[test]
+fn field_mul_bn254_fr_loop_wasm_leg() {
+    field_mul_wasm_gate(
+        FIELD_MUL_BN254_FR_LOOP_SOURCE,
+        "field_mul_bn254_fr_loop",
+        &bn254_fr_prime(),
+        20,
+        "MSM-0a-loop BN254 Fr (rolled, array-backed)",
+    );
+}
+
+/// Rung 3 headline slice S2-B: the rolled, array-backed field-mul compiles to
+/// naga-validated SPIR-V (MemAllocDynamic/Mload/Mstore -> the private-heap
+/// emulation) and, where a GPU is available, EXECUTES tri-equal against the
+/// unrolled kernel's own proven wasm/oracle gate. Hard-fail-not-skip on a
+/// missing GPU except under `MB2_ALLOW_GPU_SKIP` (this sandbox has no Vulkan
+/// ICD, so the GPU leg is expected to SKIP here; the compile+naga-validate
+/// half runs unconditionally either way).
+#[test]
+fn field_mul_bn254_fr_loop_executes_on_lavapipe_browser_profile() {
+    field_mul_lavapipe_gate(
+        FIELD_MUL_BN254_FR_LOOP_SOURCE,
+        "field_mul_bn254_fr_loop",
+        &bn254_fr_prime(),
+        20,
+        24, // 20 limbs, rounded up to a multiple of the 8-wide workgroup
+        "MSM-0a-loop BN254 Fr (rolled, array-backed)",
+    );
+}
+
+const POSEIDON_BN254_LOOP_SOURCE: &str = include_str!("fixtures/spirv/poseidon_bn254_loop.fe");
+const POSEIDON_MERKLE_ROOT_LOOP_SOURCE: &str =
+    include_str!("fixtures/spirv/poseidon_merkle_root_loop.fe");
+const POSEIDON_MERKLE8_ROOT_LOOP_SOURCE: &str =
+    include_str!("fixtures/spirv/poseidon_merkle8_root_loop.fe");
+
+/// Compile `source` (grid-shaped: arg0=k, arg1=row, args 2.. broadcast) to
+/// naga-validated SPIR-V through the Grid driver seam and assert the
+/// private-heap array machinery is actually engaged (not silently
+/// bypassed / dead-code-eliminated). Compile-only tier
+/// (`RUNG3_SPIRV_ARRAYS_DESIGN.md` slice S3): no GPU touched.
+fn array_kernel_grid_compiles_naga_valid(source: &str, fn_name: &str, label: &str) {
+    let mut db = DriverDataBase::default();
+    let url = Url::parse(&format!("file:///{fn_name}_grid.fe")).expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(source.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let top_mod = db.top_mod(file);
+    let package = mir::build_wasm_runtime_package(&db, top_mod)
+        .unwrap_or_else(|e| panic!("{label}: should build a wasm runtime package: {e:?}"));
+    let artifact = fe_codegen::compile_runtime_package_spirv_grid(&db, &package, [8, 8, 1])
+        .unwrap_or_else(|e| {
+            panic!("{label}: should compile Fe -> naga-validated SPIR-V in Grid mode: {e:?}")
+        });
+
+    assert_eq!(artifact.layout.mode, sonatina_codegen::isa::spirv::LayoutMode::Grid);
+    assert_eq!(artifact.layout.word, sonatina_codegen::isa::spirv::WordKind::U32);
+
+    let wgsl = artifact.wgsl.as_ref().expect("naga should emit WGSL");
+    assert_browser_profile_wgsl(wgsl);
+    assert!(
+        wgsl.contains("fe_heap"),
+        "{label}: WGSL must carry the private heap (fe_heap); got a {}-char module",
+        wgsl.len()
+    );
+    assert!(wgsl.contains("fe_bump"), "{label}: WGSL must carry the bump pointer (fe_bump)");
+    assert!(
+        wgsl.contains("fe_trapped"),
+        "{label}: WGSL must carry the trap-status channel (fe_trapped)"
+    );
+    assert!(
+        artifact.layout.bindings.iter().any(|b| b.name == "trap"),
+        "{label}: layout must state a trap binding"
+    );
+
+    eprintln!(
+        "{label}: naga-validated SPIR-V ({} words, {}-char WGSL), private-heap array machinery \
+         confirmed engaged (fe_heap/fe_bump/fe_trapped + trap binding present).",
+        artifact.words.len(),
+        wgsl.len(),
+    );
+}
+
+/// Analogous to `array_kernel_grid_compiles_naga_valid` but for Scalar mode
+/// (fixtures whose arg1 is a real broadcast input, not a second grid
+/// coordinate).
+fn array_kernel_scalar_compiles_naga_valid(source: &str, fn_name: &str, label: &str) {
+    let mut db = DriverDataBase::default();
+    let url = Url::parse(&format!("file:///{fn_name}_scalar.fe")).expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(source.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let top_mod = db.top_mod(file);
+    let package = mir::build_wasm_runtime_package(&db, top_mod)
+        .unwrap_or_else(|e| panic!("{label}: should build a wasm runtime package: {e:?}"));
+    let artifact =
+        fe_codegen::compile_runtime_package_spirv_with_workgroup(&db, &package, [1, 1, 1])
+            .unwrap_or_else(|e| {
+                panic!("{label}: should compile Fe -> naga-validated SPIR-V in Scalar mode: {e:?}")
+            });
+
+    assert_eq!(artifact.layout.mode, sonatina_codegen::isa::spirv::LayoutMode::Scalar);
+    assert_eq!(artifact.layout.word, sonatina_codegen::isa::spirv::WordKind::U32);
+
+    let wgsl = artifact.wgsl.as_ref().expect("naga should emit WGSL");
+    assert_browser_profile_wgsl(wgsl);
+    assert!(
+        wgsl.contains("fe_heap"),
+        "{label}: WGSL must carry the private heap (fe_heap); got a {}-char module",
+        wgsl.len()
+    );
+    assert!(wgsl.contains("fe_bump"), "{label}: WGSL must carry the bump pointer (fe_bump)");
+    assert!(
+        wgsl.contains("fe_trapped"),
+        "{label}: WGSL must carry the trap-status channel (fe_trapped)"
+    );
+    assert!(
+        artifact.layout.trap.is_some(),
+        "{label}: Scalar-mode layout must state a trap SpirvResult"
+    );
+
+    eprintln!(
+        "{label}: naga-validated SPIR-V ({} words, {}-char WGSL), private-heap array machinery \
+         confirmed engaged (fe_heap/fe_bump/fe_trapped + trap result present).",
+        artifact.words.len(),
+        wgsl.len(),
+    );
+}
+
+/// Rung 3 slice S3: `poseidon_bn254_loop` compiles to naga-validated SPIR-V
+/// through the SAME Grid driver seam as `field_mul_bn254_fr_loop` above.
+/// This is the rung's headline kernel: 18 function-local arrays (~2442 u32
+/// elements incl. a 1950-element round-constant table), the SAME Fe source
+/// already proven bit-exact against circomlib on wasm (wasm_e2e.rs::
+/// loop_form_bn254_poseidon_hash2_matches_circomlib_and_u256_form_on_wasm_at_o0_and_o2).
+/// GPU tri-equal execution (design doc slice S2-C) is lavapipe-gated and out
+/// of scope in this sandbox; this test earns R-val (validated, not
+/// executed).
+///
+/// The Sonatina straight-line lowering / opt pipeline recurses deeply enough
+/// over this ~2.8k-statement function to exhaust a default libtest thread
+/// stack -- the SAME reason wasm_e2e.rs's Poseidon dual gate runs on a
+/// wide-stack worker thread (`loop_form_bn254_poseidon_hash2_matches_
+/// circomlib_and_u256_form_on_wasm_at_o0_and_o2`); this test does too, since
+/// it goes through the identical `compile_runtime_package_wasm` front half
+/// before handing off to the SPIR-V translator.
+#[test]
+fn poseidon_bn254_loop_compiles_naga_valid_spirv() {
+    std::thread::Builder::new()
+        .stack_size(1 << 31)
+        .spawn(|| {
+            array_kernel_grid_compiles_naga_valid(
+                POSEIDON_BN254_LOOP_SOURCE,
+                "poseidon_bn254_loop",
+                "Rung 3 poseidon_bn254_loop",
+            );
+        })
+        .expect("spawn wide-stack worker for the Poseidon SPIR-V compile")
+        .join()
+        .expect("Poseidon SPIR-V compile worker thread should not panic");
+}
+
+/// Rung 3 slice S3: the serial N=4 Merkle-root builder (Step 1's Slice D
+/// kernel, already proven vs a bigint tree oracle on wasm) compiles to
+/// naga-validated SPIR-V. Scalar mode: this fixture's arg1 is the first
+/// broadcast leaf limb (`in0`), not a second grid coordinate, unlike
+/// `poseidon_bn254_loop`'s `(k, row, ...)` shape. Same wide-stack
+/// accommodation as the Poseidon kernel above (same front-half pipeline,
+/// similar statement count).
+#[test]
+fn poseidon_merkle_root_loop_compiles_naga_valid_spirv() {
+    std::thread::Builder::new()
+        .stack_size(1 << 31)
+        .spawn(|| {
+            array_kernel_scalar_compiles_naga_valid(
+                POSEIDON_MERKLE_ROOT_LOOP_SOURCE,
+                "poseidon_merkle_root_loop",
+                "Rung 3 poseidon_merkle_root_loop (N=4)",
+            );
+        })
+        .expect("spawn wide-stack worker for the N=4 Merkle-root SPIR-V compile")
+        .join()
+        .expect("N=4 Merkle-root SPIR-V compile worker thread should not panic");
+}
+
+/// Rung 3 slice S3: the serial N=8 Merkle-root builder compiles to
+/// naga-validated SPIR-V. Same shape as the N=4 gate above with a wider
+/// `buf` scratch array (8 leaves instead of 4); same 18 base arrays.
+#[test]
+fn poseidon_merkle8_root_loop_compiles_naga_valid_spirv() {
+    std::thread::Builder::new()
+        .stack_size(1 << 31)
+        .spawn(|| {
+            array_kernel_scalar_compiles_naga_valid(
+                POSEIDON_MERKLE8_ROOT_LOOP_SOURCE,
+                "poseidon_merkle8_root_loop",
+                "Rung 3 poseidon_merkle8_root_loop (N=8)",
+            );
+        })
+        .expect("spawn wide-stack worker for the N=8 Merkle-root SPIR-V compile")
+        .join()
+        .expect("N=8 Merkle-root SPIR-V compile worker thread should not panic");
+}
+
 /// Regression for the QCGA renderer's stable quadratic-root diamond: its
 /// value-producing nested conditionals must structurize for Render SPIR-V and
 /// execute byte-identically to the same Fe export compiled to Wasm.
