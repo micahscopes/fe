@@ -858,6 +858,178 @@ fn rollcall_merkle_root_native_cranelift_leg_is_honestly_reported() {
     }
 }
 
+// ============================================================================
+// N=8 (depth-3) Merkle-root builder: the SAME honest-probe cross-backend
+// check as the N=4 case above, over `poseidon_merkle8_root_loop.fe` (Step
+// 1's Slice D generalization) and its own `(i32 x 161) -> i32` native ABI
+// (`NativeMerkle8RootEntryArtifact`).
+// ============================================================================
+
+const MERKLE8_SRC: &str = include_str!("fixtures/spirv/poseidon_merkle8_root_loop.fe");
+const MERKLE8_LEAF_COUNT: usize = 8;
+
+/// PROVE (wasm leg): compile + run the serial wasm N=8 Poseidon-Merkle root
+/// builder over `leaves`, returning the root as a field element. Wide-stack
+/// worker thread for the same reason as the N=4 builder (a large generated
+/// function).
+fn merkle8_root_on_wasm(leaves: &[BigUint]) -> BigUint {
+    assert_eq!(leaves.len(), MERKLE8_LEAF_COUNT, "this end-to-end uses the N=8 (depth-3) builder");
+    let leaves = leaves.to_vec();
+    std::thread::Builder::new()
+        .stack_size(1 << 31)
+        .spawn(move || merkle8_root_on_wasm_body(&leaves))
+        .expect("spawn wide-stack worker for the N=8 wasm Merkle builder")
+        .join()
+        .expect("N=8 wasm Merkle worker thread should not panic")
+}
+
+fn merkle8_root_on_wasm_body(leaves: &[BigUint]) -> BigUint {
+    let n = MERKLE_N_LIMBS;
+    let mut db = DriverDataBase::default();
+    let url =
+        Url::parse("file:///poseidon_merkle8_root_loop.fe").expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(MERKLE8_SRC.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let top_mod = db.top_mod(file);
+    let bytes = BackendKind::Wasm
+        .create()
+        .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
+        .expect("wasm compilation of the N=8 Merkle builder should succeed")
+        .into_bytecode()
+        .expect("wasm output should be bytecode");
+
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &bytes).expect("wasmtime should load the module");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance =
+        wasmtime::Instance::new(&mut store, &module, &[]).expect("wasmtime should instantiate");
+    let f = instance
+        .get_func(&mut store, "poseidon_merkle8_root_loop")
+        .expect("`poseidon_merkle8_root_loop` export should exist");
+
+    let leaf_limbs: Vec<Vec<u32>> = leaves.iter().map(|x| merkle_to_limbs(x, n)).collect();
+    let mut root_limbs = Vec::with_capacity(n);
+    for k in 0..n {
+        let mut params: Vec<wasmtime::Val> = Vec::with_capacity(1 + leaf_limbs.len() * n);
+        params.push(wasmtime::Val::I32(k as i32));
+        for leaf in &leaf_limbs {
+            for &l in leaf {
+                params.push(wasmtime::Val::I32(l as i32));
+            }
+        }
+        let mut results = [wasmtime::Val::I32(0)];
+        f.call(&mut store, &params, &mut results).unwrap_or_else(|e| {
+            panic!("N=8 merkle builder (k={k}) should run under wasmtime: {e:?}")
+        });
+        root_limbs.push(match results[0] {
+            wasmtime::Val::I32(v) => v as u32,
+            other => panic!("N=8 merkle builder result must be i32, got {other:?}"),
+        });
+    }
+    merkle_limbs_to_biguint(&root_limbs)
+}
+
+/// Native/Cranelift leg: the N=8 builder's real ABI is `(i32 x 161) -> i32`
+/// (one output-limb index + 8 leaves x 20 Montgomery limbs), via
+/// `NativeMerkle8RootEntryArtifact`. Returns `Err` (never panics) on a
+/// compile-time lowering failure so the caller can report it honestly.
+#[cfg(all(
+    feature = "native-backend",
+    not(target_arch = "wasm32"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn merkle8_root_on_native(leaves: &[BigUint]) -> Result<BigUint, String> {
+    assert_eq!(leaves.len(), MERKLE8_LEAF_COUNT, "this end-to-end uses the N=8 (depth-3) builder");
+    let leaves = leaves.to_vec();
+    std::thread::Builder::new()
+        .stack_size(1 << 31)
+        .spawn(move || merkle8_root_on_native_body(&leaves))
+        .expect("spawn wide-stack worker for the N=8 native Merkle builder")
+        .join()
+        .expect("N=8 native Merkle worker thread should not panic")
+}
+
+#[cfg(all(
+    feature = "native-backend",
+    not(target_arch = "wasm32"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn merkle8_root_on_native_body(leaves: &[BigUint]) -> Result<BigUint, String> {
+    let n = MERKLE_N_LIMBS;
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///poseidon_merkle8_root_loop_native.fe")
+        .expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(MERKLE8_SRC.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let top_mod = db.top_mod(file);
+    let package =
+        mir::build_wasm_runtime_package_for_entry(&db, top_mod, "poseidon_merkle8_root_loop")
+            .expect("N=8 merkle builder should build a native-entry runtime package");
+    let artifact = fe_codegen::compile_runtime_package_native_merkle8_root_entry(
+        &db,
+        &package,
+        "poseidon_merkle8_root_loop",
+    )
+    .map_err(|error| error.to_string())?;
+
+    let leaf_limbs: Vec<Vec<u32>> = leaves.iter().map(|x| merkle_to_limbs(x, n)).collect();
+    let mut root_limbs = Vec::with_capacity(n);
+    for k in 0..n {
+        let mut args = [0i32; fe_codegen::MERKLE8_ROOT_NATIVE_ENTRY_ARITY];
+        args[0] = k as i32;
+        let mut idx = 1;
+        for leaf in &leaf_limbs {
+            for &l in leaf {
+                args[idx] = l as i32;
+                idx += 1;
+            }
+        }
+        let result = artifact.call(&args);
+        root_limbs.push(result as u32);
+    }
+    Ok(merkle_limbs_to_biguint(&root_limbs))
+}
+
+/// The N=8 analog of `rollcall_merkle_root_native_cranelift_leg_is_honestly_
+/// reported` above: independently EXECUTES `poseidon_merkle8_root_loop` on
+/// native/Cranelift over 8 leaves and cross-checks against the wasm-built
+/// root. A probe, not a foregone conclusion, for the SAME reason as the N=4
+/// case: records and asserts on whatever actually happens.
+#[cfg(all(
+    feature = "native-backend",
+    not(target_arch = "wasm32"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[test]
+fn rollcall_merkle8_root_native_cranelift_leg_is_honestly_reported() {
+    let leaves_u64: [u64; MERKLE8_LEAF_COUNT] = [111, 222, 333, 444, 555, 666, 777, 888];
+    let leaves_big: Vec<BigUint> = leaves_u64.iter().map(|&v| BigUint::from(v)).collect();
+
+    let wasm_root = merkle8_root_on_wasm(&leaves_big);
+    match merkle8_root_on_native(&leaves_big) {
+        Ok(native_root) => {
+            assert_eq!(
+                wasm_root, native_root,
+                "the native/Cranelift-executed N=8 Poseidon-Merkle root must equal the \
+                 wasm-executed root (same kernel, same 8 leaves, two independent backends)"
+            );
+            eprintln!(
+                "Rollcall N=8 native/Cranelift leg: root == wasm-built root (0x{})",
+                wasm_root.to_str_radix(16)
+            );
+        }
+        Err(message) => {
+            eprintln!(
+                "Rollcall N=8 native/Cranelift leg: native execution is NOT currently possible \
+                 on this pinned Sonatina rev for an array-using kernel: {message}. Re-lands \
+                 with the fork re-pin (Decision 5)."
+            );
+        }
+    }
+}
+
 /// GPU/SPIR-V leg: attempts to compile + naga-validate the SAME kernel through
 /// `compile_runtime_package_spirv`. This is a probe, not a foregone
 /// conclusion: the kernel uses function-local `[u32; N]` arrays

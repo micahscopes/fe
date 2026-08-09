@@ -15,8 +15,11 @@ mod wasm_lower;
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 pub use native::{
-    MERKLE_ROOT_NATIVE_ENTRY_ARITY, NativeI32EntryArtifact, NativeMerkleRootEntryArtifact,
-    compile_runtime_package_native_i32_entry, compile_runtime_package_native_merkle_root_entry,
+    GRID_LOOP_NATIVE_ENTRY_ARITY, MERKLE8_ROOT_NATIVE_ENTRY_ARITY, MERKLE_ROOT_NATIVE_ENTRY_ARITY,
+    NativeGridLoopEntryArtifact, NativeI32EntryArtifact, NativeMerkle8RootEntryArtifact,
+    NativeMerkleRootEntryArtifact, compile_runtime_package_native_grid_loop_entry,
+    compile_runtime_package_native_i32_entry, compile_runtime_package_native_merkle8_root_entry,
+    compile_runtime_package_native_merkle_root_entry,
 };
 #[cfg(feature = "spirv-backend")]
 pub use spirv_lower::{
