@@ -27,36 +27,40 @@
 //! limb-for-limb + escape iteration counts, L=4 and L=8). This is the general
 //! CTFE form instantiated at 8, not a bespoke fixed-point copy.
 //!
-//! The COMPLEX-PLANE CENTER and the GESTURE/VIEW PLUMBING stay df64: the actor
-//! state is a flat `(hi, lo): (f32, f32)` pair per axis
-//! (`center_x_hi`/`center_x_lo`, `center_y_hi`/`center_y_lo`) that the wasm
-//! export signature and the web control-manifest bind by name, and `update_view`
-//! keeps folding pan/zoom/anchor deltas into that df64 center through
-//! `add_f32<2>` (unchanged, still oracle-gated). Only the per-pixel `escape`
-//! path changed: it assembles the df64 center + `u*zoom`/`v*zoom` offset into a
-//! deep `Fixed<8>` coordinate (`from_df64_offset`, each f32 source's bits
-//! stitched by the exact Fixed add) and iterates in integer `Fixed<8>`.
+//! DEEP CENTER (increment 1). The per-pixel coordinate `c` is assembled from a
+//! FOUR-WORD f32 float-expansion base (`Expansion<4>` / qf128 territory,
+//! ~1e-27) plus the `u*zoom`/`v*zoom` offset, all stitched into one `Fixed<8>`
+//! value by the exact Fixed add (`from_qf_offset`). The two leading words are
+//! the gesture-plumbing df64 pair (`center_x_hi`/`center_x_lo`,
+//! `center_y_hi`/`center_y_lo`, still `update_view`-driven via `add_f32<2>`,
+//! unchanged and oracle-gated); the two trailing words (`CENTER_*_DEEP2/DEEP3`)
+//! are CONSTS carrying the deep low-order bits BELOW the df64 (two-f32) floor,
+//! seeding a real Seahorse-Valley location to ~1e-27. Those deep bits are
+//! un-representable in a two-word df64 center: dropping them shifts the view by
+//! ~768 pixels at the default `zoom = 1e-16` (proven, GPU-free, in
+//! `crates/codegen/tests/precision_deep_center_oracle.rs`: adjacent deep pixels
+//! resolve to DISTINCT `Fixed<8>` c values, which a df64 center could not).
 //!
 //!     fe web build demos/sketches/mandelbrot --out <dir>
 //!
 //! Software rendering (lavapipe/SwiftShader) in the sandbox; no performance or
 //! parallelism claim (VISION 3.1).
 //!
-//! Honesty register: the center is seeded to df64 precision (the preserved
-//! gesture plumbing, ~14 digits / usable zoom floor ~1e-11), so absolute zoom
-//! depth is still df64-bounded; what `Fixed<8>` buys is that the render stays
-//! CORRECT ON THE GPU at that depth (df64 silently degrades to ~f32 there once
-//! the shader compiler reassociates), plus a full ~27-digit integer iteration.
-//! Going deeper than the df64 center floor needs the center supplied at
-//! `Fixed` precision from the host (per-limb view params) rather than as a df64
-//! pair, and the 1e-100+ regime needs perturbation (reference-orbit) rendering;
-//! both are out of scope here.
+//! Honesty register: the deep low-order bits are seeded as CONSTS, so the
+//! INITIAL view is a fixed deep location; interactive pan at `zoom < ~1e-14`
+//! still moves only the df64 leading pair (deep-pan needs the trailing words
+//! promoted to gesture-driven fields, increment 2), and the 1e-100+ regime
+//! needs perturbation (reference-orbit) rendering (out of scope). What is
+//! proven here: the coordinate carried into the GPU escape holds full `Fixed<8>`
+//! (~1e-27) precision, past the ~1e-11 df64 wall, and stays GPU-faithful
+//! because the orbit is integer `Fixed<8>` (df64's error-free transforms
+//! collapse under WGSL reassociation; memory: gpu-df64-dead-end-use-perturbation).
 
 use std::webgpu::{FragmentSurface, GpuProgram, UpdateSurface, WebGpuBackend}
 use std::web::view::{Extent, Param, Surface}
 use fmath::{from_i32, palette, to_i32}
 use precision::{add_f32, from_pair, to_pair}
-use precision::fixed::{from_df64_offset, escape as fx_escape}
+use precision::fixed::{from_qf_offset, escape as fx_escape}
 
 // Iteration-budget scaling: deeper zoom needs more iterations to resolve the
 // boundary. `max_iter_for_zoom` grows the trip count with how far `zoom` has
@@ -72,11 +76,23 @@ const CENTER_X_MIN: f32 = -2.5
 const CENTER_X_MAX: f32 = 1.0
 const CENTER_Y_MIN: f32 = -1.5
 const CENTER_Y_MAX: f32 = 1.5
-// The Expansion<2> floor: about 14 significant digits of (hi, lo) f32 gets a
-// usable picture down to roughly 1e-11 before the per-pixel step underflows
-// again.
-const ZOOM_MIN: f32 = 0.00000000001
+// The `Fixed<8>` floor (~2^-91 ~ 1e-27): the per-pixel coordinate is carried at
+// full `Fixed<8>` width, so the zoom is no longer bounded at the old ~1e-11
+// df64 wall. Held just above the resolution limit.
+const ZOOM_MIN: f32 = 0.000000000000000000000000001
 const ZOOM_MAX: f32 = 3.0
+
+// The DEEP low-order center words (`w2`, `w3` of the four-word `Expansion<4>`
+// base per axis), a real Seahorse-Valley location (main-cardioid / period-2
+// neck) seeded BELOW the df64 (two-f32) floor so the center reaches ~1e-27. The
+// leading two words are the gesture-driven `center_*_hi`/`center_*_lo` fields;
+// these trailing two are consts (increment 1). `w2 ~ 1e-16` alone is already
+// un-representable in a df64 center: dropping it moves the view ~768 px at the
+// default `zoom = 1e-16`.
+const CENTER_X_DEEP2: f32 = -0.0000000000000003
+const CENTER_X_DEEP3: f32 = -0.00000000000000000000002
+const CENTER_Y_DEEP2: f32 = 0.00000000000000025
+const CENTER_Y_DEEP3: f32 = 0.000000000000000000000015
 
 /// One wheel notch: `dzoom < 0` zooms IN (7/8), `dzoom > 0` zooms OUT (9/8),
 /// `dzoom == 0` leaves `zoom` unchanged. Same per-notch ratios as
@@ -185,11 +201,16 @@ actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
         Surface {
             extent: Extent::square(512),
             params: MandelbrotParams {
-                center_x_hi: Param::range(min: -2.5, max: 1.0, init: -0.5),
-                center_x_lo: Param::fixed(0.0),
-                center_y_hi: Param::range(min: -1.5, max: 1.5, init: 0.0),
-                center_y_lo: Param::fixed(0.0),
-                zoom: Param::log(min: 0.00000000001, max: 3.0, init: 1.5),
+                // The df64 leading pair of the deep Seahorse-Valley center
+                // (`hi` visible on the slider, `lo` the next ~7 digits); the
+                // trailing deep words are the `CENTER_*_DEEP2/DEEP3` consts.
+                center_x_hi: Param::range(min: -2.5, max: 1.0, init: -0.7436438798904419),
+                center_x_lo: Param::fixed(-0.0000000071467170),
+                center_y_hi: Param::range(min: -1.5, max: 1.5, init: 0.1318259090185165),
+                center_y_lo: Param::fixed(-0.0000000048132045),
+                // Default to a DEEP view (~1e-16, far past the old ~1e-11 df64
+                // wall) so the deep center is visible on load.
+                zoom: Param::log(min: 0.000000000000000000000000001, max: 3.0, init: 0.0000000000000001),
                 res: Param::extent_x(),
             },
         }
@@ -205,15 +226,18 @@ actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
         let u: f32 = (from_i32(px) + 0.5) / self.res * 2.0 - 1.0
         let v: f32 = 1.0 - (from_i32(py) + 0.5) / self.res * 2.0
 
-        // The per-pixel coordinate as a deep `Fixed<8>` value: the df64 center
-        // `(hi, lo)` plus the small `u*zoom`/`v*zoom` offset, each an f32 source
-        // whose ~24 real bits land at their own magnitude and are stitched by
-        // the exact Fixed add (`from_df64_offset`). The gesture/view plumbing
-        // stays df64 (`update_view` below), so the center is seeded to df64
-        // precision; the ITERATION then runs at full Fixed<8> width, integer
+        // The per-pixel coordinate as a deep `Fixed<8>` value: a FOUR-WORD
+        // float-expansion center (the gesture-driven df64 pair `hi`/`lo` plus
+        // the two deep const words `DEEP2`/`DEEP3` below the df64 floor) plus
+        // the small `u*zoom`/`v*zoom` offset, all f32 sources whose ~24 real
+        // bits land at their own magnitude and are stitched by the exact Fixed
+        // add (`from_qf_offset`). The center now reaches ~1e-27, past the old
+        // ~1e-11 df64 wall; the ITERATION runs at full Fixed<8> width, integer
         // and GPU-faithful.
-        let (cx_s, cx) = from_df64_offset<8>(self.center_x_hi, self.center_x_lo, u * self.zoom)
-        let (cy_s, cy) = from_df64_offset<8>(self.center_y_hi, self.center_y_lo, v * self.zoom)
+        let (cx_s, cx) = from_qf_offset<8>(
+            self.center_x_hi, self.center_x_lo, CENTER_X_DEEP2, CENTER_X_DEEP3, u * self.zoom)
+        let (cy_s, cy) = from_qf_offset<8>(
+            self.center_y_hi, self.center_y_lo, CENTER_Y_DEEP2, CENTER_Y_DEEP3, v * self.zoom)
 
         let max_iter: i32 = max_iter_for_zoom(self.zoom)
         // The general integer escape loop (z <- z*z + c, strict |z|^2 > 4). It

@@ -1,0 +1,57 @@
+//! Gate fixture for the DEEP-CENTER oracle
+//! (`crates/codegen/tests/precision_deep_center_oracle.rs`; precision axis,
+//! mandelbrot increment 1). Thin per-limb wasm-export wrappers around the real
+//! general form `precision::fixed::from_qf_offset<8>`: the EXACT construction
+//! `demos/sketches/mandelbrot`'s `escape` uses to turn a four-word f32
+//! float-expansion center (`Expansion<4>`) plus a per-pixel `u*zoom` offset
+//! into one deep `Fixed<8>` coordinate.
+//!
+//! The Rust oracle compiles this to wasm, runs it under wasmtime, and proves
+//! (GPU-free) that the coordinate carries full `Fixed<8>` (~1e-27) precision:
+//! two adjacent deep pixels resolve to DISTINCT `Fixed<8>` c values, while the
+//! same construction with the two deep words dropped (a df64 / two-word center)
+//! lands many pixels away -- i.e. df64 could not reach this location.
+//!
+//! Per-STATIC-limb wrappers exist because `Limbs<8>` is an HList struct, not an
+//! array, so a runtime limb INDEX cannot select a field (same convention as the
+//! `precision_fixed_oracle_ingot`).
+
+use precision::fixed::from_qf_offset
+use precision::field::Limbs
+
+pub fn deep_center_l8_sign(w0: f32, w1: f32, w2: f32, w3: f32, off: f32) -> u32 {
+    let (s, _m) = from_qf_offset<8>(w0, w1, w2, w3, off)
+    s
+}
+pub fn deep_center_l8_limb0(w0: f32, w1: f32, w2: f32, w3: f32, off: f32) -> u32 {
+    let (_s, m) = from_qf_offset<8>(w0, w1, w2, w3, off)
+    m.lead
+}
+pub fn deep_center_l8_limb1(w0: f32, w1: f32, w2: f32, w3: f32, off: f32) -> u32 {
+    let (_s, m) = from_qf_offset<8>(w0, w1, w2, w3, off)
+    m.tail.lead
+}
+pub fn deep_center_l8_limb2(w0: f32, w1: f32, w2: f32, w3: f32, off: f32) -> u32 {
+    let (_s, m) = from_qf_offset<8>(w0, w1, w2, w3, off)
+    m.tail.tail.lead
+}
+pub fn deep_center_l8_limb3(w0: f32, w1: f32, w2: f32, w3: f32, off: f32) -> u32 {
+    let (_s, m) = from_qf_offset<8>(w0, w1, w2, w3, off)
+    m.tail.tail.tail.lead
+}
+pub fn deep_center_l8_limb4(w0: f32, w1: f32, w2: f32, w3: f32, off: f32) -> u32 {
+    let (_s, m) = from_qf_offset<8>(w0, w1, w2, w3, off)
+    m.tail.tail.tail.tail.lead
+}
+pub fn deep_center_l8_limb5(w0: f32, w1: f32, w2: f32, w3: f32, off: f32) -> u32 {
+    let (_s, m) = from_qf_offset<8>(w0, w1, w2, w3, off)
+    m.tail.tail.tail.tail.tail.lead
+}
+pub fn deep_center_l8_limb6(w0: f32, w1: f32, w2: f32, w3: f32, off: f32) -> u32 {
+    let (_s, m) = from_qf_offset<8>(w0, w1, w2, w3, off)
+    m.tail.tail.tail.tail.tail.tail.lead
+}
+pub fn deep_center_l8_limb7(w0: f32, w1: f32, w2: f32, w3: f32, off: f32) -> u32 {
+    let (_s, m) = from_qf_offset<8>(w0, w1, w2, w3, off)
+    m.tail.tail.tail.tail.tail.tail.tail.value
+}

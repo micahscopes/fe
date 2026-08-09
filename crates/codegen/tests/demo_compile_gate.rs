@@ -252,9 +252,10 @@ fn mandelbrot_sketch_compiles() {
 
 const MANDELBROT_CENTER_X_RANGE: (f32, f32) = (-2.5, 1.0);
 const MANDELBROT_CENTER_Y_RANGE: (f32, f32) = (-1.5, 1.5);
-// The df64 zoom floor (about 14 significant df64 digits gets a usable
-// picture down to roughly 1e-11); mirrors `lib.fe`'s `ZOOM_MIN`.
-const MANDELBROT_ZOOM_RANGE: (f32, f32) = (0.00000000001, 3.0);
+// The `Fixed<8>` zoom floor (~2^-91 ~ 1e-27): the per-pixel coordinate is
+// carried at full `Fixed<8>` width, so the zoom is no longer bounded at the old
+// ~1e-11 df64 wall; mirrors `lib.fe`'s `ZOOM_MIN`.
+const MANDELBROT_ZOOM_RANGE: (f32, f32) = (0.000000000000000000000000001, 3.0);
 const MANDELBROT_RES: f32 = 512.0;
 
 /// Knuth's TwoSum, mirroring `lib.fe`'s `two_sum`: exact `a + b` as `(s, e)`
@@ -403,16 +404,16 @@ fn mandelbrot_control_manifest_projects_gesture_bindings() {
 /// the tape visits every clamp arm (coverage, not just "never observed to
 /// escape").
 ///
-/// `ZOOM_MIN` is a df64-depth floor (`~1e-11`) a purely random 3-way `dzoom`
-/// walk cannot reach in any reasonable step budget: reaching it from the
-/// declared init (`1.5`) takes about `ln(1e-11/1.5)/ln(0.875) ~= 193`
+/// `ZOOM_MIN` is now the `Fixed<8>` depth floor (`~1e-27`) a purely random
+/// 3-way `dzoom` walk cannot reach in any reasonable step budget: reaching it
+/// from the declared init (`1.5`) takes about `ln(1e-27/1.5)/ln(0.875) ~= 469`
 /// CONSECUTIVE zoom-in notches, vanishingly unlikely at random (unlike
 /// `ZOOM_MAX`, ~6 consecutive zoom-out notches away, which the random walk
 /// reaches easily). So the tape runs the ORIGINAL random walk FIRST (the
 /// regime that actually exercises the centre clamps: panning sensitivity is
 /// `2*zoom/res`, so it needs zoom to stay near a normal size, not buried at
-/// the df64 floor), then APPENDS `FORCE_ZOOM_IN_STEPS` deterministic zoom-in
-/// notches (cursor centred, so the anchor term is exactly zero) to guarantee
+/// the depth floor), then APPENDS `FORCE_ZOOM_IN_STEPS` deterministic zoom-in
+/// notches (cursor centred, so the anchor term is near zero) to guarantee
 /// `ZOOM_MIN` coverage from wherever the random walk left `zoom`. Every step,
 /// forced or random, still runs through wasmtime and is checked against the
 /// oracle.
@@ -445,9 +446,9 @@ fn mandelbrot_update_view_matches_oracle_over_gesture_tape() {
     let (mut hit_zoom_lo, mut hit_zoom_hi) = (0u32, 0u32);
     const RANDOM_STEPS: usize = 3_000;
     // From the worst-case starting point the random phase can leave zoom at
-    // (`ZOOM_MAX = 3.0`): `ln(1e-11/3.0)/ln(0.875) ~= 198`, so 220 gives
+    // (`ZOOM_MAX = 3.0`): `ln(1e-27/3.0)/ln(0.875) ~= 474`, so 520 gives
     // margin.
-    const FORCE_ZOOM_IN_STEPS: usize = 220;
+    const FORCE_ZOOM_IN_STEPS: usize = 520;
     const STEPS: usize = RANDOM_STEPS + FORCE_ZOOM_IN_STEPS;
     for step in 0..STEPS {
         let (dx, dy, dzoom, mx, my) = if step < RANDOM_STEPS {
