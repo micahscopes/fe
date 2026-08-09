@@ -46,41 +46,40 @@
 //!      where the fold genuinely IS associative, e.g. Poseidon's MDS
 //!      contraction or a Merkle tree's combine) is untouched by this file.
 //!   3. The measured wall is N=255 for a linear chain under a trait fold (P0
-//!      Probe 1). BN254 Fr needs `L=20` (`Limbs<20>`) and the WORKING width
-//!      `L+2=22` (`Pad2::Out`, see below): both far below the wall, and in
-//!      the same safe range P0 Probe 3 and `Expansion<N>` already exercised.
+//!      Probe 1). This is now moot for `mul`'s kernel: since the loop-form
+//!      re-author (below) the CIOS arithmetic runs over `[u32; L]` arrays and
+//!      `while` loops, NOT a depth-`L` trait fold, so no recursive `Limbs`
+//!      chain is folded inside `mul`. The linear chain survives only as the
+//!      Stage-1 boundary ABI (`Head`/`ShiftAppend`/`Zero` adapters) and as
+//!      Fixed's still-chain-form kernel, both well below the wall.
 //!
-//! WORKING WIDTH (`Pad2`): CIOS needs 2 extra headroom limbs beyond the
-//! logical `L` during each row (the multiply-accumulate and reduce-accumulate
-//! carries can spill past position `L-1`), exactly as the existing kernels'
-//! own `t` arrays are `L+2` long (`field_mul_bn254_fr_loop.fe`). Rather than
-//! replicate that kernel's own shifted-index bookkeeping, this file reduces
-//! each CIOS row to ONE UNIFORM identity, `t := (t + a*b_i + m*p) / base`,
-//! computed as two full-width `Mac` passes over the padded `L+2` width
-//! followed by an EXACT division by `base` (dropping the guaranteed-zero low
-//! limb, i.e. `ShiftAppend`). This is mathematically equivalent to the
-//! existing kernels' piecewise shift (REDC has a UNIQUE correct output for
-//! given operands, unlike float expansions there is no op-order-dependent
-//! rounding to match), verified independently by the bit-identical oracle
-//! (`crates/codegen/tests/precision_field_bn254fr_oracle.rs`), not merely
-//! trusted by construction.
+//! LOOP FORM (the codegen-volume fix; see `mul`'s own doc): CIOS needs 2
+//! headroom limbs beyond the logical `L` during each row (the multiply- and
+//! reduce-accumulate carries can spill past position `L-1`), exactly as the
+//! existing kernels' `t` arrays are `L+2` long (`field_mul_bn254_fr_loop.fe`).
+//! The unrolled chain form (retired below) carried that headroom in a padded
+//! TYPE `<Limbs<L> as Pad2>::Out` (`Limbs<{L+2}>`), which forced `{L+2}`
+//! const-arithmetic, a `DropLast` kind-check wart, and a padded return; worse,
+//! its two full-width `Mac`/`ShiftAppend` folds monomorphized to O(L^2)
+//! emitted code, the wall that blocked `L=20`. `mul` is now authored in LOOP
+//! FORM: the two headroom limbs are TWO SCALAR u32 locals (`t_l`/`t_l1`, the
+//! fixed positions the kernels touch as `t[20]`/`t[21]`), the accumulator is a
+//! function-local `[u32; L]` array, and the rows/macs are `while` loops with
+//! runtime indices. No padded type exists, so `Pad2`/`{L+2}`/`DropLast` all
+//! dissolve and the return type is plain `Limbs<L>`; the emitted kernel is
+//! O(1) in `L`. REDC has a UNIQUE correct output for given operands (unlike
+//! float expansions there is no op-order-dependent rounding), so the loop form
+//! is bit-identical to the unrolled and hand-loop twins by construction,
+//! verified independently by the bit-identical oracle
+//! (`crates/codegen/tests/precision_field_bn254fr_oracle.rs`).
 //!
-//! `Field<p>`'s canonical VALUE representation is the WORKING width itself
-//! (`<Limbs<L> as Pad2>::Out`, i.e. `Limbs<{L+2}>`, with the top 2 limbs
-//! always zero for an in-range element): `mul` takes logical-width operands
-//! (`Limbs<L>`, what a caller/oracle harness naturally holds) and returns the
-//! padded width. A generic "drop the last 2 limbs" combinator was attempted
-//! and hits a genuine compiler limitation (see the task report): projecting
-//! an associated type through an ABSTRACT (not-yet-concrete) recursive bound
-//! -- `<More<T> as DropLast>::Out` for free `T` -- fails kind-checking
-//! (`expected a fully-applied type (kind *) here`), while the SAME shape
-//! projected through a bound on a bare type parameter (`Pad2`'s `T::Out`, or
-//! `<Limbs<L> as Pad2>::Out` for an abstract `const L`) works fine. Rather
-//! than force a workaround, this file keeps the padded width as the return
-//! type (mathematically sound: the top 2 limbs are always zero for any valid
-//! element) and lets concrete call sites (fixed `L`) extract individual
-//! limbs by direct, ground field access, exactly the same mechanism the
-//! oracle harness already needs for its own per-limb wasm export ABI.
+//! The chain combinators below (`Mac`/`ShiftAppend`/`Head`/`Zero`/`SubBorrow`/
+//! `Select`/`Pad2`/`Rows`/`row`/`canonicalize`) all remain: `Fixed<L>`
+//! (`fixed.fe`) still imports the shared folds, and `mul`'s Stage-1 boundary
+//! adapters use `Head`/`ShiftAppend`/`Zero`. The `Pad2`/`Rows`/`row`/
+//! `canonicalize` combinators are no longer referenced by `mul` and are
+//! scheduled for deletion in the Stage-3 subsumption slice (they are not
+//! monomorphized by any live call site, so they add zero emitted code today).
 
 use core::marker::Copy
 
@@ -324,21 +323,123 @@ pub trait Modulus<const L: usize> {
     fn mu() -> u32
 }
 
-/// `Field<p>::mul`: the general entry point. `L` and `M` are explicit at
-/// every call site (mirrors `Expansion<N>`'s own doctrine: consts are not
-/// inferred from a concrete argument by this compiler). Returns the WORKING
-/// width (`Pad2::Out`, i.e. `Limbs<{L+2}>`, top 2 limbs always zero); see the
-/// module doc for why.
-pub fn mul<const L: usize, M: Modulus<L>>(_ a: Limbs<L>, _ b: Limbs<L>) -> <Limbs<L> as Pad2>::Out
-    where Limbs<L>: Pad2 + Rows< <Limbs<L> as Pad2>::Out > + Copy,
-          <Limbs<L> as Pad2>::Out: Mac + ShiftAppend + Head + Zero + SubBorrow + Select + Copy,
+/// `Field<p>::mul`: the general entry point, LOOP FORM. `L` and `M` are
+/// explicit at every call site (mirrors `Expansion<N>`'s own doctrine: consts
+/// are not inferred from a concrete argument by this compiler).
+///
+/// The CIOS kernel runs over FUNCTION-LOCAL `[u32; L]` limb arrays with
+/// `while` loops (runtime indices), so the EMITTED CODE is O(1) in `L`: the
+/// quadratic monomorphization wall the fully-unrolled chain fold hit at L=20
+/// is gone. `L` reaches the body as a runtime value via `L.downcast_truncate()`
+/// (a bare const param used as a value; proven to lower through wasm codegen).
+/// The two CIOS headroom limbs above position `L-1` live in TWO SCALAR u32
+/// locals (`t_l`, `t_l1`), exactly the fixed positions the existing kernels
+/// touch as `t[20]`/`t[21]`: no padded TYPE exists, so `Pad2`/`{L+2}`/the
+/// DropLast wart all dissolve and the return type is plain `Limbs<L>`.
+///
+/// BOUNDARY (Stage 1): operands and the modulus arrive as `Limbs<L>` cons
+/// chains (the committed call/oracle ABI). O(L)-code spill/rebuild `while`
+/// loops move them to/from the `[u32; L]` arrays over the committed `Head` /
+/// `ShiftAppend` / `Zero` folds (spill: read `head()`, rotate down; rebuild:
+/// feed limb 0..L-1 into `shift_append` from `zero()`). This costs O(L^2)
+/// runtime limb moves per call but O(L) EMITTED bytes; Stage 2 flips the
+/// boundary to `[u32; L]` and deletes these adapters. Zero compiler changes.
+///
+/// SOUNDNESS PRECONDITION (now explicit): `2p < B^L` (one headroom bit in the
+/// top limb). Then with `a,b < p` every intermediate fits the window plus the
+/// two headroom scalars and one conditional subtract canonicalizes. BN254 Fr
+/// (`p < 2^254`, `B^L = 2^260`) satisfies it with 5 bits to spare. This is
+/// exactly what the existing kernels silently assume by ignoring the top
+/// headroom limb in their conditional subtract; the bit-identical oracle
+/// verifies the whole schedule rather than trusting it.
+pub fn mul<const L: usize, M: Modulus<L>>(_ a: Limbs<L>, _ b: Limbs<L>) -> Limbs<L>
+    where Limbs<L>: Head + ShiftAppend + Zero + Copy,
 {
-    let a2 = a.pad2()
-    let p: Limbs<L> = M::p_limbs()
-    let p2 = p.pad2()
-    let t0 = <<Limbs<L> as Pad2>::Out as Zero>::zero()
-    let t_final = <Limbs<L> as Rows< <Limbs<L> as Pad2>::Out > >::rows(
-        b: b, t: t0, a: a2, p: p2, mu: M::mu(),
-    )
-    canonicalize< <Limbs<L> as Pad2>::Out >(t_final, p2)
+    let ln: u32 = L.downcast_truncate()
+    let mu: u32 = M::mu()
+
+    // ---- boundary spill (Stage 1 only; O(L) emitted code) ----
+    // read limb 0 (`head`), rotate the chain down (`shift_append(_, 0)`), so
+    // step i observes original limb i.
+    let mut aa: [u32; L] = [0; L]
+    let mut bb: [u32; L] = [0; L]
+    let mut pp: [u32; L] = [0; L]
+    let mut sa: Limbs<L> = a
+    let mut sb: Limbs<L> = b
+    let mut sp: Limbs<L> = M::p_limbs()
+    let mut i: u32 = 0
+    while i < ln {
+        aa[i as usize] = sa.head()
+        bb[i as usize] = sb.head()
+        pp[i as usize] = sp.head()
+        sa = <Limbs<L> as ShiftAppend>::shift_append(t: sa, v: 0)
+        sb = <Limbs<L> as ShiftAppend>::shift_append(t: sb, v: 0)
+        sp = <Limbs<L> as ShiftAppend>::shift_append(t: sp, v: 0)
+        i = i + 1
+    }
+
+    // ---- CIOS core (the enduring O(1)-code kernel; headroom = two scalars) ----
+    let mut t: [u32; L] = [0; L]
+    let mut t_l: u32 = 0
+    let mut t_l1: u32 = 0
+    let mut r: u32 = 0
+    while r < ln {
+        // multiply phase: t += aa * bb[r]
+        let b_r: u32 = bb[r as usize]
+        let mut c: u32 = 0
+        let mut j: u32 = 0
+        while j < ln {
+            let s: u32 = t[j as usize] + aa[j as usize] * b_r + c
+            c = s >> LIMB_BITS
+            t[j as usize] = s - c * LIMB_BASE
+            j = j + 1
+        }
+        let s_l: u32 = t_l + c
+        let c_hi: u32 = s_l >> LIMB_BITS
+        t_l = s_l - c_hi * LIMB_BASE
+        t_l1 = c_hi
+        // reduction phase: t := (t + m*pp) / B, m = (t[0]*mu) mod B
+        let m0: u32 = t[0] * mu
+        let m: u32 = m0 - (m0 >> LIMB_BITS) * LIMB_BASE
+        let mut cr: u32 = (t[0] + m * pp[0]) >> LIMB_BITS
+        let mut jr: u32 = 1
+        while jr < ln {
+            let sr: u32 = t[jr as usize] + m * pp[jr as usize] + cr
+            cr = sr >> LIMB_BITS
+            let jm1: u32 = jr - 1
+            t[jm1 as usize] = sr - cr * LIMB_BASE
+            jr = jr + 1
+        }
+        let s_top: u32 = t_l + cr
+        cr = s_top >> LIMB_BITS
+        let lm1: u32 = ln - 1
+        t[lm1 as usize] = s_top - cr * LIMB_BASE
+        t_l = t_l1 + cr
+        r = r + 1
+    }
+    // final t < 2p < B^L (precondition above), so t_l == t_l1 == 0 here.
+
+    // ---- constant-time canonicalize: compute d = t - p (base-complement) ----
+    let mut d: [u32; L] = [0; L]
+    let mut borrow: u32 = 0
+    let mut jc: u32 = 0
+    while jc < ln {
+        let dd: u32 = t[jc as usize] + LIMB_BASE - pp[jc as usize] - borrow
+        let db: u32 = dd >> LIMB_BITS
+        borrow = 1 - db
+        d[jc as usize] = dd - db * LIMB_BASE
+        jc = jc + 1
+    }
+    let keep_t: u32 = borrow
+    let keep_d: u32 = 1 - borrow
+
+    // ---- select + boundary rebuild (Stage 1 only; O(L) emitted code) ----
+    let mut out: Limbs<L> = <Limbs<L> as Zero>::zero()
+    let mut js: u32 = 0
+    while js < ln {
+        let v: u32 = keep_t * t[js as usize] + keep_d * d[js as usize]
+        out = <Limbs<L> as ShiftAppend>::shift_append(t: out, v: v)
+        js = js + 1
+    }
+    out
 }

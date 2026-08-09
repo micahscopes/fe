@@ -1,0 +1,143 @@
+//! Gate fixture for the precision axis P2 bit-identical oracle
+//! (PRECISION_TYPES_RESEARCH.md P2 gate; ROLLCALL_GOAL.md "Precision axis").
+//! NOT the source of truth for either side:
+//!
+//!   - `field_bn254fr_mul_limb*` below are thin, per-limb wasm-export
+//!     wrappers around the real general form, `precision::field::mul` at the
+//!     explicit `L = 20, M = precision::bn254_fr::Bn254Fr` instantiation.
+//!     They exist ONLY because `Limbs<L>` is a struct (HList), not an array,
+//!     so a runtime limb INDEX cannot select a field the way
+//!     `field_mul_bn254_fr`'s `res[k]` can; one wrapper per STATIC limb
+//!     position sidesteps that (mirrors this codebase's own established
+//!     per-component wasm-export convention, e.g.
+//!     `precision_expansion2_df64_oracle_ingot`'s `df64_add_hi`/`_lo`).
+//!   - `field_mul_bn254_fr` (the reference/oracle side) is NOT duplicated
+//!     here: the Rust oracle test `include_str!`s the EXISTING, already
+//!     independently oracle-proven fixture
+//!     (`crates/codegen/tests/fixtures/spirv/field_mul_bn254_fr.fe` and
+//!     `field_mul_bn254_fr_loop.fe`) directly, compiling it as its own
+//!     separate wasm module (same pattern `wasm_e2e.rs`'s Slice B dual gate
+//!     already uses). Reusing the literal fixture avoids any transcription-
+//!     drift risk entirely (an improvement on the P1 pattern's "freeze a
+//!     copy" move, since this fixture is already standalone).
+//!
+//! The gate this fixture exists for: `field_bn254fr_mul_limb{k}(a0..a19,
+//! b0..b19) == field_mul_bn254_fr(k, 0, a0..a19, b0..b19)` for every k in
+//! 0..19, bit-for-bit, over representative + edge BN254 Fr operand pairs
+//! (0, 1, p-1, near-2^256, random), run under wasmtime.
+
+use precision::field::{mul, Limbs, LimbLast, LimbMore}
+use precision::bn254_fr::Bn254Fr
+
+fn build_a(a0: u32, a1: u32, a2: u32, a3: u32, a4: u32, a5: u32, a6: u32, a7: u32, a8: u32, a9: u32, a10: u32, a11: u32, a12: u32, a13: u32, a14: u32, a15: u32, a16: u32, a17: u32, a18: u32, a19: u32) -> Limbs<20> {
+    LimbMore { lead: a0, tail: LimbMore { lead: a1, tail: LimbMore { lead: a2, tail: LimbMore { lead: a3, tail: LimbMore { lead: a4, tail: LimbMore { lead: a5, tail: LimbMore { lead: a6, tail: LimbMore { lead: a7, tail: LimbMore { lead: a8, tail: LimbMore { lead: a9, tail: LimbMore { lead: a10, tail: LimbMore { lead: a11, tail: LimbMore { lead: a12, tail: LimbMore { lead: a13, tail: LimbMore { lead: a14, tail: LimbMore { lead: a15, tail: LimbMore { lead: a16, tail: LimbMore { lead: a17, tail: LimbMore { lead: a18, tail: LimbLast { value: a19 } } } } } } } } } } } } } } } } } } } }
+}
+
+fn build_b(b0: u32, b1: u32, b2: u32, b3: u32, b4: u32, b5: u32, b6: u32, b7: u32, b8: u32, b9: u32, b10: u32, b11: u32, b12: u32, b13: u32, b14: u32, b15: u32, b16: u32, b17: u32, b18: u32, b19: u32) -> Limbs<20> {
+    LimbMore { lead: b0, tail: LimbMore { lead: b1, tail: LimbMore { lead: b2, tail: LimbMore { lead: b3, tail: LimbMore { lead: b4, tail: LimbMore { lead: b5, tail: LimbMore { lead: b6, tail: LimbMore { lead: b7, tail: LimbMore { lead: b8, tail: LimbMore { lead: b9, tail: LimbMore { lead: b10, tail: LimbMore { lead: b11, tail: LimbMore { lead: b12, tail: LimbMore { lead: b13, tail: LimbMore { lead: b14, tail: LimbMore { lead: b15, tail: LimbMore { lead: b16, tail: LimbMore { lead: b17, tail: LimbMore { lead: b18, tail: LimbLast { value: b19 } } } } } } } } } } } } } } } } } } } }
+}
+
+fn field_bn254fr_mul_result(a0: u32, a1: u32, a2: u32, a3: u32, a4: u32, a5: u32, a6: u32, a7: u32, a8: u32, a9: u32, a10: u32, a11: u32, a12: u32, a13: u32, a14: u32, a15: u32, a16: u32, a17: u32, a18: u32, a19: u32, b0: u32, b1: u32, b2: u32, b3: u32, b4: u32, b5: u32, b6: u32, b7: u32, b8: u32, b9: u32, b10: u32, b11: u32, b12: u32, b13: u32, b14: u32, b15: u32, b16: u32, b17: u32, b18: u32, b19: u32) -> Limbs<20> {
+    mul<20, Bn254Fr>(build_a(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19), build_b(b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15, b16, b17, b18, b19))
+}
+
+pub fn field_bn254fr_mul_limb0(a0: u32, a1: u32, a2: u32, a3: u32, a4: u32, a5: u32, a6: u32, a7: u32, a8: u32, a9: u32, a10: u32, a11: u32, a12: u32, a13: u32, a14: u32, a15: u32, a16: u32, a17: u32, a18: u32, a19: u32, b0: u32, b1: u32, b2: u32, b3: u32, b4: u32, b5: u32, b6: u32, b7: u32, b8: u32, b9: u32, b10: u32, b11: u32, b12: u32, b13: u32, b14: u32, b15: u32, b16: u32, b17: u32, b18: u32, b19: u32) -> u32 {
+    let out = field_bn254fr_mul_result(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15, b16, b17, b18, b19)
+    out.lead
+}
+
+pub fn field_bn254fr_mul_limb1(a0: u32, a1: u32, a2: u32, a3: u32, a4: u32, a5: u32, a6: u32, a7: u32, a8: u32, a9: u32, a10: u32, a11: u32, a12: u32, a13: u32, a14: u32, a15: u32, a16: u32, a17: u32, a18: u32, a19: u32, b0: u32, b1: u32, b2: u32, b3: u32, b4: u32, b5: u32, b6: u32, b7: u32, b8: u32, b9: u32, b10: u32, b11: u32, b12: u32, b13: u32, b14: u32, b15: u32, b16: u32, b17: u32, b18: u32, b19: u32) -> u32 {
+    let out = field_bn254fr_mul_result(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15, b16, b17, b18, b19)
+    out.tail.lead
+}
+
+pub fn field_bn254fr_mul_limb2(a0: u32, a1: u32, a2: u32, a3: u32, a4: u32, a5: u32, a6: u32, a7: u32, a8: u32, a9: u32, a10: u32, a11: u32, a12: u32, a13: u32, a14: u32, a15: u32, a16: u32, a17: u32, a18: u32, a19: u32, b0: u32, b1: u32, b2: u32, b3: u32, b4: u32, b5: u32, b6: u32, b7: u32, b8: u32, b9: u32, b10: u32, b11: u32, b12: u32, b13: u32, b14: u32, b15: u32, b16: u32, b17: u32, b18: u32, b19: u32) -> u32 {
+    let out = field_bn254fr_mul_result(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15, b16, b17, b18, b19)
+    out.tail.tail.lead
+}
+
+pub fn field_bn254fr_mul_limb3(a0: u32, a1: u32, a2: u32, a3: u32, a4: u32, a5: u32, a6: u32, a7: u32, a8: u32, a9: u32, a10: u32, a11: u32, a12: u32, a13: u32, a14: u32, a15: u32, a16: u32, a17: u32, a18: u32, a19: u32, b0: u32, b1: u32, b2: u32, b3: u32, b4: u32, b5: u32, b6: u32, b7: u32, b8: u32, b9: u32, b10: u32, b11: u32, b12: u32, b13: u32, b14: u32, b15: u32, b16: u32, b17: u32, b18: u32, b19: u32) -> u32 {
+    let out = field_bn254fr_mul_result(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15, b16, b17, b18, b19)
+    out.tail.tail.tail.lead
+}
+
+pub fn field_bn254fr_mul_limb4(a0: u32, a1: u32, a2: u32, a3: u32, a4: u32, a5: u32, a6: u32, a7: u32, a8: u32, a9: u32, a10: u32, a11: u32, a12: u32, a13: u32, a14: u32, a15: u32, a16: u32, a17: u32, a18: u32, a19: u32, b0: u32, b1: u32, b2: u32, b3: u32, b4: u32, b5: u32, b6: u32, b7: u32, b8: u32, b9: u32, b10: u32, b11: u32, b12: u32, b13: u32, b14: u32, b15: u32, b16: u32, b17: u32, b18: u32, b19: u32) -> u32 {
+    let out = field_bn254fr_mul_result(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15, b16, b17, b18, b19)
+    out.tail.tail.tail.tail.lead
+}
+
+pub fn field_bn254fr_mul_limb5(a0: u32, a1: u32, a2: u32, a3: u32, a4: u32, a5: u32, a6: u32, a7: u32, a8: u32, a9: u32, a10: u32, a11: u32, a12: u32, a13: u32, a14: u32, a15: u32, a16: u32, a17: u32, a18: u32, a19: u32, b0: u32, b1: u32, b2: u32, b3: u32, b4: u32, b5: u32, b6: u32, b7: u32, b8: u32, b9: u32, b10: u32, b11: u32, b12: u32, b13: u32, b14: u32, b15: u32, b16: u32, b17: u32, b18: u32, b19: u32) -> u32 {
+    let out = field_bn254fr_mul_result(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15, b16, b17, b18, b19)
+    out.tail.tail.tail.tail.tail.lead
+}
+
+pub fn field_bn254fr_mul_limb6(a0: u32, a1: u32, a2: u32, a3: u32, a4: u32, a5: u32, a6: u32, a7: u32, a8: u32, a9: u32, a10: u32, a11: u32, a12: u32, a13: u32, a14: u32, a15: u32, a16: u32, a17: u32, a18: u32, a19: u32, b0: u32, b1: u32, b2: u32, b3: u32, b4: u32, b5: u32, b6: u32, b7: u32, b8: u32, b9: u32, b10: u32, b11: u32, b12: u32, b13: u32, b14: u32, b15: u32, b16: u32, b17: u32, b18: u32, b19: u32) -> u32 {
+    let out = field_bn254fr_mul_result(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15, b16, b17, b18, b19)
+    out.tail.tail.tail.tail.tail.tail.lead
+}
+
+pub fn field_bn254fr_mul_limb7(a0: u32, a1: u32, a2: u32, a3: u32, a4: u32, a5: u32, a6: u32, a7: u32, a8: u32, a9: u32, a10: u32, a11: u32, a12: u32, a13: u32, a14: u32, a15: u32, a16: u32, a17: u32, a18: u32, a19: u32, b0: u32, b1: u32, b2: u32, b3: u32, b4: u32, b5: u32, b6: u32, b7: u32, b8: u32, b9: u32, b10: u32, b11: u32, b12: u32, b13: u32, b14: u32, b15: u32, b16: u32, b17: u32, b18: u32, b19: u32) -> u32 {
+    let out = field_bn254fr_mul_result(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15, b16, b17, b18, b19)
+    out.tail.tail.tail.tail.tail.tail.tail.lead
+}
+
+pub fn field_bn254fr_mul_limb8(a0: u32, a1: u32, a2: u32, a3: u32, a4: u32, a5: u32, a6: u32, a7: u32, a8: u32, a9: u32, a10: u32, a11: u32, a12: u32, a13: u32, a14: u32, a15: u32, a16: u32, a17: u32, a18: u32, a19: u32, b0: u32, b1: u32, b2: u32, b3: u32, b4: u32, b5: u32, b6: u32, b7: u32, b8: u32, b9: u32, b10: u32, b11: u32, b12: u32, b13: u32, b14: u32, b15: u32, b16: u32, b17: u32, b18: u32, b19: u32) -> u32 {
+    let out = field_bn254fr_mul_result(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15, b16, b17, b18, b19)
+    out.tail.tail.tail.tail.tail.tail.tail.tail.lead
+}
+
+pub fn field_bn254fr_mul_limb9(a0: u32, a1: u32, a2: u32, a3: u32, a4: u32, a5: u32, a6: u32, a7: u32, a8: u32, a9: u32, a10: u32, a11: u32, a12: u32, a13: u32, a14: u32, a15: u32, a16: u32, a17: u32, a18: u32, a19: u32, b0: u32, b1: u32, b2: u32, b3: u32, b4: u32, b5: u32, b6: u32, b7: u32, b8: u32, b9: u32, b10: u32, b11: u32, b12: u32, b13: u32, b14: u32, b15: u32, b16: u32, b17: u32, b18: u32, b19: u32) -> u32 {
+    let out = field_bn254fr_mul_result(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15, b16, b17, b18, b19)
+    out.tail.tail.tail.tail.tail.tail.tail.tail.tail.lead
+}
+
+pub fn field_bn254fr_mul_limb10(a0: u32, a1: u32, a2: u32, a3: u32, a4: u32, a5: u32, a6: u32, a7: u32, a8: u32, a9: u32, a10: u32, a11: u32, a12: u32, a13: u32, a14: u32, a15: u32, a16: u32, a17: u32, a18: u32, a19: u32, b0: u32, b1: u32, b2: u32, b3: u32, b4: u32, b5: u32, b6: u32, b7: u32, b8: u32, b9: u32, b10: u32, b11: u32, b12: u32, b13: u32, b14: u32, b15: u32, b16: u32, b17: u32, b18: u32, b19: u32) -> u32 {
+    let out = field_bn254fr_mul_result(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15, b16, b17, b18, b19)
+    out.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.lead
+}
+
+pub fn field_bn254fr_mul_limb11(a0: u32, a1: u32, a2: u32, a3: u32, a4: u32, a5: u32, a6: u32, a7: u32, a8: u32, a9: u32, a10: u32, a11: u32, a12: u32, a13: u32, a14: u32, a15: u32, a16: u32, a17: u32, a18: u32, a19: u32, b0: u32, b1: u32, b2: u32, b3: u32, b4: u32, b5: u32, b6: u32, b7: u32, b8: u32, b9: u32, b10: u32, b11: u32, b12: u32, b13: u32, b14: u32, b15: u32, b16: u32, b17: u32, b18: u32, b19: u32) -> u32 {
+    let out = field_bn254fr_mul_result(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15, b16, b17, b18, b19)
+    out.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.lead
+}
+
+pub fn field_bn254fr_mul_limb12(a0: u32, a1: u32, a2: u32, a3: u32, a4: u32, a5: u32, a6: u32, a7: u32, a8: u32, a9: u32, a10: u32, a11: u32, a12: u32, a13: u32, a14: u32, a15: u32, a16: u32, a17: u32, a18: u32, a19: u32, b0: u32, b1: u32, b2: u32, b3: u32, b4: u32, b5: u32, b6: u32, b7: u32, b8: u32, b9: u32, b10: u32, b11: u32, b12: u32, b13: u32, b14: u32, b15: u32, b16: u32, b17: u32, b18: u32, b19: u32) -> u32 {
+    let out = field_bn254fr_mul_result(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15, b16, b17, b18, b19)
+    out.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.lead
+}
+
+pub fn field_bn254fr_mul_limb13(a0: u32, a1: u32, a2: u32, a3: u32, a4: u32, a5: u32, a6: u32, a7: u32, a8: u32, a9: u32, a10: u32, a11: u32, a12: u32, a13: u32, a14: u32, a15: u32, a16: u32, a17: u32, a18: u32, a19: u32, b0: u32, b1: u32, b2: u32, b3: u32, b4: u32, b5: u32, b6: u32, b7: u32, b8: u32, b9: u32, b10: u32, b11: u32, b12: u32, b13: u32, b14: u32, b15: u32, b16: u32, b17: u32, b18: u32, b19: u32) -> u32 {
+    let out = field_bn254fr_mul_result(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15, b16, b17, b18, b19)
+    out.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.lead
+}
+
+pub fn field_bn254fr_mul_limb14(a0: u32, a1: u32, a2: u32, a3: u32, a4: u32, a5: u32, a6: u32, a7: u32, a8: u32, a9: u32, a10: u32, a11: u32, a12: u32, a13: u32, a14: u32, a15: u32, a16: u32, a17: u32, a18: u32, a19: u32, b0: u32, b1: u32, b2: u32, b3: u32, b4: u32, b5: u32, b6: u32, b7: u32, b8: u32, b9: u32, b10: u32, b11: u32, b12: u32, b13: u32, b14: u32, b15: u32, b16: u32, b17: u32, b18: u32, b19: u32) -> u32 {
+    let out = field_bn254fr_mul_result(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15, b16, b17, b18, b19)
+    out.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.lead
+}
+
+pub fn field_bn254fr_mul_limb15(a0: u32, a1: u32, a2: u32, a3: u32, a4: u32, a5: u32, a6: u32, a7: u32, a8: u32, a9: u32, a10: u32, a11: u32, a12: u32, a13: u32, a14: u32, a15: u32, a16: u32, a17: u32, a18: u32, a19: u32, b0: u32, b1: u32, b2: u32, b3: u32, b4: u32, b5: u32, b6: u32, b7: u32, b8: u32, b9: u32, b10: u32, b11: u32, b12: u32, b13: u32, b14: u32, b15: u32, b16: u32, b17: u32, b18: u32, b19: u32) -> u32 {
+    let out = field_bn254fr_mul_result(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15, b16, b17, b18, b19)
+    out.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.lead
+}
+
+pub fn field_bn254fr_mul_limb16(a0: u32, a1: u32, a2: u32, a3: u32, a4: u32, a5: u32, a6: u32, a7: u32, a8: u32, a9: u32, a10: u32, a11: u32, a12: u32, a13: u32, a14: u32, a15: u32, a16: u32, a17: u32, a18: u32, a19: u32, b0: u32, b1: u32, b2: u32, b3: u32, b4: u32, b5: u32, b6: u32, b7: u32, b8: u32, b9: u32, b10: u32, b11: u32, b12: u32, b13: u32, b14: u32, b15: u32, b16: u32, b17: u32, b18: u32, b19: u32) -> u32 {
+    let out = field_bn254fr_mul_result(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15, b16, b17, b18, b19)
+    out.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.lead
+}
+
+pub fn field_bn254fr_mul_limb17(a0: u32, a1: u32, a2: u32, a3: u32, a4: u32, a5: u32, a6: u32, a7: u32, a8: u32, a9: u32, a10: u32, a11: u32, a12: u32, a13: u32, a14: u32, a15: u32, a16: u32, a17: u32, a18: u32, a19: u32, b0: u32, b1: u32, b2: u32, b3: u32, b4: u32, b5: u32, b6: u32, b7: u32, b8: u32, b9: u32, b10: u32, b11: u32, b12: u32, b13: u32, b14: u32, b15: u32, b16: u32, b17: u32, b18: u32, b19: u32) -> u32 {
+    let out = field_bn254fr_mul_result(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15, b16, b17, b18, b19)
+    out.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.lead
+}
+
+pub fn field_bn254fr_mul_limb18(a0: u32, a1: u32, a2: u32, a3: u32, a4: u32, a5: u32, a6: u32, a7: u32, a8: u32, a9: u32, a10: u32, a11: u32, a12: u32, a13: u32, a14: u32, a15: u32, a16: u32, a17: u32, a18: u32, a19: u32, b0: u32, b1: u32, b2: u32, b3: u32, b4: u32, b5: u32, b6: u32, b7: u32, b8: u32, b9: u32, b10: u32, b11: u32, b12: u32, b13: u32, b14: u32, b15: u32, b16: u32, b17: u32, b18: u32, b19: u32) -> u32 {
+    let out = field_bn254fr_mul_result(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15, b16, b17, b18, b19)
+    out.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.lead
+}
+
+pub fn field_bn254fr_mul_limb19(a0: u32, a1: u32, a2: u32, a3: u32, a4: u32, a5: u32, a6: u32, a7: u32, a8: u32, a9: u32, a10: u32, a11: u32, a12: u32, a13: u32, a14: u32, a15: u32, a16: u32, a17: u32, a18: u32, a19: u32, b0: u32, b1: u32, b2: u32, b3: u32, b4: u32, b5: u32, b6: u32, b7: u32, b8: u32, b9: u32, b10: u32, b11: u32, b12: u32, b13: u32, b14: u32, b15: u32, b16: u32, b17: u32, b18: u32, b19: u32) -> u32 {
+    let out = field_bn254fr_mul_result(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15, b16, b17, b18, b19)
+    out.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.value
+}
+
