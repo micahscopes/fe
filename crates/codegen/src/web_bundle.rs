@@ -542,6 +542,26 @@ fn project_control(
 /// The (param count, result count) of a named function export in a compiled
 /// wasm module, measured with `wasmparser` (never assumed). `None` when the
 /// export is absent or not a function.
+/// The names of every FUNCTION export of a wasm module, in section order.
+/// Used to assert that the manifest `source_entry` is actually resolvable by
+/// the browser render runtime before the bundle is written.
+fn wasm_function_export_names(wasm: &[u8]) -> Vec<String> {
+    use wasmparser::{ExternalKind, Payload};
+
+    let mut names = Vec::new();
+    for payload in wasmparser::Parser::new(0).parse_all(wasm) {
+        if let Ok(Payload::ExportSection(reader)) = payload {
+            for export in reader {
+                let Ok(export) = export else { continue };
+                if matches!(export.kind, ExternalKind::Func) {
+                    names.push(export.name.to_owned());
+                }
+            }
+        }
+    }
+    names
+}
+
 fn wasm_export_signature(wasm: &[u8], export_name: &str) -> Option<(usize, usize)> {
     use wasmparser::{ExternalKind, Payload, TypeRef};
 
@@ -1188,6 +1208,24 @@ impl WebBundle {
             .transpose()?;
         let canonical_interface =
             verify_canonical_candidate(&wasm, canonical_candidate, &mut canonical_status)?;
+        // Fail the build closed if the render runtime cannot resolve the entry it
+        // is told to mount. When there is NO canonical interface, the browser
+        // render runtime resolves the render entry with
+        // `instance.exports[manifest.source_entry]` (fe-render-runtime.js), so a
+        // divergence (e.g. a module-qualified `lib__escape` export against a bare
+        // `escape` source_entry) otherwise surfaces only as a silent mount
+        // failure in the console. Canonical bundles route the entry through the
+        // generated `fe_cabi_*` lanes instead, so this direct-export contract does
+        // not apply there.
+        if canonical_interface.is_none() {
+            let function_exports = wasm_function_export_names(&wasm);
+            if !function_exports.iter().any(|name| name == &options.source_entry) {
+                return Err(WebBundleError::EntryExportMismatch {
+                    source_entry: options.source_entry.clone(),
+                    exports: function_exports,
+                });
+            }
+        }
         let (interface_js, interface_d_ts, canonical_adapters) =
             generated_canonical_adapters(canonical_interface.as_ref())?;
         let browser_runtime = generated_browser_runtime(canonical_interface.is_some());
@@ -1818,6 +1856,15 @@ pub enum WebBundleError {
     /// the manifest `surface` section, or the projected params fail to reconcile
     /// against the actor's state fields and the lowered uniform binding members.
     SurfaceProjection(String),
+    /// The manifest `source_entry` is not present as a function export of the
+    /// emitted wasm module. The browser render runtime resolves the render entry
+    /// with `instance.exports[manifest.source_entry]`, so a mismatch fails the
+    /// mount silently in the console; catching it here fails the build closed
+    /// with the offending name and the actual export set.
+    EntryExportMismatch {
+        source_entry: String,
+        exports: Vec<String>,
+    },
     DestinationExists(PathBuf),
     Io(io::Error),
 }
@@ -1851,6 +1898,18 @@ impl fmt::Display for WebBundleError {
             }
             Self::SurfaceProjection(error) => {
                 write!(f, "web surface projection failed: {error}")
+            }
+            Self::EntryExportMismatch {
+                source_entry,
+                exports,
+            } => {
+                write!(
+                    f,
+                    "manifest source_entry `{source_entry}` is not a wasm function export \
+                     (the browser runtime resolves it via instance.exports[source_entry]); \
+                     emitted function exports are [{}]",
+                    exports.join(", ")
+                )
             }
             Self::DestinationExists(path) => {
                 write!(
