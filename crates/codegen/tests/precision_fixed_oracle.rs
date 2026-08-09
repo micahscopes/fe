@@ -431,19 +431,22 @@ fn run_escape_for_l(
 fn fixed_mul_add_sub_sqr_and_escape_match_bigint_reference() {
     let (wasm, elapsed) = compile_fixed_gate_ingot_to_wasm();
     eprintln!(
-        "Fixed<L> gate ingot (L=4 and L=8) compiled to wasm in {:?} ({:.3}s), {} bytes.",
+        "Fixed<L> gate ingot (L=2, 4, 6, 8) compiled to wasm in {:?} ({:.3}s), {} bytes.",
         elapsed,
         elapsed.as_secs_f64(),
         wasm.len()
     );
     let (mut store, instance) = instantiate(&wasm);
-    for l in [4usize, 8] {
+    // L=2 and L=6 are the tiers the adaptive mandelbrot escape kernel newly
+    // selects among (alongside the original L=4 and L=8); every tier the demo
+    // can land on is oracle-proven bit-identical here.
+    for l in [2usize, 4, 6, 8] {
         run_binops_for_l(&mut store, &instance, l);
         run_escape_for_l(&mut store, &instance, l);
     }
     eprintln!(
         "Fixed<L>::{{mul,add,sub,sqr,escape}} == independent num-bigint fixed-point reference, \
-         limb-for-limb, at L=4 and L=8 (edges, directed rounding ties, wrap, signs, 64 randoms, \
+         limb-for-limb, at L=2, 4, 6 and 8 (edges, directed rounding ties, wrap, signs, 64 randoms, \
          escape iteration counts incl the antenna non-escape)."
     );
 }

@@ -72,13 +72,29 @@ use fmath::{from_i32, palette, to_i32}
 use precision::{add_f32, from_quad, to_quad}
 use precision::fixed::{from_qf_offset, escape as fx_escape}
 
-// Iteration-budget scaling: deeper zoom needs more iterations to resolve the
-// boundary. `max_iter_for_zoom` grows the trip count with how far `zoom` has
-// been zoomed in, capped so the loop stays bounded.
+// Zoom DEPTH drives two things: the iteration budget and the adaptive limb
+// count. `depth_for_zoom` counts how many doublings bring `zoom` up to 1.0, a
+// cheap exact-enough integer stand-in for `-log2(zoom)` (no `log2` intrinsic).
+// The probe ceiling must exceed the deepest depth we distinguish (~90 at
+// ZOOM_MIN), so it no longer saturates at ~1e-12 the way the old 40-step probe
+// did (which would have mis-selected the adaptive L for deep views).
 const MAX_ITER_BASE: i32 = 256
 const MAX_ITER_CAP: i32 = 2000
 const ITER_PER_DOUBLING: f32 = 48.0
-const DEPTH_PROBE_STEPS: i32 = 40
+const DEPTH_PROBE_STEPS: i32 = 96
+
+// Adaptive-precision thresholds on zoom DEPTH (doublings-to-1.0 ~ -log2 zoom).
+// `Fixed<L>` resolves 2^-13(L-1) fractional bits (fixed.fe:32), and a pixel
+// spans ~zoom/256 ~ 2^-(depth+8), so a tier stays valid while 13(L-1) holds a
+// few bits above depth+8. Picking the SMALLEST sufficient L makes the per-pixel
+// kernel quadratically cheaper (mul is O(L^2)) at shallow zoom while deep views
+// keep full ~1e-27 `Fixed<8>` fidelity. `zoom` is a per-frame uniform, so the
+// selection is UNIFORM control flow, not per-pixel divergence. Policy defaults,
+// tunable. [G3]
+//   L=2 F=13   L=4 F=39   L=6 F=65   L=8 F=91
+const DEPTH_L2: i32 = 4      // zoom >~ 2^-4  (near whole-set view)
+const DEPTH_L4: i32 = 24     // zoom >~ 2^-24 ~ 6e-8
+const DEPTH_L6: i32 = 50     // zoom >~ 2^-50 ~ 9e-16  (default 1e-16 -> L=8)
 
 // `update_view`'s clamps (mirrors `view()`'s declared ranges below; kept as
 // named consts so the two cannot silently drift).
@@ -86,9 +102,9 @@ const CENTER_X_MIN: f32 = -2.5
 const CENTER_X_MAX: f32 = 1.0
 const CENTER_Y_MIN: f32 = -1.5
 const CENTER_Y_MAX: f32 = 1.5
-// The `Fixed<8>` floor (~2^-91 ~ 1e-27): the per-pixel coordinate is carried at
-// full `Fixed<8>` width, so the zoom is no longer bounded at the old ~1e-11
-// df64 wall. Held just above the resolution limit.
+// The `Fixed<8>` floor (~2^-91 ~ 1e-27): the deepest adaptive tier carries the
+// per-pixel coordinate at full `Fixed<8>` width, so the zoom is no longer
+// bounded at the old ~1e-11 df64 wall. Held just above that resolution limit.
 const ZOOM_MIN: f32 = 0.000000000000000000000000001
 const ZOOM_MAX: f32 = 3.0
 
@@ -141,24 +157,29 @@ fn clamp_quad(_ w0: f32, _ w1: f32, _ w2: f32, _ w3: f32, _ min_v: f32, _ max_v:
     }
 }
 
-/// Deep zoom needs many more iterations to resolve the escape boundary than a
-/// wide view does. There is no `log2` intrinsic, so this counts how many
-/// doublings bring `zoom` up to `1.0` -- a cheap, exact-enough stand-in for
-/// `-log2(zoom)` -- over a fixed, bounded trip count (`zoom` never goes below
-/// `ZOOM_MIN`, about `2^-36.5`, so `DEPTH_PROBE_STEPS` doublings always
-/// finish the count).
-fn max_iter_for_zoom(_ zoom: f32) -> i32 {
+/// How many doublings bring `zoom` up to `1.0`: a cheap, exact-enough integer
+/// stand-in for `-log2(zoom)` (no `log2` intrinsic), over a fixed, bounded trip
+/// count. Drives both the iteration budget and the adaptive limb count.
+/// `DEPTH_PROBE_STEPS` exceeds the deepest depth we distinguish, so the count
+/// saturates only past the `ZOOM_MIN` floor.
+fn depth_for_zoom(_ zoom: f32) -> i32 {
     let mut z: f32 = zoom
-    let mut depth: f32 = 0.0
+    let mut depth: i32 = 0
     let mut i: i32 = 0
     while i < DEPTH_PROBE_STEPS {
         if z < 1.0 {
             z = z * 2.0
-            depth = depth + 1.0
+            depth = depth + 1
         }
         i = i + 1
     }
-    let scaled: i32 = MAX_ITER_BASE + to_i32(depth * ITER_PER_DOUBLING)
+    depth
+}
+
+/// Deeper zoom needs more iterations to resolve the escape boundary than a wide
+/// view does. Grow the trip count with depth, capped so the loop stays bounded.
+fn max_iter_from_depth(_ depth: i32) -> i32 {
+    let scaled: i32 = MAX_ITER_BASE + to_i32(from_i32(depth) * ITER_PER_DOUBLING)
     if scaled > MAX_ITER_CAP {
         MAX_ITER_CAP
     } else {
@@ -231,33 +252,60 @@ actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
         }
     }
 
-    /// Pixel coordinate in, packed RGBA8 word out. The orbit runs entirely in
-    /// integer `precision::fixed::Fixed<8>` (13-bit limbs, ~2^-91 resolution):
-    /// reassociation-immune, so unlike the df64 float expansion it stays
-    /// bit-correct through the browser's WGSL shader compiler and holds deep
-    /// zoom on the actual GPU where df64's error-free transforms collapse.
+    /// Pixel coordinate in, packed RGBA8 word out. The orbit runs in integer
+    /// `precision::fixed::Fixed<L>` (13-bit limbs, reassociation-immune, so it
+    /// stays bit-correct through the browser's WGSL compiler where df64's
+    /// error-free transforms collapse). L is chosen ADAPTIVELY from zoom depth:
+    /// the smallest limb count that still resolves the current view (up to full
+    /// `Fixed<8>` ~1e-27 at deep zoom), so a shallow view pays a quadratically
+    /// smaller kernel. `zoom` is a per-frame uniform, so the L branch is uniform
+    /// control flow, not per-pixel divergence.
     fn escape(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
         // Pixel centre to [-1, 1], y up, then into the complex plane.
         let u: f32 = (from_i32(px) + 0.5) / self.res * 2.0 - 1.0
         let v: f32 = 1.0 - (from_i32(py) + 0.5) / self.res * 2.0
+        let ox: f32 = u * self.zoom
+        let oy: f32 = v * self.zoom
 
-        // The per-pixel coordinate as a deep `Fixed<8>` value: the FOUR-WORD
-        // `Expansion<4>` center (all four gesture-driven, reaching ~1e-27) plus
-        // the small `u*zoom`/`v*zoom` offset, all f32 sources whose ~24 real
-        // bits land at their own magnitude and are stitched by the exact Fixed
-        // add (`from_qf_offset`). The center reaches past the old ~1e-11 df64
-        // wall; the ITERATION runs at full Fixed<8> width, integer and
-        // GPU-faithful.
-        let (cx_s, cx) = from_qf_offset<8>(
-            self.center_x_w0, self.center_x_w1, self.center_x_w2, self.center_x_w3, u * self.zoom)
-        let (cy_s, cy) = from_qf_offset<8>(
-            self.center_y_w0, self.center_y_w1, self.center_y_w2, self.center_y_w3, v * self.zoom)
+        let depth: i32 = depth_for_zoom(self.zoom)
+        let max_iter: i32 = max_iter_from_depth(depth)
 
-        let max_iter: i32 = max_iter_for_zoom(self.zoom)
-        // The general integer escape loop (z <- z*z + c, strict |z|^2 > 4). It
-        // returns the iteration count; a point that never escapes runs the full
-        // budget, so `count == max_iter` marks the set interior.
-        let count: i32 = fx_escape<8>(cx_s, cx, cy_s, cy, max_iter)
+        // Adaptive limb count: the smallest `Fixed<L>` that resolves this zoom
+        // (thresholds above). Each arm assembles the deep FOUR-WORD
+        // `Expansion<4>` center + `u*zoom`/`v*zoom` offset into one `Fixed<L>`
+        // via `from_qf_offset<L>` (which self-truncates the sub-resolution deep
+        // words at small L) and runs the general `escape<L>` orbit. One general
+        // form at four placements, no bespoke per-L copy. [G3]
+        let count: i32 = if depth <= DEPTH_L2 {
+            let (cx_s, cx) = from_qf_offset<2>(
+                self.center_x_w0, self.center_x_w1, self.center_x_w2, self.center_x_w3, ox)
+            let (cy_s, cy) = from_qf_offset<2>(
+                self.center_y_w0, self.center_y_w1, self.center_y_w2, self.center_y_w3, oy)
+            fx_escape<2>(cx_s, cx, cy_s, cy, max_iter)
+        } else {
+            if depth <= DEPTH_L4 {
+                let (cx_s, cx) = from_qf_offset<4>(
+                    self.center_x_w0, self.center_x_w1, self.center_x_w2, self.center_x_w3, ox)
+                let (cy_s, cy) = from_qf_offset<4>(
+                    self.center_y_w0, self.center_y_w1, self.center_y_w2, self.center_y_w3, oy)
+                fx_escape<4>(cx_s, cx, cy_s, cy, max_iter)
+            } else {
+                if depth <= DEPTH_L6 {
+                    let (cx_s, cx) = from_qf_offset<6>(
+                        self.center_x_w0, self.center_x_w1, self.center_x_w2, self.center_x_w3, ox)
+                    let (cy_s, cy) = from_qf_offset<6>(
+                        self.center_y_w0, self.center_y_w1, self.center_y_w2, self.center_y_w3, oy)
+                    fx_escape<6>(cx_s, cx, cy_s, cy, max_iter)
+                } else {
+                    // Deepest tier: full `Fixed<8>` (~1e-27), the proven floor.
+                    let (cx_s, cx) = from_qf_offset<8>(
+                        self.center_x_w0, self.center_x_w1, self.center_x_w2, self.center_x_w3, ox)
+                    let (cy_s, cy) = from_qf_offset<8>(
+                        self.center_y_w0, self.center_y_w1, self.center_y_w2, self.center_y_w3, oy)
+                    fx_escape<8>(cx_s, cx, cy_s, cy, max_iter)
+                }
+            }
+        }
 
         if count < max_iter {
             // Escaped: colour by how long it survived.
