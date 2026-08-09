@@ -1,0 +1,66 @@
+//! SECOND-MODULUS generality gate for the loop-form `Field<p>::mul`
+//! (LOOP_FORM_FIELD_DESIGN.md section 4, "operational proof of generality"):
+//! the SAME general `precision::field::mul`, instantiated at L=4 with a
+//! NON-BN254 modulus, proves the loop form is not a re-blessed BN254 kernel.
+//!
+//!   p = 2^51 - 129 = 2251799813685119   (51-bit prime, R = 2^52 = B^4,
+//!   mu = -p^-1 mod 2^13 = 8065)
+//!
+//! This is the SPIR-V MSM slice's own probe prime
+//! (`crates/codegen/tests/fixtures/spirv/field_mul_probe.fe`, `spirv_e2e.rs`'s
+//! `probe_prime()`), so the general form can be checked bit-for-bit against
+//! that independent, separately-generated 4-limb kernel AND against an
+//! independent num-bigint Montgomery oracle (both in the Rust harness).
+//!
+//! `mu` is NOT hand-blessed: `field::mont_mu` (2-adic Newton) is a real CTFE
+//! computation over THIS prime's low limb, and the `static_assert` proves the
+//! literal `8065` equals what the compiler derives from `8063` -- so the
+//! CTFE derivation is exercised at a second, independent modulus, not just
+//! BN254. Per-limb wasm-export wrappers, same convention as
+//! `precision_field_bn254fr_oracle_ingot`.
+
+use precision::field::{mul, Limbs, LimbLast, LimbMore, Modulus, mont_mu, LIMB_BITS}
+
+pub struct ProbeP51 {}
+
+impl Modulus<4> for ProbeP51 {
+    fn p_limbs() -> Limbs<4> {
+        LimbMore { lead: 8063, tail: LimbMore { lead: 8191, tail: LimbMore { lead: 8191, tail: LimbLast { value: 4095 } } } }
+    }
+
+    fn mu() -> u32 { 8065 }
+}
+
+static_assert(mont_mu(8063, LIMB_BITS) == 8065)
+
+fn build_a(a0: u32, a1: u32, a2: u32, a3: u32) -> Limbs<4> {
+    LimbMore { lead: a0, tail: LimbMore { lead: a1, tail: LimbMore { lead: a2, tail: LimbLast { value: a3 } } } }
+}
+
+fn build_b(b0: u32, b1: u32, b2: u32, b3: u32) -> Limbs<4> {
+    LimbMore { lead: b0, tail: LimbMore { lead: b1, tail: LimbMore { lead: b2, tail: LimbLast { value: b3 } } } }
+}
+
+fn probe51_mul_result(a0: u32, a1: u32, a2: u32, a3: u32, b0: u32, b1: u32, b2: u32, b3: u32) -> Limbs<4> {
+    mul<4, ProbeP51>(build_a(a0, a1, a2, a3), build_b(b0, b1, b2, b3))
+}
+
+pub fn probe51_mul_limb0(a0: u32, a1: u32, a2: u32, a3: u32, b0: u32, b1: u32, b2: u32, b3: u32) -> u32 {
+    let out = probe51_mul_result(a0, a1, a2, a3, b0, b1, b2, b3)
+    out.lead
+}
+
+pub fn probe51_mul_limb1(a0: u32, a1: u32, a2: u32, a3: u32, b0: u32, b1: u32, b2: u32, b3: u32) -> u32 {
+    let out = probe51_mul_result(a0, a1, a2, a3, b0, b1, b2, b3)
+    out.tail.lead
+}
+
+pub fn probe51_mul_limb2(a0: u32, a1: u32, a2: u32, a3: u32, b0: u32, b1: u32, b2: u32, b3: u32) -> u32 {
+    let out = probe51_mul_result(a0, a1, a2, a3, b0, b1, b2, b3)
+    out.tail.tail.lead
+}
+
+pub fn probe51_mul_limb3(a0: u32, a1: u32, a2: u32, a3: u32, b0: u32, b1: u32, b2: u32, b3: u32) -> u32 {
+    let out = probe51_mul_result(a0, a1, a2, a3, b0, b1, b2, b3)
+    out.tail.tail.tail.value
+}

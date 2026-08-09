@@ -41,6 +41,10 @@ const N: usize = 20;
 
 const FIELD_MUL_UNROLLED_SRC: &str = include_str!("fixtures/spirv/field_mul_bn254_fr.fe");
 const FIELD_MUL_LOOP_SRC: &str = include_str!("fixtures/spirv/field_mul_bn254_fr_loop.fe");
+/// The SPIR-V MSM slice's standalone 4-limb kernel for the 51-bit probe prime
+/// (`p = 2^51 - 129`), independently generated, reused verbatim as a second
+/// reference witness for the loop-form generality gate (see the L=4 test).
+const FIELD_MUL_PROBE51_SRC: &str = include_str!("fixtures/spirv/field_mul_probe.fe");
 
 /// BN254 (alt_bn128) scalar field order Fr, parsed from decimal.
 fn bn254_fr_prime() -> BigUint {
@@ -335,6 +339,178 @@ fn field_mul_matches_both_bn254_fr_kernels_and_bigint_oracle() {
         "  Field<p>::mul::<20, Bn254Fr> == field_mul_bn254_fr == field_mul_bn254_fr_loop == \
          num-bigint Montgomery oracle, limb-for-limb, over {} operand products (incl p-1 x p-1, \
          dense-limb, R, R^2, near-2^256).",
+        cases.len()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// SECOND-MODULUS generality gate (design section 4): the SAME general
+// `precision::field::mul`, at L=4 with a NON-BN254 modulus (the 51-bit prime
+// p = 2^51 - 129), is bit-identical to the independent 4-limb kernel
+// `field_mul_probe.fe` AND to a num-bigint Montgomery oracle. A form that only
+// works at L=20/BN254 cannot pass this.
+// ---------------------------------------------------------------------------
+
+const N4: usize = 4;
+
+/// The 51-bit probe prime `p = 2^51 - 129` (matches `spirv_e2e.rs`'s
+/// `probe_prime()` and `field_mul_probe.fe`'s header).
+fn probe51_prime() -> BigUint {
+    BigUint::from(2_251_799_813_685_119u64)
+}
+
+/// Compile the `precision_field_probe51_oracle_ingot` fixture (the general
+/// `Field<p>` form at `mul::<4, ProbeP51>`, wrapped per-limb) to wasm.
+fn compile_probe51_gate_ingot_to_wasm() -> Vec<u8> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/precision_field_probe51_oracle_ingot");
+    let url = Url::from_directory_path(path.canonicalize().unwrap()).unwrap();
+    let mut db = DriverDataBase::default();
+    assert!(
+        !driver::init_ingot(&mut db, &url),
+        "precision Field<p>/ProbeP51 (L=4) oracle gate ingot initialization diagnostics"
+    );
+    let ingot = db
+        .workspace()
+        .containing_ingot(&db, url)
+        .expect("precision Field<p>/ProbeP51 oracle gate ingot");
+    let top_mod = ingot.root_mod(&db);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "unexpected probe51 gate-ingot diagnostics:\n{diagnostics}"
+    );
+    let bytes = BackendKind::Wasm
+        .create()
+        .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
+        .expect("precision/ProbeP51 oracle gate ingot should compile to wasm")
+        .into_bytecode()
+        .expect("wasm output should be bytecode");
+    wasmparser::validate(&bytes).expect("probe51 gate ingot wasm should validate");
+    bytes
+}
+
+/// Execute the ProbeP51 gate ingot's per-limb wrappers
+/// (`probe51_mul_limb{k}(a0..a3,b0..b3) -> u32`) over all `N4` limb indices.
+fn probe51_field_mul_limbs(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    a_limbs: &[u32],
+    b_limbs: &[u32],
+) -> Vec<u32> {
+    use wasmtime::Val;
+    let mut out = Vec::with_capacity(N4);
+    for k in 0..N4 {
+        let fn_name = format!("probe51_mul_limb{k}");
+        let f = instance
+            .get_func(&mut *store, &fn_name)
+            .unwrap_or_else(|| panic!("`{fn_name}` export should exist"));
+        let mut params: Vec<Val> = Vec::with_capacity(2 * N4);
+        for &l in a_limbs {
+            params.push(Val::I32(l as i32));
+        }
+        for &l in b_limbs {
+            params.push(Val::I32(l as i32));
+        }
+        let mut results = [Val::I32(0)];
+        f.call(&mut *store, &params, &mut results)
+            .unwrap_or_else(|e| panic!("{fn_name}(...) should run: {e:?}"));
+        out.push(match results[0] {
+            Val::I32(v) => v as u32,
+            other => panic!("{fn_name} result must be i32, got {other:?}"),
+        });
+    }
+    out
+}
+
+#[test]
+fn field_mul_l4_second_modulus_matches_probe_kernel_and_bigint_oracle() {
+    let p = probe51_prime();
+    let n = N4;
+    let one = BigUint::from(1u32);
+    let two = BigUint::from(2u32);
+
+    let mut edges: Vec<(String, BigUint)> = vec![
+        ("0".into(), BigUint::from(0u32)),
+        ("1".into(), one.clone()),
+        ("2".into(), two.clone()),
+        ("p-1".into(), &p - &one),
+        ("p-2".into(), &p - &two),
+        ("(p-1)/2".into(), (&p - &one) / &two),
+    ];
+    let mut dense = BigUint::from(0u32);
+    for j in 0..n {
+        dense |= BigUint::from(8191u32) << (LIMB_BITS * j);
+    }
+    edges.push(("dense".into(), &dense % &p));
+    let r = BigUint::from(1u32) << (LIMB_BITS * n);
+    edges.push(("R".into(), &r % &p));
+    edges.push(("R^2".into(), (&r * &r) % &p));
+    let near_2_52 = (BigUint::from(1u32) << 52u32) - &one;
+    edges.push(("near_2^52".into(), &near_2_52 % &p));
+
+    let mut products: Vec<(String, BigUint, BigUint)> = Vec::new();
+    for (na, a) in &edges {
+        for (nb, b) in &edges {
+            products.push((format!("{na} x {nb}"), a.clone(), b.clone()));
+        }
+    }
+    let mut seed: u64 = 0x5150_B1FF_1234_ABCD;
+    for idx in 0..64 {
+        let a = next_field(&mut seed, &p);
+        let b = next_field(&mut seed, &p);
+        products.push((format!("rand{idx}"), a, b));
+    }
+
+    let cases: Vec<(String, Vec<u32>, Vec<u32>, Vec<u32>)> = products
+        .iter()
+        .map(|(name, a, b)| {
+            (
+                name.clone(),
+                to_limbs(a, n),
+                to_limbs(b, n),
+                mont_oracle(a, b, &p, n),
+            )
+        })
+        .collect();
+
+    let probe_wasm = compile_source_to_wasm(FIELD_MUL_PROBE51_SRC, "field_mul_probe");
+    let field_wasm = compile_probe51_gate_ingot_to_wasm();
+
+    let (mut probe_store, probe_instance) = instantiate(&probe_wasm);
+    let (mut field_store, field_instance) = instantiate(&field_wasm);
+
+    for (name, al, bl, oracle) in &cases {
+        let got_probe = reference_field_mul_limbs(
+            &mut probe_store,
+            &probe_instance,
+            "field_mul_probe",
+            al,
+            bl,
+            n,
+        );
+        let got_field = probe51_field_mul_limbs(&mut field_store, &field_instance, al, bl);
+
+        assert_eq!(
+            &got_probe, oracle,
+            "sanity: standalone field_mul_probe({name}) must equal the num-bigint oracle"
+        );
+        assert_eq!(
+            &got_field, oracle,
+            "Field<p>::mul::<4, ProbeP51>({name}) must equal the num-bigint Montgomery oracle \
+             a*b*R^-1 mod p (p = 2^51 - 129)"
+        );
+        assert_eq!(
+            &got_field, &got_probe,
+            "Field<p>::mul::<4, ProbeP51>({name}) must be BIT-IDENTICAL, limb for limb, to the \
+             independent 4-limb field_mul_probe kernel"
+        );
+    }
+
+    eprintln!(
+        "  Field<p>::mul::<4, ProbeP51> (p = 2^51 - 129, NON-BN254) == field_mul_probe == \
+         num-bigint Montgomery oracle, limb-for-limb, over {} operand products: the general \
+         loop form is not a re-blessed BN254 kernel.",
         cases.len()
     );
 }
