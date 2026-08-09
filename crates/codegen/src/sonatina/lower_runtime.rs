@@ -595,6 +595,13 @@ pub(super) fn assign_sonatina_function_symbols<'db>(
             fallback_symbol: function.symbol(db).clone(),
             variant_suffix: String::new(),
             disambiguator: mir::runtime_instance_symbol_key(db, function.instance(db)),
+            // An `Internal`-linkage function is the module's public wasm export
+            // (`linkage_for_runtime` maps it to `Linkage::Public`): its symbol IS
+            // the ABI name the manifest `source_entry` and the JS runtime resolve,
+            // so it must keep its bare source name against a private, same-leaf
+            // sibling. `Private` bodies and `External` host imports (named by the
+            // broker op, not this symbol) never need that guarantee.
+            pinned_export: matches!(function.linkage(db), RuntimeLinkage::Internal),
         })
         .collect::<Vec<_>>();
     functions

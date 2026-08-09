@@ -38,6 +38,16 @@ pub(crate) struct FunctionSymbolInput<'db> {
     pub fallback_symbol: String,
     pub variant_suffix: String,
     pub disambiguator: String,
+    /// An ABI-visible export whose wasm symbol IS its public interface: the
+    /// manifest `source_entry`, the JS runtime's `instance.exports[name]`
+    /// lookup, and every generated adapter reference it by the bare source
+    /// name. Such a function must KEEP its shortest (bare) symbol candidate
+    /// when it collides with a private, internal function that merely shares
+    /// its leaf name (e.g. an entry `escape` vs a library `precision::fixed::
+    /// escape` reached as a callee). In a conflict the private siblings yield
+    /// and disambiguate; the export stays bare. Two exports that genuinely
+    /// share a leaf name are a real ambiguity and both still disambiguate.
+    pub pinned_export: bool,
 }
 
 pub(crate) fn assign_function_symbols<'db>(
@@ -59,7 +69,22 @@ pub(crate) fn assign_function_symbols<'db>(
 
         let mut changed = false;
         for group in conflicts.values().filter(|group| group.len() > 1) {
+            // A single pinned export in the group KEEPS its current (shorter)
+            // candidate; its private, same-leaf-name siblings yield and bump so
+            // the ABI-visible export retains its bare source name. With zero or
+            // more than one pinned export the group has no unique winner, so
+            // every member bumps (the historical symmetric behavior) and a real
+            // ambiguity between two exports is later hash-suffixed.
+            let pinned: Vec<usize> = group
+                .iter()
+                .copied()
+                .filter(|&idx| inputs[idx].pinned_export)
+                .collect();
+            let protected = if pinned.len() == 1 { pinned[0] } else { usize::MAX };
             for &idx in group {
+                if idx == protected {
+                    continue;
+                }
                 if selected[idx] + 1 < candidates[idx].len() {
                     selected[idx] += 1;
                     changed = true;
@@ -241,6 +266,19 @@ fn uniquify_function_symbols(
         .collect::<FxHashSet<_>>();
     for group in conflicts.values().filter(|group| group.len() > 1) {
         let mut group = group.clone();
+        // A lone pinned export in a residual conflict keeps its bare symbol (the
+        // ABI name the manifest and JS runtime resolve); only its siblings take
+        // the hash suffix. This mirrors the candidate-bumping rule above for the
+        // case where a private sibling ran out of candidates to bump to.
+        let pinned: Vec<usize> = group
+            .iter()
+            .copied()
+            .filter(|&idx| inputs[idx].pinned_export)
+            .collect();
+        if let [protected] = pinned.as_slice() {
+            used.insert((style.namespace_key)(&symbols[*protected]));
+            group.retain(|idx| idx != protected);
+        }
         group.sort_by(|lhs, rhs| {
             candidates[*lhs]
                 .cmp(&candidates[*rhs])

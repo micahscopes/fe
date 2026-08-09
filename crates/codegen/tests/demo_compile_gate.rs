@@ -234,6 +234,39 @@ fn mandelbrot_sketch_compiles() {
     let bundle = compile_actor_ingot("demos/sketches/mandelbrot");
     assert_browser_wgsl(&bundle.wgsl);
     wasmparser::validate(&bundle.wasm).expect("mandelbrot sketch wasm should be valid");
+
+    // The render entry MUST be exported under its BARE source name, matching
+    // the manifest `source_entry` the browser runtime resolves via
+    // `instance.exports[source_entry]`. `escape`'s body calls the library
+    // `precision::fixed::escape` (imported as `fx_escape`), which shares the leaf
+    // name `escape`; the exported entry must still win the bare symbol while the
+    // private library instance disambiguates, or the demo fails to mount.
+    let entry = &bundle.manifest.source_entry;
+    assert_eq!(entry, "escape", "mandelbrot render entry name");
+    let exports = wasm_function_export_names(&bundle.wasm);
+    assert!(
+        exports.iter().any(|name| name == entry),
+        "manifest source_entry `{entry}` must be a bare wasm function export; \
+         exports were {exports:?}"
+    );
+}
+
+/// Names of every FUNCTION export of a wasm module, in section order.
+fn wasm_function_export_names(wasm: &[u8]) -> Vec<String> {
+    use wasmparser::{ExternalKind, Payload};
+
+    let mut names = Vec::new();
+    for payload in wasmparser::Parser::new(0).parse_all(wasm) {
+        if let Ok(Payload::ExportSection(reader)) = payload {
+            for export in reader {
+                let Ok(export) = export else { continue };
+                if matches!(export.kind, ExternalKind::Func) {
+                    names.push(export.name.to_owned());
+                }
+            }
+        }
+    }
+    names
 }
 
 // ---------------------------------------------------------------------------
