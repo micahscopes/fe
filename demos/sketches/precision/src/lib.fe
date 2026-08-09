@@ -297,3 +297,17 @@ pub fn from_pair(_ hi: f32, _ lo: f32) -> Expansion<2> {
 pub fn to_pair(_ a: Expansion<2>) -> (f32, f32) {
     (a.lead, a.tail.value)
 }
+
+/// N=4 constructor: four f32 words (most significant first) into an
+/// `Expansion<4>` (qf128 territory, ~1e-27). The flat-tuple sibling of
+/// `from_pair`, letting a renderer swap four flat center-word fields into one
+/// `Expansion<4>` value with no generic-inference friction; `Expansion<4>` is
+/// ground (`More<More<More<Last>>>`), so no bound is needed.
+pub fn from_quad(_ w0: f32, _ w1: f32, _ w2: f32, _ w3: f32) -> Expansion<4> {
+    More { lead: w0, tail: More { lead: w1, tail: More { lead: w2, tail: Last { value: w3 } } } }
+}
+
+/// N=4 destructor: the four words of an `Expansion<4>`, most significant first.
+pub fn to_quad(_ a: Expansion<4>) -> (f32, f32, f32, f32) {
+    (a.lead, a.tail.lead, a.tail.tail.lead, a.tail.tail.tail.value)
+}

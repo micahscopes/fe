@@ -27,39 +27,49 @@
 //! limb-for-limb + escape iteration counts, L=4 and L=8). This is the general
 //! CTFE form instantiated at 8, not a bespoke fixed-point copy.
 //!
-//! DEEP CENTER (increment 1). The per-pixel coordinate `c` is assembled from a
-//! FOUR-WORD f32 float-expansion base (`Expansion<4>` / qf128 territory,
-//! ~1e-27) plus the `u*zoom`/`v*zoom` offset, all stitched into one `Fixed<8>`
-//! value by the exact Fixed add (`from_qf_offset`). The two leading words are
-//! the gesture-plumbing df64 pair (`center_x_hi`/`center_x_lo`,
-//! `center_y_hi`/`center_y_lo`, still `update_view`-driven via `add_f32<2>`,
-//! unchanged and oracle-gated); the two trailing words (`CENTER_*_DEEP2/DEEP3`)
-//! are CONSTS carrying the deep low-order bits BELOW the df64 (two-f32) floor,
-//! seeding a real Seahorse-Valley location to ~1e-27. Those deep bits are
-//! un-representable in a two-word df64 center: dropping them shifts the view by
-//! ~768 pixels at the default `zoom = 1e-16` (proven, GPU-free, in
-//! `crates/codegen/tests/precision_deep_center_oracle.rs`: adjacent deep pixels
-//! resolve to DISTINCT `Fixed<8>` c values, which a df64 center could not).
+//! DEEP CENTER, INTERACTIVE (~1e-27). The per-pixel coordinate `c` is assembled
+//! from a FOUR-WORD f32 float-expansion center (`Expansion<4>` / qf128
+//! territory, ~1e-27) plus the `u*zoom`/`v*zoom` offset, all stitched into one
+//! `Fixed<8>` value by the exact Fixed add (`from_qf_offset`). All four words
+//! per axis are GESTURE-DRIVEN state fields (`center_x_w0..w3`,
+//! `center_y_w0..w3`): `update_view` folds pan/zoom/anchor deltas into the whole
+//! four-word center via the GENERAL `add_f32<4>` (the committed `Expansion<N>`
+//! form at N=4, the same one oracle-gated at N=2), so deep pan/zoom stays exact
+//! at full depth rather than hard-walling once a ~1e-20 delta underflows a df64
+//! (two-word, ~1e-14) center. The runtime carries the eight center words as
+//! plain f32 uniforms and round-trips them by name (no host change: the render
+//! runtime is field-count-general).
+//!
+//! WHY `Expansion<4>` FOR THE CENTER AND `Fixed<8>` FOR THE ORBIT. The center
+//! update (`update_view`) runs in wasm on the CPU, where IEEE round-to-nearest
+//! holds and a float expansion is exact -- so it stays the committed float-
+//! expansion path, just widened 2 -> 4 words (no new numeric kernel). The
+//! ORBIT (`escape`) runs in WGSL on the GPU, where the shader compiler may
+//! reassociate float ops and collapse df64's error-free transforms, so it runs
+//! in reassociation-immune integer `Fixed<8>`. `from_qf_offset` bridges them:
+//! its per-word `from_f32` limb extraction is exact (truncation + an exact
+//! *8192 exponent shift, not an error-free transform), so the bridge is
+//! GPU-faithful (memory: gpu-df64-dead-end-use-perturbation).
 //!
 //!     fe web build demos/sketches/mandelbrot --out <dir>
 //!
 //! Software rendering (lavapipe/SwiftShader) in the sandbox; no performance or
 //! parallelism claim (VISION 3.1).
 //!
-//! Honesty register: the deep low-order bits are seeded as CONSTS, so the
-//! INITIAL view is a fixed deep location; interactive pan at `zoom < ~1e-14`
-//! still moves only the df64 leading pair (deep-pan needs the trailing words
-//! promoted to gesture-driven fields, increment 2), and the 1e-100+ regime
-//! needs perturbation (reference-orbit) rendering (out of scope). What is
-//! proven here: the coordinate carried into the GPU escape holds full `Fixed<8>`
-//! (~1e-27) precision, past the ~1e-11 df64 wall, and stays GPU-faithful
-//! because the orbit is integer `Fixed<8>` (df64's error-free transforms
-//! collapse under WGSL reassociation; memory: gpu-df64-dead-end-use-perturbation).
+//! Honesty register: the initial `view()` seeds a real Seahorse-Valley location
+//! (main-cardioid / period-2 neck) to ~1e-27 at a deep default `zoom = 1e-16`,
+//! and pan/zoom hold that depth interactively; the 1e-100+ regime needs
+//! perturbation (reference-orbit) rendering (out of scope). Proven GPU-free
+//! (`crates/codegen/tests/precision_deep_center_oracle.rs`): the coordinate the
+//! GPU escape receives holds full `Fixed<8>` (~1e-27) precision -- adjacent deep
+//! pixels resolve to DISTINCT `Fixed<8>` c values (a full 512-px row strictly
+//! increasing), and dropping the two deep words (a df64 center) shifts the view
+//! ~768 px at `zoom = 1e-16`, which a df64 center could not reach.
 
 use std::webgpu::{FragmentSurface, GpuProgram, UpdateSurface, WebGpuBackend}
 use std::web::view::{Extent, Param, Surface}
 use fmath::{from_i32, palette, to_i32}
-use precision::{add_f32, from_pair, to_pair}
+use precision::{add_f32, from_quad, to_quad}
 use precision::fixed::{from_qf_offset, escape as fx_escape}
 
 // Iteration-budget scaling: deeper zoom needs more iterations to resolve the
@@ -81,18 +91,6 @@ const CENTER_Y_MAX: f32 = 1.5
 // df64 wall. Held just above the resolution limit.
 const ZOOM_MIN: f32 = 0.000000000000000000000000001
 const ZOOM_MAX: f32 = 3.0
-
-// The DEEP low-order center words (`w2`, `w3` of the four-word `Expansion<4>`
-// base per axis), a real Seahorse-Valley location (main-cardioid / period-2
-// neck) seeded BELOW the df64 (two-f32) floor so the center reaches ~1e-27. The
-// leading two words are the gesture-driven `center_*_hi`/`center_*_lo` fields;
-// these trailing two are consts (increment 1). `w2 ~ 1e-16` alone is already
-// un-representable in a df64 center: dropping it moves the view ~768 px at the
-// default `zoom = 1e-16`.
-const CENTER_X_DEEP2: f32 = -0.0000000000000003
-const CENTER_X_DEEP3: f32 = -0.00000000000000000000002
-const CENTER_Y_DEEP2: f32 = 0.00000000000000025
-const CENTER_Y_DEEP3: f32 = 0.000000000000000000000015
 
 /// One wheel notch: `dzoom < 0` zooms IN (7/8), `dzoom > 0` zooms OUT (9/8),
 /// `dzoom == 0` leaves `zoom` unchanged. Same per-notch ratios as
@@ -122,21 +120,23 @@ fn clamp_f(_ v: f32, _ lo: f32, _ hi: f32) -> f32 {
     }
 }
 
-/// Clamp a flat `(hi, lo)` pair to a plain f32 range, comparing on the `hi`
-/// part (the `lo` part is below the clamp bounds' own resolution). Landing
-/// exactly on a bound drops `lo` to zero, which is correct: the clamp itself
-/// is the more significant fact at that point, not the sub-ulp remainder.
-/// This is representation-level, not `Expansion<2>` arithmetic (`precision`
-/// has no clamp of its own), so it stays local rather than moving to the
-/// general form.
-fn clamp_pair(_ hi: f32, _ lo: f32, _ min_v: f32, _ max_v: f32) -> (f32, f32) {
-    if hi < min_v {
-        (min_v, 0.0)
+/// Clamp a flat four-word `Expansion<4>` center to a plain f32 range, comparing
+/// on the leading word `w0` (the trailing words are below the clamp bounds' own
+/// resolution). Landing exactly on a bound drops the trailing words to zero,
+/// which is correct: the clamp itself is the more significant fact at that
+/// point, not the sub-ulp remainder. This is representation-level, not
+/// `Expansion<4>` arithmetic (`precision` has no clamp of its own), so it stays
+/// local rather than moving to the general form.
+fn clamp_quad(_ w0: f32, _ w1: f32, _ w2: f32, _ w3: f32, _ min_v: f32, _ max_v: f32)
+    -> (f32, f32, f32, f32)
+{
+    if w0 < min_v {
+        (min_v, 0.0, 0.0, 0.0)
     } else {
-        if hi > max_v {
-            (max_v, 0.0)
+        if w0 > max_v {
+            (max_v, 0.0, 0.0, 0.0)
         } else {
-            (hi, lo)
+            (w0, w1, w2, w3)
         }
     }
 }
@@ -167,30 +167,40 @@ fn max_iter_for_zoom(_ zoom: f32) -> i32 {
 }
 
 /// The per-demo params record: field names bind, by name identity, to the
-/// actor's state fields (checked at projection time). `center_x_lo`/
-/// `center_y_lo` are `Param::fixed` (carried in the uniform record, gesture-
-/// updated, but not rendered as a slider): the LOW word of the `Expansion<2>`
-/// center is not a control a person turns, it is precision the `hi` slider
-/// alone can't hold.
+/// actor's state fields (checked at projection time). Each axis carries a
+/// FOUR-WORD `Expansion<4>` center (`w0..w3`, most significant first, ~1e-27):
+/// `w0` is the visible slider; `w1`/`w2`/`w3` are `Param::fixed` (carried in the
+/// uniform record and gesture-updated, but not sliders) -- the low words are not
+/// controls a person turns, they are the deep precision `w0` alone can't hold.
 struct MandelbrotParams {
-    center_x_hi: Param,
-    center_x_lo: Param,
-    center_y_hi: Param,
-    center_y_lo: Param,
+    center_x_w0: Param,
+    center_x_w1: Param,
+    center_x_w2: Param,
+    center_x_w3: Param,
+    center_y_w0: Param,
+    center_y_w1: Param,
+    center_y_w2: Param,
+    center_y_w3: Param,
     zoom: Param,
     res: Param,
 }
 
 actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
-    /// Complex-plane centre, as a flat `(hi, lo)` f32 pair per axis (the
-    /// `Expansion<2>` representation, kept flat here so the wasm export
-    /// signature and control-manifest layout stay unchanged): `_hi` carries
-    /// the visible position, `_lo` the extra ~7 digits deep zoom needs to
-    /// keep the per-pixel/per-gesture step from vanishing.
-    center_x_hi: f32,
-    center_x_lo: f32,
-    center_y_hi: f32,
-    center_y_lo: f32,
+    /// Complex-plane centre, as a flat FOUR-WORD `Expansion<4>` per axis
+    /// (`w0..w3`, most significant first, kept flat so the wasm export signature
+    /// and control-manifest layout are plain f32 members): `w0` carries the
+    /// visible position, `w1`/`w2`/`w3` the deep low-order words (~1e-27) that
+    /// keep the per-pixel/per-gesture step from vanishing far past the ~1e-11
+    /// df64 wall. `update_view` folds gesture deltas into all four words via the
+    /// general `add_f32<4>`; `escape` stitches them into one `Fixed<8>`.
+    center_x_w0: f32,
+    center_x_w1: f32,
+    center_x_w2: f32,
+    center_x_w3: f32,
+    center_y_w0: f32,
+    center_y_w1: f32,
+    center_y_w2: f32,
+    center_y_w3: f32,
     zoom: f32,
     /// Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).
     res: f32,
@@ -201,13 +211,18 @@ actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
         Surface {
             extent: Extent::square(512),
             params: MandelbrotParams {
-                // The df64 leading pair of the deep Seahorse-Valley center
-                // (`hi` visible on the slider, `lo` the next ~7 digits); the
-                // trailing deep words are the `CENTER_*_DEEP2/DEEP3` consts.
-                center_x_hi: Param::range(min: -2.5, max: 1.0, init: -0.7436438798904419),
-                center_x_lo: Param::fixed(-0.0000000071467170),
-                center_y_hi: Param::range(min: -1.5, max: 1.5, init: 0.1318259090185165),
-                center_y_lo: Param::fixed(-0.0000000048132045),
+                // The four-word deep Seahorse-Valley center (`w0` visible on the
+                // slider; `w1`/`w2`/`w3` the deep low-order words, below the df64
+                // floor, reaching ~1e-27). All four are gesture-driven fields, so
+                // pan/zoom stays exact at full depth.
+                center_x_w0: Param::range(min: -2.5, max: 1.0, init: -0.7436438798904419),
+                center_x_w1: Param::fixed(-0.0000000071467170),
+                center_x_w2: Param::fixed(-0.0000000000000003),
+                center_x_w3: Param::fixed(-0.00000000000000000000002),
+                center_y_w0: Param::range(min: -1.5, max: 1.5, init: 0.1318259090185165),
+                center_y_w1: Param::fixed(-0.0000000048132045),
+                center_y_w2: Param::fixed(0.00000000000000025),
+                center_y_w3: Param::fixed(0.000000000000000000000015),
                 // Default to a DEEP view (~1e-16, far past the old ~1e-11 df64
                 // wall) so the deep center is visible on load.
                 zoom: Param::log(min: 0.000000000000000000000000001, max: 3.0, init: 0.0000000000000001),
@@ -226,18 +241,17 @@ actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
         let u: f32 = (from_i32(px) + 0.5) / self.res * 2.0 - 1.0
         let v: f32 = 1.0 - (from_i32(py) + 0.5) / self.res * 2.0
 
-        // The per-pixel coordinate as a deep `Fixed<8>` value: a FOUR-WORD
-        // float-expansion center (the gesture-driven df64 pair `hi`/`lo` plus
-        // the two deep const words `DEEP2`/`DEEP3` below the df64 floor) plus
+        // The per-pixel coordinate as a deep `Fixed<8>` value: the FOUR-WORD
+        // `Expansion<4>` center (all four gesture-driven, reaching ~1e-27) plus
         // the small `u*zoom`/`v*zoom` offset, all f32 sources whose ~24 real
         // bits land at their own magnitude and are stitched by the exact Fixed
-        // add (`from_qf_offset`). The center now reaches ~1e-27, past the old
-        // ~1e-11 df64 wall; the ITERATION runs at full Fixed<8> width, integer
-        // and GPU-faithful.
+        // add (`from_qf_offset`). The center reaches past the old ~1e-11 df64
+        // wall; the ITERATION runs at full Fixed<8> width, integer and
+        // GPU-faithful.
         let (cx_s, cx) = from_qf_offset<8>(
-            self.center_x_hi, self.center_x_lo, CENTER_X_DEEP2, CENTER_X_DEEP3, u * self.zoom)
+            self.center_x_w0, self.center_x_w1, self.center_x_w2, self.center_x_w3, u * self.zoom)
         let (cy_s, cy) = from_qf_offset<8>(
-            self.center_y_hi, self.center_y_lo, CENTER_Y_DEEP2, CENTER_Y_DEEP3, v * self.zoom)
+            self.center_y_w0, self.center_y_w1, self.center_y_w2, self.center_y_w3, v * self.zoom)
 
         let max_iter: i32 = max_iter_for_zoom(self.zoom)
         // The general integer escape loop (z <- z*z + c, strict |z|^2 > 4). It
@@ -258,8 +272,8 @@ actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
     /// Pan/zoom the view from one raw gesture. Fe owns ALL gesture math here
     /// (pan sensitivity, the zoom curve, the cursor anchor, and the clamps);
     /// the runtime delivers only raw pointer deltas and blits the returned
-    /// values back into `(center_x_hi, center_x_lo, center_y_hi,
-    /// center_y_lo, zoom)`. No JS gesture math.
+    /// values back into the eight `center_*_w*` words plus `zoom`. No JS gesture
+    /// math.
     ///
     /// Same SHAPE as `update_view` in `mandel_view_ctl.fe` (the oracle-proven
     /// Q12 fixed-point pan/zoom/anchor/clamp algorithm): pan follows the
@@ -268,9 +282,10 @@ actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
     /// correction uses the OLD zoom minus the NEW (clamped) zoom so the point
     /// under the cursor stays put; clamps apply last. The center's pan/anchor
     /// deltas are O(zoom) quantities the same way `escape`'s per-pixel offset
-    /// is, so they fold into the `Expansion<2>` center through `add_f32<2>`
-    /// for the same reason: dropping them straight into an O(1) f32 center
-    /// would erase them at deep zoom.
+    /// is, so they fold into the FOUR-WORD `Expansion<4>` center through the
+    /// general `add_f32<4>` for the same reason: dropping a ~1e-20 delta into an
+    /// O(1) f32 center (or even a two-word df64 center, ~1e-14) would erase it,
+    /// hard-walling deep pan; the four-word center holds it to ~1e-27.
     ///
     /// `dx`/`dy`: pixel drag delta (image follows the pointer). `dzoom`: one
     /// wheel notch, < 0 in / > 0 out / 0 none. `mx`/`my`: the pointer's
@@ -278,7 +293,7 @@ actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
     /// unused when `dzoom == 0`, since the anchor term is then scaled by
     /// zero).
     fn update_view(self, dx: f32, dy: f32, dzoom: f32, mx: f32, my: f32)
-        -> (f32, f32, f32, f32, f32)
+        -> (f32, f32, f32, f32, f32, f32, f32, f32, f32)
         uses (UpdateSurface)
     {
         // pixel -> complex-plane step at the CURRENT zoom: `escape`'s own
@@ -287,8 +302,10 @@ actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
         // screen row increases downward, complex y increases upward), so a
         // downward drag (dy > 0) must INCREASE center_y, not decrease it.
         let step: f32 = 2.0 * self.zoom / self.res
-        let (cx0_hi, cx0_lo) = to_pair(add_f32<2>(from_pair(self.center_x_hi, self.center_x_lo), -dx * step))
-        let (cy0_hi, cy0_lo) = to_pair(add_f32<2>(from_pair(self.center_y_hi, self.center_y_lo), dy * step))
+        let (cx0_0, cx0_1, cx0_2, cx0_3) = to_quad(add_f32<4>(
+            from_quad(self.center_x_w0, self.center_x_w1, self.center_x_w2, self.center_x_w3), -dx * step))
+        let (cy0_0, cy0_1, cy0_2, cy0_3) = to_quad(add_f32<4>(
+            from_quad(self.center_y_w0, self.center_y_w1, self.center_y_w2, self.center_y_w3), dy * step))
 
         let z_c: f32 = clamp_f(zoom_step(self.zoom, dzoom), ZOOM_MIN, ZOOM_MAX)
 
@@ -297,11 +314,15 @@ actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
         // new): keeps that point fixed under the new zoom.
         let u: f32 = (mx + 0.5) * 2.0 / self.res - 1.0
         let v: f32 = 1.0 - (my + 0.5) * 2.0 / self.res
-        let (cx_a_hi, cx_a_lo) = to_pair(add_f32<2>(from_pair(cx0_hi, cx0_lo), u * (self.zoom - z_c)))
-        let (cy_a_hi, cy_a_lo) = to_pair(add_f32<2>(from_pair(cy0_hi, cy0_lo), v * (self.zoom - z_c)))
+        let (cx_a_0, cx_a_1, cx_a_2, cx_a_3) = to_quad(add_f32<4>(
+            from_quad(cx0_0, cx0_1, cx0_2, cx0_3), u * (self.zoom - z_c)))
+        let (cy_a_0, cy_a_1, cy_a_2, cy_a_3) = to_quad(add_f32<4>(
+            from_quad(cy0_0, cy0_1, cy0_2, cy0_3), v * (self.zoom - z_c)))
 
-        let (cx_c_hi, cx_c_lo) = clamp_pair(cx_a_hi, cx_a_lo, CENTER_X_MIN, CENTER_X_MAX)
-        let (cy_c_hi, cy_c_lo) = clamp_pair(cy_a_hi, cy_a_lo, CENTER_Y_MIN, CENTER_Y_MAX)
-        (cx_c_hi, cx_c_lo, cy_c_hi, cy_c_lo, z_c)
+        let (cx_c_0, cx_c_1, cx_c_2, cx_c_3) =
+            clamp_quad(cx_a_0, cx_a_1, cx_a_2, cx_a_3, CENTER_X_MIN, CENTER_X_MAX)
+        let (cy_c_0, cy_c_1, cy_c_2, cy_c_3) =
+            clamp_quad(cy_a_0, cy_a_1, cy_a_2, cy_a_3, CENTER_Y_MIN, CENTER_Y_MAX)
+        (cx_c_0, cx_c_1, cx_c_2, cx_c_3, cy_c_0, cy_c_1, cy_c_2, cy_c_3, z_c)
     }
 }

@@ -269,22 +269,47 @@ fn two_sum(a: f32, b: f32) -> (f32, f32) {
     (s, err)
 }
 
-/// Mirrors `lib.fe`'s `df_add_f32`: df64 `a` plus a plain f32 `b`.
-fn df_add_f32(a_hi: f32, a_lo: f32, b: f32) -> (f32, f32) {
-    let (s, e0) = two_sum(a_hi, b);
-    let e1 = e0 + a_lo;
-    two_sum(s, e1)
+/// Mirrors `precision`'s general `Exp::add_corr` on a length-n expansion (index
+/// 0 = most significant), verbatim: `two_sum` the leading terms, fold the error
+/// down into the tail's own combine, then a FINAL `two_sum` re-normalizing this
+/// level's leading term against whatever the tail settled on. Plain f32 (no
+/// f64, no FMA), so this stays bit-for-bit comparable to the wasm the SAME
+/// generic source lowers to. This is the N-general body the committed
+/// `Expansion<2>` oracle proves bit-identical at N=2; here it drives N=4.
+fn exp_add_corr(a: &[f32], b: &[f32], corr: f32) -> Vec<f32> {
+    if a.len() == 1 {
+        // The base case (`Last`): a plain "lump the rest" sum.
+        vec![(corr + a[0]) + b[0]]
+    } else {
+        let (s, e) = two_sum(corr + a[0], b[0]);
+        let tail = exp_add_corr(&a[1..], &b[1..], e);
+        let (hi, lo) = two_sum(s, tail[0]);
+        let mut out = Vec::with_capacity(a.len());
+        out.push(hi); // this level's re-normalized leading term
+        out.push(lo); // tail_result.with_head(lo)
+        out.extend_from_slice(&tail[1..]);
+        out
+    }
 }
 
-/// Mirrors `lib.fe`'s `df_clamp`: clamp a df64 value to an f32 range,
-/// comparing on `hi` only, dropping `lo` to zero on a clamp.
-fn df_clamp(hi: f32, lo: f32, min_v: f32, max_v: f32) -> (f32, f32) {
-    if hi < min_v {
-        (min_v, 0.0)
-    } else if hi > max_v {
-        (max_v, 0.0)
+/// Mirrors `lib.fe`'s `add_f32<4>(a, b)`: a four-word `Expansion<4>` `a` plus a
+/// plain f32 `b`, via `a.add_corr(from_scalar(b), 0.0)` where
+/// `from_scalar(b) = [b, 0, 0, 0]`.
+fn qf_add_f32(a: [f32; 4], b: f32) -> [f32; 4] {
+    let r = exp_add_corr(&a, &[b, 0.0, 0.0, 0.0], 0.0);
+    [r[0], r[1], r[2], r[3]]
+}
+
+/// Mirrors `lib.fe`'s `clamp_quad`: clamp a four-word `Expansion<4>` to an f32
+/// range, comparing on `w0` only, dropping the trailing words to zero on a
+/// clamp.
+fn qf_clamp(w: [f32; 4], min_v: f32, max_v: f32) -> [f32; 4] {
+    if w[0] < min_v {
+        [min_v, 0.0, 0.0, 0.0]
+    } else if w[0] > max_v {
+        [max_v, 0.0, 0.0, 0.0]
     } else {
-        (hi, lo)
+        w
     }
 }
 
@@ -297,17 +322,14 @@ fn df_clamp(hi: f32, lo: f32, min_v: f32, max_v: f32) -> (f32, f32) {
 /// `v(py) = 1-(py+0.5)/res*2` (screen DOWN = complex UP, the Y-flip), so a
 /// downward drag increases `center_y` (opposite of the `dx`/`center_x` sign).
 ///
-/// The complex-plane centre is df64 (deep zoom, `MANDELBROT_DF64_MB.md`
-/// equivalent: see `lib.fe`'s module doc): pan and anchor deltas are O(zoom)
-/// quantities that fold into the df64 centre through `df_add_f32`, mirroring
-/// `lib.fe`'s `update_view` exactly (same op sequence, same f32 rounding),
-/// so this oracle is expected to match the wasm export BIT-FOR-BIT, not just
-/// within an epsilon.
+/// The complex-plane centre is a FOUR-WORD `Expansion<4>` (deep zoom ~1e-27):
+/// pan and anchor deltas are O(zoom) quantities that fold into the four-word
+/// centre through `add_f32<4>`, mirroring `lib.fe`'s `update_view` exactly
+/// (same op sequence, same f32 rounding), so this oracle is expected to match
+/// the wasm export BIT-FOR-BIT, not just within an epsilon.
 fn mandelbrot_update_view_oracle(
-    center_x_hi: f32,
-    center_x_lo: f32,
-    center_y_hi: f32,
-    center_y_lo: f32,
+    cx: [f32; 4],
+    cy: [f32; 4],
     zoom: f32,
     res: f32,
     dx: f32,
@@ -315,10 +337,10 @@ fn mandelbrot_update_view_oracle(
     dzoom: f32,
     mx: f32,
     my: f32,
-) -> (f32, f32, f32, f32, f32) {
+) -> ([f32; 4], [f32; 4], f32) {
     let step = 2.0 * zoom / res;
-    let (cx0_hi, cx0_lo) = df_add_f32(center_x_hi, center_x_lo, -dx * step);
-    let (cy0_hi, cy0_lo) = df_add_f32(center_y_hi, center_y_lo, dy * step);
+    let cx0 = qf_add_f32(cx, -dx * step);
+    let cy0 = qf_add_f32(cy, dy * step);
 
     let stepped = if dzoom < 0.0 {
         zoom * 0.875
@@ -331,20 +353,19 @@ fn mandelbrot_update_view_oracle(
 
     let u = (mx + 0.5) * 2.0 / res - 1.0;
     let v = 1.0 - (my + 0.5) * 2.0 / res;
-    let (cx_a_hi, cx_a_lo) = df_add_f32(cx0_hi, cx0_lo, u * (zoom - z_c));
-    let (cy_a_hi, cy_a_lo) = df_add_f32(cy0_hi, cy0_lo, v * (zoom - z_c));
+    let cx_a = qf_add_f32(cx0, u * (zoom - z_c));
+    let cy_a = qf_add_f32(cy0, v * (zoom - z_c));
 
-    let (cx_c_hi, cx_c_lo) =
-        df_clamp(cx_a_hi, cx_a_lo, MANDELBROT_CENTER_X_RANGE.0, MANDELBROT_CENTER_X_RANGE.1);
-    let (cy_c_hi, cy_c_lo) =
-        df_clamp(cy_a_hi, cy_a_lo, MANDELBROT_CENTER_Y_RANGE.0, MANDELBROT_CENTER_Y_RANGE.1);
-    (cx_c_hi, cx_c_lo, cy_c_hi, cy_c_lo, z_c)
+    let cx_c = qf_clamp(cx_a, MANDELBROT_CENTER_X_RANGE.0, MANDELBROT_CENTER_X_RANGE.1);
+    let cy_c = qf_clamp(cy_a, MANDELBROT_CENTER_Y_RANGE.0, MANDELBROT_CENTER_Y_RANGE.1);
+    (cx_c, cy_c, z_c)
 }
 
 /// The manifest `control` section has EXACTLY the shape the render runtime
-/// reads: the `update_view` export, its 11 positional arg sources (5 raw
-/// gesture deltas, then the actor's 6 df64-centre state fields by name, in
-/// declaration order), and the 5-value reply's target field names.
+/// reads: the `update_view` export, its 15 positional arg sources (5 raw
+/// gesture deltas, then the actor's 10 state fields by name -- the eight
+/// four-word `Expansion<4>` centre words plus `zoom` and `res` -- in
+/// declaration order), and the 9-value reply's target field names.
 #[test]
 fn mandelbrot_control_manifest_projects_gesture_bindings() {
     use fe_codegen::WebControlArgSource as Src;
@@ -364,10 +385,14 @@ fn mandelbrot_control_manifest_projects_gesture_bindings() {
             Src::Wheel,
             Src::Pointer { axis: "x".to_string() },
             Src::Pointer { axis: "y".to_string() },
-            Src::State { name: "center_x_hi".to_string() },
-            Src::State { name: "center_x_lo".to_string() },
-            Src::State { name: "center_y_hi".to_string() },
-            Src::State { name: "center_y_lo".to_string() },
+            Src::State { name: "center_x_w0".to_string() },
+            Src::State { name: "center_x_w1".to_string() },
+            Src::State { name: "center_x_w2".to_string() },
+            Src::State { name: "center_x_w3".to_string() },
+            Src::State { name: "center_y_w0".to_string() },
+            Src::State { name: "center_y_w1".to_string() },
+            Src::State { name: "center_y_w2".to_string() },
+            Src::State { name: "center_y_w3".to_string() },
             Src::State { name: "zoom".to_string() },
             Src::State { name: "res".to_string() },
         ],
@@ -377,14 +402,18 @@ fn mandelbrot_control_manifest_projects_gesture_bindings() {
     assert_eq!(
         control.result,
         vec![
-            "center_x_hi".to_string(),
-            "center_x_lo".to_string(),
-            "center_y_hi".to_string(),
-            "center_y_lo".to_string(),
+            "center_x_w0".to_string(),
+            "center_x_w1".to_string(),
+            "center_x_w2".to_string(),
+            "center_x_w3".to_string(),
+            "center_y_w0".to_string(),
+            "center_y_w1".to_string(),
+            "center_y_w2".to_string(),
+            "center_y_w3".to_string(),
             "zoom".to_string(),
         ],
-        "control.result must be the LEADING 5 state fields (declaration order); `res` is read \
-         but not itself gesture-updated"
+        "control.result must be the LEADING 9 state fields (declaration order): the eight \
+         center words plus zoom; `res` is read but not itself gesture-updated"
     );
 
     // Non-interactive sketches carry no `control` section at all (this is
@@ -426,20 +455,24 @@ fn mandelbrot_update_view_matches_oracle_over_gesture_tape() {
     let mut store = wasmtime::Store::new(&engine, ());
     let instance = wasmtime::Instance::new(&mut store, &module, &[])
         .expect("wasmtime should instantiate the mandelbrot sketch wasm");
+    // `(f32 x15) -> (f32 x9)`: the arity exceeds wasmtime's typed-tuple
+    // ergonomics, so the call goes through the untyped `Val` path (mirroring
+    // `precision_fixed_oracle.rs`'s L=8 harness).
     let update_view = instance
-        .get_typed_func::<
-            (f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32),
-            (f32, f32, f32, f32, f32),
-        >(&mut store, "update_view")
+        .get_func(&mut store, "update_view")
         .expect(
-            "`update_view` export should exist as (f32 x11) -> (f32, f32, f32, f32, f32): 5 \
-             gesture args then the 6 flattened df64-centre actor state fields",
+            "`update_view` export should exist as (f32 x15) -> (f32 x9): 5 gesture args then the \
+             10 flattened actor state fields (eight Expansion<4> centre words, zoom, res)",
         );
 
-    // view()'s declared init: `center_x_hi = -0.5`, `center_y_hi = 0.0`, both
-    // df64 `_lo` words start at zero, `zoom = 1.5`.
-    let (mut cx_hi, mut cx_lo, mut cy_hi, mut cy_lo, mut zoom) = (-0.5f32, 0.0f32, 0.0f32, 0.0f32, 1.5f32);
+    // The tape's own start state (independent of view()'s deep init): a shallow
+    // centre so pan actually reaches the centre clamps. Each axis is a four-word
+    // `Expansion<4>` centre; the deep words begin at zero.
+    let mut cx = [-0.5f32, 0.0, 0.0, 0.0];
+    let mut cy = [0.0f32, 0.0, 0.0, 0.0];
+    let mut zoom = 1.5f32;
     let res = MANDELBROT_RES;
+    let mut results = vec![wasmtime::Val::F32(0); 9];
 
     let mut s: u64 = 0x5EED_1234_CAFE_F00D;
     let (mut hit_cx_lo, mut hit_cx_hi, mut hit_cy_lo, mut hit_cy_hi) = (0u32, 0u32, 0u32, 0u32);
@@ -471,38 +504,52 @@ fn mandelbrot_update_view_matches_oracle_over_gesture_tape() {
             (dx, dy, dzoom, mx, my)
         } else {
             // The deterministic zoom-in burst: no pan (dx=dy=0), cursor
-            // centred (so the anchor term is exactly zero and the centre
-            // does not drift), pure zoom-in.
+            // centred (so the anchor term is near zero and the centre does
+            // not drift), pure zoom-in.
             (0.0, 0.0, -1.0, res / 2.0, res / 2.0)
         };
 
-        let got = update_view
-            .call(
-                &mut store,
-                (dx, dy, dzoom, mx, my, cx_hi, cx_lo, cy_hi, cy_lo, zoom, res),
-            )
+        let args: [f32; 15] = [
+            dx, dy, dzoom, mx, my, cx[0], cx[1], cx[2], cx[3], cy[0], cy[1], cy[2], cy[3], zoom, res,
+        ];
+        let vals: Vec<wasmtime::Val> =
+            args.iter().map(|v| wasmtime::Val::F32(v.to_bits())).collect();
+        update_view
+            .call(&mut store, &vals, &mut results)
             .expect("update_view should run");
-        let want = mandelbrot_update_view_oracle(
-            cx_hi, cx_lo, cy_hi, cy_lo, zoom, res, dx, dy, dzoom, mx, my,
-        );
+        let mut got = [0f32; 9];
+        for (i, r) in results.iter().enumerate() {
+            got[i] = match r {
+                wasmtime::Val::F32(bits) => f32::from_bits(*bits),
+                other => panic!("update_view result {i} must be f32, got {other:?}"),
+            };
+        }
+
+        let (want_cx, want_cy, want_z) =
+            mandelbrot_update_view_oracle(cx, cy, zoom, res, dx, dy, dzoom, mx, my);
+        let want = [
+            want_cx[0], want_cx[1], want_cx[2], want_cx[3], want_cy[0], want_cy[1], want_cy[2],
+            want_cy[3], want_z,
+        ];
         assert_eq!(
             got, want,
-            "gesture-tape step {step}: wasm update_view(cx_hi={cx_hi},cx_lo={cx_lo},\
-             cy_hi={cy_hi},cy_lo={cy_lo},zoom={zoom}; dx={dx},dy={dy},dz={dzoom},mx={mx},my={my}) \
-             = {got:?} must equal the oracle {want:?}"
+            "gesture-tape step {step}: wasm update_view(cx={cx:?}, cy={cy:?}, zoom={zoom}; \
+             dx={dx},dy={dy},dz={dzoom},mx={mx},my={my}) = {got:?} must equal the oracle {want:?}"
         );
 
-        (cx_hi, cx_lo, cy_hi, cy_lo, zoom) = got;
-        if cx_hi <= MANDELBROT_CENTER_X_RANGE.0 {
+        cx = [got[0], got[1], got[2], got[3]];
+        cy = [got[4], got[5], got[6], got[7]];
+        zoom = got[8];
+        if cx[0] <= MANDELBROT_CENTER_X_RANGE.0 {
             hit_cx_lo += 1;
         }
-        if cx_hi >= MANDELBROT_CENTER_X_RANGE.1 {
+        if cx[0] >= MANDELBROT_CENTER_X_RANGE.1 {
             hit_cx_hi += 1;
         }
-        if cy_hi <= MANDELBROT_CENTER_Y_RANGE.0 {
+        if cy[0] <= MANDELBROT_CENTER_Y_RANGE.0 {
             hit_cy_lo += 1;
         }
-        if cy_hi >= MANDELBROT_CENTER_Y_RANGE.1 {
+        if cy[0] >= MANDELBROT_CENTER_Y_RANGE.1 {
             hit_cy_hi += 1;
         }
         if zoom <= MANDELBROT_ZOOM_RANGE.0 {
@@ -512,12 +559,14 @@ fn mandelbrot_update_view_matches_oracle_over_gesture_tape() {
             hit_zoom_hi += 1;
         }
         assert!(
-            (MANDELBROT_CENTER_X_RANGE.0..=MANDELBROT_CENTER_X_RANGE.1).contains(&cx_hi),
-            "step {step}: center_x_hi {cx_hi} escaped its view() range"
+            (MANDELBROT_CENTER_X_RANGE.0..=MANDELBROT_CENTER_X_RANGE.1).contains(&cx[0]),
+            "step {step}: center_x_w0 {} escaped its view() range",
+            cx[0]
         );
         assert!(
-            (MANDELBROT_CENTER_Y_RANGE.0..=MANDELBROT_CENTER_Y_RANGE.1).contains(&cy_hi),
-            "step {step}: center_y_hi {cy_hi} escaped its view() range"
+            (MANDELBROT_CENTER_Y_RANGE.0..=MANDELBROT_CENTER_Y_RANGE.1).contains(&cy[0]),
+            "step {step}: center_y_w0 {} escaped its view() range",
+            cy[0]
         );
         assert!(
             (MANDELBROT_ZOOM_RANGE.0..=MANDELBROT_ZOOM_RANGE.1).contains(&zoom),
@@ -536,9 +585,9 @@ fn mandelbrot_update_view_matches_oracle_over_gesture_tape() {
     );
     eprintln!(
         "R3 step 1 tape: {STEPS} mixed pan/zoom/anchor events under wasmtime; the mandelbrot \
-         update_view triple equals the independent oracle at EVERY step. Clamp coverage: \
-         cx_lo={hit_cx_lo} cx_hi={hit_cx_hi} cy_lo={hit_cy_lo} cy_hi={hit_cy_hi} \
-         zoom_lo={hit_zoom_lo} zoom_hi={hit_zoom_hi}."
+         update_view (Expansion<4> centre, 9-value reply) equals the independent oracle at EVERY \
+         step. Clamp coverage: cx_lo={hit_cx_lo} cx_hi={hit_cx_hi} cy_lo={hit_cy_lo} \
+         cy_hi={hit_cy_hi} zoom_lo={hit_zoom_lo} zoom_hi={hit_zoom_hi}."
     );
 }
 
