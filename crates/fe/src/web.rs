@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     path::{Path, PathBuf},
+    sync::OnceLock,
     time::{Instant, UNIX_EPOCH},
 };
 
@@ -301,25 +302,39 @@ fn render_cache_root() -> Option<PathBuf> {
     )
 }
 
-fn compiler_cache_identity() -> String {
-    let git = option_env!("FE_GIT_HASH").unwrap_or("unknown");
-    let executable = std::env::current_exe()
-        .ok()
-        .and_then(|path| std::fs::metadata(path).ok())
-        .map(|metadata| {
-            let modified = metadata
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-                .map(|duration| duration.as_nanos())
-                .unwrap_or_default();
-            format!("{}:{modified}", metadata.len())
+fn executable_cache_identity(path: &Path) -> String {
+    std::fs::read(path)
+        .map(|bytes| format!("sha256:{}", sha256_hex(&bytes)))
+        .unwrap_or_else(|_| {
+            std::fs::metadata(path)
+                .map(|metadata| {
+                    let modified = metadata
+                        .modified()
+                        .ok()
+                        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                        .map(|duration| duration.as_nanos())
+                        .unwrap_or_default();
+                    format!("metadata:{}:{modified}", metadata.len())
+                })
+                .unwrap_or_else(|_| "no-executable-identity".to_owned())
         })
-        .unwrap_or_else(|| "no-executable-metadata".to_owned());
-    format!(
-        "render-cache-v{RENDER_CACHE_FORMAT}:{}:{git}:{executable}",
-        env!("CARGO_PKG_VERSION")
-    )
+}
+
+fn compiler_cache_identity() -> &'static str {
+    static IDENTITY: OnceLock<String> = OnceLock::new();
+    IDENTITY
+        .get_or_init(|| {
+            let git = option_env!("FE_GIT_HASH").unwrap_or("unknown");
+            let executable = std::env::current_exe()
+                .ok()
+                .map(|path| executable_cache_identity(&path))
+                .unwrap_or_else(|| "no-executable-identity".to_owned());
+            format!(
+                "render-cache-v{RENDER_CACHE_FORMAT}:{}:{git}:{executable}",
+                env!("CARGO_PKG_VERSION")
+            )
+        })
+        .as_str()
 }
 
 fn render_cache_key(
@@ -709,6 +724,19 @@ mod tests {
         assert_eq!(first_key, render_cache_key(&first, Some("shade")).unwrap());
         assert_ne!(first_key, render_cache_key(&first, Some("other")).unwrap());
         assert_ne!(first_key, render_cache_key(&second, Some("shade")).unwrap());
+    }
+
+    #[test]
+    fn executable_cache_identity_ignores_timestamp_only_rewrites() {
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("fe-test-compiler");
+        std::fs::write(&executable, b"same compiler bytes").unwrap();
+        let first = executable_cache_identity(&executable);
+        std::fs::write(&executable, b"same compiler bytes").unwrap();
+        assert_eq!(first, executable_cache_identity(&executable));
+
+        std::fs::write(&executable, b"changed compiler bytes").unwrap();
+        assert_ne!(first, executable_cache_identity(&executable));
     }
 
     #[test]

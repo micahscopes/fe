@@ -25,7 +25,7 @@ extern {
 const MAX_ITER_BASE: u32 = 256
 const MAX_ITER_CAP: u32 = 2000
 const DEPTH_PROBE_STEPS: u32 = 96
-const ITER_PER_DOUBLING: u32 = 48
+const ITER_PER_DOUBLING: u32 = 64
 const PALETTE_PERIOD: f32 = 256.0
 const ORBIT_SAMPLES: usize = 2003
 const ORBIT_CENTER_INDEX: u32 = 2001

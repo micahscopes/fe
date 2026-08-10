@@ -206,7 +206,7 @@ fn adaptive_iteration_limit(zoom: f32) -> u32 {
             depth += 1;
         }
     }
-    (256 + depth * 48).min(2000)
+    (256 + depth * 64).min(2000)
 }
 
 /// Exact Fixed<8> classification for the same four-word center and f32 pixel
@@ -447,23 +447,24 @@ fn render_params(
     render_frame(device, queue, pipelines, target, target_view, readback)
 }
 
-fn assert_exact_classification(values: [f32; 10], pixels: &[[u8; 4]], label: &str) {
+fn assert_exact_or_visible_glitch(values: [f32; 10], pixels: &[[u8; 4]], label: &str) -> usize {
     let black = [0, 0, 0, 255];
     let magenta = [255, 0, 255, 255];
     let mut inside = 0usize;
     let mut escaped = 0usize;
+    let mut glitches = 0usize;
     for py in 0..HEIGHT {
         for px in 0..WIDTH {
             let pixel = pixels[(py * WIDTH + px) as usize];
             let want_escaped = exact_fixed8_pixel_escapes(&values, px, py);
+            if pixel == magenta {
+                glitches += 1;
+                continue;
+            }
             let got_escaped = pixel != black && pixel != magenta;
             assert_eq!(
                 got_escaped, want_escaped,
                 "{label} pixel ({px},{py}) classification mismatch: RGBA={pixel:?}"
-            );
-            assert_ne!(
-                pixel, magenta,
-                "{label} pixel ({px},{py}) became numerically ambiguous"
             );
             if want_escaped {
                 escaped += 1;
@@ -473,8 +474,10 @@ fn assert_exact_classification(values: [f32; 10], pixels: &[[u8; 4]], label: &st
         }
     }
     eprintln!(
-        "  exact classification receipt {label}: {inside} inside, {escaped} escaped, 0 false escapes, 0 magenta"
+        "  exact-or-visible-glitch receipt {label}: {inside} inside, {escaped} escaped, \
+         0 false classifications, {glitches} magenta"
     );
+    glitches
 }
 
 #[test]
@@ -559,7 +562,9 @@ fn perturbation_graph_executes_reference_before_pixels_and_exposes_glitches() {
 
     // The reference c=(1,1) escapes. At the lower-left sample, zoom=8/7
     // contributes approximately (-1,-1), keeping that perturbed pixel near
-    // c=(0,0) until it encounters the reference sentinel.
+    // c=(0,0). Exhausting the short reference must reanchor at z=0 before
+    // any invalid-reference sentinel is consumed, without producing a pink
+    // blob or changing exact Fixed<8> escape classification.
     let sentinel = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.1428572, 8.0];
     let pixels = render_params(
         &device,
@@ -573,21 +578,56 @@ fn perturbation_graph_executes_reference_before_pixels_and_exposes_glitches() {
         sentinel,
     );
     let magenta_count = pixels.iter().filter(|pixel| **pixel == magenta).count();
-    assert!(
-        magenta_count > 0,
-        "an unrecoverable ambiguity must remain visibly magenta, never classified inside"
+    assert_eq!(
+        magenta_count, 0,
+        "reference exhaustion must reanchor against the center orbit, not produce a pink blob"
     );
-    assert!(
-        magenta_count <= 4,
-        "reference exhaustion must reanchor against the center orbit, not produce a pink blob: \
-         got {magenta_count}/{} magenta pixels",
-        pixels.len()
+    assert_eq!(
+        assert_exact_or_visible_glitch(sentinel, &pixels, "escaping reference overlap"),
+        0,
+        "center-orbit reanchoring should resolve this overlap without a visible glitch"
     );
     eprintln!(
-        "  sentinel-overlap receipt: {magenta_count}/{} pixels remain visibly ambiguous after \
+        "  sentinel-overlap receipt: {magenta_count}/{} pixels ambiguous after exact \
          center-orbit reanchoring",
         pixels.len()
     );
+
+    // A separate directed frame proves that real numerical ambiguity remains
+    // visible instead of being silently classified inside. For a zero
+    // reference, each corner has u^2 + v^2 = 2 * 0.875^2. This adjacent-f32
+    // zoom places the first iterate just above the escape boundary and inside
+    // the shader's explicit ambiguity band. Only those four symmetric samples
+    // are deliberately ambiguous.
+    let boundary = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.6162442, 8.0];
+    let corner_delta = -0.875f32 * boundary[8];
+    let corner_magnitude = corner_delta * corner_delta + corner_delta * corner_delta;
+    assert!(
+        corner_magnitude > 4.0
+            && (corner_magnitude - 4.0).abs() <= 0.000004 * 1.0f32.max(corner_magnitude),
+        "the directed frame must actually land in the declared ambiguity band"
+    );
+    let pixels = render_params(
+        &device,
+        &queue,
+        &pipelines,
+        &compute_params,
+        &fragment_params,
+        &target,
+        &target_view,
+        &readback,
+        boundary,
+    );
+    let corner_indices = [0usize, 7, 56, 63];
+    for (index, pixel) in pixels.iter().enumerate() {
+        assert_eq!(
+            *pixel == magenta,
+            corner_indices.contains(&index),
+            "only the four directed boundary samples may be visibly ambiguous: \
+             pixel {index} is {pixel:?}"
+        );
+    }
+    eprintln!("  visible-glitch receipt: 4/64 directed boundary pixels are magenta");
 
     // Directed classification receipts. The first frame is wholly inside the
     // main cardioid. The next two exercise the cancellation-heavy seahorse
@@ -605,7 +645,11 @@ fn perturbation_graph_executes_reference_before_pixels_and_exposes_glitches() {
         &readback,
         interior,
     );
-    assert_exact_classification(interior, &pixels, "cardioid zoom=5e-2");
+    assert_eq!(
+        assert_exact_or_visible_glitch(interior, &pixels, "cardioid zoom=5e-2"),
+        0,
+        "the directed cardioid frame should be unambiguous"
+    );
 
     let seahorse_center = [
         -0.7436438798904419,
@@ -630,7 +674,11 @@ fn perturbation_graph_executes_reference_before_pixels_and_exposes_glitches() {
         &readback,
         seahorse_center,
     );
-    assert_exact_classification(seahorse_center, &pixels, "seahorse zoom=1e-7");
+    assert_eq!(
+        assert_exact_or_visible_glitch(seahorse_center, &pixels, "seahorse zoom=1e-7"),
+        0,
+        "the directed seahorse frame should need no visible fallback at zoom=1e-7"
+    );
 
     let mut deep_seahorse = seahorse_center;
     deep_seahorse[8] = 0.0000000001;
@@ -645,5 +693,9 @@ fn perturbation_graph_executes_reference_before_pixels_and_exposes_glitches() {
         &readback,
         deep_seahorse,
     );
-    assert_exact_classification(deep_seahorse, &pixels, "seahorse zoom=1e-10");
+    assert_eq!(
+        assert_exact_or_visible_glitch(deep_seahorse, &pixels, "seahorse zoom=1e-10"),
+        0,
+        "the directed seahorse frame should need no visible fallback at zoom=1e-10"
+    );
 }
