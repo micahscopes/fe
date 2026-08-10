@@ -1,0 +1,338 @@
+{
+  "artifacts": {
+    "canonical_adapters": [],
+    "wasm": "fe-render-e69e85798d972f51.wasm",
+    "wasm_bytes": 7504,
+    "wgsl": "fe-render-3862ea1cb15b6d77.wgsl",
+    "wgsl_bytes": 231109
+  },
+  "browser_runtime": null,
+  "canonical_interface": null,
+  "canonical_status": {
+    "embedded": false,
+    "omission_reason": "canonical interface was not requested",
+    "policy": "disabled"
+  },
+  "layout": {
+    "bindings": [
+      {
+        "access": "read",
+        "binding": 1,
+        "group": 0,
+        "members": [
+          {
+            "arg_index": 2,
+            "doc": "0-cochain value at the hexagon's centre vertex.",
+            "name": "c0",
+            "offset": 0,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 3,
+            "doc": "0-cochain values at the six ring vertices, counterclockwise from +x.",
+            "name": "c1",
+            "offset": 4,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 4,
+            "doc": null,
+            "name": "c2",
+            "offset": 8,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 5,
+            "doc": null,
+            "name": "c3",
+            "offset": 12,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 6,
+            "doc": null,
+            "name": "c4",
+            "offset": 16,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 7,
+            "doc": null,
+            "name": "c5",
+            "offset": 20,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 8,
+            "doc": null,
+            "name": "c6",
+            "offset": 24,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 9,
+            "doc": "0 draws the cochain itself; 1 draws its discrete Laplacian.",
+            "name": "show_laplacian",
+            "offset": 28,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 10,
+            "doc": "Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).",
+            "name": "res",
+            "offset": 32,
+            "scalar": "f32",
+            "width": 4
+          }
+        ],
+        "name": "input",
+        "role": "input",
+        "span": 36,
+        "stride": 36
+      }
+    ],
+    "builtin_inputs": [
+      {
+        "arg_index": 0,
+        "scalar": "i32",
+        "source": "fragment_position_x"
+      },
+      {
+        "arg_index": 1,
+        "scalar": "i32",
+        "source": "fragment_position_y"
+      }
+    ],
+    "color_target_format": "rgba8unorm",
+    "entry_point": "fs_main",
+    "fragment_entry": "fs_main",
+    "mode": "render",
+    "result": null,
+    "vertex_entry": "vs_fullscreen",
+    "word": "u32",
+    "word_bytes": 4,
+    "workgroup_size": [
+      0,
+      0,
+      0
+    ]
+  },
+  "passes": [
+    {
+      "layout": {
+        "bindings": [
+          {
+            "access": "read",
+            "binding": 1,
+            "group": 0,
+            "members": [
+              {
+                "arg_index": 2,
+                "doc": "0-cochain value at the hexagon's centre vertex.",
+                "name": "c0",
+                "offset": 0,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 3,
+                "doc": "0-cochain values at the six ring vertices, counterclockwise from +x.",
+                "name": "c1",
+                "offset": 4,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 4,
+                "doc": null,
+                "name": "c2",
+                "offset": 8,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 5,
+                "doc": null,
+                "name": "c3",
+                "offset": 12,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 6,
+                "doc": null,
+                "name": "c4",
+                "offset": 16,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 7,
+                "doc": null,
+                "name": "c5",
+                "offset": 20,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 8,
+                "doc": null,
+                "name": "c6",
+                "offset": 24,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 9,
+                "doc": "0 draws the cochain itself; 1 draws its discrete Laplacian.",
+                "name": "show_laplacian",
+                "offset": 28,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 10,
+                "doc": "Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).",
+                "name": "res",
+                "offset": 32,
+                "scalar": "f32",
+                "width": 4
+              }
+            ],
+            "name": "input",
+            "role": "input",
+            "span": 36,
+            "stride": 36
+          }
+        ],
+        "builtin_inputs": [
+          {
+            "arg_index": 0,
+            "scalar": "i32",
+            "source": "fragment_position_x"
+          },
+          {
+            "arg_index": 1,
+            "scalar": "i32",
+            "source": "fragment_position_y"
+          }
+        ],
+        "color_target_format": "rgba8unorm",
+        "entry_point": "fs_main",
+        "fragment_entry": "fs_main",
+        "mode": "render",
+        "result": null,
+        "vertex_entry": "vs_fullscreen",
+        "word": "u32",
+        "word_bytes": 4,
+        "workgroup_size": [
+          0,
+          0,
+          0
+        ]
+      },
+      "shader": "fe-render-3862ea1cb15b6d77.wgsl",
+      "shader_bytes": 231109,
+      "source_entry": "dec_render"
+    }
+  ],
+  "protocol": "fe-web-bundle",
+  "protocol_version": 6,
+  "provenance": {
+    "compiler": "fe",
+    "compiler_version": "26.2.0",
+    "source_id": null
+  },
+  "resources": [],
+  "source_entry": "dec_render",
+  "surface": {
+    "activate": "pointer",
+    "extent": {
+      "dpr": "auto",
+      "filter": "smooth",
+      "height": 512,
+      "width": 512
+    },
+    "params": [
+      {
+        "doc": "0-cochain value at the hexagon's centre vertex.",
+        "init": 1.0,
+        "kind": "range",
+        "max": 1.0,
+        "min": -1.0,
+        "name": "c0"
+      },
+      {
+        "doc": "0-cochain values at the six ring vertices, counterclockwise from +x.",
+        "init": 0.0,
+        "kind": "range",
+        "max": 1.0,
+        "min": -1.0,
+        "name": "c1"
+      },
+      {
+        "init": 0.0,
+        "kind": "range",
+        "max": 1.0,
+        "min": -1.0,
+        "name": "c2"
+      },
+      {
+        "init": 0.0,
+        "kind": "range",
+        "max": 1.0,
+        "min": -1.0,
+        "name": "c3"
+      },
+      {
+        "init": 0.0,
+        "kind": "range",
+        "max": 1.0,
+        "min": -1.0,
+        "name": "c4"
+      },
+      {
+        "init": 0.0,
+        "kind": "range",
+        "max": 1.0,
+        "min": -1.0,
+        "name": "c5"
+      },
+      {
+        "init": 0.0,
+        "kind": "range",
+        "max": 1.0,
+        "min": -1.0,
+        "name": "c6"
+      },
+      {
+        "doc": "0 draws the cochain itself; 1 draws its discrete Laplacian.",
+        "init": 0.0,
+        "kind": "int",
+        "max": 1.0,
+        "min": 0.0,
+        "name": "show_laplacian"
+      },
+      {
+        "doc": "Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).",
+        "kind": "extent_x",
+        "name": "res",
+        "visible": false
+      }
+    ],
+    "pipeline": {
+      "kind": "fullscreen_fragment"
+    },
+    "state": {
+      "kind": "params"
+    }
+  }
+}

@@ -1,0 +1,268 @@
+{
+  "artifacts": {
+    "canonical_adapters": [],
+    "wasm": "fe-render-1d0b759ef0917387.wasm",
+    "wasm_bytes": 2323,
+    "wgsl": "fe-render-c3f557cbc432a6ac.wgsl",
+    "wgsl_bytes": 25595
+  },
+  "browser_runtime": null,
+  "canonical_interface": null,
+  "canonical_status": {
+    "embedded": false,
+    "omission_reason": "canonical interface was not requested",
+    "policy": "disabled"
+  },
+  "control": {
+    "args": [
+      {
+        "axis": "x",
+        "source": "drag"
+      },
+      {
+        "axis": "y",
+        "source": "drag"
+      },
+      {
+        "source": "wheel"
+      },
+      {
+        "axis": "x",
+        "source": "pointer"
+      },
+      {
+        "axis": "y",
+        "source": "pointer"
+      },
+      {
+        "name": "sweep",
+        "source": "state"
+      },
+      {
+        "name": "spin",
+        "source": "state"
+      },
+      {
+        "name": "zoom",
+        "source": "state"
+      },
+      {
+        "name": "res",
+        "source": "state"
+      }
+    ],
+    "export": "update_view",
+    "result": [
+      "sweep",
+      "spin",
+      "zoom"
+    ]
+  },
+  "layout": {
+    "bindings": [
+      {
+        "access": "read",
+        "binding": 1,
+        "group": 0,
+        "members": [
+          {
+            "arg_index": 2,
+            "doc": "Perspective sweep: slides the second triangle along the rays from O.",
+            "name": "sweep",
+            "offset": 0,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 3,
+            "doc": "View rotation, in radians.",
+            "name": "spin",
+            "offset": 4,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 4,
+            "doc": "Half-extent of the visible square, in world units.",
+            "name": "zoom",
+            "offset": 8,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 5,
+            "doc": "Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).",
+            "name": "res",
+            "offset": 12,
+            "scalar": "f32",
+            "width": 4
+          }
+        ],
+        "name": "input",
+        "role": "input",
+        "span": 16,
+        "stride": 16
+      }
+    ],
+    "builtin_inputs": [
+      {
+        "arg_index": 0,
+        "scalar": "i32",
+        "source": "fragment_position_x"
+      },
+      {
+        "arg_index": 1,
+        "scalar": "i32",
+        "source": "fragment_position_y"
+      }
+    ],
+    "color_target_format": "rgba8unorm",
+    "entry_point": "fs_main",
+    "fragment_entry": "fs_main",
+    "mode": "render",
+    "result": null,
+    "vertex_entry": "vs_fullscreen",
+    "word": "u32",
+    "word_bytes": 4,
+    "workgroup_size": [
+      0,
+      0,
+      0
+    ]
+  },
+  "passes": [
+    {
+      "layout": {
+        "bindings": [
+          {
+            "access": "read",
+            "binding": 1,
+            "group": 0,
+            "members": [
+              {
+                "arg_index": 2,
+                "doc": "Perspective sweep: slides the second triangle along the rays from O.",
+                "name": "sweep",
+                "offset": 0,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 3,
+                "doc": "View rotation, in radians.",
+                "name": "spin",
+                "offset": 4,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 4,
+                "doc": "Half-extent of the visible square, in world units.",
+                "name": "zoom",
+                "offset": 8,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 5,
+                "doc": "Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).",
+                "name": "res",
+                "offset": 12,
+                "scalar": "f32",
+                "width": 4
+              }
+            ],
+            "name": "input",
+            "role": "input",
+            "span": 16,
+            "stride": 16
+          }
+        ],
+        "builtin_inputs": [
+          {
+            "arg_index": 0,
+            "scalar": "i32",
+            "source": "fragment_position_x"
+          },
+          {
+            "arg_index": 1,
+            "scalar": "i32",
+            "source": "fragment_position_y"
+          }
+        ],
+        "color_target_format": "rgba8unorm",
+        "entry_point": "fs_main",
+        "fragment_entry": "fs_main",
+        "mode": "render",
+        "result": null,
+        "vertex_entry": "vs_fullscreen",
+        "word": "u32",
+        "word_bytes": 4,
+        "workgroup_size": [
+          0,
+          0,
+          0
+        ]
+      },
+      "shader": "fe-render-c3f557cbc432a6ac.wgsl",
+      "shader_bytes": 25595,
+      "source_entry": "shade"
+    }
+  ],
+  "protocol": "fe-web-bundle",
+  "protocol_version": 6,
+  "provenance": {
+    "compiler": "fe",
+    "compiler_version": "26.2.0",
+    "source_id": null
+  },
+  "resources": [],
+  "source_entry": "shade",
+  "surface": {
+    "activate": "pointer",
+    "extent": {
+      "dpr": "auto",
+      "filter": "smooth",
+      "height": 512,
+      "width": 512
+    },
+    "params": [
+      {
+        "doc": "Perspective sweep: slides the second triangle along the rays from O.",
+        "init": 0.62,
+        "kind": "range",
+        "max": 1.6,
+        "min": 0.3,
+        "name": "sweep"
+      },
+      {
+        "doc": "View rotation, in radians.",
+        "init": 0.0,
+        "kind": "angle",
+        "max": 6.2831855,
+        "min": 0.0,
+        "name": "spin"
+      },
+      {
+        "doc": "Half-extent of the visible square, in world units.",
+        "init": 2.4,
+        "kind": "range",
+        "max": 5.0,
+        "min": 0.8,
+        "name": "zoom"
+      },
+      {
+        "doc": "Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).",
+        "kind": "extent_x",
+        "name": "res",
+        "visible": false
+      }
+    ],
+    "pipeline": {
+      "kind": "fullscreen_fragment"
+    },
+    "state": {
+      "kind": "params"
+    }
+  }
+}
