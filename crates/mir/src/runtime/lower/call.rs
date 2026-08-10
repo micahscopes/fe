@@ -68,6 +68,7 @@ pub fn collect_referenced_code_regions<'db>(
                 | RExpr::Unary { .. }
                 | RExpr::Binary { .. }
                 | RExpr::Cast { .. }
+                | RExpr::Bitcast { .. }
                 | RExpr::ConstRef { .. }
                 | RExpr::AllocObject { .. }
                 | RExpr::MaterializeToObject { .. }

@@ -15,21 +15,23 @@ mod wasm_lower;
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 pub use native::{
-    GRID_LOOP_NATIVE_ENTRY_ARITY, MERKLE8_ROOT_NATIVE_ENTRY_ARITY, MERKLE_ROOT_NATIVE_ENTRY_ARITY,
+    GRID_LOOP_NATIVE_ENTRY_ARITY, MERKLE_ROOT_NATIVE_ENTRY_ARITY, MERKLE8_ROOT_NATIVE_ENTRY_ARITY,
     NativeGridLoopEntryArtifact, NativeI32EntryArtifact, NativeMerkle8RootEntryArtifact,
     NativeMerkleRootEntryArtifact, compile_runtime_package_native_grid_loop_entry,
-    compile_runtime_package_native_i32_entry, compile_runtime_package_native_merkle8_root_entry,
-    compile_runtime_package_native_merkle_root_entry,
+    compile_runtime_package_native_i32_entry, compile_runtime_package_native_merkle_root_entry,
+    compile_runtime_package_native_merkle8_root_entry,
 };
 #[cfg(feature = "spirv-backend")]
 pub use spirv_lower::{
-    compile_render_wgsl, compile_runtime_package_spirv, compile_runtime_package_spirv_grid,
-    compile_runtime_package_spirv_render, compile_runtime_package_spirv_with_workgroup,
+    compile_render_wgsl, compile_runtime_package_spirv,
+    compile_runtime_package_spirv_compute_with_resources, compile_runtime_package_spirv_grid,
+    compile_runtime_package_spirv_render, compile_runtime_package_spirv_render_with_resources,
+    compile_runtime_package_spirv_with_workgroup,
 };
 pub use wasm_lower::compile_runtime_package_wasm;
-pub(crate) use wasm_lower::module_emits_dynamic_alloc;
 #[cfg(feature = "sonatina-indirect-calls")]
 pub use wasm_lower::compile_runtime_package_wasm_with_guest_callbacks;
+pub(crate) use wasm_lower::module_emits_dynamic_alloc;
 
 use std::collections::{BTreeMap, VecDeque};
 

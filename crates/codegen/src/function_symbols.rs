@@ -80,7 +80,11 @@ pub(crate) fn assign_function_symbols<'db>(
                 .copied()
                 .filter(|&idx| inputs[idx].pinned_export)
                 .collect();
-            let protected = if pinned.len() == 1 { pinned[0] } else { usize::MAX };
+            let protected = if pinned.len() == 1 {
+                pinned[0]
+            } else {
+                usize::MAX
+            };
             for &idx in group {
                 if idx == protected {
                     continue;

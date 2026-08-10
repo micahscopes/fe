@@ -59,19 +59,29 @@ const BOOTSTRAP_SOURCE: &str = include_str!("../assets/bootstrap.js");
 /// publication by [`precompile_html_with_render_lane`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderBundleArtifact {
-    pub wasm: Vec<u8>,
+    /// Optional CPU fallback module. Typed GPU pass graphs deliberately omit
+    /// this so a missing WebGPU implementation is reported instead of hiding
+    /// a graph failure behind a different execution path.
+    pub wasm: Option<Vec<u8>>,
     pub wgsl: Vec<u8>,
-    /// The bundle's fe-web-bundle v4 manifest exactly as
-    /// `WebBundle::manifest_json()` produces it: `artifacts.wasm` /
-    /// `artifacts.wgsl` still name the bundle-local `module.wasm` /
-    /// `shader.wgsl` placeholders. Publication rewrites those two fields to
-    /// the content-addressed published names, the same precedent as the
-    /// wasm lane's `PublishedArtifact::from_artifact`.
+    /// Every shader in an ordered pass graph. Empty for the legacy one-shader
+    /// bundle shape, where `wgsl` alone is sufficient.
+    pub pass_wgsl: Vec<RenderShaderArtifact>,
+    /// The bundle's fe-web-bundle manifest exactly as
+    /// `WebBundle::manifest_json()` produces it. Publication rewrites the
+    /// bundle-local artifact and pass shader paths to content-addressed names,
+    /// the same precedent as the wasm lane's `PublishedArtifact::from_artifact`.
     pub manifest_json: Vec<u8>,
     /// The render source's structural dependency closure (ingot files),
     /// folded into the development watch graph exactly like the wasm lane's
     /// `PublishedModuleManifest::source_dependencies`.
     pub source_dependencies: Option<SourceDependencyInventory>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderShaderArtifact {
+    pub path: String,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -365,7 +375,10 @@ impl DevelopmentRebuildCoordinator {
         mut load_document: impl FnMut(&str) -> Result<String, String>,
         render_runtime_js: &str,
         mut load_source: impl FnMut(&Url) -> Result<String, String>,
-        mut render_compile: impl FnMut(&Url, Option<&str>) -> Result<Option<RenderBundleArtifact>, String>,
+        mut render_compile: impl FnMut(
+            &Url,
+            Option<&str>,
+        ) -> Result<Option<RenderBundleArtifact>, String>,
     ) -> Vec<DevelopmentRebuildEvent> {
         if batch.generation != self.generation {
             return vec![DevelopmentRebuildEvent::Cancelled {
@@ -644,9 +657,7 @@ pub fn verify_precompiled_site(index_path: &Path) -> Result<VerificationReport, 
     let mut verified = BTreeSet::new();
     for (position, script) in scripts.iter().enumerate() {
         let context = format!("application/fe+wasm script #{}", position + 1);
-        let wasm_ref = required_attr(script, "data-fe-src", &context)?;
         let manifest_ref = required_attr(script, "data-fe-manifest", &context)?;
-        let wasm = deployment_file(root, &wasm_ref, &format!("{context} data-fe-src"))?;
         let manifest =
             deployment_file(root, &manifest_ref, &format!("{context} data-fe-manifest"))?;
         if is_addressed_path(&manifest) {
@@ -661,6 +672,14 @@ pub fn verify_precompiled_site(index_path: &Path) -> Result<VerificationReport, 
                 context: format!("{context} manifest {}", manifest.display()),
                 detail: format!("invalid JSON: {error}"),
             })?;
+        if attr(script, RENDER_SCRIPT_MARKER).is_some() {
+            verify_render_deployment(root, script, &manifest, &value, &context, &mut verified)?;
+            verified.insert(manifest);
+            continue;
+        }
+
+        let wasm_ref = required_attr(script, "data-fe-src", &context)?;
+        let wasm = deployment_file(root, &wasm_ref, &format!("{context} data-fe-src"))?;
         let artifacts = value["artifacts"]
             .as_array()
             .ok_or_else(|| VerificationError {
@@ -746,6 +765,180 @@ pub fn verify_precompiled_site(index_path: &Path) -> Result<VerificationReport, 
         modules: scripts.len(),
         files: verified.len(),
     })
+}
+
+fn verify_render_deployment(
+    root: &Path,
+    script: &Handle,
+    manifest: &Path,
+    value: &serde_json::Value,
+    context: &str,
+    verified: &mut BTreeSet<PathBuf>,
+) -> Result<(), VerificationError> {
+    if value["protocol"].as_str() != Some("fe-web-bundle") {
+        return Err(VerificationError {
+            context: format!("{context} manifest {}", manifest.display()),
+            detail: "render manifest protocol is not `fe-web-bundle`".to_owned(),
+        });
+    }
+    let version = value["protocol_version"]
+        .as_u64()
+        .ok_or_else(|| VerificationError {
+            context: format!("{context} manifest {}", manifest.display()),
+            detail: "render manifest has no protocol_version".to_owned(),
+        })?;
+    if !(4..=6).contains(&version) {
+        return Err(VerificationError {
+            context: format!("{context} manifest {}", manifest.display()),
+            detail: format!("unsupported fe-web-bundle protocol version {version}"),
+        });
+    }
+    let artifacts = value["artifacts"]
+        .as_object()
+        .ok_or_else(|| VerificationError {
+            context: format!("{context} manifest {}", manifest.display()),
+            detail: "render manifest has no artifacts object".to_owned(),
+        })?;
+    let manifest_root = manifest.parent().ok_or_else(|| VerificationError {
+        context: format!("{context} manifest {}", manifest.display()),
+        detail: "render manifest has no parent directory".to_owned(),
+    })?;
+
+    let primary_ref = artifacts
+        .get("wgsl")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| VerificationError {
+            context: format!("{context} manifest artifacts.wgsl"),
+            detail: "required string is missing".to_owned(),
+        })?;
+    let primary = deployment_file(
+        manifest_root,
+        primary_ref,
+        &format!("{context} manifest artifacts.wgsl"),
+    )?;
+    verify_addressed_file(&primary, &format!("{context} primary WGSL"))?;
+    verify_byte_length(
+        &primary,
+        artifacts
+            .get("wgsl_bytes")
+            .and_then(serde_json::Value::as_u64),
+        &format!("{context} primary WGSL"),
+    )?;
+    verified.insert(primary);
+
+    match artifacts.get("wasm").and_then(serde_json::Value::as_str) {
+        Some(wasm_ref) => {
+            let script_ref = required_attr(script, "data-fe-src", context)?;
+            let script_wasm =
+                deployment_file(root, &script_ref, &format!("{context} data-fe-src"))?;
+            let declared_wasm = deployment_file(
+                manifest_root,
+                wasm_ref,
+                &format!("{context} manifest artifacts.wasm"),
+            )?;
+            if script_wasm != declared_wasm {
+                return Err(VerificationError {
+                    context: format!("{context} manifest artifacts.wasm"),
+                    detail: format!(
+                        "resolves to {}, but data-fe-src resolves to {}",
+                        declared_wasm.display(),
+                        script_wasm.display()
+                    ),
+                });
+            }
+            verify_addressed_file(&declared_wasm, &format!("{context} Wasm"))?;
+            verify_byte_length(
+                &declared_wasm,
+                artifacts
+                    .get("wasm_bytes")
+                    .and_then(serde_json::Value::as_u64),
+                &format!("{context} Wasm"),
+            )?;
+            if let Some(integrity) = attr(script, "data-fe-integrity") {
+                verify_integrity(&declared_wasm, &integrity, context)?;
+            }
+            verified.insert(declared_wasm);
+        }
+        None => {
+            if attr(script, "data-fe-src").is_some() || attr(script, "data-fe-integrity").is_some()
+            {
+                return Err(VerificationError {
+                    context: context.to_owned(),
+                    detail: "GPU-only render graph declares a script Wasm reference or integrity"
+                        .to_owned(),
+                });
+            }
+        }
+    }
+
+    if let Some(passes) = value.get("passes").and_then(serde_json::Value::as_array) {
+        for (index, pass) in passes.iter().enumerate() {
+            let pass_context = format!("{context} pass #{}", index + 1);
+            let shader_ref = pass["shader"].as_str().ok_or_else(|| VerificationError {
+                context: pass_context.clone(),
+                detail: "pass has no shader path".to_owned(),
+            })?;
+            let shader = deployment_file(manifest_root, shader_ref, &pass_context)?;
+            verify_addressed_file(&shader, &pass_context)?;
+            verify_byte_length(&shader, pass["shader_bytes"].as_u64(), &pass_context)?;
+            verified.insert(shader);
+        }
+    }
+
+    let runtime_ref = required_attr(script, RENDER_RUNTIME_ATTR, context)?;
+    let runtime = deployment_file(
+        root,
+        &runtime_ref,
+        &format!("{context} {RENDER_RUNTIME_ATTR}"),
+    )?;
+    verify_addressed_file(&runtime, &format!("{context} render runtime"))?;
+    verified.insert(runtime);
+    Ok(())
+}
+
+fn verify_byte_length(
+    path: &Path,
+    expected: Option<u64>,
+    context: &str,
+) -> Result<(), VerificationError> {
+    let expected = expected.ok_or_else(|| VerificationError {
+        context: context.to_owned(),
+        detail: "manifest byte length is missing".to_owned(),
+    })?;
+    let actual = std::fs::metadata(path)
+        .map_err(|error| VerificationError {
+            context: context.to_owned(),
+            detail: format!("cannot inspect {}: {error}", path.display()),
+        })?
+        .len();
+    if actual != expected {
+        return Err(VerificationError {
+            context: context.to_owned(),
+            detail: format!(
+                "{} has {actual} bytes, but the manifest declares {expected}",
+                path.display()
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn verify_integrity(path: &Path, integrity: &str, context: &str) -> Result<(), VerificationError> {
+    let bytes = std::fs::read(path).map_err(|error| VerificationError {
+        context: context.to_owned(),
+        detail: format!("cannot read {}: {error}", path.display()),
+    })?;
+    let expected = format!(
+        "sha256-{}",
+        base64::engine::general_purpose::STANDARD.encode(hex_to_bytes(&sha256_hex(&bytes)))
+    );
+    if integrity != expected {
+        return Err(VerificationError {
+            context: format!("{context} data-fe-integrity"),
+            detail: format!("expected {expected:?}, found {integrity:?}"),
+        });
+    }
+    Ok(())
 }
 
 fn required_attr(node: &Handle, name: &str, context: &str) -> Result<String, VerificationError> {
@@ -1097,14 +1290,12 @@ fn precompile_html_impl(
                     url: src.to_owned(),
                     detail: error.to_string(),
                 })?;
-            if let Some(bundle) =
-                render_compile(&url, entry_attr.as_deref()).map_err(|detail| {
-                    PrecompileError::Compile {
-                        source_url: url.to_string(),
-                        detail,
-                    }
-                })?
-            {
+            if let Some(bundle) = render_compile(&url, entry_attr.as_deref()).map_err(|detail| {
+                PrecompileError::Compile {
+                    source_url: url.to_string(),
+                    detail,
+                }
+            })? {
                 if let Some(dependencies) = &bundle.source_dependencies {
                     render_dependencies.push(dependencies.clone());
                 }
@@ -1250,7 +1441,12 @@ fn precompile_html_impl(
     // returning `Ok(None)` (a single `.fe` file, not an ingot directory) is a
     // hard error naming the source, not a silent fall-through.
     let mut surface_elements = Vec::new();
-    collect_elements_with_attr(&dom.document, SURFACE_ELEMENT_TAG, "src", &mut surface_elements);
+    collect_elements_with_attr(
+        &dom.document,
+        SURFACE_ELEMENT_TAG,
+        "src",
+        &mut surface_elements,
+    );
     let mut published_a_surface = false;
     for element in surface_elements {
         let src = attr(&element, "src").expect("collected `fe-surface[src]` elements have `src`");
@@ -1334,9 +1530,9 @@ fn publish_render_runtime(
     Ok(path)
 }
 
-/// Publish one render bundle's wasm/wgsl/manifest content-addressed and
-/// rewrite its manifest's `artifacts.wasm`/`artifacts.wgsl` to the published
-/// names (the same precedent as the wasm lane's
+/// Publish one render bundle's optional wasm, shaders, and manifest
+/// content-addressed and rewrite its manifest's artifact/pass paths to the
+/// published names (the same precedent as the wasm lane's
 /// `PublishedArtifact::from_artifact` rewriting paths). Shared by both render
 /// authoring forms: the `<script data-fe-render>` lane
 /// ([`publish_render_bundle`]) and the authored `<fe-surface src>` lane
@@ -1349,26 +1545,116 @@ fn publish_render_artifacts(
     document_url: &Url,
     bundle: RenderBundleArtifact,
     assets: &mut BTreeMap<String, Vec<u8>>,
-) -> Result<(String, String, String), PrecompileError> {
-    let wasm_sha256 = sha256_hex(&bundle.wasm);
-    let wasm_path = format!("assets/fe-render-{}.wasm", &wasm_sha256[..16]);
-    insert_identical(assets, wasm_path.clone(), bundle.wasm)?;
-
-    let wgsl_sha256 = sha256_hex(&bundle.wgsl);
-    let wgsl_path = format!("assets/fe-render-{}.wgsl", &wgsl_sha256[..16]);
-    insert_identical(assets, wgsl_path.clone(), bundle.wgsl)?;
-
+) -> Result<(Option<String>, String, Option<String>), PrecompileError> {
+    let RenderBundleArtifact {
+        wasm,
+        wgsl,
+        pass_wgsl,
+        manifest_json,
+        source_dependencies: _,
+    } = bundle;
     let mut manifest: serde_json::Value =
-        serde_json::from_slice(&bundle.manifest_json).map_err(|error| {
-            PrecompileError::Serialize(format!(
-                "render bundle manifest is not valid JSON: {error}"
-            ))
+        serde_json::from_slice(&manifest_json).map_err(|error| {
+            PrecompileError::Serialize(format!("render bundle manifest is not valid JSON: {error}"))
         })?;
-    let artifacts = manifest.get_mut("artifacts").ok_or_else(|| {
-        PrecompileError::Serialize("render bundle manifest has no `artifacts`".to_owned())
+    let artifacts = manifest
+        .get_mut("artifacts")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| {
+            PrecompileError::Serialize("render bundle manifest has no `artifacts`".to_owned())
+        })?;
+    let original_primary = artifacts
+        .get("wgsl")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            PrecompileError::Serialize(
+                "render bundle manifest has no string `artifacts.wgsl`".to_owned(),
+            )
+        })?
+        .to_owned();
+
+    let (wasm_ref, wasm_sha256) = if let Some(wasm) = wasm {
+        let digest = sha256_hex(&wasm);
+        let path = format!("assets/fe-render-{}.wasm", &digest[..16]);
+        insert_identical(assets, path.clone(), wasm)?;
+        artifacts.insert(
+            "wasm".to_owned(),
+            serde_json::Value::String(basename(&path).to_owned()),
+        );
+        (
+            Some(published_reference(base_url, document_url, &path)),
+            Some(digest),
+        )
+    } else {
+        artifacts.remove("wasm");
+        artifacts.remove("wasm_bytes");
+        (None, None)
+    };
+
+    let shaders = if pass_wgsl.is_empty() {
+        vec![RenderShaderArtifact {
+            path: original_primary.clone(),
+            bytes: wgsl,
+        }]
+    } else {
+        if pass_wgsl
+            .iter()
+            .find(|shader| shader.path == original_primary)
+            .is_none_or(|shader| shader.bytes != wgsl)
+        {
+            return Err(PrecompileError::Serialize(
+                "render bundle primary WGSL does not match its pass shader".to_owned(),
+            ));
+        }
+        pass_wgsl
+    };
+    let mut published_shaders = BTreeMap::new();
+    for shader in shaders {
+        let digest = sha256_hex(&shader.bytes);
+        let path = format!("assets/fe-render-{}.wgsl", &digest[..16]);
+        insert_identical(assets, path.clone(), shader.bytes)?;
+        if let Some(previous) = published_shaders.get(&shader.path) {
+            if previous != &path {
+                return Err(PrecompileError::Serialize(format!(
+                    "render bundle repeats shader path `{}` with different content",
+                    shader.path
+                )));
+            }
+        } else {
+            published_shaders.insert(shader.path, path);
+        }
+    }
+    let primary_path = published_shaders.get(&original_primary).ok_or_else(|| {
+        PrecompileError::Serialize(format!(
+            "render bundle has no shader content for primary path `{original_primary}`"
+        ))
     })?;
-    artifacts["wasm"] = serde_json::Value::String(basename(&wasm_path).to_owned());
-    artifacts["wgsl"] = serde_json::Value::String(basename(&wgsl_path).to_owned());
+    artifacts.insert(
+        "wgsl".to_owned(),
+        serde_json::Value::String(basename(primary_path).to_owned()),
+    );
+
+    if let Some(passes) = manifest
+        .get_mut("passes")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for pass in passes {
+            let shader = pass
+                .get("shader")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    PrecompileError::Serialize(
+                        "render bundle pass has no string `shader` path".to_owned(),
+                    )
+                })?;
+            let published = published_shaders.get(shader).ok_or_else(|| {
+                PrecompileError::Serialize(format!(
+                    "render bundle has no shader content for pass path `{shader}`"
+                ))
+            })?;
+            pass["shader"] = serde_json::Value::String(basename(published).to_owned());
+        }
+    }
     let manifest_bytes = serde_json::to_vec_pretty(&manifest)
         .map_err(|error| PrecompileError::Serialize(error.to_string()))?;
     let manifest_sha256 = sha256_hex(&manifest_bytes);
@@ -1376,7 +1662,7 @@ fn publish_render_artifacts(
     insert_identical(assets, manifest_path.clone(), manifest_bytes)?;
 
     Ok((
-        published_reference(base_url, document_url, &wasm_path),
+        wasm_ref,
         published_reference(base_url, document_url, &manifest_path),
         wasm_sha256,
     ))
@@ -1396,10 +1682,10 @@ fn publish_render_bundle(
         publish_render_artifacts(base_url, document_url, bundle, assets)?;
     rewrite_render_script(
         script,
-        &wasm_ref,
+        wasm_ref.as_deref(),
         &manifest_ref,
         &published_reference(base_url, document_url, render_runtime_path),
-        &wasm_sha256,
+        wasm_sha256.as_deref(),
     );
     Ok(())
 }
@@ -1721,29 +2007,37 @@ fn rewrite_script(
 /// of instantiating the module and calling its entry with zero arguments.
 fn rewrite_render_script(
     node: &Handle,
-    wasm_path: &str,
+    wasm_path: Option<&str>,
     manifest_path: &str,
     render_runtime_path: &str,
-    sha256: &str,
+    sha256: Option<&str>,
 ) {
     set_attr(node, "type", ARTIFACT_SCRIPT_TYPE);
     remove_attr(node, "src");
     remove_attr(node, "integrity");
-    set_attr(node, "data-fe-src", wasm_path);
+    if let Some(wasm_path) = wasm_path {
+        set_attr(node, "data-fe-src", wasm_path);
+    } else {
+        remove_attr(node, "data-fe-src");
+    }
     set_attr(node, "data-fe-manifest", manifest_path);
     set_attr(node, RENDER_SCRIPT_MARKER, "");
     set_attr(node, RENDER_RUNTIME_ATTR, render_runtime_path);
     remove_attr(node, "data-fe-adapter-selection");
     remove_attr(node, "data-fe-adapter");
-    let digest = hex_to_bytes(sha256);
-    set_attr(
-        node,
-        "data-fe-integrity",
-        &format!(
-            "sha256-{}",
-            base64::engine::general_purpose::STANDARD.encode(digest)
-        ),
-    );
+    if let Some(sha256) = sha256 {
+        let digest = hex_to_bytes(sha256);
+        set_attr(
+            node,
+            "data-fe-integrity",
+            &format!(
+                "sha256-{}",
+                base64::engine::general_purpose::STANDARD.encode(digest)
+            ),
+        );
+    } else {
+        remove_attr(node, "data-fe-integrity");
+    }
     node.children.borrow_mut().clear();
 }
 
@@ -1801,9 +2095,49 @@ mod tests {
 
     fn fake_render_bundle() -> RenderBundleArtifact {
         RenderBundleArtifact {
-            wasm: b"wasm-bytes".to_vec(),
+            wasm: Some(b"wasm-bytes".to_vec()),
             wgsl: b"wgsl-source".to_vec(),
-            manifest_json: br#"{"artifacts":{}}"#.to_vec(),
+            pass_wgsl: Vec::new(),
+            manifest_json: br#"{
+                "artifacts": {
+                    "wasm": "module.wasm",
+                    "wasm_bytes": 10,
+                    "wgsl": "shader.wgsl",
+                    "wgsl_bytes": 11
+                }
+            }"#
+            .to_vec(),
+            source_dependencies: None,
+        }
+    }
+
+    fn fake_render_graph_bundle() -> RenderBundleArtifact {
+        RenderBundleArtifact {
+            wasm: None,
+            wgsl: b"fragment-shader".to_vec(),
+            pass_wgsl: vec![
+                RenderShaderArtifact {
+                    path: "passes/000-compute.wgsl".to_owned(),
+                    bytes: b"compute-shader".to_vec(),
+                },
+                RenderShaderArtifact {
+                    path: "passes/001-fragment.wgsl".to_owned(),
+                    bytes: b"fragment-shader".to_vec(),
+                },
+            ],
+            manifest_json: serde_json::to_vec(&serde_json::json!({
+                "protocol": "fe-web-bundle",
+                "protocol_version": 6,
+                "artifacts": {
+                    "wgsl": "passes/001-fragment.wgsl",
+                    "wgsl_bytes": 15
+                },
+                "passes": [
+                    { "shader": "passes/000-compute.wgsl", "shader_bytes": 14 },
+                    { "shader": "passes/001-fragment.wgsl", "shader_bytes": 15 }
+                ]
+            }))
+            .unwrap(),
             source_dependencies: None,
         }
     }
@@ -1853,6 +2187,58 @@ mod tests {
                 .keys()
                 .any(|path| path.contains("fe-render-runtime-"))
         );
+    }
+
+    #[test]
+    fn typed_pass_graph_publishes_every_shader_without_a_wasm_fallback() {
+        let html = r#"<!doctype html><script type="application/fe" data-fe-src="sketches/graph" data-fe-render></script>"#;
+        let output = precompile_html_with_render_lane(
+            "https://example.test/index.html",
+            html,
+            "runtime-js",
+            |_| panic!("no application/fe source files"),
+            |_url, _entry| Ok(Some(fake_render_graph_bundle())),
+        )
+        .unwrap();
+
+        assert!(output.html.contains(RENDER_SCRIPT_MARKER));
+        assert!(!output.html.contains("data-fe-src"));
+        assert!(!output.html.contains("data-fe-integrity"));
+        assert_eq!(
+            output
+                .assets
+                .keys()
+                .filter(|path| path.ends_with(".wgsl"))
+                .count(),
+            2
+        );
+        assert!(!output.assets.keys().any(|path| path.ends_with(".wasm")));
+
+        let manifest = output
+            .assets
+            .iter()
+            .filter(|(path, _)| path.ends_with(".json"))
+            .find_map(|(_, bytes)| {
+                let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+                (value["protocol"] == "fe-web-bundle").then_some(value)
+            })
+            .unwrap();
+        assert!(manifest["artifacts"].get("wasm").is_none());
+        assert!(manifest["artifacts"].get("wasm_bytes").is_none());
+        let primary = manifest["artifacts"]["wgsl"].as_str().unwrap();
+        assert!(primary.starts_with("fe-render-"));
+        for pass in manifest["passes"].as_array().unwrap() {
+            let shader = pass["shader"].as_str().unwrap();
+            assert!(shader.starts_with("fe-render-"));
+            assert!(!shader.contains('/'));
+            assert!(output.assets.contains_key(&format!("assets/{shader}")));
+        }
+
+        let deployment = tempfile::tempdir().unwrap();
+        write_publication(deployment.path(), &output);
+        let report = verify_precompiled_site(&deployment.path().join("index.html")).unwrap();
+        assert_eq!(report.modules, 1);
+        assert_eq!(report.files, output.assets.len());
     }
 
     #[test]

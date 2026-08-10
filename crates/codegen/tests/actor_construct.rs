@@ -20,10 +20,16 @@
 use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
-    WasmCompileOptions, WebBundleMode, actor_web_entry, compile_runtime_package_wasm_with_options,
+    WasmCompileOptions, WebActorResourceElement, WebActorStageKind, WebBuildOptions, WebBundle,
+    WebBundleMode, actor_gpu_program, actor_web_entry,
+    compile_runtime_package_spirv_compute_with_resources,
+    compile_runtime_package_spirv_render_with_resources, compile_runtime_package_wasm_with_options,
     resolve_web_entry,
 };
 use hir::hir_def::{HirIngot, TopLevelMod};
+use sonatina_codegen::isa::spirv::{
+    Access, SpirvExternalResource, SpirvResourceElement, SpirvResourceField, SpirvScalarKind,
+};
 use url::Url;
 
 fn ingot_root(relative: &str) -> Url {
@@ -137,7 +143,7 @@ fn actor_without_a_unique_fragment_behavior_is_rejected() {
     assert!(!driver::init_ingot(&mut db, &url));
     let top_mod = ingot_top_mod(&db, &url);
     let err = actor_web_entry(&db, top_mod).unwrap_err();
-    assert!(format!("{err}").contains("FragmentSurface"), "{err}");
+    assert!(format!("{err}").contains("fragment-stage"), "{err}");
 
     // An actor with the placement row but no fragment behavior at all.
     let mut db = DriverDataBase::default();
@@ -145,7 +151,162 @@ fn actor_without_a_unique_fragment_behavior_is_rejected() {
     assert!(!driver::init_ingot(&mut db, &url));
     let top_mod = ingot_top_mod(&db, &url);
     let err = actor_web_entry(&db, top_mod).unwrap_err();
-    assert!(format!("{err}").contains("no `FragmentSurface`"), "{err}");
+    assert!(format!("{err}").contains("gpu_stage(fragment)"), "{err}");
+}
+
+#[test]
+fn attributed_aliases_derive_compute_resource_and_fragment_plan() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_compute_storage");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "compute/storage fixture diagnostics:\n{diagnostics}"
+    );
+
+    let program = actor_gpu_program(&db, top_mod)
+        .expect("attributed GPU plan")
+        .expect("GPU actor");
+    assert_eq!(program.actor, "KnownColor");
+    assert_eq!(program.stages.len(), 2);
+    assert_eq!(program.stages[0].source_entry, "seed");
+    assert_eq!(
+        program.stages[0].kind,
+        WebActorStageKind::Compute {
+            workgroup_size: [1, 1, 1],
+            dispatch: [1, 1, 1],
+        }
+    );
+    assert_eq!(program.stages[1].source_entry, "paint");
+    assert_eq!(program.stages[1].kind, WebActorStageKind::Fragment);
+    assert_eq!(program.resources.len(), 1);
+    let orbit = &program.resources[0];
+    assert_eq!(
+        (orbit.field_index, orbit.name.as_str(), orbit.length),
+        (0, "orbit", 1)
+    );
+    assert_eq!(
+        orbit.element,
+        WebActorResourceElement::Record {
+            fields: vec![
+                fe_codegen::WebActorResourceField {
+                    name: "re_bits".to_owned(),
+                    offset: 0,
+                },
+                fe_codegen::WebActorResourceField {
+                    name: "im_bits".to_owned(),
+                    offset: 4,
+                },
+            ],
+            span: 8,
+        }
+    );
+
+    assert_eq!(
+        actor_web_entry(&db, top_mod).expect("legacy fragment projection"),
+        Some(("paint".to_owned(), WebBundleMode::Render))
+    );
+}
+
+#[test]
+fn attributed_storage_intrinsics_compile_to_compute_and_fragment_wgsl() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_compute_storage");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "compute/storage fixture diagnostics:\n{diagnostics}"
+    );
+
+    let resource = |arg_index, access| SpirvExternalResource {
+        arg_index,
+        group: 0,
+        binding: 0,
+        name: "orbit".to_owned(),
+        access,
+        element: SpirvResourceElement::Record {
+            fields: vec![
+                SpirvResourceField {
+                    name: "re_bits".to_owned(),
+                    scalar: SpirvScalarKind::U32,
+                    offset: 0,
+                },
+                SpirvResourceField {
+                    name: "im_bits".to_owned(),
+                    scalar: SpirvScalarKind::U32,
+                    offset: 4,
+                },
+            ],
+            span: 8,
+        },
+        stride: 8,
+        length: 1,
+    };
+
+    let compute_package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "seed").unwrap();
+    let compute = compile_runtime_package_spirv_compute_with_resources(
+        &db,
+        &compute_package,
+        [1, 1, 1],
+        &[resource(0, Access::ReadWrite)],
+    )
+    .expect("Fe-authored compute stage");
+    let compute_wgsl = compute.wgsl.as_deref().expect("compute WGSL");
+    assert!(compute_wgsl.contains("var<storage, read_write> orbit"));
+    assert!(compute_wgsl.contains(".re_bits = 1065353216u"));
+    assert!(compute_wgsl.contains(".im_bits = 3221225472u"));
+
+    let fragment_package =
+        mir::build_wasm_runtime_package_for_entry(&db, top_mod, "paint").unwrap();
+    let fragment = compile_runtime_package_spirv_render_with_resources(
+        &db,
+        &fragment_package,
+        &[resource(2, Access::Read)],
+    )
+    .expect("Fe-authored fragment stage");
+    let fragment_wgsl = fragment.wgsl.as_deref().expect("fragment WGSL");
+    assert!(fragment_wgsl.contains("var<storage> orbit"));
+    assert!(fragment_wgsl.contains("].re_bits"));
+    assert!(fragment_wgsl.contains("].im_bits"));
+}
+
+#[test]
+fn attributed_actor_builds_a_materialized_v6_pass_graph() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_compute_storage");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let bundle = WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render("paint", Some("known-color.fe".to_owned())),
+    )
+    .expect("v6 actor pass graph");
+
+    assert_eq!(bundle.manifest.protocol_version, 6);
+    assert!(bundle.wasm.is_empty(), "resource graph has no CPU fallback");
+    assert_eq!(bundle.manifest.artifacts.wasm, None);
+    assert_eq!(bundle.manifest.resources.len(), 1);
+    assert_eq!(bundle.manifest.passes.len(), 2);
+    assert_eq!(
+        bundle.manifest.passes[0].layout.mode,
+        WebBundleMode::Compute
+    );
+    assert_eq!(bundle.manifest.passes[0].dispatch, Some([1, 1, 1]));
+    assert_eq!(bundle.manifest.passes[1].layout.mode, WebBundleMode::Render);
+    let paths = bundle
+        .materialized_files()
+        .expect("materialized graph")
+        .into_iter()
+        .map(|file| file.path().to_owned())
+        .collect::<Vec<_>>();
+    assert!(paths.contains(&"passes/000-compute.wgsl".to_owned()));
+    assert!(paths.contains(&"passes/001-fragment.wgsl".to_owned()));
+    assert!(!paths.contains(&"module.wasm".to_owned()));
 }
 
 #[test]

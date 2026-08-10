@@ -182,8 +182,13 @@ impl<T: Exp + Copy> Exp for More<T> {
     /// whatever the tail settled on as ITS leading term. At N=2 this IS
     /// `df_add` (see the oracle derivation in the task report / commit).
     fn add_corr(self, _ other: More<T>, _ corr: f32) -> More<T> {
-        let (s, e) = two_sum(corr + self.lead, other.lead)
-        let tail_result = self.tail.add_corr(other.tail, e)
+        // Keep `corr` exact while it searches for the expansion word whose
+        // exponent can absorb it. Pre-adding `corr + self.lead` discards a
+        // deep pan delta as soon as it is smaller than this word's ulp,
+        // instead of carrying it into the next word.
+        let (a, ae) = two_sum(self.lead, corr)
+        let (s, e) = two_sum(a, other.lead)
+        let tail_result = self.tail.add_corr(other.tail, ae + e)
         let (hi, lo) = two_sum(s, tail_result.head())
         More { lead: hi, tail: tail_result.with_head(lo) }
     }

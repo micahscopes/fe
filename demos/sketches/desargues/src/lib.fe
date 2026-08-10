@@ -32,13 +32,25 @@
 //!     fe web build demos/sketches/desargues --out <dir>
 
 use core::marker::Copy
-use std::webgpu::{FragmentSurface, GpuProgram, WebGpuBackend}
+use std::webgpu::{FragmentSurface, GpuProgram, UpdateSurface, WebGpuBackend}
 use gaplay::{
     DESA_FB, DESA_FC, Line, Point, desa_a, desa_b, desa_c, desa_o, desargues_image,
     join, line_eval, meet, point_world_x, point_world_y,
 }
 use std::web::view::{Extent, Param, Surface}
 use fmath::{abs, clamp01, cos, from_i32, rgba, sin, smoothstep, sqrt}
+
+fn clamp_control(_ value: f32, _ lower: f32, _ upper: f32) -> f32 {
+    if value < lower { lower } else { if value > upper { upper } else { value } }
+}
+
+fn wheel_zoom(_ zoom: f32, _ delta: f32) -> f32 {
+    if delta < 0.0 {
+        zoom * 0.875
+    } else {
+        if delta > 0.0 { zoom * 1.125 } else { zoom }
+    }
+}
 
 /// Perpendicular distance-based line coverage: 1 on the line, fading over `w`.
 fn line_cover(_ l: Line, _ x: f32, _ y: f32, _ w: f32) -> f32 {
@@ -92,6 +104,16 @@ actor Desargues2d uses (GpuProgram<WebGpuBackend>) {
                 res: Param::extent_x(),
             },
         }
+    }
+
+    /// Drag reconfigures and rotates the theorem; wheel changes view scale.
+    fn update_view(self, dx: f32, dy: f32, dzoom: f32, mx: f32, my: f32)
+        -> (f32, f32, f32) uses (UpdateSurface)
+    {
+        let sweep: f32 = clamp_control(self.sweep + dx * 0.0025, 0.3, 1.6)
+        let spin: f32 = self.spin + dy * 0.01
+        let zoom: f32 = clamp_control(wheel_zoom(self.zoom, dzoom), 0.8, 5.0)
+        (sweep, spin, zoom)
     }
 
     fn shade(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {

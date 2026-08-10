@@ -1,0 +1,178 @@
+//! GPU audit fixture for the exact `Fixed<8>` Mandelbrot reference producer.
+//!
+//! One runtime loop visits four centers and one nested runtime loop emits every
+//! `Z_0..Z_32` checkpoint. `packed` has the production two-word projection;
+//! `audit` additionally exposes the exact sign-magnitude state to an
+//! independent BigUint oracle. Readback exists only in the Rust gate.
+
+use std::webgpu::{
+    ComputeSurface as AuditPass,
+    FixedDispatch as Once,
+    FragmentSurface as Diagnostic,
+    GpuProgram as PassGraph,
+    StorageBuffer as Tape,
+    Workgroup as Threads,
+    WebGpuBackend,
+}
+use precision::field::Limbs
+use precision::fixed::{from_f32, from_qf_offset, mandelbrot_advance8, to_f32_bits}
+
+const CENTER_COUNT: u32 = 4
+const STEPS: u32 = 32
+const SAMPLES_PER_CENTER: u32 = 33
+const SAMPLE_COUNT: usize = 132
+const INVALID_REFERENCE: u32 = 2143289344
+
+pub struct ComplexF32Bits {
+    pub re_bits: u32,
+    pub im_bits: u32,
+}
+
+pub struct AuditSample {
+    pub x_sign: u32,
+    pub x0: u32,
+    pub x1: u32,
+    pub x2: u32,
+    pub x3: u32,
+    pub x4: u32,
+    pub x5: u32,
+    pub x6: u32,
+    pub x7: u32,
+    pub y_sign: u32,
+    pub y0: u32,
+    pub y1: u32,
+    pub y2: u32,
+    pub y3: u32,
+    pub y4: u32,
+    pub y5: u32,
+    pub y6: u32,
+    pub y7: u32,
+    pub re_bits: u32,
+    pub im_bits: u32,
+    pub valid: u32,
+}
+
+fn audit_sample(
+    _ x_sign: u32,
+    _ x: Limbs<8>,
+    _ y_sign: u32,
+    _ y: Limbs<8>,
+    _ re_bits: u32,
+    _ im_bits: u32,
+    _ valid: u32,
+) -> AuditSample {
+    AuditSample {
+        x_sign: x_sign,
+        x0: x.lead,
+        x1: x.tail.lead,
+        x2: x.tail.tail.lead,
+        x3: x.tail.tail.tail.lead,
+        x4: x.tail.tail.tail.tail.lead,
+        x5: x.tail.tail.tail.tail.tail.lead,
+        x6: x.tail.tail.tail.tail.tail.tail.lead,
+        x7: x.tail.tail.tail.tail.tail.tail.tail.value,
+        y_sign: y_sign,
+        y0: y.lead,
+        y1: y.tail.lead,
+        y2: y.tail.tail.lead,
+        y3: y.tail.tail.tail.lead,
+        y4: y.tail.tail.tail.tail.lead,
+        y5: y.tail.tail.tail.tail.tail.lead,
+        y6: y.tail.tail.tail.tail.tail.tail.lead,
+        y7: y.tail.tail.tail.tail.tail.tail.tail.value,
+        re_bits: re_bits,
+        im_bits: im_bits,
+        valid: valid,
+    }
+}
+
+actor FixedOrbitAudit uses (PassGraph<WebGpuBackend>) {
+    packed: Tape<ComplexF32Bits, SAMPLE_COUNT>,
+    audit: Tape<AuditSample, SAMPLE_COUNT>,
+
+    fn build(self) uses (AuditPass<Threads<1, 1, 1>, Once<1, 1, 1>>) {
+        let mut center: u32 = 0
+        while center < CENTER_COUNT {
+            let x0: f32 = if center == 0 { -2.0 } else {
+                if center == 1 { -0.5 } else {
+                    if center == 2 { 1.0 } else { -0.7436438798904419 }
+                }
+            }
+            let x1: f32 = if center == 3 { -0.0000000071467170 } else { 0.0 }
+            let x2: f32 = if center == 3 { -0.0000000000000003 } else { 0.0 }
+            let x3: f32 = if center == 3 { -0.00000000000000000000002 } else { 0.0 }
+            let y0: f32 = if center == 2 { 1.0 } else {
+                if center == 3 { 0.1318259090185165 } else { 0.0 }
+            }
+            let y1: f32 = if center == 3 { -0.0000000048132045 } else { 0.0 }
+            let y2: f32 = if center == 3 { 0.00000000000000025 } else { 0.0 }
+            let y3: f32 = if center == 3 { 0.000000000000000000000015 } else { 0.0 }
+
+            let (cx_sign, cx) = from_qf_offset<8>(x0, x1, x2, x3, 0.0)
+            let (cy_sign, cy) = from_qf_offset<8>(y0, y1, y2, y3, 0.0)
+            let (zx_zero_sign, zx_zero) = from_f32<8>(0.0)
+            let (zy_zero_sign, zy_zero) = from_f32<8>(0.0)
+            let mut zx_sign: u32 = zx_zero_sign
+            let mut zx = zx_zero
+            let mut zy_sign: u32 = zy_zero_sign
+            let mut zy = zy_zero
+            let mut valid: u32 = 1
+            let base: u32 = center * SAMPLES_PER_CENTER
+
+            self.packed.store(
+                index: base,
+                value: ComplexF32Bits { re_bits: 0, im_bits: 0 },
+            )
+            self.audit.store(
+                index: base,
+                value: audit_sample(zx_sign, zx, zy_sign, zy, 0, 0, valid),
+            )
+
+            let mut step: u32 = 0
+            while step < STEPS {
+                if valid == 1 {
+                    let (next_x_sign, next_x, next_y_sign, next_y, did_escape) =
+                        mandelbrot_advance8(
+                            zx_sign, zx, zy_sign, zy, cx_sign, cx, cy_sign, cy)
+                    if did_escape == 1 {
+                        valid = 0
+                    } else {
+                        zx_sign = next_x_sign
+                        zx = next_x
+                        zy_sign = next_y_sign
+                        zy = next_y
+                    }
+                }
+
+                let re_bits: u32 = if valid == 1 {
+                    to_f32_bits<8>(zx_sign, zx)
+                } else {
+                    INVALID_REFERENCE
+                }
+                let im_bits: u32 = if valid == 1 {
+                    to_f32_bits<8>(zy_sign, zy)
+                } else {
+                    INVALID_REFERENCE
+                }
+                let index: u32 = base + step + 1
+                self.packed.store(
+                    index: index,
+                    value: ComplexF32Bits { re_bits: re_bits, im_bits: im_bits },
+                )
+                self.audit.store(
+                    index: index,
+                    value: audit_sample(
+                        zx_sign, zx, zy_sign, zy, re_bits, im_bits, valid),
+                )
+                step = step + 1
+            }
+            center = center + 1
+        }
+    }
+
+    fn display(self, px: i32, py: i32) -> i32 uses (Diagnostic) {
+        let first: ComplexF32Bits = self.packed.load(index: 0)
+        let last: AuditSample = self.audit.load(index: 131)
+        ((first.re_bits ^ last.y7 ^ last.valid) | 4278190080).downcast_truncate()
+    }
+}

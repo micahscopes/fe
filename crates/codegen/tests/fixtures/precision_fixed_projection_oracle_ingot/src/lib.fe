@@ -1,0 +1,42 @@
+//! Thin Wasm exports for the general integer-only `Fixed<L>` binary32
+//! projection. The independent Rust gate supplies arbitrary sign-magnitude
+//! inputs and compares the returned IEEE-754 word with a BigUint oracle.
+
+use precision::fixed::{to_f32_bits, to_f32_quad_bits}
+use precision::field::{Limbs, LimbLast, LimbMore}
+
+fn build2(_ x0: u32, _ x1: u32) -> Limbs<2> {
+    LimbMore { lead: x0, tail: LimbLast { value: x1 } }
+}
+
+fn build4(_ x0: u32, _ x1: u32, _ x2: u32, _ x3: u32) -> Limbs<4> {
+    LimbMore { lead: x0, tail: LimbMore { lead: x1, tail: LimbMore { lead: x2, tail: LimbLast { value: x3 } } } }
+}
+
+fn build6(_ x0: u32, _ x1: u32, _ x2: u32, _ x3: u32, _ x4: u32, _ x5: u32) -> Limbs<6> {
+    LimbMore { lead: x0, tail: LimbMore { lead: x1, tail: LimbMore { lead: x2, tail: LimbMore { lead: x3, tail: LimbMore { lead: x4, tail: LimbLast { value: x5 } } } } } }
+}
+
+fn build8(_ x0: u32, _ x1: u32, _ x2: u32, _ x3: u32, _ x4: u32, _ x5: u32, _ x6: u32, _ x7: u32) -> Limbs<8> {
+    LimbMore { lead: x0, tail: LimbMore { lead: x1, tail: LimbMore { lead: x2, tail: LimbMore { lead: x3, tail: LimbMore { lead: x4, tail: LimbMore { lead: x5, tail: LimbMore { lead: x6, tail: LimbLast { value: x7 } } } } } } } }
+}
+
+pub fn fixed_to_f32_bits_l2(sign: u32, x0: u32, x1: u32) -> u32 {
+    to_f32_bits<2>(sign, build2(x0, x1))
+}
+
+pub fn fixed_to_f32_bits_l4(sign: u32, x0: u32, x1: u32, x2: u32, x3: u32) -> u32 {
+    to_f32_bits<4>(sign, build4(x0, x1, x2, x3))
+}
+
+pub fn fixed_to_f32_bits_l6(sign: u32, x0: u32, x1: u32, x2: u32, x3: u32, x4: u32, x5: u32) -> u32 {
+    to_f32_bits<6>(sign, build6(x0, x1, x2, x3, x4, x5))
+}
+
+pub fn fixed_to_f32_bits_l8(sign: u32, x0: u32, x1: u32, x2: u32, x3: u32, x4: u32, x5: u32, x6: u32, x7: u32) -> u32 {
+    to_f32_bits<8>(sign, build8(x0, x1, x2, x3, x4, x5, x6, x7))
+}
+
+pub fn fixed_to_f32_quad_bits_l8(sign: u32, x0: u32, x1: u32, x2: u32, x3: u32, x4: u32, x5: u32, x6: u32, x7: u32) -> (u32, u32, u32, u32) {
+    to_f32_quad_bits<8>(sign, build8(x0, x1, x2, x3, x4, x5, x6, x7))
+}

@@ -28,6 +28,18 @@ pub use dispatch::DispatchKind;
 pub use layout::{
     DISCRIMINANT_SIZE_BYTES, EVM_LAYOUT, Endianness, TargetDataLayout, WASM_LAYOUT, WORD_SIZE_BYTES,
 };
+#[cfg(all(
+    feature = "native-backend",
+    not(target_arch = "wasm32"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+pub use sonatina::{
+    GRID_LOOP_NATIVE_ENTRY_ARITY, MERKLE_ROOT_NATIVE_ENTRY_ARITY, MERKLE8_ROOT_NATIVE_ENTRY_ARITY,
+    NativeGridLoopEntryArtifact, NativeI32EntryArtifact, NativeMerkle8RootEntryArtifact,
+    NativeMerkleRootEntryArtifact, compile_runtime_package_native_grid_loop_entry,
+    compile_runtime_package_native_i32_entry, compile_runtime_package_native_merkle_root_entry,
+    compile_runtime_package_native_merkle8_root_entry,
+};
 pub use sonatina::{
     LowerError, SonatinaContractBytecode, SonatinaTestOptions, WasmCompileOptions,
     compile_runtime_package_wasm_with_options, emit_ingot_sonatina_bytecode,
@@ -36,22 +48,12 @@ pub use sonatina::{
     emit_runtime_package_sonatina_ir_optimized, emit_test_ingot_sonatina,
     emit_test_module_sonatina, validate_module_sonatina_ir,
 };
-#[cfg(all(
-    feature = "native-backend",
-    not(target_arch = "wasm32"),
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
-pub use sonatina::{
-    GRID_LOOP_NATIVE_ENTRY_ARITY, MERKLE8_ROOT_NATIVE_ENTRY_ARITY, MERKLE_ROOT_NATIVE_ENTRY_ARITY,
-    NativeGridLoopEntryArtifact, NativeI32EntryArtifact, NativeMerkle8RootEntryArtifact,
-    NativeMerkleRootEntryArtifact, compile_runtime_package_native_grid_loop_entry,
-    compile_runtime_package_native_i32_entry, compile_runtime_package_native_merkle8_root_entry,
-    compile_runtime_package_native_merkle_root_entry,
-};
 #[cfg(feature = "spirv-backend")]
 pub use sonatina::{
-    compile_render_wgsl, compile_runtime_package_spirv, compile_runtime_package_spirv_grid,
-    compile_runtime_package_spirv_render, compile_runtime_package_spirv_with_workgroup,
+    compile_render_wgsl, compile_runtime_package_spirv,
+    compile_runtime_package_spirv_compute_with_resources, compile_runtime_package_spirv_grid,
+    compile_runtime_package_spirv_render, compile_runtime_package_spirv_render_with_resources,
+    compile_runtime_package_spirv_with_workgroup,
 };
 pub use test_output::{ExpectedRevert, TestMetadata, TestModuleOutput, parse_expected_revert};
 
@@ -67,10 +69,12 @@ pub fn standalone_ctfe_ingot_source(source: &str) -> String {
 #[cfg(feature = "spirv-backend")]
 pub use web_bundle::{
     WEB_ACTOR_RUNTIME_PROTOCOL, WEB_ACTOR_RUNTIME_VERSION, WEB_BUNDLE_PROTOCOL,
-    WEB_BUNDLE_PROTOCOL_VERSION, WebArtifactManifest, WebBinding, WebBindingAccess,
-    WebBindingMember, WebBindingRole, WebBrowserRuntimeManifest, WebBuildOptions, WebBuiltinInput,
-    WebBuiltinSource, WebBundle, WebBundleError, WebBundleFile, WebBundleManifest, WebBundleMode,
-    WebCanonicalPolicy, WebCanonicalStatus, WebControl, WebControlArgSource, WebGeneratedArtifact,
-    WebLayout, WebProvenance, WebResult, WebScalarKind, actor_web_entry, render_runtime_js,
+    WEB_BUNDLE_PROTOCOL_VERSION, WebActorProgram, WebActorResource, WebActorResourceElement,
+    WebActorResourceField, WebActorStage, WebActorStageKind, WebArtifactManifest, WebBinding,
+    WebBindingAccess, WebBindingMember, WebBindingRole, WebBrowserRuntimeManifest, WebBuildOptions,
+    WebBuiltinInput, WebBuiltinSource, WebBundle, WebBundleError, WebBundleFile, WebBundleManifest,
+    WebBundleMode, WebCanonicalPolicy, WebCanonicalStatus, WebControl, WebControlArgSource,
+    WebControlWasmType, WebGeneratedArtifact, WebLayout, WebPass, WebPassShader, WebProvenance,
+    WebResource, WebResult, WebScalarKind, actor_gpu_program, actor_web_entry, render_runtime_js,
     resolve_web_entry,
 };

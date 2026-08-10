@@ -1,0 +1,6 @@
+[ingot]
+name = "rollcall_pipeline"
+version = "0.1.0"
+
+[dependencies]
+core = true

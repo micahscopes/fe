@@ -16,29 +16,46 @@ use std::{
 };
 
 use compiler_db::DriverDataBase;
-use hir::analysis::semantic::{ViewParam, ViewParamKind, project_view_surface};
-use hir::hir_def::TopLevelMod;
+use hir::analysis::{
+    name_resolution::{PathRes, resolve_path},
+    semantic::{ViewParam, ViewParamKind, project_view_surface},
+    ty::{
+        adt_def::AdtRef,
+        const_ty::{ConstTyData, EvaluatedConstTy},
+        trait_resolution::PredicateListId,
+        ty_def::{PrimTy, TyBase, TyData, TyId},
+        ty_lower::lower_hir_ty,
+    },
+};
+use hir::hir_def::{
+    FieldParent, GenericArg, GpuControl, GpuDispatch, GpuResource, GpuStage, ItemKind, LitKind,
+    Partial, PathId, Struct, TopLevelMod, TypeKind,
+};
+use hir::span::{ActorDesugaredFocus, DesugaredOrigin, HirOrigin};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sonatina_codegen::isa::spirv::{
-    Access, LayoutMode, Role, SpirvBuiltinSource, SpirvLayout, SpirvScalarKind, WordKind,
+    Access, LayoutMode, Role, SpirvBuiltinSource, SpirvExternalResource, SpirvLayout,
+    SpirvResourceElement, SpirvResourceField, SpirvScalarKind, WordKind,
 };
 
 use crate::sonatina::{
-    WasmCompileOptions, compile_runtime_package_spirv_grid, compile_runtime_package_spirv_render,
-    compile_runtime_package_wasm_with_options,
+    WasmCompileOptions, compile_runtime_package_spirv_compute_with_resources,
+    compile_runtime_package_spirv_grid, compile_runtime_package_spirv_render,
+    compile_runtime_package_spirv_render_with_resources, compile_runtime_package_wasm_with_options,
 };
 use crate::{
     CanonicalInterfaceManifest, canonical_lane_decl_from_entry, verify_canonical_wasm_abi,
 };
 
 pub const WEB_BUNDLE_PROTOCOL: &str = "fe-web-bundle";
-pub const WEB_BUNDLE_PROTOCOL_VERSION: u32 = 5;
+pub const WEB_BUNDLE_PROTOCOL_VERSION: u32 = 6;
 pub const WEB_ACTOR_RUNTIME_PROTOCOL: &str = "fe-browser-actor-runtime";
 pub const WEB_ACTOR_RUNTIME_VERSION: u32 = 4;
 
 const WASM_FILE: &str = "module.wasm";
 const WGSL_FILE: &str = "shader.wgsl";
+const PASS_DIR: &str = "passes";
 const MANIFEST_FILE: &str = "manifest.json";
 const INTERFACE_JS_FILE: &str = "interface.js";
 const INTERFACE_D_TS_FILE: &str = "interface.d.ts";
@@ -107,6 +124,7 @@ static NEXT_STAGING_ID: AtomicU64 = AtomicU64::new(0);
 pub enum WebBundleMode {
     Render,
     Grid,
+    Compute,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -204,63 +222,549 @@ impl WebBuildOptions {
     }
 }
 
-/// The placement-row marker naming a surface program: `uses (GpuProgram<B>)`.
-const GPU_PROGRAM_MARKER: &str = "GpuProgram";
-/// The behavior-role marker naming the per-pixel fragment stage.
-const FRAGMENT_SURFACE_MARKER: &str = "FragmentSurface";
+#[derive(Debug)]
+struct SemanticActor<'db> {
+    state: Struct<'db>,
+    behaviors: Vec<hir::hir_def::Func<'db>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebActorProgram {
+    pub actor: String,
+    pub stages: Vec<WebActorStage>,
+    pub resources: Vec<WebActorResource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebActorStage {
+    pub source_entry: String,
+    pub kind: WebActorStageKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebActorStageKind {
+    Compute {
+        workgroup_size: [u32; 3],
+        dispatch: [u32; 3],
+    },
+    Fragment,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebActorResource {
+    pub field_index: u32,
+    pub name: String,
+    pub length: u32,
+    pub element: WebActorResourceElement,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WebActorResourceElement {
+    U32,
+    Record {
+        fields: Vec<WebActorResourceField>,
+        span: u32,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebActorResourceField {
+    pub name: String,
+    pub offset: u32,
+}
+
+fn semantic_actors<'db>(
+    db: &'db DriverDataBase,
+    top_mod: TopLevelMod<'db>,
+) -> Vec<SemanticActor<'db>> {
+    let items = top_mod.all_items(db);
+    let mut actors = Vec::new();
+    for item in items {
+        let ItemKind::Struct(state) = item else {
+            continue;
+        };
+        let HirOrigin::Desugared(DesugaredOrigin::Actor(state_origin)) = state.origin(db) else {
+            continue;
+        };
+        if state_origin.focus != ActorDesugaredFocus::State {
+            continue;
+        }
+        let behaviors = items
+            .iter()
+            .filter_map(|item| {
+                let ItemKind::Func(func) = item else {
+                    return None;
+                };
+                let HirOrigin::Desugared(DesugaredOrigin::Actor(origin)) = func.origin(db) else {
+                    return None;
+                };
+                (origin.actor == state_origin.actor
+                    && matches!(origin.focus, ActorDesugaredFocus::Behavior(_)))
+                .then_some(*func)
+            })
+            .collect();
+        actors.push(SemanticActor {
+            state: *state,
+            behaviors,
+        });
+    }
+    actors
+}
+
+fn resolve_metadata_ty<'db>(
+    db: &'db DriverDataBase,
+    path: hir::hir_def::PathId<'db>,
+    scope: hir::hir_def::scope_graph::ScopeId<'db>,
+) -> Option<TyId<'db>> {
+    for candidate in [scope, scope.top_mod(db).scope()] {
+        for candidate_path in [path, path.strip_generic_args(db)] {
+            match resolve_path(
+                db,
+                candidate_path,
+                candidate,
+                PredicateListId::empty_list(db),
+                true,
+            )
+            .ok()
+            {
+                Some(PathRes::Ty(ty) | PathRes::TyAlias(_, ty)) => return Some(ty),
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+fn nominal_attrs<'db>(
+    db: &'db DriverDataBase,
+    ty: TyId<'db>,
+) -> Option<hir::hir_def::AttrListId<'db>> {
+    let ty = ty.as_view(db).unwrap_or(ty);
+    let adt = ty.adt_def(db)?;
+    let AdtRef::Struct(struct_) = adt.adt_ref(db) else {
+        return None;
+    };
+    struct_.scope().attrs(db)
+}
+
+fn actor_is_gpu_program(db: &DriverDataBase, actor: &SemanticActor<'_>) -> bool {
+    actor
+        .state
+        .actor_placement(db)
+        .data(db)
+        .iter()
+        .filter_map(|role| role.key_path.to_opt())
+        .filter_map(|path| resolve_metadata_ty(db, path, actor.state.scope()))
+        .filter_map(|ty| nominal_attrs(db, ty))
+        .any(|attrs| attrs.is_gpu_program(db))
+}
+
+fn behavior_stage(db: &DriverDataBase, behavior: hir::hir_def::Func<'_>) -> Option<GpuStage> {
+    behavior_stage_role(db, behavior).map(|(stage, _)| stage)
+}
+
+fn behavior_stage_role<'db>(
+    db: &'db DriverDataBase,
+    behavior: hir::hir_def::Func<'db>,
+) -> Option<(GpuStage, PathId<'db>)> {
+    behavior
+        .actor_roles(db)
+        .data(db)
+        .iter()
+        .filter_map(|role| role.key_path.to_opt())
+        .find_map(|path| {
+            let attrs = nominal_attrs(db, resolve_metadata_ty(db, path, behavior.scope())?)?;
+            Some((attrs.gpu_stage(db)?, path))
+        })
+}
+
+fn literal_u32(db: &DriverDataBase, body: hir::hir_def::Body<'_>) -> Option<u32> {
+    let expr = body.exprs(db).get(body.expr(db))?.clone().to_opt()?;
+    let hir::hir_def::Expr::Lit(LitKind::Int(value)) = expr else {
+        return None;
+    };
+    u32::try_from(value.data(db).clone()).ok()
+}
+
+fn path_const_triplet(db: &DriverDataBase, path: PathId<'_>) -> Option<[u32; 3]> {
+    let args = path.generic_args(db).data(db);
+    let [
+        GenericArg::Const(x),
+        GenericArg::Const(y),
+        GenericArg::Const(z),
+    ] = args.as_slice()
+    else {
+        return None;
+    };
+    let value = |arg: &hir::hir_def::ConstGenericArg<'_>| match arg.value {
+        hir::hir_def::ConstGenericArgValue::Expr(Partial::Present(body)) => literal_u32(db, body),
+        hir::hir_def::ConstGenericArgValue::Expr(Partial::Absent)
+        | hir::hir_def::ConstGenericArgValue::Hole => None,
+    };
+    Some([value(x)?, value(y)?, value(z)?])
+}
+
+fn nested_type_path_db<'db>(db: &'db DriverDataBase, arg: &GenericArg<'db>) -> Option<PathId<'db>> {
+    let GenericArg::Type(arg) = arg else {
+        return None;
+    };
+    let TypeKind::Path(Partial::Present(path)) = arg.ty.to_opt()?.data(db) else {
+        return None;
+    };
+    Some(*path)
+}
+
+fn compute_stage_shape(
+    db: &DriverDataBase,
+    behavior: hir::hir_def::Func<'_>,
+    role_path: PathId<'_>,
+) -> Result<([u32; 3], [u32; 3]), WebBundleError> {
+    let args = role_path.generic_args(db).data(db);
+    let [workgroup_arg, dispatch_arg] = args.as_slice() else {
+        return Err(WebBundleError::EntryDerivation(
+            "compute-stage role requires workgroup and dispatch type arguments".to_owned(),
+        ));
+    };
+    let workgroup_path = nested_type_path_db(db, workgroup_arg).ok_or_else(|| {
+        WebBundleError::EntryDerivation(
+            "compute-stage workgroup argument must be a nominal type".to_owned(),
+        )
+    })?;
+    let dispatch_path = nested_type_path_db(db, dispatch_arg).ok_or_else(|| {
+        WebBundleError::EntryDerivation(
+            "compute-stage dispatch argument must be a nominal type".to_owned(),
+        )
+    })?;
+    let workgroup_attrs = nominal_attrs(
+        db,
+        resolve_metadata_ty(db, workgroup_path, behavior.scope()).ok_or_else(|| {
+            WebBundleError::EntryDerivation(
+                "compute-stage workgroup type did not resolve".to_owned(),
+            )
+        })?,
+    )
+    .ok_or_else(|| {
+        WebBundleError::EntryDerivation(
+            "compute-stage workgroup argument is not an attributed nominal type".to_owned(),
+        )
+    })?;
+    if !workgroup_attrs.is_gpu_workgroup(db) {
+        return Err(WebBundleError::EntryDerivation(
+            "compute-stage workgroup type lacks `#[gpu_workgroup]`".to_owned(),
+        ));
+    }
+    let dispatch_attrs = nominal_attrs(
+        db,
+        resolve_metadata_ty(db, dispatch_path, behavior.scope()).ok_or_else(|| {
+            WebBundleError::EntryDerivation(
+                "compute-stage dispatch type did not resolve".to_owned(),
+            )
+        })?,
+    )
+    .ok_or_else(|| {
+        WebBundleError::EntryDerivation(
+            "compute-stage dispatch argument is not an attributed nominal type".to_owned(),
+        )
+    })?;
+    if dispatch_attrs.gpu_dispatch(db) != Some(GpuDispatch::Fixed) {
+        return Err(WebBundleError::EntryDerivation(
+            "compute-stage dispatch type must carry `#[gpu_dispatch(fixed)]`".to_owned(),
+        ));
+    }
+    let workgroup_size = path_const_triplet(db, workgroup_path).ok_or_else(|| {
+        WebBundleError::EntryDerivation(
+            "GPU workgroup dimensions must be three concrete u32-sized literals".to_owned(),
+        )
+    })?;
+    let dispatch = path_const_triplet(db, dispatch_path).ok_or_else(|| {
+        WebBundleError::EntryDerivation(
+            "fixed dispatch dimensions must be three concrete u32-sized literals".to_owned(),
+        )
+    })?;
+    if workgroup_size.contains(&0) || dispatch.contains(&0) {
+        return Err(WebBundleError::EntryDerivation(
+            "GPU workgroup and fixed dispatch dimensions must be nonzero".to_owned(),
+        ));
+    }
+    Ok((workgroup_size, dispatch))
+}
+
+fn semantic_const_u32(db: &DriverDataBase, ty: TyId<'_>) -> Option<u32> {
+    let TyData::ConstTy(value) = ty.data(db) else {
+        return None;
+    };
+    let evaluated = value.evaluate(db, None);
+    let ConstTyData::Evaluated(EvaluatedConstTy::LitInt(value), _) = evaluated.data(db) else {
+        return None;
+    };
+    u32::try_from(value.data(db).clone()).ok()
+}
+
+fn resource_element(
+    db: &DriverDataBase,
+    ty: TyId<'_>,
+    path: &str,
+) -> Result<WebActorResourceElement, WebBundleError> {
+    let ty = ty.as_view(db).unwrap_or(ty);
+    if matches!(
+        ty.base_ty(db).data(db),
+        TyData::TyBase(TyBase::Prim(PrimTy::U32))
+    ) {
+        return Ok(WebActorResourceElement::U32);
+    }
+    let adt = ty.adt_def(db).ok_or_else(|| {
+        WebBundleError::EntryDerivation(format!(
+            "resource `{path}` element must be `u32` or a POD record"
+        ))
+    })?;
+    let AdtRef::Struct(struct_) = adt.adt_ref(db) else {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "resource `{path}` element must be `u32` or a POD record"
+        )));
+    };
+    let field_views = FieldParent::Struct(struct_).fields(db).collect::<Vec<_>>();
+    let field_tys = ty.field_types(db);
+    if field_views.is_empty() || field_views.len() != field_tys.len() {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "resource `{path}` POD record has no fields or inconsistent semantic metadata"
+        )));
+    }
+    let mut fields = Vec::with_capacity(field_views.len());
+    for (index, (field, field_ty)) in field_views.into_iter().zip(field_tys).enumerate() {
+        if !matches!(
+            field_ty.base_ty(db).data(db),
+            TyData::TyBase(TyBase::Prim(PrimTy::U32))
+        ) {
+            return Err(WebBundleError::EntryDerivation(format!(
+                "resource `{path}` POD field {} must be exactly `u32`",
+                index
+            )));
+        }
+        let name = field
+            .name(db)
+            .map(|name| name.data(db).to_string())
+            .ok_or_else(|| {
+                WebBundleError::EntryDerivation(format!(
+                    "resource `{path}` POD fields must be named"
+                ))
+            })?;
+        fields.push(WebActorResourceField {
+            name,
+            offset: u32::try_from(index).unwrap() * 4,
+        });
+    }
+    let span = u32::try_from(fields.len()).unwrap() * 4;
+    Ok(WebActorResourceElement::Record { fields, span })
+}
+
+fn actor_resources(
+    db: &DriverDataBase,
+    actor: &SemanticActor<'_>,
+) -> Result<Vec<WebActorResource>, WebBundleError> {
+    let assumptions = PredicateListId::empty_list(db);
+    let mut resources = Vec::new();
+    for (field_index, field) in actor.state.hir_fields(db).data(db).iter().enumerate() {
+        let Some(type_ref) = field.type_ref().to_opt() else {
+            continue;
+        };
+        let ty = lower_hir_ty(db, type_ref, actor.state.scope(), assumptions);
+        let Some(attrs) = nominal_attrs(db, ty) else {
+            continue;
+        };
+        if attrs.gpu_resource(db) != Some(GpuResource::Storage) {
+            continue;
+        }
+        let [element_ty, length_ty, ..] = ty.generic_args(db) else {
+            return Err(WebBundleError::EntryDerivation(
+                "storage resource type requires element and length arguments".to_owned(),
+            ));
+        };
+        let name = field
+            .name
+            .to_opt()
+            .map(|name| name.data(db).to_string())
+            .ok_or_else(|| {
+                WebBundleError::EntryDerivation(
+                    "actor storage resource fields must be named".to_owned(),
+                )
+            })?;
+        let length = semantic_const_u32(db, *length_ty).ok_or_else(|| {
+            WebBundleError::EntryDerivation(format!(
+                "storage resource `{name}` length must be a concrete u32-sized integer"
+            ))
+        })?;
+        if length == 0 {
+            return Err(WebBundleError::EntryDerivation(format!(
+                "storage resource `{name}` length must be nonzero"
+            )));
+        }
+        resources.push(WebActorResource {
+            field_index: u32::try_from(field_index).unwrap(),
+            element: resource_element(db, *element_ty, &name)?,
+            name,
+            length,
+        });
+    }
+    Ok(resources)
+}
+
+pub fn actor_gpu_program(
+    db: &DriverDataBase,
+    top_mod: TopLevelMod<'_>,
+) -> Result<Option<WebActorProgram>, WebBundleError> {
+    let actors = semantic_actors(db, top_mod);
+    let gpu_actors = actors
+        .iter()
+        .filter(|actor| actor_is_gpu_program(db, actor))
+        .collect::<Vec<_>>();
+    let actor = match gpu_actors.as_slice() {
+        [] => return Ok(None),
+        [actor] => *actor,
+        _ => {
+            return Err(WebBundleError::EntryDerivation(format!(
+                "module declares {} attributed GPU-program actors; exactly one is required",
+                gpu_actors.len()
+            )));
+        }
+    };
+    let actor_name = actor
+        .state
+        .name(db)
+        .to_opt()
+        .map(|name| name.data(db).to_string())
+        .ok_or_else(|| {
+            WebBundleError::EntryDerivation(
+                "attributed GPU-program actor has no resolvable name".to_owned(),
+            )
+        })?;
+    let mut stages = Vec::new();
+    for behavior in &actor.behaviors {
+        let Some((stage, role_path)) = behavior_stage_role(db, *behavior) else {
+            continue;
+        };
+        let source_entry = behavior
+            .name(db)
+            .to_opt()
+            .map(|name| name.data(db).to_string())
+            .ok_or_else(|| {
+                WebBundleError::EntryDerivation(
+                    "attributed GPU-stage behavior has no resolvable name".to_owned(),
+                )
+            })?;
+        let kind = match stage {
+            GpuStage::Fragment => WebActorStageKind::Fragment,
+            GpuStage::Compute => {
+                let (workgroup_size, dispatch) = compute_stage_shape(db, *behavior, role_path)?;
+                WebActorStageKind::Compute {
+                    workgroup_size,
+                    dispatch,
+                }
+            }
+        };
+        stages.push(WebActorStage { source_entry, kind });
+    }
+    Ok(Some(WebActorProgram {
+        actor: actor_name,
+        stages,
+        resources: actor_resources(db, actor)?,
+    }))
+}
+
+fn behavior_is_surface_control(db: &DriverDataBase, behavior: hir::hir_def::Func<'_>) -> bool {
+    behavior
+        .actor_roles(db)
+        .data(db)
+        .iter()
+        .filter_map(|role| role.key_path.to_opt())
+        .filter_map(|path| resolve_metadata_ty(db, path, behavior.scope()))
+        .filter_map(|ty| nominal_attrs(db, ty))
+        .any(|attrs| attrs.gpu_control(db) == Some(GpuControl::Surface))
+}
+
+fn gpu_actor_name_for_entry(
+    db: &DriverDataBase,
+    top_mod: TopLevelMod<'_>,
+    source_entry: &str,
+) -> Option<String> {
+    semantic_actors(db, top_mod)
+        .into_iter()
+        .find(|actor| {
+            actor_is_gpu_program(db, actor)
+                && actor.behaviors.iter().any(|behavior| {
+                    behavior
+                        .name(db)
+                        .to_opt()
+                        .is_some_and(|name| name.data(db) == source_entry)
+                })
+        })?
+        .state
+        .name(db)
+        .to_opt()
+        .map(|name| name.data(db).to_string())
+}
 
 /// The render entry and mode derived from a module's unique GPU-program actor,
 /// or `None` when the module declares no such actor (the pre-actor flag path).
 ///
-/// This is R-A1's zero-config derivation: it reads the `actor` declaration
-/// structurally (via [`hir::lower::module_actor_decls`]) and maps the unique
-/// `FragmentSurface` behavior to `(entry, WebBundleMode::Render)`. The single
-/// `FragmentSurface -> Render` shell-key row is a deliberate, temporary closed
-/// recognizer (design 7, edit 4), removed when the role recognizer opens.
+/// This resolves the actor's placement and behavior role types, then consumes
+/// their nominal GPU attributes. Source spellings and imported aliases do not
+/// participate in classification.
 pub fn actor_web_entry(
     db: &DriverDataBase,
     top_mod: TopLevelMod<'_>,
 ) -> Result<Option<(String, WebBundleMode)>, WebBundleError> {
-    let decls = hir::lower::module_actor_decls(db, top_mod);
-    let gpu_actors: Vec<&hir::lower::ActorDecl> = decls
+    let actors = semantic_actors(db, top_mod);
+    let gpu_actors: Vec<&SemanticActor<'_>> = actors
         .iter()
-        .filter(|actor| {
-            actor
-                .row_markers
-                .iter()
-                .any(|marker| marker == GPU_PROGRAM_MARKER)
-        })
+        .filter(|actor| actor_is_gpu_program(db, actor))
         .collect();
     let actor = match gpu_actors.as_slice() {
         [] => return Ok(None),
         [actor] => *actor,
         _ => {
             return Err(WebBundleError::EntryDerivation(format!(
-                "module declares {} `GpuProgram` actors; the render entry cannot be derived from more than one",
+                "module declares {} attributed GPU-program actors; the web entry cannot be derived from more than one",
                 gpu_actors.len()
             )));
         }
     };
 
-    let fragment_behaviors: Vec<&hir::lower::ActorBehaviorDecl> = actor
+    let fragment_behaviors: Vec<hir::hir_def::Func<'_>> = actor
         .behaviors
         .iter()
-        .filter(|behavior| {
-            behavior
-                .role_markers
-                .iter()
-                .any(|marker| marker == FRAGMENT_SURFACE_MARKER)
-        })
+        .copied()
+        .filter(|behavior| behavior_stage(db, *behavior) == Some(GpuStage::Fragment))
         .collect();
     match fragment_behaviors.as_slice() {
-        [behavior] => Ok(Some((behavior.name.clone(), WebBundleMode::Render))),
+        [behavior] => Ok(Some((
+            behavior
+                .name(db)
+                .to_opt()
+                .map(|name| name.data(db).to_string())
+                .ok_or_else(|| {
+                    WebBundleError::EntryDerivation(
+                        "attributed fragment behavior has no resolvable name".to_owned(),
+                    )
+                })?,
+            WebBundleMode::Render,
+        ))),
         [] => Err(WebBundleError::EntryDerivation(format!(
-            "actor `{}` has a `GpuProgram` row but no `FragmentSurface` behavior to serve as the render entry",
-            actor.name
+            "GPU-program actor `{}` has no behavior carrying `#[gpu_stage(fragment)]`",
+            actor
+                .state
+                .name(db)
+                .to_opt()
+                .map(|name| name.data(db))
+                .map_or("<unnamed>", |name| name.as_str())
         ))),
         _ => Err(WebBundleError::EntryDerivation(format!(
-            "actor `{}` declares {} `FragmentSurface` behaviors; a render program has exactly one",
-            actor.name,
+            "GPU-program actor `{}` declares {} fragment-stage behaviors; a render program has exactly one",
+            actor
+                .state
+                .name(db)
+                .to_opt()
+                .map(|name| name.data(db))
+                .map_or("<unnamed>", |name| name.as_str()),
             fragment_behaviors.len()
         ))),
     }
@@ -325,53 +829,49 @@ fn project_actor_field_metadata(
     top_mod: TopLevelMod<'_>,
     source_entry: &str,
     layout: &mut WebLayout,
+    resource_field_indices: &[u32],
 ) {
     let decls = hir::lower::module_actor_decls(db, top_mod);
-    // Bind the fields of the actor whose behavior IS this render entry, exactly
-    // the unique GpuProgram actor `resolve_web_entry` derived `source_entry`
-    // from.
-    let Some(actor) = decls.iter().find(|actor| {
-        actor
-            .row_markers
-            .iter()
-            .any(|marker| marker == GPU_PROGRAM_MARKER)
-            && actor
-                .behaviors
-                .iter()
-                .any(|behavior| behavior.name == source_entry)
-    }) else {
+    let Some(actor_name) = gpu_actor_name_for_entry(db, top_mod, source_entry) else {
+        return;
+    };
+    let Some(actor) = decls.iter().find(|actor| actor.name == actor_name) else {
         return;
     };
     if actor.fields.is_empty() {
         return;
     }
-    for binding in &mut layout.bindings {
-        if binding.role != WebBindingRole::Input {
-            continue;
-        }
-        let Some(base) = binding.members.iter().map(|member| member.arg_index).min() else {
-            continue;
-        };
-        for member in &mut binding.members {
-            let field_index = (member.arg_index - base) as usize;
-            if let Some(field) = actor.fields.get(field_index) {
-                member.name = field.name.clone();
-                member.doc = field.doc.clone();
-            }
-        }
+    let fields = actor
+        .fields
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !resource_field_indices.contains(&(*index as u32)))
+        .map(|(_, field)| field)
+        .collect::<Vec<_>>();
+    let mut members = layout
+        .bindings
+        .iter()
+        .enumerate()
+        .filter(|(_, binding)| binding.role == WebBindingRole::Input)
+        .flat_map(|(binding_index, binding)| {
+            binding
+                .members
+                .iter()
+                .enumerate()
+                .map(move |(member_index, member)| (member.arg_index, binding_index, member_index))
+        })
+        .collect::<Vec<_>>();
+    members.sort_by_key(|(arg_index, _, _)| *arg_index);
+    for ((_, binding_index, member_index), field) in members.into_iter().zip(fields) {
+        let member = &mut layout.bindings[binding_index].members[member_index];
+        member.name = field.name.clone();
+        member.doc = field.doc.clone();
     }
 }
 
 /// The reserved const behavior a render actor declares to project its
 /// interactive surface (design 1.2).
 const VIEW_BEHAVIOR: &str = "view";
-
-/// The reserved role marker naming a `self`-taking actor behavior that maps a
-/// raw gesture (plus the actor's current state) to the next state (R3 param
-/// gestures). Structurally recognized exactly like `FRAGMENT_SURFACE_MARKER`:
-/// no fixed function NAME, so it generalizes across demos (`update_view` here,
-/// `update_rotor` for the Cl(3) rotor demo).
-const UPDATE_SURFACE_MARKER: &str = "UpdateSurface";
 
 /// The reserved gesture-argument name vocabulary an `UpdateSurface` behavior's
 /// own declared (pre-flatten) params must draw from, kept IDENTICAL to the
@@ -407,35 +907,38 @@ fn actor_update_export_name(
     top_mod: TopLevelMod<'_>,
     source_entry: &str,
 ) -> Result<Option<String>, WebBundleError> {
-    let decls = hir::lower::module_actor_decls(db, top_mod);
-    let Some(actor) = decls.iter().find(|actor| {
-        actor
-            .row_markers
-            .iter()
-            .any(|marker| marker == GPU_PROGRAM_MARKER)
-            && actor
-                .behaviors
-                .iter()
-                .any(|behavior| behavior.name == source_entry)
+    let actors = semantic_actors(db, top_mod);
+    let Some(actor) = actors.iter().find(|actor| {
+        actor_is_gpu_program(db, actor)
+            && actor.behaviors.iter().any(|behavior| {
+                behavior
+                    .name(db)
+                    .to_opt()
+                    .is_some_and(|name| name.data(db) == source_entry)
+            })
     }) else {
         return Ok(None);
     };
-    let update_behaviors: Vec<&hir::lower::ActorBehaviorDecl> = actor
+    let update_behaviors: Vec<hir::hir_def::Func<'_>> = actor
         .behaviors
         .iter()
-        .filter(|behavior| {
-            behavior
-                .role_markers
-                .iter()
-                .any(|marker| marker == UPDATE_SURFACE_MARKER)
-        })
+        .copied()
+        .filter(|behavior| behavior_is_surface_control(db, *behavior))
         .collect();
     match update_behaviors.as_slice() {
         [] => Ok(None),
-        [behavior] => Ok(Some(behavior.name.clone())),
+        [behavior] => Ok(behavior
+            .name(db)
+            .to_opt()
+            .map(|name| name.data(db).to_string())),
         _ => Err(WebBundleError::SurfaceProjection(format!(
-            "actor `{}` declares {} `UpdateSurface` behaviors; a render program has at most one",
-            actor.name,
+            "actor `{}` declares {} surface-control behaviors; a render program has at most one",
+            actor
+                .state
+                .name(db)
+                .to_opt()
+                .map(|name| name.data(db))
+                .map_or("<unnamed>", |name| name.as_str()),
             update_behaviors.len()
         ))),
     }
@@ -455,20 +958,17 @@ fn project_control(
     source_entry: &str,
     control_export: &str,
     wasm: &[u8],
+    resource_field_indices: &[u32],
 ) -> Result<WebControl, WebBundleError> {
     let decls = hir::lower::module_actor_decls(db, top_mod);
+    let actor_name = gpu_actor_name_for_entry(db, top_mod, source_entry).ok_or_else(|| {
+        WebBundleError::SurfaceProjection(format!(
+            "control export `{control_export}` was named but its actor could not be re-found"
+        ))
+    })?;
     let actor = decls
         .iter()
-        .find(|actor| {
-            actor
-                .row_markers
-                .iter()
-                .any(|marker| marker == GPU_PROGRAM_MARKER)
-                && actor
-                    .behaviors
-                    .iter()
-                    .any(|behavior| behavior.name == source_entry)
-        })
+        .find(|actor| actor.name == actor_name)
         .ok_or_else(|| {
             WebBundleError::SurfaceProjection(format!(
                 "control export `{control_export}` was named but its actor could not be re-found"
@@ -485,9 +985,56 @@ fn project_control(
             ))
         })?;
 
-    let field_names: Vec<&str> = actor.fields.iter().map(|field| field.name.as_str()).collect();
-    let mut args = Vec::with_capacity(behavior.context_params.len() + field_names.len());
-    for name in &behavior.context_params {
+    let state_field_names: Vec<&str> = actor
+        .fields
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !resource_field_indices.contains(&(*index as u32)))
+        .map(|(_, field)| field)
+        .map(|field| field.name.as_str())
+        .collect();
+    let (param_types, result_types) =
+        wasm_export_signature(wasm, control_export).ok_or_else(|| {
+            WebBundleError::SurfaceProjection(format!(
+                "actor `{}`: update behavior `{control_export}` has no matching wasm export",
+                actor.name
+            ))
+        })?;
+    let param_count = param_types.len();
+    let result_count = result_types.len();
+    let expected_param_count = behavior.context_params.len() + actor.fields.len();
+    if param_count != expected_param_count {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "actor `{}`: update export `{control_export}` takes {param_count} wasm params but the \
+             behavior's gesture args ({}) + actor fields ({}) = {expected_param_count}",
+            actor.name,
+            behavior.context_params.len(),
+            actor.fields.len(),
+        )));
+    }
+    if result_count == 0 || result_count > state_field_names.len() {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "actor `{}`: update export `{control_export}` returns {result_count} values; expected \
+             1..={} (a leading subset of the actor's state fields, declaration order)",
+            actor.name,
+            state_field_names.len()
+        )));
+    }
+    if result_types.iter().any(|ty| *ty != WebControlWasmType::F32) {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "actor `{}`: update export `{control_export}` results must all be f32, got {result_types:?}",
+            actor.name
+        )));
+    }
+
+    let mut args = Vec::with_capacity(expected_param_count);
+    for (index, name) in behavior.context_params.iter().enumerate() {
+        if param_types[index] != WebControlWasmType::F32 {
+            return Err(WebBundleError::SurfaceProjection(format!(
+                "actor `{}`: gesture argument `{name}` must lower as f32, got {:?}",
+                actor.name, param_types[index]
+            )));
+        }
         let source = gesture_arg_source(name).ok_or_else(|| {
             WebBundleError::SurfaceProjection(format!(
                 "actor `{}`: update behavior `{control_export}` has an unrecognized gesture arg \
@@ -497,37 +1044,28 @@ fn project_control(
         })?;
         args.push(source);
     }
-    for name in &field_names {
-        args.push(WebControlArgSource::State {
-            name: (*name).to_string(),
-        });
+    for (index, field) in actor.fields.iter().enumerate() {
+        let name = field.name.clone();
+        let wasm_type = param_types[behavior.context_params.len() + index];
+        if resource_field_indices.contains(&(index as u32)) {
+            if !matches!(wasm_type, WebControlWasmType::I32 | WebControlWasmType::I64) {
+                return Err(WebBundleError::SurfaceProjection(format!(
+                    "actor `{}`: resource control argument `{name}` must lower as an integer handle, got {wasm_type:?}",
+                    actor.name
+                )));
+            }
+            args.push(WebControlArgSource::Resource { name, wasm_type });
+        } else {
+            if wasm_type != WebControlWasmType::F32 {
+                return Err(WebBundleError::SurfaceProjection(format!(
+                    "actor `{}`: state control argument `{name}` must lower as f32, got {wasm_type:?}",
+                    actor.name
+                )));
+            }
+            args.push(WebControlArgSource::State { name });
+        }
     }
-
-    let (param_count, result_count) = wasm_export_signature(wasm, control_export).ok_or_else(|| {
-        WebBundleError::SurfaceProjection(format!(
-            "actor `{}`: update behavior `{control_export}` has no matching wasm export",
-            actor.name
-        ))
-    })?;
-    if param_count != args.len() {
-        return Err(WebBundleError::SurfaceProjection(format!(
-            "actor `{}`: update export `{control_export}` takes {param_count} wasm params but the \
-             behavior's gesture args ({}) + state fields ({}) = {}",
-            actor.name,
-            behavior.context_params.len(),
-            field_names.len(),
-            args.len()
-        )));
-    }
-    if result_count == 0 || result_count > field_names.len() {
-        return Err(WebBundleError::SurfaceProjection(format!(
-            "actor `{}`: update export `{control_export}` returns {result_count} values; expected \
-             1..={} (a leading subset of the actor's state fields, declaration order)",
-            actor.name,
-            field_names.len()
-        )));
-    }
-    let result: Vec<String> = field_names[..result_count]
+    let result: Vec<String> = state_field_names[..result_count]
         .iter()
         .map(|name| (*name).to_string())
         .collect();
@@ -562,10 +1100,13 @@ fn wasm_function_export_names(wasm: &[u8]) -> Vec<String> {
     names
 }
 
-fn wasm_export_signature(wasm: &[u8], export_name: &str) -> Option<(usize, usize)> {
+fn wasm_export_signature(
+    wasm: &[u8],
+    export_name: &str,
+) -> Option<(Vec<WebControlWasmType>, Vec<WebControlWasmType>)> {
     use wasmparser::{ExternalKind, Payload, TypeRef};
 
-    let mut func_sigs: Vec<(usize, usize)> = Vec::new();
+    let mut func_sigs: Vec<(Vec<WebControlWasmType>, Vec<WebControlWasmType>)> = Vec::new();
     let mut func_type_indices: Vec<u32> = Vec::new();
     let mut imported_func_count: u32 = 0;
     let mut export_func_index: Option<u32> = None;
@@ -576,7 +1117,25 @@ fn wasm_export_signature(wasm: &[u8], export_name: &str) -> Option<(usize, usize
                 for rec in reader {
                     for sub in rec.ok()?.into_types() {
                         let ft = sub.unwrap_func();
-                        func_sigs.push((ft.params().len(), ft.results().len()));
+                        let convert = |ty| match ty {
+                            wasmparser::ValType::I32 => Some(WebControlWasmType::I32),
+                            wasmparser::ValType::I64 => Some(WebControlWasmType::I64),
+                            wasmparser::ValType::F32 => Some(WebControlWasmType::F32),
+                            wasmparser::ValType::F64 => Some(WebControlWasmType::F64),
+                            _ => None,
+                        };
+                        func_sigs.push((
+                            ft.params()
+                                .iter()
+                                .copied()
+                                .map(convert)
+                                .collect::<Option<Vec<_>>>()?,
+                            ft.results()
+                                .iter()
+                                .copied()
+                                .map(convert)
+                                .collect::<Option<Vec<_>>>()?,
+                        ));
                     }
                 }
             }
@@ -610,7 +1169,7 @@ fn wasm_export_signature(wasm: &[u8], export_name: &str) -> Option<(usize, usize
     }
     let defined = (fidx - imported_func_count) as usize;
     let tyidx = *func_type_indices.get(defined)? as usize;
-    func_sigs.get(tyidx).copied()
+    func_sigs.get(tyidx).cloned()
 }
 
 /// Projects the render actor's `const fn view()` behavior into the manifest
@@ -629,18 +1188,13 @@ fn project_surface(
     top_mod: TopLevelMod<'_>,
     source_entry: &str,
     layout: &WebLayout,
+    resource_field_indices: &[u32],
 ) -> Result<Option<WebSurface>, WebBundleError> {
     let decls = hir::lower::module_actor_decls(db, top_mod);
-    let Some(actor) = decls.iter().find(|actor| {
-        actor
-            .row_markers
-            .iter()
-            .any(|marker| marker == GPU_PROGRAM_MARKER)
-            && actor
-                .behaviors
-                .iter()
-                .any(|behavior| behavior.name == source_entry)
-    }) else {
+    let Some(actor_name) = gpu_actor_name_for_entry(db, top_mod, source_entry) else {
+        return Ok(None);
+    };
+    let Some(actor) = decls.iter().find(|actor| actor.name == actor_name) else {
         return Ok(None);
     };
     // Recognize the reserved `view()` behavior structurally.
@@ -686,8 +1240,19 @@ fn project_surface(
     members.sort_by_key(|member| member.arg_index);
 
     // Reconcile view params <-> actor fields <-> binding members by name.
-    let view_names: Vec<&str> = view.params.iter().map(|param| param.name.as_str()).collect();
-    let field_names: Vec<&str> = actor.fields.iter().map(|field| field.name.as_str()).collect();
+    let view_names: Vec<&str> = view
+        .params
+        .iter()
+        .map(|param| param.name.as_str())
+        .collect();
+    let field_names: Vec<&str> = actor
+        .fields
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !resource_field_indices.contains(&(*index as u32)))
+        .map(|(_, field)| field)
+        .map(|field| field.name.as_str())
+        .collect();
     let member_names: Vec<&str> = members.iter().map(|member| member.name.as_str()).collect();
     let mismatch = || {
         WebBundleError::SurfaceProjection(format!(
@@ -695,7 +1260,7 @@ fn project_surface(
             actor.name
         ))
     };
-    if view.params.len() != members.len() || view.params.len() != actor.fields.len() {
+    if view.params.len() != members.len() || view.params.len() != field_names.len() {
         return Err(mismatch());
     }
 
@@ -777,8 +1342,10 @@ fn web_surface_param(
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebArtifactManifest {
-    pub wasm: String,
-    pub wasm_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wasm: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wasm_bytes: Option<u64>,
     pub wgsl: String,
     pub wgsl_bytes: u64,
     /// Added in web-bundle protocol v3. The serde default keeps compiler tools
@@ -814,6 +1381,7 @@ pub enum WebBindingAccess {
 pub enum WebBindingRole {
     Input,
     Output,
+    Resource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -895,6 +1463,27 @@ pub struct WebLayout {
     pub color_target_format: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebResource {
+    pub group: u32,
+    pub binding: u32,
+    pub name: String,
+    pub length: u32,
+    pub stride: u32,
+    pub span: u32,
+    pub element: WebActorResourceElement,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebPass {
+    pub source_entry: String,
+    pub shader: String,
+    pub shader_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch: Option<[u32; 3]>,
+    pub layout: WebLayout,
+}
+
 // The manifest carries floating-point param ranges/inits in its `surface`
 // section (protocol v5, R1b), so it can no longer be `Eq`; `PartialEq` is
 // retained for the round-trip tests. Nothing keys a manifest by hash/equality.
@@ -905,6 +1494,10 @@ pub struct WebBundleManifest {
     pub source_entry: String,
     pub artifacts: WebArtifactManifest,
     pub layout: WebLayout,
+    #[serde(default)]
+    pub resources: Vec<WebResource>,
+    #[serde(default)]
+    pub passes: Vec<WebPass>,
     /// The CTFE-projected `view()` surface (extent + per-param range/init/kind),
     /// added in protocol v5 (R1b). Absent for a render entry with no `view()`
     /// behavior (the v4-compatible path); serde-defaulted on read so v4
@@ -982,7 +1575,10 @@ pub struct WebSurfaceParam {
     pub init: Option<f32>,
     /// Whether the runtime renders a control for this param. Omitted (defaults
     /// true) for ordinary sliders; `false` for extent-bound and fixed params.
-    #[serde(default = "web_surface_param_visible_default", skip_serializing_if = "is_true")]
+    #[serde(
+        default = "web_surface_param_visible_default",
+        skip_serializing_if = "is_true"
+    )]
     pub visible: bool,
 }
 
@@ -1035,6 +1631,13 @@ pub enum WebControlArgSource {
     /// the live uniform vector by name, exactly like a `surface.params[]`
     /// member).
     State { name: String },
+    /// An actor-owned GPU resource occupies a position in the desugared
+    /// behavior ABI but is not browser scalar state. The control lane receives
+    /// an inert zero handle; resource operations are not available to Wasm.
+    Resource {
+        name: String,
+        wasm_type: WebControlWasmType,
+    },
     /// Accumulated pointer movement while dragging (primary button held), in
     /// the SAME pixel frame as an `extent_x`/`extent_y` state field; `axis`
     /// is `"x"` or `"y"`.
@@ -1047,6 +1650,15 @@ pub enum WebControlArgSource {
     Pointer { axis: String },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebControlWasmType {
+    I32,
+    I64,
+    F32,
+    F64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebCanonicalStatus {
     pub policy: WebCanonicalPolicy,
@@ -1054,15 +1666,99 @@ pub struct WebCanonicalStatus {
     pub omission_reason: Option<String>,
 }
 
-// `WebBundle` embeds the v5 manifest (which carries f32 surface ranges), so it
+// `WebBundle` embeds the v6 manifest (which carries f32 surface ranges), so it
 // is `PartialEq` but not `Eq`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WebBundle {
     pub wasm: Vec<u8>,
     pub wgsl: String,
+    pub pass_wgsl: Vec<WebPassShader>,
     pub manifest: WebBundleManifest,
     pub interface_js: Option<String>,
     pub interface_d_ts: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebPassShader {
+    pub path: String,
+    pub source: String,
+}
+
+fn web_resource_manifest(resource: &WebActorResource, binding: u32) -> WebResource {
+    let span = match &resource.element {
+        WebActorResourceElement::U32 => 4,
+        WebActorResourceElement::Record { span, .. } => *span,
+    };
+    WebResource {
+        group: 0,
+        binding,
+        name: resource.name.clone(),
+        length: resource.length,
+        stride: span,
+        span,
+        element: resource.element.clone(),
+    }
+}
+
+fn stage_external_resources(
+    db: &DriverDataBase,
+    package: &mir::RuntimePackage<'_>,
+    resources: &[WebResource],
+    access: Access,
+) -> Result<Vec<SpirvExternalResource>, WebBundleError> {
+    let root = package.primary_object(db).ok_or_else(|| {
+        WebBundleError::Lower("GPU stage runtime package has no primary object".to_owned())
+    })?;
+    let section = root.sections(db).into_iter().next().ok_or_else(|| {
+        WebBundleError::Lower("GPU stage runtime package has no root section".to_owned())
+    })?;
+    let body = section.entry.instance(db).body(db);
+    let arg_indices = body
+        .signature
+        .params
+        .iter()
+        .enumerate()
+        .filter_map(|(index, param)| {
+            let ty = body.local(param.local)?.semantic_ty;
+            nominal_attrs(db, ty)
+                .is_some_and(|attrs| attrs.gpu_resource(db) == Some(GpuResource::Storage))
+                .then_some(index as u32)
+        })
+        .collect::<Vec<_>>();
+    if arg_indices.len() != resources.len() {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "GPU stage exposes {} attributed resource arguments but the actor declares {} resources",
+            arg_indices.len(),
+            resources.len()
+        )));
+    }
+    Ok(resources
+        .iter()
+        .zip(arg_indices)
+        .map(|(resource, arg_index)| SpirvExternalResource {
+            arg_index,
+            group: resource.group,
+            binding: resource.binding,
+            name: resource.name.clone(),
+            access,
+            element: match &resource.element {
+                WebActorResourceElement::U32 => SpirvResourceElement::Scalar(SpirvScalarKind::U32),
+                WebActorResourceElement::Record { fields, span } => SpirvResourceElement::Record {
+                    fields: fields
+                        .iter()
+                        .map(|field| SpirvResourceField {
+                            name: field.name.clone(),
+                            scalar: SpirvScalarKind::U32,
+                            offset: field.offset,
+                        })
+                        .collect(),
+                    span: *span,
+                },
+            },
+            stride: resource.stride,
+            length: resource.length,
+        })
+        .collect())
 }
 
 /// One immutable file in a fully materialized [`WebBundle`].
@@ -1087,6 +1783,200 @@ impl WebBundleFile {
 }
 
 impl WebBundle {
+    fn compile_actor_graph(
+        db: &DriverDataBase,
+        top_mod: TopLevelMod<'_>,
+        options: WebBuildOptions,
+        program: WebActorProgram,
+    ) -> Result<Self, WebBundleError> {
+        if options.mode != WebBundleMode::Render {
+            return Err(WebBundleError::EntryDerivation(
+                "a GPU actor pass graph must terminate in a fragment stage".to_owned(),
+            ));
+        }
+        if options.canonical_policy != WebCanonicalPolicy::Disabled
+            || !options.canonical_entries.is_empty()
+        {
+            return Err(WebBundleError::CanonicalRequired(
+                "GPU actor pass graphs do not yet carry Wasm message lanes".to_owned(),
+            ));
+        }
+        let control_export = actor_update_export_name(db, top_mod, &options.source_entry)?;
+        let fragment_entries = program
+            .stages
+            .iter()
+            .filter(|stage| stage.kind == WebActorStageKind::Fragment)
+            .map(|stage| stage.source_entry.as_str())
+            .collect::<Vec<_>>();
+        if fragment_entries.as_slice() != [options.source_entry.as_str()]
+            || !matches!(
+                program.stages.last().map(|stage| &stage.kind),
+                Some(WebActorStageKind::Fragment)
+            )
+        {
+            return Err(WebBundleError::EntryDerivation(format!(
+                "GPU actor pass graph must end in its unique fragment entry `{}`",
+                options.source_entry
+            )));
+        }
+
+        let resources = program
+            .resources
+            .iter()
+            .enumerate()
+            .map(|(binding, resource)| web_resource_manifest(resource, binding as u32))
+            .collect::<Vec<_>>();
+        let resource_field_indices = program
+            .resources
+            .iter()
+            .map(|resource| resource.field_index)
+            .collect::<Vec<_>>();
+        let mut passes = Vec::with_capacity(program.stages.len());
+        let mut pass_wgsl = Vec::with_capacity(program.stages.len());
+        let mut final_shader = None;
+        let mut final_layout = None;
+        for (index, stage) in program.stages.iter().enumerate() {
+            let package =
+                mir::build_wasm_runtime_package_for_entry(db, top_mod, &stage.source_entry)
+                    .map_err(|error| WebBundleError::Lower(error.to_string()))?;
+            let (artifact, dispatch, kind) = match stage.kind {
+                WebActorStageKind::Compute {
+                    workgroup_size,
+                    dispatch,
+                } => {
+                    let external =
+                        stage_external_resources(db, &package, &resources, Access::ReadWrite)?;
+                    (
+                        compile_runtime_package_spirv_compute_with_resources(
+                            db,
+                            &package,
+                            workgroup_size,
+                            &external,
+                        ),
+                        Some(dispatch),
+                        "compute",
+                    )
+                }
+                WebActorStageKind::Fragment => {
+                    let external =
+                        stage_external_resources(db, &package, &resources, Access::Read)?;
+                    (
+                        compile_runtime_package_spirv_render_with_resources(
+                            db, &package, &external,
+                        ),
+                        None,
+                        "fragment",
+                    )
+                }
+            };
+            let artifact = artifact.map_err(|error| WebBundleError::Lower(error.to_string()))?;
+            let shader =
+                normalize_generated_text(&artifact.wgsl.ok_or(WebBundleError::MissingWgsl)?);
+            validate_browser_wgsl(&shader)?;
+            let mut layout = WebLayout::from_spirv(&artifact.layout)?;
+            project_actor_field_metadata(
+                db,
+                top_mod,
+                &stage.source_entry,
+                &mut layout,
+                &resource_field_indices,
+            );
+            let path = format!("{PASS_DIR}/{index:03}-{kind}.wgsl");
+            passes.push(WebPass {
+                source_entry: stage.source_entry.clone(),
+                shader: path.clone(),
+                shader_bytes: shader.len() as u64,
+                dispatch,
+                layout: layout.clone(),
+            });
+            pass_wgsl.push(WebPassShader {
+                path: path.clone(),
+                source: shader.clone(),
+            });
+            if stage.kind == WebActorStageKind::Fragment {
+                final_shader = Some((path, shader));
+                final_layout = Some(layout);
+            }
+        }
+        let (final_path, wgsl) = final_shader.ok_or_else(|| {
+            WebBundleError::EntryDerivation(
+                "GPU actor pass graph has no fragment shader".to_owned(),
+            )
+        })?;
+        let layout = final_layout.expect("fragment shader and layout are paired");
+        let (wasm, control) = if let Some(control_export) = control_export.as_deref() {
+            // A pass graph remains GPU-only for all rendering and resource
+            // work. Its optional Wasm artifact contains only the Fe-authored
+            // surface-control behavior, which returns updated scalar state.
+            let control_package =
+                mir::build_wasm_runtime_package_for_entry(db, top_mod, control_export)
+                    .map_err(|error| WebBundleError::Lower(error.to_string()))?;
+            let wasm = compile_runtime_package_wasm_with_options(
+                db,
+                &control_package,
+                WasmCompileOptions::default().with_optimization(),
+            )
+            .map_err(|error| WebBundleError::Lower(error.to_string()))?
+            .bytes;
+            wasmparser::validate(&wasm)
+                .map_err(|error| WebBundleError::WasmValidation(error.to_string()))?;
+            let control = project_control(
+                db,
+                top_mod,
+                &options.source_entry,
+                control_export,
+                &wasm,
+                &resource_field_indices,
+            )?;
+            (wasm, Some(control))
+        } else {
+            (Vec::new(), None)
+        };
+        let surface = project_surface(
+            db,
+            top_mod,
+            &options.source_entry,
+            &layout,
+            &resource_field_indices,
+        )?;
+        let manifest = WebBundleManifest {
+            protocol: WEB_BUNDLE_PROTOCOL.to_owned(),
+            protocol_version: WEB_BUNDLE_PROTOCOL_VERSION,
+            source_entry: options.source_entry,
+            artifacts: WebArtifactManifest {
+                wasm: (!wasm.is_empty()).then(|| WASM_FILE.to_owned()),
+                wasm_bytes: (!wasm.is_empty()).then_some(wasm.len() as u64),
+                wgsl: final_path,
+                wgsl_bytes: wgsl.len() as u64,
+                canonical_adapters: Vec::new(),
+            },
+            layout,
+            resources,
+            passes,
+            surface,
+            control,
+            provenance: options.provenance,
+            canonical_interface: None,
+            canonical_status: WebCanonicalStatus {
+                policy: WebCanonicalPolicy::Disabled,
+                embedded: false,
+                omission_reason: Some(
+                    "GPU resource pass graph has no CPU fallback or canonical Wasm message lane"
+                        .to_owned(),
+                ),
+            },
+            browser_runtime: generated_browser_runtime(false),
+        };
+        Ok(Self {
+            wasm,
+            wgsl,
+            pass_wgsl,
+            manifest,
+            interface_js: None,
+            interface_d_ts: None,
+        })
+    }
+
     /// Compile Wasm and browser-profile WGSL from the same resolved module.
     /// Canonical message lanes may be different public entries from the GPU
     /// kernel. Wasm receives the ordered selected root set while WebGPU retains
@@ -1097,6 +1987,15 @@ impl WebBundle {
         top_mod: TopLevelMod<'_>,
         options: WebBuildOptions,
     ) -> Result<Self, WebBundleError> {
+        if let Some(program) = actor_gpu_program(db, top_mod)?
+            && (!program.resources.is_empty()
+                || program
+                    .stages
+                    .iter()
+                    .any(|stage| matches!(stage.kind, WebActorStageKind::Compute { .. })))
+        {
+            return Self::compile_actor_graph(db, top_mod, options, program);
+        }
         // Structurally recognized like `view()`: an `UpdateSurface`-marked
         // behavior joins the wasm root set automatically (no caller opt-in),
         // so a demo with none stays byte-identical. It is a PLAIN multi-scalar
@@ -1204,7 +2103,7 @@ impl WebBundle {
             .map_err(|error| WebBundleError::WasmValidation(error.to_string()))?;
         let control = control_export
             .as_deref()
-            .map(|export| project_control(db, top_mod, &options.source_entry, export, &wasm))
+            .map(|export| project_control(db, top_mod, &options.source_entry, export, &wasm, &[]))
             .transpose()?;
         let canonical_interface =
             verify_canonical_candidate(&wasm, canonical_candidate, &mut canonical_status)?;
@@ -1219,7 +2118,10 @@ impl WebBundle {
         // not apply there.
         if canonical_interface.is_none() {
             let function_exports = wasm_function_export_names(&wasm);
-            if !function_exports.iter().any(|name| name == &options.source_entry) {
+            if !function_exports
+                .iter()
+                .any(|name| name == &options.source_entry)
+            {
                 return Err(WebBundleError::EntryExportMismatch {
                     source_entry: options.source_entry.clone(),
                     exports: function_exports,
@@ -1238,26 +2140,41 @@ impl WebBundle {
             WebBundleMode::Grid => {
                 compile_runtime_package_spirv_grid(db, &gpu_package, options.workgroup_size)
             }
+            WebBundleMode::Compute => {
+                return Err(WebBundleError::EntryDerivation(
+                    "standalone compute bundles require an attributed GPU actor pass graph"
+                        .to_owned(),
+                ));
+            }
         }
         .map_err(|error| WebBundleError::Lower(error.to_string()))?;
         let wgsl = normalize_generated_text(&artifact.wgsl.ok_or(WebBundleError::MissingWgsl)?);
         validate_browser_wgsl(&wgsl)?;
         let mut layout = WebLayout::from_spirv(&artifact.layout)?;
-        project_actor_field_metadata(db, top_mod, &options.source_entry, &mut layout);
-        let surface = project_surface(db, top_mod, &options.source_entry, &layout)?;
+        project_actor_field_metadata(db, top_mod, &options.source_entry, &mut layout, &[]);
+        let surface = project_surface(db, top_mod, &options.source_entry, &layout, &[])?;
+        let passes = vec![WebPass {
+            source_entry: options.source_entry.clone(),
+            shader: WGSL_FILE.to_owned(),
+            shader_bytes: wgsl.len() as u64,
+            dispatch: None,
+            layout: layout.clone(),
+        }];
 
         let manifest = WebBundleManifest {
             protocol: WEB_BUNDLE_PROTOCOL.to_string(),
             protocol_version: WEB_BUNDLE_PROTOCOL_VERSION,
             source_entry: options.source_entry,
             artifacts: WebArtifactManifest {
-                wasm: WASM_FILE.to_string(),
-                wasm_bytes: wasm.len() as u64,
+                wasm: Some(WASM_FILE.to_string()),
+                wasm_bytes: Some(wasm.len() as u64),
                 wgsl: WGSL_FILE.to_string(),
                 wgsl_bytes: wgsl.len() as u64,
                 canonical_adapters,
             },
             layout,
+            resources: Vec::new(),
+            passes,
             surface,
             control,
             provenance: options.provenance,
@@ -1268,6 +2185,7 @@ impl WebBundle {
         Ok(Self {
             wasm,
             wgsl,
+            pass_wgsl: Vec::new(),
             manifest,
             interface_js,
             interface_d_ts,
@@ -1308,11 +2226,25 @@ impl WebBundle {
             Ok(())
         };
 
-        if self.wasm.len() as u64 != self.manifest.artifacts.wasm_bytes {
-            return Err(WebBundleError::Materialization(format!(
-                "artifact `{}` does not match its manifest byte length",
-                self.manifest.artifacts.wasm
-            )));
+        match (
+            self.manifest.artifacts.wasm.as_deref(),
+            self.manifest.artifacts.wasm_bytes,
+        ) {
+            (Some(path), Some(bytes)) if self.wasm.len() as u64 == bytes => {
+                push(path, Arc::from(self.wasm.as_slice()))?;
+            }
+            (None, None) if self.wasm.is_empty() => {}
+            (Some(path), Some(_)) => {
+                return Err(WebBundleError::Materialization(format!(
+                    "artifact `{path}` does not match its manifest byte length"
+                )));
+            }
+            _ => {
+                return Err(WebBundleError::Materialization(
+                    "Wasm artifact path and byte length must either both be present or both be absent"
+                        .to_owned(),
+                ));
+            }
         }
         if self.wgsl.len() as u64 != self.manifest.artifacts.wgsl_bytes {
             return Err(WebBundleError::Materialization(format!(
@@ -1320,14 +2252,42 @@ impl WebBundle {
                 self.manifest.artifacts.wgsl
             )));
         }
-        push(
-            &self.manifest.artifacts.wasm,
-            Arc::from(self.wasm.as_slice()),
-        )?;
-        push(
-            &self.manifest.artifacts.wgsl,
-            Arc::from(self.wgsl.as_bytes()),
-        )?;
+        if self.pass_wgsl.is_empty() {
+            push(
+                &self.manifest.artifacts.wgsl,
+                Arc::from(self.wgsl.as_bytes()),
+            )?;
+        } else {
+            if self
+                .pass_wgsl
+                .iter()
+                .find(|shader| shader.path == self.manifest.artifacts.wgsl)
+                .is_none_or(|shader| shader.source != self.wgsl)
+            {
+                return Err(WebBundleError::Materialization(
+                    "primary WGSL artifact does not identify the final pass shader".to_owned(),
+                ));
+            }
+            for pass in &self.manifest.passes {
+                let shader = self
+                    .pass_wgsl
+                    .iter()
+                    .find(|shader| shader.path == pass.shader)
+                    .ok_or_else(|| {
+                        WebBundleError::Materialization(format!(
+                            "manifest pass `{}` has no shader content",
+                            pass.source_entry
+                        ))
+                    })?;
+                if shader.source.len() as u64 != pass.shader_bytes {
+                    return Err(WebBundleError::Materialization(format!(
+                        "pass shader `{}` does not match its manifest byte length",
+                        pass.shader
+                    )));
+                }
+                push(&shader.path, Arc::from(shader.source.as_bytes()))?;
+            }
+        }
         for artifact in &self.manifest.artifacts.canonical_adapters {
             let bytes: Arc<[u8]> = match artifact.path.as_str() {
                 INTERFACE_JS_FILE => self
@@ -1714,6 +2674,7 @@ impl WebLayout {
         let mode = match layout.mode {
             LayoutMode::Render => WebBundleMode::Render,
             LayoutMode::Grid => WebBundleMode::Grid,
+            LayoutMode::Compute => WebBundleMode::Compute,
             other => return Err(WebBundleError::UnexpectedLayout(format!("{other:?}"))),
         };
         let word = match layout.word {
@@ -1740,6 +2701,7 @@ impl WebLayout {
                     role: match binding.role {
                         Role::Input => WebBindingRole::Input,
                         Role::Output => WebBindingRole::Output,
+                        Role::Resource => WebBindingRole::Resource,
                     },
                     stride: binding.stride,
                     span: binding.span,
@@ -2000,6 +2962,7 @@ pub fn shade(x: u32, y: u32) -> u32 {
             WebBundleMode::Grid => {
                 WebBuildOptions::grid("shade", [8, 4, 1], Some("web_bundle.fe".to_string()))
             }
+            WebBundleMode::Compute => panic!("test helper does not build standalone compute"),
         };
         WebBundle::compile(&db, db.top_mod(file), options).unwrap()
     }
@@ -2536,17 +3499,17 @@ pub fn shade(x: u32, y: u32) -> u32 {
     #[test]
     fn materialization_rejects_manifest_content_drift() {
         let mut bundle = compile(WebBundleMode::Render);
-        bundle.manifest.artifacts.wasm = "../module.wasm".to_owned();
+        bundle.manifest.artifacts.wasm = Some("../module.wasm".to_owned());
         let error = bundle.materialized_files().unwrap_err().to_string();
         assert!(error.contains("safe bundle-relative path"), "{error}");
 
         let mut bundle = compile(WebBundleMode::Render);
-        bundle.manifest.artifacts.wgsl = bundle.manifest.artifacts.wasm.clone();
+        bundle.manifest.artifacts.wgsl = bundle.manifest.artifacts.wasm.clone().unwrap();
         let error = bundle.materialized_files().unwrap_err().to_string();
         assert!(error.contains("duplicate artifact path"), "{error}");
 
         let mut bundle = compile(WebBundleMode::Render);
-        bundle.manifest.artifacts.wasm_bytes += 1;
+        *bundle.manifest.artifacts.wasm_bytes.as_mut().unwrap() += 1;
         let error = bundle.materialized_files().unwrap_err().to_string();
         assert!(error.contains("manifest byte length"), "{error}");
 

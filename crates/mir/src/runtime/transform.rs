@@ -158,9 +158,10 @@ fn rewrite_alias_inputs(
 ) -> Option<()> {
     let resolve = |value: &mut RLocalId| *value = resolve_alias(*value, aliases);
     match expr {
-        RExpr::Use(value) | RExpr::Unary { value, .. } | RExpr::Cast { value, .. } => {
-            resolve(value)
-        }
+        RExpr::Use(value)
+        | RExpr::Unary { value, .. }
+        | RExpr::Cast { value, .. }
+        | RExpr::Bitcast { value, .. } => resolve(value),
         RExpr::Binary { lhs, rhs, .. } => {
             resolve(lhs);
             resolve(rhs);
@@ -208,6 +209,7 @@ fn is_pure_inline_expr(expr: &RExpr<'_>) -> bool {
             | RExpr::Unary { .. }
             | RExpr::Binary { .. }
             | RExpr::Cast { .. }
+            | RExpr::Bitcast { .. }
             | RExpr::Builtin(
                 RuntimeBuiltin::IntrinsicArith { .. }
                     | RuntimeBuiltin::F32FromI32 { .. }
@@ -227,7 +229,10 @@ fn is_pure_inline_expr(expr: &RExpr<'_>) -> bool {
 
 fn add_expr_inputs(expr: &RExpr<'_>, live: &mut FxHashSet<RLocalId>) -> Option<()> {
     match expr {
-        RExpr::Use(value) | RExpr::Unary { value, .. } | RExpr::Cast { value, .. } => {
+        RExpr::Use(value)
+        | RExpr::Unary { value, .. }
+        | RExpr::Cast { value, .. }
+        | RExpr::Bitcast { value, .. } => {
             live.insert(*value);
         }
         RExpr::Binary { lhs, rhs, .. } => {

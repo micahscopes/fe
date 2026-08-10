@@ -217,7 +217,16 @@ pub(crate) fn runtime_exit_behavior<'db>(
 ) -> RuntimeExitBehavior {
     match key.source(db) {
         RuntimeInstanceSource::Semantic(semantic) => {
-            if semantic.known_never_returns(db) {
+            let attributed_gpu_intrinsic = match semantic.key(db).owner(db) {
+                hir::analysis::ty::ty_check::BodyOwner::Func(func) => func
+                    .scope()
+                    .attrs(db)
+                    .is_some_and(|attrs| attrs.gpu_intrinsic(db).is_some()),
+                _ => false,
+            };
+            if attributed_gpu_intrinsic {
+                RuntimeExitBehavior::MayReturn
+            } else if semantic.known_never_returns(db) {
                 RuntimeExitBehavior::NeverReturns
             } else {
                 RuntimeExitBehavior::MayReturn

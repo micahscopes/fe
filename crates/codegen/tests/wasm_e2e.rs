@@ -393,8 +393,16 @@ pub fn clamp(x: f32, lo: f32, hi: f32) -> f32 { __clamp_f32(x, lo, hi) }
         assert_eq!(abs.call(&mut store, x).unwrap(), x.abs(), "abs({x})");
     }
     for (a, b) in [(1.0f32, 2.0), (2.0, 1.0), (-5.0, 5.0), (3.0, 3.0)] {
-        assert_eq!(min.call(&mut store, (a, b)).unwrap(), a.min(b), "min({a}, {b})");
-        assert_eq!(max.call(&mut store, (a, b)).unwrap(), a.max(b), "max({a}, {b})");
+        assert_eq!(
+            min.call(&mut store, (a, b)).unwrap(),
+            a.min(b),
+            "min({a}, {b})"
+        );
+        assert_eq!(
+            max.call(&mut store, (a, b)).unwrap(),
+            a.max(b),
+            "max({a}, {b})"
+        );
     }
     for (x, lo, hi, expected) in [
         (5.0f32, 0.0, 1.0, 1.0),
@@ -1171,6 +1179,42 @@ fn recursive_mvt2_construct_copy_project_return_executes_on_wasm() {
             .expect("MvT<2> probe call"),
         (11, 22, 33, 44),
         "DFS construction/projection/copy/rebuild must preserve all four leaves",
+    );
+}
+
+#[test]
+fn scalar_i32_to_f32_bitcasts_preserve_runtime_and_constant_bits_on_wasm() {
+    let source = r#"
+extern {
+    const fn __bitcast<From, To>(_: From) -> To
+}
+pub fn bits_to_f32(_ bits: u32) -> f32 { __bitcast(bits) }
+pub fn constant_bits_to_f32() -> f32 {
+    let bits: u32 = 1065353216
+    __bitcast(bits)
+}
+"#;
+    let wasm = compile_to_wasm("scalar_i32_f32_bitcasts.fe", source);
+    let (mut store, instance) = instantiate(&wasm);
+    let bits_to_f32 = instance
+        .get_typed_func::<i32, f32>(&mut store, "bits_to_f32")
+        .expect("u32 -> f32 bitcast export");
+    let constant = instance
+        .get_typed_func::<(), f32>(&mut store, "constant_bits_to_f32")
+        .expect("constant u32 -> f32 bitcast export");
+
+    for bits in [0u32, 1, 0x3f80_0000, 0x8000_0000, 0x7f80_0000] {
+        let value = bits_to_f32
+            .call(&mut store, bits as i32)
+            .expect("runtime u32 -> f32 bitcast");
+        assert_eq!(value.to_bits(), bits);
+    }
+    assert_eq!(
+        constant
+            .call(&mut store, ())
+            .expect("constant u32 -> f32 bitcast")
+            .to_bits(),
+        0x3f80_0000,
     );
 }
 
@@ -4628,7 +4672,8 @@ pub fn probe256(k: u32) -> u256 {
 "#;
     let error = compile_to_wasm_err("wasm_local_u256_array.fe", source);
     assert!(
-        error.contains("wasm target") && (error.contains("scalar") || error.contains("not lowered")),
+        error.contains("wasm target")
+            && (error.contains("scalar") || error.contains("not lowered")),
         "u256-element array should fail closed with a named error; got: {error}"
     );
 }
@@ -4769,13 +4814,17 @@ pub fn probe(seed: u32) -> u32 {
         .touch(&mut db, url.clone(), Some(source.to_string()));
     let file = db.workspace().get(&db, &url).expect("file should load");
     let top_mod = db.top_mod(file);
-    let result =
-        BackendKind::Wasm
-            .create()
-            .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0);
+    let result = BackendKind::Wasm.create().compile(
+        &db,
+        top_mod,
+        layout_for(BackendKind::Wasm),
+        OptLevel::O0,
+    );
     match result {
         Ok(output) => {
-            let bytes = output.into_bytecode().expect("wasm output should be bytecode");
+            let bytes = output
+                .into_bytecode()
+                .expect("wasm output should be bytecode");
             wasmparser::validate(&bytes).expect("produced invalid wasm");
             let (mut store, instance) = instantiate(&bytes);
             let probe = instance
@@ -5007,8 +5056,7 @@ fn loop_form_bn254_fr_field_mul_matches_unrolled_kernel_on_wasm_at_o0_and_o2() {
     // speed pipeline: inlining, GVN, load/store forwarding over the array memory).
     for opt in [OptLevel::O0, OptLevel::O2] {
         let loop_wasm = slice_b_compile_at("field_mul_bn254_fr_loop.fe", SLICE_B_LOOP_SRC, opt);
-        let unrolled_wasm =
-            slice_b_compile_at("field_mul_bn254_fr.fe", SLICE_B_UNROLLED_SRC, opt);
+        let unrolled_wasm = slice_b_compile_at("field_mul_bn254_fr.fe", SLICE_B_UNROLLED_SRC, opt);
 
         // The loop kernel's limb arrays live in the synthesized canonical arena,
         // so the module must stay self-contained (no host imports to instantiate).
@@ -5085,8 +5133,7 @@ fn loop_form_bn254_fr_field_mul_matches_unrolled_kernel_on_wasm_at_o0_and_o2() {
 // ============================================================================
 
 const SLICE_C_POSEIDON_SRC: &str = include_str!("fixtures/spirv/poseidon_bn254_loop.fe");
-const CONST_POSEIDON_SRC: &str =
-    include_str!("../../fe/tests/fixtures/fe_test/const_poseidon.fe");
+const CONST_POSEIDON_SRC: &str = include_str!("../../fe/tests/fixtures/fe_test/const_poseidon.fe");
 
 /// Extract the `0x..` field-element literals of a named `const` array block out of
 /// `const_poseidon.fe` (bracket-matched from the block's opening `[`), so the
@@ -5247,7 +5294,11 @@ fn slice_c_poseidon_dual_gate_body() {
         ("hash2(3,4)".into(), 3u32.into(), 4u32.into()),
         ("hash2(7,7)".into(), 7u32.into(), 7u32.into()),
         ("hash2(p-1,p-2)".into(), &p - &one, &p - &two),
-        ("hash2(12345,678910)".into(), 12345u32.into(), 678910u32.into()),
+        (
+            "hash2(12345,678910)".into(),
+            12345u32.into(),
+            678910u32.into(),
+        ),
     ];
 
     for opt in [OptLevel::O0, OptLevel::O2] {
@@ -5306,8 +5357,14 @@ fn slice_c_poseidon_dual_gate_body() {
             &slice_b_to_limbs(&2u32.into(), n),
             n,
         ));
-        assert_eq!(h00, pin_00, "[{opt:?}] loop-form hash2(0,0) must equal the circomlib vector");
-        assert_eq!(h12, pin_12, "[{opt:?}] loop-form hash2(1,2) must equal the circomlib vector");
+        assert_eq!(
+            h00, pin_00,
+            "[{opt:?}] loop-form hash2(0,0) must equal the circomlib vector"
+        );
+        assert_eq!(
+            h12, pin_12,
+            "[{opt:?}] loop-form hash2(1,2) must equal the circomlib vector"
+        );
 
         eprintln!(
             "  Slice C Poseidon dual gate [{opt:?}]: rolled loop-form limb Poseidon hash2 == \
@@ -5438,7 +5495,9 @@ fn slice_d_merkle_gate_body() {
     // Deterministic pseudo-random leaf sets + edge sets, per depth.
     let mut seed: u64 = 0xD1B5_4A32_D192_ED03;
     let mut make_random_set = |count: usize| -> Vec<BigUint> {
-        (0..count).map(|_| slice_b_next_field(&mut seed, &p)).collect()
+        (0..count)
+            .map(|_| slice_b_next_field(&mut seed, &p))
+            .collect()
     };
 
     // depth 2 (N=4): edge set (0, 1, p-1, p-2), ascending, + 2 random sets.
@@ -5502,8 +5561,7 @@ fn slice_d_merkle_gate_body() {
 
         let (mut store, instance) = instantiate(&wasm);
         for (name, leaves) in src_sets.iter() {
-            let leaf_limbs: Vec<Vec<u32>> =
-                leaves.iter().map(|x| slice_b_to_limbs(x, n)).collect();
+            let leaf_limbs: Vec<Vec<u32>> = leaves.iter().map(|x| slice_b_to_limbs(x, n)).collect();
             let got_limbs =
                 slice_d_merkle_root_limbs(&mut store, &instance, export, &leaf_limbs, n);
             let got = slice_c_limbs_to_biguint(&got_limbs);
@@ -5521,4 +5579,3 @@ fn slice_d_merkle_gate_body() {
         );
     }
 }
-

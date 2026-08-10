@@ -100,7 +100,8 @@ fn main() {
     // --- 3. HARD GATE 2: wasmtime-executed update_desargues == the independent
     // Rust oracle, directed cases + a deterministic random walk. -------------
     let engine = wasmtime::Engine::default();
-    let module = wasmtime::Module::new(&engine, &ctl_wasm).expect("wasmtime should load the module");
+    let module =
+        wasmtime::Module::new(&engine, &ctl_wasm).expect("wasmtime should load the module");
     let mut store = wasmtime::Store::new(&engine, ());
     let instance =
         wasmtime::Instance::new(&mut store, &module, &[]).expect("wasmtime should instantiate");
@@ -109,15 +110,15 @@ fn main() {
         .expect("update_desargues should be (f32,f32,f32,i32,i32,i32) -> (f32,f32,f32)");
 
     let directed: [(f32, f32, f32, i32, i32, i32); 9] = [
-        (0.62, 0.0, 2.4, 0, 0, 0),   // no-op identity
-        (0.4, 0.0, 2.4, 200, 0, 0),  // sweep advances
-        (1.5, 0.0, 2.4, 200, 0, 0),  // sweep clamps at 1.6
+        (0.62, 0.0, 2.4, 0, 0, 0),    // no-op identity
+        (0.4, 0.0, 2.4, 200, 0, 0),   // sweep advances
+        (1.5, 0.0, 2.4, 200, 0, 0),   // sweep clamps at 1.6
         (0.35, 0.0, 2.4, -300, 0, 0), // sweep clamps at 0.3
-        (0.62, 0.5, 2.4, 0, 100, 0), // spin turns
-        (0.62, 0.5, 2.4, 0, 0, -1),  // zoom in one notch
-        (0.62, 0.5, 2.4, 0, 0, 1),   // zoom out one notch
-        (0.62, 0.5, 0.85, 0, 0, -1), // zoom-in clamps at ZOOM_MIN
-        (0.62, 0.5, 4.9, 0, 0, 1),   // zoom-out clamps at ZOOM_MAX
+        (0.62, 0.5, 2.4, 0, 100, 0),  // spin turns
+        (0.62, 0.5, 2.4, 0, 0, -1),   // zoom in one notch
+        (0.62, 0.5, 2.4, 0, 0, 1),    // zoom out one notch
+        (0.62, 0.5, 0.85, 0, 0, -1),  // zoom-in clamps at ZOOM_MIN
+        (0.62, 0.5, 4.9, 0, 0, 1),    // zoom-out clamps at ZOOM_MAX
     ];
     let mut steps = 0usize;
     for (sweep, spin, zoom, dx, dy, dzoom) in directed {

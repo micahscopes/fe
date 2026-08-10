@@ -36,13 +36,19 @@
 use std::collections::{HashMap, HashSet};
 
 use compiler_db::DriverDataBase;
-use hir::analysis::ty::ty_def::{PrimTy, TyBase, TyData};
-use hir::hir_def::{ArithBinOp, BinOp, CompBinOp, UnOp};
 use hir::projection::IndexSource;
+use hir::{
+    analysis::ty::{
+        adt_def::AdtRef,
+        const_ty::{ConstTyData, EvaluatedConstTy},
+        ty_def::{PrimTy, TyBase, TyData, TyId},
+    },
+    hir_def::{ArithBinOp, BinOp, CompBinOp, GpuIntrinsic, GpuResource, UnOp},
+};
 use mir::{
     AddressSpaceKind, ConstNode, ConstScalar, IntrinsicArithBinOp, Layout, LayoutId, PlaceElem,
-    PlaceRoot, RBlockId, RExpr, RLocal, RLocalId, RStmt, RTerminator, RefKind, RefView, RuntimeBody,
-    RuntimeBuiltin, RuntimeCarrier, RuntimeClass, RuntimeFunction, RuntimeInlineHint,
+    PlaceRoot, RBlockId, RExpr, RLocal, RLocalId, RStmt, RTerminator, RefKind, RefView,
+    RuntimeBody, RuntimeBuiltin, RuntimeCarrier, RuntimeClass, RuntimeFunction, RuntimeInlineHint,
     RuntimeInstance, RuntimeLinkage, RuntimeLocalRoot, RuntimePackage, RuntimePlace, ScalarClass,
     ScalarRepr,
 };
@@ -56,10 +62,10 @@ use sonatina_ir::{
             Add, Fabs, Fadd, Fceil, Fclamp, Fdiv, Ffloor, Fmax, FmaxRelaxed, Fmin, FminRelaxed,
             Fmul, Fneg, Fround, Fsqrt, Fsub, Ftrunc, Mul, Sar, Shl, Shr, Sub,
         },
-        cast::{F32ToI32, I32ToF32, Sext, Trunc, Zext},
+        cast::{Bitcast, F32ToI32, I32ToF32, Sext, Trunc, Zext},
         cmp::{Eq as CmpEq, Feq, Fle, Flt, Lt, Slt},
         control_flow::{Br, Call, Jump, Phi, Return, Unreachable},
-        data::{MemAllocDynamic, Mload, Mstore},
+        data::{MemAllocDynamic, Mload, Mstore, ObjIndex, ObjLoad, ObjProj, ObjStore},
         logic::{And, Or, Xor},
         native::inst_set::NativeInstSet,
     },
@@ -87,6 +93,39 @@ pub(crate) fn create_wasm32_isa() -> Wasm32 {
         Vendor::Unknown,
         OperatingSystem::Native,
     ))
+}
+
+fn gpu_intrinsic(db: &DriverDataBase, instance: RuntimeInstance<'_>) -> Option<GpuIntrinsic> {
+    let semantic = instance.key(db).semantic(db)?;
+    let hir::analysis::ty::ty_check::BodyOwner::Func(func) = semantic.key(db).owner(db) else {
+        return None;
+    };
+    func.scope().attrs(db)?.gpu_intrinsic(db)
+}
+
+fn semantic_gpu_resource(db: &DriverDataBase, ty: TyId<'_>) -> bool {
+    let ty = ty.as_view(db).unwrap_or(ty);
+    let Some(adt) = ty.adt_def(db) else {
+        return false;
+    };
+    let AdtRef::Struct(struct_) = adt.adt_ref(db) else {
+        return false;
+    };
+    struct_
+        .scope()
+        .attrs(db)
+        .is_some_and(|attrs| attrs.gpu_resource(db) == Some(GpuResource::Storage))
+}
+
+fn semantic_const_u32(db: &DriverDataBase, ty: TyId<'_>) -> Option<u32> {
+    let TyData::ConstTy(value) = ty.data(db) else {
+        return None;
+    };
+    let evaluated = value.evaluate(db, None);
+    let ConstTyData::Evaluated(EvaluatedConstTy::LitInt(value), _) = evaluated.data(db) else {
+        return None;
+    };
+    u32::try_from(value.data(db).clone()).ok()
 }
 
 /// Lower a MIR runtime package to a Sonatina IR `Module` built under the Wasm32
@@ -791,6 +830,7 @@ fn inline_value_call<'db>(
                         | RExpr::Unary { .. }
                         | RExpr::Binary { .. }
                         | RExpr::Cast { .. }
+                        | RExpr::Bitcast { .. }
                         | RExpr::Builtin(
                             RuntimeBuiltin::IntrinsicArith { .. }
                                 | RuntimeBuiltin::F32FromI32 { .. }
@@ -901,6 +941,10 @@ fn remap_inline_expr<'db>(
             rhs: map(*rhs)?,
         },
         RExpr::Cast { value, to } => RExpr::Cast {
+            value: map(*value)?,
+            to: to.clone(),
+        },
+        RExpr::Bitcast { value, to } => RExpr::Bitcast {
             value: map(*value)?,
             to: to.clone(),
         },
@@ -1047,6 +1091,7 @@ fn expr_mentions_aggregate_candidate(expr: &RExpr<'_>, candidate: RLocalId) -> b
         RExpr::Use(value)
         | RExpr::Unary { value, .. }
         | RExpr::Cast { value, .. }
+        | RExpr::Bitcast { value, .. }
         | RExpr::MaterializeToObject { src: value }
         | RExpr::ProviderFromRaw { raw: value, .. }
         | RExpr::WordToRawAddr { value, .. }
@@ -1388,6 +1433,13 @@ fn narrow_usize_scalars<'db>(db: &'db DriverDataBase, body: &mut RuntimeBody<'db
                         ok = false;
                     }
                 }
+                RExpr::Bitcast { value: _, to } if dst_narrowed => {
+                    if is_u256_unsigned(to.repr) {
+                        to.repr = USIZE_WASM_REPR;
+                    } else {
+                        ok = false;
+                    }
+                }
                 RExpr::Builtin(RuntimeBuiltin::IntrinsicArith { class, .. }) if dst_narrowed => {
                     if is_u256_unsigned(class.repr) {
                         class.repr = USIZE_WASM_REPR;
@@ -1505,6 +1557,9 @@ fn collect_expr_uses(expr: &RExpr<'_>, used: &mut FxHashMap<RLocalId, ()>) {
             used.insert(*rhs, ());
         }
         RExpr::Cast { value, to: _ } => {
+            used.insert(*value, ());
+        }
+        RExpr::Bitcast { value, to: _ } => {
             used.insert(*value, ());
         }
         RExpr::ConstRef {
@@ -1962,10 +2017,15 @@ fn collect_builtin_uses(builtin: &RuntimeBuiltin<'_>, used: &mut FxHashMap<RLoca
 /// (object-ref array element accesses use `Ref`-rooted places, never `Ptr`).
 fn check_host_region_arena_disjoint(body: &RuntimeBody<'_>) -> Result<(), LowerError> {
     let allocates_array = body.blocks.iter().any(|block| {
-        block
-            .stmts
-            .iter()
-            .any(|stmt| matches!(stmt, RStmt::Assign { expr: RExpr::AllocObject { .. }, .. }))
+        block.stmts.iter().any(|stmt| {
+            matches!(
+                stmt,
+                RStmt::Assign {
+                    expr: RExpr::AllocObject { .. },
+                    ..
+                }
+            )
+        })
     });
     if !allocates_array {
         return Ok(());
@@ -2076,9 +2136,9 @@ fn drop_dead_pure_aggregate_values<'db>(db: &'db DriverDataBase, body: &mut Runt
         }
         let dead_set: FxHashMap<RLocalId, ()> = dead.iter().map(|id| (*id, ())).collect();
         for block in &mut body.blocks {
-            block.stmts.retain(|stmt| {
-                !matches!(stmt, RStmt::Assign { dst, .. } if dead_set.contains_key(dst))
-            });
+            block.stmts.retain(
+                |stmt| !matches!(stmt, RStmt::Assign { dst, .. } if dead_set.contains_key(dst)),
+            );
         }
         for id in dead {
             body.locals[id.as_u32() as usize].carrier = RuntimeCarrier::Erased;
@@ -2097,7 +2157,24 @@ where
     prepared_bodies: FxHashMap<RuntimeInstance<'db>, RuntimeBody<'db>>,
     func_symbols: FxHashMap<RuntimeInstance<'db>, String>,
     func_map: FxHashMap<RuntimeInstance<'db>, FuncRef>,
+    resource_element_cache: FxHashMap<TyId<'db>, GpuResourceElementType>,
+    resource_type_cache: FxHashMap<TyId<'db>, Type>,
     canonical_lane_names: HashSet<String>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum GpuResourceElementType {
+    U32,
+    Record { ty: Type, fields: usize },
+}
+
+impl GpuResourceElementType {
+    fn ty(self) -> Type {
+        match self {
+            Self::U32 => Type::I32,
+            Self::Record { ty, .. } => ty,
+        }
+    }
 }
 
 impl<'db, 'a, I> PortableModuleLowerer<'db, 'a, I>
@@ -2125,6 +2202,8 @@ where
             prepared_bodies,
             func_symbols: assign_sonatina_function_symbols(db, package),
             func_map: FxHashMap::default(),
+            resource_element_cache: FxHashMap::default(),
+            resource_type_cache: FxHashMap::default(),
             canonical_lane_names,
         }
     }
@@ -2193,6 +2272,99 @@ where
             .unwrap_or_else(|| format!("{:?}", instance.key(self.db)))
     }
 
+    fn gpu_resource_element_type(
+        &mut self,
+        resource_ty: TyId<'db>,
+    ) -> Result<GpuResourceElementType, LowerError> {
+        let resource_ty = resource_ty.as_view(self.db).unwrap_or(resource_ty);
+        let [element_ty, _, ..] = resource_ty.generic_args(self.db) else {
+            return Err(LowerError::Unsupported(
+                "GPU storage resource type requires element and length arguments".to_owned(),
+            ));
+        };
+        let element_ty = element_ty.as_view(self.db).unwrap_or(*element_ty);
+        if let Some(element) = self.resource_element_cache.get(&element_ty).copied() {
+            return Ok(element);
+        }
+        let element = if matches!(
+            element_ty.base_ty(self.db).data(self.db),
+            TyData::TyBase(TyBase::Prim(PrimTy::U32))
+        ) {
+            GpuResourceElementType::U32
+        } else {
+            let adt = element_ty.adt_def(self.db).ok_or_else(|| {
+                LowerError::Unsupported(
+                    "GPU storage elements must be u32 or POD records of u32 fields".to_owned(),
+                )
+            })?;
+            let AdtRef::Struct(struct_) = adt.adt_ref(self.db) else {
+                return Err(LowerError::Unsupported(
+                    "GPU storage elements must be u32 or POD records of u32 fields".to_owned(),
+                ));
+            };
+            let fields = element_ty.field_types(self.db);
+            if fields.is_empty()
+                || fields.iter().any(|field| {
+                    !matches!(
+                        field.base_ty(self.db).data(self.db),
+                        TyData::TyBase(TyBase::Prim(PrimTy::U32))
+                    )
+                })
+            {
+                return Err(LowerError::Unsupported(
+                    "GPU storage POD records must contain one or more u32 fields".to_owned(),
+                ));
+            }
+            let name = struct_
+                .name(self.db)
+                .to_opt()
+                .map(|name| name.data(self.db).to_string())
+                .unwrap_or_else(|| {
+                    format!("gpu_resource_record_{}", self.resource_element_cache.len())
+                });
+            let field_tys = vec![Type::I32; fields.len()];
+            let ty = self.builder.declare_struct_type(&name, &field_tys, false);
+            GpuResourceElementType::Record {
+                ty,
+                fields: fields.len(),
+            }
+        };
+        self.resource_element_cache.insert(element_ty, element);
+        Ok(element)
+    }
+
+    fn gpu_resource_type(&mut self, resource_ty: TyId<'db>) -> Result<Type, LowerError> {
+        let resource_ty = resource_ty.as_view(self.db).unwrap_or(resource_ty);
+        if let Some(ty) = self.resource_type_cache.get(&resource_ty).copied() {
+            return Ok(ty);
+        }
+        if !semantic_gpu_resource(self.db, resource_ty) {
+            return Err(LowerError::Internal(
+                "non-resource semantic type reached GPU resource lowering".to_owned(),
+            ));
+        }
+        let [_, length_ty, ..] = resource_ty.generic_args(self.db) else {
+            return Err(LowerError::Unsupported(
+                "GPU storage resource type requires element and length arguments".to_owned(),
+            ));
+        };
+        let length = semantic_const_u32(self.db, *length_ty)
+            .and_then(|length| usize::try_from(length).ok())
+            .filter(|length| *length != 0)
+            .ok_or_else(|| {
+                LowerError::Unsupported(
+                    "GPU storage resource length must be a concrete nonzero u32-sized integer"
+                        .to_owned(),
+                )
+            })?;
+        let element_ty = self.gpu_resource_element_type(resource_ty)?.ty();
+        let array_ty = self.builder.declare_array_type(element_ty, length);
+        let resource_ref_ty = self.builder.objref_type(array_ty);
+        self.resource_type_cache
+            .insert(resource_ty, resource_ref_ty);
+        Ok(resource_ref_ty)
+    }
+
     fn declare_functions(&mut self) -> Result<(), LowerError> {
         // DECLARED-EXTERNAL host imports dedup to ONE import per `(module, op-name)`
         // identity: the same `extern` reached through two effect-provider scopes
@@ -2203,6 +2375,9 @@ where
         let mut import_refs: FxHashMap<(String, String), FuncRef> = FxHashMap::default();
         for function in self.functions_in_declaration_order() {
             let instance = function.instance(self.db);
+            if gpu_intrinsic(self.db, instance).is_some() {
+                continue;
+            }
             if let Some(name) = mir::host_import_name(self.db, instance) {
                 if let Some(descriptor) = mir::indirect_host_result(self.db, instance) {
                     let mut missing = Vec::new();
@@ -2267,7 +2442,15 @@ where
         // scalar-tuple RETURN becomes a wasm multi-value result the host reads.
         let mut args = Vec::with_capacity(body.signature.params.len());
         for param in &body.signature.params {
-            if let Some(elem_tys) = self.scalar_tuple_element_tys(&param.class) {
+            let semantic_ty = body
+                .local(param.local)
+                .map(|local| local.semantic_ty)
+                .ok_or_else(|| {
+                    LowerError::Internal("runtime parameter local is missing".to_owned())
+                })?;
+            if semantic_gpu_resource(self.db, semantic_ty) {
+                args.push(self.gpu_resource_type(semantic_ty)?);
+            } else if let Some(elem_tys) = self.scalar_tuple_element_tys(&param.class) {
                 args.extend(elem_tys);
             } else {
                 args.push(self.ty_for_class(&param.class)?);
@@ -2298,6 +2481,9 @@ where
     fn lower_bodies(&mut self) -> Result<(), LowerError> {
         for function in self.package.functions(self.db) {
             let instance = function.instance(self.db);
+            if gpu_intrinsic(self.db, instance).is_some() {
+                continue;
+            }
             let body = self
                 .prepared_bodies
                 .get(&instance)
@@ -3221,6 +3407,11 @@ where
         for (idx, local) in body.locals.iter().enumerate() {
             if let RuntimeCarrier::Value(class) = &local.carrier {
                 let local_id = RLocalId::from_u32(idx as u32);
+                if semantic_gpu_resource(module.db, local.semantic_ty) {
+                    let ty = module.gpu_resource_type(local.semantic_ty)?;
+                    vars.insert(local_id, fb.declare_var(ty));
+                    continue;
+                }
                 if matches!(local.root, RuntimeLocalRoot::Slot(_)) {
                     // Conditional-value and multi-exit joins can materialize a
                     // primitive scalar through a MIR Slot even when every
@@ -3412,6 +3603,14 @@ where
         callee: RuntimeInstance<'db>,
         args: &[RLocalId],
     ) -> Result<(), LowerError> {
+        if let Some(intrinsic) = gpu_intrinsic(self.module.db, callee) {
+            return match intrinsic {
+                GpuIntrinsic::StorageStore => self.lower_gpu_storage_store(args),
+                GpuIntrinsic::StorageLoad => Err(LowerError::Internal(
+                    "GPU storage load appeared as a unit-returning call".to_owned(),
+                )),
+            };
+        }
         let is = self.inst_set();
         let callee_ref =
             *self.module.func_map.get(&callee).ok_or_else(|| {
@@ -3420,6 +3619,125 @@ where
         let arg_vals = self.call_arg_values(args)?;
         self.fb
             .insert_inst_no_result(Call::new(is, callee_ref, arg_vals.into_iter().collect()));
+        Ok(())
+    }
+
+    fn gpu_resource_element_object(
+        &mut self,
+        args: &[RLocalId],
+    ) -> Result<(ValueId, GpuResourceElementType), LowerError> {
+        let [resource, index, ..] = args else {
+            return Err(LowerError::Internal(
+                "GPU storage intrinsic requires resource and index arguments".to_owned(),
+            ));
+        };
+        let resource_ty = self
+            .body
+            .local(*resource)
+            .map(|local| local.semantic_ty)
+            .ok_or_else(|| {
+                LowerError::Internal("GPU storage resource local is missing".to_owned())
+            })?;
+        if !semantic_gpu_resource(self.module.db, resource_ty) {
+            return Err(LowerError::Internal(
+                "GPU storage intrinsic receiver is not an attributed resource".to_owned(),
+            ));
+        }
+        let element = self.module.gpu_resource_element_type(resource_ty)?;
+        let element_ref_ty = self.module.builder.objref_type(element.ty());
+        let resource = self.local_value(*resource)?;
+        let index = self.local_value(*index)?;
+        let object = self.fb.insert_inst(
+            ObjIndex::new(self.inst_set(), resource, index),
+            element_ref_ty,
+        );
+        Ok((object, element))
+    }
+
+    fn lower_gpu_storage_load_scalar(&mut self, args: &[RLocalId]) -> Result<ValueId, LowerError> {
+        let (object, element) = self.gpu_resource_element_object(args)?;
+        match element {
+            GpuResourceElementType::U32 => Ok(self
+                .fb
+                .insert_inst(ObjLoad::new(self.inst_set(), object), Type::I32)),
+            GpuResourceElementType::Record { .. } => Err(LowerError::Internal(
+                "GPU storage record load reached scalar expression lowering".to_owned(),
+            )),
+        }
+    }
+
+    fn lower_gpu_storage_load_tuple(
+        &mut self,
+        dst: RLocalId,
+        args: &[RLocalId],
+    ) -> Result<(), LowerError> {
+        let (object, element) = self.gpu_resource_element_object(args)?;
+        let GpuResourceElementType::Record { fields, .. } = element else {
+            return Err(LowerError::Internal(
+                "GPU scalar storage load reached tuple expression lowering".to_owned(),
+            ));
+        };
+        let dst_vars = self.tuple_vars.get(&dst).cloned().ok_or_else(|| {
+            LowerError::Internal("GPU storage record destination is not flattened".to_owned())
+        })?;
+        if dst_vars.len() != fields {
+            return Err(LowerError::Internal(format!(
+                "GPU storage record has {fields} fields but its destination has {} leaves",
+                dst_vars.len()
+            )));
+        }
+        let field_ref_ty = self.module.builder.objref_type(Type::I32);
+        for (index, var) in dst_vars.into_iter().enumerate() {
+            let index = self.fb.make_imm_value(Immediate::I32(index as i32));
+            let field = self.fb.insert_inst(
+                ObjProj::new(self.inst_set(), smallvec1::smallvec![object, index]),
+                field_ref_ty,
+            );
+            let value = self
+                .fb
+                .insert_inst(ObjLoad::new(self.inst_set(), field), Type::I32);
+            self.fb.def_var(var, value);
+        }
+        Ok(())
+    }
+
+    fn lower_gpu_storage_store(&mut self, args: &[RLocalId]) -> Result<(), LowerError> {
+        let [_, _, value, ..] = args else {
+            return Err(LowerError::Internal(
+                "GPU storage store requires resource, index, and value arguments".to_owned(),
+            ));
+        };
+        let (object, element) = self.gpu_resource_element_object(args)?;
+        let values = self.local_flat_values(*value)?;
+        match element {
+            GpuResourceElementType::U32 => {
+                let [value] = values.as_slice() else {
+                    return Err(LowerError::Internal(
+                        "GPU u32 storage store value is not scalar".to_owned(),
+                    ));
+                };
+                self.fb
+                    .insert_inst_no_result(ObjStore::new(self.inst_set(), object, *value));
+            }
+            GpuResourceElementType::Record { fields, .. } => {
+                if values.len() != fields {
+                    return Err(LowerError::Internal(format!(
+                        "GPU storage record has {fields} fields but its stored value has {} leaves",
+                        values.len()
+                    )));
+                }
+                let field_ref_ty = self.module.builder.objref_type(Type::I32);
+                for (index, value) in values.into_iter().enumerate() {
+                    let index = self.fb.make_imm_value(Immediate::I32(index as i32));
+                    let field = self.fb.insert_inst(
+                        ObjProj::new(self.inst_set(), smallvec1::smallvec![object, index]),
+                        field_ref_ty,
+                    );
+                    self.fb
+                        .insert_inst_no_result(ObjStore::new(self.inst_set(), field, value));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -3658,6 +3976,14 @@ where
                 Ok(())
             }
             RExpr::Call { callee, args } => {
+                if let Some(intrinsic) = gpu_intrinsic(self.module.db, *callee) {
+                    return match intrinsic {
+                        GpuIntrinsic::StorageLoad => self.lower_gpu_storage_load_tuple(dst, args),
+                        GpuIntrinsic::StorageStore => Err(LowerError::Internal(
+                            "GPU storage store appeared as a tuple-returning call".to_owned(),
+                        )),
+                    };
+                }
                 let callee_body = callee.body(self.module.db);
                 let callee_class = callee_body.signature.ret.as_ref().ok_or_else(|| {
                     LowerError::Unsupported(format!(
@@ -3761,6 +4087,19 @@ where
                     )));
                 }
                 self.local_value(*value)
+            }
+            RExpr::Bitcast { value, to } => {
+                let source_ty = self.local_ty(*value)?;
+                let value = self.local_value(*value)?;
+                let target_ty = scalar_ty_r1(to)?;
+                if source_ty == target_ty {
+                    Ok(value)
+                } else {
+                    Ok(self.fb.insert_inst(
+                        Bitcast::new(self.module.builder.inst_set(), value, target_ty),
+                        target_ty,
+                    ))
+                }
             }
             RExpr::Call { callee, args } => self.lower_call(*callee, args),
             RExpr::Builtin(builtin) => self.lower_builtin(builtin, dst),
@@ -4068,7 +4407,8 @@ where
                         ));
                     };
                     let len = array_layout.len;
-                    let stride = mir::array_elem_size_bytes(self.module.db, layout, crate::WASM_LAYOUT);
+                    let stride =
+                        mir::array_elem_size_bytes(self.module.db, layout, crate::WASM_LAYOUT);
                     match index {
                         IndexSource::Constant(k) => {
                             if (k as u64) >= len {
@@ -4081,11 +4421,12 @@ where
                                     "wasm array element byte offset overflow".to_string(),
                                 )
                             })?;
-                            byte_offset = byte_offset.checked_add(elem_offset).ok_or_else(|| {
-                                LowerError::Unsupported(
-                                    "wasm array element byte offset overflow".to_string(),
-                                )
-                            })?;
+                            byte_offset =
+                                byte_offset.checked_add(elem_offset).ok_or_else(|| {
+                                    LowerError::Unsupported(
+                                        "wasm array element byte offset overflow".to_string(),
+                                    )
+                                })?;
                         }
                         IndexSource::Dynamic(index_local) => {
                             addr = self.offset_addr(addr, byte_offset)?;
@@ -4101,7 +4442,8 @@ where
                             // Unsigned `Lt`: a narrowed `usize` index is unsigned,
                             // so an out-of-range (or wrapped) value fails the check
                             // and traps.
-                            let in_bounds = self.fb.insert_inst(Lt::new(is, idx, len_val), Type::I1);
+                            let in_bounds =
+                                self.fb.insert_inst(Lt::new(is, idx, len_val), Type::I1);
                             let trap = self.trap_block();
                             let ok = self.fb.append_block();
                             self.fb
@@ -4113,8 +4455,9 @@ where
                                 ))
                             })?;
                             let stride_val = self.fb.make_imm_value(Immediate::I32(stride));
-                            let scaled =
-                                self.fb.insert_inst(Mul::new(is, idx, stride_val), Type::I32);
+                            let scaled = self
+                                .fb
+                                .insert_inst(Mul::new(is, idx, stride_val), Type::I32);
                             addr = self.fb.insert_inst(Add::new(is, addr, scaled), Type::I32);
                         }
                     }
@@ -4409,7 +4752,10 @@ where
         // R1's wrapping behavior, so no existing kernel changes.
         if checked
             && ty == Type::I32
-            && is_usize_semantic_ty(self.module.db, self.body.locals[dst.as_u32() as usize].semantic_ty)
+            && is_usize_semantic_ty(
+                self.module.db,
+                self.body.locals[dst.as_u32() as usize].semantic_ty,
+            )
         {
             let lhs = self.local_value(lhs)?;
             let rhs = self.local_value(rhs)?;
@@ -4458,14 +4804,20 @@ where
                 Ok(self.fb.insert_inst(Sub::new(is, lhs, rhs), Type::I32))
             }
             IntrinsicArithBinOp::Mul => {
-                let lhs64 = self.fb.insert_inst(Zext::new(is, lhs, Type::I64), Type::I64);
-                let rhs64 = self.fb.insert_inst(Zext::new(is, rhs, Type::I64), Type::I64);
+                let lhs64 = self
+                    .fb
+                    .insert_inst(Zext::new(is, lhs, Type::I64), Type::I64);
+                let rhs64 = self
+                    .fb
+                    .insert_inst(Zext::new(is, rhs, Type::I64), Type::I64);
                 let product = self.fb.insert_inst(Mul::new(is, lhs64, rhs64), Type::I64);
                 let limit = self.fb.make_imm_value(Immediate::I64(u32::MAX as i64));
                 // Overflow iff the 64-bit product exceeds u32::MAX (unsigned `>`).
                 let overflow = self.fb.insert_inst(Lt::new(is, limit, product), Type::I1);
                 self.trap_if(overflow);
-                Ok(self.fb.insert_inst(Trunc::new(is, product, Type::I32), Type::I32))
+                Ok(self
+                    .fb
+                    .insert_inst(Trunc::new(is, product, Type::I32), Type::I32))
             }
             other => Err(LowerError::Unsupported(format!(
                 "wasm target: checked usize intrinsic arithmetic `{other:?}` is not supported \
@@ -4671,6 +5023,14 @@ where
         callee: RuntimeInstance<'db>,
         args: &[RLocalId],
     ) -> Result<ValueId, LowerError> {
+        if let Some(intrinsic) = gpu_intrinsic(self.module.db, callee) {
+            return match intrinsic {
+                GpuIntrinsic::StorageLoad => self.lower_gpu_storage_load_scalar(args),
+                GpuIntrinsic::StorageStore => Err(LowerError::Internal(
+                    "GPU storage store appeared as a value-returning call".to_owned(),
+                )),
+            };
+        }
         if let Some(name) = callee
             .key(self.module.db)
             .semantic(self.module.db)
@@ -4764,6 +5124,12 @@ where
                 let else_block = self.block_for(*else_bb)?;
                 self.fb
                     .insert_inst_no_result(Br::new(is, cond, then_block, else_block));
+            }
+            RTerminator::TerminalCall { callee, args }
+                if gpu_intrinsic(self.module.db, *callee) == Some(GpuIntrinsic::StorageStore) =>
+            {
+                self.lower_gpu_storage_store(args)?;
+                self.fb.insert_inst_no_result(Return::new_unit(is));
             }
             RTerminator::Trap => {
                 self.fb.insert_inst_no_result(Unreachable::new(is));
@@ -5171,8 +5537,7 @@ pub fn kernel(k: u32) -> u256 {
         let top_mod = db.top_mod(file);
         let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
         assert!(diagnostics.is_empty(), "diags:\n{diagnostics}");
-        let package =
-            mir::build_wasm_runtime_package_for_entry(&db, top_mod, "kernel").unwrap();
+        let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "kernel").unwrap();
         let body = package.functions(&db)[0].instance(&db).body(&db);
 
         let is_u256_unsigned_local = |local: &RLocal| {
@@ -5274,8 +5639,12 @@ pub fn kernel(k: u32) -> u256 {
         // 0x80000000 and 0xffffffff FIT in u32 (their bit pattern is preserved and
         // the unsigned bounds check rejects them); only genuinely wider values are
         // refused.
-        assert!(const_int_fits_u32(&[0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00]));
-        assert!(const_int_fits_u32(&[0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff]));
+        assert!(const_int_fits_u32(&[
+            0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00
+        ]));
+        assert!(const_int_fits_u32(&[
+            0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff
+        ]));
         // 2^32 and above do NOT fit: a high word is set.
         assert!(!const_int_fits_u32(&[0x01, 0x00, 0x00, 0x00, 0x00]));
         assert!(!const_int_fits_u32(&[
@@ -5305,8 +5674,7 @@ pub fn kernel(k: u32) -> u32 {
         let top_mod = db.top_mod(file);
         let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
         assert!(diagnostics.is_empty(), "diags:\n{diagnostics}");
-        let package =
-            mir::build_wasm_runtime_package_for_entry(&db, top_mod, "kernel").unwrap();
+        let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "kernel").unwrap();
         let real = package.functions(&db)[0].instance(&db).body(&db);
 
         // A real, effectful `Call` expression (the call to `seed`).
@@ -5350,7 +5718,10 @@ pub fn kernel(k: u32) -> u32 {
             .locals
             .iter()
             .find(|local| {
-                matches!(&local.carrier, RuntimeCarrier::Value(RuntimeClass::Scalar(_)))
+                matches!(
+                    &local.carrier,
+                    RuntimeCarrier::Value(RuntimeClass::Scalar(_))
+                )
             })
             .expect("kernel should have a scalar local")
             .clone();
@@ -5389,16 +5760,13 @@ pub fn kernel(k: u32) -> u32 {
         drop_dead_pure_aggregate_values(&db, &mut body);
 
         assert!(
-            body.blocks[0]
-                .stmts
-                .iter()
-                .any(|stmt| matches!(
-                    stmt,
-                    RStmt::Assign {
-                        expr: RExpr::Call { .. },
-                        ..
-                    }
-                )),
+            body.blocks[0].stmts.iter().any(|stmt| matches!(
+                stmt,
+                RStmt::Assign {
+                    expr: RExpr::Call { .. },
+                    ..
+                }
+            )),
             "the effectful Call definition must not be deleted"
         );
         assert!(

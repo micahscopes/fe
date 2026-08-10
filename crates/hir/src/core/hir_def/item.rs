@@ -741,6 +741,14 @@ pub struct FuncModifiers {
     pub is_extern: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
+pub struct FuncMetadata<'db> {
+    pub modifiers: FuncModifiers,
+    /// Actor behavior roles preserved for compiler consumers without becoming
+    /// callable effects. Empty for ordinary functions.
+    pub actor_roles: EffectParamListId<'db>,
+}
+
 #[salsa::tracked]
 #[derive(Debug)]
 pub struct Func<'db> {
@@ -754,7 +762,7 @@ pub struct Func<'db> {
     pub(in crate::core) params_list: Partial<FuncParamListId<'db>>,
     pub(crate) effects: EffectParamListId<'db>,
     pub(in crate::core) ret_type_ref: Option<TypeId<'db>>,
-    pub(in crate::core) modifiers: FuncModifiers,
+    pub(in crate::core) metadata: FuncMetadata<'db>,
     pub body: Option<Body<'db>>,
     pub top_mod: TopLevelMod<'db>,
 
@@ -763,6 +771,14 @@ pub struct Func<'db> {
 }
 
 impl<'db> Func<'db> {
+    pub fn modifiers(self, db: &'db dyn HirDb) -> FuncModifiers {
+        self.metadata(db).modifiers
+    }
+
+    pub fn actor_roles(self, db: &'db dyn HirDb) -> EffectParamListId<'db> {
+        self.metadata(db).actor_roles
+    }
+
     pub fn span(self) -> LazyFuncSpan<'db> {
         LazyFuncSpan::new(self)
     }
@@ -911,10 +927,13 @@ pub struct Struct<'db> {
     pub(in crate::core) generic_params: GenericParamListId<'db>,
     pub(in crate::core) where_clause: WhereClauseId<'db>,
     pub(in crate::core) fields: FieldDefListId<'db>,
+    /// Actor placement row preserved as inert compiler metadata. Empty for
+    /// ordinary structs.
+    pub actor_placement: EffectParamListId<'db>,
     pub top_mod: TopLevelMod<'db>,
 
     #[return_ref]
-    pub(crate) origin: HirOrigin<ast::Struct>,
+    pub origin: HirOrigin<ast::Struct>,
 }
 
 impl<'db> Struct<'db> {

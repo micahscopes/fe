@@ -29,6 +29,38 @@ pub enum HostType {
     List,
 }
 
+/// GPU stage meaning carried by a nominal role type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GpuStage {
+    Fragment,
+    Compute,
+}
+
+/// GPU resource meaning carried by a nominal container type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GpuResource {
+    Storage,
+}
+
+/// GPU operation implemented directly by the compiler backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GpuIntrinsic {
+    StorageLoad,
+    StorageStore,
+}
+
+/// Fixed-runtime control role carried by a nominal actor behavior type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GpuControl {
+    Surface,
+}
+
+/// Dispatch policy carried by a nominal compute-dispatch type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GpuDispatch {
+    Fixed,
+}
+
 /// A target-neutral description of an aggregate result returned indirectly by
 /// a host import. Backends may realize this contract differently, but must not
 /// silently flatten or reinterpret it.
@@ -421,6 +453,51 @@ impl<'db> AttrListId<'db> {
             "list" => Some(HostType::List),
             _ => None,
         }
+    }
+
+    pub fn gpu_stage(self, db: &'db dyn HirDb) -> Option<GpuStage> {
+        match self.single_ident_arg(db, "gpu_stage")?.as_str() {
+            "fragment" => Some(GpuStage::Fragment),
+            "compute" => Some(GpuStage::Compute),
+            _ => None,
+        }
+    }
+
+    pub fn gpu_resource(self, db: &'db dyn HirDb) -> Option<GpuResource> {
+        match self.single_ident_arg(db, "gpu_resource")?.as_str() {
+            "storage" => Some(GpuResource::Storage),
+            _ => None,
+        }
+    }
+
+    pub fn gpu_intrinsic(self, db: &'db dyn HirDb) -> Option<GpuIntrinsic> {
+        match self.single_ident_arg(db, "gpu_intrinsic")?.as_str() {
+            "storage_load" => Some(GpuIntrinsic::StorageLoad),
+            "storage_store" => Some(GpuIntrinsic::StorageStore),
+            _ => None,
+        }
+    }
+
+    pub fn gpu_control(self, db: &'db dyn HirDb) -> Option<GpuControl> {
+        match self.single_ident_arg(db, "gpu_control")?.as_str() {
+            "surface" => Some(GpuControl::Surface),
+            _ => None,
+        }
+    }
+
+    pub fn gpu_dispatch(self, db: &'db dyn HirDb) -> Option<GpuDispatch> {
+        match self.single_ident_arg(db, "gpu_dispatch")?.as_str() {
+            "fixed" => Some(GpuDispatch::Fixed),
+            _ => None,
+        }
+    }
+
+    pub fn is_gpu_program(self, db: &'db dyn HirDb) -> bool {
+        self.has_marker_attr(db, "gpu_program")
+    }
+
+    pub fn is_gpu_workgroup(self, db: &'db dyn HirDb) -> bool {
+        self.has_marker_attr(db, "gpu_workgroup")
     }
 
     pub fn arithmetic_mode(self, db: &'db dyn HirDb) -> Option<ArithmeticMode> {

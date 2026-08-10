@@ -6596,7 +6596,8 @@ fn field_mul_bn254_fr_executes_on_lavapipe_browser_profile() {
 // scalar-only path the unrolled kernel takes.
 // ===========================================================================
 
-const FIELD_MUL_BN254_FR_LOOP_SOURCE: &str = include_str!("fixtures/spirv/field_mul_bn254_fr_loop.fe");
+const FIELD_MUL_BN254_FR_LOOP_SOURCE: &str =
+    include_str!("fixtures/spirv/field_mul_bn254_fr_loop.fe");
 
 /// Loop-form MSM-0a wasm leg (GPU-free): re-confirms the rolled kernel ==
 /// the bigint oracle (already proven in wasm_e2e.rs; re-checked here so this
@@ -6656,8 +6657,14 @@ fn array_kernel_grid_compiles_naga_valid(source: &str, fn_name: &str, label: &st
             panic!("{label}: should compile Fe -> naga-validated SPIR-V in Grid mode: {e:?}")
         });
 
-    assert_eq!(artifact.layout.mode, sonatina_codegen::isa::spirv::LayoutMode::Grid);
-    assert_eq!(artifact.layout.word, sonatina_codegen::isa::spirv::WordKind::U32);
+    assert_eq!(
+        artifact.layout.mode,
+        sonatina_codegen::isa::spirv::LayoutMode::Grid
+    );
+    assert_eq!(
+        artifact.layout.word,
+        sonatina_codegen::isa::spirv::WordKind::U32
+    );
 
     let wgsl = artifact.wgsl.as_ref().expect("naga should emit WGSL");
     assert_browser_profile_wgsl(wgsl);
@@ -6666,7 +6673,10 @@ fn array_kernel_grid_compiles_naga_valid(source: &str, fn_name: &str, label: &st
         "{label}: WGSL must carry the private heap (fe_heap); got a {}-char module",
         wgsl.len()
     );
-    assert!(wgsl.contains("fe_bump"), "{label}: WGSL must carry the bump pointer (fe_bump)");
+    assert!(
+        wgsl.contains("fe_bump"),
+        "{label}: WGSL must carry the bump pointer (fe_bump)"
+    );
     assert!(
         wgsl.contains("fe_trapped"),
         "{label}: WGSL must carry the trap-status channel (fe_trapped)"
@@ -6702,8 +6712,14 @@ fn array_kernel_scalar_compiles_naga_valid(source: &str, fn_name: &str, label: &
                 panic!("{label}: should compile Fe -> naga-validated SPIR-V in Scalar mode: {e:?}")
             });
 
-    assert_eq!(artifact.layout.mode, sonatina_codegen::isa::spirv::LayoutMode::Scalar);
-    assert_eq!(artifact.layout.word, sonatina_codegen::isa::spirv::WordKind::U32);
+    assert_eq!(
+        artifact.layout.mode,
+        sonatina_codegen::isa::spirv::LayoutMode::Scalar
+    );
+    assert_eq!(
+        artifact.layout.word,
+        sonatina_codegen::isa::spirv::WordKind::U32
+    );
 
     let wgsl = artifact.wgsl.as_ref().expect("naga should emit WGSL");
     assert_browser_profile_wgsl(wgsl);
@@ -6712,7 +6728,10 @@ fn array_kernel_scalar_compiles_naga_valid(source: &str, fn_name: &str, label: &
         "{label}: WGSL must carry the private heap (fe_heap); got a {}-char module",
         wgsl.len()
     );
-    assert!(wgsl.contains("fe_bump"), "{label}: WGSL must carry the bump pointer (fe_bump)");
+    assert!(
+        wgsl.contains("fe_bump"),
+        "{label}: WGSL must carry the bump pointer (fe_bump)"
+    );
     assert!(
         wgsl.contains("fe_trapped"),
         "{label}: WGSL must carry the trap-status channel (fe_trapped)"

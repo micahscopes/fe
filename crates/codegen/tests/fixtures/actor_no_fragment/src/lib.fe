@@ -1,6 +1,8 @@
 // Reject fixture: a `GpuProgram` actor carrying the placement row but no
 // `FragmentSurface` behavior, so there is nothing to serve as the render entry.
 
+use std::webgpu::GpuProgram
+
 actor Bare uses (GpuProgram<i32>) {
     x: i32,
 }

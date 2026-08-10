@@ -226,14 +226,15 @@ fn field_mul_loop_native_body() -> Result<(), String> {
     let wasm_bytes = compile_source_to_wasm(FIELD_MUL_LOOP_SRC, "field_mul_native");
 
     let mut db = DriverDataBase::default();
-    let url = Url::parse("file:///field_mul_bn254_fr_loop_native.fe")
-        .expect("test URL should parse");
+    let url =
+        Url::parse("file:///field_mul_bn254_fr_loop_native.fe").expect("test URL should parse");
     db.workspace()
         .touch(&mut db, url.clone(), Some(FIELD_MUL_LOOP_SRC.to_string()));
     let file = db.workspace().get(&db, &url).expect("file should load");
     let top_mod = db.top_mod(file);
-    let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "field_mul_bn254_fr_loop")
-        .map_err(|e| e.to_string())?;
+    let package =
+        mir::build_wasm_runtime_package_for_entry(&db, top_mod, "field_mul_bn254_fr_loop")
+            .map_err(|e| e.to_string())?;
     let artifact = fe_codegen::compile_runtime_package_native_grid_loop_entry(
         &db,
         &package,
@@ -313,8 +314,7 @@ fn poseidon_loop_native_body() -> Result<(), String> {
     let wasm_bytes = compile_source_to_wasm(POSEIDON_LOOP_SRC, "poseidon_native");
 
     let mut db = DriverDataBase::default();
-    let url =
-        Url::parse("file:///poseidon_bn254_loop_native.fe").expect("test URL should parse");
+    let url = Url::parse("file:///poseidon_bn254_loop_native.fe").expect("test URL should parse");
     db.workspace()
         .touch(&mut db, url.clone(), Some(POSEIDON_LOOP_SRC.to_string()));
     let file = db.workspace().get(&db, &url).expect("file should load");

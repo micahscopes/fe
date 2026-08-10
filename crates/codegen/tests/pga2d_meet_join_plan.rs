@@ -24,8 +24,8 @@ use std::path::Path;
 use url::Url;
 
 fn compile_gate_ingot_to_wasm() -> Vec<u8> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/pga2d_meet_join_gate_ingot");
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pga2d_meet_join_gate_ingot");
     let url = Url::from_directory_path(path.canonicalize().unwrap()).unwrap();
     let mut db = DriverDataBase::default();
     assert!(
@@ -117,9 +117,12 @@ fn planned_meet_join_matches_hand_tabled_kernel_and_proves_desargues() {
 
     let check_wedge = |l: [f32; 3], r: [f32; 3], store: &mut wasmtime::Store<()>| {
         let got = [
-            w0.call(&mut *store, (l[0], l[1], l[2], r[0], r[1], r[2])).unwrap(),
-            w1.call(&mut *store, (l[0], l[1], l[2], r[0], r[1], r[2])).unwrap(),
-            w2.call(&mut *store, (l[0], l[1], l[2], r[0], r[1], r[2])).unwrap(),
+            w0.call(&mut *store, (l[0], l[1], l[2], r[0], r[1], r[2]))
+                .unwrap(),
+            w1.call(&mut *store, (l[0], l[1], l[2], r[0], r[1], r[2]))
+                .unwrap(),
+            w2.call(&mut *store, (l[0], l[1], l[2], r[0], r[1], r[2]))
+                .unwrap(),
         ];
         let want = wedge3_oracle(l, r);
         assert_eq!(

@@ -279,6 +279,17 @@ pub enum DesugaredOrigin {
 pub struct ActorDesugared {
     /// The original `actor` AST node.
     pub actor: AstPtr<ast::Actor>,
+    /// Which generated item this origin belongs to.
+    pub focus: ActorDesugaredFocus,
+}
+
+/// Identifies the source surface represented by an actor-desugared HIR item.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ActorDesugaredFocus {
+    /// The generated actor state struct.
+    State,
+    /// One generated behavior function.
+    Behavior(AstPtr<ast::Func>),
 }
 
 /// Tracks the origin of HIR nodes desugared from a `msg` block.

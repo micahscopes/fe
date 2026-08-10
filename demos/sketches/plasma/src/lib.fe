@@ -11,9 +11,21 @@
 //! Software rendering (lavapipe/SwiftShader) in the sandbox; no performance or
 //! parallelism claim (VISION 3.1).
 
-use std::webgpu::{FragmentSurface, GpuProgram, WebGpuBackend}
+use std::webgpu::{FragmentSurface, GpuProgram, UpdateSurface, WebGpuBackend}
 use std::web::view::{Extent, Param, Surface}
 use fmath::{from_i32, palette, sin, sqrt}
+
+fn clamp_control(_ value: f32, _ lower: f32, _ upper: f32) -> f32 {
+    if value < lower { lower } else { if value > upper { upper } else { value } }
+}
+
+fn wheel_zoom(_ zoom: f32, _ delta: f32) -> f32 {
+    if delta < 0.0 {
+        zoom * 0.875
+    } else {
+        if delta > 0.0 { zoom * 1.125 } else { zoom }
+    }
+}
 
 /// The per-demo params record: field names bind, by name identity, to the
 /// actor's state fields (checked at projection time).
@@ -44,6 +56,16 @@ actor PlasmaSurface uses (GpuProgram<WebGpuBackend>) {
                 res: Param::extent_x(),
             },
         }
+    }
+
+    /// Drag changes phase and radial warp; wheel changes spatial scale.
+    fn update_view(self, dx: f32, dy: f32, dzoom: f32, mx: f32, my: f32)
+        -> (f32, f32, f32) uses (UpdateSurface)
+    {
+        let time: f32 = clamp_control(self.time + dx * 0.025, 0.0, 20.0)
+        let zoom: f32 = clamp_control(wheel_zoom(self.zoom, dzoom), 1.0, 8.0)
+        let warp: f32 = clamp_control(self.warp + dy * 0.005, 0.0, 2.0)
+        (time, zoom, warp)
     }
 
     /// Pixel coordinate in, packed RGBA8 word out. The uniform record is the

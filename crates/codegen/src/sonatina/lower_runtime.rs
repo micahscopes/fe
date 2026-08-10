@@ -1190,6 +1190,27 @@ impl<'ctx, 'db, 'a> FunctionLowerer<'ctx, 'db, 'a> {
                 let value = self.local_value(*value)?;
                 self.cast_scalar_with_signedness(value, scalar_ty(to)?, signed)?
             }
+            RExpr::Bitcast { value, to } => {
+                let from = self
+                    .body
+                    .value_class(*value)
+                    .and_then(|class| match class {
+                        RuntimeClass::Scalar(scalar) => Some(scalar),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        LowerError::Internal("bitcast source is not scalar".to_owned())
+                    })?;
+                let from_ty = scalar_ty(from)?;
+                let value = self.local_value(*value)?;
+                let ty = scalar_ty(to)?;
+                if from_ty == ty {
+                    value
+                } else {
+                    self.fb
+                        .insert_inst(Bitcast::new(self.module.inst_set(), value, ty), ty)
+                }
+            }
             RExpr::ConstRef { region, .. } => {
                 let gv = self.module.lower_const_region(*region)?;
                 let gv_ty = gv.ty(&self.fb.module_builder.ctx);

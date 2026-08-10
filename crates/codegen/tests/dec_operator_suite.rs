@@ -29,7 +29,15 @@ use hir::hir_def::HirIngot;
 use url::Url;
 
 const WASM_LANES: [&str; 6] = ["probe", "d0", "d1", "dd0", "laplace0", "hodge"];
-const ALL_LANES: [&str; 7] = ["probe", "d0", "d1", "dd0", "laplace0", "hodge", "submit_view"];
+const ALL_LANES: [&str; 7] = [
+    "probe",
+    "d0",
+    "d1",
+    "dd0",
+    "laplace0",
+    "hodge",
+    "submit_view",
+];
 
 fn ingot_root(relative: &str) -> Url {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);

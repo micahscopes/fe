@@ -54,7 +54,7 @@
 
 use core::marker::Copy
 use core::{HostEffect, MainThread, Worker}
-use std::webgpu::{Dispatch, WebGpuBackend}
+use std::webgpu::{Dispatch, FragmentSurface, GpuProgram, WebGpuBackend}
 use std::web::view::{Extent, Param, Surface}
 use fmath::{clamp01, from_i32, palette, rgba, sqrt}
 

@@ -102,6 +102,7 @@ const HOST_TYPE_FORM: AttrForm = AttrForm::SingleArg {
     allowed_args: &["bytes", "string", "list"],
 };
 const HOST_CAPABILITY_FORM: AttrForm = AttrForm::SingleIdentArg;
+const GPU_IDENT_FORM: AttrForm = AttrForm::SingleIdentArg;
 
 const ARITHMETIC_EXPECTED: &str = "`#[arithmetic(checked)]` or `#[arithmetic(unchecked)]`";
 const INLINE_EXPECTED: &str = "`#[inline]`, `#[inline(always)]`, or `#[inline(never)]`";
@@ -202,6 +203,11 @@ fn validate_func_attrs<'db>(
             arithmetic,
             AttrRule::supported("inline", INLINE_FORM, INLINE_EXPECTED),
             AttrRule::supported("must_use", BARE_FORM, MUST_USE_EXPECTED),
+            AttrRule::supported(
+                "gpu_intrinsic",
+                GPU_IDENT_FORM,
+                "`#[gpu_intrinsic(<operation>)]`",
+            ),
             AttrRule::unsupported("event", EVENT_TARGETS),
             AttrRule::unsupported("error", ERROR_TARGETS),
             AttrRule::unsupported("derive", DERIVE_TARGETS),
@@ -232,6 +238,16 @@ fn validate_struct_attrs<'db>(
             AttrRule::supported("event", BARE_FORM, "`#[event]`"),
             AttrRule::supported("error", BARE_FORM, "`#[error]`"),
             AttrRule::supported("must_use", BARE_FORM, MUST_USE_EXPECTED),
+            AttrRule::supported("gpu_program", BARE_FORM, "`#[gpu_program]`"),
+            AttrRule::supported(
+                "gpu_stage",
+                GPU_IDENT_FORM,
+                "`#[gpu_stage(fragment)]` or `#[gpu_stage(compute)]`",
+            ),
+            AttrRule::supported("gpu_resource", GPU_IDENT_FORM, "`#[gpu_resource(storage)]`"),
+            AttrRule::supported("gpu_control", GPU_IDENT_FORM, "`#[gpu_control(surface)]`"),
+            AttrRule::supported("gpu_workgroup", BARE_FORM, "`#[gpu_workgroup]`"),
+            AttrRule::supported("gpu_dispatch", GPU_IDENT_FORM, "`#[gpu_dispatch(fixed)]`"),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),
             AttrRule::unsupported("host_import", HOST_IMPORT_TARGETS),
             AttrRule::unsupported("wasm_import", HOST_IMPORT_TARGETS),
@@ -693,7 +709,10 @@ impl<'db> Func<'db> {
             params,
             effects,
             ret_ty,
-            modifiers,
+            crate::hir_def::FuncMetadata {
+                modifiers,
+                actor_roles: EffectParamListId::new(ctxt.db(), vec![]),
+            },
             body,
             top_mod,
             origin,
@@ -749,6 +768,7 @@ impl<'db> Struct<'db> {
             generic_params,
             where_clause,
             fields,
+            EffectParamListId::new(ctxt.db(), vec![]),
             ctxt.top_mod(),
             origin,
         );

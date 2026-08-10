@@ -740,6 +740,7 @@ fn role_str(r: Role) -> &'static str {
     match r {
         Role::Output => "Output",
         Role::Input => "Input",
+        Role::Resource => "Resource",
     }
 }
 

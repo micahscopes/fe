@@ -24,12 +24,10 @@
 //! The behavior's context parameters (everything after `self`) come first, then
 //! the actor's state fields in declaration order; the `self.<field>` accesses
 //! in the body are rewritten to the flattened parameters (see
-//! `FileLowerCtxt::actor_self_field_rewrite`). The role marker in the behavior's
-//! `uses` row (e.g. `FragmentSurface`) is dropped here: it is consumed by the
-//! `fe web` entry derivation, which reads the `actor` node directly, and keeping
-//! it on the flattened kernel would make the kernel demand an unprovidable
-//! effect at a root. Nothing about `actor` survives into name resolution or type
-//! checking; the construct is pure sugar over items that already exist.
+//! `FileLowerCtxt::actor_self_field_rewrite`). Placement and behavior-role paths
+//! are preserved as inert metadata on the lowered struct and function. They do
+//! not become root effects, but downstream consumers can resolve their nominal,
+//! attributed identities without re-reading or recognizing source names.
 
 use parser::ast::{self, prelude::*};
 
@@ -40,7 +38,7 @@ use crate::{
         FuncParam, FuncParamListId, FuncParamMode, FuncParamName, GenericParamListId, IdentId,
         Partial, Struct, TrackedItemVariant, TypeId, Visibility, WhereClauseId,
     },
-    span::{ActorDesugared, DesugaredOrigin, HirOrigin},
+    span::{ActorDesugared, ActorDesugaredFocus, DesugaredOrigin, HirOrigin},
 };
 
 /// Lowers an `actor` item into its desugared struct + free functions, all
@@ -74,12 +72,13 @@ fn lower_actor_field_specs<'db>(
     specs
 }
 
-fn actor_origin<T>(ast: &ast::Actor) -> HirOrigin<T>
+fn actor_origin<T>(ast: &ast::Actor, focus: ActorDesugaredFocus) -> HirOrigin<T>
 where
     T: AstNode<Language = parser::FeLang>,
 {
     HirOrigin::desugared(DesugaredOrigin::Actor(ActorDesugared {
         actor: ast::AstPtr::new(ast),
+        focus,
     }))
 }
 
@@ -109,6 +108,7 @@ fn lower_actor_struct<'db>(
 
     let id = ctxt.joined_id(TrackedItemVariant::Struct(name));
     ctxt.enter_item_scope(id, false);
+    let placement = super::item::lower_uses_clause_opt(ctxt, ast.uses_clause());
     let struct_ = Struct::new(
         ctxt.db(),
         id,
@@ -118,8 +118,9 @@ fn lower_actor_struct<'db>(
         GenericParamListId::new(ctxt.db(), vec![]),
         WhereClauseId::new(ctxt.db(), vec![], vec![]),
         fields,
+        placement,
         ctxt.top_mod(),
-        actor_origin(ast),
+        actor_origin(ast, ActorDesugaredFocus::State),
     );
     ctxt.leave_item_scope(struct_)
 }
@@ -127,7 +128,7 @@ fn lower_actor_struct<'db>(
 /// Emits one behavior as a flattened free function.
 fn lower_actor_behavior<'db>(
     ctxt: &mut FileLowerCtxt<'db>,
-    _actor_ast: &ast::Actor,
+    actor_ast: &ast::Actor,
     field_specs: &[(IdentId<'db>, Partial<TypeId<'db>>)],
     behavior: ast::Func,
 ) -> Func<'db> {
@@ -178,7 +179,10 @@ fn lower_actor_behavior<'db>(
 
     let ret_ty = sig.ret_ty().map(|ty| TypeId::lower_ast(ctxt, ty));
 
-    // The role marker in the behavior's `uses` row is intentionally dropped.
+    // The role row is compiler metadata, not a callable effect requirement.
+    // Preserve the same lowered paths separately so downstream consumers can
+    // resolve nominal, attributed identities without burdening a root call.
+    let roles = super::item::lower_uses_clause_opt(ctxt, sig.uses_clause());
     let effects = EffectParamListId::new(ctxt.db(), vec![]);
     // Behaviors are the actor's public surface, so the flattened kernel is
     // public regardless of how the behavior was written. A `const` behavior
@@ -200,7 +204,10 @@ fn lower_actor_behavior<'db>(
         .map(|body| Body::lower_ast(ctxt, ast::Expr::cast(body.syntax().clone()).unwrap()));
     ctxt.set_actor_self_fields(previous);
 
-    let origin = HirOrigin::raw(&behavior);
+    let origin = actor_origin(
+        actor_ast,
+        ActorDesugaredFocus::Behavior(ast::AstPtr::new(&behavior)),
+    );
     let top_mod = ctxt.top_mod();
     let fn_ = Func::new(
         ctxt.db(),
@@ -212,7 +219,10 @@ fn lower_actor_behavior<'db>(
         params,
         effects,
         ret_ty,
-        modifiers,
+        crate::hir_def::FuncMetadata {
+            modifiers,
+            actor_roles: roles,
+        },
         body,
         top_mod,
         origin,

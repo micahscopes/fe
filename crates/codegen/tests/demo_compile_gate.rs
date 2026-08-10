@@ -16,10 +16,10 @@
 //!
 //! Coverage:
 //!   - every `demos/sketches/*/src/lib.fe` that declares an `actor ... uses
-//!     (GpuProgram<WebGpuBackend>)` (cga3d, qcga, desargues, mandelbrot,
-//!     plasma, gradient, dec): entry/mode are DERIVED from the actor
-//!     declaration, never hardcoded here, exactly as `fe web build` does
-//!     with `--entry`/`--mode` omitted;
+//!     (GpuProgram<WebGpuBackend>)` (known_color, rollcall_pipeline, cga3d,
+//!     qcga, desargues, mandelbrot, plasma, gradient, dec): entry/mode are
+//!     DERIVED from the actor declaration, never hardcoded here, exactly as
+//!     `fe web build` does with `--entry`/`--mode` omitted;
 //!   - `demos/sketches/fmath`, a math-intrinsics library ingot with no
 //!     render entry: diagnostics-only (it must still type-check);
 //!   - `demos/sketches/qcga_pencil`: predates the `actor` idiom (spells the
@@ -54,7 +54,10 @@ use std::path::{Path, PathBuf};
 
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::{WebBuildOptions, WebBundle, WebBundleMode, WebCanonicalPolicy, resolve_web_entry};
+use fe_codegen::{
+    WebBindingAccess, WebBindingRole, WebBuildOptions, WebBundle, WebBundleMode,
+    WebCanonicalPolicy, resolve_web_entry,
+};
 use hir::hir_def::HirIngot;
 use url::Url;
 
@@ -76,9 +79,8 @@ fn assert_browser_wgsl(wgsl: &str) {
         !wgsl.contains("i64") && !wgsl.contains("u64"),
         "browser-profile WGSL must contain no 64-bit scalar token:\n{wgsl}"
     );
-    let module = naga::front::wgsl::parse_str(wgsl).unwrap_or_else(|e| {
-        panic!("naga wgsl-in should reparse the emitted WGSL: {e:?}\n{wgsl}")
-    });
+    let module = naga::front::wgsl::parse_str(wgsl)
+        .unwrap_or_else(|e| panic!("naga wgsl-in should reparse the emitted WGSL: {e:?}\n{wgsl}"));
     naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
         naga::valid::Capabilities::default(),
@@ -87,11 +89,89 @@ fn assert_browser_wgsl(wgsl: &str) {
     .unwrap_or_else(|e| panic!("browser-profile WGSL validation failed: {e:?}"));
 }
 
+fn assert_fe_gesture_control(bundle: &WebBundle, state_fields: &[&str], result_fields: &[&str]) {
+    use fe_codegen::WebControlArgSource as Src;
+
+    let control = bundle
+        .manifest
+        .control
+        .as_ref()
+        .expect("the actor must project its Fe-authored gesture lane");
+    assert_eq!(control.export, "update_view");
+    assert_eq!(
+        control.args[..5],
+        [
+            Src::Drag { axis: "x".into() },
+            Src::Drag { axis: "y".into() },
+            Src::Wheel,
+            Src::Pointer { axis: "x".into() },
+            Src::Pointer { axis: "y".into() },
+        ]
+    );
+    assert_eq!(control.args.len(), 5 + state_fields.len());
+    for (arg, name) in control.args[5..].iter().zip(state_fields) {
+        assert_eq!(
+            arg,
+            &Src::State {
+                name: (*name).into()
+            }
+        );
+    }
+    assert_eq!(
+        control.result,
+        result_fields
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        wasm_function_export_names(&bundle.wasm)
+            .iter()
+            .any(|name| name == "update_view"),
+        "the projected control lane must be a real Wasm export"
+    );
+}
+
+fn assert_initial_zoom(bundle: &WebBundle, expected: f32) {
+    let zoom = bundle
+        .manifest
+        .surface
+        .as_ref()
+        .expect("actor view surface")
+        .params
+        .iter()
+        .find(|param| param.name == "zoom")
+        .expect("zoom param");
+    assert_eq!(zoom.init, Some(expected));
+}
+
+fn call_three_state_update(bundle: &WebBundle, args: [f32; 9]) -> [f32; 3] {
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &bundle.wasm).expect("control Wasm module");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("control instance");
+    let update = instance
+        .get_func(&mut store, "update_view")
+        .expect("update_view export");
+    let values = args.map(|value| wasmtime::Val::F32(value.to_bits()));
+    let mut results = [wasmtime::Val::F32(0); 3];
+    update
+        .call(&mut store, &values, &mut results)
+        .expect("Fe update_view call");
+    results.map(|value| match value {
+        wasmtime::Val::F32(bits) => f32::from_bits(bits),
+        other => panic!("update_view returned non-f32 value {other:?}"),
+    })
+}
+
 /// Run `body` with a checked-in ingot directory's driver database and top
 /// module. `body` receives `&DriverDataBase` (borrowed, not moved) so the
 /// caller can keep compiling against it (`resolve_web_entry`,
 /// `WebBundle::compile`, ...).
-fn with_ingot<R>(rel_dir: &str, body: impl FnOnce(&DriverDataBase, hir::hir_def::TopLevelMod<'_>) -> R) -> R {
+fn with_ingot<R>(
+    rel_dir: &str,
+    body: impl FnOnce(&DriverDataBase, hir::hir_def::TopLevelMod<'_>) -> R,
+) -> R {
     let dir = repo_root().join(rel_dir);
     let mut db = DriverDataBase::default();
     let url = Url::from_directory_path(&dir)
@@ -115,7 +195,10 @@ fn with_ingot<R>(rel_dir: &str, body: impl FnOnce(&DriverDataBase, hir::hir_def:
 
 /// Run `body` with a standalone `.fe` FILE (no `fe.toml`, a fixture path)
 /// loaded into its own driver database.
-fn with_standalone_file<R>(rel_path: &str, body: impl FnOnce(&DriverDataBase, hir::hir_def::TopLevelMod<'_>) -> R) -> R {
+fn with_standalone_file<R>(
+    rel_path: &str,
+    body: impl FnOnce(&DriverDataBase, hir::hir_def::TopLevelMod<'_>) -> R,
+) -> R {
     let file_path = repo_root().join(rel_path);
     let source = std::fs::read_to_string(&file_path)
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", file_path.display()));
@@ -149,6 +232,9 @@ fn compile_actor_ingot(rel_dir: &str) -> WebBundle {
             WebBundleMode::Grid => panic!(
                 "{rel_dir}: derived grid mode; no curated sketch is expected to be grid-shaped"
             ),
+            WebBundleMode::Compute => {
+                panic!("{rel_dir}: a compute stage must be part of an actor pass graph")
+            }
         };
         WebBundle::compile(db, top_mod, options)
             .unwrap_or_else(|e| panic!("{rel_dir}: WebBundle::compile failed: {e}"))
@@ -209,10 +295,257 @@ fn view_vocabulary_const_constructs_a_surface() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn known_color_pass_graph_compiles() {
+    let bundle = compile_actor_ingot("demos/sketches/known_color");
+    assert_browser_wgsl(&bundle.wgsl);
+    assert!(
+        bundle.wasm.is_empty(),
+        "typed resource graph has no CPU fallback"
+    );
+    assert_eq!(bundle.manifest.resources.len(), 1);
+    assert_eq!(bundle.manifest.passes.len(), 2);
+}
+
+#[test]
+fn rollcall_pipeline_pass_graph_compiles_with_external_resources_and_private_mem() {
+    let bundle = compile_actor_ingot("demos/sketches/rollcall_pipeline");
+    assert!(
+        bundle.wasm.is_empty(),
+        "typed pass graph has no CPU fallback"
+    );
+    assert_eq!(bundle.manifest.protocol_version, 6);
+    assert_eq!(bundle.manifest.resources.len(), 2);
+    assert_eq!(bundle.manifest.passes.len(), 3);
+    assert_eq!(bundle.pass_wgsl.len(), 3);
+    assert_eq!(bundle.manifest.passes[0].source_entry, "collect");
+    assert_eq!(bundle.manifest.passes[1].source_entry, "fold");
+    assert_eq!(bundle.manifest.passes[2].source_entry, "display");
+
+    let collect = &bundle.manifest.passes[0].layout.bindings;
+    let fold = &bundle.manifest.passes[1].layout.bindings;
+    let display = &bundle.manifest.passes[2].layout.bindings;
+    assert_eq!(collect.len(), 2);
+    assert_eq!(fold.len(), 3);
+    assert_eq!(display.len(), 2);
+    for (binding, name) in collect.iter().zip(["leaves", "nodes"]) {
+        assert_eq!(binding.name, name);
+        assert_eq!(binding.role, WebBindingRole::Resource);
+        assert_eq!(binding.access, WebBindingAccess::ReadWrite);
+    }
+    for (binding, name) in fold[..2].iter().zip(["leaves", "nodes"]) {
+        assert_eq!(binding.name, name);
+        assert_eq!(binding.role, WebBindingRole::Resource);
+        assert_eq!(binding.access, WebBindingAccess::ReadWrite);
+    }
+    assert_eq!(fold[2].name, "trap");
+    assert_eq!(fold[2].role, WebBindingRole::Output);
+    assert_eq!(fold[2].binding, 2);
+    for (binding, name) in display.iter().zip(["leaves", "nodes"]) {
+        assert_eq!(binding.name, name);
+        assert_eq!(binding.role, WebBindingRole::Resource);
+        assert_eq!(binding.access, WebBindingAccess::Read);
+    }
+
+    for shader in &bundle.pass_wgsl {
+        assert_browser_wgsl(&shader.source);
+    }
+    let middle = &bundle.pass_wgsl[1].source;
+    assert!(middle.contains("var<storage, read_write> leaves"));
+    assert!(middle.contains("var<storage, read_write> nodes"));
+    assert!(
+        middle.contains("fe_heap"),
+        "private Mem heap is absent:\n{middle}"
+    );
+    assert!(
+        middle.contains("fe_bump"),
+        "private Mem bump pointer is absent"
+    );
+    assert!(
+        middle.contains("fe_trapped"),
+        "private Mem trap channel is absent"
+    );
+}
+
+#[test]
+fn perturbational_mandelbrot_graph_compiles() {
+    use fe_codegen::WebControlArgSource as Src;
+    use fe_codegen::WebControlWasmType;
+
+    let bundle = compile_actor_ingot("demos/sketches/perturbational_mandelbrot");
+    wasmparser::validate(&bundle.wasm).expect("the Fe control lane must be valid Wasm");
+    assert_initial_zoom(&bundle, 1.0);
+    let exports = wasm_function_export_names(&bundle.wasm);
+    assert!(exports.iter().any(|name| name == "update_view"));
+    assert!(
+        !exports.iter().any(|name| name == "display_reference"),
+        "the GPU graph must not acquire a CPU pixel fallback"
+    );
+    assert_eq!(bundle.manifest.protocol_version, 6);
+    assert_eq!(bundle.manifest.resources.len(), 1);
+    assert_eq!(bundle.manifest.resources[0].name, "orbit");
+    assert_eq!(bundle.manifest.resources[0].stride, 32);
+    assert_eq!(bundle.manifest.resources[0].length, 2003);
+    assert_eq!(bundle.manifest.passes.len(), 2);
+    assert_eq!(bundle.pass_wgsl.len(), 2);
+    assert_eq!(bundle.manifest.passes[0].source_entry, "build_reference");
+    assert_eq!(bundle.manifest.passes[1].source_entry, "display_reference");
+    for pass in &bundle.manifest.passes {
+        let names = pass
+            .layout
+            .bindings
+            .iter()
+            .filter(|binding| binding.role == WebBindingRole::Input)
+            .flat_map(|binding| binding.members.iter())
+            .map(|member| member.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "center_x_w0",
+                "center_x_w1",
+                "center_x_w2",
+                "center_x_w3",
+                "center_y_w0",
+                "center_y_w1",
+                "center_y_w2",
+                "center_y_w3",
+                "zoom",
+                "res",
+            ],
+            "each pass must carry projected Fe state names for runtime uploads"
+        );
+    }
+    let control = bundle
+        .manifest
+        .control
+        .as_ref()
+        .expect("the graph must carry its Fe-authored pan/zoom lane");
+    assert_eq!(control.export, "update_view");
+    assert_eq!(control.args.len(), 16);
+    assert_eq!(
+        control.args[5],
+        Src::Resource {
+            name: "orbit".to_owned(),
+            wasm_type: WebControlWasmType::I64,
+        }
+    );
+    assert_eq!(
+        control.result,
+        [
+            "center_x_w0",
+            "center_x_w1",
+            "center_x_w2",
+            "center_x_w3",
+            "center_y_w0",
+            "center_y_w1",
+            "center_y_w2",
+            "center_y_w3",
+            "zoom",
+        ]
+        .map(str::to_owned)
+    );
+    for shader in &bundle.pass_wgsl {
+        assert_browser_wgsl(&shader.source);
+    }
+    assert!(
+        bundle.pass_wgsl[0]
+            .source
+            .contains("var<storage, read_write> orbit"),
+        "compute shader must write the shared orbit"
+    );
+    assert!(
+        bundle.pass_wgsl[1].source.contains("var<storage> orbit"),
+        "fragment shader must read the shared orbit:\n{}",
+        bundle.pass_wgsl[1].source
+    );
+    assert!(
+        bundle.pass_wgsl[1].source.contains("bitcast<f32>"),
+        "the packed reference must be reinterpreted as f32, never numerically converted"
+    );
+
+    // B4.4 deterministic quality receipt. The old deep Fixed<8> pixel loop
+    // performs three fixed multiplies and five branch-free fixed additions.
+    // Counting only their authored limb arithmetic gives conservative L=8
+    // lower bounds of 422 and 222 scalar operations respectively. The f32
+    // perturbation recurrence itself has 25 arithmetic operations; its six
+    // explicit validity/glitch-policy operations are reported separately.
+    const FIXED8_MUL_ARITH: u64 = 422;
+    const FIXED8_ADD_ARITH: u64 = 222;
+    const OLD_PIXEL_ITER_ARITH: u64 = 3 * FIXED8_MUL_ARITH + 5 * FIXED8_ADD_ARITH;
+    const PERTURB_ITER_ARITH: u64 = 25;
+    const PERTURB_VALIDITY_ARITH: u64 = 6;
+    const PIXELS: u64 = 512 * 512;
+    const ITERATIONS: u64 = 512;
+    let recurrence_ratio = OLD_PIXEL_ITER_ARITH as f64 / PERTURB_ITER_ARITH as f64;
+    assert!(
+        recurrence_ratio >= 90.0,
+        "the conservative recurrence leverage must remain about 100x"
+    );
+
+    let classic = compile_actor_ingot("demos/sketches/mandelbrot");
+    let classic_bytes = classic.wgsl.len();
+    let compute_bytes = bundle.pass_wgsl[0].source.len();
+    let fragment_bytes = bundle.pass_wgsl[1].source.len();
+    let combined_bytes = compute_bytes + fragment_bytes;
+    // Source bytes and execution frequency are deliberately separate. The
+    // exact four-word producer is allowed to be somewhat larger than the old
+    // Fixed fragment because it executes once per frame, not once per pixel.
+    // Bound both the producer and the combined graph so exactness additions
+    // cannot make cold shader compilation grow without limit.
+    assert!(
+        compute_bytes * 4 <= classic_bytes * 5,
+        "one-per-frame reference WGSL ({compute_bytes}) exceeds 1.25x the exact fragment \
+         baseline ({classic_bytes})"
+    );
+    assert!(
+        combined_bytes * 2 <= classic_bytes * 3,
+        "combined perturbation WGSL ({combined_bytes}) exceeds 1.5x the exact fragment \
+         baseline ({classic_bytes})"
+    );
+    assert!(
+        fragment_bytes * 8 < classic_bytes,
+        "the f32 fragment ({fragment_bytes}) should be at least 8x smaller than the Fixed \
+         fragment ({classic_bytes})"
+    );
+    assert!(!bundle.pass_wgsl[1].source.contains("DEPTH_L"));
+
+    let old_modeled = PIXELS * ITERATIONS * OLD_PIXEL_ITER_ARITH;
+    let new_modeled = PIXELS * ITERATIONS * (PERTURB_ITER_ARITH + PERTURB_VALIDITY_ARITH)
+        + ITERATIONS * OLD_PIXEL_ITER_ARITH;
+    eprintln!(
+        "  B4 quality receipt: authored Fe {} -> {} lines; WGSL exact={} B, \
+         reference={} B, perturb={} B, combined={} B; core recurrence={:.1}x, \
+         modeled old={} ops, new={} ops including validity + one reference",
+        include_str!("../../../demos/sketches/mandelbrot/src/lib.fe")
+            .lines()
+            .count(),
+        include_str!("../../../demos/sketches/perturbational_mandelbrot/src/lib.fe")
+            .lines()
+            .count(),
+        classic_bytes,
+        compute_bytes,
+        fragment_bytes,
+        combined_bytes,
+        recurrence_ratio,
+        old_modeled,
+        new_modeled,
+    );
+}
+
+#[test]
 fn cga3d_sketch_compiles() {
     let bundle = compile_actor_ingot("demos/sketches/cga3d");
     assert_browser_wgsl(&bundle.wgsl);
     wasmparser::validate(&bundle.wasm).expect("cga3d wasm should be valid");
+    assert_fe_gesture_control(
+        &bundle,
+        &["lambda", "theta", "zoom", "res"],
+        &["lambda", "theta", "zoom"],
+    );
+    assert_eq!(
+        call_three_state_update(&bundle, [10.0, -5.0, -1.0, 0.0, 0.0, 0.15, 0.6, 1.6, 512.0]),
+        [0.15f32 + 10.0 * 0.0025, 0.6f32 - 5.0 * 0.01, 1.6f32 * 0.875]
+    );
 }
 
 #[test]
@@ -220,6 +553,15 @@ fn qcga_sketch_compiles() {
     let bundle = compile_actor_ingot("demos/sketches/qcga");
     assert_browser_wgsl(&bundle.wgsl);
     wasmparser::validate(&bundle.wasm).expect("qcga wasm should be valid");
+    assert_fe_gesture_control(
+        &bundle,
+        &["lambda", "theta", "zoom", "res"],
+        &["lambda", "theta", "zoom"],
+    );
+    assert_eq!(
+        call_three_state_update(&bundle, [10.0, -5.0, -1.0, 0.0, 0.0, 0.15, 0.6, 1.6, 512.0]),
+        [0.15f32 + 10.0 * 0.0025, 0.6f32 - 5.0 * 0.01, 1.6f32 * 0.875]
+    );
 }
 
 #[test]
@@ -227,6 +569,15 @@ fn desargues_sketch_compiles() {
     let bundle = compile_actor_ingot("demos/sketches/desargues");
     assert_browser_wgsl(&bundle.wgsl);
     wasmparser::validate(&bundle.wasm).expect("desargues wasm should be valid");
+    assert_fe_gesture_control(
+        &bundle,
+        &["sweep", "spin", "zoom", "res"],
+        &["sweep", "spin", "zoom"],
+    );
+    assert_eq!(
+        call_three_state_update(&bundle, [10.0, -5.0, -1.0, 0.0, 0.0, 0.62, 0.0, 2.4, 512.0]),
+        [0.62f32 + 10.0 * 0.0025, -5.0f32 * 0.01, 2.4f32 * 0.875]
+    );
 }
 
 #[test]
@@ -234,6 +585,7 @@ fn mandelbrot_sketch_compiles() {
     let bundle = compile_actor_ingot("demos/sketches/mandelbrot");
     assert_browser_wgsl(&bundle.wgsl);
     wasmparser::validate(&bundle.wasm).expect("mandelbrot sketch wasm should be valid");
+    assert_initial_zoom(&bundle, 1.0);
 
     // The render entry MUST be exported under its BARE source name, matching
     // the manifest `source_entry` the browser runtime resolves via
@@ -314,8 +666,9 @@ fn exp_add_corr(a: &[f32], b: &[f32], corr: f32) -> Vec<f32> {
         // The base case (`Last`): a plain "lump the rest" sum.
         vec![(corr + a[0]) + b[0]]
     } else {
-        let (s, e) = two_sum(corr + a[0], b[0]);
-        let tail = exp_add_corr(&a[1..], &b[1..], e);
+        let (a0, ae) = two_sum(a[0], corr);
+        let (s, e) = two_sum(a0, b[0]);
+        let tail = exp_add_corr(&a[1..], &b[1..], ae + e);
         let (hi, lo) = two_sum(s, tail[0]);
         let mut out = Vec::with_capacity(a.len());
         out.push(hi); // this level's re-normalized leading term
@@ -331,6 +684,64 @@ fn exp_add_corr(a: &[f32], b: &[f32], corr: f32) -> Vec<f32> {
 fn qf_add_f32(a: [f32; 4], b: f32) -> [f32; 4] {
     let r = exp_add_corr(&a, &[b, 0.0, 0.0, 0.0], 0.0);
     [r[0], r[1], r[2], r[3]]
+}
+
+fn scaled_f32(value: f32, fractional_bits: i32) -> num_bigint::BigInt {
+    let bits = value.to_bits();
+    if bits & 0x7fff_ffff == 0 {
+        return 0u32.into();
+    }
+    let exponent = ((bits >> 23) & 0xff) as i32 - 127;
+    let significand = num_bigint::BigInt::from((1u32 << 23) | (bits & 0x7f_ffff));
+    let shift = exponent - 23 + fractional_bits;
+    let magnitude = if shift >= 0 {
+        significand << shift as usize
+    } else {
+        significand >> (-shift) as usize
+    };
+    if bits >> 31 == 0 {
+        magnitude
+    } else {
+        -magnitude
+    }
+}
+
+fn scaled_expansion(words: [f32; 4], fractional_bits: i32) -> num_bigint::BigInt {
+    words
+        .into_iter()
+        .map(|word| scaled_f32(word, fractional_bits))
+        .sum()
+}
+
+#[test]
+fn expansion4_pan_keeps_one_pixel_steps_through_declared_zoom_floor() {
+    // A 160-bit integer scale represents every binary32 term here exactly.
+    // This is a mathematical-value gate, not another copy of the expansion's
+    // operation sequence: adding one backing pixel must move the represented
+    // center in the requested direction, even when the change belongs in w3.
+    const SCALE_BITS: i32 = 160;
+    let center = [
+        -0.7436438798904419,
+        -0.0000000071467170,
+        -0.0000000000000003,
+        -0.00000000000000000000002,
+    ];
+    let before = scaled_expansion(center, SCALE_BITS);
+    for zoom in [1.0e-12f32, 1.0e-18, 1.0e-24, 1.0e-27] {
+        let pixel_step = 2.0 * zoom / MANDELBROT_RES;
+        let after = scaled_expansion(qf_add_f32(center, pixel_step), SCALE_BITS);
+        let observed = &after - &before;
+        let expected = scaled_f32(pixel_step, SCALE_BITS);
+        let error = &observed - &expected;
+        assert!(
+            observed > 0u32.into(),
+            "zoom={zoom:e}: a positive one-pixel pan was lost or reversed ({observed})"
+        );
+        assert!(
+            error.magnitude() * 2u32 < expected.magnitude().clone(),
+            "zoom={zoom:e}: represented pan {observed} is not within half a pixel of {expected}"
+        );
+    }
 }
 
 /// Mirrors `lib.fe`'s `clamp_quad`: clamp a four-word `Expansion<4>` to an f32
@@ -389,8 +800,16 @@ fn mandelbrot_update_view_oracle(
     let cx_a = qf_add_f32(cx0, u * (zoom - z_c));
     let cy_a = qf_add_f32(cy0, v * (zoom - z_c));
 
-    let cx_c = qf_clamp(cx_a, MANDELBROT_CENTER_X_RANGE.0, MANDELBROT_CENTER_X_RANGE.1);
-    let cy_c = qf_clamp(cy_a, MANDELBROT_CENTER_Y_RANGE.0, MANDELBROT_CENTER_Y_RANGE.1);
+    let cx_c = qf_clamp(
+        cx_a,
+        MANDELBROT_CENTER_X_RANGE.0,
+        MANDELBROT_CENTER_X_RANGE.1,
+    );
+    let cy_c = qf_clamp(
+        cy_a,
+        MANDELBROT_CENTER_Y_RANGE.0,
+        MANDELBROT_CENTER_Y_RANGE.1,
+    );
     (cx_c, cy_c, z_c)
 }
 
@@ -413,21 +832,49 @@ fn mandelbrot_control_manifest_projects_gesture_bindings() {
     assert_eq!(
         control.args,
         vec![
-            Src::Drag { axis: "x".to_string() },
-            Src::Drag { axis: "y".to_string() },
+            Src::Drag {
+                axis: "x".to_string()
+            },
+            Src::Drag {
+                axis: "y".to_string()
+            },
             Src::Wheel,
-            Src::Pointer { axis: "x".to_string() },
-            Src::Pointer { axis: "y".to_string() },
-            Src::State { name: "center_x_w0".to_string() },
-            Src::State { name: "center_x_w1".to_string() },
-            Src::State { name: "center_x_w2".to_string() },
-            Src::State { name: "center_x_w3".to_string() },
-            Src::State { name: "center_y_w0".to_string() },
-            Src::State { name: "center_y_w1".to_string() },
-            Src::State { name: "center_y_w2".to_string() },
-            Src::State { name: "center_y_w3".to_string() },
-            Src::State { name: "zoom".to_string() },
-            Src::State { name: "res".to_string() },
+            Src::Pointer {
+                axis: "x".to_string()
+            },
+            Src::Pointer {
+                axis: "y".to_string()
+            },
+            Src::State {
+                name: "center_x_w0".to_string()
+            },
+            Src::State {
+                name: "center_x_w1".to_string()
+            },
+            Src::State {
+                name: "center_x_w2".to_string()
+            },
+            Src::State {
+                name: "center_x_w3".to_string()
+            },
+            Src::State {
+                name: "center_y_w0".to_string()
+            },
+            Src::State {
+                name: "center_y_w1".to_string()
+            },
+            Src::State {
+                name: "center_y_w2".to_string()
+            },
+            Src::State {
+                name: "center_y_w3".to_string()
+            },
+            Src::State {
+                name: "zoom".to_string()
+            },
+            Src::State {
+                name: "res".to_string()
+            },
         ],
         "control.args must be exactly [dx, dy, dzoom, mx, my] (the reserved gesture-arg \
          vocabulary) followed by the actor's state fields in declaration order"
@@ -451,7 +898,7 @@ fn mandelbrot_control_manifest_projects_gesture_bindings() {
 
     // Non-interactive sketches carry no `control` section at all (this is
     // exactly what keeps their manifests byte-stable): spot-check a sibling.
-    let plain = compile_actor_ingot("demos/sketches/plasma");
+    let plain = compile_actor_ingot("demos/sketches/gradient");
     assert!(
         plain.manifest.control.is_none(),
         "a sketch with no `UpdateSurface` behavior must project no `control` section"
@@ -491,12 +938,10 @@ fn mandelbrot_update_view_matches_oracle_over_gesture_tape() {
     // `(f32 x15) -> (f32 x9)`: the arity exceeds wasmtime's typed-tuple
     // ergonomics, so the call goes through the untyped `Val` path (mirroring
     // `precision_fixed_oracle.rs`'s L=8 harness).
-    let update_view = instance
-        .get_func(&mut store, "update_view")
-        .expect(
-            "`update_view` export should exist as (f32 x15) -> (f32 x9): 5 gesture args then the \
+    let update_view = instance.get_func(&mut store, "update_view").expect(
+        "`update_view` export should exist as (f32 x15) -> (f32 x9): 5 gesture args then the \
              10 flattened actor state fields (eight Expansion<4> centre words, zoom, res)",
-        );
+    );
 
     // The tape's own start state (independent of view()'s deep init): a shallow
     // centre so pan actually reaches the centre clamps. Each axis is a four-word
@@ -543,10 +988,13 @@ fn mandelbrot_update_view_matches_oracle_over_gesture_tape() {
         };
 
         let args: [f32; 15] = [
-            dx, dy, dzoom, mx, my, cx[0], cx[1], cx[2], cx[3], cy[0], cy[1], cy[2], cy[3], zoom, res,
+            dx, dy, dzoom, mx, my, cx[0], cx[1], cx[2], cx[3], cy[0], cy[1], cy[2], cy[3], zoom,
+            res,
         ];
-        let vals: Vec<wasmtime::Val> =
-            args.iter().map(|v| wasmtime::Val::F32(v.to_bits())).collect();
+        let vals: Vec<wasmtime::Val> = args
+            .iter()
+            .map(|v| wasmtime::Val::F32(v.to_bits()))
+            .collect();
         update_view
             .call(&mut store, &vals, &mut results)
             .expect("update_view should run");
@@ -629,6 +1077,15 @@ fn plasma_sketch_compiles() {
     let bundle = compile_actor_ingot("demos/sketches/plasma");
     assert_browser_wgsl(&bundle.wgsl);
     wasmparser::validate(&bundle.wasm).expect("plasma wasm should be valid");
+    assert_fe_gesture_control(
+        &bundle,
+        &["time", "zoom", "warp", "res"],
+        &["time", "zoom", "warp"],
+    );
+    assert_eq!(
+        call_three_state_update(&bundle, [10.0, -5.0, -1.0, 0.0, 0.0, 0.0, 3.0, 0.8, 512.0]),
+        [10.0f32 * 0.025, 3.0f32 * 0.875, 0.8f32 - 5.0 * 0.005]
+    );
 }
 
 #[test]

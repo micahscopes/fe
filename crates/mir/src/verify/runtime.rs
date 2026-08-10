@@ -242,6 +242,10 @@ fn verify_assign<'db>(
             let _ = runtime_value_class(body, *value)?;
             Some(RuntimeClass::Scalar(to.clone()))
         }
+        RExpr::Bitcast { value, to } => {
+            let _ = runtime_value_class(body, *value)?;
+            Some(RuntimeClass::Scalar(to.clone()))
+        }
         RExpr::ConstRef { region, layout } => {
             let region_id = *region;
             let region = program.const_region(region_id);

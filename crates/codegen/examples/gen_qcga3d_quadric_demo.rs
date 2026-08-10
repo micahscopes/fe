@@ -248,7 +248,7 @@ fn main() {
     let bindings = artifact.layout.bindings.iter().map(|b| serde_json::json!({
         "group": b.group, "binding": b.binding, "name": b.name,
         "access": match b.access { Access::Read => "Read", Access::ReadWrite => "ReadWrite" },
-        "role": match b.role { Role::Input => "Input", Role::Output => "Output" },
+        "role": match b.role { Role::Input => "Input", Role::Output => "Output", Role::Resource => "Resource" },
         "span": b.span, "stride": b.stride,
     })).collect::<Vec<_>>();
     let input = artifact

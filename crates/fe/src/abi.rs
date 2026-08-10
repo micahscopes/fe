@@ -815,9 +815,7 @@ fn semantic_ty_to_abi_desc(db: &DriverDataBase, ty: TyId<'_>) -> Result<AbiTypeD
                 EvmAbi::NAME,
             )),
             ScalarAbi::NotAScalar => unreachable!(),
-            ScalarAbi::NotAValue => {
-                Err(format!("unsupported ABI type `{}`", ty.pretty_print(db)))
-            }
+            ScalarAbi::NotAValue => Err(format!("unsupported ABI type `{}`", ty.pretty_print(db))),
         },
         TyData::TyBase(TyBase::Adt(adt)) => {
             let adt_ref = adt.adt_ref(db);

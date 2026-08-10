@@ -243,14 +243,13 @@ pub(crate) fn top_mod_ast(db: &dyn HirDb, top_mod: TopLevelMod) -> ast::Root {
 
 /// One `actor` declaration, read structurally from the source AST.
 ///
-/// `actor` items are desugared away in HIR lowering, so this is how downstream
-/// tooling (the `fe web` entry derivation) recovers the declared unit: its
-/// placement row and its behaviors with their role markers. Markers are the
-/// last path segment of each `uses`-row entry, matched by name.
+/// This view supplies authored field docs, behavior parameter names, and other
+/// source-only projection details. Semantic entry and stage derivation use the
+/// preserved HIR actor metadata and resolved attributes instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActorDecl {
     pub name: String,
-    /// Last path segment of each placement-row entry, e.g. `GpuProgram`.
+    /// Last path segment of each placement-row entry, retained for source views.
     pub row_markers: Vec<String>,
     /// State fields in declaration order, each with its name and doc comment.
     /// A behavior's `self.<field>` accesses flatten into positional parameters
@@ -273,7 +272,7 @@ pub struct ActorFieldDecl {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActorBehaviorDecl {
     pub name: String,
-    /// Last path segment of each role-row entry, e.g. `FragmentSurface`.
+    /// Last path segment of each role-row entry, retained for source views.
     pub role_markers: Vec<String>,
     /// The behavior's own declared parameter names, in source order, AFTER
     /// `self` (empty for a `self`-less behavior, e.g. the reserved `view()`).

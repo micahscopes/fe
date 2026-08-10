@@ -3196,7 +3196,7 @@ impl<'db> RmirEmitter<'db> {
                 let [value] = args.as_slice() else {
                     return None;
                 };
-                RExpr::Cast {
+                RExpr::Bitcast {
                     value: *value,
                     to: scalar,
                 }

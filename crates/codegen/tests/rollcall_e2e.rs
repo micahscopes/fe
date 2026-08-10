@@ -468,7 +468,11 @@ fn rollcall_registry_gas_at_depth20_is_l2_honest() {
     let verify_result = registry
         .call_function(
             "verifyMembership(uint256,uint256,uint256[20])",
-            &[Token::Uint(leaf), Token::Uint(AbiU256::from(0u64)), path_tokens(&path)],
+            &[
+                Token::Uint(leaf),
+                Token::Uint(AbiU256::from(0u64)),
+                path_tokens(&path),
+            ],
             ExecutionOptions::default(),
         )
         .expect("verifyMembership should execute");
@@ -545,7 +549,11 @@ fn biguint_to_abi_u256(x: &BigUint) -> AbiU256 {
 /// a wide-stack worker thread (the generated function is large; a compiler-stack
 /// accommodation, mirroring the wasm_e2e Poseidon/Merkle gates).
 fn merkle_root_on_wasm(leaves: &[BigUint]) -> BigUint {
-    assert_eq!(leaves.len(), 4, "this end-to-end uses the N=4 (depth-2) builder");
+    assert_eq!(
+        leaves.len(),
+        4,
+        "this end-to-end uses the N=4 (depth-2) builder"
+    );
     let leaves = leaves.to_vec();
     std::thread::Builder::new()
         .stack_size(1 << 31)
@@ -760,7 +768,11 @@ fn rollcall_prove_on_wasm_commit_on_evm_and_verify_membership_end_to_end() {
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 fn merkle_root_on_native(leaves: &[BigUint]) -> Result<BigUint, String> {
-    assert_eq!(leaves.len(), 4, "this end-to-end uses the N=4 (depth-2) builder");
+    assert_eq!(
+        leaves.len(),
+        4,
+        "this end-to-end uses the N=4 (depth-2) builder"
+    );
     let leaves = leaves.to_vec();
     std::thread::Builder::new()
         .stack_size(1 << 31)
@@ -873,7 +885,11 @@ const MERKLE8_LEAF_COUNT: usize = 8;
 /// worker thread for the same reason as the N=4 builder (a large generated
 /// function).
 fn merkle8_root_on_wasm(leaves: &[BigUint]) -> BigUint {
-    assert_eq!(leaves.len(), MERKLE8_LEAF_COUNT, "this end-to-end uses the N=8 (depth-3) builder");
+    assert_eq!(
+        leaves.len(),
+        MERKLE8_LEAF_COUNT,
+        "this end-to-end uses the N=8 (depth-3) builder"
+    );
     let leaves = leaves.to_vec();
     std::thread::Builder::new()
         .stack_size(1 << 31)
@@ -886,8 +902,7 @@ fn merkle8_root_on_wasm(leaves: &[BigUint]) -> BigUint {
 fn merkle8_root_on_wasm_body(leaves: &[BigUint]) -> BigUint {
     let n = MERKLE_N_LIMBS;
     let mut db = DriverDataBase::default();
-    let url =
-        Url::parse("file:///poseidon_merkle8_root_loop.fe").expect("test URL should parse");
+    let url = Url::parse("file:///poseidon_merkle8_root_loop.fe").expect("test URL should parse");
     db.workspace()
         .touch(&mut db, url.clone(), Some(MERKLE8_SRC.to_string()));
     let file = db.workspace().get(&db, &url).expect("file should load");
@@ -919,9 +934,10 @@ fn merkle8_root_on_wasm_body(leaves: &[BigUint]) -> BigUint {
             }
         }
         let mut results = [wasmtime::Val::I32(0)];
-        f.call(&mut store, &params, &mut results).unwrap_or_else(|e| {
-            panic!("N=8 merkle builder (k={k}) should run under wasmtime: {e:?}")
-        });
+        f.call(&mut store, &params, &mut results)
+            .unwrap_or_else(|e| {
+                panic!("N=8 merkle builder (k={k}) should run under wasmtime: {e:?}")
+            });
         root_limbs.push(match results[0] {
             wasmtime::Val::I32(v) => v as u32,
             other => panic!("N=8 merkle builder result must be i32, got {other:?}"),
@@ -940,7 +956,11 @@ fn merkle8_root_on_wasm_body(leaves: &[BigUint]) -> BigUint {
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 fn merkle8_root_on_native(leaves: &[BigUint]) -> Result<BigUint, String> {
-    assert_eq!(leaves.len(), MERKLE8_LEAF_COUNT, "this end-to-end uses the N=8 (depth-3) builder");
+    assert_eq!(
+        leaves.len(),
+        MERKLE8_LEAF_COUNT,
+        "this end-to-end uses the N=8 (depth-3) builder"
+    );
     let leaves = leaves.to_vec();
     std::thread::Builder::new()
         .stack_size(1 << 31)
@@ -958,8 +978,8 @@ fn merkle8_root_on_native(leaves: &[BigUint]) -> Result<BigUint, String> {
 fn merkle8_root_on_native_body(leaves: &[BigUint]) -> Result<BigUint, String> {
     let n = MERKLE_N_LIMBS;
     let mut db = DriverDataBase::default();
-    let url = Url::parse("file:///poseidon_merkle8_root_loop_native.fe")
-        .expect("test URL should parse");
+    let url =
+        Url::parse("file:///poseidon_merkle8_root_loop_native.fe").expect("test URL should parse");
     db.workspace()
         .touch(&mut db, url.clone(), Some(MERKLE8_SRC.to_string()));
     let file = db.workspace().get(&db, &url).expect("file should load");

@@ -180,9 +180,27 @@ fn expansion2_matches_hand_df64_bit_for_bit() {
                 );
             };
         }
-        check4!("add", df64_add_hi, df64_add_lo, expansion2_add_hi, expansion2_add_lo);
-        check4!("sub", df64_sub_hi, df64_sub_lo, expansion2_sub_hi, expansion2_sub_lo);
-        check4!("mul", df64_mul_hi, df64_mul_lo, expansion2_mul_hi, expansion2_mul_lo);
+        check4!(
+            "add",
+            df64_add_hi,
+            df64_add_lo,
+            expansion2_add_hi,
+            expansion2_add_lo
+        );
+        check4!(
+            "sub",
+            df64_sub_hi,
+            df64_sub_lo,
+            expansion2_sub_hi,
+            expansion2_sub_lo
+        );
+        check4!(
+            "mul",
+            df64_mul_hi,
+            df64_mul_lo,
+            expansion2_mul_hi,
+            expansion2_mul_lo
+        );
 
         let want_hi = df64_sqr_hi.call(&mut store, (a_hi, a_lo)).unwrap();
         let want_lo = df64_sqr_lo.call(&mut store, (a_hi, a_lo)).unwrap();
@@ -197,8 +215,12 @@ fn expansion2_matches_hand_df64_bit_for_bit() {
         for &b in SCALAR_ADDENDS.iter() {
             let want_hi = df64_add_f32_hi.call(&mut store, (a_hi, a_lo, b)).unwrap();
             let want_lo = df64_add_f32_lo.call(&mut store, (a_hi, a_lo, b)).unwrap();
-            let got_hi = expansion2_add_f32_hi.call(&mut store, (a_hi, a_lo, b)).unwrap();
-            let got_lo = expansion2_add_f32_lo.call(&mut store, (a_hi, a_lo, b)).unwrap();
+            let got_hi = expansion2_add_f32_hi
+                .call(&mut store, (a_hi, a_lo, b))
+                .unwrap();
+            let got_lo = expansion2_add_f32_lo
+                .call(&mut store, (a_hi, a_lo, b))
+                .unwrap();
             assert_eq!(
                 (got_hi.to_bits(), got_lo.to_bits()),
                 (want_hi.to_bits(), want_lo.to_bits()),

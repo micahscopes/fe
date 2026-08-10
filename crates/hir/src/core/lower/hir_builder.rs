@@ -369,6 +369,7 @@ where
                 generic_params,
                 where_clause,
                 fields,
+                this.empty_effect_params(),
                 this.top_mod(),
                 this.origin(),
             )
@@ -650,7 +651,10 @@ where
                     Partial::Present(spec.params),
                     effects,
                     spec.ret_ty,
-                    spec.modifiers,
+                    crate::hir_def::FuncMetadata {
+                        modifiers: spec.modifiers,
+                        actor_roles: this.empty_effect_params(),
+                    },
                     Some(body),
                     this.top_mod(),
                     this.origin(),

@@ -1,0 +1,6 @@
+[ingot]
+name = "precision_fixed_projection_oracle_gate"
+version = "0.1.0"
+
+[dependencies]
+precision = "../../../../../demos/sketches/precision"

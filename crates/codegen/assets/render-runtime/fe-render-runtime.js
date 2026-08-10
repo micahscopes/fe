@@ -1,4 +1,4 @@
-// fe render runtime (compiler-emitted, protocol fe-web-bundle v4/v5).
+// fe render runtime (compiler-emitted, protocol fe-web-bundle v4/v5/v6).
 //
 // The ONE fixed, versioned, demo-blind WebGPU/wasm render kernel driver
 // shipped by the Fe toolchain. It defines the `<fe-surface>` custom element
@@ -7,11 +7,12 @@
 // additionally carries each uniform member's source field name/doc comment
 // and a `surface` section projected from the actor's `view()`) and drives the
 // two lowerings of the render kernel the compiler produced from the SAME
-// source:
-//   - the GPU lane: shader.wgsl via WebGPU (vertex/fragment entries and the
-//     uniform binding table are read from manifest.layout);
-//   - a CPU fallback when WebGPU is unavailable (e.g. an insecure origin):
-//     the module.wasm kernel invoked per pixel into a 2D canvas.
+// source. v4/v5 bundles carry one GPU shader plus a CPU fallback. v6 also
+// carries ordered GPU pass graphs and shared typed resources; those graphs are
+// intentionally GPU-only and report WebGPU failures without changing programs:
+//   - the GPU lane reads shaders, passes, resources, and layouts from the
+//     manifest;
+//   - legacy bundles may fall back to module.wasm per pixel in a 2D canvas.
 // Uniform controls are generated from the manifest's input binding members.
 //
 // One shared WebGPU adapter/device serves every surface mounted on a page,
@@ -37,6 +38,11 @@ const DEFAULT_SIZE = 256; // dispatch/canvas size for a v4 manifest with no decl
 // ---------------------------------------------------------------------------
 
 let sharedGpuPromise;
+let sharedGpuFailure;
+let sharedGpuRecoveryPromise;
+let pendingDeviceLoss;
+const DEVICE_STABILITY_MS = 50;
+const MAX_RECOVERY_ATTEMPTS = 2;
 /** Every currently connected `<fe-surface>`, live or not (module-level so a
  * `device.lost` event, which is a page-wide fact, can reach every element). */
 const attachedSurfaces = new Set();
@@ -50,15 +56,51 @@ function acquireSharedGpu() {
 }
 
 async function requestGpu() {
-  if (!navigator.gpu) return null;
+  sharedGpuFailure = null;
+  if (!window.isSecureContext) {
+    sharedGpuFailure = new Error(
+      "fe render runtime: WebGPU requires a secure context; serve this page over HTTPS or localhost",
+    );
+    return null;
+  }
+  if (!navigator.gpu) {
+    sharedGpuFailure = new Error(
+      "fe render runtime: this browser does not expose WebGPU (navigator.gpu is unavailable)",
+    );
+    return null;
+  }
   try {
     const adapter = await navigator.gpu.requestAdapter();
-    if (!adapter) return null;
+    if (!adapter) {
+      sharedGpuFailure = new Error(
+        "fe render runtime: no WebGPU adapter is available (requestAdapter returned null). " +
+        "Check browser WebGPU support, hardware acceleration, the GPU blocklist, and chrome://gpu on Chromium.",
+      );
+      return null;
+    }
     const device = await adapter.requestDevice();
+    // Some backends resolve `requestDevice()` and then immediately report
+    // that their native instance disappeared. Do not hand that already-dead
+    // device to every surface or recursively reacquire it forever.
+    const initialState = await Promise.race([
+      device.lost.then((info) => ({ lost: true, info })),
+      new Promise((resolve) => setTimeout(() => resolve({ lost: false }), DEVICE_STABILITY_MS)),
+    ]);
+    if (initialState.lost) {
+      const detail = initialState.info?.message || "the device was lost during initialization";
+      sharedGpuFailure = new Error(
+        `fe render runtime: WebGPU device initialization failed: ${detail}`,
+      );
+      return null;
+    }
     device.lost.then((info) => handleSharedDeviceLoss(device, info));
     return { adapter, device };
   } catch (error) {
-    console.warn("[fe web] WebGPU init failed, using wasm fallback:", error);
+    sharedGpuFailure = new Error(
+      `fe render runtime: WebGPU initialization failed: ${error?.message ?? String(error)}`,
+      { cause: error },
+    );
+    console.warn("[fe web] WebGPU initialization failed:", error);
     return null;
   }
 }
@@ -71,16 +113,48 @@ async function requestGpu() {
  * whole point of releasing the GPU context at "ready"), so recovery is a
  * cheap no-op for it; only elements that are actually `live` do real work.
  */
-async function handleSharedDeviceLoss(deadDevice, info) {
-  console.warn(`[fe web] WebGPU device lost (${info?.reason ?? "unknown"}): ${info?.message ?? ""}`);
-  if (sharedGpuPromise) {
-    const current = await sharedGpuPromise.catch(() => null);
-    if (current && current.device !== deadDevice) return; // already recovered by a concurrent loss
+function handleSharedDeviceLoss(deadDevice, info) {
+  pendingDeviceLoss = { deadDevice, info };
+  if (sharedGpuRecoveryPromise === undefined) {
+    sharedGpuRecoveryPromise = drainDeviceLosses().finally(() => {
+      sharedGpuRecoveryPromise = undefined;
+      if (pendingDeviceLoss) {
+        const pending = pendingDeviceLoss;
+        pendingDeviceLoss = undefined;
+        handleSharedDeviceLoss(pending.deadDevice, pending.info);
+      }
+    });
   }
-  sharedGpuPromise = undefined;
-  const fresh = await acquireSharedGpu();
-  for (const surface of attachedSurfaces) {
-    await surface._onDeviceLoss(fresh);
+  return sharedGpuRecoveryPromise;
+}
+
+async function drainDeviceLosses() {
+  let attempts = 0;
+  while (pendingDeviceLoss) {
+    const { deadDevice, info } = pendingDeviceLoss;
+    pendingDeviceLoss = undefined;
+    console.warn(`[fe web] WebGPU device lost (${info?.reason ?? "unknown"}): ${info?.message ?? ""}`);
+    const current = sharedGpuPromise ? await sharedGpuPromise.catch(() => null) : null;
+    if (current && current.device !== deadDevice) continue;
+
+    let fresh = null;
+    if (attempts < MAX_RECOVERY_ATTEMPTS) {
+      attempts += 1;
+      sharedGpuPromise = undefined;
+      fresh = await acquireSharedGpu();
+    } else {
+      sharedGpuFailure = new Error(
+        `fe render runtime: WebGPU device recovery stopped after ${MAX_RECOVERY_ATTEMPTS} failed attempts`,
+      );
+      sharedGpuPromise = Promise.resolve(null);
+    }
+    for (const surface of attachedSurfaces) {
+      try {
+        await surface._onDeviceLoss(fresh);
+      } catch (error) {
+        surface._fail(error);
+      }
+    }
   }
 }
 
@@ -202,6 +276,7 @@ const SHADOW_CSS = `
          font-size: 11px; font-weight: 600; }
 .badge.webgpu { background: #10281a; color: #5bffa0; }
 .badge.wasm-2d { background: #1a2030; color: #8fb0ff; }
+.badge.error { background: #35151a; color: #ff9da8; }
 .panel { display: grid; gap: 12px; }
 .control { display: grid; gap: 4px; }
 .control label { display: flex; justify-content: space-between; color: #96a0b5; }
@@ -252,8 +327,14 @@ class FeSurfaceElement extends HTMLElement {
     this._surface = null;
     this._control = null; // R3 param gestures: the projected `control` manifest section.
     this._controlKernel = null; // the resolved wasm control export, or null (no gestures).
+    this._passes = [];
+    this._resources = [];
+    this._graph = false;
     this._gestureListeners = null; // { canvas, onPointerDown, onPointerMove, onPointerUp, onWheel }
-    this._gpu = null; // { device, format, pipeline, bindGroup, uniformBuffer }
+    this._gestureFrame = null;
+    this._gesturePresenting = false;
+    this._gestureDirty = false;
+    this._gpu = null; // one legacy pipeline, or { passRecords, resourceBuffers } for a graph.
     this._liveContext = null; // GPUCanvasContext on `_liveCanvas`
     this._adoptedContext = null; // GPUCanvasContext on `_adoptedCanvas`
     this._resolveReady = null;
@@ -263,6 +344,10 @@ class FeSurfaceElement extends HTMLElement {
       this._resolveReady = resolve;
       this._rejectReady = reject;
     });
+    // Declarative surfaces have no imperative consumer awaiting this private
+    // promise. Observe rejection without changing the original promise that
+    // `mountRenderSurface` callers await.
+    this._readyPromise.catch(() => {});
     this._livePromise = new Promise((resolve) => {
       this._resolveLive = resolve;
     });
@@ -376,9 +461,20 @@ class FeSurfaceElement extends HTMLElement {
     try {
       const manifestUrl = new URL(manifestAttr, this.baseURI);
       const manifest = await (await fetchOrThrow(manifestUrl, "manifest")).json();
+      if (manifest.protocol !== "fe-web-bundle" || ![4, 5, 6].includes(manifest.protocol_version)) {
+        throw new Error(
+          `fe render runtime: unsupported manifest protocol ${manifest.protocol}@${manifest.protocol_version}`,
+        );
+      }
       this._manifestUrl = manifestUrl;
       this._manifest = deepFreeze(manifest);
-      this._layout = manifest.layout;
+      this._passes = manifest.passes?.length
+        ? manifest.passes
+        : [{ source_entry: manifest.source_entry, shader: manifest.artifacts.wgsl, layout: manifest.layout }];
+      this._resources = manifest.resources || [];
+      this._graph = this._resources.length > 0 || this._passes.some((pass) => pass.layout.mode === "compute");
+      const fragmentPass = [...this._passes].reverse().find((pass) => pass.layout.mode === "render");
+      this._layout = fragmentPass?.layout ?? manifest.layout;
       this._surface = manifest.surface || null;
       this._control = manifest.control || null;
       const inputBinding = this._layout.bindings.find((binding) => binding.role === "input");
@@ -390,13 +486,23 @@ class FeSurfaceElement extends HTMLElement {
         1 +
         Math.max(-1, ...this._builtins.map((b) => b.arg_index), ...this._members.map((m) => m.arg_index));
 
-      this._wasmUrl = new URL(manifest.artifacts.wasm, manifestUrl);
+      this._wasmUrl = manifest.artifacts.wasm
+        ? new URL(manifest.artifacts.wasm, manifestUrl)
+        : null;
       this._wgslUrl = new URL(manifest.artifacts.wgsl, manifestUrl);
-      const wasmBytes = await (await fetchOrThrow(this._wasmUrl, "wasm module")).arrayBuffer();
-      const { instance } = await WebAssembly.instantiate(wasmBytes, {});
-      this._kernel = instance.exports[manifest.source_entry];
-      if (typeof this._kernel !== "function") {
-        throw new Error(`fe render runtime: wasm export \`${manifest.source_entry}\` not found`);
+      this._passShaderUrls = this._passes.map((pass) => new URL(pass.shader, manifestUrl));
+      this._kernel = null;
+      let instance = null;
+      if (this._wasmUrl) {
+        const wasmBytes = await (await fetchOrThrow(this._wasmUrl, "wasm module")).arrayBuffer();
+        ({ instance } = await WebAssembly.instantiate(wasmBytes, {}));
+        this._kernel = instance.exports[manifest.source_entry];
+        if (!this._graph && typeof this._kernel !== "function") {
+          throw new Error(`fe render runtime: wasm export \`${manifest.source_entry}\` not found`);
+        }
+        if (this._graph && typeof this._kernel !== "function") this._kernel = null;
+      } else if (!this._graph) {
+        throw new Error("fe render runtime: bundle has neither a Wasm fallback nor a GPU pass graph");
       }
       // R3 param gestures: the SAME wasm instance carries the control export
       // (already part of the root set the compiler emitted `module.wasm`
@@ -404,7 +510,7 @@ class FeSurfaceElement extends HTMLElement {
       // means gestures stay off -- never a JS reimplementation fallback.
       this._controlKernel = null;
       if (this._control) {
-        const controlFn = instance.exports[this._control.export];
+        const controlFn = instance?.exports[this._control.export];
         if (typeof controlFn === "function") {
           this._controlKernel = controlFn;
         } else {
@@ -436,6 +542,12 @@ class FeSurfaceElement extends HTMLElement {
 
   _fail(error) {
     this._fsm = "error";
+    this._badge.textContent = "error";
+    this._badge.className = "badge error";
+    const notice = document.createElement("div");
+    notice.className = "control notice";
+    notice.textContent = error?.message ?? String(error);
+    this._panel.replaceChildren(notice);
     console.error("[fe web] fe-surface failed to mount:", error);
     this._rejectReady?.(error);
     this._dispatch("fe-error", error);
@@ -535,12 +647,117 @@ class FeSurfaceElement extends HTMLElement {
     return this._gpuOverride ?? (await acquireSharedGpu());
   }
 
+  async _buildPassGraph(device) {
+    const format = this._layout.color_target_format || navigator.gpu.getPreferredCanvasFormat();
+    const shaderSources = await Promise.all(
+      this._passShaderUrls.map(async (url) => (await fetchOrThrow(url, "WGSL pass shader")).text()),
+    );
+    const resourceBuffers = new Map();
+    for (const resource of this._resources) {
+      if (resource.group !== 0) {
+        throw new Error("fe render runtime: v6 pass graphs currently require resource group 0");
+      }
+      resourceBuffers.set(
+        resource.name,
+        device.createBuffer({
+          size: Math.max(4, resource.stride * resource.length),
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+        }),
+      );
+    }
+
+    const passRecords = [];
+    for (let index = 0; index < this._passes.length; index++) {
+      const pass = this._passes[index];
+      const module = device.createShaderModule({ code: shaderSources[index] });
+      const visibility = pass.layout.mode === "compute" ? GPUShaderStage.COMPUTE : GPUShaderStage.FRAGMENT;
+      const layoutEntries = [];
+      const groupEntries = [];
+      const inputs = [];
+      const outputs = [];
+      for (const binding of pass.layout.bindings) {
+        if (binding.group !== 0) {
+          throw new Error("fe render runtime: v6 pass graphs currently require binding group 0");
+        }
+        if (binding.role === "resource") {
+          const buffer = resourceBuffers.get(binding.name);
+          if (!buffer) throw new Error(`fe render runtime: resource \`${binding.name}\` is undeclared`);
+          layoutEntries.push({
+            binding: binding.binding,
+            visibility,
+            buffer: { type: binding.access === "read" ? "read-only-storage" : "storage" },
+          });
+          groupEntries.push({ binding: binding.binding, resource: { buffer } });
+        } else if (binding.role === "input") {
+          const buffer = device.createBuffer({
+            size: Math.max(16, binding.span),
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+          });
+          layoutEntries.push({
+            binding: binding.binding,
+            visibility,
+            buffer: { type: "read-only-storage" },
+          });
+          groupEntries.push({ binding: binding.binding, resource: { buffer } });
+          inputs.push({ binding, buffer });
+        } else if (binding.role === "output") {
+          // Compiler-internal channels, including the checked-arithmetic trap
+          // word, are pass-local. They are deliberately not graph resources:
+          // external actor storage remains shared by resource identity while
+          // these buffers are rebuilt with the pass on device recovery.
+          const buffer = device.createBuffer({
+            size: Math.max(4, binding.span),
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+          });
+          layoutEntries.push({
+            binding: binding.binding,
+            visibility,
+            buffer: { type: binding.access === "read" ? "read-only-storage" : "storage" },
+          });
+          groupEntries.push({ binding: binding.binding, resource: { buffer } });
+          outputs.push({ binding, buffer });
+        }
+      }
+      const bindGroupLayout = layoutEntries.length
+        ? device.createBindGroupLayout({ entries: layoutEntries })
+        : null;
+      const bindGroup = bindGroupLayout
+        ? device.createBindGroup({ layout: bindGroupLayout, entries: groupEntries })
+        : null;
+      const pipelineLayout = bindGroupLayout
+        ? device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] })
+        : "auto";
+      const pipeline = pass.layout.mode === "compute"
+        ? device.createComputePipeline({
+            layout: pipelineLayout,
+            compute: { module, entryPoint: pass.layout.entry_point },
+          })
+        : device.createRenderPipeline({
+            layout: pipelineLayout,
+            vertex: { module, entryPoint: pass.layout.vertex_entry },
+            fragment: {
+              module,
+              entryPoint: pass.layout.fragment_entry,
+              targets: [{ format }],
+            },
+            primitive: { topology: "triangle-list" },
+          });
+      passRecords.push({ pass, pipeline, bindGroup, inputs, outputs });
+    }
+    return { device, format, passRecords, resourceBuffers };
+  }
+
   async _ensurePipeline() {
+    this._pipelineError = null;
     const gpu = await this._resolveGpu();
     if (!gpu) return null;
     const { device } = gpu;
     if (this._gpu && this._gpu.device === device) return this._gpu;
     try {
+      if (this._graph) {
+        this._gpu = await this._buildPassGraph(device);
+        return this._gpu;
+      }
       const wgsl = await (await fetchOrThrow(this._wgslUrl, "WGSL shader")).text();
       const shaderModule = device.createShaderModule({ code: wgsl });
       const format = this._layout.color_target_format || navigator.gpu.getPreferredCanvasFormat();
@@ -577,12 +794,63 @@ class FeSurfaceElement extends HTMLElement {
       this._gpu = { device, format, pipeline, bindGroup, uniformBuffer };
       return this._gpu;
     } catch (error) {
-      console.warn("[fe web] WebGPU pipeline init failed, using wasm fallback:", error);
+      this._pipelineError = error;
+      console.warn(
+        this._graph
+          ? "[fe web] WebGPU pass graph init failed:"
+          : "[fe web] WebGPU pipeline init failed, using wasm fallback:",
+        error,
+      );
       return null;
     }
   }
 
   _presentOn(context, uniforms) {
+    if (this._graph) {
+      const { device, passRecords } = this._gpu;
+      for (const record of passRecords) {
+        for (const input of record.inputs) {
+          const values = input.binding.members.map((member) => {
+            const index = this._memberIndexByName.get(member.name);
+            return index === undefined ? 0 : uniforms[index];
+          });
+          writeUniformBuffer(
+            device,
+            input.buffer,
+            input.binding.span,
+            input.binding.members,
+            values,
+          );
+        }
+      }
+      const encoder = device.createCommandEncoder();
+      for (const record of passRecords) {
+        if (record.pass.layout.mode === "compute") {
+          const compute = encoder.beginComputePass();
+          compute.setPipeline(record.pipeline);
+          if (record.bindGroup) compute.setBindGroup(0, record.bindGroup);
+          const dispatch = record.pass.dispatch;
+          if (!dispatch) throw new Error("fe render runtime: compute pass has no fixed dispatch");
+          compute.dispatchWorkgroups(dispatch[0], dispatch[1], dispatch[2]);
+          compute.end();
+        } else {
+          const render = encoder.beginRenderPass({
+            colorAttachments: [{
+              view: context.getCurrentTexture().createView(),
+              clearValue: { r: 0, g: 0, b: 0, a: 1 },
+              loadOp: "clear",
+              storeOp: "store",
+            }],
+          });
+          render.setPipeline(record.pipeline);
+          if (record.bindGroup) render.setBindGroup(0, record.bindGroup);
+          render.draw(3);
+          render.end();
+        }
+      }
+      device.queue.submit([encoder.finish()]);
+      return;
+    }
     const { device, pipeline, bindGroup, uniformBuffer } = this._gpu;
     if (uniformBuffer) {
       writeUniformBuffer(device, uniformBuffer, this._inputBinding.span, this._members, uniforms);
@@ -591,6 +859,9 @@ class FeSurfaceElement extends HTMLElement {
   }
 
   _callKernel(px, py, uniforms) {
+    if (!this._kernel) {
+      throw new Error("fe render runtime: this GPU pass graph has no CPU fallback");
+    }
     const args = new Array(this._argumentCount).fill(0);
     for (const builtin of this._builtins) {
       args[builtin.arg_index] = builtin.source.endsWith("_y") ? py : px;
@@ -643,6 +914,17 @@ class FeSurfaceElement extends HTMLElement {
 
     const gpu = await this._ensurePipeline();
     if (!gpu) {
+      if (!this._kernel) {
+        if (this._pipelineError) {
+          throw new Error(
+            `fe render runtime: WebGPU pass graph initialization failed: ${this._pipelineError.message}`,
+            { cause: this._pipelineError },
+          );
+        }
+        throw sharedGpuFailure ?? new Error(
+          "fe render runtime: WebGPU is required for this resource pass graph",
+        );
+      }
       this._mode = "wasm-2d";
       this._renderWasmInto(this._adoptedCanvas || this._posterCanvas, width, height, this._uniforms);
       return;
@@ -662,11 +944,20 @@ class FeSurfaceElement extends HTMLElement {
       this._presentOn(context, this._uniforms);
       return;
     }
-    const offscreen = new OffscreenCanvas(width, height);
-    const context = offscreen.getContext("webgpu");
+    // Use a transient HTML canvas for the one-frame poster. Some otherwise
+    // WebGPU-capable browser configurations cannot create an OffscreenCanvas
+    // WebGPU context provider. The transient canvas is never attached and its
+    // context is still unconfigured immediately after capture.
+    const posterSource = document.createElement("canvas");
+    posterSource.width = width;
+    posterSource.height = height;
+    const context = posterSource.getContext("webgpu");
+    if (!context) {
+      throw new Error("fe render runtime: the browser could not create a WebGPU canvas context");
+    }
     context.configure({ device: gpu.device, format: gpu.format, alphaMode: "opaque" });
     this._presentOn(context, this._uniforms);
-    const bitmap = await createImageBitmap(offscreen);
+    const bitmap = await createImageBitmap(posterSource);
     context.unconfigure();
     this._paintPoster(bitmap, width, height);
   }
@@ -736,6 +1027,12 @@ class FeSurfaceElement extends HTMLElement {
     if (!gpu) {
       // WebGPU became unavailable between poster and live (e.g. a
       // pre-recovery device loss): fail over honestly, badge included.
+      if (!this._kernel) {
+        this._fail(sharedGpuFailure ?? new Error(
+          "fe render runtime: WebGPU is required for this resource pass graph",
+        ));
+        return;
+      }
       this._mode = "wasm-2d";
       this._renderWasmInto(this._posterCanvas, this._backingWidth, this._backingHeight, this._uniforms);
       this._enterLive();
@@ -872,6 +1169,12 @@ class FeSurfaceElement extends HTMLElement {
     if (this._fsm !== "live") return; // posters rebuild lazily on the next `.live()`.
     this._dispatch("fe-statechange", { state: this._fsm, reason: "device-lost" });
     if (!freshGpu) {
+      if (!this._kernel) {
+        this._fail(sharedGpuFailure ?? new Error(
+          "fe render runtime: WebGPU device recovery failed for a GPU-only pass graph",
+        ));
+        return;
+      }
       this._mode = "wasm-2d";
       this._renderWasmInto(
         this._adoptedCanvas || this._posterCanvas,
@@ -893,6 +1196,9 @@ class FeSurfaceElement extends HTMLElement {
   }
 
   _teardown() {
+    if (this._gestureFrame !== null) cancelAnimationFrame(this._gestureFrame);
+    this._gestureFrame = null;
+    this._gestureDirty = false;
     if (this._liveContext) {
       try {
         this._liveContext.unconfigure();
@@ -934,6 +1240,7 @@ class FeSurfaceElement extends HTMLElement {
 
     let dragging = false;
     let dragPointerId = null;
+    let lastDragPoint = null;
 
     const backingPoint = (event) => {
       const rect = canvas.getBoundingClientRect();
@@ -946,18 +1253,24 @@ class FeSurfaceElement extends HTMLElement {
       if (event.button !== 0) return;
       dragging = true;
       dragPointerId = event.pointerId;
+      const { mx, my } = backingPoint(event);
+      lastDragPoint = { mx, my };
       canvas.setPointerCapture(event.pointerId);
       event.preventDefault();
     };
     const onPointerMove = (event) => {
       if (!dragging || event.pointerId !== dragPointerId) return;
-      const { mx, my, scaleX, scaleY } = backingPoint(event);
-      this._applyGesture({ dx: event.movementX * scaleX, dy: event.movementY * scaleY, dzoom: 0, mx, my });
+      const { mx, my } = backingPoint(event);
+      const previous = lastDragPoint;
+      lastDragPoint = { mx, my };
+      if (!previous) return;
+      this._applyGesture({ dx: mx - previous.mx, dy: my - previous.my, dzoom: 0, mx, my });
     };
     const onPointerUp = (event) => {
       if (event.pointerId !== dragPointerId) return;
       dragging = false;
       dragPointerId = null;
+      lastDragPoint = null;
       try {
         canvas.releasePointerCapture(event.pointerId);
       } catch {
@@ -1003,6 +1316,8 @@ class FeSurfaceElement extends HTMLElement {
           const index = this._memberIndexByName.get(arg.name);
           return index === undefined ? 0 : this._uniforms[index];
         }
+        case "resource":
+          return arg.wasm_type === "i64" ? 0n : 0;
         case "drag":
           return arg.axis === "x" ? raw.dx : raw.dy;
         case "wheel":
@@ -1020,14 +1335,51 @@ class FeSurfaceElement extends HTMLElement {
       const memberIndex = this._memberIndexByName.get(name);
       if (memberIndex !== undefined) next[memberIndex] = results[index];
     });
-    this._render(next);
+    this._queueGestureRender(next);
+  }
+
+  /** Keep every Fe-computed state transition, but present only the newest one
+   * after the next animation-frame boundary and after the prior GPU submission
+   * has completed. This is a generic latest-state throttle, not demo-specific
+   * gesture math. A graph presentation still records its complete ordered pass
+   * list in one command buffer. */
+  _queueGestureRender(next) {
+    this._uniforms = next;
+    this._refreshControlValues();
+    if (this._fsm !== "live") return;
+    this._gestureDirty = true;
+    this._scheduleGestureFrame();
+  }
+
+  _scheduleGestureFrame() {
+    if (this._gestureFrame !== null || this._gesturePresenting || !this._gestureDirty) return;
+    this._gestureFrame = requestAnimationFrame(() => {
+      this._gestureFrame = null;
+      void this._flushGestureFrame();
+    });
+  }
+
+  async _flushGestureFrame() {
+    if (this._fsm !== "live" || !this._gestureDirty || this._gesturePresenting) return;
+    this._gestureDirty = false;
+    this._gesturePresenting = true;
+    try {
+      this._render();
+      const queue = this._mode === "webgpu" ? this._gpu?.device?.queue : null;
+      if (queue?.onSubmittedWorkDone) await queue.onSubmittedWorkDone();
+    } finally {
+      this._gesturePresenting = false;
+      if (this._fsm === "live" && this._gestureDirty) this._scheduleGestureFrame();
+    }
   }
 
   // -- chrome: badge / controls / meta --------------------------------------
 
   _updateBadge() {
     if (!this._badge) return;
-    this._badge.textContent = this._mode === "webgpu" ? "WebGPU · shader.wgsl" : "wasm · module.wasm";
+    this._badge.textContent = this._mode === "webgpu"
+      ? `WebGPU · ${this._passes.length} pass${this._passes.length === 1 ? "" : "es"}`
+      : "wasm · module.wasm";
     this._badge.className = `badge ${this._mode === "webgpu" ? "webgpu" : "wasm-2d"}`;
   }
 
@@ -1066,44 +1418,57 @@ class FeSurfaceElement extends HTMLElement {
       const label = document.createElement("label");
       const value = document.createElement("b");
       const isInt = param.kind === "int";
-      const format = (v) => (+v).toFixed(isInt ? 0 : 2);
+      const min = typeof param.min === "number" ? param.min : 0;
+      const max = typeof param.max === "number" ? param.max : 1;
+      const isLog = param.kind === "log" && min > 0 && max > min;
+      const encode = isLog
+        ? (v) => Math.log10(Math.max(min, Math.min(max, +v)))
+        : (v) => +v;
+      const decode = isLog ? (v) => 10 ** (+v) : (v) => +v;
+      const format = (v) => {
+        const number = +v;
+        if (isInt) return number.toFixed(0);
+        if (isLog && (number < 0.01 || number >= 1000)) return number.toExponential(2);
+        return Number(number.toPrecision(8)).toString();
+      };
       value.textContent = format(this._uniforms[index]);
       const name = document.createElement("span");
       name.textContent = param.name;
       label.append(name, value);
       const input = document.createElement("input");
       input.type = "range";
-      const min = typeof param.min === "number" ? param.min : 0;
-      const max = typeof param.max === "number" ? param.max : 1;
-      input.min = String(min);
-      input.max = String(max);
-      input.step = isInt ? "1" : String((max - min) / 200 || 0.01);
-      input.value = String(this._uniforms[index]);
+      const inputMin = isLog ? Math.log10(min) : min;
+      const inputMax = isLog ? Math.log10(max) : max;
+      input.min = String(inputMin);
+      input.max = String(inputMax);
+      input.step = isInt ? "1" : String((inputMax - inputMin) / 200 || 0.01);
+      input.value = String(encode(this._uniforms[index]));
       input.oninput = () => {
         const next = this._uniforms.slice();
-        next[index] = +input.value;
+        next[index] = decode(input.value);
         this._render(next);
       };
       row.append(label, input);
       this._panel.append(row);
-      this._controlRows.push({ index, input, value, format });
+      this._controlRows.push({ index, input, value, format, encode });
     });
   }
 
   _refreshControlValues() {
     for (const row of this._controlRows) {
       row.value.textContent = row.format(this._uniforms[row.index]);
-      row.input.value = String(this._uniforms[row.index]);
+      row.input.value = String(row.encode(this._uniforms[row.index]));
     }
   }
 
   _updateMeta() {
     if (!this._meta) return;
     const link = (href, text) => `<a href="${href}" target="_blank" rel="noopener">${text}</a>`;
+    const wasm = this._wasmUrl
+      ? link(this._wasmUrl.href, `wasm ${this._manifest.artifacts.wasm_bytes} B`) + ` · `
+      : "";
     this._meta.innerHTML =
-      `entry ${this._manifest.source_entry} · ` +
-      link(this._wasmUrl.href, `wasm ${this._manifest.artifacts.wasm_bytes} B`) +
-      ` · ` +
+      `entry ${this._manifest.source_entry} · ` + wasm +
       link(this._wgslUrl.href, `wgsl ${this._manifest.artifacts.wgsl_bytes} B`) +
       ` · path ${this._mode} · fe ${this._manifest.provenance.compiler_version} · ` +
       link(this._manifestUrl.href, `manifest`);

@@ -307,6 +307,248 @@ pub fn from_qf_offset<const L: usize>(_ w0: f32, _ w1: f32, _ w2: f32, _ w3: f32
 }
 
 // -----------------------------------------------------------------------------
+// Deterministic binary32 projection.
+//
+// The exact Fixed value never travels through floating-point arithmetic here.
+// The recursive limb view finds the leading bit and selects the 24 retained
+// significand bits. Guard and sticky information then implement IEEE-754
+// round-to-nearest, ties-to-even with integer operations only. For the widths
+// used by the precision ladder (L in {2, 4, 6, 8}), every nonzero value is a
+// normal binary32 number. Zero is canonical +0, including negative zero.
+// -----------------------------------------------------------------------------
+
+/// Bit-level view of a least-significant-limb-first magnitude. The recursion is
+/// specialized with `Limbs<L>`; projection contains no runtime limb loop.
+pub trait Binary32View {
+    /// Index of the highest set bit, with bit zero at the magnitude LSB. `-1`
+    /// denotes zero.
+    fn highest_bit(self) -> i32
+
+    /// Bit at a signed magnitude index. Out-of-range indices read as zero.
+    fn bit_at(self, _ index: i32) -> u32
+
+    /// Low 32 bits of the magnitude shifted right by `index`. Negative indices
+    /// read as zero. Recursive specialization visits each relevant limb once.
+    fn word_from(self, _ index: i32) -> u32
+
+    /// OR of all magnitude bits whose index is strictly below `count`.
+    fn any_below(self, _ count: i32) -> u32
+
+    /// Number of fractional bits in this Fixed representation.
+    fn fractional_bits(self) -> i32
+}
+
+/// Highest set bit of one 13-bit limb, or -1 when the limb is zero.
+fn limb_highest_bit(_ value: u32) -> i32 {
+    if value >= 4096 { 12 }
+    else { if value >= 2048 { 11 }
+    else { if value >= 1024 { 10 }
+    else { if value >= 512 { 9 }
+    else { if value >= 256 { 8 }
+    else { if value >= 128 { 7 }
+    else { if value >= 64 { 6 }
+    else { if value >= 32 { 5 }
+    else { if value >= 16 { 4 }
+    else { if value >= 8 { 3 }
+    else { if value >= 4 { 2 }
+    else { if value >= 2 { 1 }
+    else { if value == 1 { 0 } else { -1 }
+    } } } } } } } } } } } }
+}
+
+impl Binary32View for LimbLast {
+    fn highest_bit(self) -> i32 { limb_highest_bit(self.value) }
+
+    fn bit_at(self, _ index: i32) -> u32 {
+        if index < 0 {
+            0
+        } else {
+            if index < 13 {
+                let shift: u32 = __bitcast(index)
+                (self.value >> shift) & 1
+            } else {
+                0
+            }
+        }
+    }
+
+    fn word_from(self, _ index: i32) -> u32 {
+        if index < 0 {
+            0
+        } else {
+            if index < 13 {
+                let shift: u32 = __bitcast(index)
+                self.value >> shift
+            } else {
+                0
+            }
+        }
+    }
+
+    fn any_below(self, _ count: i32) -> u32 {
+        if count <= 0 {
+            0
+        } else {
+            if count >= 13 {
+                self.value
+            } else {
+                let shift: u32 = __bitcast(count)
+                self.value & (((1 as u32) << shift) - 1)
+            }
+        }
+    }
+
+    fn fractional_bits(self) -> i32 { 0 }
+}
+
+impl<T: Binary32View + Copy> Binary32View for LimbMore<T> {
+    fn highest_bit(self) -> i32 {
+        let upper: i32 = self.tail.highest_bit()
+        if upper >= 0 { upper + 13 } else { limb_highest_bit(self.lead) }
+    }
+
+    fn bit_at(self, _ index: i32) -> u32 {
+        if index < 0 {
+            0
+        } else {
+            if index < 13 {
+                let shift: u32 = __bitcast(index)
+                (self.lead >> shift) & 1
+            } else {
+                self.tail.bit_at(index - 13)
+            }
+        }
+    }
+
+    fn word_from(self, _ index: i32) -> u32 {
+        if index < 0 {
+            0
+        } else {
+            if index < 13 {
+                let shift: u32 = __bitcast(index)
+                let upper_shift: u32 = __bitcast(13 - index)
+                (self.lead >> shift) | (self.tail.word_from(0) << upper_shift)
+            } else {
+                self.tail.word_from(index - 13)
+            }
+        }
+    }
+
+    fn any_below(self, _ count: i32) -> u32 {
+        if count <= 0 {
+            0
+        } else {
+            if count >= 13 {
+                self.lead | self.tail.any_below(count - 13)
+            } else {
+                let shift: u32 = __bitcast(count)
+                self.lead & (((1 as u32) << shift) - 1)
+            }
+        }
+    }
+
+    fn fractional_bits(self) -> i32 { 13 + self.tail.fractional_bits() }
+}
+
+/// Project an exact sign-magnitude `Fixed<L>` value to its correctly rounded
+/// IEEE-754 binary32 encoding. This one-way projection cannot perturb the exact
+/// source value and is suitable for packing into `StorageBuffer<u32, N>`.
+pub fn to_f32_bits<const L: usize>(_ sign: u32, _ mag: Limbs<L>) -> u32
+    where Limbs<L>: Binary32View + Copy,
+{
+    let high: i32 = <Limbs<L> as Binary32View>::highest_bit(mag)
+    if high < 0 {
+        0
+    } else {
+        let mut exponent: i32 = high - <Limbs<L> as Binary32View>::fractional_bits(mag) + 127
+        // The leading 24 magnitude bits, aligned with the implicit binary32
+        // leading one at bit 23. One recursive window extraction replaces 24
+        // separately expanded recursive bit lookups.
+        let window_shift: i32 = high - 23
+        let retained: u32 = if window_shift < 0 {
+            let left: u32 = __bitcast(-window_shift)
+            <Limbs<L> as Binary32View>::word_from(mag, 0) << left
+        } else {
+            <Limbs<L> as Binary32View>::word_from(mag, window_shift)
+        }
+        let guard_index: i32 = high - 24
+        let guard: u32 = <Limbs<L> as Binary32View>::bit_at(mag, guard_index)
+        let sticky: u32 = <Limbs<L> as Binary32View>::any_below(mag, guard_index)
+        let increment: u32 = if guard == 1 {
+            if sticky != 0 { 1 } else { retained & 1 }
+        } else {
+            0
+        }
+        let mut rounded: u32 = retained + increment
+        if rounded == 16777216 {
+            rounded = 8388608
+            exponent = exponent + 1
+        }
+        let exponent_bits: u32 = __bitcast(exponent)
+        (sign << 31) | (exponent_bits << 23) | (rounded & 8388607)
+    }
+}
+
+/// Decompose an exact `Fixed<L>` value into four non-overlapping binary32
+/// words, most significant first. For `Fixed<8>` values in the Mandelbrot
+/// orbit range, four 24-bit chunks cover the full 91-bit fractional payload.
+/// The reference pass therefore preserves the exact integer orbit while each
+/// pixel consumes only four ordinary binary32 terms.
+pub fn to_f32_quad_bits<const L: usize>(_ sign: u32, _ mag: Limbs<L>) -> (u32, u32, u32, u32)
+    where Limbs<L>: Binary32View + Copy,
+{
+    let high: i32 = <Limbs<L> as Binary32View>::highest_bit(mag)
+    let fractional: i32 = <Limbs<L> as Binary32View>::fractional_bits(mag)
+    let mut w0: u32 = 0
+    let mut w1: u32 = 0
+    let mut w2: u32 = 0
+    let mut w3: u32 = 0
+    let mut slot: u32 = 0
+    let mut offset: i32 = 0
+    while slot < 4 {
+        let chunk_high: i32 = high - offset
+        let bits: u32 = if chunk_high < 0 {
+            0
+        } else {
+            let chunk_low: i32 = chunk_high - 23
+            let retained: u32 = if chunk_low < 0 {
+                let left: u32 = __bitcast(-chunk_low)
+                (<Limbs<L> as Binary32View>::word_from(mag, 0) << left) & 16777215
+            } else {
+                <Limbs<L> as Binary32View>::word_from(mag, chunk_low) & 16777215
+            }
+            if retained == 0 {
+                0
+            } else {
+                let upper: u32 = retained >> 13
+                let word_high: i32 = if upper == 0 {
+                    limb_highest_bit(retained)
+                } else {
+                    13 + limb_highest_bit(upper)
+                }
+                let align: u32 = __bitcast(23 - word_high)
+                let significand: u32 = retained << align
+                let exponent: i32 = chunk_low + word_high - fractional + 127
+                let exponent_bits: u32 = __bitcast(exponent)
+                (sign << 31) | (exponent_bits << 23) | (significand & 8388607)
+            }
+        }
+        if slot == 0 {
+            w0 = bits
+        } else {
+            if slot == 1 {
+                w1 = bits
+            } else {
+                if slot == 2 { w2 = bits } else { w3 = bits }
+            }
+        }
+        slot = slot + 1
+        offset = offset + 24
+    }
+    (w0, w1, w2, w3)
+}
+
+// -----------------------------------------------------------------------------
 // Mandelbrot escape in `Fixed<L>`. Every quantity is a fixed-point integer, so
 // nothing the GPU shader compiler does can perturb the orbit.
 // -----------------------------------------------------------------------------
@@ -315,7 +557,7 @@ pub fn from_qf_offset<const L: usize>(_ w0: f32, _ w1: f32, _ w2: f32, _ w3: f32
 /// iff `top > 4`, or `top == 4` with any nonzero fractional limb. Strict `>`
 /// matters: `z = -2` (the antenna tip) sits at `|z|^2 == 4` forever and must
 /// NOT escape.
-fn escaped<const L: usize>(_ v: Limbs<L>) -> u32
+pub fn escaped<const L: usize>(_ v: Limbs<L>) -> u32
     where Limbs<L>: Top + OrLower + Copy,
 {
     let top: u32 = <Limbs<L> as Top>::top(v)
@@ -328,6 +570,32 @@ fn escaped<const L: usize>(_ v: Limbs<L>) -> u32
         } else {
             0
         }
+    }
+}
+
+/// Check one `Fixed<8>` reference value and, when it has not escaped, advance
+/// it by one exact recurrence step. `Fixed<8>` is the declared reference
+/// precision; every operation below is still the general `Fixed<L>` form
+/// instantiated once at that width. The final slot is `1` when the input value
+/// already satisfies strict `|z|^2 > 4`.
+pub fn mandelbrot_advance8(
+    _ zx_s: u32, _ zx: Limbs<8>, _ zy_s: u32, _ zy: Limbs<8>,
+    _ cx_s: u32, _ cx: Limbs<8>, _ cy_s: u32, _ cy: Limbs<8>,
+) -> (u32, Limbs<8>, u32, Limbs<8>, u32)
+{
+    let (xx_s, xx) = sqr<8>(zx_s, zx)
+    let (yy_s, yy) = sqr<8>(zy_s, zy)
+    let (_mag_s, mag2) = add<Limbs<8>>(xx_s, xx, yy_s, yy)
+    let did_escape: u32 = escaped<8>(mag2)
+    if did_escape == 1 {
+        (zx_s, zx, zy_s, zy, 1)
+    } else {
+        let (re_s, re) = sub<Limbs<8>>(xx_s, xx, yy_s, yy)
+        let (nzx_s, nzx) = add<Limbs<8>>(re_s, re, cx_s, cx)
+        let (m_s, m) = mul<8>(zx_s, zx, zy_s, zy)
+        let (d_s, d) = add<Limbs<8>>(m_s, m, m_s, m)
+        let (nzy_s, nzy) = add<Limbs<8>>(d_s, d, cy_s, cy)
+        (nzx_s, nzx, nzy_s, nzy, 0)
     }
 }
 
@@ -351,18 +619,16 @@ pub fn escape<const L: usize>(
     let mut i: i32 = 0
     while i < max_iter {
         if done == 0 {
-            let (xx_s, xx) = sqr<L>(zx_s, zx)                     // zx^2
-            let (yy_s, yy) = sqr<L>(zy_s, zy)                     // zy^2
-            let (_mag_s, mag2) = add<Limbs<L>>(xx_s, xx, yy_s, yy) // |z|^2
+            let (xx_s, xx) = sqr<L>(zx_s, zx)
+            let (yy_s, yy) = sqr<L>(zy_s, zy)
+            let (_mag_s, mag2) = add<Limbs<L>>(xx_s, xx, yy_s, yy)
             if escaped<L>(mag2) == 1 {
                 done = 1
             } else {
-                // re(z^2) = zx^2 - zy^2 ; new_zx = re + cx
                 let (re_s, re) = sub<Limbs<L>>(xx_s, xx, yy_s, yy)
                 let (nzx_s, nzx) = add<Limbs<L>>(re_s, re, cx_s, cx)
-                // im(z^2) = 2*zx*zy ; new_zy = im + cy   (double = add to self)
                 let (m_s, m) = mul<L>(zx_s, zx, zy_s, zy)
-                let (d_s, d) = add<Limbs<L>>(m_s, m, m_s, m)      // 2*zx*zy
+                let (d_s, d) = add<Limbs<L>>(m_s, m, m_s, m)
                 let (nzy_s, nzy) = add<Limbs<L>>(d_s, d, cy_s, cy)
                 zx_s = nzx_s
                 zx = nzx

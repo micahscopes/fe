@@ -57,8 +57,9 @@
 //! parallelism claim (VISION 3.1).
 //!
 //! Honesty register: the initial `view()` seeds a real Seahorse-Valley location
-//! (main-cardioid / period-2 neck) to ~1e-27 at a deep default `zoom = 1e-16`,
-//! and pan/zoom hold that depth interactively; the 1e-100+ regime needs
+//! (main-cardioid / period-2 neck) to ~1e-27 and opens at the recognizable
+//! whole-set scale `zoom = 1`; pan/zoom hold the full center depth while moving
+//! into deep views. The 1e-100+ regime needs
 //! perturbation (reference-orbit) rendering (out of scope). Proven GPU-free
 //! (`crates/codegen/tests/precision_deep_center_oracle.rs`): the coordinate the
 //! GPU escape receives holds full `Fixed<8>` (~1e-27) precision -- adjacent deep
@@ -82,6 +83,7 @@ const MAX_ITER_BASE: i32 = 256
 const MAX_ITER_CAP: i32 = 2000
 const ITER_PER_DOUBLING: f32 = 48.0
 const DEPTH_PROBE_STEPS: i32 = 96
+const PALETTE_PERIOD: f32 = 256.0
 
 // Adaptive-precision thresholds on zoom DEPTH (doublings-to-1.0 ~ -log2 zoom).
 // `Fixed<L>` resolves 2^-13(L-1) fractional bits (fixed.fe:32), and a pixel
@@ -94,7 +96,7 @@ const DEPTH_PROBE_STEPS: i32 = 96
 //   L=2 F=13   L=4 F=39   L=6 F=65   L=8 F=91
 const DEPTH_L2: i32 = 4      // zoom >~ 2^-4  (near whole-set view)
 const DEPTH_L4: i32 = 24     // zoom >~ 2^-24 ~ 6e-8
-const DEPTH_L6: i32 = 50     // zoom >~ 2^-50 ~ 9e-16  (default 1e-16 -> L=8)
+const DEPTH_L6: i32 = 50     // zoom >~ 2^-50 ~ 9e-16
 
 // `update_view`'s clamps (mirrors `view()`'s declared ranges below; kept as
 // named consts so the two cannot silently drift).
@@ -218,6 +220,7 @@ actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
     center_x_w1: f32,
     center_x_w2: f32,
     center_x_w3: f32,
+    /// Most-significant word of the four-word vertical center expansion.
     center_y_w0: f32,
     center_y_w1: f32,
     center_y_w2: f32,
@@ -244,9 +247,9 @@ actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
                 center_y_w1: Param::fixed(-0.0000000048132045),
                 center_y_w2: Param::fixed(0.00000000000000025),
                 center_y_w3: Param::fixed(0.000000000000000000000015),
-                // Default to a DEEP view (~1e-16, far past the old ~1e-11 df64
-                // wall) so the deep center is visible on load.
-                zoom: Param::log(min: 0.000000000000000000000000001, max: 3.0, init: 0.0000000000000001),
+                // Start at a recognizable whole-set scale. The four-word center
+                // and logarithmic range still retain the full deep-zoom path.
+                zoom: Param::log(min: 0.000000000000000000000000001, max: 3.0, init: 1.0),
                 res: Param::extent_x(),
             },
         }
@@ -308,8 +311,9 @@ actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
         }
 
         if count < max_iter {
-            // Escaped: colour by how long it survived.
-            let t: f32 = from_i32(count) / from_i32(max_iter)
+            // Keep palette phase independent of the adaptive trip limit, so
+            // deeper budgets reveal detail without recoloring known escapes.
+            let t: f32 = from_i32(count) / PALETTE_PERIOD
             palette(t, 0.0, 0.33, 0.67)
         } else {
             // Inside the set: opaque black (0xFF000000).

@@ -18,13 +18,11 @@ pub use core::pending::{Pending, Wait, Notify, Spawn, TaskId}
 /// A TYPE-LEVEL browser WebGPU backend (the WGSL device model under the browser's
 /// PORTABLE limits).
 ///
-/// This is NOT a code-generation backend on this branch: kernels are emitted by
-/// the external schedule-walker harness (the mini-Garamon `emit-web` binary) until
-/// B4 (fe-emitted WGSL) lands, and WebGPU EXECUTION is browser-only and never
-/// sandbox-verifiable (no WebGPU secure context here). `WebGpuBackend` exists so
-/// the browser demo's interface is a compiler-checked contract rather than a JS
-/// convention: the Fe side pins the storage classes, the parallel envelope, and
-/// the atomic/barrier grant matrix, and the JS host implements them op-for-op.
+/// Fe kernels placed on this backend lower through the compiler's portable MIR
+/// and SPIR-V path into generated WGSL. WebGPU execution remains browser-only in
+/// environments without a secure GPU context. The Fe side pins storage classes,
+/// the parallel envelope, and the atomic/barrier grant matrix, while the fixed
+/// browser runtime materializes the generated binding and pass manifests.
 ///
 /// It is a DISTINCT backend, not a reuse of `GpuBackend`: the branch's whole
 /// discipline is anti-conflation of backend FACTS, and the browser's facts
@@ -40,23 +38,36 @@ pub use core::pending::{Pending, Wait, Notify, Spawn, TaskId}
 pub struct WebGpuBackend {}
 
 // ---------------------------------------------------------------------------
-// R-A1 actor placement markers.
+// GPU actor placement, stage, dispatch, and resource vocabulary.
 // ---------------------------------------------------------------------------
 //
 // These name the boundary shape of an `actor` (`GpuProgram<B>`: a surface
 // program placed on backend `B`) and the role of a behavior (`FragmentSurface`:
-// the per-pixel fragment stage). v1 consumes them STRUCTURALLY: the `fe web`
-// entry derivation reads them off the `actor` declaration by name to recover
-// the render entry and mode, so no trait obligation is raised and the flattened
-// kernel carries no placement effect. The `Cx`/`Out`-checked `Stage` vocabulary
-// (layering 2.2) that TYPES these roles follows in the typed slice; here they
-// are pure carriers.
+// the per-pixel fragment stage). `fe web` resolves their nominal types and reads
+// the compiler attributes below, so aliases work and no source spelling is
+// privileged. No trait obligation is raised and the flattened kernel carries
+// no placement effect. The `Cx`/`Out`-checked `Stage` vocabulary (layering 2.2)
+// that types these roles follows in the typed slice; here they are pure carriers.
 
-/// The boundary shape of a surface program on backend `B`.
+/// The boundary shape of a GPU program on backend `B`.
+#[gpu_program]
 pub struct GpuProgram<B> {}
 
 /// The per-pixel fragment stage role of an actor behavior.
+#[gpu_stage(fragment)]
 pub struct FragmentSurface {}
+
+/// A compute-stage role with a workgroup shape and dispatch policy in its type.
+#[gpu_stage(compute)]
+pub struct ComputeSurface<W, D> {}
+
+/// Compile-time WebGPU workgroup dimensions.
+#[gpu_workgroup]
+pub struct Workgroup<const X: usize, const Y: usize, const Z: usize> {}
+
+/// A fixed dispatch grid executed once whenever the pass graph runs.
+#[gpu_dispatch(fixed)]
+pub struct FixedDispatch<const X: usize, const Y: usize, const Z: usize> {}
 
 /// The gesture-driven control-state role of an actor behavior (R3 param
 /// gestures): a `self`-taking behavior that maps raw gesture deltas (pan
@@ -64,13 +75,36 @@ pub struct FragmentSurface {}
 /// vocabulary) plus the actor's own current state onto the next state, e.g.
 /// `fn update_view(self, dx: f32, dy: f32, dzoom: f32, mx: f32, my: f32) ->
 /// (f32, f32, f32) uses (UpdateSurface)`. Consumed STRUCTURALLY, exactly like
-/// `FragmentSurface` above: `fe web` reads it off the `actor` declaration by
-/// name to recover the control export and project the manifest `control`
+/// `FragmentSurface` above: `fe web` resolves its attributed nominal identity
+/// to recover the control export and project the manifest `control`
 /// section (gesture -> arg bindings, return -> state-field bindings), so no
 /// trait obligation is raised here either. Fe owns ALL gesture math (pan
 /// sensitivity, the zoom curve, clamps); the runtime delivers only raw deltas
 /// and blits the returned state (no gesture math in JS).
+#[gpu_control(surface)]
 pub struct UpdateSurface {}
+
+/// An externally allocated storage resource shared by GPU stages.
+///
+/// The private word keeps the nominal value live through ordinary Fe lowering;
+/// it is never a runtime binding number. The compiler roots the whole value as
+/// the attributed external resource before emitting WGSL.
+#[gpu_resource(storage)]
+pub struct StorageBuffer<T, const N: usize> { binding: u32 }
+
+impl<T, const N: usize> StorageBuffer<T, N> {
+    /// Loads element `index` from this shared resource.
+    #[gpu_intrinsic(storage_load)]
+    pub fn load(self, index: u32) -> T {
+        core::panic()
+    }
+
+    /// Stores `value` at element `index` in this shared resource.
+    #[gpu_intrinsic(storage_store)]
+    pub fn store(self, index: u32, value: T) {
+        core::panic()
+    }
+}
 
 /// WebGPU class-typed reference: a bind-group BINDING INDEX, which is what a
 /// WebGPU resource honestly is at the API boundary (not a pointer). `T` and `S`
@@ -107,9 +141,9 @@ impl Backend for WebGpuBackend {
 /// `type Buffer<T>: Functor<T>` bound on `core::Backend`. `WebGpuBackend::Buffer<T>`
 /// is `WebGpuRef<T, Global>` (a global-class storage binding), so this impl
 /// discharges the bound by SUBSTITUTING the class marker `Global` through the GAT
-/// RHS. `map` is a type-level stub (`core::panic()`, never-typed): no WebGPU
-/// pipeline exists on this branch (kernels are harness-emitted; execution is
-/// browser-only), so this body is never lowered here, matching the
+/// RHS. `map` is a type-level stub (`core::panic()`, never-typed): this
+/// implementation does not execute as ordinary Fe code, so this body is never
+/// lowered as a kernel operation, matching the
 /// `GpuRef` / `WebGpuAtomics` / `WebGpuBarriers` stub posture.
 impl<X> Functor<X> for WebGpuRef<X, Global> {
     type Out<Y> = WebGpuRef<Y, Global>

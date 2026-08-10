@@ -445,6 +445,13 @@ fn format_expr<'db>(db: &'db dyn MirDb, expr: &RExpr<'db>) -> String {
                 format_scalar_class(db, to)
             )
         }
+        RExpr::Bitcast { value, to } => {
+            format!(
+                "bitcast {} as {}",
+                format_local_id(*value),
+                format_scalar_class(db, to)
+            )
+        }
         RExpr::ConstRef { region, layout } => {
             format!("const_ref @{:?}:{}", region, format_layout(db, *layout))
         }

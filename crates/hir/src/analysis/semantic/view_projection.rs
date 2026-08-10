@@ -160,13 +160,17 @@ fn struct_named_fields<'db>(
     what: &str,
 ) -> Result<Vec<(String, SemConstId<'db>)>, ViewProjectionError> {
     let SemConstValue::Struct { ty, fields } = value.value(db) else {
-        return Err(ViewProjectionError::Shape(format!("expected {what} to be a struct value")));
+        return Err(ViewProjectionError::Shape(format!(
+            "expected {what} to be a struct value"
+        )));
     };
     let adt = ty
         .adt_def(db)
         .ok_or_else(|| ViewProjectionError::Shape(format!("{what}'s type is not a struct")))?;
     let AdtRef::Struct(struct_) = adt.adt_ref(db) else {
-        return Err(ViewProjectionError::Shape(format!("{what}'s type is not a struct")));
+        return Err(ViewProjectionError::Shape(format!(
+            "{what}'s type is not a struct"
+        )));
     };
     let field_defs = struct_.hir_fields(db).data(db);
     if field_defs.len() != fields.len() {
@@ -200,7 +204,9 @@ fn read_u32<'db>(
         } => value
             .to_u32()
             .ok_or_else(|| ViewProjectionError::Shape(format!("{what} is not a u32"))),
-        _ => Err(ViewProjectionError::Shape(format!("{what} is not an integer scalar"))),
+        _ => Err(ViewProjectionError::Shape(format!(
+            "{what} is not an integer scalar"
+        ))),
     }
 }
 
@@ -214,7 +220,9 @@ fn read_f32<'db>(
             value: SemConstScalar::Float { bits },
             ..
         } => Ok(f32::from_bits(bits)),
-        _ => Err(ViewProjectionError::Shape(format!("{what} is not an f32 scalar"))),
+        _ => Err(ViewProjectionError::Shape(format!(
+            "{what} is not an f32 scalar"
+        ))),
     }
 }
 
@@ -223,13 +231,17 @@ fn read_kind<'db>(
     value: SemConstId<'db>,
 ) -> Result<ViewParamKind, ViewProjectionError> {
     let SemConstValue::Enum { ty, variant, .. } = value.value(db) else {
-        return Err(ViewProjectionError::Shape("`kind` is not an enum value".into()));
+        return Err(ViewProjectionError::Shape(
+            "`kind` is not an enum value".into(),
+        ));
     };
     let adt = ty
         .adt_def(db)
         .ok_or_else(|| ViewProjectionError::Shape("`kind`'s type is not an enum".into()))?;
     let AdtRef::Enum(enum_) = adt.adt_ref(db) else {
-        return Err(ViewProjectionError::Shape("`kind`'s type is not an enum".into()));
+        return Err(ViewProjectionError::Shape(
+            "`kind`'s type is not an enum".into(),
+        ));
     };
     let variant_name = EnumVariant::new(enum_, variant.0 as usize)
         .name(db)
@@ -280,8 +292,8 @@ fn walk_extent<'db>(
     }
     let width =
         width.ok_or_else(|| ViewProjectionError::Shape("`Extent` has no `width` field".into()))?;
-    let height =
-        height.ok_or_else(|| ViewProjectionError::Shape("`Extent` has no `height` field".into()))?;
+    let height = height
+        .ok_or_else(|| ViewProjectionError::Shape("`Extent` has no `height` field".into()))?;
     Ok((width, height))
 }
 
@@ -314,8 +326,8 @@ fn walk_param<'db>(
             _ => {}
         }
     }
-    let kind = kind
-        .ok_or_else(|| ViewProjectionError::Shape(format!("param `{name}` has no `kind`")))?;
+    let kind =
+        kind.ok_or_else(|| ViewProjectionError::Shape(format!("param `{name}` has no `kind`")))?;
     let min =
         min.ok_or_else(|| ViewProjectionError::Shape(format!("param `{name}` has no `min`")))?;
     let max =

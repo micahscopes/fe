@@ -151,8 +151,8 @@ fn ref_escape(cx: &Fx, cy: &Fx, max_iter: i32, l: usize) -> i32 {
 // -------------------------------------------------------------------------
 
 fn compile_fixed_gate_ingot_to_wasm() -> (Vec<u8>, std::time::Duration) {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/precision_fixed_oracle_ingot");
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/precision_fixed_oracle_ingot");
     let url = Url::from_directory_path(path.canonicalize().unwrap()).unwrap();
     let mut db = DriverDataBase::default();
     let t0 = std::time::Instant::now();
@@ -232,8 +232,7 @@ fn fe_result(
     let sign = call_i32(store, instance, &format!("fixed_{op}_l{l}_sign"), params) as u32;
     let mut mag = BigUint::from(0u32);
     for k in 0..l {
-        let limb =
-            call_i32(store, instance, &format!("fixed_{op}_l{l}_limb{k}"), params) as u32;
+        let limb = call_i32(store, instance, &format!("fixed_{op}_l{l}_limb{k}"), params) as u32;
         mag |= BigUint::from(limb) << (LIMB_BITS as usize * k);
     }
     Fx { sign, mag }
@@ -309,11 +308,7 @@ fn next_mag(s: &mut u64, l: usize) -> BigUint {
     x % modulus(l)
 }
 
-fn run_binops_for_l(
-    store: &mut wasmtime::Store<()>,
-    instance: &wasmtime::Instance,
-    l: usize,
-) {
+fn run_binops_for_l(store: &mut wasmtime::Store<()>, instance: &wasmtime::Instance, l: usize) {
     let bases = base_mags(l);
     // Full magnitude cross, all four sign combos.
     let signs = [(0u32, 0u32), (0, 1), (1, 0), (1, 1)];
@@ -383,11 +378,7 @@ fn run_binops_for_l(
     eprintln!("  L{l}: {n_cases} bit-identical mul/add/sub/sqr checks green.");
 }
 
-fn run_escape_for_l(
-    store: &mut wasmtime::Store<()>,
-    instance: &wasmtime::Instance,
-    l: usize,
-) {
+fn run_escape_for_l(store: &mut wasmtime::Store<()>, instance: &wasmtime::Instance, l: usize) {
     let s = scale(l);
     // (name, cx, cy): the antenna tip c=(-2,0) must NOT escape (strict |z|^2>4);
     // an escaping point; an interior point; a boundary-adjacent center.

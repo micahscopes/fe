@@ -284,6 +284,7 @@ fn role_str(r: Role) -> &'static str {
     match r {
         Role::Output => "Output",
         Role::Input => "Input",
+        Role::Resource => "Resource",
     }
 }
 
@@ -293,6 +294,7 @@ fn mode_str(m: LayoutMode) -> &'static str {
         LayoutMode::Batch => "Batch",
         LayoutMode::Grid => "Grid",
         LayoutMode::Render => "Render",
+        LayoutMode::Compute => "Compute",
     }
 }
 

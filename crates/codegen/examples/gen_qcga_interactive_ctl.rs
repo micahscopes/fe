@@ -59,7 +59,9 @@ fn main() {
     std::fs::create_dir_all(&gen_dir)
         .unwrap_or_else(|e| panic!("could not create {}: {e}", gen_dir.display()));
 
-    eprintln!("gen_qcga_interactive_ctl: compiling `{CTL_NAME}` (wasm) through the real Fe drivers");
+    eprintln!(
+        "gen_qcga_interactive_ctl: compiling `{CTL_NAME}` (wasm) through the real Fe drivers"
+    );
 
     // --- 1. Fe -> wasm (the controls). --------------------------------------
     let ctl_wasm = compile_to_wasm(CTL_SOURCE, "gen_qcga_ctl_wasm");
@@ -99,7 +101,8 @@ fn main() {
     // --- 3. HARD GATE 2: wasmtime-executed update_quadric == the independent
     // Rust oracle, directed cases + a deterministic random walk. -------------
     let engine = wasmtime::Engine::default();
-    let module = wasmtime::Module::new(&engine, &ctl_wasm).expect("wasmtime should load the module");
+    let module =
+        wasmtime::Module::new(&engine, &ctl_wasm).expect("wasmtime should load the module");
     let mut store = wasmtime::Store::new(&engine, ());
     let instance =
         wasmtime::Instance::new(&mut store, &module, &[]).expect("wasmtime should instantiate");
@@ -108,15 +111,15 @@ fn main() {
         .expect("update_quadric should be (f32,f32,f32,i32,i32,i32) -> (f32,f32,f32)");
 
     let directed: [(f32, f32, f32, i32, i32, i32); 9] = [
-        (0.5, 0.0, 1.0, 0, 0, 0),      // no-op identity
-        (0.0, 0.0, 1.0, 200, 0, 0),    // lambda sweeps up
-        (0.9, 0.0, 1.0, 200, 0, 0),    // lambda clamps at 1.0
-        (0.5, 0.0, 1.0, -300, 0, 0),   // lambda clamps at 0.0
-        (0.5, 0.5, 1.0, 0, 100, 0),    // theta turns
-        (0.5, 0.5, 1.0, 0, 0, -1),     // zoom in one notch
-        (0.5, 0.5, 1.0, 0, 0, 1),      // zoom out one notch
-        (0.5, 0.5, 0.32, 0, 0, -1),    // zoom-in clamps at ZOOM_MIN
-        (0.5, 0.5, 3.9, 0, 0, 1),      // zoom-out clamps at ZOOM_MAX
+        (0.5, 0.0, 1.0, 0, 0, 0),    // no-op identity
+        (0.0, 0.0, 1.0, 200, 0, 0),  // lambda sweeps up
+        (0.9, 0.0, 1.0, 200, 0, 0),  // lambda clamps at 1.0
+        (0.5, 0.0, 1.0, -300, 0, 0), // lambda clamps at 0.0
+        (0.5, 0.5, 1.0, 0, 100, 0),  // theta turns
+        (0.5, 0.5, 1.0, 0, 0, -1),   // zoom in one notch
+        (0.5, 0.5, 1.0, 0, 0, 1),    // zoom out one notch
+        (0.5, 0.5, 0.32, 0, 0, -1),  // zoom-in clamps at ZOOM_MIN
+        (0.5, 0.5, 3.9, 0, 0, 1),    // zoom-out clamps at ZOOM_MAX
     ];
     let mut steps = 0usize;
     for (lambda, theta, zoom, dx, dy, dzoom) in directed {

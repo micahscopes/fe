@@ -103,8 +103,7 @@ fn compile_prologue(
 }
 
 fn compile_wasm(request: &CompileRequest) -> Result<CompileResult, CompileFacadeError> {
-    let (db, root_file, diagnostics, has_error, source_dependencies) =
-        compile_prologue(request)?;
+    let (db, root_file, diagnostics, has_error, source_dependencies) = compile_prologue(request)?;
     if has_error {
         return Ok(result(
             request,
@@ -157,8 +156,7 @@ fn compile_wasm(request: &CompileRequest) -> Result<CompileResult, CompileFacade
 /// later increment, not a protocol gap.
 #[cfg(feature = "webgpu-target")]
 fn compile_webgpu(request: &CompileRequest) -> Result<CompileResult, CompileFacadeError> {
-    let (db, root_file, diagnostics, has_error, source_dependencies) =
-        compile_prologue(request)?;
+    let (db, root_file, diagnostics, has_error, source_dependencies) = compile_prologue(request)?;
     if has_error {
         return Ok(result(
             request,

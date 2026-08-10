@@ -1,4 +1,8 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashSet},
+    path::{Path, PathBuf},
+    time::{Instant, UNIX_EPOCH},
+};
 
 use camino::Utf8PathBuf;
 use codegen::{WebBuildOptions, WebBundle, WebBundleMode, resolve_web_entry};
@@ -7,9 +11,12 @@ use driver::{
     DriverDataBase,
     cli_target::{CliTarget, resolve_cli_target},
 };
-use fe_compiler_protocol::{SOURCE_DEPENDENCY_INVENTORY_VERSION, SourceDependency, sha256_hex};
-use fe_html_precompile::RenderBundleArtifact;
+use fe_compiler_protocol::{
+    SOURCE_DEPENDENCY_INVENTORY_VERSION, SourceDependency, SourceDependencyInventory, sha256_hex,
+};
+use fe_html_precompile::{RenderBundleArtifact, RenderShaderArtifact};
 use hir::hir_def::HirIngot;
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::{WebCanonicalPolicy, WebMode, dependency_diagnostics::DependencyIssues};
@@ -39,6 +46,9 @@ fn from_bundle_mode(mode: WebBundleMode) -> WebMode {
     match mode {
         WebBundleMode::Render => WebMode::Render,
         WebBundleMode::Grid => WebMode::Grid,
+        WebBundleMode::Compute => {
+            panic!("compute stages are internal to a render pass graph")
+        }
     }
 }
 
@@ -73,6 +83,7 @@ pub fn build(request: &CompileRequest, out: &Utf8PathBuf) -> Result<(), String> 
 }
 
 pub fn compile(request: &CompileRequest) -> Result<WebBundle, String> {
+    let compile_started = Instant::now();
     let CompileRequest {
         path,
         entry,
@@ -82,6 +93,13 @@ pub fn compile(request: &CompileRequest) -> Result<WebBundle, String> {
         canonical,
         canonical_entries,
     } = request;
+    tracing::info!(
+        target: "fe_web",
+        phase = "compile",
+        source = %path,
+        entry = entry.as_deref().unwrap_or("<derived>"),
+        "starting web compilation"
+    );
     if matches!(entry.as_deref(), Some("")) {
         return Err("`--entry` must not be empty".to_string());
     }
@@ -110,6 +128,7 @@ pub fn compile(request: &CompileRequest) -> Result<WebBundle, String> {
     }
 
     let mut db = DriverDataBase::default();
+    let phase_started = Instant::now();
     let target = resolve_cli_target(&mut db, path, false)?;
     let (top_mod, ingot_target) = match target {
         CliTarget::StandaloneFile(file_path) => {
@@ -147,30 +166,70 @@ pub fn compile(request: &CompileRequest) -> Result<WebBundle, String> {
             (ingot.root_mod(&db), Some((url, ingot)))
         }
     };
+    tracing::info!(
+        target: "fe_web",
+        phase = "target",
+        source = %path,
+        elapsed_ms = phase_started.elapsed().as_millis() as u64,
+        "resolved compilation target"
+    );
 
+    let phase_started = Instant::now();
     let diagnostics = match ingot_target {
         Some((_, ingot)) => db.run_on_ingot(ingot),
         None => db.run_on_top_mod(top_mod),
     };
     if !diagnostics.is_empty() {
+        tracing::warn!(
+            target: "fe_web",
+            phase = "diagnostics",
+            source = %path,
+            elapsed_ms = phase_started.elapsed().as_millis() as u64,
+            "source diagnostics prevent web build"
+        );
         return Err(format!(
             "source diagnostics prevent web build:\n{}",
             diagnostics.format_diags(&db)
         ));
     }
+    tracing::info!(
+        target: "fe_web",
+        phase = "diagnostics",
+        source = %path,
+        count = 0,
+        elapsed_ms = phase_started.elapsed().as_millis() as u64,
+        "source diagnostics clean"
+    );
     if let Some((ingot_url, _)) = ingot_target {
+        let phase_started = Instant::now();
         let mut seen = HashSet::from([ingot_url.clone()]);
         let dependency_issues = DependencyIssues::collect(&db, &ingot_url, &mut seen);
         if !dependency_issues.is_empty() {
+            tracing::warn!(
+                target: "fe_web",
+                phase = "dependency_diagnostics",
+                source = %path,
+                elapsed_ms = phase_started.elapsed().as_millis() as u64,
+                "dependency diagnostics prevent web build"
+            );
             return Err(format!(
                 "dependency diagnostics prevent web build:\n{}",
                 dependency_issues.format(&db)
             ));
         }
+        tracing::info!(
+            target: "fe_web",
+            phase = "dependency_diagnostics",
+            source = %path,
+            ingots = seen.len(),
+            elapsed_ms = phase_started.elapsed().as_millis() as u64,
+            "dependency diagnostics clean"
+        );
     }
     // Derive the render entry and mode from the module's `actor` declaration when
     // not given explicitly; when supplied, they are reconciled against the
     // declaration (a mismatch errors, naming both sources).
+    let phase_started = Instant::now();
     let (entry, mode) =
         resolve_web_entry(&db, top_mod, (*entry).clone(), (*mode).map(to_bundle_mode))
             .map_err(|error| error.to_string())?;
@@ -187,19 +246,180 @@ pub fn compile(request: &CompileRequest) -> Result<WebBundle, String> {
         WebCanonicalPolicy::Required => codegen::WebCanonicalPolicy::Required,
     });
     options = options.with_canonical_entries(canonical_entries.iter().cloned());
-    WebBundle::compile(&db, top_mod, options).map_err(|error| error.to_string())
+    tracing::info!(
+        target: "fe_web",
+        phase = "entry",
+        source = %path,
+        entry = %entry,
+        mode = ?mode,
+        elapsed_ms = phase_started.elapsed().as_millis() as u64,
+        "resolved web entry"
+    );
+    let phase_started = Instant::now();
+    let bundle = WebBundle::compile(&db, top_mod, options).map_err(|error| error.to_string())?;
+    tracing::info!(
+        target: "fe_web",
+        phase = "lowering",
+        source = %path,
+        passes = bundle.pass_wgsl.len(),
+        wasm_bytes = bundle.wasm.len(),
+        wgsl_bytes = bundle.wgsl.len()
+            + bundle.pass_wgsl.iter().map(|shader| shader.source.len()).sum::<usize>(),
+        elapsed_ms = phase_started.elapsed().as_millis() as u64,
+        total_elapsed_ms = compile_started.elapsed().as_millis() as u64,
+        "finished web compilation"
+    );
+    Ok(bundle)
 }
 
-/// The native bundle-lane compiler for the standards `fe web dev`/`fe web
-/// precompile` render lane (`fe_html_precompile::precompile_html_with_render_lane`'s
-/// `render_compile` closure): the SAME seam `fe web build` uses
-/// (`resolve_web_entry` + `WebBundle::compile`, via [`compile`] above), for a
-/// `data-fe-src` naming a GpuProgram-actor ingot DIRECTORY. Callers dispatch
-/// on `path.is_dir()` before calling this; a standalone `.fe` file stays on
-/// the wasm-only facade lane untouched.
-pub fn compile_render_bundle(
+const RENDER_CACHE_FORMAT: u16 = 1;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RenderCacheMetadata {
+    format: u16,
+    source_dependencies: SourceDependencyInventory,
+    has_wasm: bool,
+    pass_shaders: Vec<CachedRenderShader>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CachedRenderShader {
+    path: String,
+    file: String,
+}
+
+fn render_cache_root() -> Option<PathBuf> {
+    if std::env::var("FE_WEB_CACHE")
+        .is_ok_and(|value| matches!(value.as_str(), "0" | "false" | "off"))
+    {
+        return None;
+    }
+    Some(
+        std::env::var_os("FE_WEB_CACHE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("target/fe-web-cache")),
+    )
+}
+
+fn compiler_cache_identity() -> String {
+    let git = option_env!("FE_GIT_HASH").unwrap_or("unknown");
+    let executable = std::env::current_exe()
+        .ok()
+        .and_then(|path| std::fs::metadata(path).ok())
+        .map(|metadata| {
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default();
+            format!("{}:{modified}", metadata.len())
+        })
+        .unwrap_or_else(|| "no-executable-metadata".to_owned());
+    format!(
+        "render-cache-v{RENDER_CACHE_FORMAT}:{}:{git}:{executable}",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+fn render_cache_key(
+    dependencies: &SourceDependencyInventory,
+    entry: Option<&str>,
+) -> Option<String> {
+    serde_json::to_vec(&(
+        compiler_cache_identity(),
+        entry.unwrap_or_default(),
+        dependencies,
+    ))
+    .ok()
+    .map(|bytes| sha256_hex(&bytes))
+}
+
+fn load_render_cache(
+    root: &Path,
+    key: &str,
+    dependencies: &SourceDependencyInventory,
+) -> Option<RenderBundleArtifact> {
+    let directory = root.join(key);
+    let metadata: RenderCacheMetadata =
+        serde_json::from_slice(&std::fs::read(directory.join("metadata.json")).ok()?).ok()?;
+    if metadata.format != RENDER_CACHE_FORMAT || metadata.source_dependencies != *dependencies {
+        return None;
+    }
+    let pass_wgsl = metadata
+        .pass_shaders
+        .into_iter()
+        .map(|shader| {
+            Some(RenderShaderArtifact {
+                path: shader.path,
+                bytes: std::fs::read(directory.join(shader.file)).ok()?,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let wasm = if metadata.has_wasm {
+        Some(std::fs::read(directory.join("module.wasm")).ok()?)
+    } else {
+        None
+    };
+    Some(RenderBundleArtifact {
+        wasm,
+        wgsl: std::fs::read(directory.join("shader.wgsl")).ok()?,
+        pass_wgsl,
+        manifest_json: std::fs::read(directory.join("manifest.json")).ok()?,
+        source_dependencies: Some(metadata.source_dependencies),
+    })
+}
+
+fn store_render_cache(
+    root: &Path,
+    key: &str,
+    artifact: &RenderBundleArtifact,
+) -> Result<(), String> {
+    let Some(source_dependencies) = artifact.source_dependencies.clone() else {
+        return Ok(());
+    };
+    let directory = root.join(key);
+    std::fs::create_dir_all(&directory).map_err(|error| {
+        format!(
+            "failed to create render cache {}: {error}",
+            directory.display()
+        )
+    })?;
+    std::fs::write(directory.join("shader.wgsl"), &artifact.wgsl)
+        .map_err(|error| format!("failed to cache shader.wgsl: {error}"))?;
+    std::fs::write(directory.join("manifest.json"), &artifact.manifest_json)
+        .map_err(|error| format!("failed to cache manifest.json: {error}"))?;
+    if let Some(wasm) = &artifact.wasm {
+        std::fs::write(directory.join("module.wasm"), wasm)
+            .map_err(|error| format!("failed to cache module.wasm: {error}"))?;
+    }
+    let mut pass_shaders = Vec::with_capacity(artifact.pass_wgsl.len());
+    for (index, shader) in artifact.pass_wgsl.iter().enumerate() {
+        let file = format!("pass-{index}.wgsl");
+        std::fs::write(directory.join(&file), &shader.bytes)
+            .map_err(|error| format!("failed to cache {file}: {error}"))?;
+        pass_shaders.push(CachedRenderShader {
+            path: shader.path.clone(),
+            file,
+        });
+    }
+    let metadata = serde_json::to_vec_pretty(&RenderCacheMetadata {
+        format: RENDER_CACHE_FORMAT,
+        source_dependencies,
+        has_wasm: artifact.wasm.is_some(),
+        pass_shaders,
+    })
+    .map_err(|error| format!("failed to serialize render cache metadata: {error}"))?;
+    // Metadata is written last. An interrupted population is therefore a
+    // harmless miss on the next invocation, never a partially accepted hit.
+    std::fs::write(directory.join("metadata.json"), metadata)
+        .map_err(|error| format!("failed to cache metadata.json: {error}"))
+}
+
+fn compile_render_bundle_with_dependencies(
     path: &Utf8PathBuf,
     entry: Option<&str>,
+    dependencies: Option<SourceDependencyInventory>,
 ) -> Result<RenderBundleArtifact, String> {
     let bundle = compile(&CompileRequest {
         path: path.clone(),
@@ -211,11 +431,21 @@ pub fn compile_render_bundle(
         canonical_entries: Vec::new(),
     })?;
     let manifest_json = bundle.manifest_json().map_err(|error| error.to_string())?;
+    let wasm = (!bundle.wasm.is_empty()).then_some(bundle.wasm);
+    let pass_wgsl = bundle
+        .pass_wgsl
+        .into_iter()
+        .map(|shader| RenderShaderArtifact {
+            path: shader.path,
+            bytes: shader.source.into_bytes(),
+        })
+        .collect();
     Ok(RenderBundleArtifact {
-        wasm: bundle.wasm,
+        wasm,
         wgsl: bundle.wgsl.into_bytes(),
+        pass_wgsl,
         manifest_json,
-        source_dependencies: ingot_source_dependencies(path),
+        source_dependencies: dependencies,
     })
 }
 
@@ -241,7 +471,66 @@ pub fn render_compile(
     if !path.is_dir() {
         return Ok(None);
     }
-    compile_render_bundle(&path, entry).map(Some)
+    let dependencies = ingot_source_dependencies(&path);
+    let cache = render_cache_root().and_then(|root| {
+        dependencies
+            .as_ref()
+            .and_then(|dependencies| render_cache_key(dependencies, entry))
+            .map(|key| (root, key))
+    });
+    if let (Some((root, key)), Some(dependencies)) = (&cache, dependencies.as_ref())
+        && let Some(artifact) = load_render_cache(root, key, dependencies)
+    {
+        tracing::info!(
+            target: "fe_web",
+            phase = "render_bundle",
+            cache = "hit",
+            ingot = %path,
+            entry = entry.unwrap_or("<derived>"),
+            "reused compiled render bundle"
+        );
+        return Ok(Some(artifact));
+    }
+
+    let started = Instant::now();
+    tracing::info!(
+        target: "fe_web",
+        phase = "render_bundle",
+        cache = if cache.is_some() { "miss" } else { "disabled" },
+        ingot = %path,
+        entry = entry.unwrap_or("<derived>"),
+        "compiling render bundle"
+    );
+    let artifact = compile_render_bundle_with_dependencies(&path, entry, dependencies)?;
+    let emitted_bytes = artifact.wgsl.len()
+        + artifact.manifest_json.len()
+        + artifact.wasm.as_ref().map_or(0, Vec::len)
+        + artifact
+            .pass_wgsl
+            .iter()
+            .map(|shader| shader.bytes.len())
+            .sum::<usize>();
+    tracing::info!(
+        target: "fe_web",
+        phase = "render_bundle",
+        cache = "populated",
+        ingot = %path,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        emitted_bytes,
+        "compiled render bundle"
+    );
+    if let Some((root, key)) = cache
+        && let Err(error) = store_render_cache(&root, &key, &artifact)
+    {
+        tracing::warn!(
+            target: "fe_web",
+            phase = "render_cache",
+            ingot = %path,
+            %error,
+            "could not populate render cache"
+        );
+    }
+    Ok(Some(artifact))
 }
 
 /// Best-effort structural dependency inventory for the bundle lane's watch
@@ -290,7 +579,10 @@ fn collect_ingot_sources(
         if !entry.file_type().is_file() {
             continue;
         }
-        let is_source = entry.path().extension().is_some_and(|extension| extension == "fe")
+        let is_source = entry
+            .path()
+            .extension()
+            .is_some_and(|extension| extension == "fe")
             || entry.file_name() == "fe.toml";
         if !is_source {
             continue;
@@ -330,6 +622,31 @@ fn collect_ingot_sources(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cache_dependencies(contents: &str) -> SourceDependencyInventory {
+        let url = "file:///cache-test/src/lib.fe".to_owned();
+        SourceDependencyInventory {
+            version: SOURCE_DEPENDENCY_INVENTORY_VERSION,
+            root: url.clone(),
+            sources: vec![SourceDependency {
+                url,
+                sha256: sha256_hex(contents.as_bytes()),
+            }],
+        }
+    }
+
+    fn cache_artifact(dependencies: SourceDependencyInventory) -> RenderBundleArtifact {
+        RenderBundleArtifact {
+            wasm: Some(vec![0, 97, 115, 109]),
+            wgsl: b"@fragment fn main() {}".to_vec(),
+            pass_wgsl: vec![RenderShaderArtifact {
+                path: "pass-0.wgsl".to_owned(),
+                bytes: b"@compute @workgroup_size(1) fn main() {}".to_vec(),
+            }],
+            manifest_json: br#"{"protocol":"fe-web-bundle"}"#.to_vec(),
+            source_dependencies: Some(dependencies),
+        }
+    }
 
     fn request(
         path: &str,
@@ -382,6 +699,42 @@ mod tests {
         )
         .unwrap_err();
         assert!(render.contains("only valid"), "{render}");
+    }
+
+    #[test]
+    fn render_cache_key_covers_sources_and_entry() {
+        let first = cache_dependencies("pub fn first() {}");
+        let second = cache_dependencies("pub fn second() {}");
+        let first_key = render_cache_key(&first, Some("shade")).unwrap();
+        assert_eq!(first_key, render_cache_key(&first, Some("shade")).unwrap());
+        assert_ne!(first_key, render_cache_key(&first, Some("other")).unwrap());
+        assert_ne!(first_key, render_cache_key(&second, Some("shade")).unwrap());
+    }
+
+    #[test]
+    fn render_cache_round_trips_only_matching_dependencies() {
+        let temp = tempfile::tempdir().unwrap();
+        let dependencies = cache_dependencies("pub fn shade() {}");
+        let artifact = cache_artifact(dependencies.clone());
+        store_render_cache(temp.path(), "key", &artifact).unwrap();
+
+        let loaded = load_render_cache(temp.path(), "key", &dependencies).unwrap();
+        assert_eq!(loaded.wasm, artifact.wasm);
+        assert_eq!(loaded.wgsl, artifact.wgsl);
+        assert_eq!(loaded.manifest_json, artifact.manifest_json);
+        assert_eq!(loaded.pass_wgsl.len(), 1);
+        assert_eq!(loaded.pass_wgsl[0].path, artifact.pass_wgsl[0].path);
+        assert_eq!(loaded.pass_wgsl[0].bytes, artifact.pass_wgsl[0].bytes);
+        assert_eq!(loaded.source_dependencies, artifact.source_dependencies);
+
+        assert!(
+            load_render_cache(
+                temp.path(),
+                "key",
+                &cache_dependencies("pub fn changed() {}")
+            )
+            .is_none()
+        );
     }
 
     #[test]

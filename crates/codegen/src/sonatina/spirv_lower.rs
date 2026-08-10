@@ -18,7 +18,7 @@ use compiler_db::DriverDataBase;
 use hir::hir_def::TopLevelMod;
 use mir::{RuntimePackage, build_wasm_runtime_package_for_entry};
 use sonatina_codegen::Backend as _;
-use sonatina_codegen::isa::spirv::{SpirvArtifact, SpirvBackend};
+use sonatina_codegen::isa::spirv::{SpirvArtifact, SpirvBackend, SpirvExternalResource};
 use sonatina_codegen::optim::{Pass, Pipeline, Step, inliner::InlinerConfig};
 
 use crate::sonatina::{LowerError, compile_runtime_package_wasm};
@@ -88,6 +88,38 @@ pub fn compile_runtime_package_spirv_with_workgroup(
                     .join("; "),
             )
         })
+}
+
+/// Lower an explicit unit-returning compute stage with compiler-described
+/// storage resources. Resource arguments stay typed object roots in Sonatina
+/// IR and become storage globals in the emitted shader.
+pub fn compile_runtime_package_spirv_compute_with_resources(
+    db: &DriverDataBase,
+    package: &RuntimePackage<'_>,
+    workgroup_size: [u32; 3],
+    resources: &[SpirvExternalResource],
+) -> Result<SpirvArtifact, LowerError> {
+    let (mut module, _import_modules) = compile_runtime_package_wasm(db, package)?;
+    inline_spirv_calls(&mut module);
+    ensure_spirv_entry_call_free(&module)?;
+
+    let mut backend = SpirvBackend::new().with_compute().with_workgroup_size(
+        workgroup_size[0],
+        workgroup_size[1],
+        workgroup_size[2],
+    );
+    for resource in resources {
+        backend = backend.with_external_resource(resource.clone());
+    }
+    backend.compile_module(&module).map_err(|errors| {
+        LowerError::Spirv(
+            errors
+                .iter()
+                .map(|error| error.to_string())
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
+    })
 }
 
 /// Lower a MIR runtime package to naga-validated SPIR-V in GRID mode: one
@@ -192,6 +224,32 @@ pub fn compile_runtime_package_spirv_render(
                     .join("; "),
             )
         })
+}
+
+/// Lower a fragment stage whose compiler-described storage resources are
+/// rooted directly in the function arguments.
+pub fn compile_runtime_package_spirv_render_with_resources(
+    db: &DriverDataBase,
+    package: &RuntimePackage<'_>,
+    resources: &[SpirvExternalResource],
+) -> Result<SpirvArtifact, LowerError> {
+    let (mut module, _import_modules) = compile_runtime_package_wasm(db, package)?;
+    inline_spirv_calls(&mut module);
+    ensure_spirv_entry_call_free(&module)?;
+
+    let mut backend = SpirvBackend::new().with_render();
+    for resource in resources {
+        backend = backend.with_external_resource(resource.clone());
+    }
+    backend.compile_module(&module).map_err(|errors| {
+        LowerError::Spirv(
+            errors
+                .iter()
+                .map(|error| error.to_string())
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
+    })
 }
 
 /// Build the render-shaped MIR runtime package rooted at `entry` and lower it

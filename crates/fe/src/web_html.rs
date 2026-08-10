@@ -5,10 +5,19 @@
 
 use std::fs;
 use std::io;
+use std::time::Instant;
 
 use camino::{Utf8Path, Utf8PathBuf};
 
 pub fn precompile(html_path: &Utf8Path, output: &Utf8Path) -> Result<(), String> {
+    let started = Instant::now();
+    tracing::info!(
+        target: "fe_web",
+        phase = "site_precompile",
+        html = %html_path,
+        output = %output,
+        "precompiling Fe HTML site"
+    );
     if output.exists() {
         return Err(format!(
             "output destination already exists: {output} (refusing to merge or overwrite)"
@@ -35,6 +44,15 @@ pub fn precompile(html_path: &Utf8Path, output: &Utf8Path) -> Result<(), String>
         crate::web::render_compile,
     )
     .map_err(|error| error.to_string())?;
+    tracing::info!(
+        target: "fe_web",
+        phase = "site_precompile",
+        modules = result.modules.len(),
+        render_bundles = result.render_dependencies.len(),
+        assets = result.assets.len(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "compiled Fe HTML site"
+    );
 
     let parent = publication_parent(output);
     fs::create_dir_all(parent)
@@ -61,6 +79,13 @@ pub fn precompile(html_path: &Utf8Path, output: &Utf8Path) -> Result<(), String>
         let _ = fs::remove_dir_all(&staging_path);
         return Err(format!("failed to publish Web site at {output}: {error}"));
     }
+    tracing::info!(
+        target: "fe_web",
+        phase = "site_publication",
+        output = %output,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "published Fe HTML site"
+    );
     Ok(())
 }
 

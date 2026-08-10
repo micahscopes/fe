@@ -92,6 +92,13 @@ pub async fn serve(config: DevConfig) -> Result<(), String> {
 
     let mut coordinator =
         DevelopmentRebuildCoordinator::new(config.poll_interval.as_millis() as u64);
+    let initial_started = Instant::now();
+    tracing::info!(
+        target: "fe_web",
+        phase = "initial_build",
+        html = %canonical_html,
+        "building initial development site"
+    );
     let initial = coordinator.precompiler_mut().build_with_render_lane(
         &document_url,
         &html,
@@ -107,6 +114,15 @@ pub async fn serve(config: DevConfig) -> Result<(), String> {
             .collect::<Vec<_>>()
             .join("\n")
     })?;
+    tracing::info!(
+        target: "fe_web",
+        phase = "initial_build",
+        modules = publication.output().modules.len(),
+        render_bundles = publication.output().render_dependencies.len(),
+        assets = publication.output().assets.len(),
+        elapsed_ms = initial_started.elapsed().as_millis() as u64,
+        "built initial development site"
+    );
     let snapshot = Arc::new(RwLock::new(Arc::new(SiteSnapshot::from_publication(
         &publication,
     ))));
@@ -227,18 +243,39 @@ async fn watch(
         let changed = changed_urls(&observed, &current);
         observed = current;
         let now = started.elapsed().as_millis() as u64;
+        if !changed.is_empty() {
+            tracing::info!(
+                target: "fe_web",
+                phase = "watch",
+                changed = changed.len(),
+                "queued changed source dependencies"
+            );
+        }
         if let Some(event) = coordinator.queue_changes(now, changed) {
             publish_event(&events, &event);
         }
         let Some(batch) = coordinator.take_ready(now) else {
             continue;
         };
+        let rebuild_started = Instant::now();
+        tracing::info!(
+            target: "fe_web",
+            phase = "rebuild",
+            "rebuilding affected development documents"
+        );
         let emitted = coordinator.execute_with_render_lane(
             batch,
             |_| std::fs::read_to_string(&html_path).map_err(|error| error.to_string()),
             codegen::render_runtime_js(),
             load_file_url,
             crate::web::render_compile,
+        );
+        tracing::info!(
+            target: "fe_web",
+            phase = "rebuild",
+            events = emitted.len(),
+            elapsed_ms = rebuild_started.elapsed().as_millis() as u64,
+            "finished development rebuild"
         );
         for event in emitted {
             if matches!(
@@ -301,7 +338,6 @@ fn load_file_url(url: &Url) -> Result<String, String> {
     std::fs::read_to_string(&path)
         .map_err(|error| format!("failed to read {}: {error}", path.display()))
 }
-
 
 fn publish_event(sender: &broadcast::Sender<String>, event: &DevelopmentRebuildEvent) {
     if let Ok(json) = serde_json::to_string(event) {

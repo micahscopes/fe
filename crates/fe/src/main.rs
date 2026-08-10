@@ -29,6 +29,8 @@ use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use colored::Colorize;
 use fmt as fe_fmt;
 use similar::{ChangeTag, TextDiff};
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt};
+use tracing_tree::HierarchicalLayer;
 use walkdir::WalkDir;
 
 use crate::test::TestDebugOptions;
@@ -593,8 +595,34 @@ fn default_project_path() -> Utf8PathBuf {
 
 fn main() {
     let opts = Options::parse();
+    install_cli_tracing(&opts);
     run(&opts);
 }
+
+fn install_cli_tracing(opts: &Options) {
+    if !matches!(&opts.command, Command::Web { .. }) {
+        return;
+    }
+    let filter = EnvFilter::builder()
+        .with_default_directive(
+            "fe_web=info"
+                .parse()
+                .expect("the built-in web tracing directive is valid"),
+        )
+        .from_env_lossy();
+    let subscriber = tracing_subscriber::registry().with(filter).with(
+        HierarchicalLayer::new(2)
+            .with_targets(true)
+            .with_thread_ids(false)
+            .with_thread_names(false)
+            .with_indent_lines(true)
+            .with_bracketed_fields(true)
+            .with_ansi(false)
+            .with_writer(std::io::stderr),
+    );
+    let _ = tracing::subscriber::set_global_default(subscriber);
+}
+
 pub fn run(opts: &Options) {
     let preference = match opts.color {
         ColorChoice::Auto => common::color::ColorPreference::Auto,

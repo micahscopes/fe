@@ -556,18 +556,14 @@ pub fn type_identity<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> String {
                     variant.name(db).unwrap_or("variant")
                 ),
             },
-            // A `recursive type fn` is normalized away before MIR (spec sec
-            // 7.4): ground applications are expanded at path-lowering and by the
-            // normalizer, and symbolic applications are rejected. Reaching MIR
-            // with a residual `TyBase::TypeFn` is therefore a containment bug;
-            // this is the last-line tripwire (spec sec 7.4 defensive assert). The
-            // release build keeps a stable key so it never panics in production.
+            // Stable keys are built while semantic callees are being collected,
+            // before runtime layout normalization. A nested generic callee may
+            // therefore carry a ground recursive type-function application such
+            // as `Limbs<8>` in its substitution. Hash the declaration identity
+            // here; the enclosing `TyApp` key already hashes every argument.
+            // Runtime lowering still requires the actual carrier to normalize to
+            // a concrete layout and rejects unresolved symbolic applications.
             TyBase::TypeFn(type_fn) => {
-                debug_assert!(
-                    false,
-                    "TyBase::TypeFn reached the MIR stable-key boundary; S1.5 \
-                     normalization/expansion should have removed it (spec sec 7.4)"
-                );
                 format!("type_fn${}", item_identity(db, (*type_fn).into()))
             }
         },

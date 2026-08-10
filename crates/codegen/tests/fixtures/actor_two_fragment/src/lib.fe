@@ -2,6 +2,8 @@
 // A render program has exactly one fragment entry, so the entry derivation
 // must refuse to pick one.
 
+use std::webgpu::{FragmentSurface, GpuProgram}
+
 actor Two uses (GpuProgram<i32>) {
     x: i32,
 

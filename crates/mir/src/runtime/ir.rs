@@ -1614,6 +1614,11 @@ pub enum RExpr<'db> {
         value: RValueId,
         to: ScalarClass<'db>,
     },
+    /// Reinterpret equal-width scalar bits without a numeric conversion.
+    Bitcast {
+        value: RValueId,
+        to: ScalarClass<'db>,
+    },
     ConstRef {
         region: ConstRegionId<'db>,
         layout: LayoutId<'db>,

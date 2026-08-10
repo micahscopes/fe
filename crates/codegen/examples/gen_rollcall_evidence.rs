@@ -350,7 +350,10 @@ fn main() {
                 root, &wasm_root,
                 "native/Cranelift root must equal the wasm root when native execution succeeds"
             );
-            eprintln!("  native/Cranelift leg EXECUTED: root == wasm root ({})", root_hex(root));
+            eprintln!(
+                "  native/Cranelift leg EXECUTED: root == wasm root ({})",
+                root_hex(root)
+            );
         }
         Err(message) => eprintln!("  native/Cranelift leg NOT RUN: {message}"),
     }
@@ -431,7 +434,10 @@ fn main() {
             ExecutionOptions::default(),
         )
         .expect("verifyMembership should execute");
-    assert!(decode_bool(&accept.return_data), "a real member must verify");
+    assert!(
+        decode_bool(&accept.return_data),
+        "a real member must verify"
+    );
     let accept_gas = accept.gas_used;
 
     let mut tampered = path.clone();
@@ -584,13 +590,16 @@ fn main() {
                 command: "cargo run -p fe-codegen --features native-backend --example gen_rollcall_evidence",
                 test: "generator native/Cranelift execution",
                 result: None,
-                note: Some(Box::leak(format!(
-                    "Native execution is not currently possible on the pinned Sonatina rev for \
+                note: Some(Box::leak(
+                    format!(
+                        "Native execution is not currently possible on the pinned Sonatina rev for \
                      this array-using kernel: {message} Same root cause as the SPIR-V leg \
                      (function-local array lowering via MemAllocDynamic is wasm-only on this \
                      pin); re-lands with the fork re-pin (Decision 5). See \
                      RUNG4_ASSEMBLY_PLAN.md."
-                ).into_boxed_str())),
+                    )
+                    .into_boxed_str(),
+                )),
             },
         },
     };
@@ -627,15 +636,18 @@ fn main() {
                 command: "cargo run -p fe-codegen --features native-backend --example gen_rollcall_evidence",
                 test: "generator SPIR-V compile + naga validation",
                 result: None,
-                note: Some(Box::leak(format!(
-                    "GPU validation is not currently possible on the pinned Sonatina rev for \
+                note: Some(Box::leak(
+                    format!(
+                        "GPU validation is not currently possible on the pinned Sonatina rev for \
                      this array-using kernel: {message} The private-storage heap emulation it \
                      needs (SpirvLayout.trap) exists only on the unpushed fork branch \
                      rung3-spirv-arrays-v2 (same-day revert b55f051e9 -> 40f8a1f27 on this \
                      branch); re-lands with the fork re-pin (Decision 5). GPU EXECUTION would \
                      additionally need lavapipe, unavailable in this sandbox regardless. See \
                      RUNG4_ASSEMBLY_PLAN.md."
-                ).into_boxed_str())),
+                    )
+                    .into_boxed_str(),
+                )),
             },
         },
     };
