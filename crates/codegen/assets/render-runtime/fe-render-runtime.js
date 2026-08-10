@@ -348,6 +348,7 @@ class FeSurfaceElement extends HTMLElement {
     this._surface = null;
     this._control = null; // R3 param gestures: the projected `control` manifest section.
     this._controlKernel = null; // the resolved wasm control export, or null (no gestures).
+    this._surfaceTransitionKernel = null; // typed Fe SurfaceEvent ABI, discovered from Wasm.
     this._passes = [];
     this._resources = [];
     this._graph = false;
@@ -503,6 +504,7 @@ class FeSurfaceElement extends HTMLElement {
       this._inputBinding = inputBinding ?? null;
       this._members = inputBinding ? inputBinding.members : [];
       this._memberIndexByName = new Map(this._members.map((member, index) => [member.name, index]));
+      this._memberIndexByArg = new Map(this._members.map((member, index) => [member.arg_index, index]));
       this._builtins = this._layout.builtin_inputs || [];
       this._argumentCount =
         1 +
@@ -531,6 +533,10 @@ class FeSurfaceElement extends HTMLElement {
       // with). No control block, or an export it doesn't actually find,
       // means gestures stay off -- never a JS reimplementation fallback.
       this._controlKernel = null;
+      this._surfaceTransitionKernel = instance?.exports.fe_surface_transition_v1 ?? null;
+      if (typeof this._surfaceTransitionKernel !== "function") {
+        this._surfaceTransitionKernel = null;
+      }
       if (this._control) {
         const controlFn = instance?.exports[this._control.export];
         if (typeof controlFn === "function") {
@@ -1326,17 +1332,19 @@ class FeSurfaceElement extends HTMLElement {
     this._unwireGestures();
   }
 
-  // -- gestures: drag pans, wheel zooms (R3 param gestures) ------------------
+  // -- typed surface facts + legacy gestures --------------------------------
   //
   // Fe owns ALL gesture semantics (pan sensitivity, the zoom curve, the
   // cursor anchor, the clamps): this element delivers only raw pointer/wheel
-  // deltas to `manifest.control.export` and blits the returned state back by
-  // NAME. No pan/zoom arithmetic lives here.
+  // facts to Fe. A typed `SurfaceTransition` is discovered directly from its
+  // fixed Wasm ABI export and replaces the complete actor state; it has no
+  // manifest control block, argument-name switch, or result-name mapping. The
+  // older manifest lane remains below only while the remaining demos migrate.
 
   /** Attach drag/wheel listeners on the current live/adopted canvas, once per
    * canvas identity (idempotent across suspend/resume within one boot). */
   _wireGestures() {
-    if (!this._control || !this._controlKernel) return;
+    if (!this._surfaceTransitionKernel && (!this._control || !this._controlKernel)) return;
     const canvas = this._adoptedCanvas || (this._mode === "webgpu" ? this._liveCanvas : this._posterCanvas);
     if (!canvas || this._gestureListeners?.canvas === canvas) return;
     this._unwireGestures();
@@ -1367,7 +1375,16 @@ class FeSurfaceElement extends HTMLElement {
       const previous = lastDragPoint;
       lastDragPoint = { mx, my };
       if (!previous) return;
-      this._applyGesture({ dx: mx - previous.mx, dy: my - previous.my, dzoom: 0, mx, my });
+      this._applyGesture({
+        dx: mx - previous.mx,
+        dy: my - previous.my,
+        wheelDelta: 0,
+        wheelMode: 0,
+        mx,
+        my,
+        buttons: event.buttons,
+        timestamp: event.timeStamp,
+      });
     };
     const onPointerUp = (event) => {
       if (event.pointerId !== dragPointerId) return;
@@ -1383,7 +1400,16 @@ class FeSurfaceElement extends HTMLElement {
     const onWheel = (event) => {
       event.preventDefault();
       const { mx, my } = backingPoint(event);
-      this._applyGesture({ dx: 0, dy: 0, dzoom: Math.sign(event.deltaY), mx, my });
+      this._applyGesture({
+        dx: 0,
+        dy: 0,
+        wheelDelta: event.deltaY,
+        wheelMode: event.deltaMode,
+        mx,
+        my,
+        buttons: event.buttons,
+        timestamp: event.timeStamp,
+      });
     };
 
     canvas.addEventListener("pointerdown", onPointerDown);
@@ -1411,7 +1437,44 @@ class FeSurfaceElement extends HTMLElement {
    * the reply back into `_uniforms` by `control.result`'s names. No writes
    * while cold/error/not presenting. */
   _applyGesture(raw) {
-    if (this._fsm !== "live" || !this._controlKernel) return;
+    if (this._fsm !== "live") return;
+    if (this._surfaceTransitionKernel) {
+      // Fixed DFS layout of std::web::SurfaceEvent, followed by the actor's
+      // fields in declaration order. Fragment context args precede actor state
+      // in the GPU signature; missing positions in that suffix are external
+      // resource handles and cross into control-only Wasm as inert i64 zeroes.
+      const eventArgs = [
+        raw.mx,
+        raw.my,
+        raw.dx,
+        raw.dy,
+        raw.wheelDelta,
+        raw.wheelMode,
+        raw.buttons,
+        raw.timestamp,
+        this._backingWidth,
+        this._backingHeight,
+      ];
+      const actorArgStart = 1 + Math.max(-1, ...this._builtins.map((builtin) => builtin.arg_index));
+      const actorArgEnd = actorArgStart + this._members.length + this._resources.length;
+      const actorArgs = [];
+      for (let argIndex = actorArgStart; argIndex < actorArgEnd; argIndex += 1) {
+        const memberIndex = this._memberIndexByArg.get(argIndex);
+        actorArgs.push(memberIndex === undefined ? 0n : this._uniforms[memberIndex]);
+      }
+      const reply = this._surfaceTransitionKernel(...eventArgs, ...actorArgs);
+      const next = Array.isArray(reply) ? reply : [reply];
+      if (next.length !== this._uniforms.length) {
+        console.error(
+          `[fe web] typed surface transition returned ${next.length} fields; expected ${this._uniforms.length}`,
+        );
+        this._surfaceTransitionKernel = null;
+        return;
+      }
+      this._queueGestureRender(next);
+      return;
+    }
+    if (!this._controlKernel) return;
     const control = this._control;
     const args = control.args.map((arg) => {
       switch (arg.source) {
@@ -1424,7 +1487,7 @@ class FeSurfaceElement extends HTMLElement {
         case "drag":
           return arg.axis === "x" ? raw.dx : raw.dy;
         case "wheel":
-          return raw.dzoom;
+          return Math.sign(raw.wheelDelta);
         case "pointer":
           return arg.axis === "x" ? raw.mx : raw.my;
         default:

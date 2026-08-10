@@ -53,6 +53,7 @@ pub enum GpuIntrinsic {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GpuControl {
     Surface,
+    TypedSurface,
 }
 
 /// Dispatch policy carried by a nominal compute-dispatch type.
@@ -481,6 +482,7 @@ impl<'db> AttrListId<'db> {
     pub fn gpu_control(self, db: &'db dyn HirDb) -> Option<GpuControl> {
         match self.single_ident_arg(db, "gpu_control")?.as_str() {
             "surface" => Some(GpuControl::Surface),
+            "typed_surface" => Some(GpuControl::TypedSurface),
             _ => None,
         }
     }
@@ -498,6 +500,13 @@ impl<'db> AttrListId<'db> {
 
     pub fn is_gpu_workgroup(self, db: &'db dyn HirDb) -> bool {
         self.has_marker_attr(db, "gpu_workgroup")
+    }
+
+    /// Marks the standard Fe record transported by the fixed browser surface
+    /// event ABI. Consumers still verify its complete semantic field shape;
+    /// the marker supplies nominal intent, never a name-based guess.
+    pub fn is_web_surface_event(self, db: &'db dyn HirDb) -> bool {
+        self.has_marker_attr(db, "web_surface_event")
     }
 
     pub fn arithmetic_mode(self, db: &'db dyn HirDb) -> Option<ArithmeticMode> {

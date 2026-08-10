@@ -9,11 +9,11 @@ use std::webgpu::{
     FragmentSurface as Display,
     GpuProgram as PassGraph,
     StorageBuffer as OrbitBuffer,
-    UpdateSurface,
+    SurfaceTransition,
     Workgroup as Threads,
     WebGpuBackend,
 }
-use std::web::view::{Extent, Param, Surface}
+use std::web::view::{Extent, Param, Surface, SurfaceEvent}
 use fmath::{abs, from_i32, max, palette}
 use precision::{add_f32, from_quad, sub, to_quad, two_sum}
 use precision::fixed::{from_f32, from_qf_offset, mandelbrot_advance8, to_f32_quad_bits}
@@ -124,6 +124,19 @@ struct MandelbrotParams {
     center_y_w3: Param,
     zoom: Param,
     res: Param,
+}
+
+struct MandelbrotViewState {
+    center_x_w0: f32,
+    center_x_w1: f32,
+    center_x_w2: f32,
+    center_x_w3: f32,
+    center_y_w0: f32,
+    center_y_w1: f32,
+    center_y_w2: f32,
+    center_y_w3: f32,
+    zoom: f32,
+    res: f32,
 }
 
 actor PerturbationalMandelbrot uses (PassGraph<WebGpuBackend>) {
@@ -447,11 +460,16 @@ actor PerturbationalMandelbrot uses (PassGraph<WebGpuBackend>) {
         }
     }
 
-    fn update_view(self, dx: f32, dy: f32, dzoom: f32, mx: f32, my: f32)
-        -> (f32, f32, f32, f32, f32, f32, f32, f32, f32)
-        uses (UpdateSurface)
+    fn navigate(self, event: own SurfaceEvent) -> MandelbrotViewState
+        uses (SurfaceTransition)
     {
-        let step: f32 = 2.0 * self.zoom / self.res
+        let dx: f32 = event.delta_x
+        let dy: f32 = event.delta_y
+        let dzoom: f32 = event.wheel_delta
+        let mx: f32 = event.pointer_x
+        let my: f32 = event.pointer_y
+        let res: f32 = event.width
+        let step: f32 = 2.0 * self.zoom / res
         let (cx0, cx1, cx2, cx3) = to_quad(add_f32<4>(
             from_quad(self.center_x_w0, self.center_x_w1, self.center_x_w2, self.center_x_w3),
             -dx * step,
@@ -461,8 +479,8 @@ actor PerturbationalMandelbrot uses (PassGraph<WebGpuBackend>) {
             dy * step,
         ))
         let next_zoom: f32 = clamp_f(zoom_step(self.zoom, dzoom), ZOOM_MIN, ZOOM_MAX)
-        let u: f32 = (mx + 0.5) * 2.0 / self.res - 1.0
-        let v: f32 = 1.0 - (my + 0.5) * 2.0 / self.res
+        let u: f32 = (mx + 0.5) * 2.0 / res - 1.0
+        let v: f32 = 1.0 - (my + 0.5) * 2.0 / res
         let (ax0, ax1, ax2, ax3) = to_quad(add_f32<4>(
             from_quad(cx0, cx1, cx2, cx3), u * (self.zoom - next_zoom),
         ))
@@ -473,6 +491,17 @@ actor PerturbationalMandelbrot uses (PassGraph<WebGpuBackend>) {
             clamp_quad(ax0, ax1, ax2, ax3, CENTER_X_MIN, CENTER_X_MAX)
         let (ny0, ny1, ny2, ny3) =
             clamp_quad(ay0, ay1, ay2, ay3, CENTER_Y_MIN, CENTER_Y_MAX)
-        (nx0, nx1, nx2, nx3, ny0, ny1, ny2, ny3, next_zoom)
+        MandelbrotViewState {
+            center_x_w0: nx0,
+            center_x_w1: nx1,
+            center_x_w2: nx2,
+            center_x_w3: nx3,
+            center_y_w0: ny0,
+            center_y_w1: ny1,
+            center_y_w2: ny2,
+            center_y_w3: ny3,
+            zoom: next_zoom,
+            res,
+        }
     }
 }

@@ -245,7 +245,12 @@ fn validate_struct_attrs<'db>(
                 "`#[gpu_stage(fragment)]` or `#[gpu_stage(compute)]`",
             ),
             AttrRule::supported("gpu_resource", GPU_IDENT_FORM, "`#[gpu_resource(storage)]`"),
-            AttrRule::supported("gpu_control", GPU_IDENT_FORM, "`#[gpu_control(surface)]`"),
+            AttrRule::supported(
+                "gpu_control",
+                GPU_IDENT_FORM,
+                "`#[gpu_control(surface)]` or `#[gpu_control(typed_surface)]`",
+            ),
+            AttrRule::supported("web_surface_event", BARE_FORM, "`#[web_surface_event]`"),
             AttrRule::supported("gpu_workgroup", BARE_FORM, "`#[gpu_workgroup]`"),
             AttrRule::supported("gpu_dispatch", GPU_IDENT_FORM, "`#[gpu_dispatch(fixed)]`"),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),

@@ -45,7 +45,8 @@ use crate::sonatina::{
     compile_runtime_package_spirv_render_with_resources, compile_runtime_package_wasm_with_options,
 };
 use crate::{
-    CanonicalInterfaceManifest, canonical_lane_decl_from_entry, verify_canonical_wasm_abi,
+    CanonicalField, CanonicalInterfaceManifest, CanonicalType, canonical_lane_decl_from_entry,
+    canonical_type_from_semantic, verify_canonical_wasm_abi,
 };
 
 pub const WEB_BUNDLE_PROTOCOL: &str = "fe-web-bundle";
@@ -59,6 +60,10 @@ const PASS_DIR: &str = "passes";
 const MANIFEST_FILE: &str = "manifest.json";
 const INTERFACE_JS_FILE: &str = "interface.js";
 const INTERFACE_D_TS_FILE: &str = "interface.d.ts";
+/// Manifest-free fixed host discovery point for a typed Fe surface transition.
+/// The authored behavior may have any ordinary Fe name; Wasm publication
+/// aliases it to this versioned ABI identity after semantic shape validation.
+const TYPED_SURFACE_TRANSITION_EXPORT: &str = "fe_surface_transition_v1";
 const CANONICAL_INTERFACE_JS: &str = include_str!("../assets/canonical-interface.js");
 /// Compiler-emitted host page for render bundles. It reads `manifest.json` and
 /// drives the two lowerings of the render kernel it describes: `shader.wgsl`
@@ -828,7 +833,10 @@ pub fn actor_gpu_program(
     }))
 }
 
-fn behavior_is_surface_control(db: &DriverDataBase, behavior: hir::hir_def::Func<'_>) -> bool {
+fn behavior_surface_control_kind(
+    db: &DriverDataBase,
+    behavior: hir::hir_def::Func<'_>,
+) -> Option<GpuControl> {
     behavior
         .actor_roles(db)
         .data(db)
@@ -836,7 +844,11 @@ fn behavior_is_surface_control(db: &DriverDataBase, behavior: hir::hir_def::Func
         .filter_map(|role| role.key_path.to_opt())
         .filter_map(|path| resolve_metadata_ty(db, path, behavior.scope()))
         .filter_map(|ty| nominal_attrs(db, ty))
-        .any(|attrs| attrs.gpu_control(db) == Some(GpuControl::Surface))
+        .find_map(|attrs| attrs.gpu_control(db))
+}
+
+fn behavior_is_surface_control(db: &DriverDataBase, behavior: hir::hir_def::Func<'_>) -> bool {
+    behavior_surface_control_kind(db, behavior).is_some()
 }
 
 fn gpu_actor_name_for_entry(
@@ -1102,6 +1114,186 @@ fn actor_update_export_name(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TypedSurfaceTransitionContract {
+    params: Vec<WebControlWasmType>,
+    results: Vec<WebControlWasmType>,
+}
+
+fn canonical_surface_event_type() -> CanonicalType {
+    CanonicalType::Record(vec![
+        CanonicalField::new("pointer_x", CanonicalType::F32),
+        CanonicalField::new("pointer_y", CanonicalType::F32),
+        CanonicalField::new("delta_x", CanonicalType::F32),
+        CanonicalField::new("delta_y", CanonicalType::F32),
+        CanonicalField::new("wheel_delta", CanonicalType::F32),
+        CanonicalField::new("wheel_mode", CanonicalType::U32),
+        CanonicalField::new("buttons", CanonicalType::U32),
+        CanonicalField::new("timestamp", CanonicalType::F32),
+        CanonicalField::new("width", CanonicalType::F32),
+        CanonicalField::new("height", CanonicalType::F32),
+    ])
+}
+
+fn append_canonical_wasm_types(
+    ty: &CanonicalType,
+    output: &mut Vec<WebControlWasmType>,
+    path: &str,
+) -> Result<(), WebBundleError> {
+    match ty {
+        CanonicalType::Bool | CanonicalType::U8 | CanonicalType::I32 | CanonicalType::U32 => {
+            output.push(WebControlWasmType::I32)
+        }
+        CanonicalType::I64 | CanonicalType::U64 => output.push(WebControlWasmType::I64),
+        CanonicalType::F32 => output.push(WebControlWasmType::F32),
+        CanonicalType::Record(fields) => {
+            for field in fields {
+                append_canonical_wasm_types(&field.ty, output, &format!("{path}.{}", field.name))?;
+            }
+        }
+        CanonicalType::Bytes
+        | CanonicalType::String
+        | CanonicalType::List { .. }
+        | CanonicalType::Variant(_) => {
+            return Err(WebBundleError::SurfaceProjection(format!(
+                "typed surface ABI `{path}` must be a closed scalar record, got {ty:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Resolve and validate the manifest-free typed surface-transition contract.
+/// `Ok(None)` is the legacy `UpdateSurface` lane. A typed role fails closed on
+/// any mismatch: nominal event marker, complete event shape, complete
+/// non-resource state response, or scalar Wasm transport layout.
+fn typed_surface_transition_contract(
+    db: &DriverDataBase,
+    top_mod: TopLevelMod<'_>,
+    source_entry: &str,
+    control_export: &str,
+    resource_field_indices: &[u32],
+) -> Result<Option<TypedSurfaceTransitionContract>, WebBundleError> {
+    let actors = semantic_actors(db, top_mod);
+    let actor = actors
+        .iter()
+        .find(|actor| {
+            actor_is_gpu_program(db, actor)
+                && actor.behaviors.iter().any(|behavior| {
+                    behavior
+                        .name(db)
+                        .to_opt()
+                        .is_some_and(|name| name.data(db) == source_entry)
+                })
+        })
+        .ok_or_else(|| {
+            WebBundleError::SurfaceProjection(format!(
+                "typed control export `{control_export}` has no containing GPU actor"
+            ))
+        })?;
+    let behavior = actor
+        .behaviors
+        .iter()
+        .copied()
+        .find(|behavior| {
+            behavior
+                .name(db)
+                .to_opt()
+                .is_some_and(|name| name.data(db) == control_export)
+        })
+        .ok_or_else(|| {
+            WebBundleError::SurfaceProjection(format!(
+                "typed control export `{control_export}` was not found semantically"
+            ))
+        })?;
+    if behavior_surface_control_kind(db, behavior) != Some(GpuControl::TypedSurface) {
+        return Ok(None);
+    }
+
+    let actor_name = actor
+        .state
+        .name(db)
+        .to_opt()
+        .map(|name| name.data(db).to_string())
+        .unwrap_or_else(|| "<unnamed>".to_owned());
+    let decl = hir::lower::module_actor_decls(db, top_mod)
+        .into_iter()
+        .find(|decl| decl.name == actor_name)
+        .ok_or_else(|| {
+            WebBundleError::SurfaceProjection(format!(
+                "typed surface actor `{actor_name}` has no structural declaration"
+            ))
+        })?;
+    let arg_tys = behavior.arg_tys(db);
+    let expected_args = 1 + decl.fields.len();
+    if arg_tys.len() != expected_args {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "typed surface behavior `{control_export}` must take exactly one SurfaceEvent context record before {} actor fields; found {} semantic arguments",
+            decl.fields.len(),
+            arg_tys.len()
+        )));
+    }
+    let event_ty = *arg_tys[0].skip_binder();
+    if !nominal_attrs(db, event_ty).is_some_and(|attrs| attrs.is_web_surface_event(db)) {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "typed surface behavior `{control_export}` must take the nominal #[web_surface_event] record"
+        )));
+    }
+    let event = canonical_type_from_semantic(db, event_ty, "surface_event")
+        .map_err(|error| WebBundleError::SurfaceProjection(error.to_string()))?;
+    let expected_event = canonical_surface_event_type();
+    if event != expected_event {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "typed surface behavior `{control_export}` event shape differs from the fixed SurfaceEvent ABI: expected {expected_event:?}, got {event:?}"
+        )));
+    }
+
+    let mut state_fields = Vec::new();
+    for (index, (field, ty)) in decl.fields.iter().zip(&arg_tys[1..]).enumerate() {
+        if resource_field_indices.contains(&(index as u32)) {
+            continue;
+        }
+        let ty = canonical_type_from_semantic(
+            db,
+            *ty.skip_binder(),
+            &format!("surface_state.{}", field.name),
+        )
+        .map_err(|error| WebBundleError::SurfaceProjection(error.to_string()))?;
+        state_fields.push(CanonicalField::new(field.name.clone(), ty));
+    }
+    let expected_state = CanonicalType::Record(state_fields);
+    let returned_state =
+        canonical_type_from_semantic(db, behavior.return_ty(db), "surface_state_response")
+            .map_err(|error| WebBundleError::SurfaceProjection(error.to_string()))?;
+    if returned_state != expected_state {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "typed surface behavior `{control_export}` must return the actor's complete non-resource state record in declaration order: expected {expected_state:?}, got {returned_state:?}"
+        )));
+    }
+
+    let mut params = Vec::new();
+    append_canonical_wasm_types(&event, &mut params, "surface_event")?;
+    for (index, ty) in arg_tys[1..].iter().enumerate() {
+        if resource_field_indices.contains(&(index as u32)) {
+            // GPU resource values are inert handles in the control-only Wasm
+            // lane. The fixed host supplies zero; no resource operation is
+            // available to this transition.
+            params.push(WebControlWasmType::I64);
+            continue;
+        }
+        let ty = canonical_type_from_semantic(
+            db,
+            *ty.skip_binder(),
+            &format!("surface_state.{}", decl.fields[index].name),
+        )
+        .map_err(|error| WebBundleError::SurfaceProjection(error.to_string()))?;
+        append_canonical_wasm_types(&ty, &mut params, "surface_state")?;
+    }
+    let mut results = Vec::new();
+    append_canonical_wasm_types(&returned_state, &mut results, "surface_state_response")?;
+    Ok(Some(TypedSurfaceTransitionContract { params, results }))
+}
+
 /// Projects the render actor's `UpdateSurface`-marked behavior (already named
 /// by `actor_update_export_name`) into the manifest `control` section (R3
 /// param gestures): the compiled wasm export name, its positional argument
@@ -1117,7 +1309,7 @@ fn project_control(
     control_export: &str,
     wasm: &[u8],
     resource_field_indices: &[u32],
-) -> Result<WebControl, WebBundleError> {
+) -> Result<Option<WebControl>, WebBundleError> {
     let decls = hir::lower::module_actor_decls(db, top_mod);
     let actor_name = gpu_actor_name_for_entry(db, top_mod, source_entry).ok_or_else(|| {
         WebBundleError::SurfaceProjection(format!(
@@ -1151,13 +1343,33 @@ fn project_control(
         .map(|(_, field)| field)
         .map(|field| field.name.as_str())
         .collect();
-    let (param_types, result_types) =
-        wasm_export_signature(wasm, control_export).ok_or_else(|| {
+    let typed_contract = typed_surface_transition_contract(
+        db,
+        top_mod,
+        source_entry,
+        control_export,
+        resource_field_indices,
+    )?;
+    let wasm_export = if typed_contract.is_some() {
+        TYPED_SURFACE_TRANSITION_EXPORT
+    } else {
+        control_export
+    };
+    let (param_types, result_types) = wasm_export_signature(wasm, wasm_export).ok_or_else(|| {
             WebBundleError::SurfaceProjection(format!(
-                "actor `{}`: update behavior `{control_export}` has no matching wasm export",
+                "actor `{}`: update behavior `{control_export}` has no matching wasm export `{wasm_export}`",
                 actor.name
             ))
         })?;
+    if let Some(contract) = typed_contract {
+        if param_types != contract.params || result_types != contract.results {
+            return Err(WebBundleError::SurfaceProjection(format!(
+                "actor `{}`: typed surface export `{wasm_export}` has measured Wasm signature {param_types:?} -> {result_types:?}; expected {:?} -> {:?} from the resolved Fe records",
+                actor.name, contract.params, contract.results
+            )));
+        }
+        return Ok(None);
+    }
     let param_count = param_types.len();
     let result_count = result_types.len();
     let expected_param_count = behavior.context_params.len() + actor.fields.len();
@@ -1228,11 +1440,11 @@ fn project_control(
         .map(|name| (*name).to_string())
         .collect();
 
-    Ok(WebControl {
+    Ok(Some(WebControl {
         export: control_export.to_string(),
         args,
         result,
-    })
+    }))
 }
 
 /// The (param count, result count) of a named function export in a compiled
@@ -2069,13 +2281,23 @@ impl WebBundle {
             let control_package =
                 mir::build_wasm_runtime_package_for_entry(db, top_mod, control_export)
                     .map_err(|error| WebBundleError::Lower(error.to_string()))?;
-            let wasm = compile_runtime_package_wasm_with_options(
+            let typed_transition = typed_surface_transition_contract(
                 db,
-                &control_package,
-                WasmCompileOptions::default().with_optimization(),
-            )
-            .map_err(|error| WebBundleError::Lower(error.to_string()))?
-            .bytes;
+                top_mod,
+                &options.source_entry,
+                control_export,
+                &resource_field_indices,
+            )?
+            .is_some();
+            let mut wasm_options = WasmCompileOptions::default().with_optimization();
+            if typed_transition {
+                wasm_options =
+                    wasm_options.with_export_alias(control_export, TYPED_SURFACE_TRANSITION_EXPORT);
+            }
+            let wasm =
+                compile_runtime_package_wasm_with_options(db, &control_package, wasm_options)
+                    .map_err(|error| WebBundleError::Lower(error.to_string()))?
+                    .bytes;
             wasmparser::validate(&wasm)
                 .map_err(|error| WebBundleError::WasmValidation(error.to_string()))?;
             let control = project_control(
@@ -2086,7 +2308,7 @@ impl WebBundle {
                 &wasm,
                 &resource_field_indices,
             )?;
-            (wasm, Some(control))
+            (wasm, control)
         } else {
             (Vec::new(), None)
         };
@@ -2100,7 +2322,7 @@ impl WebBundle {
         let provenance = options.provenance.with_bundle_shape(
             !wasm.is_empty(),
             surface.is_some(),
-            control.is_some(),
+            control_export.is_some(),
             passes.len() > 1 || !resources.is_empty(),
         );
         let manifest = WebBundleManifest {
@@ -2171,6 +2393,14 @@ impl WebBundle {
         // need `control_export` routed around canonical-lane derivation too,
         // which no demo does yet, so that combination is left unhandled here.
         let control_export = actor_update_export_name(db, top_mod, &options.source_entry)?;
+        let typed_transition = control_export
+            .as_deref()
+            .map(|export| {
+                typed_surface_transition_contract(db, top_mod, &options.source_entry, export, &[])
+            })
+            .transpose()?
+            .flatten()
+            .is_some();
         let mut canonical_entries = if options.canonical_entries.is_empty() {
             vec![options.source_entry.clone()]
         } else {
@@ -2240,7 +2470,7 @@ impl WebBundle {
         let wasm_package = mir::build_wasm_runtime_package_for_entries(db, top_mod, &wasm_entries)
             .map_err(|error| WebBundleError::Lower(error.to_string()))?;
 
-        let wasm_options = match options.canonical_policy {
+        let mut wasm_options = match options.canonical_policy {
             WebCanonicalPolicy::Disabled => WasmCompileOptions::default(),
             WebCanonicalPolicy::Optional | WebCanonicalPolicy::Required => canonical_candidate
                 .as_ref()
@@ -2256,6 +2486,14 @@ impl WebBundle {
                 .map(|lanes| WasmCompileOptions::default().with_canonical_lanes(lanes))
                 .unwrap_or_else(|| WasmCompileOptions::default().with_canonical_arena()),
         };
+        if typed_transition {
+            wasm_options = wasm_options.with_export_alias(
+                control_export
+                    .as_deref()
+                    .expect("typed transition has a source export"),
+                TYPED_SURFACE_TRANSITION_EXPORT,
+            );
+        }
         let wasm = compile_runtime_package_wasm_with_options(
             db,
             &wasm_package,
@@ -2268,7 +2506,8 @@ impl WebBundle {
         let control = control_export
             .as_deref()
             .map(|export| project_control(db, top_mod, &options.source_entry, export, &wasm, &[]))
-            .transpose()?;
+            .transpose()?
+            .flatten();
         let canonical_interface =
             verify_canonical_candidate(&wasm, canonical_candidate, &mut canonical_status)?;
         // Fail the build closed if the render runtime cannot resolve the entry it
@@ -2328,7 +2567,7 @@ impl WebBundle {
         let provenance = options.provenance.with_bundle_shape(
             !wasm.is_empty(),
             surface.is_some(),
-            control.is_some(),
+            control_export.is_some(),
             false,
         );
         let manifest = WebBundleManifest {

@@ -55,7 +55,7 @@ use std::path::{Path, PathBuf};
 use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
-    WebBindingAccess, WebBindingRole, WebBuildOptions, WebBundle, WebBundleMode,
+    WebBindingAccess, WebBindingRole, WebBuildOptions, WebBundle, WebBundleError, WebBundleMode,
     WebCanonicalPolicy, resolve_web_entry,
 };
 use hir::hir_def::HirIngot;
@@ -241,6 +241,46 @@ fn compile_actor_ingot(rel_dir: &str) -> WebBundle {
     })
 }
 
+/// Compile an actor ingot after replacing only its root Fe source in the
+/// in-memory workspace. Dependencies and package metadata remain the real
+/// checked-in ingot, while a negative gate can perturb one semantic contract
+/// without creating another fixture format or runtime manifest.
+fn compile_actor_ingot_with_root_source(
+    rel_dir: &str,
+    source: String,
+) -> Result<WebBundle, WebBundleError> {
+    let dir = repo_root().join(rel_dir);
+    let mut db = DriverDataBase::default();
+    let dir_url = Url::from_directory_path(&dir)
+        .unwrap_or_else(|_| panic!("invalid ingot path {}", dir.display()));
+    assert!(
+        !driver::init_ingot(&mut db, &dir_url),
+        "{rel_dir}: ingot initialization diagnostics"
+    );
+    let source_url = Url::from_file_path(dir.join("src/lib.fe"))
+        .unwrap_or_else(|_| panic!("invalid ingot root source path {}", dir.display()));
+    db.workspace().update(&mut db, source_url.clone(), source);
+    let ingot = db
+        .workspace()
+        .containing_ingot(&db, source_url)
+        .unwrap_or_else(|| panic!("{rel_dir} root source did not resolve to its ingot"));
+    let top_mod = ingot.root_mod(&db);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "{rel_dir}: mutated source diagnostics prevent contract testing:\n{diagnostics}"
+    );
+    let (entry, mode) = resolve_web_entry(&db, top_mod, None, None)?;
+    let WebBundleMode::Render = mode else {
+        panic!("{rel_dir}: negative surface contract fixture must remain render-shaped")
+    };
+    WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render(entry, Some(rel_dir.to_owned())),
+    )
+}
+
 /// Compile a checked-in ingot directory in explicit render mode with the
 /// canonical `render`/`verify`/`oracle` lanes required, matching the legacy
 /// `render/verify/oracle uses (HostEffect, MainThread, mut
@@ -368,14 +408,18 @@ fn rollcall_pipeline_pass_graph_compiles_with_external_resources_and_private_mem
 
 #[test]
 fn perturbational_mandelbrot_graph_compiles() {
-    use fe_codegen::WebControlArgSource as Src;
-    use fe_codegen::WebControlWasmType;
-
     let bundle = compile_actor_ingot("demos/sketches/perturbational_mandelbrot");
     wasmparser::validate(&bundle.wasm).expect("the Fe control lane must be valid Wasm");
     assert_initial_zoom(&bundle, 1.0);
     let exports = wasm_function_export_names(&bundle.wasm);
-    assert!(exports.iter().any(|name| name == "update_view"));
+    assert!(
+        exports
+            .iter()
+            .any(|name| name == "fe_surface_transition_v1"),
+        "the typed Fe transition must use the fixed, versioned host ABI"
+    );
+    assert!(!exports.iter().any(|name| name == "navigate"));
+    assert!(!exports.iter().any(|name| name == "update_view"));
     assert!(
         !exports.iter().any(|name| name == "display_reference"),
         "the GPU graph must not acquire a CPU pixel fallback"
@@ -415,35 +459,82 @@ fn perturbational_mandelbrot_graph_compiles() {
             "each pass must carry projected Fe state names for runtime uploads"
         );
     }
-    let control = bundle
-        .manifest
-        .control
-        .as_ref()
-        .expect("the graph must carry its Fe-authored pan/zoom lane");
-    assert_eq!(control.export, "update_view");
-    assert_eq!(control.args.len(), 16);
-    assert_eq!(
-        control.args[5],
-        Src::Resource {
-            name: "orbit".to_owned(),
-            wasm_type: WebControlWasmType::I64,
+    assert!(
+        bundle.manifest.control.is_none(),
+        "typed control discovery must not recreate a JSON manifest protocol"
+    );
+
+    // The pass graph's transition includes one inert i64 orbit handle between
+    // the fixed event record and its ten non-resource state fields. Execute a
+    // deterministic mixed event tape to prove that resource-bearing actors use
+    // the same Fe state policy and fixed host ABI as the brute renderer.
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &bundle.wasm)
+        .expect("wasmtime should load the perturbational control module");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("wasmtime should instantiate perturbational control");
+    let transition = instance
+        .get_func(&mut store, "fe_surface_transition_v1")
+        .expect("typed perturbational surface transition export");
+    let mut cx = [-0.7436439f32, -7.146717e-9, -3e-16, -2e-23];
+    let mut cy = [0.13182591f32, -4.8132045e-9, 2.5e-16, 1.5e-23];
+    let mut zoom = 1.0f32;
+    let res = MANDELBROT_RES;
+    let events = [
+        (12.0f32, -7.0f32, 0.0f32, 128.0f32, 300.0f32),
+        (0.0, 0.0, -37.25, 401.0, 91.0),
+        (-3.0, 5.0, 0.0, 401.0, 91.0),
+        (0.0, 0.0, 8.5, 20.0, 490.0),
+        (127.0, -128.0, -0.125, 256.0, 256.0),
+        (-90.0, 64.0, 0.0, -12.0, 600.0),
+    ];
+    let mut results = vec![wasmtime::Val::F32(0); 10];
+    for (step, (dx, dy, wheel_delta, mx, my)) in events.into_iter().enumerate() {
+        let mut vals = vec![
+            wasmtime::Val::F32(mx.to_bits()),
+            wasmtime::Val::F32(my.to_bits()),
+            wasmtime::Val::F32(dx.to_bits()),
+            wasmtime::Val::F32(dy.to_bits()),
+            wasmtime::Val::F32(wheel_delta.to_bits()),
+            wasmtime::Val::I32((step % 3) as i32),
+            wasmtime::Val::I32(1),
+            wasmtime::Val::F32((step as f32 * 4.0).to_bits()),
+            wasmtime::Val::F32(res.to_bits()),
+            wasmtime::Val::F32(res.to_bits()),
+            wasmtime::Val::I64(0),
+        ];
+        vals.extend(
+            [
+                cx[0], cx[1], cx[2], cx[3], cy[0], cy[1], cy[2], cy[3], zoom, res,
+            ]
+            .iter()
+            .map(|value| wasmtime::Val::F32(value.to_bits())),
+        );
+        transition
+            .call(&mut store, &vals, &mut results)
+            .expect("perturbational typed transition should run");
+        let mut got = [0.0f32; 10];
+        for (index, value) in results.iter().enumerate() {
+            got[index] = match value {
+                wasmtime::Val::F32(bits) => f32::from_bits(*bits),
+                other => panic!("perturbational transition result must be f32, got {other:?}"),
+            };
         }
-    );
-    assert_eq!(
-        control.result,
-        [
-            "center_x_w0",
-            "center_x_w1",
-            "center_x_w2",
-            "center_x_w3",
-            "center_y_w0",
-            "center_y_w1",
-            "center_y_w2",
-            "center_y_w3",
-            "zoom",
-        ]
-        .map(str::to_owned)
-    );
+        let (want_cx, want_cy, want_zoom) =
+            mandelbrot_update_view_oracle(cx, cy, zoom, res, dx, dy, wheel_delta, mx, my);
+        let want = [
+            want_cx[0], want_cx[1], want_cx[2], want_cx[3], want_cy[0], want_cy[1], want_cy[2],
+            want_cy[3], want_zoom, res,
+        ];
+        assert_eq!(
+            got, want,
+            "perturbational typed event tape step {step} must equal the independent oracle"
+        );
+        cx = [got[0], got[1], got[2], got[3]];
+        cy = [got[4], got[5], got[6], got[7]];
+        zoom = got[8];
+    }
     for shader in &bundle.pass_wgsl {
         assert_browser_wgsl(&shader.source);
     }
@@ -622,15 +713,14 @@ fn wasm_function_export_names(wasm: &[u8]) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
-// R3 step 1 (param gestures, mandelbrot): the gallery `demos/sketches/
-// mandelbrot` actor's `update_view` behavior (the `UpdateSurface` role
-// marker) is projected into the manifest `control` section AND compiled into
-// `bundle.wasm` as a real, callable export. Fe owns pan sensitivity, the zoom
-// curve, the cursor anchor, and the clamps; JS delivers only raw deltas.
+// Typed surface transition (mandelbrot): the gallery actor's `navigate`
+// behavior is compiled under one fixed, versioned Wasm export. Fe owns pan
+// sensitivity, raw-wheel interpretation, the zoom curve, cursor anchoring,
+// clamps, and complete state replacement; JS transports raw event facts.
 //
-// Gate: the manifest `control` section has the exact shape the runtime reads
-// (measured, not assumed), and the wasmtime-executed `update_view` export
-// matches an oracle over a seeded synthetic gesture tape at EVERY step,
+// Gate: there is deliberately NO manifest control section, and the
+// wasmtime-executed fixed export matches an oracle over a seeded synthetic
+// event tape at EVERY step,
 // mirroring `spirv_e2e.rs`'s `update_view_matches_oracle_over_gesture_tape`
 // rigor for the `mandel_view_ctl.fe` fixture's i32 Q12 sibling.
 // ---------------------------------------------------------------------------
@@ -768,7 +858,7 @@ fn qf_clamp(w: [f32; 4], min_v: f32, max_v: f32) -> [f32; 4] {
 ///
 /// The complex-plane centre is a FOUR-WORD `Expansion<4>` (deep zoom ~1e-27):
 /// pan and anchor deltas are O(zoom) quantities that fold into the four-word
-/// centre through `add_f32<4>`, mirroring `lib.fe`'s `update_view` exactly
+/// centre through `add_f32<4>`, mirroring `lib.fe`'s `navigate` exactly
 /// (same op sequence, same f32 rounding), so this oracle is expected to match
 /// the wasm export BIT-FOR-BIT, not just within an epsilon.
 fn mandelbrot_update_view_oracle(
@@ -813,100 +903,42 @@ fn mandelbrot_update_view_oracle(
     (cx_c, cy_c, z_c)
 }
 
-/// The manifest `control` section has EXACTLY the shape the render runtime
-/// reads: the `update_view` export, its 15 positional arg sources (5 raw
-/// gesture deltas, then the actor's 10 state fields by name -- the eight
-/// four-word `Expansion<4>` centre words plus `zoom` and `res` -- in
-/// declaration order), and the 9-value reply's target field names.
+/// Typed control is discovered by a fixed Wasm export, not a JSON binding
+/// table. The source behavior name is intentionally absent from the binary ABI,
+/// and its complete ten-field response needs no result-name mapping.
 #[test]
-fn mandelbrot_control_manifest_projects_gesture_bindings() {
-    use fe_codegen::WebControlArgSource as Src;
-
+fn mandelbrot_typed_surface_abi_is_manifest_free() {
     let bundle = compile_actor_ingot("demos/sketches/mandelbrot");
-    let control = bundle
-        .manifest
-        .control
-        .as_ref()
-        .expect("demos/sketches/mandelbrot should project an `UpdateSurface` control section");
-    assert_eq!(control.export, "update_view");
-    assert_eq!(
-        control.args,
-        vec![
-            Src::Drag {
-                axis: "x".to_string()
-            },
-            Src::Drag {
-                axis: "y".to_string()
-            },
-            Src::Wheel,
-            Src::Pointer {
-                axis: "x".to_string()
-            },
-            Src::Pointer {
-                axis: "y".to_string()
-            },
-            Src::State {
-                name: "center_x_w0".to_string()
-            },
-            Src::State {
-                name: "center_x_w1".to_string()
-            },
-            Src::State {
-                name: "center_x_w2".to_string()
-            },
-            Src::State {
-                name: "center_x_w3".to_string()
-            },
-            Src::State {
-                name: "center_y_w0".to_string()
-            },
-            Src::State {
-                name: "center_y_w1".to_string()
-            },
-            Src::State {
-                name: "center_y_w2".to_string()
-            },
-            Src::State {
-                name: "center_y_w3".to_string()
-            },
-            Src::State {
-                name: "zoom".to_string()
-            },
-            Src::State {
-                name: "res".to_string()
-            },
-        ],
-        "control.args must be exactly [dx, dy, dzoom, mx, my] (the reserved gesture-arg \
-         vocabulary) followed by the actor's state fields in declaration order"
+    assert!(
+        bundle.manifest.control.is_none(),
+        "typed surface control must not emit a manifest control block"
     );
-    assert_eq!(
-        control.result,
-        vec![
-            "center_x_w0".to_string(),
-            "center_x_w1".to_string(),
-            "center_x_w2".to_string(),
-            "center_x_w3".to_string(),
-            "center_y_w0".to_string(),
-            "center_y_w1".to_string(),
-            "center_y_w2".to_string(),
-            "center_y_w3".to_string(),
-            "zoom".to_string(),
-        ],
-        "control.result must be the LEADING 9 state fields (declaration order): the eight \
-         center words plus zoom; `res` is read but not itself gesture-updated"
+    let exports = wasm_function_export_names(&bundle.wasm);
+    assert!(
+        exports
+            .iter()
+            .any(|name| name == "fe_surface_transition_v1")
     );
+    assert!(!exports.iter().any(|name| name == "navigate"));
+    assert!(!exports.iter().any(|name| name == "update_view"));
 
-    // Non-interactive sketches carry no `control` section at all (this is
-    // exactly what keeps their manifests byte-stable): spot-check a sibling.
+    // A non-interactive sibling has neither transport metadata nor the fixed
+    // typed transition export.
     let plain = compile_actor_ingot("demos/sketches/gradient");
     assert!(
         plain.manifest.control.is_none(),
-        "a sketch with no `UpdateSurface` behavior must project no `control` section"
+        "a non-interactive sketch must project no legacy control block"
+    );
+    assert!(
+        !wasm_function_export_names(&plain.wasm)
+            .iter()
+            .any(|name| name == "fe_surface_transition_v1"),
+        "a non-interactive sketch must not acquire a typed transition export"
     );
 }
 
-/// The wasmtime-executed `update_view` export matches the independent oracle
-/// over a deterministic synthetic gesture tape (a forced zoom-in burst, then
+/// The wasmtime-executed typed transition matches the independent oracle over
+/// a deterministic synthetic event tape (a forced zoom-in burst, then
 /// a seeded LCG mixed drag/wheel walk), feeding each reply forward as the
 /// next state -- the exact runtime round-trip `fe-render-runtime.js`'s
 /// `_applyGesture` performs. Asserts the clamps hold at every step and that
@@ -927,7 +959,7 @@ fn mandelbrot_control_manifest_projects_gesture_bindings() {
 /// forced or random, still runs through wasmtime and is checked against the
 /// oracle.
 #[test]
-fn mandelbrot_update_view_matches_oracle_over_gesture_tape() {
+fn mandelbrot_typed_surface_transition_matches_oracle_over_event_tape() {
     let bundle = compile_actor_ingot("demos/sketches/mandelbrot");
     let engine = wasmtime::Engine::default();
     let module =
@@ -935,13 +967,12 @@ fn mandelbrot_update_view_matches_oracle_over_gesture_tape() {
     let mut store = wasmtime::Store::new(&engine, ());
     let instance = wasmtime::Instance::new(&mut store, &module, &[])
         .expect("wasmtime should instantiate the mandelbrot sketch wasm");
-    // `(f32 x15) -> (f32 x9)`: the arity exceeds wasmtime's typed-tuple
-    // ergonomics, so the call goes through the untyped `Val` path (mirroring
-    // `precision_fixed_oracle.rs`'s L=8 harness).
-    let update_view = instance.get_func(&mut store, "update_view").expect(
-        "`update_view` export should exist as (f32 x15) -> (f32 x9): 5 gesture args then the \
-             10 flattened actor state fields (eight Expansion<4> centre words, zoom, res)",
-    );
+    // The fixed ABI is ten event leaves (eight f32 + two i32), then ten actor
+    // state f32s, returning the complete ten-f32 state. The arity exceeds
+    // wasmtime's typed-tuple ergonomics, so use the untyped `Val` path.
+    let transition = instance
+        .get_func(&mut store, "fe_surface_transition_v1")
+        .expect("typed surface transition export");
 
     // The tape's own start state (independent of view()'s deep init): a shallow
     // centre so pan actually reaches the centre clamps. Each axis is a four-word
@@ -950,7 +981,7 @@ fn mandelbrot_update_view_matches_oracle_over_gesture_tape() {
     let mut cy = [0.0f32, 0.0, 0.0, 0.0];
     let mut zoom = 1.5f32;
     let res = MANDELBROT_RES;
-    let mut results = vec![wasmtime::Val::F32(0); 9];
+    let mut results = vec![wasmtime::Val::F32(0); 10];
 
     let mut s: u64 = 0x5EED_1234_CAFE_F00D;
     let (mut hit_cx_lo, mut hit_cx_hi, mut hit_cy_lo, mut hit_cy_hi) = (0u32, 0u32, 0u32, 0u32);
@@ -962,7 +993,7 @@ fn mandelbrot_update_view_matches_oracle_over_gesture_tape() {
     const FORCE_ZOOM_IN_STEPS: usize = 520;
     const STEPS: usize = RANDOM_STEPS + FORCE_ZOOM_IN_STEPS;
     for step in 0..STEPS {
-        let (dx, dy, dzoom, mx, my) = if step < RANDOM_STEPS {
+        let (dx, dy, dzoom, mx, my): (f32, f32, f32, f32, f32) = if step < RANDOM_STEPS {
             s = s
                 .wrapping_mul(6364136223846793005)
                 .wrapping_add(1442695040888963407);
@@ -987,22 +1018,37 @@ fn mandelbrot_update_view_matches_oracle_over_gesture_tape() {
             (0.0, 0.0, -1.0, res / 2.0, res / 2.0)
         };
 
-        let args: [f32; 15] = [
-            dx, dy, dzoom, mx, my, cx[0], cx[1], cx[2], cx[3], cy[0], cy[1], cy[2], cy[3], zoom,
-            res,
+        // SurfaceEvent declaration order, followed by actor declaration order.
+        // `wheel_delta` remains raw; Fe interprets its sign. Mode/buttons/time
+        // are intentionally varied/inert facts to ensure their mixed i32/f32
+        // transport slots are real even though this transition ignores them.
+        let mut vals = vec![
+            wasmtime::Val::F32(mx.to_bits()),
+            wasmtime::Val::F32(my.to_bits()),
+            wasmtime::Val::F32(dx.to_bits()),
+            wasmtime::Val::F32(dy.to_bits()),
+            wasmtime::Val::F32(dzoom.to_bits()),
+            wasmtime::Val::I32((step % 3) as i32),
+            wasmtime::Val::I32((step % 2) as i32),
+            wasmtime::Val::F32((step as f32 * 0.25).to_bits()),
+            wasmtime::Val::F32(res.to_bits()),
+            wasmtime::Val::F32(res.to_bits()),
         ];
-        let vals: Vec<wasmtime::Val> = args
+        vals.extend(
+            [
+                cx[0], cx[1], cx[2], cx[3], cy[0], cy[1], cy[2], cy[3], zoom, res,
+            ]
             .iter()
-            .map(|v| wasmtime::Val::F32(v.to_bits()))
-            .collect();
-        update_view
+            .map(|v| wasmtime::Val::F32(v.to_bits())),
+        );
+        transition
             .call(&mut store, &vals, &mut results)
-            .expect("update_view should run");
-        let mut got = [0f32; 9];
+            .expect("typed surface transition should run");
+        let mut got = [0f32; 10];
         for (i, r) in results.iter().enumerate() {
             got[i] = match r {
                 wasmtime::Val::F32(bits) => f32::from_bits(*bits),
-                other => panic!("update_view result {i} must be f32, got {other:?}"),
+                other => panic!("typed transition result {i} must be f32, got {other:?}"),
             };
         }
 
@@ -1010,11 +1056,11 @@ fn mandelbrot_update_view_matches_oracle_over_gesture_tape() {
             mandelbrot_update_view_oracle(cx, cy, zoom, res, dx, dy, dzoom, mx, my);
         let want = [
             want_cx[0], want_cx[1], want_cx[2], want_cx[3], want_cy[0], want_cy[1], want_cy[2],
-            want_cy[3], want_z,
+            want_cy[3], want_z, res,
         ];
         assert_eq!(
             got, want,
-            "gesture-tape step {step}: wasm update_view(cx={cx:?}, cy={cy:?}, zoom={zoom}; \
+            "event-tape step {step}: wasm typed transition(cx={cx:?}, cy={cy:?}, zoom={zoom}; \
              dx={dx},dy={dy},dz={dzoom},mx={mx},my={my}) = {got:?} must equal the oracle {want:?}"
         );
 
@@ -1065,8 +1111,8 @@ fn mandelbrot_update_view_matches_oracle_over_gesture_tape() {
         "the gesture tape must visit both zoom clamps (zoom_lo={hit_zoom_lo}, zoom_hi={hit_zoom_hi})"
     );
     eprintln!(
-        "R3 step 1 tape: {STEPS} mixed pan/zoom/anchor events under wasmtime; the mandelbrot \
-         update_view (Expansion<4> centre, 9-value reply) equals the independent oracle at EVERY \
+        "typed surface tape: {STEPS} mixed pan/zoom/anchor events under wasmtime; the mandelbrot \
+         transition (Expansion<4> centre, complete 10-field reply) equals the independent oracle at EVERY \
          step. Clamp coverage: cx_lo={hit_cx_lo} cx_hi={hit_cx_hi} cy_lo={hit_cy_lo} \
          cy_hi={hit_cy_hi} zoom_lo={hit_zoom_lo} zoom_hi={hit_zoom_hi}."
     );
@@ -1093,6 +1139,55 @@ fn gradient_sketch_compiles() {
     let bundle = compile_actor_ingot("demos/sketches/gradient");
     assert_browser_wgsl(&bundle.wgsl);
     wasmparser::validate(&bundle.wasm).expect("gradient wasm should be valid");
+}
+
+#[test]
+fn typed_surface_transition_rejects_partial_state_record() {
+    let path = repo_root().join("demos/sketches/gradient/src/lib.fe");
+    let mut source = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+    source = source.replace(
+        "use std::webgpu::{FragmentSurface, GpuProgram, WebGpuBackend}",
+        "use std::webgpu::{FragmentSurface, GpuProgram, SurfaceTransition, WebGpuBackend}",
+    );
+    source = source.replace(
+        "use std::web::view::{Extent, Param, Surface}",
+        "use std::web::view::{Extent, Param, Surface, SurfaceEvent}",
+    );
+    source = source.replace(
+        "actor GradientSurface uses (GpuProgram<WebGpuBackend>) {",
+        r#"struct PartialGradientState {
+    gain: f32,
+    bias: f32,
+}
+
+actor GradientSurface uses (GpuProgram<WebGpuBackend>) {"#,
+    );
+    let actor_end = source
+        .rfind("\n}")
+        .expect("gradient actor should have a closing brace");
+    source.insert_str(
+        actor_end,
+        r#"
+
+    fn navigate(self, event: own SurfaceEvent) -> PartialGradientState
+        uses (SurfaceTransition)
+    {
+        PartialGradientState {
+            gain: self.gain + event.width * 0.0,
+            bias: self.bias,
+        }
+    }
+"#,
+    );
+
+    let error = compile_actor_ingot_with_root_source("demos/sketches/gradient", source)
+        .expect_err("a partial typed state response must fail closed");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("complete non-resource state record") && rendered.contains("cutoff"),
+        "the diagnostic must name the complete-state contract and missing actor field: {rendered}"
+    );
 }
 
 #[test]

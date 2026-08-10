@@ -11,9 +11,34 @@
 //! compiler capability is the generic const-projection seam that evaluates the
 //! behavior and walks the record.
 //!
-//! `Param` values carry no gesture bindings yet: input gestures (`.wheel()`,
-//! `.drag_x()`, ...) are the R3 (L3) param-gesture slice and attach here later
-//! without perturbing this shape.
+//! `Param` values carry no gesture bindings yet: fluent input bindings
+//! (`.wheel()`, `.drag_x()`, ...) remain a later library projection. Rich
+//! controls already receive the typed raw facts below through a
+//! `SurfaceTransition` behavior, keeping policy in Fe.
+
+/// The fixed browser-to-Fe input transport record. The marker declares nominal
+/// host-boundary intent; the compiler verifies this complete field shape before
+/// admitting a `SurfaceTransition` export, so no argument names or JSON binding
+/// table participate in dispatch. It is deliberately flat: handlers read raw
+/// facts directly, and the value-only Wasm lane never needs addressable nested
+/// transport objects.
+#[web_surface_event]
+pub struct SurfaceEvent {
+    pub pointer_x: f32,
+    pub pointer_y: f32,
+    pub delta_x: f32,
+    pub delta_y: f32,
+    /// Raw `WheelEvent.deltaY`; Fe owns its sign and scale policy.
+    pub wheel_delta: f32,
+    /// Raw `WheelEvent.deltaMode`.
+    pub wheel_mode: u32,
+    pub buttons: u32,
+    pub timestamp: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl Copy for SurfaceEvent {}
 
 /// How a param presents and is driven by the runtime. The variant NAME is the
 /// projected `kind` string (snake_cased), so this enum is the single source of

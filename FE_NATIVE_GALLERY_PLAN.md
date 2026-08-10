@@ -5,6 +5,35 @@ Status: active direction
 Origin: honesty audit of Claude Code session
 `e806786e-dff4-43c1-b25f-849ba82a8a02` and the subsequent Codex gallery work.
 
+## Execution ledger (2026-08-11)
+
+- Phase 0 is landed and pushed in `855b982a4`: canonical-gallery attribution,
+  provenance, fixed-host hashing, a purity gate, corrected claims, and removal
+  of the handwritten gallery source-viewer script.
+- The first Phase 1 slice is implemented for both Mandelbrot actors. Their Fe
+  `navigate` behaviors consume one owned, typed `SurfaceEvent`, return the
+  complete ten-field Fe state record, and compile to the fixed
+  `fe_surface_transition_v1` export. The browser supplies raw facts and carries
+  returned values; it does not normalize the wheel, perform pan/zoom math, or
+  read a control manifest. No replacement JSON specification was introduced.
+- Independent Wasmtime gates execute the brute transition over 3,520 stateful
+  events and compare every result bit-for-bit with a separately derived Rust
+  expansion oracle. The perturbational actor executes a mixed raw-event tape
+  through the same fixed ABI, including its real resource slot. Negative gates
+  reject partial state records, and release gallery precompilation validates
+  both manifest-free control artifacts.
+- Native/Cranelift event parity is still open. An attempted gate against the
+  real checked-in actor exposed two named limitations in the pinned Sonatina
+  backend: floating-point comparison instructions are not translated, and
+  records/tuples returning more than two floating-point values require an
+  indirect-return ABI. The adapter failed closed and was not retained as a
+  sham parity claim. Until native lowering gains those features, the Wasmtime
+  event oracle is browser-Wasm proof only; it must not be described as native
+  parity.
+
+This ledger records achieved evidence, not a relaxation of the phases or the
+Definition of done below.
+
 ## Goal
 
 Make the gallery the canonical proof that rendering, application state, input
@@ -208,18 +237,46 @@ host code, or an oracle for every published tile.
 
 ### Phase 1: replace the reserved gesture ABI
 
+Chosen first-slice ABI (no new manifest protocol):
+
+- `std::web::SurfaceEvent` is an attributed Fe record of raw browser facts:
+  pointer, movement delta, raw wheel delta and mode, buttons, timestamp, and
+  backing extent.
+- A `SurfaceTransition` behavior takes exactly that one context record and
+  returns a named Fe record matching the actor's complete non-resource state.
+- The compiler validates both record shapes from resolved semantic types and
+  exports the transition under one fixed, versioned Wasm ABI symbol. The source
+  behavior name is ordinary Fe and is not part of the host contract.
+- The fixed host discovers that export directly, transports the fixed event
+  layout, and replaces the complete returned state in declaration order. It
+  does not consult a `control` manifest block, argument-source strings, or
+  result-field names.
+- The old `UpdateSurface` projection remains only as a migration compatibility
+  path for examples not yet converted, and is deleted after the gallery sweep.
+
 1. Introduce typed Fe browser/surface facts, conceptually:
 
    ```fe
+   #[web_surface_event]
    struct SurfaceEvent {
-       pointer: SurfacePoint,
-       delta: SurfaceDelta,
-       wheel: WheelDelta,
-       buttons: Buttons,
-       timestamp: Time,
-       extent: Extent,
+       pointer_x: f32,
+       pointer_y: f32,
+       delta_x: f32,
+       delta_y: f32,
+       wheel_delta: f32,
+       wheel_mode: u32,
+       buttons: u32,
+       timestamp: f32,
+       width: f32,
+       height: f32,
    }
    ```
+
+   The first executable slice keeps this boundary record deliberately flat and
+   takes it as `event: own SurfaceEvent`. That gives the Wasm value lane ten
+   direct scalar leaves and keeps Fe handlers readable; nested convenience
+   records can remain ordinary library views built inside Fe when the general
+   canonical record lane is ready.
 
 2. Replace `UpdateSurface(dx, dy, dzoom, mx, my)` with a capability-typed
    transition taking a record and returning a typed state record.

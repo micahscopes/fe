@@ -84,6 +84,14 @@ pub struct FixedDispatch<const X: usize, const Y: usize, const Z: usize> {}
 #[gpu_control(surface)]
 pub struct UpdateSurface {}
 
+/// Typed replacement for `UpdateSurface`. A behavior using this role takes one
+/// `std::web::SurfaceEvent` context record and returns one named record equal to
+/// the actor's complete non-resource state. The compiler validates the types
+/// and publishes a fixed Wasm surface-transition export; the source function
+/// name and record parameter name remain ordinary Fe.
+#[gpu_control(typed_surface)]
+pub struct SurfaceTransition {}
+
 /// An externally allocated storage resource shared by GPU stages.
 ///
 /// The private word keeps the nominal value live through ordinary Fe lowering;

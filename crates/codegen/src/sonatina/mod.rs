@@ -63,6 +63,10 @@ use crate::{
 pub struct WasmCompileOptions {
     canonical_arena: bool,
     canonical_lanes: Vec<crate::CanonicalLane>,
+    /// Compiler-owned public ABI aliases. The selected Fe source name remains
+    /// ordinary application vocabulary while a fixed host contract can
+    /// discover its export without a side manifest.
+    export_aliases: Vec<(String, String)>,
     /// Run Sonatina's ISA-independent optimization pipeline before emitting
     /// wasm. Defaults to OFF so the documented byte-for-byte-equivalent
     /// default is preserved; opt in to measure or to ship smaller modules.
@@ -94,6 +98,18 @@ impl WasmCompileOptions {
         self.canonical_lanes = lanes;
         self
     }
+
+    pub fn with_export_alias(
+        mut self,
+        source: impl Into<String>,
+        export: impl Into<String>,
+    ) -> Self {
+        let alias = (source.into(), export.into());
+        if !self.export_aliases.contains(&alias) {
+            self.export_aliases.push(alias);
+        }
+        self
+    }
 }
 
 /// Lower a runtime package through the existing Wasm path and emit Wasm with
@@ -113,6 +129,7 @@ pub fn compile_runtime_package_wasm_with_options(
             db,
             package,
             &options.canonical_lanes,
+            &options.export_aliases,
         )?;
     // Sonatina's `Pipeline` is ISA-independent (`EvmPipeline` is the
     // EVM-specific one) and `EvmCompile::optimize` runs it with no target

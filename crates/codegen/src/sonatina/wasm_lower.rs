@@ -138,7 +138,7 @@ pub fn compile_runtime_package_wasm(
     db: &DriverDataBase,
     package: &RuntimePackage<'_>,
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
-    compile_runtime_package_wasm_with_canonical_lanes(db, package, &[])
+    compile_runtime_package_wasm_with_canonical_lanes(db, package, &[], &[])
 }
 
 /// Overlay-only callback-capstone entry point. The default pin cannot name the
@@ -152,7 +152,7 @@ pub fn compile_runtime_package_wasm_with_guest_callbacks(
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
     let isa = create_wasm32_isa();
     let builder = ModuleBuilder::new(ModuleCtx::new(&isa));
-    let mut lowerer = PortableModuleLowerer::new(db, builder, &isa, package, HashSet::new());
+    let mut lowerer = PortableModuleLowerer::new(db, builder, &isa, package, HashSet::new(), &[]);
     lowerer.declare_functions()?;
     lowerer.lower_bodies()?;
     lowerer.synthesize_guest_callbacks(callbacks)?;
@@ -164,6 +164,7 @@ pub(crate) fn compile_runtime_package_wasm_with_canonical_lanes(
     db: &DriverDataBase,
     package: &RuntimePackage<'_>,
     canonical_lanes: &[crate::CanonicalLane],
+    export_aliases: &[(String, String)],
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
     // Reject unsupported indirect host results before constructing any
     // Sonatina signatures. A local wrapper may itself return the authored enum
@@ -212,7 +213,14 @@ pub(crate) fn compile_runtime_package_wasm_with_canonical_lanes(
         .iter()
         .map(|lane| lane.name.clone())
         .collect();
-    let mut lowerer = PortableModuleLowerer::new(db, builder, &isa, package, canonical_lane_names);
+    let mut lowerer = PortableModuleLowerer::new(
+        db,
+        builder,
+        &isa,
+        package,
+        canonical_lane_names,
+        export_aliases,
+    );
     lowerer.declare_functions()?;
     lowerer.lower_bodies()?;
     for lane in canonical_lanes {
@@ -271,7 +279,7 @@ pub(crate) fn compile_runtime_package_native(
         OperatingSystem::Native,
     ));
     let builder = ModuleBuilder::new(ModuleCtx::new(&isa));
-    let mut lowerer = PortableModuleLowerer::new(db, builder, &isa, package, HashSet::new());
+    let mut lowerer = PortableModuleLowerer::new(db, builder, &isa, package, HashSet::new(), &[]);
     lowerer.declare_functions()?;
     lowerer.lower_bodies()?;
     Ok(lowerer.finish())
@@ -2187,6 +2195,7 @@ where
         isa: &'a I,
         package: &'a RuntimePackage<'db>,
         canonical_lane_names: HashSet<String>,
+        export_aliases: &[(String, String)],
     ) -> Self {
         let mut prepared_bodies = prepare_inline_value_bodies(db, package).bodies;
         for body in prepared_bodies.values_mut() {
@@ -2194,13 +2203,25 @@ where
             narrow_usize_scalars(db, body);
             drop_dead_pure_aggregate_values(db, body);
         }
+        let mut func_symbols = assign_sonatina_function_symbols(db, package);
+        for function in package.functions(db) {
+            let instance = function.instance(db);
+            let assigned = func_symbols.get(&instance).map(String::as_str);
+            let declared = function.symbol(db);
+            if let Some((_, export)) = export_aliases
+                .iter()
+                .find(|(source, _)| source == &declared || Some(source.as_str()) == assigned)
+            {
+                func_symbols.insert(instance, export.clone());
+            }
+        }
         Self {
             db,
             builder,
             isa,
             package,
             prepared_bodies,
-            func_symbols: assign_sonatina_function_symbols(db, package),
+            func_symbols,
             func_map: FxHashMap::default(),
             resource_element_cache: FxHashMap::default(),
             resource_type_cache: FxHashMap::default(),
