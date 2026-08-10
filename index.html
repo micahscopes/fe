@@ -1,11 +1,11 @@
 <!DOCTYPE html><!--
-  The all-demos page. `fe web dev demos/gallery.html` compiles and renders
-  EVERY render sketch on one page, script-free: each `<script
-  type="application/fe" data-fe-render>` is a standalone render bundle, and the
-  bootstrap handoff inserts a `<fe-surface>` custom element after each script,
-  which mounts and drives its own lifecycle (poster first, live on pointer
-  intent, suspended off-viewport) while sharing a single WebGPU device across
-  every tile on the page (acquireSharedGpu). See
+  The canonical all-demos page. `fe web dev demos/gallery.html` compiles and
+  renders every sketch without authored browser JavaScript: each inert `<script
+  type="application/fe" data-fe-render>` names Fe source, while the generated
+  bootstrap and one fixed, demo-blind runtime insert a `<fe-surface>` custom
+  element after each compiled artifact. That host mounts and drives lifecycle
+  (poster first, live on pointer intent, suspended off-viewport) while sharing a
+  single WebGPU device across every tile (acquireSharedGpu). See
   crates/codegen/assets/render-runtime/fe-render-runtime.js and
   FE_WEB_V5_ORCHESTRATION_DESIGN.md section 3/6 for the element/lifecycle.
 
@@ -36,6 +36,7 @@
 --><html lang="en"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="fe-attribution-policy" content="canonical_fe_gallery">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%2312151b'/%3E%3Cpath d='M14 45V19h36v7H23v4h22v7H23v8z' fill='%235b8cff'/%3E%3C/svg%3E">
 <title>fe web · gallery</title>
 <style>
@@ -83,136 +84,52 @@
 <body>
   <header>
     <h1>fe web · gallery</h1>
-    <p>Every render sketch, compiled and run on the GPU from its Fe source. Serve with <code>fe web dev demos/gallery.html</code>.</p>
+    <p>Fe-authored GPU and control programs, with generated WGSL/Wasm hosted by one fixed browser runtime. Serve with <code>fe web dev demos/gallery.html</code>.</p>
   </header>
 
   <div class="grid">
     <figure>
       <figcaption><b>known color</b><span class="desc">typed compute → fragment resource</span><a href="sketches/known_color/src/lib.fe" target="_blank" rel="noopener">source</a></figcaption>
-      <script type="application/fe+wasm" data-fe-render="" data-fe-manifest="assets/fe-render-d61999eefb059ca1.json" data-fe-render-runtime="assets/fe-render-runtime-5d7153a63a699ff3.js"></script>
+      <script type="application/fe+wasm" data-fe-render="" data-fe-manifest="assets/fe-render-9bae37ba3b61fdcf.json" data-fe-render-runtime="assets/fe-render-runtime-2f0e893c1e15f904.js"></script>
     </figure>
     <figure>
       <figcaption><b>rollcall pipeline</b><span class="desc">compute → private tree fold → fragment</span><a href="sketches/rollcall_pipeline/src/lib.fe" target="_blank" rel="noopener">source</a></figcaption>
-      <script type="application/fe+wasm" data-fe-render="" data-fe-manifest="assets/fe-render-4dd3ba96b725326f.json" data-fe-render-runtime="assets/fe-render-runtime-5d7153a63a699ff3.js"></script>
+      <script type="application/fe+wasm" data-fe-render="" data-fe-manifest="assets/fe-render-0fdc9dd9b37836c6.json" data-fe-render-runtime="assets/fe-render-runtime-2f0e893c1e15f904.js"></script>
     </figure>
     <figure>
       <figcaption><b>cga3d</b><span class="desc">sparse Clifford sphere pencil</span><a href="sketches/cga3d/src/lib.fe" target="_blank" rel="noopener">source</a></figcaption>
-      <script type="application/fe+wasm" data-fe-src="assets/fe-render-fba6784d50e89ef1.wasm" data-fe-render="" data-fe-manifest="assets/fe-render-f8a96047cf352182.json" data-fe-render-runtime="assets/fe-render-runtime-5d7153a63a699ff3.js" data-fe-integrity="sha256-+6Z4TVDonvEWy0I2qT58th5FZF5/Y/uCivDziUDcaNk="></script>
+      <script type="application/fe+wasm" data-fe-src="assets/fe-render-fba6784d50e89ef1.wasm" data-fe-render="" data-fe-manifest="assets/fe-render-30f927a69185b559.json" data-fe-render-runtime="assets/fe-render-runtime-2f0e893c1e15f904.js" data-fe-integrity="sha256-+6Z4TVDonvEWy0I2qT58th5FZF5/Y/uCivDziUDcaNk="></script>
     </figure>
     <figure>
       <figcaption><b>qcga</b><span class="desc">quadric conformal surface</span><a href="sketches/qcga/src/lib.fe" target="_blank" rel="noopener">source</a></figcaption>
-      <script type="application/fe+wasm" data-fe-src="assets/fe-render-d6581023e153424c.wasm" data-fe-render="" data-fe-manifest="assets/fe-render-77d1313c91caa8bb.json" data-fe-render-runtime="assets/fe-render-runtime-5d7153a63a699ff3.js" data-fe-integrity="sha256-1lgQI+FTQkwnTDN5mkj0+OyFyX7uEJeO+fOX+K3x8/U="></script>
+      <script type="application/fe+wasm" data-fe-src="assets/fe-render-d6581023e153424c.wasm" data-fe-render="" data-fe-manifest="assets/fe-render-b3e239eb6e55caca.json" data-fe-render-runtime="assets/fe-render-runtime-2f0e893c1e15f904.js" data-fe-integrity="sha256-1lgQI+FTQkwnTDN5mkj0+OyFyX7uEJeO+fOX+K3x8/U="></script>
     </figure>
     <figure>
       <figcaption><b>desargues</b><span class="desc">projective incidence</span><a href="sketches/desargues/src/lib.fe" target="_blank" rel="noopener">source</a></figcaption>
-      <script type="application/fe+wasm" data-fe-src="assets/fe-render-1d0b759ef0917387.wasm" data-fe-render="" data-fe-manifest="assets/fe-render-b2544e2eff803c8d.json" data-fe-render-runtime="assets/fe-render-runtime-5d7153a63a699ff3.js" data-fe-integrity="sha256-HQt1nvCRc4dDqANSyqQb1mgGTGeCk8zmeEz1bILBdK8="></script>
+      <script type="application/fe+wasm" data-fe-src="assets/fe-render-1d0b759ef0917387.wasm" data-fe-render="" data-fe-manifest="assets/fe-render-9c17b81f994c81ef.json" data-fe-render-runtime="assets/fe-render-runtime-2f0e893c1e15f904.js" data-fe-integrity="sha256-HQt1nvCRc4dDqANSyqQb1mgGTGeCk8zmeEz1bILBdK8="></script>
     </figure>
     <figure>
       <figcaption><b>plasma</b><span class="desc">branch-free field</span><a href="sketches/plasma/src/lib.fe" target="_blank" rel="noopener">source</a></figcaption>
-      <script type="application/fe+wasm" data-fe-src="assets/fe-render-574c196c77c08eca.wasm" data-fe-render="" data-fe-manifest="assets/fe-render-384e2fc26294d305.json" data-fe-render-runtime="assets/fe-render-runtime-5d7153a63a699ff3.js" data-fe-integrity="sha256-V0wZbHfAjsrRAV/K66vJo9VrVyX5mhQfRR0ki/fYbgY="></script>
+      <script type="application/fe+wasm" data-fe-src="assets/fe-render-574c196c77c08eca.wasm" data-fe-render="" data-fe-manifest="assets/fe-render-a0e246f53092d501.json" data-fe-render-runtime="assets/fe-render-runtime-2f0e893c1e15f904.js" data-fe-integrity="sha256-V0wZbHfAjsrRAV/K66vJo9VrVyX5mhQfRR0ki/fYbgY="></script>
     </figure>
     <figure>
       <figcaption><b>mandelbrot</b><span class="desc">escape-time set</span><a href="sketches/mandelbrot/src/lib.fe" target="_blank" rel="noopener">source</a></figcaption>
-      <script type="application/fe+wasm" data-fe-src="assets/fe-render-6581f3801aee65c5.wasm" data-fe-render="" data-fe-manifest="assets/fe-render-d7fa5ca7a894a87b.json" data-fe-render-runtime="assets/fe-render-runtime-5d7153a63a699ff3.js" data-fe-integrity="sha256-ZYHzgBruZcU2TRJuZIWJaanZ0d/ZVVoS+/Yw9iuLqIw="></script>
+      <script type="application/fe+wasm" data-fe-src="assets/fe-render-5d4c7f4ae965fecd.wasm" data-fe-render="" data-fe-manifest="assets/fe-render-962e6a17407a5409.json" data-fe-render-runtime="assets/fe-render-runtime-2f0e893c1e15f904.js" data-fe-integrity="sha256-XUx/Sull/s0RZUw0eqpqwQMMpWhR1ZoHDxiTcxGMFkQ="></script>
     </figure>
     <figure>
       <figcaption><b>perturbation mandelbrot</b><span class="desc">Fixed reference → f32 delta pixels</span><a href="sketches/perturbational_mandelbrot/src/lib.fe" target="_blank" rel="noopener">source</a></figcaption>
-      <script type="application/fe+wasm" data-fe-src="assets/fe-render-a6e55457b4a75aaf.wasm" data-fe-render="" data-fe-manifest="assets/fe-render-b49d18982c8078a7.json" data-fe-render-runtime="assets/fe-render-runtime-5d7153a63a699ff3.js" data-fe-integrity="sha256-puVUV7SnWq8gGP5BKw8ReJ6kjUlU6AbQCctH7annG9w="></script>
+      <script type="application/fe+wasm" data-fe-src="assets/fe-render-127accae7bdbee1d.wasm" data-fe-render="" data-fe-manifest="assets/fe-render-1d6356b3d66731d6.json" data-fe-render-runtime="assets/fe-render-runtime-2f0e893c1e15f904.js" data-fe-integrity="sha256-EnrMrnvb7h2x2JYoG69r2q3yrzb95E7qaISY6gkG2UY="></script>
     </figure>
     <figure>
       <figcaption><b>dec</b><span class="desc">discrete exterior calculus</span><a href="sketches/dec/src/lib.fe" target="_blank" rel="noopener">source</a></figcaption>
-      <script type="application/fe+wasm" data-fe-src="assets/fe-render-e69e85798d972f51.wasm" data-fe-render="" data-fe-manifest="assets/fe-render-3b4c6c59e9bd446c.json" data-fe-render-runtime="assets/fe-render-runtime-5d7153a63a699ff3.js" data-fe-integrity="sha256-5p6FeY2XL1F4mMVqzTyITx8DAyaIR93rg6Ys1IiVbnI="></script>
+      <script type="application/fe+wasm" data-fe-src="assets/fe-render-e69e85798d972f51.wasm" data-fe-render="" data-fe-manifest="assets/fe-render-4c13c1403908748a.json" data-fe-render-runtime="assets/fe-render-runtime-2f0e893c1e15f904.js" data-fe-integrity="sha256-5p6FeY2XL1F4mMVqzTyITx8DAyaIR93rg6Ys1IiVbnI="></script>
     </figure>
     <figure>
       <figcaption><b>gradient</b><span class="desc">runtime-default surface</span><a href="sketches/gradient/src/lib.fe" target="_blank" rel="noopener">source</a></figcaption>
-      <script type="application/fe+wasm" data-fe-src="assets/fe-render-9e3197987d9bad67.wasm" data-fe-render="" data-fe-manifest="assets/fe-render-21a635e31d36ee7f.json" data-fe-render-runtime="assets/fe-render-runtime-5d7153a63a699ff3.js" data-fe-integrity="sha256-njGXmH2brWcn4HfHk27zq/tWQpha5SfZ+Efsy5xj7Xc="></script>
+      <script type="application/fe+wasm" data-fe-src="assets/fe-render-9e3197987d9bad67.wasm" data-fe-render="" data-fe-manifest="assets/fe-render-f58d56ca6dae3f39.json" data-fe-render-runtime="assets/fe-render-runtime-2f0e893c1e15f904.js" data-fe-integrity="sha256-njGXmH2brWcn4HfHk27zq/tWQpha5SfZ+Efsy5xj7Xc="></script>
     </figure>
   </div>
 
-  <!-- Buildless inline code viewer (dev affordance): intercepts clicks on the
-       source/wgsl/wasm/manifest links the tiles already carry (reaching into
-       each <fe-surface> shadow DOM via composedPath) and shows the fetched text
-       in a dialog instead of downloading. This is a STOPGAP on the dev gallery;
-       the durable home is the fixed render runtime's meta line (needs a compiler
-       rebuild, so it graduates there on the next build). -->
-  <dialog id="fe-code-viewer">
-    <div class="cv-head">
-      <span class="cv-title">code</span>
-      <span class="cv-bytes"></span>
-      <a class="cv-raw" target="_blank" rel="noopener">raw</a>
-      <button class="cv-close" type="button" aria-label="close">×</button>
-    </div>
-    <pre class="cv-body" tabindex="0"></pre>
-  </dialog>
-  <style>
-    #fe-code-viewer { width: min(90vw, 1000px); max-height: 82vh; padding: 0;
-      border: 1px solid #2a3140; border-radius: 10px; background: #0f1218; color: #cfd6e4;
-      overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,.55); }
-    #fe-code-viewer::backdrop { background: rgba(4,6,10,.66); }
-    #fe-code-viewer .cv-head { display: flex; align-items: center; gap: 12px;
-      padding: 10px 14px; border-bottom: 1px solid #1e232d; background: #12151b; }
-    #fe-code-viewer .cv-title { font: 600 12.5px ui-monospace, Menlo, monospace; color: #e6ecf7; }
-    #fe-code-viewer .cv-bytes { font: 11.5px ui-monospace, monospace; color: #8a93a6; flex: 1; }
-    #fe-code-viewer .cv-raw { font: 11.5px ui-monospace, monospace; color: #6b7688; text-decoration: underline dotted; }
-    #fe-code-viewer .cv-raw:hover { color: #b7c2d8; }
-    #fe-code-viewer .cv-close { background: none; border: 0; color: #8a93a6; font-size: 20px;
-      line-height: 1; cursor: pointer; padding: 0 4px; }
-    #fe-code-viewer .cv-close:hover { color: #e6ecf7; }
-    #fe-code-viewer .cv-body { margin: 0; padding: 14px 16px; overflow: auto; max-height: calc(82vh - 44px);
-      font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: #cfd6e4;
-      white-space: pre; tab-size: 2; }
-  </style>
-  <script>
-    (function () {
-      const dlg = document.getElementById('fe-code-viewer');
-      const titleEl = dlg.querySelector('.cv-title');
-      const bytesEl = dlg.querySelector('.cv-bytes');
-      const rawEl = dlg.querySelector('.cv-raw');
-      const bodyEl = dlg.querySelector('.cv-body');
-      dlg.querySelector('.cv-close').addEventListener('click', () => dlg.close());
-      dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.close(); }); // backdrop click
-      const kindOf = (p) => {
-        if (p.endsWith('.wgsl')) return 'wgsl';
-        if (p.endsWith('.wasm')) return 'wasm';
-        if (p.endsWith('.json')) return 'manifest';
-        if (p.endsWith('.fe')) return 'source';
-        return null;
-      };
-      document.addEventListener('click', async (e) => {
-        const a = e.composedPath().find((n) => n && n.tagName === 'A' && n.href);
-        if (!a) return;
-        let path;
-        try { path = new URL(a.href).pathname; } catch { return; }
-        const kind = kindOf(path);
-        if (!kind) return;
-        e.preventDefault();
-        e.stopPropagation();
-        const name = path.split('/').pop();
-        titleEl.textContent = kind + '  ·  ' + name;
-        rawEl.href = a.href;
-        bodyEl.textContent = 'loading ' + name + ' ...';
-        if (!dlg.open) dlg.showModal();
-        try {
-          const res = await fetch(a.href);
-          if (kind === 'wasm') {
-            const buf = new Uint8Array(await res.arrayBuffer());
-            bytesEl.textContent = buf.length + ' bytes (binary module)';
-            const hex = [...buf.slice(0, 512)].map((b) => b.toString(16).padStart(2, '0'))
-              .reduce((acc, h, i) => acc + h + ((i + 1) % 32 === 0 ? '\n' : ' '), '');
-            bodyEl.textContent = 'compiled wasm module, ' + buf.length + ' bytes.\n'
-              + 'first ' + Math.min(512, buf.length) + ' bytes:\n\n' + hex
-              + (buf.length > 512 ? '\n...' : '');
-          } else {
-            const text = await res.text();
-            bytesEl.textContent = new Blob([text]).size + ' bytes';
-            bodyEl.textContent = text;
-          }
-        } catch (err) {
-          bodyEl.textContent = 'failed to load ' + name + ': ' + err;
-        }
-      }, true);
-    })();
-  </script>
 
 
 <script type="module" src="assets/fe-bootstrap-8e25755b59eb9e01.js" data-fe-bootstrap=""></script></body></html>

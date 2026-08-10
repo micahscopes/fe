@@ -1,8 +1,8 @@
 {
   "artifacts": {
     "canonical_adapters": [],
-    "wasm": "fe-render-a6e55457b4a75aaf.wasm",
-    "wasm_bytes": 1126,
+    "wasm": "fe-render-127accae7bdbee1d.wasm",
+    "wasm_bytes": 1160,
     "wgsl": "fe-render-636b45dcc7350850.wgsl",
     "wgsl_bytes": 45239
   },
@@ -12,86 +12,6 @@
     "embedded": false,
     "omission_reason": "GPU resource pass graph has no CPU fallback or canonical Wasm message lane",
     "policy": "disabled"
-  },
-  "control": {
-    "args": [
-      {
-        "axis": "x",
-        "source": "drag"
-      },
-      {
-        "axis": "y",
-        "source": "drag"
-      },
-      {
-        "source": "wheel"
-      },
-      {
-        "axis": "x",
-        "source": "pointer"
-      },
-      {
-        "axis": "y",
-        "source": "pointer"
-      },
-      {
-        "name": "orbit",
-        "source": "resource",
-        "wasm_type": "i64"
-      },
-      {
-        "name": "center_x_w0",
-        "source": "state"
-      },
-      {
-        "name": "center_x_w1",
-        "source": "state"
-      },
-      {
-        "name": "center_x_w2",
-        "source": "state"
-      },
-      {
-        "name": "center_x_w3",
-        "source": "state"
-      },
-      {
-        "name": "center_y_w0",
-        "source": "state"
-      },
-      {
-        "name": "center_y_w1",
-        "source": "state"
-      },
-      {
-        "name": "center_y_w2",
-        "source": "state"
-      },
-      {
-        "name": "center_y_w3",
-        "source": "state"
-      },
-      {
-        "name": "zoom",
-        "source": "state"
-      },
-      {
-        "name": "res",
-        "source": "state"
-      }
-    ],
-    "export": "update_view",
-    "result": [
-      "center_x_w0",
-      "center_x_w1",
-      "center_x_w2",
-      "center_x_w3",
-      "center_y_w0",
-      "center_y_w1",
-      "center_y_w2",
-      "center_y_w3",
-      "zoom"
-    ]
   },
   "layout": {
     "bindings": [
@@ -492,9 +412,91 @@
   "protocol": "fe-web-bundle",
   "protocol_version": 6,
   "provenance": {
+    "authored_sources": [
+      {
+        "id": "fmath/fe.toml",
+        "kind": "fe_manifest",
+        "sha256": "1bb68ed27a9ae6ba289a949ca67500ebf92f8f21461e4a922b43931b9d98b0c0"
+      },
+      {
+        "id": "fmath/src/lib.fe",
+        "kind": "fe",
+        "sha256": "c4221532aabf2a9b416d68f18023faaa3edfe0b5652c704b0b4f82401491e31c"
+      },
+      {
+        "id": "perturbational_mandelbrot/fe.toml",
+        "kind": "fe_manifest",
+        "sha256": "3b9f889e8d2d64642b54850424cc1efa66a8572083949b8d93dabb6c5b3c5a2c"
+      },
+      {
+        "id": "perturbational_mandelbrot/src/lib.fe",
+        "kind": "fe",
+        "sha256": "ad5685d14cb09c3a4c2ad64092591deb76bf2c667c333f8214dfb1b7b73bfe26"
+      },
+      {
+        "id": "precision/fe.toml",
+        "kind": "fe_manifest",
+        "sha256": "066f78f40312980077f3a140a3b461e8675fed2b19b21f550b383abb09a422b2"
+      },
+      {
+        "id": "precision/src/bn254_fr.fe",
+        "kind": "fe",
+        "sha256": "8de4dba642077943ab56cb1819e1e3e3258c5dca8425ef1835b8dfddb16559da"
+      },
+      {
+        "id": "precision/src/field.fe",
+        "kind": "fe",
+        "sha256": "5deac8eb28c7686450483f6cea533cd3838b00d62c33874e28aeb0bca9b2b743"
+      },
+      {
+        "id": "precision/src/fixed.fe",
+        "kind": "fe",
+        "sha256": "0378003b9b03e37658907a16fcfc27e118ace703e274020ca2493e468c9406ec"
+      },
+      {
+        "id": "precision/src/lib.fe",
+        "kind": "fe",
+        "sha256": "a3e02b1959d6be414c4981c6328cf511202a6e91919e6d555b4dd8902ae4cd39"
+      }
+    ],
     "compiler": "fe",
     "compiler_version": "26.2.0",
-    "source_id": null
+    "fe_responsibilities": [
+      "gpu_program",
+      "gpu_pass_graph",
+      "surface_declaration",
+      "control_transition"
+    ],
+    "fixed_host": {
+      "artifact": {
+        "bytes": 69424,
+        "path": "fe-render-runtime-2f0e893c1e15f904.js",
+        "sha256": "2f0e893c1e15f904edf7f13ced1212b9fea5fb698c1a341e45dd6687db55c75b"
+      },
+      "contract": "fixed_versioned_demo_blind_browser_host",
+      "name": "fe-render-runtime",
+      "responsibilities": [
+        "dom_surface",
+        "input_transport",
+        "presentation_scheduler",
+        "web_gpu_executor",
+        "lifecycle",
+        "wasm_loader"
+      ]
+    },
+    "generated_artifacts": [
+      "manifest",
+      "wasm",
+      "wgsl"
+    ],
+    "non_fe_authored_sources": [
+      {
+        "id": "gallery.html",
+        "kind": "html",
+        "sha256": "0432c50d08e3111f05fe86e61254176e5ce821b9dfd3c0092cfedbf4a1a2a453"
+      }
+    ],
+    "source_id": "perturbational_mandelbrot"
   },
   "resources": [
     {

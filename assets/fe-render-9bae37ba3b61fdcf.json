@@ -137,9 +137,53 @@
   "protocol": "fe-web-bundle",
   "protocol_version": 6,
   "provenance": {
+    "authored_sources": [
+      {
+        "id": "known_color/fe.toml",
+        "kind": "fe_manifest",
+        "sha256": "eb6f604086c1e36ba0c3b9e282ba2e33d33ab2753c2c66787f3472391c4ce661"
+      },
+      {
+        "id": "known_color/src/lib.fe",
+        "kind": "fe",
+        "sha256": "defb0a2eb92c80c02329497d8205f3e5b8467c9d99cbfc0be92233d96dcbb593"
+      }
+    ],
     "compiler": "fe",
     "compiler_version": "26.2.0",
-    "source_id": null
+    "fe_responsibilities": [
+      "gpu_program",
+      "gpu_pass_graph"
+    ],
+    "fixed_host": {
+      "artifact": {
+        "bytes": 69424,
+        "path": "fe-render-runtime-2f0e893c1e15f904.js",
+        "sha256": "2f0e893c1e15f904edf7f13ced1212b9fea5fb698c1a341e45dd6687db55c75b"
+      },
+      "contract": "fixed_versioned_demo_blind_browser_host",
+      "name": "fe-render-runtime",
+      "responsibilities": [
+        "dom_surface",
+        "input_transport",
+        "presentation_scheduler",
+        "web_gpu_executor",
+        "lifecycle",
+        "wasm_loader"
+      ]
+    },
+    "generated_artifacts": [
+      "manifest",
+      "wgsl"
+    ],
+    "non_fe_authored_sources": [
+      {
+        "id": "gallery.html",
+        "kind": "html",
+        "sha256": "0432c50d08e3111f05fe86e61254176e5ce821b9dfd3c0092cfedbf4a1a2a453"
+      }
+    ],
+    "source_id": "known_color"
   },
   "resources": [
     {

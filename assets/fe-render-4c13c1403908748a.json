@@ -247,9 +247,64 @@
   "protocol": "fe-web-bundle",
   "protocol_version": 6,
   "provenance": {
+    "authored_sources": [
+      {
+        "id": "dec/fe.toml",
+        "kind": "fe_manifest",
+        "sha256": "241739a5f9f70138e8616a148b8f5e9e8802484930405721c1f076306bfe4522"
+      },
+      {
+        "id": "dec/src/lib.fe",
+        "kind": "fe",
+        "sha256": "3045e5cf2c0faa34392441f29c7e32ea7ae9eb32a07cfa041233b184ca425354"
+      },
+      {
+        "id": "fmath/fe.toml",
+        "kind": "fe_manifest",
+        "sha256": "1bb68ed27a9ae6ba289a949ca67500ebf92f8f21461e4a922b43931b9d98b0c0"
+      },
+      {
+        "id": "fmath/src/lib.fe",
+        "kind": "fe",
+        "sha256": "c4221532aabf2a9b416d68f18023faaa3edfe0b5652c704b0b4f82401491e31c"
+      }
+    ],
     "compiler": "fe",
     "compiler_version": "26.2.0",
-    "source_id": null
+    "fe_responsibilities": [
+      "gpu_program",
+      "surface_declaration"
+    ],
+    "fixed_host": {
+      "artifact": {
+        "bytes": 69424,
+        "path": "fe-render-runtime-2f0e893c1e15f904.js",
+        "sha256": "2f0e893c1e15f904edf7f13ced1212b9fea5fb698c1a341e45dd6687db55c75b"
+      },
+      "contract": "fixed_versioned_demo_blind_browser_host",
+      "name": "fe-render-runtime",
+      "responsibilities": [
+        "dom_surface",
+        "input_transport",
+        "presentation_scheduler",
+        "web_gpu_executor",
+        "lifecycle",
+        "wasm_loader"
+      ]
+    },
+    "generated_artifacts": [
+      "manifest",
+      "wasm",
+      "wgsl"
+    ],
+    "non_fe_authored_sources": [
+      {
+        "id": "gallery.html",
+        "kind": "html",
+        "sha256": "0432c50d08e3111f05fe86e61254176e5ce821b9dfd3c0092cfedbf4a1a2a453"
+      }
+    ],
+    "source_id": "dec"
   },
   "resources": [],
   "source_entry": "dec_render",

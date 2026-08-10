@@ -1,10 +1,10 @@
 {
   "artifacts": {
     "canonical_adapters": [],
-    "wasm": "fe-render-1d0b759ef0917387.wasm",
-    "wasm_bytes": 2323,
-    "wgsl": "fe-render-c3f557cbc432a6ac.wgsl",
-    "wgsl_bytes": 25595
+    "wasm": "fe-render-fba6784d50e89ef1.wasm",
+    "wasm_bytes": 1366,
+    "wgsl": "fe-render-a5517872fee7a2ab.wgsl",
+    "wgsl_bytes": 8117
   },
   "browser_runtime": null,
   "canonical_interface": null,
@@ -35,11 +35,11 @@
         "source": "pointer"
       },
       {
-        "name": "sweep",
+        "name": "lambda",
         "source": "state"
       },
       {
-        "name": "spin",
+        "name": "theta",
         "source": "state"
       },
       {
@@ -53,8 +53,8 @@
     ],
     "export": "update_view",
     "result": [
-      "sweep",
-      "spin",
+      "lambda",
+      "theta",
       "zoom"
     ]
   },
@@ -67,23 +67,23 @@
         "members": [
           {
             "arg_index": 2,
-            "doc": "Perspective sweep: slides the second triangle along the rays from O.",
-            "name": "sweep",
+            "doc": "Pencil parameter: [0, 1] sweeps sphere -> sphere -> radical plane.",
+            "name": "lambda",
             "offset": 0,
             "scalar": "f32",
             "width": 4
           },
           {
             "arg_index": 3,
-            "doc": "View rotation, in radians.",
-            "name": "spin",
+            "doc": "Rotation of the generator axis in the slice plane.",
+            "name": "theta",
             "offset": 4,
             "scalar": "f32",
             "width": 4
           },
           {
             "arg_index": 4,
-            "doc": "Half-extent of the visible square, in world units.",
+            "doc": "Half-extent of the visible slice in world units.",
             "name": "zoom",
             "offset": 8,
             "scalar": "f32",
@@ -141,23 +141,23 @@
             "members": [
               {
                 "arg_index": 2,
-                "doc": "Perspective sweep: slides the second triangle along the rays from O.",
-                "name": "sweep",
+                "doc": "Pencil parameter: [0, 1] sweeps sphere -> sphere -> radical plane.",
+                "name": "lambda",
                 "offset": 0,
                 "scalar": "f32",
                 "width": 4
               },
               {
                 "arg_index": 3,
-                "doc": "View rotation, in radians.",
-                "name": "spin",
+                "doc": "Rotation of the generator axis in the slice plane.",
+                "name": "theta",
                 "offset": 4,
                 "scalar": "f32",
                 "width": 4
               },
               {
                 "arg_index": 4,
-                "doc": "Half-extent of the visible square, in world units.",
+                "doc": "Half-extent of the visible slice in world units.",
                 "name": "zoom",
                 "offset": 8,
                 "scalar": "f32",
@@ -204,17 +204,83 @@
           0
         ]
       },
-      "shader": "fe-render-c3f557cbc432a6ac.wgsl",
-      "shader_bytes": 25595,
+      "shader": "fe-render-a5517872fee7a2ab.wgsl",
+      "shader_bytes": 8117,
       "source_entry": "shade"
     }
   ],
   "protocol": "fe-web-bundle",
   "protocol_version": 6,
   "provenance": {
+    "authored_sources": [
+      {
+        "id": "demos/sketches/cga3d/fe.toml",
+        "kind": "fe_manifest",
+        "sha256": "a48018fab7bb3cc436bc6723462f25db69246e3d8fb1cc2c1ed07be533cb97f2"
+      },
+      {
+        "id": "demos/sketches/cga3d/src/lib.fe",
+        "kind": "fe",
+        "sha256": "2260286a6b624a34d2512d3bc3014e9062210ee840ca42c5a5f06bf772f935de"
+      },
+      {
+        "id": "demos/sketches/fmath/fe.toml",
+        "kind": "fe_manifest",
+        "sha256": "1bb68ed27a9ae6ba289a949ca67500ebf92f8f21461e4a922b43931b9d98b0c0"
+      },
+      {
+        "id": "demos/sketches/fmath/src/lib.fe",
+        "kind": "fe",
+        "sha256": "c4221532aabf2a9b416d68f18023faaa3edfe0b5652c704b0b4f82401491e31c"
+      },
+      {
+        "id": "ingots/sparse_clifford/fe.toml",
+        "kind": "fe_manifest",
+        "sha256": "86dbfce53a6b656e590a36f9624d2bbfe9222e13299d07cefef340a284a191ed"
+      },
+      {
+        "id": "ingots/sparse_clifford/src/lib.fe",
+        "kind": "fe",
+        "sha256": "bc75b3743ca9c2c373d06253625d4ae97de359c4d039865e30a4776abc7aa18e"
+      }
+    ],
     "compiler": "fe",
     "compiler_version": "26.2.0",
-    "source_id": null
+    "fe_responsibilities": [
+      "gpu_program",
+      "surface_declaration",
+      "control_transition"
+    ],
+    "fixed_host": {
+      "artifact": {
+        "bytes": 69424,
+        "path": "fe-render-runtime-2f0e893c1e15f904.js",
+        "sha256": "2f0e893c1e15f904edf7f13ced1212b9fea5fb698c1a341e45dd6687db55c75b"
+      },
+      "contract": "fixed_versioned_demo_blind_browser_host",
+      "name": "fe-render-runtime",
+      "responsibilities": [
+        "dom_surface",
+        "input_transport",
+        "presentation_scheduler",
+        "web_gpu_executor",
+        "lifecycle",
+        "wasm_loader"
+      ]
+    },
+    "generated_artifacts": [
+      "manifest",
+      "wasm",
+      "wgsl"
+    ],
+    "non_fe_authored_sources": [
+      {
+        "id": "gallery.html",
+        "kind": "html",
+        "sha256": "0432c50d08e3111f05fe86e61254176e5ce821b9dfd3c0092cfedbf4a1a2a453"
+      }
+    ],
+    "source_id": "cga3d"
   },
   "resources": [],
   "source_entry": "shade",
@@ -228,27 +294,27 @@
     },
     "params": [
       {
-        "doc": "Perspective sweep: slides the second triangle along the rays from O.",
-        "init": 0.62,
-        "kind": "range",
-        "max": 1.6,
-        "min": 0.3,
-        "name": "sweep"
+        "doc": "Pencil parameter: [0, 1] sweeps sphere -> sphere -> radical plane.",
+        "init": 0.15,
+        "kind": "unit",
+        "max": 1.0,
+        "min": 0.0,
+        "name": "lambda"
       },
       {
-        "doc": "View rotation, in radians.",
-        "init": 0.0,
+        "doc": "Rotation of the generator axis in the slice plane.",
+        "init": 0.6,
         "kind": "angle",
         "max": 6.2831855,
         "min": 0.0,
-        "name": "spin"
+        "name": "theta"
       },
       {
-        "doc": "Half-extent of the visible square, in world units.",
-        "init": 2.4,
+        "doc": "Half-extent of the visible slice in world units.",
+        "init": 1.6,
         "kind": "range",
-        "max": 5.0,
-        "min": 0.8,
+        "max": 4.0,
+        "min": 0.5,
         "name": "zoom"
       },
       {

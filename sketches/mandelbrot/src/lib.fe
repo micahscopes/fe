@@ -32,7 +32,7 @@
 //! territory, ~1e-27) plus the `u*zoom`/`v*zoom` offset, all stitched into one
 //! `Fixed<8>` value by the exact Fixed add (`from_qf_offset`). All four words
 //! per axis are GESTURE-DRIVEN state fields (`center_x_w0..w3`,
-//! `center_y_w0..w3`): `update_view` folds pan/zoom/anchor deltas into the whole
+//! `center_y_w0..w3`): `navigate` folds pan/zoom/anchor deltas into the whole
 //! four-word center via the GENERAL `add_f32<4>` (the committed `Expansion<N>`
 //! form at N=4, the same one oracle-gated at N=2), so deep pan/zoom stays exact
 //! at full depth rather than hard-walling once a ~1e-20 delta underflows a df64
@@ -41,7 +41,7 @@
 //! runtime is field-count-general).
 //!
 //! WHY `Expansion<4>` FOR THE CENTER AND `Fixed<8>` FOR THE ORBIT. The center
-//! update (`update_view`) runs in wasm on the CPU, where IEEE round-to-nearest
+//! transition (`navigate`) runs in wasm on the CPU, where IEEE round-to-nearest
 //! holds and a float expansion is exact -- so it stays the committed float-
 //! expansion path, just widened 2 -> 4 words (no new numeric kernel). The
 //! ORBIT (`escape`) runs in WGSL on the GPU, where the shader compiler may
@@ -67,8 +67,8 @@
 //! increasing), and dropping the two deep words (a df64 center) shifts the view
 //! ~768 px at `zoom = 1e-16`, which a df64 center could not reach.
 
-use std::webgpu::{FragmentSurface, GpuProgram, UpdateSurface, WebGpuBackend}
-use std::web::view::{Extent, Param, Surface}
+use std::webgpu::{FragmentSurface, GpuProgram, SurfaceTransition, WebGpuBackend}
+use std::web::view::{Extent, Param, Surface, SurfaceEvent}
 use fmath::{from_i32, palette, to_i32}
 use precision::{add_f32, from_quad, to_quad}
 use precision::fixed::{from_qf_offset, escape as fx_escape}
@@ -98,7 +98,7 @@ const DEPTH_L2: i32 = 4      // zoom >~ 2^-4  (near whole-set view)
 const DEPTH_L4: i32 = 24     // zoom >~ 2^-24 ~ 6e-8
 const DEPTH_L6: i32 = 50     // zoom >~ 2^-50 ~ 9e-16
 
-// `update_view`'s clamps (mirrors `view()`'s declared ranges below; kept as
+// `navigate`'s clamps (mirrors `view()`'s declared ranges below; kept as
 // named consts so the two cannot silently drift).
 const CENTER_X_MIN: f32 = -2.5
 const CENTER_X_MAX: f32 = 1.0
@@ -208,13 +208,28 @@ struct MandelbrotParams {
     res: Param,
 }
 
+/// Complete browser-held actor state returned atomically by the typed surface
+/// transition. This is ordinary Fe data, not a positional tuple convention.
+struct MandelbrotViewState {
+    center_x_w0: f32,
+    center_x_w1: f32,
+    center_x_w2: f32,
+    center_x_w3: f32,
+    center_y_w0: f32,
+    center_y_w1: f32,
+    center_y_w2: f32,
+    center_y_w3: f32,
+    zoom: f32,
+    res: f32,
+}
+
 actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
     /// Complex-plane centre, as a flat FOUR-WORD `Expansion<4>` per axis
-    /// (`w0..w3`, most significant first, kept flat so the wasm export signature
-    /// and control-manifest layout are plain f32 members): `w0` carries the
+    /// (`w0..w3`, most significant first, kept flat so the typed Wasm ABI and
+    /// render uniform layout are plain f32 members): `w0` carries the
     /// visible position, `w1`/`w2`/`w3` the deep low-order words (~1e-27) that
     /// keep the per-pixel/per-gesture step from vanishing far past the ~1e-11
-    /// df64 wall. `update_view` folds gesture deltas into all four words via the
+    /// df64 wall. `navigate` folds gesture deltas into all four words via the
     /// general `add_f32<4>`; `escape` stitches them into one `Fixed<8>`.
     center_x_w0: f32,
     center_x_w1: f32,
@@ -321,11 +336,11 @@ actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
         }
     }
 
-    /// Pan/zoom the view from one raw gesture. Fe owns ALL gesture math here
+    /// Pan/zoom the view from one raw surface event. Fe owns ALL policy here
     /// (pan sensitivity, the zoom curve, the cursor anchor, and the clamps);
-    /// the runtime delivers only raw pointer deltas and blits the returned
-    /// values back into the eight `center_*_w*` words plus `zoom`. No JS gesture
-    /// math.
+    /// the runtime delivers only raw browser facts and replaces browser-held
+    /// state with the complete returned record. No JS gesture math and no JSON
+    /// argument/result binding table.
     ///
     /// Same SHAPE as `update_view` in `mandel_view_ctl.fe` (the oracle-proven
     /// Q12 fixed-point pan/zoom/anchor/clamp algorithm): pan follows the
@@ -339,21 +354,24 @@ actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
     /// O(1) f32 center (or even a two-word df64 center, ~1e-14) would erase it,
     /// hard-walling deep pan; the four-word center holds it to ~1e-27.
     ///
-    /// `dx`/`dy`: pixel drag delta (image follows the pointer). `dzoom`: one
-    /// wheel notch, < 0 in / > 0 out / 0 none. `mx`/`my`: the pointer's
-    /// CURRENT position in the same pixel frame as `res` (the anchor point;
-    /// unused when `dzoom == 0`, since the anchor term is then scaled by
-    /// zero).
-    fn update_view(self, dx: f32, dy: f32, dzoom: f32, mx: f32, my: f32)
-        -> (f32, f32, f32, f32, f32, f32, f32, f32, f32)
-        uses (UpdateSurface)
+    /// The host transports one raw typed fact. Fe—not JavaScript—chooses how
+    /// pointer movement and raw wheel delta map to pan/zoom, and returns the
+    /// complete next browser-held state as a named record.
+    fn navigate(self, event: own SurfaceEvent) -> MandelbrotViewState
+        uses (SurfaceTransition)
     {
+        let dx: f32 = event.delta_x
+        let dy: f32 = event.delta_y
+        let dzoom: f32 = event.wheel_delta
+        let mx: f32 = event.pointer_x
+        let my: f32 = event.pointer_y
+        let res: f32 = event.width
         // pixel -> complex-plane step at the CURRENT zoom: `escape`'s own
         // u map is `u = (px + 0.5) / res * 2 - 1`, so `d(cx)/d(px) = 2 *
         // zoom / res`. `escape`'s v map is Y-FLIPPED (`v = 1 - (py+0.5)/res*2`:
         // screen row increases downward, complex y increases upward), so a
         // downward drag (dy > 0) must INCREASE center_y, not decrease it.
-        let step: f32 = 2.0 * self.zoom / self.res
+        let step: f32 = 2.0 * self.zoom / res
         let (cx0_0, cx0_1, cx0_2, cx0_3) = to_quad(add_f32<4>(
             from_quad(self.center_x_w0, self.center_x_w1, self.center_x_w2, self.center_x_w3), -dx * step))
         let (cy0_0, cy0_1, cy0_2, cy0_3) = to_quad(add_f32<4>(
@@ -364,8 +382,8 @@ actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
         // The complex point under the cursor's CURRENT (mx, my), via the
         // EXACT SAME u/v map `escape` uses, times the zoom CHANGE (old minus
         // new): keeps that point fixed under the new zoom.
-        let u: f32 = (mx + 0.5) * 2.0 / self.res - 1.0
-        let v: f32 = 1.0 - (my + 0.5) * 2.0 / self.res
+        let u: f32 = (mx + 0.5) * 2.0 / res - 1.0
+        let v: f32 = 1.0 - (my + 0.5) * 2.0 / res
         let (cx_a_0, cx_a_1, cx_a_2, cx_a_3) = to_quad(add_f32<4>(
             from_quad(cx0_0, cx0_1, cx0_2, cx0_3), u * (self.zoom - z_c)))
         let (cy_a_0, cy_a_1, cy_a_2, cy_a_3) = to_quad(add_f32<4>(
@@ -375,6 +393,17 @@ actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
             clamp_quad(cx_a_0, cx_a_1, cx_a_2, cx_a_3, CENTER_X_MIN, CENTER_X_MAX)
         let (cy_c_0, cy_c_1, cy_c_2, cy_c_3) =
             clamp_quad(cy_a_0, cy_a_1, cy_a_2, cy_a_3, CENTER_Y_MIN, CENTER_Y_MAX)
-        (cx_c_0, cx_c_1, cx_c_2, cx_c_3, cy_c_0, cy_c_1, cy_c_2, cy_c_3, z_c)
+        MandelbrotViewState {
+            center_x_w0: cx_c_0,
+            center_x_w1: cx_c_1,
+            center_x_w2: cx_c_2,
+            center_x_w3: cx_c_3,
+            center_y_w0: cy_c_0,
+            center_y_w1: cy_c_1,
+            center_y_w2: cy_c_2,
+            center_y_w3: cy_c_3,
+            zoom: z_c,
+            res,
+        }
     }
 }

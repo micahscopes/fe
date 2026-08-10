@@ -1,8 +1,8 @@
 {
   "artifacts": {
     "canonical_adapters": [],
-    "wasm": "fe-render-6581f3801aee65c5.wasm",
-    "wasm_bytes": 20664,
+    "wasm": "fe-render-5d4c7f4ae965fecd.wasm",
+    "wasm_bytes": 20698,
     "wgsl": "fe-render-98836d9c82fbf15b.wgsl",
     "wgsl_bytes": 385779
   },
@@ -13,81 +13,6 @@
     "omission_reason": "canonical interface was not requested",
     "policy": "disabled"
   },
-  "control": {
-    "args": [
-      {
-        "axis": "x",
-        "source": "drag"
-      },
-      {
-        "axis": "y",
-        "source": "drag"
-      },
-      {
-        "source": "wheel"
-      },
-      {
-        "axis": "x",
-        "source": "pointer"
-      },
-      {
-        "axis": "y",
-        "source": "pointer"
-      },
-      {
-        "name": "center_x_w0",
-        "source": "state"
-      },
-      {
-        "name": "center_x_w1",
-        "source": "state"
-      },
-      {
-        "name": "center_x_w2",
-        "source": "state"
-      },
-      {
-        "name": "center_x_w3",
-        "source": "state"
-      },
-      {
-        "name": "center_y_w0",
-        "source": "state"
-      },
-      {
-        "name": "center_y_w1",
-        "source": "state"
-      },
-      {
-        "name": "center_y_w2",
-        "source": "state"
-      },
-      {
-        "name": "center_y_w3",
-        "source": "state"
-      },
-      {
-        "name": "zoom",
-        "source": "state"
-      },
-      {
-        "name": "res",
-        "source": "state"
-      }
-    ],
-    "export": "update_view",
-    "result": [
-      "center_x_w0",
-      "center_x_w1",
-      "center_x_w2",
-      "center_x_w3",
-      "center_y_w0",
-      "center_y_w1",
-      "center_y_w2",
-      "center_y_w3",
-      "zoom"
-    ]
-  },
   "layout": {
     "bindings": [
       {
@@ -97,7 +22,7 @@
         "members": [
           {
             "arg_index": 2,
-            "doc": "Complex-plane centre, as a flat FOUR-WORD `Expansion<4>` per axis\n(`w0..w3`, most significant first, kept flat so the wasm export signature\nand control-manifest layout are plain f32 members): `w0` carries the\nvisible position, `w1`/`w2`/`w3` the deep low-order words (~1e-27) that\nkeep the per-pixel/per-gesture step from vanishing far past the ~1e-11\ndf64 wall. `update_view` folds gesture deltas into all four words via the\ngeneral `add_f32<4>`; `escape` stitches them into one `Fixed<8>`.",
+            "doc": "Complex-plane centre, as a flat FOUR-WORD `Expansion<4>` per axis\n(`w0..w3`, most significant first, kept flat so the typed Wasm ABI and\nrender uniform layout are plain f32 members): `w0` carries the\nvisible position, `w1`/`w2`/`w3` the deep low-order words (~1e-27) that\nkeep the per-pixel/per-gesture step from vanishing far past the ~1e-11\ndf64 wall. `navigate` folds gesture deltas into all four words via the\ngeneral `add_f32<4>`; `escape` stitches them into one `Fixed<8>`.",
             "name": "center_x_w0",
             "offset": 0,
             "scalar": "f32",
@@ -219,7 +144,7 @@
             "members": [
               {
                 "arg_index": 2,
-                "doc": "Complex-plane centre, as a flat FOUR-WORD `Expansion<4>` per axis\n(`w0..w3`, most significant first, kept flat so the wasm export signature\nand control-manifest layout are plain f32 members): `w0` carries the\nvisible position, `w1`/`w2`/`w3` the deep low-order words (~1e-27) that\nkeep the per-pixel/per-gesture step from vanishing far past the ~1e-11\ndf64 wall. `update_view` folds gesture deltas into all four words via the\ngeneral `add_f32<4>`; `escape` stitches them into one `Fixed<8>`.",
+                "doc": "Complex-plane centre, as a flat FOUR-WORD `Expansion<4>` per axis\n(`w0..w3`, most significant first, kept flat so the typed Wasm ABI and\nrender uniform layout are plain f32 members): `w0` carries the\nvisible position, `w1`/`w2`/`w3` the deep low-order words (~1e-27) that\nkeep the per-pixel/per-gesture step from vanishing far past the ~1e-11\ndf64 wall. `navigate` folds gesture deltas into all four words via the\ngeneral `add_f32<4>`; `escape` stitches them into one `Fixed<8>`.",
                 "name": "center_x_w0",
                 "offset": 0,
                 "scalar": "f32",
@@ -338,9 +263,90 @@
   "protocol": "fe-web-bundle",
   "protocol_version": 6,
   "provenance": {
+    "authored_sources": [
+      {
+        "id": "fmath/fe.toml",
+        "kind": "fe_manifest",
+        "sha256": "1bb68ed27a9ae6ba289a949ca67500ebf92f8f21461e4a922b43931b9d98b0c0"
+      },
+      {
+        "id": "fmath/src/lib.fe",
+        "kind": "fe",
+        "sha256": "c4221532aabf2a9b416d68f18023faaa3edfe0b5652c704b0b4f82401491e31c"
+      },
+      {
+        "id": "mandelbrot/fe.toml",
+        "kind": "fe_manifest",
+        "sha256": "5324e4bef7e869dca864b2f02c643d68243a51359c9f86c3bb9f01f2199bec0c"
+      },
+      {
+        "id": "mandelbrot/src/lib.fe",
+        "kind": "fe",
+        "sha256": "70b4305330bcc6b9ffcb15c2e96f8a7358be95ac2f2df31276bc9cd820febd90"
+      },
+      {
+        "id": "precision/fe.toml",
+        "kind": "fe_manifest",
+        "sha256": "066f78f40312980077f3a140a3b461e8675fed2b19b21f550b383abb09a422b2"
+      },
+      {
+        "id": "precision/src/bn254_fr.fe",
+        "kind": "fe",
+        "sha256": "8de4dba642077943ab56cb1819e1e3e3258c5dca8425ef1835b8dfddb16559da"
+      },
+      {
+        "id": "precision/src/field.fe",
+        "kind": "fe",
+        "sha256": "5deac8eb28c7686450483f6cea533cd3838b00d62c33874e28aeb0bca9b2b743"
+      },
+      {
+        "id": "precision/src/fixed.fe",
+        "kind": "fe",
+        "sha256": "0378003b9b03e37658907a16fcfc27e118ace703e274020ca2493e468c9406ec"
+      },
+      {
+        "id": "precision/src/lib.fe",
+        "kind": "fe",
+        "sha256": "a3e02b1959d6be414c4981c6328cf511202a6e91919e6d555b4dd8902ae4cd39"
+      }
+    ],
     "compiler": "fe",
     "compiler_version": "26.2.0",
-    "source_id": null
+    "fe_responsibilities": [
+      "gpu_program",
+      "surface_declaration",
+      "control_transition"
+    ],
+    "fixed_host": {
+      "artifact": {
+        "bytes": 69424,
+        "path": "fe-render-runtime-2f0e893c1e15f904.js",
+        "sha256": "2f0e893c1e15f904edf7f13ced1212b9fea5fb698c1a341e45dd6687db55c75b"
+      },
+      "contract": "fixed_versioned_demo_blind_browser_host",
+      "name": "fe-render-runtime",
+      "responsibilities": [
+        "dom_surface",
+        "input_transport",
+        "presentation_scheduler",
+        "web_gpu_executor",
+        "lifecycle",
+        "wasm_loader"
+      ]
+    },
+    "generated_artifacts": [
+      "manifest",
+      "wasm",
+      "wgsl"
+    ],
+    "non_fe_authored_sources": [
+      {
+        "id": "gallery.html",
+        "kind": "html",
+        "sha256": "0432c50d08e3111f05fe86e61254176e5ce821b9dfd3c0092cfedbf4a1a2a453"
+      }
+    ],
+    "source_id": "mandelbrot"
   },
   "resources": [],
   "source_entry": "escape",
@@ -354,7 +360,7 @@
     },
     "params": [
       {
-        "doc": "Complex-plane centre, as a flat FOUR-WORD `Expansion<4>` per axis\n(`w0..w3`, most significant first, kept flat so the wasm export signature\nand control-manifest layout are plain f32 members): `w0` carries the\nvisible position, `w1`/`w2`/`w3` the deep low-order words (~1e-27) that\nkeep the per-pixel/per-gesture step from vanishing far past the ~1e-11\ndf64 wall. `update_view` folds gesture deltas into all four words via the\ngeneral `add_f32<4>`; `escape` stitches them into one `Fixed<8>`.",
+        "doc": "Complex-plane centre, as a flat FOUR-WORD `Expansion<4>` per axis\n(`w0..w3`, most significant first, kept flat so the typed Wasm ABI and\nrender uniform layout are plain f32 members): `w0` carries the\nvisible position, `w1`/`w2`/`w3` the deep low-order words (~1e-27) that\nkeep the per-pixel/per-gesture step from vanishing far past the ~1e-11\ndf64 wall. `navigate` folds gesture deltas into all four words via the\ngeneral `add_f32<4>`; `escape` stitches them into one `Fixed<8>`.",
         "init": -0.7436439,
         "kind": "range",
         "max": 1.0,
