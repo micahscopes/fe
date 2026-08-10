@@ -142,6 +142,31 @@ pub struct WebProvenance {
     /// Stable caller-supplied identity, such as an ingot-relative source path
     /// or content digest. No timestamp or ambient Git state is injected.
     pub source_id: Option<String>,
+    /// Authored Fe program inputs (including the ingot manifest), filled by
+    /// filesystem-aware frontends such as `fe web`. Bundle lowering itself is
+    /// deliberately filesystem-blind, so direct API callers may leave this
+    /// empty while retaining the ownership contract below.
+    #[serde(default)]
+    pub authored_sources: Vec<WebSourceProvenance>,
+    /// Authored inputs which are not Fe. A published render manifest records
+    /// its containing HTML document here; canonical-gallery validation rejects
+    /// JavaScript/Rust/WGSL/Wasm/generated-manifest inputs while still honestly
+    /// admitting the hand-authored HTML/CSS composition until `WebPage` lands.
+    #[serde(default)]
+    pub non_fe_authored_sources: Vec<WebSourceProvenance>,
+    /// Artifact classes produced by the Fe compiler for this bundle. This is
+    /// ownership metadata, not a second path/size inventory (the concrete
+    /// files remain in `artifacts` and `passes`).
+    #[serde(default)]
+    pub generated_artifacts: Vec<WebGeneratedArtifactKind>,
+    /// Application responsibilities whose implementation is authored in Fe.
+    #[serde(default)]
+    pub fe_responsibilities: Vec<WebFeResponsibility>,
+    /// The one fixed, versioned, demo-blind browser host. Static `fe web build`
+    /// output names the contract; HTML publication additionally pins its exact
+    /// content-addressed artifact.
+    #[serde(default)]
+    pub fixed_host: WebFixedHostProvenance,
 }
 
 impl WebProvenance {
@@ -150,6 +175,139 @@ impl WebProvenance {
             compiler: "fe".to_string(),
             compiler_version: env!("CARGO_PKG_VERSION").to_string(),
             source_id,
+            authored_sources: Vec::new(),
+            non_fe_authored_sources: Vec::new(),
+            generated_artifacts: Vec::new(),
+            fe_responsibilities: Vec::new(),
+            fixed_host: WebFixedHostProvenance::render_runtime(),
+        }
+    }
+
+    fn with_bundle_shape(
+        mut self,
+        has_wasm: bool,
+        has_surface: bool,
+        has_control: bool,
+        has_pass_graph: bool,
+    ) -> Self {
+        self.generated_artifacts = vec![
+            WebGeneratedArtifactKind::Manifest,
+            WebGeneratedArtifactKind::Wgsl,
+        ];
+        if has_wasm {
+            self.generated_artifacts
+                .push(WebGeneratedArtifactKind::Wasm);
+        }
+        self.generated_artifacts.sort();
+        self.fe_responsibilities = vec![WebFeResponsibility::GpuProgram];
+        if has_surface {
+            self.fe_responsibilities
+                .push(WebFeResponsibility::SurfaceDeclaration);
+        }
+        if has_control {
+            self.fe_responsibilities
+                .push(WebFeResponsibility::ControlTransition);
+        }
+        if has_pass_graph {
+            self.fe_responsibilities
+                .push(WebFeResponsibility::GpuPassGraph);
+        }
+        self.fe_responsibilities.sort();
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebSourceProvenance {
+    /// Stable logical identity, normally relative to the sketches directory or
+    /// the published HTML document. Never an ambient absolute build path.
+    pub id: String,
+    pub sha256: String,
+    pub kind: WebAuthoredSourceKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebAuthoredSourceKind {
+    Fe,
+    FeManifest,
+    Html,
+    Css,
+    JavaScript,
+    Rust,
+    Wgsl,
+    Wasm,
+    Json,
+    Asset,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebGeneratedArtifactKind {
+    Manifest,
+    Wasm,
+    Wgsl,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebFeResponsibility {
+    GpuProgram,
+    GpuPassGraph,
+    SurfaceDeclaration,
+    ControlTransition,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebHostResponsibility {
+    DomSurface,
+    InputTransport,
+    PresentationScheduler,
+    WebGpuExecutor,
+    Lifecycle,
+    WasmLoader,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebFixedHostProvenance {
+    pub name: String,
+    pub contract: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<WebGeneratedArtifact>,
+    #[serde(default)]
+    pub responsibilities: Vec<WebHostResponsibility>,
+}
+
+impl WebFixedHostProvenance {
+    fn render_runtime() -> Self {
+        Self {
+            name: "fe-render-runtime".to_owned(),
+            contract: "fixed_versioned_demo_blind_browser_host".to_owned(),
+            artifact: None,
+            responsibilities: vec![
+                WebHostResponsibility::DomSurface,
+                WebHostResponsibility::InputTransport,
+                WebHostResponsibility::PresentationScheduler,
+                WebHostResponsibility::WebGpuExecutor,
+                WebHostResponsibility::Lifecycle,
+                WebHostResponsibility::WasmLoader,
+            ],
+        }
+    }
+}
+
+impl Default for WebFixedHostProvenance {
+    fn default() -> Self {
+        // Additive decoding of a legacy manifest must not manufacture a host
+        // claim the producer never made. New bundles call `render_runtime()`
+        // explicitly; absence remains honestly unknown.
+        Self {
+            name: String::new(),
+            contract: String::new(),
+            artifact: None,
+            responsibilities: Vec::new(),
         }
     }
 }
@@ -1939,6 +2097,12 @@ impl WebBundle {
             &layout,
             &resource_field_indices,
         )?;
+        let provenance = options.provenance.with_bundle_shape(
+            !wasm.is_empty(),
+            surface.is_some(),
+            control.is_some(),
+            passes.len() > 1 || !resources.is_empty(),
+        );
         let manifest = WebBundleManifest {
             protocol: WEB_BUNDLE_PROTOCOL.to_owned(),
             protocol_version: WEB_BUNDLE_PROTOCOL_VERSION,
@@ -1955,7 +2119,7 @@ impl WebBundle {
             passes,
             surface,
             control,
-            provenance: options.provenance,
+            provenance,
             canonical_interface: None,
             canonical_status: WebCanonicalStatus {
                 policy: WebCanonicalPolicy::Disabled,
@@ -2161,6 +2325,12 @@ impl WebBundle {
             layout: layout.clone(),
         }];
 
+        let provenance = options.provenance.with_bundle_shape(
+            !wasm.is_empty(),
+            surface.is_some(),
+            control.is_some(),
+            false,
+        );
         let manifest = WebBundleManifest {
             protocol: WEB_BUNDLE_PROTOCOL.to_string(),
             protocol_version: WEB_BUNDLE_PROTOCOL_VERSION,
@@ -2177,7 +2347,7 @@ impl WebBundle {
             passes,
             surface,
             control,
-            provenance: options.provenance,
+            provenance,
             canonical_interface,
             canonical_status,
             browser_runtime,
@@ -3001,6 +3171,34 @@ pub fn shade(x: u32, y: u32) -> u32 {
         assert!(first.manifest.browser_runtime.is_none());
         assert!(first.interface_js.is_none());
         assert!(first.interface_d_ts.is_none());
+        assert_eq!(
+            first.manifest.provenance.generated_artifacts,
+            [
+                WebGeneratedArtifactKind::Manifest,
+                WebGeneratedArtifactKind::Wasm,
+                WebGeneratedArtifactKind::Wgsl,
+            ]
+        );
+        assert_eq!(
+            first.manifest.provenance.fe_responsibilities,
+            [WebFeResponsibility::GpuProgram]
+        );
+        assert_eq!(
+            first.manifest.provenance.fixed_host.contract,
+            "fixed_versioned_demo_blind_browser_host"
+        );
+        assert!(first.manifest.provenance.fixed_host.artifact.is_none());
+        assert_eq!(
+            first.manifest.provenance.fixed_host.responsibilities,
+            [
+                WebHostResponsibility::DomSurface,
+                WebHostResponsibility::InputTransport,
+                WebHostResponsibility::PresentationScheduler,
+                WebHostResponsibility::WebGpuExecutor,
+                WebHostResponsibility::Lifecycle,
+                WebHostResponsibility::WasmLoader,
+            ]
+        );
         let exports = wasm_exports(&first.wasm);
         assert!(!exports.iter().any(|name| name == "fe_cabi_alloc"));
         assert!(!exports.iter().any(|name| name == "fe_cabi_reset"));
@@ -3013,6 +3211,21 @@ pub fn shade(x: u32, y: u32) -> u32 {
         let decoded: WebBundleManifest =
             serde_json::from_slice(&first.manifest_json().unwrap()).unwrap();
         assert_eq!(decoded, first.manifest);
+
+        let mut unattributed = serde_json::to_value(&first.manifest).unwrap();
+        let provenance = unattributed["provenance"].as_object_mut().unwrap();
+        for field in [
+            "authored_sources",
+            "non_fe_authored_sources",
+            "generated_artifacts",
+            "fe_responsibilities",
+            "fixed_host",
+        ] {
+            provenance.remove(field);
+        }
+        let unattributed: WebBundleManifest = serde_json::from_value(unattributed).unwrap();
+        assert!(unattributed.provenance.fixed_host.contract.is_empty());
+        assert!(unattributed.provenance.generated_artifacts.is_empty());
 
         // V3 adds generated adapter metadata and V4 adds the compiler-owned
         // browser actor runtime. A compiler tool may still inspect a V2

@@ -33,6 +33,12 @@ pub const SOURCE_SCRIPT_TYPE: &str = "application/fe";
 pub const ARTIFACT_SCRIPT_TYPE: &str = "application/fe+wasm";
 pub const BOOTSTRAP_MARKER: &str = "data-fe-bootstrap";
 pub const BOOTSTRAP_META_NAME: &str = "fe-bootstrap";
+/// Opt-in page policy used by the canonical gallery. It turns attribution from
+/// descriptive metadata into a build gate: authored browser scripts are
+/// rejected, and every render bundle must carry a complete compiler-produced
+/// Fe ownership ledger with no JS/Rust/WGSL/Wasm/generated-manifest inputs.
+pub const ATTRIBUTION_POLICY_META_NAME: &str = "fe-attribution-policy";
+pub const CANONICAL_FE_GALLERY_POLICY: &str = "canonical_fe_gallery";
 /// Valueless marker on a rewritten `application/fe+wasm` script: the bootstrap
 /// hands this module to `mountRenderSurface` from the render runtime module
 /// instead of instantiating it and calling its entry with zero arguments.
@@ -137,6 +143,10 @@ pub enum PrecompileError {
         diagnostics: Vec<Diagnostic>,
     },
     AdapterSelection {
+        source_url: String,
+        detail: String,
+    },
+    AttributionPolicy {
         source_url: String,
         detail: String,
     },
@@ -1145,6 +1155,12 @@ fn development_diagnostic(error: PrecompileError) -> DevelopmentDiagnostic {
             message: detail,
             compiler_diagnostics: Vec::new(),
         },
+        PrecompileError::AttributionPolicy { source_url, detail } => DevelopmentDiagnostic {
+            code: "attribution_policy".to_owned(),
+            source_url: Some(source_url),
+            message: detail,
+            compiler_diagnostics: Vec::new(),
+        },
         other => DevelopmentDiagnostic {
             code: match &other {
                 PrecompileError::InvalidDocumentUrl(_) => "invalid_document_url",
@@ -1154,7 +1170,8 @@ fn development_diagnostic(error: PrecompileError) -> DevelopmentDiagnostic {
                 PrecompileError::SourceLoad { .. }
                 | PrecompileError::Compile { .. }
                 | PrecompileError::Diagnostics { .. }
-                | PrecompileError::AdapterSelection { .. } => unreachable!(),
+                | PrecompileError::AdapterSelection { .. }
+                | PrecompileError::AttributionPolicy { .. } => unreachable!(),
             }
             .to_owned(),
             source_url: None,
@@ -1271,14 +1288,32 @@ fn precompile_html_impl(
     let document_url = Url::parse(document_url)
         .map_err(|error| PrecompileError::InvalidDocumentUrl(error.to_string()))?;
     let dom = html5ever::parse_document(RcDom::default(), Default::default()).one(html);
+    let canonical_gallery = find_meta_content(&dom.document, ATTRIBUTION_POLICY_META_NAME)
+        .is_some_and(|value| {
+            value
+                .trim()
+                .eq_ignore_ascii_case(CANONICAL_FE_GALLERY_POLICY)
+        });
+    if canonical_gallery {
+        validate_canonical_gallery_document(&dom.document, &document_url)?;
+    }
     let base_url = document_base_url(&dom.document, &document_url)?;
+    let document_source = PublishedDocumentSource {
+        id: document_url
+            .path_segments()
+            .and_then(|mut segments| segments.next_back())
+            .filter(|segment| !segment.is_empty())
+            .unwrap_or("index.html")
+            .to_owned(),
+        sha256: sha256_hex(html.as_bytes()),
+    };
     let mut scripts = Vec::new();
     collect_fe_scripts(&dom.document, &mut scripts);
 
     let mut assets = BTreeMap::new();
     let mut modules = Vec::new();
     let mut render_dependencies = Vec::new();
-    let mut render_runtime_asset: Option<String> = None;
+    let mut render_runtime_asset: Option<PublishedRenderRuntime> = None;
     for (index, script) in scripts.into_iter().enumerate() {
         let src = attr(&script, "data-fe-src");
         let entry_attr = attr(&script, "data-fe-entry");
@@ -1296,10 +1331,13 @@ fn precompile_html_impl(
                     detail,
                 }
             })? {
+                if canonical_gallery {
+                    validate_canonical_render_bundle(&bundle, &url)?;
+                }
                 if let Some(dependencies) = &bundle.source_dependencies {
                     render_dependencies.push(dependencies.clone());
                 }
-                let runtime_path = publish_render_runtime(
+                let runtime = publish_render_runtime(
                     render_runtime_js,
                     &mut assets,
                     &mut render_runtime_asset,
@@ -1309,7 +1347,8 @@ fn precompile_html_impl(
                     &base_url,
                     &document_url,
                     bundle,
-                    &runtime_path,
+                    &runtime,
+                    &document_source,
                     &mut assets,
                 )?;
                 continue;
@@ -1468,10 +1507,23 @@ fn precompile_html_impl(
                           .fe file has no `actor` declaration to derive a surface from)"
                     .to_owned(),
             })?;
+        if canonical_gallery {
+            validate_canonical_render_bundle(&bundle, &url)?;
+        }
         if let Some(dependencies) = &bundle.source_dependencies {
             render_dependencies.push(dependencies.clone());
         }
-        publish_authored_surface(&element, &base_url, &document_url, bundle, &mut assets)?;
+        let runtime =
+            publish_render_runtime(render_runtime_js, &mut assets, &mut render_runtime_asset)?;
+        publish_authored_surface(
+            &element,
+            &base_url,
+            &document_url,
+            bundle,
+            &runtime,
+            &document_source,
+            &mut assets,
+        )?;
         published_a_surface = true;
     }
     if published_a_surface {
@@ -1481,9 +1533,9 @@ fn precompile_html_impl(
         // runtime (bootstrap.js), but a page with ONLY authored `fe-surface`
         // elements has no such script, so a static module import is injected
         // once instead.
-        let runtime_path =
+        let runtime =
             publish_render_runtime(render_runtime_js, &mut assets, &mut render_runtime_asset)?;
-        publish_surface_runtime_loader(&dom.document, &document_url, &base_url, &runtime_path)?;
+        publish_surface_runtime_loader(&dom.document, &document_url, &base_url, &runtime.path)?;
     }
 
     publish_bootstrap(&dom.document, &document_url, &base_url, &mut assets)?;
@@ -1508,13 +1560,26 @@ fn precompile_html_impl(
 /// Publish the fixed render runtime module once, content-addressed. Returns
 /// its (document-relative, un-retargeted) publication path, from cache after
 /// the first call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PublishedRenderRuntime {
+    path: String,
+    bytes: u64,
+    sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PublishedDocumentSource {
+    id: String,
+    sha256: String,
+}
+
 fn publish_render_runtime(
     render_runtime_js: &str,
     assets: &mut BTreeMap<String, Vec<u8>>,
-    published: &mut Option<String>,
-) -> Result<String, PrecompileError> {
-    if let Some(path) = published {
-        return Ok(path.clone());
+    published: &mut Option<PublishedRenderRuntime>,
+) -> Result<PublishedRenderRuntime, PrecompileError> {
+    if let Some(runtime) = published {
+        return Ok(runtime.clone());
     }
     if render_runtime_js.is_empty() {
         return Err(PrecompileError::Serialize(
@@ -1526,8 +1591,13 @@ fn publish_render_runtime(
     let digest = sha256_hex(render_runtime_js.as_bytes());
     let path = format!("assets/fe-render-runtime-{}.js", &digest[..16]);
     insert_identical(assets, path.clone(), render_runtime_js.as_bytes().to_vec())?;
-    *published = Some(path.clone());
-    Ok(path)
+    let runtime = PublishedRenderRuntime {
+        path,
+        bytes: render_runtime_js.len() as u64,
+        sha256: digest,
+    };
+    *published = Some(runtime.clone());
+    Ok(runtime)
 }
 
 /// Publish one render bundle's optional wasm, shaders, and manifest
@@ -1544,6 +1614,8 @@ fn publish_render_artifacts(
     base_url: &Url,
     document_url: &Url,
     bundle: RenderBundleArtifact,
+    runtime: &PublishedRenderRuntime,
+    document_source: &PublishedDocumentSource,
     assets: &mut BTreeMap<String, Vec<u8>>,
 ) -> Result<(Option<String>, String, Option<String>), PrecompileError> {
     let RenderBundleArtifact {
@@ -1557,6 +1629,7 @@ fn publish_render_artifacts(
         serde_json::from_slice(&manifest_json).map_err(|error| {
             PrecompileError::Serialize(format!("render bundle manifest is not valid JSON: {error}"))
         })?;
+    pin_published_attribution(&mut manifest, runtime, document_source)?;
     let artifacts = manifest
         .get_mut("artifacts")
         .and_then(serde_json::Value::as_object_mut)
@@ -1675,16 +1748,23 @@ fn publish_render_bundle(
     base_url: &Url,
     document_url: &Url,
     bundle: RenderBundleArtifact,
-    render_runtime_path: &str,
+    runtime: &PublishedRenderRuntime,
+    document_source: &PublishedDocumentSource,
     assets: &mut BTreeMap<String, Vec<u8>>,
 ) -> Result<(), PrecompileError> {
-    let (wasm_ref, manifest_ref, wasm_sha256) =
-        publish_render_artifacts(base_url, document_url, bundle, assets)?;
+    let (wasm_ref, manifest_ref, wasm_sha256) = publish_render_artifacts(
+        base_url,
+        document_url,
+        bundle,
+        runtime,
+        document_source,
+        assets,
+    )?;
     rewrite_render_script(
         script,
         wasm_ref.as_deref(),
         &manifest_ref,
-        &published_reference(base_url, document_url, render_runtime_path),
+        &published_reference(base_url, document_url, &runtime.path),
         wasm_sha256.as_deref(),
     );
     Ok(())
@@ -1702,10 +1782,18 @@ fn publish_authored_surface(
     base_url: &Url,
     document_url: &Url,
     bundle: RenderBundleArtifact,
+    runtime: &PublishedRenderRuntime,
+    document_source: &PublishedDocumentSource,
     assets: &mut BTreeMap<String, Vec<u8>>,
 ) -> Result<(), PrecompileError> {
-    let (_wasm_ref, manifest_ref, _wasm_sha256) =
-        publish_render_artifacts(base_url, document_url, bundle, assets)?;
+    let (_wasm_ref, manifest_ref, _wasm_sha256) = publish_render_artifacts(
+        base_url,
+        document_url,
+        bundle,
+        runtime,
+        document_source,
+        assets,
+    )?;
     remove_attr(element, "src");
     remove_attr(element, "entry");
     set_attr(element, "manifest", &manifest_ref);
@@ -1965,6 +2053,244 @@ fn append_text(node: &Handle, result: &mut String) {
     }
 }
 
+fn collect_elements(root: &Handle, tag: &str, output: &mut Vec<Handle>) {
+    if is_element(root, tag) {
+        output.push(root.clone());
+    }
+    for child in root.children.borrow().iter() {
+        collect_elements(child, tag, output);
+    }
+}
+
+fn validate_canonical_gallery_document(
+    root: &Handle,
+    document_url: &Url,
+) -> Result<(), PrecompileError> {
+    let mut scripts = Vec::new();
+    collect_elements(root, "script", &mut scripts);
+    for script in scripts {
+        let script_type = attr(&script, "type").unwrap_or_default();
+        if !script_type.trim().eq_ignore_ascii_case(SOURCE_SCRIPT_TYPE) {
+            return Err(PrecompileError::AttributionPolicy {
+                source_url: document_url.to_string(),
+                detail: format!(
+                    "canonical Fe gallery forbids authored browser scripts; found <script type={script_type:?}> (only `{SOURCE_SCRIPT_TYPE}` is allowed)"
+                ),
+            });
+        }
+    }
+    validate_no_inline_javascript(root, document_url)
+}
+
+fn validate_no_inline_javascript(root: &Handle, document_url: &Url) -> Result<(), PrecompileError> {
+    if let Some(attributes) = attrs(root) {
+        for attribute in attributes.borrow().iter() {
+            let name = attribute.name.local.as_ref();
+            let value = attribute.value.trim();
+            if name
+                .get(..2)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("on"))
+                && name.len() > 2
+            {
+                return Err(PrecompileError::AttributionPolicy {
+                    source_url: document_url.to_string(),
+                    detail: format!(
+                        "canonical Fe gallery forbids inline JavaScript event handlers; found `{name}`"
+                    ),
+                });
+            }
+            if value
+                .get(.."javascript:".len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("javascript:"))
+            {
+                return Err(PrecompileError::AttributionPolicy {
+                    source_url: document_url.to_string(),
+                    detail: "canonical Fe gallery forbids `javascript:` URLs".to_owned(),
+                });
+            }
+        }
+    }
+    for child in root.children.borrow().iter() {
+        validate_no_inline_javascript(child, document_url)?;
+    }
+    Ok(())
+}
+
+fn validate_canonical_render_bundle(
+    bundle: &RenderBundleArtifact,
+    source_url: &Url,
+) -> Result<(), PrecompileError> {
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&bundle.manifest_json).map_err(|error| {
+            PrecompileError::AttributionPolicy {
+                source_url: source_url.to_string(),
+                detail: format!("render bundle has no inspectable attribution manifest: {error}"),
+            }
+        })?;
+    let provenance = manifest
+        .get("provenance")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| PrecompileError::AttributionPolicy {
+            source_url: source_url.to_string(),
+            detail: "canonical render bundle has no compiler-produced `provenance` ledger"
+                .to_owned(),
+        })?;
+    let authored = provenance
+        .get("authored_sources")
+        .and_then(serde_json::Value::as_array)
+        .filter(|sources| !sources.is_empty())
+        .ok_or_else(|| PrecompileError::AttributionPolicy {
+            source_url: source_url.to_string(),
+            detail: "canonical render bundle has no digested authored Fe sources".to_owned(),
+        })?;
+    for source in authored {
+        validate_source_ledger_entry(source, source_url, &["fe", "fe_manifest"])?;
+    }
+    if let Some(sources) = provenance
+        .get("non_fe_authored_sources")
+        .and_then(serde_json::Value::as_array)
+    {
+        for source in sources {
+            validate_source_ledger_entry(source, source_url, &["html", "css", "asset", "other"])?;
+        }
+    }
+    let generated = provenance
+        .get("generated_artifacts")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| PrecompileError::AttributionPolicy {
+            source_url: source_url.to_string(),
+            detail: "canonical render bundle has no generated-artifact ownership ledger".to_owned(),
+        })?;
+    for required in ["manifest", "wgsl"] {
+        if !generated.iter().any(|kind| kind.as_str() == Some(required)) {
+            return Err(PrecompileError::AttributionPolicy {
+                source_url: source_url.to_string(),
+                detail: format!(
+                    "canonical render bundle does not identify `{required}` as compiler-generated"
+                ),
+            });
+        }
+    }
+    if bundle.wasm.is_some() && !generated.iter().any(|kind| kind.as_str() == Some("wasm")) {
+        return Err(PrecompileError::AttributionPolicy {
+            source_url: source_url.to_string(),
+            detail: "canonical render bundle has Wasm bytes not attributed to the Fe compiler"
+                .to_owned(),
+        });
+    }
+    let contract = provenance
+        .get("fixed_host")
+        .and_then(|host| host.get("contract"))
+        .and_then(serde_json::Value::as_str);
+    if contract != Some("fixed_versioned_demo_blind_browser_host") {
+        return Err(PrecompileError::AttributionPolicy {
+            source_url: source_url.to_string(),
+            detail: "canonical render bundle does not declare the fixed demo-blind host contract"
+                .to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_source_ledger_entry(
+    source: &serde_json::Value,
+    source_url: &Url,
+    admitted_kinds: &[&str],
+) -> Result<(), PrecompileError> {
+    let id = source
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let sha256 = source
+        .get("sha256")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let kind = source
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let stable_id = !id.is_empty()
+        && !id.contains("://")
+        && !Path::new(id).is_absolute()
+        && !id.split('/').any(|component| component == "..");
+    let valid_digest = sha256.len() == 64 && sha256.bytes().all(|byte| byte.is_ascii_hexdigit());
+    if !stable_id || !valid_digest || !admitted_kinds.contains(&kind) {
+        return Err(PrecompileError::AttributionPolicy {
+            source_url: source_url.to_string(),
+            detail: format!(
+                "canonical source ledger rejects id={id:?}, kind={kind:?}; expected a stable relative identity, SHA-256 digest, and one of {admitted_kinds:?}"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn pin_published_attribution(
+    manifest: &mut serde_json::Value,
+    runtime: &PublishedRenderRuntime,
+    document_source: &PublishedDocumentSource,
+) -> Result<(), PrecompileError> {
+    let root = manifest.as_object_mut().ok_or_else(|| {
+        PrecompileError::Serialize("render bundle manifest root is not an object".to_owned())
+    })?;
+    let provenance = root
+        .entry("provenance")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| {
+            PrecompileError::Serialize("render bundle `provenance` is not an object".to_owned())
+        })?;
+    let fixed_host = provenance
+        .entry("fixed_host")
+        .or_insert_with(|| {
+            serde_json::json!({
+                "name": "fe-render-runtime",
+                "contract": "fixed_versioned_demo_blind_browser_host",
+                "responsibilities": [
+                    "dom_surface",
+                    "input_transport",
+                    "presentation_scheduler",
+                    "web_gpu_executor",
+                    "lifecycle",
+                    "wasm_loader"
+                ]
+            })
+        })
+        .as_object_mut()
+        .ok_or_else(|| {
+            PrecompileError::Serialize(
+                "render bundle `provenance.fixed_host` is not an object".to_owned(),
+            )
+        })?;
+    fixed_host.insert(
+        "artifact".to_owned(),
+        serde_json::json!({
+            "path": basename(&runtime.path),
+            "bytes": runtime.bytes,
+            "sha256": runtime.sha256,
+        }),
+    );
+    let pages = provenance
+        .entry("non_fe_authored_sources")
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .ok_or_else(|| {
+            PrecompileError::Serialize(
+                "render bundle `provenance.non_fe_authored_sources` is not an array".to_owned(),
+            )
+        })?;
+    if !pages.iter().any(|source| {
+        source.get("id").and_then(serde_json::Value::as_str) == Some(&document_source.id)
+    }) {
+        pages.push(serde_json::json!({
+            "id": document_source.id,
+            "sha256": document_source.sha256,
+            "kind": "html",
+        }));
+    }
+    Ok(())
+}
+
 fn rewrite_script(
     node: &Handle,
     wasm_path: &str,
@@ -2111,6 +2437,61 @@ mod tests {
         }
     }
 
+    fn fake_attributed_render_bundle(non_fe_kind: Option<&str>) -> RenderBundleArtifact {
+        let mut bundle = fake_render_bundle();
+        let non_fe_authored_sources = non_fe_kind
+            .map(|kind| {
+                vec![serde_json::json!({
+                    "id": format!("demo/host.{kind}"),
+                    "sha256": "22".repeat(32),
+                    "kind": kind,
+                })]
+            })
+            .unwrap_or_default();
+        bundle.manifest_json = serde_json::to_vec(&serde_json::json!({
+            "protocol": "fe-web-bundle",
+            "protocol_version": 6,
+            "artifacts": {
+                "wasm": "module.wasm",
+                "wasm_bytes": 10,
+                "wgsl": "shader.wgsl",
+                "wgsl_bytes": 11,
+            },
+            "provenance": {
+                "source_id": "demo",
+                "authored_sources": [
+                    {
+                        "id": "demo/fe.toml",
+                        "sha256": "00".repeat(32),
+                        "kind": "fe_manifest",
+                    },
+                    {
+                        "id": "demo/src/lib.fe",
+                        "sha256": "11".repeat(32),
+                        "kind": "fe",
+                    },
+                ],
+                "non_fe_authored_sources": non_fe_authored_sources,
+                "generated_artifacts": ["manifest", "wasm", "wgsl"],
+                "fe_responsibilities": ["gpu_program", "surface_declaration"],
+                "fixed_host": {
+                    "name": "fe-render-runtime",
+                    "contract": "fixed_versioned_demo_blind_browser_host",
+                    "responsibilities": [
+                        "dom_surface",
+                        "input_transport",
+                        "presentation_scheduler",
+                        "web_gpu_executor",
+                        "lifecycle",
+                        "wasm_loader",
+                    ],
+                },
+            },
+        }))
+        .unwrap();
+        bundle
+    }
+
     fn fake_render_graph_bundle() -> RenderBundleArtifact {
         RenderBundleArtifact {
             wasm: None,
@@ -2140,6 +2521,97 @@ mod tests {
             .unwrap(),
             source_dependencies: None,
         }
+    }
+
+    #[test]
+    fn canonical_gallery_rejects_authored_browser_javascript() {
+        for authored_javascript in [
+            r#"<script src="app.js"></script>"#,
+            r#"<button onclick="runDemo()">run</button>"#,
+            r#"<a href="javascript:runDemo()">run</a>"#,
+        ] {
+            let html = format!(
+                r#"<!doctype html><meta name="{ATTRIBUTION_POLICY_META_NAME}" content="{CANONICAL_FE_GALLERY_POLICY}">{authored_javascript}"#
+            );
+            let error = precompile_html_with_render_lane(
+                "https://example.test/gallery.html",
+                &html,
+                "runtime-js",
+                |_| unreachable!("policy fails before source loading"),
+                |_, _| unreachable!("policy fails before render compilation"),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(error, PrecompileError::AttributionPolicy { .. }),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_gallery_rejects_forbidden_non_fe_bundle_inputs() {
+        let source_url = Url::parse("https://example.test/sketches/demo").unwrap();
+        for kind in ["javascript", "rust", "wgsl", "wasm", "json"] {
+            let error = validate_canonical_render_bundle(
+                &fake_attributed_render_bundle(Some(kind)),
+                &source_url,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(error, PrecompileError::AttributionPolicy { .. }),
+                "kind={kind}: {error}"
+            );
+            assert!(error.to_string().contains(kind), "kind={kind}: {error}");
+        }
+    }
+
+    #[test]
+    fn canonical_gallery_pins_exact_host_and_document_provenance() {
+        let html = format!(
+            r#"<!doctype html>
+<meta name="{ATTRIBUTION_POLICY_META_NAME}" content="{CANONICAL_FE_GALLERY_POLICY}">
+<script type="application/fe" data-fe-src="sketches/demo" data-fe-render></script>"#
+        );
+        let runtime = "export function mountRenderSurface() {}\n";
+        let output = precompile_html_with_render_lane(
+            "https://example.test/gallery.html",
+            &html,
+            runtime,
+            |_| unreachable!("render ingot routes through the render lane"),
+            |_, _| Ok(Some(fake_attributed_render_bundle(None))),
+        )
+        .unwrap();
+
+        let manifest = output
+            .assets
+            .iter()
+            .filter(|(path, _)| path.ends_with(".json"))
+            .find_map(|(_, bytes)| {
+                let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+                (value["protocol"] == "fe-web-bundle").then_some(value)
+            })
+            .unwrap();
+        let host_artifact = &manifest["provenance"]["fixed_host"]["artifact"];
+        let runtime_digest = sha256_hex(runtime.as_bytes());
+        assert_eq!(host_artifact["sha256"], runtime_digest);
+        assert_eq!(host_artifact["bytes"], runtime.len() as u64);
+        assert_eq!(
+            host_artifact["path"],
+            format!("fe-render-runtime-{}.js", &runtime_digest[..16])
+        );
+        assert!(output.assets.contains_key(&format!(
+            "assets/fe-render-runtime-{}.js",
+            &runtime_digest[..16]
+        )));
+
+        let document_source = manifest["provenance"]["non_fe_authored_sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|source| source["id"] == "gallery.html")
+            .unwrap();
+        assert_eq!(document_source["kind"], "html");
+        assert_eq!(document_source["sha256"], sha256_hex(html.as_bytes()));
     }
 
     #[test]

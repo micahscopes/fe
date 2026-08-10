@@ -1,12 +1,12 @@
 <!doctype html>
 <!--
-  The all-demos page. `fe web dev demos/gallery.html` compiles and renders
-  EVERY render sketch on one page, script-free: each `<script
-  type="application/fe" data-fe-render>` is a standalone render bundle, and the
-  bootstrap handoff inserts a `<fe-surface>` custom element after each script,
-  which mounts and drives its own lifecycle (poster first, live on pointer
-  intent, suspended off-viewport) while sharing a single WebGPU device across
-  every tile on the page (acquireSharedGpu). See
+  The canonical all-demos page. `fe web dev demos/gallery.html` compiles and
+  renders every sketch without authored browser JavaScript: each inert `<script
+  type="application/fe" data-fe-render>` names Fe source, while the generated
+  bootstrap and one fixed, demo-blind runtime insert a `<fe-surface>` custom
+  element after each compiled artifact. That host mounts and drives lifecycle
+  (poster first, live on pointer intent, suspended off-viewport) while sharing a
+  single WebGPU device across every tile (acquireSharedGpu). See
   crates/codegen/assets/render-runtime/fe-render-runtime.js and
   FE_WEB_V5_ORCHESTRATION_DESIGN.md section 3/6 for the element/lifecycle.
 
@@ -39,6 +39,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="fe-attribution-policy" content="canonical_fe_gallery">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%2312151b'/%3E%3Cpath d='M14 45V19h36v7H23v4h22v7H23v8z' fill='%235b8cff'/%3E%3C/svg%3E">
 <title>fe web · gallery</title>
 <style>
@@ -86,7 +87,7 @@
 <body>
   <header>
     <h1>fe web · gallery</h1>
-    <p>Every render sketch, compiled and run on the GPU from its Fe source. Serve with <code>fe web dev demos/gallery.html</code>.</p>
+    <p>Fe-authored GPU and control programs, with generated WGSL/Wasm hosted by one fixed browser runtime. Serve with <code>fe web dev demos/gallery.html</code>.</p>
   </header>
 
   <div class="grid">
@@ -132,89 +133,5 @@
     </figure>
   </div>
 
-  <!-- Buildless inline code viewer (dev affordance): intercepts clicks on the
-       source/wgsl/wasm/manifest links the tiles already carry (reaching into
-       each <fe-surface> shadow DOM via composedPath) and shows the fetched text
-       in a dialog instead of downloading. This is a STOPGAP on the dev gallery;
-       the durable home is the fixed render runtime's meta line (needs a compiler
-       rebuild, so it graduates there on the next build). -->
-  <dialog id="fe-code-viewer">
-    <div class="cv-head">
-      <span class="cv-title">code</span>
-      <span class="cv-bytes"></span>
-      <a class="cv-raw" target="_blank" rel="noopener">raw</a>
-      <button class="cv-close" type="button" aria-label="close">×</button>
-    </div>
-    <pre class="cv-body" tabindex="0"></pre>
-  </dialog>
-  <style>
-    #fe-code-viewer { width: min(90vw, 1000px); max-height: 82vh; padding: 0;
-      border: 1px solid #2a3140; border-radius: 10px; background: #0f1218; color: #cfd6e4;
-      overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,.55); }
-    #fe-code-viewer::backdrop { background: rgba(4,6,10,.66); }
-    #fe-code-viewer .cv-head { display: flex; align-items: center; gap: 12px;
-      padding: 10px 14px; border-bottom: 1px solid #1e232d; background: #12151b; }
-    #fe-code-viewer .cv-title { font: 600 12.5px ui-monospace, Menlo, monospace; color: #e6ecf7; }
-    #fe-code-viewer .cv-bytes { font: 11.5px ui-monospace, monospace; color: #8a93a6; flex: 1; }
-    #fe-code-viewer .cv-raw { font: 11.5px ui-monospace, monospace; color: #6b7688; text-decoration: underline dotted; }
-    #fe-code-viewer .cv-raw:hover { color: #b7c2d8; }
-    #fe-code-viewer .cv-close { background: none; border: 0; color: #8a93a6; font-size: 20px;
-      line-height: 1; cursor: pointer; padding: 0 4px; }
-    #fe-code-viewer .cv-close:hover { color: #e6ecf7; }
-    #fe-code-viewer .cv-body { margin: 0; padding: 14px 16px; overflow: auto; max-height: calc(82vh - 44px);
-      font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: #cfd6e4;
-      white-space: pre; tab-size: 2; }
-  </style>
-  <script>
-    (function () {
-      const dlg = document.getElementById('fe-code-viewer');
-      const titleEl = dlg.querySelector('.cv-title');
-      const bytesEl = dlg.querySelector('.cv-bytes');
-      const rawEl = dlg.querySelector('.cv-raw');
-      const bodyEl = dlg.querySelector('.cv-body');
-      dlg.querySelector('.cv-close').addEventListener('click', () => dlg.close());
-      dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.close(); }); // backdrop click
-      const kindOf = (p) => {
-        if (p.endsWith('.wgsl')) return 'wgsl';
-        if (p.endsWith('.wasm')) return 'wasm';
-        if (p.endsWith('.json')) return 'manifest';
-        if (p.endsWith('.fe')) return 'source';
-        return null;
-      };
-      document.addEventListener('click', async (e) => {
-        const a = e.composedPath().find((n) => n && n.tagName === 'A' && n.href);
-        if (!a) return;
-        let path;
-        try { path = new URL(a.href).pathname; } catch { return; }
-        const kind = kindOf(path);
-        if (!kind) return;
-        e.preventDefault();
-        e.stopPropagation();
-        const name = path.split('/').pop();
-        titleEl.textContent = kind + '  ·  ' + name;
-        rawEl.href = a.href;
-        bodyEl.textContent = 'loading ' + name + ' ...';
-        if (!dlg.open) dlg.showModal();
-        try {
-          const res = await fetch(a.href);
-          if (kind === 'wasm') {
-            const buf = new Uint8Array(await res.arrayBuffer());
-            bytesEl.textContent = buf.length + ' bytes (binary module)';
-            const hex = [...buf.slice(0, 512)].map((b) => b.toString(16).padStart(2, '0'))
-              .reduce((acc, h, i) => acc + h + ((i + 1) % 32 === 0 ? '\n' : ' '), '');
-            bodyEl.textContent = 'compiled wasm module, ' + buf.length + ' bytes.\n'
-              + 'first ' + Math.min(512, buf.length) + ' bytes:\n\n' + hex
-              + (buf.length > 512 ? '\n...' : '');
-          } else {
-            const text = await res.text();
-            bytesEl.textContent = new Blob([text]).size + ' bytes';
-            bodyEl.textContent = text;
-          }
-        } catch (err) {
-          bodyEl.textContent = 'failed to load ' + name + ': ' + err;
-        }
-      }, true);
-    })();
-  </script>
 </body>
 </html>

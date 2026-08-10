@@ -1480,9 +1480,17 @@ class FeSurfaceElement extends HTMLElement {
 
   _updateBadge() {
     if (!this._badge) return;
+    const provenance = this._manifest?.provenance || {};
+    const feResponsibilities = provenance.fe_responsibilities || [];
+    const feControl = feResponsibilities.includes("control_transition");
     this._badge.textContent = this._mode === "webgpu"
-      ? `WebGPU · ${this._passes.length} pass${this._passes.length === 1 ? "" : "es"}`
-      : "wasm · module.wasm";
+      ? `Fe WGSL${feControl ? " + control Wasm" : ""} · fixed JS host`
+      : "Fe Wasm renderer · fixed JS host";
+    const hostArtifact = provenance.fixed_host?.artifact;
+    const runtimeIdentity = hostArtifact?.sha256
+      ? `${hostArtifact.path} · sha256:${hostArtifact.sha256}`
+      : "fe-render-runtime · unpinned build artifact";
+    this._badge.title = `Fe owns: ${feResponsibilities.join(", ") || "GPU program"}. Host owns: DOM, input transport, scheduling, WebGPU execution, lifecycle, Wasm loading. ${runtimeIdentity}`;
     this._badge.className = `badge ${this._mode === "webgpu" ? "webgpu" : "wasm-2d"}`;
   }
 

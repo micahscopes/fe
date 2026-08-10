@@ -5,8 +5,11 @@ use std::{
     time::{Instant, UNIX_EPOCH},
 };
 
-use camino::Utf8PathBuf;
-use codegen::{WebBuildOptions, WebBundle, WebBundleMode, resolve_web_entry};
+use camino::{Utf8Path, Utf8PathBuf};
+use codegen::{
+    WebAuthoredSourceKind, WebBuildOptions, WebBundle, WebBundleMode, WebSourceProvenance,
+    resolve_web_entry,
+};
 use common::InputDb;
 use driver::{
     DriverDataBase,
@@ -339,12 +342,14 @@ fn compiler_cache_identity() -> &'static str {
 
 fn render_cache_key(
     dependencies: &SourceDependencyInventory,
+    non_fe_authored_sources: &[WebSourceProvenance],
     entry: Option<&str>,
 ) -> Option<String> {
     serde_json::to_vec(&(
         compiler_cache_identity(),
         entry.unwrap_or_default(),
         dependencies,
+        non_fe_authored_sources,
     ))
     .ok()
     .map(|bytes| sha256_hex(&bytes))
@@ -434,9 +439,9 @@ fn store_render_cache(
 fn compile_render_bundle_with_dependencies(
     path: &Utf8PathBuf,
     entry: Option<&str>,
-    dependencies: Option<SourceDependencyInventory>,
+    source_audit: Option<IngotSourceAudit>,
 ) -> Result<RenderBundleArtifact, String> {
-    let bundle = compile(&CompileRequest {
+    let mut bundle = compile(&CompileRequest {
         path: path.clone(),
         entry: entry.map(str::to_owned),
         mode: None,
@@ -445,6 +450,12 @@ fn compile_render_bundle_with_dependencies(
         canonical: WebCanonicalPolicy::Disabled,
         canonical_entries: Vec::new(),
     })?;
+    let dependencies = source_audit.map(|audit| {
+        bundle.manifest.provenance.source_id = Some(audit.source_id);
+        bundle.manifest.provenance.authored_sources = audit.authored_sources;
+        bundle.manifest.provenance.non_fe_authored_sources = audit.non_fe_authored_sources;
+        audit.dependencies
+    });
     let manifest_json = bundle.manifest_json().map_err(|error| error.to_string())?;
     let wasm = (!bundle.wasm.is_empty()).then_some(bundle.wasm);
     let pass_wgsl = bundle
@@ -486,14 +497,18 @@ pub fn render_compile(
     if !path.is_dir() {
         return Ok(None);
     }
-    let dependencies = ingot_source_dependencies(&path);
+    let source_audit = ingot_source_audit(&path);
+    let dependencies = source_audit.as_ref().map(|audit| &audit.dependencies);
+    let non_fe_authored_sources = source_audit
+        .as_ref()
+        .map(|audit| audit.non_fe_authored_sources.as_slice())
+        .unwrap_or_default();
     let cache = render_cache_root().and_then(|root| {
         dependencies
-            .as_ref()
-            .and_then(|dependencies| render_cache_key(dependencies, entry))
+            .and_then(|dependencies| render_cache_key(dependencies, non_fe_authored_sources, entry))
             .map(|key| (root, key))
     });
-    if let (Some((root, key)), Some(dependencies)) = (&cache, dependencies.as_ref())
+    if let (Some((root, key)), Some(dependencies)) = (&cache, dependencies)
         && let Some(artifact) = load_render_cache(root, key, dependencies)
     {
         tracing::info!(
@@ -516,7 +531,7 @@ pub fn render_compile(
         entry = entry.unwrap_or("<derived>"),
         "compiling render bundle"
     );
-    let artifact = compile_render_bundle_with_dependencies(&path, entry, dependencies)?;
+    let artifact = compile_render_bundle_with_dependencies(&path, entry, source_audit)?;
     let emitted_bytes = artifact.wgsl.len()
         + artifact.manifest_json.len()
         + artifact.wasm.as_ref().map_or(0, Vec::len)
@@ -548,23 +563,27 @@ pub fn render_compile(
     Ok(Some(artifact))
 }
 
-/// Best-effort structural dependency inventory for the bundle lane's watch
-/// graph: every `.fe` file and `fe.toml` under the ingot directory, plus the
-/// same under every LOCAL path dependency it declares (recursively), so
-/// editing a shared library ingot (e.g. `demos/sketches/fmath`) is proven to
-/// affect every sketch that depends on it. Remote/registry dependencies are
-/// not walked (their sources are not local files to watch). `None` when the
-/// directory has no readable sources or would not validate as an inventory;
-/// callers treat this as "no extra watch entries," not a hard failure.
-fn ingot_source_dependencies(
-    ingot_dir: &Utf8PathBuf,
-) -> Option<fe_compiler_protocol::SourceDependencyInventory> {
+#[derive(Debug, Clone)]
+struct IngotSourceAudit {
+    source_id: String,
+    dependencies: SourceDependencyInventory,
+    authored_sources: Vec<WebSourceProvenance>,
+    non_fe_authored_sources: Vec<WebSourceProvenance>,
+}
+
+/// The structural dependency inventory used for rebuilds plus the ownership
+/// ledger published in a render manifest. Unlike the watch graph, the ledger
+/// also records non-Fe files under the root ingot and its local dependencies so
+/// the canonical-gallery policy can reject application JS/Rust/WGSL/Wasm
+/// without relying on a filename search outside the build.
+fn ingot_source_audit(ingot_dir: &Utf8PathBuf) -> Option<IngotSourceAudit> {
     let root_dir = ingot_dir.canonicalize_utf8().ok()?;
     let mut visited = BTreeSet::new();
     let mut sources = BTreeMap::new();
-    collect_ingot_sources(&root_dir, &mut visited, &mut sources);
+    let mut non_fe_sources = BTreeMap::new();
+    collect_ingot_sources(&root_dir, &mut visited, &mut sources, &mut non_fe_sources);
     let root = sources.keys().next()?.clone();
-    let inventory = fe_compiler_protocol::SourceDependencyInventory {
+    let inventory = SourceDependencyInventory {
         version: SOURCE_DEPENDENCY_INVENTORY_VERSION,
         root,
         sources: sources
@@ -573,13 +592,54 @@ fn ingot_source_dependencies(
             .collect(),
     };
     inventory.validate().ok()?;
-    Some(inventory)
+    let logical_base = provenance_logical_base(&root_dir, &inventory.sources);
+    let authored_sources = inventory
+        .sources
+        .iter()
+        .filter_map(|source| source_provenance(&logical_base, &source.url, &source.sha256, None))
+        .collect();
+    let non_fe_authored_sources = non_fe_sources
+        .into_iter()
+        .filter_map(|(url, sha256)| source_provenance(&logical_base, &url, &sha256, None))
+        .collect();
+    Some(IngotSourceAudit {
+        source_id: root_dir.file_name().unwrap_or(root_dir.as_str()).to_owned(),
+        dependencies: inventory,
+        authored_sources,
+        non_fe_authored_sources,
+    })
+}
+
+/// Choose a stable namespace that contains both the root sketch and every
+/// recursively discovered local Fe dependency. Starting at the sketch's
+/// parent preserves compact `sketch/file.fe` identities for the common case;
+/// shared ingots outside that directory widen the base to their common
+/// ancestor (normally the repository root), never to an ambient absolute id.
+fn provenance_logical_base(root_dir: &Utf8Path, sources: &[SourceDependency]) -> Utf8PathBuf {
+    let mut base = root_dir.parent().unwrap_or(root_dir).to_owned();
+    for source in sources {
+        let Some(path) = Url::parse(&source.url)
+            .ok()
+            .and_then(|url| url.to_file_path().ok())
+            .and_then(|path| Utf8PathBuf::from_path_buf(path).ok())
+        else {
+            continue;
+        };
+        while !path.starts_with(&base) {
+            let Some(parent) = base.parent() else {
+                break;
+            };
+            base = parent.to_owned();
+        }
+    }
+    base
 }
 
 fn collect_ingot_sources(
     dir: &Utf8PathBuf,
     visited: &mut BTreeSet<Utf8PathBuf>,
     sources: &mut BTreeMap<String, String>,
+    non_fe_sources: &mut BTreeMap<String, String>,
 ) {
     let Ok(canonical) = dir.canonicalize_utf8() else {
         return;
@@ -589,6 +649,13 @@ fn collect_ingot_sources(
     }
     for entry in walkdir::WalkDir::new(canonical.as_std_path())
         .into_iter()
+        .filter_entry(|entry| {
+            entry.depth() == 0
+                || !matches!(
+                    entry.file_name().to_str(),
+                    Some(".git" | "target" | "node_modules")
+                )
+        })
         .filter_map(Result::ok)
     {
         if !entry.file_type().is_file() {
@@ -599,9 +666,6 @@ fn collect_ingot_sources(
             .extension()
             .is_some_and(|extension| extension == "fe")
             || entry.file_name() == "fe.toml";
-        if !is_source {
-            continue;
-        }
         let (Ok(path), Ok(bytes)) = (
             Utf8PathBuf::from_path_buf(entry.path().to_path_buf()),
             std::fs::read(entry.path()),
@@ -609,7 +673,12 @@ fn collect_ingot_sources(
             continue;
         };
         if let Ok(url) = Url::from_file_path(path.as_std_path()) {
-            sources.insert(url.to_string(), sha256_hex(&bytes));
+            let target = if is_source {
+                &mut *sources
+            } else {
+                &mut *non_fe_sources
+            };
+            target.insert(url.to_string(), sha256_hex(&bytes));
         }
     }
 
@@ -629,8 +698,53 @@ fn collect_ingot_sources(
             && let Ok(dependency_path) = local.url.to_file_path()
             && let Ok(dependency_path) = Utf8PathBuf::from_path_buf(dependency_path)
         {
-            collect_ingot_sources(&dependency_path, visited, sources);
+            collect_ingot_sources(&dependency_path, visited, sources, non_fe_sources);
         }
+    }
+}
+
+fn source_provenance(
+    logical_base: &Utf8Path,
+    url: &str,
+    sha256: &str,
+    kind: Option<WebAuthoredSourceKind>,
+) -> Option<WebSourceProvenance> {
+    let path = Url::parse(url).ok()?.to_file_path().ok()?;
+    let path = Utf8PathBuf::from_path_buf(path).ok()?;
+    let id = path
+        .strip_prefix(logical_base)
+        .unwrap_or(&path)
+        .as_str()
+        .replace('\\', "/");
+    Some(WebSourceProvenance {
+        kind: kind.unwrap_or_else(|| authored_source_kind(&path)),
+        id,
+        sha256: sha256.to_owned(),
+    })
+}
+
+fn authored_source_kind(path: &Utf8PathBuf) -> WebAuthoredSourceKind {
+    if path.file_name() == Some("fe.toml") {
+        return WebAuthoredSourceKind::FeManifest;
+    }
+    match path
+        .extension()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "fe" => WebAuthoredSourceKind::Fe,
+        "html" | "htm" => WebAuthoredSourceKind::Html,
+        "css" => WebAuthoredSourceKind::Css,
+        "js" | "mjs" | "cjs" => WebAuthoredSourceKind::JavaScript,
+        "rs" => WebAuthoredSourceKind::Rust,
+        "wgsl" => WebAuthoredSourceKind::Wgsl,
+        "wasm" => WebAuthoredSourceKind::Wasm,
+        "json" => WebAuthoredSourceKind::Json,
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "avif" | "ico" => {
+            WebAuthoredSourceKind::Asset
+        }
+        _ => WebAuthoredSourceKind::Other,
     }
 }
 
@@ -720,10 +834,72 @@ mod tests {
     fn render_cache_key_covers_sources_and_entry() {
         let first = cache_dependencies("pub fn first() {}");
         let second = cache_dependencies("pub fn second() {}");
-        let first_key = render_cache_key(&first, Some("shade")).unwrap();
-        assert_eq!(first_key, render_cache_key(&first, Some("shade")).unwrap());
-        assert_ne!(first_key, render_cache_key(&first, Some("other")).unwrap());
-        assert_ne!(first_key, render_cache_key(&second, Some("shade")).unwrap());
+        let authored_js = [WebSourceProvenance {
+            id: "demo/host.js".to_owned(),
+            sha256: "11".repeat(32),
+            kind: WebAuthoredSourceKind::JavaScript,
+        }];
+        let first_key = render_cache_key(&first, &[], Some("shade")).unwrap();
+        assert_eq!(
+            first_key,
+            render_cache_key(&first, &[], Some("shade")).unwrap()
+        );
+        assert_ne!(
+            first_key,
+            render_cache_key(&first, &[], Some("other")).unwrap()
+        );
+        assert_ne!(
+            first_key,
+            render_cache_key(&second, &[], Some("shade")).unwrap()
+        );
+        assert_ne!(
+            first_key,
+            render_cache_key(&first, &authored_js, Some("shade")).unwrap()
+        );
+    }
+
+    #[test]
+    fn provenance_namespace_widens_for_shared_local_ingots() {
+        let sources = [
+            SourceDependency {
+                url: "file:///repo/demos/sketches/cga3d/src/lib.fe".to_owned(),
+                sha256: "00".repeat(32),
+            },
+            SourceDependency {
+                url: "file:///repo/ingots/sparse_clifford/src/lib.fe".to_owned(),
+                sha256: "11".repeat(32),
+            },
+        ];
+        let base = provenance_logical_base(Utf8Path::new("/repo/demos/sketches/cga3d"), &sources);
+        assert_eq!(base, Utf8Path::new("/repo"));
+        let source = source_provenance(&base, &sources[1].url, &sources[1].sha256, None).unwrap();
+        assert_eq!(source.id, "ingots/sparse_clifford/src/lib.fe");
+        assert_eq!(source.kind, WebAuthoredSourceKind::Fe);
+    }
+
+    #[test]
+    fn ingot_source_audit_classifies_and_digests_non_fe_inputs() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("demo");
+        std::fs::create_dir_all(app.join("src")).unwrap();
+        std::fs::write(app.join("fe.toml"), "[ingot]\nname = \"demo\"\n").unwrap();
+        std::fs::write(app.join("src/lib.fe"), "pub fn shade() -> u32 { 0 }\n").unwrap();
+        std::fs::write(app.join("host.js"), "export const hiddenPolicy = true;\n").unwrap();
+
+        let audit = ingot_source_audit(&Utf8PathBuf::from_path_buf(app).unwrap()).unwrap();
+        assert!(audit.authored_sources.iter().any(
+            |source| source.id == "demo/src/lib.fe" && source.kind == WebAuthoredSourceKind::Fe
+        ));
+        let host = audit
+            .non_fe_authored_sources
+            .iter()
+            .find(|source| source.id == "demo/host.js")
+            .unwrap();
+        assert_eq!(host.kind, WebAuthoredSourceKind::JavaScript);
+        assert_eq!(
+            host.sha256,
+            sha256_hex(b"export const hiddenPolicy = true;\n")
+        );
     }
 
     #[test]

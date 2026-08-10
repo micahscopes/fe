@@ -34,6 +34,25 @@ Two deliberate outsiders remain:
 - the compiler/toolchain itself, currently Rust; and
 - independent test oracles, whose independence supplies their proof value.
 
+### Manifest and JSON protocol composting rule
+
+The current render manifest is a transitional compiler-generated audit and
+publication envelope, not the desired application ABI. Do not grow new JSON
+specifications for events, state, scheduling, effects, resources, passes, or
+page composition. Those contracts must be typed in Fe and lowered to generated
+binary layouts or standards-derived host bindings. During the migration the
+existing manifest may expose hashes, ownership, and debugging projections, but
+the browser runtime must progressively stop interpreting its semantic payload.
+
+The endpoint has no render manifest. A surface is one Fe-generated module or
+artifact with typed, versioned exports for shaders, resources, pass structure,
+controls, state, and effects. The fixed host receives only that artifact URL
+and realizes the exported contract. HTML/module URLs and their content-addressed
+names provide publication identity without a second application description.
+Provenance is checked directly from compiler/source data at build time and may
+be emitted as an optional attestation for reviewers, but is never a runtime
+input.
+
 ## Honesty baseline
 
 The current gallery is a collection of Fe render/control programs hosted by a
@@ -171,6 +190,9 @@ path.
    - fixed runtime hash;
    - host imports and capabilities; and
    - any non-Fe authored inputs.
+   This temporarily extends the existing generated manifest so the honesty
+   gate can ship before the typed host ABI; it must not become a new semantic
+   JSON protocol.
 3. Display an exact runtime badge such as `Fe GPU + Fe control Wasm / fixed
    browser host` rather than a broad "compiled from Fe" claim.
 4. Add a canonical-demo CI gate rejecting:
@@ -285,13 +307,17 @@ Exit condition: one Fe page entrypoint composes the entire gallery.
 
 ### Phase 6: shrink the JavaScript WebGPU kernel
 
-1. Project declarative WebGPU command/resource plans from Fe actor structure so
-   the host executes data rather than re-deriving policy.
+1. Project typed WebGPU command/resource plans from Fe actor structure into a
+   generated binary/host layout so the host executes data rather than
+   re-deriving policy or interpreting a JSON object model.
 2. Expose standards-derived WebGPU host imports with opaque resource handles.
 3. Move resource lifetime, pass selection, recovery decisions, and presentation
    scheduling into a Fe orchestration actor.
 4. Generate JavaScript import adapters from WebIDL/host ABI metadata.
 5. Retain only the irreducible browser object/promise adapter as fixed host code.
+6. Remove semantic runtime dependence on the render-manifest JSON schema. Keep
+   no replacement manifest: publish one Fe-generated surface artifact whose
+   typed exports carry the contract, and delete the manifest fetch/parser/path.
 
 Exit condition: the fixed JavaScript contains browser API realization but no
 application scheduling, state, geometry, parameter, or pass-selection policy.
@@ -376,6 +402,9 @@ The campaign is complete only when:
 - the gallery is composed in Fe;
 - remaining JavaScript is generated or one fixed standards-derived host
   adapter;
+- no runtime render manifest exists, and no JSON schema carries application
+  events, state, scheduling, effects, resource/pass semantics, artifact
+  location, or page composition;
 - Rust remains only in the toolchain and independent gates; and
 - every legacy showcase is migrated, reclassified, or retired.
 
