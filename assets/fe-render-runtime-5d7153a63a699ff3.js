@@ -42,6 +42,7 @@ let sharedGpuFailure;
 let sharedGpuRecoveryPromise;
 let pendingDeviceLoss;
 const DEVICE_STABILITY_MS = 50;
+const DEVICE_LOSS_CONFIRMATION_MS = 250;
 const MAX_RECOVERY_ATTEMPTS = 2;
 /** Every currently connected `<fe-surface>`, live or not (module-level so a
  * `device.lost` event, which is a page-wide fact, can reach every element). */
@@ -93,6 +94,9 @@ async function requestGpu() {
       );
       return null;
     }
+    device.addEventListener("uncapturederror", (event) => {
+      console.error("[fe web] uncaptured WebGPU error:", event.error);
+    });
     device.lost.then((info) => handleSharedDeviceLoss(device, info));
     return { adapter, device };
   } catch (error) {
@@ -156,6 +160,23 @@ async function drainDeviceLosses() {
       }
     }
   }
+}
+
+/** A failed WebGPU operation is not evidence of device loss by itself. Wait a
+ * short, bounded interval for the platform's authoritative `device.lost`
+ * signal before attempting a replacement device. Validation and shader errors
+ * therefore remain ordinary visible failures instead of being misclassified
+ * as recoverable device loss. */
+async function confirmedDeviceLoss(device) {
+  return Promise.race([
+    device.lost.then((info) => ({ lost: true, info })),
+    new Promise((resolve) => {
+      setTimeout(
+        () => resolve({ lost: false, info: null }),
+        DEVICE_LOSS_CONFIRMATION_MS,
+      );
+    }),
+  ]);
 }
 
 // ---------------------------------------------------------------------------
@@ -330,6 +351,7 @@ class FeSurfaceElement extends HTMLElement {
     this._passes = [];
     this._resources = [];
     this._graph = false;
+    this._posterAttemptedDevice = null;
     this._gestureListeners = null; // { canvas, onPointerDown, onPointerMove, onPointerUp, onWheel }
     this._gestureFrame = null;
     this._gesturePresenting = false;
@@ -527,7 +549,7 @@ class FeSurfaceElement extends HTMLElement {
           : undeclaredViewInitialUniforms(this._members));
 
       if (!this._adoptedCanvas) this._ensureStage();
-      await this._renderPoster();
+      await this._renderPosterWithRecovery();
       this._renderControls();
       this._updateMeta();
 
@@ -901,6 +923,45 @@ class FeSurfaceElement extends HTMLElement {
 
   // -- ready: render one frame, capture a poster, release the GPU context --
 
+  /** Retry a cold poster only when the exact device used for the failed frame
+   * has reported `device.lost` and shared recovery produced a different
+   * device. This covers first-submit backend loss without masking ordinary
+   * pass-graph errors or allowing an unbounded request/retry loop. */
+  async _renderPosterWithRecovery() {
+    let lastError;
+    for (let attempt = 0; attempt <= MAX_RECOVERY_ATTEMPTS; attempt++) {
+      this._posterAttemptedDevice = null;
+      try {
+        await this._renderPoster();
+        this._posterAttemptedDevice = null;
+        return;
+      } catch (error) {
+        lastError = error;
+        const attemptedDevice = this._posterAttemptedDevice;
+        this._posterAttemptedDevice = null;
+        if (
+          this._gpuOverride ||
+          !attemptedDevice ||
+          attempt === MAX_RECOVERY_ATTEMPTS
+        ) {
+          throw error;
+        }
+        const loss = await confirmedDeviceLoss(attemptedDevice);
+        if (!loss.lost) throw error;
+
+        await (sharedGpuRecoveryPromise ?? handleSharedDeviceLoss(attemptedDevice, loss.info));
+        const freshGpu = await acquireSharedGpu();
+        if (!freshGpu || freshGpu.device === attemptedDevice) throw error;
+        this._gpu = null;
+        this._pipelineError = null;
+        console.warn(
+          `[fe web] retrying initial poster after confirmed device loss (${attempt + 1}/${MAX_RECOVERY_ATTEMPTS})`,
+        );
+      }
+    }
+    throw lastError;
+  }
+
   /** Render ONE frame at the current (initial) uniforms, capture it as a
    * static poster, and release GPU presentation: the durable fix for a
    * gallery of N tiles costing zero configured swap chains until a tile goes
@@ -929,6 +990,7 @@ class FeSurfaceElement extends HTMLElement {
       this._renderWasmInto(this._adoptedCanvas || this._posterCanvas, width, height, this._uniforms);
       return;
     }
+    this._posterAttemptedDevice = gpu.device;
     this._mode = "webgpu";
     if (this._adoptedCanvas) {
       // An adopted canvas opts OUT of the poster/live swap (its context type
@@ -942,24 +1004,60 @@ class FeSurfaceElement extends HTMLElement {
       this._adoptedCanvas.height = height;
       this._adoptedContext = context;
       this._presentOn(context, this._uniforms);
+      await gpu.device.queue.onSubmittedWorkDone();
       return;
     }
-    // Use a transient HTML canvas for the one-frame poster. Some otherwise
-    // WebGPU-capable browser configurations cannot create an OffscreenCanvas
-    // WebGPU context provider. The transient canvas is never attached and its
-    // context is still unconfigured immediately after capture.
-    const posterSource = document.createElement("canvas");
+    // Use the ordinary HTML live canvas, briefly attached and visible, for the
+    // one-frame poster. OffscreenCanvas is not supported by every WebGPU
+    // configuration, while a detached HTML canvas may never acquire a
+    // compositor mailbox. The context is still unconfigured immediately after
+    // capture, so ready galleries retain zero configured swap chains.
+    this._createLiveCanvas();
+    const posterSource = this._liveCanvas;
     posterSource.width = width;
     posterSource.height = height;
+    posterSource.hidden = false;
+    this._posterCanvas.hidden = true;
     const context = posterSource.getContext("webgpu");
     if (!context) {
       throw new Error("fe render runtime: the browser could not create a WebGPU canvas context");
     }
-    context.configure({ device: gpu.device, format: gpu.format, alphaMode: "opaque" });
-    this._presentOn(context, this._uniforms);
-    const bitmap = await createImageBitmap(posterSource);
-    context.unconfigure();
-    this._paintPoster(bitmap, width, height);
+    try {
+      try {
+        context.configure({ device: gpu.device, format: gpu.format, alphaMode: "opaque" });
+      } catch (error) {
+        throw new Error(`fe render runtime: poster context configuration failed: ${error?.message ?? String(error)}`, { cause: error });
+      }
+      try {
+        this._presentOn(context, this._uniforms);
+      } catch (error) {
+        throw new Error(`fe render runtime: poster command submission failed: ${error?.message ?? String(error)}`, { cause: error });
+      }
+      try {
+        await gpu.device.queue.onSubmittedWorkDone();
+      } catch (error) {
+        throw new Error(`fe render runtime: poster GPU completion failed: ${error?.message ?? String(error)}`, { cause: error });
+      }
+      await new Promise((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(resolve));
+      });
+      let bitmap;
+      try {
+        bitmap = await createImageBitmap(posterSource);
+      } catch (error) {
+        throw new Error(`fe render runtime: poster bitmap capture failed: ${error?.message ?? String(error)}`, { cause: error });
+      }
+      context.unconfigure();
+      this._paintPoster(bitmap, width, height);
+    } finally {
+      try {
+        context.unconfigure();
+      } catch {
+        // Device loss may already have invalidated the context.
+      }
+      posterSource.hidden = true;
+      this._posterCanvas.hidden = false;
+    }
   }
 
   _paintPoster(bitmap, width, height) {
@@ -973,6 +1071,10 @@ class FeSurfaceElement extends HTMLElement {
 
   async _capturePosterFromLive() {
     if (this._adoptedCanvas || this._mode !== "webgpu" || !this._liveContext) return;
+    await this._gpu.device.queue.onSubmittedWorkDone();
+    await new Promise((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(resolve));
+    });
     const bitmap = await createImageBitmap(this._liveCanvas);
     this._paintPoster(bitmap, this._backingWidth, this._backingHeight);
     this._liveContext.unconfigure();
@@ -1216,6 +1318,7 @@ class FeSurfaceElement extends HTMLElement {
     this._liveContext = null;
     this._adoptedContext = null;
     this._gpu = null;
+    this._posterAttemptedDevice = null;
     this._suspendObserver?.disconnect();
     this._suspendObserver = null;
     this._activationObserver?.disconnect();
