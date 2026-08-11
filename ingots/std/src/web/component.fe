@@ -11,6 +11,10 @@ pub use core::actor::{InitialState, ProjectState, ResidentTransition}
 pub use core::marker::Copy as ComponentCopy
 use core::marker::Copy
 use core::browser::alloc_browser_bytes
+use super::identity::{
+    Checkbox, ComponentAction, ComponentClassToken, ComponentNode, ComponentRepeat,
+    ComponentTarget, Input, Link, Text,
+}
 
 /// Version-1 event kinds at the fixed component boundary. Variants are append-
 /// only within this ABI version because their fieldless-enum tags cross Wasm.
@@ -23,8 +27,8 @@ pub enum ComponentEventKind {
     Change,
     Submit,
     KeyDown,
-    /// Completion of a Fe-requested browser resource effect. `target` is the
-    /// opaque request identity chosen by Fe, `key` is the HTTP status (zero
+    /// Completion of a Fe-requested browser resource effect. `request` is the
+    /// opaque correlation identity chosen by Fe, `key` is the HTTP status (zero
     /// for a transport failure), `detail` is the byte length, and `text`
     /// carries a UTF-8 body or failure description.
     ResourceLoaded,
@@ -32,13 +36,28 @@ pub enum ComponentEventKind {
 
 impl Copy for ComponentEventKind {}
 
+/// Standards keyboard keys understood by the fixed component event lane.
+/// The browser boundary remains an append-only scalar ABI, while application
+/// actors match this vocabulary instead of repeating legacy key-code numbers.
+pub enum KeyboardKey {
+    Enter,
+    Escape,
+    Other,
+}
+
+impl Copy for KeyboardKey {}
+
 /// One untouched event delivered to a resident Fe component actor. Scalars
 /// cross as ordinary Wasm values; `text` crosses through the canonical
 /// `(pointer, length)` UTF-8 descriptor owned by the fixed host boundary.
-pub struct ComponentEvent {
+pub struct ComponentEvent<A = u32> {
     pub kind: ComponentEventKind,
     /// Fe-declared action identity attached by generated page composition.
-    pub target: u32,
+    pub target: A,
+    /// Opaque correlation identity for a completed Fe-requested resource
+    /// effect. Ordinary standards events carry zero; this lane is deliberately
+    /// separate from the typed action vocabulary.
+    pub request: u32,
     /// Stable key of the nearest generated repeated item, or zero outside one.
     pub key: u32,
     /// Raw event detail or key code, with interpretation owned by Fe.
@@ -52,15 +71,36 @@ pub struct ComponentEvent {
     pub text: BrowserString,
 }
 
-impl Copy for ComponentEvent {}
+impl<A: Copy> Copy for ComponentEvent<A> {}
 
-impl ComponentEvent {
+impl<A: Copy> ComponentEvent<A> {
     pub fn is_lifecycle(self) -> bool {
         match self.kind {
             ComponentEventKind::Connected => true,
             ComponentEventKind::Disconnected => true,
             ComponentEventKind::Adopted => true,
             _ => false,
+        }
+    }
+
+    /// Interpret `detail` as a standards keyboard key for `KeyDown` events.
+    /// Non-key events and keys outside the closed vocabulary return `Other`.
+    pub fn keyboard_key(self) -> KeyboardKey {
+        match self.kind {
+            ComponentEventKind::KeyDown => {
+                if self.detail == 13 { return KeyboardKey::Enter }
+                if self.detail == 27 { return KeyboardKey::Escape }
+                KeyboardKey::Other
+            }
+            _ => KeyboardKey::Other,
+        }
+    }
+
+    /// Untouched click count for an activation event.
+    pub fn click_count(self) -> u32 {
+        match self.kind {
+            ComponentEventKind::Activate => self.detail,
+            _ => 0,
         }
     }
 }
@@ -78,6 +118,24 @@ pub struct ComponentPatch {
     pub focus_target: u32,
     pub flags: u32,
     pub commands: BrowserBytes,
+}
+
+impl ComponentPatch {
+    /// Construct one complete projection without exposing the fixed ABI's
+    /// prevent-default flag bit to application code.
+    pub fn new<A: ComponentAction>(
+        visible_mask: u32,
+        focus_target: A,
+        prevent_default: bool,
+        commands: own BrowserBytes,
+    ) -> Self {
+        Self {
+            visible_mask: visible_mask,
+            focus_target: focus_target.component_action_id(),
+            flags: if prevent_default { 1 } else { 0 },
+            commands: commands,
+        }
+    }
 }
 
 /// Allocate persistent Wasm memory for an actor's reusable projection buffer.
@@ -159,10 +217,11 @@ impl ComponentWriter {
 
     /// Begin one keyed reconciliation region. `container` names a
     /// `data-fe-node`; `template` names a `data-fe-template`.
-    pub fn repeat_begin(self, container: u32, template: u32) -> Self {
+    pub fn repeat_begin<R: ComponentRepeat>(self, region: R) -> Self {
         let writer = self.byte(value: 1)
-        let writer = writer.word(value: container)
-        writer.word(value: template)
+        let id = <R as ComponentRepeat>::component_repeat_id(region)
+        let writer = writer.word(value: id)
+        writer.word(value: id)
     }
 
     /// Select/create one stable key and make its cloned row the command scope.
@@ -176,20 +235,20 @@ impl ComponentWriter {
         self.byte(value: 3)
     }
 
-    pub fn set_text(self, target: u32, value: own BrowserString) -> Self {
+    pub fn set_text<N: ComponentTarget<Text>>(self, target: N, value: own BrowserString) -> Self {
         let writer = self.byte(value: 4)
-        let writer = writer.word(value: target)
+        let writer = writer.word(value: <N as ComponentTarget<Text>>::component_target_id(target))
         let writer = writer.word(value: value.len)
         writer.bytes(value: value)
     }
 
     /// Emit a bounded two-digit decimal without asking JavaScript to own
     /// number formatting. Values outside `[0, 99]` fail closed.
-    pub fn set_small_u32_text(self, target: u32, value: u32) -> Self {
+    pub fn set_small_u32_text<N: ComponentTarget<Text>>(self, target: N, value: u32) -> Self {
         if value >= 100 { core::panic() }
         let digits: u32 = if value >= 10 { 2 } else { 1 }
         let mut writer = self.byte(value: 4)
-        writer = writer.word(value: target)
+        writer = writer.word(value: <N as ComponentTarget<Text>>::component_target_id(target))
         writer = writer.word(value: digits)
         let mut remaining: u32 = value
         if value >= 10 {
@@ -206,7 +265,7 @@ impl ComponentWriter {
 
     /// Emit an arbitrary `u32` as decimal text in Fe. The fixed host applies
     /// only the resulting bytes and owns no application number formatting.
-    pub fn set_u32_text(self, target: u32, value: u32) -> Self {
+    pub fn set_u32_text<N: ComponentTarget<Text>>(self, target: N, value: u32) -> Self {
         let digits: u32 = if value >= 1000000000 { 10 } else {
             if value >= 100000000 { 9 } else {
                 if value >= 10000000 { 8 } else {
@@ -225,7 +284,7 @@ impl ComponentWriter {
             }
         }
         let mut writer = self.byte(value: 4)
-        writer = writer.word(value: target)
+        writer = writer.word(value: <N as ComponentTarget<Text>>::component_target_id(target))
         writer = writer.word(value: digits)
         let mut remaining = value
         if digits >= 10 {
@@ -276,48 +335,48 @@ impl ComponentWriter {
         writer.byte(value: 48 + remaining)
     }
 
-    pub fn set_value(self, target: u32, value: own BrowserString) -> Self {
+    pub fn set_value<N: ComponentTarget<Input>>(self, target: N, value: own BrowserString) -> Self {
         let writer = self.byte(value: 5)
-        let writer = writer.word(value: target)
+        let writer = writer.word(value: <N as ComponentTarget<Input>>::component_target_id(target))
         let writer = writer.word(value: value.len)
         writer.bytes(value: value)
     }
 
-    pub fn set_checked(self, target: u32, checked: bool) -> Self {
+    pub fn set_checked<N: ComponentTarget<Checkbox>>(self, target: N, checked: bool) -> Self {
         let writer = self.byte(value: 6)
-        let writer = writer.word(value: target)
+        let writer = writer.word(value: <N as ComponentTarget<Checkbox>>::component_target_id(target))
         writer.byte(value: if checked { 1 } else { 0 })
     }
 
-    pub fn set_hidden(self, target: u32, hidden: bool) -> Self {
+    pub fn set_hidden<N: ComponentNode>(self, target: N, hidden: bool) -> Self {
         let writer = self.byte(value: 7)
-        let writer = writer.word(value: target)
+        let writer = writer.word(value: target.component_node_id())
         writer.byte(value: if hidden { 1 } else { 0 })
     }
 
     /// Toggle the class named by `data-fe-class-{token}` on the target node.
-    pub fn set_class(self, target: u32, token: u32, enabled: bool) -> Self {
+    pub fn set_class<N: ComponentNode, C: ComponentClassToken>(self, target: N, token: C, enabled: bool) -> Self {
         let writer = self.byte(value: 8)
-        let writer = writer.word(value: target)
-        let writer = writer.word(value: token)
+        let writer = writer.word(value: target.component_node_id())
+        let writer = writer.word(value: token.component_class_token_id())
         writer.byte(value: if enabled { 1 } else { 0 })
     }
 
-    pub fn focus(self, target: u32) -> Self {
-        self.byte(value: 9).word(value: target)
+    pub fn focus<N: ComponentTarget<Input>>(self, target: N) -> Self {
+        self.byte(value: 9).word(value: <N as ComponentTarget<Input>>::component_target_id(target))
     }
 
-    pub fn set_disabled(self, target: u32, disabled: bool) -> Self {
+    pub fn set_disabled<N: ComponentNode>(self, target: N, disabled: bool) -> Self {
         let writer = self.byte(value: 10)
-        let writer = writer.word(value: target)
+        let writer = writer.word(value: target.component_node_id())
         writer.byte(value: if disabled { 1 } else { 0 })
     }
 
     /// Set an anchor URL from Fe-authored state. The host validates and applies
     /// the standard `href` property but does not choose the destination.
-    pub fn set_href(self, target: u32, value: own BrowserString) -> Self {
+    pub fn set_href<N: ComponentTarget<Link>>(self, target: N, value: own BrowserString) -> Self {
         let writer = self.byte(value: 11)
-        let writer = writer.word(value: target)
+        let writer = writer.word(value: <N as ComponentTarget<Link>>::component_target_id(target))
         let writer = writer.word(value: value.len)
         writer.bytes(value: value)
     }

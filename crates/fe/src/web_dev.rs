@@ -25,8 +25,10 @@ use axum::{
     routing::get,
 };
 use camino::Utf8PathBuf;
+use fe_compiler_protocol::{Diagnostic, DiagnosticSeverity};
 use fe_html_precompile::{
-    DevelopmentPublication, DevelopmentRebuildCoordinator, DevelopmentRebuildEvent,
+    DevelopmentDiagnostic, DevelopmentPublication, DevelopmentRebuildCoordinator,
+    DevelopmentRebuildEvent,
 };
 use futures::stream;
 use tokio::sync::broadcast;
@@ -99,21 +101,17 @@ pub async fn serve(config: DevConfig) -> Result<(), String> {
         html = %canonical_html,
         "building initial development site"
     );
-    let initial = coordinator.precompiler_mut().build_with_render_lane(
+    let initial = coordinator.precompiler_mut().build_with_lanes(
         &document_url,
         &html,
         codegen::render_runtime_js(),
         load_file_url,
         crate::web::render_compile,
+        crate::web::page_compile,
     );
-    let publication = initial.active.ok_or_else(|| {
-        initial
-            .diagnostics
-            .iter()
-            .map(|diagnostic| diagnostic.message.as_str())
-            .collect::<Vec<_>>()
-            .join("\n")
-    })?;
+    let publication = initial
+        .active
+        .ok_or_else(|| format_development_diagnostics(&initial.diagnostics))?;
     tracing::info!(
         target: "fe_web",
         phase = "initial_build",
@@ -265,21 +263,16 @@ async fn watch(
             phase = "rebuild",
             "rebuilding affected development documents"
         );
-        let emitted = coordinator.execute_with_render_lane(
+        let emitted = coordinator.execute_with_lanes(
             batch,
             |_| std::fs::read_to_string(&html_path).map_err(|error| error.to_string()),
             codegen::render_runtime_js(),
             load_file_url,
             crate::web::render_compile,
-        );
-        tracing::info!(
-            target: "fe_web",
-            phase = "rebuild",
-            events = emitted.len(),
-            elapsed_ms = rebuild_started.elapsed().as_millis() as u64,
-            "finished development rebuild"
+            crate::web::page_compile,
         );
         for event in emitted {
+            trace_rebuild_diagnostic(&event);
             if matches!(
                 event,
                 DevelopmentRebuildEvent::Publication { changed: true, .. }
@@ -290,6 +283,12 @@ async fn watch(
             }
             publish_event(&events, &event);
         }
+        tracing::info!(
+            target: "fe_web",
+            phase = "rebuild",
+            elapsed_ms = rebuild_started.elapsed().as_millis() as u64,
+            "finished development rebuild"
+        );
     }
 }
 
@@ -345,6 +344,161 @@ fn publish_event(sender: &broadcast::Sender<String>, event: &DevelopmentRebuildE
     if let Ok(json) = serde_json::to_string(event) {
         let _ = sender.send(json);
     }
+}
+
+fn trace_rebuild_diagnostic(event: &DevelopmentRebuildEvent) {
+    let DevelopmentRebuildEvent::Diagnostic {
+        document_url,
+        diagnostic,
+        serving_last_good,
+    } = event
+    else {
+        return;
+    };
+    let rendered = format_development_diagnostic(diagnostic);
+    tracing::error!(
+        target: "fe_web",
+        phase = "rebuild_diagnostics",
+        document = %document_url,
+        serving_last_good,
+        diagnostic = %rendered,
+        "development rebuild produced diagnostics"
+    );
+}
+
+/// Render the compiler protocol's structured diagnostics at the CLI boundary.
+///
+/// The precompiler deliberately keeps diagnostics as data so browsers, editors,
+/// and other hosts can choose their own presentation. `fe web dev` is the
+/// terminal consumer: it resolves file labels only here and never flattens
+/// diagnostics while they are still moving through the rebuild coordinator.
+fn format_development_diagnostics(diagnostics: &[DevelopmentDiagnostic]) -> String {
+    diagnostics
+        .iter()
+        .map(format_development_diagnostic)
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn format_development_diagnostic(diagnostic: &DevelopmentDiagnostic) -> String {
+    let mut rendered = diagnostic.message.clone();
+    for compiler_diagnostic in &diagnostic.compiler_diagnostics {
+        rendered.push_str("\n\n");
+        render_compiler_diagnostic(&mut rendered, compiler_diagnostic);
+    }
+    rendered
+}
+
+fn render_compiler_diagnostic(rendered: &mut String, diagnostic: &Diagnostic) {
+    use std::fmt::Write as _;
+
+    let severity = match diagnostic.severity {
+        DiagnosticSeverity::Error => "error",
+        DiagnosticSeverity::Warning => "warning",
+        DiagnosticSeverity::Note => "note",
+    };
+    let _ = write!(rendered, "{severity}");
+    if let Some(code) = &diagnostic.code {
+        let _ = write!(rendered, "[{code}]");
+    }
+    let _ = write!(rendered, ": {}", diagnostic.message);
+
+    for label in &diagnostic.labels {
+        let display_url = Url::parse(&label.source_url)
+            .ok()
+            .and_then(|url| url.to_file_path().ok())
+            .map_or_else(
+                || label.source_url.clone(),
+                |path| path.display().to_string(),
+            );
+        let source = Url::parse(&label.source_url)
+            .map_err(|error| error.to_string())
+            .and_then(|url| load_file_url(&url));
+        if let Ok(source) = source
+            && let Some(location) = source_location(&source, label.start, label.end)
+        {
+            let gutter_width = location.line_number.to_string().len().max(2);
+            let _ = write!(
+                rendered,
+                "\n  {space:>gutter_width$}┌─ {display_url}:{line}:{column}\n\
+                 {line:>gutter_width$} │ {source_line}\n\
+                 {space:>gutter_width$} │ {indent}{marker}",
+                space = "",
+                line = location.line_number,
+                column = location.column,
+                source_line = location.source_line,
+                indent = " ".repeat(location.marker_offset),
+                marker = if label.primary {
+                    "^".repeat(location.marker_width)
+                } else {
+                    "-".repeat(location.marker_width)
+                },
+            );
+            if let Some(message) = &label.message
+                && !message.is_empty()
+            {
+                let _ = write!(rendered, " {message}");
+            }
+        } else {
+            let _ = write!(
+                rendered,
+                "\n  --> {display_url}:{}..{}",
+                label.start, label.end
+            );
+            if let Some(message) = &label.message
+                && !message.is_empty()
+            {
+                let _ = write!(rendered, " {message}");
+            }
+        }
+    }
+    for note in &diagnostic.notes {
+        let _ = write!(rendered, "\n  = note: {note}");
+    }
+}
+
+struct SourceLocation {
+    line_number: usize,
+    column: usize,
+    source_line: String,
+    marker_offset: usize,
+    marker_width: usize,
+}
+
+fn source_location(source: &str, start: u32, end: u32) -> Option<SourceLocation> {
+    let mut start = usize::try_from(start).ok()?.min(source.len());
+    while !source.is_char_boundary(start) {
+        start = start.checked_sub(1)?;
+    }
+    let mut end = usize::try_from(end).ok()?.min(source.len()).max(start);
+    while !source.is_char_boundary(end) {
+        end = end.checked_sub(1)?;
+    }
+
+    let line_start = source[..start].rfind('\n').map_or(0, |index| index + 1);
+    let line_end = source[start..]
+        .find('\n')
+        .map_or(source.len(), |index| start + index);
+    let marker_end = end.min(line_end);
+    let prefix = &source[line_start..start];
+    let marked = &source[start..marker_end];
+    Some(SourceLocation {
+        line_number: source[..line_start]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count()
+            + 1,
+        column: prefix.chars().count() + 1,
+        source_line: source[line_start..line_end].replace('\t', "    "),
+        marker_offset: display_width(prefix),
+        marker_width: display_width(marked).max(1),
+    })
+}
+
+fn display_width(text: &str) -> usize {
+    text.chars()
+        .map(|character| if character == '\t' { 4 } else { 1 })
+        .sum()
 }
 
 fn safe_relative_path(path: &str) -> Option<&Path> {
@@ -410,6 +564,7 @@ fn mime_type(path: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fe_compiler_protocol::DiagnosticLabel;
 
     #[test]
     fn changed_urls_are_sorted_deduplicated_and_include_deletions() {
@@ -425,6 +580,41 @@ mod tests {
             changed_urls(&previous, &current),
             ["file:///a.fe", "file:///deleted.fe", "file:///new.fe"]
         );
+    }
+
+    #[test]
+    fn development_diagnostics_render_compiler_message_source_label_and_note() {
+        let root = tempfile::tempdir().unwrap();
+        let source_path = root.path().join("broken.fe");
+        let source = "pub fn answer() -> u32 {\n    missing\n}\n";
+        std::fs::write(&source_path, source).unwrap();
+        let start = source.find("missing").unwrap() as u32;
+        let diagnostic = DevelopmentDiagnostic {
+            code: "compiler_diagnostics".to_owned(),
+            source_url: Some(Url::from_file_path(&source_path).unwrap().to_string()),
+            message: "Fe compilation produced diagnostics; last-good output was retained"
+                .to_owned(),
+            compiler_diagnostics: vec![Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                code: Some("8-0001".to_owned()),
+                message: "undefined variable `missing`".to_owned(),
+                labels: vec![DiagnosticLabel {
+                    source_url: Url::from_file_path(&source_path).unwrap().to_string(),
+                    start,
+                    end: start + "missing".len() as u32,
+                    message: Some("not found in this scope".to_owned()),
+                    primary: true,
+                }],
+                notes: vec!["declare the value before using it".to_owned()],
+            }],
+        };
+
+        let rendered = format_development_diagnostic(&diagnostic);
+        assert!(rendered.contains("error[8-0001]: undefined variable `missing`"));
+        assert!(rendered.contains("broken.fe:2:5"));
+        assert!(rendered.contains("2 │     missing"));
+        assert!(rendered.contains("^^^^^^^ not found in this scope"));
+        assert!(rendered.contains("= note: declare the value before using it"));
     }
 
     #[tokio::test]

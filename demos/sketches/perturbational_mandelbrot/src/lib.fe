@@ -151,15 +151,15 @@ derive ApplyParamBindings for MandelbrotViewState using ParamBindingsProvider
 
 const fn mandelbrot_params() -> MandelbrotParams {
     MandelbrotParams {
-        center_x_w0: Param::range(min: CENTER_X_MIN, max: CENTER_X_MAX, init: -0.7436438798904419),
-        center_x_w1: Param::fixed(-0.0000000071467170),
-        center_x_w2: Param::fixed(-0.0000000000000003),
-        center_x_w3: Param::fixed(-0.00000000000000000000002),
-        center_y_w0: Param::range(min: CENTER_Y_MIN, max: CENTER_Y_MAX, init: 0.1318259090185165),
-        center_y_w1: Param::fixed(-0.0000000048132045),
-        center_y_w2: Param::fixed(0.00000000000000025),
-        center_y_w3: Param::fixed(0.000000000000000000000015),
-        zoom: Param::log(min: ZOOM_MIN, max: ZOOM_MAX, init: 1.0),
+        center_x_w0: Param::range(min: CENTER_X_MIN, max: CENTER_X_MAX, init: -1.1723285913467407),
+        center_x_w1: Param::fixed(-0.000000008653259442326089),
+        center_x_w2: Param::fixed(0.00000000000000016498233784400384),
+        center_x_w3: Param::fixed(0.0000000000000000000000010576053052462748),
+        center_y_w0: Param::range(min: CENTER_Y_MIN, max: CENTER_Y_MAX, init: 0.29582354426383972),
+        center_y_w1: Param::fixed(-0.000000004263839503693134),
+        center_y_w2: Param::fixed(-0.00000000000000021798654948407476),
+        center_y_w3: Param::fixed(-0.0000000000000000000000037684836019798525),
+        zoom: Param::log(min: ZOOM_MIN, max: ZOOM_MAX, init: 0.0000000389),
         res: Param::extent_x(),
     }
 }

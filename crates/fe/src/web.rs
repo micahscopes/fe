@@ -15,6 +15,7 @@ use driver::{
     DriverDataBase,
     cli_target::{CliTarget, resolve_cli_target},
 };
+use fe_compiler_facade::PageProjectionResult;
 use fe_compiler_protocol::{
     SOURCE_DEPENDENCY_INVENTORY_VERSION, SourceDependency, SourceDependencyInventory, sha256_hex,
 };
@@ -568,6 +569,61 @@ pub fn render_compile(
     Ok(Some(artifact))
 }
 
+/// Project an external page source through its real initialized ingot when one
+/// exists. This is the native counterpart to the protocol-only page facade:
+/// local dependencies are resolved by the ordinary Fe workspace machinery,
+/// while standalone/virtual sources return `Ok(None)` and retain the portable
+/// single-source path.
+pub fn page_compile(url: &Url) -> Result<Option<PageProjectionResult>, String> {
+    let Ok(path) = url.to_file_path() else {
+        return Ok(None);
+    };
+    let Ok(path) = Utf8PathBuf::from_path_buf(path) else {
+        return Ok(None);
+    };
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let canonical = path
+        .canonicalize_utf8()
+        .map_err(|error| format!("cannot canonicalize page source `{path}`: {error}"))?;
+    let Some(ingot_dir) = canonical
+        .ancestors()
+        .skip(1)
+        .find(|directory| directory.join("fe.toml").is_file())
+        .map(Utf8Path::to_path_buf)
+    else {
+        return Ok(None);
+    };
+    let ingot_url = Url::from_directory_path(ingot_dir.as_std_path())
+        .map_err(|_| format!("invalid page ingot path `{ingot_dir}`"))?;
+    let source_url = Url::from_file_path(canonical.as_std_path())
+        .map_err(|_| format!("invalid page source path `{canonical}`"))?;
+    let mut db = DriverDataBase::default();
+    if driver::init_ingot(&mut db, &ingot_url) {
+        return Err(format!("failed to initialize page ingot `{ingot_dir}`"));
+    }
+    let ingot = db
+        .workspace()
+        .containing_ingot(&db, ingot_url.clone())
+        .ok_or_else(|| format!("page source `{canonical}` is not in an initialized ingot"))?;
+    let mut seen = HashSet::from([ingot_url]);
+    let dependency_issues = DependencyIssues::collect(&db, &ingot.base(&db), &mut seen);
+    if !dependency_issues.is_empty() {
+        return Err(format!(
+            "dependency diagnostics prevent page projection:\n{}",
+            dependency_issues.format(&db)
+        ));
+    }
+    let root_file = db
+        .workspace()
+        .get(&db, &source_url)
+        .ok_or_else(|| format!("page source `{canonical}` was not loaded by its ingot"))?;
+    fe_compiler_facade::project_page_in_db(&db, root_file)
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
 #[derive(Debug, Clone)]
 struct IngotSourceAudit {
     source_id: String,
@@ -780,6 +836,25 @@ mod tests {
             manifest_json: br#"{"protocol":"fe-web-bundle"}"#.to_vec(),
             source_dependencies: Some(dependencies),
         }
+    }
+
+    #[test]
+    fn native_page_projection_resolves_its_real_ingot_dependencies() {
+        let source = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../demos/sketches/gallery_page/src/lib.fe")
+            .canonicalize_utf8()
+            .unwrap();
+        let url = Url::from_file_path(source.as_std_path()).unwrap();
+        let projected = page_compile(&url)
+            .expect("native page projection")
+            .expect("the gallery page belongs to an ingot");
+        assert!(projected.diagnostics.is_empty());
+        assert!(projected.page.is_some());
+        assert!(projected.source_dependencies.sources.iter().any(|source| {
+            source
+                .url
+                .ends_with("/demos/sketches/source_inspector/src/lib.fe")
+        }));
     }
 
     fn request(

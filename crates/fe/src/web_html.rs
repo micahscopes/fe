@@ -30,7 +30,7 @@ pub fn precompile(html_path: &Utf8Path, output: &Utf8Path) -> Result<(), String>
         .map_err(|error| format!("failed to read HTML entry {canonical_html}: {error}"))?;
     let document_url = url::Url::from_file_path(&canonical_html)
         .map_err(|_| format!("HTML entry cannot be represented as a file URL: {canonical_html}"))?;
-    let result = fe_html_precompile::precompile_html_with_render_lane(
+    let result = fe_html_precompile::precompile_html_with_lanes(
         document_url.as_str(),
         &source_html,
         codegen::render_runtime_js(),
@@ -42,6 +42,7 @@ pub fn precompile(html_path: &Utf8Path, output: &Utf8Path) -> Result<(), String>
                 .map_err(|error| format!("failed to read {}: {error}", path.display()))
         },
         crate::web::render_compile,
+        crate::web::page_compile,
     )
     .map_err(|error| error.to_string())?;
     tracing::info!(

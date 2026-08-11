@@ -2548,7 +2548,8 @@ where
                 LowerError::Internal("wasm function lowered before it was declared".to_string())
             })?;
             let symbol = self.function_symbol(instance);
-            PortableFunctionLowerer::new(self, body, func_ref)?
+            let validate_enum_params = function.linkage(self.db) == RuntimeLinkage::Internal;
+            PortableFunctionLowerer::new(self, body, func_ref, validate_enum_params)?
                 .lower()
                 .map_err(|error| match error {
                     LowerError::Unsupported(message) => LowerError::Unsupported(format!(
@@ -4002,16 +4003,19 @@ where
                             .to_owned(),
                     ));
                 }
-                let scalar = self
-                    .single_scalar_field(*layout)
-                    .or_else(|| self.fieldless_enum_tag(*layout))
-                    .ok_or_else(|| {
-                        LowerError::Unsupported(format!(
-                            "wasm target supports only recursively flattened scalar records, \
-                         one-field scalar newtypes, and fieldless enums; `{class:?}` has no \
-                         admitted value representation"
-                        ))
-                    })?;
+                if self.fieldless_enum_tag(*layout).is_some() {
+                    // WebAssembly exposes every narrow integer through an i32
+                    // value. Keep enum SSA values in that canonical carrier;
+                    // compact in-memory tags truncate/extend at projections.
+                    return Ok(Type::I32);
+                }
+                let scalar = self.single_scalar_field(*layout).ok_or_else(|| {
+                    LowerError::Unsupported(format!(
+                        "wasm target supports only recursively flattened scalar records, \
+                     one-field scalar newtypes, and fieldless enums; `{class:?}` has no \
+                     admitted value representation"
+                    ))
+                })?;
                 scalar_ty_r1(&scalar)
             }
             other => Err(LowerError::Unsupported(format!(
@@ -4077,14 +4081,14 @@ where
                 "enum variant index is outside its runtime layout".to_owned(),
             ));
         }
-        let ScalarRepr::Int { bits, signed } = tag.repr else {
+        let ScalarRepr::Int { .. } = tag.repr else {
             return Err(LowerError::Internal(
                 "enum tag does not have an integer scalar representation".to_owned(),
             ));
         };
         let value = ConstScalar::Int {
-            bits,
-            signed,
+            bits: 32,
+            signed: false,
             words: if variant.index == 0 {
                 Vec::new()
             } else {
@@ -4096,7 +4100,7 @@ where
                     .collect()
             },
         };
-        Ok((value, scalar_ty_r1(&tag)?))
+        Ok((value, Type::I32))
     }
 
     /// Change 1: whether `class` is a function-local aggregate behind an object /
@@ -4158,6 +4162,79 @@ where
         self.flat_shape_visit(class, &mut HashSet::new())
     }
 
+    /// One optional closed-enum upper bound per flattened Wasm parameter leaf.
+    /// This follows the same admitted product tree as `flat_shape`; unlike the
+    /// scalar type vector, it retains which i32 leaves are fieldless-enum tags
+    /// so exported Fe functions can reject host-forged variants at their ABI
+    /// boundary before application pattern matching observes them.
+    fn flat_leaf_enum_bounds(&self, class: &RuntimeClass<'db>) -> Option<Vec<Option<u32>>> {
+        fn visit<'db, I>(
+            module: &PortableModuleLowerer<'db, '_, I>,
+            class: &RuntimeClass<'db>,
+            active: &mut HashSet<LayoutId<'db>>,
+            out: &mut Vec<Option<u32>>,
+        ) -> Option<()>
+        where
+            I: Isa<InstSet = NativeInstSet>,
+        {
+            match class {
+                RuntimeClass::Scalar(scalar) => {
+                    scalar_ty_r1(scalar).ok()?;
+                    out.push(None);
+                }
+                RuntimeClass::AggregateValue { layout } => {
+                    if !active.insert(*layout) {
+                        return None;
+                    }
+                    match layout.data(module.db) {
+                        Layout::Struct(struct_layout) => {
+                            for field in &struct_layout.fields {
+                                visit(module, field, active, out)?;
+                            }
+                        }
+                        Layout::Enum(enum_layout) => {
+                            module.fieldless_enum_tag(*layout)?;
+                            out.push(Some(u32::try_from(enum_layout.variants.len()).ok()?));
+                        }
+                        Layout::Array(_) => return None,
+                    }
+                    active.remove(layout);
+                }
+                RuntimeClass::Ref {
+                    pointee,
+                    kind:
+                        RefKind::Provider {
+                            space: AddressSpaceKind::Memory,
+                            ..
+                        },
+                    view: RefView::Whole,
+                } if matches!(
+                    &**pointee,
+                    RuntimeClass::AggregateValue { layout }
+                        if module.fieldless_enum_tag(*layout).is_some()
+                ) =>
+                {
+                    let RuntimeClass::AggregateValue { layout } = &**pointee else {
+                        unreachable!()
+                    };
+                    let Layout::Enum(enum_layout) = layout.data(module.db) else {
+                        unreachable!()
+                    };
+                    out.push(Some(u32::try_from(enum_layout.variants.len()).ok()?));
+                }
+                transport @ (RuntimeClass::RawAddr { .. } | RuntimeClass::Ref { .. }) => {
+                    module.ty_for_class(transport).ok()?;
+                    out.push(None);
+                }
+            }
+            Some(())
+        }
+
+        let mut bounds = Vec::new();
+        visit(self, class, &mut HashSet::new(), &mut bounds)?;
+        Some(bounds)
+    }
+
     fn flat_shape_visit(
         &self,
         class: &RuntimeClass<'db>,
@@ -4181,8 +4258,8 @@ where
                         FlatShape::Struct(fields)
                     }
                     Layout::Enum(_) => {
-                        let tag = self.fieldless_enum_tag(*layout)?;
-                        FlatShape::Leaf(scalar_ty_r1(&tag).ok()?)
+                        self.fieldless_enum_tag(*layout)?;
+                        FlatShape::Leaf(Type::I32)
                     }
                     Layout::Array(_) => return None,
                 };
@@ -4267,6 +4344,9 @@ where
     /// (`aggregate_make`), passed as flattened params, and returned as flattened
     /// results.
     tuple_vars: FxHashMap<RLocalId, Vec<Variable>>,
+    /// Only host-visible entries need dynamic closed-enum validation. Private
+    /// Fe-to-Fe calls are already typed and avoid the extra branch entirely.
+    validate_enum_params: bool,
     /// Change 3: the lazily-created per-function trap block. A dynamic array
     /// index emits `Br(idx < len, ok, trap)`, and checked `usize` overflow emits
     /// `Br(overflow, trap, cont)`; every such check in the function branches to
@@ -4285,6 +4365,7 @@ where
         module: &'ctx mut PortableModuleLowerer<'db, 'a, I>,
         body: RuntimeBody<'db>,
         func_ref: FuncRef,
+        validate_enum_params: bool,
     ) -> Result<Self, LowerError> {
         let mut fb = module.builder.func_builder::<InstInserter>(func_ref);
         let prologue_block = fb.append_block();
@@ -4349,6 +4430,7 @@ where
             block_map,
             vars,
             tuple_vars,
+            validate_enum_params,
             trap_block: None,
         })
     }
@@ -4371,14 +4453,36 @@ where
         let arg_values: Vec<ValueId> = self.fb.args().to_vec();
         let mut wasm_arg_idx = 0usize;
         for param in params.iter() {
+            let enum_bounds = self
+                .validate_enum_params
+                .then(|| self.module.flat_leaf_enum_bounds(&param.class))
+                .flatten();
             if let Some(elem_vars) = self.tuple_vars.get(&param.local).cloned() {
-                for elem_var in elem_vars {
-                    self.fb.def_var(elem_var, arg_values[wasm_arg_idx]);
+                for (leaf, elem_var) in elem_vars.into_iter().enumerate() {
+                    let arg = arg_values[wasm_arg_idx];
+                    if let Some(limit) = enum_bounds
+                        .as_ref()
+                        .and_then(|bounds| bounds.get(leaf))
+                        .copied()
+                        .flatten()
+                    {
+                        self.validate_enum_tag(arg, limit);
+                    }
+                    self.fb.def_var(elem_var, arg);
                     wasm_arg_idx += 1;
                 }
             } else {
                 let var = self.var_for(param.local)?;
-                self.fb.def_var(var, arg_values[wasm_arg_idx]);
+                let arg = arg_values[wasm_arg_idx];
+                if let Some(limit) = enum_bounds
+                    .as_ref()
+                    .and_then(|bounds| bounds.first())
+                    .copied()
+                    .flatten()
+                {
+                    self.validate_enum_tag(arg, limit);
+                }
+                self.fb.def_var(var, arg);
                 wasm_arg_idx += 1;
             }
         }
@@ -5116,12 +5220,20 @@ where
                         "wasm target: enum tag source is not a value-carried enum".to_owned(),
                     ));
                 };
-                self.module.fieldless_enum_tag(*layout).ok_or_else(|| {
+                let tag = self.module.fieldless_enum_tag(*layout).ok_or_else(|| {
                     LowerError::Unsupported(
                         "wasm target: payload enum tags are not lowered as values".to_owned(),
                     )
                 })?;
-                self.local_value(*value)
+                let value = self.local_value(*value)?;
+                let tag_ty = scalar_ty_r1(&tag)?;
+                if self.fb.type_of(value) == tag_ty {
+                    Ok(value)
+                } else {
+                    Ok(self
+                        .fb
+                        .insert_inst(Trunc::new(self.inst_set(), value, tag_ty), tag_ty))
+                }
             }
             RExpr::EnumIsVariant { value, variant } => {
                 let class = self.body.value_class(*value).ok_or_else(|| {
@@ -5142,6 +5254,65 @@ where
                 Ok(self
                     .fb
                     .insert_inst(CmpEq::new(self.inst_set(), actual, expected), Type::I1))
+            }
+            RExpr::EnumGetTag { root } => {
+                let class = self.body.value_class(*root).ok_or_else(|| {
+                    LowerError::Internal("enum reference has no runtime class".to_owned())
+                })?;
+                let RuntimeClass::Ref { pointee, kind, .. } = class else {
+                    return Err(LowerError::Unsupported(format!(
+                        "wasm target: enum reference tag source is not a reference: {class:?}"
+                    )));
+                };
+                let RuntimeClass::AggregateValue { layout } = &**pointee else {
+                    return Err(LowerError::Unsupported(format!(
+                        "wasm target: enum reference does not point to an aggregate: {pointee:?}"
+                    )));
+                };
+                let tag = self.module.fieldless_enum_tag(*layout).ok_or_else(|| {
+                    LowerError::Unsupported(
+                        "wasm target: payload enum reference tags are not lowered".to_owned(),
+                    )
+                })?;
+                let tag_ty = scalar_ty_r1(&tag)?;
+                match kind {
+                    // A borrowed method receiver carried through the canonical
+                    // memory provider uses the provider word itself as the
+                    // value (the same established identity used by scalar
+                    // actor fields and one-word newtypes). Extract the compact
+                    // MIR tag from that canonical i32 carrier.
+                    RefKind::Provider {
+                        space: AddressSpaceKind::Memory,
+                        ..
+                    } => {
+                        let value = self.local_value(*root)?;
+                        if self.fb.type_of(value) == tag_ty {
+                            Ok(value)
+                        } else {
+                            Ok(self
+                                .fb
+                                .insert_inst(Trunc::new(self.inst_set(), value, tag_ty), tag_ty))
+                        }
+                    }
+                    // Object references, unlike provider-value receivers, are
+                    // actual linear-memory addresses.
+                    RefKind::Object => {
+                        let address = self.local_value(*root)?;
+                        Ok(self.load_memory_scalar(address, tag_ty))
+                    }
+                    RefKind::Const
+                    | RefKind::Provider {
+                        space:
+                            AddressSpaceKind::Storage
+                            | AddressSpaceKind::Transient
+                            | AddressSpaceKind::Calldata
+                            | AddressSpaceKind::Code,
+                        ..
+                    } => Err(LowerError::Unsupported(
+                        "wasm target: enum reference tags require a memory-backed receiver"
+                            .to_owned(),
+                    )),
+                }
             }
             // Browser component descriptors construct memory pointers from
             // their canonical wasm32 `u32` offsets. At this target the scalar
@@ -5228,26 +5399,28 @@ where
     /// Ptr roots, object/const ref carriers, non-memory provider spaces, deeper or
     /// other paths, multi-field pointees, and all real linear memory) stays
     /// fail-closed as R2. See the ladder doc section 7.2 for the exact boundary.
+    /// Load one Fe scalar from linear memory. Wasm narrow loads occupy an i32
+    /// register even when the logical Fe carrier is i1/i8/i16, so truncate the
+    /// register before binding it to a narrow SSA local.
+    fn load_memory_scalar(&mut self, address: ValueId, ty: Type) -> ValueId {
+        let register_ty = match ty {
+            Type::I1 | Type::I8 | Type::I16 => Type::I32,
+            _ => ty,
+        };
+        let loaded = self
+            .fb
+            .insert_inst(Mload::new(self.inst_set(), address, ty), register_ty);
+        if register_ty == ty {
+            loaded
+        } else {
+            self.fb
+                .insert_inst(Trunc::new(self.inst_set(), loaded, ty), ty)
+        }
+    }
+
     fn lower_place_read(&mut self, place: &RuntimePlace<'db>) -> Result<ValueId, LowerError> {
         if let Some((addr, ty)) = self.raw_memory_scalar_place(place)? {
-            // Wasm narrow integer loads produce an i32 register even though
-            // `Mload` retains the byte/halfword access width. Normalize that
-            // register back to the Fe local's scalar carrier before defining
-            // an i1/i8/i16 SSA variable.
-            let register_ty = match ty {
-                Type::I1 | Type::I8 | Type::I16 => Type::I32,
-                _ => ty,
-            };
-            let loaded = self
-                .fb
-                .insert_inst(Mload::new(self.inst_set(), addr, ty), register_ty);
-            return if register_ty == ty {
-                Ok(loaded)
-            } else {
-                Ok(self
-                    .fb
-                    .insert_inst(Trunc::new(self.inst_set(), loaded, ty), ty))
-            };
+            return Ok(self.load_memory_scalar(addr, ty));
         }
         if let (PlaceRoot::Slot(local), []) = (&place.root, &*place.path) {
             if matches!(self.body.value_class(*local), Some(RuntimeClass::Scalar(_))) {
@@ -5529,6 +5702,19 @@ where
         let trap = self.trap_block();
         let cont = self.fb.append_block();
         self.fb.insert_inst_no_result(Br::new(is, cond, trap, cont));
+        self.fb.switch_to_block(cont);
+    }
+
+    /// Continue only when `tag < variant_count` in the enum's unsigned i32
+    /// carrier. Negative/oversized host words therefore trap as well.
+    fn validate_enum_tag(&mut self, tag: ValueId, variant_count: u32) {
+        let is = self.inst_set();
+        let limit = self.fb.make_imm_value(Immediate::I32(variant_count as i32));
+        let valid = self.fb.insert_inst(Lt::new(is, tag, limit), Type::I1);
+        let trap = self.trap_block();
+        let cont = self.fb.append_block();
+        self.fb
+            .insert_inst_no_result(Br::new(is, valid, cont, trap));
         self.fb.switch_to_block(cont);
     }
 

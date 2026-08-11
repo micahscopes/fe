@@ -414,6 +414,10 @@ pub(super) struct GenMethodSig<'db> {
     pub(super) takes_self: bool,
     pub(super) args: Vec<(IdentId<'db>, TypeId<'db>)>,
     pub(super) ret: Option<TypeId<'db>>,
+    /// Constness is part of the goal trait's checked signature just as much as
+    /// its parameters and result. Dropping it made provider-generated static
+    /// constructors unusable from otherwise valid `const fn` composition.
+    pub(super) is_const: bool,
 }
 
 /// A field reference: `(variant index, field index)` into the target
@@ -3689,6 +3693,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             takes_self,
             args,
             ret,
+            is_const: method.is_const(self.db),
         });
         Ok(SigId(self.sigs.len() - 1))
     }

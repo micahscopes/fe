@@ -135,7 +135,7 @@ pub(super) fn synthesize_provider_impl<'db>(
                     builder.empty_generic_params(),
                     params,
                     sig.ret,
-                    FuncModifiers::new(Visibility::Private, false, false, false),
+                    FuncModifiers::new(Visibility::Private, false, sig.is_const, false),
                     move |body| {
                         replay.shared_exprs.borrow_mut().clear();
                         let mut reserved = replay.reserved_names.borrow_mut();

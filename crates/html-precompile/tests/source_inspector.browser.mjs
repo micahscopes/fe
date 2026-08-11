@@ -131,8 +131,25 @@ try {
     const expectedSurfaces = document.querySelector(".gallery-head") ? 10 : 1;
     return script?.dataset.feState === "complete" && component?._active === true &&
       surfaces.length === expectedSurfaces &&
-      surfaces.every(surface => surface.shadowRoot?.querySelector('[data-fe-action="101"]'));
+      surfaces.every(surface => surface.shadowRoot?.querySelector('a[href$=".wgsl"]'));
   });
+
+  const semanticActions = await page.evaluate(() => {
+    const action = element => element?.getAttribute("data-fe-action");
+    const artifactAction = suffix => action(Array.from(document.querySelectorAll("fe-surface"))
+      .map(surface => surface.shadowRoot?.querySelector(`a[href$="${suffix}"]`))
+      .find(Boolean));
+    return [
+      action(document.querySelector(".gallery-head a[href$='.fe'], .source[href$='.fe']")),
+      artifactAction(".wgsl"),
+      artifactAction(".wasm"),
+      artifactAction(".json"),
+      action(document.querySelector(".source-inspector .close")),
+    ];
+  });
+  assert.ok(semanticActions.every(action => action !== null));
+  assert.equal(new Set(semanticActions).size, semanticActions.length,
+    "semantic inspector actions must have distinct derived transport identities");
 
   const isGallery = await page.$(".gallery-head") !== null;
   if (isGallery) {
@@ -179,41 +196,77 @@ try {
   }
 
   assert.equal(await page.$eval(".inspector, .source-inspector", node => node.hidden), true);
+  const nestedOwnership = await page.evaluate(() => {
+    const owner = document.querySelector("#source-inspector, #gallery-shell");
+    const statesBefore = globalThis.__feInspectorE2E.states.length;
+    const nested = document.createElement("fe-component");
+    nested.id = "nested-component-ownership-probe";
+    const button = document.createElement("button");
+    button.setAttribute("data-fe-action", document
+      .querySelector(".gallery-head a[href$='.fe'], .source[href$='.fe']")
+      .getAttribute("data-fe-action"));
+    nested.append(button);
+    owner.append(nested);
+    button.click();
+    const result = {
+      statesBefore,
+      statesAfter: globalThis.__feInspectorE2E.states.length,
+      inspectorHidden: document.querySelector(".inspector, .source-inspector").hidden,
+    };
+    nested.remove();
+    return result;
+  });
+  assert.deepEqual(nestedOwnership, {
+    statesBefore: nestedOwnership.statesBefore,
+    statesAfter: nestedOwnership.statesBefore,
+    inspectorHidden: true,
+  }, "an action owned by a nested Fe component reached its parent actor");
   if (isGallery) {
-    await page.click('.gallery-head [data-fe-action="100"]');
-    await page.waitForFunction(() =>
-      !document.querySelector('[data-fe-view="1"]').hidden &&
-      document.querySelector('[data-fe-node="100"]').textContent.includes("actor GalleryPage") &&
-      document.querySelector('[data-fe-node="100"]').textContent.includes("struct GalleryBuilder")
-    );
+    await page.click(".gallery-head a[href$='.fe']");
+    try {
+      await page.waitForFunction(() =>
+        !document.querySelector('[data-fe-view="1"]').hidden &&
+        document.querySelector(".inspector-body pre:not(.error)").textContent.includes("actor GalleryPage") &&
+        document.querySelector(".inspector-body pre:not(.error)").textContent.includes("struct GalleryBuilder")
+      );
+    } catch (error) {
+      const diagnosis = await page.evaluate(() => ({
+        evidence: globalThis.__feInspectorE2E,
+        componentActive: document.querySelector("#gallery-shell")?._active,
+        componentState: document.querySelector("#gallery-shell")?._state,
+        inspectorHidden: document.querySelector(".source-inspector")?.hidden,
+        inspectorText: document.querySelector(".inspector-body")?.textContent,
+      }));
+      throw new Error(`gallery SourceInspector did not load page source: ${JSON.stringify({ diagnosis, browserErrors })}`, { cause: error });
+    }
   } else {
-    await page.click('.source[data-fe-action="100"]');
+    await page.click(".source[href$='.fe']");
     await page.waitForFunction(() =>
       !document.querySelector('[data-fe-view="1"]').hidden &&
-      document.querySelector('[data-fe-node="100"]').textContent.includes("actor GradientSurface")
+      document.querySelector(".inspector-body pre:not(.error)").textContent.includes("actor GradientSurface")
     );
   }
   assert.deepEqual(await page.evaluate(() => ({
     open: !document.querySelector(".inspector, .source-inspector").hidden,
     sourceTitle: !document.querySelector('[data-fe-view="5"]').hidden,
-    focused: document.activeElement === document.querySelector('[data-fe-action="104"]'),
+    focused: document.activeElement === document.querySelector(".source-inspector .close"),
     stayed: location.pathname === "/",
   })), { open: true, sourceTitle: true, focused: true, stayed: true });
 
-  await page.click('[data-fe-action="104"]');
+  await page.click(".source-inspector .close");
   assert.equal(await page.$eval(".inspector, .source-inspector", node => node.hidden), true);
   await page.evaluate(() => Array.from(document.querySelectorAll("fe-surface"))
-    .map(surface => surface.shadowRoot?.querySelector('[data-fe-action="101"]'))
+    .map(surface => surface.shadowRoot?.querySelector('a[href$=".wgsl"]'))
     .find(Boolean).click());
   await page.waitForFunction(() =>
     !document.querySelector('[data-fe-view="1"]').hidden &&
-    document.querySelector('[data-fe-node="100"]').textContent.includes("@fragment")
+    document.querySelector(".inspector-body pre:not(.error)").textContent.includes("@fragment")
   );
   assert.equal(await page.$eval('[data-fe-view="6"]', node => node.hidden), false);
 
   const wasmExpected = await page.evaluate(async () => {
     const link = Array.from(document.querySelectorAll("fe-surface"))
-      .map(surface => surface.shadowRoot?.querySelector('[data-fe-action="102"]'))
+      .map(surface => surface.shadowRoot?.querySelector('a[href$=".wasm"]'))
       .find(Boolean);
     const length = (await (await fetch(link.href)).arrayBuffer()).byteLength;
     link.click();
@@ -221,17 +274,17 @@ try {
   });
   await page.waitForFunction(expected =>
     !document.querySelector('[data-fe-view="2"]').hidden &&
-    Number(document.querySelector('[data-fe-node="101"]').textContent) === expected,
+    Number(document.querySelector(".inspector-body strong").textContent) === expected,
     {}, wasmExpected,
   );
   assert.equal(await page.$eval('[data-fe-view="7"]', node => node.hidden), false);
 
   await page.evaluate(() => Array.from(document.querySelectorAll("fe-surface"))
-    .map(surface => surface.shadowRoot?.querySelector('[data-fe-action="103"]'))
+    .map(surface => surface.shadowRoot?.querySelector('a[href$=".json"]'))
     .find(Boolean).click());
   await page.waitForFunction(() =>
     !document.querySelector('[data-fe-view="1"]').hidden &&
-    document.querySelector('[data-fe-node="100"]').textContent.includes('"protocol": "fe-web-bundle"')
+    document.querySelector(".inspector-body pre:not(.error)").textContent.includes('"protocol": "fe-web-bundle"')
   );
   assert.equal(await page.$eval('[data-fe-view="8"]', node => node.hidden), false);
 
@@ -240,7 +293,7 @@ try {
   const evidence = await page.evaluate(() => globalThis.__feInspectorE2E);
   assert.deepEqual(evidence.errors, []);
   assert.ok(evidence.states.length >= 10, `too few Fe states: ${evidence.states.length}`);
-  for (const action of ["100", "101", "102", "103", "104"]) {
+  for (const action of semanticActions) {
     assert.ok(evidence.prevented.some(value => value[0] === action && value[1] === true),
       `Fe did not prevent default for action ${action}`);
   }

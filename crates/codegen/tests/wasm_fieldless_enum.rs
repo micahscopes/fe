@@ -39,6 +39,15 @@ pub enum Mode {
 }
 impl Copy for Mode {}
 
+impl Mode {
+    pub fn is_scale(self) -> bool {
+        match self {
+            Self::Scale => true,
+            _ => false,
+        }
+    }
+}
+
 pub struct Policy {
     mode: Mode,
     amount: f32,
@@ -55,6 +64,10 @@ pub fn apply(_ policy: Policy, current: f32) -> f32 {
 
 pub fn construct_and_apply(current: f32) -> f32 {
     apply(Policy { mode: Mode::Scale, amount: 1.5 }, current)
+}
+
+pub fn method_receiver_is_scale(_ mode: Mode) -> bool {
+    mode.is_scale()
 }
 "#;
 
@@ -85,6 +98,16 @@ pub fn construct_and_apply(current: f32) -> f32 {
         .get_typed_func::<f32, f32>(&mut store, "construct_and_apply")
         .expect("enum construction export");
     assert_eq!(construct.call(&mut store, 8.0).unwrap(), 12.0);
+
+    // A borrowed method receiver travels through Fe's provider-value lane.
+    // Its fieldless enum remains the same canonical i32 value rather than
+    // being mistaken for a linear-memory address.
+    let method = instance
+        .get_typed_func::<i32, i32>(&mut store, "method_receiver_is_scale")
+        .expect("fieldless enum method receiver export");
+    assert_eq!(method.call(&mut store, 0).unwrap(), 0);
+    assert_eq!(method.call(&mut store, 2).unwrap(), 1);
+    assert!(method.call(&mut store, 99).is_err());
 }
 
 #[test]

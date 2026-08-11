@@ -103,13 +103,13 @@ fn reduce(model: &mut Model, event: Event<'_>) {
                 4 => model.filter = 0,
                 5 => model.filter = 1,
                 6 => model.filter = 2,
-                12 => {
+                9 => {
                     model.todos.retain(|todo| todo.id != event.key);
                     if model.editing == event.key {
                         model.editing = 0;
                     }
                 }
-                11 | 14 if event.target == 14 || event.detail >= 2 => {
+                8 | 11 if event.target == 11 || event.detail >= 2 => {
                     if let Some(todo) = model.todos.iter().find(|todo| todo.id == event.key) {
                         model.draft = todo.title.clone();
                         model.editing = event.key;
@@ -126,14 +126,14 @@ fn reduce(model: &mut Model, event: Event<'_>) {
                 for todo in &mut model.todos {
                     todo.completed = make_completed;
                 }
-            } else if event.target == 10
+            } else if event.target == 7
                 && let Some(todo) = model.todos.iter_mut().find(|todo| todo.id == event.key)
             {
                 todo.completed = !todo.completed;
             }
             model.revision += 1;
         }
-        4 if model.connected && event.target == 13 && event.key == model.editing => {
+        4 if model.connected && event.target == 10 && event.key == model.editing => {
             model.draft = bounded_utf8(event.text);
             model.revision += 1;
         }
@@ -150,7 +150,7 @@ fn reduce(model: &mut Model, event: Event<'_>) {
                     model.clear_input = true;
                 }
                 model.prevent_default = true;
-            } else if event.target == 13 && event.key == model.editing {
+            } else if event.target == 10 && event.key == model.editing {
                 if event.detail == 13 {
                     let title = model.draft.trim_matches([' ', '\t', '\n', '\r']).to_owned();
                     if title.is_empty() {
@@ -249,14 +249,14 @@ fn expected_operations(model: &Model) -> Vec<Operation> {
         Operation::Hidden(2, model.todos.is_empty()),
         Operation::Text(4, active.to_string()),
         Operation::Checked(6, !model.todos.is_empty() && active == 0),
-        Operation::Class(7, 1, model.filter == 0),
-        Operation::Class(8, 1, model.filter == 1),
-        Operation::Class(9, 1, model.filter == 2),
+        Operation::Class(7, 13, model.filter == 0),
+        Operation::Class(8, 13, model.filter == 1),
+        Operation::Class(9, 13, model.filter == 2),
     ];
     if model.clear_input {
         operations.push(Operation::Value(5, String::new()));
     }
-    operations.push(Operation::RepeatBegin(3, 1));
+    operations.push(Operation::RepeatBegin(3, 3));
     for todo in &model.todos {
         let visible = match model.filter {
             1 => !todo.completed,
@@ -270,13 +270,13 @@ fn expected_operations(model: &Model) -> Vec<Operation> {
             Operation::RepeatItem(todo.id),
             Operation::Text(11, todo.title.clone()),
             Operation::Checked(10, todo.completed),
-            Operation::Class(0, 1, todo.completed),
-            Operation::Class(0, 2, todo.id == model.editing),
+            Operation::Class(0, 14, todo.completed),
+            Operation::Class(0, 15, todo.id == model.editing),
         ]);
         if todo.id == model.editing {
-            operations.push(Operation::Value(13, model.draft.clone()));
+            operations.push(Operation::Value(12, model.draft.clone()));
             if model.focus_edit {
-                operations.push(Operation::Focus(13));
+                operations.push(Operation::Focus(12));
             }
         }
     }
@@ -325,7 +325,7 @@ fn todomvc_reducer_utf8_keyed_projection_and_lifecycle_are_fe_owned() {
         .expect("TodoMVC resident contract")
         .expect("TodoMVC resident actor");
     assert_eq!(artifact.contract.actor, "TodoApp");
-    assert_eq!(artifact.contract.event_leaf_count, 8);
+    assert_eq!(artifact.contract.event_leaf_count, 9);
     assert_eq!(artifact.contract.state_leaf_count, 13);
     assert_eq!(artifact.contract.projection_leaf_count, 5);
 
@@ -340,7 +340,7 @@ fn todomvc_reducer_utf8_keyed_projection_and_lifecycle_are_fe_owned() {
         .get_typed_func::<(), ActorState>(&mut store, RESIDENT_ACTOR_INITIALIZE_EXPORT)
         .expect("TodoMVC initializer");
     let transition = instance
-        .get_typed_func::<(i32, i32, i32, i32, f32, f32, i32, i32), ActorState>(
+        .get_typed_func::<(i32, i32, i32, i32, i32, f32, f32, i32, i32), ActorState>(
             &mut store,
             RESIDENT_ACTOR_TRANSITION_EXPORT,
         )
@@ -407,7 +407,7 @@ fn todomvc_reducer_utf8_keyed_projection_and_lifecycle_are_fe_owned() {
         },
         Event {
             kind: 5,
-            target: 10,
+            target: 7,
             key: 1,
             detail: 0,
             text: "on",
@@ -428,21 +428,21 @@ fn todomvc_reducer_utf8_keyed_projection_and_lifecycle_are_fe_owned() {
         },
         Event {
             kind: 3,
-            target: 14,
+            target: 11,
             key: 2,
             detail: 1,
             text: "",
         },
         Event {
             kind: 4,
-            target: 13,
+            target: 10,
             key: 2,
             detail: 0,
             text: " gamma ",
         },
         Event {
             kind: 7,
-            target: 13,
+            target: 10,
             key: 2,
             detail: 13,
             text: " gamma ",
@@ -470,7 +470,7 @@ fn todomvc_reducer_utf8_keyed_projection_and_lifecycle_are_fe_owned() {
         },
         Event {
             kind: 3,
-            target: 12,
+            target: 9,
             key: 1,
             detail: 1,
             text: "",
@@ -509,6 +509,7 @@ fn todomvc_reducer_utf8_keyed_projection_and_lifecycle_are_fe_owned() {
                 (
                     event.kind as i32,
                     event.target as i32,
+                    0,
                     event.key as i32,
                     event.detail as i32,
                     0.0,
@@ -538,8 +539,14 @@ fn todomvc_reducer_utf8_keyed_projection_and_lifecycle_are_fe_owned() {
 
     assert!(
         transition
-            .call(&mut store, (99, 0, 0, 0, 0.0, 0.0, 0, 0))
+            .call(&mut store, (99, 0, 0, 0, 0, 0.0, 0.0, 0, 0))
             .is_err(),
         "invalid ComponentEventKind must trap before reaching Fe"
+    );
+    assert!(
+        transition
+            .call(&mut store, (3, 99, 0, 0, 0, 0.0, 0.0, 0, 0))
+            .is_err(),
+        "invalid FCO-derived TodoAction must trap before reaching Fe"
     );
 }

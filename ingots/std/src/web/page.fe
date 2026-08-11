@@ -9,7 +9,9 @@
 pub use core::actor::PageComposition
 pub use core::actor::ComponentComposition
 use core::marker::Copy
-use core::panic
+use super::identity::{
+    ComponentAction, ComponentClassToken, ComponentNode, ComponentTemplate, ComponentVisibility,
+}
 
 /// CTFE-only page text assembled from ordinary inline Fe string words. This
 /// keeps authored code within Fe's current 31-byte runtime string limit while
@@ -120,32 +122,45 @@ impl PageAttribute {
         Self { kind: kind, text: PageText::empty(), number: number, enabled: false }
     }
 
-    pub const fn id(value: String<31>) -> Self { Self::text_attr(PageAttributeKind::Id, PageText::one(value)) }
-    pub const fn local_id(value: String<31>) -> Self { Self::text_attr(PageAttributeKind::LocalId, PageText::one(value)) }
-    pub const fn class(value: String<31>) -> Self { Self::text_attr(PageAttributeKind::Class, PageText::one(value)) }
-    pub const fn role(value: String<31>) -> Self { Self::text_attr(PageAttributeKind::Role, PageText::one(value)) }
-    pub const fn aria_label(value: String<31>) -> Self { Self::text_attr(PageAttributeKind::AriaLabel, PageText::one(value)) }
-    pub const fn input_type(value: String<31>) -> Self { Self::text_attr(PageAttributeKind::InputType, PageText::one(value)) }
-    pub const fn for_id(value: String<31>) -> Self { Self::text_attr(PageAttributeKind::For, PageText::one(value)) }
-    pub const fn local_for(value: String<31>) -> Self { Self::text_attr(PageAttributeKind::LocalFor, PageText::one(value)) }
-    pub const fn title(value: String<31>) -> Self { Self::text_attr(PageAttributeKind::Title, PageText::one(value)) }
-    pub const fn placeholder(value: String<31>) -> Self { Self::text_attr(PageAttributeKind::Placeholder, PageText::one(value)) }
-    pub const fn autocomplete(value: String<31>) -> Self { Self::text_attr(PageAttributeKind::Autocomplete, PageText::one(value)) }
-    pub const fn target(value: String<31>) -> Self { Self::text_attr(PageAttributeKind::Target, PageText::one(value)) }
-    pub const fn rel(value: String<31>) -> Self { Self::text_attr(PageAttributeKind::Rel, PageText::one(value)) }
-    pub const fn href(value: PageText) -> Self { Self::text_attr(PageAttributeKind::Href, value) }
+    pub const fn id(value: String<31>) -> Self { Self::text_attr(kind: PageAttributeKind::Id, text: PageText::one(value: value)) }
+    pub const fn local_id(value: String<31>) -> Self { Self::text_attr(kind: PageAttributeKind::LocalId, text: PageText::one(value: value)) }
+    pub const fn class(value: String<31>) -> Self { Self::text_attr(kind: PageAttributeKind::Class, text: PageText::one(value: value)) }
+    pub const fn role(value: String<31>) -> Self { Self::text_attr(kind: PageAttributeKind::Role, text: PageText::one(value: value)) }
+    pub const fn aria_label(value: String<31>) -> Self { Self::text_attr(kind: PageAttributeKind::AriaLabel, text: PageText::one(value: value)) }
+    pub const fn input_type(value: String<31>) -> Self { Self::text_attr(kind: PageAttributeKind::InputType, text: PageText::one(value: value)) }
+    pub const fn for_id(value: String<31>) -> Self { Self::text_attr(kind: PageAttributeKind::For, text: PageText::one(value: value)) }
+    pub const fn local_for(value: String<31>) -> Self { Self::text_attr(kind: PageAttributeKind::LocalFor, text: PageText::one(value: value)) }
+    pub const fn title(value: String<31>) -> Self { Self::text_attr(kind: PageAttributeKind::Title, text: PageText::one(value: value)) }
+    pub const fn placeholder(value: String<31>) -> Self { Self::text_attr(kind: PageAttributeKind::Placeholder, text: PageText::one(value: value)) }
+    pub const fn autocomplete(value: String<31>) -> Self { Self::text_attr(kind: PageAttributeKind::Autocomplete, text: PageText::one(value: value)) }
+    pub const fn target(value: String<31>) -> Self { Self::text_attr(kind: PageAttributeKind::Target, text: PageText::one(value: value)) }
+    pub const fn rel(value: String<31>) -> Self { Self::text_attr(kind: PageAttributeKind::Rel, text: PageText::one(value: value)) }
+    pub const fn href(value: PageText) -> Self { Self::text_attr(kind: PageAttributeKind::Href, text: value) }
     pub const fn aria_modal() -> Self {
         Self { kind: PageAttributeKind::AriaModal, text: PageText::empty(), number: 0, enabled: true }
     }
     pub const fn hidden() -> Self {
         Self { kind: PageAttributeKind::Hidden, text: PageText::empty(), number: 0, enabled: true }
     }
-    pub const fn action(value: u32) -> Self { Self::number_attr(PageAttributeKind::Action, value) }
-    pub const fn node(value: u32) -> Self { Self::number_attr(PageAttributeKind::Node, value) }
-    pub const fn view(value: u32) -> Self { Self::number_attr(PageAttributeKind::View, value) }
-    pub const fn template(value: u32) -> Self { Self::number_attr(PageAttributeKind::Template, value) }
-    pub const fn class_token(slot: u32, value: String<31>) -> Self {
-        Self { kind: PageAttributeKind::ClassToken, text: PageText::one(value), number: slot, enabled: false }
+    pub const fn action<A: ComponentAction>(value: A) -> Self {
+        Self::number_attr(kind: PageAttributeKind::Action, number: value.component_action_id())
+    }
+    pub const fn node<N: ComponentNode>(value: N) -> Self {
+        Self::number_attr(kind: PageAttributeKind::Node, number: value.component_node_id())
+    }
+    pub const fn view<V: ComponentVisibility>(value: V) -> Self {
+        Self::number_attr(kind: PageAttributeKind::View, number: value.component_visibility_id())
+    }
+    pub const fn template<T: ComponentTemplate>(value: T) -> Self {
+        Self::number_attr(kind: PageAttributeKind::Template, number: value.component_template_id())
+    }
+    pub const fn class_token<C: ComponentClassToken>(slot: C, value: String<31>) -> Self {
+        Self {
+            kind: PageAttributeKind::ClassToken,
+            text: PageText::one(value),
+            number: slot.component_class_token_id(),
+            enabled: false,
+        }
     }
     pub const fn publish() -> Self {
         Self { kind: PageAttributeKind::Publish, text: PageText::empty(), number: 0, enabled: true }
@@ -193,34 +208,34 @@ impl PageOp {
     pub const fn text(value: PageText) -> Self { Self::Text(value) }
     pub const fn close() -> Self { Self::Close }
 
-    pub const fn render(
+    pub const fn render<A: ComponentAction>(
         source: PageText,
-        wgsl_action: u32,
-        wasm_action: u32,
-        manifest_action: u32,
+        wgsl_action: A,
+        wasm_action: A,
+        manifest_action: A,
     ) -> Self {
         Self::Render(PageRender {
             source: source,
             entry: "",
-            wgsl_action: wgsl_action,
-            wasm_action: wasm_action,
-            manifest_action: manifest_action,
+            wgsl_action: wgsl_action.component_action_id(),
+            wasm_action: wasm_action.component_action_id(),
+            manifest_action: manifest_action.component_action_id(),
         })
     }
 
-    pub const fn render_entry(
+    pub const fn render_entry<A: ComponentAction>(
         source: PageText,
         entry: String<31>,
-        wgsl_action: u32,
-        wasm_action: u32,
-        manifest_action: u32,
+        wgsl_action: A,
+        wasm_action: A,
+        manifest_action: A,
     ) -> Self {
         Self::Render(PageRender {
             source: source,
             entry: entry,
-            wgsl_action: wgsl_action,
-            wasm_action: wasm_action,
-            manifest_action: manifest_action,
+            wgsl_action: wgsl_action.component_action_id(),
+            wasm_action: wasm_action.component_action_id(),
+            manifest_action: manifest_action.component_action_id(),
         })
     }
 
@@ -271,8 +286,8 @@ impl<const N: usize> PageBuilder<N> {
     }
 
     pub const fn push(self, operation: PageOp) -> Self {
-        if self.length >= N { panic() }
         let mut body = self.body
+        // The checked array write is the const-valid capacity assertion.
         body[self.length] = operation
         Self { body: body, length: self.length + 1 }
     }
@@ -293,12 +308,12 @@ impl<const N: usize> PageBuilder<N> {
         self.push(operation: PageOp::close())
     }
 
-    pub const fn render(
+    pub const fn render<A: ComponentAction>(
         self,
         source: PageText,
-        wgsl_action: u32,
-        wasm_action: u32,
-        manifest_action: u32,
+        wgsl_action: A,
+        wasm_action: A,
+        manifest_action: A,
     ) -> Self {
         self.push(operation: PageOp::render(
             source: source,

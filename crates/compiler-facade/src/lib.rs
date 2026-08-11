@@ -103,6 +103,38 @@ pub fn project_page(request: &CompileRequest) -> Result<PageProjectionResult, Co
     })
 }
 
+/// Project a page from an already initialized compiler database.
+///
+/// Native build tooling uses this entry when a page source belongs to a real
+/// ingot with local dependencies. The protocol-only [`project_page`] path
+/// remains filesystem-free for browser compilers and supplied virtual source
+/// graphs; both paths produce the same typed result and structured diagnostics.
+pub fn project_page_in_db(
+    db: &DriverDataBase,
+    root_file: common::file::File,
+) -> Result<PageProjectionResult, CompileFacadeError> {
+    let top_mod = db.top_mod(root_file);
+    let complete = db.run_on_top_mod(top_mod).complete(db);
+    let diagnostics = complete
+        .iter()
+        .map(|diagnostic| protocol_diagnostic(db, diagnostic))
+        .collect::<Vec<_>>();
+    let has_error = complete
+        .iter()
+        .any(|diagnostic| diagnostic.severity == Severity::Error);
+    let page = if has_error {
+        None
+    } else {
+        codegen::project_page(db, top_mod)
+            .map_err(|error| CompileFacadeError::Backend(error.to_string()))?
+    };
+    Ok(PageProjectionResult {
+        diagnostics,
+        page,
+        source_dependencies: source_dependencies_from_db(db, root_file)?,
+    })
+}
+
 /// Compile a resident component and CTFE-project its optional
 /// `ComponentComposition` behavior without parsing or analyzing the source a
 /// second time.
@@ -350,6 +382,33 @@ fn source_dependencies(
         root: request.root.clone(),
         sources,
     }
+}
+
+fn source_dependencies_from_db(
+    db: &DriverDataBase,
+    root_file: common::file::File,
+) -> Result<SourceDependencyInventory, CompileFacadeError> {
+    let root = root_file
+        .url(db)
+        .ok_or_else(|| CompileFacadeError::RootUnavailable("page source has no URL".to_owned()))?
+        .to_string();
+    let sources = db
+        .source_dependency_urls(root_file)
+        .into_iter()
+        .filter_map(|source_url| {
+            let url = Url::parse(&source_url).ok()?;
+            let file = db.workspace().get(db, &url)?;
+            Some(SourceDependency {
+                url: source_url,
+                sha256: sha256_hex(file.text(db).as_bytes()),
+            })
+        })
+        .collect();
+    Ok(SourceDependencyInventory {
+        version: SOURCE_DEPENDENCY_INVENTORY_VERSION,
+        root,
+        sources,
+    })
 }
 
 fn protocol_diagnostic(db: &DriverDataBase, diagnostic: &CompleteDiagnostic) -> Diagnostic {

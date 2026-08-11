@@ -1,0 +1,218 @@
+//! Typed identities for resident Fe component vocabularies.
+//!
+//! Browser/DOM transport still needs compact integer correlation handles, but
+//! application authors describe semantic actions and a typed part record, not
+//! numeric tables. FCO providers reflect those declarations and derive every
+//! transport identity as an ordinary const Fe method. Generated resident
+//! wrappers validate every incoming action tag before application code can
+//! observe it.
+
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+
+/// Opaque, compiler-populated reference carried by a component schema field.
+/// Its integer never appears in application source; it exists only so the
+/// generated HTML and the resident Wasm projection can correlate one part.
+pub trait ComponentPart {
+    const fn component_part(_ index: u32) -> Self
+}
+
+/// Derives the complete set of opaque part references for a plain schema
+/// record. Declaration order is an implementation detail of the generated
+/// transport, not an application-maintained protocol.
+pub trait ComponentSchema {
+    const fn component_parts() -> Self
+
+    /// Provider-only bridge from one schema ordinal to its expected field
+    /// type. Return-position inference selects `P`; ordinary Fe trait dispatch
+    /// then applies the single opaque `ComponentPart` minting rule.
+    const fn __component_part<P: ComponentPart>(_ index: u32) -> P {
+        <P as ComponentPart>::component_part(index)
+    }
+}
+
+pub struct ComponentSchemaProvider {}
+
+impl Derive<ComponentSchema> for ComponentSchemaProvider {
+    const fn derive<T>(ev: own Evidence<ComponentSchema<T>>) -> Evidence<ComponentSchema<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<ComponentSchema<T>>,
+        )
+    {
+        let mut parts = builder.struct_init()
+        let mut index: u32 = 0
+        for field in reflect.fields() {
+            builder.require<ComponentPart>(field.ty())
+            parts = builder.with_field(
+                parts,
+                field,
+                builder.trait_call(
+                    builder.self_ty(),
+                    "__component_part",
+                    builder.int(index),
+                ),
+            )
+            index = index + 1
+        }
+        builder.emit_method("component_parts", parts)
+        builder.finish()
+        ev
+    }
+}
+
+/// One generic opaque part; the role is a compile-time type argument and has
+/// no runtime representation. FCO assigns `id` once when deriving a component
+/// schema. The role selects the legal page/projection operations below.
+pub struct Part<Role> { id: u32 }
+
+impl<Role> Copy for Part<Role> {}
+
+impl<Role> ComponentPart for Part<Role> {
+    const fn component_part(_ index: u32) -> Self { Self { id: index } }
+}
+
+pub struct Element {}
+pub struct Text {}
+pub struct Input {}
+pub struct Checkbox {}
+pub struct Link {}
+pub struct Repeat<Row> {}
+pub struct Visibility {}
+pub struct Template<Row> {}
+pub struct Class<Token> {}
+
+/// Private role classification keeps non-DOM parts out of `data-fe-node`.
+trait NodeRole {}
+impl NodeRole for Element {}
+impl NodeRole for Text {}
+impl NodeRole for Input {}
+impl NodeRole for Checkbox {}
+impl NodeRole for Link {}
+impl<Row> NodeRole for Repeat<Row> {}
+
+pub trait ComponentAction {
+    const fn component_action_id(self) -> u32
+}
+
+/// Compatibility for fixed-host fixtures and migrating components. Canonical
+/// application examples derive the trait for a fieldless enum instead.
+impl ComponentAction for u32 {
+    const fn component_action_id(self) -> u32 { self }
+}
+
+pub struct ComponentActionProvider {}
+
+impl Derive<ComponentAction> for ComponentActionProvider {
+    const fn derive<T>(ev: own Evidence<ComponentAction<T>>) -> Evidence<ComponentAction<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<ComponentAction<T>>,
+        )
+    {
+        let mut arms = quote { }
+        let mut index: u32 = 0
+        for variant in reflect.variants() {
+            arms = quote { ${arms}, ${variant}(ignored) => ${index} }
+            index = index + 1
+        }
+        // The goal trait carries the `const` qualifier; body-form emission
+        // inherits that checked signature.
+        builder.emit_method("component_action_id", quote { match self { ${arms} } })
+        builder.finish()
+        ev
+    }
+}
+
+pub trait ComponentNode {
+    const fn component_node_id(self) -> u32
+}
+
+impl<Role: NodeRole> ComponentNode for Part<Role> {
+    const fn component_node_id(self) -> u32 { self.id }
+}
+
+impl ComponentNode for u32 {
+    const fn component_node_id(self) -> u32 { self }
+}
+
+/// One bit position in a component's visibility projection.
+pub trait ComponentVisibility {
+    const fn component_visibility_id(self) -> u32
+}
+
+impl ComponentVisibility for Part<Visibility> {
+    const fn component_visibility_id(self) -> u32 { self.id }
+}
+
+impl Part<Visibility> {
+    pub fn bit(self) -> u32 {
+        if self.id >= 32 { core::panic() }
+        1 << self.id
+    }
+}
+
+impl ComponentVisibility for u32 {
+    const fn component_visibility_id(self) -> u32 { self }
+}
+
+pub trait ComponentTemplate {
+    const fn component_template_id(self) -> u32
+}
+
+impl<Row> ComponentTemplate for Part<Template<Row>> {
+    const fn component_template_id(self) -> u32 { self.id }
+}
+
+/// A repeated region and its row template form one logical typed part. DOM
+/// node and template attributes occupy distinct transport namespaces, so the
+/// same opaque identity can name both without a second schema field.
+impl<Row> ComponentTemplate for Part<Repeat<Row>> {
+    const fn component_template_id(self) -> u32 { self.id }
+}
+
+impl ComponentTemplate for u32 {
+    const fn component_template_id(self) -> u32 { self }
+}
+
+pub trait ComponentClassToken {
+    const fn component_class_token_id(self) -> u32
+}
+
+impl<Token> ComponentClassToken for Part<Class<Token>> {
+    const fn component_class_token_id(self) -> u32 { self.id }
+}
+
+/// One role-indexed capability for every operation-specific part. The role is
+/// compile-time only: it makes assigning text to a checkbox (or pairing a
+/// repeat region with the wrong row template) ill-typed without proliferating
+/// one marker trait per browser operation. `u32` remains a compatibility
+/// implementation for fixed-host fixtures; canonical components use `Part`.
+pub trait ComponentTarget<Role> {
+    const fn component_target_id(self) -> u32
+}
+
+impl<Role> ComponentTarget<Role> for Part<Role> {
+    const fn component_target_id(self) -> u32 { self.id }
+}
+
+impl<Role> ComponentTarget<Role> for u32 {
+    const fn component_target_id(self) -> u32 { self }
+}
+
+/// Erases only the row type after it has already coupled a repeat region to
+/// its template in the schema.
+pub trait ComponentRepeat {
+    const fn component_repeat_id(self) -> u32
+}
+
+impl<Row> ComponentRepeat for Part<Repeat<Row>> {
+    const fn component_repeat_id(self) -> u32 { self.id }
+}
+
+impl ComponentRepeat for u32 {
+    const fn component_repeat_id(self) -> u32 { self }
+}
+
+impl ComponentClassToken for u32 {
+    const fn component_class_token_id(self) -> u32 { self }
+}

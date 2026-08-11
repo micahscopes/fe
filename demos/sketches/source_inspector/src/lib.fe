@@ -7,37 +7,98 @@
 
 use std::web::component::{
     BrowserBytes, BrowserPtr, BrowserString, ComponentEvent, ComponentEventKind,
-    ComponentPatch, ComponentWriter, InitialState, ProjectState, ResidentTransition,
+    ComponentPatch, ComponentWriter, InitialState, KeyboardKey, ProjectState, ResidentTransition,
     allocate_component_buffer, component_string,
 }
 use std::web::page::{
     ComponentComposition, ComponentView, PageAttribute, PageBuilder, PageElement, PageText,
 }
+use std::web::identity::{
+    ComponentAction, ComponentActionProvider, ComponentSchema, ComponentSchemaProvider,
+    Link, Part, Text, Visibility,
+}
 
-const ACTION_SOURCE: u32 = 100
-const ACTION_WGSL: u32 = 101
-const ACTION_WASM: u32 = 102
-const ACTION_MANIFEST: u32 = 103
-const ACTION_CLOSE: u32 = 104
+pub enum InspectorAction {
+    Unknown,
+    Source,
+    Wgsl,
+    Wasm,
+    Manifest,
+    Close,
+}
 
-const NODE_BODY: u32 = 100
-const NODE_BYTES: u32 = 101
-const NODE_RAW: u32 = 102
-const NODE_ERROR: u32 = 103
+impl Copy for InspectorAction {}
 
-const VIEW_OVERLAY: u32 = 0
-const VIEW_TEXT: u32 = 1
-const VIEW_BINARY: u32 = 2
-const VIEW_LOADING: u32 = 3
-const VIEW_ERROR: u32 = 4
-const VIEW_TITLE_SOURCE: u32 = 5
-const VIEW_TITLE_WGSL: u32 = 6
-const VIEW_TITLE_WASM: u32 = 7
-const VIEW_TITLE_MANIFEST: u32 = 8
+derive ComponentAction for InspectorAction using ComponentActionProvider
 
-const STATUS_LOADING: u32 = 0
-const STATUS_READY: u32 = 1
-const STATUS_ERROR: u32 = 2
+impl InspectorAction {
+    fn opens_artifact(self) -> bool {
+        match self {
+            Self::Source | Self::Wgsl | Self::Wasm | Self::Manifest => true,
+            _ => false,
+        }
+    }
+
+    fn artifact(self) -> ArtifactKind {
+        match self {
+            Self::Wgsl => ArtifactKind::Wgsl,
+            Self::Wasm => ArtifactKind::Wasm,
+            Self::Manifest => ArtifactKind::Manifest,
+            Self::Source | Self::Unknown | Self::Close => ArtifactKind::Source,
+        }
+    }
+}
+
+enum ArtifactKind {
+    Source,
+    Wgsl,
+    Wasm,
+    Manifest,
+}
+
+impl Copy for ArtifactKind {}
+
+impl ArtifactKind {
+    fn is_source(self) -> bool { match self { Self::Source => true, _ => false } }
+    fn is_wgsl(self) -> bool { match self { Self::Wgsl => true, _ => false } }
+    fn is_wasm(self) -> bool { match self { Self::Wasm => true, _ => false } }
+}
+
+/// One reflected schema owns every DOM/view correlation identity. The source
+/// never spells a numeric node/view table; FCO assigns opaque handles once and
+/// their role types constrain both page construction and projection effects.
+struct InspectorParts {
+    overlay: Part<Visibility>,
+    text: Part<Visibility>,
+    binary: Part<Visibility>,
+    loading: Part<Visibility>,
+    error_view: Part<Visibility>,
+    title_source: Part<Visibility>,
+    title_wgsl: Part<Visibility>,
+    title_wasm: Part<Visibility>,
+    title_manifest: Part<Visibility>,
+    body: Part<Text>,
+    bytes: Part<Text>,
+    raw: Part<Link>,
+    error_text: Part<Text>,
+}
+
+derive ComponentSchema for InspectorParts using ComponentSchemaProvider
+
+enum InspectorStatus {
+    Loading,
+    Ready,
+    Error,
+}
+
+impl Copy for InspectorStatus {}
+
+impl InspectorStatus {
+    fn is_loading(self) -> bool { match self { Self::Loading => true, _ => false } }
+    fn is_ready(self) -> bool { match self { Self::Ready => true, _ => false } }
+    fn is_error(self) -> bool { match self { Self::Error => true, _ => false } }
+}
+
 const URL_CAPACITY: u32 = 2048
 const PATCH_CAPACITY: u32 = 1048576
 const CONTENT_CAPACITY: u32 = 1044480
@@ -51,9 +112,9 @@ pub struct InspectorState {
     pub patch_ptr: u32,
     pub url_ptr: u32,
     pub url_len: u32,
-    pub selected: u32,
+    pub selected: ArtifactKind,
     pub pending: u32,
-    pub status: u32,
+    pub status: InspectorStatus,
     pub byte_len: u32,
     pub content_ptr: u32,
     pub content_len: u32,
@@ -93,28 +154,17 @@ fn copy_content(destination: u32, value: own BrowserString) -> u32 {
     len
 }
 
-fn is_resource_action(target: u32) -> bool {
-    target == ACTION_SOURCE
-        || target == ACTION_WGSL
-        || target == ACTION_WASM
-        || target == ACTION_MANIFEST
-}
-
 fn is_success(status: u32) -> bool {
     status >= 200 && status < 300
-}
-
-fn view_bit(index: u32) -> u32 {
-    1 << index
 }
 
 actor SourceInspector {
     patch_ptr: u32,
     url_ptr: u32,
     url_len: u32,
-    selected: u32,
+    selected: ArtifactKind,
     pending: u32,
-    status: u32,
+    status: InspectorStatus,
     byte_len: u32,
     content_ptr: u32,
     content_len: u32,
@@ -126,10 +176,11 @@ actor SourceInspector {
     revision: u32,
 
     const fn view() -> ComponentView<VIEW_CAPACITY> uses (ComponentComposition) {
+        let ui = <InspectorParts as ComponentSchema>::component_parts()
         PageBuilder::new()
             .open(element: PageElement::Section)
             .attribute(value: PageAttribute::class(value: "inspector source-inspector"))
-            .attribute(value: PageAttribute::view(value: VIEW_OVERLAY))
+            .attribute(value: PageAttribute::view(value: ui.overlay))
             .attribute(value: PageAttribute::hidden())
             .attribute(value: PageAttribute::role(value: "dialog"))
             .attribute(value: PageAttribute::aria_modal())
@@ -138,34 +189,34 @@ actor SourceInspector {
             .attribute(value: PageAttribute::class(value: "inspector-head"))
             .open(element: PageElement::Span)
             .attribute(value: PageAttribute::class(value: "inspector-title"))
-            .attribute(value: PageAttribute::view(value: VIEW_TITLE_SOURCE))
+            .attribute(value: PageAttribute::view(value: ui.title_source))
             .text(value: ui_text(value: "Fe source"))
             .close()
             .open(element: PageElement::Span)
             .attribute(value: PageAttribute::class(value: "inspector-title"))
-            .attribute(value: PageAttribute::view(value: VIEW_TITLE_WGSL))
+            .attribute(value: PageAttribute::view(value: ui.title_wgsl))
             .text(value: ui_text(value: "Compiler-generated WGSL"))
             .close()
             .open(element: PageElement::Span)
             .attribute(value: PageAttribute::class(value: "inspector-title"))
-            .attribute(value: PageAttribute::view(value: VIEW_TITLE_WASM))
+            .attribute(value: PageAttribute::view(value: ui.title_wasm))
             .text(value: ui_text(value: "Compiler-generated Wasm"))
             .close()
             .open(element: PageElement::Span)
             .attribute(value: PageAttribute::class(value: "inspector-title"))
-            .attribute(value: PageAttribute::view(value: VIEW_TITLE_MANIFEST))
+            .attribute(value: PageAttribute::view(value: ui.title_manifest))
             .text(value: ui_text(value: "Transitional audit manifest"))
             .close()
             .open(element: PageElement::Anchor)
             .attribute(value: PageAttribute::class(value: "raw"))
-            .attribute(value: PageAttribute::node(value: NODE_RAW))
+            .attribute(value: PageAttribute::node(value: ui.raw))
             .attribute(value: PageAttribute::target(value: "_blank"))
             .attribute(value: PageAttribute::rel(value: "noopener"))
             .text(value: ui_text(value: "Raw"))
             .close()
             .open(element: PageElement::Button)
             .attribute(value: PageAttribute::class(value: "close"))
-            .attribute(value: PageAttribute::action(value: ACTION_CLOSE))
+            .attribute(value: PageAttribute::action(value: InspectorAction::Close))
             .attribute(value: PageAttribute::input_type(value: "button"))
             .attribute(value: PageAttribute::aria_label(value: "Close"))
             .text(value: ui_text(value: "×"))
@@ -175,27 +226,27 @@ actor SourceInspector {
             .attribute(value: PageAttribute::class(value: "body inspector-body"))
             .open(element: PageElement::Paragraph)
             .attribute(value: PageAttribute::class(value: "message"))
-            .attribute(value: PageAttribute::view(value: VIEW_LOADING))
+            .attribute(value: PageAttribute::view(value: ui.loading))
             .text(value: ui_text(value: "Loading…"))
             .close()
             .open(element: PageElement::Pre)
-            .attribute(value: PageAttribute::view(value: VIEW_TEXT))
-            .attribute(value: PageAttribute::node(value: NODE_BODY))
+            .attribute(value: PageAttribute::view(value: ui.text))
+            .attribute(value: PageAttribute::node(value: ui.body))
             .close()
             .open(element: PageElement::Paragraph)
             .attribute(value: PageAttribute::class(value: "message"))
-            .attribute(value: PageAttribute::view(value: VIEW_BINARY))
+            .attribute(value: PageAttribute::view(value: ui.binary))
             .text(value: ui_text(value: "Compiled binary module · "))
             .open(element: PageElement::Strong)
-            .attribute(value: PageAttribute::node(value: NODE_BYTES))
+            .attribute(value: PageAttribute::node(value: ui.bytes))
             .text(value: ui_text(value: "0"))
             .close()
             .text(value: ui_text(value: " bytes."))
             .close()
             .open(element: PageElement::Pre)
             .attribute(value: PageAttribute::class(value: "error"))
-            .attribute(value: PageAttribute::view(value: VIEW_ERROR))
-            .attribute(value: PageAttribute::node(value: NODE_ERROR))
+            .attribute(value: PageAttribute::view(value: ui.error_view))
+            .attribute(value: PageAttribute::node(value: ui.error_text))
             .close()
             .close()
             .close()
@@ -210,9 +261,9 @@ actor SourceInspector {
             patch_ptr: patch.ptr,
             url_ptr: url.ptr,
             url_len: 0,
-            selected: ACTION_SOURCE,
+            selected: ArtifactKind::Source,
             pending: 0,
-            status: STATUS_LOADING,
+            status: InspectorStatus::Loading,
             byte_len: 0,
             content_ptr: content.ptr,
             content_len: 0,
@@ -225,7 +276,7 @@ actor SourceInspector {
         }
     }
 
-    fn receive(self, event: own ComponentEvent) -> InspectorState uses (ResidentTransition) {
+    fn receive(self, event: own ComponentEvent<InspectorAction>) -> InspectorState uses (ResidentTransition) {
         let patch_ptr = self.patch_ptr
         let url_ptr = self.url_ptr
         let mut url_len = self.url_len
@@ -254,13 +305,13 @@ actor SourceInspector {
             }
             ComponentEventKind::Activate => {
                 if connected {
-                    if is_resource_action(target: event.target) && event.text.len > 0 {
-                        selected = event.target
+                    if event.target.opens_artifact() && event.text.len > 0 {
+                        selected = event.target.artifact()
                         url_len = copy_url(destination: url_ptr, value: event.text)
                         revision = revision + 1
                         pending = revision
                         if pending == 0 { pending = 1 }
-                        status = STATUS_LOADING
+                        status = InspectorStatus::Loading
                         byte_len = 0
                         content_len = 0
                         open = true
@@ -268,26 +319,40 @@ actor SourceInspector {
                         prevent_default = true
                         focus_close = true
                     } else {
-                        if event.target == ACTION_CLOSE && open {
-                            open = false
-                            prevent_default = true
-                            revision = revision + 1
+                        match event.target {
+                            InspectorAction::Close => {
+                                if open {
+                                    open = false
+                                    prevent_default = true
+                                    revision = revision + 1
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
             }
             ComponentEventKind::KeyDown => {
-                if connected && open && event.detail == 27 {
-                    open = false
-                    prevent_default = true
-                    revision = revision + 1
+                if connected && open {
+                    match event.keyboard_key() {
+                        KeyboardKey::Escape => {
+                            open = false
+                            prevent_default = true
+                            revision = revision + 1
+                        }
+                        _ => {}
+                    }
                 }
             }
             ComponentEventKind::ResourceLoaded => {
-                if connected && open && event.target == pending {
+                if connected && open && event.request == pending {
                     byte_len = event.detail
                     content_len = copy_content(destination: content_ptr, value: event.text)
-                    status = if is_success(status: event.key) { STATUS_READY } else { STATUS_ERROR }
+                    status = if is_success(status: event.key) {
+                        InspectorStatus::Ready
+                    } else {
+                        InspectorStatus::Error
+                    }
                     revision = revision + 1
                 }
             }
@@ -314,34 +379,35 @@ actor SourceInspector {
     }
 
     fn project(self) -> ComponentPatch uses (ProjectState) {
+        let ui = <InspectorParts as ComponentSchema>::component_parts()
         let url = component_string(ptr: self.url_ptr, len: self.url_len)
         let content = component_string(ptr: self.content_ptr, len: self.content_len)
         let mut visible_mask: u32 = 0
         if self.connected && self.open {
-            visible_mask = visible_mask | view_bit(index: VIEW_OVERLAY)
-            if self.selected == ACTION_SOURCE {
-                visible_mask = visible_mask | view_bit(index: VIEW_TITLE_SOURCE)
+            visible_mask = visible_mask | ui.overlay.bit()
+            if self.selected.is_source() {
+                visible_mask = visible_mask | ui.title_source.bit()
             } else {
-                if self.selected == ACTION_WGSL {
-                    visible_mask = visible_mask | view_bit(index: VIEW_TITLE_WGSL)
+                if self.selected.is_wgsl() {
+                    visible_mask = visible_mask | ui.title_wgsl.bit()
                 } else {
-                    if self.selected == ACTION_WASM {
-                        visible_mask = visible_mask | view_bit(index: VIEW_TITLE_WASM)
+                    if self.selected.is_wasm() {
+                        visible_mask = visible_mask | ui.title_wasm.bit()
                     } else {
-                        visible_mask = visible_mask | view_bit(index: VIEW_TITLE_MANIFEST)
+                        visible_mask = visible_mask | ui.title_manifest.bit()
                     }
                 }
             }
-            if self.status == STATUS_LOADING {
-                visible_mask = visible_mask | view_bit(index: VIEW_LOADING)
+            if self.status.is_loading() {
+                visible_mask = visible_mask | ui.loading.bit()
             } else {
-                if self.status == STATUS_ERROR {
-                    visible_mask = visible_mask | view_bit(index: VIEW_ERROR)
+                if self.status.is_error() {
+                    visible_mask = visible_mask | ui.error_view.bit()
                 } else {
-                    if self.selected == ACTION_WASM {
-                        visible_mask = visible_mask | view_bit(index: VIEW_BINARY)
+                    if self.selected.is_wasm() {
+                        visible_mask = visible_mask | ui.binary.bit()
                     } else {
-                        visible_mask = visible_mask | view_bit(index: VIEW_TEXT)
+                        visible_mask = visible_mask | ui.text.bit()
                     }
                 }
             }
@@ -351,32 +417,36 @@ actor SourceInspector {
             buffer: BrowserBytes { ptr: self.patch_ptr, len: PATCH_CAPACITY },
         )
         if self.open && self.url_len > 0 {
-            writer = writer.set_href(target: NODE_RAW, value: url)
+            writer = writer.set_href(target: ui.raw, value: url)
         }
-        if self.status == STATUS_READY {
-            if self.selected == ACTION_WASM {
-                writer = writer.set_u32_text(target: NODE_BYTES, value: self.byte_len)
+        if self.status.is_ready() {
+            if self.selected.is_wasm() {
+                writer = writer.set_u32_text(target: ui.bytes, value: self.byte_len)
             } else {
-                writer = writer.set_text(target: NODE_BODY, value: content)
+                writer = writer.set_text(target: ui.body, value: content)
             }
         } else {
-            if self.status == STATUS_ERROR {
-                writer = writer.set_text(target: NODE_ERROR, value: content)
+            if self.status.is_error() {
+                writer = writer.set_text(target: ui.error_text, value: content)
             }
         }
         if self.issue_load {
-            if self.selected == ACTION_WASM {
+            if self.selected.is_wasm() {
                 writer = writer.load_bytes(request: self.pending, value: url)
             } else {
                 writer = writer.load_text(request: self.pending, value: url)
             }
         }
 
-        ComponentPatch {
+        ComponentPatch::new(
             visible_mask: visible_mask,
-            focus_target: if self.focus_close { ACTION_CLOSE } else { 0 },
-            flags: if self.prevent_default { 1 } else { 0 },
+            focus_target: if self.focus_close {
+                InspectorAction::Close
+            } else {
+                InspectorAction::Unknown
+            },
+            prevent_default: self.prevent_default,
             commands: writer.finish(),
-        }
+        )
     }
 }

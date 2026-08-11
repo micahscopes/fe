@@ -51,7 +51,7 @@ impl Default for Model {
     fn default() -> Self {
         Self {
             url: String::new(),
-            selected: 100,
+            selected: 0,
             pending: 0,
             status: 0,
             byte_len: 0,
@@ -70,6 +70,7 @@ impl Default for Model {
 struct Event<'a> {
     kind: u32,
     target: u32,
+    request: u32,
     key: u32,
     detail: u32,
     text: &'a str,
@@ -89,8 +90,8 @@ fn reduce(model: &mut Model, event: Event<'_>) {
             model.open = false;
             model.revision += 1;
         }
-        3 if model.connected && (100..=103).contains(&event.target) && !event.text.is_empty() => {
-            model.selected = event.target;
+        3 if model.connected && (1..=4).contains(&event.target) && !event.text.is_empty() => {
+            model.selected = event.target - 1;
             model.url = event.text.chars().take(2048).collect();
             model.revision += 1;
             model.pending = model.revision.max(1);
@@ -102,7 +103,7 @@ fn reduce(model: &mut Model, event: Event<'_>) {
             model.prevent_default = true;
             model.focus_close = true;
         }
-        3 if model.connected && event.target == 104 && model.open => {
+        3 if model.connected && event.target == 5 && model.open => {
             model.open = false;
             model.prevent_default = true;
             model.revision += 1;
@@ -112,7 +113,7 @@ fn reduce(model: &mut Model, event: Event<'_>) {
             model.prevent_default = true;
             model.revision += 1;
         }
-        8 if model.connected && model.open && event.target == model.pending => {
+        8 if model.connected && model.open && event.request == model.pending => {
             model.byte_len = event.detail;
             model.content = event.text.to_owned();
             model.status = u32::from(!(200..300).contains(&event.key)) + 1;
@@ -172,29 +173,29 @@ fn expected_projection(model: &Model) -> (u32, u32, u32, Vec<Operation>) {
     let mut mask = 0;
     if model.connected && model.open {
         mask |= 1 << 0;
-        mask |= 1 << (model.selected - 95);
+        mask |= 1 << (model.selected + 5);
         mask |= match model.status {
             0 => 1 << 3,
             2 => 1 << 4,
-            _ if model.selected == 102 => 1 << 2,
+            _ if model.selected == 2 => 1 << 2,
             _ => 1 << 1,
         };
     }
     let mut operations = Vec::new();
     if model.open && !model.url.is_empty() {
-        operations.push(Operation::Href(102, model.url.clone()));
+        operations.push(Operation::Href(11, model.url.clone()));
     }
     if model.status == 1 {
-        if model.selected == 102 {
-            operations.push(Operation::Text(101, model.byte_len.to_string()));
+        if model.selected == 2 {
+            operations.push(Operation::Text(10, model.byte_len.to_string()));
         } else {
-            operations.push(Operation::Text(100, model.content.clone()));
+            operations.push(Operation::Text(9, model.content.clone()));
         }
     } else if model.status == 2 {
-        operations.push(Operation::Text(103, model.content.clone()));
+        operations.push(Operation::Text(12, model.content.clone()));
     }
     if model.issue_load {
-        operations.push(if model.selected == 102 {
+        operations.push(if model.selected == 2 {
             Operation::LoadBytes(model.pending, model.url.clone())
         } else {
             Operation::LoadText(model.pending, model.url.clone())
@@ -202,7 +203,7 @@ fn expected_projection(model: &Model) -> (u32, u32, u32, Vec<Operation>) {
     }
     (
         mask,
-        u32::from(model.focus_close) * 104,
+        u32::from(model.focus_close) * 5,
         u32::from(model.prevent_default),
         operations,
     )
@@ -231,7 +232,7 @@ fn source_inspector_owns_selection_loading_stale_response_and_presentation_polic
         .expect("SourceInspector contract")
         .expect("SourceInspector actor");
     assert_eq!(artifact.contract.actor, "SourceInspector");
-    assert_eq!(artifact.contract.event_leaf_count, 8);
+    assert_eq!(artifact.contract.event_leaf_count, 9);
     assert_eq!(artifact.contract.state_leaf_count, 15);
 
     let engine = wasmtime::Engine::default();
@@ -243,7 +244,7 @@ fn source_inspector_owns_selection_loading_stale_response_and_presentation_polic
         .get_typed_func::<(), ActorState>(&mut store, RESIDENT_ACTOR_INITIALIZE_EXPORT)
         .unwrap();
     let transition = instance
-        .get_typed_func::<(i32, i32, i32, i32, f32, f32, i32, i32), ActorState>(
+        .get_typed_func::<(i32, i32, i32, i32, i32, f32, f32, i32, i32), ActorState>(
             &mut store,
             RESIDENT_ACTOR_TRANSITION_EXPORT,
         )
@@ -262,7 +263,8 @@ fn source_inspector_owns_selection_loading_stale_response_and_presentation_polic
     let tape = [
         Event {
             kind: 3,
-            target: 100,
+            target: 1,
+            request: 0,
             key: 0,
             detail: 1,
             text: "https://example.test/a.fe",
@@ -270,48 +272,55 @@ fn source_inspector_owns_selection_loading_stale_response_and_presentation_polic
         Event {
             kind: 0,
             target: 0,
+            request: 0,
             key: 0,
             detail: 0,
             text: "",
         },
         Event {
             kind: 3,
-            target: 100,
+            target: 1,
+            request: 0,
             key: 0,
             detail: 1,
             text: "https://example.test/a.fe",
         },
         Event {
             kind: 3,
-            target: 14,
+            target: 0,
+            request: 0,
             key: 7,
             detail: 1,
             text: "",
         },
         Event {
             kind: 8,
-            target: 99,
+            target: 0,
+            request: 99,
             key: 200,
             detail: 5,
             text: "stale",
         },
         Event {
             kind: 8,
-            target: 2,
+            target: 0,
+            request: 2,
             key: 200,
             detail: 8,
             text: "actor A",
         },
         Event {
             kind: 3,
-            target: 102,
+            target: 3,
+            request: 0,
             key: 0,
             detail: 1,
             text: "https://example.test/a.wasm",
         },
         Event {
             kind: 8,
-            target: 4,
+            target: 0,
+            request: 4,
             key: 200,
             detail: 4294967295,
             text: "",
@@ -319,20 +328,23 @@ fn source_inspector_owns_selection_loading_stale_response_and_presentation_polic
         Event {
             kind: 7,
             target: 0,
+            request: 0,
             key: 0,
             detail: 27,
             text: "",
         },
         Event {
             kind: 3,
-            target: 101,
+            target: 2,
+            request: 0,
             key: 0,
             detail: 1,
             text: "https://example.test/missing.wgsl",
         },
         Event {
             kind: 8,
-            target: 7,
+            target: 0,
+            request: 7,
             key: 404,
             detail: 9,
             text: "not found",
@@ -340,13 +352,15 @@ fn source_inspector_owns_selection_loading_stale_response_and_presentation_polic
         Event {
             kind: 1,
             target: 0,
+            request: 0,
             key: 0,
             detail: 0,
             text: "",
         },
         Event {
             kind: 8,
-            target: 7,
+            target: 0,
+            request: 7,
             key: 200,
             detail: 2,
             text: "ok",
@@ -363,6 +377,7 @@ fn source_inspector_owns_selection_loading_stale_response_and_presentation_polic
                 (
                     event.kind as i32,
                     event.target as i32,
+                    event.request as i32,
                     event.key as i32,
                     event.detail as i32,
                     0.0,
@@ -414,4 +429,11 @@ fn source_inspector_owns_selection_loading_stale_response_and_presentation_polic
             .unwrap();
         assert_eq!(decode(&commands), expected.3, "effects at event {index}");
     }
+
+    assert!(
+        transition
+            .call(&mut store, (3, 99, 0, 0, 0, 0.0, 0.0, 0, 0))
+            .is_err(),
+        "invalid FCO-derived InspectorAction must trap before reaching Fe"
+    );
 }

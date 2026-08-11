@@ -9,6 +9,7 @@
 use std::web::page::{
     Page, PageAttribute, PageBuilder, PageComposition, PageElement, PageText,
 }
+use source_inspector::InspectorAction
 
 const CAPACITY: usize = 512
 
@@ -58,7 +59,7 @@ impl GalleryBuilder {
             .open(element: PageElement::Anchor)
             .attribute(value: PageAttribute::href(value: t2("sketches/gallery_page/", "src/lib.fe")))
             .attribute(value: PageAttribute::publish())
-            .attribute(value: PageAttribute::action(value: 100))
+            .attribute(value: PageAttribute::action(value: InspectorAction::Source))
             .text(value: t("page source"))
             .close()
             .close()
@@ -85,7 +86,7 @@ impl GalleryBuilder {
             .open(element: PageElement::Anchor)
             .attribute(value: PageAttribute::href(value: source))
             .attribute(value: PageAttribute::publish())
-            .attribute(value: PageAttribute::action(value: 100))
+            .attribute(value: PageAttribute::action(value: InspectorAction::Source))
             .text(value: t("source"))
             .close()
             .close()
@@ -105,9 +106,9 @@ impl GalleryBuilder {
         let page = builder.page
             .render(
                 source: program,
-                wgsl_action: 101,
-                wasm_action: 102,
-                manifest_action: 103,
+                wgsl_action: InspectorAction::Wgsl,
+                wasm_action: InspectorAction::Wasm,
+                manifest_action: InspectorAction::Manifest,
             )
             .close()
         Self { page: page }

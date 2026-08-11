@@ -108,7 +108,7 @@ fn fe_component_actor_owns_lifecycle_selection_and_resident_state() {
     assert_eq!(artifact.contract.init_source_entry, "initial");
     assert_eq!(artifact.contract.projection_source_entry, "project");
     assert_eq!(artifact.contract.source_entry, "receive");
-    assert_eq!(artifact.contract.event_leaf_count, 8);
+    assert_eq!(artifact.contract.event_leaf_count, 9);
     assert_eq!(artifact.contract.state_leaf_count, 3);
     assert_eq!(artifact.contract.projection_leaf_count, 5);
     assert!(matches!(artifact.contract.event, CanonicalType::Record(_)));
@@ -155,7 +155,7 @@ fn fe_component_actor_owns_lifecycle_selection_and_resident_state() {
     let mut store = wasmtime::Store::new(&engine, ());
     let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("resident instance");
     let transition = instance
-        .get_typed_func::<(i32, i32, i32, i32, f32, f32, i32, i32), (i32, i32, i32)>(
+        .get_typed_func::<(i32, i32, i32, i32, i32, f32, f32, i32, i32), (i32, i32, i32)>(
             &mut store,
             RESIDENT_ACTOR_TRANSITION_EXPORT,
         )
@@ -172,7 +172,7 @@ fn fe_component_actor_owns_lifecycle_selection_and_resident_state() {
 
     assert!(
         transition
-            .call(&mut store, (0, 0, 0, 0, 0.0, 0.0, 0, 0))
+            .call(&mut store, (0, 0, 0, 0, 0, 0.0, 0.0, 0, 0))
             .is_err(),
         "component transition must reject events before a complete state seed"
     );
@@ -314,6 +314,7 @@ fn fe_component_actor_owns_lifecycle_selection_and_resident_state() {
                 (
                     event.kind as i32,
                     event.target as i32,
+                    0,
                     event.key as i32,
                     event.detail as i32,
                     event.value,
@@ -351,7 +352,7 @@ fn fe_component_actor_owns_lifecycle_selection_and_resident_state() {
 
     assert!(
         transition
-            .call(&mut store, (99, 0, 0, 0, 0.0, 11.0, 0, 0))
+            .call(&mut store, (99, 0, 0, 0, 0, 0.0, 11.0, 0, 0))
             .is_err(),
         "an invalid fieldless-enum tag must trap before Fe can interpret it"
     );

@@ -245,12 +245,12 @@ try {
     active: document.querySelector(".todo-count strong").textContent,
   })), { completed: true, checked: true, active: "1" });
 
-  await page.click('[data-fe-action="5"]');
+  await page.click('#todo-app [data-fe-action="5"], #gallery-todomvc [data-fe-action="5"]');
   assert.deepEqual(await page.evaluate(() => ({
     keys: Array.from(document.querySelectorAll(".todo-list > li"), node => node.dataset.feKey),
     identity: document.querySelector('[data-fe-key="2"]').dataset.e2eIdentity,
   })), { keys: ["2"], identity: "kept" });
-  await page.click('[data-fe-action="4"]');
+  await page.click('#todo-app [data-fe-action="4"], #gallery-todomvc [data-fe-action="4"]');
   assert.deepEqual(await page.evaluate(() =>
     Array.from(document.querySelectorAll(".todo-list > li"), node => node.dataset.feKey)
   ), ["1", "2"]);
@@ -297,7 +297,7 @@ try {
       await Promise.resolve();
     }
     globalThis.__feTodoE2E.beforeSingleClick = globalThis.__feTodoE2E.stateCount;
-    document.querySelector('[data-fe-action="6"]').click();
+    component.querySelector('[data-fe-action="6"]').click();
   });
   assert.deepEqual(await page.evaluate(() => ({
     delta: globalThis.__feTodoE2E.stateCount - globalThis.__feTodoE2E.beforeSingleClick,
@@ -305,12 +305,12 @@ try {
     title: document.querySelector('[data-fe-key="1"] label').textContent,
   })), { delta: 1, keys: ["1"], title: "gamma" });
 
-  await page.click('[data-fe-action="4"]');
+  await page.click('#todo-app [data-fe-action="4"], #gallery-todomvc [data-fe-action="4"]');
   await page.click('[data-fe-key="2"] .destroy');
   assert.deepEqual(await page.evaluate(() =>
     Array.from(document.querySelectorAll(".todo-list > li"), node => node.dataset.feKey)
   ), ["1"]);
-  await page.click('[data-fe-action="3"]');
+  await page.click('#todo-app [data-fe-action="3"], #gallery-todomvc [data-fe-action="3"]');
   assert.deepEqual(await page.evaluate(() => ({
     rows: document.querySelectorAll(".todo-list > li").length,
     mainHidden: document.querySelector(".main").hidden,

@@ -400,6 +400,24 @@ impl DevelopmentRebuildCoordinator {
     pub fn execute_with_render_lane(
         &mut self,
         batch: DevelopmentRebuildBatch,
+        load_document: impl FnMut(&str) -> Result<String, String>,
+        render_runtime_js: &str,
+        load_source: impl FnMut(&Url) -> Result<String, String>,
+        render_compile: impl FnMut(&Url, Option<&str>) -> Result<Option<RenderBundleArtifact>, String>,
+    ) -> Vec<DevelopmentRebuildEvent> {
+        self.execute_with_lanes(
+            batch,
+            load_document,
+            render_runtime_js,
+            load_source,
+            render_compile,
+            |_| Ok(None),
+        )
+    }
+
+    pub fn execute_with_lanes(
+        &mut self,
+        batch: DevelopmentRebuildBatch,
         mut load_document: impl FnMut(&str) -> Result<String, String>,
         render_runtime_js: &str,
         mut load_source: impl FnMut(&Url) -> Result<String, String>,
@@ -407,6 +425,10 @@ impl DevelopmentRebuildCoordinator {
             &Url,
             Option<&str>,
         ) -> Result<Option<RenderBundleArtifact>, String>,
+        mut page_compile: impl FnMut(
+            &Url,
+        )
+            -> Result<Option<fe_compiler_facade::PageProjectionResult>, String>,
     ) -> Vec<DevelopmentRebuildEvent> {
         if batch.generation != self.generation {
             return vec![DevelopmentRebuildEvent::Cancelled {
@@ -433,12 +455,13 @@ impl DevelopmentRebuildCoordinator {
                     continue;
                 }
             };
-            let report = self.precompiler.build_with_render_lane(
+            let report = self.precompiler.build_with_lanes(
                 &document_url,
                 &html,
                 render_runtime_js,
                 &mut load_source,
                 &mut render_compile,
+                &mut page_compile,
             );
             append_build_events(&mut events, document_url, report);
         }
@@ -532,6 +555,32 @@ impl DevelopmentPrecompiler {
         load: impl FnMut(&Url) -> Result<String, String>,
         render_compile: impl FnMut(&Url, Option<&str>) -> Result<Option<RenderBundleArtifact>, String>,
     ) -> DevelopmentBuildReport {
+        self.build_with_lanes(
+            document_url,
+            html,
+            render_runtime_js,
+            load,
+            render_compile,
+            |_| Ok(None),
+        )
+    }
+
+    /// Full native development build with render and initialized-ingot page
+    /// projection lanes. Portable callers keep using
+    /// [`Self::build_with_render_lane`], whose page compiler falls back to the
+    /// protocol-only virtual-source facade.
+    pub fn build_with_lanes(
+        &mut self,
+        document_url: &str,
+        html: &str,
+        render_runtime_js: &str,
+        load: impl FnMut(&Url) -> Result<String, String>,
+        render_compile: impl FnMut(&Url, Option<&str>) -> Result<Option<RenderBundleArtifact>, String>,
+        page_compile: impl FnMut(
+            &Url,
+        )
+            -> Result<Option<fe_compiler_facade::PageProjectionResult>, String>,
+    ) -> DevelopmentBuildReport {
         match discover_external_dependencies(document_url, html) {
             Ok(dependencies) => {
                 self.graph
@@ -540,12 +589,13 @@ impl DevelopmentPrecompiler {
             Err(error) => return self.failed(document_url, error),
         }
 
-        match precompile_html_with_render_lane(
+        match precompile_html_with_lanes(
             document_url,
             html,
             render_runtime_js,
             load,
             render_compile,
+            page_compile,
         ) {
             Ok(output) => {
                 let mut dependencies = self
@@ -1256,7 +1306,16 @@ pub fn precompile_html(
     html: &str,
     load: impl FnMut(&Url) -> Result<String, String>,
 ) -> Result<PrecompileOutput, PrecompileError> {
-    precompile_html_impl(document_url, html, None, None, "", load, |_, _| Ok(None))
+    precompile_html_impl(
+        document_url,
+        html,
+        None,
+        None,
+        "",
+        load,
+        |_, _| Ok(None),
+        |_| Ok(None),
+    )
 }
 
 /// Precompile and publish a versioned, minimal adapter selection inventory for
@@ -1276,6 +1335,7 @@ pub fn precompile_html_with_adapter_metadata(
         "",
         load,
         |_, _| Ok(None),
+        |_| Ok(None),
     )
 }
 
@@ -1298,6 +1358,7 @@ pub fn precompile_html_with_adapter_plan(
         "",
         load,
         |_, _| Ok(None),
+        |_| Ok(None),
     )
 }
 
@@ -1338,6 +1399,31 @@ pub fn precompile_html_with_render_lane(
         render_runtime_js,
         load,
         render_compile,
+        |_| Ok(None),
+    )
+}
+
+/// Native/full-workspace form of [`precompile_html_with_render_lane`]. A page
+/// compiler may project an external page source through an initialized ingot;
+/// returning `Ok(None)` retains the portable virtual-source facade. The typed
+/// page result remains in memory and never becomes a runtime manifest.
+pub fn precompile_html_with_lanes(
+    document_url: &str,
+    html: &str,
+    render_runtime_js: &str,
+    load: impl FnMut(&Url) -> Result<String, String>,
+    render_compile: impl FnMut(&Url, Option<&str>) -> Result<Option<RenderBundleArtifact>, String>,
+    page_compile: impl FnMut(&Url) -> Result<Option<fe_compiler_facade::PageProjectionResult>, String>,
+) -> Result<PrecompileOutput, PrecompileError> {
+    precompile_html_impl(
+        document_url,
+        html,
+        None,
+        None,
+        render_runtime_js,
+        load,
+        render_compile,
+        page_compile,
     )
 }
 
@@ -1350,12 +1436,22 @@ fn precompile_html_impl(
     render_runtime_js: &str,
     mut load: impl FnMut(&Url) -> Result<String, String>,
     mut render_compile: impl FnMut(&Url, Option<&str>) -> Result<Option<RenderBundleArtifact>, String>,
+    mut page_compile: impl FnMut(
+        &Url,
+    )
+        -> Result<Option<fe_compiler_facade::PageProjectionResult>, String>,
 ) -> Result<PrecompileOutput, PrecompileError> {
     let document_url = Url::parse(document_url)
         .map_err(|error| PrecompileError::InvalidDocumentUrl(error.to_string()))?;
     let dom = html5ever::parse_document(RcDom::default(), Default::default()).one(html);
     let base_url = document_base_url(&dom.document, &document_url)?;
-    let page_dependencies = project_fe_pages(&dom.document, &base_url, &document_url, &mut load)?;
+    let page_dependencies = project_fe_pages(
+        &dom.document,
+        &base_url,
+        &document_url,
+        &mut load,
+        &mut page_compile,
+    )?;
     let canonical_gallery = find_meta_content(&dom.document, ATTRIBUTION_POLICY_META_NAME)
         .is_some_and(|value| {
             value
@@ -1712,6 +1808,10 @@ fn project_fe_pages(
     base_url: &Url,
     document_url: &Url,
     load: &mut impl FnMut(&Url) -> Result<String, String>,
+    page_compile: &mut impl FnMut(
+        &Url,
+    )
+        -> Result<Option<fe_compiler_facade::PageProjectionResult>, String>,
 ) -> Result<Vec<SourceDependencyInventory>, PrecompileError> {
     let mut scripts = Vec::new();
     collect_elements_with_attr(root, "script", PAGE_SCRIPT_MARKER, &mut scripts);
@@ -1741,26 +1841,34 @@ fn project_fe_pages(
                 url: source.clone(),
                 detail: error.to_string(),
             })?;
-        let source_text = load(&source_url).map_err(|detail| PrecompileError::SourceLoad {
-            url: source_url.to_string(),
-            detail,
-        })?;
-        let request = CompileRequest {
-            protocol: ProtocolVersion::CURRENT,
-            root: source_url.to_string(),
-            sources: vec![VirtualSource::new(source_url.as_str(), source_text)],
-            target: CompileTarget::Wasm,
-            // Page behavior identity is selected by its nominal role, not this
-            // otherwise-required protocol field.
-            entries: vec!["page".to_owned()],
-            options: CompileOptions::default(),
-        };
-        let projected = fe_compiler_facade::project_page(&request).map_err(|error| {
-            PrecompileError::Compile {
+        let projected = if let Some(projected) =
+            page_compile(&source_url).map_err(|detail| PrecompileError::Compile {
                 source_url: source_url.to_string(),
-                detail: error.to_string(),
-            }
-        })?;
+                detail,
+            })? {
+            projected
+        } else {
+            let source_text = load(&source_url).map_err(|detail| PrecompileError::SourceLoad {
+                url: source_url.to_string(),
+                detail,
+            })?;
+            let request = CompileRequest {
+                protocol: ProtocolVersion::CURRENT,
+                root: source_url.to_string(),
+                sources: vec![VirtualSource::new(source_url.as_str(), source_text)],
+                target: CompileTarget::Wasm,
+                // Page behavior identity is selected by its nominal role, not
+                // this otherwise-required protocol field.
+                entries: vec!["page".to_owned()],
+                options: CompileOptions::default(),
+            };
+            fe_compiler_facade::project_page(&request).map_err(|error| {
+                PrecompileError::Compile {
+                    source_url: source_url.to_string(),
+                    detail: error.to_string(),
+                }
+            })?
+        };
         let page = projected.page.ok_or_else(|| {
             if projected.diagnostics.is_empty() {
                 PrecompileError::Compile {

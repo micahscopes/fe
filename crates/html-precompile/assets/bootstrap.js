@@ -70,6 +70,34 @@ function eventElement(event, boundary, attribute) {
   return element && boundary.contains(element) ? element : null;
 }
 
+function eventBelongsToComponent(event, boundary) {
+  const path = typeof event.composedPath === "function" ? event.composedPath() : [];
+  const boundaryIndex = path.indexOf(boundary);
+  if (boundaryIndex >= 0) {
+    return !path.slice(0, boundaryIndex).some(value =>
+      value instanceof Element && value.tagName === "FE-COMPONENT");
+  }
+  const owner = event.target instanceof Element
+    ? event.target.closest("fe-component")
+    : null;
+  return owner === boundary;
+}
+
+function componentElements(boundary, scope, selector) {
+  // Keyed repeat rows are projected while detached, before reconciliation
+  // inserts them into their actor's container. In that one scoped case there
+  // is no closest component yet; descendants are still owned unless they sit
+  // beneath a nested component inside the row.
+  const detachedOwnedScope = scope !== boundary && scope.closest("fe-component") === null;
+  return Array.from(scope.querySelectorAll(selector)).filter(element =>
+    element.closest("fe-component") === boundary ||
+      (detachedOwnedScope && element.closest("fe-component") === null));
+}
+
+function componentElement(boundary, scope, selector) {
+  return componentElements(boundary, scope, selector)[0] ?? null;
+}
+
 function eventTargetId(event, boundary) {
   const element = eventElement(event, boundary, "data-fe-action");
   if (!element) return 0;
@@ -234,7 +262,7 @@ class FeComponentElement extends FeHTMLElement {
   disconnectedCallback() {
     if (this._active) {
       try {
-        this._send(COMPONENT_EVENT.disconnected, 0, 0, 0, 0, performance.now());
+        this._send(COMPONENT_EVENT.disconnected, 0, 0, 0, 0, 0, performance.now());
       } catch (error) {
         this._fail(error);
       }
@@ -249,7 +277,7 @@ class FeComponentElement extends FeHTMLElement {
   adoptedCallback() {
     if (!this._active) return;
     try {
-      this._send(COMPONENT_EVENT.adopted, 0, 0, 0, 0, performance.now());
+      this._send(COMPONENT_EVENT.adopted, 0, 0, 0, 0, 0, performance.now());
     } catch (error) {
       this._fail(error);
     }
@@ -278,7 +306,7 @@ class FeComponentElement extends FeHTMLElement {
     }
     this._active = true;
     this._installListeners();
-    this._send(COMPONENT_EVENT.connected, 0, 0, 0, 0, performance.now());
+    this._send(COMPONENT_EVENT.connected, 0, 0, 0, 0, 0, performance.now());
     this._resolveReady(this);
     this.dispatchEvent(new CustomEvent("fe-ready", { detail: this }));
   }
@@ -289,9 +317,11 @@ class FeComponentElement extends FeHTMLElement {
     this._listeners = controller;
     const on = (type, kind) => this.addEventListener(type, event => {
       try {
+        if (!eventBelongsToComponent(event, this)) return;
         const patch = this._send(
           kind,
           eventTargetId(event, this),
+          0,
           eventKey(event, this),
           type === "keydown" ? (event.keyCode >>> 0) : (event.detail >>> 0),
           numericEventValue(event, this),
@@ -333,7 +363,7 @@ class FeComponentElement extends FeHTMLElement {
     return [this._inputScratch, bytes.byteLength];
   }
 
-  _send(kind, target, key, detail, value, timestamp, text = "", textLimit = COMPONENT_INPUT_CAPACITY) {
+  _send(kind, target, request, key, detail, value, timestamp, text = "", textLimit = COMPONENT_INPUT_CAPACITY) {
     if (!this._instance || !this._initialized) {
       throw new Error("fe-component received an event before Fe initialization");
     }
@@ -341,6 +371,7 @@ class FeComponentElement extends FeHTMLElement {
     this._state = values(this._instance.exports[ACTOR_TRANSITION](
       kind >>> 0,
       target >>> 0,
+      request >>> 0,
       key >>> 0,
       detail >>> 0,
       Math.fround(value),
@@ -363,7 +394,7 @@ class FeComponentElement extends FeHTMLElement {
     if ((flags & ~1) !== 0) {
       throw new Error(`fe-component received unknown ComponentPatch flags ${flags}`);
     }
-    for (const view of this.querySelectorAll("[data-fe-view]")) {
+    for (const view of componentElements(this, this, "[data-fe-view]")) {
       const index = Number(view.getAttribute("data-fe-view"));
       if (!Number.isInteger(index) || index < 0 || index >= 32) {
         throw new Error("data-fe-view must be an integer in [0, 31]");
@@ -371,7 +402,7 @@ class FeComponentElement extends FeHTMLElement {
       view.hidden = (visibleMask & (1 << index)) === 0;
     }
     if (focusTarget !== 0) {
-      const candidate = Array.from(this.querySelectorAll("[data-fe-action]"))
+      const candidate = componentElements(this, this, "[data-fe-action]")
         .find(element => Number(element.getAttribute("data-fe-action")) === focusTarget);
       if (candidate) this._focusAfterDispatch(candidate);
     }
@@ -396,7 +427,7 @@ class FeComponentElement extends FeHTMLElement {
 
   _node(scope, target) {
     if (target === 0 && scope !== this) return scope;
-    const node = scope.querySelector(`[data-fe-node="${target}"]`);
+    const node = componentElement(this, scope, `[data-fe-node="${target}"]`);
     if (!node) throw new Error(`fe-component has no data-fe-node ${target} in command scope`);
     return node;
   }
@@ -416,7 +447,11 @@ class FeComponentElement extends FeHTMLElement {
     for (const operation of operations) {
       if (operation.opcode === 1) {
         const container = this._node(this, operation.container);
-        const template = this.querySelector(`[data-fe-template="${operation.template}"]`);
+        const template = componentElement(
+          this,
+          this,
+          `[data-fe-template="${operation.template}"]`,
+        );
         if (!(template instanceof HTMLTemplateElement)) {
           throw new Error(`fe-component has no template ${operation.template}`);
         }
@@ -584,6 +619,7 @@ class FeComponentElement extends FeHTMLElement {
     try {
       this._send(
         COMPONENT_EVENT.resourceLoaded,
+        0,
         request,
         status,
         byteLength,

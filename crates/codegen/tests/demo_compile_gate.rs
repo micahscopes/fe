@@ -168,16 +168,20 @@ fn assert_scheduled_typed_surface(bundle: &WebBundle) {
 }
 
 fn assert_initial_zoom(bundle: &WebBundle, expected: f32) {
-    let zoom = bundle
+    assert_initial_param(bundle, "zoom", expected);
+}
+
+fn assert_initial_param(bundle: &WebBundle, name: &str, expected: f32) {
+    let param = bundle
         .manifest
         .surface
         .as_ref()
         .expect("actor view surface")
         .params
         .iter()
-        .find(|param| param.name == "zoom")
-        .expect("zoom param");
-    assert_eq!(zoom.init, Some(expected));
+        .find(|param| param.name == name)
+        .unwrap_or_else(|| panic!("{name} param"));
+    assert_eq!(param.init, Some(expected), "initial {name}");
 }
 
 #[derive(Clone, Copy)]
@@ -694,7 +698,23 @@ fn perturbational_mandelbrot_graph_compiles() {
     let bundle = compile_actor_ingot("demos/sketches/perturbational_mandelbrot");
     wasmparser::validate(&bundle.wasm).expect("the Fe control lane must be valid Wasm");
     assert_scheduled_typed_surface(&bundle);
-    assert_initial_zoom(&bundle, 1.0);
+    assert_initial_param(&bundle, "center_x_w0", -1.1723285913467407);
+    assert_initial_param(&bundle, "center_x_w1", -0.000000008653259442326089);
+    assert_initial_param(&bundle, "center_x_w2", 0.00000000000000016498233784400384);
+    assert_initial_param(
+        &bundle,
+        "center_x_w3",
+        0.0000000000000000000000010576053052462748,
+    );
+    assert_initial_param(&bundle, "center_y_w0", 0.29582354426383972);
+    assert_initial_param(&bundle, "center_y_w1", -0.000000004263839503693134);
+    assert_initial_param(&bundle, "center_y_w2", -0.00000000000000021798654948407476);
+    assert_initial_param(
+        &bundle,
+        "center_y_w3",
+        -0.0000000000000000000000037684836019798525,
+    );
+    assert_initial_zoom(&bundle, 0.0000000389);
     let exports = wasm_function_export_names(&bundle.wasm);
     assert!(
         exports

@@ -1,3 +1,6 @@
 [ingot]
 name = "gallery_page"
 version = "0.1.0"
+
+[dependencies]
+source_inspector = "../source_inspector"
