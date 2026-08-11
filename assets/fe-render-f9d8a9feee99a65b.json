@@ -1,10 +1,10 @@
 {
   "artifacts": {
     "canonical_adapters": [],
-    "wasm": "fe-render-72e1282793aa5637.wasm",
-    "wasm_bytes": 2069,
-    "wgsl": "fe-render-52a350d9c877ffbe.wgsl",
-    "wgsl_bytes": 8542
+    "wasm": "fe-render-13c18556b5c39312.wasm",
+    "wasm_bytes": 1629,
+    "wgsl": "fe-render-cd19975c11152900.wgsl",
+    "wgsl_bytes": 5585
   },
   "browser_runtime": null,
   "canonical_interface": null,
@@ -22,24 +22,24 @@
         "members": [
           {
             "arg_index": 2,
-            "doc": "Pencil parameter: [0, 1] sweeps cylinder -> sphere-like -> plane pair.",
-            "name": "lambda",
+            "doc": "Advances the animation; `zoom` and `warp` are exposed for the page.",
+            "name": "time",
             "offset": 0,
             "scalar": "f32",
             "width": 4
           },
           {
             "arg_index": 3,
-            "doc": "Rotation of the member about the y axis; makes the xz cross term live.",
-            "name": "theta",
+            "doc": null,
+            "name": "zoom",
             "offset": 4,
             "scalar": "f32",
             "width": 4
           },
           {
             "arg_index": 4,
-            "doc": "Half-extent of the visible slice in world units.",
-            "name": "zoom",
+            "doc": null,
+            "name": "warp",
             "offset": 8,
             "scalar": "f32",
             "width": 4
@@ -96,24 +96,24 @@
             "members": [
               {
                 "arg_index": 2,
-                "doc": "Pencil parameter: [0, 1] sweeps cylinder -> sphere-like -> plane pair.",
-                "name": "lambda",
+                "doc": "Advances the animation; `zoom` and `warp` are exposed for the page.",
+                "name": "time",
                 "offset": 0,
                 "scalar": "f32",
                 "width": 4
               },
               {
                 "arg_index": 3,
-                "doc": "Rotation of the member about the y axis; makes the xz cross term live.",
-                "name": "theta",
+                "doc": null,
+                "name": "zoom",
                 "offset": 4,
                 "scalar": "f32",
                 "width": 4
               },
               {
                 "arg_index": 4,
-                "doc": "Half-extent of the visible slice in world units.",
-                "name": "zoom",
+                "doc": null,
+                "name": "warp",
                 "offset": 8,
                 "scalar": "f32",
                 "width": 4
@@ -159,9 +159,9 @@
           0
         ]
       },
-      "shader": "fe-render-52a350d9c877ffbe.wgsl",
-      "shader_bytes": 8542,
-      "source_entry": "shade"
+      "shader": "fe-render-cd19975c11152900.wgsl",
+      "shader_bytes": 5585,
+      "source_entry": "plasma"
     }
   ],
   "protocol": "fe-web-bundle",
@@ -169,34 +169,24 @@
   "provenance": {
     "authored_sources": [
       {
-        "id": "demos/sketches/fmath/fe.toml",
+        "id": "fmath/fe.toml",
         "kind": "fe_manifest",
         "sha256": "1bb68ed27a9ae6ba289a949ca67500ebf92f8f21461e4a922b43931b9d98b0c0"
       },
       {
-        "id": "demos/sketches/fmath/src/lib.fe",
+        "id": "fmath/src/lib.fe",
         "kind": "fe",
         "sha256": "c4221532aabf2a9b416d68f18023faaa3edfe0b5652c704b0b4f82401491e31c"
       },
       {
-        "id": "demos/sketches/qcga/fe.toml",
+        "id": "plasma/fe.toml",
         "kind": "fe_manifest",
-        "sha256": "88c621c73e0d93fde6561aeb6262d7cf5280e3358422508659b6e96c8123c8d9"
+        "sha256": "22aa43476bed75e280ec9ae457cc95277b50559e656f090520ee682527c74554"
       },
       {
-        "id": "demos/sketches/qcga/src/lib.fe",
+        "id": "plasma/src/lib.fe",
         "kind": "fe",
-        "sha256": "d6e78628642ebe341931beb33b0cc69e217522b02b51e6abd2b20f463d5ecd95"
-      },
-      {
-        "id": "ingots/sparse_clifford/fe.toml",
-        "kind": "fe_manifest",
-        "sha256": "86dbfce53a6b656e590a36f9624d2bbfe9222e13299d07cefef340a284a191ed"
-      },
-      {
-        "id": "ingots/sparse_clifford/src/lib.fe",
-        "kind": "fe",
-        "sha256": "bc75b3743ca9c2c373d06253625d4ae97de359c4d039865e30a4776abc7aa18e"
+        "sha256": "56ad75826ad961880d7eceddc186883c3b1e19dda45c504bea6686edfa3d9964"
       }
     ],
     "compiler": "fe",
@@ -205,13 +195,14 @@
       "gpu_program",
       "surface_declaration",
       "control_transition",
-      "scheduling_policy"
+      "scheduling_policy",
+      "resident_actor_state"
     ],
     "fixed_host": {
       "artifact": {
-        "bytes": 74166,
-        "path": "fe-render-runtime-ac138839d0f4d287.js",
-        "sha256": "ac138839d0f4d287c527853a0ddf6409a3fe51fdbda7023c7ba378023ac8cb7f"
+        "bytes": 76236,
+        "path": "fe-render-runtime-6ecde349c528b26c.js",
+        "sha256": "6ecde349c528b26c14c9bc5a6677455d7df58c727f2013c59089f07ce2618c7b"
       },
       "contract": "fixed_versioned_demo_blind_browser_host",
       "name": "fe-render-runtime",
@@ -236,10 +227,10 @@
         "sha256": "0432c50d08e3111f05fe86e61254176e5ce821b9dfd3c0092cfedbf4a1a2a453"
       }
     ],
-    "source_id": "qcga"
+    "source_id": "plasma"
   },
   "resources": [],
-  "source_entry": "shade",
+  "source_entry": "plasma",
   "surface": {
     "activate": "pointer",
     "extent": {
@@ -250,28 +241,26 @@
     },
     "params": [
       {
-        "doc": "Pencil parameter: [0, 1] sweeps cylinder -> sphere-like -> plane pair.",
-        "init": 0.15,
-        "kind": "unit",
-        "max": 1.0,
-        "min": 0.0,
-        "name": "lambda"
-      },
-      {
-        "doc": "Rotation of the member about the y axis; makes the xz cross term live.",
-        "init": 0.6,
-        "kind": "angle",
-        "max": 6.2831855,
-        "min": 0.0,
-        "name": "theta"
-      },
-      {
-        "doc": "Half-extent of the visible slice in world units.",
-        "init": 1.6,
+        "doc": "Advances the animation; `zoom` and `warp` are exposed for the page.",
+        "init": 0.0,
         "kind": "range",
-        "max": 4.0,
-        "min": 0.5,
+        "max": 20.0,
+        "min": 0.0,
+        "name": "time"
+      },
+      {
+        "init": 3.0,
+        "kind": "range",
+        "max": 8.0,
+        "min": 1.0,
         "name": "zoom"
+      },
+      {
+        "init": 0.8,
+        "kind": "range",
+        "max": 2.0,
+        "min": 0.0,
+        "name": "warp"
       },
       {
         "doc": "Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).",

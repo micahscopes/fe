@@ -1,10 +1,10 @@
 {
   "artifacts": {
     "canonical_adapters": [],
-    "wasm": "fe-render-9e3197987d9bad67.wasm",
-    "wasm_bytes": 245,
-    "wgsl": "fe-render-74c532f0cacf3fd8.wgsl",
-    "wgsl_bytes": 2296
+    "wasm": "fe-render-71293bc9d5170315.wasm",
+    "wasm_bytes": 2230,
+    "wgsl": "fe-render-52a350d9c877ffbe.wgsl",
+    "wgsl_bytes": 8542
   },
   "browser_runtime": null,
   "canonical_interface": null,
@@ -22,33 +22,41 @@
         "members": [
           {
             "arg_index": 2,
-            "doc": null,
-            "name": "gain",
+            "doc": "Pencil parameter: [0, 1] sweeps cylinder -> sphere-like -> plane pair.",
+            "name": "lambda",
             "offset": 0,
             "scalar": "f32",
             "width": 4
           },
           {
             "arg_index": 3,
-            "doc": null,
-            "name": "bias",
+            "doc": "Rotation of the member about the y axis; makes the xz cross term live.",
+            "name": "theta",
             "offset": 4,
             "scalar": "f32",
             "width": 4
           },
           {
             "arg_index": 4,
-            "doc": null,
-            "name": "cutoff",
+            "doc": "Half-extent of the visible slice in world units.",
+            "name": "zoom",
             "offset": 8,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 5,
+            "doc": "Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).",
+            "name": "res",
+            "offset": 12,
             "scalar": "f32",
             "width": 4
           }
         ],
         "name": "input",
         "role": "input",
-        "span": 12,
-        "stride": 12
+        "span": 16,
+        "stride": 16
       }
     ],
     "builtin_inputs": [
@@ -88,33 +96,41 @@
             "members": [
               {
                 "arg_index": 2,
-                "doc": null,
-                "name": "gain",
+                "doc": "Pencil parameter: [0, 1] sweeps cylinder -> sphere-like -> plane pair.",
+                "name": "lambda",
                 "offset": 0,
                 "scalar": "f32",
                 "width": 4
               },
               {
                 "arg_index": 3,
-                "doc": null,
-                "name": "bias",
+                "doc": "Rotation of the member about the y axis; makes the xz cross term live.",
+                "name": "theta",
                 "offset": 4,
                 "scalar": "f32",
                 "width": 4
               },
               {
                 "arg_index": 4,
-                "doc": null,
-                "name": "cutoff",
+                "doc": "Half-extent of the visible slice in world units.",
+                "name": "zoom",
                 "offset": 8,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 5,
+                "doc": "Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).",
+                "name": "res",
+                "offset": 12,
                 "scalar": "f32",
                 "width": 4
               }
             ],
             "name": "input",
             "role": "input",
-            "span": 12,
-            "stride": 12
+            "span": 16,
+            "stride": 16
           }
         ],
         "builtin_inputs": [
@@ -143,8 +159,8 @@
           0
         ]
       },
-      "shader": "fe-render-74c532f0cacf3fd8.wgsl",
-      "shader_bytes": 2296,
+      "shader": "fe-render-52a350d9c877ffbe.wgsl",
+      "shader_bytes": 8542,
       "source_entry": "shade"
     }
   ],
@@ -153,34 +169,57 @@
   "provenance": {
     "authored_sources": [
       {
-        "id": "gradient/fe.toml",
+        "id": "demos/sketches/fmath/fe.toml",
         "kind": "fe_manifest",
-        "sha256": "a42c78244e784d3a3d38091d547a234194c3febea3bb3b6a54e7ef768477d0d1"
+        "sha256": "1bb68ed27a9ae6ba289a949ca67500ebf92f8f21461e4a922b43931b9d98b0c0"
       },
       {
-        "id": "gradient/src/lib.fe",
+        "id": "demos/sketches/fmath/src/lib.fe",
         "kind": "fe",
-        "sha256": "2b2f2a0c3e615d6df2d54dde4ddc5712226bce5d488b99ed0c4c76f8a64b56c8"
+        "sha256": "c4221532aabf2a9b416d68f18023faaa3edfe0b5652c704b0b4f82401491e31c"
+      },
+      {
+        "id": "demos/sketches/qcga/fe.toml",
+        "kind": "fe_manifest",
+        "sha256": "88c621c73e0d93fde6561aeb6262d7cf5280e3358422508659b6e96c8123c8d9"
+      },
+      {
+        "id": "demos/sketches/qcga/src/lib.fe",
+        "kind": "fe",
+        "sha256": "d6e78628642ebe341931beb33b0cc69e217522b02b51e6abd2b20f463d5ecd95"
+      },
+      {
+        "id": "ingots/sparse_clifford/fe.toml",
+        "kind": "fe_manifest",
+        "sha256": "86dbfce53a6b656e590a36f9624d2bbfe9222e13299d07cefef340a284a191ed"
+      },
+      {
+        "id": "ingots/sparse_clifford/src/lib.fe",
+        "kind": "fe",
+        "sha256": "bc75b3743ca9c2c373d06253625d4ae97de359c4d039865e30a4776abc7aa18e"
       }
     ],
     "compiler": "fe",
     "compiler_version": "26.2.0",
     "fe_responsibilities": [
       "gpu_program",
-      "surface_declaration"
+      "surface_declaration",
+      "control_transition",
+      "scheduling_policy",
+      "resident_actor_state"
     ],
     "fixed_host": {
       "artifact": {
-        "bytes": 74166,
-        "path": "fe-render-runtime-ac138839d0f4d287.js",
-        "sha256": "ac138839d0f4d287c527853a0ddf6409a3fe51fdbda7023c7ba378023ac8cb7f"
+        "bytes": 76236,
+        "path": "fe-render-runtime-6ecde349c528b26c.js",
+        "sha256": "6ecde349c528b26c14c9bc5a6677455d7df58c727f2013c59089f07ce2618c7b"
       },
       "contract": "fixed_versioned_demo_blind_browser_host",
       "name": "fe-render-runtime",
       "responsibilities": [
         "dom_surface",
         "input_transport",
-        "presentation_scheduler",
+        "presentation_clock",
         "web_gpu_executor",
         "lifecycle",
         "wasm_loader"
@@ -198,7 +237,7 @@
         "sha256": "0432c50d08e3111f05fe86e61254176e5ce821b9dfd3c0092cfedbf4a1a2a453"
       }
     ],
-    "source_id": "gradient"
+    "source_id": "qcga"
   },
   "resources": [],
   "source_entry": "shade",
@@ -212,25 +251,34 @@
     },
     "params": [
       {
-        "init": 0.12,
-        "kind": "range",
+        "doc": "Pencil parameter: [0, 1] sweeps cylinder -> sphere-like -> plane pair.",
+        "init": 0.15,
+        "kind": "unit",
         "max": 1.0,
         "min": 0.0,
-        "name": "gain"
+        "name": "lambda"
       },
       {
-        "init": 0.0,
-        "kind": "range",
-        "max": 50.0,
-        "min": -50.0,
-        "name": "bias"
-      },
-      {
-        "init": 96.0,
-        "kind": "range",
-        "max": 255.0,
+        "doc": "Rotation of the member about the y axis; makes the xz cross term live.",
+        "init": 0.6,
+        "kind": "angle",
+        "max": 6.2831855,
         "min": 0.0,
-        "name": "cutoff"
+        "name": "theta"
+      },
+      {
+        "doc": "Half-extent of the visible slice in world units.",
+        "init": 1.6,
+        "kind": "range",
+        "max": 4.0,
+        "min": 0.5,
+        "name": "zoom"
+      },
+      {
+        "doc": "Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).",
+        "kind": "extent_x",
+        "name": "res",
+        "visible": false
       }
     ],
     "pipeline": {

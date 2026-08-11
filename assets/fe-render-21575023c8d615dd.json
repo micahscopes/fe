@@ -1,10 +1,10 @@
 {
   "artifacts": {
     "canonical_adapters": [],
-    "wasm": "fe-render-c863cd53554e1ea3.wasm",
-    "wasm_bytes": 1468,
-    "wgsl": "fe-render-cd19975c11152900.wgsl",
-    "wgsl_bytes": 5585
+    "wasm": "fe-render-9e3197987d9bad67.wasm",
+    "wasm_bytes": 245,
+    "wgsl": "fe-render-74c532f0cacf3fd8.wgsl",
+    "wgsl_bytes": 2296
   },
   "browser_runtime": null,
   "canonical_interface": null,
@@ -22,8 +22,8 @@
         "members": [
           {
             "arg_index": 2,
-            "doc": "Advances the animation; `zoom` and `warp` are exposed for the page.",
-            "name": "time",
+            "doc": null,
+            "name": "gain",
             "offset": 0,
             "scalar": "f32",
             "width": 4
@@ -31,7 +31,7 @@
           {
             "arg_index": 3,
             "doc": null,
-            "name": "zoom",
+            "name": "bias",
             "offset": 4,
             "scalar": "f32",
             "width": 4
@@ -39,24 +39,16 @@
           {
             "arg_index": 4,
             "doc": null,
-            "name": "warp",
+            "name": "cutoff",
             "offset": 8,
-            "scalar": "f32",
-            "width": 4
-          },
-          {
-            "arg_index": 5,
-            "doc": "Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).",
-            "name": "res",
-            "offset": 12,
             "scalar": "f32",
             "width": 4
           }
         ],
         "name": "input",
         "role": "input",
-        "span": 16,
-        "stride": 16
+        "span": 12,
+        "stride": 12
       }
     ],
     "builtin_inputs": [
@@ -96,8 +88,8 @@
             "members": [
               {
                 "arg_index": 2,
-                "doc": "Advances the animation; `zoom` and `warp` are exposed for the page.",
-                "name": "time",
+                "doc": null,
+                "name": "gain",
                 "offset": 0,
                 "scalar": "f32",
                 "width": 4
@@ -105,7 +97,7 @@
               {
                 "arg_index": 3,
                 "doc": null,
-                "name": "zoom",
+                "name": "bias",
                 "offset": 4,
                 "scalar": "f32",
                 "width": 4
@@ -113,24 +105,16 @@
               {
                 "arg_index": 4,
                 "doc": null,
-                "name": "warp",
+                "name": "cutoff",
                 "offset": 8,
-                "scalar": "f32",
-                "width": 4
-              },
-              {
-                "arg_index": 5,
-                "doc": "Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).",
-                "name": "res",
-                "offset": 12,
                 "scalar": "f32",
                 "width": 4
               }
             ],
             "name": "input",
             "role": "input",
-            "span": 16,
-            "stride": 16
+            "span": 12,
+            "stride": 12
           }
         ],
         "builtin_inputs": [
@@ -159,9 +143,9 @@
           0
         ]
       },
-      "shader": "fe-render-cd19975c11152900.wgsl",
-      "shader_bytes": 5585,
-      "source_entry": "plasma"
+      "shader": "fe-render-74c532f0cacf3fd8.wgsl",
+      "shader_bytes": 2296,
+      "source_entry": "shade"
     }
   ],
   "protocol": "fe-web-bundle",
@@ -169,46 +153,34 @@
   "provenance": {
     "authored_sources": [
       {
-        "id": "fmath/fe.toml",
+        "id": "gradient/fe.toml",
         "kind": "fe_manifest",
-        "sha256": "1bb68ed27a9ae6ba289a949ca67500ebf92f8f21461e4a922b43931b9d98b0c0"
+        "sha256": "a42c78244e784d3a3d38091d547a234194c3febea3bb3b6a54e7ef768477d0d1"
       },
       {
-        "id": "fmath/src/lib.fe",
+        "id": "gradient/src/lib.fe",
         "kind": "fe",
-        "sha256": "c4221532aabf2a9b416d68f18023faaa3edfe0b5652c704b0b4f82401491e31c"
-      },
-      {
-        "id": "plasma/fe.toml",
-        "kind": "fe_manifest",
-        "sha256": "22aa43476bed75e280ec9ae457cc95277b50559e656f090520ee682527c74554"
-      },
-      {
-        "id": "plasma/src/lib.fe",
-        "kind": "fe",
-        "sha256": "56ad75826ad961880d7eceddc186883c3b1e19dda45c504bea6686edfa3d9964"
+        "sha256": "2b2f2a0c3e615d6df2d54dde4ddc5712226bce5d488b99ed0c4c76f8a64b56c8"
       }
     ],
     "compiler": "fe",
     "compiler_version": "26.2.0",
     "fe_responsibilities": [
       "gpu_program",
-      "surface_declaration",
-      "control_transition",
-      "scheduling_policy"
+      "surface_declaration"
     ],
     "fixed_host": {
       "artifact": {
-        "bytes": 74166,
-        "path": "fe-render-runtime-ac138839d0f4d287.js",
-        "sha256": "ac138839d0f4d287c527853a0ddf6409a3fe51fdbda7023c7ba378023ac8cb7f"
+        "bytes": 76236,
+        "path": "fe-render-runtime-6ecde349c528b26c.js",
+        "sha256": "6ecde349c528b26c14c9bc5a6677455d7df58c727f2013c59089f07ce2618c7b"
       },
       "contract": "fixed_versioned_demo_blind_browser_host",
       "name": "fe-render-runtime",
       "responsibilities": [
         "dom_surface",
         "input_transport",
-        "presentation_clock",
+        "presentation_scheduler",
         "web_gpu_executor",
         "lifecycle",
         "wasm_loader"
@@ -226,10 +198,10 @@
         "sha256": "0432c50d08e3111f05fe86e61254176e5ce821b9dfd3c0092cfedbf4a1a2a453"
       }
     ],
-    "source_id": "plasma"
+    "source_id": "gradient"
   },
   "resources": [],
-  "source_entry": "plasma",
+  "source_entry": "shade",
   "surface": {
     "activate": "pointer",
     "extent": {
@@ -240,32 +212,25 @@
     },
     "params": [
       {
-        "doc": "Advances the animation; `zoom` and `warp` are exposed for the page.",
+        "init": 0.12,
+        "kind": "range",
+        "max": 1.0,
+        "min": 0.0,
+        "name": "gain"
+      },
+      {
         "init": 0.0,
         "kind": "range",
-        "max": 20.0,
-        "min": 0.0,
-        "name": "time"
+        "max": 50.0,
+        "min": -50.0,
+        "name": "bias"
       },
       {
-        "init": 3.0,
+        "init": 96.0,
         "kind": "range",
-        "max": 8.0,
-        "min": 1.0,
-        "name": "zoom"
-      },
-      {
-        "init": 0.8,
-        "kind": "range",
-        "max": 2.0,
+        "max": 255.0,
         "min": 0.0,
-        "name": "warp"
-      },
-      {
-        "doc": "Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).",
-        "kind": "extent_x",
-        "name": "res",
-        "visible": false
+        "name": "cutoff"
       }
     ],
     "pipeline": {

@@ -1,8 +1,8 @@
 {
   "artifacts": {
     "canonical_adapters": [],
-    "wasm": "fe-render-c3775c7fc98d0efa.wasm",
-    "wasm_bytes": 21372,
+    "wasm": "fe-render-d26fb9b289aa03b3.wasm",
+    "wasm_bytes": 21664,
     "wgsl": "fe-render-98836d9c82fbf15b.wgsl",
     "wgsl_bytes": 385779
   },
@@ -316,13 +316,14 @@
       "gpu_program",
       "surface_declaration",
       "control_transition",
-      "scheduling_policy"
+      "scheduling_policy",
+      "resident_actor_state"
     ],
     "fixed_host": {
       "artifact": {
-        "bytes": 74166,
-        "path": "fe-render-runtime-ac138839d0f4d287.js",
-        "sha256": "ac138839d0f4d287c527853a0ddf6409a3fe51fdbda7023c7ba378023ac8cb7f"
+        "bytes": 76236,
+        "path": "fe-render-runtime-6ecde349c528b26c.js",
+        "sha256": "6ecde349c528b26c14c9bc5a6677455d7df58c727f2013c59089f07ce2618c7b"
       },
       "contract": "fixed_versioned_demo_blind_browser_host",
       "name": "fe-render-runtime",
