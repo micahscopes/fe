@@ -1,8 +1,8 @@
 {
   "artifacts": {
     "canonical_adapters": [],
-    "wasm": "fe-render-c38da6c802f0bacd.wasm",
-    "wasm_bytes": 4872,
+    "wasm": "fe-render-b4490563874bf05d.wasm",
+    "wasm_bytes": 5173,
     "wgsl": "fe-render-759345ae67bd693c.wgsl",
     "wgsl_bytes": 45400
   },
@@ -471,9 +471,9 @@
     ],
     "fixed_host": {
       "artifact": {
-        "bytes": 85468,
-        "path": "fe-render-runtime-7170976766e8a5fe.js",
-        "sha256": "7170976766e8a5fed93f33890d8edad4082ceac34ecc39650d9feed0e3de0ccb"
+        "bytes": 87576,
+        "path": "fe-render-runtime-bf5e21efc700959d.js",
+        "sha256": "bf5e21efc700959d90230f0ae1ed3e27711463bc90d292a1423988c734589dee"
       },
       "contract": "fixed_versioned_demo_blind_browser_host",
       "name": "fe-render-runtime",
