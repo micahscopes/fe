@@ -1,45 +1,35 @@
 {
   "artifacts": {
     "canonical_adapters": [],
-    "wasm": "fe-render-4b74f4345290b512.wasm",
-    "wasm_bytes": 4407,
-    "wgsl": "fe-render-759345ae67bd693c.wgsl",
-    "wgsl_bytes": 45400
+    "wasm": "fe-render-23ae199bf42d8ce9.wasm",
+    "wasm_bytes": 25216,
+    "wgsl": "fe-render-ffb808824a00fe99.wgsl",
+    "wgsl_bytes": 391796
   },
   "browser_runtime": null,
   "canonical_interface": null,
   "canonical_status": {
     "embedded": false,
-    "omission_reason": "GPU resource pass graph has no CPU fallback or canonical Wasm message lane",
+    "omission_reason": "canonical interface was not requested",
     "policy": "disabled"
   },
   "layout": {
     "bindings": [
       {
         "access": "read",
-        "binding": 0,
-        "group": 0,
-        "members": [],
-        "name": "orbit",
-        "role": "resource",
-        "span": 32,
-        "stride": 32
-      },
-      {
-        "access": "read",
         "binding": 1,
         "group": 0,
         "members": [
           {
-            "arg_index": 3,
-            "doc": "Most-significant word of a four-word center expansion. Fe gesture math\nupdates this and the three hidden low words together.",
+            "arg_index": 2,
+            "doc": "Complex-plane centre, as a flat FOUR-WORD `Expansion<4>` per axis\n(`w0..w3`, most significant first, kept flat so the typed Wasm ABI and\nrender uniform layout are plain f32 members): `w0` carries the\nvisible position, `w1`/`w2`/`w3` the deep low-order words (~1e-27) that\nkeep the per-pixel/per-gesture step from vanishing far past the ~1e-11\ndf64 wall. `navigate` folds gesture deltas into all four words via the\ngeneral `add_f32<4>`; `escape` stitches them into one `Fixed<8>`.",
             "name": "center_x_w0",
             "offset": 0,
             "scalar": "f32",
             "width": 4
           },
           {
-            "arg_index": 4,
+            "arg_index": 3,
             "doc": null,
             "name": "center_x_w1",
             "offset": 4,
@@ -47,7 +37,7 @@
             "width": 4
           },
           {
-            "arg_index": 5,
+            "arg_index": 4,
             "doc": null,
             "name": "center_x_w2",
             "offset": 8,
@@ -55,7 +45,7 @@
             "width": 4
           },
           {
-            "arg_index": 6,
+            "arg_index": 5,
             "doc": null,
             "name": "center_x_w3",
             "offset": 12,
@@ -63,7 +53,7 @@
             "width": 4
           },
           {
-            "arg_index": 7,
+            "arg_index": 6,
             "doc": "Most-significant word of the four-word vertical center expansion.",
             "name": "center_y_w0",
             "offset": 16,
@@ -71,7 +61,7 @@
             "width": 4
           },
           {
-            "arg_index": 8,
+            "arg_index": 7,
             "doc": null,
             "name": "center_y_w1",
             "offset": 20,
@@ -79,7 +69,7 @@
             "width": 4
           },
           {
-            "arg_index": 9,
+            "arg_index": 8,
             "doc": null,
             "name": "center_y_w2",
             "offset": 24,
@@ -87,7 +77,7 @@
             "width": 4
           },
           {
-            "arg_index": 10,
+            "arg_index": 9,
             "doc": null,
             "name": "center_y_w3",
             "offset": 28,
@@ -95,7 +85,7 @@
             "width": 4
           },
           {
-            "arg_index": 11,
+            "arg_index": 10,
             "doc": null,
             "name": "zoom",
             "offset": 32,
@@ -103,8 +93,8 @@
             "width": 4
           },
           {
-            "arg_index": 12,
-            "doc": null,
+            "arg_index": 11,
+            "doc": "Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).",
             "name": "res",
             "offset": 36,
             "scalar": "f32",
@@ -145,38 +135,23 @@
   },
   "passes": [
     {
-      "dispatch": [
-        1,
-        1,
-        1
-      ],
       "layout": {
         "bindings": [
-          {
-            "access": "read_write",
-            "binding": 0,
-            "group": 0,
-            "members": [],
-            "name": "orbit",
-            "role": "resource",
-            "span": 32,
-            "stride": 32
-          },
           {
             "access": "read",
             "binding": 1,
             "group": 0,
             "members": [
               {
-                "arg_index": 1,
-                "doc": "Most-significant word of a four-word center expansion. Fe gesture math\nupdates this and the three hidden low words together.",
+                "arg_index": 2,
+                "doc": "Complex-plane centre, as a flat FOUR-WORD `Expansion<4>` per axis\n(`w0..w3`, most significant first, kept flat so the typed Wasm ABI and\nrender uniform layout are plain f32 members): `w0` carries the\nvisible position, `w1`/`w2`/`w3` the deep low-order words (~1e-27) that\nkeep the per-pixel/per-gesture step from vanishing far past the ~1e-11\ndf64 wall. `navigate` folds gesture deltas into all four words via the\ngeneral `add_f32<4>`; `escape` stitches them into one `Fixed<8>`.",
                 "name": "center_x_w0",
                 "offset": 0,
                 "scalar": "f32",
                 "width": 4
               },
               {
-                "arg_index": 2,
+                "arg_index": 3,
                 "doc": null,
                 "name": "center_x_w1",
                 "offset": 4,
@@ -184,7 +159,7 @@
                 "width": 4
               },
               {
-                "arg_index": 3,
+                "arg_index": 4,
                 "doc": null,
                 "name": "center_x_w2",
                 "offset": 8,
@@ -192,7 +167,7 @@
                 "width": 4
               },
               {
-                "arg_index": 4,
+                "arg_index": 5,
                 "doc": null,
                 "name": "center_x_w3",
                 "offset": 12,
@@ -200,7 +175,7 @@
                 "width": 4
               },
               {
-                "arg_index": 5,
+                "arg_index": 6,
                 "doc": "Most-significant word of the four-word vertical center expansion.",
                 "name": "center_y_w0",
                 "offset": 16,
@@ -208,7 +183,7 @@
                 "width": 4
               },
               {
-                "arg_index": 6,
+                "arg_index": 7,
                 "doc": null,
                 "name": "center_y_w1",
                 "offset": 20,
@@ -216,7 +191,7 @@
                 "width": 4
               },
               {
-                "arg_index": 7,
+                "arg_index": 8,
                 "doc": null,
                 "name": "center_y_w2",
                 "offset": 24,
@@ -224,7 +199,7 @@
                 "width": 4
               },
               {
-                "arg_index": 8,
+                "arg_index": 9,
                 "doc": null,
                 "name": "center_y_w3",
                 "offset": 28,
@@ -232,140 +207,16 @@
                 "width": 4
               },
               {
-                "arg_index": 9,
+                "arg_index": 10,
                 "doc": null,
                 "name": "zoom",
                 "offset": 32,
-                "scalar": "f32",
-                "width": 4
-              },
-              {
-                "arg_index": 10,
-                "doc": null,
-                "name": "res",
-                "offset": 36,
-                "scalar": "f32",
-                "width": 4
-              }
-            ],
-            "name": "params",
-            "role": "input",
-            "span": 40,
-            "stride": 40
-          }
-        ],
-        "builtin_inputs": [],
-        "color_target_format": null,
-        "entry_point": "main",
-        "fragment_entry": null,
-        "mode": "compute",
-        "result": null,
-        "vertex_entry": null,
-        "word": "u32",
-        "word_bytes": 4,
-        "workgroup_size": [
-          1,
-          1,
-          1
-        ]
-      },
-      "shader": "fe-render-c092ada6c94e88e5.wgsl",
-      "shader_bytes": 456259,
-      "source_entry": "build_reference"
-    },
-    {
-      "layout": {
-        "bindings": [
-          {
-            "access": "read",
-            "binding": 0,
-            "group": 0,
-            "members": [],
-            "name": "orbit",
-            "role": "resource",
-            "span": 32,
-            "stride": 32
-          },
-          {
-            "access": "read",
-            "binding": 1,
-            "group": 0,
-            "members": [
-              {
-                "arg_index": 3,
-                "doc": "Most-significant word of a four-word center expansion. Fe gesture math\nupdates this and the three hidden low words together.",
-                "name": "center_x_w0",
-                "offset": 0,
-                "scalar": "f32",
-                "width": 4
-              },
-              {
-                "arg_index": 4,
-                "doc": null,
-                "name": "center_x_w1",
-                "offset": 4,
-                "scalar": "f32",
-                "width": 4
-              },
-              {
-                "arg_index": 5,
-                "doc": null,
-                "name": "center_x_w2",
-                "offset": 8,
-                "scalar": "f32",
-                "width": 4
-              },
-              {
-                "arg_index": 6,
-                "doc": null,
-                "name": "center_x_w3",
-                "offset": 12,
-                "scalar": "f32",
-                "width": 4
-              },
-              {
-                "arg_index": 7,
-                "doc": "Most-significant word of the four-word vertical center expansion.",
-                "name": "center_y_w0",
-                "offset": 16,
-                "scalar": "f32",
-                "width": 4
-              },
-              {
-                "arg_index": 8,
-                "doc": null,
-                "name": "center_y_w1",
-                "offset": 20,
-                "scalar": "f32",
-                "width": 4
-              },
-              {
-                "arg_index": 9,
-                "doc": null,
-                "name": "center_y_w2",
-                "offset": 24,
-                "scalar": "f32",
-                "width": 4
-              },
-              {
-                "arg_index": 10,
-                "doc": null,
-                "name": "center_y_w3",
-                "offset": 28,
                 "scalar": "f32",
                 "width": 4
               },
               {
                 "arg_index": 11,
-                "doc": null,
-                "name": "zoom",
-                "offset": 32,
-                "scalar": "f32",
-                "width": 4
-              },
-              {
-                "arg_index": 12,
-                "doc": null,
+                "doc": "Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).",
                 "name": "res",
                 "offset": 36,
                 "scalar": "f32",
@@ -404,9 +255,9 @@
           0
         ]
       },
-      "shader": "fe-render-759345ae67bd693c.wgsl",
-      "shader_bytes": 45400,
-      "source_entry": "display_reference"
+      "shader": "fe-render-ffb808824a00fe99.wgsl",
+      "shader_bytes": 391796,
+      "source_entry": "escape"
     }
   ],
   "protocol": "fe-web-bundle",
@@ -424,14 +275,14 @@
         "sha256": "24947e823177be0b57b757cbdde66ced2e1b8f97f3d8adb042cfd1d59290a0d6"
       },
       {
-        "id": "perturbational_mandelbrot/fe.toml",
+        "id": "mandelbrot/fe.toml",
         "kind": "fe_manifest",
-        "sha256": "3b9f889e8d2d64642b54850424cc1efa66a8572083949b8d93dabb6c5b3c5a2c"
+        "sha256": "5324e4bef7e869dca864b2f02c643d68243a51359c9f86c3bb9f01f2199bec0c"
       },
       {
-        "id": "perturbational_mandelbrot/src/lib.fe",
+        "id": "mandelbrot/src/lib.fe",
         "kind": "fe",
-        "sha256": "3d2577d3da0103988206b5a1e08d89497b78b28d1a7358328efb123e99e93773"
+        "sha256": "7d7273458baf990db0436796caf75caa2656db3e32a6ac3a26a6aa111d06cb9a"
       },
       {
         "id": "precision/fe.toml",
@@ -463,7 +314,6 @@
     "compiler_version": "26.2.0",
     "fe_responsibilities": [
       "gpu_program",
-      "gpu_pass_graph",
       "surface_declaration",
       "control_transition",
       "scheduling_policy",
@@ -471,9 +321,9 @@
     ],
     "fixed_host": {
       "artifact": {
-        "bytes": 84928,
-        "path": "fe-render-runtime-30be3b9ee87339f3.js",
-        "sha256": "30be3b9ee87339f3bb2051dcadcc208f1261128f039135fcc7c5cd35c58bf6ed"
+        "bytes": 85468,
+        "path": "fe-render-runtime-7170976766e8a5fe.js",
+        "sha256": "7170976766e8a5fed93f33890d8edad4082ceac34ecc39650d9feed0e3de0ccb"
       },
       "contract": "fixed_versioned_demo_blind_browser_host",
       "name": "fe-render-runtime",
@@ -498,58 +348,10 @@
         "sha256": "fc68e26b829e1d6b79baa0e3cbd686a4903af0f544401674f4198ea035b37a28"
       }
     ],
-    "source_id": "perturbational_mandelbrot"
+    "source_id": "mandelbrot"
   },
-  "resources": [
-    {
-      "binding": 0,
-      "element": {
-        "Record": {
-          "fields": [
-            {
-              "name": "re_w0_bits",
-              "offset": 0
-            },
-            {
-              "name": "re_w1_bits",
-              "offset": 4
-            },
-            {
-              "name": "re_w2_bits",
-              "offset": 8
-            },
-            {
-              "name": "re_w3_bits",
-              "offset": 12
-            },
-            {
-              "name": "im_w0_bits",
-              "offset": 16
-            },
-            {
-              "name": "im_w1_bits",
-              "offset": 20
-            },
-            {
-              "name": "im_w2_bits",
-              "offset": 24
-            },
-            {
-              "name": "im_w3_bits",
-              "offset": 28
-            }
-          ],
-          "span": 32
-        }
-      },
-      "group": 0,
-      "length": 2003,
-      "name": "orbit",
-      "span": 32,
-      "stride": 32
-    }
-  ],
-  "source_entry": "display_reference",
+  "resources": [],
+  "source_entry": "escape",
   "surface": {
     "activate": "pointer",
     "extent": {
@@ -560,65 +362,66 @@
     },
     "params": [
       {
-        "doc": "Most-significant word of a four-word center expansion. Fe gesture math\nupdates this and the three hidden low words together.",
-        "init": -1.1723286,
+        "doc": "Complex-plane centre, as a flat FOUR-WORD `Expansion<4>` per axis\n(`w0..w3`, most significant first, kept flat so the typed Wasm ABI and\nrender uniform layout are plain f32 members): `w0` carries the\nvisible position, `w1`/`w2`/`w3` the deep low-order words (~1e-27) that\nkeep the per-pixel/per-gesture step from vanishing far past the ~1e-11\ndf64 wall. `navigate` folds gesture deltas into all four words via the\ngeneral `add_f32<4>`; `escape` stitches them into one `Fixed<8>`.",
+        "init": -0.7436439,
         "kind": "range",
         "max": 1.0,
         "min": -2.5,
         "name": "center_x_w0"
       },
       {
-        "init": -8.653259e-9,
+        "init": -7.146717e-9,
         "kind": "fixed",
         "name": "center_x_w1",
         "visible": false
       },
       {
-        "init": 1.6498234000000002e-16,
+        "init": -3e-16,
         "kind": "fixed",
         "name": "center_x_w2",
         "visible": false
       },
       {
-        "init": 1.0576053e-24,
+        "init": -2.0000000000000002e-23,
         "kind": "fixed",
         "name": "center_x_w3",
         "visible": false
       },
       {
         "doc": "Most-significant word of the four-word vertical center expansion.",
-        "init": 0.29582354,
+        "init": 0.13182591,
         "kind": "range",
         "max": 1.5,
         "min": -1.5,
         "name": "center_y_w0"
       },
       {
-        "init": -4.2638395e-9,
+        "init": -4.8132045e-9,
         "kind": "fixed",
         "name": "center_y_w1",
         "visible": false
       },
       {
-        "init": -2.1798655000000002e-16,
+        "init": 2.5e-16,
         "kind": "fixed",
         "name": "center_y_w2",
         "visible": false
       },
       {
-        "init": -3.7684836000000005e-24,
+        "init": 1.5e-23,
         "kind": "fixed",
         "name": "center_y_w3",
         "visible": false
       },
       {
-        "init": 3.89e-8,
+        "init": 1.0,
         "kind": "log",
         "max": 3.0,
         "min": 1e-27,
         "name": "zoom"
       },
       {
+        "doc": "Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).",
         "kind": "extent_x",
         "name": "res",
         "visible": false

@@ -18,7 +18,7 @@ use std::webgpu::{
 }
 use std::web::view::{
     ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface,
-    SurfaceEvent, SurfaceScheduleEvent, SurfaceScheduleState, SurfaceScheduleStep, SurfaceState,
+    SurfaceEvent, SurfaceState,
 }
 
 extern {
@@ -64,13 +64,6 @@ actor GradientSurface uses (GpuProgram<WebGpuBackend>) {
     bias: f32,
     cutoff: f32,
 
-    fn schedule(_ event: own SurfaceScheduleEvent, _ state: own SurfaceScheduleState)
-        -> SurfaceScheduleStep
-        uses (SurfaceScheduling<LatestPerFrame>)
-    {
-        LatestPerFrame::step(state, event)
-    }
-
     /// The surface declaration: CTFE-evaluated at bundle time and projected
     /// into the manifest `surface` section. Never lowered to wasm or WGSL.
     const fn view() -> Surface<GradientParams> {
@@ -81,7 +74,7 @@ actor GradientSurface uses (GpuProgram<WebGpuBackend>) {
     }
 
     fn navigate(self, event: own SurfaceEvent) -> GradientViewState
-        uses (SurfaceTransition, LatestPerFrame)
+        uses (SurfaceTransition, SurfaceScheduling<LatestPerFrame>)
     {
         GradientViewState {
             gain: self.gain,

@@ -1,10 +1,10 @@
 {
   "artifacts": {
     "canonical_adapters": [],
-    "wasm": "fe-render-6a17763f7ab071de.wasm",
-    "wasm_bytes": 3637,
-    "wgsl": "fe-render-52a350d9c877ffbe.wgsl",
-    "wgsl_bytes": 8542
+    "wasm": "fe-render-5db63cde19bbc713.wasm",
+    "wasm_bytes": 10951,
+    "wgsl": "fe-render-252ff731131ca11e.wgsl",
+    "wgsl_bytes": 231109
   },
   "browser_runtime": null,
   "canonical_interface": null,
@@ -22,41 +22,81 @@
         "members": [
           {
             "arg_index": 2,
-            "doc": "Pencil parameter: [0, 1] sweeps cylinder -> sphere-like -> plane pair.",
-            "name": "lambda",
+            "doc": "0-cochain value at the hexagon's centre vertex.",
+            "name": "c0",
             "offset": 0,
             "scalar": "f32",
             "width": 4
           },
           {
             "arg_index": 3,
-            "doc": "Rotation of the member about the y axis; makes the xz cross term live.",
-            "name": "theta",
+            "doc": "0-cochain values at the six ring vertices, counterclockwise from +x.",
+            "name": "c1",
             "offset": 4,
             "scalar": "f32",
             "width": 4
           },
           {
             "arg_index": 4,
-            "doc": "Half-extent of the visible slice in world units.",
-            "name": "zoom",
+            "doc": null,
+            "name": "c2",
             "offset": 8,
             "scalar": "f32",
             "width": 4
           },
           {
             "arg_index": 5,
+            "doc": null,
+            "name": "c3",
+            "offset": 12,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 6,
+            "doc": null,
+            "name": "c4",
+            "offset": 16,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 7,
+            "doc": null,
+            "name": "c5",
+            "offset": 20,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 8,
+            "doc": null,
+            "name": "c6",
+            "offset": 24,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 9,
+            "doc": "0 draws the cochain itself; 1 draws its discrete Laplacian.",
+            "name": "show_laplacian",
+            "offset": 28,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 10,
             "doc": "Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).",
             "name": "res",
-            "offset": 12,
+            "offset": 32,
             "scalar": "f32",
             "width": 4
           }
         ],
         "name": "input",
         "role": "input",
-        "span": 16,
-        "stride": 16
+        "span": 36,
+        "stride": 36
       }
     ],
     "builtin_inputs": [
@@ -96,41 +136,81 @@
             "members": [
               {
                 "arg_index": 2,
-                "doc": "Pencil parameter: [0, 1] sweeps cylinder -> sphere-like -> plane pair.",
-                "name": "lambda",
+                "doc": "0-cochain value at the hexagon's centre vertex.",
+                "name": "c0",
                 "offset": 0,
                 "scalar": "f32",
                 "width": 4
               },
               {
                 "arg_index": 3,
-                "doc": "Rotation of the member about the y axis; makes the xz cross term live.",
-                "name": "theta",
+                "doc": "0-cochain values at the six ring vertices, counterclockwise from +x.",
+                "name": "c1",
                 "offset": 4,
                 "scalar": "f32",
                 "width": 4
               },
               {
                 "arg_index": 4,
-                "doc": "Half-extent of the visible slice in world units.",
-                "name": "zoom",
+                "doc": null,
+                "name": "c2",
                 "offset": 8,
                 "scalar": "f32",
                 "width": 4
               },
               {
                 "arg_index": 5,
+                "doc": null,
+                "name": "c3",
+                "offset": 12,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 6,
+                "doc": null,
+                "name": "c4",
+                "offset": 16,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 7,
+                "doc": null,
+                "name": "c5",
+                "offset": 20,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 8,
+                "doc": null,
+                "name": "c6",
+                "offset": 24,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 9,
+                "doc": "0 draws the cochain itself; 1 draws its discrete Laplacian.",
+                "name": "show_laplacian",
+                "offset": 28,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 10,
                 "doc": "Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).",
                 "name": "res",
-                "offset": 12,
+                "offset": 32,
                 "scalar": "f32",
                 "width": 4
               }
             ],
             "name": "input",
             "role": "input",
-            "span": 16,
-            "stride": 16
+            "span": 36,
+            "stride": 36
           }
         ],
         "builtin_inputs": [
@@ -159,9 +239,9 @@
           0
         ]
       },
-      "shader": "fe-render-52a350d9c877ffbe.wgsl",
-      "shader_bytes": 8542,
-      "source_entry": "shade"
+      "shader": "fe-render-252ff731131ca11e.wgsl",
+      "shader_bytes": 231109,
+      "source_entry": "dec_render"
     }
   ],
   "protocol": "fe-web-bundle",
@@ -169,34 +249,24 @@
   "provenance": {
     "authored_sources": [
       {
-        "id": "demos/sketches/fmath/fe.toml",
+        "id": "dec/fe.toml",
+        "kind": "fe_manifest",
+        "sha256": "241739a5f9f70138e8616a148b8f5e9e8802484930405721c1f076306bfe4522"
+      },
+      {
+        "id": "dec/src/lib.fe",
+        "kind": "fe",
+        "sha256": "0dded9d148f1f69fa72c3205393e167b298e2fa7be6b827cbdfdb010d7d008f6"
+      },
+      {
+        "id": "fmath/fe.toml",
         "kind": "fe_manifest",
         "sha256": "1bb68ed27a9ae6ba289a949ca67500ebf92f8f21461e4a922b43931b9d98b0c0"
       },
       {
-        "id": "demos/sketches/fmath/src/lib.fe",
+        "id": "fmath/src/lib.fe",
         "kind": "fe",
         "sha256": "24947e823177be0b57b757cbdde66ced2e1b8f97f3d8adb042cfd1d59290a0d6"
-      },
-      {
-        "id": "demos/sketches/qcga/fe.toml",
-        "kind": "fe_manifest",
-        "sha256": "88c621c73e0d93fde6561aeb6262d7cf5280e3358422508659b6e96c8123c8d9"
-      },
-      {
-        "id": "demos/sketches/qcga/src/lib.fe",
-        "kind": "fe",
-        "sha256": "7bf2acae5d433b8e4e80652a6f78053a51ef8317f610a5a299fd5eb2b55ef704"
-      },
-      {
-        "id": "ingots/sparse_clifford/fe.toml",
-        "kind": "fe_manifest",
-        "sha256": "86dbfce53a6b656e590a36f9624d2bbfe9222e13299d07cefef340a284a191ed"
-      },
-      {
-        "id": "ingots/sparse_clifford/src/lib.fe",
-        "kind": "fe",
-        "sha256": "bc75b3743ca9c2c373d06253625d4ae97de359c4d039865e30a4776abc7aa18e"
       }
     ],
     "compiler": "fe",
@@ -210,9 +280,9 @@
     ],
     "fixed_host": {
       "artifact": {
-        "bytes": 84928,
-        "path": "fe-render-runtime-30be3b9ee87339f3.js",
-        "sha256": "30be3b9ee87339f3bb2051dcadcc208f1261128f039135fcc7c5cd35c58bf6ed"
+        "bytes": 85468,
+        "path": "fe-render-runtime-7170976766e8a5fe.js",
+        "sha256": "7170976766e8a5fed93f33890d8edad4082ceac34ecc39650d9feed0e3de0ccb"
       },
       "contract": "fixed_versioned_demo_blind_browser_host",
       "name": "fe-render-runtime",
@@ -237,10 +307,10 @@
         "sha256": "fc68e26b829e1d6b79baa0e3cbd686a4903af0f544401674f4198ea035b37a28"
       }
     ],
-    "source_id": "qcga"
+    "source_id": "dec"
   },
   "resources": [],
-  "source_entry": "shade",
+  "source_entry": "dec_render",
   "surface": {
     "activate": "pointer",
     "extent": {
@@ -251,28 +321,63 @@
     },
     "params": [
       {
-        "doc": "Pencil parameter: [0, 1] sweeps cylinder -> sphere-like -> plane pair.",
-        "init": 0.15,
-        "kind": "unit",
+        "doc": "0-cochain value at the hexagon's centre vertex.",
+        "init": 1.0,
+        "kind": "range",
+        "max": 1.0,
+        "min": -1.0,
+        "name": "c0"
+      },
+      {
+        "doc": "0-cochain values at the six ring vertices, counterclockwise from +x.",
+        "init": 0.0,
+        "kind": "range",
+        "max": 1.0,
+        "min": -1.0,
+        "name": "c1"
+      },
+      {
+        "init": 0.0,
+        "kind": "range",
+        "max": 1.0,
+        "min": -1.0,
+        "name": "c2"
+      },
+      {
+        "init": 0.0,
+        "kind": "range",
+        "max": 1.0,
+        "min": -1.0,
+        "name": "c3"
+      },
+      {
+        "init": 0.0,
+        "kind": "range",
+        "max": 1.0,
+        "min": -1.0,
+        "name": "c4"
+      },
+      {
+        "init": 0.0,
+        "kind": "range",
+        "max": 1.0,
+        "min": -1.0,
+        "name": "c5"
+      },
+      {
+        "init": 0.0,
+        "kind": "range",
+        "max": 1.0,
+        "min": -1.0,
+        "name": "c6"
+      },
+      {
+        "doc": "0 draws the cochain itself; 1 draws its discrete Laplacian.",
+        "init": 0.0,
+        "kind": "int",
         "max": 1.0,
         "min": 0.0,
-        "name": "lambda"
-      },
-      {
-        "doc": "Rotation of the member about the y axis; makes the xz cross term live.",
-        "init": 0.6,
-        "kind": "angle",
-        "max": 6.2831855,
-        "min": 0.0,
-        "name": "theta"
-      },
-      {
-        "doc": "Half-extent of the visible slice in world units.",
-        "init": 1.6,
-        "kind": "range",
-        "max": 4.0,
-        "min": 0.5,
-        "name": "zoom"
+        "name": "show_laplacian"
       },
       {
         "doc": "Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).",

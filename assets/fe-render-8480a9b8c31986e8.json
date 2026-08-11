@@ -1,8 +1,8 @@
 {
   "artifacts": {
     "canonical_adapters": [],
-    "wasm": "fe-render-7fb42eb60d77aa33.wasm",
-    "wasm_bytes": 4480,
+    "wasm": "fe-render-27967ab637d345f8.wasm",
+    "wasm_bytes": 4905,
     "wgsl": "fe-render-c3f557cbc432a6ac.wgsl",
     "wgsl_bytes": 25595
   },
@@ -176,7 +176,7 @@
       {
         "id": "demos/sketches/desargues/src/lib.fe",
         "kind": "fe",
-        "sha256": "8989f07c1c107e5a72b7a62df588dc5826de099ea56de4be7540b9a055d240a0"
+        "sha256": "7e7d33b2ea97832d041e5b7c4e37dccf15f3396db535d6ae9898f598b0daa3f8"
       },
       {
         "id": "demos/sketches/fmath/fe.toml",
@@ -375,9 +375,9 @@
     ],
     "fixed_host": {
       "artifact": {
-        "bytes": 84928,
-        "path": "fe-render-runtime-30be3b9ee87339f3.js",
-        "sha256": "30be3b9ee87339f3bb2051dcadcc208f1261128f039135fcc7c5cd35c58bf6ed"
+        "bytes": 85468,
+        "path": "fe-render-runtime-7170976766e8a5fe.js",
+        "sha256": "7170976766e8a5fed93f33890d8edad4082ceac34ecc39650d9feed0e3de0ccb"
       },
       "contract": "fixed_versioned_demo_blind_browser_host",
       "name": "fe-render-runtime",

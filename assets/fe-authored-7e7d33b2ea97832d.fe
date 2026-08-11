@@ -41,7 +41,7 @@ use gaplay::{
 }
 use std::web::view::{
     ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface,
-    SurfaceEvent, SurfaceScheduleEvent, SurfaceScheduleState, SurfaceScheduleStep, SurfaceState,
+    SurfaceEvent, SurfaceState,
 }
 use fmath::{abs, clamp01, cos, from_i32, rgba, sin, smoothstep, sqrt}
 
@@ -109,13 +109,6 @@ actor Desargues2d uses (GpuProgram<WebGpuBackend>) {
     /// Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).
     res: f32,
 
-    fn schedule(_ event: own SurfaceScheduleEvent, _ state: own SurfaceScheduleState)
-        -> SurfaceScheduleStep
-        uses (SurfaceScheduling<LatestPerFrame>)
-    {
-        LatestPerFrame::step(state, event)
-    }
-
     /// The surface declaration: CTFE-evaluated at bundle time and projected
     /// into the manifest `surface` section. Never lowered to wasm or WGSL.
     const fn view() -> Surface<DesarguesParams> {
@@ -127,7 +120,7 @@ actor Desargues2d uses (GpuProgram<WebGpuBackend>) {
 
     /// Drag reconfigures and rotates the theorem; wheel changes view scale.
     fn navigate(self, event: own SurfaceEvent) -> DesarguesViewState
-        uses (SurfaceTransition, LatestPerFrame)
+        uses (SurfaceTransition, SurfaceScheduling<LatestPerFrame>)
     {
         let current = DesarguesViewState {
             sweep: self.sweep,

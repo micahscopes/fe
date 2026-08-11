@@ -16,7 +16,7 @@ use std::webgpu::{
 }
 use std::web::view::{
     ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface,
-    SurfaceEvent, SurfaceScheduleEvent, SurfaceScheduleState, SurfaceScheduleStep, SurfaceState,
+    SurfaceEvent, SurfaceState,
 }
 use fmath::{from_i32, palette, sin, sqrt}
 
@@ -62,13 +62,6 @@ actor PlasmaSurface uses (GpuProgram<WebGpuBackend>) {
     /// Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).
     res: f32,
 
-    fn schedule(_ event: own SurfaceScheduleEvent, _ state: own SurfaceScheduleState)
-        -> SurfaceScheduleStep
-        uses (SurfaceScheduling<LatestPerFrame>)
-    {
-        LatestPerFrame::step(state, event)
-    }
-
     /// The surface declaration: CTFE-evaluated at bundle time and projected
     /// into the manifest `surface` section. Never lowered to wasm or WGSL.
     const fn view() -> Surface<PlasmaParams> {
@@ -80,7 +73,7 @@ actor PlasmaSurface uses (GpuProgram<WebGpuBackend>) {
 
     /// Drag changes phase and radial warp; wheel changes spatial scale.
     fn navigate(self, event: own SurfaceEvent) -> PlasmaViewState
-        uses (SurfaceTransition, LatestPerFrame)
+        uses (SurfaceTransition, SurfaceScheduling<LatestPerFrame>)
     {
         let current = PlasmaViewState {
             time: self.time,

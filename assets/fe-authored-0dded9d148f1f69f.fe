@@ -60,7 +60,7 @@ use std::webgpu::{
 }
 use std::web::view::{
     ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface,
-    SurfaceEvent, SurfaceScheduleEvent, SurfaceScheduleState, SurfaceScheduleStep, SurfaceState,
+    SurfaceEvent, SurfaceState,
 }
 use fmath::{clamp01, from_i32, palette, rgba, sqrt}
 
@@ -838,13 +838,6 @@ actor DecSurface uses (GpuProgram<WebGpuBackend>) {
     /// Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).
     res: f32,
 
-    fn schedule(_ event: own SurfaceScheduleEvent, _ state: own SurfaceScheduleState)
-        -> SurfaceScheduleStep
-        uses (SurfaceScheduling<LatestPerFrame>)
-    {
-        LatestPerFrame::step(state, event)
-    }
-
     /// The surface declaration: CTFE-evaluated at bundle time and projected
     /// into the manifest `surface` section. Never lowered to wasm or WGSL.
     const fn view() -> Surface<DecParams> {
@@ -855,7 +848,7 @@ actor DecSurface uses (GpuProgram<WebGpuBackend>) {
     }
 
     fn navigate(self, event: own SurfaceEvent) -> DecViewState
-        uses (SurfaceTransition, LatestPerFrame)
+        uses (SurfaceTransition, SurfaceScheduling<LatestPerFrame>)
     {
         DecViewState {
             c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3,

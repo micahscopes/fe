@@ -42,7 +42,7 @@ use std::webgpu::{
 }
 use std::web::view::{
     ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface,
-    SurfaceEvent, SurfaceScheduleEvent, SurfaceScheduleState, SurfaceScheduleStep, SurfaceState,
+    SurfaceEvent, SurfaceState,
 }
 use sparse_clifford::{
     Nat, PlanLength, SparsePlan, Term, null_vector_pairing, plan_candidate_left,
@@ -320,13 +320,6 @@ actor Cga3dSurface uses (GpuProgram<WebGpuBackend>) {
     /// Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).
     res: f32,
 
-    fn schedule(_ event: own SurfaceScheduleEvent, _ state: own SurfaceScheduleState)
-        -> SurfaceScheduleStep
-        uses (SurfaceScheduling<LatestPerFrame>)
-    {
-        LatestPerFrame::step(state, event)
-    }
-
     /// The surface declaration: CTFE-evaluated at bundle time and projected
     /// into the manifest `surface` section. Never lowered to wasm or WGSL.
     const fn view() -> Surface<Cga3dParams> {
@@ -338,7 +331,7 @@ actor Cga3dSurface uses (GpuProgram<WebGpuBackend>) {
 
     /// Drag sweeps and rotates the sphere pencil; wheel changes slice scale.
     fn navigate(self, event: own SurfaceEvent) -> Cga3dViewState
-        uses (SurfaceTransition, LatestPerFrame)
+        uses (SurfaceTransition, SurfaceScheduling<LatestPerFrame>)
     {
         let current = Cga3dViewState {
             lambda: self.lambda,
