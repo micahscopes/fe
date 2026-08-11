@@ -187,6 +187,12 @@ actor GalleryPage {
                 program: t("sketches/plasma"),
             )
             .render_tile(
+                title: t("distance field"),
+                description: t2("3D Fe raymarch + soft ", "shadows"),
+                source: t("sketches/raymarch/src/lib.fe"),
+                program: t("sketches/raymarch"),
+            )
+            .render_tile(
                 title: t("mandelbrot"),
                 description: t("escape-time set"),
                 source: t("sketches/mandelbrot/src/lib.fe"),

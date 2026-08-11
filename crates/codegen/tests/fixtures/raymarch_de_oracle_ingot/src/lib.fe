@@ -1,0 +1,16 @@
+//! Thin Wasm exports over the production Fe distance and ray constructions.
+//! Expected geometry lives only in the independent Rust oracle.
+
+use raymarch::{scene_distance, trace_ray_distance}
+
+pub fn de_distance(_ x: f32, _ y: f32, _ z: f32, _ morph: f32) -> f32 {
+    scene_distance(x, y, z, morph)
+}
+
+pub fn de_trace(
+    _ ox: f32, _ oy: f32, _ oz: f32,
+    _ dx: f32, _ dy: f32, _ dz: f32,
+    _ morph: f32,
+) -> f32 {
+    trace_ray_distance(ox, oy, oz, dx, dy, dz, morph)
+}

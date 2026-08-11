@@ -17,7 +17,7 @@
 //! Coverage:
 //!   - every `demos/sketches/*/src/lib.fe` that declares an `actor ... uses
 //!     (GpuProgram<WebGpuBackend>)` (known_color, rollcall_pipeline, cga3d,
-//!     qcga, desargues, mandelbrot, plasma, gradient, dec): entry/mode are
+//!     qcga, desargues, raymarch, mandelbrot, plasma, gradient, dec): entry/mode are
 //!     DERIVED from the actor declaration, never hardcoded here, exactly as
 //!     `fe web build` does with `--entry`/`--mode` omitted;
 //!   - `demos/sketches/fmath`, a math-intrinsics library ingot with no
@@ -1672,6 +1672,60 @@ fn plasma_sketch_compiles() {
     assert_eq!(
         call_four_state_transition(&bundle, 10.0, -5.0, -1.0, [0.0, 3.0, 0.8, 512.0], 640.0,),
         [10.0f32 * 0.025, 3.0f32 * 0.875, 0.8f32 - 5.0 * 0.005, 640.0,]
+    );
+}
+
+#[test]
+fn raymarch_sketch_compiles_with_fe_owned_camera_and_bounded_shader() {
+    let bundle = compile_actor_ingot("demos/sketches/raymarch");
+    assert_browser_wgsl(&bundle.wgsl);
+    wasmparser::validate(&bundle.wasm).expect("raymarch control Wasm should be valid");
+    assert_scheduled_typed_surface(&bundle);
+    assert_initial_param(&bundle, "yaw", 0.72);
+    assert_initial_param(&bundle, "pitch", 0.28);
+    assert_initial_param(&bundle, "distance", 4.6);
+    assert_initial_param(&bundle, "morph", 0.58);
+    assert!(
+        bundle.wgsl.len() < 100_000,
+        "the readable Fe raymarcher should remain under its 100 kB WGSL budget (got {})",
+        bundle.wgsl.len(),
+    );
+    assert_eq!(
+        call_state_batch(
+            &bundle,
+            &[SurfaceEventFixture {
+                pointer_x: 100.0,
+                pointer_y: 100.0,
+                delta_x: 10.0,
+                delta_y: -5.0,
+                wheel_delta: -1.0,
+                wheel_mode: 0,
+                buttons: 1,
+                timestamp: 1.0,
+                width: 640.0,
+                height: 640.0,
+                event_kind: 0,
+                param_index: 0,
+                param_value: 0.0,
+            }],
+            &[0.72, 0.28, 4.6, 0.58, 512.0],
+        ),
+        [
+            0.72f32 + 10.0 * 0.008,
+            0.28f32 + -5.0 * -0.006,
+            4.6f32 * 0.875,
+            0.58,
+            640.0,
+        ],
+        "raw drag/wheel facts must drive the Fe-authored camera transition",
+    );
+    eprintln!(
+        "Fe raymarch receipt: {} authored lines -> {} B browser-valid WGSL, {} B control Wasm",
+        include_str!("../../../demos/sketches/raymarch/src/lib.fe")
+            .lines()
+            .count(),
+        bundle.wgsl.len(),
+        bundle.wasm.len(),
     );
 }
 

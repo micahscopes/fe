@@ -189,6 +189,25 @@ Origin: honesty audit of Claude Code session
   modules / 50 deployment files. Actual offscreen GPU execution is unavailable
   in this container (`wgpu` reports no active adapter), so that leg remains an
   honest external/browser requirement rather than a claimed local pass.
+- A new canonical `raymarch` tile is a complete Fe-authored 3D signed-distance
+  renderer rather than a handwritten Shadertoy port hidden in JavaScript/WGSL.
+  Its 336-line actor owns a 112-step primary march, the smooth-union
+  torus/core/satellite/floor distance estimator, finite-difference normals,
+  five-tap ambient occlusion, a 28-step soft shadow, material/sky/fog/gamma
+  policy, and typed yaw/pitch/distance/morph interaction. The host remains the
+  same demo-blind surface adapter. Generic `Vec3` operations and an `OrbitRay`
+  camera construction moved into `fmath`, so the application states the scene
+  and can seed later 3D examples without copying camera math. The shared
+  one-orbit ordered pixel sampling policy is reused outside Mandelbrot for the
+  first time. An independent Rust scalar model compares 1,029 field samples and
+  four complete rays against the production Fe functions executed in Wasmtime.
+  The canonical compile gate additionally executes the resident camera
+  transition from raw events and browser-validates the 83,496-byte WGSL under a
+  100 kB budget; control Wasm is 4,931 bytes. The Fe-composed gallery now
+  projects 11 render actors plus two resident components, and its release
+  artifact verifies 13 Fe modules / 54 files with both component browser tapes
+  green. Actual pixel execution retains the same local no-adapter qualification
+  recorded above.
 - This component/page slice is not the full resident-component end state. The
   outer gallery shell does not yet own routing, tile lifecycle, scheduling, or
   component-to-component messages as a long-lived Fe actor, and the stylesheet

@@ -43,6 +43,7 @@
 //! ordinary Fe (a hand-chosen parabola approximation): no backend has a
 //! native `sin`/`cos` instruction, so there is no intrinsic to graduate to.
 
+use core::marker::Copy
 use core::num::{Abs, FloatRounding}
 use core::ops::MinMax
 
@@ -130,6 +131,98 @@ pub fn mix(_ a: f32, _ b: f32, _ t: f32) -> f32 {
 pub fn smoothstep(_ edge0: f32, _ edge1: f32, _ x: f32) -> f32 {
     let t: f32 = clamp01((x - edge0) / (edge1 - edge0))
     t * t * (3.0 - 2.0 * t)
+}
+
+// ---------------------------------------------------------------------------
+// Three-dimensional geometry
+// ---------------------------------------------------------------------------
+
+/// Small, ordinary Fe vector used by camera, ray, distance-field, and lighting
+/// code. Keeping it here lets examples state their geometry rather than repeat
+/// a private vector substrate; backend scalarization still decides the final
+/// representation.
+pub struct Vec3 {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+}
+
+impl Copy for Vec3 {}
+
+pub fn vec3(_ x: f32, _ y: f32, _ z: f32) -> Vec3 {
+    Vec3 { x: x, y: y, z: z }
+}
+
+pub fn add3(_ a: Vec3, _ b: Vec3) -> Vec3 {
+    vec3(a.x + b.x, a.y + b.y, a.z + b.z)
+}
+
+pub fn sub3(_ a: Vec3, _ b: Vec3) -> Vec3 {
+    vec3(a.x - b.x, a.y - b.y, a.z - b.z)
+}
+
+pub fn scale3(_ value: Vec3, _ scale: f32) -> Vec3 {
+    vec3(value.x * scale, value.y * scale, value.z * scale)
+}
+
+pub fn dot3(_ a: Vec3, _ b: Vec3) -> f32 {
+    a.x * b.x + a.y * b.y + a.z * b.z
+}
+
+pub fn cross3(_ a: Vec3, _ b: Vec3) -> Vec3 {
+    vec3(
+        a.y * b.z - a.z * b.y,
+        a.z * b.x - a.x * b.z,
+        a.x * b.y - a.y * b.x,
+    )
+}
+
+pub fn length3(_ value: Vec3) -> f32 {
+    sqrt(dot3(value, value))
+}
+
+pub fn normalize3(_ value: Vec3) -> Vec3 {
+    scale3(value, 1.0 / max(length3(value), 0.0000001))
+}
+
+pub fn mix3(_ a: Vec3, _ b: Vec3, _ amount: f32) -> Vec3 {
+    vec3(
+        mix(a.x, b.x, amount),
+        mix(a.y, b.y, amount),
+        mix(a.z, b.z, amount),
+    )
+}
+
+/// A world-space camera ray derived entirely in Fe.
+pub struct OrbitRay {
+    pub origin: Vec3,
+    pub direction: Vec3,
+}
+
+impl Copy for OrbitRay {}
+
+/// Build a look-at ray from an orbit camera and normalized fragment plane.
+/// Interaction policy remains outside this pure construction; any Fe actor can
+/// feed it yaw/pitch/distance state from its preferred event vocabulary.
+pub fn orbit_ray(
+    _ yaw: f32, _ pitch: f32, _ distance: f32,
+    _ u: f32, _ v: f32, _ target_y: f32, _ field_of_view: f32,
+) -> OrbitRay {
+    let cos_pitch: f32 = cos(pitch)
+    let origin: Vec3 = vec3(
+        sin(yaw) * cos_pitch * distance,
+        sin(pitch) * distance,
+        cos(yaw) * cos_pitch * distance,
+    )
+    let target: Vec3 = vec3(0.0, target_y, 0.0)
+    let forward: Vec3 = normalize3(sub3(target, origin))
+    let right: Vec3 = normalize3(cross3(forward, vec3(0.0, 1.0, 0.0)))
+    let up: Vec3 = cross3(right, forward)
+    let direction: Vec3 = normalize3(add3(
+        forward,
+        add3(scale3(right, u * field_of_view), scale3(up, v * field_of_view)),
+    ))
+    OrbitRay { origin: origin, direction: direction }
 }
 
 // ---------------------------------------------------------------------------

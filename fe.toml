@@ -8,6 +8,7 @@ members = [
   { path = "demos/sketches/fmath", name = "fmath" },
   { path = "demos/sketches/precision", name = "precision" },
   { path = "demos/sketches/plasma", name = "plasma" },
+  { path = "demos/sketches/raymarch", name = "raymarch" },
   { path = "demos/sketches/dec", name = "dec" },
   { path = "demos/sketches/gradient", name = "gradient" },
   { path = "demos/sketches/mandelbrot", name = "mandelbrot" },

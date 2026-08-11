@@ -128,7 +128,7 @@ try {
     const script = document.querySelector('script[data-fe-mount="#source-inspector"], script[data-fe-mount="#gallery-shell"]');
     const component = document.querySelector("#source-inspector, #gallery-shell");
     const surfaces = Array.from(document.querySelectorAll("fe-surface"));
-    const expectedSurfaces = document.querySelector(".gallery-head") ? 10 : 1;
+    const expectedSurfaces = document.querySelector(".gallery-head") ? 11 : 1;
     return script?.dataset.feState === "complete" && component?._active === true &&
       surfaces.length === expectedSurfaces &&
       surfaces.every(surface => surface.shadowRoot?.querySelector('a[href$=".wgsl"]'));
@@ -164,8 +164,8 @@ try {
     })), {
       title: "Fe · GPU gallery",
       pageMarker: false,
-      figures: 11,
-      surfaces: 10,
+      figures: 12,
+      surfaces: 11,
       components: 2,
       captions: [
         "known color",
@@ -174,6 +174,7 @@ try {
         "qcga",
         "desargues",
         "plasma",
+        "distance field",
         "mandelbrot",
         "perturbation mandelbrot",
         "dec",

@@ -1,0 +1,6 @@
+[ingot]
+name = "raymarch_de_oracle_gate"
+version = "0.1.0"
+
+[dependencies]
+raymarch = "../../../../../demos/sketches/raymarch"
