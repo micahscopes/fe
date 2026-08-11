@@ -6,11 +6,12 @@
 //! typed output effects.
 
 use core::actor::{
-    InitialState as Initial, ProjectState as Projection,
+    ComponentComposition as Composition, InitialState as Initial, ProjectState as Projection,
     ResidentTransition as Stateful,
 }
 use std::web::component::{ComponentEvent, ComponentEventKind, ComponentPatch}
 use std::web::component::BrowserBytes
+use std::web::page::{ComponentView, PageAttribute, PageElement, PageOp, PageText}
 
 pub struct InspectorState {
     pub selected: u32,
@@ -22,6 +23,34 @@ actor SourceInspector {
     selected: u32,
     connected: bool,
     revision: u32,
+
+    const fn view() -> ComponentView<23> uses (Composition) {
+        ComponentView::exact(body: [
+            PageOp::open(element: PageElement::Button),
+            PageOp::attribute(value: PageAttribute::action(value: 0)),
+            PageOp::text(value: PageText::one(value: "Fe")),
+            PageOp::close(),
+            PageOp::open(element: PageElement::Button),
+            PageOp::attribute(value: PageAttribute::action(value: 1)),
+            PageOp::text(value: PageText::one(value: "Wasm")),
+            PageOp::close(),
+            PageOp::open(element: PageElement::Section),
+            PageOp::attribute(value: PageAttribute::view(value: 0)),
+            PageOp::text(value: PageText::one(value: "authored")),
+            PageOp::close(),
+            PageOp::open(element: PageElement::Section),
+            PageOp::attribute(value: PageAttribute::view(value: 1)),
+            PageOp::text(value: PageText::one(value: "generated")),
+            PageOp::close(),
+            PageOp::open(element: PageElement::Label),
+            PageOp::attribute(value: PageAttribute::local_for(value: "choice")),
+            PageOp::text(value: PageText::one(value: "Choice")),
+            PageOp::close(),
+            PageOp::open(element: PageElement::Input),
+            PageOp::attribute(value: PageAttribute::local_id(value: "choice")),
+            PageOp::close(),
+        ])
+    }
 
     const fn initial() -> InspectorState uses (Initial) {
         InspectorState {

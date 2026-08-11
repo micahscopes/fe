@@ -27,3 +27,9 @@ pub struct ProjectState {}
 /// ordinary Fe library choices.
 #[actor_page_projection]
 pub struct PageComposition {}
+
+/// A self-less resident-actor behavior whose const result describes the
+/// component's initial light-DOM fragment. Build tooling projects it into each
+/// mount before the resident Wasm instance boots.
+#[actor_component_projection]
+pub struct ComponentComposition {}

@@ -1,6 +1,8 @@
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::{PageAttributeKind, PageElement, PageProjectionOp, project_page};
+use fe_codegen::{
+    PageAttributeKind, PageElement, PageProjectionOp, project_component, project_page,
+};
 use hir::hir_def::HirIngot;
 use url::Url;
 
@@ -57,4 +59,21 @@ fn role_selected_fe_page_projects_typed_structure_without_json() {
     };
     assert_eq!(component.source, "sketches/todomvc/src/lib.fe");
     assert_eq!(component.mount, "todo-app");
+
+    let component = project_component(&db, top_mod)
+        .expect("component projection")
+        .expect("selected component view");
+    assert_eq!(component.actor, "TodoComponent");
+    assert_eq!(component.source_entry, "view");
+    assert_eq!(component.body.len(), 7);
+    let PageProjectionOp::Attribute(local_for) = &component.body[1] else {
+        panic!("expected component-local for attribute")
+    };
+    assert_eq!(local_for.kind, PageAttributeKind::LocalFor);
+    assert_eq!(local_for.text, "toggle-all");
+    let PageProjectionOp::Attribute(local_id) = &component.body[5] else {
+        panic!("expected component-local id attribute")
+    };
+    assert_eq!(local_id.kind, PageAttributeKind::LocalId);
+    assert_eq!(local_id.text, "toggle-all");
 }

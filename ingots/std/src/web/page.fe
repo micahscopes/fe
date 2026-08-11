@@ -7,6 +7,7 @@
 //! HTML syntax, escaping, and standards validation remain fixed host concerns.
 
 pub use core::actor::PageComposition
+pub use core::actor::ComponentComposition
 use core::marker::Copy
 use core::panic
 
@@ -74,12 +75,14 @@ impl Copy for PageElement {}
 /// Standard attributes plus the fixed Fe host's declarative identities.
 pub enum PageAttributeKind {
     Id,
+    LocalId,
     Class,
     Role,
     AriaLabel,
     AriaModal,
     InputType,
     For,
+    LocalFor,
     Title,
     Placeholder,
     Autocomplete,
@@ -118,11 +121,13 @@ impl PageAttribute {
     }
 
     pub const fn id(value: String<31>) -> Self { Self::text_attr(PageAttributeKind::Id, PageText::one(value)) }
+    pub const fn local_id(value: String<31>) -> Self { Self::text_attr(PageAttributeKind::LocalId, PageText::one(value)) }
     pub const fn class(value: String<31>) -> Self { Self::text_attr(PageAttributeKind::Class, PageText::one(value)) }
     pub const fn role(value: String<31>) -> Self { Self::text_attr(PageAttributeKind::Role, PageText::one(value)) }
     pub const fn aria_label(value: String<31>) -> Self { Self::text_attr(PageAttributeKind::AriaLabel, PageText::one(value)) }
     pub const fn input_type(value: String<31>) -> Self { Self::text_attr(PageAttributeKind::InputType, PageText::one(value)) }
     pub const fn for_id(value: String<31>) -> Self { Self::text_attr(PageAttributeKind::For, PageText::one(value)) }
+    pub const fn local_for(value: String<31>) -> Self { Self::text_attr(PageAttributeKind::LocalFor, PageText::one(value)) }
     pub const fn title(value: String<31>) -> Self { Self::text_attr(PageAttributeKind::Title, PageText::one(value)) }
     pub const fn placeholder(value: String<31>) -> Self { Self::text_attr(PageAttributeKind::Placeholder, PageText::one(value)) }
     pub const fn autocomplete(value: String<31>) -> Self { Self::text_attr(PageAttributeKind::Autocomplete, PageText::one(value)) }
@@ -232,6 +237,20 @@ pub struct Page<const N: usize> {
     pub body: [PageOp; N],
 }
 
+/// A resident component's initial light-DOM fragment. Unlike `Page`, a
+/// component fragment has no document title and is projected into the mount
+/// selected by the ordinary component declaration.
+pub struct ComponentView<const N: usize> {
+    pub length: usize,
+    pub body: [PageOp; N],
+}
+
+impl<const N: usize> ComponentView<N> {
+    pub const fn exact(body: [PageOp; N]) -> Self {
+        Self { length: N, body: body }
+    }
+}
+
 impl<const N: usize> Page<N> {
     pub const fn exact(title: PageText, body: [PageOp; N]) -> Self {
         Self { title: title, length: N, body: body }
@@ -295,5 +314,9 @@ impl<const N: usize> PageBuilder<N> {
 
     pub const fn finish(self, title: PageText) -> Page<N> {
         Page { title: title, length: self.length, body: self.body }
+    }
+
+    pub const fn finish_component(self) -> ComponentView<N> {
+        ComponentView { length: self.length, body: self.body }
     }
 }

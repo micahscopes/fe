@@ -1,5 +1,6 @@
 use std::web::page::{
-    Page, PageAttribute, PageComposition, PageElement, PageOp, PageText,
+    ComponentComposition, ComponentView, Page, PageAttribute, PageComposition,
+    PageElement, PageOp, PageText,
 }
 
 actor GalleryPage {
@@ -28,5 +29,21 @@ actor GalleryPage {
                 PageOp::close(),
             ],
         )
+    }
+}
+
+actor TodoComponent {
+    version: u32,
+
+    const fn view() -> ComponentView<7> uses (ComponentComposition) {
+        ComponentView::exact(body: [
+            PageOp::open(element: PageElement::Label),
+            PageOp::attribute(value: PageAttribute::local_for(value: "toggle-all")),
+            PageOp::text(value: PageText::one(value: "Toggle all")),
+            PageOp::close(),
+            PageOp::open(element: PageElement::Input),
+            PageOp::attribute(value: PageAttribute::local_id(value: "toggle-all")),
+            PageOp::close(),
+        ])
     }
 }

@@ -135,6 +135,10 @@ pub struct PrecompileOutput {
     /// Structural dependency inventories contributed by const-projected Fe
     /// page actors. Kept separate from render bundles for honest diagnostics.
     pub page_dependencies: Vec<SourceDependencyInventory>,
+    /// Dependency inventories for resident actors whose initial light DOM was
+    /// projected from `ComponentComposition` in the same compiler pass that
+    /// emitted their Wasm.
+    pub component_dependencies: Vec<SourceDependencyInventory>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -563,6 +567,7 @@ impl DevelopmentPrecompiler {
                     .render_dependencies
                     .iter()
                     .chain(output.page_dependencies.iter())
+                    .chain(output.component_dependencies.iter())
                     .flat_map(|inventory| &inventory.sources)
                 {
                     dependencies.insert(dependency.url.clone());
@@ -1375,6 +1380,7 @@ fn precompile_html_impl(
     let mut assets = BTreeMap::new();
     let mut modules = Vec::new();
     let mut render_dependencies = Vec::new();
+    let mut component_dependencies = Vec::new();
     let mut render_runtime_asset: Option<PublishedRenderRuntime> = None;
     for (index, script) in scripts.into_iter().enumerate() {
         let src = attr(&script, "data-fe-src");
@@ -1460,11 +1466,24 @@ fn precompile_html_impl(
             entries: vec![entry.clone()],
             options: CompileOptions::default(),
         };
-        let result =
-            fe_compiler_facade::compile(&request).map_err(|error| PrecompileError::Compile {
-                source_url: source_url.clone(),
-                detail: error.to_string(),
+        let (result, component_view) = if is_component {
+            let compiled =
+                fe_compiler_facade::compile_resident_component(&request).map_err(|error| {
+                    PrecompileError::Compile {
+                        source_url: source_url.clone(),
+                        detail: error.to_string(),
+                    }
+                })?;
+            (compiled.compilation, compiled.view)
+        } else {
+            let result = fe_compiler_facade::compile(&request).map_err(|error| {
+                PrecompileError::Compile {
+                    source_url: source_url.clone(),
+                    detail: error.to_string(),
+                }
             })?;
+            (result, None)
+        };
         if result.artifacts.is_empty() {
             return Err(PrecompileError::Diagnostics {
                 source_url,
@@ -1476,6 +1495,12 @@ fn precompile_html_impl(
             .iter()
             .find(|artifact| artifact.kind == ArtifactKind::WasmModule)
             .ok_or_else(|| PrecompileError::MissingWasm(source_url.clone()))?;
+        if let Some(view) = component_view {
+            project_component_view_into_mount(&dom.document, &script, &view)?;
+            if let Some(dependencies) = &result.source_dependencies {
+                component_dependencies.push(dependencies.clone());
+            }
+        }
         let wasm_path = format!("assets/fe-{}.wasm", &wasm.sha256[..16]);
         insert_identical(&mut assets, wasm_path.clone(), wasm.bytes.clone())?;
 
@@ -1545,6 +1570,14 @@ fn precompile_html_impl(
             &wasm.sha256,
         );
         modules.push(manifest);
+    }
+
+    // Component views are projected during the shared resident compilation
+    // above. Their closed vocabulary cannot add scripts, but re-run the URL
+    // and event-attribute purity walk so a projected href receives the same
+    // canonical-gallery scrutiny as page-authored markup.
+    if canonical_gallery {
+        validate_no_inline_javascript(&dom.document, &document_url)?;
     }
 
     // Authored `<fe-surface src="...">` elements (the render web component
@@ -1640,6 +1673,7 @@ fn precompile_html_impl(
         modules,
         render_dependencies,
         page_dependencies,
+        component_dependencies,
     })
 }
 
@@ -1812,6 +1846,7 @@ fn valid_page_id(value: &str) -> bool {
 fn set_projected_attribute(
     node: &Handle,
     value: &fe_compiler_facade::ProjectedPageAttribute,
+    component_scope: Option<&str>,
 ) -> Result<(), PrecompileError> {
     use fe_compiler_facade::PageAttributeKind;
     let (name, text) = match value.kind {
@@ -1824,12 +1859,40 @@ fn set_projected_attribute(
             }
             ("id".to_owned(), value.text.clone())
         }
+        PageAttributeKind::LocalId => {
+            let scope = component_scope.ok_or_else(|| {
+                PrecompileError::Serialize(
+                    "Fe page uses a component-local id outside a component view".to_owned(),
+                )
+            })?;
+            if !valid_page_id(&value.text) {
+                return Err(PrecompileError::Serialize(format!(
+                    "Fe component local id {:?} is not a safe HTML identifier",
+                    value.text
+                )));
+            }
+            ("id".to_owned(), format!("{scope}-{}", value.text))
+        }
         PageAttributeKind::Class => ("class".to_owned(), value.text.clone()),
         PageAttributeKind::Role => ("role".to_owned(), value.text.clone()),
         PageAttributeKind::AriaLabel => ("aria-label".to_owned(), value.text.clone()),
         PageAttributeKind::AriaModal => ("aria-modal".to_owned(), value.enabled.to_string()),
         PageAttributeKind::InputType => ("type".to_owned(), value.text.clone()),
         PageAttributeKind::For => ("for".to_owned(), value.text.clone()),
+        PageAttributeKind::LocalFor => {
+            let scope = component_scope.ok_or_else(|| {
+                PrecompileError::Serialize(
+                    "Fe page uses a component-local `for` outside a component view".to_owned(),
+                )
+            })?;
+            if !valid_page_id(&value.text) {
+                return Err(PrecompileError::Serialize(format!(
+                    "Fe component local `for` {:?} is not a safe HTML identifier",
+                    value.text
+                )));
+            }
+            ("for".to_owned(), format!("{scope}-{}", value.text))
+        }
         PageAttributeKind::Title => ("title".to_owned(), value.text.clone()),
         PageAttributeKind::Placeholder => ("placeholder".to_owned(), value.text.clone()),
         PageAttributeKind::Autocomplete => ("autocomplete".to_owned(), value.text.clone()),
@@ -1888,11 +1951,20 @@ fn page_program_script(attributes: Vec<(&str, String)>) -> Handle {
 fn realize_page_projection(
     page: &fe_compiler_facade::PageProjection,
 ) -> Result<Vec<Handle>, PrecompileError> {
+    realize_projection_ops(&page.body, None, true, "page")
+}
+
+fn realize_projection_ops(
+    operations: &[fe_compiler_facade::PageProjectionOp],
+    component_scope: Option<&str>,
+    allow_programs: bool,
+    owner: &str,
+) -> Result<Vec<Handle>, PrecompileError> {
     use fe_compiler_facade::PageProjectionOp;
     let mut roots = Vec::new();
     let mut stack = Vec::new();
     let mut accepts_attributes = Vec::new();
-    for (index, operation) in page.body.iter().enumerate() {
+    for (index, operation) in operations.iter().enumerate() {
         match operation {
             PageProjectionOp::Open(element) => {
                 if let Some(accepts) = accepts_attributes.last_mut() {
@@ -1906,15 +1978,15 @@ fn realize_page_projection(
             PageProjectionOp::Attribute(value) => {
                 let Some(node) = stack.last() else {
                     return Err(PrecompileError::Serialize(format!(
-                        "Fe page operation #{index} applies an attribute outside an element"
+                        "Fe {owner} operation #{index} applies an attribute outside an element"
                     )));
                 };
                 if !accepts_attributes.last().copied().unwrap_or(false) {
                     return Err(PrecompileError::Serialize(format!(
-                        "Fe page operation #{index} applies an attribute after element content"
+                        "Fe {owner} operation #{index} applies an attribute after element content"
                     )));
                 }
-                set_projected_attribute(node, value)?;
+                set_projected_attribute(node, value, component_scope)?;
             }
             PageProjectionOp::Text(value) => {
                 if let Some(accepts) = accepts_attributes.last_mut() {
@@ -1925,12 +1997,17 @@ fn realize_page_projection(
             PageProjectionOp::Close => {
                 if stack.pop().is_none() {
                     return Err(PrecompileError::Serialize(format!(
-                        "Fe page operation #{index} closes beyond the page root"
+                        "Fe {owner} operation #{index} closes beyond the projection root"
                     )));
                 }
                 accepts_attributes.pop();
             }
             PageProjectionOp::Render(render) => {
+                if !allow_programs {
+                    return Err(PrecompileError::Serialize(format!(
+                        "Fe {owner} operation #{index} nests a render program; component views may only describe DOM"
+                    )));
+                }
                 if render.source.is_empty() {
                     return Err(PrecompileError::Serialize(format!(
                         "Fe page render operation #{index} has an empty source"
@@ -1957,6 +2034,11 @@ fn realize_page_projection(
                 append_page_node(&mut roots, &stack, node);
             }
             PageProjectionOp::Component(component) => {
+                if !allow_programs {
+                    return Err(PrecompileError::Serialize(format!(
+                        "Fe {owner} operation #{index} nests a resident program; component views may only describe DOM"
+                    )));
+                }
                 if component.source.is_empty() || !valid_page_id(&component.mount) {
                     return Err(PrecompileError::Serialize(format!(
                         "Fe page component operation #{index} requires a source and safe mount id"
@@ -1977,11 +2059,75 @@ fn realize_page_projection(
     }
     if !stack.is_empty() {
         return Err(PrecompileError::Serialize(format!(
-            "Fe page leaves {} element(s) unclosed",
+            "Fe {owner} leaves {} element(s) unclosed",
             stack.len()
         )));
     }
     Ok(roots)
+}
+
+fn project_component_view_into_mount(
+    root: &Handle,
+    script: &Handle,
+    component: &fe_compiler_facade::ComponentProjection,
+) -> Result<(), PrecompileError> {
+    let selector = attr(script, "data-fe-mount").ok_or_else(|| {
+        PrecompileError::Serialize(
+            "a component view requires its script to declare `data-fe-mount`".to_owned(),
+        )
+    })?;
+    let mount = selector.strip_prefix('#').ok_or_else(|| {
+        PrecompileError::Serialize(format!(
+            "component view mount {selector:?} must be one safe id selector"
+        ))
+    })?;
+    if !valid_page_id(mount) {
+        return Err(PrecompileError::Serialize(format!(
+            "component view mount {selector:?} must be one safe id selector"
+        )));
+    }
+
+    let mut candidates = Vec::new();
+    collect_elements_with_attr(root, "fe-component", "id", &mut candidates);
+    candidates.retain(|candidate| attr(candidate, "id").as_deref() == Some(mount));
+    let [target] = candidates.as_slice() else {
+        return Err(PrecompileError::Serialize(format!(
+            "component view `{}` requires exactly one <fe-component id={mount:?}> mount; found {}",
+            component.actor,
+            candidates.len()
+        )));
+    };
+
+    let nodes = realize_projection_ops(&component.body, Some(mount), false, "component view")?;
+    let mut existing_ids = Vec::new();
+    collect_element_ids(root, &mut existing_ids);
+    let mut ids = existing_ids.into_iter().collect::<BTreeSet<_>>();
+    let mut projected_ids = Vec::new();
+    for node in &nodes {
+        collect_element_ids(node, &mut projected_ids);
+    }
+    for id in projected_ids {
+        if !ids.insert(id.clone()) {
+            return Err(PrecompileError::Serialize(format!(
+                "component view `{}` projects duplicate document id `{id}`",
+                component.actor
+            )));
+        }
+    }
+    for node in nodes {
+        node.parent.set(Some(Rc::downgrade(target)));
+        target.children.borrow_mut().push(node);
+    }
+    Ok(())
+}
+
+fn collect_element_ids(root: &Handle, output: &mut Vec<String>) {
+    if let Some(id) = attr(root, "id") {
+        output.push(id);
+    }
+    for child in root.children.borrow().iter() {
+        collect_element_ids(child, output);
+    }
 }
 
 fn replace_page_script(script: &Handle, replacements: Vec<Handle>) -> Result<(), PrecompileError> {
@@ -3410,6 +3556,7 @@ actor ExamplePage {
         );
         assert!(output.render_dependencies.is_empty());
         assert_eq!(output.page_dependencies.len(), 1);
+        assert!(output.component_dependencies.is_empty());
         assert!(!output.html.contains(PAGE_SCRIPT_MARKER));
         assert!(output.html.contains("<title>Fe owns &lt;title&gt;</title>"));
         assert!(
@@ -3445,16 +3592,73 @@ actor ExamplePage {
     }
 
     #[test]
+    fn component_projection_rejects_nested_programs_and_unscoped_local_ids() {
+        let nested = vec![fe_compiler_facade::PageProjectionOp::Render(
+            fe_compiler_facade::ProjectedPageRender {
+                source: "sketches/gradient".to_owned(),
+                entry: String::new(),
+                wgsl_action: 1,
+                wasm_action: 2,
+                manifest_action: 3,
+            },
+        )];
+        let error =
+            realize_projection_ops(&nested, Some("fixture-component"), false, "component view")
+                .unwrap_err();
+        assert!(error.to_string().contains("may only describe DOM"));
+
+        let page = fe_compiler_facade::PageProjection {
+            actor: "Broken".to_owned(),
+            source_entry: "compose".to_owned(),
+            title: "broken".to_owned(),
+            body: vec![
+                fe_compiler_facade::PageProjectionOp::Open(fe_compiler_facade::PageElement::Input),
+                fe_compiler_facade::PageProjectionOp::Attribute(
+                    fe_compiler_facade::ProjectedPageAttribute {
+                        kind: fe_compiler_facade::PageAttributeKind::LocalId,
+                        text: "choice".to_owned(),
+                        number: 0,
+                        enabled: false,
+                    },
+                ),
+                fe_compiler_facade::PageProjectionOp::Close,
+            ],
+        };
+        let error = realize_page_projection(&page).unwrap_err();
+        assert!(error.to_string().contains("outside a component view"));
+
+        let dom = html5ever::parse_document(RcDom::default(), Default::default()).one(
+            r##"<script data-fe-mount="#fixture"></script><fe-component id="fixture"></fe-component>"##,
+        );
+        let script = find_first_element(&dom.document, "script").unwrap();
+        let component = fe_compiler_facade::ComponentProjection {
+            actor: "Fixture".to_owned(),
+            source_entry: "view".to_owned(),
+            body: vec![
+                fe_compiler_facade::PageProjectionOp::Open(fe_compiler_facade::PageElement::Input),
+                fe_compiler_facade::PageProjectionOp::Attribute(
+                    fe_compiler_facade::ProjectedPageAttribute {
+                        kind: fe_compiler_facade::PageAttributeKind::LocalId,
+                        text: "choice".to_owned(),
+                        number: 0,
+                        enabled: false,
+                    },
+                ),
+                fe_compiler_facade::PageProjectionOp::Close,
+            ],
+        };
+        project_component_view_into_mount(&dom.document, &script, &component).unwrap();
+        let error =
+            project_component_view_into_mount(&dom.document, &script, &component).unwrap_err();
+        assert!(error.to_string().contains("duplicate document id"));
+    }
+
+    #[test]
     fn resident_fe_component_uses_normal_wasm_lane_and_fixed_bootstrap_without_new_json_protocol() {
         let html = r##"<!doctype html><html><head></head><body>
 <script type="application/fe" data-fe-src="./source-inspector.fe"
         data-fe-component data-fe-mount="#inspector"></script>
-<fe-component id="inspector">
-  <button data-fe-action="0">Fe</button>
-  <button data-fe-action="1">Wasm</button>
-  <section data-fe-view="0">authored</section>
-  <section data-fe-view="1">generated</section>
-</fe-component>
+<fe-component id="inspector"></fe-component>
 </body></html>"##;
         let source = include_str!("../../codegen/tests/fixtures/web_component_actor/src/lib.fe");
         let output = precompile_html("https://example.test/component.html", html, |url| {
@@ -3464,6 +3668,8 @@ actor ExamplePage {
         .expect("precompile resident Fe component");
 
         assert_eq!(output.modules.len(), 1);
+        assert!(output.page_dependencies.is_empty());
+        assert_eq!(output.component_dependencies.len(), 1);
         let module = &output.modules[0];
         assert_eq!(module.entry, RESIDENT_ACTOR_INITIALIZE_EXPORT);
         for fixed in [
@@ -3483,6 +3689,13 @@ actor ExamplePage {
         assert!(output.html.contains("data-fe-component=\"\""));
         assert!(output.html.contains("data-fe-mount=\"#inspector\""));
         assert!(output.html.contains("<fe-component id=\"inspector\""));
+        assert!(
+            output
+                .html
+                .contains("<button data-fe-action=\"0\">Fe</button>")
+        );
+        assert!(output.html.contains("id=\"inspector-choice\""));
+        assert!(output.html.contains("for=\"inspector-choice\""));
         assert!(
             !output.html.contains("actor_transition")
                 && !output.html.contains("ComponentEventKind")
@@ -3793,6 +4006,7 @@ actor ExamplePage {
                 modules: Vec::new(),
                 render_dependencies: Vec::new(),
                 page_dependencies: Vec::new(),
+                component_dependencies: Vec::new(),
             }),
         };
         let mut events = Vec::new();

@@ -113,18 +113,30 @@ Origin: honesty audit of Claude Code session
 - The canonical gallery body is now one role-selected Fe `GalleryPage` actor.
   Its const `GalleryBuilder` expands through a typed `std::web::page` operation
   vocabulary into the header, ordered tiles, captions, source links, all ten
-  render declarations, two resident-component mounts, TodoMVC template, and
-  SourceInspector view. The HTML body retains only one inert `data-fe-page`
+  render declarations, and two resident-component mounts. The HTML body
+  retains only one inert `data-fe-page`
   source declaration; there is no page Wasm or page JSON manifest. The fixed
   precompiler realizes standards nodes and validates ordering, balanced trees,
   attributes, mount identities, and sources before ordinary program discovery.
   A semantic projector fixture, negative structure gate, deployment verifier,
   and Chromium gate independently prove the typed result and actual behavior.
+- TodoMVC and SourceInspector now each declare a self-less const
+  `ComponentComposition` behavior beside their resident reducer. The facade
+  analyzes each module once, then emits its resident Wasm and projects its
+  typed initial light-DOM fragment without JSON or a second compiler pass.
+  Gallery and standalone HTML now carry empty mounts rather than duplicated
+  component markup. Component-local `id`/`for` pairs are generically prefixed
+  from the mount identity, so the Fe module stays reusable without global-ID
+  collisions or gallery-specific strings. Semantic projection, mount/actor
+  agreement, exact structural checks, and both standalone and gallery Chromium
+  tapes guard this interface. On the measured release build, a warm full
+  gallery precompile reused all ten render bundles and projected the page plus
+  both component views in 4.8 seconds; this is evidence, not yet a formal
+  performance budget.
 - This component/page slice is not the full resident-component end state. The
   outer gallery shell does not yet own routing, tile lifecycle, scheduling, or
-  component-to-component messages as a long-lived Fe actor. Static component
-  DOM is composed by `GalleryPage` rather than exported by each component
-  module, and the stylesheet remains an authored transitional HTML shell. The
+  component-to-component messages as a long-lived Fe actor, and the stylesheet
+  remains an authored transitional HTML shell. The
   component directory route still needs to supersede the render-lane probe; an
   attribute-mutation event ABI, persistence, unbounded collections, and native
   backend parity remain open. TodoMVC intentionally caps itself at 32 todos and
@@ -481,10 +493,11 @@ without runtime knowledge of its control points or geometry.
 
 Current status: the functional page-composition exit condition is landed. One
 role-selected Fe entrypoint composes the full canonical gallery body, produces
-no page runtime artifact or JSON, and is exercised in a real browser. The
-remaining Phase 5 cleanup is moving the transitional shell CSS onto a fixed
-selectable theme and letting resident component modules project their own
-static DOM, so `GalleryPage` need not spell out TodoMVC/inspector internals.
+no page runtime artifact or JSON, and is exercised in a real browser. Resident
+component modules now project their own static DOM as well, so `GalleryPage`
+does not spell out TodoMVC/inspector internals. The remaining Phase 5 cleanup
+is moving the transitional shell CSS onto a fixed selectable theme and retiring
+the compatibility shell once that theme covers it.
 
 1. Land the planned `WebPage` actor and `const compose() -> Page` projection.
 2. Generate mounts, captions, source/provenance links, and layout declarations

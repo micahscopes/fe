@@ -20,8 +20,8 @@ use fe_compiler_protocol::{
 use url::Url;
 
 pub use codegen::{
-    PageAttributeKind, PageElement, PageProjection, PageProjectionOp, ProjectedPageAttribute,
-    ProjectedPageComponent, ProjectedPageRender,
+    ComponentProjection, PageAttributeKind, PageElement, PageProjection, PageProjectionOp,
+    ProjectedPageAttribute, ProjectedPageComponent, ProjectedPageRender,
 };
 
 /// In-memory result of projecting a role-selected Fe page. This is a direct
@@ -31,6 +31,15 @@ pub struct PageProjectionResult {
     pub diagnostics: Vec<Diagnostic>,
     pub page: Option<PageProjection>,
     pub source_dependencies: SourceDependencyInventory,
+}
+
+/// One resident Wasm compilation and its optional Fe-authored initial DOM
+/// fragment, produced from a shared compiler database and diagnostic pass.
+/// The view stays typed in memory and is never a runtime manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResidentComponentCompileResult {
+    pub compilation: CompileResult,
+    pub view: Option<ComponentProjection>,
 }
 
 #[derive(Debug)]
@@ -94,6 +103,19 @@ pub fn project_page(request: &CompileRequest) -> Result<PageProjectionResult, Co
     })
 }
 
+/// Compile a resident component and CTFE-project its optional
+/// `ComponentComposition` behavior without parsing or analyzing the source a
+/// second time.
+pub fn compile_resident_component(
+    request: &CompileRequest,
+) -> Result<ResidentComponentCompileResult, CompileFacadeError> {
+    request.validate()?;
+    if request.target != CompileTarget::Wasm {
+        return Err(CompileFacadeError::UnsupportedTarget(request.target));
+    }
+    compile_wasm_with_component_view(request, true)
+}
+
 /// Shared prologue: build the in-memory db from the request's virtual
 /// sources, run diagnostics on the root module once, and hand back the
 /// pieces both target backends need. `root_file` (not `top_mod`) is returned
@@ -137,29 +159,58 @@ fn compile_prologue(
 }
 
 fn compile_wasm(request: &CompileRequest) -> Result<CompileResult, CompileFacadeError> {
+    Ok(compile_wasm_with_component_view(request, false)?.compilation)
+}
+
+fn compile_wasm_with_component_view(
+    request: &CompileRequest,
+    project_view: bool,
+) -> Result<ResidentComponentCompileResult, CompileFacadeError> {
     let (db, root_file, diagnostics, has_error, source_dependencies) = compile_prologue(request)?;
     if has_error {
-        return Ok(result(
-            request,
-            diagnostics,
-            Vec::new(),
-            InterfaceManifest::default(),
-            source_dependencies,
-        ));
+        return Ok(ResidentComponentCompileResult {
+            compilation: result(
+                request,
+                diagnostics,
+                Vec::new(),
+                InterfaceManifest::default(),
+                source_dependencies,
+            ),
+            view: None,
+        });
     }
     let top_mod = db.top_mod(root_file);
+    let view = if project_view {
+        codegen::project_component(&db, top_mod)
+            .map_err(|error| CompileFacadeError::Backend(error.to_string()))?
+    } else {
+        None
+    };
 
     // A nominal target-neutral resident actor role selects the fixed actor ABI
     // through the same ordinary Wasm target. This is semantic auto-discovery,
     // not a new JSON request mode, entry-name convention, or web/component
     // compiler special case.
     let optimize = request.options.optimization != fe_compiler_protocol::OptimizationLevel::None;
-    let bytes = if let Some(actor) =
-        codegen::compile_resident_actor_with_optimization(&db, top_mod, optimize)
-            .map_err(|error| CompileFacadeError::Backend(error.to_string()))?
-    {
+    let resident = codegen::compile_resident_actor_with_optimization(&db, top_mod, optimize)
+        .map_err(|error| CompileFacadeError::Backend(error.to_string()))?;
+    let bytes = if let Some(actor) = resident {
+        if let Some(view) = &view
+            && view.actor != actor.contract.actor
+        {
+            return Err(CompileFacadeError::Backend(format!(
+                "component view actor `{}` does not match resident actor `{}`",
+                view.actor, actor.contract.actor
+            )));
+        }
         actor.wasm
     } else {
+        if let Some(view) = &view {
+            return Err(CompileFacadeError::Backend(format!(
+                "component view actor `{}` has no resident transition",
+                view.actor
+            )));
+        }
         let output = BackendKind::Wasm
             .create()
             .compile(
@@ -186,13 +237,16 @@ fn compile_wasm(request: &CompileRequest) -> Result<CompileResult, CompileFacade
         "application/wasm",
         bytes,
     )];
-    Ok(result(
-        request,
-        diagnostics,
-        artifacts,
-        interface,
-        source_dependencies,
-    ))
+    Ok(ResidentComponentCompileResult {
+        compilation: result(
+            request,
+            diagnostics,
+            artifacts,
+            interface,
+            source_dependencies,
+        ),
+        view,
+    })
 }
 
 /// `CompileTarget::Webgpu`: lower the requested entry through the render

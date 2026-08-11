@@ -10,6 +10,9 @@ use std::web::component::{
     ComponentPatch, ComponentWriter, InitialState, ProjectState, ResidentTransition,
     allocate_component_buffer, component_string,
 }
+use std::web::page::{
+    ComponentComposition, ComponentView, PageAttribute, PageBuilder, PageElement, PageText,
+}
 
 const ACTION_SOURCE: u32 = 100
 const ACTION_WGSL: u32 = 101
@@ -38,6 +41,11 @@ const STATUS_ERROR: u32 = 2
 const URL_CAPACITY: u32 = 2048
 const PATCH_CAPACITY: u32 = 1048576
 const CONTENT_CAPACITY: u32 = 1044480
+const VIEW_CAPACITY: usize = 80
+
+const fn ui_text(value: String<31>) -> PageText {
+    PageText::one(value: value)
+}
 
 pub struct InspectorState {
     pub patch_ptr: u32,
@@ -116,6 +124,83 @@ actor SourceInspector {
     prevent_default: bool,
     focus_close: bool,
     revision: u32,
+
+    const fn view() -> ComponentView<VIEW_CAPACITY> uses (ComponentComposition) {
+        PageBuilder::new()
+            .open(element: PageElement::Section)
+            .attribute(value: PageAttribute::class(value: "inspector source-inspector"))
+            .attribute(value: PageAttribute::view(value: VIEW_OVERLAY))
+            .attribute(value: PageAttribute::hidden())
+            .attribute(value: PageAttribute::role(value: "dialog"))
+            .attribute(value: PageAttribute::aria_modal())
+            .attribute(value: PageAttribute::aria_label(value: "Source inspector"))
+            .open(element: PageElement::Header)
+            .attribute(value: PageAttribute::class(value: "inspector-head"))
+            .open(element: PageElement::Span)
+            .attribute(value: PageAttribute::class(value: "inspector-title"))
+            .attribute(value: PageAttribute::view(value: VIEW_TITLE_SOURCE))
+            .text(value: ui_text(value: "Fe source"))
+            .close()
+            .open(element: PageElement::Span)
+            .attribute(value: PageAttribute::class(value: "inspector-title"))
+            .attribute(value: PageAttribute::view(value: VIEW_TITLE_WGSL))
+            .text(value: ui_text(value: "Compiler-generated WGSL"))
+            .close()
+            .open(element: PageElement::Span)
+            .attribute(value: PageAttribute::class(value: "inspector-title"))
+            .attribute(value: PageAttribute::view(value: VIEW_TITLE_WASM))
+            .text(value: ui_text(value: "Compiler-generated Wasm"))
+            .close()
+            .open(element: PageElement::Span)
+            .attribute(value: PageAttribute::class(value: "inspector-title"))
+            .attribute(value: PageAttribute::view(value: VIEW_TITLE_MANIFEST))
+            .text(value: ui_text(value: "Transitional audit manifest"))
+            .close()
+            .open(element: PageElement::Anchor)
+            .attribute(value: PageAttribute::class(value: "raw"))
+            .attribute(value: PageAttribute::node(value: NODE_RAW))
+            .attribute(value: PageAttribute::target(value: "_blank"))
+            .attribute(value: PageAttribute::rel(value: "noopener"))
+            .text(value: ui_text(value: "Raw"))
+            .close()
+            .open(element: PageElement::Button)
+            .attribute(value: PageAttribute::class(value: "close"))
+            .attribute(value: PageAttribute::action(value: ACTION_CLOSE))
+            .attribute(value: PageAttribute::input_type(value: "button"))
+            .attribute(value: PageAttribute::aria_label(value: "Close"))
+            .text(value: ui_text(value: "×"))
+            .close()
+            .close()
+            .open(element: PageElement::Div)
+            .attribute(value: PageAttribute::class(value: "body inspector-body"))
+            .open(element: PageElement::Paragraph)
+            .attribute(value: PageAttribute::class(value: "message"))
+            .attribute(value: PageAttribute::view(value: VIEW_LOADING))
+            .text(value: ui_text(value: "Loading…"))
+            .close()
+            .open(element: PageElement::Pre)
+            .attribute(value: PageAttribute::view(value: VIEW_TEXT))
+            .attribute(value: PageAttribute::node(value: NODE_BODY))
+            .close()
+            .open(element: PageElement::Paragraph)
+            .attribute(value: PageAttribute::class(value: "message"))
+            .attribute(value: PageAttribute::view(value: VIEW_BINARY))
+            .text(value: ui_text(value: "Compiled binary module · "))
+            .open(element: PageElement::Strong)
+            .attribute(value: PageAttribute::node(value: NODE_BYTES))
+            .text(value: ui_text(value: "0"))
+            .close()
+            .text(value: ui_text(value: " bytes."))
+            .close()
+            .open(element: PageElement::Pre)
+            .attribute(value: PageAttribute::class(value: "error"))
+            .attribute(value: PageAttribute::view(value: VIEW_ERROR))
+            .attribute(value: PageAttribute::node(value: NODE_ERROR))
+            .close()
+            .close()
+            .close()
+            .finish_component()
+    }
 
     fn initial() -> InspectorState uses (InitialState) {
         let patch = allocate_component_buffer(capacity: PATCH_CAPACITY)

@@ -50,6 +50,7 @@ pub fn precompile(html_path: &Utf8Path, output: &Utf8Path) -> Result<(), String>
         modules = result.modules.len(),
         render_bundles = result.render_dependencies.len(),
         page_projections = result.page_dependencies.len(),
+        component_projections = result.component_dependencies.len(),
         assets = result.assets.len(),
         elapsed_ms = started.elapsed().as_millis() as u64,
         "compiled Fe HTML site"

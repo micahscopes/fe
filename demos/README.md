@@ -21,10 +21,12 @@ embedded as a tile in `gallery.html`.
 The gallery body is composed by the role-selected `GalleryPage` actor in
 `demos/sketches/gallery_page/src/lib.fe`. Its const `GalleryBuilder` expands
 through the typed `std::web::page` vocabulary into the header, ordered tiles,
-captions, source links, render declarations, resident-component mounts, and
-their initial DOM. The HTML body contains only the inert page declaration; its
-remaining authored CSS is an explicitly transitional presentation shell, not
-application behavior or a second page manifest.
+captions, source links, render declarations, and resident-component mounts.
+TodoMVC and SourceInspector each project their own initial DOM from a const
+`ComponentComposition` behavior in the same Fe module as their reducer. The
+HTML body contains only the inert page declaration; its remaining authored CSS
+is an explicitly transitional presentation shell, not application behavior or
+a second page manifest.
 
 `demos/sketches/source_inspector/src/lib.fe` owns source/generated-artifact
 selection, loading/error state, stale-response rejection, binary-vs-text

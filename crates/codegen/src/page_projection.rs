@@ -52,12 +52,14 @@ pub enum PageElement {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageAttributeKind {
     Id,
+    LocalId,
     Class,
     Role,
     AriaLabel,
     AriaModal,
     InputType,
     For,
+    LocalFor,
     Title,
     Placeholder,
     Autocomplete,
@@ -114,6 +116,13 @@ pub struct PageProjection {
     pub body: Vec<PageProjectionOp>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComponentProjection {
+    pub actor: String,
+    pub source_entry: String,
+    pub body: Vec<PageProjectionOp>,
+}
+
 #[derive(Debug)]
 pub enum PageProjectionError {
     Contract(String),
@@ -147,6 +156,17 @@ fn behavior_is_page_projection(db: &DriverDataBase, behavior: hir::hir_def::Func
         .filter_map(|path| resolve_metadata_ty(db, path, behavior.scope()))
         .filter_map(|ty| nominal_attrs(db, ty))
         .any(|attrs| attrs.is_actor_page_projection(db))
+}
+
+fn behavior_is_component_projection(db: &DriverDataBase, behavior: hir::hir_def::Func<'_>) -> bool {
+    behavior
+        .actor_roles(db)
+        .data(db)
+        .iter()
+        .filter_map(|role| role.key_path.to_opt())
+        .filter_map(|path| resolve_metadata_ty(db, path, behavior.scope()))
+        .filter_map(|ty| nominal_attrs(db, ty))
+        .any(|attrs| attrs.is_actor_component_projection(db))
 }
 
 /// Find and CTFE-project the module's unique page-composition behavior.
@@ -196,6 +216,60 @@ pub fn project_page(
         actor,
         source_entry,
         title,
+        body,
+    }))
+}
+
+/// Find and CTFE-project the module's unique resident-component view behavior.
+/// `Ok(None)` preserves compatibility for components whose light DOM is still
+/// supplied by authored HTML.
+pub fn project_component(
+    db: &DriverDataBase,
+    top_mod: TopLevelMod<'_>,
+) -> Result<Option<ComponentProjection>, PageProjectionError> {
+    let selected = semantic_actors(db, top_mod)
+        .into_iter()
+        .flat_map(|actor| {
+            actor
+                .behaviors
+                .into_iter()
+                .filter(|behavior| behavior_is_component_projection(db, *behavior))
+                .map(move |behavior| (actor.state, behavior))
+        })
+        .collect::<Vec<_>>();
+    let (state, behavior) = match selected.as_slice() {
+        [] => return Ok(None),
+        [selected] => *selected,
+        _ => {
+            return Err(PageProjectionError::Contract(format!(
+                "module declares {} component-view behaviors; exactly one is required",
+                selected.len()
+            )));
+        }
+    };
+    if !behavior.arg_tys(db).is_empty() {
+        return Err(PageProjectionError::Contract(
+            "component view composition must be self-less and take no arguments".to_owned(),
+        ));
+    }
+    let actor = state
+        .name(db)
+        .to_opt()
+        .map(|name| name.data(db).to_string())
+        .ok_or_else(|| PageProjectionError::Contract("component actor has no name".to_owned()))?;
+    let source_entry = behavior
+        .name(db)
+        .to_opt()
+        .map(|name| name.data(db).to_string())
+        .ok_or_else(|| {
+            PageProjectionError::Contract("component view behavior has no name".to_owned())
+        })?;
+    let value = eval_body_owner_const(db, BodyOwner::Func(behavior), Vec::new())
+        .map_err(|error| PageProjectionError::NotConstEvaluable(describe_ctfe_error(&error)))?;
+    let body = walk_component(db, value)?;
+    Ok(Some(ComponentProjection {
+        actor,
+        source_entry,
         body,
     }))
 }
@@ -456,12 +530,14 @@ fn read_attribute_kind(
     no_fields(fields, "PageAttributeKind")?;
     Ok(match name.as_str() {
         "Id" => PageAttributeKind::Id,
+        "LocalId" => PageAttributeKind::LocalId,
         "Class" => PageAttributeKind::Class,
         "Role" => PageAttributeKind::Role,
         "AriaLabel" => PageAttributeKind::AriaLabel,
         "AriaModal" => PageAttributeKind::AriaModal,
         "InputType" => PageAttributeKind::InputType,
         "For" => PageAttributeKind::For,
+        "LocalFor" => PageAttributeKind::LocalFor,
         "Title" => PageAttributeKind::Title,
         "Placeholder" => PageAttributeKind::Placeholder,
         "Autocomplete" => PageAttributeKind::Autocomplete,
@@ -602,23 +678,43 @@ fn walk_page(
 ) -> Result<(String, Vec<PageProjectionOp>), PageProjectionError> {
     let fields = struct_fields(db, value, "Page")?;
     let title = read_page_text(db, named_field(&fields, "title", "Page")?, "Page.title")?;
-    let length = read_u32(db, named_field(&fields, "length", "Page")?, "Page.length")? as usize;
-    let body = named_field(&fields, "body", "Page")?;
+    let body = walk_body(db, &fields, "Page")?;
+    Ok((title, body))
+}
+
+fn walk_component(
+    db: &DriverDataBase,
+    value: SemConstId<'_>,
+) -> Result<Vec<PageProjectionOp>, PageProjectionError> {
+    let fields = struct_fields(db, value, "ComponentView")?;
+    walk_body(db, &fields, "ComponentView")
+}
+
+fn walk_body(
+    db: &DriverDataBase,
+    fields: &[(String, SemConstId<'_>)],
+    what: &str,
+) -> Result<Vec<PageProjectionOp>, PageProjectionError> {
+    let length = read_u32(
+        db,
+        named_field(fields, "length", what)?,
+        &format!("{what}.length"),
+    )? as usize;
+    let body = named_field(fields, "body", what)?;
     let SemConstValue::Array { elems, .. } = body.value(db) else {
-        return Err(PageProjectionError::Shape(
-            "Page.body is not an array".to_owned(),
-        ));
+        return Err(PageProjectionError::Shape(format!(
+            "{what}.body is not an array"
+        )));
     };
     if length > elems.len() {
         return Err(PageProjectionError::Shape(format!(
-            "Page.length {length} exceeds its body capacity {}",
+            "{what}.length {length} exceeds its body capacity {}",
             elems.len()
         )));
     }
-    let body = elems[..length]
+    elems[..length]
         .iter()
         .copied()
         .map(|value| read_op(db, value))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok((title, body))
+        .collect::<Result<Vec<_>, _>>()
 }

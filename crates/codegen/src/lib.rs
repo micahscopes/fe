@@ -32,8 +32,9 @@ pub use layout::{
     DISCRIMINANT_SIZE_BYTES, EVM_LAYOUT, Endianness, TargetDataLayout, WASM_LAYOUT, WORD_SIZE_BYTES,
 };
 pub use page_projection::{
-    PageAttributeKind, PageElement, PageProjection, PageProjectionError, PageProjectionOp,
-    ProjectedPageAttribute, ProjectedPageComponent, ProjectedPageRender, project_page,
+    ComponentProjection, PageAttributeKind, PageElement, PageProjection, PageProjectionError,
+    PageProjectionOp, ProjectedPageAttribute, ProjectedPageComponent, ProjectedPageRender,
+    project_component, project_page,
 };
 pub use resident_actor::{
     RESIDENT_ACTOR_INITIALIZE_EXPORT, RESIDENT_ACTOR_PROJECT_EXPORT,

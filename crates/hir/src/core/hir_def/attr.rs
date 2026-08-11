@@ -533,6 +533,12 @@ impl<'db> AttrListId<'db> {
         self.has_marker_attr(db, "actor_page_projection")
     }
 
+    /// Marks a self-less resident actor behavior whose const result is the
+    /// component's typed initial DOM fragment.
+    pub fn is_actor_component_projection(self, db: &'db dyn HirDb) -> bool {
+        self.has_marker_attr(db, "actor_component_projection")
+    }
+
     pub fn gpu_dispatch(self, db: &'db dyn HirDb) -> Option<GpuDispatch> {
         match self.single_ident_arg(db, "gpu_dispatch")?.as_str() {
             "fixed" => Some(GpuDispatch::Fixed),

@@ -11,8 +11,8 @@
   body { margin: 0; min-width: 230px; }
   button, input { font: inherit; }
   .page { width: min(550px, calc(100vw - 32px)); margin: 70px auto 32px; }
-  h1 { position: absolute; top: -90px; width: 100%; margin: 0; color: rgba(175, 47, 47, .18);
-       font-size: 80px; font-weight: 100; text-align: center; text-rendering: optimizeLegibility; }
+  .todo-heading { position: absolute; top: -90px; width: 100%; margin: 0; color: rgba(175, 47, 47, .18);
+                  font-size: 80px; font-weight: 100; text-align: center; text-rendering: optimizeLegibility; }
   fe-component { position: relative; display: block; background: #fff; box-shadow: 0 2px 4px #0003, 0 25px 50px #0000001a; }
   .new-todo, .edit { width: 100%; margin: 0; border: 0; outline: 0; color: inherit; background: transparent; }
   .new-todo { padding: 16px 16px 16px 60px; font-size: 24px; line-height: 1.4; box-shadow: inset 0 -2px 1px #00000008; }
@@ -51,46 +51,14 @@
   [hidden] { display: none !important; }
   .honesty { margin: 30px auto; color: #888; font-size: 12px; text-align: center; }
   .honesty a { color: inherit; }
-  @media (max-width: 480px) { h1 { font-size: 60px; top: -72px; } .footer { height: 72px; } .filters { bottom: 10px; } }
+  @media (max-width: 480px) { .todo-heading { font-size: 60px; top: -72px; } .footer { height: 72px; } .filters { bottom: 10px; } }
 </style>
 </head>
 <body>
   <main class="page">
     <script type="application/fe" data-fe-src="sketches/todomvc/src/lib.fe"
             data-fe-component data-fe-mount="#todo-app"></script>
-    <fe-component id="todo-app">
-      <h1>todos</h1>
-      <header class="header">
-        <input class="new-todo" data-fe-node="5" data-fe-action="1"
-               placeholder="What needs to be done?" autofocus autocomplete="off">
-      </header>
-      <section class="main" data-fe-node="1" hidden>
-        <input id="toggle-all" class="toggle-all" data-fe-node="6" data-fe-action="2" type="checkbox"
-               aria-label="Mark all as complete">
-        <label class="toggle-all-label" for="toggle-all" title="Mark all as complete">⌄</label>
-        <ul class="todo-list" data-fe-node="3"></ul>
-      </section>
-      <footer class="footer" data-fe-node="2" hidden>
-        <span class="todo-count"><strong data-fe-node="4">0</strong> items left</span>
-        <ul class="filters">
-          <li><button data-fe-node="7" data-fe-action="4" data-fe-class-1="selected">All</button></li>
-          <li><button data-fe-node="8" data-fe-action="5" data-fe-class-1="selected">Active</button></li>
-          <li><button data-fe-node="9" data-fe-action="6" data-fe-class-1="selected">Completed</button></li>
-        </ul>
-        <button class="clear-completed" data-fe-action="3">Clear completed</button>
-      </footer>
-      <template data-fe-template="1">
-        <li data-fe-class-1="completed" data-fe-class-2="editing">
-          <div class="view">
-            <input class="toggle" data-fe-node="10" data-fe-action="10" type="checkbox">
-            <label data-fe-node="11" data-fe-action="11"></label>
-            <button class="edit-button" data-fe-action="14" aria-label="Edit todo" title="Edit">✎</button>
-            <button class="destroy" data-fe-action="12" aria-label="Delete todo"></button>
-          </div>
-          <input class="edit" data-fe-node="13" data-fe-action="13">
-        </li>
-      </template>
-    </fe-component>
+    <fe-component id="todo-app"></fe-component>
     <p class="honesty">Reducer, resident state, UTF-8 storage, filtering, and keyed projection are authored in
       <a href="sketches/todomvc/src/lib.fe">Fe</a>. The fixed browser adapter only transports events and applies component effects.</p>
   </main>

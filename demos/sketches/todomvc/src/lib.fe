@@ -9,6 +9,9 @@ use std::web::component::{
     BrowserPtr, ComponentWriter, InitialState, ProjectState, ResidentTransition,
     allocate_component_buffer, component_string,
 }
+use std::web::page::{
+    ComponentComposition, ComponentView, PageAttribute, PageBuilder, PageElement, PageText,
+}
 
 const MAX_TODOS: u32 = 32
 const TITLE_CAPACITY: u32 = 96
@@ -16,9 +19,13 @@ const TODO_HEADER_BYTES: u32 = 12
 const TODO_STRIDE: u32 = TODO_HEADER_BYTES + TITLE_CAPACITY
 const TODO_STORAGE_BYTES: u32 = MAX_TODOS * TODO_STRIDE
 const PATCH_CAPACITY: u32 = 32768
+const VIEW_CAPACITY: usize = 160
 
-// Fe-declared action identities. HTML is currently the composition carrier;
-// the next composting rung will project these declarations into the page too.
+const fn ui_text(value: String<31>) -> PageText {
+    PageText::one(value: value)
+}
+
+// Fe-declared action identities shared by the reducer and its projected view.
 const ACTION_NEW: u32 = 1
 const ACTION_TOGGLE_ALL: u32 = 2
 const ACTION_CLEAR_COMPLETED: u32 = 3
@@ -247,6 +254,130 @@ actor TodoApp {
     clear_input: bool,
     focus_edit: bool,
     revision: u32,
+
+    const fn view() -> ComponentView<VIEW_CAPACITY> uses (ComponentComposition) {
+        PageBuilder::new()
+            .open(element: PageElement::Heading2)
+            .attribute(value: PageAttribute::class(value: "todo-heading"))
+            .text(value: ui_text(value: "todos"))
+            .close()
+            .open(element: PageElement::Header)
+            .attribute(value: PageAttribute::class(value: "header"))
+            .open(element: PageElement::Input)
+            .attribute(value: PageAttribute::class(value: "new-todo"))
+            .attribute(value: PageAttribute::node(value: NODE_NEW))
+            .attribute(value: PageAttribute::action(value: ACTION_NEW))
+            .attribute(value: PageAttribute::placeholder(value: "What needs to be done?"))
+            .attribute(value: PageAttribute::autocomplete(value: "off"))
+            .close()
+            .close()
+            .open(element: PageElement::Section)
+            .attribute(value: PageAttribute::class(value: "main"))
+            .attribute(value: PageAttribute::node(value: NODE_MAIN))
+            .attribute(value: PageAttribute::hidden())
+            .open(element: PageElement::Input)
+            .attribute(value: PageAttribute::local_id(value: "toggle-all"))
+            .attribute(value: PageAttribute::class(value: "toggle-all"))
+            .attribute(value: PageAttribute::node(value: NODE_TOGGLE_ALL))
+            .attribute(value: PageAttribute::action(value: ACTION_TOGGLE_ALL))
+            .attribute(value: PageAttribute::input_type(value: "checkbox"))
+            .attribute(value: PageAttribute::aria_label(value: "Mark all as complete"))
+            .close()
+            .open(element: PageElement::Label)
+            .attribute(value: PageAttribute::class(value: "toggle-all-label"))
+            .attribute(value: PageAttribute::local_for(value: "toggle-all"))
+            .attribute(value: PageAttribute::title(value: "Mark all as complete"))
+            .text(value: ui_text(value: "⌄"))
+            .close()
+            .open(element: PageElement::UnorderedList)
+            .attribute(value: PageAttribute::class(value: "todo-list"))
+            .attribute(value: PageAttribute::node(value: NODE_LIST))
+            .close()
+            .close()
+            .open(element: PageElement::Footer)
+            .attribute(value: PageAttribute::class(value: "footer"))
+            .attribute(value: PageAttribute::node(value: NODE_FOOTER))
+            .attribute(value: PageAttribute::hidden())
+            .open(element: PageElement::Span)
+            .attribute(value: PageAttribute::class(value: "todo-count"))
+            .open(element: PageElement::Strong)
+            .attribute(value: PageAttribute::node(value: NODE_COUNT))
+            .text(value: ui_text(value: "0"))
+            .close()
+            .text(value: ui_text(value: " items left"))
+            .close()
+            .open(element: PageElement::UnorderedList)
+            .attribute(value: PageAttribute::class(value: "filters"))
+            .open(element: PageElement::ListItem)
+            .open(element: PageElement::Button)
+            .attribute(value: PageAttribute::node(value: NODE_FILTER_ALL))
+            .attribute(value: PageAttribute::action(value: ACTION_FILTER_ALL))
+            .attribute(value: PageAttribute::class_token(slot: CLASS_SELECTED, value: "selected"))
+            .text(value: ui_text(value: "All"))
+            .close()
+            .close()
+            .open(element: PageElement::ListItem)
+            .open(element: PageElement::Button)
+            .attribute(value: PageAttribute::node(value: NODE_FILTER_ACTIVE))
+            .attribute(value: PageAttribute::action(value: ACTION_FILTER_ACTIVE))
+            .attribute(value: PageAttribute::class_token(slot: CLASS_SELECTED, value: "selected"))
+            .text(value: ui_text(value: "Active"))
+            .close()
+            .close()
+            .open(element: PageElement::ListItem)
+            .open(element: PageElement::Button)
+            .attribute(value: PageAttribute::node(value: NODE_FILTER_COMPLETED))
+            .attribute(value: PageAttribute::action(value: ACTION_FILTER_COMPLETED))
+            .attribute(value: PageAttribute::class_token(slot: CLASS_SELECTED, value: "selected"))
+            .text(value: ui_text(value: "Completed"))
+            .close()
+            .close()
+            .close()
+            .open(element: PageElement::Button)
+            .attribute(value: PageAttribute::class(value: "clear-completed"))
+            .attribute(value: PageAttribute::action(value: ACTION_CLEAR_COMPLETED))
+            .text(value: ui_text(value: "Clear completed"))
+            .close()
+            .close()
+            .open(element: PageElement::Template)
+            .attribute(value: PageAttribute::template(value: TEMPLATE_TODO))
+            .open(element: PageElement::ListItem)
+            .attribute(value: PageAttribute::class_token(slot: CLASS_COMPLETED, value: "completed"))
+            .attribute(value: PageAttribute::class_token(slot: CLASS_EDITING, value: "editing"))
+            .open(element: PageElement::Div)
+            .attribute(value: PageAttribute::class(value: "view"))
+            .open(element: PageElement::Input)
+            .attribute(value: PageAttribute::class(value: "toggle"))
+            .attribute(value: PageAttribute::node(value: NODE_ROW_TOGGLE))
+            .attribute(value: PageAttribute::action(value: ACTION_TOGGLE))
+            .attribute(value: PageAttribute::input_type(value: "checkbox"))
+            .close()
+            .open(element: PageElement::Label)
+            .attribute(value: PageAttribute::node(value: NODE_ROW_TITLE))
+            .attribute(value: PageAttribute::action(value: ACTION_EDIT))
+            .close()
+            .open(element: PageElement::Button)
+            .attribute(value: PageAttribute::class(value: "edit-button"))
+            .attribute(value: PageAttribute::action(value: ACTION_EDIT_BUTTON))
+            .attribute(value: PageAttribute::aria_label(value: "Edit todo"))
+            .attribute(value: PageAttribute::title(value: "Edit"))
+            .text(value: ui_text(value: "✎"))
+            .close()
+            .open(element: PageElement::Button)
+            .attribute(value: PageAttribute::class(value: "destroy"))
+            .attribute(value: PageAttribute::action(value: ACTION_DESTROY))
+            .attribute(value: PageAttribute::aria_label(value: "Delete todo"))
+            .close()
+            .close()
+            .open(element: PageElement::Input)
+            .attribute(value: PageAttribute::class(value: "edit"))
+            .attribute(value: PageAttribute::node(value: NODE_ROW_EDIT))
+            .attribute(value: PageAttribute::action(value: ACTION_EDIT_INPUT))
+            .close()
+            .close()
+            .close()
+            .finish_component()
+    }
 
     fn initial() -> TodoState uses (InitialState) {
         let todos = allocate_component_buffer(capacity: TODO_STORAGE_BYTES)
