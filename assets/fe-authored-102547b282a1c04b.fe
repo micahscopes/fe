@@ -1,0 +1,408 @@
+//! A quadric pencil on a slice plane, drawn per pixel by the REAL sparse QCGA
+//! contraction: and the contraction's shader code is GENERATED, not written.
+//!
+//! The division of labor, in one breath:
+//!   - the GENERIC sparse-Clifford library owns the algebra: the null-basis
+//!     metric pairing, the CTFE plan masks, and the type-level `SparsePlan`
+//!     whose Term nodes ARE the surviving products;
+//!   - this demo states only the QCGA facts: which basis vector each operand
+//!     slot carries (the paper's point embedding and dual-quadric layout), and
+//!     how the ten quadric coefficients pack into that layout;
+//!   - one FCO derive provider walks the plan type and, for each Term, asks
+//!     the library for the metric sign and emits `mul`/`neg`/`add`; the
+//!     generated `incidence` body is flat f32 arithmetic with no loops, no
+//!     branches, and no runtime reflection, so it lowers to the WebGPU
+//!     fragment stage like any hand-written kernel.
+//!
+//! No hand-rolled sign table, no per-field `if field_index == N` dispatch:
+//! where `qcga_pencil` spells both by hand (twice, in two index spaces), this
+//! file derives both from `null_vector_pairing` + the plan. The pinned
+//! `static_assert`s keep the derived masks equal to `qcga_pencil`'s.
+//!
+//! The picture: the y = 0 slice of the pencil member
+//! Q(lambda) = cos(PI*lambda) * (x^2 + y^2 - 1/2) + sin(PI*lambda) * (z^2 - 1/2),
+//! rotated by `theta` so the xz cross term is live. Every pixel evaluates the
+//! field and its exact gradient through five planned contractions; the zero
+//! set is drawn as a gradient-normalized curve over a signed-field wash.
+//! Sweeping `lambda` deforms the conic through genuine topology changes
+//! (ellipse -> circle -> hyperbola -> line pair).
+//!
+//! Software rendering (lavapipe/SwiftShader) in the sandbox; no performance or
+//! parallelism claim (VISION 3.1).
+//!
+//!     fe web build demos/sketches/qcga --out <dir>
+
+use core::marker::Copy
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+use core::num::IntDowncast
+use std::webgpu::{FragmentSurface, GpuProgram, LatestPerFrame, SurfaceTransition, WebGpuBackend}
+use std::web::view::{
+    ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface,
+    SurfaceEvent, SurfaceState,
+}
+use sparse_clifford::{
+    Nat, PlanLength, SparsePlan, Term, null_vector_pairing, plan_candidate_left,
+    plan_candidate_right, plan_mask_candidate, plan_mask_cardinality,
+}
+use fmath::{PI, abs, clamp01, cos, from_i32, mix, rgba, sin, smoothstep, sqrt}
+
+// ---------------------------------------------------------------------------
+// The QCGA facts. This is the WHOLE domain-specific surface of the
+// contraction: two support maps and one pairing composition.
+//
+// Vector index space (paper-null basis of R(9,6), vectors only):
+//   0..3 = e1,e2,e3   3..9 = eo1..eo6   9..15 = ei1..ei6.
+// ---------------------------------------------------------------------------
+
+const POINT_TERMS: usize = 12
+const QUADRIC_TERMS: usize = 12
+const CANDIDATES: usize = POINT_TERMS * QUADRIC_TERMS
+
+/// The point support list (paper eq. 2.9): e1,e2,e3, eo1,eo2,eo3, ei1..ei6.
+const fn point_vector(_ slot: usize) -> usize {
+    if slot < 6 { slot } else { slot + 3 }
+}
+
+/// The dual-quadric support list: e1,e2,e3, eo1..eo6, ei1,ei2,ei3.
+const fn quadric_vector(_ slot: usize) -> usize {
+    slot
+}
+
+/// Metric pairing of one candidate product, THROUGH the generic library fn:
+/// the only place the QCGA metric is stated, consumed by both the CTFE plan
+/// masks and the derive provider below. 0 = annihilated, 1 = +1, 2 = -1.
+const fn incidence_pairing(_ candidate: usize) -> usize {
+    null_vector_pairing(
+        point_vector(plan_candidate_left(candidate, QUADRIC_TERMS)),
+        quadric_vector(plan_candidate_right(candidate, QUADRIC_TERMS)),
+        3, 6,
+    )
+}
+
+// Provider-facing helpers: the derive body may only call const fns declared in
+// its own module (provider_executor eval_const_helper_call), so these
+// one-liners bridge it to the library vocabulary above.
+
+const fn incidence_left_field(_ candidate: usize) -> usize {
+    plan_candidate_left(candidate, QUADRIC_TERMS)
+}
+
+const fn incidence_right_field(_ candidate: usize) -> usize {
+    POINT_TERMS + plan_candidate_right(candidate, QUADRIC_TERMS)
+}
+
+const fn incidence_negative(_ candidate: usize) -> bool {
+    incidence_pairing(candidate) == 2
+}
+
+// ---------------------------------------------------------------------------
+// The CTFE plan: enumerate the 144 candidate products, keep the metric
+// survivors, and materialize the type-level SparsePlan the provider walks.
+// ---------------------------------------------------------------------------
+
+const fn incidence_keep_word(_ first: usize, _ last: usize) -> u32 {
+    let mut candidate: usize = first
+    let mut keep_bits: u32 = 0
+    while candidate < last {
+        if incidence_pairing(candidate) != 0 {
+            keep_bits =
+                keep_bits | ((1 as u32) << (candidate - first).downcast_truncate())
+        }
+        candidate = candidate + 1
+    }
+    keep_bits
+}
+
+const INCIDENCE_KEEP0: u32 = incidence_keep_word(0, 24)
+const INCIDENCE_KEEP1: u32 = incidence_keep_word(24, 48)
+const INCIDENCE_KEEP2: u32 = incidence_keep_word(48, 72)
+const INCIDENCE_KEEP3: u32 = incidence_keep_word(72, 96)
+const INCIDENCE_KEEP4: u32 = incidence_keep_word(96, 120)
+const INCIDENCE_KEEP5: u32 = incidence_keep_word(120, 144)
+const INCIDENCE_KEEP6: u32 = 0
+const INCIDENCE_KEEP7: u32 = 0
+
+const fn survivor_count() -> usize {
+    plan_mask_cardinality(
+        INCIDENCE_KEEP0, INCIDENCE_KEEP1, INCIDENCE_KEEP2,
+        INCIDENCE_KEEP3, INCIDENCE_KEEP4, INCIDENCE_KEEP5,
+        INCIDENCE_KEEP6, INCIDENCE_KEEP7, CANDIDATES,
+    )
+}
+
+const fn survivor_negatives() -> usize {
+    let mut candidate: usize = 0
+    let mut count: usize = 0
+    while candidate < CANDIDATES {
+        if incidence_pairing(candidate) == 2 { count = count + 1 }
+        candidate = candidate + 1
+    }
+    count
+}
+
+// The derived plan must be EXACTLY qcga_pencil's hand-tabled one: same twelve
+// survivors (mask words pinned to the same constants), three positive
+// Euclidean products and nine negative null-pair products.
+static_assert(survivor_count() == 12)
+static_assert(survivor_negatives() == 9)
+static_assert(INCIDENCE_KEEP0 == 8193)
+static_assert(INCIDENCE_KEEP1 == 2097156)
+static_assert(INCIDENCE_KEEP2 == 8389632)
+static_assert(INCIDENCE_KEEP3 == 65544)
+static_assert(INCIDENCE_KEEP4 == 262176)
+static_assert(INCIDENCE_KEEP5 == 1048704)
+
+type IncidencePlan12 =
+    SparsePlan<
+        INCIDENCE_KEEP0, INCIDENCE_KEEP1, INCIDENCE_KEEP2, INCIDENCE_KEEP3,
+        INCIDENCE_KEEP4, INCIDENCE_KEEP5, INCIDENCE_KEEP6, INCIDENCE_KEEP7,
+        CANDIDATES,
+        12,
+    >
+
+fn takes_nat12(_ value: Nat<12>) {}
+fn planned_support_has_twelve_terms(value: <IncidencePlan12 as PlanLength>::Out) {
+    takes_nat12(value)
+}
+
+// ---------------------------------------------------------------------------
+// The operand carrier and the generated contraction.
+//
+// Flat reflected carrier: the first twelve fields are the point support list,
+// the second twelve the dual-quadric support list, in the slot orders the
+// support maps above declare.
+// ---------------------------------------------------------------------------
+
+struct SparseIncidenceOperands {
+    p0: f32, p1: f32, p2: f32, p3: f32, p4: f32, p5: f32,
+    p6: f32, p7: f32, p8: f32, p9: f32, p10: f32, p11: f32,
+    q0: f32, q1: f32, q2: f32, q3: f32, q4: f32, q5: f32,
+    q6: f32, q7: f32, q8: f32, q9: f32, q10: f32, q11: f32,
+}
+impl Copy for SparseIncidenceOperands {}
+
+trait PlannedIncidence {
+    fn incidence(_ operands: SparseIncidenceOperands) -> f32
+}
+
+/// The provider is a CATAMORPHISM over the plan type: for each `Term` of
+/// `IncidencePlan12` it selects the two operand fields the candidate names,
+/// asks the library-backed pairing for the metric sign, and folds
+/// `mul`/`neg`/`add` into one expression tree. Nothing here restates the
+/// algebra: change the supports or the metric above and the generated kernel
+/// follows. Contrast qcga_pencil's provider (demos/sketches/qcga_pencil/src/
+/// lib.fe:252-384): 24 pre-bound locals, two 24-way `if field_index == N`
+/// chains, and an inline re-derivation of the sign table in a second index
+/// space.
+struct QcgaContractionProvider {}
+impl Derive<PlannedIncidence> for QcgaContractionProvider {
+    const fn derive<T>(ev: own Evidence<PlannedIncidence<T>>) -> Evidence<PlannedIncidence<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<PlannedIncidence<T>>)
+    {
+        let operands = builder.arg_ref("operands")
+        let acc = operands
+        let emitted = 0
+        for nested in builder.ty<IncidencePlan12>().normalized_preorder_types() {
+            if builder.same_ty(nested.constructor(), builder.ty<Term>()) {
+                let candidate: usize = 144
+                for arg in nested.generic_args() {
+                    if arg.is_const() { candidate = arg.const_value() }
+                }
+                if candidate < 144 {
+                    let left_field = incidence_left_field(candidate)
+                    let right_field = incidence_right_field(candidate)
+                    let lhs = operands
+                    let rhs = operands
+                    let index = 0
+                    for field in reflect.fields() {
+                        if index == left_field { lhs = builder.field_get(operands, field) }
+                        if index == right_field { rhs = builder.field_get(operands, field) }
+                        index = index + 1
+                    }
+                    let term = builder.mul(lhs, rhs)
+                    if incidence_negative(candidate) { term = builder.neg(term) }
+                    if emitted == 0 { acc = term }
+                    else { acc = builder.add(acc, term) }
+                    emitted = emitted + 1
+                }
+            }
+        }
+        builder.emit_method("incidence", acc)
+        builder.finish()
+        ev
+    }
+}
+
+derive PlannedIncidence for SparseIncidenceOperands using QcgaContractionProvider
+
+// ---------------------------------------------------------------------------
+// The paper-normalized point embedding and dual-quadric packing (feasibility
+// design section 4): the only other QCGA-specific code in this file.
+// ---------------------------------------------------------------------------
+
+pub fn qcga3d_incidence_planned(
+    x: f32, y: f32, z: f32,
+    a: f32, b: f32, c: f32, d: f32, e: f32,
+    f: f32, g: f32, h: f32, i: f32, j: f32,
+) -> f32 {
+    let half: f32 = 0.5
+    let j_third: f32 = j / 3.0
+    let negative_j_third: f32 = 0.0 - j_third
+    <SparseIncidenceOperands as PlannedIncidence>::incidence(SparseIncidenceOperands {
+        p0: x, p1: y, p2: z,
+        p3: 1.0, p4: 1.0, p5: 1.0,
+        p6: x * x * half, p7: y * y * half, p8: z * z * half,
+        p9: x * y, p10: x * z, p11: y * z,
+        q0: g, q1: h, q2: i,
+        q3: -2.0 * a, q4: -2.0 * b, q5: -2.0 * c,
+        q6: -d, q7: -e, q8: -f,
+        q9: negative_j_third, q10: negative_j_third, q11: negative_j_third,
+    })
+}
+
+/// The ten coefficients of a dual quadric:
+/// a x^2 + b y^2 + c z^2 + d xy + e xz + f yz + g x + h y + i z + j.
+pub struct Quadric {
+    pub a: f32, pub b: f32, pub c: f32, pub d: f32, pub e: f32,
+    pub f: f32, pub g: f32, pub h: f32, pub i: f32, pub j: f32,
+}
+impl Copy for Quadric {}
+
+/// Point/quadric incidence through the planned sparse contraction. Every
+/// "does this point lie on this surface" below flows through here; there is
+/// no second evaluation path to drift from.
+pub fn eval_quadric(_ q: Quadric, _ x: f32, _ y: f32, _ z: f32) -> f32 {
+    qcga3d_incidence_planned(
+        x: x, y: y, z: z,
+        a: q.a, b: q.b, c: q.c, d: q.d, e: q.e,
+        f: q.f, g: q.g, h: q.h, i: q.i, j: q.j,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// THE ACTOR: one program, one per-pixel behavior. The interactive boundary is
+// DECLARED in `view()` (web v5): the runtime reads real slider ranges/init/
+// kind and the dispatch extent from the projected manifest `surface` section,
+// mirroring cga3d's `Cga3dSurface`. `res` is bound to the live canvas width,
+// replacing the baked `const RESOLUTION`.
+// ---------------------------------------------------------------------------
+
+/// The per-demo params record: field names bind, by name identity, to the
+/// actor's state fields (checked at projection time).
+struct QcgaParams {
+    lambda: Param,
+    theta: Param,
+    zoom: Param,
+    res: Param,
+}
+
+struct QcgaViewState {
+    lambda: f32,
+    theta: f32,
+    zoom: f32,
+    res: f32,
+}
+
+impl SurfaceState for QcgaViewState {
+    type Params = QcgaParams
+}
+
+derive ApplyParamBindings for QcgaViewState using ParamBindingsProvider
+
+const fn qcga_params() -> QcgaParams {
+    QcgaParams {
+        lambda: Param::unit(init: 0.15).drag_x(per_px: 0.0025),
+        theta: Param::angle(init: 0.6).drag_y(per_px: 0.01),
+        zoom: Param::range(min: 0.5, max: 4.0, init: 1.6)
+            .wheel_scale(in_factor: 0.875, out_factor: 1.125),
+        res: Param::extent_x(),
+    }
+}
+
+actor QcgaSurface uses (GpuProgram<WebGpuBackend>) {
+    /// Pencil parameter: [0, 1] sweeps cylinder -> sphere-like -> plane pair.
+    lambda: f32,
+    /// Rotation of the member about the y axis; makes the xz cross term live.
+    theta: f32,
+    /// Half-extent of the visible slice in world units.
+    zoom: f32,
+    /// Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).
+    res: f32,
+
+    /// The surface declaration: CTFE-evaluated at bundle time and projected
+    /// into the manifest `surface` section. Never lowered to wasm or WGSL.
+    const fn view() -> Surface<QcgaParams> {
+        Surface {
+            extent: Extent::square(512),
+            params: qcga_params(),
+        }
+    }
+
+    /// Drag sweeps and rotates the quadric pencil; wheel changes slice scale.
+    fn navigate(self, event: own SurfaceEvent) -> QcgaViewState
+        uses (SurfaceTransition, LatestPerFrame)
+    {
+        let current = QcgaViewState {
+            lambda: self.lambda,
+            theta: self.theta,
+            zoom: self.zoom,
+            res: self.res,
+        }
+        current.apply_param_bindings(qcga_params(), event)
+    }
+
+    /// Pixel coordinate in, packed RGBA8 word out. Five planned contractions
+    /// per pixel: the field and its exact slice gradient (central differences
+    /// with h = 1 are exact for a quadric).
+    fn shade(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
+        // Pixel centre to the y = 0 slice plane: screen x -> world x, screen
+        // y (up) -> world z.
+        let u: f32 = ((from_i32(px) + 0.5) / self.res * 2.0 - 1.0) * self.zoom
+        let v: f32 = (1.0 - (from_i32(py) + 0.5) / self.res * 2.0) * self.zoom
+
+        // Pencil member Q(lambda) = cos(PI l) Q0 + sin(PI l) Q1 with
+        // Q0 = x^2 + y^2 - 1/2 (cylinder), Q1 = z^2 - 1/2 (plane pair):
+        // the same pencil qcga_pencil's nine points pin, held as constants.
+        let w0: f32 = cos(PI * self.lambda)
+        let w1: f32 = sin(PI * self.lambda)
+        let a0: f32 = w0
+        let b0: f32 = w0
+        let c0: f32 = w1
+        let j0: f32 = -0.5 * (w0 + w1)
+
+        // Rotate the member about the y axis by theta: the xz cross term
+        // (coefficient e) goes live, so the eo5/ei5 plan term carries real
+        // data (the feasibility gate's "cross terms live" minimum).
+        let ct: f32 = cos(self.theta)
+        let st: f32 = sin(self.theta)
+        let a: f32 = a0 * ct * ct + c0 * st * st
+        let c: f32 = a0 * st * st + c0 * ct * ct
+        let e: f32 = 2.0 * (a0 - c0) * st * ct
+        let q: Quadric = Quadric {
+            a: a, b: b0, c: c, d: 0.0, e: e,
+            f: 0.0, g: 0.0, h: 0.0, i: 0.0, j: j0,
+        }
+
+        // The REAL sparse contraction, five times.
+        let f0: f32 = eval_quadric(q, u, 0.0, v)
+        let gx: f32 = (eval_quadric(q, u + 1.0, 0.0, v) - eval_quadric(q, u - 1.0, 0.0, v)) * 0.5
+        let gz: f32 = (eval_quadric(q, u, 0.0, v + 1.0) - eval_quadric(q, u, 0.0, v - 1.0)) * 0.5
+        let gmag: f32 = sqrt(gx * gx + gz * gz) + 0.0000001
+
+        // First-order distance to the zero set in world units, then a
+        // resolution-aware curve mask.
+        let dist: f32 = abs(f0) / gmag
+        let pixel_w: f32 = self.zoom * 2.0 / self.res
+        let curve: f32 = 1.0 - smoothstep(0.0, pixel_w * 1.5, dist)
+
+        // Signed-field wash behind the curve: warm outside, cool inside.
+        let s: f32 = f0 / (1.0 + abs(f0))
+        let inside: f32 = clamp01(0.0 - s)
+        let outside: f32 = clamp01(s)
+        let wash: f32 = 1.0 - curve
+        let red: f32 = mix(0.07, 0.96, curve) + wash * 0.38 * outside
+        let grn: f32 = mix(0.09, 0.97, curve) + wash * 0.20 * inside
+        let blu: f32 = mix(0.14, 0.99, curve) + wash * 0.48 * inside
+        rgba(red, grn, blu)
+    }
+}

@@ -50,41 +50,55 @@ const COMPONENT_EVENT = Object.freeze({
   change: 5,
   submit: 6,
   keyDown: 7,
+  resourceLoaded: 8,
 });
 
 function values(value) {
   return Array.isArray(value) ? value : [value];
 }
 
-function eventTargetId(event, boundary) {
+function eventElement(event, boundary, attribute) {
+  const path = typeof event.composedPath === "function" ? event.composedPath() : [];
+  const boundaryIndex = path.indexOf(boundary);
+  if (boundaryIndex >= 0) {
+    return path.slice(0, boundaryIndex).find(value =>
+      value instanceof Element && value.hasAttribute(attribute)) ?? null;
+  }
   const element = event.target instanceof Element
-    ? event.target.closest("[data-fe-action]")
+    ? event.target.closest(`[${attribute}]`)
     : null;
-  if (!element || !boundary.contains(element)) return 0;
+  return element && boundary.contains(element) ? element : null;
+}
+
+function eventTargetId(event, boundary) {
+  const element = eventElement(event, boundary, "data-fe-action");
+  if (!element) return 0;
   const target = Number(element.getAttribute("data-fe-action"));
   return Number.isInteger(target) && target >= 0 ? target >>> 0 : 0;
 }
 
 function eventKey(event, boundary) {
-  const element = event.target instanceof Element
-    ? event.target.closest("[data-fe-key]")
-    : null;
-  if (!element || !boundary.contains(element)) return 0;
+  const element = eventElement(event, boundary, "data-fe-key");
+  if (!element) return 0;
   const key = Number(element.getAttribute("data-fe-key"));
   return Number.isInteger(key) && key >= 0 ? key >>> 0 : 0;
 }
 
-function numericEventValue(event) {
-  const value = Number(event.target?.value);
+function numericEventValue(event, boundary) {
+  const element = eventElement(event, boundary, "data-fe-action");
+  const value = Number(element?.value);
   return Number.isFinite(value) ? Math.fround(value) : 0;
 }
 
-function textualEventValue(event) {
-  return typeof event.target?.value === "string" ? event.target.value : "";
+function textualEventValue(event, boundary) {
+  const element = eventElement(event, boundary, "data-fe-action");
+  if (typeof element?.value === "string") return element.value;
+  return element instanceof HTMLAnchorElement ? element.href : "";
 }
 
 const COMPONENT_INPUT_CAPACITY = 4096;
 const COMPONENT_COMMAND_LIMIT = 1024 * 1024;
+const COMPONENT_RESOURCE_LIMIT = COMPONENT_COMMAND_LIMIT - 4096;
 const componentTextEncoder = new TextEncoder();
 const componentTextDecoder = new TextDecoder("utf-8", { fatal: true });
 
@@ -96,7 +110,7 @@ function boundedUtf8(value, capacity) {
   return encoded.slice(0, end);
 }
 
-function decodeComponentCommands(bytes) {
+export function decodeComponentCommands(bytes) {
   const operations = [];
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let cursor = 0;
@@ -149,6 +163,18 @@ function decodeComponentCommands(bytes) {
         operations.push({ opcode, target, value: text() });
         break;
       }
+      case 11: {
+        const target = word();
+        operations.push({ opcode, target, value: text() });
+        break;
+      }
+      case 12:
+      case 13: {
+        const request = word();
+        if (request === 0) throw new Error("fe-component resource request zero is reserved");
+        operations.push({ opcode, request, value: text() });
+        break;
+      }
       case 6:
       case 7:
       case 10: {
@@ -192,6 +218,8 @@ class FeComponentElement extends FeHTMLElement {
     this._active = false;
     this._listeners = null;
     this._inputScratch = 0;
+    this._inputCapacity = 0;
+    this._resourceLoads = new Set();
     this._keyedRows = new WeakMap();
     this._readyPromise = new Promise((resolve, reject) => {
       this._resolveReady = resolve;
@@ -214,6 +242,8 @@ class FeComponentElement extends FeHTMLElement {
     this._active = false;
     this._listeners?.abort();
     this._listeners = null;
+    for (const controller of this._resourceLoads) controller.abort();
+    this._resourceLoads.clear();
   }
 
   adoptedCallback() {
@@ -264,9 +294,9 @@ class FeComponentElement extends FeHTMLElement {
           eventTargetId(event, this),
           eventKey(event, this),
           type === "keydown" ? (event.keyCode >>> 0) : (event.detail >>> 0),
-          numericEventValue(event),
+          numericEventValue(event, this),
           event.timeStamp,
-          textualEventValue(event),
+          textualEventValue(event, this),
         );
         if ((patch[2] & 1) !== 0) event.preventDefault();
       } catch (error) {
@@ -280,16 +310,20 @@ class FeComponentElement extends FeHTMLElement {
     on("keydown", COMPONENT_EVENT.keyDown);
   }
 
-  _writeEventText(value) {
-    const bytes = boundedUtf8(value, COMPONENT_INPUT_CAPACITY);
+  _writeEventText(value, limit = COMPONENT_INPUT_CAPACITY) {
+    const bytes = boundedUtf8(value, limit);
     if (bytes.byteLength === 0) return [0, 0];
     const exports = this._instance?.exports;
     if (!(exports?.memory instanceof WebAssembly.Memory) ||
         typeof exports?.fe_cabi_alloc !== "function") {
       throw new Error("fe-component rich input requires Fe canonical Wasm memory");
     }
-    if (this._inputScratch === 0) {
-      this._inputScratch = exports.fe_cabi_alloc(COMPONENT_INPUT_CAPACITY, 1) >>> 0;
+    if (bytes.byteLength > this._inputCapacity) {
+      let capacity = COMPONENT_INPUT_CAPACITY;
+      while (capacity < bytes.byteLength) capacity *= 2;
+      if (capacity > COMPONENT_RESOURCE_LIMIT) capacity = COMPONENT_RESOURCE_LIMIT;
+      this._inputScratch = exports.fe_cabi_alloc(capacity, 1) >>> 0;
+      this._inputCapacity = capacity;
     }
     const end = this._inputScratch + bytes.byteLength;
     if (end > exports.memory.buffer.byteLength || end < this._inputScratch) {
@@ -299,11 +333,11 @@ class FeComponentElement extends FeHTMLElement {
     return [this._inputScratch, bytes.byteLength];
   }
 
-  _send(kind, target, key, detail, value, timestamp, text = "") {
+  _send(kind, target, key, detail, value, timestamp, text = "", textLimit = COMPONENT_INPUT_CAPACITY) {
     if (!this._instance || !this._initialized) {
       throw new Error("fe-component received an event before Fe initialization");
     }
-    const [textPointer, textLength] = this._writeEventText(text);
+    const [textPointer, textLength] = this._writeEventText(text, textLimit);
     this._state = values(this._instance.exports[ACTOR_TRANSITION](
       kind >>> 0,
       target >>> 0,
@@ -442,6 +476,10 @@ class FeComponentElement extends FeHTMLElement {
         scope = this;
         continue;
       }
+      if (operation.opcode === 12 || operation.opcode === 13) {
+        this._loadResource(operation, operation.opcode === 12);
+        continue;
+      }
       const target = this._node(scope, operation.target);
       switch (operation.opcode) {
         case 4:
@@ -479,9 +517,83 @@ class FeComponentElement extends FeHTMLElement {
           }
           target.disabled = operation.value;
           break;
+        case 11: {
+          if (!(target instanceof HTMLAnchorElement)) {
+            throw new Error("set-href target is not an anchor");
+          }
+          const url = new URL(operation.value, this.baseURI);
+          if (url.origin !== new URL(this.baseURI).origin) {
+            throw new Error("fe-component set-href requires a same-origin URL");
+          }
+          target.href = url.href;
+          break;
+        }
         default:
           throw new Error(`unapplied fe-component command ${operation.opcode}`);
       }
+    }
+  }
+
+  _loadResource(operation, asText) {
+    let url;
+    try {
+      url = new URL(operation.value, this.baseURI);
+      if (url.origin !== new URL(this.baseURI).origin) {
+        throw new Error("resource effects require a same-origin URL");
+      }
+    } catch (error) {
+      this._deliverResource(operation.request, 0, 0, String(error));
+      return;
+    }
+    const controller = new AbortController();
+    this._resourceLoads.add(controller);
+    (async () => {
+      try {
+        const response = await fetch(url, {
+          mode: "same-origin",
+          credentials: "same-origin",
+          signal: controller.signal,
+        });
+        if (new URL(response.url).origin !== url.origin) {
+          throw new Error("resource effect redirected across origins");
+        }
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        if (bytes.byteLength > COMPONENT_RESOURCE_LIMIT) {
+          throw new Error(`resource exceeds ${COMPONENT_RESOURCE_LIMIT} byte component limit`);
+        }
+        let body = "";
+        if (asText) body = componentTextDecoder.decode(bytes);
+        this._deliverResource(
+          operation.request,
+          response.status >>> 0,
+          bytes.byteLength >>> 0,
+          body,
+        );
+      } catch (error) {
+        if (error?.name !== "AbortError") {
+          this._deliverResource(operation.request, 0, 0, String(error));
+        }
+      } finally {
+        this._resourceLoads.delete(controller);
+      }
+    })();
+  }
+
+  _deliverResource(request, status, byteLength, text) {
+    if (!this._active) return;
+    try {
+      this._send(
+        COMPONENT_EVENT.resourceLoaded,
+        request,
+        status,
+        byteLength,
+        0,
+        performance.now(),
+        text,
+        COMPONENT_RESOURCE_LIMIT,
+      );
+    } catch (error) {
+      this._fail(error);
     }
   }
 
@@ -535,6 +647,12 @@ async function runRenderSurface(element, manifestUrl) {
   surface.setAttribute("manifest", manifestUrl.href);
   if (element.dataset.feWidth) surface.setAttribute("width", element.dataset.feWidth);
   if (element.dataset.feHeight) surface.setAttribute("height", element.dataset.feHeight);
+  for (const kind of ["wgsl", "wasm", "manifest"]) {
+    const attribute = `data-fe-${kind}-action`;
+    if (element.hasAttribute(attribute)) {
+      surface.setAttribute(attribute, element.getAttribute(attribute));
+    }
+  }
 
   const canvasSelector = element.dataset.feCanvas;
   const adopted = canvasSelector ? document.querySelector(canvasSelector) : null;

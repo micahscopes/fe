@@ -1,0 +1,74 @@
+//! A small Rollcall-shaped typed WebGPU pass graph.
+//!
+//! `collect` writes eight deterministic leaves. `fold` copies those external
+//! leaves into private scratch storage, reduces a binary commitment tree, and
+//! writes the seven internal nodes plus the leaf count to a second external
+//! resource. `display` paints the resulting receipt. The compiler, not this
+//! source, assigns bindings and constructs the ordered pass graph.
+
+use std::webgpu::{
+    ComputeSurface as Work,
+    FixedDispatch as Once,
+    FragmentSurface as Display,
+    GpuProgram as Pipeline,
+    StorageBuffer as Tape,
+    Workgroup as Threads,
+    WebGpuBackend,
+}
+
+fn parent(left: u32, right: u32) -> u32 {
+    left * 31 + right * 17 + 7
+}
+
+actor RollcallPipeline uses (Pipeline<WebGpuBackend>) {
+    leaves: Tape<u32, 8>,
+    nodes: Tape<u32, 8>,
+
+    fn collect(self) uses (Work<Threads<1, 1, 1>, Once<1, 1, 1>>) {
+        let mut i: u32 = 0
+        while i < 8 {
+            self.leaves.store(index: i, value: i * 2 + 3)
+            self.nodes.store(index: i, value: 0)
+            i = i + 1
+        }
+    }
+
+    fn fold(self) uses (Work<Threads<1, 1, 1>, Once<1, 1, 1>>) {
+        let mut scratch: [u32; 8] = [0; 8]
+        let mut i: u32 = 0
+        while i < 8 {
+            scratch[i as usize] = self.leaves.load(index: i)
+            i = i + 1
+        }
+
+        let n3: u32 = parent(left: scratch[0], right: scratch[1])
+        let n4: u32 = parent(left: scratch[2], right: scratch[3])
+        let n5: u32 = parent(left: scratch[4], right: scratch[5])
+        let n6: u32 = parent(left: scratch[6], right: scratch[7])
+        scratch[0] = n3
+        scratch[1] = n4
+        scratch[2] = n5
+        scratch[3] = n6
+        self.nodes.store(index: 3, value: n3)
+        self.nodes.store(index: 4, value: n4)
+        self.nodes.store(index: 5, value: n5)
+        self.nodes.store(index: 6, value: n6)
+
+        let n1: u32 = parent(left: scratch[0], right: scratch[1])
+        let n2: u32 = parent(left: scratch[2], right: scratch[3])
+        scratch[0] = n1
+        scratch[1] = n2
+        self.nodes.store(index: 1, value: n1)
+        self.nodes.store(index: 2, value: n2)
+
+        let root: u32 = parent(left: scratch[0], right: scratch[1])
+        self.nodes.store(index: 0, value: root)
+        self.nodes.store(index: 7, value: 8)
+    }
+
+    fn display(self, px: i32, py: i32) -> i32 uses (Display) {
+        let root: u32 = self.nodes.load(index: 0)
+        let count: u32 = self.nodes.load(index: 7)
+        ((root ^ (count * 65793)) | 4278190080).downcast_truncate()
+    }
+}

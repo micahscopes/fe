@@ -200,9 +200,9 @@
     ],
     "fixed_host": {
       "artifact": {
-        "bytes": 77836,
-        "path": "fe-render-runtime-fe8254fc77d59fa8.js",
-        "sha256": "fe8254fc77d59fa86652af2dd55ca65c9bd9a22a3f7ee31a6751c79c34d08f3f"
+        "bytes": 78407,
+        "path": "fe-render-runtime-2a9134262c9e6651.js",
+        "sha256": "2a9134262c9e665158852f2807c9dcb10cdf0cc3c7ae04b902f7c9b650218533"
       },
       "contract": "fixed_versioned_demo_blind_browser_host",
       "name": "fe-render-runtime",
@@ -224,7 +224,7 @@
       {
         "id": "gallery.html",
         "kind": "html",
-        "sha256": "405efde4b063982b89133ce85ea63f9ec53f362f51456765672e1dbda5cf4544"
+        "sha256": "f844f20a5e1d75c8c7131abcd993518f10ac82a0a83762fabb3314e08a6e950b"
       }
     ],
     "source_id": "plasma"

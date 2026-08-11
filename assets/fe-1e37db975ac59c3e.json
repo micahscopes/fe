@@ -1,0 +1,82 @@
+{
+  "protocol": {
+    "major": 1,
+    "minor": 1
+  },
+  "compiler": {
+    "name": "fe",
+    "version": "0.1.0",
+    "build": "workspace"
+  },
+  "target": "wasm",
+  "source_set_sha256": "1f171cf3e696a1c0696dac749b9b61d363a3500875a852325a638be37927a7c5",
+  "source_dependencies": {
+    "version": 1,
+    "root": "file:///workspace/fe-worktrees/mb2/demos/sketches/source_inspector/src/lib.fe",
+    "sources": [
+      {
+        "url": "file:///workspace/fe-worktrees/mb2/demos/sketches/source_inspector/src/lib.fe",
+        "sha256": "446c7fa32bd4256f49886dc05d10164b953297ea1daec1ff4157db452dcf1bac"
+      }
+    ]
+  },
+  "entry": "fe_actor_initialize_v1",
+  "interface": {
+    "imports": [],
+    "exports": [
+      {
+        "module": "",
+        "name": "fe_actor_initialize_v1",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "fe_actor_project_v1",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "fe_actor_state_replace_v1",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "fe_actor_transition_v1",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "fe_cabi_alloc",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "fe_cabi_reset",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      }
+    ],
+    "resources": []
+  },
+  "artifacts": [
+    {
+      "name": "module.wasm",
+      "kind": "wasm_module",
+      "media_type": "application/wasm",
+      "sha256": "efdc9ab4f45755c48a592d690a3bd2f021744325712ce0ce7dd3014d73f2669e",
+      "byte_len": 7266,
+      "url": "assets/fe-efdc9ab4f45755c4.wasm"
+    }
+  ]
+}
