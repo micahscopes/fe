@@ -57,6 +57,12 @@ pub const SURFACE_ELEMENT_TAG: &str = "fe-surface";
 /// static import instead). Injected at most once per document, the same
 /// idempotent posture as [`BOOTSTRAP_MARKER`].
 pub const SURFACE_RUNTIME_MARKER: &str = "data-fe-surface-runtime";
+/// Transitional ordinary-asset publication marker. It lets authored pages
+/// name inspectable text assets (notably their Fe source) without a JSON asset
+/// manifest; production precompilation content-addresses the bytes and rewrites
+/// the standard `href` in place.
+pub const PUBLISH_ASSET_MARKER: &str = "data-fe-publish";
+pub const PUBLISHED_ASSET_DIGEST_ATTR: &str = "data-fe-published-sha256";
 const BOOTSTRAP_SOURCE: &str = include_str!("../assets/bootstrap.js");
 const RESIDENT_ACTOR_INITIALIZE_EXPORT: &str = "fe_actor_initialize_v1";
 
@@ -617,7 +623,7 @@ pub fn discover_external_dependencies(
         .iter()
         .filter_map(|script| attr(script, "data-fe-src"))
         .chain(surfaces.iter().filter_map(|surface| attr(surface, "src")));
-    let dependencies = sources
+    let mut dependencies = sources
         .map(|source| {
             base_url
                 .join(&source)
@@ -628,6 +634,26 @@ pub fn discover_external_dependencies(
                 })
         })
         .collect::<Result<BTreeSet<_>, _>>()?;
+    let mut published_links = Vec::new();
+    collect_elements_with_attr(
+        &dom.document,
+        "a",
+        PUBLISH_ASSET_MARKER,
+        &mut published_links,
+    );
+    for link in published_links {
+        let href = attr(&link, "href").ok_or_else(|| PrecompileError::SourceLoad {
+            url: document_url.to_string(),
+            detail: format!("`{PUBLISH_ASSET_MARKER}` requires an href"),
+        })?;
+        let url = base_url
+            .join(&href)
+            .map_err(|error| PrecompileError::SourceLoad {
+                url: href,
+                detail: error.to_string(),
+            })?;
+        dependencies.insert(url.to_string());
+    }
     Ok(dependencies.into_iter().collect())
 }
 
@@ -768,6 +794,32 @@ pub fn verify_precompiled_site(index_path: &Path) -> Result<VerificationReport, 
                     ),
                 });
             }
+        }
+        verified.insert(path);
+    }
+    let mut published_assets = Vec::new();
+    collect_elements_with_attr(
+        &dom.document,
+        "a",
+        PUBLISHED_ASSET_DIGEST_ATTR,
+        &mut published_assets,
+    );
+    for (position, asset) in published_assets.iter().enumerate() {
+        let context = format!("published text asset #{}", position + 1);
+        let reference = required_attr(asset, "href", &context)?;
+        let path = deployment_file(root, &reference, &context)?;
+        verify_addressed_file(&path, &context)?;
+        let expected = required_attr(asset, PUBLISHED_ASSET_DIGEST_ATTR, &context)?;
+        let bytes = std::fs::read(&path).map_err(|error| VerificationError {
+            context: context.clone(),
+            detail: format!("cannot read {}: {error}", path.display()),
+        })?;
+        let actual = sha256_hex(&bytes);
+        if actual != expected {
+            return Err(VerificationError {
+                context,
+                detail: format!("expected sha256 {expected}, found {actual}"),
+            });
         }
         verified.insert(path);
     }
@@ -1554,6 +1606,13 @@ fn precompile_html_impl(
         publish_surface_runtime_loader(&dom.document, &document_url, &base_url, &runtime.path)?;
     }
 
+    publish_linked_text_assets(
+        &dom.document,
+        &base_url,
+        &document_url,
+        &mut load,
+        &mut assets,
+    )?;
     publish_bootstrap(&dom.document, &document_url, &base_url, &mut assets)?;
 
     materialize_template_contents_for_serialization(&dom.document);
@@ -1854,6 +1913,65 @@ fn published_reference(base_url: &Url, document_url: &Url, path: &str) -> String
     base_url
         .make_relative(&target)
         .unwrap_or_else(|| target.to_string())
+}
+
+fn publish_linked_text_assets(
+    root: &Handle,
+    base_url: &Url,
+    document_url: &Url,
+    load: &mut impl FnMut(&Url) -> Result<String, String>,
+    assets: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<(), PrecompileError> {
+    let mut links = Vec::new();
+    collect_elements_with_attr(root, "a", PUBLISH_ASSET_MARKER, &mut links);
+    for link in links {
+        let href = attr(&link, "href").ok_or_else(|| PrecompileError::SourceLoad {
+            url: document_url.to_string(),
+            detail: format!("`{PUBLISH_ASSET_MARKER}` requires an href"),
+        })?;
+        let url = base_url
+            .join(&href)
+            .map_err(|error| PrecompileError::SourceLoad {
+                url: href.clone(),
+                detail: error.to_string(),
+            })?;
+        let same_origin = match document_url.scheme() {
+            "file" => url.scheme() == "file",
+            "http" | "https" => url.origin() == document_url.origin(),
+            _ => false,
+        };
+        if !same_origin {
+            return Err(PrecompileError::SourceLoad {
+                url: url.to_string(),
+                detail: "published text assets must be same-origin".to_owned(),
+            });
+        }
+        let source = load(&url).map_err(|detail| PrecompileError::SourceLoad {
+            url: url.to_string(),
+            detail,
+        })?;
+        let bytes = source.into_bytes();
+        let digest = sha256_hex(&bytes);
+        let extension = Path::new(url.path())
+            .extension()
+            .and_then(|value| value.to_str())
+            .filter(|value| {
+                !value.is_empty()
+                    && value.len() <= 12
+                    && value.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            })
+            .unwrap_or("txt");
+        let path = format!("assets/fe-authored-{}.{}", &digest[..16], extension);
+        insert_identical(assets, path.clone(), bytes)?;
+        set_attr(
+            &link,
+            "href",
+            &published_reference(base_url, document_url, &path),
+        );
+        remove_attr(&link, PUBLISH_ASSET_MARKER);
+        set_attr(&link, PUBLISHED_ASSET_DIGEST_ATTR, &digest);
+    }
+    Ok(())
 }
 
 fn publish_bootstrap(
@@ -3381,6 +3499,41 @@ pub fn main() -> u32 { 42 }
             development.graph().dependencies(document),
             ["https://example.test/missing.fe"]
         );
+    }
+
+    #[test]
+    fn inspectable_text_assets_publish_without_an_asset_manifest_and_verify_digest() {
+        let document = "https://example.test/gallery.html";
+        let html = r#"<!doctype html><html><body>
+<script type="application/fe">pub fn main() {}</script>
+<a href="./demo.fe" data-fe-publish data-fe-action="100">source</a>
+</body></html>"#;
+        assert_eq!(
+            discover_external_dependencies(document, html).unwrap(),
+            ["https://example.test/demo.fe"]
+        );
+        let output = precompile_html(document, html, |url| {
+            assert_eq!(url.as_str(), "https://example.test/demo.fe");
+            Ok("actor Demo {}\n".to_owned())
+        })
+        .unwrap();
+        let source_path = output
+            .assets
+            .keys()
+            .find(|path| path.starts_with("assets/fe-authored-") && path.ends_with(".fe"))
+            .unwrap();
+        assert_eq!(output.assets[source_path], b"actor Demo {}\n");
+        assert!(!output.html.contains("data-fe-publish=\"\""));
+        assert!(output.html.contains(PUBLISHED_ASSET_DIGEST_ATTR));
+        assert!(output.html.contains(source_path));
+
+        let root = tempfile::tempdir().unwrap();
+        write_publication(root.path(), &output);
+        let report = verify_precompiled_site(&root.path().join("index.html")).unwrap();
+        assert_eq!(report.files, output.assets.len());
+        std::fs::write(root.path().join(source_path), b"tampered").unwrap();
+        let error = verify_precompiled_site(&root.path().join("index.html")).unwrap_err();
+        assert!(error.to_string().contains("content digest"), "{error}");
     }
 
     #[test]

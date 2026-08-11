@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   bootFeArtifacts,
+  decodeComponentCommands,
   registerFeImportProvider,
 } from "../assets/bootstrap.js";
 
@@ -129,6 +130,40 @@ test("one failed artifact does not prevent sibling artifacts from booting", asyn
   assert.equal(failed.dataset.feState, "error");
   assert.equal(sibling.dataset.feState, "complete");
   assert.equal(sibling.feResult.value, 42);
+});
+
+test("component resource commands decode strictly without interpreting policy", () => {
+  const encoder = new TextEncoder();
+  const command = (opcode, id, value) => {
+    const text = encoder.encode(value);
+    const bytes = new Uint8Array(9 + text.length);
+    const view = new DataView(bytes.buffer);
+    bytes[0] = opcode;
+    view.setUint32(1, id, true);
+    view.setUint32(5, text.length, true);
+    bytes.set(text, 9);
+    return bytes;
+  };
+  assert.deepEqual(
+    decodeComponentCommands(command(11, 9, "https://example.test/a.fe")),
+    [{ opcode: 11, target: 9, value: "https://example.test/a.fe" }],
+  );
+  assert.deepEqual(
+    decodeComponentCommands(command(12, 41, "https://example.test/a.wgsl")),
+    [{ opcode: 12, request: 41, value: "https://example.test/a.wgsl" }],
+  );
+  assert.deepEqual(
+    decodeComponentCommands(command(13, 42, "https://example.test/a.wasm")),
+    [{ opcode: 13, request: 42, value: "https://example.test/a.wasm" }],
+  );
+  assert.throws(
+    () => decodeComponentCommands(command(12, 0, "https://example.test/a.fe")),
+    /request zero is reserved/,
+  );
+  assert.throws(
+    () => decodeComponentCommands(Uint8Array.from([12, 1, 0, 0, 0, 1, 0, 0, 0, 0xff])),
+    /Invalid byte sequence|encoded data was not valid/,
+  );
 });
 
 test("bootstrap registers a selected adapter before real Wasm import preflight", async () => {

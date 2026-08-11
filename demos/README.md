@@ -2,12 +2,13 @@
 
 ## Standards-based Fe HTML
 
-The canonical gallery and the resident TodoMVC component use inert
+The canonical gallery, resident SourceInspector, and TodoMVC component use inert
 `application/fe` source declarations and the fixed, demo-blind browser hosts
 published by `fe web dev`:
 
 ```sh
 cargo run --release -p fe -- web dev demos/gallery.html --port 8000 --host 0.0.0.0
+cargo run --release -p fe -- web dev demos/source-inspector.html --port 8000 --host 0.0.0.0
 cargo run --release -p fe -- web dev demos/todomvc.html --port 8000 --host 0.0.0.0
 ```
 
@@ -16,6 +17,14 @@ and DOM effect projection are in `demos/sketches/todomvc/src/lib.fe`. The
 browser adapter transports standards events and applies the fixed component
 effect vocabulary; it contains no Todo-specific policy. The example is also
 embedded as a tile in `gallery.html`.
+
+`demos/sketches/source_inspector/src/lib.fe` owns source/generated-artifact
+selection, loading/error state, stale-response rejection, binary-vs-text
+presentation, focus, Escape, and navigation cancellation. The generic browser
+adapter performs same-origin fetches only when Fe emits a resource effect.
+Precompiled authored `.fe` links are direct content-addressed text assets, not
+entries in another JSON asset manifest, so the same inspector works on static
+hosting.
 
 The sections below document the older Trunk/compatibility showcase lanes.
 

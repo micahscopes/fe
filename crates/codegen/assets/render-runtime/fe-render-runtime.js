@@ -626,6 +626,10 @@ export class FeSurfaceElement extends HTMLElement {
           : undeclaredViewInitialUniforms(this._members));
 
       if (!this._adoptedCanvas) this._ensureStage();
+      // Publish inspectable artifact links as soon as the manifest has been
+      // resolved. They remain useful diagnostics even when poster rendering
+      // subsequently fails because this browser has no usable WebGPU device.
+      this._updateMeta();
       await this._renderPosterWithRecovery();
       this._renderControls();
       this._updateMeta();
@@ -1855,15 +1859,22 @@ export class FeSurfaceElement extends HTMLElement {
 
   _updateMeta() {
     if (!this._meta) return;
-    const link = (href, text) => `<a href="${href}" target="_blank" rel="noopener">${text}</a>`;
+    const link = (href, text, kind) => {
+      const rawAction = this.getAttribute(`data-fe-${kind}-action`);
+      const action = Number(rawAction);
+      const actionAttribute = Number.isInteger(action) && action >= 0
+        ? ` data-fe-action="${action >>> 0}"`
+        : "";
+      return `<a href="${href}" target="_blank" rel="noopener"${actionAttribute}>${text}</a>`;
+    };
     const wasm = this._wasmUrl
-      ? link(this._wasmUrl.href, `wasm ${this._manifest.artifacts.wasm_bytes} B`) + ` · `
+      ? link(this._wasmUrl.href, `wasm ${this._manifest.artifacts.wasm_bytes} B`, "wasm") + ` · `
       : "";
     this._meta.innerHTML =
       `entry ${this._manifest.source_entry} · ` + wasm +
-      link(this._wgslUrl.href, `wgsl ${this._manifest.artifacts.wgsl_bytes} B`) +
+      link(this._wgslUrl.href, `wgsl ${this._manifest.artifacts.wgsl_bytes} B`, "wgsl") +
       ` · path ${this._mode} · fe ${this._manifest.provenance.compiler_version} · ` +
-      link(this._manifestUrl.href, `manifest`);
+      link(this._manifestUrl.href, `manifest`, "manifest");
   }
 
   _dispatch(type, detail) {

@@ -94,6 +94,22 @@ Origin: honesty audit of Claude Code session
   byte/hash checks could not: dropped `<template>` contents, focus overwritten
   by post-click browser defaults, and needless keyed-row moves detaching a
   focused input.
+- The removed handwritten JavaScript code viewer is restored as a real
+  resident Fe `SourceInspector`, both standalone and around the canonical
+  gallery. Fe owns artifact-kind selection, open/loading/error state, opaque
+  request identities, stale-completion rejection, text-vs-binary presentation,
+  focus, Escape, and navigation cancellation. The fixed component host adds
+  only same-origin URL/fetch realization plus `href`, text, and byte-count
+  effects. Accepted response bodies are copied into Fe-owned resident memory;
+  an independent Wasmtime tape caught and now guards against accidentally
+  retaining the host's reusable scratch pointer. A Chromium gate opens actual
+  authored Fe and compiler-generated WGSL/Wasm/manifest artifacts through
+  composed shadow-DOM clicks and verifies Fe-owned lifecycle/presentation.
+- Inspectable authored `.fe` files are now ordinary content-addressed
+  publication assets. HTML `href` is rewritten in place and the deployment
+  verifier checks the direct source digest; there is no asset JSON or new
+  runtime manifest. This makes source inspection work on static Pages rather
+  than only under the development file server.
 - This component slice is not the Phase 5 end state. Todo page composition and
   numeric action/node/class/template declarations are still ordinary authored
   HTML; the component directory route still needs to supersede the render-lane

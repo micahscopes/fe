@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cpath d='M12 16h40v32H12z' fill='%23151a23' stroke='%2391a7ca' stroke-width='4'/%3E%3Cpath d='m20 27 7 6-7 6M32 40h13' fill='none' stroke='%23d8e2f2' stroke-width='4'/%3E%3C/svg%3E">
+<title>Fe · SourceInspector</title>
+<style>
+  :root { color-scheme: dark; font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+          background: #0d0f13; color: #cfd6e4; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 32px; }
+  fe-component { display: block; max-width: 760px; margin: 0 auto; }
+  h1 { margin: 0 0 6px; font-size: 18px; color: #e6ecf7; }
+  .lede { margin: 0 0 18px; color: #8a93a6; }
+  .card { padding: 14px; border: 1px solid #252b37; border-radius: 10px; background: #12151b; }
+  .source { display: inline-block; margin-bottom: 12px; color: #91a7ca; }
+  fe-surface { width: 100%; }
+  .inspector { position: fixed; z-index: 100; inset: 5vh 5vw; display: flex; flex-direction: column;
+               border: 1px solid #30394a; border-radius: 10px; background: #0f1218;
+               box-shadow: 0 24px 80px #000b; overflow: hidden; }
+  .inspector-head { display: flex; align-items: center; gap: 12px; padding: 10px 14px;
+                    border-bottom: 1px solid #252b37; background: #151922; }
+  .inspector-title { flex: 1; font-weight: 600; color: #edf2fb; }
+  .raw { color: #91a7ca; }
+  .close { border: 0; background: none; color: #aeb8cc; font-size: 22px; cursor: pointer; }
+  .body { min-height: 0; flex: 1; overflow: auto; }
+  pre { min-height: 100%; margin: 0; padding: 16px; white-space: pre; tab-size: 2;
+        font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .message { padding: 24px; color: #aeb8cc; }
+  .error { color: #ff9c9c; white-space: pre-wrap; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+  <script type="application/fe" data-fe-src="sketches/source_inspector/src/lib.fe"
+          data-fe-component data-fe-mount="#source-inspector"></script>
+  <fe-component id="source-inspector">
+    <h1>Fe SourceInspector</h1>
+    <p class="lede">Open authored Fe or the compiler-generated artifacts below. Selection,
+      loading state, stale-response policy, and presentation are resident Fe state.</p>
+    <div class="card">
+      <a class="source" href="sketches/gradient/src/lib.fe" data-fe-publish data-fe-action="100">Fe source</a>
+      <script type="application/fe" data-fe-src="sketches/gradient" data-fe-render
+              data-fe-wgsl-action="101" data-fe-wasm-action="102"
+              data-fe-manifest-action="103"></script>
+    </div>
+
+    <section class="inspector" data-fe-view="0" hidden role="dialog" aria-modal="true"
+             aria-label="Source inspector">
+      <header class="inspector-head">
+        <span class="inspector-title" data-fe-view="5">Fe source</span>
+        <span class="inspector-title" data-fe-view="6">Compiler-generated WGSL</span>
+        <span class="inspector-title" data-fe-view="7">Compiler-generated Wasm</span>
+        <span class="inspector-title" data-fe-view="8">Transitional audit manifest</span>
+        <a class="raw" data-fe-node="102" target="_blank" rel="noopener">Raw</a>
+        <button class="close" data-fe-action="104" type="button" aria-label="Close">×</button>
+      </header>
+      <div class="body">
+        <p class="message" data-fe-view="3">Loading…</p>
+        <pre data-fe-view="1" data-fe-node="100"></pre>
+        <p class="message" data-fe-view="2">Compiled binary module · <strong data-fe-node="101">0</strong> bytes.</p>
+        <pre class="error" data-fe-view="4" data-fe-node="103"></pre>
+      </div>
+    </section>
+  </fe-component>
+</body>
+</html>

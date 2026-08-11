@@ -23,6 +23,11 @@ pub enum ComponentEventKind {
     Change,
     Submit,
     KeyDown,
+    /// Completion of a Fe-requested browser resource effect. `target` is the
+    /// opaque request identity chosen by Fe, `key` is the HTTP status (zero
+    /// for a transport failure), `detail` is the byte length, and `text`
+    /// carries a UTF-8 body or failure description.
+    ResourceLoaded,
 }
 
 impl Copy for ComponentEventKind {}
@@ -100,6 +105,11 @@ pub struct ComponentWriter {
     pub failed: bool,
 }
 
+struct DecimalStep {
+    writer: ComponentWriter,
+    remaining: u32,
+}
+
 impl Copy for ComponentWriter {}
 
 impl ComponentWriter {
@@ -132,6 +142,19 @@ impl ComponentWriter {
             index = index + 1
         }
         writer
+    }
+
+    fn decimal_digit(self, value: u32, place: u32) -> DecimalStep {
+        let mut remaining = value
+        let mut digit: u32 = 0
+        while remaining >= place {
+            remaining = remaining - place
+            digit = digit + 1
+        }
+        DecimalStep {
+            writer: self.byte(value: 48 + digit),
+            remaining: remaining,
+        }
     }
 
     /// Begin one keyed reconciliation region. `container` names a
@@ -181,6 +204,78 @@ impl ComponentWriter {
         writer
     }
 
+    /// Emit an arbitrary `u32` as decimal text in Fe. The fixed host applies
+    /// only the resulting bytes and owns no application number formatting.
+    pub fn set_u32_text(self, target: u32, value: u32) -> Self {
+        let digits: u32 = if value >= 1000000000 { 10 } else {
+            if value >= 100000000 { 9 } else {
+                if value >= 10000000 { 8 } else {
+                    if value >= 1000000 { 7 } else {
+                        if value >= 100000 { 6 } else {
+                            if value >= 10000 { 5 } else {
+                                if value >= 1000 { 4 } else {
+                                    if value >= 100 { 3 } else {
+                                        if value >= 10 { 2 } else { 1 }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let mut writer = self.byte(value: 4)
+        writer = writer.word(value: target)
+        writer = writer.word(value: digits)
+        let mut remaining = value
+        if digits >= 10 {
+            let step = writer.decimal_digit(value: remaining, place: 1000000000)
+            writer = step.writer
+            remaining = step.remaining
+        }
+        if digits >= 9 {
+            let step = writer.decimal_digit(value: remaining, place: 100000000)
+            writer = step.writer
+            remaining = step.remaining
+        }
+        if digits >= 8 {
+            let step = writer.decimal_digit(value: remaining, place: 10000000)
+            writer = step.writer
+            remaining = step.remaining
+        }
+        if digits >= 7 {
+            let step = writer.decimal_digit(value: remaining, place: 1000000)
+            writer = step.writer
+            remaining = step.remaining
+        }
+        if digits >= 6 {
+            let step = writer.decimal_digit(value: remaining, place: 100000)
+            writer = step.writer
+            remaining = step.remaining
+        }
+        if digits >= 5 {
+            let step = writer.decimal_digit(value: remaining, place: 10000)
+            writer = step.writer
+            remaining = step.remaining
+        }
+        if digits >= 4 {
+            let step = writer.decimal_digit(value: remaining, place: 1000)
+            writer = step.writer
+            remaining = step.remaining
+        }
+        if digits >= 3 {
+            let step = writer.decimal_digit(value: remaining, place: 100)
+            writer = step.writer
+            remaining = step.remaining
+        }
+        if digits >= 2 {
+            let step = writer.decimal_digit(value: remaining, place: 10)
+            writer = step.writer
+            remaining = step.remaining
+        }
+        writer.byte(value: 48 + remaining)
+    }
+
     pub fn set_value(self, target: u32, value: own BrowserString) -> Self {
         let writer = self.byte(value: 5)
         let writer = writer.word(value: target)
@@ -216,6 +311,35 @@ impl ComponentWriter {
         let writer = self.byte(value: 10)
         let writer = writer.word(value: target)
         writer.byte(value: if disabled { 1 } else { 0 })
+    }
+
+    /// Set an anchor URL from Fe-authored state. The host validates and applies
+    /// the standard `href` property but does not choose the destination.
+    pub fn set_href(self, target: u32, value: own BrowserString) -> Self {
+        let writer = self.byte(value: 11)
+        let writer = writer.word(value: target)
+        let writer = writer.word(value: value.len)
+        writer.bytes(value: value)
+    }
+
+    /// Ask the fixed browser adapter to fetch one same-origin UTF-8 resource.
+    /// Completion returns as `ComponentEventKind::ResourceLoaded`; request
+    /// identity and stale-response policy remain Fe-owned.
+    pub fn load_text(self, request: u32, value: own BrowserString) -> Self {
+        let writer = self.byte(value: 12)
+        let writer = writer.word(value: request)
+        let writer = writer.word(value: value.len)
+        writer.bytes(value: value)
+    }
+
+    /// Fetch a same-origin binary resource and report only its byte length.
+    /// This keeps binary interpretation out of JavaScript while letting Fe
+    /// decide how to present or otherwise act on the result.
+    pub fn load_bytes(self, request: u32, value: own BrowserString) -> Self {
+        let writer = self.byte(value: 13)
+        let writer = writer.word(value: request)
+        let writer = writer.word(value: value.len)
+        writer.bytes(value: value)
     }
 
     pub fn finish(self) -> BrowserBytes {

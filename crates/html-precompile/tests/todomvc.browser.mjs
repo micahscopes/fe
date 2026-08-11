@@ -121,6 +121,7 @@ try {
   await page.evaluateOnNewDocument(() => {
     globalThis.__feTodoE2E = { stateCount: 0, states: [], errors: [] };
     document.addEventListener("fe-state", event => {
+      if (event.target?.id !== "todo-app" && event.target?.id !== "gallery-todomvc") return;
       globalThis.__feTodoE2E.stateCount += 1;
       globalThis.__feTodoE2E.states.push({
         state: event.detail.state.slice(),
@@ -128,7 +129,7 @@ try {
       });
     });
     document.addEventListener("fe-error", event => {
-      if (event.target?.localName === "fe-component") {
+      if (event.target?.id === "todo-app" || event.target?.id === "gallery-todomvc") {
         globalThis.__feTodoE2E.errors.push(String(event.detail?.stack ?? event.detail));
       }
     }, true);
@@ -148,14 +149,14 @@ try {
   await page.goto(`http://127.0.0.1:${serverAddress.port}/`, { waitUntil: "networkidle0" });
   try {
     await page.waitForFunction(() => {
-      const script = document.querySelector('script[type="application/fe+wasm"][data-fe-component]');
-      const component = document.querySelector("fe-component");
+      const script = document.querySelector('script[type="application/fe+wasm"][data-fe-mount="#todo-app"], script[type="application/fe+wasm"][data-fe-mount="#gallery-todomvc"]');
+      const component = document.querySelector("#todo-app, #gallery-todomvc");
       return script?.dataset.feState === "complete" && component?._active === true;
     });
   } catch (error) {
     const diagnosis = await page.evaluate(() => {
-      const script = document.querySelector('script[type="application/fe+wasm"][data-fe-component]');
-      const component = document.querySelector("fe-component");
+      const script = document.querySelector('script[type="application/fe+wasm"][data-fe-mount="#todo-app"], script[type="application/fe+wasm"][data-fe-mount="#gallery-todomvc"]');
+      const component = document.querySelector("#todo-app, #gallery-todomvc");
       return {
         scriptState: script?.dataset.feState ?? null,
         componentActive: component?._active ?? null,
@@ -181,7 +182,7 @@ try {
   await page.keyboard.press("Enter");
   if (process.env.FE_E2E_DEBUG) {
     console.log(await page.evaluate(() => ({
-      html: document.querySelector("fe-component").innerHTML,
+      html: document.querySelector("#todo-app, #gallery-todomvc").innerHTML,
       latest: globalThis.__feTodoE2E.states.at(-1),
       stateCount: globalThis.__feTodoE2E.stateCount,
     })));
@@ -287,7 +288,7 @@ try {
   // Repeated disconnect/reconnect must retain Fe state and replace, not stack,
   // the browser listener subscription.
   await page.evaluate(async () => {
-    const component = document.querySelector("fe-component");
+    const component = document.querySelector("#todo-app, #gallery-todomvc");
     for (let index = 0; index < 3; index += 1) {
       const marker = document.createComment("component-position");
       component.before(marker);

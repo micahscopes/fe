@@ -1,0 +1,297 @@
+//! A resident Fe source/generated-artifact inspector.
+//!
+//! Anchors provide untouched same-origin URLs. Fe owns which artifact kinds
+//! are inspectable, modal state, stale response rejection, loading/error
+//! policy, binary-vs-text presentation, focus, and navigation cancellation.
+//! The fixed browser host only realizes URL/fetch/DOM effects.
+
+use std::web::component::{
+    BrowserBytes, BrowserPtr, BrowserString, ComponentEvent, ComponentEventKind,
+    ComponentPatch, ComponentWriter, InitialState, ProjectState, ResidentTransition,
+    allocate_component_buffer, component_string,
+}
+
+const ACTION_SOURCE: u32 = 100
+const ACTION_WGSL: u32 = 101
+const ACTION_WASM: u32 = 102
+const ACTION_MANIFEST: u32 = 103
+const ACTION_CLOSE: u32 = 104
+
+const NODE_BODY: u32 = 100
+const NODE_BYTES: u32 = 101
+const NODE_RAW: u32 = 102
+const NODE_ERROR: u32 = 103
+
+const VIEW_OVERLAY: u32 = 0
+const VIEW_TEXT: u32 = 1
+const VIEW_BINARY: u32 = 2
+const VIEW_LOADING: u32 = 3
+const VIEW_ERROR: u32 = 4
+const VIEW_TITLE_SOURCE: u32 = 5
+const VIEW_TITLE_WGSL: u32 = 6
+const VIEW_TITLE_WASM: u32 = 7
+const VIEW_TITLE_MANIFEST: u32 = 8
+
+const STATUS_LOADING: u32 = 0
+const STATUS_READY: u32 = 1
+const STATUS_ERROR: u32 = 2
+const URL_CAPACITY: u32 = 2048
+const PATCH_CAPACITY: u32 = 1048576
+const CONTENT_CAPACITY: u32 = 1044480
+
+pub struct InspectorState {
+    pub patch_ptr: u32,
+    pub url_ptr: u32,
+    pub url_len: u32,
+    pub selected: u32,
+    pub pending: u32,
+    pub status: u32,
+    pub byte_len: u32,
+    pub content_ptr: u32,
+    pub content_len: u32,
+    pub connected: bool,
+    pub open: bool,
+    pub issue_load: bool,
+    pub prevent_default: bool,
+    pub focus_close: bool,
+    pub revision: u32,
+}
+
+fn byte_at(ptr: u32, index: u32) -> BrowserPtr<u32> {
+    BrowserPtr::from_u32(ptr + index)
+}
+
+fn copy_url(destination: u32, value: own BrowserString) -> u32 {
+    // Browser-resolved anchor hrefs are ASCII URLs. Bound the retained value
+    // so malformed or adversarial pages cannot grow component state.
+    let len = if value.len < URL_CAPACITY { value.len } else { URL_CAPACITY }
+    let mut index: u32 = 0
+    while index < len {
+        let source: BrowserPtr<u32> = BrowserPtr::from_u32(value.ptr + index)
+        byte_at(ptr: destination, index: index).write(source.read() & 255)
+        index = index + 1
+    }
+    len
+}
+
+fn copy_content(destination: u32, value: own BrowserString) -> u32 {
+    let len = if value.len < CONTENT_CAPACITY { value.len } else { CONTENT_CAPACITY }
+    let mut index: u32 = 0
+    while index < len {
+        let source: BrowserPtr<u32> = BrowserPtr::from_u32(value.ptr + index)
+        byte_at(ptr: destination, index: index).write(source.read() & 255)
+        index = index + 1
+    }
+    len
+}
+
+fn is_resource_action(target: u32) -> bool {
+    target == ACTION_SOURCE
+        || target == ACTION_WGSL
+        || target == ACTION_WASM
+        || target == ACTION_MANIFEST
+}
+
+fn is_success(status: u32) -> bool {
+    status >= 200 && status < 300
+}
+
+fn view_bit(index: u32) -> u32 {
+    1 << index
+}
+
+actor SourceInspector {
+    patch_ptr: u32,
+    url_ptr: u32,
+    url_len: u32,
+    selected: u32,
+    pending: u32,
+    status: u32,
+    byte_len: u32,
+    content_ptr: u32,
+    content_len: u32,
+    connected: bool,
+    open: bool,
+    issue_load: bool,
+    prevent_default: bool,
+    focus_close: bool,
+    revision: u32,
+
+    fn initial() -> InspectorState uses (InitialState) {
+        let patch = allocate_component_buffer(capacity: PATCH_CAPACITY)
+        let url = allocate_component_buffer(capacity: URL_CAPACITY)
+        let content = allocate_component_buffer(capacity: CONTENT_CAPACITY)
+        InspectorState {
+            patch_ptr: patch.ptr,
+            url_ptr: url.ptr,
+            url_len: 0,
+            selected: ACTION_SOURCE,
+            pending: 0,
+            status: STATUS_LOADING,
+            byte_len: 0,
+            content_ptr: content.ptr,
+            content_len: 0,
+            connected: false,
+            open: false,
+            issue_load: false,
+            prevent_default: false,
+            focus_close: false,
+            revision: 0,
+        }
+    }
+
+    fn receive(self, event: own ComponentEvent) -> InspectorState uses (ResidentTransition) {
+        let patch_ptr = self.patch_ptr
+        let url_ptr = self.url_ptr
+        let mut url_len = self.url_len
+        let mut selected = self.selected
+        let mut pending = self.pending
+        let mut status = self.status
+        let mut byte_len = self.byte_len
+        let content_ptr = self.content_ptr
+        let mut content_len = self.content_len
+        let mut connected = self.connected
+        let mut open = self.open
+        let mut issue_load = false
+        let mut prevent_default = false
+        let mut focus_close = false
+        let mut revision = self.revision
+
+        match event.kind {
+            ComponentEventKind::Connected => {
+                connected = true
+                revision = revision + 1
+            }
+            ComponentEventKind::Disconnected => {
+                connected = false
+                open = false
+                revision = revision + 1
+            }
+            ComponentEventKind::Activate => {
+                if connected {
+                    if is_resource_action(target: event.target) && event.text.len > 0 {
+                        selected = event.target
+                        url_len = copy_url(destination: url_ptr, value: event.text)
+                        revision = revision + 1
+                        pending = revision
+                        if pending == 0 { pending = 1 }
+                        status = STATUS_LOADING
+                        byte_len = 0
+                        content_len = 0
+                        open = true
+                        issue_load = true
+                        prevent_default = true
+                        focus_close = true
+                    } else {
+                        if event.target == ACTION_CLOSE && open {
+                            open = false
+                            prevent_default = true
+                            revision = revision + 1
+                        }
+                    }
+                }
+            }
+            ComponentEventKind::KeyDown => {
+                if connected && open && event.detail == 27 {
+                    open = false
+                    prevent_default = true
+                    revision = revision + 1
+                }
+            }
+            ComponentEventKind::ResourceLoaded => {
+                if connected && open && event.target == pending {
+                    byte_len = event.detail
+                    content_len = copy_content(destination: content_ptr, value: event.text)
+                    status = if is_success(status: event.key) { STATUS_READY } else { STATUS_ERROR }
+                    revision = revision + 1
+                }
+            }
+            _ => {}
+        }
+
+        InspectorState {
+            patch_ptr: patch_ptr,
+            url_ptr: url_ptr,
+            url_len: url_len,
+            selected: selected,
+            pending: pending,
+            status: status,
+            byte_len: byte_len,
+            content_ptr: content_ptr,
+            content_len: content_len,
+            connected: connected,
+            open: open,
+            issue_load: issue_load,
+            prevent_default: prevent_default,
+            focus_close: focus_close,
+            revision: revision,
+        }
+    }
+
+    fn project(self) -> ComponentPatch uses (ProjectState) {
+        let url = component_string(ptr: self.url_ptr, len: self.url_len)
+        let content = component_string(ptr: self.content_ptr, len: self.content_len)
+        let mut visible_mask: u32 = 0
+        if self.connected && self.open {
+            visible_mask = visible_mask | view_bit(index: VIEW_OVERLAY)
+            if self.selected == ACTION_SOURCE {
+                visible_mask = visible_mask | view_bit(index: VIEW_TITLE_SOURCE)
+            } else {
+                if self.selected == ACTION_WGSL {
+                    visible_mask = visible_mask | view_bit(index: VIEW_TITLE_WGSL)
+                } else {
+                    if self.selected == ACTION_WASM {
+                        visible_mask = visible_mask | view_bit(index: VIEW_TITLE_WASM)
+                    } else {
+                        visible_mask = visible_mask | view_bit(index: VIEW_TITLE_MANIFEST)
+                    }
+                }
+            }
+            if self.status == STATUS_LOADING {
+                visible_mask = visible_mask | view_bit(index: VIEW_LOADING)
+            } else {
+                if self.status == STATUS_ERROR {
+                    visible_mask = visible_mask | view_bit(index: VIEW_ERROR)
+                } else {
+                    if self.selected == ACTION_WASM {
+                        visible_mask = visible_mask | view_bit(index: VIEW_BINARY)
+                    } else {
+                        visible_mask = visible_mask | view_bit(index: VIEW_TEXT)
+                    }
+                }
+            }
+        }
+
+        let mut writer = ComponentWriter::new(
+            buffer: BrowserBytes { ptr: self.patch_ptr, len: PATCH_CAPACITY },
+        )
+        if self.open && self.url_len > 0 {
+            writer = writer.set_href(target: NODE_RAW, value: url)
+        }
+        if self.status == STATUS_READY {
+            if self.selected == ACTION_WASM {
+                writer = writer.set_u32_text(target: NODE_BYTES, value: self.byte_len)
+            } else {
+                writer = writer.set_text(target: NODE_BODY, value: content)
+            }
+        } else {
+            if self.status == STATUS_ERROR {
+                writer = writer.set_text(target: NODE_ERROR, value: content)
+            }
+        }
+        if self.issue_load {
+            if self.selected == ACTION_WASM {
+                writer = writer.load_bytes(request: self.pending, value: url)
+            } else {
+                writer = writer.load_text(request: self.pending, value: url)
+            }
+        }
+
+        ComponentPatch {
+            visible_mask: visible_mask,
+            focus_target: if self.focus_close { ACTION_CLOSE } else { 0 },
+            flags: if self.prevent_default { 1 } else { 0 },
+            commands: writer.finish(),
+        }
+    }
+}
