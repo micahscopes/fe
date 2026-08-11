@@ -393,9 +393,8 @@ actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
         let res: f32 = event.width
         // pixel -> complex-plane step at the CURRENT zoom: the ordered sample
         // map has the same `d(cx)/d(px) = 2 * zoom / res` scale as a centered
-        // sample. Its v map is Y-FLIPPED (screen row increases downward,
-        // complex y increases upward), so a
-        // screen row increases downward, complex y increases upward), so a
+        // sample. Its v map is Y-FLIPPED: screen row increases downward while
+        // complex y increases upward, so a
         // downward drag (dy > 0) must INCREASE center_y, not decrease it.
         let step: f32 = 2.0 * self.zoom / res
         let (cx0_0, cx0_1, cx0_2, cx0_3) = to_quad(add_f32<4>(
