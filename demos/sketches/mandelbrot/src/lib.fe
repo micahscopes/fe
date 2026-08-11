@@ -72,9 +72,9 @@ use std::web::view::{
     ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface,
     SurfaceEvent, SurfaceState,
 }
-use fmath::{from_i32, palette, to_i32}
+use fmath::{escape_palette, from_i32, PixelSample, to_i32}
 use precision::{add_f32, from_quad, to_quad}
-use precision::fixed::{from_qf_offset, escape as fx_escape}
+use precision::fixed::{from_qf_offset, escape_sample as fx_escape_sample}
 
 // Zoom DEPTH drives two things: the iteration budget and the adaptive limb
 // count. `depth_for_zoom` counts how many doublings bring `zoom` up to 1.0, a
@@ -86,7 +86,6 @@ const MAX_ITER_BASE: i32 = 256
 const MAX_ITER_CAP: i32 = 2000
 const ITER_PER_DOUBLING: f32 = 48.0
 const DEPTH_PROBE_STEPS: i32 = 96
-const PALETTE_PERIOD: f32 = 256.0
 
 // Adaptive-precision thresholds on zoom DEPTH (doublings-to-1.0 ~ -log2 zoom).
 // `Fixed<L>` resolves 2^-13(L-1) fractional bits (fixed.fe:32), and a pixel
@@ -289,11 +288,13 @@ actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
     /// smaller kernel. `zoom` is a per-frame uniform, so the L branch is uniform
     /// control flow, not per-pixel divergence.
     fn escape(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
-        // Pixel centre to [-1, 1], y up, then into the complex plane.
-        let u: f32 = (from_i32(px) + 0.5) / self.res * 2.0 - 1.0
-        let v: f32 = 1.0 - (from_i32(py) + 0.5) / self.res * 2.0
-        let ox: f32 = u * self.zoom
-        let oy: f32 = v * self.zoom
+        // One branch-free ordered subpixel sample. Across each 2x2 pixel block
+        // the four offsets cover every quadrant and average to the pixel
+        // centre, improving diagonal boundary reconstruction without a second
+        // expensive fixed-point orbit.
+        let point = PixelSample::ordered_2x2(px, py).plane(self.res)
+        let ox: f32 = point.u * self.zoom
+        let oy: f32 = point.v * self.zoom
 
         let depth: i32 = depth_for_zoom(self.zoom)
         let max_iter: i32 = max_iter_from_depth(depth)
@@ -304,42 +305,42 @@ actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
         // via `from_qf_offset<L>` (which self-truncates the sub-resolution deep
         // words at small L) and runs the general `escape<L>` orbit. One general
         // form at four placements, no bespoke per-L copy. [G3]
-        let count: i32 = if depth <= DEPTH_L2 {
+        let sample = if depth <= DEPTH_L2 {
             let (cx_s, cx) = from_qf_offset<2>(
                 self.center_x_w0, self.center_x_w1, self.center_x_w2, self.center_x_w3, ox)
             let (cy_s, cy) = from_qf_offset<2>(
                 self.center_y_w0, self.center_y_w1, self.center_y_w2, self.center_y_w3, oy)
-            fx_escape<2>(cx_s, cx, cy_s, cy, max_iter)
+            fx_escape_sample<2>(cx_s, cx, cy_s, cy, max_iter)
         } else {
             if depth <= DEPTH_L4 {
                 let (cx_s, cx) = from_qf_offset<4>(
                     self.center_x_w0, self.center_x_w1, self.center_x_w2, self.center_x_w3, ox)
                 let (cy_s, cy) = from_qf_offset<4>(
                     self.center_y_w0, self.center_y_w1, self.center_y_w2, self.center_y_w3, oy)
-                fx_escape<4>(cx_s, cx, cy_s, cy, max_iter)
+                fx_escape_sample<4>(cx_s, cx, cy_s, cy, max_iter)
             } else {
                 if depth <= DEPTH_L6 {
                     let (cx_s, cx) = from_qf_offset<6>(
                         self.center_x_w0, self.center_x_w1, self.center_x_w2, self.center_x_w3, ox)
                     let (cy_s, cy) = from_qf_offset<6>(
                         self.center_y_w0, self.center_y_w1, self.center_y_w2, self.center_y_w3, oy)
-                    fx_escape<6>(cx_s, cx, cy_s, cy, max_iter)
+                    fx_escape_sample<6>(cx_s, cx, cy_s, cy, max_iter)
                 } else {
                     // Deepest tier: full `Fixed<8>` (~1e-27), the proven floor.
                     let (cx_s, cx) = from_qf_offset<8>(
                         self.center_x_w0, self.center_x_w1, self.center_x_w2, self.center_x_w3, ox)
                     let (cy_s, cy) = from_qf_offset<8>(
                         self.center_y_w0, self.center_y_w1, self.center_y_w2, self.center_y_w3, oy)
-                    fx_escape<8>(cx_s, cx, cy_s, cy, max_iter)
+                    fx_escape_sample<8>(cx_s, cx, cy_s, cy, max_iter)
                 }
             }
         }
 
-        if count < max_iter {
-            // Keep palette phase independent of the adaptive trip limit, so
-            // deeper budgets reveal detail without recoloring known escapes.
-            let t: f32 = from_i32(count) / PALETTE_PERIOD
-            palette(t, 0.0, 0.33, 0.67)
+        if sample.iterations < max_iter {
+            // Shared continuous escape coloring keeps phase independent of the
+            // adaptive trip limit, so deeper budgets reveal detail without
+            // recoloring known escapes or preserving integer-count bands.
+            escape_palette(sample.iterations, sample.magnitude_squared)
         } else {
             // Inside the set: opaque black (0xFF000000).
             -16777216
@@ -390,10 +391,10 @@ actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
         let mx: f32 = event.pointer_x
         let my: f32 = event.pointer_y
         let res: f32 = event.width
-        // pixel -> complex-plane step at the CURRENT zoom: `escape`'s own
-        // u map is `u = (px + 0.5) / res * 2 - 1`, so `d(cx)/d(px) = 2 *
-        // zoom / res`. `escape`'s v map is Y-FLIPPED (`v = 1 - (py+0.5)/res*2`:
-        // screen row increases downward, complex y increases upward), so a
+        // pixel -> complex-plane step at the CURRENT zoom: the ordered sample
+        // map has the same `d(cx)/d(px) = 2 * zoom / res` scale as a centered
+        // sample. Its v map is Y-FLIPPED: screen row increases downward while
+        // complex y increases upward, so a
         // downward drag (dy > 0) must INCREASE center_y, not decrease it.
         let step: f32 = 2.0 * self.zoom / res
         let (cx0_0, cx0_1, cx0_2, cx0_3) = to_quad(add_f32<4>(
@@ -403,9 +404,10 @@ actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
 
         let z_c: f32 = clamp_f(zoom_step(self.zoom, dzoom), ZOOM_MIN, ZOOM_MAX)
 
-        // The complex point under the cursor's CURRENT (mx, my), via the
-        // EXACT SAME u/v map `escape` uses, times the zoom CHANGE (old minus
-        // new): keeps that point fixed under the new zoom.
+        // The complex point under the cursor's CURRENT (mx, my), through the
+        // continuous pixel-centre map, times the zoom CHANGE (old minus new):
+        // keeps that point fixed under the new zoom. Sampling phase remains a
+        // screen-space reconstruction detail and never makes the anchor jump.
         let u: f32 = (mx + 0.5) * 2.0 / res - 1.0
         let v: f32 = 1.0 - (my + 0.5) * 2.0 / res
         let (cx_a_0, cx_a_1, cx_a_2, cx_a_3) = to_quad(add_f32<4>(

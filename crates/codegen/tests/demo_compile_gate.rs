@@ -945,6 +945,7 @@ fn perturbational_mandelbrot_graph_compiles() {
     const OLD_PIXEL_ITER_ARITH: u64 = 3 * FIXED8_MUL_ARITH + 5 * FIXED8_ADD_ARITH;
     const PERTURB_ITER_ARITH: u64 = 25;
     const PERTURB_VALIDITY_ARITH: u64 = 6;
+    const SAMPLES_PER_PIXEL: u64 = 1;
     const PIXELS: u64 = 512 * 512;
     const ITERATIONS: u64 = 512;
     let recurrence_ratio = OLD_PIXEL_ITER_ARITH as f64 / PERTURB_ITER_ARITH as f64;
@@ -980,19 +981,43 @@ fn perturbational_mandelbrot_graph_compiles() {
     );
     assert!(!bundle.pass_wgsl[1].source.contains("DEPTH_L"));
 
+    // The shared ordered pattern is spatially stratified across 2x2 pixels,
+    // but deliberately requests exactly one orbit per pixel. Keep the authored
+    // Fe shape explicit so refined sampling cannot quietly clone either the
+    // adaptive Fixed ladder or the perturbation loop.
+    let classic_source = include_str!("../../../demos/sketches/mandelbrot/src/lib.fe");
+    let perturb_source =
+        include_str!("../../../demos/sketches/perturbational_mandelbrot/src/lib.fe");
+    assert_eq!(
+        classic_source.matches("PixelSample::ordered_2x2").count(),
+        1,
+        "the exact renderer should select one shared sample before its uniform LoD ladder"
+    );
+    assert_eq!(
+        classic_source.matches("fx_escape_sample<").count(),
+        4,
+        "the exact renderer should retain exactly one orbit at each of its four precision tiers"
+    );
+    assert_eq!(
+        perturb_source.matches("PixelSample::ordered_2x2").count(),
+        1,
+        "the perturbation renderer should select one shared sample before its orbit"
+    );
+    assert_eq!(
+        SAMPLES_PER_PIXEL, 1,
+        "deep refined sampling must not multiply fixed-trip orbit work"
+    );
+
     let old_modeled = PIXELS * ITERATIONS * OLD_PIXEL_ITER_ARITH;
-    let new_modeled = PIXELS * ITERATIONS * (PERTURB_ITER_ARITH + PERTURB_VALIDITY_ARITH)
-        + ITERATIONS * OLD_PIXEL_ITER_ARITH;
+    let new_modeled =
+        PIXELS * SAMPLES_PER_PIXEL * ITERATIONS * (PERTURB_ITER_ARITH + PERTURB_VALIDITY_ARITH)
+            + ITERATIONS * OLD_PIXEL_ITER_ARITH;
     eprintln!(
         "  B4 quality receipt: authored Fe {} -> {} lines; WGSL exact={} B, \
          reference={} B, perturb={} B, combined={} B; core recurrence={:.1}x, \
          modeled old={} ops, new={} ops including validity + one reference",
-        include_str!("../../../demos/sketches/mandelbrot/src/lib.fe")
-            .lines()
-            .count(),
-        include_str!("../../../demos/sketches/perturbational_mandelbrot/src/lib.fe")
-            .lines()
-            .count(),
+        classic_source.lines().count(),
+        perturb_source.lines().count(),
         classic_bytes,
         compute_bytes,
         fragment_bytes,

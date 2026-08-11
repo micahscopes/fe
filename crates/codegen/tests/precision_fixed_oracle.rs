@@ -113,7 +113,7 @@ fn ref_escaped(mag2: &BigUint, l: usize) -> bool {
 
 /// The escape reference: the identical integer orbit `z <- z^2 + c`, returning
 /// the iteration count (== max_iter for points that never escape).
-fn ref_escape(cx: &Fx, cy: &Fx, max_iter: i32, l: usize) -> i32 {
+fn ref_escape_sample(cx: &Fx, cy: &Fx, max_iter: i32, l: usize) -> (i32, f32) {
     let zero = Fx {
         sign: 0,
         mag: BigUint::from(0u32),
@@ -121,6 +121,7 @@ fn ref_escape(cx: &Fx, cy: &Fx, max_iter: i32, l: usize) -> i32 {
     let mut zx = zero.clone();
     let mut zy = zero.clone();
     let mut count = 0i32;
+    let mut magnitude_squared = 4.0f32;
     let mut done = false;
     let mut i = 0i32;
     while i < max_iter {
@@ -130,6 +131,12 @@ fn ref_escape(cx: &Fx, cy: &Fx, max_iter: i32, l: usize) -> i32 {
             let mag2 = ref_add(&xx, &yy, l).mag;
             if ref_escaped(&mag2, l) {
                 done = true;
+                let integer = (&mag2 >> (13 * (l - 1))).to_u32_digits();
+                let integer = integer.first().copied().unwrap_or(0);
+                let upper_fraction =
+                    ((&mag2 >> (13 * (l - 2))) & BigUint::from(8191u32)).to_u32_digits();
+                let upper_fraction = upper_fraction.first().copied().unwrap_or(0);
+                magnitude_squared = integer as f32 + upper_fraction as f32 / 8192.0;
             } else {
                 let re = ref_sub(&xx, &yy, l);
                 let nzx = ref_add(&re, cx, l);
@@ -143,7 +150,11 @@ fn ref_escape(cx: &Fx, cy: &Fx, max_iter: i32, l: usize) -> i32 {
         }
         i += 1;
     }
-    count
+    (count, magnitude_squared)
+}
+
+fn ref_escape(cx: &Fx, cy: &Fx, max_iter: i32, l: usize) -> i32 {
+    ref_escape_sample(cx, cy, max_iter, l).0
 }
 
 // -------------------------------------------------------------------------
@@ -209,6 +220,26 @@ fn call_i32(
     match results[0] {
         Val::I32(v) => v,
         other => panic!("{name} result must be i32, got {other:?}"),
+    }
+}
+
+fn call_escape_sample(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    name: &str,
+    args: &[i32],
+) -> (i32, f32) {
+    use wasmtime::Val;
+    let f = instance
+        .get_func(&mut *store, name)
+        .unwrap_or_else(|| panic!("`{name}` export should exist"));
+    let vals = args.iter().copied().map(Val::I32).collect::<Vec<_>>();
+    let mut results = [Val::I32(0), Val::F32(0)];
+    f.call(&mut *store, &vals, &mut results)
+        .unwrap_or_else(|e| panic!("{name}(...) should run: {e:?}"));
+    match (&results[0], &results[1]) {
+        (Val::I32(count), Val::F32(bits)) => (*count, f32::from_bits(*bits)),
+        other => panic!("{name} result must be (i32, f32), got {other:?}"),
     }
 }
 
@@ -400,11 +431,20 @@ fn run_escape_for_l(store: &mut wasmtime::Store<()>, instance: &wasmtime::Instan
             params.push(cy.sign as i32);
             params.extend(to_limbs(&cy.mag, l).iter().map(|&x| x as i32));
             params.push(max_iter);
-            let got = call_i32(store, instance, &format!("fixed_escape_l{l}"), &params);
-            let want = ref_escape(cx, cy, max_iter, l);
+            let (got, got_magnitude) = call_escape_sample(
+                store,
+                instance,
+                &format!("fixed_escape_sample_l{l}"),
+                &params,
+            );
+            let (want, want_magnitude) = ref_escape_sample(cx, cy, max_iter, l);
             assert_eq!(
                 got, want,
                 "L{l} escape {name} max_iter={max_iter}: wasm count {got} != reference {want}"
+            );
+            assert_eq!(
+                got_magnitude, want_magnitude,
+                "L{l} escape {name} max_iter={max_iter}: presentation magnitude mismatch"
             );
             n += 1;
         }
@@ -415,7 +455,10 @@ fn run_escape_for_l(store: &mut wasmtime::Store<()>, instance: &wasmtime::Instan
         256,
         "L{l}: antenna c=(-2,0) must never escape (count == max_iter)"
     );
-    eprintln!("  L{l}: {n} escape iteration-count equalities green (incl antenna non-escape).");
+    eprintln!(
+        "  L{l}: {n} escape count + independent 13-bit magnitude equalities green \
+         (incl antenna non-escape)."
+    );
 }
 
 #[test]
@@ -436,8 +479,8 @@ fn fixed_mul_add_sub_sqr_and_escape_match_bigint_reference() {
         run_escape_for_l(&mut store, &instance, l);
     }
     eprintln!(
-        "Fixed<L>::{{mul,add,sub,sqr,escape}} == independent num-bigint fixed-point reference, \
+        "Fixed<L>::{{mul,add,sub,sqr,escape_sample}} == independent num-bigint fixed-point reference, \
          limb-for-limb, at L=2, 4, 6 and 8 (edges, directed rounding ties, wrap, signs, 64 randoms, \
-         escape iteration counts incl the antenna non-escape)."
+         escape iteration counts + presentation magnitudes incl the antenna non-escape)."
     );
 }

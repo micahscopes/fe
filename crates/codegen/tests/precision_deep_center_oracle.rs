@@ -129,10 +129,13 @@ fn deep_center_value(
     if sign == 1 { -mag } else { mag }
 }
 
-/// The demo's own pixel -> `u` map, in f32 (matches `escape`:
-/// `u = (px + 0.5) / res * 2 - 1`).
+/// The demo's own branch-free ordered 2x2 pixel sample -> `u` map, independently
+/// expressed here. Even columns sample at 3/8 and odd columns at 5/8; every
+/// aligned pair has mean offset 1/2 without asking the exact orbit for a second
+/// sample.
 fn pixel_offset_x(px: i32, zoom: f32) -> f32 {
-    let u = (px as f32 + 0.5) / RES * 2.0 - 1.0;
+    let offset = if px % 2 == 0 { 3.0 / 8.0 } else { 5.0 / 8.0 };
+    let u = (px as f32 + offset) / RES * 2.0 - 1.0;
     u * zoom
 }
 

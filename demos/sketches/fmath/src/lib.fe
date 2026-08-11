@@ -133,6 +133,52 @@ pub fn smoothstep(_ edge0: f32, _ edge1: f32, _ x: f32) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
+// Sampling
+// ---------------------------------------------------------------------------
+
+/// A continuous sample position inside the integer pixel `(px, py)`.
+///
+/// `ordered_2x2` places one sample in each quarter of every 2x2 pixel block.
+/// The four offsets average to the pixel centre, but no sample sits on the
+/// centre-aligned lattice that makes thin, rotated boundaries stair-step in
+/// lockstep. It is deliberately ONE sample per pixel: expensive implicit
+/// surfaces and deep fractals gain spatially stratified refinement without
+/// multiplying their dominant orbit/ray-march loop. The construction is
+/// branch-free and contains no renderer-specific quality or LoD policy.
+pub struct PixelSample {
+    pub x: f32,
+    pub y: f32,
+}
+
+/// The normalized `[-1, 1]` plane coordinate for a pixel sample, with y up.
+pub struct PlaneSample {
+    pub u: f32,
+    pub v: f32,
+}
+
+impl PixelSample {
+    /// One ordered, stratified sample per pixel. Even coordinates use 3/8 and
+    /// odd coordinates use 5/8, so every aligned 2x2 block contains all four
+    /// subpixel quadrants and has centroid `(0.5, 0.5)`.
+    pub fn ordered_2x2(_ px: i32, _ py: i32) -> Self {
+        let x_parity: i32 = px & 1
+        let y_parity: i32 = py & 1
+        Self {
+            x: from_i32(px) + 0.375 + 0.25 * from_i32(x_parity),
+            y: from_i32(py) + 0.375 + 0.25 * from_i32(y_parity),
+        }
+    }
+
+    /// Map this sample to the conventional square fragment plane.
+    pub fn plane(self, _ resolution: f32) -> PlaneSample {
+        PlaneSample {
+            u: self.x / resolution * 2.0 - 1.0,
+            v: 1.0 - self.y / resolution * 2.0,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Periodic functions
 //
 // There is no libm, and that is the interesting part rather than a limitation:
@@ -184,4 +230,14 @@ pub fn palette(_ t: f32, _ phase_r: f32, _ phase_g: f32, _ phase_b: f32) -> i32 
         0.5 + 0.5 * cos(TAU * (t + phase_g)),
         0.5 + 0.5 * cos(TAU * (t + phase_b)),
     )
+}
+
+/// Shared escape-time coloring for the Mandelbrot family. The escape-radius
+/// overshoot supplies a continuous fraction of one iteration, removing the
+/// integer-count bands without a logarithm intrinsic or another orbit sample.
+/// `magnitude_squared` is the first finite `|z|^2 > 4` value.
+pub fn escape_palette(_ iterations: i32, _ magnitude_squared: f32) -> i32 {
+    let smooth_iterations: f32 =
+        from_i32(iterations) + 4.0 / magnitude_squared
+    palette(smooth_iterations / 256.0, 0.0, 0.33, 0.67)
 }

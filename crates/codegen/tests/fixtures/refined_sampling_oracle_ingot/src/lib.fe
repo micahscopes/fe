@@ -1,0 +1,21 @@
+//! Thin Wasm-executable surface over the real shared Fe sampling construction.
+//! The independent Rust gate supplies the expected geometry; this fixture does
+//! not carry a second sampling implementation.
+
+use fmath::PixelSample
+
+pub fn ordered_sample_x(_ px: i32, _ py: i32) -> f32 {
+    PixelSample::ordered_2x2(px, py).x
+}
+
+pub fn ordered_sample_y(_ px: i32, _ py: i32) -> f32 {
+    PixelSample::ordered_2x2(px, py).y
+}
+
+pub fn ordered_plane_u(_ px: i32, _ py: i32, _ resolution: f32) -> f32 {
+    PixelSample::ordered_2x2(px, py).plane(resolution).u
+}
+
+pub fn ordered_plane_v(_ px: i32, _ py: i32, _ resolution: f32) -> f32 {
+    PixelSample::ordered_2x2(px, py).plane(resolution).v
+}

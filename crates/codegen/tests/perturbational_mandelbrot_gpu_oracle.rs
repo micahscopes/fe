@@ -209,13 +209,19 @@ fn adaptive_iteration_limit(zoom: f32) -> u32 {
     (256 + depth * 64).min(2000)
 }
 
+/// Independent statement of the production pattern's geometry. This is an
+/// oracle over semantic sample positions, not a generated-source/byte match.
+fn ordered_sample_coordinate(pixel: u32) -> f32 {
+    pixel as f32 + if pixel % 2 == 0 { 3.0 / 8.0 } else { 5.0 / 8.0 }
+}
+
 /// Exact Fixed<8> classification for the same four-word center and f32 pixel
 /// offset consumed by the production graph. This is intentionally a separate
 /// BigInt recurrence, not a Rust translation of perturbation arithmetic.
 fn exact_fixed8_pixel_escapes(values: &[f32; 10], px: u32, py: u32) -> bool {
     let res = values[9];
-    let u = (px as f32 + 0.5) / res * 2.0 - 1.0;
-    let v = 1.0 - (py as f32 + 0.5) / res * 2.0;
+    let u = ordered_sample_coordinate(px) / res * 2.0 - 1.0;
+    let v = 1.0 - ordered_sample_coordinate(py) / res * 2.0;
     let cx = fixed8_coordinate(&values[0..4], u * values[8]);
     let cy = fixed8_coordinate(&values[4..8], v * values[8]);
     let mut zx = BigInt::from(0u32);
@@ -599,8 +605,8 @@ fn perturbation_graph_executes_reference_before_pixels_and_exposes_glitches() {
     // zoom places the first iterate just above the escape boundary and inside
     // the shader's explicit ambiguity band. Only those four symmetric samples
     // are deliberately ambiguous.
-    let boundary = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.6162442, 8.0];
-    let corner_delta = -0.875f32 * boundary[8];
+    let boundary = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.5605116, 8.0];
+    let corner_delta = -0.90625f32 * boundary[8];
     let corner_magnitude = corner_delta * corner_delta + corner_delta * corner_delta;
     assert!(
         corner_magnitude > 4.0

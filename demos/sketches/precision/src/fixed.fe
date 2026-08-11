@@ -75,6 +75,18 @@ impl<T: OrLower + Copy> OrLower for LimbMore<T> {
     fn or_lower(self) -> u32 { self.lead | self.tail.or_lower() }
 }
 
+/// The highest fractional limb (the limb immediately below the integer limb).
+/// `Fixed<L>` is used with `L >= 2`, so the base case is exactly two limbs.
+/// This view makes a cheap 13-bit color projection possible without invoking
+/// the full correctly-rounded binary32 conversion used for reference storage.
+pub trait UpperFraction { fn upper_fraction(self) -> u32 }
+impl UpperFraction for LimbMore<LimbLast> {
+    fn upper_fraction(self) -> u32 { self.lead }
+}
+impl<T: UpperFraction + Copy> UpperFraction for LimbMore<T> {
+    fn upper_fraction(self) -> u32 { self.tail.upper_fraction() }
+}
+
 /// Ripple-add a scalar carry into the low limb and propagate: `t + carry_in`
 /// per limb, returning the updated limbs and the carry out of the top. This is
 /// `Mac` with a zero `x`; given its own trait so no zero chain is materialized.
@@ -573,6 +585,26 @@ pub fn escaped<const L: usize>(_ v: Limbs<L>) -> u32
     }
 }
 
+/// A Mandelbrot escape result with enough radius information for continuous
+/// coloring. The exact orbit/classification remains wholly fixed-point;
+/// `magnitude_squared` is only a one-way presentation projection made after
+/// escape. Its top fractional limb gives absolute error below 2^-13, far more
+/// than an RGBA8 palette can reveal and much cheaper than full binary32
+/// rounding at every precision tier.
+pub struct EscapeSample {
+    pub iterations: i32,
+    pub magnitude_squared: f32,
+}
+
+fn presentation_f32<const L: usize>(_ mag: Limbs<L>) -> f32
+    where Limbs<L>: Top + UpperFraction + Copy,
+{
+    let integer_word: i32 = __bitcast(<Limbs<L> as Top>::top(mag))
+    let fractional_word: i32 =
+        __bitcast(<Limbs<L> as UpperFraction>::upper_fraction(mag))
+    __f32_from_i32(integer_word) + __f32_from_i32(fractional_word) / 8192.0
+}
+
 /// Check one `Fixed<8>` reference value and, when it has not escaped, advance
 /// it by one exact recurrence step. `Fixed<8>` is the declared reference
 /// precision; every operation below is still the general `Fixed<L>` form
@@ -600,15 +632,17 @@ pub fn mandelbrot_advance8(
 }
 
 /// One escape-time sample at fixed-point coordinate `(cx, cy)`, returning the
-/// iteration count. The `Expansion<2>` mandelbrot loop's exact shape, with
+/// iteration count and first escaped magnitude. The `Expansion<2>` mandelbrot
+/// loop's exact shape, with
 /// `Fixed<L>` integer ops in place of the df64 float ops: freeze the orbit with
 /// a `done` flag after escape (so the count is preserved and no early return
 /// from the loop is needed), fixed trip count, no `bool`, no `&&`.
-pub fn escape<const L: usize>(
+pub fn escape_sample<const L: usize>(
     _ cx_s: u32, _ cx: Limbs<L>, _ cy_s: u32, _ cy: Limbs<L>, _ max_iter: i32,
-) -> i32
+) -> EscapeSample
     where Limbs<L>: TruncRows<Limbs<L>> + Mac + ShiftAppend + Head + Carry
-                  + Zero + SubBorrow + Select + Top + OrLower + Copy,
+                  + Zero + SubBorrow + Select + Top + OrLower + UpperFraction
+                  + Copy,
 {
     let mut zx_s: u32 = 0
     let mut zx: Limbs<L> = <Limbs<L> as Zero>::zero()
@@ -616,6 +650,7 @@ pub fn escape<const L: usize>(
     let mut zy: Limbs<L> = <Limbs<L> as Zero>::zero()
     let mut count: i32 = 0
     let mut done: i32 = 0
+    let mut magnitude_squared: f32 = 4.0
     let mut i: i32 = 0
     while i < max_iter {
         if done == 0 {
@@ -624,6 +659,7 @@ pub fn escape<const L: usize>(
             let (_mag_s, mag2) = add<Limbs<L>>(xx_s, xx, yy_s, yy)
             if escaped<L>(mag2) == 1 {
                 done = 1
+                magnitude_squared = presentation_f32<L>(mag2)
             } else {
                 let (re_s, re) = sub<Limbs<L>>(xx_s, xx, yy_s, yy)
                 let (nzx_s, nzx) = add<Limbs<L>>(re_s, re, cx_s, cx)
@@ -639,5 +675,20 @@ pub fn escape<const L: usize>(
         }
         i = i + 1
     }
-    count
+    EscapeSample {
+        iterations: count,
+        magnitude_squared: magnitude_squared,
+    }
+}
+
+/// Compatibility projection for fixed-point arithmetic oracles that need only
+/// the exact iteration count. The optimizer discards the presentation field.
+pub fn escape<const L: usize>(
+    _ cx_s: u32, _ cx: Limbs<L>, _ cy_s: u32, _ cy: Limbs<L>, _ max_iter: i32,
+) -> i32
+    where Limbs<L>: TruncRows<Limbs<L>> + Mac + ShiftAppend + Head + Carry
+                  + Zero + SubBorrow + Select + Top + OrLower + UpperFraction
+                  + Copy,
+{
+    escape_sample<L>(cx_s, cx, cy_s, cy, max_iter).iterations
 }
