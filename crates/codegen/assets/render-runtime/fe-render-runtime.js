@@ -372,6 +372,8 @@ export class FeSurfaceElement extends HTMLElement {
     this._controlKernel = null; // the resolved wasm control export, or null (no gestures).
     this._surfaceTransitionKernel = null; // typed Fe SurfaceEvent ABI, discovered from Wasm.
     this._surfaceTransitionSchedule = "immediate";
+    this._surfaceTransitionStateResident = false;
+    this._surfaceStateReplaceKernel = null;
     this._surfaceTransitionMemory = null;
     this._surfaceTransitionAlloc = null;
     this._surfaceEventBufferPtr = 0;
@@ -563,9 +565,13 @@ export class FeSurfaceElement extends HTMLElement {
       this._controlKernel = null;
       this._surfaceTransitionMemory = null;
       this._surfaceTransitionAlloc = null;
+      this._surfaceTransitionStateResident = false;
+      this._surfaceStateReplaceKernel = null;
       this._surfaceEventBufferPtr = 0;
       this._surfaceEventBufferCapacity = 0;
-      const latestPerFrame =
+      const residentLatestPerFrame =
+        instance?.exports.fe_surface_transition_latest_per_frame_v3 ?? null;
+      const latestPerFrame = residentLatestPerFrame ??
         instance?.exports.fe_surface_transition_latest_per_frame_v2 ?? null;
       this._surfaceTransitionKernel = typeof latestPerFrame === "function"
         ? latestPerFrame
@@ -576,6 +582,17 @@ export class FeSurfaceElement extends HTMLElement {
       if (typeof this._surfaceTransitionKernel !== "function") {
         this._surfaceTransitionKernel = null;
         this._surfaceTransitionSchedule = "immediate";
+      }
+      this._surfaceTransitionStateResident =
+        typeof residentLatestPerFrame === "function";
+      if (this._surfaceTransitionStateResident) {
+        const replaceState = instance?.exports.fe_surface_state_replace_v1;
+        if (typeof replaceState !== "function") {
+          throw new Error(
+            "fe render runtime: resident surface transition is missing its fixed state replacement export",
+          );
+        }
+        this._surfaceStateReplaceKernel = replaceState;
       }
       if (this._surfaceTransitionSchedule === "latest_per_frame") {
         const memory = instance?.exports.memory;
@@ -1027,7 +1044,9 @@ export class FeSurfaceElement extends HTMLElement {
     const { width, height } = this._computeBackingExtent();
     this._backingWidth = width;
     this._backingHeight = height;
-    this._uniforms = withExtentUniforms(this._members, this._surface, this._uniforms, width, height);
+    this._replaceSurfaceState(
+      withExtentUniforms(this._members, this._surface, this._uniforms, width, height),
+    );
     this._applyExtentAndFilter(width, height);
 
     const gpu = await this._ensurePipeline();
@@ -1241,10 +1260,10 @@ export class FeSurfaceElement extends HTMLElement {
   // -- render (param write path: sliders, `.params`, gestures in R3) -------
 
   _render(next) {
-    if (next) this._uniforms = next;
+    if (next) this._replaceSurfaceState(next);
     if (this._fsm !== "live") {
-      // Held (courier) state still updates while not presenting (section
-      // 5.2/11.4); no GPU/CPU work is spent while hidden or not yet live.
+      // The resident actor plus its presentation mirror still update while
+      // hidden; no GPU/CPU presentation work is spent until it becomes live.
       this._refreshControlValues();
       return;
     }
@@ -1363,6 +1382,8 @@ export class FeSurfaceElement extends HTMLElement {
     this._surfaceEventBufferCapacity = 0;
     this._surfaceTransitionMemory = null;
     this._surfaceTransitionAlloc = null;
+    this._surfaceStateReplaceKernel = null;
+    this._surfaceTransitionStateResident = false;
     if (this._liveContext) {
       try {
         this._liveContext.unconfigure();
@@ -1572,6 +1593,26 @@ export class FeSurfaceElement extends HTMLElement {
     return actorArgs;
   }
 
+  _surfaceResourceArgs() {
+    const actorArgStart = 1 + Math.max(-1, ...this._builtins.map((builtin) => builtin.arg_index));
+    const actorArgEnd = actorArgStart + this._members.length + this._resources.length;
+    const resourceArgs = [];
+    for (let argIndex = actorArgStart; argIndex < actorArgEnd; argIndex += 1) {
+      if (!this._memberIndexByArg.has(argIndex)) resourceArgs.push(0n);
+    }
+    return resourceArgs;
+  }
+
+  /** Seed or explicitly replace the complete state of a resident Fe actor.
+   * This is an external-boundary operation (initial extent, resize, slider,
+   * or `.params` edit), never the frame-to-frame transition path. */
+  _replaceSurfaceState(next) {
+    this._uniforms = next;
+    if (this._surfaceStateReplaceKernel) {
+      this._surfaceStateReplaceKernel(...next);
+    }
+  }
+
   _runSurfaceFrame(events) {
     if (events.length === 0 || events.length > MAX_SURFACE_EVENT_BATCH) {
       throw new Error(`fe render runtime: invalid surface event batch length ${events.length}`);
@@ -1594,7 +1635,9 @@ export class FeSurfaceElement extends HTMLElement {
     const reply = this._surfaceTransitionKernel(
       this._surfaceEventBufferPtr,
       events.length,
-      ...this._surfaceActorArgs(),
+      ...(this._surfaceTransitionStateResident
+        ? this._surfaceResourceArgs()
+        : this._surfaceActorArgs()),
     );
     return this._surfaceReply(reply);
   }
@@ -1606,6 +1649,8 @@ export class FeSurfaceElement extends HTMLElement {
         `[fe web] typed surface transition returned ${next.length} fields; expected ${this._uniforms.length}`,
       );
       this._surfaceTransitionKernel = null;
+      this._surfaceStateReplaceKernel = null;
+      this._surfaceTransitionStateResident = false;
       this._surfaceTransitionSchedule = "immediate";
       this._pendingSurfaceEvents = [];
       return null;
@@ -1664,7 +1709,10 @@ export class FeSurfaceElement extends HTMLElement {
     const feResponsibilities = provenance.fe_responsibilities || [];
     const feControl = feResponsibilities.includes("control_transition");
     const feSchedule = feResponsibilities.includes("scheduling_policy");
-    const wasmRoles = feControl ? ` + control${feSchedule ? "/schedule" : ""} Wasm` : "";
+    const feState = feResponsibilities.includes("resident_actor_state");
+    const wasmRoles = feControl
+      ? ` + control${feSchedule ? "/schedule" : ""}${feState ? "/state" : ""} Wasm`
+      : "";
     this._badge.textContent = this._mode === "webgpu"
       ? `Fe WGSL${wasmRoles} · fixed JS host`
       : "Fe Wasm renderer · fixed JS host";

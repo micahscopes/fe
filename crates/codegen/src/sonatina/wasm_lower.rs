@@ -53,10 +53,13 @@ use mir::{
     ScalarRepr,
 };
 use rustc_hash::FxHashMap;
+#[cfg(feature = "sonatina-indirect-calls")]
+use sonatina_ir::inst::{control_flow::CallIndirect, data::GetFunctionPtr};
 use sonatina_ir::{
-    BlockId, Immediate, Linkage, Module, Signature, Type, ValueId,
+    BlockId, GlobalVariableData, Immediate, Linkage, Module, Signature, Type, ValueId,
     builder::{FunctionBuilder, ModuleBuilder, Variable},
     func_cursor::InstInserter,
+    global_variable::GvInitializer,
     inst::{
         arith::{
             Add, Fabs, Fadd, Fceil, Fclamp, Fdiv, Ffloor, Fmax, FmaxRelaxed, Fmin, FminRelaxed,
@@ -71,12 +74,6 @@ use sonatina_ir::{
     },
     isa::{Isa, wasm32::Wasm32},
     module::{FuncRef, ModuleCtx},
-};
-#[cfg(feature = "sonatina-indirect-calls")]
-use sonatina_ir::{
-    GlobalVariableData,
-    global_variable::GvInitializer,
-    inst::{control_flow::CallIndirect, data::GetFunctionPtr},
 };
 use sonatina_triple::{Architecture, OperatingSystem, TargetTriple, Vendor};
 
@@ -2872,7 +2869,10 @@ where
     /// linear memory and calls this wrapper once per presentation opportunity.
     /// Coalescing executes here in the generated Wasm module: movement and
     /// wheel deltas accumulate while every other fact comes from the newest
-    /// record. The wrapper then calls the authored Fe transition exactly once.
+    /// record. Complete actor state persists in private Wasm globals; only
+    /// inert external resource slots remain wrapper arguments. The wrapper
+    /// then calls the authored Fe transition exactly once and commits its full
+    /// reply before returning a presentation snapshot to the browser.
     fn synthesize_surface_frame(
         &mut self,
         frame: &super::WasmSurfaceFrame,
@@ -2921,8 +2921,92 @@ where
             )));
         }
 
+        let actor_tys = &callee_args[EVENT_FIELDS..];
+        if actor_tys.len() != frame.actor_param_is_resource.len() {
+            return Err(LowerError::Unsupported(format!(
+                "surface frame `{}` has {} flattened actor arguments but its resource mask has {} entries",
+                frame.source,
+                actor_tys.len(),
+                frame.actor_param_is_resource.len()
+            )));
+        }
+        let state_tys = actor_tys
+            .iter()
+            .zip(&frame.actor_param_is_resource)
+            .filter_map(|(ty, is_resource)| (!is_resource).then_some(*ty))
+            .collect::<Vec<_>>();
+        if state_tys != result_tys {
+            return Err(LowerError::Unsupported(format!(
+                "surface frame `{}` must return the complete flattened non-resource actor state: arguments {state_tys:?}, results {result_tys:?}",
+                frame.source
+            )));
+        }
+
+        let state_globals = result_tys
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| {
+                self.builder.declare_gv(GlobalVariableData::new(
+                    format!("__fe_surface_state_v1_{index}"),
+                    *ty,
+                    Linkage::Private,
+                    false,
+                    None,
+                ))
+            })
+            .collect::<Vec<_>>();
+        let state_initialized = self.builder.declare_gv(GlobalVariableData::new(
+            "__fe_surface_state_v1_initialized".to_owned(),
+            Type::I32,
+            Linkage::Private,
+            false,
+            Some(GvInitializer::make_imm(0i32)),
+        ));
+
+        let state_replace = self
+            .builder
+            .declare_function(Signature::new(
+                &frame.state_replace_export,
+                Linkage::Public,
+                &result_tys,
+                &[],
+            ))
+            .map_err(|error| {
+                LowerError::Internal(format!(
+                    "failed to declare surface state replacement `{}`: {error}",
+                    frame.state_replace_export
+                ))
+            })?;
+        {
+            let is = self.isa.inst_set();
+            let mut fb = self.builder.func_builder::<InstInserter>(state_replace);
+            let entry = fb.append_block();
+            fb.switch_to_block(entry);
+            let values = fb.args().to_vec();
+            for ((global, ty), value) in state_globals
+                .iter()
+                .copied()
+                .zip(result_tys.iter().copied())
+                .zip(values)
+            {
+                let address = fb.make_global_value(global);
+                fb.insert_inst_no_result(Mstore::new(is, address, value, ty));
+            }
+            let initialized_address = fb.make_global_value(state_initialized);
+            let one = fb.make_imm_value(Immediate::I32(1));
+            fb.insert_inst_no_result(Mstore::new(is, initialized_address, one, Type::I32));
+            fb.insert_inst_no_result(Return::new_unit(is));
+            fb.seal_all();
+            fb.finish();
+        }
+
         let mut wrapper_args = vec![Type::I32, Type::I32];
-        wrapper_args.extend_from_slice(&callee_args[EVENT_FIELDS..]);
+        wrapper_args.extend(
+            actor_tys
+                .iter()
+                .zip(&frame.actor_param_is_resource)
+                .filter_map(|(ty, is_resource)| is_resource.then_some(*ty)),
+        );
         let wrapper = self
             .builder
             .declare_function(Signature::new(
@@ -2952,7 +3036,14 @@ where
         let event_count = wrapper_values[1];
         let zero = fb.make_imm_value(Immediate::I32(0));
         let has_events = fb.insert_inst(Lt::new(is, zero, event_count), Type::I1);
-        fb.insert_inst_no_result(Br::new(is, has_events, initialize, invalid));
+        let initialized_address = fb.make_global_value(state_initialized);
+        let initialized_value =
+            fb.insert_inst(Mload::new(is, initialized_address, Type::I32), Type::I32);
+        let initialized_one = fb.make_imm_value(Immediate::I32(1));
+        let initialized =
+            fb.insert_inst(CmpEq::new(is, initialized_value, initialized_one), Type::I1);
+        let ready = fb.insert_inst(And::new(is, has_events, initialized), Type::I1);
+        fb.insert_inst_no_result(Br::new(is, ready, initialize, invalid));
 
         fb.switch_to_block(invalid);
         fb.insert_inst_no_result(Unreachable::new(is));
@@ -3014,12 +3105,34 @@ where
         fb.switch_to_block(done);
         let mut args = smallvec1::SmallVec::<[ValueId; 8]>::new();
         args.extend(coalesced);
-        args.extend_from_slice(&wrapper_values[2..]);
+        let mut resource_index = 2usize;
+        let mut state_index = 0usize;
+        for is_resource in &frame.actor_param_is_resource {
+            if *is_resource {
+                args.push(wrapper_values[resource_index]);
+                resource_index += 1;
+            } else {
+                let global = state_globals[state_index];
+                let ty = result_tys[state_index];
+                let address = fb.make_global_value(global);
+                args.push(fb.insert_inst(Mload::new(is, address, ty), ty));
+                state_index += 1;
+            }
+        }
         let results = fb.insert_call_results(*callee, args);
         if results.len() != result_tys.len() {
             return Err(LowerError::Internal(
                 "surface frame call result arity changed after signature inspection".to_owned(),
             ));
+        }
+        for ((global, ty), value) in state_globals
+            .iter()
+            .copied()
+            .zip(result_tys.iter().copied())
+            .zip(results.iter().copied())
+        {
+            let address = fb.make_global_value(global);
+            fb.insert_inst_no_result(Mstore::new(is, address, value, ty));
         }
         fb.insert_return_values(&results);
         fb.seal_all();

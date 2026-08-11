@@ -98,7 +98,7 @@ fn assert_scheduled_typed_surface(bundle: &WebBundle) {
     assert!(
         exports
             .iter()
-            .any(|name| name == "fe_surface_transition_latest_per_frame_v2"),
+            .any(|name| name == "fe_surface_transition_latest_per_frame_v3"),
         "the Fe-declared latest-per-frame transition must use its fixed host ABI"
     );
     assert!(
@@ -116,6 +116,18 @@ fn assert_scheduled_typed_surface(bundle: &WebBundle) {
     assert!(exports.iter().any(|name| name == "fe_cabi_alloc"));
     assert!(exports.iter().any(|name| name == "fe_cabi_reset"));
     assert!(
+        exports
+            .iter()
+            .any(|name| name == "fe_surface_state_replace_v1"),
+        "a resident actor must expose its fixed complete-state replacement boundary"
+    );
+    assert!(
+        !exports
+            .iter()
+            .any(|name| name == "fe_surface_transition_latest_per_frame_v2"),
+        "the JavaScript-state-courier v2 ABI must be absent"
+    );
+    assert!(
         !exports.iter().any(|name| name == "navigate"),
         "an ordinary Fe behavior name must not leak into the host ABI"
     );
@@ -129,6 +141,13 @@ fn assert_scheduled_typed_surface(bundle: &WebBundle) {
             .provenance
             .fe_responsibilities
             .contains(&WebFeResponsibility::SchedulingPolicy)
+    );
+    assert!(
+        bundle
+            .manifest
+            .provenance
+            .fe_responsibilities
+            .contains(&WebFeResponsibility::ResidentActorState)
     );
     assert!(
         bundle
@@ -199,10 +218,10 @@ fn write_surface_event_batch(
         .expect("write raw SurfaceEvent batch");
 }
 
-/// Execute the fixed surface ABI used by the four scalar-state gallery actors.
-/// The mixed event facts precede the complete actor state, exactly as the
-/// browser host supplies them; a four-value reply proves that `res` is no
-/// longer retained through the legacy leading-subset convention.
+/// Execute the fixed resident surface ABI used by the four scalar-state
+/// gallery actors. The browser seeds complete state once; the frame call then
+/// carries only a raw event batch. A four-value reply is a presentation
+/// snapshot, while the same values also remain resident in the Wasm instance.
 fn call_four_state_transition(
     bundle: &WebBundle,
     delta_x: f32,
@@ -243,8 +262,11 @@ fn call_four_state_batch(
     let mut store = wasmtime::Store::new(&engine, ());
     let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("control instance");
     let transition = instance
-        .get_func(&mut store, "fe_surface_transition_latest_per_frame_v2")
+        .get_func(&mut store, "fe_surface_transition_latest_per_frame_v3")
         .expect("scheduled typed surface transition export");
+    let replace_state = instance
+        .get_func(&mut store, "fe_surface_state_replace_v1")
+        .expect("resident surface state replacement export");
     let memory = instance
         .get_memory(&mut store, "memory")
         .expect("scheduled transition exports linear memory");
@@ -255,15 +277,24 @@ fn call_four_state_batch(
         .call(&mut store, ((events.len() * 40) as i32, 4))
         .expect("allocate raw SurfaceEvent batch") as usize;
     write_surface_event_batch(&memory, &mut store, event_pointer, events);
-    let mut values = vec![
+    let values = [
         wasmtime::Val::I32(event_pointer as i32),
         wasmtime::Val::I32(events.len() as i32),
     ];
-    values.extend(
-        state
-            .iter()
-            .map(|value| wasmtime::Val::F32(value.to_bits())),
+    let mut uninitialized_results = [wasmtime::Val::F32(0); 4];
+    assert!(
+        transition
+            .call(&mut store, &values, &mut uninitialized_results)
+            .is_err(),
+        "a resident frame must fail closed before complete state is seeded"
     );
+    let state_values = state
+        .iter()
+        .map(|value| wasmtime::Val::F32(value.to_bits()))
+        .collect::<Vec<_>>();
+    replace_state
+        .call(&mut store, &state_values, &mut [])
+        .expect("seed complete resident Fe state");
     let mut results = [wasmtime::Val::F32(0); 4];
     transition
         .call(&mut store, &values, &mut results)
@@ -540,12 +571,13 @@ fn rollcall_pipeline_pass_graph_compiles_with_external_resources_and_private_mem
 fn perturbational_mandelbrot_graph_compiles() {
     let bundle = compile_actor_ingot("demos/sketches/perturbational_mandelbrot");
     wasmparser::validate(&bundle.wasm).expect("the Fe control lane must be valid Wasm");
+    assert_scheduled_typed_surface(&bundle);
     assert_initial_zoom(&bundle, 1.0);
     let exports = wasm_function_export_names(&bundle.wasm);
     assert!(
         exports
             .iter()
-            .any(|name| name == "fe_surface_transition_latest_per_frame_v2"),
+            .any(|name| name == "fe_surface_transition_latest_per_frame_v3"),
         "the Fe-declared latest-per-frame transition must use its fixed, versioned host ABI"
     );
     assert!(
@@ -599,10 +631,10 @@ fn perturbational_mandelbrot_graph_compiles() {
         "typed control discovery must not recreate a JSON manifest protocol"
     );
 
-    // The pass graph's transition includes one inert i64 orbit handle between
-    // the fixed event record and its ten non-resource state fields. Execute a
-    // deterministic mixed event tape to prove that resource-bearing actors use
-    // the same Fe state policy and fixed host ABI as the brute renderer.
+    // The pass graph's frame transition carries one inert i64 orbit handle,
+    // while all ten non-resource fields stay resident. Execute a deterministic
+    // mixed event tape after one state seed to prove that resource-bearing
+    // actors use the same Fe state policy and fixed ABI as the brute renderer.
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, &bundle.wasm)
         .expect("wasmtime should load the perturbational control module");
@@ -610,8 +642,11 @@ fn perturbational_mandelbrot_graph_compiles() {
     let instance = wasmtime::Instance::new(&mut store, &module, &[])
         .expect("wasmtime should instantiate perturbational control");
     let transition = instance
-        .get_func(&mut store, "fe_surface_transition_latest_per_frame_v2")
+        .get_func(&mut store, "fe_surface_transition_latest_per_frame_v3")
         .expect("typed perturbational surface transition export");
+    let replace_state = instance
+        .get_func(&mut store, "fe_surface_state_replace_v1")
+        .expect("perturbational resident state replacement export");
     let memory = instance
         .get_memory(&mut store, "memory")
         .expect("scheduled perturbational transition exports linear memory");
@@ -625,6 +660,15 @@ fn perturbational_mandelbrot_graph_compiles() {
     let mut cy = [0.13182591f32, -4.8132045e-9, 2.5e-16, 1.5e-23];
     let mut zoom = 1.0f32;
     let res = MANDELBROT_RES;
+    let initial_state = [
+        cx[0], cx[1], cx[2], cx[3], cy[0], cy[1], cy[2], cy[3], zoom, res,
+    ]
+    .into_iter()
+    .map(|value| wasmtime::Val::F32(value.to_bits()))
+    .collect::<Vec<_>>();
+    replace_state
+        .call(&mut store, &initial_state, &mut [])
+        .expect("seed perturbational resident state once");
     let events = [
         (12.0f32, -7.0f32, 0.0f32, 128.0f32, 300.0f32),
         (0.0, 0.0, -37.25, 401.0, 91.0),
@@ -652,18 +696,11 @@ fn perturbational_mandelbrot_graph_compiles() {
                 height: res,
             }],
         );
-        let mut vals = vec![
+        let vals = [
             wasmtime::Val::I32(event_pointer as i32),
             wasmtime::Val::I32(1),
             wasmtime::Val::I64(0),
         ];
-        vals.extend(
-            [
-                cx[0], cx[1], cx[2], cx[3], cy[0], cy[1], cy[2], cy[3], zoom, res,
-            ]
-            .iter()
-            .map(|value| wasmtime::Val::F32(value.to_bits())),
-        );
         transition
             .call(&mut store, &vals, &mut results)
             .expect("perturbational typed transition should run");
@@ -883,6 +920,7 @@ fn mandelbrot_sketch_compiles() {
     let bundle = compile_actor_ingot("demos/sketches/mandelbrot");
     assert_browser_wgsl(&bundle.wgsl);
     wasmparser::validate(&bundle.wasm).expect("mandelbrot sketch wasm should be valid");
+    assert_scheduled_typed_surface(&bundle);
     assert_initial_zoom(&bundle, 1.0);
 
     // The render entry MUST be exported under its BARE source name, matching
@@ -923,7 +961,8 @@ fn wasm_function_export_names(wasm: &[u8]) -> Vec<String> {
 // Typed surface transition (mandelbrot): the gallery actor's `navigate`
 // behavior is compiled under one fixed, versioned Wasm export. Fe owns pan
 // sensitivity, raw-wheel interpretation, the zoom curve, cursor anchoring,
-// clamps, and complete state replacement; JS transports raw event facts.
+// clamps, complete state transitions, and resident state; JS transports raw
+// event facts and retains returned values only as a presentation mirror.
 //
 // Gate: there is deliberately NO manifest control section, and the
 // wasmtime-executed fixed export matches an oracle over a seeded synthetic
@@ -1124,7 +1163,7 @@ fn mandelbrot_typed_surface_abi_is_manifest_free() {
     assert!(
         exports
             .iter()
-            .any(|name| name == "fe_surface_transition_latest_per_frame_v2")
+            .any(|name| name == "fe_surface_transition_latest_per_frame_v3")
     );
     assert!(
         !exports
@@ -1144,9 +1183,10 @@ fn mandelbrot_typed_surface_abi_is_manifest_free() {
     assert!(
         !wasm_function_export_names(&plain.wasm).iter().any(|name| {
             name == "fe_surface_transition_v1"
-                || name == "fe_surface_transition_latest_per_frame_v2"
+                || name == "fe_surface_transition_latest_per_frame_v3"
+                || name == "fe_surface_state_replace_v1"
         }),
-        "a non-interactive sketch must not acquire a typed transition export"
+        "a non-interactive sketch must not acquire typed transition/state exports"
     );
 }
 
@@ -1180,12 +1220,15 @@ fn mandelbrot_typed_surface_transition_matches_oracle_over_event_tape() {
     let mut store = wasmtime::Store::new(&engine, ());
     let instance = wasmtime::Instance::new(&mut store, &module, &[])
         .expect("wasmtime should instantiate the mandelbrot sketch wasm");
-    // The fixed scheduled ABI is `(event_pointer, event_count)`, then ten actor
-    // state f32s, returning the complete ten-f32 state. Raw event records are
-    // transported through exported memory and coalesced inside generated Wasm.
+    // The fixed scheduled ABI is `(event_pointer, event_count)` and returns a
+    // complete ten-f32 presentation snapshot. State is seeded once through the
+    // companion export, then persists inside generated Wasm across the tape.
     let transition = instance
-        .get_func(&mut store, "fe_surface_transition_latest_per_frame_v2")
+        .get_func(&mut store, "fe_surface_transition_latest_per_frame_v3")
         .expect("typed surface transition export");
+    let replace_state = instance
+        .get_func(&mut store, "fe_surface_state_replace_v1")
+        .expect("resident surface state replacement export");
     let memory = instance
         .get_memory(&mut store, "memory")
         .expect("scheduled transition exports linear memory");
@@ -1204,6 +1247,15 @@ fn mandelbrot_typed_surface_transition_matches_oracle_over_event_tape() {
     let mut zoom = 1.5f32;
     let res = MANDELBROT_RES;
     let mut results = vec![wasmtime::Val::F32(0); 10];
+    let initial_state = [
+        cx[0], cx[1], cx[2], cx[3], cy[0], cy[1], cy[2], cy[3], zoom, res,
+    ]
+    .into_iter()
+    .map(|value| wasmtime::Val::F32(value.to_bits()))
+    .collect::<Vec<_>>();
+    replace_state
+        .call(&mut store, &initial_state, &mut [])
+        .expect("seed Mandelbrot resident state exactly once");
 
     let mut s: u64 = 0x5EED_1234_CAFE_F00D;
     let (mut hit_cx_lo, mut hit_cx_hi, mut hit_cy_lo, mut hit_cy_hi) = (0u32, 0u32, 0u32, 0u32);
@@ -1257,18 +1309,11 @@ fn mandelbrot_typed_surface_transition_matches_oracle_over_event_tape() {
                 height: res,
             }],
         );
-        // Fixed batch pointer/count followed by actor declaration order.
-        let mut vals = vec![
+        // Fixed batch pointer/count only: no actor state is couriered back.
+        let vals = [
             wasmtime::Val::I32(event_pointer as i32),
             wasmtime::Val::I32(1),
         ];
-        vals.extend(
-            [
-                cx[0], cx[1], cx[2], cx[3], cy[0], cy[1], cy[2], cy[3], zoom, res,
-            ]
-            .iter()
-            .map(|v| wasmtime::Val::F32(v.to_bits())),
-        );
         transition
             .call(&mut store, &vals, &mut results)
             .expect("typed surface transition should run");

@@ -67,7 +67,12 @@ const TYPED_SURFACE_TRANSITION_EXPORT: &str = "fe_surface_transition_v1";
 /// Fixed discovery point for the same transition when Fe declares the
 /// `LatestPerFrame` presentation policy. Encoding the choice in the typed
 /// binary ABI avoids adding scheduling fields to the render manifest.
-const TYPED_SURFACE_LATEST_PER_FRAME_EXPORT: &str = "fe_surface_transition_latest_per_frame_v2";
+const TYPED_SURFACE_LATEST_PER_FRAME_EXPORT: &str = "fe_surface_transition_latest_per_frame_v3";
+/// Fixed companion ABI for seeding or explicitly replacing the private state
+/// of a resident scheduled actor. It takes the complete non-resource state in
+/// declaration order and returns nothing. Frame transitions never receive
+/// those values back from the browser.
+const TYPED_SURFACE_STATE_REPLACE_EXPORT: &str = "fe_surface_state_replace_v1";
 const CANONICAL_INTERFACE_JS: &str = include_str!("../assets/canonical-interface.js");
 /// Compiler-emitted host page for render bundles. It reads `manifest.json` and
 /// drives the two lowerings of the render kernel it describes: `shader.wgsl`
@@ -221,6 +226,8 @@ impl WebProvenance {
         if has_fe_schedule {
             self.fe_responsibilities
                 .push(WebFeResponsibility::SchedulingPolicy);
+            self.fe_responsibilities
+                .push(WebFeResponsibility::ResidentActorState);
             self.fixed_host
                 .responsibilities
                 .retain(|role| *role != WebHostResponsibility::PresentationScheduler);
@@ -279,6 +286,7 @@ pub enum WebFeResponsibility {
     SurfaceDeclaration,
     ControlTransition,
     SchedulingPolicy,
+    ResidentActorState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1150,6 +1158,7 @@ fn actor_update_export_name(
 struct TypedSurfaceTransitionContract {
     params: Vec<WebControlWasmType>,
     results: Vec<WebControlWasmType>,
+    actor_param_is_resource: Vec<bool>,
     schedule: Option<GpuSchedule>,
 }
 
@@ -1166,9 +1175,12 @@ fn with_typed_surface_export(
     contract: &TypedSurfaceTransitionContract,
 ) -> WasmCompileOptions {
     match contract.schedule {
-        Some(GpuSchedule::LatestPerFrame) => {
-            options.with_surface_frame(source, TYPED_SURFACE_LATEST_PER_FRAME_EXPORT)
-        }
+        Some(GpuSchedule::LatestPerFrame) => options.with_surface_frame(
+            source,
+            TYPED_SURFACE_LATEST_PER_FRAME_EXPORT,
+            TYPED_SURFACE_STATE_REPLACE_EXPORT,
+            contract.actor_param_is_resource.clone(),
+        ),
         None => options.with_export_alias(source, TYPED_SURFACE_TRANSITION_EXPORT),
     }
 }
@@ -1179,10 +1191,16 @@ fn typed_surface_wasm_signature(
     let params = match contract.schedule {
         Some(GpuSchedule::LatestPerFrame) => {
             // Raw SurfaceEvent records live in exported linear memory. The
-            // fixed wrapper receives `(pointer, count)` followed by the actor
-            // fields that follow the ten scalar event leaves in `navigate`.
+            // fixed wrapper receives `(pointer, count)` followed only by inert
+            // external resource slots. Complete non-resource state is
+            // resident in private Wasm globals and is not couriered per frame.
             let mut params = vec![WebControlWasmType::I32, WebControlWasmType::I32];
-            params.extend_from_slice(&contract.params[10..]);
+            params.extend(
+                contract.params[10..]
+                    .iter()
+                    .zip(&contract.actor_param_is_resource)
+                    .filter_map(|(ty, is_resource)| is_resource.then_some(*ty)),
+            );
             params
         }
         None => contract.params.clone(),
@@ -1348,6 +1366,7 @@ fn typed_surface_transition_contract(
     }
 
     let mut params = Vec::new();
+    let mut actor_param_is_resource = Vec::new();
     append_canonical_wasm_types(&event, &mut params, "surface_event")?;
     for (index, ty) in arg_tys[1..].iter().enumerate() {
         if resource_field_indices.contains(&(index as u32)) {
@@ -1355,6 +1374,7 @@ fn typed_surface_transition_contract(
             // lane. The fixed host supplies zero; no resource operation is
             // available to this transition.
             params.push(WebControlWasmType::I64);
+            actor_param_is_resource.push(true);
             continue;
         }
         let ty = canonical_type_from_semantic(
@@ -1363,13 +1383,16 @@ fn typed_surface_transition_contract(
             &format!("surface_state.{}", decl.fields[index].name),
         )
         .map_err(|error| WebBundleError::SurfaceProjection(error.to_string()))?;
+        let before = params.len();
         append_canonical_wasm_types(&ty, &mut params, "surface_state")?;
+        actor_param_is_resource.extend(std::iter::repeat_n(false, params.len() - before));
     }
     let mut results = Vec::new();
     append_canonical_wasm_types(&returned_state, &mut results, "surface_state_response")?;
     Ok(Some(TypedSurfaceTransitionContract {
         params,
         results,
+        actor_param_is_resource,
         schedule,
     }))
 }
@@ -1447,6 +1470,23 @@ fn project_control(
                 "actor `{}`: typed surface export `{wasm_export}` has measured Wasm signature {param_types:?} -> {result_types:?}; expected {expected_params:?} -> {expected_results:?} from the resolved Fe records and schedule",
                 actor.name
             )));
+        }
+        if contract.schedule == Some(GpuSchedule::LatestPerFrame) {
+            let (replace_params, replace_results) =
+                wasm_export_signature(wasm, TYPED_SURFACE_STATE_REPLACE_EXPORT).ok_or_else(
+                    || {
+                        WebBundleError::SurfaceProjection(format!(
+                            "actor `{}`: resident typed surface has no state replacement export `{TYPED_SURFACE_STATE_REPLACE_EXPORT}`",
+                            actor.name
+                        ))
+                    },
+                )?;
+            if replace_params != contract.results || !replace_results.is_empty() {
+                return Err(WebBundleError::SurfaceProjection(format!(
+                    "actor `{}`: resident state replacement export has measured Wasm signature {replace_params:?} -> {replace_results:?}; expected {:?} -> [] from the complete Fe state record",
+                    actor.name, contract.results
+                )));
+            }
         }
         return Ok(None);
     }

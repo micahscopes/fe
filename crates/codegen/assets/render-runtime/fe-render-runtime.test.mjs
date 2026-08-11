@@ -53,6 +53,7 @@ test("a burst crosses into the Fe transition once at the presentation boundary",
   const surface = Object.create(FeSurfaceElement.prototype);
   surface._fsm = "live";
   surface._surfaceTransitionSchedule = "latest_per_frame";
+  surface._surfaceTransitionStateResident = true;
   surface._pendingSurfaceEvents = [];
   surface._gestureFrame = null;
   surface._gesturePresenting = false;
@@ -64,6 +65,13 @@ test("a burst crosses into the Fe transition once at the presentation boundary",
   surface._memberIndexByArg = new Map([[0, 0]]);
   surface._resources = [];
   surface._uniforms = [41];
+  let residentState = null;
+  const stateReplacementCalls = [];
+  surface._surfaceStateReplaceKernel = (...state) => {
+    stateReplacementCalls.push(state);
+    [residentState] = state;
+  };
+  surface._replaceSurfaceState([41]);
   surface._surfaceTransitionMemory = new WebAssembly.Memory({ initial: 1 });
   surface._surfaceEventBufferPtr = 0;
   surface._surfaceEventBufferCapacity = 0;
@@ -77,9 +85,12 @@ test("a burst crosses into the Fe transition once at the presentation boundary",
   let renders = 0;
   surface._render = () => { renders += 1; };
   let transitionCalls = 0;
+  const transitionArgCounts = [];
   let transportedEvents;
-  surface._surfaceTransitionKernel = (pointer, count, state) => {
+  surface._surfaceTransitionKernel = (...args) => {
+    const [pointer, count] = args;
     transitionCalls += 1;
+    transitionArgCounts.push(args.length);
     const view = new DataView(surface._surfaceTransitionMemory.buffer);
     transportedEvents = Array.from({ length: count }, (_, index) => {
       const base = pointer + index * 40;
@@ -96,7 +107,8 @@ test("a burst crosses into the Fe transition once at the presentation boundary",
         height: view.getFloat32(base + 36, true),
       };
     });
-    return [state + 1];
+    residentState += 1;
+    return [residentState];
   };
 
   surface._applyGesture({
@@ -136,4 +148,21 @@ test("a burst crosses into the Fe transition once at the presentation boundary",
   ]);
   assert.deepEqual(surface._uniforms, [42]);
   assert.deepEqual(surface._pendingSurfaceEvents, []);
+  assert.deepEqual(stateReplacementCalls, [[41]]);
+  assert.deepEqual(transitionArgCounts, [2]);
+
+  // A second frame advances the state held by the Fe instance. The browser
+  // presents the returned snapshot but never feeds 42 back as a frame arg or
+  // state-replacement call.
+  surface._applyGesture({
+    mx: 110, my: 116, dx: 1, dy: -1, wheelDelta: 0,
+    wheelMode: 0, buttons: 1, timestamp: 4,
+  });
+  surface._gestureFrame = null;
+  await surface._flushGestureFrame();
+  assert.equal(transitionCalls, 2);
+  assert.equal(renders, 2);
+  assert.deepEqual(surface._uniforms, [43]);
+  assert.deepEqual(stateReplacementCalls, [[41]]);
+  assert.deepEqual(transitionArgCounts, [2, 2]);
 });

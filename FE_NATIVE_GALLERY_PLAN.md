@@ -30,10 +30,11 @@ Origin: honesty audit of Claude Code session
   sham parity claim. Until native lowering gains those features, the Wasmtime
   event oracle is browser-Wasm proof only; it must not be described as native
   parity.
-- The first Phase 2 scheduling slice is implemented without manifest growth.
+- The first Phase 2/3 scheduling and resident-state slice is implemented
+  without manifest growth.
   All six interactive canonical gallery actors declare `LatestPerFrame` as a
   Fe capability on `navigate`. The compiler now lowers that choice to the
-  fixed v2 frame export: the generic host writes untouched 40-byte raw event
+  fixed v3 frame export: the generic host writes untouched 40-byte raw event
   records into exported memory and crosses into Wasm once at the presentation
   boundary; the generated wrapper accumulates movement/wheel facts, keeps the
   newest remaining facts, and invokes the authored Fe transition once. A
@@ -42,9 +43,14 @@ Origin: honesty audit of Claude Code session
   one Fe call and one render at flush. An independent Wasmtime three-event
   burst proves coalescing occurs in generated Wasm. CGA3D, QCGA, Desargues, and
   plasma join both Mandelbrots on the nominal `SurfaceEvent`, complete-state,
-  manifest-free path. Actor state is still couriered in browser uniform arrays,
-  and animation-frame/GPU-completion facts have not yet been exposed as typed
-  events to a resident Fe actor.
+  manifest-free path. The generated module now keeps complete non-resource
+  actor state in private Wasm globals. A fixed companion export seeds or
+  explicitly replaces that state at initialization, extent, and parameter-edit
+  boundaries; frame calls carry only the raw batch and inert external resource
+  slots. JavaScript retains the returned values only as a presentation
+  mirror for GPU uniform upload. Animation-frame/GPU-completion facts and their
+  clock state machine have not yet been exposed as typed events to the resident
+  Fe actor.
 
 This ledger records achieved evidence, not a relaxation of the phases or the
 Definition of done below.
@@ -130,7 +136,8 @@ application or Fe-native event system.
   migrated to the canonical path;
 - fixed raw-event batch memory transport plus legacy positional argument
   construction for examples not yet migrated;
-- complete typed-transition state replacement plus legacy result blitting;
+- resident-state initialization/explicit replacement, returned presentation
+  snapshots, plus legacy state couriering/result blitting for unmigrated paths;
 - animation-frame/GPU-completion clock delivery and presentation gating;
 - WebGPU adapter/device acquisition, loss recovery, buffer allocation, pipeline
   construction, pass encoding, and presentation;
@@ -146,8 +153,10 @@ asks us to absorb.
 - The canonical throttle is Fe-declared and compiler-lowered into generated
   Wasm. JavaScript buffers untouched raw records and supplies the
   `requestAnimationFrame`/GPU-completion clock; the Wasm wrapper coalesces and
-  invokes the authored Fe transition once per permitted frame. Actor state and
-  the clock state machine are not resident in Fe yet.
+  invokes the authored Fe transition once per permitted frame. Complete actor
+  state is resident in private Wasm globals; JavaScript keeps only a GPU-upload
+  mirror and supplies explicit initialization/parameter changes. The browser
+  clock state machine is not resident in Fe yet.
 - Cursor-anchored pan/zoom mathematics is Fe; cursor acquisition,
   normalization, drag state, and timing are JavaScript.
 - The gallery is not using Rust-Wasm to fake its renderers. `fe web dev` and

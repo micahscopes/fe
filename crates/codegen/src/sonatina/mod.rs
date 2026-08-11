@@ -63,6 +63,11 @@ use crate::{
 pub(crate) struct WasmSurfaceFrame {
     source: String,
     export: String,
+    state_replace_export: String,
+    /// One bit per flattened actor argument after the ten SurfaceEvent
+    /// leaves. Inert resource slots remain host-supplied transport values;
+    /// every other value is complete actor state in private Wasm globals.
+    actor_param_is_resource: Vec<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -113,11 +118,15 @@ impl WasmCompileOptions {
         mut self,
         source: impl Into<String>,
         export: impl Into<String>,
+        state_replace_export: impl Into<String>,
+        actor_param_is_resource: Vec<bool>,
     ) -> Self {
         self.canonical_arena = true;
         self.surface_frame = Some(WasmSurfaceFrame {
             source: source.into(),
             export: export.into(),
+            state_replace_export: state_replace_export.into(),
+            actor_param_is_resource,
         });
         self
     }
