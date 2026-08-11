@@ -1,8 +1,8 @@
 {
   "artifacts": {
     "canonical_adapters": [],
-    "wgsl": "fe-render-9c2c485f44dc9668.wgsl",
-    "wgsl_bytes": 519
+    "wgsl": "fe-render-7a9a90df7d8ce323.wgsl",
+    "wgsl_bytes": 513
   },
   "browser_runtime": null,
   "canonical_interface": null,
@@ -18,10 +18,20 @@
         "binding": 0,
         "group": 0,
         "members": [],
-        "name": "orbit",
+        "name": "leaves",
         "role": "resource",
-        "span": 8,
-        "stride": 8
+        "span": 4,
+        "stride": 4
+      },
+      {
+        "access": "read",
+        "binding": 1,
+        "group": 0,
+        "members": [],
+        "name": "nodes",
+        "role": "resource",
+        "span": 4,
+        "stride": 4
       }
     ],
     "builtin_inputs": [
@@ -64,10 +74,20 @@
             "binding": 0,
             "group": 0,
             "members": [],
-            "name": "orbit",
+            "name": "leaves",
             "role": "resource",
-            "span": 8,
-            "stride": 8
+            "span": 4,
+            "stride": 4
+          },
+          {
+            "access": "read_write",
+            "binding": 1,
+            "group": 0,
+            "members": [],
+            "name": "nodes",
+            "role": "resource",
+            "span": 4,
+            "stride": 4
           }
         ],
         "builtin_inputs": [],
@@ -85,9 +105,67 @@
           1
         ]
       },
-      "shader": "fe-render-8aa30259cc407927.wgsl",
-      "shader_bytes": 271,
-      "source_entry": "seed"
+      "shader": "fe-render-450f49277d0ddae1.wgsl",
+      "shader_bytes": 923,
+      "source_entry": "collect"
+    },
+    {
+      "dispatch": [
+        1,
+        1,
+        1
+      ],
+      "layout": {
+        "bindings": [
+          {
+            "access": "read_write",
+            "binding": 0,
+            "group": 0,
+            "members": [],
+            "name": "leaves",
+            "role": "resource",
+            "span": 4,
+            "stride": 4
+          },
+          {
+            "access": "read_write",
+            "binding": 1,
+            "group": 0,
+            "members": [],
+            "name": "nodes",
+            "role": "resource",
+            "span": 4,
+            "stride": 4
+          },
+          {
+            "access": "read_write",
+            "binding": 2,
+            "group": 0,
+            "members": [],
+            "name": "trap",
+            "role": "output",
+            "span": 4,
+            "stride": 4
+          }
+        ],
+        "builtin_inputs": [],
+        "color_target_format": null,
+        "entry_point": "main",
+        "fragment_entry": null,
+        "mode": "compute",
+        "result": null,
+        "vertex_entry": null,
+        "word": "u32",
+        "word_bytes": 4,
+        "workgroup_size": [
+          1,
+          1,
+          1
+        ]
+      },
+      "shader": "fe-render-eab91e95e0717d48.wgsl",
+      "shader_bytes": 10511,
+      "source_entry": "fold"
     },
     {
       "layout": {
@@ -97,10 +175,20 @@
             "binding": 0,
             "group": 0,
             "members": [],
-            "name": "orbit",
+            "name": "leaves",
             "role": "resource",
-            "span": 8,
-            "stride": 8
+            "span": 4,
+            "stride": 4
+          },
+          {
+            "access": "read",
+            "binding": 1,
+            "group": 0,
+            "members": [],
+            "name": "nodes",
+            "role": "resource",
+            "span": 4,
+            "stride": 4
           }
         ],
         "builtin_inputs": [
@@ -129,9 +217,9 @@
           0
         ]
       },
-      "shader": "fe-render-9c2c485f44dc9668.wgsl",
-      "shader_bytes": 519,
-      "source_entry": "paint"
+      "shader": "fe-render-7a9a90df7d8ce323.wgsl",
+      "shader_bytes": 513,
+      "source_entry": "display"
     }
   ],
   "protocol": "fe-web-bundle",
@@ -139,14 +227,14 @@
   "provenance": {
     "authored_sources": [
       {
-        "id": "known_color/fe.toml",
+        "id": "rollcall_pipeline/fe.toml",
         "kind": "fe_manifest",
-        "sha256": "eb6f604086c1e36ba0c3b9e282ba2e33d33ab2753c2c66787f3472391c4ce661"
+        "sha256": "097dc0f576c9e73a1e1474a1495a19d417e325385aec76620604b264d9e6c915"
       },
       {
-        "id": "known_color/src/lib.fe",
+        "id": "rollcall_pipeline/src/lib.fe",
         "kind": "fe",
-        "sha256": "defb0a2eb92c80c02329497d8205f3e5b8467c9d99cbfc0be92233d96dcbb593"
+        "sha256": "dd12360062107875f8b953e5239c9ac74aa14f3a26f86d7580571791593c77d0"
       }
     ],
     "compiler": "fe",
@@ -157,9 +245,9 @@
     ],
     "fixed_host": {
       "artifact": {
-        "bytes": 80329,
-        "path": "fe-render-runtime-4120558c5a3aad0f.js",
-        "sha256": "4120558c5a3aad0f69266cdd7830629f0dcf8cdbec52af9f58c81807a8e97b52"
+        "bytes": 84928,
+        "path": "fe-render-runtime-30be3b9ee87339f3.js",
+        "sha256": "30be3b9ee87339f3bb2051dcadcc208f1261128f039135fcc7c5cd35c58bf6ed"
       },
       "contract": "fixed_versioned_demo_blind_browser_host",
       "name": "fe-render-runtime",
@@ -183,32 +271,27 @@
         "sha256": "fc68e26b829e1d6b79baa0e3cbd686a4903af0f544401674f4198ea035b37a28"
       }
     ],
-    "source_id": "known_color"
+    "source_id": "rollcall_pipeline"
   },
   "resources": [
     {
       "binding": 0,
-      "element": {
-        "Record": {
-          "fields": [
-            {
-              "name": "re_bits",
-              "offset": 0
-            },
-            {
-              "name": "im_bits",
-              "offset": 4
-            }
-          ],
-          "span": 8
-        }
-      },
+      "element": "U32",
       "group": 0,
-      "length": 1,
-      "name": "orbit",
-      "span": 8,
-      "stride": 8
+      "length": 8,
+      "name": "leaves",
+      "span": 4,
+      "stride": 4
+    },
+    {
+      "binding": 1,
+      "element": "U32",
+      "group": 0,
+      "length": 8,
+      "name": "nodes",
+      "span": 4,
+      "stride": 4
     }
   ],
-  "source_entry": "paint"
+  "source_entry": "display"
 }

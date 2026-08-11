@@ -10,13 +10,14 @@ use std::webgpu::{
     GpuProgram as PassGraph,
     LatestPerFrame,
     StorageBuffer as OrbitBuffer,
+    SurfaceScheduling,
     SurfaceTransition,
     Workgroup as Threads,
     WebGpuBackend,
 }
 use std::web::view::{
     ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface,
-    SurfaceEvent, SurfaceState,
+    SurfaceEvent, SurfaceScheduleEvent, SurfaceScheduleState, SurfaceScheduleStep, SurfaceState,
 }
 use fmath::{abs, escape_palette, from_i32, max, PixelSample}
 use precision::{add_f32, from_quad, sub, to_quad, two_sum}
@@ -178,6 +179,13 @@ actor PerturbationalMandelbrot uses (PassGraph<WebGpuBackend>) {
     center_y_w3: f32,
     zoom: f32,
     res: f32,
+
+    fn schedule(_ event: own SurfaceScheduleEvent, _ state: own SurfaceScheduleState)
+        -> SurfaceScheduleStep
+        uses (SurfaceScheduling<LatestPerFrame>)
+    {
+        LatestPerFrame::step(state, event)
+    }
 
     const fn view() -> Surface<MandelbrotParams> {
         Surface {

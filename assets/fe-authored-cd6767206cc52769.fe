@@ -67,10 +67,12 @@
 //! increasing), and dropping the two deep words (a df64 center) shifts the view
 //! ~768 px at `zoom = 1e-16`, which a df64 center could not reach.
 
-use std::webgpu::{FragmentSurface, GpuProgram, LatestPerFrame, SurfaceTransition, WebGpuBackend}
+use std::webgpu::{
+    FragmentSurface, GpuProgram, LatestPerFrame, SurfaceScheduling, SurfaceTransition, WebGpuBackend,
+}
 use std::web::view::{
     ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface,
-    SurfaceEvent, SurfaceState,
+    SurfaceEvent, SurfaceScheduleEvent, SurfaceScheduleState, SurfaceScheduleStep, SurfaceState,
 }
 use fmath::{escape_palette, from_i32, PixelSample, to_i32}
 use precision::{add_f32, from_quad, to_quad}
@@ -269,6 +271,13 @@ actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
     zoom: f32,
     /// Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).
     res: f32,
+
+    fn schedule(_ event: own SurfaceScheduleEvent, _ state: own SurfaceScheduleState)
+        -> SurfaceScheduleStep
+        uses (SurfaceScheduling<LatestPerFrame>)
+    {
+        LatestPerFrame::step(state, event)
+    }
 
     /// The surface declaration: CTFE-evaluated at bundle time and projected
     /// into the manifest `surface` section. Never lowered to wasm or WGSL.

@@ -13,10 +13,12 @@
 //! program rather than handwritten WGSL or a Rust/JavaScript shader generator.
 
 use core::marker::Copy
-use std::webgpu::{FragmentSurface, GpuProgram, LatestPerFrame, SurfaceTransition, WebGpuBackend}
+use std::webgpu::{
+    FragmentSurface, GpuProgram, LatestPerFrame, SurfaceScheduling, SurfaceTransition, WebGpuBackend,
+}
 use std::web::view::{
     ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface,
-    SurfaceEvent, SurfaceState,
+    SurfaceEvent, SurfaceScheduleEvent, SurfaceScheduleState, SurfaceScheduleStep, SurfaceState,
 }
 use fmath::{
     abs, add3, clamp, clamp01, cos, dot3, floor, fract, from_i32,
@@ -306,6 +308,13 @@ actor RaymarchSurface uses (GpuProgram<WebGpuBackend>) {
             morph: self.morph,
             res: self.res,
         }.apply_param_bindings(raymarch_params(), event)
+    }
+
+    fn schedule(_ event: own SurfaceScheduleEvent, _ state: own SurfaceScheduleState)
+        -> SurfaceScheduleStep
+        uses (SurfaceScheduling<LatestPerFrame>)
+    {
+        LatestPerFrame::step(state, event)
     }
 
     fn render(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
