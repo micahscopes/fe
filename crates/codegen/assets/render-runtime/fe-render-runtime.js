@@ -31,19 +31,27 @@
 // import this SAME module and drive the SAME element. One mount path.
 
 const DEFAULT_SIZE = 256; // dispatch/canvas size for a v4 manifest with no declared `surface.extent`.
+const SURFACE_EVENT_STRIDE = 40;
+const MAX_SURFACE_EVENT_BATCH = Math.floor(0x7fffffff / SURFACE_EVENT_STRIDE);
 
-/** Fixed-host realization of Fe's `LatestPerFrame` surface policy. Movement
- * and wheel deltas accumulate so no displacement is lost; every other field
- * is the newest raw browser fact. Exported solely for a deterministic host
- * conformance gate—the application selects this policy in Fe. */
-export function coalesceLatestSurfaceEvent(pending, incoming) {
-  if (!pending) return { ...incoming };
-  return {
-    ...incoming,
-    dx: pending.dx + incoming.dx,
-    dy: pending.dy + incoming.dy,
-    wheelDelta: pending.wheelDelta + incoming.wheelDelta,
-  };
+/** Write the fixed DFS layout of untouched `std::web::SurfaceEvent` records.
+ * This is transport only: the compiler-lowered Fe scheduling wrapper owns
+ * coalescing and calls the authored transition inside Wasm. */
+export function writeSurfaceEventBatch(memory, pointer, events) {
+  const view = new DataView(memory.buffer);
+  events.forEach((event, index) => {
+    const base = pointer + index * SURFACE_EVENT_STRIDE;
+    view.setFloat32(base, event.mx, true);
+    view.setFloat32(base + 4, event.my, true);
+    view.setFloat32(base + 8, event.dx, true);
+    view.setFloat32(base + 12, event.dy, true);
+    view.setFloat32(base + 16, event.wheelDelta, true);
+    view.setUint32(base + 20, event.wheelMode, true);
+    view.setUint32(base + 24, event.buttons, true);
+    view.setFloat32(base + 28, event.timestamp, true);
+    view.setFloat32(base + 32, event.width, true);
+    view.setFloat32(base + 36, event.height, true);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -364,7 +372,11 @@ export class FeSurfaceElement extends HTMLElement {
     this._controlKernel = null; // the resolved wasm control export, or null (no gestures).
     this._surfaceTransitionKernel = null; // typed Fe SurfaceEvent ABI, discovered from Wasm.
     this._surfaceTransitionSchedule = "immediate";
-    this._pendingSurfaceEvent = null;
+    this._surfaceTransitionMemory = null;
+    this._surfaceTransitionAlloc = null;
+    this._surfaceEventBufferPtr = 0;
+    this._surfaceEventBufferCapacity = 0;
+    this._pendingSurfaceEvents = [];
     this._passes = [];
     this._resources = [];
     this._graph = false;
@@ -549,8 +561,12 @@ export class FeSurfaceElement extends HTMLElement {
       // with). No control block, or an export it doesn't actually find,
       // means gestures stay off -- never a JS reimplementation fallback.
       this._controlKernel = null;
+      this._surfaceTransitionMemory = null;
+      this._surfaceTransitionAlloc = null;
+      this._surfaceEventBufferPtr = 0;
+      this._surfaceEventBufferCapacity = 0;
       const latestPerFrame =
-        instance?.exports.fe_surface_transition_latest_per_frame_v1 ?? null;
+        instance?.exports.fe_surface_transition_latest_per_frame_v2 ?? null;
       this._surfaceTransitionKernel = typeof latestPerFrame === "function"
         ? latestPerFrame
         : instance?.exports.fe_surface_transition_v1 ?? null;
@@ -560,6 +576,17 @@ export class FeSurfaceElement extends HTMLElement {
       if (typeof this._surfaceTransitionKernel !== "function") {
         this._surfaceTransitionKernel = null;
         this._surfaceTransitionSchedule = "immediate";
+      }
+      if (this._surfaceTransitionSchedule === "latest_per_frame") {
+        const memory = instance?.exports.memory;
+        const alloc = instance?.exports.fe_cabi_alloc;
+        if (!(memory instanceof WebAssembly.Memory) || typeof alloc !== "function") {
+          throw new Error(
+            "fe render runtime: scheduled surface transition is missing fixed memory/allocator exports",
+          );
+        }
+        this._surfaceTransitionMemory = memory;
+        this._surfaceTransitionAlloc = alloc;
       }
       if (this._control) {
         const controlFn = instance?.exports[this._control.export];
@@ -1331,7 +1358,11 @@ export class FeSurfaceElement extends HTMLElement {
     if (this._gestureFrame !== null) cancelAnimationFrame(this._gestureFrame);
     this._gestureFrame = null;
     this._gestureDirty = false;
-    this._pendingSurfaceEvent = null;
+    this._pendingSurfaceEvents = [];
+    this._surfaceEventBufferPtr = 0;
+    this._surfaceEventBufferCapacity = 0;
+    this._surfaceTransitionMemory = null;
+    this._surfaceTransitionAlloc = null;
     if (this._liveContext) {
       try {
         this._liveContext.unconfigure();
@@ -1364,7 +1395,7 @@ export class FeSurfaceElement extends HTMLElement {
   // facts to Fe. A typed `SurfaceTransition` is discovered directly from its
   // fixed Wasm ABI export and replaces the complete actor state; it has no
   // manifest control block, argument-name switch, or result-name mapping. The
-  // older manifest lane remains below only while the remaining demos migrate.
+  // older manifest lane remains below only for explicitly legacy bundles.
 
   /** Attach drag/wheel listeners on the current live/adopted canvas, once per
    * canvas identity (idempotent across suspend/resume within one boot). */
@@ -1463,14 +1494,19 @@ export class FeSurfaceElement extends HTMLElement {
    * while cold/error/not presenting. */
   _applyGesture(raw) {
     if (this._fsm !== "live") return;
+    const surfaceEvent = {
+      ...raw,
+      width: this._backingWidth,
+      height: this._backingHeight,
+    };
     if (this._surfaceTransitionKernel) {
       if (this._surfaceTransitionSchedule === "latest_per_frame") {
-        this._pendingSurfaceEvent = coalesceLatestSurfaceEvent(this._pendingSurfaceEvent, raw);
+        this._pendingSurfaceEvents.push(surfaceEvent);
         this._gestureDirty = true;
         this._scheduleGestureFrame();
         return;
       }
-      const next = this._runSurfaceTransition(raw);
+      const next = this._runSurfaceTransition(surfaceEvent);
       if (next) this._queueGestureRender(next);
       return;
     }
@@ -1485,11 +1521,11 @@ export class FeSurfaceElement extends HTMLElement {
         case "resource":
           return arg.wasm_type === "i64" ? 0n : 0;
         case "drag":
-          return arg.axis === "x" ? raw.dx : raw.dy;
+          return arg.axis === "x" ? surfaceEvent.dx : surfaceEvent.dy;
         case "wheel":
-          return Math.sign(raw.wheelDelta);
+          return Math.sign(surfaceEvent.wheelDelta);
         case "pointer":
-          return arg.axis === "x" ? raw.mx : raw.my;
+          return arg.axis === "x" ? surfaceEvent.mx : surfaceEvent.my;
         default:
           return 0;
       }
@@ -1518,9 +1554,14 @@ export class FeSurfaceElement extends HTMLElement {
       raw.wheelMode,
       raw.buttons,
       raw.timestamp,
-      this._backingWidth,
-      this._backingHeight,
+      raw.width,
+      raw.height,
     ];
+    const reply = this._surfaceTransitionKernel(...eventArgs, ...this._surfaceActorArgs());
+    return this._surfaceReply(reply);
+  }
+
+  _surfaceActorArgs() {
     const actorArgStart = 1 + Math.max(-1, ...this._builtins.map((builtin) => builtin.arg_index));
     const actorArgEnd = actorArgStart + this._members.length + this._resources.length;
     const actorArgs = [];
@@ -1528,7 +1569,37 @@ export class FeSurfaceElement extends HTMLElement {
       const memberIndex = this._memberIndexByArg.get(argIndex);
       actorArgs.push(memberIndex === undefined ? 0n : this._uniforms[memberIndex]);
     }
-    const reply = this._surfaceTransitionKernel(...eventArgs, ...actorArgs);
+    return actorArgs;
+  }
+
+  _runSurfaceFrame(events) {
+    if (events.length === 0 || events.length > MAX_SURFACE_EVENT_BATCH) {
+      throw new Error(`fe render runtime: invalid surface event batch length ${events.length}`);
+    }
+    if (events.length > this._surfaceEventBufferCapacity) {
+      let capacity = Math.max(1, this._surfaceEventBufferCapacity);
+      while (capacity < events.length) capacity *= 2;
+      const pointer = this._surfaceTransitionAlloc(capacity * SURFACE_EVENT_STRIDE, 4);
+      if (!Number.isInteger(pointer) || pointer < 0) {
+        throw new Error("fe render runtime: surface event batch allocation failed");
+      }
+      this._surfaceEventBufferPtr = pointer;
+      this._surfaceEventBufferCapacity = capacity;
+    }
+    writeSurfaceEventBatch(
+      this._surfaceTransitionMemory,
+      this._surfaceEventBufferPtr,
+      events,
+    );
+    const reply = this._surfaceTransitionKernel(
+      this._surfaceEventBufferPtr,
+      events.length,
+      ...this._surfaceActorArgs(),
+    );
+    return this._surfaceReply(reply);
+  }
+
+  _surfaceReply(reply) {
     const next = Array.isArray(reply) ? reply : [reply];
     if (next.length !== this._uniforms.length) {
       console.error(
@@ -1536,7 +1607,7 @@ export class FeSurfaceElement extends HTMLElement {
       );
       this._surfaceTransitionKernel = null;
       this._surfaceTransitionSchedule = "immediate";
-      this._pendingSurfaceEvent = null;
+      this._pendingSurfaceEvents = [];
       return null;
     }
     return next;
@@ -1568,10 +1639,10 @@ export class FeSurfaceElement extends HTMLElement {
     this._gestureDirty = false;
     this._gesturePresenting = true;
     try {
-      const pending = this._pendingSurfaceEvent;
-      this._pendingSurfaceEvent = null;
-      if (pending && this._surfaceTransitionKernel) {
-        const next = this._runSurfaceTransition(pending);
+      const pending = this._pendingSurfaceEvents;
+      this._pendingSurfaceEvents = [];
+      if (pending.length > 0 && this._surfaceTransitionKernel) {
+        const next = this._runSurfaceFrame(pending);
         if (!next) return;
         this._uniforms = next;
         this._refreshControlValues();
@@ -1592,14 +1663,17 @@ export class FeSurfaceElement extends HTMLElement {
     const provenance = this._manifest?.provenance || {};
     const feResponsibilities = provenance.fe_responsibilities || [];
     const feControl = feResponsibilities.includes("control_transition");
+    const feSchedule = feResponsibilities.includes("scheduling_policy");
+    const wasmRoles = feControl ? ` + control${feSchedule ? "/schedule" : ""} Wasm` : "";
     this._badge.textContent = this._mode === "webgpu"
-      ? `Fe WGSL${feControl ? " + control Wasm" : ""} · fixed JS host`
+      ? `Fe WGSL${wasmRoles} · fixed JS host`
       : "Fe Wasm renderer · fixed JS host";
     const hostArtifact = provenance.fixed_host?.artifact;
     const runtimeIdentity = hostArtifact?.sha256
       ? `${hostArtifact.path} · sha256:${hostArtifact.sha256}`
       : "fe-render-runtime · unpinned build artifact";
-    this._badge.title = `Fe owns: ${feResponsibilities.join(", ") || "GPU program"}. Host owns: DOM, input transport, scheduling, WebGPU execution, lifecycle, Wasm loading. ${runtimeIdentity}`;
+    const hostResponsibilities = provenance.fixed_host?.responsibilities || [];
+    this._badge.title = `Fe owns: ${feResponsibilities.join(", ") || "GPU program"}. Host owns: ${hostResponsibilities.join(", ") || "browser API realization"}. ${runtimeIdentity}`;
     this._badge.className = `badge ${this._mode === "webgpu" ? "webgpu" : "wasm-2d"}`;
   }
 

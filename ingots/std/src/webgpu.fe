@@ -93,11 +93,11 @@ pub struct UpdateSurface {}
 pub struct SurfaceTransition {}
 
 /// Process at most one coalesced raw surface event per browser presentation
-/// opportunity. The fixed host currently realizes the timing boundary while
-/// Fe owns the declaration and the `SurfaceTransition` owns all state policy.
-/// Movement and wheel deltas accumulate; pointer, buttons, time, mode, and
-/// extent use the newest raw fact. A later resident-actor lane will execute the
-/// same policy inside Fe without changing application source.
+/// opportunity. The fixed host supplies the presentation clock and writes an
+/// untouched event batch into the generated module; the compiler-lowered Wasm
+/// policy accumulates movement/wheel deltas, keeps the newest pointer, buttons,
+/// time, mode, and extent facts, then calls the authored `SurfaceTransition`
+/// exactly once. Actor state becomes resident in a later additive ABI slice.
 #[gpu_schedule(latest_per_frame)]
 pub struct LatestPerFrame {}
 

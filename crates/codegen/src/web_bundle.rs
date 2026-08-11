@@ -67,7 +67,7 @@ const TYPED_SURFACE_TRANSITION_EXPORT: &str = "fe_surface_transition_v1";
 /// Fixed discovery point for the same transition when Fe declares the
 /// `LatestPerFrame` presentation policy. Encoding the choice in the typed
 /// binary ABI avoids adding scheduling fields to the render manifest.
-const TYPED_SURFACE_LATEST_PER_FRAME_EXPORT: &str = "fe_surface_transition_latest_per_frame_v1";
+const TYPED_SURFACE_LATEST_PER_FRAME_EXPORT: &str = "fe_surface_transition_latest_per_frame_v2";
 const CANONICAL_INTERFACE_JS: &str = include_str!("../assets/canonical-interface.js");
 /// Compiler-emitted host page for render bundles. It reads `manifest.json` and
 /// drives the two lowerings of the render kernel it describes: `shader.wgsl`
@@ -198,6 +198,7 @@ impl WebProvenance {
         has_surface: bool,
         has_control: bool,
         has_pass_graph: bool,
+        has_fe_schedule: bool,
     ) -> Self {
         self.generated_artifacts = vec![
             WebGeneratedArtifactKind::Manifest,
@@ -216,6 +217,17 @@ impl WebProvenance {
         if has_control {
             self.fe_responsibilities
                 .push(WebFeResponsibility::ControlTransition);
+        }
+        if has_fe_schedule {
+            self.fe_responsibilities
+                .push(WebFeResponsibility::SchedulingPolicy);
+            self.fixed_host
+                .responsibilities
+                .retain(|role| *role != WebHostResponsibility::PresentationScheduler);
+            self.fixed_host
+                .responsibilities
+                .push(WebHostResponsibility::PresentationClock);
+            self.fixed_host.responsibilities.sort();
         }
         if has_pass_graph {
             self.fe_responsibilities
@@ -266,6 +278,7 @@ pub enum WebFeResponsibility {
     GpuPassGraph,
     SurfaceDeclaration,
     ControlTransition,
+    SchedulingPolicy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -274,6 +287,7 @@ pub enum WebHostResponsibility {
     DomSurface,
     InputTransport,
     PresentationScheduler,
+    PresentationClock,
     WebGpuExecutor,
     Lifecycle,
     WasmLoader,
@@ -1146,6 +1160,36 @@ fn typed_surface_transition_export(contract: &TypedSurfaceTransitionContract) ->
     }
 }
 
+fn with_typed_surface_export(
+    options: WasmCompileOptions,
+    source: &str,
+    contract: &TypedSurfaceTransitionContract,
+) -> WasmCompileOptions {
+    match contract.schedule {
+        Some(GpuSchedule::LatestPerFrame) => {
+            options.with_surface_frame(source, TYPED_SURFACE_LATEST_PER_FRAME_EXPORT)
+        }
+        None => options.with_export_alias(source, TYPED_SURFACE_TRANSITION_EXPORT),
+    }
+}
+
+fn typed_surface_wasm_signature(
+    contract: &TypedSurfaceTransitionContract,
+) -> (Vec<WebControlWasmType>, Vec<WebControlWasmType>) {
+    let params = match contract.schedule {
+        Some(GpuSchedule::LatestPerFrame) => {
+            // Raw SurfaceEvent records live in exported linear memory. The
+            // fixed wrapper receives `(pointer, count)` followed by the actor
+            // fields that follow the ten scalar event leaves in `navigate`.
+            let mut params = vec![WebControlWasmType::I32, WebControlWasmType::I32];
+            params.extend_from_slice(&contract.params[10..]);
+            params
+        }
+        None => contract.params.clone(),
+    };
+    (params, contract.results.clone())
+}
+
 fn canonical_surface_event_type() -> CanonicalType {
     CanonicalType::Record(vec![
         CanonicalField::new("pointer_x", CanonicalType::F32),
@@ -1397,10 +1441,11 @@ fn project_control(
             ))
         })?;
     if let Some(contract) = typed_contract {
-        if param_types != contract.params || result_types != contract.results {
+        let (expected_params, expected_results) = typed_surface_wasm_signature(&contract);
+        if param_types != expected_params || result_types != expected_results {
             return Err(WebBundleError::SurfaceProjection(format!(
-                "actor `{}`: typed surface export `{wasm_export}` has measured Wasm signature {param_types:?} -> {result_types:?}; expected {:?} -> {:?} from the resolved Fe records",
-                actor.name, contract.params, contract.results
+                "actor `{}`: typed surface export `{wasm_export}` has measured Wasm signature {param_types:?} -> {result_types:?}; expected {expected_params:?} -> {expected_results:?} from the resolved Fe records and schedule",
+                actor.name
             )));
         }
         return Ok(None);
@@ -2309,7 +2354,9 @@ impl WebBundle {
             )
         })?;
         let layout = final_layout.expect("fragment shader and layout are paired");
-        let (wasm, control) = if let Some(control_export) = control_export.as_deref() {
+        let (wasm, control, has_fe_schedule) = if let Some(control_export) =
+            control_export.as_deref()
+        {
             // A pass graph remains GPU-only for all rendering and resource
             // work. Its optional Wasm artifact contains only the Fe-authored
             // surface-control behavior, which returns updated scalar state.
@@ -2325,8 +2372,7 @@ impl WebBundle {
             )?;
             let mut wasm_options = WasmCompileOptions::default().with_optimization();
             if let Some(contract) = typed_transition.as_ref() {
-                wasm_options = wasm_options
-                    .with_export_alias(control_export, typed_surface_transition_export(contract));
+                wasm_options = with_typed_surface_export(wasm_options, control_export, contract);
             }
             let wasm =
                 compile_runtime_package_wasm_with_options(db, &control_package, wasm_options)
@@ -2342,9 +2388,12 @@ impl WebBundle {
                 &wasm,
                 &resource_field_indices,
             )?;
-            (wasm, control)
+            let has_fe_schedule = typed_transition
+                .as_ref()
+                .is_some_and(|contract| contract.schedule.is_some());
+            (wasm, control, has_fe_schedule)
         } else {
-            (Vec::new(), None)
+            (Vec::new(), None, false)
         };
         let surface = project_surface(
             db,
@@ -2358,6 +2407,7 @@ impl WebBundle {
             surface.is_some(),
             control_export.is_some(),
             passes.len() > 1 || !resources.is_empty(),
+            has_fe_schedule,
         );
         let manifest = WebBundleManifest {
             protocol: WEB_BUNDLE_PROTOCOL.to_owned(),
@@ -2520,11 +2570,12 @@ impl WebBundle {
                 .unwrap_or_else(|| WasmCompileOptions::default().with_canonical_arena()),
         };
         if let Some(contract) = typed_transition.as_ref() {
-            wasm_options = wasm_options.with_export_alias(
+            wasm_options = with_typed_surface_export(
+                wasm_options,
                 control_export
                     .as_deref()
                     .expect("typed transition has a source export"),
-                typed_surface_transition_export(contract),
+                contract,
             );
         }
         let wasm = compile_runtime_package_wasm_with_options(
@@ -2602,6 +2653,9 @@ impl WebBundle {
             surface.is_some(),
             control_export.is_some(),
             false,
+            typed_transition
+                .as_ref()
+                .is_some_and(|contract| contract.schedule.is_some()),
         );
         let manifest = WebBundleManifest {
             protocol: WEB_BUNDLE_PROTOCOL.to_string(),

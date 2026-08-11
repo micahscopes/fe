@@ -138,7 +138,7 @@ pub fn compile_runtime_package_wasm(
     db: &DriverDataBase,
     package: &RuntimePackage<'_>,
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
-    compile_runtime_package_wasm_with_canonical_lanes(db, package, &[], &[])
+    compile_runtime_package_wasm_with_canonical_lanes(db, package, &[], &[], None)
 }
 
 /// Overlay-only callback-capstone entry point. The default pin cannot name the
@@ -165,6 +165,7 @@ pub(crate) fn compile_runtime_package_wasm_with_canonical_lanes(
     package: &RuntimePackage<'_>,
     canonical_lanes: &[crate::CanonicalLane],
     export_aliases: &[(String, String)],
+    surface_frame: Option<&super::WasmSurfaceFrame>,
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
     // Reject unsupported indirect host results before constructing any
     // Sonatina signatures. A local wrapper may itself return the authored enum
@@ -209,22 +210,28 @@ pub(crate) fn compile_runtime_package_wasm_with_canonical_lanes(
     );
     let isa = create_wasm32_isa();
     let builder = ModuleBuilder::new(ModuleCtx::new(&isa));
-    let canonical_lane_names = canonical_lanes
+    let mut wrapped_lane_names: HashSet<String> = canonical_lanes
         .iter()
         .map(|lane| lane.name.clone())
         .collect();
+    if let Some(frame) = surface_frame {
+        wrapped_lane_names.insert(frame.source.clone());
+    }
     let mut lowerer = PortableModuleLowerer::new(
         db,
         builder,
         &isa,
         package,
-        canonical_lane_names,
+        wrapped_lane_names,
         export_aliases,
     );
     lowerer.declare_functions()?;
     lowerer.lower_bodies()?;
     for lane in canonical_lanes {
         lowerer.synthesize_canonical_lane(lane)?;
+    }
+    if let Some(frame) = surface_frame {
+        lowerer.synthesize_surface_frame(frame)?;
     }
     let import_modules = lowerer.import_modules();
     Ok((lowerer.finish(), import_modules))
@@ -2167,7 +2174,7 @@ where
     func_map: FxHashMap<RuntimeInstance<'db>, FuncRef>,
     resource_element_cache: FxHashMap<TyId<'db>, GpuResourceElementType>,
     resource_type_cache: FxHashMap<TyId<'db>, Type>,
-    canonical_lane_names: HashSet<String>,
+    wrapped_lane_names: HashSet<String>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2194,7 +2201,7 @@ where
         builder: ModuleBuilder,
         isa: &'a I,
         package: &'a RuntimePackage<'db>,
-        canonical_lane_names: HashSet<String>,
+        wrapped_lane_names: HashSet<String>,
         export_aliases: &[(String, String)],
     ) -> Self {
         let mut prepared_bodies = prepare_inline_value_bodies(db, package).bodies;
@@ -2225,7 +2232,7 @@ where
             func_map: FxHashMap::default(),
             resource_element_cache: FxHashMap::default(),
             resource_type_cache: FxHashMap::default(),
-            canonical_lane_names,
+            wrapped_lane_names,
         }
     }
 
@@ -2488,10 +2495,10 @@ where
             }
         };
         let symbol = self.function_symbol(function.instance(self.db));
-        let linkage = if self.canonical_lane_names.contains(&symbol) {
-            // The host ABI is the synthesized `fe_cabi_*` wrapper. Its
-            // underlying typed Fe lane remains an internal implementation
-            // dependency even though it seeded the lane-specific package.
+        let linkage = if self.wrapped_lane_names.contains(&symbol) {
+            // The host ABI is a synthesized canonical or surface-frame
+            // wrapper. Its underlying typed Fe lane remains an internal
+            // implementation dependency even though it seeded the package.
             Linkage::Private
         } else {
             linkage_for_runtime(function.linkage(self.db))
@@ -2857,6 +2864,166 @@ where
                 fb.finish();
             }
         }
+        Ok(())
+    }
+
+    /// Lower Fe's `LatestPerFrame` capability to one fixed raw-batch ABI. The
+    /// browser writes untouched 40-byte `SurfaceEvent` records into exported
+    /// linear memory and calls this wrapper once per presentation opportunity.
+    /// Coalescing executes here in the generated Wasm module: movement and
+    /// wheel deltas accumulate while every other fact comes from the newest
+    /// record. The wrapper then calls the authored Fe transition exactly once.
+    fn synthesize_surface_frame(
+        &mut self,
+        frame: &super::WasmSurfaceFrame,
+    ) -> Result<(), LowerError> {
+        const EVENT_FIELDS: usize = 10;
+        const EVENT_STRIDE: i32 = 40;
+
+        let candidates = self
+            .func_map
+            .iter()
+            .filter(|(instance, _)| self.function_symbol(**instance) == frame.source)
+            .map(|(_, func_ref)| *func_ref)
+            .collect::<Vec<_>>();
+        let [callee] = candidates.as_slice() else {
+            return Err(LowerError::Unsupported(format!(
+                "surface frame `{}` must select exactly one lowered Fe transition (found {})",
+                frame.source,
+                candidates.len()
+            )));
+        };
+        let (callee_args, result_tys) = self.builder.sig(*callee, |signature| {
+            (signature.args().to_vec(), signature.ret_tys().to_vec())
+        });
+        let event_tys = [
+            Type::F32,
+            Type::F32,
+            Type::F32,
+            Type::F32,
+            Type::F32,
+            Type::I32,
+            Type::I32,
+            Type::F32,
+            Type::F32,
+            Type::F32,
+        ];
+        if callee_args.len() < EVENT_FIELDS || callee_args[..EVENT_FIELDS] != event_tys {
+            return Err(LowerError::Unsupported(format!(
+                "surface frame `{}` does not begin with the fixed SurfaceEvent scalar layout",
+                frame.source
+            )));
+        }
+        if result_tys.is_empty() {
+            return Err(LowerError::Unsupported(format!(
+                "surface frame `{}` must return complete actor state",
+                frame.source
+            )));
+        }
+
+        let mut wrapper_args = vec![Type::I32, Type::I32];
+        wrapper_args.extend_from_slice(&callee_args[EVENT_FIELDS..]);
+        let wrapper = self
+            .builder
+            .declare_function(Signature::new(
+                &frame.export,
+                Linkage::Public,
+                &wrapper_args,
+                &result_tys,
+            ))
+            .map_err(|error| {
+                LowerError::Internal(format!(
+                    "failed to declare surface frame wrapper `{}`: {error}",
+                    frame.export
+                ))
+            })?;
+
+        let is = self.isa.inst_set();
+        let mut fb = self.builder.func_builder::<InstInserter>(wrapper);
+        let entry = fb.append_block();
+        let initialize = fb.append_block();
+        let invalid = fb.append_block();
+        let header = fb.append_block();
+        let body = fb.append_block();
+        let done = fb.append_block();
+        fb.switch_to_block(entry);
+        let wrapper_values = fb.args().to_vec();
+        let events_ptr = wrapper_values[0];
+        let event_count = wrapper_values[1];
+        let zero = fb.make_imm_value(Immediate::I32(0));
+        let has_events = fb.insert_inst(Lt::new(is, zero, event_count), Type::I1);
+        fb.insert_inst_no_result(Br::new(is, has_events, initialize, invalid));
+
+        fb.switch_to_block(invalid);
+        fb.insert_inst_no_result(Unreachable::new(is));
+
+        fb.switch_to_block(initialize);
+        let mut initial = Vec::with_capacity(EVENT_FIELDS);
+        for (index, ty) in event_tys.into_iter().enumerate() {
+            let address = if index == 0 {
+                events_ptr
+            } else {
+                let offset = fb.make_imm_value(Immediate::I32((index as i32) * 4));
+                fb.insert_inst(Add::new(is, events_ptr, offset), Type::I32)
+            };
+            initial.push(fb.insert_inst(Mload::new(is, address, ty), ty));
+        }
+        let initialize_block = fb
+            .current_block()
+            .expect("surface frame initialization has a current block");
+        fb.insert_inst_no_result(Jump::new(is, header));
+
+        fb.switch_to_block(header);
+        let one = fb.make_imm_value(Immediate::I32(1));
+        let event_index = fb.insert_inst(Phi::new(is, vec![(one, initialize_block)]), Type::I32);
+        let mut coalesced = Vec::with_capacity(EVENT_FIELDS);
+        for (value, ty) in initial.into_iter().zip(event_tys) {
+            coalesced.push(fb.insert_inst(Phi::new(is, vec![(value, initialize_block)]), ty));
+        }
+        let more = fb.insert_inst(Lt::new(is, event_index, event_count), Type::I1);
+        fb.insert_inst_no_result(Br::new(is, more, body, done));
+
+        fb.switch_to_block(body);
+        let stride = fb.make_imm_value(Immediate::I32(EVENT_STRIDE));
+        let byte_offset = fb.insert_inst(Mul::new(is, event_index, stride), Type::I32);
+        let event_ptr = fb.insert_inst(Add::new(is, events_ptr, byte_offset), Type::I32);
+        let mut incoming = Vec::with_capacity(EVENT_FIELDS);
+        for (index, ty) in event_tys.into_iter().enumerate() {
+            let address = if index == 0 {
+                event_ptr
+            } else {
+                let offset = fb.make_imm_value(Immediate::I32((index as i32) * 4));
+                fb.insert_inst(Add::new(is, event_ptr, offset), Type::I32)
+            };
+            incoming.push(fb.insert_inst(Mload::new(is, address, ty), ty));
+        }
+        let mut next = incoming;
+        for index in [2usize, 3, 4] {
+            next[index] = fb.insert_inst(Fadd::new(is, coalesced[index], next[index]), Type::F32);
+        }
+        let next_index = fb.insert_inst(Add::new(is, event_index, one), Type::I32);
+        let body_block = fb
+            .current_block()
+            .expect("surface frame body has a current block");
+        fb.append_phi_arg(event_index, next_index, body_block);
+        for (phi, value) in coalesced.iter().copied().zip(next) {
+            fb.append_phi_arg(phi, value, body_block);
+        }
+        fb.insert_inst_no_result(Jump::new(is, header));
+
+        fb.switch_to_block(done);
+        let mut args = smallvec1::SmallVec::<[ValueId; 8]>::new();
+        args.extend(coalesced);
+        args.extend_from_slice(&wrapper_values[2..]);
+        let results = fb.insert_call_results(*callee, args);
+        if results.len() != result_tys.len() {
+            return Err(LowerError::Internal(
+                "surface frame call result arity changed after signature inspection".to_owned(),
+            ));
+        }
+        fb.insert_return_values(&results);
+        fb.seal_all();
+        fb.finish();
         Ok(())
     }
 

@@ -59,10 +59,20 @@ use crate::{
     test_output::{TestRootMetadataError, runtime_test_root_metadata},
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WasmSurfaceFrame {
+    source: String,
+    export: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WasmCompileOptions {
     canonical_arena: bool,
     canonical_lanes: Vec<crate::CanonicalLane>,
+    /// One compiler-lowered raw-event batch wrapper selected by a typed Fe
+    /// surface schedule. Its underlying Fe transition stays private; the
+    /// fixed wrapper export and linear memory are the browser contract.
+    surface_frame: Option<WasmSurfaceFrame>,
     /// Compiler-owned public ABI aliases. The selected Fe source name remains
     /// ordinary application vocabulary while a fixed host contract can
     /// discover its export without a side manifest.
@@ -99,6 +109,19 @@ impl WasmCompileOptions {
         self
     }
 
+    pub(crate) fn with_surface_frame(
+        mut self,
+        source: impl Into<String>,
+        export: impl Into<String>,
+    ) -> Self {
+        self.canonical_arena = true;
+        self.surface_frame = Some(WasmSurfaceFrame {
+            source: source.into(),
+            export: export.into(),
+        });
+        self
+    }
+
     pub fn with_export_alias(
         mut self,
         source: impl Into<String>,
@@ -130,6 +153,7 @@ pub fn compile_runtime_package_wasm_with_options(
             package,
             &options.canonical_lanes,
             &options.export_aliases,
+            options.surface_frame.as_ref(),
         )?;
     // Sonatina's `Pipeline` is ISA-independent (`EvmPipeline` is the
     // EVM-specific one) and `EvmCompile::optimize` runs it with no target

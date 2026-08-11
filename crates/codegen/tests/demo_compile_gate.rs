@@ -56,7 +56,7 @@ use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
     WebBindingAccess, WebBindingRole, WebBuildOptions, WebBundle, WebBundleError, WebBundleMode,
-    WebCanonicalPolicy, resolve_web_entry,
+    WebCanonicalPolicy, WebFeResponsibility, WebHostResponsibility, resolve_web_entry,
 };
 use hir::hir_def::HirIngot;
 use url::Url;
@@ -98,7 +98,7 @@ fn assert_scheduled_typed_surface(bundle: &WebBundle) {
     assert!(
         exports
             .iter()
-            .any(|name| name == "fe_surface_transition_latest_per_frame_v1"),
+            .any(|name| name == "fe_surface_transition_latest_per_frame_v2"),
         "the Fe-declared latest-per-frame transition must use its fixed host ABI"
     );
     assert!(
@@ -108,12 +108,43 @@ fn assert_scheduled_typed_surface(bundle: &WebBundle) {
         "a scheduled actor must not also export the immediate transition ABI"
     );
     assert!(
+        !exports
+            .iter()
+            .any(|name| name == "fe_surface_transition_latest_per_frame_v1"),
+        "the host-coalesced v1 scheduling ABI must be absent"
+    );
+    assert!(exports.iter().any(|name| name == "fe_cabi_alloc"));
+    assert!(exports.iter().any(|name| name == "fe_cabi_reset"));
+    assert!(
         !exports.iter().any(|name| name == "navigate"),
         "an ordinary Fe behavior name must not leak into the host ABI"
     );
     assert!(
         !exports.iter().any(|name| name == "update_view"),
         "the reserved legacy gesture export must be absent"
+    );
+    assert!(
+        bundle
+            .manifest
+            .provenance
+            .fe_responsibilities
+            .contains(&WebFeResponsibility::SchedulingPolicy)
+    );
+    assert!(
+        bundle
+            .manifest
+            .provenance
+            .fixed_host
+            .responsibilities
+            .contains(&WebHostResponsibility::PresentationClock)
+    );
+    assert!(
+        !bundle
+            .manifest
+            .provenance
+            .fixed_host
+            .responsibilities
+            .contains(&WebHostResponsibility::PresentationScheduler)
     );
 }
 
@@ -130,6 +161,44 @@ fn assert_initial_zoom(bundle: &WebBundle, expected: f32) {
     assert_eq!(zoom.init, Some(expected));
 }
 
+#[derive(Clone, Copy)]
+struct SurfaceEventFixture {
+    pointer_x: f32,
+    pointer_y: f32,
+    delta_x: f32,
+    delta_y: f32,
+    wheel_delta: f32,
+    wheel_mode: u32,
+    buttons: u32,
+    timestamp: f32,
+    width: f32,
+    height: f32,
+}
+
+fn write_surface_event_batch(
+    memory: &wasmtime::Memory,
+    store: &mut wasmtime::Store<()>,
+    pointer: usize,
+    events: &[SurfaceEventFixture],
+) {
+    let mut bytes = Vec::with_capacity(events.len() * 40);
+    for event in events {
+        bytes.extend_from_slice(&event.pointer_x.to_le_bytes());
+        bytes.extend_from_slice(&event.pointer_y.to_le_bytes());
+        bytes.extend_from_slice(&event.delta_x.to_le_bytes());
+        bytes.extend_from_slice(&event.delta_y.to_le_bytes());
+        bytes.extend_from_slice(&event.wheel_delta.to_le_bytes());
+        bytes.extend_from_slice(&event.wheel_mode.to_le_bytes());
+        bytes.extend_from_slice(&event.buttons.to_le_bytes());
+        bytes.extend_from_slice(&event.timestamp.to_le_bytes());
+        bytes.extend_from_slice(&event.width.to_le_bytes());
+        bytes.extend_from_slice(&event.height.to_le_bytes());
+    }
+    memory
+        .write(store, pointer, &bytes)
+        .expect("write raw SurfaceEvent batch");
+}
+
 /// Execute the fixed surface ABI used by the four scalar-state gallery actors.
 /// The mixed event facts precede the complete actor state, exactly as the
 /// browser host supplies them; a four-value reply proves that `res` is no
@@ -142,24 +211,53 @@ fn call_four_state_transition(
     state: [f32; 4],
     width: f32,
 ) -> [f32; 4] {
+    call_four_state_batch(
+        bundle,
+        &[SurfaceEventFixture {
+            pointer_x: 123.25,
+            pointer_y: 87.5,
+            delta_x,
+            delta_y,
+            wheel_delta,
+            wheel_mode: 1,
+            buttons: 1,
+            timestamp: 456.75,
+            width,
+            height: 480.0,
+        }],
+        state,
+    )
+}
+
+fn call_four_state_batch(
+    bundle: &WebBundle,
+    events: &[SurfaceEventFixture],
+    state: [f32; 4],
+) -> [f32; 4] {
+    assert!(
+        !events.is_empty(),
+        "surface frame fixture requires an event"
+    );
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, &bundle.wasm).expect("control Wasm module");
     let mut store = wasmtime::Store::new(&engine, ());
     let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("control instance");
     let transition = instance
-        .get_func(&mut store, "fe_surface_transition_latest_per_frame_v1")
+        .get_func(&mut store, "fe_surface_transition_latest_per_frame_v2")
         .expect("scheduled typed surface transition export");
+    let memory = instance
+        .get_memory(&mut store, "memory")
+        .expect("scheduled transition exports linear memory");
+    let alloc = instance
+        .get_typed_func::<(i32, i32), i32>(&mut store, "fe_cabi_alloc")
+        .expect("scheduled transition exports fixed allocator");
+    let event_pointer = alloc
+        .call(&mut store, ((events.len() * 40) as i32, 4))
+        .expect("allocate raw SurfaceEvent batch") as usize;
+    write_surface_event_batch(&memory, &mut store, event_pointer, events);
     let mut values = vec![
-        wasmtime::Val::F32(123.25f32.to_bits()), // pointer_x
-        wasmtime::Val::F32(87.5f32.to_bits()),   // pointer_y
-        wasmtime::Val::F32(delta_x.to_bits()),
-        wasmtime::Val::F32(delta_y.to_bits()),
-        wasmtime::Val::F32(wheel_delta.to_bits()),
-        wasmtime::Val::I32(1), // wheel_mode
-        wasmtime::Val::I32(1), // buttons
-        wasmtime::Val::F32(456.75f32.to_bits()),
-        wasmtime::Val::F32(width.to_bits()),
-        wasmtime::Val::F32(480.0f32.to_bits()),
+        wasmtime::Val::I32(event_pointer as i32),
+        wasmtime::Val::I32(events.len() as i32),
     ];
     values.extend(
         state
@@ -447,7 +545,7 @@ fn perturbational_mandelbrot_graph_compiles() {
     assert!(
         exports
             .iter()
-            .any(|name| name == "fe_surface_transition_latest_per_frame_v1"),
+            .any(|name| name == "fe_surface_transition_latest_per_frame_v2"),
         "the Fe-declared latest-per-frame transition must use its fixed, versioned host ABI"
     );
     assert!(
@@ -512,8 +610,17 @@ fn perturbational_mandelbrot_graph_compiles() {
     let instance = wasmtime::Instance::new(&mut store, &module, &[])
         .expect("wasmtime should instantiate perturbational control");
     let transition = instance
-        .get_func(&mut store, "fe_surface_transition_latest_per_frame_v1")
+        .get_func(&mut store, "fe_surface_transition_latest_per_frame_v2")
         .expect("typed perturbational surface transition export");
+    let memory = instance
+        .get_memory(&mut store, "memory")
+        .expect("scheduled perturbational transition exports linear memory");
+    let alloc = instance
+        .get_typed_func::<(i32, i32), i32>(&mut store, "fe_cabi_alloc")
+        .expect("scheduled perturbational transition exports fixed allocator");
+    let event_pointer = alloc
+        .call(&mut store, (40, 4))
+        .expect("allocate perturbational SurfaceEvent slot") as usize;
     let mut cx = [-0.7436439f32, -7.146717e-9, -3e-16, -2e-23];
     let mut cy = [0.13182591f32, -4.8132045e-9, 2.5e-16, 1.5e-23];
     let mut zoom = 1.0f32;
@@ -528,17 +635,26 @@ fn perturbational_mandelbrot_graph_compiles() {
     ];
     let mut results = vec![wasmtime::Val::F32(0); 10];
     for (step, (dx, dy, wheel_delta, mx, my)) in events.into_iter().enumerate() {
+        write_surface_event_batch(
+            &memory,
+            &mut store,
+            event_pointer,
+            &[SurfaceEventFixture {
+                pointer_x: mx,
+                pointer_y: my,
+                delta_x: dx,
+                delta_y: dy,
+                wheel_delta,
+                wheel_mode: (step % 3) as u32,
+                buttons: 1,
+                timestamp: step as f32 * 4.0,
+                width: res,
+                height: res,
+            }],
+        );
         let mut vals = vec![
-            wasmtime::Val::F32(mx.to_bits()),
-            wasmtime::Val::F32(my.to_bits()),
-            wasmtime::Val::F32(dx.to_bits()),
-            wasmtime::Val::F32(dy.to_bits()),
-            wasmtime::Val::F32(wheel_delta.to_bits()),
-            wasmtime::Val::I32((step % 3) as i32),
+            wasmtime::Val::I32(event_pointer as i32),
             wasmtime::Val::I32(1),
-            wasmtime::Val::F32((step as f32 * 4.0).to_bits()),
-            wasmtime::Val::F32(res.to_bits()),
-            wasmtime::Val::F32(res.to_bits()),
             wasmtime::Val::I64(0),
         ];
         vals.extend(
@@ -674,6 +790,57 @@ fn cga3d_sketch_compiles() {
             1.6f32 * 0.875,
             640.0,
         ]
+    );
+    assert_eq!(
+        call_four_state_batch(
+            &bundle,
+            &[
+                SurfaceEventFixture {
+                    pointer_x: 10.0,
+                    pointer_y: 20.0,
+                    delta_x: 4.0,
+                    delta_y: -3.0,
+                    wheel_delta: 0.0,
+                    wheel_mode: 0,
+                    buttons: 1,
+                    timestamp: 1.0,
+                    width: 512.0,
+                    height: 512.0,
+                },
+                SurfaceEventFixture {
+                    pointer_x: 14.0,
+                    pointer_y: 17.0,
+                    delta_x: -1.0,
+                    delta_y: 9.0,
+                    wheel_delta: -120.0,
+                    wheel_mode: 1,
+                    buttons: 3,
+                    timestamp: 2.0,
+                    width: 600.0,
+                    height: 500.0,
+                },
+                SurfaceEventFixture {
+                    pointer_x: 18.0,
+                    pointer_y: 30.0,
+                    delta_x: 8.0,
+                    delta_y: 2.0,
+                    wheel_delta: -40.0,
+                    wheel_mode: 2,
+                    buttons: 0,
+                    timestamp: 3.0,
+                    width: 640.0,
+                    height: 480.0,
+                },
+            ],
+            [0.15, 0.6, 1.6, 512.0],
+        ),
+        [
+            0.15f32 + 11.0 * 0.0025,
+            0.6f32 + 8.0 * 0.01,
+            1.6f32 * 0.875,
+            640.0,
+        ],
+        "generated Wasm must accumulate motion/wheel and preserve newest raw facts"
     );
 }
 
@@ -957,7 +1124,7 @@ fn mandelbrot_typed_surface_abi_is_manifest_free() {
     assert!(
         exports
             .iter()
-            .any(|name| name == "fe_surface_transition_latest_per_frame_v1")
+            .any(|name| name == "fe_surface_transition_latest_per_frame_v2")
     );
     assert!(
         !exports
@@ -977,7 +1144,7 @@ fn mandelbrot_typed_surface_abi_is_manifest_free() {
     assert!(
         !wasm_function_export_names(&plain.wasm).iter().any(|name| {
             name == "fe_surface_transition_v1"
-                || name == "fe_surface_transition_latest_per_frame_v1"
+                || name == "fe_surface_transition_latest_per_frame_v2"
         }),
         "a non-interactive sketch must not acquire a typed transition export"
     );
@@ -1013,12 +1180,21 @@ fn mandelbrot_typed_surface_transition_matches_oracle_over_event_tape() {
     let mut store = wasmtime::Store::new(&engine, ());
     let instance = wasmtime::Instance::new(&mut store, &module, &[])
         .expect("wasmtime should instantiate the mandelbrot sketch wasm");
-    // The fixed ABI is ten event leaves (eight f32 + two i32), then ten actor
-    // state f32s, returning the complete ten-f32 state. The arity exceeds
-    // wasmtime's typed-tuple ergonomics, so use the untyped `Val` path.
+    // The fixed scheduled ABI is `(event_pointer, event_count)`, then ten actor
+    // state f32s, returning the complete ten-f32 state. Raw event records are
+    // transported through exported memory and coalesced inside generated Wasm.
     let transition = instance
-        .get_func(&mut store, "fe_surface_transition_latest_per_frame_v1")
+        .get_func(&mut store, "fe_surface_transition_latest_per_frame_v2")
         .expect("typed surface transition export");
+    let memory = instance
+        .get_memory(&mut store, "memory")
+        .expect("scheduled transition exports linear memory");
+    let alloc = instance
+        .get_typed_func::<(i32, i32), i32>(&mut store, "fe_cabi_alloc")
+        .expect("scheduled transition exports fixed allocator");
+    let event_pointer = alloc
+        .call(&mut store, (40, 4))
+        .expect("allocate Mandelbrot SurfaceEvent slot") as usize;
 
     // The tape's own start state (independent of view()'s deep init): a shallow
     // centre so pan actually reaches the centre clamps. Each axis is a four-word
@@ -1064,21 +1240,27 @@ fn mandelbrot_typed_surface_transition_matches_oracle_over_event_tape() {
             (0.0, 0.0, -1.0, res / 2.0, res / 2.0)
         };
 
-        // SurfaceEvent declaration order, followed by actor declaration order.
-        // `wheel_delta` remains raw; Fe interprets its sign. Mode/buttons/time
-        // are intentionally varied/inert facts to ensure their mixed i32/f32
-        // transport slots are real even though this transition ignores them.
+        write_surface_event_batch(
+            &memory,
+            &mut store,
+            event_pointer,
+            &[SurfaceEventFixture {
+                pointer_x: mx,
+                pointer_y: my,
+                delta_x: dx,
+                delta_y: dy,
+                wheel_delta: dzoom,
+                wheel_mode: (step % 3) as u32,
+                buttons: (step % 2) as u32,
+                timestamp: step as f32 * 0.25,
+                width: res,
+                height: res,
+            }],
+        );
+        // Fixed batch pointer/count followed by actor declaration order.
         let mut vals = vec![
-            wasmtime::Val::F32(mx.to_bits()),
-            wasmtime::Val::F32(my.to_bits()),
-            wasmtime::Val::F32(dx.to_bits()),
-            wasmtime::Val::F32(dy.to_bits()),
-            wasmtime::Val::F32(dzoom.to_bits()),
-            wasmtime::Val::I32((step % 3) as i32),
-            wasmtime::Val::I32((step % 2) as i32),
-            wasmtime::Val::F32((step as f32 * 0.25).to_bits()),
-            wasmtime::Val::F32(res.to_bits()),
-            wasmtime::Val::F32(res.to_bits()),
+            wasmtime::Val::I32(event_pointer as i32),
+            wasmtime::Val::I32(1),
         ];
         vals.extend(
             [
