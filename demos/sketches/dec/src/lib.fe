@@ -54,8 +54,14 @@
 
 use core::marker::Copy
 use core::{HostEffect, MainThread, Worker}
-use std::webgpu::{Dispatch, FragmentSurface, GpuProgram, WebGpuBackend}
-use std::web::view::{Extent, Param, Surface}
+use std::webgpu::{
+    Dispatch, FragmentSurface, GpuProgram, LatestPerFrame, SurfaceTransition,
+    WebGpuBackend,
+}
+use std::web::view::{
+    ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface,
+    SurfaceEvent, SurfaceState,
+}
 use fmath::{clamp01, from_i32, palette, rgba, sqrt}
 
 // ---------------------------------------------------------------------------
@@ -791,6 +797,36 @@ struct DecParams {
     res: Param,
 }
 
+struct DecViewState {
+    c0: f32, c1: f32, c2: f32, c3: f32,
+    c4: f32, c5: f32, c6: f32,
+    show_laplacian: f32,
+    res: f32,
+}
+
+impl SurfaceState for DecViewState {
+    type Params = DecParams
+}
+
+derive ApplyParamBindings for DecViewState using ParamBindingsProvider
+
+const fn dec_params() -> DecParams {
+    DecParams {
+        c0: Param::range(min: -1.0, max: 1.0, init: 1.0)
+            .drag_x(per_px: 0.005),
+        c1: Param::range(min: -1.0, max: 1.0, init: 0.0)
+            .drag_y(per_px: 0.005),
+        c2: Param::range(min: -1.0, max: 1.0, init: 0.0),
+        c3: Param::range(min: -1.0, max: 1.0, init: 0.0),
+        c4: Param::range(min: -1.0, max: 1.0, init: 0.0),
+        c5: Param::range(min: -1.0, max: 1.0, init: 0.0),
+        c6: Param::range(min: -1.0, max: 1.0, init: 0.0),
+        show_laplacian: Param::int(min: 0.0, max: 1.0, init: 0.0)
+            .wheel(per_notch: 1.0),
+        res: Param::extent_x(),
+    }
+}
+
 actor DecSurface uses (GpuProgram<WebGpuBackend>) {
     /// 0-cochain value at the hexagon's centre vertex.
     c0: f32,
@@ -807,18 +843,19 @@ actor DecSurface uses (GpuProgram<WebGpuBackend>) {
     const fn view() -> Surface<DecParams> {
         Surface {
             extent: Extent::square(512),
-            params: DecParams {
-                c0: Param::range(min: -1.0, max: 1.0, init: 1.0),
-                c1: Param::range(min: -1.0, max: 1.0, init: 0.0),
-                c2: Param::range(min: -1.0, max: 1.0, init: 0.0),
-                c3: Param::range(min: -1.0, max: 1.0, init: 0.0),
-                c4: Param::range(min: -1.0, max: 1.0, init: 0.0),
-                c5: Param::range(min: -1.0, max: 1.0, init: 0.0),
-                c6: Param::range(min: -1.0, max: 1.0, init: 0.0),
-                show_laplacian: Param::int(min: 0.0, max: 1.0, init: 0.0),
-                res: Param::extent_x(),
-            },
+            params: dec_params(),
         }
+    }
+
+    fn navigate(self, event: own SurfaceEvent) -> DecViewState
+        uses (SurfaceTransition, LatestPerFrame)
+    {
+        DecViewState {
+            c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3,
+            c4: self.c4, c5: self.c5, c6: self.c6,
+            show_laplacian: self.show_laplacian,
+            res: self.res,
+        }.apply_param_bindings(dec_params(), event)
     }
 
     /// The fragment behavior: the render program's per-pixel stage. The

@@ -32,25 +32,51 @@ Origin: honesty audit of Claude Code session
   parity.
 - The first Phase 2/3 scheduling and resident-state slice is implemented
   without manifest growth.
-  All six interactive canonical gallery actors declare `LatestPerFrame` as a
+  All eight parameterized canonical gallery actors declare `LatestPerFrame` as a
   Fe capability on `navigate`. The compiler now lowers that choice to the
-  fixed v3 frame export: the generic host writes untouched 40-byte raw event
+  fixed v4 frame export: the generic host writes untouched 52-byte raw event
   records into exported memory and crosses into Wasm once at the presentation
   boundary; the generated wrapper accumulates movement/wheel facts, keeps the
   newest remaining facts, and invokes the authored Fe transition once. A
   deterministic host conformance tape proves the raw records remain separate
   in transport and a burst makes zero Fe calls while collecting, then exactly
   one Fe call and one render at flush. An independent Wasmtime three-event
-  burst proves coalescing occurs in generated Wasm. CGA3D, QCGA, Desargues, and
-  plasma join both Mandelbrots on the nominal `SurfaceEvent`, complete-state,
-  manifest-free path. The generated module now keeps complete non-resource
-  actor state in private Wasm globals. A fixed companion export seeds or
-  explicitly replaces that state at initialization, extent, and parameter-edit
+  burst proves coalescing occurs in generated Wasm. CGA3D, QCGA, Desargues,
+  plasma, gradient, and DEC join both Mandelbrots on the nominal
+  `SurfaceEvent`, complete-state, manifest-free path. The generated module now
+  keeps complete non-resource actor state in private Wasm globals. A fixed
+  companion export seeds or
+  explicitly replaces that state at initialization, extent, and restoration
   boundaries; frame calls carry only the raw batch and inert external resource
-  slots. JavaScript retains the returned values only as a presentation
-  mirror for GPU uniform upload. Animation-frame/GPU-completion facts and their
-  clock state machine have not yet been exposed as typed events to the resident
-  Fe actor.
+  slots. Slider and scripted edits enter that same transition as raw
+  `event_kind`/`param_index`/`param_value` facts, after any older pending gesture,
+  and never use state replacement for typed actors. JavaScript retains returned
+  values only as a presentation mirror for GPU uniform upload.
+- The fluent Phase 1 parameter interface is implemented in Fe without a new
+  manifest protocol. `Param::{drag_x, drag_y, wheel, wheel_scale}` compose with
+  a reflection/provider-derived `ApplyParamBindings` transition; parameter
+  kind policy, bounds, robust angle wrapping, ties-to-even integer rounding,
+  and extent values execute in Fe. A new fieldless-enum Wasm value lane is
+  generic rather than `ParamKind`-specific. A standalone new-actor gate proves
+  the mechanism needs only Fe source and that private binding/provider details
+  do not leak into the generated JSON audit envelope. Pinch remains open.
+- The fixed host has a deterministic 52-byte transport/order tape. Independent
+  Wasmtime gates cover direct edits, all simple gallery bindings, both
+  high-precision Mandelbrot transitions, provider name drift, and partial-state
+  rejection. The complete 25-test gallery gate is green; the perturbational
+  receipt remains 456,259-byte reference WGSL plus 45,239-byte fragment WGSL,
+  and the brute 3,520-event tape remains bit-exact at every step.
+- Cold multi-tile builds now reuse only content-keyed *clean* dependency
+  diagnostic proofs across fresh compiler databases. The key covers the
+  dependency's transitive Fe/config closure, resolved edges, workspace profile,
+  arithmetic mode, and parser recovery mode; failures and DB-bound diagnostics
+  are never cached. A cache-disabled release precompile built all ten gallery
+  bundles in 105 seconds, with repeated shared checks reporting 0--1 ms, and
+  the verifier accepted all ten modules and 34 publication files.
+- Animation-frame/GPU-completion facts and their clock state machine have not
+  yet been exposed as typed events to the resident Fe actor. Native/Cranelift
+  parity, typed lifecycle/reactive streams, pointer capture, picking/messages,
+  Fe page composition, and runtime-manifest removal remain open.
 
 This ledger records achieved evidence, not a relaxation of the phases or the
 Definition of done below.
@@ -118,10 +144,11 @@ application or Fe-native event system.
 - The brute Mandelbrot's fixed-precision orbit and adaptive precision policy.
 - The perturbational Mandelbrot's `Fixed<8>` reference pass, binary32 delta
   pass, reanchoring/cancellation logic, and color policy.
-- Control arithmetic in all six interactive actors' typed `navigate`
-  behaviors: pan sensitivity, zoom curves, clamps, cursor anchoring, and
-  high-precision center updates. These behaviors compile from Fe to Wasm, and
-  their `LatestPerFrame` choice is declared in Fe.
+- Control arithmetic in all eight parameterized actors' typed `navigate`
+  behaviors: fluent affine bindings and parameter-kind policy, plus the
+  Mandelbrots' specialized pan sensitivity, zoom curves, clamps, cursor
+  anchoring, and high-precision center updates. These behaviors compile from
+  Fe to Wasm, and their `LatestPerFrame` choice is declared in Fe.
 - CTFE-projected parameter names, ranges, initial values, kinds, and extents.
 
 ### Fixed JavaScript host today
@@ -136,7 +163,7 @@ application or Fe-native event system.
   migrated to the canonical path;
 - fixed raw-event batch memory transport plus legacy positional argument
   construction for examples not yet migrated;
-- resident-state initialization/explicit replacement, returned presentation
+- resident-state initialization/extent/restoration, returned presentation
   snapshots, plus legacy state couriering/result blitting for unmigrated paths;
 - animation-frame/GPU-completion clock delivery and presentation gating;
 - WebGPU adapter/device acquisition, loss recovery, buffer allocation, pipeline
@@ -155,8 +182,9 @@ asks us to absorb.
   `requestAnimationFrame`/GPU-completion clock; the Wasm wrapper coalesces and
   invokes the authored Fe transition once per permitted frame. Complete actor
   state is resident in private Wasm globals; JavaScript keeps only a GPU-upload
-  mirror and supplies explicit initialization/parameter changes. The browser
-  clock state machine is not resident in Fe yet.
+  mirror and supplies explicit initialization/extent/restoration. Slider and
+  scripted changes are raw typed events handled by the same Fe transition. The
+  browser clock state machine is not resident in Fe yet.
 - Cursor-anchored pan/zoom mathematics is Fe; cursor acquisition,
   normalization, drag state, and timing are JavaScript.
 - The gallery is not using Rust-Wasm to fake its renderers. `fe web dev` and
@@ -169,7 +197,7 @@ asks us to absorb.
 - The safe `std::web` facade intentionally does not yet expose callbacks,
   events, promises, or asynchronous operations.
 
-## The lost parameter interface
+## The recovered parameter interface
 
 The v5 design intended fluent Fe declarations such as:
 
@@ -179,9 +207,14 @@ theta: Param::angle(init: 0.6).drag_x(per_px: 0.01),
 zoom: Param::range(min: 0.5, max: 4.0, init: 1.6).pinch(),
 ```
 
-That interface did not land. `ingots/std/src/web/view.fe` still says gesture
-bindings are future work. It was originally replaced by the narrower
-`UpdateSurface` bridge:
+The affine portion of that interface now lands as ordinary Fe library code:
+`drag_x`, `drag_y`, `wheel`, and `wheel_scale`. A generic reflection provider
+matches parameter/state labels and derives one complete-state transition, so
+mouse, wheel, slider, scripted edits, and Wasmtime tests share the same Fe
+policy path. Binding metadata is private Fe data and is not projected into the
+runtime manifest. `pinch()` and typed multi-pointer facts remain to be added.
+
+The narrower legacy `UpdateSurface` bridge still exists for compatibility:
 
 ```fe
 fn update_view(self, dx: f32, dy: f32, dzoom: f32, mx: f32, my: f32)
@@ -191,8 +224,8 @@ That compatibility path still recognizes exactly the argument names `dx`,
 `dy`, `dzoom`, `mx`, and `my`; accepts only scalar `f32` results; and maps the
 result to a leading subset of actor state. Its manifest and runtime mediate the
 call with string-valued `drag`, `wheel`, `pointer`, `state`, and `resource`
-sources. No curated sketch uses it now: all six interactive canonical actors
-use the nominal typed event and complete-state transition instead.
+sources. No curated sketch uses it now: all eight parameterized canonical
+actors use the nominal typed event and complete-state transition instead.
 
 The capability-marked Fe behavior is a sound intermediate step. The
 reserved-name, positional, scalar-only ABI is bespoke surface area to remove.
@@ -202,15 +235,16 @@ reserved-name, positional, scalar-only ABI is bespoke surface area to remove.
 ### Canonical `demos/gallery.html`
 
 - Ten tiles are sourced from Fe ingots.
-- Six tiles have typed Fe `SurfaceTransition` controls and Fe-declared
+- Eight tiles have typed Fe `SurfaceTransition` controls and Fe-declared
   `LatestPerFrame` scheduling. None emits the legacy JSON `control` block.
 - Known-color and rollcall are pure Fe-derived GPU graphs with no Wasm module.
 - Perturbational Mandelbrot is a two-pass Fe GPU graph; its Wasm is the typed
   Fe control lane only.
 - No tile has its own `main.js`.
 - The page remains authored HTML/CSS. The former handwritten inline
-  source/WGSL/manifest viewer has been removed; the fixed host owns artifact
-  inspection.
+  source/WGSL/manifest viewer has been removed. Restoring it as an actor-like
+  Fe web component is the first planned consumer of the page/component path;
+  the fixed runtime still consumes the transitional render manifest today.
 - `qcga_pencil` remains excluded because vertex/fragment plus typed
   pick/message lanes have not landed.
 - DEC contains Worker/message-shaped Fe functions, but the gallery currently
@@ -273,16 +307,18 @@ Chosen first-slice ABI (no new manifest protocol):
 
 - `std::web::SurfaceEvent` is an attributed Fe record of raw browser facts:
   pointer, movement delta, raw wheel delta and mode, buttons, timestamp, and
-  backing extent.
+  backing extent, plus untouched direct-parameter proposals identified by a
+  fixed event-kind discriminant and declaration-order parameter index.
 - A `SurfaceTransition` behavior takes exactly that one context record and
   returns a named Fe record matching the actor's complete non-resource state.
 - The compiler validates both record shapes from resolved semantic types and
   exports the transition under one fixed, versioned Wasm ABI symbol. The source
   behavior name is ordinary Fe and is not part of the host contract.
-- The fixed host discovers that export directly, transports the fixed event
-  layout, and replaces the complete returned state in declaration order. It
-  does not consult a `control` manifest block, argument-source strings, or
-  result-field names.
+- The fixed host discovers that export directly and transports the fixed event
+  layout. The generated module commits the complete returned state in
+  declaration order; the host keeps only a presentation mirror. Neither side
+  consults a `control` manifest block, argument-source strings, or result-field
+  names.
 - The old `UpdateSurface` projection remains only as a migration compatibility
   path for examples not yet converted, and is deleted after the gallery sweep.
 
@@ -301,11 +337,14 @@ Chosen first-slice ABI (no new manifest protocol):
        timestamp: f32,
        width: f32,
        height: f32,
+       event_kind: u32,
+       param_index: u32,
+       param_value: f32,
    }
    ```
 
    The first executable slice keeps this boundary record deliberately flat and
-   takes it as `event: own SurfaceEvent`. That gives the Wasm value lane ten
+   takes it as `event: own SurfaceEvent`. That gives the Wasm value lane thirteen
    direct scalar leaves and keeps Fe handlers readable; nested convenience
    records can remain ordinary library views built inside Fe when the general
    canonical record lane is ready.

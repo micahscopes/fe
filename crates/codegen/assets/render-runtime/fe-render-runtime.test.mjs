@@ -16,10 +16,12 @@ test("fixed host writes untouched SurfaceEvent records in the versioned memory l
     {
       mx: 10, my: 20, dx: 4, dy: -3, wheelDelta: -120,
       wheelMode: 2, buttons: 3, timestamp: 1.25, width: 512, height: 256,
+      eventKind: 0, paramIndex: 0, paramValue: 0,
     },
     {
       mx: 14, my: 17, dx: -1, dy: 9, wheelDelta: 40,
       wheelMode: 1, buttons: 0, timestamp: 2.5, width: 640, height: 480,
+      eventKind: 0, paramIndex: 0, paramValue: 0,
     },
   ];
   const before = structuredClone(events);
@@ -36,8 +38,11 @@ test("fixed host writes untouched SurfaceEvent records in the versioned memory l
     timestamp: view.getFloat32(base + 28, true),
     width: view.getFloat32(base + 32, true),
     height: view.getFloat32(base + 36, true),
+    eventKind: view.getUint32(base + 40, true),
+    paramIndex: view.getUint32(base + 44, true),
+    paramValue: view.getFloat32(base + 48, true),
   });
-  assert.deepEqual([decode(64), decode(104)], events);
+  assert.deepEqual([decode(64), decode(116)], events);
   assert.deepEqual(events, before);
 });
 
@@ -93,7 +98,7 @@ test("a burst crosses into the Fe transition once at the presentation boundary",
     transitionArgCounts.push(args.length);
     const view = new DataView(surface._surfaceTransitionMemory.buffer);
     transportedEvents = Array.from({ length: count }, (_, index) => {
-      const base = pointer + index * 40;
+      const base = pointer + index * 52;
       return {
         mx: view.getFloat32(base, true),
         my: view.getFloat32(base + 4, true),
@@ -105,6 +110,9 @@ test("a burst crosses into the Fe transition once at the presentation boundary",
         timestamp: view.getFloat32(base + 28, true),
         width: view.getFloat32(base + 32, true),
         height: view.getFloat32(base + 36, true),
+        eventKind: view.getUint32(base + 40, true),
+        paramIndex: view.getUint32(base + 44, true),
+        paramValue: view.getFloat32(base + 48, true),
       };
     });
     residentState += 1;
@@ -131,19 +139,22 @@ test("a burst crosses into the Fe transition once at the presentation boundary",
 
   assert.equal(transitionCalls, 1);
   assert.equal(renders, 1);
-  assert.deepEqual(allocations, [[160, 4]]);
+  assert.deepEqual(allocations, [[208, 4]]);
   assert.deepEqual(transportedEvents, [
     {
       mx: 100, my: 110, dx: 3, dy: -2, wheelDelta: 0,
       wheelMode: 0, buttons: 1, timestamp: 1, width: 512, height: 256,
+      eventKind: 0, paramIndex: 0, paramValue: 0,
     },
     {
       mx: 104, my: 118, dx: 4, dy: 8, wheelDelta: -120,
       wheelMode: 1, buttons: 1, timestamp: 2, width: 512, height: 256,
+      eventKind: 0, paramIndex: 0, paramValue: 0,
     },
     {
       mx: 109, my: 117, dx: 5, dy: -1, wheelDelta: -40,
       wheelMode: 1, buttons: 0, timestamp: 3, width: 512, height: 256,
+      eventKind: 0, paramIndex: 0, paramValue: 0,
     },
   ]);
   assert.deepEqual(surface._uniforms, [42]);
@@ -165,4 +176,49 @@ test("a burst crosses into the Fe transition once at the presentation boundary",
   assert.deepEqual(surface._uniforms, [43]);
   assert.deepEqual(stateReplacementCalls, [[41]]);
   assert.deepEqual(transitionArgCounts, [2, 2]);
+});
+
+test("scripted parameter edits enter the typed Fe transition without replacing resident state", () => {
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._fsm = "live";
+  surface._surfaceTransitionKernel = () => {};
+  surface._surfaceTransitionSchedule = "latest_per_frame";
+  surface._pendingSurfaceEvents = [{ eventKind: 0, marker: "prior gesture" }];
+  surface._gestureDirty = true;
+  surface._backingWidth = 640;
+  surface._backingHeight = 480;
+  surface._uniforms = [3];
+  surface._memberIndexByName = new Map([["steps", 0]]);
+  const transported = [];
+  surface._runSurfaceFrame = events => {
+    transported.push(structuredClone(events));
+    return events[0].eventKind === 0
+      ? [4] // independent stand-in for the prior authored Fe gesture result
+      : [5]; // independent stand-in for the authored Fe edit result
+  };
+  let renders = 0;
+  surface._render = next => {
+    assert.equal(next, undefined, "Fe results must not re-enter the replacement boundary");
+    renders += 1;
+  };
+  surface._replaceSurfaceState = () => {
+    throw new Error("parameter edits must not replace resident state from JavaScript");
+  };
+
+  surface.params.steps = 4.6;
+
+  assert.equal(renders, 1);
+  assert.deepEqual(surface._uniforms, [5]);
+  assert.deepEqual(transported[0], [{ eventKind: 0, marker: "prior gesture" }]);
+  assert.equal(transported[1].length, 1);
+  assert.deepEqual(
+    {
+      eventKind: transported[1][0].eventKind,
+      paramIndex: transported[1][0].paramIndex,
+      paramValue: transported[1][0].paramValue,
+      width: transported[1][0].width,
+      height: transported[1][0].height,
+    },
+    { eventKind: 1, paramIndex: 0, paramValue: 4.6, width: 640, height: 480 },
+  );
 });

@@ -208,11 +208,14 @@ pub fn compile(request: &CompileRequest) -> Result<WebBundle, String> {
         let phase_started = Instant::now();
         let mut seen = HashSet::from([ingot_url.clone()]);
         let dependency_issues = DependencyIssues::collect(&db, &ingot_url, &mut seen);
+        let dependency_stats = dependency_issues.stats();
         if !dependency_issues.is_empty() {
             tracing::warn!(
                 target: "fe_web",
                 phase = "dependency_diagnostics",
                 source = %path,
+                analyzed = dependency_stats.analyzed,
+                reused = dependency_stats.reused,
                 elapsed_ms = phase_started.elapsed().as_millis() as u64,
                 "dependency diagnostics prevent web build"
             );
@@ -226,6 +229,8 @@ pub fn compile(request: &CompileRequest) -> Result<WebBundle, String> {
             phase = "dependency_diagnostics",
             source = %path,
             ingots = seen.len(),
+            analyzed = dependency_stats.analyzed,
+            reused = dependency_stats.reused,
             elapsed_ms = phase_started.elapsed().as_millis() as u64,
             "dependency diagnostics clean"
         );
@@ -976,13 +981,15 @@ mod tests {
     fn ingot_web_build_rejects_diagnostics_in_unused_dependency() {
         let temp = tempfile::tempdir().unwrap();
         let app = temp.path().join("app");
-        let dependency = temp.path().join("broken_dependency");
+        let dependency = temp.path().join("checked_dependency");
+        let transitive = temp.path().join("broken_dependency");
         std::fs::create_dir_all(app.join("src")).unwrap();
         std::fs::create_dir_all(dependency.join("src")).unwrap();
+        std::fs::create_dir_all(transitive.join("src")).unwrap();
         std::fs::write(
             app.join("fe.toml"),
             "[ingot]\nname = \"web_app\"\nversion = \"0.1.0\"\n\n\
-             [dependencies]\nbroken = { path = \"../broken_dependency\" }\n",
+             [dependencies]\nchecked = { path = \"../checked_dependency\" }\n",
         )
         .unwrap();
         std::fs::write(
@@ -992,31 +999,108 @@ mod tests {
         .unwrap();
         std::fs::write(
             dependency.join("fe.toml"),
-            "[ingot]\nname = \"broken_dependency\"\nversion = \"0.1.0\"\n",
+            "[ingot]\nname = \"checked_dependency\"\nversion = \"0.1.0\"\n\n\
+             [dependencies]\nbroken = { path = \"../broken_dependency\" }\n",
         )
         .unwrap();
         std::fs::write(
             dependency.join("src/lib.fe"),
-            "pub fn unused_but_invalid() -> i32 { missing_value }\n",
+            "pub fn unused_wrapper() -> i32 { 7 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            transitive.join("fe.toml"),
+            "[ingot]\nname = \"broken_dependency\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            transitive.join("src/lib.fe"),
+            "pub fn unused_but_valid() -> i32 { 42 }\n",
         )
         .unwrap();
 
         let app = Utf8PathBuf::from_path_buf(app).unwrap();
-        let error = compile(&CompileRequest {
-            path: app,
-            entry: Some("shade".to_owned()),
-            mode: Some(WebMode::Render),
-            workgroup: [None, None, None],
-            source_id: None,
-            canonical: WebCanonicalPolicy::Disabled,
-            canonical_entries: Vec::new(),
-        })
-        .unwrap_err();
+        let dependency_url = Url::from_directory_path(
+            dependency
+                .canonicalize()
+                .expect("dependency path must canonicalize"),
+        )
+        .expect("dependency path must be a file URL");
+        let transitive_url = Url::from_directory_path(
+            transitive
+                .canonicalize()
+                .expect("transitive dependency path must canonicalize"),
+        )
+        .expect("transitive dependency path must be a file URL");
+        let compile_app = || {
+            compile(&CompileRequest {
+                path: app.clone(),
+                entry: Some("shade".to_owned()),
+                mode: Some(WebMode::Render),
+                workgroup: [None, None, None],
+                source_id: None,
+                canonical: WebCanonicalPolicy::Disabled,
+                canonical_entries: Vec::new(),
+            })
+        };
+
+        compile_app().expect("initial clean dependency must compile");
+        assert_eq!(
+            crate::dependency_diagnostics::dependency_analysis_count(&dependency_url),
+            1,
+            "the direct local dependency should be analyzed on the first build"
+        );
+        assert_eq!(
+            crate::dependency_diagnostics::dependency_analysis_count(&transitive_url),
+            1,
+            "the transitive local dependency should be analyzed on the first build"
+        );
+        compile_app().expect("unchanged clean dependency must compile from its proof");
+        assert_eq!(
+            crate::dependency_diagnostics::dependency_analysis_count(&dependency_url),
+            1,
+            "an unchanged clean dependency should be reused across fresh databases"
+        );
+        assert_eq!(
+            crate::dependency_diagnostics::dependency_analysis_count(&transitive_url),
+            1,
+            "an unchanged transitive dependency should also be reused"
+        );
+
+        std::fs::write(
+            transitive.join("src/lib.fe"),
+            "pub fn unused_but_invalid() -> i32 { missing_value }\n",
+        )
+        .unwrap();
+        let error = compile_app().unwrap_err();
         assert!(
             error.contains("dependency diagnostics prevent web build")
                 && error.contains("broken_dependency")
                 && error.contains("missing_value"),
             "{error}"
+        );
+        assert_eq!(
+            crate::dependency_diagnostics::dependency_analysis_count(&dependency_url),
+            2,
+            "changing transitive content must invalidate its parent's clean proof"
+        );
+        assert_eq!(
+            crate::dependency_diagnostics::dependency_analysis_count(&transitive_url),
+            2,
+            "changing transitive content must invalidate its own clean proof"
+        );
+
+        let repeated_error = compile_app().unwrap_err();
+        assert!(repeated_error.contains("missing_value"), "{repeated_error}");
+        assert_eq!(
+            crate::dependency_diagnostics::dependency_analysis_count(&dependency_url),
+            2,
+            "a clean parent at the changed closure may be reused"
+        );
+        assert_eq!(
+            crate::dependency_diagnostics::dependency_analysis_count(&transitive_url),
+            3,
+            "a failed dependency analysis must never be cached as clean"
         );
     }
 

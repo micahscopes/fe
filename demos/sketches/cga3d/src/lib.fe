@@ -38,24 +38,15 @@ use core::marker::Copy
 use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
 use core::num::IntDowncast
 use std::webgpu::{FragmentSurface, GpuProgram, LatestPerFrame, SurfaceTransition, WebGpuBackend}
-use std::web::view::{Extent, Param, Surface, SurfaceEvent}
+use std::web::view::{
+    ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface,
+    SurfaceEvent, SurfaceState,
+}
 use sparse_clifford::{
     Nat, PlanLength, SparsePlan, Term, null_vector_pairing, plan_candidate_left,
     plan_candidate_right, plan_mask_cardinality,
 }
 use fmath::{PI, abs, clamp01, cos, from_i32, mix, rgba, sin, smoothstep, sqrt}
-
-fn clamp_control(_ value: f32, _ lower: f32, _ upper: f32) -> f32 {
-    if value < lower { lower } else { if value > upper { upper } else { value } }
-}
-
-fn wheel_zoom(_ zoom: f32, _ delta: f32) -> f32 {
-    if delta < 0.0 {
-        zoom * 0.875
-    } else {
-        if delta > 0.0 { zoom * 1.125 } else { zoom }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // The Cl(4,1) facts. Vector index space (null basis, vectors only):
@@ -299,6 +290,24 @@ struct Cga3dViewState {
     res: f32,
 }
 
+impl SurfaceState for Cga3dViewState {
+    type Params = Cga3dParams
+}
+
+derive ApplyParamBindings for Cga3dViewState using ParamBindingsProvider
+
+/// One Fe declaration feeds both the projected sliders and the generated
+/// pointer/wheel transition. Binding policy never enters the web manifest.
+const fn cga3d_params() -> Cga3dParams {
+    Cga3dParams {
+        lambda: Param::unit(init: 0.15).drag_x(per_px: 0.0025),
+        theta: Param::angle(init: 0.6).drag_y(per_px: 0.01),
+        zoom: Param::range(min: 0.5, max: 4.0, init: 1.6)
+            .wheel_scale(in_factor: 0.875, out_factor: 1.125),
+        res: Param::extent_x(),
+    }
+}
+
 actor Cga3dSurface uses (GpuProgram<WebGpuBackend>) {
     /// Pencil parameter: [0, 1] sweeps sphere -> sphere -> radical plane.
     lambda: f32,
@@ -314,12 +323,7 @@ actor Cga3dSurface uses (GpuProgram<WebGpuBackend>) {
     const fn view() -> Surface<Cga3dParams> {
         Surface {
             extent: Extent::square(512),
-            params: Cga3dParams {
-                lambda: Param::unit(init: 0.15),
-                theta: Param::angle(init: 0.6),
-                zoom: Param::range(min: 0.5, max: 4.0, init: 1.6),
-                res: Param::extent_x(),
-            },
+            params: cga3d_params(),
         }
     }
 
@@ -327,12 +331,13 @@ actor Cga3dSurface uses (GpuProgram<WebGpuBackend>) {
     fn navigate(self, event: own SurfaceEvent) -> Cga3dViewState
         uses (SurfaceTransition, LatestPerFrame)
     {
-        Cga3dViewState {
-            lambda: clamp_control(self.lambda + event.delta_x * 0.0025, 0.0, 1.0),
-            theta: self.theta + event.delta_y * 0.01,
-            zoom: clamp_control(wheel_zoom(self.zoom, event.wheel_delta), 0.5, 4.0),
-            res: event.width,
+        let current = Cga3dViewState {
+            lambda: self.lambda,
+            theta: self.theta,
+            zoom: self.zoom,
+            res: self.res,
         }
+        current.apply_param_bindings(cga3d_params(), event)
     }
 
     /// Pixel coordinate in, packed RGBA8 word out. Five planned contractions

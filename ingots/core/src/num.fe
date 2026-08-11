@@ -576,6 +576,17 @@ impl UnsignedAbs for isize {
 //   overflowing_abs  -> (T::MIN, true)
 //
 // For `T::MIN`-free magnitude in an unsigned type, use `UnsignedAbs`.
+/// Rounding operations for binary floating-point values. These are ordinary
+/// type-directed methods over the target-neutral numeric intrinsics, so
+/// libraries do not need to redeclare private `__*_f32` externs.
+pub trait FloatRounding {
+    const fn floor(self) -> Self
+    const fn ceil(self) -> Self
+    const fn trunc(self) -> Self
+    /// Round to nearest, with ties to even.
+    const fn round(self) -> Self
+}
+
 pub trait Abs {
     const fn abs(self) -> Self
     const fn checked_abs(self) -> Option<Self>
@@ -1932,6 +1943,13 @@ impl MinMax for f32 {
     const fn min(self, _ other: f32) -> f32 { __min_f32(self, other) }
     const fn max(self, _ other: f32) -> f32 { __max_f32(self, other) }
     const fn clamp(self, _ lo: f32, _ hi: f32) -> f32 { __clamp_f32(self, lo, hi) }
+}
+
+impl FloatRounding for f32 {
+    const fn floor(self) -> f32 { __floor_f32(self) }
+    const fn ceil(self) -> f32 { __ceil_f32(self) }
+    const fn trunc(self) -> f32 { __trunc_f32(self) }
+    const fn round(self) -> f32 { __round_f32(self) }
 }
 
 // `Abs` (declared above for the signed integer words, with the

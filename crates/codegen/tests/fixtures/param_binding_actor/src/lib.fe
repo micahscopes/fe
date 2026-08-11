@@ -1,0 +1,73 @@
+//! Generalization fixture: a new interactive surface authored entirely in Fe.
+//!
+//! The compiler and fixed browser runtime must know nothing about this actor,
+//! its state names, or its chosen bindings.
+
+use std::webgpu::{
+    FragmentSurface, GpuProgram, LatestPerFrame, SurfaceTransition, WebGpuBackend,
+}
+use std::web::view::{
+    ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface,
+    SurfaceEvent, SurfaceState,
+}
+
+struct ProbeParams {
+    steps: Param,
+    phase: Param,
+    zoom: Param,
+    res: Param,
+}
+
+struct ProbeState {
+    steps: f32,
+    phase: f32,
+    zoom: f32,
+    res: f32,
+}
+
+impl SurfaceState for ProbeState {
+    type Params = ProbeParams
+}
+
+derive ApplyParamBindings for ProbeState using ParamBindingsProvider
+
+const fn probe_params() -> ProbeParams {
+    ProbeParams {
+        steps: Param::int(min: 0.0, max: 10.0, init: 3.0)
+            .drag_x(per_px: 0.2)
+            .wheel(per_notch: 0.75),
+        phase: Param::angle(init: 0.0).drag_y(per_px: 0.02),
+        zoom: Param::range(min: 0.5, max: 4.0, init: 2.0)
+            .wheel_scale(in_factor: 0.75, out_factor: 1.25),
+        res: Param::extent_x(),
+    }
+}
+
+actor ParamBindingProbe uses (GpuProgram<WebGpuBackend>) {
+    steps: f32,
+    phase: f32,
+    zoom: f32,
+    res: f32,
+
+    const fn view() -> Surface<ProbeParams> {
+        Surface {
+            extent: Extent::square(256),
+            params: probe_params(),
+        }
+    }
+
+    fn navigate(self, event: own SurfaceEvent) -> ProbeState
+        uses (SurfaceTransition, LatestPerFrame)
+    {
+        ProbeState {
+            steps: self.steps,
+            phase: self.phase,
+            zoom: self.zoom,
+            res: self.res,
+        }.apply_param_bindings(probe_params(), event)
+    }
+
+    fn paint(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
+        px ^ py
+    }
+}

@@ -98,13 +98,13 @@ fn assert_scheduled_typed_surface(bundle: &WebBundle) {
     assert!(
         exports
             .iter()
-            .any(|name| name == "fe_surface_transition_latest_per_frame_v3"),
+            .any(|name| name == "fe_surface_transition_latest_per_frame_v4"),
         "the Fe-declared latest-per-frame transition must use its fixed host ABI"
     );
     assert!(
         !exports
             .iter()
-            .any(|name| name == "fe_surface_transition_v1"),
+            .any(|name| name == "fe_surface_transition_v2"),
         "a scheduled actor must not also export the immediate transition ABI"
     );
     assert!(
@@ -192,6 +192,9 @@ struct SurfaceEventFixture {
     timestamp: f32,
     width: f32,
     height: f32,
+    event_kind: u32,
+    param_index: u32,
+    param_value: f32,
 }
 
 fn write_surface_event_batch(
@@ -200,7 +203,7 @@ fn write_surface_event_batch(
     pointer: usize,
     events: &[SurfaceEventFixture],
 ) {
-    let mut bytes = Vec::with_capacity(events.len() * 40);
+    let mut bytes = Vec::with_capacity(events.len() * 52);
     for event in events {
         bytes.extend_from_slice(&event.pointer_x.to_le_bytes());
         bytes.extend_from_slice(&event.pointer_y.to_le_bytes());
@@ -212,6 +215,9 @@ fn write_surface_event_batch(
         bytes.extend_from_slice(&event.timestamp.to_le_bytes());
         bytes.extend_from_slice(&event.width.to_le_bytes());
         bytes.extend_from_slice(&event.height.to_le_bytes());
+        bytes.extend_from_slice(&event.event_kind.to_le_bytes());
+        bytes.extend_from_slice(&event.param_index.to_le_bytes());
+        bytes.extend_from_slice(&event.param_value.to_le_bytes());
     }
     memory
         .write(store, pointer, &bytes)
@@ -243,6 +249,9 @@ fn call_four_state_transition(
             timestamp: 456.75,
             width,
             height: 480.0,
+            event_kind: 0,
+            param_index: 0,
+            param_value: 0.0,
         }],
         state,
     )
@@ -253,6 +262,12 @@ fn call_four_state_batch(
     events: &[SurfaceEventFixture],
     state: [f32; 4],
 ) -> [f32; 4] {
+    call_state_batch(bundle, events, &state)
+        .try_into()
+        .expect("four-state fixture must return exactly four fields")
+}
+
+fn call_state_batch(bundle: &WebBundle, events: &[SurfaceEventFixture], state: &[f32]) -> Vec<f32> {
     assert!(
         !events.is_empty(),
         "surface frame fixture requires an event"
@@ -262,7 +277,7 @@ fn call_four_state_batch(
     let mut store = wasmtime::Store::new(&engine, ());
     let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("control instance");
     let transition = instance
-        .get_func(&mut store, "fe_surface_transition_latest_per_frame_v3")
+        .get_func(&mut store, "fe_surface_transition_latest_per_frame_v4")
         .expect("scheduled typed surface transition export");
     let replace_state = instance
         .get_func(&mut store, "fe_surface_state_replace_v1")
@@ -274,14 +289,14 @@ fn call_four_state_batch(
         .get_typed_func::<(i32, i32), i32>(&mut store, "fe_cabi_alloc")
         .expect("scheduled transition exports fixed allocator");
     let event_pointer = alloc
-        .call(&mut store, ((events.len() * 40) as i32, 4))
+        .call(&mut store, ((events.len() * 52) as i32, 4))
         .expect("allocate raw SurfaceEvent batch") as usize;
     write_surface_event_batch(&memory, &mut store, event_pointer, events);
     let values = [
         wasmtime::Val::I32(event_pointer as i32),
         wasmtime::Val::I32(events.len() as i32),
     ];
-    let mut uninitialized_results = [wasmtime::Val::F32(0); 4];
+    let mut uninitialized_results = vec![wasmtime::Val::F32(0); state.len()];
     assert!(
         transition
             .call(&mut store, &values, &mut uninitialized_results)
@@ -295,14 +310,17 @@ fn call_four_state_batch(
     replace_state
         .call(&mut store, &state_values, &mut [])
         .expect("seed complete resident Fe state");
-    let mut results = [wasmtime::Val::F32(0); 4];
+    let mut results = vec![wasmtime::Val::F32(0); state.len()];
     transition
         .call(&mut store, &values, &mut results)
         .expect("Fe typed surface transition call");
-    results.map(|value| match value {
-        wasmtime::Val::F32(bits) => f32::from_bits(bits),
-        other => panic!("typed surface transition returned non-f32 value {other:?}"),
-    })
+    results
+        .into_iter()
+        .map(|value| match value {
+            wasmtime::Val::F32(bits) => f32::from_bits(bits),
+            other => panic!("typed surface transition returned non-f32 value {other:?}"),
+        })
+        .collect()
 }
 
 /// Run `body` with a checked-in ingot directory's driver database and top
@@ -422,6 +440,28 @@ fn compile_actor_ingot_with_root_source(
     )
 }
 
+/// Analyze an ingot after replacing only its root Fe source. Unlike the bundle
+/// helper above, this deliberately returns semantic diagnostics for negative
+/// provider/generalization gates.
+fn actor_ingot_root_diagnostics(rel_dir: &str, source: String) -> String {
+    let dir = repo_root().join(rel_dir);
+    let mut db = DriverDataBase::default();
+    let dir_url = Url::from_directory_path(&dir)
+        .unwrap_or_else(|_| panic!("invalid ingot path {}", dir.display()));
+    assert!(
+        !driver::init_ingot(&mut db, &dir_url),
+        "{rel_dir}: ingot initialization diagnostics"
+    );
+    let source_url = Url::from_file_path(dir.join("src/lib.fe"))
+        .unwrap_or_else(|_| panic!("invalid ingot root source path {}", dir.display()));
+    db.workspace().update(&mut db, source_url.clone(), source);
+    let ingot = db
+        .workspace()
+        .containing_ingot(&db, source_url)
+        .unwrap_or_else(|| panic!("{rel_dir} root source did not resolve to its ingot"));
+    db.run_on_top_mod(ingot.root_mod(&db)).format_diags(&db)
+}
+
 /// Compile a checked-in ingot directory in explicit render mode with the
 /// canonical `render`/`verify`/`oracle` lanes required, matching the legacy
 /// `render/verify/oracle uses (HostEffect, MainThread, mut
@@ -466,6 +506,88 @@ fn view_vocabulary_const_constructs_a_surface() {
     with_standalone_file(
         "crates/codegen/tests/fixtures/view/view_surface_smoke.fe",
         |_db, _top_mod| {},
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase-1/7 generalization proof: this checked-in actor was added as Fe source
+// plus ordinary package metadata only. Neither codegen nor the fixed runtime
+// contains its actor, state, or parameter names.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn new_param_binding_actor_needs_only_fe_source() {
+    let bundle = compile_actor_ingot("crates/codegen/tests/fixtures/param_binding_actor");
+    assert_browser_wgsl(&bundle.wgsl);
+    wasmparser::validate(&bundle.wasm).expect("param-binding fixture should emit valid Wasm");
+    assert_scheduled_typed_surface(&bundle);
+
+    let manifest_json = serde_json::to_string(&bundle.manifest).expect("serialize audit envelope");
+    for forbidden in [
+        "drag_x_per_px",
+        "drag_y_per_px",
+        "wheel_per_notch",
+        "wheel_in_factor",
+        "wheel_out_factor",
+        "apply_param_bindings",
+    ] {
+        assert!(
+            !manifest_json.contains(forbidden),
+            "Fe binding implementation detail `{forbidden}` leaked into JSON: {manifest_json}"
+        );
+    }
+
+    assert_eq!(
+        call_four_state_transition(&bundle, 10.0, -5.0, -1.0, [3.0, 0.0, 2.0, 256.0], 640.0,),
+        [4.0, (-5.0f32 * 0.02) + 6.2831855, 2.0f32 * 0.75, 640.0,],
+        "ordinary Fe declarations must drive the exact resident-state transition"
+    );
+    assert_eq!(
+        call_four_state_batch(
+            &bundle,
+            &[SurfaceEventFixture {
+                pointer_x: 0.0,
+                pointer_y: 0.0,
+                delta_x: 0.0,
+                delta_y: 0.0,
+                wheel_delta: 0.0,
+                wheel_mode: 0,
+                buttons: 0,
+                timestamp: 9.5,
+                width: 640.0,
+                height: 480.0,
+                event_kind: 1,
+                param_index: 0,
+                param_value: 6.6,
+            }],
+            [3.0, 0.0, 2.0, 256.0],
+        ),
+        [7.0, 0.0, 2.0, 256.0],
+        "a direct edit must enter Param::drive in Fe, round the Int value there, and leave every other field untouched"
+    );
+}
+
+#[test]
+fn param_binding_provider_rejects_state_param_name_drift() {
+    let rel_dir = "crates/codegen/tests/fixtures/param_binding_actor";
+    let source_path = repo_root().join(rel_dir).join("src/lib.fe");
+    let source = std::fs::read_to_string(&source_path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", source_path.display()));
+    let source = source
+        .replacen("    steps: Param,", "    step_control: Param,", 1)
+        .replacen(
+            "        steps: Param::int",
+            "        step_control: Param::int",
+            1,
+        );
+    let diagnostics = actor_ingot_root_diagnostics(rel_dir, source);
+    assert!(
+        !diagnostics.is_empty(),
+        "provider must reject a Params record whose labels drift from state"
+    );
+    assert!(
+        diagnostics.contains("steps") && diagnostics.contains("field"),
+        "diagnostic should identify the reflected state field that lacks a binding:\n{diagnostics}"
     );
 }
 
@@ -577,13 +699,13 @@ fn perturbational_mandelbrot_graph_compiles() {
     assert!(
         exports
             .iter()
-            .any(|name| name == "fe_surface_transition_latest_per_frame_v3"),
+            .any(|name| name == "fe_surface_transition_latest_per_frame_v4"),
         "the Fe-declared latest-per-frame transition must use its fixed, versioned host ABI"
     );
     assert!(
         !exports
             .iter()
-            .any(|name| name == "fe_surface_transition_v1")
+            .any(|name| name == "fe_surface_transition_v2")
     );
     assert!(!exports.iter().any(|name| name == "navigate"));
     assert!(!exports.iter().any(|name| name == "update_view"));
@@ -642,7 +764,7 @@ fn perturbational_mandelbrot_graph_compiles() {
     let instance = wasmtime::Instance::new(&mut store, &module, &[])
         .expect("wasmtime should instantiate perturbational control");
     let transition = instance
-        .get_func(&mut store, "fe_surface_transition_latest_per_frame_v3")
+        .get_func(&mut store, "fe_surface_transition_latest_per_frame_v4")
         .expect("typed perturbational surface transition export");
     let replace_state = instance
         .get_func(&mut store, "fe_surface_state_replace_v1")
@@ -654,7 +776,7 @@ fn perturbational_mandelbrot_graph_compiles() {
         .get_typed_func::<(i32, i32), i32>(&mut store, "fe_cabi_alloc")
         .expect("scheduled perturbational transition exports fixed allocator");
     let event_pointer = alloc
-        .call(&mut store, (40, 4))
+        .call(&mut store, (52, 4))
         .expect("allocate perturbational SurfaceEvent slot") as usize;
     let mut cx = [-0.7436439f32, -7.146717e-9, -3e-16, -2e-23];
     let mut cy = [0.13182591f32, -4.8132045e-9, 2.5e-16, 1.5e-23];
@@ -694,6 +816,9 @@ fn perturbational_mandelbrot_graph_compiles() {
                 timestamp: step as f32 * 4.0,
                 width: res,
                 height: res,
+                event_kind: 0,
+                param_index: 0,
+                param_value: 0.0,
             }],
         );
         let vals = [
@@ -725,6 +850,51 @@ fn perturbational_mandelbrot_graph_compiles() {
         cy = [got[4], got[5], got[6], got[7]];
         zoom = got[8];
     }
+    write_surface_event_batch(
+        &memory,
+        &mut store,
+        event_pointer,
+        &[SurfaceEventFixture {
+            pointer_x: 0.0,
+            pointer_y: 0.0,
+            delta_x: 0.0,
+            delta_y: 0.0,
+            wheel_delta: 0.0,
+            wheel_mode: 0,
+            buttons: 0,
+            timestamp: 30.0,
+            width: res,
+            height: res,
+            event_kind: 1,
+            param_index: 8,
+            param_value: 2.25,
+        }],
+    );
+    transition
+        .call(
+            &mut store,
+            &[
+                wasmtime::Val::I32(event_pointer as i32),
+                wasmtime::Val::I32(1),
+                wasmtime::Val::I64(0),
+            ],
+            &mut results,
+        )
+        .expect("perturbational parameter edit should invoke the same Fe transition");
+    let edited = results
+        .iter()
+        .map(|value| match value {
+            wasmtime::Val::F32(bits) => f32::from_bits(*bits),
+            other => panic!("perturbational edit result must be f32, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        edited,
+        [
+            cx[0], cx[1], cx[2], cx[3], cy[0], cy[1], cy[2], cy[3], 2.25, res
+        ],
+        "direct zoom edits must be Fe-clamped without disturbing the high-precision center"
+    );
     for shader in &bundle.pass_wgsl {
         assert_browser_wgsl(&shader.source);
     }
@@ -843,6 +1013,9 @@ fn cga3d_sketch_compiles() {
                     timestamp: 1.0,
                     width: 512.0,
                     height: 512.0,
+                    event_kind: 0,
+                    param_index: 0,
+                    param_value: 0.0,
                 },
                 SurfaceEventFixture {
                     pointer_x: 14.0,
@@ -855,6 +1028,9 @@ fn cga3d_sketch_compiles() {
                     timestamp: 2.0,
                     width: 600.0,
                     height: 500.0,
+                    event_kind: 0,
+                    param_index: 0,
+                    param_value: 0.0,
                 },
                 SurfaceEventFixture {
                     pointer_x: 18.0,
@@ -867,6 +1043,9 @@ fn cga3d_sketch_compiles() {
                     timestamp: 3.0,
                     width: 640.0,
                     height: 480.0,
+                    event_kind: 0,
+                    param_index: 0,
+                    param_value: 0.0,
                 },
             ],
             [0.15, 0.6, 1.6, 512.0],
@@ -908,7 +1087,7 @@ fn desargues_sketch_compiles() {
         call_four_state_transition(&bundle, 10.0, -5.0, -1.0, [0.62, 0.0, 2.4, 512.0], 640.0,),
         [
             0.62f32 + 10.0 * 0.0025,
-            -5.0f32 * 0.01,
+            (-5.0f32 * 0.01) + 6.2831855,
             2.4f32 * 0.875,
             640.0,
         ]
@@ -1163,27 +1342,27 @@ fn mandelbrot_typed_surface_abi_is_manifest_free() {
     assert!(
         exports
             .iter()
-            .any(|name| name == "fe_surface_transition_latest_per_frame_v3")
+            .any(|name| name == "fe_surface_transition_latest_per_frame_v4")
     );
     assert!(
         !exports
             .iter()
-            .any(|name| name == "fe_surface_transition_v1")
+            .any(|name| name == "fe_surface_transition_v2")
     );
     assert!(!exports.iter().any(|name| name == "navigate"));
     assert!(!exports.iter().any(|name| name == "update_view"));
 
     // A non-interactive sibling has neither transport metadata nor the fixed
     // typed transition export.
-    let plain = compile_actor_ingot("demos/sketches/gradient");
+    let plain = compile_actor_ingot("demos/sketches/known_color");
     assert!(
         plain.manifest.control.is_none(),
         "a non-interactive sketch must project no legacy control block"
     );
     assert!(
         !wasm_function_export_names(&plain.wasm).iter().any(|name| {
-            name == "fe_surface_transition_v1"
-                || name == "fe_surface_transition_latest_per_frame_v3"
+            name == "fe_surface_transition_v2"
+                || name == "fe_surface_transition_latest_per_frame_v4"
                 || name == "fe_surface_state_replace_v1"
         }),
         "a non-interactive sketch must not acquire typed transition/state exports"
@@ -1224,7 +1403,7 @@ fn mandelbrot_typed_surface_transition_matches_oracle_over_event_tape() {
     // complete ten-f32 presentation snapshot. State is seeded once through the
     // companion export, then persists inside generated Wasm across the tape.
     let transition = instance
-        .get_func(&mut store, "fe_surface_transition_latest_per_frame_v3")
+        .get_func(&mut store, "fe_surface_transition_latest_per_frame_v4")
         .expect("typed surface transition export");
     let replace_state = instance
         .get_func(&mut store, "fe_surface_state_replace_v1")
@@ -1236,7 +1415,7 @@ fn mandelbrot_typed_surface_transition_matches_oracle_over_event_tape() {
         .get_typed_func::<(i32, i32), i32>(&mut store, "fe_cabi_alloc")
         .expect("scheduled transition exports fixed allocator");
     let event_pointer = alloc
-        .call(&mut store, (40, 4))
+        .call(&mut store, (52, 4))
         .expect("allocate Mandelbrot SurfaceEvent slot") as usize;
 
     // The tape's own start state (independent of view()'s deep init): a shallow
@@ -1307,6 +1486,9 @@ fn mandelbrot_typed_surface_transition_matches_oracle_over_event_tape() {
                 timestamp: step as f32 * 0.25,
                 width: res,
                 height: res,
+                event_kind: 0,
+                param_index: 0,
+                param_value: 0.0,
             }],
         );
         // Fixed batch pointer/count only: no actor state is couriered back.
@@ -1374,6 +1556,51 @@ fn mandelbrot_typed_surface_transition_matches_oracle_over_event_tape() {
         );
     }
 
+    write_surface_event_batch(
+        &memory,
+        &mut store,
+        event_pointer,
+        &[SurfaceEventFixture {
+            pointer_x: 0.0,
+            pointer_y: 0.0,
+            delta_x: 0.0,
+            delta_y: 0.0,
+            wheel_delta: 0.0,
+            wheel_mode: 0,
+            buttons: 0,
+            timestamp: STEPS as f32,
+            width: res,
+            height: res,
+            event_kind: 1,
+            param_index: 8,
+            param_value: 2.0,
+        }],
+    );
+    transition
+        .call(
+            &mut store,
+            &[
+                wasmtime::Val::I32(event_pointer as i32),
+                wasmtime::Val::I32(1),
+            ],
+            &mut results,
+        )
+        .expect("Mandelbrot parameter edit should invoke the same Fe transition");
+    let edited = results
+        .iter()
+        .map(|value| match value {
+            wasmtime::Val::F32(bits) => f32::from_bits(*bits),
+            other => panic!("Mandelbrot edit result must be f32, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        edited,
+        [
+            cx[0], cx[1], cx[2], cx[3], cy[0], cy[1], cy[2], cy[3], 2.0, res
+        ],
+        "direct zoom edits must be Fe-clamped without disturbing the high-precision center"
+    );
+
     assert!(
         hit_cx_lo > 0 && hit_cx_hi > 0 && hit_cy_lo > 0 && hit_cy_hi > 0,
         "the gesture tape must visit all four center clamps (cx_lo={hit_cx_lo}, cx_hi={hit_cx_hi}, \
@@ -1408,6 +1635,30 @@ fn gradient_sketch_compiles() {
     let bundle = compile_actor_ingot("demos/sketches/gradient");
     assert_browser_wgsl(&bundle.wgsl);
     wasmparser::validate(&bundle.wasm).expect("gradient wasm should be valid");
+    assert_scheduled_typed_surface(&bundle);
+    assert_eq!(
+        call_state_batch(
+            &bundle,
+            &[SurfaceEventFixture {
+                pointer_x: 100.0,
+                pointer_y: 100.0,
+                delta_x: 10.0,
+                delta_y: -5.0,
+                wheel_delta: -1.0,
+                wheel_mode: 0,
+                buttons: 1,
+                timestamp: 1.0,
+                width: 512.0,
+                height: 512.0,
+                event_kind: 0,
+                param_index: 0,
+                param_value: 0.0,
+            }],
+            &[0.12, 0.0, 96.0],
+        ),
+        [0.12f32 + 10.0 * 0.002, -5.0f32 * 0.1, 96.0 - 8.0],
+        "gradient mouse bindings must be authored and executed in Fe"
+    );
 }
 
 #[test]
@@ -1415,40 +1666,12 @@ fn typed_surface_transition_rejects_partial_state_record() {
     let path = repo_root().join("demos/sketches/gradient/src/lib.fe");
     let mut source = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-    source = source.replace(
-        "use std::webgpu::{FragmentSurface, GpuProgram, WebGpuBackend}",
-        "use std::webgpu::{FragmentSurface, GpuProgram, SurfaceTransition, WebGpuBackend}",
+    source = source.replacen(
+        "    cutoff: f32,\n}\n\nimpl SurfaceState",
+        "}\n\nimpl SurfaceState",
+        1,
     );
-    source = source.replace(
-        "use std::web::view::{Extent, Param, Surface}",
-        "use std::web::view::{Extent, Param, Surface, SurfaceEvent}",
-    );
-    source = source.replace(
-        "actor GradientSurface uses (GpuProgram<WebGpuBackend>) {",
-        r#"struct PartialGradientState {
-    gain: f32,
-    bias: f32,
-}
-
-actor GradientSurface uses (GpuProgram<WebGpuBackend>) {"#,
-    );
-    let actor_end = source
-        .rfind("\n}")
-        .expect("gradient actor should have a closing brace");
-    source.insert_str(
-        actor_end,
-        r#"
-
-    fn navigate(self, event: own SurfaceEvent) -> PartialGradientState
-        uses (SurfaceTransition)
-    {
-        PartialGradientState {
-            gain: self.gain + event.width * 0.0,
-            bias: self.bias,
-        }
-    }
-"#,
-    );
+    source = source.replacen("            cutoff: self.cutoff,\n", "", 1);
 
     let error = compile_actor_ingot_with_root_source("demos/sketches/gradient", source)
         .expect_err("a partial typed state response must fail closed");
@@ -1464,6 +1687,40 @@ fn dec_sketch_compiles() {
     let bundle = compile_actor_ingot("demos/sketches/dec");
     assert_browser_wgsl(&bundle.wgsl);
     wasmparser::validate(&bundle.wasm).expect("dec wasm should be valid");
+    assert_scheduled_typed_surface(&bundle);
+    assert_eq!(
+        call_state_batch(
+            &bundle,
+            &[SurfaceEventFixture {
+                pointer_x: 100.0,
+                pointer_y: 100.0,
+                delta_x: -10.0,
+                delta_y: 20.0,
+                wheel_delta: 1.0,
+                wheel_mode: 0,
+                buttons: 1,
+                timestamp: 1.0,
+                width: 640.0,
+                height: 480.0,
+                event_kind: 0,
+                param_index: 0,
+                param_value: 0.0,
+            }],
+            &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 512.0],
+        ),
+        [
+            1.0f32 + -10.0 * 0.005,
+            0.0f32 + 20.0 * 0.005,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            640.0,
+        ],
+        "DEC drag/wheel bindings and integer policy must execute in Fe"
+    );
 }
 
 // ---------------------------------------------------------------------------

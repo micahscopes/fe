@@ -63,11 +63,15 @@ const INTERFACE_D_TS_FILE: &str = "interface.d.ts";
 /// Manifest-free fixed host discovery point for a typed Fe surface transition.
 /// The authored behavior may have any ordinary Fe name; Wasm publication
 /// aliases it to this versioned ABI identity after semantic shape validation.
-const TYPED_SURFACE_TRANSITION_EXPORT: &str = "fe_surface_transition_v1";
+const TYPED_SURFACE_TRANSITION_EXPORT: &str = "fe_surface_transition_v2";
 /// Fixed discovery point for the same transition when Fe declares the
 /// `LatestPerFrame` presentation policy. Encoding the choice in the typed
 /// binary ABI avoids adding scheduling fields to the render manifest.
-const TYPED_SURFACE_LATEST_PER_FRAME_EXPORT: &str = "fe_surface_transition_latest_per_frame_v3";
+const TYPED_SURFACE_LATEST_PER_FRAME_EXPORT: &str = "fe_surface_transition_latest_per_frame_v4";
+/// Scalar leaves in the fixed v2 `SurfaceEvent`: ten browser gesture/extent
+/// facts followed by the typed direct-parameter-edit discriminant, index, and
+/// proposed value.
+const TYPED_SURFACE_EVENT_FIELDS: usize = 13;
 /// Fixed companion ABI for seeding or explicitly replacing the private state
 /// of a resident scheduled actor. It takes the complete non-resource state in
 /// declaration order and returns nothing. Frame transitions never receive
@@ -1196,7 +1200,7 @@ fn typed_surface_wasm_signature(
             // resident in private Wasm globals and is not couriered per frame.
             let mut params = vec![WebControlWasmType::I32, WebControlWasmType::I32];
             params.extend(
-                contract.params[10..]
+                contract.params[TYPED_SURFACE_EVENT_FIELDS..]
                     .iter()
                     .zip(&contract.actor_param_is_resource)
                     .filter_map(|(ty, is_resource)| is_resource.then_some(*ty)),
@@ -1220,6 +1224,9 @@ fn canonical_surface_event_type() -> CanonicalType {
         CanonicalField::new("timestamp", CanonicalType::F32),
         CanonicalField::new("width", CanonicalType::F32),
         CanonicalField::new("height", CanonicalType::F32),
+        CanonicalField::new("event_kind", CanonicalType::U32),
+        CanonicalField::new("param_index", CanonicalType::U32),
+        CanonicalField::new("param_value", CanonicalType::F32),
     ])
 }
 
@@ -2511,11 +2518,10 @@ impl WebBundle {
         // so a demo with none stays byte-identical. It is a PLAIN multi-scalar
         // wasm export (native multi-value reply, R2.1), never a canonical
         // message lane (that machinery demands a single nominal request/
-        // response record), so this is exercised under `Disabled` canonical
-        // policy today (`demos/sketches/mandelbrot`); a demo combining
-        // `UpdateSurface` with `Optional`/`Required` canonical policy would
-        // need `control_export` routed around canonical-lane derivation too,
-        // which no demo does yet, so that combination is left unhandled here.
+        // response record). This compatibility lane is admitted only under
+        // `Disabled` canonical policy; combining it with `Optional`/`Required`
+        // would need `control_export` routed around canonical-lane derivation
+        // too, so that unsupported combination remains fail-closed.
         let control_export = actor_update_export_name(db, top_mod, &options.source_entry)?;
         let typed_transition = control_export
             .as_deref()

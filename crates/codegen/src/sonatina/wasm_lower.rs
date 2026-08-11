@@ -50,7 +50,7 @@ use mir::{
     PlaceRoot, RBlockId, RExpr, RLocal, RLocalId, RStmt, RTerminator, RefKind, RefView,
     RuntimeBody, RuntimeBuiltin, RuntimeCarrier, RuntimeClass, RuntimeFunction, RuntimeInlineHint,
     RuntimeInstance, RuntimeLinkage, RuntimeLocalRoot, RuntimePackage, RuntimePlace, ScalarClass,
-    ScalarRepr,
+    ScalarRepr, VariantId,
 };
 use rustc_hash::FxHashMap;
 #[cfg(feature = "sonatina-indirect-calls")]
@@ -2865,7 +2865,7 @@ where
     }
 
     /// Lower Fe's `LatestPerFrame` capability to one fixed raw-batch ABI. The
-    /// browser writes untouched 40-byte `SurfaceEvent` records into exported
+    /// browser writes untouched 52-byte `SurfaceEvent` records into exported
     /// linear memory and calls this wrapper once per presentation opportunity.
     /// Coalescing executes here in the generated Wasm module: movement and
     /// wheel deltas accumulate while every other fact comes from the newest
@@ -2877,8 +2877,8 @@ where
         &mut self,
         frame: &super::WasmSurfaceFrame,
     ) -> Result<(), LowerError> {
-        const EVENT_FIELDS: usize = 10;
-        const EVENT_STRIDE: i32 = 40;
+        const EVENT_FIELDS: usize = 13;
+        const EVENT_STRIDE: i32 = 52;
 
         let candidates = self
             .func_map
@@ -2906,6 +2906,9 @@ where
             Type::I32,
             Type::F32,
             Type::F32,
+            Type::F32,
+            Type::I32,
+            Type::I32,
             Type::F32,
         ];
         if callee_args.len() < EVENT_FIELDS || callee_args[..EVENT_FIELDS] != event_tys {
@@ -3452,7 +3455,7 @@ where
     /// memory-space provider reference is the backend pointer word (i32), and a
     /// single-scalar-field aggregate is its one field's scalar. Wider scalars
     /// (u128/u256/address), non-memory provider refs, object/const refs, raw
-    /// addresses, and multi-field / empty aggregates all fail closed.
+    /// addresses, and non-flattened aggregates fail closed here.
     fn ty_for_class(&self, class: &RuntimeClass<'db>) -> Result<Type, LowerError> {
         match class {
             RuntimeClass::Scalar(scalar) => scalar_ty_r1(scalar),
@@ -3480,14 +3483,31 @@ where
             } => Ok(Type::I32),
             // R3.4b step 2: a single-scalar-field aggregate (a `u32` newtype such
             // as `Pending<T>` / `KernelId` / `WebGpuRef`) is represented as its one
-            // field's scalar. Multi-field and empty aggregates fail closed.
+            // field's scalar. A payload-free enum is represented by its
+            // compiler-derived tag. Payload enums fail closed explicitly.
             RuntimeClass::AggregateValue { layout } => {
-                let scalar = self.single_scalar_field(*layout).ok_or_else(|| {
-                    LowerError::Unsupported(format!(
-                        "wasm target (R3.4b) supports only single-scalar-field aggregates; \
-                         `{class:?}` is not a one-field scalar newtype"
-                    ))
-                })?;
+                if let Layout::Enum(enum_layout) = layout.data(self.db)
+                    && enum_layout
+                        .variants
+                        .iter()
+                        .any(|variant| !variant.fields.is_empty())
+                {
+                    return Err(LowerError::Unsupported(
+                        "wasm target: payload enum value transport is not implemented; only \
+                         payload-free enums have a scalar tag representation"
+                            .to_owned(),
+                    ));
+                }
+                let scalar = self
+                    .single_scalar_field(*layout)
+                    .or_else(|| self.fieldless_enum_tag(*layout))
+                    .ok_or_else(|| {
+                        LowerError::Unsupported(format!(
+                            "wasm target supports only recursively flattened scalar records, \
+                         one-field scalar newtypes, and fieldless enums; `{class:?}` has no \
+                         admitted value representation"
+                        ))
+                    })?;
                 scalar_ty_r1(&scalar)
             }
             other => Err(LowerError::Unsupported(format!(
@@ -3499,7 +3519,7 @@ where
 
     /// If `layout` is a struct with EXACTLY ONE field that is an R1-envelope
     /// scalar, return that field's scalar class; otherwise `None` (multi-field,
-    /// empty, array, and enum layouts stay fail-closed). This is what lets the
+    /// empty, array, and enum layouts return `None`). This is what lets the
     /// `u32` newtypes (`Pending<T>` / `KernelId` / `WebGpuRef`) execute: their
     /// runtime representation IS their single field's word.
     fn single_scalar_field(&self, layout: LayoutId<'db>) -> Option<ScalarClass<'db>> {
@@ -3510,6 +3530,69 @@ where
             },
             Layout::Array(_) | Layout::Enum(_) => None,
         }
+    }
+
+    /// A payload-free enum is exactly its compiler-derived tag scalar. This is
+    /// the closed value representation needed by ordinary Fe policy enums such
+    /// as `ParamKind`; payload enums retain their existing fail-closed path.
+    fn fieldless_enum_tag(&self, layout: LayoutId<'db>) -> Option<ScalarClass<'db>> {
+        match layout.data(self.db) {
+            Layout::Enum(enum_layout)
+                if enum_layout
+                    .variants
+                    .iter()
+                    .all(|variant| variant.fields.is_empty()) =>
+            {
+                Some(enum_layout.tag)
+            }
+            Layout::Struct(_) | Layout::Array(_) | Layout::Enum(_) => None,
+        }
+    }
+
+    fn fieldless_enum_variant_const(
+        &self,
+        layout: LayoutId<'db>,
+        variant: VariantId<'db>,
+    ) -> Result<(ConstScalar, Type), LowerError> {
+        let tag = self.fieldless_enum_tag(layout).ok_or_else(|| {
+            LowerError::Unsupported(
+                "wasm target: only payload-free enums have a scalar value representation"
+                    .to_owned(),
+            )
+        })?;
+        if variant.enum_layout != layout {
+            return Err(LowerError::Internal(
+                "enum variant belongs to a different runtime layout".to_owned(),
+            ));
+        }
+        let Layout::Enum(enum_layout) = layout.data(self.db) else {
+            unreachable!()
+        };
+        if usize::from(variant.index) >= enum_layout.variants.len() {
+            return Err(LowerError::Internal(
+                "enum variant index is outside its runtime layout".to_owned(),
+            ));
+        }
+        let ScalarRepr::Int { bits, signed } = tag.repr else {
+            return Err(LowerError::Internal(
+                "enum tag does not have an integer scalar representation".to_owned(),
+            ));
+        };
+        let value = ConstScalar::Int {
+            bits,
+            signed,
+            words: if variant.index == 0 {
+                Vec::new()
+            } else {
+                variant
+                    .index
+                    .to_be_bytes()
+                    .into_iter()
+                    .skip_while(|byte| *byte == 0)
+                    .collect()
+            },
+        };
+        Ok((value, scalar_ty_r1(&tag)?))
     }
 
     /// Change 1: whether `class` is a function-local aggregate behind an object /
@@ -3581,20 +3664,25 @@ where
                 if !active.insert(*layout) {
                     return None;
                 }
-                let Layout::Struct(struct_layout) = layout.data(self.db) else {
-                    return None;
+                let shape = match layout.data(self.db) {
+                    Layout::Struct(struct_layout) => {
+                        let fields = struct_layout
+                            .fields
+                            .iter()
+                            .map(|field| self.flat_shape_visit(field, active))
+                            .collect::<Option<Vec<_>>>()?;
+                        // Unit structs contribute zero leaves but remain a valid
+                        // node in a closed product tree.
+                        FlatShape::Struct(fields)
+                    }
+                    Layout::Enum(_) => {
+                        let tag = self.fieldless_enum_tag(*layout)?;
+                        FlatShape::Leaf(scalar_ty_r1(&tag).ok()?)
+                    }
+                    Layout::Array(_) => return None,
                 };
-                let fields = struct_layout
-                    .fields
-                    .iter()
-                    .map(|field| self.flat_shape_visit(field, active))
-                    .collect::<Option<Vec<_>>>()?;
                 active.remove(layout);
-                // Unit structs contribute zero leaves but remain a valid node in
-                // a closed product tree. This matters for recursively encoded
-                // products such as `Cell<Cell<Nil>>`: rejecting `Nil` here makes
-                // the otherwise scalar-only parent tree fail flattening.
-                Some(FlatShape::Struct(fields))
+                Some(shape)
             }
             // Preserve the previously admitted immediate one-word transport
             // leaves through the existing admissibility SSOT. This accepts only
@@ -3627,6 +3715,7 @@ where
             class,
             RuntimeClass::AggregateValue { layout }
                 if self.single_scalar_field(*layout).is_some()
+                    || self.fieldless_enum_tag(*layout).is_some()
         );
         (matches!(class, RuntimeClass::AggregateValue { .. }) && !preserves_scalar_newtype_path)
             .then_some(leaves)
@@ -3890,6 +3979,31 @@ where
                     "wasm target (R1) statement `{stmt:?}` is not supported"
                 )))
             }
+            RStmt::EnumAssertVariant { value, variant } => {
+                let class = self.body.value_class(*value).ok_or_else(|| {
+                    LowerError::Internal("enum assertion value has no runtime class".to_owned())
+                })?;
+                let RuntimeClass::AggregateValue { layout } = class else {
+                    return Err(LowerError::Unsupported(
+                        "wasm target: enum assertions require a value-carried enum".to_owned(),
+                    ));
+                };
+                let layout = *layout;
+                let actual = self.local_value(*value)?;
+                let (expected, ty) = self.module.fieldless_enum_variant_const(layout, *variant)?;
+                let expected = self
+                    .fb
+                    .make_imm_value(immediate_for_const_scalar(&expected, ty)?);
+                let valid = self
+                    .fb
+                    .insert_inst(CmpEq::new(self.inst_set(), actual, expected), Type::I1);
+                let cont = self.fb.append_block();
+                let trap = self.trap_block();
+                self.fb
+                    .insert_inst_no_result(Br::new(self.inst_set(), valid, cont, trap));
+                self.fb.switch_to_block(cont);
+                Ok(())
+            }
             other => Err(LowerError::Unsupported(format!(
                 "wasm target (R1) statement `{other:?}` is not supported"
             ))),
@@ -4042,10 +4156,11 @@ where
         Ok(())
     }
 
-    /// Flatten value-carried struct-tree arguments in the same DFS field order
+    /// Flatten value-carried product-tree arguments in the same DFS field order
     /// used by `lower_signature` and the function prologue. Scalar arguments
-    /// remain one wasm value. Arrays, enums, and place-backed aggregates never
-    /// acquire tuple variables and therefore continue to fail closed here.
+    /// remain one wasm value. Fieldless enums are scalar leaves. Arrays,
+    /// payload enums, and place-backed aggregates never acquire tuple variables
+    /// and therefore continue to fail closed here.
     fn call_arg_values(&mut self, args: &[RLocalId]) -> Result<Vec<ValueId>, LowerError> {
         let mut values = Vec::new();
         for arg in args {
@@ -4462,6 +4577,59 @@ where
                     return Ok(self.local_flat_values(*value)?[start]);
                 }
                 self.lower_scalar_newtype_extract(*value, *index)
+            }
+            RExpr::EnumMake {
+                layout,
+                variant,
+                fields,
+            } => {
+                if !fields.is_empty() {
+                    return Err(LowerError::Unsupported(
+                        "wasm target: payload enum construction is not lowered".to_owned(),
+                    ));
+                }
+                let (constant, ty) = self
+                    .module
+                    .fieldless_enum_variant_const(*layout, *variant)?;
+                Ok(self
+                    .fb
+                    .make_imm_value(immediate_for_const_scalar(&constant, ty)?))
+            }
+            RExpr::EnumTagOfValue { value } => {
+                let class = self.body.value_class(*value).ok_or_else(|| {
+                    LowerError::Internal("enum tag source has no runtime class".to_owned())
+                })?;
+                let RuntimeClass::AggregateValue { layout } = class else {
+                    return Err(LowerError::Unsupported(
+                        "wasm target: enum tag source is not a value-carried enum".to_owned(),
+                    ));
+                };
+                self.module.fieldless_enum_tag(*layout).ok_or_else(|| {
+                    LowerError::Unsupported(
+                        "wasm target: payload enum tags are not lowered as values".to_owned(),
+                    )
+                })?;
+                self.local_value(*value)
+            }
+            RExpr::EnumIsVariant { value, variant } => {
+                let class = self.body.value_class(*value).ok_or_else(|| {
+                    LowerError::Internal("enum comparison source has no runtime class".to_owned())
+                })?;
+                let RuntimeClass::AggregateValue { layout } = class else {
+                    return Err(LowerError::Unsupported(
+                        "wasm target: enum comparison source is not a value-carried enum"
+                            .to_owned(),
+                    ));
+                };
+                let layout = *layout;
+                let actual = self.local_value(*value)?;
+                let (expected, ty) = self.module.fieldless_enum_variant_const(layout, *variant)?;
+                let expected = self
+                    .fb
+                    .make_imm_value(immediate_for_const_scalar(&expected, ty)?);
+                Ok(self
+                    .fb
+                    .insert_inst(CmpEq::new(self.inst_set(), actual, expected), Type::I1))
             }
             // On wasm32 both a memory provider handle and its explicit raw form
             // are the same i32 linear-memory byte offset. Keep this conversion
@@ -5425,6 +5593,52 @@ where
                 let else_block = self.block_for(*else_bb)?;
                 self.fb
                     .insert_inst_no_result(Br::new(is, cond, then_block, else_block));
+            }
+            RTerminator::MatchEnumTag {
+                tag,
+                enum_layout,
+                cases,
+                default,
+            } => {
+                self.module
+                    .fieldless_enum_tag(*enum_layout)
+                    .ok_or_else(|| {
+                        LowerError::Unsupported(
+                            "wasm target: payload-enum match lowering is not implemented"
+                                .to_owned(),
+                        )
+                    })?;
+                let actual = self.local_value(*tag)?;
+                let invalid = match default {
+                    Some(default) => self.block_for(*default)?,
+                    None => self.trap_block(),
+                };
+                if cases.is_empty() {
+                    self.fb.insert_inst_no_result(Jump::new(is, invalid));
+                } else {
+                    for (index, (variant, target)) in cases.iter().enumerate() {
+                        let (expected, ty) = self
+                            .module
+                            .fieldless_enum_variant_const(*enum_layout, *variant)?;
+                        let expected = self
+                            .fb
+                            .make_imm_value(immediate_for_const_scalar(&expected, ty)?);
+                        let matches = self
+                            .fb
+                            .insert_inst(CmpEq::new(is, actual, expected), Type::I1);
+                        let target = self.block_for(*target)?;
+                        let otherwise = if index + 1 == cases.len() {
+                            invalid
+                        } else {
+                            self.fb.append_block()
+                        };
+                        self.fb
+                            .insert_inst_no_result(Br::new(is, matches, target, otherwise));
+                        if index + 1 != cases.len() {
+                            self.fb.switch_to_block(otherwise);
+                        }
+                    }
+                }
             }
             RTerminator::TerminalCall { callee, args }
                 if gpu_intrinsic(self.module.db, *callee) == Some(GpuIntrinsic::StorageStore) =>

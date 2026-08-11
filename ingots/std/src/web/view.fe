@@ -11,10 +11,15 @@
 //! compiler capability is the generic const-projection seam that evaluates the
 //! behavior and walks the record.
 //!
-//! `Param` values carry no gesture bindings yet: fluent input bindings
-//! (`.wheel()`, `.drag_x()`, ...) remain a later library projection. Rich
-//! controls already receive the typed raw facts below through a
-//! `SurfaceTransition` behavior, keeping policy in Fe.
+//! `Param` also owns fluent input bindings. A params record and its ordinary
+//! scalar state record are joined by `SurfaceState`; the
+//! `ParamBindingsProvider` reflects the state fields once, projects the same
+//! names from the params record, and emits a straight-line Fe transition. No
+//! binding table is projected to JSON and the browser does not interpret these
+//! values: the generated Wasm calls `Param::drive` below.
+
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+use core::num::FloatRounding
 
 /// The fixed browser-to-Fe input transport record. The marker declares nominal
 /// host-boundary intent; the compiler verifies this complete field shape before
@@ -36,9 +41,20 @@ pub struct SurfaceEvent {
     pub timestamp: f32,
     pub width: f32,
     pub height: f32,
+    /// Fixed host fact discriminant: 0 = pointer/wheel gesture, 1 = direct
+    /// parameter edit. Fe interprets it; JavaScript does not apply policy.
+    pub event_kind: u32,
+    /// Declaration-order parameter index for a direct edit.
+    pub param_index: u32,
+    /// Untouched browser/script value proposed by a direct edit.
+    pub param_value: f32,
 }
 
 impl Copy for SurfaceEvent {}
+
+impl SurfaceEvent {
+    pub fn is_param_edit(self) -> bool { self.event_kind == 1 }
+}
 
 /// How a param presents and is driven by the runtime. The variant NAME is the
 /// projected `kind` string (snake_cased), so this enum is the single source of
@@ -72,50 +88,196 @@ pub struct Param {
     min: f32,
     max: f32,
     init: f32,
+    drag_x_per_px: f32,
+    drag_y_per_px: f32,
+    wheel_per_notch: f32,
+    wheel_in_factor: f32,
+    wheel_out_factor: f32,
 }
 
 impl Param {
+    const fn new(_ kind: ParamKind, _ min: f32, _ max: f32, _ init: f32) -> Param {
+        Param {
+            kind: kind, min: min, max: max, init: init,
+            drag_x_per_px: 0.0, drag_y_per_px: 0.0, wheel_per_notch: 0.0,
+            wheel_in_factor: 1.0, wheel_out_factor: 1.0,
+        }
+    }
+
     /// A linear slider over `[min, max]`, starting at `init`.
     pub const fn range(min: f32, max: f32, init: f32) -> Param {
-        Param { kind: ParamKind::Range, min: min, max: max, init: init }
+        Param::new(ParamKind::Range, min, max, init)
     }
 
     /// A linear slider over `[0, 1]`, starting at `init`.
     pub const fn unit(init: f32) -> Param {
-        Param { kind: ParamKind::Unit, min: 0.0, max: 1.0, init: init }
+        Param::new(ParamKind::Unit, 0.0, 1.0, init)
     }
 
     /// An angle in radians over `[0, TAU]`, starting at `init`.
     pub const fn angle(init: f32) -> Param {
-        Param { kind: ParamKind::Angle, min: 0.0, max: 6.2831855, init: init }
+        Param::new(ParamKind::Angle, 0.0, 6.2831855, init)
     }
 
     /// A logarithmic slider over `[min, max]`, starting at `init`.
     pub const fn log(min: f32, max: f32, init: f32) -> Param {
-        Param { kind: ParamKind::Log, min: min, max: max, init: init }
+        Param::new(ParamKind::Log, min, max, init)
     }
 
     /// An integer slider over `[min, max]`, starting at `init`.
     pub const fn int(min: f32, max: f32, init: f32) -> Param {
-        Param { kind: ParamKind::Int, min: min, max: max, init: init }
+        Param::new(ParamKind::Int, min, max, init)
     }
 
     /// A constant value carried into the uniform record but not shown as a
     /// control.
     pub const fn fixed(_ value: f32) -> Param {
-        Param { kind: ParamKind::Fixed, min: value, max: value, init: value }
+        Param::new(ParamKind::Fixed, value, value, value)
     }
 
     /// Bound to the live canvas width in pixels. The runtime writes the actual
     /// backing-store width into this member each configure, so the kernel is
     /// resolution-exact with no `const RESOLUTION` and no ABI change.
     pub const fn extent_x() -> Param {
-        Param { kind: ParamKind::ExtentX, min: 0.0, max: 0.0, init: 0.0 }
+        Param::new(ParamKind::ExtentX, 0.0, 0.0, 0.0)
     }
 
     /// Bound to the live canvas height in pixels.
     pub const fn extent_y() -> Param {
-        Param { kind: ParamKind::ExtentY, min: 0.0, max: 0.0, init: 0.0 }
+        Param::new(ParamKind::ExtentY, 0.0, 0.0, 0.0)
+    }
+
+    /// Add `delta_x * per_px` to this value for each captured drag event.
+    pub const fn drag_x(self, per_px: f32) -> Param {
+        Param {
+            kind: self.kind, min: self.min, max: self.max, init: self.init,
+            drag_x_per_px: per_px, drag_y_per_px: self.drag_y_per_px,
+            wheel_per_notch: self.wheel_per_notch,
+            wheel_in_factor: self.wheel_in_factor,
+            wheel_out_factor: self.wheel_out_factor,
+        }
+    }
+
+    /// Add `delta_y * per_px` to this value for each captured drag event.
+    pub const fn drag_y(self, per_px: f32) -> Param {
+        Param {
+            kind: self.kind, min: self.min, max: self.max, init: self.init,
+            drag_x_per_px: self.drag_x_per_px, drag_y_per_px: per_px,
+            wheel_per_notch: self.wheel_per_notch,
+            wheel_in_factor: self.wheel_in_factor,
+            wheel_out_factor: self.wheel_out_factor,
+        }
+    }
+
+    /// Add one signed `per_notch` step for each raw wheel event. Deliberately
+    /// choosing the sign-only policy here makes browser delta units irrelevant;
+    /// applications needing a continuous trackpad curve can provide an authored
+    /// transition instead of changing the host transport.
+    pub const fn wheel(self, per_notch: f32) -> Param {
+        Param {
+            kind: self.kind, min: self.min, max: self.max, init: self.init,
+            drag_x_per_px: self.drag_x_per_px,
+            drag_y_per_px: self.drag_y_per_px,
+            wheel_per_notch: per_notch,
+            wheel_in_factor: self.wheel_in_factor,
+            wheel_out_factor: self.wheel_out_factor,
+        }
+    }
+
+    /// Scale inward/outward wheel events by explicit factors. This is the
+    /// reusable form of the gallery's former handwritten `wheel_zoom` helper.
+    pub const fn wheel_scale(self, in_factor: f32, out_factor: f32) -> Param {
+        Param {
+            kind: self.kind, min: self.min, max: self.max, init: self.init,
+            drag_x_per_px: self.drag_x_per_px,
+            drag_y_per_px: self.drag_y_per_px,
+            wheel_per_notch: self.wheel_per_notch,
+            wheel_in_factor: in_factor, wheel_out_factor: out_factor,
+        }
+    }
+
+    /// Apply this declaration to one current scalar and one untouched browser
+    /// fact. This body is ordinary Fe and is what the provider-generated state
+    /// transition calls in Wasm.
+    pub fn drive(self, _ current: f32, _ event: SurfaceEvent, _ index: u32) -> f32 {
+        let mut next: f32 = current
+        if event.is_param_edit() {
+            if event.param_index != index { return current }
+            next = event.param_value
+        } else {
+            next = current
+                + event.delta_x * self.drag_x_per_px
+                + event.delta_y * self.drag_y_per_px
+            if event.wheel_delta < 0.0 {
+                next = (next - self.wheel_per_notch) * self.wheel_in_factor
+            } else {
+                if event.wheel_delta > 0.0 {
+                    next = (next + self.wheel_per_notch) * self.wheel_out_factor
+                }
+            }
+        }
+
+        match self.kind {
+            ParamKind::Range => next.clamp(self.min, self.max),
+            ParamKind::Unit => next.clamp(self.min, self.max),
+            ParamKind::Angle => {
+                let span = self.max - self.min
+                let offset = next - self.min
+                self.min + offset - span * (offset / span).floor()
+            },
+            ParamKind::Log => next.clamp(self.min, self.max),
+            ParamKind::Int => next.round().clamp(self.min, self.max),
+            ParamKind::Fixed => current,
+            ParamKind::ExtentX => event.width,
+            ParamKind::ExtentY => event.height,
+        }
+    }
+}
+
+/// Associates an ordinary scalar state record with the params record whose
+/// fields have the same labels. The relation is authored in Fe, not inferred
+/// from a manifest.
+pub trait SurfaceState {
+    type Params
+}
+
+/// A straight-line, field-complete input transition derived from `Param`
+/// declarations. Rich coupled controls (for example cursor-anchored deep
+/// Mandelbrot navigation) remain ordinary authored implementations.
+pub trait ApplyParamBindings: SurfaceState {
+    fn apply_param_bindings(
+        self,
+        _ params: <Self as SurfaceState>::Params,
+        _ event: SurfaceEvent,
+    ) -> Self
+}
+
+/// Generic derive provider for `ApplyParamBindings`. Reflection supplies only
+/// state field labels; `Param::drive` supplies all application semantics.
+pub struct ParamBindingsProvider {}
+
+impl Derive<ApplyParamBindings> for ParamBindingsProvider {
+    const fn derive<T>(ev: own Evidence<ApplyParamBindings<T>>) -> Evidence<ApplyParamBindings<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<ApplyParamBindings<T>>,
+        )
+    {
+        let state = builder.self_ref()
+        let params = builder.arg_ref("params")
+        let event = builder.arg_ref("event")
+        let mut next = builder.struct_init()
+        let mut index: u32 = 0
+        for field in reflect.fields() {
+            let current = builder.field_get(state, field)
+            let param = builder.field_get(params, field)
+            let driven = builder.call(param, "drive", current, event, builder.int(index))
+            next = builder.with_field(next, field, driven)
+            index = index + 1
+        }
+        builder.emit_method("apply_param_bindings", next)
+        builder.finish()
+        ev
     }
 }
 

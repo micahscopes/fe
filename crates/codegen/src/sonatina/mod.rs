@@ -64,7 +64,7 @@ pub(crate) struct WasmSurfaceFrame {
     source: String,
     export: String,
     state_replace_export: String,
-    /// One bit per flattened actor argument after the ten SurfaceEvent
+    /// One bit per flattened actor argument after the fixed SurfaceEvent
     /// leaves. Inert resource slots remain host-supplied transport values;
     /// every other value is complete actor state in private Wasm globals.
     actor_param_is_resource: Vec<bool>,

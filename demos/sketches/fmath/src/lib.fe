@@ -43,17 +43,13 @@
 //! ordinary Fe (a hand-chosen parabola approximation): no backend has a
 //! native `sin`/`cos` instruction, so there is no intrinsic to graduate to.
 
-use core::num::Abs
+use core::num::{Abs, FloatRounding}
 use core::ops::MinMax
 
 extern {
     fn __f32_from_i32(_: i32) -> f32
     fn __i32_from_f32(_: f32) -> i32
     fn __sqrt_f32(_: f32) -> f32
-    fn __floor_f32(_: f32) -> f32
-    fn __ceil_f32(_: f32) -> f32
-    fn __trunc_f32(_: f32) -> f32
-    fn __round_f32(_: f32) -> f32
 }
 
 pub const PI: f32 = 3.14159265
@@ -99,22 +95,22 @@ pub fn clamp01(_ x: f32) -> f32 {
 /// "round toward negative infinity", which is the distinction `floor` turns
 /// on.
 pub fn trunc(_ x: f32) -> f32 {
-    __trunc_f32(x)
+    x.trunc()
 }
 
 /// Round toward negative infinity.
 pub fn floor(_ x: f32) -> f32 {
-    __floor_f32(x)
+    x.floor()
 }
 
 /// Round toward positive infinity.
 pub fn ceil(_ x: f32) -> f32 {
-    __ceil_f32(x)
+    x.ceil()
 }
 
 /// Round to the nearest integer, ties to even (IEEE 754 `roundTiesToEven`).
 pub fn round(_ x: f32) -> f32 {
-    __round_f32(x)
+    x.round()
 }
 
 pub fn fract(_ x: f32) -> f32 {
