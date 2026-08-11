@@ -1,10 +1,10 @@
 {
   "artifacts": {
     "canonical_adapters": [],
-    "wasm": "fe-render-836e707a30e34856.wasm",
-    "wasm_bytes": 22951,
-    "wgsl": "fe-render-98836d9c82fbf15b.wgsl",
-    "wgsl_bytes": 385779
+    "wasm": "fe-render-ef2b8e3ccbed0630.wasm",
+    "wasm_bytes": 23546,
+    "wgsl": "fe-render-ffb808824a00fe99.wgsl",
+    "wgsl_bytes": 391796
   },
   "browser_runtime": null,
   "canonical_interface": null,
@@ -255,8 +255,8 @@
           0
         ]
       },
-      "shader": "fe-render-98836d9c82fbf15b.wgsl",
-      "shader_bytes": 385779,
+      "shader": "fe-render-ffb808824a00fe99.wgsl",
+      "shader_bytes": 391796,
       "source_entry": "escape"
     }
   ],
@@ -272,7 +272,7 @@
       {
         "id": "fmath/src/lib.fe",
         "kind": "fe",
-        "sha256": "d2e14a7f4fa6cdff0a6a2f65c711677b835c919a816e5098e5c35aca2693ebe4"
+        "sha256": "6d3420ee371961c38f30062489d936a916326ad5537dd436ba213843ae43acf7"
       },
       {
         "id": "mandelbrot/fe.toml",
@@ -282,7 +282,7 @@
       {
         "id": "mandelbrot/src/lib.fe",
         "kind": "fe",
-        "sha256": "6d136ea02f5ae045e7c6d59c15c2b2d46ebfb5a5dd407422f8ba7d4f7893101d"
+        "sha256": "b2e78a5c79e877519964fdfd49b9ae2bcc0f5ab1107037ef5d8c19c3ebe62de0"
       },
       {
         "id": "precision/fe.toml",
@@ -302,7 +302,7 @@
       {
         "id": "precision/src/fixed.fe",
         "kind": "fe",
-        "sha256": "0378003b9b03e37658907a16fcfc27e118ace703e274020ca2493e468c9406ec"
+        "sha256": "a6240bf9a1c50871352a21e91cc5d8fd69429d008f8fa9543cb42981a4f28a3b"
       },
       {
         "id": "precision/src/lib.fe",

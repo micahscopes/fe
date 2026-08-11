@@ -18,7 +18,7 @@ use std::web::view::{
     ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface,
     SurfaceEvent, SurfaceState,
 }
-use fmath::{abs, from_i32, max, palette}
+use fmath::{abs, escape_palette, from_i32, max, PixelSample}
 use precision::{add_f32, from_quad, sub, to_quad, two_sum}
 use precision::fixed::{from_f32, from_qf_offset, mandelbrot_advance8, to_f32_quad_bits}
 
@@ -30,7 +30,6 @@ const MAX_ITER_BASE: u32 = 256
 const MAX_ITER_CAP: u32 = 2000
 const DEPTH_PROBE_STEPS: u32 = 96
 const ITER_PER_DOUBLING: u32 = 64
-const PALETTE_PERIOD: f32 = 256.0
 const ORBIT_SAMPLES: usize = 2003
 const ORBIT_CENTER_INDEX: u32 = 2001
 const ORBIT_META_INDEX: u32 = 2002
@@ -311,8 +310,12 @@ actor PerturbationalMandelbrot uses (PassGraph<WebGpuBackend>) {
     }
 
     fn display_reference(self, px: i32, py: i32) -> i32 uses (Display) {
-        let u: f32 = (from_i32(px) + 0.5) / self.res * 2.0 - 1.0
-        let v: f32 = 1.0 - (from_i32(py) + 0.5) / self.res * 2.0
+        // The same one-orbit ordered refinement as the exact renderer. This is
+        // deliberately not naive 4x supersampling: the fixed-trip perturbation
+        // loop reaches ~2,000 iterations at depth and must remain interactive.
+        let point = PixelSample::ordered_2x2(px, py).plane(self.res)
+        let u: f32 = point.u
+        let v: f32 = point.v
         let center_reference: ComplexQF32Bits = self.orbit.load(index: ORBIT_CENTER_INDEX)
         let center_ref_re_w0: f32 = __bitcast(center_reference.re_w0_bits)
         let center_ref_re_w1: f32 = __bitcast(center_reference.re_w1_bits)
@@ -464,10 +467,7 @@ actor PerturbationalMandelbrot uses (PassGraph<WebGpuBackend>) {
             -65281
         } else {
             if escaped == 1 {
-                let smooth_count: f32 = from_i32(count.downcast_truncate())
-                    + 4.0 / escape_magnitude
-                let t: f32 = smooth_count / PALETTE_PERIOD
-                palette(t, 0.0, 0.33, 0.67)
+                escape_palette(count.downcast_truncate(), escape_magnitude)
             } else {
                 -16777216
             }
