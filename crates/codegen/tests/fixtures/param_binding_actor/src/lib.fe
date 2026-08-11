@@ -9,7 +9,7 @@ use std::webgpu::{
 }
 use std::web::view::{
     ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface,
-    SurfaceEvent, SurfaceScheduleEvent, SurfaceScheduleState, SurfaceScheduleStep, SurfaceState,
+    SurfaceEvent, SurfaceState,
 }
 
 struct ProbeParams {
@@ -50,13 +50,6 @@ actor ParamBindingProbe uses (GpuProgram<WebGpuBackend>) {
     zoom: f32,
     res: f32,
 
-    fn schedule(_ event: own SurfaceScheduleEvent, _ state: own SurfaceScheduleState)
-        -> SurfaceScheduleStep
-        uses (SurfaceScheduling<LatestPerFrame>)
-    {
-        LatestPerFrame::step(state, event)
-    }
-
     const fn view() -> Surface<ProbeParams> {
         Surface {
             extent: Extent::square(256),
@@ -65,7 +58,7 @@ actor ParamBindingProbe uses (GpuProgram<WebGpuBackend>) {
     }
 
     fn navigate(self, event: own SurfaceEvent) -> ProbeState
-        uses (SurfaceTransition, LatestPerFrame)
+        uses (SurfaceTransition, SurfaceScheduling<LatestPerFrame>)
     {
         ProbeState {
             steps: self.steps,

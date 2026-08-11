@@ -27,8 +27,8 @@ use hir::analysis::{
     },
 };
 use hir::hir_def::{
-    FieldParent, GenericArg, GpuControl, GpuDispatch, GpuResource, GpuSchedule, GpuStage, LitKind,
-    Partial, PathId, TopLevelMod, TypeKind,
+    FieldParent, Func, GenericArg, GpuControl, GpuDispatch, GpuResource, GpuSchedule, GpuStage,
+    HirIngot, LitKind, Partial, PathId, TopLevelMod, TypeKind, Visibility,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -806,14 +806,10 @@ fn behavior_is_surface_control(db: &DriverDataBase, behavior: hir::hir_def::Func
     )
 }
 
-fn behavior_is_surface_schedule(db: &DriverDataBase, behavior: hir::hir_def::Func<'_>) -> bool {
-    behavior_surface_control_kind(db, behavior) == Some(GpuControl::SurfaceSchedule)
-}
-
-fn behavior_surface_policy_kind(
-    db: &DriverDataBase,
-    behavior: hir::hir_def::Func<'_>,
-) -> Option<GpuSchedule> {
+fn behavior_surface_policy_ty<'db>(
+    db: &'db DriverDataBase,
+    behavior: Func<'db>,
+) -> Option<TyId<'db>> {
     behavior
         .actor_roles(db)
         .data(db)
@@ -828,22 +824,12 @@ fn behavior_surface_policy_kind(
             let [policy_ty] = ty.generic_args(db) else {
                 return None;
             };
-            nominal_attrs(db, *policy_ty)?.gpu_schedule(db)
+            Some(*policy_ty)
         })
 }
 
-fn behavior_surface_schedule_kind(
-    db: &DriverDataBase,
-    behavior: hir::hir_def::Func<'_>,
-) -> Option<GpuSchedule> {
-    behavior
-        .actor_roles(db)
-        .data(db)
-        .iter()
-        .filter_map(|role| role.key_path.to_opt())
-        .filter_map(|path| resolve_metadata_ty(db, path, behavior.scope()))
-        .filter_map(|ty| nominal_attrs(db, ty))
-        .find_map(|attrs| attrs.gpu_schedule(db))
+fn behavior_surface_schedule_kind(db: &DriverDataBase, behavior: Func<'_>) -> Option<GpuSchedule> {
+    nominal_attrs(db, behavior_surface_policy_ty(db, behavior)?)?.gpu_schedule(db)
 }
 
 fn gpu_actor_name_for_entry(
@@ -1109,56 +1095,13 @@ fn actor_update_export_name(
     }
 }
 
-/// Finds the actor's separately typed resident presentation-policy behavior.
-/// Keeping this distinct from the application state transition prevents a
-/// scheduling role from becoming a second ambiguous control behavior.
-fn actor_schedule_export_name(
-    db: &DriverDataBase,
-    top_mod: TopLevelMod<'_>,
-    source_entry: &str,
-) -> Result<Option<String>, WebBundleError> {
-    let actors = semantic_actors(db, top_mod);
-    let Some(actor) = actors.iter().find(|actor| {
-        actor_is_gpu_program(db, actor)
-            && actor.behaviors.iter().any(|behavior| {
-                behavior
-                    .name(db)
-                    .to_opt()
-                    .is_some_and(|name| name.data(db) == source_entry)
-            })
-    }) else {
-        return Ok(None);
-    };
-    let schedules = actor
-        .behaviors
-        .iter()
-        .copied()
-        .filter(|behavior| behavior_is_surface_schedule(db, *behavior))
-        .collect::<Vec<_>>();
-    match schedules.as_slice() {
-        [] => Ok(None),
-        [behavior] => Ok(behavior
-            .name(db)
-            .to_opt()
-            .map(|name| name.data(db).to_string())),
-        _ => Err(WebBundleError::SurfaceProjection(format!(
-            "actor `{}` declares {} surface-schedule behaviors; a render program has at most one",
-            actor
-                .state
-                .name(db)
-                .to_opt()
-                .map(|name| name.data(db))
-                .map_or("<unnamed>", |name| name.as_str()),
-            schedules.len()
-        ))),
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TypedSurfaceTransitionContract {
     params: Vec<WebControlWasmType>,
     results: Vec<WebControlWasmType>,
     event_tag_limits: Vec<(usize, u32)>,
+    coalesce_tag_field: usize,
+    coalesce_tag_variant: u32,
     actor_param_is_resource: Vec<bool>,
     schedule: Option<GpuSchedule>,
 }
@@ -1170,6 +1113,16 @@ struct TypedSurfaceScheduleContract {
     decision_fields: usize,
     event_tag_limits: Vec<(usize, u32)>,
     state_tag_limits: Vec<(usize, u32)>,
+}
+
+/// An ordinary Fe policy function selected solely from the nominal
+/// `SurfaceScheduling<P>` capability and its structurally unique inherent
+/// implementation. No behavior/function name participates in selection.
+#[derive(Debug, Clone)]
+struct ResolvedSurfaceSchedulePolicy<'db> {
+    func: Func<'db>,
+    event_first: bool,
+    contract: TypedSurfaceScheduleContract,
 }
 
 fn typed_surface_transition_export(contract: &TypedSurfaceTransitionContract) -> &'static str {
@@ -1190,6 +1143,8 @@ fn with_typed_surface_export(
             TYPED_SURFACE_LATEST_PER_FRAME_EXPORT,
             TYPED_SURFACE_STATE_REPLACE_EXPORT,
             contract.event_tag_limits.clone(),
+            contract.coalesce_tag_field,
+            contract.coalesce_tag_variant,
             contract.actor_param_is_resource.clone(),
         ),
         None => options.with_export_alias(source, TYPED_SURFACE_TRANSITION_EXPORT),
@@ -1361,6 +1316,40 @@ fn surface_scalar_tag_limits(
     }
 }
 
+/// Derive the homogeneous gesture-batch key from the validated fixed
+/// `SurfaceEvent` shape. The enum ordinal comes from Fe's resolved variant
+/// order; neither an example nor the browser host supplies a numeric table.
+fn surface_event_coalesce_key(event: &CanonicalType) -> Result<(usize, u32), WebBundleError> {
+    let CanonicalType::Record(fields) = event else {
+        return Err(WebBundleError::SurfaceProjection(
+            "typed SurfaceEvent must be a record".to_owned(),
+        ));
+    };
+    let mut offset = 0usize;
+    for field in fields {
+        if field.name == "event_kind" {
+            let CanonicalType::Variant(variants) = &field.ty else {
+                return Err(WebBundleError::SurfaceProjection(
+                    "typed SurfaceEvent.event_kind must be a fieldless enum".to_owned(),
+                ));
+            };
+            let variant = variants
+                .iter()
+                .position(|variant| variant.name == "gesture")
+                .ok_or_else(|| {
+                    WebBundleError::SurfaceProjection(
+                        "typed SurfaceEventKind is missing its gesture variant".to_owned(),
+                    )
+                })?;
+            return Ok((offset, variant as u32));
+        }
+        offset += surface_scalar_tag_limits(&field.ty, &field.name, offset, &mut Vec::new())?;
+    }
+    Err(WebBundleError::SurfaceProjection(
+        "typed SurfaceEvent is missing its event_kind field".to_owned(),
+    ))
+}
+
 /// Resolve and validate the manifest-free typed surface-transition contract.
 /// `Ok(None)` is the legacy `UpdateSurface` lane. A typed role fails closed on
 /// any mismatch: nominal event marker, complete event shape, complete
@@ -1486,6 +1475,7 @@ fn typed_surface_transition_contract(
             "typed surface event flattened to {event_fields} scalar leaves; expected {TYPED_SURFACE_EVENT_FIELDS}"
         )));
     }
+    let (coalesce_tag_field, coalesce_tag_variant) = surface_event_coalesce_key(&event)?;
     for (index, ty) in arg_tys[1..].iter().enumerate() {
         if resource_field_indices.contains(&(index as u32)) {
             // GPU resource values are inert handles in the control-only Wasm
@@ -1511,21 +1501,48 @@ fn typed_surface_transition_contract(
         params,
         results,
         event_tag_limits,
+        coalesce_tag_field,
+        coalesce_tag_variant,
         actor_param_is_resource,
         schedule,
     }))
 }
 
-/// Resolve the Fe-authored resident presentation policy. Its nominal input,
-/// state, and step records are checked structurally, then only scalar counts
-/// and enum bounds are passed to Wasm lowering. Nothing is projected into the
-/// render manifest or interpreted by the browser.
-fn typed_surface_schedule_contract(
-    db: &DriverDataBase,
-    top_mod: TopLevelMod<'_>,
+fn surface_schedule_arg_order(db: &DriverDataBase, func: Func<'_>) -> Option<bool> {
+    let arg_tys = func.arg_tys(db);
+    if arg_tys.len() != 2
+        || !nominal_attrs(db, func.return_ty(db))
+            .is_some_and(|attrs| attrs.is_web_surface_schedule_step(db))
+    {
+        return None;
+    }
+    let first = *arg_tys[0].skip_binder();
+    let second = *arg_tys[1].skip_binder();
+    let first_attrs = nominal_attrs(db, first)?;
+    let second_attrs = nominal_attrs(db, second)?;
+    if first_attrs.is_web_surface_schedule_event(db)
+        && second_attrs.is_web_surface_schedule_state(db)
+    {
+        Some(true)
+    } else if first_attrs.is_web_surface_schedule_state(db)
+        && second_attrs.is_web_surface_schedule_event(db)
+    {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// Resolve a policy from the typed capability on the application transition.
+/// Its nominal policy type identifies an inherent `impl`; exactly one public
+/// ordinary Fe function in that impl must have the schedule event/state/step
+/// shape. Function names and argument labels are deliberately irrelevant.
+fn resolve_surface_schedule_policy<'db>(
+    db: &'db DriverDataBase,
+    top_mod: TopLevelMod<'db>,
     source_entry: &str,
-    schedule_export: &str,
-) -> Result<TypedSurfaceScheduleContract, WebBundleError> {
+    control_export: &str,
+) -> Result<Option<ResolvedSurfaceSchedulePolicy<'db>>, WebBundleError> {
     let actors = semantic_actors(db, top_mod);
     let actor = actors
         .iter()
@@ -1540,7 +1557,7 @@ fn typed_surface_schedule_contract(
         })
         .ok_or_else(|| {
             WebBundleError::SurfaceProjection(format!(
-                "surface schedule `{schedule_export}` has no containing GPU actor"
+                "typed control export `{control_export}` has no containing GPU actor"
             ))
         })?;
     let behavior = actor
@@ -1551,46 +1568,113 @@ fn typed_surface_schedule_contract(
             behavior
                 .name(db)
                 .to_opt()
-                .is_some_and(|name| name.data(db) == schedule_export)
+                .is_some_and(|name| name.data(db) == control_export)
         })
         .ok_or_else(|| {
             WebBundleError::SurfaceProjection(format!(
-                "surface schedule `{schedule_export}` was not found semantically"
+                "typed control export `{control_export}` was not found semantically"
             ))
         })?;
-    if behavior_surface_control_kind(db, behavior) != Some(GpuControl::SurfaceSchedule) {
+    let Some(policy_ty) = behavior_surface_policy_ty(db, behavior) else {
+        return Ok(None);
+    };
+    let policy_kind = nominal_attrs(db, policy_ty).and_then(|attrs| attrs.gpu_schedule(db));
+    if policy_kind != Some(GpuSchedule::LatestPerFrame) {
         return Err(WebBundleError::SurfaceProjection(format!(
-            "surface schedule `{schedule_export}` must use the SurfaceScheduling role"
+            "surface actor `{source_entry}` selects an unsupported SurfaceScheduling policy `{}`",
+            policy_ty.pretty_print(db)
         )));
     }
-    if behavior_surface_policy_kind(db, behavior) != Some(GpuSchedule::LatestPerFrame) {
+    let separate_schedule_behaviors = actor
+        .behaviors
+        .iter()
+        .copied()
+        .filter(|candidate| {
+            behavior_surface_control_kind(db, *candidate) == Some(GpuControl::SurfaceSchedule)
+        })
+        .count();
+    if separate_schedule_behaviors != 0 {
         return Err(WebBundleError::SurfaceProjection(format!(
-            "surface schedule `{schedule_export}` must select SurfaceScheduling<LatestPerFrame>"
+            "surface actor `{source_entry}` declares {separate_schedule_behaviors} redundant surface-schedule behavior(s); select the policy only through SurfaceScheduling<P> on its SurfaceTransition"
         )));
     }
-    let arg_tys = behavior.arg_tys(db);
+
+    let policy_name = policy_ty.pretty_print(db);
+    let policy_ingot = policy_ty.ingot(db).ok_or_else(|| {
+        WebBundleError::SurfaceProjection(format!(
+            "SurfaceScheduling policy `{policy_name}` is not owned by a resolvable Fe ingot"
+        ))
+    })?;
+    let candidates = policy_ingot
+        .all_impls(db)
+        .iter()
+        .copied()
+        .filter(|impl_| impl_.admissible_inherent_impl_ty(db) == Some(policy_ty))
+        .flat_map(|impl_| impl_.funcs(db))
+        .filter(|func| {
+            func.vis(db) == Visibility::Public && !func.is_extern(db) && func.body(db).is_some()
+        })
+        .filter_map(|func| {
+            surface_schedule_arg_order(db, func).map(|event_first| (func, event_first))
+        })
+        .collect::<Vec<_>>();
+    let (func, event_first) = match candidates.as_slice() {
+        [(func, event_first)] => (*func, *event_first),
+        [] => {
+            return Err(WebBundleError::SurfaceProjection(format!(
+                "SurfaceScheduling policy `{policy_name}` has no unique public Fe implementation with nominal SurfaceScheduleEvent/SurfaceScheduleState -> SurfaceScheduleStep shape"
+            )));
+        }
+        _ => {
+            return Err(WebBundleError::SurfaceProjection(format!(
+                "SurfaceScheduling policy `{policy_name}` has {} structurally matching Fe implementations; exactly one is required",
+                candidates.len()
+            )));
+        }
+    };
+    let contract = typed_surface_schedule_contract(db, func, event_first, &policy_name)?;
+    Ok(Some(ResolvedSurfaceSchedulePolicy {
+        func,
+        event_first,
+        contract,
+    }))
+}
+
+/// Validate the selected Fe policy's nominal records, then retain only scalar
+/// counts and enum bounds for target-neutral wrapper lowering. Nothing is
+/// projected into the render manifest or interpreted by the browser.
+fn typed_surface_schedule_contract(
+    db: &DriverDataBase,
+    func: Func<'_>,
+    event_first: bool,
+    policy_name: &str,
+) -> Result<TypedSurfaceScheduleContract, WebBundleError> {
+    let arg_tys = func.arg_tys(db);
     if arg_tys.len() != 2 {
         return Err(WebBundleError::SurfaceProjection(format!(
-            "surface schedule `{schedule_export}` must take exactly SurfaceScheduleEvent and SurfaceScheduleState; found {} semantic arguments",
+            "SurfaceScheduling policy `{policy_name}` must take exactly SurfaceScheduleEvent and SurfaceScheduleState; found {} semantic arguments",
             arg_tys.len()
         )));
     }
-    let event_ty = *arg_tys[0].skip_binder();
-    let state_ty = *arg_tys[1].skip_binder();
+    let (event_ty, state_ty) = if event_first {
+        (*arg_tys[0].skip_binder(), *arg_tys[1].skip_binder())
+    } else {
+        (*arg_tys[1].skip_binder(), *arg_tys[0].skip_binder())
+    };
     if !nominal_attrs(db, event_ty).is_some_and(|attrs| attrs.is_web_surface_schedule_event(db)) {
         return Err(WebBundleError::SurfaceProjection(format!(
-            "surface schedule `{schedule_export}` first argument must be the nominal #[web_surface_schedule_event] record"
+            "SurfaceScheduling policy `{policy_name}` must take the nominal #[web_surface_schedule_event] record"
         )));
     }
     if !nominal_attrs(db, state_ty).is_some_and(|attrs| attrs.is_web_surface_schedule_state(db)) {
         return Err(WebBundleError::SurfaceProjection(format!(
-            "surface schedule `{schedule_export}` second argument must be the nominal #[web_surface_schedule_state] record"
+            "SurfaceScheduling policy `{policy_name}` must take the nominal #[web_surface_schedule_state] record"
         )));
     }
-    let result_ty = behavior.return_ty(db);
+    let result_ty = func.return_ty(db);
     if !nominal_attrs(db, result_ty).is_some_and(|attrs| attrs.is_web_surface_schedule_step(db)) {
         return Err(WebBundleError::SurfaceProjection(format!(
-            "surface schedule `{schedule_export}` must return the nominal #[web_surface_schedule_step] record"
+            "SurfaceScheduling policy `{policy_name}` must return the nominal #[web_surface_schedule_step] record"
         )));
     }
 
@@ -1605,7 +1689,7 @@ fn typed_surface_schedule_contract(
     let expected_step = canonical_surface_schedule_step_type();
     if event != expected_event || state != expected_state || step != expected_step {
         return Err(WebBundleError::SurfaceProjection(format!(
-            "surface schedule `{schedule_export}` differs from the fixed typed policy ABI: expected {expected_event:?}, {expected_state:?} -> {expected_step:?}; got {event:?}, {state:?} -> {step:?}"
+            "SurfaceScheduling policy `{policy_name}` differs from the fixed typed policy ABI: expected {expected_event:?}, {expected_state:?} -> {expected_step:?}; got {event:?}, {state:?} -> {step:?}"
         )));
     }
 
@@ -1620,12 +1704,12 @@ fn typed_surface_schedule_contract(
         surface_scalar_tag_limits(&step, "surface_schedule_step", 0, &mut step_tag_limits)?;
     let decision_fields = step_fields.checked_sub(state_fields).ok_or_else(|| {
         WebBundleError::SurfaceProjection(format!(
-            "surface schedule `{schedule_export}` reply is shorter than its resident state"
+            "SurfaceScheduling policy `{policy_name}` reply is shorter than its resident state"
         ))
     })?;
     if event_fields != 3 || state_fields != 3 || decision_fields != 2 {
         return Err(WebBundleError::SurfaceProjection(format!(
-            "surface schedule `{schedule_export}` must flatten to 3 event, 3 state, and 2 decision leaves; got {event_fields}, {state_fields}, and {decision_fields}"
+            "SurfaceScheduling policy `{policy_name}` must flatten to 3 event, 3 state, and 2 decision leaves; got {event_fields}, {state_fields}, and {decision_fields}"
         )));
     }
     Ok(TypedSurfaceScheduleContract {
@@ -1640,11 +1724,13 @@ fn typed_surface_schedule_contract(
 fn with_typed_surface_schedule(
     options: WasmCompileOptions,
     source: &str,
+    event_first: bool,
     contract: &TypedSurfaceScheduleContract,
 ) -> WasmCompileOptions {
     options.with_resident_policy(
         source,
         TYPED_SURFACE_SCHEDULE_EXPORT,
+        event_first,
         contract.event_fields,
         contract.state_fields,
         contract.decision_fields,
@@ -1655,21 +1741,18 @@ fn with_typed_surface_schedule(
 
 fn validate_surface_schedule_pair(
     transition: Option<&TypedSurfaceTransitionContract>,
-    schedule_export: Option<&str>,
+    policy: Option<&ResolvedSurfaceSchedulePolicy<'_>>,
     source_entry: &str,
 ) -> Result<(), WebBundleError> {
-    match (
-        transition.and_then(|contract| contract.schedule),
-        schedule_export,
-    ) {
+    match (transition.and_then(|contract| contract.schedule), policy) {
         (Some(GpuSchedule::LatestPerFrame), Some(_)) => Ok(()),
         (Some(GpuSchedule::LatestPerFrame), None) => {
             Err(WebBundleError::SurfaceProjection(format!(
-                "surface actor `{source_entry}` selects LatestPerFrame but has no typed SurfaceScheduling behavior"
+                "surface actor `{source_entry}` selects SurfaceScheduling<LatestPerFrame> but its Fe policy implementation could not be derived"
             )))
         }
-        (None, Some(schedule)) => Err(WebBundleError::SurfaceProjection(format!(
-            "surface actor `{source_entry}` declares schedule behavior `{schedule}` without selecting a scheduling policy on its typed SurfaceTransition"
+        (None, Some(_)) => Err(WebBundleError::SurfaceProjection(format!(
+            "surface actor `{source_entry}` derived a scheduling policy without selecting it on its typed SurfaceTransition"
         ))),
         (None, None) => Ok(()),
     }
@@ -2570,7 +2653,6 @@ impl WebBundle {
             ));
         }
         let control_export = actor_update_export_name(db, top_mod, &options.source_entry)?;
-        let schedule_export = actor_schedule_export_name(db, top_mod, &options.source_entry)?;
         let fragment_entries = program
             .stages
             .iter()
@@ -2679,13 +2761,6 @@ impl WebBundle {
             // A pass graph remains GPU-only for all rendering and resource
             // work. Its optional Wasm artifact contains only the Fe-authored
             // surface-control behavior, which returns updated scalar state.
-            let mut control_entries = vec![control_export.to_owned()];
-            if let Some(schedule_export) = schedule_export.as_ref() {
-                control_entries.push(schedule_export.clone());
-            }
-            let control_package =
-                mir::build_wasm_runtime_package_for_entries(db, top_mod, &control_entries)
-                    .map_err(|error| WebBundleError::Lower(error.to_string()))?;
             let typed_transition = typed_surface_transition_contract(
                 db,
                 top_mod,
@@ -2693,24 +2768,43 @@ impl WebBundle {
                 control_export,
                 &resource_field_indices,
             )?;
+            let schedule_policy = resolve_surface_schedule_policy(
+                db,
+                top_mod,
+                &options.source_entry,
+                control_export,
+            )?;
             validate_surface_schedule_pair(
                 typed_transition.as_ref(),
-                schedule_export.as_deref(),
+                schedule_policy.as_ref(),
                 &options.source_entry,
             )?;
+            let control_entries = vec![control_export.to_owned()];
+            let internal_funcs = schedule_policy
+                .as_ref()
+                .map(|policy| vec![policy.func])
+                .unwrap_or_default();
+            let control_package = mir::build_wasm_runtime_package_for_entries_with_internal_funcs(
+                db,
+                top_mod,
+                &control_entries,
+                &internal_funcs,
+            )
+            .map_err(|error| WebBundleError::Lower(error.to_string()))?;
             let mut wasm_options = WasmCompileOptions::default().with_optimization();
             if let Some(contract) = typed_transition.as_ref() {
                 wasm_options = with_typed_surface_export(wasm_options, control_export, contract);
             }
-            if let Some(schedule_export) = schedule_export.as_deref() {
-                let schedule_contract = typed_surface_schedule_contract(
-                    db,
-                    top_mod,
-                    &options.source_entry,
-                    schedule_export,
-                )?;
-                wasm_options =
-                    with_typed_surface_schedule(wasm_options, schedule_export, &schedule_contract);
+            if let Some(policy) = schedule_policy.as_ref() {
+                let policy_symbol =
+                    mir::runtime_package_symbol_for_func(db, control_package, policy.func)
+                        .map_err(|error| WebBundleError::Lower(error.to_string()))?;
+                wasm_options = with_typed_surface_schedule(
+                    wasm_options,
+                    &policy_symbol,
+                    policy.event_first,
+                    &policy.contract,
+                );
             }
             let wasm =
                 compile_runtime_package_wasm_with_options(db, &control_package, wasm_options)
@@ -2814,7 +2908,6 @@ impl WebBundle {
         // would need `control_export` routed around canonical-lane derivation
         // too, so that unsupported combination remains fail-closed.
         let control_export = actor_update_export_name(db, top_mod, &options.source_entry)?;
-        let schedule_export = actor_schedule_export_name(db, top_mod, &options.source_entry)?;
         let typed_transition = control_export
             .as_deref()
             .map(|export| {
@@ -2822,9 +2915,16 @@ impl WebBundle {
             })
             .transpose()?
             .flatten();
+        let schedule_policy = control_export
+            .as_deref()
+            .map(|export| {
+                resolve_surface_schedule_policy(db, top_mod, &options.source_entry, export)
+            })
+            .transpose()?
+            .flatten();
         validate_surface_schedule_pair(
             typed_transition.as_ref(),
-            schedule_export.as_deref(),
+            schedule_policy.as_ref(),
             &options.source_entry,
         )?;
         let mut canonical_entries = if options.canonical_entries.is_empty() {
@@ -2833,9 +2933,6 @@ impl WebBundle {
             options.canonical_entries.clone()
         };
         if let Some(name) = &control_export {
-            canonical_entries.push(name.clone());
-        }
-        if let Some(name) = &schedule_export {
             canonical_entries.push(name.clone());
         }
         let mut seen_entries = std::collections::BTreeSet::new();
@@ -2896,8 +2993,17 @@ impl WebBundle {
                 "canonical bundle requires at least one executable Wasm lane".to_owned(),
             ));
         }
-        let wasm_package = mir::build_wasm_runtime_package_for_entries(db, top_mod, &wasm_entries)
-            .map_err(|error| WebBundleError::Lower(error.to_string()))?;
+        let internal_funcs = schedule_policy
+            .as_ref()
+            .map(|policy| vec![policy.func])
+            .unwrap_or_default();
+        let wasm_package = mir::build_wasm_runtime_package_for_entries_with_internal_funcs(
+            db,
+            top_mod,
+            &wasm_entries,
+            &internal_funcs,
+        )
+        .map_err(|error| WebBundleError::Lower(error.to_string()))?;
 
         let mut wasm_options = match options.canonical_policy {
             WebCanonicalPolicy::Disabled => WasmCompileOptions::default(),
@@ -2924,15 +3030,15 @@ impl WebBundle {
                 contract,
             );
         }
-        if let Some(schedule_export) = schedule_export.as_deref() {
-            let schedule_contract = typed_surface_schedule_contract(
-                db,
-                top_mod,
-                &options.source_entry,
-                schedule_export,
-            )?;
-            wasm_options =
-                with_typed_surface_schedule(wasm_options, schedule_export, &schedule_contract);
+        if let Some(policy) = schedule_policy.as_ref() {
+            let policy_symbol = mir::runtime_package_symbol_for_func(db, wasm_package, policy.func)
+                .map_err(|error| WebBundleError::Lower(error.to_string()))?;
+            wasm_options = with_typed_surface_schedule(
+                wasm_options,
+                &policy_symbol,
+                policy.event_first,
+                &policy.contract,
+            );
         }
         let wasm = compile_runtime_package_wasm_with_options(
             db,

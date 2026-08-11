@@ -482,7 +482,7 @@ pub fn build_wasm_runtime_package<'db>(
     db: &'db dyn MirDb,
     top_mod: TopLevelMod<'db>,
 ) -> Result<RuntimePackage<'db>, LowerError> {
-    build_wasm_runtime_package_impl(db, top_mod, None)
+    build_wasm_runtime_package_impl(db, top_mod, None, &[])
 }
 
 /// Build the Wasm-shaped runtime package rooted at one caller-selected public
@@ -504,6 +504,21 @@ pub fn build_wasm_runtime_package_for_entries<'db>(
     top_mod: TopLevelMod<'db>,
     entry_names: &[String],
 ) -> Result<RuntimePackage<'db>, LowerError> {
+    build_wasm_runtime_package_for_entries_with_internal_funcs(db, top_mod, entry_names, &[])
+}
+
+/// Build a Wasm package from caller-selected public entries plus exact hidden
+/// semantic functions. Internal roots let a compiler-derived ABI wrapper call
+/// ordinary Fe code selected by type identity even when that code is an
+/// associated function in a dependency ingot. They never join the source
+/// module's public export set; the code generator is responsible for hiding a
+/// rooted implementation behind its fixed wrapper export.
+pub fn build_wasm_runtime_package_for_entries_with_internal_funcs<'db>(
+    db: &'db dyn MirDb,
+    top_mod: TopLevelMod<'db>,
+    entry_names: &[String],
+    internal_funcs: &[Func<'db>],
+) -> Result<RuntimePackage<'db>, LowerError> {
     if entry_names.is_empty() {
         return Err(LowerError::Unsupported(
             "requested web entry set must not be empty".to_owned(),
@@ -517,13 +532,23 @@ pub fn build_wasm_runtime_package_for_entries<'db>(
             )));
         }
     }
-    build_wasm_runtime_package_impl(db, top_mod, Some(entry_names))
+    let mut seen_internal = FxHashSet::default();
+    for func in internal_funcs {
+        if !seen_internal.insert(*func) {
+            return Err(LowerError::Unsupported(format!(
+                "requested internal Wasm root `{}` is duplicated",
+                func_display_name(db, *func)
+            )));
+        }
+    }
+    build_wasm_runtime_package_impl(db, top_mod, Some(entry_names), internal_funcs)
 }
 
 fn build_wasm_runtime_package_impl<'db>(
     db: &'db dyn MirDb,
     top_mod: TopLevelMod<'db>,
     requested_entries: Option<&[String]>,
+    internal_funcs: &[Func<'db>],
 ) -> Result<RuntimePackage<'db>, LowerError> {
     // Contracts fail closed on wasm: no silent EVM-shaped behavior.
     if !top_mod.all_contracts(db).is_empty()
@@ -678,6 +703,34 @@ fn build_wasm_runtime_package_impl<'db>(
             main_root = Some(instance);
         }
         package_roots.push(instance);
+    }
+    for func in internal_funcs.iter().copied() {
+        if func.is_extern(db) || is_test_func(db, func) || func.body(db).is_none() {
+            return Err(LowerError::Unsupported(format!(
+                "requested internal Wasm root `{}` must be a bodied non-extern, non-test Fe function",
+                func_display_name(db, func)
+            )));
+        }
+        if entry_funcs.contains(&func) {
+            return Err(LowerError::Unsupported(format!(
+                "requested internal Wasm root `{}` is already a public entry",
+                func_display_name(db, func)
+            )));
+        }
+        let semantic = semantic_instance_for_root_owner(db, BodyOwner::Func(func))?;
+        let entry_effect_args =
+            entry_effect_arg_plans(db, EntryEffectContext::StandaloneFunc { func }, semantic)?;
+        if !entry_effect_args.is_empty() || wasm_root_has_surviving_effect_param(db, semantic) {
+            return Err(LowerError::Unsupported(format!(
+                "requested internal Wasm root `{}` has a host-visible effect binding",
+                func_display_name(db, func)
+            )));
+        }
+        package_roots.push(runtime_instance_for_semantic_with_visible_param_overrides(
+            db,
+            semantic,
+            wasm_export_param_class,
+        ));
     }
     let entry = main_root.unwrap_or(package_roots[0]);
     // Export eligibility is the SOURCE's `pub` declaration, not root-seeding.
@@ -2473,6 +2526,40 @@ pub fn runtime_instance_symbol_key<'db>(
     instance: RuntimeInstance<'db>,
 ) -> String {
     runtime_instance_symbol_key_query(db, instance)
+}
+
+/// Return the emitted symbol for one exact semantic Fe function in a runtime
+/// package. A compiler-generated wrapper uses this after package construction
+/// so its callee selection follows semantic identity rather than a reserved
+/// source name. Multiple specializations fail closed.
+pub fn runtime_package_symbol_for_func<'db>(
+    db: &'db dyn MirDb,
+    package: RuntimePackage<'db>,
+    func: Func<'db>,
+) -> Result<String, LowerError> {
+    let symbols = package
+        .functions(db)
+        .into_iter()
+        .filter_map(|function| {
+            let RuntimeFunctionOwner::Semantic(semantic) = function.owner(db) else {
+                return None;
+            };
+            (semantic.key(db).owner(db) == BodyOwner::Func(func))
+                .then(|| function.symbol(db).clone())
+        })
+        .collect::<Vec<_>>();
+    match symbols.as_slice() {
+        [symbol] => Ok(symbol.clone()),
+        [] => Err(LowerError::Unsupported(format!(
+            "semantic Fe function `{}` was not materialized in the runtime package",
+            func_display_name(db, func)
+        ))),
+        _ => Err(LowerError::Unsupported(format!(
+            "semantic Fe function `{}` materialized as {} runtime specializations; an exact wrapper callee is required",
+            func_display_name(db, func),
+            symbols.len()
+        ))),
+    }
 }
 
 fn runtime_instance_sort_key<'db>(db: &'db dyn MirDb, instance: RuntimeInstance<'db>) -> String {

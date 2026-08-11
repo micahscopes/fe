@@ -5,8 +5,7 @@ use std::webgpu::{
     WebGpuBackend,
 }
 use std::web::view::{
-    Extent, Param, Surface, SurfaceEvent, SurfaceEventKind, SurfaceScheduleEvent,
-    SurfaceScheduleState, SurfaceScheduleStep,
+    Extent, Param, Surface, SurfaceEvent, SurfaceEventKind,
 }
 
 struct EventKindParams {
@@ -34,7 +33,7 @@ actor SurfaceEventKindProbe uses (GpuProgram<WebGpuBackend>) {
     }
 
     fn transition(self, event: own SurfaceEvent) -> EventKindState
-        uses (SurfaceTransition, LatestPerFrame)
+        uses (SurfaceTransition, SurfaceScheduling<LatestPerFrame>)
     {
         let identity: f32 = match event.event_kind {
             SurfaceEventKind::Gesture => 1.0,
@@ -50,13 +49,6 @@ actor SurfaceEventKindProbe uses (GpuProgram<WebGpuBackend>) {
             receipt: self.receipt + identity + event.delta_x + event.delta_y,
             res: event.width,
         }
-    }
-
-    fn schedule(_ event: own SurfaceScheduleEvent, _ state: own SurfaceScheduleState)
-        -> SurfaceScheduleStep
-        uses (SurfaceScheduling<LatestPerFrame>)
-    {
-        LatestPerFrame::step(state, event)
     }
 
     fn paint(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {

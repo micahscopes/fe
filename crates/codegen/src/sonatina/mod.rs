@@ -70,6 +70,10 @@ pub(crate) enum WasmResidentEventTransport {
         event_fields: usize,
         event_stride: i32,
         accumulate_f32_fields: Vec<usize>,
+        /// Flattened enum leaf and semantically derived variant ordinal for
+        /// the homogeneous coalescing fast path.
+        coalesce_tag_field: usize,
+        coalesce_tag_variant: u32,
     },
 }
 
@@ -108,14 +112,17 @@ pub(crate) struct WasmResidentProjection {
     export: String,
 }
 
-/// A target-neutral resident decision policy. The authored Fe function takes
-/// flattened host facts followed by its previous private state, and returns
-/// next state followed by a reply. Generated Wasm retains the state prefix and
-/// exposes only the reply suffix under a fixed export.
+/// A target-neutral resident decision policy. The selected ordinary Fe
+/// function takes nominal host facts and previous private state in either
+/// order, and returns next state followed by a reply. Generated Wasm retains
+/// the state prefix and exposes only the reply suffix under a fixed export.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WasmResidentPolicy {
-    source: String,
+    callee_symbol: String,
     export: String,
+    /// The fixed host ABI is event-first, but the structurally selected Fe
+    /// function may use either nominal argument order.
+    event_first: bool,
     event_fields: usize,
     state_fields: usize,
     decision_fields: usize,
@@ -253,8 +260,9 @@ impl WasmCompileOptions {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn with_resident_policy(
         mut self,
-        source: impl Into<String>,
+        callee_symbol: impl Into<String>,
         export: impl Into<String>,
+        event_first: bool,
         event_fields: usize,
         state_fields: usize,
         decision_fields: usize,
@@ -262,8 +270,9 @@ impl WasmCompileOptions {
         state_tag_limits: Vec<(usize, u32)>,
     ) -> Self {
         self.resident_policy = Some(WasmResidentPolicy {
-            source: source.into(),
+            callee_symbol: callee_symbol.into(),
             export: export.into(),
+            event_first,
             event_fields,
             state_fields,
             decision_fields,
@@ -280,6 +289,8 @@ impl WasmCompileOptions {
         export: impl Into<String>,
         state_replace_export: impl Into<String>,
         event_tag_limits: Vec<(usize, u32)>,
+        coalesce_tag_field: usize,
+        coalesce_tag_variant: u32,
         actor_param_is_resource: Vec<bool>,
     ) -> Self {
         self.canonical_arena = true;
@@ -291,6 +302,8 @@ impl WasmCompileOptions {
                 event_fields: 13,
                 event_stride: 52,
                 accumulate_f32_fields: vec![2, 3, 4],
+                coalesce_tag_field,
+                coalesce_tag_variant,
             },
             event_tag_limits,
             state_tag_limits: Vec::new(),

@@ -224,7 +224,7 @@ pub(crate) fn compile_runtime_package_wasm_with_canonical_lanes(
         wrapped_lane_names.insert(projection.source.clone());
     }
     if let Some(policy) = resident_policy {
-        wrapped_lane_names.insert(policy.source.clone());
+        wrapped_lane_names.insert(policy.callee_symbol.clone());
     }
     let mut lowerer = PortableModuleLowerer::new(
         db,
@@ -2928,6 +2928,8 @@ where
                 event_fields,
                 event_stride,
                 accumulate_f32_fields,
+                coalesce_tag_field,
+                coalesce_tag_variant,
             } => {
                 if initializer.is_some() || projection.is_some() {
                     return Err(LowerError::Unsupported(
@@ -2940,6 +2942,8 @@ where
                     *event_fields,
                     *event_stride,
                     accumulate_f32_fields,
+                    *coalesce_tag_field,
+                    *coalesce_tag_variant,
                 )
             }
         }
@@ -3386,13 +3390,13 @@ where
         let candidates = self
             .func_map
             .iter()
-            .filter(|(instance, _)| self.function_symbol(**instance) == policy.source)
+            .filter(|(instance, _)| self.function_symbol(**instance) == policy.callee_symbol)
             .map(|(_, func_ref)| *func_ref)
             .collect::<Vec<_>>();
         let [callee] = candidates.as_slice() else {
             return Err(LowerError::Unsupported(format!(
                 "resident policy `{}` must select exactly one lowered Fe behavior (found {})",
-                policy.source,
+                policy.callee_symbol,
                 candidates.len()
             )));
         };
@@ -3404,17 +3408,26 @@ where
         if callee_args.len() != expected_args || result_tys.len() != expected_results {
             return Err(LowerError::Unsupported(format!(
                 "resident policy `{}` must flatten to {expected_args} arguments and {expected_results} results; got {} -> {}",
-                policy.source,
+                policy.callee_symbol,
                 callee_args.len(),
                 result_tys.len()
             )));
         }
-        let event_tys = &callee_args[..policy.event_fields];
-        let state_tys = &callee_args[policy.event_fields..];
+        let (event_tys, state_tys) = if policy.event_first {
+            (
+                &callee_args[..policy.event_fields],
+                &callee_args[policy.event_fields..],
+            )
+        } else {
+            (
+                &callee_args[policy.state_fields..],
+                &callee_args[..policy.state_fields],
+            )
+        };
         if result_tys[..policy.state_fields] != *state_tys {
             return Err(LowerError::Unsupported(format!(
                 "resident policy `{}` must return its complete state as the leading result prefix: arguments {state_tys:?}, results {:?}",
-                policy.source,
+                policy.callee_symbol,
                 &result_tys[..policy.state_fields]
             )));
         }
@@ -3427,7 +3440,7 @@ where
             {
                 return Err(LowerError::Unsupported(format!(
                     "resident policy `{}` has invalid event enum constraint ({index}, {limit}) for {event_tys:?}",
-                    policy.source
+                    policy.callee_symbol
                 )));
             }
         }
@@ -3440,7 +3453,7 @@ where
             {
                 return Err(LowerError::Unsupported(format!(
                     "resident policy `{}` has invalid state enum constraint ({index}, {limit}) for {state_tys:?}",
-                    policy.source
+                    policy.callee_symbol
                 )));
             }
         }
@@ -3516,10 +3529,15 @@ where
 
         fb.switch_to_block(invoke);
         let mut args = smallvec1::SmallVec::<[ValueId; 8]>::new();
-        args.extend(event_values);
+        if policy.event_first {
+            args.extend(event_values.iter().copied());
+        }
         for (global, ty) in state_globals.iter().copied().zip(state_tys.iter().copied()) {
             let address = fb.make_global_value(global);
             args.push(fb.insert_inst(Mload::new(is, address, ty), ty));
+        }
+        if !policy.event_first {
+            args.extend(event_values);
         }
         let results = fb.insert_call_results(*callee, args);
         for ((global, ty), value) in state_globals
@@ -3548,6 +3566,8 @@ where
         event_fields: usize,
         event_stride: i32,
         accumulate_f32_fields: &[usize],
+        coalesce_tag_field: usize,
+        coalesce_tag_variant: u32,
     ) -> Result<(), LowerError> {
         if event_fields == 0 || event_stride <= 0 {
             return Err(LowerError::Unsupported(
@@ -3615,6 +3635,31 @@ where
                 )));
             }
         }
+        let coalesce_limit = transition
+            .event_tag_limits
+            .iter()
+            .find_map(|(index, limit)| (*index == coalesce_tag_field).then_some(*limit))
+            .ok_or_else(|| {
+                LowerError::Unsupported(format!(
+                    "resident transition `{}` coalescing field {coalesce_tag_field} is not a validated fieldless enum leaf",
+                    transition.source
+                ))
+            })?;
+        if coalesce_tag_variant >= coalesce_limit {
+            return Err(LowerError::Unsupported(format!(
+                "resident transition `{}` coalescing variant {coalesce_tag_variant} exceeds enum bound {coalesce_limit}",
+                transition.source
+            )));
+        }
+        let coalesce_tag = event_tys
+            .get(coalesce_tag_field)
+            .and_then(|ty| fieldless_tag_immediate(*ty, coalesce_tag_variant))
+            .ok_or_else(|| {
+                LowerError::Unsupported(format!(
+                    "resident transition `{}` cannot represent coalescing variant {coalesce_tag_variant} in event leaf {coalesce_tag_field}",
+                    transition.source
+                ))
+            })?;
         let actor_tys = &callee_args[event_fields..];
         if actor_tys.len() != transition.actor_param_is_resource.len() {
             return Err(LowerError::Unsupported(format!(
@@ -3719,12 +3764,19 @@ where
         let is = self.isa.inst_set();
         let mut fb = self.builder.func_builder::<InstInserter>(wrapper);
         let entry = fb.append_block();
+        let classify_header = fb.append_block();
+        let classify_body = fb.append_block();
+        let classify_done = fb.append_block();
         let initialize = fb.append_block();
         let invalid = fb.append_block();
         let header = fb.append_block();
         let body = fb.append_block();
         let done = fb.append_block();
         let invoke = fb.append_block();
+        let sequential_header = fb.append_block();
+        let sequential_body = fb.append_block();
+        let sequential_invoke = fb.append_block();
+        let sequential_done = fb.append_block();
         fb.switch_to_block(entry);
         let wrapper_values = fb.args().to_vec();
         let events_ptr = wrapper_values[0];
@@ -3738,7 +3790,41 @@ where
         let initialized =
             fb.insert_inst(CmpEq::new(is, initialized_value, initialized_one), Type::I1);
         let ready = fb.insert_inst(And::new(is, has_events, initialized), Type::I1);
-        fb.insert_inst_no_result(Br::new(is, ready, initialize, invalid));
+        fb.insert_inst_no_result(Br::new(is, ready, classify_header, invalid));
+
+        // Preserve the one-transition hot path for a homogeneous gesture
+        // burst. Any heterogeneous batch is folded in source order below, so
+        // a direct parameter edit can never swallow an older gesture merely
+        // because its event tag is the newest record.
+        fb.switch_to_block(classify_header);
+        let classify_index = fb.insert_inst(Phi::new(is, vec![(zero, entry)]), Type::I32);
+        let true_value = fb.make_imm_value(Immediate::I1(true));
+        let all_coalescible = fb.insert_inst(Phi::new(is, vec![(true_value, entry)]), Type::I1);
+        let classify_more = fb.insert_inst(Lt::new(is, classify_index, event_count), Type::I1);
+        fb.insert_inst_no_result(Br::new(is, classify_more, classify_body, classify_done));
+
+        fb.switch_to_block(classify_body);
+        let stride = fb.make_imm_value(Immediate::I32(event_stride));
+        let byte_offset = fb.insert_inst(Mul::new(is, classify_index, stride), Type::I32);
+        let event_ptr = fb.insert_inst(Add::new(is, events_ptr, byte_offset), Type::I32);
+        let tag_offset = fb.make_imm_value(Immediate::I32((coalesce_tag_field as i32) * 4));
+        let tag_ptr = fb.insert_inst(Add::new(is, event_ptr, tag_offset), Type::I32);
+        let tag_ty = event_tys[coalesce_tag_field];
+        let tag = fb.insert_inst(Mload::new(is, tag_ptr, tag_ty), tag_ty);
+        let expected_tag = fb.make_imm_value(coalesce_tag.clone());
+        let is_coalescible = fb.insert_inst(CmpEq::new(is, tag, expected_tag), Type::I1);
+        let next_all = fb.insert_inst(And::new(is, all_coalescible, is_coalescible), Type::I1);
+        let one = fb.make_imm_value(Immediate::I32(1));
+        let next_classify_index = fb.insert_inst(Add::new(is, classify_index, one), Type::I32);
+        let classify_body_block = fb
+            .current_block()
+            .expect("resident batch classification has a current block");
+        fb.append_phi_arg(classify_index, next_classify_index, classify_body_block);
+        fb.append_phi_arg(all_coalescible, next_all, classify_body_block);
+        fb.insert_inst_no_result(Jump::new(is, classify_header));
+
+        fb.switch_to_block(classify_done);
+        fb.insert_inst_no_result(Br::new(is, all_coalescible, initialize, sequential_header));
 
         fb.switch_to_block(invalid);
         fb.insert_inst_no_result(Unreachable::new(is));
@@ -3859,6 +3945,113 @@ where
             fb.insert_inst_no_result(Mstore::new(is, address, value, ty));
         }
         fb.insert_return_values(&results);
+
+        // Slow path for a heterogeneous batch. The browser still crosses the
+        // Wasm boundary once, but the generated wrapper folds each untouched
+        // event through the same authored Fe transition in source order. This
+        // is deliberately generic over event meaning; only the semantically
+        // derived homogeneous coalescing tag chooses the fast path above.
+        fb.switch_to_block(sequential_header);
+        let sequential_index = fb.insert_inst(Phi::new(is, vec![(zero, classify_done)]), Type::I32);
+        let sequential_more = fb.insert_inst(Lt::new(is, sequential_index, event_count), Type::I1);
+        fb.insert_inst_no_result(Br::new(
+            is,
+            sequential_more,
+            sequential_body,
+            sequential_done,
+        ));
+
+        fb.switch_to_block(sequential_body);
+        let stride = fb.make_imm_value(Immediate::I32(event_stride));
+        let byte_offset = fb.insert_inst(Mul::new(is, sequential_index, stride), Type::I32);
+        let event_ptr = fb.insert_inst(Add::new(is, events_ptr, byte_offset), Type::I32);
+        let mut sequential_event = Vec::with_capacity(event_fields);
+        for (index, ty) in event_tys.iter().copied().enumerate() {
+            let address = if index == 0 {
+                event_ptr
+            } else {
+                let offset = fb.make_imm_value(Immediate::I32((index as i32) * 4));
+                fb.insert_inst(Add::new(is, event_ptr, offset), Type::I32)
+            };
+            sequential_event.push(fb.insert_inst(Mload::new(is, address, ty), ty));
+        }
+        let mut sequential_tags_valid = None;
+        for (index, limit) in &transition.event_tag_limits {
+            let mut tag_valid = None;
+            for tag in 0..*limit {
+                let expected = fb.make_imm_value(
+                    fieldless_tag_immediate(event_tys[*index], tag)
+                        .expect("batched enum tag type validated above"),
+                );
+                let equal =
+                    fb.insert_inst(CmpEq::new(is, sequential_event[*index], expected), Type::I1);
+                tag_valid = Some(match tag_valid {
+                    Some(previous) => fb.insert_inst(Or::new(is, previous, equal), Type::I1),
+                    None => equal,
+                });
+            }
+            let tag_valid = tag_valid.expect("nonzero batched enum limit validated above");
+            sequential_tags_valid = Some(match sequential_tags_valid {
+                Some(previous) => fb.insert_inst(And::new(is, previous, tag_valid), Type::I1),
+                None => tag_valid,
+            });
+        }
+        if let Some(tags_valid) = sequential_tags_valid {
+            fb.insert_inst_no_result(Br::new(is, tags_valid, sequential_invoke, invalid));
+        } else {
+            fb.insert_inst_no_result(Jump::new(is, sequential_invoke));
+        }
+
+        fb.switch_to_block(sequential_invoke);
+        let mut args = smallvec1::SmallVec::<[ValueId; 8]>::new();
+        args.extend(sequential_event);
+        let mut resource_index = 2usize;
+        let mut state_index = 0usize;
+        for is_resource in &transition.actor_param_is_resource {
+            if *is_resource {
+                args.push(wrapper_values[resource_index]);
+                resource_index += 1;
+            } else {
+                let global = state_globals[state_index];
+                let ty = result_tys[state_index];
+                let address = fb.make_global_value(global);
+                args.push(fb.insert_inst(Mload::new(is, address, ty), ty));
+                state_index += 1;
+            }
+        }
+        let results = fb.insert_call_results(*callee, args);
+        for ((global, ty), value) in state_globals
+            .iter()
+            .copied()
+            .zip(result_tys.iter().copied())
+            .zip(results.iter().copied())
+        {
+            let address = fb.make_global_value(global);
+            fb.insert_inst_no_result(Mstore::new(is, address, value, ty));
+        }
+        let one = fb.make_imm_value(Immediate::I32(1));
+        let next_sequential_index = fb.insert_inst(Add::new(is, sequential_index, one), Type::I32);
+        let sequential_invoke_block = fb
+            .current_block()
+            .expect("resident sequential batch invocation has a current block");
+        fb.append_phi_arg(
+            sequential_index,
+            next_sequential_index,
+            sequential_invoke_block,
+        );
+        fb.insert_inst_no_result(Jump::new(is, sequential_header));
+
+        fb.switch_to_block(sequential_done);
+        let mut final_state = Vec::with_capacity(result_tys.len());
+        for (global, ty) in state_globals
+            .iter()
+            .copied()
+            .zip(result_tys.iter().copied())
+        {
+            let address = fb.make_global_value(global);
+            final_state.push(fb.insert_inst(Mload::new(is, address, ty), ty));
+        }
+        fb.insert_return_values(&final_state);
         fb.seal_all();
         fb.finish();
         Ok(())

@@ -4371,10 +4371,12 @@ impl<'db> Impl<'db> {
         }
     }
 
-    pub(crate) fn admissible_inherent_impl_ty(
-        self,
-        db: &'db dyn HirAnalysisDb,
-    ) -> Option<TyId<'db>> {
+    /// The semantically checked target type of an inherent `impl`.
+    ///
+    /// Compiler consumers that derive behavior from a nominal type use this
+    /// instead of matching the source spelling of the `impl` target. Invalid,
+    /// disallowed, or ill-formed targets stay unavailable.
+    pub fn admissible_inherent_impl_ty(self, db: &'db dyn HirAnalysisDb) -> Option<TyId<'db>> {
         match self.inherent_impl_admissibility(db) {
             InherentImplAdmissibility::Admissible { ty } => Some(ty),
             InherentImplAdmissibility::NotAllowed { .. }

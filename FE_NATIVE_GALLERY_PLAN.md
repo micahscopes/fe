@@ -231,7 +231,7 @@ Origin: honesty audit of Claude Code session
   presentation decision still remained in JavaScript.
 - The canonical `LatestPerFrame` state machine is now ordinary resident Fe.
   `SurfaceScheduleEvent`, `SurfaceScheduleState`, and `SurfaceScheduleStep` are
-  nominal typed records; `LatestPerFrame::step` owns presenting, visibility,
+  nominal typed records; `LatestPerFrame::decide` owns presenting, visibility,
   device-loss backpressure, and the `present`/`request_frame` decisions. Each
   scheduled behavior selects the policy as
   `SurfaceScheduling<LatestPerFrame>`, and the compiler rejects a missing or
@@ -257,13 +257,46 @@ Origin: honesty audit of Claude Code session
   Chromium component/gallery tapes passed. The full 62-test codegen unit suite
   and the 3,520-event bit-exact Mandelbrot transition oracle also passed against
   this final contract. This completes the Fe-owned
-  latest-per-frame decision loop, not all of Phase 2: sample/throttle/debounce/
-  accumulate policy families, native event parity, compiler-derived elimination
-  of the uniform per-actor scheduling behavior, and deletion of the legacy host
-  compatibility branch remain open. Direct parameter edits still use an eager
-  transition only when necessary to preserve ordering against an older queued
-  gesture; presentation itself remains Fe-gated, and moving heterogeneous input
-  ordering wholly into the generated batch wrapper is a follow-up burn-down.
+  latest-per-frame decision loop, not all of Phase 2. At that checkpoint,
+  compiler-derived elimination of the uniform per-actor scheduling behavior
+  and moving heterogeneous input ordering wholly into generated Wasm remained
+  the immediate follow-up burn-down.
+- `SurfaceScheduling<P>` now selects the resident policy implementation all the
+  way through without a per-actor wrapper behavior. The nine canonical actors
+  and two generalization/oracle fixtures declare only
+  `uses (SurfaceTransition, SurfaceScheduling<LatestPerFrame>)` on their
+  application transition; none imports the schedule event/state/step records or
+  spells a `schedule` function. From the nominal `P`, the compiler finds the
+  unique public inherent Fe function whose semantic arguments/results are the
+  marked `SurfaceScheduleEvent`, `SurfaceScheduleState`, and
+  `SurfaceScheduleStep` records. Its source name and argument labels are not
+  recognized, and either state/event order is accepted. The exact semantic
+  function is rooted from its dependency ingot as a compiler-internal Wasm
+  root, reconciled to its emitted package symbol, hidden, and called only by
+  fixed `fe_surface_schedule_v1`; a marker-identical policy with no structural
+  implementation fails closed. The standard policy is deliberately named
+  `LatestPerFrame::decide`, demonstrating that `step` is not an ABI word.
+  Heterogeneous application input ordering also moved out of JavaScript. The
+  generated batch wrapper retains a homogeneous gesture fast path that invokes
+  the authored Fe transition once, but folds mixed gesture/direct-edit records
+  through that same transition in source order inside one host-to-Wasm call.
+  The host's eager pre-edit flush was deleted. A scheduled typed artifact
+  missing its Fe policy export now fails at boot and cannot enter the legacy
+  JavaScript dirty/presenting scheduler; that compatibility branch remains only
+  for genuinely unscheduled legacy lanes. Independent Wasmtime receipts prove
+  both the one-call gesture fast path and that a newer parameter edit cannot
+  swallow an older gesture; the real `ParamBindings` fixture additionally
+  proves all non-edited gesture state survives the ordered fold. Six fixed-host
+  tests prove the raw two-event queue crosses only at Fe's admitted frame and
+  that scheduled fallback is rejected. The full 62-test codegen suite passed in
+  185.18 seconds and all 28 serialized gallery gates passed in 2,168.06 seconds,
+  including the 3,520-event bit-exact Mandelbrot tape and unchanged shader
+  receipts. Raymarch remains 83,496 bytes of WGSL and is now 6,307 bytes of
+  control Wasm; perturbation control Wasm is 4,872 bytes. A fresh release site
+  precompile built 11 render bundles in 111.997 seconds and verified 13 Fe
+  modules / 54 files; both real Chromium SourceInspector/gallery and TodoMVC
+  tapes passed. Sample/throttle/debounce/accumulate policy families and native
+  event parity remain open Phase 2 work.
 - This component/page slice is not the full resident-component end state. The
   outer gallery shell does not yet own routing, tile lifecycle, scheduling, or
   component-to-component messages as a long-lived Fe actor, and the stylesheet

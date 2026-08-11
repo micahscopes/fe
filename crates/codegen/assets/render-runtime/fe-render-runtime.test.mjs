@@ -307,14 +307,13 @@ test("the fixed host obeys resident Fe lifecycle scheduling decisions", () => {
   assert.deepEqual(surface._uniforms, [11]);
 });
 
-test("scripted parameter edits enter the typed Fe transition without replacing resident state", () => {
+test("gesture and parameter edits stay in one ordered raw batch until Fe admits a frame", async () => {
   const surface = Object.create(FeSurfaceElement.prototype);
   surface._fsm = "live";
   surface._surfaceTransitionKernel = () => {};
   surface._surfaceTransitionSchedule = "latest_per_frame";
   surface._surfaceScheduleKernel = () => [1, 0];
   surface._pendingSurfaceEvents = [{ eventKind: SurfaceEventKind.Gesture, marker: "prior gesture" }];
-  surface._gestureDirty = true;
   surface._backingWidth = 640;
   surface._backingHeight = 480;
   surface._uniforms = [3];
@@ -322,9 +321,7 @@ test("scripted parameter edits enter the typed Fe transition without replacing r
   const transported = [];
   surface._runSurfaceFrame = events => {
     transported.push(structuredClone(events));
-    return events[0].eventKind === SurfaceEventKind.Gesture
-      ? [4] // independent stand-in for the prior authored Fe gesture result
-      : [5]; // independent stand-in for the authored Fe edit result
+    return [5]; // stand-in for the generated Wasm's ordered Fe fold
   };
   let renders = 0;
   surface._render = next => {
@@ -334,23 +331,67 @@ test("scripted parameter edits enter the typed Fe transition without replacing r
   surface._replaceSurfaceState = () => {
     throw new Error("parameter edits must not replace resident state from JavaScript");
   };
+  surface._refreshControlValues = () => {};
   let scheduled = 0;
   surface._scheduleGestureFrame = () => { scheduled += 1; };
 
   surface.params.steps = 4.6;
 
   assert.equal(renders, 0);
-  assert.deepEqual(surface._uniforms, [4]);
-  assert.deepEqual(transported[0], [{ eventKind: SurfaceEventKind.Gesture, marker: "prior gesture" }]);
+  assert.deepEqual(surface._uniforms, [3]);
+  assert.deepEqual(transported, []);
+  assert.equal(surface._pendingSurfaceEvents.length, 2);
+  assert.deepEqual(surface._pendingSurfaceEvents[0], {
+    eventKind: SurfaceEventKind.Gesture,
+    marker: "prior gesture",
+  });
   assert.deepEqual(
     {
-      eventKind: surface._pendingSurfaceEvents[0].eventKind,
-      paramIndex: surface._pendingSurfaceEvents[0].paramIndex,
-      paramValue: surface._pendingSurfaceEvents[0].paramValue,
-      width: surface._pendingSurfaceEvents[0].width,
-      height: surface._pendingSurfaceEvents[0].height,
+      eventKind: surface._pendingSurfaceEvents[1].eventKind,
+      paramIndex: surface._pendingSurfaceEvents[1].paramIndex,
+      paramValue: surface._pendingSurfaceEvents[1].paramValue,
+      width: surface._pendingSurfaceEvents[1].width,
+      height: surface._pendingSurfaceEvents[1].height,
     },
     { eventKind: SurfaceEventKind.ParamEdit, paramIndex: 0, paramValue: 4.6, width: 640, height: 480 },
   );
   assert.equal(scheduled, 1);
+
+  await surface._flushGestureFrame(10);
+  assert.equal(renders, 1);
+  assert.deepEqual(surface._uniforms, [5]);
+  assert.equal(surface._pendingSurfaceEvents.length, 0);
+  assert.equal(transported.length, 1);
+  assert.deepEqual(
+    transported[0].map(event => event.eventKind),
+    [SurfaceEventKind.Gesture, SurfaceEventKind.ParamEdit],
+  );
+});
+
+test("a scheduled typed surface cannot enter the legacy JavaScript scheduler", () => {
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._fsm = "live";
+  surface._surfaceTransitionKernel = () => {};
+  surface._surfaceTransitionSchedule = "latest_per_frame";
+  surface._surfaceScheduleKernel = null;
+  surface._pendingSurfaceEvents = [];
+  surface._gestureDirty = false;
+  surface._backingWidth = 64;
+  surface._backingHeight = 64;
+
+  assert.throws(
+    () => surface._applyGesture({
+      mx: 1,
+      my: 2,
+      dx: 3,
+      dy: 4,
+      wheelDelta: 0,
+      wheelMode: 0,
+      buttons: 1,
+      timestamp: 5,
+    }),
+    /cannot fall back to JavaScript scheduling/,
+  );
+  assert.deepEqual(surface._pendingSurfaceEvents, []);
+  assert.equal(surface._gestureDirty, false);
 });

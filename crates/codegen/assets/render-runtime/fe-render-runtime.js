@@ -628,6 +628,14 @@ export class FeSurfaceElement extends HTMLElement {
       this._surfaceScheduleKernel = typeof surfaceSchedule === "function"
         ? surfaceSchedule
         : null;
+      if (
+        this._surfaceTransitionSchedule === "latest_per_frame" &&
+        !this._surfaceScheduleKernel
+      ) {
+        throw new Error(
+          "fe render runtime: scheduled surface transition is missing its resident Fe scheduling policy export",
+        );
+      }
       if (this._control) {
         const controlFn = instance?.exports[this._control.export];
         if (typeof controlFn === "function") {
@@ -1562,11 +1570,14 @@ export class FeSurfaceElement extends HTMLElement {
     };
     if (this._surfaceTransitionKernel) {
       if (this._surfaceTransitionSchedule === "latest_per_frame") {
+        if (!this._surfaceScheduleKernel) {
+          throw new Error(
+            "fe render runtime: scheduled surface input cannot fall back to JavaScript scheduling",
+          );
+        }
         this._pendingSurfaceEvents.push(surfaceEvent);
-        // The raw queue itself is the only canonical pending-work fact. A
-        // resident Fe policy decides at the frame boundary whether to present;
-        // `_gestureDirty` remains solely for old bundles without that export.
-        if (!this._surfaceScheduleKernel) this._gestureDirty = true;
+        // The raw queue itself is the only canonical pending-work fact. The
+        // resident Fe policy decides at the frame boundary whether to present.
         this._scheduleGestureFrame();
         return;
       }
@@ -1657,13 +1668,11 @@ export class FeSurfaceElement extends HTMLElement {
     if (this._surfaceTransitionKernel) {
       if (
         this._surfaceTransitionSchedule === "latest_per_frame" &&
-        this._pendingSurfaceEvents.length > 0
+        !this._surfaceScheduleKernel
       ) {
-        const prior = this._runSurfaceFrame(this._pendingSurfaceEvents);
-        this._pendingSurfaceEvents = [];
-        if (!prior) return;
-        this._uniforms = prior;
-        this._gestureDirty = false;
+        throw new Error(
+          "fe render runtime: scheduled parameter input cannot fall back to JavaScript scheduling",
+        );
       }
       const event = {
         mx: 0,
@@ -1684,9 +1693,9 @@ export class FeSurfaceElement extends HTMLElement {
         this._surfaceTransitionSchedule === "latest_per_frame" &&
         this._surfaceScheduleKernel
       ) {
-        // Direct edits remain ordered after any older gesture transition, but
-        // presentation is still Fe-gated. Keeping the untouched edit in the
-        // same raw queue avoids recreating a JavaScript dirty flag.
+        // The generated Wasm batch boundary preserves heterogeneous event
+        // order. The host therefore keeps an older gesture and this untouched
+        // edit in one raw queue and performs no eager application transition.
         this._pendingSurfaceEvents.push(event);
         this._scheduleGestureFrame();
         return;
@@ -1897,7 +1906,13 @@ export class FeSurfaceElement extends HTMLElement {
     }
 
     // Compatibility state machine for old bundles that predate the resident
-    // Fe policy export. Canonical gallery artifacts do not take this branch.
+    // Fe policy export. A scheduled typed transition is rejected during boot
+    // and again here, so canonical gallery artifacts cannot take this branch.
+    if (this._surfaceTransitionSchedule === "latest_per_frame") {
+      throw new Error(
+        "fe render runtime: scheduled surface transition reached the legacy JavaScript state machine",
+      );
+    }
     if (this._fsm !== "live" || !this._gestureDirty || this._gesturePresenting) return;
     this._gestureDirty = false;
     this._gesturePresenting = true;

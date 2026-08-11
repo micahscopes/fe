@@ -136,8 +136,8 @@ fn assert_scheduled_typed_surface(bundle: &WebBundle) {
         "an ordinary Fe behavior name must not leak into the host ABI"
     );
     assert!(
-        !exports.iter().any(|name| name == "schedule"),
-        "the authored Fe policy behavior name must remain private"
+        !exports.iter().any(|name| name == "decide"),
+        "the structurally selected Fe policy function must remain private"
     );
     assert!(
         !exports.iter().any(|name| name == "update_view"),
@@ -577,6 +577,46 @@ fn new_param_binding_actor_needs_only_fe_source() {
         [7.0, 0.0, 2.0, 256.0],
         "a direct edit must enter Param::drive in Fe, round the Int value there, and leave every other field untouched"
     );
+    assert_eq!(
+        call_four_state_batch(
+            &bundle,
+            &[
+                SurfaceEventFixture {
+                    pointer_x: 0.0,
+                    pointer_y: 0.0,
+                    delta_x: 10.0,
+                    delta_y: -5.0,
+                    wheel_delta: -1.0,
+                    wheel_mode: 0,
+                    buttons: 1,
+                    timestamp: 10.0,
+                    width: 640.0,
+                    height: 480.0,
+                    event_kind: 0,
+                    param_index: 0,
+                    param_value: 0.0,
+                },
+                SurfaceEventFixture {
+                    pointer_x: 0.0,
+                    pointer_y: 0.0,
+                    delta_x: 0.0,
+                    delta_y: 0.0,
+                    wheel_delta: 0.0,
+                    wheel_mode: 0,
+                    buttons: 0,
+                    timestamp: 11.0,
+                    width: 640.0,
+                    height: 480.0,
+                    event_kind: 1,
+                    param_index: 0,
+                    param_value: 6.6,
+                },
+            ],
+            [3.0, 0.0, 2.0, 256.0],
+        ),
+        [7.0, (-5.0f32 * 0.02) + 6.2831855, 2.0f32 * 0.75, 640.0,],
+        "one Wasm batch must apply an older gesture before a newer direct edit without losing the gesture's other state changes"
+    );
 }
 
 #[test]
@@ -728,7 +768,7 @@ fn surface_event_kinds_are_fe_typed_and_invalid_host_tags_trap() {
                 timestamp: 11.0,
                 width: 64.0,
                 height: 64.0,
-                event_kind: 2,
+                event_kind: 1,
                 param_index: 0,
                 param_value: 0.0,
             },
@@ -744,14 +784,74 @@ fn surface_event_kinds_are_fe_typed_and_invalid_host_tags_trap() {
             ],
             &mut coalesced_results,
         )
-        .expect("gesture plus frame boundary should coalesce in generated Wasm");
+        .expect("gesture plus parameter edit should fold in order inside generated Wasm");
     let coalesced_receipt = match coalesced_results[0] {
         wasmtime::Val::F32(bits) => f32::from_bits(bits),
         ref other => panic!("coalesced event receipt must be f32, got {other:?}"),
     };
     assert_eq!(
-        coalesced_receipt, 102.0,
-        "Fe must observe the frame identity plus the independently accumulated movement facts",
+        coalesced_receipt, 13.0,
+        "Fe must observe both event identities and the gesture movement; the newer parameter edit cannot swallow the older gesture",
+    );
+
+    replace_state
+        .call(&mut store, &seed, &mut [])
+        .expect("reset event-kind state for homogeneous fast-path receipt");
+    write_surface_event_batch(
+        &memory,
+        &mut store,
+        event_pointer,
+        &[
+            SurfaceEventFixture {
+                pointer_x: 2.0,
+                pointer_y: 3.0,
+                delta_x: 3.0,
+                delta_y: -1.0,
+                wheel_delta: 0.0,
+                wheel_mode: 0,
+                buttons: 1,
+                timestamp: 12.0,
+                width: 64.0,
+                height: 64.0,
+                event_kind: 0,
+                param_index: 0,
+                param_value: 0.0,
+            },
+            SurfaceEventFixture {
+                pointer_x: 4.0,
+                pointer_y: 5.0,
+                delta_x: 4.0,
+                delta_y: 2.0,
+                wheel_delta: 0.0,
+                wheel_mode: 0,
+                buttons: 1,
+                timestamp: 13.0,
+                width: 64.0,
+                height: 64.0,
+                event_kind: 0,
+                param_index: 0,
+                param_value: 0.0,
+            },
+        ],
+    );
+    let mut gesture_results = [wasmtime::Val::F32(0), wasmtime::Val::F32(0)];
+    transition
+        .call(
+            &mut store,
+            &[
+                wasmtime::Val::I32(event_pointer as i32),
+                wasmtime::Val::I32(2),
+            ],
+            &mut gesture_results,
+        )
+        .expect("homogeneous gesture burst should retain its coalescing fast path");
+    let gesture_receipt = match gesture_results[0] {
+        wasmtime::Val::F32(bits) => f32::from_bits(bits),
+        ref other => panic!("gesture receipt must be f32, got {other:?}"),
+    };
+    assert_eq!(
+        gesture_receipt, 9.0,
+        "two gesture identities must collapse to one Fe transition while movement remains accumulated",
     );
 
     // Independent presentation-policy tape. These expectations are a scalar
@@ -870,6 +970,20 @@ fn curated_sketch_sources_have_no_legacy_gesture_abi() {
              SurfaceEvent and SurfaceTransition contract",
             source_path.display()
         );
+        if source.contains("SurfaceScheduling<") {
+            for redundant in [
+                "fn schedule",
+                "SurfaceScheduleEvent",
+                "SurfaceScheduleState",
+                "SurfaceScheduleStep",
+            ] {
+                assert!(
+                    !source.contains(redundant),
+                    "{} reintroduced the per-actor scheduling wrapper `{redundant}`; select the policy only through SurfaceScheduling<P> on the typed transition",
+                    source_path.display()
+                );
+            }
+        }
     }
 }
 
@@ -2034,22 +2148,31 @@ fn typed_surface_transition_rejects_partial_state_record() {
 }
 
 #[test]
-fn latest_per_frame_rejects_missing_resident_fe_policy() {
+fn latest_per_frame_rejects_missing_structural_fe_policy() {
     let path = repo_root().join("demos/sketches/gradient/src/lib.fe");
-    let source = std::fs::read_to_string(&path)
+    let mut source = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-    let policy = "    fn schedule(_ event: own SurfaceScheduleEvent, _ state: own SurfaceScheduleState)\n        -> SurfaceScheduleStep\n        uses (SurfaceScheduling<LatestPerFrame>)\n    {\n        LatestPerFrame::step(state, event)\n    }\n\n";
     assert!(
-        source.contains(policy),
-        "gradient must carry the canonical Fe policy behavior"
+        !source.contains("fn schedule") && source.contains("SurfaceScheduling<LatestPerFrame>"),
+        "gradient must select its policy by type without a wrapper behavior"
     );
-    let source = source.replacen(policy, "", 1);
+    source = source.replacen(
+        "SurfaceScheduling<LatestPerFrame>",
+        "SurfaceScheduling<MissingSchedulePolicy>",
+        1,
+    );
+    source = source.replacen(
+        "actor GradientSurface",
+        "#[gpu_schedule(latest_per_frame)]\nstruct MissingSchedulePolicy {}\n\nactor GradientSurface",
+        1,
+    );
     let error = compile_actor_ingot_with_root_source("demos/sketches/gradient", source)
-        .expect_err("LatestPerFrame without a resident Fe decision policy must fail closed");
+        .expect_err("a selected policy without a structural Fe implementation must fail closed");
     let rendered = error.to_string();
     assert!(
-        rendered.contains("LatestPerFrame") && rendered.contains("SurfaceScheduling"),
-        "the diagnostic must name the missing Fe scheduling contract: {rendered}"
+        rendered.contains("MissingSchedulePolicy")
+            && rendered.contains("no unique public Fe implementation"),
+        "the diagnostic must name the missing structural Fe scheduling contract: {rendered}"
     );
 }
 

@@ -106,9 +106,10 @@ pub struct SurfaceTransition {}
 #[gpu_schedule(latest_per_frame)]
 pub struct LatestPerFrame {}
 
-/// Role of the resident policy behavior selected alongside a surface
-/// transition. Its source name is ordinary Fe vocabulary; the compiler checks
-/// the typed schedule records and lowers it behind one fixed export.
+/// Select a resident presentation policy on a surface transition. The compiler
+/// finds the policy type's unique public inherent function by its nominal
+/// `SurfaceScheduleEvent`/`SurfaceScheduleState`/`SurfaceScheduleStep` shape;
+/// neither a wrapper behavior nor a reserved function name is required.
 #[gpu_control(surface_schedule)]
 pub struct SurfaceScheduling<P> {}
 
@@ -117,7 +118,10 @@ impl LatestPerFrame {
     /// queued until an animation-frame fact arrives while the surface is
     /// visible and usable. GPU completion releases backpressure and requests
     /// another frame exactly when more input accumulated in the meantime.
-    pub fn step(_ state: SurfaceScheduleState, _ event: SurfaceScheduleEvent) -> SurfaceScheduleStep {
+    pub fn decide(
+        _ state: own SurfaceScheduleState,
+        _ event: own SurfaceScheduleEvent,
+    ) -> SurfaceScheduleStep {
         let mut presenting: bool = state.presenting
         let mut visible: bool = state.visible
         let mut device_lost: bool = state.device_lost
