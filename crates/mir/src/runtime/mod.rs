@@ -17,7 +17,7 @@ pub use package::{
     build_wasm_runtime_package_for_entries,
     build_wasm_runtime_package_for_entries_with_internal_funcs,
     build_wasm_runtime_package_for_entry, runtime_instance_stable_key, runtime_instance_symbol_key,
-    runtime_package_symbol_for_func,
+    runtime_package_instance_key_for_func, runtime_package_symbol_for_func,
 };
 pub use pretty::{
     format_runtime_body, format_runtime_body_excerpt, format_runtime_package,

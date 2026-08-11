@@ -98,8 +98,8 @@ fn assert_scheduled_typed_surface(bundle: &WebBundle) {
     assert!(
         exports
             .iter()
-            .any(|name| name == "fe_surface_transition_latest_per_frame_v4"),
-        "the Fe-declared latest-per-frame transition must use its fixed host ABI"
+            .any(|name| name == "fe_surface_transition_scheduled_v1"),
+        "a Fe-scheduled transition must use the policy-neutral fixed host ABI"
     );
     assert!(
         !exports
@@ -122,14 +122,20 @@ fn assert_scheduled_typed_surface(bundle: &WebBundle) {
         "a resident actor must expose its fixed complete-state replacement boundary"
     );
     assert!(
-        exports.iter().any(|name| name == "fe_surface_schedule_v1"),
-        "a LatestPerFrame actor must expose the resident Fe decision policy"
+        exports.iter().any(|name| name == "fe_surface_schedule_v2"),
+        "a scheduled actor must expose the resident Fe decision policy"
     );
     assert!(
         !exports
             .iter()
             .any(|name| name == "fe_surface_transition_latest_per_frame_v2"),
         "the JavaScript-state-courier v2 ABI must be absent"
+    );
+    assert!(
+        !exports
+            .iter()
+            .any(|name| name == "fe_surface_transition_latest_per_frame_v4"),
+        "the policy-named resident ABI must be absent"
     );
     assert!(
         !exports.iter().any(|name| name == "navigate"),
@@ -289,7 +295,7 @@ fn call_state_batch(bundle: &WebBundle, events: &[SurfaceEventFixture], state: &
     let mut store = wasmtime::Store::new(&engine, ());
     let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("control instance");
     let transition = instance
-        .get_func(&mut store, "fe_surface_transition_latest_per_frame_v4")
+        .get_func(&mut store, "fe_surface_transition_scheduled_v1")
         .expect("scheduled typed surface transition export");
     let replace_state = instance
         .get_func(&mut store, "fe_surface_state_replace_v1")
@@ -450,6 +456,90 @@ fn compile_actor_ingot_with_root_source(
         top_mod,
         WebBuildOptions::render(entry, Some(rel_dir.to_owned())),
     )
+}
+
+/// Compile the same policy-blind actor with one ordinary Fe policy type. This
+/// is a source-only perturbation: no compiler attribute, export name, manifest
+/// field, or host table changes with `policy`.
+fn compile_surface_policy(policy: &str) -> WebBundle {
+    let rel_dir = "crates/codegen/tests/fixtures/surface_event_kinds_actor";
+    let path = repo_root().join(rel_dir).join("src/lib.fe");
+    let source = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+    let source = source.replacen(
+        "FragmentSurface, GpuProgram, LatestPerFrame, SurfaceScheduling",
+        &format!("FragmentSurface, GpuProgram, {policy}, SurfaceScheduling"),
+        1,
+    );
+    let source = source.replacen(
+        "SurfaceScheduling<LatestPerFrame>",
+        &format!("SurfaceScheduling<{policy}>"),
+        1,
+    );
+    assert!(
+        source.contains(&format!("SurfaceScheduling<{policy}>")),
+        "policy fixture replacement must select {policy}"
+    );
+    compile_actor_ingot_with_root_source(rel_dir, source)
+        .unwrap_or_else(|error| panic!("{policy} policy fixture failed: {error}"))
+}
+
+fn call_surface_schedule(
+    schedule: &wasmtime::Func,
+    store: &mut wasmtime::Store<()>,
+    kind: u32,
+    timestamp: f32,
+    pending: u32,
+) -> (i32, i32, i32) {
+    let mut results = [
+        wasmtime::Val::I32(-1),
+        wasmtime::Val::I32(-1),
+        wasmtime::Val::I32(-1),
+    ];
+    schedule
+        .call(
+            &mut *store,
+            &[
+                wasmtime::Val::I32(kind as i32),
+                wasmtime::Val::F32(timestamp.to_bits()),
+                wasmtime::Val::I32(pending as i32),
+            ],
+            &mut results,
+        )
+        .unwrap_or_else(|error| {
+            panic!("surface schedule fact ({kind}, {timestamp}, {pending}): {error}")
+        });
+    match results {
+        [
+            wasmtime::Val::I32(present),
+            wasmtime::Val::I32(request_frame),
+            wasmtime::Val::I32(queue),
+        ] => (present, request_frame, queue),
+        other => {
+            panic!("surface policy must return two booleans and one queue action, got {other:?}")
+        }
+    }
+}
+
+fn assert_surface_policy_tape(policy: &str, tape: &[(u32, f32, u32, (i32, i32, i32))]) {
+    let bundle = compile_surface_policy(policy);
+    assert_scheduled_typed_surface(&bundle);
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &bundle.wasm)
+        .unwrap_or_else(|error| panic!("{policy} Wasm module: {error}"));
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .unwrap_or_else(|error| panic!("{policy} Wasm instance: {error}"));
+    let schedule = instance
+        .get_func(&mut store, "fe_surface_schedule_v2")
+        .unwrap_or_else(|| panic!("{policy} resident policy export"));
+    for &(kind, timestamp, pending, expected) in tape {
+        let actual = call_surface_schedule(&schedule, &mut store, kind, timestamp, pending);
+        assert_eq!(
+            actual, expected,
+            "{policy} semantic drift at ({kind}, {timestamp}, {pending})"
+        );
+    }
 }
 
 /// Analyze an ingot after replacing only its root Fe source. Unlike the bundle
@@ -630,7 +720,7 @@ fn surface_event_kinds_are_fe_typed_and_invalid_host_tags_trap() {
     let mut store = wasmtime::Store::new(&engine, ());
     let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("event-kind instance");
     let transition = instance
-        .get_func(&mut store, "fe_surface_transition_latest_per_frame_v4")
+        .get_func(&mut store, "fe_surface_transition_scheduled_v1")
         .expect("typed scheduled transition");
     let replace_state = instance
         .get_func(&mut store, "fe_surface_state_replace_v1")
@@ -859,30 +949,35 @@ fn surface_event_kinds_are_fe_typed_and_invalid_host_tags_trap() {
     // mirror-function comparison. Repeated boundaries prove the generated
     // wrapper retains the Fe policy's private state between calls.
     let schedule = instance
-        .get_func(&mut store, "fe_surface_schedule_v1")
+        .get_func(&mut store, "fe_surface_schedule_v2")
         .expect("resident Fe presentation policy");
     let schedule_tape = [
-        // visible with queued input asks the fixed host for a frame.
-        (4, 1, (0, 1)),
+        // Visibility alone is not work; raw input then asks for a frame.
+        (4, 0, (0, 0, 0)),
+        (0, 1, (0, 1, 0)),
         // the frame starts one presentation.
-        (2, 1, (1, 0)),
+        (2, 1, (1, 0, 0)),
         // a second frame cannot overtake the in-flight submission.
-        (2, 3, (0, 0)),
+        (2, 3, (0, 0, 0)),
         // completion releases backpressure and observes newer queued input.
-        (3, 3, (0, 1)),
-        (2, 3, (1, 0)),
+        (3, 3, (0, 1, 0)),
+        (2, 3, (1, 0, 0)),
         // loss cancels presenting and suppresses work until recovery.
-        (6, 2, (0, 0)),
-        (3, 2, (0, 0)),
-        (7, 2, (0, 1)),
+        (6, 2, (0, 0, 0)),
+        (3, 2, (0, 0, 0)),
+        (7, 2, (0, 1, 0)),
         // hidden surfaces do not request or present queued input.
-        (5, 2, (0, 0)),
-        (2, 2, (0, 0)),
+        (5, 2, (0, 0, 0)),
+        (2, 2, (0, 0, 0)),
         // becoming visible again requests the retained work.
-        (4, 2, (0, 1)),
+        (4, 2, (0, 1, 0)),
     ];
     for (kind, pending, expected) in schedule_tape {
-        let mut decisions = [wasmtime::Val::I32(-1), wasmtime::Val::I32(-1)];
+        let mut decisions = [
+            wasmtime::Val::I32(-1),
+            wasmtime::Val::I32(-1),
+            wasmtime::Val::I32(-1),
+        ];
         schedule
             .call(
                 &mut store,
@@ -898,15 +993,22 @@ fn surface_event_kinds_are_fe_typed_and_invalid_host_tags_trap() {
             [
                 wasmtime::Val::I32(present),
                 wasmtime::Val::I32(request_frame),
-            ] => (present, request_frame),
-            other => panic!("presentation decisions must be two booleans, got {other:?}"),
+                wasmtime::Val::I32(queue),
+            ] => (present, request_frame, queue),
+            other => panic!(
+                "presentation decisions must be two booleans and one queue action, got {other:?}"
+            ),
         };
         assert_eq!(
             actual, expected,
             "policy drift at kind {kind}, pending {pending}"
         );
     }
-    let mut invalid_policy_results = [wasmtime::Val::I32(0), wasmtime::Val::I32(0)];
+    let mut invalid_policy_results = [
+        wasmtime::Val::I32(0),
+        wasmtime::Val::I32(0),
+        wasmtime::Val::I32(0),
+    ];
     assert!(
         schedule
             .call(
@@ -920,6 +1022,66 @@ fn surface_event_kinds_are_fe_typed_and_invalid_host_tags_trap() {
             )
             .is_err(),
         "the resident policy wrapper must trap before Fe observes event tag 8",
+    );
+}
+
+#[test]
+fn surface_scheduling_policy_family_is_fe_authored_and_structurally_selected() {
+    // Queue action ordinals come from the canonical Fe enum declaration:
+    // Retain=0, KeepLatest=1, Drop=2. Every tape executes the selected ordinary
+    // Fe implementation through generated Wasm; policy names never reach the
+    // fixed export or a manifest.
+    assert_surface_policy_tape(
+        "SampleLatest",
+        &[
+            (4, 0.0, 0, (0, 0, 0)),
+            (0, 1.0, 1, (0, 1, 1)),
+            (2, 16.0, 1, (1, 0, 0)),
+        ],
+    );
+    assert_surface_policy_tape(
+        "Throttle",
+        &[
+            (4, 0.0, 0, (0, 0, 0)),
+            (0, 1.0, 1, (0, 1, 0)),
+            (2, 16.0, 1, (0, 1, 0)),
+            (2, 32.0, 1, (1, 0, 0)),
+            (3, 33.0, 0, (0, 0, 0)),
+            (0, 40.0, 1, (0, 1, 0)),
+            (2, 50.0, 1, (0, 1, 0)),
+            (2, 64.0, 1, (1, 0, 0)),
+        ],
+    );
+    assert_surface_policy_tape(
+        "Debounce",
+        &[
+            (4, 0.0, 0, (0, 0, 0)),
+            (0, 10.0, 1, (0, 1, 0)),
+            (2, 50.0, 1, (0, 1, 0)),
+            (1, 70.0, 2, (0, 1, 0)),
+            (2, 149.0, 2, (0, 1, 0)),
+            (2, 150.0, 2, (1, 0, 0)),
+        ],
+    );
+    assert_surface_policy_tape(
+        "Accumulate",
+        &[
+            (4, 0.0, 0, (0, 0, 0)),
+            (0, 1.0, 1, (0, 1, 0)),
+            (2, 16.0, 1, (0, 1, 0)),
+            (0, 20.0, 4, (0, 1, 0)),
+            (2, 21.0, 4, (1, 0, 0)),
+        ],
+    );
+    assert_surface_policy_tape(
+        "DropWhilePresenting",
+        &[
+            (4, 0.0, 0, (0, 0, 0)),
+            (0, 1.0, 1, (0, 1, 0)),
+            (2, 16.0, 1, (1, 0, 0)),
+            (0, 20.0, 1, (0, 0, 2)),
+            (3, 21.0, 0, (0, 0, 0)),
+        ],
     );
 }
 
@@ -968,6 +1130,11 @@ fn curated_sketch_sources_have_no_legacy_gesture_abi() {
             !source.contains("UpdateSurface") && !source.contains("fn update_view"),
             "{} reintroduced the reserved-name/partial-state gesture ABI; use the typed \
              SurfaceEvent and SurfaceTransition contract",
+            source_path.display()
+        );
+        assert!(
+            !source.contains("#[gpu_schedule"),
+            "{} reintroduced a compiler-enumerated scheduling attribute; select an ordinary Fe policy type through SurfaceScheduling<P>",
             source_path.display()
         );
         if source.contains("SurfaceScheduling<") {
@@ -1085,8 +1252,8 @@ fn perturbational_mandelbrot_graph_compiles() {
     assert!(
         exports
             .iter()
-            .any(|name| name == "fe_surface_transition_latest_per_frame_v4"),
-        "the Fe-declared latest-per-frame transition must use its fixed, versioned host ABI"
+            .any(|name| name == "fe_surface_transition_scheduled_v1"),
+        "the Fe-scheduled transition must use its policy-neutral fixed host ABI"
     );
     assert!(
         !exports
@@ -1150,7 +1317,7 @@ fn perturbational_mandelbrot_graph_compiles() {
     let instance = wasmtime::Instance::new(&mut store, &module, &[])
         .expect("wasmtime should instantiate perturbational control");
     let transition = instance
-        .get_func(&mut store, "fe_surface_transition_latest_per_frame_v4")
+        .get_func(&mut store, "fe_surface_transition_scheduled_v1")
         .expect("typed perturbational surface transition export");
     let replace_state = instance
         .get_func(&mut store, "fe_surface_state_replace_v1")
@@ -1753,7 +1920,7 @@ fn mandelbrot_typed_surface_abi_is_manifest_free() {
     assert!(
         exports
             .iter()
-            .any(|name| name == "fe_surface_transition_latest_per_frame_v4")
+            .any(|name| name == "fe_surface_transition_scheduled_v1")
     );
     assert!(
         !exports
@@ -1773,7 +1940,7 @@ fn mandelbrot_typed_surface_abi_is_manifest_free() {
     assert!(
         !wasm_function_export_names(&plain.wasm).iter().any(|name| {
             name == "fe_surface_transition_v2"
-                || name == "fe_surface_transition_latest_per_frame_v4"
+                || name == "fe_surface_transition_scheduled_v1"
                 || name == "fe_surface_state_replace_v1"
         }),
         "a non-interactive sketch must not acquire typed transition/state exports"
@@ -1814,7 +1981,7 @@ fn mandelbrot_typed_surface_transition_matches_oracle_over_event_tape() {
     // complete ten-f32 presentation snapshot. State is seeded once through the
     // companion export, then persists inside generated Wasm across the tape.
     let transition = instance
-        .get_func(&mut store, "fe_surface_transition_latest_per_frame_v4")
+        .get_func(&mut store, "fe_surface_transition_scheduled_v1")
         .expect("typed surface transition export");
     let replace_state = instance
         .get_func(&mut store, "fe_surface_state_replace_v1")
@@ -2148,7 +2315,7 @@ fn typed_surface_transition_rejects_partial_state_record() {
 }
 
 #[test]
-fn latest_per_frame_rejects_missing_structural_fe_policy() {
+fn surface_scheduling_rejects_missing_structural_fe_policy() {
     let path = repo_root().join("demos/sketches/gradient/src/lib.fe");
     let mut source = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
@@ -2163,7 +2330,7 @@ fn latest_per_frame_rejects_missing_structural_fe_policy() {
     );
     source = source.replacen(
         "actor GradientSurface",
-        "#[gpu_schedule(latest_per_frame)]\nstruct MissingSchedulePolicy {}\n\nactor GradientSurface",
+        "struct MissingSchedulePolicy {}\n\nactor GradientSurface",
         1,
     );
     let error = compile_actor_ingot_with_root_source("demos/sketches/gradient", source)

@@ -96,26 +96,95 @@ pub struct SurfaceScheduleEvent {
 impl Copy for SurfaceScheduleEvent {}
 
 /// Private state of a resident presentation policy. The all-zero value is the
-/// deliberate initial state: hidden, idle, and with no observed device loss.
+/// deliberate initial state: hidden, idle, with no observed device loss and no
+/// timing/count history. The latter fields are general policy memory rather
+/// than host state; generated Wasm retains them without exposing a manifest.
 #[web_surface_schedule_state]
 pub struct SurfaceScheduleState {
     pub presenting: bool,
     pub visible: bool,
     pub device_lost: bool,
+    pub last_presented_at: f32,
+    pub deadline: f32,
+    pub observed_inputs: u32,
 }
 
 impl Copy for SurfaceScheduleState {}
 
+/// Fe-owned disposition of the untouched raw input queue. The fixed browser
+/// adapter realizes this small standards-boundary effect without knowing which
+/// policy selected it.
+pub enum SurfaceQueueAction {
+    /// Preserve every queued record. The generated transition decides how a
+    /// homogeneous gesture burst is accumulated.
+    Retain,
+    /// Preserve only the newest raw record, implementing sampling rather than
+    /// accumulation without moving that choice into JavaScript.
+    KeepLatest,
+    /// Discard the pending batch, implementing explicit drop/backpressure.
+    Drop,
+}
+
+impl Copy for SurfaceQueueAction {}
+
 /// One Fe-authored scheduling result. Generated Wasm retains `state`; only the
-/// two decisions cross back to the fixed host.
+/// three host decisions cross the fixed binary boundary.
 #[web_surface_schedule_step]
 pub struct SurfaceScheduleStep {
     pub state: SurfaceScheduleState,
     pub present: bool,
     pub request_frame: bool,
+    pub queue: SurfaceQueueAction,
 }
 
 impl Copy for SurfaceScheduleStep {}
+
+impl SurfaceScheduleStep {
+    /// Preserve every decision while changing only the raw-queue effect.
+    pub fn with_queue(self, queue: SurfaceQueueAction) -> Self {
+        SurfaceScheduleStep {
+            state: self.state,
+            present: self.present,
+            request_frame: self.request_frame,
+            queue: queue,
+        }
+    }
+
+    /// Preserve every decision while updating one timing deadline.
+    pub fn with_deadline(self, deadline: f32) -> Self {
+        SurfaceScheduleStep {
+            state: SurfaceScheduleState {
+                presenting: self.state.presenting,
+                visible: self.state.visible,
+                device_lost: self.state.device_lost,
+                last_presented_at: self.state.last_presented_at,
+                deadline: deadline,
+                observed_inputs: self.state.observed_inputs,
+            },
+            present: self.present,
+            request_frame: self.request_frame,
+            queue: self.queue,
+        }
+    }
+
+    /// Reject a provisional presentation and request another browser frame,
+    /// retaining policy history from before that provisional decision.
+    pub fn defer(self, previous: SurfaceScheduleState) -> Self {
+        SurfaceScheduleStep {
+            state: SurfaceScheduleState {
+                presenting: false,
+                visible: self.state.visible,
+                device_lost: self.state.device_lost,
+                last_presented_at: previous.last_presented_at,
+                deadline: self.state.deadline,
+                observed_inputs: self.state.observed_inputs,
+            },
+            present: false,
+            request_frame: true,
+            queue: self.queue,
+        }
+    }
+}
 
 /// How a param presents and is driven by the runtime. The variant NAME is the
 /// projected `kind` string (snake_cased), so this enum is the single source of

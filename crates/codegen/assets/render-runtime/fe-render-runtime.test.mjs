@@ -7,7 +7,7 @@ import test from "node:test";
 globalThis.HTMLElement = class HTMLElement {};
 globalThis.customElements = { define() {} };
 
-const { FeSurfaceElement, SurfaceEventKind, writeSurfaceEventBatch } =
+const { FeSurfaceElement, SurfaceEventKind, SurfaceQueueAction, writeSurfaceEventBatch } =
   await import("./fe-render-runtime.js");
 
 test("fixed host writes untouched SurfaceEvent records in the versioned memory layout", () => {
@@ -57,7 +57,8 @@ test("a burst crosses into the Fe transition once at the presentation boundary",
   // state touched by this scheduling path.
   const surface = Object.create(FeSurfaceElement.prototype);
   surface._fsm = "live";
-  surface._surfaceTransitionSchedule = "latest_per_frame";
+  surface._surfaceTransitionSchedule = "resident";
+  surface._surfaceScheduleHasQueueAction = true;
   surface._surfaceTransitionStateResident = true;
   surface._pendingSurfaceEvents = [];
   surface._gestureFrame = null;
@@ -121,8 +122,9 @@ test("a burst crosses into the Fe transition once at the presentation boundary",
   const scheduleCalls = [];
   surface._surfaceScheduleKernel = (kind, timestamp, pendingEvents) => {
     scheduleCalls.push([kind, timestamp, pendingEvents]);
-    if (kind === SurfaceEventKind.AnimationFrame) return [1, 0];
-    if (kind === SurfaceEventKind.GpuComplete) return [0, pendingEvents > 0 ? 1 : 0];
+    if (kind === SurfaceEventKind.Gesture) return [0, 1, 0];
+    if (kind === SurfaceEventKind.AnimationFrame) return [1, 0, 0];
+    if (kind === SurfaceEventKind.GpuComplete) return [0, pendingEvents > 0 ? 1 : 0, 0];
     throw new Error(`unexpected schedule fact ${kind}`);
   };
 
@@ -168,9 +170,12 @@ test("a burst crosses into the Fe transition once at the presentation boundary",
   assert.deepEqual(surface._pendingSurfaceEvents, []);
   assert.deepEqual(stateReplacementCalls, [[41]]);
   assert.deepEqual(transitionArgCounts, [2]);
-  assert.deepEqual(scheduleCalls[0], [SurfaceEventKind.AnimationFrame, 10, 3]);
-  assert.equal(scheduleCalls[1][0], SurfaceEventKind.GpuComplete);
-  assert.equal(scheduleCalls[1][2], 0);
+  assert.deepEqual(scheduleCalls[0], [SurfaceEventKind.Gesture, 1, 1]);
+  assert.deepEqual(scheduleCalls[1], [SurfaceEventKind.Gesture, 2, 2]);
+  assert.deepEqual(scheduleCalls[2], [SurfaceEventKind.Gesture, 3, 3]);
+  assert.deepEqual(scheduleCalls[3], [SurfaceEventKind.AnimationFrame, 10, 3]);
+  assert.equal(scheduleCalls[4][0], SurfaceEventKind.GpuComplete);
+  assert.equal(scheduleCalls[4][2], 0);
 
   // A second frame advances the state held by the Fe instance. The browser
   // presents the returned snapshot but never feeds 42 back as a frame arg or
@@ -186,9 +191,10 @@ test("a burst crosses into the Fe transition once at the presentation boundary",
   assert.deepEqual(surface._uniforms, [43]);
   assert.deepEqual(stateReplacementCalls, [[41]]);
   assert.deepEqual(transitionArgCounts, [2, 2]);
-  assert.deepEqual(scheduleCalls[2], [SurfaceEventKind.AnimationFrame, 20, 1]);
-  assert.equal(scheduleCalls[3][0], SurfaceEventKind.GpuComplete);
-  assert.equal(scheduleCalls[3][2], 0);
+  assert.deepEqual(scheduleCalls[5], [SurfaceEventKind.Gesture, 4, 1]);
+  assert.deepEqual(scheduleCalls[6], [SurfaceEventKind.AnimationFrame, 20, 1]);
+  assert.equal(scheduleCalls[7][0], SurfaceEventKind.GpuComplete);
+  assert.equal(scheduleCalls[7][2], 0);
 });
 
 test("Fe policy backpressure retains input until GPU completion requests a frame", async () => {
@@ -199,7 +205,8 @@ test("Fe policy backpressure retains input until GPU completion requests a frame
   };
   const surface = Object.create(FeSurfaceElement.prototype);
   surface._fsm = "live";
-  surface._surfaceTransitionSchedule = "latest_per_frame";
+  surface._surfaceTransitionSchedule = "resident";
+  surface._surfaceScheduleHasQueueAction = true;
   surface._surfaceTransitionKernel = () => {};
   surface._pendingSurfaceEvents = [];
   surface._gestureFrame = null;
@@ -225,7 +232,15 @@ test("Fe policy backpressure retains input until GPU completion requests a frame
     },
   } } };
 
-  const decisions = [[1, 0], [0, 0], [0, 1], [1, 0], [0, 0]];
+  const decisions = [
+    [0, 1, 0],
+    [1, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 1, 0],
+    [1, 0, 0],
+    [0, 0, 0],
+  ];
   const scheduleCalls = [];
   surface._surfaceScheduleKernel = (...facts) => {
     scheduleCalls.push(facts);
@@ -252,8 +267,8 @@ test("Fe policy backpressure retains input until GPU completion requests a frame
 
   finishFirst();
   await firstFlush;
-  assert.equal(scheduleCalls[2][0], SurfaceEventKind.GpuComplete);
-  assert.equal(scheduleCalls[2][2], 1);
+  assert.equal(scheduleCalls[4][0], SurfaceEventKind.GpuComplete);
+  assert.equal(scheduleCalls[4][2], 1);
   assert.notEqual(surface._gestureFrame, null, "host must realize Fe's request_frame decision");
 
   surface._gestureFrame = null; // model the requested callback 3
@@ -266,7 +281,9 @@ test("Fe policy backpressure retains input until GPU completion requests a frame
   assert.deepEqual(
     scheduleCalls.map(([kind, _timestamp, pending]) => [kind, pending]),
     [
+      [SurfaceEventKind.Gesture, 1],
       [SurfaceEventKind.AnimationFrame, 1],
+      [SurfaceEventKind.Gesture, 1],
       [SurfaceEventKind.AnimationFrame, 1],
       [SurfaceEventKind.GpuComplete, 1],
       [SurfaceEventKind.AnimationFrame, 1],
@@ -280,7 +297,8 @@ test("the fixed host obeys resident Fe lifecycle scheduling decisions", () => {
   surface._surfaceTransitionKernel = () => {
     throw new Error("lifecycle scheduling must not re-enter application state");
   };
-  surface._surfaceTransitionSchedule = "latest_per_frame";
+  surface._surfaceTransitionSchedule = "resident";
+  surface._surfaceScheduleHasQueueAction = true;
   surface._pendingSurfaceEvents = [{
     mx: 12, my: 9, dx: 3, dy: -2, wheelDelta: 0,
     wheelMode: 0, buttons: 1, timestamp: 8, width: 320, height: 200,
@@ -292,14 +310,14 @@ test("the fixed host obeys resident Fe lifecycle scheduling decisions", () => {
   const scheduleCalls = [];
   surface._surfaceScheduleKernel = (...args) => {
     scheduleCalls.push(args);
-    return [0, 1];
+    return [0, 1, 0];
   };
   let requested = 0;
   surface._scheduleGestureFrame = () => { requested += 1; };
 
   assert.deepEqual(
     surface._deliverSurfaceLifecycle(SurfaceEventKind.GpuComplete, 21.5),
-    { present: false, requestFrame: true },
+    { present: false, requestFrame: true, queueAction: 0 },
   );
   assert.deepEqual(scheduleCalls, [[SurfaceEventKind.GpuComplete, 21.5, 1]]);
   assert.equal(requested, 1);
@@ -311,8 +329,13 @@ test("gesture and parameter edits stay in one ordered raw batch until Fe admits 
   const surface = Object.create(FeSurfaceElement.prototype);
   surface._fsm = "live";
   surface._surfaceTransitionKernel = () => {};
-  surface._surfaceTransitionSchedule = "latest_per_frame";
-  surface._surfaceScheduleKernel = () => [1, 0];
+  surface._surfaceTransitionSchedule = "resident";
+  surface._surfaceScheduleHasQueueAction = true;
+  surface._surfaceScheduleKernel = kind => {
+    if (kind === SurfaceEventKind.ParamEdit) return [0, 1, 0];
+    if (kind === SurfaceEventKind.AnimationFrame) return [1, 0, 0];
+    return [0, 0, 0];
+  };
   surface._pendingSurfaceEvents = [{ eventKind: SurfaceEventKind.Gesture, marker: "prior gesture" }];
   surface._backingWidth = 640;
   surface._backingHeight = 480;
@@ -368,11 +391,34 @@ test("gesture and parameter edits stay in one ordered raw batch until Fe admits 
   );
 });
 
+test("the fixed host realizes Fe-authored sample and drop queue effects", () => {
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._surfaceScheduleHasQueueAction = true;
+  surface._pendingSurfaceEvents = [
+    { marker: "oldest" },
+    { marker: "middle" },
+    { marker: "newest" },
+  ];
+
+  surface._applySurfaceQueueAction({ queueAction: SurfaceQueueAction.KeepLatest });
+  assert.deepEqual(surface._pendingSurfaceEvents, [{ marker: "newest" }]);
+
+  surface._pendingSurfaceEvents.push({ marker: "later" });
+  surface._applySurfaceQueueAction({ queueAction: SurfaceQueueAction.Drop });
+  assert.deepEqual(surface._pendingSurfaceEvents, []);
+
+  surface._surfaceScheduleKernel = () => [0, 0, 3];
+  assert.throws(
+    () => surface._runSurfaceSchedule(SurfaceEventKind.Gesture, 1, 1),
+    /valid queue action/,
+  );
+});
+
 test("a scheduled typed surface cannot enter the legacy JavaScript scheduler", () => {
   const surface = Object.create(FeSurfaceElement.prototype);
   surface._fsm = "live";
   surface._surfaceTransitionKernel = () => {};
-  surface._surfaceTransitionSchedule = "latest_per_frame";
+  surface._surfaceTransitionSchedule = "resident";
   surface._surfaceScheduleKernel = null;
   surface._pendingSurfaceEvents = [];
   surface._gestureDirty = false;

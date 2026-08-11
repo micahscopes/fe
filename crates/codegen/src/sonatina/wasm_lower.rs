@@ -224,7 +224,22 @@ pub(crate) fn compile_runtime_package_wasm_with_canonical_lanes(
         wrapped_lane_names.insert(projection.source.clone());
     }
     if let Some(policy) = resident_policy {
-        wrapped_lane_names.insert(policy.callee_symbol.clone());
+        let assigned = assign_sonatina_function_symbols(db, package);
+        let policy_symbols = assigned
+            .into_iter()
+            .filter_map(|(instance, symbol)| {
+                (mir::runtime_instance_symbol_key(db, instance) == policy.callee_instance_key)
+                    .then_some(symbol)
+            })
+            .collect::<Vec<_>>();
+        let [symbol] = policy_symbols.as_slice() else {
+            return Err(LowerError::Unsupported(format!(
+                "resident policy instance `{}` must select exactly one assigned Fe symbol (found {})",
+                policy.callee_instance_key,
+                policy_symbols.len()
+            )));
+        };
+        wrapped_lane_names.insert(symbol.clone());
     }
     let mut lowerer = PortableModuleLowerer::new(
         db,
@@ -3390,13 +3405,15 @@ where
         let candidates = self
             .func_map
             .iter()
-            .filter(|(instance, _)| self.function_symbol(**instance) == policy.callee_symbol)
+            .filter(|(instance, _)| {
+                mir::runtime_instance_symbol_key(self.db, **instance) == policy.callee_instance_key
+            })
             .map(|(_, func_ref)| *func_ref)
             .collect::<Vec<_>>();
         let [callee] = candidates.as_slice() else {
             return Err(LowerError::Unsupported(format!(
                 "resident policy `{}` must select exactly one lowered Fe behavior (found {})",
-                policy.callee_symbol,
+                policy.callee_instance_key,
                 candidates.len()
             )));
         };
@@ -3408,7 +3425,7 @@ where
         if callee_args.len() != expected_args || result_tys.len() != expected_results {
             return Err(LowerError::Unsupported(format!(
                 "resident policy `{}` must flatten to {expected_args} arguments and {expected_results} results; got {} -> {}",
-                policy.callee_symbol,
+                policy.callee_instance_key,
                 callee_args.len(),
                 result_tys.len()
             )));
@@ -3427,7 +3444,7 @@ where
         if result_tys[..policy.state_fields] != *state_tys {
             return Err(LowerError::Unsupported(format!(
                 "resident policy `{}` must return its complete state as the leading result prefix: arguments {state_tys:?}, results {:?}",
-                policy.callee_symbol,
+                policy.callee_instance_key,
                 &result_tys[..policy.state_fields]
             )));
         }
@@ -3440,7 +3457,7 @@ where
             {
                 return Err(LowerError::Unsupported(format!(
                     "resident policy `{}` has invalid event enum constraint ({index}, {limit}) for {event_tys:?}",
-                    policy.callee_symbol
+                    policy.callee_instance_key
                 )));
             }
         }
@@ -3453,7 +3470,7 @@ where
             {
                 return Err(LowerError::Unsupported(format!(
                     "resident policy `{}` has invalid state enum constraint ({index}, {limit}) for {state_tys:?}",
-                    policy.callee_symbol
+                    policy.callee_instance_key
                 )));
             }
         }

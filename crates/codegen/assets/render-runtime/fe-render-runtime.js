@@ -48,6 +48,14 @@ export const SurfaceEventKind = Object.freeze({
   DeviceRecovered: 7,
 });
 
+/** Fixed tags of Fe's bounded raw-queue effect. The selected resident policy
+ * produces them; this adapter only realizes the corresponding queue operation. */
+export const SurfaceQueueAction = Object.freeze({
+  Retain: 0,
+  KeepLatest: 1,
+  Drop: 2,
+});
+
 /** Write the fixed DFS layout of untouched `std::web::SurfaceEvent` records.
  * This is transport only: the compiler-lowered Fe scheduling wrapper owns
  * coalescing and calls the authored transition inside Wasm. */
@@ -588,22 +596,23 @@ export class FeSurfaceElement extends HTMLElement {
       this._surfaceScheduleKernel = null;
       this._surfaceEventBufferPtr = 0;
       this._surfaceEventBufferCapacity = 0;
-      const residentLatestPerFrame =
+      const residentScheduled =
+        instance?.exports.fe_surface_transition_scheduled_v1 ??
         instance?.exports.fe_surface_transition_latest_per_frame_v4 ?? null;
-      const latestPerFrame = residentLatestPerFrame ??
+      const scheduled = residentScheduled ??
         instance?.exports.fe_surface_transition_latest_per_frame_v2 ?? null;
-      this._surfaceTransitionKernel = typeof latestPerFrame === "function"
-        ? latestPerFrame
+      this._surfaceTransitionKernel = typeof scheduled === "function"
+        ? scheduled
         : instance?.exports.fe_surface_transition_v2 ?? null;
-      this._surfaceTransitionSchedule = typeof latestPerFrame === "function"
-        ? "latest_per_frame"
+      this._surfaceTransitionSchedule = typeof scheduled === "function"
+        ? "resident"
         : "immediate";
       if (typeof this._surfaceTransitionKernel !== "function") {
         this._surfaceTransitionKernel = null;
         this._surfaceTransitionSchedule = "immediate";
       }
       this._surfaceTransitionStateResident =
-        typeof residentLatestPerFrame === "function";
+        typeof residentScheduled === "function";
       if (this._surfaceTransitionStateResident) {
         const replaceState = instance?.exports.fe_surface_state_replace_v1;
         if (typeof replaceState !== "function") {
@@ -613,7 +622,7 @@ export class FeSurfaceElement extends HTMLElement {
         }
         this._surfaceStateReplaceKernel = replaceState;
       }
-      if (this._surfaceTransitionSchedule === "latest_per_frame") {
+      if (this._surfaceTransitionSchedule === "resident") {
         const memory = instance?.exports.memory;
         const alloc = instance?.exports.fe_cabi_alloc;
         if (!(memory instanceof WebAssembly.Memory) || typeof alloc !== "function") {
@@ -624,12 +633,14 @@ export class FeSurfaceElement extends HTMLElement {
         this._surfaceTransitionMemory = memory;
         this._surfaceTransitionAlloc = alloc;
       }
-      const surfaceSchedule = instance?.exports.fe_surface_schedule_v1;
+      const surfaceScheduleV2 = instance?.exports.fe_surface_schedule_v2;
+      const surfaceSchedule = surfaceScheduleV2 ?? instance?.exports.fe_surface_schedule_v1;
       this._surfaceScheduleKernel = typeof surfaceSchedule === "function"
         ? surfaceSchedule
         : null;
+      this._surfaceScheduleHasQueueAction = typeof surfaceScheduleV2 === "function";
       if (
-        this._surfaceTransitionSchedule === "latest_per_frame" &&
+        this._surfaceTransitionSchedule === "resident" &&
         !this._surfaceScheduleKernel
       ) {
         throw new Error(
@@ -1569,16 +1580,14 @@ export class FeSurfaceElement extends HTMLElement {
       paramValue: 0,
     };
     if (this._surfaceTransitionKernel) {
-      if (this._surfaceTransitionSchedule === "latest_per_frame") {
+      if (this._surfaceTransitionSchedule === "resident") {
         if (!this._surfaceScheduleKernel) {
           throw new Error(
             "fe render runtime: scheduled surface input cannot fall back to JavaScript scheduling",
           );
         }
         this._pendingSurfaceEvents.push(surfaceEvent);
-        // The raw queue itself is the only canonical pending-work fact. The
-        // resident Fe policy decides at the frame boundary whether to present.
-        this._scheduleGestureFrame();
+        this._notifyScheduledInput(surfaceEvent.eventKind, surfaceEvent.timestamp);
         return;
       }
       const next = this._runSurfaceTransition(surfaceEvent);
@@ -1667,7 +1676,7 @@ export class FeSurfaceElement extends HTMLElement {
   _applyParamEdit(index, value) {
     if (this._surfaceTransitionKernel) {
       if (
-        this._surfaceTransitionSchedule === "latest_per_frame" &&
+        this._surfaceTransitionSchedule === "resident" &&
         !this._surfaceScheduleKernel
       ) {
         throw new Error(
@@ -1690,17 +1699,17 @@ export class FeSurfaceElement extends HTMLElement {
         paramValue: value,
       };
       if (
-        this._surfaceTransitionSchedule === "latest_per_frame" &&
+        this._surfaceTransitionSchedule === "resident" &&
         this._surfaceScheduleKernel
       ) {
         // The generated Wasm batch boundary preserves heterogeneous event
         // order. The host therefore keeps an older gesture and this untouched
         // edit in one raw queue and performs no eager application transition.
         this._pendingSurfaceEvents.push(event);
-        this._scheduleGestureFrame();
+        this._notifyScheduledInput(event.eventKind, event.timestamp);
         return;
       }
-      const next = this._surfaceTransitionSchedule === "latest_per_frame"
+      const next = this._surfaceTransitionSchedule === "resident"
         ? this._runSurfaceFrame([event])
         : this._runSurfaceTransition(event);
       if (!next) return;
@@ -1778,7 +1787,7 @@ export class FeSurfaceElement extends HTMLElement {
       paramIndex: 0,
       paramValue: 0,
     };
-    const next = this._surfaceTransitionSchedule === "latest_per_frame"
+    const next = this._surfaceTransitionSchedule === "resident"
       ? this._runSurfaceFrame([
           ...(includePending ? this._pendingSurfaceEvents.splice(0) : []),
           event,
@@ -1791,8 +1800,8 @@ export class FeSurfaceElement extends HTMLElement {
   }
 
   /** Invoke the generated resident Fe presentation policy. Private policy
-   * state remains in Wasm; the fixed host sees only two booleans and performs
-   * no dirty/presenting inference of its own. */
+   * state remains in Wasm; the fixed host sees two booleans plus one bounded
+   * raw-queue effect and performs no dirty/presenting inference of its own. */
   _runSurfaceSchedule(
     kind,
     timestamp = globalThis.performance?.now?.() ?? 0,
@@ -1801,15 +1810,52 @@ export class FeSurfaceElement extends HTMLElement {
     if (!this._surfaceScheduleKernel) return null;
     const reply = this._surfaceScheduleKernel(kind, timestamp, pendingEvents);
     const decisions = Array.isArray(reply) ? reply : [reply];
+    const expected = this._surfaceScheduleHasQueueAction ? 3 : 2;
     if (
-      decisions.length !== 2 ||
-      !decisions.every((value) => value === 0 || value === 1)
+      decisions.length !== expected ||
+      ![decisions[0], decisions[1]].every((value) => value === 0 || value === 1) ||
+      (expected === 3 && !Number.isInteger(decisions[2])) ||
+      (expected === 3 &&
+        (decisions[2] < SurfaceQueueAction.Retain || decisions[2] > SurfaceQueueAction.Drop))
     ) {
       throw new Error(
-        "fe render runtime: resident surface policy must return boolean present/request_frame decisions",
+        "fe render runtime: resident surface policy must return present/request_frame and a valid queue action",
       );
     }
-    return { present: decisions[0] === 1, requestFrame: decisions[1] === 1 };
+    return {
+      present: decisions[0] === 1,
+      requestFrame: decisions[1] === 1,
+      queueAction: expected === 3 ? decisions[2] : SurfaceQueueAction.Retain,
+    };
+  }
+
+  /** Realize the Fe policy's bounded raw-queue effect. Numeric identities are
+   * declaration-order tags of the fixed `SurfaceQueueAction` enum, not a
+   * demo-authored protocol or manifest table. */
+  _applySurfaceQueueAction(decision) {
+    if (!decision || decision.queueAction === SurfaceQueueAction.Retain) return;
+    if (decision.queueAction === SurfaceQueueAction.KeepLatest) {
+      const latest = this._pendingSurfaceEvents.at(-1);
+      this._pendingSurfaceEvents = latest ? [latest] : [];
+      return;
+    }
+    if (decision.queueAction === SurfaceQueueAction.Drop) {
+      this._pendingSurfaceEvents = [];
+    }
+  }
+
+  /** Notify Fe that one untouched application input entered the raw queue.
+   * Fe alone chooses retention and whether the browser should request a frame. */
+  _notifyScheduledInput(kind, timestamp) {
+    const decision = this._runSurfaceSchedule(kind, timestamp);
+    if (!decision) {
+      throw new Error("fe render runtime: resident input has no Fe scheduling decision");
+    }
+    if (decision.present) {
+      throw new Error("fe render runtime: Fe requested presentation outside an animation frame");
+    }
+    this._applySurfaceQueueAction(decision);
+    if (decision.requestFrame) this._scheduleGestureFrame();
   }
 
   /** Deliver a standards fact to the resident Fe scheduling policy without
@@ -1823,6 +1869,7 @@ export class FeSurfaceElement extends HTMLElement {
       this._deliverSurfaceBoundary(kind, timestamp, false);
     }
     const decision = this._runSurfaceSchedule(kind, timestamp);
+    this._applySurfaceQueueAction(decision);
     if (decision?.requestFrame) this._scheduleGestureFrame();
     return decision;
   }
@@ -1844,9 +1891,9 @@ export class FeSurfaceElement extends HTMLElement {
     return next;
   }
 
-  /** Queue the newest Fe-computed state for presentation. For a
-   * `LatestPerFrame` transition the raw event reaches this queue first and Fe
-   * runs inside `_flushGestureFrame`; immediate and legacy lanes have already
+  /** Queue the newest Fe-computed state for presentation. For a resident
+   * scheduled transition the raw event reaches this queue first and Fe runs
+   * inside `_flushGestureFrame`; immediate and legacy lanes have already
    * computed `next`. A graph presentation still records its complete ordered
    * pass list in one command buffer. */
   _queueGestureRender(next) {
@@ -1877,6 +1924,7 @@ export class FeSurfaceElement extends HTMLElement {
         SurfaceEventKind.AnimationFrame,
         timestamp,
       );
+      this._applySurfaceQueueAction(decision);
       if (decision?.requestFrame) this._scheduleGestureFrame();
       if (!decision?.present) return;
       if (this._pendingSurfaceEvents.length === 0) {
@@ -1886,10 +1934,10 @@ export class FeSurfaceElement extends HTMLElement {
       }
 
       const events = this._pendingSurfaceEvents.splice(0);
-      const next = this._surfaceTransitionSchedule === "latest_per_frame"
+      const next = this._surfaceTransitionSchedule === "resident"
         ? this._runSurfaceFrame(events)
         : null;
-      if (this._surfaceTransitionSchedule === "latest_per_frame" && !next) return;
+      if (this._surfaceTransitionSchedule === "resident" && !next) return;
       if (next) {
         this._uniforms = next;
         this._refreshControlValues();
@@ -1900,6 +1948,7 @@ export class FeSurfaceElement extends HTMLElement {
         if (queue?.onSubmittedWorkDone) await queue.onSubmittedWorkDone();
       } finally {
         const complete = this._runSurfaceSchedule(SurfaceEventKind.GpuComplete);
+        this._applySurfaceQueueAction(complete);
         if (complete?.requestFrame) this._scheduleGestureFrame();
       }
       return;
@@ -1908,7 +1957,7 @@ export class FeSurfaceElement extends HTMLElement {
     // Compatibility state machine for old bundles that predate the resident
     // Fe policy export. A scheduled typed transition is rejected during boot
     // and again here, so canonical gallery artifacts cannot take this branch.
-    if (this._surfaceTransitionSchedule === "latest_per_frame") {
+    if (this._surfaceTransitionSchedule === "resident") {
       throw new Error(
         "fe render runtime: scheduled surface transition reached the legacy JavaScript state machine",
       );

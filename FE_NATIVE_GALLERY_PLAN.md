@@ -297,6 +297,46 @@ Origin: honesty audit of Claude Code session
   modules / 54 files; both real Chromium SourceInspector/gallery and TodoMVC
   tapes passed. Sample/throttle/debounce/accumulate policy families and native
   event parity remain open Phase 2 work.
+- Resident scheduling is no longer a compiler-enumerated `LatestPerFrame`
+  special case. `GpuSchedule`, `#[gpu_schedule(latest_per_frame)]`, and the
+  policy-named transition export were deleted; the binary surface now exposes
+  only policy-neutral `fe_surface_transition_scheduled_v1` and
+  `fe_surface_schedule_v2`. Any nominal `P` selected through
+  `SurfaceScheduling<P>` is accepted when it has exactly one public ordinary
+  Fe function with the structural schedule event/state/step shape. Same-leaf
+  method names no longer destabilize this selection: the wrapper roots and
+  hides the exact semantic runtime-instance identity after package-wide symbol
+  disambiguation, rather than guessing an emitted name.
+- The fixed host now notifies the resident Fe policy when untouched gesture or
+  direct-edit input enters the raw queue and requests a browser frame only when
+  Fe says to do so. `SurfaceScheduleState` gained private timing/count memory,
+  and `SurfaceScheduleStep` gained the typed `SurfaceQueueAction` effect:
+  `Retain`, `KeepLatest`, or `Drop`. JavaScript only realizes that bounded queue
+  operation. No policy name, timing value, queue rule, manifest field, or JSON
+  table crosses the application boundary. Ordinary Fe implementations now
+  provide latest-per-frame, sample-latest, 32 ms throttle, 80 ms debounce,
+  four-event/64 ms bounded accumulation, and drop-while-presenting behavior.
+  Immutable `SurfaceScheduleStep::{with_queue, with_deadline, defer}`
+  combinators keep the policy bodies concise without introducing aggregate
+  references the current Wasm value lane cannot yet lower. These are concrete
+  standard policies; parameterized policy constructors remain a later library/
+  generic-instance refinement rather than a compiler or host vocabulary.
+- Five source-only actor variants independently select those additional policy
+  types and execute deterministic Wasmtime tapes over their private state and
+  three semantic decisions. A fixed-host tape separately proves sample/drop
+  queue realization and invalid-action rejection. The fixed-host suite is 7/7,
+  the codegen unit suite is 62/62, and all 29 serialized gallery gates passed in
+  2,451.47 seconds. The 3,520-event exact Mandelbrot oracle remains bit-exact
+  with all six clamp boundaries covered; perturbation shader receipts remain
+  exact WGSL 391,796 bytes, reference 456,259, perturb 45,400, combined
+  501,659. Raymarch WGSL remains 83,496 bytes while its richer control Wasm is
+  6,607 bytes. A cache-disabled release precompile built all 11 render bundles
+  in 116.02 seconds (exact control Wasm 25,517 bytes; perturbation control Wasm
+  5,173 bytes), and deployment verification accepted 13 Fe modules / 54 files.
+  Real Chromium SourceInspector/gallery and TodoMVC tapes both passed against
+  that exact cold-built site; unavailable WebGPU pixel execution remains the
+  previously named environmental qualification. Native event/scheduling parity
+  remains open Phase 2 work.
 - This component/page slice is not the full resident-component end state. The
   outer gallery shell does not yet own routing, tile lifecycle, scheduling, or
   component-to-component messages as a long-lived Fe actor, and the stylesheet

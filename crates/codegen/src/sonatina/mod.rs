@@ -118,7 +118,7 @@ pub(crate) struct WasmResidentProjection {
 /// the state prefix and exposes only the reply suffix under a fixed export.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WasmResidentPolicy {
-    callee_symbol: String,
+    callee_instance_key: String,
     export: String,
     /// The fixed host ABI is event-first, but the structurally selected Fe
     /// function may use either nominal argument order.
@@ -260,7 +260,7 @@ impl WasmCompileOptions {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn with_resident_policy(
         mut self,
-        callee_symbol: impl Into<String>,
+        callee_instance_key: impl Into<String>,
         export: impl Into<String>,
         event_first: bool,
         event_fields: usize,
@@ -270,7 +270,7 @@ impl WasmCompileOptions {
         state_tag_limits: Vec<(usize, u32)>,
     ) -> Self {
         self.resident_policy = Some(WasmResidentPolicy {
-            callee_symbol: callee_symbol.into(),
+            callee_instance_key: callee_instance_key.into(),
             export: export.into(),
             event_first,
             event_fields,

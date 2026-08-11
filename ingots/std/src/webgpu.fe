@@ -5,7 +5,13 @@ use core::conal::Functor
 use core::contracts::Target
 use core::Fn
 use core::MemPtr
-use super::web::{SurfaceEventKind, SurfaceScheduleEvent, SurfaceScheduleState, SurfaceScheduleStep}
+use super::web::{
+    SurfaceEventKind,
+    SurfaceQueueAction,
+    SurfaceScheduleEvent,
+    SurfaceScheduleState,
+    SurfaceScheduleStep,
+}
 use raw::{gpu_buffer_create, gpu_upload, gpu_dispatch, gpu_readback_begin, wait as async_wait}
 
 // mb2 CE-3: the completion-cell control-effects vocabulary now lives
@@ -103,8 +109,29 @@ pub struct SurfaceTransition {}
 /// private Wasm globals. The fixed host seeds or explicitly replaces only
 /// application state at initialization, extent, and restoration boundaries;
 /// frame calls carry raw inputs plus inert external resource slots.
-#[gpu_schedule(latest_per_frame)]
 pub struct LatestPerFrame {}
+
+/// Sample the newest raw input record at the next available presentation
+/// frame. Older queued records are discarded by an explicit Fe effect.
+pub struct SampleLatest {}
+
+/// Retain input but admit at most one presentation every 32 milliseconds.
+/// This concrete standard policy is intentionally ordinary Fe; future policy
+/// constructors can generate additional nominal configurations without a new
+/// compiler or host vocabulary.
+pub struct Throttle {}
+
+/// Retain input until it has been quiet for 80 milliseconds, then present the
+/// complete batch. Animation-frame facts provide the clock.
+pub struct Debounce {}
+
+/// Accumulate four raw records, or wait at most 64 milliseconds from the first
+/// one, before presenting one generated-Wasm batch.
+pub struct Accumulate {}
+
+/// Apply strict backpressure: raw input arriving during an in-flight GPU
+/// submission is explicitly dropped by Fe.
+pub struct DropWhilePresenting {}
 
 /// Select a resident presentation policy on a surface transition. The compiler
 /// finds the policy type's unique public inherent function by its nominal
@@ -127,12 +154,28 @@ impl LatestPerFrame {
         let mut device_lost: bool = state.device_lost
         let mut present: bool = false
         let mut request_frame: bool = false
+        let mut last_presented_at: f32 = state.last_presented_at
+        let deadline: f32 = state.deadline
+        let mut observed_inputs: u32 = state.observed_inputs
+
+        match event.kind {
+            SurfaceEventKind::Gesture => {
+                observed_inputs = observed_inputs + 1
+                request_frame = visible && device_lost == false && presenting == false && event.pending_events > 0
+            }
+            SurfaceEventKind::ParamEdit => {
+                observed_inputs = observed_inputs + 1
+                request_frame = visible && device_lost == false && presenting == false && event.pending_events > 0
+            }
+            _ => {}
+        }
 
         match event.kind {
             SurfaceEventKind::AnimationFrame => {
                 if visible && device_lost == false && presenting == false && event.pending_events > 0 {
                     presenting = true
                     present = true
+                    last_presented_at = event.timestamp
                 }
             }
             SurfaceEventKind::GpuComplete => {
@@ -162,10 +205,121 @@ impl LatestPerFrame {
                 presenting: presenting,
                 visible: visible,
                 device_lost: device_lost,
+                last_presented_at: last_presented_at,
+                deadline: deadline,
+                observed_inputs: observed_inputs,
             },
             present: present,
             request_frame: request_frame,
+            queue: SurfaceQueueAction::Retain,
         }
+    }
+}
+
+impl SampleLatest {
+    pub fn decide(
+        _ event: own SurfaceScheduleEvent,
+        _ state: own SurfaceScheduleState,
+    ) -> SurfaceScheduleStep {
+        let step: SurfaceScheduleStep = LatestPerFrame::decide(state: state, event: event)
+        let mut queue: SurfaceQueueAction = SurfaceQueueAction::Retain
+        match event.kind {
+            SurfaceEventKind::Gesture => { queue = SurfaceQueueAction::KeepLatest }
+            SurfaceEventKind::ParamEdit => { queue = SurfaceQueueAction::KeepLatest }
+            _ => {}
+        }
+        step.with_queue(queue: queue)
+    }
+}
+
+impl Throttle {
+    pub fn decide(
+        _ state: own SurfaceScheduleState,
+        _ event: own SurfaceScheduleEvent,
+    ) -> SurfaceScheduleStep {
+        let step: SurfaceScheduleStep = LatestPerFrame::decide(state: state, event: event)
+        match event.kind {
+            SurfaceEventKind::AnimationFrame => {
+                if step.present {
+                    let first: bool = state.observed_inputs == 0
+                    if first == false && event.timestamp < state.last_presented_at + 32.0 {
+                        return step.defer(previous: state)
+                    }
+                }
+            }
+            _ => {}
+        }
+        step
+    }
+}
+
+impl Debounce {
+    pub fn decide(
+        _ state: own SurfaceScheduleState,
+        _ event: own SurfaceScheduleEvent,
+    ) -> SurfaceScheduleStep {
+        let step: SurfaceScheduleStep = LatestPerFrame::decide(state: state, event: event)
+        match event.kind {
+            SurfaceEventKind::Gesture => { return step.with_deadline(deadline: event.timestamp + 80.0) }
+            SurfaceEventKind::ParamEdit => { return step.with_deadline(deadline: event.timestamp + 80.0) }
+            SurfaceEventKind::AnimationFrame => {
+                if step.present && event.timestamp < state.deadline {
+                    return step.defer(previous: state)
+                }
+            }
+            _ => {}
+        }
+        step
+    }
+}
+
+impl Accumulate {
+    pub fn decide(
+        _ state: own SurfaceScheduleState,
+        _ event: own SurfaceScheduleEvent,
+    ) -> SurfaceScheduleStep {
+        let step: SurfaceScheduleStep = LatestPerFrame::decide(state: state, event: event)
+        match event.kind {
+            SurfaceEventKind::Gesture => {
+                if state.deadline == 0.0 {
+                    return step.with_deadline(deadline: event.timestamp + 64.0)
+                }
+            }
+            SurfaceEventKind::ParamEdit => {
+                if state.deadline == 0.0 {
+                    return step.with_deadline(deadline: event.timestamp + 64.0)
+                }
+            }
+            SurfaceEventKind::AnimationFrame => {
+                if step.present {
+                    if event.pending_events < 4 && event.timestamp < state.deadline {
+                        return step.defer(previous: state)
+                    } else {
+                        return step.with_deadline(deadline: 0.0)
+                    }
+                }
+            }
+            _ => {}
+        }
+        step
+    }
+}
+
+impl DropWhilePresenting {
+    pub fn decide(
+        _ event: own SurfaceScheduleEvent,
+        _ state: own SurfaceScheduleState,
+    ) -> SurfaceScheduleStep {
+        let step: SurfaceScheduleStep = LatestPerFrame::decide(state: state, event: event)
+        let mut queue: SurfaceQueueAction = SurfaceQueueAction::Retain
+        if state.presenting {
+            match event.kind {
+                SurfaceEventKind::Gesture => { queue = SurfaceQueueAction::Drop }
+                SurfaceEventKind::ParamEdit => { queue = SurfaceQueueAction::Drop }
+                _ => {}
+            }
+        }
+        step.with_queue(queue: queue)
     }
 }
 

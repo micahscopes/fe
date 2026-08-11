@@ -2562,6 +2562,41 @@ pub fn runtime_package_symbol_for_func<'db>(
     }
 }
 
+/// Return the stable runtime-instance identity for one exact semantic Fe
+/// function in a package. Compiler-generated wrappers use this instead of an
+/// emitted symbol because symbol assignment may lengthen same-leaf functions
+/// after package-wide collision analysis. Multiple specializations still fail
+/// closed: a wrapper must call one exact instance.
+pub fn runtime_package_instance_key_for_func<'db>(
+    db: &'db dyn MirDb,
+    package: RuntimePackage<'db>,
+    func: Func<'db>,
+) -> Result<String, LowerError> {
+    let keys = package
+        .functions(db)
+        .into_iter()
+        .filter_map(|function| {
+            let RuntimeFunctionOwner::Semantic(semantic) = function.owner(db) else {
+                return None;
+            };
+            (semantic.key(db).owner(db) == BodyOwner::Func(func))
+                .then(|| runtime_instance_symbol_key(db, function.instance(db)))
+        })
+        .collect::<Vec<_>>();
+    match keys.as_slice() {
+        [key] => Ok(key.clone()),
+        [] => Err(LowerError::Unsupported(format!(
+            "semantic Fe function `{}` was not materialized in the runtime package",
+            func_display_name(db, func)
+        ))),
+        _ => Err(LowerError::Unsupported(format!(
+            "semantic Fe function `{}` materialized as {} runtime specializations; an exact wrapper callee is required",
+            func_display_name(db, func),
+            keys.len()
+        ))),
+    }
+}
+
 fn runtime_instance_sort_key<'db>(db: &'db dyn MirDb, instance: RuntimeInstance<'db>) -> String {
     runtime_instance_sort_key_query(db, instance)
 }

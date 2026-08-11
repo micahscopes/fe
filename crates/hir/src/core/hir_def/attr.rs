@@ -57,12 +57,6 @@ pub enum GpuControl {
     SurfaceSchedule,
 }
 
-/// Presentation policy selected by a Fe behavior capability.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum GpuSchedule {
-    LatestPerFrame,
-}
-
 /// Target-neutral stateful actor transition selected by a nominal role type.
 /// A backend may keep the actor's complete returned state resident between
 /// host calls; the attribute carries no browser, DOM, or rendering semantics.
@@ -499,13 +493,6 @@ impl<'db> AttrListId<'db> {
             "surface" => Some(GpuControl::Surface),
             "typed_surface" => Some(GpuControl::TypedSurface),
             "surface_schedule" => Some(GpuControl::SurfaceSchedule),
-            _ => None,
-        }
-    }
-
-    pub fn gpu_schedule(self, db: &'db dyn HirDb) -> Option<GpuSchedule> {
-        match self.single_ident_arg(db, "gpu_schedule")?.as_str() {
-            "latest_per_frame" => Some(GpuSchedule::LatestPerFrame),
             _ => None,
         }
     }
