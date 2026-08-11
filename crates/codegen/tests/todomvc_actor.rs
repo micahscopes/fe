@@ -109,7 +109,7 @@ fn reduce(model: &mut Model, event: Event<'_>) {
                         model.editing = 0;
                     }
                 }
-                11 if event.detail >= 2 => {
+                11 | 14 if event.target == 14 || event.detail >= 2 => {
                     if let Some(todo) = model.todos.iter().find(|todo| todo.id == event.key) {
                         model.draft = todo.title.clone();
                         model.editing = event.key;
@@ -428,9 +428,9 @@ fn todomvc_reducer_utf8_keyed_projection_and_lifecycle_are_fe_owned() {
         },
         Event {
             kind: 3,
-            target: 11,
+            target: 14,
             key: 2,
-            detail: 2,
+            detail: 1,
             text: "",
         },
         Event {
@@ -453,6 +453,13 @@ fn todomvc_reducer_utf8_keyed_projection_and_lifecycle_are_fe_owned() {
             key: 0,
             detail: 0,
             text: "on",
+        },
+        Event {
+            kind: 5,
+            target: 2,
+            key: 0,
+            detail: 0,
+            text: "",
         },
         Event {
             kind: 3,

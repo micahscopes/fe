@@ -95,9 +95,13 @@
                         box-shadow: inset 0 -2px 1px #00000008; }
   .todo-app .new-todo::placeholder { color: #ccc; font-style: italic; }
   .todo-app .main { position: relative; border-top: 1px solid #e6e6e6; background: white; }
-  .todo-app .toggle-all { position: absolute; top: -48px; left: 12px; width: 30px; height: 30px;
-                          opacity: .28; transform: rotate(90deg); }
-  .todo-app .toggle-all-label { position: absolute; overflow: hidden; width: 1px; height: 1px; }
+  .todo-app .toggle-all { position: absolute; z-index: 2; top: -50px; left: 7px; width: 42px;
+                          height: 46px; margin: 0; opacity: 0; cursor: pointer; }
+  .todo-app .toggle-all-label { position: absolute; top: -50px; left: 7px; width: 42px; height: 46px;
+                                color: #aaa; font: 28px/40px system-ui, sans-serif; text-align: center;
+                                cursor: pointer; }
+  .todo-app .toggle-all:checked + .toggle-all-label { color: #555; }
+  .todo-app .toggle-all:focus-visible + .toggle-all-label { outline: 2px solid #8aa9d6; outline-offset: -5px; }
   .todo-app .todo-list { margin: 0; padding: 0; list-style: none; }
   .todo-app .todo-list > li { position: relative; min-height: 54px; border-bottom: 1px solid #ededed;
                               font: 20px/1.35 system-ui, sans-serif; }
@@ -105,8 +109,10 @@
   .todo-app .todo-list .toggle { width: 34px; height: 34px; margin: 0 8px; }
   .todo-app .todo-list label { flex: 1; padding: 13px 8px; overflow-wrap: anywhere; }
   .todo-app .todo-list .completed label { color: #bbb; text-decoration: line-through; }
-  .todo-app .destroy { width: 38px; height: 38px; margin-right: 8px; border: 0;
-                       background: none; color: #cc9a9a; font-size: 26px; }
+  .todo-app .edit-button, .todo-app .destroy { width: 34px; height: 38px; border: 0;
+                                               background: none; cursor: pointer; }
+  .todo-app .edit-button { color: #9aa5b5; font-size: 20px; }
+  .todo-app .destroy { margin-right: 8px; color: #cc9a9a; font-size: 26px; }
   .todo-app .destroy::after { content: "×"; }
   .todo-app .edit { display: none; padding: 12px 14px; border: 1px solid #999; font-size: 20px; }
   .todo-app .editing .view { display: none; }
@@ -182,8 +188,8 @@
         </header>
         <section class="main" data-fe-node="1" hidden>
           <input id="gallery-toggle-all" class="toggle-all" data-fe-node="6"
-                 data-fe-action="2" type="checkbox">
-          <label class="toggle-all-label" for="gallery-toggle-all">Mark all as complete</label>
+                 data-fe-action="2" type="checkbox" aria-label="Mark all as complete">
+          <label class="toggle-all-label" for="gallery-toggle-all" title="Mark all as complete">⌄</label>
           <ul class="todo-list" data-fe-node="3"></ul>
         </section>
         <footer class="footer" data-fe-node="2" hidden>
@@ -200,6 +206,7 @@
             <div class="view">
               <input class="toggle" data-fe-node="10" data-fe-action="10" type="checkbox">
               <label data-fe-node="11" data-fe-action="11"></label>
+              <button class="edit-button" data-fe-action="14" aria-label="Edit todo" title="Edit">✎</button>
               <button class="destroy" data-fe-action="12" aria-label="Delete todo"></button>
             </div>
             <input class="edit" data-fe-node="13" data-fe-action="13">

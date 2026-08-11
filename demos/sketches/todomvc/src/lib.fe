@@ -29,6 +29,7 @@ const ACTION_TOGGLE: u32 = 10
 const ACTION_EDIT: u32 = 11
 const ACTION_DESTROY: u32 = 12
 const ACTION_EDIT_INPUT: u32 = 13
+const ACTION_EDIT_BUTTON: u32 = 14
 
 // Fe-declared node/template identities consumed by ComponentWriter.
 const NODE_MAIN: u32 = 1
@@ -322,7 +323,9 @@ actor TodoApp {
                                             count = count - 1
                                             if editing == event.key { editing = 0 }
                                         } else {
-                                            if event.target == ACTION_EDIT && event.detail >= 2 {
+                                            if (event.target == ACTION_EDIT && event.detail >= 2)
+                                                || event.target == ACTION_EDIT_BUTTON
+                                            {
                                                 draft_len = copy_text(
                                                     destination: draft,
                                                     capacity: draft_capacity,
@@ -343,11 +346,15 @@ actor TodoApp {
             ComponentEventKind::Change => {
                 if connected {
                     if event.target == ACTION_TOGGLE_ALL {
-                        let make_completed = active_count(todos: todos) != 0
+                        let completion_word: u32 = if active_count(todos: todos) != 0 { 1 } else { 0 }
                         let mut index: u32 = 0
                         while index < MAX_TODOS {
                             if occupied(todos: todos, index: index) {
-                                set_completed(todos: todos, index: index, value: make_completed)
+                                write_word(
+                                    ptr: todos,
+                                    index: slot_offset(index: index) + 8,
+                                    value: completion_word,
+                                )
                             }
                             index = index + 1
                         }

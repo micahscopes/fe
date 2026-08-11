@@ -215,6 +215,23 @@ try {
     active: document.querySelector(".todo-count strong").textContent,
   })), { titles: ["alpha", "βeta 🌍"], keys: ["1", "2"], active: "2" });
 
+  await page.click(".toggle-all-label");
+  assert.deepEqual(await page.evaluate(() => ({
+    completed: Array.from(document.querySelectorAll(".todo-list > li"), node =>
+      node.classList.contains("completed")),
+    checked: Array.from(document.querySelectorAll(".todo-list .toggle"), node => node.checked),
+    master: document.querySelector(".toggle-all").checked,
+    active: document.querySelector(".todo-count strong").textContent,
+  })), { completed: [true, true], checked: [true, true], master: true, active: "0" });
+  await page.click(".toggle-all-label");
+  assert.deepEqual(await page.evaluate(() => ({
+    completed: Array.from(document.querySelectorAll(".todo-list > li"), node =>
+      node.classList.contains("completed")),
+    checked: Array.from(document.querySelectorAll(".todo-list .toggle"), node => node.checked),
+    master: document.querySelector(".toggle-all").checked,
+    active: document.querySelector(".todo-count strong").textContent,
+  })), { completed: [false, false], checked: [false, false], master: false, active: "2" });
+
   await page.evaluate(() => {
     // Row two remains projected when the active filter removes completed row
     // one, so its identity must survive the keyed reconciliation.
@@ -237,7 +254,7 @@ try {
     Array.from(document.querySelectorAll(".todo-list > li"), node => node.dataset.feKey)
   ), ["1", "2"]);
 
-  await page.click('[data-fe-key="1"] label', { count: 2 });
+  await page.click('[data-fe-key="1"] .edit-button');
   assert.deepEqual(await page.evaluate(() => ({
     editing: document.querySelector('[data-fe-key="1"]').classList.contains("editing"),
     focused: document.activeElement === document.querySelector('[data-fe-key="1"] .edit'),
