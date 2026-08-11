@@ -1,10 +1,10 @@
 {
   "artifacts": {
     "canonical_adapters": [],
-    "wasm": "fe-render-fba6784d50e89ef1.wasm",
-    "wasm_bytes": 1366,
-    "wgsl": "fe-render-a5517872fee7a2ab.wgsl",
-    "wgsl_bytes": 8117
+    "wasm": "fe-render-f37f4cecdbea9816.wasm",
+    "wasm_bytes": 948,
+    "wgsl": "fe-render-cd19975c11152900.wgsl",
+    "wgsl_bytes": 5585
   },
   "browser_runtime": null,
   "canonical_interface": null,
@@ -12,51 +12,6 @@
     "embedded": false,
     "omission_reason": "canonical interface was not requested",
     "policy": "disabled"
-  },
-  "control": {
-    "args": [
-      {
-        "axis": "x",
-        "source": "drag"
-      },
-      {
-        "axis": "y",
-        "source": "drag"
-      },
-      {
-        "source": "wheel"
-      },
-      {
-        "axis": "x",
-        "source": "pointer"
-      },
-      {
-        "axis": "y",
-        "source": "pointer"
-      },
-      {
-        "name": "lambda",
-        "source": "state"
-      },
-      {
-        "name": "theta",
-        "source": "state"
-      },
-      {
-        "name": "zoom",
-        "source": "state"
-      },
-      {
-        "name": "res",
-        "source": "state"
-      }
-    ],
-    "export": "update_view",
-    "result": [
-      "lambda",
-      "theta",
-      "zoom"
-    ]
   },
   "layout": {
     "bindings": [
@@ -67,24 +22,24 @@
         "members": [
           {
             "arg_index": 2,
-            "doc": "Pencil parameter: [0, 1] sweeps sphere -> sphere -> radical plane.",
-            "name": "lambda",
+            "doc": "Advances the animation; `zoom` and `warp` are exposed for the page.",
+            "name": "time",
             "offset": 0,
             "scalar": "f32",
             "width": 4
           },
           {
             "arg_index": 3,
-            "doc": "Rotation of the generator axis in the slice plane.",
-            "name": "theta",
+            "doc": null,
+            "name": "zoom",
             "offset": 4,
             "scalar": "f32",
             "width": 4
           },
           {
             "arg_index": 4,
-            "doc": "Half-extent of the visible slice in world units.",
-            "name": "zoom",
+            "doc": null,
+            "name": "warp",
             "offset": 8,
             "scalar": "f32",
             "width": 4
@@ -141,24 +96,24 @@
             "members": [
               {
                 "arg_index": 2,
-                "doc": "Pencil parameter: [0, 1] sweeps sphere -> sphere -> radical plane.",
-                "name": "lambda",
+                "doc": "Advances the animation; `zoom` and `warp` are exposed for the page.",
+                "name": "time",
                 "offset": 0,
                 "scalar": "f32",
                 "width": 4
               },
               {
                 "arg_index": 3,
-                "doc": "Rotation of the generator axis in the slice plane.",
-                "name": "theta",
+                "doc": null,
+                "name": "zoom",
                 "offset": 4,
                 "scalar": "f32",
                 "width": 4
               },
               {
                 "arg_index": 4,
-                "doc": "Half-extent of the visible slice in world units.",
-                "name": "zoom",
+                "doc": null,
+                "name": "warp",
                 "offset": 8,
                 "scalar": "f32",
                 "width": 4
@@ -204,9 +159,9 @@
           0
         ]
       },
-      "shader": "fe-render-a5517872fee7a2ab.wgsl",
-      "shader_bytes": 8117,
-      "source_entry": "shade"
+      "shader": "fe-render-cd19975c11152900.wgsl",
+      "shader_bytes": 5585,
+      "source_entry": "plasma"
     }
   ],
   "protocol": "fe-web-bundle",
@@ -214,34 +169,24 @@
   "provenance": {
     "authored_sources": [
       {
-        "id": "demos/sketches/cga3d/fe.toml",
-        "kind": "fe_manifest",
-        "sha256": "a48018fab7bb3cc436bc6723462f25db69246e3d8fb1cc2c1ed07be533cb97f2"
-      },
-      {
-        "id": "demos/sketches/cga3d/src/lib.fe",
-        "kind": "fe",
-        "sha256": "2260286a6b624a34d2512d3bc3014e9062210ee840ca42c5a5f06bf772f935de"
-      },
-      {
-        "id": "demos/sketches/fmath/fe.toml",
+        "id": "fmath/fe.toml",
         "kind": "fe_manifest",
         "sha256": "1bb68ed27a9ae6ba289a949ca67500ebf92f8f21461e4a922b43931b9d98b0c0"
       },
       {
-        "id": "demos/sketches/fmath/src/lib.fe",
+        "id": "fmath/src/lib.fe",
         "kind": "fe",
         "sha256": "c4221532aabf2a9b416d68f18023faaa3edfe0b5652c704b0b4f82401491e31c"
       },
       {
-        "id": "ingots/sparse_clifford/fe.toml",
+        "id": "plasma/fe.toml",
         "kind": "fe_manifest",
-        "sha256": "86dbfce53a6b656e590a36f9624d2bbfe9222e13299d07cefef340a284a191ed"
+        "sha256": "22aa43476bed75e280ec9ae457cc95277b50559e656f090520ee682527c74554"
       },
       {
-        "id": "ingots/sparse_clifford/src/lib.fe",
+        "id": "plasma/src/lib.fe",
         "kind": "fe",
-        "sha256": "bc75b3743ca9c2c373d06253625d4ae97de359c4d039865e30a4776abc7aa18e"
+        "sha256": "56ad75826ad961880d7eceddc186883c3b1e19dda45c504bea6686edfa3d9964"
       }
     ],
     "compiler": "fe",
@@ -280,10 +225,10 @@
         "sha256": "0432c50d08e3111f05fe86e61254176e5ce821b9dfd3c0092cfedbf4a1a2a453"
       }
     ],
-    "source_id": "cga3d"
+    "source_id": "plasma"
   },
   "resources": [],
-  "source_entry": "shade",
+  "source_entry": "plasma",
   "surface": {
     "activate": "pointer",
     "extent": {
@@ -294,28 +239,26 @@
     },
     "params": [
       {
-        "doc": "Pencil parameter: [0, 1] sweeps sphere -> sphere -> radical plane.",
-        "init": 0.15,
-        "kind": "unit",
-        "max": 1.0,
-        "min": 0.0,
-        "name": "lambda"
-      },
-      {
-        "doc": "Rotation of the generator axis in the slice plane.",
-        "init": 0.6,
-        "kind": "angle",
-        "max": 6.2831855,
-        "min": 0.0,
-        "name": "theta"
-      },
-      {
-        "doc": "Half-extent of the visible slice in world units.",
-        "init": 1.6,
+        "doc": "Advances the animation; `zoom` and `warp` are exposed for the page.",
+        "init": 0.0,
         "kind": "range",
-        "max": 4.0,
-        "min": 0.5,
+        "max": 20.0,
+        "min": 0.0,
+        "name": "time"
+      },
+      {
+        "init": 3.0,
+        "kind": "range",
+        "max": 8.0,
+        "min": 1.0,
         "name": "zoom"
+      },
+      {
+        "init": 0.8,
+        "kind": "range",
+        "max": 2.0,
+        "min": 0.0,
+        "name": "warp"
       },
       {
         "doc": "Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).",

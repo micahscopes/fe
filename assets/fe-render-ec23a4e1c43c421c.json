@@ -1,8 +1,8 @@
 {
   "artifacts": {
     "canonical_adapters": [],
-    "wasm": "fe-render-1d0b759ef0917387.wasm",
-    "wasm_bytes": 2323,
+    "wasm": "fe-render-7307e336a6d219e8.wasm",
+    "wasm_bytes": 2391,
     "wgsl": "fe-render-c3f557cbc432a6ac.wgsl",
     "wgsl_bytes": 25595
   },
@@ -12,51 +12,6 @@
     "embedded": false,
     "omission_reason": "canonical interface was not requested",
     "policy": "disabled"
-  },
-  "control": {
-    "args": [
-      {
-        "axis": "x",
-        "source": "drag"
-      },
-      {
-        "axis": "y",
-        "source": "drag"
-      },
-      {
-        "source": "wheel"
-      },
-      {
-        "axis": "x",
-        "source": "pointer"
-      },
-      {
-        "axis": "y",
-        "source": "pointer"
-      },
-      {
-        "name": "sweep",
-        "source": "state"
-      },
-      {
-        "name": "spin",
-        "source": "state"
-      },
-      {
-        "name": "zoom",
-        "source": "state"
-      },
-      {
-        "name": "res",
-        "source": "state"
-      }
-    ],
-    "export": "update_view",
-    "result": [
-      "sweep",
-      "spin",
-      "zoom"
-    ]
   },
   "layout": {
     "bindings": [
@@ -221,7 +176,7 @@
       {
         "id": "demos/sketches/desargues/src/lib.fe",
         "kind": "fe",
-        "sha256": "b8ee8672f709e108ad37459c20f13b5853a1ba1b0d4f5b5ba2ffd28de2e07cf3"
+        "sha256": "508f713c16c1c5936ae2bfe79a00d163eaee460140c62da7cf630bc423752494"
       },
       {
         "id": "demos/sketches/fmath/fe.toml",

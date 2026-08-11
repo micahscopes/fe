@@ -11,8 +11,8 @@
 //! Software rendering (lavapipe/SwiftShader) in the sandbox; no performance or
 //! parallelism claim (VISION 3.1).
 
-use std::webgpu::{FragmentSurface, GpuProgram, UpdateSurface, WebGpuBackend}
-use std::web::view::{Extent, Param, Surface}
+use std::webgpu::{FragmentSurface, GpuProgram, LatestPerFrame, SurfaceTransition, WebGpuBackend}
+use std::web::view::{Extent, Param, Surface, SurfaceEvent}
 use fmath::{from_i32, palette, sin, sqrt}
 
 fn clamp_control(_ value: f32, _ lower: f32, _ upper: f32) -> f32 {
@@ -34,6 +34,13 @@ struct PlasmaParams {
     zoom: Param,
     warp: Param,
     res: Param,
+}
+
+struct PlasmaViewState {
+    time: f32,
+    zoom: f32,
+    warp: f32,
+    res: f32,
 }
 
 actor PlasmaSurface uses (GpuProgram<WebGpuBackend>) {
@@ -59,13 +66,15 @@ actor PlasmaSurface uses (GpuProgram<WebGpuBackend>) {
     }
 
     /// Drag changes phase and radial warp; wheel changes spatial scale.
-    fn update_view(self, dx: f32, dy: f32, dzoom: f32, mx: f32, my: f32)
-        -> (f32, f32, f32) uses (UpdateSurface)
+    fn navigate(self, event: own SurfaceEvent) -> PlasmaViewState
+        uses (SurfaceTransition, LatestPerFrame)
     {
-        let time: f32 = clamp_control(self.time + dx * 0.025, 0.0, 20.0)
-        let zoom: f32 = clamp_control(wheel_zoom(self.zoom, dzoom), 1.0, 8.0)
-        let warp: f32 = clamp_control(self.warp + dy * 0.005, 0.0, 2.0)
-        (time, zoom, warp)
+        PlasmaViewState {
+            time: clamp_control(self.time + event.delta_x * 0.025, 0.0, 20.0),
+            zoom: clamp_control(wheel_zoom(self.zoom, event.wheel_delta), 1.0, 8.0),
+            warp: clamp_control(self.warp + event.delta_y * 0.005, 0.0, 2.0),
+            res: event.width,
+        }
     }
 
     /// Pixel coordinate in, packed RGBA8 word out. The uniform record is the

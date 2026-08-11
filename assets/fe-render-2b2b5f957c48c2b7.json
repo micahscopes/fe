@@ -1,8 +1,8 @@
 {
   "artifacts": {
     "canonical_adapters": [],
-    "wasm": "fe-render-d6581023e153424c.wasm",
-    "wasm_bytes": 1480,
+    "wasm": "fe-render-8674521f81aab0b5.wasm",
+    "wasm_bytes": 1548,
     "wgsl": "fe-render-52a350d9c877ffbe.wgsl",
     "wgsl_bytes": 8542
   },
@@ -12,51 +12,6 @@
     "embedded": false,
     "omission_reason": "canonical interface was not requested",
     "policy": "disabled"
-  },
-  "control": {
-    "args": [
-      {
-        "axis": "x",
-        "source": "drag"
-      },
-      {
-        "axis": "y",
-        "source": "drag"
-      },
-      {
-        "source": "wheel"
-      },
-      {
-        "axis": "x",
-        "source": "pointer"
-      },
-      {
-        "axis": "y",
-        "source": "pointer"
-      },
-      {
-        "name": "lambda",
-        "source": "state"
-      },
-      {
-        "name": "theta",
-        "source": "state"
-      },
-      {
-        "name": "zoom",
-        "source": "state"
-      },
-      {
-        "name": "res",
-        "source": "state"
-      }
-    ],
-    "export": "update_view",
-    "result": [
-      "lambda",
-      "theta",
-      "zoom"
-    ]
   },
   "layout": {
     "bindings": [
@@ -231,7 +186,7 @@
       {
         "id": "demos/sketches/qcga/src/lib.fe",
         "kind": "fe",
-        "sha256": "aa921371a5a6b658be5623cc6a2b2abce5ad17625020a004b7cba4455a15ba5b"
+        "sha256": "d6e78628642ebe341931beb33b0cc69e217522b02b51e6abd2b20f463d5ecd95"
       },
       {
         "id": "ingots/sparse_clifford/fe.toml",

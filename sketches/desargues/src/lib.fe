@@ -32,12 +32,12 @@
 //!     fe web build demos/sketches/desargues --out <dir>
 
 use core::marker::Copy
-use std::webgpu::{FragmentSurface, GpuProgram, UpdateSurface, WebGpuBackend}
+use std::webgpu::{FragmentSurface, GpuProgram, LatestPerFrame, SurfaceTransition, WebGpuBackend}
 use gaplay::{
     DESA_FB, DESA_FC, Line, Point, desa_a, desa_b, desa_c, desa_o, desargues_image,
     join, line_eval, meet, point_world_x, point_world_y,
 }
-use std::web::view::{Extent, Param, Surface}
+use std::web::view::{Extent, Param, Surface, SurfaceEvent}
 use fmath::{abs, clamp01, cos, from_i32, rgba, sin, smoothstep, sqrt}
 
 fn clamp_control(_ value: f32, _ lower: f32, _ upper: f32) -> f32 {
@@ -82,6 +82,13 @@ struct DesarguesParams {
     res: Param,
 }
 
+struct DesarguesViewState {
+    sweep: f32,
+    spin: f32,
+    zoom: f32,
+    res: f32,
+}
+
 actor Desargues2d uses (GpuProgram<WebGpuBackend>) {
     /// Perspective sweep: slides the second triangle along the rays from O.
     sweep: f32,
@@ -107,13 +114,15 @@ actor Desargues2d uses (GpuProgram<WebGpuBackend>) {
     }
 
     /// Drag reconfigures and rotates the theorem; wheel changes view scale.
-    fn update_view(self, dx: f32, dy: f32, dzoom: f32, mx: f32, my: f32)
-        -> (f32, f32, f32) uses (UpdateSurface)
+    fn navigate(self, event: own SurfaceEvent) -> DesarguesViewState
+        uses (SurfaceTransition, LatestPerFrame)
     {
-        let sweep: f32 = clamp_control(self.sweep + dx * 0.0025, 0.3, 1.6)
-        let spin: f32 = self.spin + dy * 0.01
-        let zoom: f32 = clamp_control(wheel_zoom(self.zoom, dzoom), 0.8, 5.0)
-        (sweep, spin, zoom)
+        DesarguesViewState {
+            sweep: clamp_control(self.sweep + event.delta_x * 0.0025, 0.3, 1.6),
+            spin: self.spin + event.delta_y * 0.01,
+            zoom: clamp_control(wheel_zoom(self.zoom, event.wheel_delta), 0.8, 5.0),
+            res: event.width,
+        }
     }
 
     fn shade(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
