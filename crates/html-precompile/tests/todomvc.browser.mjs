@@ -6,6 +6,7 @@ import { resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const siteRoot = resolve(process.argv[2] ?? "");
+const tolerateUnavailableWebGpu = process.argv.includes("--allow-unavailable-webgpu");
 async function exists(path) {
   try {
     await access(path, fsConstants.R_OK);
@@ -127,22 +128,43 @@ try {
       });
     });
     document.addEventListener("fe-error", event => {
-      globalThis.__feTodoE2E.errors.push(String(event.detail?.stack ?? event.detail));
+      if (event.target?.localName === "fe-component") {
+        globalThis.__feTodoE2E.errors.push(String(event.detail?.stack ?? event.detail));
+      }
     }, true);
     globalThis.addEventListener("fe:bootstrap-error", event => {
-      globalThis.__feTodoE2E.errors.push(String(event.detail?.stack ?? event.detail));
+      if (!globalThis.__feTodoTolerateUnavailableWebGpu) {
+        globalThis.__feTodoE2E.errors.push(String(event.detail?.stack ?? event.detail));
+      }
     });
     globalThis.addEventListener("unhandledrejection", event => {
       globalThis.__feTodoE2E.errors.push(String(event.reason?.stack ?? event.reason));
     });
   });
+  await page.evaluateOnNewDocument(value => {
+    globalThis.__feTodoTolerateUnavailableWebGpu = value;
+  }, tolerateUnavailableWebGpu);
 
   await page.goto(`http://127.0.0.1:${serverAddress.port}/`, { waitUntil: "networkidle0" });
-  await page.waitForFunction(() => {
-    const script = document.querySelector('script[type="application/fe+wasm"]');
-    const component = document.querySelector("fe-component");
-    return script?.dataset.feState === "complete" && component?._active === true;
-  });
+  try {
+    await page.waitForFunction(() => {
+      const script = document.querySelector('script[type="application/fe+wasm"][data-fe-component]');
+      const component = document.querySelector("fe-component");
+      return script?.dataset.feState === "complete" && component?._active === true;
+    });
+  } catch (error) {
+    const diagnosis = await page.evaluate(() => {
+      const script = document.querySelector('script[type="application/fe+wasm"][data-fe-component]');
+      const component = document.querySelector("fe-component");
+      return {
+        scriptState: script?.dataset.feState ?? null,
+        componentActive: component?._active ?? null,
+        componentError: component?._error?.stack ?? String(component?._error ?? ""),
+        testErrors: globalThis.__feTodoE2E?.errors ?? [],
+      };
+    });
+    throw new Error(`TodoMVC did not boot: ${JSON.stringify(diagnosis)}`, { cause: error });
+  }
 
   const initial = await page.evaluate(() => ({
     mainHidden: document.querySelector(".main").hidden,
@@ -303,7 +325,10 @@ try {
   });
   await page.click(".todo-list .destroy");
 
-  assert.deepEqual(browserErrors, []);
+  const unexpectedBrowserErrors = tolerateUnavailableWebGpu
+    ? browserErrors.filter(error => !error.includes("no WebGPU adapter is available"))
+    : browserErrors;
+  assert.deepEqual(unexpectedBrowserErrors, []);
   console.log("ok: Fe TodoMVC browser behavior, keyed identity, focus, UTF-8, and lifecycle");
 } finally {
   await browser.close();

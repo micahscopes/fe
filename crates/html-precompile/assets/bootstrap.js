@@ -651,11 +651,19 @@ async function run(element) {
 }
 
 export async function bootFeArtifacts(root = document) {
-  const results = [];
-  for (const element of root.querySelectorAll('script[type="application/fe+wasm"]')) {
-    results.push(await run(element));
+  const elements = Array.from(root.querySelectorAll('script[type="application/fe+wasm"]'));
+  const settled = await Promise.allSettled(elements.map(element => run(element)));
+  const failures = settled.filter(result => result.status === "rejected");
+  if (failures.length === 1) {
+    throw failures[0].reason;
   }
-  return results;
+  if (failures.length > 1) {
+    throw new AggregateError(
+      failures.map(result => result.reason),
+      `${failures.length} Fe artifacts failed to boot`,
+    );
+  }
+  return settled.map(result => result.value);
 }
 
 if (typeof document !== "undefined") {

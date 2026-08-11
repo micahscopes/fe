@@ -84,6 +84,53 @@ test("published bootstrap fails preflight before instantiation on unresolved imp
   assert.equal(script.lastEvent.type, "fe:error");
 });
 
+test("one failed artifact does not prevent sibling artifacts from booting", async () => {
+  const invalid = Uint8Array.from([
+    0, 97, 115, 109, 1, 0, 0, 0,
+    1, 4, 1, 96, 0, 0,
+    2, 11, 1, 3, 101, 110, 118, 3, 108, 111, 103, 0, 0,
+    7, 8, 1, 4, 109, 97, 105, 110, 0, 0,
+  ]);
+  const valid = Uint8Array.from([
+    0, 97, 115, 109, 1, 0, 0, 0,
+    1, 5, 1, 96, 0, 1, 127,
+    3, 2, 1, 0,
+    7, 8, 1, 4, 109, 97, 105, 110, 0, 0,
+    10, 6, 1, 4, 0, 65, 42, 11,
+  ]);
+  globalThis.fetch = async url => {
+    const href = String(url);
+    const bytes = href.includes("invalid") ? invalid : valid;
+    return href.endsWith(".json")
+      ? {
+          ok: true,
+          json: async () => ({
+            entry: "main",
+            artifacts: [{
+              kind: "wasm_module",
+              byte_len: bytes.byteLength,
+              sha256: await digest(bytes),
+            }],
+          }),
+        }
+      : { ok: true, arrayBuffer: async () => bytes.buffer };
+  };
+  const failed = element();
+  failed.dataset.feManifest = "assets/invalid.json";
+  failed.dataset.feSrc = "assets/invalid.wasm";
+  const sibling = element();
+  sibling.dataset.feManifest = "assets/valid.json";
+  sibling.dataset.feSrc = "assets/valid.wasm";
+
+  await assert.rejects(
+    bootFeArtifacts({ querySelectorAll: () => [failed, sibling] }),
+    /missing Wasm import: env\.log/,
+  );
+  assert.equal(failed.dataset.feState, "error");
+  assert.equal(sibling.dataset.feState, "complete");
+  assert.equal(sibling.feResult.value, 42);
+});
+
 test("bootstrap registers a selected adapter before real Wasm import preflight", async () => {
   const wasm = Uint8Array.from([
     0, 97, 115, 109, 1, 0, 0, 0,
