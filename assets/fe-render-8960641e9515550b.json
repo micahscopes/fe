@@ -1,10 +1,10 @@
 {
   "artifacts": {
     "canonical_adapters": [],
-    "wasm": "fe-render-b8d553a0d883826a.wasm",
-    "wasm_bytes": 1675,
-    "wgsl": "fe-render-74c532f0cacf3fd8.wgsl",
-    "wgsl_bytes": 2296
+    "wasm": "fe-render-40a04607726bcaf0.wasm",
+    "wasm_bytes": 5068,
+    "wgsl": "fe-render-50046cee2544d7ae.wgsl",
+    "wgsl_bytes": 83496
   },
   "browser_runtime": null,
   "canonical_interface": null,
@@ -23,7 +23,7 @@
           {
             "arg_index": 2,
             "doc": null,
-            "name": "gain",
+            "name": "yaw",
             "offset": 0,
             "scalar": "f32",
             "width": 4
@@ -31,7 +31,7 @@
           {
             "arg_index": 3,
             "doc": null,
-            "name": "bias",
+            "name": "pitch",
             "offset": 4,
             "scalar": "f32",
             "width": 4
@@ -39,16 +39,32 @@
           {
             "arg_index": 4,
             "doc": null,
-            "name": "cutoff",
+            "name": "distance",
             "offset": 8,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 5,
+            "doc": null,
+            "name": "morph",
+            "offset": 12,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 6,
+            "doc": null,
+            "name": "res",
+            "offset": 16,
             "scalar": "f32",
             "width": 4
           }
         ],
         "name": "input",
         "role": "input",
-        "span": 12,
-        "stride": 12
+        "span": 20,
+        "stride": 20
       }
     ],
     "builtin_inputs": [
@@ -89,7 +105,7 @@
               {
                 "arg_index": 2,
                 "doc": null,
-                "name": "gain",
+                "name": "yaw",
                 "offset": 0,
                 "scalar": "f32",
                 "width": 4
@@ -97,7 +113,7 @@
               {
                 "arg_index": 3,
                 "doc": null,
-                "name": "bias",
+                "name": "pitch",
                 "offset": 4,
                 "scalar": "f32",
                 "width": 4
@@ -105,16 +121,32 @@
               {
                 "arg_index": 4,
                 "doc": null,
-                "name": "cutoff",
+                "name": "distance",
                 "offset": 8,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 5,
+                "doc": null,
+                "name": "morph",
+                "offset": 12,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 6,
+                "doc": null,
+                "name": "res",
+                "offset": 16,
                 "scalar": "f32",
                 "width": 4
               }
             ],
             "name": "input",
             "role": "input",
-            "span": 12,
-            "stride": 12
+            "span": 20,
+            "stride": 20
           }
         ],
         "builtin_inputs": [
@@ -143,9 +175,9 @@
           0
         ]
       },
-      "shader": "fe-render-74c532f0cacf3fd8.wgsl",
-      "shader_bytes": 2296,
-      "source_entry": "shade"
+      "shader": "fe-render-50046cee2544d7ae.wgsl",
+      "shader_bytes": 83496,
+      "source_entry": "render"
     }
   ],
   "protocol": "fe-web-bundle",
@@ -153,14 +185,24 @@
   "provenance": {
     "authored_sources": [
       {
-        "id": "gradient/fe.toml",
+        "id": "fmath/fe.toml",
         "kind": "fe_manifest",
-        "sha256": "a42c78244e784d3a3d38091d547a234194c3febea3bb3b6a54e7ef768477d0d1"
+        "sha256": "1bb68ed27a9ae6ba289a949ca67500ebf92f8f21461e4a922b43931b9d98b0c0"
       },
       {
-        "id": "gradient/src/lib.fe",
+        "id": "fmath/src/lib.fe",
         "kind": "fe",
-        "sha256": "537ab4675be9c1d97e63189f04d696604722d4de2054c160c4b0ef67efd6ffe3"
+        "sha256": "24947e823177be0b57b757cbdde66ced2e1b8f97f3d8adb042cfd1d59290a0d6"
+      },
+      {
+        "id": "raymarch/fe.toml",
+        "kind": "fe_manifest",
+        "sha256": "2e11d5580b4b60e17d917b30b28c0f2190499008cb1f471744bae0dd5b238748"
+      },
+      {
+        "id": "raymarch/src/lib.fe",
+        "kind": "fe",
+        "sha256": "5c2b6bf0f21575109e10b2df0f6d3a8cdd0c641f5ae225ac00d013f1ae138127"
       }
     ],
     "compiler": "fe",
@@ -174,9 +216,9 @@
     ],
     "fixed_host": {
       "artifact": {
-        "bytes": 78407,
-        "path": "fe-render-runtime-2a9134262c9e6651.js",
-        "sha256": "2a9134262c9e665158852f2807c9dcb10cdf0cc3c7ae04b902f7c9b650218533"
+        "bytes": 80329,
+        "path": "fe-render-runtime-4120558c5a3aad0f.js",
+        "sha256": "4120558c5a3aad0f69266cdd7830629f0dcf8cdbec52af9f58c81807a8e97b52"
       },
       "contract": "fixed_versioned_demo_blind_browser_host",
       "name": "fe-render-runtime",
@@ -201,10 +243,10 @@
         "sha256": "fc68e26b829e1d6b79baa0e3cbd686a4903af0f544401674f4198ea035b37a28"
       }
     ],
-    "source_id": "gradient"
+    "source_id": "raymarch"
   },
   "resources": [],
-  "source_entry": "shade",
+  "source_entry": "render",
   "surface": {
     "activate": "pointer",
     "extent": {
@@ -215,25 +257,37 @@
     },
     "params": [
       {
-        "init": 0.12,
+        "init": 0.72,
+        "kind": "angle",
+        "max": 6.2831855,
+        "min": 0.0,
+        "name": "yaw"
+      },
+      {
+        "init": 0.28,
         "kind": "range",
+        "max": 1.05,
+        "min": -1.05,
+        "name": "pitch"
+      },
+      {
+        "init": 4.6,
+        "kind": "range",
+        "max": 8.0,
+        "min": 2.8,
+        "name": "distance"
+      },
+      {
+        "init": 0.58,
+        "kind": "unit",
         "max": 1.0,
         "min": 0.0,
-        "name": "gain"
+        "name": "morph"
       },
       {
-        "init": 0.0,
-        "kind": "range",
-        "max": 50.0,
-        "min": -50.0,
-        "name": "bias"
-      },
-      {
-        "init": 96.0,
-        "kind": "range",
-        "max": 255.0,
-        "min": 0.0,
-        "name": "cutoff"
+        "kind": "extent_x",
+        "name": "res",
+        "visible": false
       }
     ],
     "pipeline": {

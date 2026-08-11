@@ -34,6 +34,20 @@ const DEFAULT_SIZE = 256; // dispatch/canvas size for a v4 manifest with no decl
 const SURFACE_EVENT_STRIDE = 52;
 const MAX_SURFACE_EVENT_BATCH = Math.floor(0x7fffffff / SURFACE_EVENT_STRIDE);
 
+/** Fixed tags of the append-only Fe `SurfaceEventKind` enum. These are browser
+ * facts, not application policy; the generated Wasm wrapper validates the tag
+ * before authored Fe can observe it. */
+export const SurfaceEventKind = Object.freeze({
+  Gesture: 0,
+  ParamEdit: 1,
+  AnimationFrame: 2,
+  GpuComplete: 3,
+  Visible: 4,
+  Hidden: 5,
+  DeviceLost: 6,
+  DeviceRecovered: 7,
+});
+
 /** Write the fixed DFS layout of untouched `std::web::SurfaceEvent` records.
  * This is transport only: the compiler-lowered Fe scheduling wrapper owns
  * coalescing and calls the authored transition inside Wasm. */
@@ -1190,6 +1204,10 @@ export class FeSurfaceElement extends HTMLElement {
     if (this._fsm === "cold") await this._readyPromise.catch(() => {});
     if (this._fsm === "error") return;
 
+    // Lifecycle policy may alter resident Fe state before the first live
+    // presentation. The host contributes only the standards-derived fact.
+    this._deliverSurfaceBoundary(SurfaceEventKind.Visible);
+
     if (this._adoptedCanvas) {
       // Already presenting (webgpu, kept configured) or cheap to re-run
       // (wasm-2d); "live" is a state/event transition here, not new work.
@@ -1261,6 +1279,7 @@ export class FeSurfaceElement extends HTMLElement {
   async _suspend() {
     await this._capturePosterFromLive();
     this._fsm = "suspended";
+    this._deliverSurfaceBoundary(SurfaceEventKind.Hidden);
     this._dispatch("fe-statechange", { state: "suspended" });
   }
 
@@ -1332,6 +1351,7 @@ export class FeSurfaceElement extends HTMLElement {
 
   async _onDeviceLoss(freshGpu) {
     if (this._mode !== "webgpu") return; // wasm-2d surfaces hold no device resources.
+    this._deliverSurfaceBoundary(SurfaceEventKind.DeviceLost);
     this._gpu = null;
     if (this._liveContext) {
       try {
@@ -1374,6 +1394,7 @@ export class FeSurfaceElement extends HTMLElement {
       return;
     }
     this._fsm = "ready"; // force `_goLive` back through the real pipeline-build path.
+    this._deliverSurfaceBoundary(SurfaceEventKind.DeviceRecovered);
     await this._goLive();
     this._dispatch("fe-statechange", { state: this._fsm, reason: "device-recovered" });
   }
@@ -1524,7 +1545,7 @@ export class FeSurfaceElement extends HTMLElement {
       ...raw,
       width: this._backingWidth,
       height: this._backingHeight,
-      eventKind: 0,
+      eventKind: SurfaceEventKind.Gesture,
       paramIndex: 0,
       paramValue: 0,
     };
@@ -1641,7 +1662,7 @@ export class FeSurfaceElement extends HTMLElement {
         timestamp: globalThis.performance?.now?.() ?? 0,
         width: this._backingWidth,
         height: this._backingHeight,
-        eventKind: 1,
+        eventKind: SurfaceEventKind.ParamEdit,
         paramIndex: index,
         paramValue: value,
       };
@@ -1698,6 +1719,37 @@ export class FeSurfaceElement extends HTMLElement {
     return this._surfaceReply(reply);
   }
 
+  /** Deliver one standards presentation/lifecycle boundary to the same
+   * resident Fe actor. Any input collected since the prior boundary remains
+   * raw in memory and is coalesced by generated Wasm; the boundary identity is
+   * the newest typed fact. This keeps heterogeneous clock facts out of a JSON
+   * protocol and preserves one host-to-Wasm frame call. */
+  _deliverSurfaceBoundary(kind, timestamp = globalThis.performance?.now?.() ?? 0) {
+    if (!this._surfaceTransitionKernel) return null;
+    const event = {
+      mx: 0,
+      my: 0,
+      dx: 0,
+      dy: 0,
+      wheelDelta: 0,
+      wheelMode: 0,
+      buttons: 0,
+      timestamp,
+      width: this._backingWidth,
+      height: this._backingHeight,
+      eventKind: kind,
+      paramIndex: 0,
+      paramValue: 0,
+    };
+    const next = this._surfaceTransitionSchedule === "latest_per_frame"
+      ? this._runSurfaceFrame([...this._pendingSurfaceEvents.splice(0), event])
+      : this._runSurfaceTransition(event);
+    if (!next) return null;
+    this._uniforms = next;
+    this._refreshControlValues();
+    return next;
+  }
+
   _surfaceReply(reply) {
     const next = Array.isArray(reply) ? reply : [reply];
     if (next.length !== this._uniforms.length) {
@@ -1729,28 +1781,26 @@ export class FeSurfaceElement extends HTMLElement {
 
   _scheduleGestureFrame() {
     if (this._gestureFrame !== null || this._gesturePresenting || !this._gestureDirty) return;
-    this._gestureFrame = requestAnimationFrame(() => {
+    this._gestureFrame = requestAnimationFrame((timestamp) => {
       this._gestureFrame = null;
-      void this._flushGestureFrame();
+      void this._flushGestureFrame(timestamp);
     });
   }
 
-  async _flushGestureFrame() {
+  async _flushGestureFrame(timestamp = globalThis.performance?.now?.() ?? 0) {
     if (this._fsm !== "live" || !this._gestureDirty || this._gesturePresenting) return;
     this._gestureDirty = false;
     this._gesturePresenting = true;
     try {
-      const pending = this._pendingSurfaceEvents;
-      this._pendingSurfaceEvents = [];
-      if (pending.length > 0 && this._surfaceTransitionKernel) {
-        const next = this._runSurfaceFrame(pending);
-        if (!next) return;
-        this._uniforms = next;
-        this._refreshControlValues();
+      if (this._surfaceTransitionKernel) {
+        if (!this._deliverSurfaceBoundary(SurfaceEventKind.AnimationFrame, timestamp)) return;
       }
       this._render();
       const queue = this._mode === "webgpu" ? this._gpu?.device?.queue : null;
-      if (queue?.onSubmittedWorkDone) await queue.onSubmittedWorkDone();
+      if (queue?.onSubmittedWorkDone) {
+        await queue.onSubmittedWorkDone();
+        this._deliverSurfaceBoundary(SurfaceEventKind.GpuComplete);
+      }
     } finally {
       this._gesturePresenting = false;
       if (this._fsm === "live" && this._gestureDirty) this._scheduleGestureFrame();
