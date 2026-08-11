@@ -1,0 +1,299 @@
+//! Typed, const-projectable page composition.
+//!
+//! A page actor returns `Page<N>` from a behavior using `PageComposition`.
+//! Build tooling evaluates that behavior and realizes this closed operation
+//! vocabulary through an HTML5 parser before discovering render/component
+//! programs. Application structure and artifact choices therefore live in Fe;
+//! HTML syntax, escaping, and standards validation remain fixed host concerns.
+
+pub use core::actor::PageComposition
+use core::marker::Copy
+use core::panic
+
+/// CTFE-only page text assembled from ordinary inline Fe string words. This
+/// keeps authored code within Fe's current 31-byte runtime string limit while
+/// allowing build-time page labels and URLs to span several readable pieces.
+pub struct PageText {
+    first: String<31>,
+    second: String<31>,
+    third: String<31>,
+    length: u32,
+}
+
+impl Copy for PageText {}
+
+impl PageText {
+    pub const fn one(value: String<31>) -> Self {
+        Self { first: value, second: "", third: "", length: 1 }
+    }
+
+    pub const fn two(first: String<31>, second: String<31>) -> Self {
+        Self { first: first, second: second, third: "", length: 2 }
+    }
+
+    pub const fn three(first: String<31>, second: String<31>, third: String<31>) -> Self {
+        Self { first: first, second: second, third: third, length: 3 }
+    }
+
+    const fn empty() -> Self {
+        Self { first: "", second: "", third: "", length: 0 }
+    }
+}
+
+/// Standards-derived element vocabulary admitted by the first page slice.
+/// It is intentionally small and append-only; adding a normal element does not
+/// add application knowledge to the host.
+pub enum PageElement {
+    Header,
+    Main,
+    Div,
+    Figure,
+    Figcaption,
+    Span,
+    Bold,
+    Paragraph,
+    Code,
+    Section,
+    Footer,
+    Heading1,
+    Heading2,
+    Input,
+    Label,
+    UnorderedList,
+    ListItem,
+    Button,
+    Template,
+    Strong,
+    Pre,
+    Anchor,
+    FeComponent,
+}
+
+impl Copy for PageElement {}
+
+/// Standard attributes plus the fixed Fe host's declarative identities.
+pub enum PageAttributeKind {
+    Id,
+    Class,
+    Role,
+    AriaLabel,
+    AriaModal,
+    InputType,
+    For,
+    Title,
+    Placeholder,
+    Autocomplete,
+    Target,
+    Rel,
+    Href,
+    Hidden,
+    Action,
+    Node,
+    View,
+    Template,
+    ClassToken,
+    Publish,
+}
+
+impl Copy for PageAttributeKind {}
+
+/// One typed attribute operation. Fields are private so constructors establish
+/// which payload lane is meaningful for each kind.
+pub struct PageAttribute {
+    kind: PageAttributeKind,
+    text: PageText,
+    number: u32,
+    enabled: bool,
+}
+
+impl Copy for PageAttribute {}
+
+impl PageAttribute {
+    const fn text_attr(kind: PageAttributeKind, text: PageText) -> Self {
+        Self { kind: kind, text: text, number: 0, enabled: false }
+    }
+
+    const fn number_attr(kind: PageAttributeKind, number: u32) -> Self {
+        Self { kind: kind, text: PageText::empty(), number: number, enabled: false }
+    }
+
+    pub const fn id(value: String<31>) -> Self { Self::text_attr(PageAttributeKind::Id, PageText::one(value)) }
+    pub const fn class(value: String<31>) -> Self { Self::text_attr(PageAttributeKind::Class, PageText::one(value)) }
+    pub const fn role(value: String<31>) -> Self { Self::text_attr(PageAttributeKind::Role, PageText::one(value)) }
+    pub const fn aria_label(value: String<31>) -> Self { Self::text_attr(PageAttributeKind::AriaLabel, PageText::one(value)) }
+    pub const fn input_type(value: String<31>) -> Self { Self::text_attr(PageAttributeKind::InputType, PageText::one(value)) }
+    pub const fn for_id(value: String<31>) -> Self { Self::text_attr(PageAttributeKind::For, PageText::one(value)) }
+    pub const fn title(value: String<31>) -> Self { Self::text_attr(PageAttributeKind::Title, PageText::one(value)) }
+    pub const fn placeholder(value: String<31>) -> Self { Self::text_attr(PageAttributeKind::Placeholder, PageText::one(value)) }
+    pub const fn autocomplete(value: String<31>) -> Self { Self::text_attr(PageAttributeKind::Autocomplete, PageText::one(value)) }
+    pub const fn target(value: String<31>) -> Self { Self::text_attr(PageAttributeKind::Target, PageText::one(value)) }
+    pub const fn rel(value: String<31>) -> Self { Self::text_attr(PageAttributeKind::Rel, PageText::one(value)) }
+    pub const fn href(value: PageText) -> Self { Self::text_attr(PageAttributeKind::Href, value) }
+    pub const fn aria_modal() -> Self {
+        Self { kind: PageAttributeKind::AriaModal, text: PageText::empty(), number: 0, enabled: true }
+    }
+    pub const fn hidden() -> Self {
+        Self { kind: PageAttributeKind::Hidden, text: PageText::empty(), number: 0, enabled: true }
+    }
+    pub const fn action(value: u32) -> Self { Self::number_attr(PageAttributeKind::Action, value) }
+    pub const fn node(value: u32) -> Self { Self::number_attr(PageAttributeKind::Node, value) }
+    pub const fn view(value: u32) -> Self { Self::number_attr(PageAttributeKind::View, value) }
+    pub const fn template(value: u32) -> Self { Self::number_attr(PageAttributeKind::Template, value) }
+    pub const fn class_token(slot: u32, value: String<31>) -> Self {
+        Self { kind: PageAttributeKind::ClassToken, text: PageText::one(value), number: slot, enabled: false }
+    }
+    pub const fn publish() -> Self {
+        Self { kind: PageAttributeKind::Publish, text: PageText::empty(), number: 0, enabled: true }
+    }
+}
+
+/// One render program chosen by the Fe page. Empty `entry` requests the
+/// render actor's derived entry point.
+pub struct PageRender {
+    source: PageText,
+    entry: String<31>,
+    wgsl_action: u32,
+    wasm_action: u32,
+    manifest_action: u32,
+}
+
+impl Copy for PageRender {}
+
+/// One resident component program chosen by the Fe page.
+pub struct PageComponent {
+    source: PageText,
+    mount: String<31>,
+}
+
+impl Copy for PageComponent {}
+
+/// A balanced stream of typed page operations. Attributes apply to the most
+/// recently opened element and must precede its content. `Render` and
+/// `Component` are semantic leaf operations so artifact discovery never has
+/// to reverse-engineer application intent from arbitrary markup.
+pub enum PageOp {
+    Open(PageElement),
+    Attribute(PageAttribute),
+    Text(PageText),
+    Close,
+    Render(PageRender),
+    Component(PageComponent),
+}
+
+impl Copy for PageOp {}
+
+impl PageOp {
+    pub const fn open(element: PageElement) -> Self { Self::Open(element) }
+    pub const fn attribute(value: PageAttribute) -> Self { Self::Attribute(value) }
+    pub const fn text(value: PageText) -> Self { Self::Text(value) }
+    pub const fn close() -> Self { Self::Close }
+
+    pub const fn render(
+        source: PageText,
+        wgsl_action: u32,
+        wasm_action: u32,
+        manifest_action: u32,
+    ) -> Self {
+        Self::Render(PageRender {
+            source: source,
+            entry: "",
+            wgsl_action: wgsl_action,
+            wasm_action: wasm_action,
+            manifest_action: manifest_action,
+        })
+    }
+
+    pub const fn render_entry(
+        source: PageText,
+        entry: String<31>,
+        wgsl_action: u32,
+        wasm_action: u32,
+        manifest_action: u32,
+    ) -> Self {
+        Self::Render(PageRender {
+            source: source,
+            entry: entry,
+            wgsl_action: wgsl_action,
+            wasm_action: wasm_action,
+            manifest_action: manifest_action,
+        })
+    }
+
+    pub const fn component(source: PageText, mount: String<31>) -> Self {
+        Self::Component(PageComponent { source: source, mount: mount })
+    }
+}
+
+/// A complete static page projection. The theme is selected by ordinary HTML
+/// shell/CSS for now; `title` and every body operation are Fe-authored.
+pub struct Page<const N: usize> {
+    pub title: PageText,
+    pub length: usize,
+    pub body: [PageOp; N],
+}
+
+impl<const N: usize> Page<N> {
+    pub const fn exact(title: PageText, body: [PageOp; N]) -> Self {
+        Self { title: title, length: N, body: body }
+    }
+}
+
+/// Fe-side fluent construction with a statically bounded operation buffer.
+/// The compiler projects only `length` entries; unused capacity never reaches
+/// HTML or a runtime artifact.
+pub struct PageBuilder<const N: usize> {
+    body: [PageOp; N],
+    length: usize,
+}
+
+impl<const N: usize> PageBuilder<N> {
+    pub const fn new() -> Self {
+        Self { body: [PageOp::Close; N], length: 0 }
+    }
+
+    pub const fn push(self, operation: PageOp) -> Self {
+        if self.length >= N { panic() }
+        let mut body = self.body
+        body[self.length] = operation
+        Self { body: body, length: self.length + 1 }
+    }
+
+    pub const fn open(self, element: PageElement) -> Self {
+        self.push(operation: PageOp::open(element: element))
+    }
+
+    pub const fn attribute(self, value: PageAttribute) -> Self {
+        self.push(operation: PageOp::attribute(value: value))
+    }
+
+    pub const fn text(self, value: PageText) -> Self {
+        self.push(operation: PageOp::text(value: value))
+    }
+
+    pub const fn close(self) -> Self {
+        self.push(operation: PageOp::close())
+    }
+
+    pub const fn render(
+        self,
+        source: PageText,
+        wgsl_action: u32,
+        wasm_action: u32,
+        manifest_action: u32,
+    ) -> Self {
+        self.push(operation: PageOp::render(
+            source: source,
+            wgsl_action: wgsl_action,
+            wasm_action: wasm_action,
+            manifest_action: manifest_action,
+        ))
+    }
+
+    pub const fn component(self, source: PageText, mount: String<31>) -> Self {
+        self.push(operation: PageOp::component(source: source, mount: mount))
+    }
+
+    pub const fn finish(self, title: PageText) -> Page<N> {
+        Page { title: title, length: self.length, body: self.body }
+    }
+}

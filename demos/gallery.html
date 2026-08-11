@@ -1,9 +1,10 @@
 <!doctype html>
 <!--
   The canonical all-demos page. `fe web dev demos/gallery.html` compiles and
-  renders every sketch without authored browser JavaScript: inert `<script
-  type="application/fe">` elements name Fe render actors or resident component
-  actors, while the generated bootstrap and fixed, demo-blind hosts mount the
+  renders every sketch without authored browser JavaScript. One inert
+  `data-fe-page` script names the Fe page actor; its typed const projection
+  generates render/component declarations, captions, links, and DOM structure
+  before the generated bootstrap and fixed, demo-blind hosts mount the
   corresponding custom elements. The render host drives surface lifecycle
   (poster first, live on pointer intent, suspended off-viewport) while sharing a
   single WebGPU device across every tile (acquireSharedGpu). See
@@ -53,6 +54,7 @@
   .gallery-head { max-width: 1500px; margin: 0 auto 22px; }
   .gallery-head h1 { font-size: 16px; font-weight: 600; margin: 0 0 4px; color: #e6ecf7; letter-spacing: .02em; }
   .gallery-head p { margin: 0; color: #8a93a6; font-size: 12.5px; }
+  .gallery-head a { display: inline-block; margin-top: 8px; color: #91a7ca; font-size: 12.5px; }
   .gallery-head code { color: #b7c2d8; background: #171a21; padding: 1px 6px; border-radius: 4px; }
   .grid { max-width: 1500px; margin: 0 auto;
           display: grid; gap: 28px;
@@ -147,113 +149,7 @@
 </style>
 </head>
 <body>
-  <script type="application/fe" data-fe-src="sketches/source_inspector/src/lib.fe"
-          data-fe-component data-fe-mount="#gallery-shell"></script>
-  <fe-component id="gallery-shell" class="gallery-shell">
-  <header class="gallery-head">
-    <h1>fe web · gallery</h1>
-    <p>Fe-authored GPU, control, and resident component programs, with generated WGSL/Wasm hosted by fixed demo-blind browser adapters. Serve with <code>fe web dev demos/gallery.html</code>.</p>
-  </header>
-
-  <div class="grid">
-    <figure>
-      <figcaption><b>known color</b><span class="desc">typed compute → fragment resource</span><a href="sketches/known_color/src/lib.fe" data-fe-publish data-fe-action="100">source</a></figcaption>
-      <script type="application/fe" data-fe-src="sketches/known_color" data-fe-render data-fe-wgsl-action="101" data-fe-wasm-action="102" data-fe-manifest-action="103"></script>
-    </figure>
-    <figure>
-      <figcaption><b>rollcall pipeline</b><span class="desc">compute → private tree fold → fragment</span><a href="sketches/rollcall_pipeline/src/lib.fe" data-fe-publish data-fe-action="100">source</a></figcaption>
-      <script type="application/fe" data-fe-src="sketches/rollcall_pipeline" data-fe-render data-fe-wgsl-action="101" data-fe-wasm-action="102" data-fe-manifest-action="103"></script>
-    </figure>
-    <figure>
-      <figcaption><b>cga3d</b><span class="desc">sparse Clifford sphere pencil</span><a href="sketches/cga3d/src/lib.fe" data-fe-publish data-fe-action="100">source</a></figcaption>
-      <script type="application/fe" data-fe-src="sketches/cga3d" data-fe-render data-fe-wgsl-action="101" data-fe-wasm-action="102" data-fe-manifest-action="103"></script>
-    </figure>
-    <figure>
-      <figcaption><b>qcga</b><span class="desc">quadric conformal surface</span><a href="sketches/qcga/src/lib.fe" data-fe-publish data-fe-action="100">source</a></figcaption>
-      <script type="application/fe" data-fe-src="sketches/qcga" data-fe-render data-fe-wgsl-action="101" data-fe-wasm-action="102" data-fe-manifest-action="103"></script>
-    </figure>
-    <figure>
-      <figcaption><b>desargues</b><span class="desc">projective incidence</span><a href="sketches/desargues/src/lib.fe" data-fe-publish data-fe-action="100">source</a></figcaption>
-      <script type="application/fe" data-fe-src="sketches/desargues" data-fe-render data-fe-wgsl-action="101" data-fe-wasm-action="102" data-fe-manifest-action="103"></script>
-    </figure>
-    <figure>
-      <figcaption><b>plasma</b><span class="desc">branch-free field</span><a href="sketches/plasma/src/lib.fe" data-fe-publish data-fe-action="100">source</a></figcaption>
-      <script type="application/fe" data-fe-src="sketches/plasma" data-fe-render data-fe-wgsl-action="101" data-fe-wasm-action="102" data-fe-manifest-action="103"></script>
-    </figure>
-    <figure>
-      <figcaption><b>mandelbrot</b><span class="desc">escape-time set</span><a href="sketches/mandelbrot/src/lib.fe" data-fe-publish data-fe-action="100">source</a></figcaption>
-      <script type="application/fe" data-fe-src="sketches/mandelbrot" data-fe-render data-fe-wgsl-action="101" data-fe-wasm-action="102" data-fe-manifest-action="103"></script>
-    </figure>
-    <figure>
-      <figcaption><b>perturbation mandelbrot</b><span class="desc">Fixed reference → f32 delta pixels</span><a href="sketches/perturbational_mandelbrot/src/lib.fe" data-fe-publish data-fe-action="100">source</a></figcaption>
-      <script type="application/fe" data-fe-src="sketches/perturbational_mandelbrot" data-fe-render data-fe-wgsl-action="101" data-fe-wasm-action="102" data-fe-manifest-action="103"></script>
-    </figure>
-    <figure>
-      <figcaption><b>dec</b><span class="desc">discrete exterior calculus</span><a href="sketches/dec/src/lib.fe" data-fe-publish data-fe-action="100">source</a></figcaption>
-      <script type="application/fe" data-fe-src="sketches/dec" data-fe-render data-fe-wgsl-action="101" data-fe-wasm-action="102" data-fe-manifest-action="103"></script>
-    </figure>
-    <figure>
-      <figcaption><b>gradient</b><span class="desc">runtime-default surface</span><a href="sketches/gradient/src/lib.fe" data-fe-publish data-fe-action="100">source</a></figcaption>
-      <script type="application/fe" data-fe-src="sketches/gradient" data-fe-render data-fe-wgsl-action="101" data-fe-wasm-action="102" data-fe-manifest-action="103"></script>
-    </figure>
-    <figure>
-      <figcaption><b>TodoMVC</b><span class="desc">resident Fe state → keyed DOM effects</span><a href="sketches/todomvc/src/lib.fe" data-fe-publish data-fe-action="100">source</a></figcaption>
-      <script type="application/fe" data-fe-src="sketches/todomvc/src/lib.fe"
-              data-fe-component data-fe-mount="#gallery-todomvc"></script>
-      <fe-component id="gallery-todomvc" class="todo-app">
-        <h2 class="todo-heading">todos</h2>
-        <header>
-          <input class="new-todo" data-fe-node="5" data-fe-action="1"
-                 placeholder="What needs to be done?" autocomplete="off">
-        </header>
-        <section class="main" data-fe-node="1" hidden>
-          <input id="gallery-toggle-all" class="toggle-all" data-fe-node="6"
-                 data-fe-action="2" type="checkbox" aria-label="Mark all as complete">
-          <label class="toggle-all-label" for="gallery-toggle-all" title="Mark all as complete">⌄</label>
-          <ul class="todo-list" data-fe-node="3"></ul>
-        </section>
-        <footer class="footer" data-fe-node="2" hidden>
-          <span class="todo-count"><strong data-fe-node="4">0</strong> items left</span>
-          <ul class="filters">
-            <li><button data-fe-node="7" data-fe-action="4" data-fe-class-1="selected">All</button></li>
-            <li><button data-fe-node="8" data-fe-action="5" data-fe-class-1="selected">Active</button></li>
-            <li><button data-fe-node="9" data-fe-action="6" data-fe-class-1="selected">Completed</button></li>
-          </ul>
-          <button class="clear-completed" data-fe-action="3">Clear completed</button>
-        </footer>
-        <template data-fe-template="1">
-          <li data-fe-class-1="completed" data-fe-class-2="editing">
-            <div class="view">
-              <input class="toggle" data-fe-node="10" data-fe-action="10" type="checkbox">
-              <label data-fe-node="11" data-fe-action="11"></label>
-              <button class="edit-button" data-fe-action="14" aria-label="Edit todo" title="Edit">✎</button>
-              <button class="destroy" data-fe-action="12" aria-label="Delete todo"></button>
-            </div>
-            <input class="edit" data-fe-node="13" data-fe-action="13">
-          </li>
-        </template>
-      </fe-component>
-    </figure>
-  </div>
-
-  <section class="source-inspector" data-fe-view="0" hidden role="dialog" aria-modal="true"
-           aria-label="Source inspector">
-    <header class="inspector-head">
-      <span class="inspector-title" data-fe-view="5">Fe source</span>
-      <span class="inspector-title" data-fe-view="6">Compiler-generated WGSL</span>
-      <span class="inspector-title" data-fe-view="7">Compiler-generated Wasm</span>
-      <span class="inspector-title" data-fe-view="8">Transitional audit manifest</span>
-      <a class="raw" data-fe-node="102" target="_blank" rel="noopener">Raw</a>
-      <button class="close" data-fe-action="104" type="button" aria-label="Close">×</button>
-    </header>
-    <div class="inspector-body">
-      <p class="message" data-fe-view="3">Loading…</p>
-      <pre data-fe-view="1" data-fe-node="100"></pre>
-      <p class="message" data-fe-view="2">Compiled binary module · <strong data-fe-node="101">0</strong> bytes.</p>
-      <pre class="error" data-fe-view="4" data-fe-node="103"></pre>
-    </div>
-  </section>
-  </fe-component>
-
+  <script type="application/fe" data-fe-page
+          data-fe-src="sketches/gallery_page/src/lib.fe"></script>
 </body>
 </html>

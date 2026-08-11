@@ -19,6 +19,20 @@ use fe_compiler_protocol::{
 };
 use url::Url;
 
+pub use codegen::{
+    PageAttributeKind, PageElement, PageProjection, PageProjectionOp, ProjectedPageAttribute,
+    ProjectedPageComponent, ProjectedPageRender,
+};
+
+/// In-memory result of projecting a role-selected Fe page. This is a direct
+/// typed toolchain API, not a serialized runtime protocol or manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageProjectionResult {
+    pub diagnostics: Vec<Diagnostic>,
+    pub page: Option<PageProjection>,
+    pub source_dependencies: SourceDependencyInventory,
+}
+
 #[derive(Debug)]
 pub enum CompileFacadeError {
     Protocol(ProtocolError),
@@ -58,6 +72,26 @@ pub fn compile(request: &CompileRequest) -> Result<CompileResult, CompileFacadeE
         CompileTarget::Webgpu => compile_webgpu(request),
         _ => Err(CompileFacadeError::UnsupportedTarget(request.target)),
     }
+}
+
+/// CTFE-project one `PageComposition` actor behavior without producing a
+/// runtime module. HTML tooling realizes the returned typed operations through
+/// its standards parser before normal Fe program discovery.
+pub fn project_page(request: &CompileRequest) -> Result<PageProjectionResult, CompileFacadeError> {
+    request.validate()?;
+    let (db, root_file, diagnostics, has_error, source_dependencies) = compile_prologue(request)?;
+    let page = if has_error {
+        None
+    } else {
+        let top_mod = db.top_mod(root_file);
+        codegen::project_page(&db, top_mod)
+            .map_err(|error| CompileFacadeError::Backend(error.to_string()))?
+    };
+    Ok(PageProjectionResult {
+        diagnostics,
+        page,
+        source_dependencies,
+    })
 }
 
 /// Shared prologue: build the in-memory db from the request's virtual

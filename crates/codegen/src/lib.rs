@@ -6,6 +6,7 @@ pub mod dispatch;
 mod function_symbols;
 pub mod guest_callbacks;
 mod layout;
+mod page_projection;
 mod resident_actor;
 pub mod resumable_tasks;
 mod runtime_package;
@@ -29,6 +30,10 @@ pub use canonical_interface::{
 pub use dispatch::DispatchKind;
 pub use layout::{
     DISCRIMINANT_SIZE_BYTES, EVM_LAYOUT, Endianness, TargetDataLayout, WASM_LAYOUT, WORD_SIZE_BYTES,
+};
+pub use page_projection::{
+    PageAttributeKind, PageElement, PageProjection, PageProjectionError, PageProjectionOp,
+    ProjectedPageAttribute, ProjectedPageComponent, ProjectedPageRender, project_page,
 };
 pub use resident_actor::{
     RESIDENT_ACTOR_INITIALIZE_EXPORT, RESIDENT_ACTOR_PROJECT_EXPORT,

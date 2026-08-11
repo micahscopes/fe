@@ -13,7 +13,7 @@ pub use intrinsic::{contract_field_slot, size_of}
 pub use functional::{Fn, Functor, Applicative, Monad}
 pub use effect_ref::{AddressSpace, EffectHandle, EffectHandleMut, EffectRef, EffectRefMut, MemPtr, StaticSlot, StorPtr}
 pub use browser::{AllocatedBrowserBytes, BrowserBytes, BrowserLatin1String, BrowserList, BrowserPtr, BrowserString, BrowserUtf16String, HostEffect, MainThread, Worker, alloc_browser_bytes}
-pub use actor::{InitialState, ProjectState, ResidentTransition}
+pub use actor::{InitialState, PageComposition, ProjectState, ResidentTransition}
 pub use contracts::{self, *}
 pub use backend::{Backend, Supports, Global, Constant, Shared, Local}
 pub use atomic::Atomic

@@ -31,6 +31,10 @@ use url::Url;
 
 pub const SOURCE_SCRIPT_TYPE: &str = "application/fe";
 pub const ARTIFACT_SCRIPT_TYPE: &str = "application/fe+wasm";
+/// Marks a role-selected Fe page actor. Build tooling CTFE-projects its typed
+/// operation stream into the standards DOM before discovering render and
+/// resident programs; the page actor itself has no runtime Wasm artifact.
+pub const PAGE_SCRIPT_MARKER: &str = "data-fe-page";
 pub const BOOTSTRAP_MARKER: &str = "data-fe-bootstrap";
 pub const BOOTSTRAP_META_NAME: &str = "fe-bootstrap";
 /// Opt-in page policy used by the canonical gallery. It turns attribution from
@@ -128,6 +132,9 @@ pub struct PrecompileOutput {
     /// no script routed through the render lane. Folded into the development
     /// watch graph alongside `modules[].source_dependencies`.
     pub render_dependencies: Vec<SourceDependencyInventory>,
+    /// Structural dependency inventories contributed by const-projected Fe
+    /// page actors. Kept separate from render bundles for honest diagnostics.
+    pub page_dependencies: Vec<SourceDependencyInventory>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -555,6 +562,7 @@ impl DevelopmentPrecompiler {
                 for dependency in output
                     .render_dependencies
                     .iter()
+                    .chain(output.page_dependencies.iter())
                     .flat_map(|inventory| &inventory.sources)
                 {
                     dependencies.insert(dependency.url.clone());
@@ -1341,6 +1349,8 @@ fn precompile_html_impl(
     let document_url = Url::parse(document_url)
         .map_err(|error| PrecompileError::InvalidDocumentUrl(error.to_string()))?;
     let dom = html5ever::parse_document(RcDom::default(), Default::default()).one(html);
+    let base_url = document_base_url(&dom.document, &document_url)?;
+    let page_dependencies = project_fe_pages(&dom.document, &base_url, &document_url, &mut load)?;
     let canonical_gallery = find_meta_content(&dom.document, ATTRIBUTION_POLICY_META_NAME)
         .is_some_and(|value| {
             value
@@ -1350,7 +1360,6 @@ fn precompile_html_impl(
     if canonical_gallery {
         validate_canonical_gallery_document(&dom.document, &document_url)?;
     }
-    let base_url = document_base_url(&dom.document, &document_url)?;
     let document_source = PublishedDocumentSource {
         id: document_url
             .path_segments()
@@ -1630,6 +1639,7 @@ fn precompile_html_impl(
         assets,
         modules,
         render_dependencies,
+        page_dependencies,
     })
 }
 
@@ -1657,6 +1667,351 @@ fn materialize_template_contents_for_serialization(root: &Handle) {
     for child in children {
         materialize_template_contents_for_serialization(&child);
     }
+}
+
+/// Project every (currently at most one) Fe page actor into this parsed
+/// document before ordinary Fe program discovery. The operation stream is
+/// typed compiler data; this host only realizes standards elements/attributes
+/// and the two fixed render/component declarations.
+fn project_fe_pages(
+    root: &Handle,
+    base_url: &Url,
+    document_url: &Url,
+    load: &mut impl FnMut(&Url) -> Result<String, String>,
+) -> Result<Vec<SourceDependencyInventory>, PrecompileError> {
+    let mut scripts = Vec::new();
+    collect_elements_with_attr(root, "script", PAGE_SCRIPT_MARKER, &mut scripts);
+    if scripts.len() > 1 {
+        return Err(PrecompileError::Compile {
+            source_url: document_url.to_string(),
+            detail: format!("a document may declare at most one `{PAGE_SCRIPT_MARKER}` page actor"),
+        });
+    }
+    let mut dependencies = Vec::new();
+    for script in scripts {
+        if !attr(&script, "type")
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case(SOURCE_SCRIPT_TYPE))
+        {
+            return Err(PrecompileError::Compile {
+                source_url: document_url.to_string(),
+                detail: format!("`{PAGE_SCRIPT_MARKER}` requires type `{SOURCE_SCRIPT_TYPE}`"),
+            });
+        }
+        let source = attr(&script, "data-fe-src").ok_or_else(|| PrecompileError::Compile {
+            source_url: document_url.to_string(),
+            detail: format!("`{PAGE_SCRIPT_MARKER}` requires an external `data-fe-src`"),
+        })?;
+        let source_url = base_url
+            .join(&source)
+            .map_err(|error| PrecompileError::SourceLoad {
+                url: source.clone(),
+                detail: error.to_string(),
+            })?;
+        let source_text = load(&source_url).map_err(|detail| PrecompileError::SourceLoad {
+            url: source_url.to_string(),
+            detail,
+        })?;
+        let request = CompileRequest {
+            protocol: ProtocolVersion::CURRENT,
+            root: source_url.to_string(),
+            sources: vec![VirtualSource::new(source_url.as_str(), source_text)],
+            target: CompileTarget::Wasm,
+            // Page behavior identity is selected by its nominal role, not this
+            // otherwise-required protocol field.
+            entries: vec!["page".to_owned()],
+            options: CompileOptions::default(),
+        };
+        let projected = fe_compiler_facade::project_page(&request).map_err(|error| {
+            PrecompileError::Compile {
+                source_url: source_url.to_string(),
+                detail: error.to_string(),
+            }
+        })?;
+        let page = projected.page.ok_or_else(|| {
+            if projected.diagnostics.is_empty() {
+                PrecompileError::Compile {
+                    source_url: source_url.to_string(),
+                    detail: format!(
+                        "`{PAGE_SCRIPT_MARKER}` source declares no role-selected `PageComposition` behavior"
+                    ),
+                }
+            } else {
+                PrecompileError::Diagnostics {
+                    source_url: source_url.to_string(),
+                    diagnostics: projected.diagnostics.clone(),
+                }
+            }
+        })?;
+        let nodes = realize_page_projection(&page)?;
+        replace_page_script(&script, nodes)?;
+        set_document_title(root, &page.title)?;
+        dependencies.push(projected.source_dependencies);
+    }
+    Ok(dependencies)
+}
+
+fn page_element_tag(element: fe_compiler_facade::PageElement) -> &'static str {
+    use fe_compiler_facade::PageElement;
+    match element {
+        PageElement::Header => "header",
+        PageElement::Main => "main",
+        PageElement::Div => "div",
+        PageElement::Figure => "figure",
+        PageElement::Figcaption => "figcaption",
+        PageElement::Span => "span",
+        PageElement::Bold => "b",
+        PageElement::Paragraph => "p",
+        PageElement::Code => "code",
+        PageElement::Section => "section",
+        PageElement::Footer => "footer",
+        PageElement::Heading1 => "h1",
+        PageElement::Heading2 => "h2",
+        PageElement::Input => "input",
+        PageElement::Label => "label",
+        PageElement::UnorderedList => "ul",
+        PageElement::ListItem => "li",
+        PageElement::Button => "button",
+        PageElement::Template => "template",
+        PageElement::Strong => "strong",
+        PageElement::Pre => "pre",
+        PageElement::Anchor => "a",
+        PageElement::FeComponent => "fe-component",
+    }
+}
+
+fn page_element(tag: &str) -> Handle {
+    Node::new(NodeData::Element {
+        name: QualName::new(None, ns!(html), LocalName::from(tag)),
+        attrs: RefCell::new(Vec::new()),
+        template_contents: RefCell::new(None),
+        mathml_annotation_xml_integration_point: false,
+    })
+}
+
+fn page_text(value: &str) -> Handle {
+    Node::new(NodeData::Text {
+        contents: RefCell::new(value.into()),
+    })
+}
+
+fn append_page_node(roots: &mut Vec<Handle>, stack: &[Handle], node: Handle) {
+    if let Some(parent) = stack.last() {
+        node.parent.set(Some(Rc::downgrade(parent)));
+        parent.children.borrow_mut().push(node);
+    } else {
+        roots.push(node);
+    }
+}
+
+fn valid_page_id(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    bytes.next().is_some_and(|byte| byte.is_ascii_alphabetic())
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn set_projected_attribute(
+    node: &Handle,
+    value: &fe_compiler_facade::ProjectedPageAttribute,
+) -> Result<(), PrecompileError> {
+    use fe_compiler_facade::PageAttributeKind;
+    let (name, text) = match value.kind {
+        PageAttributeKind::Id => {
+            if !valid_page_id(&value.text) {
+                return Err(PrecompileError::Serialize(format!(
+                    "Fe page id {:?} is not a safe HTML identifier",
+                    value.text
+                )));
+            }
+            ("id".to_owned(), value.text.clone())
+        }
+        PageAttributeKind::Class => ("class".to_owned(), value.text.clone()),
+        PageAttributeKind::Role => ("role".to_owned(), value.text.clone()),
+        PageAttributeKind::AriaLabel => ("aria-label".to_owned(), value.text.clone()),
+        PageAttributeKind::AriaModal => ("aria-modal".to_owned(), value.enabled.to_string()),
+        PageAttributeKind::InputType => ("type".to_owned(), value.text.clone()),
+        PageAttributeKind::For => ("for".to_owned(), value.text.clone()),
+        PageAttributeKind::Title => ("title".to_owned(), value.text.clone()),
+        PageAttributeKind::Placeholder => ("placeholder".to_owned(), value.text.clone()),
+        PageAttributeKind::Autocomplete => ("autocomplete".to_owned(), value.text.clone()),
+        PageAttributeKind::Target => ("target".to_owned(), value.text.clone()),
+        PageAttributeKind::Rel => ("rel".to_owned(), value.text.clone()),
+        PageAttributeKind::Href => ("href".to_owned(), value.text.clone()),
+        PageAttributeKind::Hidden => {
+            if !value.enabled {
+                return Err(PrecompileError::Serialize(
+                    "Fe page Hidden attribute must be enabled".to_owned(),
+                ));
+            }
+            ("hidden".to_owned(), String::new())
+        }
+        PageAttributeKind::Action => ("data-fe-action".to_owned(), value.number.to_string()),
+        PageAttributeKind::Node => ("data-fe-node".to_owned(), value.number.to_string()),
+        PageAttributeKind::View => ("data-fe-view".to_owned(), value.number.to_string()),
+        PageAttributeKind::Template => ("data-fe-template".to_owned(), value.number.to_string()),
+        PageAttributeKind::ClassToken => {
+            if value.number == 0 || value.text.is_empty() {
+                return Err(PrecompileError::Serialize(
+                    "Fe page class token requires a nonzero slot and nonempty token".to_owned(),
+                ));
+            }
+            (
+                format!("data-fe-class-{}", value.number),
+                value.text.clone(),
+            )
+        }
+        PageAttributeKind::Publish => {
+            if !value.enabled {
+                return Err(PrecompileError::Serialize(
+                    "Fe page Publish attribute must be enabled".to_owned(),
+                ));
+            }
+            (PUBLISH_ASSET_MARKER.to_owned(), String::new())
+        }
+    };
+    if attr(node, &name).is_some() {
+        return Err(PrecompileError::Serialize(format!(
+            "Fe page repeats attribute `{name}` on one element"
+        )));
+    }
+    set_attr(node, &name, &text);
+    Ok(())
+}
+
+fn page_program_script(attributes: Vec<(&str, String)>) -> Handle {
+    let script = page_element("script");
+    for (name, value) in attributes {
+        set_attr(&script, name, &value);
+    }
+    script
+}
+
+fn realize_page_projection(
+    page: &fe_compiler_facade::PageProjection,
+) -> Result<Vec<Handle>, PrecompileError> {
+    use fe_compiler_facade::PageProjectionOp;
+    let mut roots = Vec::new();
+    let mut stack = Vec::new();
+    let mut accepts_attributes = Vec::new();
+    for (index, operation) in page.body.iter().enumerate() {
+        match operation {
+            PageProjectionOp::Open(element) => {
+                if let Some(accepts) = accepts_attributes.last_mut() {
+                    *accepts = false;
+                }
+                let node = page_element(page_element_tag(*element));
+                append_page_node(&mut roots, &stack, node.clone());
+                stack.push(node);
+                accepts_attributes.push(true);
+            }
+            PageProjectionOp::Attribute(value) => {
+                let Some(node) = stack.last() else {
+                    return Err(PrecompileError::Serialize(format!(
+                        "Fe page operation #{index} applies an attribute outside an element"
+                    )));
+                };
+                if !accepts_attributes.last().copied().unwrap_or(false) {
+                    return Err(PrecompileError::Serialize(format!(
+                        "Fe page operation #{index} applies an attribute after element content"
+                    )));
+                }
+                set_projected_attribute(node, value)?;
+            }
+            PageProjectionOp::Text(value) => {
+                if let Some(accepts) = accepts_attributes.last_mut() {
+                    *accepts = false;
+                }
+                append_page_node(&mut roots, &stack, page_text(value));
+            }
+            PageProjectionOp::Close => {
+                if stack.pop().is_none() {
+                    return Err(PrecompileError::Serialize(format!(
+                        "Fe page operation #{index} closes beyond the page root"
+                    )));
+                }
+                accepts_attributes.pop();
+            }
+            PageProjectionOp::Render(render) => {
+                if render.source.is_empty() {
+                    return Err(PrecompileError::Serialize(format!(
+                        "Fe page render operation #{index} has an empty source"
+                    )));
+                }
+                if let Some(accepts) = accepts_attributes.last_mut() {
+                    *accepts = false;
+                }
+                let mut attributes = vec![
+                    ("type", SOURCE_SCRIPT_TYPE.to_owned()),
+                    ("data-fe-src", render.source.clone()),
+                    (RENDER_SCRIPT_MARKER, String::new()),
+                    ("data-fe-wgsl-action", render.wgsl_action.to_string()),
+                    ("data-fe-wasm-action", render.wasm_action.to_string()),
+                    (
+                        "data-fe-manifest-action",
+                        render.manifest_action.to_string(),
+                    ),
+                ];
+                if !render.entry.is_empty() {
+                    attributes.push(("data-fe-entry", render.entry.clone()));
+                }
+                let node = page_program_script(attributes);
+                append_page_node(&mut roots, &stack, node);
+            }
+            PageProjectionOp::Component(component) => {
+                if component.source.is_empty() || !valid_page_id(&component.mount) {
+                    return Err(PrecompileError::Serialize(format!(
+                        "Fe page component operation #{index} requires a source and safe mount id"
+                    )));
+                }
+                if let Some(accepts) = accepts_attributes.last_mut() {
+                    *accepts = false;
+                }
+                let node = page_program_script(vec![
+                    ("type", SOURCE_SCRIPT_TYPE.to_owned()),
+                    ("data-fe-src", component.source.clone()),
+                    ("data-fe-component", String::new()),
+                    ("data-fe-mount", format!("#{}", component.mount)),
+                ]);
+                append_page_node(&mut roots, &stack, node);
+            }
+        }
+    }
+    if !stack.is_empty() {
+        return Err(PrecompileError::Serialize(format!(
+            "Fe page leaves {} element(s) unclosed",
+            stack.len()
+        )));
+    }
+    Ok(roots)
+}
+
+fn replace_page_script(script: &Handle, replacements: Vec<Handle>) -> Result<(), PrecompileError> {
+    let parent = script
+        .parent
+        .take()
+        .and_then(|parent| parent.upgrade())
+        .ok_or_else(|| PrecompileError::Serialize("Fe page script has no parent".to_owned()))?;
+    let mut children = parent.children.borrow_mut();
+    let index = children
+        .iter()
+        .position(|child| Rc::ptr_eq(child, script))
+        .ok_or_else(|| {
+            PrecompileError::Serialize("Fe page script is absent from its parent".to_owned())
+        })?;
+    for replacement in &replacements {
+        replacement.parent.set(Some(Rc::downgrade(&parent)));
+    }
+    children.splice(index..=index, replacements);
+    Ok(())
+}
+
+fn set_document_title(root: &Handle, value: &str) -> Result<(), PrecompileError> {
+    let title = find_first_element(root, "title").ok_or_else(|| {
+        PrecompileError::Serialize("a Fe page document requires a <title> shell element".to_owned())
+    })?;
+    let text = page_text(value);
+    text.parent.set(Some(Rc::downgrade(&title)));
+    title.children.borrow_mut().splice(.., [text]);
+    Ok(())
 }
 
 /// Publish the fixed render runtime module once, content-addressed. Returns
@@ -3021,6 +3376,75 @@ pub fn main() -> u32 { 42 }
     }
 
     #[test]
+    fn fe_page_actor_projects_typed_dom_before_program_discovery_without_runtime_manifest() {
+        let html = r#"<!doctype html><html><head><title>shell</title></head><body>
+<script type="application/fe" data-fe-page data-fe-src="./page.fe"></script>
+</body></html>"#;
+        let page = r#"
+use std::web::page::{Page, PageAttribute, PageBuilder, PageComposition, PageElement, PageText}
+
+actor ExamplePage {
+    version: u32,
+
+    const fn compose() -> Page<8> uses (PageComposition) {
+        PageBuilder::new()
+            .open(element: PageElement::Main)
+            .attribute(value: PageAttribute::id(value: "gallery"))
+            .open(element: PageElement::Heading1)
+            .text(value: PageText::one(value: "Hello <Fe> & browser"))
+            .close()
+            .close()
+            .finish(title: PageText::one(value: "Fe owns <title>"))
+    }
+}
+"#;
+        let output = precompile_html("https://example.test/index.html", html, |url| {
+            assert_eq!(url.as_str(), "https://example.test/page.fe");
+            Ok(page.to_owned())
+        })
+        .expect("project Fe page");
+
+        assert!(
+            output.modules.is_empty(),
+            "page projection is not runtime Wasm"
+        );
+        assert!(output.render_dependencies.is_empty());
+        assert_eq!(output.page_dependencies.len(), 1);
+        assert!(!output.html.contains(PAGE_SCRIPT_MARKER));
+        assert!(output.html.contains("<title>Fe owns &lt;title&gt;</title>"));
+        assert!(
+            output
+                .html
+                .contains("<main id=\"gallery\"><h1>Hello &lt;Fe&gt; &amp; browser</h1></main>")
+        );
+        assert!(!output.html.contains("manifest"));
+    }
+
+    #[test]
+    fn page_realizer_rejects_attribute_policy_after_content() {
+        let page = fe_compiler_facade::PageProjection {
+            actor: "Broken".to_owned(),
+            source_entry: "compose".to_owned(),
+            title: "broken".to_owned(),
+            body: vec![
+                fe_compiler_facade::PageProjectionOp::Open(fe_compiler_facade::PageElement::Main),
+                fe_compiler_facade::PageProjectionOp::Text("content".to_owned()),
+                fe_compiler_facade::PageProjectionOp::Attribute(
+                    fe_compiler_facade::ProjectedPageAttribute {
+                        kind: fe_compiler_facade::PageAttributeKind::Id,
+                        text: "too-late".to_owned(),
+                        number: 0,
+                        enabled: false,
+                    },
+                ),
+                fe_compiler_facade::PageProjectionOp::Close,
+            ],
+        };
+        let error = realize_page_projection(&page).unwrap_err();
+        assert!(error.to_string().contains("after element content"));
+    }
+
+    #[test]
     fn resident_fe_component_uses_normal_wasm_lane_and_fixed_bootstrap_without_new_json_protocol() {
         let html = r##"<!doctype html><html><head></head><body>
 <script type="application/fe" data-fe-src="./source-inspector.fe"
@@ -3368,6 +3792,7 @@ pub fn main() -> u32 { 42 }
                 assets: BTreeMap::new(),
                 modules: Vec::new(),
                 render_dependencies: Vec::new(),
+                page_dependencies: Vec::new(),
             }),
         };
         let mut events = Vec::new();

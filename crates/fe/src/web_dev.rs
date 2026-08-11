@@ -119,6 +119,7 @@ pub async fn serve(config: DevConfig) -> Result<(), String> {
         phase = "initial_build",
         modules = publication.output().modules.len(),
         render_bundles = publication.output().render_dependencies.len(),
+        page_projections = publication.output().page_dependencies.len(),
         assets = publication.output().assets.len(),
         elapsed_ms = initial_started.elapsed().as_millis() as u64,
         "built initial development site"

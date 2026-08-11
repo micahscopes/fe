@@ -110,17 +110,30 @@ Origin: honesty audit of Claude Code session
   verifier checks the direct source digest; there is no asset JSON or new
   runtime manifest. This makes source inspection work on static Pages rather
   than only under the development file server.
-- This component slice is not the Phase 5 end state. Todo page composition and
-  numeric action/node/class/template declarations are still ordinary authored
-  HTML; the component directory route still needs to supersede the render-lane
-  probe; an attribute-mutation event ABI, persistence, unbounded collections,
-  native backend parity, and Fe-generated page composition remain open. The
-  example intentionally caps itself at 32 todos and 96 UTF-8 bytes per title
-  while those richer storage interfaces are designed.
+- The canonical gallery body is now one role-selected Fe `GalleryPage` actor.
+  Its const `GalleryBuilder` expands through a typed `std::web::page` operation
+  vocabulary into the header, ordered tiles, captions, source links, all ten
+  render declarations, two resident-component mounts, TodoMVC template, and
+  SourceInspector view. The HTML body retains only one inert `data-fe-page`
+  source declaration; there is no page Wasm or page JSON manifest. The fixed
+  precompiler realizes standards nodes and validates ordering, balanced trees,
+  attributes, mount identities, and sources before ordinary program discovery.
+  A semantic projector fixture, negative structure gate, deployment verifier,
+  and Chromium gate independently prove the typed result and actual behavior.
+- This component/page slice is not the full resident-component end state. The
+  outer gallery shell does not yet own routing, tile lifecycle, scheduling, or
+  component-to-component messages as a long-lived Fe actor. Static component
+  DOM is composed by `GalleryPage` rather than exported by each component
+  module, and the stylesheet remains an authored transitional HTML shell. The
+  component directory route still needs to supersede the render-lane probe; an
+  attribute-mutation event ABI, persistence, unbounded collections, and native
+  backend parity remain open. TodoMVC intentionally caps itself at 32 todos and
+  96 UTF-8 bytes per title while those richer storage interfaces are designed.
 - Animation-frame/GPU-completion facts and their clock state machine have not
   yet been exposed as typed events to the resident Fe actor. Native/Cranelift
   parity, typed lifecycle/reactive streams, pointer capture, picking/messages,
-  Fe page composition, and runtime-manifest removal remain open.
+  resident outer-gallery orchestration, and runtime-manifest removal remain
+  open.
 
 This ledger records achieved evidence, not a relaxation of the phases or the
 Definition of done below.
@@ -285,10 +298,11 @@ reserved-name, positional, scalar-only ABI is bespoke surface area to remove.
 - Perturbational Mandelbrot is a two-pass Fe GPU graph; its Wasm is the typed
   Fe control lane only.
 - No tile has its own `main.js`.
-- The page remains authored HTML/CSS. The former handwritten inline
-  source/WGSL/manifest viewer has been removed. Restoring it as an actor-like
-  Fe web component is the first planned consumer of the page/component path;
-  the fixed runtime still consumes the transitional render manifest today.
+- `GalleryPage` authors the complete body structure and all render/component
+  declarations in Fe. `gallery.html` retains the document shell and
+  transitional CSS only. The source/WGSL/Wasm/manifest viewer is a resident Fe
+  `SourceInspector`; the fixed render runtime still consumes the transitional
+  render manifest today.
 - `qcga_pencil` remains excluded because vertex/fragment plus typed
   pick/message lanes have not landed.
 - DEC contains Worker/message-shaped Fe functions, but the gallery currently
@@ -464,6 +478,13 @@ Exit condition: `qcga_pencil` works end to end without per-demo JavaScript and
 without runtime knowledge of its control points or geometry.
 
 ### Phase 5: compose the page in Fe
+
+Current status: the functional page-composition exit condition is landed. One
+role-selected Fe entrypoint composes the full canonical gallery body, produces
+no page runtime artifact or JSON, and is exercised in a real browser. The
+remaining Phase 5 cleanup is moving the transitional shell CSS onto a fixed
+selectable theme and letting resident component modules project their own
+static DOM, so `GalleryPage` need not spell out TodoMVC/inspector internals.
 
 1. Land the planned `WebPage` actor and `const compose() -> Page` projection.
 2. Generate mounts, captions, source/provenance links, and layout declarations

@@ -20,3 +20,10 @@ pub struct InitialState {}
 /// consumer, not compiler vocabulary.
 #[actor_projection]
 pub struct ProjectState {}
+
+/// A self-less actor behavior whose const result describes page structure.
+/// Build tooling may project this typed value before runtime artifacts are
+/// discovered; the authored behavior name and concrete page vocabulary remain
+/// ordinary Fe library choices.
+#[actor_page_projection]
+pub struct PageComposition {}

@@ -129,14 +129,45 @@ try {
     const component = document.querySelector("#source-inspector, #gallery-shell");
     const surfaces = Array.from(document.querySelectorAll("fe-surface"));
     return script?.dataset.feState === "complete" && component?._active === true &&
-      surfaces.some(surface => surface.shadowRoot?.querySelector('[data-fe-action="101"]'));
+      surfaces.length === 10 &&
+      surfaces.every(surface => surface.shadowRoot?.querySelector('[data-fe-action="101"]'));
+  });
+
+  assert.deepEqual(await page.evaluate(() => ({
+    title: document.title,
+    pageMarker: Boolean(document.querySelector("script[data-fe-page]")),
+    figures: document.querySelectorAll(".grid > figure").length,
+    surfaces: document.querySelectorAll("fe-surface").length,
+    components: document.querySelectorAll("fe-component").length,
+    captions: Array.from(document.querySelectorAll(".grid > figure > figcaption > b"),
+      node => node.textContent),
+  })), {
+    title: "Fe · GPU gallery",
+    pageMarker: false,
+    figures: 11,
+    surfaces: 10,
+    components: 2,
+    captions: [
+      "known color",
+      "rollcall pipeline",
+      "cga3d",
+      "qcga",
+      "desargues",
+      "plasma",
+      "mandelbrot",
+      "perturbation mandelbrot",
+      "dec",
+      "gradient",
+      "TodoMVC",
+    ],
   });
 
   assert.equal(await page.$eval(".inspector, .source-inspector", node => node.hidden), true);
-  await page.click('[data-fe-action="100"]');
+  await page.click('.gallery-head [data-fe-action="100"]');
   await page.waitForFunction(() =>
     !document.querySelector('[data-fe-view="1"]').hidden &&
-    document.querySelector('[data-fe-node="100"]').textContent.includes("actor ")
+    document.querySelector('[data-fe-node="100"]').textContent.includes("actor GalleryPage") &&
+    document.querySelector('[data-fe-node="100"]').textContent.includes("struct GalleryBuilder")
   );
   assert.deepEqual(await page.evaluate(() => ({
     open: !document.querySelector(".inspector, .source-inspector").hidden,
@@ -193,7 +224,7 @@ try {
     ? browserErrors.filter(error => !error.includes("no WebGPU adapter is available"))
     : browserErrors;
   assert.deepEqual(unexpectedBrowserErrors, []);
-  console.log("ok: resident Fe SourceInspector loads source, WGSL, Wasm metadata, and manifest");
+  console.log("ok: Fe-composed gallery and resident SourceInspector behavior");
 } finally {
   await browser.close();
   await new Promise(resolvePromise => server.close(resolvePromise));

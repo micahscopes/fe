@@ -18,6 +18,14 @@ browser adapter transports standards events and applies the fixed component
 effect vocabulary; it contains no Todo-specific policy. The example is also
 embedded as a tile in `gallery.html`.
 
+The gallery body is composed by the role-selected `GalleryPage` actor in
+`demos/sketches/gallery_page/src/lib.fe`. Its const `GalleryBuilder` expands
+through the typed `std::web::page` vocabulary into the header, ordered tiles,
+captions, source links, render declarations, resident-component mounts, and
+their initial DOM. The HTML body contains only the inert page declaration; its
+remaining authored CSS is an explicitly transitional presentation shell, not
+application behavior or a second page manifest.
+
 `demos/sketches/source_inspector/src/lib.fe` owns source/generated-artifact
 selection, loading/error state, stale-response rejection, binary-vs-text
 presentation, focus, Escape, and navigation cancellation. The generic browser

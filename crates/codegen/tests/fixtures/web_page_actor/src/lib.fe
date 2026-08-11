@@ -1,0 +1,32 @@
+use std::web::page::{
+    Page, PageAttribute, PageComposition, PageElement, PageOp, PageText,
+}
+
+actor GalleryPage {
+    version: u32,
+
+    const fn compose() -> Page<9> uses (PageComposition) {
+        Page::exact(
+            title: PageText::one(value: "Fe page"),
+            body: [
+                PageOp::open(element: PageElement::Main),
+                PageOp::attribute(value: PageAttribute::id(value: "gallery")),
+                PageOp::attribute(value: PageAttribute::hidden()),
+                PageOp::open(element: PageElement::Heading1),
+                PageOp::text(value: PageText::one(value: "Hello <Fe>")),
+                PageOp::close(),
+                PageOp::render(
+                    source: PageText::one(value: "sketches/gradient"),
+                    wgsl_action: 101,
+                    wasm_action: 102,
+                    manifest_action: 103,
+                ),
+                PageOp::component(
+                    source: PageText::one(value: "sketches/todomvc/src/lib.fe"),
+                    mount: "todo-app",
+                ),
+                PageOp::close(),
+            ],
+        )
+    }
+}
