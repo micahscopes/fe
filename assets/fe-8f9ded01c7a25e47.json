@@ -1,0 +1,82 @@
+{
+  "protocol": {
+    "major": 1,
+    "minor": 1
+  },
+  "compiler": {
+    "name": "fe",
+    "version": "0.1.0",
+    "build": "workspace"
+  },
+  "target": "wasm",
+  "source_set_sha256": "171224108e4af2a7adae9933d0c51ede0cbfd7539caf414d066b1ba25221f600",
+  "source_dependencies": {
+    "version": 1,
+    "root": "file:///workspace/fe-worktrees/mb2/demos/sketches/todomvc/src/lib.fe",
+    "sources": [
+      {
+        "url": "file:///workspace/fe-worktrees/mb2/demos/sketches/todomvc/src/lib.fe",
+        "sha256": "5d4b858d0b7e8fb8a219cbafff7cd79ae68d8f25e2cb9e8215eaa478a5f0fa5e"
+      }
+    ]
+  },
+  "entry": "fe_actor_initialize_v1",
+  "interface": {
+    "imports": [],
+    "exports": [
+      {
+        "module": "",
+        "name": "fe_actor_initialize_v1",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "fe_actor_project_v1",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "fe_actor_state_replace_v1",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "fe_actor_transition_v1",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "fe_cabi_alloc",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "fe_cabi_reset",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      }
+    ],
+    "resources": []
+  },
+  "artifacts": [
+    {
+      "name": "module.wasm",
+      "kind": "wasm_module",
+      "media_type": "application/wasm",
+      "sha256": "c71200f39fe6638f499e56cd162381cfec393bad39f5143757f1e07f69920377",
+      "byte_len": 10192,
+      "url": "assets/fe-c71200f39fe6638f.wasm"
+    }
+  ]
+}

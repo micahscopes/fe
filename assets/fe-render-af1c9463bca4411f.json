@@ -1,10 +1,10 @@
 {
   "artifacts": {
     "canonical_adapters": [],
-    "wasm": "fe-render-890ca1e53f27d308.wasm",
-    "wasm_bytes": 2042,
-    "wgsl": "fe-render-cd19975c11152900.wgsl",
-    "wgsl_bytes": 5585
+    "wasm": "fe-render-0f6e5c7faecc35f8.wasm",
+    "wasm_bytes": 2592,
+    "wgsl": "fe-render-a5517872fee7a2ab.wgsl",
+    "wgsl_bytes": 8117
   },
   "browser_runtime": null,
   "canonical_interface": null,
@@ -22,24 +22,24 @@
         "members": [
           {
             "arg_index": 2,
-            "doc": "Advances the animation; `zoom` and `warp` are exposed for the page.",
-            "name": "time",
+            "doc": "Pencil parameter: [0, 1] sweeps sphere -> sphere -> radical plane.",
+            "name": "lambda",
             "offset": 0,
             "scalar": "f32",
             "width": 4
           },
           {
             "arg_index": 3,
-            "doc": null,
-            "name": "zoom",
+            "doc": "Rotation of the generator axis in the slice plane.",
+            "name": "theta",
             "offset": 4,
             "scalar": "f32",
             "width": 4
           },
           {
             "arg_index": 4,
-            "doc": null,
-            "name": "warp",
+            "doc": "Half-extent of the visible slice in world units.",
+            "name": "zoom",
             "offset": 8,
             "scalar": "f32",
             "width": 4
@@ -96,24 +96,24 @@
             "members": [
               {
                 "arg_index": 2,
-                "doc": "Advances the animation; `zoom` and `warp` are exposed for the page.",
-                "name": "time",
+                "doc": "Pencil parameter: [0, 1] sweeps sphere -> sphere -> radical plane.",
+                "name": "lambda",
                 "offset": 0,
                 "scalar": "f32",
                 "width": 4
               },
               {
                 "arg_index": 3,
-                "doc": null,
-                "name": "zoom",
+                "doc": "Rotation of the generator axis in the slice plane.",
+                "name": "theta",
                 "offset": 4,
                 "scalar": "f32",
                 "width": 4
               },
               {
                 "arg_index": 4,
-                "doc": null,
-                "name": "warp",
+                "doc": "Half-extent of the visible slice in world units.",
+                "name": "zoom",
                 "offset": 8,
                 "scalar": "f32",
                 "width": 4
@@ -159,9 +159,9 @@
           0
         ]
       },
-      "shader": "fe-render-cd19975c11152900.wgsl",
-      "shader_bytes": 5585,
-      "source_entry": "plasma"
+      "shader": "fe-render-a5517872fee7a2ab.wgsl",
+      "shader_bytes": 8117,
+      "source_entry": "shade"
     }
   ],
   "protocol": "fe-web-bundle",
@@ -169,24 +169,34 @@
   "provenance": {
     "authored_sources": [
       {
-        "id": "fmath/fe.toml",
+        "id": "demos/sketches/cga3d/fe.toml",
+        "kind": "fe_manifest",
+        "sha256": "a48018fab7bb3cc436bc6723462f25db69246e3d8fb1cc2c1ed07be533cb97f2"
+      },
+      {
+        "id": "demos/sketches/cga3d/src/lib.fe",
+        "kind": "fe",
+        "sha256": "a9b62c78240e65bd81e7c68882ff1baf076af7eab494ceb12ed09e5812c60028"
+      },
+      {
+        "id": "demos/sketches/fmath/fe.toml",
         "kind": "fe_manifest",
         "sha256": "1bb68ed27a9ae6ba289a949ca67500ebf92f8f21461e4a922b43931b9d98b0c0"
       },
       {
-        "id": "fmath/src/lib.fe",
+        "id": "demos/sketches/fmath/src/lib.fe",
         "kind": "fe",
         "sha256": "d2e14a7f4fa6cdff0a6a2f65c711677b835c919a816e5098e5c35aca2693ebe4"
       },
       {
-        "id": "plasma/fe.toml",
+        "id": "ingots/sparse_clifford/fe.toml",
         "kind": "fe_manifest",
-        "sha256": "22aa43476bed75e280ec9ae457cc95277b50559e656f090520ee682527c74554"
+        "sha256": "86dbfce53a6b656e590a36f9624d2bbfe9222e13299d07cefef340a284a191ed"
       },
       {
-        "id": "plasma/src/lib.fe",
+        "id": "ingots/sparse_clifford/src/lib.fe",
         "kind": "fe",
-        "sha256": "65ce1d3bfd886ce9ae7abe119eb2546d0f2252c441658fb8b56ba713cf96e22a"
+        "sha256": "bc75b3743ca9c2c373d06253625d4ae97de359c4d039865e30a4776abc7aa18e"
       }
     ],
     "compiler": "fe",
@@ -224,13 +234,13 @@
       {
         "id": "gallery.html",
         "kind": "html",
-        "sha256": "0432c50d08e3111f05fe86e61254176e5ce821b9dfd3c0092cfedbf4a1a2a453"
+        "sha256": "6b4eacaded99f68254aac70d7624690541629b3bbd0cc931d58755d33aa22990"
       }
     ],
-    "source_id": "plasma"
+    "source_id": "cga3d"
   },
   "resources": [],
-  "source_entry": "plasma",
+  "source_entry": "shade",
   "surface": {
     "activate": "pointer",
     "extent": {
@@ -241,26 +251,28 @@
     },
     "params": [
       {
-        "doc": "Advances the animation; `zoom` and `warp` are exposed for the page.",
-        "init": 0.0,
-        "kind": "range",
-        "max": 20.0,
+        "doc": "Pencil parameter: [0, 1] sweeps sphere -> sphere -> radical plane.",
+        "init": 0.15,
+        "kind": "unit",
+        "max": 1.0,
         "min": 0.0,
-        "name": "time"
+        "name": "lambda"
       },
       {
-        "init": 3.0,
+        "doc": "Rotation of the generator axis in the slice plane.",
+        "init": 0.6,
+        "kind": "angle",
+        "max": 6.2831855,
+        "min": 0.0,
+        "name": "theta"
+      },
+      {
+        "doc": "Half-extent of the visible slice in world units.",
+        "init": 1.6,
         "kind": "range",
-        "max": 8.0,
-        "min": 1.0,
+        "max": 4.0,
+        "min": 0.5,
         "name": "zoom"
-      },
-      {
-        "init": 0.8,
-        "kind": "range",
-        "max": 2.0,
-        "min": 0.0,
-        "name": "warp"
       },
       {
         "doc": "Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).",

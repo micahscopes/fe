@@ -199,6 +199,11 @@
         "sha256": "d4862d459e8295085587f8790102fcd68bc47b957ed46b7d3c4bdaea4f800e2a"
       },
       {
+        "id": "ingots/core/src/actor.fe",
+        "kind": "fe",
+        "sha256": "da36c65e03d3759ae9b89fab7977501c89fc0775dfa2ccc0eeaa62dcaa0ca8ca"
+      },
+      {
         "id": "ingots/core/src/atomic.fe",
         "kind": "fe",
         "sha256": "ffb79a98969d2b6ded8ade488b932be63bb1817753f602ceb68beede222f81b9"
@@ -216,7 +221,7 @@
       {
         "id": "ingots/core/src/browser.fe",
         "kind": "fe",
-        "sha256": "15ae31073335a6e18fd7d816cff9b01ca5360f1cbec3376c23e20d6376a17bae"
+        "sha256": "eb404f71d5d082e15586f08b2390dff80c0f3e7aa6754ddbf0b6d109567d381b"
       },
       {
         "id": "ingots/core/src/bytes.fe",
@@ -271,7 +276,7 @@
       {
         "id": "ingots/core/src/lib.fe",
         "kind": "fe",
-        "sha256": "07e15f5119f4d9a4c61bd06ddc8b74cb8c474e3782d907ef646345c0409d50b7"
+        "sha256": "fa9474ccca9d189364302c77a38a9c3a91332f56dbe77b119352c13ede117881"
       },
       {
         "id": "ingots/core/src/marker.fe",
@@ -394,7 +399,7 @@
       {
         "id": "gallery.html",
         "kind": "html",
-        "sha256": "0432c50d08e3111f05fe86e61254176e5ce821b9dfd3c0092cfedbf4a1a2a453"
+        "sha256": "6b4eacaded99f68254aac70d7624690541629b3bbd0cc931d58755d33aa22990"
       }
     ],
     "source_id": "desargues"
