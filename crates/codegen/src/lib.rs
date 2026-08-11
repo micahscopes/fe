@@ -1,3 +1,4 @@
+mod actor_semantics;
 mod backend;
 pub mod canonical_interface;
 pub mod capstone_evidence;
@@ -5,6 +6,7 @@ pub mod dispatch;
 mod function_symbols;
 pub mod guest_callbacks;
 mod layout;
+mod resident_actor;
 pub mod resumable_tasks;
 mod runtime_package;
 mod sonatina;
@@ -27,6 +29,12 @@ pub use canonical_interface::{
 pub use dispatch::DispatchKind;
 pub use layout::{
     DISCRIMINANT_SIZE_BYTES, EVM_LAYOUT, Endianness, TargetDataLayout, WASM_LAYOUT, WORD_SIZE_BYTES,
+};
+pub use resident_actor::{
+    RESIDENT_ACTOR_INITIALIZE_EXPORT, RESIDENT_ACTOR_PROJECT_EXPORT,
+    RESIDENT_ACTOR_STATE_REPLACE_EXPORT, RESIDENT_ACTOR_TRANSITION_EXPORT, ResidentActorArtifact,
+    ResidentActorContract, ResidentActorError, compile_resident_actor,
+    compile_resident_actor_with_optimization, resident_actor_contract,
 };
 #[cfg(all(
     feature = "native-backend",

@@ -1,0 +1,515 @@
+//! TodoMVC as one resident Fe web-component actor.
+//!
+//! The browser adapter transports standards events and applies a fixed DOM
+//! effect vocabulary. Todo identity, UTF-8 retention, filtering, lifecycle,
+//! reducer policy, keyed row order, and every projected effect live here.
+
+use std::web::component::{
+    BrowserBytes, BrowserString, ComponentEvent, ComponentEventKind, ComponentPatch,
+    BrowserPtr, ComponentWriter, InitialState, ProjectState, ResidentTransition,
+    allocate_component_buffer, component_string,
+}
+
+const MAX_TODOS: u32 = 32
+const TITLE_CAPACITY: u32 = 96
+const TODO_HEADER_BYTES: u32 = 12
+const TODO_STRIDE: u32 = TODO_HEADER_BYTES + TITLE_CAPACITY
+const TODO_STORAGE_BYTES: u32 = MAX_TODOS * TODO_STRIDE
+const PATCH_CAPACITY: u32 = 32768
+
+// Fe-declared action identities. HTML is currently the composition carrier;
+// the next composting rung will project these declarations into the page too.
+const ACTION_NEW: u32 = 1
+const ACTION_TOGGLE_ALL: u32 = 2
+const ACTION_CLEAR_COMPLETED: u32 = 3
+const ACTION_FILTER_ALL: u32 = 4
+const ACTION_FILTER_ACTIVE: u32 = 5
+const ACTION_FILTER_COMPLETED: u32 = 6
+const ACTION_TOGGLE: u32 = 10
+const ACTION_EDIT: u32 = 11
+const ACTION_DESTROY: u32 = 12
+const ACTION_EDIT_INPUT: u32 = 13
+
+// Fe-declared node/template identities consumed by ComponentWriter.
+const NODE_MAIN: u32 = 1
+const NODE_FOOTER: u32 = 2
+const NODE_LIST: u32 = 3
+const NODE_COUNT: u32 = 4
+const NODE_NEW: u32 = 5
+const NODE_TOGGLE_ALL: u32 = 6
+const NODE_FILTER_ALL: u32 = 7
+const NODE_FILTER_ACTIVE: u32 = 8
+const NODE_FILTER_COMPLETED: u32 = 9
+const NODE_ROW_TOGGLE: u32 = 10
+const NODE_ROW_TITLE: u32 = 11
+const NODE_ROW_EDIT: u32 = 13
+const TEMPLATE_TODO: u32 = 1
+
+const CLASS_SELECTED: u32 = 1
+const CLASS_COMPLETED: u32 = 1
+const CLASS_EDITING: u32 = 2
+
+const FILTER_ALL: u32 = 0
+const FILTER_ACTIVE: u32 = 1
+const FILTER_COMPLETED: u32 = 2
+
+pub struct TodoState {
+    pub todos_ptr: u32,
+    pub patch_ptr: u32,
+    pub draft_ptr: u32,
+    pub count: u32,
+    pub next_id: u32,
+    pub filter: u32,
+    pub editing: u32,
+    pub draft_len: u32,
+    pub connected: bool,
+    pub prevent_default: bool,
+    pub clear_input: bool,
+    pub focus_edit: bool,
+    pub revision: u32,
+}
+
+fn byte_at(ptr: u32, index: u32) -> BrowserPtr<u32> {
+    BrowserPtr::from_u32(ptr + index)
+}
+
+fn word_at(ptr: u32, index: u32) -> BrowserPtr<u32> {
+    BrowserPtr::from_u32(ptr + index)
+}
+
+fn read_word(ptr: u32, index: u32) -> u32 {
+    word_at(ptr: ptr, index: index).read()
+}
+
+fn write_word(ptr: u32, index: u32, value: u32) {
+    word_at(ptr: ptr, index: index).write(value)
+}
+
+fn clear_bytes(ptr: u32, len: u32) {
+    let mut index: u32 = 0
+    while index < len {
+        byte_at(ptr: ptr, index: index).write(0)
+        index = index + 1
+    }
+}
+
+fn slot_offset(index: u32) -> u32 {
+    index * TODO_STRIDE
+}
+
+fn occupied(todos: u32, index: u32) -> bool {
+    read_word(ptr: todos, index: slot_offset(index: index)) != 0
+}
+
+fn todo_id(todos: u32, index: u32) -> u32 {
+    read_word(ptr: todos, index: slot_offset(index: index) + 4)
+}
+
+fn completed(todos: u32, index: u32) -> bool {
+    read_word(ptr: todos, index: slot_offset(index: index) + 8) != 0
+}
+
+fn set_completed(todos: u32, index: u32, value: bool) {
+    write_word(
+        ptr: todos,
+        index: slot_offset(index: index) + 8,
+        value: if value { 1 } else { 0 },
+    )
+}
+
+fn title_len(todos: u32, index: u32) -> u32 {
+    read_word(ptr: todos, index: slot_offset(index: index)) >> 1
+}
+
+fn title_ptr(todos: u32, index: u32) -> u32 {
+    todos + slot_offset(index: index) + TODO_HEADER_BYTES
+}
+
+fn title(todos: u32, index: u32) -> BrowserString {
+    component_string(ptr: title_ptr(todos: todos, index: index), len: title_len(todos: todos, index: index))
+}
+
+fn is_space(value: u32) -> bool {
+    value == 32 || value == 9 || value == 10 || value == 13
+}
+
+fn trim(value: own BrowserString) -> BrowserString {
+    let mut start: u32 = 0
+    let mut end: u32 = value.len
+    while start < end {
+        let source: BrowserPtr<u32> = BrowserPtr::from_u32(value.ptr + start)
+        if is_space(value: source.read() & 255) == false { break }
+        start = start + 1
+    }
+    while end > start {
+        let source: BrowserPtr<u32> = BrowserPtr::from_u32(value.ptr + end - 1)
+        if is_space(value: source.read() & 255) == false { break }
+        end = end - 1
+    }
+    component_string(ptr: value.ptr + start, len: end - start)
+}
+
+fn utf8_prefix_len(value: own BrowserString, capacity: u32) -> u32 {
+    let mut len = value.len
+    if len <= capacity { return len }
+    len = capacity
+    // Host input is valid UTF-8. If the first excluded byte is a continuation
+    // byte, retreat to the lead byte so the retained prefix stays valid.
+    while len > 0 {
+        let next: BrowserPtr<u32> = BrowserPtr::from_u32(value.ptr + len)
+        if next.read() & 192 != 128 { break }
+        len = len - 1
+    }
+    len
+}
+
+fn copy_text(destination: u32, capacity: u32, value: own BrowserString) -> u32 {
+    let len = utf8_prefix_len(value: value, capacity: capacity)
+    let mut index: u32 = 0
+    while index < len {
+        let source: BrowserPtr<u32> = BrowserPtr::from_u32(value.ptr + index)
+        byte_at(ptr: destination, index: index).write(source.read() & 255)
+        index = index + 1
+    }
+    len
+}
+
+fn set_title(todos: u32, index: u32, value: own BrowserString) -> u32 {
+    let trimmed = trim(value: value)
+    let len = copy_text(
+        destination: title_ptr(todos: todos, index: index),
+        capacity: TITLE_CAPACITY,
+        value: trimmed,
+    )
+    let present: u32 = if occupied(todos: todos, index: index) { 1 } else { 0 }
+    write_word(ptr: todos, index: slot_offset(index: index), value: (len << 1) | present)
+    len
+}
+
+fn find_slot(todos: u32, key: u32) -> u32 {
+    let mut index: u32 = 0
+    while index < MAX_TODOS {
+        if occupied(todos: todos, index: index) && todo_id(todos: todos, index: index) == key {
+            return index
+        }
+        index = index + 1
+    }
+    MAX_TODOS
+}
+
+fn find_empty(todos: u32) -> u32 {
+    let mut index: u32 = 0
+    while index < MAX_TODOS {
+        if occupied(todos: todos, index: index) == false { return index }
+        index = index + 1
+    }
+    MAX_TODOS
+}
+
+fn remove_at(todos: u32, index: u32) {
+    write_word(ptr: todos, index: slot_offset(index: index), value: 0)
+}
+
+fn visible(filter: u32, is_completed: bool) -> bool {
+    if filter == FILTER_ACTIVE { return is_completed == false }
+    if filter == FILTER_COMPLETED { return is_completed }
+    true
+}
+
+fn active_count(todos: u32) -> u32 {
+    let mut count: u32 = 0
+    let mut index: u32 = 0
+    while index < MAX_TODOS {
+        if occupied(todos: todos, index: index) && completed(todos: todos, index: index) == false {
+            count = count + 1
+        }
+        index = index + 1
+    }
+    count
+}
+
+fn selected(filter: u32, expected: u32) -> bool {
+    filter == expected
+}
+
+actor TodoApp {
+    todos_ptr: u32,
+    patch_ptr: u32,
+    draft_ptr: u32,
+    count: u32,
+    next_id: u32,
+    filter: u32,
+    editing: u32,
+    draft_len: u32,
+    connected: bool,
+    prevent_default: bool,
+    clear_input: bool,
+    focus_edit: bool,
+    revision: u32,
+
+    fn initial() -> TodoState uses (InitialState) {
+        let todos = allocate_component_buffer(capacity: TODO_STORAGE_BYTES)
+        let patch = allocate_component_buffer(capacity: PATCH_CAPACITY)
+        let draft = allocate_component_buffer(capacity: TITLE_CAPACITY)
+        clear_bytes(ptr: todos.ptr, len: todos.len)
+        TodoState {
+            todos_ptr: todos.ptr,
+            patch_ptr: patch.ptr,
+            draft_ptr: draft.ptr,
+            count: 0,
+            next_id: 1,
+            filter: FILTER_ALL,
+            editing: 0,
+            draft_len: 0,
+            connected: false,
+            prevent_default: false,
+            clear_input: false,
+            focus_edit: false,
+            revision: 0,
+        }
+    }
+
+    fn receive(self, event: own ComponentEvent) -> TodoState uses (ResidentTransition) {
+        let todos = self.todos_ptr
+        let patch = self.patch_ptr
+        let draft = self.draft_ptr
+        let draft_capacity = TITLE_CAPACITY
+        let mut count = self.count
+        let mut next_id = self.next_id
+        let mut filter = self.filter
+        let mut editing = self.editing
+        let mut draft_len = self.draft_len
+        let mut connected = self.connected
+        let mut prevent_default = false
+        let mut clear_input = false
+        let mut focus_edit = false
+        let mut revision = self.revision
+
+        match event.kind {
+            ComponentEventKind::Connected => {
+                connected = true
+                revision = revision + 1
+            }
+            ComponentEventKind::Disconnected => {
+                connected = false
+                revision = revision + 1
+            }
+            ComponentEventKind::Activate => {
+                if connected {
+                    if event.target == ACTION_CLEAR_COMPLETED {
+                        let mut index: u32 = 0
+                        while index < MAX_TODOS {
+                            if occupied(todos: todos, index: index) && completed(todos: todos, index: index) {
+                                remove_at(todos: todos, index: index)
+                                count = count - 1
+                            }
+                            index = index + 1
+                        }
+                    } else {
+                        if event.target == ACTION_FILTER_ALL {
+                            filter = FILTER_ALL
+                        } else {
+                            if event.target == ACTION_FILTER_ACTIVE {
+                                filter = FILTER_ACTIVE
+                            } else {
+                                if event.target == ACTION_FILTER_COMPLETED {
+                                    filter = FILTER_COMPLETED
+                                } else {
+                                    let index = find_slot(todos: todos, key: event.key)
+                                    if index < MAX_TODOS {
+                                        if event.target == ACTION_DESTROY {
+                                            remove_at(todos: todos, index: index)
+                                            count = count - 1
+                                            if editing == event.key { editing = 0 }
+                                        } else {
+                                            if event.target == ACTION_EDIT && event.detail >= 2 {
+                                                draft_len = copy_text(
+                                                    destination: draft,
+                                                    capacity: draft_capacity,
+                                                    value: title(todos: todos, index: index),
+                                                )
+                                                editing = event.key
+                                                focus_edit = true
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    revision = revision + 1
+                }
+            }
+            ComponentEventKind::Change => {
+                if connected {
+                    if event.target == ACTION_TOGGLE_ALL {
+                        let make_completed = active_count(todos: todos) != 0
+                        let mut index: u32 = 0
+                        while index < MAX_TODOS {
+                            if occupied(todos: todos, index: index) {
+                                set_completed(todos: todos, index: index, value: make_completed)
+                            }
+                            index = index + 1
+                        }
+                    } else {
+                        if event.target == ACTION_TOGGLE {
+                            let index = find_slot(todos: todos, key: event.key)
+                            if index < MAX_TODOS {
+                                set_completed(
+                                    todos: todos,
+                                    index: index,
+                                    value: completed(todos: todos, index: index) == false,
+                                )
+                            }
+                        }
+                    }
+                    revision = revision + 1
+                }
+            }
+            ComponentEventKind::Input => {
+                if connected && event.target == ACTION_EDIT_INPUT && event.key == editing {
+                    draft_len = copy_text(
+                        destination: draft,
+                        capacity: draft_capacity,
+                        value: event.text,
+                    )
+                    revision = revision + 1
+                }
+            }
+            ComponentEventKind::KeyDown => {
+                if connected {
+                    if event.target == ACTION_NEW && event.detail == 13 {
+                        let value = trim(value: event.text)
+                        let index = find_empty(todos: todos)
+                        if value.len > 0 && index < MAX_TODOS {
+                            write_word(ptr: todos, index: slot_offset(index: index), value: 1)
+                            write_word(ptr: todos, index: slot_offset(index: index) + 4, value: next_id)
+                            write_word(ptr: todos, index: slot_offset(index: index) + 8, value: 0)
+                            set_title(todos: todos, index: index, value: value)
+                            count = count + 1
+                            next_id = next_id + 1
+                            clear_input = true
+                        }
+                        prevent_default = true
+                    } else {
+                        if event.target == ACTION_EDIT_INPUT && event.key == editing {
+                            if event.detail == 13 {
+                                let index = find_slot(todos: todos, key: event.key)
+                                let value = trim(value: component_string(ptr: draft, len: draft_len))
+                                if index < MAX_TODOS {
+                                    if value.len == 0 {
+                                        remove_at(todos: todos, index: index)
+                                        count = count - 1
+                                    } else {
+                                        let _ = set_title(todos: todos, index: index, value: value)
+                                    }
+                                }
+                                editing = 0
+                                prevent_default = true
+                            } else {
+                                if event.detail == 27 {
+                                    editing = 0
+                                    prevent_default = true
+                                }
+                            }
+                        }
+                    }
+                    revision = revision + 1
+                }
+            }
+            _ => {}
+        }
+
+        TodoState {
+            todos_ptr: todos,
+            patch_ptr: patch,
+            draft_ptr: draft,
+            count: count,
+            next_id: next_id,
+            filter: filter,
+            editing: editing,
+            draft_len: draft_len,
+            connected: connected,
+            prevent_default: prevent_default,
+            clear_input: clear_input,
+            focus_edit: focus_edit,
+            revision: revision,
+        }
+    }
+
+    fn project(self) -> ComponentPatch uses (ProjectState) {
+        let todos = self.todos_ptr
+        let active = active_count(todos: todos)
+        let mut writer = ComponentWriter::new(
+            buffer: BrowserBytes { ptr: self.patch_ptr, len: PATCH_CAPACITY },
+        )
+        writer = writer.set_hidden(target: NODE_MAIN, hidden: self.count == 0)
+        writer = writer.set_hidden(target: NODE_FOOTER, hidden: self.count == 0)
+        writer = writer.set_small_u32_text(target: NODE_COUNT, value: active)
+        writer = writer.set_checked(
+            target: NODE_TOGGLE_ALL,
+            checked: self.count > 0 && active == 0,
+        )
+        writer = writer.set_class(
+            target: NODE_FILTER_ALL,
+            token: CLASS_SELECTED,
+            enabled: selected(filter: self.filter, expected: FILTER_ALL),
+        )
+        writer = writer.set_class(
+            target: NODE_FILTER_ACTIVE,
+            token: CLASS_SELECTED,
+            enabled: selected(filter: self.filter, expected: FILTER_ACTIVE),
+        )
+        writer = writer.set_class(
+            target: NODE_FILTER_COMPLETED,
+            token: CLASS_SELECTED,
+            enabled: selected(filter: self.filter, expected: FILTER_COMPLETED),
+        )
+        if self.clear_input {
+            writer = writer.set_value(target: NODE_NEW, value: component_string(ptr: 0, len: 0))
+        }
+
+        writer = writer.repeat_begin(container: NODE_LIST, template: TEMPLATE_TODO)
+        let mut index: u32 = 0
+        while index < MAX_TODOS {
+            if occupied(todos: todos, index: index) {
+                let is_completed = completed(todos: todos, index: index)
+                if visible(filter: self.filter, is_completed: is_completed) {
+                    let key = todo_id(todos: todos, index: index)
+                    let value = title(todos: todos, index: index)
+                    writer = writer.repeat_item(key: key)
+                    writer = writer.set_text(target: NODE_ROW_TITLE, value: value)
+                    writer = writer.set_checked(target: NODE_ROW_TOGGLE, checked: is_completed)
+                    writer = writer.set_class(
+                        target: 0,
+                        token: CLASS_COMPLETED,
+                        enabled: is_completed,
+                    )
+                    writer = writer.set_class(
+                        target: 0,
+                        token: CLASS_EDITING,
+                        enabled: key == self.editing,
+                    )
+                    if key == self.editing {
+                        writer = writer.set_value(
+                            target: NODE_ROW_EDIT,
+                            value: component_string(ptr: self.draft_ptr, len: self.draft_len),
+                        )
+                        if self.focus_edit {
+                            writer = writer.focus(target: NODE_ROW_EDIT)
+                        }
+                    }
+                }
+            }
+            index = index + 1
+        }
+        writer = writer.repeat_end()
+
+        ComponentPatch {
+            visible_mask: 0,
+            focus_target: 0,
+            flags: if self.prevent_default { 1 } else { 0 },
+            commands: writer.finish(),
+        }
+    }
+}

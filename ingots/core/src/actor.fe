@@ -1,0 +1,22 @@
+//! Target-neutral actor execution roles.
+//!
+//! These types describe how a backend may invoke an authored actor behavior;
+//! they do not name a host platform or prescribe application event vocabulary.
+
+/// A behavior whose complete returned state remains resident between calls.
+/// The behavior takes one ordinary event value before its flattened actor
+/// fields and returns the complete non-resource state in declaration order.
+#[actor_transition(resident)]
+pub struct ResidentTransition {}
+
+/// A self-less actor behavior returning complete initial state. Backends may
+/// publish it behind a fixed initialization ABI without exposing its authored
+/// name to the host.
+#[actor_initializer]
+pub struct InitialState {}
+
+/// A read-only actor behavior projecting resident state to a closed value for
+/// its host. The role is target-neutral; web component patches are one library
+/// consumer, not compiler vocabulary.
+#[actor_projection]
+pub struct ProjectState {}

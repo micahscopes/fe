@@ -17,7 +17,6 @@ use std::{
 
 use compiler_db::DriverDataBase;
 use hir::analysis::{
-    name_resolution::{PathRes, resolve_path},
     semantic::{ViewParam, ViewParamKind, project_view_surface},
     ty::{
         adt_def::AdtRef,
@@ -28,10 +27,9 @@ use hir::analysis::{
     },
 };
 use hir::hir_def::{
-    FieldParent, GenericArg, GpuControl, GpuDispatch, GpuResource, GpuSchedule, GpuStage, ItemKind,
-    LitKind, Partial, PathId, Struct, TopLevelMod, TypeKind,
+    FieldParent, GenericArg, GpuControl, GpuDispatch, GpuResource, GpuSchedule, GpuStage, LitKind,
+    Partial, PathId, TopLevelMod, TypeKind,
 };
-use hir::span::{ActorDesugaredFocus, DesugaredOrigin, HirOrigin};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sonatina_codegen::isa::spirv::{
@@ -39,6 +37,7 @@ use sonatina_codegen::isa::spirv::{
     SpirvResourceElement, SpirvResourceField, SpirvScalarKind, WordKind,
 };
 
+use crate::actor_semantics::{SemanticActor, nominal_attrs, resolve_metadata_ty, semantic_actors};
 use crate::sonatina::{
     WasmCompileOptions, compile_runtime_package_spirv_compute_with_resources,
     compile_runtime_package_spirv_grid, compile_runtime_package_spirv_render,
@@ -415,12 +414,6 @@ impl WebBuildOptions {
     }
 }
 
-#[derive(Debug)]
-struct SemanticActor<'db> {
-    state: Struct<'db>,
-    behaviors: Vec<hir::hir_def::Func<'db>>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebActorProgram {
     pub actor: String,
@@ -464,80 +457,6 @@ pub enum WebActorResourceElement {
 pub struct WebActorResourceField {
     pub name: String,
     pub offset: u32,
-}
-
-fn semantic_actors<'db>(
-    db: &'db DriverDataBase,
-    top_mod: TopLevelMod<'db>,
-) -> Vec<SemanticActor<'db>> {
-    let items = top_mod.all_items(db);
-    let mut actors = Vec::new();
-    for item in items {
-        let ItemKind::Struct(state) = item else {
-            continue;
-        };
-        let HirOrigin::Desugared(DesugaredOrigin::Actor(state_origin)) = state.origin(db) else {
-            continue;
-        };
-        if state_origin.focus != ActorDesugaredFocus::State {
-            continue;
-        }
-        let behaviors = items
-            .iter()
-            .filter_map(|item| {
-                let ItemKind::Func(func) = item else {
-                    return None;
-                };
-                let HirOrigin::Desugared(DesugaredOrigin::Actor(origin)) = func.origin(db) else {
-                    return None;
-                };
-                (origin.actor == state_origin.actor
-                    && matches!(origin.focus, ActorDesugaredFocus::Behavior(_)))
-                .then_some(*func)
-            })
-            .collect();
-        actors.push(SemanticActor {
-            state: *state,
-            behaviors,
-        });
-    }
-    actors
-}
-
-fn resolve_metadata_ty<'db>(
-    db: &'db DriverDataBase,
-    path: hir::hir_def::PathId<'db>,
-    scope: hir::hir_def::scope_graph::ScopeId<'db>,
-) -> Option<TyId<'db>> {
-    for candidate in [scope, scope.top_mod(db).scope()] {
-        for candidate_path in [path, path.strip_generic_args(db)] {
-            match resolve_path(
-                db,
-                candidate_path,
-                candidate,
-                PredicateListId::empty_list(db),
-                true,
-            )
-            .ok()
-            {
-                Some(PathRes::Ty(ty) | PathRes::TyAlias(_, ty)) => return Some(ty),
-                _ => {}
-            }
-        }
-    }
-    None
-}
-
-fn nominal_attrs<'db>(
-    db: &'db DriverDataBase,
-    ty: TyId<'db>,
-) -> Option<hir::hir_def::AttrListId<'db>> {
-    let ty = ty.as_view(db).unwrap_or(ty);
-    let adt = ty.adt_def(db)?;
-    let AdtRef::Struct(struct_) = adt.adt_ref(db) else {
-        return None;
-    };
-    struct_.scope().attrs(db)
 }
 
 fn actor_is_gpu_program(db: &DriverDataBase, actor: &SemanticActor<'_>) -> bool {

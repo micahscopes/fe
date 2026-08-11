@@ -192,6 +192,7 @@ pub fn runtime_builtin_func_kind<'db>(
     let path = runtime_builtin_func_path(db, func)?;
     Some(match (kind, path.as_slice()) {
         (IngotKind::Core, ["effect_ref", "alloc_bytes"]) => RuntimeBuiltinFuncKind::Malloc,
+        (IngotKind::Core, ["browser", "alloc_browser_bytes"]) => RuntimeBuiltinFuncKind::Malloc,
         (IngotKind::Std, ["evm", "mem", "alloc"]) => RuntimeBuiltinFuncKind::Malloc,
         (IngotKind::Std, ["evm", "ops", "mload"]) => RuntimeBuiltinFuncKind::Mload,
         (IngotKind::Std, ["evm", "ops", "mstore"]) => RuntimeBuiltinFuncKind::Mstore,

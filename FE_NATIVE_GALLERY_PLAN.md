@@ -73,6 +73,34 @@ Origin: honesty audit of Claude Code session
   are never cached. A cache-disabled release precompile built all ten gallery
   bundles in 105 seconds, with repeated shared checks reporting 0--1 ms, and
   the verifier accepted all ten modules and 34 publication files.
+- The first generic resident component slice is implemented without a
+  component-specific JSON protocol. `InitialState`, `ResidentTransition`, and
+  `ProjectState` are Fe roles lowered to three fixed Wasm exports. The fixed
+  `<fe-component>` adapter transports lifecycle/input facts plus bounded UTF-8
+  text and applies a bounded Fe-authored DOM command stream. Fe owns visible,
+  focus, prevent-default, text/value/checked/hidden/class/disabled effects and
+  stable numeric repeat keys; the adapter owns standards event subscription,
+  Wasm memory transport, validation, and keyed DOM reconciliation.
+- A resident Fe TodoMVC actor is both a standalone example and a canonical
+  gallery tile. Fe owns its bounded UTF-8 todo storage, monotonic keys, add,
+  toggle/toggle-all, all/active/completed filters, edit/commit/cancel, destroy,
+  clear-completed, lifecycle state, and complete projection. An independent
+  Rust reducer compares semantic state and decoded effect operations at every
+  step of a mixed UTF-8 event tape; it does not use byte equality as a behavior
+  oracle. A real Chromium gate additionally exercises DOM visibility, native
+  keyboard input, prevent-default, caret continuity, focus, surviving keyed
+  identity, filter reconciliation, repeated disconnect/reconnect cleanup, and
+  state continuity. That browser gate exposed and now guards three bugs that
+  byte/hash checks could not: dropped `<template>` contents, focus overwritten
+  by post-click browser defaults, and needless keyed-row moves detaching a
+  focused input.
+- This component slice is not the Phase 5 end state. Todo page composition and
+  numeric action/node/class/template declarations are still ordinary authored
+  HTML; the component directory route still needs to supersede the render-lane
+  probe; an attribute-mutation event ABI, persistence, unbounded collections,
+  native backend parity, and Fe-generated page composition remain open. The
+  example intentionally caps itself at 32 todos and 96 UTF-8 bytes per title
+  while those richer storage interfaces are designed.
 - Animation-frame/GPU-completion facts and their clock state machine have not
   yet been exposed as typed events to the resident Fe actor. Native/Cranelift
   parity, typed lifecycle/reactive streams, pointer capture, picking/messages,

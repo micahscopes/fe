@@ -62,6 +62,14 @@ pub enum GpuSchedule {
     LatestPerFrame,
 }
 
+/// Target-neutral stateful actor transition selected by a nominal role type.
+/// A backend may keep the actor's complete returned state resident between
+/// host calls; the attribute carries no browser, DOM, or rendering semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ActorTransition {
+    Resident,
+}
+
 /// Dispatch policy carried by a nominal compute-dispatch type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GpuDispatch {
@@ -498,6 +506,25 @@ impl<'db> AttrListId<'db> {
             "latest_per_frame" => Some(GpuSchedule::LatestPerFrame),
             _ => None,
         }
+    }
+
+    pub fn actor_transition(self, db: &'db dyn HirDb) -> Option<ActorTransition> {
+        match self.single_ident_arg(db, "actor_transition")?.as_str() {
+            "resident" => Some(ActorTransition::Resident),
+            _ => None,
+        }
+    }
+
+    /// Marks a self-less actor behavior that returns its complete initial
+    /// state. The behavior name remains ordinary Fe vocabulary.
+    pub fn is_actor_initializer(self, db: &'db dyn HirDb) -> bool {
+        self.has_marker_attr(db, "actor_initializer")
+    }
+
+    /// Marks a read-only `self` behavior that projects resident actor state to
+    /// a closed host-facing value. Projection semantics remain library-owned.
+    pub fn is_actor_projection(self, db: &'db dyn HirDb) -> bool {
+        self.has_marker_attr(db, "actor_projection")
     }
 
     pub fn gpu_dispatch(self, db: &'db dyn HirDb) -> Option<GpuDispatch> {

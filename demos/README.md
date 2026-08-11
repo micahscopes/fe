@@ -1,5 +1,24 @@
 # Browser demos
 
+## Standards-based Fe HTML
+
+The canonical gallery and the resident TodoMVC component use inert
+`application/fe` source declarations and the fixed, demo-blind browser hosts
+published by `fe web dev`:
+
+```sh
+cargo run --release -p fe -- web dev demos/gallery.html --port 8000 --host 0.0.0.0
+cargo run --release -p fe -- web dev demos/todomvc.html --port 8000 --host 0.0.0.0
+```
+
+TodoMVC's lifecycle, UTF-8 storage, reducer, filters, edit policy, stable keys,
+and DOM effect projection are in `demos/sketches/todomvc/src/lib.fe`. The
+browser adapter transports standards events and applies the fixed component
+effect vocabulary; it contains no Todo-specific policy. The example is also
+embedded as a tile in `gallery.html`.
+
+The sections below document the older Trunk/compatibility showcase lanes.
+
 Compiler-produced Wasm/WGSL artifacts, served from one isolated origin via Trunk.
 
 ```sh

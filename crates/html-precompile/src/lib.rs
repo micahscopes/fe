@@ -58,6 +58,7 @@ pub const SURFACE_ELEMENT_TAG: &str = "fe-surface";
 /// idempotent posture as [`BOOTSTRAP_MARKER`].
 pub const SURFACE_RUNTIME_MARKER: &str = "data-fe-surface-runtime";
 const BOOTSTRAP_SOURCE: &str = include_str!("../assets/bootstrap.js");
+const RESIDENT_ACTOR_INITIALIZE_EXPORT: &str = "fe_actor_initialize_v1";
 
 /// A compiled render bundle for one `data-fe-src` naming a GpuProgram-actor
 /// ingot, produced through the SAME seam `fe web build` uses
@@ -1317,6 +1318,7 @@ fn precompile_html_impl(
     for (index, script) in scripts.into_iter().enumerate() {
         let src = attr(&script, "data-fe-src");
         let entry_attr = attr(&script, "data-fe-entry");
+        let is_component = attr(&script, "data-fe-component").is_some();
 
         if let Some(src) = src.as_deref() {
             let url = base_url
@@ -1374,7 +1376,21 @@ fn precompile_html_impl(
                 text_content(&script),
             )
         };
-        let entry = entry_attr.unwrap_or_else(|| "main".to_owned());
+        let entry = if is_component {
+            if let Some(entry) = entry_attr
+                && entry != RESIDENT_ACTOR_INITIALIZE_EXPORT
+            {
+                return Err(PrecompileError::Compile {
+                    source_url,
+                    detail: format!(
+                        "a role-selected resident component has fixed entry `{RESIDENT_ACTOR_INITIALIZE_EXPORT}`, not `{entry}`"
+                    ),
+                });
+            }
+            RESIDENT_ACTOR_INITIALIZE_EXPORT.to_owned()
+        } else {
+            entry_attr.unwrap_or_else(|| "main".to_owned())
+        };
         let request = CompileRequest {
             protocol: ProtocolVersion::CURRENT,
             root: source_url.clone(),
@@ -1540,6 +1556,7 @@ fn precompile_html_impl(
 
     publish_bootstrap(&dom.document, &document_url, &base_url, &mut assets)?;
 
+    materialize_template_contents_for_serialization(&dom.document);
     let mut serialized = Vec::new();
     serialize(
         &mut serialized,
@@ -1555,6 +1572,32 @@ fn precompile_html_impl(
         modules,
         render_dependencies,
     })
+}
+
+/// `markup5ever_rcdom::SerializableHandle` currently walks an element's
+/// ordinary `children` but not the separate fragment stored in
+/// `template_contents`. Move each parsed template fragment into the traversal
+/// tree immediately before serialization so standards-authored inert
+/// templates survive precompilation. Re-parsing the output restores the
+/// browser/rcdom template-content representation.
+fn materialize_template_contents_for_serialization(root: &Handle) {
+    let contents = match &root.data {
+        NodeData::Element {
+            template_contents, ..
+        } => template_contents.borrow_mut().take(),
+        _ => None,
+    };
+    if let Some(contents) = contents {
+        let moved: Vec<_> = contents.children.borrow_mut().drain(..).collect();
+        for child in &moved {
+            child.parent.set(Some(Rc::downgrade(root)));
+        }
+        root.children.borrow_mut().extend(moved);
+    }
+    let children = root.children.borrow().clone();
+    for child in children {
+        materialize_template_contents_for_serialization(&child);
+    }
 }
 
 /// Publish the fixed render runtime module once, content-addressed. Returns
@@ -2857,6 +2900,92 @@ pub fn main() -> u32 { 42 }
         )
         .unwrap();
         assert!(!opted_out.html.contains(BOOTSTRAP_MARKER));
+    }
+
+    #[test]
+    fn resident_fe_component_uses_normal_wasm_lane_and_fixed_bootstrap_without_new_json_protocol() {
+        let html = r##"<!doctype html><html><head></head><body>
+<script type="application/fe" data-fe-src="./source-inspector.fe"
+        data-fe-component data-fe-mount="#inspector"></script>
+<fe-component id="inspector">
+  <button data-fe-action="0">Fe</button>
+  <button data-fe-action="1">Wasm</button>
+  <section data-fe-view="0">authored</section>
+  <section data-fe-view="1">generated</section>
+</fe-component>
+</body></html>"##;
+        let source = include_str!("../../codegen/tests/fixtures/web_component_actor/src/lib.fe");
+        let output = precompile_html("https://example.test/component.html", html, |url| {
+            assert_eq!(url.as_str(), "https://example.test/source-inspector.fe");
+            Ok(source.to_owned())
+        })
+        .expect("precompile resident Fe component");
+
+        assert_eq!(output.modules.len(), 1);
+        let module = &output.modules[0];
+        assert_eq!(module.entry, RESIDENT_ACTOR_INITIALIZE_EXPORT);
+        for fixed in [
+            "fe_actor_initialize_v1",
+            "fe_actor_transition_v1",
+            "fe_actor_project_v1",
+        ] {
+            assert!(
+                module
+                    .interface
+                    .exports
+                    .iter()
+                    .any(|export| export.name == fixed),
+                "published component interface missing {fixed}"
+            );
+        }
+        assert!(output.html.contains("data-fe-component=\"\""));
+        assert!(output.html.contains("data-fe-mount=\"#inspector\""));
+        assert!(output.html.contains("<fe-component id=\"inspector\""));
+        assert!(
+            !output.html.contains("actor_transition")
+                && !output.html.contains("ComponentEventKind")
+                && !output.html.contains("visible_mask"),
+            "Fe policy must not be serialized into page or manifest JSON"
+        );
+        let bootstrap = output
+            .assets
+            .iter()
+            .find(|(path, _)| path.contains("fe-bootstrap-"))
+            .map(|(_, bytes)| std::str::from_utf8(bytes).expect("bootstrap UTF-8"))
+            .expect("published fixed bootstrap");
+        assert!(bootstrap.contains("customElements.define(\"fe-component\""));
+        assert!(bootstrap.contains("fe_actor_transition_v1"));
+        assert!(bootstrap.contains("[data-fe-view]"));
+    }
+
+    #[test]
+    fn precompile_preserves_inert_html_template_contents() {
+        let output = precompile_html(
+            "https://example.test/component.html",
+            r#"<!doctype html><template data-fe-template="7">
+                 <li data-fe-key="fixture"><span>projected row</span></li>
+               </template>"#,
+            |_| panic!("template-only page has no Fe source"),
+        )
+        .expect("precompile template-only page");
+
+        let reparsed = html5ever::parse_document(RcDom::default(), Default::default())
+            .one(output.html.as_str());
+        let template = find_first_element(&reparsed.document, "template")
+            .expect("serialized template element");
+        let contents = match &template.data {
+            NodeData::Element {
+                template_contents, ..
+            } => template_contents
+                .borrow()
+                .clone()
+                .expect("reparsed template content fragment"),
+            _ => unreachable!("template is an element"),
+        };
+        let row = find_first_element(&contents, "li").expect("template row survived serialization");
+        assert_eq!(attr(&row, "data-fe-key").as_deref(), Some("fixture"));
+        assert!(find_first_element(&contents, "span").is_some());
+        assert!(output.html.contains("projected row"));
     }
 
     #[test]

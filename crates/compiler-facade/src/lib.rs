@@ -115,22 +115,34 @@ fn compile_wasm(request: &CompileRequest) -> Result<CompileResult, CompileFacade
     }
     let top_mod = db.top_mod(root_file);
 
-    let output = BackendKind::Wasm
-        .create()
-        .compile(
-            &db,
-            top_mod,
-            layout_for(BackendKind::Wasm),
-            match request.options.optimization {
-                fe_compiler_protocol::OptimizationLevel::None => OptLevel::O0,
-                fe_compiler_protocol::OptimizationLevel::Size
-                | fe_compiler_protocol::OptimizationLevel::Speed => OptLevel::O1,
-            },
-        )
-        .map_err(|error| CompileFacadeError::Backend(error.to_string()))?;
-    let bytes = output
-        .into_bytecode()
-        .ok_or_else(|| CompileFacadeError::Artifact("Wasm backend returned no bytes".to_owned()))?;
+    // A nominal target-neutral resident actor role selects the fixed actor ABI
+    // through the same ordinary Wasm target. This is semantic auto-discovery,
+    // not a new JSON request mode, entry-name convention, or web/component
+    // compiler special case.
+    let optimize = request.options.optimization != fe_compiler_protocol::OptimizationLevel::None;
+    let bytes = if let Some(actor) =
+        codegen::compile_resident_actor_with_optimization(&db, top_mod, optimize)
+            .map_err(|error| CompileFacadeError::Backend(error.to_string()))?
+    {
+        actor.wasm
+    } else {
+        let output = BackendKind::Wasm
+            .create()
+            .compile(
+                &db,
+                top_mod,
+                layout_for(BackendKind::Wasm),
+                match request.options.optimization {
+                    fe_compiler_protocol::OptimizationLevel::None => OptLevel::O0,
+                    fe_compiler_protocol::OptimizationLevel::Size
+                    | fe_compiler_protocol::OptimizationLevel::Speed => OptLevel::O1,
+                },
+            )
+            .map_err(|error| CompileFacadeError::Backend(error.to_string()))?;
+        output.into_bytecode().ok_or_else(|| {
+            CompileFacadeError::Artifact("Wasm backend returned no bytes".to_owned())
+        })?
+    };
     wasmparser::validate(&bytes)
         .map_err(|error| CompileFacadeError::Artifact(format!("invalid Wasm: {error}")))?;
     let interface = wasm_interface(&bytes)?;
@@ -377,6 +389,83 @@ mod tests {
         assert_eq!(dependencies.root, "fe-memory:///app.fe");
         assert_eq!(dependencies.sources.len(), 1);
         assert_eq!(dependencies.sources[0].url, "fe-memory:///app.fe");
+    }
+
+    #[test]
+    fn nominal_resident_actor_uses_fixed_stateful_wasm_abi_without_a_new_request_mode() {
+        let source = r#"
+use core::actor::{InitialState, ProjectState, ResidentTransition}
+
+pub struct Event { pub amount: u32 }
+pub struct State { pub count: u32 }
+pub struct Patch { pub visible_mask: u32, pub focus_target: u32, pub flags: u32 }
+
+actor App {
+    count: u32,
+
+    const fn initial() -> State uses (InitialState) {
+        State { count: 3 }
+    }
+
+    fn project(self) -> Patch uses (ProjectState) {
+        Patch { visible_mask: self.count, focus_target: 0, flags: 0 }
+    }
+
+    fn update(self, event: own Event) -> State uses (ResidentTransition) {
+        State { count: self.count + event.amount }
+    }
+}
+"#;
+        let mut request = request(source);
+        request.entries = vec![codegen::RESIDENT_ACTOR_INITIALIZE_EXPORT.to_owned()];
+        let result = compile(&request).expect("resident actor facade compilation");
+        result.validate().expect("resident actor compile result");
+        assert!(result.diagnostics.is_empty());
+        let wasm = result
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.kind == ArtifactKind::WasmModule)
+            .expect("resident actor Wasm");
+        let exports = result
+            .interface
+            .exports
+            .iter()
+            .map(|export| export.name.as_str())
+            .collect::<Vec<_>>();
+        for fixed in [
+            codegen::RESIDENT_ACTOR_INITIALIZE_EXPORT,
+            codegen::RESIDENT_ACTOR_TRANSITION_EXPORT,
+            codegen::RESIDENT_ACTOR_PROJECT_EXPORT,
+        ] {
+            assert!(exports.contains(&fixed), "missing {fixed}: {exports:?}");
+        }
+        assert!(
+            !exports
+                .iter()
+                .any(|name| matches!(*name, "initial" | "update" | "project")),
+            "authored behavior names leaked into host discovery: {exports:?}"
+        );
+
+        let engine = wasmtime::Engine::default();
+        let module = wasmtime::Module::new(&engine, &wasm.bytes).expect("resident facade Wasm");
+        let mut store = wasmtime::Store::new(&engine, ());
+        let instance =
+            wasmtime::Instance::new(&mut store, &module, &[]).expect("resident instance");
+        let initialize = instance
+            .get_typed_func::<(), i32>(&mut store, codegen::RESIDENT_ACTOR_INITIALIZE_EXPORT)
+            .expect("initializer");
+        let update = instance
+            .get_typed_func::<i32, i32>(&mut store, codegen::RESIDENT_ACTOR_TRANSITION_EXPORT)
+            .expect("transition");
+        let project = instance
+            .get_typed_func::<(), (i32, i32, i32)>(
+                &mut store,
+                codegen::RESIDENT_ACTOR_PROJECT_EXPORT,
+            )
+            .expect("projection");
+        assert_eq!(initialize.call(&mut store, ()).unwrap(), 3);
+        assert_eq!(update.call(&mut store, 4).unwrap(), 7);
+        assert_eq!(project.call(&mut store, ()).unwrap(), (7, 0, 0));
     }
 
     #[test]

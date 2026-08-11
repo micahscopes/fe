@@ -1,5 +1,6 @@
 use ingot::Copy
-use super::effect_ref::MemPtr
+use super::effect_ref::{AddressSpace, EffectHandle, EffectHandleMut, EffectRef, EffectRefMut, MemPtr}
+use super::num::IntDowncast
 
 /// Borrowed bytes in wasm32 linear memory.
 ///
@@ -37,6 +38,19 @@ pub struct BrowserLatin1String {
     pub len: u32,
 }
 
+/// wasm32-native pointer used by browser component state and effect buffers.
+/// Unlike the cross-target `MemPtr`, its source-level carrier is exactly one
+/// `u32`, so pointer arithmetic never introduces an out-of-envelope `u256`
+/// into Wasm application code.
+pub struct BrowserPtr<T> {
+    addr: u32,
+}
+
+/// Allocate browser linear memory and return a wasm32-native pointer.
+extern {
+    pub fn alloc_browser_bytes(_ size: u32) -> BrowserPtr<u8>
+}
+
 /// Allocated bytes returned from Fe through the canonical browser ABI.
 ///
 /// Keeping the pointer as `MemPtr<u8>` preserves the backend's native
@@ -65,8 +79,52 @@ impl Copy for BrowserBytes {}
 impl Copy for BrowserString {}
 impl Copy for BrowserUtf16String {}
 impl Copy for BrowserLatin1String {}
+impl<T> Copy for BrowserPtr<T> {}
 impl Copy for AllocatedBrowserBytes {}
 impl<T, const MAX: usize> Copy for BrowserList<T, MAX> {}
+
+impl<T> EffectHandle for BrowserPtr<T> {
+    type Target = T
+    const SPACE: AddressSpace = AddressSpace::Memory
+
+    fn from_raw(_ raw: u256) -> Self {
+        Self { addr: raw.downcast_truncate() }
+    }
+
+    fn raw(self) -> u256 {
+        self.addr as u256
+    }
+}
+
+impl<T> EffectHandleMut for BrowserPtr<T> {}
+impl<T> EffectRef<T> for BrowserPtr<T> {}
+impl<T> EffectRefMut<T> for BrowserPtr<T> {}
+
+impl<T> BrowserPtr<T> {
+    pub fn from_u32(_ addr: u32) -> Self {
+        Self { addr: addr }
+    }
+
+    pub fn address(self) -> u32 {
+        self.addr
+    }
+
+    pub fn read(self) -> T
+        where T: Copy
+    {
+        let mut ptr = self
+        with (ptr) {
+            super::effect_ref::read(ptr)
+        }
+    }
+
+    pub fn write(self, _ value: T) {
+        let mut ptr = self
+        with (ptr) {
+            super::effect_ref::write(ptr, value)
+        }
+    }
+}
 
 /// Marks a canonical browser lane as host-executed.
 #[host_execution(external)]

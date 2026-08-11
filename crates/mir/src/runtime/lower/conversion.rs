@@ -612,14 +612,15 @@ impl<'db> RuntimeConversionPlanner<'db> {
                 steps.push(RuntimeConversionStep::ProviderToRaw { class: target });
                 Ok(())
             }
-            (RuntimeClass::RawAddr { .. }, RuntimeClass::Scalar(scalar))
+            (RuntimeClass::RawAddr { space, .. }, RuntimeClass::Scalar(scalar))
                 if matches!(
                     scalar.repr,
                     ScalarRepr::Int {
                         bits: 256,
                         signed: false
                     }
-                ) =>
+                ) || (*space == AddressSpaceKind::Memory
+                    && is_wasm32_address_scalar(scalar)) =>
             {
                 steps.push(RuntimeConversionStep::RawAddrToWord {
                     class: target.clone(),
@@ -633,7 +634,9 @@ impl<'db> RuntimeConversionPlanner<'db> {
                     space,
                     target: target_layout,
                 },
-            ) if is_plain_word_scalar(scalar) => {
+            ) if is_plain_word_scalar(scalar)
+                || (*space == AddressSpaceKind::Memory && is_wasm32_address_scalar(scalar)) =>
+            {
                 steps.push(RuntimeConversionStep::WordToRawAddr {
                     class: target.clone(),
                     space: *space,
@@ -677,6 +680,23 @@ fn is_plain_word_scalar(scalar: &ScalarClass<'_>) -> bool {
     )
 }
 
+/// Browser linear-memory descriptors carry wasm32 addresses as plain `u32`.
+/// Admit that exact source shape when constructing a memory-space raw address;
+/// other address spaces and signed/narrower integers retain the full-word-only
+/// rule above.
+fn is_wasm32_address_scalar(scalar: &ScalarClass<'_>) -> bool {
+    matches!(
+        scalar,
+        ScalarClass {
+            repr: ScalarRepr::Int {
+                bits: 32,
+                signed: false
+            },
+            role: ScalarRole::Plain
+        }
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use driver::DriverDataBase;
@@ -689,6 +709,16 @@ mod tests {
         RuntimeClass::Scalar(ScalarClass {
             repr: ScalarRepr::Int {
                 bits: 256,
+                signed: false,
+            },
+            role: ScalarRole::Plain,
+        })
+    }
+
+    fn u32_class<'db>() -> RuntimeClass<'db> {
+        RuntimeClass::Scalar(ScalarClass {
+            repr: ScalarRepr::Int {
+                bits: 32,
                 signed: false,
             },
             role: ScalarRole::Plain,
@@ -747,6 +777,70 @@ mod tests {
                 },
             }]
         );
+    }
+
+    #[test]
+    fn wasm32_memory_addresses_admit_plain_u32_and_no_other_narrow_carrier() {
+        let db = DriverDataBase::default();
+        let memory_raw = RuntimeClass::RawAddr {
+            space: AddressSpaceKind::Memory,
+            target: None,
+        };
+
+        let to_raw = RuntimeConversionPlanner::plan(&db, u32_class(), memory_raw.clone()).unwrap();
+        assert_eq!(
+            to_raw.steps.as_ref(),
+            &[RuntimeConversionStep::WordToRawAddr {
+                class: memory_raw.clone(),
+                space: AddressSpaceKind::Memory,
+                target: None,
+            }]
+        );
+        let to_u32 = RuntimeConversionPlanner::plan(&db, memory_raw.clone(), u32_class()).unwrap();
+        assert_eq!(
+            to_u32.steps.as_ref(),
+            &[RuntimeConversionStep::RawAddrToWord {
+                class: u32_class(),
+                scalar: match u32_class() {
+                    RuntimeClass::Scalar(scalar) => scalar,
+                    _ => unreachable!(),
+                },
+            }]
+        );
+
+        let storage_raw = RuntimeClass::RawAddr {
+            space: AddressSpaceKind::Storage,
+            target: None,
+        };
+        assert!(matches!(
+            RuntimeConversionPlanner::plan(&db, u32_class(), storage_raw),
+            Err(RuntimeConversionError::Unsupported { .. })
+        ));
+        for disallowed in [
+            ScalarClass {
+                repr: ScalarRepr::Int {
+                    bits: 32,
+                    signed: true,
+                },
+                role: ScalarRole::Plain,
+            },
+            ScalarClass {
+                repr: ScalarRepr::Int {
+                    bits: 16,
+                    signed: false,
+                },
+                role: ScalarRole::Plain,
+            },
+        ] {
+            assert!(matches!(
+                RuntimeConversionPlanner::plan(
+                    &db,
+                    RuntimeClass::Scalar(disallowed),
+                    memory_raw.clone(),
+                ),
+                Err(RuntimeConversionError::Unsupported { .. })
+            ));
+        }
     }
 
     #[test]

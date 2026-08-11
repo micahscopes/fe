@@ -17,6 +17,7 @@
 //! before the canonical allocator/callback ownership protocols execute would be
 //! unsound; generation or facade review must fail closed instead.
 
+pub use component::{self, *}
 pub use view::{self, *}
 
 use raw::{

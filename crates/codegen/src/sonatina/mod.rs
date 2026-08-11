@@ -60,24 +60,67 @@ use crate::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WasmSurfaceFrame {
+#[cfg_attr(not(feature = "spirv-backend"), allow(dead_code))]
+pub(crate) enum WasmResidentEventTransport {
+    /// One host call carries one already-flattened event value.
+    Direct { event_fields: usize },
+    /// One host call carries a pointer/count pair for fixed-stride scalar
+    /// records. The generated module combines the batch before invoking Fe.
+    Batch {
+        event_fields: usize,
+        event_stride: i32,
+        accumulate_f32_fields: Vec<usize>,
+    },
+}
+
+/// Target-neutral resident actor lowering. The compiler keeps the complete
+/// scalar state returned by an authored transition in private Wasm globals;
+/// hosts provide only event facts and inert resource handles on later calls.
+///
+/// This deliberately does not name surfaces, DOM events, custom elements, or
+/// browsers. Those are library/adapter policies layered over this mechanism.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WasmResidentTransition {
     source: String,
     export: String,
     state_replace_export: String,
-    /// One bit per flattened actor argument after the fixed SurfaceEvent
-    /// leaves. Inert resource slots remain host-supplied transport values;
-    /// every other value is complete actor state in private Wasm globals.
+    transport: WasmResidentEventTransport,
+    /// `(flattened leaf index, exclusive variant count)` checks applied before
+    /// host-provided event values reach authored Fe.
+    event_tag_limits: Vec<(usize, u32)>,
+    /// The same validation for host-provided initial/replacement state.
+    state_tag_limits: Vec<(usize, u32)>,
+    /// One bit per flattened actor argument after the event leaves. Inert
+    /// resource slots remain host-supplied transport values; every other value
+    /// is complete actor state in private Wasm globals.
     actor_param_is_resource: Vec<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WasmResidentInitializer {
+    source: String,
+    export: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WasmResidentProjection {
+    source: String,
+    export: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WasmCompileOptions {
     canonical_arena: bool,
     canonical_lanes: Vec<crate::CanonicalLane>,
-    /// One compiler-lowered raw-event batch wrapper selected by a typed Fe
-    /// surface schedule. Its underlying Fe transition stays private; the
-    /// fixed wrapper export and linear memory are the browser contract.
-    surface_frame: Option<WasmSurfaceFrame>,
+    /// At most one compiler-lowered resident actor transition. Its underlying
+    /// authored Fe behavior stays private; the fixed wrapper and state-seeding
+    /// exports are the host contract.
+    resident_transition: Option<WasmResidentTransition>,
+    /// Optional authored complete-state initializer paired with the resident
+    /// transition. It is hidden behind a fixed zero-argument export.
+    resident_initializer: Option<WasmResidentInitializer>,
+    /// Optional read-only projection of current resident state.
+    resident_projection: Option<WasmResidentProjection>,
     /// Compiler-owned public ABI aliases. The selected Fe source name remains
     /// ordinary application vocabulary while a fixed host contract can
     /// discover its export without a side manifest.
@@ -114,6 +157,81 @@ impl WasmCompileOptions {
         self
     }
 
+    /// Keep one ordinary scalar actor transition resident across Wasm export
+    /// calls. `event_fields` counts the flattened leading event arguments; all
+    /// following non-resource arguments are state and must equal the flattened
+    /// return shape. The generated wrapper fails closed until the host seeds
+    /// complete state through `state_replace_export`.
+    pub fn with_resident_actor_transition(
+        self,
+        source: impl Into<String>,
+        export: impl Into<String>,
+        state_replace_export: impl Into<String>,
+        event_fields: usize,
+        actor_param_is_resource: Vec<bool>,
+    ) -> Self {
+        self.with_resident_actor_transition_checked(
+            source,
+            export,
+            state_replace_export,
+            event_fields,
+            actor_param_is_resource,
+            Vec::new(),
+            Vec::new(),
+        )
+    }
+
+    /// Checked form used by semantic actor projection. Variant limits describe
+    /// fieldless-enum leaves at the flattened host boundary; invalid tags trap
+    /// before an authored wildcard arm can observe them.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_resident_actor_transition_checked(
+        mut self,
+        source: impl Into<String>,
+        export: impl Into<String>,
+        state_replace_export: impl Into<String>,
+        event_fields: usize,
+        actor_param_is_resource: Vec<bool>,
+        event_tag_limits: Vec<(usize, u32)>,
+        state_tag_limits: Vec<(usize, u32)>,
+    ) -> Self {
+        self.resident_transition = Some(WasmResidentTransition {
+            source: source.into(),
+            export: export.into(),
+            state_replace_export: state_replace_export.into(),
+            transport: WasmResidentEventTransport::Direct { event_fields },
+            event_tag_limits,
+            state_tag_limits,
+            actor_param_is_resource,
+        });
+        self
+    }
+
+    pub fn with_resident_actor_initializer(
+        mut self,
+        source: impl Into<String>,
+        export: impl Into<String>,
+    ) -> Self {
+        self.resident_initializer = Some(WasmResidentInitializer {
+            source: source.into(),
+            export: export.into(),
+        });
+        self
+    }
+
+    pub fn with_resident_actor_projection(
+        mut self,
+        source: impl Into<String>,
+        export: impl Into<String>,
+    ) -> Self {
+        self.resident_projection = Some(WasmResidentProjection {
+            source: source.into(),
+            export: export.into(),
+        });
+        self
+    }
+
+    #[cfg_attr(not(feature = "spirv-backend"), allow(dead_code))]
     pub(crate) fn with_surface_frame(
         mut self,
         source: impl Into<String>,
@@ -122,10 +240,17 @@ impl WasmCompileOptions {
         actor_param_is_resource: Vec<bool>,
     ) -> Self {
         self.canonical_arena = true;
-        self.surface_frame = Some(WasmSurfaceFrame {
+        self.resident_transition = Some(WasmResidentTransition {
             source: source.into(),
             export: export.into(),
             state_replace_export: state_replace_export.into(),
+            transport: WasmResidentEventTransport::Batch {
+                event_fields: 13,
+                event_stride: 52,
+                accumulate_f32_fields: vec![2, 3, 4],
+            },
+            event_tag_limits: Vec::new(),
+            state_tag_limits: Vec::new(),
             actor_param_is_resource,
         });
         self
@@ -162,7 +287,9 @@ pub fn compile_runtime_package_wasm_with_options(
             package,
             &options.canonical_lanes,
             &options.export_aliases,
-            options.surface_frame.as_ref(),
+            options.resident_transition.as_ref(),
+            options.resident_initializer.as_ref(),
+            options.resident_projection.as_ref(),
         )?;
     // Sonatina's `Pipeline` is ISA-independent (`EvmPipeline` is the
     // EVM-specific one) and `EvmCompile::optimize` runs it with no target

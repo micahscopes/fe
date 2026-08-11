@@ -1,0 +1,225 @@
+//! Fe-facing web component events.
+//!
+//! This is application vocabulary layered over core's target-neutral resident
+//! actor transition. A fixed host adapter translates standards events into
+//! these raw facts; Fe owns lifecycle and application state transitions. The
+//! numeric target is a declarative action identity chosen by Fe page
+//! composition, never a DOM selector interpreted as application policy by JS.
+
+pub use core::{BrowserBytes, BrowserPtr, BrowserString}
+pub use core::actor::{InitialState, ProjectState, ResidentTransition}
+pub use core::marker::Copy as ComponentCopy
+use core::marker::Copy
+use core::browser::alloc_browser_bytes
+
+/// Version-1 event kinds at the fixed component boundary. Variants are append-
+/// only within this ABI version because their fieldless-enum tags cross Wasm.
+pub enum ComponentEventKind {
+    Connected,
+    Disconnected,
+    Adopted,
+    Activate,
+    Input,
+    Change,
+    Submit,
+    KeyDown,
+}
+
+impl Copy for ComponentEventKind {}
+
+/// One untouched event delivered to a resident Fe component actor. Scalars
+/// cross as ordinary Wasm values; `text` crosses through the canonical
+/// `(pointer, length)` UTF-8 descriptor owned by the fixed host boundary.
+pub struct ComponentEvent {
+    pub kind: ComponentEventKind,
+    /// Fe-declared action identity attached by generated page composition.
+    pub target: u32,
+    /// Stable key of the nearest generated repeated item, or zero outside one.
+    pub key: u32,
+    /// Raw event detail or key code, with interpretation owned by Fe.
+    pub detail: u32,
+    /// Raw scalar value for controls whose standards value is numeric.
+    pub value: f32,
+    /// Host monotonic event timestamp in milliseconds.
+    pub timestamp: f32,
+    /// Untouched UTF-8 control value in Wasm memory. The fixed host reuses one
+    /// bounded scratch allocation; Fe decides whether and how to retain it.
+    pub text: BrowserString,
+}
+
+impl Copy for ComponentEvent {}
+
+impl ComponentEvent {
+    pub fn is_lifecycle(self) -> bool {
+        match self.kind {
+            ComponentEventKind::Connected => true,
+            ComponentEventKind::Disconnected => true,
+            ComponentEventKind::Adopted => true,
+            _ => false,
+        }
+    }
+}
+
+/// Component projection consumed by the fixed, demo-blind host.
+/// Bit `n` in `visible_mask` controls generated view slot `n`; zero
+/// `focus_target` means no focus request, while a nonzero value names a
+/// Fe-declared action target. Bit zero of `flags` requests `preventDefault`
+/// for the transported standards event; all higher bits are reserved in v1.
+/// `commands` is an optional Fe-authored binary effect stream built through
+/// `ComponentWriter`; JavaScript applies its fixed structural vocabulary but
+/// contains no component-specific reducer or rendering policy.
+pub struct ComponentPatch {
+    pub visible_mask: u32,
+    pub focus_target: u32,
+    pub flags: u32,
+    pub commands: BrowserBytes,
+}
+
+/// Allocate persistent Wasm memory for an actor's reusable projection buffer.
+/// Resident components should allocate this once in their Fe initializer,
+/// retain the descriptor in actor state, and overwrite it on each projection.
+pub fn allocate_component_buffer(capacity: u32) -> BrowserBytes {
+    // Writers use overlapping unaligned u32 stores to publish one byte at a
+    // time while staying in Wasm's native i32 register class. Four bytes of
+    // tail slack keep the final store inside the owned allocation.
+    let allocation = alloc_browser_bytes(capacity + 4)
+    BrowserBytes { ptr: allocation.address(), len: capacity }
+}
+
+/// Borrow UTF-8 bytes already held in resident Wasm memory.
+pub fn component_string(ptr: u32, len: u32) -> BrowserString {
+    BrowserString { ptr: ptr, len: len }
+}
+
+/// A compact Fe-side builder for the fixed component effect vocabulary.
+/// Commands are deliberately defined here in Fe so application code remains
+/// readable and the browser host only transports and applies typed effects.
+pub struct ComponentWriter {
+    pub buffer: BrowserBytes,
+    pub cursor: u32,
+    pub failed: bool,
+}
+
+impl Copy for ComponentWriter {}
+
+impl ComponentWriter {
+    pub fn new(buffer: own BrowserBytes) -> Self {
+        Self { buffer: buffer, cursor: 0, failed: false }
+    }
+
+    fn byte(self, value: u32) -> Self {
+        if self.cursor >= self.buffer.len {
+            return Self { buffer: self.buffer, cursor: self.cursor, failed: true }
+        }
+        let cell: BrowserPtr<u32> = BrowserPtr::from_u32(self.buffer.ptr + self.cursor)
+        cell.write(value & 255)
+        Self { buffer: self.buffer, cursor: self.cursor + 1, failed: self.failed }
+    }
+
+    fn word(self, value: u32) -> Self {
+        let mut writer = self.byte(value: value)
+        writer = writer.byte(value: value >> 8)
+        writer = writer.byte(value: value >> 16)
+        writer.byte(value: value >> 24)
+    }
+
+    fn bytes(self, value: own BrowserString) -> Self {
+        let mut writer = self
+        let mut index: u32 = 0
+        while index < value.len {
+            let source: BrowserPtr<u32> = BrowserPtr::from_u32(value.ptr + index)
+            writer = writer.byte(value: source.read())
+            index = index + 1
+        }
+        writer
+    }
+
+    /// Begin one keyed reconciliation region. `container` names a
+    /// `data-fe-node`; `template` names a `data-fe-template`.
+    pub fn repeat_begin(self, container: u32, template: u32) -> Self {
+        let writer = self.byte(value: 1)
+        let writer = writer.word(value: container)
+        writer.word(value: template)
+    }
+
+    /// Select/create one stable key and make its cloned row the command scope.
+    pub fn repeat_item(self, key: u32) -> Self {
+        if key == 0 { core::panic() }
+        self.byte(value: 2).word(value: key)
+    }
+
+    /// Finish the current reconciliation region and remove absent keys.
+    pub fn repeat_end(self) -> Self {
+        self.byte(value: 3)
+    }
+
+    pub fn set_text(self, target: u32, value: own BrowserString) -> Self {
+        let writer = self.byte(value: 4)
+        let writer = writer.word(value: target)
+        let writer = writer.word(value: value.len)
+        writer.bytes(value: value)
+    }
+
+    /// Emit a bounded two-digit decimal without asking JavaScript to own
+    /// number formatting. Values outside `[0, 99]` fail closed.
+    pub fn set_small_u32_text(self, target: u32, value: u32) -> Self {
+        if value >= 100 { core::panic() }
+        let digits: u32 = if value >= 10 { 2 } else { 1 }
+        let mut writer = self.byte(value: 4)
+        writer = writer.word(value: target)
+        writer = writer.word(value: digits)
+        let mut remaining: u32 = value
+        if value >= 10 {
+            let mut tens: u32 = 0
+            while remaining >= 10 {
+                remaining = remaining - 10
+                tens = tens + 1
+            }
+            writer = writer.byte(value: 48 + tens)
+        }
+        writer = writer.byte(value: 48 + remaining)
+        writer
+    }
+
+    pub fn set_value(self, target: u32, value: own BrowserString) -> Self {
+        let writer = self.byte(value: 5)
+        let writer = writer.word(value: target)
+        let writer = writer.word(value: value.len)
+        writer.bytes(value: value)
+    }
+
+    pub fn set_checked(self, target: u32, checked: bool) -> Self {
+        let writer = self.byte(value: 6)
+        let writer = writer.word(value: target)
+        writer.byte(value: if checked { 1 } else { 0 })
+    }
+
+    pub fn set_hidden(self, target: u32, hidden: bool) -> Self {
+        let writer = self.byte(value: 7)
+        let writer = writer.word(value: target)
+        writer.byte(value: if hidden { 1 } else { 0 })
+    }
+
+    /// Toggle the class named by `data-fe-class-{token}` on the target node.
+    pub fn set_class(self, target: u32, token: u32, enabled: bool) -> Self {
+        let writer = self.byte(value: 8)
+        let writer = writer.word(value: target)
+        let writer = writer.word(value: token)
+        writer.byte(value: if enabled { 1 } else { 0 })
+    }
+
+    pub fn focus(self, target: u32) -> Self {
+        self.byte(value: 9).word(value: target)
+    }
+
+    pub fn set_disabled(self, target: u32, disabled: bool) -> Self {
+        let writer = self.byte(value: 10)
+        let writer = writer.word(value: target)
+        writer.byte(value: if disabled { 1 } else { 0 })
+    }
+
+    pub fn finish(self) -> BrowserBytes {
+        if self.failed { core::panic() }
+        BrowserBytes { ptr: self.buffer.ptr, len: self.cursor }
+    }
+}

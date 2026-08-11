@@ -135,7 +135,7 @@ pub fn compile_runtime_package_wasm(
     db: &DriverDataBase,
     package: &RuntimePackage<'_>,
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
-    compile_runtime_package_wasm_with_canonical_lanes(db, package, &[], &[], None)
+    compile_runtime_package_wasm_with_canonical_lanes(db, package, &[], &[], None, None, None)
 }
 
 /// Overlay-only callback-capstone entry point. The default pin cannot name the
@@ -162,7 +162,9 @@ pub(crate) fn compile_runtime_package_wasm_with_canonical_lanes(
     package: &RuntimePackage<'_>,
     canonical_lanes: &[crate::CanonicalLane],
     export_aliases: &[(String, String)],
-    surface_frame: Option<&super::WasmSurfaceFrame>,
+    resident_transition: Option<&super::WasmResidentTransition>,
+    resident_initializer: Option<&super::WasmResidentInitializer>,
+    resident_projection: Option<&super::WasmResidentProjection>,
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
     // Reject unsupported indirect host results before constructing any
     // Sonatina signatures. A local wrapper may itself return the authored enum
@@ -211,8 +213,14 @@ pub(crate) fn compile_runtime_package_wasm_with_canonical_lanes(
         .iter()
         .map(|lane| lane.name.clone())
         .collect();
-    if let Some(frame) = surface_frame {
-        wrapped_lane_names.insert(frame.source.clone());
+    if let Some(transition) = resident_transition {
+        wrapped_lane_names.insert(transition.source.clone());
+    }
+    if let Some(initializer) = resident_initializer {
+        wrapped_lane_names.insert(initializer.source.clone());
+    }
+    if let Some(projection) = resident_projection {
+        wrapped_lane_names.insert(projection.source.clone());
     }
     let mut lowerer = PortableModuleLowerer::new(
         db,
@@ -227,8 +235,16 @@ pub(crate) fn compile_runtime_package_wasm_with_canonical_lanes(
     for lane in canonical_lanes {
         lowerer.synthesize_canonical_lane(lane)?;
     }
-    if let Some(frame) = surface_frame {
-        lowerer.synthesize_surface_frame(frame)?;
+    if let Some(transition) = resident_transition {
+        lowerer.synthesize_resident_transition(
+            transition,
+            resident_initializer,
+            resident_projection,
+        )?;
+    } else if resident_initializer.is_some() || resident_projection.is_some() {
+        return Err(LowerError::Unsupported(
+            "resident actor initializer/projection requires a resident transition".to_owned(),
+        ));
     }
     let import_modules = lowerer.import_modules();
     Ok((lowerer.finish(), import_modules))
@@ -257,6 +273,17 @@ pub(crate) fn module_emits_dynamic_alloc(module: &Module) -> bool {
             })
             .unwrap_or(false)
     })
+}
+
+fn fieldless_tag_immediate(ty: Type, tag: u32) -> Option<Immediate> {
+    match ty {
+        Type::I1 if tag <= 1 => Some(Immediate::I1(tag != 0)),
+        Type::I8 => Some(Immediate::I8(tag as u8 as i8)),
+        Type::I16 => Some(Immediate::I16(tag as u16 as i16)),
+        Type::I32 => Some(Immediate::I32(tag as i32)),
+        Type::I64 => Some(Immediate::I64(i64::from(tag))),
+        _ => None,
+    }
 }
 
 /// Lower through the same fail-closed portable instruction vocabulary as Wasm,
@@ -2520,7 +2547,18 @@ where
             let func_ref = *self.func_map.get(&instance).ok_or_else(|| {
                 LowerError::Internal("wasm function lowered before it was declared".to_string())
             })?;
-            PortableFunctionLowerer::new(self, body, func_ref)?.lower()?;
+            let symbol = self.function_symbol(instance);
+            PortableFunctionLowerer::new(self, body, func_ref)?
+                .lower()
+                .map_err(|error| match error {
+                    LowerError::Unsupported(message) => LowerError::Unsupported(format!(
+                        "{message}; while lowering Wasm function `{symbol}`"
+                    )),
+                    LowerError::Internal(message) => LowerError::Internal(format!(
+                        "{message}; while lowering Wasm function `{symbol}`"
+                    )),
+                    other => other,
+                })?;
         }
         Ok(())
     }
@@ -2864,85 +2902,135 @@ where
         Ok(())
     }
 
-    /// Lower Fe's `LatestPerFrame` capability to one fixed raw-batch ABI. The
-    /// browser writes untouched 52-byte `SurfaceEvent` records into exported
-    /// linear memory and calls this wrapper once per presentation opportunity.
-    /// Coalescing executes here in the generated Wasm module: movement and
-    /// wheel deltas accumulate while every other fact comes from the newest
-    /// record. Complete actor state persists in private Wasm globals; only
-    /// inert external resource slots remain wrapper arguments. The wrapper
-    /// then calls the authored Fe transition exactly once and commits its full
-    /// reply before returning a presentation snapshot to the browser.
-    fn synthesize_surface_frame(
+    fn synthesize_resident_transition(
         &mut self,
-        frame: &super::WasmSurfaceFrame,
+        transition: &super::WasmResidentTransition,
+        initializer: Option<&super::WasmResidentInitializer>,
+        projection: Option<&super::WasmResidentProjection>,
     ) -> Result<(), LowerError> {
-        const EVENT_FIELDS: usize = 13;
-        const EVENT_STRIDE: i32 = 52;
+        match &transition.transport {
+            super::WasmResidentEventTransport::Direct { event_fields } => self
+                .synthesize_direct_resident_transition(
+                    transition,
+                    initializer,
+                    projection,
+                    *event_fields,
+                ),
+            super::WasmResidentEventTransport::Batch {
+                event_fields,
+                event_stride,
+                accumulate_f32_fields,
+            } => {
+                if initializer.is_some() || projection.is_some() {
+                    return Err(LowerError::Unsupported(
+                        "batched resident transitions do not yet admit an authored initializer/projection"
+                            .to_owned(),
+                    ));
+                }
+                self.synthesize_batched_resident_transition(
+                    transition,
+                    *event_fields,
+                    *event_stride,
+                    accumulate_f32_fields,
+                )
+            }
+        }
+    }
+
+    /// Synthesize the target-neutral one-event resident actor ABI. The host
+    /// passes one flattened event plus inert resources. Complete actor state
+    /// stays in private Wasm globals and the authored Fe transition returns the
+    /// next complete state.
+    fn synthesize_direct_resident_transition(
+        &mut self,
+        transition: &super::WasmResidentTransition,
+        initializer: Option<&super::WasmResidentInitializer>,
+        projection: Option<&super::WasmResidentProjection>,
+        event_fields: usize,
+    ) -> Result<(), LowerError> {
+        if event_fields == 0 {
+            return Err(LowerError::Unsupported(
+                "resident actor transition must declare at least one event field".to_owned(),
+            ));
+        }
 
         let candidates = self
             .func_map
             .iter()
-            .filter(|(instance, _)| self.function_symbol(**instance) == frame.source)
+            .filter(|(instance, _)| self.function_symbol(**instance) == transition.source)
             .map(|(_, func_ref)| *func_ref)
             .collect::<Vec<_>>();
         let [callee] = candidates.as_slice() else {
             return Err(LowerError::Unsupported(format!(
-                "surface frame `{}` must select exactly one lowered Fe transition (found {})",
-                frame.source,
+                "resident transition `{}` must select exactly one lowered Fe behavior (found {})",
+                transition.source,
                 candidates.len()
             )));
         };
         let (callee_args, result_tys) = self.builder.sig(*callee, |signature| {
             (signature.args().to_vec(), signature.ret_tys().to_vec())
         });
-        let event_tys = [
-            Type::F32,
-            Type::F32,
-            Type::F32,
-            Type::F32,
-            Type::F32,
-            Type::I32,
-            Type::I32,
-            Type::F32,
-            Type::F32,
-            Type::F32,
-            Type::I32,
-            Type::I32,
-            Type::F32,
-        ];
-        if callee_args.len() < EVENT_FIELDS || callee_args[..EVENT_FIELDS] != event_tys {
+        if callee_args.len() < event_fields {
             return Err(LowerError::Unsupported(format!(
-                "surface frame `{}` does not begin with the fixed SurfaceEvent scalar layout",
-                frame.source
+                "resident transition `{}` has {} arguments, fewer than its {} event leaves",
+                transition.source,
+                callee_args.len(),
+                event_fields
             )));
         }
         if result_tys.is_empty() {
             return Err(LowerError::Unsupported(format!(
-                "surface frame `{}` must return complete actor state",
-                frame.source
+                "resident transition `{}` must return complete actor state",
+                transition.source
             )));
         }
 
-        let actor_tys = &callee_args[EVENT_FIELDS..];
-        if actor_tys.len() != frame.actor_param_is_resource.len() {
+        let event_tys = &callee_args[..event_fields];
+        let actor_tys = &callee_args[event_fields..];
+        if actor_tys.len() != transition.actor_param_is_resource.len() {
             return Err(LowerError::Unsupported(format!(
-                "surface frame `{}` has {} flattened actor arguments but its resource mask has {} entries",
-                frame.source,
+                "resident transition `{}` has {} flattened actor arguments but its resource mask has {} entries",
+                transition.source,
                 actor_tys.len(),
-                frame.actor_param_is_resource.len()
+                transition.actor_param_is_resource.len()
             )));
         }
         let state_tys = actor_tys
             .iter()
-            .zip(&frame.actor_param_is_resource)
+            .zip(&transition.actor_param_is_resource)
             .filter_map(|(ty, is_resource)| (!is_resource).then_some(*ty))
             .collect::<Vec<_>>();
         if state_tys != result_tys {
             return Err(LowerError::Unsupported(format!(
-                "surface frame `{}` must return the complete flattened non-resource actor state: arguments {state_tys:?}, results {result_tys:?}",
-                frame.source
+                "resident transition `{}` must return the complete flattened non-resource actor state: arguments {state_tys:?}, results {result_tys:?}",
+                transition.source
             )));
+        }
+        for (index, limit) in &transition.event_tag_limits {
+            if *limit == 0
+                || event_tys
+                    .get(*index)
+                    .and_then(|ty| fieldless_tag_immediate(*ty, *limit - 1))
+                    .is_none()
+            {
+                return Err(LowerError::Unsupported(format!(
+                    "resident transition `{}` has invalid event enum constraint ({index}, {limit}) for {event_tys:?}",
+                    transition.source
+                )));
+            }
+        }
+        for (index, limit) in &transition.state_tag_limits {
+            if *limit == 0
+                || result_tys
+                    .get(*index)
+                    .and_then(|ty| fieldless_tag_immediate(*ty, *limit - 1))
+                    .is_none()
+            {
+                return Err(LowerError::Unsupported(format!(
+                    "resident transition `{}` has invalid state enum constraint ({index}, {limit}) for {result_tys:?}",
+                    transition.source
+                )));
+            }
         }
 
         let state_globals = result_tys
@@ -2950,7 +3038,7 @@ where
             .enumerate()
             .map(|(index, ty)| {
                 self.builder.declare_gv(GlobalVariableData::new(
-                    format!("__fe_surface_state_v1_{index}"),
+                    format!("__fe_actor_state_v1_{index}"),
                     *ty,
                     Linkage::Private,
                     false,
@@ -2959,7 +3047,421 @@ where
             })
             .collect::<Vec<_>>();
         let state_initialized = self.builder.declare_gv(GlobalVariableData::new(
-            "__fe_surface_state_v1_initialized".to_owned(),
+            "__fe_actor_state_v1_initialized".to_owned(),
+            Type::I32,
+            Linkage::Private,
+            false,
+            Some(GvInitializer::make_imm(0i32)),
+        ));
+
+        if let Some(initializer) = initializer {
+            let candidates = self
+                .func_map
+                .iter()
+                .filter(|(instance, _)| self.function_symbol(**instance) == initializer.source)
+                .map(|(_, func_ref)| *func_ref)
+                .collect::<Vec<_>>();
+            let [initializer_callee] = candidates.as_slice() else {
+                return Err(LowerError::Unsupported(format!(
+                    "resident initializer `{}` must select exactly one lowered Fe behavior (found {})",
+                    initializer.source,
+                    candidates.len()
+                )));
+            };
+            let (initializer_args, initializer_results) =
+                self.builder.sig(*initializer_callee, |signature| {
+                    (signature.args().to_vec(), signature.ret_tys().to_vec())
+                });
+            if !initializer_args.is_empty() || initializer_results != result_tys {
+                return Err(LowerError::Unsupported(format!(
+                    "resident initializer `{}` must take no arguments and return complete actor state {result_tys:?}; got {initializer_args:?} -> {initializer_results:?}",
+                    initializer.source
+                )));
+            }
+            let initialize = self
+                .builder
+                .declare_function(Signature::new(
+                    &initializer.export,
+                    Linkage::Public,
+                    &[],
+                    &result_tys,
+                ))
+                .map_err(|error| {
+                    LowerError::Internal(format!(
+                        "failed to declare resident initializer `{}`: {error}",
+                        initializer.export
+                    ))
+                })?;
+            {
+                let is = self.isa.inst_set();
+                let mut fb = self.builder.func_builder::<InstInserter>(initialize);
+                let entry = fb.append_block();
+                fb.switch_to_block(entry);
+                let results = fb.insert_call_results(
+                    *initializer_callee,
+                    smallvec1::SmallVec::<[ValueId; 8]>::new(),
+                );
+                for ((global, ty), value) in state_globals
+                    .iter()
+                    .copied()
+                    .zip(result_tys.iter().copied())
+                    .zip(results.iter().copied())
+                {
+                    let address = fb.make_global_value(global);
+                    fb.insert_inst_no_result(Mstore::new(is, address, value, ty));
+                }
+                let initialized_address = fb.make_global_value(state_initialized);
+                let one = fb.make_imm_value(Immediate::I32(1));
+                fb.insert_inst_no_result(Mstore::new(is, initialized_address, one, Type::I32));
+                fb.insert_return_values(&results);
+                fb.seal_all();
+                fb.finish();
+            }
+        }
+
+        if let Some(projection) = projection {
+            let candidates = self
+                .func_map
+                .iter()
+                .filter(|(instance, _)| self.function_symbol(**instance) == projection.source)
+                .map(|(_, func_ref)| *func_ref)
+                .collect::<Vec<_>>();
+            let [projection_callee] = candidates.as_slice() else {
+                return Err(LowerError::Unsupported(format!(
+                    "resident projection `{}` must select exactly one lowered Fe behavior (found {})",
+                    projection.source,
+                    candidates.len()
+                )));
+            };
+            let (projection_args, projection_results) =
+                self.builder.sig(*projection_callee, |signature| {
+                    (signature.args().to_vec(), signature.ret_tys().to_vec())
+                });
+            if projection_args != result_tys || projection_results.is_empty() {
+                return Err(LowerError::Unsupported(format!(
+                    "resident projection `{}` must take complete actor state {result_tys:?} and return a non-empty closed value; got {projection_args:?} -> {projection_results:?}",
+                    projection.source
+                )));
+            }
+            let project = self
+                .builder
+                .declare_function(Signature::new(
+                    &projection.export,
+                    Linkage::Public,
+                    &[],
+                    &projection_results,
+                ))
+                .map_err(|error| {
+                    LowerError::Internal(format!(
+                        "failed to declare resident projection `{}`: {error}",
+                        projection.export
+                    ))
+                })?;
+            {
+                let is = self.isa.inst_set();
+                let mut fb = self.builder.func_builder::<InstInserter>(project);
+                let entry = fb.append_block();
+                let invoke = fb.append_block();
+                let invalid = fb.append_block();
+                fb.switch_to_block(entry);
+                let initialized_address = fb.make_global_value(state_initialized);
+                let initialized_value =
+                    fb.insert_inst(Mload::new(is, initialized_address, Type::I32), Type::I32);
+                let one = fb.make_imm_value(Immediate::I32(1));
+                let initialized = fb.insert_inst(CmpEq::new(is, initialized_value, one), Type::I1);
+                fb.insert_inst_no_result(Br::new(is, initialized, invoke, invalid));
+
+                fb.switch_to_block(invalid);
+                fb.insert_inst_no_result(Unreachable::new(is));
+
+                fb.switch_to_block(invoke);
+                let mut args = smallvec1::SmallVec::<[ValueId; 8]>::new();
+                for (global, ty) in state_globals
+                    .iter()
+                    .copied()
+                    .zip(result_tys.iter().copied())
+                {
+                    let address = fb.make_global_value(global);
+                    args.push(fb.insert_inst(Mload::new(is, address, ty), ty));
+                }
+                let results = fb.insert_call_results(*projection_callee, args);
+                fb.insert_return_values(&results);
+                fb.seal_all();
+                fb.finish();
+            }
+        }
+
+        let state_replace = self
+            .builder
+            .declare_function(Signature::new(
+                &transition.state_replace_export,
+                Linkage::Public,
+                &result_tys,
+                &[],
+            ))
+            .map_err(|error| {
+                LowerError::Internal(format!(
+                    "failed to declare resident state replacement `{}`: {error}",
+                    transition.state_replace_export
+                ))
+            })?;
+        {
+            let is = self.isa.inst_set();
+            let mut fb = self.builder.func_builder::<InstInserter>(state_replace);
+            let entry = fb.append_block();
+            let valid = fb.append_block();
+            let invalid = fb.append_block();
+            fb.switch_to_block(entry);
+            let values = fb.args().to_vec();
+            let mut all_valid = None;
+            for (index, limit) in &transition.state_tag_limits {
+                let mut tag_valid = None;
+                for tag in 0..*limit {
+                    let expected = fb.make_imm_value(
+                        fieldless_tag_immediate(result_tys[*index], tag)
+                            .expect("enum tag type validated above"),
+                    );
+                    let equal = fb.insert_inst(CmpEq::new(is, values[*index], expected), Type::I1);
+                    tag_valid = Some(match tag_valid {
+                        Some(previous) => fb.insert_inst(Or::new(is, previous, equal), Type::I1),
+                        None => equal,
+                    });
+                }
+                let tag_valid = tag_valid.expect("nonzero enum limit validated above");
+                all_valid = Some(match all_valid {
+                    Some(previous) => fb.insert_inst(And::new(is, previous, tag_valid), Type::I1),
+                    None => tag_valid,
+                });
+            }
+            if let Some(all_valid) = all_valid {
+                fb.insert_inst_no_result(Br::new(is, all_valid, valid, invalid));
+            } else {
+                fb.insert_inst_no_result(Jump::new(is, valid));
+            }
+
+            fb.switch_to_block(invalid);
+            fb.insert_inst_no_result(Unreachable::new(is));
+
+            fb.switch_to_block(valid);
+            for ((global, ty), value) in state_globals
+                .iter()
+                .copied()
+                .zip(result_tys.iter().copied())
+                .zip(values)
+            {
+                let address = fb.make_global_value(global);
+                fb.insert_inst_no_result(Mstore::new(is, address, value, ty));
+            }
+            let initialized_address = fb.make_global_value(state_initialized);
+            let one = fb.make_imm_value(Immediate::I32(1));
+            fb.insert_inst_no_result(Mstore::new(is, initialized_address, one, Type::I32));
+            fb.insert_inst_no_result(Return::new_unit(is));
+            fb.seal_all();
+            fb.finish();
+        }
+
+        let mut wrapper_args = event_tys.to_vec();
+        wrapper_args.extend(
+            actor_tys
+                .iter()
+                .zip(&transition.actor_param_is_resource)
+                .filter_map(|(ty, is_resource)| is_resource.then_some(*ty)),
+        );
+        let wrapper = self
+            .builder
+            .declare_function(Signature::new(
+                &transition.export,
+                Linkage::Public,
+                &wrapper_args,
+                &result_tys,
+            ))
+            .map_err(|error| {
+                LowerError::Internal(format!(
+                    "failed to declare resident transition wrapper `{}`: {error}",
+                    transition.export
+                ))
+            })?;
+
+        let is = self.isa.inst_set();
+        let mut fb = self.builder.func_builder::<InstInserter>(wrapper);
+        let entry = fb.append_block();
+        let invoke = fb.append_block();
+        let invalid = fb.append_block();
+        fb.switch_to_block(entry);
+        let wrapper_values = fb.args().to_vec();
+        let initialized_address = fb.make_global_value(state_initialized);
+        let initialized_value =
+            fb.insert_inst(Mload::new(is, initialized_address, Type::I32), Type::I32);
+        let one = fb.make_imm_value(Immediate::I32(1));
+        let mut ready = fb.insert_inst(CmpEq::new(is, initialized_value, one), Type::I1);
+        for (index, limit) in &transition.event_tag_limits {
+            let mut tag_valid = None;
+            for tag in 0..*limit {
+                let expected = fb.make_imm_value(
+                    fieldless_tag_immediate(event_tys[*index], tag)
+                        .expect("enum tag type validated above"),
+                );
+                let equal =
+                    fb.insert_inst(CmpEq::new(is, wrapper_values[*index], expected), Type::I1);
+                tag_valid = Some(match tag_valid {
+                    Some(previous) => fb.insert_inst(Or::new(is, previous, equal), Type::I1),
+                    None => equal,
+                });
+            }
+            ready = fb.insert_inst(
+                And::new(
+                    is,
+                    ready,
+                    tag_valid.expect("nonzero enum limit validated above"),
+                ),
+                Type::I1,
+            );
+        }
+        fb.insert_inst_no_result(Br::new(is, ready, invoke, invalid));
+
+        fb.switch_to_block(invalid);
+        fb.insert_inst_no_result(Unreachable::new(is));
+
+        fb.switch_to_block(invoke);
+        let mut args = smallvec1::SmallVec::<[ValueId; 8]>::new();
+        args.extend(wrapper_values[..event_fields].iter().copied());
+        let mut resource_index = event_fields;
+        let mut state_index = 0usize;
+        for is_resource in &transition.actor_param_is_resource {
+            if *is_resource {
+                args.push(wrapper_values[resource_index]);
+                resource_index += 1;
+            } else {
+                let global = state_globals[state_index];
+                let ty = result_tys[state_index];
+                let address = fb.make_global_value(global);
+                args.push(fb.insert_inst(Mload::new(is, address, ty), ty));
+                state_index += 1;
+            }
+        }
+        let results = fb.insert_call_results(*callee, args);
+        if results.len() != result_tys.len() {
+            return Err(LowerError::Internal(
+                "resident transition call result arity changed after signature inspection"
+                    .to_owned(),
+            ));
+        }
+        for ((global, ty), value) in state_globals
+            .iter()
+            .copied()
+            .zip(result_tys.iter().copied())
+            .zip(results.iter().copied())
+        {
+            let address = fb.make_global_value(global);
+            fb.insert_inst_no_result(Mstore::new(is, address, value, ty));
+        }
+        fb.insert_return_values(&results);
+        fb.seal_all();
+        fb.finish();
+        Ok(())
+    }
+
+    /// Lower Fe's batched resident transition policy. The host writes fixed-
+    /// stride scalar event records into exported linear memory. Coalescing
+    /// executes in generated Wasm: selected f32 leaves accumulate while every
+    /// other fact comes from the newest record. The authored Fe transition is
+    /// invoked exactly once and its full state reply is committed atomically.
+    fn synthesize_batched_resident_transition(
+        &mut self,
+        transition: &super::WasmResidentTransition,
+        event_fields: usize,
+        event_stride: i32,
+        accumulate_f32_fields: &[usize],
+    ) -> Result<(), LowerError> {
+        if event_fields == 0 || event_stride <= 0 {
+            return Err(LowerError::Unsupported(
+                "batched resident transition requires a non-empty, positive-stride event"
+                    .to_owned(),
+            ));
+        }
+        if !transition.event_tag_limits.is_empty() || !transition.state_tag_limits.is_empty() {
+            return Err(LowerError::Unsupported(
+                "batched resident transitions do not yet admit fieldless-enum host leaves"
+                    .to_owned(),
+            ));
+        }
+
+        let candidates = self
+            .func_map
+            .iter()
+            .filter(|(instance, _)| self.function_symbol(**instance) == transition.source)
+            .map(|(_, func_ref)| *func_ref)
+            .collect::<Vec<_>>();
+        let [callee] = candidates.as_slice() else {
+            return Err(LowerError::Unsupported(format!(
+                "resident transition `{}` must select exactly one lowered Fe behavior (found {})",
+                transition.source,
+                candidates.len()
+            )));
+        };
+        let (callee_args, result_tys) = self.builder.sig(*callee, |signature| {
+            (signature.args().to_vec(), signature.ret_tys().to_vec())
+        });
+        if callee_args.len() < event_fields {
+            return Err(LowerError::Unsupported(format!(
+                "resident transition `{}` has {} arguments, fewer than its {} event leaves",
+                transition.source,
+                callee_args.len(),
+                event_fields
+            )));
+        }
+        if result_tys.is_empty() {
+            return Err(LowerError::Unsupported(format!(
+                "resident transition `{}` must return complete actor state",
+                transition.source
+            )));
+        }
+
+        let event_tys = callee_args[..event_fields].to_vec();
+        for index in accumulate_f32_fields {
+            if event_tys.get(*index) != Some(&Type::F32) {
+                return Err(LowerError::Unsupported(format!(
+                    "resident transition `{}` accumulation leaf {index} is not f32",
+                    transition.source
+                )));
+            }
+        }
+        let actor_tys = &callee_args[event_fields..];
+        if actor_tys.len() != transition.actor_param_is_resource.len() {
+            return Err(LowerError::Unsupported(format!(
+                "resident transition `{}` has {} flattened actor arguments but its resource mask has {} entries",
+                transition.source,
+                actor_tys.len(),
+                transition.actor_param_is_resource.len()
+            )));
+        }
+        let state_tys = actor_tys
+            .iter()
+            .zip(&transition.actor_param_is_resource)
+            .filter_map(|(ty, is_resource)| (!is_resource).then_some(*ty))
+            .collect::<Vec<_>>();
+        if state_tys != result_tys {
+            return Err(LowerError::Unsupported(format!(
+                "resident transition `{}` must return the complete flattened non-resource actor state: arguments {state_tys:?}, results {result_tys:?}",
+                transition.source
+            )));
+        }
+
+        let state_globals = result_tys
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| {
+                self.builder.declare_gv(GlobalVariableData::new(
+                    format!("__fe_actor_state_v1_{index}"),
+                    *ty,
+                    Linkage::Private,
+                    false,
+                    None,
+                ))
+            })
+            .collect::<Vec<_>>();
+        let state_initialized = self.builder.declare_gv(GlobalVariableData::new(
+            "__fe_actor_state_v1_initialized".to_owned(),
             Type::I32,
             Linkage::Private,
             false,
@@ -2969,15 +3471,15 @@ where
         let state_replace = self
             .builder
             .declare_function(Signature::new(
-                &frame.state_replace_export,
+                &transition.state_replace_export,
                 Linkage::Public,
                 &result_tys,
                 &[],
             ))
             .map_err(|error| {
                 LowerError::Internal(format!(
-                    "failed to declare surface state replacement `{}`: {error}",
-                    frame.state_replace_export
+                    "failed to declare resident state replacement `{}`: {error}",
+                    transition.state_replace_export
                 ))
             })?;
         {
@@ -3007,21 +3509,21 @@ where
         wrapper_args.extend(
             actor_tys
                 .iter()
-                .zip(&frame.actor_param_is_resource)
+                .zip(&transition.actor_param_is_resource)
                 .filter_map(|(ty, is_resource)| is_resource.then_some(*ty)),
         );
         let wrapper = self
             .builder
             .declare_function(Signature::new(
-                &frame.export,
+                &transition.export,
                 Linkage::Public,
                 &wrapper_args,
                 &result_tys,
             ))
             .map_err(|error| {
                 LowerError::Internal(format!(
-                    "failed to declare surface frame wrapper `{}`: {error}",
-                    frame.export
+                    "failed to declare resident transition wrapper `{}`: {error}",
+                    transition.export
                 ))
             })?;
 
@@ -3052,8 +3554,8 @@ where
         fb.insert_inst_no_result(Unreachable::new(is));
 
         fb.switch_to_block(initialize);
-        let mut initial = Vec::with_capacity(EVENT_FIELDS);
-        for (index, ty) in event_tys.into_iter().enumerate() {
+        let mut initial = Vec::with_capacity(event_fields);
+        for (index, ty) in event_tys.iter().copied().enumerate() {
             let address = if index == 0 {
                 events_ptr
             } else {
@@ -3064,25 +3566,25 @@ where
         }
         let initialize_block = fb
             .current_block()
-            .expect("surface frame initialization has a current block");
+            .expect("resident batch initialization has a current block");
         fb.insert_inst_no_result(Jump::new(is, header));
 
         fb.switch_to_block(header);
         let one = fb.make_imm_value(Immediate::I32(1));
         let event_index = fb.insert_inst(Phi::new(is, vec![(one, initialize_block)]), Type::I32);
-        let mut coalesced = Vec::with_capacity(EVENT_FIELDS);
-        for (value, ty) in initial.into_iter().zip(event_tys) {
+        let mut coalesced = Vec::with_capacity(event_fields);
+        for (value, ty) in initial.into_iter().zip(event_tys.iter().copied()) {
             coalesced.push(fb.insert_inst(Phi::new(is, vec![(value, initialize_block)]), ty));
         }
         let more = fb.insert_inst(Lt::new(is, event_index, event_count), Type::I1);
         fb.insert_inst_no_result(Br::new(is, more, body, done));
 
         fb.switch_to_block(body);
-        let stride = fb.make_imm_value(Immediate::I32(EVENT_STRIDE));
+        let stride = fb.make_imm_value(Immediate::I32(event_stride));
         let byte_offset = fb.insert_inst(Mul::new(is, event_index, stride), Type::I32);
         let event_ptr = fb.insert_inst(Add::new(is, events_ptr, byte_offset), Type::I32);
-        let mut incoming = Vec::with_capacity(EVENT_FIELDS);
-        for (index, ty) in event_tys.into_iter().enumerate() {
+        let mut incoming = Vec::with_capacity(event_fields);
+        for (index, ty) in event_tys.iter().copied().enumerate() {
             let address = if index == 0 {
                 event_ptr
             } else {
@@ -3092,13 +3594,14 @@ where
             incoming.push(fb.insert_inst(Mload::new(is, address, ty), ty));
         }
         let mut next = incoming;
-        for index in [2usize, 3, 4] {
-            next[index] = fb.insert_inst(Fadd::new(is, coalesced[index], next[index]), Type::F32);
+        for index in accumulate_f32_fields {
+            next[*index] =
+                fb.insert_inst(Fadd::new(is, coalesced[*index], next[*index]), Type::F32);
         }
         let next_index = fb.insert_inst(Add::new(is, event_index, one), Type::I32);
         let body_block = fb
             .current_block()
-            .expect("surface frame body has a current block");
+            .expect("resident batch body has a current block");
         fb.append_phi_arg(event_index, next_index, body_block);
         for (phi, value) in coalesced.iter().copied().zip(next) {
             fb.append_phi_arg(phi, value, body_block);
@@ -3110,7 +3613,7 @@ where
         args.extend(coalesced);
         let mut resource_index = 2usize;
         let mut state_index = 0usize;
-        for is_resource in &frame.actor_param_is_resource {
+        for is_resource in &transition.actor_param_is_resource {
             if *is_resource {
                 args.push(wrapper_values[resource_index]);
                 resource_index += 1;
@@ -3125,7 +3628,8 @@ where
         let results = fb.insert_call_results(*callee, args);
         if results.len() != result_tys.len() {
             return Err(LowerError::Internal(
-                "surface frame call result arity changed after signature inspection".to_owned(),
+                "resident transition call result arity changed after signature inspection"
+                    .to_owned(),
             ));
         }
         for ((global, ty), value) in state_globals
@@ -3624,7 +4128,8 @@ where
         ) {
             return false;
         }
-        self.aggregate_is_memory_lowerable(pointee)
+        matches!(**pointee, RuntimeClass::AggregateValue { .. })
+            && self.aggregate_is_memory_lowerable(pointee)
     }
 
     /// Whether an aggregate value's every scalar leaf passes the R1 scalar
@@ -3950,6 +4455,13 @@ where
                     )),
                     other => other,
                 })?;
+                let expected = self.local_ty(*dst)?;
+                let actual = self.fb.type_of(value);
+                if actual != expected {
+                    return Err(LowerError::Internal(format!(
+                        "wasm assignment type mismatch for {dst:?}: lowered `{expr:?}` as {actual:?}, destination requires {expected:?}"
+                    )));
+                }
                 self.fb.def_var(var, value);
                 Ok(())
             }
@@ -4631,6 +5143,15 @@ where
                     .fb
                     .insert_inst(CmpEq::new(self.inst_set(), actual, expected), Type::I1))
             }
+            // Browser component descriptors construct memory pointers from
+            // their canonical wasm32 `u32` offsets. At this target the scalar
+            // and raw-address carriers are the same i32; retain the MIR
+            // address-space check and lower only that representation identity.
+            RExpr::WordToRawAddr {
+                value,
+                space: AddressSpaceKind::Memory,
+                ..
+            } if self.local_ty(*value)? == Type::I32 => self.local_value(*value),
             // On wasm32 both a memory provider handle and its explicit raw form
             // are the same i32 linear-memory byte offset. Keep this conversion
             // as a checked representation identity; object/const/non-memory
@@ -4709,9 +5230,24 @@ where
     /// fail-closed as R2. See the ladder doc section 7.2 for the exact boundary.
     fn lower_place_read(&mut self, place: &RuntimePlace<'db>) -> Result<ValueId, LowerError> {
         if let Some((addr, ty)) = self.raw_memory_scalar_place(place)? {
-            return Ok(self
+            // Wasm narrow integer loads produce an i32 register even though
+            // `Mload` retains the byte/halfword access width. Normalize that
+            // register back to the Fe local's scalar carrier before defining
+            // an i1/i8/i16 SSA variable.
+            let register_ty = match ty {
+                Type::I1 | Type::I8 | Type::I16 => Type::I32,
+                _ => ty,
+            };
+            let loaded = self
                 .fb
-                .insert_inst(Mload::new(self.inst_set(), addr, ty), ty));
+                .insert_inst(Mload::new(self.inst_set(), addr, ty), register_ty);
+            return if register_ty == ty {
+                Ok(loaded)
+            } else {
+                Ok(self
+                    .fb
+                    .insert_inst(Trunc::new(self.inst_set(), loaded, ty), ty))
+            };
         }
         if let (PlaceRoot::Slot(local), []) = (&place.root, &*place.path) {
             if matches!(self.body.value_class(*local), Some(RuntimeClass::Scalar(_))) {
@@ -5719,7 +6255,11 @@ where
         let class = self.body.value_class(local).cloned().ok_or_else(|| {
             LowerError::Internal(format!("local {local:?} carries no value class"))
         })?;
-        self.module.ty_for_class(&class)
+        if self.module.is_memory_lowerable_object_ref(&class) {
+            Ok(Type::I32)
+        } else {
+            self.module.ty_for_class(&class)
+        }
     }
 
     fn block_for(&self, block: RBlockId) -> Result<BlockId, LowerError> {

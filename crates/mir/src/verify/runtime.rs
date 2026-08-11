@@ -337,17 +337,33 @@ fn verify_assign<'db>(
             space,
             target,
         } => {
-            let RuntimeClass::Scalar(ScalarClass {
-                repr:
-                    ScalarRepr::Int {
-                        bits: 256,
-                        signed: false,
-                    },
-                role: ScalarRole::Plain,
-            }) = runtime_value_class(body, *value)?
-            else {
+            let RuntimeClass::Scalar(scalar) = runtime_value_class(body, *value)? else {
                 return Err(VerifyError::InvalidExprClass(dst));
             };
+            let full_word = matches!(
+                scalar,
+                ScalarClass {
+                    repr: ScalarRepr::Int {
+                        bits: 256,
+                        signed: false
+                    },
+                    role: ScalarRole::Plain,
+                }
+            );
+            let wasm32_memory = *space == crate::runtime::AddressSpaceKind::Memory
+                && matches!(
+                    scalar,
+                    ScalarClass {
+                        repr: ScalarRepr::Int {
+                            bits: 32,
+                            signed: false
+                        },
+                        role: ScalarRole::Plain,
+                    }
+                );
+            if !full_word && !wasm32_memory {
+                return Err(VerifyError::InvalidExprClass(dst));
+            }
             Some(RuntimeClass::RawAddr {
                 space: *space,
                 target: *target,

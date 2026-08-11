@@ -56,6 +56,46 @@ fn compile_to_wasm_err(name: &str, source: &str) -> String {
         .to_string()
 }
 
+/// Compile one authored transition through the generic resident-actor wrapper.
+/// This bypasses every surface/gallery projection so the acceptance below is
+/// an independent consumer of the target-neutral lowering primitive.
+fn compile_resident_actor_transition(
+    name: &str,
+    source: &str,
+    authored_transition: &str,
+    event_fields: usize,
+    actor_fields: usize,
+) -> Vec<u8> {
+    let mut db = DriverDataBase::default();
+    let url = Url::parse(&format!("file:///{name}")).expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(source.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let top_mod = db.top_mod(file);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "resident actor fixture diagnostics:\n{diagnostics}"
+    );
+    let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, authored_transition)
+        .expect("resident actor runtime package");
+    let bytes = compile_runtime_package_wasm_with_options(
+        &db,
+        &package,
+        WasmCompileOptions::default().with_resident_actor_transition(
+            authored_transition,
+            "fe_actor_transition_v1",
+            "fe_actor_state_replace_v1",
+            event_fields,
+            vec![false; actor_fields],
+        ),
+    )
+    .expect("resident actor Wasm")
+    .bytes;
+    wasmparser::validate(&bytes).expect("produced invalid resident actor Wasm");
+    bytes
+}
+
 /// Compile the same Fe source through the EVM backend (the cross-backend twin).
 /// Returns the EVM runtime bytecode, proving one source lowers on both targets.
 fn compile_to_evm(name: &str, source: &str) -> Vec<u8> {
@@ -128,6 +168,115 @@ fn wasm_float_shape(bytes: &[u8]) -> (usize, usize, usize, usize, usize) {
         }
     }
     (adds, subs, muls, calls, loops)
+}
+
+/// A non-surface actor proves that resident state is a general execution
+/// mechanism, not a Mandelbrot/gallery special case. The authored Fe behavior
+/// is executed once for each event; only the initial seed crosses from the
+/// host. Every returned state is compared to an independently written Rust
+/// transition over the same deterministic tape.
+#[test]
+fn scalar_actor_state_remains_resident_and_matches_independent_event_oracle() {
+    let source = r#"
+pub struct ComponentEvent {
+    pub kind: u32,
+    pub amount: i32,
+    pub weight: f32,
+}
+
+pub struct CounterState {
+    pub total: i32,
+    pub accepted: u32,
+    pub score: f32,
+}
+
+actor CounterActor {
+    total: i32,
+    accepted: u32,
+    score: f32,
+
+    fn react(self, event: own ComponentEvent) -> CounterState {
+        let mut total: i32 = self.total
+        let mut accepted: u32 = self.accepted
+        if event.kind == 0 {
+            total = total + event.amount
+            accepted = accepted + 1
+        } else {
+            if event.kind == 1 {
+                total = total - event.amount
+                accepted = accepted + 2
+            }
+        }
+        CounterState {
+            total: total,
+            accepted: accepted,
+            score: self.score + event.weight,
+        }
+    }
+}
+"#;
+    let wasm =
+        compile_resident_actor_transition("resident_counter_actor.fe", source, "react", 3, 3);
+    let (mut store, instance) = instantiate(&wasm);
+    assert!(
+        instance.get_func(&mut store, "react").is_none(),
+        "the authored behavior name is private behind the fixed resident ABI"
+    );
+    let transition = instance
+        .get_typed_func::<(i32, i32, f32), (i32, i32, f32)>(&mut store, "fe_actor_transition_v1")
+        .expect("generic resident transition export");
+    let replace = instance
+        .get_typed_func::<(i32, i32, f32), ()>(&mut store, "fe_actor_state_replace_v1")
+        .expect("generic resident state seed export");
+
+    assert!(
+        transition.call(&mut store, (0, 1, 0.5)).is_err(),
+        "a resident actor must fail closed before complete state is seeded"
+    );
+
+    let mut expected = (17i32, 4u32, -2.0f32);
+    replace
+        .call(&mut store, (expected.0, expected.1 as i32, expected.2))
+        .expect("seed complete actor state exactly once");
+
+    let mut rng = 0x4d59_5df4u32;
+    for step in 0..1024u32 {
+        rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let kind = match step % 11 {
+            0 => 0,
+            1 => 1,
+            _ => (rng >> 30) + 2,
+        };
+        let amount = ((rng >> 8) % 19) as i32;
+        let weight = match rng & 3 {
+            0 => -0.5,
+            1 => 0.25,
+            2 => 0.75,
+            _ => 1.0,
+        };
+
+        // Independent oracle: this is intentionally not generated from, or
+        // structurally compared with, the Fe source above.
+        if kind == 0 {
+            expected.0 += amount;
+            expected.1 += 1;
+        } else if kind == 1 {
+            expected.0 -= amount;
+            expected.1 += 2;
+        }
+        expected.2 += weight;
+
+        let got = transition
+            .call(&mut store, (kind as i32, amount, weight))
+            .unwrap_or_else(|error| panic!("resident event {step} trapped: {error}"));
+        assert_eq!(got.0, expected.0, "total differs at event {step}");
+        assert_eq!(got.1 as u32, expected.1, "accepted differs at event {step}");
+        assert_eq!(
+            got.2.to_bits(),
+            expected.2.to_bits(),
+            "score differs at event {step}"
+        );
+    }
 }
 
 /// THE MILESTONE: `#[target(wasm)] pub fn add(a, b) -> a + b`, compiled Fe ->
@@ -3227,6 +3376,45 @@ pub fn ordinary_roundtrip(_ ptr: MemPtr<u32>, value: u32) -> u32 {
         0x78563412
     );
     assert_eq!(&memory.data(&store)[19..23], &0x78563412_u32.to_le_bytes());
+}
+
+#[test]
+fn browser_ptr_u32_allocates_copies_and_roundtrips_on_wasm32_memory() {
+    let source = r#"
+use core::browser::{BrowserPtr, alloc_browser_bytes}
+
+pub fn allocated_roundtrip(value: u32) -> u32 {
+    let bytes = alloc_browser_bytes(8)
+    let word: BrowserPtr<u32> = BrowserPtr::from_u32(bytes.address())
+    let alias = word
+    alias.write(value)
+    word.read()
+}
+
+pub fn explicit_roundtrip(addr: u32, value: u32) -> u32 {
+    let word: BrowserPtr<u32> = BrowserPtr::from_u32(addr)
+    word.write(value)
+    word.read()
+}
+"#;
+    let wasm = compile_to_wasm("wasm_browser_ptr_u32.fe", source);
+    let (mut store, instance) = instantiate(&wasm);
+    let memory = instance
+        .get_memory(&mut store, "memory")
+        .expect("BrowserPtr allocation requires exported linear memory");
+    let allocated = instance
+        .get_typed_func::<i32, i32>(&mut store, "allocated_roundtrip")
+        .expect("allocated_roundtrip export");
+    let explicit = instance
+        .get_typed_func::<(i32, i32), i32>(&mut store, "explicit_roundtrip")
+        .expect("explicit_roundtrip export");
+
+    assert_eq!(allocated.call(&mut store, 0x78563412).unwrap(), 0x78563412);
+    assert_eq!(
+        explicit.call(&mut store, (19, 0x10203040)).unwrap(),
+        0x10203040
+    );
+    assert_eq!(&memory.data(&store)[19..23], &0x10203040_u32.to_le_bytes());
 }
 
 #[test]

@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23fafafa'/%3E%3Cpath d='m17 33 9 9 21-23' fill='none' stroke='%23b83f45' stroke-width='7'/%3E%3C/svg%3E">
+<title>Fe · TodoMVC</title>
+<style>
+  :root { color-scheme: light; font: 14px/1.4 system-ui, sans-serif; background: #f5f5f5; color: #111; }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-width: 230px; }
+  button, input { font: inherit; }
+  .page { width: min(550px, calc(100vw - 32px)); margin: 70px auto 32px; }
+  h1 { position: absolute; top: -90px; width: 100%; margin: 0; color: rgba(175, 47, 47, .18);
+       font-size: 80px; font-weight: 100; text-align: center; text-rendering: optimizeLegibility; }
+  fe-component { position: relative; display: block; background: #fff; box-shadow: 0 2px 4px #0003, 0 25px 50px #0000001a; }
+  .new-todo, .edit { width: 100%; margin: 0; border: 0; outline: 0; color: inherit; background: transparent; }
+  .new-todo { padding: 16px 16px 16px 60px; font-size: 24px; line-height: 1.4; box-shadow: inset 0 -2px 1px #00000008; }
+  .new-todo::placeholder { color: #e6e6e6; font-style: italic; }
+  .main { position: relative; border-top: 1px solid #e6e6e6; }
+  .toggle-all { position: absolute; top: -52px; left: 14px; width: 32px; height: 32px; opacity: .25; transform: rotate(90deg); }
+  .todo-list { list-style: none; margin: 0; padding: 0; }
+  .todo-list li { position: relative; min-height: 58px; border-bottom: 1px solid #ededed; font-size: 24px; }
+  .todo-list li .view { display: flex; align-items: center; min-height: 58px; }
+  .todo-list li .toggle { width: 40px; height: 40px; margin: 0 8px; appearance: none; border: 1px solid #d9d9d9; border-radius: 50%; }
+  .todo-list li .toggle:checked { border-color: #bddad5; }
+  .todo-list li .toggle:checked::after { content: "✓"; display: block; color: #5dc2af; text-align: center; line-height: 36px; }
+  .todo-list li label { flex: 1; padding: 14px 10px; overflow-wrap: anywhere; transition: color .25s; }
+  .todo-list li.completed label { color: #d9d9d9; text-decoration: line-through; }
+  .destroy { display: none; width: 40px; height: 40px; margin-right: 10px; border: 0; background: none; color: #cc9a9a; font-size: 30px; }
+  .destroy::after { content: "×"; }
+  .todo-list li:hover .destroy { display: block; }
+  .edit { display: none; margin-left: 48px; width: calc(100% - 48px); padding: 12px 16px; border: 1px solid #999; font-size: 24px; box-shadow: inset 0 -1px 5px #0003; }
+  .todo-list li.editing .view { display: none; }
+  .todo-list li.editing .edit { display: block; }
+  .footer { min-height: 42px; padding: 10px 15px; color: #777; text-align: center; border-top: 1px solid #e6e6e6; }
+  .todo-count { float: left; text-align: left; }
+  .filters { position: absolute; right: 0; left: 0; margin: 0; padding: 0; list-style: none; }
+  .filters li { display: inline; }
+  .filters button { margin: 0 2px; padding: 3px 7px; border: 1px solid transparent; border-radius: 3px; background: none; color: inherit; cursor: pointer; }
+  .filters button.selected { border-color: rgba(175, 47, 47, .25); }
+  .clear-completed { position: relative; float: right; border: 0; background: none; color: inherit; cursor: pointer; }
+  .clear-completed:hover { text-decoration: underline; }
+  [hidden] { display: none !important; }
+  .honesty { margin: 30px auto; color: #888; font-size: 12px; text-align: center; }
+  .honesty a { color: inherit; }
+  @media (max-width: 480px) { h1 { font-size: 60px; top: -72px; } .footer { height: 72px; } .filters { bottom: 10px; } }
+</style>
+</head>
+<body>
+  <main class="page">
+    <script type="application/fe" data-fe-src="sketches/todomvc/src/lib.fe"
+            data-fe-component data-fe-mount="#todo-app"></script>
+    <fe-component id="todo-app">
+      <h1>todos</h1>
+      <header class="header">
+        <input class="new-todo" data-fe-node="5" data-fe-action="1"
+               placeholder="What needs to be done?" autofocus autocomplete="off">
+      </header>
+      <section class="main" data-fe-node="1" hidden>
+        <input id="toggle-all" class="toggle-all" data-fe-node="6" data-fe-action="2" type="checkbox">
+        <label for="toggle-all" aria-label="Mark all as complete">❯</label>
+        <ul class="todo-list" data-fe-node="3"></ul>
+      </section>
+      <footer class="footer" data-fe-node="2" hidden>
+        <span class="todo-count"><strong data-fe-node="4">0</strong> items left</span>
+        <ul class="filters">
+          <li><button data-fe-node="7" data-fe-action="4" data-fe-class-1="selected">All</button></li>
+          <li><button data-fe-node="8" data-fe-action="5" data-fe-class-1="selected">Active</button></li>
+          <li><button data-fe-node="9" data-fe-action="6" data-fe-class-1="selected">Completed</button></li>
+        </ul>
+        <button class="clear-completed" data-fe-action="3">Clear completed</button>
+      </footer>
+      <template data-fe-template="1">
+        <li data-fe-class-1="completed" data-fe-class-2="editing">
+          <div class="view">
+            <input class="toggle" data-fe-node="10" data-fe-action="10" type="checkbox">
+            <label data-fe-node="11" data-fe-action="11"></label>
+            <button class="destroy" data-fe-action="12" aria-label="Delete todo"></button>
+          </div>
+          <input class="edit" data-fe-node="13" data-fe-action="13">
+        </li>
+      </template>
+    </fe-component>
+    <p class="honesty">Reducer, resident state, UTF-8 storage, filtering, and keyed projection are authored in
+      <a href="sketches/todomvc/src/lib.fe">Fe</a>. The fixed browser adapter only transports events and applies component effects.</p>
+  </main>
+</body>
+</html>
