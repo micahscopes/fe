@@ -92,9 +92,13 @@
                         box-shadow: inset 0 -2px 1px #00000008; }
   .todo-app .new-todo::placeholder { color: #ccc; font-style: italic; }
   .todo-app .main { position: relative; border-top: 1px solid #e6e6e6; background: white; }
-  .todo-app .toggle-all { position: absolute; top: -48px; left: 12px; width: 30px; height: 30px;
-                          opacity: .28; transform: rotate(90deg); }
-  .todo-app .toggle-all-label { position: absolute; overflow: hidden; width: 1px; height: 1px; }
+  .todo-app .toggle-all { position: absolute; z-index: 2; top: -50px; left: 7px; width: 42px;
+                          height: 46px; margin: 0; opacity: 0; cursor: pointer; }
+  .todo-app .toggle-all-label { position: absolute; top: -50px; left: 7px; width: 42px; height: 46px;
+                                color: #aaa; font: 28px/40px system-ui, sans-serif; text-align: center;
+                                cursor: pointer; }
+  .todo-app .toggle-all:checked + .toggle-all-label { color: #555; }
+  .todo-app .toggle-all:focus-visible + .toggle-all-label { outline: 2px solid #8aa9d6; outline-offset: -5px; }
   .todo-app .todo-list { margin: 0; padding: 0; list-style: none; }
   .todo-app .todo-list > li { position: relative; min-height: 54px; border-bottom: 1px solid #ededed;
                               font: 20px/1.35 system-ui, sans-serif; }
@@ -102,8 +106,10 @@
   .todo-app .todo-list .toggle { width: 34px; height: 34px; margin: 0 8px; }
   .todo-app .todo-list label { flex: 1; padding: 13px 8px; overflow-wrap: anywhere; }
   .todo-app .todo-list .completed label { color: #bbb; text-decoration: line-through; }
-  .todo-app .destroy { width: 38px; height: 38px; margin-right: 8px; border: 0;
-                       background: none; color: #cc9a9a; font-size: 26px; }
+  .todo-app .edit-button, .todo-app .destroy { width: 34px; height: 38px; border: 0;
+                                               background: none; cursor: pointer; }
+  .todo-app .edit-button { color: #9aa5b5; font-size: 20px; }
+  .todo-app .destroy { margin-right: 8px; color: #cc9a9a; font-size: 26px; }
   .todo-app .destroy::after { content: "×"; }
   .todo-app .edit { display: none; padding: 12px 14px; border: 1px solid #999; font-size: 20px; }
   .todo-app .editing .view { display: none; }
@@ -129,55 +135,55 @@
   <div class="grid">
     <figure>
       <figcaption><b>known color</b><span class="desc">typed compute → fragment resource</span><a href="sketches/known_color/src/lib.fe" target="_blank" rel="noopener">source</a></figcaption>
-      <script type="application/fe+wasm" data-fe-render="" data-fe-manifest="assets/fe-render-77b70cfd7f81bf83.json" data-fe-render-runtime="assets/fe-render-runtime-fe8254fc77d59fa8.js"></script>
+      <script type="application/fe+wasm" data-fe-render="" data-fe-manifest="assets/fe-render-f6430e3ab2330946.json" data-fe-render-runtime="assets/fe-render-runtime-fe8254fc77d59fa8.js"></script>
     </figure>
     <figure>
       <figcaption><b>rollcall pipeline</b><span class="desc">compute → private tree fold → fragment</span><a href="sketches/rollcall_pipeline/src/lib.fe" target="_blank" rel="noopener">source</a></figcaption>
-      <script type="application/fe+wasm" data-fe-render="" data-fe-manifest="assets/fe-render-02fb7121251adc17.json" data-fe-render-runtime="assets/fe-render-runtime-fe8254fc77d59fa8.js"></script>
+      <script type="application/fe+wasm" data-fe-render="" data-fe-manifest="assets/fe-render-e750e41658e8177a.json" data-fe-render-runtime="assets/fe-render-runtime-fe8254fc77d59fa8.js"></script>
     </figure>
     <figure>
       <figcaption><b>cga3d</b><span class="desc">sparse Clifford sphere pencil</span><a href="sketches/cga3d/src/lib.fe" target="_blank" rel="noopener">source</a></figcaption>
-      <script type="application/fe+wasm" data-fe-src="assets/fe-render-0f6e5c7faecc35f8.wasm" data-fe-render="" data-fe-manifest="assets/fe-render-af1c9463bca4411f.json" data-fe-render-runtime="assets/fe-render-runtime-fe8254fc77d59fa8.js" data-fe-integrity="sha256-D25cf67MNfh208c+9O/b2gvpTBgiT/nl2+oGekB3mOY="></script>
+      <script type="application/fe+wasm" data-fe-src="assets/fe-render-0f6e5c7faecc35f8.wasm" data-fe-render="" data-fe-manifest="assets/fe-render-ce67c09a6b60bc87.json" data-fe-render-runtime="assets/fe-render-runtime-fe8254fc77d59fa8.js" data-fe-integrity="sha256-D25cf67MNfh208c+9O/b2gvpTBgiT/nl2+oGekB3mOY="></script>
     </figure>
     <figure>
       <figcaption><b>qcga</b><span class="desc">quadric conformal surface</span><a href="sketches/qcga/src/lib.fe" target="_blank" rel="noopener">source</a></figcaption>
-      <script type="application/fe+wasm" data-fe-src="assets/fe-render-c3b81f143e83756f.wasm" data-fe-render="" data-fe-manifest="assets/fe-render-a8faeaf6ca55ea9c.json" data-fe-render-runtime="assets/fe-render-runtime-fe8254fc77d59fa8.js" data-fe-integrity="sha256-w7gfFD6DdW+pHVo24xfeOk/T1+/3JLKSrQUFl7Z8I3k="></script>
+      <script type="application/fe+wasm" data-fe-src="assets/fe-render-c3b81f143e83756f.wasm" data-fe-render="" data-fe-manifest="assets/fe-render-ab562ea510612e6d.json" data-fe-render-runtime="assets/fe-render-runtime-fe8254fc77d59fa8.js" data-fe-integrity="sha256-w7gfFD6DdW+pHVo24xfeOk/T1+/3JLKSrQUFl7Z8I3k="></script>
     </figure>
     <figure>
       <figcaption><b>desargues</b><span class="desc">projective incidence</span><a href="sketches/desargues/src/lib.fe" target="_blank" rel="noopener">source</a></figcaption>
-      <script type="application/fe+wasm" data-fe-src="assets/fe-render-804363e7052d2052.wasm" data-fe-render="" data-fe-manifest="assets/fe-render-3a577b88b6d15bd2.json" data-fe-render-runtime="assets/fe-render-runtime-fe8254fc77d59fa8.js" data-fe-integrity="sha256-gENj5wUtIFJTWrFZEbBVjgylfmSNpIvPN6lqsA+7rD8="></script>
+      <script type="application/fe+wasm" data-fe-src="assets/fe-render-804363e7052d2052.wasm" data-fe-render="" data-fe-manifest="assets/fe-render-2e0d016a3c8b0e8f.json" data-fe-render-runtime="assets/fe-render-runtime-fe8254fc77d59fa8.js" data-fe-integrity="sha256-gENj5wUtIFJTWrFZEbBVjgylfmSNpIvPN6lqsA+7rD8="></script>
     </figure>
     <figure>
       <figcaption><b>plasma</b><span class="desc">branch-free field</span><a href="sketches/plasma/src/lib.fe" target="_blank" rel="noopener">source</a></figcaption>
-      <script type="application/fe+wasm" data-fe-src="assets/fe-render-890ca1e53f27d308.wasm" data-fe-render="" data-fe-manifest="assets/fe-render-7ba7e889390d3025.json" data-fe-render-runtime="assets/fe-render-runtime-fe8254fc77d59fa8.js" data-fe-integrity="sha256-iQyh5T8n0wh0WByAniLUiRHJpMjI636DTdTzQUc/59U="></script>
+      <script type="application/fe+wasm" data-fe-src="assets/fe-render-890ca1e53f27d308.wasm" data-fe-render="" data-fe-manifest="assets/fe-render-0b1efc4bb433c4bb.json" data-fe-render-runtime="assets/fe-render-runtime-fe8254fc77d59fa8.js" data-fe-integrity="sha256-iQyh5T8n0wh0WByAniLUiRHJpMjI636DTdTzQUc/59U="></script>
     </figure>
     <figure>
       <figcaption><b>mandelbrot</b><span class="desc">escape-time set</span><a href="sketches/mandelbrot/src/lib.fe" target="_blank" rel="noopener">source</a></figcaption>
-      <script type="application/fe+wasm" data-fe-src="assets/fe-render-3ddfba681c072bfa.wasm" data-fe-render="" data-fe-manifest="assets/fe-render-7d812a146238eeb8.json" data-fe-render-runtime="assets/fe-render-runtime-fe8254fc77d59fa8.js" data-fe-integrity="sha256-Pd+6aBwHK/rONMHMKGxGEYSLBn1i6Y36iE/45B2HqVE="></script>
+      <script type="application/fe+wasm" data-fe-src="assets/fe-render-3ddfba681c072bfa.wasm" data-fe-render="" data-fe-manifest="assets/fe-render-ae68134e3925a5dd.json" data-fe-render-runtime="assets/fe-render-runtime-fe8254fc77d59fa8.js" data-fe-integrity="sha256-Pd+6aBwHK/rONMHMKGxGEYSLBn1i6Y36iE/45B2HqVE="></script>
     </figure>
     <figure>
       <figcaption><b>perturbation mandelbrot</b><span class="desc">Fixed reference → f32 delta pixels</span><a href="sketches/perturbational_mandelbrot/src/lib.fe" target="_blank" rel="noopener">source</a></figcaption>
-      <script type="application/fe+wasm" data-fe-src="assets/fe-render-6710de8d75d2a0ce.wasm" data-fe-render="" data-fe-manifest="assets/fe-render-a0a556b7e9b3023f.json" data-fe-render-runtime="assets/fe-render-runtime-fe8254fc77d59fa8.js" data-fe-integrity="sha256-ZxDejXXSoM7Zl2o0hC0g7/u6iozIIsSCEwglYVyuy7Q="></script>
+      <script type="application/fe+wasm" data-fe-src="assets/fe-render-6710de8d75d2a0ce.wasm" data-fe-render="" data-fe-manifest="assets/fe-render-07ef57aa2b6890bc.json" data-fe-render-runtime="assets/fe-render-runtime-fe8254fc77d59fa8.js" data-fe-integrity="sha256-ZxDejXXSoM7Zl2o0hC0g7/u6iozIIsSCEwglYVyuy7Q="></script>
     </figure>
     <figure>
       <figcaption><b>dec</b><span class="desc">discrete exterior calculus</span><a href="sketches/dec/src/lib.fe" target="_blank" rel="noopener">source</a></figcaption>
-      <script type="application/fe+wasm" data-fe-src="assets/fe-render-248f9921f1b2ad1a.wasm" data-fe-render="" data-fe-manifest="assets/fe-render-4947137f05b69b1e.json" data-fe-render-runtime="assets/fe-render-runtime-fe8254fc77d59fa8.js" data-fe-integrity="sha256-JI+ZIfGyrRpW6svGnaN2Z9+GQ58FbGVCZVe5GBMMtt0="></script>
+      <script type="application/fe+wasm" data-fe-src="assets/fe-render-248f9921f1b2ad1a.wasm" data-fe-render="" data-fe-manifest="assets/fe-render-56e7debc58ec6621.json" data-fe-render-runtime="assets/fe-render-runtime-fe8254fc77d59fa8.js" data-fe-integrity="sha256-JI+ZIfGyrRpW6svGnaN2Z9+GQ58FbGVCZVe5GBMMtt0="></script>
     </figure>
     <figure>
       <figcaption><b>gradient</b><span class="desc">runtime-default surface</span><a href="sketches/gradient/src/lib.fe" target="_blank" rel="noopener">source</a></figcaption>
-      <script type="application/fe+wasm" data-fe-src="assets/fe-render-b860fb40a02c39aa.wasm" data-fe-render="" data-fe-manifest="assets/fe-render-4cbffc093cd84e79.json" data-fe-render-runtime="assets/fe-render-runtime-fe8254fc77d59fa8.js" data-fe-integrity="sha256-uGD7QKAsOapmnNWkiG561ks/ffaFltb8KPzoQof4cTE="></script>
+      <script type="application/fe+wasm" data-fe-src="assets/fe-render-b860fb40a02c39aa.wasm" data-fe-render="" data-fe-manifest="assets/fe-render-4e81ad13a03e3c14.json" data-fe-render-runtime="assets/fe-render-runtime-fe8254fc77d59fa8.js" data-fe-integrity="sha256-uGD7QKAsOapmnNWkiG561ks/ffaFltb8KPzoQof4cTE="></script>
     </figure>
     <figure>
       <figcaption><b>TodoMVC</b><span class="desc">resident Fe state → keyed DOM effects</span><a href="sketches/todomvc/src/lib.fe" target="_blank" rel="noopener">source</a></figcaption>
-      <script type="application/fe+wasm" data-fe-src="assets/fe-c71200f39fe6638f.wasm" data-fe-component="" data-fe-mount="#gallery-todomvc" data-fe-manifest="assets/fe-8f9ded01c7a25e47.json" data-fe-integrity="sha256-xxIA85/mY49JnlbNFiOBz+w5O6059RQ3V/Hgf2mSA3c="></script>
+      <script type="application/fe+wasm" data-fe-src="assets/fe-1b6a78d70e22f99d.wasm" data-fe-component="" data-fe-mount="#gallery-todomvc" data-fe-manifest="assets/fe-a9e46531503bd842.json" data-fe-integrity="sha256-G2p41w4i+Z1Yuih+OAgQ9aBKHuaLYTLvCD0BqMnHRYM="></script>
       <fe-component id="gallery-todomvc" class="todo-app">
         <h2 class="todo-heading">todos</h2>
         <header>
           <input class="new-todo" data-fe-node="5" data-fe-action="1" placeholder="What needs to be done?" autocomplete="off">
         </header>
         <section class="main" data-fe-node="1" hidden="">
-          <input id="gallery-toggle-all" class="toggle-all" data-fe-node="6" data-fe-action="2" type="checkbox">
-          <label class="toggle-all-label" for="gallery-toggle-all">Mark all as complete</label>
+          <input id="gallery-toggle-all" class="toggle-all" data-fe-node="6" data-fe-action="2" type="checkbox" aria-label="Mark all as complete">
+          <label class="toggle-all-label" for="gallery-toggle-all" title="Mark all as complete">⌄</label>
           <ul class="todo-list" data-fe-node="3"></ul>
         </section>
         <footer class="footer" data-fe-node="2" hidden="">
@@ -194,6 +200,7 @@
             <div class="view">
               <input class="toggle" data-fe-node="10" data-fe-action="10" type="checkbox">
               <label data-fe-node="11" data-fe-action="11"></label>
+              <button class="edit-button" data-fe-action="14" aria-label="Edit todo" title="Edit">✎</button>
               <button class="destroy" data-fe-action="12" aria-label="Delete todo"></button>
             </div>
             <input class="edit" data-fe-node="13" data-fe-action="13">
