@@ -35,10 +35,12 @@
 use core::marker::Copy
 use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
 use core::num::IntDowncast
-use std::webgpu::{FragmentSurface, GpuProgram, LatestPerFrame, SurfaceTransition, WebGpuBackend}
+use std::webgpu::{
+    FragmentSurface, GpuProgram, LatestPerFrame, SurfaceScheduling, SurfaceTransition, WebGpuBackend,
+}
 use std::web::view::{
     ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface,
-    SurfaceEvent, SurfaceState,
+    SurfaceEvent, SurfaceScheduleEvent, SurfaceScheduleState, SurfaceScheduleStep, SurfaceState,
 }
 use sparse_clifford::{
     Nat, PlanLength, SparsePlan, Term, null_vector_pairing, plan_candidate_left,
@@ -328,6 +330,13 @@ actor QcgaSurface uses (GpuProgram<WebGpuBackend>) {
     zoom: f32,
     /// Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).
     res: f32,
+
+    fn schedule(_ event: own SurfaceScheduleEvent, _ state: own SurfaceScheduleState)
+        -> SurfaceScheduleStep
+        uses (SurfaceScheduling<LatestPerFrame>)
+    {
+        LatestPerFrame::step(state, event)
+    }
 
     /// The surface declaration: CTFE-evaluated at bundle time and projected
     /// into the manifest `surface` section. Never lowered to wasm or WGSL.

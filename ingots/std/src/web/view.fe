@@ -82,6 +82,41 @@ impl SurfaceEvent {
     }
 }
 
+/// Presentation-clock and lifecycle facts supplied by the fixed browser host
+/// to a resident Fe scheduling policy. `pending_events` describes untouched
+/// application input waiting at the host boundary; it is a fact, not a request
+/// to present. The policy alone returns that decision.
+#[web_surface_schedule_event]
+pub struct SurfaceScheduleEvent {
+    pub kind: SurfaceEventKind,
+    pub timestamp: f32,
+    pub pending_events: u32,
+}
+
+impl Copy for SurfaceScheduleEvent {}
+
+/// Private state of a resident presentation policy. The all-zero value is the
+/// deliberate initial state: hidden, idle, and with no observed device loss.
+#[web_surface_schedule_state]
+pub struct SurfaceScheduleState {
+    pub presenting: bool,
+    pub visible: bool,
+    pub device_lost: bool,
+}
+
+impl Copy for SurfaceScheduleState {}
+
+/// One Fe-authored scheduling result. Generated Wasm retains `state`; only the
+/// two decisions cross back to the fixed host.
+#[web_surface_schedule_step]
+pub struct SurfaceScheduleStep {
+    pub state: SurfaceScheduleState,
+    pub present: bool,
+    pub request_frame: bool,
+}
+
+impl Copy for SurfaceScheduleStep {}
+
 /// How a param presents and is driven by the runtime. The variant NAME is the
 /// projected `kind` string (snake_cased), so this enum is the single source of
 /// the kind vocabulary; the compiler reads the variant name off the evaluated

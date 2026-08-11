@@ -55,12 +55,12 @@
 use core::marker::Copy
 use core::{HostEffect, MainThread, Worker}
 use std::webgpu::{
-    Dispatch, FragmentSurface, GpuProgram, LatestPerFrame, SurfaceTransition,
-    WebGpuBackend,
+    Dispatch, FragmentSurface, GpuProgram, LatestPerFrame, SurfaceScheduling,
+    SurfaceTransition, WebGpuBackend,
 }
 use std::web::view::{
     ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface,
-    SurfaceEvent, SurfaceState,
+    SurfaceEvent, SurfaceScheduleEvent, SurfaceScheduleState, SurfaceScheduleStep, SurfaceState,
 }
 use fmath::{clamp01, from_i32, palette, rgba, sqrt}
 
@@ -837,6 +837,13 @@ actor DecSurface uses (GpuProgram<WebGpuBackend>) {
     show_laplacian: f32,
     /// Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).
     res: f32,
+
+    fn schedule(_ event: own SurfaceScheduleEvent, _ state: own SurfaceScheduleState)
+        -> SurfaceScheduleStep
+        uses (SurfaceScheduling<LatestPerFrame>)
+    {
+        LatestPerFrame::step(state, event)
+    }
 
     /// The surface declaration: CTFE-evaluated at bundle time and projected
     /// into the manifest `surface` section. Never lowered to wasm or WGSL.

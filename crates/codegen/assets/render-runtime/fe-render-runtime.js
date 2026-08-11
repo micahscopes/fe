@@ -391,6 +391,7 @@ export class FeSurfaceElement extends HTMLElement {
     this._surfaceTransitionSchedule = "immediate";
     this._surfaceTransitionStateResident = false;
     this._surfaceStateReplaceKernel = null;
+    this._surfaceScheduleKernel = null;
     this._surfaceTransitionMemory = null;
     this._surfaceTransitionAlloc = null;
     this._surfaceEventBufferPtr = 0;
@@ -584,6 +585,7 @@ export class FeSurfaceElement extends HTMLElement {
       this._surfaceTransitionAlloc = null;
       this._surfaceTransitionStateResident = false;
       this._surfaceStateReplaceKernel = null;
+      this._surfaceScheduleKernel = null;
       this._surfaceEventBufferPtr = 0;
       this._surfaceEventBufferCapacity = 0;
       const residentLatestPerFrame =
@@ -622,6 +624,10 @@ export class FeSurfaceElement extends HTMLElement {
         this._surfaceTransitionMemory = memory;
         this._surfaceTransitionAlloc = alloc;
       }
+      const surfaceSchedule = instance?.exports.fe_surface_schedule_v1;
+      this._surfaceScheduleKernel = typeof surfaceSchedule === "function"
+        ? surfaceSchedule
+        : null;
       if (this._control) {
         const controlFn = instance?.exports[this._control.export];
         if (typeof controlFn === "function") {
@@ -1206,7 +1212,7 @@ export class FeSurfaceElement extends HTMLElement {
 
     // Lifecycle policy may alter resident Fe state before the first live
     // presentation. The host contributes only the standards-derived fact.
-    this._deliverSurfaceBoundary(SurfaceEventKind.Visible);
+    this._deliverSurfaceLifecycle(SurfaceEventKind.Visible);
 
     if (this._adoptedCanvas) {
       // Already presenting (webgpu, kept configured) or cheap to re-run
@@ -1261,6 +1267,10 @@ export class FeSurfaceElement extends HTMLElement {
     this._resolveLive();
     this._dispatch("fe-live", { mode: this._mode });
     this._dispatch("fe-frame", { params: this._paramsSnapshot() });
+    // A visibility/device boundary may have retained raw input while the
+    // standards surface was not live. Fe has already decided whether that work
+    // deserves a frame; this only realizes the browser request when possible.
+    this._scheduleGestureFrame();
   }
 
   // -- live <-> suspended off-viewport --------------------------------------
@@ -1279,7 +1289,7 @@ export class FeSurfaceElement extends HTMLElement {
   async _suspend() {
     await this._capturePosterFromLive();
     this._fsm = "suspended";
-    this._deliverSurfaceBoundary(SurfaceEventKind.Hidden);
+    this._deliverSurfaceLifecycle(SurfaceEventKind.Hidden);
     this._dispatch("fe-statechange", { state: "suspended" });
   }
 
@@ -1351,7 +1361,7 @@ export class FeSurfaceElement extends HTMLElement {
 
   async _onDeviceLoss(freshGpu) {
     if (this._mode !== "webgpu") return; // wasm-2d surfaces hold no device resources.
-    this._deliverSurfaceBoundary(SurfaceEventKind.DeviceLost);
+    this._deliverSurfaceLifecycle(SurfaceEventKind.DeviceLost);
     this._gpu = null;
     if (this._liveContext) {
       try {
@@ -1394,7 +1404,7 @@ export class FeSurfaceElement extends HTMLElement {
       return;
     }
     this._fsm = "ready"; // force `_goLive` back through the real pipeline-build path.
-    this._deliverSurfaceBoundary(SurfaceEventKind.DeviceRecovered);
+    this._deliverSurfaceLifecycle(SurfaceEventKind.DeviceRecovered);
     await this._goLive();
     this._dispatch("fe-statechange", { state: this._fsm, reason: "device-recovered" });
   }
@@ -1410,6 +1420,7 @@ export class FeSurfaceElement extends HTMLElement {
     this._surfaceTransitionAlloc = null;
     this._surfaceStateReplaceKernel = null;
     this._surfaceTransitionStateResident = false;
+    this._surfaceScheduleKernel = null;
     if (this._liveContext) {
       try {
         this._liveContext.unconfigure();
@@ -1552,7 +1563,10 @@ export class FeSurfaceElement extends HTMLElement {
     if (this._surfaceTransitionKernel) {
       if (this._surfaceTransitionSchedule === "latest_per_frame") {
         this._pendingSurfaceEvents.push(surfaceEvent);
-        this._gestureDirty = true;
+        // The raw queue itself is the only canonical pending-work fact. A
+        // resident Fe policy decides at the frame boundary whether to present;
+        // `_gestureDirty` remains solely for old bundles without that export.
+        if (!this._surfaceScheduleKernel) this._gestureDirty = true;
         this._scheduleGestureFrame();
         return;
       }
@@ -1666,6 +1680,17 @@ export class FeSurfaceElement extends HTMLElement {
         paramIndex: index,
         paramValue: value,
       };
+      if (
+        this._surfaceTransitionSchedule === "latest_per_frame" &&
+        this._surfaceScheduleKernel
+      ) {
+        // Direct edits remain ordered after any older gesture transition, but
+        // presentation is still Fe-gated. Keeping the untouched edit in the
+        // same raw queue avoids recreating a JavaScript dirty flag.
+        this._pendingSurfaceEvents.push(event);
+        this._scheduleGestureFrame();
+        return;
+      }
       const next = this._surfaceTransitionSchedule === "latest_per_frame"
         ? this._runSurfaceFrame([event])
         : this._runSurfaceTransition(event);
@@ -1719,12 +1744,15 @@ export class FeSurfaceElement extends HTMLElement {
     return this._surfaceReply(reply);
   }
 
-  /** Deliver one standards presentation/lifecycle boundary to the same
-   * resident Fe actor. Any input collected since the prior boundary remains
-   * raw in memory and is coalesced by generated Wasm; the boundary identity is
-   * the newest typed fact. This keeps heterogeneous clock facts out of a JSON
-   * protocol and preserves one host-to-Wasm frame call. */
-  _deliverSurfaceBoundary(kind, timestamp = globalThis.performance?.now?.() ?? 0) {
+  /** Compatibility delivery of one typed clock/lifecycle fact to an older
+   * application transition. Canonical scheduled bundles deliver these facts to
+   * their distinct resident Fe policy instead, leaving queued application
+   * input untouched for the permitted presentation frame. */
+  _deliverSurfaceBoundary(
+    kind,
+    timestamp = globalThis.performance?.now?.() ?? 0,
+    includePending = false,
+  ) {
     if (!this._surfaceTransitionKernel) return null;
     const event = {
       mx: 0,
@@ -1742,12 +1770,52 @@ export class FeSurfaceElement extends HTMLElement {
       paramValue: 0,
     };
     const next = this._surfaceTransitionSchedule === "latest_per_frame"
-      ? this._runSurfaceFrame([...this._pendingSurfaceEvents.splice(0), event])
+      ? this._runSurfaceFrame([
+          ...(includePending ? this._pendingSurfaceEvents.splice(0) : []),
+          event,
+        ])
       : this._runSurfaceTransition(event);
     if (!next) return null;
     this._uniforms = next;
     this._refreshControlValues();
     return next;
+  }
+
+  /** Invoke the generated resident Fe presentation policy. Private policy
+   * state remains in Wasm; the fixed host sees only two booleans and performs
+   * no dirty/presenting inference of its own. */
+  _runSurfaceSchedule(
+    kind,
+    timestamp = globalThis.performance?.now?.() ?? 0,
+    pendingEvents = this._pendingSurfaceEvents.length,
+  ) {
+    if (!this._surfaceScheduleKernel) return null;
+    const reply = this._surfaceScheduleKernel(kind, timestamp, pendingEvents);
+    const decisions = Array.isArray(reply) ? reply : [reply];
+    if (
+      decisions.length !== 2 ||
+      !decisions.every((value) => value === 0 || value === 1)
+    ) {
+      throw new Error(
+        "fe render runtime: resident surface policy must return boolean present/request_frame decisions",
+      );
+    }
+    return { present: decisions[0] === 1, requestFrame: decisions[1] === 1 };
+  }
+
+  /** Deliver a standards fact to the resident Fe scheduling policy without
+   * consuming queued input. Older bundles fall back to the application
+   * transition. The host then realizes only Fe's explicit request-frame
+   * decision. */
+  _deliverSurfaceLifecycle(kind, timestamp = globalThis.performance?.now?.() ?? 0) {
+    // A resident scheduling actor is the Fe owner of clock/lifecycle policy.
+    // Older modules without it retain the prior application-transition path.
+    if (!this._surfaceScheduleKernel) {
+      this._deliverSurfaceBoundary(kind, timestamp, false);
+    }
+    const decision = this._runSurfaceSchedule(kind, timestamp);
+    if (decision?.requestFrame) this._scheduleGestureFrame();
+    return decision;
   }
 
   _surfaceReply(reply) {
@@ -1758,6 +1826,7 @@ export class FeSurfaceElement extends HTMLElement {
       );
       this._surfaceTransitionKernel = null;
       this._surfaceStateReplaceKernel = null;
+      this._surfaceScheduleKernel = null;
       this._surfaceTransitionStateResident = false;
       this._surfaceTransitionSchedule = "immediate";
       this._pendingSurfaceEvents = [];
@@ -1780,26 +1849,67 @@ export class FeSurfaceElement extends HTMLElement {
   }
 
   _scheduleGestureFrame() {
-    if (this._gestureFrame !== null || this._gesturePresenting || !this._gestureDirty) return;
+    if (this._gestureFrame !== null || this._fsm !== "live") return;
+    if (this._surfaceScheduleKernel) {
+      if (this._pendingSurfaceEvents.length === 0) return;
+    } else if (this._gesturePresenting || !this._gestureDirty) {
+      return;
+    }
     this._gestureFrame = requestAnimationFrame((timestamp) => {
       this._gestureFrame = null;
-      void this._flushGestureFrame(timestamp);
+      void this._flushGestureFrame(timestamp).catch((error) => this._fail(error));
     });
   }
 
   async _flushGestureFrame(timestamp = globalThis.performance?.now?.() ?? 0) {
+    if (this._surfaceScheduleKernel) {
+      if (this._fsm !== "live") return;
+      const decision = this._runSurfaceSchedule(
+        SurfaceEventKind.AnimationFrame,
+        timestamp,
+      );
+      if (decision?.requestFrame) this._scheduleGestureFrame();
+      if (!decision?.present) return;
+      if (this._pendingSurfaceEvents.length === 0) {
+        throw new Error(
+          "fe render runtime: Fe requested presentation without pending surface input",
+        );
+      }
+
+      const events = this._pendingSurfaceEvents.splice(0);
+      const next = this._surfaceTransitionSchedule === "latest_per_frame"
+        ? this._runSurfaceFrame(events)
+        : null;
+      if (this._surfaceTransitionSchedule === "latest_per_frame" && !next) return;
+      if (next) {
+        this._uniforms = next;
+        this._refreshControlValues();
+      }
+      try {
+        this._render();
+        const queue = this._mode === "webgpu" ? this._gpu?.device?.queue : null;
+        if (queue?.onSubmittedWorkDone) await queue.onSubmittedWorkDone();
+      } finally {
+        const complete = this._runSurfaceSchedule(SurfaceEventKind.GpuComplete);
+        if (complete?.requestFrame) this._scheduleGestureFrame();
+      }
+      return;
+    }
+
+    // Compatibility state machine for old bundles that predate the resident
+    // Fe policy export. Canonical gallery artifacts do not take this branch.
     if (this._fsm !== "live" || !this._gestureDirty || this._gesturePresenting) return;
     this._gestureDirty = false;
     this._gesturePresenting = true;
     try {
       if (this._surfaceTransitionKernel) {
-        if (!this._deliverSurfaceBoundary(SurfaceEventKind.AnimationFrame, timestamp)) return;
+        if (!this._deliverSurfaceBoundary(SurfaceEventKind.AnimationFrame, timestamp, true)) return;
       }
       this._render();
       const queue = this._mode === "webgpu" ? this._gpu?.device?.queue : null;
       if (queue?.onSubmittedWorkDone) {
         await queue.onSubmittedWorkDone();
-        this._deliverSurfaceBoundary(SurfaceEventKind.GpuComplete);
+        this._deliverSurfaceBoundary(SurfaceEventKind.GpuComplete, undefined, false);
       }
     } finally {
       this._gesturePresenting = false;

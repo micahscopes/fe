@@ -226,10 +226,44 @@ Origin: honesty audit of Claude Code session
   the 3,520-event bit-exact tape; the raymarch control Wasm grew 137 bytes to
   5,068 bytes. A cold release gallery precompile completed in 112.3 seconds and
   verified 13 Fe modules / 54 files with both Chromium component tapes green.
-  This exposes the missing typed clock facts but does not yet move the
-  `requestAnimationFrame`/GPU-completion dirty/presenting state machine or its
-  presentation decision out of JavaScript; that stronger Phase 2/3 step remains
-  open.
+  At that checkpoint the typed facts were exposed, but the
+  `requestAnimationFrame`/GPU-completion dirty/presenting state machine and its
+  presentation decision still remained in JavaScript.
+- The canonical `LatestPerFrame` state machine is now ordinary resident Fe.
+  `SurfaceScheduleEvent`, `SurfaceScheduleState`, and `SurfaceScheduleStep` are
+  nominal typed records; `LatestPerFrame::step` owns presenting, visibility,
+  device-loss backpressure, and the `present`/`request_frame` decisions. Each
+  scheduled behavior selects the policy as
+  `SurfaceScheduling<LatestPerFrame>`, and the compiler rejects a missing or
+  mismatched policy rather than silently falling back to JavaScript. Generic
+  Wasm lowering validates the fieldless event enum, retains the state prefix in
+  private globals, hides the authored behavior name, and exposes only the two
+  decisions through fixed `fe_surface_schedule_v1`; no manifest field or JSON
+  policy table was added. The fixed host retains raw queue storage and browser
+  rAF/promise realization, supplies frame/completion/visibility/device facts,
+  and obeys Fe's replies. Its old dirty/presenting branch is now reached only by
+  legacy artifacts without the policy export. An independent Wasmtime tape
+  covers visibility, frame admission, repeated-frame rejection, GPU completion,
+  device loss/recovery, hidden retention, and invalid-tag trapping. A separate
+  five-test fixed-host tape proves untouched 52-byte input, one application
+  transition per permitted gesture frame, queued input across an unresolved GPU
+  submission, and exact obedience to completion-driven frame requests. All 11
+  Fe sources selecting `LatestPerFrame` (nine canonical render actors and two
+  generalization/oracle fixtures) carry the typed policy. The resource-bearing
+  perturbation graph remained green in 427.22 seconds with unchanged semantic
+  shader receipts; raymarch WGSL remained 83,496 bytes while its control Wasm
+  became 5,853 bytes. A cold-cache release site precompile built 11 render
+  bundles in 116.37 seconds and verified 13 Fe modules / 54 files; both real
+  Chromium component/gallery tapes passed. The full 62-test codegen unit suite
+  and the 3,520-event bit-exact Mandelbrot transition oracle also passed against
+  this final contract. This completes the Fe-owned
+  latest-per-frame decision loop, not all of Phase 2: sample/throttle/debounce/
+  accumulate policy families, native event parity, compiler-derived elimination
+  of the uniform per-actor scheduling behavior, and deletion of the legacy host
+  compatibility branch remain open. Direct parameter edits still use an eager
+  transition only when necessary to preserve ordering against an older queued
+  gesture; presentation itself remains Fe-gated, and moving heterogeneous input
+  ordering wholly into the generated batch wrapper is a follow-up burn-down.
 - This component/page slice is not the full resident-component end state. The
   outer gallery shell does not yet own routing, tile lifecycle, scheduling, or
   component-to-component messages as a long-lived Fe actor, and the stylesheet
@@ -238,11 +272,9 @@ Origin: honesty audit of Claude Code session
   attribute-mutation event ABI, persistence, unbounded collections, and native
   backend parity remain open. TodoMVC intentionally caps itself at 32 todos and
   96 UTF-8 bytes per title while those richer storage interfaces are designed.
-- Animation-frame/GPU-completion facts and their clock state machine have not
-  yet been exposed as typed events to the resident Fe actor. Native/Cranelift
-  parity, typed lifecycle/reactive streams, pointer capture, picking/messages,
-  resident outer-gallery orchestration, and runtime-manifest removal remain
-  open.
+- Native/Cranelift parity, general typed lifecycle/reactive streams, pointer
+  capture, picking/messages, resident outer-gallery orchestration, and
+  runtime-manifest removal remain open.
 
 This ledger records achieved evidence, not a relaxation of the phases or the
 Definition of done below.

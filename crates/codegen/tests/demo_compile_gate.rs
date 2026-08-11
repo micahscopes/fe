@@ -122,6 +122,10 @@ fn assert_scheduled_typed_surface(bundle: &WebBundle) {
         "a resident actor must expose its fixed complete-state replacement boundary"
     );
     assert!(
+        exports.iter().any(|name| name == "fe_surface_schedule_v1"),
+        "a LatestPerFrame actor must expose the resident Fe decision policy"
+    );
+    assert!(
         !exports
             .iter()
             .any(|name| name == "fe_surface_transition_latest_per_frame_v2"),
@@ -130,6 +134,10 @@ fn assert_scheduled_typed_surface(bundle: &WebBundle) {
     assert!(
         !exports.iter().any(|name| name == "navigate"),
         "an ordinary Fe behavior name must not leak into the host ABI"
+    );
+    assert!(
+        !exports.iter().any(|name| name == "schedule"),
+        "the authored Fe policy behavior name must remain private"
     );
     assert!(
         !exports.iter().any(|name| name == "update_view"),
@@ -744,6 +752,74 @@ fn surface_event_kinds_are_fe_typed_and_invalid_host_tags_trap() {
     assert_eq!(
         coalesced_receipt, 102.0,
         "Fe must observe the frame identity plus the independently accumulated movement facts",
+    );
+
+    // Independent presentation-policy tape. These expectations are a scalar
+    // Rust model of latest-per-frame backpressure, not a generated-byte or
+    // mirror-function comparison. Repeated boundaries prove the generated
+    // wrapper retains the Fe policy's private state between calls.
+    let schedule = instance
+        .get_func(&mut store, "fe_surface_schedule_v1")
+        .expect("resident Fe presentation policy");
+    let schedule_tape = [
+        // visible with queued input asks the fixed host for a frame.
+        (4, 1, (0, 1)),
+        // the frame starts one presentation.
+        (2, 1, (1, 0)),
+        // a second frame cannot overtake the in-flight submission.
+        (2, 3, (0, 0)),
+        // completion releases backpressure and observes newer queued input.
+        (3, 3, (0, 1)),
+        (2, 3, (1, 0)),
+        // loss cancels presenting and suppresses work until recovery.
+        (6, 2, (0, 0)),
+        (3, 2, (0, 0)),
+        (7, 2, (0, 1)),
+        // hidden surfaces do not request or present queued input.
+        (5, 2, (0, 0)),
+        (2, 2, (0, 0)),
+        // becoming visible again requests the retained work.
+        (4, 2, (0, 1)),
+    ];
+    for (kind, pending, expected) in schedule_tape {
+        let mut decisions = [wasmtime::Val::I32(-1), wasmtime::Val::I32(-1)];
+        schedule
+            .call(
+                &mut store,
+                &[
+                    wasmtime::Val::I32(kind),
+                    wasmtime::Val::F32(123.5f32.to_bits()),
+                    wasmtime::Val::I32(pending),
+                ],
+                &mut decisions,
+            )
+            .expect("Fe presentation-policy step");
+        let actual = match decisions {
+            [
+                wasmtime::Val::I32(present),
+                wasmtime::Val::I32(request_frame),
+            ] => (present, request_frame),
+            other => panic!("presentation decisions must be two booleans, got {other:?}"),
+        };
+        assert_eq!(
+            actual, expected,
+            "policy drift at kind {kind}, pending {pending}"
+        );
+    }
+    let mut invalid_policy_results = [wasmtime::Val::I32(0), wasmtime::Val::I32(0)];
+    assert!(
+        schedule
+            .call(
+                &mut store,
+                &[
+                    wasmtime::Val::I32(8),
+                    wasmtime::Val::F32(0),
+                    wasmtime::Val::I32(0),
+                ],
+                &mut invalid_policy_results,
+            )
+            .is_err(),
+        "the resident policy wrapper must trap before Fe observes event tag 8",
     );
 }
 
@@ -1954,6 +2030,26 @@ fn typed_surface_transition_rejects_partial_state_record() {
     assert!(
         rendered.contains("complete non-resource state record") && rendered.contains("cutoff"),
         "the diagnostic must name the complete-state contract and missing actor field: {rendered}"
+    );
+}
+
+#[test]
+fn latest_per_frame_rejects_missing_resident_fe_policy() {
+    let path = repo_root().join("demos/sketches/gradient/src/lib.fe");
+    let source = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+    let policy = "    fn schedule(_ event: own SurfaceScheduleEvent, _ state: own SurfaceScheduleState)\n        -> SurfaceScheduleStep\n        uses (SurfaceScheduling<LatestPerFrame>)\n    {\n        LatestPerFrame::step(state, event)\n    }\n\n";
+    assert!(
+        source.contains(policy),
+        "gradient must carry the canonical Fe policy behavior"
+    );
+    let source = source.replacen(policy, "", 1);
+    let error = compile_actor_ingot_with_root_source("demos/sketches/gradient", source)
+        .expect_err("LatestPerFrame without a resident Fe decision policy must fail closed");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("LatestPerFrame") && rendered.contains("SurfaceScheduling"),
+        "the diagnostic must name the missing Fe scheduling contract: {rendered}"
     );
 }
 

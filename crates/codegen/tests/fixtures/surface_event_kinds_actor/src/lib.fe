@@ -1,10 +1,12 @@
 //! Semantic fixture for the append-only typed surface/presentation event ABI.
 
 use std::webgpu::{
-    FragmentSurface, GpuProgram, LatestPerFrame, SurfaceTransition, WebGpuBackend,
+    FragmentSurface, GpuProgram, LatestPerFrame, SurfaceScheduling, SurfaceTransition,
+    WebGpuBackend,
 }
 use std::web::view::{
-    Extent, Param, Surface, SurfaceEvent, SurfaceEventKind,
+    Extent, Param, Surface, SurfaceEvent, SurfaceEventKind, SurfaceScheduleEvent,
+    SurfaceScheduleState, SurfaceScheduleStep,
 }
 
 struct EventKindParams {
@@ -48,6 +50,13 @@ actor SurfaceEventKindProbe uses (GpuProgram<WebGpuBackend>) {
             receipt: self.receipt + identity + event.delta_x + event.delta_y,
             res: event.width,
         }
+    }
+
+    fn schedule(_ event: own SurfaceScheduleEvent, _ state: own SurfaceScheduleState)
+        -> SurfaceScheduleStep
+        uses (SurfaceScheduling<LatestPerFrame>)
+    {
+        LatestPerFrame::step(state, event)
     }
 
     fn paint(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {

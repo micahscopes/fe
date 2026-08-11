@@ -5,6 +5,7 @@ use core::conal::Functor
 use core::contracts::Target
 use core::Fn
 use core::MemPtr
+use super::web::{SurfaceEventKind, SurfaceScheduleEvent, SurfaceScheduleState, SurfaceScheduleStep}
 use raw::{gpu_buffer_create, gpu_upload, gpu_dispatch, gpu_readback_begin, wait as async_wait}
 
 // mb2 CE-3: the completion-cell control-effects vocabulary now lives
@@ -92,19 +93,77 @@ pub struct UpdateSurface {}
 #[gpu_control(typed_surface)]
 pub struct SurfaceTransition {}
 
-/// Process at most one coalesced raw surface event per browser presentation
-/// opportunity. The fixed host supplies a typed `AnimationFrame` boundary and
-/// writes it beside the untouched input batch; the compiler-lowered Wasm policy
-/// accumulates movement/wheel deltas, keeps the newest pointer, buttons, time,
-/// mode, extent, and event identity, then calls the authored
-/// `SurfaceTransition` exactly once. GPU completion, visibility, and device
-/// recovery enter through the same typed boundary rather than hidden manifest
-/// flags. Complete non-resource actor state remains in private Wasm globals
-/// across calls. The fixed host seeds or explicitly replaces that state only at
-/// initialization, extent, and restoration boundaries; frame calls carry raw
-/// events plus any inert external resource slots.
+/// Process at most one coalesced raw surface-input batch per browser
+/// presentation opportunity. A separate resident Fe policy consumes typed
+/// animation-frame, GPU-completion, visibility, and device facts and returns
+/// the present/request-frame decisions. When it permits presentation, the
+/// compiler-lowered transition accumulates movement/wheel deltas, keeps the
+/// newest remaining input facts, and calls the authored `SurfaceTransition`
+/// exactly once. Complete non-resource application and policy state remain in
+/// private Wasm globals. The fixed host seeds or explicitly replaces only
+/// application state at initialization, extent, and restoration boundaries;
+/// frame calls carry raw inputs plus inert external resource slots.
 #[gpu_schedule(latest_per_frame)]
 pub struct LatestPerFrame {}
+
+/// Role of the resident policy behavior selected alongside a surface
+/// transition. Its source name is ordinary Fe vocabulary; the compiler checks
+/// the typed schedule records and lowers it behind one fixed export.
+#[gpu_control(surface_schedule)]
+pub struct SurfaceScheduling<P> {}
+
+impl LatestPerFrame {
+    /// Keep at most one presentation in flight. Browser input remains raw and
+    /// queued until an animation-frame fact arrives while the surface is
+    /// visible and usable. GPU completion releases backpressure and requests
+    /// another frame exactly when more input accumulated in the meantime.
+    pub fn step(_ state: SurfaceScheduleState, _ event: SurfaceScheduleEvent) -> SurfaceScheduleStep {
+        let mut presenting: bool = state.presenting
+        let mut visible: bool = state.visible
+        let mut device_lost: bool = state.device_lost
+        let mut present: bool = false
+        let mut request_frame: bool = false
+
+        match event.kind {
+            SurfaceEventKind::AnimationFrame => {
+                if visible && device_lost == false && presenting == false && event.pending_events > 0 {
+                    presenting = true
+                    present = true
+                }
+            }
+            SurfaceEventKind::GpuComplete => {
+                presenting = false
+                request_frame = visible && device_lost == false && event.pending_events > 0
+            }
+            SurfaceEventKind::Visible => {
+                visible = true
+                request_frame = device_lost == false && presenting == false && event.pending_events > 0
+            }
+            SurfaceEventKind::Hidden => {
+                visible = false
+            }
+            SurfaceEventKind::DeviceLost => {
+                device_lost = true
+                presenting = false
+            }
+            SurfaceEventKind::DeviceRecovered => {
+                device_lost = false
+                request_frame = visible && presenting == false && event.pending_events > 0
+            }
+            _ => {}
+        }
+
+        SurfaceScheduleStep {
+            state: SurfaceScheduleState {
+                presenting: presenting,
+                visible: visible,
+                device_lost: device_lost,
+            },
+            present: present,
+            request_frame: request_frame,
+        }
+    }
+}
 
 /// An externally allocated storage resource shared by GPU stages.
 ///

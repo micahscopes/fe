@@ -32,14 +32,16 @@
 //!     fe web build demos/sketches/desargues --out <dir>
 
 use core::marker::Copy
-use std::webgpu::{FragmentSurface, GpuProgram, LatestPerFrame, SurfaceTransition, WebGpuBackend}
+use std::webgpu::{
+    FragmentSurface, GpuProgram, LatestPerFrame, SurfaceScheduling, SurfaceTransition, WebGpuBackend,
+}
 use gaplay::{
     DESA_FB, DESA_FC, Line, Point, desa_a, desa_b, desa_c, desa_o, desargues_image,
     join, line_eval, meet, point_world_x, point_world_y,
 }
 use std::web::view::{
     ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface,
-    SurfaceEvent, SurfaceState,
+    SurfaceEvent, SurfaceScheduleEvent, SurfaceScheduleState, SurfaceScheduleStep, SurfaceState,
 }
 use fmath::{abs, clamp01, cos, from_i32, rgba, sin, smoothstep, sqrt}
 
@@ -106,6 +108,13 @@ actor Desargues2d uses (GpuProgram<WebGpuBackend>) {
     zoom: f32,
     /// Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).
     res: f32,
+
+    fn schedule(_ event: own SurfaceScheduleEvent, _ state: own SurfaceScheduleState)
+        -> SurfaceScheduleStep
+        uses (SurfaceScheduling<LatestPerFrame>)
+    {
+        LatestPerFrame::step(state, event)
+    }
 
     /// The surface declaration: CTFE-evaluated at bundle time and projected
     /// into the manifest `surface` section. Never lowered to wasm or WGSL.

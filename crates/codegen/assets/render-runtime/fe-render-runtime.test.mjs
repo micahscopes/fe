@@ -118,6 +118,13 @@ test("a burst crosses into the Fe transition once at the presentation boundary",
     residentState += 1;
     return [residentState];
   };
+  const scheduleCalls = [];
+  surface._surfaceScheduleKernel = (kind, timestamp, pendingEvents) => {
+    scheduleCalls.push([kind, timestamp, pendingEvents]);
+    if (kind === SurfaceEventKind.AnimationFrame) return [1, 0];
+    if (kind === SurfaceEventKind.GpuComplete) return [0, pendingEvents > 0 ? 1 : 0];
+    throw new Error(`unexpected schedule fact ${kind}`);
+  };
 
   surface._applyGesture({
     mx: 100, my: 110, dx: 3, dy: -2, wheelDelta: 0,
@@ -156,16 +163,14 @@ test("a burst crosses into the Fe transition once at the presentation boundary",
       wheelMode: 1, buttons: 0, timestamp: 3, width: 512, height: 256,
       eventKind: SurfaceEventKind.Gesture, paramIndex: 0, paramValue: 0,
     },
-    {
-      mx: 0, my: 0, dx: 0, dy: 0, wheelDelta: 0,
-      wheelMode: 0, buttons: 0, timestamp: 10, width: 512, height: 256,
-      eventKind: SurfaceEventKind.AnimationFrame, paramIndex: 0, paramValue: 0,
-    },
   ]);
   assert.deepEqual(surface._uniforms, [42]);
   assert.deepEqual(surface._pendingSurfaceEvents, []);
   assert.deepEqual(stateReplacementCalls, [[41]]);
   assert.deepEqual(transitionArgCounts, [2]);
+  assert.deepEqual(scheduleCalls[0], [SurfaceEventKind.AnimationFrame, 10, 3]);
+  assert.equal(scheduleCalls[1][0], SurfaceEventKind.GpuComplete);
+  assert.equal(scheduleCalls[1][2], 0);
 
   // A second frame advances the state held by the Fe instance. The browser
   // presents the returned snapshot but never feeds 42 back as a frame arg or
@@ -181,11 +186,100 @@ test("a burst crosses into the Fe transition once at the presentation boundary",
   assert.deepEqual(surface._uniforms, [43]);
   assert.deepEqual(stateReplacementCalls, [[41]]);
   assert.deepEqual(transitionArgCounts, [2, 2]);
+  assert.deepEqual(scheduleCalls[2], [SurfaceEventKind.AnimationFrame, 20, 1]);
+  assert.equal(scheduleCalls[3][0], SurfaceEventKind.GpuComplete);
+  assert.equal(scheduleCalls[3][2], 0);
 });
 
-test("presentation and lifecycle boundaries reach Fe as typed facts", () => {
+test("Fe policy backpressure retains input until GPU completion requests a frame", async () => {
+  const frameCallbacks = [];
+  globalThis.requestAnimationFrame = callback => {
+    frameCallbacks.push(callback);
+    return frameCallbacks.length;
+  };
   const surface = Object.create(FeSurfaceElement.prototype);
+  surface._fsm = "live";
+  surface._surfaceTransitionSchedule = "latest_per_frame";
   surface._surfaceTransitionKernel = () => {};
+  surface._pendingSurfaceEvents = [];
+  surface._gestureFrame = null;
+  surface._backingWidth = 64;
+  surface._backingHeight = 64;
+  surface._uniforms = [0];
+  surface._refreshControlValues = () => {};
+  const transitionBatches = [];
+  surface._runSurfaceFrame = events => {
+    transitionBatches.push(structuredClone(events));
+    return [transitionBatches.length];
+  };
+  let renders = 0;
+  surface._render = () => { renders += 1; };
+  surface._mode = "webgpu";
+  let finishFirst;
+  const firstCompletion = new Promise(resolve => { finishFirst = resolve; });
+  let submissions = 0;
+  surface._gpu = { device: { queue: {
+    onSubmittedWorkDone() {
+      submissions += 1;
+      return submissions === 1 ? firstCompletion : Promise.resolve();
+    },
+  } } };
+
+  const decisions = [[1, 0], [0, 0], [0, 1], [1, 0], [0, 0]];
+  const scheduleCalls = [];
+  surface._surfaceScheduleKernel = (...facts) => {
+    scheduleCalls.push(facts);
+    const decision = decisions[scheduleCalls.length - 1];
+    if (!decision) throw new Error(`unexpected policy call ${scheduleCalls.length}`);
+    return decision;
+  };
+  const gesture = timestamp => ({
+    mx: timestamp, my: 0, dx: 1, dy: 0, wheelDelta: 0,
+    wheelMode: 0, buttons: 1, timestamp,
+  });
+
+  surface._applyGesture(gesture(1));
+  surface._gestureFrame = null; // model the browser entering callback 1
+  const firstFlush = surface._flushGestureFrame(10);
+  await Promise.resolve(); // first submission is now awaiting GPU completion
+
+  surface._applyGesture(gesture(2));
+  surface._gestureFrame = null; // model callback 2 while submission 1 is live
+  await surface._flushGestureFrame(11);
+  assert.equal(renders, 1);
+  assert.equal(transitionBatches.length, 1);
+  assert.equal(surface._pendingSurfaceEvents.length, 1);
+
+  finishFirst();
+  await firstFlush;
+  assert.equal(scheduleCalls[2][0], SurfaceEventKind.GpuComplete);
+  assert.equal(scheduleCalls[2][2], 1);
+  assert.notEqual(surface._gestureFrame, null, "host must realize Fe's request_frame decision");
+
+  surface._gestureFrame = null; // model the requested callback 3
+  await surface._flushGestureFrame(12);
+  assert.equal(renders, 2);
+  assert.equal(transitionBatches.length, 2);
+  assert.equal(transitionBatches[0][0].timestamp, 1);
+  assert.equal(transitionBatches[1][0].timestamp, 2);
+  assert.equal(surface._pendingSurfaceEvents.length, 0);
+  assert.deepEqual(
+    scheduleCalls.map(([kind, _timestamp, pending]) => [kind, pending]),
+    [
+      [SurfaceEventKind.AnimationFrame, 1],
+      [SurfaceEventKind.AnimationFrame, 1],
+      [SurfaceEventKind.GpuComplete, 1],
+      [SurfaceEventKind.AnimationFrame, 1],
+      [SurfaceEventKind.GpuComplete, 0],
+    ],
+  );
+});
+
+test("the fixed host obeys resident Fe lifecycle scheduling decisions", () => {
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._surfaceTransitionKernel = () => {
+    throw new Error("lifecycle scheduling must not re-enter application state");
+  };
   surface._surfaceTransitionSchedule = "latest_per_frame";
   surface._pendingSurfaceEvents = [{
     mx: 12, my: 9, dx: 3, dy: -2, wheelDelta: 0,
@@ -195,26 +289,22 @@ test("presentation and lifecycle boundaries reach Fe as typed facts", () => {
   surface._backingWidth = 320;
   surface._backingHeight = 200;
   surface._uniforms = [11];
-  surface._refreshControlValues = () => {};
-  let transported;
-  surface._runSurfaceFrame = events => {
-    transported = structuredClone(events);
-    return [12];
+  const scheduleCalls = [];
+  surface._surfaceScheduleKernel = (...args) => {
+    scheduleCalls.push(args);
+    return [0, 1];
   };
+  let requested = 0;
+  surface._scheduleGestureFrame = () => { requested += 1; };
 
   assert.deepEqual(
-    surface._deliverSurfaceBoundary(SurfaceEventKind.GpuComplete, 21.5),
-    [12],
+    surface._deliverSurfaceLifecycle(SurfaceEventKind.GpuComplete, 21.5),
+    { present: false, requestFrame: true },
   );
-  assert.equal(transported.length, 2);
-  assert.equal(transported[0].eventKind, SurfaceEventKind.Gesture);
-  assert.deepEqual(transported[1], {
-    mx: 0, my: 0, dx: 0, dy: 0, wheelDelta: 0,
-    wheelMode: 0, buttons: 0, timestamp: 21.5, width: 320, height: 200,
-    eventKind: SurfaceEventKind.GpuComplete, paramIndex: 0, paramValue: 0,
-  });
-  assert.deepEqual(surface._pendingSurfaceEvents, []);
-  assert.deepEqual(surface._uniforms, [12]);
+  assert.deepEqual(scheduleCalls, [[SurfaceEventKind.GpuComplete, 21.5, 1]]);
+  assert.equal(requested, 1);
+  assert.equal(surface._pendingSurfaceEvents.length, 1);
+  assert.deepEqual(surface._uniforms, [11]);
 });
 
 test("scripted parameter edits enter the typed Fe transition without replacing resident state", () => {
@@ -222,6 +312,7 @@ test("scripted parameter edits enter the typed Fe transition without replacing r
   surface._fsm = "live";
   surface._surfaceTransitionKernel = () => {};
   surface._surfaceTransitionSchedule = "latest_per_frame";
+  surface._surfaceScheduleKernel = () => [1, 0];
   surface._pendingSurfaceEvents = [{ eventKind: SurfaceEventKind.Gesture, marker: "prior gesture" }];
   surface._gestureDirty = true;
   surface._backingWidth = 640;
@@ -243,21 +334,23 @@ test("scripted parameter edits enter the typed Fe transition without replacing r
   surface._replaceSurfaceState = () => {
     throw new Error("parameter edits must not replace resident state from JavaScript");
   };
+  let scheduled = 0;
+  surface._scheduleGestureFrame = () => { scheduled += 1; };
 
   surface.params.steps = 4.6;
 
-  assert.equal(renders, 1);
-  assert.deepEqual(surface._uniforms, [5]);
+  assert.equal(renders, 0);
+  assert.deepEqual(surface._uniforms, [4]);
   assert.deepEqual(transported[0], [{ eventKind: SurfaceEventKind.Gesture, marker: "prior gesture" }]);
-  assert.equal(transported[1].length, 1);
   assert.deepEqual(
     {
-      eventKind: transported[1][0].eventKind,
-      paramIndex: transported[1][0].paramIndex,
-      paramValue: transported[1][0].paramValue,
-      width: transported[1][0].width,
-      height: transported[1][0].height,
+      eventKind: surface._pendingSurfaceEvents[0].eventKind,
+      paramIndex: surface._pendingSurfaceEvents[0].paramIndex,
+      paramValue: surface._pendingSurfaceEvents[0].paramValue,
+      width: surface._pendingSurfaceEvents[0].width,
+      height: surface._pendingSurfaceEvents[0].height,
     },
     { eventKind: SurfaceEventKind.ParamEdit, paramIndex: 0, paramValue: 4.6, width: 640, height: 480 },
   );
+  assert.equal(scheduled, 1);
 });

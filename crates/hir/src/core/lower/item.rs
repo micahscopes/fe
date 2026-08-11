@@ -248,7 +248,7 @@ fn validate_struct_attrs<'db>(
             AttrRule::supported(
                 "gpu_control",
                 GPU_IDENT_FORM,
-                "`#[gpu_control(surface)]` or `#[gpu_control(typed_surface)]`",
+                "`#[gpu_control(surface)]`, `#[gpu_control(typed_surface)]`, or `#[gpu_control(surface_schedule)]`",
             ),
             AttrRule::supported(
                 "gpu_schedule",
@@ -256,6 +256,21 @@ fn validate_struct_attrs<'db>(
                 "`#[gpu_schedule(latest_per_frame)]`",
             ),
             AttrRule::supported("web_surface_event", BARE_FORM, "`#[web_surface_event]`"),
+            AttrRule::supported(
+                "web_surface_schedule_event",
+                BARE_FORM,
+                "`#[web_surface_schedule_event]`",
+            ),
+            AttrRule::supported(
+                "web_surface_schedule_state",
+                BARE_FORM,
+                "`#[web_surface_schedule_state]`",
+            ),
+            AttrRule::supported(
+                "web_surface_schedule_step",
+                BARE_FORM,
+                "`#[web_surface_schedule_step]`",
+            ),
             AttrRule::supported("gpu_workgroup", BARE_FORM, "`#[gpu_workgroup]`"),
             AttrRule::supported("gpu_dispatch", GPU_IDENT_FORM, "`#[gpu_dispatch(fixed)]`"),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),

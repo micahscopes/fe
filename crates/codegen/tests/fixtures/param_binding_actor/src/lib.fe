@@ -4,11 +4,12 @@
 //! its state names, or its chosen bindings.
 
 use std::webgpu::{
-    FragmentSurface, GpuProgram, LatestPerFrame, SurfaceTransition, WebGpuBackend,
+    FragmentSurface, GpuProgram, LatestPerFrame, SurfaceScheduling, SurfaceTransition,
+    WebGpuBackend,
 }
 use std::web::view::{
     ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface,
-    SurfaceEvent, SurfaceState,
+    SurfaceEvent, SurfaceScheduleEvent, SurfaceScheduleState, SurfaceScheduleStep, SurfaceState,
 }
 
 struct ProbeParams {
@@ -48,6 +49,13 @@ actor ParamBindingProbe uses (GpuProgram<WebGpuBackend>) {
     phase: f32,
     zoom: f32,
     res: f32,
+
+    fn schedule(_ event: own SurfaceScheduleEvent, _ state: own SurfaceScheduleState)
+        -> SurfaceScheduleStep
+        uses (SurfaceScheduling<LatestPerFrame>)
+    {
+        LatestPerFrame::step(state, event)
+    }
 
     const fn view() -> Surface<ProbeParams> {
         Surface {

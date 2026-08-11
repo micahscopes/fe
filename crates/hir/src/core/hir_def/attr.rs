@@ -54,6 +54,7 @@ pub enum GpuIntrinsic {
 pub enum GpuControl {
     Surface,
     TypedSurface,
+    SurfaceSchedule,
 }
 
 /// Presentation policy selected by a Fe behavior capability.
@@ -497,6 +498,7 @@ impl<'db> AttrListId<'db> {
         match self.single_ident_arg(db, "gpu_control")?.as_str() {
             "surface" => Some(GpuControl::Surface),
             "typed_surface" => Some(GpuControl::TypedSurface),
+            "surface_schedule" => Some(GpuControl::SurfaceSchedule),
             _ => None,
         }
     }
@@ -559,6 +561,25 @@ impl<'db> AttrListId<'db> {
     /// the marker supplies nominal intent, never a name-based guess.
     pub fn is_web_surface_event(self, db: &'db dyn HirDb) -> bool {
         self.has_marker_attr(db, "web_surface_event")
+    }
+
+    /// Marks the fixed host facts consumed by a resident Fe presentation
+    /// policy. The compiler validates the complete nominal record rather than
+    /// publishing a parallel scheduling schema.
+    pub fn is_web_surface_schedule_event(self, db: &'db dyn HirDb) -> bool {
+        self.has_marker_attr(db, "web_surface_schedule_event")
+    }
+
+    /// Marks the private resident state carried between presentation-policy
+    /// calls in generated Wasm.
+    pub fn is_web_surface_schedule_state(self, db: &'db dyn HirDb) -> bool {
+        self.has_marker_attr(db, "web_surface_schedule_state")
+    }
+
+    /// Marks the Fe policy reply containing next resident state followed by
+    /// the decisions the fixed host must obey.
+    pub fn is_web_surface_schedule_step(self, db: &'db dyn HirDb) -> bool {
+        self.has_marker_attr(db, "web_surface_schedule_step")
     }
 
     pub fn arithmetic_mode(self, db: &'db dyn HirDb) -> Option<ArithmeticMode> {

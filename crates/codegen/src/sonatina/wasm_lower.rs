@@ -135,7 +135,7 @@ pub fn compile_runtime_package_wasm(
     db: &DriverDataBase,
     package: &RuntimePackage<'_>,
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
-    compile_runtime_package_wasm_with_canonical_lanes(db, package, &[], &[], None, None, None)
+    compile_runtime_package_wasm_with_canonical_lanes(db, package, &[], &[], None, None, None, None)
 }
 
 /// Overlay-only callback-capstone entry point. The default pin cannot name the
@@ -165,6 +165,7 @@ pub(crate) fn compile_runtime_package_wasm_with_canonical_lanes(
     resident_transition: Option<&super::WasmResidentTransition>,
     resident_initializer: Option<&super::WasmResidentInitializer>,
     resident_projection: Option<&super::WasmResidentProjection>,
+    resident_policy: Option<&super::WasmResidentPolicy>,
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
     // Reject unsupported indirect host results before constructing any
     // Sonatina signatures. A local wrapper may itself return the authored enum
@@ -222,6 +223,9 @@ pub(crate) fn compile_runtime_package_wasm_with_canonical_lanes(
     if let Some(projection) = resident_projection {
         wrapped_lane_names.insert(projection.source.clone());
     }
+    if let Some(policy) = resident_policy {
+        wrapped_lane_names.insert(policy.source.clone());
+    }
     let mut lowerer = PortableModuleLowerer::new(
         db,
         builder,
@@ -245,6 +249,9 @@ pub(crate) fn compile_runtime_package_wasm_with_canonical_lanes(
         return Err(LowerError::Unsupported(
             "resident actor initializer/projection requires a resident transition".to_owned(),
         ));
+    }
+    if let Some(policy) = resident_policy {
+        lowerer.synthesize_resident_policy(policy)?;
     }
     let import_modules = lowerer.import_modules();
     Ok((lowerer.finish(), import_modules))
@@ -3357,6 +3364,174 @@ where
             fb.insert_inst_no_result(Mstore::new(is, address, value, ty));
         }
         fb.insert_return_values(&results);
+        fb.seal_all();
+        fb.finish();
+        Ok(())
+    }
+
+    /// Lower an ordinary Fe decision function into a resident policy export.
+    /// Its event prefix is host supplied, its state segment is loaded from and
+    /// committed to private globals, and only the decision suffix is returned
+    /// to the host. This is the generic mechanism used by presentation policy;
+    /// it contains no browser or scheduling algorithm.
+    fn synthesize_resident_policy(
+        &mut self,
+        policy: &super::WasmResidentPolicy,
+    ) -> Result<(), LowerError> {
+        if policy.event_fields == 0 || policy.state_fields == 0 || policy.decision_fields == 0 {
+            return Err(LowerError::Unsupported(
+                "resident policy requires non-empty event, state, and decision records".to_owned(),
+            ));
+        }
+        let candidates = self
+            .func_map
+            .iter()
+            .filter(|(instance, _)| self.function_symbol(**instance) == policy.source)
+            .map(|(_, func_ref)| *func_ref)
+            .collect::<Vec<_>>();
+        let [callee] = candidates.as_slice() else {
+            return Err(LowerError::Unsupported(format!(
+                "resident policy `{}` must select exactly one lowered Fe behavior (found {})",
+                policy.source,
+                candidates.len()
+            )));
+        };
+        let (callee_args, result_tys) = self.builder.sig(*callee, |signature| {
+            (signature.args().to_vec(), signature.ret_tys().to_vec())
+        });
+        let expected_args = policy.event_fields + policy.state_fields;
+        let expected_results = policy.state_fields + policy.decision_fields;
+        if callee_args.len() != expected_args || result_tys.len() != expected_results {
+            return Err(LowerError::Unsupported(format!(
+                "resident policy `{}` must flatten to {expected_args} arguments and {expected_results} results; got {} -> {}",
+                policy.source,
+                callee_args.len(),
+                result_tys.len()
+            )));
+        }
+        let event_tys = &callee_args[..policy.event_fields];
+        let state_tys = &callee_args[policy.event_fields..];
+        if result_tys[..policy.state_fields] != *state_tys {
+            return Err(LowerError::Unsupported(format!(
+                "resident policy `{}` must return its complete state as the leading result prefix: arguments {state_tys:?}, results {:?}",
+                policy.source,
+                &result_tys[..policy.state_fields]
+            )));
+        }
+        for (index, limit) in &policy.event_tag_limits {
+            if *limit == 0
+                || event_tys
+                    .get(*index)
+                    .and_then(|ty| fieldless_tag_immediate(*ty, *limit - 1))
+                    .is_none()
+            {
+                return Err(LowerError::Unsupported(format!(
+                    "resident policy `{}` has invalid event enum constraint ({index}, {limit}) for {event_tys:?}",
+                    policy.source
+                )));
+            }
+        }
+        for (index, limit) in &policy.state_tag_limits {
+            if *limit == 0
+                || state_tys
+                    .get(*index)
+                    .and_then(|ty| fieldless_tag_immediate(*ty, *limit - 1))
+                    .is_none()
+            {
+                return Err(LowerError::Unsupported(format!(
+                    "resident policy `{}` has invalid state enum constraint ({index}, {limit}) for {state_tys:?}",
+                    policy.source
+                )));
+            }
+        }
+
+        // Wasm globals without an explicit initializer are zero-initialized.
+        // The nominal Fe state contract deliberately defines that value as its
+        // initial state, so no host-authored seed or policy JSON is required.
+        let state_globals = state_tys
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| {
+                self.builder.declare_gv(GlobalVariableData::new(
+                    format!("__fe_resident_policy_state_v1_{index}"),
+                    *ty,
+                    Linkage::Private,
+                    false,
+                    None,
+                ))
+            })
+            .collect::<Vec<_>>();
+        let decision_tys = &result_tys[policy.state_fields..];
+        let wrapper = self
+            .builder
+            .declare_function(Signature::new(
+                &policy.export,
+                Linkage::Public,
+                event_tys,
+                decision_tys,
+            ))
+            .map_err(|error| {
+                LowerError::Internal(format!(
+                    "failed to declare resident policy wrapper `{}`: {error}",
+                    policy.export
+                ))
+            })?;
+
+        let is = self.isa.inst_set();
+        let mut fb = self.builder.func_builder::<InstInserter>(wrapper);
+        let entry = fb.append_block();
+        let invoke = fb.append_block();
+        let invalid = fb.append_block();
+        fb.switch_to_block(entry);
+        let event_values = fb.args().to_vec();
+        let mut all_valid = None;
+        for (index, limit) in &policy.event_tag_limits {
+            let mut tag_valid = None;
+            for tag in 0..*limit {
+                let expected = fb.make_imm_value(
+                    fieldless_tag_immediate(event_tys[*index], tag)
+                        .expect("resident policy enum tag type validated above"),
+                );
+                let equal =
+                    fb.insert_inst(CmpEq::new(is, event_values[*index], expected), Type::I1);
+                tag_valid = Some(match tag_valid {
+                    Some(previous) => fb.insert_inst(Or::new(is, previous, equal), Type::I1),
+                    None => equal,
+                });
+            }
+            let tag_valid = tag_valid.expect("nonzero resident policy enum limit validated above");
+            all_valid = Some(match all_valid {
+                Some(previous) => fb.insert_inst(And::new(is, previous, tag_valid), Type::I1),
+                None => tag_valid,
+            });
+        }
+        if let Some(all_valid) = all_valid {
+            fb.insert_inst_no_result(Br::new(is, all_valid, invoke, invalid));
+        } else {
+            fb.insert_inst_no_result(Jump::new(is, invoke));
+        }
+
+        fb.switch_to_block(invalid);
+        fb.insert_inst_no_result(Unreachable::new(is));
+
+        fb.switch_to_block(invoke);
+        let mut args = smallvec1::SmallVec::<[ValueId; 8]>::new();
+        args.extend(event_values);
+        for (global, ty) in state_globals.iter().copied().zip(state_tys.iter().copied()) {
+            let address = fb.make_global_value(global);
+            args.push(fb.insert_inst(Mload::new(is, address, ty), ty));
+        }
+        let results = fb.insert_call_results(*callee, args);
+        for ((global, ty), value) in state_globals
+            .iter()
+            .copied()
+            .zip(state_tys.iter().copied())
+            .zip(results[..policy.state_fields].iter().copied())
+        {
+            let address = fb.make_global_value(global);
+            fb.insert_inst_no_result(Mstore::new(is, address, value, ty));
+        }
+        fb.insert_return_values(&results[policy.state_fields..]);
         fb.seal_all();
         fb.finish();
         Ok(())

@@ -108,6 +108,21 @@ pub(crate) struct WasmResidentProjection {
     export: String,
 }
 
+/// A target-neutral resident decision policy. The authored Fe function takes
+/// flattened host facts followed by its previous private state, and returns
+/// next state followed by a reply. Generated Wasm retains the state prefix and
+/// exposes only the reply suffix under a fixed export.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WasmResidentPolicy {
+    source: String,
+    export: String,
+    event_fields: usize,
+    state_fields: usize,
+    decision_fields: usize,
+    event_tag_limits: Vec<(usize, u32)>,
+    state_tag_limits: Vec<(usize, u32)>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WasmCompileOptions {
     canonical_arena: bool,
@@ -121,6 +136,10 @@ pub struct WasmCompileOptions {
     resident_initializer: Option<WasmResidentInitializer>,
     /// Optional read-only projection of current resident state.
     resident_projection: Option<WasmResidentProjection>,
+    /// Optional Fe-authored resident presentation policy. Unlike a render
+    /// manifest, this is compiler-only lowering metadata and never crosses the
+    /// host boundary as data.
+    resident_policy: Option<WasmResidentPolicy>,
     /// Compiler-owned public ABI aliases. The selected Fe source name remains
     /// ordinary application vocabulary while a fixed host contract can
     /// discover its export without a side manifest.
@@ -231,6 +250,29 @@ impl WasmCompileOptions {
         self
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn with_resident_policy(
+        mut self,
+        source: impl Into<String>,
+        export: impl Into<String>,
+        event_fields: usize,
+        state_fields: usize,
+        decision_fields: usize,
+        event_tag_limits: Vec<(usize, u32)>,
+        state_tag_limits: Vec<(usize, u32)>,
+    ) -> Self {
+        self.resident_policy = Some(WasmResidentPolicy {
+            source: source.into(),
+            export: export.into(),
+            event_fields,
+            state_fields,
+            decision_fields,
+            event_tag_limits,
+            state_tag_limits,
+        });
+        self
+    }
+
     #[cfg_attr(not(feature = "spirv-backend"), allow(dead_code))]
     pub(crate) fn with_surface_frame(
         mut self,
@@ -291,6 +333,7 @@ pub fn compile_runtime_package_wasm_with_options(
             options.resident_transition.as_ref(),
             options.resident_initializer.as_ref(),
             options.resident_projection.as_ref(),
+            options.resident_policy.as_ref(),
         )?;
     // Sonatina's `Pipeline` is ISA-independent (`EvmPipeline` is the
     // EVM-specific one) and `EvmCompile::optimize` runs it with no target
