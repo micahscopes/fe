@@ -68,7 +68,10 @@
 //! ~768 px at `zoom = 1e-16`, which a df64 center could not reach.
 
 use std::webgpu::{FragmentSurface, GpuProgram, LatestPerFrame, SurfaceTransition, WebGpuBackend}
-use std::web::view::{Extent, Param, Surface, SurfaceEvent}
+use std::web::view::{
+    ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface,
+    SurfaceEvent, SurfaceState,
+}
 use fmath::{from_i32, palette, to_i32}
 use precision::{add_f32, from_quad, to_quad}
 use precision::fixed::{from_qf_offset, escape as fx_escape}
@@ -223,6 +226,30 @@ struct MandelbrotViewState {
     res: f32,
 }
 
+impl SurfaceState for MandelbrotViewState {
+    type Params = MandelbrotParams
+}
+
+derive ApplyParamBindings for MandelbrotViewState using ParamBindingsProvider
+
+const fn mandelbrot_params() -> MandelbrotParams {
+    MandelbrotParams {
+        // The four-word deep Seahorse-Valley center (`w0` visible on the
+        // slider; `w1`/`w2`/`w3` the deep low-order words, below the df64
+        // floor, reaching ~1e-27).
+        center_x_w0: Param::range(min: -2.5, max: 1.0, init: -0.7436438798904419),
+        center_x_w1: Param::fixed(-0.0000000071467170),
+        center_x_w2: Param::fixed(-0.0000000000000003),
+        center_x_w3: Param::fixed(-0.00000000000000000000002),
+        center_y_w0: Param::range(min: -1.5, max: 1.5, init: 0.1318259090185165),
+        center_y_w1: Param::fixed(-0.0000000048132045),
+        center_y_w2: Param::fixed(0.00000000000000025),
+        center_y_w3: Param::fixed(0.000000000000000000000015),
+        zoom: Param::log(min: ZOOM_MIN, max: ZOOM_MAX, init: 1.0),
+        res: Param::extent_x(),
+    }
+}
+
 actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
     /// Complex-plane centre, as a flat FOUR-WORD `Expansion<4>` per axis
     /// (`w0..w3`, most significant first, kept flat so the typed Wasm ABI and
@@ -249,24 +276,7 @@ actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
     const fn view() -> Surface<MandelbrotParams> {
         Surface {
             extent: Extent::square(512),
-            params: MandelbrotParams {
-                // The four-word deep Seahorse-Valley center (`w0` visible on the
-                // slider; `w1`/`w2`/`w3` the deep low-order words, below the df64
-                // floor, reaching ~1e-27). All four are gesture-driven fields, so
-                // pan/zoom stays exact at full depth.
-                center_x_w0: Param::range(min: -2.5, max: 1.0, init: -0.7436438798904419),
-                center_x_w1: Param::fixed(-0.0000000071467170),
-                center_x_w2: Param::fixed(-0.0000000000000003),
-                center_x_w3: Param::fixed(-0.00000000000000000000002),
-                center_y_w0: Param::range(min: -1.5, max: 1.5, init: 0.1318259090185165),
-                center_y_w1: Param::fixed(-0.0000000048132045),
-                center_y_w2: Param::fixed(0.00000000000000025),
-                center_y_w3: Param::fixed(0.000000000000000000000015),
-                // Start at a recognizable whole-set scale. The four-word center
-                // and logarithmic range still retain the full deep-zoom path.
-                zoom: Param::log(min: 0.000000000000000000000000001, max: 3.0, init: 1.0),
-                res: Param::extent_x(),
-            },
+            params: mandelbrot_params(),
         }
     }
 
@@ -360,6 +370,20 @@ actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
     fn navigate(self, event: own SurfaceEvent) -> MandelbrotViewState
         uses (SurfaceTransition, LatestPerFrame)
     {
+        if event.is_param_edit() {
+            return MandelbrotViewState {
+                center_x_w0: self.center_x_w0,
+                center_x_w1: self.center_x_w1,
+                center_x_w2: self.center_x_w2,
+                center_x_w3: self.center_x_w3,
+                center_y_w0: self.center_y_w0,
+                center_y_w1: self.center_y_w1,
+                center_y_w2: self.center_y_w2,
+                center_y_w3: self.center_y_w3,
+                zoom: self.zoom,
+                res: self.res,
+            }.apply_param_bindings(mandelbrot_params(), event)
+        }
         let dx: f32 = event.delta_x
         let dy: f32 = event.delta_y
         let dzoom: f32 = event.wheel_delta

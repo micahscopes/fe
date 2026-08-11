@@ -1,8 +1,8 @@
 {
   "artifacts": {
     "canonical_adapters": [],
-    "wasm": "fe-render-5bf27925bd34ebfa.wasm",
-    "wasm_bytes": 2128,
+    "wasm": "fe-render-6710de8d75d2a0ce.wasm",
+    "wasm_bytes": 3311,
     "wgsl": "fe-render-636b45dcc7350850.wgsl",
     "wgsl_bytes": 45239
   },
@@ -421,7 +421,7 @@
       {
         "id": "fmath/src/lib.fe",
         "kind": "fe",
-        "sha256": "c4221532aabf2a9b416d68f18023faaa3edfe0b5652c704b0b4f82401491e31c"
+        "sha256": "d2e14a7f4fa6cdff0a6a2f65c711677b835c919a816e5098e5c35aca2693ebe4"
       },
       {
         "id": "perturbational_mandelbrot/fe.toml",
@@ -431,7 +431,7 @@
       {
         "id": "perturbational_mandelbrot/src/lib.fe",
         "kind": "fe",
-        "sha256": "2183575db521e2a17c4024393e1ed95e83a825a6fd10f9ba69d7c938f4b94919"
+        "sha256": "04510d06619f16b1071918e221ed0ca45df3caa9395ede7e0f7d93c96ebca8ec"
       },
       {
         "id": "precision/fe.toml",
@@ -471,9 +471,9 @@
     ],
     "fixed_host": {
       "artifact": {
-        "bytes": 76236,
-        "path": "fe-render-runtime-6ecde349c528b26c.js",
-        "sha256": "6ecde349c528b26c14c9bc5a6677455d7df58c727f2013c59089f07ce2618c7b"
+        "bytes": 77836,
+        "path": "fe-render-runtime-fe8254fc77d59fa8.js",
+        "sha256": "fe8254fc77d59fa86652af2dd55ca65c9bd9a22a3f7ee31a6751c79c34d08f3f"
       },
       "contract": "fixed_versioned_demo_blind_browser_host",
       "name": "fe-render-runtime",

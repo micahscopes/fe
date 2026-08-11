@@ -31,7 +31,7 @@
 // import this SAME module and drive the SAME element. One mount path.
 
 const DEFAULT_SIZE = 256; // dispatch/canvas size for a v4 manifest with no declared `surface.extent`.
-const SURFACE_EVENT_STRIDE = 40;
+const SURFACE_EVENT_STRIDE = 52;
 const MAX_SURFACE_EVENT_BATCH = Math.floor(0x7fffffff / SURFACE_EVENT_STRIDE);
 
 /** Write the fixed DFS layout of untouched `std::web::SurfaceEvent` records.
@@ -51,6 +51,9 @@ export function writeSurfaceEventBatch(memory, pointer, events) {
     view.setFloat32(base + 28, event.timestamp, true);
     view.setFloat32(base + 32, event.width, true);
     view.setFloat32(base + 36, event.height, true);
+    view.setUint32(base + 40, event.eventKind, true);
+    view.setUint32(base + 44, event.paramIndex, true);
+    view.setFloat32(base + 48, event.paramValue, true);
   });
 }
 
@@ -570,12 +573,12 @@ export class FeSurfaceElement extends HTMLElement {
       this._surfaceEventBufferPtr = 0;
       this._surfaceEventBufferCapacity = 0;
       const residentLatestPerFrame =
-        instance?.exports.fe_surface_transition_latest_per_frame_v3 ?? null;
+        instance?.exports.fe_surface_transition_latest_per_frame_v4 ?? null;
       const latestPerFrame = residentLatestPerFrame ??
         instance?.exports.fe_surface_transition_latest_per_frame_v2 ?? null;
       this._surfaceTransitionKernel = typeof latestPerFrame === "function"
         ? latestPerFrame
-        : instance?.exports.fe_surface_transition_v1 ?? null;
+        : instance?.exports.fe_surface_transition_v2 ?? null;
       this._surfaceTransitionSchedule = typeof latestPerFrame === "function"
         ? "latest_per_frame"
         : "immediate";
@@ -1257,7 +1260,7 @@ export class FeSurfaceElement extends HTMLElement {
     this._dispatch("fe-statechange", { state: "suspended" });
   }
 
-  // -- render (param write path: sliders, `.params`, gestures in R3) -------
+  // -- render --------------------------------------------------------------
 
   _render(next) {
     if (next) this._replaceSurfaceState(next);
@@ -1304,9 +1307,7 @@ export class FeSurfaceElement extends HTMLElement {
           }
           const index = element._memberIndexByName.get(prop);
           if (index === undefined) return false;
-          const next = element._uniforms.slice();
-          next[index] = Number(value);
-          element._render(next);
+          element._applyParamEdit(index, Number(value));
           return true;
         },
         has(_target, prop) {
@@ -1519,6 +1520,9 @@ export class FeSurfaceElement extends HTMLElement {
       ...raw,
       width: this._backingWidth,
       height: this._backingHeight,
+      eventKind: 0,
+      paramIndex: 0,
+      paramValue: 0,
     };
     if (this._surfaceTransitionKernel) {
       if (this._surfaceTransitionSchedule === "latest_per_frame") {
@@ -1577,6 +1581,9 @@ export class FeSurfaceElement extends HTMLElement {
       raw.timestamp,
       raw.width,
       raw.height,
+      raw.eventKind,
+      raw.paramIndex,
+      raw.paramValue,
     ];
     const reply = this._surfaceTransitionKernel(...eventArgs, ...this._surfaceActorArgs());
     return this._surfaceReply(reply);
@@ -1603,9 +1610,54 @@ export class FeSurfaceElement extends HTMLElement {
     return resourceArgs;
   }
 
+  /** Route a DOM slider or scripted `.params` write through the same authored
+   * Fe transition as pointer/wheel input. The fixed host contributes only the
+   * declaration-order index and untouched proposed value. Older, untyped
+   * bundles retain their compatibility replacement path. */
+  _applyParamEdit(index, value) {
+    if (this._surfaceTransitionKernel) {
+      if (
+        this._surfaceTransitionSchedule === "latest_per_frame" &&
+        this._pendingSurfaceEvents.length > 0
+      ) {
+        const prior = this._runSurfaceFrame(this._pendingSurfaceEvents);
+        this._pendingSurfaceEvents = [];
+        if (!prior) return;
+        this._uniforms = prior;
+        this._gestureDirty = false;
+      }
+      const event = {
+        mx: 0,
+        my: 0,
+        dx: 0,
+        dy: 0,
+        wheelDelta: 0,
+        wheelMode: 0,
+        buttons: 0,
+        timestamp: globalThis.performance?.now?.() ?? 0,
+        width: this._backingWidth,
+        height: this._backingHeight,
+        eventKind: 1,
+        paramIndex: index,
+        paramValue: value,
+      };
+      const next = this._surfaceTransitionSchedule === "latest_per_frame"
+        ? this._runSurfaceFrame([event])
+        : this._runSurfaceTransition(event);
+      if (!next) return;
+      this._uniforms = next;
+      this._render();
+      return;
+    }
+
+    const next = this._uniforms.slice();
+    next[index] = value;
+    this._render(next);
+  }
+
   /** Seed or explicitly replace the complete state of a resident Fe actor.
-   * This is an external-boundary operation (initial extent, resize, slider,
-   * or `.params` edit), never the frame-to-frame transition path. */
+   * This is an external-boundary operation (initialization, extent change, or
+   * explicit restoration), never a user-input transition path. */
   _replaceSurfaceState(next) {
     this._uniforms = next;
     if (this._surfaceStateReplaceKernel) {
@@ -1786,9 +1838,7 @@ export class FeSurfaceElement extends HTMLElement {
       input.step = isInt ? "1" : String((inputMax - inputMin) / 200 || 0.01);
       input.value = String(encode(this._uniforms[index]));
       input.oninput = () => {
-        const next = this._uniforms.slice();
-        next[index] = decode(input.value);
-        this._render(next);
+        this._applyParamEdit(index, decode(input.value));
       };
       row.append(label, input);
       this._panel.append(row);

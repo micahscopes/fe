@@ -1,8 +1,8 @@
 {
   "artifacts": {
     "canonical_adapters": [],
-    "wasm": "fe-render-6e5f32c57437b9e2.wasm",
-    "wasm_bytes": 3073,
+    "wasm": "fe-render-804363e7052d2052.wasm",
+    "wasm_bytes": 3549,
     "wgsl": "fe-render-c3f557cbc432a6ac.wgsl",
     "wgsl_bytes": 25595
   },
@@ -176,7 +176,7 @@
       {
         "id": "demos/sketches/desargues/src/lib.fe",
         "kind": "fe",
-        "sha256": "508f713c16c1c5936ae2bfe79a00d163eaee460140c62da7cf630bc423752494"
+        "sha256": "477a5590f91febc448a5aee34c996986d14ce177ef7fedead15d45a47b75850d"
       },
       {
         "id": "demos/sketches/fmath/fe.toml",
@@ -186,7 +186,7 @@
       {
         "id": "demos/sketches/fmath/src/lib.fe",
         "kind": "fe",
-        "sha256": "c4221532aabf2a9b416d68f18023faaa3edfe0b5652c704b0b4f82401491e31c"
+        "sha256": "d2e14a7f4fa6cdff0a6a2f65c711677b835c919a816e5098e5c35aca2693ebe4"
       },
       {
         "id": "ingots/core/fe.toml",
@@ -286,7 +286,7 @@
       {
         "id": "ingots/core/src/num.fe",
         "kind": "fe",
-        "sha256": "cda9ce4520ba6aedcba8e41743e4e50fb8addac9a544fc7bd9f91c9c6d9ca041"
+        "sha256": "50dcf702a6f76badc198d03769498927bd929d0ac0275c384086fb048fe90203"
       },
       {
         "id": "ingots/core/src/num_intrinsics.fe",
@@ -370,9 +370,9 @@
     ],
     "fixed_host": {
       "artifact": {
-        "bytes": 76236,
-        "path": "fe-render-runtime-6ecde349c528b26c.js",
-        "sha256": "6ecde349c528b26c14c9bc5a6677455d7df58c727f2013c59089f07ce2618c7b"
+        "bytes": 77836,
+        "path": "fe-render-runtime-fe8254fc77d59fa8.js",
+        "sha256": "fe8254fc77d59fa86652af2dd55ca65c9bd9a22a3f7ee31a6751c79c34d08f3f"
       },
       "contract": "fixed_versioned_demo_blind_browser_host",
       "name": "fe-render-runtime",
