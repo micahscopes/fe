@@ -32,6 +32,20 @@
 
 const DEFAULT_SIZE = 256; // dispatch/canvas size for a v4 manifest with no declared `surface.extent`.
 
+/** Fixed-host realization of Fe's `LatestPerFrame` surface policy. Movement
+ * and wheel deltas accumulate so no displacement is lost; every other field
+ * is the newest raw browser fact. Exported solely for a deterministic host
+ * conformance gate—the application selects this policy in Fe. */
+export function coalesceLatestSurfaceEvent(pending, incoming) {
+  if (!pending) return { ...incoming };
+  return {
+    ...incoming,
+    dx: pending.dx + incoming.dx,
+    dy: pending.dy + incoming.dy,
+    wheelDelta: pending.wheelDelta + incoming.wheelDelta,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Shared WebGPU device: one adapter/device for the whole page, requested at
 // most once, with `device.lost` recovery broadcast to every attached surface.
@@ -328,7 +342,7 @@ const SHADOW_CSS = `
  * natural, harmless fifth value for observability (an `fe-error` event also
  * fires, so nothing depends on polling `.state` to notice a failure).
  */
-class FeSurfaceElement extends HTMLElement {
+export class FeSurfaceElement extends HTMLElement {
   static get observedAttributes() {
     return ["manifest", "state", "controls", "width", "height"];
   }
@@ -349,6 +363,8 @@ class FeSurfaceElement extends HTMLElement {
     this._control = null; // R3 param gestures: the projected `control` manifest section.
     this._controlKernel = null; // the resolved wasm control export, or null (no gestures).
     this._surfaceTransitionKernel = null; // typed Fe SurfaceEvent ABI, discovered from Wasm.
+    this._surfaceTransitionSchedule = "immediate";
+    this._pendingSurfaceEvent = null;
     this._passes = [];
     this._resources = [];
     this._graph = false;
@@ -533,9 +549,17 @@ class FeSurfaceElement extends HTMLElement {
       // with). No control block, or an export it doesn't actually find,
       // means gestures stay off -- never a JS reimplementation fallback.
       this._controlKernel = null;
-      this._surfaceTransitionKernel = instance?.exports.fe_surface_transition_v1 ?? null;
+      const latestPerFrame =
+        instance?.exports.fe_surface_transition_latest_per_frame_v1 ?? null;
+      this._surfaceTransitionKernel = typeof latestPerFrame === "function"
+        ? latestPerFrame
+        : instance?.exports.fe_surface_transition_v1 ?? null;
+      this._surfaceTransitionSchedule = typeof latestPerFrame === "function"
+        ? "latest_per_frame"
+        : "immediate";
       if (typeof this._surfaceTransitionKernel !== "function") {
         this._surfaceTransitionKernel = null;
+        this._surfaceTransitionSchedule = "immediate";
       }
       if (this._control) {
         const controlFn = instance?.exports[this._control.export];
@@ -1307,6 +1331,7 @@ class FeSurfaceElement extends HTMLElement {
     if (this._gestureFrame !== null) cancelAnimationFrame(this._gestureFrame);
     this._gestureFrame = null;
     this._gestureDirty = false;
+    this._pendingSurfaceEvent = null;
     if (this._liveContext) {
       try {
         this._liveContext.unconfigure();
@@ -1439,39 +1464,14 @@ class FeSurfaceElement extends HTMLElement {
   _applyGesture(raw) {
     if (this._fsm !== "live") return;
     if (this._surfaceTransitionKernel) {
-      // Fixed DFS layout of std::web::SurfaceEvent, followed by the actor's
-      // fields in declaration order. Fragment context args precede actor state
-      // in the GPU signature; missing positions in that suffix are external
-      // resource handles and cross into control-only Wasm as inert i64 zeroes.
-      const eventArgs = [
-        raw.mx,
-        raw.my,
-        raw.dx,
-        raw.dy,
-        raw.wheelDelta,
-        raw.wheelMode,
-        raw.buttons,
-        raw.timestamp,
-        this._backingWidth,
-        this._backingHeight,
-      ];
-      const actorArgStart = 1 + Math.max(-1, ...this._builtins.map((builtin) => builtin.arg_index));
-      const actorArgEnd = actorArgStart + this._members.length + this._resources.length;
-      const actorArgs = [];
-      for (let argIndex = actorArgStart; argIndex < actorArgEnd; argIndex += 1) {
-        const memberIndex = this._memberIndexByArg.get(argIndex);
-        actorArgs.push(memberIndex === undefined ? 0n : this._uniforms[memberIndex]);
-      }
-      const reply = this._surfaceTransitionKernel(...eventArgs, ...actorArgs);
-      const next = Array.isArray(reply) ? reply : [reply];
-      if (next.length !== this._uniforms.length) {
-        console.error(
-          `[fe web] typed surface transition returned ${next.length} fields; expected ${this._uniforms.length}`,
-        );
-        this._surfaceTransitionKernel = null;
+      if (this._surfaceTransitionSchedule === "latest_per_frame") {
+        this._pendingSurfaceEvent = coalesceLatestSurfaceEvent(this._pendingSurfaceEvent, raw);
+        this._gestureDirty = true;
+        this._scheduleGestureFrame();
         return;
       }
-      this._queueGestureRender(next);
+      const next = this._runSurfaceTransition(raw);
+      if (next) this._queueGestureRender(next);
       return;
     }
     if (!this._controlKernel) return;
@@ -1504,11 +1504,49 @@ class FeSurfaceElement extends HTMLElement {
     this._queueGestureRender(next);
   }
 
-  /** Keep every Fe-computed state transition, but present only the newest one
-   * after the next animation-frame boundary and after the prior GPU submission
-   * has completed. This is a generic latest-state throttle, not demo-specific
-   * gesture math. A graph presentation still records its complete ordered pass
-   * list in one command buffer. */
+  _runSurfaceTransition(raw) {
+    // Fixed DFS layout of std::web::SurfaceEvent, followed by the actor's
+    // fields in declaration order. Fragment context args precede actor state
+    // in the GPU signature; missing positions in that suffix are external
+    // resource handles and cross into control-only Wasm as inert i64 zeroes.
+    const eventArgs = [
+      raw.mx,
+      raw.my,
+      raw.dx,
+      raw.dy,
+      raw.wheelDelta,
+      raw.wheelMode,
+      raw.buttons,
+      raw.timestamp,
+      this._backingWidth,
+      this._backingHeight,
+    ];
+    const actorArgStart = 1 + Math.max(-1, ...this._builtins.map((builtin) => builtin.arg_index));
+    const actorArgEnd = actorArgStart + this._members.length + this._resources.length;
+    const actorArgs = [];
+    for (let argIndex = actorArgStart; argIndex < actorArgEnd; argIndex += 1) {
+      const memberIndex = this._memberIndexByArg.get(argIndex);
+      actorArgs.push(memberIndex === undefined ? 0n : this._uniforms[memberIndex]);
+    }
+    const reply = this._surfaceTransitionKernel(...eventArgs, ...actorArgs);
+    const next = Array.isArray(reply) ? reply : [reply];
+    if (next.length !== this._uniforms.length) {
+      console.error(
+        `[fe web] typed surface transition returned ${next.length} fields; expected ${this._uniforms.length}`,
+      );
+      this._surfaceTransitionKernel = null;
+      this._surfaceTransitionSchedule = "immediate";
+      this._pendingSurfaceEvent = null;
+      return null;
+    }
+    return next;
+  }
+
+  /** Queue the newest Fe-computed state for presentation. For a
+   * `LatestPerFrame` transition the raw event reaches this queue first and Fe
+   * runs inside `_flushGestureFrame`; immediate and legacy lanes have already
+   * computed `next`. A graph presentation still records its complete ordered
+   * pass list in one command buffer. */
   _queueGestureRender(next) {
     this._uniforms = next;
     this._refreshControlValues();
@@ -1530,6 +1568,14 @@ class FeSurfaceElement extends HTMLElement {
     this._gestureDirty = false;
     this._gesturePresenting = true;
     try {
+      const pending = this._pendingSurfaceEvent;
+      this._pendingSurfaceEvent = null;
+      if (pending && this._surfaceTransitionKernel) {
+        const next = this._runSurfaceTransition(pending);
+        if (!next) return;
+        this._uniforms = next;
+        this._refreshControlValues();
+      }
       this._render();
       const queue = this._mode === "webgpu" ? this._gpu?.device?.queue : null;
       if (queue?.onSubmittedWorkDone) await queue.onSubmittedWorkDone();

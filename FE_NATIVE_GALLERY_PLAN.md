@@ -12,8 +12,8 @@ Origin: honesty audit of Claude Code session
   of the handwritten gallery source-viewer script.
 - The first Phase 1 slice is implemented for both Mandelbrot actors. Their Fe
   `navigate` behaviors consume one owned, typed `SurfaceEvent`, return the
-  complete ten-field Fe state record, and compile to the fixed
-  `fe_surface_transition_v1` export. The browser supplies raw facts and carries
+  complete ten-field Fe state record, and compile to a fixed versioned
+  surface-transition export. The browser supplies raw facts and carries
   returned values; it does not normalize the wheel, perform pan/zoom math, or
   read a control manifest. No replacement JSON specification was introduced.
 - Independent Wasmtime gates execute the brute transition over 3,520 stateful
@@ -30,6 +30,15 @@ Origin: honesty audit of Claude Code session
   sham parity claim. Until native lowering gains those features, the Wasmtime
   event oracle is browser-Wasm proof only; it must not be described as native
   parity.
+- The first Phase 2 scheduling slice is implemented without manifest growth.
+  Both Mandelbrots declare `LatestPerFrame` as a Fe capability on `navigate`;
+  the compiler selects a fixed scheduled-transition export, and the generic
+  host accumulates raw movement/wheel facts until the presentation boundary.
+  A deterministic host conformance tape proves a burst makes zero Fe calls
+  while collecting, then exactly one Fe call and one render at flush. This is
+  still the explicitly transitional host-realized policy: timing/coalescing
+  have not yet moved into a resident Fe actor, and the other gallery controls
+  still use the legacy path.
 
 This ledger records achieved evidence, not a relaxation of the phases or the
 Definition of done below.

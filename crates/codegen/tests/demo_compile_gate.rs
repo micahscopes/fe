@@ -415,8 +415,13 @@ fn perturbational_mandelbrot_graph_compiles() {
     assert!(
         exports
             .iter()
-            .any(|name| name == "fe_surface_transition_v1"),
-        "the typed Fe transition must use the fixed, versioned host ABI"
+            .any(|name| name == "fe_surface_transition_latest_per_frame_v1"),
+        "the Fe-declared latest-per-frame transition must use its fixed, versioned host ABI"
+    );
+    assert!(
+        !exports
+            .iter()
+            .any(|name| name == "fe_surface_transition_v1")
     );
     assert!(!exports.iter().any(|name| name == "navigate"));
     assert!(!exports.iter().any(|name| name == "update_view"));
@@ -475,7 +480,7 @@ fn perturbational_mandelbrot_graph_compiles() {
     let instance = wasmtime::Instance::new(&mut store, &module, &[])
         .expect("wasmtime should instantiate perturbational control");
     let transition = instance
-        .get_func(&mut store, "fe_surface_transition_v1")
+        .get_func(&mut store, "fe_surface_transition_latest_per_frame_v1")
         .expect("typed perturbational surface transition export");
     let mut cx = [-0.7436439f32, -7.146717e-9, -3e-16, -2e-23];
     let mut cy = [0.13182591f32, -4.8132045e-9, 2.5e-16, 1.5e-23];
@@ -917,6 +922,11 @@ fn mandelbrot_typed_surface_abi_is_manifest_free() {
     assert!(
         exports
             .iter()
+            .any(|name| name == "fe_surface_transition_latest_per_frame_v1")
+    );
+    assert!(
+        !exports
+            .iter()
             .any(|name| name == "fe_surface_transition_v1")
     );
     assert!(!exports.iter().any(|name| name == "navigate"));
@@ -930,9 +940,10 @@ fn mandelbrot_typed_surface_abi_is_manifest_free() {
         "a non-interactive sketch must project no legacy control block"
     );
     assert!(
-        !wasm_function_export_names(&plain.wasm)
-            .iter()
-            .any(|name| name == "fe_surface_transition_v1"),
+        !wasm_function_export_names(&plain.wasm).iter().any(|name| {
+            name == "fe_surface_transition_v1"
+                || name == "fe_surface_transition_latest_per_frame_v1"
+        }),
         "a non-interactive sketch must not acquire a typed transition export"
     );
 }
@@ -971,7 +982,7 @@ fn mandelbrot_typed_surface_transition_matches_oracle_over_event_tape() {
     // state f32s, returning the complete ten-f32 state. The arity exceeds
     // wasmtime's typed-tuple ergonomics, so use the untyped `Val` path.
     let transition = instance
-        .get_func(&mut store, "fe_surface_transition_v1")
+        .get_func(&mut store, "fe_surface_transition_latest_per_frame_v1")
         .expect("typed surface transition export");
 
     // The tape's own start state (independent of view()'s deep init): a shallow

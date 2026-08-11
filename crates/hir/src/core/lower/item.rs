@@ -250,6 +250,11 @@ fn validate_struct_attrs<'db>(
                 GPU_IDENT_FORM,
                 "`#[gpu_control(surface)]` or `#[gpu_control(typed_surface)]`",
             ),
+            AttrRule::supported(
+                "gpu_schedule",
+                GPU_IDENT_FORM,
+                "`#[gpu_schedule(latest_per_frame)]`",
+            ),
             AttrRule::supported("web_surface_event", BARE_FORM, "`#[web_surface_event]`"),
             AttrRule::supported("gpu_workgroup", BARE_FORM, "`#[gpu_workgroup]`"),
             AttrRule::supported("gpu_dispatch", GPU_IDENT_FORM, "`#[gpu_dispatch(fixed)]`"),

@@ -92,6 +92,15 @@ pub struct UpdateSurface {}
 #[gpu_control(typed_surface)]
 pub struct SurfaceTransition {}
 
+/// Process at most one coalesced raw surface event per browser presentation
+/// opportunity. The fixed host currently realizes the timing boundary while
+/// Fe owns the declaration and the `SurfaceTransition` owns all state policy.
+/// Movement and wheel deltas accumulate; pointer, buttons, time, mode, and
+/// extent use the newest raw fact. A later resident-actor lane will execute the
+/// same policy inside Fe without changing application source.
+#[gpu_schedule(latest_per_frame)]
+pub struct LatestPerFrame {}
+
 /// An externally allocated storage resource shared by GPU stages.
 ///
 /// The private word keeps the nominal value live through ordinary Fe lowering;

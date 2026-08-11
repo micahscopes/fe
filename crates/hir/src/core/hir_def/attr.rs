@@ -56,6 +56,12 @@ pub enum GpuControl {
     TypedSurface,
 }
 
+/// Presentation policy selected by a Fe behavior capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GpuSchedule {
+    LatestPerFrame,
+}
+
 /// Dispatch policy carried by a nominal compute-dispatch type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GpuDispatch {
@@ -483,6 +489,13 @@ impl<'db> AttrListId<'db> {
         match self.single_ident_arg(db, "gpu_control")?.as_str() {
             "surface" => Some(GpuControl::Surface),
             "typed_surface" => Some(GpuControl::TypedSurface),
+            _ => None,
+        }
+    }
+
+    pub fn gpu_schedule(self, db: &'db dyn HirDb) -> Option<GpuSchedule> {
+        match self.single_ident_arg(db, "gpu_schedule")?.as_str() {
+            "latest_per_frame" => Some(GpuSchedule::LatestPerFrame),
             _ => None,
         }
     }

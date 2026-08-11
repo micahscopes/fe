@@ -8,6 +8,7 @@ use std::webgpu::{
     FixedDispatch as Once,
     FragmentSurface as Display,
     GpuProgram as PassGraph,
+    LatestPerFrame,
     StorageBuffer as OrbitBuffer,
     SurfaceTransition,
     Workgroup as Threads,
@@ -461,7 +462,7 @@ actor PerturbationalMandelbrot uses (PassGraph<WebGpuBackend>) {
     }
 
     fn navigate(self, event: own SurfaceEvent) -> MandelbrotViewState
-        uses (SurfaceTransition)
+        uses (SurfaceTransition, LatestPerFrame)
     {
         let dx: f32 = event.delta_x
         let dy: f32 = event.delta_y

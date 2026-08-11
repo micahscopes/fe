@@ -28,8 +28,8 @@ use hir::analysis::{
     },
 };
 use hir::hir_def::{
-    FieldParent, GenericArg, GpuControl, GpuDispatch, GpuResource, GpuStage, ItemKind, LitKind,
-    Partial, PathId, Struct, TopLevelMod, TypeKind,
+    FieldParent, GenericArg, GpuControl, GpuDispatch, GpuResource, GpuSchedule, GpuStage, ItemKind,
+    LitKind, Partial, PathId, Struct, TopLevelMod, TypeKind,
 };
 use hir::span::{ActorDesugaredFocus, DesugaredOrigin, HirOrigin};
 use serde::{Deserialize, Serialize};
@@ -64,6 +64,10 @@ const INTERFACE_D_TS_FILE: &str = "interface.d.ts";
 /// The authored behavior may have any ordinary Fe name; Wasm publication
 /// aliases it to this versioned ABI identity after semantic shape validation.
 const TYPED_SURFACE_TRANSITION_EXPORT: &str = "fe_surface_transition_v1";
+/// Fixed discovery point for the same transition when Fe declares the
+/// `LatestPerFrame` presentation policy. Encoding the choice in the typed
+/// binary ABI avoids adding scheduling fields to the render manifest.
+const TYPED_SURFACE_LATEST_PER_FRAME_EXPORT: &str = "fe_surface_transition_latest_per_frame_v1";
 const CANONICAL_INTERFACE_JS: &str = include_str!("../assets/canonical-interface.js");
 /// Compiler-emitted host page for render bundles. It reads `manifest.json` and
 /// drives the two lowerings of the render kernel it describes: `shader.wgsl`
@@ -851,6 +855,20 @@ fn behavior_is_surface_control(db: &DriverDataBase, behavior: hir::hir_def::Func
     behavior_surface_control_kind(db, behavior).is_some()
 }
 
+fn behavior_surface_schedule_kind(
+    db: &DriverDataBase,
+    behavior: hir::hir_def::Func<'_>,
+) -> Option<GpuSchedule> {
+    behavior
+        .actor_roles(db)
+        .data(db)
+        .iter()
+        .filter_map(|role| role.key_path.to_opt())
+        .filter_map(|path| resolve_metadata_ty(db, path, behavior.scope()))
+        .filter_map(|ty| nominal_attrs(db, ty))
+        .find_map(|attrs| attrs.gpu_schedule(db))
+}
+
 fn gpu_actor_name_for_entry(
     db: &DriverDataBase,
     top_mod: TopLevelMod<'_>,
@@ -1118,6 +1136,14 @@ fn actor_update_export_name(
 struct TypedSurfaceTransitionContract {
     params: Vec<WebControlWasmType>,
     results: Vec<WebControlWasmType>,
+    schedule: Option<GpuSchedule>,
+}
+
+fn typed_surface_transition_export(contract: &TypedSurfaceTransitionContract) -> &'static str {
+    match contract.schedule {
+        Some(GpuSchedule::LatestPerFrame) => TYPED_SURFACE_LATEST_PER_FRAME_EXPORT,
+        None => TYPED_SURFACE_TRANSITION_EXPORT,
+    }
 }
 
 fn canonical_surface_event_type() -> CanonicalType {
@@ -1206,7 +1232,13 @@ fn typed_surface_transition_contract(
                 "typed control export `{control_export}` was not found semantically"
             ))
         })?;
+    let schedule = behavior_surface_schedule_kind(db, behavior);
     if behavior_surface_control_kind(db, behavior) != Some(GpuControl::TypedSurface) {
+        if schedule.is_some() {
+            return Err(WebBundleError::SurfaceProjection(format!(
+                "surface behavior `{control_export}` may declare a GPU schedule only with the typed SurfaceTransition role"
+            )));
+        }
         return Ok(None);
     }
 
@@ -1291,7 +1323,11 @@ fn typed_surface_transition_contract(
     }
     let mut results = Vec::new();
     append_canonical_wasm_types(&returned_state, &mut results, "surface_state_response")?;
-    Ok(Some(TypedSurfaceTransitionContract { params, results }))
+    Ok(Some(TypedSurfaceTransitionContract {
+        params,
+        results,
+        schedule,
+    }))
 }
 
 /// Projects the render actor's `UpdateSurface`-marked behavior (already named
@@ -1350,11 +1386,10 @@ fn project_control(
         control_export,
         resource_field_indices,
     )?;
-    let wasm_export = if typed_contract.is_some() {
-        TYPED_SURFACE_TRANSITION_EXPORT
-    } else {
-        control_export
-    };
+    let wasm_export = typed_contract
+        .as_ref()
+        .map(typed_surface_transition_export)
+        .unwrap_or(control_export);
     let (param_types, result_types) = wasm_export_signature(wasm, wasm_export).ok_or_else(|| {
             WebBundleError::SurfaceProjection(format!(
                 "actor `{}`: update behavior `{control_export}` has no matching wasm export `{wasm_export}`",
@@ -2287,12 +2322,11 @@ impl WebBundle {
                 &options.source_entry,
                 control_export,
                 &resource_field_indices,
-            )?
-            .is_some();
+            )?;
             let mut wasm_options = WasmCompileOptions::default().with_optimization();
-            if typed_transition {
-                wasm_options =
-                    wasm_options.with_export_alias(control_export, TYPED_SURFACE_TRANSITION_EXPORT);
+            if let Some(contract) = typed_transition.as_ref() {
+                wasm_options = wasm_options
+                    .with_export_alias(control_export, typed_surface_transition_export(contract));
             }
             let wasm =
                 compile_runtime_package_wasm_with_options(db, &control_package, wasm_options)
@@ -2399,8 +2433,7 @@ impl WebBundle {
                 typed_surface_transition_contract(db, top_mod, &options.source_entry, export, &[])
             })
             .transpose()?
-            .flatten()
-            .is_some();
+            .flatten();
         let mut canonical_entries = if options.canonical_entries.is_empty() {
             vec![options.source_entry.clone()]
         } else {
@@ -2486,12 +2519,12 @@ impl WebBundle {
                 .map(|lanes| WasmCompileOptions::default().with_canonical_lanes(lanes))
                 .unwrap_or_else(|| WasmCompileOptions::default().with_canonical_arena()),
         };
-        if typed_transition {
+        if let Some(contract) = typed_transition.as_ref() {
             wasm_options = wasm_options.with_export_alias(
                 control_export
                     .as_deref()
                     .expect("typed transition has a source export"),
-                TYPED_SURFACE_TRANSITION_EXPORT,
+                typed_surface_transition_export(contract),
             );
         }
         let wasm = compile_runtime_package_wasm_with_options(
