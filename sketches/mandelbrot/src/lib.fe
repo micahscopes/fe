@@ -67,7 +67,7 @@
 //! increasing), and dropping the two deep words (a df64 center) shifts the view
 //! ~768 px at `zoom = 1e-16`, which a df64 center could not reach.
 
-use std::webgpu::{FragmentSurface, GpuProgram, SurfaceTransition, WebGpuBackend}
+use std::webgpu::{FragmentSurface, GpuProgram, LatestPerFrame, SurfaceTransition, WebGpuBackend}
 use std::web::view::{Extent, Param, Surface, SurfaceEvent}
 use fmath::{from_i32, palette, to_i32}
 use precision::{add_f32, from_quad, to_quad}
@@ -358,7 +358,7 @@ actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
     /// pointer movement and raw wheel delta map to pan/zoom, and returns the
     /// complete next browser-held state as a named record.
     fn navigate(self, event: own SurfaceEvent) -> MandelbrotViewState
-        uses (SurfaceTransition)
+        uses (SurfaceTransition, LatestPerFrame)
     {
         let dx: f32 = event.delta_x
         let dy: f32 = event.delta_y
