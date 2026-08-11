@@ -89,46 +89,31 @@ fn assert_browser_wgsl(wgsl: &str) {
     .unwrap_or_else(|e| panic!("browser-profile WGSL validation failed: {e:?}"));
 }
 
-fn assert_fe_gesture_control(bundle: &WebBundle, state_fields: &[&str], result_fields: &[&str]) {
-    use fe_codegen::WebControlArgSource as Src;
-
-    let control = bundle
-        .manifest
-        .control
-        .as_ref()
-        .expect("the actor must project its Fe-authored gesture lane");
-    assert_eq!(control.export, "update_view");
-    assert_eq!(
-        control.args[..5],
-        [
-            Src::Drag { axis: "x".into() },
-            Src::Drag { axis: "y".into() },
-            Src::Wheel,
-            Src::Pointer { axis: "x".into() },
-            Src::Pointer { axis: "y".into() },
-        ]
+fn assert_scheduled_typed_surface(bundle: &WebBundle) {
+    assert!(
+        bundle.manifest.control.is_none(),
+        "typed surface control must not recreate the legacy JSON control protocol"
     );
-    assert_eq!(control.args.len(), 5 + state_fields.len());
-    for (arg, name) in control.args[5..].iter().zip(state_fields) {
-        assert_eq!(
-            arg,
-            &Src::State {
-                name: (*name).into()
-            }
-        );
-    }
-    assert_eq!(
-        control.result,
-        result_fields
+    let exports = wasm_function_export_names(&bundle.wasm);
+    assert!(
+        exports
             .iter()
-            .map(|name| (*name).to_owned())
-            .collect::<Vec<_>>()
+            .any(|name| name == "fe_surface_transition_latest_per_frame_v1"),
+        "the Fe-declared latest-per-frame transition must use its fixed host ABI"
     );
     assert!(
-        wasm_function_export_names(&bundle.wasm)
+        !exports
             .iter()
-            .any(|name| name == "update_view"),
-        "the projected control lane must be a real Wasm export"
+            .any(|name| name == "fe_surface_transition_v1"),
+        "a scheduled actor must not also export the immediate transition ABI"
+    );
+    assert!(
+        !exports.iter().any(|name| name == "navigate"),
+        "an ordinary Fe behavior name must not leak into the host ABI"
+    );
+    assert!(
+        !exports.iter().any(|name| name == "update_view"),
+        "the reserved legacy gesture export must be absent"
     );
 }
 
@@ -145,22 +130,49 @@ fn assert_initial_zoom(bundle: &WebBundle, expected: f32) {
     assert_eq!(zoom.init, Some(expected));
 }
 
-fn call_three_state_update(bundle: &WebBundle, args: [f32; 9]) -> [f32; 3] {
+/// Execute the fixed surface ABI used by the four scalar-state gallery actors.
+/// The mixed event facts precede the complete actor state, exactly as the
+/// browser host supplies them; a four-value reply proves that `res` is no
+/// longer retained through the legacy leading-subset convention.
+fn call_four_state_transition(
+    bundle: &WebBundle,
+    delta_x: f32,
+    delta_y: f32,
+    wheel_delta: f32,
+    state: [f32; 4],
+    width: f32,
+) -> [f32; 4] {
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, &bundle.wasm).expect("control Wasm module");
     let mut store = wasmtime::Store::new(&engine, ());
     let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("control instance");
-    let update = instance
-        .get_func(&mut store, "update_view")
-        .expect("update_view export");
-    let values = args.map(|value| wasmtime::Val::F32(value.to_bits()));
-    let mut results = [wasmtime::Val::F32(0); 3];
-    update
+    let transition = instance
+        .get_func(&mut store, "fe_surface_transition_latest_per_frame_v1")
+        .expect("scheduled typed surface transition export");
+    let mut values = vec![
+        wasmtime::Val::F32(123.25f32.to_bits()), // pointer_x
+        wasmtime::Val::F32(87.5f32.to_bits()),   // pointer_y
+        wasmtime::Val::F32(delta_x.to_bits()),
+        wasmtime::Val::F32(delta_y.to_bits()),
+        wasmtime::Val::F32(wheel_delta.to_bits()),
+        wasmtime::Val::I32(1), // wheel_mode
+        wasmtime::Val::I32(1), // buttons
+        wasmtime::Val::F32(456.75f32.to_bits()),
+        wasmtime::Val::F32(width.to_bits()),
+        wasmtime::Val::F32(480.0f32.to_bits()),
+    ];
+    values.extend(
+        state
+            .iter()
+            .map(|value| wasmtime::Val::F32(value.to_bits())),
+    );
+    let mut results = [wasmtime::Val::F32(0); 4];
+    transition
         .call(&mut store, &values, &mut results)
-        .expect("Fe update_view call");
+        .expect("Fe typed surface transition call");
     results.map(|value| match value {
         wasmtime::Val::F32(bits) => f32::from_bits(bits),
-        other => panic!("update_view returned non-f32 value {other:?}"),
+        other => panic!("typed surface transition returned non-f32 value {other:?}"),
     })
 }
 
@@ -333,6 +345,26 @@ fn view_vocabulary_const_constructs_a_surface() {
 // (GpuProgram<WebGpuBackend>)` with a single `FragmentSurface` behavior, so
 // entry/mode are always DERIVED, never hardcoded here.
 // ---------------------------------------------------------------------------
+
+#[test]
+fn curated_sketch_sources_have_no_legacy_gesture_abi() {
+    let sketches = repo_root().join("demos/sketches");
+    for entry in std::fs::read_dir(&sketches).expect("read demos/sketches") {
+        let path = entry.expect("read sketch directory entry").path();
+        let source_path = path.join("src/lib.fe");
+        if !source_path.is_file() {
+            continue;
+        }
+        let source = std::fs::read_to_string(&source_path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", source_path.display()));
+        assert!(
+            !source.contains("UpdateSurface") && !source.contains("fn update_view"),
+            "{} reintroduced the reserved-name/partial-state gesture ABI; use the typed \
+             SurfaceEvent and SurfaceTransition contract",
+            source_path.display()
+        );
+    }
+}
 
 #[test]
 fn known_color_pass_graph_compiles() {
@@ -633,14 +665,15 @@ fn cga3d_sketch_compiles() {
     let bundle = compile_actor_ingot("demos/sketches/cga3d");
     assert_browser_wgsl(&bundle.wgsl);
     wasmparser::validate(&bundle.wasm).expect("cga3d wasm should be valid");
-    assert_fe_gesture_control(
-        &bundle,
-        &["lambda", "theta", "zoom", "res"],
-        &["lambda", "theta", "zoom"],
-    );
+    assert_scheduled_typed_surface(&bundle);
     assert_eq!(
-        call_three_state_update(&bundle, [10.0, -5.0, -1.0, 0.0, 0.0, 0.15, 0.6, 1.6, 512.0]),
-        [0.15f32 + 10.0 * 0.0025, 0.6f32 - 5.0 * 0.01, 1.6f32 * 0.875]
+        call_four_state_transition(&bundle, 10.0, -5.0, -1.0, [0.15, 0.6, 1.6, 512.0], 640.0,),
+        [
+            0.15f32 + 10.0 * 0.0025,
+            0.6f32 - 5.0 * 0.01,
+            1.6f32 * 0.875,
+            640.0,
+        ]
     );
 }
 
@@ -649,14 +682,15 @@ fn qcga_sketch_compiles() {
     let bundle = compile_actor_ingot("demos/sketches/qcga");
     assert_browser_wgsl(&bundle.wgsl);
     wasmparser::validate(&bundle.wasm).expect("qcga wasm should be valid");
-    assert_fe_gesture_control(
-        &bundle,
-        &["lambda", "theta", "zoom", "res"],
-        &["lambda", "theta", "zoom"],
-    );
+    assert_scheduled_typed_surface(&bundle);
     assert_eq!(
-        call_three_state_update(&bundle, [10.0, -5.0, -1.0, 0.0, 0.0, 0.15, 0.6, 1.6, 512.0]),
-        [0.15f32 + 10.0 * 0.0025, 0.6f32 - 5.0 * 0.01, 1.6f32 * 0.875]
+        call_four_state_transition(&bundle, 10.0, -5.0, -1.0, [0.15, 0.6, 1.6, 512.0], 640.0,),
+        [
+            0.15f32 + 10.0 * 0.0025,
+            0.6f32 - 5.0 * 0.01,
+            1.6f32 * 0.875,
+            640.0,
+        ]
     );
 }
 
@@ -665,14 +699,15 @@ fn desargues_sketch_compiles() {
     let bundle = compile_actor_ingot("demos/sketches/desargues");
     assert_browser_wgsl(&bundle.wgsl);
     wasmparser::validate(&bundle.wasm).expect("desargues wasm should be valid");
-    assert_fe_gesture_control(
-        &bundle,
-        &["sweep", "spin", "zoom", "res"],
-        &["sweep", "spin", "zoom"],
-    );
+    assert_scheduled_typed_surface(&bundle);
     assert_eq!(
-        call_three_state_update(&bundle, [10.0, -5.0, -1.0, 0.0, 0.0, 0.62, 0.0, 2.4, 512.0]),
-        [0.62f32 + 10.0 * 0.0025, -5.0f32 * 0.01, 2.4f32 * 0.875]
+        call_four_state_transition(&bundle, 10.0, -5.0, -1.0, [0.62, 0.0, 2.4, 512.0], 640.0,),
+        [
+            0.62f32 + 10.0 * 0.0025,
+            -5.0f32 * 0.01,
+            2.4f32 * 0.875,
+            640.0,
+        ]
     );
 }
 
@@ -1134,14 +1169,10 @@ fn plasma_sketch_compiles() {
     let bundle = compile_actor_ingot("demos/sketches/plasma");
     assert_browser_wgsl(&bundle.wgsl);
     wasmparser::validate(&bundle.wasm).expect("plasma wasm should be valid");
-    assert_fe_gesture_control(
-        &bundle,
-        &["time", "zoom", "warp", "res"],
-        &["time", "zoom", "warp"],
-    );
+    assert_scheduled_typed_surface(&bundle);
     assert_eq!(
-        call_three_state_update(&bundle, [10.0, -5.0, -1.0, 0.0, 0.0, 0.0, 3.0, 0.8, 512.0]),
-        [10.0f32 * 0.025, 3.0f32 * 0.875, 0.8f32 - 5.0 * 0.005]
+        call_four_state_transition(&bundle, 10.0, -5.0, -1.0, [0.0, 3.0, 0.8, 512.0], 640.0,),
+        [10.0f32 * 0.025, 3.0f32 * 0.875, 0.8f32 - 5.0 * 0.005, 640.0,]
     );
 }
 

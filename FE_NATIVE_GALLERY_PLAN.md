@@ -31,14 +31,17 @@ Origin: honesty audit of Claude Code session
   event oracle is browser-Wasm proof only; it must not be described as native
   parity.
 - The first Phase 2 scheduling slice is implemented without manifest growth.
-  Both Mandelbrots declare `LatestPerFrame` as a Fe capability on `navigate`;
-  the compiler selects a fixed scheduled-transition export, and the generic
-  host accumulates raw movement/wheel facts until the presentation boundary.
-  A deterministic host conformance tape proves a burst makes zero Fe calls
-  while collecting, then exactly one Fe call and one render at flush. This is
+  All six interactive canonical gallery actors declare `LatestPerFrame` as a
+  Fe capability on `navigate`; the compiler selects a fixed
+  scheduled-transition export, and the generic host accumulates raw
+  movement/wheel facts until the presentation boundary. A deterministic host
+  conformance tape proves a burst makes zero Fe calls while collecting, then
+  exactly one Fe call and one render at flush. CGA3D, QCGA, Desargues, and
+  plasma now join both Mandelbrots on the nominal `SurfaceEvent`, complete-state
+  response, manifest-free control path. Their independent Wasmtime gates
+  inspect the fixed export and execute the real compiled transition. This is
   still the explicitly transitional host-realized policy: timing/coalescing
-  have not yet moved into a resident Fe actor, and the other gallery controls
-  still use the legacy path.
+  have not yet moved into a resident Fe actor.
 
 This ledger records achieved evidence, not a relaxation of the phases or the
 Definition of done below.
@@ -106,9 +109,10 @@ application or Fe-native event system.
 - The brute Mandelbrot's fixed-precision orbit and adaptive precision policy.
 - The perturbational Mandelbrot's `Fixed<8>` reference pass, binary32 delta
   pass, reanchoring/cancellation logic, and color policy.
-- Control arithmetic in the six actors that declare `update_view`: pan
-  sensitivity, zoom curves, clamps, cursor anchoring, and high-precision center
-  updates. These behaviors compile from Fe to Wasm.
+- Control arithmetic in all six interactive actors' typed `navigate`
+  behaviors: pan sensitivity, zoom curves, clamps, cursor anchoring, and
+  high-precision center updates. These behaviors compile from Fe to Wasm, and
+  their `LatestPerFrame` choice is declared in Fe.
 - CTFE-projected parameter names, ranges, initial values, kinds, and extents.
 
 ### Fixed JavaScript host today
@@ -119,9 +123,11 @@ application or Fe-native event system.
 - browser pointer/wheel listener registration;
 - pointer capture, active-pointer state, and drag delta production;
 - CSS-coordinate to backing-pixel conversion;
-- wheel normalization via `Math.sign(deltaY)`;
-- positional Wasm argument construction from manifest strings;
-- result blitting into uniform fields by name;
+- legacy-only wheel normalization via `Math.sign(deltaY)` for examples not yet
+  migrated to the canonical path;
+- fixed typed-event Wasm argument transport plus legacy positional argument
+  construction for examples not yet migrated;
+- complete typed-transition state replacement plus legacy result blitting;
 - animation-frame/GPU-completion presentation throttling;
 - WebGPU adapter/device acquisition, loss recovery, buffer allocation, pipeline
   construction, pass encoding, and presentation;
@@ -134,15 +140,17 @@ asks us to absorb.
 
 ### Important corrections
 
-- The currently effective throttle is JavaScript, not Fe. Each browser event
-  invokes the Fe transition, while JavaScript coalesces GPU presentation through
+- The canonical throttle is Fe-declared but not yet Fe-executed. JavaScript
+  accumulates each event burst and invokes the Fe transition once at the
+  presentation boundary, then coalesces GPU presentation through
   `requestAnimationFrame` and `queue.onSubmittedWorkDone()`.
 - Cursor-anchored pan/zoom mathematics is Fe; cursor acquisition,
   normalization, drag state, and timing are JavaScript.
 - The gallery is not using Rust-Wasm to fake its renderers. `fe web dev` and
   precompile are native Rust toolchain operations. Browser Wasm artifacts are
   compiler output from Fe; live GPU rendering uses Fe-generated WGSL. The
-  perturbational renderer's Wasm is only its Fe `update_view` control export.
+  perturbational renderer's Wasm is its generated fixed Fe surface-transition
+  export; its two render passes are Fe-generated WGSL.
 - `std::reactive::{Event, Signal, Stream}` exists, but it is not on the
   gallery's execution path.
 - The safe `std::web` facade intentionally does not yet expose callbacks,
@@ -159,18 +167,19 @@ zoom: Param::range(min: 0.5, max: 4.0, init: 1.6).pinch(),
 ```
 
 That interface did not land. `ingots/std/src/web/view.fe` still says gesture
-bindings are future work. It was replaced by the narrower `UpdateSurface`
-bridge:
+bindings are future work. It was originally replaced by the narrower
+`UpdateSurface` bridge:
 
 ```fe
 fn update_view(self, dx: f32, dy: f32, dzoom: f32, mx: f32, my: f32)
 ```
 
-The compiler currently recognizes exactly the argument names `dx`, `dy`,
-`dzoom`, `mx`, and `my`; accepts only scalar `f32` results; and maps the result
-to a leading subset of actor state. The manifest and runtime then mediate the
+That compatibility path still recognizes exactly the argument names `dx`,
+`dy`, `dzoom`, `mx`, and `my`; accepts only scalar `f32` results; and maps the
+result to a leading subset of actor state. Its manifest and runtime mediate the
 call with string-valued `drag`, `wheel`, `pointer`, `state`, and `resource`
-sources.
+sources. No curated sketch uses it now: all six interactive canonical actors
+use the nominal typed event and complete-state transition instead.
 
 The capability-marked Fe behavior is a sound intermediate step. The
 reserved-name, positional, scalar-only ABI is bespoke surface area to remove.
@@ -180,14 +189,15 @@ reserved-name, positional, scalar-only ABI is bespoke surface area to remove.
 ### Canonical `demos/gallery.html`
 
 - Ten tiles are sourced from Fe ingots.
-- Six tiles have Fe `UpdateSurface` control behaviors.
+- Six tiles have typed Fe `SurfaceTransition` controls and Fe-declared
+  `LatestPerFrame` scheduling. None emits the legacy JSON `control` block.
 - Known-color and rollcall are pure Fe-derived GPU graphs with no Wasm module.
-- Perturbational Mandelbrot is a two-pass Fe GPU graph; its Wasm is control
-  only.
+- Perturbational Mandelbrot is a two-pass Fe GPU graph; its Wasm is the typed
+  Fe control lane only.
 - No tile has its own `main.js`.
-- The page remains authored HTML/CSS and contains a handwritten inline
-  JavaScript source/WGSL/manifest viewer despite describing itself as
-  script-free.
+- The page remains authored HTML/CSS. The former handwritten inline
+  source/WGSL/manifest viewer has been removed; the fixed host owns artifact
+  inspection.
 - `qcga_pencil` remains excluded because vertex/fragment plus typed
   pick/message lanes have not landed.
 - DEC contains Worker/message-shaped Fe functions, but the gallery currently

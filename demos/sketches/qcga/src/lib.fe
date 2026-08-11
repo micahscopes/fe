@@ -35,8 +35,8 @@
 use core::marker::Copy
 use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
 use core::num::IntDowncast
-use std::webgpu::{FragmentSurface, GpuProgram, UpdateSurface, WebGpuBackend}
-use std::web::view::{Extent, Param, Surface}
+use std::webgpu::{FragmentSurface, GpuProgram, LatestPerFrame, SurfaceTransition, WebGpuBackend}
+use std::web::view::{Extent, Param, Surface, SurfaceEvent}
 use sparse_clifford::{
     Nat, PlanLength, SparsePlan, Term, null_vector_pairing, plan_candidate_left,
     plan_candidate_right, plan_mask_candidate, plan_mask_cardinality,
@@ -305,6 +305,13 @@ struct QcgaParams {
     res: Param,
 }
 
+struct QcgaViewState {
+    lambda: f32,
+    theta: f32,
+    zoom: f32,
+    res: f32,
+}
+
 actor QcgaSurface uses (GpuProgram<WebGpuBackend>) {
     /// Pencil parameter: [0, 1] sweeps cylinder -> sphere-like -> plane pair.
     lambda: f32,
@@ -330,13 +337,15 @@ actor QcgaSurface uses (GpuProgram<WebGpuBackend>) {
     }
 
     /// Drag sweeps and rotates the quadric pencil; wheel changes slice scale.
-    fn update_view(self, dx: f32, dy: f32, dzoom: f32, mx: f32, my: f32)
-        -> (f32, f32, f32) uses (UpdateSurface)
+    fn navigate(self, event: own SurfaceEvent) -> QcgaViewState
+        uses (SurfaceTransition, LatestPerFrame)
     {
-        let lambda: f32 = clamp_control(self.lambda + dx * 0.0025, 0.0, 1.0)
-        let theta: f32 = self.theta + dy * 0.01
-        let zoom: f32 = clamp_control(wheel_zoom(self.zoom, dzoom), 0.5, 4.0)
-        (lambda, theta, zoom)
+        QcgaViewState {
+            lambda: clamp_control(self.lambda + event.delta_x * 0.0025, 0.0, 1.0),
+            theta: self.theta + event.delta_y * 0.01,
+            zoom: clamp_control(wheel_zoom(self.zoom, event.wheel_delta), 0.5, 4.0),
+            res: event.width,
+        }
     }
 
     /// Pixel coordinate in, packed RGBA8 word out. Five planned contractions
