@@ -201,7 +201,7 @@
       {
         "id": "ingots/core/src/actor.fe",
         "kind": "fe",
-        "sha256": "da36c65e03d3759ae9b89fab7977501c89fc0775dfa2ccc0eeaa62dcaa0ca8ca"
+        "sha256": "827dc291db050967281893e1ccfa8cdeacd68d4090172fd23cc91b3ba8c80627"
       },
       {
         "id": "ingots/core/src/atomic.fe",
@@ -276,7 +276,7 @@
       {
         "id": "ingots/core/src/lib.fe",
         "kind": "fe",
-        "sha256": "fa9474ccca9d189364302c77a38a9c3a91332f56dbe77b119352c13ede117881"
+        "sha256": "489c1b177d4ff36c776219ba23a598ac7b47e612ea7d2499f927405321cbaf26"
       },
       {
         "id": "ingots/core/src/marker.fe",
@@ -399,7 +399,7 @@
       {
         "id": "gallery.html",
         "kind": "html",
-        "sha256": "f844f20a5e1d75c8c7131abcd993518f10ac82a0a83762fabb3314e08a6e950b"
+        "sha256": "fc68e26b829e1d6b79baa0e3cbd686a4903af0f544401674f4198ea035b37a28"
       }
     ],
     "source_id": "desargues"

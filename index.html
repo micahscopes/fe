@@ -1,8 +1,9 @@
 <!DOCTYPE html><!--
   The canonical all-demos page. `fe web dev demos/gallery.html` compiles and
-  renders every sketch without authored browser JavaScript: inert `<script
-  type="application/fe">` elements name Fe render actors or resident component
-  actors, while the generated bootstrap and fixed, demo-blind hosts mount the
+  renders every sketch without authored browser JavaScript. One inert
+  `data-fe-page` script names the Fe page actor; its typed const projection
+  generates render/component declarations, captions, links, and DOM structure
+  before the generated bootstrap and fixed, demo-blind hosts mount the
   corresponding custom elements. The render host drives surface lifecycle
   (poster first, live on pointer intent, suspended off-viewport) while sharing a
   single WebGPU device across every tile (acquireSharedGpu). See
@@ -22,8 +23,10 @@
   section, so the runtime reads the real dispatch extent from there. The page
   carries no sizes at all (FE_WEB_V5_ORCHESTRATION_DESIGN.md).
 
-  Each caption carries a `source` link (the dev server serves the raw .fe); the
-  runtime's meta line links the generated wgsl/wasm/manifest.
+  Each caption carries a content-addressed source asset; the runtime's meta line
+  links the generated wgsl/wasm/manifest. The enclosing resident Fe
+  SourceInspector owns selection, loading, stale-response, and presentation
+  policy for all four artifact kinds.
 
   Tile restyling uses `fe-surface::part(...)` (canvas/panel/control/badge/meta)
   instead of piercing the runtime's internal layout with `!important`: the
@@ -38,7 +41,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="fe-attribution-policy" content="canonical_fe_gallery">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%2312151b'/%3E%3Cpath d='M14 45V19h36v7H23v4h22v7H23v8z' fill='%235b8cff'/%3E%3C/svg%3E">
-<title>fe web · gallery</title>
+<title>Fe · GPU gallery</title>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -48,6 +51,7 @@
   .gallery-head { max-width: 1500px; margin: 0 auto 22px; }
   .gallery-head h1 { font-size: 16px; font-weight: 600; margin: 0 0 4px; color: #e6ecf7; letter-spacing: .02em; }
   .gallery-head p { margin: 0; color: #8a93a6; font-size: 12.5px; }
+  .gallery-head a { display: inline-block; margin-top: 8px; color: #91a7ca; font-size: 12.5px; }
   .gallery-head code { color: #b7c2d8; background: #171a21; padding: 1px 6px; border-radius: 4px; }
   .grid { max-width: 1500px; margin: 0 auto;
           display: grid; gap: 28px;
@@ -142,109 +146,7 @@
 </style>
 </head>
 <body>
-  <script type="application/fe+wasm" data-fe-src="assets/fe-efdc9ab4f45755c4.wasm" data-fe-component="" data-fe-mount="#gallery-shell" data-fe-manifest="assets/fe-1e37db975ac59c3e.json" data-fe-integrity="sha256-79yatPRXVcSKWS1pCjvS8CF0QyVxLODOfdMBTXPyZp4="></script>
-  <fe-component id="gallery-shell" class="gallery-shell">
-  <header class="gallery-head">
-    <h1>fe web · gallery</h1>
-    <p>Fe-authored GPU, control, and resident component programs, with generated WGSL/Wasm hosted by fixed demo-blind browser adapters. Serve with <code>fe web dev demos/gallery.html</code>.</p>
-  </header>
-
-  <div class="grid">
-    <figure>
-      <figcaption><b>known color</b><span class="desc">typed compute → fragment resource</span><a href="assets/fe-authored-defb0a2eb92c80c0.fe" data-fe-action="100" data-fe-published-sha256="defb0a2eb92c80c02329497d8205f3e5b8467c9d99cbfc0be92233d96dcbb593">source</a></figcaption>
-      <script type="application/fe+wasm" data-fe-render="" data-fe-wgsl-action="101" data-fe-wasm-action="102" data-fe-manifest-action="103" data-fe-manifest="assets/fe-render-42841baed75db6a5.json" data-fe-render-runtime="assets/fe-render-runtime-2a9134262c9e6651.js"></script>
-    </figure>
-    <figure>
-      <figcaption><b>rollcall pipeline</b><span class="desc">compute → private tree fold → fragment</span><a href="assets/fe-authored-dd12360062107875.fe" data-fe-action="100" data-fe-published-sha256="dd12360062107875f8b953e5239c9ac74aa14f3a26f86d7580571791593c77d0">source</a></figcaption>
-      <script type="application/fe+wasm" data-fe-render="" data-fe-wgsl-action="101" data-fe-wasm-action="102" data-fe-manifest-action="103" data-fe-manifest="assets/fe-render-f973eb23978d4212.json" data-fe-render-runtime="assets/fe-render-runtime-2a9134262c9e6651.js"></script>
-    </figure>
-    <figure>
-      <figcaption><b>cga3d</b><span class="desc">sparse Clifford sphere pencil</span><a href="assets/fe-authored-a9b62c78240e65bd.fe" data-fe-action="100" data-fe-published-sha256="a9b62c78240e65bd81e7c68882ff1baf076af7eab494ceb12ed09e5812c60028">source</a></figcaption>
-      <script type="application/fe+wasm" data-fe-src="assets/fe-render-0f6e5c7faecc35f8.wasm" data-fe-render="" data-fe-wgsl-action="101" data-fe-wasm-action="102" data-fe-manifest-action="103" data-fe-manifest="assets/fe-render-0c285887a5e876bc.json" data-fe-render-runtime="assets/fe-render-runtime-2a9134262c9e6651.js" data-fe-integrity="sha256-D25cf67MNfh208c+9O/b2gvpTBgiT/nl2+oGekB3mOY="></script>
-    </figure>
-    <figure>
-      <figcaption><b>qcga</b><span class="desc">quadric conformal surface</span><a href="assets/fe-authored-102547b282a1c04b.fe" data-fe-action="100" data-fe-published-sha256="102547b282a1c04b3a74952163ce5ce20d01b05f7777d004228ae4337fd62fb3">source</a></figcaption>
-      <script type="application/fe+wasm" data-fe-src="assets/fe-render-c3b81f143e83756f.wasm" data-fe-render="" data-fe-wgsl-action="101" data-fe-wasm-action="102" data-fe-manifest-action="103" data-fe-manifest="assets/fe-render-2bf94ac5f47dcc9f.json" data-fe-render-runtime="assets/fe-render-runtime-2a9134262c9e6651.js" data-fe-integrity="sha256-w7gfFD6DdW+pHVo24xfeOk/T1+/3JLKSrQUFl7Z8I3k="></script>
-    </figure>
-    <figure>
-      <figcaption><b>desargues</b><span class="desc">projective incidence</span><a href="assets/fe-authored-477a5590f91febc4.fe" data-fe-action="100" data-fe-published-sha256="477a5590f91febc448a5aee34c996986d14ce177ef7fedead15d45a47b75850d">source</a></figcaption>
-      <script type="application/fe+wasm" data-fe-src="assets/fe-render-804363e7052d2052.wasm" data-fe-render="" data-fe-wgsl-action="101" data-fe-wasm-action="102" data-fe-manifest-action="103" data-fe-manifest="assets/fe-render-89808e243875a7c6.json" data-fe-render-runtime="assets/fe-render-runtime-2a9134262c9e6651.js" data-fe-integrity="sha256-gENj5wUtIFJTWrFZEbBVjgylfmSNpIvPN6lqsA+7rD8="></script>
-    </figure>
-    <figure>
-      <figcaption><b>plasma</b><span class="desc">branch-free field</span><a href="assets/fe-authored-65ce1d3bfd886ce9.fe" data-fe-action="100" data-fe-published-sha256="65ce1d3bfd886ce9ae7abe119eb2546d0f2252c441658fb8b56ba713cf96e22a">source</a></figcaption>
-      <script type="application/fe+wasm" data-fe-src="assets/fe-render-890ca1e53f27d308.wasm" data-fe-render="" data-fe-wgsl-action="101" data-fe-wasm-action="102" data-fe-manifest-action="103" data-fe-manifest="assets/fe-render-173ec799c35baf44.json" data-fe-render-runtime="assets/fe-render-runtime-2a9134262c9e6651.js" data-fe-integrity="sha256-iQyh5T8n0wh0WByAniLUiRHJpMjI636DTdTzQUc/59U="></script>
-    </figure>
-    <figure>
-      <figcaption><b>mandelbrot</b><span class="desc">escape-time set</span><a href="assets/fe-authored-6d136ea02f5ae045.fe" data-fe-action="100" data-fe-published-sha256="6d136ea02f5ae045e7c6d59c15c2b2d46ebfb5a5dd407422f8ba7d4f7893101d">source</a></figcaption>
-      <script type="application/fe+wasm" data-fe-src="assets/fe-render-3ddfba681c072bfa.wasm" data-fe-render="" data-fe-wgsl-action="101" data-fe-wasm-action="102" data-fe-manifest-action="103" data-fe-manifest="assets/fe-render-f8479e804591484b.json" data-fe-render-runtime="assets/fe-render-runtime-2a9134262c9e6651.js" data-fe-integrity="sha256-Pd+6aBwHK/rONMHMKGxGEYSLBn1i6Y36iE/45B2HqVE="></script>
-    </figure>
-    <figure>
-      <figcaption><b>perturbation mandelbrot</b><span class="desc">Fixed reference → f32 delta pixels</span><a href="assets/fe-authored-04510d06619f16b1.fe" data-fe-action="100" data-fe-published-sha256="04510d06619f16b1071918e221ed0ca45df3caa9395ede7e0f7d93c96ebca8ec">source</a></figcaption>
-      <script type="application/fe+wasm" data-fe-src="assets/fe-render-6710de8d75d2a0ce.wasm" data-fe-render="" data-fe-wgsl-action="101" data-fe-wasm-action="102" data-fe-manifest-action="103" data-fe-manifest="assets/fe-render-62ba5ef8d8a234e6.json" data-fe-render-runtime="assets/fe-render-runtime-2a9134262c9e6651.js" data-fe-integrity="sha256-ZxDejXXSoM7Zl2o0hC0g7/u6iozIIsSCEwglYVyuy7Q="></script>
-    </figure>
-    <figure>
-      <figcaption><b>dec</b><span class="desc">discrete exterior calculus</span><a href="assets/fe-authored-eaef2a7bafe57dd7.fe" data-fe-action="100" data-fe-published-sha256="eaef2a7bafe57dd72aafbf2458975de72c5e0d02874584a3c85e4732926fe0fd">source</a></figcaption>
-      <script type="application/fe+wasm" data-fe-src="assets/fe-render-248f9921f1b2ad1a.wasm" data-fe-render="" data-fe-wgsl-action="101" data-fe-wasm-action="102" data-fe-manifest-action="103" data-fe-manifest="assets/fe-render-8626875ff4a3f5d9.json" data-fe-render-runtime="assets/fe-render-runtime-2a9134262c9e6651.js" data-fe-integrity="sha256-JI+ZIfGyrRpW6svGnaN2Z9+GQ58FbGVCZVe5GBMMtt0="></script>
-    </figure>
-    <figure>
-      <figcaption><b>gradient</b><span class="desc">runtime-default surface</span><a href="assets/fe-authored-537ab4675be9c1d9.fe" data-fe-action="100" data-fe-published-sha256="537ab4675be9c1d97e63189f04d696604722d4de2054c160c4b0ef67efd6ffe3">source</a></figcaption>
-      <script type="application/fe+wasm" data-fe-src="assets/fe-render-b860fb40a02c39aa.wasm" data-fe-render="" data-fe-wgsl-action="101" data-fe-wasm-action="102" data-fe-manifest-action="103" data-fe-manifest="assets/fe-render-40fe33ce4c114ef3.json" data-fe-render-runtime="assets/fe-render-runtime-2a9134262c9e6651.js" data-fe-integrity="sha256-uGD7QKAsOapmnNWkiG561ks/ffaFltb8KPzoQof4cTE="></script>
-    </figure>
-    <figure>
-      <figcaption><b>TodoMVC</b><span class="desc">resident Fe state → keyed DOM effects</span><a href="assets/fe-authored-c9208026ec52eb80.fe" data-fe-action="100" data-fe-published-sha256="c9208026ec52eb805855381933175b59dfa0ae55fbcb12e0530d7f884020b9a1">source</a></figcaption>
-      <script type="application/fe+wasm" data-fe-src="assets/fe-4028824c122b8561.wasm" data-fe-component="" data-fe-mount="#gallery-todomvc" data-fe-manifest="assets/fe-83d023776186c807.json" data-fe-integrity="sha256-QCiCTBIrhWG7UVOXvZw8WqoXQZi0zVttlgajYTyUTNI="></script>
-      <fe-component id="gallery-todomvc" class="todo-app">
-        <h2 class="todo-heading">todos</h2>
-        <header>
-          <input class="new-todo" data-fe-node="5" data-fe-action="1" placeholder="What needs to be done?" autocomplete="off">
-        </header>
-        <section class="main" data-fe-node="1" hidden="">
-          <input id="gallery-toggle-all" class="toggle-all" data-fe-node="6" data-fe-action="2" type="checkbox" aria-label="Mark all as complete">
-          <label class="toggle-all-label" for="gallery-toggle-all" title="Mark all as complete">⌄</label>
-          <ul class="todo-list" data-fe-node="3"></ul>
-        </section>
-        <footer class="footer" data-fe-node="2" hidden="">
-          <span class="todo-count"><strong data-fe-node="4">0</strong> items left</span>
-          <ul class="filters">
-            <li><button data-fe-node="7" data-fe-action="4" data-fe-class-1="selected">All</button></li>
-            <li><button data-fe-node="8" data-fe-action="5" data-fe-class-1="selected">Active</button></li>
-            <li><button data-fe-node="9" data-fe-action="6" data-fe-class-1="selected">Completed</button></li>
-          </ul>
-          <button class="clear-completed" data-fe-action="3">Clear completed</button>
-        </footer>
-        <template data-fe-template="1">
-          <li data-fe-class-1="completed" data-fe-class-2="editing">
-            <div class="view">
-              <input class="toggle" data-fe-node="10" data-fe-action="10" type="checkbox">
-              <label data-fe-node="11" data-fe-action="11"></label>
-              <button class="edit-button" data-fe-action="14" aria-label="Edit todo" title="Edit">✎</button>
-              <button class="destroy" data-fe-action="12" aria-label="Delete todo"></button>
-            </div>
-            <input class="edit" data-fe-node="13" data-fe-action="13">
-          </li>
-        </template>
-      </fe-component>
-    </figure>
-  </div>
-
-  <section class="source-inspector" data-fe-view="0" hidden="" role="dialog" aria-modal="true" aria-label="Source inspector">
-    <header class="inspector-head">
-      <span class="inspector-title" data-fe-view="5">Fe source</span>
-      <span class="inspector-title" data-fe-view="6">Compiler-generated WGSL</span>
-      <span class="inspector-title" data-fe-view="7">Compiler-generated Wasm</span>
-      <span class="inspector-title" data-fe-view="8">Transitional audit manifest</span>
-      <a class="raw" data-fe-node="102" target="_blank" rel="noopener">Raw</a>
-      <button class="close" data-fe-action="104" type="button" aria-label="Close">×</button>
-    </header>
-    <div class="inspector-body">
-      <p class="message" data-fe-view="3">Loading…</p>
-      <pre data-fe-view="1" data-fe-node="100"></pre>
-      <p class="message" data-fe-view="2">Compiled binary module · <strong data-fe-node="101">0</strong> bytes.</p>
-      <pre class="error" data-fe-view="4" data-fe-node="103"></pre>
-    </div>
-  </section>
-  </fe-component>
-
+  <script type="application/fe+wasm" data-fe-src="assets/fe-efdc9ab4f45755c4.wasm" data-fe-component="" data-fe-mount="#gallery-shell" data-fe-manifest="assets/fe-1e37db975ac59c3e.json" data-fe-integrity="sha256-79yatPRXVcSKWS1pCjvS8CF0QyVxLODOfdMBTXPyZp4="></script><fe-component id="gallery-shell" class="gallery-shell"><header class="gallery-head"><h1>fe web · gallery</h1><p>Fe-authored GPU, control, resident component, and page programs, with generated WGSL/Wasm hosted by fixed demo-blind browser adapters. Serve with <code>fe web dev demos/gallery.html</code>.</p><a href="assets/fe-authored-6a76e1d01596a665.fe" data-fe-action="100" data-fe-published-sha256="6a76e1d01596a665e55b56800ae078f315152f3e321c0929cd45000437fcffc1">page source</a></header><div class="grid"><figure><figcaption><b>known color</b><span class="desc">typed compute → fragment resource</span><a href="assets/fe-authored-defb0a2eb92c80c0.fe" data-fe-action="100" data-fe-published-sha256="defb0a2eb92c80c02329497d8205f3e5b8467c9d99cbfc0be92233d96dcbb593">source</a></figcaption><script type="application/fe+wasm" data-fe-render="" data-fe-wgsl-action="101" data-fe-wasm-action="102" data-fe-manifest-action="103" data-fe-manifest="assets/fe-render-5f42e68bf27f71f4.json" data-fe-render-runtime="assets/fe-render-runtime-2a9134262c9e6651.js"></script></figure><figure><figcaption><b>rollcall pipeline</b><span class="desc">compute → private tree fold → fragment</span><a href="assets/fe-authored-dd12360062107875.fe" data-fe-action="100" data-fe-published-sha256="dd12360062107875f8b953e5239c9ac74aa14f3a26f86d7580571791593c77d0">source</a></figcaption><script type="application/fe+wasm" data-fe-render="" data-fe-wgsl-action="101" data-fe-wasm-action="102" data-fe-manifest-action="103" data-fe-manifest="assets/fe-render-cad6e546fb81273e.json" data-fe-render-runtime="assets/fe-render-runtime-2a9134262c9e6651.js"></script></figure><figure><figcaption><b>cga3d</b><span class="desc">sparse Clifford sphere pencil</span><a href="assets/fe-authored-a9b62c78240e65bd.fe" data-fe-action="100" data-fe-published-sha256="a9b62c78240e65bd81e7c68882ff1baf076af7eab494ceb12ed09e5812c60028">source</a></figcaption><script type="application/fe+wasm" data-fe-src="assets/fe-render-0f6e5c7faecc35f8.wasm" data-fe-render="" data-fe-wgsl-action="101" data-fe-wasm-action="102" data-fe-manifest-action="103" data-fe-manifest="assets/fe-render-76934e486b7bd8c7.json" data-fe-render-runtime="assets/fe-render-runtime-2a9134262c9e6651.js" data-fe-integrity="sha256-D25cf67MNfh208c+9O/b2gvpTBgiT/nl2+oGekB3mOY="></script></figure><figure><figcaption><b>qcga</b><span class="desc">quadric conformal surface</span><a href="assets/fe-authored-102547b282a1c04b.fe" data-fe-action="100" data-fe-published-sha256="102547b282a1c04b3a74952163ce5ce20d01b05f7777d004228ae4337fd62fb3">source</a></figcaption><script type="application/fe+wasm" data-fe-src="assets/fe-render-c3b81f143e83756f.wasm" data-fe-render="" data-fe-wgsl-action="101" data-fe-wasm-action="102" data-fe-manifest-action="103" data-fe-manifest="assets/fe-render-29ffe49053b137c3.json" data-fe-render-runtime="assets/fe-render-runtime-2a9134262c9e6651.js" data-fe-integrity="sha256-w7gfFD6DdW+pHVo24xfeOk/T1+/3JLKSrQUFl7Z8I3k="></script></figure><figure><figcaption><b>desargues</b><span class="desc">projective incidence</span><a href="assets/fe-authored-477a5590f91febc4.fe" data-fe-action="100" data-fe-published-sha256="477a5590f91febc448a5aee34c996986d14ce177ef7fedead15d45a47b75850d">source</a></figcaption><script type="application/fe+wasm" data-fe-src="assets/fe-render-804363e7052d2052.wasm" data-fe-render="" data-fe-wgsl-action="101" data-fe-wasm-action="102" data-fe-manifest-action="103" data-fe-manifest="assets/fe-render-c79d84cbb3bb80cf.json" data-fe-render-runtime="assets/fe-render-runtime-2a9134262c9e6651.js" data-fe-integrity="sha256-gENj5wUtIFJTWrFZEbBVjgylfmSNpIvPN6lqsA+7rD8="></script></figure><figure><figcaption><b>plasma</b><span class="desc">branch-free field</span><a href="assets/fe-authored-65ce1d3bfd886ce9.fe" data-fe-action="100" data-fe-published-sha256="65ce1d3bfd886ce9ae7abe119eb2546d0f2252c441658fb8b56ba713cf96e22a">source</a></figcaption><script type="application/fe+wasm" data-fe-src="assets/fe-render-890ca1e53f27d308.wasm" data-fe-render="" data-fe-wgsl-action="101" data-fe-wasm-action="102" data-fe-manifest-action="103" data-fe-manifest="assets/fe-render-11a58e9552089279.json" data-fe-render-runtime="assets/fe-render-runtime-2a9134262c9e6651.js" data-fe-integrity="sha256-iQyh5T8n0wh0WByAniLUiRHJpMjI636DTdTzQUc/59U="></script></figure><figure><figcaption><b>mandelbrot</b><span class="desc">escape-time set</span><a href="assets/fe-authored-6d136ea02f5ae045.fe" data-fe-action="100" data-fe-published-sha256="6d136ea02f5ae045e7c6d59c15c2b2d46ebfb5a5dd407422f8ba7d4f7893101d">source</a></figcaption><script type="application/fe+wasm" data-fe-src="assets/fe-render-3ddfba681c072bfa.wasm" data-fe-render="" data-fe-wgsl-action="101" data-fe-wasm-action="102" data-fe-manifest-action="103" data-fe-manifest="assets/fe-render-0834a2b9dccb29e5.json" data-fe-render-runtime="assets/fe-render-runtime-2a9134262c9e6651.js" data-fe-integrity="sha256-Pd+6aBwHK/rONMHMKGxGEYSLBn1i6Y36iE/45B2HqVE="></script></figure><figure><figcaption><b>perturbation mandelbrot</b><span class="desc">Fixed reference → f32 delta pixels</span><a href="assets/fe-authored-04510d06619f16b1.fe" data-fe-action="100" data-fe-published-sha256="04510d06619f16b1071918e221ed0ca45df3caa9395ede7e0f7d93c96ebca8ec">source</a></figcaption><script type="application/fe+wasm" data-fe-src="assets/fe-render-6710de8d75d2a0ce.wasm" data-fe-render="" data-fe-wgsl-action="101" data-fe-wasm-action="102" data-fe-manifest-action="103" data-fe-manifest="assets/fe-render-97c2dd5fca348a4e.json" data-fe-render-runtime="assets/fe-render-runtime-2a9134262c9e6651.js" data-fe-integrity="sha256-ZxDejXXSoM7Zl2o0hC0g7/u6iozIIsSCEwglYVyuy7Q="></script></figure><figure><figcaption><b>dec</b><span class="desc">discrete exterior calculus</span><a href="assets/fe-authored-eaef2a7bafe57dd7.fe" data-fe-action="100" data-fe-published-sha256="eaef2a7bafe57dd72aafbf2458975de72c5e0d02874584a3c85e4732926fe0fd">source</a></figcaption><script type="application/fe+wasm" data-fe-src="assets/fe-render-248f9921f1b2ad1a.wasm" data-fe-render="" data-fe-wgsl-action="101" data-fe-wasm-action="102" data-fe-manifest-action="103" data-fe-manifest="assets/fe-render-3cfe3577052570ed.json" data-fe-render-runtime="assets/fe-render-runtime-2a9134262c9e6651.js" data-fe-integrity="sha256-JI+ZIfGyrRpW6svGnaN2Z9+GQ58FbGVCZVe5GBMMtt0="></script></figure><figure><figcaption><b>gradient</b><span class="desc">runtime-default surface</span><a href="assets/fe-authored-537ab4675be9c1d9.fe" data-fe-action="100" data-fe-published-sha256="537ab4675be9c1d97e63189f04d696604722d4de2054c160c4b0ef67efd6ffe3">source</a></figcaption><script type="application/fe+wasm" data-fe-src="assets/fe-render-b860fb40a02c39aa.wasm" data-fe-render="" data-fe-wgsl-action="101" data-fe-wasm-action="102" data-fe-manifest-action="103" data-fe-manifest="assets/fe-render-f18ca976d10590b2.json" data-fe-render-runtime="assets/fe-render-runtime-2a9134262c9e6651.js" data-fe-integrity="sha256-uGD7QKAsOapmnNWkiG561ks/ffaFltb8KPzoQof4cTE="></script></figure><figure><figcaption><b>TodoMVC</b><span class="desc">resident Fe state → keyed DOM effects</span><a href="assets/fe-authored-c9208026ec52eb80.fe" data-fe-action="100" data-fe-published-sha256="c9208026ec52eb805855381933175b59dfa0ae55fbcb12e0530d7f884020b9a1">source</a></figcaption><script type="application/fe+wasm" data-fe-src="assets/fe-4028824c122b8561.wasm" data-fe-component="" data-fe-mount="#gallery-todomvc" data-fe-manifest="assets/fe-83d023776186c807.json" data-fe-integrity="sha256-QCiCTBIrhWG7UVOXvZw8WqoXQZi0zVttlgajYTyUTNI="></script><fe-component id="gallery-todomvc" class="todo-app"><h2 class="todo-heading">todos</h2><header><input class="new-todo" data-fe-node="5" data-fe-action="1" placeholder="What needs to be done?" autocomplete="off"></header><section class="main" data-fe-node="1" hidden=""><input id="gallery-toggle-all" class="toggle-all" data-fe-node="6" data-fe-action="2" type="checkbox" aria-label="Mark all as complete"><label class="toggle-all-label" for="gallery-toggle-all" title="Mark all as complete">⌄</label><ul class="todo-list" data-fe-node="3"></ul></section><footer class="footer" data-fe-node="2" hidden=""><span class="todo-count"><strong data-fe-node="4">0</strong> items left</span><ul class="filters"><li><button data-fe-node="7" data-fe-action="4" data-fe-class-1="selected">All</button></li><li><button data-fe-node="8" data-fe-action="5" data-fe-class-1="selected">Active</button></li><li><button data-fe-node="9" data-fe-action="6" data-fe-class-1="selected">Completed</button></li></ul><button class="clear-completed" data-fe-action="3">Clear completed</button></footer><template data-fe-template="1"><li data-fe-class-1="completed" data-fe-class-2="editing"><div class="view"><input class="toggle" data-fe-node="10" data-fe-action="10" type="checkbox"><label data-fe-node="11" data-fe-action="11"></label><button class="edit-button" data-fe-action="14" aria-label="Edit todo" title="Edit">✎</button><button class="destroy" data-fe-action="12" aria-label="Delete todo"></button></div><input class="edit" data-fe-node="13" data-fe-action="13"></li></template></fe-component></figure></div><section class="source-inspector" data-fe-view="0" hidden="" role="dialog" aria-modal="true" aria-label="Source inspector"><header class="inspector-head"><span class="inspector-title" data-fe-view="5">Fe source</span><span class="inspector-title" data-fe-view="6">Compiler-generated WGSL</span><span class="inspector-title" data-fe-view="7">Compiler-generated Wasm</span><span class="inspector-title" data-fe-view="8">Transitional audit manifest</span><a class="raw" data-fe-node="102" target="_blank" rel="noopener">Raw</a><button class="close" data-fe-action="104" type="button" aria-label="Close">×</button></header><div class="inspector-body"><p class="message" data-fe-view="3">Loading…</p><pre data-fe-view="1" data-fe-node="100"></pre><p class="message" data-fe-view="2">Compiled binary module · <strong data-fe-node="101">0</strong> bytes.</p><pre class="error" data-fe-view="4" data-fe-node="103"></pre></div></section></fe-component>
 
 
 <script type="module" src="assets/fe-bootstrap-de37caca9310b965.js" data-fe-bootstrap=""></script></body></html>
