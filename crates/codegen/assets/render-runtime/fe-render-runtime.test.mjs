@@ -7,7 +7,7 @@ import test from "node:test";
 globalThis.HTMLElement = class HTMLElement {};
 globalThis.customElements = { define() {} };
 
-const { FeSurfaceElement, writeSurfaceEventBatch } =
+const { FeSurfaceElement, SurfaceEventKind, writeSurfaceEventBatch } =
   await import("./fe-render-runtime.js");
 
 test("fixed host writes untouched SurfaceEvent records in the versioned memory layout", () => {
@@ -16,12 +16,12 @@ test("fixed host writes untouched SurfaceEvent records in the versioned memory l
     {
       mx: 10, my: 20, dx: 4, dy: -3, wheelDelta: -120,
       wheelMode: 2, buttons: 3, timestamp: 1.25, width: 512, height: 256,
-      eventKind: 0, paramIndex: 0, paramValue: 0,
+      eventKind: SurfaceEventKind.Gesture, paramIndex: 0, paramValue: 0,
     },
     {
       mx: 14, my: 17, dx: -1, dy: 9, wheelDelta: 40,
       wheelMode: 1, buttons: 0, timestamp: 2.5, width: 640, height: 480,
-      eventKind: 0, paramIndex: 0, paramValue: 0,
+      eventKind: SurfaceEventKind.Gesture, paramIndex: 0, paramValue: 0,
     },
   ];
   const before = structuredClone(events);
@@ -135,7 +135,7 @@ test("a burst crosses into the Fe transition once at the presentation boundary",
   assert.equal(transitionCalls, 0);
   assert.equal(frameCallbacks.length, 1);
   surface._gestureFrame = null;
-  await surface._flushGestureFrame();
+  await surface._flushGestureFrame(10);
 
   assert.equal(transitionCalls, 1);
   assert.equal(renders, 1);
@@ -144,17 +144,22 @@ test("a burst crosses into the Fe transition once at the presentation boundary",
     {
       mx: 100, my: 110, dx: 3, dy: -2, wheelDelta: 0,
       wheelMode: 0, buttons: 1, timestamp: 1, width: 512, height: 256,
-      eventKind: 0, paramIndex: 0, paramValue: 0,
+      eventKind: SurfaceEventKind.Gesture, paramIndex: 0, paramValue: 0,
     },
     {
       mx: 104, my: 118, dx: 4, dy: 8, wheelDelta: -120,
       wheelMode: 1, buttons: 1, timestamp: 2, width: 512, height: 256,
-      eventKind: 0, paramIndex: 0, paramValue: 0,
+      eventKind: SurfaceEventKind.Gesture, paramIndex: 0, paramValue: 0,
     },
     {
       mx: 109, my: 117, dx: 5, dy: -1, wheelDelta: -40,
       wheelMode: 1, buttons: 0, timestamp: 3, width: 512, height: 256,
-      eventKind: 0, paramIndex: 0, paramValue: 0,
+      eventKind: SurfaceEventKind.Gesture, paramIndex: 0, paramValue: 0,
+    },
+    {
+      mx: 0, my: 0, dx: 0, dy: 0, wheelDelta: 0,
+      wheelMode: 0, buttons: 0, timestamp: 10, width: 512, height: 256,
+      eventKind: SurfaceEventKind.AnimationFrame, paramIndex: 0, paramValue: 0,
     },
   ]);
   assert.deepEqual(surface._uniforms, [42]);
@@ -170,7 +175,7 @@ test("a burst crosses into the Fe transition once at the presentation boundary",
     wheelMode: 0, buttons: 1, timestamp: 4,
   });
   surface._gestureFrame = null;
-  await surface._flushGestureFrame();
+  await surface._flushGestureFrame(20);
   assert.equal(transitionCalls, 2);
   assert.equal(renders, 2);
   assert.deepEqual(surface._uniforms, [43]);
@@ -178,12 +183,46 @@ test("a burst crosses into the Fe transition once at the presentation boundary",
   assert.deepEqual(transitionArgCounts, [2, 2]);
 });
 
+test("presentation and lifecycle boundaries reach Fe as typed facts", () => {
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._surfaceTransitionKernel = () => {};
+  surface._surfaceTransitionSchedule = "latest_per_frame";
+  surface._pendingSurfaceEvents = [{
+    mx: 12, my: 9, dx: 3, dy: -2, wheelDelta: 0,
+    wheelMode: 0, buttons: 1, timestamp: 8, width: 320, height: 200,
+    eventKind: SurfaceEventKind.Gesture, paramIndex: 0, paramValue: 0,
+  }];
+  surface._backingWidth = 320;
+  surface._backingHeight = 200;
+  surface._uniforms = [11];
+  surface._refreshControlValues = () => {};
+  let transported;
+  surface._runSurfaceFrame = events => {
+    transported = structuredClone(events);
+    return [12];
+  };
+
+  assert.deepEqual(
+    surface._deliverSurfaceBoundary(SurfaceEventKind.GpuComplete, 21.5),
+    [12],
+  );
+  assert.equal(transported.length, 2);
+  assert.equal(transported[0].eventKind, SurfaceEventKind.Gesture);
+  assert.deepEqual(transported[1], {
+    mx: 0, my: 0, dx: 0, dy: 0, wheelDelta: 0,
+    wheelMode: 0, buttons: 0, timestamp: 21.5, width: 320, height: 200,
+    eventKind: SurfaceEventKind.GpuComplete, paramIndex: 0, paramValue: 0,
+  });
+  assert.deepEqual(surface._pendingSurfaceEvents, []);
+  assert.deepEqual(surface._uniforms, [12]);
+});
+
 test("scripted parameter edits enter the typed Fe transition without replacing resident state", () => {
   const surface = Object.create(FeSurfaceElement.prototype);
   surface._fsm = "live";
   surface._surfaceTransitionKernel = () => {};
   surface._surfaceTransitionSchedule = "latest_per_frame";
-  surface._pendingSurfaceEvents = [{ eventKind: 0, marker: "prior gesture" }];
+  surface._pendingSurfaceEvents = [{ eventKind: SurfaceEventKind.Gesture, marker: "prior gesture" }];
   surface._gestureDirty = true;
   surface._backingWidth = 640;
   surface._backingHeight = 480;
@@ -192,7 +231,7 @@ test("scripted parameter edits enter the typed Fe transition without replacing r
   const transported = [];
   surface._runSurfaceFrame = events => {
     transported.push(structuredClone(events));
-    return events[0].eventKind === 0
+    return events[0].eventKind === SurfaceEventKind.Gesture
       ? [4] // independent stand-in for the prior authored Fe gesture result
       : [5]; // independent stand-in for the authored Fe edit result
   };
@@ -209,7 +248,7 @@ test("scripted parameter edits enter the typed Fe transition without replacing r
 
   assert.equal(renders, 1);
   assert.deepEqual(surface._uniforms, [5]);
-  assert.deepEqual(transported[0], [{ eventKind: 0, marker: "prior gesture" }]);
+  assert.deepEqual(transported[0], [{ eventKind: SurfaceEventKind.Gesture, marker: "prior gesture" }]);
   assert.equal(transported[1].length, 1);
   assert.deepEqual(
     {
@@ -219,6 +258,6 @@ test("scripted parameter edits enter the typed Fe transition without replacing r
       width: transported[1][0].width,
       height: transported[1][0].height,
     },
-    { eventKind: 1, paramIndex: 0, paramValue: 4.6, width: 640, height: 480 },
+    { eventKind: SurfaceEventKind.ParamEdit, paramIndex: 0, paramValue: 4.6, width: 640, height: 480 },
   );
 });

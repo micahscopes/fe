@@ -93,14 +93,16 @@ pub struct UpdateSurface {}
 pub struct SurfaceTransition {}
 
 /// Process at most one coalesced raw surface event per browser presentation
-/// opportunity. The fixed host supplies the presentation clock and writes an
-/// untouched event batch into the generated module; the compiler-lowered Wasm
-/// policy accumulates movement/wheel deltas, keeps the newest pointer, buttons,
-/// time, mode, and extent facts, then calls the authored `SurfaceTransition`
-/// exactly once. Complete non-resource actor state remains in private Wasm
-/// globals across frames. The fixed host seeds or explicitly replaces that
-/// state only at initialization, extent, and parameter-edit boundaries; frame
-/// calls carry raw events plus any inert external resource slots.
+/// opportunity. The fixed host supplies a typed `AnimationFrame` boundary and
+/// writes it beside the untouched input batch; the compiler-lowered Wasm policy
+/// accumulates movement/wheel deltas, keeps the newest pointer, buttons, time,
+/// mode, extent, and event identity, then calls the authored
+/// `SurfaceTransition` exactly once. GPU completion, visibility, and device
+/// recovery enter through the same typed boundary rather than hidden manifest
+/// flags. Complete non-resource actor state remains in private Wasm globals
+/// across calls. The fixed host seeds or explicitly replaces that state only at
+/// initialization, extent, and restoration boundaries; frame calls carry raw
+/// events plus any inert external resource slots.
 #[gpu_schedule(latest_per_frame)]
 pub struct LatestPerFrame {}
 

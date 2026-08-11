@@ -208,6 +208,28 @@ Origin: honesty audit of Claude Code session
   artifact verifies 13 Fe modules / 54 files with both component browser tapes
   green. Actual pixel execution retains the same local no-adapter qualification
   recorded above.
+- The surface boundary no longer exposes its browser/presentation identity as
+  an application-visible integer. `SurfaceEventKind` is an append-only Fe
+  fieldless enum covering gesture, direct edit, animation-frame, GPU-complete,
+  visible/hidden, and device lost/recovered facts. The compiler derives its
+  scalar position and variant bound from the resolved Fe record, carries that
+  bound only into the generated Wasm wrapper, and traps an out-of-range host
+  tag before authored Fe can observe it; no manifest field or number table was
+  added to an example. The fixed adapter appends the real rAF timestamp to the
+  untouched input batch, so generated Wasm still coalesces a burst and crosses
+  the frame boundary once, and routes completion/visibility/device boundaries
+  through the same typed resident transition. An independent Fe fixture gives
+  all eight variants distinct semantic receipts under Wasmtime, proves a
+  gesture plus frame preserves accumulated movement, and proves tag eight
+  traps. The fixed-host tape separately verifies the 52-byte transport and
+  exact call boundary. Both Mandelbrot semantic gates remain green, including
+  the 3,520-event bit-exact tape; the raymarch control Wasm grew 137 bytes to
+  5,068 bytes. A cold release gallery precompile completed in 112.3 seconds and
+  verified 13 Fe modules / 54 files with both Chromium component tapes green.
+  This exposes the missing typed clock facts but does not yet move the
+  `requestAnimationFrame`/GPU-completion dirty/presenting state machine or its
+  presentation decision out of JavaScript; that stronger Phase 2/3 step remains
+  open.
 - This component/page slice is not the full resident-component end state. The
   outer gallery shell does not yet own routing, tile lifecycle, scheduling, or
   component-to-component messages as a long-lived Fe actor, and the stylesheet

@@ -21,6 +21,23 @@
 use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
 use core::num::FloatRounding
 
+/// Append-only identities for raw browser and presentation facts delivered to
+/// a surface actor. The fieldless enum is the single Fe source of this fixed
+/// Wasm lane's discriminants; application code matches variants rather than
+/// repeating host integers.
+pub enum SurfaceEventKind {
+    Gesture,
+    ParamEdit,
+    AnimationFrame,
+    GpuComplete,
+    Visible,
+    Hidden,
+    DeviceLost,
+    DeviceRecovered,
+}
+
+impl Copy for SurfaceEventKind {}
+
 /// The fixed browser-to-Fe input transport record. The marker declares nominal
 /// host-boundary intent; the compiler verifies this complete field shape before
 /// admitting a `SurfaceTransition` export, so no argument names or JSON binding
@@ -41,9 +58,8 @@ pub struct SurfaceEvent {
     pub timestamp: f32,
     pub width: f32,
     pub height: f32,
-    /// Fixed host fact discriminant: 0 = pointer/wheel gesture, 1 = direct
-    /// parameter edit. Fe interprets it; JavaScript does not apply policy.
-    pub event_kind: u32,
+    /// Typed identity of the raw browser or presentation boundary fact.
+    pub event_kind: SurfaceEventKind,
     /// Declaration-order parameter index for a direct edit.
     pub param_index: u32,
     /// Untouched browser/script value proposed by a direct edit.
@@ -53,7 +69,17 @@ pub struct SurfaceEvent {
 impl Copy for SurfaceEvent {}
 
 impl SurfaceEvent {
-    pub fn is_param_edit(self) -> bool { self.event_kind == 1 }
+    pub fn is_param_edit(self) -> bool {
+        match self.event_kind { SurfaceEventKind::ParamEdit => true, _ => false }
+    }
+
+    pub fn is_animation_frame(self) -> bool {
+        match self.event_kind { SurfaceEventKind::AnimationFrame => true, _ => false }
+    }
+
+    pub fn is_gpu_complete(self) -> bool {
+        match self.event_kind { SurfaceEventKind::GpuComplete => true, _ => false }
+    }
 }
 
 /// How a param presents and is driven by the runtime. The variant NAME is the

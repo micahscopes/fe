@@ -3380,9 +3380,9 @@ where
                     .to_owned(),
             ));
         }
-        if !transition.event_tag_limits.is_empty() || !transition.state_tag_limits.is_empty() {
+        if !transition.state_tag_limits.is_empty() {
             return Err(LowerError::Unsupported(
-                "batched resident transitions do not yet admit fieldless-enum host leaves"
+                "batched resident transitions do not yet admit fieldless-enum state leaves"
                     .to_owned(),
             ));
         }
@@ -3419,6 +3419,19 @@ where
         }
 
         let event_tys = callee_args[..event_fields].to_vec();
+        for (index, limit) in &transition.event_tag_limits {
+            if *limit == 0
+                || event_tys
+                    .get(*index)
+                    .and_then(|ty| fieldless_tag_immediate(*ty, *limit - 1))
+                    .is_none()
+            {
+                return Err(LowerError::Unsupported(format!(
+                    "resident transition `{}` has invalid batched event enum constraint ({index}, {limit}) for {event_tys:?}",
+                    transition.source
+                )));
+            }
+        }
         for index in accumulate_f32_fields {
             if event_tys.get(*index) != Some(&Type::F32) {
                 return Err(LowerError::Unsupported(format!(
@@ -3536,6 +3549,7 @@ where
         let header = fb.append_block();
         let body = fb.append_block();
         let done = fb.append_block();
+        let invoke = fb.append_block();
         fb.switch_to_block(entry);
         let wrapper_values = fb.args().to_vec();
         let events_ptr = wrapper_values[0];
@@ -3610,6 +3624,33 @@ where
         fb.insert_inst_no_result(Jump::new(is, header));
 
         fb.switch_to_block(done);
+        let mut tags_valid = None;
+        for (index, limit) in &transition.event_tag_limits {
+            let mut tag_valid = None;
+            for tag in 0..*limit {
+                let expected = fb.make_imm_value(
+                    fieldless_tag_immediate(event_tys[*index], tag)
+                        .expect("batched enum tag type validated above"),
+                );
+                let equal = fb.insert_inst(CmpEq::new(is, coalesced[*index], expected), Type::I1);
+                tag_valid = Some(match tag_valid {
+                    Some(previous) => fb.insert_inst(Or::new(is, previous, equal), Type::I1),
+                    None => equal,
+                });
+            }
+            let tag_valid = tag_valid.expect("nonzero batched enum limit validated above");
+            tags_valid = Some(match tags_valid {
+                Some(previous) => fb.insert_inst(And::new(is, previous, tag_valid), Type::I1),
+                None => tag_valid,
+            });
+        }
+        if let Some(tags_valid) = tags_valid {
+            fb.insert_inst_no_result(Br::new(is, tags_valid, invoke, invalid));
+        } else {
+            fb.insert_inst_no_result(Jump::new(is, invoke));
+        }
+
+        fb.switch_to_block(invoke);
         let mut args = smallvec1::SmallVec::<[ValueId; 8]>::new();
         args.extend(coalesced);
         let mut resource_index = 2usize;

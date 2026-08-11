@@ -237,6 +237,7 @@ impl WasmCompileOptions {
         source: impl Into<String>,
         export: impl Into<String>,
         state_replace_export: impl Into<String>,
+        event_tag_limits: Vec<(usize, u32)>,
         actor_param_is_resource: Vec<bool>,
     ) -> Self {
         self.canonical_arena = true;
@@ -249,7 +250,7 @@ impl WasmCompileOptions {
                 event_stride: 52,
                 accumulate_f32_fields: vec![2, 3, 4],
             },
-            event_tag_limits: Vec::new(),
+            event_tag_limits,
             state_tag_limits: Vec::new(),
             actor_param_is_resource,
         });

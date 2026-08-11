@@ -572,6 +572,182 @@ fn new_param_binding_actor_needs_only_fe_source() {
 }
 
 #[test]
+fn surface_event_kinds_are_fe_typed_and_invalid_host_tags_trap() {
+    let bundle = compile_actor_ingot("crates/codegen/tests/fixtures/surface_event_kinds_actor");
+    assert_browser_wgsl(&bundle.wgsl);
+    assert_scheduled_typed_surface(&bundle);
+
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &bundle.wasm).expect("event-kind Wasm module");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("event-kind instance");
+    let transition = instance
+        .get_func(&mut store, "fe_surface_transition_latest_per_frame_v4")
+        .expect("typed scheduled transition");
+    let replace_state = instance
+        .get_func(&mut store, "fe_surface_state_replace_v1")
+        .expect("resident state replacement");
+    let memory = instance
+        .get_memory(&mut store, "memory")
+        .expect("event memory");
+    let alloc = instance
+        .get_typed_func::<(i32, i32), i32>(&mut store, "fe_cabi_alloc")
+        .expect("event allocator");
+    let event_pointer = alloc.call(&mut store, (104, 4)).expect("event allocation") as usize;
+    let seed = [
+        wasmtime::Val::F32(0.0f32.to_bits()),
+        wasmtime::Val::F32(64.0f32.to_bits()),
+    ];
+    replace_state
+        .call(&mut store, &seed, &mut [])
+        .expect("seed event-kind state");
+
+    let identities = [
+        1.0f32, 10.0, 100.0, 1000.0, 10000.0, 100000.0, 1000000.0, 10000000.0,
+    ];
+    let mut receipt = 0.0f32;
+    for (tag, identity) in identities.into_iter().enumerate() {
+        write_surface_event_batch(
+            &memory,
+            &mut store,
+            event_pointer,
+            &[SurfaceEventFixture {
+                pointer_x: 0.0,
+                pointer_y: 0.0,
+                delta_x: 0.0,
+                delta_y: 0.0,
+                wheel_delta: 0.0,
+                wheel_mode: 0,
+                buttons: 0,
+                timestamp: tag as f32,
+                width: 64.0,
+                height: 64.0,
+                event_kind: tag as u32,
+                param_index: 0,
+                param_value: 0.0,
+            }],
+        );
+        let mut results = [wasmtime::Val::F32(0), wasmtime::Val::F32(0)];
+        transition
+            .call(
+                &mut store,
+                &[
+                    wasmtime::Val::I32(event_pointer as i32),
+                    wasmtime::Val::I32(1),
+                ],
+                &mut results,
+            )
+            .expect("every declared Fe event kind should execute");
+        receipt += identity;
+        let got_receipt = match results[0] {
+            wasmtime::Val::F32(bits) => f32::from_bits(bits),
+            ref other => panic!("event receipt must be f32, got {other:?}"),
+        };
+        let got_res = match results[1] {
+            wasmtime::Val::F32(bits) => f32::from_bits(bits),
+            ref other => panic!("event extent must be f32, got {other:?}"),
+        };
+        assert_eq!(got_receipt, receipt);
+        assert_eq!(got_res, 64.0);
+    }
+
+    write_surface_event_batch(
+        &memory,
+        &mut store,
+        event_pointer,
+        &[SurfaceEventFixture {
+            pointer_x: 0.0,
+            pointer_y: 0.0,
+            delta_x: 0.0,
+            delta_y: 0.0,
+            wheel_delta: 0.0,
+            wheel_mode: 0,
+            buttons: 0,
+            timestamp: 9.0,
+            width: 64.0,
+            height: 64.0,
+            event_kind: 8,
+            param_index: 0,
+            param_value: 0.0,
+        }],
+    );
+    let mut invalid_results = [wasmtime::Val::F32(0), wasmtime::Val::F32(0)];
+    assert!(
+        transition
+            .call(
+                &mut store,
+                &[
+                    wasmtime::Val::I32(event_pointer as i32),
+                    wasmtime::Val::I32(1),
+                ],
+                &mut invalid_results,
+            )
+            .is_err(),
+        "the generated Wasm boundary must trap before Fe observes tag 8",
+    );
+
+    replace_state
+        .call(&mut store, &seed, &mut [])
+        .expect("reset event-kind state for coalescing receipt");
+    write_surface_event_batch(
+        &memory,
+        &mut store,
+        event_pointer,
+        &[
+            SurfaceEventFixture {
+                pointer_x: 2.0,
+                pointer_y: 3.0,
+                delta_x: 3.0,
+                delta_y: -1.0,
+                wheel_delta: 0.0,
+                wheel_mode: 0,
+                buttons: 1,
+                timestamp: 10.0,
+                width: 64.0,
+                height: 64.0,
+                event_kind: 0,
+                param_index: 0,
+                param_value: 0.0,
+            },
+            SurfaceEventFixture {
+                pointer_x: 0.0,
+                pointer_y: 0.0,
+                delta_x: 0.0,
+                delta_y: 0.0,
+                wheel_delta: 0.0,
+                wheel_mode: 0,
+                buttons: 0,
+                timestamp: 11.0,
+                width: 64.0,
+                height: 64.0,
+                event_kind: 2,
+                param_index: 0,
+                param_value: 0.0,
+            },
+        ],
+    );
+    let mut coalesced_results = [wasmtime::Val::F32(0), wasmtime::Val::F32(0)];
+    transition
+        .call(
+            &mut store,
+            &[
+                wasmtime::Val::I32(event_pointer as i32),
+                wasmtime::Val::I32(2),
+            ],
+            &mut coalesced_results,
+        )
+        .expect("gesture plus frame boundary should coalesce in generated Wasm");
+    let coalesced_receipt = match coalesced_results[0] {
+        wasmtime::Val::F32(bits) => f32::from_bits(bits),
+        ref other => panic!("coalesced event receipt must be f32, got {other:?}"),
+    };
+    assert_eq!(
+        coalesced_receipt, 102.0,
+        "Fe must observe the frame identity plus the independently accumulated movement facts",
+    );
+}
+
+#[test]
 fn param_binding_provider_rejects_state_param_name_drift() {
     let rel_dir = "crates/codegen/tests/fixtures/param_binding_actor";
     let source_path = repo_root().join(rel_dir).join("src/lib.fe");

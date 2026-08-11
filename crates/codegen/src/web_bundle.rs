@@ -44,8 +44,8 @@ use crate::sonatina::{
     compile_runtime_package_spirv_render_with_resources, compile_runtime_package_wasm_with_options,
 };
 use crate::{
-    CanonicalField, CanonicalInterfaceManifest, CanonicalType, canonical_lane_decl_from_entry,
-    canonical_type_from_semantic, verify_canonical_wasm_abi,
+    CanonicalField, CanonicalInterfaceManifest, CanonicalType, CanonicalVariant,
+    canonical_lane_decl_from_entry, canonical_type_from_semantic, verify_canonical_wasm_abi,
 };
 
 pub const WEB_BUNDLE_PROTOCOL: &str = "fe-web-bundle";
@@ -68,8 +68,8 @@ const TYPED_SURFACE_TRANSITION_EXPORT: &str = "fe_surface_transition_v2";
 /// binary ABI avoids adding scheduling fields to the render manifest.
 const TYPED_SURFACE_LATEST_PER_FRAME_EXPORT: &str = "fe_surface_transition_latest_per_frame_v4";
 /// Scalar leaves in the fixed v2 `SurfaceEvent`: ten browser gesture/extent
-/// facts followed by the typed direct-parameter-edit discriminant, index, and
-/// proposed value.
+/// facts followed by the typed browser/presentation identity, direct-parameter
+/// index, and proposed value.
 const TYPED_SURFACE_EVENT_FIELDS: usize = 13;
 /// Fixed companion ABI for seeding or explicitly replacing the private state
 /// of a resident scheduled actor. It takes the complete non-resource state in
@@ -1081,6 +1081,7 @@ fn actor_update_export_name(
 struct TypedSurfaceTransitionContract {
     params: Vec<WebControlWasmType>,
     results: Vec<WebControlWasmType>,
+    event_tag_limits: Vec<(usize, u32)>,
     actor_param_is_resource: Vec<bool>,
     schedule: Option<GpuSchedule>,
 }
@@ -1102,6 +1103,7 @@ fn with_typed_surface_export(
             source,
             TYPED_SURFACE_LATEST_PER_FRAME_EXPORT,
             TYPED_SURFACE_STATE_REPLACE_EXPORT,
+            contract.event_tag_limits.clone(),
             contract.actor_param_is_resource.clone(),
         ),
         None => options.with_export_alias(source, TYPED_SURFACE_TRANSITION_EXPORT),
@@ -1143,7 +1145,27 @@ fn canonical_surface_event_type() -> CanonicalType {
         CanonicalField::new("timestamp", CanonicalType::F32),
         CanonicalField::new("width", CanonicalType::F32),
         CanonicalField::new("height", CanonicalType::F32),
-        CanonicalField::new("event_kind", CanonicalType::U32),
+        CanonicalField::new(
+            "event_kind",
+            CanonicalType::Variant(
+                [
+                    "gesture",
+                    "param_edit",
+                    "animation_frame",
+                    "gpu_complete",
+                    "visible",
+                    "hidden",
+                    "device_lost",
+                    "device_recovered",
+                ]
+                .into_iter()
+                .map(|name| CanonicalVariant {
+                    name: name.to_owned(),
+                    fields: Vec::new(),
+                })
+                .collect(),
+            ),
+        ),
         CanonicalField::new("param_index", CanonicalType::U32),
         CanonicalField::new("param_value", CanonicalType::F32),
     ])
@@ -1165,6 +1187,11 @@ fn append_canonical_wasm_types(
                 append_canonical_wasm_types(&field.ty, output, &format!("{path}.{}", field.name))?;
             }
         }
+        CanonicalType::Variant(variants)
+            if !variants.is_empty() && variants.iter().all(|variant| variant.fields.is_empty()) =>
+        {
+            output.push(WebControlWasmType::I32)
+        }
         CanonicalType::Bytes
         | CanonicalType::String
         | CanonicalType::List { .. }
@@ -1175,6 +1202,52 @@ fn append_canonical_wasm_types(
         }
     }
     Ok(())
+}
+
+/// Return the flattened scalar leaf count while deriving fieldless-enum bounds
+/// from the resolved Fe type. This is boundary validation metadata, not an
+/// application manifest: it stays inside the generated Wasm wrapper.
+fn surface_scalar_tag_limits(
+    ty: &CanonicalType,
+    path: &str,
+    offset: usize,
+    output: &mut Vec<(usize, u32)>,
+) -> Result<usize, WebBundleError> {
+    match ty {
+        CanonicalType::Bool
+        | CanonicalType::U8
+        | CanonicalType::I32
+        | CanonicalType::U32
+        | CanonicalType::I64
+        | CanonicalType::U64
+        | CanonicalType::F32 => Ok(1),
+        CanonicalType::Record(fields) => {
+            let mut count = 0usize;
+            for field in fields {
+                count += surface_scalar_tag_limits(
+                    &field.ty,
+                    &format!("{path}.{}", field.name),
+                    offset + count,
+                    output,
+                )?;
+            }
+            Ok(count)
+        }
+        CanonicalType::Variant(variants)
+            if !variants.is_empty() && variants.iter().all(|variant| variant.fields.is_empty()) =>
+        {
+            let limit = u32::try_from(variants.len()).map_err(|_| {
+                WebBundleError::SurfaceProjection(format!(
+                    "typed surface ABI `{path}` has too many fieldless enum variants"
+                ))
+            })?;
+            output.push((offset, limit));
+            Ok(1)
+        }
+        _ => Err(WebBundleError::SurfaceProjection(format!(
+            "typed surface ABI `{path}` must be a closed scalar record, got {ty:?}"
+        ))),
+    }
 }
 
 /// Resolve and validate the manifest-free typed surface-transition contract.
@@ -1292,8 +1365,16 @@ fn typed_surface_transition_contract(
     }
 
     let mut params = Vec::new();
+    let mut event_tag_limits = Vec::new();
     let mut actor_param_is_resource = Vec::new();
     append_canonical_wasm_types(&event, &mut params, "surface_event")?;
+    let event_fields =
+        surface_scalar_tag_limits(&event, "surface_event", 0, &mut event_tag_limits)?;
+    if event_fields != TYPED_SURFACE_EVENT_FIELDS {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "typed surface event flattened to {event_fields} scalar leaves; expected {TYPED_SURFACE_EVENT_FIELDS}"
+        )));
+    }
     for (index, ty) in arg_tys[1..].iter().enumerate() {
         if resource_field_indices.contains(&(index as u32)) {
             // GPU resource values are inert handles in the control-only Wasm
@@ -1318,6 +1399,7 @@ fn typed_surface_transition_contract(
     Ok(Some(TypedSurfaceTransitionContract {
         params,
         results,
+        event_tag_limits,
         actor_param_is_resource,
         schedule,
     }))

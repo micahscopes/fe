@@ -1,0 +1,56 @@
+//! Semantic fixture for the append-only typed surface/presentation event ABI.
+
+use std::webgpu::{
+    FragmentSurface, GpuProgram, LatestPerFrame, SurfaceTransition, WebGpuBackend,
+}
+use std::web::view::{
+    Extent, Param, Surface, SurfaceEvent, SurfaceEventKind,
+}
+
+struct EventKindParams {
+    receipt: Param,
+    res: Param,
+}
+
+struct EventKindState {
+    receipt: f32,
+    res: f32,
+}
+
+actor SurfaceEventKindProbe uses (GpuProgram<WebGpuBackend>) {
+    receipt: f32,
+    res: f32,
+
+    const fn view() -> Surface<EventKindParams> {
+        Surface {
+            extent: Extent::square(64),
+            params: EventKindParams {
+                receipt: Param::fixed(0.0),
+                res: Param::extent_x(),
+            },
+        }
+    }
+
+    fn transition(self, event: own SurfaceEvent) -> EventKindState
+        uses (SurfaceTransition, LatestPerFrame)
+    {
+        let identity: f32 = match event.event_kind {
+            SurfaceEventKind::Gesture => 1.0,
+            SurfaceEventKind::ParamEdit => 10.0,
+            SurfaceEventKind::AnimationFrame => 100.0,
+            SurfaceEventKind::GpuComplete => 1000.0,
+            SurfaceEventKind::Visible => 10000.0,
+            SurfaceEventKind::Hidden => 100000.0,
+            SurfaceEventKind::DeviceLost => 1000000.0,
+            SurfaceEventKind::DeviceRecovered => 10000000.0,
+        }
+        EventKindState {
+            receipt: self.receipt + identity + event.delta_x + event.delta_y,
+            res: event.width,
+        }
+    }
+
+    fn paint(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
+        px ^ py
+    }
+}
