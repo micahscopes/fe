@@ -379,6 +379,32 @@ Origin: honesty audit of Claude Code session
   unconnected: invoking it rejects explicitly instead of fabricating the
   application-defined `{ submitted: bool }` response. Completing that provider
   and `qcga_pencil` pick -> drag -> solve -> render remain Phase 4 work.
+- The QCGA Phase 4 solver/value prerequisite is now promoted and independently
+  green. The portable Wasm value lane recursively flattens fixed arrays and
+  records, materializes owned aggregate parameters into independent
+  target-layout arena storage, supports bounds-checked dynamic projections and
+  typed stores, and retains exact `usize` narrowing/division/remainder
+  semantics needed by the production Gauss-Jordan solver. Loads and stores use
+  MIR's recursive field offsets and array strides rather than assuming one word
+  per leaf; a packed `[u8; 4]` gate proves byte-stride selection and OOB
+  trapping. The promoted QCGA suite executes real zero-import Fe Wasm lanes and
+  is 8/8: rank-eight pencil recovery, rank-nine perturbed rejection, independent
+  f64 incidence/basis checks, vertex projection, topology tearing, stream
+  receipts, and honest placement declarations. It also keeps the still-missing
+  raster-placement wall explicit rather than inferring end-to-end picking from
+  solver success.
+- That promotion exposed and fixed a general Sonatina-to-WAFFLE miscompile.
+  WAFFLE's stackifier could rematerialize a cross-block expression such as
+  `1 / load(pivot)` at each later use; when a loop mutated `pivot`, the emitted
+  Wasm no longer preserved Sonatina SSA's definition-time value. Sonatina now
+  converts cross-block uses to explicit maximal SSA before structurization, and
+  a minimal mutable-memory oracle plus the complete 27-test Sonatina Wasm
+  backend target are green. Fe pins the exact fixed revision. Fe's lowerer unit
+  suite is 10/10, all codegen tests typecheck, and the 71-test Wasm integration
+  target produced 70 semantic passes with its sole stale diagnostic matcher
+  subsequently corrected and passing focused. Fieldless enums retain their
+  compiler-derived scalar lane; payload-enum transport remains deliberately
+  fail-closed and is pinned by the `Result` flagship boundary test.
 - This component/page slice is not the full resident-component end state. The
   outer gallery shell does not yet own routing, tile lifecycle, scheduling, or
   component-to-component messages as a long-lived Fe actor, and the stylesheet

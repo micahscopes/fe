@@ -1,10 +1,5 @@
-//! STAGED acceptance suite for the `qcga_pencil` sketch.
-//!
-//! Destination: `crates/codegen/tests/qcga_pencil_sketch.rs`. It is staged
-//! HERE, outside the cargo workspace, because it was authored under a build
-//! lock and shared test infrastructure must never carry an unverified compile.
-//! Move it only after `cargo check -p fe-codegen --tests` passes with it in
-//! place; until then cargo does not see this file.
+//! Independent acceptance suite for the `qcga_pencil` sketch, included by
+//! `crates/codegen/tests/qcga_pencil_sketch.rs` as an ordinary workspace gate.
 //!
 //! What it verifies (all Fe compiled to zero-import wasm, run under wasmtime;
 //! no GPU work happens here and no GPU performance claim is made anywhere):
@@ -103,7 +98,7 @@ fn compile_lane(db: &DriverDataBase, top_mod: TopLevelMod, name: &str) -> Lane {
         .unwrap_or_else(|error| panic!("manifest for `{name}`: {error}"));
     let lane = manifest.lanes[0].clone();
     let package = mir::build_wasm_runtime_package_for_entry(db, top_mod, name)
-        .unwrap_or_else(|| panic!("runtime package for `{name}`"));
+        .unwrap_or_else(|error| panic!("runtime package for `{name}`: {error}"));
     let wasm = compile_runtime_package_wasm_with_options(
         db,
         &package,

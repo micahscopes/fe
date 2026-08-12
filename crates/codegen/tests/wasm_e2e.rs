@@ -4650,17 +4650,17 @@ fn instantiate_worker_and_clock(
 }
 
 /// CE-9 THE STOP (pinned): the `Result`-typed R7b flagship FAILS CLOSED on wasm at
-/// the enum wall. `Result<E, A>` is an enum; a `Result`-returning signature cannot
-/// lower on the wasm value model (`single_scalar_field` rejects `Layout::Enum`). The
-/// flagship type-checks in full (the anti-coloring / typed-environment thesis holds);
-/// only its wasm EXECUTION is walled, on the typed-error arm.
+/// the payload-enum wall. Fieldless enums have a compiler-derived scalar tag, but
+/// `Result<E, A>` needs a tagged payload representation that the Wasm value lane
+/// does not yet provide. The flagship type-checks in full (the anti-coloring /
+/// typed-environment thesis holds); only its Wasm execution is walled.
 #[test]
 fn fe_ce9_result_flagship_fails_closed_at_enum_wall() {
     let err = compile_to_wasm_err("wasm_ce9_flagship.fe", CE9_FLAGSHIP_SRC);
     assert!(
-        err.contains("single-scalar-field") || err.contains("one-field scalar newtype"),
-        "the Result-typed flagship should fail closed at the wasm enum/aggregate wall \
-         (enums are R2 on the wasm value model), got: {err}"
+        err.contains("payload enum value transport is not implemented"),
+        "the Result-typed flagship should fail closed specifically at the Wasm \
+         payload-enum transport boundary, got: {err}"
     );
 }
 
@@ -4845,6 +4845,37 @@ pub fn probe(k: u32) -> u32 {
             "probe({k}) is out of bounds and must trap"
         );
     }
+}
+
+/// A private fixed-array parameter is flattened at the call boundary and
+/// materialized into independent target-layout memory for dynamic indexing.
+/// `u8` arrays are intentionally packed at one byte per element, so this gate
+/// rejects the tempting but incorrect assumption that every flattened leaf is
+/// one Wasm-layout word apart.
+#[test]
+fn packed_u8_array_parameter_uses_target_layout_stride() {
+    let source = r#"
+fn pick(bytes: [u8; 4], index: u32) -> u8 {
+    bytes[index as usize]
+}
+
+pub fn probe(a: u8, b: u8, c: u8, d: u8, index: u32) -> u8 {
+    pick([a, b, c, d], index)
+}
+"#;
+    let wasm = compile_to_wasm("wasm_packed_u8_array_parameter.fe", source);
+    let (mut store, instance) = instantiate(&wasm);
+    let probe = instance
+        .get_typed_func::<(i32, i32, i32, i32, i32), i32>(&mut store, "probe")
+        .expect("`probe` export should exist");
+
+    for index in 0..4 {
+        assert_eq!(
+            probe.call(&mut store, (17, 33, 65, 129, index)).unwrap(),
+            [17, 33, 65, 129][index as usize]
+        );
+    }
+    assert!(probe.call(&mut store, (17, 33, 65, 129, 4)).is_err());
 }
 
 /// Fail-closed regression: a `[u256; N]` local array stays rejected (its element

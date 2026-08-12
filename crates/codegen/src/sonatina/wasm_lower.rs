@@ -1,47 +1,47 @@
-//! Narrow MIR -> Sonatina IR lowering for the wasm target (R1).
+//! MIR -> Sonatina IR lowering for the wasm target.
 //!
 //! This is the first genuinely-Fe-compiled wasm path: `MIR runtime package ->
-//! Sonatina IR (portable vocabulary, Wasm32 ISA) -> WAFFLE -> wasm bytes`. It is
-//! deliberately narrow. It lowers only the scalar-arithmetic + control-flow +
-//! call subset needed for `add`, `sum_to` (a loop/phi), and a two-function call
-//! pair, and it FAILS CLOSED on everything else (aggregates, memory builtins,
-//! checked-overflow reverts, u128/u256, EVM host ops). Those are R2.
+//! Sonatina IR (portable vocabulary, Wasm32 ISA) -> WAFFLE -> wasm bytes`.
+//! The portable value lane includes scalar arithmetic/control flow/calls,
+//! recursively flattened struct and fixed-array values, materialized aggregate
+//! slots and object references, target-layout memory projections, fieldless
+//! enum tags, and the canonical browser ABI wrappers. Unsupported payload
+//! enums, wide scalar operations, EVM host operations, and other target-specific
+//! constructs fail closed rather than being silently approximated.
 //!
 //! Why a separate path rather than parameterizing the EVM lowerer
 //! (`lower_runtime.rs`): the EVM path hardcodes `Type::I256` as the word in ~90
 //! places and lowers Fe's checked arithmetic to `uaddo` + an EVM `revert` panic
 //! block (see `emit_panic_revert`), which is EVM-native. A faithful portable
-//! rewrite of that lowerer is R2-scale. For R1 we lower the clean MIR directly:
+//! rewrite of that lowerer is target-backend scale. Here we lower clean MIR directly:
 //! at the MIR level `a + b` is `RExpr::Binary { op: Arith(Add), .. }` with no
 //! overflow machinery attached, so we emit a plain portable `arith::Add`. The
-//! WAFFLE translator currently fakes overflow flags as 0, so R1 is only correct
-//! for non-overflowing values; real checked semantics are R2.
+//! Checked wasm32 `usize` add/sub/mul are explicitly guarded. Other checked
+//! arithmetic remains supported only where the portable backend implements its
+//! exact semantics; unsupported cases fail closed.
 //!
 //! It reuses Sonatina's `FunctionBuilder` SSA-variable machinery (declare/def/
 //! use + `seal_all`) exactly as the EVM lowerer does, so loop-carried values
 //! (`sum_to`'s accumulator) get their phis inserted automatically. MIR runtime
-//! locals in this subset are normally value-carried (`RuntimeLocalRoot::None`).
-//! One closed Slot shape is also admitted: a primitive scalar stored to and
-//! loaded from the whole Slot is promoted to an SSA variable. Slot projections,
-//! aggregates, addressing, and aliasing operations remain out of scope and fail
-//! closed. Other place reads are fail-closed R2, with ONE admitted sliver (R2.0,
-//! control-effects ladder
-//! section 7): a Ref-rooted place whose carrier is a memory-space provider ref,
-//! at the empty path or `[Field(0)]` on a single-scalar-field newtype, lowers as
-//! the identity on the transport word (`use_var`); it is what lets an own-mode
-//! word-carried token (`Wait::wait<T>(_ pending: own Pending<T>)`) consume. Apart
-//! from whole primitive scalar Slot stores, stores, addresses, offsets, and
-//! object materializations remain R2 and fail closed.
+//! locals may be value-carried or materialized in the canonical arena. Scalar
+//! slots remain SSA-promoted; fixed aggregate slots receive an independent
+//! target-layout copy so dynamic indexing has ordinary Fe value semantics.
+//! Memory-space provider/object references use explicit bounds-checked address
+//! projection and typed loads/stores. Place forms outside those admitted,
+//! layout-derived cases continue to fail closed.
 
 use std::collections::{HashMap, HashSet};
 
 use compiler_db::DriverDataBase;
 use hir::projection::IndexSource;
 use hir::{
-    analysis::ty::{
-        adt_def::AdtRef,
-        const_ty::{ConstTyData, EvaluatedConstTy},
-        ty_def::{PrimTy, TyBase, TyData, TyId},
+    analysis::{
+        semantic::instantiate_with_generic_args,
+        ty::{
+            adt_def::AdtRef,
+            const_ty::{ConstTyData, EvaluatedConstTy},
+            ty_def::{PrimTy, TyBase, TyData, TyId},
+        },
     },
     hir_def::{ArithBinOp, BinOp, CompBinOp, GpuIntrinsic, GpuResource, UnOp},
 };
@@ -63,7 +63,7 @@ use sonatina_ir::{
     inst::{
         arith::{
             Add, Fabs, Fadd, Fceil, Fclamp, Fdiv, Ffloor, Fmax, FmaxRelaxed, Fmin, FminRelaxed,
-            Fmul, Fneg, Fround, Fsqrt, Fsub, Ftrunc, Mul, Sar, Shl, Shr, Sub,
+            Fmul, Fneg, Fround, Fsqrt, Fsub, Ftrunc, Mul, Sar, Shl, Shr, Sub, Udiv, Umod,
         },
         cast::{Bitcast, F32ToI32, I32ToF32, Sext, Trunc, Zext},
         cmp::{Eq as CmpEq, Feq, Fle, Flt, Lt, Slt},
@@ -341,26 +341,26 @@ pub(crate) fn compile_runtime_package_native(
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FlatShape {
     Leaf(Type),
-    Struct(Vec<FlatShape>),
+    Product(Vec<FlatShape>),
 }
 
 impl FlatShape {
     fn leaf_count(&self) -> usize {
         match self {
             Self::Leaf(_) => 1,
-            Self::Struct(fields) => fields.iter().map(Self::leaf_count).sum(),
+            Self::Product(fields) => fields.iter().map(Self::leaf_count).sum(),
         }
     }
 
     fn leaf_types(&self, out: &mut Vec<Type>) {
         match self {
             Self::Leaf(ty) => out.push(*ty),
-            Self::Struct(fields) => fields.iter().for_each(|field| field.leaf_types(out)),
+            Self::Product(fields) => fields.iter().for_each(|field| field.leaf_types(out)),
         }
     }
 
     fn field_range(&self, index: usize) -> Option<(usize, usize, &FlatShape)> {
-        let Self::Struct(fields) = self else {
+        let Self::Product(fields) = self else {
             return None;
         };
         let field = fields.get(index)?;
@@ -750,16 +750,35 @@ fn seed_parameter_facts<'db>(
                     .find(|(index, _)| RLocalId::from_u32(*index as u32) == local)?
                     .1
                     .clone();
+                let semantic_ty = template
+                    .semantic_ty
+                    .as_view(db)
+                    .unwrap_or(template.semantic_ty);
+                let field_semantic_tys = match layout.data(db) {
+                    Layout::Struct(_) => semantic_ty.field_types(db),
+                    Layout::Array(layout) => {
+                        let (_, args) = semantic_ty.decompose_ty_app(db);
+                        let element = args.first().copied()?;
+                        vec![element; layout.len as usize]
+                    }
+                    Layout::Enum(_) => return None,
+                };
+                if field_semantic_tys.len() != field_facts.len() {
+                    return None;
+                }
                 let mut fields = Vec::with_capacity(field_facts.len());
-                for (index, (field_class, field_fact)) in
-                    field_classes.iter().zip(field_facts).enumerate()
+                for (index, ((field_class, field_fact), field_semantic_ty)) in field_classes
+                    .iter()
+                    .zip(field_facts)
+                    .zip(field_semantic_tys)
+                    .enumerate()
                 {
                     if stmts.len() >= budget {
                         return None;
                     }
                     let field = RLocalId::from_u32(body.locals.len() as u32);
                     body.locals.push(mir::RLocal {
-                        semantic_ty: template.semantic_ty,
+                        semantic_ty: field_semantic_ty,
                         carrier: RuntimeCarrier::Value(field_class.clone()),
                         root: RuntimeLocalRoot::None,
                     });
@@ -1503,6 +1522,86 @@ fn reify_static_aggregate_params<'db>(db: &'db DriverDataBase, body: &mut Runtim
     }
 }
 
+fn repair_scalar_semantic_types_from_array_projections<'db>(
+    db: &'db DriverDataBase,
+    body: &mut RuntimeBody<'db>,
+) {
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            let RStmt::Assign {
+                dst,
+                expr: RExpr::AggregateExtract { value, .. },
+            } = stmt
+            else {
+                continue;
+            };
+            let source_ty = body.locals[value.as_u32() as usize]
+                .semantic_ty
+                .as_view(db)
+                .unwrap_or(body.locals[value.as_u32() as usize].semantic_ty);
+            if !source_ty.is_array(db) {
+                continue;
+            }
+            let (_, args) = source_ty.decompose_ty_app(db);
+            if let Some(element_ty) = args.first().copied() {
+                body.locals[dst.as_u32() as usize].semantic_ty = element_ty;
+            }
+        }
+    }
+}
+
+fn semantic_place_result_ty<'db>(
+    db: &'db DriverDataBase,
+    body: &RuntimeBody<'db>,
+    place: &RuntimePlace<'db>,
+) -> Option<TyId<'db>> {
+    let root = match place.root {
+        PlaceRoot::Slot(local) | PlaceRoot::Ref(local) => local,
+        PlaceRoot::Provider(_) | PlaceRoot::Ptr { .. } => return None,
+    };
+    let mut ty = body.locals[root.as_u32() as usize].semantic_ty;
+    for elem in place.path.iter() {
+        ty = ty.as_view(db).unwrap_or(ty);
+        ty = match elem {
+            PlaceElem::Field(index) => ty.field_types(db).get(index.0 as usize).copied()?,
+            PlaceElem::Index(_) => {
+                if !ty.is_array(db) {
+                    return None;
+                }
+                let (_, args) = ty.decompose_ty_app(db);
+                args.first().copied()?
+            }
+            PlaceElem::VariantField { .. } | PlaceElem::Deref => return None,
+        };
+    }
+    Some(ty)
+}
+
+fn lower_usize_array_place_classes<'db>(db: &'db DriverDataBase, body: &mut RuntimeBody<'db>) {
+    let snapshot = body.clone();
+    for block in &mut body.blocks {
+        for stmt in &mut block.stmts {
+            let RStmt::Assign {
+                dst,
+                expr: RExpr::Load { place },
+            } = stmt
+            else {
+                continue;
+            };
+            if semantic_place_result_ty(db, &snapshot, place)
+                .is_some_and(|ty| is_usize_semantic_ty(db, ty))
+                && let RuntimeCarrier::Value(RuntimeClass::Scalar(scalar)) =
+                    &mut body.locals[dst.as_u32() as usize].carrier
+                && is_u256_unsigned(scalar.repr)
+            {
+                scalar.repr = USIZE_WASM_REPR;
+                body.locals[dst.as_u32() as usize].semantic_ty =
+                    semantic_place_result_ty(db, &snapshot, place).unwrap();
+            }
+        }
+    }
+}
+
 /// True when a runtime local's source-level type is `usize`. On wasm32 `usize`
 /// is a 32-bit pointer-width integer, but MIR classifies it as a 256-bit scalar
 /// (shared with `u256`, `type_info.rs`). The narrowing pass below keys on this
@@ -1512,10 +1611,33 @@ fn is_usize_semantic_ty<'db>(
     db: &'db DriverDataBase,
     ty: hir::analysis::ty::ty_def::TyId<'db>,
 ) -> bool {
+    let mut ty = ty;
+    while let Some(inner) = ty.as_view(db) {
+        ty = inner;
+    }
     matches!(
         ty.base_ty(db).data(db),
         TyData::TyBase(TyBase::Prim(PrimTy::Usize))
     )
+}
+
+/// Resolve the source-level type carried by an RMIR local in the context of
+/// the concrete runtime instance that owns the body. Most semantic locals are
+/// already instantiated before RMIR lowering, but provider-selected generic
+/// helpers can retain a `TyParam` label even though their runtime class and
+/// instance substitution are concrete. Target legalization must consume that
+/// semantic substitution rather than infer from a helper symbol or runtime
+/// width (which would incorrectly turn a genuine `u256` into a pointer).
+fn instantiated_runtime_local_ty<'db>(
+    db: &'db DriverDataBase,
+    instance: RuntimeInstance<'db>,
+    ty: TyId<'db>,
+) -> TyId<'db> {
+    let Some(semantic) = instance.key(db).semantic(db) else {
+        return ty;
+    };
+    let ty = instantiate_with_generic_args(db, ty, semantic.key(db).subst(db).generic_args(db));
+    semantic.normalized_ty(db, ty)
 }
 
 /// The i32-width unsigned scalar repr that a narrowed `usize` carries on wasm32.
@@ -1567,8 +1689,12 @@ fn const_int_fits_u32(words: &[u8]) -> bool {
 /// embedded repr keyed off a narrowed local was the expected 256-bit unsigned
 /// one. Any inconsistency leaves the body untouched so the old fail-closed error
 /// fires instead of a silently-miscompiled narrowing.
-fn narrow_usize_scalars<'db>(db: &'db DriverDataBase, body: &mut RuntimeBody<'db>) {
-    let narrowed: FxHashMap<RLocalId, ()> = body
+fn narrow_usize_scalars<'db>(
+    db: &'db DriverDataBase,
+    instance: RuntimeInstance<'db>,
+    body: &mut RuntimeBody<'db>,
+) {
+    let narrowed: FxHashMap<RLocalId, TyId<'db>> = body
         .locals
         .iter()
         .enumerate()
@@ -1576,8 +1702,9 @@ fn narrow_usize_scalars<'db>(db: &'db DriverDataBase, body: &mut RuntimeBody<'db
             let RuntimeCarrier::Value(RuntimeClass::Scalar(scalar)) = &local.carrier else {
                 return None;
             };
-            (is_u256_unsigned(scalar.repr) && is_usize_semantic_ty(db, local.semantic_ty))
-                .then_some((RLocalId::from_u32(idx as u32), ()))
+            let concrete_ty = instantiated_runtime_local_ty(db, instance, local.semantic_ty);
+            (is_u256_unsigned(scalar.repr) && is_usize_semantic_ty(db, concrete_ty))
+                .then_some((RLocalId::from_u32(idx as u32), concrete_ty))
         })
         .collect();
     if narrowed.is_empty() {
@@ -1588,9 +1715,16 @@ fn narrow_usize_scalars<'db>(db: &'db DriverDataBase, body: &mut RuntimeBody<'db
     let mut staged = body.clone();
     let mut ok = true;
 
-    for id in narrowed.keys() {
-        if let RuntimeCarrier::Value(RuntimeClass::Scalar(scalar)) =
-            &mut staged.locals[id.as_u32() as usize].carrier
+    for (id, concrete_ty) in &narrowed {
+        let idx = id.as_u32() as usize;
+        staged.locals[idx].semantic_ty = *concrete_ty;
+        if let RuntimeCarrier::Value(RuntimeClass::Scalar(scalar)) = &mut staged.locals[idx].carrier
+        {
+            scalar.repr = USIZE_WASM_REPR;
+        }
+        if let RuntimeLocalRoot::Slot(RuntimeClass::Scalar(scalar))
+        | RuntimeLocalRoot::Ref(RuntimeClass::Scalar(scalar)) = &mut staged.locals[idx].root
+            && is_u256_unsigned(scalar.repr)
         {
             scalar.repr = USIZE_WASM_REPR;
         }
@@ -1598,7 +1732,11 @@ fn narrow_usize_scalars<'db>(db: &'db DriverDataBase, body: &mut RuntimeBody<'db
     for param in &mut staged.signature.params {
         if is_narrowed(&param.local) {
             if let RuntimeClass::Scalar(scalar) = &mut param.class {
-                scalar.repr = USIZE_WASM_REPR;
+                if is_u256_unsigned(scalar.repr) {
+                    scalar.repr = USIZE_WASM_REPR;
+                } else if scalar.repr != USIZE_WASM_REPR {
+                    ok = false;
+                }
             } else {
                 ok = false;
             }
@@ -1647,7 +1785,7 @@ fn narrow_usize_scalars<'db>(db: &'db DriverDataBase, body: &mut RuntimeBody<'db
                     if is_narrowed(value) {
                         if is_u256_unsigned(from.repr) {
                             from.repr = USIZE_WASM_REPR;
-                        } else {
+                        } else if from.repr != USIZE_WASM_REPR {
                             ok = false;
                         }
                     }
@@ -2332,6 +2470,47 @@ fn drop_dead_pure_aggregate_values<'db>(db: &'db DriverDataBase, body: &mut Runt
     }
 }
 
+fn drop_dead_scalar_constants_and_copies(body: &mut RuntimeBody<'_>) {
+    let params = body
+        .signature
+        .params
+        .iter()
+        .map(|param| param.local)
+        .collect::<HashSet<_>>();
+    loop {
+        let used = collect_used_locals(body);
+        let mut dead = Vec::new();
+        for block in &body.blocks {
+            for stmt in &block.stmts {
+                let RStmt::Assign { dst, expr } = stmt else {
+                    continue;
+                };
+                if params.contains(dst) || used.contains_key(dst) {
+                    continue;
+                }
+                if matches!(body.value_class(*dst), Some(RuntimeClass::Scalar(_)))
+                    && matches!(expr, RExpr::ConstScalar(_) | RExpr::Use(_))
+                {
+                    dead.push(*dst);
+                }
+            }
+        }
+        if dead.is_empty() {
+            break;
+        }
+        let dead_set = dead.iter().copied().collect::<HashSet<_>>();
+        for block in &mut body.blocks {
+            block.stmts.retain(
+                |stmt| !matches!(stmt, RStmt::Assign { dst, .. } if dead_set.contains(dst)),
+            );
+        }
+        for local in dead {
+            body.locals[local.as_u32() as usize].carrier = RuntimeCarrier::Erased;
+            body.locals[local.as_u32() as usize].root = RuntimeLocalRoot::None;
+        }
+    }
+}
+
 struct PortableModuleLowerer<'db, 'a, I>
 where
     I: Isa<InstSet = NativeInstSet>,
@@ -2376,10 +2555,13 @@ where
         export_aliases: &[(String, String)],
     ) -> Self {
         let mut prepared_bodies = prepare_inline_value_bodies(db, package).bodies;
-        for body in prepared_bodies.values_mut() {
+        for (instance, body) in &mut prepared_bodies {
             reify_static_aggregate_params(db, body);
-            narrow_usize_scalars(db, body);
+            repair_scalar_semantic_types_from_array_projections(db, body);
+            lower_usize_array_place_classes(db, body);
+            narrow_usize_scalars(db, *instance, body);
             drop_dead_pure_aggregate_values(db, body);
+            drop_dead_scalar_constants_and_copies(body);
         }
         let mut func_symbols = assign_sonatina_function_symbols(db, package);
         for function in package.functions(db) {
@@ -2629,6 +2811,7 @@ where
 
     fn lower_signature(&mut self, function: RuntimeFunction<'db>) -> Result<Signature, LowerError> {
         let instance = function.instance(self.db);
+        let symbol = self.function_symbol(instance);
         let body = self
             .prepared_bodies
             .get(&instance)
@@ -2652,7 +2835,13 @@ where
             } else if let Some(elem_tys) = self.scalar_tuple_element_tys(&param.class) {
                 args.extend(elem_tys);
             } else {
-                args.push(self.ty_for_class(&param.class)?);
+                args.push(self.ty_for_class(&param.class).map_err(|error| match error {
+                    LowerError::Unsupported(message) => LowerError::Unsupported(format!(
+                        "{message}; while declaring parameter local {:?} of Wasm function `{symbol}`",
+                        param.local
+                    )),
+                    other => other,
+                })?);
             }
         }
         let ret_tys: Vec<Type> = match &body.signature.ret {
@@ -2661,11 +2850,15 @@ where
                 if let Some(elem_tys) = self.scalar_tuple_element_tys(class) {
                     elem_tys
                 } else {
-                    vec![self.ty_for_class(class)?]
+                    vec![self.ty_for_class(class).map_err(|error| match error {
+                        LowerError::Unsupported(message) => LowerError::Unsupported(format!(
+                            "{message}; while declaring the return of Wasm function `{symbol}`"
+                        )),
+                        other => other,
+                    })?]
                 }
             }
         };
-        let symbol = self.function_symbol(function.instance(self.db));
         let linkage = if self.wrapped_lane_names.contains(&symbol) {
             // The host ABI is a synthesized canonical or surface-frame
             // wrapper. Its underlying typed Fe lane remains an internal
@@ -4506,12 +4699,11 @@ where
         Ok(())
     }
 
-    /// The Sonatina `Type` for a runtime class. R1 covered the scalar envelope
-    /// (bool, u8..u64 / i8..i64); R3.4b adds the FIRST per-backend ABI facts: a
-    /// memory-space provider reference is the backend pointer word (i32), and a
-    /// single-scalar-field aggregate is its one field's scalar. Wider scalars
-    /// (u128/u256/address), non-memory provider refs, object/const refs, raw
-    /// addresses, and non-flattened aggregates fail closed here.
+    /// The single Sonatina value type for a runtime class. Recursive product
+    /// values are handled by `flat_shape`; materialized objects are i32 arena
+    /// pointers. This method therefore covers scalar leaves, transport words,
+    /// single-scalar newtypes, and fieldless-enum tags, and fails closed for
+    /// classes without one scalar/pointer representation.
     fn ty_for_class(&self, class: &RuntimeClass<'db>) -> Result<Type, LowerError> {
         match class {
             RuntimeClass::Scalar(scalar) => scalar_ty_r1(scalar),
@@ -4687,6 +4879,21 @@ where
             && self.aggregate_is_memory_lowerable(pointee)
     }
 
+    fn object_value_layout(&self, class: &RuntimeClass<'db>) -> Option<LayoutId<'db>> {
+        let RuntimeClass::Ref {
+            pointee,
+            kind: RefKind::Object,
+            view: RefView::Whole,
+        } = class
+        else {
+            return None;
+        };
+        let RuntimeClass::AggregateValue { layout } = pointee.as_ref() else {
+            return None;
+        };
+        Some(*layout)
+    }
+
     /// Whether an aggregate value's every scalar leaf passes the R1 scalar
     /// envelope (so it can be stored/loaded through typed Mload/Mstore at i32
     /// addresses). Structs recurse over their fields, arrays over their element;
@@ -4711,6 +4918,20 @@ where
 
     fn flat_shape(&self, class: &RuntimeClass<'db>) -> Option<FlatShape> {
         self.flat_shape_visit(class, &mut HashSet::new())
+    }
+
+    fn product_element_class(
+        &self,
+        layout: LayoutId<'db>,
+        index: usize,
+    ) -> Option<RuntimeClass<'db>> {
+        match layout.data(self.db) {
+            Layout::Struct(struct_layout) => struct_layout.fields.get(index).cloned(),
+            Layout::Array(array_layout) => {
+                (index < usize::try_from(array_layout.len).ok()?).then(|| array_layout.elem.clone())
+            }
+            Layout::Enum(_) => None,
+        }
     }
 
     /// One optional closed-enum upper bound per flattened Wasm parameter leaf.
@@ -4747,7 +4968,11 @@ where
                             module.fieldless_enum_tag(*layout)?;
                             out.push(Some(u32::try_from(enum_layout.variants.len()).ok()?));
                         }
-                        Layout::Array(_) => return None,
+                        Layout::Array(array_layout) => {
+                            for _ in 0..array_layout.len {
+                                visit(module, &array_layout.elem, active, out)?;
+                            }
+                        }
                     }
                     active.remove(layout);
                 }
@@ -4806,13 +5031,17 @@ where
                             .collect::<Option<Vec<_>>>()?;
                         // Unit structs contribute zero leaves but remain a valid
                         // node in a closed product tree.
-                        FlatShape::Struct(fields)
+                        FlatShape::Product(fields)
                     }
                     Layout::Enum(_) => {
                         self.fieldless_enum_tag(*layout)?;
                         FlatShape::Leaf(Type::I32)
                     }
-                    Layout::Array(_) => return None,
+                    Layout::Array(array_layout) => {
+                        let len = usize::try_from(array_layout.len).ok()?;
+                        let elem = self.flat_shape_visit(&array_layout.elem, active)?;
+                        FlatShape::Product(vec![elem; len])
+                    }
                 };
                 active.remove(layout);
                 Some(shape)
@@ -4827,10 +5056,11 @@ where
         }
     }
 
-    /// The recursively flattened scalar leaves of a nontrivial struct tree, or
+    /// The recursively flattened scalar leaves of a nontrivial product tree, or
     /// `None` for scalars, the existing direct one-word-newtype path,
-    /// arrays/enums, refs, and unsupported leaves. Unit structs flatten to zero
-    /// leaves, as required for terminal `Nil` products.
+    /// refs and unsupported leaves. Structs and fixed-size arrays share this
+    /// closed product representation; unit structs flatten to zero leaves, as
+    /// required for terminal `Nil` products.
     /// This is the INTERFACE-level generalization of the single-scalar-field
     /// newtype scalarization to N fields: a `(Pending<B,T1>, Pending<B,T2>)`
     /// own-tuple param flattens into N wasm params, and a `(u64, u64)` return
@@ -4895,6 +5125,11 @@ where
     /// (`aggregate_make`), passed as flattened params, and returned as flattened
     /// results.
     tuple_vars: FxHashMap<RLocalId, Vec<Variable>>,
+    /// Fixed-size product parameters that Fe models as by-value Slots. Their
+    /// public/private Wasm ABI is flattened, then the prologue materializes an
+    /// independent arena copy so dynamic indexing observes normal Fe value
+    /// semantics without aliasing the caller's storage.
+    materialized_param_slots: HashSet<RLocalId>,
     /// Only host-visible entries need dynamic closed-enum validation. Private
     /// Fe-to-Fe calls are already typed and avoid the extra branch entirely.
     validate_enum_params: bool,
@@ -4931,6 +5166,7 @@ where
         // scalar tuple still fails closed there, unchanged).
         let mut vars = FxHashMap::default();
         let mut tuple_vars: FxHashMap<RLocalId, Vec<Variable>> = FxHashMap::default();
+        let mut materialized_param_slots = HashSet::new();
         for (idx, local) in body.locals.iter().enumerate() {
             if let RuntimeCarrier::Value(class) = &local.carrier {
                 let local_id = RLocalId::from_u32(idx as u32);
@@ -4949,6 +5185,15 @@ where
                     if matches!(class, RuntimeClass::Scalar(_)) {
                         let ty = module.ty_for_class(class)?;
                         vars.insert(local_id, fb.declare_var(ty));
+                    } else if body
+                        .signature
+                        .params
+                        .iter()
+                        .any(|param| param.local == local_id)
+                        && module.scalar_tuple_element_tys(class).is_some()
+                    {
+                        vars.insert(local_id, fb.declare_var(Type::I32));
+                        materialized_param_slots.insert(local_id);
                     }
                     continue;
                 }
@@ -4958,7 +5203,9 @@ where
                         .map(|ty| fb.declare_var(*ty))
                         .collect::<Vec<_>>();
                     tuple_vars.insert(local_id, elem_vars);
-                } else if module.is_memory_lowerable_object_ref(class) {
+                } else if module.is_memory_lowerable_object_ref(class)
+                    || module.object_value_layout(class).is_some()
+                {
                     // Change 1: a function-local aggregate behind an object /
                     // memory-provider reference lowers to an i32 linear-memory
                     // pointer (the arena offset the AllocObject arm mints). The
@@ -4967,7 +5214,13 @@ where
                     // is free (only the pointer is carried, never the aggregate).
                     vars.insert(local_id, fb.declare_var(Type::I32));
                 } else {
-                    let ty = module.ty_for_class(class)?;
+                    let ty = module.ty_for_class(class).map_err(|error| match error {
+                        LowerError::Unsupported(message) => LowerError::Unsupported(format!(
+                            "{message}; while declaring Wasm local {local_id:?} in `{}`",
+                            module.function_symbol(body.owner)
+                        )),
+                        other => other,
+                    })?;
                     vars.insert(local_id, fb.declare_var(ty));
                 }
             }
@@ -4981,6 +5234,7 @@ where
             block_map,
             vars,
             tuple_vars,
+            materialized_param_slots,
             validate_enum_params,
             trap_block: None,
         })
@@ -5008,7 +5262,44 @@ where
                 .validate_enum_params
                 .then(|| self.module.flat_leaf_enum_bounds(&param.class))
                 .flatten();
-            if let Some(elem_vars) = self.tuple_vars.get(&param.local).cloned() {
+            if self.materialized_param_slots.contains(&param.local) {
+                let RuntimeClass::AggregateValue { layout } = &param.class else {
+                    return Err(LowerError::Internal(format!(
+                        "materialized parameter slot {:?} is not an aggregate",
+                        param.local
+                    )));
+                };
+                let shape = self.module.flat_shape(&param.class).ok_or_else(|| {
+                    LowerError::Internal(format!(
+                        "materialized parameter slot {:?} lost its flat shape",
+                        param.local
+                    ))
+                })?;
+                let end = wasm_arg_idx
+                    .checked_add(shape.leaf_count())
+                    .ok_or_else(|| {
+                        LowerError::Internal("materialized parameter arity overflow".to_owned())
+                    })?;
+                let leaves = arg_values.get(wasm_arg_idx..end).ok_or_else(|| {
+                    LowerError::Internal(format!(
+                        "materialized parameter {:?} exceeds Wasm argument arity",
+                        param.local
+                    ))
+                })?;
+                let pointer = self.lower_alloc_object(*layout)?;
+                let mut cursor = 0usize;
+                self.store_materialized_leaves(pointer, &param.class, leaves, &mut cursor)?;
+                if cursor != leaves.len() {
+                    return Err(LowerError::Internal(format!(
+                        "materialized parameter {:?} consumed {cursor} of {} leaves",
+                        param.local,
+                        leaves.len()
+                    )));
+                }
+                let var = self.var_for(param.local)?;
+                self.fb.def_var(var, pointer);
+                wasm_arg_idx = end;
+            } else if let Some(elem_vars) = self.tuple_vars.get(&param.local).cloned() {
                 for (leaf, elem_var) in elem_vars.into_iter().enumerate() {
                     let arg = arg_values[wasm_arg_idx];
                     if let Some(limit) = enum_bounds
@@ -5323,11 +5614,11 @@ where
         Ok(())
     }
 
-    /// Flatten value-carried product-tree arguments in the same DFS field order
-    /// used by `lower_signature` and the function prologue. Scalar arguments
-    /// remain one wasm value. Fieldless enums are scalar leaves. Arrays,
-    /// payload enums, and place-backed aggregates never acquire tuple variables
-    /// and therefore continue to fail closed here.
+    /// Flatten value-carried product-tree arguments in the same DFS declaration
+    /// order used by `lower_signature` and the function prologue. Scalar and
+    /// fieldless-enum arguments remain one Wasm value; structs and fixed arrays
+    /// contribute their recursively flattened leaves. Unsupported payload enums
+    /// and non-value transports fail closed in `local_flat_values`.
     fn call_arg_values(&mut self, args: &[RLocalId]) -> Result<Vec<ValueId>, LowerError> {
         let mut values = Vec::new();
         for arg in args {
@@ -5342,7 +5633,7 @@ where
         })?;
         self.module.flat_shape(class).ok_or_else(|| {
             LowerError::Unsupported(format!(
-                "wasm target (R2.2): `{class:?}` is not a recursive struct tree of wasm scalars"
+                "wasm target (R2.2): `{class:?}` is not a recursive product tree of wasm scalars"
             ))
         })
     }
@@ -5397,7 +5688,7 @@ where
                     LowerError::Internal(format!("R2.1 tuple dst {dst:?} has no element vars"))
                 })?;
                 let dst_shape = self.local_flat_shape(dst)?;
-                let FlatShape::Struct(expected_fields) = dst_shape else {
+                let FlatShape::Product(expected_fields) = dst_shape else {
                     return Err(LowerError::Internal(format!(
                         "R2.1 flattened destination {dst:?} is not a struct"
                     )));
@@ -5410,12 +5701,17 @@ where
                         "R2.1 flattened destination {dst:?} is not an aggregate"
                     )));
                 };
-                let Layout::Struct(dst_layout) = layout.data(self.module.db) else {
-                    return Err(LowerError::Unsupported(
-                        "wasm target (R2.2): arrays/enums cannot be flattened".to_string(),
-                    ));
+                let expected_classes = match layout.data(self.module.db) {
+                    Layout::Struct(dst_layout) => dst_layout.fields.to_vec(),
+                    Layout::Array(dst_layout) => {
+                        vec![dst_layout.elem.clone(); dst_layout.len as usize]
+                    }
+                    Layout::Enum(_) => {
+                        return Err(LowerError::Unsupported(
+                            "wasm target (R2.2): payload enums cannot be flattened".to_string(),
+                        ));
+                    }
                 };
-                let expected_classes = dst_layout.fields.to_vec();
                 if fields.len() != expected_fields.len() || fields.len() != expected_classes.len() {
                     return Err(LowerError::Unsupported(format!(
                         "wasm target (R2.1): aggregate make has {} fields but recursive \
@@ -5487,7 +5783,24 @@ where
                 let dst_vars = self.tuple_vars.get(&dst).cloned().ok_or_else(|| {
                     LowerError::Internal(format!("R2.1 tuple dst {dst:?} has no element vars"))
                 })?;
-                let values = self.local_flat_values(*src)?;
+                let values = if self.materialized_param_slots.contains(src) {
+                    let pointer = self.local_value(*src)?;
+                    let source_class = self.body.value_class(*src).cloned().ok_or_else(|| {
+                        LowerError::Internal(format!(
+                            "materialized parameter {src:?} has no runtime class"
+                        ))
+                    })?;
+                    let mut values = Vec::with_capacity(src_shape.leaf_count());
+                    self.load_materialized_leaves(
+                        pointer,
+                        &source_class,
+                        &src_shape,
+                        &mut values,
+                    )?;
+                    values
+                } else {
+                    self.local_flat_values(*src)?
+                };
                 if values.len() != dst_vars.len() {
                     return Err(LowerError::Internal(format!(
                         "R2.1 scalar-tree copy has {} source values but {} destination vars",
@@ -5509,15 +5822,9 @@ where
                         "wasm target (R2.2): aggregate extract source is not a struct".to_string(),
                     ));
                 };
-                let Layout::Struct(source_layout) = layout.data(self.module.db) else {
-                    return Err(LowerError::Unsupported(
-                        "wasm target (R2.2): arrays/enums cannot be projected".to_string(),
-                    ));
-                };
-                let field_class = source_layout
-                    .fields
-                    .get(*index as usize)
-                    .cloned()
+                let field_class = self
+                    .module
+                    .product_element_class(*layout, *index as usize)
                     .ok_or_else(|| {
                         LowerError::Unsupported(format!(
                             "wasm target (R2.2): aggregate extract index {index} is out of bounds"
@@ -5555,6 +5862,51 @@ where
                 })?;
                 for (dst_var, value) in dst_vars.into_iter().zip(values) {
                     self.fb.def_var(dst_var, value);
+                }
+                Ok(())
+            }
+            RExpr::Load { place }
+                if place.path.is_empty() && matches!(place.root, PlaceRoot::Ref(_)) =>
+            {
+                let PlaceRoot::Ref(source) = place.root else {
+                    unreachable!()
+                };
+                let source_class = self.body.value_class(source).cloned().ok_or_else(|| {
+                    LowerError::Internal(format!("aggregate source {source:?} has no class"))
+                })?;
+                let layout = self
+                    .module
+                    .object_value_layout(&source_class)
+                    .ok_or_else(|| {
+                        LowerError::Unsupported(
+                            "wasm target: whole aggregate load requires an object root".to_owned(),
+                        )
+                    })?;
+                let dst_class = self.body.value_class(dst).cloned().ok_or_else(|| {
+                    LowerError::Internal(format!("aggregate destination {dst:?} has no class"))
+                })?;
+                if !(RuntimeClass::AggregateValue { layout })
+                    .shares_runtime_rep_with(self.module.db, &dst_class)
+                {
+                    return Err(LowerError::Unsupported(
+                        "wasm target: whole aggregate load has incompatible layouts".to_owned(),
+                    ));
+                }
+                let pointer = self.local_value(source)?;
+                let shape = self.local_flat_shape(dst)?;
+                let value_class = RuntimeClass::AggregateValue { layout };
+                let mut values = Vec::with_capacity(shape.leaf_count());
+                self.load_materialized_leaves(pointer, &value_class, &shape, &mut values)?;
+                let dst_vars = self.tuple_vars.get(&dst).cloned().ok_or_else(|| {
+                    LowerError::Internal(format!("aggregate destination {dst:?} has no vars"))
+                })?;
+                if dst_vars.len() != values.len() {
+                    return Err(LowerError::Internal(
+                        "whole aggregate load arity mismatch".to_owned(),
+                    ));
+                }
+                for (var, value) in dst_vars.into_iter().zip(values) {
+                    self.fb.def_var(var, value);
                 }
                 Ok(())
             }
@@ -5663,7 +6015,12 @@ where
             RExpr::Unary { op, value } => self.lower_unary(*op, *value),
             RExpr::Cast { value, to } => {
                 let source_ty = self.local_ty(*value)?;
-                let target_ty = scalar_ty_r1(to)?;
+                let target_ty = scalar_ty_r1(to).map_err(|error| match error {
+                    LowerError::Unsupported(message) => LowerError::Unsupported(format!(
+                        "{message}; while lowering cast into {dst:?} from {value:?} to {to:?}"
+                    )),
+                    other => other,
+                })?;
                 if source_ty != target_ty {
                     return Err(LowerError::Unsupported(format!(
                         "wasm target: non-identity scalar cast `{source_ty:?}` -> `{target_ty:?}` must lower through a dedicated numeric builtin"
@@ -5674,7 +6031,12 @@ where
             RExpr::Bitcast { value, to } => {
                 let source_ty = self.local_ty(*value)?;
                 let value = self.local_value(*value)?;
-                let target_ty = scalar_ty_r1(to)?;
+                let target_ty = scalar_ty_r1(to).map_err(|error| match error {
+                    LowerError::Unsupported(message) => LowerError::Unsupported(format!(
+                        "{message}; while lowering bitcast into {dst:?} from {value:?} to {to:?}"
+                    )),
+                    other => other,
+                })?;
                 if source_ty == target_ty {
                     Ok(value)
                 } else {
@@ -5704,15 +6066,9 @@ where
                             "wasm target (R2.2): scalar extract source is not a struct".to_string(),
                         ));
                     };
-                    let Layout::Struct(source_layout) = layout.data(self.module.db) else {
-                        return Err(LowerError::Unsupported(
-                            "wasm target (R2.2): arrays/enums cannot be projected".to_string(),
-                        ));
-                    };
-                    let field_class = source_layout
-                        .fields
-                        .get(*index as usize)
-                        .cloned()
+                    let field_class = self
+                        .module
+                        .product_element_class(*layout, *index as usize)
                         .ok_or_else(|| {
                             LowerError::Unsupported(format!(
                                 "wasm target (R2.2): scalar extract index {index} is out of bounds"
@@ -5907,6 +6263,10 @@ where
             // Change 2: allocate a function-local aggregate in the wasm canonical
             // arena. The value produced is the aligned i32 linear-memory pointer.
             RExpr::AllocObject { layout } => self.lower_alloc_object(*layout),
+            RExpr::MaterializeToObject { src } => self.lower_materialize_to_object(*src),
+            RExpr::MaterializePlaceToObject { place } => {
+                self.lower_materialize_place_to_object(place, dst)
+            }
             other => Err(LowerError::Unsupported(format!(
                 "wasm target (R1) expression `{other:?}` is not supported"
             ))),
@@ -5938,6 +6298,246 @@ where
         let biased = self.fb.insert_inst(Add::new(is, raw, slack), Type::I32);
         let mask = self.fb.make_imm_value(Immediate::I32(-ALIGN));
         Ok(self.fb.insert_inst(And::new(is, biased, mask), Type::I32))
+    }
+
+    fn store_materialized_leaves(
+        &mut self,
+        pointer: ValueId,
+        class: &RuntimeClass<'db>,
+        leaves: &[ValueId],
+        cursor: &mut usize,
+    ) -> Result<(), LowerError> {
+        match class {
+            RuntimeClass::Scalar(scalar) => {
+                let value = *leaves.get(*cursor).ok_or_else(|| {
+                    LowerError::Internal(
+                        "materialized aggregate is missing a scalar leaf".to_owned(),
+                    )
+                })?;
+                let ty = scalar_ty_r1(scalar)?;
+                self.fb
+                    .insert_inst_no_result(Mstore::new(self.inst_set(), pointer, value, ty));
+                *cursor += 1;
+                Ok(())
+            }
+            RuntimeClass::AggregateValue { layout } => match layout.data(self.module.db) {
+                Layout::Struct(struct_layout) => {
+                    for (index, field) in struct_layout.fields.iter().enumerate() {
+                        let offset = mir::struct_field_offset_bytes(
+                            self.module.db,
+                            *layout,
+                            hir::analysis::semantic::FieldIndex(index as u16),
+                            crate::WASM_LAYOUT,
+                        );
+                        let address = self.offset_addr(pointer, offset)?;
+                        self.store_materialized_leaves(address, field, leaves, cursor)?;
+                    }
+                    Ok(())
+                }
+                Layout::Array(array_layout) => {
+                    let stride =
+                        mir::array_elem_size_bytes(self.module.db, *layout, crate::WASM_LAYOUT);
+                    for index in 0..usize::try_from(array_layout.len).map_err(|_| {
+                        LowerError::Unsupported("wasm array length exceeds usize".to_owned())
+                    })? {
+                        let offset = index.checked_mul(stride).ok_or_else(|| {
+                            LowerError::Unsupported(
+                                "wasm materialization array offset overflow".to_owned(),
+                            )
+                        })?;
+                        let address = self.offset_addr(pointer, offset)?;
+                        self.store_materialized_leaves(
+                            address,
+                            &array_layout.elem,
+                            leaves,
+                            cursor,
+                        )?;
+                    }
+                    Ok(())
+                }
+                Layout::Enum(_) => Err(LowerError::Unsupported(
+                    "wasm target: payload-enum materialization is not implemented".to_owned(),
+                )),
+            },
+            RuntimeClass::Ref { .. } | RuntimeClass::RawAddr { .. } => {
+                Err(LowerError::Unsupported(
+                    "wasm target: materialized aggregate contains a transport leaf".to_owned(),
+                ))
+            }
+        }
+    }
+
+    /// Load a flattened product from its target-layout memory representation.
+    /// This is deliberately structural rather than a fixed leaf stride: MIR
+    /// packs `bool`/`u8` arrays, while wider scalar arrays and nested records use
+    /// their target-derived field offsets and element strides.
+    fn load_materialized_leaves(
+        &mut self,
+        pointer: ValueId,
+        class: &RuntimeClass<'db>,
+        shape: &FlatShape,
+        values: &mut Vec<ValueId>,
+    ) -> Result<(), LowerError> {
+        match (class, shape) {
+            (RuntimeClass::Scalar(_), FlatShape::Leaf(ty)) => {
+                values.push(self.load_memory_scalar(pointer, *ty));
+                Ok(())
+            }
+            (RuntimeClass::AggregateValue { layout }, FlatShape::Product(fields)) => {
+                match layout.data(self.module.db) {
+                    Layout::Struct(struct_layout) => {
+                        if struct_layout.fields.len() != fields.len() {
+                            return Err(LowerError::Internal(
+                                "materialized struct shape/layout arity mismatch".to_owned(),
+                            ));
+                        }
+                        for (index, (field, field_shape)) in
+                            struct_layout.fields.iter().zip(fields).enumerate()
+                        {
+                            let offset = mir::struct_field_offset_bytes(
+                                self.module.db,
+                                *layout,
+                                hir::analysis::semantic::FieldIndex(index as u16),
+                                crate::WASM_LAYOUT,
+                            );
+                            let address = self.offset_addr(pointer, offset)?;
+                            self.load_materialized_leaves(
+                                address,
+                                field,
+                                field_shape,
+                                values,
+                            )?;
+                        }
+                        Ok(())
+                    }
+                    Layout::Array(array_layout) => {
+                        let len = usize::try_from(array_layout.len).map_err(|_| {
+                            LowerError::Unsupported("wasm array length exceeds usize".to_owned())
+                        })?;
+                        if len != fields.len() {
+                            return Err(LowerError::Internal(
+                                "materialized array shape/layout arity mismatch".to_owned(),
+                            ));
+                        }
+                        let stride =
+                            mir::array_elem_size_bytes(self.module.db, *layout, crate::WASM_LAYOUT);
+                        for (index, field_shape) in fields.iter().enumerate() {
+                            let offset = index.checked_mul(stride).ok_or_else(|| {
+                                LowerError::Unsupported(
+                                    "wasm materialized array offset overflow".to_owned(),
+                                )
+                            })?;
+                            let address = self.offset_addr(pointer, offset)?;
+                            self.load_materialized_leaves(
+                                address,
+                                &array_layout.elem,
+                                field_shape,
+                                values,
+                            )?;
+                        }
+                        Ok(())
+                    }
+                    Layout::Enum(_) => Err(LowerError::Unsupported(
+                        "wasm target: payload-enum aggregate loads are not implemented".to_owned(),
+                    )),
+                }
+            }
+            _ => Err(LowerError::Internal(format!(
+                "materialized aggregate class/shape mismatch: {class:?} / {shape:?}"
+            ))),
+        }
+    }
+
+    fn lower_materialize_to_object(&mut self, src: RLocalId) -> Result<ValueId, LowerError> {
+        let class = self.body.value_class(src).cloned().ok_or_else(|| {
+            LowerError::Internal(format!(
+                "materialization source {src:?} has no runtime class"
+            ))
+        })?;
+        let RuntimeClass::AggregateValue { layout } = class else {
+            return Err(LowerError::Unsupported(format!(
+                "wasm target: materialization source {src:?} is not an aggregate value"
+            )));
+        };
+        if !self.module.aggregate_is_memory_lowerable(&class) {
+            return Err(LowerError::Unsupported(format!(
+                "wasm target: materialization source {src:?} has non-scalar memory leaves"
+            )));
+        }
+        let shape = self.module.flat_shape(&class).ok_or_else(|| {
+            LowerError::Unsupported(format!(
+                "wasm target: materialization source {src:?} cannot be flattened"
+            ))
+        })?;
+        let leaves = self.local_flat_values(src)?;
+        if leaves.len() != shape.leaf_count() {
+            return Err(LowerError::Internal(format!(
+                "materialization source {src:?} exposed {} leaves for shape {shape:?}",
+                leaves.len()
+            )));
+        }
+        let pointer = self.lower_alloc_object(layout)?;
+        let mut cursor = 0usize;
+        self.store_materialized_leaves(pointer, &class, &leaves, &mut cursor)?;
+        if cursor != leaves.len() {
+            return Err(LowerError::Internal(format!(
+                "materialization source {src:?} consumed {cursor} of {} leaves",
+                leaves.len()
+            )));
+        }
+        Ok(pointer)
+    }
+
+    fn lower_materialize_place_to_object(
+        &mut self,
+        place: &RuntimePlace<'db>,
+        dst: RLocalId,
+    ) -> Result<ValueId, LowerError> {
+        if !place.path.is_empty() {
+            return Err(LowerError::Unsupported(
+                "wasm target: projected aggregate-place materialization is not implemented"
+                    .to_owned(),
+            ));
+        }
+        let source = match place.root {
+            PlaceRoot::Ref(source) => source,
+            _ => {
+                return Err(LowerError::Unsupported(
+                    "wasm target: aggregate-place materialization requires an object root"
+                        .to_owned(),
+                ));
+            }
+        };
+        let dst_class = self.body.value_class(dst).cloned().ok_or_else(|| {
+            LowerError::Internal(format!("materialization destination {dst:?} has no class"))
+        })?;
+        let layout = self.module.object_value_layout(&dst_class).ok_or_else(|| {
+            LowerError::Internal(format!(
+                "materialization destination {dst:?} is not an object value"
+            ))
+        })?;
+        let source_class = self.body.value_class(source).cloned().ok_or_else(|| {
+            LowerError::Internal(format!("materialization source {source:?} has no class"))
+        })?;
+        if self.module.object_value_layout(&source_class) != Some(layout) {
+            return Err(LowerError::Unsupported(
+                "wasm target: aggregate-place materialization source/destination layouts differ"
+                    .to_owned(),
+            ));
+        }
+        let source_pointer = self.local_value(source)?;
+        let destination = self.lower_alloc_object(layout)?;
+        let size = mir::layout_size_bytes(self.module.db, layout, crate::WASM_LAYOUT);
+        for offset in 0..size {
+            let src = self.offset_addr(source_pointer, offset)?;
+            let dst = self.offset_addr(destination, offset)?;
+            let byte = self
+                .fb
+                .insert_inst(Mload::new(self.inst_set(), src, Type::I8), Type::I8);
+            self.fb
+                .insert_inst_no_result(Mstore::new(self.inst_set(), dst, byte, Type::I8));
+        }
+        Ok(destination)
     }
 
     /// R2.0: lower a place READ that is an identity on an already value-carried
@@ -6073,6 +6673,11 @@ where
             {
                 (value, class, true)
             }
+            mir::ResolvedPlaceRootKind::Slot { local, class }
+                if self.materialized_param_slots.contains(&local) =>
+            {
+                (local, class, true)
+            }
             mir::ResolvedPlaceRootKind::Provider {
                 value,
                 provider_class:
@@ -6202,7 +6807,18 @@ where
             }
         }
         let addr = self.offset_addr(addr, byte_offset)?;
-        Ok(Some((addr, scalar_ty_r1(&scalar)?)))
+        let semantic_place_ty = semantic_place_result_ty(self.module.db, &self.body, place);
+        let ty = if semantic_place_ty.is_some_and(|ty| is_usize_semantic_ty(self.module.db, ty)) {
+            Type::I32
+        } else {
+            scalar_ty_r1(&scalar).map_err(|error| match error {
+                LowerError::Unsupported(message) => LowerError::Unsupported(format!(
+                    "{message}; while lowering memory place {place:?} with result class {scalar:?}"
+                )),
+                other => other,
+            })?
+        };
+        Ok(Some((addr, ty)))
     }
 
     /// Add a constant byte offset to a linear-memory address, emitting the `Add`
@@ -6324,7 +6940,12 @@ where
             RuntimeBuiltin::IntTruncate { value, from, to } => {
                 let is = self.inst_set();
                 let value = self.local_value(*value)?;
-                let target = scalar_ty_r1(to)?;
+                let target = scalar_ty_r1(to).map_err(|error| match error {
+                    LowerError::Unsupported(message) => LowerError::Unsupported(format!(
+                        "{message}; while lowering integer truncation into {dst:?} from {value:?} ({from:?} -> {to:?})"
+                    )),
+                    other => other,
+                })?;
                 let source = self.fb.type_of(value);
                 if source == target {
                     return Ok(value);
@@ -6484,7 +7105,12 @@ where
                 }
             });
         }
-        let ty = scalar_ty_r1(class)?;
+        let ty = scalar_ty_r1(class).map_err(|error| match error {
+            LowerError::Unsupported(message) => LowerError::Unsupported(format!(
+                "{message}; while lowering intrinsic arithmetic {op:?} into {dst:?} from {lhs:?}, {rhs:?} with class {class:?}"
+            )),
+            other => other,
+        })?;
         // CRITICAL bounds-safety: checked arithmetic on a narrowed `usize` (the
         // wasm32 pointer width) MUST trap on overflow. R1 otherwise ignores the
         // `checked` flag and emits a wrapping op, which would turn a semantically
@@ -6510,10 +7136,16 @@ where
             IntrinsicArithBinOp::Add => self.fb.insert_inst(Add::new(is, lhs, rhs), ty),
             IntrinsicArithBinOp::Sub => self.fb.insert_inst(Sub::new(is, lhs, rhs), ty),
             IntrinsicArithBinOp::Mul => self.fb.insert_inst(Mul::new(is, lhs, rhs), ty),
+            IntrinsicArithBinOp::Div if !class.is_signed_int() => {
+                self.fb.insert_inst(Udiv::new(is, lhs, rhs), ty)
+            }
+            IntrinsicArithBinOp::Rem if !class.is_signed_int() => {
+                self.fb.insert_inst(Umod::new(is, lhs, rhs), ty)
+            }
             other => {
                 return Err(LowerError::Unsupported(format!(
                     "wasm target (R1) intrinsic arithmetic `{other:?}` is not supported \
-                     (div/rem/pow are R2)"
+                     (signed div/rem and pow are R2)"
                 )));
             }
         })
@@ -6522,8 +7154,9 @@ where
     /// Checked unsigned 32-bit (`usize` on wasm32) arithmetic: compute the result
     /// and trap (`Unreachable`) on overflow, matching Fe's checked-overflow panic.
     /// `Add`/`Sub` detect wrap with an unsigned compare; `Mul` widens to i64,
-    /// multiplies, and traps when the product exceeds `u32::MAX`. Only Add/Sub/Mul
-    /// reach here (Div/Rem/Pow already fail closed on the wasm R1 path).
+    /// multiplies, and traps when the product exceeds `u32::MAX`. WebAssembly's
+    /// unsigned division and remainder instructions provide the required
+    /// divide-by-zero trap directly; unsigned division has no overflow case.
     fn lower_checked_usize_arith(
         &mut self,
         op: IntrinsicArithBinOp,
@@ -6561,9 +7194,11 @@ where
                     .fb
                     .insert_inst(Trunc::new(is, product, Type::I32), Type::I32))
             }
+            IntrinsicArithBinOp::Div => Ok(self.fb.insert_inst(Udiv::new(is, lhs, rhs), Type::I32)),
+            IntrinsicArithBinOp::Rem => Ok(self.fb.insert_inst(Umod::new(is, lhs, rhs), Type::I32)),
             other => Err(LowerError::Unsupported(format!(
                 "wasm target: checked usize intrinsic arithmetic `{other:?}` is not supported \
-                 (div/rem/pow are R2)"
+                 (pow is R2)"
             ))),
         }
     }
@@ -6992,7 +7627,9 @@ where
         let class = self.body.value_class(local).cloned().ok_or_else(|| {
             LowerError::Internal(format!("local {local:?} carries no value class"))
         })?;
-        if self.module.is_memory_lowerable_object_ref(&class) {
+        if self.module.is_memory_lowerable_object_ref(&class)
+            || self.module.object_value_layout(&class).is_some()
+        {
             Ok(Type::I32)
         } else {
             self.module.ty_for_class(&class)
@@ -7372,7 +8009,8 @@ pub fn kernel(k: u32) -> u256 {
             .expect("a u256 local should exist");
 
         let mut narrowed = body.clone();
-        narrow_usize_scalars(&db, &mut narrowed);
+        let instance = package.functions(&db)[0].instance(&db);
+        narrow_usize_scalars(&db, instance, &mut narrowed);
 
         assert!(
             matches!(
