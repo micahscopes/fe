@@ -252,6 +252,33 @@ pub fn compile_runtime_package_spirv_render_with_resources(
     })
 }
 
+/// Lower two Fe behaviors as one authored raster module. The package must
+/// contain both public entries; Sonatina checks their flattened signatures as
+/// one position/varying/state interface and emits the paired stage entrypoints.
+pub fn compile_runtime_package_spirv_authored_raster(
+    db: &DriverDataBase,
+    package: &RuntimePackage<'_>,
+    vertex_entry: &str,
+    fragment_entry: &str,
+) -> Result<SpirvArtifact, LowerError> {
+    let (mut module, _import_modules) = compile_runtime_package_wasm(db, package)?;
+    inline_spirv_calls(&mut module);
+    ensure_spirv_entries_call_free(&module, &[vertex_entry, fragment_entry])?;
+
+    SpirvBackend::new()
+        .with_authored_raster(vertex_entry, fragment_entry)
+        .compile_module(&module)
+        .map_err(|errors| {
+            LowerError::Spirv(
+                errors
+                    .iter()
+                    .map(|error| error.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            )
+        })
+}
+
 /// Build the render-shaped MIR runtime package rooted at `entry` and lower it
 /// straight to naga-validated WGSL, in one call. Composes
 /// [`mir::build_wasm_runtime_package_for_entry`] (the package boundary) with
@@ -358,4 +385,48 @@ fn ensure_spirv_entry_call_free(module: &sonatina_ir::Module) -> Result<(), Lowe
         ))),
         None => Ok(()),
     }
+}
+
+fn ensure_spirv_entries_call_free(
+    module: &sonatina_ir::Module,
+    entry_names: &[&str],
+) -> Result<(), LowerError> {
+    for entry_name in entry_names {
+        let entry = module
+            .funcs()
+            .iter()
+            .copied()
+            .find(|entry| {
+                module
+                    .ctx
+                    .get_sig(*entry)
+                    .is_some_and(|signature| signature.name() == *entry_name)
+            })
+            .ok_or_else(|| {
+                LowerError::Spirv(format!(
+                    "SPIR-V entry `{entry_name}` is absent after lowering"
+                ))
+            })?;
+        let residual = module.func_store.view(entry, |function| {
+            function.layout.iter_block().find_map(|block| {
+                function.layout.iter_inst(block).find_map(|inst| {
+                    let call = function.dfg.call_info(inst)?;
+                    let callee = call.callee();
+                    Some(
+                        module
+                            .ctx
+                            .get_sig(callee)
+                            .map(|signature| signature.name().to_string())
+                            .unwrap_or_else(|| format!("{callee:?}")),
+                    )
+                })
+            })
+        });
+        if let Some(callee) = residual {
+            return Err(LowerError::Spirv(format!(
+                "SPIR-V entry `{entry_name}` is not call-free after bounded inlining; residual call to `{callee}`"
+            )));
+        }
+    }
+    Ok(())
 }

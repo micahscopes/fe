@@ -2620,7 +2620,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5158,7 +5158,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi 0.5.2",
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5789,7 +5789,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6633,7 +6633,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7366,7 +7366,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7423,7 +7423,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8092,7 +8092,7 @@ dependencies = [
 [[package]]
 name = "sonatina-codegen"
 version = "0.0.3-alpha"
-source = "git+https://github.com/micahscopes/sonatina?rev=f2760356928b78219e201dc8987ba2a9b31edad5#f2760356928b78219e201dc8987ba2a9b31edad5"
+source = "git+https://github.com/micahscopes/sonatina?rev=c38bd8654446007c75f9560f4f8600c9b94b6779#c38bd8654446007c75f9560f4f8600c9b94b6779"
 dependencies = [
  "bit-set 0.8.0",
  "cranelift-codegen 0.126.2",
@@ -8120,7 +8120,7 @@ dependencies = [
 [[package]]
 name = "sonatina-ir"
 version = "0.0.3-alpha"
-source = "git+https://github.com/micahscopes/sonatina?rev=f2760356928b78219e201dc8987ba2a9b31edad5#f2760356928b78219e201dc8987ba2a9b31edad5"
+source = "git+https://github.com/micahscopes/sonatina?rev=c38bd8654446007c75f9560f4f8600c9b94b6779#c38bd8654446007c75f9560f4f8600c9b94b6779"
 dependencies = [
  "bit-set 0.8.0",
  "bitflags 2.13.1",
@@ -8143,7 +8143,7 @@ dependencies = [
 [[package]]
 name = "sonatina-macros"
 version = "0.0.3-alpha"
-source = "git+https://github.com/micahscopes/sonatina?rev=f2760356928b78219e201dc8987ba2a9b31edad5#f2760356928b78219e201dc8987ba2a9b31edad5"
+source = "git+https://github.com/micahscopes/sonatina?rev=c38bd8654446007c75f9560f4f8600c9b94b6779#c38bd8654446007c75f9560f4f8600c9b94b6779"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -8153,7 +8153,7 @@ dependencies = [
 [[package]]
 name = "sonatina-parser"
 version = "0.0.3-alpha"
-source = "git+https://github.com/micahscopes/sonatina?rev=f2760356928b78219e201dc8987ba2a9b31edad5#f2760356928b78219e201dc8987ba2a9b31edad5"
+source = "git+https://github.com/micahscopes/sonatina?rev=c38bd8654446007c75f9560f4f8600c9b94b6779#c38bd8654446007c75f9560f4f8600c9b94b6779"
 dependencies = [
  "annotate-snippets",
  "bimap",
@@ -8174,7 +8174,7 @@ dependencies = [
 [[package]]
 name = "sonatina-triple"
 version = "0.0.3-alpha"
-source = "git+https://github.com/micahscopes/sonatina?rev=f2760356928b78219e201dc8987ba2a9b31edad5#f2760356928b78219e201dc8987ba2a9b31edad5"
+source = "git+https://github.com/micahscopes/sonatina?rev=c38bd8654446007c75f9560f4f8600c9b94b6779#c38bd8654446007c75f9560f4f8600c9b94b6779"
 dependencies = [
  "thiserror 2.0.20",
 ]
@@ -8182,7 +8182,7 @@ dependencies = [
 [[package]]
 name = "sonatina-verifier"
 version = "0.0.3-alpha"
-source = "git+https://github.com/micahscopes/sonatina?rev=f2760356928b78219e201dc8987ba2a9b31edad5#f2760356928b78219e201dc8987ba2a9b31edad5"
+source = "git+https://github.com/micahscopes/sonatina?rev=c38bd8654446007c75f9560f4f8600c9b94b6779#c38bd8654446007c75f9560f4f8600c9b94b6779"
 dependencies = [
  "cranelift-entity 0.126.2",
  "rayon",
@@ -8411,7 +8411,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10018,7 +10018,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

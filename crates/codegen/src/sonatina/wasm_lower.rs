@@ -1173,7 +1173,7 @@ fn is_static_leaf_load_from_slot<'db>(
     !matches!(class, RuntimeClass::AggregateValue { .. })
 }
 
-fn is_static_leaf_load_from_ref<'db>(
+fn is_static_value_load_from_ref<'db>(
     db: &'db DriverDataBase,
     body: &RuntimeBody<'db>,
     stmt: &RStmt<'_>,
@@ -1215,7 +1215,10 @@ fn is_static_leaf_load_from_ref<'db>(
         };
         class = field;
     }
-    !matches!(class, RuntimeClass::AggregateValue { .. })
+    // Every traversed field is statically known and the resulting class is a
+    // closed value subtree. It may itself be a record: the reifier below
+    // projects that subtree into flattened SSA leaves before any later reads.
+    true
 }
 
 /// Prove that a reference-shaped aggregate parameter is consumed only as a
@@ -1229,8 +1232,14 @@ fn ref_param_has_only_value_reads<'db>(
 ) -> bool {
     for block in &body.blocks {
         for stmt in &block.stmts {
-            if is_static_leaf_load_from_ref(db, body, stmt, candidate)
-                || matches!(stmt, RStmt::Assign { expr: RExpr::Use(src), .. } if *src == candidate)
+            if is_static_value_load_from_ref(db, body, stmt, candidate)
+                || matches!(
+                    stmt,
+                    RStmt::Assign {
+                        expr: RExpr::Use(src) | RExpr::RetagRef { value: src },
+                        ..
+                    } if *src == candidate
+                )
             {
                 continue;
             }
@@ -1395,11 +1404,12 @@ fn reify_static_aggregate_params<'db>(db: &'db DriverDataBase, body: &mut Runtim
     for block in blocks {
         let mut rewritten = Vec::with_capacity(block.stmts.len());
         for stmt in std::mem::take(&mut block.stmts) {
-            if let RStmt::Assign {
-                dst,
-                expr: RExpr::Use(src),
-            } = &stmt
-                && let Some(class) = candidates.get(src).cloned()
+            if let RStmt::Assign { dst, expr } = &stmt
+                && let Some(src) = (match expr {
+                    RExpr::Use(src) | RExpr::RetagRef { value: src } => Some(*src),
+                    _ => None,
+                })
+                && let Some(class) = candidates.get(&src).cloned()
             {
                 // Enum values retain their reference/tag representation until
                 // the value lane has an explicit flattened enum ABI. Record
@@ -1422,6 +1432,17 @@ fn reify_static_aggregate_params<'db>(db: &'db DriverDataBase, body: &mut Runtim
                     locals[dst.as_u32() as usize].carrier = RuntimeCarrier::Value(class.clone());
                     locals[dst.as_u32() as usize].root = RuntimeLocalRoot::None;
                     candidates.insert(*dst, class);
+                    // `RetagRef` changes only Fe capability metadata and MIR's
+                    // verifier already proves an identical runtime
+                    // representation. Once this backend overlay reifies the
+                    // reference as a recursive scalar value, preserve that
+                    // proof as an ordinary value copy rather than carrying a
+                    // meaningless reference operation into Wasm.
+                    rewritten.push(RStmt::Assign {
+                        dst: *dst,
+                        expr: RExpr::Use(src),
+                    });
+                    continue;
                 }
                 rewritten.push(stmt);
                 continue;
@@ -5791,12 +5812,7 @@ where
                         ))
                     })?;
                     let mut values = Vec::with_capacity(src_shape.leaf_count());
-                    self.load_materialized_leaves(
-                        pointer,
-                        &source_class,
-                        &src_shape,
-                        &mut values,
-                    )?;
+                    self.load_materialized_leaves(pointer, &source_class, &src_shape, &mut values)?;
                     values
                 } else {
                     self.local_flat_values(*src)?
@@ -6401,12 +6417,7 @@ where
                                 crate::WASM_LAYOUT,
                             );
                             let address = self.offset_addr(pointer, offset)?;
-                            self.load_materialized_leaves(
-                                address,
-                                field,
-                                field_shape,
-                                values,
-                            )?;
+                            self.load_materialized_leaves(address, field, field_shape, values)?;
                         }
                         Ok(())
                     }

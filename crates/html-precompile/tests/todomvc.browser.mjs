@@ -146,7 +146,13 @@ try {
     globalThis.__feTodoTolerateUnavailableWebGpu = value;
   }, tolerateUnavailableWebGpu);
 
-  await page.goto(`http://127.0.0.1:${serverAddress.port}/`, { waitUntil: "networkidle0" });
+  // The gallery may still be loading its compiler-sequenced GPU surfaces;
+  // TodoMVC's independent component gate must begin from document readiness,
+  // not wait for unrelated render artifacts to make the whole page idle.
+  await page.goto(`http://127.0.0.1:${serverAddress.port}/`, {
+    waitUntil: "domcontentloaded",
+    timeout: 120_000,
+  });
   try {
     await page.waitForFunction(() => {
       const script = document.querySelector('script[type="application/fe+wasm"][data-fe-mount="#todo-app"], script[type="application/fe+wasm"][data-fe-mount="#gallery-todomvc"]');

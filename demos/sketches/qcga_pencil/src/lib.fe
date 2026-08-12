@@ -52,12 +52,12 @@
 //!   every surface that displays such a result must say so out loud.
 //! - No `Par` parallelism claims; no shipped `Par` provider executes anything
 //!   in parallel today.
-//! - The compiler recognizes and checks the authored raster pair today. Its
-//!   paired SPIR-V lowering is still deliberately fail-closed; this ingot is
-//!   the acceptance test for that remaining gap, and no fullscreen envelope
-//!   or host shader pretends to discharge it.
+//! - The compiler recognizes the authored raster pair and lowers both Fe
+//!   behaviors into one typed WebGPU pipeline. No fullscreen envelope or host
+//!   shader substitutes for either body.
 
 use core::marker::Copy
+use core::actor::InitialState
 use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
 use core::{AllocatedBrowserBytes, BrowserBytes, HostEffect, MainThread}
 use core::effect_ref::alloc_bytes
@@ -67,9 +67,22 @@ use std::webgpu::{
     Dispatch,
     FragmentStage,
     GpuProgram,
+    LatestPerFrame,
     RasterVertex,
+    SurfaceScheduling,
+    SurfaceTransition,
+    TriangleList,
     VertexStage,
     WebGpuBackend,
+}
+use std::web::view::{
+    ApplyParamBindings,
+    Extent,
+    Param,
+    ParamBindingsProvider,
+    Surface,
+    SurfaceEvent,
+    SurfaceState,
 }
 use sparse_clifford::{
     Nat, PlanLength, SparsePlan, Term, plan_mask_candidate, plan_mask_cardinality,
@@ -456,12 +469,10 @@ pub struct ControlPoints {
 }
 impl Copy for ControlPoints {}
 
-/// The state slice both GPU behaviors read (at runtime: the program's uniform
-/// block): the solved pencil basis, the pencil parameter, and the orbit view.
-/// Derived from `ControlPoints` by the `resolve` behavior; the binding table
-/// is generated from this one nominal record and nothing restates it.
-pub struct PencilFrame {
-    pub generation: u32,
+/// The small interactive view of the solved frame. FCO derives its
+/// field-complete browser transition; neither source nor host maintains
+/// numeric control IDs.
+pub struct PencilControls {
     /// Pencil parameter. The blend weights are cos(PI*lambda), sin(PI*lambda),
     /// so [0,1] sweeps the full projective pencil line and returns to the
     /// starting surface (with flipped sign, the same quadric).
@@ -469,6 +480,14 @@ pub struct PencilFrame {
     pub yaw: f32,
     pub pitch: f32,
     pub dist: f32,
+}
+impl Copy for PencilControls {}
+
+/// Immutable result of the incidence solve. Navigation replaces only the
+/// sibling `PencilControls` value, so the ownership split prevents view input
+/// from accidentally rewriting the certified pencil basis.
+pub struct PencilBasis {
+    pub generation: u32,
     /// Projection centre: the centroid of the nine constraint points.
     pub cx: f32,
     pub cy: f32,
@@ -482,27 +501,61 @@ pub struct PencilFrame {
     pub a1: f32, pub b1: f32, pub c1: f32, pub d1: f32, pub e1: f32,
     pub f1: f32, pub g1: f32, pub h1: f32, pub i1: f32, pub j1: f32,
 }
+impl Copy for PencilBasis {}
+
+/// The state slice both GPU behaviors read (at runtime: the program's uniform
+/// block). Its two nominal subrecords make mutable presentation state and the
+/// solved mathematical certificate distinct while the compiler recursively
+/// derives one flat GPU ABI.
+pub struct PencilFrame {
+    pub view: PencilControls,
+    pub basis: PencilBasis,
+}
 impl Copy for PencilFrame {}
+
+pub struct PencilParams {
+    pub lambda: Param,
+    pub yaw: Param,
+    pub pitch: Param,
+    pub dist: Param,
+}
+
+impl SurfaceState for PencilControls {
+    type Params = PencilParams
+}
+
+derive ApplyParamBindings for PencilControls using ParamBindingsProvider
+
+const fn pencil_params() -> PencilParams {
+    PencilParams {
+        lambda: Param::unit(init: 0.15),
+        yaw: Param::angle(init: 0.6).drag_x(per_px: 0.008),
+        pitch: Param::range(min: -1.45, max: 1.45, init: 0.35)
+            .drag_y(per_px: 0.008),
+        dist: Param::log(min: 1.5, max: 12.0, init: 4.0)
+            .wheel_scale(in_factor: 0.88, out_factor: 1.14),
+    }
+}
 
 /// The current pencil member. The blend happens on COEFFICIENTS, which is the
 /// same thing as blending incidence values only because the QCGA contraction
 /// is linear in the dual quadric; the acceptance test checks that equality
 /// rather than assuming it.
 pub fn pencil_member(_ frame: PencilFrame) -> Quadric {
-    let th: f32 = PI * frame.lambda
+    let th: f32 = PI * frame.view.lambda
     let w0: f32 = cos(th)
     let w1: f32 = sin(th)
     Quadric {
-        a: w0 * frame.a0 + w1 * frame.a1,
-        b: w0 * frame.b0 + w1 * frame.b1,
-        c: w0 * frame.c0 + w1 * frame.c1,
-        d: w0 * frame.d0 + w1 * frame.d1,
-        e: w0 * frame.e0 + w1 * frame.e1,
-        f: w0 * frame.f0 + w1 * frame.f1,
-        g: w0 * frame.g0 + w1 * frame.g1,
-        h: w0 * frame.h0 + w1 * frame.h1,
-        i: w0 * frame.i0 + w1 * frame.i1,
-        j: w0 * frame.j0 + w1 * frame.j1,
+        a: w0 * frame.basis.a0 + w1 * frame.basis.a1,
+        b: w0 * frame.basis.b0 + w1 * frame.basis.b1,
+        c: w0 * frame.basis.c0 + w1 * frame.basis.c1,
+        d: w0 * frame.basis.d0 + w1 * frame.basis.d1,
+        e: w0 * frame.basis.e0 + w1 * frame.basis.e1,
+        f: w0 * frame.basis.f0 + w1 * frame.basis.f1,
+        g: w0 * frame.basis.g0 + w1 * frame.basis.g1,
+        h: w0 * frame.basis.h0 + w1 * frame.basis.h1,
+        i: w0 * frame.basis.i0 + w1 * frame.basis.i1,
+        j: w0 * frame.basis.j0 + w1 * frame.basis.j1,
     }
 }
 
@@ -616,9 +669,9 @@ fn sample_vertex(_ vid: u32, _ frame: PencilFrame) -> SurfaceSample {
     // The radial constraint: q(c + t d) is EXACTLY alpha t^2 + beta t + qc,
     // and three planned contractions pin all three coefficients.
     let q: Quadric = pencil_member(frame)
-    let qc: f32 = eval_quadric(q, frame.cx, frame.cy, frame.cz)
-    let qp: f32 = eval_quadric(q, frame.cx + dx, frame.cy + dy, frame.cz + dz)
-    let qm: f32 = eval_quadric(q, frame.cx - dx, frame.cy - dy, frame.cz - dz)
+    let qc: f32 = eval_quadric(q, frame.basis.cx, frame.basis.cy, frame.basis.cz)
+    let qp: f32 = eval_quadric(q, frame.basis.cx + dx, frame.basis.cy + dy, frame.basis.cz + dz)
+    let qm: f32 = eval_quadric(q, frame.basis.cx - dx, frame.basis.cy - dy, frame.basis.cz - dz)
     let alpha: f32 = (qp + qm) * 0.5 - qc
     let beta: f32 = (qp - qm) * 0.5
 
@@ -669,9 +722,9 @@ fn sample_vertex(_ vid: u32, _ frame: PencilFrame) -> SurfaceSample {
     if t > T_MAX { t = -1.0 }
     if t <= 0.0 { return miss_sample(sheet_f, disc) }
 
-    let hx: f32 = frame.cx + dx * t
-    let hy: f32 = frame.cy + dy * t
-    let hz: f32 = frame.cz + dz * t
+    let hx: f32 = frame.basis.cx + dx * t
+    let hy: f32 = frame.basis.cy + dy * t
+    let hz: f32 = frame.basis.cz + dz * t
 
     // The emitted point's own incidence receipt, through the same planned
     // contraction the solver used to build the constraint matrix.
@@ -691,18 +744,18 @@ fn sample_vertex(_ vid: u32, _ frame: PencilFrame) -> SurfaceSample {
     let glow: f32 = clamp01(1.0 - (disc / disc_scale) * 5.0)
 
     // Orbit camera: yaw about +y, pitch about +x, dolly along view z.
-    let wx: f32 = hx - frame.cx
-    let wy: f32 = hy - frame.cy
-    let wz: f32 = hz - frame.cz
-    let cyaw: f32 = cos(frame.yaw)
-    let syaw: f32 = sin(frame.yaw)
-    let cpit: f32 = cos(frame.pitch)
-    let spit: f32 = sin(frame.pitch)
+    let wx: f32 = hx - frame.basis.cx
+    let wy: f32 = hy - frame.basis.cy
+    let wz: f32 = hz - frame.basis.cz
+    let cyaw: f32 = cos(frame.view.yaw)
+    let syaw: f32 = sin(frame.view.yaw)
+    let cpit: f32 = cos(frame.view.pitch)
+    let spit: f32 = sin(frame.view.pitch)
     let rx: f32 = cyaw * wx + syaw * wz
     let rz0: f32 = cyaw * wz - syaw * wx
     let ry: f32 = cpit * wy - spit * rz0
     let rz: f32 = spit * wy + cpit * rz0
-    let vz: f32 = rz + frame.dist
+    let vz: f32 = rz + frame.view.dist
     if vz < NEAR { return miss_sample(sheet_f, disc) }
 
     SurfaceSample {
@@ -749,7 +802,7 @@ fn sample_vertex(_ vid: u32, _ frame: PencilFrame) -> SurfaceSample {
 //         }
 //
 //         behavior vertex(vid: u32) -> RasterVertex<SurfaceVarying>
-//             uses (state, VertexStage<SurfaceVarying>) { ... }
+//             uses (state, VertexStage<SurfaceVarying, TriangleList<VERTEX_COUNT>>) { ... }
 //
 //         behavior fragment(v: SurfaceVarying) -> u32
 //             uses (state, FragmentStage<SurfaceVarying>) { ... }
@@ -790,15 +843,19 @@ impl PencilSurface {
                 p8x: initial.p8x, p8y: initial.p8y, p8z: initial.p8z,
             },
             frame: PencilFrame {
-                generation: 0,
-                lambda: 0.15,
-                yaw: 0.6, pitch: 0.35, dist: 4.0,
-                cx: 0.0, cy: 0.0, cz: 0.0,
-                pencil_free: 0.0,
-                a0: 0.0, b0: 0.0, c0: 0.0, d0: 0.0, e0: 0.0,
-                f0: 0.0, g0: 0.0, h0: 0.0, i0: 0.0, j0: 0.0,
-                a1: 0.0, b1: 0.0, c1: 0.0, d1: 0.0, e1: 0.0,
-                f1: 0.0, g1: 0.0, h1: 0.0, i1: 0.0, j1: 0.0,
+                view: PencilControls {
+                    lambda: 0.15,
+                    yaw: 0.6, pitch: 0.35, dist: 4.0,
+                },
+                basis: PencilBasis {
+                    generation: 0,
+                    cx: 0.0, cy: 0.0, cz: 0.0,
+                    pencil_free: 0.0,
+                    a0: 0.0, b0: 0.0, c0: 0.0, d0: 0.0, e0: 0.0,
+                    f0: 0.0, g0: 0.0, h0: 0.0, i0: 0.0, j0: 0.0,
+                    a1: 0.0, b1: 0.0, c1: 0.0, d1: 0.0, e1: 0.0,
+                    f1: 0.0, g1: 0.0, h1: 0.0, i1: 0.0, j1: 0.0,
+                },
             },
             rank: 0,
             residual: 0.0,
@@ -862,14 +919,14 @@ impl PencilSurface {
     /// when rank == 9 the basis is degenerate so the sweep honestly does
     /// nothing.
     pub fn set_lambda(mut self, _ value: f32) {
-        self.frame.lambda = value
+        self.frame.view.lambda = value
     }
 
     /// Message: orbit the camera.
     pub fn orbit(mut self, _ yaw: f32, _ pitch: f32, _ dist: f32) {
-        self.frame.yaw = yaw
-        self.frame.pitch = pitch
-        self.frame.dist = dist
+        self.frame.view.yaw = yaw
+        self.frame.view.pitch = pitch
+        self.frame.view.dist = dist
     }
 
     /// Internal behavior: rebuild the derived state from the control points
@@ -892,30 +949,30 @@ impl PencilSurface {
         let q1: [f32; 10] = sol.q1
         self.rank = sol.rank
         self.residual = sol.residual
-        self.frame.cx = solved.cx
-        self.frame.cy = solved.cy
-        self.frame.cz = solved.cz
-        self.frame.pencil_free = if sol.rank <= 8 { 1.0 } else { 0.0 }
-        self.frame.a0 = q0[0]
-        self.frame.b0 = q0[1]
-        self.frame.c0 = q0[2]
-        self.frame.d0 = q0[3]
-        self.frame.e0 = q0[4]
-        self.frame.f0 = q0[5]
-        self.frame.g0 = q0[6]
-        self.frame.h0 = q0[7]
-        self.frame.i0 = q0[8]
-        self.frame.j0 = q0[9]
-        self.frame.a1 = q1[0]
-        self.frame.b1 = q1[1]
-        self.frame.c1 = q1[2]
-        self.frame.d1 = q1[3]
-        self.frame.e1 = q1[4]
-        self.frame.f1 = q1[5]
-        self.frame.g1 = q1[6]
-        self.frame.h1 = q1[7]
-        self.frame.i1 = q1[8]
-        self.frame.j1 = q1[9]
+        self.frame.basis.cx = solved.cx
+        self.frame.basis.cy = solved.cy
+        self.frame.basis.cz = solved.cz
+        self.frame.basis.pencil_free = if sol.rank <= 8 { 1.0 } else { 0.0 }
+        self.frame.basis.a0 = q0[0]
+        self.frame.basis.b0 = q0[1]
+        self.frame.basis.c0 = q0[2]
+        self.frame.basis.d0 = q0[3]
+        self.frame.basis.e0 = q0[4]
+        self.frame.basis.f0 = q0[5]
+        self.frame.basis.g0 = q0[6]
+        self.frame.basis.h0 = q0[7]
+        self.frame.basis.i0 = q0[8]
+        self.frame.basis.j0 = q0[9]
+        self.frame.basis.a1 = q1[0]
+        self.frame.basis.b1 = q1[1]
+        self.frame.basis.c1 = q1[2]
+        self.frame.basis.d1 = q1[3]
+        self.frame.basis.e1 = q1[4]
+        self.frame.basis.f1 = q1[5]
+        self.frame.basis.g1 = q1[6]
+        self.frame.basis.h1 = q1[7]
+        self.frame.basis.i1 = q1[8]
+        self.frame.basis.j1 = q1[9]
     }
 
     /// CPU oracle projection of the same authored vertex construction.
@@ -957,7 +1014,7 @@ fn shade_varying(_ v: SurfaceVarying, _ frame: PencilFrame) -> u32 {
     let nz: f32 = v.nz * ninv
     // Two-sided lighting: open sheets are seen from both sides.
     let lit: f32 = 0.22 + 0.78 * abs(nx * LX + ny * LY + nz * LZ)
-    let warm: f32 = clamp01(frame.pencil_free)
+    let warm: f32 = clamp01(frame.basis.pencil_free)
     let sheet: f32 = clamp01(v.sheet)
     let glow: f32 = clamp01(v.glow)
     let mut red: f32 = lit * (0.18 + 0.30 * sheet + 0.34 * warm) + glow * 0.55
@@ -977,8 +1034,59 @@ fn shade_varying(_ v: SurfaceVarying, _ frame: PencilFrame) -> u32 {
 actor PencilRaster uses (GpuProgram<WebGpuBackend>) {
     frame: PencilFrame,
 
+    const fn view() -> Surface<PencilParams> {
+        Surface {
+            extent: Extent::square(512),
+            params: pencil_params(),
+        }
+    }
+
+    /// Compute the full solved frame in Fe once at boot. Only the four view
+    /// controls are declared above; the 25 derived leaves never become a
+    /// parallel host defaults table.
+    fn initial() -> PencilRasterState uses (InitialState) {
+        let initial: SolveRequest = defaults(request: DefaultsRequest { generation: 0 })
+        let solved: SolveResponse = solve(request: initial)
+        PencilRasterState {
+            frame: PencilFrame {
+                view: PencilControls {
+                    lambda: 0.15,
+                    yaw: 0.6,
+                    pitch: 0.35,
+                    dist: 4.0,
+                },
+                basis: PencilBasis {
+                    generation: solved.generation,
+                    cx: solved.cx, cy: solved.cy, cz: solved.cz,
+                    pencil_free: if solved.rank <= 8 { 1.0 } else { 0.0 },
+                    a0: solved.a0, b0: solved.b0, c0: solved.c0, d0: solved.d0, e0: solved.e0,
+                    f0: solved.f0, g0: solved.g0, h0: solved.h0, i0: solved.i0, j0: solved.j0,
+                    a1: solved.a1, b1: solved.b1, c1: solved.c1, d1: solved.d1, e1: solved.e1,
+                    f1: solved.f1, g1: solved.g1, h1: solved.h1, i1: solved.i1, j1: solved.j1,
+                },
+            },
+        }
+    }
+
+    /// Raw browser facts enter one FCO-derived four-field Fe transition, then
+    /// update the corresponding leaves of the nominal solved frame. The fixed
+    /// host neither interprets orbit/zoom policy nor mutates uniform slots.
+    fn navigate(self, event: own SurfaceEvent) -> PencilRasterState
+        uses (SurfaceTransition, SurfaceScheduling<LatestPerFrame>)
+    {
+        let controls: PencilControls = PencilControls {
+            lambda: self.frame.view.lambda,
+            yaw: self.frame.view.yaw,
+            pitch: self.frame.view.pitch,
+            dist: self.frame.view.dist,
+        }.apply_param_bindings(pencil_params(), event)
+        PencilRasterState {
+            frame: PencilFrame { view: controls, basis: self.frame.basis },
+        }
+    }
+
     fn surface_vertex(self, vertex_index: u32) -> RasterVertex<SurfaceVarying>
-        uses (VertexStage<SurfaceVarying>)
+        uses (VertexStage<SurfaceVarying, TriangleList<VERTEX_COUNT>>)
     {
         raster_vertex(vertex_index, self.frame)
     }
@@ -988,6 +1096,10 @@ actor PencilRaster uses (GpuProgram<WebGpuBackend>) {
     {
         shade_varying(varying, self.frame)
     }
+}
+
+pub struct PencilRasterState {
+    pub frame: PencilFrame,
 }
 
 pub struct RenderResponse {
@@ -1405,7 +1517,7 @@ fn actor_from_frame(_ frame: PencilFrame) -> PencilSurface {
             p8x: 0.0, p8y: 0.0, p8z: 0.0,
         },
         frame,
-        rank: if frame.pencil_free > 0.5 { 8 } else { 9 },
+        rank: if frame.basis.pencil_free > 0.5 { 8 } else { 9 },
         residual: 0.0,
     }
 }
@@ -1458,17 +1570,21 @@ pub struct ProbeResponse {
 /// caveat that between vertices the GPU shades INTERPOLATED handoffs.
 pub fn probe(request: own VertexProbe) -> ProbeResponse {
     let actor: PencilSurface = actor_from_frame(PencilFrame {
-        generation: request.generation,
-        lambda: request.lambda,
-        yaw: request.yaw,
-        pitch: request.pitch,
-        dist: request.dist,
-        cx: request.cx, cy: request.cy, cz: request.cz,
-        pencil_free: request.pencil_free,
-        a0: request.a0, b0: request.b0, c0: request.c0, d0: request.d0, e0: request.e0,
-        f0: request.f0, g0: request.g0, h0: request.h0, i0: request.i0, j0: request.j0,
-        a1: request.a1, b1: request.b1, c1: request.c1, d1: request.d1, e1: request.e1,
-        f1: request.f1, g1: request.g1, h1: request.h1, i1: request.i1, j1: request.j1,
+        view: PencilControls {
+            lambda: request.lambda,
+            yaw: request.yaw,
+            pitch: request.pitch,
+            dist: request.dist,
+        },
+        basis: PencilBasis {
+            generation: request.generation,
+            cx: request.cx, cy: request.cy, cz: request.cz,
+            pencil_free: request.pencil_free,
+            a0: request.a0, b0: request.b0, c0: request.c0, d0: request.d0, e0: request.e0,
+            f0: request.f0, g0: request.g0, h0: request.h0, i0: request.i0, j0: request.j0,
+            a1: request.a1, b1: request.b1, c1: request.c1, d1: request.d1, e1: request.e1,
+            f1: request.f1, g1: request.g1, h1: request.h1, i1: request.i1, j1: request.j1,
+        },
     })
     let s: SurfaceSample = sample_vertex(request.vid, actor.frame)
     let v: SurfaceVarying = SurfaceVarying {

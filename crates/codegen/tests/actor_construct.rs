@@ -173,12 +173,17 @@ fn authored_raster_roles_derive_one_nominal_typed_varying() {
     assert_eq!(program.stages.len(), 2);
     assert_eq!(program.stages[0].source_entry, "vertices");
     assert_eq!(program.stages[1].source_entry, "shade");
-    let WebActorStageKind::Vertex { varying: vertex } = &program.stages[0].kind else {
+    let WebActorStageKind::Vertex {
+        varying: vertex,
+        vertex_count,
+    } = &program.stages[0].kind
+    else {
         panic!(
             "expected authored vertex stage, got {:?}",
             program.stages[0].kind
         );
     };
+    assert_eq!(*vertex_count, 3);
     let WebActorStageKind::RasterFragment { varying: fragment } = &program.stages[1].kind else {
         panic!(
             "expected authored raster fragment, got {:?}",
@@ -216,14 +221,21 @@ fn authored_raster_roles_derive_one_nominal_typed_varying() {
         Some(("shade".to_owned(), WebBundleMode::Render)),
     );
 
-    // The semantic plan must not silently enter the old fullscreen compiler.
-    let error =
-        WebBundle::compile(&db, top_mod, WebBuildOptions::render("shade", None)).unwrap_err();
-    assert!(
-        format!("{error}")
-            .contains("authored raster vertex/varying SPIR-V lowering is not implemented yet"),
-        "unexpected fail-closed boundary: {error}",
-    );
+    // Compile the pair as one real raster pipeline. These assertions check the
+    // typed interface and Fe-authored source logic, not only artifact bytes.
+    let bundle = WebBundle::compile(&db, top_mod, WebBuildOptions::render("shade", None))
+        .expect("typed authored raster bundle");
+    assert_eq!(bundle.manifest.passes.len(), 1);
+    let pass = &bundle.manifest.passes[0];
+    assert_eq!(pass.draw_vertices, Some(3));
+    assert_eq!(pass.layout.vertex_entry.as_deref(), Some("vertices"));
+    assert_eq!(pass.layout.fragment_entry.as_deref(), Some("shade"));
+    assert_eq!(pass.layout.bindings.len(), 1);
+    assert_eq!(pass.layout.bindings[0].members[0].name, "tint");
+    assert!(bundle.wgsl.contains("@vertex"), "{}", bundle.wgsl);
+    assert!(bundle.wgsl.contains("@fragment"), "{}", bundle.wgsl);
+    assert!(bundle.wgsl.contains("@location(3)"), "{}", bundle.wgsl);
+    assert!(bundle.wgsl.contains("unpack4x8unorm"), "{}", bundle.wgsl);
 }
 
 #[test]

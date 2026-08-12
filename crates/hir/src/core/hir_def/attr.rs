@@ -73,6 +73,12 @@ pub enum GpuDispatch {
     Fixed,
 }
 
+/// Primitive topology carried by a nominal authored-raster draw type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GpuDraw {
+    TriangleList,
+}
+
 /// A target-neutral description of an aggregate result returned indirectly by
 /// a host import. Backends may realize this contract differently, but must not
 /// silently flatten or reinterpret it.
@@ -547,6 +553,13 @@ impl<'db> AttrListId<'db> {
     pub fn gpu_dispatch(self, db: &'db dyn HirDb) -> Option<GpuDispatch> {
         match self.single_ident_arg(db, "gpu_dispatch")?.as_str() {
             "fixed" => Some(GpuDispatch::Fixed),
+            _ => None,
+        }
+    }
+
+    pub fn gpu_draw(self, db: &'db dyn HirDb) -> Option<GpuDraw> {
+        match self.single_ident_arg(db, "gpu_draw")?.as_str() {
+            "triangle_list" => Some(GpuDraw::TriangleList),
             _ => None,
         }
     }

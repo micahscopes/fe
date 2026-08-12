@@ -270,6 +270,7 @@ fn validate_struct_attrs<'db>(
             ),
             AttrRule::supported("gpu_workgroup", BARE_FORM, "`#[gpu_workgroup]`"),
             AttrRule::supported("gpu_dispatch", GPU_IDENT_FORM, "`#[gpu_dispatch(fixed)]`"),
+            AttrRule::supported("gpu_draw", GPU_IDENT_FORM, "`#[gpu_draw(triangle_list)]`"),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),
             AttrRule::unsupported("host_import", HOST_IMPORT_TARGETS),
             AttrRule::unsupported("wasm_import", HOST_IMPORT_TARGETS),

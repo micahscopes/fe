@@ -34,6 +34,20 @@ const DEFAULT_SIZE = 256; // dispatch/canvas size for a v4 manifest with no decl
 const SURFACE_EVENT_STRIDE = 52;
 const MAX_SURFACE_EVENT_BATCH = Math.floor(0x7fffffff / SURFACE_EVENT_STRIDE);
 
+export function rasterDrawVertexCount(pass) {
+  const count = pass.draw_vertices ?? 3;
+  if (!Number.isSafeInteger(count) || count <= 0) {
+    throw new Error(`fe render runtime: invalid compiler-derived raster vertex count ${count}`);
+  }
+  return count;
+}
+
+export function requiresGpuPassGraph(passes, resources = []) {
+  return resources.length > 0 || passes.some(
+    (pass) => pass.layout.mode === "compute" || pass.draw_vertices !== undefined,
+  );
+}
+
 /** Fixed tags of the append-only Fe `SurfaceEventKind` enum. These are browser
  * facts, not application policy; the generated Wasm wrapper validates the tag
  * before authored Fe can observe it. */
@@ -415,6 +429,7 @@ export class FeSurfaceElement extends HTMLElement {
     this._gesturePresenting = false;
     this._gestureDirty = false;
     this._gpu = null; // one legacy pipeline, or { passRecords, resourceBuffers } for a graph.
+    this._surfaceInitializerKernel = null;
     this._liveContext = null; // GPUCanvasContext on `_liveCanvas`
     this._adoptedContext = null; // GPUCanvasContext on `_adoptedCanvas`
     this._resolveReady = null;
@@ -581,10 +596,13 @@ export class FeSurfaceElement extends HTMLElement {
         ? manifest.passes
         : [{ source_entry: manifest.source_entry, shader: manifest.artifacts.wgsl, layout: manifest.layout }];
       this._resources = manifest.resources || [];
-      this._graph = this._resources.length > 0 || this._passes.some((pass) => pass.layout.mode === "compute");
+      this._graph = requiresGpuPassGraph(this._passes, this._resources);
       const fragmentPass = [...this._passes].reverse().find((pass) => pass.layout.mode === "render");
       this._layout = fragmentPass?.layout ?? manifest.layout;
       this._surface = manifest.surface || null;
+      this._surfaceParamIndexByName = new Map(
+        (this._surface?.params || []).map((param, index) => [param.name, index]),
+      );
       this._control = manifest.control || null;
       const inputBinding = this._layout.bindings.find((binding) => binding.role === "input");
       this._inputBinding = inputBinding ?? null;
@@ -616,6 +634,14 @@ export class FeSurfaceElement extends HTMLElement {
         throw new Error("fe render runtime: bundle has neither a Wasm fallback nor a GPU pass graph");
       } else if (manifest.canonical_interface) {
         throw new Error("fe render runtime: canonical browser messages require a Wasm artifact");
+      }
+      // Optional GPU actor state comes from one Fe-authored `InitialState`
+      // behavior behind a fixed compiler-owned export. The host neither knows
+      // its source name nor reconstructs its computation from manifest data.
+      this._surfaceInitializerKernel = instance?.exports.fe_surface_initialize_v1 ?? null;
+      if (this._surfaceInitializerKernel !== null &&
+          typeof this._surfaceInitializerKernel !== "function") {
+        throw new Error("fe render runtime: surface initializer export is not callable");
       }
       // R3 param gestures: the SAME wasm instance carries the control export
       // (already part of the root set the compiler emitted `module.wasm`
@@ -691,11 +717,15 @@ export class FeSurfaceElement extends HTMLElement {
         }
       }
 
-      this._uniforms =
-        this._initialOverride ??
-        (this._surface
-          ? surfaceInitialUniforms(this._members, this._surface, DEFAULT_SIZE, DEFAULT_SIZE)
-          : undeclaredViewInitialUniforms(this._members));
+      const authoredInitial = this._surfaceInitializerKernel
+        ? this._surfaceInitializerKernel()
+        : undefined;
+      this._uniforms = this._initialOverride ??
+        (authoredInitial === undefined
+          ? (this._surface
+            ? surfaceInitialUniforms(this._members, this._surface, DEFAULT_SIZE, DEFAULT_SIZE)
+            : undeclaredViewInitialUniforms(this._members))
+          : this._surfaceReplyValues(authoredInitial, "surface initializer"));
 
       if (!this._adoptedCanvas) this._ensureStage();
       // Publish inspectable artifact links as soon as the manifest has been
@@ -845,7 +875,11 @@ export class FeSurfaceElement extends HTMLElement {
     for (let index = 0; index < this._passes.length; index++) {
       const pass = this._passes[index];
       const module = device.createShaderModule({ code: shaderSources[index] });
-      const visibility = pass.layout.mode === "compute" ? GPUShaderStage.COMPUTE : GPUShaderStage.FRAGMENT;
+      const visibility = pass.layout.mode === "compute"
+        ? GPUShaderStage.COMPUTE
+        : pass.draw_vertices
+          ? GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT
+          : GPUShaderStage.FRAGMENT;
       const layoutEntries = [];
       const groupEntries = [];
       const inputs = [];
@@ -1019,7 +1053,7 @@ export class FeSurfaceElement extends HTMLElement {
           });
           render.setPipeline(record.pipeline);
           if (record.bindGroup) render.setBindGroup(0, record.bindGroup);
-          render.draw(3);
+          render.draw(rasterDrawVertexCount(record.pass));
           render.end();
         }
       }
@@ -1392,7 +1426,9 @@ export class FeSurfaceElement extends HTMLElement {
           }
           const index = element._memberIndexByName.get(prop);
           if (index === undefined) return false;
-          element._applyParamEdit(index, Number(value));
+          const paramIndex = element._surfaceParamIndexByName.get(prop);
+          if (element._surfaceTransitionKernel && paramIndex === undefined) return false;
+          element._applyParamEdit(index, Number(value), paramIndex ?? index);
           return true;
         },
         has(_target, prop) {
@@ -1716,6 +1752,15 @@ export class FeSurfaceElement extends HTMLElement {
   }
 
   _surfaceActorArgs() {
+    // A paired raster fragment may have authored varying parameters before
+    // actor state in its GPU signature. Those varying slots are not part of
+    // the Fe transition ABI. With no resources, declaration-order state is
+    // exactly the compiler-projected member sequence.
+    if (this._resources.length === 0) {
+      return [...this._members]
+        .sort((left, right) => left.arg_index - right.arg_index)
+        .map((member) => this._uniforms[this._memberIndexByName.get(member.name)]);
+    }
     const actorArgStart = 1 + Math.max(-1, ...this._builtins.map((builtin) => builtin.arg_index));
     const actorArgEnd = actorArgStart + this._members.length + this._resources.length;
     const actorArgs = [];
@@ -1727,20 +1772,17 @@ export class FeSurfaceElement extends HTMLElement {
   }
 
   _surfaceResourceArgs() {
-    const actorArgStart = 1 + Math.max(-1, ...this._builtins.map((builtin) => builtin.arg_index));
-    const actorArgEnd = actorArgStart + this._members.length + this._resources.length;
-    const resourceArgs = [];
-    for (let argIndex = actorArgStart; argIndex < actorArgEnd; argIndex += 1) {
-      if (!this._memberIndexByArg.has(argIndex)) resourceArgs.push(0n);
-    }
-    return resourceArgs;
+    // Resident transitions already own their scalar state. Their fixed Wasm
+    // ABI therefore receives one inert host handle per declared resource,
+    // independent of vertex/fragment-only parameters in the GPU signature.
+    return this._resources.map(() => 0n);
   }
 
   /** Route a DOM slider or scripted `.params` write through the same authored
    * Fe transition as pointer/wheel input. The fixed host contributes only the
    * declaration-order index and untouched proposed value. Older, untyped
    * bundles retain their compatibility replacement path. */
-  _applyParamEdit(index, value) {
+  _applyParamEdit(index, value, paramIndex = index) {
     if (this._surfaceTransitionKernel) {
       if (
         this._surfaceTransitionSchedule === "resident" &&
@@ -1762,7 +1804,7 @@ export class FeSurfaceElement extends HTMLElement {
         width: this._backingWidth,
         height: this._backingHeight,
         eventKind: SurfaceEventKind.ParamEdit,
-        paramIndex: index,
+        paramIndex,
         paramValue: value,
       };
       if (
@@ -1942,11 +1984,17 @@ export class FeSurfaceElement extends HTMLElement {
   }
 
   _surfaceReply(reply) {
+    return this._surfaceReplyValues(reply, "typed surface transition", true);
+  }
+
+  _surfaceReplyValues(reply, source, disableTransitionOnMismatch = false) {
     const next = Array.isArray(reply) ? reply : [reply];
-    if (next.length !== this._uniforms.length) {
-      console.error(
-        `[fe web] typed surface transition returned ${next.length} fields; expected ${this._uniforms.length}`,
+    if (next.length !== this._members.length) {
+      const error = new Error(
+        `fe web: ${source} returned ${next.length} fields; expected ${this._members.length}`,
       );
+      if (!disableTransitionOnMismatch) throw error;
+      console.error(error.message);
       this._surfaceTransitionKernel = null;
       this._surfaceStateReplaceKernel = null;
       this._surfaceScheduleKernel = null;
@@ -2094,7 +2142,7 @@ export class FeSurfaceElement extends HTMLElement {
       this._panel.append(notice);
       return;
     }
-    this._surface.params.forEach((param) => {
+    this._surface.params.forEach((param, paramIndex) => {
       if (param.visible === false) return;
       const index = this._memberIndexByName.get(param.name);
       if (index === undefined) return;
@@ -2133,7 +2181,7 @@ export class FeSurfaceElement extends HTMLElement {
       input.step = isInt ? "1" : String((inputMax - inputMin) / 200 || 0.01);
       input.value = String(encode(this._uniforms[index]));
       input.oninput = () => {
-        this._applyParamEdit(index, decode(input.value));
+        this._applyParamEdit(index, decode(input.value), paramIndex);
       };
       row.append(label, input);
       this._panel.append(row);

@@ -3,6 +3,7 @@ use std::webgpu::{
     FragmentStage,
     GpuProgram,
     RasterVertex,
+    TriangleList,
     VertexStage,
     WebGpuBackend,
 }
@@ -17,18 +18,18 @@ actor TypedMesh uses (GpuProgram<WebGpuBackend>) {
     tint: f32,
 
     fn vertices(self, vertex_index: u32) -> RasterVertex<MeshVarying>
-        uses (VertexStage<MeshVarying>)
+        uses (VertexStage<MeshVarying, TriangleList<3>>)
     {
         RasterVertex {
             position: ClipPosition {
-                x: if vertex_index == 1 { 1.0 } else { -1.0 },
-                y: if vertex_index == 2 { 1.0 } else { -1.0 },
+                x: if vertex_index == 1 { 3.0 } else { -1.0 },
+                y: if vertex_index == 2 { 3.0 } else { -1.0 },
                 z: 0.0,
                 w: 1.0,
             },
             varying: MeshVarying {
                 normal: Normal { x: 0.0, y: 0.0, z: 1.0 },
-                heat: self.tint,
+                heat: if vertex_index == 0 { 1.0 } else { 0.0 },
             },
         }
     }

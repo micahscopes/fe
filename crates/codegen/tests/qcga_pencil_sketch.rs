@@ -1,6 +1,6 @@
-// The sketch keeps its unusually large independent scalar oracle beside the
-// Fe source it audits. Compile it as an ordinary workspace integration-test
-// module so the solver/topology evidence cannot silently rot while raster
-// placement is implemented.
-#[path = "../../../demos/sketches/qcga_pencil/acceptance.rs"]
+// Keep the unusually large independent scalar oracle outside the publishable
+// Fe ingot. Compile it as an ordinary workspace integration-test module so
+// solver/topology evidence cannot silently rot while the canonical gallery's
+// provenance remains honest about which source actually ships.
+#[path = "support/qcga_pencil_acceptance.rs"]
 mod acceptance;

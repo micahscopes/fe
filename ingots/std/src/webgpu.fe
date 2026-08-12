@@ -65,10 +65,11 @@ pub struct GpuProgram<B> {}
 pub struct FragmentSurface {}
 
 /// An authored raster vertex behavior. `V` is the nominal payload the
-/// rasterizer interpolates; the behavior returns `RasterVertex<V>` so clip
-/// position is never inferred from application field names or ordering.
+/// rasterizer interpolates and `D` is its Fe-authored draw policy; the behavior
+/// returns `RasterVertex<V>` so clip position is never inferred from
+/// application field names or ordering.
 #[gpu_stage(vertex)]
-pub struct VertexStage<V> {}
+pub struct VertexStage<V, D> {}
 
 /// An authored raster fragment behavior consuming the same nominal payload
 /// `V` emitted by its program's `VertexStage<V>` behavior.
@@ -109,6 +110,11 @@ pub struct Workgroup<const X: usize, const Y: usize, const Z: usize> {}
 /// A fixed dispatch grid executed once whenever the pass graph runs.
 #[gpu_dispatch(fixed)]
 pub struct FixedDispatch<const X: usize, const Y: usize, const Z: usize> {}
+
+/// One non-indexed triangle-list draw. Vertex/index-buffer variants can join
+/// this policy family without changing the stage role or browser ABI.
+#[gpu_draw(triangle_list)]
+pub struct TriangleList<const VERTICES: usize> {}
 
 /// The gesture-driven control-state role of an actor behavior (R3 param
 /// gestures): a `self`-taking behavior that maps raw gesture deltas (pan

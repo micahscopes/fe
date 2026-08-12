@@ -3,6 +3,7 @@ use std::webgpu::{
     FragmentStage,
     GpuProgram,
     RasterVertex,
+    TriangleList,
     VertexStage,
     WebGpuBackend,
 }
@@ -16,7 +17,7 @@ actor Mismatch uses (GpuProgram<WebGpuBackend>) {
     tint: f32,
 
     fn vertices(self, vertex_index: u32) -> RasterVertex<VertexPayload>
-        uses (VertexStage<VertexPayload>)
+        uses (VertexStage<VertexPayload, TriangleList<3>>)
     {
         RasterVertex {
             position: ClipPosition {

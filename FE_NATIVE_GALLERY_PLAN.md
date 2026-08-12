@@ -419,10 +419,42 @@ Origin: honesty audit of Claude Code session
   adapters. Its CPU mesh stream remains a semantic oracle over the shared
   ordinary Fe vertex/shading constructions, not a replacement renderer. The
   focused positive/negative compiler gates are 2/2 and the promoted QCGA suite
-  remains 8/8. Paired vertex/fragment SPIR-V lowering is still deliberately
-  fail-closed with a named diagnostic rather than silently substituting the
-  fullscreen vertex stage; completing that backend is the immediate Phase 4
-  frontier.
+  remains 8/8.
+- The paired authored-raster backend and first real gallery consumer are now
+  implemented. Sonatina lowers one Fe vertex/fragment pair into one validated
+  module with `VertexIndex`, compiler-derived varying locations and perspective
+  interpolation, shared vertex/fragment state visibility, authored clip
+  position, and packed fragment color; dynamic resources, memory/object lanes,
+  and unsupported traps still fail closed. Fe derives the non-indexed
+  `TriangleList<N>` draw count, routes even a single authored raster pass
+  through the pass-graph executor, and never substitutes the fullscreen
+  envelope. The generic Wasm value lane also treats representation-preserving
+  `RetagRef` over statically projected nested records as value identity; an
+  executed nested-record regression guards that semantic fix.
+- `qcga_pencil` is now the canonical gallery's twelfth render actor. Its
+  `PencilRaster` owns a nominal `PencilFrame` split into four mutable
+  `PencilControls` leaves and an immutable 25-leaf solver certificate. One
+  Fe `InitialState` behavior computes the complete solved state at boot behind
+  fixed `fe_surface_initialize_v1`; no host defaults table was added. Its
+  FCO-derived `ApplyParamBindings` transition and ordinary
+  `LatestPerFrame` policy own pencil blend, orbit, dolly, and scheduling. The
+  browser carries raw pointer facts and returned uniforms only. Recursive
+  compiler reflection derives the 29-leaf GPU layout while `view()` exposes
+  only the four interactive parameters.
+- Evidence for that promotion is semantic and independently layered. The QCGA
+  suite is 8/8 after moving its Rust oracle outside the publishable ingot; the
+  oracle executes Fe initialization and navigation in Wasmtime, proves the two
+  solved quadrics against independent f64 incidence checks, observes yaw
+  change, and proves the basis certificate is bit-preserved. Actor construction
+  is 9/9, the authored-raster execution target is 2/2 (its Wasmtime oracle
+  passes; the actual GPU leg reports an explicit no-adapter skip), and the
+  fixed-host tape is 10/10 including a varying/state-slot separation gate. A
+  release precompile publishes 12 render bundles as 14 Fe modules / 68 files;
+  the deployment verifier and real Chromium Fe gallery/SourceInspector tape
+  pass. The strict Chromium raster interaction leg remains externally required
+  because this machine exposes no usable WebGPU adapter. The remaining Phase 4
+  frontier is semantic QCGA point picking and drag/resolve messaging, not
+  raster placement.
 - This component/page slice is not the full resident-component end state. The
   outer gallery shell does not yet own routing, tile lifecycle, scheduling, or
   component-to-component messages as a long-lived Fe actor, and the stylesheet

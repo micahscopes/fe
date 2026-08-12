@@ -180,6 +180,12 @@ actor GalleryPage {
                 program: t("sketches/qcga"),
             )
             .render_tile(
+                title: t("qcga pencil"),
+                description: t2("solved QCGA vertex → typed ", "fragment raster"),
+                source: t2("sketches/qcga_pencil/", "src/lib.fe"),
+                program: t("sketches/qcga_pencil"),
+            )
+            .render_tile(
                 title: t("desargues"),
                 description: t("projective incidence"),
                 source: t("sketches/desargues/src/lib.fe"),

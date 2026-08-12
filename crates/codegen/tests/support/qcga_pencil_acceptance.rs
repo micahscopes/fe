@@ -1,5 +1,8 @@
 //! Independent acceptance suite for the `qcga_pencil` sketch, included by
 //! `crates/codegen/tests/qcga_pencil_sketch.rs` as an ordinary workspace gate.
+//! It intentionally lives outside the publishable demo ingot: the gallery's
+//! provenance ledger must describe authored Fe, not its independent Rust
+//! acceptance oracle.
 //!
 //! What it verifies (all Fe compiled to zero-import wasm, run under wasmtime;
 //! no GPU work happens here and no GPU performance claim is made anywhere):
@@ -24,9 +27,8 @@
 //!    host-effect + main thread + WebGPU dispatch capability).
 //! 9. Authored raster placement is nominal and typed: the compiler derives one
 //!    `SurfaceVarying` interface for `PencilRaster`'s vertex/fragment pair and
-//!    selects its fragment as the render entry. Paired SPIR-V lowering remains
-//!    a named, fail-closed wall; it must never substitute the fullscreen
-//!    envelope while that backend work is incomplete.
+//!    selects its fragment as the render entry, and lowers both Fe bodies into
+//!    one pipeline without substituting the fullscreen envelope.
 
 use std::path::Path;
 
@@ -92,6 +94,30 @@ fn record_fields(layout: &CanonicalLayout) -> &[CanonicalFieldLayout] {
     }
 }
 
+fn uniquely_named_leaf_offset(layout: &CanonicalLayout, name: &str) -> Option<u32> {
+    fn collect(layout: &CanonicalLayout, base: u32, name: &str, found: &mut Vec<u32>) {
+        let CanonicalShape::Record { fields } = &layout.shape else {
+            return;
+        };
+        for field in fields {
+            let offset = base + field.offset;
+            match &field.layout.shape {
+                CanonicalShape::Record { .. } => collect(&field.layout, offset, name, found),
+                _ if field.name == name => found.push(offset),
+                _ => {}
+            }
+        }
+    }
+
+    let mut found = Vec::new();
+    collect(layout, 0, name, &mut found);
+    match found.as_slice() {
+        [offset] => Some(*offset),
+        [] => None,
+        _ => panic!("canonical request has more than one leaf named `{name}`"),
+    }
+}
+
 fn compile_lane(db: &DriverDataBase, top_mod: TopLevelMod, name: &str) -> Lane {
     let decl = canonical_lane_decl_from_entry(db, top_mod, name, name)
         .unwrap_or_else(|error| panic!("lane decl for `{name}`: {error}"));
@@ -146,19 +172,14 @@ impl Lane {
             .call(&mut self.store, (size as i32, align as i32))
             .unwrap();
         let mut bytes = vec![0_u8; size as usize];
-        let fields = record_fields(&self.lane.request);
         for (name, value) in values {
-            let field = fields
-                .iter()
-                .find(|field| &field.name == name)
-                .unwrap_or_else(|| {
-                    panic!("lane `{}` has no request field `{name}`", self.lane.name)
-                });
+            let offset = uniquely_named_leaf_offset(&self.lane.request, name).unwrap_or_else(|| {
+                panic!("lane `{}` has no request field `{name}`", self.lane.name)
+            }) as usize;
             let word = match value {
                 V::F(x) => x.to_bits(),
                 V::U(x) => *x,
             };
-            let offset = field.offset as usize;
             bytes[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
         }
         self.memory
@@ -817,13 +838,12 @@ fn lane_intents_declare_honest_placement() {
     });
 }
 
-/// The standard authored-raster meaning is already expressible and checked;
-/// only paired backend lowering remains pinned. This protects both sides of
-/// the honesty boundary: stage roles must not masquerade as message lanes, and
-/// the compiler must not render QCGA through its old synthesized fullscreen
-/// vertex stage.
+/// The standard authored-raster meaning is checked and lowered. This protects
+/// both sides of the honesty boundary: stage roles must not masquerade as
+/// message lanes, and the compiler must not render QCGA through its old
+/// synthesized fullscreen vertex stage.
 #[test]
-fn authored_raster_plan_is_typed_and_backend_wall_is_explicit() {
+fn authored_raster_plan_is_typed_and_compiles_the_fe_stage_pair() {
     with_sketch(|db, top_mod| {
         let program = actor_gpu_program(db, top_mod)
             .expect("derive QCGA raster program")
@@ -833,9 +853,14 @@ fn authored_raster_plan_is_typed_and_backend_wall_is_explicit() {
         assert_eq!(program.stages[0].source_entry, "surface_vertex");
         assert_eq!(program.stages[1].source_entry, "surface_fragment");
 
-        let WebActorStageKind::Vertex { varying: vertex } = &program.stages[0].kind else {
+        let WebActorStageKind::Vertex {
+            varying: vertex,
+            vertex_count,
+        } = &program.stages[0].kind
+        else {
             panic!("expected vertex role, got {:?}", program.stages[0].kind);
         };
+        assert_eq!(*vertex_count, VERTEX_COUNT);
         let WebActorStageKind::RasterFragment { varying: fragment } = &program.stages[1].kind
         else {
             panic!(
@@ -873,16 +898,161 @@ fn authored_raster_plan_is_typed_and_backend_wall_is_explicit() {
             );
         }
 
-        let error = WebBundle::compile(
+        let bundle = WebBundle::compile(
             db,
             top_mod,
             WebBuildOptions::render("surface_fragment", None),
         )
-        .unwrap_err();
-        let text = format!("{error}");
-        assert!(
-            text.contains("authored raster vertex/varying SPIR-V lowering is not implemented yet"),
-            "unexpected authored-raster backend boundary: {text}"
+        .expect("QCGA authored raster bundle");
+        assert_eq!(bundle.manifest.passes.len(), 1);
+        let pass = &bundle.manifest.passes[0];
+        assert_eq!(pass.draw_vertices, Some(VERTEX_COUNT));
+        assert_eq!(pass.layout.vertex_entry.as_deref(), Some("surface_vertex"));
+        assert_eq!(
+            pass.layout.fragment_entry.as_deref(),
+            Some("surface_fragment")
         );
+        assert_eq!(pass.layout.bindings.len(), 1);
+        assert_eq!(pass.layout.bindings[0].members.len(), 29);
+        assert_eq!(
+            pass.layout.bindings[0]
+                .members
+                .iter()
+                .map(|member| member.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "lambda",
+                "yaw",
+                "pitch",
+                "dist",
+                "generation",
+                "cx",
+                "cy",
+                "cz",
+                "pencil_free",
+                "a0",
+                "b0",
+                "c0",
+                "d0",
+                "e0",
+                "f0",
+                "g0",
+                "h0",
+                "i0",
+                "j0",
+                "a1",
+                "b1",
+                "c1",
+                "d1",
+                "e1",
+                "f1",
+                "g1",
+                "h1",
+                "i1",
+                "j1",
+            ],
+            "nested Fe state must recursively derive the shader member identities",
+        );
+        let surface = bundle.manifest.surface.as_ref().expect("QCGA view");
+        assert_eq!(
+            surface
+                .params
+                .iter()
+                .map(|param| param.name.as_str())
+                .collect::<Vec<_>>(),
+            ["lambda", "yaw", "pitch", "dist"],
+            "InitialState supplies complete defaults; view() exposes only controls",
+        );
+        assert!(bundle.manifest.control.is_none());
+        let engine = wasmtime::Engine::default();
+        let module = wasmtime::Module::new(&engine, &bundle.wasm).expect("QCGA control Wasm");
+        let mut store = wasmtime::Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+        let initialize = instance
+            .get_func(&mut store, "fe_surface_initialize_v1")
+            .expect("fixed Fe InitialState export");
+        let mut state = vec![wasmtime::Val::F32(0); 29];
+        state[4] = wasmtime::Val::I32(0);
+        initialize
+            .call(&mut store, &[], &mut state)
+            .expect("execute Fe solver-backed initialization");
+        let f32_at = |values: &[wasmtime::Val], index: usize| match values[index] {
+            wasmtime::Val::F32(bits) => f32::from_bits(bits),
+            ref value => panic!("state leaf {index} is not f32: {value:?}"),
+        };
+        assert_eq!(f32_at(&state, 0).to_bits(), 0.15f32.to_bits());
+        assert_eq!(f32_at(&state, 1).to_bits(), 0.6f32.to_bits());
+        assert_eq!(f32_at(&state, 2).to_bits(), 0.35f32.to_bits());
+        assert_eq!(f32_at(&state, 3).to_bits(), 4.0f32.to_bits());
+        assert!(matches!(state[4], wasmtime::Val::I32(0)));
+        assert_eq!(f32_at(&state, 8).to_bits(), 1.0f32.to_bits());
+        let q0 = std::array::from_fn(|index| f32_at(&state, 9 + index));
+        let q1 = std::array::from_fn(|index| f32_at(&state, 19 + index));
+        let points = read_default_points(db, top_mod);
+        for point in points.chunks_exact(3) {
+            let point = [point[0] as f64, point[1] as f64, point[2] as f64];
+            assert!(oracle(&q0, point).abs() < 1e-4);
+            assert!(oracle(&q1, point).abs() < 1e-4);
+        }
+
+        let replace = instance
+            .get_func(&mut store, "fe_surface_state_replace_v1")
+            .expect("resident state seed");
+        replace.call(&mut store, &state, &mut []).unwrap();
+        let memory = instance.get_memory(&mut store, "memory").unwrap();
+        let alloc = instance
+            .get_typed_func::<(i32, i32), i32>(&mut store, "fe_cabi_alloc")
+            .unwrap();
+        let pointer = alloc.call(&mut store, (52, 4)).unwrap() as usize;
+        let event_words = [
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            25.0f32.to_bits(),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            0,
+            1,
+            1.0f32.to_bits(),
+            512.0f32.to_bits(),
+            512.0f32.to_bits(),
+            0,
+            0,
+            0.0f32.to_bits(),
+        ];
+        let event_bytes = event_words
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect::<Vec<_>>();
+        memory.write(&mut store, pointer, &event_bytes).unwrap();
+        let transition = instance
+            .get_func(&mut store, "fe_surface_transition_scheduled_v1")
+            .expect("scheduled Fe navigation export");
+        let mut next = vec![wasmtime::Val::F32(0); 29];
+        next[4] = wasmtime::Val::I32(0);
+        transition
+            .call(
+                &mut store,
+                &[wasmtime::Val::I32(pointer as i32), wasmtime::Val::I32(1)],
+                &mut next,
+            )
+            .expect("execute FCO-derived QCGA navigation");
+        assert_eq!(f32_at(&next, 0).to_bits(), f32_at(&state, 0).to_bits());
+        assert_ne!(f32_at(&next, 1).to_bits(), f32_at(&state, 1).to_bits());
+        assert_eq!(f32_at(&next, 2).to_bits(), f32_at(&state, 2).to_bits());
+        assert_eq!(f32_at(&next, 3).to_bits(), f32_at(&state, 3).to_bits());
+        assert_eq!(
+            next[4..]
+                .iter()
+                .map(|value| format!("{value:?}"))
+                .collect::<Vec<_>>(),
+            state[4..]
+                .iter()
+                .map(|value| format!("{value:?}"))
+                .collect::<Vec<_>>(),
+            "navigation must preserve every solver-derived basis leaf exactly",
+        );
+        assert!(bundle.wgsl.contains("@vertex"), "{}", bundle.wgsl);
+        assert!(bundle.wgsl.contains("@fragment"), "{}", bundle.wgsl);
+        assert!(!bundle.wgsl.contains("vs_fullscreen"), "{}", bundle.wgsl);
     });
 }

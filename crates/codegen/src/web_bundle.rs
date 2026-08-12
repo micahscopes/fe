@@ -27,8 +27,8 @@ use hir::analysis::{
     },
 };
 use hir::hir_def::{
-    FieldParent, Func, GenericArg, GpuControl, GpuDispatch, GpuResource, GpuStage, HirIngot,
-    LitKind, Partial, PathId, TopLevelMod, TypeKind, Visibility,
+    FieldParent, Func, GenericArg, GpuControl, GpuDispatch, GpuDraw, GpuResource, GpuStage,
+    HirIngot, LitKind, Partial, PathId, TopLevelMod, TypeKind, Visibility,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -39,9 +39,10 @@ use sonatina_codegen::isa::spirv::{
 
 use crate::actor_semantics::{SemanticActor, nominal_attrs, resolve_metadata_ty, semantic_actors};
 use crate::sonatina::{
-    WasmCompileOptions, compile_runtime_package_spirv_compute_with_resources,
-    compile_runtime_package_spirv_grid, compile_runtime_package_spirv_render,
-    compile_runtime_package_spirv_render_with_resources, compile_runtime_package_wasm_with_options,
+    WasmCompileOptions, compile_runtime_package_spirv_authored_raster,
+    compile_runtime_package_spirv_compute_with_resources, compile_runtime_package_spirv_grid,
+    compile_runtime_package_spirv_render, compile_runtime_package_spirv_render_with_resources,
+    compile_runtime_package_wasm_with_options,
 };
 use crate::{
     CanonicalField, CanonicalInterfaceManifest, CanonicalType, CanonicalVariant,
@@ -77,6 +78,10 @@ const TYPED_SURFACE_EVENT_FIELDS: usize = 13;
 /// declaration order and returns nothing. Frame transitions never receive
 /// those values back from the browser.
 const TYPED_SURFACE_STATE_REPLACE_EXPORT: &str = "fe_surface_state_replace_v1";
+/// Manifest-free fixed host discovery point for a GPU actor's Fe-authored
+/// complete-state initializer. The selected behavior is identified by the
+/// nominal `InitialState` role; its source name remains application vocabulary.
+const SURFACE_INITIALIZER_EXPORT: &str = "fe_surface_initialize_v1";
 /// Fixed binary discovery point for a resident Fe presentation policy. The
 /// policy's authored behavior name and private state never enter the manifest.
 const TYPED_SURFACE_SCHEDULE_EXPORT: &str = "fe_surface_schedule_v2";
@@ -442,6 +447,7 @@ pub enum WebActorStageKind {
     /// into the transitional render manifest.
     Vertex {
         varying: CanonicalType,
+        vertex_count: u32,
     },
     Fragment,
     /// Authored fragment behavior paired with `Vertex` by exact nominal
@@ -633,6 +639,47 @@ fn role_payload_ty<'db>(
     Ok(*payload)
 }
 
+fn raster_draw_count(
+    db: &DriverDataBase,
+    behavior: hir::hir_def::Func<'_>,
+    role_path: PathId<'_>,
+) -> Result<u32, WebBundleError> {
+    let role_ty = resolve_metadata_ty(db, role_path, behavior.scope()).ok_or_else(|| {
+        WebBundleError::EntryDerivation("vertex-stage role did not resolve".to_owned())
+    })?;
+    let [_, draw, ..] = role_ty.generic_args(db) else {
+        return Err(WebBundleError::EntryDerivation(
+            "vertex-stage role requires a Fe-authored draw policy".to_owned(),
+        ));
+    };
+    let attrs = nominal_attrs(db, *draw).ok_or_else(|| {
+        WebBundleError::EntryDerivation(
+            "vertex-stage draw policy is not an attributed nominal type".to_owned(),
+        )
+    })?;
+    if attrs.gpu_draw(db) != Some(GpuDraw::TriangleList) {
+        return Err(WebBundleError::EntryDerivation(
+            "authored raster currently requires `#[gpu_draw(triangle_list)]`".to_owned(),
+        ));
+    }
+    let [count, ..] = draw.generic_args(db) else {
+        return Err(WebBundleError::EntryDerivation(
+            "triangle-list draw policy requires one concrete vertex count".to_owned(),
+        ));
+    };
+    let count = semantic_const_u32(db, *count).ok_or_else(|| {
+        WebBundleError::EntryDerivation(
+            "triangle-list vertex count must be a concrete u32-sized integer".to_owned(),
+        )
+    })?;
+    if count == 0 {
+        return Err(WebBundleError::EntryDerivation(
+            "triangle-list vertex count must be nonzero".to_owned(),
+        ));
+    }
+    Ok(count)
+}
+
 fn is_primitive(db: &DriverDataBase, ty: TyId<'_>, primitive: PrimTy) -> bool {
     let ty = ty.as_view(db).unwrap_or(ty);
     matches!(
@@ -647,6 +694,7 @@ fn raster_vertex_stage<'db>(
     role_path: PathId<'db>,
 ) -> Result<(WebActorStageKind, TyId<'db>), WebBundleError> {
     let payload = role_payload_ty(db, behavior, role_path, "vertex")?;
+    let vertex_count = raster_draw_count(db, behavior, role_path)?;
     let args = behavior.arg_tys(db);
     let Some(vertex_index) = args.first() else {
         return Err(WebBundleError::EntryDerivation(
@@ -710,7 +758,13 @@ fn raster_vertex_stage<'db>(
                 .to_owned(),
         ));
     }
-    Ok((WebActorStageKind::Vertex { varying }, payload))
+    Ok((
+        WebActorStageKind::Vertex {
+            varying,
+            vertex_count,
+        },
+        payload,
+    ))
 }
 
 fn raster_fragment_stage<'db>(
@@ -935,7 +989,7 @@ pub fn actor_gpu_program(
     let authored_vertices = stages
         .iter()
         .filter_map(|stage| match &stage.kind {
-            WebActorStageKind::Vertex { varying } => Some(varying),
+            WebActorStageKind::Vertex { varying, .. } => Some(varying),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -1169,30 +1223,267 @@ pub fn resolve_web_entry(
 /// owns the member whose `arg_index` sits `d` positions above the binding's
 /// lowest member arg_index; we map by that offset rather than by vec position
 /// so the field-to-member correspondence is explicit and order-independent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActorStateLeafMetadata {
+    name: String,
+    doc: Option<String>,
+}
+
+fn append_actor_state_leaves(
+    ty: &CanonicalType,
+    field_name: &str,
+    doc: &Option<String>,
+    leaves: &mut Vec<ActorStateLeafMetadata>,
+) -> Result<(), WebBundleError> {
+    match ty {
+        CanonicalType::Record(fields) => {
+            for field in fields {
+                append_actor_state_leaves(&field.ty, &field.name, doc, leaves)?;
+            }
+        }
+        CanonicalType::Bool
+        | CanonicalType::U8
+        | CanonicalType::I32
+        | CanonicalType::U32
+        | CanonicalType::I64
+        | CanonicalType::U64
+        | CanonicalType::F32 => leaves.push(ActorStateLeafMetadata {
+            name: field_name.to_owned(),
+            doc: doc.clone(),
+        }),
+        CanonicalType::Variant(variants)
+            if !variants.is_empty() && variants.iter().all(|variant| variant.fields.is_empty()) =>
+        {
+            leaves.push(ActorStateLeafMetadata {
+                name: field_name.to_owned(),
+                doc: doc.clone(),
+            })
+        }
+        CanonicalType::Variant(_) => {
+            return Err(WebBundleError::SurfaceProjection(format!(
+                "GPU actor state field `{field_name}` has a payload enum, which cannot be flattened into one uniform member"
+            )));
+        }
+        CanonicalType::Bytes | CanonicalType::String | CanonicalType::List { .. } => {
+            return Err(WebBundleError::SurfaceProjection(format!(
+                "GPU actor state field `{field_name}` has non-scalar browser state `{ty:?}`"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Resolve an actor's complete non-resource state from semantic field types.
+/// The structural declaration contributes source names/docs; recursive record
+/// leaves come from the nominal Fe types rather than a parallel binding table.
+fn actor_state_shape(
+    db: &DriverDataBase,
+    top_mod: TopLevelMod<'_>,
+    source_entry: &str,
+    resource_field_indices: &[u32],
+) -> Result<Option<(CanonicalType, Vec<ActorStateLeafMetadata>)>, WebBundleError> {
+    let Some(actor_name) = gpu_actor_name_for_entry(db, top_mod, source_entry) else {
+        return Ok(None);
+    };
+    let declaration = hir::lower::module_actor_decls(db, top_mod)
+        .into_iter()
+        .find(|actor| actor.name == actor_name)
+        .ok_or_else(|| {
+            WebBundleError::SurfaceProjection(format!(
+                "GPU actor `{actor_name}` has no structural declaration"
+            ))
+        })?;
+    let actors = semantic_actors(db, top_mod);
+    let actor = actors
+        .iter()
+        .find(|actor| {
+            actor
+                .state
+                .name(db)
+                .to_opt()
+                .is_some_and(|name| name.data(db) == &actor_name)
+        })
+        .ok_or_else(|| {
+            WebBundleError::SurfaceProjection(format!(
+                "GPU actor `{actor_name}` has no semantic state declaration"
+            ))
+        })?;
+    let semantic_fields = actor.state.hir_fields(db).data(db);
+    if semantic_fields.len() != declaration.fields.len() {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "GPU actor `{actor_name}` has inconsistent structural and semantic state fields"
+        )));
+    }
+
+    let assumptions = PredicateListId::empty_list(db);
+    let mut fields = Vec::new();
+    let mut leaves = Vec::new();
+    for (index, (field, semantic_field)) in
+        declaration.fields.iter().zip(semantic_fields).enumerate()
+    {
+        if resource_field_indices.contains(&(index as u32)) {
+            continue;
+        }
+        let type_ref = semantic_field.type_ref().to_opt().ok_or_else(|| {
+            WebBundleError::SurfaceProjection(format!(
+                "GPU actor `{actor_name}` state field `{}` has no resolved type",
+                field.name
+            ))
+        })?;
+        let ty = lower_hir_ty(db, type_ref, actor.state.scope(), assumptions);
+        let canonical =
+            canonical_type_from_semantic(db, ty, &format!("surface_state.{}", field.name))
+                .map_err(|error| WebBundleError::SurfaceProjection(error.to_string()))?;
+        append_actor_state_leaves(&canonical, &field.name, &field.doc, &mut leaves)?;
+        fields.push(CanonicalField::new(field.name.clone(), canonical));
+    }
+    let mut names = std::collections::BTreeSet::new();
+    if let Some(duplicate) = leaves.iter().find(|leaf| !names.insert(leaf.name.clone())) {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "GPU actor `{actor_name}` recursively flattens more than one state leaf named `{}`; leaf names must be unambiguous",
+            duplicate.name
+        )));
+    }
+    Ok(Some((CanonicalType::Record(fields), leaves)))
+}
+
+fn behavior_is_actor_initializer(db: &DriverDataBase, behavior: Func<'_>) -> bool {
+    behavior
+        .actor_roles(db)
+        .data(db)
+        .iter()
+        .filter_map(|role| role.key_path.to_opt())
+        .filter_map(|path| resolve_metadata_ty(db, path, behavior.scope()))
+        .filter_map(|ty| nominal_attrs(db, ty))
+        .any(|attrs| attrs.is_actor_initializer(db))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SurfaceInitializerContract {
+    source_entry: String,
+    results: Vec<WebControlWasmType>,
+}
+
+/// Select an optional GPU-state initializer by its nominal Fe role and prove
+/// that it returns the actor's complete nested state. This is compile-only
+/// metadata; the browser discovers only the fixed Wasm export.
+fn surface_initializer_contract(
+    db: &DriverDataBase,
+    top_mod: TopLevelMod<'_>,
+    source_entry: &str,
+    resource_field_indices: &[u32],
+) -> Result<Option<SurfaceInitializerContract>, WebBundleError> {
+    let Some(actor_name) = gpu_actor_name_for_entry(db, top_mod, source_entry) else {
+        return Ok(None);
+    };
+    let actors = semantic_actors(db, top_mod);
+    let actor = actors
+        .iter()
+        .find(|actor| {
+            actor_is_gpu_program(db, actor)
+                && actor
+                    .state
+                    .name(db)
+                    .to_opt()
+                    .is_some_and(|name| name.data(db) == &actor_name)
+        })
+        .ok_or_else(|| {
+            WebBundleError::SurfaceProjection(format!(
+                "GPU actor `{actor_name}` has no semantic declaration"
+            ))
+        })?;
+    let initializers = actor
+        .behaviors
+        .iter()
+        .copied()
+        .filter(|behavior| behavior_is_actor_initializer(db, *behavior))
+        .collect::<Vec<_>>();
+    let initializer = match initializers.as_slice() {
+        [] => return Ok(None),
+        [initializer] => *initializer,
+        _ => {
+            return Err(WebBundleError::SurfaceProjection(format!(
+                "GPU actor `{actor_name}` declares {} complete-state initializers; at most one is allowed",
+                initializers.len()
+            )));
+        }
+    };
+    let initializer_name = initializer
+        .name(db)
+        .to_opt()
+        .map(|name| name.data(db).to_string())
+        .ok_or_else(|| {
+            WebBundleError::SurfaceProjection(format!(
+                "GPU actor `{actor_name}` has an unnamed state initializer"
+            ))
+        })?;
+    if !initializer.arg_tys(db).is_empty() {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "GPU state initializer `{initializer_name}` must be self-less and take no arguments"
+        )));
+    }
+    if !resource_field_indices.is_empty() {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "GPU state initializer `{initializer_name}` cannot initialize external resource handles"
+        )));
+    }
+    let (state, _) = actor_state_shape(db, top_mod, source_entry, resource_field_indices)?
+        .expect("initializer containing actor must have state shape");
+    let initialized =
+        canonical_type_from_semantic(db, initializer.return_ty(db), "initial_surface_state")
+            .map_err(|error| WebBundleError::SurfaceProjection(error.to_string()))?;
+    if initialized != state {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "GPU state initializer `{initializer_name}` must return complete actor state: expected {state:?}, got {initialized:?}"
+        )));
+    }
+    let mut results = Vec::new();
+    append_canonical_wasm_types(&initialized, &mut results, "initial_surface_state")?;
+    Ok(Some(SurfaceInitializerContract {
+        source_entry: initializer_name,
+        results,
+    }))
+}
+
+fn with_surface_initializer(
+    options: WasmCompileOptions,
+    contract: &SurfaceInitializerContract,
+) -> WasmCompileOptions {
+    options.with_export_alias(&contract.source_entry, SURFACE_INITIALIZER_EXPORT)
+}
+
+fn verify_surface_initializer_export(
+    wasm: &[u8],
+    contract: &SurfaceInitializerContract,
+) -> Result<(), WebBundleError> {
+    let (params, results) = wasm_export_signature(wasm, SURFACE_INITIALIZER_EXPORT).ok_or_else(
+        || {
+            WebBundleError::SurfaceProjection(format!(
+                "GPU state initializer `{}` has no fixed Wasm export `{SURFACE_INITIALIZER_EXPORT}`",
+                contract.source_entry
+            ))
+        },
+    )?;
+    if !params.is_empty() || results != contract.results {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "GPU state initializer `{}` has measured Wasm signature {params:?} -> {results:?}; expected [] -> {:?} from the complete Fe actor state",
+            contract.source_entry, contract.results
+        )));
+    }
+    Ok(())
+}
+
 fn project_actor_field_metadata(
     db: &DriverDataBase,
     top_mod: TopLevelMod<'_>,
     source_entry: &str,
     layout: &mut WebLayout,
     resource_field_indices: &[u32],
-) {
-    let decls = hir::lower::module_actor_decls(db, top_mod);
-    let Some(actor_name) = gpu_actor_name_for_entry(db, top_mod, source_entry) else {
-        return;
+) -> Result<(), WebBundleError> {
+    let Some((_, fields)) = actor_state_shape(db, top_mod, source_entry, resource_field_indices)?
+    else {
+        return Ok(());
     };
-    let Some(actor) = decls.iter().find(|actor| actor.name == actor_name) else {
-        return;
-    };
-    if actor.fields.is_empty() {
-        return;
-    }
-    let fields = actor
-        .fields
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| !resource_field_indices.contains(&(*index as u32)))
-        .map(|(_, field)| field)
-        .collect::<Vec<_>>();
     let mut members = layout
         .bindings
         .iter()
@@ -1207,11 +1498,19 @@ fn project_actor_field_metadata(
         })
         .collect::<Vec<_>>();
     members.sort_by_key(|(arg_index, _, _)| *arg_index);
+    if members.len() != fields.len() {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "GPU actor `{source_entry}` has {} recursively flattened state leaves but its shader layout has {} input members",
+            fields.len(),
+            members.len()
+        )));
+    }
     for ((_, binding_index, member_index), field) in members.into_iter().zip(fields) {
         let member = &mut layout.bindings[binding_index].members[member_index];
-        member.name = field.name.clone();
-        member.doc = field.doc.clone();
+        member.name = field.name;
+        member.doc = field.doc;
     }
+    Ok(())
 }
 
 /// The reserved const behavior a render actor declares to project its
@@ -2275,9 +2574,11 @@ fn wasm_export_signature(
 /// Projects the render actor's `const fn view()` behavior into the manifest
 /// `surface` section (protocol v5, R1b; design decision 2). CTFE-evaluates the
 /// behavior to a value (via the semantic const machine), walks it, and
-/// RECONCILES the params-record field names against the actor's state fields and
-/// the lowered uniform binding members: all three must name the same set, or
-/// this errors naming every source.
+/// Reconciles params-record field names against recursively flattened actor
+/// state and lowered uniform members. Normally all three sets must match. When
+/// the actor also has a nominal `InitialState` behavior, that Fe computation
+/// supplies complete defaults and `view()` may deliberately expose a named
+/// interactive subset.
 ///
 /// Returns `Ok(None)` for a render entry whose actor declares no `view()`
 /// behavior (the v4-compatible path: legacy non-actor bundles, and sketches not
@@ -2328,6 +2629,8 @@ fn project_surface(
     let view = project_view_surface(db, view_func).map_err(|error| {
         WebBundleError::SurfaceProjection(format!("actor `{}`: {error}", actor.name))
     })?;
+    let (_, state_leaves) = actor_state_shape(db, top_mod, source_entry, resource_field_indices)?
+        .expect("view-containing GPU actor must have a semantic state shape");
 
     // The uniform binding members, in arg_index order (== actor field order via
     // the R0 anchor); their names were projected in L0.
@@ -2339,39 +2642,47 @@ fn project_surface(
         .collect();
     members.sort_by_key(|member| member.arg_index);
 
-    // Reconcile view params <-> actor fields <-> binding members by name.
+    // Reconcile view params <-> recursively flattened actor state <-> binding
+    // members by name. An authored complete-state initializer allows `view()`
+    // to expose only the interactive subset; without one, retain the strict
+    // field-complete rule so no state default is fabricated.
     let view_names: Vec<&str> = view
         .params
         .iter()
         .map(|param| param.name.as_str())
         .collect();
-    let field_names: Vec<&str> = actor
-        .fields
+    let field_names: Vec<&str> = state_leaves
         .iter()
-        .enumerate()
-        .filter(|(index, _)| !resource_field_indices.contains(&(*index as u32)))
-        .map(|(_, field)| field)
         .map(|field| field.name.as_str())
         .collect();
     let member_names: Vec<&str> = members.iter().map(|member| member.name.as_str()).collect();
     let mismatch = || {
         WebBundleError::SurfaceProjection(format!(
-            "actor `{}`: the `view()` params {view_names:?} do not reconcile with the actor state fields {field_names:?} and the lowered uniform members {member_names:?} (all three must name the same set)",
+            "actor `{}`: the `view()` params {view_names:?} do not reconcile with the recursively flattened actor state fields {field_names:?} and lowered uniform members {member_names:?} (without InitialState all three sets must match; with InitialState every view param must be a unique state leaf)",
             actor.name
         ))
     };
-    if view.params.len() != members.len() || view.params.len() != field_names.len() {
+    let has_initializer =
+        surface_initializer_contract(db, top_mod, source_entry, resource_field_indices)?.is_some();
+    if (!has_initializer
+        && (view.params.len() != members.len() || view.params.len() != field_names.len()))
+        || view.params.len() > members.len()
+    {
         return Err(mismatch());
     }
 
     // Emit params in member (arg_index) order so `surface.params[i]` aligns with
     // `members[i]`, matching each member name to exactly one `view()` param.
     let mut params = Vec::with_capacity(members.len());
-    for &member in &members {
-        if !field_names.contains(&member.name.as_str()) {
+    for view_param in &view.params {
+        if !field_names.contains(&view_param.name.as_str()) {
             return Err(mismatch());
         }
-        let Some(view_param) = view.params.iter().find(|param| param.name == member.name) else {
+        let Some(member) = members
+            .iter()
+            .copied()
+            .find(|member| member.name == view_param.name)
+        else {
             return Err(mismatch());
         };
         params.push(web_surface_param(view_param, member)?);
@@ -2385,7 +2696,11 @@ fn project_surface(
             filter: "smooth".to_string(),
         },
         pipeline: WebPipeline {
-            kind: "fullscreen_fragment".to_string(),
+            kind: if layout.vertex_entry.is_some() {
+                "authored_raster".to_string()
+            } else {
+                "fullscreen_fragment".to_string()
+            },
         },
         params,
         state: WebSurfaceState {
@@ -2531,6 +2846,7 @@ pub enum WebBuiltinSource {
     GlobalInvocationIdY,
     FragmentPositionX,
     FragmentPositionY,
+    VertexIndex,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2581,6 +2897,11 @@ pub struct WebPass {
     pub shader_bytes: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatch: Option<[u32; 3]>,
+    /// Compiler-derived non-indexed draw count. This transitional transport is
+    /// consumed by the fixed host; the source of truth is the Fe draw-policy
+    /// type (`TriangleList<N>`), never page JavaScript.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draw_vertices: Option<u32>,
     pub layout: WebLayout,
 }
 
@@ -2924,18 +3245,6 @@ impl WebBundle {
                 options.source_entry
             )));
         }
-        if program.stages.iter().any(|stage| {
-            matches!(
-                stage.kind,
-                WebActorStageKind::Vertex { .. } | WebActorStageKind::RasterFragment { .. }
-            )
-        }) {
-            return Err(WebBundleError::Lower(
-                "authored raster vertex/varying SPIR-V lowering is not implemented yet; the compiler refuses to substitute the fullscreen render envelope"
-                    .to_owned(),
-            ));
-        }
-
         let resources = program
             .resources
             .iter()
@@ -2951,7 +3260,82 @@ impl WebBundle {
         let mut pass_wgsl = Vec::with_capacity(program.stages.len());
         let mut final_shader = None;
         let mut final_layout = None;
+        let authored_raster = match program.stages.as_slice() {
+            [
+                WebActorStage {
+                    source_entry: vertex_entry,
+                    kind: WebActorStageKind::Vertex { vertex_count, .. },
+                },
+                WebActorStage {
+                    source_entry: fragment_entry,
+                    kind: WebActorStageKind::RasterFragment { .. },
+                },
+            ] => Some((vertex_entry.clone(), fragment_entry.clone(), *vertex_count)),
+            stages
+                if stages.iter().any(|stage| {
+                    matches!(
+                        stage.kind,
+                        WebActorStageKind::Vertex { .. } | WebActorStageKind::RasterFragment { .. }
+                    )
+                }) =>
+            {
+                return Err(WebBundleError::Lower(
+                    "authored raster currently requires exactly one vertex behavior followed by its paired fragment behavior"
+                        .to_owned(),
+                ));
+            }
+            _ => None,
+        };
+        if let Some((vertex_entry, fragment_entry, vertex_count)) = authored_raster.as_ref() {
+            if !resources.is_empty() {
+                return Err(WebBundleError::Lower(
+                    "authored raster resources are not wired into both stages yet".to_owned(),
+                ));
+            }
+            let package = mir::build_wasm_runtime_package_for_entries(
+                db,
+                top_mod,
+                &[vertex_entry.clone(), fragment_entry.clone()],
+            )
+            .map_err(|error| WebBundleError::Lower(error.to_string()))?;
+            let artifact = compile_runtime_package_spirv_authored_raster(
+                db,
+                &package,
+                vertex_entry,
+                fragment_entry,
+            )
+            .map_err(|error| WebBundleError::Lower(error.to_string()))?;
+            let shader =
+                normalize_generated_text(&artifact.wgsl.ok_or(WebBundleError::MissingWgsl)?);
+            validate_browser_wgsl(&shader)?;
+            let mut layout = WebLayout::from_spirv(&artifact.layout)?;
+            project_actor_field_metadata(
+                db,
+                top_mod,
+                &fragment_entry,
+                &mut layout,
+                &resource_field_indices,
+            )?;
+            let path = format!("{PASS_DIR}/000-raster.wgsl");
+            passes.push(WebPass {
+                source_entry: fragment_entry.clone(),
+                shader: path.clone(),
+                shader_bytes: shader.len() as u64,
+                dispatch: None,
+                draw_vertices: Some(*vertex_count),
+                layout: layout.clone(),
+            });
+            pass_wgsl.push(WebPassShader {
+                path: path.clone(),
+                source: shader.clone(),
+            });
+            final_shader = Some((path, shader));
+            final_layout = Some(layout);
+        }
         for (index, stage) in program.stages.iter().enumerate() {
+            if authored_raster.is_some() {
+                break;
+            }
             let package =
                 mir::build_wasm_runtime_package_for_entry(db, top_mod, &stage.source_entry)
                     .map_err(|error| WebBundleError::Lower(error.to_string()))?;
@@ -2999,13 +3383,14 @@ impl WebBundle {
                 &stage.source_entry,
                 &mut layout,
                 &resource_field_indices,
-            );
+            )?;
             let path = format!("{PASS_DIR}/{index:03}-{kind}.wgsl");
             passes.push(WebPass {
                 source_entry: stage.source_entry.clone(),
                 shader: path.clone(),
                 shader_bytes: shader.len() as u64,
                 dispatch,
+                draw_vertices: None,
                 layout: layout.clone(),
             });
             pass_wgsl.push(WebPassShader {
@@ -3023,31 +3408,55 @@ impl WebBundle {
             )
         })?;
         let layout = final_layout.expect("fragment shader and layout are paired");
-        let (wasm, control, has_fe_schedule) = if let Some(control_export) =
-            control_export.as_deref()
+        let initializer = surface_initializer_contract(
+            db,
+            top_mod,
+            &options.source_entry,
+            &resource_field_indices,
+        )?;
+        let (wasm, control, has_fe_schedule) = if control_export.is_some() || initializer.is_some()
         {
             // A pass graph remains GPU-only for all rendering and resource
-            // work. Its optional Wasm artifact contains only the Fe-authored
-            // surface-control behavior, which returns updated scalar state.
-            let typed_transition = typed_surface_transition_contract(
-                db,
-                top_mod,
-                &options.source_entry,
-                control_export,
-                &resource_field_indices,
-            )?;
-            let schedule_policy = resolve_surface_schedule_policy(
-                db,
-                top_mod,
-                &options.source_entry,
-                control_export,
-            )?;
+            // work. Its optional Wasm artifact contains only Fe-authored state
+            // initialization/control behavior; neither body is reimplemented
+            // by the browser host.
+            let typed_transition = control_export
+                .as_deref()
+                .map(|control_export| {
+                    typed_surface_transition_contract(
+                        db,
+                        top_mod,
+                        &options.source_entry,
+                        control_export,
+                        &resource_field_indices,
+                    )
+                })
+                .transpose()?
+                .flatten();
+            let schedule_policy = control_export
+                .as_deref()
+                .map(|control_export| {
+                    resolve_surface_schedule_policy(
+                        db,
+                        top_mod,
+                        &options.source_entry,
+                        control_export,
+                    )
+                })
+                .transpose()?
+                .flatten();
             validate_surface_schedule_pair(
                 typed_transition.as_ref(),
                 schedule_policy.as_ref(),
                 &options.source_entry,
             )?;
-            let control_entries = vec![control_export.to_owned()];
+            let mut control_entries = Vec::new();
+            if let Some(control_export) = control_export.as_deref() {
+                control_entries.push(control_export.to_owned());
+            }
+            if let Some(initializer) = initializer.as_ref() {
+                control_entries.push(initializer.source_entry.clone());
+            }
             let internal_funcs = schedule_policy
                 .as_ref()
                 .map(|policy| vec![policy.func])
@@ -3061,7 +3470,16 @@ impl WebBundle {
             .map_err(|error| WebBundleError::Lower(error.to_string()))?;
             let mut wasm_options = WasmCompileOptions::default().with_optimization();
             if let Some(contract) = typed_transition.as_ref() {
-                wasm_options = with_typed_surface_export(wasm_options, control_export, contract);
+                wasm_options = with_typed_surface_export(
+                    wasm_options,
+                    control_export
+                        .as_deref()
+                        .expect("typed transition has a source export"),
+                    contract,
+                );
+            }
+            if let Some(initializer) = initializer.as_ref() {
+                wasm_options = with_surface_initializer(wasm_options, initializer);
             }
             if let Some(policy) = schedule_policy.as_ref() {
                 let policy_instance_key =
@@ -3080,14 +3498,23 @@ impl WebBundle {
                     .bytes;
             wasmparser::validate(&wasm)
                 .map_err(|error| WebBundleError::WasmValidation(error.to_string()))?;
-            let control = project_control(
-                db,
-                top_mod,
-                &options.source_entry,
-                control_export,
-                &wasm,
-                &resource_field_indices,
-            )?;
+            if let Some(initializer) = initializer.as_ref() {
+                verify_surface_initializer_export(&wasm, initializer)?;
+            }
+            let control = control_export
+                .as_deref()
+                .map(|control_export| {
+                    project_control(
+                        db,
+                        top_mod,
+                        &options.source_entry,
+                        control_export,
+                        &wasm,
+                        &resource_field_indices,
+                    )
+                })
+                .transpose()?
+                .flatten();
             let has_fe_schedule = typed_transition
                 .as_ref()
                 .is_some_and(|contract| contract.scheduled);
@@ -3199,6 +3626,7 @@ impl WebBundle {
             schedule_policy.as_ref(),
             &options.source_entry,
         )?;
+        let initializer = surface_initializer_contract(db, top_mod, &options.source_entry, &[])?;
         // Canonical actor messages and the surface-control transition are two
         // different roles. Explicitly placed/capability-bearing Fe functions
         // form the public message interface; `navigate` remains a private
@@ -3302,6 +3730,9 @@ impl WebBundle {
         if let Some(control_export) = &control_export {
             wasm_entries.push(control_export.clone());
         }
+        if let Some(initializer) = initializer.as_ref() {
+            wasm_entries.push(initializer.source_entry.clone());
+        }
         let mut seen_wasm_entries = std::collections::BTreeSet::new();
         wasm_entries.retain(|entry| seen_wasm_entries.insert(entry.clone()));
         if wasm_entries.is_empty() {
@@ -3346,6 +3777,9 @@ impl WebBundle {
                 contract,
             );
         }
+        if let Some(initializer) = initializer.as_ref() {
+            wasm_options = with_surface_initializer(wasm_options, initializer);
+        }
         if let Some(policy) = schedule_policy.as_ref() {
             let policy_instance_key =
                 mir::runtime_package_instance_key_for_func(db, wasm_package, policy.func)
@@ -3366,6 +3800,9 @@ impl WebBundle {
         .bytes;
         wasmparser::validate(&wasm)
             .map_err(|error| WebBundleError::WasmValidation(error.to_string()))?;
+        if let Some(initializer) = initializer.as_ref() {
+            verify_surface_initializer_export(&wasm, initializer)?;
+        }
         let control = control_export
             .as_deref()
             .map(|export| project_control(db, top_mod, &options.source_entry, export, &wasm, &[]))
@@ -3408,13 +3845,14 @@ impl WebBundle {
         let wgsl = normalize_generated_text(&artifact.wgsl.ok_or(WebBundleError::MissingWgsl)?);
         validate_browser_wgsl(&wgsl)?;
         let mut layout = WebLayout::from_spirv(&artifact.layout)?;
-        project_actor_field_metadata(db, top_mod, &options.source_entry, &mut layout, &[]);
+        project_actor_field_metadata(db, top_mod, &options.source_entry, &mut layout, &[])?;
         let surface = project_surface(db, top_mod, &options.source_entry, &layout, &[])?;
         let passes = vec![WebPass {
             source_entry: options.source_entry.clone(),
             shader: WGSL_FILE.to_owned(),
             shader_bytes: wgsl.len() as u64,
             dispatch: None,
+            draw_vertices: None,
             layout: layout.clone(),
         }];
 
@@ -4007,6 +4445,7 @@ impl WebLayout {
                         SpirvBuiltinSource::FragmentPositionY => {
                             WebBuiltinSource::FragmentPositionY
                         }
+                        SpirvBuiltinSource::VertexIndex => WebBuiltinSource::VertexIndex,
                     },
                     scalar: scalar_kind(input.scalar),
                 })

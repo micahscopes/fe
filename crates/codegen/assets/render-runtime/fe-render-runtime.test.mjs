@@ -7,8 +7,58 @@ import test from "node:test";
 globalThis.HTMLElement = class HTMLElement {};
 globalThis.customElements = { define() {} };
 
-const { FeSurfaceElement, SurfaceEventKind, SurfaceQueueAction, writeSurfaceEventBatch } =
+const { FeSurfaceElement, SurfaceEventKind, SurfaceQueueAction, rasterDrawVertexCount, requiresGpuPassGraph, writeSurfaceEventBatch } =
   await import("./fe-render-runtime.js");
+
+test("fixed host consumes the Fe-derived authored-raster draw count", () => {
+  assert.equal(rasterDrawVertexCount({ draw_vertices: 7 }), 7);
+  assert.equal(rasterDrawVertexCount({}), 3, "legacy fullscreen render remains three vertices");
+  assert.throws(
+    () => rasterDrawVertexCount({ draw_vertices: 0 }),
+    /invalid compiler-derived raster vertex count/,
+  );
+});
+
+test("one authored raster pass takes the GPU pass-graph path", () => {
+  assert.equal(
+    requiresGpuPassGraph([{ draw_vertices: 13824, layout: { mode: "render" } }]),
+    true,
+  );
+  assert.equal(
+    requiresGpuPassGraph([{ layout: { mode: "render" } }]),
+    false,
+    "legacy fullscreen rendering keeps its established path",
+  );
+});
+
+test("authored raster varyings never become Fe actor or resource arguments", () => {
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._builtins = [{ arg_index: 0 }];
+  surface._members = [
+    { name: "yaw", arg_index: 7 },
+    { name: "lambda", arg_index: 6 },
+  ];
+  surface._memberIndexByName = new Map([
+    ["lambda", 0],
+    ["yaw", 1],
+  ]);
+  surface._memberIndexByArg = new Map([
+    [6, 0],
+    [7, 1],
+  ]);
+  surface._uniforms = [0.15, 0.6];
+  surface._resources = [];
+
+  assert.deepEqual(surface._surfaceActorArgs(), [0.15, 0.6]);
+  assert.deepEqual(surface._surfaceResourceArgs(), []);
+
+  surface._resources = [{ name: "reference_orbit" }];
+  assert.deepEqual(
+    surface._surfaceResourceArgs(),
+    [0n],
+    "resident transitions receive only declared resources, not varying gaps",
+  );
+});
 
 test("fixed host writes untouched SurfaceEvent records in the versioned memory layout", () => {
   const memory = new WebAssembly.Memory({ initial: 1 });
@@ -341,6 +391,7 @@ test("gesture and parameter edits stay in one ordered raw batch until Fe admits 
   surface._backingHeight = 480;
   surface._uniforms = [3];
   surface._memberIndexByName = new Map([["steps", 0]]);
+  surface._surfaceParamIndexByName = new Map([["steps", 0]]);
   const transported = [];
   surface._runSurfaceFrame = events => {
     transported.push(structuredClone(events));

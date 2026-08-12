@@ -143,7 +143,7 @@ try {
     const script = document.querySelector('script[data-fe-mount="#source-inspector"], script[data-fe-mount="#gallery-shell"]');
     const component = document.querySelector("#source-inspector, #gallery-shell");
     const surfaces = Array.from(document.querySelectorAll("fe-surface"));
-    const expectedSurfaces = document.querySelector(".gallery-head") ? 11 : 1;
+    const expectedSurfaces = document.querySelector(".gallery-head") ? 12 : 1;
     const shell = document.querySelector("#gallery-shell");
     const sequenceComplete = !shell ||
       (shell._state?.[16] === expectedSurfaces && shell._state?.[17] === 0);
@@ -173,7 +173,7 @@ try {
   if (isGallery) {
     assert.deepEqual(
       await page.evaluate(() => globalThis.__feInspectorE2E.surfaceTerminal),
-      Array.from({ length: 11 }, (_, index) => index),
+      Array.from({ length: 12 }, (_, index) => index),
       "Fe did not activate every gallery surface exactly in compiler-derived order",
     );
     assert.deepEqual(await page.evaluate(() => ({
@@ -187,14 +187,15 @@ try {
     })), {
       title: "Fe · GPU gallery",
       pageMarker: false,
-      figures: 12,
-      surfaces: 11,
+      figures: 13,
+      surfaces: 12,
       components: 2,
       captions: [
         "known color",
         "rollcall pipeline",
         "cga3d",
         "qcga",
+        "qcga pencil",
         "desargues",
         "plasma",
         "distance field",
@@ -227,6 +228,57 @@ try {
       e0: -1, e1: -1, e2: -1, e3: -1, e4: -1, e5: -1,
       e6: 0, e7: 0, e8: 0, e9: 0, e10: 0, e11: 0,
     }, "DEC d0 did not execute through the generated Worker/message path");
+
+    // Exercise the new authored vertex/fragment tile through actual pointer
+    // events. The browser contributes only coordinates; the changed yaw must
+    // come back from the resident Fe transition, while the solver certificate
+    // remains untouched. Skip only when this run explicitly permits a missing
+    // WebGPU implementation and the GPU-only surface could not become ready.
+    const qcgaPointer = await page.evaluate(async tolerateUnavailable => {
+      const figure = Array.from(document.querySelectorAll(".grid > figure"))
+        .find(node => node.querySelector("figcaption > b")?.textContent === "qcga pencil");
+      const surface = figure?.querySelector("fe-surface");
+      if (!surface) throw new Error("QCGA pencil surface is missing");
+      if (surface._fsm === "error") {
+        const detail = surface.shadowRoot?.querySelector(".notice")?.textContent ??
+          "QCGA pencil failed to boot";
+        const unavailable = /no WebGPU adapter is available|WebGPU is required|does not expose WebGPU/.test(detail);
+        if (tolerateUnavailable && unavailable) return { skipped: true, detail };
+        throw new Error(detail);
+      }
+      surface.scrollIntoView({ block: "center" });
+      await surface.live();
+      const canvas = surface._adoptedCanvas || surface._liveCanvas || surface._posterCanvas;
+      const rect = canvas.getBoundingClientRect();
+      return {
+        skipped: false,
+        x: rect.left + rect.width * 0.5,
+        y: rect.top + rect.height * 0.5,
+        yaw: surface.params.yaw,
+        certificate: surface._uniforms.slice(4),
+      };
+    }, tolerateUnavailableWebGpu);
+    if (!qcgaPointer.skipped) {
+      await page.mouse.move(qcgaPointer.x, qcgaPointer.y);
+      await page.mouse.down();
+      await page.mouse.move(qcgaPointer.x + 25, qcgaPointer.y);
+      await page.mouse.up();
+      await page.waitForFunction(previousYaw => {
+        const figure = Array.from(document.querySelectorAll(".grid > figure"))
+          .find(node => node.querySelector("figcaption > b")?.textContent === "qcga pencil");
+        return figure.querySelector("fe-surface").params.yaw !== previousYaw;
+      }, {}, qcgaPointer.yaw);
+      const qcgaAfter = await page.evaluate(() => {
+        const figure = Array.from(document.querySelectorAll(".grid > figure"))
+          .find(node => node.querySelector("figcaption > b")?.textContent === "qcga pencil");
+        const surface = figure.querySelector("fe-surface");
+        return { yaw: surface.params.yaw, certificate: surface._uniforms.slice(4) };
+      });
+      assert.notEqual(qcgaAfter.yaw, qcgaPointer.yaw,
+        "raw pointer movement did not cross the resident Fe QCGA transition");
+      assert.deepEqual(qcgaAfter.certificate, qcgaPointer.certificate,
+        "camera interaction rewrote the Fe-owned solved-pencil certificate");
+    }
   } else {
     assert.deepEqual(await page.evaluate(() => ({
       title: document.title,
