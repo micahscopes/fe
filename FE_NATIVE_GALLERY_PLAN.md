@@ -5,7 +5,7 @@ Status: active direction
 Origin: honesty audit of Claude Code session
 `e806786e-dff4-43c1-b25f-849ba82a8a02` and the subsequent Codex gallery work.
 
-## Execution ledger (2026-08-11)
+## Execution ledger (2026-08-12)
 
 - Phase 0 is landed and pushed in `855b982a4`: canonical-gallery attribution,
   provenance, fixed-host hashing, a purity gate, corrected claims, and removal
@@ -462,6 +462,18 @@ Origin: honesty audit of Claude Code session
   arbitrary operator-expression tree, normalize across that tree, derive CSE,
   or choose an emitted schedule automatically. That is real groundwork, not a
   completed expression compiler.
+- The first reusable GA expression-compiler slice is now implemented and
+  specified in `docs/mb2/GA_SINGLE_INVOCATION_COMPILER.md`. The new `ga_expr`
+  ingot provides typed metric, expression, support, program, numerical-policy,
+  and exact-term vocabularies. A PGA twice-wedge fixture proves the complete
+  Fe path: compositional support inference, a closed six-term CTFE type
+  witness, FCO-emitted shared straight-line arithmetic, zero-import Wasmtime
+  execution over 2,005 cases against independent schedule and dense semantic
+  oracles, and browser-valid WGSL with six survivor products and no runtime
+  planning control flow. This is deliberately recorded as a vertical slice:
+  the exact planner is still example-specific, automatic arbitrary-tree term
+  normalization, reflected leaf-slot derivation, hash-consing, and scheduling
+  remain Phase 7 work.
 - Mandelbrot-specific native transition tapes, general typed
   lifecycle/reactive streams, pointer capture, picking/messages, resident
   outer-gallery orchestration, and runtime-manifest removal remain open.

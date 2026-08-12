@@ -3,6 +3,13 @@
 Status: architecture research, 2026-07-23. This note describes the checked-in
 compiler and experiments at `4727577d0`; it does not propose syntax changes.
 
+Historical note (2026-08-12): provider support has since gained bounded
+base-graph normalization and preorder traversal for closed ground recursive
+plans. The current implementation boundary and the typed single-invocation GA
+compiler design are documented in `GA_SINGLE_INVOCATION_COMPILER.md`. Statements
+below saying that providers cannot normalize any `Schedule<N>` describe the
+older checkpoint, not the current branch.
+
 ## Conclusion
 
 Fe can implement a useful **typed, bounded symbolic compiler** now. The most

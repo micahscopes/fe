@@ -1,0 +1,7 @@
+[ingot]
+name = "ga_expr"
+version = "0.1.0"
+
+[dependencies]
+core = { path = "../core" }
+sparse_clifford = { path = "../sparse_clifford" }

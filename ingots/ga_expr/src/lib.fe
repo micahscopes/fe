@@ -1,0 +1,279 @@
+//! Static geometric-algebra expressions and conservative support analysis.
+//!
+//! This is the first reusable layer of the single-invocation GA compiler. A
+//! ground expression type is ordinary Fe data for CTFE/FCO: operators remain
+//! nominal, operand support is carried by leaf types, and `GaSupport<M>`
+//! computes possible output blades before any runtime code exists.
+//!
+//! Support is deliberately conservative. It removes structural zeros but does
+//! not claim coefficient cancellation. Exact term normalization, numeric
+//! policy, and FCO emission are later layers described in
+//! `docs/mb2/GA_SINGLE_INVOCATION_COMPILER.md`.
+//!
+//! The implemented metric family is bounded diagonal/orthogonal geometry with
+//! at most five generators, matching `sparse_clifford::BladeSet`. Outer and
+//! Poincare-dual support are metric-independent inside that envelope. General
+//! symmetric/off-diagonal metrics require the exact term planner; they are not
+//! approximated by pretending the diagonal support rule applies.
+
+use sparse_clifford::{
+    BladeSet, blade_grade, blade_set, support_capacity_mask, support_dimension_valid,
+    support_gp, support_grade,
+}
+
+/// A bounded diagonal metric. Bit `i` of `NONZERO_SQUARES` says generator `i`
+/// has a nonzero square; its sign belongs to exact coefficient planning and
+/// does not affect conservative support.
+pub struct DiagonalMetric<const DIMENSION: u32, const NONZERO_SQUARES: u32> {}
+
+pub trait StaticDiagonalMetric {
+    const DIMENSION: u32
+    const NONZERO_SQUARES: u32
+}
+
+impl<const Dimension: u32, const NonzeroSquares: u32> StaticDiagonalMetric
+    for DiagonalMetric<Dimension, NonzeroSquares>
+{
+    const DIMENSION: u32 = Dimension
+    const NONZERO_SQUARES: u32 = NonzeroSquares
+}
+
+/// One runtime multivector input. `Slot` is semantic leaf identity for the
+/// later term/DAG planner; `Mask` is a bitset over basis-blade indices.
+pub struct Input<const Slot: usize, const Mask: u32> {}
+
+pub struct Sum<A, B> {}
+pub struct Difference<A, B> {}
+pub struct Neg<A> {}
+pub struct Geometric<A, B> {}
+pub struct Outer<A, B> {}
+pub struct LeftContraction<A, B> {}
+pub struct RightContraction<A, B> {}
+pub struct ScalarProduct<A, B> {}
+pub struct Grade<A, const K: u32> {}
+pub struct Reverse<A> {}
+pub struct PoincareDual<A> {}
+pub struct Regressive<A, B> {}
+
+/// Preserve the authored expression tree's floating-point evaluation order.
+/// Pure subexpressions may be shared, but reassociation and coefficient
+/// collection are forbidden.
+pub struct Strict {}
+
+/// Permit exact symbolic coefficient collection followed by a balanced
+/// straight-line schedule. Algebraically equivalent, but not promised to be
+/// bit-identical to the authored f32 association.
+pub struct AlgebraicBalanced {}
+
+/// A fully static compilation request. `E` is the expression, `M` the metric,
+/// and `P` the numerical policy. The value contains no runtime metadata.
+pub struct GaProgram<E, M, P> {}
+
+/// Conservative possible output blades of expression `Self` in metric `M`.
+/// A dense/unknown leaf should explicitly use the metric's capacity mask.
+pub trait GaSupport<M: StaticDiagonalMetric> {
+    const SUPPORT: u32
+}
+
+impl<
+    M: StaticDiagonalMetric,
+    const Slot: usize,
+    const Mask: u32,
+> GaSupport<M> for Input<Slot, Mask> {
+    const SUPPORT: u32 = Mask & support_capacity_mask(M::DIMENSION)
+}
+
+impl<M: StaticDiagonalMetric, A: GaSupport<M>, B: GaSupport<M>> GaSupport<M>
+    for Sum<A, B>
+{
+    const SUPPORT: u32 = A::SUPPORT | B::SUPPORT
+}
+
+impl<M: StaticDiagonalMetric, A: GaSupport<M>, B: GaSupport<M>> GaSupport<M>
+    for Difference<A, B>
+{
+    const SUPPORT: u32 = A::SUPPORT | B::SUPPORT
+}
+
+impl<M: StaticDiagonalMetric, A: GaSupport<M>> GaSupport<M> for Neg<A> {
+    const SUPPORT: u32 = A::SUPPORT
+}
+
+impl<M: StaticDiagonalMetric, A: GaSupport<M>> GaSupport<M> for Reverse<A> {
+    const SUPPORT: u32 = A::SUPPORT
+}
+
+impl<M: StaticDiagonalMetric, A: GaSupport<M>, const K: u32> GaSupport<M>
+    for Grade<A, K>
+{
+    const SUPPORT: u32 = support_grade(
+        blade_set(A::SUPPORT, M::DIMENSION),
+        K,
+    ).bits
+}
+
+impl<M: StaticDiagonalMetric, A: GaSupport<M>, B: GaSupport<M>> GaSupport<M>
+    for Geometric<A, B>
+{
+    const SUPPORT: u32 = support_gp(
+        blade_set(A::SUPPORT, M::DIMENSION),
+        blade_set(B::SUPPORT, M::DIMENSION),
+        M::NONZERO_SQUARES,
+    ).bits
+}
+
+impl<M: StaticDiagonalMetric, A: GaSupport<M>, B: GaSupport<M>> GaSupport<M>
+    for Outer<A, B>
+{
+    const SUPPORT: u32 = support_gp(
+        blade_set(A::SUPPORT, M::DIMENSION),
+        blade_set(B::SUPPORT, M::DIMENSION),
+        0,
+    ).bits
+}
+
+/// Conservative support for a grade-selected diagonal-metric product. `Mode`
+/// is 0 for left contraction, 1 for right contraction, and 2 for scalar
+/// product. This is a CTFE scan, never a runtime shader loop.
+pub const fn support_contraction(
+    _ left: BladeSet,
+    _ right: BladeSet,
+    _ nonzero_square_generators: u32,
+    _ mode: u32,
+) -> BladeSet {
+    if left.dimension != right.dimension || !support_dimension_valid(left.dimension) {
+        return blade_set(0, left.dimension)
+    }
+    let blade_count: u32 = 1 << left.dimension
+    let mut l: u32 = 0
+    let mut output: u32 = 0
+    while l < blade_count {
+        if ((left.bits >> l) & 1) == 1 {
+            let mut r: u32 = 0
+            while r < blade_count {
+                if ((right.bits >> r) & 1) == 1 {
+                    let shared: u32 = l & r
+                    if (shared & nonzero_square_generators) == shared {
+                        let lg = blade_grade(l)
+                        let rg = blade_grade(r)
+                        let og = blade_grade(l ^ r)
+                        let keep = if mode == 0 {
+                            lg <= rg && og == rg - lg
+                        } else if mode == 1 {
+                            rg <= lg && og == lg - rg
+                        } else {
+                            og == 0
+                        }
+                        if keep { output = output | (1 << (l ^ r)) }
+                    }
+                }
+                r = r + 1
+            }
+        }
+        l = l + 1
+    }
+    blade_set(output, left.dimension)
+}
+
+impl<M: StaticDiagonalMetric, A: GaSupport<M>, B: GaSupport<M>> GaSupport<M>
+    for LeftContraction<A, B>
+{
+    const SUPPORT: u32 = support_contraction(
+        blade_set(A::SUPPORT, M::DIMENSION),
+        blade_set(B::SUPPORT, M::DIMENSION),
+        M::NONZERO_SQUARES,
+        0,
+    ).bits
+}
+
+impl<M: StaticDiagonalMetric, A: GaSupport<M>, B: GaSupport<M>> GaSupport<M>
+    for RightContraction<A, B>
+{
+    const SUPPORT: u32 = support_contraction(
+        blade_set(A::SUPPORT, M::DIMENSION),
+        blade_set(B::SUPPORT, M::DIMENSION),
+        M::NONZERO_SQUARES,
+        1,
+    ).bits
+}
+
+impl<M: StaticDiagonalMetric, A: GaSupport<M>, B: GaSupport<M>> GaSupport<M>
+    for ScalarProduct<A, B>
+{
+    const SUPPORT: u32 = support_contraction(
+        blade_set(A::SUPPORT, M::DIMENSION),
+        blade_set(B::SUPPORT, M::DIMENSION),
+        M::NONZERO_SQUARES,
+        2,
+    ).bits
+}
+
+/// Metric-independent complement-blade support (Poincare dual), bounded by the
+/// same explicit five-generator envelope as `BladeSet`.
+pub const fn support_poincare_dual(_ value: BladeSet) -> BladeSet {
+    if !support_dimension_valid(value.dimension) {
+        return blade_set(0, value.dimension)
+    }
+    let blade_count: u32 = 1 << value.dimension
+    let pseudoscalar: u32 = blade_count - 1
+    let mut blade: u32 = 0
+    let mut output: u32 = 0
+    while blade < blade_count {
+        if ((value.bits >> blade) & 1) == 1 {
+            output = output | ((1 as u32) << (pseudoscalar ^ blade))
+        }
+        blade = blade + 1
+    }
+    blade_set(output, value.dimension)
+}
+
+impl<M: StaticDiagonalMetric, A: GaSupport<M>> GaSupport<M> for PoincareDual<A> {
+    const SUPPORT: u32 = support_poincare_dual(
+        blade_set(A::SUPPORT, M::DIMENSION),
+    ).bits
+}
+
+impl<M: StaticDiagonalMetric, A: GaSupport<M>, B: GaSupport<M>> GaSupport<M>
+    for Regressive<A, B>
+{
+    const SUPPORT: u32 = support_poincare_dual(support_gp(
+        support_poincare_dual(blade_set(A::SUPPORT, M::DIMENSION)),
+        support_poincare_dual(blade_set(B::SUPPORT, M::DIMENSION)),
+        0,
+    )).bits
+}
+
+// Canonical exact-term witness vocabulary. The support layer above is already
+// compositional; the next compiler layer materializes normalized ground trees
+// of these nodes for bounded FCO inspection and straight-line emission.
+pub struct TermZero {}
+pub struct TermAdd<H, T> {}
+
+/// One bilinear survivor. Leaf/component identities are semantic slots, not
+/// DOM/binding IDs. The first prototype uses non-negative magnitude plus a
+/// 0/1 sign because FCO's reflected const values are currently unsigned. The
+/// full design generalizes this to an exact scalar-domain coefficient.
+pub struct BilinearTerm<
+    const Left: usize,
+    const Right: usize,
+    const OutputBlade: usize,
+    const Magnitude: usize,
+    const Negative: usize,
+> {}
+
+// Compile-time examples over PGA(2,0,1): e0^2=0, e1^2=e2^2=+1.
+type Pga2 = DiagonalMetric<3, 6>
+type LineA = Input<0, 22>
+type LineB = Input<1, 22>
+type LineSum = Sum<LineA, LineB>
+type LineMeet = Outer<LineSum, LineB>
+type LineGp = Geometric<LineA, LineB>
+type ScalarLane = Grade<LineGp, 0>
+type DualLine = PoincareDual<LineA>
+
+static_assert(<LineA as GaSupport<Pga2>>::SUPPORT == 22)
+static_assert(<LineSum as GaSupport<Pga2>>::SUPPORT == 22)
+static_assert(<LineMeet as GaSupport<Pga2>>::SUPPORT == 104)
+static_assert(<LineGp as GaSupport<Pga2>>::SUPPORT == 105)
+static_assert(<ScalarLane as GaSupport<Pga2>>::SUPPORT == 1)
+static_assert(<DualLine as GaSupport<Pga2>>::SUPPORT == 104)
