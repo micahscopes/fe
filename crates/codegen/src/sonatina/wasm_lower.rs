@@ -66,7 +66,7 @@ use sonatina_ir::{
             Fmul, Fneg, Fround, Fsqrt, Fsub, Ftrunc, Mul, Sar, Shl, Shr, Sub, Udiv, Umod,
         },
         cast::{Bitcast, F32ToI32, I32ToF32, Sext, Trunc, Zext},
-        cmp::{Eq as CmpEq, Feq, Fle, Flt, Lt, Slt},
+        cmp::{Eq as CmpEq, Feq, Fle, Flt, IsZero, Lt, Slt},
         control_flow::{Br, Call, Jump, Phi, Return, Unreachable},
         data::{MemAllocDynamic, Mload, Mstore, ObjIndex, ObjLoad, ObjProj, ObjStore},
         logic::{And, Or, Xor},
@@ -7390,9 +7390,17 @@ where
                 ))),
             };
         }
-        Err(LowerError::Unsupported(format!(
-            "wasm target (R1) unary op `{op:?}` is not supported"
-        )))
+        let is = self.inst_set();
+        let value = self.local_value(value)?;
+        match op {
+            // Fe's logical `!` is typed over bool before MIR. Sonatina carries
+            // that as i1; Wasm represents it as i32 and translates IsZero to
+            // the width-correct `i32.eqz` while retaining an i1 result in IR.
+            UnOp::Not => Ok(self.fb.insert_inst(IsZero::new(is, value), Type::I1)),
+            other => Err(LowerError::Unsupported(format!(
+                "wasm target (R1) unary op `{other:?}` is not supported"
+            ))),
+        }
     }
 
     fn lower_call(

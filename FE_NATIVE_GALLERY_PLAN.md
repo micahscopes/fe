@@ -432,13 +432,12 @@ Origin: honesty audit of Claude Code session
   backend parity remain open. TodoMVC intentionally caps itself at 32 todos and
   96 UTF-8 bytes per title while those richer storage interfaces are designed.
 - A low-hanging Wasm language-parity sweep is now explicit early work. The
-  sequential gallery policy exposed that ordinary boolean unary `!` reaches
-  MIR as `Unary::Not` but the Wasm target currently rejects it; the source
-  temporarily spells `waiting == false`. Implement `Not` generically in the
-  Wasm lowering, add semantic execution regressions (not byte matching), audit
-  the remaining ordinary unary/binary/control operations against native, and
-  restore the idiomatic source spelling. Small backend omissions must not force
-  visible contortions into otherwise exemplary Fe programs.
+  sequential gallery policy exposed that ordinary boolean unary `!` reached
+  MIR as `Unary::Not` but the Wasm target rejected it. The exact portable
+  `IsZero` lowering and executed truth-table/composed-comparison regression are
+  now implemented, and the policy again spells idiomatic `!waiting`. Audit the
+  remaining ordinary unary/binary/control operations against native so small
+  backend omissions do not force visible contortions into exemplary Fe code.
 - Gallery render declarations now opt into compiler-correlated sequential
   activation, with a reusable Fe state machine owning the cursor, waiting
   state, fail-open completion policy, and 30-second deadline. This is clearly

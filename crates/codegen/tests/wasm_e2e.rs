@@ -792,6 +792,62 @@ pub fn le_u32(a: u32, b: u32) -> bool { a <= b }
     );
 }
 
+/// Ordinary Fe logical negation reaches MIR as `UnOp::Not`. Execute both
+/// truth-table values and a composed comparison under Wasmtime so this pins
+/// language semantics, not merely the presence of a backend opcode.
+#[test]
+fn fe_bool_not_runs_on_wasm() {
+    let source = r#"
+pub fn negate(value: bool) -> bool { !value }
+pub fn not_less(a: i32, b: i32) -> bool { !(a < b) }
+pub fn main() -> u32 { if !false { 1 } else { 0 } }
+"#;
+    let wasm = compile_to_wasm("wasm_bool_not.fe", source);
+    let operators = wasmparser::Parser::new(0)
+        .parse_all(&wasm)
+        .filter_map(|payload| match payload.expect("valid wasm") {
+            wasmparser::Payload::CodeSectionEntry(body) => Some(
+                body.get_operators_reader()
+                    .expect("operator reader")
+                    .into_iter()
+                    .map(|op| format!("{:?}", op.expect("valid operator")))
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        operators.contains("I32Eqz"),
+        "generated Wasm lacks the exact bool-not operation:\n{operators}"
+    );
+
+    let (mut store, instance) = instantiate(&wasm);
+    let negate = instance
+        .get_typed_func::<i32, i32>(&mut store, "negate")
+        .expect("negate export");
+    assert_eq!(negate.call(&mut store, 0).unwrap(), 1);
+    assert_eq!(negate.call(&mut store, 1).unwrap(), 0);
+
+    let not_less = instance
+        .get_typed_func::<(i32, i32), i32>(&mut store, "not_less")
+        .expect("not_less export");
+    for (a, b) in [(-2, -1), (-1, -2), (0, 0), (7, 9), (9, 7)] {
+        assert_eq!(
+            not_less.call(&mut store, (a, b)).unwrap(),
+            (!(a < b)) as i32,
+            "!({a} < {b})"
+        );
+    }
+
+    let evm = compile_to_evm("wasm_bool_not.fe", source);
+    assert!(
+        !evm.is_empty(),
+        "bool-not EVM twin bytecode must be non-empty"
+    );
+}
+
 /// R2 bitwise: `& | ^ << >>` on i32 and u32 through the R1 wasm path, each
 /// checked against a Rust oracle. and/or/xor result bits are signedness-blind;
 /// `>>` is NOT (Sar for i32, Shr for u32), so both shift-right opcodes must

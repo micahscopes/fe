@@ -185,7 +185,7 @@ impl SequentialSurfaceActivation {
             discovered = 0
             waiting = false
         }
-        if disconnected == false && waiting == false && next < 32 && (discovered & (1 << next)) != 0 {
+        if !disconnected && !waiting && next < 32 && (discovered & (1 << next)) != 0 {
             waiting = true
             issue = true
         }
