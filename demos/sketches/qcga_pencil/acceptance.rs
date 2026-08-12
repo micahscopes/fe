@@ -22,20 +22,21 @@
 //!    VERTEX_COUNT.
 //! 8. Lane intents are honest (wasm lanes say wasm, host lanes say
 //!    host-effect + main thread + WebGPU dispatch capability).
-//! 9. THE WALL, pinned: neither the canonical lane vocabulary nor the
-//!    render-mode WebBundle can root `surface_vertex` / `surface_fragment`
-//!    today. When these assertions fail, raster placement has begun to exist;
-//!    replace the pins with real pipeline gates.
+//! 9. Authored raster placement is nominal and typed: the compiler derives one
+//!    `SurfaceVarying` interface for `PencilRaster`'s vertex/fragment pair and
+//!    selects its fragment as the render entry. Paired SPIR-V lowering remains
+//!    a named, fail-closed wall; it must never substitute the fullscreen
+//!    envelope while that backend work is incomplete.
 
 use std::path::Path;
 
 use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
-    CanonicalExecution, CanonicalFieldLayout, CanonicalInterfaceManifest,
-    CanonicalLane, CanonicalLayout, CanonicalPlacement, CanonicalShape, WasmCompileOptions,
-    WebBuildOptions, WebBundle, canonical_lane_decl_from_entry,
-    compile_runtime_package_wasm_with_options,
+    CanonicalExecution, CanonicalFieldLayout, CanonicalInterfaceManifest, CanonicalLane,
+    CanonicalLayout, CanonicalPlacement, CanonicalShape, CanonicalType, WasmCompileOptions,
+    WebActorStageKind, WebBuildOptions, WebBundle, WebBundleMode, actor_gpu_program,
+    actor_web_entry, canonical_lane_decl_from_entry, compile_runtime_package_wasm_with_options,
 };
 use hir::hir_def::{HirIngot, TopLevelMod};
 use url::Url;
@@ -257,7 +258,11 @@ fn direction(vid: u32) -> ([f64; 3], u32) {
     let theta = std::f64::consts::PI * (band + dr) as f64 / ROWS as f64;
     let phi = std::f64::consts::TAU * (col + dc) as f64 / COLS as f64;
     (
-        [theta.sin() * phi.cos(), theta.cos(), theta.sin() * phi.sin()],
+        [
+            theta.sin() * phi.cos(),
+            theta.cos(),
+            theta.sin() * phi.sin(),
+        ],
         sheet,
     )
 }
@@ -380,7 +385,10 @@ fn nine_conspiring_points_leave_a_pencil() {
         };
         assert!((dot(&q0, &q0) - 1.0).abs() < 1e-4, "q0 must be unit");
         assert!((dot(&q1, &q1) - 1.0).abs() < 1e-4, "q1 must be unit");
-        assert!(dot(&q0, &q1).abs() < 1e-3, "pencil basis must be orthogonal");
+        assert!(
+            dot(&q0, &q1).abs() < 1e-3,
+            "pencil basis must be orthogonal"
+        );
 
         // Independent oracle: BOTH basis surfaces vanish at all nine points,
         // therefore (exact linearity, computed in f64) EVERY pencil member
@@ -403,8 +411,14 @@ fn nine_conspiring_points_leave_a_pencil() {
         // configuration was built from: cylinder x^2+y^2-1/2 and plane pair
         // z^2-1/2. Membership = residue after projecting onto the basis.
         for (name, target) in [
-            ("cylinder", [1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.5]),
-            ("plane pair", [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.5]),
+            (
+                "cylinder",
+                [1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.5],
+            ),
+            (
+                "plane pair",
+                [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.5],
+            ),
         ] {
             let target: [f32; 10] = target;
             let norm = dot(&target, &target).sqrt();
@@ -803,46 +817,72 @@ fn lane_intents_declare_honest_placement() {
     });
 }
 
-/// The wall, pinned mechanically. `surface_vertex` / `surface_fragment` are
-/// the placed behaviors this program-actor exists for; the current toolchain
-/// must reject them at both boundaries they would need to cross. When either
-/// assertion starts failing, the raster placement path has begun to exist:
-/// replace this test with real pipeline gates instead of deleting it.
+/// The standard authored-raster meaning is already expressible and checked;
+/// only paired backend lowering remains pinned. This protects both sides of
+/// the honesty boundary: stage roles must not masquerade as message lanes, and
+/// the compiler must not render QCGA through its old synthesized fullscreen
+/// vertex stage.
 #[test]
-fn stage_placement_is_not_expressible_today() {
+fn authored_raster_plan_is_typed_and_backend_wall_is_explicit() {
     with_sketch(|db, top_mod| {
-        // Boundary 1: the canonical actor vocabulary. A stage behavior is not
-        // a single-request record lane (it takes the program state plus a
-        // second argument), so today's declaration path must refuse both.
+        let program = actor_gpu_program(db, top_mod)
+            .expect("derive QCGA raster program")
+            .expect("QCGA GPU actor");
+        assert_eq!(program.actor, "PencilRaster");
+        assert_eq!(program.stages.len(), 2);
+        assert_eq!(program.stages[0].source_entry, "surface_vertex");
+        assert_eq!(program.stages[1].source_entry, "surface_fragment");
+
+        let WebActorStageKind::Vertex { varying: vertex } = &program.stages[0].kind else {
+            panic!("expected vertex role, got {:?}", program.stages[0].kind);
+        };
+        let WebActorStageKind::RasterFragment { varying: fragment } = &program.stages[1].kind
+        else {
+            panic!(
+                "expected raster fragment role, got {:?}",
+                program.stages[1].kind
+            );
+        };
+        assert_eq!(
+            vertex, fragment,
+            "both stages must share one nominal payload"
+        );
+        let CanonicalType::Record(fields) = vertex else {
+            panic!("SurfaceVarying must retain its named record shape: {vertex:?}");
+        };
+        assert_eq!(
+            fields
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
+            ["nx", "ny", "nz", "glow", "sheet", "accuse"],
+        );
+        assert!(fields.iter().all(|field| field.ty == CanonicalType::F32));
+        assert_eq!(
+            actor_web_entry(db, top_mod).expect("derive QCGA web entry"),
+            Some(("surface_fragment".to_owned(), WebBundleMode::Render)),
+        );
+
+        // Stage invocations are pipeline roles, not host request/response
+        // messages. Their rejection by the canonical message ABI is correct.
         for name in ["surface_vertex", "surface_fragment"] {
             let decl = canonical_lane_decl_from_entry(db, top_mod, name, name);
             assert!(
                 decl.is_err(),
-                "canonical lane vocabulary unexpectedly accepted `{name}`; \
-                 the wall has moved, replace this pin with a real gate"
+                "canonical message vocabulary unexpectedly accepted stage `{name}`"
             );
         }
 
-        // Boundary 2: the render-mode web bundle. Its contract is a fixed
-        // fullscreen vertex stage and a per-pixel (i32, i32, scalars) -> u32
-        // fragment; a varying-returning vertex behavior must not root.
-        let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            WebBundle::compile(db, top_mod, WebBuildOptions::render("surface_vertex", None))
-                .map(|_| ())
-        }));
-        let expressible = matches!(attempt, Ok(Ok(())));
+        let error = WebBundle::compile(
+            db,
+            top_mod,
+            WebBuildOptions::render("surface_fragment", None),
+        )
+        .unwrap_err();
+        let text = format!("{error}");
         assert!(
-            !expressible,
-            "render-mode WebBundle unexpectedly rooted `surface_vertex`; \
-             the wall has moved, replace this pin with a real gate"
-        );
-
-        // Control: the same ingot's wasm lanes root fine, so the refusals
-        // above are about STAGE PLACEMENT, not about the sketch being broken.
-        let control = canonical_lane_decl_from_entry(db, top_mod, "probe", "probe");
-        assert!(
-            control.is_ok(),
-            "control failed: the probe lane should be expressible today"
+            text.contains("authored raster vertex/varying SPIR-V lowering is not implemented yet"),
+            "unexpected authored-raster backend boundary: {text}"
         );
     });
 }

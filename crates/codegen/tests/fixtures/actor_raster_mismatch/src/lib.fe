@@ -1,0 +1,34 @@
+use std::webgpu::{
+    ClipPosition,
+    FragmentStage,
+    GpuProgram,
+    RasterVertex,
+    VertexStage,
+    WebGpuBackend,
+}
+
+struct VertexPayload { value: f32 }
+impl Copy for VertexPayload {}
+struct FragmentPayload { value: f32 }
+impl Copy for FragmentPayload {}
+
+actor Mismatch uses (GpuProgram<WebGpuBackend>) {
+    tint: f32,
+
+    fn vertices(self, vertex_index: u32) -> RasterVertex<VertexPayload>
+        uses (VertexStage<VertexPayload>)
+    {
+        RasterVertex {
+            position: ClipPosition {
+                x: 0.0, y: 0.0, z: 0.0, w: 1.0,
+            },
+            varying: VertexPayload { value: self.tint },
+        }
+    }
+
+    fn shade(self, varying: FragmentPayload) -> u32
+        uses (FragmentStage<FragmentPayload>)
+    {
+        if varying.value > self.tint { 4294901760 } else { 4278190335 }
+    }
+}

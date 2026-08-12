@@ -437,7 +437,18 @@ pub enum WebActorStageKind {
         workgroup_size: [u32; 3],
         dispatch: [u32; 3],
     },
+    /// Authored vertex behavior. The payload tree is derived from the role's
+    /// nominal `V` and retained only as compiler state; it is not serialized
+    /// into the transitional render manifest.
+    Vertex {
+        varying: CanonicalType,
+    },
     Fragment,
+    /// Authored fragment behavior paired with `Vertex` by exact nominal
+    /// payload identity before this serializable-free descriptor is produced.
+    RasterFragment {
+        varying: CanonicalType,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -605,6 +616,136 @@ fn compute_stage_shape(
     Ok((workgroup_size, dispatch))
 }
 
+fn role_payload_ty<'db>(
+    db: &'db DriverDataBase,
+    behavior: hir::hir_def::Func<'db>,
+    role_path: PathId<'db>,
+    stage_name: &str,
+) -> Result<TyId<'db>, WebBundleError> {
+    let role_ty = resolve_metadata_ty(db, role_path, behavior.scope()).ok_or_else(|| {
+        WebBundleError::EntryDerivation(format!("{stage_name}-stage role did not resolve"))
+    })?;
+    let [payload, ..] = role_ty.generic_args(db) else {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "{stage_name}-stage role requires one varying payload type"
+        )));
+    };
+    Ok(*payload)
+}
+
+fn is_primitive(db: &DriverDataBase, ty: TyId<'_>, primitive: PrimTy) -> bool {
+    let ty = ty.as_view(db).unwrap_or(ty);
+    matches!(
+        ty.base_ty(db).data(db),
+        TyData::TyBase(TyBase::Prim(found)) if *found == primitive
+    )
+}
+
+fn raster_vertex_stage<'db>(
+    db: &'db DriverDataBase,
+    behavior: hir::hir_def::Func<'db>,
+    role_path: PathId<'db>,
+) -> Result<(WebActorStageKind, TyId<'db>), WebBundleError> {
+    let payload = role_payload_ty(db, behavior, role_path, "vertex")?;
+    let args = behavior.arg_tys(db);
+    let Some(vertex_index) = args.first() else {
+        return Err(WebBundleError::EntryDerivation(
+            "authored vertex behavior must take one `u32` vertex-index context before actor state"
+                .to_owned(),
+        ));
+    };
+    if !is_primitive(db, *vertex_index.skip_binder(), PrimTy::U32) {
+        return Err(WebBundleError::EntryDerivation(
+            "authored vertex behavior's first context argument must be exactly `u32`".to_owned(),
+        ));
+    }
+    let output = behavior.return_ty(db);
+    if !nominal_attrs(db, output).is_some_and(|attrs| attrs.is_gpu_vertex_output(db)) {
+        return Err(WebBundleError::EntryDerivation(
+            "authored vertex behavior must return the nominal `#[gpu_vertex_output]` record"
+                .to_owned(),
+        ));
+    }
+    let output_fields = output.field_types(db);
+    let [position, returned_payload] = output_fields.as_slice() else {
+        return Err(WebBundleError::EntryDerivation(
+            "`#[gpu_vertex_output]` must contain exactly clip position and varying payload fields"
+                .to_owned(),
+        ));
+    };
+    if !nominal_attrs(db, *position).is_some_and(|attrs| attrs.is_gpu_clip_position(db))
+        || position.field_types(db).len() != 4
+        || position
+            .field_types(db)
+            .into_iter()
+            .any(|field| !is_primitive(db, field, PrimTy::F32))
+    {
+        return Err(WebBundleError::EntryDerivation(
+            "authored vertex output position must be the four-f32 nominal `#[gpu_clip_position]` record"
+                .to_owned(),
+        ));
+    }
+    if returned_payload != &payload {
+        return Err(WebBundleError::EntryDerivation(
+            "authored vertex role payload differs from its returned varying payload".to_owned(),
+        ));
+    }
+    let varying = canonical_type_from_semantic(db, payload, "raster_varying")
+        .map_err(|error| WebBundleError::EntryDerivation(error.to_string()))?;
+    if !matches!(varying, CanonicalType::Record(_)) {
+        return Err(WebBundleError::EntryDerivation(
+            "authored raster varying payload must be a nominal record".to_owned(),
+        ));
+    }
+    fn all_f32(ty: &CanonicalType) -> bool {
+        match ty {
+            CanonicalType::F32 => true,
+            CanonicalType::Record(fields) => fields.iter().all(|field| all_f32(&field.ty)),
+            _ => false,
+        }
+    }
+    if !all_f32(&varying) {
+        return Err(WebBundleError::EntryDerivation(
+            "authored raster varying payload currently supports recursively nested f32 records only"
+                .to_owned(),
+        ));
+    }
+    Ok((WebActorStageKind::Vertex { varying }, payload))
+}
+
+fn raster_fragment_stage<'db>(
+    db: &'db DriverDataBase,
+    behavior: hir::hir_def::Func<'db>,
+    role_path: PathId<'db>,
+) -> Result<(WebActorStageKind, TyId<'db>), WebBundleError> {
+    let payload = role_payload_ty(db, behavior, role_path, "raster fragment")?;
+    let args = behavior.arg_tys(db);
+    let Some(varying_arg) = args.first() else {
+        return Err(WebBundleError::EntryDerivation(
+            "authored raster fragment behavior must take its varying payload before actor state"
+                .to_owned(),
+        ));
+    };
+    let varying_arg = *varying_arg.skip_binder();
+    let varying_arg = varying_arg.as_view(db).unwrap_or(varying_arg);
+    if varying_arg != payload {
+        return Err(WebBundleError::EntryDerivation(
+            "authored raster fragment role payload differs from its varying argument".to_owned(),
+        ));
+    }
+    if !is_primitive(db, behavior.return_ty(db), PrimTy::U32)
+        && !is_primitive(db, behavior.return_ty(db), PrimTy::I32)
+    {
+        return Err(WebBundleError::EntryDerivation(
+            "authored raster fragment behavior must return a packed `u32` or `i32` color"
+                .to_owned(),
+        ));
+    }
+    let varying = canonical_type_from_semantic(db, payload, "raster_varying")
+        .map_err(|error| WebBundleError::EntryDerivation(error.to_string()))?;
+    Ok((WebActorStageKind::RasterFragment { varying }, payload))
+}
+
 fn semantic_const_u32(db: &DriverDataBase, ty: TyId<'_>) -> Option<u32> {
     let TyData::ConstTy(value) = ty.data(db) else {
         return None;
@@ -754,6 +895,8 @@ pub fn actor_gpu_program(
             )
         })?;
     let mut stages = Vec::new();
+    let mut authored_vertex_payloads = Vec::new();
+    let mut authored_fragment_payloads = Vec::new();
     for behavior in &actor.behaviors {
         let Some((stage, role_path)) = behavior_stage_role(db, *behavior) else {
             continue;
@@ -768,7 +911,17 @@ pub fn actor_gpu_program(
                 )
             })?;
         let kind = match stage {
+            GpuStage::Vertex => {
+                let (kind, payload) = raster_vertex_stage(db, *behavior, role_path)?;
+                authored_vertex_payloads.push(payload);
+                kind
+            }
             GpuStage::Fragment => WebActorStageKind::Fragment,
+            GpuStage::RasterFragment => {
+                let (kind, payload) = raster_fragment_stage(db, *behavior, role_path)?;
+                authored_fragment_payloads.push(payload);
+                kind
+            }
             GpuStage::Compute => {
                 let (workgroup_size, dispatch) = compute_stage_shape(db, *behavior, role_path)?;
                 WebActorStageKind::Compute {
@@ -778,6 +931,45 @@ pub fn actor_gpu_program(
             }
         };
         stages.push(WebActorStage { source_entry, kind });
+    }
+    let authored_vertices = stages
+        .iter()
+        .filter_map(|stage| match &stage.kind {
+            WebActorStageKind::Vertex { varying } => Some(varying),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let authored_fragments = stages
+        .iter()
+        .filter_map(|stage| match &stage.kind {
+            WebActorStageKind::RasterFragment { varying } => Some(varying),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if !authored_vertices.is_empty() || !authored_fragments.is_empty() {
+        if authored_vertices.len() != 1 || authored_fragments.len() != 1 {
+            return Err(WebBundleError::EntryDerivation(format!(
+                "authored raster program requires exactly one vertex and one raster-fragment behavior; found {} and {}",
+                authored_vertices.len(),
+                authored_fragments.len(),
+            )));
+        }
+        if authored_vertex_payloads[0] != authored_fragment_payloads[0] {
+            return Err(WebBundleError::EntryDerivation(
+                "authored raster vertex and fragment behaviors use different varying payload types"
+                    .to_owned(),
+            ));
+        }
+        debug_assert_eq!(authored_vertices[0], authored_fragments[0]);
+        if stages
+            .iter()
+            .any(|stage| matches!(stage.kind, WebActorStageKind::Fragment))
+        {
+            return Err(WebBundleError::EntryDerivation(
+                "authored raster program cannot also declare a fullscreen fragment behavior"
+                    .to_owned(),
+            ));
+        }
     }
     Ok(Some(WebActorProgram {
         actor: actor_name,
@@ -881,7 +1073,12 @@ pub fn actor_web_entry(
         .behaviors
         .iter()
         .copied()
-        .filter(|behavior| behavior_stage(db, *behavior) == Some(GpuStage::Fragment))
+        .filter(|behavior| {
+            matches!(
+                behavior_stage(db, *behavior),
+                Some(GpuStage::Fragment | GpuStage::RasterFragment)
+            )
+        })
         .collect();
     match fragment_behaviors.as_slice() {
         [behavior] => Ok(Some((
@@ -897,7 +1094,7 @@ pub fn actor_web_entry(
             WebBundleMode::Render,
         ))),
         [] => Err(WebBundleError::EntryDerivation(format!(
-            "GPU-program actor `{}` has no behavior carrying `#[gpu_stage(fragment)]`",
+            "GPU-program actor `{}` has no behavior carrying `#[gpu_stage(fragment)]` or `#[gpu_stage(raster_fragment)]`",
             actor
                 .state
                 .name(db)
@@ -2708,19 +2905,35 @@ impl WebBundle {
         let fragment_entries = program
             .stages
             .iter()
-            .filter(|stage| stage.kind == WebActorStageKind::Fragment)
+            .filter(|stage| {
+                matches!(
+                    stage.kind,
+                    WebActorStageKind::Fragment | WebActorStageKind::RasterFragment { .. }
+                )
+            })
             .map(|stage| stage.source_entry.as_str())
             .collect::<Vec<_>>();
         if fragment_entries.as_slice() != [options.source_entry.as_str()]
             || !matches!(
                 program.stages.last().map(|stage| &stage.kind),
-                Some(WebActorStageKind::Fragment)
+                Some(WebActorStageKind::Fragment | WebActorStageKind::RasterFragment { .. })
             )
         {
             return Err(WebBundleError::EntryDerivation(format!(
                 "GPU actor pass graph must end in its unique fragment entry `{}`",
                 options.source_entry
             )));
+        }
+        if program.stages.iter().any(|stage| {
+            matches!(
+                stage.kind,
+                WebActorStageKind::Vertex { .. } | WebActorStageKind::RasterFragment { .. }
+            )
+        }) {
+            return Err(WebBundleError::Lower(
+                "authored raster vertex/varying SPIR-V lowering is not implemented yet; the compiler refuses to substitute the fullscreen render envelope"
+                    .to_owned(),
+            ));
         }
 
         let resources = program
@@ -2771,6 +2984,9 @@ impl WebBundle {
                         "fragment",
                     )
                 }
+                WebActorStageKind::Vertex { .. } | WebActorStageKind::RasterFragment { .. } => {
+                    unreachable!("authored raster stages fail closed before per-stage compilation")
+                }
             };
             let artifact = artifact.map_err(|error| WebBundleError::Lower(error.to_string()))?;
             let shader =
@@ -2796,7 +3012,7 @@ impl WebBundle {
                 path: path.clone(),
                 source: shader.clone(),
             });
-            if stage.kind == WebActorStageKind::Fragment {
+            if matches!(stage.kind, WebActorStageKind::Fragment) {
                 final_shader = Some((path, shader));
                 final_layout = Some(layout);
             }
@@ -2943,10 +3159,14 @@ impl WebBundle {
     ) -> Result<Self, WebBundleError> {
         if let Some(program) = actor_gpu_program(db, top_mod)?
             && (!program.resources.is_empty()
-                || program
-                    .stages
-                    .iter()
-                    .any(|stage| matches!(stage.kind, WebActorStageKind::Compute { .. })))
+                || program.stages.iter().any(|stage| {
+                    matches!(
+                        stage.kind,
+                        WebActorStageKind::Compute { .. }
+                            | WebActorStageKind::Vertex { .. }
+                            | WebActorStageKind::RasterFragment { .. }
+                    )
+                }))
         {
             return Self::compile_actor_graph(db, top_mod, options, program);
         }

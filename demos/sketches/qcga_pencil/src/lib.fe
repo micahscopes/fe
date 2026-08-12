@@ -22,19 +22,13 @@
 //! trivially observable here BECAUSE incidence is linear; no nonlinear
 //! degeneracy analysis is involved anywhere.
 //!
-//! THE PROGRAM IS THE ACTOR. The unit with actor status here is the shader
-//! program `PencilSurface`, not any single stage: it owns the control points,
-//! the derived pencil basis, and the view as declared private state (at
-//! runtime: its buffers, bind groups and uniforms), and its behaviors consume
-//! that state. Dragging a point is a MESSAGE to the actor, not a uniform poke
-//! arranged by host glue. The vertex behavior does the QCGA work (project the
-//! template vertex onto the constraint surface); the fragment behavior shades
-//! the interpolated result; the value passed between them, `SurfaceVarying`,
-//! is a TYPED HANDOFF between two behaviors of one actor. This mirrors the
-//! contract anatomy already shipping in Fe (storage = private state, `recv`
-//! arms = behaviors, calls = messages, address = identity); see the
-//! `PencilSurface` section for the target spelling and for what today's
-//! toolchain forces us to flatten.
+//! THE PROGRAM IS THE ACTOR. `PencilRaster` owns the solved frame and its two
+//! GPU behaviors consume that state. The vertex behavior does the QCGA work
+//! (project the template vertex onto the constraint surface); the fragment
+//! behavior shades the interpolated result. `RasterVertex<SurfaceVarying>` is
+//! their nominal typed handoff: clip position has its standard meaning and the
+//! compiler derives the varying interface from the Fe type rather than from
+//! field names, numeric locations, or a second interface description.
 //!
 //! Rendering model: ordinary rasterization, no raycasting and no path tracing.
 //! A template direction sphere is generated procedurally from the vertex index
@@ -58,18 +52,25 @@
 //!   every surface that displays such a result must say so out loud.
 //! - No `Par` parallelism claims; no shipped `Par` provider executes anything
 //!   in parallel today.
-//! - The only artifacts executable today are the wasm actor lanes. The
-//!   stage placements declared below are claims that current tooling cannot
-//!   discharge; this ingot is the acceptance test for that gap, and no shim
-//!   pretends otherwise.
+//! - The compiler recognizes and checks the authored raster pair today. Its
+//!   paired SPIR-V lowering is still deliberately fail-closed; this ingot is
+//!   the acceptance test for that remaining gap, and no fullscreen envelope
+//!   or host shader pretends to discharge it.
 
 use core::marker::Copy
 use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
 use core::{AllocatedBrowserBytes, BrowserBytes, HostEffect, MainThread}
-use core::backend::Backend
 use core::effect_ref::alloc_bytes
 use core::num::IntDowncast
-use std::webgpu::{Dispatch, WebGpuBackend}
+use std::webgpu::{
+    ClipPosition,
+    Dispatch,
+    FragmentStage,
+    GpuProgram,
+    RasterVertex,
+    VertexStage,
+    WebGpuBackend,
+}
 use sparse_clifford::{
     Nat, PlanLength, SparsePlan, Term, plan_mask_candidate, plan_mask_cardinality,
 }
@@ -78,31 +79,6 @@ use fmath::{PI, TAU, abs, clamp01, cos, from_i32, max, min, rgba, sin, sqrt}
 extern {
     const fn __bitcast<From, To>(_: From) -> To
 }
-
-// ---------------------------------------------------------------------------
-// Behavior placement, declared in the language.
-//
-// Placement is an effect on this branch, not command-line wiring. The shader
-// PROGRAM is the actor; its stages are behaviors of that one actor, so these
-// markers place a BEHAVIOR within its program, in the house marker idiom
-// (`HostEffect` / `MainThread` / `Worker` in core::browser).
-//
-// Both markers are declared HERE, demo-locally, as stand-ins: the in-language
-// actor composition and placement vocabulary is a separate design task
-// (DESIGN_ACTOR_COMPOSITION_IN_FE.md) and these migrate into core/std when it
-// lands. Declaring them locally keeps the claims visible and typed without
-// pretending the vocabulary is ratified.
-// ---------------------------------------------------------------------------
-
-/// Requires a behavior to execute per vertex in the rasterization vertex
-/// stage of its program's pipeline on backend `B`. Stand-in marker; see the
-/// section comment above.
-pub trait VertexStage<B: Backend> {}
-
-/// Requires a behavior to execute per fragment in the rasterization fragment
-/// stage of its program's pipeline on backend `B`, consuming the interpolated
-/// typed handoff emitted by the program's vertex behavior. Stand-in marker.
-pub trait FragmentStage<B: Backend> {}
 
 // ---------------------------------------------------------------------------
 // The planned sparse QCGA incidence contraction.
@@ -530,18 +506,11 @@ pub fn pencil_member(_ frame: PencilFrame) -> Quadric {
     }
 }
 
-/// THE TYPED HANDOFF between the actor's two GPU behaviors: what the vertex
-/// behavior emits and the fragment behavior receives after interpolation.
-/// Clip position (`x`,`y`,`z`,`w`; the rasterizer divides by `w`) plus the
-/// interpolated surface data shading needs: the exact quadric gradient, the
-/// discriminant glow, the sheet identity, and the vertex's self-accusation
-/// flag. No color crosses this boundary; color is the fragment behavior's
-/// job.
+/// THE TYPED HANDOFF between the actor's two GPU behaviors: interpolated
+/// surface data shading needs. Clip position is deliberately absent because
+/// `RasterVertex` gives it a distinct standard type; no field order or name in
+/// this record carries a hidden raster meaning.
 pub struct SurfaceVarying {
-    pub x: f32,
-    pub y: f32,
-    pub z: f32,
-    pub w: f32,
     pub nx: f32,
     pub ny: f32,
     pub nz: f32,
@@ -753,15 +722,15 @@ fn sample_vertex(_ vid: u32, _ frame: PencilFrame) -> SurfaceSample {
 }
 
 // ---------------------------------------------------------------------------
-// THE ACTOR: the shader program `PencilSurface`.
+// THE DOMAIN STATE and THE GPU ACTOR.
 //
-// The program, not the stage, is the unit with actor status: it owns private
-// state with a lifetime longer than any invocation (control points, the
-// solved pencil basis, the view; at runtime, the pipeline's buffers and bind
-// groups), its behaviors consume that state, and interaction is messaging
-// (a drag is a message, not a uniform poke). Draws are its messages too; the
-// command queue is its mailbox. This is the same anatomy as the contract
-// layer already shipping in Fe, and the target spelling is the contract one:
+// `PencilSurface` remains an ordinary owned value used by the deterministic
+// solver/message verification lanes below. `PencilRaster` is the actual GPU
+// actor: one program owning one solved `PencilFrame`, with a nominal authored
+// vertex/fragment pair. Both paths call the same ordinary Fe constructions;
+// the CPU stream is an oracle lane, not a second renderer or stage interface.
+//
+// The remaining message target is:
 //
 //     msg SurfaceMsg {
 //         Drag { index: u32, x: f32, y: f32, z: f32 },
@@ -779,19 +748,16 @@ fn sample_vertex(_ vid: u32, _ frame: PencilFrame) -> SurfaceSample {
 //             ...
 //         }
 //
-//         behavior vertex(vid: u32) -> SurfaceVarying
-//             uses (state, VertexStage<WebGpuBackend>) { ... }
+//         behavior vertex(vid: u32) -> RasterVertex<SurfaceVarying>
+//             uses (state, VertexStage<SurfaceVarying>) { ... }
 //
 //         behavior fragment(v: SurfaceVarying) -> u32
-//             uses (state, FragmentStage<WebGpuBackend>) { ... }
+//             uses (state, FragmentStage<SurfaceVarying>) { ... }
 //     }
 //
-// No `actor` / `behavior` items exist yet and `recv` is contract-only, so
-// TODAY the actor is spelled as a plain state record plus an impl whose
-// methods are the behaviors. The flattening this forces is recorded as a
-// tooling gap, not silently accepted: today's canonical lanes are stateless,
-// so the state round-trips through the host between messages instead of
-// living in the actor.
+// `recv` remains contract-only, so interaction still round-trips through the
+// canonical lanes. Raster placement itself no longer uses a demo-local trait,
+// adapter, location table, or fullscreen-stage substitute.
 // ---------------------------------------------------------------------------
 
 pub struct PencilSurface {
@@ -952,16 +918,9 @@ impl PencilSurface {
         self.frame.j1 = q1[9]
     }
 
-    /// GPU behavior (vertex): all the QCGA. Substrate-blind body; the stage
-    /// placement claim lives on the program boundary adapter
-    /// `surface_vertex`, mirroring the established mode-blind-body doctrine.
-    pub fn vertex(self, _ vid: u32) -> SurfaceVarying {
-        let s: SurfaceSample = sample_vertex(vid, self.frame)
-        SurfaceVarying {
-            x: s.x, y: s.y, z: s.z, w: s.w,
-            nx: s.nx, ny: s.ny, nz: s.nz,
-            glow: s.glow, sheet: s.sheet, accuse: s.accuse,
-        }
+    /// CPU oracle projection of the same authored vertex construction.
+    pub fn vertex(self, _ vid: u32) -> RasterVertex<SurfaceVarying> {
+        raster_vertex(vid, self.frame)
     }
 
     /// GPU behavior (fragment): shading only, no QCGA. Reads the interpolated
@@ -969,49 +928,66 @@ impl PencilSurface {
     /// (`pencil_free` drives the warm tint), and turns any vertex
     /// self-accusation into visible magenta rather than a quiet pixel.
     pub fn fragment(self, _ v: SurfaceVarying) -> u32 {
-        // Interpolation denormalizes the gradient; renormalize per pixel.
-        let nlen: f32 = sqrt(v.nx * v.nx + v.ny * v.ny + v.nz * v.nz)
-        let ninv: f32 = if nlen > 0.0000001 { 1.0 / nlen } else { 0.0 }
-        let nx: f32 = v.nx * ninv
-        let ny: f32 = v.ny * ninv
-        let nz: f32 = v.nz * ninv
-        // Two-sided lighting: open sheets are seen from both sides.
-        let lit: f32 = 0.22 + 0.78 * abs(nx * LX + ny * LY + nz * LZ)
-        let warm: f32 = clamp01(self.frame.pencil_free)
-        let sheet: f32 = clamp01(v.sheet)
-        let glow: f32 = clamp01(v.glow)
-        let mut red: f32 = lit * (0.18 + 0.30 * sheet + 0.34 * warm) + glow * 0.55
-        let mut grn: f32 = lit * (0.55 - 0.18 * sheet + 0.10 * warm) + glow * 0.30
-        let mut blu: f32 = lit * (0.78 - 0.22 * sheet - 0.25 * warm) + glow * 0.10
-        if v.accuse > 0.5 {
-            red = 1.0
-            grn = 0.0
-            blu = 1.0
-        }
-        __bitcast(rgba(red, grn, blu))
+        shade_varying(v, self.frame)
     }
 }
 
 // ---------------------------------------------------------------------------
-// Program boundary adapters: where the placement claims live. These are the
-// entry points a raster pipeline build would root, exactly as the current
-// render mode roots one fragment entry. Today's toolchain can root neither;
-// the acceptance suite pins both refusals.
+// One standard authored-raster construction shared by the GPU actor and CPU
+// verification lanes.
 // ---------------------------------------------------------------------------
 
-/// The vertex stage of the `PencilSurface` program.
-pub fn surface_vertex(_ actor: PencilSurface, _ vid: u32) -> SurfaceVarying
-    uses (VertexStage<WebGpuBackend>)
-{
-    actor.vertex(vid)
+fn raster_vertex(_ vid: u32, _ frame: PencilFrame) -> RasterVertex<SurfaceVarying> {
+    let s: SurfaceSample = sample_vertex(vid, frame)
+    RasterVertex {
+        position: ClipPosition { x: s.x, y: s.y, z: s.z, w: s.w },
+        varying: SurfaceVarying {
+            nx: s.nx, ny: s.ny, nz: s.nz,
+            glow: s.glow, sheet: s.sheet, accuse: s.accuse,
+        },
+    }
 }
 
-/// The fragment stage of the `PencilSurface` program, consuming the
-/// interpolated handoff emitted by `surface_vertex`.
-pub fn surface_fragment(_ actor: PencilSurface, _ v: SurfaceVarying) -> u32
-    uses (FragmentStage<WebGpuBackend>)
-{
-    actor.fragment(v)
+fn shade_varying(_ v: SurfaceVarying, _ frame: PencilFrame) -> u32 {
+    // Interpolation denormalizes the gradient; renormalize per pixel.
+    let nlen: f32 = sqrt(v.nx * v.nx + v.ny * v.ny + v.nz * v.nz)
+    let ninv: f32 = if nlen > 0.0000001 { 1.0 / nlen } else { 0.0 }
+    let nx: f32 = v.nx * ninv
+    let ny: f32 = v.ny * ninv
+    let nz: f32 = v.nz * ninv
+    // Two-sided lighting: open sheets are seen from both sides.
+    let lit: f32 = 0.22 + 0.78 * abs(nx * LX + ny * LY + nz * LZ)
+    let warm: f32 = clamp01(frame.pencil_free)
+    let sheet: f32 = clamp01(v.sheet)
+    let glow: f32 = clamp01(v.glow)
+    let mut red: f32 = lit * (0.18 + 0.30 * sheet + 0.34 * warm) + glow * 0.55
+    let mut grn: f32 = lit * (0.55 - 0.18 * sheet + 0.10 * warm) + glow * 0.30
+    let mut blu: f32 = lit * (0.78 - 0.22 * sheet - 0.25 * warm) + glow * 0.10
+    if v.accuse > 0.5 {
+        red = 1.0
+        grn = 0.0
+        blu = 1.0
+    }
+    __bitcast(rgba(red, grn, blu))
+}
+
+/// The actual raster program. `V` is named once in each role; the compiler
+/// proves both roles refer to this exact nominal type and derives all varying
+/// locations recursively.
+actor PencilRaster uses (GpuProgram<WebGpuBackend>) {
+    frame: PencilFrame,
+
+    fn surface_vertex(self, vertex_index: u32) -> RasterVertex<SurfaceVarying>
+        uses (VertexStage<SurfaceVarying>)
+    {
+        raster_vertex(vertex_index, self.frame)
+    }
+
+    fn surface_fragment(self, varying: SurfaceVarying) -> u32
+        uses (FragmentStage<SurfaceVarying>)
+    {
+        shade_varying(varying, self.frame)
+    }
 }
 
 pub struct RenderResponse {
@@ -1496,7 +1472,6 @@ pub fn probe(request: own VertexProbe) -> ProbeResponse {
     })
     let s: SurfaceSample = sample_vertex(request.vid, actor.frame)
     let v: SurfaceVarying = SurfaceVarying {
-        x: s.x, y: s.y, z: s.z, w: s.w,
         nx: s.nx, ny: s.ny, nz: s.nz,
         glow: s.glow, sheet: s.sheet, accuse: s.accuse,
     }
@@ -1531,11 +1506,11 @@ fn append_word(_ word: u32) {
     append_word_tail(word)
 }
 
-fn append_clip_and_color(_ v: SurfaceVarying, _ color: u32) {
-    let xw: u32 = __bitcast(v.x)
-    let yw: u32 = __bitcast(v.y)
-    let zw: u32 = __bitcast(v.z)
-    let ww: u32 = __bitcast(v.w)
+fn append_clip_and_color(_ vertex: RasterVertex<SurfaceVarying>, _ color: u32) {
+    let xw: u32 = __bitcast(vertex.position.x)
+    let yw: u32 = __bitcast(vertex.position.y)
+    let zw: u32 = __bitcast(vertex.position.z)
+    let ww: u32 = __bitcast(vertex.position.w)
     append_word(xw)
     append_word(yw)
     append_word(zw)
@@ -1554,23 +1529,23 @@ fn append_clip_and_color(_ v: SurfaceVarying, _ color: u32) {
 /// rendering (SwiftShader or lavapipe) and must be labeled so.
 pub fn mesh_oracle(request: own PencilFrame) -> AllocatedBrowserBytes {
     let actor: PencilSurface = actor_from_frame(request)
-    let first_v: SurfaceVarying = actor.vertex(0)
-    let first_color: u32 = actor.fragment(first_v)
-    let first_word: u32 = __bitcast(first_v.x)
+    let first_v: RasterVertex<SurfaceVarying> = actor.vertex(0)
+    let first_color: u32 = actor.fragment(first_v.varying)
+    let first_word: u32 = __bitcast(first_v.position.x)
     let head = alloc_bytes(1)
     head.write(first_word.downcast_truncate())
     append_word_tail(first_word)
-    let yw: u32 = __bitcast(first_v.y)
-    let zw: u32 = __bitcast(first_v.z)
-    let ww: u32 = __bitcast(first_v.w)
+    let yw: u32 = __bitcast(first_v.position.y)
+    let zw: u32 = __bitcast(first_v.position.z)
+    let ww: u32 = __bitcast(first_v.position.w)
     append_word(yw)
     append_word(zw)
     append_word(ww)
     append_word(first_color)
     let mut vid: u32 = 1
     while vid < VERTEX_COUNT {
-        let v: SurfaceVarying = actor.vertex(vid)
-        let color: u32 = actor.fragment(v)
+        let v: RasterVertex<SurfaceVarying> = actor.vertex(vid)
+        let color: u32 = actor.fragment(v.varying)
         append_clip_and_color(v, color)
         vid = vid + 1
     }

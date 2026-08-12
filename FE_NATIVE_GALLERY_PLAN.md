@@ -405,6 +405,24 @@ Origin: honesty audit of Claude Code session
   subsequently corrected and passing focused. Fieldless enums retain their
   compiler-derived scalar lane; payload-enum transport remains deliberately
   fail-closed and is pinned by the `Result` flagship boundary test.
+- Authored rasterization now has a standard nominal Fe surface rather than a
+  QCGA-local marker convention. `VertexStage<V>` and `FragmentStage<V>` are
+  paired through exact semantic identity of `V`; `RasterVertex<V>` separates
+  the standard `ClipPosition` result from the recursively derived f32 varying
+  record, so applications maintain neither numeric locations nor a parallel
+  interface declaration. The compiler rejects malformed outputs, payload
+  disagreement (including structurally identical but nominally different
+  records), multiple stage pairs, and mixing authored raster stages with the
+  synthesized fullscreen envelope. QCGA now declares one real
+  `PencilRaster uses (GpuProgram<WebGpuBackend>)` actor and has deleted its
+  demo-local `VertexStage<B>` / `FragmentStage<B>` traits and free placement
+  adapters. Its CPU mesh stream remains a semantic oracle over the shared
+  ordinary Fe vertex/shading constructions, not a replacement renderer. The
+  focused positive/negative compiler gates are 2/2 and the promoted QCGA suite
+  remains 8/8. Paired vertex/fragment SPIR-V lowering is still deliberately
+  fail-closed with a named diagnostic rather than silently substituting the
+  fullscreen vertex stage; completing that backend is the immediate Phase 4
+  frontier.
 - This component/page slice is not the full resident-component end state. The
   outer gallery shell does not yet own routing, tile lifecycle, scheduling, or
   component-to-component messages as a long-lived Fe actor, and the stylesheet
@@ -585,8 +603,9 @@ reserved-name, positional, scalar-only ABI is bespoke surface area to remove.
   transitional CSS only. The source/WGSL/Wasm/manifest viewer is a resident Fe
   `SourceInspector`; the fixed render runtime still consumes the transitional
   render manifest today.
-- `qcga_pencil` remains excluded because vertex/fragment plus typed
-  pick/message lanes have not landed.
+- `qcga_pencil` remains excluded because paired authored-raster backend
+  lowering and typed pick/message lanes have not landed. Its nominal
+  vertex/fragment interface is now compiler-checked.
 - DEC's Worker/message-shaped Fe functions derive an ordinary generated
   browser actor, and the gallery Chromium gate executes `d0` through its real
   Worker/Wasm lane. Its Fe-declared MainThread `submit_view` capability is

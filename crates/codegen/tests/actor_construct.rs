@@ -20,8 +20,8 @@
 use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
-    WasmCompileOptions, WebActorResourceElement, WebActorStageKind, WebBuildOptions, WebBundle,
-    WebBundleMode, actor_gpu_program, actor_web_entry,
+    CanonicalType, WasmCompileOptions, WebActorResourceElement, WebActorStageKind, WebBuildOptions,
+    WebBundle, WebBundleMode, actor_gpu_program, actor_web_entry,
     compile_runtime_package_spirv_compute_with_resources,
     compile_runtime_package_spirv_render_with_resources, compile_runtime_package_wasm_with_options,
     resolve_web_entry,
@@ -152,6 +152,96 @@ fn actor_without_a_unique_fragment_behavior_is_rejected() {
     let top_mod = ingot_top_mod(&db, &url);
     let err = actor_web_entry(&db, top_mod).unwrap_err();
     assert!(format!("{err}").contains("gpu_stage(fragment)"), "{err}");
+}
+
+#[test]
+fn authored_raster_roles_derive_one_nominal_typed_varying() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_raster_typed");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "typed raster diagnostics:\n{diagnostics}"
+    );
+
+    let program = actor_gpu_program(&db, top_mod)
+        .expect("typed raster plan")
+        .expect("GPU actor");
+    assert_eq!(program.actor, "TypedMesh");
+    assert_eq!(program.stages.len(), 2);
+    assert_eq!(program.stages[0].source_entry, "vertices");
+    assert_eq!(program.stages[1].source_entry, "shade");
+    let WebActorStageKind::Vertex { varying: vertex } = &program.stages[0].kind else {
+        panic!(
+            "expected authored vertex stage, got {:?}",
+            program.stages[0].kind
+        );
+    };
+    let WebActorStageKind::RasterFragment { varying: fragment } = &program.stages[1].kind else {
+        panic!(
+            "expected authored raster fragment, got {:?}",
+            program.stages[1].kind
+        );
+    };
+    assert_eq!(
+        vertex, fragment,
+        "the paired stages must share one derived payload"
+    );
+    let CanonicalType::Record(fields) = vertex else {
+        panic!("varying must remain a named-field record: {vertex:?}");
+    };
+    assert_eq!(
+        fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>(),
+        ["normal", "heat"]
+    );
+    let CanonicalType::Record(normal) = &fields[0].ty else {
+        panic!("normal must retain its nested record structure");
+    };
+    assert_eq!(
+        normal
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>(),
+        ["x", "y", "z"]
+    );
+    assert!(normal.iter().all(|field| field.ty == CanonicalType::F32));
+    assert_eq!(fields[1].ty, CanonicalType::F32);
+    assert_eq!(
+        actor_web_entry(&db, top_mod).unwrap(),
+        Some(("shade".to_owned(), WebBundleMode::Render)),
+    );
+
+    // The semantic plan must not silently enter the old fullscreen compiler.
+    let error =
+        WebBundle::compile(&db, top_mod, WebBuildOptions::render("shade", None)).unwrap_err();
+    assert!(
+        format!("{error}")
+            .contains("authored raster vertex/varying SPIR-V lowering is not implemented yet"),
+        "unexpected fail-closed boundary: {error}",
+    );
+}
+
+#[test]
+fn authored_raster_rejects_mismatched_nominal_payloads() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_raster_mismatch");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "mismatch fixture diagnostics:\n{diagnostics}"
+    );
+    let error = actor_gpu_program(&db, top_mod).unwrap_err();
+    assert!(
+        format!("{error}").contains("different varying payload types"),
+        "unexpected mismatch diagnostic: {error}",
+    );
 }
 
 #[test]

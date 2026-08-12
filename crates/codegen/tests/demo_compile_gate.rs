@@ -2398,19 +2398,11 @@ fn fmath_library_ingot_typechecks() {
     with_ingot("demos/sketches/fmath", |_db, _top_mod| {});
 }
 
-/// `qcga_pencil` predates the `actor` idiom: it spells the render program by
-/// hand across free `pub fn`s (`surface_vertex uses (VertexStage<..>)`,
-/// `surface_fragment uses (FragmentStage<..>)`, `render`/`verify uses
-/// (HostEffect, MainThread, mut Dispatch<..>)`), documented in the file's
-/// own commentary as a deliberate stopgap pending real `actor`/`behavior`
-/// syntax. Confirmed via `fe web build demos/sketches/qcga_pencil` (no
-/// `--entry`/`--mode`): the failure is "no `actor` declaration to derive
-/// from", NOT a source diagnostic - there is no single-entry web bundle to
-/// derive here (a vertex+fragment pair, not one `FragmentSurface`). This has
-/// its own staged `acceptance.rs` (explicitly `#[allow(dead_code)]`-style,
-/// not yet a workspace member) and is a documented coverage gap in
-/// DEMO_MODERNIZATION_PLAN.md, not a broken demo. Gate: the ingot itself
-/// must still type-check clean.
+/// `qcga_pencil` now declares a real `PencilRaster` GPU actor with the standard
+/// nominal `VertexStage<V>` / `FragmentStage<V>` pair. Its dedicated workspace
+/// acceptance target checks that typed program plus the current explicit
+/// paired-SPIR-V lowering wall; this broad gate independently keeps the full
+/// source and dependency graph diagnostic-free.
 #[test]
 fn qcga_pencil_sketch_typechecks() {
     with_ingot("demos/sketches/qcga_pencil", |_db, _top_mod| {});

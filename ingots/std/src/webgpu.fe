@@ -64,6 +64,40 @@ pub struct GpuProgram<B> {}
 #[gpu_stage(fragment)]
 pub struct FragmentSurface {}
 
+/// An authored raster vertex behavior. `V` is the nominal payload the
+/// rasterizer interpolates; the behavior returns `RasterVertex<V>` so clip
+/// position is never inferred from application field names or ordering.
+#[gpu_stage(vertex)]
+pub struct VertexStage<V> {}
+
+/// An authored raster fragment behavior consuming the same nominal payload
+/// `V` emitted by its program's `VertexStage<V>` behavior.
+#[gpu_stage(raster_fragment)]
+pub struct FragmentStage<V> {}
+
+/// Clip-space position with an explicit standard meaning. The rasterizer
+/// performs the perspective divide by `w`.
+#[gpu_clip_position]
+pub struct ClipPosition {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub w: f32,
+}
+
+impl Copy for ClipPosition {}
+
+/// Standard vertex-stage result. The compiler derives locations recursively
+/// from `varying`; applications do not assign numeric locations or maintain a
+/// parallel interface declaration.
+#[gpu_vertex_output]
+pub struct RasterVertex<V> {
+    pub position: ClipPosition,
+    pub varying: V,
+}
+
+impl<V: Copy> Copy for RasterVertex<V> {}
+
 /// A compute-stage role with a workgroup shape and dispatch policy in its type.
 #[gpu_stage(compute)]
 pub struct ComputeSurface<W, D> {}

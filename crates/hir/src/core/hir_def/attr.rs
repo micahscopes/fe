@@ -32,7 +32,9 @@ pub enum HostType {
 /// GPU stage meaning carried by a nominal role type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GpuStage {
+    Vertex,
     Fragment,
+    RasterFragment,
     Compute,
 }
 
@@ -467,10 +469,24 @@ impl<'db> AttrListId<'db> {
 
     pub fn gpu_stage(self, db: &'db dyn HirDb) -> Option<GpuStage> {
         match self.single_ident_arg(db, "gpu_stage")?.as_str() {
+            "vertex" => Some(GpuStage::Vertex),
             "fragment" => Some(GpuStage::Fragment),
+            "raster_fragment" => Some(GpuStage::RasterFragment),
             "compute" => Some(GpuStage::Compute),
             _ => None,
         }
+    }
+
+    /// Marks the standard generic record that carries clip position plus a
+    /// nominal interpolated payload out of an authored vertex behavior.
+    pub fn is_gpu_vertex_output(self, db: &'db dyn HirDb) -> bool {
+        self.has_marker_attr(db, "gpu_vertex_output")
+    }
+
+    /// Marks the standard four-f32 clip-space position record nested in a
+    /// `#[gpu_vertex_output]` value.
+    pub fn is_gpu_clip_position(self, db: &'db dyn HirDb) -> bool {
+        self.has_marker_attr(db, "gpu_clip_position")
     }
 
     pub fn gpu_resource(self, db: &'db dyn HirDb) -> Option<GpuResource> {

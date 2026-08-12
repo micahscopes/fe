@@ -1,0 +1,41 @@
+use std::webgpu::{
+    ClipPosition,
+    FragmentStage,
+    GpuProgram,
+    RasterVertex,
+    VertexStage,
+    WebGpuBackend,
+}
+
+struct Normal { x: f32, y: f32, z: f32 }
+impl Copy for Normal {}
+
+struct MeshVarying { normal: Normal, heat: f32 }
+impl Copy for MeshVarying {}
+
+actor TypedMesh uses (GpuProgram<WebGpuBackend>) {
+    tint: f32,
+
+    fn vertices(self, vertex_index: u32) -> RasterVertex<MeshVarying>
+        uses (VertexStage<MeshVarying>)
+    {
+        RasterVertex {
+            position: ClipPosition {
+                x: if vertex_index == 1 { 1.0 } else { -1.0 },
+                y: if vertex_index == 2 { 1.0 } else { -1.0 },
+                z: 0.0,
+                w: 1.0,
+            },
+            varying: MeshVarying {
+                normal: Normal { x: 0.0, y: 0.0, z: 1.0 },
+                heat: self.tint,
+            },
+        }
+    }
+
+    fn shade(self, varying: MeshVarying) -> u32
+        uses (FragmentStage<MeshVarying>)
+    {
+        if varying.heat + self.tint > 1.0 { 4294901760 } else { 4278190335 }
+    }
+}
