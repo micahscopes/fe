@@ -19,7 +19,7 @@ use fe_compiler_facade::PageProjectionResult;
 use fe_compiler_protocol::{
     SOURCE_DEPENDENCY_INVENTORY_VERSION, SourceDependency, SourceDependencyInventory, sha256_hex,
 };
-use fe_html_precompile::{RenderBundleArtifact, RenderShaderArtifact};
+use fe_html_precompile::{RenderBundleArtifact, RenderShaderArtifact, RenderSupportArtifact};
 use hir::hir_def::HirIngot;
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -112,12 +112,6 @@ pub fn compile(request: &CompileRequest) -> Result<WebBundle, String> {
         (WebCanonicalPolicy::Disabled, false) => {
             return Err(
                 "`--canonical-entry` is only valid with `--canonical optional|required`"
-                    .to_string(),
-            );
-        }
-        (WebCanonicalPolicy::Optional | WebCanonicalPolicy::Required, true) => {
-            return Err(
-                "`--canonical-entry NAME` is required with `--canonical optional|required`"
                     .to_string(),
             );
         }
@@ -282,7 +276,7 @@ pub fn compile(request: &CompileRequest) -> Result<WebBundle, String> {
     Ok(bundle)
 }
 
-const RENDER_CACHE_FORMAT: u16 = 1;
+const RENDER_CACHE_FORMAT: u16 = 2;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct RenderCacheMetadata {
@@ -290,10 +284,17 @@ struct RenderCacheMetadata {
     source_dependencies: SourceDependencyInventory,
     has_wasm: bool,
     pass_shaders: Vec<CachedRenderShader>,
+    support_files: Vec<CachedRenderSupport>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct CachedRenderShader {
+    path: String,
+    file: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CachedRenderSupport {
     path: String,
     file: String,
 }
@@ -387,10 +388,21 @@ fn load_render_cache(
     } else {
         None
     };
+    let support_files = metadata
+        .support_files
+        .into_iter()
+        .map(|support| {
+            Some(RenderSupportArtifact {
+                path: support.path,
+                bytes: std::fs::read(directory.join(support.file)).ok()?,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
     Some(RenderBundleArtifact {
         wasm,
         wgsl: std::fs::read(directory.join("shader.wgsl")).ok()?,
         pass_wgsl,
+        support_files,
         manifest_json: std::fs::read(directory.join("manifest.json")).ok()?,
         source_dependencies: Some(metadata.source_dependencies),
     })
@@ -429,11 +441,22 @@ fn store_render_cache(
             file,
         });
     }
+    let mut support_files = Vec::with_capacity(artifact.support_files.len());
+    for (index, support) in artifact.support_files.iter().enumerate() {
+        let file = format!("support-{index}");
+        std::fs::write(directory.join(&file), &support.bytes)
+            .map_err(|error| format!("failed to cache {file}: {error}"))?;
+        support_files.push(CachedRenderSupport {
+            path: support.path.clone(),
+            file,
+        });
+    }
     let metadata = serde_json::to_vec_pretty(&RenderCacheMetadata {
         format: RENDER_CACHE_FORMAT,
         source_dependencies,
         has_wasm: artifact.wasm.is_some(),
         pass_shaders,
+        support_files,
     })
     .map_err(|error| format!("failed to serialize render cache metadata: {error}"))?;
     // Metadata is written last. An interrupted population is therefore a
@@ -463,6 +486,20 @@ fn compile_render_bundle_with_dependencies(
         audit.dependencies
     });
     let manifest_json = bundle.manifest_json().map_err(|error| error.to_string())?;
+    let support_files = bundle
+        .materialized_files()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|file| {
+            file.path() == "interface.js"
+                || file.path() == "interface.d.ts"
+                || file.path().starts_with("runtime/")
+        })
+        .map(|file| RenderSupportArtifact {
+            path: file.path().to_owned(),
+            bytes: file.bytes().to_vec(),
+        })
+        .collect();
     let wasm = (!bundle.wasm.is_empty()).then_some(bundle.wasm);
     let pass_wgsl = bundle
         .pass_wgsl
@@ -476,6 +513,7 @@ fn compile_render_bundle_with_dependencies(
         wasm,
         wgsl: bundle.wgsl.into_bytes(),
         pass_wgsl,
+        support_files,
         manifest_json,
         source_dependencies: dependencies,
     })
@@ -833,6 +871,7 @@ mod tests {
                 path: "pass-0.wgsl".to_owned(),
                 bytes: b"@compute @workgroup_size(1) fn main() {}".to_vec(),
             }],
+            support_files: Vec::new(),
             manifest_json: br#"{"protocol":"fe-web-bundle"}"#.to_vec(),
             source_dependencies: Some(dependencies),
         }
@@ -1022,21 +1061,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_entry_policy_combinations_fail_before_io() {
-        let missing = build(
-            &request(
-                "missing.fe",
-                "shade",
-                WebMode::Render,
-                [None, None, None],
-                WebCanonicalPolicy::Required,
-                &[],
-            ),
-            &"out".into(),
-        )
-        .unwrap_err();
-        assert!(missing.contains("is required"), "{missing}");
-
+    fn explicit_canonical_entries_require_an_enabled_policy() {
         let disabled = build(
             &request(
                 "missing.fe",
@@ -1229,5 +1254,50 @@ pub fn shade(x: u32, y: u32) -> u32 {
                 < manifest.find("\"name\": \"update\"").unwrap()
         );
         assert!(manifest.contains("\"embedded\": true"));
+    }
+
+    #[test]
+    fn required_canonical_build_discovers_fe_marked_lanes_without_cli_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("auto_actor");
+        std::fs::create_dir_all(app.join("src")).unwrap();
+        std::fs::write(
+            app.join("fe.toml"),
+            "[ingot]\nname = \"auto_actor\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            app.join("src/lib.fe"),
+            r#"
+#[host_placement(worker)]
+pub trait Worker {}
+struct Request { value: u32 }
+struct Response { value: u32 }
+pub fn update(request: Request) -> Response uses (Worker) {
+    Response { value: request.value + 1 }
+}
+pub fn shade(x: u32, y: u32) -> u32 { x + y }
+"#,
+        )
+        .unwrap();
+        let out = Utf8PathBuf::from_path_buf(temp.path().join("bundle")).unwrap();
+        build(
+            &CompileRequest {
+                path: Utf8PathBuf::from_path_buf(app).unwrap(),
+                entry: Some("shade".to_owned()),
+                mode: Some(WebMode::Render),
+                workgroup: [None, None, None],
+                source_id: None,
+                canonical: WebCanonicalPolicy::Required,
+                canonical_entries: Vec::new(),
+            },
+            &out,
+        )
+        .unwrap();
+        let manifest = std::fs::read_to_string(out.join("manifest.json")).unwrap();
+        assert!(manifest.contains("\"name\": \"update\""));
+        assert!(manifest.contains("\"placement\": \"worker\""));
+        assert!(out.join("interface.js").is_file());
+        assert!(out.join("runtime/worker-host.js").is_file());
     }
 }

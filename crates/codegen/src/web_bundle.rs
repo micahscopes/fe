@@ -45,7 +45,8 @@ use crate::sonatina::{
 };
 use crate::{
     CanonicalField, CanonicalInterfaceManifest, CanonicalType, CanonicalVariant,
-    canonical_lane_decl_from_entry, canonical_type_from_semantic, verify_canonical_wasm_abi,
+    canonical_lane_decl_from_entry, canonical_lane_decls_from_module, canonical_type_from_semantic,
+    verify_canonical_wasm_abi,
 };
 
 pub const WEB_BUNDLE_PROTOCOL: &str = "fe-web-bundle";
@@ -2978,17 +2979,55 @@ impl WebBundle {
             schedule_policy.as_ref(),
             &options.source_entry,
         )?;
-        let mut canonical_entries = if options.canonical_entries.is_empty() {
-            vec![options.source_entry.clone()]
+        // Canonical actor messages and the surface-control transition are two
+        // different roles. Explicitly placed/capability-bearing Fe functions
+        // form the public message interface; `navigate` remains a private
+        // resident root even though it is compiled into the same Wasm module.
+        // Keeping those sets distinct prevents a render actor's multi-field
+        // transition from being mistaken for a one-request/one-response lane.
+        //
+        // `canonical_entries` is retained as a compatibility/tooling override
+        // for unmarked fixtures. An ordinary actor build needs no parallel
+        // Rust/CLI name list: its effect rows are the source of truth.
+        let explicit_canonical_entries = !options.canonical_entries.is_empty();
+        let (canonical_declarations, canonical_entries) = if explicit_canonical_entries {
+            let mut entries = options.canonical_entries.clone();
+            let mut seen = std::collections::BTreeSet::new();
+            entries.retain(|entry| seen.insert(entry.clone()));
+            let declarations = entries
+                .iter()
+                .map(|entry| canonical_lane_decl_from_entry(db, top_mod, entry, entry))
+                .collect::<Result<Vec<_>, _>>();
+            (declarations, entries)
         } else {
-            options.canonical_entries.clone()
+            let declarations = canonical_lane_decls_from_module(db, top_mod);
+            let entries = declarations
+                .as_ref()
+                .map(|declarations| {
+                    declarations
+                        .iter()
+                        .map(|declaration| declaration.name.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            (declarations, entries)
         };
-        if let Some(name) = &control_export {
-            canonical_entries.push(name.clone());
-        }
-        let mut seen_entries = std::collections::BTreeSet::new();
-        canonical_entries.retain(|entry| seen_entries.insert(entry.clone()));
-        let (canonical_candidate, mut canonical_status) = match options.canonical_policy {
+        let has_declared_interface = match canonical_declarations.as_ref() {
+            Ok(declarations) => !declarations.is_empty(),
+            // A malformed explicitly marked lane must diagnose; it must not
+            // make the interface disappear and fall back to an untyped build.
+            Err(_) => !explicit_canonical_entries,
+        };
+        // A Fe-declared browser actor interface is fail-closed even when an
+        // older caller left the opt-in policy at its default. The policy flag
+        // controls only legacy/manual derivation; it cannot disable semantics
+        // authored explicitly in Fe.
+        let canonical_policy = if has_declared_interface && !explicit_canonical_entries {
+            WebCanonicalPolicy::Required
+        } else {
+            options.canonical_policy
+        };
+        let (canonical_candidate, mut canonical_status) = match canonical_policy {
             WebCanonicalPolicy::Disabled => (
                 None,
                 WebCanonicalStatus {
@@ -2998,11 +3037,7 @@ impl WebBundle {
                 },
             ),
             policy @ (WebCanonicalPolicy::Optional | WebCanonicalPolicy::Required) => {
-                let derived = canonical_entries
-                    .iter()
-                    .map(|entry| canonical_lane_decl_from_entry(db, top_mod, entry, entry))
-                    .collect::<Result<Vec<_>, _>>()
-                    .and_then(CanonicalInterfaceManifest::build);
+                let derived = canonical_declarations.and_then(CanonicalInterfaceManifest::build);
                 match derived {
                     Ok(interface) => (
                         Some(interface),
@@ -3030,15 +3065,25 @@ impl WebBundle {
                 }
             }
         };
-        let wasm_entries = match canonical_candidate.as_ref() {
+        // The render entry remains the module's CPU fallback and must be
+        // rooted independently of public actor messages. Canonical wrappers
+        // hide their authored lane entries, but they do not replace the
+        // render runtime's direct pixel-kernel contract.
+        let mut wasm_entries = vec![options.source_entry.clone()];
+        wasm_entries.extend(match canonical_candidate.as_ref() {
             Some(interface) => canonical_entries
                 .iter()
                 .zip(&interface.lanes)
                 .filter(|(_, lane)| lane.intent.execution == crate::CanonicalExecution::Wasm)
                 .map(|(entry, _)| entry.clone())
                 .collect::<Vec<_>>(),
-            None => canonical_entries.clone(),
-        };
+            None => Vec::new(),
+        });
+        if let Some(control_export) = &control_export {
+            wasm_entries.push(control_export.clone());
+        }
+        let mut seen_wasm_entries = std::collections::BTreeSet::new();
+        wasm_entries.retain(|entry| seen_wasm_entries.insert(entry.clone()));
         if wasm_entries.is_empty() {
             return Err(WebBundleError::CanonicalRequired(
                 "canonical bundle requires at least one executable Wasm lane".to_owned(),
@@ -3056,7 +3101,7 @@ impl WebBundle {
         )
         .map_err(|error| WebBundleError::Lower(error.to_string()))?;
 
-        let mut wasm_options = match options.canonical_policy {
+        let mut wasm_options = match canonical_policy {
             WebCanonicalPolicy::Disabled => WasmCompileOptions::default(),
             WebCanonicalPolicy::Optional | WebCanonicalPolicy::Required => canonical_candidate
                 .as_ref()
@@ -3108,26 +3153,17 @@ impl WebBundle {
             .flatten();
         let canonical_interface =
             verify_canonical_candidate(&wasm, canonical_candidate, &mut canonical_status)?;
-        // Fail the build closed if the render runtime cannot resolve the entry it
-        // is told to mount. When there is NO canonical interface, the browser
-        // render runtime resolves the render entry with
-        // `instance.exports[manifest.source_entry]` (fe-render-runtime.js), so a
-        // divergence (e.g. a module-qualified `lib__escape` export against a bare
-        // `escape` source_entry) otherwise surfaces only as a silent mount
-        // failure in the console. Canonical bundles route the entry through the
-        // generated `fe_cabi_*` lanes instead, so this direct-export contract does
-        // not apply there.
-        if canonical_interface.is_none() {
-            let function_exports = wasm_function_export_names(&wasm);
-            if !function_exports
-                .iter()
-                .any(|name| name == &options.source_entry)
-            {
-                return Err(WebBundleError::EntryExportMismatch {
-                    source_entry: options.source_entry.clone(),
-                    exports: function_exports,
-                });
-            }
+        // The fixed render host always resolves the direct pixel entry. Actor
+        // message wrappers are an additional interface, never a substitute.
+        let function_exports = wasm_function_export_names(&wasm);
+        if !function_exports
+            .iter()
+            .any(|name| name == &options.source_entry)
+        {
+            return Err(WebBundleError::EntryExportMismatch {
+                source_entry: options.source_entry.clone(),
+                exports: function_exports,
+            });
         }
         let (interface_js, interface_d_ts, canonical_adapters) =
             generated_canonical_adapters(canonical_interface.as_ref())?;
@@ -4209,8 +4245,9 @@ pub fn shade(x: u32, y: u32) -> u32 {
                 "fe_cabi_update",
                 "fe_cabi_verify",
                 "memory",
+                "shade",
             ],
-            "only canonical wrappers, arena, and memory belong to the actor Wasm ABI",
+            "the render fallback and canonical wrappers are public; authored message lanes stay private",
         );
         let module = wasmtime::Module::new(&engine, &required.wasm).unwrap();
         let mut store = wasmtime::Store::new(&engine, ());
@@ -4224,7 +4261,11 @@ pub fn shade(x: u32, y: u32) -> u32 {
         let verify = instance
             .get_typed_func::<i32, i32>(&mut store, "fe_cabi_verify")
             .unwrap();
+        let shade = instance
+            .get_typed_func::<(i32, i32), i32>(&mut store, "shade")
+            .unwrap();
         let memory = instance.get_memory(&mut store, "memory").unwrap();
+        assert_eq!(shade.call(&mut store, (19, 23)).unwrap(), 42);
         for (sample, expected) in [(7_i32, 1_u8), (8_i32, 0_u8)] {
             reset.call(&mut store, ()).unwrap();
             let request = alloc.call(&mut store, (4, 4)).unwrap();

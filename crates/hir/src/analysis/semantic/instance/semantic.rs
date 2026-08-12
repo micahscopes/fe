@@ -1481,7 +1481,9 @@ pub(crate) fn semantic_instance_base_assumptions_for_key<'db>(
     let mut predicates: IndexSet<_> = typed_body.assumptions().list(db).iter().copied().collect();
     predicates.extend(impl_env.assumptions(db).list(db).iter().copied());
     predicates.extend(impl_env.witnesses(db).iter().copied());
-    PredicateListId::new(db, predicates.into_iter().collect::<Vec<_>>()).extend_all_bounds(db)
+    PredicateListId::new(db, predicates.into_iter().collect::<Vec<_>>())
+        .extend_all_bounds(db)
+        .without_host_placement(db)
 }
 
 fn instantiated_effect_env_forwarded_witnesses<'db>(
@@ -1500,6 +1502,9 @@ fn instantiated_effect_env_forwarded_witnesses<'db>(
         .collect::<IndexMap<_, _>>();
     let mut witnesses = IndexSet::new();
     for requirement in requirements {
+        if requirement.host_placement(db).is_some() {
+            continue;
+        }
         let Some(trait_inst) = requirement.key.key_trait() else {
             continue;
         };

@@ -1733,6 +1733,27 @@ pub struct EffectRequirement<'db> {
     pub binding_path: PathId<'db>,
 }
 
+impl<'db> EffectRequirement<'db> {
+    /// Placement traits are nominal compiler evidence, not runtime authority.
+    ///
+    /// Keep this semantic query here so every consumer keys on the resolved
+    /// trait attribute rather than on source names such as `Worker`.
+    pub fn host_placement(&self, db: &'db dyn HirAnalysisDb) -> Option<HostPlacement> {
+        let EffectRequirementKey::Trait(trait_inst) = &self.key else {
+            return None;
+        };
+        trait_inst_host_placement(db, *trait_inst)
+    }
+}
+
+/// Return a nominal trait instance's compiler-owned browser placement, if any.
+pub fn trait_inst_host_placement<'db>(
+    db: &'db dyn HirAnalysisDb,
+    trait_inst: TraitInstId<'db>,
+) -> Option<HostPlacement> {
+    trait_inst.def(db).scope().attrs(db)?.host_placement(db)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Update)]
 pub enum ProviderSource<'db> {
     UsesParam {

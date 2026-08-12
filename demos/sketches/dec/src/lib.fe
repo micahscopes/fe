@@ -17,13 +17,15 @@
 //!     refuses to dispatch them anywhere else); its mailbox is the Worker
 //!     message port with the runtime's admission control in front of it.
 //!   - The RENDER PROGRAM: the pipeline that owns the uniform state
-//!     (`ViewRequest`'s cochain values and flags), seated on the main thread
-//!     with the WebGPU dispatch capability via the `submit_view` lane. Its internal
-//!     behaviors are the synthesized fullscreen vertex stage and the
+//!     (`ViewRequest`'s cochain values and flags). `submit_view` declares the
+//!     intended main-thread WebGPU capability boundary, but the fixed surface
+//!     host does not connect that capability yet and rejects it explicitly.
+//!     The program's working gallery path is its Fe-projected pass graph. Its
+//!     internal behaviors are the synthesized fullscreen vertex stage and the
 //!     `dec_render` fragment behavior below: the SAME graded operators the
 //!     Worker lanes run, lowered through the render path instead of the wasm
-//!     path. Draw requests are its messages; the command queue is its
-//!     mailbox. One set of operator definitions, two substrates.
+//!     path. One set of operator definitions, two substrates; typed draw
+//!     submission across the declared lane remains the next orchestration step.
 //!
 //! The one piece of tooling this demo forces: GRADE-INDEXED OPERATOR TYPES.
 //! `Form<D>` and `Dual<D>` carry the cochain grade in the type; `d` raises
@@ -655,7 +657,9 @@ fn wire2(f: Form<D2>) -> Cochain2 {
 
 // ---------------------------------------------------------------------------
 // The actor lanes. Placement is DECLARED: `uses (Worker)` on the wasm lanes,
-// main-thread host seating on `submit_view`. The generated router enforces both.
+// main-thread host seating on `submit_view`. The generated router enforces
+// both placements; the fixed surface host currently exposes that host lane as
+// unavailable until a standards WebGPU capability provider is connected.
 // ---------------------------------------------------------------------------
 
 /// Shape of the complex, computed from the graded structure itself.
@@ -717,11 +721,13 @@ pub fn hodge(_request: HodgeRequest) -> HodgeDiagonal
 
 /// The render program's message lane: a main-thread host-effect lane holding
 /// the WebGPU dispatch capability. A `ViewRequest` is a draw message carrying
-/// the program's uniform state; the browser runtime routes this schema to its
-/// GPU actor, and this Fe body is never presented as GPU execution. The
-/// fragment behavior that realizes it is the `DecSurface` actor's `dec_render`
-/// below, and `fe web build` derives the render entry and mode from that
-/// declaration.
+/// the program's uniform state. The generated browser actor derives and routes
+/// this lane from Fe, but today's fixed surface host rejects invocation because
+/// its standards WebGPU capability provider is not connected yet. It never
+/// fabricates the `submitted` result from the Fe stub below. The separately
+/// working gallery render path is the `DecSurface` actor's `dec_render`
+/// fragment behavior, and `fe web build` derives the render entry and mode from
+/// that declaration.
 ///
 /// Named `submit_view`, not `view`: `view` is the reserved const behavior
 /// name a `GpuProgram` actor's surface declaration owns (web v5); this lane

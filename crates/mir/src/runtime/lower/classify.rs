@@ -27,7 +27,7 @@ use hir::analysis::{
 };
 use hir::hir_def::{ArithBinOp, FuncParamMode, ItemKind};
 use hir::projection::Projection;
-use hir::semantic::{ProviderBinding, ProviderSource, constraints_for};
+use hir::semantic::{EffectEnvView, ProviderBinding, ProviderSource, constraints_for};
 use rustc_hash::FxHashMap;
 use salsa::Update;
 
@@ -1526,6 +1526,15 @@ pub(crate) fn runtime_effect_binding_plan<'db>(
     if !matches!(binding, LocalBinding::EffectParam { .. }) {
         return None;
     }
+    // A host-placement requirement is compiler evidence about where a browser
+    // lane is seated, not a value the lane receives.  Its nominal trait must
+    // remain visible to interface derivation, while disappearing from every
+    // runtime calling convention just like other compile-time-only evidence.
+    // Key this on the resolved trait attribute rather than on `Worker`,
+    // `MainThread`, or any source spelling.
+    if effect_binding_is_host_placement_metadata(db, binding) {
+        return None;
+    }
     let env = RuntimeTypeEnv::for_semantic(db, semantic);
     let binding_ty = semantic.binding_ty(db, binding);
     match semantic.binding_role(db, binding) {
@@ -1679,6 +1688,29 @@ pub(crate) fn runtime_effect_binding_plan<'db>(
             ..
         } => None,
     }
+}
+
+/// Whether an effect binding is nominal host-placement evidence.
+///
+/// This remains narrower than "any host attribute": host capabilities can
+/// carry real runtime authority, and host-executed lanes are rejected from a
+/// Wasm root rather than silently compiled as guest code.  Placement alone is
+/// declarative and therefore has no runtime payload on any backend.
+pub(crate) fn effect_binding_is_host_placement_metadata<'db>(
+    db: &'db dyn MirDb,
+    binding: LocalBinding<'db>,
+) -> bool {
+    let LocalBinding::EffectParam { site, idx, .. } = binding else {
+        return false;
+    };
+    let Some(requirement) = EffectEnvView::new(site)
+        .requirements(db)
+        .into_iter()
+        .find(|requirement| requirement.binding_idx as usize == idx)
+    else {
+        return false;
+    };
+    requirement.host_placement(db).is_some()
 }
 
 fn runtime_exact_class_for_ordinary_binding_in_env<'db>(

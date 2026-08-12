@@ -84,6 +84,11 @@ pub struct RenderBundleArtifact {
     /// Every shader in an ordered pass graph. Empty for the legacy one-shader
     /// bundle shape, where `wgsl` alone is sufficient.
     pub pass_wgsl: Vec<RenderShaderArtifact>,
+    /// Compiler-generated canonical interface and browser actor modules.
+    /// Paths are bundle-relative (`interface.js`, `runtime/actor-client.js`,
+    /// ...); publication keeps that directory topology intact so generated
+    /// ES-module imports remain valid. Empty for a render-only surface.
+    pub support_files: Vec<RenderSupportArtifact>,
     /// The bundle's fe-web-bundle manifest exactly as
     /// `WebBundle::manifest_json()` produces it. Publication rewrites the
     /// bundle-local artifact and pass shader paths to content-addressed names,
@@ -97,6 +102,12 @@ pub struct RenderBundleArtifact {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderShaderArtifact {
+    pub path: String,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderSupportArtifact {
     pub path: String,
     pub bytes: Vec<u8>,
 }
@@ -1011,6 +1022,35 @@ fn verify_render_deployment(
         }
     }
 
+    for (field, entries) in [
+        (
+            "artifacts.canonical_adapters",
+            artifacts
+                .get("canonical_adapters")
+                .and_then(serde_json::Value::as_array),
+        ),
+        (
+            "browser_runtime.artifacts",
+            value
+                .get("browser_runtime")
+                .and_then(|runtime| runtime.get("artifacts"))
+                .and_then(serde_json::Value::as_array),
+        ),
+    ] {
+        if let Some(entries) = entries {
+            for (index, artifact) in entries.iter().enumerate() {
+                let artifact_context = format!("{context} {field}[{index}]");
+                let reference = artifact["path"].as_str().ok_or_else(|| VerificationError {
+                    context: artifact_context.clone(),
+                    detail: "generated browser artifact has no path".to_owned(),
+                })?;
+                let path = deployment_file(manifest_root, reference, &artifact_context)?;
+                verify_generated_browser_artifact(&path, artifact, &artifact_context)?;
+                verified.insert(path);
+            }
+        }
+    }
+
     let runtime_ref = required_attr(script, RENDER_RUNTIME_ATTR, context)?;
     let runtime = deployment_file(
         root,
@@ -1019,6 +1059,44 @@ fn verify_render_deployment(
     )?;
     verify_addressed_file(&runtime, &format!("{context} render runtime"))?;
     verified.insert(runtime);
+    Ok(())
+}
+
+fn verify_generated_browser_artifact(
+    path: &Path,
+    artifact: &serde_json::Value,
+    context: &str,
+) -> Result<(), VerificationError> {
+    let bytes = std::fs::read(path).map_err(|error| VerificationError {
+        context: context.to_owned(),
+        detail: format!("cannot read {}: {error}", path.display()),
+    })?;
+    let expected_len = artifact["bytes"]
+        .as_u64()
+        .ok_or_else(|| VerificationError {
+            context: context.to_owned(),
+            detail: "generated browser artifact has no byte length".to_owned(),
+        })?;
+    let expected_digest = artifact["sha256"]
+        .as_str()
+        .ok_or_else(|| VerificationError {
+            context: context.to_owned(),
+            detail: "generated browser artifact has no sha256".to_owned(),
+        })?;
+    let actual_digest = sha256_hex(&bytes);
+    if bytes.len() as u64 != expected_len || actual_digest != expected_digest {
+        return Err(VerificationError {
+            context: context.to_owned(),
+            detail: format!(
+                "{} failed generated-browser-artifact verification: expected {} bytes sha256 {}, found {} bytes sha256 {}",
+                path.display(),
+                expected_len,
+                expected_digest,
+                bytes.len(),
+                actual_digest
+            ),
+        });
+    }
     Ok(())
 }
 
@@ -2333,6 +2411,7 @@ fn publish_render_artifacts(
         wasm,
         wgsl,
         pass_wgsl,
+        support_files,
         manifest_json,
         source_dependencies: _,
     } = bundle;
@@ -2341,6 +2420,115 @@ fn publish_render_artifacts(
             PrecompileError::Serialize(format!("render bundle manifest is not valid JSON: {error}"))
         })?;
     pin_published_attribution(&mut manifest, runtime, document_source)?;
+    if !support_files.is_empty() {
+        let mut package_identity = Vec::new();
+        let mut support_paths = BTreeSet::new();
+        for support in &support_files {
+            validate_materialized_support_path(&support.path)?;
+            if !support_paths.insert(support.path.clone()) {
+                return Err(PrecompileError::Serialize(format!(
+                    "render support path `{}` is duplicated",
+                    support.path
+                )));
+            }
+            package_identity.extend_from_slice(&(support.path.len() as u64).to_le_bytes());
+            package_identity.extend_from_slice(support.path.as_bytes());
+            package_identity.extend_from_slice(&(support.bytes.len() as u64).to_le_bytes());
+            package_identity.extend_from_slice(&support.bytes);
+        }
+        let package_digest = sha256_hex(&package_identity);
+        let package_dir = format!("assets/fe-actor-{}", &package_digest[..16]);
+        for support in &support_files {
+            insert_identical(
+                assets,
+                format!("{package_dir}/{}", support.path),
+                support.bytes.clone(),
+            )?;
+        }
+        let published = |path: &str| format!("{}/{}", basename(&package_dir), path);
+        let mut declared_paths = BTreeSet::new();
+        {
+            let adapters = manifest
+                .get_mut("artifacts")
+                .and_then(|artifacts| artifacts.get_mut("canonical_adapters"))
+                .and_then(serde_json::Value::as_array_mut)
+                .ok_or_else(|| {
+                    PrecompileError::Serialize(
+                        "render support files require canonical adapter metadata".to_owned(),
+                    )
+                })?;
+            for adapter in adapters {
+                let path = adapter
+                    .get("path")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        PrecompileError::Serialize(
+                            "canonical adapter metadata has no string path".to_owned(),
+                        )
+                    })?;
+                if !support_files.iter().any(|support| support.path == path) {
+                    return Err(PrecompileError::Serialize(format!(
+                        "canonical adapter `{path}` is absent from render support files"
+                    )));
+                }
+                let support = support_files
+                    .iter()
+                    .find(|support| support.path == path)
+                    .expect("presence checked above");
+                verify_support_metadata(adapter, support, path)?;
+                if !declared_paths.insert(path.to_owned()) {
+                    return Err(PrecompileError::Serialize(format!(
+                        "generated browser artifact `{path}` is declared more than once"
+                    )));
+                }
+                adapter["path"] = serde_json::Value::String(published(path));
+            }
+        }
+        let runtime_artifacts = manifest
+            .get_mut("browser_runtime")
+            .and_then(|runtime| runtime.get_mut("artifacts"))
+            .and_then(serde_json::Value::as_array_mut)
+            .ok_or_else(|| {
+                PrecompileError::Serialize(
+                    "render support files require browser runtime metadata".to_owned(),
+                )
+            })?;
+        for runtime in runtime_artifacts {
+            let path = runtime
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    PrecompileError::Serialize(
+                        "browser runtime metadata has no string path".to_owned(),
+                    )
+                })?;
+            if !support_files.iter().any(|support| support.path == path) {
+                return Err(PrecompileError::Serialize(format!(
+                    "browser runtime `{path}` is absent from render support files"
+                )));
+            }
+            let support = support_files
+                .iter()
+                .find(|support| support.path == path)
+                .expect("presence checked above");
+            verify_support_metadata(runtime, support, path)?;
+            if !declared_paths.insert(path.to_owned()) {
+                return Err(PrecompileError::Serialize(format!(
+                    "generated browser artifact `{path}` is declared more than once"
+                )));
+            }
+            runtime["path"] = serde_json::Value::String(published(path));
+        }
+        if declared_paths != support_paths {
+            let extras = support_paths
+                .difference(&declared_paths)
+                .cloned()
+                .collect::<Vec<_>>();
+            return Err(PrecompileError::Serialize(format!(
+                "render support files are not exactly declared by the generated manifest: extra {extras:?}"
+            )));
+        }
+    }
     let artifacts = manifest
         .get_mut("artifacts")
         .and_then(serde_json::Value::as_object_mut)
@@ -2450,6 +2638,38 @@ fn publish_render_artifacts(
         published_reference(base_url, document_url, &manifest_path),
         wasm_sha256,
     ))
+}
+
+fn verify_support_metadata(
+    artifact: &serde_json::Value,
+    support: &RenderSupportArtifact,
+    path: &str,
+) -> Result<(), PrecompileError> {
+    let bytes = artifact.get("bytes").and_then(serde_json::Value::as_u64);
+    let sha256 = artifact.get("sha256").and_then(serde_json::Value::as_str);
+    let actual_sha256 = sha256_hex(&support.bytes);
+    if bytes != Some(support.bytes.len() as u64) || sha256 != Some(actual_sha256.as_str()) {
+        return Err(PrecompileError::Serialize(format!(
+            "generated browser artifact `{path}` does not match its manifest metadata"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_materialized_support_path(path: &str) -> Result<(), PrecompileError> {
+    let path = Path::new(path);
+    if path.as_os_str().is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(PrecompileError::Serialize(format!(
+            "render support path `{}` is not bundle-relative",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 /// Form 1 (`<script type="application/fe" data-fe-src=DIR data-fe-render>`):
@@ -3194,6 +3414,7 @@ mod tests {
             wasm: Some(b"wasm-bytes".to_vec()),
             wgsl: b"wgsl-source".to_vec(),
             pass_wgsl: Vec::new(),
+            support_files: Vec::new(),
             manifest_json: br#"{
                 "artifacts": {
                     "wasm": "module.wasm",
@@ -3276,6 +3497,7 @@ mod tests {
                     bytes: b"fragment-shader".to_vec(),
                 },
             ],
+            support_files: Vec::new(),
             manifest_json: serde_json::to_vec(&serde_json::json!({
                 "protocol": "fe-web-bundle",
                 "protocol_version": 6,
@@ -3287,6 +3509,62 @@ mod tests {
                     { "shader": "passes/000-compute.wgsl", "shader_bytes": 14 },
                     { "shader": "passes/001-fragment.wgsl", "shader_bytes": 15 }
                 ]
+            }))
+            .unwrap(),
+            source_dependencies: None,
+        }
+    }
+
+    fn fake_actor_render_bundle() -> RenderBundleArtifact {
+        let adapters = [
+            (
+                "interface.js",
+                b"export const lane = 'update';\n".as_slice(),
+            ),
+            (
+                "interface.d.ts",
+                b"export declare const lane: 'update';\n".as_slice(),
+            ),
+        ];
+        let runtime = [(
+            "runtime/actor-client.js",
+            b"export function createCanonicalBrowserActor() {}\n".as_slice(),
+        )];
+        let metadata = |(path, bytes): &(&str, &[u8])| {
+            serde_json::json!({
+                "path": path,
+                "bytes": bytes.len(),
+                "sha256": sha256_hex(bytes),
+            })
+        };
+        RenderBundleArtifact {
+            wasm: Some(b"wasm-bytes".to_vec()),
+            wgsl: b"wgsl-source".to_vec(),
+            pass_wgsl: Vec::new(),
+            support_files: adapters
+                .iter()
+                .chain(runtime.iter())
+                .map(|(path, bytes)| RenderSupportArtifact {
+                    path: (*path).to_owned(),
+                    bytes: bytes.to_vec(),
+                })
+                .collect(),
+            manifest_json: serde_json::to_vec(&serde_json::json!({
+                "protocol": "fe-web-bundle",
+                "protocol_version": 6,
+                "source_entry": "shade",
+                "artifacts": {
+                    "wasm": "module.wasm",
+                    "wasm_bytes": 10,
+                    "wgsl": "shader.wgsl",
+                    "wgsl_bytes": 11,
+                    "canonical_adapters": adapters.iter().map(metadata).collect::<Vec<_>>(),
+                },
+                "browser_runtime": {
+                    "protocol": "fe-web-actor-runtime",
+                    "protocol_version": 1,
+                    "artifacts": runtime.iter().map(metadata).collect::<Vec<_>>(),
+                },
             }))
             .unwrap(),
             source_dependencies: None,
@@ -3428,6 +3706,82 @@ mod tests {
                 .assets
                 .keys()
                 .any(|path| path.contains("fe-render-runtime-"))
+        );
+    }
+
+    #[test]
+    fn generated_actor_support_is_content_addressed_verified_and_fail_closed() {
+        let html = r#"<script type="application/fe" data-fe-src="sketches/actor" data-fe-render></script>"#;
+        let compile = |bundle: RenderBundleArtifact| {
+            precompile_html_with_render_lane(
+                "https://example.test/index.html",
+                html,
+                "export function mountRenderSurface() {}\n",
+                |_| panic!("no application/fe script sources"),
+                |url, entry| {
+                    assert_eq!(url.as_str(), "https://example.test/sketches/actor");
+                    assert_eq!(entry, None);
+                    Ok(Some(bundle.clone()))
+                },
+            )
+        };
+
+        let output = compile(fake_actor_render_bundle()).unwrap();
+        let support_paths = output
+            .assets
+            .keys()
+            .filter(|path| path.contains("/fe-actor-"))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(support_paths.len(), 3, "{support_paths:?}");
+        let package = support_paths[0]
+            .split_once("/interface")
+            .map(|(package, _)| package)
+            .unwrap_or_else(|| {
+                support_paths[0]
+                    .split_once("/runtime/")
+                    .expect("actor package path")
+                    .0
+            });
+        assert!(support_paths.iter().all(|path| path.starts_with(package)));
+
+        let deployment = tempfile::tempdir().unwrap();
+        write_publication(deployment.path(), &output);
+        let report = verify_precompiled_site(&deployment.path().join("index.html")).unwrap();
+        assert_eq!(report.files, output.assets.len());
+
+        let interface = support_paths
+            .iter()
+            .find(|path| path.ends_with("/interface.js"))
+            .unwrap();
+        std::fs::write(deployment.path().join(interface), b"tampered").unwrap();
+        let error = verify_precompiled_site(&deployment.path().join("index.html")).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("failed generated-browser-artifact verification"),
+            "{error}"
+        );
+
+        let mut metadata_tampered = fake_actor_render_bundle();
+        metadata_tampered.support_files[0].bytes.push(b'!');
+        let error = compile(metadata_tampered).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not match its manifest metadata"),
+            "{error}"
+        );
+
+        let mut undeclared = fake_actor_render_bundle();
+        undeclared.support_files.push(RenderSupportArtifact {
+            path: "runtime/undeclared.js".to_owned(),
+            bytes: b"export {};\n".to_vec(),
+        });
+        let error = compile(undeclared).unwrap_err();
+        assert!(
+            error.to_string().contains("not exactly declared"),
+            "{error}"
         );
     }
 

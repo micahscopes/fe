@@ -392,6 +392,7 @@ export class FeSurfaceElement extends HTMLElement {
     this._memberIndexByName = new Map();
     this._controlRows = [];
     this._manifest = null;
+    this._actor = null;
     this._surface = null;
     this._control = null; // R3 param gestures: the projected `control` manifest section.
     this._controlKernel = null; // the resolved wasm control export, or null (no gestures).
@@ -475,8 +476,26 @@ export class FeSurfaceElement extends HTMLElement {
     this._dispatch("fe-statechange", { state: "frozen" });
   }
 
-  // `.post()` (message lanes) is R3/R4 (FE_WEB_V5_BUILD_ORDER.md); deliberately
-  // not defined here rather than shipped as a stub with no lane to call.
+  /** Send one compiler-derived typed message to this surface's resident actor.
+   * Lane admission, request/result validation, placement, Worker ownership,
+   * cancellation, and transfer policy all come from the generated interface;
+   * this fixed host neither assigns numeric IDs nor knows demo message shapes. */
+  async post(lane, payload, { generation = 0, signal } = {}) {
+    if (typeof lane !== "string" || lane.length === 0) {
+      throw new TypeError("fe-surface.post requires a canonical lane name");
+    }
+    if (!Number.isSafeInteger(generation) || generation < 0) {
+      throw new TypeError("fe-surface.post generation must be a non-negative safe integer");
+    }
+    if (!this._actor) await this._readyPromise;
+    if (this._manifest && !this._manifest.canonical_interface) {
+      throw new Error("fe-surface: this Fe program declares no browser message lanes");
+    }
+    if (!this._actor) {
+      throw new Error("fe-surface: canonical browser actor did not initialize");
+    }
+    return this._actor.request(lane, payload, generation, { signal });
+  }
 
   /** Adopt an existing canvas element instead of generating one (the
    * `data-fe-canvas` compatibility path). Must be called before the element
@@ -581,8 +600,11 @@ export class FeSurfaceElement extends HTMLElement {
           throw new Error(`fe render runtime: wasm export \`${manifest.source_entry}\` not found`);
         }
         if (this._graph && typeof this._kernel !== "function") this._kernel = null;
+        await this._bootCanonicalActor(wasmBytes);
       } else if (!this._graph) {
         throw new Error("fe render runtime: bundle has neither a Wasm fallback nor a GPU pass graph");
+      } else if (manifest.canonical_interface) {
+        throw new Error("fe render runtime: canonical browser messages require a Wasm artifact");
       }
       // R3 param gestures: the SAME wasm instance carries the control export
       // (already part of the root set the compiler emitted `module.wasm`
@@ -1429,6 +1451,8 @@ export class FeSurfaceElement extends HTMLElement {
   }
 
   _teardown() {
+    this._actor?.close();
+    this._actor = null;
     if (this._gestureFrame !== null) cancelAnimationFrame(this._gestureFrame);
     this._gestureFrame = null;
     this._gestureDirty = false;
@@ -1463,6 +1487,38 @@ export class FeSurfaceElement extends HTMLElement {
     this._activationObserver?.disconnect();
     this._activationObserver = null;
     this._unwireGestures();
+  }
+
+  async _bootCanonicalActor(wasm) {
+    const canonical = this._manifest?.canonical_interface;
+    if (!canonical) return;
+    const runtime = this._manifest?.browser_runtime;
+    const clientArtifact = runtime?.artifacts?.find((artifact) =>
+      typeof artifact?.path === "string" && artifact.path.endsWith("/actor-client.js"));
+    if (!clientArtifact) {
+      throw new Error("fe render runtime: canonical interface has no generated actor client");
+    }
+    const clientUrl = new URL(clientArtifact.path, this._manifestUrl);
+    const { createCanonicalBrowserActor } = await import(clientUrl.href);
+    if (typeof createCanonicalBrowserActor !== "function") {
+      throw new Error("fe render runtime: generated actor client has no constructor");
+    }
+    // Main-thread effects are admitted by the generated intent router. Until
+    // the corresponding standards capability provider is connected, invoking
+    // one rejects explicitly; Worker/Wasm lanes remain fully usable. This is
+    // an honest unavailable capability, not a fabricated application result.
+    const handlers = Object.fromEntries(canonical.lanes
+      .filter((lane) => lane.intent.execution === "host_effect"
+        && lane.intent.placement === "main_thread")
+      .map((lane) => [lane.name, async () => {
+        throw new Error(
+          `fe render runtime: host capability for canonical lane ${lane.name} is not connected`,
+        );
+      }]));
+    this._actor = await createCanonicalBrowserActor({ wasm, handlers });
+    this._dispatch("fe-actor-ready", {
+      lanes: canonical.lanes.map((lane) => lane.name),
+    });
   }
 
   // -- typed surface facts + legacy gestures --------------------------------

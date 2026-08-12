@@ -1277,6 +1277,20 @@ impl<'db> PredicateListId<'db> {
         self.list(db).is_empty()
     }
 
+    /// Remove compiler-only browser placement evidence from a runtime-facing
+    /// assumption set after all implied bounds have been expanded.
+    pub(crate) fn without_host_placement(self, db: &'db dyn HirAnalysisDb) -> Self {
+        let predicates = self
+            .list(db)
+            .iter()
+            .copied()
+            .filter(|predicate| {
+                crate::semantic::trait_inst_host_placement(db, *predicate).is_none()
+            })
+            .collect::<Vec<_>>();
+        PredicateListId::new(db, predicates)
+    }
+
     /// Transitively extends the predicate list with all implied bounds:
     /// - Super trait bounds
     /// - Associated type bounds from trait definitions

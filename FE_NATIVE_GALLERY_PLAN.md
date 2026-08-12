@@ -348,6 +348,37 @@ Origin: honesty audit of Claude Code session
   that exact cold-built site; unavailable WebGPU pixel execution remains the
   previously named environmental qualification. Native event/scheduling parity
   remains open Phase 2 work.
+- The first Phase 4 typed-message slice now runs through the ordinary gallery
+  build without CLI or Rust name inventories. Public Fe functions whose
+  resolved effect rows carry host execution, placement, or capability markers
+  derive the canonical interface in declaration order; ordinary helpers,
+  render stages, surface transitions, and policy implementations are not
+  guessed into it. `Worker`/`MainThread` are compiler-only placement evidence,
+  erased from runtime arguments after trait-bound expansion rather than
+  supplied as fake values. The generated Wasm value lane now safely reifies
+  read-only, statically projected memory-provider records and whole-record
+  forwarding while continuing to reject dynamic indexing, stores,
+  address-taking, object references, and enum flattening.
+- Generated interface JavaScript, declarations, and the fixed actor modules
+  are published as one content-addressed ES-module package. Publication is
+  fail-closed: bundle-relative paths must be unique and exactly equal the
+  manifest-declared set, bytes and SHA-256 metadata must match, and the
+  deployment verifier rechecks every emitted module. `<fe-surface>.post()` is
+  one fixed demo-blind host call into that generated actor; lane admission,
+  validation, Worker placement, cancellation, and request/result codecs come
+  from Fe-derived bindings. DEC's real `d0` lane now crosses
+  surface -> generated router -> module Worker -> Fe Wasm in Chromium and its
+  returned cochain matches the independent hand oracle (`-1` on all six
+  spokes, zero on all six ring edges). This is semantic behavior evidence, not
+  byte matching. The complete DEC suite is 4/4, WebBundle tests are 9/9,
+  html-precompile tests are 31/31, and the two focused CLI discovery/policy
+  gates pass. A fresh release precompile built 11 render bundles in 118.095
+  seconds and verified 13 Fe modules / 64 files; the real Chromium gallery and
+  SourceInspector tape including DEC passed against that exact publication.
+  The Fe-declared `submit_view` MainThread/WebGPU capability is honestly still
+  unconnected: invoking it rejects explicitly instead of fabricating the
+  application-defined `{ submitted: bool }` response. Completing that provider
+  and `qcga_pencil` pick -> drag -> solve -> render remain Phase 4 work.
 - This component/page slice is not the full resident-component end state. The
   outer gallery shell does not yet own routing, tile lifecycle, scheduling, or
   component-to-component messages as a long-lived Fe actor, and the stylesheet
@@ -530,8 +561,11 @@ reserved-name, positional, scalar-only ABI is bespoke surface area to remove.
   render manifest today.
 - `qcga_pencil` remains excluded because vertex/fragment plus typed
   pick/message lanes have not landed.
-- DEC contains Worker/message-shaped Fe functions, but the gallery currently
-  exercises only its fragment actor and direct parameter sliders.
+- DEC's Worker/message-shaped Fe functions derive an ordinary generated
+  browser actor, and the gallery Chromium gate executes `d0` through its real
+  Worker/Wasm lane. Its Fe-declared MainThread `submit_view` capability is
+  present but explicitly unavailable until general WebGPU orchestration lands;
+  the visible picture still uses the separately projected fragment actor.
 
 ### Legacy strata
 

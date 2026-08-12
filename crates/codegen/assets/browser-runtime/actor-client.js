@@ -15,6 +15,8 @@ export async function createCanonicalBrowserActor({
     throw new TypeError("generated actor composition owns adapter, init, and auxiliary ports");
   }
   const adapter = compileActorAdapter();
+  const hasMainThreadGpu = Object.values(adapter.intents).some((intent) =>
+    intent.execution === "host_effect" && intent.placement === "main_thread");
   return createCanonicalModuleWorkerActor({
     ...actorOptions,
     workerUrl,
@@ -22,6 +24,9 @@ export async function createCanonicalBrowserActor({
     adapter,
     MessageChannelCtor,
     createAuxiliaryPorts(epoch) {
+      if (!hasMainThreadGpu) {
+        return { message: {}, transfer: [], close() {} };
+      }
       const channel = new MessageChannelCtor();
       const broker = createCanonicalMainThreadGpuBroker(channel.port1, {
         adapter,

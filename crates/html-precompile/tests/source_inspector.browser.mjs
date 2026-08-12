@@ -182,6 +182,28 @@ try {
         "TodoMVC",
       ],
     });
+
+    // Exercise the DEC tile through the real generated browser actor path:
+    // `<fe-surface>.post` -> generated canonical validators/router -> module
+    // Worker -> Fe `d0` -> canonical response. This is semantic evidence, not
+    // a publication-byte or manifest-presence proxy.
+    await page.waitForFunction(() => {
+      const figure = Array.from(document.querySelectorAll(".grid > figure"))
+        .find(node => node.querySelector("figcaption > b")?.textContent === "dec");
+      return figure?.querySelector("fe-surface")?._actor != null;
+    });
+    const decD0 = await page.evaluate(async () => {
+      const figure = Array.from(document.querySelectorAll(".grid > figure"))
+        .find(node => node.querySelector("figcaption > b")?.textContent === "dec");
+      const surface = figure.querySelector("fe-surface");
+      return surface.post("d0", {
+        v0: 1, v1: 0, v2: 0, v3: 0, v4: 0, v5: 0, v6: 0,
+      });
+    });
+    assert.deepEqual(decD0, {
+      e0: -1, e1: -1, e2: -1, e3: -1, e4: -1, e5: -1,
+      e6: 0, e7: 0, e8: 0, e9: 0, e10: 0, e11: 0,
+    }, "DEC d0 did not execute through the generated Worker/message path");
   } else {
     assert.deepEqual(await page.evaluate(() => ({
       title: document.title,

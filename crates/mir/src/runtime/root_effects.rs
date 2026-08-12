@@ -21,8 +21,8 @@ use crate::{
         RefView, RuntimeClass, TargetRootProviderBinding, TargetRootProviderMaterialization,
         lower::{
             classify::{
-                provider_erases_runtime_root, provider_source_erases_zero_sized_effect_value,
-                runtime_effect_binding_plan,
+                effect_binding_is_host_placement_metadata, provider_erases_runtime_root,
+                provider_source_erases_zero_sized_effect_value, runtime_effect_binding_plan,
             },
             type_info::RuntimeTypeEnv,
         },
@@ -112,6 +112,9 @@ fn entry_effect_arg_plan_for_binding<'db>(
     contract_fields: Option<&FxHashMap<u32, ContractFieldLayoutInfo<'db>>>,
     total_code_slots: usize,
 ) -> Result<Option<EntryEffectArgPlan<'db>>, LowerError> {
+    if effect_binding_is_host_placement_metadata(db, binding) {
+        return Ok(None);
+    }
     match provider.source.clone() {
         ProviderSource::ContractField { field_idx, .. } => {
             let env = RuntimeTypeEnv::for_semantic(db, semantic);

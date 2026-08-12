@@ -1086,13 +1086,28 @@ fn remap_inline_expr<'db>(
 }
 
 /// Reify statically projected read-only aggregate parameters as flattened
-/// values for Wasm. Fe presents ordinary record parameters as references, but
-/// the Wasm product ABI already carries closed scalar trees by value. Convert
-/// only compile-time `Field` paths through struct layouts; dynamic indexes,
-/// enums, stores, address-taking, and non-aggregate/resource pointees are left
-/// untouched and continue to fail closed in normal lowering.
+/// values for Wasm. Fe presents `Copy`/owned records as memory-provider refs
+/// and immutable constants as const refs, but the Wasm product ABI already
+/// carries their closed scalar trees by value. Convert only compile-time
+/// `Field` paths through struct layouts; dynamic indexes, enums, stores,
+/// address-taking, mutable object refs, and non-aggregate/resource pointees are
+/// left untouched and continue to fail closed in normal lowering.
 fn is_reifiable_aggregate_ref(kind: &RefKind<'_>) -> bool {
-    matches!(kind, RefKind::Const)
+    matches!(
+        kind,
+        RefKind::Const
+            | RefKind::Provider {
+                space: AddressSpaceKind::Memory,
+                ..
+            }
+    )
+}
+
+fn is_struct_aggregate(db: &DriverDataBase, class: &RuntimeClass<'_>) -> bool {
+    let RuntimeClass::AggregateValue { layout } = class else {
+        return false;
+    };
+    matches!(layout.data(db), Layout::Struct(_))
 }
 
 fn is_static_leaf_load_from_slot<'db>(
@@ -1137,6 +1152,82 @@ fn is_static_leaf_load_from_slot<'db>(
         class = field;
     }
     !matches!(class, RuntimeClass::AggregateValue { .. })
+}
+
+fn is_static_leaf_load_from_ref<'db>(
+    db: &'db DriverDataBase,
+    body: &RuntimeBody<'db>,
+    stmt: &RStmt<'_>,
+    candidate: RLocalId,
+) -> bool {
+    let RStmt::Assign {
+        expr:
+            RExpr::Load {
+                place:
+                    RuntimePlace {
+                        root: PlaceRoot::Ref(root),
+                        path,
+                    },
+            },
+        ..
+    } = stmt
+    else {
+        return false;
+    };
+    if *root != candidate || path.is_empty() {
+        return false;
+    }
+    let Some(RuntimeClass::Ref { pointee, .. }) = body.value_class(candidate) else {
+        return false;
+    };
+    let mut class = pointee.as_ref().clone();
+    for elem in path.iter() {
+        let PlaceElem::Field(index) = elem else {
+            return false;
+        };
+        let RuntimeClass::AggregateValue { layout } = class else {
+            return false;
+        };
+        let Layout::Struct(struct_layout) = layout.data(db) else {
+            return false;
+        };
+        let Some(field) = struct_layout.fields.get(index.0 as usize).cloned() else {
+            return false;
+        };
+        class = field;
+    }
+    !matches!(class, RuntimeClass::AggregateValue { .. })
+}
+
+/// Prove that a reference-shaped aggregate parameter is consumed only as a
+/// value: immutable static leaf reads or an explicit whole-value forwarding
+/// assignment. Once flattened, the latter copies all leaves, so it preserves
+/// Fe value semantics rather than aliasing a linear-memory object.
+fn ref_param_has_only_value_reads<'db>(
+    db: &'db DriverDataBase,
+    body: &RuntimeBody<'db>,
+    candidate: RLocalId,
+) -> bool {
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            if is_static_leaf_load_from_ref(db, body, stmt, candidate)
+                || matches!(stmt, RStmt::Assign { expr: RExpr::Use(src), .. } if *src == candidate)
+            {
+                continue;
+            }
+            let mut used = FxHashMap::default();
+            collect_stmt_uses(stmt, &mut used);
+            if used.contains_key(&candidate) {
+                return false;
+            }
+        }
+        let mut used = FxHashMap::default();
+        collect_terminator_uses(&block.terminator, &mut used);
+        if used.contains_key(&candidate) {
+            return false;
+        }
+    }
+    true
 }
 
 fn place_is_rooted_at(place: &RuntimePlace<'_>, candidate: RLocalId) -> bool {
@@ -1243,14 +1334,17 @@ fn slot_param_has_only_static_field_reads<'db>(
 }
 
 fn reify_static_aggregate_params<'db>(db: &'db DriverDataBase, body: &mut RuntimeBody<'db>) {
-    let candidates = body
+    let mut candidates = body
         .signature
         .params
         .iter()
         .filter_map(|param| match &param.class {
             RuntimeClass::Ref { pointee, kind, .. }
                 if is_reifiable_aggregate_ref(kind)
-                    && matches!(pointee.as_ref(), RuntimeClass::AggregateValue { .. }) =>
+                    && matches!(pointee.as_ref(), RuntimeClass::AggregateValue { .. })
+                    && (matches!(kind, RefKind::Const)
+                        || (is_struct_aggregate(db, pointee)
+                            && ref_param_has_only_value_reads(db, body, param.local))) =>
             {
                 Some((param.local, pointee.as_ref().clone()))
             }
@@ -1282,6 +1376,37 @@ fn reify_static_aggregate_params<'db>(db: &'db DriverDataBase, body: &mut Runtim
     for block in blocks {
         let mut rewritten = Vec::with_capacity(block.stmts.len());
         for stmt in std::mem::take(&mut block.stmts) {
+            if let RStmt::Assign {
+                dst,
+                expr: RExpr::Use(src),
+            } = &stmt
+                && let Some(class) = candidates.get(src).cloned()
+            {
+                // Enum values retain their reference/tag representation until
+                // the value lane has an explicit flattened enum ABI. Record
+                // forwarding is safe because every leaf is projected by
+                // declaration order; applying that rule to an enum would
+                // erase the tag/reference operations used by its consumer.
+                if !is_struct_aggregate(db, &class) {
+                    rewritten.push(stmt);
+                    continue;
+                }
+                let dst_class = locals[dst.as_u32() as usize].carrier.value_class();
+                let compatible = match dst_class {
+                    Some(RuntimeClass::Ref { pointee, .. }) => {
+                        class.shares_runtime_rep_with(db, pointee)
+                    }
+                    Some(other) => class.shares_runtime_rep_with(db, other),
+                    None => false,
+                };
+                if compatible {
+                    locals[dst.as_u32() as usize].carrier = RuntimeCarrier::Value(class.clone());
+                    locals[dst.as_u32() as usize].root = RuntimeLocalRoot::None;
+                    candidates.insert(*dst, class);
+                }
+                rewritten.push(stmt);
+                continue;
+            }
             let RStmt::Assign {
                 dst,
                 expr: RExpr::Load { place },
@@ -6955,7 +7080,15 @@ mod tests {
 
     #[test]
     fn aggregate_param_reification_excludes_mutable_object_refs() {
+        let db = DriverDataBase::default();
         assert!(is_reifiable_aggregate_ref(&RefKind::Const));
+        assert!(is_reifiable_aggregate_ref(&RefKind::Provider {
+            provider_ty: hir::analysis::ty::ty_def::TyId::invalid(
+                &db,
+                hir::analysis::ty::ty_def::InvalidCause::Other,
+            ),
+            space: AddressSpaceKind::Memory,
+        }));
         assert!(!is_reifiable_aggregate_ref(&RefKind::Object));
     }
 

@@ -365,6 +365,71 @@ pub fn canonical_lane_decl_from_entry<'db>(
             "canonical entry `{entry_name}` is ambiguous in the selected module"
         )));
     }
+    canonical_lane_decl_from_func(db, func, entry_name, lane_name)
+}
+
+/// Derive every explicitly placed browser-message lane in one Fe module.
+///
+/// A function enters this set only when its effect row contains a nominal
+/// host execution, placement, or capability marker (`Worker`, `MainThread`,
+/// `HostEffect`, ...). Ordinary public helpers and GPU-stage functions are not
+/// guessed into an interface from their names or record-shaped signatures.
+pub fn canonical_lane_decls_from_module<'db>(
+    db: &'db dyn HirAnalysisDb,
+    top_mod: TopLevelMod<'db>,
+) -> Result<Vec<CanonicalLaneDecl>, CanonicalInterfaceError> {
+    let candidates = top_mod
+        .all_funcs(db)
+        .iter()
+        .copied()
+        .filter(|func| func.top_mod(db) == top_mod)
+        .filter(|func| !func.is_associated_func(db))
+        .filter(|func| function_has_browser_actor_marker(db, *func))
+        .map(|func| {
+            let name = func
+                .name(db)
+                .to_opt()
+                .map(|name| name.data(db).to_owned())
+                .ok_or_else(|| error("canonical browser-message lane must be named"))?;
+            Ok((name, func))
+        })
+        .collect::<Result<Vec<_>, CanonicalInterfaceError>>()?;
+    let mut seen = std::collections::BTreeSet::new();
+    for (name, _) in &candidates {
+        if !seen.insert(name) {
+            return Err(error(format!(
+                "canonical browser-message entry `{}` is ambiguous in the selected module",
+                name
+            )));
+        }
+    }
+    candidates
+        .into_iter()
+        .map(|(name, func)| canonical_lane_decl_from_func(db, func, &name, &name))
+        .collect()
+}
+
+fn function_has_browser_actor_marker(db: &dyn HirAnalysisDb, func: hir::hir_def::Func<'_>) -> bool {
+    func.effect_requirements(db).into_iter().any(|requirement| {
+        let EffectRequirementKey::Trait(trait_inst) = &requirement.key else {
+            return false;
+        };
+        let trait_ = trait_inst.def(db);
+        let Some(attrs) = trait_.scope().attrs(db) else {
+            return false;
+        };
+        attrs.host_execution(db).is_some()
+            || attrs.host_placement(db).is_some()
+            || attrs.host_capability(db).is_some()
+    })
+}
+
+fn canonical_lane_decl_from_func<'db>(
+    db: &'db dyn HirAnalysisDb,
+    func: hir::hir_def::Func<'db>,
+    entry_name: &str,
+    lane_name: &str,
+) -> Result<CanonicalLaneDecl, CanonicalInterfaceError> {
     if !func.vis(db).is_pub() || func.is_extern(db) || func.is_associated_func(db) {
         return Err(error(format!(
             "canonical entry `{entry_name}` must be a public non-associated Fe function"

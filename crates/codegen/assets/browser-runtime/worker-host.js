@@ -28,6 +28,7 @@ const canonicalDispatchers = (adapter, wasmActor, gpu) => {
     dispatchers.wasm = (request, context) => wasmActor.dispatch(request, context);
   }
   if (owners.has("main_thread_host")) {
+    if (!gpu) throw new TypeError("canonical main-thread host lanes require a GPU port");
     dispatchers.main_thread_host = (request, { signal } = {}) => gpu.request(
       request.lane,
       request.payload,
@@ -47,10 +48,11 @@ export async function attachCanonicalWorkerHost({
   const exports = await instantiateCanonicalWasm(wasm);
   const adapter = compileActorAdapter();
   const wasmActor = createActorAdapter(exports, { placement: "worker" });
-  const gpu = createCanonicalMainThreadGpuClient(gpuPort, {
-    adapter,
-    initialEpoch: actorEpoch,
-  });
+  const hasMainThreadGpu = Object.values(adapter.intents).some((intent) =>
+    intent.execution === "host_effect" && intent.placement === "main_thread");
+  const gpu = hasMainThreadGpu
+    ? createCanonicalMainThreadGpuClient(gpuPort, { adapter, initialEpoch: actorEpoch })
+    : null;
   const router = createCanonicalIntentRouter(
     adapter,
     canonicalDispatchers(adapter, wasmActor, gpu),

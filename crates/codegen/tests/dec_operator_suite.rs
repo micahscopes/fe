@@ -22,7 +22,7 @@ use driver::DriverDataBase;
 use fe_codegen::{
     CanonicalExecution, CanonicalInterfaceManifest, CanonicalLane, CanonicalLayout,
     CanonicalPlacement, CanonicalShape, WasmCompileOptions, WebBuildOptions, WebBundle,
-    WebCanonicalPolicy, canonical_lane_decl_from_entry, compile_runtime_package_wasm_with_options,
+    canonical_lane_decls_from_module, compile_runtime_package_wasm_with_options,
     verify_canonical_wasm_abi,
 };
 use hir::hir_def::HirIngot;
@@ -147,13 +147,15 @@ fn compile_dec_actor() -> (CanonicalInterfaceManifest, Vec<u8>) {
         "unexpected dec diagnostics:\n{diagnostics}"
     );
 
-    let declarations = ALL_LANES
-        .iter()
-        .map(|entry| canonical_lane_decl_from_entry(&db, top_mod, entry, entry).unwrap())
-        .collect::<Vec<_>>();
+    let declarations = canonical_lane_decls_from_module(&db, top_mod).unwrap();
     let manifest = CanonicalInterfaceManifest::build(declarations).unwrap();
 
-    let wasm_entries: Vec<String> = WASM_LANES.iter().map(|name| (*name).to_string()).collect();
+    let wasm_entries = manifest
+        .lanes
+        .iter()
+        .filter(|lane| lane.intent.execution == CanonicalExecution::Wasm)
+        .map(|lane| lane.name.clone())
+        .collect::<Vec<_>>();
     let package = mir::build_wasm_runtime_package_for_entries(&db, top_mod, &wasm_entries).unwrap();
     let lanes: Vec<CanonicalLane> = manifest
         .lanes
@@ -408,14 +410,8 @@ fn web_bundle_carries_the_declared_topology() {
     // placements are DECLARED in Fe, but the kernel selection and pipeline
     // shape still arrive as options here (the CLI's --entry/--mode). Closing
     // that is the composition design's job, not this demo's.
-    let bundle = WebBundle::compile(
-        &db,
-        top_mod,
-        WebBuildOptions::render("dec_render", None)
-            .with_canonical_policy(WebCanonicalPolicy::Required)
-            .with_canonical_entries(ALL_LANES.iter().map(|name| (*name).to_string())),
-    )
-    .unwrap();
+    let bundle =
+        WebBundle::compile(&db, top_mod, WebBuildOptions::render("dec_render", None)).unwrap();
 
     assert!(bundle.manifest.canonical_status.embedded);
     assert!(!bundle.wgsl.is_empty(), "render leg must emit WGSL");
