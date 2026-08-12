@@ -22,14 +22,25 @@ Origin: honesty audit of Claude Code session
   through the same fixed ABI, including its real resource slot. Negative gates
   reject partial state records, and release gallery precompilation validates
   both manifest-free control artifacts.
-- Native/Cranelift event parity is still open. An attempted gate against the
-  real checked-in actor exposed two named limitations in the pinned Sonatina
-  backend: floating-point comparison instructions are not translated, and
-  records/tuples returning more than two floating-point values require an
-  indirect-return ABI. The adapter failed closed and was not retained as a
-  sham parity claim. Until native lowering gains those features, the Wasmtime
-  event oracle is browser-Wasm proof only; it must not be described as native
-  parity.
+- The native/Cranelift blockers found by the first real actor attempt are now
+  fixed upstream and pinned exactly. Sonatina lowers ordered `f32`
+  comparisons, uses a caller-owned result buffer for more than two scalar
+  returns, and legalizes the mixed-width enum comparisons Fe emits. Its full
+  23-test Cranelift backend target passes. Fe's narrow checked native surface
+  ABI now executes the actual `ParamBindings` actor transition and the exact
+  ordinary Fe `LatestPerFrame` function selected structurally from
+  `SurfaceScheduling<P>`. One stateful tape compares every one of the eight
+  typed event variants, parameter edits, wheel directions, wrap/round/clamp,
+  extent changes, visibility, frame/completion backpressure, and device
+  loss/recovery three ways: native Cranelift, the generated resident browser
+  Wasm wrappers, and independent Rust semantic models. Application state is
+  bit-exact at every transition; native policy state and browser decisions
+  match the independent policy model at every boundary. The full native Fe
+  target is 7/7 in 1,505.92 seconds, including the existing
+  native/Wasmtime/circomlib Poseidon receipt. This lands generic typed
+  event/scheduling native parity; native tapes for each high-precision
+  Mandelbrot transition remain an explicit Phase 7 migration gate rather than
+  an inferred claim.
 - The first Phase 2/3 scheduling and resident-state slice is implemented
   without manifest growth.
   All eight parameterized canonical gallery actors declare `LatestPerFrame` as a
@@ -345,9 +356,9 @@ Origin: honesty audit of Claude Code session
   attribute-mutation event ABI, persistence, unbounded collections, and native
   backend parity remain open. TodoMVC intentionally caps itself at 32 todos and
   96 UTF-8 bytes per title while those richer storage interfaces are designed.
-- Native/Cranelift parity, general typed lifecycle/reactive streams, pointer
-  capture, picking/messages, resident outer-gallery orchestration, and
-  runtime-manifest removal remain open.
+- Mandelbrot-specific native transition tapes, general typed
+  lifecycle/reactive streams, pointer capture, picking/messages, resident
+  outer-gallery orchestration, and runtime-manifest removal remain open.
 
 This ledger records achieved evidence, not a relaxation of the phases or the
 Definition of done below.
@@ -745,6 +756,29 @@ application scheduling, state, geometry, parameter, or pass-selection policy.
    every fragment while keeping the authored Fe compact.
 5. Preserve generated-code/performance inspection so abstraction does not hide
    accidental branching or compilation blowups.
+6. Add a full-stack succinct orbit-certificate capstone without overstating
+   Mandelbrot membership:
+   - distinguish `EscapesBy<N>` from `EntersAttractor<P>` claims; the latter
+     proves entry into a certified attracting-cycle enclosure with an explicit
+     contraction/error bound, rather than calling every bounded orbit
+     "convergent";
+   - state the numeric model in the claim (fixed-point width, rounding, escape
+     radius, and iteration bound), and separately account for the interval
+     bound connecting that execution to the intended complex orbit;
+   - have Fe generate the execution witness, commit to the orbit trace, and
+     produce a genuinely succinct reachability proof (using the existing Fe
+     field/Poseidon/Merkle foundations as building blocks), so verification is
+     asymptotically and concretely cheaper than replaying the full orbit;
+   - encode the proof as a canonical typed Fe value, transport/submit only its
+     bytes through the fixed host, and run the same Fe verifier in browser
+     Wasm, native differential tests, and the contract backend where supported;
+   - show the point, exact claim, witness length, proof size, prover work, and
+     verifier work in the gallery instead of reducing the result to a vague
+     in-set badge; and
+   - gate known answers, independently replayed short traces, altered-point /
+     altered-claim / altered-proof rejection, native-Wasm-verifier parity, and
+     an end-to-end submitted-proof receipt. Rust/JavaScript may remain
+     independent oracles and host adapters, never the shipped prover/verifier.
 
 #### Other examples
 
@@ -813,6 +847,9 @@ The campaign is complete only when:
 - no runtime render manifest exists, and no JSON schema carries application
   events, state, scheduling, effects, resource/pass semantics, artifact
   location, or page composition;
+- the succinct Mandelbrot capstone generates, transports, and verifies its
+  honestly scoped typed proof through Fe code, with a verifier demonstrably
+  cheaper than full orbit replay;
 - Rust remains only in the toolchain and independent gates; and
 - every legacy showcase is migrated, reclassified, or retired.
 

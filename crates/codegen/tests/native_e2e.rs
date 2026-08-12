@@ -6,7 +6,14 @@
 
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::compile_runtime_package_native_i32_entry;
+use fe_codegen::{
+    NativeSurfaceEvent, NativeSurfaceEventKind, NativeSurfaceQueueAction,
+    NativeSurfaceScheduleArtifact, NativeSurfaceScheduleState, NativeSurfaceScheduleStep,
+    WebBuildOptions, WebBundle, WebBundleMode, compile_native_surface_schedule_policy,
+    compile_runtime_package_native_i32_entry,
+    compile_runtime_package_native_surface_transition4_f32, resolve_web_entry,
+};
+use hir::hir_def::HirIngot;
 use url::Url;
 
 use num_bigint::BigUint;
@@ -30,6 +37,432 @@ fn compile_entry(
         .map_err(|error| error.to_string())?;
     compile_runtime_package_native_i32_entry(&db, &package, entry)
         .map_err(|error| error.to_string())
+}
+
+fn compile_param_binding_surface_backends() -> Result<
+    (
+        fe_codegen::NativeSurfaceTransition4F32Artifact,
+        NativeSurfaceScheduleArtifact,
+        WebBundle,
+    ),
+    String,
+> {
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/param_binding_actor");
+    let mut db = DriverDataBase::default();
+    let url = Url::from_directory_path(&dir)
+        .map_err(|_| format!("invalid fixture path {}", dir.display()))?;
+    if driver::init_ingot(&mut db, &url) {
+        return Err("param binding fixture has initialization diagnostics".to_owned());
+    }
+    let ingot = db
+        .workspace()
+        .containing_ingot(&db, url)
+        .ok_or_else(|| "param binding fixture did not resolve to one ingot".to_owned())?;
+    let top_mod = ingot.root_mod(&db);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    if !diagnostics.is_empty() {
+        return Err(diagnostics);
+    }
+    let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "navigate")
+        .map_err(|error| error.to_string())?;
+    let native = compile_runtime_package_native_surface_transition4_f32(&db, &package, "navigate")
+        .map_err(|error| error.to_string())?;
+    let (entry, mode) =
+        resolve_web_entry(&db, top_mod, None, None).map_err(|error| error.to_string())?;
+    if mode != WebBundleMode::Render {
+        return Err(format!(
+            "param binding fixture resolved unexpected {mode:?} mode"
+        ));
+    }
+    let schedule = compile_native_surface_schedule_policy(&db, top_mod, &entry)
+        .map_err(|error| error.to_string())?;
+    let browser = WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render(entry, Some("param_binding_actor".to_owned())),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok((native, schedule, browser))
+}
+
+fn param_binding_oracle(mut state: [f32; 4], event: NativeSurfaceEvent) -> [f32; 4] {
+    if event.event_kind == NativeSurfaceEventKind::ParamEdit {
+        match event.param_index {
+            0 => state[0] = event.param_value.round().clamp(0.0, 10.0),
+            1 => {
+                let span = 6.2831855_f32;
+                state[1] = event.param_value - span * (event.param_value / span).floor();
+            }
+            2 => state[2] = event.param_value.clamp(0.5, 4.0),
+            3 => state[3] = event.width,
+            _ => {}
+        }
+        return state;
+    }
+
+    let mut steps = state[0] + event.delta_x * 0.2_f32;
+    if event.wheel_delta < 0.0 {
+        steps -= 0.75;
+    } else if event.wheel_delta > 0.0 {
+        steps += 0.75;
+    }
+    state[0] = steps.round().clamp(0.0, 10.0);
+
+    let span = 6.2831855_f32;
+    let phase = state[1] + event.delta_y * 0.02_f32;
+    state[1] = phase - span * (phase / span).floor();
+
+    let mut zoom = state[2];
+    if event.wheel_delta < 0.0 {
+        zoom *= 0.75;
+    } else if event.wheel_delta > 0.0 {
+        zoom *= 1.25;
+    }
+    state[2] = zoom.clamp(0.5, 4.0);
+    state[3] = event.width;
+    state
+}
+
+fn write_native_surface_event(
+    memory: &wasmtime::Memory,
+    store: &mut wasmtime::Store<()>,
+    pointer: usize,
+    event: NativeSurfaceEvent,
+) {
+    let mut bytes = Vec::with_capacity(52);
+    bytes.extend_from_slice(&event.pointer_x.to_le_bytes());
+    bytes.extend_from_slice(&event.pointer_y.to_le_bytes());
+    bytes.extend_from_slice(&event.delta_x.to_le_bytes());
+    bytes.extend_from_slice(&event.delta_y.to_le_bytes());
+    bytes.extend_from_slice(&event.wheel_delta.to_le_bytes());
+    bytes.extend_from_slice(&event.wheel_mode.to_le_bytes());
+    bytes.extend_from_slice(&event.buttons.to_le_bytes());
+    bytes.extend_from_slice(&event.timestamp.to_le_bytes());
+    bytes.extend_from_slice(&event.width.to_le_bytes());
+    bytes.extend_from_slice(&event.height.to_le_bytes());
+    bytes.extend_from_slice(&(event.event_kind as u32).to_le_bytes());
+    bytes.extend_from_slice(&event.param_index.to_le_bytes());
+    bytes.extend_from_slice(&event.param_value.to_le_bytes());
+    assert_eq!(bytes.len(), 52);
+    memory
+        .write(store, pointer, &bytes)
+        .expect("write SurfaceEvent");
+}
+
+fn latest_per_frame_oracle(
+    mut state: NativeSurfaceScheduleState,
+    kind: NativeSurfaceEventKind,
+    timestamp: f32,
+    pending_events: u32,
+) -> NativeSurfaceScheduleStep {
+    let mut present = false;
+    let mut request_frame = false;
+    if matches!(
+        kind,
+        NativeSurfaceEventKind::Gesture | NativeSurfaceEventKind::ParamEdit
+    ) {
+        state.observed_inputs += 1;
+        request_frame =
+            state.visible && !state.device_lost && !state.presenting && pending_events > 0;
+    }
+    match kind {
+        NativeSurfaceEventKind::AnimationFrame
+            if state.visible && !state.device_lost && !state.presenting && pending_events > 0 =>
+        {
+            state.presenting = true;
+            state.last_presented_at = timestamp;
+            present = true;
+        }
+        NativeSurfaceEventKind::GpuComplete => {
+            state.presenting = false;
+            request_frame = state.visible && !state.device_lost && pending_events > 0;
+        }
+        NativeSurfaceEventKind::Visible => {
+            state.visible = true;
+            request_frame = !state.device_lost && !state.presenting && pending_events > 0;
+        }
+        NativeSurfaceEventKind::Hidden => state.visible = false,
+        NativeSurfaceEventKind::DeviceLost => {
+            state.device_lost = true;
+            state.presenting = false;
+        }
+        NativeSurfaceEventKind::DeviceRecovered => {
+            state.device_lost = false;
+            request_frame = state.visible && !state.presenting && pending_events > 0;
+        }
+        _ => {}
+    }
+    NativeSurfaceScheduleStep {
+        state,
+        present,
+        request_frame,
+        queue: NativeSurfaceQueueAction::Retain,
+    }
+}
+
+fn assert_surface_schedule_step_eq(
+    actual: NativeSurfaceScheduleStep,
+    expected: NativeSurfaceScheduleStep,
+    backend: &str,
+    step: usize,
+) {
+    assert_eq!(
+        actual.state.presenting, expected.state.presenting,
+        "{backend} presenting at step {step}"
+    );
+    assert_eq!(
+        actual.state.visible, expected.state.visible,
+        "{backend} visible at step {step}"
+    );
+    assert_eq!(
+        actual.state.device_lost, expected.state.device_lost,
+        "{backend} device_lost at step {step}"
+    );
+    assert_eq!(
+        actual.state.last_presented_at.to_bits(),
+        expected.state.last_presented_at.to_bits(),
+        "{backend} last_presented_at at step {step}"
+    );
+    assert_eq!(
+        actual.state.deadline.to_bits(),
+        expected.state.deadline.to_bits(),
+        "{backend} deadline at step {step}"
+    );
+    assert_eq!(
+        actual.state.observed_inputs, expected.state.observed_inputs,
+        "{backend} observed_inputs at step {step}"
+    );
+    assert_eq!(
+        actual.present, expected.present,
+        "{backend} present at step {step}"
+    );
+    assert_eq!(
+        actual.request_frame, expected.request_frame,
+        "{backend} request_frame at step {step}"
+    );
+    assert_eq!(
+        actual.queue, expected.queue,
+        "{backend} queue at step {step}"
+    );
+}
+
+#[test]
+fn native_browser_and_oracle_agree_on_the_real_typed_surface_transition() {
+    let (native, native_schedule, browser) = compile_param_binding_surface_backends()
+        .expect("typed ParamBindings transition should compile for native and browser targets");
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &browser.wasm).expect("browser control Wasm");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("instantiate browser control Wasm");
+    let replace_state = instance
+        .get_func(&mut store, "fe_surface_state_replace_v1")
+        .expect("resident state replacement export");
+    let transition = instance
+        .get_func(&mut store, "fe_surface_transition_scheduled_v1")
+        .expect("scheduled typed transition export");
+    let memory = instance
+        .get_memory(&mut store, "memory")
+        .expect("linear memory");
+    let alloc = instance
+        .get_typed_func::<(i32, i32), i32>(&mut store, "fe_cabi_alloc")
+        .expect("fixed browser allocator");
+    let event_pointer = alloc.call(&mut store, (52, 4)).expect("event allocation") as usize;
+
+    let mut expected = [3.0_f32, 0.0, 2.0, 256.0];
+    replace_state
+        .call(
+            &mut store,
+            &expected.map(|value| wasmtime::Val::F32(value.to_bits())),
+            &mut [],
+        )
+        .expect("seed complete resident state");
+
+    let base = NativeSurfaceEvent {
+        pointer_x: 123.25,
+        pointer_y: 87.5,
+        delta_x: 0.0,
+        delta_y: 0.0,
+        wheel_delta: 0.0,
+        wheel_mode: 1,
+        buttons: 1,
+        timestamp: 456.75,
+        width: 640.0,
+        height: 480.0,
+        event_kind: NativeSurfaceEventKind::Gesture,
+        param_index: 0,
+        param_value: 0.0,
+    };
+    let tape = [
+        NativeSurfaceEvent {
+            delta_x: 2.5,
+            delta_y: 5.0,
+            wheel_delta: -1.0,
+            ..base
+        },
+        NativeSurfaceEvent {
+            delta_x: 100.0,
+            delta_y: -10.0,
+            wheel_delta: 1.0,
+            width: 800.0,
+            ..base
+        },
+        NativeSurfaceEvent {
+            event_kind: NativeSurfaceEventKind::ParamEdit,
+            param_index: 0,
+            param_value: 6.6,
+            width: 801.0,
+            ..base
+        },
+        NativeSurfaceEvent {
+            event_kind: NativeSurfaceEventKind::ParamEdit,
+            param_index: 1,
+            param_value: -0.5,
+            width: 802.0,
+            ..base
+        },
+        NativeSurfaceEvent {
+            event_kind: NativeSurfaceEventKind::ParamEdit,
+            param_index: 2,
+            param_value: 8.0,
+            width: 803.0,
+            ..base
+        },
+        NativeSurfaceEvent {
+            event_kind: NativeSurfaceEventKind::ParamEdit,
+            param_index: 3,
+            param_value: -99.0,
+            width: 804.0,
+            ..base
+        },
+        NativeSurfaceEvent {
+            event_kind: NativeSurfaceEventKind::AnimationFrame,
+            timestamp: 500.0,
+            width: 805.0,
+            ..base
+        },
+        NativeSurfaceEvent {
+            event_kind: NativeSurfaceEventKind::GpuComplete,
+            timestamp: 501.0,
+            width: 806.0,
+            ..base
+        },
+        NativeSurfaceEvent {
+            event_kind: NativeSurfaceEventKind::Visible,
+            timestamp: 502.0,
+            width: 807.0,
+            ..base
+        },
+        NativeSurfaceEvent {
+            event_kind: NativeSurfaceEventKind::Hidden,
+            timestamp: 503.0,
+            width: 808.0,
+            ..base
+        },
+        NativeSurfaceEvent {
+            event_kind: NativeSurfaceEventKind::DeviceLost,
+            timestamp: 504.0,
+            width: 809.0,
+            ..base
+        },
+        NativeSurfaceEvent {
+            event_kind: NativeSurfaceEventKind::DeviceRecovered,
+            timestamp: 505.0,
+            width: 810.0,
+            ..base
+        },
+    ];
+
+    for (step, event) in tape.into_iter().enumerate() {
+        let native_state = native.call(event, expected);
+        expected = param_binding_oracle(expected, event);
+        assert_eq!(
+            native_state.map(f32::to_bits),
+            expected.map(f32::to_bits),
+            "native transition diverged from the independent oracle at tape step {step}",
+        );
+
+        write_native_surface_event(&memory, &mut store, event_pointer, event);
+        let mut browser_values = [wasmtime::Val::F32(0); 4];
+        transition
+            .call(
+                &mut store,
+                &[
+                    wasmtime::Val::I32(event_pointer as i32),
+                    wasmtime::Val::I32(1),
+                ],
+                &mut browser_values,
+            )
+            .unwrap_or_else(|error| {
+                panic!("browser transition failed at tape step {step}: {error}")
+            });
+        let browser_state = browser_values.map(|value| match value {
+            wasmtime::Val::F32(bits) => f32::from_bits(bits),
+            other => panic!("browser transition returned {other:?} at tape step {step}"),
+        });
+        assert_eq!(
+            browser_state.map(f32::to_bits),
+            expected.map(f32::to_bits),
+            "browser transition diverged from the independent oracle at tape step {step}",
+        );
+    }
+
+    let schedule = instance
+        .get_func(&mut store, "fe_surface_schedule_v2")
+        .expect("resident Fe schedule export");
+    let schedule_tape = [
+        (NativeSurfaceEventKind::Visible, 0.0, 0),
+        (NativeSurfaceEventKind::Gesture, 1.0, 1),
+        (NativeSurfaceEventKind::AnimationFrame, 16.0, 1),
+        (NativeSurfaceEventKind::ParamEdit, 17.0, 3),
+        (NativeSurfaceEventKind::AnimationFrame, 32.0, 3),
+        (NativeSurfaceEventKind::GpuComplete, 33.0, 3),
+        (NativeSurfaceEventKind::AnimationFrame, 48.0, 3),
+        (NativeSurfaceEventKind::DeviceLost, 49.0, 2),
+        (NativeSurfaceEventKind::GpuComplete, 50.0, 2),
+        (NativeSurfaceEventKind::DeviceRecovered, 51.0, 2),
+        (NativeSurfaceEventKind::Hidden, 52.0, 2),
+        (NativeSurfaceEventKind::AnimationFrame, 64.0, 2),
+        (NativeSurfaceEventKind::Visible, 65.0, 2),
+    ];
+    let mut policy_state = NativeSurfaceScheduleState::ZERO;
+    for (step, (kind, timestamp, pending)) in schedule_tape.into_iter().enumerate() {
+        let expected_step = latest_per_frame_oracle(policy_state, kind, timestamp, pending);
+        let native_step = native_schedule.call(policy_state, kind, timestamp, pending);
+        assert_surface_schedule_step_eq(native_step, expected_step, "native", step);
+
+        let mut browser_decisions = [wasmtime::Val::I32(-1); 3];
+        schedule
+            .call(
+                &mut store,
+                &[
+                    wasmtime::Val::I32(kind as i32),
+                    wasmtime::Val::F32(timestamp.to_bits()),
+                    wasmtime::Val::I32(pending as i32),
+                ],
+                &mut browser_decisions,
+            )
+            .unwrap_or_else(|error| panic!("browser schedule failed at tape step {step}: {error}"));
+        let browser_step = match browser_decisions {
+            [
+                wasmtime::Val::I32(present),
+                wasmtime::Val::I32(request_frame),
+                wasmtime::Val::I32(queue),
+            ] => (present != 0, request_frame != 0, queue),
+            other => panic!("browser schedule returned {other:?} at tape step {step}"),
+        };
+        assert_eq!(
+            browser_step,
+            (
+                expected_step.present,
+                expected_step.request_frame,
+                expected_step.queue as i32,
+            ),
+            "browser scheduling decisions diverged from the independent oracle at tape step {step}",
+        );
+        policy_state = expected_step.state;
+    }
 }
 
 #[test]

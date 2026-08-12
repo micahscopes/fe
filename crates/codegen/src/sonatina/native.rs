@@ -1,9 +1,9 @@
 //! Host-native execution through Sonatina IR and Cranelift.
 //!
-//! This API is deliberately narrow: callers select a public
-//! `(i32, i32) -> i32` entry and can invoke it only while the owning JIT
-//! artifact is alive. Expanding the ABI requires another explicitly checked
-//! artifact wrapper rather than an untyped compiler seam.
+//! This API is deliberately narrow: every supported Fe boundary has its own
+//! exact signature-checked artifact, callable only while the owning JIT
+//! allocation is alive. A new ABI requires another nominal checked wrapper;
+//! there is no untyped arbitrary-signature compiler seam.
 
 use compiler_db::DriverDataBase;
 use mir::RuntimePackage;
@@ -60,6 +60,317 @@ pub fn compile_runtime_package_native_i32_entry(
     let artifact = compile_and_verify_definitions(module, &expected_definitions)?;
 
     Ok(NativeI32EntryArtifact {
+        artifact,
+        entry: entry.to_owned(),
+    })
+}
+
+/// The scalar leaves of the fixed typed surface-event boundary. These are
+/// ordinary host facts; all interpretation remains in the selected Fe
+/// transition. Keeping the Rust carrier nominal makes native/browser parity
+/// tapes readable without turning this test-facing API into an untyped FFI
+/// seam.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum NativeSurfaceEventKind {
+    Gesture,
+    ParamEdit,
+    AnimationFrame,
+    GpuComplete,
+    Visible,
+    Hidden,
+    DeviceLost,
+    DeviceRecovered,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct NativeSurfaceEvent {
+    pub pointer_x: f32,
+    pub pointer_y: f32,
+    pub delta_x: f32,
+    pub delta_y: f32,
+    pub wheel_delta: f32,
+    pub wheel_mode: u32,
+    pub buttons: u32,
+    pub timestamp: f32,
+    pub width: f32,
+    pub height: f32,
+    pub event_kind: NativeSurfaceEventKind,
+    pub param_index: u32,
+    pub param_value: f32,
+}
+
+/// An owning JIT artifact for the generalization fixture's exact typed
+/// transition shape: thirteen fixed `SurfaceEvent` leaves plus four resident
+/// `f32` state leaves, returning four `f32` state leaves. Wide scalar returns
+/// use Sonatina's checked caller-owned native result buffer.
+pub struct NativeSurfaceTransition4F32Artifact {
+    artifact: CraneliftArtifact,
+    entry: String,
+}
+
+impl NativeSurfaceTransition4F32Artifact {
+    pub fn entry_name(&self) -> &str {
+        &self.entry
+    }
+
+    pub fn call(&self, event: NativeSurfaceEvent, state: [f32; 4]) -> [f32; 4] {
+        #[rustfmt::skip]
+        type Entry = extern "C" fn(
+            *mut u128,
+            f32, f32, f32, f32, f32, i32, i32, f32, f32, f32, i32, i32, f32,
+            f32, f32, f32, f32,
+        );
+
+        // SAFETY: construction checks the exact Sonatina scalar signature.
+        // Sonatina's native backend lowers four direct results through the
+        // first caller-owned pointer, using one 16-byte slot per scalar. The
+        // JIT allocation remains owned by `self` for the whole call.
+        let function: Entry = unsafe {
+            let pointer = self
+                .artifact
+                .get_func_ptr::<Entry>(&self.entry)
+                .expect("verified native surface transition disappeared from its artifact");
+            std::mem::transmute(pointer)
+        };
+        let mut results = [0u128; 4];
+        function(
+            results.as_mut_ptr(),
+            event.pointer_x,
+            event.pointer_y,
+            event.delta_x,
+            event.delta_y,
+            event.wheel_delta,
+            event.wheel_mode as i32,
+            event.buttons as i32,
+            event.timestamp,
+            event.width,
+            event.height,
+            event.event_kind as i32,
+            event.param_index as i32,
+            event.param_value,
+            state[0],
+            state[1],
+            state[2],
+            state[3],
+        );
+        results.map(|slot| f32::from_bits(slot as u32))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NativeSurfaceScheduleState {
+    pub presenting: bool,
+    pub visible: bool,
+    pub device_lost: bool,
+    pub last_presented_at: f32,
+    pub deadline: f32,
+    pub observed_inputs: u32,
+}
+
+impl NativeSurfaceScheduleState {
+    pub const ZERO: Self = Self {
+        presenting: false,
+        visible: false,
+        device_lost: false,
+        last_presented_at: 0.0,
+        deadline: 0.0,
+        observed_inputs: 0,
+    };
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum NativeSurfaceQueueAction {
+    Retain,
+    KeepLatest,
+    Drop,
+}
+
+impl NativeSurfaceQueueAction {
+    fn from_tag(tag: u32) -> Self {
+        match tag {
+            0 => Self::Retain,
+            1 => Self::KeepLatest,
+            2 => Self::Drop,
+            _ => panic!("verified Fe surface policy returned invalid queue tag {tag}"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NativeSurfaceScheduleStep {
+    pub state: NativeSurfaceScheduleState,
+    pub present: bool,
+    pub request_frame: bool,
+    pub queue: NativeSurfaceQueueAction,
+}
+
+/// An owning JIT artifact for the exact Fe surface-scheduling policy shape.
+/// The selected policy function remains ordinary Fe and is not a fixed host
+/// ABI; construction binds its compiler-resolved emitted symbol and exact
+/// nominal record ABI.
+pub struct NativeSurfaceScheduleArtifact {
+    artifact: CraneliftArtifact,
+    entry: String,
+    event_first: bool,
+}
+
+impl NativeSurfaceScheduleArtifact {
+    pub fn entry_name(&self) -> &str {
+        &self.entry
+    }
+
+    pub fn call(
+        &self,
+        state: NativeSurfaceScheduleState,
+        kind: NativeSurfaceEventKind,
+        timestamp: f32,
+        pending_events: u32,
+    ) -> NativeSurfaceScheduleStep {
+        #[rustfmt::skip]
+        type StateFirst = extern "C" fn(
+            *mut u128,
+            i8, i8, i8, f32, f32, i32,
+            i32, f32, i32,
+        );
+        #[rustfmt::skip]
+        type EventFirst = extern "C" fn(
+            *mut u128,
+            i32, f32, i32,
+            i8, i8, i8, f32, f32, i32,
+        );
+
+        let mut results = [0u128; 9];
+        // SAFETY: construction verifies this exact private Sonatina signature,
+        // including the semantically discovered event/state argument order.
+        unsafe {
+            let pointer = self
+                .artifact
+                .get_func_ptr::<()>(&self.entry)
+                .expect("verified native surface policy disappeared from its artifact");
+            if self.event_first {
+                let function: EventFirst = std::mem::transmute(pointer);
+                function(
+                    results.as_mut_ptr(),
+                    kind as i32,
+                    timestamp,
+                    pending_events as i32,
+                    state.presenting as i8,
+                    state.visible as i8,
+                    state.device_lost as i8,
+                    state.last_presented_at,
+                    state.deadline,
+                    state.observed_inputs as i32,
+                );
+            } else {
+                let function: StateFirst = std::mem::transmute(pointer);
+                function(
+                    results.as_mut_ptr(),
+                    state.presenting as i8,
+                    state.visible as i8,
+                    state.device_lost as i8,
+                    state.last_presented_at,
+                    state.deadline,
+                    state.observed_inputs as i32,
+                    kind as i32,
+                    timestamp,
+                    pending_events as i32,
+                );
+            }
+        }
+        NativeSurfaceScheduleStep {
+            state: NativeSurfaceScheduleState {
+                presenting: results[0] as u8 != 0,
+                visible: results[1] as u8 != 0,
+                device_lost: results[2] as u8 != 0,
+                last_presented_at: f32::from_bits(results[3] as u32),
+                deadline: f32::from_bits(results[4] as u32),
+                observed_inputs: results[5] as u32,
+            },
+            present: results[6] as u8 != 0,
+            request_frame: results[7] as u8 != 0,
+            queue: NativeSurfaceQueueAction::from_tag(results[8] as u32),
+        }
+    }
+}
+
+#[cfg(feature = "spirv-backend")]
+pub(crate) fn compile_runtime_package_native_surface_schedule(
+    db: &DriverDataBase,
+    package: &RuntimePackage<'_>,
+    entry: &str,
+    event_first: bool,
+) -> Result<NativeSurfaceScheduleArtifact, LowerError> {
+    let module = wasm_lower::compile_runtime_package_native(db, package)?;
+    let state = [
+        Type::I1,
+        Type::I1,
+        Type::I1,
+        Type::F32,
+        Type::F32,
+        Type::I32,
+    ];
+    let event = [Type::I32, Type::F32, Type::I32];
+    let expected_args = if event_first {
+        event.into_iter().chain(state).collect::<Vec<_>>()
+    } else {
+        state.into_iter().chain(event).collect::<Vec<_>>()
+    };
+    let expected_results = [
+        Type::I1,
+        Type::I1,
+        Type::I1,
+        Type::F32,
+        Type::F32,
+        Type::I32,
+        Type::I1,
+        Type::I1,
+        Type::I32,
+    ];
+    resolve_checked_function(
+        &module,
+        entry,
+        Linkage::Public,
+        &expected_args,
+        &expected_results,
+    )?;
+    let expected_definitions = expected_definition_names(&module);
+    let artifact = compile_and_verify_definitions(module, &expected_definitions)?;
+    Ok(NativeSurfaceScheduleArtifact {
+        artifact,
+        entry: entry.to_owned(),
+        event_first,
+    })
+}
+
+pub fn compile_runtime_package_native_surface_transition4_f32(
+    db: &DriverDataBase,
+    package: &RuntimePackage<'_>,
+    entry: &str,
+) -> Result<NativeSurfaceTransition4F32Artifact, LowerError> {
+    let module = wasm_lower::compile_runtime_package_native(db, package)?;
+    let mut expected_args = vec![
+        Type::F32,
+        Type::F32,
+        Type::F32,
+        Type::F32,
+        Type::F32,
+        Type::I32,
+        Type::I32,
+        Type::F32,
+        Type::F32,
+        Type::F32,
+        Type::I32,
+        Type::I32,
+        Type::F32,
+    ];
+    expected_args.extend([Type::F32; 4]);
+    resolve_checked_entry(&module, entry, &expected_args, &[Type::F32; 4])?;
+    let expected_definitions = expected_definition_names(&module);
+    let artifact = compile_and_verify_definitions(module, &expected_definitions)?;
+
+    Ok(NativeSurfaceTransition4F32Artifact {
         artifact,
         entry: entry.to_owned(),
     })
@@ -342,6 +653,16 @@ fn resolve_checked_entry(
     expected_args: &[Type],
     expected_rets: &[Type],
 ) -> Result<sonatina_ir::module::FuncRef, LowerError> {
+    resolve_checked_function(module, entry, Linkage::Public, expected_args, expected_rets)
+}
+
+fn resolve_checked_function(
+    module: &sonatina_ir::Module,
+    entry: &str,
+    expected_linkage: Linkage,
+    expected_args: &[Type],
+    expected_rets: &[Type],
+) -> Result<sonatina_ir::module::FuncRef, LowerError> {
     let matching: Vec<_> = module
         .funcs()
         .into_iter()
@@ -358,9 +679,9 @@ fn resolve_checked_entry(
         )));
     };
     module.ctx.func_sig(*func_ref, |signature| {
-        if signature.linkage() != Linkage::Public {
+        if signature.linkage() != expected_linkage {
             return Err(LowerError::Unsupported(format!(
-                "native entry `{entry}` must have public linkage"
+                "native entry `{entry}` must have {expected_linkage:?} linkage"
             )));
         }
         if signature.args() != expected_args || signature.ret_tys() != expected_rets {

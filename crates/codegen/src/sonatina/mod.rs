@@ -10,6 +10,13 @@ mod spirv_lower;
 mod wasm_lower;
 
 #[cfg(all(
+    feature = "spirv-backend",
+    feature = "native-backend",
+    not(target_arch = "wasm32"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+pub(crate) use native::compile_runtime_package_native_surface_schedule;
+#[cfg(all(
     feature = "native-backend",
     not(target_arch = "wasm32"),
     any(target_arch = "x86_64", target_arch = "aarch64")
@@ -17,9 +24,13 @@ mod wasm_lower;
 pub use native::{
     GRID_LOOP_NATIVE_ENTRY_ARITY, MERKLE_ROOT_NATIVE_ENTRY_ARITY, MERKLE8_ROOT_NATIVE_ENTRY_ARITY,
     NativeGridLoopEntryArtifact, NativeI32EntryArtifact, NativeMerkle8RootEntryArtifact,
-    NativeMerkleRootEntryArtifact, compile_runtime_package_native_grid_loop_entry,
-    compile_runtime_package_native_i32_entry, compile_runtime_package_native_merkle_root_entry,
+    NativeMerkleRootEntryArtifact, NativeSurfaceEvent, NativeSurfaceEventKind,
+    NativeSurfaceQueueAction, NativeSurfaceScheduleArtifact, NativeSurfaceScheduleState,
+    NativeSurfaceScheduleStep, NativeSurfaceTransition4F32Artifact,
+    compile_runtime_package_native_grid_loop_entry, compile_runtime_package_native_i32_entry,
+    compile_runtime_package_native_merkle_root_entry,
     compile_runtime_package_native_merkle8_root_entry,
+    compile_runtime_package_native_surface_transition4_f32,
 };
 #[cfg(feature = "spirv-backend")]
 pub use spirv_lower::{

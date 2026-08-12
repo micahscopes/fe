@@ -1646,6 +1646,50 @@ fn resolve_surface_schedule_policy<'db>(
     }))
 }
 
+/// Compile the exact ordinary Fe scheduling policy structurally selected by a
+/// GPU actor for native differential execution. The caller names only the
+/// actor's render entry; its control behavior, nominal policy type, unique
+/// implementation, argument order, and emitted symbol are all compiler-
+/// derived through the same path used by [`WebBundle::compile`].
+#[cfg(all(
+    feature = "native-backend",
+    not(target_arch = "wasm32"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+pub fn compile_native_surface_schedule_policy(
+    db: &DriverDataBase,
+    top_mod: TopLevelMod<'_>,
+    source_entry: &str,
+) -> Result<crate::NativeSurfaceScheduleArtifact, WebBundleError> {
+    let control_export = actor_update_export_name(db, top_mod, source_entry)?.ok_or_else(|| {
+        WebBundleError::SurfaceProjection(format!(
+            "surface actor `{source_entry}` has no typed control behavior"
+        ))
+    })?;
+    let policy = resolve_surface_schedule_policy(db, top_mod, source_entry, &control_export)?
+        .ok_or_else(|| {
+            WebBundleError::SurfaceProjection(format!(
+                "surface actor `{source_entry}` has no SurfaceScheduling<P> policy"
+            ))
+        })?;
+    let package = mir::build_wasm_runtime_package_for_entries_with_internal_funcs(
+        db,
+        top_mod,
+        std::slice::from_ref(&control_export),
+        std::slice::from_ref(&policy.func),
+    )
+    .map_err(|error| WebBundleError::Lower(error.to_string()))?;
+    let symbol = mir::runtime_package_symbol_for_func(db, package, policy.func)
+        .map_err(|error| WebBundleError::Lower(error.to_string()))?;
+    crate::sonatina::compile_runtime_package_native_surface_schedule(
+        db,
+        &package,
+        &symbol,
+        policy.event_first,
+    )
+    .map_err(|error| WebBundleError::Lower(error.to_string()))
+}
+
 /// Validate the selected Fe policy's nominal records, then retain only scalar
 /// counts and enum bounds for target-neutral wrapper lowering. Nothing is
 /// projected into the render manifest or interpreted by the browser.
