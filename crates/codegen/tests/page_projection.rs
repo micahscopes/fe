@@ -26,7 +26,7 @@ fn role_selected_fe_page_projects_typed_structure_without_json() {
     assert_eq!(page.actor, "GalleryPage");
     assert_eq!(page.source_entry, "compose");
     assert_eq!(page.title, "Fe page");
-    assert_eq!(page.body.len(), 9);
+    assert_eq!(page.body.len(), 10);
     assert_eq!(page.body[0], PageProjectionOp::Open(PageElement::Main));
     let PageProjectionOp::Attribute(id) = &page.body[1] else {
         panic!("expected id attribute")
@@ -46,6 +46,8 @@ fn role_selected_fe_page_projects_typed_structure_without_json() {
         panic!("expected render program")
     };
     assert_eq!(render.source, "sketches/gradient");
+    assert!(render.sequenced);
+    assert_eq!(render.sequence, 0);
     assert_eq!(
         (
             render.wgsl_action,
@@ -54,7 +56,13 @@ fn role_selected_fe_page_projects_typed_structure_without_json() {
         ),
         (101, 102, 103)
     );
-    let PageProjectionOp::Component(component) = &page.body[7] else {
+    let PageProjectionOp::Render(second_render) = &page.body[7] else {
+        panic!("expected second render program")
+    };
+    assert!(second_render.sequenced);
+    assert_eq!(second_render.sequence, 1);
+    assert_eq!(second_render.source, "sketches/plasma");
+    let PageProjectionOp::Component(component) = &page.body[8] else {
         panic!("expected component program")
     };
     assert_eq!(component.source, "sketches/todomvc/src/lib.fe");

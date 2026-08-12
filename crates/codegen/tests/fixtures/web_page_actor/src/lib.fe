@@ -1,34 +1,37 @@
 use std::web::page::{
-    ComponentComposition, ComponentView, Page, PageAttribute, PageComposition,
-    PageElement, PageOp, PageText,
+    ComponentComposition, ComponentView, Page, PageAttribute, PageBuilder,
+    PageComposition, PageElement, PageOp, PageText,
 }
 
 actor GalleryPage {
     version: u32,
 
-    const fn compose() -> Page<9> uses (PageComposition) {
-        Page::exact(
-            title: PageText::one(value: "Fe page"),
-            body: [
-                PageOp::open(element: PageElement::Main),
-                PageOp::attribute(value: PageAttribute::id(value: "gallery")),
-                PageOp::attribute(value: PageAttribute::hidden()),
-                PageOp::open(element: PageElement::Heading1),
-                PageOp::text(value: PageText::one(value: "Hello <Fe>")),
-                PageOp::close(),
-                PageOp::render(
-                    source: PageText::one(value: "sketches/gradient"),
-                    wgsl_action: 101,
-                    wasm_action: 102,
-                    manifest_action: 103,
-                ),
-                PageOp::component(
-                    source: PageText::one(value: "sketches/todomvc/src/lib.fe"),
-                    mount: "todo-app",
-                ),
-                PageOp::close(),
-            ],
-        )
+    const fn compose() -> Page<10> uses (PageComposition) {
+        PageBuilder::new()
+            .open(element: PageElement::Main)
+            .attribute(value: PageAttribute::id(value: "gallery"))
+            .attribute(value: PageAttribute::hidden())
+            .open(element: PageElement::Heading1)
+            .text(value: PageText::one(value: "Hello <Fe>"))
+            .close()
+            .render_sequenced(
+                source: PageText::one(value: "sketches/gradient"),
+                wgsl_action: 101,
+                wasm_action: 102,
+                manifest_action: 103,
+            )
+            .render_sequenced(
+                source: PageText::one(value: "sketches/plasma"),
+                wgsl_action: 101,
+                wasm_action: 102,
+                manifest_action: 103,
+            )
+            .component(
+                source: PageText::one(value: "sketches/todomvc/src/lib.fe"),
+                mount: "todo-app",
+            )
+            .close()
+            .finish(title: PageText::one(value: "Fe page"))
     }
 }
 

@@ -51,6 +51,10 @@ const COMPONENT_EVENT = Object.freeze({
   submit: 6,
   keyDown: 7,
   resourceLoaded: 8,
+  surfaceDiscovered: 9,
+  surfaceLive: 10,
+  surfaceError: 11,
+  surfaceTimeout: 12,
 });
 
 function values(value) {
@@ -223,6 +227,9 @@ export function decodeComponentCommands(bytes) {
       case 9:
         operations.push({ opcode, target: word() });
         break;
+      case 14:
+        operations.push({ opcode, sequence: word(), timeout: word() });
+        break;
       default:
         throw new Error(`fe-component received unknown command opcode ${opcode}`);
     }
@@ -249,6 +256,9 @@ class FeComponentElement extends FeHTMLElement {
     this._inputCapacity = 0;
     this._resourceLoads = new Set();
     this._keyedRows = new WeakMap();
+    this._surfaceObserver = null;
+    this._discoveredSurfaces = new Set();
+    this._surfaceActivations = new Map();
     this._readyPromise = new Promise((resolve, reject) => {
       this._resolveReady = resolve;
       this._rejectReady = reject;
@@ -270,6 +280,13 @@ class FeComponentElement extends FeHTMLElement {
     this._active = false;
     this._listeners?.abort();
     this._listeners = null;
+    this._surfaceObserver?.disconnect();
+    this._surfaceObserver = null;
+    this._discoveredSurfaces.clear();
+    for (const activation of this._surfaceActivations.values()) {
+      clearTimeout(activation.timer);
+    }
+    this._surfaceActivations.clear();
     for (const controller of this._resourceLoads) controller.abort();
     this._resourceLoads.clear();
   }
@@ -307,6 +324,7 @@ class FeComponentElement extends FeHTMLElement {
     this._active = true;
     this._installListeners();
     this._send(COMPONENT_EVENT.connected, 0, 0, 0, 0, 0, performance.now());
+    this._discoverSurfaces();
     this._resolveReady(this);
     this.dispatchEvent(new CustomEvent("fe-ready", { detail: this }));
   }
@@ -338,6 +356,49 @@ class FeComponentElement extends FeHTMLElement {
     on("change", COMPONENT_EVENT.change);
     on("submit", COMPONENT_EVENT.submit);
     on("keydown", COMPONENT_EVENT.keyDown);
+    const onSurface = (type, kind) => this.addEventListener(type, event => {
+      try {
+        if (!eventBelongsToComponent(event, this)) return;
+        const sequence = this._surfaceSequence(event.target);
+        if (sequence === null || !this._surfaceActivations.has(sequence)) return;
+        const activation = this._surfaceActivations.get(sequence);
+        clearTimeout(activation.timer);
+        this._surfaceActivations.delete(sequence);
+        this._send(kind, 0, sequence + 1, 0, 0, 0, event.timeStamp);
+      } catch (error) {
+        this._fail(error);
+      }
+    }, { signal: controller.signal });
+    onSurface("fe-live", COMPONENT_EVENT.surfaceLive);
+    onSurface("fe-error", COMPONENT_EVENT.surfaceError);
+    if (typeof MutationObserver !== "undefined") {
+      this._surfaceObserver = new MutationObserver(() => this._discoverSurfaces());
+      this._surfaceObserver.observe(this, { childList: true, subtree: true });
+    }
+  }
+
+  _surfaceSequence(surface) {
+    if (!(surface instanceof Element) || surface.tagName !== "FE-SURFACE") return null;
+    const value = Number(surface.getAttribute("data-fe-sequence"));
+    return Number.isInteger(value) && value >= 0 && value < 32 ? value : null;
+  }
+
+  _discoverSurfaces() {
+    if (!this._active) return;
+    for (const surface of componentElements(this, this, "fe-surface[data-fe-sequence]")) {
+      const sequence = this._surfaceSequence(surface);
+      if (sequence === null || this._discoveredSurfaces.has(sequence)) continue;
+      this._discoveredSurfaces.add(sequence);
+      this._send(
+        COMPONENT_EVENT.surfaceDiscovered,
+        0,
+        sequence + 1,
+        0,
+        0,
+        0,
+        performance.now(),
+      );
+    }
   }
 
   _writeEventText(value, limit = COMPONENT_INPUT_CAPACITY) {
@@ -515,6 +576,10 @@ class FeComponentElement extends FeHTMLElement {
         this._loadResource(operation, operation.opcode === 12);
         continue;
       }
+      if (operation.opcode === 14) {
+        this._activateSurface(operation);
+        continue;
+      }
       const target = this._node(scope, operation.target);
       switch (operation.opcode) {
         case 4:
@@ -567,6 +632,76 @@ class FeComponentElement extends FeHTMLElement {
           throw new Error(`unapplied fe-component command ${operation.opcode}`);
       }
     }
+  }
+
+  _activateSurface(operation) {
+    if (this._surfaceActivations.has(operation.sequence)) return;
+    const surface = componentElement(
+      this,
+      this,
+      `fe-surface[data-fe-sequence="${operation.sequence}"]`,
+    );
+    if (!surface || typeof surface.live !== "function") {
+      this._send(
+        COMPONENT_EVENT.surfaceError,
+        0,
+        operation.sequence + 1,
+        0,
+        0,
+        0,
+        performance.now(),
+      );
+      return;
+    }
+    const timer = operation.timeout === 0 ? null : setTimeout(() => {
+      if (!this._active || !this._surfaceActivations.has(operation.sequence)) return;
+      this._surfaceActivations.delete(operation.sequence);
+      this._send(
+        COMPONENT_EVENT.surfaceTimeout,
+        0,
+        operation.sequence + 1,
+        0,
+        0,
+        0,
+        performance.now(),
+      );
+    }, operation.timeout);
+    this._surfaceActivations.set(operation.sequence, { surface, timer });
+    Promise.resolve(surface.live()).then(() => {
+      // `fe-live` normally reports completion synchronously. The resolved
+      // effect also covers idempotently activating an already-live surface
+      // after its owning component reconnects.
+      if (this._active && this._surfaceActivations.has(operation.sequence)) {
+        clearTimeout(timer);
+        this._surfaceActivations.delete(operation.sequence);
+        this._send(
+          COMPONENT_EVENT.surfaceLive,
+          0,
+          operation.sequence + 1,
+          0,
+          0,
+          0,
+          performance.now(),
+        );
+      }
+    }).catch(error => {
+      // An emitted `fe-error` normally wins this race; this rejection path
+      // guarantees the fixed effect still has exactly one completion fact.
+      if (this._surfaceActivations.has(operation.sequence)) {
+        clearTimeout(timer);
+        this._surfaceActivations.delete(operation.sequence);
+        this._send(
+          COMPONENT_EVENT.surfaceError,
+          0,
+          operation.sequence + 1,
+          0,
+          0,
+          0,
+          performance.now(),
+          String(error),
+        );
+      }
+    });
   }
 
   _loadResource(operation, asText) {
@@ -681,6 +816,10 @@ async function runRenderSurface(element, manifestUrl) {
 
   const surface = document.createElement("fe-surface");
   surface.setAttribute("manifest", manifestUrl.href);
+  if (element.dataset.feSequence !== undefined) {
+    surface.setAttribute("data-fe-sequence", element.dataset.feSequence);
+    surface.setAttribute("boot", "manual");
+  }
   if (element.dataset.feWidth) surface.setAttribute("width", element.dataset.feWidth);
   if (element.dataset.feHeight) surface.setAttribute("height", element.dataset.feHeight);
   for (const kind of ["wgsl", "wasm", "manifest"]) {

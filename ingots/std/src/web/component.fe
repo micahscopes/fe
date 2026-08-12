@@ -32,6 +32,15 @@ pub enum ComponentEventKind {
     /// for a transport failure), `detail` is the byte length, and `text`
     /// carries a UTF-8 body or failure description.
     ResourceLoaded,
+    /// A compiler-correlated cold render surface became available beneath
+    /// this component. Its opaque one-based sequence token is in `request`.
+    SurfaceDiscovered,
+    /// A previously requested surface reached live presentation.
+    SurfaceLive,
+    /// A previously requested surface failed during activation.
+    SurfaceError,
+    /// A previously requested surface exceeded the Fe-selected deadline.
+    SurfaceTimeout,
 }
 
 impl Copy for ComponentEventKind {}
@@ -54,9 +63,9 @@ pub struct ComponentEvent<A = u32> {
     pub kind: ComponentEventKind,
     /// Fe-declared action identity attached by generated page composition.
     pub target: A,
-    /// Opaque correlation identity for a completed Fe-requested resource
-    /// effect. Ordinary standards events carry zero; this lane is deliberately
-    /// separate from the typed action vocabulary.
+    /// Opaque correlation identity for a completed Fe-requested effect or a
+    /// compiler-correlated surface fact. Ordinary standards events carry zero;
+    /// this lane is deliberately separate from the typed action vocabulary.
     pub request: u32,
     /// Stable key of the nearest generated repeated item, or zero outside one.
     pub key: u32,
@@ -101,6 +110,93 @@ impl<A: Copy> ComponentEvent<A> {
         match self.kind {
             ComponentEventKind::Activate => self.detail,
             _ => 0,
+        }
+    }
+}
+
+/// Reusable Fe-owned policy for activating compiler-correlated render
+/// surfaces in declaration order. The fixed browser boundary reports only
+/// discovery/completion facts and realizes the resulting activation effect.
+/// The current compact policy intentionally supports up to 32 surfaces.
+pub struct SequentialSurfaceActivation {
+    pub discovered: u32,
+    pub next: u32,
+    pub waiting: bool,
+    pub issue: bool,
+}
+
+impl Copy for SequentialSurfaceActivation {}
+
+impl SequentialSurfaceActivation {
+    pub fn new() -> Self {
+        Self { discovered: 0, next: 0, waiting: false, issue: false }
+    }
+
+    pub fn receive(self, kind: ComponentEventKind, request: u32) -> Self {
+        let mut discovered = self.discovered
+        let mut next = self.next
+        let mut waiting = self.waiting
+        let mut issue = false
+
+        match kind {
+            ComponentEventKind::SurfaceDiscovered => {
+                if request > 0 {
+                    let sequence = request - 1
+                    if sequence >= 32 { core::panic() }
+                    let bit: u32 = 1 << sequence
+                    discovered = discovered | bit
+                }
+            }
+            ComponentEventKind::SurfaceLive => {
+                if request > 0 {
+                    let sequence = request - 1
+                    if sequence >= 32 { core::panic() }
+                    if waiting && sequence == next {
+                        waiting = false
+                        next = next + 1
+                    }
+                }
+            }
+            ComponentEventKind::SurfaceError => {
+                if request > 0 {
+                    let sequence = request - 1
+                    if sequence >= 32 { core::panic() }
+                    if waiting && sequence == next {
+                        waiting = false
+                        next = next + 1
+                    }
+                }
+            }
+            ComponentEventKind::SurfaceTimeout => {
+                if request > 0 {
+                    let sequence = request - 1
+                    if sequence >= 32 { core::panic() }
+                    if waiting && sequence == next {
+                        waiting = false
+                        next = next + 1
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        let disconnected = match kind { ComponentEventKind::Disconnected => true, _ => false }
+        if disconnected {
+            discovered = 0
+            waiting = false
+        }
+        if disconnected == false && waiting == false && next < 32 && (discovered & (1 << next)) != 0 {
+            waiting = true
+            issue = true
+        }
+        Self { discovered: discovered, next: next, waiting: waiting, issue: issue }
+    }
+
+    pub fn write(self, writer: ComponentWriter, timeout_ms: u32) -> ComponentWriter {
+        if self.issue {
+            writer.activate_surface(sequence: self.next, timeout_ms: timeout_ms)
+        } else {
+            writer
         }
     }
 }
@@ -399,6 +495,15 @@ impl ComponentWriter {
         let writer = writer.word(value: request)
         let writer = writer.word(value: value.len)
         writer.bytes(value: value)
+    }
+
+    /// Request cold-to-live activation of one compiler-correlated surface.
+    /// Completion or failure returns through the append-only surface event
+    /// kinds; ordering, deadline, and fail-open policy remain Fe-owned.
+    pub fn activate_surface(self, sequence: u32, timeout_ms: u32) -> Self {
+        let writer = self.byte(value: 14)
+        let writer = writer.word(value: sequence)
+        writer.word(value: timeout_ms)
     }
 
     pub fn finish(self) -> BrowserBytes {

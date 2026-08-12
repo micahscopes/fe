@@ -104,7 +104,12 @@ impl GalleryBuilder {
             page: self.page.open(element: PageElement::Figure),
         }.caption(title: title, description: description, source: source)
         let page = builder.page
-            .render(
+            // Compatibility workaround for browser WebGPU implementations
+            // which can crash or lose their shared device when a gallery
+            // initializes many surfaces in one burst. This is not a WebGPU or
+            // Fe semantic requirement: the resident Fe shell deliberately
+            // advances this compiler-derived sequence one surface at a time.
+            .render_sequenced(
                 source: program,
                 wgsl_action: InspectorAction::Wgsl,
                 wasm_action: InspectorAction::Wasm,

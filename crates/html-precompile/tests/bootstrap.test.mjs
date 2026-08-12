@@ -156,6 +156,15 @@ test("component resource commands decode strictly without interpreting policy", 
     decodeComponentCommands(command(13, 42, "https://example.test/a.wasm")),
     [{ opcode: 13, request: 42, value: "https://example.test/a.wasm" }],
   );
+  const activation = new Uint8Array(9);
+  const activationView = new DataView(activation.buffer);
+  activation[0] = 14;
+  activationView.setUint32(1, 7, true);
+  activationView.setUint32(5, 30_000, true);
+  assert.deepEqual(
+    decodeComponentCommands(activation),
+    [{ opcode: 14, sequence: 7, timeout: 30_000 }],
+  );
   assert.throws(
     () => decodeComponentCommands(command(12, 0, "https://example.test/a.fe")),
     /request zero is reserved/,

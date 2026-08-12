@@ -106,8 +106,20 @@ try {
   });
   page.on("pageerror", error => browserErrors.push(`page: ${error.message}`));
   await page.evaluateOnNewDocument(() => {
-    globalThis.__feInspectorE2E = { errors: [], states: [], prevented: [] };
+    globalThis.__feInspectorE2E = {
+      errors: [], states: [], prevented: [], surfaceReady: [], surfaceTerminal: [],
+    };
+    const recordSurface = (field, event) => {
+      if (event.target?.tagName !== "FE-SURFACE") return;
+      const sequence = Number(event.target.getAttribute("data-fe-sequence"));
+      if (!Number.isInteger(sequence)) return;
+      const values = globalThis.__feInspectorE2E[field];
+      if (!values.includes(sequence)) values.push(sequence);
+    };
+    document.addEventListener("fe-ready", event => recordSurface("surfaceReady", event), true);
+    document.addEventListener("fe-live", event => recordSurface("surfaceTerminal", event), true);
     document.addEventListener("fe-error", event => {
+      recordSurface("surfaceTerminal", event);
       if (event.target?.id === "source-inspector" || event.target?.id === "gallery-shell") {
         globalThis.__feInspectorE2E.errors.push(String(event.detail?.stack ?? event.detail));
       }
@@ -123,16 +135,22 @@ try {
       if (action) globalThis.__feInspectorE2E.prevented.push([action, event.defaultPrevented]);
     });
   });
-  await page.goto(`http://127.0.0.1:${address.port}/`, { waitUntil: "networkidle0" });
+  await page.goto(`http://127.0.0.1:${address.port}/`, {
+    waitUntil: "domcontentloaded",
+    timeout: 120_000,
+  });
   await page.waitForFunction(() => {
     const script = document.querySelector('script[data-fe-mount="#source-inspector"], script[data-fe-mount="#gallery-shell"]');
     const component = document.querySelector("#source-inspector, #gallery-shell");
     const surfaces = Array.from(document.querySelectorAll("fe-surface"));
     const expectedSurfaces = document.querySelector(".gallery-head") ? 11 : 1;
+    const shell = document.querySelector("#gallery-shell");
+    const sequenceComplete = !shell ||
+      (shell._state?.[16] === expectedSurfaces && shell._state?.[17] === 0);
     return script?.dataset.feState === "complete" && component?._active === true &&
-      surfaces.length === expectedSurfaces &&
+      surfaces.length === expectedSurfaces && sequenceComplete &&
       surfaces.every(surface => surface.shadowRoot?.querySelector('a[href$=".wgsl"]'));
-  });
+  }, { timeout: 120_000 });
 
   const semanticActions = await page.evaluate(() => {
     const action = element => element?.getAttribute("data-fe-action");
@@ -153,6 +171,11 @@ try {
 
   const isGallery = await page.$(".gallery-head") !== null;
   if (isGallery) {
+    assert.deepEqual(
+      await page.evaluate(() => globalThis.__feInspectorE2E.surfaceTerminal),
+      Array.from({ length: 11 }, (_, index) => index),
+      "Fe did not activate every gallery surface exactly in compiler-derived order",
+    );
     assert.deepEqual(await page.evaluate(() => ({
       title: document.title,
       pageMarker: Boolean(document.querySelector("script[data-fe-page]")),

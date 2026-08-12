@@ -1,14 +1,15 @@
-//! A resident Fe source/generated-artifact inspector.
+//! The gallery's resident Fe shell: source inspector plus surface activation.
 //!
 //! Anchors provide untouched same-origin URLs. Fe owns which artifact kinds
 //! are inspectable, modal state, stale response rejection, loading/error
-//! policy, binary-vs-text presentation, focus, and navigation cancellation.
-//! The fixed browser host only realizes URL/fetch/DOM effects.
+//! policy, binary-vs-text presentation, focus, navigation cancellation, and
+//! sequential surface scheduling. The fixed browser host only realizes
+//! URL/fetch/DOM/surface effects and returns raw lifecycle facts.
 
 use std::web::component::{
     BrowserBytes, BrowserPtr, BrowserString, ComponentEvent, ComponentEventKind,
     ComponentPatch, ComponentWriter, InitialState, KeyboardKey, ProjectState, ResidentTransition,
-    allocate_component_buffer, component_string,
+    SequentialSurfaceActivation, allocate_component_buffer, component_string,
 }
 use std::web::page::{
     ComponentComposition, ComponentView, PageAttribute, PageBuilder, PageElement, PageText,
@@ -103,6 +104,7 @@ const URL_CAPACITY: u32 = 2048
 const PATCH_CAPACITY: u32 = 1048576
 const CONTENT_CAPACITY: u32 = 1044480
 const VIEW_CAPACITY: usize = 80
+const SURFACE_ACTIVATION_TIMEOUT_MS: u32 = 30000
 
 const fn ui_text(value: String<31>) -> PageText {
     PageText::one(value: value)
@@ -124,6 +126,10 @@ pub struct InspectorState {
     pub prevent_default: bool,
     pub focus_close: bool,
     pub revision: u32,
+    pub surface_discovered: u32,
+    pub surface_next: u32,
+    pub surface_waiting: bool,
+    pub surface_issue: bool,
 }
 
 fn byte_at(ptr: u32, index: u32) -> BrowserPtr<u32> {
@@ -174,6 +180,15 @@ actor SourceInspector {
     prevent_default: bool,
     focus_close: bool,
     revision: u32,
+    // Compatibility workaround for buggy browser WebGPU implementations
+    // observed crashing or losing their shared device when many gallery
+    // surfaces initialize in one burst. The ordering and fail-open deadline
+    // live in Fe; JavaScript only transports facts and realizes effects. This
+    // is deliberately not treated as a WebGPU or Fe semantic requirement.
+    surface_discovered: u32,
+    surface_next: u32,
+    surface_waiting: bool,
+    surface_issue: bool,
 
     const fn view() -> ComponentView<VIEW_CAPACITY> uses (ComponentComposition) {
         let ui = <InspectorParts as ComponentSchema>::component_parts()
@@ -273,6 +288,10 @@ actor SourceInspector {
             prevent_default: false,
             focus_close: false,
             revision: 0,
+            surface_discovered: 0,
+            surface_next: 0,
+            surface_waiting: false,
+            surface_issue: false,
         }
     }
 
@@ -292,6 +311,12 @@ actor SourceInspector {
         let mut prevent_default = false
         let mut focus_close = false
         let mut revision = self.revision
+        let activation = SequentialSurfaceActivation {
+            discovered: self.surface_discovered,
+            next: self.surface_next,
+            waiting: self.surface_waiting,
+            issue: self.surface_issue,
+        }.receive(kind: event.kind, request: event.request)
 
         match event.kind {
             ComponentEventKind::Connected => {
@@ -375,6 +400,10 @@ actor SourceInspector {
             prevent_default: prevent_default,
             focus_close: focus_close,
             revision: revision,
+            surface_discovered: activation.discovered,
+            surface_next: activation.next,
+            surface_waiting: activation.waiting,
+            surface_issue: activation.issue,
         }
     }
 
@@ -437,6 +466,12 @@ actor SourceInspector {
                 writer = writer.load_text(request: self.pending, value: url)
             }
         }
+        writer = SequentialSurfaceActivation {
+            discovered: self.surface_discovered,
+            next: self.surface_next,
+            waiting: self.surface_waiting,
+            issue: self.surface_issue,
+        }.write(writer: writer, timeout_ms: SURFACE_ACTIVATION_TIMEOUT_MS)
 
         ComponentPatch::new(
             visible_mask: visible_mask,

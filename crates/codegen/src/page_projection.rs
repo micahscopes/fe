@@ -90,6 +90,8 @@ pub struct ProjectedPageRender {
     pub wgsl_action: u32,
     pub wasm_action: u32,
     pub manifest_action: u32,
+    pub sequenced: bool,
+    pub sequence: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -614,6 +616,16 @@ fn read_render(
             db,
             named_field(&fields, "manifest_action", "PageRender")?,
             "PageRender.manifest_action",
+        )?,
+        sequenced: read_bool(
+            db,
+            named_field(&fields, "sequenced", "PageRender")?,
+            "PageRender.sequenced",
+        )?,
+        sequence: read_u32(
+            db,
+            named_field(&fields, "sequence", "PageRender")?,
+            "PageRender.sequence",
         )?,
     })
 }

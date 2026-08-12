@@ -431,6 +431,38 @@ Origin: honesty audit of Claude Code session
   attribute-mutation event ABI, persistence, unbounded collections, and native
   backend parity remain open. TodoMVC intentionally caps itself at 32 todos and
   96 UTF-8 bytes per title while those richer storage interfaces are designed.
+- A low-hanging Wasm language-parity sweep is now explicit early work. The
+  sequential gallery policy exposed that ordinary boolean unary `!` reaches
+  MIR as `Unary::Not` but the Wasm target currently rejects it; the source
+  temporarily spells `waiting == false`. Implement `Not` generically in the
+  Wasm lowering, add semantic execution regressions (not byte matching), audit
+  the remaining ordinary unary/binary/control operations against native, and
+  restore the idiomatic source spelling. Small backend omissions must not force
+  visible contortions into otherwise exemplary Fe programs.
+- Gallery render declarations now opt into compiler-correlated sequential
+  activation, with a reusable Fe state machine owning the cursor, waiting
+  state, fail-open completion policy, and 30-second deadline. This is clearly
+  labeled in Fe source as a compatibility workaround for buggy browser WebGPU
+  implementations which crash or lose a shared device during burst gallery
+  initialization, not as a Fe/WebGPU semantic requirement. The fixed host
+  currently contributes generic descendant discovery, lifecycle transport,
+  timer realization, and `live()` realization. Phase 3/6 must compost those
+  handwritten cases into generated EventSource/effect adapters from the typed
+  Fe/browser capability vocabulary; no gallery title, count, or reducer may
+  enter that adapter while it remains.
+- The single-invocation geometric-algebra compilation frontier is now stated
+  precisely. A WebGPU shader invocation is already one GPU lane and cannot
+  dynamically spawn additional lanes. Fe can instead use CTFE/FCO to turn a
+  statically shaped GA expression with statically known operand supports into
+  a sparse, call-free SSA DAG: load each leaf once, omit structural zeros,
+  share repeated products, and balance independent output reductions so the
+  GPU compiler can expose instruction-level parallelism within that lane.
+  `sparse_clifford` already supplies conservative support interpretation,
+  bounded `SparsePlan` materialization, provider-emitted straight-line terms,
+  and one explicitly balanced canonical schedule. It does not yet accept an
+  arbitrary operator-expression tree, normalize across that tree, derive CSE,
+  or choose an emitted schedule automatically. That is real groundwork, not a
+  completed expression compiler.
 - Mandelbrot-specific native transition tapes, general typed
   lifecycle/reactive streams, pointer capture, picking/messages, resident
   outer-gallery orchestration, and runtime-manifest removal remain open.
@@ -754,6 +786,11 @@ and tested in Fe; JavaScript merely supplies frame/GPU-completion facts.
 
 ### Phase 3: complete canonical values, callbacks, and runtime control effects
 
+0. Close low-hanging Wasm language-parity gaps before growing more examples:
+   implement boolean unary `!`/`Unary::Not`, exercise it in generated Wasm,
+   audit the ordinary operator/control matrix against native, and pin every
+   discovered gap with a semantic regression rather than generated-byte
+   equality.
 1. Finish canonical allocator/PostReturn and rich-record transport.
 2. Connect generated WebIDL callback adapters to compiled Fe callback bodies.
 3. Add the MIR suspension/re-entry transform for resumable Fe tasks.
@@ -821,6 +858,41 @@ Exit condition: the fixed JavaScript contains browser API realization but no
 application scheduling, state, geometry, parameter, or pass-selection policy.
 
 ### Phase 7: simplify and generalize the Fe demos
+
+#### Geometric-algebra expression compiler
+
+1. Define a static typed expression vocabulary for leaves and binary/unary GA
+   operators (sum/subtraction, geometric and outer products, contractions,
+   grade projection, reverse, and dual). "Arbitrary" means arbitrary finite
+   composition of those type-level nodes known during compilation; a runtime
+   AST or a leaf with unknown/dense support cannot be CTFE-sparsified.
+2. Interpret the same expression twice at compile time: once over conservative
+   blade support, and once into a normalized term plan carrying output blade,
+   operand-product key, coefficient/sign, dependencies, and source-order
+   identity. Generalize beyond the present dimension-five/192-candidate
+   envelope without hiding an unbounded compile-time explosion.
+3. Add an FCO `CompileGa<E, Metric, NumericPolicy>` provider which emits one
+   shared straight-line SSA DAG for a shader invocation: leaf loads and common
+   products occur once, provably absent terms disappear, independent outputs
+   are available together, and reductions are balanced only when policy allows
+   it. This exposes instruction-level parallelism; actual issue/scheduling
+   remains the WebGPU implementation's job because an invocation cannot spawn
+   threads.
+4. Preserve two honest floating-point policies. `Strict` keeps source order and
+   only prunes structural zeros. `AlgebraicBalanced` may reassociate, merge, or
+   cancel terms under an explicit real-algebra contract; it must not silently
+   pretend that those rewrites preserve every IEEE-754 NaN, signed-zero, and
+   rounding behavior.
+5. Gate the provider semantically against the dense Fuchs--Thery recurrence on
+   generated expression trees, sparse supports, metrics, and adversarial
+   floating-point values. Separately inspect emitted MIR/WGSL for survivor
+   operation counts, single loads/CSE, balanced depth, absence of runtime plan
+   branches, browser-profile validation, and executed GPU parity. Byte matches
+   and shader-size reductions are supporting evidence, never correctness.
+6. Keep true cross-lane collaboration as a distinct workgroup track. It would
+   require several shader invocations plus workgroup memory/barriers and a
+   partition/reduction mapping; it cannot satisfy a literal single-invocation
+   constraint and must not be described as threads spawned inside one lane.
 
 #### Mandelbrot family
 

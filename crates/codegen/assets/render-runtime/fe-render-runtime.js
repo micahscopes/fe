@@ -459,9 +459,18 @@ export class FeSurfaceElement extends HTMLElement {
     return this._manifest;
   }
 
-  /** Force a transition to `live`, waiting for `ready` first if still cold. */
+  /** Start a manually booted surface and wait until its poster is ready. */
+  async load() {
+    if (!this._booted) {
+      this._booted = true;
+      this._bootSurface();
+    }
+    await this._readyPromise;
+  }
+
+  /** Force a transition to `live`, booting first when declared manual. */
   async live() {
-    if (this._fsm === "cold") await this._readyPromise.catch(() => {});
+    if (this._fsm === "cold") await this.load();
     await this._goLive();
   }
 
@@ -516,8 +525,7 @@ export class FeSurfaceElement extends HTMLElement {
       if (this._fsm === "live") this._wireSuspendObserver();
       return;
     }
-    this._booted = true;
-    this._bootSurface();
+    if (this.getAttribute("boot") !== "manual") this.load();
   }
 
   disconnectedCallback() {
@@ -534,7 +542,10 @@ export class FeSurfaceElement extends HTMLElement {
       return;
     }
     if (name === "manifest") {
-      if (this.isConnected) this._bootSurface();
+      if (this.isConnected && (this._booted || this.getAttribute("boot") !== "manual")) {
+        this._booted = true;
+        this._bootSurface();
+      }
       return;
     }
     if (name === "controls") {

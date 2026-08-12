@@ -2216,6 +2216,9 @@ fn realize_projection_ops(
                 if !render.entry.is_empty() {
                     attributes.push(("data-fe-entry", render.entry.clone()));
                 }
+                if render.sequenced {
+                    attributes.push(("data-fe-sequence", render.sequence.to_string()));
+                }
                 let node = page_program_script(attributes);
                 append_page_node(&mut roots, &stack, node);
             }
@@ -4062,6 +4065,8 @@ actor ExamplePage {
                 wgsl_action: 1,
                 wasm_action: 2,
                 manifest_action: 3,
+                sequenced: false,
+                sequence: 0,
             },
         )];
         let error =

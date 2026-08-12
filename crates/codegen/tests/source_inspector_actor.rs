@@ -13,23 +13,17 @@ use fe_codegen::{
 use hir::hir_def::HirIngot;
 use url::Url;
 
-type ActorState = (
-    i32,
-    i32,
-    i32,
-    i32,
-    i32,
-    i32,
-    i32,
-    i32,
-    i32,
-    i32,
-    i32,
-    i32,
-    i32,
-    i32,
-    i32,
-);
+const STATE_LEAVES: usize = 19;
+
+fn i32_results(values: &[wasmtime::Val]) -> Vec<i32> {
+    values
+        .iter()
+        .map(|value| match value {
+            wasmtime::Val::I32(value) => *value,
+            other => panic!("resident actor returned non-i32 state leaf {other:?}"),
+        })
+        .collect()
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Model {
@@ -45,6 +39,10 @@ struct Model {
     prevent_default: bool,
     focus_close: bool,
     revision: u32,
+    surface_discovered: u32,
+    surface_next: u32,
+    surface_waiting: bool,
+    surface_issue: bool,
 }
 
 impl Default for Model {
@@ -62,6 +60,10 @@ impl Default for Model {
             prevent_default: false,
             focus_close: false,
             revision: 0,
+            surface_discovered: 0,
+            surface_next: 0,
+            surface_waiting: false,
+            surface_issue: false,
         }
     }
 }
@@ -80,6 +82,34 @@ fn reduce(model: &mut Model, event: Event<'_>) {
     model.issue_load = false;
     model.prevent_default = false;
     model.focus_close = false;
+    model.surface_issue = false;
+
+    if (9..=12).contains(&event.kind) && event.request > 0 {
+        let sequence = event.request - 1;
+        assert!(sequence < 32, "model surface token bound");
+        let bit = 1 << sequence;
+        match event.kind {
+            9 => model.surface_discovered |= bit,
+            10..=12 if model.surface_waiting && sequence == model.surface_next => {
+                model.surface_waiting = false;
+                model.surface_next += 1;
+            }
+            _ => {}
+        }
+    }
+    if event.kind == 1 {
+        model.surface_discovered = 0;
+        model.surface_waiting = false;
+    }
+    if event.kind != 1
+        && !model.surface_waiting
+        && model.surface_next < 32
+        && model.surface_discovered & (1 << model.surface_next) != 0
+    {
+        model.surface_waiting = true;
+        model.surface_issue = true;
+    }
+
     match event.kind {
         0 => {
             model.connected = true;
@@ -129,6 +159,7 @@ enum Operation {
     Href(u32, String),
     LoadText(u32, String),
     LoadBytes(u32, String),
+    ActivateSurface(u32, u32),
 }
 
 fn decode(bytes: &[u8]) -> Vec<Operation> {
@@ -156,15 +187,24 @@ fn decode(bytes: &[u8]) -> Vec<Operation> {
     let mut operations = Vec::new();
     while cursor < bytes.len() {
         let opcode = byte(bytes, &mut cursor);
-        let id = word(bytes, &mut cursor);
-        let value = text(bytes, &mut cursor);
-        operations.push(match opcode {
-            4 => Operation::Text(id, value),
-            11 => Operation::Href(id, value),
-            12 => Operation::LoadText(id, value),
-            13 => Operation::LoadBytes(id, value),
+        match opcode {
+            14 => operations.push(Operation::ActivateSurface(
+                word(bytes, &mut cursor),
+                word(bytes, &mut cursor),
+            )),
+            4 | 11 | 12 | 13 => {
+                let id = word(bytes, &mut cursor);
+                let value = text(bytes, &mut cursor);
+                operations.push(match opcode {
+                    4 => Operation::Text(id, value),
+                    11 => Operation::Href(id, value),
+                    12 => Operation::LoadText(id, value),
+                    13 => Operation::LoadBytes(id, value),
+                    _ => unreachable!(),
+                });
+            }
             _ => panic!("unexpected SourceInspector opcode {opcode}"),
-        });
+        }
     }
     operations
 }
@@ -201,6 +241,9 @@ fn expected_projection(model: &Model) -> (u32, u32, u32, Vec<Operation>) {
             Operation::LoadText(model.pending, model.url.clone())
         });
     }
+    if model.surface_issue {
+        operations.push(Operation::ActivateSurface(model.surface_next, 30_000));
+    }
     (
         mask,
         u32::from(model.focus_close) * 5,
@@ -233,7 +276,7 @@ fn source_inspector_owns_selection_loading_stale_response_and_presentation_polic
         .expect("SourceInspector actor");
     assert_eq!(artifact.contract.actor, "SourceInspector");
     assert_eq!(artifact.contract.event_leaf_count, 9);
-    assert_eq!(artifact.contract.state_leaf_count, 15);
+    assert_eq!(artifact.contract.state_leaf_count, STATE_LEAVES);
 
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, &artifact.wasm).unwrap();
@@ -241,13 +284,10 @@ fn source_inspector_owns_selection_loading_stale_response_and_presentation_polic
     let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
     let memory = instance.get_memory(&mut store, "memory").unwrap();
     let initialize = instance
-        .get_typed_func::<(), ActorState>(&mut store, RESIDENT_ACTOR_INITIALIZE_EXPORT)
+        .get_func(&mut store, RESIDENT_ACTOR_INITIALIZE_EXPORT)
         .unwrap();
     let transition = instance
-        .get_typed_func::<(i32, i32, i32, i32, i32, f32, f32, i32, i32), ActorState>(
-            &mut store,
-            RESIDENT_ACTOR_TRANSITION_EXPORT,
-        )
+        .get_func(&mut store, RESIDENT_ACTOR_TRANSITION_EXPORT)
         .unwrap();
     let project = instance
         .get_typed_func::<(), (i32, i32, i32, i32, i32)>(&mut store, RESIDENT_ACTOR_PROJECT_EXPORT)
@@ -255,8 +295,12 @@ fn source_inspector_owns_selection_loading_stale_response_and_presentation_polic
     let alloc = instance
         .get_typed_func::<(i32, i32), i32>(&mut store, "fe_cabi_alloc")
         .unwrap();
-    let initial = initialize.call(&mut store, ()).unwrap();
-    let pointers = (initial.0, initial.1, initial.7);
+    let mut initial_results = vec![wasmtime::Val::I32(0); STATE_LEAVES];
+    initialize
+        .call(&mut store, &[], &mut initial_results)
+        .unwrap();
+    let initial = i32_results(&initial_results);
+    let pointers = (initial[0], initial[1], initial[7]);
     let scratch = alloc.call(&mut store, (4096, 1)).unwrap();
     let mut model = Model::default();
 
@@ -273,6 +317,56 @@ fn source_inspector_owns_selection_loading_stale_response_and_presentation_polic
             kind: 0,
             target: 0,
             request: 0,
+            key: 0,
+            detail: 0,
+            text: "",
+        },
+        // Discovery can arrive out of order. Fe waits for sequence zero,
+        // activates one surface, and advances only on live/error/timeout.
+        Event {
+            kind: 9,
+            target: 0,
+            request: 2,
+            key: 0,
+            detail: 0,
+            text: "",
+        },
+        Event {
+            kind: 9,
+            target: 0,
+            request: 1,
+            key: 0,
+            detail: 0,
+            text: "",
+        },
+        Event {
+            kind: 10,
+            target: 0,
+            request: 1,
+            key: 0,
+            detail: 0,
+            text: "",
+        },
+        Event {
+            kind: 11,
+            target: 0,
+            request: 2,
+            key: 0,
+            detail: 0,
+            text: "",
+        },
+        Event {
+            kind: 9,
+            target: 0,
+            request: 3,
+            key: 0,
+            detail: 0,
+            text: "",
+        },
+        Event {
+            kind: 12,
+            target: 0,
+            request: 3,
             key: 0,
             detail: 0,
             text: "",
@@ -357,6 +451,40 @@ fn source_inspector_owns_selection_loading_stale_response_and_presentation_polic
             detail: 0,
             text: "",
         },
+        // Reconnection deliberately clears discovery/waiting but preserves the
+        // Fe cursor. Rediscovery resumes at the next incomplete surface.
+        Event {
+            kind: 0,
+            target: 0,
+            request: 0,
+            key: 0,
+            detail: 0,
+            text: "",
+        },
+        Event {
+            kind: 9,
+            target: 0,
+            request: 4,
+            key: 0,
+            detail: 0,
+            text: "",
+        },
+        Event {
+            kind: 10,
+            target: 0,
+            request: 4,
+            key: 0,
+            detail: 0,
+            text: "",
+        },
+        Event {
+            kind: 1,
+            target: 0,
+            request: 0,
+            key: 0,
+            detail: 0,
+            text: "",
+        },
         Event {
             kind: 8,
             target: 0,
@@ -371,51 +499,72 @@ fn source_inspector_owns_selection_loading_stale_response_and_presentation_polic
             .write(&mut store, scratch as usize, event.text.as_bytes())
             .unwrap();
         reduce(&mut model, event);
-        let actual = transition
-            .call(
-                &mut store,
-                (
-                    event.kind as i32,
-                    event.target as i32,
-                    event.request as i32,
-                    event.key as i32,
-                    event.detail as i32,
-                    0.0,
-                    index as f32,
-                    if event.text.is_empty() { 0 } else { scratch },
-                    event.text.len() as i32,
-                ),
-            )
+        let params = [
+            wasmtime::Val::I32(event.kind as i32),
+            wasmtime::Val::I32(event.target as i32),
+            wasmtime::Val::I32(event.request as i32),
+            wasmtime::Val::I32(event.key as i32),
+            wasmtime::Val::I32(event.detail as i32),
+            wasmtime::Val::F32(0.0f32.to_bits()),
+            wasmtime::Val::F32((index as f32).to_bits()),
+            wasmtime::Val::I32(if event.text.is_empty() { 0 } else { scratch }),
+            wasmtime::Val::I32(event.text.len() as i32),
+        ];
+        let mut actual_results = vec![wasmtime::Val::I32(0); STATE_LEAVES];
+        transition
+            .call(&mut store, &params, &mut actual_results)
             .unwrap_or_else(|error| panic!("SourceInspector event {index}: {error}"));
+        let actual = i32_results(&actual_results);
         assert_eq!(
-            (actual.0, actual.1, actual.7),
+            (actual[0], actual[1], actual[7]),
             pointers,
             "persistent pointers at {index}"
         );
         assert_eq!(
-            actual.2 as u32,
+            actual[2] as u32,
             model.url.len() as u32,
             "url length at {index}"
         );
-        assert_eq!(actual.3 as u32, model.selected, "selection at {index}");
-        assert_eq!(actual.4 as u32, model.pending, "pending request at {index}");
-        assert_eq!(actual.5 as u32, model.status, "status at {index}");
-        assert_eq!(actual.6 as u32, model.byte_len, "byte length at {index}");
+        assert_eq!(actual[3] as u32, model.selected, "selection at {index}");
         assert_eq!(
-            actual.8 as u32,
+            actual[4] as u32, model.pending,
+            "pending request at {index}"
+        );
+        assert_eq!(actual[5] as u32, model.status, "status at {index}");
+        assert_eq!(actual[6] as u32, model.byte_len, "byte length at {index}");
+        assert_eq!(
+            actual[8] as u32,
             model.content.len() as u32,
             "content length at {index}"
         );
-        assert_eq!(actual.9 != 0, model.connected, "connected at {index}");
-        assert_eq!(actual.10 != 0, model.open, "open at {index}");
-        assert_eq!(actual.11 != 0, model.issue_load, "load effect at {index}");
+        assert_eq!(actual[9] != 0, model.connected, "connected at {index}");
+        assert_eq!(actual[10] != 0, model.open, "open at {index}");
+        assert_eq!(actual[11] != 0, model.issue_load, "load effect at {index}");
         assert_eq!(
-            actual.12 != 0,
+            actual[12] != 0,
             model.prevent_default,
             "prevent default at {index}"
         );
-        assert_eq!(actual.13 != 0, model.focus_close, "focus at {index}");
-        assert_eq!(actual.14 as u32, model.revision, "revision at {index}");
+        assert_eq!(actual[13] != 0, model.focus_close, "focus at {index}");
+        assert_eq!(actual[14] as u32, model.revision, "revision at {index}");
+        assert_eq!(
+            actual[15] as u32, model.surface_discovered,
+            "surface discovery mask at {index}"
+        );
+        assert_eq!(
+            actual[16] as u32, model.surface_next,
+            "next surface at {index}"
+        );
+        assert_eq!(
+            actual[17] != 0,
+            model.surface_waiting,
+            "surface waiting state at {index}"
+        );
+        assert_eq!(
+            actual[18] != 0,
+            model.surface_issue,
+            "surface activation effect at {index}"
+        );
 
         let patch = project.call(&mut store, ()).unwrap();
         let expected = expected_projection(&model);
@@ -431,9 +580,21 @@ fn source_inspector_owns_selection_loading_stale_response_and_presentation_polic
     }
 
     assert!(
-        transition
-            .call(&mut store, (3, 99, 0, 0, 0, 0.0, 0.0, 0, 0))
-            .is_err(),
+        {
+            let params = [
+                wasmtime::Val::I32(3),
+                wasmtime::Val::I32(99),
+                wasmtime::Val::I32(0),
+                wasmtime::Val::I32(0),
+                wasmtime::Val::I32(0),
+                wasmtime::Val::F32(0),
+                wasmtime::Val::F32(0),
+                wasmtime::Val::I32(0),
+                wasmtime::Val::I32(0),
+            ];
+            let mut results = vec![wasmtime::Val::I32(0); STATE_LEAVES];
+            transition.call(&mut store, &params, &mut results).is_err()
+        },
         "invalid FCO-derived InspectorAction must trap before reaching Fe"
     );
 }
