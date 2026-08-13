@@ -848,9 +848,22 @@ fn canonical_de_actor_owns_the_complete_scene_lifecycle() {
             .expect("derive QCGA DE program")
             .expect("QCGA GPU actor");
         assert_eq!(program.actor, "PencilDistanceSurface");
-        assert_eq!(program.stages.len(), 1);
+        assert_eq!(program.stages.len(), 3);
         assert_eq!(program.stages[0].source_entry, "distance_surface");
         assert_eq!(program.stages[0].kind, WebActorStageKind::Fragment);
+        assert_eq!(program.stages[1].source_entry, "marker_vertices");
+        assert!(matches!(
+            program.stages[1].kind,
+            WebActorStageKind::Vertex {
+                vertex_count: 54,
+                ..
+            }
+        ));
+        assert_eq!(program.stages[2].source_entry, "marker_fragment");
+        assert!(matches!(
+            program.stages[2].kind,
+            WebActorStageKind::RasterFragment { .. }
+        ));
         assert_eq!(
             actor_web_entry(db, top_mod).expect("derive QCGA web entry"),
             Some(("distance_surface".to_owned(), WebBundleMode::Render)),
@@ -869,9 +882,12 @@ fn canonical_de_actor_owns_the_complete_scene_lifecycle() {
             WebBuildOptions::render("distance_surface", None),
         )
         .expect("QCGA canonical DE bundle");
-        assert_eq!(bundle.manifest.passes.len(), 1);
+        assert_eq!(bundle.manifest.passes.len(), 2);
         let pass = &bundle.manifest.passes[0];
         assert_eq!(pass.source_entry, "distance_surface");
+        let marker = &bundle.manifest.passes[1];
+        assert_eq!(marker.source_entry, "marker_fragment");
+        assert_eq!(marker.draw_vertices, Some(54));
         assert_eq!(pass.layout.bindings.len(), 1);
         assert_eq!(pass.layout.bindings[0].members.len(), 59);
         assert_eq!(

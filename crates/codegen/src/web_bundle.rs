@@ -949,8 +949,10 @@ pub fn actor_gpu_program(
             )
         })?;
     let mut stages = Vec::new();
-    let mut authored_vertex_payloads = Vec::new();
-    let mut authored_fragment_payloads = Vec::new();
+    // Kept in lockstep with `stages` only while resolving the semantic actor.
+    // The serializable-free program descriptor retains the canonical varying
+    // shape, while exact nominal identity is checked here before it is erased.
+    let mut raster_payloads = Vec::new();
     for behavior in &actor.behaviors {
         let Some((stage, role_path)) = behavior_stage_role(db, *behavior) else {
             continue;
@@ -964,65 +966,70 @@ pub fn actor_gpu_program(
                     "attributed GPU-stage behavior has no resolvable name".to_owned(),
                 )
             })?;
-        let kind = match stage {
+        let (kind, raster_payload) = match stage {
             GpuStage::Vertex => {
                 let (kind, payload) = raster_vertex_stage(db, *behavior, role_path)?;
-                authored_vertex_payloads.push(payload);
-                kind
+                (kind, Some(payload))
             }
-            GpuStage::Fragment => WebActorStageKind::Fragment,
+            GpuStage::Fragment => (WebActorStageKind::Fragment, None),
             GpuStage::RasterFragment => {
                 let (kind, payload) = raster_fragment_stage(db, *behavior, role_path)?;
-                authored_fragment_payloads.push(payload);
-                kind
+                (kind, Some(payload))
             }
             GpuStage::Compute => {
                 let (workgroup_size, dispatch) = compute_stage_shape(db, *behavior, role_path)?;
-                WebActorStageKind::Compute {
-                    workgroup_size,
-                    dispatch,
-                }
+                (
+                    WebActorStageKind::Compute {
+                        workgroup_size,
+                        dispatch,
+                    },
+                    None,
+                )
             }
         };
         stages.push(WebActorStage { source_entry, kind });
+        raster_payloads.push(raster_payload);
     }
-    let authored_vertices = stages
-        .iter()
-        .filter_map(|stage| match &stage.kind {
-            WebActorStageKind::Vertex { varying, .. } => Some(varying),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let authored_fragments = stages
-        .iter()
-        .filter_map(|stage| match &stage.kind {
-            WebActorStageKind::RasterFragment { varying } => Some(varying),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    if !authored_vertices.is_empty() || !authored_fragments.is_empty() {
-        if authored_vertices.len() != 1 || authored_fragments.len() != 1 {
-            return Err(WebBundleError::EntryDerivation(format!(
-                "authored raster program requires exactly one vertex and one raster-fragment behavior; found {} and {}",
-                authored_vertices.len(),
-                authored_fragments.len(),
-            )));
-        }
-        if authored_vertex_payloads[0] != authored_fragment_payloads[0] {
-            return Err(WebBundleError::EntryDerivation(
-                "authored raster vertex and fragment behaviors use different varying payload types"
-                    .to_owned(),
-            ));
-        }
-        debug_assert_eq!(authored_vertices[0], authored_fragments[0]);
-        if stages
-            .iter()
-            .any(|stage| matches!(stage.kind, WebActorStageKind::Fragment))
-        {
-            return Err(WebBundleError::EntryDerivation(
-                "authored raster program cannot also declare a fullscreen fragment behavior"
-                    .to_owned(),
-            ));
+
+    // A raster pass is one adjacent vertex/fragment pair. This grammar admits
+    // any ordered mixture of compute, fullscreen, and raster passes without a
+    // second pass manifest or application-named pipeline table. In particular,
+    // a small raster pass may overlay a fullscreen distance field while both
+    // stages continue to consume the same Fe actor state.
+    let mut index = 0;
+    while index < stages.len() {
+        match &stages[index].kind {
+            WebActorStageKind::Vertex {
+                varying: vertex, ..
+            } => {
+                let Some(next) = stages.get(index + 1) else {
+                    return Err(WebBundleError::EntryDerivation(
+                        "authored raster vertex behavior must be followed by its paired raster-fragment behavior"
+                            .to_owned(),
+                    ));
+                };
+                let WebActorStageKind::RasterFragment { varying: fragment } = &next.kind else {
+                    return Err(WebBundleError::EntryDerivation(
+                        "authored raster vertex behavior must be followed by its paired raster-fragment behavior"
+                            .to_owned(),
+                    ));
+                };
+                if raster_payloads[index] != raster_payloads[index + 1] {
+                    return Err(WebBundleError::EntryDerivation(
+                        "authored raster vertex and fragment behaviors use different varying payload types"
+                            .to_owned(),
+                    ));
+                }
+                debug_assert_eq!(vertex, fragment);
+                index += 2;
+            }
+            WebActorStageKind::RasterFragment { .. } => {
+                return Err(WebBundleError::EntryDerivation(
+                    "authored raster fragment behavior must immediately follow its paired vertex behavior"
+                        .to_owned(),
+                ));
+            }
+            WebActorStageKind::Compute { .. } | WebActorStageKind::Fragment => index += 1,
         }
     }
     Ok(Some(WebActorProgram {
@@ -1123,19 +1130,60 @@ pub fn actor_web_entry(
         }
     };
 
-    let fragment_behaviors: Vec<hir::hir_def::Func<'_>> = actor
+    let fullscreen_behaviors: Vec<hir::hir_def::Func<'_>> = actor
+        .behaviors
+        .iter()
+        .copied()
+        .filter(|behavior| matches!(behavior_stage(db, *behavior), Some(GpuStage::Fragment)))
+        .collect();
+    if fullscreen_behaviors.len() > 1 {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "GPU-program actor `{}` declares {} fullscreen fragment-stage behaviors; a render program has at most one",
+            actor
+                .state
+                .name(db)
+                .to_opt()
+                .map(|name| name.data(db))
+                .map_or("<unnamed>", |name| name.as_str()),
+            fullscreen_behaviors.len()
+        )));
+    }
+    // A unique fullscreen behavior remains the page-facing surface entry even
+    // when later authored raster pairs overlay it. Pure raster actors retain
+    // their unique raster-fragment entry. Pass order itself stays in Fe source.
+    let raster_fragment_behaviors: Vec<hir::hir_def::Func<'_>> = actor
         .behaviors
         .iter()
         .copied()
         .filter(|behavior| {
             matches!(
                 behavior_stage(db, *behavior),
-                Some(GpuStage::Fragment | GpuStage::RasterFragment)
+                Some(GpuStage::RasterFragment)
             )
         })
         .collect();
-    match fragment_behaviors.as_slice() {
-        [behavior] => Ok(Some((
+    let entry = match fullscreen_behaviors.as_slice() {
+        [behavior] => Some(*behavior),
+        [] => match raster_fragment_behaviors.as_slice() {
+            [behavior] => Some(*behavior),
+            [] => None,
+            _ => {
+                return Err(WebBundleError::EntryDerivation(format!(
+                    "GPU-program actor `{}` declares {} raster fragment-stage behaviors without one fullscreen surface entry",
+                    actor
+                        .state
+                        .name(db)
+                        .to_opt()
+                        .map(|name| name.data(db))
+                        .map_or("<unnamed>", |name| name.as_str()),
+                    raster_fragment_behaviors.len()
+                )));
+            }
+        },
+        _ => unreachable!("multiple fullscreen behaviors rejected above"),
+    };
+    match entry {
+        Some(behavior) => Ok(Some((
             behavior
                 .name(db)
                 .to_opt()
@@ -1147,7 +1195,7 @@ pub fn actor_web_entry(
                 })?,
             WebBundleMode::Render,
         ))),
-        [] => Err(WebBundleError::EntryDerivation(format!(
+        None => Err(WebBundleError::EntryDerivation(format!(
             "GPU-program actor `{}` has no behavior carrying `#[gpu_stage(fragment)]` or `#[gpu_stage(raster_fragment)]`",
             actor
                 .state
@@ -1155,16 +1203,6 @@ pub fn actor_web_entry(
                 .to_opt()
                 .map(|name| name.data(db))
                 .map_or("<unnamed>", |name| name.as_str())
-        ))),
-        _ => Err(WebBundleError::EntryDerivation(format!(
-            "GPU-program actor `{}` declares {} fragment-stage behaviors; a render program has exactly one",
-            actor
-                .state
-                .name(db)
-                .to_opt()
-                .map(|name| name.data(db))
-                .map_or("<unnamed>", |name| name.as_str()),
-            fragment_behaviors.len()
         ))),
     }
 }
@@ -3253,14 +3291,14 @@ impl WebBundle {
             })
             .map(|stage| stage.source_entry.as_str())
             .collect::<Vec<_>>();
-        if fragment_entries.as_slice() != [options.source_entry.as_str()]
+        if !fragment_entries.contains(&options.source_entry.as_str())
             || !matches!(
                 program.stages.last().map(|stage| &stage.kind),
                 Some(WebActorStageKind::Fragment | WebActorStageKind::RasterFragment { .. })
             )
         {
             return Err(WebBundleError::EntryDerivation(format!(
-                "GPU actor pass graph must end in its unique fragment entry `{}`",
+                "GPU actor pass graph must contain its derived fragment entry `{}` and end in a render stage",
                 options.source_entry
             )));
         }
@@ -3277,83 +3315,75 @@ impl WebBundle {
             .collect::<Vec<_>>();
         let mut passes = Vec::with_capacity(program.stages.len());
         let mut pass_wgsl = Vec::with_capacity(program.stages.len());
-        let mut final_shader = None;
-        let mut final_layout = None;
-        let authored_raster = match program.stages.as_slice() {
-            [
-                WebActorStage {
-                    source_entry: vertex_entry,
-                    kind: WebActorStageKind::Vertex { vertex_count, .. },
-                },
-                WebActorStage {
+        // The top-level compatibility artifact/layout follows the derived
+        // page-facing fragment entry. Ordered pass execution uses `passes`;
+        // a later overlay must not silently replace the inspected primary
+        // shader merely because it is last in source order.
+        let mut primary_shader = None;
+        let mut primary_layout = None;
+        let mut index = 0;
+        while index < program.stages.len() {
+            let stage = &program.stages[index];
+            if let WebActorStageKind::Vertex { vertex_count, .. } = &stage.kind {
+                let Some(WebActorStage {
                     source_entry: fragment_entry,
                     kind: WebActorStageKind::RasterFragment { .. },
-                },
-            ] => Some((vertex_entry.clone(), fragment_entry.clone(), *vertex_count)),
-            stages
-                if stages.iter().any(|stage| {
-                    matches!(
-                        stage.kind,
-                        WebActorStageKind::Vertex { .. } | WebActorStageKind::RasterFragment { .. }
-                    )
-                }) =>
-            {
-                return Err(WebBundleError::Lower(
-                    "authored raster currently requires exactly one vertex behavior followed by its paired fragment behavior"
-                        .to_owned(),
-                ));
-            }
-            _ => None,
-        };
-        if let Some((vertex_entry, fragment_entry, vertex_count)) = authored_raster.as_ref() {
-            if !resources.is_empty() {
-                return Err(WebBundleError::Lower(
-                    "authored raster resources are not wired into both stages yet".to_owned(),
-                ));
-            }
-            let package = mir::build_wasm_runtime_package_for_entries(
-                db,
-                top_mod,
-                &[vertex_entry.clone(), fragment_entry.clone()],
-            )
-            .map_err(|error| WebBundleError::Lower(error.to_string()))?;
-            let artifact = compile_runtime_package_spirv_authored_raster(
-                db,
-                &package,
-                vertex_entry,
-                fragment_entry,
-            )
-            .map_err(|error| WebBundleError::Lower(error.to_string()))?;
-            let shader =
-                normalize_generated_text(&artifact.wgsl.ok_or(WebBundleError::MissingWgsl)?);
-            validate_browser_wgsl(&shader)?;
-            let mut layout = WebLayout::from_spirv(&artifact.layout)?;
-            project_actor_field_metadata(
-                db,
-                top_mod,
-                &fragment_entry,
-                &mut layout,
-                &resource_field_indices,
-            )?;
-            let path = format!("{PASS_DIR}/000-raster.wgsl");
-            passes.push(WebPass {
-                source_entry: fragment_entry.clone(),
-                shader: path.clone(),
-                shader_bytes: shader.len() as u64,
-                dispatch: None,
-                draw_vertices: Some(*vertex_count),
-                layout: layout.clone(),
-            });
-            pass_wgsl.push(WebPassShader {
-                path: path.clone(),
-                source: shader.clone(),
-            });
-            final_shader = Some((path, shader));
-            final_layout = Some(layout);
-        }
-        for (index, stage) in program.stages.iter().enumerate() {
-            if authored_raster.is_some() {
-                break;
+                }) = program.stages.get(index + 1)
+                else {
+                    return Err(WebBundleError::Lower(
+                        "authored raster vertex behavior lost its adjacent fragment pair"
+                            .to_owned(),
+                    ));
+                };
+                if !resources.is_empty() {
+                    return Err(WebBundleError::Lower(
+                        "authored raster resources are not wired into both stages yet".to_owned(),
+                    ));
+                }
+                let vertex_entry = &stage.source_entry;
+                let package = mir::build_wasm_runtime_package_for_entries(
+                    db,
+                    top_mod,
+                    &[vertex_entry.clone(), fragment_entry.clone()],
+                )
+                .map_err(|error| WebBundleError::Lower(error.to_string()))?;
+                let artifact = compile_runtime_package_spirv_authored_raster(
+                    db,
+                    &package,
+                    vertex_entry,
+                    fragment_entry,
+                )
+                .map_err(|error| WebBundleError::Lower(error.to_string()))?;
+                let shader =
+                    normalize_generated_text(&artifact.wgsl.ok_or(WebBundleError::MissingWgsl)?);
+                validate_browser_wgsl(&shader)?;
+                let mut layout = WebLayout::from_spirv(&artifact.layout)?;
+                project_actor_field_metadata(
+                    db,
+                    top_mod,
+                    fragment_entry,
+                    &mut layout,
+                    &resource_field_indices,
+                )?;
+                let path = format!("{PASS_DIR}/{index:03}-raster.wgsl");
+                passes.push(WebPass {
+                    source_entry: fragment_entry.clone(),
+                    shader: path.clone(),
+                    shader_bytes: shader.len() as u64,
+                    dispatch: None,
+                    draw_vertices: Some(*vertex_count),
+                    layout: layout.clone(),
+                });
+                pass_wgsl.push(WebPassShader {
+                    path: path.clone(),
+                    source: shader.clone(),
+                });
+                if fragment_entry == &options.source_entry {
+                    primary_shader = Some((path, shader));
+                    primary_layout = Some(layout);
+                }
+                index += 2;
+                continue;
             }
             let package =
                 mir::build_wasm_runtime_package_for_entry(db, top_mod, &stage.source_entry)
@@ -3387,8 +3417,9 @@ impl WebBundle {
                         "fragment",
                     )
                 }
-                WebActorStageKind::Vertex { .. } | WebActorStageKind::RasterFragment { .. } => {
-                    unreachable!("authored raster stages fail closed before per-stage compilation")
+                WebActorStageKind::Vertex { .. } => unreachable!("handled as an adjacent pair"),
+                WebActorStageKind::RasterFragment { .. } => {
+                    unreachable!("actor construction rejects unpaired raster fragments")
                 }
             };
             let artifact = artifact.map_err(|error| WebBundleError::Lower(error.to_string()))?;
@@ -3416,17 +3447,20 @@ impl WebBundle {
                 path: path.clone(),
                 source: shader.clone(),
             });
-            if matches!(stage.kind, WebActorStageKind::Fragment) {
-                final_shader = Some((path, shader));
-                final_layout = Some(layout);
+            if matches!(stage.kind, WebActorStageKind::Fragment)
+                && stage.source_entry == options.source_entry
+            {
+                primary_shader = Some((path, shader));
+                primary_layout = Some(layout);
             }
+            index += 1;
         }
-        let (final_path, wgsl) = final_shader.ok_or_else(|| {
+        let (final_path, wgsl) = primary_shader.ok_or_else(|| {
             WebBundleError::EntryDerivation(
-                "GPU actor pass graph has no fragment shader".to_owned(),
+                "GPU actor pass graph has no shader for its derived fragment entry".to_owned(),
             )
         })?;
-        let layout = final_layout.expect("fragment shader and layout are paired");
+        let layout = primary_layout.expect("primary fragment shader and layout are paired");
         let initializer = surface_initializer_contract(
             db,
             top_mod,

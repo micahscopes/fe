@@ -2340,27 +2340,75 @@ fn raymarch_sketch_compiles_with_fe_owned_camera_and_bounded_shader() {
 #[test]
 fn qcga_pencil_de_compiles_as_a_fe_owned_iterative_fragment_surface() {
     let bundle = compile_actor_ingot("demos/sketches/qcga_pencil_de");
-    assert_browser_wgsl(&bundle.wgsl);
-    wasmparser::validate(&bundle.wasm).expect("QCGA pencil DE control Wasm should be valid");
-    assert_scheduled_typed_surface(&bundle);
-    assert!(
-        bundle.wgsl.contains("loop"),
-        "the DE view must retain its authored iterative march"
-    );
-    assert!(
-        bundle.wgsl.contains("break;"),
-        "completed DE rays must leave the generated shader loop instead of running a done-flag envelope"
-    );
-    assert!(
-        bundle.wgsl.len() < 190_000,
-        "the shared Fe QCGA DE view should remain under its initial 190 kB WGSL budget (got {})",
-        bundle.wgsl.len(),
-    );
+    assert_eq!(bundle.manifest.passes.len(), 2);
+    assert_eq!(bundle.pass_wgsl.len(), 2);
+    for shader in &bundle.pass_wgsl {
+        assert_browser_wgsl(&shader.source);
+    }
     let pass = bundle
         .manifest
         .passes
-        .first()
+        .iter()
+        .find(|pass| pass.source_entry == "distance_surface")
         .expect("one fullscreen DE pass");
+    let de_wgsl = &bundle
+        .pass_wgsl
+        .iter()
+        .find(|shader| shader.path == pass.shader)
+        .expect("fullscreen DE shader bytes")
+        .source;
+    let marker_pass = bundle
+        .manifest
+        .passes
+        .iter()
+        .find(|pass| pass.source_entry == "marker_fragment")
+        .expect("one authored marker overlay");
+    let marker_wgsl = &bundle
+        .pass_wgsl
+        .iter()
+        .find(|shader| shader.path == marker_pass.shader)
+        .expect("authored marker shader bytes")
+        .source;
+    wasmparser::validate(&bundle.wasm).expect("QCGA pencil DE control Wasm should be valid");
+    assert_scheduled_typed_surface(&bundle);
+    assert!(
+        de_wgsl.contains("loop"),
+        "the DE view must retain its authored iterative march"
+    );
+    assert!(
+        de_wgsl.contains("break;"),
+        "completed DE rays must leave the generated shader loop instead of running a done-flag envelope"
+    );
+    assert!(
+        de_wgsl.len() < 36_000,
+        "the marker-free Fe QCGA DE pass should remain under 36 kB WGSL (got {})",
+        de_wgsl.len(),
+    );
+    assert_eq!(marker_pass.draw_vertices, Some(54));
+    assert_eq!(
+        marker_pass.layout.vertex_entry.as_deref(),
+        Some("marker_vertices")
+    );
+    assert_eq!(
+        marker_pass.layout.fragment_entry.as_deref(),
+        Some("marker_fragment")
+    );
+    assert!(
+        marker_wgsl.len() < 20_000,
+        "the 54-vertex marker overlay should remain under 20 kB WGSL (got {})",
+        marker_wgsl.len(),
+    );
+    assert!(
+        de_wgsl.len() + marker_wgsl.len() < 55_000,
+        "the distance field plus typed marker overlay should remain compact (got {} + {})",
+        de_wgsl.len(),
+        marker_wgsl.len(),
+    );
+    let authored = include_str!("../../../demos/sketches/qcga_pencil_de/src/lib.fe");
+    assert!(
+        !authored.contains("selected_marker"),
+        "control-point projection must not return to the all-fragment distance pass",
+    );
     assert_eq!(pass.source_entry, "distance_surface");
     assert_eq!(pass.layout.bindings.len(), 1);
     assert_eq!(pass.layout.bindings[0].members.len(), 59);
@@ -2489,11 +2537,12 @@ fn qcga_pencil_de_compiles_as_a_fe_owned_iterative_fragment_surface() {
         "camera motion must not invent a picked control"
     );
     eprintln!(
-        "Fe QCGA DE receipt: {} authored view lines -> {} B browser-valid WGSL, {} B shared-state control Wasm",
+        "Fe QCGA DE receipt: {} authored view lines -> {} B DE + {} B marker browser-valid WGSL, {} B shared-state control Wasm",
         include_str!("../../../demos/sketches/qcga_pencil_de/src/lib.fe")
             .lines()
             .count(),
-        bundle.wgsl.len(),
+        de_wgsl.len(),
+        marker_wgsl.len(),
         bundle.wasm.len(),
     );
 }

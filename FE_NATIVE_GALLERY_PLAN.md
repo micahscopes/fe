@@ -933,6 +933,30 @@ Origin: honesty audit of Claude Code session
   hoisting, marker-pass separation, raw device/frame capability facts, and
   deletion of the temporary host ceiling remain the next mobile workload
   slice; actual GPU pixel execution retains the named no-adapter qualification.
+- The control-marker portion of that mobile workload is now removed from the
+  all-fragment DE path through a general Fe-authored composition mechanism,
+  not a QCGA runtime hook. A GPU actor may declare ordered fullscreen,
+  compute, and adjacent nominally typed vertex/fragment stages; the compiler
+  lowers each adjacent pair as one raster pass and retains the unique
+  fullscreen behavior as the page-facing artifact. The fixed runtime derives
+  target preservation solely from that Fe order: the first render pass clears
+  and subsequent render passes load the established color. No overlay flag,
+  demo name, or new JSON field was added. `qcga_pencil_de` now projects its
+  nine controls only for 54 small marker vertices instead of nine times in
+  every fragment: at the temporary 256-square ceiling this reduces modeled
+  projection evaluations from 589,824 to 54 per frame, while the independent
+  point-projection/pick oracle remains unchanged. The release graph contains a
+  32,109-byte browser-valid DE shader and a 17,798-byte browser-valid marker
+  shader; shared-state control Wasm is 61,234 bytes, 9,746 bytes below the
+  preceding checkpoint. Actor construction is 10/10, the fixed render runtime
+  is 19/19 with exact clear/load and draw-count evidence, the QCGA lifecycle
+  suite is 8/8, and the independent 500-field/seven-ray analytic oracle is
+  green for both full and mobile policies. A fresh optimized site verifies 14
+  Fe modules / 72 deployment files, and both real Chromium gallery/
+  SourceInspector and TodoMVC tapes pass against it. Actual marker pixels still
+  require the named external WebGPU-adapter run; camera/current-member uniform
+  hoisting, clipped march intervals, typed device/frame facts, and deletion of
+  the temporary host ceiling remain the next mobile workload slice.
 
 This ledger records achieved evidence, not a relaxation of the phases or the
 Definition of done below.

@@ -172,6 +172,45 @@ test("one authored raster pass takes the GPU pass-graph path", () => {
   );
 });
 
+test("ordered render passes clear once and preserve earlier Fe-authored color", () => {
+  const loadOps = [];
+  const draws = [];
+  const encoder = {
+    beginRenderPass(descriptor) {
+      loadOps.push(descriptor.colorAttachments[0].loadOp);
+      return {
+        setPipeline() {},
+        setBindGroup() {},
+        draw(count) { draws.push(count); },
+        end() {},
+      };
+    },
+    finish() { return {}; },
+  };
+  const device = {
+    createCommandEncoder() { return encoder; },
+    queue: { submit() {} },
+  };
+  const context = {
+    getCurrentTexture() {
+      return { createView() { return {}; } };
+    },
+  };
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._graph = true;
+  surface._gpu = {
+    device,
+    passRecords: [
+      { pass: { layout: { mode: "render" } }, pipeline: {}, bindGroup: null, inputs: [] },
+      { pass: { layout: { mode: "render" }, draw_vertices: 54 }, pipeline: {}, bindGroup: null, inputs: [] },
+    ],
+  };
+
+  surface._presentOn(context, []);
+  assert.deepEqual(loadOps, ["clear", "load"]);
+  assert.deepEqual(draws, [3, 54]);
+});
+
 test("authored raster varyings never become Fe actor or resource arguments", () => {
   const surface = Object.create(FeSurfaceElement.prototype);
   surface._builtins = [{ arg_index: 0 }];

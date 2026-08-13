@@ -61,6 +61,12 @@ pub struct WebGpuBackend {}
 pub struct GpuProgram<B> {}
 
 /// The per-pixel fragment stage role of an actor behavior.
+///
+/// GPU-stage behaviors execute in Fe declaration order. The first render stage
+/// establishes the presentation target; later render stages preserve its
+/// colour and update the pixels they cover. An adjacent `VertexStage` /
+/// `FragmentStage` pair is one authored raster pass, so a fullscreen field and
+/// a small geometric overlay compose without a host-side pass table.
 #[gpu_stage(fragment)]
 pub struct FragmentSurface {}
 

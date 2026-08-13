@@ -1139,6 +1139,7 @@ export class FeSurfaceElement extends HTMLElement {
       }
       const encoder = device.createCommandEncoder();
       let texture = null;
+      let rendered = false;
       for (const record of passRecords) {
         if (record.pass.layout.mode === "compute") {
           const compute = encoder.beginComputePass();
@@ -1154,7 +1155,12 @@ export class FeSurfaceElement extends HTMLElement {
             colorAttachments: [{
               view: texture.createView(),
               clearValue: { r: 0, g: 0, b: 0, a: 1 },
-              loadOp: "clear",
+              // Ordered Fe render stages compose onto one presentation target:
+              // the first establishes it, while later authored raster/fullscreen
+              // stages preserve prior color and update only their covered pixels.
+              // This rule is derived from pass order; no manifest flag or
+              // application-specific host branch chooses overlay behavior.
+              loadOp: rendered ? "load" : "clear",
               storeOp: "store",
             }],
           });
@@ -1162,6 +1168,7 @@ export class FeSurfaceElement extends HTMLElement {
           if (record.bindGroup) render.setBindGroup(0, record.bindGroup);
           render.draw(rasterDrawVertexCount(record.pass));
           render.end();
+          rendered = true;
         }
       }
       if (capture && !texture) {

@@ -239,6 +239,73 @@ fn authored_raster_roles_derive_one_nominal_typed_varying() {
 }
 
 #[test]
+fn fullscreen_and_authored_raster_form_one_ordered_fe_pass_graph() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_layered_raster");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "layered raster diagnostics:\n{diagnostics}"
+    );
+
+    let program = actor_gpu_program(&db, top_mod)
+        .expect("derive layered actor")
+        .expect("GPU actor");
+    assert_eq!(program.actor, "LayeredSurface");
+    assert_eq!(program.stages.len(), 3);
+    assert_eq!(program.stages[0].source_entry, "background");
+    assert_eq!(program.stages[0].kind, WebActorStageKind::Fragment);
+    assert!(matches!(
+        program.stages[1].kind,
+        WebActorStageKind::Vertex {
+            vertex_count: 6,
+            ..
+        }
+    ));
+    assert!(matches!(
+        program.stages[2].kind,
+        WebActorStageKind::RasterFragment { .. }
+    ));
+    assert_eq!(
+        actor_web_entry(&db, top_mod).unwrap(),
+        Some(("background".to_owned(), WebBundleMode::Render)),
+        "the fullscreen surface remains the page-facing entry; source order carries the overlay",
+    );
+
+    let bundle = WebBundle::compile(&db, top_mod, WebBuildOptions::render("background", None))
+        .expect("compile layered render graph");
+    assert_eq!(bundle.manifest.source_entry, "background");
+    assert_eq!(bundle.manifest.passes.len(), 2);
+    assert_eq!(bundle.pass_wgsl.len(), 2);
+    let base = &bundle.manifest.passes[0];
+    let overlay = &bundle.manifest.passes[1];
+    assert_eq!(base.source_entry, "background");
+    assert_eq!(bundle.manifest.artifacts.wgsl, base.shader);
+    assert_eq!(bundle.wgsl, bundle.pass_wgsl[0].source);
+    assert_eq!(base.draw_vertices, None);
+    assert_eq!(base.layout.fragment_entry.as_deref(), Some("fs_main"));
+    assert_eq!(overlay.source_entry, "overlay_fragment");
+    assert_eq!(overlay.draw_vertices, Some(6));
+    assert_eq!(
+        overlay.layout.vertex_entry.as_deref(),
+        Some("overlay_vertices")
+    );
+    assert_eq!(
+        overlay.layout.fragment_entry.as_deref(),
+        Some("overlay_fragment")
+    );
+    assert_eq!(
+        base.layout.bindings[0].members[0].name, overlay.layout.bindings[0].members[0].name,
+        "both passes derive the same Fe actor-state identity",
+    );
+    assert!(bundle.pass_wgsl[0].source.contains("@fragment"));
+    assert!(bundle.pass_wgsl[1].source.contains("@vertex"));
+    assert!(bundle.pass_wgsl[1].source.contains("@fragment"));
+}
+
+#[test]
 fn authored_raster_rejects_mismatched_nominal_payloads() {
     let mut db = DriverDataBase::default();
     let url = ingot_root("tests/fixtures/actor_raster_mismatch");

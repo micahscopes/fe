@@ -1,0 +1,51 @@
+//! A fullscreen Fe pass followed by a small authored raster overlay. Source
+//! order is the complete composition policy; no pass-name table or JSON blend
+//! flag accompanies this actor.
+
+use std::webgpu::{
+    ClipPosition,
+    FragmentStage,
+    FragmentSurface,
+    GpuProgram,
+    RasterVertex,
+    TriangleList,
+    VertexStage,
+    WebGpuBackend,
+}
+
+struct OverlayVarying { heat: f32 }
+impl Copy for OverlayVarying {}
+
+actor LayeredSurface uses (GpuProgram<WebGpuBackend>) {
+    tint: f32,
+
+    fn background(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
+        if px + py > 0 && self.tint >= 0.0 { -15720400 } else { 0 }
+    }
+
+    fn overlay_vertices(self, vertex_index: u32) -> RasterVertex<OverlayVarying>
+        uses (VertexStage<OverlayVarying, TriangleList<6>>)
+    {
+        let corner: u32 = vertex_index % 6
+        let mut x: f32 = -0.25
+        let mut y: f32 = -0.25
+        if corner == 1 { x = 0.25 }
+        if corner == 2 { y = 0.25 }
+        if corner == 3 { y = 0.25 }
+        if corner == 4 { x = 0.25 }
+        if corner == 5 {
+            x = 0.25
+            y = 0.25
+        }
+        RasterVertex {
+            position: ClipPosition { x: x, y: y, z: 0.0, w: 1.0 },
+            varying: OverlayVarying { heat: self.tint },
+        }
+    }
+
+    fn overlay_fragment(self, varying: OverlayVarying) -> u32
+        uses (FragmentStage<OverlayVarying>)
+    {
+        if varying.heat + self.tint > 1.0 { 4294901760 } else { 4278190335 }
+    }
+}
