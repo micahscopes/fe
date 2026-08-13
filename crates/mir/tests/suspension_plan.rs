@@ -65,6 +65,40 @@ pub fn effect_resumable(
 }
 "#;
 
+const BRANCHED_EFFECT_SOURCE: &str = r#"
+use core::pending::{Pending, Suspend, TaskOutcome}
+use std::host::Resumable
+use std::wasm::WasmBackend
+
+fn wait_on_either_branch(
+    _ pending: own Pending<WasmBackend, u32>,
+    _ choose_first: bool,
+) -> TaskOutcome<u32, u32>
+    uses (s: Suspend<WasmBackend, u32>)
+{
+    if choose_first {
+        s.suspend(pending)
+    } else {
+        s.suspend(pending)
+    }
+}
+
+pub fn branched_resumable(
+    _ pending: own Pending<WasmBackend, u32>,
+    _ choose_first: bool,
+    _ kept: u32,
+) -> u32 {
+    with (Suspend<WasmBackend, u32> = Resumable {}) {
+        let outcome = wait_on_either_branch(pending, choose_first)
+        match outcome {
+            TaskOutcome::Success(value) => value + kept
+            TaskOutcome::Failure(error) => error + kept
+            TaskOutcome::Cancelled => kept
+        }
+    }
+}
+"#;
+
 #[test]
 fn nominal_suspend_derives_state_pending_delivery_and_exact_live_values() {
     let mut db = DriverDataBase::default();
@@ -218,10 +252,13 @@ fn suspension_propagates_through_effect_provider_and_ordinary_helpers() {
         .find(|plan| name(plan) == "effect_resumable")
         .unwrap();
     let [point] = root.points.as_ref() else {
-        panic!("root should suspend at its ordinary helper call: {root:?}");
+        panic!("root should contain one flattened nominal suspension: {root:?}");
     };
-    assert!(matches!(point.cause, RuntimeSuspensionCause::Callee { .. }));
-    let root_body = root.body.body(&db);
+    assert!(
+        matches!(point.cause, RuntimeSuspensionCause::Effect { .. }),
+        "ordinary helpers and the selected effect provider must expand before liveness"
+    );
+    let root_body = &root.flattened_body;
     assert_eq!(
         point.live_values.as_ref(),
         [root_body.signature.params[1].local]
@@ -234,6 +271,93 @@ fn suspension_propagates_through_effect_provider_and_ordinary_helpers() {
             .live_values
             .contains(&root_body.signature.params[2].local)
     );
+
+    let machine = materialize_runtime_resumable_machine(&db, root).unwrap();
+    let view: &dyn fe_mir::MirDb = &db;
+    for segment in std::iter::once(&machine.entry).chain(machine.continuations.iter()) {
+        verify_runtime_body(&db, &view, &segment.body).unwrap_or_else(|error| {
+            panic!("flattened transitive segment failed MIR verification: {error:?}")
+        });
+        assert!(
+            !segment.body.blocks.iter().any(|block| {
+                block.stmts.iter().any(|statement| {
+                    matches!(
+                        statement,
+                        RStmt::Assign {
+                            expr: RExpr::Call { callee, .. },
+                            ..
+                        } if fe_mir::runtime_control_effect_kind(&db, *callee).is_some()
+                    )
+                })
+            }),
+            "the transitive machine must consume its provider's nominal suspension"
+        );
+    }
+}
+
+#[test]
+fn branched_provider_cfg_flattens_both_suspension_paths() {
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///branched_effect_suspension.fe").unwrap();
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(BRANCHED_EFFECT_SOURCE.to_owned()),
+    );
+    let file = db.workspace().get(&db, &url).unwrap();
+    let top_mod = db.top_mod(file);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "fixture diagnostics:\n{diagnostics}"
+    );
+
+    let package = build_wasm_runtime_package_for_entry(&db, top_mod, "branched_resumable").unwrap();
+    let plans = derive_runtime_resumable_plans(&db, package).unwrap();
+    let root = plans
+        .iter()
+        .find(|plan| {
+            package
+                .functions(&db)
+                .into_iter()
+                .find(|function| function.instance(&db) == plan.body)
+                .is_some_and(|function| {
+                    let RuntimeFunctionOwner::Semantic(semantic) = function.owner(&db) else {
+                        return false;
+                    };
+                    matches!(
+                        semantic.key(&db).owner(&db),
+                        BodyOwner::Func(func)
+                            if func.name(&db).to_opt().is_some_and(
+                                |name| name.data(&db) == "branched_resumable"
+                            )
+                    )
+                })
+        })
+        .expect("branched resumable root");
+    assert_eq!(root.points.len(), 2);
+    assert!(
+        root.points
+            .iter()
+            .all(|point| matches!(point.cause, RuntimeSuspensionCause::Effect { .. })),
+        "both branch-local provider calls must become direct nominal leaves"
+    );
+    let kept = root.flattened_body.signature.params[2].local;
+    assert!(
+        root.points
+            .iter()
+            .all(|point| point.live_values.contains(&kept)),
+        "the caller's used value must survive either branch"
+    );
+
+    let machine = materialize_runtime_resumable_machine(&db, root).unwrap();
+    assert_eq!(machine.continuations.len(), 2);
+    let view: &dyn fe_mir::MirDb = &db;
+    for segment in std::iter::once(&machine.entry).chain(machine.continuations.iter()) {
+        verify_runtime_body(&db, &view, &segment.body).unwrap_or_else(|error| {
+            panic!("branched materialized segment failed MIR verification: {error:?}")
+        });
+    }
 }
 
 #[test]

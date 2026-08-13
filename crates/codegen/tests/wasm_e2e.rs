@@ -174,8 +174,8 @@ pub fn task(
 }
 
 #[test]
-fn transitive_suspend_stack_fails_at_linked_frame_materialization() {
-    let error = compile_to_wasm_err(
+fn transitive_effect_provider_stack_flattens_to_exact_executable_frame() {
+    let wasm = compile_to_wasm(
         "transitive_resumable_stack.fe",
         r#"
 use core::pending::{Pending, Suspend, TaskOutcome}
@@ -188,9 +188,88 @@ fn through_effect(_ pending: own Pending<WasmBackend, u32>) -> TaskOutcome<u32, 
     s.suspend(pending)
 }
 
-pub fn task(_ pending: own Pending<WasmBackend, u32>) -> u32 {
+pub fn task(
+    _ pending: own Pending<WasmBackend, u32>,
+    _ kept: u32,
+    _ dead: u32,
+) -> u32 {
     with (Suspend<WasmBackend, u32> = Resumable {}) {
         let outcome = through_effect(pending)
+        match outcome {
+            TaskOutcome::Success(value) => value + kept
+            TaskOutcome::Failure(error) => error + kept
+            TaskOutcome::Cancelled => kept
+        }
+    }
+}
+"#,
+    );
+    assert!(
+        func_imports(&wasm).is_empty(),
+        "the selected Fe provider must flatten to the nominal suspension leaf, not an import"
+    );
+    let mut continuation_exports = func_exports(&wasm)
+        .into_iter()
+        .filter(|name| name.starts_with("__fe_task_"))
+        .collect::<Vec<_>>();
+    continuation_exports.sort();
+    assert_eq!(
+        continuation_exports,
+        ["__fe_task_resume_task_1", "__fe_task_start_task"],
+        "private helper/provider continuations must not leak into the public Wasm ABI"
+    );
+    let (mut store, instance) = instantiate(&wasm);
+    let start = instance
+        .get_typed_func::<(i32, i32, i32), (i32, i32, i32, i32)>(&mut store, "__fe_task_start_task")
+        .expect("compiler-derived transitive start export");
+    let resume = instance
+        .get_typed_func::<(i32, i32, i32, i32), (i32, i32, i32, i32)>(
+            &mut store,
+            "__fe_task_resume_task_1",
+        )
+        .expect("compiler-derived transitive resume export");
+
+    assert_eq!(
+        start.call(&mut store, (77, 5, 999)).unwrap(),
+        (1, 0, 77, 5),
+        "the provider stack disappears while pending + the one live caller value survive"
+    );
+    assert_eq!(
+        resume.call(&mut store, (5, 1, 0, 9)).unwrap(),
+        (0, 14, 0, 0)
+    );
+    assert_eq!(resume.call(&mut store, (5, 0, 3, 0)).unwrap(), (0, 8, 0, 0));
+    assert!(
+        resume.call(&mut store, (5, 3, 0, 0)).is_err(),
+        "a forged delivery tag must still trap after provider flattening"
+    );
+}
+
+#[test]
+fn recursive_resumable_stack_retains_an_explicit_linked_frame_boundary() {
+    let error = compile_to_wasm_err(
+        "recursive_resumable_stack.fe",
+        r#"
+use core::pending::{Pending, Suspend, TaskOutcome}
+use std::host::Resumable
+use std::wasm::WasmBackend
+
+fn recursive_wait(
+    _ pending: own Pending<WasmBackend, u32>,
+    _ depth: u32,
+) -> TaskOutcome<u32, u32>
+    uses (s: Suspend<WasmBackend, u32>)
+{
+    if depth == 0 {
+        s.suspend(pending)
+    } else {
+        recursive_wait(pending, depth - 1)
+    }
+}
+
+pub fn task(_ pending: own Pending<WasmBackend, u32>, _ depth: u32) -> u32 {
+    with (Suspend<WasmBackend, u32> = Resumable {}) {
+        let outcome = recursive_wait(pending, depth)
         match outcome {
             TaskOutcome::Success(value) => value
             TaskOutcome::Failure(error) => error
@@ -204,7 +283,7 @@ pub fn task(_ pending: own Pending<WasmBackend, u32>) -> u32 {
         error.contains("resumable stack materialization is incomplete")
             && (error.contains("CalleeFrameRequired")
                 || error.contains("SuspendingTailFrameRequired")),
-        "a transitive effect stack must fail at its explicit linked-frame boundary, never degrade to an import: {error}"
+        "recursive suspension must retain an explicit linked-frame boundary: {error}"
     );
 }
 
@@ -373,6 +452,22 @@ fn func_imports(bytes: &[u8]) -> Vec<(String, String)> {
         }
     }
     imports
+}
+
+fn func_exports(bytes: &[u8]) -> Vec<String> {
+    use wasmparser::{ExternalKind, Payload};
+    let mut exports = Vec::new();
+    for payload in wasmparser::Parser::new(0).parse_all(bytes) {
+        if let Payload::ExportSection(reader) = payload.expect("valid wasm payload") {
+            for export in reader {
+                let export = export.expect("valid export entry");
+                if export.kind == ExternalKind::Func {
+                    exports.push(export.name.to_owned());
+                }
+            }
+        }
+    }
+    exports
 }
 
 fn wasm_float_shape(bytes: &[u8]) -> (usize, usize, usize, usize, usize) {

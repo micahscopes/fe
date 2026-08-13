@@ -2620,6 +2620,7 @@ where
 
 struct PreparedResumableContinuation<'db> {
     symbol: String,
+    linkage: RuntimeLinkage,
     body: RuntimeBody<'db>,
     func_ref: Option<FuncRef>,
 }
@@ -2675,6 +2676,17 @@ where
         })?;
         let mut resumable_continuations = Vec::new();
         for plan in &plans {
+            let continuation_linkage = package
+                .functions(db)
+                .into_iter()
+                .find(|function| function.instance(db) == plan.body)
+                .map(|function| function.linkage(db))
+                .ok_or_else(|| {
+                    LowerError::Internal(format!(
+                        "resumable plan `{}` has no runtime function declaration",
+                        mir::runtime_instance_symbol_key(db, plan.body)
+                    ))
+                })?;
             let machine =
                 mir::materialize_runtime_resumable_machine(db, plan).map_err(|error| {
                     LowerError::Unsupported(format!(
@@ -2703,6 +2715,7 @@ where
                 normalize_portable_body(db, plan.body, &mut body);
                 resumable_continuations.push(PreparedResumableContinuation {
                     symbol,
+                    linkage: continuation_linkage.clone(),
                     body,
                     func_ref: None,
                 });
@@ -2952,8 +2965,10 @@ where
         }
         for index in 0..self.resumable_continuations.len() {
             let symbol = self.resumable_continuations[index].symbol.clone();
+            let linkage = self.resumable_continuations[index].linkage.clone();
             let body = self.resumable_continuations[index].body.clone();
-            let signature = self.lower_body_signature(&symbol, Linkage::Public, &body)?;
+            let signature =
+                self.lower_body_signature(&symbol, linkage_for_runtime(linkage), &body)?;
             let func_ref = self.builder.declare_function(signature).map_err(|err| {
                 LowerError::Internal(format!(
                     "failed to declare Wasm continuation `{symbol}`: {err}"

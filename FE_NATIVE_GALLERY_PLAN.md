@@ -777,10 +777,16 @@ Origin: honesty audit of Claude Code session
   receives those exact locals followed by its typed `TaskOutcome` delivery.
   Wasm emits compiler-named start/resume exports with no `fe:control` import;
   independent Wasmtime gates execute success, failure, cancellation, forged-tag
-  trapping, and a two-site chain whose inactive variant lanes remain zero.
-  Linked caller/callee frames, host-owned frame persistence, and connection to
-  the generation-safe executor remain the active materialization slice; a real
-  Fe effect-provider chain fails explicitly at that linked-frame boundary.
+  trapping, and a two-site chain whose inactive variant lanes remain zero. A
+  general target-neutral CFG transform now expands acyclic resumable calls
+  through ordinary helpers and the selected Fe effect-provider method before
+  liveness. The executable transitive gate proves pending + one live caller
+  value survive, a dead sibling does not, and private helper continuations do
+  not leak into the public Wasm ABI; a separate branched-provider gate verifies
+  both cloned CFG paths. Resumable cycle membership is computed before
+  expansion so recursive stacks fail explicitly instead of unrolling forever.
+  Host-owned frame persistence, executor connection, and true recursive linked
+  frames remain the active materialization slice.
 - A mobile-safety follow-up keeps the sequential policy in the resident Fe
   shell but changes its fixed opcode-14 realization from cold-to-live to
   poster-only loading. Poster capture and off-viewport suspension now destroy
