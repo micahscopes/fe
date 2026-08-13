@@ -102,10 +102,11 @@ struct EvalEnv<'db> {
     const_args: Vec<(IdentId<'db>, BaseConstValue<'db>)>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct TypeBinding<'db> {
     ty: TypeId<'db>,
     top_mod: TopLevelMod<'db>,
+    env: Option<Box<EvalEnv<'db>>>,
 }
 
 impl<'db> EvalEnv<'db> {
@@ -113,7 +114,7 @@ impl<'db> EvalEnv<'db> {
         self.type_args
             .iter()
             .rev()
-            .find_map(|(bound, value)| (*bound == name).then_some(*value))
+            .find_map(|(bound, value)| (*bound == name).then(|| value.clone()))
     }
 
     fn const_arg(&self, name: IdentId<'db>) -> Option<BaseConstValue<'db>> {
@@ -159,21 +160,58 @@ impl<'db> Evaluator<'db> {
             && let Some(name) = path.ident(self.db).to_opt()
             && let Some(binding) = env.and_then(|env| env.type_arg(name))
         {
-            return self.eval_ty(binding.ty, binding.top_mod, None);
+            return self.eval_ty(binding.ty, binding.top_mod, binding.env.as_deref());
         }
 
         let item =
             resolve_base_item(self.db, top_mod, *path).ok_or(GroundTypePlanError::Unsupported)?;
         match item {
             ItemKind::TypeAlias(alias) => {
-                if !path.generic_args(self.db).is_empty(self.db) {
+                self.unfolds += 1;
+                if self.unfolds > PLAN_UNFOLD_LIMIT {
+                    return Err(GroundTypePlanError::UnfoldLimit);
+                }
+                let params = alias.generic_params(self.db).data(self.db);
+                let args = path.generic_args(self.db).data(self.db);
+                if params.len() != args.len() {
                     return Err(GroundTypePlanError::Unsupported);
+                }
+                let mut alias_env = EvalEnv {
+                    type_args: Vec::new(),
+                    const_args: Vec::new(),
+                };
+                for (param, arg) in params.iter().zip(args) {
+                    let name = param
+                        .name()
+                        .to_opt()
+                        .ok_or(GroundTypePlanError::Unsupported)?;
+                    match (param, arg) {
+                        (GenericParam::Type(_), GenericArg::Type(arg)) => {
+                            let ty = arg.ty.to_opt().ok_or(GroundTypePlanError::Unsupported)?;
+                            alias_env.type_args.push((
+                                name,
+                                TypeBinding {
+                                    ty,
+                                    top_mod,
+                                    env: env.cloned().map(Box::new),
+                                },
+                            ));
+                        }
+                        (GenericParam::Const(param), GenericArg::Const(arg)) => {
+                            let kind =
+                                super::base_const_eval::raw_uint_kind(self.db, param.ty.to_opt())
+                                    .ok_or(GroundTypePlanError::Unsupported)?;
+                            let value = self.eval_const_arg(arg.value, top_mod, env, kind)?;
+                            alias_env.const_args.push((name, value));
+                        }
+                        _ => return Err(GroundTypePlanError::Unsupported),
+                    }
                 }
                 let target = alias
                     .type_ref(self.db)
                     .to_opt()
                     .ok_or(GroundTypePlanError::Unsupported)?;
-                self.eval_ty(target, alias.top_mod(self.db), env)
+                self.eval_ty(target, alias.top_mod(self.db), Some(&alias_env))
             }
             ItemKind::TypeFn(def) => self.eval_type_fn(def, *path, top_mod, env),
             ItemKind::Struct(_) | ItemKind::Enum(_) => {
@@ -260,6 +298,7 @@ impl<'db> Evaluator<'db> {
                     TypeBinding {
                         ty: arg.ty.to_opt().ok_or(GroundTypePlanError::Unsupported)?,
                         top_mod: call_top_mod,
+                        env: parent_env.cloned().map(Box::new),
                     },
                 )),
                 (GenericParam::Const(param), GenericArg::Const(arg)) => {

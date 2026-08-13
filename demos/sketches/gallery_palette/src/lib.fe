@@ -1,0 +1,44 @@
+//! The shared colour vocabulary for Fe gallery sketches.
+//!
+//! These are the original Desargues construction colours, promoted from seven
+//! unrelated triples into named Fe values. Renderers remain free to mix or
+//! scale them for lighting, but they do not invent a second palette. The
+//! Mandelbrot capstones intentionally retain their established colouring.
+
+use core::marker::Copy
+
+pub struct Rgb {
+    pub red: f32,
+    pub green: f32,
+    pub blue: f32,
+}
+
+impl Copy for Rgb {}
+
+pub const fn midnight() -> Rgb {
+    Rgb { red: 0.05, green: 0.06, blue: 0.09 }
+}
+
+pub const fn guide() -> Rgb {
+    Rgb { red: 0.16, green: 0.16, blue: 0.20 }
+}
+
+pub const fn electric_blue() -> Rgb {
+    Rgb { red: 0.20, green: 0.42, blue: 0.95 }
+}
+
+pub const fn spring_green() -> Rgb {
+    Rgb { red: 0.30, green: 0.90, blue: 0.42 }
+}
+
+pub const fn theorem_gold() -> Rgb {
+    Rgb { red: 0.98, green: 0.80, blue: 0.20 }
+}
+
+pub const fn evidence_gold() -> Rgb {
+    Rgb { red: 1.0, green: 0.82, blue: 0.15 }
+}
+
+pub const fn clean_white() -> Rgb {
+    Rgb { red: 0.90, green: 0.90, blue: 0.90 }
+}

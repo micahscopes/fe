@@ -1,21 +1,23 @@
-//! Static geometric-algebra expressions and conservative support analysis.
+//! Static geometric-algebra expressions compiled into ordinary Fe arithmetic.
 //!
-//! This is the first reusable layer of the single-invocation GA compiler. A
-//! ground expression type is ordinary Fe data for CTFE/FCO: operators remain
-//! nominal, operand support is carried by leaf types, and `GaSupport<M>`
-//! computes possible output blades before any runtime code exists.
+//! A ground expression is Fe type data: nominal operator constructors form the
+//! tree, nominal coefficient records identify runtime leaves, a metric type
+//! states the bilinear form, and a policy states which numerical rewrites are
+//! legal. CTFE/FCO consumes that program before runtime; emitted Wasm/WGSL has
+//! scalar arithmetic, not an AST interpreter, support mask, or blade loop.
 //!
-//! Support is deliberately conservative. It removes structural zeros but does
-//! not claim coefficient cancellation. Exact term normalization, numeric
-//! policy, and FCO emission are later layers described in
-//! `docs/mb2/GA_SINGLE_INVOCATION_COMPILER.md`.
+//! Two honest executable surfaces coexist. `CompileGaF32` accepts arbitrary
+//! finite compositions of the published whole-multivector operators under an
+//! orthogonal metric, currently bounded to five generators. The separately
+//! optimized `CompileVectorScalarF32` accepts one named vector scalar product
+//! under high-dimensional sparse symmetric, reflected-basis, or named-matrix
+//! metrics. General off-diagonal products of arbitrary multivectors remain
+//! outside the current contract; they are never approximated as diagonal.
 //!
-//! Conservative whole-multivector `GaSupport` is currently bounded to
-//! diagonal/orthogonal geometry with at most five generators, matching
-//! `sparse_clifford::BladeSet`. A separate configured provider below handles a
-//! high-dimensional, sparse symmetric metric for the explicitly narrower
-//! vector scalar-product contract. General off-diagonal Clifford products are
-//! not approximated by pretending the diagonal support rule applies.
+//! `GaSupport<M>` remains a conservative structural interpretation: it removes
+//! impossible blades but does not infer cancellation between runtime values.
+//! Exact planning and policy-governed FCO emission are separate layers, as
+//! detailed in `docs/mb2/GA_SINGLE_INVOCATION_COMPILER.md`.
 
 use sparse_clifford::{
     BladeSet, blade_grade, blade_set, support_capacity_mask, support_dimension_valid,
@@ -37,6 +39,35 @@ pub struct SignedOrthogonalMetric<
     const NONZERO_SQUARES: usize,
     const NEGATIVE_SQUARES: usize,
 > {}
+
+/// Unit diagonal basis descriptors for a reflected metric.
+pub struct Positive {}
+pub struct Negative {}
+pub struct Degenerate {}
+
+/// Null basis descriptors. In a [`BasisMetric`], `Null<Pair>` pairs with the
+/// unique `Prime<Pair>` carrying the same nominal `Pair` type, independent of
+/// field order, with symmetric coefficient -1. Every pair identity must occur
+/// exactly once on each side; an intentionally unpaired null generator uses
+/// `Degenerate`. Thus a conformal basis is written directly as named fields,
+/// without author-maintained generator numbers or pairing masks.
+pub struct Null<Pair> {}
+pub struct Prime<Pair> {}
+
+/// Derive a symmetric metric from one named basis record. Each field's type is
+/// `Positive`, `Negative`, `Degenerate`, `Null<Pair>`, or `Prime<Pair>`;
+/// declaration order is basis order while null pairing is nominal.
+pub struct BasisMetric<Basis> {}
+
+/// Derive an arbitrary sparse symmetric matrix from named records. `Matrix`
+/// contains row records named after `Basis` fields; each row contains nonzero
+/// cells, also named after basis fields. Cells use the coefficient descriptors
+/// below. Author each unordered entry once in the canonical upper triangle
+/// (row generator no later than column generator).
+pub struct SymmetricMatrixMetric<Basis, Matrix> {}
+pub struct BasisVector {}
+pub struct PositiveMagnitude<const Magnitude: usize> {}
+pub struct NegativeMagnitude<const Magnitude: usize> {}
 
 pub trait StaticDiagonalMetric {
     const DIMENSION: u32
@@ -62,6 +93,11 @@ pub struct Input<const Slot: usize, const Mask: u32> {}
 /// 15-generator vectors.
 pub struct VectorInput<Identity, const GeneratorSupport: usize> {}
 
+/// A named sparse grade-1 input. The coefficient record is its nominal leaf
+/// identity; its field names are aligned with the selected metric's named
+/// basis by FCO, deriving support and runtime packing without a numeric mask.
+pub struct Vector<Coefficients> {}
+
 /// A sparse whole-multivector leaf for the structural expression compiler.
 /// `Coefficients` is both nominal leaf identity and its runtime coefficient
 /// record. `BladeSupport` is a bitset over basis-blade masks; the record packs
@@ -80,6 +116,14 @@ pub struct Grade<A, const K: u32> {}
 pub struct Reverse<A> {}
 pub struct PoincareDual<A> {}
 pub struct Regressive<A, B> {}
+
+/// Mathematical spellings for the three most common binary expression nodes.
+/// Fe does not yet overload `^`, `&`, or `·`; these aliases keep a type-level
+/// expression close to the algebra without adding a parser/compiler special
+/// case or changing the underlying nominal nodes.
+pub type Wedge<A, B> = Outer<A, B>
+pub type Vee<A, B> = Regressive<A, B>
+pub type Dot<A, B> = ScalarProduct<A, B>
 
 /// Preserve the authored expression tree's floating-point evaluation order.
 /// Pure subexpressions may be shared, but reassociation and coefficient
@@ -212,11 +256,6 @@ const fn reverse_negative(_ blade: usize) -> bool {
     }
 }
 
-struct GaF32Scalar {}
-impl GaF32Scalar {
-    fn zero() -> f32 { 0.0 }
-}
-
 /// A compact result inferred from a finite GA expression. The associated
 /// tuple contains only statically supported output blades, in ascending blade
 /// order. No output record or lane list is authored beside the expression.
@@ -242,12 +281,12 @@ impl<Program> Derive<EvaluateGaF32> for CompileGaF32<Program> {
         )
     {
         let operands = builder.arg_ref("operands")
-        let zero = builder.static_call(builder.ty<GaF32Scalar>(), "zero")
+        let zero = builder.float(0.0)
 
         // Reflect each runtime leaf once. A descriptor contains its nominal
-        // coefficient type and shared loads for every declared coefficient.
-        // Repeated uses of the same leaf therefore reuse the same generated
-        // roots without author-assigned slots.
+        // coefficient type, nested base, fields, and declaration-order shared
+        // loads. Named vectors can instead align those fields to a reflected
+        // basis below; no author-assigned slots enter either path.
         let carriers = 0..0
         for carrier_field in reflect.fields() {
             let coefficient_fields = carrier_field.ty().fields()
@@ -260,7 +299,11 @@ impl<Program> Derive<EvaluateGaF32> for CompileGaF32<Program> {
                     ))
                 }
                 carriers = carriers.append(
-                    (0..0).append(carrier_field.ty()).append(loads),
+                    (0..0)
+                        .append(carrier_field.ty())
+                        .append(base)
+                        .append(coefficient_fields)
+                        .append(loads),
                 )
             }
         }
@@ -281,6 +324,7 @@ impl<Program> Derive<EvaluateGaF32> for CompileGaF32<Program> {
         let negative_squares: usize = 0
         let metric_valid: usize = 0
         let strict: usize = 0
+        let basis_fields = 0..0
         if program_types.len() == 3 {
             let metric = program_types.at(1)
             if builder.same_ty(
@@ -301,6 +345,39 @@ impl<Program> Derive<EvaluateGaF32> for CompileGaF32<Program> {
                         && negative_squares < generator_limit
                         && (negative_squares & nonzero_squares)
                             == negative_squares
+                    {
+                        metric_valid = 1
+                    }
+                }
+            }
+            if builder.same_ty(metric.constructor(), builder.ty<BasisMetric>()) {
+                let metric_args = 0..0
+                for arg in metric.generic_args() {
+                    if arg.is_type() { metric_args = metric_args.append(arg.ty()) }
+                }
+                if metric_args.len() == 1 {
+                    basis_fields = metric_args.at(0).fields()
+                    dimension = basis_fields.len()
+                    let recognized: usize = 0
+                    let generator: usize = 0
+                    for basis_field in basis_fields {
+                        let descriptor = basis_field.ty().constructor()
+                        if builder.same_ty(descriptor, builder.ty<Positive>()) {
+                            nonzero_squares = nonzero_squares | (1 << generator)
+                            recognized = recognized + 1
+                        }
+                        if builder.same_ty(descriptor, builder.ty<Negative>()) {
+                            nonzero_squares = nonzero_squares | (1 << generator)
+                            negative_squares = negative_squares | (1 << generator)
+                            recognized = recognized + 1
+                        }
+                        if builder.same_ty(descriptor, builder.ty<Degenerate>()) {
+                            recognized = recognized + 1
+                        }
+                        generator = generator + 1
+                    }
+                    if dimension > 0 && dimension < 6
+                        && recognized == dimension
                     {
                         metric_valid = 1
                     }
@@ -351,7 +428,7 @@ impl<Program> Derive<EvaluateGaF32> for CompileGaF32<Program> {
                             type_args.at(0).constructor(), carrier.at(0),
                         ) {
                             matches = matches + 1
-                            matched_loads = carrier.at(1)
+                            matched_loads = carrier.at(3)
                         }
                     }
                     if matches == 1 && width > 0
@@ -363,6 +440,55 @@ impl<Program> Derive<EvaluateGaF32> for CompileGaF32<Program> {
                             let component = zero
                             if finite_support_has(support, blade) {
                                 component = matched_loads.at(
+                                    finite_support_rank(support, blade),
+                                )
+                            }
+                            value = value.append(component)
+                        }
+                        result = (0..0).append(support).append(value)
+                    }
+                }
+
+                if builder.same_ty(node.constructor(), builder.ty<Vector>())
+                    && type_args.len() == 1 && const_args.len() == 0
+                    && basis_fields.len() == dimension
+                {
+                    let support: usize = 0
+                    let matches: usize = 0
+                    let matched_base = operands
+                    let matched_fields = 0..0
+                    for carrier in carriers {
+                        if builder.same_ty(
+                            type_args.at(0).constructor(), carrier.at(0),
+                        ) {
+                            matches = matches + 1
+                            matched_base = carrier.at(1)
+                            matched_fields = carrier.at(2)
+                        }
+                    }
+                    let ordered_loads = 0..0
+                    let generator: usize = 0
+                    for basis_field in basis_fields {
+                        for coefficient_field in matched_fields {
+                            if coefficient_field.same_name(basis_field) {
+                                support = support | (1 << (1 << generator))
+                                ordered_loads = ordered_loads.append(builder.share(
+                                    builder.field_get(
+                                        matched_base, coefficient_field,
+                                    ),
+                                ))
+                            }
+                        }
+                        generator = generator + 1
+                    }
+                    if matches == 1 && ordered_loads.len() > 0
+                        && ordered_loads.len() == matched_fields.len()
+                    {
+                        let value = 0..0
+                        for blade in 0..blade_count {
+                            let component = zero
+                            if finite_support_has(support, blade) {
+                                component = ordered_loads.at(
                                     finite_support_rank(support, blade),
                                 )
                             }
@@ -731,10 +857,11 @@ const fn vector_support_width(_ support: usize, _ dimension: usize) -> usize {
     width
 }
 
-/// Generated scalar result of a sparse symmetric-metric product between two
-/// packed `VectorInput`s. The configured provider carries the static
-/// `GaProgram`; the target record contains one field per nominal leaf identity,
-/// whose nested coefficient record is packed in ascending generator order.
+/// Generated scalar result of a symmetric-metric product between two sparse
+/// vectors. The configured provider carries the static `GaProgram`; the target
+/// record contains one field per nominal coefficient-record identity. Named
+/// `Vector` leaves align coefficients to a named basis by reflected field name;
+/// legacy `VectorInput` leaves retain explicit support masks.
 pub trait EvaluateVectorScalarF32 {
     fn scalar(_ operands: Self) -> f32
 }
@@ -745,6 +872,13 @@ pub trait EvaluateVectorScalarF32 {
 /// narrow: two distinct nominal vector leaves, `ScalarProduct` at the root,
 /// and `AlgebraicBalanced`'s deterministic four-term chunk reduction.
 pub struct CompileVectorScalarF32<Program> {}
+
+/// Concise façade for the overwhelmingly common named-vector dot product.
+/// It expands to the same ordinary expression program and the same provider;
+/// no special lowering path or hidden runtime object is introduced.
+pub type CompileNamedVectorDotF32<Left, Right, Metric> = CompileVectorScalarF32<
+    GaProgram<Dot<Vector<Left>, Vector<Right>>, Metric, AlgebraicBalanced>
+>
 
 impl<Program> Derive<EvaluateVectorScalarF32>
     for CompileVectorScalarF32<Program>
@@ -774,10 +908,8 @@ impl<Program> Derive<EvaluateVectorScalarF32>
                 expression.constructor(), builder.ty<ScalarProduct>(),
             ) {
                 // This provider's deliberately narrow grammar is a scalar
-                // product whose two direct children are vector leaves. Read
-                // those edges directly: a normalized postorder also contains
-                // each leaf's nominal `Identity` argument, which is data
-                // inside the leaf rather than another GA expression node.
+                // product whose two direct children are vector leaves. A
+                // descriptor is [identity, explicit_support, named_support].
                 for expression_arg in expression.generic_args() {
                     if expression_arg.is_type() {
                         let node = expression_arg.ty()
@@ -802,7 +934,28 @@ impl<Program> Derive<EvaluateVectorScalarF32>
                             }
                             if type_count == 1 && const_count == 1 {
                                 descriptors = descriptors.append(
-                                    (0..0).append(identity).append(support),
+                                    (0..0)
+                                        .append(identity)
+                                        .append(support)
+                                        .append(0),
+                                )
+                            } else {
+                                descriptors = descriptors.append(0)
+                            }
+                        } else if builder.same_ty(
+                            node.constructor(), builder.ty<Vector>(),
+                        ) {
+                            let identity = node
+                            let type_count: usize = 0
+                            for arg in node.generic_args() {
+                                if arg.is_type() {
+                                    if type_count == 0 { identity = arg.ty() }
+                                    type_count = type_count + 1
+                                }
+                            }
+                            if type_count == 1 {
+                                descriptors = descriptors.append(
+                                    (0..0).append(identity).append(0).append(1),
                                 )
                             } else {
                                 descriptors = descriptors.append(0)
@@ -818,11 +971,12 @@ impl<Program> Derive<EvaluateVectorScalarF32>
         if descriptors.len() == 2 {
             let left = descriptors.at(0)
             let right = descriptors.at(1)
-            if left.len() == 2 && right.len() == 2 {
-                let left_support = left.at(1)
-                let right_support = right.at(1)
+            if left.len() == 3 && right.len() == 3 {
                 let metric_nodes = program_types.at(1).normalized_preorder_types()
                 let dimension: usize = 0
+                let basis_fields = 0..0
+                let metric_entries = 0..0
+                let metric_valid: usize = 0
                 for metric_node in metric_nodes {
                     if builder.same_ty(
                         metric_node.constructor(),
@@ -834,6 +988,254 @@ impl<Program> Derive<EvaluateVectorScalarF32>
                             }
                         }
                     }
+                    if builder.same_ty(
+                        metric_node.constructor(), builder.ty<BasisMetric>(),
+                    ) {
+                        let metric_args = 0..0
+                        for metric_arg in metric_node.generic_args() {
+                            if metric_arg.is_type() {
+                                metric_args = metric_args.append(metric_arg.ty())
+                            }
+                        }
+                        if metric_args.len() == 1 {
+                            basis_fields = metric_args.at(0).fields()
+                            dimension = basis_fields.len()
+                            let generator: usize = 0
+                            for basis_field in basis_fields {
+                                let descriptor = basis_field.ty()
+                                if builder.same_ty(
+                                    descriptor.constructor(), builder.ty<Positive>(),
+                                ) {
+                                    metric_entries = metric_entries.append(
+                                        (0..0).append(generator).append(generator)
+                                            .append(1).append(0),
+                                    )
+                                }
+                                if builder.same_ty(
+                                    descriptor.constructor(), builder.ty<Negative>(),
+                                ) {
+                                    metric_entries = metric_entries.append(
+                                        (0..0).append(generator).append(generator)
+                                            .append(1).append(1),
+                                    )
+                                }
+                                generator = generator + 1
+                            }
+                            let left_generator: usize = 0
+                            for left_basis in basis_fields {
+                                if builder.same_ty(
+                                    left_basis.ty().constructor(), builder.ty<Null>(),
+                                ) {
+                                    let left_pair = left_basis.ty()
+                                    for left_arg in left_basis.ty().generic_args() {
+                                        if left_arg.is_type() {
+                                            left_pair = left_arg.ty()
+                                        }
+                                    }
+                                    let right_generator: usize = 0
+                                    for right_basis in basis_fields {
+                                        if builder.same_ty(
+                                            right_basis.ty().constructor(),
+                                            builder.ty<Prime>(),
+                                        ) {
+                                            let right_pair = right_basis.ty()
+                                            for right_arg in right_basis.ty().generic_args() {
+                                                if right_arg.is_type() {
+                                                    right_pair = right_arg.ty()
+                                                }
+                                            }
+                                            if builder.same_ty(left_pair, right_pair) {
+                                                metric_entries = metric_entries.append(
+                                                    (0..0)
+                                                        .append(left_generator)
+                                                        .append(right_generator)
+                                                        .append(1)
+                                                        .append(1),
+                                                )
+                                            }
+                                        }
+                                        right_generator = right_generator + 1
+                                    }
+                                }
+                                left_generator = left_generator + 1
+                            }
+                            let recognized: usize = 0
+                            for basis_field in basis_fields {
+                                let descriptor = basis_field.ty().constructor()
+                                if builder.same_ty(descriptor, builder.ty<Positive>())
+                                    || builder.same_ty(descriptor, builder.ty<Negative>())
+                                    || builder.same_ty(descriptor, builder.ty<Degenerate>())
+                                {
+                                    recognized = recognized + 1
+                                }
+                                if builder.same_ty(descriptor, builder.ty<Null>()) {
+                                    let pair = basis_field.ty()
+                                    for pair_arg in basis_field.ty().generic_args() {
+                                        if pair_arg.is_type() { pair = pair_arg.ty() }
+                                    }
+                                    let matches: usize = 0
+                                    for candidate in basis_fields {
+                                        if builder.same_ty(
+                                            candidate.ty().constructor(), builder.ty<Prime>(),
+                                        ) {
+                                            let candidate_pair = candidate.ty()
+                                            for candidate_arg in candidate.ty().generic_args() {
+                                                if candidate_arg.is_type() {
+                                                    candidate_pair = candidate_arg.ty()
+                                                }
+                                            }
+                                            if builder.same_ty(pair, candidate_pair) {
+                                                matches = matches + 1
+                                            }
+                                        }
+                                    }
+                                    if matches == 1 { recognized = recognized + 1 }
+                                }
+                                if builder.same_ty(descriptor, builder.ty<Prime>()) {
+                                    let pair = basis_field.ty()
+                                    for pair_arg in basis_field.ty().generic_args() {
+                                        if pair_arg.is_type() { pair = pair_arg.ty() }
+                                    }
+                                    let matches: usize = 0
+                                    for candidate in basis_fields {
+                                        if builder.same_ty(
+                                            candidate.ty().constructor(), builder.ty<Null>(),
+                                        ) {
+                                            let candidate_pair = candidate.ty()
+                                            for candidate_arg in candidate.ty().generic_args() {
+                                                if candidate_arg.is_type() {
+                                                    candidate_pair = candidate_arg.ty()
+                                                }
+                                            }
+                                            if builder.same_ty(pair, candidate_pair) {
+                                                matches = matches + 1
+                                            }
+                                        }
+                                    }
+                                    if matches == 1 { recognized = recognized + 1 }
+                                }
+                            }
+                            if dimension > 0 && recognized == dimension {
+                                metric_valid = 1
+                            }
+                        }
+                    }
+                    if builder.same_ty(
+                        metric_node.constructor(),
+                        builder.ty<SymmetricMatrixMetric>(),
+                    ) {
+                        let metric_args = 0..0
+                        for metric_arg in metric_node.generic_args() {
+                            if metric_arg.is_type() {
+                                metric_args = metric_args.append(metric_arg.ty())
+                            }
+                        }
+                        if metric_args.len() == 2 {
+                            basis_fields = metric_args.at(0).fields()
+                            let matrix_rows = metric_args.at(1).fields()
+                            dimension = basis_fields.len()
+                            let basis_count: usize = 0
+                            for basis_field in basis_fields {
+                                if builder.same_ty(
+                                    basis_field.ty().constructor(),
+                                    builder.ty<BasisVector>(),
+                                ) { basis_count = basis_count + 1 }
+                            }
+                            let valid_entries: usize = 0
+                            let cell_count: usize = 0
+                            let row_count: usize = 0
+                            for row in matrix_rows {
+                                let row_generator: usize = dimension
+                                let generator: usize = 0
+                                for basis_field in basis_fields {
+                                    if row.same_name(basis_field) {
+                                        row_generator = generator
+                                    }
+                                    generator = generator + 1
+                                }
+                                if row_generator < dimension {
+                                    row_count = row_count + 1
+                                    for cell in row.ty().fields() {
+                                        cell_count = cell_count + 1
+                                        let column_generator: usize = dimension
+                                        let column: usize = 0
+                                        for basis_field in basis_fields {
+                                            if cell.same_name(basis_field) {
+                                                column_generator = column
+                                            }
+                                            column = column + 1
+                                        }
+                                        let magnitude: usize = 0
+                                        let negative: usize = 0
+                                        let descriptor_valid: usize = 0
+                                        if builder.same_ty(
+                                            cell.ty().constructor(),
+                                            builder.ty<PositiveMagnitude>(),
+                                        ) {
+                                            for cell_arg in cell.ty().generic_args() {
+                                                if cell_arg.is_const() {
+                                                    magnitude = cell_arg.const_value()
+                                                }
+                                            }
+                                            descriptor_valid = 1
+                                        }
+                                        if builder.same_ty(
+                                            cell.ty().constructor(),
+                                            builder.ty<NegativeMagnitude>(),
+                                        ) {
+                                            for cell_arg in cell.ty().generic_args() {
+                                                if cell_arg.is_const() {
+                                                    magnitude = cell_arg.const_value()
+                                                }
+                                            }
+                                            negative = 1
+                                            descriptor_valid = 1
+                                        }
+                                        if column_generator < dimension
+                                            && descriptor_valid == 1
+                                            && magnitude > 0
+                                            && row_generator <= column_generator
+                                        {
+                                            metric_entries = metric_entries.append(
+                                                (0..0)
+                                                    .append(row_generator)
+                                                    .append(column_generator)
+                                                    .append(magnitude)
+                                                    .append(negative),
+                                            )
+                                            valid_entries = valid_entries + 1
+                                        }
+                                    }
+                                }
+                            }
+                            if dimension > 0 && basis_count == dimension
+                                && row_count == matrix_rows.len()
+                                && valid_entries == cell_count
+                                && valid_entries > 0
+                            {
+                                metric_valid = 1
+                            }
+                        }
+                    }
+                }
+
+                if dimension > 0 && basis_fields.len() == 0 {
+                    for metric_node in metric_nodes {
+                        if builder.same_ty(
+                            metric_node.constructor(), builder.ty<MetricTerm>(),
+                        ) {
+                            let entry = 0..0
+                            for metric_arg in metric_node.generic_args() {
+                                if metric_arg.is_const() {
+                                    entry = entry.append(metric_arg.const_value())
+                                }
+                            }
+                            if entry.len() == 4 {
+                                metric_entries = metric_entries.append(entry)
+                            }
+                        }
+                    }
+                    metric_valid = 1
                 }
 
                 // Bind each nominal leaf identity to exactly one top-level
@@ -862,47 +1264,67 @@ impl<Program> Derive<EvaluateVectorScalarF32>
                         right_matches = right_matches + 1
                     }
                 }
+                let left_support = left.at(1)
+                let right_support = right.at(1)
+                if left.at(2) == 1 && basis_fields.len() == dimension {
+                    let ordered = 0..0
+                    let generator: usize = 0
+                    for basis_field in basis_fields {
+                        for coefficient_field in left_fields {
+                            if coefficient_field.same_name(basis_field) {
+                                left_support = left_support | (1 << generator)
+                                ordered = ordered.append(coefficient_field)
+                            }
+                        }
+                        generator = generator + 1
+                    }
+                    if ordered.len() == left_fields.len() {
+                        left_fields = ordered
+                    } else {
+                        left_fields = 0..0
+                    }
+                }
+                if right.at(2) == 1 && basis_fields.len() == dimension {
+                    let ordered = 0..0
+                    let generator: usize = 0
+                    for basis_field in basis_fields {
+                        for coefficient_field in right_fields {
+                            if coefficient_field.same_name(basis_field) {
+                                right_support = right_support | (1 << generator)
+                                ordered = ordered.append(coefficient_field)
+                            }
+                        }
+                        generator = generator + 1
+                    }
+                    if ordered.len() == right_fields.len() {
+                        right_fields = ordered
+                    } else {
+                        right_fields = 0..0
+                    }
+                }
                 let left_width = vector_support_width(left_support, dimension)
                 let right_width = vector_support_width(right_support, dimension)
 
-                if left_matches == 1 && right_matches == 1
+                if metric_valid == 1
+                    && left_matches == 1 && right_matches == 1
                     && left_fields.len() == left_width
                     && right_fields.len() == right_width
                     && left_width > 0 && right_width > 0
                 {
-                    let first = builder.field_get(left_base, left_fields.at(0))
-                    let zero = builder.sub(first, first)
+                    // A literal +0 keeps an otherwise empty reduction neutral
+                    // even for Inf/NaN coefficients; `first - first` would
+                    // contaminate every result before any metric term ran.
+                    let zero = builder.float(0.0)
                     let sum0 = zero
                     let sum1 = zero
                     let sum2 = zero
                     let survivor: usize = 0
-                    for metric_node in metric_nodes {
-                        if builder.same_ty(
-                            metric_node.constructor(),
-                            builder.ty<MetricTerm>(),
-                        ) {
-                            let ordinal: usize = 0
-                            let metric_left: usize = dimension
-                            let metric_right: usize = dimension
-                            let magnitude: usize = 0
-                            let negative: usize = 0
-                            for metric_arg in metric_node.generic_args() {
-                                if metric_arg.is_const() {
-                                    if ordinal == 0 {
-                                        metric_left = metric_arg.const_value()
-                                    }
-                                    if ordinal == 1 {
-                                        metric_right = metric_arg.const_value()
-                                    }
-                                    if ordinal == 2 {
-                                        magnitude = metric_arg.const_value()
-                                    }
-                                    if ordinal == 3 {
-                                        negative = metric_arg.const_value()
-                                    }
-                                    ordinal = ordinal + 1
-                                }
-                            }
+                    for metric_entry in metric_entries {
+                        if metric_entry.len() == 4 {
+                            let metric_left = metric_entry.at(0)
+                            let metric_right = metric_entry.at(1)
+                            let magnitude = metric_entry.at(2)
+                            let negative = metric_entry.at(3)
 
                             // A symmetric entry can contribute in either
                             // operand orientation. Diagonal entries are

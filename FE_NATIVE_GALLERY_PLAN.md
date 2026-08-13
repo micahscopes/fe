@@ -641,6 +641,45 @@ Origin: honesty audit of Claude Code session
   allocation-heavy Fe drag/re-solves and pins identical event allocation,
   aggregate high-water mark, and Wasm page count while resident generation
   advances.
+- The GA authoring surface now admits named basis and coefficient records.
+  `BasisMetric<Basis>` derives positive, negative, degenerate, and typed null-
+  pair products from field types; `SymmetricMatrixMetric<Basis, Matrix>` aligns
+  a named symmetric matrix by reflected field name; and `Vector<Coefficients>`
+  aligns vector coefficients to the basis without masks or numeric generator
+  IDs. Alias-normalized `type.fields()` and the pure reflection read
+  `field.same_name(other)` supply the general compiler mechanism. CGA3D, QCGA,
+  QCGA Pencil, gaplay, and the PGA gate consume it. Independent differential
+  gates cover the legacy sparse form, named null-pair form, named matrix form,
+  4,008 PGA/Desargues cases, and the real rank-8 QCGA solve.
+- Configured FCO providers may now be named through an ordinary generic type
+  alias, so `CompileNamedVectorDotF32<Left, Right, Metric>` is a concise library
+  facade rather than another derive declaration or target-side phantom field.
+  Base-graph normalization preserves the alias's nested type/const argument
+  environments. The audited provider expression surface also gains one
+  domain-neutral `builder.float(literal)` node; it preserves the parsed literal
+  into ordinary generated HIR without evaluating floats in the provider. This
+  lets GA reductions start from literal `+0.0`, avoiding `x - x` contamination
+  for infinite/NaN inputs and avoiding an inaccessible cross-ingot helper.
+  Positive, fail-closed wrong-kind, ordinary type-check, generic-alias, and
+  command-surface freeze gates are green. Null-pair matching now compares full
+  types, so `Pair<A>` cannot silently match `Pair<B>` merely because their
+  constructors coincide; a focused generic-identity regression pins this.
+- A fresh primary-source GA scheduling audit is recorded in
+  `docs/mb2/GA_SINGLE_INVOCATION_COMPILER.md`, with local PDF/page references
+  for Elliott, Fuchs--Thery, Breuils--Nozick--Fuchs, and Leopardi. It keeps the
+  two executable envelopes distinct (bounded orthogonal whole-MV trees versus
+  high-dimensional named vector incidence), treats current straight-line FCO
+  as instruction-level work rather than spawned lanes, and orders the next
+  slices as correctness lock, shared QCGA/metric witness, exact output DAG plus
+  work/depth interpreters, packed schedules, measured compute workgroups,
+  general-metric products, then an optional dense transform backend.
+- The QCGA Pencil renderer is consolidated rather than duplicated. The former
+  `PencilRaster` GPU actor and its fake host-effect lanes are deleted; the
+  iterative `PencilDistanceSurface` is the sole gallery/GPU view, while the
+  old radial projection remains only as a zero-import CPU/Wasm oracle in the
+  shared Fe solver library. The converted eight-part acceptance suite proves
+  canonical DE initialization, interaction, drag/re-solve, rank and topology
+  transitions, plus the retained independent projection evidence.
 - The QCGA DE view now polishes an iterative marcher hit with four bounded
   Newton corrections along the ray. This is still implicit-field iteration,
   not the analytic quadratic intersection retained solely by the independent
@@ -648,7 +687,25 @@ Origin: honesty audit of Claude Code session
   gentler AO/shadow modulation and removal of a DE-only square-root transfer
   preserve the shared raster/DE normal-and-tangent palette. The independent
   gate remains green for 500 field samples and seven analytic-root rays, and
-  the browser gate emits 55,961 bytes of valid WGSL with its march loop intact.
+  the browser gate emits 45,314 bytes of valid WGSL with its march loop intact.
+- Gallery colour policy is now ordinary shared Fe data rather than replicated
+  shader literals. `demos/sketches/gallery_palette` names the original
+  Desargues midnight, guide gray, electric blue, spring green, theorem/evidence
+  gold, and white roles as typed `Rgb` values. Desargues is restored exactly;
+  Gradient, CGA3D, QCGA, and the canonical QCGA Pencil DE/shared material all
+  consume the same ingot while mapping those roles to their own geometry.
+  Mandelbrot deliberately remains outside this policy so its established
+  escape palette is unchanged. Focused compile gates for all five consumers
+  and a real HTML precompile are green (12 render bundles, one Fe page
+  projection, two resident component projections, 68 publication assets). A
+  fresh cold release publication verifies 14 Fe modules / 68 deployment files.
+- The Fe-composed gallery order now leads with Gradient and TodoMVC, keeps the
+  GA demonstrations together, exposes only the consolidated QCGA Pencil DE
+  tile, and moves Known Color and Rollcall Pipeline to the bottom. TodoMVC's
+  real Fe resident initial state is visibly seeded with `strings`,
+  `review code`, and `much much more`; subsequent reducer operations treat
+  those records exactly like keyboard-created items. Its independent semantic
+  actor tape passes with the seeded keys and next-ID policy.
 - Mandelbrot-specific native transition tapes, general typed
   lifecycle/reactive streams, pointer capture, picking/messages, resident
   outer-gallery orchestration, and runtime-manifest removal remain open.
@@ -686,10 +743,11 @@ general interface rather than open a parallel demo-specific lane.
    the same Fe-derived package used by DEC's Worker lane. This removes the last
    reason to add a QCGA host hook and supplies the mechanism for proof
    submission and cross-component collaboration.
-5. **Reactive resident outer gallery.** Derive EventSource/effect adapters from
-   the typed browser capability vocabulary, place `Event`/`Stream`/`Signal` on
-   the real path, and move sequential tile activation, lifecycle, timers,
-   routing, and component messages into one Fe gallery actor. The existing
+5. **Effect-backed reactive resident outer gallery.** Derive EventSource
+   handlers from the typed browser capability vocabulary; interpret
+   `Event`/`Stream`/`Signal` subscriptions through the canonical runtime control
+   effects; and move sequential tile activation, lifecycle, timers, routing,
+   backpressure, and component messages into one Fe gallery actor. The existing
    sequential activation reducer remains the compatibility test case for this
    composting, not a permanent handwritten host feature.
 6. **Binary surface artifact and host-kernel contraction.** Project resource,
@@ -1044,8 +1102,39 @@ and tested in Fe; JavaScript merely supplies frame/GPU-completion facts.
    JavaScript uniform arrays.
 5. Provide browser implementations of Fe `EventSource` for pointer, wheel,
    resize, animation-frame, visibility, and device-loss streams.
-6. Put `std::reactive::{Event, Stream, Signal}` on the real gallery path.
+6. Re-orient `std::reactive::{Event, Stream, Signal}` around runtime control
+   effects before putting it on the real gallery path. Values and combinators
+   remain pure Fe descriptions/reducers; subscribe, await-next, yield, wake,
+   timer/frame, cancellation, backpressure, placement, and resource lifetime
+   are handled by the canonical effect system rather than a parallel reactive
+   runtime or JavaScript scheduler.
 7. Preserve affine subscription/cancellation semantics across the host boundary.
+8. Turn runtime control into ordinary typed Fe effects rather than another
+   numeric host-command protocol. Define effect families for suspend/await,
+   yield, timer/frame subscription, spawn/join, cancellation, resource
+   acquire/release, placement, and supervision; make the effect set visible in
+   function/actor types and rejected when no handler is in scope.
+9. Lower effect performance to the same MIR suspension/re-entry machinery and
+   resume a continuation exactly once with a typed success, failure, or
+   cancellation value. Preserve affine continuation/subscription/resource
+   ownership and suppress stale or late host completions by generation.
+10. Generate handler adapters for MainThread, Worker, and WebGPU placements.
+    Handlers may realize browser objects, promises, clocks, and queues, while
+    Fe handlers own combination, retry/backoff, timeout, cancellation,
+    supervision, and algorithm-selection policy. Keep pure reducers directly
+    executable with deterministic test handlers.
+11. Use structured scopes for child actors/tasks: parent cancellation and
+    resource release are deterministic; detached work requires an explicit
+    capability; bounded mailbox/backpressure and restart budgets are typed
+    policies. Prove nested-handler routing cannot capture another component's
+    effects merely because an opaque handle or ordinal coincides.
+12. Provide one effect-backed reactive interpreter family for synchronous
+    collections, deterministic virtual-time tapes, browser `EventSource`,
+    async iterators, Worker/message lanes, and WebGPU completion streams. Pin
+    fusion and sharing semantics (`map`/`filter`/`scan`, merge/switch/latest,
+    sample/throttle/debounce, multicast/replay) in Fe; handlers realize wakeups
+    but do not choose or reconstruct the stream graph. Dropping the owning
+    scope must cancel upstream work exactly once and suppress late delivery.
 
 Exit condition: browser events resume a resident Fe actor; Fe owns combination,
 cancellation, state transitions, and scheduling policy.
@@ -1102,6 +1191,63 @@ Exit condition: one Fe page entrypoint composes the entire gallery.
 
 Exit condition: the fixed JavaScript contains browser API realization but no
 application scheduling, state, geometry, parameter, or pass-selection policy.
+
+#### Fe-authored GPU compute, workgroups, and proof kernels
+
+The existing compute-surface, workgroup-size, dispatch-grid, storage-resource,
+barrier, SPIR-V, and WGSL types are a starting vocabulary, not evidence that
+application kernels can already use the complete model. Finish this as an
+explicit compiler/runtime track:
+
+1. Define typed Fe compute entrypoints with global/local/workgroup invocation
+   identities, compile-time workgroup sizes, dispatch geometry, storage and
+   uniform buffer views, storage textures, atomics, and checked address-space
+   rules. Derive bindings and layouts from Fe types; do not add JSON manifests.
+2. Lower workgroup memory and barriers end to end. Statically reject divergent
+   barrier placement, out-of-bounds shared arenas, incompatible access modes,
+   and dispatch/workgroup shape mismatches. Exercise the result in both WGSL
+   and SPIR-V paths, not merely in the type vocabulary.
+3. Add a capability-gated Fe subgroup vocabulary for ballot, broadcast,
+   shuffle, reductions, and scans. Never assume a fixed subgroup width: query
+   adapter limits, specialize only under an explicit policy, and retain a
+   scalar/workgroup fallback with the same semantics.
+4. Give CTFE/FCO schedulers multiple interpreters over one exact dependency
+   DAG: scalar straight-line, packed-vector, output-partitioned subgroup, and
+   workgroup/shared-memory. Record work, depth, communication, fanout, liveness,
+   occupancy, barrier count, and shared-memory use before choosing a schedule.
+5. Express capability negotiation, dispatch/await, device loss, cancellation,
+   resource lifetime, and recovery through the canonical runtime control
+   effects above. The fixed browser handler may acquire objects and realize
+   promises; it must not choose an application algorithm or silently weaken a
+   requested proof/security policy.
+6. Build the cryptography path in audited layers: finite-field arithmetic and
+   batch inversion; Poseidon/permutation and Merkle kernels; radix/Stockham NTT
+   and FFT; multi-scalar multiplication where the curve/backend model justifies
+   it; transcript/challenge derivation; and the polynomial/FRI or other proof
+   kernels selected by the actual Fe proof system. Prefer reusable primitives
+   shared by browser proof generation, Mandelbrot reachability, and standalone
+   crypto demos over proof-specific GPU shims.
+7. Keep the prover/verifier boundary honest. WebGPU may accelerate witness and
+   proof generation, but canonical typed Fe owns the statement, transcript,
+   field/curve parameters, proof encoding, and verification. The verifier must
+   run independently in Fe Wasm/native/contract targets where supported and
+   never trust a GPU-produced receipt merely because the dispatch completed.
+8. Gate semantics with independent CPU/reference implementations, published
+   vectors, algebraic/property tests, malformed-proof rejection, boundary and
+   overflow cases, cross-backend transcript parity, and mutation tests. Add
+   randomized GPU-vs-reference execution on real adapters plus browser E2E;
+   Naga validation, shader bytes, and byte-for-byte compiler output are useful
+   shape evidence but are not correctness proofs.
+9. Publish reproducible performance envelopes by adapter and problem size:
+   cold/warm compile, upload/download, dispatch, end-to-end prover time,
+   occupancy, memory, and crossover against scalar/Wasm. A GPU schedule lands
+   only when measured gains amortize synchronization and transfer costs.
+
+Exit condition: a non-trivial Fe proof-generation pipeline executes reusable
+Fe-authored compute kernels in browser WebGPU, produces a canonically encoded
+proof accepted by an independently executed Fe verifier, rejects mutated
+claims/proofs, survives capability loss through an explicit policy, and ships
+no application math or schedule in Rust/JavaScript/JSON scaffolding.
 
 ### Phase 7: simplify and generalize the Fe demos
 

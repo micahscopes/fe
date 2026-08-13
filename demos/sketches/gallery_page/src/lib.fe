@@ -156,17 +156,12 @@ actor GalleryPage {
     const fn compose() -> Page<CAPACITY> uses (PageComposition) {
         GalleryBuilder::new()
             .render_tile(
-                title: t("known color"),
-                description: t2("typed compute → fragment ", "resource"),
-                source: t2("sketches/known_color/", "src/lib.fe"),
-                program: t("sketches/known_color"),
+                title: t("gradient"),
+                description: t2("Fe-owned colour field → ", "typed controls"),
+                source: t("sketches/gradient/src/lib.fe"),
+                program: t("sketches/gradient"),
             )
-            .render_tile(
-                title: t("rollcall pipeline"),
-                description: t2("compute → private tree fold ", "→ fragment"),
-                source: t2("sketches/rollcall_pipeline/", "src/lib.fe"),
-                program: t("sketches/rollcall_pipeline"),
-            )
+            .todo_mount()
             .render_tile(
                 title: t("cga3d"),
                 description: t("sparse Clifford sphere pencil"),
@@ -181,13 +176,7 @@ actor GalleryPage {
             )
             .render_tile(
                 title: t("qcga pencil"),
-                description: t2("solved QCGA vertex → typed ", "fragment raster"),
-                source: t2("sketches/qcga_pencil/", "src/lib.fe"),
-                program: t("sketches/qcga_pencil"),
-            )
-            .render_tile(
-                title: t("qcga pencil DE"),
-                description: t2("shared solved pencil → ", "iterative DE"),
+                description: t2("solved QCGA pencil → ", "iterative DE"),
                 source: t2("sketches/qcga_pencil_de/", "src/lib.fe"),
                 program: t("sketches/qcga_pencil_de"),
             )
@@ -228,12 +217,17 @@ actor GalleryPage {
                 program: t("sketches/dec"),
             )
             .render_tile(
-                title: t("gradient"),
-                description: t("runtime-default surface"),
-                source: t("sketches/gradient/src/lib.fe"),
-                program: t("sketches/gradient"),
+                title: t("known color"),
+                description: t2("typed compute → fragment ", "resource"),
+                source: t2("sketches/known_color/", "src/lib.fe"),
+                program: t("sketches/known_color"),
             )
-            .todo_mount()
+            .render_tile(
+                title: t("rollcall pipeline"),
+                description: t2("compute → private tree fold ", "→ fragment"),
+                source: t2("sketches/rollcall_pipeline/", "src/lib.fe"),
+                program: t("sketches/rollcall_pipeline"),
+            )
             .end_grid()
             .finish()
     }

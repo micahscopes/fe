@@ -1,12 +1,12 @@
-//! Desargues' theorem, drawn per pixel by the REAL planned PGA-2D meet/join.
+//! Desargues' theorem, drawn per pixel from compiled PGA-2D meet/join.
 //!
 //! This is the ganja.js `pga2d_desargues_theorem` exhibit, in Fe: every line
 //! and every point on screen is a projective incidence computed by the
-//! CTFE-planned outer product `gaplay::pga2_wedge3` (dual-gated bit-for-bit
+//! type-level wedge `gaplay::pga2_wedge3` (dual-gated bit-for-bit
 //! against a hand-tabled cross product in crates/codegen/tests/
-//! pga2d_meet_join_plan.rs). ganja interprets the algebra per frame on the CPU;
-//! here the algebra was folded to a survivor mask (238) at compile time and the
-//! shader is machine-derived from it.
+//! pga2d_meet_join_plan.rs). `gaplay` states the named PGA basis and
+//! `Wedge<Left, Right>` expression; FCO derives support, signs, and the compact
+//! result, then emits ordinary branch-free arithmetic into the shader.
 //!
 //! The picture: a centre of perspectivity O and a base triangle A, B, C; a
 //! second triangle A'B'C' whose vertices slide along the rays O->A/B/C (so the
@@ -44,6 +44,10 @@ use std::web::view::{
     SurfaceEvent, SurfaceState,
 }
 use fmath::{abs, clamp01, cos, from_i32, rgba, sin, smoothstep, sqrt}
+use gallery_palette::{
+    clean_white, electric_blue, evidence_gold, guide, midnight, spring_green,
+    theorem_gold,
+}
 
 /// Perpendicular distance-based line coverage: 1 on the line, fading over `w`.
 fn line_cover(_ l: Line, _ x: f32, _ y: f32, _ w: f32) -> f32 {
@@ -142,7 +146,7 @@ actor Desargues2d uses (GpuProgram<WebGpuBackend>) {
         let x: f32 = cs * u + sn * v
         let y: f32 = 0.0 - sn * u + cs * v
 
-        // The Desargues configuration, all through the planned meet/join.
+        // The Desargues configuration, all through FCO-compiled meet/join.
         let o: Point = desa_o()
         let a: Point = desa_a()
         let b: Point = desa_b()
@@ -176,38 +180,44 @@ actor Desargues2d uses (GpuProgram<WebGpuBackend>) {
         let thick: f32 = pw * 2.1
         let rdot: f32 = pw * 3.4
 
-        // Additive wireframe: rays faint, triangle 1 cool, triangle 2 warm,
-        // the axis gold, cross-points gold, vertices white.
-        let mut red: f32 = 0.05
-        let mut grn: f32 = 0.06
-        let mut blu: f32 = 0.09
+        // The original Desargues palette is now the shared gallery vocabulary.
+        let ground = midnight()
+        let guide_color = guide()
+        let cool = electric_blue()
+        let warm = spring_green()
+        let gold = theorem_gold()
+        let evidence = evidence_gold()
+        let white = clean_white()
+        let mut red: f32 = ground.red
+        let mut grn: f32 = ground.green
+        let mut blu: f32 = ground.blue
 
         // Rays from O (faint gray).
         let rays: f32 =
             line_cover(r_a, x, y, thin) + line_cover(r_b, x, y, thin) + line_cover(r_c, x, y, thin)
-        red = red + 0.16 * rays
-        grn = grn + 0.16 * rays
-        blu = blu + 0.20 * rays
+        red = red + guide_color.red * rays
+        grn = grn + guide_color.green * rays
+        blu = blu + guide_color.blue * rays
 
         // Triangle 1 sides (blue).
         let t1: f32 =
             line_cover(l_ab, x, y, thin) + line_cover(l_bc, x, y, thin) + line_cover(l_ca, x, y, thin)
-        red = red + 0.20 * t1
-        grn = grn + 0.42 * t1
-        blu = blu + 0.95 * t1
+        red = red + cool.red * t1
+        grn = grn + cool.green * t1
+        blu = blu + cool.blue * t1
 
         // Triangle 2 sides (green).
         let t2: f32 =
             line_cover(l_apbp, x, y, thin) + line_cover(l_bpcp, x, y, thin) + line_cover(l_cpap, x, y, thin)
-        red = red + 0.30 * t2
-        grn = grn + 0.90 * t2
-        blu = blu + 0.42 * t2
+        red = red + warm.red * t2
+        grn = grn + warm.green * t2
+        blu = blu + warm.blue * t2
 
         // The axis of perspectivity (gold, thicker).
         let ax: f32 = line_cover(axis, x, y, thick)
-        red = red + 0.98 * ax
-        grn = grn + 0.80 * ax
-        blu = blu + 0.20 * ax
+        red = red + gold.red * ax
+        grn = grn + gold.green * ax
+        blu = blu + gold.blue * ax
 
         // Vertex dots (white): O, the two triangles.
         let verts: f32 =
@@ -218,18 +228,18 @@ actor Desargues2d uses (GpuProgram<WebGpuBackend>) {
             + dot_cover(point_world_x(ap), point_world_y(ap), x, y, rdot)
             + dot_cover(point_world_x(bp), point_world_y(bp), x, y, rdot)
             + dot_cover(point_world_x(cp), point_world_y(cp), x, y, rdot)
-        red = red + 0.9 * verts
-        grn = grn + 0.9 * verts
-        blu = blu + 0.9 * verts
+        red = red + white.red * verts
+        grn = grn + white.green * verts
+        blu = blu + white.blue * verts
 
-        // Cross-point dots (gold, on the axis): the theorem, made visible.
+        // Cross-point dots (hot gold, on the axis): the theorem, made visible.
         let cross: f32 =
             dot_cover(point_world_x(pa), point_world_y(pa), x, y, rdot)
             + dot_cover(point_world_x(pb), point_world_y(pb), x, y, rdot)
             + dot_cover(point_world_x(pc), point_world_y(pc), x, y, rdot)
-        red = red + 1.0 * cross
-        grn = grn + 0.82 * cross
-        blu = blu + 0.15 * cross
+        red = red + evidence.red * cross
+        grn = grn + evidence.green * cross
+        blu = blu + evidence.blue * cross
 
         rgba(clamp01(red), clamp01(grn), clamp01(blu))
     }

@@ -53,8 +53,24 @@ struct Model {
 impl Default for Model {
     fn default() -> Self {
         Self {
-            todos: Vec::new(),
-            next_id: 1,
+            todos: vec![
+                Todo {
+                    id: 1,
+                    title: "strings".to_owned(),
+                    completed: false,
+                },
+                Todo {
+                    id: 2,
+                    title: "review code".to_owned(),
+                    completed: false,
+                },
+                Todo {
+                    id: 3,
+                    title: "much much more".to_owned(),
+                    completed: false,
+                },
+            ],
+            next_id: 4,
             filter: 0,
             editing: 0,
             draft: String::new(),

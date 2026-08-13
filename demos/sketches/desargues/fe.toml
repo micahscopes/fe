@@ -5,4 +5,5 @@ version = "0.1.0"
 [dependencies]
 core = true
 fmath = "../fmath"
+gallery_palette = "../gallery_palette"
 gaplay = "../../../ingots/gaplay"

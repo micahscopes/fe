@@ -1,12 +1,13 @@
 # A typed sparse GA compiler for one WebGPU invocation
 
-Status: active design plus structural G2/G3 vertical slices, 2026-08-13.
+Status: two bounded executable compilers plus open generalization milestones,
+2026-08-13.
 
 This document specifies the fuller geometric-algebra implementation behind the
 Phase 7 gallery goal. It is deliberately honest about three different things:
 
 1. the Fe code that exists and executes now;
-2. the reusable expression compiler we are building toward; and
+2. the two reusable expression compilers that execute today; and
 3. a possible later workgroup implementation that uses several GPU lanes.
 
 The primary target is a sparse, straight-line program executed by **one shader
@@ -15,25 +16,38 @@ threads. Compile-time sparsification can expose independent instructions for
 the device compiler to issue concurrently, but that is instruction-level
 parallelism within a lane, not dynamically created shader invocations.
 
-## Executive design
+## Current authoring surface
 
-The intended user-facing shape is a static Fe program:
+Whole multivector expressions under a named orthogonal basis are ordinary Fe
+type expressions:
 
 ```fe
-type Expr = Grade<
-    Sum<
-        Geometric<Sphere, Point>,
-        Outer<Reverse<Tangent>, Plane>,
-    >,
-    2,
->
+struct Pga2Basis { e0: Degenerate, e1: Positive, e2: Positive }
+struct LeftCoefficients { e0: f32, e1: f32, e2: f32 }
+struct RightCoefficients { e0: f32, e1: f32, e2: f32 }
 
-type Program = GaProgram<Expr, Cl41, Strict>
-derive EvaluateGa for Inputs using CompileGa<Program>
+type Expr = Wedge<Vector<LeftCoefficients>, Vector<RightCoefficients>>
+type Pga2 = BasisMetric<Pga2Basis>
+
+derive EvaluateGaF32 for Operands using CompileGaF32<
+    GaProgram<Expr, Pga2, Strict>
+>
 ```
 
-The exact spelling of the final derive façade is not committed yet. The
-essential properties are:
+High-dimensional named vector incidence under a sparse symmetric metric has a
+smaller facade:
+
+```fe
+derive EvaluateVectorScalarF32 for IncidenceOperands using
+    CompileNamedVectorDotF32<PointCoefficients, SurfaceCoefficients, Metric>
+```
+
+`Wedge<A, B>`, `Vee<A, B>`, and `Dot<A, B>` are transparent library aliases
+for `Outer`, `Regressive`, and `ScalarProduct`. They improve mathematical
+reading without pretending Fe has operator overloading or adding a hidden
+parser/compiler special case.
+
+Both executable surfaces have the same essential properties:
 
 - the expression, metric, supports, and numerical policy are static Fe types;
 - runtime values are only the input coefficients;
@@ -45,7 +59,7 @@ essential properties are:
 - the same plan can have semantic, strict, balanced, Wasm, and GPU interpreters
   without making any generated artifact the correctness oracle.
 
-The implementation pipeline is:
+The target architecture is:
 
 ```text
 static expression + metric + leaf supports + numeric policy
@@ -73,6 +87,11 @@ FCO-emitted ordinary Fe SSA
     +----------> native differential execution
 ```
 
+This diagram is a destination, not a claim that every box is already a shared
+IR. Today `CompileGaF32` folds a normalized expression into dense bounded CTFE
+component vectors and emits directly; it does not yet materialize the exact
+sparse-term arena, hash-consed DAG, or reusable schedule shown above.
+
 Support, exact algebra, numerical transformation, and machine schedule are
 separate layers. Conflating them is the easiest way to obtain fast but
 incorrect code.
@@ -90,24 +109,32 @@ incorrect code.
 - dense Fuchs--Thery-style support recurrence for cross-checking; and
 - several real CGA/QCGA plans that erase to straight-line shader arithmetic.
 
-`ingots/ga_expr` now adds:
+`ingots/ga_expr` provides:
 
 - `Input<Slot, Support>` leaves;
 - `Sum`, `Difference`, `Neg`, `Geometric`, `Outer`, `LeftContraction`,
   `RightContraction`, `ScalarProduct`, `Grade`, `Reverse`, `PoincareDual`, and
   `Regressive` expression nodes;
-- `DiagonalMetric<Dimension, NonzeroSquares>`;
+- `DiagonalMetric<Dimension, NonzeroSquares>` and
+  `SignedOrthogonalMetric<Dimension, NonzeroSquares, NegativeSquares>`;
+- named `BasisMetric<Basis>` descriptors (`Positive`, `Negative`,
+  `Degenerate`, `Null<Pair>`, and `Prime<Pair>`);
+- `SymmetricMatrixMetric<Basis, Matrix>` for arbitrary named sparse symmetric
+  vector metrics;
+- named `Vector<Coefficients>` and bounded whole-multivector leaves;
 - compositional `GaSupport<Metric>` interpretation over those nodes;
 - explicit `Strict` and `AlgebraicBalanced` numerical policies;
-- `GaProgram<Expression, Metric, Policy>` as a static compilation request; and
-- `TermZero`, `TermAdd`, and `BilinearTerm` as the initial exact-plan witness
-  vocabulary.
+- `GaProgram<Expression, Metric, Policy>` as a static compilation request;
+- `CompileGaF32` for finite whole-multivector trees under orthogonal metrics;
+- `CompileVectorScalarF32` for sparse symmetric named-vector products and its
+  concise `CompileNamedVectorDotF32` facade; and
+- `TermZero`, `TermAdd`, and `BilinearTerm` as exact-plan witness vocabulary.
 
 Support analysis is compositional today. It is conservative: it removes
 structural zeros and impossible blades, but does not claim cancellation between
 runtime coefficients.
 
-### Specialized executable vertical slice
+### Historical specialized validation slice
 
 `crates/codegen/tests/fixtures/ga_expr_fco` expresses
 `(a ^ b) + (a ^ b)` for sparse PGA(2,0,1) line inputs. In Fe it:
@@ -131,11 +158,11 @@ same Fe implementation compiles to browser-valid WGSL with:
 - six surviving GA multiplications plus one display-scale multiplication; and
 - no runtime loop, branch, switch, plan table, or host algebra import.
 
-This is a real end-to-end proof of the staging route. It is **not yet** a
-general lowering from every arbitrary expression node to exact terms. The
-prototype's exact plan constructor is specialized to the twice-wedge example.
+This remains a useful end-to-end validation of the staging route, but it is no
+longer the reusable authoring surface. Its exact plan constructor is
+intentionally specialized to the twice-wedge fixture.
 
-### Structural expression-lowering prototype
+### Historical structural expression-lowering prototype
 
 `crates/codegen/tests/fixtures/ga_expr_operator_substitution_fco` is an
 operator-substitution
@@ -172,9 +199,9 @@ Its boundary is explicit:
 - a zero-sized marker field retained by this initial fixture; the configured
   provider slice below removes it from later runtime carriers.
 
-General diagonal metric products, the remaining node vocabulary, compact typed
-outputs, stable expression DAG sharing, and deriving input slots/support from
-the reflected record are still required before this is the final GA façade.
+The reusable compiler in the next section supersedes those fixture-local
+limitations. Stable expression-DAG sharing and a sparse planner arena remain
+open performance work.
 
 ### Reusable finite orthogonal expression compiler
 
@@ -198,6 +225,22 @@ containing only supported blades in ascending mask order; no output lane list,
 numeric leaf ID, flat carrier offset, phantom program field, or manifest is
 authored beside the expression.
 
+The same bounded compiler now also accepts a named orthogonal basis:
+
+```fe
+struct Pga2Basis { e0: Degenerate, e1: Positive, e2: Positive }
+type Pga2 = BasisMetric<Pga2Basis>
+type Point = Vector<PointCoefficients>
+```
+
+Coefficient fields align to basis generators by authored field name, so the
+leaf derives its support and packing without a mask. This form is deliberately
+strict: missing, unknown, or duplicate matches leave the generated trait
+incomplete rather than falling back to position. The complete expression-tree
+compiler still applies diagonal rules only; `Null`/`Prime` off-diagonal bases
+belong to the scalar-vector slice below until general symmetric blade-product
+expansion exists.
+
 The substitution gate does not reuse the twice-wedge expression. One unchanged
 provider executes four unrelated programs covering every accepted operator,
 two dimensions and three dimensions, Euclidean and mixed signature metrics,
@@ -219,13 +262,23 @@ caching and a sparse planner arena remain named requirements.
 
 ### Configured provider and QCGA sparse-metric slice
 
-FCO now retains a named provider's exact ground configuration. The intended
+FCO now retains a named provider's exact ground configuration. The concise
 facade is executable:
 
 ```fe
-derive EvaluateVectorScalarF32 for Operands using CompileVectorScalarF32<
-    GaProgram<ScalarProduct<Point, Quadric>, QcgaMetric, AlgebraicBalanced>
->
+derive EvaluateVectorScalarF32 for Operands using
+    CompileNamedVectorDotF32<PointCoefficients, QuadricCoefficients, QcgaMetric>
+```
+
+That alias expands to the fully explicit program below; both spellings use the
+same provider and lowering path:
+
+```fe
+CompileVectorScalarF32<GaProgram<
+    Dot<Vector<PointCoefficients>, Vector<QuadricCoefficients>>,
+    QcgaMetric,
+    AlgebraicBalanced,
+>>
 ```
 
 `builder.provider_ty()` exposes that configured type to the Fe provider, and
@@ -233,7 +286,8 @@ the exact type participates in the expansion cache key. Runtime `Operands`
 contains only packed coefficients—no `GaProgram` marker, manifest, numeric
 operator ID, or Rust-generated plan.
 
-`ga_expr` now includes `VectorInput<Identity, GeneratorSupport>`,
+`ga_expr` retains the numeric migration forms
+`VectorInput<Identity, GeneratorSupport>`,
 `SparseSymmetricMetric<Dimension, Terms>`, and exact signed `MetricTerm` leaves.
 `CompileVectorScalarF32<Program>` structurally recognizes a two-vector
 `ScalarProduct`, iterates only the metric's nonzero entries and applicable
@@ -241,6 +295,29 @@ symmetric orientations, derives packed reflected-field ranks from supports,
 and emits a deterministic four-term-chunk scalar reduction. This represents
 QCGA's 15-generator paper-null basis honestly; it does not pretend the six
 off-diagonal null pairs form a diagonal metric.
+
+The preferred authoring surface is now entirely named Fe type data:
+
+```fe
+struct Pair1 {}
+struct Pair2 {}
+struct QcgaBasis {
+    e1: Positive,
+    eo1: Null<Pair1>, eo2: Null<Pair2>,
+    ei1: Prime<Pair1>, ei2: Prime<Pair2>,
+}
+type QcgaMetric = BasisMetric<QcgaBasis>
+type Point = Vector<PointCoefficients>
+```
+
+FCO derives dimension, vector support, runtime packing, diagonal signs, and
+each symmetric null pairing from those records. Pair marker identity—not
+declaration proximity or matching numeric suffixes—connects `Null<P>` to
+`Prime<P>`, and each marker must occur exactly once on each side. For a fully
+explicit sparse symmetric form, `SymmetricMatrixMetric<Basis, Matrix>` aligns
+named row/cell records to a `BasisVector` record and accepts exact
+`PositiveMagnitude<N>`/`NegativeMagnitude<N>` cells. This supports arbitrary
+sparse matrices without hiding a second JSON/table format.
 
 `Identity` is the nominal Fe coefficient-record type, not a numeric slot or
 operator ID. The target carrier has one field of each identity type. FCO
@@ -255,10 +332,13 @@ The independent sparse-metric gate executes 259 QCGA-shaped deterministic
 cases bit-for-bit against a separately tabled Rust oracle with no Wasm host
 imports. A second 131-case configuration changes dimension, supports, metric
 signs and magnitudes, carrier width, and expression operand order while using
-the same provider. `qcga_pencil` consumes that provider in its actual incidence
-solver; its rank-8 pencil acceptance and ordinary typecheck gates pass after
-deleting the demo-local 144-candidate mask, recursive twelve-term plan, and
-24-way provider selection ladder.
+the same provider. A further 131 cases author the same shuffled-field null
+metric once through automatic typed pairs and once through the named matrix;
+both agree with a separately written scalar oracle. `cga3d`, `qcga`, and
+`qcga_pencil` consume the concise facade in their actual incidence paths. The
+QCGA rank-8 pencil acceptance and ordinary typecheck gates pass after deleting
+the demo-local 144-candidate mask, recursive twelve-term plan, and 24-way
+provider selection ladder.
 
 This establishes a bounded generic scalar-product facility, not a generic GA
 expression compiler or complete off-diagonal Clifford product compiler. It
@@ -267,6 +347,70 @@ in-process semantic/Wasm gate takes roughly 41 seconds and the QCGA typecheck
 about 44 seconds on the current development host; the standalone CLI cold path
 was materially slower. Provider expansion/ground-plan caching and dependency
 analysis need profiling before this is considered the final ergonomic path.
+
+## 2026-08-13 paper audit and scheduling implications
+
+The implementation and demos were re-audited against the locally retained
+primary references, read as algorithms rather than used as inspirational
+citations:
+
+- Conal Elliott, *Generic Functional Parallel Algorithms: Scan and FFT*,
+  `/workspace/scratch/dirs/architect-upload-bundle-2026-05-22/local-reference-pdfs/Conal-Elliott-Generic-Functional-Parallel-Algorithms-Scan-and-FFT.pdf`.
+  Sections 2.3--2.4 (pp. 6--8), 3 (pp. 8--17), and 4.2--4.3 (pp. 18--21)
+  motivate static shape/composition types and separate semantic, work, depth,
+  and schedule interpretations. A `Par` marker alone is not parallelism;
+  association must change an executable schedule and its measured complexity.
+- Fuchs and Théry, *Clifford Algebra Products with Binary Trees*,
+  `/workspace/scratch/dirs/architect-upload-bundle-2026-05-22/local-reference-pdfs/Fuchs-Thery-Clifford-Algebra-Products-with-Binary-Trees.pdf`.
+  Sections 2--5 (pp. 5--20) give dense recursive carriers, orthogonal-metric
+  products, and sparse-tree denotation. They do not supply arbitrary
+  off-diagonal products.
+- Breuils, Nozick, and Fuchs, *A Geometric Algebra Implementation using Binary
+  Tree*, `/workspace/scratch/breuils_AACA_2016.pdf`. Sections 3--5 (pp. 4--19)
+  expose independently computable output coefficients, reusable signs, static
+  specialization, and SIMD under diagonal metrics. This is the strongest
+  immediate precedent for an output-root DAG and packed/scalar interpreters.
+- Leopardi, *A Generalized FFT for Clifford Algebras*,
+  `/workspace/scratch/dirs/architect-upload-bundle-2026-05-22/local-reference-pdfs/Leopardi-Generalized-FFT-for-Clifford-Algebras.pdf`.
+  Sections 4--9 (pp. 5--20) suggest an optional dense/high-dimensional
+  matrix-transform backend. It is not an expression-AST FFT and is a poor fit
+  for sparse QCGA scalar incidence.
+
+The resulting boundary is explicit. Current FCO specialization exposes
+independent scalar instructions inside one invocation; a device compiler may
+schedule that instruction-level parallelism, but a shader invocation cannot
+spawn lanes. True Breuils-style lane parallelism requires a compute entry,
+subgroup or workgroup identities, an output-root partition, communication and
+uniform synchronization. It is therefore a separately selectable backend with
+semantic-equivalence and performance gates, not a reinterpretation of the
+current fragment kernel.
+
+The order of work implied by the audit is:
+
+1. lock correctness with exhaustive basis products for dimensions zero through
+   five, algebra-law/property trees, malformed-metric failures, and directed
+   NaN/Inf/subnormal/signed-zero policy cases;
+2. consolidate duplicated QCGA basis/embedding/incidence into one model ingot
+   and derive one reflected metric witness consumed by both compiler envelopes;
+3. materialize exact output roots and a hash-consed DAG, then interpret the
+   same graph as semantics, support, `Cost { work, depth, fanout, live }`, and
+   scalar/packed schedules;
+4. benchmark scalar versus vec2/vec4 schedules before adding coordination;
+5. add a compute subgroup/workgroup interpreter only for products whose output
+   width and register pressure amortize communication;
+6. implement general off-diagonal multivector products by an exact contraction
+   recurrence or compile-time basis transform, with an independent
+   matrix/tensor oracle; and
+7. consider the Leopardi backend only for dense higher-dimensional regimes.
+
+For the current QCGA renderer, one incidence has about twelve surviving scalar
+products while thousands of pixels are already independent invocations; using
+a subgroup per dot product would normally reduce pixel occupancy and add a
+reduction. Balanced/packed instruction schedules are the appropriate first
+optimization. A dense five-generator full product has up to 32 output roots
+and roughly 1,024 pair contributions, so lane-partitioned roots are much more
+credible there. No speedup factor is accepted without timestamp-query/device
+benchmarks and a scalar semantic oracle.
 
 ## Semantic model
 
@@ -307,11 +451,14 @@ Metric {
 The existing support layer only needs the nonzero-square mask; exact planning
 also needs each square's sign. Degenerate metrics such as PGA are first-class.
 
-A general symmetric metric is a later extension. Multiplying two basis blades
-under an off-diagonal metric can expand into several blades, so `left XOR
-right` is no longer the exact product. It must use an exact contraction
-recurrence or a statically derived change of basis. The API must never accept a
-general matrix and quietly apply diagonal support rules.
+A general symmetric metric is implemented for the deliberately narrow
+vector-scalar form above, where every surviving result is grade zero and a
+sparse matrix scan is exact. General *blade products* remain a later extension:
+multiplying two basis blades under an off-diagonal metric can expand into
+several blades, so `left XOR right` is no longer the exact product. It must use
+an exact contraction recurrence or a statically derived change of basis. The
+whole-expression API must never accept a general matrix and quietly apply
+diagonal support rules.
 
 ### Operators
 
@@ -667,29 +814,36 @@ adds, and application behavior remains Fe-owned.
 
 - compute-stage typed entry and invocation identity;
 - workgroup storage and barrier lowering in Fe/WebGPU;
+- capability-gated subgroup reductions/scans/shuffles with no fixed-width
+  assumption and a semantics-equivalent fallback;
 - task partitioning by dependency level or output blade;
 - uniformity, occupancy, and shared-memory gates; and
 - comparison against the single-invocation compiler on expressions large
   enough to amortize coordination.
 
 This milestone is not required to call the one-invocation implementation
-complete.
+complete. It is part of the broader Fe-authored GPU-compute and proof-kernel
+track in `FE_NATIVE_GALLERY_PLAN.md`: the same scheduler machinery should serve
+large GA products, NTT/FFT, Merkle/Poseidon, and later proof-generation kernels
+without moving algorithm selection into a browser shim.
 
 ## Gallery/API outcome
 
-The success condition is compact semantic Fe such as:
+The current syntax can already express compact semantic Fe such as:
 
 ```fe
-type DistanceExpr = ScalarProduct<
+type DistanceExpr = Dot<
     Grade<Geometric<Reverse<Rotor>, Point>, 1>,
     Surface,
 >
 ```
 
-expanding to a powerful, inspected, browser-valid kernel without a handwritten
-term table, generated `.fe` file, Rust algebra generator, JSON plan, runtime
-manifest, or JavaScript math shim. The host may upload coefficients and launch
-WebGPU; it must not know which blades survive or how the algebra is scheduled.
+For orthogonal metrics, that shape expands today to an inspected,
+browser-valid kernel without a handwritten term table, generated `.fe` file,
+Rust algebra generator, JSON plan, runtime manifest, or JavaScript math shim.
+General off-diagonal whole-multivector products remain an explicit future
+milestone. The host may upload coefficients and launch WebGPU; it must not know
+which blades survive or how the algebra is scheduled.
 
 That is the same composting direction as the rest of the gallery: readable Fe
 owns the semantics, Fe CTFE/FCO owns specialization, compiler-generated

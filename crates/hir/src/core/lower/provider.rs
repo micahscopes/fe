@@ -1113,6 +1113,51 @@ pub(super) enum SelectionOutcome<'db> {
     },
 }
 
+/// Resolve the nominal provider behind a bare named-selection facade.
+///
+/// A configured provider may be written through an ordinary generic type
+/// alias, for example `type DotCompiler<L, R, M> =
+/// Compile<Program<Dot<Vector<L>, Vector<R>>, M>>`. Provider execution already
+/// receives the exact written type and normalizes it for `provider_ty()`
+/// inspection; selection only needs the underlying provider declaration's
+/// nominal name. Follow alias heads through base HIR so this syntactic
+/// abstraction does not require a duplicate `Derive` impl.
+///
+/// The public selection boundary remains deliberately narrow: the spelling at
+/// the derive site must start as one bare identifier, matching the historical
+/// `using Provider<...>` rule. Only a resolved alias body may introduce a
+/// qualified head. Cycles and non-path aliases fail closed.
+fn named_provider_head<'db>(
+    db: &'db dyn HirDb,
+    from: TopLevelMod<'db>,
+    written: PathId<'db>,
+) -> Option<IdentId<'db>> {
+    let mut path = written.strip_generic_args(db);
+    path.as_ident(db)?;
+    let mut owner = from;
+
+    for _ in 0..16 {
+        let Some(item) = resolve_base_item(db, owner, path) else {
+            // Preserve direct name-based lookup for provider declarations that
+            // are visible through the existing provider discovery route but
+            // cannot be resolved as an ordinary nominal item here.
+            return path.as_ident(db);
+        };
+        match item {
+            ItemKind::TypeAlias(alias) => {
+                let target = alias.type_ref(db).to_opt()?;
+                let TypeKind::Path(target) = target.data(db) else {
+                    return None;
+                };
+                path = target.to_opt()?.strip_generic_args(db);
+                owner = alias.top_mod(db);
+            }
+            _ => return item.name(db),
+        }
+    }
+    None
+}
+
 /// Selects the provider for a request whose goal trait is named by
 /// `goal_path` (the head path exactly as written at the derive site: bare,
 /// aliased, or qualified).
@@ -1133,13 +1178,11 @@ pub(super) fn select_provider<'db>(
             .filter(|provider| goal_matches_provider(db, from, goal_path, provider, false))
             .collect(),
         ProviderSelection::Named(path) => {
-            // Selection may configure a bare generic provider
-            // (`using Compile<Program>`). Strip only its generic arguments;
-            // retaining the old bare-path boundary avoids turning a merely
-            // same-named qualified path into provider identity. The exact
-            // applied path is retained by the derive expansion key and
-            // exposed to FCO separately.
-            let Some(selected) = path.strip_generic_args(db).as_ident(db) else {
+            // Selection may configure a bare generic provider directly or
+            // through a generic type alias. The exact applied path is retained
+            // by the expansion key and exposed to FCO; only nominal provider
+            // discovery follows the alias head.
+            let Some(selected) = named_provider_head(db, from, path) else {
                 return SelectionOutcome::NotFound {
                     wrong_goal_heads: Vec::new(),
                 };

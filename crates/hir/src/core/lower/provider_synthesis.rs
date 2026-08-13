@@ -385,6 +385,7 @@ impl<'a, 'db> ReplayCtxt<'a, 'db> {
         match &self.output.bodies.exprs[expr.0] {
             GenExpr::Bool(value) => body.bool_lit_expr(*value),
             GenExpr::Int(value) => body.push_expr(Expr::Lit(LitKind::Int(*value))),
+            GenExpr::Float(value) => body.push_expr(Expr::Lit(LitKind::Float(*value))),
             GenExpr::And(lhs, rhs) => {
                 let lhs = self.replay_expr(body, *lhs);
                 let rhs = self.replay_expr(body, *rhs);

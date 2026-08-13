@@ -34,15 +34,14 @@
   element's shadow DOM is not reachable any other way, which is the point (R2
   retires the old override hack this file used to carry).
 
-  qcga_pencil is projected by the Fe page beside the fullscreen examples. Its
-  authored vertex/fragment pair, solver-backed InitialState, and scheduled
-  orbit/pencil controls all come from that sketch's Fe actor; the fixed host
-  contributes WebGPU/DOM standards transport only.
-
-  qcga_pencil_de is a companion Fe fragment-surface actor over the same solved
-  scene/interaction constructions. Its production visibility loop iterates an
-  implicit quadric distance estimate; analytic ray roots exist only in the
-  independent Rust oracle and never enter the shipped renderer.
+  The canonical qcga pencil tile is the Fe fragment-surface DE view. Its
+  solver-backed InitialState, point editing, and scheduled orbit/pencil
+  controls come from the shared Fe scene ingot; the fixed host contributes
+  WebGPU/DOM standards transport only. Its production visibility loop iterates
+  an implicit quadric distance estimate. Analytic ray roots exist only in the
+  independent Rust oracle and never enter the shipped renderer. The former
+  vertex/fragment actor is retired; its radial projection survives only as a
+  zero-import CPU/Wasm geometry oracle in the shared non-rendering Fe library.
 -->
 <html lang="en">
 <head>

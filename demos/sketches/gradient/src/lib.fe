@@ -1,14 +1,11 @@
-//! The smallest actor that RENDERS.
+//! A small, genuinely useful Fe-authored colour surface.
 //!
 //! `GradientSurface` is a shader program declared as an `actor`: its uniform
 //! state is the actor's fields, its one `FragmentSurface` behavior is the
-//! per-pixel stage, and `fe web build --mode render` derives the render entry
-//! and mode from the actor rather than from `--entry`/`--mode` flags. This is
-//! the R-A1 construct on a kernel that actually lowers to WebGPU today: pure
-//! f32 arithmetic, no aggregates, no division, no bitwise, no external calls
-//! (only the three scalar-cast intrinsics), so it clears every current R1
-//! wasm/SPIR-V wall. The interesting demos (dec, plasma) do not yet; this one
-//! is the honest "an actor you can see".
+//! per-pixel stage, and the compiler derives its render entry and mode. Drag
+//! horizontally to rotate the gradient, vertically to move its centre, and
+//! use the wheel to change its spread. The same typed
+//! Fe parameter declaration owns the controls and transition policy.
 //!
 //! Software rendering (lavapipe/SwiftShader) in the sandbox; no performance
 //! claim, no parallelism claim (VISION 3.1).
@@ -20,26 +17,23 @@ use std::web::view::{
     ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface,
     SurfaceEvent, SurfaceState,
 }
-
-extern {
-    fn __f32_from_i32(_: i32) -> f32
-    fn __i32_from_f32(_: f32) -> i32
-}
+use fmath::{clamp01, cos, from_i32, mix, rgba, sin, smoothstep}
+use gallery_palette::{electric_blue, spring_green}
 
 /// The per-demo params record: field names bind, by name identity, to the
-/// actor's state fields (checked at projection time). This kernel reads raw
-/// pixel coordinates directly (no resolution normalization), so there is no
-/// extent-bound param: the extent still sets the dispatch size below.
+/// actor's state fields (checked at projection time).
 struct GradientParams {
-    gain: Param,
-    bias: Param,
-    cutoff: Param,
+    angle: Param,
+    offset: Param,
+    spread: Param,
+    res: Param,
 }
 
 struct GradientViewState {
-    gain: f32,
-    bias: f32,
-    cutoff: f32,
+    angle: f32,
+    offset: f32,
+    spread: f32,
+    res: f32,
 }
 
 impl SurfaceState for GradientViewState {
@@ -50,19 +44,20 @@ derive ApplyParamBindings for GradientViewState using ParamBindingsProvider
 
 const fn gradient_params() -> GradientParams {
     GradientParams {
-        gain: Param::range(min: 0.0, max: 1.0, init: 0.12)
-            .drag_x(per_px: 0.002),
-        bias: Param::range(min: -50.0, max: 50.0, init: 0.0)
-            .drag_y(per_px: 0.1),
-        cutoff: Param::range(min: 0.0, max: 255.0, init: 96.0)
-            .wheel(per_notch: 8.0),
+        angle: Param::angle(init: 0.55).drag_x(per_px: 0.01),
+        offset: Param::range(min: -0.5, max: 0.5, init: 0.0)
+            .drag_y(per_px: -0.002),
+        spread: Param::range(min: 0.5, max: 4.0, init: 1.4)
+            .wheel_scale(in_factor: 0.875, out_factor: 1.125),
+        res: Param::extent_x(),
     }
 }
 
 actor GradientSurface uses (GpuProgram<WebGpuBackend>) {
-    gain: f32,
-    bias: f32,
-    cutoff: f32,
+    angle: f32,
+    offset: f32,
+    spread: f32,
+    res: f32,
 
     /// The surface declaration: CTFE-evaluated at bundle time and projected
     /// into the manifest `surface` section. Never lowered to wasm or WGSL.
@@ -77,28 +72,28 @@ actor GradientSurface uses (GpuProgram<WebGpuBackend>) {
         uses (SurfaceTransition, SurfaceScheduling<LatestPerFrame>)
     {
         GradientViewState {
-            gain: self.gain,
-            bias: self.bias,
-            cutoff: self.cutoff,
+            angle: self.angle,
+            offset: self.offset,
+            spread: self.spread,
+            res: self.res,
         }.apply_param_bindings(gradient_params(), event)
     }
 
     /// The fragment behavior: pixel coordinate in, packed RGBA8 word out. The
     /// uniform record is the actor's own fields, reached as `self.*`.
     fn shade(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
-        let x: f32 = __f32_from_i32(px)
-        let y: f32 = __f32_from_i32(py)
-        let mut value: f32 = (x + y) * self.gain + self.bias
-        let mut i: i32 = 0
-        while i < 3 {
-            value = value * 0.5 + self.bias
-            if value > self.cutoff {
-                let hot: i32 = __i32_from_f32(value)
-                return hot + hot * 256 + 16711680 + -16777216
-            }
-            i = i + 1
-        }
-        let cool: i32 = __i32_from_f32(value)
-        cool + 65280 + cool * 65536 + -16777216
+        let u: f32 = (from_i32(px) + 0.5) / self.res - 0.5
+        let v: f32 = (from_i32(py) + 0.5) / self.res - 0.5
+        let axis: f32 = u * cos(self.angle) + v * sin(self.angle)
+        let t: f32 = smoothstep(
+            0.0, 1.0, clamp01(0.5 + self.offset + axis * self.spread),
+        )
+        let low = electric_blue()
+        let high = spring_green()
+        rgba(
+            mix(low.red, high.red, t),
+            mix(low.green, high.green, t),
+            mix(low.blue, high.blue, t),
+        )
     }
 }

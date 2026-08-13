@@ -3,5 +3,4 @@ name = "pga2d_meet_join_gate"
 version = "0.1.0"
 
 [dependencies]
-sparse_clifford = "../../../../../ingots/sparse_clifford"
 gaplay = "../../../../../ingots/gaplay"

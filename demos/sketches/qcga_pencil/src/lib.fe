@@ -1,78 +1,46 @@
 //! Nine points decide a quadric. Sometimes they abstain.
 //!
-//! Drag nine points in space and a quadric surface passes through them. That
-//! sounds like a nonlinear fitting problem, and classically it is treated as
-//! one. In QCGA the dual quadric is a grade-1 vector and point incidence is a
-//! CONTRACTION, linear in the quadric coefficients, so "the quadric through
-//! nine points" is the nullspace of a 9 x 10 linear system whose entries are
-//! literally that contraction. The solver below builds each matrix entry by
-//! calling the planned sparse QCGA contraction with a unit basis dual quadric:
-//! the linear system IS the incidence operator, by construction.
+//! This ingot is the non-rendering QCGA model behind the canonical
+//! `qcga_pencil_de` actor: named algebra, point embedding, linear solve,
+//! control-point editing, camera policy, and one shared material are ordinary
+//! Fe. The browser knows none of those concepts.
 //!
-//! The quirk this demo illustrates: nine points in general position pin the
-//! quadric uniquely, but nine points that lie on the intersection curve of two
-//! quadrics (here, the circle pair where the unit sphere meets the cone
-//! z^2 = x^2 + y^2) impose only EIGHT independent conditions. The nullspace
-//! becomes two dimensional and a whole projective pencil of quadrics passes
-//! through all nine points at once: cylinder, sphere, cone, plane pair, and
-//! every hyperboloid between them. Sweeping the pencil parameter deforms the
-//! surface through genuine topology changes while every point stays exactly
-//! incident. Nudge one point off the curve and the freedom snaps shut: rank
-//! returns to nine and the pencil collapses to a single surface. Rank drop is
-//! trivially observable here BECAUSE incidence is linear; no nonlinear
-//! degeneracy analysis is involved anywhere.
+//! The algebraic statement is compact. `QcgaBasis` declares three positive
+//! generators and six nominal null pairs. Point and dual-quadric coefficient
+//! records declare their sparse supports by field name. One
+//! `CompileNamedVectorDotF32<PointCoefficients,
+//! QcgaDualQuadricCoefficients, QcgaMetric>` expands incidence into
+//! straight-line arithmetic; no generator IDs, masks, sign table, or
+//! demo-local compiler appears here.
 //!
-//! THE PROGRAM IS THE ACTOR. `PencilRaster` owns the solved frame and its two
-//! GPU behaviors consume that state. The vertex behavior does the QCGA work
-//! (project the template vertex onto the constraint surface); the fragment
-//! behavior shades the interpolated result. `RasterVertex<SurfaceVarying>` is
-//! their nominal typed handoff: clip position has its standard meaning and the
-//! compiler derives the varying interface from the Fe type rather than from
-//! field names, numeric locations, or a second interface description.
+//! Because point/quadric incidence is linear in the ten dual-quadric
+//! coefficients, “quadrics through nine points” is exactly the nullspace of a
+//! 9 x 10 incidence matrix. The solver constructs every matrix entry with that
+//! same generated incidence evaluator. Nine generic points give rank nine and
+//! one projective quadric. The chosen nine points lie on the intersection of a
+//! sphere and cone, impose only eight independent conditions, and leave a
+//! two-dimensional nullspace: a projective pencil containing cylinders,
+//! spheres, cones, plane pairs, and hyperboloids. Move one point off the curve
+//! and the freedom closes. No nonlinear fitting or separate polynomial table
+//! is involved.
 //!
-//! Rendering model: ordinary rasterization, no raycasting and no path tracing.
-//! A template direction sphere is generated procedurally from the vertex index
-//! and each vertex is projected radially onto the current pencil member by
-//! solving q(c + t d) = 0, whose three coefficients are three planned QCGA
-//! contractions (the polynomial is exactly quadratic along the line, so three
-//! evaluations determine it). The surface normal is six more contractions
-//! (central differences are EXACT for a quadric), and each emitted vertex
-//! re-checks its own incidence with a final contraction: ten planned sparse
-//! contractions per vertex, all in the vertex behavior. The fragment behavior
-//! contains no QCGA at all, only per-pixel shading of the interpolated
-//! handoff. Directions on which the constraint has no solution emit clipped
-//! vertices, so the mesh visibly TEARS along the asymptotic cone when the
-//! surface changes topology. Nothing smooths over that; the tear is the
-//! constraint speaking.
+//! The sole shipped GPU view is the iterative fragment-surface DE actor in
+//! `qcga_pencil_de`. The radial projection code retained below is a historical
+//! zero-import CPU/Wasm oracle for geometry and topology; it is deliberately
+//! not an actor, gallery tile, or alternate renderer. Its names and comments
+//! say “oracle” wherever that distinction matters.
 //!
-//! Honesty registers, binding on every consumer of this ingot:
-//! - No GPU performance claims, anywhere, of any kind.
-//! - Any GPU-rendered result shown on the development host is software
-//!   rendered (SwiftShader or lavapipe; there is no real Vulkan adapter), and
-//!   every surface that displays such a result must say so out loud.
-//! - No `Par` parallelism claims; no shipped `Par` provider executes anything
-//!   in parallel today.
-//! - The compiler recognizes the authored raster pair and lowers both Fe
-//!   behaviors into one typed WebGPU pipeline. No fullscreen envelope or host
-//!   shader substitutes for either body.
+//! No parallel-execution claim is made: FCO removes runtime algebra structure
+//! and exposes straight-line work inside one invocation, but it does not spawn
+//! GPU lanes. Browser GPU availability remains an external execution fact.
 
 use core::marker::Copy
-use core::actor::InitialState
-use core::{AllocatedBrowserBytes, BrowserBytes, HostEffect, MainThread}
+use core::AllocatedBrowserBytes
 use core::effect_ref::alloc_bytes
 use core::num::IntDowncast
 use std::webgpu::{
     ClipPosition,
-    Dispatch,
-    FragmentStage,
-    GpuProgram,
-    LatestPerFrame,
     RasterVertex,
-    SurfaceScheduling,
-    SurfaceTransition,
-    TriangleList,
-    VertexStage,
-    WebGpuBackend,
 }
 use std::web::view::{
     ApplyParamBindings,
@@ -84,13 +52,15 @@ use std::web::view::{
     SurfaceState,
 }
 use ga_expr::{
-    AlgebraicBalanced, CompileVectorScalarF32, EvaluateVectorScalarF32, GaProgram,
-    MetricSum, MetricTerm, MetricZero, ScalarProduct, SparseSymmetricMetric,
-    VectorInput,
+    BasisMetric, CompileNamedVectorDotF32, EvaluateVectorScalarF32,
+    Null, Positive, Prime,
 }
 use fmath::{
     PI, TAU, Vec3, abs, clamp01, cos, dot3, from_i32, max, min,
-    normalize3, rgba, sin, sqrt, vec3,
+    mix, normalize3, rgba, sin, sqrt, vec3,
+}
+use gallery_palette::{
+    clean_white, electric_blue, evidence_gold, spring_green, theorem_gold,
 }
 
 extern {
@@ -98,44 +68,31 @@ extern {
 }
 
 // ---------------------------------------------------------------------------
-// Sparse structural QCGA incidence.
+// Named structural QCGA incidence.
 //
 // The metric and expression below are ordinary Fe type data consumed by the
-// shared `ga_expr` vector-scalar provider. Unlike the retired local provider,
-// this contains no 144-candidate mask, recursive twelve-term plan, or 24-way
-// field-selection ladder. The six null pairs are the actual sparse symmetric
-// metric; input supports determine which oriented products survive.
+// shared `ga_expr` named-vector-dot provider. The basis and two coefficient
+// record types are the complete authoring surface; FCO derives dimension,
+// support alignment, pair routing, signs, and balanced scalar arithmetic.
 // ---------------------------------------------------------------------------
 
-type QcgaMetricTerms = MetricSum<
-    MetricTerm<0, 0, 1, 0>,
-    MetricSum<
-        MetricTerm<1, 1, 1, 0>,
-        MetricSum<
-            MetricTerm<2, 2, 1, 0>,
-            MetricSum<
-                MetricTerm<3, 9, 1, 1>,
-                MetricSum<
-                    MetricTerm<4, 10, 1, 1>,
-                    MetricSum<
-                        MetricTerm<5, 11, 1, 1>,
-                        MetricSum<
-                            MetricTerm<6, 12, 1, 1>,
-                            MetricSum<
-                                MetricTerm<7, 13, 1, 1>,
-                                MetricSum<MetricTerm<8, 14, 1, 1>, MetricZero>,
-                            >,
-                        >,
-                    >,
-                >,
-            >,
-        >,
-    >,
->
-type QcgaMetric = SparseSymmetricMetric<15, QcgaMetricTerms>
+struct Pair1 {}
+struct Pair2 {}
+struct Pair3 {}
+struct Pair4 {}
+struct Pair5 {}
+struct Pair6 {}
+struct QcgaBasis {
+    e1: Positive, e2: Positive, e3: Positive,
+    eo1: Null<Pair1>, eo2: Null<Pair2>, eo3: Null<Pair3>,
+    eo4: Null<Pair4>, eo5: Null<Pair5>, eo6: Null<Pair6>,
+    ei1: Prime<Pair1>, ei2: Prime<Pair2>, ei3: Prime<Pair3>,
+    ei4: Prime<Pair4>, ei5: Prime<Pair5>, ei6: Prime<Pair6>,
+}
+type QcgaMetric = BasisMetric<QcgaBasis>
 
-// Point coefficients occupy generators {0..5, 9..14}; dual quadrics occupy
-// {0..11}. Both are packed in ascending generator order at runtime.
+// Field presence states sparse support. Field order need not match basis order;
+// the provider aligns each coefficient to the basis by reflected field name.
 struct QcgaPointCoefficients {
     e1: f32, e2: f32, e3: f32,
     eo1: f32, eo2: f32, eo3: f32,
@@ -146,17 +103,13 @@ struct QcgaDualQuadricCoefficients {
     eo1: f32, eo2: f32, eo3: f32, eo4: f32, eo5: f32, eo6: f32,
     ei1: f32, ei2: f32, ei3: f32,
 }
-type QcgaPoint = VectorInput<QcgaPointCoefficients, 32319>
-type QcgaDualQuadric = VectorInput<QcgaDualQuadricCoefficients, 4095>
-type QcgaIncidence = ScalarProduct<QcgaPoint, QcgaDualQuadric>
-
 struct SparseIncidenceOperands {
     point: QcgaPointCoefficients,
     quadric: QcgaDualQuadricCoefficients,
 }
 
-derive EvaluateVectorScalarF32 for SparseIncidenceOperands using CompileVectorScalarF32<
-    GaProgram<QcgaIncidence, QcgaMetric, AlgebraicBalanced>
+derive EvaluateVectorScalarF32 for SparseIncidenceOperands using CompileNamedVectorDotF32<
+    QcgaPointCoefficients, QcgaDualQuadricCoefficients, QcgaMetric,
 >
 
 fn embed_qcga_point(x: f32, y: f32, z: f32) -> QcgaPointCoefficients {
@@ -182,7 +135,7 @@ fn embed_qcga_dual_quadric(
     }
 }
 
-pub fn qcga3d_incidence_planned(
+pub fn qcga3d_incidence(
     x: f32, y: f32, z: f32,
     a: f32, b: f32, c: f32, d: f32, e: f32,
     f: f32, g: f32, h: f32, i: f32, j: f32,
@@ -205,11 +158,11 @@ pub struct Quadric {
 }
 impl Copy for Quadric {}
 
-/// Point/quadric incidence through the planned sparse contraction. Every use
-/// of "does this point lie on this surface" in this ingot flows through here;
-/// there is no second evaluation path to drift from.
+/// Point/quadric incidence through the FCO-generated named-basis dot product.
+/// Every use of "does this point lie on this surface" in this ingot flows
+/// through here; there is no second polynomial evaluation path to drift from.
 pub fn eval_quadric(_ q: Quadric, _ x: f32, _ y: f32, _ z: f32) -> f32 {
-    qcga3d_incidence_planned(
+    qcga3d_incidence(
         x: x, y: y, z: z,
         a: q.a, b: q.b, c: q.c, d: q.d, e: q.e,
         f: q.f, g: q.g, h: q.h, i: q.i, j: q.j,
@@ -233,13 +186,14 @@ pub const SHEET_VERTS: u32 = ROWS * COLS * 6
 pub const VERTEX_COUNT: u32 = 2 * SHEET_VERTS
 /// Six screen-facing vertices for each of the nine editable constraints.
 pub const CONTROL_VERTEX_COUNT: u32 = 9 * 6
-/// Compiler-derived authored-raster draw count: analytic surface plus controls.
-pub const RASTER_VERTEX_COUNT: u32 = VERTEX_COUNT + CONTROL_VERTEX_COUNT
+/// Size of the retained historical projection oracle: analytic surface plus
+/// control markers. The live gallery renderer is the distance estimator.
+pub const ORACLE_SCENE_VERTEX_COUNT: u32 = VERTEX_COUNT + CONTROL_VERTEX_COUNT
 pub const PENCIL_RESOLUTION: f32 = 512.0
 
 static_assert(SHEET_VERTS == 6912)
 static_assert(VERTEX_COUNT == 13824)
-static_assert(RASTER_VERTEX_COUNT == 13878)
+static_assert(ORACLE_SCENE_VERTEX_COUNT == 13878)
 
 /// Roots below this parameter are treated as the centre itself, not a hit.
 pub const T_MIN: f32 = 0.001
@@ -316,8 +270,7 @@ pub fn control_point(_ points: ControlPoints, _ picked: PickedControl) -> Contro
     }
 }
 
-/// Shader-side projection uses the vertex-derived numeric index directly. The
-/// index is bounded by `TriangleList<RASTER_VERTEX_COUNT>` construction, while
+/// The historical projection oracle uses its generated vertex index directly;
 /// the browser-facing selection lane retains its closed `PickedControl` type.
 pub fn control_point_at_index(_ points: ControlPoints, _ index: u32) -> ControlPoint {
     if index == 0 { return ControlPoint { x: points.p0x, y: points.p0y, z: points.p0z } }
@@ -383,8 +336,7 @@ pub struct PencilBasis {
     pub cy: f32,
     pub cz: f32,
     /// 1.0 when the solver found rank <= 8 (the pencil is unlocked), else 0.0.
-    /// Read by the fragment behavior for the warm tint, so the degenerate
-    /// state is visible without any host-side presentation logic.
+    /// This is algebraic evidence exposed to the renderer, not a hue switch.
     pub pencil_free: f32,
     pub a0: f32, pub b0: f32, pub c0: f32, pub d0: f32, pub e0: f32,
     pub f0: f32, pub g0: f32, pub h0: f32, pub i0: f32, pub j0: f32,
@@ -393,10 +345,9 @@ pub struct PencilBasis {
 }
 impl Copy for PencilBasis {}
 
-/// The state slice both GPU behaviors read (at runtime: the program's uniform
-/// block). Its two nominal subrecords make mutable presentation state and the
-/// solved mathematical certificate distinct while the compiler recursively
-/// derives one flat GPU ABI.
+/// The Fe-owned state shared by the live distance estimator and the retained
+/// projection oracle. Its two nominal subrecords keep mutable presentation
+/// state distinct from the solved mathematical certificate.
 pub struct PencilFrame {
     pub view: PencilControls,
     pub basis: PencilBasis,
@@ -427,8 +378,7 @@ pub const fn pencil_params() -> PencilParams {
     }
 }
 
-/// The one surface declaration shared by the raster and distance-estimator
-/// views. A companion renderer cannot silently drift in extent or controls.
+/// The canonical distance-estimator surface declaration.
 pub const fn pencil_view() -> Surface<PencilParams> {
     Surface {
         extent: Extent::square(512),
@@ -458,10 +408,9 @@ pub fn pencil_member(_ frame: PencilFrame) -> Quadric {
     }
 }
 
-/// THE TYPED HANDOFF between the actor's two GPU behaviors: interpolated
-/// surface data shading needs. Clip position is deliberately absent because
-/// `RasterVertex` gives it a distinct standard type; no field order or name in
-/// this record carries a hidden raster meaning.
+/// Historical nominal payload between the projection and material oracles.
+/// It remains useful as an independent regression lane; the live distance
+/// estimator computes its own hit and normal instead of interpolating this.
 pub struct SurfaceVarying {
     pub nx: f32,
     pub ny: f32,
@@ -471,10 +420,9 @@ pub struct SurfaceVarying {
     pub glow: f32,
     /// 0.0 for the near sheet, 1.0 for the far sheet.
     pub sheet: f32,
-    /// 1.0 when this vertex failed its own incidence receipt (beyond the f32
-    /// cancellation budget at its distance). The fragment behavior turns it
-    /// magenta instead of quietly drawing it; the acceptance test asserts it
-    /// never fires on honest frames and DOES fire on corrupted ones.
+    /// 1.0 when this sample failed its own incidence receipt (beyond the f32
+    /// cancellation budget at its distance). The oracle material makes the
+    /// failure visible; acceptance tests require honest frames to remain zero.
     pub accuse: f32,
     /// 1.0 for a screen-facing editable constraint marker, 0.0 for the
     /// analytic surface. This remains a typed varying, not a second pipeline.
@@ -482,8 +430,9 @@ pub struct SurfaceVarying {
 }
 impl Copy for SurfaceVarying {}
 
-/// Everything the vertex behavior knows, for the verification lanes. The
-/// GPU-facing `SurfaceVarying` is a strict projection of this.
+/// Full radial-projection evidence for the independent verification lanes.
+/// `SurfaceVarying` is the smaller historical material payload projected from
+/// it.
 pub struct SurfaceSample {
     pub x: f32,
     pub y: f32,
@@ -501,9 +450,8 @@ pub struct SurfaceSample {
     pub hx: f32,
     pub hy: f32,
     pub hz: f32,
-    /// The vertex's own incidence receipt: the planned contraction of the
-    /// emitted point against the current pencil member. Near zero on every
-    /// honest hit.
+    /// This sample's own generated incidence receipt against the current
+    /// pencil member. Near zero on every honest hit.
     pub residual: f32,
     /// Discriminant of the radial quadratic; approaches zero at the tear.
     pub disc: f32,
@@ -593,15 +541,14 @@ pub fn pencil_ray(_ frame: PencilFrame, _ u: f32, _ v: f32) -> PencilRay {
     }
 }
 
-/// Per-vertex QCGA projection onto the current pencil member.
+/// Historical per-vertex QCGA projection onto the current pencil member.
 ///
 /// Per vertex: decode the template direction from the vertex index; three
-/// planned contractions determine the exact quadratic q(c + t d) along the
+/// generated incidences determine the exact quadratic q(c + t d) along the
 /// radial line; the stable root pair picks this sheet's parameter; six more
-/// contractions give the exact surface normal (central differences are exact
-/// on a quadric); one final contraction is the emitted point's own incidence
-/// receipt. Ten planned 12-term sparse contractions per vertex, no loops over
-/// blades, and no QCGA anywhere else in the pipeline.
+/// incidences give the exact surface normal (central differences are exact on
+/// a quadric); one final incidence is the emitted point's own receipt. FCO
+/// erases the named-basis dot products to ordinary scalar arithmetic.
 fn sample_vertex(_ vid: u32, _ frame: PencilFrame) -> SurfaceSample {
     let sheet: u32 = vid / SHEET_VERTS
     let sheet_f: f32 = from_i32(sheet.downcast_truncate())
@@ -639,7 +586,7 @@ fn sample_vertex(_ vid: u32, _ frame: PencilFrame) -> SurfaceSample {
     let dz: f32 = st * sin(phi)
 
     // The radial constraint: q(c + t d) is EXACTLY alpha t^2 + beta t + qc,
-    // and three planned contractions pin all three coefficients.
+    // and three generated incidence evaluations pin all three coefficients.
     let q: Quadric = pencil_member(frame)
     let qc: f32 = eval_quadric(q, frame.basis.cx, frame.basis.cy, frame.basis.cz)
     let qp: f32 = eval_quadric(q, frame.basis.cx + dx, frame.basis.cy + dy, frame.basis.cz + dz)
@@ -698,8 +645,8 @@ fn sample_vertex(_ vid: u32, _ frame: PencilFrame) -> SurfaceSample {
     let hy: f32 = frame.basis.cy + dy * t
     let hz: f32 = frame.basis.cz + dz * t
 
-    // The emitted point's own incidence receipt, through the same planned
-    // contraction the solver used to build the constraint matrix.
+    // The emitted point's own incidence receipt, through the same generated
+    // dot product the solver used to build the constraint matrix.
     let residual: f32 = eval_quadric(q, hx, hy, hz)
     let accuse: f32 =
         if abs(residual) > 0.004 * (1.0 + t * t) { 1.0 } else { 0.0 }
@@ -738,62 +685,31 @@ fn sample_vertex(_ vid: u32, _ frame: PencilFrame) -> SurfaceSample {
 }
 
 // ---------------------------------------------------------------------------
-// THE DOMAIN STATE and THE GPU ACTOR.
+// HISTORICAL CPU/WASM RADIAL-PROJECTION ORACLE.
 //
-// `PencilSurface` remains an ordinary owned value used by the deterministic
-// solver/message verification lanes below. `PencilRaster` is the actual GPU
-// actor: one program owning one solved `PencilFrame`, with a nominal authored
-// vertex/fragment pair. Both paths call the same ordinary Fe constructions;
-// the CPU stream is an oracle lane, not a second renderer or stage interface.
-//
-// The remaining message target is:
-//
-//     msg SurfaceMsg {
-//         Drag { index: u32, x: f32, y: f32, z: f32 },
-//         SetLambda { value: f32 },
-//         Orbit { yaw: f32, pitch: f32, dist: f32 },
-//     }
-//
-//     pub actor PencilSurface {
-//         mut state: SurfaceState
-//
-//         init() uses (mut state) { ... defaults + resolve ... }
-//
-//         recv SurfaceMsg {
-//             Drag { index, x, y, z } uses (mut state) { ... resolve ... }
-//             ...
-//         }
-//
-//         behavior vertex(vid: u32) -> RasterVertex<SurfaceVarying>
-//             uses (state, VertexStage<SurfaceVarying, TriangleList<VERTEX_COUNT>>) { ... }
-//
-//         behavior fragment(v: SurfaceVarying) -> u32
-//             uses (state, FragmentStage<SurfaceVarying>) { ... }
-//     }
-//
-// `recv` remains contract-only, so interaction still round-trips through the
-// canonical lanes. Raster placement itself no longer uses a demo-local trait,
-// adapter, location table, or fullscreen-stage substitute.
+// The live gallery surface is the distance estimator in `qcga_pencil_de`.
+// This ordinary Fe value retains the earlier radial mesh construction only as
+// independent semantic evidence for solver, projection, and material tests.
 // ---------------------------------------------------------------------------
 
-pub struct PencilSurface {
+pub struct RadialProjectionOracle {
     /// Primary state: the nine dragged points.
     pub points: ControlPoints,
-    /// Derived state both GPU behaviors read; rebuilt by `resolve`.
+    /// Solved frame sampled by the projection and material oracle methods.
     pub frame: PencilFrame,
     /// Rank of the incidence system at the last resolve.
     pub rank: u32,
     /// Worst incidence receipt of the published basis at the last resolve.
     pub residual: f32,
 }
-impl Copy for PencilSurface {}
+impl Copy for RadialProjectionOracle {}
 
-impl PencilSurface {
-    /// Boot the actor in the quirky state: nine points on the sphere-cone
+impl RadialProjectionOracle {
+    /// Boot the oracle in the quirky state: nine points on the sphere-cone
     /// intersection curve, already resolved (rank 8, pencil unlocked).
-    pub fn spawn() -> PencilSurface {
+    pub fn spawn() -> RadialProjectionOracle {
         let initial = defaults(request: DefaultsRequest { generation: 0 })
-        let mut actor = PencilSurface {
+        let mut oracle = RadialProjectionOracle {
             points: ControlPoints {
                 p0x: initial.p0x, p0y: initial.p0y, p0z: initial.p0z,
                 p1x: initial.p1x, p1y: initial.p1y, p1z: initial.p1z,
@@ -823,11 +739,11 @@ impl PencilSurface {
             rank: 0,
             residual: 0.0,
         }
-        actor.resolve()
-        actor
+        oracle.resolve()
+        oracle
     }
 
-    /// Message: move one control point. The actor immediately re-solves so it
+    /// Move one control point. The oracle immediately re-solves so it
     /// is never displayed in a state its own constraints do not certify.
     pub fn drag(mut self, _ index: u32, _ x: f32, _ y: f32, _ z: f32) {
         if index == 0 {
@@ -938,26 +854,23 @@ impl PencilSurface {
         self.frame.basis.j1 = q1[9]
     }
 
-    /// CPU oracle projection of the same authored vertex construction.
+    /// Project one vertex of the retained radial construction.
     pub fn vertex(self, _ vid: u32) -> RasterVertex<SurfaceVarying> {
-        raster_vertex(vid, self.frame)
+        oracle_vertex(vid, self.frame)
     }
 
-    /// GPU behavior (fragment): shading only, no QCGA. Reads the interpolated
-    /// typed handoff plus the actor state it shares with the vertex behavior
-    /// (`pencil_free` drives the warm tint), and turns any vertex
-    /// self-accusation into visible magenta rather than a quiet pixel.
-    pub fn fragment(self, _ v: SurfaceVarying) -> u32 {
+    /// Material sample for a projected payload; the algebra stays in the
+    /// projection and the shared Fe material stays directly testable.
+    pub fn material(self, _ v: SurfaceVarying) -> u32 {
         shade_varying(v, self.frame)
     }
 }
 
 // ---------------------------------------------------------------------------
-// One standard authored-raster construction shared by the GPU actor and CPU
-// verification lanes.
+// Retained radial projection construction for CPU/Wasm verification lanes.
 // ---------------------------------------------------------------------------
 
-fn raster_vertex(_ vid: u32, _ frame: PencilFrame) -> RasterVertex<SurfaceVarying> {
+fn oracle_vertex(_ vid: u32, _ frame: PencilFrame) -> RasterVertex<SurfaceVarying> {
     let s: SurfaceSample = sample_vertex(vid, frame)
     RasterVertex {
         position: ClipPosition { x: s.x, y: s.y, z: s.z, w: s.w },
@@ -1015,18 +928,20 @@ fn control_marker_vertex(
     }
 }
 
-fn authored_raster_vertex(
+fn oracle_scene_vertex(
     _ vid: u32,
     _ points: ControlPoints,
     _ frame: PencilFrame,
 ) -> RasterVertex<SurfaceVarying> {
-    if vid < VERTEX_COUNT { raster_vertex(vid, frame) }
+    if vid < VERTEX_COUNT { oracle_vertex(vid, frame) }
     else { control_marker_vertex(vid, points, frame) }
 }
 
-/// Shared Fe material for both the authored mesh and the DE surface. `view`
-/// points from camera toward the surface; two-sided lighting is intentional
-/// because the pencil contains open and orientation-flipping members.
+/// Stable Fe material shared by the live DE renderer and retained oracle.
+/// `view` points from camera toward the surface. Signed normal components do
+/// not determine the base colour: a projective quadric may reverse its
+/// representative without changing its zero set, and its material must not
+/// flash to a complementary palette when that happens.
 pub fn pencil_material(
     _ normal: Vec3,
     _ view: Vec3,
@@ -1036,31 +951,43 @@ pub fn pencil_material(
 ) -> Vec3 {
     let normal: Vec3 = normalize3(normal)
     let view: Vec3 = normalize3(view)
-    let lit: f32 = 0.18 + 0.82 * abs(dot3(normal, vec3(LX, LY, LZ)))
+    let lit: f32 = 0.80 + 0.20 * abs(dot3(normal, vec3(LX, LY, LZ)))
     let facing: f32 = abs(dot3(normal, view))
     let tangent: f32 = 1.0 - facing
-    let sheen2: f32 = tangent * tangent
-    let sheen: f32 = sheen2 * sheen2
-    let normal_r: f32 = 0.5 + 0.5 * normal.x
-    let normal_g: f32 = 0.5 + 0.5 * normal.y
-    let normal_b: f32 = 0.5 + 0.5 * normal.z
-    let warm: f32 = clamp01(frame.basis.pencil_free)
+    let sheen: f32 = tangent * tangent * 0.16
     let sheet: f32 = clamp01(sheet)
     let glow: f32 = clamp01(glow)
+    // Rank/pencil freedom is algebraic evidence, not a material coordinate.
+    // Dragging one point commonly changes rank 8 -> 9; coupling hue to that
+    // discrete fact made the whole surface jump from orange to purple.
+    // Absolute normal components retain orientation-tracking colour while
+    // remaining invariant under the projective reversal n -> -n. The surface
+    // moves between the shared electric blue and spring green; gold is
+    // reserved for grazing sheen and interaction evidence.
+    let cool = electric_blue()
+    let warm = spring_green()
+    let gold = theorem_gold()
+    let white = clean_white()
+    let chroma: f32 = clamp01(0.18 + 0.68 * abs(normal.y) + 0.14 * sheet)
+    let base_r: f32 = mix(cool.red, warm.red, chroma)
+    let base_g: f32 = mix(cool.green, warm.green, chroma)
+    let base_b: f32 = mix(cool.blue, warm.blue, chroma)
     vec3(
-        lit * (0.10 + 0.60 * normal_r + 0.20 * warm) + glow * 0.48 + sheen * 0.70,
-        lit * (0.12 + 0.62 * normal_g + 0.12 * sheet) + glow * 0.20 + sheen * 0.42,
-        lit * (0.18 + 0.66 * normal_b + 0.20 * (1.0 - sheet)) + glow * 0.62 + sheen * 0.88,
+        lit * base_r + glow * white.red * 0.20 + sheen * gold.red,
+        lit * base_g + glow * white.green * 0.20 + sheen * gold.green,
+        lit * base_b + glow * white.blue * 0.20 + sheen * gold.blue,
     )
 }
 
 fn shade_varying(_ v: SurfaceVarying, _ frame: PencilFrame) -> u32 {
     if v.marker > 0.5 {
         let phase: f32 = clamp01(v.glow)
+        let gold = theorem_gold()
+        let white = clean_white()
         return __bitcast(rgba(
-            1.0,
-            0.28 + 0.65 * phase,
-            0.12 + 0.78 * (1.0 - phase),
+            mix(gold.red, white.red, phase),
+            mix(gold.green, white.green, phase),
+            mix(gold.blue, white.blue, phase),
         ))
     }
     let color: Vec3 = pencil_material(
@@ -1074,9 +1001,10 @@ fn shade_varying(_ v: SurfaceVarying, _ frame: PencilFrame) -> u32 {
     let mut grn: f32 = color.y
     let mut blu: f32 = color.z
     if v.accuse > 0.5 {
-        red = 1.0
-        grn = 0.0
-        blu = 1.0
+        let evidence = evidence_gold()
+        red = evidence.red
+        grn = evidence.green
+        blu = evidence.blue
     }
     __bitcast(rgba(red, grn, blu))
 }
@@ -1281,90 +1209,18 @@ pub fn transition_pencil_scene(
     }
 }
 
-/// The actual raster program. `V` is named once in each role; the compiler
-/// proves both roles refer to this exact nominal type and derives all varying
-/// locations recursively.
-actor PencilRaster uses (GpuProgram<WebGpuBackend>) {
-    frame: PencilFrame,
-    points: ControlPoints,
-    picked: PickedControl,
-
-    const fn view() -> Surface<PencilParams> {
-        pencil_view()
-    }
-
-    /// Compute the full solved frame in Fe once at boot. Only the four view
-    /// controls are declared above; the 25 derived leaves never become a
-    /// parallel host defaults table.
-    fn initial() -> PencilSceneState uses (InitialState) {
-        initial_pencil_scene()
-    }
-
-    /// Raw browser facts enter one FCO-derived four-field Fe transition, then
-    /// update the corresponding leaves of the nominal solved frame. The fixed
-    /// host neither interprets orbit/zoom policy nor mutates uniform slots.
-    fn navigate(self, event: own SurfaceEvent) -> PencilSceneState
-        uses (SurfaceTransition, SurfaceScheduling<LatestPerFrame>)
-    {
-        transition_pencil_scene(
-            PencilSceneState {
-                frame: self.frame,
-                points: self.points,
-                picked: self.picked,
-            },
-            event,
-        )
-    }
-
-    fn surface_vertex(self, vertex_index: u32) -> RasterVertex<SurfaceVarying>
-        uses (VertexStage<SurfaceVarying, TriangleList<RASTER_VERTEX_COUNT>>)
-    {
-        authored_raster_vertex(vertex_index, self.points, self.frame)
-    }
-
-    fn surface_fragment(self, varying: SurfaceVarying) -> u32
-        uses (FragmentStage<SurfaceVarying>)
-    {
-        shade_varying(varying, self.frame)
-    }
-}
-
-pub struct RenderResponse {
-    pub submitted: bool,
-}
-
-// Nominal host-effect lane. The browser runtime dispatches this schema to its
-// WebGPU actor; this Fe body is never presented as GPU execution. Whenever a
-// frame produced through this lane is displayed on the development host, the
-// display is software rendering (SwiftShader or lavapipe) and the surface
-// showing it must say so.
-pub fn render(_request: own PencilFrame) -> RenderResponse
-    uses (HostEffect, MainThread, mut Dispatch<WebGpuBackend>)
-{
-    RenderResponse { submitted: false }
-}
-
-// Nominal host-effect lane for explicit GPU readback of the rasterized frame,
-// the comparison target for `mesh_oracle`. Same software-rendering disclosure
-// as `render`.
-pub fn verify(_request: own PencilFrame) -> BrowserBytes
-    uses (HostEffect, MainThread, mut Dispatch<WebGpuBackend>)
-{
-    BrowserBytes { ptr: 0, len: 0 }
-}
-
 // ---------------------------------------------------------------------------
 // The solver: nine points to a pencil, entirely through linear incidence.
 // ---------------------------------------------------------------------------
 
-/// One entry of the 9 x 10 incidence matrix: the planned QCGA contraction of
+/// One entry of the 9 x 10 incidence matrix: the generated QCGA incidence of
 /// the embedded point against the k-th basis dual quadric. The linear system
 /// is the incidence operator by construction; there is no separately derived
 /// Veronese table to drift from it.
 fn incidence_row_entry(_ x: f32, _ y: f32, _ z: f32, _ k: usize) -> f32 {
     let mut unit: [f32; 10] = [0.0; 10]
     unit[k] = 1.0
-    qcga3d_incidence_planned(
+    qcga3d_incidence(
         x: x, y: y, z: z,
         a: unit[0], b: unit[1], c: unit[2], d: unit[3], e: unit[4],
         f: unit[5], g: unit[6], h: unit[7], i: unit[8], j: unit[9],
@@ -1575,7 +1431,7 @@ pub fn solve_pencil(_ pts: [f32; 27]) -> PencilSolution {
     }
 
     // The receipt: the worst incidence of the returned surfaces over all nine
-    // points, measured by the SAME planned contraction the vertex stage runs.
+    // points, measured by the same generated incidence used everywhere else.
     let qa: Quadric = Quadric {
         a: q0[0], b: q0[1], c: q0[2], d: q0[3], e: q0[4],
         f: q0[5], g: q0[6], h: q0[7], i: q0[8], j: q0[9],
@@ -1627,14 +1483,13 @@ pub fn solve_points(_ pts: [f32; 27]) -> SolvedState {
 }
 
 // ---------------------------------------------------------------------------
-// Canonical wasm lanes: the actor's message surface, FLATTENED.
+// Canonical Wasm lanes: the domain message surface, flattened.
 //
 // Today's canonical lanes are stateless free functions, so each message must
 // carry the full state it needs and the actor state round-trips through the
-// host between messages. Under the target model, `defaults` is the spawn
-// payload, `solve` is the Drag/resolve arm, and `probe` / `mesh_oracle` are
-// verification behaviors reading actor state. The flattening is a recorded
-// tooling gap, not a design choice.
+// host between messages. `defaults` and `solve` are the domain transitions;
+// `probe` and `mesh_oracle` retain independent evidence for the former radial
+// projection. The flattening is a recorded tooling gap, not a design choice.
 // ---------------------------------------------------------------------------
 
 pub struct DefaultsRequest {
@@ -1662,8 +1517,8 @@ pub struct SolveResponse {
     /// general position (the response still carries the first two basis
     /// surfaces and reports the honest rank).
     pub rank: u32,
-    /// Worst planned-contraction incidence of the returned basis surfaces
-    /// over all nine points.
+    /// Worst generated incidence of the returned basis surfaces over all nine
+    /// points.
     pub residual: f32,
     pub cx: f32,
     pub cy: f32,
@@ -1727,11 +1582,11 @@ pub fn solve(request: own SolveRequest) -> SolveResponse {
     }
 }
 
-/// Rehydrate a `PencilSurface` from its wire-form state slice. This function
-/// existing at all is the statelessness gap made visible: under the target
-/// model the actor holds its state and no lane needs to rebuild it.
-fn actor_from_frame(_ frame: PencilFrame) -> PencilSurface {
-    PencilSurface {
+/// Rehydrate the radial oracle from its wire-form state slice. Its existence
+/// makes the current stateless lane boundary visible; a resident Fe component
+/// can retain the frame directly.
+fn oracle_from_frame(_ frame: PencilFrame) -> RadialProjectionOracle {
+    RadialProjectionOracle {
         points: ControlPoints {
             p0x: 0.0, p0y: 0.0, p0z: 0.0,
             p1x: 0.0, p1y: 0.0, p1z: 0.0,
@@ -1778,8 +1633,7 @@ pub struct ProbeResponse {
     pub glow: f32,
     pub sheet: f32,
     pub accuse: f32,
-    /// The fragment behavior's color for this vertex's own (un-interpolated)
-    /// handoff: what the pipeline computes AT the vertex.
+    /// Material-oracle color for this vertex's own un-interpolated payload.
     pub rgba: u32,
     pub t: f32,
     pub hx: f32,
@@ -1790,13 +1644,11 @@ pub struct ProbeResponse {
     pub missed: u32,
 }
 
-/// Single-vertex verification lane: runs BOTH behaviors of the actor for one
-/// vertex, exactly as declared (vertex, then fragment on the vertex's own
-/// handoff), and returns the full evidence. The acceptance test drives this
-/// lane; a future raster pipeline is verified against it, with the stated
-/// caveat that between vertices the GPU shades INTERPOLATED handoffs.
+/// Single-vertex verification lane for the historical radial projection. It
+/// returns full hit evidence plus the material evaluated at that sample; the
+/// live DE renderer is tested separately by ray oracles.
 pub fn probe(request: own VertexProbe) -> ProbeResponse {
-    let actor: PencilSurface = actor_from_frame(PencilFrame {
+    let oracle: RadialProjectionOracle = oracle_from_frame(PencilFrame {
         view: PencilControls {
             lambda: request.lambda,
             yaw: request.yaw,
@@ -1813,12 +1665,12 @@ pub fn probe(request: own VertexProbe) -> ProbeResponse {
             f1: request.f1, g1: request.g1, h1: request.h1, i1: request.i1, j1: request.j1,
         },
     })
-    let s: SurfaceSample = sample_vertex(request.vid, actor.frame)
+    let s: SurfaceSample = sample_vertex(request.vid, oracle.frame)
     let v: SurfaceVarying = SurfaceVarying {
         nx: s.nx, ny: s.ny, nz: s.nz,
         glow: s.glow, sheet: s.sheet, accuse: s.accuse, marker: 0.0,
     }
-    let color: u32 = actor.fragment(v)
+    let color: u32 = oracle.material(v)
     ProbeResponse {
         generation: request.generation,
         x: s.x, y: s.y, z: s.z, w: s.w,
@@ -1861,19 +1713,14 @@ fn append_clip_and_color(_ vertex: RasterVertex<SurfaceVarying>, _ color: u32) {
     append_word(color)
 }
 
-/// The complete CPU-side vertex stream: for every vertex, the clip position
-/// the vertex behavior emits and the fragment behavior's color for that
-/// vertex's own handoff. 20 bytes per vertex (4 x f32 LE, then RGBA8 as one
-/// LE u32), `VERTEX_COUNT` vertices in vid order. This is the canonical
-/// comparison target for a raster pipeline claiming to run these behaviors
-/// on the GPU (vertex stream against vertex stream; between vertices the GPU
-/// shades interpolated handoffs, which this stream deliberately does not
-/// model). Any GPU frame shown from it on the development host is software
-/// rendering (SwiftShader or lavapipe) and must be labeled so.
+/// Complete historical radial-oracle stream: clip position plus material at
+/// each un-interpolated analytic vertex. The 20-byte records (4 x f32 LE plus
+/// RGBA8 as one LE u32) remain a deterministic regression artifact; they are
+/// not the live gallery renderer and make no claim about between-vertex color.
 pub fn mesh_oracle(request: own PencilFrame) -> AllocatedBrowserBytes {
-    let actor: PencilSurface = actor_from_frame(request)
-    let first_v: RasterVertex<SurfaceVarying> = actor.vertex(0)
-    let first_color: u32 = actor.fragment(first_v.varying)
+    let oracle: RadialProjectionOracle = oracle_from_frame(request)
+    let first_v: RasterVertex<SurfaceVarying> = oracle.vertex(0)
+    let first_color: u32 = oracle.material(first_v.varying)
     let first_word: u32 = __bitcast(first_v.position.x)
     let head = alloc_bytes(1)
     head.write(first_word.downcast_truncate())
@@ -1887,8 +1734,8 @@ pub fn mesh_oracle(request: own PencilFrame) -> AllocatedBrowserBytes {
     append_word(first_color)
     let mut vid: u32 = 1
     while vid < VERTEX_COUNT {
-        let v: RasterVertex<SurfaceVarying> = actor.vertex(vid)
-        let color: u32 = actor.fragment(v.varying)
+        let v: RasterVertex<SurfaceVarying> = oracle.vertex(vid)
+        let color: u32 = oracle.material(v.varying)
         append_clip_and_color(v, color)
         vid = vid + 1
     }

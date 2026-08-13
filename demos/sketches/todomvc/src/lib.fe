@@ -236,6 +236,24 @@ fn set_title(todos: u32, index: u32, value: own BrowserString) -> u32 {
     len
 }
 
+/// Seed one ordinary todo slot from a small fixed UTF-8/ASCII byte record.
+/// These are real resident items: subsequent reducer operations do not know
+/// or care that they came from initial state rather than a keyboard event.
+fn seed_todo_header(todos: u32, index: u32, id: u32, len: u32) -> u32 {
+    write_word(
+        ptr: todos,
+        index: slot_offset(index: index),
+        value: (len << 1) | 1,
+    )
+    write_word(ptr: todos, index: slot_offset(index: index) + 4, value: id)
+    write_word(ptr: todos, index: slot_offset(index: index) + 8, value: 0)
+    title_ptr(todos: todos, index: index)
+}
+
+fn seed_byte(destination: u32, offset: u32, value: u32) {
+    byte_at(ptr: destination, index: offset).write(value)
+}
+
 fn find_slot(todos: u32, key: u32) -> u32 {
     let mut index: u32 = 0
     while index < MAX_TODOS {
@@ -417,12 +435,49 @@ actor TodoApp {
         let patch = allocate_component_buffer(capacity: PATCH_CAPACITY)
         let draft = allocate_component_buffer(capacity: TITLE_CAPACITY)
         clear_bytes(ptr: todos.ptr, len: todos.len)
+        let strings = seed_todo_header(todos: todos.ptr, index: 0, id: 1, len: 7)
+        seed_byte(destination: strings, offset: 0, value: 115)
+        seed_byte(destination: strings, offset: 1, value: 116)
+        seed_byte(destination: strings, offset: 2, value: 114)
+        seed_byte(destination: strings, offset: 3, value: 105)
+        seed_byte(destination: strings, offset: 4, value: 110)
+        seed_byte(destination: strings, offset: 5, value: 103)
+        seed_byte(destination: strings, offset: 6, value: 115)
+
+        let review = seed_todo_header(todos: todos.ptr, index: 1, id: 2, len: 11)
+        seed_byte(destination: review, offset: 0, value: 114)
+        seed_byte(destination: review, offset: 1, value: 101)
+        seed_byte(destination: review, offset: 2, value: 118)
+        seed_byte(destination: review, offset: 3, value: 105)
+        seed_byte(destination: review, offset: 4, value: 101)
+        seed_byte(destination: review, offset: 5, value: 119)
+        seed_byte(destination: review, offset: 6, value: 32)
+        seed_byte(destination: review, offset: 7, value: 99)
+        seed_byte(destination: review, offset: 8, value: 111)
+        seed_byte(destination: review, offset: 9, value: 100)
+        seed_byte(destination: review, offset: 10, value: 101)
+
+        let more = seed_todo_header(todos: todos.ptr, index: 2, id: 3, len: 14)
+        seed_byte(destination: more, offset: 0, value: 109)
+        seed_byte(destination: more, offset: 1, value: 117)
+        seed_byte(destination: more, offset: 2, value: 99)
+        seed_byte(destination: more, offset: 3, value: 104)
+        seed_byte(destination: more, offset: 4, value: 32)
+        seed_byte(destination: more, offset: 5, value: 109)
+        seed_byte(destination: more, offset: 6, value: 117)
+        seed_byte(destination: more, offset: 7, value: 99)
+        seed_byte(destination: more, offset: 8, value: 104)
+        seed_byte(destination: more, offset: 9, value: 32)
+        seed_byte(destination: more, offset: 10, value: 109)
+        seed_byte(destination: more, offset: 11, value: 111)
+        seed_byte(destination: more, offset: 12, value: 114)
+        seed_byte(destination: more, offset: 13, value: 101)
         TodoState {
             todos_ptr: todos.ptr,
             patch_ptr: patch.ptr,
             draft_ptr: draft.ptr,
-            count: 0,
-            next_id: 1,
+            count: 3,
+            next_id: 4,
             filter: TodoFilter::All,
             editing: 0,
             draft_len: 0,

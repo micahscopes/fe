@@ -1,0 +1,6 @@
+[ingot]
+name = "gallery_palette"
+version = "0.1.0"
+
+[dependencies]
+core = { path = "../../../ingots/core" }

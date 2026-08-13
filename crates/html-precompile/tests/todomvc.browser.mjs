@@ -179,7 +179,7 @@ try {
     rows: document.querySelectorAll(".todo-list > li").length,
     stateCount: globalThis.__feTodoE2E.stateCount,
   }));
-  assert.deepEqual(initial, { mainHidden: true, footerHidden: true, rows: 0, stateCount: 1 });
+  assert.deepEqual(initial, { mainHidden: false, footerHidden: false, rows: 3, stateCount: 1 });
 
   // Real keyboard input covers the controlled-input/caret path as well as the
   // fixed host's key event transport.
@@ -201,9 +201,9 @@ try {
     mainHidden: document.querySelector(".main").hidden,
   })), {
     value: "",
-    titles: ["alpha"],
-    keys: ["1"],
-    active: "1",
+    titles: ["strings", "review code", "much much more", "alpha"],
+    keys: ["1", "2", "3", "4"],
+    active: "4",
     mainHidden: false,
   });
 
@@ -220,7 +220,11 @@ try {
     titles: Array.from(document.querySelectorAll(".todo-list label"), node => node.textContent),
     keys: Array.from(document.querySelectorAll(".todo-list > li"), node => node.dataset.feKey),
     active: document.querySelector(".todo-count strong").textContent,
-  })), { titles: ["alpha", "βeta 🌍"], keys: ["1", "2"], active: "2" });
+  })), {
+    titles: ["strings", "review code", "much much more", "alpha", "βeta 🌍"],
+    keys: ["1", "2", "3", "4", "5"],
+    active: "5",
+  });
 
   await page.click(".toggle-all-label");
   assert.deepEqual(await page.evaluate(() => ({
@@ -229,7 +233,12 @@ try {
     checked: Array.from(document.querySelectorAll(".todo-list .toggle"), node => node.checked),
     master: document.querySelector(".toggle-all").checked,
     active: document.querySelector(".todo-count strong").textContent,
-  })), { completed: [true, true], checked: [true, true], master: true, active: "0" });
+  })), {
+    completed: [true, true, true, true, true],
+    checked: [true, true, true, true, true],
+    master: true,
+    active: "0",
+  });
   await page.click(".toggle-all-label");
   assert.deepEqual(await page.evaluate(() => ({
     completed: Array.from(document.querySelectorAll(".todo-list > li"), node =>
@@ -237,7 +246,12 @@ try {
     checked: Array.from(document.querySelectorAll(".todo-list .toggle"), node => node.checked),
     master: document.querySelector(".toggle-all").checked,
     active: document.querySelector(".todo-count strong").textContent,
-  })), { completed: [false, false], checked: [false, false], master: false, active: "2" });
+  })), {
+    completed: [false, false, false, false, false],
+    checked: [false, false, false, false, false],
+    master: false,
+    active: "5",
+  });
 
   await page.evaluate(() => {
     // Row two remains projected when the active filter removes completed row
@@ -249,24 +263,24 @@ try {
     completed: document.querySelector('[data-fe-key="1"]').classList.contains("completed"),
     checked: document.querySelector('[data-fe-key="1"] .toggle').checked,
     active: document.querySelector(".todo-count strong").textContent,
-  })), { completed: true, checked: true, active: "1" });
+  })), { completed: true, checked: true, active: "4" });
 
   await page.click('#todo-app [data-fe-action="5"], #gallery-todomvc [data-fe-action="5"]');
   assert.deepEqual(await page.evaluate(() => ({
     keys: Array.from(document.querySelectorAll(".todo-list > li"), node => node.dataset.feKey),
     identity: document.querySelector('[data-fe-key="2"]').dataset.e2eIdentity,
-  })), { keys: ["2"], identity: "kept" });
+  })), { keys: ["2", "3", "4", "5"], identity: "kept" });
   await page.click('#todo-app [data-fe-action="4"], #gallery-todomvc [data-fe-action="4"]');
   assert.deepEqual(await page.evaluate(() =>
     Array.from(document.querySelectorAll(".todo-list > li"), node => node.dataset.feKey)
-  ), ["1", "2"]);
+  ), ["1", "2", "3", "4", "5"]);
 
   await page.click('[data-fe-key="1"] .edit-button');
   assert.deepEqual(await page.evaluate(() => ({
     editing: document.querySelector('[data-fe-key="1"]').classList.contains("editing"),
     focused: document.activeElement === document.querySelector('[data-fe-key="1"] .edit'),
     value: document.querySelector('[data-fe-key="1"] .edit').value,
-  })), { editing: true, focused: true, value: "alpha" });
+  })), { editing: true, focused: true, value: "strings" });
 
   // Every input event reprojects the Fe draft. If the generic adapter rewrites
   // an unchanged value and resets the caret, this becomes a scrambled title.
@@ -315,7 +329,7 @@ try {
   await page.click('[data-fe-key="2"] .destroy');
   assert.deepEqual(await page.evaluate(() =>
     Array.from(document.querySelectorAll(".todo-list > li"), node => node.dataset.feKey)
-  ), ["1"]);
+  ), ["1", "3", "4", "5"]);
   await page.click('#todo-app [data-fe-action="3"], #gallery-todomvc [data-fe-action="3"]');
   assert.deepEqual(await page.evaluate(() => ({
     rows: document.querySelectorAll(".todo-list > li").length,
@@ -325,9 +339,9 @@ try {
       entry.state.length === 13 && entry.patch.length === 5),
     componentErrors: globalThis.__feTodoE2E.errors,
   })), {
-    rows: 0,
-    mainHidden: true,
-    footerHidden: true,
+    rows: 3,
+    mainHidden: false,
+    footerHidden: false,
     stateShapes: true,
     componentErrors: [],
   });
@@ -339,7 +353,7 @@ try {
     const canceled = !input.dispatchEvent(new KeyboardEvent("keydown", {
       key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true,
     }));
-    const title = document.querySelector(".todo-list label")?.textContent;
+    const title = document.querySelector('[data-fe-key="6"] label')?.textContent;
     return { canceled, title, codePoints: Array.from(title ?? "").length };
   });
   assert.deepEqual(boundary, {

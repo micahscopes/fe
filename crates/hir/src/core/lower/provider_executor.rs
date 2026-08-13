@@ -40,10 +40,10 @@ use crate::{
         ty_def::MAX_INLINE_STRING_BYTES,
     },
     hir_def::{
-        ArithBinOp, BinOp, Body, CompBinOp, Cond, CondId, ConstGenericArgValue, Expr, ExprId, Func,
-        GenericArg, GenericArgListId, IdentId, IntegerId, ItemKind, LitKind, LogicalBinOp,
-        MatchArm, Partial, Pat, PatId, PathId, PathKind, QuoteBody, Stmt, StmtId, StringId, Trait,
-        TraitRefId, TypeId, TypeKind, scope_graph::ScopeId,
+        ArithBinOp, BinOp, Body, CompBinOp, Cond, CondId, ConstGenericArgValue, Expr, ExprId,
+        FloatId, Func, GenericArg, GenericArgListId, IdentId, IntegerId, ItemKind, LitKind,
+        LogicalBinOp, MatchArm, Partial, Pat, PatId, PathId, PathKind, QuoteBody, Stmt, StmtId,
+        StringId, Trait, TraitRefId, TypeId, TypeKind, scope_graph::ScopeId,
     },
     span::HirOrigin,
 };
@@ -98,6 +98,7 @@ const RECOGNIZED_BUILDER_OPS: &[&str] = &[
     // B-build: generated expressions
     "bool",
     "int",
+    "float",
     "and",
     "or",
     "add",
@@ -189,8 +190,9 @@ const _: () = {
     // inferred from the goal trait's declaration at `emit_method(name, body)`
     // (43 → 39). Domain-neutral generated integer literal, subtraction,
     // multiplication, negation, and explicit expression sharing builders then
-    // extend the audited codegen subset (39 → 45).
-    assert!(RECOGNIZED_BUILDER_OPS.len() == 45);
+    // extend the audited codegen subset (39 → 45). A domain-neutral float
+    // literal builder extends that same generated-expression subset (45 → 46).
+    assert!(RECOGNIZED_BUILDER_OPS.len() == 46);
     // TD5c: was 7, then 4, now 0; ALL reflection reads — non-iterating (onto the
     // typed read-only handles `ReflectHandle`/`FieldHandle`/`VariantHandle`) AND
     // the `fields`/`variants` iterables (now ordinary method calls returning a
@@ -276,6 +278,8 @@ pub(super) enum GenExpr<'db> {
     /// An unsigned integer literal. Signed values are represented explicitly
     /// as `Neg(Int(..))`, preserving the source IR's operator structure.
     Int(IntegerId<'db>),
+    /// An IEEE-754 source literal, preserving the parser's exact spelling.
+    Float(FloatId<'db>),
     /// `lhs && rhs`
     And(GenExprId, GenExprId),
     /// `lhs || rhs`
@@ -623,6 +627,8 @@ enum Value<'db> {
     /// `compare_nats` primitive (the same code that decides a `where N > 0`
     /// const predicate), never a provider-local comparator.
     Int(IntegerId<'db>),
+    /// A compile-time float literal used only as data for `builder.float`.
+    Float(FloatId<'db>),
     /// A reflected field handle, as a typed read-only handle (TD5c). Scalar
     /// reads (`ty`/`name`) resolve against the handle's own property table.
     /// Target fields retain `FieldKey` provenance for initialization/binders;
@@ -855,6 +861,20 @@ impl<'db> FieldHandle<'db> {
             .find(|(prop, _)| *prop == name)
             .map(|(_, value)| value)
     }
+
+    /// This field's read-only binary vocabulary. `same_name` deliberately
+    /// compares only the authored member spelling, not owner-qualified field
+    /// identity: it lets structural providers align two independently declared
+    /// records without manufacturing numeric slots or string paths.
+    fn binary_read(&self, name: &str) -> Option<BinaryRead<'db>> {
+        match name {
+            "same_name" => Some(BinaryRead {
+                operand: CompareOperand::Field,
+                apply: BinaryCompare::SameFieldName(self.name),
+            }),
+            _ => None,
+        }
+    }
 }
 
 /// A typed read-only handle over a reflected variant (TD5c). It is the value
@@ -944,6 +964,8 @@ enum BinaryCompare<'db> {
     SameTy(TypeHandle<'db>),
     /// `self_field == other_field` (owner-qualified field identity).
     SameField(FieldHandle<'db>),
+    /// `self_name == other_name` across otherwise unrelated record fields.
+    SameFieldName(StringId<'db>),
 }
 
 /// A binary read resolved by a handle's/vocabulary's name table (TD5c): the
@@ -1015,6 +1037,9 @@ impl<'db> BinaryRead<'db> {
             }
             (CompareOperand::Field, BinaryCompare::SameField(lhs), Value::Field(rhs)) => {
                 Some(lhs == *rhs)
+            }
+            (CompareOperand::Field, BinaryCompare::SameFieldName(lhs), Value::Field(rhs)) => {
+                Some(lhs == rhs.name)
             }
             _ => None,
         }
@@ -1445,6 +1470,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             Expr::Lit(LitKind::Bool(value)) => Ok(Value::Bool(*value)),
             Expr::Lit(LitKind::String(value)) => Ok(Value::Str(*value)),
             Expr::Lit(LitKind::Int(value)) => Ok(Value::Int(*value)),
+            Expr::Lit(LitKind::Float(value)) => Ok(Value::Float(*value)),
             // A pure integer comparison in provider steering (e.g.
             // `reflect.variants().len() > 1`): both operands are evaluated to
             // compile-time naturals and the relation is decided by the SHARED
@@ -2671,13 +2697,22 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 }
             }
             Value::Field(field) => {
-                if !args.is_empty() {
-                    return Err(self.unsupported_expr(expr));
+                if args.is_empty() {
+                    return match field.scalar_read(method_name.as_str()) {
+                        Some(read) => Ok(read.into_value(self.db)),
+                        None => Err(self.unsupported_expr(expr)),
+                    };
                 }
-                match field.scalar_read(method_name.as_str()) {
-                    Some(read) => Ok(read.into_value(self.db)),
-                    None => Err(self.unsupported_expr(expr)),
+                if let [other] = args.as_slice()
+                    && let Some(read) = field.binary_read(method_name.as_str())
+                {
+                    let other_value = self.eval_expr(other.expr)?;
+                    return match read.apply(&other_value) {
+                        Some(result) => Ok(Value::Bool(result)),
+                        None => Err(self.unsupported_expr(other.expr)),
+                    };
                 }
+                Err(self.unsupported_expr(expr))
             }
             Value::Variant(variant) => {
                 // Argument-free reads on a variant: the scalar `is_default`
@@ -2778,6 +2813,10 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                     return Err(self.unsupported_expr(expr));
                 };
                 match method_name.as_str() {
+                    "fields" => self
+                        .normalized_nominal_field_sequence(plan, node)
+                        .map(Value::Seq)
+                        .ok_or_else(|| self.unsupported_expr(expr)),
                     "constructor" => Ok(Value::NormalizedCtor(node_data.constructor)),
                     "generic_args" => Ok(Value::Seq(
                         node_data
@@ -3039,6 +3078,45 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             return None;
         };
         let owner = resolve_base_item(self.db, ty.top_mod, *path)?;
+        let ItemKind::Struct(struct_) = owner else {
+            return None;
+        };
+        if !struct_.generic_params(self.db).data(self.db).is_empty() {
+            return None;
+        }
+        let top_mod = struct_.top_mod(self.db);
+        struct_
+            .fields(self.db)
+            .data(self.db)
+            .iter()
+            .enumerate()
+            .map(|(index, field)| {
+                let name = field.name.to_opt()?;
+                let ty = field.type_ref().to_opt()?;
+                Some(Value::Field(FieldHandle::new_nominal(
+                    self.db,
+                    owner,
+                    index,
+                    FieldName::Named(name),
+                    ty,
+                    top_mod,
+                )))
+            })
+            .collect()
+    }
+
+    /// Enumerates fields of an alias-normalized concrete nominal struct. This
+    /// is the normalized counterpart of [`Self::nominal_field_sequence`]. The
+    /// first slice intentionally accepts only non-generic structs; substituted
+    /// generic field occurrences remain fail-closed until the ground plan
+    /// carries an explicit occurrence environment for them.
+    fn normalized_nominal_field_sequence(
+        &self,
+        plan: usize,
+        node: usize,
+    ) -> Option<Vec<Value<'db>>> {
+        let node = self.normalized_plans.get(plan)?.nodes.get(node)?;
+        let owner = node.constructor;
         let ItemKind::Struct(struct_) = owner else {
             return None;
         };
@@ -3340,6 +3418,12 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                     return Err(self.unsupported_expr(arg.expr));
                 };
                 Ok(self.push_expr(GenExpr::Int(value)))
+            }
+            ("float", [arg]) => {
+                let Value::Float(value) = self.eval_expr(arg.expr)? else {
+                    return Err(self.unsupported_expr(arg.expr));
+                };
+                Ok(self.push_expr(GenExpr::Float(value)))
             }
             ("and", [lhs, rhs]) => {
                 let lhs = self.gen_expr_arg(lhs.expr)?;
@@ -3683,12 +3767,14 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 if name == "same_ty"
                     && let Value::NormalizedCtor(lhs_ctor) = lhs_value
                 {
-                    let Value::Ty(rhs_ty) = self.eval_expr(rhs.expr)? else {
-                        return Err(self.unsupported_expr(rhs.expr));
+                    let rhs_ctor = match self.eval_expr(rhs.expr)? {
+                        Value::NormalizedCtor(rhs_ctor) => rhs_ctor,
+                        Value::Ty(rhs_ty) => {
+                            base_ground_constructor(self.db, rhs_ty.ty, rhs_ty.top_mod.scope())
+                                .map_err(|_| self.unsupported_expr(rhs.expr))?
+                        }
+                        _ => return Err(self.unsupported_expr(rhs.expr)),
                     };
-                    let rhs_ctor =
-                        base_ground_constructor(self.db, rhs_ty.ty, rhs_ty.top_mod.scope())
-                            .map_err(|_| self.unsupported_expr(rhs.expr))?;
                     return Ok(Value::Bool(lhs_ctor == rhs_ctor));
                 }
                 // Known compare op: a wrong first operand is attributed to the
@@ -3817,6 +3903,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             match &self.exprs[expr.0] {
                 GenExpr::Bool(_)
                 | GenExpr::Int(_)
+                | GenExpr::Float(_)
                 | GenExpr::SelfRef
                 | GenExpr::ArgRef(_)
                 | GenExpr::TraitConst { .. }
@@ -4158,6 +4245,7 @@ fn value_kind_name(value: &Value) -> &'static str {
         Value::Bool(_) => "compile-time bool",
         Value::Str(_) => "compile-time string",
         Value::Int(_) => "compile-time integer",
+        Value::Float(_) => "compile-time float literal",
         Value::Field(_) => "`Field` handle",
         Value::Variant(_) => "`Variant` handle",
         Value::GroundArg(_) | Value::NormalizedArg { .. } => "ground generic argument",
@@ -4262,7 +4350,7 @@ mod freeze_guard {
         // Pin the count too, so a same-size swap is still flagged for review.
         assert_eq!(
             RECOGNIZED_BUILDER_OPS.len(),
-            45,
+            46,
             "FREEZE (TD5.0): the builder command surface changed size; update the count \
              and docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md as part of a TD5 rung. \
              (TD5c moved `same_ty`/`same_field` — mis-shelved `builder.*`-spelled identity \
@@ -4271,7 +4359,8 @@ mod freeze_guard {
              — the emitted method's signature is inferred from the goal trait's declaration at \
              `emit_method(name, body)`, 43 → 39. Domain-neutral integer literals and \
              subtract/multiply/negate/share construction add five audited operations, 39 → 44; \
-             configured provider-type reflection adds one, 44 → 45.)"
+             configured provider-type reflection adds one, 44 → 45; domain-neutral float \
+             literal construction adds one, 45 → 46.)"
         );
     }
 

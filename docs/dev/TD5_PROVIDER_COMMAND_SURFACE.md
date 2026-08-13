@@ -22,7 +22,8 @@ The provider surface has four classes:
    4,096-element eager-allocation cap.
 3. **Generated IR construction.** `ImplBuilder` creates inert, typed generated
    expression/pattern/type nodes. Integer construction consists only of literal,
-   add, subtract, multiply and negate. Quote blocks use executor-assigned local
+   add, subtract, multiply and negate; `float` preserves one parsed floating
+   literal as generated HIR without evaluating it in the provider. Quote blocks use executor-assigned local
    slots, so shared expressions cannot capture destination names.
 4. **Effects.** `require`, `emit_method`, `emit_const`, `emit_assoc_ty` and
    `finish` append to the sole typed effect trace. Synthesis replays that trace
@@ -41,7 +42,7 @@ Effect operations:
 
 Generated expressions:
 
-- literals and logic: `bool`, `int`, `and`, `or`
+- literals and logic: `bool`, `int`, `float`, `and`, `or`
 - integer arithmetic: `add`, `sub`, `mul`, `neg`
 - comparisons: `eq`, `lt`, `gt`
 - references and access: `self_ref`, `arg_ref`, `field_get`
@@ -60,7 +61,7 @@ Generated types:
 - `ty`, `target_ty`, `provider_ty`, `self_ty`, `str_ty`, `tuple_ty`, `with_elem_ty`,
   `trait_assoc_ty`
 
-The canonical inventory currently contains 45 operations. Reflection reads are
+The canonical inventory currently contains 46 operations. Reflection reads are
 not string-dispatched `ImplBuilder` commands; typed handle vocabularies own
 them, so the bespoke reflection-operation inventory is empty.
 
@@ -74,15 +75,27 @@ declared) while provider code and ordinary `ty<T>()` remain scoped to the
 provider module. The configured type must still be finite and ground; the same
 base-graph, node, unfold, and execution bounds fail closed.
 
-A concrete type handle also exposes `fields()` as an ordinary read-only
-sequence. This is not a builder command: the base graph resolves the nominal
-struct, and each returned owner-qualified `Field` handle carries its declared
-type/name plus hygienic access identity. Consequently
+A concrete type handle and an alias-normalized concrete ground-type handle
+also expose `fields()` as an ordinary read-only sequence. This is not a builder
+command: the base graph resolves the nominal struct, and each returned
+owner-qualified `Field` handle carries its declared type/name plus hygienic
+access identity. Consequently
 `builder.field_get(builder.field_get(value, outer), inner)` can generate nested
 record access without a string path or domain-specific metadata. The initial
 surface deliberately accepts concrete non-generic structs only. Generic field
 substitution and enum payload reflection fail closed until their occurrence
 environments are modeled explicitly.
+
+A field handle additionally exposes the pure binary read
+`field.same_name(other)`. Unlike owner-qualified field equality, this compares
+only the two authored member spellings. It allows a provider to align two
+independently declared records—such as a named metric basis and a sparse
+coefficient record—without string extraction, numeric slots, or positional
+coupling. It never authorizes access through the other record: generated
+`field_get` still consumes the original owner-qualified handle. Wrong operand
+kinds and unresolved fields fail closed. Because `fields()` and `same_name`
+are typed reflection reads rather than `ImplBuilder` commands, the frozen
+46-operation builder inventory does not change.
 
 ## Natural iteration
 
@@ -136,6 +149,17 @@ occurrence. Its input is deliberately restricted to pure root-scope leaves
 arithmetic/logic/comparison builders and nested shares. Calls, aggregates,
 matches, quote blocks, and arm/local binders fail closed; branch-local sharing
 continues to use an ordinary quote-local `let`.
+
+## Floating generated literals
+
+`builder.float(literal)` preserves the parser's exact `FloatId` and synthesis
+replays it as an ordinary Fe float literal. The provider executor neither
+converts nor computes with it; ordinary checking at the emitted method or
+constant decides its scalar type. Only a direct compile-time float value is
+accepted, so integer/string/type operands fail closed. Floating arithmetic is
+still expressed with the same generated `add`/`sub`/`mul`/`neg` nodes and is
+typed by the generated program. This domain-neutral primitive removes the need
+for a provider library to call a private helper merely to obtain `+0.0`.
 
 ## Change rule
 

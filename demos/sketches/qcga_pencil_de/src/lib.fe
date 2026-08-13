@@ -1,10 +1,10 @@
 //! Distance-estimator view of the solved QCGA pencil.
 //!
-//! This is deliberately a second VIEW of `qcga_pencil::PencilSceneState`, not
+//! This is the canonical gallery VIEW of `qcga_pencil::PencilSceneState`, not
 //! a second solver or interaction implementation. Initialization, controls,
 //! camera projection, point picking, drag geometry, re-solving, and the vivid
-//! normal/tangent material all come from the shared Fe ingot. This actor owns
-//! only the fragment-surface interpretation.
+//! normal/tangent material all come from the shared Fe ingot. The older raster
+//! actor is retired; this actor owns the sole GPU and user-facing surface.
 //!
 //! Production visibility is a genuine iterative implicit-surface march. Every
 //! step evaluates the scale-invariant first-order quadric estimate
@@ -41,6 +41,7 @@ use fmath::{
     scale3,
     vec3,
 }
+use gallery_palette::{clean_white, electric_blue, midnight, spring_green, theorem_gold}
 use qcga_pencil::{
     ControlPoints,
     PencilFrame,
@@ -182,9 +183,18 @@ fn ambient_occlusion(_ q: Quadric, _ p: Vec3, _ normal: Vec3) -> f32 {
 
 fn sky(_ direction: Vec3) -> Vec3 {
     let horizon: f32 = clamp01(0.5 + 0.5 * direction.y)
-    let base: Vec3 = mix3(vec3(0.018, 0.026, 0.065), vec3(0.14, 0.08, 0.28), horizon)
+    let ground = midnight()
+    let cool = electric_blue()
+    let warm = spring_green()
+    let base: Vec3 = mix3(
+        vec3(ground.red, ground.green, ground.blue),
+        vec3(cool.red * 0.38, cool.green * 0.38, cool.blue * 0.38),
+        horizon,
+    )
     let glow: f32 = clamp01(1.0 - abs(direction.y + 0.08) * 4.0)
-    add3(base, scale3(vec3(0.34, 0.06, 0.28), glow * glow * 0.34))
+    add3(base, scale3(
+        vec3(warm.red, warm.green, warm.blue), glow * glow * 0.14,
+    ))
 }
 
 fn selected_marker(_ points: ControlPoints, _ frame: PencilFrame, _ px: i32, _ py: i32) -> Vec3 {
@@ -210,7 +220,13 @@ fn selected_marker(_ points: ControlPoints, _ frame: PencilFrame, _ px: i32, _ p
     }
     if nearest < 42.0 {
         let phase: f32 = from_i32(nearest_index) / 8.0
-        vec3(1.0, 0.28 + 0.65 * phase, 0.90 - 0.70 * phase)
+        let gold = theorem_gold()
+        let white = clean_white()
+        mix3(
+            vec3(gold.red, gold.green, gold.blue),
+            vec3(white.red, white.green, white.blue),
+            phase,
+        )
     } else {
         vec3(-1.0, -1.0, -1.0)
     }
@@ -250,23 +266,39 @@ actor PencilDistanceSurface uses (GpuProgram<WebGpuBackend>) {
         let background: Vec3 = sky(ray.direction)
         let linear: Vec3 = if hit.hit == 1 {
             let point: Vec3 = add3(ray.origin, scale3(ray.direction, hit.distance))
-            let normal: Vec3 = normalize3(quadric_gradient(q, point))
-            let light: Vec3 = normalize3(vec3(0.37, 0.82, 0.44))
-            let shadow: f32 = soft_shadow(q, add3(point, scale3(normal, 0.006)), light)
-            let occlusion: f32 = ambient_occlusion(q, point, normal)
-            let tangent: f32 = 1.0 - abs(dot3(normal, ray.direction))
+            let gradient: Vec3 = quadric_gradient(q, point)
+            let gradient_length: f32 = length3(gradient)
+            let mut geometric_normal: Vec3 = scale3(
+                gradient, 1.0 / max(gradient_length, 0.00001),
+            )
+            // Q and -Q are one projective surface, so first remove that sign
+            // ambiguity by facing the normal toward the camera ray.
+            if dot3(geometric_normal, ray.direction) > 0.0 {
+                geometric_normal = scale3(geometric_normal, -1.0)
+            }
+            // At a singular pencil member |gradient F| genuinely approaches
+            // zero and no unique surface normal exists. Fade to a view-stable
+            // fallback only in that ill-conditioned neighbourhood; ordinary
+            // members retain the exact analytic normal.
+            let conditioning: f32 = clamp01(
+                (gradient_length - 0.001) / 0.035,
+            )
+            let normal: Vec3 = normalize3(mix3(
+                scale3(ray.direction, -1.0),
+                geometric_normal,
+                conditioning,
+            ))
             let tangent_color: Vec3 = pencil_material(
                 normal, ray.direction, self.frame,
-                0.08 + 0.20 * tangent * tangent,
+                0.06,
                 0.0,
             )
-            // Keep the raster view's vivid shared material primary. Shadows
-            // and AO modulate it gently instead of replacing its normal/tangent
-            // palette with near-black bands.
-            let surface: Vec3 = scale3(
-                tangent_color,
-                (0.56 + 0.44 * shadow) * (0.74 + 0.26 * occlusion),
-            )
+            // The quadric is smooth and two-sided. Iterative self-shadow/AO
+            // probes can cross a neighbouring sheet as the pencil morphs,
+            // creating moving contour bands unrelated to the material. Keep
+            // its shading analytic and continuous; neither marcher steps nor
+            // secondary DE samples enter colour.
+            let surface: Vec3 = tangent_color
             let fog: f32 = clamp01((hit.distance - 7.0) / 11.0)
             mix3(surface, background, fog * fog)
         } else {
@@ -277,9 +309,8 @@ actor PencilDistanceSurface uses (GpuProgram<WebGpuBackend>) {
         // for enum traps while keeping the browser geometry-blind.
         let marker: Vec3 = selected_marker(self.points, self.frame, px, py)
         let color: Vec3 = if marker.x >= 0.0 { marker } else { linear }
-        // Match the authored raster's output transfer: `pencil_material` is
-        // shared display color, so a DE-only square-root transfer washed out
-        // precisely the palette we meant to preserve.
+        // `pencil_material` already returns shared display colour; applying a
+        // DE-only square-root transfer here would wash out that palette.
         rgba(clamp01(color.x), clamp01(color.y), clamp01(color.z))
     }
 }

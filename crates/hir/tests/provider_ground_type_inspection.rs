@@ -157,6 +157,85 @@ fn ground_type_inspection_exposes_constructor_and_ordered_args() {
 }
 
 #[test]
+fn configured_derive_provider_may_be_named_through_a_generic_type_alias() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_generic_alias_facade.fe".into(),
+        r#"
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+
+trait Inspect { type Out }
+struct Program<T> {}
+struct Compiler<P> {}
+struct Payload {}
+struct Yes {}
+struct No {}
+type Facade<T> = Compiler<Program<T>>
+
+struct Target {}
+impl<P> Derive<Inspect> for Compiler<P> {
+    const fn derive<T>(ev: own Evidence<Inspect<T>>) -> Evidence<Inspect<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<Inspect<T>>)
+    {
+        let out = builder.ty<No>()
+        for nested in builder.provider_ty().normalized_preorder_types() {
+            if builder.same_ty(nested.constructor(), builder.ty<Payload>()) {
+                out = builder.ty<Yes>()
+            }
+        }
+        builder.emit_assoc_ty("Out", out)
+        builder.finish()
+        ev
+    }
+}
+
+derive Inspect for Target using Facade<Payload>
+fn takes_yes(_ value: Yes) {}
+fn proves_alias_configuration(value: <Target as Inspect>::Out) { takes_yes(value) }
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
+fn provider_type_identity_distinguishes_generic_arguments() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_generic_argument_identity.fe".into(),
+        r#"
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+trait Inspect { type Out }
+struct A {}
+struct B {}
+struct Pair<T> {}
+struct Yes {}
+struct No {}
+struct Target {}
+struct Inspector {}
+impl Derive<Inspect> for Inspector {
+    const fn derive<T>(ev: own Evidence<Inspect<T>>) -> Evidence<Inspect<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<Inspect<T>>)
+    {
+        let out = builder.ty<No>()
+        if builder.same_ty(builder.ty<Pair<A>>(), builder.ty<Pair<B>>()) {
+            out = builder.ty<Yes>()
+        }
+        builder.emit_assoc_ty("Out", out)
+        builder.finish()
+        ev
+    }
+}
+derive Inspect for Target using Inspector
+fn takes_no(_ value: No) {}
+fn proves_full_generic_identity(value: <Target as Inspect>::Out) { takes_no(value) }
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
 fn ground_type_inspection_keeps_recursive_type_fn_alias_opaque() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
@@ -492,6 +571,60 @@ fn proves_nested(value: Carrier) -> u32 {
 }
 
 #[test]
+fn reflected_fields_align_by_name_across_alias_normalized_records() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_field_name_alignment.fe".into(),
+        r#"
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+
+trait ReadAligned { fn read(_ value: Self) -> u32 }
+struct Basis { e0: Marker, e1: Marker, e2: Marker }
+type BasisAlias = Basis
+struct Marker {}
+struct Coefficients { e2: u32, e0: u32 }
+struct Carrier { coefficients: Coefficients }
+struct AlignedReader {}
+
+impl Derive<ReadAligned> for AlignedReader {
+    const fn derive<T>(ev: own Evidence<ReadAligned<T>>) -> Evidence<ReadAligned<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<ReadAligned<T>>)
+    {
+        let value = builder.arg_ref("value")
+        let result = value
+        let basis = builder.ty<BasisAlias>()
+        for configured in builder.ty<BasisAlias>().normalized_preorder_types() {
+            if builder.same_ty(configured.constructor(), builder.ty<Basis>()) {
+                basis = configured
+            }
+        }
+        for outer in reflect.fields() {
+            let coefficients = builder.field_get(value, outer)
+            for coefficient in outer.ty().fields() {
+                for generator in basis.fields() {
+                    if coefficient.same_name(generator) {
+                        result = builder.field_get(coefficients, coefficient)
+                    }
+                }
+            }
+        }
+        builder.emit_method("read", result)
+        builder.finish()
+        ev
+    }
+}
+
+derive ReadAligned for Carrier using AlignedReader
+fn proves_alignment(value: Carrier) -> u32 {
+    <Carrier as ReadAligned>::read(value)
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
 fn nested_generic_field_reflection_fails_closed_without_substitution() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
@@ -638,6 +771,62 @@ derive Compute for Target using Provider
     );
     let (top_mod, _) = db.top_mod(file);
     db.assert_no_diags(top_mod);
+}
+
+#[test]
+fn provider_float_literal_replays_through_ordinary_type_checking() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_float_literal_codegen.fe".into(),
+        r#"
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+trait Compute { fn zero(self) -> f32 }
+struct Provider {}
+impl Derive<Compute> for Provider {
+    const fn derive<T>(ev: own Evidence<Compute<T>>) -> Evidence<Compute<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<Compute<T>>)
+    {
+        builder.emit_method("zero", builder.float(0.0))
+        builder.finish()
+        ev
+    }
+}
+struct Target {}
+derive Compute for Target using Provider
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
+fn provider_float_builder_rejects_non_float_input() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_float_literal_kind_reject.fe".into(),
+        r#"
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+trait Compute { fn zero(self) -> f32 }
+struct Provider {}
+impl Derive<Compute> for Provider {
+    const fn derive<T>(ev: own Evidence<Compute<T>>) -> Evidence<Compute<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<Compute<T>>)
+    {
+        builder.emit_method("zero", builder.float(0))
+        builder.finish()
+        ev
+    }
+}
+struct Target {}
+derive Compute for Target using Provider
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let rendered = fe_hir::test_db::format_diagnostics(&db, &db.run_on_top_mod(top_mod));
+    assert!(
+        !rendered.is_empty(),
+        "builder.float must fail closed when its value is not a float literal"
+    );
 }
 
 #[test]

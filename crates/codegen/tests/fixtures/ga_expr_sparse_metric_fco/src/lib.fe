@@ -1,7 +1,9 @@
 use ga_expr::{
-    AlgebraicBalanced, CompileVectorScalarF32, EvaluateVectorScalarF32, GaProgram,
-    MetricSum, MetricTerm, MetricZero, ScalarProduct, SparseSymmetricMetric,
-    VectorInput,
+    AlgebraicBalanced, BasisMetric, BasisVector, CompileNamedVectorDotF32,
+    CompileVectorScalarF32, EvaluateVectorScalarF32, GaProgram,
+    MetricSum, MetricTerm, MetricZero,
+    NegativeMagnitude, Null, Positive, PositiveMagnitude, Prime, ScalarProduct,
+    SparseSymmetricMetric, SymmetricMatrixMetric, VectorInput,
 }
 
 type MetricTerms = MetricSum<
@@ -126,5 +128,52 @@ pub fn reversed_tiny_metric_probe(
     <ReversedTinyOperands as EvaluateVectorScalarF32>::scalar(ReversedTinyOperands {
         left: TinyLeftCoefficients { l0: l0, l1: l1, l2: l2 },
         right: TinyRightCoefficients { r0: r0, r1: r1, r2: r2 },
+    })
+}
+
+// The same Cl(2,0,1-null-pair) scalar form authored two ways. Field order in
+// both coefficient records is deliberately unrelated to basis order: FCO
+// aligns by names and derives support/packing.
+struct Pair0 {}
+struct NullBasis {
+    x: Positive,
+    origin: Null<Pair0>,
+    infinity: Prime<Pair0>,
+}
+struct MatrixBasis { x: BasisVector, origin: BasisVector, infinity: BasisVector }
+struct XRow { x: PositiveMagnitude<1> }
+struct OriginRow { infinity: NegativeMagnitude<1> }
+struct NullMatrix { x: XRow, origin: OriginRow }
+
+struct NamedLeft { infinity: f32, x: f32, origin: f32 }
+struct NamedRight { origin: f32, infinity: f32, x: f32 }
+type AutoNullMetric = BasisMetric<NullBasis>
+type MatrixNullMetric = SymmetricMatrixMetric<MatrixBasis, NullMatrix>
+struct AutoNullOperands { left: NamedLeft, right: NamedRight }
+struct MatrixNullOperands { left: NamedLeft, right: NamedRight }
+derive EvaluateVectorScalarF32 for AutoNullOperands using CompileNamedVectorDotF32<
+    NamedLeft, NamedRight, AutoNullMetric,
+>
+derive EvaluateVectorScalarF32 for MatrixNullOperands using CompileNamedVectorDotF32<
+    NamedLeft, NamedRight, MatrixNullMetric,
+>
+
+pub fn auto_null_metric_probe(
+    _ lx: f32, _ lo: f32, _ li: f32,
+    _ rx: f32, _ ro: f32, _ ri: f32,
+) -> f32 {
+    <AutoNullOperands as EvaluateVectorScalarF32>::scalar(AutoNullOperands {
+        left: NamedLeft { infinity: li, x: lx, origin: lo },
+        right: NamedRight { origin: ro, infinity: ri, x: rx },
+    })
+}
+
+pub fn matrix_null_metric_probe(
+    _ lx: f32, _ lo: f32, _ li: f32,
+    _ rx: f32, _ ro: f32, _ ri: f32,
+) -> f32 {
+    <MatrixNullOperands as EvaluateVectorScalarF32>::scalar(MatrixNullOperands {
+        left: NamedLeft { infinity: li, x: lx, origin: lo },
+        right: NamedRight { origin: ro, infinity: ri, x: rx },
     })
 }

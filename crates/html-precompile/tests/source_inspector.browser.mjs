@@ -191,8 +191,8 @@ try {
       surfaces: 12,
       components: 2,
       captions: [
-        "known color",
-        "rollcall pipeline",
+        "gradient",
+        "TodoMVC",
         "cga3d",
         "qcga",
         "qcga pencil",
@@ -202,8 +202,8 @@ try {
         "mandelbrot",
         "perturbation mandelbrot",
         "dec",
-        "gradient",
-        "TodoMVC",
+        "known color",
+        "rollcall pipeline",
       ],
     });
 
@@ -229,8 +229,8 @@ try {
       e6: 0, e7: 0, e8: 0, e9: 0, e10: 0, e11: 0,
     }, "DEC d0 did not execute through the generated Worker/message path");
 
-    // Exercise the new authored vertex/fragment tile through actual pointer
-    // events. The browser contributes only coordinates; the changed yaw must
+    // Exercise the canonical QCGA DE tile through actual pointer events. The
+    // browser contributes only coordinates; the changed yaw must
     // come back from the resident Fe transition, while the solver certificate
     // remains untouched. Skip only when this run explicitly permits a missing
     // WebGPU implementation and the GPU-only surface could not become ready.
@@ -246,28 +246,54 @@ try {
         if (tolerateUnavailable && unavailable) return { skipped: true, detail };
         throw new Error(detail);
       }
-      surface.scrollIntoView({ block: "center" });
       await surface.live();
+      surface.scrollIntoView({ block: "center" });
+      await new Promise(resolvePromise => requestAnimationFrame(
+        () => requestAnimationFrame(resolvePromise),
+      ));
       const canvas = surface._adoptedCanvas || surface._liveCanvas || surface._posterCanvas;
       const rect = canvas.getBoundingClientRect();
+      // Start in a canvas corner, deliberately outside the projected control
+      // cluster. The previous centre click could correctly pick a control
+      // point and enter Fe's drag/re-solve branch, making an orbit assertion
+      // depend on the current scene geometry.
+      surface.__qcgaTestFrames = 0;
+      surface.addEventListener("fe-frame", () => { surface.__qcgaTestFrames += 1; });
       return {
         skipped: false,
-        x: rect.left + rect.width * 0.5,
-        y: rect.top + rect.height * 0.5,
+        x: Math.max(24, Math.min(innerWidth - 24, rect.left + rect.width * 0.06)),
+        y: Math.max(24, Math.min(innerHeight - 24, rect.top + rect.height * 0.06)),
         yaw: surface.params.yaw,
         certificate: surface._uniforms.slice(4),
+        picked: surface._uniforms.at(-1),
       };
     }, tolerateUnavailableWebGpu);
     if (!qcgaPointer.skipped) {
       await page.mouse.move(qcgaPointer.x, qcgaPointer.y);
       await page.mouse.down();
-      await page.mouse.move(qcgaPointer.x + 25, qcgaPointer.y);
-      await page.mouse.up();
-      await page.waitForFunction(previousYaw => {
+      await page.waitForFunction(() => {
         const figure = Array.from(document.querySelectorAll(".grid > figure"))
           .find(node => node.querySelector("figcaption > b")?.textContent === "qcga pencil");
-        return figure.querySelector("fe-surface").params.yaw !== previousYaw;
-      }, {}, qcgaPointer.yaw);
+        const surface = figure.querySelector("fe-surface");
+        return surface.__qcgaTestFrames > 0 && surface._pendingSurfaceEvents.length === 0;
+      });
+      const qcgaAfterDown = await page.evaluate(() => {
+        const figure = Array.from(document.querySelectorAll(".grid > figure"))
+          .find(node => node.querySelector("figcaption > b")?.textContent === "qcga pencil");
+        const surface = figure.querySelector("fe-surface");
+        return { frames: surface.__qcgaTestFrames, picked: surface._uniforms.at(-1) };
+      });
+      assert.equal(qcgaAfterDown.picked, qcgaPointer.picked,
+        "marker-free orbit press unexpectedly selected a QCGA control point");
+      await page.mouse.move(qcgaPointer.x + 25, qcgaPointer.y);
+      await page.waitForFunction(({ previousYaw, previousFrames }) => {
+        const figure = Array.from(document.querySelectorAll(".grid > figure"))
+          .find(node => node.querySelector("figcaption > b")?.textContent === "qcga pencil");
+        const surface = figure.querySelector("fe-surface");
+        return surface.__qcgaTestFrames > previousFrames
+          && surface.params.yaw !== previousYaw;
+      }, {}, { previousYaw: qcgaPointer.yaw, previousFrames: qcgaAfterDown.frames });
+      await page.mouse.up();
       const qcgaAfter = await page.evaluate(() => {
         const figure = Array.from(document.querySelectorAll(".grid > figure"))
           .find(node => node.querySelector("figcaption > b")?.textContent === "qcga pencil");

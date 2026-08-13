@@ -23,10 +23,9 @@
 //!     `fe web build` does with `--entry`/`--mode` omitted;
 //!   - `demos/sketches/fmath`, a math-intrinsics library ingot with no
 //!     render entry: diagnostics-only (it must still type-check);
-//!   - `demos/sketches/qcga_pencil` is an authored vertex/fragment raster actor
-//!     with its own deep semantic acceptance suite; `qcga_pencil_de` consumes
-//!     the same solved scene/interaction values as an iterative fullscreen
-//!     distance-estimator actor;
+//!   - `demos/sketches/qcga_pencil_de` is the sole canonical gallery view over
+//!     the shared solved scene; the old vertex/fragment actor is retired and
+//!     `qcga_pencil` retains only non-rendering solver/projection oracles;
 //!   - `demos/capstones/mandelbrot/kernel.fe`: a standalone, non-actor GRID
 //!     kernel (intentionally target-neutral, four backends; see its own
 //!     README), compiled here in explicit grid mode;
@@ -53,7 +52,8 @@ use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
     WebBindingAccess, WebBindingRole, WebBuildOptions, WebBundle, WebBundleError, WebBundleMode,
-    WebCanonicalPolicy, WebFeResponsibility, WebHostResponsibility, resolve_web_entry,
+    WebCanonicalPolicy, WebFeResponsibility, WebHostResponsibility, actor_gpu_program,
+    resolve_web_entry,
 };
 use hir::hir_def::HirIngot;
 use url::Url;
@@ -339,9 +339,8 @@ fn call_state_batch(bundle: &WebBundle, events: &[SurfaceEventFixture], state: &
 }
 
 /// Execute one initialized mixed-scalar QCGA scene transition and return its
-/// decoded semantic leaves. Raster/DE equality is useful integration evidence,
-/// while the independent solver and analytic-root oracles remain the actual
-/// correctness evidence for those values.
+/// decoded semantic leaves. Independent solver and analytic-root oracles—not
+/// comparison to the retired raster renderer—establish mathematical results.
 fn qcga_scene_receipt(bundle: &WebBundle, event: SurfaceEventFixture) -> Vec<wasmtime::Val> {
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, &bundle.wasm).expect("QCGA control Wasm module");
@@ -382,25 +381,6 @@ fn qcga_scene_receipt(bundle: &WebBundle, event: SurfaceEventFixture) -> Vec<was
         )
         .expect("execute shared QCGA transition");
     result
-}
-
-fn assert_qcga_scene_values_equal(left: &[wasmtime::Val], right: &[wasmtime::Val]) {
-    assert_eq!(left.len(), right.len());
-    for (index, (left, right)) in left.iter().zip(right).enumerate() {
-        match (left, right) {
-            (wasmtime::Val::F32(left), wasmtime::Val::F32(right)) => assert_eq!(
-                left, right,
-                "raster/DE f32 scene leaf {index} diverged after the same Fe event"
-            ),
-            (wasmtime::Val::I32(left), wasmtime::Val::I32(right)) => assert_eq!(
-                left, right,
-                "raster/DE enum/u32 scene leaf {index} diverged after the same Fe event"
-            ),
-            _ => panic!(
-                "raster/DE scene leaf {index} has inconsistent scalar types: {left:?} / {right:?}"
-            ),
-        }
-    }
 }
 
 /// Run `body` with a checked-in ingot directory's driver database and top
@@ -1724,7 +1704,9 @@ fn cga3d_sketch_compiles() {
         [
             0.15f32 + 11.0 * 0.0025,
             0.6f32 + 8.0 * 0.01,
-            1.6f32 * 0.875,
+            // Both nonzero wheel events in the batch are semantic inputs;
+            // LatestPerFrame coalesces scheduling, not state reduction.
+            1.6f32 * 0.875 * 0.875,
             640.0,
         ],
         "generated Wasm must accumulate motion/wheel and preserve newest raw facts"
@@ -2443,10 +2425,9 @@ fn qcga_pencil_de_compiles_as_a_fe_owned_iterative_fragment_surface() {
             "p8z",
             "picked",
         ],
-        "DE and raster views must consume the exact same solved scene state",
+        "the canonical DE view must consume the complete solved scene state",
     );
 
-    let raster = compile_actor_ingot("demos/sketches/qcga_pencil");
     let event = SurfaceEventFixture {
         pointer_x: 210.0,
         pointer_y: 184.0,
@@ -2462,9 +2443,31 @@ fn qcga_pencil_de_compiles_as_a_fe_owned_iterative_fragment_surface() {
         param_index: 0,
         param_value: 0.0,
     };
-    let raster_receipt = qcga_scene_receipt(&raster, event);
     let de_receipt = qcga_scene_receipt(&bundle, event);
-    assert_qcga_scene_values_equal(&raster_receipt, &de_receipt);
+    let f32_at = |index: usize| match de_receipt[index] {
+        wasmtime::Val::F32(bits) => f32::from_bits(bits),
+        ref other => panic!("QCGA scene leaf {index} is not f32: {other:?}"),
+    };
+    let i32_at = |index: usize| match de_receipt[index] {
+        wasmtime::Val::I32(value) => value,
+        ref other => panic!("QCGA scene leaf {index} is not i32: {other:?}"),
+    };
+    assert_eq!(
+        [f32_at(0), f32_at(1), f32_at(2), f32_at(3)],
+        [0.15, 0.6 + 17.0 * 0.008, 0.35 - 9.0 * 0.008, 4.0 * 0.88],
+        "the canonical DE transition must apply Fe-owned orbit and dolly policy",
+    );
+    assert_eq!(i32_at(4), 0, "camera motion must not re-solve the pencil");
+    assert_eq!(
+        f32_at(8),
+        1.0,
+        "the initial rank-8 pencil certificate must survive"
+    );
+    assert_eq!(
+        i32_at(56),
+        0,
+        "camera motion must not invent a picked control"
+    );
     eprintln!(
         "Fe QCGA DE receipt: {} authored view lines -> {} B browser-valid WGSL, {} B shared-state control Wasm",
         include_str!("../../../demos/sketches/qcga_pencil_de/src/lib.fe")
@@ -2499,9 +2502,14 @@ fn gradient_sketch_compiles() {
                 param_index: 0,
                 param_value: 0.0,
             }],
-            &[0.12, 0.0, 96.0],
+            &[0.55, 0.0, 1.4, 512.0],
         ),
-        [0.12f32 + 10.0 * 0.002, -5.0f32 * 0.1, 96.0 - 8.0],
+        [
+            0.55f32 + 10.0 * 0.01,
+            -5.0f32 * -0.002,
+            1.4f32 * 0.875,
+            512.0,
+        ],
         "gradient mouse bindings must be authored and executed in Fe"
     );
 }
@@ -2512,17 +2520,17 @@ fn typed_surface_transition_rejects_partial_state_record() {
     let mut source = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
     source = source.replacen(
-        "    cutoff: f32,\n}\n\nimpl SurfaceState",
+        "    res: f32,\n}\n\nimpl SurfaceState",
         "}\n\nimpl SurfaceState",
         1,
     );
-    source = source.replacen("            cutoff: self.cutoff,\n", "", 1);
+    source = source.replacen("            res: self.res,\n", "", 1);
 
     let error = compile_actor_ingot_with_root_source("demos/sketches/gradient", source)
         .expect_err("a partial typed state response must fail closed");
     let rendered = error.to_string();
     assert!(
-        rendered.contains("complete non-resource state record") && rendered.contains("cutoff"),
+        rendered.contains("complete non-resource state record") && rendered.contains("res"),
         "the diagnostic must name the complete-state contract and missing actor field: {rendered}"
     );
 }
@@ -2611,14 +2619,20 @@ fn fmath_library_ingot_typechecks() {
     with_ingot("demos/sketches/fmath", |_db, _top_mod| {});
 }
 
-/// `qcga_pencil` now declares a real `PencilRaster` GPU actor with the standard
-/// nominal `VertexStage<V>` / `FragmentStage<V>` pair. Its dedicated workspace
-/// acceptance target checks that typed program plus the current explicit
-/// paired-SPIR-V lowering wall; this broad gate independently keeps the full
-/// source and dependency graph diagnostic-free.
+/// `qcga_pencil` is the non-rendering shared scene/solver library consumed by
+/// the canonical `qcga_pencil_de` actor. Its dedicated acceptance target keeps
+/// the solver and historical projection oracles independent; this broad gate
+/// keeps the full source and dependency graph diagnostic-free.
 #[test]
 fn qcga_pencil_sketch_typechecks() {
-    with_ingot("demos/sketches/qcga_pencil", |_db, _top_mod| {});
+    with_ingot("demos/sketches/qcga_pencil", |db, top_mod| {
+        assert!(
+            actor_gpu_program(db, top_mod)
+                .expect("inspect shared QCGA scene library")
+                .is_none(),
+            "the retired vertex-shaded QCGA Pencil must not remain a GPU actor",
+        );
+    });
 }
 
 // ---------------------------------------------------------------------------

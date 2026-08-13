@@ -30,7 +30,7 @@ fn expected(p: [f32; 12], q: [f32; 12]) -> f32 {
         -(p[10] * q[7]),
         -(p[11] * q[8]),
     ];
-    let zero = p[0] - p[0];
+    let zero = 0.0;
     let mut chunks = [zero; 3];
     for (index, term) in terms.into_iter().enumerate() {
         chunks[index / 4] += term;
@@ -39,7 +39,7 @@ fn expected(p: [f32; 12], q: [f32; 12]) -> f32 {
 }
 
 fn tiny_expected(l: [f32; 3], r: [f32; 3]) -> f32 {
-    let zero = l[0] - l[0];
+    let zero = 0.0;
     let twice_l0r0 = l[0] * r[0] + l[0] * r[0];
     let negative_l1r3 = -(l[1] * r[2]);
     let l2r2 = l[2] * r[1];
@@ -89,6 +89,15 @@ fn configured_sparse_symmetric_metric_executes_without_host_algebra() {
             "reversed_tiny_metric_probe",
         )
         .expect("reversed expression probe");
+    let auto_null = instance
+        .get_typed_func::<(f32, f32, f32, f32, f32, f32), f32>(&mut store, "auto_null_metric_probe")
+        .expect("automatically paired null-basis probe");
+    let matrix_null = instance
+        .get_typed_func::<(f32, f32, f32, f32, f32, f32), f32>(
+            &mut store,
+            "matrix_null_metric_probe",
+        )
+        .expect("named symmetric-matrix probe");
 
     let mut cases = vec![
         ([0.0; 12], [0.0; 12]),
@@ -152,6 +161,33 @@ fn configured_sparse_symmetric_metric_executes_without_host_algebra() {
             reversed_tiny.call(&mut store, args).unwrap().to_bits(),
             wanted,
             "expression operand-order substitution drifted for l={l:?}, r={r:?}",
+        );
+    }
+
+    let mut null_cases = vec![
+        ([0.0; 3], [0.0; 3]),
+        ([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]),
+        ([-0.0, -7.5, 0.25], [3.0, -4.5, 8.0]),
+    ];
+    for _ in 0..128 {
+        null_cases.push(([next(), next(), next()], [next(), next(), next()]));
+    }
+    for (left, right) in null_cases {
+        // Basis order is x, origin, infinity. This oracle is independent of
+        // both Fe descriptor forms and of their reflected field order.
+        let zero = 0.0;
+        let expected =
+            (((zero + left[0] * right[0]) - left[1] * right[2]) - left[2] * right[1]) + zero + zero;
+        let args = (left[0], left[1], left[2], right[0], right[1], right[2]);
+        assert_eq!(
+            auto_null.call(&mut store, args).unwrap().to_bits(),
+            expected.to_bits(),
+            "automatic null pairing drifted for left={left:?}, right={right:?}",
+        );
+        assert_eq!(
+            matrix_null.call(&mut store, args).unwrap().to_bits(),
+            expected.to_bits(),
+            "named matrix metric drifted for left={left:?}, right={right:?}",
         );
     }
 }

@@ -1,14 +1,10 @@
 //! Dual-gate for the gaplay PGA-2D meet/join plan (ingots/gaplay).
 //!
 //! The gaplay ingot adds ganja.js's `^` (meet) and `&` (join) for Cl(2,0,1) as
-//! a CTFE-planned sparse contraction over `sparse_clifford::SparsePlan`, with no
-//! compiler change: the outer product is `support_gp(., ., 0)` plus the
-//! reordering sign `blade_merge_sign`, and one kernel `pga2_wedge3` serves both
-//! operators. This test:
+//! `Outer<Left,Right>` compiled by the shared `ga_expr::CompileGaF32` provider;
+//! one kernel `pga2_wedge3` serves both operators. This test:
 //!
-//!   1. compiles the ingot through the real Fe drivers (the `static_assert`s in
-//!      gaplay + sparse_clifford — the pinned survivor mask 238 and the
-//!      candidate routing — are checked here, since a bad plan fails to compile);
+//!   1. compiles the ingot through the real Fe drivers and shared provider;
 //!   2. runs the planned kernel under wasmtime and checks it BIT-FOR-BIT against
 //!      an independent hand-written cross product over directed + random f32
 //!      cases (f32 arithmetic is IEEE754-deterministic, so the match is exact);

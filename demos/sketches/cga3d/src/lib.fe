@@ -1,23 +1,19 @@
-//! A pencil of spheres on a slice plane, drawn per pixel by the REAL sparse
-//! classic-CGA contraction: the qcga demo's sibling, same generic library,
-//! same provider pattern, different conformal signature.
+//! A pencil of spheres on a slice plane, drawn per pixel by a reflected
+//! classic-CGA expression: the qcga demo's sibling, same generic compiler,
+//! different named conformal basis.
 //!
-//! This file instantiates EXACTLY the machinery `demos/sketches/qcga` uses,
-//! at Cl(4,1) instead of R(9,6): the SAME `sparse_clifford::null_vector_pairing`
-//! at E = 3, N = 1, the SAME plan-mask + `SparsePlan` discipline, and the SAME
-//! provider catamorphism, with the classic point/dual-sphere embedding in
-//! place of the quadric one. The domain surface is again just support maps
-//! plus one pairing composition; here both supports are the identity over the
-//! five vector slots [e1, e2, e3, eo1, ei1], so the whole "CGA vs QCGA"
-//! difference is the (E, N) instantiation and the embedding.
+//! `Cga3Basis` states three positive generators and one typed null pair.
+//! `Vector<Coefficients>` aligns coefficient records to that basis by reflected
+//! field name; `CompileNamedVectorDotF32<Point, Sphere, Metric>` derives
+//! support, pair routing, signs, and straight-line scalar arithmetic. No
+//! numeric support, plan mask, candidate routing, or demo-local provider is
+//! authored here.
 //!
-//! The algebra, worked by hand and pinned below: of the 25 candidate
-//! products, five survive the metric: e_i * e_i (+1) at candidates 0, 6, 12,
-//! and the eo1/ei1 null pair (-1) at candidates 19 and 23, so
+//! The resulting algebra is the familiar coordinate-free incidence
 //!     X . S* = x.c - |x|^2/2 - (|c|^2 - r^2)/2 = -(|x - c|^2 - r^2)/2
 //! for the point embedding X = x + eo1 + (|x|^2/2) ei1 and the dual sphere
 //! S* = c + eo1 + ((|c|^2 - r^2)/2) ei1: incidence is zero exactly on the
-//! sphere. The keep mask 8917057 = 2^0 + 2^6 + 2^12 + 2^19 + 2^23.
+//! sphere.
 //!
 //! The picture: the y = 0 slice of the pencil member
 //! S(lambda) = cos(PI*lambda) * S1 + sin(PI*lambda) * S2, two fixed generator
@@ -25,8 +21,8 @@
 //! sphere, so the coefficient blend IS the classic pencil of spheres through
 //! the generators' common circle; where the blended eo1 weight crosses zero
 //! the member degenerates to the radical PLANE (a sphere through infinity),
-//! the slice curve snapping from circles to a line and back. Five planned
-//! contractions per pixel (field + exact gradient), zero set drawn as the
+//! the slice curve snapping from circles to a line and back. Five generated
+//! incidence evaluations per pixel (field + exact gradient), zero set drawn as the
 //! gradient-normalized curve over a signed-field wash, mirroring qcga.
 //!
 //! Software rendering (lavapipe/SwiftShader) in the sandbox; no performance or
@@ -35,8 +31,6 @@
 //!     fe web build demos/sketches/cga3d --out <dir>
 
 use core::marker::Copy
-use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
-use core::num::IntDowncast
 use std::webgpu::{
     FragmentSurface, GpuProgram, LatestPerFrame, SurfaceScheduling, SurfaceTransition, WebGpuBackend,
 }
@@ -44,178 +38,37 @@ use std::web::view::{
     ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface,
     SurfaceEvent, SurfaceState,
 }
-use sparse_clifford::{
-    Nat, PlanLength, SparsePlan, Term, null_vector_pairing, plan_candidate_left,
-    plan_candidate_right, plan_mask_cardinality,
+use ga_expr::{
+    BasisMetric, CompileNamedVectorDotF32, EvaluateVectorScalarF32,
+    Null, Positive, Prime,
 }
 use fmath::{PI, abs, clamp01, cos, from_i32, mix, rgba, sin, smoothstep, sqrt}
+use gallery_palette::{electric_blue, midnight, spring_green, theorem_gold}
 
 // ---------------------------------------------------------------------------
-// The Cl(4,1) facts. Vector index space (null basis, vectors only):
-//   0..3 = e1,e2,e3   3 = eo1   4 = ei1.
-// Both operand supports cover all five slots in basis order, so both support
-// maps are the identity: the contrast with qcga's staggered 12-of-15 maps is
-// the point of keeping them spelled.
+// The complete Cl(4,1) authoring surface. The shared compiler derives the
+// dimension, sparse support, and eo/ei metric products from these named types.
 // ---------------------------------------------------------------------------
 
-const POINT_TERMS: usize = 5
-const SPHERE_TERMS: usize = 5
-const CANDIDATES: usize = POINT_TERMS * SPHERE_TERMS
-
-/// The point support list: e1, e2, e3, eo1, ei1.
-const fn point_vector(_ slot: usize) -> usize {
-    slot
+struct CgaPair {}
+struct Cga3Basis {
+    e1: Positive, e2: Positive, e3: Positive,
+    eo: Null<CgaPair>, ei: Prime<CgaPair>,
 }
-
-/// The dual-sphere support list: e1, e2, e3, eo1, ei1.
-const fn sphere_vector(_ slot: usize) -> usize {
-    slot
+type Cga3Metric = BasisMetric<Cga3Basis>
+struct CgaPointCoefficients {
+    e1: f32, e2: f32, e3: f32, eo: f32, ei: f32,
 }
-
-/// Metric pairing of one candidate product, THROUGH the same generic library
-/// fn qcga uses, instantiated at E = 3, N = 1. 0 = annihilated, 1 = +1,
-/// 2 = -1.
-const fn incidence_pairing(_ candidate: usize) -> usize {
-    null_vector_pairing(
-        point_vector(plan_candidate_left(candidate, SPHERE_TERMS)),
-        sphere_vector(plan_candidate_right(candidate, SPHERE_TERMS)),
-        3, 1,
-    )
+struct DualSphereCoefficients {
+    e1: f32, e2: f32, e3: f32, eo: f32, ei: f32,
 }
-
-// Provider-facing helpers: the derive body may only call const fns declared in
-// its own module (provider_executor eval_const_helper_call), so these
-// one-liners bridge it to the library vocabulary above.
-
-const fn incidence_left_field(_ candidate: usize) -> usize {
-    plan_candidate_left(candidate, SPHERE_TERMS)
-}
-
-const fn incidence_right_field(_ candidate: usize) -> usize {
-    POINT_TERMS + plan_candidate_right(candidate, SPHERE_TERMS)
-}
-
-const fn incidence_negative(_ candidate: usize) -> bool {
-    incidence_pairing(candidate) == 2
-}
-
-// ---------------------------------------------------------------------------
-// The CTFE plan: 25 candidates, five metric survivors.
-// ---------------------------------------------------------------------------
-
-const fn incidence_keep_word(_ first: usize, _ last: usize) -> u32 {
-    let mut candidate: usize = first
-    let mut keep_bits: u32 = 0
-    while candidate < last {
-        if incidence_pairing(candidate) != 0 {
-            keep_bits =
-                keep_bits | ((1 as u32) << (candidate - first).downcast_truncate())
-        }
-        candidate = candidate + 1
-    }
-    keep_bits
-}
-
-const INCIDENCE_KEEP0: u32 = incidence_keep_word(0, 24)
-const INCIDENCE_KEEP1: u32 = incidence_keep_word(24, 25)
-
-const fn survivor_count() -> usize {
-    plan_mask_cardinality(
-        INCIDENCE_KEEP0, INCIDENCE_KEEP1, 0, 0, 0, 0, 0, 0, CANDIDATES,
-    )
-}
-
-const fn survivor_negatives() -> usize {
-    let mut candidate: usize = 0
-    let mut count: usize = 0
-    while candidate < CANDIDATES {
-        if incidence_pairing(candidate) == 2 { count = count + 1 }
-        candidate = candidate + 1
-    }
-    count
-}
-
-// The hand-derived ground truth, pinned: survivors {0, 6, 12, 19, 23}
-// (mask 2^0 + 2^6 + 2^12 + 2^19 + 2^23 = 8917057), three positive Euclidean
-// products, two negative eo1/ei1 products, and nothing in the last candidate
-// word (candidate 24 is ei1 * ei1 = 0).
-static_assert(survivor_count() == 5)
-static_assert(survivor_negatives() == 2)
-static_assert(INCIDENCE_KEEP0 == 8917057)
-static_assert(INCIDENCE_KEEP1 == 0)
-
-type IncidencePlan5 =
-    SparsePlan<
-        INCIDENCE_KEEP0, INCIDENCE_KEEP1, 0, 0, 0, 0, 0, 0,
-        CANDIDATES,
-        5,
-    >
-
-fn takes_nat5(_ value: Nat<5>) {}
-fn planned_support_has_five_terms(value: <IncidencePlan5 as PlanLength>::Out) {
-    takes_nat5(value)
-}
-
-// ---------------------------------------------------------------------------
-// The operand carrier and the generated contraction. The first five fields
-// are the point support, the second five the dual-sphere support, in the slot
-// order the support maps declare.
-// ---------------------------------------------------------------------------
-
 struct SphereIncidenceOperands {
-    p0: f32, p1: f32, p2: f32, p3: f32, p4: f32,
-    s0: f32, s1: f32, s2: f32, s3: f32, s4: f32,
+    point: CgaPointCoefficients,
+    sphere: DualSphereCoefficients,
 }
-impl Copy for SphereIncidenceOperands {}
-
-trait PlannedIncidence {
-    fn incidence(_ operands: SphereIncidenceOperands) -> f32
-}
-
-/// The same provider catamorphism as qcga's, over the Cl(4,1) plan: for each
-/// `Term` of `IncidencePlan5`, select the two operand fields the candidate
-/// names, ask the library-backed pairing for the metric sign, and fold
-/// `mul`/`neg`/`add`. Nothing here restates the algebra.
-struct Cga3dContractionProvider {}
-impl Derive<PlannedIncidence> for Cga3dContractionProvider {
-    const fn derive<T>(ev: own Evidence<PlannedIncidence<T>>) -> Evidence<PlannedIncidence<T>>
-        uses (reflect: Reflect<T>, builder: mut ImplBuilder<PlannedIncidence<T>>)
-    {
-        let operands = builder.arg_ref("operands")
-        let acc = operands
-        let emitted = 0
-        for nested in builder.ty<IncidencePlan5>().normalized_preorder_types() {
-            if builder.same_ty(nested.constructor(), builder.ty<Term>()) {
-                let candidate: usize = 25
-                for arg in nested.generic_args() {
-                    if arg.is_const() { candidate = arg.const_value() }
-                }
-                if candidate < 25 {
-                    let left_field = incidence_left_field(candidate)
-                    let right_field = incidence_right_field(candidate)
-                    let lhs = operands
-                    let rhs = operands
-                    let index = 0
-                    for field in reflect.fields() {
-                        if index == left_field { lhs = builder.field_get(operands, field) }
-                        if index == right_field { rhs = builder.field_get(operands, field) }
-                        index = index + 1
-                    }
-                    let term = builder.mul(lhs, rhs)
-                    if incidence_negative(candidate) { term = builder.neg(term) }
-                    if emitted == 0 { acc = term }
-                    else { acc = builder.add(acc, term) }
-                    emitted = emitted + 1
-                }
-            }
-        }
-        builder.emit_method("incidence", acc)
-        builder.finish()
-        ev
-    }
-}
-
-derive PlannedIncidence for SphereIncidenceOperands using Cga3dContractionProvider
+derive EvaluateVectorScalarF32 for SphereIncidenceOperands using CompileNamedVectorDotF32<
+    CgaPointCoefficients, DualSphereCoefficients, Cga3Metric,
+>
 
 // ---------------------------------------------------------------------------
 // The classic point embedding and dual-sphere values.
@@ -223,16 +76,19 @@ derive PlannedIncidence for SphereIncidenceOperands using Cga3dContractionProvid
 
 /// Embed a Euclidean point and contract it with a dual sphere's five
 /// coefficients: X = x e1 + y e2 + z e3 + eo1 + (|x|^2 / 2) ei1.
-pub fn cga3d_incidence_planned(
+pub fn cga3d_incidence(
     x: f32, y: f32, z: f32,
     sx: f32, sy: f32, sz: f32, so: f32, si: f32,
 ) -> f32 {
     let half: f32 = 0.5
-    <SphereIncidenceOperands as PlannedIncidence>::incidence(SphereIncidenceOperands {
-        p0: x, p1: y, p2: z,
-        p3: 1.0,
-        p4: (x * x + y * y + z * z) * half,
-        s0: sx, s1: sy, s2: sz, s3: so, s4: si,
+    <SphereIncidenceOperands as EvaluateVectorScalarF32>::scalar(SphereIncidenceOperands {
+        point: CgaPointCoefficients {
+            e1: x, e2: y, e3: z, eo: 1.0,
+            ei: (x * x + y * y + z * z) * half,
+        },
+        sphere: DualSphereCoefficients {
+            e1: sx, e2: sy, e3: sz, eo: so, ei: si,
+        },
     })
 }
 
@@ -256,12 +112,12 @@ pub fn dual_sphere(_ cx: f32, _ cy: f32, _ cz: f32, _ r: f32) -> DualSphere {
     }
 }
 
-/// Point/sphere incidence through the planned sparse contraction, rescaled by
+/// Point/sphere incidence through the compiled named-vector dot, rescaled by
 /// -2 so a NORMALIZED sphere (o = 1) reads as |x - c|^2 - r^2: positive
 /// outside, negative inside, zero on the surface. Every "is this point on the
 /// sphere" below flows through here.
 pub fn eval_sphere(_ s: DualSphere, _ x: f32, _ y: f32, _ z: f32) -> f32 {
-    -2.0 * cga3d_incidence_planned(
+    -2.0 * cga3d_incidence(
         x: x, y: y, z: z,
         sx: s.x, sy: s.y, sz: s.z, so: s.o, si: s.i,
     )
@@ -342,7 +198,7 @@ actor Cga3dSurface uses (GpuProgram<WebGpuBackend>) {
         current.apply_param_bindings(cga3d_params(), event)
     }
 
-    /// Pixel coordinate in, packed RGBA8 word out. Five planned contractions
+    /// Pixel coordinate in, packed RGBA8 word out. Five generated incidence
     /// per pixel: the field and its exact slice gradient (the field is
     /// quadratic in position, so h = 1 central differences are exact).
     fn shade(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
@@ -374,7 +230,7 @@ actor Cga3dSurface uses (GpuProgram<WebGpuBackend>) {
             i: w0 * s1.i + w1 * s2.i,
         }
 
-        // The REAL sparse contraction, five times.
+        // One named-basis incidence evaluator, sampled for field and gradient.
         let f0: f32 = eval_sphere(s, u, 0.0, v)
         let gx: f32 = (eval_sphere(s, u + 1.0, 0.0, v) - eval_sphere(s, u - 1.0, 0.0, v)) * 0.5
         let gz: f32 = (eval_sphere(s, u, 0.0, v + 1.0) - eval_sphere(s, u, 0.0, v - 1.0)) * 0.5
@@ -386,15 +242,27 @@ actor Cga3dSurface uses (GpuProgram<WebGpuBackend>) {
         let pixel_w: f32 = self.zoom * 2.0 / self.res
         let curve: f32 = 1.0 - smoothstep(0.0, pixel_w * 1.5, dist)
 
-        // Signed-field wash behind the curve: warm outside, cool inside,
-        // the same palette as qcga.
+        // Signed field in the original Desargues construction palette: blue
+        // inside, green outside, and theorem gold on the zero set.
         let sq: f32 = f0 / (1.0 + abs(f0))
         let inside: f32 = clamp01(0.0 - sq)
         let outside: f32 = clamp01(sq)
-        let wash: f32 = 1.0 - curve
-        let red: f32 = mix(0.07, 0.96, curve) + wash * 0.38 * outside
-        let grn: f32 = mix(0.09, 0.97, curve) + wash * 0.20 * inside
-        let blu: f32 = mix(0.14, 0.99, curve) + wash * 0.48 * inside
+        let ground = midnight()
+        let cool = electric_blue()
+        let warm = spring_green()
+        let zero = theorem_gold()
+        let field_red: f32 = ground.red
+            + inside * (cool.red - ground.red)
+            + outside * (warm.red - ground.red)
+        let field_green: f32 = ground.green
+            + inside * (cool.green - ground.green)
+            + outside * (warm.green - ground.green)
+        let field_blue: f32 = ground.blue
+            + inside * (cool.blue - ground.blue)
+            + outside * (warm.blue - ground.blue)
+        let red: f32 = mix(field_red, zero.red, curve)
+        let grn: f32 = mix(field_green, zero.green, curve)
+        let blu: f32 = mix(field_blue, zero.blue, curve)
         rgba(red, grn, blu)
     }
 }

@@ -23,12 +23,8 @@
 //!    NEGATIVE: an empty quadric emits no geometry at all.
 //! 7. `mesh_oracle` and `probe` agree bit for bit; stream length pins
 //!    VERTEX_COUNT.
-//! 8. Lane intents are honest (wasm lanes say wasm, host lanes say
-//!    host-effect + main thread + WebGPU dispatch capability).
-//! 9. Authored raster placement is nominal and typed: the compiler derives one
-//!    `SurfaceVarying` interface for `PencilRaster`'s vertex/fragment pair and
-//!    selects its fragment as the render entry, and lowers both Fe bodies into
-//!    one pipeline without substituting the fullscreen envelope.
+//! 8. The canonical DE actor owns initialization, typed interaction, bounded
+//!    arena reuse, and the only QCGA Pencil GPU entry after raster retirement.
 
 use std::path::Path;
 
@@ -36,9 +32,9 @@ use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
     CanonicalExecution, CanonicalFieldLayout, CanonicalInterfaceManifest, CanonicalLane,
-    CanonicalLayout, CanonicalPlacement, CanonicalShape, CanonicalType, WasmCompileOptions,
-    WebActorStageKind, WebBuildOptions, WebBundle, WebBundleMode, actor_gpu_program,
-    actor_web_entry, canonical_lane_decl_from_entry, compile_runtime_package_wasm_with_options,
+    CanonicalLayout, CanonicalShape, WasmCompileOptions, WebActorStageKind, WebBuildOptions,
+    WebBundle, WebBundleMode, actor_gpu_program, actor_web_entry, canonical_lane_decl_from_entry,
+    compile_runtime_package_wasm_with_options,
 };
 use hir::hir_def::{HirIngot, TopLevelMod};
 use url::Url;
@@ -49,7 +45,6 @@ const ROWS: u32 = 24;
 const COLS: u32 = 48;
 const SHEET_VERTS: u32 = ROWS * COLS * 6;
 const VERTEX_COUNT: u32 = 2 * SHEET_VERTS;
-const RASTER_VERTEX_COUNT: u32 = VERTEX_COUNT + 9 * 6;
 const T_MAX: f64 = 12.0;
 
 fn with_sketch<R>(run: impl FnOnce(&DriverDataBase, TopLevelMod) -> R) -> R {
@@ -69,6 +64,27 @@ fn with_sketch<R>(run: impl FnOnce(&DriverDataBase, TopLevelMod) -> R) -> R {
     assert!(
         diagnostics.is_empty(),
         "qcga_pencil sketch has diagnostics:\n{diagnostics}"
+    );
+    run(&db, top_mod)
+}
+
+fn with_de<R>(run: impl FnOnce(&DriverDataBase, TopLevelMod) -> R) -> R {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../demos/sketches/qcga_pencil_de");
+    let url = Url::from_directory_path(path.canonicalize().unwrap()).unwrap();
+    let mut db = DriverDataBase::default();
+    assert!(
+        !driver::init_ingot(&mut db, &url),
+        "qcga_pencil_de ingot initialization diagnostics"
+    );
+    let ingot = db
+        .workspace()
+        .containing_ingot(&db, url)
+        .expect("qcga_pencil_de ingot");
+    let top_mod = ingot.root_mod(&db);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "qcga_pencil_de sketch has diagnostics:\n{diagnostics}"
     );
     run(&db, top_mod)
 }
@@ -819,100 +835,43 @@ fn lane_intents_declare_honest_placement() {
                 "`{name}` must be a genuine wasm lane"
             );
         }
-        for name in ["render", "verify"] {
-            let decl = canonical_lane_decl_from_entry(db, top_mod, name, name)
-                .unwrap_or_else(|error| panic!("lane decl for `{name}`: {error}"));
-            assert_eq!(
-                decl.intent.execution,
-                CanonicalExecution::HostEffect,
-                "`{name}` must declare itself host-executed, not pretend to be Fe"
-            );
-            assert_eq!(decl.intent.placement, CanonicalPlacement::MainThread);
-            assert!(
-                decl.intent
-                    .capabilities
-                    .iter()
-                    .any(|req| req.capability.as_str() == "webgpu_dispatch"),
-                "`{name}` must carry the WebGPU dispatch capability requirement"
-            );
-        }
     });
 }
 
-/// The standard authored-raster meaning is checked and lowered. This protects
-/// both sides of the honesty boundary: stage roles must not masquerade as
-/// message lanes, and the compiler must not render QCGA through its old
-/// synthesized fullscreen vertex stage.
+/// The canonical DE actor owns initialization, interaction, and rendering.
+/// This absorbs lifecycle/arena coverage formerly attached to the raster actor
+/// while the independent solver and analytic-ray tests remain separate.
 #[test]
-fn authored_raster_plan_is_typed_and_compiles_the_fe_stage_pair() {
-    with_sketch(|db, top_mod| {
+fn canonical_de_actor_owns_the_complete_scene_lifecycle() {
+    with_de(|db, top_mod| {
         let program = actor_gpu_program(db, top_mod)
-            .expect("derive QCGA raster program")
+            .expect("derive QCGA DE program")
             .expect("QCGA GPU actor");
-        assert_eq!(program.actor, "PencilRaster");
-        assert_eq!(program.stages.len(), 2);
-        assert_eq!(program.stages[0].source_entry, "surface_vertex");
-        assert_eq!(program.stages[1].source_entry, "surface_fragment");
-
-        let WebActorStageKind::Vertex {
-            varying: vertex,
-            vertex_count,
-        } = &program.stages[0].kind
-        else {
-            panic!("expected vertex role, got {:?}", program.stages[0].kind);
-        };
-        assert_eq!(*vertex_count, RASTER_VERTEX_COUNT);
-        let WebActorStageKind::RasterFragment { varying: fragment } = &program.stages[1].kind
-        else {
-            panic!(
-                "expected raster fragment role, got {:?}",
-                program.stages[1].kind
-            );
-        };
-        assert_eq!(
-            vertex, fragment,
-            "both stages must share one nominal payload"
-        );
-        let CanonicalType::Record(fields) = vertex else {
-            panic!("SurfaceVarying must retain its named record shape: {vertex:?}");
-        };
-        assert_eq!(
-            fields
-                .iter()
-                .map(|field| field.name.as_str())
-                .collect::<Vec<_>>(),
-            ["nx", "ny", "nz", "glow", "sheet", "accuse", "marker"],
-        );
-        assert!(fields.iter().all(|field| field.ty == CanonicalType::F32));
+        assert_eq!(program.actor, "PencilDistanceSurface");
+        assert_eq!(program.stages.len(), 1);
+        assert_eq!(program.stages[0].source_entry, "distance_surface");
+        assert_eq!(program.stages[0].kind, WebActorStageKind::Fragment);
         assert_eq!(
             actor_web_entry(db, top_mod).expect("derive QCGA web entry"),
-            Some(("surface_fragment".to_owned(), WebBundleMode::Render)),
+            Some(("distance_surface".to_owned(), WebBundleMode::Render)),
         );
 
-        // Stage invocations are pipeline roles, not host request/response
-        // messages. Their rejection by the canonical message ABI is correct.
-        for name in ["surface_vertex", "surface_fragment"] {
-            let decl = canonical_lane_decl_from_entry(db, top_mod, name, name);
-            assert!(
-                decl.is_err(),
-                "canonical message vocabulary unexpectedly accepted stage `{name}`"
-            );
-        }
+        let decl =
+            canonical_lane_decl_from_entry(db, top_mod, "distance_surface", "distance_surface");
+        assert!(
+            decl.is_err(),
+            "the fragment stage must not masquerade as a message lane"
+        );
 
         let bundle = WebBundle::compile(
             db,
             top_mod,
-            WebBuildOptions::render("surface_fragment", None),
+            WebBuildOptions::render("distance_surface", None),
         )
-        .expect("QCGA authored raster bundle");
+        .expect("QCGA canonical DE bundle");
         assert_eq!(bundle.manifest.passes.len(), 1);
         let pass = &bundle.manifest.passes[0];
-        assert_eq!(pass.draw_vertices, Some(RASTER_VERTEX_COUNT));
-        assert_eq!(pass.layout.vertex_entry.as_deref(), Some("surface_vertex"));
-        assert_eq!(
-            pass.layout.fragment_entry.as_deref(),
-            Some("surface_fragment")
-        );
+        assert_eq!(pass.source_entry, "distance_surface");
         assert_eq!(pass.layout.bindings.len(), 1);
         assert_eq!(pass.layout.bindings[0].members.len(), 57);
         assert_eq!(
@@ -1018,9 +977,12 @@ fn authored_raster_plan_is_typed_and_compiles_the_fe_stage_pair() {
         assert_eq!(f32_at(&state, 8).to_bits(), 1.0f32.to_bits());
         let q0 = std::array::from_fn(|index| f32_at(&state, 9 + index));
         let q1 = std::array::from_fn(|index| f32_at(&state, 19 + index));
-        let points = read_default_points(db, top_mod);
-        for point in points.chunks_exact(3) {
-            let point = [point[0] as f64, point[1] as f64, point[2] as f64];
+        for index in 0..9 {
+            let point = [
+                f32_at(&state, 29 + index * 3) as f64,
+                f32_at(&state, 30 + index * 3) as f64,
+                f32_at(&state, 31 + index * 3) as f64,
+            ];
             assert!(oracle(&q0, point).abs() < 1e-4);
             assert!(oracle(&q1, point).abs() < 1e-4);
         }
@@ -1287,6 +1249,5 @@ fn authored_raster_plan_is_typed_and_compiles_the_fe_stage_pair() {
             .expect("close final canonical surface-call epoch");
         assert!(bundle.wgsl.contains("@vertex"), "{}", bundle.wgsl);
         assert!(bundle.wgsl.contains("@fragment"), "{}", bundle.wgsl);
-        assert!(!bundle.wgsl.contains("vs_fullscreen"), "{}", bundle.wgsl);
     });
 }
