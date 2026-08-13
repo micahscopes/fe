@@ -1,11 +1,12 @@
-// One transport-neutral event tape is consumed through the raw EventSource
-// interface, through Stream, and through pure FRP transformations. All three
-// subscriptions observe the same values and report identical cleanup.
+// One deterministic event tape handles the EventSource runtime effect for an
+// imperative consumer, Stream, and pure FRP transformations. All three
+// subscriptions observe the same values and report identical cleanup through
+// the same typed handler scope.
 
 use core::Fn
 use std::reactive::{
     Cancelled, Event, EventSource, Stepped, Stream, Subscription,
-    filter_event, hold, map_event,
+    cancel_event, filter_event, hold, map_event, next_event, subscribe_event,
 }
 
 struct Tape {
@@ -15,11 +16,11 @@ struct Tape {
 impl Copy for Tape {}
 
 impl EventSource for Tape {
-    fn subscribe(self) -> Subscription {
+    fn subscribe(mut self) -> Subscription {
         Subscription::new()
     }
 
-    fn next(self, _ subscription: own Subscription) -> (Subscription, Event) {
+    fn next(mut self, _ subscription: own Subscription) -> (Subscription, Event) {
         let advanced = subscription.advance()
         let next_subscription = advanced.0
         let cursor = advanced.1
@@ -30,7 +31,29 @@ impl EventSource for Tape {
         }
     }
 
-    fn cancel(self, _ subscription: own Subscription) -> Cancelled {
+    fn cancel(mut self, _ subscription: own Subscription) -> Cancelled {
+        Cancelled { consumed: subscription.cursor() }
+    }
+}
+
+// A stateful handler proves `mut EventSource` is resident for the handler
+// scope. Stream remains zero-state; it does not courier this counter itself.
+struct CounterSource {
+    next_value: u32,
+}
+
+impl EventSource for CounterSource {
+    fn subscribe(mut self) -> Subscription {
+        Subscription::new()
+    }
+
+    fn next(mut self, _ subscription: own Subscription) -> (Subscription, Event) {
+        let value = self.next_value
+        self.next_value = self.next_value + 1
+        (subscription.advance().0, Event::occurrence(value: value))
+    }
+
+    fn cancel(mut self, _ subscription: own Subscription) -> Cancelled {
         Cancelled { consumed: subscription.cursor() }
     }
 }
@@ -53,51 +76,70 @@ impl Fn<u32, bool> for AtLeastFour {
 
 #[test]
 fn imperative_stream_and_frp_consumers_share_values_and_cleanup() {
-    let tape = Tape { values: [1, 2, 3, 4] }
-    let stream = Stream::new(source: tape)
-    let mut imperative = tape.subscribe()
-    let mut streamed = stream.subscribe()
-    let mut reactive = tape.subscribe()
-    let mut held = Stepped { held: 0 }
-    let mut i: u32 = 0
-
-    while i < 4 {
-        let raw_step = tape.next(imperative)
-        imperative = raw_step.0
-        let raw = raw_step.1
-
-        let stream_step = stream.next(streamed)
-        streamed = stream_step.0
-        let stream_event = stream_step.1
-
-        let frp_step = tape.next(reactive)
-        reactive = frp_step.0
-        let mapped = map_event(frp_step.1, Double {})
-        let selected = filter_event(mapped, AtLeastFour {})
-        held = hold(held, selected)
-
-        assert(raw.present)
-        assert(stream_event.present)
-        assert(stream_event.value == raw.value)
-        assert(mapped.present)
-        assert(mapped.value == raw.value * 2)
-        if raw.value >= 2 {
-            assert(selected.present)
-            assert(held.held == raw.value * 2)
-        } else {
-            assert(!selected.present)
-            assert(held.held == 0)
-        }
-        i = i + 1
+    let mut tape = Tape {
+        values: [1, 2, 3, 4],
     }
+    let stream = Stream::new()
 
-    let imperative_cleanup = tape.cancel(imperative)
-    let stream_cleanup = stream.cancel(streamed)
-    let reactive_cleanup = tape.cancel(reactive)
-    assert(imperative_cleanup.consumed == 4)
-    assert(stream_cleanup.consumed == imperative_cleanup.consumed)
-    assert(reactive_cleanup.consumed == imperative_cleanup.consumed)
-    assert(held.held == 8)
+    with (EventSource = tape) {
+        let mut imperative = subscribe_event()
+        let mut streamed = stream.subscribe()
+        let mut reactive = subscribe_event()
+        let mut held = Stepped { held: 0 }
+        let mut i: u32 = 0
+
+        while i < 4 {
+            let raw_step = next_event(imperative)
+            imperative = raw_step.0
+            let raw = raw_step.1
+
+            let stream_step = stream.next(streamed)
+            streamed = stream_step.0
+            let stream_event = stream_step.1
+
+            let frp_step = next_event(reactive)
+            reactive = frp_step.0
+            let mapped = map_event(frp_step.1, Double {})
+            let selected = filter_event(mapped, AtLeastFour {})
+            held = hold(held, selected)
+
+            assert(raw.present)
+            assert(stream_event.present)
+            assert(stream_event.value == raw.value)
+            assert(mapped.present)
+            assert(mapped.value == raw.value * 2)
+            if raw.value >= 2 {
+                assert(selected.present)
+                assert(held.held == raw.value * 2)
+            } else {
+                assert(!selected.present)
+                assert(held.held == 0)
+            }
+            i = i + 1
+        }
+
+        let imperative_cleanup = cancel_event(imperative)
+        let stream_cleanup = stream.cancel(streamed)
+        let reactive_cleanup = cancel_event(reactive)
+        assert(imperative_cleanup.consumed == 4)
+        assert(stream_cleanup.consumed == imperative_cleanup.consumed)
+        assert(reactive_cleanup.consumed == imperative_cleanup.consumed)
+        assert(held.held == 8)
+    }
+}
+
+#[test]
+fn event_source_handler_owns_resident_mutable_state() {
+    let stream = Stream::new()
+    let mut source = CounterSource { next_value: 41 }
+    with (EventSource = source) {
+        let subscription = stream.subscribe()
+        let first = stream.next(subscription)
+        assert(first.1.value == 41)
+        let second = stream.next(first.0)
+        assert(second.1.value == 42)
+        assert(stream.cancel(second.0).consumed == 2)
+    }
 }
 
 #[test]

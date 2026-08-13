@@ -5,9 +5,9 @@ expression: diags
 input_file: fixtures/semantic_borrowck/reactive_subscription_double_cancel.fe
 ---
 error[16-0002]: move conflict in `fn double_cancel`
-   ┌─ reactive_subscription_double_cancel.fe:25:19
+   ┌─ reactive_subscription_double_cancel.fe:27:18
    │
-24 │     source.cancel(subscription)
-   │                   ------------ `subscription` is moved here
-25 │     source.cancel(subscription)
-   │                   ^^^^^^^^^^^^ cannot use a value after it was moved
+26 │     cancel_event(subscription)
+   │                  ------------ `subscription` is moved here
+27 │     cancel_event(subscription)
+   │                  ^^^^^^^^^^^^ cannot use a value after it was moved

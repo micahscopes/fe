@@ -16,18 +16,20 @@ fn test_with_block_custom_effect() {
 
     let out: u256 = with (Counter = counter) {
         inc()
+        inc()
         read()
     }
 
-    assert!(out == 1)
+    assert!(out == 2)
 }
 
 #[test]
 fn test_with_temp_block_custom_effect() {
     let out: u256 = with (Counter = Counter { value: 0 }) {
         inc()
+        inc()
         read()
     }
 
-    assert!(out == 1)
+    assert!(out == 2)
 }

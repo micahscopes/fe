@@ -2397,11 +2397,20 @@ impl<'db> TyChecker<'db> {
                 )
             }
         };
-        let arg_style = match (transport, target_ty) {
-            (WitnessTransport::Direct, Some(target_ty)) => self
-                .direct_arg_style_for_provider(provider, target_ty, required_mut)
-                .unwrap_or(EffectArgStyle::Value),
-            _ => EffectArgStyle::Value,
+        let arg_style = if key_kind == EffectKeyKind::Trait && required_mut {
+            // A mutable trait effect is one resident handler authority, not a
+            // fresh value receiver at every use. Select transport from the
+            // provider's place provenance without re-normalizing its type here
+            // (trait-key normalization may itself be in flight).
+            self.mutable_trait_arg_style_for_provider(provider)
+                .unwrap_or(EffectArgStyle::Value)
+        } else {
+            match (transport, target_ty) {
+                (WitnessTransport::Direct, Some(target_ty)) => self
+                    .direct_arg_style_for_provider(provider, target_ty, required_mut)
+                    .unwrap_or(EffectArgStyle::Value),
+                _ => EffectArgStyle::Value,
+            }
         };
         Some(EffectEvidence::Keyed {
             provider,
@@ -2533,6 +2542,25 @@ impl<'db> TyChecker<'db> {
         {
             return Some(EffectArgStyle::Value);
         }
+        let place = match provider.origin {
+            EffectOrigin::With { value_expr } => self.env.expr_place(value_expr),
+            EffectOrigin::Param { .. } => provider
+                .binding
+                .map(|binding| Place::new(PlaceBase::Binding(binding))),
+        };
+        Some(match place {
+            Some(_) => EffectArgStyle::Place,
+            None if matches!(provider.origin, EffectOrigin::With { .. }) => {
+                EffectArgStyle::TempPlace
+            }
+            None => return None,
+        })
+    }
+
+    fn mutable_trait_arg_style_for_provider(
+        &self,
+        provider: ProvidedEffect<'db>,
+    ) -> Option<EffectArgStyle> {
         let place = match provider.origin {
             EffectOrigin::With { value_expr } => self.env.expr_place(value_expr),
             EffectOrigin::Param { .. } => provider

@@ -1,18 +1,23 @@
-//! Reactive programming in Fe: an ordinary library over event subscriptions.
+//! Reactive programming in Fe: pure value combinators over runtime control
+//! effects.
 //!
 //! A `Signal` is a pure sample of time and an `Event` is one discrete
-//! occurrence. `EventSource` is the small pull-shaped interoperability
-//! interface: a source creates a `Subscription`, each `next` consumes that
-//! subscription and returns its successor, and `cancel` consumes it finally.
-//! A browser event target, test tape, game loop, channel, or contract adapter
-//! can implement that interface without this module naming its transport.
+//! occurrence. `EventSource` is the small pull-shaped *handler authority*: a
+//! handler creates a `Subscription`, each `next` consumes that subscription
+//! and returns its successor, and `cancel` consumes it finally. Imperative
+//! consumers and `Stream` both request the same `mut EventSource` effect; they
+//! cannot quietly acquire or drive a source through a second direct runtime.
+//! A browser event target, deterministic tape, game loop, async iterator, or
+//! channel may implement the handler without changing the combinator algebra.
 //!
-//! This module does not know about completion cells, blocking, a compiler
-//! lowering seam, or any particular host. An asynchronous host adapter may
-//! feed occurrences into an `EventSource`, but that adapter is below the
-//! library boundary. `Stream<S>` is the ordinary library wrapper over that
-//! source interface; imperative consumers, stream consumers, and the FRP
-//! combinators all use the same subscription mechanics.
+//! This module does not choose completion cells, blocking versus suspension,
+//! placement, or a particular host. Those are interpretations of the
+//! `EventSource` effect (and, for asynchronous handlers, the shared
+//! `core::pending` rail). `Stream` is a zero-state vocabulary over that effect:
+//! the source lives in the surrounding handler scope, never as a second
+//! couriered field inside the stream. Synchronous tests use an ordinary Fe tape
+//! as that handler; browser/Worker/WebGPU handlers may resume it from their
+//! runtime control effects.
 //!
 //! ## Purity is a type fact, not a convention (the flagship property)
 //!
@@ -40,8 +45,9 @@
 //! v1 `T` is word-sized `Copy` values (the sampled-value grammar). There is no
 //! continuous-time interval reasoning, no push-pull optimization, and no
 //! dynamic-network GC. `map_event`, `filter_event`, and `hold` are pure
-//! transformations of occurrences; acquisition and cancellation stay explicit
-//! at the `EventSource` boundary.
+//! transformations of occurrences. Acquisition, polling and cancellation are
+//! visibly effectful at every consumer boundary, while `Signal::sample` remains
+//! checked-pure.
 
 use core::Fn
 
@@ -147,41 +153,70 @@ pub struct Cancelled {
     pub consumed: u32,
 }
 
-/// Generic event/subscription interoperability surface.
+/// Generic event/subscription runtime-control authority.
 ///
-/// It is an ordinary Fe trait with no special lowering and no effects baked
-/// into it. A source whose acquisition is effectful can place that effect in
-/// its surrounding adapter; occurrence transformation remains pure.
+/// It is an ordinary Fe trait with no compiler-recognized source names. A
+/// concrete tape or host adapter is installed through `with (EventSource =
+/// handler)`, and consumers request it in their `uses` row. Mutable receivers
+/// allow a handler to own cursor, wakeup and broker state without placing that
+/// state in `Stream` or JavaScript application policy.
 pub trait EventSource {
-    fn subscribe(self) -> Subscription
-    fn next(self, _ subscription: own Subscription) -> (Subscription, Event)
-    fn cancel(self, _ subscription: own Subscription) -> Cancelled
+    fn subscribe(mut self) -> Subscription
+    fn next(mut self, _ subscription: own Subscription) -> (Subscription, Event)
+    fn cancel(mut self, _ subscription: own Subscription) -> Cancelled
 }
 
-/// Host-neutral stream view of an `EventSource`.
+/// Acquire one subscription through the current runtime effect handler.
+pub fn subscribe_event() -> Subscription
+    uses (source: mut EventSource)
+{
+    source.subscribe()
+}
+
+/// Consume one subscription position and retrieve its next occurrence through
+/// the current handler. The returned successor is the only live owner.
+pub fn next_event(_ subscription: own Subscription) -> (Subscription, Event)
+    uses (source: mut EventSource)
+{
+    source.next(subscription)
+}
+
+/// Cancel the current subscription through its owning handler. Cancellation is
+/// affine: this consumes the token, so a second cancellation cannot type-check.
+pub fn cancel_event(_ subscription: own Subscription) -> Cancelled
+    uses (source: mut EventSource)
+{
+    source.cancel(subscription)
+}
+
+/// Host-neutral stream vocabulary over the current `EventSource` effect.
 ///
-/// This wrapper adds no runtime protocol and has no compiler treatment. It
-/// simply presents one source through stream-shaped names while preserving the
-/// source's affine subscription ownership exactly.
-pub struct Stream<S: EventSource> {
-    source: S,
-}
+/// The stream stores no source and introduces no runtime protocol. Its methods
+/// forward to the same effectful functions used by imperative consumers, so
+/// subscription state has exactly one handler and one affine ownership model.
+pub struct Stream {}
 
-impl<S: EventSource> Stream<S> {
-    pub fn new(source: S) -> Self {
-        Self { source }
+impl Stream {
+    pub fn new() -> Self {
+        Self {}
     }
 
-    pub fn subscribe(self) -> Subscription {
-        self.source.subscribe()
+    pub fn subscribe(self) -> Subscription
+        uses (source: mut EventSource)
+    {
+        subscribe_event()
     }
 
-    pub fn next(self, _ subscription: own Subscription) -> (Subscription, Event) {
-        self.source.next(subscription)
+    pub fn next(self, _ subscription: own Subscription) -> (Subscription, Event)
+        uses (source: mut EventSource)
+    {
+        next_event(subscription)
     }
 
-    pub fn cancel(self, _ subscription: own Subscription) -> Cancelled {
-        self.source.cancel(subscription)
+    pub fn cancel(self, _ subscription: own Subscription) -> Cancelled
+        uses (source: mut EventSource)
+    {
+        cancel_event(subscription)
     }
 }
 

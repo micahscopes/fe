@@ -3725,6 +3725,50 @@ fn caller(x: own Ptr<Storage<u8>>) {
 }
 
 #[test]
+fn mutable_trait_effect_witnesses_use_one_place_but_read_only_witnesses_stay_values() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        Utf8PathBuf::from("mutable_trait_effect_witnesses_use_one_place.fe"),
+        r#"
+trait Handler {
+    fn bump(mut self)
+}
+
+struct State { value: u32 }
+
+impl Handler for State {
+    fn bump(mut self) { self.value = self.value + 1 }
+}
+
+fn mutate() uses (handler: mut Handler) { handler.bump() }
+fn inspect() uses (handler: Handler) {}
+
+fn mutable_caller(mut state: own State) {
+    with (Handler = state) { mutate() }
+}
+
+fn read_only_caller(state: own State) {
+    with (Handler = state) { inspect() }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    let mutable_caller = find_func(&db, top_mod, "mutable_caller");
+    let mutate_call = find_named_call_expr(&db, mutable_caller, "mutate");
+    let mutable_body = check_func_body(&db, mutable_caller).1.clone();
+    assert_single_trait_effect_arg(&mutable_body, mutate_call);
+    assert_effect_arg_pass_mode(&mutable_body, mutate_call, EffectPassMode::ByPlace);
+
+    let read_only_caller = find_func(&db, top_mod, "read_only_caller");
+    let inspect_call = find_named_call_expr(&db, read_only_caller, "inspect");
+    let read_only_body = check_func_body(&db, read_only_caller).1.clone();
+    assert_single_trait_effect_arg(&read_only_body, inspect_call);
+    assert_effect_arg_pass_mode(&read_only_body, inspect_call, EffectPassMode::ByValue);
+}
+
+#[test]
 fn family_fallback_keyed_lookup_requires_an_actual_witness_match() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(

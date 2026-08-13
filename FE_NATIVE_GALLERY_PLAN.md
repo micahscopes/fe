@@ -709,6 +709,17 @@ Origin: honesty audit of Claude Code session
 - Mandelbrot-specific native transition tapes, general typed
   lifecycle/reactive streams, pointer capture, picking/messages, resident
   outer-gallery orchestration, and runtime-manifest removal remain open.
+- The first runtime-control/reactive consolidation slice is landed. `Stream`
+  is now zero-state vocabulary over one explicit `mut EventSource` effect;
+  imperative and stream-shaped consumers share `subscribe_event` /
+  `next_event` / `cancel_event`, while pure `Signal::sample` remains unable to
+  widen its effect row. A stateful non-`Copy` Fe tape proves one handler retains
+  state through nested stream forwarding, and compiler lowering now transports
+  mutable trait-effect witnesses by place instead of silently copying their
+  concrete implementors at each call. Independent gates pin missing-handler
+  diagnostics and affine double-cancel rejection. This is the synchronous
+  handler boundary, not a claim that MIR suspension, browser EventSource
+  adapters, or async continuation materialization are complete.
 
 This ledger records achieved evidence, not a relaxation of the phases or the
 Definition of done below.

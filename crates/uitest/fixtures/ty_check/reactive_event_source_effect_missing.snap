@@ -1,0 +1,13 @@
+---
+source: crates/uitest/tests/ty_check.rs
+assertion_line: 27
+expression: diags
+input_file: fixtures/ty_check/reactive_event_source_effect_missing.fe
+---
+error[8-0036]: missing effect `EventSource` required by `subscribe_event`
+  ┌─ reactive_event_source_effect_missing.fe:7:5
+  │
+7 │     subscribe_event()
+  │     ^^^^^^^^^^^^^^^^^ `subscribe_event` requires effect `EventSource` to be in scope
+  │
+  = provide it with `with (EventSource = value)` or require it via `uses EventSource`
