@@ -160,7 +160,11 @@ fn latest_per_frame_oracle(
     let mut request_frame = false;
     if matches!(
         kind,
-        NativeSurfaceEventKind::Gesture | NativeSurfaceEventKind::ParamEdit
+        NativeSurfaceEventKind::Gesture
+            | NativeSurfaceEventKind::ParamEdit
+            | NativeSurfaceEventKind::PointerDown
+            | NativeSurfaceEventKind::PointerMove
+            | NativeSurfaceEventKind::PointerUp
     ) {
         state.observed_inputs += 1;
         request_frame =
@@ -372,6 +376,27 @@ fn native_browser_and_oracle_agree_on_the_real_typed_surface_transition() {
             width: 810.0,
             ..base
         },
+        NativeSurfaceEvent {
+            event_kind: NativeSurfaceEventKind::PointerDown,
+            timestamp: 506.0,
+            width: 811.0,
+            ..base
+        },
+        NativeSurfaceEvent {
+            event_kind: NativeSurfaceEventKind::PointerMove,
+            delta_x: 3.0,
+            delta_y: -2.0,
+            timestamp: 507.0,
+            width: 812.0,
+            ..base
+        },
+        NativeSurfaceEvent {
+            event_kind: NativeSurfaceEventKind::PointerUp,
+            buttons: 0,
+            timestamp: 508.0,
+            width: 813.0,
+            ..base
+        },
     ];
 
     for (step, event) in tape.into_iter().enumerate() {
@@ -425,6 +450,9 @@ fn native_browser_and_oracle_agree_on_the_real_typed_surface_transition() {
         (NativeSurfaceEventKind::Hidden, 52.0, 2),
         (NativeSurfaceEventKind::AnimationFrame, 64.0, 2),
         (NativeSurfaceEventKind::Visible, 65.0, 2),
+        (NativeSurfaceEventKind::PointerDown, 66.0, 3),
+        (NativeSurfaceEventKind::PointerMove, 67.0, 4),
+        (NativeSurfaceEventKind::PointerUp, 68.0, 5),
     ];
     let mut policy_state = NativeSurfaceScheduleState::ZERO;
     for (step, (kind, timestamp, pending)) in schedule_tape.into_iter().enumerate() {

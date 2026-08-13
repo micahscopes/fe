@@ -81,6 +81,9 @@ pub enum NativeSurfaceEventKind {
     Hidden,
     DeviceLost,
     DeviceRecovered,
+    PointerDown,
+    PointerMove,
+    PointerUp,
 }
 
 #[derive(Clone, Copy, Debug)]

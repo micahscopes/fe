@@ -925,8 +925,11 @@ fn wasm_root_has_surviving_effect_param<'db>(
 /// `load`-through-a-memory-reference. Params whose plan is not a direct exact
 /// boundary (borrow/view/abstract) get `None` here and fall back to the default
 /// class, which fails closed downstream in the wasm lowerer if it is reached
-/// (out of the R1/keystone envelope). Effect params never reach this hook: an
-/// admitted wasm root has none that survive erasure.
+/// (out of the R1/keystone envelope). Read-only aggregate views are different:
+/// a Wasm export has no caller-owned object provider, so it receives the full
+/// value product and the portable prologue materializes addressable storage.
+/// Effect params never reach this hook: an admitted wasm root has none that
+/// survive erasure.
 fn wasm_export_param_class<'db>(
     entry: &RuntimeVisibleBindingPlan<'db>,
 ) -> Option<RuntimeClass<'db>> {
@@ -934,9 +937,9 @@ fn wasm_export_param_class<'db>(
         RuntimeParamPlan::Boundary(
             RuntimeBoundarySpec::ExactTransport(class) | RuntimeBoundarySpec::ExactShape(class),
         ) => Some(class.clone()),
+        RuntimeParamPlan::ReadOnlyView { value, .. } => Some(value.clone()),
         RuntimeParamPlan::Erased
         | RuntimeParamPlan::Boundary(RuntimeBoundarySpec::BorrowLike { .. })
-        | RuntimeParamPlan::ReadOnlyView { .. }
         | RuntimeParamPlan::PassActual => None,
     }
 }

@@ -735,13 +735,14 @@ fn surface_event_kinds_are_fe_typed_and_invalid_host_tags_trap() {
     let seed = [
         wasmtime::Val::F32(0.0f32.to_bits()),
         wasmtime::Val::F32(64.0f32.to_bits()),
+        wasmtime::Val::I32(0),
     ];
     replace_state
         .call(&mut store, &seed, &mut [])
         .expect("seed event-kind state");
 
     let identities = [
-        1.0f32, 10.0, 100.0, 1000.0, 10000.0, 100000.0, 1000000.0, 10000000.0,
+        1.0f32, 10.0, 100.0, 1000.0, 10000.0, 100000.0, 1000000.0, 10000000.0, 2.0, 3.0, 4.0,
     ];
     let mut receipt = 0.0f32;
     for (tag, identity) in identities.into_iter().enumerate() {
@@ -765,7 +766,11 @@ fn surface_event_kinds_are_fe_typed_and_invalid_host_tags_trap() {
                 param_value: 0.0,
             }],
         );
-        let mut results = [wasmtime::Val::F32(0), wasmtime::Val::F32(0)];
+        let mut results = [
+            wasmtime::Val::F32(0),
+            wasmtime::Val::F32(0),
+            wasmtime::Val::I32(0),
+        ];
         transition
             .call(
                 &mut store,
@@ -787,6 +792,20 @@ fn surface_event_kinds_are_fe_typed_and_invalid_host_tags_trap() {
         };
         assert_eq!(got_receipt, receipt);
         assert_eq!(got_res, 64.0);
+        let got_pick = match results[2] {
+            wasmtime::Val::I32(tag) => tag,
+            ref other => panic!("picked state must be an enum tag, got {other:?}"),
+        };
+        let expected_pick = match tag {
+            8 => 1,
+            10 => 0,
+            _ if tag > 8 && tag < 10 => 1,
+            _ => 0,
+        };
+        assert_eq!(
+            got_pick, expected_pick,
+            "typed resident selection state drifted at event tag {tag}",
+        );
     }
 
     write_surface_event_batch(
@@ -804,12 +823,16 @@ fn surface_event_kinds_are_fe_typed_and_invalid_host_tags_trap() {
             timestamp: 9.0,
             width: 64.0,
             height: 64.0,
-            event_kind: 8,
+            event_kind: 11,
             param_index: 0,
             param_value: 0.0,
         }],
     );
-    let mut invalid_results = [wasmtime::Val::F32(0), wasmtime::Val::F32(0)];
+    let mut invalid_results = [
+        wasmtime::Val::F32(0),
+        wasmtime::Val::F32(0),
+        wasmtime::Val::I32(0),
+    ];
     assert!(
         transition
             .call(
@@ -821,7 +844,7 @@ fn surface_event_kinds_are_fe_typed_and_invalid_host_tags_trap() {
                 &mut invalid_results,
             )
             .is_err(),
-        "the generated Wasm boundary must trap before Fe observes tag 8",
+        "the generated Wasm boundary must trap before Fe observes tag 11",
     );
 
     replace_state
@@ -864,7 +887,11 @@ fn surface_event_kinds_are_fe_typed_and_invalid_host_tags_trap() {
             },
         ],
     );
-    let mut coalesced_results = [wasmtime::Val::F32(0), wasmtime::Val::F32(0)];
+    let mut coalesced_results = [
+        wasmtime::Val::F32(0),
+        wasmtime::Val::F32(0),
+        wasmtime::Val::I32(0),
+    ];
     transition
         .call(
             &mut store,
@@ -903,7 +930,7 @@ fn surface_event_kinds_are_fe_typed_and_invalid_host_tags_trap() {
                 timestamp: 12.0,
                 width: 64.0,
                 height: 64.0,
-                event_kind: 0,
+                event_kind: 9,
                 param_index: 0,
                 param_value: 0.0,
             },
@@ -918,13 +945,17 @@ fn surface_event_kinds_are_fe_typed_and_invalid_host_tags_trap() {
                 timestamp: 13.0,
                 width: 64.0,
                 height: 64.0,
-                event_kind: 0,
+                event_kind: 9,
                 param_index: 0,
                 param_value: 0.0,
             },
         ],
     );
-    let mut gesture_results = [wasmtime::Val::F32(0), wasmtime::Val::F32(0)];
+    let mut gesture_results = [
+        wasmtime::Val::F32(0),
+        wasmtime::Val::F32(0),
+        wasmtime::Val::I32(0),
+    ];
     transition
         .call(
             &mut store,
@@ -934,14 +965,14 @@ fn surface_event_kinds_are_fe_typed_and_invalid_host_tags_trap() {
             ],
             &mut gesture_results,
         )
-        .expect("homogeneous gesture burst should retain its coalescing fast path");
+        .expect("homogeneous pointer-motion burst should retain its coalescing fast path");
     let gesture_receipt = match gesture_results[0] {
         wasmtime::Val::F32(bits) => f32::from_bits(bits),
         ref other => panic!("gesture receipt must be f32, got {other:?}"),
     };
     assert_eq!(
-        gesture_receipt, 9.0,
-        "two gesture identities must collapse to one Fe transition while movement remains accumulated",
+        gesture_receipt, 11.0,
+        "two pointer-motion identities must collapse to one Fe transition while movement remains accumulated",
     );
 
     // Independent presentation-policy tape. These expectations are a scalar
@@ -1014,14 +1045,14 @@ fn surface_event_kinds_are_fe_typed_and_invalid_host_tags_trap() {
             .call(
                 &mut store,
                 &[
-                    wasmtime::Val::I32(8),
+                    wasmtime::Val::I32(11),
                     wasmtime::Val::F32(0),
                     wasmtime::Val::I32(0),
                 ],
                 &mut invalid_policy_results,
             )
             .is_err(),
-        "the resident policy wrapper must trap before Fe observes event tag 8",
+        "the resident policy wrapper must trap before Fe observes event tag 11",
     );
 }
 

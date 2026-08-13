@@ -492,3 +492,47 @@ test("a scheduled typed surface cannot enter the legacy JavaScript scheduler", (
   assert.deepEqual(surface._pendingSurfaceEvents, []);
   assert.equal(surface._gestureDirty, false);
 });
+
+test("pointer lifecycle identity crosses the fixed host boundary untouched", () => {
+  const seen = [];
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._fsm = "live";
+  surface._surfaceTransitionKernel = event => {
+    seen.push(event);
+    return [0];
+  };
+  surface._surfaceTransitionSchedule = "direct";
+  surface._backingWidth = 320;
+  surface._backingHeight = 180;
+  surface._runSurfaceTransition = event => {
+    seen.push(event);
+    return [0];
+  };
+  surface._queueGestureRender = () => {};
+
+  for (const eventKind of [
+    SurfaceEventKind.PointerDown,
+    SurfaceEventKind.PointerMove,
+    SurfaceEventKind.PointerUp,
+  ]) {
+    surface._applyGesture({
+      mx: 12,
+      my: 34,
+      dx: eventKind === SurfaceEventKind.PointerMove ? 5 : 0,
+      dy: eventKind === SurfaceEventKind.PointerMove ? -2 : 0,
+      wheelDelta: 0,
+      wheelMode: 0,
+      buttons: eventKind === SurfaceEventKind.PointerUp ? 0 : 1,
+      timestamp: 9,
+      eventKind,
+    });
+  }
+
+  assert.deepEqual(seen.map(event => event.eventKind), [8, 9, 10]);
+  assert.deepEqual(seen.map(event => event.buttons), [1, 1, 0]);
+  assert.deepEqual(seen.map(event => [event.width, event.height]), [
+    [320, 180],
+    [320, 180],
+    [320, 180],
+  ]);
+});

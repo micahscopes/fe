@@ -5070,11 +5070,11 @@ pub fn probe(k: u32) -> u32 {
 /// A whole-array copy (`let b = a`) must NOT pointer-alias the backing arena: a
 /// later `a[0] = 9` must not be observable through `b`. The array is seeded from a
 /// runtime parameter so the copy is not constant-folded away and the real
-/// object-ref `Use` path is exercised. Slice A defers deep array copy, so the
-/// accepted behaviors are a genuine deep copy (result `seed`) OR a deliberate
-/// compile-time fail-closed. A silent alias (result `9`) is the bug.
+/// object-ref `Use` path is exercised. This is a required portable-Wasm value
+/// operation: compilation must succeed and the result must be `seed`, never the
+/// `9` that a shallow pointer alias would observe.
 #[test]
-fn local_u32_array_copy_deep_copies_or_fails_closed() {
+fn local_u32_array_copy_deep_copies() {
     let source = r#"
 pub fn probe(seed: u32) -> u32 {
     let mut a: [u32; 2] = [seed; 2]
@@ -5089,38 +5089,25 @@ pub fn probe(seed: u32) -> u32 {
         .touch(&mut db, url.clone(), Some(source.to_string()));
     let file = db.workspace().get(&db, &url).expect("file should load");
     let top_mod = db.top_mod(file);
-    let result = BackendKind::Wasm.create().compile(
-        &db,
-        top_mod,
-        layout_for(BackendKind::Wasm),
-        OptLevel::O0,
+    let output = BackendKind::Wasm
+        .create()
+        .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
+        .expect("portable Wasm must support independent complete-value array copies");
+    let bytes = output
+        .into_bytecode()
+        .expect("wasm output should be bytecode");
+    wasmparser::validate(&bytes).expect("produced invalid wasm");
+    let (mut store, instance) = instantiate(&bytes);
+    let probe = instance
+        .get_typed_func::<i32, i32>(&mut store, "probe")
+        .expect("`probe` export should exist");
+    let seed = 4;
+    assert_eq!(
+        probe.call(&mut store, seed).unwrap(),
+        seed,
+        "array copy must be a DEEP copy (b independent of a), never a pointer alias \
+         (an alias would return 9 after `a[0] = 9`)"
     );
-    match result {
-        Ok(output) => {
-            let bytes = output
-                .into_bytecode()
-                .expect("wasm output should be bytecode");
-            wasmparser::validate(&bytes).expect("produced invalid wasm");
-            let (mut store, instance) = instantiate(&bytes);
-            let probe = instance
-                .get_typed_func::<i32, i32>(&mut store, "probe")
-                .expect("`probe` export should exist");
-            let seed = 4;
-            assert_eq!(
-                probe.call(&mut store, seed).unwrap(),
-                seed,
-                "array copy must be a DEEP copy (b independent of a), never a pointer alias \
-                 (an alias would return 9 after `a[0] = 9`)"
-            );
-        }
-        Err(error) => {
-            let message = error.to_string();
-            assert!(
-                message.contains("wasm target"),
-                "array copy should fail closed with a named wasm error; got: {message}"
-            );
-        }
-    }
 }
 
 /// Ownership contract: a function that BOTH allocates a local array AND uses a

@@ -50,7 +50,7 @@ use mir::{
     PlaceRoot, RBlockId, RExpr, RLocal, RLocalId, RStmt, RTerminator, RefKind, RefView,
     RuntimeBody, RuntimeBuiltin, RuntimeCarrier, RuntimeClass, RuntimeFunction, RuntimeInlineHint,
     RuntimeInstance, RuntimeLinkage, RuntimeLocalRoot, RuntimePackage, RuntimePlace, ScalarClass,
-    ScalarRepr, VariantId,
+    ScalarRepr, ScalarRole, VariantId,
 };
 use rustc_hash::FxHashMap;
 #[cfg(feature = "sonatina-indirect-calls")]
@@ -138,6 +138,17 @@ pub fn compile_runtime_package_wasm(
     compile_runtime_package_wasm_with_canonical_lanes(db, package, &[], &[], None, None, None, None)
 }
 
+/// Build the shared Sonatina module for a shader target. Shader entrypoints
+/// never receive untyped host values: compiler-derived WebGPU bindings and the
+/// resident Wasm wrapper mediate that boundary. Accordingly this path omits
+/// host-forgery enum traps that WebGPU render stages cannot realize.
+pub(crate) fn compile_runtime_package_shader_ir(
+    db: &DriverDataBase,
+    package: &RuntimePackage<'_>,
+) -> Result<(Module, HashMap<String, String>), LowerError> {
+    compile_runtime_package_wasm_inner(db, package, &[], &[], None, None, None, None, false)
+}
+
 /// Overlay-only callback-capstone entry point. The default pin cannot name the
 /// typed indirect-call instructions used here, so normal builds do not compile
 /// this surface.
@@ -149,7 +160,8 @@ pub fn compile_runtime_package_wasm_with_guest_callbacks(
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
     let isa = create_wasm32_isa();
     let builder = ModuleBuilder::new(ModuleCtx::new(&isa));
-    let mut lowerer = PortableModuleLowerer::new(db, builder, &isa, package, HashSet::new(), &[]);
+    let mut lowerer =
+        PortableModuleLowerer::new(db, builder, &isa, package, HashSet::new(), &[], true);
     lowerer.declare_functions()?;
     lowerer.lower_bodies()?;
     lowerer.synthesize_guest_callbacks(callbacks)?;
@@ -166,6 +178,31 @@ pub(crate) fn compile_runtime_package_wasm_with_canonical_lanes(
     resident_initializer: Option<&super::WasmResidentInitializer>,
     resident_projection: Option<&super::WasmResidentProjection>,
     resident_policy: Option<&super::WasmResidentPolicy>,
+) -> Result<(Module, HashMap<String, String>), LowerError> {
+    compile_runtime_package_wasm_inner(
+        db,
+        package,
+        canonical_lanes,
+        export_aliases,
+        resident_transition,
+        resident_initializer,
+        resident_projection,
+        resident_policy,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_runtime_package_wasm_inner(
+    db: &DriverDataBase,
+    package: &RuntimePackage<'_>,
+    canonical_lanes: &[crate::CanonicalLane],
+    export_aliases: &[(String, String)],
+    resident_transition: Option<&super::WasmResidentTransition>,
+    resident_initializer: Option<&super::WasmResidentInitializer>,
+    resident_projection: Option<&super::WasmResidentProjection>,
+    resident_policy: Option<&super::WasmResidentPolicy>,
+    validate_host_enum_params: bool,
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
     // Reject unsupported indirect host results before constructing any
     // Sonatina signatures. A local wrapper may itself return the authored enum
@@ -248,6 +285,7 @@ pub(crate) fn compile_runtime_package_wasm_with_canonical_lanes(
         package,
         wrapped_lane_names,
         export_aliases,
+        validate_host_enum_params,
     );
     lowerer.declare_functions()?;
     lowerer.lower_bodies()?;
@@ -332,7 +370,8 @@ pub(crate) fn compile_runtime_package_native(
         OperatingSystem::Native,
     ));
     let builder = ModuleBuilder::new(ModuleCtx::new(&isa));
-    let mut lowerer = PortableModuleLowerer::new(db, builder, &isa, package, HashSet::new(), &[]);
+    let mut lowerer =
+        PortableModuleLowerer::new(db, builder, &isa, package, HashSet::new(), &[], true);
     lowerer.declare_functions()?;
     lowerer.lower_bodies()?;
     Ok(lowerer.finish())
@@ -2546,6 +2585,7 @@ where
     resource_element_cache: FxHashMap<TyId<'db>, GpuResourceElementType>,
     resource_type_cache: FxHashMap<TyId<'db>, Type>,
     wrapped_lane_names: HashSet<String>,
+    validate_host_enum_params: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2574,6 +2614,7 @@ where
         package: &'a RuntimePackage<'db>,
         wrapped_lane_names: HashSet<String>,
         export_aliases: &[(String, String)],
+        validate_host_enum_params: bool,
     ) -> Self {
         let mut prepared_bodies = prepare_inline_value_bodies(db, package).bodies;
         for (instance, body) in &mut prepared_bodies {
@@ -2607,6 +2648,7 @@ where
             resource_element_cache: FxHashMap::default(),
             resource_type_cache: FxHashMap::default(),
             wrapped_lane_names,
+            validate_host_enum_params,
         }
     }
 
@@ -2909,7 +2951,9 @@ where
                 LowerError::Internal("wasm function lowered before it was declared".to_string())
             })?;
             let symbol = self.function_symbol(instance);
-            let validate_enum_params = function.linkage(self.db) == RuntimeLinkage::Internal;
+            let validate_enum_params = self.validate_host_enum_params
+                && function.linkage(self.db) == RuntimeLinkage::Internal
+                && !self.wrapped_lane_names.contains(&symbol);
             PortableFunctionLowerer::new(self, body, func_ref, validate_enum_params)?
                 .lower()
                 .map_err(|error| match error {
@@ -3931,13 +3975,6 @@ where
                     .to_owned(),
             ));
         }
-        if !transition.state_tag_limits.is_empty() {
-            return Err(LowerError::Unsupported(
-                "batched resident transitions do not yet admit fieldless-enum state leaves"
-                    .to_owned(),
-            ));
-        }
-
         let candidates = self
             .func_map
             .iter()
@@ -4036,6 +4073,19 @@ where
                 transition.source
             )));
         }
+        for (index, limit) in &transition.state_tag_limits {
+            if *limit == 0
+                || result_tys
+                    .get(*index)
+                    .and_then(|ty| fieldless_tag_immediate(*ty, *limit - 1))
+                    .is_none()
+            {
+                return Err(LowerError::Unsupported(format!(
+                    "resident transition `{}` has invalid batched state enum constraint ({index}, {limit}) for {result_tys:?}",
+                    transition.source
+                )));
+            }
+        }
 
         let state_globals = result_tys
             .iter()
@@ -4076,8 +4126,40 @@ where
             let is = self.isa.inst_set();
             let mut fb = self.builder.func_builder::<InstInserter>(state_replace);
             let entry = fb.append_block();
+            let valid = fb.append_block();
+            let invalid = fb.append_block();
             fb.switch_to_block(entry);
             let values = fb.args().to_vec();
+            let mut all_valid = None;
+            for (index, limit) in &transition.state_tag_limits {
+                let mut tag_valid = None;
+                for tag in 0..*limit {
+                    let expected = fb.make_imm_value(
+                        fieldless_tag_immediate(result_tys[*index], tag)
+                            .expect("enum tag type validated above"),
+                    );
+                    let equal = fb.insert_inst(CmpEq::new(is, values[*index], expected), Type::I1);
+                    tag_valid = Some(match tag_valid {
+                        Some(previous) => fb.insert_inst(Or::new(is, previous, equal), Type::I1),
+                        None => equal,
+                    });
+                }
+                let tag_valid = tag_valid.expect("nonzero enum limit validated above");
+                all_valid = Some(match all_valid {
+                    Some(previous) => fb.insert_inst(And::new(is, previous, tag_valid), Type::I1),
+                    None => tag_valid,
+                });
+            }
+            if let Some(all_valid) = all_valid {
+                fb.insert_inst_no_result(Br::new(is, all_valid, valid, invalid));
+            } else {
+                fb.insert_inst_no_result(Jump::new(is, valid));
+            }
+
+            fb.switch_to_block(invalid);
+            fb.insert_inst_no_result(Unreachable::new(is));
+
+            fb.switch_to_block(valid);
             for ((global, ty), value) in state_globals
                 .iter()
                 .copied()
@@ -4727,6 +4809,14 @@ where
     /// classes without one scalar/pointer representation.
     fn ty_for_class(&self, class: &RuntimeClass<'db>) -> Result<Type, LowerError> {
         match class {
+            // Value-carried enum tags use the same canonical 32-bit carrier as
+            // their fieldless enum value. Narrow layout tags are only a memory
+            // concern; letting an EnumTag scalar become i8/i16 leaks compact
+            // representation into function signatures and authored GPU state.
+            RuntimeClass::Scalar(ScalarClass {
+                role: ScalarRole::EnumTag { .. },
+                ..
+            }) => Ok(Type::I32),
             RuntimeClass::Scalar(scalar) => scalar_ty_r1(scalar),
             // R3.4b step 1: the `MemPtr<B::Word>` transport class is the backend
             // pointer word: i32 on wasm32 (exactly the linear-memory offset the JS
@@ -4913,6 +5003,30 @@ where
             return None;
         };
         Some(*layout)
+    }
+
+    /// Target layout behind any admitted whole aggregate reference. Object
+    /// locals and materialized memory-provider parameters share the same deep
+    /// value-copy rule even though their provenance differs.
+    fn memory_lowerable_ref_layout(&self, class: &RuntimeClass<'db>) -> Option<LayoutId<'db>> {
+        let RuntimeClass::Ref {
+            pointee,
+            kind:
+                RefKind::Object
+                | RefKind::Provider {
+                    space: AddressSpaceKind::Memory,
+                    ..
+                },
+            view: RefView::Whole,
+        } = class
+        else {
+            return None;
+        };
+        let RuntimeClass::AggregateValue { layout } = pointee.as_ref() else {
+            return None;
+        };
+        self.aggregate_is_memory_lowerable(pointee)
+            .then_some(*layout)
     }
 
     /// Whether an aggregate value's every scalar leaf passes the R1 scalar
@@ -5881,38 +5995,24 @@ where
                 }
                 Ok(())
             }
-            RExpr::Load { place }
-                if place.path.is_empty() && matches!(place.root, PlaceRoot::Ref(_)) =>
-            {
-                let PlaceRoot::Ref(source) = place.root else {
-                    unreachable!()
+            RExpr::Load { place } => {
+                let Some((pointer, source_class)) = self.raw_memory_aggregate_place(place)? else {
+                    return Err(LowerError::Unsupported(format!(
+                        "wasm target: aggregate load requires a memory-backed aggregate place: \
+                         {place:?}"
+                    )));
                 };
-                let source_class = self.body.value_class(source).cloned().ok_or_else(|| {
-                    LowerError::Internal(format!("aggregate source {source:?} has no class"))
-                })?;
-                let layout = self
-                    .module
-                    .object_value_layout(&source_class)
-                    .ok_or_else(|| {
-                        LowerError::Unsupported(
-                            "wasm target: whole aggregate load requires an object root".to_owned(),
-                        )
-                    })?;
                 let dst_class = self.body.value_class(dst).cloned().ok_or_else(|| {
                     LowerError::Internal(format!("aggregate destination {dst:?} has no class"))
                 })?;
-                if !(RuntimeClass::AggregateValue { layout })
-                    .shares_runtime_rep_with(self.module.db, &dst_class)
-                {
+                if !source_class.shares_runtime_rep_with(self.module.db, &dst_class) {
                     return Err(LowerError::Unsupported(
                         "wasm target: whole aggregate load has incompatible layouts".to_owned(),
                     ));
                 }
-                let pointer = self.local_value(source)?;
                 let shape = self.local_flat_shape(dst)?;
-                let value_class = RuntimeClass::AggregateValue { layout };
                 let mut values = Vec::with_capacity(shape.leaf_count());
-                self.load_materialized_leaves(pointer, &value_class, &shape, &mut values)?;
+                self.load_materialized_leaves(pointer, &source_class, &shape, &mut values)?;
                 let dst_vars = self.tuple_vars.get(&dst).cloned().ok_or_else(|| {
                     LowerError::Internal(format!("aggregate destination {dst:?} has no vars"))
                 })?;
@@ -6012,13 +6112,25 @@ where
                 // (`let b = a` lowers to `b = use a`, where `a` is itself bound from
                 // an object): `a[0] = 9; b[0]` would wrongly observe 9, whereas Fe
                 // `[T; N]` is `Copy` (deep-copy semantics). Fail closed on the
-                // latter; deep array copy is deferred (design slice A).
+                // latter. Materialize an independent value here: Fe aggregate
+                // copy semantics are deep even though this target represents
+                // addressable aggregates by arena pointers.
                 if self.is_object_ref_local(*src) && !self.is_fresh_object_binding(*src) {
-                    return Err(LowerError::Unsupported(format!(
-                        "wasm target: whole-aggregate value copy (`{dst:?} = use {src:?}`) of an \
-                         existing array would alias the backing arena pointer; array/object value \
-                         copies are not lowered (slice A fails closed, deep copy is deferred)"
-                    )));
+                    let class = self.body.value_class(*src).cloned().ok_or_else(|| {
+                        LowerError::Internal(format!(
+                            "aggregate copy source {src:?} has no runtime class"
+                        ))
+                    })?;
+                    let layout =
+                        self.module
+                            .memory_lowerable_ref_layout(&class)
+                            .ok_or_else(|| {
+                                LowerError::Internal(format!(
+                                    "aggregate copy source {src:?} lost its memory layout"
+                                ))
+                            })?;
+                    let source = self.local_value(*src)?;
+                    return self.lower_deep_object_copy(source, layout);
                 }
                 self.local_value(*src)
             }
@@ -6143,20 +6255,23 @@ where
                         "wasm target: enum tag source is not a value-carried enum".to_owned(),
                     ));
                 };
-                let tag = self.module.fieldless_enum_tag(*layout).ok_or_else(|| {
+                self.module.fieldless_enum_tag(*layout).ok_or_else(|| {
                     LowerError::Unsupported(
                         "wasm target: payload enum tags are not lowered as values".to_owned(),
                     )
                 })?;
                 let value = self.local_value(*value)?;
-                let tag_ty = scalar_ty_r1(&tag)?;
-                if self.fb.type_of(value) == tag_ty {
-                    Ok(value)
-                } else {
-                    Ok(self
-                        .fb
-                        .insert_inst(Trunc::new(self.inst_set(), value, tag_ty), tag_ty))
+                if self.fb.type_of(value) != Type::I32 {
+                    return Err(LowerError::Internal(
+                        "fieldless enum SSA value escaped its canonical i32 carrier".to_owned(),
+                    ));
                 }
+                // A value-carried fieldless enum stays in the target-neutral
+                // 32-bit SSA carrier. Compact layout tags matter only when an
+                // enum is projected to addressable memory; narrowing here
+                // leaked i8/i16 into function signatures and GPU uniform
+                // control flow even though the browser/Wasm ABI is i32.
+                Ok(value)
             }
             RExpr::EnumIsVariant { value, variant } => {
                 let class = self.body.value_class(*value).ok_or_else(|| {
@@ -6197,7 +6312,6 @@ where
                         "wasm target: payload enum reference tags are not lowered".to_owned(),
                     )
                 })?;
-                let tag_ty = scalar_ty_r1(&tag)?;
                 match kind {
                     // A borrowed method receiver carried through the canonical
                     // memory provider uses the provider word itself as the
@@ -6209,19 +6323,28 @@ where
                         ..
                     } => {
                         let value = self.local_value(*root)?;
-                        if self.fb.type_of(value) == tag_ty {
-                            Ok(value)
-                        } else {
-                            Ok(self
-                                .fb
-                                .insert_inst(Trunc::new(self.inst_set(), value, tag_ty), tag_ty))
+                        if self.fb.type_of(value) != Type::I32 {
+                            return Err(LowerError::Internal(
+                                "fieldless enum provider escaped its canonical i32 carrier"
+                                    .to_owned(),
+                            ));
                         }
+                        Ok(value)
                     }
                     // Object references, unlike provider-value receivers, are
                     // actual linear-memory addresses.
                     RefKind::Object => {
                         let address = self.local_value(*root)?;
-                        Ok(self.load_memory_scalar(address, tag_ty))
+                        let compact_ty = scalar_ty_r1(&tag)?;
+                        let compact = self.load_memory_scalar(address, compact_ty);
+                        if compact_ty == Type::I32 {
+                            Ok(compact)
+                        } else {
+                            Ok(self.fb.insert_inst(
+                                Zext::new(self.inst_set(), compact, Type::I32),
+                                Type::I32,
+                            ))
+                        }
                     }
                     RefKind::Const
                     | RefKind::Provider {
@@ -6269,6 +6392,19 @@ where
             {
                 self.local_value(*value)
             }
+            // A borrowed method receiver projected from a materialized actor
+            // state record is already represented by its canonical-arena byte
+            // address. Preserve that address as the reference value; the
+            // callee's ordinary field loads remain target-layout-derived.
+            RExpr::AddrOf { place } => {
+                let Some((address, _)) = self.raw_memory_aggregate_place(place)? else {
+                    return Err(LowerError::Unsupported(format!(
+                        "wasm target: address-of requires a memory-backed aggregate place: \
+                         {place:?}"
+                    )));
+                };
+                Ok(address)
+            }
             // R2.0 (Fable seat ruling, control-effects ladder section 7): the only
             // place read the wasm target lowers is an IDENTITY on an already
             // value-carried transport word. Own-mode consumption of a word-carried
@@ -6314,6 +6450,60 @@ where
         let biased = self.fb.insert_inst(Add::new(is, raw, slack), Type::I32);
         let mask = self.fb.make_imm_value(Immediate::I32(-ALIGN));
         Ok(self.fb.insert_inst(And::new(is, biased, mask), Type::I32))
+    }
+
+    /// Copy one addressable Fe aggregate into independent canonical-arena
+    /// storage. A compact byte loop preserves the target layout exactly without
+    /// expanding large records/arrays into one pair of instructions per byte.
+    fn lower_deep_object_copy(
+        &mut self,
+        source: ValueId,
+        layout: LayoutId<'db>,
+    ) -> Result<ValueId, LowerError> {
+        let destination = self.lower_alloc_object(layout)?;
+        let byte_len = mir::layout_size_bytes(self.module.db, layout, crate::WASM_LAYOUT);
+        let byte_len = i32::try_from(byte_len).map_err(|_| {
+            LowerError::Unsupported(format!("wasm aggregate copy size {byte_len} exceeds i32"))
+        })?;
+        let is = self.inst_set();
+        let copy_entry = self.fb.current_block().ok_or_else(|| {
+            LowerError::Internal("aggregate copy has no current block".to_owned())
+        })?;
+        let copy_header = self.fb.append_block();
+        let copy_body = self.fb.append_block();
+        let copy_done = self.fb.append_block();
+        self.fb.insert_inst_no_result(Jump::new(is, copy_header));
+
+        self.fb.switch_to_block(copy_header);
+        let zero = self.fb.make_imm_value(Immediate::I32(0));
+        let index = self
+            .fb
+            .insert_inst(Phi::new(is, vec![(zero, copy_entry)]), Type::I32);
+        let end = self.fb.make_imm_value(Immediate::I32(byte_len));
+        let more = self.fb.insert_inst(Lt::new(is, index, end), Type::I1);
+        self.fb
+            .insert_inst_no_result(Br::new(is, more, copy_body, copy_done));
+
+        self.fb.switch_to_block(copy_body);
+        let source_byte = self.fb.insert_inst(Add::new(is, source, index), Type::I32);
+        let destination_byte = self
+            .fb
+            .insert_inst(Add::new(is, destination, index), Type::I32);
+        let byte = self
+            .fb
+            .insert_inst(Mload::new(is, source_byte, Type::I8), Type::I8);
+        self.fb
+            .insert_inst_no_result(Mstore::new(is, destination_byte, byte, Type::I8));
+        let one = self.fb.make_imm_value(Immediate::I32(1));
+        let next = self.fb.insert_inst(Add::new(is, index, one), Type::I32);
+        let copy_back = self
+            .fb
+            .current_block()
+            .ok_or_else(|| LowerError::Internal("aggregate copy body has no block".to_owned()))?;
+        self.fb.append_phi_arg(index, next, copy_back);
+        self.fb.insert_inst_no_result(Jump::new(is, copy_header));
+        self.fb.switch_to_block(copy_done);
+        Ok(destination)
     }
 
     fn store_materialized_leaves(
@@ -6628,6 +6818,105 @@ where
         }
     }
 
+    /// Resolve an aggregate-valued projection backed by the canonical arena.
+    /// This is the aggregate counterpart of `raw_memory_scalar_place`: nested
+    /// record reads retain value semantics by loading their flattened leaves,
+    /// rather than passing an aliasing pointer through the Wasm value lane.
+    fn raw_memory_aggregate_place(
+        &mut self,
+        place: &RuntimePlace<'db>,
+    ) -> Result<Option<(ValueId, RuntimeClass<'db>)>, LowerError> {
+        let program = self.module.db as &dyn mir::MirDb;
+        let resolved = mir::resolve_runtime_place(self.module.db, &program, &self.body, place)
+            .map_err(|error| LowerError::Internal(format!("invalid runtime place: {error:?}")))?;
+        let RuntimeClass::AggregateValue { .. } = resolved.result_class.clone() else {
+            return Ok(None);
+        };
+        let (addr_local, mut current_class) = match resolved.root_kind {
+            mir::ResolvedPlaceRootKind::Ref { value, class }
+                if self.body.value_class(value).is_some_and(|class| {
+                    self.module.memory_lowerable_ref_layout(class).is_some()
+                }) =>
+            {
+                (value, class)
+            }
+            mir::ResolvedPlaceRootKind::Slot { local, class }
+                if self.materialized_param_slots.contains(&local) =>
+            {
+                (local, class)
+            }
+            _ => return Ok(None),
+        };
+        let mut addr = self.local_value(addr_local)?;
+        let mut byte_offset = 0usize;
+        for elem in resolved.path {
+            match elem {
+                mir::ResolvedPlaceElem::Field { field, class } => {
+                    let RuntimeClass::AggregateValue { layout } = current_class else {
+                        return Err(LowerError::Internal(
+                            "resolved aggregate field base is not a struct".to_owned(),
+                        ));
+                    };
+                    byte_offset = byte_offset
+                        .checked_add(mir::struct_field_offset_bytes(
+                            self.module.db,
+                            layout,
+                            field,
+                            crate::WASM_LAYOUT,
+                        ))
+                        .ok_or_else(|| {
+                            LowerError::Unsupported(
+                                "wasm aggregate field byte offset overflow".to_owned(),
+                            )
+                        })?;
+                    current_class = class;
+                }
+                mir::ResolvedPlaceElem::Index {
+                    index: IndexSource::Constant(index),
+                    class,
+                } => {
+                    let RuntimeClass::AggregateValue { layout } = current_class else {
+                        return Err(LowerError::Internal(
+                            "resolved aggregate index base is not an array".to_owned(),
+                        ));
+                    };
+                    let Layout::Array(array) = layout.data(self.module.db) else {
+                        return Err(LowerError::Internal(
+                            "resolved aggregate index layout is not an array".to_owned(),
+                        ));
+                    };
+                    if (index as u64) >= array.len {
+                        return Err(LowerError::Unsupported(format!(
+                            "wasm aggregate constant index {index} is out of bounds for length {}",
+                            array.len
+                        )));
+                    }
+                    let stride =
+                        mir::array_elem_size_bytes(self.module.db, layout, crate::WASM_LAYOUT);
+                    byte_offset = byte_offset
+                        .checked_add(index.checked_mul(stride).ok_or_else(|| {
+                            LowerError::Unsupported(
+                                "wasm aggregate element byte offset overflow".to_owned(),
+                            )
+                        })?)
+                        .ok_or_else(|| {
+                            LowerError::Unsupported(
+                                "wasm aggregate element byte offset overflow".to_owned(),
+                            )
+                        })?;
+                    current_class = class;
+                }
+                other => {
+                    return Err(LowerError::Unsupported(format!(
+                        "wasm aggregate place projection `{other:?}` is not supported"
+                    )));
+                }
+            }
+        }
+        addr = self.offset_addr(addr, byte_offset)?;
+        Ok(Some((addr, resolved.result_class)))
+    }
+
     /// Resolve a Wasm linear-memory scalar place behind a memory address: a
     /// memory `RawAddr` / memory-provider root (struct fields only) or a
     /// function-local object-ref root (struct fields AND array element indexes,
@@ -6681,6 +6970,27 @@ where
                         ..
                     })
                 ) =>
+            {
+                (value, class, true)
+            }
+            // Flattened aggregate parameters are materialized into independent
+            // arena storage in the prologue. Their provider-typed receiver is
+            // therefore an actual addressable aggregate, not the one-word
+            // provider identity used for scalar handles.
+            mir::ResolvedPlaceRootKind::Ref { value, class }
+                if self.body.value_class(value).is_some_and(|class| {
+                    matches!(
+                        class,
+                        RuntimeClass::Ref {
+                            kind: RefKind::Provider {
+                                space: AddressSpaceKind::Memory,
+                                ..
+                            },
+                            pointee,
+                            ..
+                        } if matches!(pointee.as_ref(), RuntimeClass::AggregateValue { .. })
+                    )
+                }) =>
             {
                 (value, class, true)
             }

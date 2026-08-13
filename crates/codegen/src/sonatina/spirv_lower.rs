@@ -21,7 +21,7 @@ use sonatina_codegen::Backend as _;
 use sonatina_codegen::isa::spirv::{SpirvArtifact, SpirvBackend, SpirvExternalResource};
 use sonatina_codegen::optim::{Pass, Pipeline, Step, inliner::InlinerConfig};
 
-use crate::sonatina::{LowerError, compile_runtime_package_wasm};
+use crate::sonatina::{LowerError, wasm_lower::compile_runtime_package_shader_ir};
 
 /// Lower a MIR runtime package to naga-validated SPIR-V by reusing the wasm-path
 /// Sonatina `Module`.
@@ -72,7 +72,7 @@ pub fn compile_runtime_package_spirv_with_workgroup(
     );
     // REUSE the wasm-path Module. The import side-table is irrelevant to SPIR-V
     // (compute shaders have no wasm-style imports), so it is discarded here.
-    let (mut module, _import_modules) = compile_runtime_package_wasm(db, package)?;
+    let (mut module, _import_modules) = compile_runtime_package_shader_ir(db, package)?;
     inline_spirv_calls(&mut module);
     ensure_spirv_entry_call_free(&module)?;
 
@@ -99,7 +99,7 @@ pub fn compile_runtime_package_spirv_compute_with_resources(
     workgroup_size: [u32; 3],
     resources: &[SpirvExternalResource],
 ) -> Result<SpirvArtifact, LowerError> {
-    let (mut module, _import_modules) = compile_runtime_package_wasm(db, package)?;
+    let (mut module, _import_modules) = compile_runtime_package_shader_ir(db, package)?;
     inline_spirv_calls(&mut module);
     ensure_spirv_entry_call_free(&module)?;
 
@@ -152,7 +152,7 @@ pub fn compile_runtime_package_spirv_grid(
         "SPIR-V lowering must realize the Kernel DispatchKind (entries invoked directly)"
     );
     // REUSE the wasm-path Module (see `compile_runtime_package_spirv_with_workgroup`).
-    let (mut module, _import_modules) = compile_runtime_package_wasm(db, package)?;
+    let (mut module, _import_modules) = compile_runtime_package_shader_ir(db, package)?;
     inline_spirv_calls(&mut module);
     ensure_spirv_entry_call_free(&module)?;
 
@@ -208,7 +208,7 @@ pub fn compile_runtime_package_spirv_render(
         "SPIR-V lowering must realize the Kernel DispatchKind (entries invoked directly)"
     );
     // REUSE the wasm-path Module (see `compile_runtime_package_spirv_with_workgroup`).
-    let (mut module, _import_modules) = compile_runtime_package_wasm(db, package)?;
+    let (mut module, _import_modules) = compile_runtime_package_shader_ir(db, package)?;
     inline_spirv_calls(&mut module);
     ensure_spirv_entry_call_free(&module)?;
 
@@ -233,7 +233,7 @@ pub fn compile_runtime_package_spirv_render_with_resources(
     package: &RuntimePackage<'_>,
     resources: &[SpirvExternalResource],
 ) -> Result<SpirvArtifact, LowerError> {
-    let (mut module, _import_modules) = compile_runtime_package_wasm(db, package)?;
+    let (mut module, _import_modules) = compile_runtime_package_shader_ir(db, package)?;
     inline_spirv_calls(&mut module);
     ensure_spirv_entry_call_free(&module)?;
 
@@ -261,7 +261,7 @@ pub fn compile_runtime_package_spirv_authored_raster(
     vertex_entry: &str,
     fragment_entry: &str,
 ) -> Result<SpirvArtifact, LowerError> {
-    let (mut module, _import_modules) = compile_runtime_package_wasm(db, package)?;
+    let (mut module, _import_modules) = compile_runtime_package_shader_ir(db, package)?;
     inline_spirv_calls(&mut module);
     ensure_spirv_entries_call_free(&module, &[vertex_entry, fragment_entry])?;
 

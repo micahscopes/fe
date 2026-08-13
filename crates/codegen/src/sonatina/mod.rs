@@ -301,6 +301,7 @@ impl WasmCompileOptions {
         export: impl Into<String>,
         state_replace_export: impl Into<String>,
         event_tag_limits: Vec<(usize, u32)>,
+        state_tag_limits: Vec<(usize, u32)>,
         coalesce_tag_field: usize,
         coalesce_tag_variant: u32,
         actor_param_is_resource: Vec<bool>,
@@ -318,7 +319,7 @@ impl WasmCompileOptions {
                 coalesce_tag_variant,
             },
             event_tag_limits,
-            state_tag_limits: Vec::new(),
+            state_tag_limits,
             actor_param_is_resource,
         });
         self

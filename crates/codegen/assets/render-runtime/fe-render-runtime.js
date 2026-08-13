@@ -60,6 +60,9 @@ export const SurfaceEventKind = Object.freeze({
   Hidden: 5,
   DeviceLost: 6,
   DeviceRecovered: 7,
+  PointerDown: 8,
+  PointerMove: 9,
+  PointerUp: 10,
 });
 
 /** Fixed tags of Fe's bounded raw-queue effect. The selected resident policy
@@ -1603,6 +1606,17 @@ export class FeSurfaceElement extends HTMLElement {
       const { mx, my } = backingPoint(event);
       lastDragPoint = { mx, my };
       canvas.setPointerCapture(event.pointerId);
+      this._applyGesture({
+        dx: 0,
+        dy: 0,
+        wheelDelta: 0,
+        wheelMode: 0,
+        mx,
+        my,
+        buttons: event.buttons,
+        timestamp: event.timeStamp,
+        eventKind: SurfaceEventKind.PointerDown,
+      });
       event.preventDefault();
     };
     const onPointerMove = (event) => {
@@ -1620,10 +1634,23 @@ export class FeSurfaceElement extends HTMLElement {
         my,
         buttons: event.buttons,
         timestamp: event.timeStamp,
+        eventKind: SurfaceEventKind.PointerMove,
       });
     };
     const onPointerUp = (event) => {
       if (event.pointerId !== dragPointerId) return;
+      const { mx, my } = backingPoint(event);
+      this._applyGesture({
+        dx: 0,
+        dy: 0,
+        wheelDelta: 0,
+        wheelMode: 0,
+        mx,
+        my,
+        buttons: event.buttons,
+        timestamp: event.timeStamp,
+        eventKind: SurfaceEventKind.PointerUp,
+      });
       dragging = false;
       dragPointerId = null;
       lastDragPoint = null;
@@ -1678,7 +1705,7 @@ export class FeSurfaceElement extends HTMLElement {
       ...raw,
       width: this._backingWidth,
       height: this._backingHeight,
-      eventKind: SurfaceEventKind.Gesture,
+      eventKind: raw.eventKind ?? SurfaceEventKind.Gesture,
       paramIndex: 0,
       paramValue: 0,
     };

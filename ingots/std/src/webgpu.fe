@@ -198,16 +198,9 @@ impl LatestPerFrame {
         let deadline: f32 = state.deadline
         let mut observed_inputs: u32 = state.observed_inputs
 
-        match event.kind {
-            SurfaceEventKind::Gesture => {
-                observed_inputs = observed_inputs + 1
-                request_frame = visible && device_lost == false && presenting == false && event.pending_events > 0
-            }
-            SurfaceEventKind::ParamEdit => {
-                observed_inputs = observed_inputs + 1
-                request_frame = visible && device_lost == false && presenting == false && event.pending_events > 0
-            }
-            _ => {}
+        if event.kind.is_application_input() {
+            observed_inputs = observed_inputs + 1
+            request_frame = visible && device_lost == false && presenting == false && event.pending_events > 0
         }
 
         match event.kind {
@@ -299,9 +292,10 @@ impl Debounce {
         _ event: own SurfaceScheduleEvent,
     ) -> SurfaceScheduleStep {
         let step: SurfaceScheduleStep = LatestPerFrame::decide(state: state, event: event)
+        if event.kind.is_application_input() {
+            return step.with_deadline(deadline: event.timestamp + 80.0)
+        }
         match event.kind {
-            SurfaceEventKind::Gesture => { return step.with_deadline(deadline: event.timestamp + 80.0) }
-            SurfaceEventKind::ParamEdit => { return step.with_deadline(deadline: event.timestamp + 80.0) }
             SurfaceEventKind::AnimationFrame => {
                 if step.present && event.timestamp < state.deadline {
                     return step.defer(previous: state)
@@ -319,17 +313,10 @@ impl Accumulate {
         _ event: own SurfaceScheduleEvent,
     ) -> SurfaceScheduleStep {
         let step: SurfaceScheduleStep = LatestPerFrame::decide(state: state, event: event)
+        if event.kind.is_application_input() && state.deadline == 0.0 {
+            return step.with_deadline(deadline: event.timestamp + 64.0)
+        }
         match event.kind {
-            SurfaceEventKind::Gesture => {
-                if state.deadline == 0.0 {
-                    return step.with_deadline(deadline: event.timestamp + 64.0)
-                }
-            }
-            SurfaceEventKind::ParamEdit => {
-                if state.deadline == 0.0 {
-                    return step.with_deadline(deadline: event.timestamp + 64.0)
-                }
-            }
             SurfaceEventKind::AnimationFrame => {
                 if step.present {
                     if event.pending_events < 4 && event.timestamp < state.deadline {
@@ -353,10 +340,8 @@ impl DropWhilePresenting {
         let step: SurfaceScheduleStep = LatestPerFrame::decide(state: state, event: event)
         let mut queue: SurfaceQueueAction = SurfaceQueueAction::Retain
         if state.presenting {
-            match event.kind {
-                SurfaceEventKind::Gesture => { queue = SurfaceQueueAction::Drop }
-                SurfaceEventKind::ParamEdit => { queue = SurfaceQueueAction::Drop }
-                _ => {}
+            if event.kind.is_application_input() {
+                queue = SurfaceQueueAction::Drop
             }
         }
         step.with_queue(queue: queue)

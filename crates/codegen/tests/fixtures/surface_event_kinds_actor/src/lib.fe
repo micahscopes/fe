@@ -1,5 +1,7 @@
 //! Semantic fixture for the append-only typed surface/presentation event ABI.
 
+use core::actor::InitialState
+use core::marker::Copy
 use std::webgpu::{
     FragmentSurface, GpuProgram, LatestPerFrame, SurfaceScheduling, SurfaceTransition,
     WebGpuBackend,
@@ -16,11 +18,16 @@ struct EventKindParams {
 struct EventKindState {
     receipt: f32,
     res: f32,
+    picked: PickState,
 }
+
+enum PickState { None, Active }
+impl Copy for PickState {}
 
 actor SurfaceEventKindProbe uses (GpuProgram<WebGpuBackend>) {
     receipt: f32,
     res: f32,
+    picked: PickState,
 
     const fn view() -> Surface<EventKindParams> {
         Surface {
@@ -32,10 +39,15 @@ actor SurfaceEventKindProbe uses (GpuProgram<WebGpuBackend>) {
         }
     }
 
+    fn initial() -> EventKindState uses (InitialState) {
+        EventKindState { receipt: 0.0, res: 64.0, picked: PickState::None }
+    }
+
     fn transition(self, event: own SurfaceEvent) -> EventKindState
         uses (SurfaceTransition, SurfaceScheduling<LatestPerFrame>)
     {
-        let identity: f32 = match event.event_kind {
+        let kind: SurfaceEventKind = event.event_kind
+        let identity: f32 = match kind {
             SurfaceEventKind::Gesture => 1.0,
             SurfaceEventKind::ParamEdit => 10.0,
             SurfaceEventKind::AnimationFrame => 100.0,
@@ -44,14 +56,29 @@ actor SurfaceEventKindProbe uses (GpuProgram<WebGpuBackend>) {
             SurfaceEventKind::Hidden => 100000.0,
             SurfaceEventKind::DeviceLost => 1000000.0,
             SurfaceEventKind::DeviceRecovered => 10000000.0,
+            SurfaceEventKind::PointerDown => 2.0,
+            SurfaceEventKind::PointerMove => 3.0,
+            SurfaceEventKind::PointerUp => 4.0,
+        }
+        let dx: f32 = event.delta_x
+        let dy: f32 = event.delta_y
+        let width: f32 = event.width
+        let picked: PickState = match kind {
+            SurfaceEventKind::PointerDown => PickState::Active,
+            SurfaceEventKind::PointerUp => PickState::None,
+            _ => self.picked,
         }
         EventKindState {
-            receipt: self.receipt + identity + event.delta_x + event.delta_y,
-            res: event.width,
+            receipt: self.receipt + identity + dx + dy,
+            res: width,
+            picked,
         }
     }
 
     fn paint(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
+        // The enum is resident interaction state. Keeping it out of the pixel
+        // expression proves typed state may coexist with GPU state without
+        // requiring the fragment shader to re-interpret its identity.
         px ^ py
     }
 }

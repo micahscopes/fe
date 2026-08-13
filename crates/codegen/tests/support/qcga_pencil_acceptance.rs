@@ -49,6 +49,7 @@ const ROWS: u32 = 24;
 const COLS: u32 = 48;
 const SHEET_VERTS: u32 = ROWS * COLS * 6;
 const VERTEX_COUNT: u32 = 2 * SHEET_VERTS;
+const RASTER_VERTEX_COUNT: u32 = VERTEX_COUNT + 9 * 6;
 const T_MAX: f64 = 12.0;
 
 fn with_sketch<R>(run: impl FnOnce(&DriverDataBase, TopLevelMod) -> R) -> R {
@@ -860,7 +861,7 @@ fn authored_raster_plan_is_typed_and_compiles_the_fe_stage_pair() {
         else {
             panic!("expected vertex role, got {:?}", program.stages[0].kind);
         };
-        assert_eq!(*vertex_count, VERTEX_COUNT);
+        assert_eq!(*vertex_count, RASTER_VERTEX_COUNT);
         let WebActorStageKind::RasterFragment { varying: fragment } = &program.stages[1].kind
         else {
             panic!(
@@ -880,7 +881,7 @@ fn authored_raster_plan_is_typed_and_compiles_the_fe_stage_pair() {
                 .iter()
                 .map(|field| field.name.as_str())
                 .collect::<Vec<_>>(),
-            ["nx", "ny", "nz", "glow", "sheet", "accuse"],
+            ["nx", "ny", "nz", "glow", "sheet", "accuse", "marker"],
         );
         assert!(fields.iter().all(|field| field.ty == CanonicalType::F32));
         assert_eq!(
@@ -906,14 +907,14 @@ fn authored_raster_plan_is_typed_and_compiles_the_fe_stage_pair() {
         .expect("QCGA authored raster bundle");
         assert_eq!(bundle.manifest.passes.len(), 1);
         let pass = &bundle.manifest.passes[0];
-        assert_eq!(pass.draw_vertices, Some(VERTEX_COUNT));
+        assert_eq!(pass.draw_vertices, Some(RASTER_VERTEX_COUNT));
         assert_eq!(pass.layout.vertex_entry.as_deref(), Some("surface_vertex"));
         assert_eq!(
             pass.layout.fragment_entry.as_deref(),
             Some("surface_fragment")
         );
         assert_eq!(pass.layout.bindings.len(), 1);
-        assert_eq!(pass.layout.bindings[0].members.len(), 29);
+        assert_eq!(pass.layout.bindings[0].members.len(), 57);
         assert_eq!(
             pass.layout.bindings[0]
                 .members
@@ -950,6 +951,34 @@ fn authored_raster_plan_is_typed_and_compiles_the_fe_stage_pair() {
                 "h1",
                 "i1",
                 "j1",
+                "p0x",
+                "p0y",
+                "p0z",
+                "p1x",
+                "p1y",
+                "p1z",
+                "p2x",
+                "p2y",
+                "p2z",
+                "p3x",
+                "p3y",
+                "p3z",
+                "p4x",
+                "p4y",
+                "p4z",
+                "p5x",
+                "p5y",
+                "p5z",
+                "p6x",
+                "p6y",
+                "p6z",
+                "p7x",
+                "p7y",
+                "p7z",
+                "p8x",
+                "p8y",
+                "p8z",
+                "picked",
             ],
             "nested Fe state must recursively derive the shader member identities",
         );
@@ -971,8 +1000,9 @@ fn authored_raster_plan_is_typed_and_compiles_the_fe_stage_pair() {
         let initialize = instance
             .get_func(&mut store, "fe_surface_initialize_v1")
             .expect("fixed Fe InitialState export");
-        let mut state = vec![wasmtime::Val::F32(0); 29];
+        let mut state = vec![wasmtime::Val::F32(0); 57];
         state[4] = wasmtime::Val::I32(0);
+        state[56] = wasmtime::Val::I32(0);
         initialize
             .call(&mut store, &[], &mut state)
             .expect("execute Fe solver-backed initialization");
@@ -1003,7 +1033,10 @@ fn authored_raster_plan_is_typed_and_compiles_the_fe_stage_pair() {
         let alloc = instance
             .get_typed_func::<(i32, i32), i32>(&mut store, "fe_cabi_alloc")
             .unwrap();
-        let pointer = alloc.call(&mut store, (52, 4)).unwrap() as usize;
+        // Three complete raw SurfaceEvent records fit here. The host boundary
+        // stays the fixed 52-byte fact transport; no QCGA identity or geometry
+        // is added to it.
+        let pointer = alloc.call(&mut store, (3 * 52, 4)).unwrap() as usize;
         let event_words = [
             0.0f32.to_bits(),
             0.0f32.to_bits(),
@@ -1027,8 +1060,9 @@ fn authored_raster_plan_is_typed_and_compiles_the_fe_stage_pair() {
         let transition = instance
             .get_func(&mut store, "fe_surface_transition_scheduled_v1")
             .expect("scheduled Fe navigation export");
-        let mut next = vec![wasmtime::Val::F32(0); 29];
+        let mut next = vec![wasmtime::Val::F32(0); 57];
         next[4] = wasmtime::Val::I32(0);
+        next[56] = wasmtime::Val::I32(0);
         transition
             .call(
                 &mut store,
@@ -1051,6 +1085,138 @@ fn authored_raster_plan_is_typed_and_compiles_the_fe_stage_pair() {
                 .collect::<Vec<_>>(),
             "navigation must preserve every solver-derived basis leaf exactly",
         );
+
+        // Independent interaction receipt: derive p0's screen location from
+        // the initialized Fe state, select it with a typed PointerDown, then
+        // deliver PointerMove + PointerUp in one ordered resident batch. This
+        // checks semantic state and incidence; generated bytes are irrelevant.
+        replace.call(&mut store, &state, &mut []).unwrap();
+        let point0 = [
+            f32_at(&state, 29) as f64,
+            f32_at(&state, 30) as f64,
+            f32_at(&state, 31) as f64,
+        ];
+        let center = [
+            f32_at(&state, 5) as f64,
+            f32_at(&state, 6) as f64,
+            f32_at(&state, 7) as f64,
+        ];
+        let yaw = f32_at(&state, 1) as f64;
+        let pitch = f32_at(&state, 2) as f64;
+        let dist = f32_at(&state, 3) as f64;
+        let [wx, wy, wz] = std::array::from_fn(|axis| point0[axis] - center[axis]);
+        let (cyaw, syaw) = (yaw.cos(), yaw.sin());
+        let (cpit, spit) = (pitch.cos(), pitch.sin());
+        let rx = cyaw * wx + syaw * wz;
+        let rz0 = cyaw * wz - syaw * wx;
+        let ry = cpit * wy - spit * rz0;
+        let depth = spit * wy + cpit * rz0 + dist;
+        let pointer_x = ((rx * 1.6 / depth) * 0.5 + 0.5) * 512.0;
+        let pointer_y = (0.5 - (ry * 1.6 / depth) * 0.5) * 512.0;
+        assert!(depth > 0.25 && pointer_x.is_finite() && pointer_y.is_finite());
+
+        let raw_event = |kind: u32, dx: f32, dy: f32| {
+            [
+                (pointer_x as f32).to_bits(),
+                (pointer_y as f32).to_bits(),
+                dx.to_bits(),
+                dy.to_bits(),
+                0.0f32.to_bits(),
+                0,
+                1,
+                2.0f32.to_bits(),
+                512.0f32.to_bits(),
+                512.0f32.to_bits(),
+                kind,
+                0,
+                0.0f32.to_bits(),
+            ]
+        };
+        let down_bytes = raw_event(8, 0.0, 0.0)
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect::<Vec<_>>();
+        memory.write(&mut store, pointer, &down_bytes).unwrap();
+        let mut selected = vec![wasmtime::Val::F32(0); 57];
+        selected[4] = wasmtime::Val::I32(0);
+        selected[56] = wasmtime::Val::I32(0);
+        transition
+            .call(
+                &mut store,
+                &[wasmtime::Val::I32(pointer as i32), wasmtime::Val::I32(1)],
+                &mut selected,
+            )
+            .expect("Fe PointerDown must select the projected control point");
+        assert!(matches!(selected[56], wasmtime::Val::I32(1)), "p0 enum tag");
+        assert_eq!(
+            selected[..56]
+                .iter()
+                .map(|value| format!("{value:?}"))
+                .collect::<Vec<_>>(),
+            state[..56]
+                .iter()
+                .map(|value| format!("{value:?}"))
+                .collect::<Vec<_>>(),
+            "selection changes only the typed PickedControl state",
+        );
+
+        let drag_release_bytes = raw_event(9, 12.0, -7.0)
+            .into_iter()
+            .chain(raw_event(10, 0.0, 0.0))
+            .flat_map(u32::to_le_bytes)
+            .collect::<Vec<_>>();
+        memory
+            .write(&mut store, pointer, &drag_release_bytes)
+            .unwrap();
+        let mut dragged = vec![wasmtime::Val::F32(0); 57];
+        dragged[4] = wasmtime::Val::I32(0);
+        dragged[56] = wasmtime::Val::I32(0);
+        transition
+            .call(
+                &mut store,
+                &[wasmtime::Val::I32(pointer as i32), wasmtime::Val::I32(2)],
+                &mut dragged,
+            )
+            .expect("ordered Fe PointerMove + PointerUp batch");
+        assert!(matches!(dragged[4], wasmtime::Val::I32(1)), "one re-solve");
+        assert!(
+            matches!(dragged[56], wasmtime::Val::I32(0)),
+            "release clears pick"
+        );
+        assert_ne!(
+            [
+                f32_at(&dragged, 29),
+                f32_at(&dragged, 30),
+                f32_at(&dragged, 31)
+            ]
+            .map(f32::to_bits),
+            [f32_at(&state, 29), f32_at(&state, 30), f32_at(&state, 31)].map(f32::to_bits),
+            "drag must move the selected point",
+        );
+        assert_eq!(
+            dragged[32..56]
+                .iter()
+                .map(|value| format!("{value:?}"))
+                .collect::<Vec<_>>(),
+            state[32..56]
+                .iter()
+                .map(|value| format!("{value:?}"))
+                .collect::<Vec<_>>(),
+            "drag must preserve all eight unselected points exactly",
+        );
+        let dragged_q0 = std::array::from_fn(|index| f32_at(&dragged, 9 + index));
+        let dragged_q1 = std::array::from_fn(|index| f32_at(&dragged, 19 + index));
+        for index in 0..9 {
+            let point = [
+                f32_at(&dragged, 29 + index * 3) as f64,
+                f32_at(&dragged, 30 + index * 3) as f64,
+                f32_at(&dragged, 31 + index * 3) as f64,
+            ];
+            assert!(
+                oracle(&dragged_q0, point).abs() < 2e-4 && oracle(&dragged_q1, point).abs() < 2e-4,
+                "re-solved basis must contain dragged point {index}",
+            );
+        }
         assert!(bundle.wgsl.contains("@vertex"), "{}", bundle.wgsl);
         assert!(bundle.wgsl.contains("@fragment"), "{}", bundle.wgsl);
         assert!(!bundle.wgsl.contains("vs_fullscreen"), "{}", bundle.wgsl);

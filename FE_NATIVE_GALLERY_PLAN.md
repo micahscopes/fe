@@ -230,8 +230,8 @@ Origin: honesty audit of Claude Code session
   untouched input batch, so generated Wasm still coalesces a burst and crosses
   the frame boundary once, and routes completion/visibility/device boundaries
   through the same typed resident transition. An independent Fe fixture gives
-  all eight variants distinct semantic receipts under Wasmtime, proves a
-  gesture plus frame preserves accumulated movement, and proves tag eight
+  all eleven variants distinct semantic receipts under Wasmtime, proves a
+  gesture plus frame preserves accumulated movement, and proves tag eleven
   traps. The fixed-host tape separately verifies the 52-byte transport and
   exact call boundary. Both Mandelbrot semantic gates remain green, including
   the 3,520-event bit-exact tape; the raymarch control Wasm grew 137 bytes to
@@ -455,6 +455,35 @@ Origin: honesty audit of Claude Code session
   because this machine exposes no usable WebGPU adapter. The remaining Phase 4
   frontier is semantic QCGA point picking and drag/resolve messaging, not
   raster placement.
+- The next QCGA interaction slice closes that named frontier without adding a
+  browser hook. The fixed host appends pointer down/move/up to the nominal
+  `SurfaceEventKind`, preserves raw identity/coordinates/buttons, and derives
+  the homogeneous motion tag from Fe's resolved enum. `PencilRaster` owns a
+  closed `PickedControl` state; ordinary Fe projects all nine points, selects
+  the nearest marker, inverse-projects captured motion into the camera plane,
+  edits an independently copied `ControlPoints` value, and solves the pencil
+  again before returning one complete state. The same authored raster appends
+  nine visible control markers and uses a vibrant normal-tracked palette with
+  grazing/tangent sheen. An independent Wasmtime receipt derives the initial
+  screen location itself, executes typed down/move/up records, observes the
+  pick state and moved point, proves all eight untouched points bit-exact, and
+  checks both returned quadrics against all nine points with an independent
+  f64 polynomial oracle. The complete QCGA suite is 8/8 and the fixed-host
+  boundary is 11/11. This is still an authored triangle surface; the companion
+  iterative distance-estimator fragment surface is explicitly the next scene
+  view, not something claimed by the richer shading.
+- That application simplification rests on a general portable-value fix rather
+  than a QCGA flattener. Root Wasm exports materialize complete read-only value
+  views, projected aggregate reads and address-taking retain target-layout
+  offsets, and aggregate `Use` performs a byte-accurate deep copy into fresh
+  canonical arena storage. QCGA can consequently spell
+  `let mut next: ControlPoints = points` instead of copying 27 fields. An
+  executed array regression requires compilation and proves post-copy mutation
+  cannot alias; enum-state wrappers separately validate both incoming and
+  returned fieldless tags. Native/Wasmtime/browser transition parity remains
+  green with all eleven lifecycle/input variants. Shader lowering deliberately
+  omits host-forgery traps because its inputs arrive through compiler-derived
+  WebGPU bindings, while public Wasm boundaries retain them.
 - This component/page slice is not the full resident-component end state. The
   outer gallery shell does not yet own routing, tile lifecycle, scheduling, or
   component-to-component messages as a long-lived Fe actor, and the stylesheet
@@ -512,6 +541,63 @@ Origin: honesty audit of Claude Code session
 
 This ledger records achieved evidence, not a relaxation of the phases or the
 Definition of done below.
+
+## Consolidated execution order (2026-08-13 prework)
+
+The remaining work should be pulled through a small number of multiplying
+abstractions, in this dependency order. A later item must consume the earlier
+general interface rather than open a parallel demo-specific lane.
+
+1. **Complete values and typed lifecycle at the resident boundary.** Finish
+   value-correct Wasm products (deep aggregate copies, projected aggregate
+   reads/references, fieldless enum state) and the append-only pointer
+   down/move/up facts. This is the substrate for picking, components, native
+   parity, reactive streams, persistence, and richer message payloads.
+2. **One Fe interaction algebra.** Express `Pick`, `Drag`, `Orbit`, `PanZoom`,
+   `RangeControl`, capture requests, and cancellation as typed state/effect
+   constructions over the same lifecycle facts. QCGA is the flagship semantic
+   proof: project control -> pick -> drag -> solve -> render, with the browser
+   remaining geometry-blind. Mandelbrot, raymarch, and the other 3D examples
+   then consume these constructions instead of owning gesture branches.
+3. **One scene/camera/field vocabulary for authored raster and DE views.**
+   Share camera rays, projection/inverse-drag math, implicit-field evaluation,
+   gradients/normals, material identities, normal palettes, grazing/tangent
+   sheen, AO/shadow, fog, and ordered sampling. The QCGA pencil's triangle view
+   and companion distance-estimator raymarch must consume the same solved
+   pencil value and interaction state; they are two views, not two apps or two
+   solvers. Keep the vibrant normal-tracked palette and sheen as reusable Fe
+   material policy rather than shader-specific constants.
+4. **General generated actor/message orchestration.** Connect the outstanding
+   MainThread/WebGPU provider and route typed pick/solve/view messages through
+   the same Fe-derived package used by DEC's Worker lane. This removes the last
+   reason to add a QCGA host hook and supplies the mechanism for proof
+   submission and cross-component collaboration.
+5. **Reactive resident outer gallery.** Derive EventSource/effect adapters from
+   the typed browser capability vocabulary, place `Event`/`Stream`/`Signal` on
+   the real path, and move sequential tile activation, lifecycle, timers,
+   routing, and component messages into one Fe gallery actor. The existing
+   sequential activation reducer remains the compatibility test case for this
+   composting, not a permanent handwritten host feature.
+6. **Binary surface artifact and host-kernel contraction.** Project resource,
+   pass, recovery, and presentation commands through typed exports; generate
+   standards adapters; stop fetching/interpreting the render manifest. Do this
+   after actor effects are real so JSON is deleted rather than replaced by a
+   second temporary protocol.
+7. **Compiler/library generalization passes.** Feed the same complete-value and
+   FCO machinery into automatic GA expression normalization/CSE/scheduling,
+   compact deep-view Mandelbrot state and policies, and the succinct orbit
+   certificate. These are intentionally downstream of trustworthy value and
+   message transport: no capstone should invent a bespoke browser lane.
+8. **Legacy burn-down and performance budgets.** Port unique examples onto the
+   general interfaces, retire duplicate JS/Rust generators, then set cold/warm
+   compile, shader-size, frame-latency, and submission budgets on the smaller
+   surface. Optimization may specialize compiler-derived structure, but must
+   preserve independent semantic oracles rather than substituting byte matches.
+
+The immediate vertical slice is therefore: typed lifecycle/value semantics ->
+QCGA interaction proof -> shared QCGA raster/DE scene policy -> general actor
+effects. This yields visible gallery value while retiring blockers needed by
+several later phases at once.
 
 ## Goal
 
@@ -576,7 +662,7 @@ application or Fe-native event system.
 - The brute Mandelbrot's fixed-precision orbit and adaptive precision policy.
 - The perturbational Mandelbrot's `Fixed<8>` reference pass, binary32 delta
   pass, reanchoring/cancellation logic, and color policy.
-- Control arithmetic in all eight parameterized actors' typed `navigate`
+- Control arithmetic in all parameterized canonical actors' typed `navigate`
   behaviors: fluent affine bindings and parameter-kind policy, plus the
   Mandelbrots' specialized pan sensitivity, zoom curves, clamps, cursor
   anchoring, and high-precision center updates. These behaviors compile from
@@ -609,16 +695,19 @@ asks us to absorb.
 
 ### Important corrections
 
-- The canonical throttle is Fe-declared and compiler-lowered into generated
-  Wasm. JavaScript buffers untouched raw records and supplies the
-  `requestAnimationFrame`/GPU-completion clock; the Wasm wrapper coalesces and
-  invokes the authored Fe transition once per permitted frame. Complete actor
-  state is resident in private Wasm globals; JavaScript keeps only a GPU-upload
-  mirror and supplies explicit initialization/extent/restoration. Slider and
-  scripted changes are raw typed events handled by the same Fe transition. The
-  browser clock state machine is not resident in Fe yet.
+- Scheduling policy and its state/decisions are Fe-declared and resident in
+  generated Wasm. JavaScript buffers untouched raw records, realizes Fe's
+  bounded queue effect, and supplies standards facts from
+  `requestAnimationFrame`/GPU completion; generated Wasm performs motion
+  coalescing and invokes the authored transition when Fe admits a frame.
+  Complete actor state is resident in private Wasm globals; JavaScript keeps
+  only a GPU-upload mirror and supplies explicit initialization/extent/
+  restoration. Slider and scripted changes are raw typed events handled by the
+  same Fe transition. Browser callback registration and promise realization,
+  not the presentation decision, remain host work.
 - Cursor-anchored pan/zoom mathematics is Fe; cursor acquisition,
-  normalization, drag state, and timing are JavaScript.
+  normalization, capture, raw delta production, and timing are JavaScript.
+  QCGA point projection, selection, drag geometry, and re-solving are Fe.
 - The gallery is not using Rust-Wasm to fake its renderers. `fe web dev` and
   precompile are native Rust toolchain operations. Browser Wasm artifacts are
   compiler output from Fe; live GPU rendering uses Fe-generated WGSL. The

@@ -34,9 +34,32 @@ pub enum SurfaceEventKind {
     Hidden,
     DeviceLost,
     DeviceRecovered,
+    /// Primary pointer contact began. The browser host supplies capture, raw
+    /// coordinates, and buttons; selection policy remains in Fe.
+    PointerDown,
+    /// Captured primary-pointer motion. Homogeneous bursts may be accumulated
+    /// by the generated Wasm wrapper, but never by application JavaScript.
+    PointerMove,
+    /// Primary pointer contact ended or was cancelled.
+    PointerUp,
 }
 
 impl Copy for SurfaceEventKind {}
+
+impl SurfaceEventKind {
+    /// True only for facts that may mutate application state. Presentation
+    /// clock/lifecycle variants are consumed by the resident scheduler.
+    pub fn is_application_input(self) -> bool {
+        match self {
+            SurfaceEventKind::Gesture => true,
+            SurfaceEventKind::ParamEdit => true,
+            SurfaceEventKind::PointerDown => true,
+            SurfaceEventKind::PointerMove => true,
+            SurfaceEventKind::PointerUp => true,
+            _ => false,
+        }
+    }
+}
 
 /// The fixed browser-to-Fe input transport record. The marker declares nominal
 /// host-boundary intent; the compiler verifies this complete field shape before
@@ -79,6 +102,18 @@ impl SurfaceEvent {
 
     pub fn is_gpu_complete(self) -> bool {
         match self.event_kind { SurfaceEventKind::GpuComplete => true, _ => false }
+    }
+
+    pub fn is_pointer_down(self) -> bool {
+        match self.event_kind { SurfaceEventKind::PointerDown => true, _ => false }
+    }
+
+    pub fn is_pointer_move(self) -> bool {
+        match self.event_kind { SurfaceEventKind::PointerMove => true, _ => false }
+    }
+
+    pub fn is_pointer_up(self) -> bool {
+        match self.event_kind { SurfaceEventKind::PointerUp => true, _ => false }
     }
 }
 

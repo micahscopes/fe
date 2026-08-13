@@ -1593,6 +1593,7 @@ struct TypedSurfaceTransitionContract {
     params: Vec<WebControlWasmType>,
     results: Vec<WebControlWasmType>,
     event_tag_limits: Vec<(usize, u32)>,
+    state_tag_limits: Vec<(usize, u32)>,
     coalesce_tag_field: usize,
     coalesce_tag_variant: u32,
     actor_param_is_resource: Vec<bool>,
@@ -1637,6 +1638,7 @@ fn with_typed_surface_export(
             TYPED_SURFACE_SCHEDULED_EXPORT,
             TYPED_SURFACE_STATE_REPLACE_EXPORT,
             contract.event_tag_limits.clone(),
+            contract.state_tag_limits.clone(),
             contract.coalesce_tag_field,
             contract.coalesce_tag_variant,
             contract.actor_param_is_resource.clone(),
@@ -1679,6 +1681,9 @@ fn canonical_surface_event_kind_type() -> CanonicalType {
             "hidden",
             "device_lost",
             "device_recovered",
+            "pointer_down",
+            "pointer_move",
+            "pointer_up",
         ]
         .into_iter()
         .map(|name| CanonicalVariant {
@@ -1826,7 +1831,7 @@ fn surface_scalar_tag_limits(
     }
 }
 
-/// Derive the homogeneous gesture-batch key from the validated fixed
+/// Derive the homogeneous pointer-motion batch key from the validated fixed
 /// `SurfaceEvent` shape. The enum ordinal comes from Fe's resolved variant
 /// order; neither an example nor the browser host supplies a numeric table.
 fn surface_event_coalesce_key(event: &CanonicalType) -> Result<(usize, u32), WebBundleError> {
@@ -1845,10 +1850,10 @@ fn surface_event_coalesce_key(event: &CanonicalType) -> Result<(usize, u32), Web
             };
             let variant = variants
                 .iter()
-                .position(|variant| variant.name == "gesture")
+                .position(|variant| variant.name == "pointer_move")
                 .ok_or_else(|| {
                     WebBundleError::SurfaceProjection(
-                        "typed SurfaceEventKind is missing its gesture variant".to_owned(),
+                        "typed SurfaceEventKind is missing its pointer_move variant".to_owned(),
                     )
                 })?;
             return Ok((offset, variant as u32));
@@ -2007,10 +2012,24 @@ fn typed_surface_transition_contract(
     }
     let mut results = Vec::new();
     append_canonical_wasm_types(&returned_state, &mut results, "surface_state_response")?;
+    let mut state_tag_limits = Vec::new();
+    let state_fields = surface_scalar_tag_limits(
+        &returned_state,
+        "surface_state_response",
+        0,
+        &mut state_tag_limits,
+    )?;
+    if state_fields != results.len() {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "typed surface state flattened inconsistently: canonical shape has {state_fields} scalar leaves but Wasm ABI has {}",
+            results.len()
+        )));
+    }
     Ok(Some(TypedSurfaceTransitionContract {
         params,
         results,
         event_tag_limits,
+        state_tag_limits,
         coalesce_tag_field,
         coalesce_tag_variant,
         actor_param_is_resource,
