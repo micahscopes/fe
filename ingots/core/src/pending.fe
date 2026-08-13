@@ -57,6 +57,19 @@ pub enum TaskOutcome<E, T> {
     Cancelled,
 }
 
+/// The authority to suspend the current resumable Fe continuation until a
+/// pending operation reaches one terminal outcome. Unlike `Wait`, this never
+/// blocks an agent: the compiler splits the surrounding runtime MIR, retains
+/// the live affine state, and re-enters it exactly once with success, failure,
+/// or cancellation.
+///
+/// `E` belongs to the interpreter/provider because the same pending payload may
+/// acquire a different transport error vocabulary on different placements.
+/// A missing provider remains the ordinary effect-row obligation error.
+pub trait Suspend<B: Backend, E> {
+    fn suspend<T>(self, _ pending: own Pending<B, T>) -> TaskOutcome<E, T>
+}
+
 impl<E, T> TaskOutcome<E, T> {
     /// Purely transform a successful value while preserving failure and
     /// cancellation as the same terminal outcomes.

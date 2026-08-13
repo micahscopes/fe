@@ -1,5 +1,7 @@
 use cranelift_entity::EntityRef;
 use hir::analysis::semantic::{SemanticInstance, check_semantic_borrows, check_semantic_noesc};
+use hir::analysis::ty::corelib::{RuntimeControlEffectFuncKind, runtime_control_effect_func_kind};
+use hir::analysis::ty::ty_check::BodyOwner;
 use hir::analysis::ty::ty_def::TyId;
 use hir::hir_def::Func;
 use salsa::Update;
@@ -169,6 +171,23 @@ pub fn host_import_name<'db>(db: &'db dyn MirDb, instance: RuntimeInstance<'db>)
     Some(func.name(db).to_opt()?.data(db).to_string())
 }
 
+/// Recover the nominal control operation represented by a runtime call. This
+/// consults the declaring Fe item, not an import string or caller-authored
+/// table, so an unrelated extern named `suspend` cannot acquire continuation
+/// semantics.
+pub fn runtime_control_effect_kind<'db>(
+    db: &'db dyn MirDb,
+    instance: RuntimeInstance<'db>,
+) -> Option<RuntimeControlEffectFuncKind> {
+    let RuntimeInstanceSource::Semantic(semantic) = instance.key(db).source(db) else {
+        return None;
+    };
+    let BodyOwner::Func(func) = semantic.key(db).owner(db) else {
+        return None;
+    };
+    runtime_control_effect_func_kind(db, func)
+}
+
 /// Codec-versioned indirect aggregate result metadata carried unchanged from
 /// the authored extern declaration into backend lowering.
 pub fn indirect_host_result<'db>(
@@ -233,6 +252,13 @@ fn external_declaration_body<'db>(
     instance: RuntimeInstance<'db>,
     func: Func<'db>,
 ) -> Result<RuntimeBody<'db>, LowerError> {
+    // A compiler-recognized control operation is represented by an extern Fe
+    // declaration so semantic analysis can type it normally, but it never
+    // crosses the flat host-import ABI. Resumable materialization consumes the
+    // call and supplies the typed delivery local on re-entry, so aggregate
+    // outcomes are legal here even though an ordinary host import returning the
+    // same enum would correctly fail closed below.
+    let compiler_consumed_control = runtime_control_effect_func_kind(db, func).is_some();
     if let Some(attrs) = hir::hir_def::ItemKind::Func(func).attrs(db)
         && attrs.get_attr(db, "host_import").is_some()
         && attrs.get_attr(db, "wasm_import").is_some()
@@ -254,6 +280,9 @@ fn external_declaration_body<'db>(
         .map(|ident| ident.data(db).to_string())
         .unwrap_or_else(|| "<extern>".to_string());
     for (idx, param) in signature.params.iter().enumerate() {
+        if compiler_consumed_control {
+            break;
+        }
         if !is_host_import_boundary_class(db, &param.class) {
             let ty = func
                 .arg_tys(db)
@@ -290,6 +319,7 @@ fn external_declaration_body<'db>(
     if let Some(ret) = &signature.ret
         && !is_host_import_boundary_class(db, ret)
         && indirect_result.is_none()
+        && !compiler_consumed_control
     {
         let ty = func.return_ty(db).pretty_print(db).to_string();
         return Err(LowerError::Unsupported(format!(

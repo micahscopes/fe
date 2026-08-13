@@ -183,6 +183,29 @@ pub enum RuntimeBuiltinFuncKind {
     IntrinsicKeccak256,
 }
 
+/// Nominal control operations which remain ordinary typed Fe functions through
+/// semantic analysis but are consumed by resumable MIR materialization before
+/// backend import lowering. Kept separate from EVM/runtime builtins: these
+/// operations alter control flow and require continuation planning rather than
+/// producing one target instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
+pub enum RuntimeControlEffectFuncKind {
+    Suspend,
+}
+
+#[salsa::tracked]
+pub fn runtime_control_effect_func_kind<'db>(
+    db: &'db dyn HirAnalysisDb,
+    func: Func<'db>,
+) -> Option<RuntimeControlEffectFuncKind> {
+    let kind = func.top_mod(db).ingot(db).kind(db);
+    let path = runtime_builtin_func_path(db, func)?;
+    match (kind, path.as_slice()) {
+        (IngotKind::Std, ["host", "raw", "suspend"]) => Some(RuntimeControlEffectFuncKind::Suspend),
+        _ => None,
+    }
+}
+
 #[salsa::tracked]
 pub fn runtime_builtin_func_kind<'db>(
     db: &'db dyn HirAnalysisDb,

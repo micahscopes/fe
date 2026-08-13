@@ -112,21 +112,29 @@ manifest-driven.
 
 ## Ordered implementation slices
 
-1. Add the typed terminal outcome and compiler-recognized suspend operation.
-2. Split MIR at suspension points and persist/reconstruct live state.
-3. Materialize fixed Wasm re-entry exports and connect them to the existing
+1. [done] Add the typed terminal outcome and compiler-recognized suspend
+   operation. `Suspend<B, E>` and its downstream provider are ordinary Fe
+   effects; nominal recognition and exact direct-site CFG liveness are pinned
+   by independent tests. Cancellation is delivered to the continuation before
+   terminal notification.
+2. [in progress] Split MIR at suspension points and persist/reconstruct live
+   state. Exact live sets, stable continuation-state assignment, typed frame
+   layouts, and fixed-point propagation through ordinary helpers/effect
+   providers are landed. Executable block splitting and frame persistence/
+   reconstruction remain.
+3. [todo] Materialize fixed Wasm re-entry exports and connect them to the existing
    generation-safe executor.
-4. Interpret timer/receive/spawn and callback completion through that path on
+4. [todo] Interpret timer/receive/spawn and callback completion through that path on
    MainThread and Worker placements; retain blocking `Wait` only where legal.
-5. Derive browser `EventSource` handlers and move the gallery activation/timer
+5. [todo] Derive browser `EventSource` handlers and move the gallery activation/timer
    loop onto the same resident/reactive interpreter.
-6. Move Worker admission, cancellation, restart/backoff, and supervision policy
+6. [todo] Move Worker admission, cancellation, restart/backoff, and supervision policy
    from handwritten JavaScript into Fe handlers and structured scopes.
-7. Route WebGPU completion, device loss/recovery, and resource lifetime through
+7. [todo] Route WebGPU completion, device loss/recovery, and resource lifetime through
    the same outcome/scope machinery.
-8. Expose typed device/viewport capability facts so Fe owns responsive render
+8. [todo] Expose typed device/viewport capability facts so Fe owns responsive render
    quality; delete the fixed host's temporary coarse-pointer/CPU safety cap.
-9. Delete remaining semantic render-manifest fetch/interpretation after typed
+9. [todo] Delete remaining semantic render-manifest fetch/interpretation after typed
    exports carry the complete contract.
 
 Each slice needs an independent semantic oracle. Generated-byte equality is

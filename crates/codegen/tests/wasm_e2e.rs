@@ -56,6 +56,108 @@ fn compile_to_wasm_err(name: &str, source: &str) -> String {
         .to_string()
 }
 
+#[test]
+fn compiler_recognized_suspend_fails_at_the_missing_materializer_not_host_abi() {
+    let error = compile_to_wasm_err(
+        "resumable_requires_materializer.fe",
+        r#"
+use core::pending::{Pending, TaskOutcome}
+use std::host::raw::suspend
+use std::wasm::WasmBackend
+
+pub fn task(_ pending: own Pending<WasmBackend, u32>) -> u32 {
+    let outcome: TaskOutcome<u32, u32> = suspend(pending)
+    match outcome {
+        TaskOutcome::Success(value) => value
+        TaskOutcome::Failure(error) => error
+        TaskOutcome::Cancelled => 0
+    }
+}
+"#,
+    );
+    assert!(
+        error.contains("resumable frame/re-entry materialization is required"),
+        "a suspend point must never degrade into an aggregate host import: {error}"
+    );
+}
+
+#[test]
+fn payload_enum_construction_match_and_extraction_execute_in_wasm() {
+    let wasm = compile_to_wasm(
+        "wasm_payload_task_outcome.fe",
+        r#"
+use core::pending::TaskOutcome
+
+pub fn success(_ value: u32) -> u32 {
+    let outcome: TaskOutcome<u32, u32> = TaskOutcome::Success(value)
+    match outcome {
+        TaskOutcome::Failure(error) => error + 100
+        TaskOutcome::Success(answer) => answer + 1
+        TaskOutcome::Cancelled => 999
+    }
+}
+
+pub fn failure(_ error: u32) -> u32 {
+    let outcome: TaskOutcome<u32, u32> = TaskOutcome::Failure(error)
+    match outcome {
+        TaskOutcome::Failure(code) => code + 2
+        TaskOutcome::Success(value) => value + 100
+        TaskOutcome::Cancelled => 999
+    }
+}
+
+pub fn cancelled() -> u32 {
+    let outcome: TaskOutcome<u32, u32> = TaskOutcome::Cancelled
+    match outcome {
+        TaskOutcome::Failure(error) => error
+        TaskOutcome::Success(value) => value
+        TaskOutcome::Cancelled => 7
+    }
+}
+
+pub fn make_success(_ value: u32) -> TaskOutcome<u32, u32> {
+    TaskOutcome::Success(value)
+}
+
+pub fn consume(_ outcome: TaskOutcome<u32, u32>) -> u32 {
+    match outcome {
+        TaskOutcome::Failure(error) => error + 10
+        TaskOutcome::Success(value) => value + 20
+        TaskOutcome::Cancelled => 30
+    }
+}
+"#,
+    );
+    assert!(func_imports(&wasm).is_empty());
+    let (mut store, instance) = instantiate(&wasm);
+    let success = instance
+        .get_typed_func::<i32, i32>(&mut store, "success")
+        .unwrap();
+    let failure = instance
+        .get_typed_func::<i32, i32>(&mut store, "failure")
+        .unwrap();
+    let cancelled = instance
+        .get_typed_func::<(), i32>(&mut store, "cancelled")
+        .unwrap();
+    let make_success = instance
+        .get_typed_func::<i32, (i32, i32, i32)>(&mut store, "make_success")
+        .unwrap();
+    let consume = instance
+        .get_typed_func::<(i32, i32, i32), i32>(&mut store, "consume")
+        .unwrap();
+    assert_eq!(success.call(&mut store, 41).unwrap(), 42);
+    assert_eq!(failure.call(&mut store, 5).unwrap(), 7);
+    assert_eq!(cancelled.call(&mut store, ()).unwrap(), 7);
+    assert_eq!(make_success.call(&mut store, 8).unwrap(), (1, 0, 8));
+    assert_eq!(consume.call(&mut store, (0, 5, 99)).unwrap(), 15);
+    assert_eq!(consume.call(&mut store, (1, 99, 6)).unwrap(), 26);
+    assert_eq!(consume.call(&mut store, (2, 99, 99)).unwrap(), 30);
+    assert!(
+        consume.call(&mut store, (3, 0, 0)).is_err(),
+        "a forged payload-enum tag must trap at the public Wasm boundary"
+    );
+}
+
 /// Compile one authored transition through the generic resident-actor wrapper.
 /// This bypasses every surface/gallery projection so the acceptance below is
 /// an independent consumer of the target-neutral lowering primitive.
@@ -4447,42 +4549,26 @@ fn fe_host_timer_recv_external_completion_rail() {
 // DSL) and a `retry_task` combinator over reified tasks. It TYPE-CHECKS in full (the
 // R6 anti-coloring / typed-environment thesis holds: no `.await`, calls are plain
 // calls, `let` is bind, capabilities are one typed `uses` row, the runtime is a
-// lexical `with`-frame, the typed error is `Result` + `#[error]`). But EXECUTING it
-// on the wasm value model hits two walls the CE-9 rung and the section-7.4 de-risk
-// table did not foresee (7.4 checked STRUCTS field-by-field - `Stepped` covered,
-// `Combine2` flagged - but never the ENUM spine on which R7b is built):
+// lexical `with`-frame, the typed error is `Result` + `#[error]`). It historically
+// exposed two Wasm value-model walls that the CE-9 rung and the section-7.4 de-risk
+// table did not foresee (7.4 checked structs but never the enum spine):
 //
-//   1. THE ENUM WALL (fundamental, a seat decision). `Result<E, A>` is an enum;
-//      `wasm_lower` fails closed on `Layout::Enum` (`single_scalar_field` returns
-//      `None`, so `ty_for_class` errors) and `match`/switch terminators are R2. So a
-//      `Result`-returning function's SIGNATURE alone cannot lower - the typed-error
-//      arm of the flagship never reaches codegen. Enum lowering on wasm (a
-//      tagged-union value repr + `match`/switch + construct/extract) is a NEW
-//      R2-class codegen rung, well beyond CE-9's "worked example + small combinator"
-//      mandate and beyond the R2.0/R2.1 slivers. Ruling needed before it is built.
-//   2. THE CAPABILITY-BODY CONTROL-FLOW WALL (secondary). Even a SCALAR (no-Result)
-//      pipeline fails closed the moment an `if` enters a `uses` body: the provision
-//      environment is materialized as an aggregate local across the branch
-//      ("not a value-carried scalar"; address-taken/aggregate locals are R2). PURE
-//      bodies with the same control flow lower fine (the shipped `ntt8_coeff`
-//      while/if), and STRAIGHT-LINE capability bodies lower fine (below), so this is
-//      specific to control flow over a capability environment.
+//   1. `Result<E, A>` needed a tagged payload value representation, construction,
+//      extraction, match lowering, and public ABI validation. It now uses the
+//      general flattened enum lane and is tested below by execution.
+//   2. Capability-body control flow once materialized its provision environment
+//      as an unlowerable aggregate. Recursive aggregate flattening removed that
+//      wall, and its separate execution gate remains below.
 //
-// WHAT DOES EXECUTE (pinned by `fe_ce9_three_capability_rail_executes` below): the
-// direct-style three-capability rail in its STRAIGHT-LINE, scalar form - three
-// distinct capabilities (`Spawn` + `Wait` + `Timer`), TWO import modules (`fe:worker`
-// + `fe:host`) in ONE wasm module, a THREE-provider HETEROGENEOUS `with`-frame
-// (`WorkerPool` + `HostTimer`) - forks/joins a task through the rail AND reads the
-// clock, end to end through a combined worker+clock fake runtime. That isolates both
-// walls to the enum and to capability-body control flow, NOT to the three-capability
-// `uses` row or the multi-provider `with`-frame themselves (those lower and run).
+// The scalar three-capability rail remains an independent substrate oracle; the
+// flagship now proves that typed error policy composes on top of that same rail.
 // ===========================================================================
 
 /// The REAL R7b flagship source: `Result<StaleQuote, u64>` threaded through a
 /// direct-style body with the three-capability `uses (sp, w, t)` row, the
 /// three-provider `with`-frame runtime, and the `retry_task` combinator. Kept
 /// verbatim as the documented target; it TYPE-CHECKS (verified with `fe check`) and
-/// is pinned to FAIL CLOSED at the enum wall on wasm by the test below.
+/// now executes through the general flattened payload-enum value lane.
 const CE9_FLAGSHIP_SRC: &str = r#"
 use core::result::Result
 use core::pending::{Spawn, Wait, Timer, TaskId}
@@ -4498,6 +4584,7 @@ struct Exhausted { pub tries: u32 }
 
 fn precompute_weights(_ pair: u64) -> u64 { pair + 7 }
 fn combine(_ local: u64, _ raw: u64) -> u64 { local + raw }
+pub fn fe_task(_ entry: u32, _ arg: u64) -> u64 { arg + 100 }
 
 // ZIO[R, E, A] as a plain Fe function: R is the row, E the Err arm, A the Ok arm.
 // No wrapper type, no flatMap chains, no for-comprehension. Direct style throughout:
@@ -4705,19 +4792,31 @@ fn instantiate_worker_and_clock(
     (store, instance)
 }
 
-/// CE-9 THE STOP (pinned): the `Result`-typed R7b flagship FAILS CLOSED on wasm at
-/// the payload-enum wall. Fieldless enums have a compiler-derived scalar tag, but
-/// `Result<E, A>` needs a tagged payload representation that the Wasm value lane
-/// does not yet provide. The flagship type-checks in full (the anti-coloring /
-/// typed-environment thesis holds); only its Wasm execution is walled.
+/// CE-9 promoted: the `Result`-typed R7b flagship executes through the general
+/// flattened payload-enum representation (tag plus one statically typed lane tree
+/// per variant). This is an independent, effectful consumer of the value lane:
+/// Worker + clock imports, branching, `Result::unwrap_or`, and retry all run.
 #[test]
-fn fe_ce9_result_flagship_fails_closed_at_enum_wall() {
-    let err = compile_to_wasm_err("wasm_ce9_flagship.fe", CE9_FLAGSHIP_SRC);
-    assert!(
-        err.contains("payload enum value transport is not implemented"),
-        "the Result-typed flagship should fail closed specifically at the Wasm \
-         payload-enum transport boundary, got: {err}"
+fn fe_ce9_result_flagship_executes() {
+    let wasm = compile_to_wasm("wasm_ce9_flagship.fe", CE9_FLAGSHIP_SRC);
+    assert_eq!(
+        func_imports(&wasm),
+        vec![
+            ("fe:host".into(), "host_now".into()),
+            ("fe:worker".into(), "task_begin".into()),
+            ("fe:worker".into(), "task_result".into()),
+            ("fe:worker".into(), "wait".into()),
+        ]
     );
+    let (mut store, instance) = instantiate_worker_and_clock(&wasm);
+    let main = instance
+        .get_typed_func::<i64, i64>(&mut store, "main")
+        .unwrap();
+    assert_eq!(main.call(&mut store, 5).unwrap(), 117);
+    let retry = instance
+        .get_typed_func::<(i64, i32), i64>(&mut store, "retry_demo")
+        .unwrap();
+    assert_eq!(retry.call(&mut store, (7, 3)).unwrap(), 107);
 }
 
 /// CE-9 (secondary wall, pinned): control flow inside a capability (`uses`) body
@@ -4953,21 +5052,23 @@ pub fn probe256(k: u32) -> u256 {
     );
 }
 
-/// Fail-closed regression: an object-ref (array) in an EXPORT signature stays
-/// rejected. Change 1 only maps object-ref LOCALS to an i32 pointer; it does not
-/// widen `ty_for_class`, which remains the signature admissibility SSOT.
+/// Public fixed arrays use the same recursively flattened value ABI as private
+/// calls. Execute the export so this gate proves element order and value
+/// semantics rather than merely accepting generated bytes.
 #[test]
-fn object_ref_array_in_signature_stays_fail_closed_on_wasm() {
+fn fixed_array_in_export_signature_flattens_and_executes() {
     let source = r#"
 pub fn takes_array(a: [u32; 4]) -> u32 {
     a[0] + a[1]
 }
 "#;
-    let error = compile_to_wasm_err("wasm_object_ref_signature.fe", source);
-    assert!(
-        error.contains("wasm target"),
-        "an array in an export signature should fail closed; got: {error}"
-    );
+    let wasm = compile_to_wasm("wasm_array_export_signature.fe", source);
+    assert!(func_imports(&wasm).is_empty());
+    let (mut store, instance) = instantiate(&wasm);
+    let takes_array = instance
+        .get_typed_func::<(i32, i32, i32, i32), i32>(&mut store, "takes_array")
+        .expect("[u32; 4] should flatten to four ordered Wasm parameters");
+    assert_eq!(takes_array.call(&mut store, (7, 11, 13, 17)).unwrap(), 18);
 }
 
 // ----------------------------------------------------------------------------

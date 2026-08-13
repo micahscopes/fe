@@ -41,7 +41,7 @@
 // composes into the trait's `wait<T> -> T`; the host client only ever instantiates
 // it at `T = u64`, where it monomorphizes to the `wait(i32) -> i64` import.
 
-use core::pending::Pending
+use core::pending::{Pending, TaskOutcome}
 use ingot::wasm::WasmBackend
 
 /// Module `fe:host` (broker-serviced host-completion lane): read the clock, mint a
@@ -79,4 +79,15 @@ extern {
     /// instantiates it at `T = u64`, where it monomorphizes to `wait(i32) -> i64`.
     /// Amendment 4: `pending` crosses WHOLE as its single `u32` id word (i32).
     pub unsafe fn wait<T>(_ pending: Pending<WasmBackend, T>) -> T
+}
+
+/// Compiler-recognized non-blocking control boundary. This declaration gives
+/// the semantic analyser a normal typed Fe function; resumable MIR lowering
+/// derives the call's state and live values. Ordinary Wasm lowering rejects it
+/// until frame/re-entry materialization consumes it, so it cannot silently
+/// degrade into a host import. There is no browser-authored function table or
+/// manifest entry for this operation.
+#[wasm_import(module = "fe:control")]
+extern {
+    pub unsafe fn suspend<E, T>(_ pending: Pending<WasmBackend, T>) -> TaskOutcome<E, T>
 }

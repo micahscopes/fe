@@ -403,8 +403,19 @@ Origin: honesty audit of Claude Code session
   suite is 10/10, all codegen tests typecheck, and the 71-test Wasm integration
   target produced 70 semantic passes with its sole stale diagnostic matcher
   subsequently corrected and passing focused. Fieldless enums retain their
-  compiler-derived scalar lane; payload-enum transport remains deliberately
-  fail-closed and is pinned by the `Result` flagship boundary test.
+  compact compiler-derived scalar lane. The general Wasm value path now also
+  flattens payload enums as one checked tag plus one statically typed lane tree
+  per variant; inactive lanes are zeroed deterministically. Construction,
+  matching, scalar/aggregate extraction, public argument/result flattening,
+  invalid-tag trapping, and the previously walled effectful `Result` flagship
+  all execute under independent Wasmtime oracles. The current 74-test Wasm
+  integration run completed every expensive arithmetic oracle (including the
+  serial Poseidon-Merkle gate) and produced 73 passes; its only failure was an
+  obsolete assertion that public fixed arrays must be rejected, while the
+  compiler now correctly flattened the array and returned executable Wasm.
+  That stale rejection was promoted to a Wasmtime value/order oracle and passes
+  focused, giving 74/74 semantic outcomes across the full run plus the exact
+  corrected gate.
 - Authored rasterization now has a standard nominal Fe surface rather than a
   QCGA-local marker convention. `VertexStage<V>` and `FragmentStage<V>` are
   paired through exact semantic identity of `V`; `RasterVertex<V>` separates
@@ -740,6 +751,28 @@ Origin: honesty audit of Claude Code session
   execution, borrow expiry, release, and stale rejection end to end. This is
   architectural composting before the real MIR suspension/re-entry slice, not
   a claim that main-thread suspension or browser handlers already exist.
+- Runtime-control phase 1 is now compiler-derived rather than merely
+  architectural. `core::pending::Suspend<B, E>` is an ordinary typed Fe
+  authority, `std::host::Resumable` is its downstream provider, and only the
+  nominal `std::host::raw::suspend` declaration is recognized as the control
+  boundary; import spellings, manifests, and caller-authored entry tables are
+  not consulted. Target-neutral MIR assigns stable continuation states and
+  computes exact CFG liveness at every direct suspension point. An independent
+  Fe-source oracle proves that a used parameter enters the frame while a dead
+  sibling does not. The executor also now delivers `Cancelled` to the Fe task
+  body before terminal notification—closing a real semantic hole where the
+  table became cancelled without the continuation observing the typed outcome.
+  Success/failure/cancellation, exact-once notification, dead-value exclusion,
+  and nominal recognition are semantic tests, not generated-byte comparisons.
+  Fixed-point propagation now carries suspension through ordinary Fe helpers
+  and the actual effect-provider chain without requiring a repeated annotation;
+  every resumable body gets a typed union frame derived from its exact live
+  values and original MIR root semantics. This work also promoted the general
+  Wasm payload-enum value lane required by `TaskOutcome`, including executable
+  construction/match/extraction, public argument/result flattening, invalid-tag
+  traps, and the previously walled effectful `Result` flagship. Executable MIR
+  block splitting, live-value persistence/reconstruction, and fixed Wasm
+  start/resume exports remain the active materialization slice.
 - A mobile-safety follow-up keeps the sequential policy in the resident Fe
   shell but changes its fixed opcode-14 realization from cold-to-live to
   poster-only loading. Poster capture and off-viewport suspension now destroy
@@ -752,6 +785,18 @@ Origin: honesty audit of Claude Code session
   through the runtime-control spine. Sixteen fixed render-runtime tests, six
   bootstrap tests, and a fresh optimized precompile of all 12 render bundles,
   one Fe page projection, and two resident components are green.
+- A static mobile workload audit identified the next concrete quality slice.
+  At the temporary 256x256 coarse-pointer ceiling, `qcga_pencil_de` can still
+  execute 8,388,608 primary march iterations per frame, then four Newton
+  refinements on hits; it also projects all nine control points independently
+  in every fragment (589,824 projections per frame) and recomputes camera/
+  pencil uniform work per fragment. `LatestPerFrame` and GPU-completion gating
+  already prevent event/command buildup, so the remaining jank is real shader
+  cost. Hoist camera/member/control-point projection into resident Fe state,
+  move marker drawing out of the all-fragment projection loop, add a clipped
+  march interval/early loop exit, and make extent/march/refinement budgets a
+  typed Fe quality policy driven by raw device/viewport/frame facts. The fixed
+  host may report those facts; it must not choose the quality tier.
 
 This ledger records achieved evidence, not a relaxation of the phases or the
 Definition of done below.

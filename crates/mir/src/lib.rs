@@ -4,10 +4,11 @@ pub mod runtime;
 pub mod verify;
 
 pub use db::MirDb;
+pub use hir::analysis::ty::corelib::RuntimeControlEffectFuncKind;
 pub use instance::{
     HostResultCodec, IndirectHostResult, RuntimeInstance, RuntimeInstanceKey,
     get_or_build_runtime_instance, host_import_module, host_import_name, indirect_host_result,
-    wasm_import_module, wasm_import_name,
+    runtime_control_effect_kind, wasm_import_module, wasm_import_name,
 };
 pub use runtime::{
     AddressSpaceKind, ArrayLayout, BorrowAccess, BorrowTransportSet, ConstNode, ConstRegion,
@@ -17,15 +18,18 @@ pub use runtime::{
     RefView, ResolvedCodeRegion, ResolvedPlaceElem, ResolvedPlaceRootKind, ResolvedRuntimePlace,
     RuntimeAggregateFacts, RuntimeArgFact, RuntimeArgShapeKey, RuntimeBody, RuntimeBoundarySpec,
     RuntimeBuiltin, RuntimeCallEdge, RuntimeCarrier, RuntimeClass, RuntimeCodeRegion,
-    RuntimeCodeRegionKey, RuntimeEmbed, RuntimeFunction, RuntimeFunctionOwner, RuntimeInlineHint,
-    RuntimeInterfaceSignature, RuntimeLinkage, RuntimeLocalRoot, RuntimeObject, RuntimePackage,
-    RuntimeParam, RuntimePlace, RuntimeProgramView, RuntimeReturnPlan, RuntimeScalarConstFacts,
-    RuntimeSection, RuntimeSectionName, RuntimeSectionRef, RuntimeSyntheticSpec, SaturatingBinOp,
-    ScalarClass, ScalarRepr, ScalarRole, StructLayout, VariantId, array_elem_size_bytes,
-    build_runtime_package, build_test_runtime_package, build_wasm_runtime_package,
-    build_wasm_runtime_package_for_entries,
+    RuntimeCodeRegionKey, RuntimeContinuationFrameSlot, RuntimeEmbed, RuntimeFunction,
+    RuntimeFunctionOwner, RuntimeInlineHint, RuntimeInterfaceSignature, RuntimeLinkage,
+    RuntimeLocalRoot, RuntimeObject, RuntimePackage, RuntimeParam, RuntimePlace,
+    RuntimeProgramView, RuntimeResumableBodyPlan, RuntimeReturnPlan, RuntimeScalarConstFacts,
+    RuntimeSection, RuntimeSectionName, RuntimeSectionRef, RuntimeSuspendingTail,
+    RuntimeSuspensionCause, RuntimeSuspensionPlanError, RuntimeSuspensionPoint,
+    RuntimeSyntheticSpec, SaturatingBinOp, ScalarClass, ScalarRepr, ScalarRole, StructLayout,
+    VariantId, array_elem_size_bytes, build_runtime_package, build_test_runtime_package,
+    build_wasm_runtime_package, build_wasm_runtime_package_for_entries,
     build_wasm_runtime_package_for_entries_with_internal_funcs,
-    build_wasm_runtime_package_for_entry, enum_tag_size_bytes, enum_variant_field_offset_bytes,
+    build_wasm_runtime_package_for_entry, derive_runtime_resumable_plans,
+    derive_runtime_suspension_points, enum_tag_size_bytes, enum_variant_field_offset_bytes,
     format_runtime_body, format_runtime_body_excerpt, format_runtime_package,
     format_runtime_verify_failure, layout_size_bytes, runtime_arg_shape_key,
     runtime_instance_stable_key, runtime_instance_symbol_key,

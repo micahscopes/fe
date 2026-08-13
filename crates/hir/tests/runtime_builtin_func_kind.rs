@@ -1,5 +1,6 @@
 use fe_hir::analysis::ty::corelib::{
-    RuntimeBuiltinFuncKind, resolve_lib_func_path, runtime_builtin_func_kind,
+    RuntimeBuiltinFuncKind, RuntimeControlEffectFuncKind, resolve_lib_func_path,
+    runtime_builtin_func_kind, runtime_control_effect_func_kind,
 };
 use fe_hir::test_db::HirAnalysisTestDb;
 
@@ -22,6 +23,10 @@ fn classifies_core_and_std_runtime_builtins() {
         .expect("failed to resolve core::panic");
     let keccak = resolve_lib_func_path(&db, func.scope(), "core::intrinsic::__keccak256")
         .expect("failed to resolve core::intrinsic::__keccak256");
+    let suspend = resolve_lib_func_path(&db, func.scope(), "std::host::raw::suspend")
+        .expect("failed to resolve std::host::raw::suspend");
+    let blocking_wait = resolve_lib_func_path(&db, func.scope(), "std::host::raw::wait")
+        .expect("failed to resolve std::host::raw::wait");
 
     assert_eq!(
         runtime_builtin_func_kind(&db, alloc),
@@ -39,4 +44,40 @@ fn classifies_core_and_std_runtime_builtins() {
         runtime_builtin_func_kind(&db, keccak),
         Some(RuntimeBuiltinFuncKind::IntrinsicKeccak256)
     );
+    assert_eq!(
+        runtime_control_effect_func_kind(&db, suspend),
+        Some(RuntimeControlEffectFuncKind::Suspend)
+    );
+    assert_eq!(
+        runtime_control_effect_func_kind(&db, blocking_wait),
+        None,
+        "blocking delivery and continuation suspension must remain distinct operations"
+    );
+}
+
+#[test]
+fn resumable_provider_is_an_ordinary_typed_effect_authority() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "resumable_provider_is_typed.fe".into(),
+        r#"
+use core::pending::{Pending, Suspend, TaskOutcome}
+use std::host::Resumable
+use std::wasm::WasmBackend
+
+fn resume_word(_ pending: own Pending<WasmBackend, u32>) -> TaskOutcome<u32, u32>
+    uses (s: Suspend<WasmBackend, u32>)
+{
+    s.suspend(pending)
+}
+
+pub fn entry(_ pending: own Pending<WasmBackend, u32>) -> TaskOutcome<u32, u32> {
+    with (Suspend<WasmBackend, u32> = Resumable {}) {
+        resume_word(pending)
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
 }

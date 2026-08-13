@@ -6,6 +6,7 @@ pub(crate) mod package;
 pub mod pretty;
 pub(crate) mod root_effects;
 pub mod stable_key;
+pub mod suspend;
 pub(crate) mod synthetic;
 pub mod transform;
 
@@ -22,6 +23,11 @@ pub use package::{
 pub use pretty::{
     format_runtime_body, format_runtime_body_excerpt, format_runtime_package,
     format_runtime_verify_failure,
+};
+pub use suspend::{
+    RuntimeContinuationFrameSlot, RuntimeResumableBodyPlan, RuntimeSuspendingTail,
+    RuntimeSuspensionCause, RuntimeSuspensionPlanError, RuntimeSuspensionPoint,
+    derive_runtime_resumable_plans, derive_runtime_suspension_points,
 };
 pub use transform::{
     RuntimeAggregateFacts, RuntimeArgFact, RuntimeArgShapeKey, RuntimeScalarConstFacts,

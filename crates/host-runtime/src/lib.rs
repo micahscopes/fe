@@ -472,7 +472,10 @@ impl<K: Clone, V, E> ResumableExecutor<K, V, E> {
                             body.resume(token, &descriptor, TaskOutcome::Failure(error));
                             None
                         }
-                        Some(TaskOutcome::Cancelled) => None,
+                        Some(TaskOutcome::Cancelled) => {
+                            body.resume(token, &descriptor, TaskOutcome::Cancelled);
+                            None
+                        }
                         None => Some(body.poll(token, &descriptor)),
                     }
                 }
@@ -1727,6 +1730,11 @@ mod tests {
             body.terminals,
             [(local, ResumableTaskState::Cancelled)],
             "cancel must replace queued value and notify once"
+        );
+        assert_eq!(
+            body.events,
+            ["start:local", "resume:local:Cancelled"],
+            "the continuation must observe cancellation exactly once before terminal notification"
         );
         assert_eq!(
             executor.wake(local).unwrap_err(),

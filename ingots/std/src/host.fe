@@ -1,5 +1,5 @@
 use ingot::wasm::WasmBackend
-use raw::{host_now, sleep_begin as raw_sleep_begin, recv_begin as raw_recv_begin, wait as block_deliver}
+use raw::{host_now, sleep_begin as raw_sleep_begin, recv_begin as raw_recv_begin, wait as block_deliver, suspend as suspend_continuation}
 
 // mb2 CE-7: the EXTERNAL-COMPLETION clients (`Timer` and `recv`), the
 // completion-cell rail's THIRD kind of client. `std::webgpu` proved the rail with
@@ -27,7 +27,7 @@ use raw::{host_now, sleep_begin as raw_sleep_begin, recv_begin as raw_recv_begin
 // keeps the broker/fork completion graph acyclic (ruling R2) and is exactly why
 // these external sources may use the `Notify` door's keyhole while `Notify` itself
 // stays reserved (no Fe-side self-completion provider is admitted).
-pub use core::pending::{Pending, Timer, Recv, Wait}
+pub use core::pending::{Pending, TaskOutcome, Timer, Recv, Wait, Suspend}
 
 /// The host external-completion provider (control-effects CE-7): a ZST that
 /// provides the host-completion authorities on the wasm backend. It carries THREE
@@ -44,6 +44,19 @@ pub use core::pending::{Pending, Timer, Recv, Wait}
 /// from `WorkerPool`'s (std::worker); which realization a caller gets is chosen by
 /// the `with (Wait<WasmBackend> = ...)` frame, not by coherence.
 pub struct HostTimer {}
+
+/// Non-blocking interpreter for the same broker-completed token rail. The
+/// compiler recognizes the nominal `std::host::raw::suspend` operation in this
+/// provider body. Direct-site continuation state and liveness are derived now;
+/// frame splitting and fixed re-entry export materialization are the active
+/// compiler slice. The ZST is authority evidence only; it carries no host id.
+pub struct Resumable {}
+
+impl Suspend<WasmBackend, u32> for Resumable {
+    fn suspend<T>(self, _ pending: own Pending<WasmBackend, T>) -> TaskOutcome<u32, T> {
+        suspend_continuation(pending)
+    }
+}
 
 /// Read the clock and mint the broker-completed timer cell (control-effects CE-7).
 /// `now` is COLORLESS (an immediate clock read, no cell). `sleep_begin` mints a cell

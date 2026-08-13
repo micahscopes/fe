@@ -5,9 +5,10 @@
 //! The portable value lane includes scalar arithmetic/control flow/calls,
 //! recursively flattened struct and fixed-array values, materialized aggregate
 //! slots and object references, target-layout memory projections, fieldless
-//! enum tags, and the canonical browser ABI wrappers. Unsupported payload
-//! enums, wide scalar operations, EVM host operations, and other target-specific
-//! constructs fail closed rather than being silently approximated.
+//! enum tags, flattened payload-enum values, and the canonical browser ABI
+//! wrappers. Unsupported memory-carried payload enums, wide scalar operations,
+//! EVM host operations, and other target-specific constructs fail closed rather
+//! than being silently approximated.
 //!
 //! Why a separate path rather than parameterizing the EVM lowerer
 //! (`lower_runtime.rs`): the EVM path hardcodes `Type::I256` as the word in ~90
@@ -342,6 +343,18 @@ fn fieldless_tag_immediate(ty: Type, tag: u32) -> Option<Immediate> {
         Type::I16 => Some(Immediate::I16(tag as u16 as i16)),
         Type::I32 => Some(Immediate::I32(tag as i32)),
         Type::I64 => Some(Immediate::I64(i64::from(tag))),
+        _ => None,
+    }
+}
+
+fn zero_immediate(ty: Type) -> Option<Immediate> {
+    match ty {
+        Type::I1 => Some(Immediate::I1(false)),
+        Type::I8 => Some(Immediate::I8(0)),
+        Type::I16 => Some(Immediate::I16(0)),
+        Type::I32 => Some(Immediate::I32(0)),
+        Type::I64 => Some(Immediate::I64(0)),
+        Type::F32 => Some(Immediate::F32(0)),
         _ => None,
     }
 }
@@ -2822,6 +2835,11 @@ where
             if gpu_intrinsic(self.db, instance).is_some() {
                 continue;
             }
+            if let Some(control) = mir::runtime_control_effect_kind(self.db, instance) {
+                return Err(LowerError::Unsupported(format!(
+                    "compiler-recognized control operation `{control:?}` reached ordinary Wasm import lowering; resumable frame/re-entry materialization is required"
+                )));
+            }
             if let Some(name) = mir::host_import_name(self.db, instance) {
                 if let Some(descriptor) = mir::indirect_host_result(self.db, instance) {
                     let mut missing = Vec::new();
@@ -4843,7 +4861,8 @@ where
             // R3.4b step 2: a single-scalar-field aggregate (a `u32` newtype such
             // as `Pending<T>` / `KernelId` / `WebGpuRef`) is represented as its one
             // field's scalar. A payload-free enum is represented by its
-            // compiler-derived tag. Payload enums fail closed explicitly.
+            // compiler-derived tag. Payload enums use `flat_shape`'s tagged
+            // lane tree and therefore never reach this single-value path.
             RuntimeClass::AggregateValue { layout } => {
                 if let Layout::Enum(enum_layout) = layout.data(self.db)
                     && enum_layout
@@ -4895,8 +4914,8 @@ where
     }
 
     /// A payload-free enum is exactly its compiler-derived tag scalar. This is
-    /// the closed value representation needed by ordinary Fe policy enums such
-    /// as `ParamKind`; payload enums retain their existing fail-closed path.
+    /// the compact value representation used by ordinary Fe policy enums such
+    /// as `ParamKind`; payload enums use a distinct flattened lane tree.
     fn fieldless_enum_tag(&self, layout: LayoutId<'db>) -> Option<ScalarClass<'db>> {
         match layout.data(self.db) {
             Layout::Enum(enum_layout)
@@ -4955,6 +4974,45 @@ where
             },
         };
         Ok((value, Type::I32))
+    }
+
+    fn enum_variant_const(
+        &self,
+        layout: LayoutId<'db>,
+        variant: VariantId<'db>,
+    ) -> Result<(ConstScalar, Type), LowerError> {
+        if variant.enum_layout != layout {
+            return Err(LowerError::Internal(
+                "enum variant belongs to a different runtime layout".to_owned(),
+            ));
+        }
+        let Layout::Enum(enum_layout) = layout.data(self.db) else {
+            return Err(LowerError::Internal(
+                "enum variant requested from a non-enum layout".to_owned(),
+            ));
+        };
+        if usize::from(variant.index) >= enum_layout.variants.len() {
+            return Err(LowerError::Internal(
+                "enum variant index is outside its runtime layout".to_owned(),
+            ));
+        }
+        Ok((
+            ConstScalar::Int {
+                bits: 32,
+                signed: false,
+                words: if variant.index == 0 {
+                    Vec::new()
+                } else {
+                    variant
+                        .index
+                        .to_be_bytes()
+                        .into_iter()
+                        .skip_while(|byte| *byte == 0)
+                        .collect()
+                },
+            },
+            Type::I32,
+        ))
     }
 
     /// Change 1: whether `class` is a function-local aggregate behind an object /
@@ -5100,8 +5158,12 @@ where
                             }
                         }
                         Layout::Enum(enum_layout) => {
-                            module.fieldless_enum_tag(*layout)?;
                             out.push(Some(u32::try_from(enum_layout.variants.len()).ok()?));
+                            for variant in &enum_layout.variants {
+                                for field in &variant.fields {
+                                    visit(module, field, active, out)?;
+                                }
+                            }
                         }
                         Layout::Array(array_layout) => {
                             for _ in 0..array_layout.len {
@@ -5168,9 +5230,27 @@ where
                         // node in a closed product tree.
                         FlatShape::Product(fields)
                     }
-                    Layout::Enum(_) => {
-                        self.fieldless_enum_tag(*layout)?;
+                    Layout::Enum(enum_layout)
+                        if enum_layout
+                            .variants
+                            .iter()
+                            .all(|variant| variant.fields.is_empty()) =>
+                    {
                         FlatShape::Leaf(Type::I32)
+                    }
+                    Layout::Enum(enum_layout) => {
+                        let mut variants = Vec::with_capacity(enum_layout.variants.len() + 1);
+                        variants.push(FlatShape::Leaf(Type::I32));
+                        for variant in &enum_layout.variants {
+                            variants.push(FlatShape::Product(
+                                variant
+                                    .fields
+                                    .iter()
+                                    .map(|field| self.flat_shape_visit(field, active))
+                                    .collect::<Option<Vec<_>>>()?,
+                            ));
+                        }
+                        FlatShape::Product(variants)
                     }
                     Layout::Array(array_layout) => {
                         let len = usize::try_from(array_layout.len).ok()?;
@@ -5582,8 +5662,8 @@ where
                     ));
                 };
                 let layout = *layout;
-                let actual = self.local_value(*value)?;
-                let (expected, ty) = self.module.fieldless_enum_variant_const(layout, *variant)?;
+                let actual = self.enum_tag_value(*value)?;
+                let (expected, ty) = self.module.enum_variant_const(layout, *variant)?;
                 let expected = self
                     .fb
                     .make_imm_value(immediate_for_const_scalar(&expected, ty)?);
@@ -5751,9 +5831,9 @@ where
 
     /// Flatten value-carried product-tree arguments in the same DFS declaration
     /// order used by `lower_signature` and the function prologue. Scalar and
-    /// fieldless-enum arguments remain one Wasm value; structs and fixed arrays
-    /// contribute their recursively flattened leaves. Unsupported payload enums
-    /// and non-value transports fail closed in `local_flat_values`.
+    /// fieldless-enum arguments remain one Wasm value; structs, fixed arrays,
+    /// and payload enums contribute their recursively flattened leaves.
+    /// Unsupported non-value transports fail closed in `local_flat_values`.
     fn call_arg_values(&mut self, args: &[RLocalId]) -> Result<Vec<ValueId>, LowerError> {
         let mut values = Vec::new();
         for arg in args {
@@ -5780,6 +5860,63 @@ where
             return Ok(vars.iter().map(|var| self.fb.use_var(*var)).collect());
         }
         Ok(vec![self.local_value(local)?])
+    }
+
+    fn enum_tag_value(&mut self, value: RLocalId) -> Result<ValueId, LowerError> {
+        if self.tuple_vars.contains_key(&value) {
+            return self
+                .local_flat_values(value)?
+                .into_iter()
+                .next()
+                .ok_or_else(|| LowerError::Internal("payload enum has no tag lane".to_owned()));
+        }
+        self.local_value(value)
+    }
+
+    fn enum_field_range(
+        &self,
+        value: RLocalId,
+        variant: VariantId<'db>,
+        field: hir::analysis::semantic::FieldIndex,
+    ) -> Result<(usize, usize, FlatShape), LowerError> {
+        let class = self.body.value_class(value).ok_or_else(|| {
+            LowerError::Internal(format!("enum source {value:?} has no runtime class"))
+        })?;
+        let RuntimeClass::AggregateValue { layout } = class else {
+            return Err(LowerError::Unsupported(
+                "enum extraction source is not a value-carried enum".to_owned(),
+            ));
+        };
+        if variant.enum_layout != *layout {
+            return Err(LowerError::Internal(
+                "enum extraction variant belongs to another layout".to_owned(),
+            ));
+        }
+        let shape = self.local_flat_shape(value)?;
+        let (variant_start, _, variant_shape) = shape
+            .field_range(usize::from(variant.index) + 1)
+            .ok_or_else(|| {
+            LowerError::Internal("payload enum variant shape is missing".to_owned())
+        })?;
+        let (field_start, field_end, field_shape) = variant_shape
+            .field_range(usize::from(field.0))
+            .ok_or_else(|| {
+                LowerError::Internal("payload enum field shape is missing".to_owned())
+            })?;
+        Ok((
+            variant_start + field_start,
+            variant_start + field_end,
+            field_shape.clone(),
+        ))
+    }
+
+    fn zero_value(&mut self, ty: Type) -> Result<ValueId, LowerError> {
+        let immediate = zero_immediate(ty).ok_or_else(|| {
+            LowerError::Unsupported(format!(
+                "wasm payload-enum inactive lane has unsupported type {ty:?}"
+            ))
+        })?;
+        Ok(self.fb.make_imm_value(immediate))
     }
 
     /// R2.2: lower an assignment whose destination is a recursively flattened
@@ -5817,6 +5954,91 @@ where
                     "wasm target (R2.2): non-unit aggregate placeholder for {dst:?} \
                      cannot be represented as flattened SSA values"
                 )))
+            }
+            RExpr::EnumMake {
+                layout,
+                variant,
+                fields,
+            } => {
+                if variant.enum_layout != *layout {
+                    return Err(LowerError::Internal(
+                        "payload enum construction uses a foreign variant".to_owned(),
+                    ));
+                }
+                let Layout::Enum(enum_layout) = layout.data(self.module.db) else {
+                    return Err(LowerError::Internal(
+                        "payload enum construction uses a non-enum layout".to_owned(),
+                    ));
+                };
+                let expected_fields = enum_layout
+                    .variants
+                    .get(usize::from(variant.index))
+                    .ok_or_else(|| {
+                        LowerError::Internal("payload enum variant is out of bounds".to_owned())
+                    })?
+                    .fields
+                    .as_ref();
+                if fields.len() != expected_fields.len() {
+                    return Err(LowerError::Internal(format!(
+                        "payload enum variant expects {} fields, got {}",
+                        expected_fields.len(),
+                        fields.len()
+                    )));
+                }
+                let shape = self.local_flat_shape(dst)?;
+                let mut leaf_types = Vec::new();
+                shape.leaf_types(&mut leaf_types);
+                let mut values = leaf_types
+                    .into_iter()
+                    .map(|ty| self.zero_value(ty))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let (tag, ty) = self.module.enum_variant_const(*layout, *variant)?;
+                values[0] = self
+                    .fb
+                    .make_imm_value(immediate_for_const_scalar(&tag, ty)?);
+                for (field_index, (field, expected_class)) in
+                    fields.iter().zip(expected_fields).enumerate()
+                {
+                    let actual_class = self.body.value_class(*field).ok_or_else(|| {
+                        LowerError::Internal(format!("enum field {field:?} has no class"))
+                    })?;
+                    if !actual_class.shares_runtime_rep_with(self.module.db, expected_class) {
+                        return Err(LowerError::Unsupported(
+                            "payload enum field has an incompatible runtime representation"
+                                .to_owned(),
+                        ));
+                    }
+                    let (start, end, expected_shape) = self.enum_field_range(
+                        dst,
+                        *variant,
+                        hir::analysis::semantic::FieldIndex(field_index as u16),
+                    )?;
+                    let actual_shape = self.local_flat_shape(*field)?;
+                    if actual_shape != expected_shape {
+                        return Err(LowerError::Unsupported(
+                            "payload enum field has an incompatible flattened shape".to_owned(),
+                        ));
+                    }
+                    let field_values = self.local_flat_values(*field)?;
+                    if field_values.len() != end - start {
+                        return Err(LowerError::Internal(
+                            "payload enum field leaf arity changed".to_owned(),
+                        ));
+                    }
+                    values[start..end].copy_from_slice(&field_values);
+                }
+                let dst_vars = self.tuple_vars.get(&dst).cloned().ok_or_else(|| {
+                    LowerError::Internal("payload enum destination has no lanes".to_owned())
+                })?;
+                if dst_vars.len() != values.len() {
+                    return Err(LowerError::Internal(
+                        "payload enum destination lane arity changed".to_owned(),
+                    ));
+                }
+                for (variable, value) in dst_vars.into_iter().zip(values) {
+                    self.fb.def_var(variable, value);
+                }
+                Ok(())
             }
             RExpr::AggregateMake { fields, .. } => {
                 let elem_vars = self.tuple_vars.get(&dst).cloned().ok_or_else(|| {
@@ -5992,6 +6214,35 @@ where
                 })?;
                 for (dst_var, value) in dst_vars.into_iter().zip(values) {
                     self.fb.def_var(dst_var, value);
+                }
+                Ok(())
+            }
+            RExpr::EnumExtract {
+                value,
+                variant,
+                field,
+            } => {
+                let (start, end, expected_shape) =
+                    self.enum_field_range(*value, *variant, *field)?;
+                let dst_shape = self.local_flat_shape(dst)?;
+                if dst_shape != expected_shape {
+                    return Err(LowerError::Unsupported(
+                        "payload enum extraction destination has an incompatible shape".to_owned(),
+                    ));
+                }
+                let values = self.local_flat_values(*value)?[start..end].to_vec();
+                let dst_vars = self.tuple_vars.get(&dst).cloned().ok_or_else(|| {
+                    LowerError::Internal(
+                        "payload enum extraction destination has no lanes".to_owned(),
+                    )
+                })?;
+                if dst_vars.len() != values.len() {
+                    return Err(LowerError::Internal(
+                        "payload enum extraction lane arity changed".to_owned(),
+                    ));
+                }
+                for (variable, value) in dst_vars.into_iter().zip(values) {
+                    self.fb.def_var(variable, value);
                 }
                 Ok(())
             }
@@ -6255,15 +6506,15 @@ where
                         "wasm target: enum tag source is not a value-carried enum".to_owned(),
                     ));
                 };
-                self.module.fieldless_enum_tag(*layout).ok_or_else(|| {
-                    LowerError::Unsupported(
-                        "wasm target: payload enum tags are not lowered as values".to_owned(),
-                    )
-                })?;
-                let value = self.local_value(*value)?;
+                if !matches!(layout.data(self.module.db), Layout::Enum(_)) {
+                    return Err(LowerError::Internal(
+                        "enum tag source carries a non-enum aggregate layout".to_owned(),
+                    ));
+                }
+                let value = self.enum_tag_value(*value)?;
                 if self.fb.type_of(value) != Type::I32 {
                     return Err(LowerError::Internal(
-                        "fieldless enum SSA value escaped its canonical i32 carrier".to_owned(),
+                        "enum tag escaped its canonical i32 carrier".to_owned(),
                     ));
                 }
                 // A value-carried fieldless enum stays in the target-neutral
@@ -6284,14 +6535,28 @@ where
                     ));
                 };
                 let layout = *layout;
-                let actual = self.local_value(*value)?;
-                let (expected, ty) = self.module.fieldless_enum_variant_const(layout, *variant)?;
+                let actual = self.enum_tag_value(*value)?;
+                let (expected, ty) = self.module.enum_variant_const(layout, *variant)?;
                 let expected = self
                     .fb
                     .make_imm_value(immediate_for_const_scalar(&expected, ty)?);
                 Ok(self
                     .fb
                     .insert_inst(CmpEq::new(self.inst_set(), actual, expected), Type::I1))
+            }
+            RExpr::EnumExtract {
+                value,
+                variant,
+                field,
+            } => {
+                let (start, end, _) = self.enum_field_range(*value, *variant, *field)?;
+                if end - start != 1 {
+                    return Err(LowerError::Unsupported(
+                        "scalar destination cannot receive a multi-lane payload enum field"
+                            .to_owned(),
+                    ));
+                }
+                Ok(self.local_flat_values(*value)?[start])
             }
             RExpr::EnumGetTag { root } => {
                 let class = self.body.value_class(*root).ok_or_else(|| {
@@ -7837,14 +8102,11 @@ where
                 cases,
                 default,
             } => {
-                self.module
-                    .fieldless_enum_tag(*enum_layout)
-                    .ok_or_else(|| {
-                        LowerError::Unsupported(
-                            "wasm target: payload-enum match lowering is not implemented"
-                                .to_owned(),
-                        )
-                    })?;
+                if !matches!(enum_layout.data(self.module.db), Layout::Enum(_)) {
+                    return Err(LowerError::Internal(
+                        "enum-tag match uses a non-enum layout".to_owned(),
+                    ));
+                }
                 let actual = self.local_value(*tag)?;
                 let invalid = match default {
                     Some(default) => self.block_for(*default)?,
@@ -7854,9 +8116,8 @@ where
                     self.fb.insert_inst_no_result(Jump::new(is, invalid));
                 } else {
                     for (index, (variant, target)) in cases.iter().enumerate() {
-                        let (expected, ty) = self
-                            .module
-                            .fieldless_enum_variant_const(*enum_layout, *variant)?;
+                        let (expected, ty) =
+                            self.module.enum_variant_const(*enum_layout, *variant)?;
                         let expected = self
                             .fb
                             .make_imm_value(immediate_for_const_scalar(&expected, ty)?);
