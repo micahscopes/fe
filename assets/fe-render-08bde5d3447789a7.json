@@ -1,0 +1,442 @@
+{
+  "artifacts": {
+    "canonical_adapters": [],
+    "wasm": "fe-render-bd3b1a9a7da85058.wasm",
+    "wasm_bytes": 6481,
+    "wgsl": "fe-render-a9adf9a867eebb06.wgsl",
+    "wgsl_bytes": 5051
+  },
+  "browser_runtime": null,
+  "canonical_interface": null,
+  "canonical_status": {
+    "embedded": false,
+    "omission_reason": "canonical interface was not requested",
+    "policy": "disabled"
+  },
+  "layout": {
+    "bindings": [
+      {
+        "access": "read",
+        "binding": 1,
+        "group": 0,
+        "members": [
+          {
+            "arg_index": 2,
+            "doc": null,
+            "name": "angle",
+            "offset": 0,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 3,
+            "doc": null,
+            "name": "offset",
+            "offset": 4,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 4,
+            "doc": null,
+            "name": "spread",
+            "offset": 8,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 5,
+            "doc": null,
+            "name": "res",
+            "offset": 12,
+            "scalar": "f32",
+            "width": 4
+          }
+        ],
+        "name": "input",
+        "role": "input",
+        "span": 16,
+        "stride": 16
+      }
+    ],
+    "builtin_inputs": [
+      {
+        "arg_index": 0,
+        "scalar": "i32",
+        "source": "fragment_position_x"
+      },
+      {
+        "arg_index": 1,
+        "scalar": "i32",
+        "source": "fragment_position_y"
+      }
+    ],
+    "color_target_format": "rgba8unorm",
+    "entry_point": "fs_main",
+    "fragment_entry": "fs_main",
+    "mode": "render",
+    "result": null,
+    "vertex_entry": "vs_fullscreen",
+    "word": "u32",
+    "word_bytes": 4,
+    "workgroup_size": [
+      0,
+      0,
+      0
+    ]
+  },
+  "passes": [
+    {
+      "layout": {
+        "bindings": [
+          {
+            "access": "read",
+            "binding": 1,
+            "group": 0,
+            "members": [
+              {
+                "arg_index": 2,
+                "doc": null,
+                "name": "angle",
+                "offset": 0,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 3,
+                "doc": null,
+                "name": "offset",
+                "offset": 4,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 4,
+                "doc": null,
+                "name": "spread",
+                "offset": 8,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 5,
+                "doc": null,
+                "name": "res",
+                "offset": 12,
+                "scalar": "f32",
+                "width": 4
+              }
+            ],
+            "name": "input",
+            "role": "input",
+            "span": 16,
+            "stride": 16
+          }
+        ],
+        "builtin_inputs": [
+          {
+            "arg_index": 0,
+            "scalar": "i32",
+            "source": "fragment_position_x"
+          },
+          {
+            "arg_index": 1,
+            "scalar": "i32",
+            "source": "fragment_position_y"
+          }
+        ],
+        "color_target_format": "rgba8unorm",
+        "entry_point": "fs_main",
+        "fragment_entry": "fs_main",
+        "mode": "render",
+        "result": null,
+        "vertex_entry": "vs_fullscreen",
+        "word": "u32",
+        "word_bytes": 4,
+        "workgroup_size": [
+          0,
+          0,
+          0
+        ]
+      },
+      "shader": "fe-render-a9adf9a867eebb06.wgsl",
+      "shader_bytes": 5051,
+      "source_entry": "shade"
+    }
+  ],
+  "protocol": "fe-web-bundle",
+  "protocol_version": 6,
+  "provenance": {
+    "authored_sources": [
+      {
+        "id": "demos/sketches/fmath/fe.toml",
+        "kind": "fe_manifest",
+        "sha256": "1bb68ed27a9ae6ba289a949ca67500ebf92f8f21461e4a922b43931b9d98b0c0"
+      },
+      {
+        "id": "demos/sketches/fmath/src/lib.fe",
+        "kind": "fe",
+        "sha256": "24947e823177be0b57b757cbdde66ced2e1b8f97f3d8adb042cfd1d59290a0d6"
+      },
+      {
+        "id": "demos/sketches/gallery_palette/fe.toml",
+        "kind": "fe_manifest",
+        "sha256": "c7a4baa0b58d1ea44f35a5d9954dc3104afd09e67827a1295eed62a2f26454ec"
+      },
+      {
+        "id": "demos/sketches/gallery_palette/src/lib.fe",
+        "kind": "fe",
+        "sha256": "0cb7e3b8c34d99a6b292ea1015bfe7f4d44ebf56c0adb495f43dd8b115827bd5"
+      },
+      {
+        "id": "demos/sketches/gradient/fe.toml",
+        "kind": "fe_manifest",
+        "sha256": "246e7a1e7a8959897df989f06468424ca4231c158692664e830292457b5566f8"
+      },
+      {
+        "id": "demos/sketches/gradient/src/lib.fe",
+        "kind": "fe",
+        "sha256": "22ad2a6bb2e1e07b1e807a29fa9b22edce42f142805168894589b054aab1cfb4"
+      },
+      {
+        "id": "ingots/core/fe.toml",
+        "kind": "fe_manifest",
+        "sha256": "a009b5dbbf9e7ec8bdc5e569e51204d982f68e447c8900bf28fcacb95aea15c4"
+      },
+      {
+        "id": "ingots/core/src/abi.fe",
+        "kind": "fe",
+        "sha256": "d4862d459e8295085587f8790102fcd68bc47b957ed46b7d3c4bdaea4f800e2a"
+      },
+      {
+        "id": "ingots/core/src/actor.fe",
+        "kind": "fe",
+        "sha256": "683f1e935aaaad0bb7c6a6e3eb03c591ce5a91f60ad0851030a02f1933ce007b"
+      },
+      {
+        "id": "ingots/core/src/atomic.fe",
+        "kind": "fe",
+        "sha256": "ffb79a98969d2b6ded8ade488b932be63bb1817753f602ceb68beede222f81b9"
+      },
+      {
+        "id": "ingots/core/src/backend.fe",
+        "kind": "fe",
+        "sha256": "fa9584d78529afdf4929b4ba34ccd50f307296bdf8afd95df1acebf4e8c66d1e"
+      },
+      {
+        "id": "ingots/core/src/barrier.fe",
+        "kind": "fe",
+        "sha256": "b45ef6cdeecafafb10ac7c09d3ccf9ba7a792a74dcce81a1c9001304cea4e90e"
+      },
+      {
+        "id": "ingots/core/src/browser.fe",
+        "kind": "fe",
+        "sha256": "eb404f71d5d082e15586f08b2390dff80c0f3e7aa6754ddbf0b6d109567d381b"
+      },
+      {
+        "id": "ingots/core/src/bytes.fe",
+        "kind": "fe",
+        "sha256": "a41edde03ce39f61eecf4a188d71b03018de1cf1f440a165a900e5013570b779"
+      },
+      {
+        "id": "ingots/core/src/clone.fe",
+        "kind": "fe",
+        "sha256": "0f6eae16c76c0d7faf154c3d1a1baf3903f1433880b93b25734194d1e3fbc027"
+      },
+      {
+        "id": "ingots/core/src/conal.fe",
+        "kind": "fe",
+        "sha256": "6017240e63d976f65b026334b28a1f9dd936fec02e0c13fc21fe58d1e418ce7e"
+      },
+      {
+        "id": "ingots/core/src/contracts.fe",
+        "kind": "fe",
+        "sha256": "a42fe0fb0069dd051d4f63fb5cb1df5856d5ef2114cadb424323183d338d499e"
+      },
+      {
+        "id": "ingots/core/src/default.fe",
+        "kind": "fe",
+        "sha256": "35f7c137cd34b394a20923ef613824cfd586d3549f6342ff5f11278944787afc"
+      },
+      {
+        "id": "ingots/core/src/derive.fe",
+        "kind": "fe",
+        "sha256": "17caaa12d03a46a53cb88ae1894b809cf47e88e768940385607e414b98ec6410"
+      },
+      {
+        "id": "ingots/core/src/effect_ref.fe",
+        "kind": "fe",
+        "sha256": "df4336099c5402e7d2be7ca4cc98164a11033e9fd4d7fcbbe0f678131323e216"
+      },
+      {
+        "id": "ingots/core/src/error.fe",
+        "kind": "fe",
+        "sha256": "87090c39382d8872463554e64cb65a7dc8da22d99ead9c9f27585c1a829cafa4"
+      },
+      {
+        "id": "ingots/core/src/functional.fe",
+        "kind": "fe",
+        "sha256": "40d762cb1ecf1d22b20dbfa317ca181e24829475a57b3a6587b337d2110e45f6"
+      },
+      {
+        "id": "ingots/core/src/intrinsic.fe",
+        "kind": "fe",
+        "sha256": "f07d3c13a3d419b4ae8262c11b36ac51118a12485eed5acf8f11de4b19dc85a7"
+      },
+      {
+        "id": "ingots/core/src/lib.fe",
+        "kind": "fe",
+        "sha256": "4a2947bae248cb7397b7a4024ca00509186380c6f7c3f769a5f50f12fde291ce"
+      },
+      {
+        "id": "ingots/core/src/marker.fe",
+        "kind": "fe",
+        "sha256": "3fb1c04e8ada748d243480519bb69cafbbd42532c8db1321c12f09d345211062"
+      },
+      {
+        "id": "ingots/core/src/message.fe",
+        "kind": "fe",
+        "sha256": "8e2fdbc34af69c8f6c5ef005b17d8b95fdc873d458415933d279be33c586774e"
+      },
+      {
+        "id": "ingots/core/src/num.fe",
+        "kind": "fe",
+        "sha256": "50dcf702a6f76badc198d03769498927bd929d0ac0275c384086fb048fe90203"
+      },
+      {
+        "id": "ingots/core/src/num_intrinsics.fe",
+        "kind": "fe",
+        "sha256": "6e6cc538ee0fa1740ea3ef00a9f4b7b208f8c852445fd99cedcd43b44a2eb34f"
+      },
+      {
+        "id": "ingots/core/src/ops.fe",
+        "kind": "fe",
+        "sha256": "b3eb8dbbb78aec39150f07058e2e3a7f0cee0ffe2c3a75889db813dfbe42036f"
+      },
+      {
+        "id": "ingots/core/src/option.fe",
+        "kind": "fe",
+        "sha256": "353a5374c3b9caeeabb65f832b513f04b40cdb1fab1466a88ae4e74e0ca4fd31"
+      },
+      {
+        "id": "ingots/core/src/par.fe",
+        "kind": "fe",
+        "sha256": "4b709ae91d32ef4ad8dc3037b4511202399986d7a02760ea6c2167b171639999"
+      },
+      {
+        "id": "ingots/core/src/pending.fe",
+        "kind": "fe",
+        "sha256": "e4f791c084d32ed069aabce0739580e80098f6d5a873680200dfc159d3dbff2b"
+      },
+      {
+        "id": "ingots/core/src/prelude.fe",
+        "kind": "fe",
+        "sha256": "b05d96609c06b984679c0fe6fb3e5242b104597a393df7c03fca44572aa98a48"
+      },
+      {
+        "id": "ingots/core/src/range.fe",
+        "kind": "fe",
+        "sha256": "d1fe899db7effeb2fa0311b3a938b01989711bad929cbc07ed9d9b0c6bfc4a10"
+      },
+      {
+        "id": "ingots/core/src/result.fe",
+        "kind": "fe",
+        "sha256": "cbd6414930a1f2c42f9db75429f21d8e0c2c25c91b61ba92ac00c47c1c7289c0"
+      },
+      {
+        "id": "ingots/core/src/seq.fe",
+        "kind": "fe",
+        "sha256": "9c23933f316045335296dc618850271c709fd55020d0efe91b9e7bfdd8884711"
+      },
+      {
+        "id": "ingots/core/src/string.fe",
+        "kind": "fe",
+        "sha256": "30c74bb93e905658ec71c0ae81f16279cb20b4db446e69149b48418a7f359886"
+      }
+    ],
+    "compiler": "fe",
+    "compiler_version": "26.2.0",
+    "fe_responsibilities": [
+      "gpu_program",
+      "surface_declaration",
+      "control_transition",
+      "scheduling_policy",
+      "resident_actor_state"
+    ],
+    "fixed_host": {
+      "artifact": {
+        "bytes": 94803,
+        "path": "fe-render-runtime-e4b3170afc9576d4.js",
+        "sha256": "e4b3170afc9576d4055195492a678dfeccc33a832e68cff318dca6c6e574245d"
+      },
+      "contract": "fixed_versioned_demo_blind_browser_host",
+      "name": "fe-render-runtime",
+      "responsibilities": [
+        "dom_surface",
+        "input_transport",
+        "presentation_clock",
+        "web_gpu_executor",
+        "lifecycle",
+        "wasm_loader"
+      ]
+    },
+    "generated_artifacts": [
+      "manifest",
+      "wasm",
+      "wgsl"
+    ],
+    "non_fe_authored_sources": [
+      {
+        "id": "gallery.html",
+        "kind": "html",
+        "sha256": "a293af509315ca071277cd6b3115f7e858a2d66c986a8ca30eeccb2ecb1085b3"
+      }
+    ],
+    "source_id": "gradient"
+  },
+  "resources": [],
+  "source_entry": "shade",
+  "surface": {
+    "activate": "pointer",
+    "extent": {
+      "dpr": "auto",
+      "filter": "smooth",
+      "height": 512,
+      "width": 512
+    },
+    "params": [
+      {
+        "init": 0.55,
+        "kind": "angle",
+        "max": 6.2831855,
+        "min": 0.0,
+        "name": "angle"
+      },
+      {
+        "init": 0.0,
+        "kind": "range",
+        "max": 0.5,
+        "min": -0.5,
+        "name": "offset"
+      },
+      {
+        "init": 1.4,
+        "kind": "range",
+        "max": 4.0,
+        "min": 0.5,
+        "name": "spread"
+      },
+      {
+        "kind": "extent_x",
+        "name": "res",
+        "visible": false
+      }
+    ],
+    "pipeline": {
+      "kind": "authored_raster"
+    },
+    "state": {
+      "kind": "params"
+    }
+  }
+}
