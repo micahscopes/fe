@@ -599,7 +599,10 @@ Origin: honesty audit of Claude Code session
   scalar cases, zero host imports, the actual rank-8 pencil solve, and QCGA
   typechecking. A second substitution gate varies dimension, supports, metric
   signs/magnitudes, carrier width, and operand order through the same provider
-  over 131 independent inputs. This establishes genericity only for the
+  over 131 independent inputs. Vector leaves use nominal Fe identity types,
+  eliminating author-maintained numeric slots; the narrow carrier is packed by
+  first structural occurrence until recursive field reflection can bind nested
+  operand records directly. This establishes genericity only for the
   provider's explicitly narrow two-vector scalar-product contract. The full
   operator vocabulary/DAG remains open, and current 41-44 second in-process
   gates make provider/dependency caching a named performance prerequisite

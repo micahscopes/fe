@@ -45,10 +45,12 @@ impl<const Dimension: u32, const NonzeroSquares: u32> StaticDiagonalMetric
 pub struct Input<const Slot: usize, const Mask: u32> {}
 
 /// A sparse grade-1 input for dimensions whose full `2^dimension` blade set
-/// does not fit the bounded `GaSupport` bitset. Bit `i` of `GeneratorSupport`
-/// names generator `i`; runtime coefficients are packed in ascending generator
-/// order. This is the natural carrier for QCGA's sparse 15-generator vectors.
-pub struct VectorInput<const Slot: usize, const GeneratorSupport: usize> {}
+/// does not fit the bounded `GaSupport` bitset. `Identity` is ordinary nominal
+/// Fe type data—not an author-maintained numeric slot. Bit `i` of
+/// `GeneratorSupport` names generator `i`; runtime coefficients are packed in
+/// ascending generator order. This is the natural carrier for QCGA's sparse
+/// 15-generator vectors.
+pub struct VectorInput<Identity, const GeneratorSupport: usize> {}
 
 pub struct Sum<A, B> {}
 pub struct Difference<A, B> {}
@@ -121,8 +123,8 @@ const fn vector_support_width(_ support: usize, _ dimension: usize) -> usize {
 
 /// Generated scalar result of a sparse symmetric-metric product between two
 /// packed `VectorInput`s. The configured provider carries the static
-/// `GaProgram`; the target record contains only slot 0 then slot 1 runtime
-/// coefficients, each packed in ascending generator order.
+/// `GaProgram`; the target record contains only first-leaf then second-leaf
+/// runtime coefficients, each packed in ascending generator order.
 pub trait EvaluateVectorScalarF32 {
     fn scalar(_ operands: Self) -> f32
 }
@@ -130,8 +132,8 @@ pub trait EvaluateVectorScalarF32 {
 /// Structural Fe/FCO compiler for [`EvaluateVectorScalarF32`]. It recognizes
 /// operator and metric-term constructors, never a complete expression alias or
 /// a precomputed candidate mask. The current carrier contract is deliberately
-/// narrow: two distinct slots numbered 0 and 1, `ScalarProduct` at the root,
-/// and `AlgebraicBalanced`'s deterministic four-term chunk reduction.
+/// narrow: two structurally occurring vector leaves, `ScalarProduct` at the
+/// root, and `AlgebraicBalanced`'s deterministic four-term chunk reduction.
 pub struct CompileVectorScalarF32<Program> {}
 
 impl<Program> Derive<EvaluateVectorScalarF32>
@@ -165,51 +167,58 @@ impl<Program> Derive<EvaluateVectorScalarF32>
 
         let descriptors = 0..0
         if program_types.len() == 3 {
-            for node in program_types.at(0).normalized_postorder_types() {
-                let recognized: usize = 0
-                if builder.same_ty(node.constructor(), builder.ty<VectorInput>()) {
-                    recognized = 1
-                    let ordinal: usize = 0
-                    let slot: usize = 2
-                    let support: usize = 0
-                    for arg in node.generic_args() {
-                        if arg.is_const() {
-                            if ordinal == 0 { slot = arg.const_value() }
-                            if ordinal == 1 { support = arg.const_value() }
-                            ordinal = ordinal + 1
+            let expression = program_types.at(0)
+            if builder.same_ty(
+                expression.constructor(), builder.ty<ScalarProduct>(),
+            ) {
+                // This provider's deliberately narrow grammar is a scalar
+                // product whose two direct children are vector leaves. Read
+                // those edges directly: a normalized postorder also contains
+                // each leaf's nominal `Identity` argument, which is data
+                // inside the leaf rather than another GA expression node.
+                for expression_arg in expression.generic_args() {
+                    if expression_arg.is_type() {
+                        let node = expression_arg.ty()
+                        if builder.same_ty(
+                            node.constructor(), builder.ty<VectorInput>(),
+                        ) {
+                            let identity = node
+                            let type_count: usize = 0
+                            let const_count: usize = 0
+                            let support: usize = 0
+                            for arg in node.generic_args() {
+                                if arg.is_type() {
+                                    if type_count == 0 { identity = arg.ty() }
+                                    type_count = type_count + 1
+                                }
+                                if arg.is_const() {
+                                    if const_count == 0 {
+                                        support = arg.const_value()
+                                    }
+                                    const_count = const_count + 1
+                                }
+                            }
+                            if type_count == 1 && const_count == 1 {
+                                descriptors = descriptors.append(
+                                    (0..0).append(identity).append(support),
+                                )
+                            } else {
+                                descriptors = descriptors.append(0)
+                            }
+                        } else {
+                            descriptors = descriptors.append(0)
                         }
                     }
-                    descriptors = descriptors.append(
-                        (0..0).append(slot).append(support),
-                    )
                 }
-                if builder.same_ty(node.constructor(), builder.ty<ScalarProduct>()) {
-                    recognized = 1
-                    // Two leaves reduce to one scalar-product descriptor. A
-                    // second operator consequently poisons the final arity.
-                    if descriptors.len() == 2 {
-                        let right = descriptors.last()
-                        descriptors = descriptors.without_last()
-                        let left = descriptors.last()
-                        descriptors = descriptors.without_last()
-                        descriptors = descriptors.append(
-                            (0..0)
-                                .append(left.at(0)).append(left.at(1))
-                                .append(right.at(0)).append(right.at(1)),
-                        )
-                    }
-                }
-                if recognized == 0 { descriptors = descriptors.append(0) }
             }
         }
 
-        if descriptors.len() == 1 {
-            let expression = descriptors.at(0)
-            if expression.len() == 4 {
-                let left_slot = expression.at(0)
-                let left_support = expression.at(1)
-                let right_slot = expression.at(2)
-                let right_support = expression.at(3)
+        if descriptors.len() == 2 {
+            let left = descriptors.at(0)
+            let right = descriptors.at(1)
+            if left.len() == 2 && right.len() == 2 {
+                let left_support = left.at(1)
+                let right_support = right.at(1)
                 let metric_nodes = program_types.at(1).normalized_preorder_types()
                 let dimension: usize = 0
                 for metric_node in metric_nodes {
@@ -225,13 +234,11 @@ impl<Program> Derive<EvaluateVectorScalarF32>
                     }
                 }
 
-                // Slots are semantic leaf identity for now. The reflected
-                // carrier stores slot 0 before slot 1, so determine slot 0's
-                // width from the expression rather than hard-coding either
-                // operand orientation.
-                let support0 = left_support
-                if right_slot == 0 { support0 = right_support }
-                let slot0_width = vector_support_width(support0, dimension)
+                // The narrow carrier contract follows structural occurrence:
+                // the left leaf's compact coefficients, then the right leaf's.
+                // Their nominal identity types remain available in the
+                // descriptor for the later arbitrary-tree DAG/CSE layer.
+                let left_width = vector_support_width(left_support, dimension)
 
                 let sum0 = zero
                 let sum1 = zero
@@ -286,15 +293,9 @@ impl<Program> Derive<EvaluateVectorScalarF32>
                                 let left_field = vector_support_rank(
                                     left_support, left_generator,
                                 )
-                                if left_slot == 1 {
-                                    left_field = left_field + slot0_width
-                                }
                                 let right_field = vector_support_rank(
                                     right_support, right_generator,
-                                )
-                                if right_slot == 1 {
-                                    right_field = right_field + slot0_width
-                                }
+                                ) + left_width
                                 let lhs = zero
                                 let rhs = zero
                                 lhs = builder.field_get(
@@ -322,8 +323,7 @@ impl<Program> Derive<EvaluateVectorScalarF32>
                         }
                     }
                 }
-                if left_slot < 2 && right_slot < 2 && left_slot != right_slot
-                    && dimension > 0 && survivor > 0
+                if dimension > 0 && survivor > 0
                     && builder.same_ty(
                         program_types.at(2).constructor(),
                         builder.ty<AlgebraicBalanced>(),

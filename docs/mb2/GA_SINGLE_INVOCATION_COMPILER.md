@@ -191,7 +191,7 @@ the exact type participates in the expansion cache key. Runtime `Operands`
 contains only packed coefficients—no `GaProgram` marker, manifest, numeric
 operator ID, or Rust-generated plan.
 
-`ga_expr` now includes `VectorInput<Slot, GeneratorSupport>`,
+`ga_expr` now includes `VectorInput<Identity, GeneratorSupport>`,
 `SparseSymmetricMetric<Dimension, Terms>`, and exact signed `MetricTerm` leaves.
 `CompileVectorScalarF32<Program>` structurally recognizes a two-vector
 `ScalarProduct`, iterates only the metric's nonzero entries and applicable
@@ -199,6 +199,14 @@ symmetric orientations, derives packed reflected-field ranks from supports,
 and emits a deterministic four-term-chunk scalar reduction. This represents
 QCGA's 15-generator paper-null basis honestly; it does not pretend the six
 off-diagonal null pairs form a diagonal metric.
+
+`Identity` is a nominal Fe type, not a numeric slot or operator ID. In this
+two-leaf slice, runtime fields are packed by structural occurrence: all compact
+coefficients of the scalar product's left leaf, then its right leaf. The
+provider retains both identity types for the later DAG/CSE layer. Recursive
+reflection over nested typed operand records is still missing; until it lands,
+the flat carrier order is an explicit boundary rather than hidden generated
+metadata.
 
 The independent sparse-metric gate executes 259 QCGA-shaped deterministic
 cases bit-for-bit against a separately tabled Rust oracle with no Wasm host
@@ -233,10 +241,13 @@ Leaf {
 }
 ```
 
-Input slots are not DOM IDs, event IDs, or arbitrary author bookkeeping. They
-are stable identities used to distinguish coefficient leaves while forming
-monomial keys and shared loads. The final façade should derive slots from the
-reflected input record and its fields, so ordinary users do not number them.
+Leaf identities are not DOM IDs, event IDs, or arbitrary author bookkeeping.
+New high-dimensional vector leaves use nominal Fe identity types, which can
+distinguish coefficient sources while forming monomial keys and shared loads.
+The older bounded `Input<Slot, Support>` support prototype still carries a
+numeric slot and is migration debt. The final façade should bind nominal leaf
+identity to nested reflected operand fields, so ordinary users neither number
+leaves nor manually flatten their storage.
 
 ### Metrics
 

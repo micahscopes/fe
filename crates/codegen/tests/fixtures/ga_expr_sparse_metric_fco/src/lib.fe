@@ -30,8 +30,10 @@ type MetricTerms = MetricSum<
     >,
 >
 type Metric = SparseSymmetricMetric<15, MetricTerms>
-type Point = VectorInput<0, 32319>
-type Quadric = VectorInput<1, 4095>
+struct PointIdentity {}
+struct QuadricIdentity {}
+type Point = VectorInput<PointIdentity, 32319>
+type Quadric = VectorInput<QuadricIdentity, 4095>
 type Incidence = ScalarProduct<Point, Quadric>
 
 struct Operands {
@@ -75,8 +77,10 @@ type TinyMetricTerms = MetricSum<
     >,
 >
 type TinyMetric = SparseSymmetricMetric<4, TinyMetricTerms>
-type TinyLeft = VectorInput<0, 7>
-type TinyRight = VectorInput<1, 13>
+struct TinyLeftIdentity {}
+struct TinyRightIdentity {}
+type TinyLeft = VectorInput<TinyLeftIdentity, 7>
+type TinyRight = VectorInput<TinyRightIdentity, 13>
 type TinyScalar = ScalarProduct<TinyLeft, TinyRight>
 type TinyScalarReversed = ScalarProduct<TinyRight, TinyLeft>
 
@@ -86,8 +90,8 @@ struct TinyOperands {
 }
 
 struct ReversedTinyOperands {
-    l0: f32, l1: f32, l2: f32,
     r0: f32, r1: f32, r2: f32,
+    l0: f32, l1: f32, l2: f32,
 }
 
 derive EvaluateVectorScalarF32 for TinyOperands using CompileVectorScalarF32<
@@ -112,7 +116,7 @@ pub fn reversed_tiny_metric_probe(
     _ r0: f32, _ r1: f32, _ r2: f32,
 ) -> f32 {
     <ReversedTinyOperands as EvaluateVectorScalarF32>::scalar(ReversedTinyOperands {
-        l0: l0, l1: l1, l2: l2,
         r0: r0, r1: r1, r2: r2,
+        l0: l0, l1: l1, l2: l2,
     })
 }

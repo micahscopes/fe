@@ -136,8 +136,10 @@ type QcgaMetric = SparseSymmetricMetric<15, QcgaMetricTerms>
 
 // Point coefficients occupy generators {0..5, 9..14}; dual quadrics occupy
 // {0..11}. Both are packed in ascending generator order at runtime.
-type QcgaPoint = VectorInput<0, 32319>
-type QcgaDualQuadric = VectorInput<1, 4095>
+struct QcgaPointIdentity {}
+struct QcgaDualQuadricIdentity {}
+type QcgaPoint = VectorInput<QcgaPointIdentity, 32319>
+type QcgaDualQuadric = VectorInput<QcgaDualQuadricIdentity, 4095>
 type QcgaIncidence = ScalarProduct<QcgaPoint, QcgaDualQuadric>
 
 struct SparseIncidenceOperands {
