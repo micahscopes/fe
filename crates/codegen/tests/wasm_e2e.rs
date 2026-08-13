@@ -544,7 +544,7 @@ if (!forgedRejected) throw new Error("forged outcome reached Fe");
 #[test]
 fn fe_timer_and_receive_resume_through_browser_completion_broker() {
     const SOURCE: &str = r#"
-use core::pending::{Recv, Suspend, TaskOutcome, Timer}
+use core::pending::{Race, RaceOutcome, Recv, Suspend, TaskOutcome, Timer}
 use std::host::{HostTimer, Resumable}
 use std::wasm::WasmBackend
 
@@ -583,6 +583,39 @@ pub fn receive_task() -> u64 {
         receive_once()
     }
 }
+
+fn receive_or_timeout(_ ms: u64) -> u64
+    uses (
+        receive: mut Recv<WasmBackend>,
+        timer: mut Timer<WasmBackend>,
+        race: mut Race<WasmBackend>,
+        suspend: Suspend<WasmBackend, u32>,
+    )
+{
+    let received = receive.recv_begin()
+    let timeout = timer.sleep_begin(ms)
+    let pending = race.race(received, timeout)
+    let outcome: TaskOutcome<u32, RaceOutcome<u64>> = suspend.suspend(pending)
+    match outcome {
+        TaskOutcome::Success(winner) => match winner {
+            RaceOutcome::Left(value) => value
+            RaceOutcome::Right(woke_at) => woke_at + 10000
+        }
+        TaskOutcome::Failure(_) => 6001
+        TaskOutcome::Cancelled => 6002
+    }
+}
+
+pub fn race_task(_ ms: u64) -> u64 {
+    with (
+        Recv<WasmBackend> = HostTimer {},
+        Timer<WasmBackend> = HostTimer {},
+        Race<WasmBackend> = Resumable {},
+        Suspend<WasmBackend, u32> = Resumable {},
+    ) {
+        receive_or_timeout(ms)
+    }
+}
 "#;
     if !std::process::Command::new("bun")
         .arg("--version")
@@ -598,16 +631,21 @@ pub fn receive_task() -> u64 {
         .touch(&mut db, url.clone(), Some(SOURCE.to_owned()));
     let file = db.workspace().get(&db, &url).unwrap();
     let top_mod = db.top_mod(file);
-    let entries = vec!["sleep_task".to_owned(), "receive_task".to_owned()];
+    let entries = vec![
+        "sleep_task".to_owned(),
+        "receive_task".to_owned(),
+        "race_task".to_owned(),
+    ];
     let package = mir::build_wasm_runtime_package_for_entries(&db, top_mod, &entries).unwrap();
     let adapters = materialized_task_adapters(&db, &package).unwrap();
-    assert_eq!(adapters.len(), 2);
+    assert_eq!(adapters.len(), 3);
     assert!(adapters.iter().any(|adapter| adapter.name == "sleep_task"));
     assert!(
         adapters
             .iter()
             .any(|adapter| adapter.name == "receive_task")
     );
+    assert!(adapters.iter().any(|adapter| adapter.name == "race_task"));
     let adapter = emit_materialized_task_adapter_js(&adapters, "./materialized-task.js")
         .unwrap()
         .expect("public Fe timer and receive tasks emit browser adapters");
@@ -619,6 +657,7 @@ pub fn receive_task() -> u64 {
     let imports = func_imports(&wasm);
     assert!(imports.contains(&("fe:host".to_owned(), "sleep_begin".to_owned())));
     assert!(imports.contains(&("fe:host".to_owned(), "recv_begin".to_owned())));
+    assert!(imports.contains(&("fe:host".to_owned(), "race_begin".to_owned())));
     assert!(!imports.iter().any(|(_, name)| name == "wait"));
 
     let directory = tempfile::tempdir().unwrap();
@@ -655,6 +694,22 @@ if (!broker.failNextReceive(23)) throw new Error("Fe receive failure was not reg
 const failureOutput = await failed;
 if (failureOutput.length !== 1 || failureOutput[0] !== 5001n) throw new Error("Fe receive failure policy was bypassed");
 
+const receiveWins = broker.run(tasks.race_task, [10_000n]);
+if (!broker.post(17n)) throw new Error("Fe race receive token was not registered");
+const receiveWinner = await receiveWins;
+if (receiveWinner.length !== 1 || receiveWinner[0] !== 17n) throw new Error("Fe did not match the receive race winner");
+
+const raceFailure = broker.run(tasks.race_task, [10_000n]);
+if (!broker.failNextReceive(29)) throw new Error("Fe race failure token was not registered");
+const raceFailureOutput = await raceFailure;
+if (raceFailureOutput.length !== 1 || raceFailureOutput[0] !== 6001n) throw new Error("Fe race failure policy was bypassed");
+
+const beforeRaceTimeout = BigInt(Math.trunc(performance.now()));
+const timeoutWinner = await broker.run(tasks.race_task, [1n]);
+const afterRaceTimeout = BigInt(Math.trunc(performance.now()));
+const timeoutTimestamp = timeoutWinner[0] - 10_000n;
+if (timeoutWinner.length !== 1 || timeoutTimestamp < beforeRaceTimeout || timeoutTimestamp > afterRaceTimeout) throw new Error("Fe did not match the timer race winner");
+
 const timerController = new AbortController();
 const cancelledTimer = broker.run(tasks.sleep_task, [10_000n], {{ signal: timerController.signal }});
 timerController.abort();
@@ -670,6 +725,14 @@ let receiveCancellation;
 try {{ await cancelledReceive; }}
 catch (error) {{ receiveCancellation = error; }}
 if (receiveCancellation?.name !== "AbortError") throw new Error("Fe receive cancellation was not terminal");
+
+const raceController = new AbortController();
+const cancelledRace = broker.run(tasks.race_task, [10_000n], {{ signal: raceController.signal }});
+raceController.abort();
+let raceCancellation;
+try {{ await cancelledRace; }}
+catch (error) {{ raceCancellation = error; }}
+if (raceCancellation?.name !== "AbortError") throw new Error("Fe race cancellation was not terminal");
 if (broker.activeCount() !== 0 || broker.cancelAll() !== 0) throw new Error("browser broker leaked completed operations");
 "#,
         adapter_url = format!("file://{}", adapter_path.display()),

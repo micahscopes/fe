@@ -57,6 +57,23 @@ pub enum TaskOutcome<E, T> {
     Cancelled,
 }
 
+/// The successful value of racing two pending operations with the same
+/// payload type. The host arbitrates which affine token settles first; Fe owns
+/// every semantic branch after observing this typed winner.
+#[must_use]
+pub enum RaceOutcome<T> {
+    Left(T),
+    Right(T),
+}
+
+/// Combine two independently broker-completed operations into one affine
+/// pending result. Both inputs are consumed, so the losing operation cannot
+/// later be awaited or resumed through another continuation.
+pub trait Race<B: Backend> {
+    fn race<T>(mut self, _ left: own Pending<B, T>, _ right: own Pending<B, T>)
+        -> Pending<B, RaceOutcome<T>>
+}
+
 /// The authority to suspend the current resumable Fe continuation until a
 /// pending operation reaches one terminal outcome. Unlike `Wait`, this never
 /// blocks an agent: the compiler splits the surrounding runtime MIR, retains

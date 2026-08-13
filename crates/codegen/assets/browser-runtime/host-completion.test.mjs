@@ -6,6 +6,7 @@ const u32 = Object.freeze({ kind: "unsigned", bits: 32 });
 const u64 = Object.freeze({ kind: "unsigned", bits: 64 });
 const state = Object.freeze({ kind: "enum_tag", bits: 8, variants: 2 });
 const outcome = Object.freeze({ kind: "enum_tag", bits: 8, variants: 3 });
+const race = Object.freeze({ kind: "enum_tag", bits: 8, variants: 2 });
 
 function machine(start, cancelled = 77n, failed = 88n, onCancel = () => {}) {
   return createMaterializedTaskMachine({
@@ -39,6 +40,35 @@ function machine(start, cancelled = 77n, failed = 88n, onCancel = () => {}) {
   });
 }
 
+function raceMachine(broker, delay) {
+  return createMaterializedTaskMachine({
+    input: [],
+    step: [state, u64, u32],
+    complete: { start: 1, count: 1 },
+    start() {
+      const receive = broker.imports["fe:host"].recv_begin();
+      const timer = broker.imports["fe:host"].sleep_begin(delay);
+      return [1, 0n, broker.imports["fe:host"].race_begin(receive, timer) >>> 0];
+    },
+    continuations: [{
+      state: 1,
+      range: { start: 2, count: 1 },
+      pending: { start: 2, count: 1 },
+      frame: { start: 3, count: 0 },
+      delivery: {
+        lanes: [outcome, u32, race, u64, u64],
+        failure: { start: 1, count: 1 },
+        success: { start: 2, count: 3 },
+      },
+      invoke(tag, error, winner, left, right) {
+        if (tag === 0) return [0, BigInt(error), 0];
+        if (tag === 2) return [0, 0n, 0];
+        return [0, winner === 0 ? left : right + 10_000n, 0];
+      },
+    }],
+  });
+}
+
 describe("browser HostTimer/Recv completion broker", () => {
   test("a real timer resumes the opaque Fe continuation", async () => {
     const broker = createHostCompletionBroker();
@@ -63,6 +93,47 @@ describe("browser HostTimer/Recv completion broker", () => {
     expect(broker.failNextReceive(3)).toBeTrue();
     expect(await failure).toEqual([91n]);
     expect(broker.post(1n)).toBeFalse();
+  });
+
+  test("typed receive/timer race cancels the loser and lets Fe match the winner", async () => {
+    const broker = createHostCompletionBroker();
+    const receiveWins = broker.run(raceMachine(broker, 10_000n), []);
+    expect(broker.post(17n)).toBeTrue();
+    expect(await receiveWins).toEqual([17n]);
+    expect(broker.activeCount()).toBe(0);
+
+    const before = BigInt(Math.trunc(performance.now()));
+    const timerWins = await broker.run(raceMachine(broker, 1n), []);
+    const after = BigInt(Math.trunc(performance.now()));
+    expect(timerWins[0] - 10_000n >= before).toBeTrue();
+    expect(timerWins[0] - 10_000n <= after).toBeTrue();
+    expect(broker.activeCount()).toBe(0);
+    expect(broker.post(99n)).toBeFalse();
+  });
+
+  test("race inputs are distinct affine tokens and failed starts clean them", async () => {
+    const broker = createHostCompletionBroker();
+    const duplicate = {
+      start() {
+        const pending = broker.imports["fe:host"].recv_begin();
+        broker.imports["fe:host"].race_begin(pending, pending);
+      },
+      resume() { throw new Error("unreachable"); },
+    };
+    await expect(broker.run(duplicate, [])).rejects.toThrow(/distinct affine/);
+    expect(broker.activeCount()).toBe(0);
+
+    const claimedTwice = {
+      start() {
+        const left = broker.imports["fe:host"].recv_begin();
+        const right = broker.imports["fe:host"].recv_begin();
+        broker.imports["fe:host"].race_begin(left, right);
+        broker.imports["fe:host"].race_begin(left, right);
+      },
+      resume() { throw new Error("unreachable"); },
+    };
+    await expect(broker.run(claimedTwice, [])).rejects.toThrow(/already claimed/);
+    expect(broker.activeCount()).toBe(0);
   });
 
   test("AbortSignal cancellation wins once and clears timer work", async () => {

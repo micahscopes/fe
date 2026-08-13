@@ -41,7 +41,7 @@
 // composes into the trait's `wait<T> -> T`; the host client only ever instantiates
 // it at `T = u64`, where it monomorphizes to the `wait(i32) -> i64` import.
 
-use core::pending::{Pending, TaskOutcome}
+use core::pending::{Pending, RaceOutcome, TaskOutcome}
 use ingot::wasm::WasmBackend
 
 /// Module `fe:host` (broker-serviced host-completion lane): read the clock, mint a
@@ -69,6 +69,14 @@ extern {
     /// token crosses WHOLE as `Pending<WasmBackend, u64>` (its single `u32` id word,
     /// i32).
     pub unsafe fn recv_begin() -> Pending<WasmBackend, u64>
+
+    /// Consume two broker tokens and mint one token completed by the first.
+    /// The fixed host cancels the loser; the generic payload remains in Fe's
+    /// compiler-derived continuation layout rather than a host schema.
+    pub unsafe fn race_begin<T>(
+        _ left: Pending<WasmBackend, T>,
+        _ right: Pending<WasmBackend, T>,
+    ) -> Pending<WasmBackend, RaceOutcome<T>>
 
     /// Block the calling agent until the cell `pending` is READY, DELIVERING its
     /// `u64` payload (interop 4.1: `Atomics.wait` on the status slot, then read the

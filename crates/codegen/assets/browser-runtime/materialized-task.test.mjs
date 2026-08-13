@@ -1,14 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import {
   createMaterializedTaskMachine,
+  raceTaskOutcome,
   taskCancelled,
   taskFailure,
   taskSuccess,
 } from "./materialized-task.js";
 
 const u32 = Object.freeze({ kind: "unsigned", bits: 32 });
+const u64 = Object.freeze({ kind: "unsigned", bits: 64 });
 const state = Object.freeze({ kind: "enum_tag", bits: 8, variants: 3 });
 const outcome = Object.freeze({ kind: "enum_tag", bits: 8, variants: 3 });
+const race = Object.freeze({ kind: "enum_tag", bits: 8, variants: 2 });
 
 function definition(overrides = {}) {
   return {
@@ -108,5 +111,44 @@ describe("compiler-materialized browser task machine", () => {
       start: () => [3, 0, 0, 0, 0, 0, 0],
     }));
     expect(() => badTag.start([1, 2, 3])).toThrow(/declared Fe enum variant/);
+  });
+
+  test("same-payload races are packed from the continuation schema", () => {
+    const machine = createMaterializedTaskMachine({
+      input: [u32],
+      step: [Object.freeze({ kind: "enum_tag", bits: 8, variants: 2 }), u64, u32],
+      complete: { start: 1, count: 1 },
+      start(token) { return [1, 0n, token]; },
+      continuations: [{
+        state: 1,
+        range: { start: 2, count: 1 },
+        pending: { start: 2, count: 1 },
+        frame: { start: 3, count: 0 },
+        delivery: {
+          lanes: [outcome, u32, race, u64, u64],
+          failure: { start: 1, count: 1 },
+          success: { start: 2, count: 3 },
+        },
+        invoke(tag, error, winner, left, right) {
+          if (tag === 0) return [0, BigInt(error), 0];
+          if (tag === 2) return [0, 0n, 0];
+          return [0, winner === 0 ? left : right + 100n, 0];
+        },
+      }],
+    });
+    const left = machine.start([41]);
+    const leftOutcome = raceTaskOutcome(left.pending, taskSuccess([9n]), "left");
+    expect(machine.resume(left.frame, leftOutcome)).toEqual({ kind: "complete", output: [9n] });
+
+    const right = machine.start([42]);
+    const rightOutcome = raceTaskOutcome(right.pending, taskSuccess([7n]), "right");
+    expect(machine.resume(right.frame, rightOutcome)).toEqual({
+      kind: "complete",
+      output: [107n],
+    });
+
+    const failed = machine.start([43]);
+    const failure = raceTaskOutcome(failed.pending, taskFailure([5]), "left");
+    expect(machine.resume(failed.frame, failure)).toEqual({ kind: "complete", output: [5n] });
   });
 });

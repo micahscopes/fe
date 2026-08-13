@@ -54,6 +54,11 @@ not thrown away when direct suspension lands.
 
 - `Pending<B, T>`, subscriptions, continuations, cancellation rights, and owned
   resources are affine.
+- `Race<B>` consumes two distinct `Pending<B, T>` values and returns one
+  `Pending<B, RaceOutcome<T>>`. The fixed broker arbitrates the first terminal
+  child and cancels the loser; winner/error/cancellation policy is an ordinary
+  typed Fe match. Equal payload types let the compiler-derived continuation
+  layout determine every lane without a host schema.
 - Every host-visible token is slot-and-generation checked. A numeric slot alone
   is never authority.
 - Browser adapters retain opaque JavaScript authorities and explicitly project
@@ -187,7 +192,11 @@ manifest-driven.
    an actual Fe timer task to its checked wake timestamp, while a separate
    lifecycle gate proves start/cancel/restart mechanics. MessagePort/EventSource
    attachment, spawn/Worker placement, nested child scopes, and migration of
-   the gallery surface loader remain.
+   the gallery surface loader remain. The first structured combinator is also
+   executable: `Race<WasmBackend>` consumes two affine same-payload tokens and
+   the browser broker cancels the loser. A real Fe receive-vs-timer gate covers
+   left/right success, child failure, explicit cancellation, and complete slot/
+   timer cleanup; no `Promise.race` or winner tag appears in application JS.
 5. [todo] Derive browser `EventSource` handlers and move the gallery activation/timer
    loop onto the same resident/reactive interpreter.
 6. [todo] Move Worker admission, cancellation, restart/backoff, and supervision policy

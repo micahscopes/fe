@@ -8,6 +8,7 @@
 
 const frameDetails = new WeakMap();
 const outcomeDetails = new WeakMap();
+const pendingDetails = new WeakMap();
 
 function exactKeys(value, expected, name) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -184,6 +185,47 @@ export function taskCancelled() {
   return outcome;
 }
 
+/// Lift one same-payload child completion into the compiler-derived
+/// `RaceOutcome<T>` success layout of `pending`. Failure/cancellation retain
+/// their outer `TaskOutcome` meaning. The schema and outcome are both opaque
+/// runtime authorities, so the host cannot invent payload widths or tags.
+export function raceTaskOutcome(pending, outcome, side) {
+  const continuation = pendingDetails.get(pending);
+  const delivered = outcomeDetails.get(outcome);
+  if (continuation === undefined || delivered === undefined) {
+    throw new TypeError("task race requires runtime-owned pending and outcome values");
+  }
+  if (side !== "left" && side !== "right") {
+    throw new TypeError("task race side must be left or right");
+  }
+  if (delivered.kind !== "success") return outcome;
+  const { delivery } = continuation;
+  const schemas = delivery.lanes.slice(
+    delivery.success.start,
+    delivery.success.start + delivery.success.count,
+  );
+  if (schemas.length < 3 || schemas[0].kind !== "enum_tag" || schemas[0].variants !== 2
+      || (schemas.length - 1) % 2 !== 0) {
+    throw new TypeError("task race success is not RaceOutcome<T>");
+  }
+  const width = (schemas.length - 1) / 2;
+  for (let index = 0; index < width; index += 1) {
+    if (JSON.stringify(schemas[1 + index]) !== JSON.stringify(schemas[1 + width + index])) {
+      throw new TypeError("task race variants do not carry the same payload layout");
+    }
+  }
+  if (delivered.lanes.length !== width) {
+    throw new TypeError(`task race child must contain exactly ${width} lanes`);
+  }
+  const lanes = schemas.map(encodedZero);
+  lanes[0] = side === "left" ? 0 : 1;
+  const start = side === "left" ? 1 : 1 + width;
+  for (let index = 0; index < width; index += 1) {
+    lanes[start + index] = delivered.lanes[index];
+  }
+  return taskSuccess(lanes);
+}
+
 export function createMaterializedTaskMachine(definition) {
   validateDefinition(definition);
   const byState = new Map(definition.continuations.map(continuation => [continuation.state, {
@@ -222,6 +264,7 @@ export function createMaterializedTaskMachine(definition) {
         continuation.pending.start + continuation.pending.count,
       )),
     });
+    pendingDetails.set(pending, continuation);
     const frame = Object.freeze({});
     frameDetails.set(frame, {
       continuation,

@@ -5,7 +5,12 @@
 // finite pending-token table, FIFO receive delivery, and driving the opaque
 // compiler-generated continuation machine.
 
-import { taskCancelled, taskFailure, taskSuccess } from "./materialized-task.js";
+import {
+  raceTaskOutcome,
+  taskCancelled,
+  taskFailure,
+  taskSuccess,
+} from "./materialized-task.js";
 
 const MAX_U32 = 0xffff_ffff;
 const MAX_U64 = (1n << 64n) - 1n;
@@ -104,11 +109,11 @@ export function createHostCompletionBroker(options = {}) {
     return slot;
   };
 
-  const settle = (slot, outcome, cancelled = false) => {
+  const settle = (slot, outcome, cancelled = false, raceSide = undefined) => {
     if (slot.state !== "pending") return false;
     slot.state = "settled";
     if (slot.cancelWork !== undefined) slot.cancelWork();
-    slot.resolve(Object.freeze({ outcome, cancelled }));
+    slot.resolve(Object.freeze({ outcome, cancelled, raceSide }));
     return true;
   };
 
@@ -149,6 +154,48 @@ export function createHostCompletionBroker(options = {}) {
 
   const beginReceive = () => allocate("receive").token | 0;
 
+  const beginRace = (rawLeft, rawRight) => {
+    if (!Number.isInteger(rawLeft) || !Number.isInteger(rawRight)) {
+      throw new TypeError("fe:host::race_begin requires two i32 Wasm carriers");
+    }
+    const leftToken = rawLeft >>> 0;
+    const rightToken = rawRight >>> 0;
+    if (leftToken === rightToken) {
+      throw new TypeError("Fe race inputs must be distinct affine pending tokens");
+    }
+    const left = slots.get(leftToken);
+    const right = slots.get(rightToken);
+    for (const child of [left, right]) {
+      if (child === undefined || child.state !== "pending" || child.claimed) {
+        throw new TypeError("Fe race input is stale, settled, foreign, or already claimed");
+      }
+    }
+    const race = allocate("race");
+    left.claimed = true;
+    right.claimed = true;
+    race.cancelWork = () => {
+      for (const child of [left, right]) {
+        if (child.state === "pending") {
+          child.state = "settled";
+          if (child.cancelWork !== undefined) child.cancelWork();
+          child.resolve(Object.freeze({
+            outcome: taskCancelled(),
+            cancelled: true,
+            raceSide: undefined,
+          }));
+        }
+        slots.delete(child.token);
+      }
+    };
+    left.settled.then(delivery => {
+      settle(race, delivery.outcome, delivery.cancelled, "left");
+    });
+    right.settled.then(delivery => {
+      settle(race, delivery.outcome, delivery.cancelled, "right");
+    });
+    return race.token | 0;
+  };
+
   const firstPendingReceive = () => {
     while (receives.length > 0) {
       const slot = slots.get(receives.shift());
@@ -176,7 +223,15 @@ export function createHostCompletionBroker(options = {}) {
       if (signal.aborted) onAbort();
     }
     try {
-      return await slot.settled;
+      const delivery = await slot.settled;
+      if (delivery.raceSide !== undefined) {
+        return Object.freeze({
+          outcome: raceTaskOutcome(pending, delivery.outcome, delivery.raceSide),
+          cancelled: delivery.cancelled,
+          raceSide: undefined,
+        });
+      }
+      return delivery;
     } finally {
       if (signal !== undefined) signal.removeEventListener("abort", onAbort);
       slots.delete(token);
@@ -256,6 +311,7 @@ export function createHostCompletionBroker(options = {}) {
     host_now: () => BigInt.asIntN(64, readClock()),
     sleep_begin: beginTimer,
     recv_begin: beginReceive,
+    race_begin: beginRace,
     wait: () => {
       throw new Error("fe:host::wait is unavailable in the non-blocking browser broker");
     },

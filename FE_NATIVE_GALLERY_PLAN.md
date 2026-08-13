@@ -849,6 +849,19 @@ Origin: honesty audit of Claude Code session
   EventSource/surface-loader migration: typed event attachment and a Fe-owned
   race/select construction remain necessary before opcode 14's Promise/timer
   realization can be deleted honestly.
+- Runtime control now has its first typed structured race on the same pending
+  rail. `Race<B>` consumes two distinct affine `Pending<B, T>` values and
+  returns `Pending<B, RaceOutcome<T>>`; the fixed broker only arbitrates the
+  first terminal token and cancels the loser. Fe matches `Left(T)`, `Right(T)`,
+  typed operation failure, or cancellation. The browser derives the nested
+  enum lanes from the opaque compiler continuation schema, so neither authors
+  nor JavaScript supply payload widths, winner IDs, or JSON. Unit gates cover
+  schema packing, stale/duplicate ownership, both winners, loser cleanup, and
+  post-race queue emptiness. The actual Fe-to-Wasm `HostTimer`/`Recv` capstone
+  now also runs receive-wins, timeout-wins, receive failure, and explicit race
+  cancellation under Bun. This supplies the timeout/select primitive needed by
+  sequential activation; a typed surface/event begin authority is still needed
+  before migrating the gallery policy itself.
 - A mobile-safety follow-up keeps the sequential policy in the resident Fe
   shell but changes its fixed opcode-14 realization from cold-to-live to
   poster-only loading. Poster capture and off-viewport suspension now destroy

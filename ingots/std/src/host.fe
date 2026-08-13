@@ -1,5 +1,5 @@
 use ingot::wasm::WasmBackend
-use raw::{host_now, sleep_begin as raw_sleep_begin, recv_begin as raw_recv_begin, wait as block_deliver, suspend as suspend_continuation}
+use raw::{host_now, sleep_begin as raw_sleep_begin, recv_begin as raw_recv_begin, race_begin as raw_race_begin, wait as block_deliver, suspend as suspend_continuation}
 
 // mb2 CE-7: the EXTERNAL-COMPLETION clients (`Timer` and `recv`), the
 // completion-cell rail's THIRD kind of client. `std::webgpu` proved the rail with
@@ -27,7 +27,7 @@ use raw::{host_now, sleep_begin as raw_sleep_begin, recv_begin as raw_recv_begin
 // keeps the broker/fork completion graph acyclic (ruling R2) and is exactly why
 // these external sources may use the `Notify` door's keyhole while `Notify` itself
 // stays reserved (no Fe-side self-completion provider is admitted).
-pub use core::pending::{Pending, TaskOutcome, Timer, Recv, Wait, Suspend}
+pub use core::pending::{Pending, Race, RaceOutcome, TaskOutcome, Timer, Recv, Wait, Suspend}
 
 /// The host external-completion provider (control-effects CE-7): a ZST that
 /// provides the host-completion authorities on the wasm backend. It carries THREE
@@ -55,6 +55,14 @@ pub struct Resumable {}
 impl Suspend<WasmBackend, u32> for Resumable {
     fn suspend<T>(self, _ pending: own Pending<WasmBackend, T>) -> TaskOutcome<u32, T> {
         suspend_continuation(pending)
+    }
+}
+
+impl Race<WasmBackend> for Resumable {
+    fn race<T>(mut self, _ left: own Pending<WasmBackend, T>, _ right: own Pending<WasmBackend, T>)
+        -> Pending<WasmBackend, RaceOutcome<T>>
+    {
+        raw_race_begin(left, right)
     }
 }
 
