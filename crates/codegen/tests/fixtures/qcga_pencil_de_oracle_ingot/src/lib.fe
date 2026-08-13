@@ -3,7 +3,13 @@
 
 use fmath::vec3
 use qcga_pencil::Quadric
-use qcga_pencil_de::{quadric_distance, trace_quadric_de}
+use qcga_pencil_de::{
+    PencilDeHit,
+    pencil_render_quality,
+    quadric_distance,
+    trace_quadric_de,
+    trace_quadric_de_with_quality,
+}
 
 fn quadric(
     _ a: f32,
@@ -86,5 +92,93 @@ pub fn de_trace_hit(
         quadric(a, b, c, d, e, f, g, h, i, j),
         vec3(ox, oy, oz),
         vec3(dx, dy, dz),
+    ).hit
+}
+
+pub fn de_quality_march_steps(_ width: f32, _ height: f32) -> i32 {
+    pencil_render_quality(width, height).march_steps
+}
+
+pub fn de_quality_refinement_steps(_ width: f32, _ height: f32) -> i32 {
+    pencil_render_quality(width, height).refinement_steps
+}
+
+fn quality_trace(
+    _ a: f32,
+    _ b: f32,
+    _ c: f32,
+    _ d: f32,
+    _ e: f32,
+    _ f: f32,
+    _ g: f32,
+    _ h: f32,
+    _ i: f32,
+    _ j: f32,
+    _ ox: f32,
+    _ oy: f32,
+    _ oz: f32,
+    _ dx: f32,
+    _ dy: f32,
+    _ dz: f32,
+    _ width: f32,
+    _ height: f32,
+) -> PencilDeHit {
+    trace_quadric_de_with_quality(
+        quadric(a, b, c, d, e, f, g, h, i, j),
+        vec3(ox, oy, oz),
+        vec3(dx, dy, dz),
+        pencil_render_quality(width, height),
+    )
+}
+
+pub fn de_quality_trace_distance(
+    _ a: f32,
+    _ b: f32,
+    _ c: f32,
+    _ d: f32,
+    _ e: f32,
+    _ f: f32,
+    _ g: f32,
+    _ h: f32,
+    _ i: f32,
+    _ j: f32,
+    _ ox: f32,
+    _ oy: f32,
+    _ oz: f32,
+    _ dx: f32,
+    _ dy: f32,
+    _ dz: f32,
+    _ width: f32,
+    _ height: f32,
+) -> f32 {
+    quality_trace(
+        a, b, c, d, e, f, g, h, i, j,
+        ox, oy, oz, dx, dy, dz, width, height,
+    ).distance
+}
+
+pub fn de_quality_trace_hit(
+    _ a: f32,
+    _ b: f32,
+    _ c: f32,
+    _ d: f32,
+    _ e: f32,
+    _ f: f32,
+    _ g: f32,
+    _ h: f32,
+    _ i: f32,
+    _ j: f32,
+    _ ox: f32,
+    _ oy: f32,
+    _ oz: f32,
+    _ dx: f32,
+    _ dy: f32,
+    _ dz: f32,
+    _ width: f32,
+    _ height: f32,
+) -> i32 {
+    quality_trace(
+        a, b, c, d, e, f, g, h, i, j,
+        ox, oy, oz, dx, dy, dz, width, height,
     ).hit
 }

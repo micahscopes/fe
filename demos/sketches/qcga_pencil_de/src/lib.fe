@@ -13,6 +13,7 @@
 //! Rust acceptance oracle, where a different algorithm has proof value.
 
 use core::actor::InitialState
+use core::marker::Copy
 use core::num::IntDowncast
 use std::webgpu::{
     FragmentSurface,
@@ -50,7 +51,6 @@ use qcga_pencil::{
     PencilSceneState,
     PickedControl,
     Quadric,
-    PENCIL_RESOLUTION,
     control_point_at_index,
     eval_quadric,
     initial_pencil_scene,
@@ -66,6 +66,26 @@ const MAX_MARCH_STEPS: i32 = 128
 const MAX_SHADOW_STEPS: i32 = 20
 const FAR_CLIP: f32 = 18.0
 const HIT_EPSILON: f32 = 0.0014
+
+/// Extent-responsive work budget selected in Fe from raw backing-store facts.
+/// The fixed browser host may impose an emergency resource ceiling, but it
+/// does not choose these algorithmic tiers or reconstruct their thresholds.
+pub struct PencilRenderQuality {
+    pub march_steps: i32,
+    pub refinement_steps: i32,
+}
+impl Copy for PencilRenderQuality {}
+
+pub fn pencil_render_quality(_ width: f32, _ height: f32) -> PencilRenderQuality {
+    let longest: f32 = max(width, height)
+    if longest <= 256.0 {
+        return PencilRenderQuality { march_steps: 64, refinement_steps: 2 }
+    }
+    if longest <= 384.0 {
+        return PencilRenderQuality { march_steps: 96, refinement_steps: 3 }
+    }
+    PencilRenderQuality { march_steps: MAX_MARCH_STEPS, refinement_steps: 4 }
+}
 
 /// Exact analytic gradient of the canonical quadric coefficient convention.
 pub fn quadric_gradient(_ q: Quadric, _ p: Vec3) -> Vec3 {
@@ -91,10 +111,16 @@ pub struct PencilDeHit { pub distance: f32, pub hit: i32, pub steps: i32, pub re
 /// members); it does not construct or choose analytic quadratic roots. The
 /// refinement removes the visible `distance += estimate` terraces before the
 /// exact gradient is used for shading.
-fn refine_quadric_hit(_ q: Quadric, _ origin: Vec3, _ direction: Vec3, _ seed: f32) -> f32 {
+fn refine_quadric_hit(
+    _ q: Quadric,
+    _ origin: Vec3,
+    _ direction: Vec3,
+    _ seed: f32,
+    _ refinement_steps: i32,
+) -> f32 {
     let mut distance: f32 = seed
     let mut i: i32 = 0
-    while i < 4 {
+    while i < refinement_steps {
         let point: Vec3 = add3(origin, scale3(direction, distance))
         let field: f32 = eval_quadric(q, point.x, point.y, point.z)
         let slope: f32 = dot3(quadric_gradient(q, point), direction)
@@ -111,35 +137,50 @@ fn refine_quadric_hit(_ q: Quadric, _ origin: Vec3, _ direction: Vec3, _ seed: f
 /// keep first-order estimates stable across ellipsoids, cones, plane pairs,
 /// and unbounded hyperboloids without consulting an analytic root.
 pub fn trace_quadric_de(_ q: Quadric, _ origin: Vec3, _ direction: Vec3) -> PencilDeHit {
+    trace_quadric_de_with_quality(
+        q,
+        origin,
+        direction,
+        PencilRenderQuality { march_steps: MAX_MARCH_STEPS, refinement_steps: 4 },
+    )
+}
+
+/// Quality-parameterized production marcher. `break` is semantically
+/// important here: completed rays leave the shader loop instead of spending
+/// the rest of a fixed 128-iteration envelope checking a `done` flag.
+pub fn trace_quadric_de_with_quality(
+    _ q: Quadric,
+    _ origin: Vec3,
+    _ direction: Vec3,
+    _ quality: PencilRenderQuality,
+) -> PencilDeHit {
     let direction: Vec3 = normalize3(direction)
     let mut distance: f32 = 0.0
     let mut hit: i32 = 0
-    let mut done: i32 = 0
-    let mut steps: i32 = MAX_MARCH_STEPS
+    let mut steps: i32 = quality.march_steps
     let mut residual: f32 = 1.0
     let mut i: i32 = 0
-    while i < MAX_MARCH_STEPS {
-        if done == 0 {
-            let p: Vec3 = add3(origin, scale3(direction, distance))
-            let estimate: f32 = quadric_distance(q, p)
-            residual = abs(eval_quadric(q, p.x, p.y, p.z))
-            let epsilon: f32 = HIT_EPSILON * (1.0 + distance * 0.025)
-            if estimate < epsilon {
-                hit = 1
-                done = 1
-                steps = i
-            } else {
-                distance = distance + clamp(estimate * 0.68, 0.00035, 0.48)
-                if distance > FAR_CLIP {
-                    done = 1
-                    steps = i
-                }
-            }
+    while i < quality.march_steps {
+        let p: Vec3 = add3(origin, scale3(direction, distance))
+        let estimate: f32 = quadric_distance(q, p)
+        residual = abs(eval_quadric(q, p.x, p.y, p.z))
+        let epsilon: f32 = HIT_EPSILON * (1.0 + distance * 0.025)
+        if estimate < epsilon {
+            hit = 1
+            steps = i
+            break
+        }
+        distance = distance + clamp(estimate * 0.68, 0.00035, 0.48)
+        if distance > FAR_CLIP {
+            steps = i
+            break
         }
         i = i + 1
     }
     if hit == 1 {
-        distance = refine_quadric_hit(q, origin, direction, distance)
+        distance = refine_quadric_hit(
+            q, origin, direction, distance, quality.refinement_steps,
+        )
         let point: Vec3 = add3(origin, scale3(direction, distance))
         residual = abs(eval_quadric(q, point.x, point.y, point.z))
     }
@@ -197,7 +238,14 @@ fn sky(_ direction: Vec3) -> Vec3 {
     ))
 }
 
-fn selected_marker(_ points: ControlPoints, _ frame: PencilFrame, _ px: i32, _ py: i32) -> Vec3 {
+fn selected_marker(
+    _ points: ControlPoints,
+    _ frame: PencilFrame,
+    _ px: i32,
+    _ py: i32,
+    _ width: f32,
+    _ height: f32,
+) -> Vec3 {
     let mut nearest: f32 = 1000000.0
     let mut nearest_index: i32 = -1
     let mut index: u32 = 0
@@ -205,9 +253,9 @@ fn selected_marker(_ points: ControlPoints, _ frame: PencilFrame, _ px: i32, _ p
         let projected = project_point(control_point_at_index(points, index), frame)
         if projected.depth > 0.25 {
             let sx: f32 = (projected.position.x / projected.position.w * 0.5 + 0.5)
-                * PENCIL_RESOLUTION
+                * width
             let sy: f32 = (0.5 - projected.position.y / projected.position.w * 0.5)
-                * PENCIL_RESOLUTION
+                * height
             let dx: f32 = sx - from_i32(px)
             let dy: f32 = sy - from_i32(py)
             let distance2: f32 = dx * dx + dy * dy
@@ -259,10 +307,19 @@ actor PencilDistanceSurface uses (GpuProgram<WebGpuBackend>) {
     }
 
     fn distance_surface(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
-        let sample = PixelSample::ordered_2x2(px, py).plane(PENCIL_RESOLUTION)
+        let sample = PixelSample::ordered_2x2(px, py).plane_extent(
+            self.frame.view.width,
+            self.frame.view.height,
+        )
         let ray: PencilRay = pencil_ray(self.frame, sample.u, sample.v)
         let q: Quadric = pencil_member(self.frame)
-        let hit: PencilDeHit = trace_quadric_de(q, ray.origin, ray.direction)
+        let quality: PencilRenderQuality = pencil_render_quality(
+            self.frame.view.width,
+            self.frame.view.height,
+        )
+        let hit: PencilDeHit = trace_quadric_de_with_quality(
+            q, ray.origin, ray.direction, quality,
+        )
         let background: Vec3 = sky(ray.direction)
         let linear: Vec3 = if hit.hit == 1 {
             let point: Vec3 = add3(ray.origin, scale3(ray.direction, hit.distance))
@@ -307,7 +364,14 @@ actor PencilDistanceSurface uses (GpuProgram<WebGpuBackend>) {
         // Selection is resident Fe control state. Render markers do not match
         // its enum in shader code, preserving the backend's fail-closed rule
         // for enum traps while keeping the browser geometry-blind.
-        let marker: Vec3 = selected_marker(self.points, self.frame, px, py)
+        let marker: Vec3 = selected_marker(
+            self.points,
+            self.frame,
+            px,
+            py,
+            self.frame.view.width,
+            self.frame.view.height,
+        )
         let color: Vec3 = if marker.x >= 0.0 { marker } else { linear }
         // `pencil_material` already returns shared display colour; applying a
         // DE-only square-root transfer here would wash out that palette.

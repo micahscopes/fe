@@ -323,6 +323,10 @@ pub struct PencilControls {
     pub yaw: f32,
     pub pitch: f32,
     pub dist: f32,
+    /// Actual browser backing-store extent. These are typed surface facts,
+    /// not user controls or a JavaScript-selected quality tier.
+    pub width: f32,
+    pub height: f32,
 }
 impl Copy for PencilControls {}
 
@@ -359,6 +363,8 @@ pub struct PencilParams {
     pub yaw: Param,
     pub pitch: Param,
     pub dist: Param,
+    pub width: Param,
+    pub height: Param,
 }
 
 impl SurfaceState for PencilControls {
@@ -375,6 +381,8 @@ pub const fn pencil_params() -> PencilParams {
             .drag_y(per_px: 0.008),
         dist: Param::log(min: 1.5, max: 12.0, init: 4.0)
             .wheel_scale(in_factor: 0.88, out_factor: 1.14),
+        width: Param::extent_x(),
+        height: Param::extent_y(),
     }
 }
 
@@ -725,6 +733,7 @@ impl RadialProjectionOracle {
                 view: PencilControls {
                     lambda: 0.15,
                     yaw: 0.6, pitch: 0.35, dist: 4.0,
+                    width: PENCIL_RESOLUTION, height: PENCIL_RESOLUTION,
                 },
                 basis: PencilBasis {
                     generation: 0,
@@ -1138,6 +1147,8 @@ pub fn initial_pencil_scene() -> PencilSceneState {
                 yaw: 0.6,
                 pitch: 0.35,
                 dist: 4.0,
+                width: PENCIL_RESOLUTION,
+                height: PENCIL_RESOLUTION,
             },
             basis: solved_basis(points, 0),
         },
@@ -1654,6 +1665,8 @@ pub fn probe(request: own VertexProbe) -> ProbeResponse {
             yaw: request.yaw,
             pitch: request.pitch,
             dist: request.dist,
+            width: PENCIL_RESOLUTION,
+            height: PENCIL_RESOLUTION,
         },
         basis: PencilBasis {
             generation: request.generation,

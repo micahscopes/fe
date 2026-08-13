@@ -269,6 +269,19 @@ impl PixelSample {
             v: 1.0 - self.y / resolution * 2.0,
         }
     }
+
+    /// Map this sample to a resolution-correct rectangular fragment plane.
+    /// The shorter backing-store axis retains the declared field of view, so
+    /// responsive surfaces neither crop a low-resolution square nor stretch a
+    /// non-square viewport. Browser code supplies only the measured extent;
+    /// this Fe construction owns the projection policy.
+    pub fn plane_extent(self, _ width: f32, _ height: f32) -> PlaneSample {
+        let scale: f32 = max(min(width, height), 1.0)
+        PlaneSample {
+            u: (self.x * 2.0 - width) / scale,
+            v: (height - self.y * 2.0) / scale,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -911,6 +911,29 @@ Origin: honesty audit of Claude Code session
   typed Fe quality policy driven by raw device/viewport/frame facts. The fixed
   host may report those facts; it must not choose the quality tier.
 
+- The first typed QCGA mobile-quality slice now executes rather than merely
+  naming that debt. Actual backing-store width/height enter the complete
+  resident Fe scene through `Param::extent_x/extent_y`; the shared
+  `PixelSample::plane_extent` construction preserves an isotropic field of
+  view on rectangular surfaces, and a zero-import Wasmtime geometry oracle
+  proves landscape, portrait, and square projections independently. Ordinary
+  Fe selects 64/2, 96/3, or 128/4 march/refinement budgets from those raw
+  extents. The production marcher uses real bounded `break` exits on hit and
+  far clip instead of spending the rest of a 128-iteration done-flag envelope.
+  This exposed a genuine Sonatina structurization gap rather than a reason to
+  contort the Fe source: the pinned `820f498b` revision lowers nested
+  conditional exits to the canonical SPIR-V loop merge, with exact phi
+  transfers and a browser-WGSL regression. Independent evidence executes 500
+  field samples and seven analytic-root rays through both full and 256-square
+  production policies, while the complete QCGA lifecycle/pick/drag/re-solve
+  suite remains 8/8. A fresh release publication emitted 45,659 bytes of QCGA
+  DE WGSL and 70,980 bytes of control Wasm, compiled 12 render bundles, and
+  verified 14 Fe modules / 71 deployment files; both real Chromium gallery/
+  SourceInspector and TodoMVC tapes passed. Camera/member/control projection
+  hoisting, marker-pass separation, raw device/frame capability facts, and
+  deletion of the temporary host ceiling remain the next mobile workload
+  slice; actual GPU pixel execution retains the named no-adapter qualification.
+
 This ledger records achieved evidence, not a relaxation of the phases or the
 Definition of done below.
 

@@ -76,6 +76,12 @@ fn ordered_sampling_executes_with_stratified_centroid_and_plane_orientation() {
     let plane_v = instance
         .get_typed_func::<(i32, i32, f32), f32>(&mut store, "ordered_plane_v")
         .expect("ordered_plane_v export");
+    let extent_u = instance
+        .get_typed_func::<(i32, i32, f32, f32), f32>(&mut store, "ordered_extent_u")
+        .expect("ordered_extent_u export");
+    let extent_v = instance
+        .get_typed_func::<(i32, i32, f32, f32), f32>(&mut store, "ordered_extent_v")
+        .expect("ordered_extent_v export");
 
     for py in 0..16 {
         for px in 0..16 {
@@ -125,6 +131,44 @@ fn ordered_sampling_executes_with_stratified_centroid_and_plane_orientation() {
             let centroid_x = offsets.iter().map(|sample| sample.0).sum::<f32>() / 4.0;
             let centroid_y = offsets.iter().map(|sample| sample.1).sum::<f32>() / 4.0;
             assert_eq!((centroid_x, centroid_y), (0.5, 0.5));
+        }
+    }
+
+    // A rectangular backing store must preserve one world-space unit per
+    // backing pixel on both axes. The shorter axis spans the canonical field
+    // of view and the longer axis reveals more scene instead of stretching or
+    // cropping it. These expectations are derived here rather than copied
+    // from the Fe helper.
+    for (width, height) in [(20.0f32, 10.0f32), (10.0, 20.0), (16.0, 16.0)] {
+        let scale = width.min(height).max(1.0);
+        for py in 0..height as i32 {
+            for px in 0..width as i32 {
+                let x = sample_x.call(&mut store, (px, py)).unwrap();
+                let y = sample_y.call(&mut store, (px, py)).unwrap();
+                let u = extent_u
+                    .call(&mut store, (px, py, width, height))
+                    .expect("extent u");
+                let v = extent_v
+                    .call(&mut store, (px, py, width, height))
+                    .expect("extent v");
+                let expected_u = (2.0 * x - width) / scale;
+                let expected_v = (height - 2.0 * y) / scale;
+                assert!((u - expected_u).abs() <= 1e-6);
+                assert!((v - expected_v).abs() <= 1e-6);
+
+                if px + 2 < width as i32 {
+                    let next = extent_u
+                        .call(&mut store, (px + 2, py, width, height))
+                        .expect("next extent u");
+                    assert!(((next - u) - 4.0 / scale).abs() <= 1e-6);
+                }
+                if py + 2 < height as i32 {
+                    let next = extent_v
+                        .call(&mut store, (px, py + 2, width, height))
+                        .expect("next extent v");
+                    assert!(((v - next) - 4.0 / scale).abs() <= 1e-6);
+                }
+            }
         }
     }
 }

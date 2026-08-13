@@ -226,8 +226,58 @@ fn production_qcga_de_matches_fields_and_independent_analytic_hits() {
         }
     }
 
+    for (width, height, march, refine) in [
+        (128.0, 256.0, 64, 2),
+        (256.0, 257.0, 96, 3),
+        (384.0, 240.0, 96, 3),
+        (385.0, 512.0, 128, 4),
+    ] {
+        assert_eq!(
+            call_i32(
+                &mut store,
+                &instance,
+                "de_quality_march_steps",
+                &[width, height],
+            ),
+            march,
+            "Fe must own the march tier for {width}x{height}",
+        );
+        assert_eq!(
+            call_i32(
+                &mut store,
+                &instance,
+                "de_quality_refinement_steps",
+                &[width, height],
+            ),
+            refine,
+            "Fe must own the refinement tier for {width}x{height}",
+        );
+    }
+
+    // The mobile tier is not accepted merely because it performs less work:
+    // execute the same rays through that exact production policy and retain
+    // the independently derived analytic classification/root oracle.
+    for (index, (q, origin, direction)) in rays.into_iter().enumerate() {
+        let mut args = q.to_vec();
+        args.extend(origin);
+        args.extend(direction);
+        args.extend([256.0, 256.0]);
+        let got_hit = call_i32(&mut store, &instance, "de_quality_trace_hit", &args);
+        let got_distance = call_f32(&mut store, &instance, "de_quality_trace_distance", &args);
+        match analytic_hit(q, origin, direction).filter(|distance| *distance <= 18.0) {
+            Some(want) => {
+                assert_eq!(got_hit, 1, "mobile-tier ray {index} should hit at {want}");
+                assert!(
+                    (got_distance - want).abs() <= 0.02,
+                    "mobile-tier ray {index}: iterative Fe distance {got_distance} != analytic root {want}",
+                );
+            }
+            None => assert_eq!(got_hit, 0, "mobile-tier ray {index} is an analytic miss"),
+        }
+    }
+
     eprintln!(
-        "QCGA DE oracle: {field_samples} independently evaluated fields + {} analytic-root rays ({hits} hits) green",
+        "QCGA DE oracle: {field_samples} independently evaluated fields + {} full/mobile analytic-root rays ({hits} hits) + Fe-owned quality tiers green",
         rays.len(),
     );
 }

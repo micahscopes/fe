@@ -360,9 +360,9 @@ fn qcga_scene_receipt(bundle: &WebBundle, event: SurfaceEventFixture) -> Vec<was
         .get_typed_func::<(i32, i32), i32>(&mut store, "fe_cabi_alloc")
         .unwrap();
 
-    let mut state = vec![wasmtime::Val::F32(0); 57];
-    state[4] = wasmtime::Val::I32(0);
-    state[56] = wasmtime::Val::I32(0);
+    let mut state = vec![wasmtime::Val::F32(0); 59];
+    state[6] = wasmtime::Val::I32(0);
+    state[58] = wasmtime::Val::I32(0);
     initialize
         .call(&mut store, &[], &mut state)
         .expect("execute shared QCGA initialization");
@@ -370,9 +370,9 @@ fn qcga_scene_receipt(bundle: &WebBundle, event: SurfaceEventFixture) -> Vec<was
 
     let pointer = alloc.call(&mut store, (52, 4)).unwrap() as usize;
     write_surface_event_batch(&memory, &mut store, pointer, &[event]);
-    let mut result = vec![wasmtime::Val::F32(0); 57];
-    result[4] = wasmtime::Val::I32(0);
-    result[56] = wasmtime::Val::I32(0);
+    let mut result = vec![wasmtime::Val::F32(0); 59];
+    result[6] = wasmtime::Val::I32(0);
+    result[58] = wasmtime::Val::I32(0);
     transition
         .call(
             &mut store,
@@ -2348,6 +2348,10 @@ fn qcga_pencil_de_compiles_as_a_fe_owned_iterative_fragment_surface() {
         "the DE view must retain its authored iterative march"
     );
     assert!(
+        bundle.wgsl.contains("break;"),
+        "completed DE rays must leave the generated shader loop instead of running a done-flag envelope"
+    );
+    assert!(
         bundle.wgsl.len() < 190_000,
         "the shared Fe QCGA DE view should remain under its initial 190 kB WGSL budget (got {})",
         bundle.wgsl.len(),
@@ -2359,7 +2363,7 @@ fn qcga_pencil_de_compiles_as_a_fe_owned_iterative_fragment_surface() {
         .expect("one fullscreen DE pass");
     assert_eq!(pass.source_entry, "distance_surface");
     assert_eq!(pass.layout.bindings.len(), 1);
-    assert_eq!(pass.layout.bindings[0].members.len(), 57);
+    assert_eq!(pass.layout.bindings[0].members.len(), 59);
     assert_eq!(
         pass.layout.bindings[0]
             .members
@@ -2371,6 +2375,8 @@ fn qcga_pencil_de_compiles_as_a_fe_owned_iterative_fragment_surface() {
             "yaw",
             "pitch",
             "dist",
+            "width",
+            "height",
             "generation",
             "cx",
             "cy",
@@ -2453,18 +2459,32 @@ fn qcga_pencil_de_compiles_as_a_fe_owned_iterative_fragment_surface() {
         ref other => panic!("QCGA scene leaf {index} is not i32: {other:?}"),
     };
     assert_eq!(
-        [f32_at(0), f32_at(1), f32_at(2), f32_at(3)],
-        [0.15, 0.6 + 17.0 * 0.008, 0.35 - 9.0 * 0.008, 4.0 * 0.88],
+        [
+            f32_at(0),
+            f32_at(1),
+            f32_at(2),
+            f32_at(3),
+            f32_at(4),
+            f32_at(5)
+        ],
+        [
+            0.15,
+            0.6 + 17.0 * 0.008,
+            0.35 - 9.0 * 0.008,
+            4.0 * 0.88,
+            512.0,
+            512.0,
+        ],
         "the canonical DE transition must apply Fe-owned orbit and dolly policy",
     );
-    assert_eq!(i32_at(4), 0, "camera motion must not re-solve the pencil");
+    assert_eq!(i32_at(6), 0, "camera motion must not re-solve the pencil");
     assert_eq!(
-        f32_at(8),
+        f32_at(10),
         1.0,
         "the initial rank-8 pencil certificate must survive"
     );
     assert_eq!(
-        i32_at(56),
+        i32_at(58),
         0,
         "camera motion must not invent a picked control"
     );

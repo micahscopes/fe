@@ -19,3 +19,11 @@ pub fn ordered_plane_u(_ px: i32, _ py: i32, _ resolution: f32) -> f32 {
 pub fn ordered_plane_v(_ px: i32, _ py: i32, _ resolution: f32) -> f32 {
     PixelSample::ordered_2x2(px, py).plane(resolution).v
 }
+
+pub fn ordered_extent_u(_ px: i32, _ py: i32, _ width: f32, _ height: f32) -> f32 {
+    PixelSample::ordered_2x2(px, py).plane_extent(width, height).u
+}
+
+pub fn ordered_extent_v(_ px: i32, _ py: i32, _ width: f32, _ height: f32) -> f32 {
+    PixelSample::ordered_2x2(px, py).plane_extent(width, height).v
+}
