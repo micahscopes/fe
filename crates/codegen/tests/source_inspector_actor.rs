@@ -7,13 +7,14 @@
 use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
-    RESIDENT_ACTOR_INITIALIZE_EXPORT, RESIDENT_ACTOR_PROJECT_EXPORT,
-    RESIDENT_ACTOR_TRANSITION_EXPORT, compile_resident_actor,
+    compile_resident_actor, emit_materialized_task_adapter_js, HOST_COMPLETION_RUNTIME_JS,
+    MATERIALIZED_TASK_RUNTIME_JS, RESIDENT_ACTOR_INITIALIZE_EXPORT, RESIDENT_ACTOR_PROJECT_EXPORT,
+    RESIDENT_ACTOR_TRANSITION_EXPORT,
 };
 use hir::hir_def::HirIngot;
 use url::Url;
 
-const STATE_LEAVES: usize = 19;
+const STATE_LEAVES: usize = 15;
 
 fn i32_results(values: &[wasmtime::Val]) -> Vec<i32> {
     values
@@ -39,10 +40,6 @@ struct Model {
     prevent_default: bool,
     focus_close: bool,
     revision: u32,
-    surface_discovered: u32,
-    surface_next: u32,
-    surface_waiting: bool,
-    surface_issue: bool,
 }
 
 impl Default for Model {
@@ -60,10 +57,6 @@ impl Default for Model {
             prevent_default: false,
             focus_close: false,
             revision: 0,
-            surface_discovered: 0,
-            surface_next: 0,
-            surface_waiting: false,
-            surface_issue: false,
         }
     }
 }
@@ -82,33 +75,6 @@ fn reduce(model: &mut Model, event: Event<'_>) {
     model.issue_load = false;
     model.prevent_default = false;
     model.focus_close = false;
-    model.surface_issue = false;
-
-    if (9..=12).contains(&event.kind) && event.request > 0 {
-        let sequence = event.request - 1;
-        assert!(sequence < 32, "model surface token bound");
-        let bit = 1 << sequence;
-        match event.kind {
-            9 => model.surface_discovered |= bit,
-            10..=12 if model.surface_waiting && sequence == model.surface_next => {
-                model.surface_waiting = false;
-                model.surface_next += 1;
-            }
-            _ => {}
-        }
-    }
-    if event.kind == 1 {
-        model.surface_discovered = 0;
-        model.surface_waiting = false;
-    }
-    if event.kind != 1
-        && !model.surface_waiting
-        && model.surface_next < 32
-        && model.surface_discovered & (1 << model.surface_next) != 0
-    {
-        model.surface_waiting = true;
-        model.surface_issue = true;
-    }
 
     match event.kind {
         0 => {
@@ -159,7 +125,6 @@ enum Operation {
     Href(u32, String),
     LoadText(u32, String),
     LoadBytes(u32, String),
-    ActivateSurface(u32, u32),
 }
 
 fn decode(bytes: &[u8]) -> Vec<Operation> {
@@ -188,10 +153,6 @@ fn decode(bytes: &[u8]) -> Vec<Operation> {
     while cursor < bytes.len() {
         let opcode = byte(bytes, &mut cursor);
         match opcode {
-            14 => operations.push(Operation::ActivateSurface(
-                word(bytes, &mut cursor),
-                word(bytes, &mut cursor),
-            )),
             4 | 11 | 12 | 13 => {
                 let id = word(bytes, &mut cursor);
                 let value = text(bytes, &mut cursor);
@@ -241,9 +202,6 @@ fn expected_projection(model: &Model) -> (u32, u32, u32, Vec<Operation>) {
             Operation::LoadText(model.pending, model.url.clone())
         });
     }
-    if model.surface_issue {
-        operations.push(Operation::ActivateSurface(model.surface_next, 30_000));
-    }
     (
         mask,
         u32::from(model.focus_close) * 5,
@@ -277,11 +235,101 @@ fn source_inspector_owns_selection_loading_stale_response_and_presentation_polic
     assert_eq!(artifact.contract.actor, "SourceInspector");
     assert_eq!(artifact.contract.event_leaf_count, 9);
     assert_eq!(artifact.contract.state_leaf_count, STATE_LEAVES);
+    assert_eq!(
+        artifact.contract.scoped_task_source_entries,
+        ["activate_surfaces"]
+    );
+    let [surface_task] = artifact.scoped_tasks.as_slice() else {
+        panic!("SourceInspector must materialize exactly one surface task")
+    };
+    assert!(surface_task.input.is_empty());
+
+    if std::process::Command::new("bun")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        let directory = tempfile::tempdir().unwrap();
+        let wasm_path = directory.path().join("source-inspector.wasm");
+        let task_runtime_path = directory.path().join("materialized-task.js");
+        let host_runtime_path = directory.path().join("host-completion.js");
+        let adapter_path = directory.path().join("task-adapter.mjs");
+        let test_path = directory.path().join("surface-task.mjs");
+        let adapter =
+            emit_materialized_task_adapter_js(&artifact.scoped_tasks, "./materialized-task.js")
+                .unwrap()
+                .expect("SourceInspector scoped task adapter");
+        std::fs::write(&wasm_path, &artifact.wasm).unwrap();
+        std::fs::write(&task_runtime_path, MATERIALIZED_TASK_RUNTIME_JS).unwrap();
+        std::fs::write(&host_runtime_path, HOST_COMPLETION_RUNTIME_JS).unwrap();
+        std::fs::write(&adapter_path, adapter).unwrap();
+        let script = format!(
+            r#"
+import {{ createMaterializedTaskRegistry }} from {adapter_url:?};
+import {{ createHostCompletionBroker }} from {host_runtime_url:?};
+const tokens = [11n, 22n, 0n];
+const loads = [];
+const broker = createHostCompletionBroker({{
+  surface: {{
+    next: async signal => {{
+      if (signal.aborted) throw new DOMException("cancelled", "AbortError");
+      return tokens.shift();
+    }},
+    load: async (token, signal) => {{
+      if (signal.aborted) throw new DOMException("cancelled", "AbortError");
+      loads.push(token);
+      if (token === 22n) throw new Error("synthetic surface failure");
+      return token;
+    }},
+  }},
+}});
+const bytes = await Bun.file({wasm_path:?}).arrayBuffer();
+const {{ instance }} = await WebAssembly.instantiate(bytes, broker.imports);
+const tasks = createMaterializedTaskRegistry(instance.exports);
+if (Object.keys(tasks).join() !== "activate_surfaces") throw new Error("task registry drift");
+const output = await broker.run(tasks.activate_surfaces, []);
+if (output.length !== 1 || output[0] !== 2) throw new Error(`Fe surface policy returned ${{output}}`);
+if (loads.length !== 2 || loads[0] !== 11n || loads[1] !== 22n) throw new Error("host reordered surface tokens");
+if (tokens.length !== 0) throw new Error("Fe did not pull the end sentinel");
+if (broker.activeCount() !== 0 || broker.cancelAll() !== 0) throw new Error("surface task leaked pending work");
+"#,
+            adapter_url = format!("file://{}", adapter_path.display()),
+            host_runtime_url = format!("file://{}", host_runtime_path.display()),
+            wasm_path = wasm_path.display().to_string(),
+        );
+        std::fs::write(&test_path, script).unwrap();
+        let output = std::process::Command::new("bun")
+            .arg("run")
+            .arg(&test_path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "Fe-authored surface task failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
 
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, &artifact.wasm).unwrap();
     let mut store = wasmtime::Store::new(&engine, ());
-    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+    let mut linker = wasmtime::Linker::new(&engine);
+    linker
+        .func_wrap("fe:web-surface", "next_begin", || -> i32 { 0 })
+        .unwrap();
+    linker
+        .func_wrap("fe:web-surface", "load_begin", |_surface: i64| -> i32 { 0 })
+        .unwrap();
+    linker
+        .func_wrap("fe:host", "sleep_begin", |_delay: i64| -> i32 { 0 })
+        .unwrap();
+    linker
+        .func_wrap("fe:host", "race_begin", |_left: i32, _right: i32| -> i32 {
+            0
+        })
+        .unwrap();
+    let instance = linker.instantiate(&mut store, &module).unwrap();
     let memory = instance.get_memory(&mut store, "memory").unwrap();
     let initialize = instance
         .get_func(&mut store, RESIDENT_ACTOR_INITIALIZE_EXPORT)
@@ -321,8 +369,9 @@ fn source_inspector_owns_selection_loading_stale_response_and_presentation_polic
             detail: 0,
             text: "",
         },
-        // Discovery can arrive out of order. Fe waits for sequence zero,
-        // activates one surface, and advances only on live/error/timeout.
+        // Legacy surface lifecycle events are valid transport facts, but the
+        // canonical actor no longer stores or interprets them. Its scoped Fe
+        // task owns sequencing through typed Pending/TaskOutcome values.
         Event {
             kind: 9,
             target: 0,
@@ -451,8 +500,8 @@ fn source_inspector_owns_selection_loading_stale_response_and_presentation_polic
             detail: 0,
             text: "",
         },
-        // Reconnection deliberately clears discovery/waiting but preserves the
-        // Fe cursor. Rediscovery resumes at the next incomplete surface.
+        // Reconnection restarts the actor-scoped loader task; lifecycle events
+        // remain irrelevant to the resident reducer.
         Event {
             kind: 0,
             target: 0,
@@ -547,25 +596,6 @@ fn source_inspector_owns_selection_loading_stale_response_and_presentation_polic
         );
         assert_eq!(actual[13] != 0, model.focus_close, "focus at {index}");
         assert_eq!(actual[14] as u32, model.revision, "revision at {index}");
-        assert_eq!(
-            actual[15] as u32, model.surface_discovered,
-            "surface discovery mask at {index}"
-        );
-        assert_eq!(
-            actual[16] as u32, model.surface_next,
-            "next surface at {index}"
-        );
-        assert_eq!(
-            actual[17] != 0,
-            model.surface_waiting,
-            "surface waiting state at {index}"
-        );
-        assert_eq!(
-            actual[18] != 0,
-            model.surface_issue,
-            "surface activation effect at {index}"
-        );
-
         let patch = project.call(&mut store, ()).unwrap();
         let expected = expected_projection(&model);
         assert_eq!(

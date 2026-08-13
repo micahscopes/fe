@@ -116,10 +116,11 @@ impl<A: Copy> ComponentEvent<A> {
     }
 }
 
-/// Reusable Fe-owned policy for activating compiler-correlated render
-/// surfaces in declaration order. The fixed browser boundary reports only
-/// discovery/completion facts and realizes the resulting activation effect.
-/// The current compact policy intentionally supports up to 32 surfaces.
+/// Legacy compatibility policy for opcode-14 component artifacts. New
+/// resident code should use `std::web::SurfaceLoader` from a `ScopedTask`, so
+/// discovery/completion are typed pending values rather than component events
+/// and projection commands. This append-only form remains for already-compiled
+/// components and intentionally supports at most 32 surfaces.
 pub struct SequentialSurfaceActivation {
     pub discovered: u32,
     pub next: u32,
@@ -499,18 +500,16 @@ impl ComponentWriter {
         writer.bytes(value: value)
     }
 
-    /// Request a poster-only load of one compiler-correlated surface.
-    /// Completion or failure returns through the append-only surface event
-    /// kinds; ordering, deadline, and fail-open policy remain Fe-owned.
+    /// Legacy opcode-14 request for a poster-only load. New resident code uses
+    /// the typed `SurfaceLoader` pending authority from an actor `ScopedTask`.
+    /// This encoder remains append-only for already-compiled components.
     pub fn load_surface(self, sequence: u32, timeout_ms: u32) -> Self {
         let writer = self.byte(value: 14)
         let writer = writer.word(value: sequence)
         writer.word(value: timeout_ms)
     }
 
-    /// Compatibility spelling for the original opcode-14 API. Sequenced
-    /// gallery callers now use `load_surface`; the fixed wire opcode remains
-    /// append-only for already-compiled components.
+    /// Compatibility spelling for the original opcode-14 API.
     pub fn activate_surface(self, sequence: u32, timeout_ms: u32) -> Self {
         self.load_surface(sequence: sequence, timeout_ms: timeout_ms)
     }

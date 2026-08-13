@@ -862,8 +862,28 @@ Origin: honesty audit of Claude Code session
   cancellation under Bun. This supplies the timeout/select primitive needed by
   sequential activation; a typed surface/event begin authority is still needed
   before migrating the gallery policy itself.
-- A mobile-safety follow-up keeps the sequential policy in the resident Fe
-  shell but changes its fixed opcode-14 realization from cold-to-live to
+- Sequential gallery poster loading now consumes that runtime-control spine.
+  `std::web::SurfaceLoader<WasmBackend>` exposes only typed pending operations
+  for pulling the next opaque compiler-correlated `SurfaceToken` and loading
+  it; the resident SourceInspector runs the declaration loop as an actor
+  `ScopedTask` and owns ordering, the `Race` against its 30-second `Timer`,
+  fail-open continuation, end-of-stream handling, and disconnect cancellation.
+  The fixed browser adapter owns only declaration correlation, DOM arrival
+  observation, `<fe-surface>.load()` realization, and abort cleanup. The
+  canonical actor's four discovery/cursor/waiting/effect state leaves and all
+  opcode-14 projection are deleted. Opcode 14 remains explicitly labeled as an
+  append-only legacy component adapter rather than silently becoming the new
+  path. An independent compiled Fe -> generated continuation -> Bun broker
+  oracle proves ordered pulls, success, typed failure recovery, end-sentinel
+  consumption, and zero leaked pending work; the resident reducer decoder now
+  rejects opcode 14. A fresh optimized gallery publication compiled 14 Fe
+  modules / 12 render bundles and verified 71 deployment files. Its real
+  Chromium tape observed every ready-or-unavailable poster settling in exact
+  compiler-derived order, including fail-open progress on this machine's three
+  unavailable GPU-only passes.
+- A mobile-safety follow-up kept the then-current sequential policy in the
+  resident Fe shell but changed its fixed opcode-14 realization from
+  cold-to-live to
   poster-only loading. Poster capture and off-viewport suspension now destroy
   retained GPU buffers/pipeline references, pointer capture is unwound across
   suspension/cancellation, and the narrow gallery layout no longer overflows
@@ -1108,9 +1128,11 @@ reserved-name, positional, scalar-only ABI is bespoke surface area to remove.
 
 ### Canonical `demos/gallery.html`
 
-- Ten tiles are sourced from Fe ingots.
-- Eight tiles have typed Fe `SurfaceTransition` controls and Fe-declared
-  `LatestPerFrame` scheduling. None emits the legacy JSON `control` block.
+- Thirteen figures are sourced from Fe ingots: twelve render actors plus the
+  resident TodoMVC component.
+- Every interactive render tile has typed Fe `SurfaceTransition` controls and
+  Fe-declared `LatestPerFrame` scheduling. None emits the legacy JSON `control`
+  block.
 - Known-color and rollcall are pure Fe-derived GPU graphs with no Wasm module.
 - Perturbational Mandelbrot is a two-pass Fe GPU graph; its Wasm is the typed
   Fe control lane only.
@@ -1120,14 +1142,21 @@ reserved-name, positional, scalar-only ABI is bespoke surface area to remove.
   transitional CSS only. The source/WGSL/Wasm/manifest viewer is a resident Fe
   `SourceInspector`; the fixed render runtime still consumes the transitional
   render manifest today.
-- `qcga_pencil` remains excluded because paired authored-raster backend
-  lowering and typed pick/message lanes have not landed. Its nominal
-  vertex/fragment interface is now compiler-checked.
+- The QCGA Pencil is canonical and consolidated into one iterative DE render
+  actor. Its solved state, camera, projection, control-point pick/drag/re-solve,
+  exact-gradient material, and scheduling are Fe; the former duplicate raster
+  actor has been retired while its projection survives only as an independent
+  zero-import oracle.
 - DEC's Worker/message-shaped Fe functions derive an ordinary generated
   browser actor, and the gallery Chromium gate executes `d0` through its real
   Worker/Wasm lane. Its Fe-declared MainThread `submit_view` capability is
   present but explicitly unavailable until general WebGPU orchestration lands;
   the visible picture still uses the separately projected fragment actor.
+- SourceInspector is also the resident outer gallery shell. Its actor-scoped
+  Fe task owns sequential poster policy through typed pending surface loads and
+  a Fe `Race`/`Timer`; the host performs only compiler correlation and browser
+  load realization. Full routing, tile lifecycle, and component-to-component
+  orchestration remain open.
 
 ### Legacy strata
 

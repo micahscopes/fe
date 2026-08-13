@@ -1,0 +1,15 @@
+//! Private host-import surface for compiler-correlated render declarations.
+//!
+//! Each operation mints an ordinary browser-completed `Pending` token. The
+//! fixed host may enumerate declarations and realize one poster load, but it
+//! cannot choose sequencing, timeout, retry, or cancellation policy.
+
+use core::pending::Pending
+use ingot::wasm::WasmBackend
+use super::SurfaceToken
+
+#[wasm_import(module = "fe:web-surface")]
+extern {
+    pub unsafe fn next_begin() -> Pending<WasmBackend, SurfaceToken>
+    pub unsafe fn load_begin(_ surface: SurfaceToken) -> Pending<WasmBackend, u64>
+}

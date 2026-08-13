@@ -75,9 +75,14 @@ export function createHostCompletionBroker(options = {}) {
   const clock = options.clock ?? defaultClock;
   const schedule = options.schedule ?? setTimeout;
   const cancelSchedule = options.cancelSchedule ?? clearTimeout;
+  const surface = options.surface;
   if (typeof clock !== "function" || typeof schedule !== "function"
       || typeof cancelSchedule !== "function") {
     throw new TypeError("host completion clock and scheduling hooks must be callable");
+  }
+  if (surface !== undefined && (!surface || typeof surface !== "object"
+      || typeof surface.next !== "function" || typeof surface.load !== "function")) {
+    throw new TypeError("host completion surface hooks must provide next and load");
   }
 
   let nextToken = 0;
@@ -153,6 +158,38 @@ export function createHostCompletionBroker(options = {}) {
   };
 
   const beginReceive = () => allocate("receive").token | 0;
+
+  const beginSurfaceOperation = (kind, invoke) => {
+    if (surface === undefined) {
+      throw new Error(`fe:web-surface::${kind}_begin requires a surface capability`);
+    }
+    const slot = allocate(`surface-${kind}`);
+    const controller = new AbortController();
+    slot.cancelWork = () => controller.abort();
+    Promise.resolve().then(() => invoke(controller.signal)).then(value => {
+      settle(slot, taskSuccess([u64(value, `surface ${kind} result`)]));
+    }).catch(() => {
+      // The browser boundary deliberately reports only a stable typed failure
+      // fact. Error strings, DOM identities, and retry policy do not become a
+      // second application protocol; Fe decides how a failed operation affects
+      // the task.
+      settle(slot, taskFailure([1]));
+    });
+    return slot.token | 0;
+  };
+
+  const beginSurfaceNext = () => beginSurfaceOperation(
+    "next",
+    signal => surface.next(signal),
+  );
+
+  const beginSurfaceLoad = (rawSurface) => {
+    if (typeof rawSurface !== "bigint") {
+      throw new TypeError("fe:web-surface::load_begin requires an i64 Wasm carrier");
+    }
+    const checked = BigInt.asUintN(64, rawSurface);
+    return beginSurfaceOperation("load", signal => surface.load(checked, signal));
+  };
 
   const beginRace = (rawLeft, rawRight) => {
     if (!Number.isInteger(rawLeft) || !Number.isInteger(rawRight)) {
@@ -317,8 +354,16 @@ export function createHostCompletionBroker(options = {}) {
     },
   });
 
+  const surfaceImports = Object.freeze({
+    next_begin: beginSurfaceNext,
+    load_begin: beginSurfaceLoad,
+  });
+
+  const imports = { "fe:host": host };
+  if (surface !== undefined) imports["fe:web-surface"] = surfaceImports;
+
   return Object.freeze({
-    imports: Object.freeze({ "fe:host": host }),
+    imports: Object.freeze(imports),
     run,
     post,
     failNextReceive,

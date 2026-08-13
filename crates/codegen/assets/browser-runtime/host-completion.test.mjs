@@ -70,6 +70,65 @@ function raceMachine(broker, delay) {
 }
 
 describe("browser HostTimer/Recv completion broker", () => {
+  test("typed surface hooks resume Fe with opaque u64 results and failures", async () => {
+    const seen = [];
+    const broker = createHostCompletionBroker({
+      surface: {
+        next: async signal => {
+          expect(signal.aborted).toBeFalse();
+          return 41n;
+        },
+        load: async (token, signal) => {
+          seen.push(token);
+          expect(signal.aborted).toBeFalse();
+          if (token === 7n) throw new Error("browser surface failed");
+          return token + 1n;
+        },
+      },
+    });
+    const next = machine(() => [
+      1, 0n, broker.imports["fe:web-surface"].next_begin() >>> 0,
+    ]);
+    expect(await broker.run(next, [])).toEqual([41n]);
+
+    const loaded = machine(() => [
+      1, 0n, broker.imports["fe:web-surface"].load_begin(5n) >>> 0,
+    ]);
+    expect(await broker.run(loaded, [])).toEqual([6n]);
+
+    const failed = machine(() => [
+      1, 0n, broker.imports["fe:web-surface"].load_begin(7n) >>> 0,
+    ]);
+    expect(await broker.run(failed, [])).toEqual([89n]);
+    expect(seen).toEqual([5n, 7n]);
+    expect(broker.activeCount()).toBe(0);
+  });
+
+  test("surface hook cancellation aborts host observation exactly once", async () => {
+    let aborts = 0;
+    const broker = createHostCompletionBroker({
+      surface: {
+        next: () => 0n,
+        load: (_token, signal) => new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => {
+            aborts += 1;
+            reject(new DOMException("cancelled", "AbortError"));
+          }, { once: true });
+        }),
+      },
+    });
+    const loading = machine(() => [
+      1, 0n, broker.imports["fe:web-surface"].load_begin(3n) >>> 0,
+    ]);
+    const controller = new AbortController();
+    const result = broker.run(loading, [], { signal: controller.signal });
+    await Promise.resolve();
+    controller.abort();
+    await expect(result).rejects.toBeInstanceOf(Error);
+    expect(aborts).toBe(1);
+    expect(broker.activeCount()).toBe(0);
+  });
+
   test("a real timer resumes the opaque Fe continuation", async () => {
     const broker = createHostCompletionBroker();
     const timer = machine(() => [1, 0n, broker.imports["fe:host"].sleep_begin(1n) >>> 0]);

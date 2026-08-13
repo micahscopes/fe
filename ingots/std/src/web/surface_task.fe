@@ -1,0 +1,46 @@
+//! Typed runtime-control authority for compiler-correlated render surfaces.
+//!
+//! The browser reports opaque declaration-order tokens and realizes one
+//! poster-only load. Fe owns iteration, timeout/race, failure, cancellation,
+//! and retry policy inside an actor `ScopedTask`.
+
+use core::backend::Backend
+use core::marker::Copy
+use core::pending::Pending
+use ingot::wasm::WasmBackend
+use raw::{load_begin as raw_load_begin, next_begin as raw_next_begin}
+
+/// Opaque one-based correlation token. Zero means the fixed declaration source
+/// is exhausted. Application code never constructs or numerically interprets
+/// this value.
+pub struct SurfaceToken { raw: u64 }
+
+impl Copy for SurfaceToken {}
+
+impl SurfaceToken {
+    pub fn is_end(self) -> bool {
+        self.raw == 0
+    }
+}
+
+/// Pull-shaped standards authority used by a resident actor task. `next_begin`
+/// reports the next compiler-correlated declaration; `load_begin` consumes no
+/// application URL or selector and completes after its poster is ready.
+pub trait SurfaceLoader<B: Backend> {
+    fn next_begin(mut self) -> Pending<B, SurfaceToken>
+    fn load_begin(mut self, _ surface: SurfaceToken) -> Pending<B, u64>
+}
+
+/// Browser realization. It is capability evidence only; the fixed host owns
+/// DOM observation and `<fe-surface>.load()`, never ordering/timeout policy.
+pub struct BrowserSurfaceLoader {}
+
+impl SurfaceLoader<WasmBackend> for BrowserSurfaceLoader {
+    fn next_begin(mut self) -> Pending<WasmBackend, SurfaceToken> {
+        raw_next_begin()
+    }
+
+    fn load_begin(mut self, _ surface: SurfaceToken) -> Pending<WasmBackend, u64> {
+        raw_load_begin(surface)
+    }
+}

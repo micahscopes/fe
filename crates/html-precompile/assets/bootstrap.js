@@ -228,6 +228,8 @@ export function decodeComponentCommands(bytes) {
         operations.push({ opcode, target: word() });
         break;
       case 14:
+        // Append-only legacy component ABI. Canonical resident components use
+        // the typed fe:web-surface pending authority from a ScopedTask.
         operations.push({ opcode, sequence: word(), timeout: word() });
         break;
       default:
@@ -259,9 +261,12 @@ export class FeComponentElement extends FeHTMLElement {
     this._surfaceObserver = null;
     this._discoveredSurfaces = new Set();
     this._surfaceLoads = new Map();
+    this._surfaceTaskDeclarations = [];
+    this._surfaceTaskCursor = 0;
     this._scopedTaskMachines = null;
     this._scopedTaskBroker = null;
     this._scopedTaskLifetime = null;
+    this._typedSurfaceTasks = false;
     this._readyPromise = new Promise((resolve, reject) => {
       this._resolveReady = resolve;
       this._rejectReady = reject;
@@ -290,6 +295,8 @@ export class FeComponentElement extends FeHTMLElement {
       clearTimeout(load.timer);
     }
     this._surfaceLoads.clear();
+    this._surfaceTaskDeclarations = [];
+    this._surfaceTaskCursor = 0;
     for (const controller of this._resourceLoads) controller.abort();
     this._resourceLoads.clear();
     this._scopedTaskLifetime?.abort();
@@ -335,6 +342,7 @@ export class FeComponentElement extends FeHTMLElement {
     }
     this._scopedTaskMachines = machines;
     this._scopedTaskBroker = broker;
+    this._typedSurfaceTasks = Object.hasOwn(broker.imports ?? {}, "fe:web-surface");
     if (this._active) this._startScopedTasks();
   }
 
@@ -347,7 +355,7 @@ export class FeComponentElement extends FeHTMLElement {
     this._active = true;
     this._installListeners();
     this._send(COMPONENT_EVENT.connected, 0, 0, 0, 0, 0, performance.now());
-    this._discoverSurfaces();
+    if (!this._typedSurfaceTasks) this._discoverSurfaces();
     this._startScopedTasks();
     this._resolveReady(this);
     this.dispatchEvent(new CustomEvent("fe-ready", { detail: this }));
@@ -357,6 +365,24 @@ export class FeComponentElement extends FeHTMLElement {
     if (!this._active || !this._scopedTaskMachines || this._scopedTaskLifetime) return;
     const lifetime = new AbortController();
     this._scopedTaskLifetime = lifetime;
+    const surfaceDeclarations = typeof this.querySelectorAll === "function"
+      ? componentElements(
+          this,
+          this,
+          'script[type="application/fe+wasm"][data-fe-sequence]',
+        )
+      : [];
+    this._surfaceTaskDeclarations = surfaceDeclarations.map(script => {
+      const sequence = Number(script.getAttribute("data-fe-sequence"));
+      if (!Number.isInteger(sequence) || sequence < 0 || sequence >= 32) {
+        throw new Error("sequenced Fe render declarations require an index in [0, 31]");
+      }
+      return sequence;
+    });
+    if (new Set(this._surfaceTaskDeclarations).size !== this._surfaceTaskDeclarations.length) {
+      throw new Error("sequenced Fe render declarations require unique indices");
+    }
+    this._surfaceTaskCursor = 0;
     for (const machine of this._scopedTaskMachines) {
       this._scopedTaskBroker.run(machine, [], { signal: lifetime.signal }).catch(error => {
         if (error?.name !== "AbortError") this._fail(error);
@@ -391,24 +417,26 @@ export class FeComponentElement extends FeHTMLElement {
     on("change", COMPONENT_EVENT.change);
     on("submit", COMPONENT_EVENT.submit);
     on("keydown", COMPONENT_EVENT.keyDown);
-    const onSurface = (type, kind) => this.addEventListener(type, event => {
-      try {
-        if (!eventBelongsToComponent(event, this)) return;
-        const sequence = this._surfaceSequence(event.target);
-        if (sequence === null || !this._surfaceLoads.has(sequence)) return;
-        const load = this._surfaceLoads.get(sequence);
-        clearTimeout(load.timer);
-        this._surfaceLoads.delete(sequence);
-        this._send(kind, 0, sequence + 1, 0, 0, 0, event.timeStamp);
-      } catch (error) {
-        this._fail(error);
+    if (!this._typedSurfaceTasks) {
+      const onSurface = (type, kind) => this.addEventListener(type, event => {
+        try {
+          if (!eventBelongsToComponent(event, this)) return;
+          const sequence = this._surfaceSequence(event.target);
+          if (sequence === null || !this._surfaceLoads.has(sequence)) return;
+          const load = this._surfaceLoads.get(sequence);
+          clearTimeout(load.timer);
+          this._surfaceLoads.delete(sequence);
+          this._send(kind, 0, sequence + 1, 0, 0, 0, event.timeStamp);
+        } catch (error) {
+          this._fail(error);
+        }
+      }, { signal: controller.signal });
+      onSurface("fe-ready", COMPONENT_EVENT.surfaceLive);
+      onSurface("fe-error", COMPONENT_EVENT.surfaceError);
+      if (typeof MutationObserver !== "undefined") {
+        this._surfaceObserver = new MutationObserver(() => this._discoverSurfaces());
+        this._surfaceObserver.observe(this, { childList: true, subtree: true });
       }
-    }, { signal: controller.signal });
-    onSurface("fe-ready", COMPONENT_EVENT.surfaceLive);
-    onSurface("fe-error", COMPONENT_EVENT.surfaceError);
-    if (typeof MutationObserver !== "undefined") {
-      this._surfaceObserver = new MutationObserver(() => this._discoverSurfaces());
-      this._surfaceObserver.observe(this, { childList: true, subtree: true });
     }
   }
 
@@ -434,6 +462,83 @@ export class FeComponentElement extends FeHTMLElement {
         performance.now(),
       );
     }
+  }
+
+  _nextSurfaceTask(signal) {
+    if (signal.aborted) throw new DOMException("surface iteration cancelled", "AbortError");
+    if (!this._active) throw new Error("surface iteration requires a connected Fe component");
+    if (this._surfaceTaskCursor >= this._surfaceTaskDeclarations.length) return 0n;
+    const sequence = this._surfaceTaskDeclarations[this._surfaceTaskCursor];
+    this._surfaceTaskCursor += 1;
+    // Zero is the typed end sentinel. The declaration's actual sequence stays
+    // entirely inside this fixed capability adapter and is opaque to Fe.
+    return BigInt(sequence + 1);
+  }
+
+  async _loadSurfaceTask(token, signal) {
+    if (typeof token !== "bigint" || token <= 0n || token > 32n) {
+      throw new TypeError("surface load requires a nonzero opaque token");
+    }
+    const sequence = Number(token - 1n);
+    if (!this._surfaceTaskDeclarations.includes(sequence)) {
+      throw new TypeError("surface load token does not name a declared render surface");
+    }
+    const findSurface = () => componentElement(
+      this,
+      this,
+      `fe-surface[data-fe-sequence="${sequence}"]`,
+    );
+    let surface = findSurface();
+    if (!surface) {
+      surface = await new Promise((resolve, reject) => {
+        const observer = new MutationObserver(() => {
+          const candidate = findSurface();
+          if (candidate) finish(candidate);
+        });
+        const onAbort = () => finish(undefined, new DOMException(
+          "surface load cancelled",
+          "AbortError",
+        ));
+        const finish = (value, error) => {
+          observer.disconnect();
+          signal.removeEventListener("abort", onAbort);
+          if (error) reject(error);
+          else resolve(value);
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+        if (signal.aborted) {
+          onAbort();
+          return;
+        }
+        observer.observe(this, { childList: true, subtree: true });
+        const candidate = findSurface();
+        if (candidate) finish(candidate);
+      });
+    }
+    if (typeof surface.load !== "function") {
+      throw new Error("correlated Fe render surface has no fixed load capability");
+    }
+    await new Promise((resolve, reject) => {
+      const onAbort = () => finish(undefined, new DOMException(
+        "surface load cancelled",
+        "AbortError",
+      ));
+      const finish = (value, error) => {
+        signal.removeEventListener("abort", onAbort);
+        if (error) reject(error);
+        else resolve(value);
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      Promise.resolve(surface.load()).then(
+        value => finish(value),
+        error => finish(undefined, error),
+      );
+    });
+    return token;
   }
 
   _writeEventText(value, limit = COMPONENT_INPUT_CAPACITY) {
@@ -612,6 +717,7 @@ export class FeComponentElement extends FeHTMLElement {
         continue;
       }
       if (operation.opcode === 14) {
+        // Legacy artifacts only; the canonical gallery cannot reach this path.
         this._loadSurface(operation);
         continue;
       }
@@ -823,10 +929,11 @@ async function runFeComponent(script, instance, scopedTasks) {
     component = document.createElement("fe-component");
     script.insertAdjacentElement("afterend", component);
   }
-  const ready = component.attachFeInstance(instance);
   if (scopedTasks) {
+    scopedTasks.surfaceScope.component = component;
     component.attachFeScopedTasks(scopedTasks.machines, scopedTasks.broker);
   }
+  const ready = component.attachFeInstance(instance);
   await ready;
   return component;
 }
@@ -932,9 +1039,30 @@ async function run(element) {
             typeof taskModule.createHostCompletionBroker !== "function") {
           throw new Error("compiler-published scoped-task package has an invalid fixed interface");
         }
+        const surfaceScope = { component: null };
+        const needsSurfaceCapability = WebAssembly.Module.imports(module).some(
+          value => value.module === "fe:web-surface",
+        );
+        const brokerOptions = needsSurfaceCapability ? {
+          surface: {
+            next: signal => {
+              if (!surfaceScope.component) {
+                throw new Error("surface task started before its Fe component was attached");
+              }
+              return surfaceScope.component._nextSurfaceTask(signal);
+            },
+            load: (token, signal) => {
+              if (!surfaceScope.component) {
+                throw new Error("surface task started before its Fe component was attached");
+              }
+              return surfaceScope.component._loadSurfaceTask(token, signal);
+            },
+          },
+        } : {};
         scopedTasks = {
           taskModule,
-          broker: taskModule.createHostCompletionBroker(),
+          broker: taskModule.createHostCompletionBroker(brokerOptions),
+          surfaceScope,
           machines: null,
         };
       }

@@ -9,8 +9,13 @@
 use std::web::component::{
     BrowserBytes, BrowserPtr, BrowserString, ComponentEvent, ComponentEventKind,
     ComponentPatch, ComponentWriter, InitialState, KeyboardKey, ProjectState, ResidentTransition,
-    SequentialSurfaceActivation, allocate_component_buffer, component_string,
+    allocate_component_buffer, component_string,
 }
+use core::actor::ScopedTask
+use core::pending::{Race, RaceOutcome, Suspend, TaskOutcome, Timer}
+use std::host::{HostTimer, Resumable}
+use std::wasm::WasmBackend
+use std::web::{BrowserSurfaceLoader, SurfaceLoader, SurfaceToken}
 use std::web::page::{
     ComponentComposition, ComponentView, PageAttribute, PageBuilder, PageElement, PageText,
 }
@@ -104,7 +109,7 @@ const URL_CAPACITY: u32 = 2048
 const PATCH_CAPACITY: u32 = 1048576
 const CONTENT_CAPACITY: u32 = 1044480
 const VIEW_CAPACITY: usize = 80
-const SURFACE_ACTIVATION_TIMEOUT_MS: u32 = 30000
+const SURFACE_ACTIVATION_TIMEOUT_MS: u64 = 30000
 
 const fn ui_text(value: String<31>) -> PageText {
     PageText::one(value: value)
@@ -126,10 +131,6 @@ pub struct InspectorState {
     pub prevent_default: bool,
     pub focus_close: bool,
     pub revision: u32,
-    pub surface_discovered: u32,
-    pub surface_next: u32,
-    pub surface_waiting: bool,
-    pub surface_issue: bool,
 }
 
 fn byte_at(ptr: u32, index: u32) -> BrowserPtr<u32> {
@@ -164,6 +165,55 @@ fn is_success(status: u32) -> bool {
     status >= 200 && status < 300
 }
 
+/// Load gallery posters one at a time. This is a compatibility policy for
+/// browser WebGPU implementations observed losing a shared device during burst
+/// initialization, not a semantic requirement of Fe or WebGPU.
+///
+/// The fixed host reports the next compiler-correlated declaration and realizes
+/// one `<fe-surface>.load()`. Fe owns ordering, timeout, fail-open behavior, and
+/// cancellation. A timed-out or failed surface cannot stall the rest of the
+/// gallery; disconnect cancellation terminates the task immediately.
+fn activate_gallery_surfaces() -> u32
+    uses (
+        loader: mut SurfaceLoader<WasmBackend>,
+        timer: mut Timer<WasmBackend>,
+        race: mut Race<WasmBackend>,
+        suspend: Suspend<WasmBackend, u32>,
+    )
+{
+    let mut loaded: u32 = 0
+    let mut running: bool = true
+    while running {
+        let next_pending = loader.next_begin()
+        let next: TaskOutcome<u32, SurfaceToken> = suspend.suspend(next_pending)
+        match next {
+            TaskOutcome::Failure(_) => { running = false }
+            TaskOutcome::Cancelled => { return loaded }
+            TaskOutcome::Success(surface) => {
+                if surface.is_end() {
+                    running = false
+                } else {
+                    let load_pending = loader.load_begin(surface)
+                    let timeout_pending = timer.sleep_begin(SURFACE_ACTIVATION_TIMEOUT_MS)
+                    let first = race.race(load_pending, timeout_pending)
+                    let completion: TaskOutcome<u32, RaceOutcome<u64>> = suspend.suspend(first)
+                    match completion {
+                        TaskOutcome::Success(winner) => {
+                            match winner {
+                                RaceOutcome::Left(_) => { loaded = loaded + 1 }
+                                RaceOutcome::Right(_) => { loaded = loaded + 1 }
+                            }
+                        }
+                        TaskOutcome::Failure(_) => { loaded = loaded + 1 }
+                        TaskOutcome::Cancelled => { return loaded }
+                    }
+                }
+            }
+        }
+    }
+    loaded
+}
+
 actor SourceInspector {
     patch_ptr: u32,
     url_ptr: u32,
@@ -180,15 +230,6 @@ actor SourceInspector {
     prevent_default: bool,
     focus_close: bool,
     revision: u32,
-    // Compatibility workaround for buggy browser WebGPU implementations
-    // observed crashing or losing their shared device when many gallery
-    // surfaces initialize in one burst. The ordering and fail-open deadline
-    // live in Fe; JavaScript only transports facts and realizes effects. This
-    // is deliberately not treated as a WebGPU or Fe semantic requirement.
-    surface_discovered: u32,
-    surface_next: u32,
-    surface_waiting: bool,
-    surface_issue: bool,
 
     const fn view() -> ComponentView<VIEW_CAPACITY> uses (ComponentComposition) {
         let ui = <InspectorParts as ComponentSchema>::component_parts()
@@ -288,10 +329,17 @@ actor SourceInspector {
             prevent_default: false,
             focus_close: false,
             revision: 0,
-            surface_discovered: 0,
-            surface_next: 0,
-            surface_waiting: false,
-            surface_issue: false,
+        }
+    }
+
+    fn activate_surfaces() -> u32 uses (ScopedTask) {
+        with (
+            SurfaceLoader<WasmBackend> = BrowserSurfaceLoader {},
+            Timer<WasmBackend> = HostTimer {},
+            Race<WasmBackend> = Resumable {},
+            Suspend<WasmBackend, u32> = Resumable {},
+        ) {
+            activate_gallery_surfaces()
         }
     }
 
@@ -311,12 +359,6 @@ actor SourceInspector {
         let mut prevent_default = false
         let mut focus_close = false
         let mut revision = self.revision
-        let activation = SequentialSurfaceActivation {
-            discovered: self.surface_discovered,
-            next: self.surface_next,
-            waiting: self.surface_waiting,
-            issue: self.surface_issue,
-        }.receive(kind: event.kind, request: event.request)
 
         match event.kind {
             ComponentEventKind::Connected => {
@@ -400,10 +442,6 @@ actor SourceInspector {
             prevent_default: prevent_default,
             focus_close: focus_close,
             revision: revision,
-            surface_discovered: activation.discovered,
-            surface_next: activation.next,
-            surface_waiting: activation.waiting,
-            surface_issue: activation.issue,
         }
     }
 
@@ -466,13 +504,6 @@ actor SourceInspector {
                 writer = writer.load_text(request: self.pending, value: url)
             }
         }
-        writer = SequentialSurfaceActivation {
-            discovered: self.surface_discovered,
-            next: self.surface_next,
-            waiting: self.surface_waiting,
-            issue: self.surface_issue,
-        }.write(writer: writer, timeout_ms: SURFACE_ACTIVATION_TIMEOUT_MS)
-
         ComponentPatch::new(
             visible_mask: visible_mask,
             focus_target: if self.focus_close {

@@ -19,6 +19,7 @@
 
 pub use component::{self, *}
 pub use page::{self, *}
+pub use surface_task::{self, *}
 pub use view::{self, *}
 
 use raw::{
