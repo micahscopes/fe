@@ -1,0 +1,8 @@
+[ingot]
+name = "qcga_pencil_de_oracle_gate"
+version = "0.1.0"
+
+[dependencies]
+qcga_pencil = "../../../../../demos/sketches/qcga_pencil"
+qcga_pencil_de = "../../../../../demos/sketches/qcga_pencil_de"
+fmath = "../../../../../demos/sketches/fmath"

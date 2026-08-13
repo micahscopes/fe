@@ -1,0 +1,8 @@
+[ingot]
+name = "qcga_pencil_de"
+version = "0.1.0"
+
+[dependencies]
+core = true
+fmath = "../fmath"
+qcga_pencil = "../qcga_pencil"

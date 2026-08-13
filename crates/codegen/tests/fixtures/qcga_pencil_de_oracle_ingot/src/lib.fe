@@ -1,0 +1,90 @@
+//! Thin scalar exports over the production Fe DE functions. Expected values
+//! and analytic roots live only in the independent Rust acceptance oracle.
+
+use fmath::vec3
+use qcga_pencil::Quadric
+use qcga_pencil_de::{quadric_distance, trace_quadric_de}
+
+fn quadric(
+    _ a: f32,
+    _ b: f32,
+    _ c: f32,
+    _ d: f32,
+    _ e: f32,
+    _ f: f32,
+    _ g: f32,
+    _ h: f32,
+    _ i: f32,
+    _ j: f32,
+) -> Quadric {
+    Quadric { a: a, b: b, c: c, d: d, e: e, f: f, g: g, h: h, i: i, j: j }
+}
+
+pub fn de_distance(
+    _ a: f32,
+    _ b: f32,
+    _ c: f32,
+    _ d: f32,
+    _ e: f32,
+    _ f: f32,
+    _ g: f32,
+    _ h: f32,
+    _ i: f32,
+    _ j: f32,
+    _ x: f32,
+    _ y: f32,
+    _ z: f32,
+) -> f32 {
+    quadric_distance(quadric(a, b, c, d, e, f, g, h, i, j), vec3(x, y, z))
+}
+
+pub fn de_trace_distance(
+    _ a: f32,
+    _ b: f32,
+    _ c: f32,
+    _ d: f32,
+    _ e: f32,
+    _ f: f32,
+    _ g: f32,
+    _ h: f32,
+    _ i: f32,
+    _ j: f32,
+    _ ox: f32,
+    _ oy: f32,
+    _ oz: f32,
+    _ dx: f32,
+    _ dy: f32,
+    _ dz: f32,
+) -> f32 {
+    trace_quadric_de(
+        quadric(a, b, c, d, e, f, g, h, i, j),
+        vec3(ox, oy, oz),
+        vec3(dx, dy, dz),
+    )
+        .distance
+}
+
+pub fn de_trace_hit(
+    _ a: f32,
+    _ b: f32,
+    _ c: f32,
+    _ d: f32,
+    _ e: f32,
+    _ f: f32,
+    _ g: f32,
+    _ h: f32,
+    _ i: f32,
+    _ j: f32,
+    _ ox: f32,
+    _ oy: f32,
+    _ oz: f32,
+    _ dx: f32,
+    _ dy: f32,
+    _ dz: f32,
+) -> i32 {
+    trace_quadric_de(
+        quadric(a, b, c, d, e, f, g, h, i, j),
+        vec3(ox, oy, oz),
+        vec3(dx, dy, dz),
+    ).hit
+}

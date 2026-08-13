@@ -186,6 +186,12 @@ actor GalleryPage {
                 program: t("sketches/qcga_pencil"),
             )
             .render_tile(
+                title: t("qcga pencil DE"),
+                description: t2("shared solved pencil → ", "iterative DE"),
+                source: t2("sketches/qcga_pencil_de/", "src/lib.fe"),
+                program: t("sketches/qcga_pencil_de"),
+            )
+            .render_tile(
                 title: t("desargues"),
                 description: t("projective incidence"),
                 source: t("sketches/desargues/src/lib.fe"),

@@ -96,6 +96,88 @@ test("fixed host writes untouched SurfaceEvent records in the versioned memory l
   assert.deepEqual(events, before);
 });
 
+test("each Fe surface call gets a bounded arena epoch, including traps", () => {
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._surfaceTransitionMemory = new WebAssembly.Memory({ initial: 1 });
+  surface._surfaceTransitionStateResident = true;
+  surface._resources = [];
+  surface._members = [{ name: "generation" }];
+  const trace = [];
+  let cursor = 64;
+  surface._wasmArenaReset = () => {
+    trace.push("reset");
+    cursor = 64;
+  };
+  surface._surfaceTransitionAlloc = (bytes, align) => {
+    trace.push(`alloc:${cursor}:${bytes}:${align}`);
+    const pointer = cursor;
+    cursor += bytes;
+    return pointer;
+  };
+  surface._surfaceTransitionKernel = () => {
+    trace.push("transition");
+    return [7];
+  };
+  const event = {
+    mx: 1, my: 2, dx: 3, dy: 4, wheelDelta: 0,
+    wheelMode: 0, buttons: 1, timestamp: 5, width: 64, height: 64,
+    eventKind: SurfaceEventKind.PointerMove, paramIndex: 0, paramValue: 0,
+  };
+
+  assert.deepEqual(surface._runSurfaceFrame([event]), [7]);
+  assert.deepEqual(trace, ["reset", "alloc:64:52:4", "transition", "reset"]);
+
+  trace.length = 0;
+  surface._surfaceTransitionKernel = () => {
+    trace.push("trap");
+    throw new WebAssembly.RuntimeError("unreachable");
+  };
+  assert.throws(() => surface._runSurfaceFrame([event]), /unreachable/);
+  assert.deepEqual(trace, ["reset", "alloc:64:52:4", "trap", "reset"]);
+
+  trace.length = 0;
+  surface._surfaceTransitionKernel = () => {
+    trace.push("recovered");
+    return [8];
+  };
+  assert.deepEqual(surface._runSurfaceFrame([event]), [8]);
+  assert.deepEqual(trace, ["reset", "alloc:64:52:4", "recovered", "reset"]);
+});
+
+test("legacy per-pixel Wasm fallback also bounds aggregate epochs", () => {
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._argumentCount = 2;
+  surface._builtins = [
+    { arg_index: 0, source: "position_x" },
+    { arg_index: 1, source: "position_y" },
+  ];
+  surface._members = [];
+  const trace = [];
+  surface._wasmArenaReset = () => trace.push("reset");
+  surface._kernel = (px, py) => {
+    trace.push(`pixel:${px}:${py}`);
+    if (px === 1) throw new WebAssembly.RuntimeError("pixel trap");
+    return 0xff000000;
+  };
+  const canvas = {
+    set width(value) {},
+    set height(value) {},
+    getContext() {
+      return {
+        createImageData(width, height) {
+          return { data: new Uint8Array(width * height * 4) };
+        },
+        putImageData() {
+          throw new Error("trapped render must not publish a partial image");
+        },
+      };
+    },
+  };
+
+  assert.throws(() => surface._renderWasmInto(canvas, 2, 1, []), /pixel trap/);
+  assert.deepEqual(trace, ["reset", "pixel:0:0", "reset", "pixel:1:0", "reset"]);
+});
+
 test("a burst crosses into the Fe transition once at the presentation boundary", async () => {
   const frameCallbacks = [];
   globalThis.requestAnimationFrame = callback => {
@@ -129,8 +211,7 @@ test("a burst crosses into the Fe transition once at the presentation boundary",
   };
   surface._replaceSurfaceState([41]);
   surface._surfaceTransitionMemory = new WebAssembly.Memory({ initial: 1 });
-  surface._surfaceEventBufferPtr = 0;
-  surface._surfaceEventBufferCapacity = 0;
+  surface._wasmArenaReset = () => {};
   const allocations = [];
   surface._surfaceTransitionAlloc = (bytes, align) => {
     allocations.push([bytes, align]);
@@ -198,7 +279,7 @@ test("a burst crosses into the Fe transition once at the presentation boundary",
 
   assert.equal(transitionCalls, 1);
   assert.equal(renders, 1);
-  assert.deepEqual(allocations, [[208, 4]]);
+  assert.deepEqual(allocations, [[156, 4]]);
   assert.deepEqual(transportedEvents, [
     {
       mx: 100, my: 110, dx: 3, dy: -2, wheelDelta: 0,
@@ -238,6 +319,7 @@ test("a burst crosses into the Fe transition once at the presentation boundary",
   await surface._flushGestureFrame(20);
   assert.equal(transitionCalls, 2);
   assert.equal(renders, 2);
+  assert.deepEqual(allocations, [[156, 4], [52, 4]]);
   assert.deepEqual(surface._uniforms, [43]);
   assert.deepEqual(stateReplacementCalls, [[41]]);
   assert.deepEqual(transitionArgCounts, [2, 2]);

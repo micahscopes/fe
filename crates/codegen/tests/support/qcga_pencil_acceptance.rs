@@ -1217,6 +1217,74 @@ fn authored_raster_plan_is_typed_and_compiles_the_fe_stage_pair() {
                 "re-solved basis must contain dragged point {index}",
             );
         }
+
+        // Browser regression for the reported `fe_cabi_alloc -> solve_pencil`
+        // trap: repeatedly execute the allocation-heavy Fe drag/re-solve path
+        // using the fixed host's canonical call epoch. Resident scalar state
+        // must advance while every call reuses the same bounded arena range.
+        let reset = instance
+            .get_typed_func::<(), ()>(&mut store, "fe_cabi_reset")
+            .expect("canonical arena reset");
+        replace
+            .call(&mut store, &selected, &mut [])
+            .expect("restore selected control state for arena stress");
+        let mut event_pointer = None;
+        let mut post_solve_cursor = None;
+        let mut bounded_pages = None;
+        let initial_generation = match selected[4] {
+            wasmtime::Val::I32(value) => value,
+            ref value => panic!("generation is not i32: {value:?}"),
+        };
+        let mut stressed = selected.clone();
+        for iteration in 0..256_i32 {
+            reset
+                .call(&mut store, ())
+                .expect("begin canonical surface-call epoch");
+            let current_pointer = alloc.call(&mut store, (52, 4)).unwrap();
+            let move_bytes = raw_event(9, 0.01, -0.005)
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>();
+            memory
+                .write(&mut store, current_pointer as usize, &move_bytes)
+                .unwrap();
+            transition
+                .call(
+                    &mut store,
+                    &[wasmtime::Val::I32(current_pointer), wasmtime::Val::I32(1)],
+                    &mut stressed,
+                )
+                .expect("allocation-heavy Fe pencil solve stays live");
+            assert!(
+                matches!(stressed[4], wasmtime::Val::I32(value) if value == initial_generation + iteration + 1)
+            );
+            assert!(matches!(stressed[56], wasmtime::Val::I32(1)));
+
+            let current_cursor = alloc.call(&mut store, (1, 1)).unwrap();
+            let current_pages = memory.size(&store);
+            match (event_pointer, post_solve_cursor, bounded_pages) {
+                (None, None, None) => {
+                    event_pointer = Some(current_pointer);
+                    post_solve_cursor = Some(current_cursor);
+                    bounded_pages = Some(current_pages);
+                }
+                (Some(pointer), Some(cursor), Some(pages)) => {
+                    assert_eq!(current_pointer, pointer, "event allocation must be reused");
+                    assert_eq!(
+                        current_cursor, cursor,
+                        "solve arena high-water mark must be stable"
+                    );
+                    assert_eq!(
+                        current_pages, pages,
+                        "surface calls must not grow Wasm memory"
+                    );
+                }
+                _ => unreachable!(),
+            }
+        }
+        reset
+            .call(&mut store, ())
+            .expect("close final canonical surface-call epoch");
         assert!(bundle.wgsl.contains("@vertex"), "{}", bundle.wgsl);
         assert!(bundle.wgsl.contains("@fragment"), "{}", bundle.wgsl);
         assert!(!bundle.wgsl.contains("vs_fullscreen"), "{}", bundle.wgsl);

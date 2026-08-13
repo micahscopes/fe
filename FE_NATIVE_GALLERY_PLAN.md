@@ -484,6 +484,32 @@ Origin: honesty audit of Claude Code session
   green with all eleven lifecycle/input variants. Shader lowering deliberately
   omits host-forgery traps because its inputs arrive through compiler-derived
   WebGPU bindings, while public Wasm boundaries retain them.
+- A thirteenth canonical render actor, `qcga_pencil_de`, now supplies the
+  companion fragment-surface view promised above. It imports the raster
+  ingot's one `PencilSceneState`, initialization, event transition, camera/
+  inverse projection, solver, control-point projection, current pencil member,
+  and normal/tangent material; it owns only the DE interpretation. Production
+  visibility iterates the coefficient-scale-invariant first-order estimate
+  `abs(F) / length(gradient F)` for up to 128 conservative bounded steps, with
+  exact analytic quadric normals, DE soft shadow/AO, vivid normal-tracked
+  color, tangent sheen, fog, ordered subpixel sampling, and projected control
+  markers. There is no analytic ray-root routine, handwritten WGSL, or
+  geometry-aware JavaScript in the shipped view. Its compile gate retains the
+  authored loop, browser-validates 55,961 bytes of WGSL under a 190 kB budget,
+  and proves both renderers expose the same compiler-derived 57-leaf scene
+  layout. It initializes the two generated Wasm modules independently, runs
+  the same event, and semantically compares every decoded leaf.
+- Correctness does not rest on that cross-view equality. A separate zero-import
+  Wasmtime gate evaluates the production Fe estimator at 500 directed points
+  against an independent Rust polynomial/gradient model, including a scaled
+  representative of the same projective sphere. It then compares seven
+  production iterative rays (four hits, three misses) to separately derived
+  analytic ray/quadratic roots and checks hit residuals. Exact roots therefore
+  remain a genuinely different oracle, never a disguised production DE. The
+  canonical precompiler discovers the actor through ordinary Fe page
+  projection and publishes 13 render bundles / 72 assets; actual WebGPU pixel
+  execution retains the existing external-browser qualification on this
+  no-adapter machine.
 - This component/page slice is not the full resident-component end state. The
   outer gallery shell does not yet own routing, tile lifecycle, scheduling, or
   component-to-component messages as a long-lived Fe actor, and the stylesheet
@@ -535,6 +561,40 @@ Origin: honesty audit of Claude Code session
   the exact planner is still example-specific, automatic arbitrary-tree term
   normalization, reflected leaf-slot derivation, hash-consing, and scheduling
   remain Phase 7 work.
+- The twice-wedge slice must not be described as a generic expression
+  compiler. Only its node vocabulary and conservative `GaSupport`
+  interpretation are generic; `AlgebraicTwiceWedgePlan6`, its exact-term
+  constructor, output-lane routing, and evaluator provider are specialized to
+  `(a ^ b) + (a ^ b)`. The next GA milestone is therefore the actual G2/G3
+  boundary: any finite ground composition of the supported nodes must produce
+  exact terms through one operator-generic planner and execute through one
+  operator-generic FCO evaluator. `qcga_pencil` is the first non-toy migration
+  target. It may retain ordinary camera and matrix-solver coordinates where
+  those are the clearest domain representation, but hand-expanded GA
+  coefficient routing/evaluation/gradient constructions are debt to replace,
+  not an acceptable per-demo specialization.
+- The surface fixed host now observes the canonical Wasm arena's documented
+  top-level-call lifetime. Initializer, explicit resident-state replacement,
+  scheduling policy, legacy control, immediate transition, and scheduled
+  transition exports run in fresh `fe_cabi_reset` epochs with post-call reset
+  in `finally`. Scheduled `SurfaceEvent` bytes are allocated inside that epoch;
+  no arena pointer is cached across frames. This fixes the observed QCGA
+  `fe_cabi_alloc -> solve_pencil -> transition_pencil_scene` exhaustion without
+  enlarging the heap or teaching JavaScript about QCGA. The fixed-host gate is
+  13/13 and includes a forced Wasm `unreachable` followed by a clean recovery
+  call, plus the legacy per-pixel fallback's equivalent lifetime. The promoted
+  QCGA suite additionally performs 256 consecutive
+  allocation-heavy Fe drag/re-solves and pins identical event allocation,
+  aggregate high-water mark, and Wasm page count while resident generation
+  advances.
+- The QCGA DE view now polishes an iterative marcher hit with four bounded
+  Newton corrections along the ray. This is still implicit-field iteration,
+  not the analytic quadratic intersection retained solely by the independent
+  Rust oracle. It removes march-step terraces before exact-gradient shading;
+  gentler AO/shadow modulation and removal of a DE-only square-root transfer
+  preserve the shared raster/DE normal-and-tangent palette. The independent
+  gate remains green for 500 field samples and seven analytic-root rays, and
+  the browser gate emits 55,961 bytes of valid WGSL with its march loop intact.
 - Mandelbrot-specific native transition tapes, general typed
   lifecycle/reactive streams, pointer capture, picking/messages, resident
   outer-gallery orchestration, and runtime-manifest removal remain open.

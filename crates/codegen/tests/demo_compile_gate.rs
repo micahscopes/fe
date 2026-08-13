@@ -17,19 +17,16 @@
 //! Coverage:
 //!   - every `demos/sketches/*/src/lib.fe` that declares an `actor ... uses
 //!     (GpuProgram<WebGpuBackend>)` (known_color, rollcall_pipeline, cga3d,
-//!     qcga, desargues, raymarch, mandelbrot, plasma, gradient, dec): entry/mode are
+//!     qcga, qcga_pencil, qcga_pencil_de, desargues, raymarch, mandelbrot,
+//!     plasma, gradient, dec): entry/mode are
 //!     DERIVED from the actor declaration, never hardcoded here, exactly as
 //!     `fe web build` does with `--entry`/`--mode` omitted;
 //!   - `demos/sketches/fmath`, a math-intrinsics library ingot with no
 //!     render entry: diagnostics-only (it must still type-check);
-//!   - `demos/sketches/qcga_pencil`: predates the `actor` idiom (spells the
-//!     pattern out by hand across free `pub fn`s using `VertexStage`/
-//!     `FragmentStage`, see the file's own commentary) and has its own
-//!     staged `acceptance.rs` not yet wired into the workspace. No single
-//!     `FragmentSurface` behavior exists to derive a render entry from, so
-//!     this is a diagnostics-only gate (confirmed: `fe web build` without an
-//!     explicit `--entry`/`--mode` fails closed with "no `actor` declaration
-//!     to derive from", not a source diagnostic);
+//!   - `demos/sketches/qcga_pencil` is an authored vertex/fragment raster actor
+//!     with its own deep semantic acceptance suite; `qcga_pencil_de` consumes
+//!     the same solved scene/interaction values as an iterative fullscreen
+//!     distance-estimator actor;
 //!   - `demos/capstones/mandelbrot/kernel.fe`: a standalone, non-actor GRID
 //!     kernel (intentionally target-neutral, four backends; see its own
 //!     README), compiled here in explicit grid mode;
@@ -339,6 +336,71 @@ fn call_state_batch(bundle: &WebBundle, events: &[SurfaceEventFixture], state: &
             other => panic!("typed surface transition returned non-f32 value {other:?}"),
         })
         .collect()
+}
+
+/// Execute one initialized mixed-scalar QCGA scene transition and return its
+/// decoded semantic leaves. Raster/DE equality is useful integration evidence,
+/// while the independent solver and analytic-root oracles remain the actual
+/// correctness evidence for those values.
+fn qcga_scene_receipt(bundle: &WebBundle, event: SurfaceEventFixture) -> Vec<wasmtime::Val> {
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &bundle.wasm).expect("QCGA control Wasm module");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("QCGA instance");
+    let initialize = instance
+        .get_func(&mut store, "fe_surface_initialize_v1")
+        .expect("shared QCGA InitialState export");
+    let replace = instance
+        .get_func(&mut store, "fe_surface_state_replace_v1")
+        .expect("shared QCGA state replacement export");
+    let transition = instance
+        .get_func(&mut store, "fe_surface_transition_scheduled_v1")
+        .expect("shared QCGA transition export");
+    let memory = instance.get_memory(&mut store, "memory").unwrap();
+    let alloc = instance
+        .get_typed_func::<(i32, i32), i32>(&mut store, "fe_cabi_alloc")
+        .unwrap();
+
+    let mut state = vec![wasmtime::Val::F32(0); 57];
+    state[4] = wasmtime::Val::I32(0);
+    state[56] = wasmtime::Val::I32(0);
+    initialize
+        .call(&mut store, &[], &mut state)
+        .expect("execute shared QCGA initialization");
+    replace.call(&mut store, &state, &mut []).unwrap();
+
+    let pointer = alloc.call(&mut store, (52, 4)).unwrap() as usize;
+    write_surface_event_batch(&memory, &mut store, pointer, &[event]);
+    let mut result = vec![wasmtime::Val::F32(0); 57];
+    result[4] = wasmtime::Val::I32(0);
+    result[56] = wasmtime::Val::I32(0);
+    transition
+        .call(
+            &mut store,
+            &[wasmtime::Val::I32(pointer as i32), wasmtime::Val::I32(1)],
+            &mut result,
+        )
+        .expect("execute shared QCGA transition");
+    result
+}
+
+fn assert_qcga_scene_values_equal(left: &[wasmtime::Val], right: &[wasmtime::Val]) {
+    assert_eq!(left.len(), right.len());
+    for (index, (left, right)) in left.iter().zip(right).enumerate() {
+        match (left, right) {
+            (wasmtime::Val::F32(left), wasmtime::Val::F32(right)) => assert_eq!(
+                left, right,
+                "raster/DE f32 scene leaf {index} diverged after the same Fe event"
+            ),
+            (wasmtime::Val::I32(left), wasmtime::Val::I32(right)) => assert_eq!(
+                left, right,
+                "raster/DE enum/u32 scene leaf {index} diverged after the same Fe event"
+            ),
+            _ => panic!(
+                "raster/DE scene leaf {index} has inconsistent scalar types: {left:?} / {right:?}"
+            ),
+        }
+    }
 }
 
 /// Run `body` with a checked-in ingot directory's driver database and top
@@ -2286,6 +2348,126 @@ fn raymarch_sketch_compiles_with_fe_owned_camera_and_bounded_shader() {
     eprintln!(
         "Fe raymarch receipt: {} authored lines -> {} B browser-valid WGSL, {} B control Wasm",
         include_str!("../../../demos/sketches/raymarch/src/lib.fe")
+            .lines()
+            .count(),
+        bundle.wgsl.len(),
+        bundle.wasm.len(),
+    );
+}
+
+#[test]
+fn qcga_pencil_de_compiles_as_a_fe_owned_iterative_fragment_surface() {
+    let bundle = compile_actor_ingot("demos/sketches/qcga_pencil_de");
+    assert_browser_wgsl(&bundle.wgsl);
+    wasmparser::validate(&bundle.wasm).expect("QCGA pencil DE control Wasm should be valid");
+    assert_scheduled_typed_surface(&bundle);
+    assert!(
+        bundle.wgsl.contains("loop"),
+        "the DE view must retain its authored iterative march"
+    );
+    assert!(
+        bundle.wgsl.len() < 190_000,
+        "the shared Fe QCGA DE view should remain under its initial 190 kB WGSL budget (got {})",
+        bundle.wgsl.len(),
+    );
+    let pass = bundle
+        .manifest
+        .passes
+        .first()
+        .expect("one fullscreen DE pass");
+    assert_eq!(pass.source_entry, "distance_surface");
+    assert_eq!(pass.layout.bindings.len(), 1);
+    assert_eq!(pass.layout.bindings[0].members.len(), 57);
+    assert_eq!(
+        pass.layout.bindings[0]
+            .members
+            .iter()
+            .map(|member| member.name.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "lambda",
+            "yaw",
+            "pitch",
+            "dist",
+            "generation",
+            "cx",
+            "cy",
+            "cz",
+            "pencil_free",
+            "a0",
+            "b0",
+            "c0",
+            "d0",
+            "e0",
+            "f0",
+            "g0",
+            "h0",
+            "i0",
+            "j0",
+            "a1",
+            "b1",
+            "c1",
+            "d1",
+            "e1",
+            "f1",
+            "g1",
+            "h1",
+            "i1",
+            "j1",
+            "p0x",
+            "p0y",
+            "p0z",
+            "p1x",
+            "p1y",
+            "p1z",
+            "p2x",
+            "p2y",
+            "p2z",
+            "p3x",
+            "p3y",
+            "p3z",
+            "p4x",
+            "p4y",
+            "p4z",
+            "p5x",
+            "p5y",
+            "p5z",
+            "p6x",
+            "p6y",
+            "p6z",
+            "p7x",
+            "p7y",
+            "p7z",
+            "p8x",
+            "p8y",
+            "p8z",
+            "picked",
+        ],
+        "DE and raster views must consume the exact same solved scene state",
+    );
+
+    let raster = compile_actor_ingot("demos/sketches/qcga_pencil");
+    let event = SurfaceEventFixture {
+        pointer_x: 210.0,
+        pointer_y: 184.0,
+        delta_x: 17.0,
+        delta_y: -9.0,
+        wheel_delta: -1.0,
+        wheel_mode: 0,
+        buttons: 1,
+        timestamp: 42.0,
+        width: 512.0,
+        height: 512.0,
+        event_kind: 0,
+        param_index: 0,
+        param_value: 0.0,
+    };
+    let raster_receipt = qcga_scene_receipt(&raster, event);
+    let de_receipt = qcga_scene_receipt(&bundle, event);
+    assert_qcga_scene_values_equal(&raster_receipt, &de_receipt);
+    eprintln!(
+        "Fe QCGA DE receipt: {} authored view lines -> {} B browser-valid WGSL, {} B shared-state control Wasm",
+        include_str!("../../../demos/sketches/qcga_pencil_de/src/lib.fe")
             .lines()
             .count(),
         bundle.wgsl.len(),

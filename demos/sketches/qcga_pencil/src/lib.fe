@@ -87,7 +87,10 @@ use std::web::view::{
 use sparse_clifford::{
     Nat, PlanLength, SparsePlan, Term, plan_mask_candidate, plan_mask_cardinality,
 }
-use fmath::{PI, TAU, abs, clamp01, cos, from_i32, max, min, rgba, sin, sqrt}
+use fmath::{
+    PI, TAU, Vec3, abs, clamp01, cos, dot3, from_i32, max, min,
+    normalize3, rgba, sin, sqrt, vec3,
+}
 
 extern {
     const fn __bitcast<From, To>(_: From) -> To
@@ -436,6 +439,7 @@ pub const VERTEX_COUNT: u32 = 2 * SHEET_VERTS
 pub const CONTROL_VERTEX_COUNT: u32 = 9 * 6
 /// Compiler-derived authored-raster draw count: analytic surface plus controls.
 pub const RASTER_VERTEX_COUNT: u32 = VERTEX_COUNT + CONTROL_VERTEX_COUNT
+pub const PENCIL_RESOLUTION: f32 = 512.0
 
 static_assert(SHEET_VERTS == 6912)
 static_assert(VERTEX_COUNT == 13824)
@@ -501,7 +505,7 @@ pub enum PickedControl {
 }
 impl Copy for PickedControl {}
 
-fn control_point(_ points: ControlPoints, _ picked: PickedControl) -> ControlPoint {
+pub fn control_point(_ points: ControlPoints, _ picked: PickedControl) -> ControlPoint {
     match picked {
         PickedControl::P0 => ControlPoint { x: points.p0x, y: points.p0y, z: points.p0z },
         PickedControl::P1 => ControlPoint { x: points.p1x, y: points.p1y, z: points.p1z },
@@ -519,7 +523,7 @@ fn control_point(_ points: ControlPoints, _ picked: PickedControl) -> ControlPoi
 /// Shader-side projection uses the vertex-derived numeric index directly. The
 /// index is bounded by `TriangleList<RASTER_VERTEX_COUNT>` construction, while
 /// the browser-facing selection lane retains its closed `PickedControl` type.
-fn control_point_at_index(_ points: ControlPoints, _ index: u32) -> ControlPoint {
+pub fn control_point_at_index(_ points: ControlPoints, _ index: u32) -> ControlPoint {
     if index == 0 { return ControlPoint { x: points.p0x, y: points.p0y, z: points.p0z } }
     if index == 1 { return ControlPoint { x: points.p1x, y: points.p1y, z: points.p1z } }
     if index == 2 { return ControlPoint { x: points.p2x, y: points.p2y, z: points.p2z } }
@@ -616,7 +620,7 @@ impl SurfaceState for PencilControls {
 
 derive ApplyParamBindings for PencilControls using ParamBindingsProvider
 
-const fn pencil_params() -> PencilParams {
+pub const fn pencil_params() -> PencilParams {
     PencilParams {
         lambda: Param::unit(init: 0.15),
         yaw: Param::angle(init: 0.6).drag_x(per_px: 0.008),
@@ -624,6 +628,15 @@ const fn pencil_params() -> PencilParams {
             .drag_y(per_px: 0.008),
         dist: Param::log(min: 1.5, max: 12.0, init: 4.0)
             .wheel_scale(in_factor: 0.88, out_factor: 1.14),
+    }
+}
+
+/// The one surface declaration shared by the raster and distance-estimator
+/// views. A companion renderer cannot silently drift in extent or controls.
+pub const fn pencil_view() -> Surface<PencilParams> {
+    Surface {
+        extent: Extent::square(512),
+        params: pencil_params(),
     }
 }
 
@@ -724,7 +737,7 @@ impl Copy for ProjectedPoint {}
 
 /// One camera projection construction shared by analytic vertices, marker
 /// vertices, hit testing, and inverse drag scaling.
-fn project_point(_ point: ControlPoint, _ frame: PencilFrame) -> ProjectedPoint {
+pub fn project_point(_ point: ControlPoint, _ frame: PencilFrame) -> ProjectedPoint {
     let wx: f32 = point.x - frame.basis.cx
     let wy: f32 = point.y - frame.basis.cy
     let wz: f32 = point.z - frame.basis.cz
@@ -745,6 +758,42 @@ fn project_point(_ point: ControlPoint, _ frame: PencilFrame) -> ProjectedPoint 
             w: depth,
         },
         depth: depth,
+    }
+}
+
+/// A world-space ray exactly inverse to `project_point`'s orbit camera. Both
+/// QCGA views therefore share one camera model rather than keeping a raster
+/// matrix and a visually similar raymarch camera in sync by convention.
+pub struct PencilRay {
+    pub origin: Vec3,
+    pub direction: Vec3,
+}
+impl Copy for PencilRay {}
+
+pub fn pencil_ray(_ frame: PencilFrame, _ u: f32, _ v: f32) -> PencilRay {
+    let cyaw: f32 = cos(frame.view.yaw)
+    let syaw: f32 = sin(frame.view.yaw)
+    let cpit: f32 = cos(frame.view.pitch)
+    let spit: f32 = sin(frame.view.pitch)
+
+    // Camera-space origin (0, 0, -dist), transformed back to world space.
+    let origin: Vec3 = vec3(
+        frame.basis.cx + syaw * cpit * frame.view.dist,
+        frame.basis.cy - spit * frame.view.dist,
+        frame.basis.cz - cyaw * cpit * frame.view.dist,
+    )
+
+    // Camera-space ray (u / focal, v / focal, 1), inverse pitch then yaw.
+    let rx: f32 = u / FOCAL
+    let ry: f32 = v / FOCAL
+    let rz: f32 = 1.0
+    let wy: f32 = cpit * ry + spit * rz
+    let rz0: f32 = 0.0 - spit * ry + cpit * rz
+    let wx: f32 = cyaw * rx - syaw * rz0
+    let wz: f32 = syaw * rx + cyaw * rz0
+    PencilRay {
+        origin: origin,
+        direction: normalize3(vec3(wx, wy, wz)),
     }
 }
 
@@ -1179,6 +1228,36 @@ fn authored_raster_vertex(
     else { control_marker_vertex(vid, points, frame) }
 }
 
+/// Shared Fe material for both the authored mesh and the DE surface. `view`
+/// points from camera toward the surface; two-sided lighting is intentional
+/// because the pencil contains open and orientation-flipping members.
+pub fn pencil_material(
+    _ normal: Vec3,
+    _ view: Vec3,
+    _ frame: PencilFrame,
+    _ glow: f32,
+    _ sheet: f32,
+) -> Vec3 {
+    let normal: Vec3 = normalize3(normal)
+    let view: Vec3 = normalize3(view)
+    let lit: f32 = 0.18 + 0.82 * abs(dot3(normal, vec3(LX, LY, LZ)))
+    let facing: f32 = abs(dot3(normal, view))
+    let tangent: f32 = 1.0 - facing
+    let sheen2: f32 = tangent * tangent
+    let sheen: f32 = sheen2 * sheen2
+    let normal_r: f32 = 0.5 + 0.5 * normal.x
+    let normal_g: f32 = 0.5 + 0.5 * normal.y
+    let normal_b: f32 = 0.5 + 0.5 * normal.z
+    let warm: f32 = clamp01(frame.basis.pencil_free)
+    let sheet: f32 = clamp01(sheet)
+    let glow: f32 = clamp01(glow)
+    vec3(
+        lit * (0.10 + 0.60 * normal_r + 0.20 * warm) + glow * 0.48 + sheen * 0.70,
+        lit * (0.12 + 0.62 * normal_g + 0.12 * sheet) + glow * 0.20 + sheen * 0.42,
+        lit * (0.18 + 0.66 * normal_b + 0.20 * (1.0 - sheet)) + glow * 0.62 + sheen * 0.88,
+    )
+}
+
 fn shade_varying(_ v: SurfaceVarying, _ frame: PencilFrame) -> u32 {
     if v.marker > 0.5 {
         let phase: f32 = clamp01(v.glow)
@@ -1188,29 +1267,16 @@ fn shade_varying(_ v: SurfaceVarying, _ frame: PencilFrame) -> u32 {
             0.12 + 0.78 * (1.0 - phase),
         ))
     }
-    // Interpolation denormalizes the gradient; renormalize per pixel.
-    let nlen: f32 = sqrt(v.nx * v.nx + v.ny * v.ny + v.nz * v.nz)
-    let ninv: f32 = if nlen > 0.0000001 { 1.0 / nlen } else { 0.0 }
-    let nx: f32 = v.nx * ninv
-    let ny: f32 = v.ny * ninv
-    let nz: f32 = v.nz * ninv
-    // Two-sided diffuse plus a grazing-angle sheen. The normal itself drives
-    // the palette, so topology and orientation remain legible while the
-    // tangent highlight slides over the pencil as it deforms.
-    let lit: f32 = 0.18 + 0.82 * abs(nx * LX + ny * LY + nz * LZ)
-    let facing: f32 = abs(nz)
-    let tangent: f32 = 1.0 - facing
-    let sheen2: f32 = tangent * tangent
-    let sheen: f32 = sheen2 * sheen2
-    let normal_r: f32 = 0.5 + 0.5 * nx
-    let normal_g: f32 = 0.5 + 0.5 * ny
-    let normal_b: f32 = 0.5 + 0.5 * nz
-    let warm: f32 = clamp01(frame.basis.pencil_free)
-    let sheet: f32 = clamp01(v.sheet)
-    let glow: f32 = clamp01(v.glow)
-    let mut red: f32 = lit * (0.10 + 0.60 * normal_r + 0.20 * warm) + glow * 0.48 + sheen * 0.70
-    let mut grn: f32 = lit * (0.12 + 0.62 * normal_g + 0.12 * sheet) + glow * 0.20 + sheen * 0.42
-    let mut blu: f32 = lit * (0.18 + 0.66 * normal_b + 0.20 * (1.0 - sheet)) + glow * 0.62 + sheen * 0.88
+    let color: Vec3 = pencil_material(
+        vec3(v.nx, v.ny, v.nz),
+        pencil_ray(frame, 0.0, 0.0).direction,
+        frame,
+        v.glow,
+        v.sheet,
+    )
+    let mut red: f32 = color.x
+    let mut grn: f32 = color.y
+    let mut blu: f32 = color.z
     if v.accuse > 0.5 {
         red = 1.0
         grn = 0.0
@@ -1219,7 +1285,7 @@ fn shade_varying(_ v: SurfaceVarying, _ frame: PencilFrame) -> u32 {
     __bitcast(rgba(red, grn, blu))
 }
 
-fn solved_basis(_ points: ControlPoints, _ generation: u32) -> PencilBasis {
+pub fn solved_basis(_ points: ControlPoints, _ generation: u32) -> PencilBasis {
     let solved: SolvedState = solve_points(control_points_array(points))
     let sol: PencilSolution = solved.sol
     let q0: [f32; 10] = sol.q0
@@ -1235,7 +1301,7 @@ fn solved_basis(_ points: ControlPoints, _ generation: u32) -> PencilBasis {
     }
 }
 
-fn pick_control_at(
+pub fn pick_control_at(
     _ points: ControlPoints,
     _ frame: PencilFrame,
     _ pointer_x: f32,
@@ -1267,7 +1333,7 @@ fn pick_control_at(
     best
 }
 
-fn drag_control_by(
+pub fn drag_control_by(
     _ points: ControlPoints,
     _ picked: PickedControl,
     _ frame: PencilFrame,
@@ -1328,6 +1394,97 @@ fn drag_control_by(
     next
 }
 
+/// One reusable application state shared by every QCGA pencil view. Actor
+/// declarations stay tiny: initialize this value, transition this value, then
+/// choose a rendering interpretation.
+pub struct PencilSceneState {
+    pub frame: PencilFrame,
+    pub points: ControlPoints,
+    pub picked: PickedControl,
+}
+impl Copy for PencilSceneState {}
+
+pub fn initial_pencil_scene() -> PencilSceneState {
+    let initial: SolveRequest = defaults(request: DefaultsRequest { generation: 0 })
+    let points: ControlPoints = control_points_from_request(initial)
+    PencilSceneState {
+        frame: PencilFrame {
+            view: PencilControls {
+                lambda: 0.15,
+                yaw: 0.6,
+                pitch: 0.35,
+                dist: 4.0,
+            },
+            basis: solved_basis(points, 0),
+        },
+        points: points,
+        picked: PickedControl::None,
+    }
+}
+
+pub fn transition_pencil_scene(
+    _ state: PencilSceneState,
+    _ event: own SurfaceEvent,
+) -> PencilSceneState {
+    if event.is_pointer_down() {
+        return PencilSceneState {
+            frame: state.frame,
+            points: state.points,
+            picked: pick_control_at(
+                state.points, state.frame, event.pointer_x, event.pointer_y,
+                event.width, event.height,
+            ),
+        }
+    }
+    if event.is_pointer_move() {
+        match state.picked {
+            PickedControl::None => {
+                return PencilSceneState {
+                    frame: PencilFrame {
+                        view: state.frame.view.apply_param_bindings(
+                            pencil_params(), event,
+                        ),
+                        basis: state.frame.basis,
+                    },
+                    points: state.points,
+                    picked: PickedControl::None,
+                }
+            }
+            _ => {
+                let points: ControlPoints = drag_control_by(
+                    state.points, state.picked, state.frame,
+                    event.delta_x, event.delta_y, event.width, event.height,
+                )
+                return PencilSceneState {
+                    frame: PencilFrame {
+                        view: state.frame.view,
+                        basis: solved_basis(
+                            points, state.frame.basis.generation + 1,
+                        ),
+                    },
+                    points: points,
+                    picked: state.picked,
+                }
+            }
+        }
+    }
+    if event.is_pointer_up() {
+        return PencilSceneState {
+            frame: state.frame,
+            points: state.points,
+            picked: PickedControl::None,
+        }
+    }
+    PencilSceneState {
+        frame: PencilFrame {
+            view: state.frame.view.apply_param_bindings(pencil_params(), event),
+            basis: state.frame.basis,
+        },
+        points: state.points,
+        picked: state.picked,
+    }
+}
+
 /// The actual raster program. `V` is named once in each role; the compiler
 /// proves both roles refer to this exact nominal type and derives all varying
 /// locations recursively.
@@ -1337,96 +1494,30 @@ actor PencilRaster uses (GpuProgram<WebGpuBackend>) {
     picked: PickedControl,
 
     const fn view() -> Surface<PencilParams> {
-        Surface {
-            extent: Extent::square(512),
-            params: pencil_params(),
-        }
+        pencil_view()
     }
 
     /// Compute the full solved frame in Fe once at boot. Only the four view
     /// controls are declared above; the 25 derived leaves never become a
     /// parallel host defaults table.
-    fn initial() -> PencilRasterState uses (InitialState) {
-        let initial: SolveRequest = defaults(request: DefaultsRequest { generation: 0 })
-        let points: ControlPoints = control_points_from_request(initial)
-        PencilRasterState {
-            frame: PencilFrame {
-                view: PencilControls {
-                    lambda: 0.15,
-                    yaw: 0.6,
-                    pitch: 0.35,
-                    dist: 4.0,
-                },
-                basis: solved_basis(points, 0),
-            },
-            points: points,
-            picked: PickedControl::None,
-        }
+    fn initial() -> PencilSceneState uses (InitialState) {
+        initial_pencil_scene()
     }
 
     /// Raw browser facts enter one FCO-derived four-field Fe transition, then
     /// update the corresponding leaves of the nominal solved frame. The fixed
     /// host neither interprets orbit/zoom policy nor mutates uniform slots.
-    fn navigate(self, event: own SurfaceEvent) -> PencilRasterState
+    fn navigate(self, event: own SurfaceEvent) -> PencilSceneState
         uses (SurfaceTransition, SurfaceScheduling<LatestPerFrame>)
     {
-        if event.is_pointer_down() {
-            return PencilRasterState {
+        transition_pencil_scene(
+            PencilSceneState {
                 frame: self.frame,
                 points: self.points,
-                picked: pick_control_at(
-                    self.points, self.frame, event.pointer_x, event.pointer_y,
-                    event.width, event.height,
-                ),
-            }
-        }
-        if event.is_pointer_move() {
-            match self.picked {
-                PickedControl::None => {
-                    return PencilRasterState {
-                        frame: PencilFrame {
-                            view: self.frame.view.apply_param_bindings(
-                                pencil_params(), event,
-                            ),
-                            basis: self.frame.basis,
-                        },
-                        points: self.points,
-                        picked: PickedControl::None,
-                    }
-                }
-                _ => {
-                    let points: ControlPoints = drag_control_by(
-                        self.points, self.picked, self.frame,
-                        event.delta_x, event.delta_y, event.width, event.height,
-                    )
-                    return PencilRasterState {
-                        frame: PencilFrame {
-                            view: self.frame.view,
-                            basis: solved_basis(
-                                points, self.frame.basis.generation + 1,
-                            ),
-                        },
-                        points: points,
-                        picked: self.picked,
-                    }
-                }
-            }
-        }
-        if event.is_pointer_up() {
-            return PencilRasterState {
-                frame: self.frame,
-                points: self.points,
-                picked: PickedControl::None,
-            }
-        }
-        PencilRasterState {
-            frame: PencilFrame {
-                view: self.frame.view.apply_param_bindings(pencil_params(), event),
-                basis: self.frame.basis,
+                picked: self.picked,
             },
-            points: self.points,
-            picked: self.picked,
-        }
+            event,
+        )
     }
 
     fn surface_vertex(self, vertex_index: u32) -> RasterVertex<SurfaceVarying>
@@ -1440,12 +1531,6 @@ actor PencilRaster uses (GpuProgram<WebGpuBackend>) {
     {
         shade_varying(varying, self.frame)
     }
-}
-
-pub struct PencilRasterState {
-    pub frame: PencilFrame,
-    pub points: ControlPoints,
-    pub picked: PickedControl,
 }
 
 pub struct RenderResponse {

@@ -420,8 +420,7 @@ export class FeSurfaceElement extends HTMLElement {
     this._surfaceScheduleKernel = null;
     this._surfaceTransitionMemory = null;
     this._surfaceTransitionAlloc = null;
-    this._surfaceEventBufferPtr = 0;
-    this._surfaceEventBufferCapacity = 0;
+    this._wasmArenaReset = null;
     this._pendingSurfaceEvents = [];
     this._passes = [];
     this._resources = [];
@@ -653,11 +652,15 @@ export class FeSurfaceElement extends HTMLElement {
       this._controlKernel = null;
       this._surfaceTransitionMemory = null;
       this._surfaceTransitionAlloc = null;
+      this._wasmArenaReset = null;
       this._surfaceTransitionStateResident = false;
       this._surfaceStateReplaceKernel = null;
       this._surfaceScheduleKernel = null;
-      this._surfaceEventBufferPtr = 0;
-      this._surfaceEventBufferCapacity = 0;
+      const arenaReset = instance?.exports.fe_cabi_reset;
+      if (arenaReset !== undefined && typeof arenaReset !== "function") {
+        throw new Error("fe render runtime: canonical arena reset export is not callable");
+      }
+      this._wasmArenaReset = arenaReset ?? null;
       const residentScheduled =
         instance?.exports.fe_surface_transition_scheduled_v1 ??
         instance?.exports.fe_surface_transition_latest_per_frame_v4 ?? null;
@@ -687,9 +690,13 @@ export class FeSurfaceElement extends HTMLElement {
       if (this._surfaceTransitionSchedule === "resident") {
         const memory = instance?.exports.memory;
         const alloc = instance?.exports.fe_cabi_alloc;
-        if (!(memory instanceof WebAssembly.Memory) || typeof alloc !== "function") {
+        if (
+          !(memory instanceof WebAssembly.Memory) ||
+          typeof alloc !== "function" ||
+          typeof this._wasmArenaReset !== "function"
+        ) {
           throw new Error(
-            "fe render runtime: scheduled surface transition is missing fixed memory/allocator exports",
+            "fe render runtime: scheduled surface transition is missing fixed memory/allocator/reset exports",
           );
         }
         this._surfaceTransitionMemory = memory;
@@ -721,7 +728,7 @@ export class FeSurfaceElement extends HTMLElement {
       }
 
       const authoredInitial = this._surfaceInitializerKernel
-        ? this._surfaceInitializerKernel()
+        ? this._runWasmArenaEpoch(() => this._surfaceInitializerKernel())
         : undefined;
       this._uniforms = this._initialOverride ??
         (authoredInitial === undefined
@@ -1081,6 +1088,10 @@ export class FeSurfaceElement extends HTMLElement {
     this._members.forEach((member, index) => {
       args[member.arg_index] = uniforms[index];
     });
+    // This legacy fallback invokes one scalar pixel entry repeatedly. Reset
+    // before (rather than before and after) each pixel; `_renderWasmInto`
+    // closes the final epoch in `finally`.
+    this._wasmArenaReset?.();
     return this._kernel(...args) >>> 0; // 0xAARRGGBB
   }
 
@@ -1090,15 +1101,19 @@ export class FeSurfaceElement extends HTMLElement {
     const ctx = canvas.getContext("2d");
     const image = ctx.createImageData(width, height);
     const data = image.data;
-    for (let py = 0; py < height; py++) {
-      for (let px = 0; px < width; px++) {
-        const rgba = this._callKernel(px, py, uniforms);
-        const i = (py * width + px) * 4;
-        data[i] = (rgba >>> 16) & 255;
-        data[i + 1] = (rgba >>> 8) & 255;
-        data[i + 2] = rgba & 255;
-        data[i + 3] = (rgba >>> 24) & 255;
+    try {
+      for (let py = 0; py < height; py++) {
+        for (let px = 0; px < width; px++) {
+          const rgba = this._callKernel(px, py, uniforms);
+          const i = (py * width + px) * 4;
+          data[i] = (rgba >>> 16) & 255;
+          data[i + 1] = (rgba >>> 8) & 255;
+          data[i + 2] = rgba & 255;
+          data[i + 3] = (rgba >>> 24) & 255;
+        }
       }
+    } finally {
+      this._wasmArenaReset?.();
     }
     ctx.putImageData(image, 0, 0);
   }
@@ -1507,10 +1522,9 @@ export class FeSurfaceElement extends HTMLElement {
     this._gestureFrame = null;
     this._gestureDirty = false;
     this._pendingSurfaceEvents = [];
-    this._surfaceEventBufferPtr = 0;
-    this._surfaceEventBufferCapacity = 0;
     this._surfaceTransitionMemory = null;
     this._surfaceTransitionAlloc = null;
+    this._wasmArenaReset = null;
     this._surfaceStateReplaceKernel = null;
     this._surfaceTransitionStateResident = false;
     this._surfaceScheduleKernel = null;
@@ -1744,7 +1758,7 @@ export class FeSurfaceElement extends HTMLElement {
           return 0;
       }
     });
-    const reply = this._controlKernel(...args);
+    const reply = this._runWasmArenaEpoch(() => this._controlKernel(...args));
     const results = Array.isArray(reply) ? reply : [reply];
     const next = this._uniforms.slice();
     control.result.forEach((name, index) => {
@@ -1774,7 +1788,8 @@ export class FeSurfaceElement extends HTMLElement {
       raw.paramIndex,
       raw.paramValue,
     ];
-    const reply = this._surfaceTransitionKernel(...eventArgs, ...this._surfaceActorArgs());
+    const reply = this._runWasmArenaEpoch(() =>
+      this._surfaceTransitionKernel(...eventArgs, ...this._surfaceActorArgs()));
     return this._surfaceReply(reply);
   }
 
@@ -1865,7 +1880,21 @@ export class FeSurfaceElement extends HTMLElement {
   _replaceSurfaceState(next) {
     this._uniforms = next;
     if (this._surfaceStateReplaceKernel) {
-      this._surfaceStateReplaceKernel(...next);
+      this._runWasmArenaEpoch(() => this._surfaceStateReplaceKernel(...next));
+    }
+  }
+
+  /** Run one externally initiated Fe call in a fresh canonical arena epoch.
+   * Aggregate storage is call-local: scalar resident actor globals survive a
+   * reset, while matrices, records, and event transport from a completed (or
+   * trapped) call do not accumulate across browser frames. */
+  _runWasmArenaEpoch(call) {
+    if (!this._wasmArenaReset) return call();
+    this._wasmArenaReset();
+    try {
+      return call();
+    } finally {
+      this._wasmArenaReset();
     }
   }
 
@@ -1873,29 +1902,23 @@ export class FeSurfaceElement extends HTMLElement {
     if (events.length === 0 || events.length > MAX_SURFACE_EVENT_BATCH) {
       throw new Error(`fe render runtime: invalid surface event batch length ${events.length}`);
     }
-    if (events.length > this._surfaceEventBufferCapacity) {
-      let capacity = Math.max(1, this._surfaceEventBufferCapacity);
-      while (capacity < events.length) capacity *= 2;
-      const pointer = this._surfaceTransitionAlloc(capacity * SURFACE_EVENT_STRIDE, 4);
+    return this._runWasmArenaEpoch(() => {
+      // The event bytes belong to this call's epoch. Caching an arena pointer
+      // across resets would let later Fe aggregate allocations overwrite it.
+      const pointer = this._surfaceTransitionAlloc(events.length * SURFACE_EVENT_STRIDE, 4);
       if (!Number.isInteger(pointer) || pointer < 0) {
         throw new Error("fe render runtime: surface event batch allocation failed");
       }
-      this._surfaceEventBufferPtr = pointer;
-      this._surfaceEventBufferCapacity = capacity;
-    }
-    writeSurfaceEventBatch(
-      this._surfaceTransitionMemory,
-      this._surfaceEventBufferPtr,
-      events,
-    );
-    const reply = this._surfaceTransitionKernel(
-      this._surfaceEventBufferPtr,
-      events.length,
-      ...(this._surfaceTransitionStateResident
-        ? this._surfaceResourceArgs()
-        : this._surfaceActorArgs()),
-    );
-    return this._surfaceReply(reply);
+      writeSurfaceEventBatch(this._surfaceTransitionMemory, pointer, events);
+      const reply = this._surfaceTransitionKernel(
+        pointer,
+        events.length,
+        ...(this._surfaceTransitionStateResident
+          ? this._surfaceResourceArgs()
+          : this._surfaceActorArgs()),
+      );
+      return this._surfaceReply(reply);
+    });
   }
 
   /** Compatibility delivery of one typed clock/lifecycle fact to an older
@@ -1944,7 +1967,8 @@ export class FeSurfaceElement extends HTMLElement {
     pendingEvents = this._pendingSurfaceEvents.length,
   ) {
     if (!this._surfaceScheduleKernel) return null;
-    const reply = this._surfaceScheduleKernel(kind, timestamp, pendingEvents);
+    const reply = this._runWasmArenaEpoch(() =>
+      this._surfaceScheduleKernel(kind, timestamp, pendingEvents));
     const decisions = Array.isArray(reply) ? reply : [reply];
     const expected = this._surfaceScheduleHasQueueAction ? 3 : 2;
     if (

@@ -21,4 +21,5 @@ members = [
   { path = "demos/sketches/cga3d", name = "cga3d" },
   { path = "demos/sketches/desargues", name = "desargues" },
   { path = "demos/sketches/qcga_pencil", name = "qcga_pencil" },
+  { path = "demos/sketches/qcga_pencil_de", name = "qcga_pencil_de" },
 ]
