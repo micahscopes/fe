@@ -1,10 +1,10 @@
 {
   "artifacts": {
     "canonical_adapters": [],
-    "wasm": "fe-render-401a2c9a46c66a28.wasm",
-    "wasm_bytes": 61234,
-    "wgsl": "fe-render-0f416c3c386bbf2a.wgsl",
-    "wgsl_bytes": 32109
+    "wasm": "fe-render-acc7e8604555ca38.wasm",
+    "wasm_bytes": 65857,
+    "wgsl": "fe-render-3e674108a50a9144.wgsl",
+    "wgsl_bytes": 29572
   },
   "browser_runtime": null,
   "canonical_interface": null,
@@ -491,12 +491,188 @@
             "offset": 232,
             "scalar": "i32",
             "width": 4
+          },
+          {
+            "arg_index": 61,
+            "doc": null,
+            "name": "origin.x",
+            "offset": 236,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 62,
+            "doc": null,
+            "name": "origin.y",
+            "offset": 240,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 63,
+            "doc": null,
+            "name": "origin.z",
+            "offset": 244,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 64,
+            "doc": null,
+            "name": "right.x",
+            "offset": 248,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 65,
+            "doc": null,
+            "name": "right.y",
+            "offset": 252,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 66,
+            "doc": null,
+            "name": "right.z",
+            "offset": 256,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 67,
+            "doc": null,
+            "name": "up.x",
+            "offset": 260,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 68,
+            "doc": null,
+            "name": "up.y",
+            "offset": 264,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 69,
+            "doc": null,
+            "name": "up.z",
+            "offset": 268,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 70,
+            "doc": null,
+            "name": "forward.x",
+            "offset": 272,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 71,
+            "doc": null,
+            "name": "forward.y",
+            "offset": 276,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 72,
+            "doc": null,
+            "name": "forward.z",
+            "offset": 280,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 73,
+            "doc": null,
+            "name": "a",
+            "offset": 284,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 74,
+            "doc": null,
+            "name": "b",
+            "offset": 288,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 75,
+            "doc": null,
+            "name": "c",
+            "offset": 292,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 76,
+            "doc": null,
+            "name": "d",
+            "offset": 296,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 77,
+            "doc": null,
+            "name": "e",
+            "offset": 300,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 78,
+            "doc": null,
+            "name": "f",
+            "offset": 304,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 79,
+            "doc": null,
+            "name": "g",
+            "offset": 308,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 80,
+            "doc": null,
+            "name": "h",
+            "offset": 312,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 81,
+            "doc": null,
+            "name": "i",
+            "offset": 316,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 82,
+            "doc": null,
+            "name": "j",
+            "offset": 320,
+            "scalar": "f32",
+            "width": 4
           }
         ],
         "name": "input",
         "role": "input",
-        "span": 236,
-        "stride": 236
+        "span": 324,
+        "stride": 324
       }
     ],
     "builtin_inputs": [
@@ -1005,12 +1181,188 @@
                 "offset": 232,
                 "scalar": "i32",
                 "width": 4
+              },
+              {
+                "arg_index": 61,
+                "doc": null,
+                "name": "origin.x",
+                "offset": 236,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 62,
+                "doc": null,
+                "name": "origin.y",
+                "offset": 240,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 63,
+                "doc": null,
+                "name": "origin.z",
+                "offset": 244,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 64,
+                "doc": null,
+                "name": "right.x",
+                "offset": 248,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 65,
+                "doc": null,
+                "name": "right.y",
+                "offset": 252,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 66,
+                "doc": null,
+                "name": "right.z",
+                "offset": 256,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 67,
+                "doc": null,
+                "name": "up.x",
+                "offset": 260,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 68,
+                "doc": null,
+                "name": "up.y",
+                "offset": 264,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 69,
+                "doc": null,
+                "name": "up.z",
+                "offset": 268,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 70,
+                "doc": null,
+                "name": "forward.x",
+                "offset": 272,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 71,
+                "doc": null,
+                "name": "forward.y",
+                "offset": 276,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 72,
+                "doc": null,
+                "name": "forward.z",
+                "offset": 280,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 73,
+                "doc": null,
+                "name": "a",
+                "offset": 284,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 74,
+                "doc": null,
+                "name": "b",
+                "offset": 288,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 75,
+                "doc": null,
+                "name": "c",
+                "offset": 292,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 76,
+                "doc": null,
+                "name": "d",
+                "offset": 296,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 77,
+                "doc": null,
+                "name": "e",
+                "offset": 300,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 78,
+                "doc": null,
+                "name": "f",
+                "offset": 304,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 79,
+                "doc": null,
+                "name": "g",
+                "offset": 308,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 80,
+                "doc": null,
+                "name": "h",
+                "offset": 312,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 81,
+                "doc": null,
+                "name": "i",
+                "offset": 316,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 82,
+                "doc": null,
+                "name": "j",
+                "offset": 320,
+                "scalar": "f32",
+                "width": 4
               }
             ],
             "name": "input",
             "role": "input",
-            "span": 236,
-            "stride": 236
+            "span": 324,
+            "stride": 324
           }
         ],
         "builtin_inputs": [
@@ -1039,8 +1391,8 @@
           0
         ]
       },
-      "shader": "fe-render-0f416c3c386bbf2a.wgsl",
-      "shader_bytes": 32109,
+      "shader": "fe-render-3e674108a50a9144.wgsl",
+      "shader_bytes": 29572,
       "source_entry": "distance_surface"
     },
     {
@@ -1523,12 +1875,188 @@
                 "offset": 232,
                 "scalar": "i32",
                 "width": 4
+              },
+              {
+                "arg_index": 60,
+                "doc": null,
+                "name": "origin.x",
+                "offset": 236,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 61,
+                "doc": null,
+                "name": "origin.y",
+                "offset": 240,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 62,
+                "doc": null,
+                "name": "origin.z",
+                "offset": 244,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 63,
+                "doc": null,
+                "name": "right.x",
+                "offset": 248,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 64,
+                "doc": null,
+                "name": "right.y",
+                "offset": 252,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 65,
+                "doc": null,
+                "name": "right.z",
+                "offset": 256,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 66,
+                "doc": null,
+                "name": "up.x",
+                "offset": 260,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 67,
+                "doc": null,
+                "name": "up.y",
+                "offset": 264,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 68,
+                "doc": null,
+                "name": "up.z",
+                "offset": 268,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 69,
+                "doc": null,
+                "name": "forward.x",
+                "offset": 272,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 70,
+                "doc": null,
+                "name": "forward.y",
+                "offset": 276,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 71,
+                "doc": null,
+                "name": "forward.z",
+                "offset": 280,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 72,
+                "doc": null,
+                "name": "a",
+                "offset": 284,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 73,
+                "doc": null,
+                "name": "b",
+                "offset": 288,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 74,
+                "doc": null,
+                "name": "c",
+                "offset": 292,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 75,
+                "doc": null,
+                "name": "d",
+                "offset": 296,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 76,
+                "doc": null,
+                "name": "e",
+                "offset": 300,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 77,
+                "doc": null,
+                "name": "f",
+                "offset": 304,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 78,
+                "doc": null,
+                "name": "g",
+                "offset": 308,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 79,
+                "doc": null,
+                "name": "h",
+                "offset": 312,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 80,
+                "doc": null,
+                "name": "i",
+                "offset": 316,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 81,
+                "doc": null,
+                "name": "j",
+                "offset": 320,
+                "scalar": "f32",
+                "width": 4
               }
             ],
             "name": "state",
             "role": "input",
-            "span": 236,
-            "stride": 236
+            "span": 324,
+            "stride": 324
           }
         ],
         "builtin_inputs": [
@@ -1552,8 +2080,8 @@
           0
         ]
       },
-      "shader": "fe-render-a2526e3875d10c34.wgsl",
-      "shader_bytes": 17798,
+      "shader": "fe-render-2bc0f2ca76256419.wgsl",
+      "shader_bytes": 16911,
       "source_entry": "marker_fragment"
     }
   ],
@@ -1589,7 +2117,7 @@
       {
         "id": "demos/sketches/qcga_pencil/src/lib.fe",
         "kind": "fe",
-        "sha256": "2dbd83249c8bf88470434340ba0641a72cb1642bd3597c0c0957ef29a851334d"
+        "sha256": "4c61506ef09833afe65c2229a371ec853d881a8ca49d58252af53028b3ab385f"
       },
       {
         "id": "demos/sketches/qcga_pencil_de/fe.toml",
@@ -1599,7 +2127,7 @@
       {
         "id": "demos/sketches/qcga_pencil_de/src/lib.fe",
         "kind": "fe",
-        "sha256": "7b8e31a02b98cdd907bbabcd6c83acd23ca726151719d632d6fb35a02a29e5a5"
+        "sha256": "2f7a0ba3fb9ea78b463a39a94ad4b257a1ab2ae27d72c6cdaec19f12fef8c4ed"
       },
       {
         "id": "ingots/core/fe.toml",
