@@ -28,6 +28,16 @@ use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
 /// does not affect conservative support.
 pub struct DiagonalMetric<const DIMENSION: u32, const NONZERO_SQUARES: u32> {}
 
+/// A bounded signed orthogonal metric for the structural expression compiler.
+/// `NONZERO_SQUARES` marks generators whose square survives and
+/// `NEGATIVE_SQUARES` marks the surviving generators whose square is -1.
+/// Bits outside `NONZERO_SQUARES` are ignored.
+pub struct SignedOrthogonalMetric<
+    const DIMENSION: usize,
+    const NONZERO_SQUARES: usize,
+    const NEGATIVE_SQUARES: usize,
+> {}
+
 pub trait StaticDiagonalMetric {
     const DIMENSION: u32
     const NONZERO_SQUARES: u32
@@ -51,6 +61,12 @@ pub struct Input<const Slot: usize, const Mask: u32> {}
 /// ascending generator order. This is the natural carrier for QCGA's sparse
 /// 15-generator vectors.
 pub struct VectorInput<Identity, const GeneratorSupport: usize> {}
+
+/// A sparse whole-multivector leaf for the structural expression compiler.
+/// `Coefficients` is both nominal leaf identity and its runtime coefficient
+/// record. `BladeSupport` is a bitset over basis-blade masks; the record packs
+/// only present blades, in ascending mask order.
+pub struct MultivectorInput<Coefficients, const BladeSupport: usize> {}
 
 pub struct Sum<A, B> {}
 pub struct Difference<A, B> {}
@@ -96,6 +112,600 @@ pub struct MetricTerm<
     const Magnitude: usize,
     const Negative: usize,
 > {}
+
+const fn finite_support_has(_ support: usize, _ blade: usize) -> bool {
+    ((support >> blade) & 1) == 1
+}
+
+const fn finite_support_rank(_ support: usize, _ blade: usize) -> usize {
+    let mut probe: usize = 0
+    let mut rank: usize = 0
+    while probe < blade {
+        if finite_support_has(support, probe) { rank = rank + 1 }
+        probe = probe + 1
+    }
+    rank
+}
+
+const fn finite_support_width(_ support: usize, _ blade_count: usize) -> usize {
+    let mut blade: usize = 0
+    let mut width: usize = 0
+    while blade < blade_count {
+        if finite_support_has(support, blade) { width = width + 1 }
+        blade = blade + 1
+    }
+    width
+}
+
+const fn finite_blade_grade(_ blade: usize) -> usize {
+    let mut rest: usize = blade
+    let mut grade: usize = 0
+    while rest > 0 {
+        grade = grade + (rest & 1)
+        rest = rest >> 1
+    }
+    grade
+}
+
+/// Reordering parity for two canonical basis blades. Metric-square signs are
+/// added separately by `geometric_negative`.
+const fn merge_negative(_ left: usize, _ right: usize) -> bool {
+    let mut generator: usize = 0
+    let mut swaps: usize = 0
+    while generator < 5 {
+        if ((left >> generator) & 1) == 1 {
+            swaps = swaps + finite_blade_grade(right & ((1 << generator) - 1))
+        }
+        generator = generator + 1
+    }
+    (swaps & 1) == 1
+}
+
+const fn geometric_negative(
+    _ left: usize, _ right: usize, _ negative_squares: usize,
+) -> bool {
+    let metric_negatives = finite_blade_grade(left & right & negative_squares)
+    let negative = merge_negative(left, right)
+    if (metric_negatives & 1) == 1 { negative = !negative }
+    negative
+}
+
+const fn geometric_survives(
+    _ left: usize, _ right: usize, _ nonzero_squares: usize,
+) -> bool {
+    let shared = left & right
+    (shared & nonzero_squares) == shared
+}
+
+const fn left_contraction_keeps(
+    _ left: usize, _ right: usize, _ output: usize,
+) -> bool {
+    let left_grade = finite_blade_grade(left)
+    let right_grade = finite_blade_grade(right)
+    let output_grade = finite_blade_grade(output)
+    if left_grade <= right_grade {
+        output_grade == right_grade - left_grade
+    } else {
+        false
+    }
+}
+
+const fn right_contraction_keeps(
+    _ left: usize, _ right: usize, _ output: usize,
+) -> bool {
+    let left_grade = finite_blade_grade(left)
+    let right_grade = finite_blade_grade(right)
+    let output_grade = finite_blade_grade(output)
+    if right_grade <= left_grade {
+        output_grade == left_grade - right_grade
+    } else {
+        false
+    }
+}
+
+const fn reverse_negative(_ blade: usize) -> bool {
+    let grade = finite_blade_grade(blade)
+    if grade == 0 {
+        false
+    } else {
+        (((grade * (grade - 1)) / 2) & 1) == 1
+    }
+}
+
+struct GaF32Scalar {}
+impl GaF32Scalar {
+    fn zero() -> f32 { 0.0 }
+}
+
+/// A compact result inferred from a finite GA expression. The associated
+/// tuple contains only statically supported output blades, in ascending blade
+/// order. No output record or lane list is authored beside the expression.
+pub trait EvaluateGaF32 {
+    type Output
+    fn evaluate(_ operands: Self) -> Self::Output
+}
+
+/// Structural compiler for bounded, finite GA expression trees over signed
+/// orthogonal metrics. The expression and metric are configured Fe types;
+/// runtime leaves are nested coefficient records selected by nominal type.
+/// The current implementation intentionally accepts `Strict` only. It emits
+/// authored-tree-order straight-line arithmetic and prunes structural zeros,
+/// but does not yet claim cross-occurrence algebraic CSE or reassociation.
+pub struct CompileGaF32<Program> {}
+
+impl<Program> Derive<EvaluateGaF32> for CompileGaF32<Program> {
+    const fn derive<T>(ev: own Evidence<EvaluateGaF32<T>>)
+        -> Evidence<EvaluateGaF32<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<EvaluateGaF32<T>>,
+        )
+    {
+        let operands = builder.arg_ref("operands")
+        let zero = builder.static_call(builder.ty<GaF32Scalar>(), "zero")
+
+        // Reflect each runtime leaf once. A descriptor contains its nominal
+        // coefficient type and shared loads for every declared coefficient.
+        // Repeated uses of the same leaf therefore reuse the same generated
+        // roots without author-assigned slots.
+        let carriers = 0..0
+        for carrier_field in reflect.fields() {
+            let coefficient_fields = carrier_field.ty().fields()
+            if coefficient_fields.len() > 0 {
+                let base = builder.field_get(operands, carrier_field)
+                let loads = 0..0
+                for coefficient_field in coefficient_fields {
+                    loads = loads.append(builder.share(
+                        builder.field_get(base, coefficient_field),
+                    ))
+                }
+                carriers = carriers.append(
+                    (0..0).append(carrier_field.ty()).append(loads),
+                )
+            }
+        }
+
+        // Extract the three normalized GaProgram arguments from the configured
+        // provider type. There is no zero-sized program field in the carrier.
+        let program_types = 0..0
+        for configured in builder.provider_ty().normalized_preorder_types() {
+            if builder.same_ty(configured.constructor(), builder.ty<GaProgram>()) {
+                for arg in configured.generic_args() {
+                    if arg.is_type() { program_types = program_types.append(arg.ty()) }
+                }
+            }
+        }
+
+        let dimension: usize = 0
+        let nonzero_squares: usize = 0
+        let negative_squares: usize = 0
+        let metric_valid: usize = 0
+        let strict: usize = 0
+        if program_types.len() == 3 {
+            let metric = program_types.at(1)
+            if builder.same_ty(
+                metric.constructor(), builder.ty<SignedOrthogonalMetric>(),
+            ) {
+                let ordinal: usize = 0
+                for arg in metric.generic_args() {
+                    if arg.is_const() {
+                        if ordinal == 0 { dimension = arg.const_value() }
+                        if ordinal == 1 { nonzero_squares = arg.const_value() }
+                        if ordinal == 2 { negative_squares = arg.const_value() }
+                        ordinal = ordinal + 1
+                    }
+                }
+                if ordinal == 3 && dimension > 0 && dimension < 6 {
+                    let generator_limit: usize = 1 << dimension
+                    if nonzero_squares < generator_limit
+                        && negative_squares < generator_limit
+                        && (negative_squares & nonzero_squares)
+                            == negative_squares
+                    {
+                        metric_valid = 1
+                    }
+                }
+            }
+            if builder.same_ty(
+                program_types.at(2).constructor(), builder.ty<Strict>(),
+            ) {
+                strict = 1
+            }
+        }
+
+        let stack = 0..0
+        if metric_valid == 1 && strict == 1 {
+            let blade_count: usize = 1 << dimension
+            let expression = program_types.at(0)
+
+            // Every normalized node produces exactly one stack entry. Unknown
+            // metadata nodes produce an invalid entry; their parent consumes
+            // it like any other type child. Consequently an unknown expression
+            // wrapper cannot disappear and accidentally expose a valid child.
+            for node in expression.normalized_postorder_types() {
+                let type_args = 0..0
+                let const_args = 0..0
+                for arg in node.generic_args() {
+                    if arg.is_type() { type_args = type_args.append(arg.ty()) }
+                    if arg.is_const() {
+                        const_args = const_args.append(arg.const_value())
+                    }
+                }
+                let children = 0..0
+                for _child in 0..type_args.len() {
+                    children = children.append(stack.last())
+                    stack = stack.without_last()
+                }
+
+                let result = 0..0
+
+                if builder.same_ty(
+                    node.constructor(), builder.ty<MultivectorInput>(),
+                ) && type_args.len() == 1 && const_args.len() == 1 {
+                    let support = const_args.at(0)
+                    let width = finite_support_width(support, blade_count)
+                    let matches: usize = 0
+                    let matched_loads = 0..0
+                    for carrier in carriers {
+                        if builder.same_ty(
+                            type_args.at(0).constructor(), carrier.at(0),
+                        ) {
+                            matches = matches + 1
+                            matched_loads = carrier.at(1)
+                        }
+                    }
+                    if matches == 1 && width > 0
+                        && support < (1 << blade_count)
+                        && matched_loads.len() == width
+                    {
+                        let value = 0..0
+                        for blade in 0..blade_count {
+                            let component = zero
+                            if finite_support_has(support, blade) {
+                                component = matched_loads.at(
+                                    finite_support_rank(support, blade),
+                                )
+                            }
+                            value = value.append(component)
+                        }
+                        result = (0..0).append(support).append(value)
+                    }
+                }
+
+                if builder.same_ty(node.constructor(), builder.ty<Sum>())
+                    && type_args.len() == 2 && children.len() == 2
+                {
+                    let right = children.at(0)
+                    let left = children.at(1)
+                    if left.len() == 2 && right.len() == 2 {
+                        let support = left.at(0) | right.at(0)
+                        let value = 0..0
+                        for blade in 0..blade_count {
+                            let component = zero
+                            if finite_support_has(left.at(0), blade)
+                                && finite_support_has(right.at(0), blade)
+                            {
+                                component = builder.add(
+                                    left.at(1).at(blade), right.at(1).at(blade),
+                                )
+                            }
+                            if finite_support_has(left.at(0), blade)
+                                && !finite_support_has(right.at(0), blade)
+                            {
+                                component = left.at(1).at(blade)
+                            }
+                            if !finite_support_has(left.at(0), blade)
+                                && finite_support_has(right.at(0), blade)
+                            {
+                                component = right.at(1).at(blade)
+                            }
+                            value = value.append(component)
+                        }
+                        result = (0..0).append(support).append(value)
+                    }
+                }
+
+                if builder.same_ty(node.constructor(), builder.ty<Difference>())
+                    && type_args.len() == 2 && children.len() == 2
+                {
+                    let right = children.at(0)
+                    let left = children.at(1)
+                    if left.len() == 2 && right.len() == 2 {
+                        let support = left.at(0) | right.at(0)
+                        let value = 0..0
+                        for blade in 0..blade_count {
+                            let component = zero
+                            if finite_support_has(left.at(0), blade)
+                                && finite_support_has(right.at(0), blade)
+                            {
+                                component = builder.sub(
+                                    left.at(1).at(blade), right.at(1).at(blade),
+                                )
+                            }
+                            if finite_support_has(left.at(0), blade)
+                                && !finite_support_has(right.at(0), blade)
+                            {
+                                component = left.at(1).at(blade)
+                            }
+                            if !finite_support_has(left.at(0), blade)
+                                && finite_support_has(right.at(0), blade)
+                            {
+                                component = builder.neg(right.at(1).at(blade))
+                            }
+                            value = value.append(component)
+                        }
+                        result = (0..0).append(support).append(value)
+                    }
+                }
+
+                if builder.same_ty(node.constructor(), builder.ty<Neg>())
+                    && type_args.len() == 1 && children.len() == 1
+                {
+                    let source = children.at(0)
+                    if source.len() == 2 {
+                        let value = 0..0
+                        for blade in 0..blade_count {
+                            let component = zero
+                            if finite_support_has(source.at(0), blade) {
+                                component = builder.neg(source.at(1).at(blade))
+                            }
+                            value = value.append(component)
+                        }
+                        result = (0..0).append(source.at(0)).append(value)
+                    }
+                }
+
+                if builder.same_ty(node.constructor(), builder.ty<Reverse>())
+                    && type_args.len() == 1 && children.len() == 1
+                {
+                    let source = children.at(0)
+                    if source.len() == 2 {
+                        let value = 0..0
+                        for blade in 0..blade_count {
+                            let component = zero
+                            if finite_support_has(source.at(0), blade) {
+                                component = source.at(1).at(blade)
+                                if reverse_negative(blade) {
+                                    component = builder.neg(component)
+                                }
+                            }
+                            value = value.append(component)
+                        }
+                        result = (0..0).append(source.at(0)).append(value)
+                    }
+                }
+
+                if builder.same_ty(node.constructor(), builder.ty<Grade>())
+                    && type_args.len() == 1 && const_args.len() == 1
+                    && children.len() == 1
+                {
+                    let source = children.at(0)
+                    if source.len() == 2 {
+                        let wanted_grade = const_args.at(0)
+                        let support: usize = 0
+                        let value = 0..0
+                        for blade in 0..blade_count {
+                            let component = zero
+                            if finite_support_has(source.at(0), blade)
+                                && finite_blade_grade(blade) == wanted_grade
+                            {
+                                support = support | (1 << blade)
+                                component = source.at(1).at(blade)
+                            }
+                            value = value.append(component)
+                        }
+                        result = (0..0).append(support).append(value)
+                    }
+                }
+
+                if builder.same_ty(node.constructor(), builder.ty<PoincareDual>())
+                    && type_args.len() == 1 && children.len() == 1
+                {
+                    let source = children.at(0)
+                    if source.len() == 2 {
+                        let pseudoscalar = blade_count - 1
+                        let support: usize = 0
+                        let value = 0..0
+                        for _blade in 0..blade_count { value = value.append(zero) }
+                        for blade in 0..blade_count {
+                            if finite_support_has(source.at(0), blade) {
+                                let output = pseudoscalar ^ blade
+                                let component = source.at(1).at(blade)
+                                if merge_negative(blade, output) {
+                                    component = builder.neg(component)
+                                }
+                                support = support | (1 << output)
+                                value = value.replace(output, component)
+                            }
+                        }
+                        result = (0..0).append(support).append(value)
+                    }
+                }
+
+                // Bilinear operators share one sparse pair scan. `mode` is
+                // 0 geometric, 1 outer, 2 left contraction, 3 right
+                // contraction, and 4 scalar product.
+                let bilinear_mode: usize = 5
+                if builder.same_ty(node.constructor(), builder.ty<Geometric>()) {
+                    bilinear_mode = 0
+                }
+                if builder.same_ty(node.constructor(), builder.ty<Outer>()) {
+                    bilinear_mode = 1
+                }
+                if builder.same_ty(
+                    node.constructor(), builder.ty<LeftContraction>(),
+                ) { bilinear_mode = 2 }
+                if builder.same_ty(
+                    node.constructor(), builder.ty<RightContraction>(),
+                ) { bilinear_mode = 3 }
+                if builder.same_ty(
+                    node.constructor(), builder.ty<ScalarProduct>(),
+                ) { bilinear_mode = 4 }
+
+                if bilinear_mode < 5 && type_args.len() == 2
+                    && children.len() == 2
+                {
+                    let right = children.at(0)
+                    let left = children.at(1)
+                    if left.len() == 2 && right.len() == 2 {
+                        let support: usize = 0
+                        let value = 0..0
+                        let counts = 0..0
+                        for _blade in 0..blade_count {
+                            value = value.append(zero)
+                            counts = counts.append(0)
+                        }
+                        for left_blade in 0..blade_count {
+                            for right_blade in 0..blade_count {
+                                if finite_support_has(left.at(0), left_blade)
+                                    && finite_support_has(right.at(0), right_blade)
+                                {
+                                    let output = left_blade ^ right_blade
+                                    let keep = geometric_survives(
+                                        left_blade, right_blade, nonzero_squares,
+                                    )
+                                    if bilinear_mode == 1 {
+                                        keep = (left_blade & right_blade) == 0
+                                    }
+                                    if bilinear_mode > 1 {
+                                        if keep {
+                                            if bilinear_mode == 2 {
+                                                keep = left_contraction_keeps(
+                                                    left_blade, right_blade, output,
+                                                )
+                                            }
+                                            if bilinear_mode == 3 {
+                                                keep = right_contraction_keeps(
+                                                    left_blade, right_blade, output,
+                                                )
+                                            }
+                                            if bilinear_mode == 4 {
+                                                keep = output == 0
+                                            }
+                                        }
+                                    }
+                                    if keep {
+                                        let term = builder.mul(
+                                            left.at(1).at(left_blade),
+                                            right.at(1).at(right_blade),
+                                        )
+                                        let negative = merge_negative(
+                                            left_blade, right_blade,
+                                        )
+                                        if bilinear_mode != 1 {
+                                            negative = geometric_negative(
+                                                left_blade, right_blade,
+                                                negative_squares,
+                                            )
+                                        }
+                                        if negative { term = builder.neg(term) }
+                                        if counts.at(output) == 0 {
+                                            value = value.replace(output, term)
+                                        } else {
+                                            value = value.replace(
+                                                output,
+                                                builder.add(value.at(output), term),
+                                            )
+                                        }
+                                        support = support | (1 << output)
+                                        counts = counts.replace(
+                                            output, counts.at(output) + 1,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        result = (0..0).append(support).append(value)
+                    }
+                }
+
+                // Regressive product is dual(dual(left) ^ dual(right)). This
+                // direct sparse scan preserves that pinned orientation without
+                // inventing a runtime intermediate.
+                if builder.same_ty(node.constructor(), builder.ty<Regressive>())
+                    && type_args.len() == 2 && children.len() == 2
+                {
+                    let right = children.at(0)
+                    let left = children.at(1)
+                    if left.len() == 2 && right.len() == 2 {
+                        let pseudoscalar = blade_count - 1
+                        let support: usize = 0
+                        let value = 0..0
+                        let counts = 0..0
+                        for _blade in 0..blade_count {
+                            value = value.append(zero)
+                            counts = counts.append(0)
+                        }
+                        for left_blade in 0..blade_count {
+                            for right_blade in 0..blade_count {
+                                if finite_support_has(left.at(0), left_blade)
+                                    && finite_support_has(right.at(0), right_blade)
+                                {
+                                    let dual_left = pseudoscalar ^ left_blade
+                                    let dual_right = pseudoscalar ^ right_blade
+                                    if (dual_left & dual_right) == 0 {
+                                        let dual_output = dual_left ^ dual_right
+                                        let output = pseudoscalar ^ dual_output
+                                        let negative = merge_negative(
+                                            left_blade, dual_left,
+                                        )
+                                        if merge_negative(right_blade, dual_right) {
+                                            negative = !negative
+                                        }
+                                        if merge_negative(dual_left, dual_right) {
+                                            negative = !negative
+                                        }
+                                        if merge_negative(dual_output, output) {
+                                            negative = !negative
+                                        }
+                                        let term = builder.mul(
+                                            left.at(1).at(left_blade),
+                                            right.at(1).at(right_blade),
+                                        )
+                                        if negative { term = builder.neg(term) }
+                                        if counts.at(output) == 0 {
+                                            value = value.replace(output, term)
+                                        } else {
+                                            value = value.replace(
+                                                output,
+                                                builder.add(value.at(output), term),
+                                            )
+                                        }
+                                        support = support | (1 << output)
+                                        counts = counts.replace(
+                                            output, counts.at(output) + 1,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        result = (0..0).append(support).append(value)
+                    }
+                }
+
+                stack = stack.append(result)
+            }
+        }
+
+        // Infer a compact tuple type and value from the single valid root.
+        // Unknown/malformed trees leave no conforming generated method.
+        if stack.len() == 1 && stack.at(0).len() == 2 {
+            let root = stack.at(0)
+            let output_ty = builder.tuple_ty()
+            let output = builder.tuple_expr()
+            for blade in 0..(1 << dimension) {
+                if finite_support_has(root.at(0), blade) {
+                    output_ty = builder.with_elem_ty(output_ty, builder.ty<f32>())
+                    output = builder.with_elem(output, root.at(1).at(blade))
+                }
+            }
+            builder.emit_assoc_ty("Output", output_ty)
+            builder.emit_method("evaluate", output)
+        }
+        builder.finish()
+        ev
+    }
+}
 
 const fn vector_support_has(_ support: usize, _ generator: usize) -> bool {
     ((support >> generator) & 1) == 1

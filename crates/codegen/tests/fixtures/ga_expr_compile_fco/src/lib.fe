@@ -1,0 +1,164 @@
+//! Substitution fixture for the reusable finite GA expression compiler.
+//!
+//! These programs deliberately differ in expression topology, operators,
+//! supports, metric signature, result support, carrier field order, and leaf
+//! record spelling. No provider code names any of them.
+
+use ga_expr::{
+    CompileGaF32, Difference, EvaluateGaF32, Geometric, Grade, LeftContraction,
+    MultivectorInput, Neg, Outer, PoincareDual, Regressive, Reverse,
+    RightContraction, ScalarProduct, SignedOrthogonalMetric, Strict, Sum,
+    GaProgram,
+}
+use core::num::IntDowncast
+
+extern { fn __i32_from_f32(_: f32) -> i32 }
+
+// -------------------------------------------------------------------------
+// Program A: a non-repeated mixed tree in Euclidean 3-space.
+// grade1((a + b) * reverse(c)) + -(a ^ c)
+// -------------------------------------------------------------------------
+
+struct ACoefficients { e0: f32, e1: f32 }
+struct BCoefficients { scalar: f32, e2: f32 }
+struct CCoefficients { e0: f32, e12: f32 }
+
+type A = MultivectorInput<ACoefficients, 6>
+type B = MultivectorInput<BCoefficients, 17>
+type C = MultivectorInput<CCoefficients, 66>
+type MixedExpr = Sum<
+    Grade<Geometric<Sum<A, B>, Reverse<C>>, 1>,
+    Neg<Outer<A, C>>,
+>
+type E3 = SignedOrthogonalMetric<3, 7, 0>
+
+struct MixedOperands {
+    c: CCoefficients,
+    a: ACoefficients,
+    b: BCoefficients,
+}
+
+derive EvaluateGaF32 for MixedOperands using CompileGaF32<
+    GaProgram<MixedExpr, E3, Strict>
+>
+
+pub fn mixed_probe(
+    _ a0: f32, _ a1: f32,
+    _ b0: f32, _ b1: f32,
+    _ c0: f32, _ c1: f32,
+) -> <MixedOperands as EvaluateGaF32>::Output {
+    <MixedOperands as EvaluateGaF32>::evaluate(MixedOperands {
+        c: CCoefficients { e0: c0, e12: c1 },
+        a: ACoefficients { e0: a0, e1: a1 },
+        b: BCoefficients { scalar: b0, e2: b1 },
+    })
+}
+
+// -------------------------------------------------------------------------
+// Program B: unrelated two-dimensional signed metric and scalar result.
+// scalar((x - y) * reverse(x + y)); e1 squares to -1.
+// -------------------------------------------------------------------------
+
+struct XCoefficients { x_scalar: f32, x_e0: f32, x_e1: f32 }
+struct YCoefficients { y_e0: f32, y_e1: f32 }
+
+type X = MultivectorInput<XCoefficients, 7>
+type Y = MultivectorInput<YCoefficients, 6>
+type SignedScalarExpr = ScalarProduct<
+    Difference<X, Y>,
+    Reverse<Sum<X, Y>>,
+>
+type Cl11 = SignedOrthogonalMetric<2, 3, 2>
+
+struct SignedOperands {
+    y: YCoefficients,
+    x: XCoefficients,
+}
+
+derive EvaluateGaF32 for SignedOperands using CompileGaF32<
+    GaProgram<SignedScalarExpr, Cl11, Strict>
+>
+
+pub fn signed_scalar_probe(
+    _ xs: f32, _ x0: f32, _ x1: f32,
+    _ y0: f32, _ y1: f32,
+) -> <SignedOperands as EvaluateGaF32>::Output {
+    <SignedOperands as EvaluateGaF32>::evaluate(SignedOperands {
+        y: YCoefficients { y_e0: y0, y_e1: y1 },
+        x: XCoefficients { x_scalar: xs, x_e0: x0, x_e1: x1 },
+    })
+}
+
+// -------------------------------------------------------------------------
+// Program C: dual/join substitution, proving those unary/binary constructors
+// are dispatched rather than silently treated as transparent wrappers.
+// -------------------------------------------------------------------------
+
+struct PCoefficients { p_e01: f32, p_e02: f32 }
+struct QCoefficients { q_e02: f32, q_e12: f32 }
+type P = MultivectorInput<PCoefficients, 40>
+type Q = MultivectorInput<QCoefficients, 96>
+type DualJoinExpr = Sum<PoincareDual<P>, Regressive<P, Q>>
+
+struct DualJoinOperands {
+    q: QCoefficients,
+    p: PCoefficients,
+}
+
+derive EvaluateGaF32 for DualJoinOperands using CompileGaF32<
+    GaProgram<DualJoinExpr, E3, Strict>
+>
+
+pub fn dual_join_probe(
+    _ p01: f32, _ p02: f32, _ q02: f32, _ q12: f32,
+) -> <DualJoinOperands as EvaluateGaF32>::Output {
+    <DualJoinOperands as EvaluateGaF32>::evaluate(DualJoinOperands {
+        q: QCoefficients { q_e02: q02, q_e12: q12 },
+        p: PCoefficients { p_e01: p01, p_e02: p02 },
+    })
+}
+
+// -------------------------------------------------------------------------
+// Program D: both directed contractions over mixed-grade operands.
+// -------------------------------------------------------------------------
+
+struct LCoefficients { l_scalar: f32, l_e0: f32, l_e01: f32 }
+struct RCoefficients { r_e0: f32, r_e1: f32, r_e01: f32, r_e012: f32 }
+type L = MultivectorInput<LCoefficients, 11>
+type R = MultivectorInput<RCoefficients, 142>
+type DirectedExpr = Sum<LeftContraction<L, R>, RightContraction<L, R>>
+
+struct DirectedOperands {
+    right: RCoefficients,
+    left: LCoefficients,
+}
+
+derive EvaluateGaF32 for DirectedOperands using CompileGaF32<
+    GaProgram<DirectedExpr, E3, Strict>
+>
+
+pub fn directed_probe(
+    _ ls: f32, _ l0: f32, _ l01: f32,
+    _ r0: f32, _ r1: f32, _ r01: f32, _ r012: f32,
+) -> <DirectedOperands as EvaluateGaF32>::Output {
+    <DirectedOperands as EvaluateGaF32>::evaluate(DirectedOperands {
+        right: RCoefficients {
+            r_e0: r0, r_e1: r1, r_e01: r01, r_e012: r012,
+        },
+        left: LCoefficients { l_scalar: ls, l_e0: l0, l_e01: l01 },
+    })
+}
+
+/// Browser-lowering witness: the reusable provider's inferred tuple is
+/// consumed by ordinary Fe and lowered as straight-line shader arithmetic.
+pub fn finite_ga_render(
+    _ px: i32, _ py: i32,
+    _ a0: f32, _ a1: f32,
+    _ b0: f32, _ b1: f32,
+    _ c0: f32, _ c1: f32,
+) -> u32 {
+    let value = mixed_probe(a0, a1, b0, b1, c0, c1)
+    __i32_from_f32(
+        value.0 + value.1 + value.2 + value.3 + value.4,
+    ).downcast_truncate()
+}

@@ -176,6 +176,47 @@ General diagonal metric products, the remaining node vocabulary, compact typed
 outputs, stable expression DAG sharing, and deriving input slots/support from
 the reflected record are still required before this is the final GA façade.
 
+### Reusable finite orthogonal expression compiler
+
+`CompileGaF32<GaProgram<E, M, Strict>>` is now the first reusable G2/G3
+implementation rather than an example-local prototype. `E` may be any finite
+ground composition, within the published five-generator and provider-budget
+envelopes, of:
+
+- nominal `MultivectorInput<Coefficients, Support>` leaves;
+- `Sum`, `Difference`, and `Neg`;
+- `Geometric`, `Outer`, left/right contractions, and `ScalarProduct`;
+- `Grade`, `Reverse`, and `PoincareDual`; and
+- `Regressive`, pinned as dual-of-wedge-of-duals.
+
+`SignedOrthogonalMetric<Dimension, NonzeroSquares, NegativeSquares>` supplies
+both degeneracy and signature. FCO folds the normalized expression in
+postorder, binds every leaf to one nested carrier record by resolved nominal
+type, validates reflected coefficient width, and emits strict authored-order
+arithmetic. The generated `EvaluateGaF32::Output` is an inferred tuple
+containing only supported blades in ascending mask order; no output lane list,
+numeric leaf ID, flat carrier offset, phantom program field, or manifest is
+authored beside the expression.
+
+The substitution gate does not reuse the twice-wedge expression. One unchanged
+provider executes four unrelated programs covering every accepted operator,
+two dimensions and three dimensions, Euclidean and mixed signature metrics,
+different leaf/support/carrier shapes, and compact results of widths 1, 3, 5,
+and 7. It runs 257 deterministic-random cases per program bit-for-bit against
+separately authored Rust tree interpreters, requires zero Wasm imports, and
+validates a branch/loop/switch-free browser WGSL consumer. Negative gates prove
+unknown operators, ambiguous nominal leaf bindings, and the not-yet-supported
+`AlgebraicBalanced` policy fail closed with incomplete-impl diagnostics.
+
+This is genuine bounded tree-substitution genericity, but not the end state.
+The current implementation stores dense `2^dimension` generated-expression
+vectors while planning, accepts concrete non-generic coefficient structs only,
+has no explicit expression-path/fuel diagnostic, and does not hash-cons
+repeated internal subexpressions. Leaf loads are shared; repeated products are
+not yet a common DAG node. Compile time remains roughly 32 seconds for the
+four-program in-process gate on the current host, so expansion/ground-plan
+caching and a sparse planner arena remain named requirements.
+
 ### Configured provider and QCGA sparse-metric slice
 
 FCO now retains a named provider's exact ground configuration. The intended
@@ -236,7 +277,7 @@ A sparse support is a set of those blade masks. A runtime multivector leaf has:
 
 ```text
 Leaf {
-    semantic input slot,
+    nominal Fe coefficient-record identity,
     scalar domain,
     statically known possible blade set,
     compact runtime coefficient storage,
@@ -244,12 +285,12 @@ Leaf {
 ```
 
 Leaf identities are not DOM IDs, event IDs, or arbitrary author bookkeeping.
-New high-dimensional vector leaves use their nominal Fe coefficient-record
-types, which distinguish sources while forming monomial keys and shared loads.
-The provider binds those types directly to nested reflected operand fields, so
-users neither number leaves nor manually flatten their storage. The older
-bounded `Input<Slot, Support>` support prototype still carries a numeric slot
-and is migration debt.
+New vector and bounded whole-multivector leaves use their nominal Fe
+coefficient-record types, which distinguish sources while forming monomial
+keys and shared loads. Providers bind those types directly to nested reflected
+operand fields, so users neither number leaves nor manually flatten their
+storage. The older bounded `Input<Slot, Support>` support prototype still
+carries a numeric slot and is migration debt.
 
 ### Metrics
 
@@ -563,7 +604,7 @@ metric square and prove the semantic gates fail.
 - exact typed term vocabulary; and
 - one executable CTFE/FCO/Wasm/WGSL vertical slice with independent semantics.
 
-### G2 — general exact binary operators
+### G2 — general exact binary operators (bounded strict slice complete)
 
 - derive term plans for arbitrary sparse leaves under `Sum`, `Difference`,
   `Neg`, `Geometric`, `Outer`, contractions, grade, reverse, and dual;
@@ -571,20 +612,25 @@ metric square and prove the semantic gates fail.
 - derive leaf/component slots from reflection; and
 - remove the example-specific exact-plan constructor.
 
-Acceptance: exhaustive dimensions 0--5 against dense Fe and Rust oracles, with
-strict bit-parity where promised, and no runtime planning in WGSL.
+Remaining acceptance: exhaustive dimensions 0--5 against dense Fe and Rust
+oracles, including degenerate metrics and adversarial floating values. The
+current substitution suite covers the full operator vocabulary at dimensions
+2 and 3 with strict bit parity and no runtime planning in WGSL.
 
-### G3 — arbitrary finite expression trees
+### G3 — arbitrary finite expression trees (bounded strict slice complete)
 
-- recursively interpret any ground composition of supported nodes;
+- recursively interpret any ground composition of supported nodes (complete
+  for `Strict` inside the five-generator envelope);
 - retain source identities/grouping for `Strict`;
 - normalize exact/algebraic terms for `AlgebraicBalanced`;
 - add explicit capacity/fuel diagnostics containing expression path and stage;
   and
 - property-generate trees, supports, metrics, and policies.
 
-Acceptance: a new composed expression needs only a type alias/input record and
-no provider/compiler changes.
+Current acceptance: a new strict composed expression needs only a type
+alias/input record and no provider/compiler changes. Remaining acceptance is
+`AlgebraicBalanced`, explicit capacity/path diagnostics, and generated-tree
+property coverage.
 
 ### G4 — shared DAG and scheduler
 

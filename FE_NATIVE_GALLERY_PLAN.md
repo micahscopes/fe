@@ -565,11 +565,10 @@ Origin: honesty audit of Claude Code session
   compiler. Only its node vocabulary and conservative `GaSupport`
   interpretation are generic; `AlgebraicTwiceWedgePlan6`, its exact-term
   constructor, output-lane routing, and evaluator provider are specialized to
-  `(a ^ b) + (a ^ b)`. The next GA milestone is therefore the actual G2/G3
-  boundary: any finite ground composition of the supported nodes must produce
-  exact terms through one operator-generic planner and execute through one
-  operator-generic FCO evaluator. `qcga_pencil` is the first non-toy migration
-  target. It may retain ordinary camera and matrix-solver coordinates where
+  `(a ^ b) + (a ^ b)`. This gap is now answered by the bounded strict G2/G3
+  provider recorded below; the specialized fixture remains only a historical
+  staging proof. `qcga_pencil` is the first non-toy migration target. It may
+  retain ordinary camera and matrix-solver coordinates where
   those are the clearest domain representation, but hand-expanded GA
   coefficient routing/evaluation/gradient constructions are debt to replace,
   not an acceptable per-demo specialization.
@@ -584,9 +583,8 @@ Origin: honesty audit of Claude Code session
   browser-valid WGSL with no runtime loop/branch/switch and no host algebra
   import. This proves structural dispatch across two trees, but it is not a
   generic GA implementation: dimension, carrier layout, output shape, and the
-  five accepted constructors remain fixed in the fixture. General diagonal
-  metric signs/products, compact output types, reflected slot/support
-  derivation, and DAG sharing remain open.
+  five accepted constructors remain fixed in that fixture. The reusable
+  provider below supersedes those first four limits; DAG sharing remains open.
 - A configured-provider follow-through now eliminates the phantom program
   field for the first real QCGA consumer. `using
   CompileVectorScalarF32<GaProgram<...>>` is reflected by FCO as exact ground
@@ -606,10 +604,29 @@ Origin: honesty audit of Claude Code session
   width, and emit hygienic nested access. Concrete structs are supported;
   generic substitution and enum payloads still fail closed. This establishes
   substitution across the provider's explicitly narrow two-vector
-  scalar-product contract; it does not establish generic GA. The full
-  operator vocabulary/DAG remains open, and current 41-44 second in-process
-  gates make provider/dependency caching a named performance prerequisite
-  rather than something to hand-wave away.
+  scalar-product contract; it does not establish generic GA. The orthogonal
+  operator vocabulary is handled separately below, while off-diagonal general
+  products and DAG normalization remain open. Current 41-44 second in-process
+  gates make provider/dependency caching a named performance prerequisite.
+- The misleading twice-wedge genericity claim is now superseded by a reusable
+  bounded strict expression compiler. `CompileGaF32<GaProgram<E,M,Strict>>`
+  accepts any finite ground composition inside the published provider budgets
+  of nominal typed leaves, sum/difference/negation,
+  geometric/outer/scalar and directed contraction,
+  grade/reverse/Poincare dual, and regressive product under a signed orthogonal
+  metric with at most five generators. It reflects leaf records by nominal
+  type, shares their loads, infers a compact result tuple, and emits no runtime
+  planner. One semantic gate substitutes four unrelated trees spanning every
+  accepted operator, dimensions 2/3, distinct signatures/supports/carriers,
+  and result widths 1/3/5/7 over 257 independent inputs each; separately
+  authored Rust interpreters match bit-for-bit, Wasm has no host algebra
+  imports, and a browser WGSL consumer has no loop/branch/switch. Unknown
+  operators, duplicate leaf identities, and `AlgebraicBalanced` fail closed.
+  This is real bounded strict tree genericity, not yet general GA: dense
+  compile-time vectors, the five-generator limit, missing property coverage,
+  missing explicit path/fuel diagnostics, and no internal-expression
+  hash-consing remain. The four-program gate still takes about 32 seconds, so
+  cache/sparse-arena work remains required.
 - The surface fixed host now observes the canonical Wasm arena's documented
   top-level-call lifetime. Initializer, explicit resident-state replacement,
   scheduling policy, legacy control, immediate transition, and scheduled
