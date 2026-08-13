@@ -74,9 +74,9 @@
       "name": "module.wasm",
       "kind": "wasm_module",
       "media_type": "application/wasm",
-      "sha256": "5dff7b2c2f07f0f6865df59a242aac07c1bb3745a66e0fe89f2ebd1e142c025e",
-      "byte_len": 23585,
-      "url": "assets/fe-5dff7b2c2f07f0f6.wasm"
+      "sha256": "afa9aefb4be953cfbd0f1a4b729fa9d4c687cc86eadeba863145e5082bd4c4ec",
+      "byte_len": 23581,
+      "url": "assets/fe-afa9aefb4be953cf.wasm"
     }
   ]
 }

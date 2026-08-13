@@ -33,6 +33,23 @@
 const DEFAULT_SIZE = 256; // dispatch/canvas size for a v4 manifest with no declared `surface.extent`.
 const SURFACE_EVENT_STRIDE = 52;
 const MAX_SURFACE_EVENT_BATCH = Math.floor(0x7fffffff / SURFACE_EVENT_STRIDE);
+const COARSE_POINTER_GPU_MAX_DIMENSION = 256;
+const COARSE_POINTER_CPU_MAX_DIMENSION = 128;
+const CPU_MAX_DIMENSION = 256;
+
+/** Preserve aspect while enforcing an implementation resource ceiling. */
+export function fitBackingExtent(width, height, maxDimension = Infinity) {
+  if (!Number.isFinite(maxDimension)) return { width, height };
+  const scale = Math.min(1, maxDimension / Math.max(width, height));
+  return {
+    width: Math.max(1, Math.round(width * scale)),
+    height: Math.max(1, Math.round(height * scale)),
+  };
+}
+
+function hasCoarsePointer() {
+  return globalThis.matchMedia?.("(pointer: coarse)")?.matches === true;
+}
 
 export function rasterDrawVertexCount(pass) {
   const count = pass.draw_vertices ?? 3;
@@ -852,10 +869,15 @@ export class FeSurfaceElement extends HTMLElement {
     const rect = probe.getBoundingClientRect();
     const cssWidth = rect.width || declaredWidth;
     const cssHeight = rect.height || declaredHeight;
-    return {
+    const extent = {
       width: Math.max(1, Math.min(declaredWidth, Math.round(cssWidth * dpr))),
       height: Math.max(1, Math.min(declaredHeight, Math.round(cssHeight * dpr))),
     };
+    return fitBackingExtent(
+      extent.width,
+      extent.height,
+      hasCoarsePointer() ? COARSE_POINTER_GPU_MAX_DIMENSION : Infinity,
+    );
   }
 
   async _resolveGpu() {
@@ -1157,7 +1179,7 @@ export class FeSurfaceElement extends HTMLElement {
         await (sharedGpuRecoveryPromise ?? handleSharedDeviceLoss(attemptedDevice, loss.info));
         const freshGpu = await acquireSharedGpu();
         if (!freshGpu || freshGpu.device === attemptedDevice) throw error;
-        this._gpu = null;
+        this._releaseGpuResources();
         this._pipelineError = null;
         console.warn(
           `[fe web] retrying initial poster after confirmed device loss (${attempt + 1}/${MAX_RECOVERY_ATTEMPTS})`,
@@ -1193,8 +1215,30 @@ export class FeSurfaceElement extends HTMLElement {
           "fe render runtime: WebGPU is required for this resource pass graph",
         );
       }
+      const cpuExtent = fitBackingExtent(
+        width,
+        height,
+        hasCoarsePointer() ? COARSE_POINTER_CPU_MAX_DIMENSION : CPU_MAX_DIMENSION,
+      );
+      this._backingWidth = cpuExtent.width;
+      this._backingHeight = cpuExtent.height;
+      this._replaceSurfaceState(
+        withExtentUniforms(
+          this._members,
+          this._surface,
+          this._uniforms,
+          cpuExtent.width,
+          cpuExtent.height,
+        ),
+      );
+      this._applyExtentAndFilter(cpuExtent.width, cpuExtent.height);
       this._mode = "wasm-2d";
-      this._renderWasmInto(this._adoptedCanvas || this._posterCanvas, width, height, this._uniforms);
+      this._renderWasmInto(
+        this._adoptedCanvas || this._posterCanvas,
+        cpuExtent.width,
+        cpuExtent.height,
+        this._uniforms,
+      );
       return;
     }
     this._posterAttemptedDevice = gpu.device;
@@ -1264,6 +1308,7 @@ export class FeSurfaceElement extends HTMLElement {
       }
       posterSource.hidden = true;
       this._posterCanvas.hidden = false;
+      this._releaseGpuResources();
     }
   }
 
@@ -1278,15 +1323,26 @@ export class FeSurfaceElement extends HTMLElement {
 
   async _capturePosterFromLive() {
     if (this._adoptedCanvas || this._mode !== "webgpu" || !this._liveContext) return;
-    await this._gpu.device.queue.onSubmittedWorkDone();
-    await new Promise((resolve) => {
-      requestAnimationFrame(() => requestAnimationFrame(resolve));
-    });
-    const bitmap = await createImageBitmap(this._liveCanvas);
-    this._paintPoster(bitmap, this._backingWidth, this._backingHeight);
-    this._liveContext.unconfigure();
-    this._liveCanvas.hidden = true;
-    this._posterCanvas.hidden = false;
+    const context = this._liveContext;
+    const gpu = this._gpu;
+    try {
+      await gpu.device.queue.onSubmittedWorkDone();
+      await new Promise((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(resolve));
+      });
+      const bitmap = await createImageBitmap(this._liveCanvas);
+      this._paintPoster(bitmap, this._backingWidth, this._backingHeight);
+    } finally {
+      try {
+        context.unconfigure();
+      } catch {
+        // Device loss may already have invalidated the context.
+      }
+      if (this._liveContext === context) this._liveContext = null;
+      this._liveCanvas.hidden = true;
+      this._posterCanvas.hidden = false;
+      this._releaseGpuResources();
+    }
   }
 
   // -- ready -> live on declared intent -------------------------------------
@@ -1392,6 +1448,7 @@ export class FeSurfaceElement extends HTMLElement {
 
   async _suspend() {
     await this._capturePosterFromLive();
+    this._unwireGestures();
     this._fsm = "suspended";
     this._deliverSurfaceLifecycle(SurfaceEventKind.Hidden);
     this._dispatch("fe-statechange", { state: "suspended" });
@@ -1464,6 +1521,26 @@ export class FeSurfaceElement extends HTMLElement {
   }
 
   // -- device loss -----------------------------------------------------------
+
+  /** Destroy buffer allocations and drop pipeline references whenever a tile
+   * returns to poster-only state. Pipelines are rebuilt lazily on the next
+   * live transition; this keeps an off-screen gallery from pinning every
+   * demo's device resources at once. */
+  _releaseGpuResources() {
+    const gpu = this._gpu;
+    this._gpu = null;
+    if (!gpu) return;
+    const buffers = gpu.resourceBuffers
+      ? [...new Set(gpu.resourceBuffers.values())]
+      : [gpu.uniformBuffer].filter(Boolean);
+    for (const buffer of buffers) {
+      try {
+        buffer.destroy();
+      } catch {
+        // Device loss may already have invalidated the allocation.
+      }
+    }
+  }
 
   async _onDeviceLoss(freshGpu) {
     if (this._mode !== "webgpu") return; // wasm-2d surfaces hold no device resources.
@@ -1544,7 +1621,7 @@ export class FeSurfaceElement extends HTMLElement {
     }
     this._liveContext = null;
     this._adoptedContext = null;
-    this._gpu = null;
+    this._releaseGpuResources();
     this._posterAttemptedDevice = null;
     this._suspendObserver?.disconnect();
     this._suspendObserver = null;
@@ -1601,6 +1678,8 @@ export class FeSurfaceElement extends HTMLElement {
     const canvas = this._adoptedCanvas || (this._mode === "webgpu" ? this._liveCanvas : this._posterCanvas);
     if (!canvas || this._gestureListeners?.canvas === canvas) return;
     this._unwireGestures();
+    const touchAction = canvas.style.touchAction;
+    canvas.style.touchAction = "none";
 
     let dragging = false;
     let dragPointerId = null;
@@ -1614,7 +1693,7 @@ export class FeSurfaceElement extends HTMLElement {
     };
 
     const onPointerDown = (event) => {
-      if (event.button !== 0) return;
+      if (event.button !== 0 || dragging) return;
       dragging = true;
       dragPointerId = event.pointerId;
       const { mx, my } = backingPoint(event);
@@ -1639,6 +1718,7 @@ export class FeSurfaceElement extends HTMLElement {
       const previous = lastDragPoint;
       lastDragPoint = { mx, my };
       if (!previous) return;
+      event.preventDefault();
       this._applyGesture({
         dx: mx - previous.mx,
         dy: my - previous.my,
@@ -1693,19 +1773,24 @@ export class FeSurfaceElement extends HTMLElement {
     canvas.addEventListener("pointermove", onPointerMove);
     canvas.addEventListener("pointerup", onPointerUp);
     canvas.addEventListener("pointercancel", onPointerUp);
+    canvas.addEventListener("lostpointercapture", onPointerUp);
     canvas.addEventListener("wheel", onWheel, { passive: false });
-    this._gestureListeners = { canvas, onPointerDown, onPointerMove, onPointerUp, onWheel };
+    this._gestureListeners = {
+      canvas, onPointerDown, onPointerMove, onPointerUp, onWheel, touchAction,
+    };
   }
 
   _unwireGestures() {
     const listeners = this._gestureListeners;
     if (!listeners) return;
-    const { canvas, onPointerDown, onPointerMove, onPointerUp, onWheel } = listeners;
+    const { canvas, onPointerDown, onPointerMove, onPointerUp, onWheel, touchAction } = listeners;
     canvas.removeEventListener("pointerdown", onPointerDown);
     canvas.removeEventListener("pointermove", onPointerMove);
     canvas.removeEventListener("pointerup", onPointerUp);
     canvas.removeEventListener("pointercancel", onPointerUp);
+    canvas.removeEventListener("lostpointercapture", onPointerUp);
     canvas.removeEventListener("wheel", onWheel);
+    canvas.style.touchAction = touchAction;
     this._gestureListeners = null;
   }
 
