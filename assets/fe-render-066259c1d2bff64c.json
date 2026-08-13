@@ -1,0 +1,214 @@
+{
+  "artifacts": {
+    "canonical_adapters": [],
+    "wgsl": "fe-render-9c2c485f44dc9668.wgsl",
+    "wgsl_bytes": 519
+  },
+  "browser_runtime": null,
+  "canonical_interface": null,
+  "canonical_status": {
+    "embedded": false,
+    "omission_reason": "GPU resource pass graph has no CPU fallback or canonical Wasm message lane",
+    "policy": "disabled"
+  },
+  "layout": {
+    "bindings": [
+      {
+        "access": "read",
+        "binding": 0,
+        "group": 0,
+        "members": [],
+        "name": "orbit",
+        "role": "resource",
+        "span": 8,
+        "stride": 8
+      }
+    ],
+    "builtin_inputs": [
+      {
+        "arg_index": 0,
+        "scalar": "i32",
+        "source": "fragment_position_x"
+      },
+      {
+        "arg_index": 1,
+        "scalar": "i32",
+        "source": "fragment_position_y"
+      }
+    ],
+    "color_target_format": "rgba8unorm",
+    "entry_point": "fs_main",
+    "fragment_entry": "fs_main",
+    "mode": "render",
+    "result": null,
+    "vertex_entry": "vs_fullscreen",
+    "word": "u32",
+    "word_bytes": 4,
+    "workgroup_size": [
+      0,
+      0,
+      0
+    ]
+  },
+  "passes": [
+    {
+      "dispatch": [
+        1,
+        1,
+        1
+      ],
+      "layout": {
+        "bindings": [
+          {
+            "access": "read_write",
+            "binding": 0,
+            "group": 0,
+            "members": [],
+            "name": "orbit",
+            "role": "resource",
+            "span": 8,
+            "stride": 8
+          }
+        ],
+        "builtin_inputs": [],
+        "color_target_format": null,
+        "entry_point": "main",
+        "fragment_entry": null,
+        "mode": "compute",
+        "result": null,
+        "vertex_entry": null,
+        "word": "u32",
+        "word_bytes": 4,
+        "workgroup_size": [
+          1,
+          1,
+          1
+        ]
+      },
+      "shader": "fe-render-8aa30259cc407927.wgsl",
+      "shader_bytes": 271,
+      "source_entry": "seed"
+    },
+    {
+      "layout": {
+        "bindings": [
+          {
+            "access": "read",
+            "binding": 0,
+            "group": 0,
+            "members": [],
+            "name": "orbit",
+            "role": "resource",
+            "span": 8,
+            "stride": 8
+          }
+        ],
+        "builtin_inputs": [
+          {
+            "arg_index": 0,
+            "scalar": "i32",
+            "source": "fragment_position_x"
+          },
+          {
+            "arg_index": 1,
+            "scalar": "i32",
+            "source": "fragment_position_y"
+          }
+        ],
+        "color_target_format": "rgba8unorm",
+        "entry_point": "fs_main",
+        "fragment_entry": "fs_main",
+        "mode": "render",
+        "result": null,
+        "vertex_entry": "vs_fullscreen",
+        "word": "u32",
+        "word_bytes": 4,
+        "workgroup_size": [
+          0,
+          0,
+          0
+        ]
+      },
+      "shader": "fe-render-9c2c485f44dc9668.wgsl",
+      "shader_bytes": 519,
+      "source_entry": "paint"
+    }
+  ],
+  "protocol": "fe-web-bundle",
+  "protocol_version": 6,
+  "provenance": {
+    "authored_sources": [
+      {
+        "id": "known_color/fe.toml",
+        "kind": "fe_manifest",
+        "sha256": "eb6f604086c1e36ba0c3b9e282ba2e33d33ab2753c2c66787f3472391c4ce661"
+      },
+      {
+        "id": "known_color/src/lib.fe",
+        "kind": "fe",
+        "sha256": "defb0a2eb92c80c02329497d8205f3e5b8467c9d99cbfc0be92233d96dcbb593"
+      }
+    ],
+    "compiler": "fe",
+    "compiler_version": "26.2.0",
+    "fe_responsibilities": [
+      "gpu_program",
+      "gpu_pass_graph"
+    ],
+    "fixed_host": {
+      "artifact": {
+        "bytes": 94493,
+        "path": "fe-render-runtime-61724846dec39fe4.js",
+        "sha256": "61724846dec39fe4a5b242307e7b721c24cb711e1fa1603c5e93489168a5666d"
+      },
+      "contract": "fixed_versioned_demo_blind_browser_host",
+      "name": "fe-render-runtime",
+      "responsibilities": [
+        "dom_surface",
+        "input_transport",
+        "presentation_scheduler",
+        "web_gpu_executor",
+        "lifecycle",
+        "wasm_loader"
+      ]
+    },
+    "generated_artifacts": [
+      "manifest",
+      "wgsl"
+    ],
+    "non_fe_authored_sources": [
+      {
+        "id": "gallery.html",
+        "kind": "html",
+        "sha256": "7ea6561a90e3e091264fe6b57f6fdf4156b2f281628458b2a8af653a1cd1936b"
+      }
+    ],
+    "source_id": "known_color"
+  },
+  "resources": [
+    {
+      "binding": 0,
+      "element": {
+        "Record": {
+          "fields": [
+            {
+              "name": "re_bits",
+              "offset": 0
+            },
+            {
+              "name": "im_bits",
+              "offset": 4
+            }
+          ],
+          "span": 8
+        }
+      },
+      "group": 0,
+      "length": 1,
+      "name": "orbit",
+      "span": 8,
+      "stride": 8
+    }
+  ],
+  "source_entry": "paint"
+}

@@ -1,0 +1,82 @@
+{
+  "protocol": {
+    "major": 1,
+    "minor": 1
+  },
+  "compiler": {
+    "name": "fe",
+    "version": "0.1.0",
+    "build": "workspace"
+  },
+  "target": "wasm",
+  "source_set_sha256": "777cda08c6f10f94450f0ae6d645915c1218b866ab095cf6e94c24ae72bcc15d",
+  "source_dependencies": {
+    "version": 1,
+    "root": "file:///workspace/fe-worktrees/mb2/demos/sketches/source_inspector/src/lib.fe",
+    "sources": [
+      {
+        "url": "file:///workspace/fe-worktrees/mb2/demos/sketches/source_inspector/src/lib.fe",
+        "sha256": "0e5a426b4618cac6b0555303aa4e56c3135123aa4597b8983122eb9edd7acb6a"
+      }
+    ]
+  },
+  "entry": "fe_actor_initialize_v1",
+  "interface": {
+    "imports": [],
+    "exports": [
+      {
+        "module": "",
+        "name": "fe_actor_initialize_v1",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "fe_actor_project_v1",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "fe_actor_state_replace_v1",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "fe_actor_transition_v1",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "fe_cabi_alloc",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "fe_cabi_reset",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      }
+    ],
+    "resources": []
+  },
+  "artifacts": [
+    {
+      "name": "module.wasm",
+      "kind": "wasm_module",
+      "media_type": "application/wasm",
+      "sha256": "5dff7b2c2f07f0f6865df59a242aac07c1bb3745a66e0fe89f2ebd1e142c025e",
+      "byte_len": 23585,
+      "url": "assets/fe-5dff7b2c2f07f0f6.wasm"
+    }
+  ]
+}
