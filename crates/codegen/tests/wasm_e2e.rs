@@ -19,7 +19,144 @@ use fe_codegen::{
     BackendKind, OptLevel, WasmCompileOptions, compile_runtime_package_wasm_with_options,
     layout_for,
 };
+use fe_host_runtime::{
+    MaterializedExecutor, MaterializedTaskMachine, MaterializedTaskStep, PendingToken,
+    ResumableTaskState, TaskDescriptor, TaskExecutor, TaskOutcome,
+};
 use url::Url;
+
+type TwoSiteStep = (i32, i32, i32, i32, i32, i32, i32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TwoSiteBody {
+    Task,
+}
+
+struct TwoSiteInput {
+    first_pending: i32,
+    second_pending: i32,
+    seed: i32,
+}
+
+enum TwoSiteFrame {
+    First { second_pending: i32, seed: i32 },
+    Second { first: i32 },
+}
+
+struct WasmtimeTwoSiteMachine {
+    store: wasmtime::Store<()>,
+    start: wasmtime::TypedFunc<(i32, i32, i32), TwoSiteStep>,
+    resume_first: wasmtime::TypedFunc<(i32, i32, i32, i32, i32), TwoSiteStep>,
+    resume_second: wasmtime::TypedFunc<(i32, i32, i32, i32), TwoSiteStep>,
+}
+
+impl WasmtimeTwoSiteMachine {
+    fn new(mut store: wasmtime::Store<()>, instance: wasmtime::Instance) -> Self {
+        let start = instance
+            .get_typed_func(&mut store, "__fe_task_start_task")
+            .expect("compiler-derived start export");
+        let resume_first = instance
+            .get_typed_func(&mut store, "__fe_task_resume_task_1")
+            .expect("first compiler-derived resume export");
+        let resume_second = instance
+            .get_typed_func(&mut store, "__fe_task_resume_task_2")
+            .expect("second compiler-derived resume export");
+        Self {
+            store,
+            start,
+            resume_first,
+            resume_second,
+        }
+    }
+
+    fn decode(
+        step: TwoSiteStep,
+    ) -> Result<MaterializedTaskStep<PendingToken, TwoSiteFrame, i32>, String> {
+        let (state, output, first_pending, second_pending, seed, later_pending, first) = step;
+        match state {
+            0 => Ok(MaterializedTaskStep::Complete(output)),
+            1 => Ok(MaterializedTaskStep::Suspended {
+                pending: PendingToken::from_core(first_pending),
+                frame: TwoSiteFrame::First {
+                    second_pending,
+                    seed,
+                },
+            }),
+            2 => Ok(MaterializedTaskStep::Suspended {
+                pending: PendingToken::from_core(later_pending),
+                frame: TwoSiteFrame::Second { first },
+            }),
+            other => Err(format!(
+                "compiler returned unknown continuation state {other}"
+            )),
+        }
+    }
+
+    fn delivery_lanes(delivery: TaskOutcome<i32, i32>) -> (i32, i32, i32) {
+        match delivery {
+            TaskOutcome::Failure(error) => (0, error, 0),
+            TaskOutcome::Success(value) => (1, 0, value),
+            TaskOutcome::Cancelled => (2, 0, 0),
+        }
+    }
+}
+
+impl MaterializedTaskMachine for WasmtimeTwoSiteMachine {
+    type Body = TwoSiteBody;
+    type Input = TwoSiteInput;
+    type Pending = PendingToken;
+    type Frame = TwoSiteFrame;
+    type Value = i32;
+    type DeliveryError = i32;
+    type Output = i32;
+    type InvokeError = String;
+
+    fn start(
+        &mut self,
+        body: &Self::Body,
+        input: Self::Input,
+    ) -> Result<MaterializedTaskStep<Self::Pending, Self::Frame, Self::Output>, Self::InvokeError>
+    {
+        if *body != TwoSiteBody::Task {
+            return Err("wrong materialized body key".to_owned());
+        }
+        let step = self
+            .start
+            .call(
+                &mut self.store,
+                (input.first_pending, input.second_pending, input.seed),
+            )
+            .map_err(|error| error.to_string())?;
+        Self::decode(step)
+    }
+
+    fn resume(
+        &mut self,
+        body: &Self::Body,
+        frame: Self::Frame,
+        delivery: TaskOutcome<Self::DeliveryError, Self::Value>,
+    ) -> Result<MaterializedTaskStep<Self::Pending, Self::Frame, Self::Output>, Self::InvokeError>
+    {
+        if *body != TwoSiteBody::Task {
+            return Err("wrong materialized body key".to_owned());
+        }
+        let (tag, error, value) = Self::delivery_lanes(delivery);
+        let step = match frame {
+            TwoSiteFrame::First {
+                second_pending,
+                seed,
+            } => self
+                .resume_first
+                .call(&mut self.store, (second_pending, seed, tag, error, value))
+                .map_err(|error| error.to_string())?,
+            TwoSiteFrame::Second { first } => self
+                .resume_second
+                .call(&mut self.store, (first, tag, error, value))
+                .map_err(|error| error.to_string())?,
+        };
+        Self::decode(step)
+    }
+}
 
 /// Compile Fe source to wasm bytes through the wasm backend.
 fn compile_to_wasm(name: &str, source: &str) -> Vec<u8> {
@@ -147,15 +284,17 @@ pub fn task(
     );
     assert!(func_imports(&wasm).is_empty());
     let (mut store, instance) = instantiate(&wasm);
-    type Step = (i32, i32, i32, i32, i32, i32, i32);
     let start = instance
-        .get_typed_func::<(i32, i32, i32), Step>(&mut store, "__fe_task_start_task")
+        .get_typed_func::<(i32, i32, i32), TwoSiteStep>(&mut store, "__fe_task_start_task")
         .unwrap();
     let resume1 = instance
-        .get_typed_func::<(i32, i32, i32, i32, i32), Step>(&mut store, "__fe_task_resume_task_1")
+        .get_typed_func::<(i32, i32, i32, i32, i32), TwoSiteStep>(
+            &mut store,
+            "__fe_task_resume_task_1",
+        )
         .unwrap();
     let resume2 = instance
-        .get_typed_func::<(i32, i32, i32, i32), Step>(&mut store, "__fe_task_resume_task_2")
+        .get_typed_func::<(i32, i32, i32, i32), TwoSiteStep>(&mut store, "__fe_task_resume_task_2")
         .unwrap();
 
     assert_eq!(
@@ -171,6 +310,101 @@ pub fn task(
         resume2.call(&mut store, (12, 1, 0, 8)).unwrap(),
         (0, 20, 0, 0, 0, 0, 0)
     );
+
+    // Drive a fresh instance through the production generation-safe executor
+    // bridge. The host supplies only typed operation completions; the machine
+    // owns continuation selection and the executor owns each exact frame.
+    let (store, instance) = instantiate(&wasm);
+    let machine = WasmtimeTwoSiteMachine::new(store, instance);
+    let mut executor = MaterializedExecutor::new(TaskExecutor::Current, machine);
+    let task = executor
+        .spawn(
+            TaskDescriptor {
+                body: TwoSiteBody::Task,
+                executor: TaskExecutor::Current,
+            },
+            TwoSiteInput {
+                first_pending: 41,
+                second_pending: 42,
+                seed: 5,
+            },
+        )
+        .unwrap();
+    executor.drain(8).unwrap();
+    assert_eq!(executor.state(task).unwrap(), ResumableTaskState::Suspended);
+    assert_eq!(executor.pending(task), Some(PendingToken::from_core(41)));
+
+    executor
+        .complete_value(PendingToken::from_core(41), 7)
+        .unwrap();
+    executor.drain(8).unwrap();
+    assert_eq!(executor.state(task).unwrap(), ResumableTaskState::Suspended);
+    assert_eq!(executor.pending(task), Some(PendingToken::from_core(42)));
+
+    executor
+        .complete_value(PendingToken::from_core(42), 8)
+        .unwrap();
+    executor.drain(8).unwrap();
+    assert_eq!(executor.state(task).unwrap(), ResumableTaskState::Completed);
+    assert_eq!(executor.take_output(task), Some(20));
+
+    let (store, instance) = instantiate(&wasm);
+    let mut failed = MaterializedExecutor::new(
+        TaskExecutor::Current,
+        WasmtimeTwoSiteMachine::new(store, instance),
+    );
+    let failed_task = failed
+        .spawn(
+            TaskDescriptor {
+                body: TwoSiteBody::Task,
+                executor: TaskExecutor::Current,
+            },
+            TwoSiteInput {
+                first_pending: 41,
+                second_pending: 42,
+                seed: 5,
+            },
+        )
+        .unwrap();
+    failed.drain(8).unwrap();
+    failed
+        .complete_error(PendingToken::from_core(41), 3)
+        .unwrap();
+    failed.drain(8).unwrap();
+    assert_eq!(
+        failed.state(failed_task).unwrap(),
+        ResumableTaskState::Failed
+    );
+    assert_eq!(failed.pending(failed_task), None);
+    assert_eq!(failed.take_output(failed_task), None);
+
+    let (store, instance) = instantiate(&wasm);
+    let mut cancelled = MaterializedExecutor::new(
+        TaskExecutor::Current,
+        WasmtimeTwoSiteMachine::new(store, instance),
+    );
+    let cancelled_task = cancelled
+        .spawn(
+            TaskDescriptor {
+                body: TwoSiteBody::Task,
+                executor: TaskExecutor::Current,
+            },
+            TwoSiteInput {
+                first_pending: 41,
+                second_pending: 42,
+                seed: 5,
+            },
+        )
+        .unwrap();
+    cancelled.drain(8).unwrap();
+    cancelled.cancel(cancelled_task).unwrap();
+    cancelled.drain(8).unwrap();
+    assert_eq!(
+        cancelled.state(cancelled_task).unwrap(),
+        ResumableTaskState::Cancelled
+    );
+    assert_eq!(cancelled.pending(cancelled_task), None);
+    assert_eq!(cancelled.take_output(cancelled_task), None);
 }
 
 #[test]

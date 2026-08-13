@@ -99,6 +99,24 @@ impl TaskToken {
     }
 }
 
+/// Opaque core-Wasm representation of one Fe `Pending<B, T>` operation.
+///
+/// The operation's own backend table remains responsible for validating its
+/// generation. This wrapper prevents the resumable executor from confusing a
+/// pending-operation token with its separate generation-tagged [`TaskToken`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PendingToken(i32);
+
+impl PendingToken {
+    pub const fn from_core(value: i32) -> Self {
+        Self(value)
+    }
+
+    pub const fn to_core(self) -> i32 {
+        self.0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskRuntimeError {
     InvalidToken(i32),
@@ -113,6 +131,20 @@ pub enum TaskRuntimeError {
         actual: TaskExecutor,
     },
     TokenSpaceExhausted,
+}
+
+/// Preserve scheduler/table errors separately from errors raised while
+/// invoking a compiler-materialized task body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecutorError<E> {
+    Runtime(TaskRuntimeError),
+    Body(E),
+}
+
+impl<E> From<TaskRuntimeError> for ExecutorError<E> {
+    fn from(error: TaskRuntimeError) -> Self {
+        Self::Runtime(error)
+    }
 }
 
 struct TaskSlot<K, V, E> {
@@ -282,6 +314,24 @@ impl<K: Clone, V, E> ResumableTaskTable<K, V, E> {
         }
     }
 
+    fn fail_body(&self, token: TaskToken) -> Result<(), TaskRuntimeError> {
+        let mut slots = self.slots.borrow_mut();
+        let (_, entry) = task_entry_mut(&mut slots, token)?;
+        match entry.state {
+            ResumableTaskState::Running | ResumableTaskState::Suspended => {
+                entry.queue.clear();
+                entry.state = ResumableTaskState::Failed;
+                Ok(())
+            }
+            ResumableTaskState::Failed | ResumableTaskState::Cancelled => Ok(()),
+            ResumableTaskState::Completed => Err(TaskRuntimeError::AlreadyTerminal(entry.state)),
+            state => Err(TaskRuntimeError::InvalidTransition {
+                state,
+                operation: "body_error",
+            }),
+        }
+    }
+
     pub fn release(&self, token: TaskToken) -> Result<(), TaskRuntimeError> {
         let mut slots = self.slots.borrow_mut();
         let (slot, entry) = task_entry_mut(&mut slots, token)?;
@@ -312,17 +362,30 @@ pub enum TaskBodyAction {
     Suspend,
     Complete,
     Wake,
+    /// The body has no work for this advisory poll. Its current task state is
+    /// retained without manufacturing a suspension or a wake loop.
+    Idle,
 }
 
 pub trait ResumableTaskBody<K, V, E> {
-    fn start(&mut self, token: TaskToken, descriptor: &TaskDescriptor<K>) -> TaskBodyAction;
-    fn poll(&mut self, token: TaskToken, descriptor: &TaskDescriptor<K>) -> TaskBodyAction;
+    type Error;
+
+    fn start(
+        &mut self,
+        token: TaskToken,
+        descriptor: &TaskDescriptor<K>,
+    ) -> Result<TaskBodyAction, Self::Error>;
+    fn poll(
+        &mut self,
+        token: TaskToken,
+        descriptor: &TaskDescriptor<K>,
+    ) -> Result<TaskBodyAction, Self::Error>;
     fn resume(
         &mut self,
         token: TaskToken,
         descriptor: &TaskDescriptor<K>,
         delivery: TaskOutcome<E, V>,
-    ) -> TaskBodyAction;
+    ) -> Result<TaskBodyAction, Self::Error>;
     fn terminal(&mut self, token: TaskToken, state: ResumableTaskState);
     fn route(&mut self, token: TaskToken, executor: TaskExecutor);
     fn yielded(&mut self, remaining_ready: usize);
@@ -421,11 +484,11 @@ impl<K: Clone, V, E> ResumableExecutor<K, V, E> {
         true
     }
 
-    pub fn drain(
+    pub fn drain<B: ResumableTaskBody<K, V, E>>(
         &self,
         budget: usize,
-        body: &mut impl ResumableTaskBody<K, V, E>,
-    ) -> Result<ExecutorDrain, TaskRuntimeError> {
+        body: &mut B,
+    ) -> Result<ExecutorDrain, ExecutorError<B::Error>> {
         if self.draining.replace(true) {
             return Ok(ExecutorDrain {
                 steps: 0,
@@ -460,24 +523,33 @@ impl<K: Clone, V, E> ResumableExecutor<K, V, E> {
             let action = match kind {
                 ReadyKind::Start => {
                     self.tasks.start(token, self.placement)?;
-                    Some(body.start(token, &descriptor))
+                    body.start(token, &descriptor).map(Some)
                 }
-                ReadyKind::Poll => Some(body.poll(token, &descriptor)),
+                ReadyKind::Poll => body.poll(token, &descriptor).map(Some),
                 ReadyKind::Resume | ReadyKind::Cancel => {
                     match self.tasks.deliver_next(token, self.placement)? {
-                        Some(TaskOutcome::Success(value)) => {
-                            Some(body.resume(token, &descriptor, TaskOutcome::Success(value)))
-                        }
-                        Some(TaskOutcome::Failure(error)) => {
-                            body.resume(token, &descriptor, TaskOutcome::Failure(error));
-                            None
-                        }
-                        Some(TaskOutcome::Cancelled) => {
-                            body.resume(token, &descriptor, TaskOutcome::Cancelled);
-                            None
-                        }
-                        None => Some(body.poll(token, &descriptor)),
+                        Some(TaskOutcome::Success(value)) => body
+                            .resume(token, &descriptor, TaskOutcome::Success(value))
+                            .map(Some),
+                        Some(TaskOutcome::Failure(error)) => body
+                            .resume(token, &descriptor, TaskOutcome::Failure(error))
+                            .map(|_| None),
+                        Some(TaskOutcome::Cancelled) => body
+                            .resume(token, &descriptor, TaskOutcome::Cancelled)
+                            .map(|_| None),
+                        None => body.poll(token, &descriptor).map(Some),
                     }
+                }
+            };
+            let action = match action {
+                Ok(action) => action,
+                Err(error) => {
+                    self.tasks.fail_body(token)?;
+                    let terminal = self.tasks.state(token)?;
+                    if self.notified.borrow_mut().insert(token) {
+                        body.terminal(token, terminal);
+                    }
+                    return Err(ExecutorError::Body(error));
                 }
             };
             if let Some(action) = action {
@@ -522,7 +594,343 @@ impl<K: Clone, V, E> ResumableExecutor<K, V, E> {
                 self.enqueue(token, ReadyKind::Poll);
                 Ok(())
             }
+            TaskBodyAction::Idle => Ok(()),
         }
+    }
+}
+
+/// One compiler-materialized task invocation either completes or hands the
+/// host the pending operation plus the exact continuation frame for that
+/// suspension site. `F` is normally a compiler-derived enum, so different
+/// sites may retain different typed fields without a flattened host schema.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MaterializedTaskStep<P, F, O> {
+    Suspended { pending: P, frame: F },
+    Complete(O),
+}
+
+/// Backend adapter for compiler-generated start/resume entry points.
+///
+/// Implementations decode the materializer-owned result union and invoke the
+/// continuation selected by `Frame`; neither the executor nor a manifest
+/// reconstructs entry names, state ordinals, or flattened value lanes.
+pub trait MaterializedTaskMachine {
+    type Body: Clone;
+    type Input;
+    /// Compiler-owned operation identity. Multi-handler machines use an enum
+    /// carrying backend/table identity rather than a bare ordinal.
+    type Pending: Clone + Ord;
+    type Frame;
+    type Value;
+    type DeliveryError;
+    type Output;
+    type InvokeError;
+
+    fn start(
+        &mut self,
+        body: &Self::Body,
+        input: Self::Input,
+    ) -> Result<MaterializedTaskStep<Self::Pending, Self::Frame, Self::Output>, Self::InvokeError>;
+
+    fn resume(
+        &mut self,
+        body: &Self::Body,
+        frame: Self::Frame,
+        delivery: TaskOutcome<Self::DeliveryError, Self::Value>,
+    ) -> Result<MaterializedTaskStep<Self::Pending, Self::Frame, Self::Output>, Self::InvokeError>;
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum MaterializedTaskError<E, P> {
+    Invoke(E),
+    MissingInput(TaskToken),
+    MissingSuspension(TaskToken),
+    DuplicateSuspension(TaskToken),
+    DuplicateOutput(TaskToken),
+    PendingAlreadyOwned {
+        pending: P,
+        owner: TaskToken,
+    },
+    PendingOwnerMismatch {
+        pending: P,
+        expected: TaskToken,
+        actual: Option<TaskToken>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingRouteError<P> {
+    UnknownPending(P),
+    Runtime(TaskRuntimeError),
+}
+
+struct MaterializedSuspension<P, F> {
+    pending: P,
+    frame: F,
+}
+
+/// Stateful executor-facing adapter which owns inputs, exact continuation
+/// frames, pending-operation routing, and completed values by generation-
+/// tagged task token.
+pub struct MaterializedTaskBody<M: MaterializedTaskMachine> {
+    machine: M,
+    inputs: BTreeMap<TaskToken, M::Input>,
+    suspensions: BTreeMap<TaskToken, MaterializedSuspension<M::Pending, M::Frame>>,
+    pending_tasks: BTreeMap<M::Pending, TaskToken>,
+    outputs: BTreeMap<TaskToken, M::Output>,
+}
+
+impl<M: MaterializedTaskMachine> MaterializedTaskBody<M> {
+    pub fn new(machine: M) -> Self {
+        Self {
+            machine,
+            inputs: BTreeMap::new(),
+            suspensions: BTreeMap::new(),
+            pending_tasks: BTreeMap::new(),
+            outputs: BTreeMap::new(),
+        }
+    }
+
+    pub fn machine(&self) -> &M {
+        &self.machine
+    }
+
+    pub fn machine_mut(&mut self) -> &mut M {
+        &mut self.machine
+    }
+
+    pub fn pending(&self, token: TaskToken) -> Option<M::Pending> {
+        self.suspensions
+            .get(&token)
+            .map(|suspension| suspension.pending.clone())
+    }
+
+    pub fn task_for_pending(&self, pending: &M::Pending) -> Option<TaskToken> {
+        self.pending_tasks.get(pending).copied()
+    }
+
+    pub fn take_output(&mut self, token: TaskToken) -> Option<M::Output> {
+        self.outputs.remove(&token)
+    }
+
+    fn stage_input(&mut self, token: TaskToken, input: M::Input) {
+        let previous = self.inputs.insert(token, input);
+        debug_assert!(
+            previous.is_none(),
+            "fresh task token already had staged input"
+        );
+    }
+
+    fn apply_step(
+        &mut self,
+        token: TaskToken,
+        step: MaterializedTaskStep<M::Pending, M::Frame, M::Output>,
+    ) -> Result<TaskBodyAction, MaterializedTaskError<M::InvokeError, M::Pending>> {
+        match step {
+            MaterializedTaskStep::Complete(output) => {
+                if self.outputs.contains_key(&token) {
+                    return Err(MaterializedTaskError::DuplicateOutput(token));
+                }
+                self.outputs.insert(token, output);
+                Ok(TaskBodyAction::Complete)
+            }
+            MaterializedTaskStep::Suspended { pending, frame } => {
+                if self.suspensions.contains_key(&token) {
+                    return Err(MaterializedTaskError::DuplicateSuspension(token));
+                }
+                if let Some(owner) = self.pending_tasks.get(&pending).copied() {
+                    return Err(MaterializedTaskError::PendingAlreadyOwned { pending, owner });
+                }
+                self.suspensions.insert(
+                    token,
+                    MaterializedSuspension {
+                        pending: pending.clone(),
+                        frame,
+                    },
+                );
+                self.pending_tasks.insert(pending, token);
+                Ok(TaskBodyAction::Suspend)
+            }
+        }
+    }
+
+    fn take_frame(
+        &mut self,
+        token: TaskToken,
+    ) -> Result<M::Frame, MaterializedTaskError<M::InvokeError, M::Pending>> {
+        let suspension = self
+            .suspensions
+            .remove(&token)
+            .ok_or(MaterializedTaskError::MissingSuspension(token))?;
+        let actual = self.pending_tasks.remove(&suspension.pending);
+        if actual != Some(token) {
+            return Err(MaterializedTaskError::PendingOwnerMismatch {
+                pending: suspension.pending,
+                expected: token,
+                actual,
+            });
+        }
+        Ok(suspension.frame)
+    }
+
+    fn discard(&mut self, token: TaskToken, keep_output: bool) {
+        self.inputs.remove(&token);
+        if let Some(suspension) = self.suspensions.remove(&token) {
+            self.pending_tasks.remove(&suspension.pending);
+        }
+        if !keep_output {
+            self.outputs.remove(&token);
+        }
+    }
+}
+
+impl<M: MaterializedTaskMachine> ResumableTaskBody<M::Body, M::Value, M::DeliveryError>
+    for MaterializedTaskBody<M>
+{
+    type Error = MaterializedTaskError<M::InvokeError, M::Pending>;
+
+    fn start(
+        &mut self,
+        token: TaskToken,
+        descriptor: &TaskDescriptor<M::Body>,
+    ) -> Result<TaskBodyAction, Self::Error> {
+        let input = self
+            .inputs
+            .remove(&token)
+            .ok_or(MaterializedTaskError::MissingInput(token))?;
+        let step = self
+            .machine
+            .start(&descriptor.body, input)
+            .map_err(MaterializedTaskError::Invoke)?;
+        self.apply_step(token, step)
+    }
+
+    fn poll(
+        &mut self,
+        _token: TaskToken,
+        _descriptor: &TaskDescriptor<M::Body>,
+    ) -> Result<TaskBodyAction, Self::Error> {
+        Ok(TaskBodyAction::Idle)
+    }
+
+    fn resume(
+        &mut self,
+        token: TaskToken,
+        descriptor: &TaskDescriptor<M::Body>,
+        delivery: TaskOutcome<M::DeliveryError, M::Value>,
+    ) -> Result<TaskBodyAction, Self::Error> {
+        let frame = self.take_frame(token)?;
+        let step = self
+            .machine
+            .resume(&descriptor.body, frame, delivery)
+            .map_err(MaterializedTaskError::Invoke)?;
+        self.apply_step(token, step)
+    }
+
+    fn terminal(&mut self, token: TaskToken, state: ResumableTaskState) {
+        self.discard(token, state == ResumableTaskState::Completed);
+    }
+
+    fn route(&mut self, _token: TaskToken, _executor: TaskExecutor) {}
+
+    fn yielded(&mut self, _remaining_ready: usize) {}
+}
+
+/// Complete target-neutral connection between a compiler-materialized task
+/// machine and the generation-safe FIFO executor.
+pub struct MaterializedExecutor<M: MaterializedTaskMachine>
+where
+    M::Body: Clone,
+{
+    executor: ResumableExecutor<M::Body, M::Value, M::DeliveryError>,
+    body: MaterializedTaskBody<M>,
+}
+
+impl<M: MaterializedTaskMachine> MaterializedExecutor<M>
+where
+    M::Body: Clone,
+{
+    pub fn new(placement: TaskExecutor, machine: M) -> Self {
+        Self {
+            executor: ResumableExecutor::new(placement),
+            body: MaterializedTaskBody::new(machine),
+        }
+    }
+
+    pub fn spawn(
+        &mut self,
+        descriptor: TaskDescriptor<M::Body>,
+        input: M::Input,
+    ) -> Result<TaskToken, TaskRuntimeError> {
+        let token = self.executor.spawn(descriptor)?;
+        self.body.stage_input(token, input);
+        Ok(token)
+    }
+
+    pub fn drain(
+        &mut self,
+        budget: usize,
+    ) -> Result<ExecutorDrain, ExecutorError<MaterializedTaskError<M::InvokeError, M::Pending>>>
+    {
+        self.executor.drain(budget, &mut self.body)
+    }
+
+    pub fn state(&self, token: TaskToken) -> Result<ResumableTaskState, TaskRuntimeError> {
+        self.executor.tasks().state(token)
+    }
+
+    pub fn pending(&self, token: TaskToken) -> Option<M::Pending> {
+        self.body.pending(token)
+    }
+
+    pub fn complete_value(
+        &self,
+        pending: M::Pending,
+        value: M::Value,
+    ) -> Result<(), PendingRouteError<M::Pending>> {
+        let token = self
+            .body
+            .task_for_pending(&pending)
+            .ok_or_else(|| PendingRouteError::UnknownPending(pending.clone()))?;
+        self.executor
+            .resume_value(token, value)
+            .map_err(PendingRouteError::Runtime)
+    }
+
+    pub fn complete_error(
+        &self,
+        pending: M::Pending,
+        error: M::DeliveryError,
+    ) -> Result<(), PendingRouteError<M::Pending>> {
+        let token = self
+            .body
+            .task_for_pending(&pending)
+            .ok_or_else(|| PendingRouteError::UnknownPending(pending.clone()))?;
+        self.executor
+            .resume_error(token, error)
+            .map_err(PendingRouteError::Runtime)
+    }
+
+    pub fn cancel(&self, token: TaskToken) -> Result<(), TaskRuntimeError> {
+        self.executor.cancel(token)
+    }
+
+    pub fn take_output(&mut self, token: TaskToken) -> Option<M::Output> {
+        self.body.take_output(token)
+    }
+
+    pub fn machine(&self) -> &M {
+        self.body.machine()
+    }
+
+    pub fn machine_mut(&mut self) -> &mut M {
+        self.body.machine_mut()
+    }
+
+    pub fn release(&mut self, token: TaskToken) -> Result<(), TaskRuntimeError> {
+        self.executor.tasks().release(token)?;
+        self.body.discard(token, false);
+        Ok(())
     }
 }
 
@@ -1560,6 +1968,7 @@ impl TableIdAllocator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::convert::Infallible;
 
     fn task_descriptor(body: &'static str, executor: TaskExecutor) -> TaskDescriptor<&'static str> {
         TaskDescriptor { body, executor }
@@ -1644,25 +2053,27 @@ mod tests {
     }
 
     impl ResumableTaskBody<&'static str, u32, &'static str> for RecordingBody {
+        type Error = Infallible;
+
         fn start(
             &mut self,
             token: TaskToken,
             descriptor: &TaskDescriptor<&'static str>,
-        ) -> TaskBodyAction {
+        ) -> Result<TaskBodyAction, Self::Error> {
             self.events.push(format!("start:{}", descriptor.body));
-            self.start_action.unwrap_or_else(|| {
+            Ok(self.start_action.unwrap_or_else(|| {
                 let _ = token;
                 TaskBodyAction::Suspend
-            })
+            }))
         }
 
         fn poll(
             &mut self,
             _token: TaskToken,
             descriptor: &TaskDescriptor<&'static str>,
-        ) -> TaskBodyAction {
+        ) -> Result<TaskBodyAction, Self::Error> {
             self.events.push(format!("poll:{}", descriptor.body));
-            self.poll_action.unwrap_or(TaskBodyAction::Suspend)
+            Ok(self.poll_action.unwrap_or(TaskBodyAction::Suspend))
         }
 
         fn resume(
@@ -1670,10 +2081,10 @@ mod tests {
             _token: TaskToken,
             descriptor: &TaskDescriptor<&'static str>,
             delivery: TaskOutcome<&'static str, u32>,
-        ) -> TaskBodyAction {
+        ) -> Result<TaskBodyAction, Self::Error> {
             self.events
                 .push(format!("resume:{}:{delivery:?}", descriptor.body));
-            TaskBodyAction::Complete
+            Ok(TaskBodyAction::Complete)
         }
 
         fn terminal(&mut self, token: TaskToken, state: ResumableTaskState) {
@@ -1749,21 +2160,31 @@ mod tests {
     }
 
     impl ResumableTaskBody<&'static str, u32, &'static str> for ReentrantBody<'_> {
-        fn start(&mut self, _: TaskToken, _: &TaskDescriptor<&'static str>) -> TaskBodyAction {
+        type Error = Infallible;
+
+        fn start(
+            &mut self,
+            _: TaskToken,
+            _: &TaskDescriptor<&'static str>,
+        ) -> Result<TaskBodyAction, Self::Error> {
             let mut nested = RecordingBody::default();
             self.observed = Some(self.executor.drain(1, &mut nested).unwrap());
-            TaskBodyAction::Complete
+            Ok(TaskBodyAction::Complete)
         }
-        fn poll(&mut self, _: TaskToken, _: &TaskDescriptor<&'static str>) -> TaskBodyAction {
-            TaskBodyAction::Complete
+        fn poll(
+            &mut self,
+            _: TaskToken,
+            _: &TaskDescriptor<&'static str>,
+        ) -> Result<TaskBodyAction, Self::Error> {
+            Ok(TaskBodyAction::Complete)
         }
         fn resume(
             &mut self,
             _: TaskToken,
             _: &TaskDescriptor<&'static str>,
             _: TaskOutcome<&'static str, u32>,
-        ) -> TaskBodyAction {
-            TaskBodyAction::Complete
+        ) -> Result<TaskBodyAction, Self::Error> {
+            Ok(TaskBodyAction::Complete)
         }
         fn terminal(&mut self, _: TaskToken, _: ResumableTaskState) {}
         fn route(&mut self, _: TaskToken, _: TaskExecutor) {}
@@ -1790,6 +2211,280 @@ mod tests {
                 reentrant: true,
             })
         );
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum DemoBody {
+        SumTwo,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    enum DemoPending {
+        Timer(PendingToken),
+        Worker(PendingToken),
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct DemoInput {
+        first_pending: DemoPending,
+        second_pending: DemoPending,
+        seed: u32,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum DemoFrame {
+        First {
+            second_pending: DemoPending,
+            seed: u32,
+        },
+        Second {
+            first: u32,
+        },
+    }
+
+    #[derive(Default)]
+    struct DemoMachine {
+        deliveries: Vec<TaskOutcome<u32, u32>>,
+    }
+
+    impl MaterializedTaskMachine for DemoMachine {
+        type Body = DemoBody;
+        type Input = DemoInput;
+        type Pending = DemoPending;
+        type Frame = DemoFrame;
+        type Value = u32;
+        type DeliveryError = u32;
+        type Output = u32;
+        type InvokeError = &'static str;
+
+        fn start(
+            &mut self,
+            body: &Self::Body,
+            input: Self::Input,
+        ) -> Result<MaterializedTaskStep<Self::Pending, Self::Frame, Self::Output>, Self::InvokeError>
+        {
+            assert_eq!(*body, DemoBody::SumTwo);
+            if input.first_pending == DemoPending::Timer(PendingToken::from_core(0)) {
+                return Err("start trap");
+            }
+            Ok(MaterializedTaskStep::Suspended {
+                pending: input.first_pending,
+                frame: DemoFrame::First {
+                    second_pending: input.second_pending,
+                    seed: input.seed,
+                },
+            })
+        }
+
+        fn resume(
+            &mut self,
+            body: &Self::Body,
+            frame: Self::Frame,
+            delivery: TaskOutcome<Self::DeliveryError, Self::Value>,
+        ) -> Result<MaterializedTaskStep<Self::Pending, Self::Frame, Self::Output>, Self::InvokeError>
+        {
+            assert_eq!(*body, DemoBody::SumTwo);
+            self.deliveries.push(delivery.clone());
+            match (frame, delivery) {
+                (
+                    DemoFrame::First {
+                        second_pending,
+                        seed,
+                    },
+                    TaskOutcome::Success(value),
+                ) => Ok(MaterializedTaskStep::Suspended {
+                    pending: second_pending,
+                    frame: DemoFrame::Second {
+                        first: value + seed,
+                    },
+                }),
+                (DemoFrame::First { seed, .. }, TaskOutcome::Failure(error)) => {
+                    Ok(MaterializedTaskStep::Complete(error + seed))
+                }
+                (DemoFrame::First { seed, .. }, TaskOutcome::Cancelled) => {
+                    Ok(MaterializedTaskStep::Complete(seed))
+                }
+                (DemoFrame::Second { first }, TaskOutcome::Success(value)) => {
+                    Ok(MaterializedTaskStep::Complete(first + value))
+                }
+                (DemoFrame::Second { .. }, TaskOutcome::Failure(error)) => {
+                    Ok(MaterializedTaskStep::Complete(error))
+                }
+                (DemoFrame::Second { first }, TaskOutcome::Cancelled) => {
+                    Ok(MaterializedTaskStep::Complete(first))
+                }
+            }
+        }
+    }
+
+    fn demo_descriptor() -> TaskDescriptor<DemoBody> {
+        TaskDescriptor {
+            body: DemoBody::SumTwo,
+            executor: TaskExecutor::Current,
+        }
+    }
+
+    #[test]
+    fn materialized_executor_owns_exact_frames_and_routes_pending_tokens() {
+        let mut executor = MaterializedExecutor::new(TaskExecutor::Current, DemoMachine::default());
+        let task = executor
+            .spawn(
+                demo_descriptor(),
+                DemoInput {
+                    first_pending: DemoPending::Timer(PendingToken::from_core(41)),
+                    second_pending: DemoPending::Timer(PendingToken::from_core(42)),
+                    seed: 5,
+                },
+            )
+            .unwrap();
+
+        executor.drain(8).unwrap();
+        assert_eq!(executor.state(task).unwrap(), ResumableTaskState::Suspended);
+        assert_eq!(
+            executor.pending(task),
+            Some(DemoPending::Timer(PendingToken::from_core(41)))
+        );
+        executor
+            .complete_value(DemoPending::Timer(PendingToken::from_core(41)), 7)
+            .unwrap();
+        assert!(matches!(
+            executor.complete_value(DemoPending::Timer(PendingToken::from_core(41)), 99),
+            Err(PendingRouteError::Runtime(
+                TaskRuntimeError::InvalidTransition { .. }
+            ))
+        ));
+
+        executor.drain(8).unwrap();
+        assert_eq!(
+            executor.pending(task),
+            Some(DemoPending::Timer(PendingToken::from_core(42)))
+        );
+        assert_eq!(
+            executor
+                .complete_value(DemoPending::Timer(PendingToken::from_core(41)), 99)
+                .unwrap_err(),
+            PendingRouteError::UnknownPending(DemoPending::Timer(PendingToken::from_core(41)))
+        );
+        executor
+            .complete_value(DemoPending::Timer(PendingToken::from_core(42)), 8)
+            .unwrap();
+        executor.drain(8).unwrap();
+
+        assert_eq!(executor.state(task).unwrap(), ResumableTaskState::Completed);
+        assert_eq!(executor.take_output(task), Some(20));
+        assert_eq!(
+            executor.machine().deliveries,
+            [TaskOutcome::Success(7), TaskOutcome::Success(8)]
+        );
+        executor.release(task).unwrap();
+        assert_eq!(
+            executor.state(task).unwrap_err(),
+            TaskRuntimeError::StaleToken(task.to_core())
+        );
+    }
+
+    #[test]
+    fn materialized_pending_identity_prevents_cross_handler_capture() {
+        let mut executor = MaterializedExecutor::new(TaskExecutor::Current, DemoMachine::default());
+        let timer_task = executor
+            .spawn(
+                demo_descriptor(),
+                DemoInput {
+                    first_pending: DemoPending::Timer(PendingToken::from_core(61)),
+                    second_pending: DemoPending::Timer(PendingToken::from_core(62)),
+                    seed: 1,
+                },
+            )
+            .unwrap();
+        let worker_task = executor
+            .spawn(
+                demo_descriptor(),
+                DemoInput {
+                    first_pending: DemoPending::Worker(PendingToken::from_core(61)),
+                    second_pending: DemoPending::Worker(PendingToken::from_core(62)),
+                    seed: 10,
+                },
+            )
+            .unwrap();
+        executor.drain(8).unwrap();
+
+        assert_eq!(
+            executor.pending(timer_task),
+            Some(DemoPending::Timer(PendingToken::from_core(61)))
+        );
+        assert_eq!(
+            executor.pending(worker_task),
+            Some(DemoPending::Worker(PendingToken::from_core(61)))
+        );
+        executor
+            .complete_value(DemoPending::Timer(PendingToken::from_core(61)), 2)
+            .unwrap();
+        executor.drain(1).unwrap();
+        assert_eq!(
+            executor.pending(timer_task),
+            Some(DemoPending::Timer(PendingToken::from_core(62)))
+        );
+        assert_eq!(
+            executor.pending(worker_task),
+            Some(DemoPending::Worker(PendingToken::from_core(61))),
+            "an equal raw ordinal from another handler must remain untouched"
+        );
+    }
+
+    #[test]
+    fn materialized_executor_delivers_cancel_before_terminal_cleanup() {
+        let mut executor = MaterializedExecutor::new(TaskExecutor::Current, DemoMachine::default());
+        let task = executor
+            .spawn(
+                demo_descriptor(),
+                DemoInput {
+                    first_pending: DemoPending::Timer(PendingToken::from_core(51)),
+                    second_pending: DemoPending::Timer(PendingToken::from_core(52)),
+                    seed: 5,
+                },
+            )
+            .unwrap();
+        executor.drain(8).unwrap();
+        executor.cancel(task).unwrap();
+        assert!(matches!(
+            executor.complete_value(DemoPending::Timer(PendingToken::from_core(51)), 7),
+            Err(PendingRouteError::Runtime(
+                TaskRuntimeError::InvalidTransition { .. }
+            ))
+        ));
+        executor.drain(8).unwrap();
+
+        assert_eq!(executor.state(task).unwrap(), ResumableTaskState::Cancelled);
+        assert_eq!(executor.pending(task), None);
+        assert_eq!(executor.take_output(task), None);
+        assert_eq!(executor.machine().deliveries, [TaskOutcome::Cancelled]);
+        assert_eq!(
+            executor
+                .complete_value(DemoPending::Timer(PendingToken::from_core(51)), 7)
+                .unwrap_err(),
+            PendingRouteError::UnknownPending(DemoPending::Timer(PendingToken::from_core(51)))
+        );
+    }
+
+    #[test]
+    fn materialized_machine_errors_fail_and_clean_the_task() {
+        let mut executor = MaterializedExecutor::new(TaskExecutor::Current, DemoMachine::default());
+        let task = executor
+            .spawn(
+                demo_descriptor(),
+                DemoInput {
+                    first_pending: DemoPending::Timer(PendingToken::from_core(0)),
+                    second_pending: DemoPending::Timer(PendingToken::from_core(52)),
+                    seed: 5,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            executor.drain(8).unwrap_err(),
+            ExecutorError::Body(MaterializedTaskError::Invoke("start trap"))
+        );
+        assert_eq!(executor.state(task).unwrap(), ResumableTaskState::Failed);
+        assert_eq!(executor.pending(task), None);
     }
 
     fn id(value: u64) -> TableId {

@@ -2862,6 +2862,7 @@ dependencies = [
  "fe-driver",
  "fe-hir",
  "fe-host-abi",
+ "fe-host-runtime",
  "fe-mir",
  "fe-test-utils",
  "fe-webidl-bindgen",

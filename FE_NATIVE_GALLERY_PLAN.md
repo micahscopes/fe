@@ -785,8 +785,15 @@ Origin: honesty audit of Claude Code session
   not leak into the public Wasm ABI; a separate branched-provider gate verifies
   both cloned CFG paths. Resumable cycle membership is computed before
   expansion so recursive stacks fail explicitly instead of unrolling forever.
-  Host-owned frame persistence, executor connection, and true recursive linked
-  frames remain the active materialization slice.
+  The target-neutral `MaterializedExecutor` now connects those generated start/
+  resume functions to the existing generation-safe FIFO: it owns initial
+  inputs, each exact site-frame enum, pending-operation routing, and completed
+  output by task generation. The two-site Wasmtime gate runs through that
+  production bridge for success, failure, and cancellation, while independent
+  host-runtime gates cover traps, stale/duplicate delivery, cleanup, and equal
+  raw pending ordinals under distinct typed handler identities. Concrete
+  browser-machine adapter emission and true recursive linked frames remain the
+  active materialization slice.
 - A mobile-safety follow-up keeps the sequential policy in the resident Fe
   shell but changes its fixed opcode-14 realization from cold-to-live to
   poster-only loading. Poster capture and off-viewport suspension now destroy

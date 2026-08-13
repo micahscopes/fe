@@ -127,7 +127,10 @@ manifest-driven.
    expanded as complete target-neutral CFGs before liveness, independent of
    inline hints; both a real selected `Resumable` provider stack and a branched
    provider body materialize successfully. Recursive resumable SCCs remain an
-   explicit linked-frame boundary, and host-owned frame persistence remains.
+   explicit linked-frame boundary. The target-neutral host runtime now owns
+   materialized inputs, exact site frames, pending-operation routing, and
+   completed outputs by generation-tagged task token; browser adapter emission
+   remains.
 3. [in progress] Materialize fixed Wasm re-entry exports and connect them to the
    existing generation-safe executor. Direct tasks now emit compiler-named
    `__fe_task_start_*` and `__fe_task_resume_*_N` exports with no `fe:control`
@@ -136,7 +139,13 @@ manifest-driven.
    helper/effect-provider stack whose dead caller value is absent. Private
    helper continuations stay private; only the authored public task's generated
    entry points are exported. Recursive stacks fail explicitly instead of
-   unrolling or degrading to an import. Executor frame/result wiring remains.
+   unrolling or degrading to an import. A production `MaterializedExecutor`
+   bridge now drives the generated two-site Wasm task through the existing
+   generation-safe FIFO executor, including success, failure, and cancellation.
+   Pending identity is a materializer-owned type rather than a raw ordinal, and
+   an independent gate proves equal ordinals in distinct handler variants
+   cannot capture each other's continuations. Compiler emission of concrete
+   browser machine adapters and recursive linked frames remain.
 4. [todo] Interpret timer/receive/spawn and callback completion through that path on
    MainThread and Worker placements; retain blocking `Wait` only where legal.
 5. [todo] Derive browser `EventSource` handlers and move the gallery activation/timer
