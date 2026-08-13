@@ -60,8 +60,14 @@ not thrown away when direct suspension lands.
   them through `toCore` only at a core-Wasm `i32` boundary. The projected token
   carries slot and generation and resolves through the same table, so callback
   borrows cannot escape and stale numeric re-entry is rejected.
-- Exactly one terminal outcome wins. Cancellation replaces an undelivered
-  value/error, and late/stale completion is rejected.
+- A typed `Failure(E)` is the suspended operation's result, not an implicit
+  failure of the surrounding task. It re-enters the Fe continuation and the
+  Fe body may recover, suspend again, or complete. A trap while invoking the
+  Fe body is a task failure and follows the separate terminal path.
+- Exactly one explicit task/scope cancellation wins. It replaces an
+  undelivered value/error, reaches the Fe continuation exactly once for owned
+  cleanup, discards any output or further suspension attempted by that cleanup
+  step, and remains terminal. Late/stale completion is rejected.
 - Parent scope cancellation deterministically cancels children and releases
   resources. Detached work requires an explicit capability.
 - Placement is nominal Fe evidence (`MainThread`, `Worker`, and GPU roles), not
@@ -145,7 +151,8 @@ manifest-driven.
    entry points are exported. Recursive stacks fail explicitly instead of
    unrolling or degrading to an import. A production `MaterializedExecutor`
    bridge now drives the generated two-site Wasm task through the existing
-   generation-safe FIFO executor, including success, failure, and cancellation.
+   generation-safe FIFO executor, including success, recoverable operation
+   failure, and terminal cancellation.
    Pending identity is a materializer-owned type rather than a raw ordinal, and
    an independent gate proves equal ordinals in distinct handler variants
    cannot capture each other's continuations. A fixed, demo-blind browser task
@@ -163,7 +170,10 @@ manifest-driven.
    `recv_begin` enters one FIFO host-post lane, `AbortSignal` delivers typed
    cancellation, and a trapping Fe invocation cancels host work minted by that
    invocation. The broker drives the compiler-generated machine until Fe
-   completes and explicitly rejects blocking `wait`. A compiled-Fe Bun gate
+   completes and explicitly rejects blocking `wait`. Operation failure follows
+   the next Fe-selected step; explicit cancellation invokes Fe once for owned
+   cleanup, discards any cleanup output/new host work, and remains terminal. A
+   compiled-Fe Bun gate
    exercises timer success, receive success/failure, both cancellations, and
    cleanup through the actual `HostTimer` and `Resumable` provider bodies.
    MessagePort/EventSource attachment, spawn/Worker placement, canonical task

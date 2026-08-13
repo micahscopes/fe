@@ -374,10 +374,22 @@ pub fn task(
     failed.drain(8).unwrap();
     assert_eq!(
         failed.state(failed_task).unwrap(),
-        ResumableTaskState::Failed
+        ResumableTaskState::Suspended,
+        "the first operation failure is recoverable Fe data, not a task trap"
     );
-    assert_eq!(failed.pending(failed_task), None);
-    assert_eq!(failed.take_output(failed_task), None);
+    assert_eq!(
+        failed.pending(failed_task),
+        Some(PendingToken::from_core(42))
+    );
+    failed
+        .complete_value(PendingToken::from_core(42), 8)
+        .unwrap();
+    failed.drain(8).unwrap();
+    assert_eq!(
+        failed.state(failed_task).unwrap(),
+        ResumableTaskState::Completed
+    );
+    assert_eq!(failed.take_output(failed_task), Some(11));
 
     let (store, instance) = instantiate(&wasm);
     let mut cancelled = MaterializedExecutor::new(
@@ -646,14 +658,18 @@ if (failureOutput.length !== 1 || failureOutput[0] !== 5001n) throw new Error("F
 const timerController = new AbortController();
 const cancelledTimer = broker.run(tasks.sleep_task, [10_000n], {{ signal: timerController.signal }});
 timerController.abort();
-const timerCancellation = await cancelledTimer;
-if (timerCancellation.length !== 1 || timerCancellation[0] !== 4002n) throw new Error("Fe timer cancellation policy was bypassed");
+let timerCancellation;
+try {{ await cancelledTimer; }}
+catch (error) {{ timerCancellation = error; }}
+if (timerCancellation?.name !== "AbortError") throw new Error("Fe timer cancellation was not terminal");
 
 const receiveController = new AbortController();
 const cancelledReceive = broker.run(tasks.receive_task, [], {{ signal: receiveController.signal }});
 receiveController.abort();
-const receiveCancellation = await cancelledReceive;
-if (receiveCancellation.length !== 1 || receiveCancellation[0] !== 5002n) throw new Error("Fe receive cancellation policy was bypassed");
+let receiveCancellation;
+try {{ await cancelledReceive; }}
+catch (error) {{ receiveCancellation = error; }}
+if (receiveCancellation?.name !== "AbortError") throw new Error("Fe receive cancellation was not terminal");
 if (broker.activeCount() !== 0 || broker.cancelAll() !== 0) throw new Error("browser broker leaked completed operations");
 "#,
         adapter_url = format!("file://{}", adapter_path.display()),

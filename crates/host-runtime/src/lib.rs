@@ -286,9 +286,13 @@ impl<K: Clone, V, E> ResumableTaskTable<K, V, E> {
         let Some(delivery) = entry.queue.pop_front() else {
             return Ok(None);
         };
+        // Success and typed failure are outcomes of the suspended operation,
+        // not an implicit verdict on the surrounding Fe task. Both re-enter
+        // ordinary Fe policy. Explicit task cancellation remains terminal,
+        // although the executor still delivers it to the continuation once
+        // so Fe can release its owned state.
         entry.state = match delivery {
-            TaskOutcome::Success(_) => ResumableTaskState::Running,
-            TaskOutcome::Failure(_) => ResumableTaskState::Failed,
+            TaskOutcome::Success(_) | TaskOutcome::Failure(_) => ResumableTaskState::Running,
             TaskOutcome::Cancelled => ResumableTaskState::Cancelled,
         };
         Ok(Some(delivery))
@@ -533,7 +537,7 @@ impl<K: Clone, V, E> ResumableExecutor<K, V, E> {
                             .map(Some),
                         Some(TaskOutcome::Failure(error)) => body
                             .resume(token, &descriptor, TaskOutcome::Failure(error))
-                            .map(|_| None),
+                            .map(Some),
                         Some(TaskOutcome::Cancelled) => body
                             .resume(token, &descriptor, TaskOutcome::Cancelled)
                             .map(|_| None),
@@ -2038,7 +2042,9 @@ mod tests {
             tasks.deliver_next(reused, TaskExecutor::External).unwrap(),
             Some(TaskOutcome::Failure("boom"))
         ));
-        assert_eq!(tasks.state(reused).unwrap(), ResumableTaskState::Failed);
+        assert_eq!(tasks.state(reused).unwrap(), ResumableTaskState::Running);
+        tasks.complete(reused).unwrap();
+        assert_eq!(tasks.state(reused).unwrap(), ResumableTaskState::Completed);
         tasks.release(reused).unwrap();
     }
 
@@ -2152,6 +2158,33 @@ mod tests {
             TaskRuntimeError::AlreadyTerminal(ResumableTaskState::Cancelled)
         );
         assert_eq!(body.terminals.len(), 1);
+    }
+
+    #[test]
+    fn typed_operation_failure_reenters_body_policy_instead_of_failing_task() {
+        let executor =
+            ResumableExecutor::<&'static str, u32, &'static str>::new(TaskExecutor::Current);
+        let token = executor
+            .spawn(task_descriptor("recover", TaskExecutor::Current))
+            .unwrap();
+        let mut body = RecordingBody::default();
+        executor.drain(8, &mut body).unwrap();
+        executor.resume_error(token, "offline").unwrap();
+        executor.drain(8, &mut body).unwrap();
+
+        assert_eq!(
+            body.events,
+            ["start:recover", "resume:recover:Failure(\"offline\")"]
+        );
+        assert_eq!(
+            body.terminals,
+            [(token, ResumableTaskState::Completed)],
+            "the Fe body chose Complete after observing the typed operation failure"
+        );
+        assert_eq!(
+            executor.tasks().state(token).unwrap(),
+            ResumableTaskState::Completed
+        );
     }
 
     struct ReentrantBody<'a> {
@@ -2428,6 +2461,34 @@ mod tests {
             executor.pending(worker_task),
             Some(DemoPending::Worker(PendingToken::from_core(61))),
             "an equal raw ordinal from another handler must remain untouched"
+        );
+    }
+
+    #[test]
+    fn materialized_operation_failure_returns_the_fe_selected_output() {
+        let mut executor = MaterializedExecutor::new(TaskExecutor::Current, DemoMachine::default());
+        let task = executor
+            .spawn(
+                demo_descriptor(),
+                DemoInput {
+                    first_pending: DemoPending::Timer(PendingToken::from_core(71)),
+                    second_pending: DemoPending::Timer(PendingToken::from_core(72)),
+                    seed: 5,
+                },
+            )
+            .unwrap();
+        executor.drain(8).unwrap();
+        executor
+            .complete_error(DemoPending::Timer(PendingToken::from_core(71)), 3)
+            .unwrap();
+        executor.drain(8).unwrap();
+
+        assert_eq!(executor.state(task).unwrap(), ResumableTaskState::Completed);
+        assert_eq!(executor.take_output(task), Some(8));
+        assert_eq!(
+            executor.machine().deliveries,
+            [TaskOutcome::Failure(3)],
+            "typed operation failure must reach the Fe machine exactly once"
         );
     }
 

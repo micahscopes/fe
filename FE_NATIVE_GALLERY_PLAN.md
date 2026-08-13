@@ -816,6 +816,20 @@ Origin: honesty audit of Claude Code session
   Fe invocation traps, and non-consuming rejection of malformed posts.
   MessagePort/EventSource attachment, Worker/spawn placement, structured child
   scopes, and canonical task-package discovery remain open.
+- A cross-runtime honesty pass closed a semantic mismatch in that first
+  realization. `TaskOutcome::Failure(E)` is now consistently an operation
+  result rather than an automatic task failure: the target-neutral executor,
+  generated browser machine, and real `HostTimer`/`Recv` broker all re-enter
+  the Fe continuation and honor its selected recovery/suspension/completion.
+  Explicit executor/`AbortSignal` cancellation remains terminal, but reaches
+  Fe exactly once for cleanup; returned values and newly minted host work from
+  that cleanup step are discarded. Independent gates cover recovery after a
+  first-site failure into a second suspension, terminal cancellation, cleanup
+  invocation count, and cleanup-created timer disposal. The host-runtime suite
+  is 23/23, the fixed browser task/broker suite is 10/10, and three actual
+  compiled Fe-to-Wasm capstones pass for the two-site machine, timer/receive
+  broker, and compiler-emitted browser adapter. This correctness distinction
+  is behavioral evidence, not generated-byte equality.
 - A mobile-safety follow-up keeps the sequential policy in the resident Fe
   shell but changes its fixed opcode-14 realization from cold-to-live to
   poster-only loading. Poster capture and off-viewport suspension now destroy

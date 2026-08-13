@@ -11,6 +11,13 @@ const MAX_U32 = 0xffff_ffff;
 const MAX_U64 = (1n << 64n) - 1n;
 const MAX_TIMER_CHUNK_MS = 0x7fff_ffffn;
 
+export class FeTaskCancelled extends Error {
+  constructor() {
+    super("Fe task was cancelled");
+    this.name = "AbortError";
+  }
+}
+
 function u32(value, name) {
   if (!Number.isInteger(value) || value < 0 || value > MAX_U32) {
     throw new TypeError(`${name} must be a u32`);
@@ -97,11 +104,11 @@ export function createHostCompletionBroker(options = {}) {
     return slot;
   };
 
-  const settle = (slot, outcome) => {
+  const settle = (slot, outcome, cancelled = false) => {
     if (slot.state !== "pending") return false;
     slot.state = "settled";
     if (slot.cancelWork !== undefined) slot.cancelWork();
-    slot.resolve(outcome);
+    slot.resolve(Object.freeze({ outcome, cancelled }));
     return true;
   };
 
@@ -163,7 +170,7 @@ export function createHostCompletionBroker(options = {}) {
     }
     slot.claimed = true;
     slot.handler = pending.handler;
-    const onAbort = () => settle(slot, taskCancelled());
+    const onAbort = () => settle(slot, taskCancelled(), true);
     if (signal !== undefined) {
       signal.addEventListener("abort", onAbort, { once: true });
       if (signal.aborted) onAbort();
@@ -173,6 +180,15 @@ export function createHostCompletionBroker(options = {}) {
     } finally {
       if (signal !== undefined) signal.removeEventListener("abort", onAbort);
       slots.delete(token);
+    }
+  };
+
+  const discardSince = (tokenCheckpoint) => {
+    for (const [token, slot] of slots) {
+      if (token >= tokenCheckpoint) {
+        if (slot.cancelWork !== undefined) slot.cancelWork();
+        slots.delete(token);
+      }
     }
   };
 
@@ -187,12 +203,7 @@ export function createHostCompletionBroker(options = {}) {
       }
       return step;
     } catch (error) {
-      for (const [token, slot] of slots) {
-        if (token >= tokenCheckpoint) {
-          if (slot.cancelWork !== undefined) slot.cancelWork();
-          slots.delete(token);
-        }
-      }
+      discardSince(tokenCheckpoint);
       throw error;
     }
   };
@@ -207,8 +218,16 @@ export function createHostCompletionBroker(options = {}) {
     const signal = abortSignal(runOptions.signal);
     let step = invokeMachine(() => machine.start(input));
     while (step.kind === "suspended") {
-      const outcome = await awaitPending(step.pending, signal);
-      step = invokeMachine(() => machine.resume(step.frame, outcome));
+      const delivery = await awaitPending(step.pending, signal);
+      const tokenCheckpoint = nextToken;
+      step = invokeMachine(() => machine.resume(step.frame, delivery.outcome));
+      if (delivery.cancelled) {
+        // Cancellation is delivered exactly once so Fe can release its owned
+        // state. It remains the task's terminal verdict even if that cleanup
+        // continuation returns a value or attempts another suspension.
+        discardSince(tokenCheckpoint);
+        throw new FeTaskCancelled();
+      }
     }
     return step.output;
   };
@@ -228,7 +247,7 @@ export function createHostCompletionBroker(options = {}) {
   const cancelAll = () => {
     let cancelled = 0;
     for (const slot of slots.values()) {
-      if (settle(slot, taskCancelled())) cancelled += 1;
+      if (settle(slot, taskCancelled(), true)) cancelled += 1;
     }
     return cancelled;
   };
