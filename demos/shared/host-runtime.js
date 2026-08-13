@@ -27,8 +27,22 @@ class OpaqueTable {
 
   insert(value, onDrop, borrowed = false) {
     const slot = this.#free.pop() ?? this.#slots.length;
+    if (slot > 0xfffe) {
+      throw new HostRuntimeError(
+        "handle_capacity_exhausted",
+        `${this.#kind} handle table exhausted its core-Wasm i32 slots`,
+        { kind: this.#kind },
+      );
+    }
     const previous = this.#slots[slot];
     const generation = (previous?.generation ?? 0) + 1;
+    if (generation > 0xffff) {
+      throw new HostRuntimeError(
+        "handle_generation_exhausted",
+        `${this.#kind} handle slot exhausted its core-Wasm i32 generations`,
+        { kind: this.#kind, slot },
+      );
+    }
     const handle = Object.freeze(Object.create(null));
     this.#slots[slot] = {
       generation,
@@ -43,7 +57,9 @@ class OpaqueTable {
   }
 
   #entry(handle) {
-    const identity = this.#handles.get(handle);
+    const identity = typeof handle === "number"
+      ? this.#decodeCore(handle)
+      : this.#handles.get(handle);
     if (!identity) {
       throw new HostRuntimeError(
         "invalid_handle",
@@ -60,6 +76,25 @@ class OpaqueTable {
       );
     }
     return { entry, ...identity };
+  }
+
+  #decodeCore(handle) {
+    if (!Number.isInteger(handle) || handle < -0x80000000 || handle > 0x7fffffff) {
+      return undefined;
+    }
+    const raw = handle >>> 0;
+    const encodedSlot = raw & 0xffff;
+    const generation = raw >>> 16;
+    if (encodedSlot === 0 || generation === 0) return undefined;
+    return { slot: encodedSlot - 1, generation };
+  }
+
+  // Project an opaque JS authority onto the generation-tagged i32 lane used
+  // by core Wasm. Imports may pass that token back to borrow/take/drop; stale
+  // generations are checked against the same table entry as object handles.
+  toCore(handle) {
+    const { slot, generation } = this.#entry(handle);
+    return ((generation << 16) | (slot + 1)) | 0;
   }
 
   borrow(handle) {
@@ -116,7 +151,7 @@ class OpaqueTable {
   #retire({ entry, slot }, notify) {
     entry.live = false;
     entry.value = undefined;
-    this.#free.push(slot);
+    if (entry.generation < 0xffff) this.#free.push(slot);
     this.#live -= 1;
     if (notify) entry.onDrop?.();
     entry.onDrop = undefined;
@@ -189,6 +224,10 @@ function createCallbackTable() {
       } else {
         table.drop(handle);
       }
+    },
+
+    toCore(handle) {
+      return table.toCore(handle);
     },
 
     get liveCount() {
@@ -269,6 +308,10 @@ function createFutureTable() {
 
     release(token) {
       table.drop(token);
+    },
+
+    toCore(token) {
+      return table.toCore(token);
     },
 
     get liveCount() {
@@ -537,6 +580,7 @@ export function createFeHostRuntime() {
       take: resources.take.bind(resources),
       drop: resources.drop.bind(resources),
       withBorrowed: resources.withBorrowed.bind(resources),
+      toCore: resources.toCore.bind(resources),
       get liveCount() {
         return resources.liveCount;
       },

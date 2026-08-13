@@ -720,6 +720,26 @@ Origin: honesty audit of Claude Code session
   diagnostics and affine double-cancel rejection. This is the synchronous
   handler boundary, not a claim that MIR suspension, browser EventSource
   adapters, or async continuation materialization are complete.
+- Runtime-control implementation now has one explicit consolidation
+  architecture in `docs/mb2/RUNTIME_CONTROL_EFFECTS.md`. The unused
+  `fe:resumable-task/v1` JSON protocol and its seven caller-authored synthetic
+  entry names are deleted. The callback-registration JSON schema, duplicated
+  flattened scalar lanes/lifetime fields, and codegen-local token arena are
+  deleted as well: callback transport is derived from the normalized interface
+  and checked against the authored Fe MIR body, while the one host-runtime
+  callback table retains generation, stale-token, reentrancy, and release
+  semantics. The resumable executor now accepts a materializer-owned typed body
+  key rather than parsing task/body/entry strings. All host ABI, host runtime,
+  and focused callback compiler gates are green. `core::pending::TaskOutcome`
+  and the executor now share the same typed `Failure(E) | Success(T) |
+  Cancelled` terminal vocabulary; a Fe execution gate proves pure success
+  mapping, typed failure preservation, and distinct cancellation. The browser
+  host also has an explicit generation-checked `toCore` projection instead of
+  implicitly passing opaque JavaScript resource objects into core-Wasm `i32`
+  lanes; its Bun capstone now exercises WebIDL conversion, Fe callback/import
+  execution, borrow expiry, release, and stale rejection end to end. This is
+  architectural composting before the real MIR suspension/re-entry slice, not
+  a claim that main-thread suspension or browser handlers already exist.
 
 This ledger records achieved evidence, not a relaxation of the phases or the
 Definition of done below.

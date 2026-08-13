@@ -1,16 +1,14 @@
-//! Compiler-visible gate for target-neutral guest callback registrations.
+//! Compiler-visible gate for target-neutral guest callbacks.
 //!
-//! This module intentionally stops before backend materialization. It validates
-//! the manifest shared with host tooling, then requires each mechanism needed
-//! for a truthful token-dispatch trampoline.
+//! Callback signature shape comes from the normalized interface world and
+//! authored-body shape comes from Fe semantic/MIR types. The compiler joins
+//! those sources directly; there is no callback-registration JSON manifest and
+//! no caller-authored scalar signature or lifetime-policy table.
 
 use std::collections::BTreeSet;
 
 use compiler_db::DriverDataBase;
-use fe_host_abi::{
-    CoreType, GuestCallbackRegistration, GuestCallbackRegistrationManifest, GuestFunctionIdentity,
-    World,
-};
+use fe_host_abi::{CoreType, World};
 use hir::{analysis::ty::ty_check::BodyOwner, hir_def::Visibility};
 use mir::{
     AddressSpaceKind, Layout, RefKind, RuntimeClass, RuntimeFunctionOwner, RuntimeLinkage,
@@ -88,11 +86,32 @@ impl GuestCallbackMaterializerProfile {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuestCallbackMaterializationError {
-    InvalidManifest(String),
+    InvalidBinding(String),
     MissingCapabilities {
         profile: &'static str,
         missing: BTreeSet<GuestCallbackMaterializerCapability>,
     },
+}
+
+/// Internal compiler identity for one authored Fe callback body.
+///
+/// This is semantic compiler data, not a serializable host ABI. The future
+/// Fe-facing authoring role will derive it without spelling paths at the call
+/// site; keeping it internal prevents an interim JSON protocol from becoming
+/// runtime architecture.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct GuestFunctionIdentity {
+    pub ingot: String,
+    pub module_path: Vec<String>,
+    pub function: String,
+}
+
+/// One compiler-internal association between an interface callback signature
+/// and an authored Fe body. Core lanes and token policy are derived, not stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestCallbackBinding {
+    pub signature_id: String,
+    pub body: GuestFunctionIdentity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,187 +124,9 @@ pub struct ResolvedGuestCallback {
     pub core_results: Vec<CoreType>,
 }
 
-/// Opaque core-i32 authority for one guest callback registration.
-///
-/// The low 16 bits encode `slot + 1` (zero is never a valid token) and the high
-/// 16 bits encode the nonzero generation. The fields remain private so callers
-/// cannot forge a typed token from slot arithmetic.
-#[derive(Debug, PartialEq, Eq)]
-pub struct GuestCallbackToken {
-    core: u32,
-}
-
-impl GuestCallbackToken {
-    pub fn to_core(&self) -> i32 {
-        self.core as i32
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum GuestCallbackSlot {
-    Vacant {
-        generation: u16,
-    },
-    Occupied {
-        generation: u16,
-        callback: ResolvedGuestCallback,
-    },
-    Exhausted,
-}
-
-/// Target-neutral registration arena. It models token ownership and generation
-/// checks only; it contains no backend function table and performs no dispatch.
-#[derive(Debug, Default)]
-pub struct GuestCallbackRegistrationTable {
-    slots: Vec<GuestCallbackSlot>,
-    free: BTreeSet<u16>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GuestCallbackTableError {
-    InvalidToken {
-        core: i32,
-    },
-    Released {
-        slot: u16,
-        generation: u16,
-    },
-    Stale {
-        slot: u16,
-        expected_generation: u16,
-        received_generation: u16,
-    },
-    SlotCapacityExhausted,
-    GenerationExhausted {
-        slot: u16,
-    },
-}
-
-impl GuestCallbackRegistrationTable {
-    pub fn register(
-        &mut self,
-        callback: ResolvedGuestCallback,
-    ) -> Result<GuestCallbackToken, GuestCallbackTableError> {
-        let (slot, generation) = if let Some(slot) = self.free.pop_first() {
-            let entry = &mut self.slots[usize::from(slot)];
-            let GuestCallbackSlot::Vacant { generation } = entry else {
-                unreachable!("only vacant callback slots enter the free set")
-            };
-            let next = generation
-                .checked_add(1)
-                .ok_or(GuestCallbackTableError::GenerationExhausted { slot })?;
-            (slot, next)
-        } else {
-            let slot = u16::try_from(self.slots.len())
-                .map_err(|_| GuestCallbackTableError::SlotCapacityExhausted)?;
-            self.slots.push(GuestCallbackSlot::Vacant { generation: 0 });
-            (slot, 1)
-        };
-        self.slots[usize::from(slot)] = GuestCallbackSlot::Occupied {
-            generation,
-            callback,
-        };
-        Ok(GuestCallbackToken {
-            core: encode_guest_callback_token(slot, generation),
-        })
-    }
-
-    pub fn resolve(&self, core: i32) -> Result<&ResolvedGuestCallback, GuestCallbackTableError> {
-        let (slot, received_generation) = decode_guest_callback_token(core)?;
-        let Some(entry) = self.slots.get(usize::from(slot)) else {
-            return Err(GuestCallbackTableError::InvalidToken { core });
-        };
-        match entry {
-            GuestCallbackSlot::Occupied {
-                generation,
-                callback,
-            } if *generation == received_generation => Ok(callback),
-            GuestCallbackSlot::Occupied { generation, .. }
-            | GuestCallbackSlot::Vacant { generation }
-                if *generation != received_generation =>
-            {
-                Err(GuestCallbackTableError::Stale {
-                    slot,
-                    expected_generation: *generation,
-                    received_generation,
-                })
-            }
-            GuestCallbackSlot::Vacant { generation } => Err(GuestCallbackTableError::Released {
-                slot,
-                generation: *generation,
-            }),
-            GuestCallbackSlot::Exhausted => {
-                Err(GuestCallbackTableError::GenerationExhausted { slot })
-            }
-            GuestCallbackSlot::Occupied { .. } => unreachable!("generation checked above"),
-        }
-    }
-
-    /// Consume the sole rooted token and retire its binding.
-    pub fn release(
-        &mut self,
-        token: GuestCallbackToken,
-    ) -> Result<ResolvedGuestCallback, GuestCallbackTableError> {
-        let core = token.to_core();
-        let (slot, received_generation) = decode_guest_callback_token(core)?;
-        let Some(entry) = self.slots.get_mut(usize::from(slot)) else {
-            return Err(GuestCallbackTableError::InvalidToken { core });
-        };
-        let generation = match entry {
-            GuestCallbackSlot::Occupied { generation, .. }
-                if *generation == received_generation =>
-            {
-                *generation
-            }
-            GuestCallbackSlot::Occupied { generation, .. }
-            | GuestCallbackSlot::Vacant { generation } => {
-                return Err(GuestCallbackTableError::Stale {
-                    slot,
-                    expected_generation: *generation,
-                    received_generation,
-                });
-            }
-            GuestCallbackSlot::Exhausted => {
-                return Err(GuestCallbackTableError::GenerationExhausted { slot });
-            }
-        };
-        let GuestCallbackSlot::Occupied { callback, .. } =
-            std::mem::replace(entry, GuestCallbackSlot::Vacant { generation })
-        else {
-            unreachable!("release admitted only an occupied slot")
-        };
-        if generation == u16::MAX {
-            *entry = GuestCallbackSlot::Exhausted;
-        } else {
-            self.free.insert(slot);
-        }
-        Ok(callback)
-    }
-
-    pub fn live_count(&self) -> usize {
-        self.slots
-            .iter()
-            .filter(|slot| matches!(slot, GuestCallbackSlot::Occupied { .. }))
-            .count()
-    }
-}
-
-fn encode_guest_callback_token(slot: u16, generation: u16) -> u32 {
-    (u32::from(generation) << 16) | (u32::from(slot) + 1)
-}
-
-fn decode_guest_callback_token(core: i32) -> Result<(u16, u16), GuestCallbackTableError> {
-    let raw = core as u32;
-    let encoded_slot = (raw & 0xffff) as u16;
-    let generation = (raw >> 16) as u16;
-    if encoded_slot == 0 || generation == 0 {
-        return Err(GuestCallbackTableError::InvalidToken { core });
-    }
-    Ok((encoded_slot - 1, generation))
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuestCallbackResolutionError {
+    InvalidBinding(String),
     Missing {
         body: GuestFunctionIdentity,
     },
@@ -319,15 +160,23 @@ pub struct GuestCallbackSignatureMismatch {
 
 /// Resolve authored identities against semantic functions already present in a
 /// MIR package. Multiple monomorphizations of one authored function are an
-/// explicit ambiguity until a manifest version can name type arguments.
+/// explicit ambiguity until Fe authoring metadata can name type arguments.
 pub fn resolve_guest_callbacks(
     db: &DriverDataBase,
     package: &RuntimePackage<'_>,
-    manifest: &GuestCallbackRegistrationManifest,
+    world: &World,
+    bindings: &[GuestCallbackBinding],
 ) -> Result<Vec<ResolvedGuestCallback>, GuestCallbackResolutionError> {
+    let bindings = normalize_guest_callback_bindings(world, bindings)
+        .map_err(GuestCallbackResolutionError::InvalidBinding)?;
     let functions = package.functions(db);
-    let mut resolved = Vec::with_capacity(manifest.registrations.len());
-    for registration in &manifest.registrations {
+    let mut resolved = Vec::with_capacity(bindings.len());
+    for registration in &bindings {
+        let plan = world
+            .callback_export_plan(&registration.signature_id)
+            .map_err(|error| GuestCallbackResolutionError::InvalidBinding(error.to_string()))?;
+        let expected_params = plan.params[1..].to_vec();
+        let expected_results = plan.results;
         let mut matches = functions
             .iter()
             .filter_map(|function| {
@@ -394,14 +243,13 @@ pub fn resolve_guest_callbacks(
             .into_iter()
             .flatten()
             .collect::<Vec<_>>();
-        if actual_params != registration.core_params || actual_results != registration.core_results
-        {
+        if actual_params != expected_params || actual_results != expected_results {
             return Err(GuestCallbackResolutionError::SignatureMismatch {
                 detail: Box::new(GuestCallbackSignatureMismatch {
                     body: registration.body.clone(),
-                    expected_params: registration.core_params.clone(),
+                    expected_params,
                     actual_params,
-                    expected_results: registration.core_results.clone(),
+                    expected_results,
                     actual_results,
                 }),
             });
@@ -411,8 +259,8 @@ pub fn resolve_guest_callbacks(
             body: registration.body.clone(),
             runtime_instance_key: mir::runtime_instance_stable_key(db, function.instance(db)),
             runtime_symbol: function.symbol(db).clone(),
-            core_params: registration.core_params.clone(),
-            core_results: registration.core_results.clone(),
+            core_params: expected_params,
+            core_results: expected_results,
         });
     }
     Ok(resolved)
@@ -501,12 +349,11 @@ fn flat_core_types(db: &DriverDataBase, class: &RuntimeClass<'_>) -> Result<Vec<
 /// the selected backend declares every required mechanism.
 pub fn prepare_guest_callback_materialization(
     world: &World,
-    manifest: &GuestCallbackRegistrationManifest,
+    bindings: &[GuestCallbackBinding],
     profile: &GuestCallbackMaterializerProfile,
-) -> Result<Vec<GuestCallbackRegistration>, GuestCallbackMaterializationError> {
-    manifest
-        .validate(world)
-        .map_err(|error| GuestCallbackMaterializationError::InvalidManifest(error.to_string()))?;
+) -> Result<Vec<GuestCallbackBinding>, GuestCallbackMaterializationError> {
+    let bindings = normalize_guest_callback_bindings(world, bindings)
+        .map_err(GuestCallbackMaterializationError::InvalidBinding)?;
     let required = BTreeSet::from([
         GuestCallbackMaterializerCapability::ExportTrampoline,
         GuestCallbackMaterializerCapability::PersistentGuestState,
@@ -525,7 +372,40 @@ pub fn prepare_guest_callback_materialization(
             missing,
         });
     }
-    Ok(manifest.registrations.clone())
+    Ok(bindings)
+}
+
+fn normalize_guest_callback_bindings(
+    world: &World,
+    bindings: &[GuestCallbackBinding],
+) -> Result<Vec<GuestCallbackBinding>, String> {
+    world.validate().map_err(|error| error.to_string())?;
+    let mut normalized = bindings.to_vec();
+    normalized.sort_by(|left, right| left.signature_id.cmp(&right.signature_id));
+    let mut signatures = BTreeSet::new();
+    let mut bodies = BTreeSet::new();
+    for binding in &normalized {
+        if !signatures.insert(binding.signature_id.as_str()) {
+            return Err(format!(
+                "duplicate callback signature `{}`",
+                binding.signature_id
+            ));
+        }
+        if !bodies.insert(&binding.body) {
+            return Err(format!(
+                "authored Fe callback body `{}::{}` is bound more than once",
+                binding.body.module_path.join("::"),
+                binding.body.function
+            ));
+        }
+        let plan = world
+            .callback_export_plan(&binding.signature_id)
+            .map_err(|error| error.to_string())?;
+        if let Some(blocker) = plan.blocker {
+            return Err(blocker);
+        }
+    }
+    Ok(normalized)
 }
 
 #[cfg(test)]
@@ -533,15 +413,10 @@ mod tests {
     use super::*;
     use common::InputDb;
     use driver::DriverDataBase;
-    use fe_host_abi::{
-        CoreType, FunctionType, GUEST_CALLBACK_REGISTRATION_PROTOCOL,
-        GUEST_CALLBACK_REGISTRATION_VERSION, GuestCallbackGenerationPolicy,
-        GuestCallbackRegistration, GuestCallbackReleasePolicy, GuestCallbackTokenOwner,
-        GuestFunctionIdentity, Param, Type, TypeDef, TypeDefKind,
-    };
+    use fe_host_abi::{CoreType, FunctionType, Param, Type, TypeDef, TypeDefKind};
     use url::Url;
 
-    fn fixture() -> (World, GuestCallbackRegistrationManifest) {
+    fn fixture() -> (World, Vec<GuestCallbackBinding>) {
         let world = World {
             name: "callbacks".into(),
             types: vec![TypeDef {
@@ -559,32 +434,23 @@ mod tests {
             }],
             ..World::default()
         };
-        let manifest = GuestCallbackRegistrationManifest {
-            protocol: GUEST_CALLBACK_REGISTRATION_PROTOCOL.into(),
-            version: GUEST_CALLBACK_REGISTRATION_VERSION,
-            registrations: vec![GuestCallbackRegistration {
-                signature_id: "listener".into(),
-                body: GuestFunctionIdentity {
-                    ingot: "app".into(),
-                    module_path: vec!["handlers".into()],
-                    function: "on_value".into(),
-                },
-                core_params: vec![CoreType::I32],
-                core_results: vec![CoreType::I32],
-                token_owner: GuestCallbackTokenOwner::GuestRegistry,
-                generation: GuestCallbackGenerationPolicy::ValidateExactAndBumpOnReuse,
-                release: GuestCallbackReleasePolicy::ConsumeRootAndRejectStale,
-            }],
-        };
-        (world, manifest)
+        let bindings = vec![GuestCallbackBinding {
+            signature_id: "listener".into(),
+            body: GuestFunctionIdentity {
+                ingot: "app".into(),
+                module_path: vec!["handlers".into()],
+                function: "on_value".into(),
+            },
+        }];
+        (world, bindings)
     }
 
     #[test]
     fn current_wasm_fails_before_emitting_a_fake_dispatcher() {
-        let (world, manifest) = fixture();
+        let (world, bindings) = fixture();
         let error = prepare_guest_callback_materialization(
             &world,
-            &manifest,
+            &bindings,
             &GuestCallbackMaterializerProfile::current_wasm(),
         )
         .unwrap_err();
@@ -613,6 +479,53 @@ mod tests {
     }
 
     #[test]
+    fn callback_bindings_are_normalized_and_lanes_are_interface_derived() {
+        let (mut world, bindings) = fixture();
+        world.types.push(TypeDef {
+            name: "listener-z".into(),
+            kind: TypeDefKind::Callback {
+                signature: FunctionType {
+                    params: vec![Param {
+                        name: "value".into(),
+                        type_: Type::I64,
+                    }],
+                    result: Some(Type::I64),
+                    async_: false,
+                },
+            },
+        });
+        let mut reversed = vec![
+            GuestCallbackBinding {
+                signature_id: "listener-z".into(),
+                body: GuestFunctionIdentity {
+                    ingot: "app".into(),
+                    module_path: vec!["handlers".into()],
+                    function: "on_i64".into(),
+                },
+            },
+            bindings[0].clone(),
+        ];
+        let normalized = normalize_guest_callback_bindings(&world, &reversed).unwrap();
+        assert_eq!(
+            normalized
+                .iter()
+                .map(|binding| binding.signature_id.as_str())
+                .collect::<Vec<_>>(),
+            ["listener", "listener-z"]
+        );
+        let plan = world.callback_export_plan("listener-z").unwrap();
+        assert_eq!(plan.params[1..], [CoreType::I64]);
+        assert_eq!(plan.results, [CoreType::I64]);
+
+        reversed[0].body = reversed[1].body.clone();
+        assert!(
+            normalize_guest_callback_bindings(&world, &reversed)
+                .unwrap_err()
+                .contains("bound more than once")
+        );
+    }
+
+    #[test]
     fn resolves_public_authored_body_and_rejects_missing_and_signature_drift() {
         let mut db = DriverDataBase::default();
         let url = Url::parse("file:///guest_callback_resolution.fe").unwrap();
@@ -622,7 +535,8 @@ mod tests {
             Some(
                 "pub fn on_value(value: i32) -> i32 { value + 1 }\n\
                  fn private_value(value: i32) -> i32 { value }\n\
-                 pub fn keep_private_reachable(value: i32) -> i32 { private_value(value) }\n"
+                 pub fn keep_private_reachable(value: i32) -> i32 { private_value(value) }\n\
+                 pub fn on_i64(value: i64) -> i64 { value }\n"
                     .to_owned(),
             ),
         );
@@ -654,9 +568,9 @@ mod tests {
             module_path: module_path_components_for_scope(&db, func.scope()),
             function: "on_value".into(),
         };
-        let (_world, mut manifest) = fixture();
-        manifest.registrations[0].body = identity.clone();
-        let resolved = resolve_guest_callbacks(&db, &package, &manifest).unwrap();
+        let (world, mut bindings) = fixture();
+        bindings[0].body = identity.clone();
+        let resolved = resolve_guest_callbacks(&db, &package, &world, &bindings).unwrap();
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].body, identity);
         assert!(!resolved[0].runtime_instance_key.is_empty());
@@ -664,16 +578,16 @@ mod tests {
         assert_eq!(resolved[0].core_params, [CoreType::I32]);
         assert_eq!(resolved[0].core_results, [CoreType::I32]);
 
-        manifest.registrations[0].body.function = "missing".into();
+        bindings[0].body.function = "missing".into();
         assert!(matches!(
-            resolve_guest_callbacks(&db, &package, &manifest),
+            resolve_guest_callbacks(&db, &package, &world, &bindings),
             Err(GuestCallbackResolutionError::Missing { .. })
         ));
 
-        manifest.registrations[0].body = identity;
-        manifest.registrations[0].core_params = vec![CoreType::I64];
+        bindings[0].body = identity;
+        bindings[0].body.function = "on_i64".into();
         assert!(matches!(
-            resolve_guest_callbacks(&db, &package, &manifest),
+            resolve_guest_callbacks(&db, &package, &world, &bindings),
             Err(GuestCallbackResolutionError::SignatureMismatch { .. })
         ));
     }
@@ -692,100 +606,6 @@ mod tests {
         );
     }
 
-    fn resolved_fixture(name: &str) -> ResolvedGuestCallback {
-        ResolvedGuestCallback {
-            signature_id: "listener".into(),
-            body: GuestFunctionIdentity {
-                ingot: "app".into(),
-                module_path: vec!["lib".into()],
-                function: name.into(),
-            },
-            runtime_instance_key: format!("app$lib$fn${name}"),
-            runtime_symbol: name.into(),
-            core_params: vec![CoreType::I32],
-            core_results: vec![CoreType::I32],
-        }
-    }
-
-    #[test]
-    fn registration_table_rejects_released_and_reused_generations() {
-        let mut table = GuestCallbackRegistrationTable::default();
-        let first = table.register(resolved_fixture("first")).unwrap();
-        let stale_core = first.to_core();
-        assert_eq!(table.resolve(stale_core).unwrap().runtime_symbol, "first");
-        assert_eq!(table.live_count(), 1);
-
-        let released = table.release(first).unwrap();
-        assert_eq!(released.runtime_symbol, "first");
-        assert_eq!(table.live_count(), 0);
-        assert!(matches!(
-            table.resolve(stale_core),
-            Err(GuestCallbackTableError::Released {
-                slot: 0,
-                generation: 1
-            })
-        ));
-
-        let second = table.register(resolved_fixture("second")).unwrap();
-        let second_core = second.to_core();
-        assert_ne!(stale_core, second_core);
-        assert_eq!(table.resolve(second_core).unwrap().runtime_symbol, "second");
-        assert!(matches!(
-            table.resolve(stale_core),
-            Err(GuestCallbackTableError::Stale {
-                slot: 0,
-                expected_generation: 2,
-                received_generation: 1,
-            })
-        ));
-    }
-
-    #[test]
-    fn registration_table_reuses_lowest_free_slot_deterministically() {
-        let mut table = GuestCallbackRegistrationTable::default();
-        let zero = table.register(resolved_fixture("zero")).unwrap();
-        let one = table.register(resolved_fixture("one")).unwrap();
-        let zero_core = zero.to_core();
-        let one_core = one.to_core();
-        table.release(one).unwrap();
-        table.release(zero).unwrap();
-
-        let reused_zero = table.register(resolved_fixture("reused-zero")).unwrap();
-        let reused_one = table.register(resolved_fixture("reused-one")).unwrap();
-        assert_eq!((reused_zero.to_core() as u32) & 0xffff, 1);
-        assert_eq!((reused_one.to_core() as u32) & 0xffff, 2);
-        assert_ne!(reused_zero.to_core(), zero_core);
-        assert_ne!(reused_one.to_core(), one_core);
-    }
-
-    #[test]
-    fn zero_tokens_are_invalid_and_exhausted_generations_retire_slots() {
-        let table = GuestCallbackRegistrationTable::default();
-        assert_eq!(
-            table.resolve(0).unwrap_err(),
-            GuestCallbackTableError::InvalidToken { core: 0 }
-        );
-
-        let mut table = GuestCallbackRegistrationTable {
-            slots: vec![GuestCallbackSlot::Occupied {
-                generation: u16::MAX,
-                callback: resolved_fixture("last-generation"),
-            }],
-            free: BTreeSet::new(),
-        };
-        let token = GuestCallbackToken {
-            core: encode_guest_callback_token(0, u16::MAX),
-        };
-        let stale_core = token.to_core();
-        table.release(token).unwrap();
-        assert!(matches!(
-            table.resolve(stale_core),
-            Err(GuestCallbackTableError::GenerationExhausted { slot: 0 })
-        ));
-        let next = table.register(resolved_fixture("next-slot")).unwrap();
-        assert_eq!((next.to_core() as u32) & 0xffff, 2);
-    }
-
     #[cfg(feature = "sonatina-indirect-calls")]
     #[test]
     fn overlay_wasm_guest_callback_registration_dispatch_and_release_capstone() {
@@ -802,6 +622,38 @@ mod tests {
             };
         "#;
         let event_world = fe_webidl_bindgen::parse(event_idl).unwrap();
+        let callback_world = World {
+            name: "event-callbacks".into(),
+            types: vec![
+                TypeDef {
+                    name: "EventListener".into(),
+                    kind: TypeDefKind::Callback {
+                        signature: FunctionType {
+                            params: vec![Param {
+                                name: "event".into(),
+                                type_: Type::I32,
+                            }],
+                            result: Some(Type::I32),
+                            async_: false,
+                        },
+                    },
+                },
+                TypeDef {
+                    name: "i64-listener".into(),
+                    kind: TypeDefKind::Callback {
+                        signature: FunctionType {
+                            params: vec![Param {
+                                name: "value".into(),
+                                type_: Type::I64,
+                            }],
+                            result: Some(Type::I64),
+                            async_: false,
+                        },
+                    },
+                },
+            ],
+            ..World::default()
+        };
         // Only the Event resource/property imports enter the Fe core-Wasm
         // compilation unit. DOMString remains on the generated semantic
         // adapter side until canonical string memory is available here.
@@ -850,31 +702,17 @@ mod tests {
                 function: name.into(),
             }
         };
-        let manifest = GuestCallbackRegistrationManifest {
-            protocol: GUEST_CALLBACK_REGISTRATION_PROTOCOL.into(),
-            version: GUEST_CALLBACK_REGISTRATION_VERSION,
-            registrations: vec![
-                GuestCallbackRegistration {
-                    signature_id: "EventListener".into(),
-                    body: identity("on_event"),
-                    core_params: vec![CoreType::I32],
-                    core_results: vec![CoreType::I32],
-                    token_owner: GuestCallbackTokenOwner::GuestRegistry,
-                    generation: GuestCallbackGenerationPolicy::ValidateExactAndBumpOnReuse,
-                    release: GuestCallbackReleasePolicy::ConsumeRootAndRejectStale,
-                },
-                GuestCallbackRegistration {
-                    signature_id: "i64-listener".into(),
-                    body: identity("on_i64"),
-                    core_params: vec![CoreType::I64],
-                    core_results: vec![CoreType::I64],
-                    token_owner: GuestCallbackTokenOwner::GuestRegistry,
-                    generation: GuestCallbackGenerationPolicy::ValidateExactAndBumpOnReuse,
-                    release: GuestCallbackReleasePolicy::ConsumeRootAndRejectStale,
-                },
-            ],
-        };
-        let callbacks = resolve_guest_callbacks(&db, &package, &manifest).unwrap();
+        let bindings = vec![
+            GuestCallbackBinding {
+                signature_id: "EventListener".into(),
+                body: identity("on_event"),
+            },
+            GuestCallbackBinding {
+                signature_id: "i64-listener".into(),
+                body: identity("on_i64"),
+            },
+        ];
+        let callbacks = resolve_guest_callbacks(&db, &package, &callback_world, &bindings).unwrap();
         let (module, imports) = crate::sonatina::compile_runtime_package_wasm_with_guest_callbacks(
             &db, &package, &callbacks,
         )
@@ -1020,7 +858,10 @@ const callbackHandle = adapter.registerCallback(
   "EventListener",
   eventHandle => {{
     borrowedEventHandle = eventHandle;
-    return wasm.fe_guest_callback_0_invoke(token, eventHandle);
+    return wasm.fe_guest_callback_0_invoke(
+      token,
+      runtime.resources.toCore(eventHandle),
+    );
   }},
 );
 const imports = adapter.imports["fe:web"];

@@ -1,0 +1,34 @@
+// The canonical resumable delivery is a typed Fe value. Success transforms
+// purely, failure preserves its typed payload, and cancellation cannot be
+// confused with an application error.
+
+use core::Fn
+use core::pending::TaskOutcome
+
+struct AddOne {}
+
+impl Fn<u32, u64> for AddOne {
+    fn call(self, _ value: own u32) -> u64 {
+        (value + 1) as u64
+    }
+}
+
+#[test]
+fn task_outcome_keeps_three_distinct_terminal_paths() {
+    let success: TaskOutcome<u32, u32> = TaskOutcome::Success(41)
+    let mapped_success: TaskOutcome<u32, u64> = success.map(AddOne {})
+    match mapped_success {
+        TaskOutcome::Success(value) => assert(value == 42 as u64)
+        _ => assert(false)
+    }
+
+    let failure: TaskOutcome<u32, u32> = TaskOutcome::Failure(7)
+    let mapped_failure: TaskOutcome<u32, u64> = failure.map(AddOne {})
+    match mapped_failure {
+        TaskOutcome::Failure(error) => assert(error == 7)
+        _ => assert(false)
+    }
+
+    let cancelled: TaskOutcome<u32, u32> = TaskOutcome::Cancelled
+    assert(cancelled.is_cancelled())
+}

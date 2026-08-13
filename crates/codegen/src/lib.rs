@@ -8,7 +8,6 @@ pub mod guest_callbacks;
 mod layout;
 mod page_projection;
 mod resident_actor;
-pub mod resumable_tasks;
 mod runtime_package;
 mod sonatina;
 mod test_output;

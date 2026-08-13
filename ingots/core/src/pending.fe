@@ -1,4 +1,5 @@
 use super::backend::Backend
+use super::functional::Fn
 
 // mb2 CE-3: the backend-generic completion-cell control-effects vocabulary,
 // lifted out of `std::webgpu` so it stops being WebGPU furniture and becomes
@@ -40,6 +41,40 @@ use super::backend::Backend
 /// Anything larger than a word is NOT a completion value; it is residency (the
 /// op takes a caller-provided destination and completes with `T = ()`).
 pub struct Pending<B: Backend, T> { id: u32 }
+
+/// The one terminal delivery vocabulary shared by resumable tasks, reactive
+/// sources, Workers, and device completions. A continuation observes exactly
+/// one of these variants; host token generations reject every stale or later
+/// competitor before it reaches Fe.
+///
+/// This is deliberately distinct from `Result<E, T>`: cancellation is not a
+/// fabricated application error, and structured scopes must be able to match
+/// it without reserving a value of `E`.
+#[must_use]
+pub enum TaskOutcome<E, T> {
+    Failure(E),
+    Success(T),
+    Cancelled,
+}
+
+impl<E, T> TaskOutcome<E, T> {
+    /// Purely transform a successful value while preserving failure and
+    /// cancellation as the same terminal outcomes.
+    pub fn map<U, F: Fn<T, U>>(own self, _ function: F) -> TaskOutcome<E, U> {
+        match self {
+            Self::Failure(error) => TaskOutcome::Failure(error)
+            Self::Success(value) => TaskOutcome::Success(function.call(value))
+            Self::Cancelled => TaskOutcome::Cancelled
+        }
+    }
+
+    pub fn is_cancelled(own self) -> bool {
+        match self {
+            Self::Cancelled => true
+            _ => false
+        }
+    }
+}
 
 /// The authority to BLOCK the current agent until a pending operation is
 /// resident (control-effects R2; lifted from `std::webgpu`, now

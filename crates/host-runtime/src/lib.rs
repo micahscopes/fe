@@ -55,12 +55,15 @@ pub enum TaskExecutor {
     External,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BoundTaskDescriptor {
-    pub task_id: String,
-    pub authored_body_key: String,
-    pub entry_keys: Vec<String>,
+/// Runtime binding for one compiler-derived Fe task body.
+///
+/// `K` is deliberately supplied by the materializer. The executor neither
+/// parses string identities nor knows about synthetic start/resume/poll entry
+/// names; a backend may use an enum, a function-table key, or another typed
+/// internal identity derived from the Fe program.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskDescriptor<K> {
+    pub body: K,
     pub executor: TaskExecutor,
 }
 
@@ -76,10 +79,10 @@ pub enum ResumableTaskState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TaskDelivery<V, E> {
-    Value(V),
-    Error(E),
-    Cancel,
+pub enum TaskOutcome<E, V> {
+    Failure(E),
+    Success(V),
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -112,20 +115,20 @@ pub enum TaskRuntimeError {
     TokenSpaceExhausted,
 }
 
-struct TaskSlot<V, E> {
+struct TaskSlot<K, V, E> {
     generation: u16,
     state: ResumableTaskState,
-    descriptor: Option<BoundTaskDescriptor>,
-    queue: VecDeque<TaskDelivery<V, E>>,
+    descriptor: Option<TaskDescriptor<K>>,
+    queue: VecDeque<TaskOutcome<E, V>>,
 }
 
 /// Generation-tagged opaque-i32 table for target-neutral resumable tasks.
-pub struct ResumableTaskTable<V, E> {
-    slots: RefCell<Vec<TaskSlot<V, E>>>,
+pub struct ResumableTaskTable<K, V, E> {
+    slots: RefCell<Vec<TaskSlot<K, V, E>>>,
     free: RefCell<BTreeSet<u16>>,
 }
 
-impl<V, E> Default for ResumableTaskTable<V, E> {
+impl<K, V, E> Default for ResumableTaskTable<K, V, E> {
     fn default() -> Self {
         Self {
             slots: RefCell::new(Vec::new()),
@@ -134,8 +137,8 @@ impl<V, E> Default for ResumableTaskTable<V, E> {
     }
 }
 
-impl<V, E> ResumableTaskTable<V, E> {
-    pub fn register(&self, descriptor: BoundTaskDescriptor) -> Result<TaskToken, TaskRuntimeError> {
+impl<K: Clone, V, E> ResumableTaskTable<K, V, E> {
+    pub fn register(&self, descriptor: TaskDescriptor<K>) -> Result<TaskToken, TaskRuntimeError> {
         let slot = if let Some(slot) = self.free.borrow_mut().pop_first() {
             slot
         } else {
@@ -157,7 +160,7 @@ impl<V, E> ResumableTaskTable<V, E> {
         Ok(pack_task_token(slot, entry.generation))
     }
 
-    pub fn descriptor(&self, token: TaskToken) -> Result<BoundTaskDescriptor, TaskRuntimeError> {
+    pub fn descriptor(&self, token: TaskToken) -> Result<TaskDescriptor<K>, TaskRuntimeError> {
         let slots = self.slots.borrow();
         let (_, entry) = task_entry(&slots, token)?;
         entry
@@ -195,15 +198,15 @@ impl<V, E> ResumableTaskTable<V, E> {
     }
 
     pub fn queue_value(&self, token: TaskToken, value: V) -> Result<(), TaskRuntimeError> {
-        self.queue(token, TaskDelivery::Value(value), "resume_value")
+        self.queue(token, TaskOutcome::Success(value), "resume_value")
     }
 
     pub fn queue_error(&self, token: TaskToken, error: E) -> Result<(), TaskRuntimeError> {
-        self.queue(token, TaskDelivery::Error(error), "resume_error")
+        self.queue(token, TaskOutcome::Failure(error), "resume_error")
     }
 
     pub fn queue_cancel(&self, token: TaskToken) -> Result<(), TaskRuntimeError> {
-        self.queue(token, TaskDelivery::Cancel, "resume_cancel")
+        self.queue(token, TaskOutcome::Cancelled, "resume_cancel")
     }
 
     /// Cancellation has priority over an already queued value/error which has
@@ -218,14 +221,14 @@ impl<V, E> ResumableTaskTable<V, E> {
             });
         }
         entry.queue.clear();
-        entry.queue.push_back(TaskDelivery::Cancel);
+        entry.queue.push_back(TaskOutcome::Cancelled);
         Ok(())
     }
 
     fn queue(
         &self,
         token: TaskToken,
-        delivery: TaskDelivery<V, E>,
+        delivery: TaskOutcome<E, V>,
         operation: &'static str,
     ) -> Result<(), TaskRuntimeError> {
         let mut slots = self.slots.borrow_mut();
@@ -244,7 +247,7 @@ impl<V, E> ResumableTaskTable<V, E> {
         &self,
         token: TaskToken,
         executor: TaskExecutor,
-    ) -> Result<Option<TaskDelivery<V, E>>, TaskRuntimeError> {
+    ) -> Result<Option<TaskOutcome<E, V>>, TaskRuntimeError> {
         let mut slots = self.slots.borrow_mut();
         let (_, entry) = task_entry_mut(&mut slots, token)?;
         enforce_task_executor(entry, executor)?;
@@ -252,9 +255,9 @@ impl<V, E> ResumableTaskTable<V, E> {
             return Ok(None);
         };
         entry.state = match delivery {
-            TaskDelivery::Value(_) => ResumableTaskState::Running,
-            TaskDelivery::Error(_) => ResumableTaskState::Failed,
-            TaskDelivery::Cancel => ResumableTaskState::Cancelled,
+            TaskOutcome::Success(_) => ResumableTaskState::Running,
+            TaskOutcome::Failure(_) => ResumableTaskState::Failed,
+            TaskOutcome::Cancelled => ResumableTaskState::Cancelled,
         };
         Ok(Some(delivery))
     }
@@ -311,14 +314,14 @@ pub enum TaskBodyAction {
     Wake,
 }
 
-pub trait ResumableTaskBody<V, E> {
-    fn start(&mut self, token: TaskToken, descriptor: &BoundTaskDescriptor) -> TaskBodyAction;
-    fn poll(&mut self, token: TaskToken, descriptor: &BoundTaskDescriptor) -> TaskBodyAction;
+pub trait ResumableTaskBody<K, V, E> {
+    fn start(&mut self, token: TaskToken, descriptor: &TaskDescriptor<K>) -> TaskBodyAction;
+    fn poll(&mut self, token: TaskToken, descriptor: &TaskDescriptor<K>) -> TaskBodyAction;
     fn resume(
         &mut self,
         token: TaskToken,
-        descriptor: &BoundTaskDescriptor,
-        delivery: TaskDelivery<V, E>,
+        descriptor: &TaskDescriptor<K>,
+        delivery: TaskOutcome<E, V>,
     ) -> TaskBodyAction;
     fn terminal(&mut self, token: TaskToken, state: ResumableTaskState);
     fn route(&mut self, token: TaskToken, executor: TaskExecutor);
@@ -341,16 +344,16 @@ pub struct ExecutorDrain {
 }
 
 /// Deterministic, non-reentrant FIFO scheduler over [`ResumableTaskTable`].
-pub struct ResumableExecutor<V, E> {
+pub struct ResumableExecutor<K, V, E> {
     placement: TaskExecutor,
-    tasks: ResumableTaskTable<V, E>,
+    tasks: ResumableTaskTable<K, V, E>,
     ready: RefCell<VecDeque<TaskToken>>,
     kinds: RefCell<BTreeMap<TaskToken, ReadyKind>>,
     draining: Cell<bool>,
     notified: RefCell<BTreeSet<TaskToken>>,
 }
 
-impl<V, E> ResumableExecutor<V, E> {
+impl<K: Clone, V, E> ResumableExecutor<K, V, E> {
     pub fn new(placement: TaskExecutor) -> Self {
         Self {
             placement,
@@ -362,11 +365,11 @@ impl<V, E> ResumableExecutor<V, E> {
         }
     }
 
-    pub fn tasks(&self) -> &ResumableTaskTable<V, E> {
+    pub fn tasks(&self) -> &ResumableTaskTable<K, V, E> {
         &self.tasks
     }
 
-    pub fn spawn(&self, descriptor: BoundTaskDescriptor) -> Result<TaskToken, TaskRuntimeError> {
+    pub fn spawn(&self, descriptor: TaskDescriptor<K>) -> Result<TaskToken, TaskRuntimeError> {
         let token = self.tasks.register(descriptor)?;
         self.enqueue(token, ReadyKind::Start);
         Ok(token)
@@ -421,7 +424,7 @@ impl<V, E> ResumableExecutor<V, E> {
     pub fn drain(
         &self,
         budget: usize,
-        body: &mut impl ResumableTaskBody<V, E>,
+        body: &mut impl ResumableTaskBody<K, V, E>,
     ) -> Result<ExecutorDrain, TaskRuntimeError> {
         if self.draining.replace(true) {
             return Ok(ExecutorDrain {
@@ -462,14 +465,14 @@ impl<V, E> ResumableExecutor<V, E> {
                 ReadyKind::Poll => Some(body.poll(token, &descriptor)),
                 ReadyKind::Resume | ReadyKind::Cancel => {
                     match self.tasks.deliver_next(token, self.placement)? {
-                        Some(TaskDelivery::Value(value)) => {
-                            Some(body.resume(token, &descriptor, TaskDelivery::Value(value)))
+                        Some(TaskOutcome::Success(value)) => {
+                            Some(body.resume(token, &descriptor, TaskOutcome::Success(value)))
                         }
-                        Some(TaskDelivery::Error(error)) => {
-                            body.resume(token, &descriptor, TaskDelivery::Error(error));
+                        Some(TaskOutcome::Failure(error)) => {
+                            body.resume(token, &descriptor, TaskOutcome::Failure(error));
                             None
                         }
-                        Some(TaskDelivery::Cancel) => None,
+                        Some(TaskOutcome::Cancelled) => None,
                         None => Some(body.poll(token, &descriptor)),
                     }
                 }
@@ -536,10 +539,10 @@ fn unpack_task_token(token: TaskToken) -> Result<(u16, u16), TaskRuntimeError> {
     Ok((encoded_slot - 1, generation))
 }
 
-fn task_entry<V, E>(
-    slots: &[TaskSlot<V, E>],
+fn task_entry<K, V, E>(
+    slots: &[TaskSlot<K, V, E>],
     token: TaskToken,
-) -> Result<(u16, &TaskSlot<V, E>), TaskRuntimeError> {
+) -> Result<(u16, &TaskSlot<K, V, E>), TaskRuntimeError> {
     let (slot, generation) = unpack_task_token(token)?;
     let entry = slots
         .get(usize::from(slot))
@@ -550,10 +553,10 @@ fn task_entry<V, E>(
     Ok((slot, entry))
 }
 
-fn task_entry_mut<V, E>(
-    slots: &mut [TaskSlot<V, E>],
+fn task_entry_mut<K, V, E>(
+    slots: &mut [TaskSlot<K, V, E>],
     token: TaskToken,
-) -> Result<(u16, &mut TaskSlot<V, E>), TaskRuntimeError> {
+) -> Result<(u16, &mut TaskSlot<K, V, E>), TaskRuntimeError> {
     let (slot, generation) = unpack_task_token(token)?;
     let entry = slots
         .get_mut(usize::from(slot))
@@ -564,8 +567,8 @@ fn task_entry_mut<V, E>(
     Ok((slot, entry))
 }
 
-fn enforce_task_executor<V, E>(
-    entry: &TaskSlot<V, E>,
+fn enforce_task_executor<K, V, E>(
+    entry: &TaskSlot<K, V, E>,
     actual: TaskExecutor,
 ) -> Result<(), TaskRuntimeError> {
     let expected = entry
@@ -580,8 +583,8 @@ fn enforce_task_executor<V, E>(
     }
 }
 
-fn transition_task<V, E>(
-    entry: &mut TaskSlot<V, E>,
+fn transition_task<K, V, E>(
+    entry: &mut TaskSlot<K, V, E>,
     expected: ResumableTaskState,
     next: ResumableTaskState,
     operation: &'static str,
@@ -1555,36 +1558,23 @@ impl TableIdAllocator {
 mod tests {
     use super::*;
 
-    fn task_descriptor(executor: TaskExecutor) -> BoundTaskDescriptor {
-        BoundTaskDescriptor {
-            task_id: "job".to_owned(),
-            authored_body_key: "app/tasks/job".to_owned(),
-            entry_keys: vec![
-                "start".to_owned(),
-                "resume_value".to_owned(),
-                "resume_error".to_owned(),
-                "resume_cancel".to_owned(),
-                "poll".to_owned(),
-                "suspend".to_owned(),
-                "complete".to_owned(),
-            ],
-            executor,
-        }
+    fn task_descriptor(body: &'static str, executor: TaskExecutor) -> TaskDescriptor<&'static str> {
+        TaskDescriptor { body, executor }
     }
 
     #[test]
     fn resumable_task_table_runs_suspend_resume_and_completes_exactly_once() {
-        let tasks = ResumableTaskTable::<u32, &'static str>::default();
+        let tasks = ResumableTaskTable::<&'static str, u32, &'static str>::default();
         let token = tasks
-            .register(task_descriptor(TaskExecutor::Current))
+            .register(task_descriptor("job", TaskExecutor::Current))
             .unwrap();
-        assert_eq!(tasks.descriptor(token).unwrap().task_id, "job");
+        assert_eq!(tasks.descriptor(token).unwrap().body, "job");
         tasks.start(token, TaskExecutor::Current).unwrap();
         tasks.suspend(token).unwrap();
         tasks.queue_value(token, 7).unwrap();
         assert!(matches!(
             tasks.deliver_next(token, TaskExecutor::Current).unwrap(),
-            Some(TaskDelivery::Value(7))
+            Some(TaskOutcome::Success(7))
         ));
         tasks.complete(token).unwrap();
         assert_eq!(
@@ -1600,9 +1590,9 @@ mod tests {
 
     #[test]
     fn resumable_task_races_reject_late_delivery_and_reuse_generation() {
-        let tasks = ResumableTaskTable::<u32, &'static str>::default();
+        let tasks = ResumableTaskTable::<&'static str, u32, &'static str>::default();
         let cancelled = tasks
-            .register(task_descriptor(TaskExecutor::External))
+            .register(task_descriptor("job", TaskExecutor::External))
             .unwrap();
         assert!(matches!(
             tasks.start(cancelled, TaskExecutor::Current),
@@ -1616,13 +1606,13 @@ mod tests {
             tasks
                 .deliver_next(cancelled, TaskExecutor::External)
                 .unwrap(),
-            Some(TaskDelivery::Cancel)
+            Some(TaskOutcome::Cancelled)
         ));
         assert!(tasks.queue_error(cancelled, "late").is_err());
         tasks.release(cancelled).unwrap();
 
         let reused = tasks
-            .register(task_descriptor(TaskExecutor::External))
+            .register(task_descriptor("job", TaskExecutor::External))
             .unwrap();
         assert_ne!(reused, cancelled);
         assert_eq!(
@@ -1634,7 +1624,7 @@ mod tests {
         tasks.queue_error(reused, "boom").unwrap();
         assert!(matches!(
             tasks.deliver_next(reused, TaskExecutor::External).unwrap(),
-            Some(TaskDelivery::Error("boom"))
+            Some(TaskOutcome::Failure("boom"))
         ));
         assert_eq!(tasks.state(reused).unwrap(), ResumableTaskState::Failed);
         tasks.release(reused).unwrap();
@@ -1650,28 +1640,36 @@ mod tests {
         poll_action: Option<TaskBodyAction>,
     }
 
-    impl ResumableTaskBody<u32, &'static str> for RecordingBody {
-        fn start(&mut self, token: TaskToken, descriptor: &BoundTaskDescriptor) -> TaskBodyAction {
-            self.events.push(format!("start:{}", descriptor.task_id));
+    impl ResumableTaskBody<&'static str, u32, &'static str> for RecordingBody {
+        fn start(
+            &mut self,
+            token: TaskToken,
+            descriptor: &TaskDescriptor<&'static str>,
+        ) -> TaskBodyAction {
+            self.events.push(format!("start:{}", descriptor.body));
             self.start_action.unwrap_or_else(|| {
                 let _ = token;
                 TaskBodyAction::Suspend
             })
         }
 
-        fn poll(&mut self, _token: TaskToken, descriptor: &BoundTaskDescriptor) -> TaskBodyAction {
-            self.events.push(format!("poll:{}", descriptor.task_id));
+        fn poll(
+            &mut self,
+            _token: TaskToken,
+            descriptor: &TaskDescriptor<&'static str>,
+        ) -> TaskBodyAction {
+            self.events.push(format!("poll:{}", descriptor.body));
             self.poll_action.unwrap_or(TaskBodyAction::Suspend)
         }
 
         fn resume(
             &mut self,
             _token: TaskToken,
-            descriptor: &BoundTaskDescriptor,
-            delivery: TaskDelivery<u32, &'static str>,
+            descriptor: &TaskDescriptor<&'static str>,
+            delivery: TaskOutcome<&'static str, u32>,
         ) -> TaskBodyAction {
             self.events
-                .push(format!("resume:{}:{delivery:?}", descriptor.task_id));
+                .push(format!("resume:{}:{delivery:?}", descriptor.body));
             TaskBodyAction::Complete
         }
 
@@ -1690,11 +1688,10 @@ mod tests {
 
     #[test]
     fn resumable_executor_is_fifo_deduplicated_and_budget_fair() {
-        let executor = ResumableExecutor::<u32, &'static str>::new(TaskExecutor::Current);
-        let mut first = task_descriptor(TaskExecutor::Current);
-        first.task_id = "first".to_owned();
-        let mut second = task_descriptor(TaskExecutor::Current);
-        second.task_id = "second".to_owned();
+        let executor =
+            ResumableExecutor::<&'static str, u32, &'static str>::new(TaskExecutor::Current);
+        let first = task_descriptor("first", TaskExecutor::Current);
+        let second = task_descriptor("second", TaskExecutor::Current);
         let first = executor.spawn(first).unwrap();
         let _second = executor.spawn(second).unwrap();
         assert!(
@@ -1712,12 +1709,13 @@ mod tests {
 
     #[test]
     fn resumable_executor_prioritizes_cancel_routes_and_notifies_once() {
-        let executor = ResumableExecutor::<u32, &'static str>::new(TaskExecutor::Current);
+        let executor =
+            ResumableExecutor::<&'static str, u32, &'static str>::new(TaskExecutor::Current);
         let local = executor
-            .spawn(task_descriptor(TaskExecutor::Current))
+            .spawn(task_descriptor("local", TaskExecutor::Current))
             .unwrap();
         let external = executor
-            .spawn(task_descriptor(TaskExecutor::External))
+            .spawn(task_descriptor("external", TaskExecutor::External))
             .unwrap();
         let mut body = RecordingBody::default();
         executor.drain(8, &mut body).unwrap();
@@ -1738,24 +1736,24 @@ mod tests {
     }
 
     struct ReentrantBody<'a> {
-        executor: &'a ResumableExecutor<u32, &'static str>,
+        executor: &'a ResumableExecutor<&'static str, u32, &'static str>,
         observed: Option<ExecutorDrain>,
     }
 
-    impl ResumableTaskBody<u32, &'static str> for ReentrantBody<'_> {
-        fn start(&mut self, _: TaskToken, _: &BoundTaskDescriptor) -> TaskBodyAction {
+    impl ResumableTaskBody<&'static str, u32, &'static str> for ReentrantBody<'_> {
+        fn start(&mut self, _: TaskToken, _: &TaskDescriptor<&'static str>) -> TaskBodyAction {
             let mut nested = RecordingBody::default();
             self.observed = Some(self.executor.drain(1, &mut nested).unwrap());
             TaskBodyAction::Complete
         }
-        fn poll(&mut self, _: TaskToken, _: &BoundTaskDescriptor) -> TaskBodyAction {
+        fn poll(&mut self, _: TaskToken, _: &TaskDescriptor<&'static str>) -> TaskBodyAction {
             TaskBodyAction::Complete
         }
         fn resume(
             &mut self,
             _: TaskToken,
-            _: &BoundTaskDescriptor,
-            _: TaskDelivery<u32, &'static str>,
+            _: &TaskDescriptor<&'static str>,
+            _: TaskOutcome<&'static str, u32>,
         ) -> TaskBodyAction {
             TaskBodyAction::Complete
         }
@@ -1766,9 +1764,10 @@ mod tests {
 
     #[test]
     fn resumable_executor_drain_is_non_reentrant() {
-        let executor = ResumableExecutor::<u32, &'static str>::new(TaskExecutor::Current);
+        let executor =
+            ResumableExecutor::<&'static str, u32, &'static str>::new(TaskExecutor::Current);
         executor
-            .spawn(task_descriptor(TaskExecutor::Current))
+            .spawn(task_descriptor("job", TaskExecutor::Current))
             .unwrap();
         let mut body = ReentrantBody {
             executor: &executor,
