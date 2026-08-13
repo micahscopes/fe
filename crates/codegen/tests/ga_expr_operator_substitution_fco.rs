@@ -42,7 +42,8 @@ fn distributed_tree(l: [f32; 3], r: [f32; 3]) -> [f32; 3] {
 
 #[test]
 fn one_provider_lowers_distinct_ga_trees_to_semantic_wasm_and_branch_free_wgsl() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ga_expr_generic_fco");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/ga_expr_operator_substitution_fco");
     let url = Url::from_directory_path(path.canonicalize().unwrap()).unwrap();
     let mut db = DriverDataBase::default();
     assert!(
@@ -121,12 +122,12 @@ fn one_provider_lowers_distinct_ga_trees_to_semantic_wasm_and_branch_free_wgsl()
         assert_eq!(
             got_repeated.map(f32::to_bits),
             repeated_tree(l, r).map(f32::to_bits),
-            "generic provider changed repeated-tree semantics for l={l:?}, r={r:?}"
+            "structural provider changed repeated-tree semantics for l={l:?}, r={r:?}"
         );
         assert_eq!(
             got_distributed.map(f32::to_bits),
             distributed_tree(l, r).map(f32::to_bits),
-            "generic provider changed distributed-tree semantics for l={l:?}, r={r:?}"
+            "structural provider changed distributed-tree semantics for l={l:?}, r={r:?}"
         );
     }
 

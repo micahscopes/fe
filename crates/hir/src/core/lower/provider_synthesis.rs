@@ -449,7 +449,12 @@ impl<'a, 'db> ReplayCtxt<'a, 'db> {
             GenExpr::ArgRef(name) => body.ident_expr(*name),
             GenExpr::FieldGet(base, field) => {
                 let base = self.replay_expr(body, *base);
-                let index = self.field_index(db, *field);
+                let index = match field {
+                    FieldName::Named(name) => FieldIndex::Ident(*name),
+                    FieldName::Positional(index) => {
+                        FieldIndex::Index(IntegerId::new(db, BigUint::from(*index)))
+                    }
+                };
                 body.push_expr(Expr::Field(base, Partial::Present(index)))
             }
             GenExpr::EqCmp(lhs, rhs) => {
@@ -755,20 +760,6 @@ impl<'a, 'db> ReplayCtxt<'a, 'db> {
         {
             Some(FieldName::Named(name)) => Some(name),
             _ => None,
-        }
-    }
-
-    fn field_index(&self, db: &'db dyn HirDb, field: FieldKey) -> FieldIndex<'db> {
-        match self
-            .reflection
-            .field(field.variant, field.index)
-            .map(|f| f.name)
-        {
-            Some(FieldName::Named(name)) => FieldIndex::Ident(name),
-            Some(FieldName::Positional(idx)) => {
-                FieldIndex::Index(IntegerId::new(db, BigUint::from(idx)))
-            }
-            None => FieldIndex::Index(IntegerId::new(db, BigUint::from(field.index))),
         }
     }
 

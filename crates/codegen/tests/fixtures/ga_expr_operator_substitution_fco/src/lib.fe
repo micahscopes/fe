@@ -1,7 +1,7 @@
 //! A structural FCO prototype for a bounded GA expression language.
 //!
-//! One unchanged provider evaluates any finite ground tree made from
-//! `Input`, `Sum`, `Difference`, `Neg`, and `Outer` in three dimensions. The
+//! One unchanged provider evaluates the two ground trees exercised below,
+//! using `Input`, `Sum`, `Difference`, `Neg`, and `Outer` in three dimensions. The
 //! expression is ordinary Fe type data stored in the zero-sized `GaProgram`
 //! marker field of each input record. FCO walks it in normalized postorder and
 //! emits straight-line scalar Fe; no runtime node tag, blade loop, or planner

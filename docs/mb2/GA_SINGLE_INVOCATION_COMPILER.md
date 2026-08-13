@@ -137,7 +137,8 @@ prototype's exact plan constructor is specialized to the twice-wedge example.
 
 ### Structural expression-lowering prototype
 
-`crates/codegen/tests/fixtures/ga_expr_generic_fco` is an operator-substitution
+`crates/codegen/tests/fixtures/ga_expr_operator_substitution_fco` is an
+operator-substitution
 G2/G3 prototype. One unchanged Fe provider lowers two different ground
 trees:
 
@@ -200,13 +201,14 @@ and emits a deterministic four-term-chunk scalar reduction. This represents
 QCGA's 15-generator paper-null basis honestly; it does not pretend the six
 off-diagonal null pairs form a diagonal metric.
 
-`Identity` is a nominal Fe type, not a numeric slot or operator ID. In this
-two-leaf slice, runtime fields are packed by structural occurrence: all compact
-coefficients of the scalar product's left leaf, then its right leaf. The
-provider retains both identity types for the later DAG/CSE layer. Recursive
-reflection over nested typed operand records is still missing; until it lands,
-the flat carrier order is an explicit boundary rather than hidden generated
-metadata.
+`Identity` is the nominal Fe coefficient-record type, not a numeric slot or
+operator ID. The target carrier has one field of each identity type. FCO
+matches those top-level fields by type identity, reflects the nested record's
+fields, validates its width against static support, and emits hygienic nested
+access. Carrier field order and field names therefore do not encode the GA
+mapping. The current domain-neutral nested reflection surface handles concrete
+non-generic structs; generic field substitution and enum payloads remain a
+fail-closed compiler boundary.
 
 The independent sparse-metric gate executes 259 QCGA-shaped deterministic
 cases bit-for-bit against a separately tabled Rust oracle with no Wasm host
@@ -242,12 +244,12 @@ Leaf {
 ```
 
 Leaf identities are not DOM IDs, event IDs, or arbitrary author bookkeeping.
-New high-dimensional vector leaves use nominal Fe identity types, which can
-distinguish coefficient sources while forming monomial keys and shared loads.
-The older bounded `Input<Slot, Support>` support prototype still carries a
-numeric slot and is migration debt. The final façade should bind nominal leaf
-identity to nested reflected operand fields, so ordinary users neither number
-leaves nor manually flatten their storage.
+New high-dimensional vector leaves use their nominal Fe coefficient-record
+types, which distinguish sources while forming monomial keys and shared loads.
+The provider binds those types directly to nested reflected operand fields, so
+users neither number leaves nor manually flatten their storage. The older
+bounded `Input<Slot, Support>` support prototype still carries a numeric slot
+and is migration debt.
 
 ### Metrics
 

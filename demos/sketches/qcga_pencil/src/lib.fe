@@ -136,40 +136,60 @@ type QcgaMetric = SparseSymmetricMetric<15, QcgaMetricTerms>
 
 // Point coefficients occupy generators {0..5, 9..14}; dual quadrics occupy
 // {0..11}. Both are packed in ascending generator order at runtime.
-struct QcgaPointIdentity {}
-struct QcgaDualQuadricIdentity {}
-type QcgaPoint = VectorInput<QcgaPointIdentity, 32319>
-type QcgaDualQuadric = VectorInput<QcgaDualQuadricIdentity, 4095>
+struct QcgaPointCoefficients {
+    e1: f32, e2: f32, e3: f32,
+    eo1: f32, eo2: f32, eo3: f32,
+    ei1: f32, ei2: f32, ei3: f32, ei4: f32, ei5: f32, ei6: f32,
+}
+struct QcgaDualQuadricCoefficients {
+    e1: f32, e2: f32, e3: f32,
+    eo1: f32, eo2: f32, eo3: f32, eo4: f32, eo5: f32, eo6: f32,
+    ei1: f32, ei2: f32, ei3: f32,
+}
+type QcgaPoint = VectorInput<QcgaPointCoefficients, 32319>
+type QcgaDualQuadric = VectorInput<QcgaDualQuadricCoefficients, 4095>
 type QcgaIncidence = ScalarProduct<QcgaPoint, QcgaDualQuadric>
 
 struct SparseIncidenceOperands {
-    p0: f32, p1: f32, p2: f32, p3: f32, p4: f32, p5: f32,
-    p6: f32, p7: f32, p8: f32, p9: f32, p10: f32, p11: f32,
-    q0: f32, q1: f32, q2: f32, q3: f32, q4: f32, q5: f32,
-    q6: f32, q7: f32, q8: f32, q9: f32, q10: f32, q11: f32,
+    point: QcgaPointCoefficients,
+    quadric: QcgaDualQuadricCoefficients,
 }
 
 derive EvaluateVectorScalarF32 for SparseIncidenceOperands using CompileVectorScalarF32<
     GaProgram<QcgaIncidence, QcgaMetric, AlgebraicBalanced>
 >
 
+fn embed_qcga_point(x: f32, y: f32, z: f32) -> QcgaPointCoefficients {
+    let half: f32 = 0.5
+    QcgaPointCoefficients {
+        e1: x, e2: y, e3: z,
+        eo1: 1.0, eo2: 1.0, eo3: 1.0,
+        ei1: x * x * half, ei2: y * y * half, ei3: z * z * half,
+        ei4: x * y, ei5: x * z, ei6: y * z,
+    }
+}
+
+fn embed_qcga_dual_quadric(
+    a: f32, b: f32, c: f32, d: f32, e: f32,
+    f: f32, g: f32, h: f32, i: f32, j: f32,
+) -> QcgaDualQuadricCoefficients {
+    let negative_j_third: f32 = 0.0 - j / 3.0
+    QcgaDualQuadricCoefficients {
+        e1: g, e2: h, e3: i,
+        eo1: -2.0 * a, eo2: -2.0 * b, eo3: -2.0 * c,
+        eo4: -d, eo5: -e, eo6: -f,
+        ei1: negative_j_third, ei2: negative_j_third, ei3: negative_j_third,
+    }
+}
+
 pub fn qcga3d_incidence_planned(
     x: f32, y: f32, z: f32,
     a: f32, b: f32, c: f32, d: f32, e: f32,
     f: f32, g: f32, h: f32, i: f32, j: f32,
 ) -> f32 {
-    let half: f32 = 0.5
-    let j_third: f32 = j / 3.0
-    let negative_j_third: f32 = 0.0 - j_third
     <SparseIncidenceOperands as EvaluateVectorScalarF32>::scalar(SparseIncidenceOperands {
-        p0: x, p1: y, p2: z,
-        p3: 1.0, p4: 1.0, p5: 1.0,
-        p6: x * x * half, p7: y * y * half, p8: z * z * half,
-        p9: x * y, p10: x * z, p11: y * z,
-        q0: g, q1: h, q2: i,
-        q3: -2.0 * a, q4: -2.0 * b, q5: -2.0 * c,
-        q6: -d, q7: -e, q8: -f,
-        q9: negative_j_third, q10: negative_j_third, q11: negative_j_third,
+        point: embed_qcga_point(x, y, z),
+        quadric: embed_qcga_dual_quadric(a, b, c, d, e, f, g, h, i, j),
     })
 }
 

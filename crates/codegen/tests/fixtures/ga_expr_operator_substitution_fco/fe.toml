@@ -1,5 +1,5 @@
 [ingot]
-name = "ga_expr_generic_fco"
+name = "ga_expr_operator_substitution_fco"
 version = "0.1.0"
 
 [dependencies]

@@ -27,7 +27,10 @@ use super::{
         GroundArg as NormalizedGroundArg, GroundTypePlan, base_ground_constructor,
         base_ground_type_plan,
     },
-    provider::{TargetReflection, ValidatedProvider, canonical_trait_path, resolve_trait_def},
+    provider::{
+        FieldName, TargetReflection, ValidatedProvider, canonical_trait_path, resolve_base_item,
+        resolve_trait_def,
+    },
     top_mod_ast,
 };
 use crate::{
@@ -294,7 +297,7 @@ pub(super) enum GenExpr<'db> {
     /// A reference to a generated method parameter by name.
     ArgRef(IdentId<'db>),
     /// `base.field`
-    FieldGet(GenExprId, FieldKey),
+    FieldGet(GenExprId, FieldName<'db>),
     /// `lhs == rhs`
     EqCmp(GenExprId, GenExprId),
     /// `lhs < rhs`
@@ -621,17 +624,18 @@ enum Value<'db> {
     /// const predicate), never a provider-local comparator.
     Int(IntegerId<'db>),
     /// A reflected field handle, as a typed read-only handle (TD5c). Scalar
-    /// reads (`ty`/`name`) resolve against the handle's own property table; its
-    /// `FieldKey` identity (which flows into generated HIR / provenance /
-    /// identity comparisons) is exposed via [`FieldHandle::key`].
+    /// reads (`ty`/`name`) resolve against the handle's own property table.
+    /// Target fields retain `FieldKey` provenance for initialization/binders;
+    /// nested fields retain resolved owner identity and hygienic access shape.
     Field(FieldHandle<'db>),
     /// A reflected variant handle, as a typed read-only handle (TD5c). The
     /// scalar read `is_default` and the binary read `precedes` resolve against
     /// the handle's own vocabulary; its declaration-order index identity is
     /// exposed via [`VariantHandle::index`].
     Variant(VariantHandle),
-    /// A type witness (e.g. the result of `field.ty()`).
-    Ty(TypeId<'db>),
+    /// A type witness (e.g. the result of `field.ty()`) together with the
+    /// module that owns the source spelling.
+    Ty(TypeHandle<'db>),
     /// A node in a base-graph-normalized ground recursive type plan.
     NormalizedTy {
         plan: usize,
@@ -680,8 +684,18 @@ enum Value<'db> {
 /// bodies do not produce this handle (inspection fails closed).
 #[derive(Debug, Clone, Copy)]
 enum GroundArg<'db> {
-    Ty(TypeId<'db>),
+    Ty(TypeHandle<'db>),
     Const(IntegerId<'db>),
+}
+
+/// A source type together with the module that owns its spelling. Provider
+/// code, the derive target, and configured provider arguments can all supply
+/// paths from different scopes; retaining this provenance lets ground
+/// normalization resolve by nominal identity without reading a merged graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TypeHandle<'db> {
+    ty: TypeId<'db>,
+    top_mod: crate::hir_def::TopLevelMod<'db>,
 }
 
 /// A typed read-only compile-time handle over the derive target's reflection
@@ -715,7 +729,7 @@ enum ScalarRead<'db> {
     /// A pre-rendered compile-time string (e.g. a positional field's index).
     Str(StringId<'db>),
     /// A reflected type witness.
-    Ty(TypeId<'db>),
+    Ty(TypeHandle<'db>),
 }
 
 impl<'db> ScalarRead<'db> {
@@ -738,14 +752,25 @@ impl<'db> ScalarRead<'db> {
 /// Like [`ReflectHandle`], it takes the `field.*` scalar reads (`ty`/`name`)
 /// OFF the bespoke executor: it copies the field's `ty` and rendered `name` at
 /// construction and owns its own scalar-read property table ([`Self::scalar_read`]).
-/// The executor consults the table by name and no longer knows `ty`/`name`. The
-/// `FieldKey` identity ([`Self::key`]) is preserved unchanged — it still flows
-/// into generated HIR (`field_get`/`with_field`/`variant_binder`), provenance
-/// (`require_field_origin`), and identity comparisons (`same_field`).
+/// The executor consults the table by name and no longer knows `ty`/`name`.
+/// Target-relative keys and nested nominal-owner identities remain distinct:
+/// both can drive access and identity comparison, while only target fields can
+/// initialize the target or bind one of its enum payloads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FieldHandle<'db> {
-    key: FieldKey,
+    /// Present only for fields of the derive target itself. Target-relative
+    /// identity is required by struct/variant initialization and provenance;
+    /// nested nominal fields deliberately cannot enter those operations.
+    target_key: Option<FieldKey>,
+    /// Resolved owner identity for a nested nominal struct field. Together
+    /// with declaration index this keeps `same_field` nominal rather than
+    /// spelling-based. Target fields have no separate owner because every
+    /// handle in their reflection arena shares the derive target.
+    owner: Option<ItemKind<'db>>,
+    index: usize,
+    access: FieldName<'db>,
     ty: TypeId<'db>,
+    ty_scope: crate::hir_def::TopLevelMod<'db>,
     name: StringId<'db>,
 }
 
@@ -754,23 +779,58 @@ impl<'db> FieldHandle<'db> {
     /// facts (`ty`, rendered `name`) out of the reflection arena. Returns
     /// `None` if `key` names no field (a malformed handle), exactly as the old
     /// `self.reflection.field(..)` lookup did.
-    fn new(db: &'db dyn HirDb, reflection: &TargetReflection<'db>, key: FieldKey) -> Option<Self> {
+    fn new_target(
+        db: &'db dyn HirDb,
+        reflection: &TargetReflection<'db>,
+        key: FieldKey,
+        ty_scope: crate::hir_def::TopLevelMod<'db>,
+    ) -> Option<Self> {
         let reflected = reflection.field(key.variant, key.index)?;
         let name = match reflected.name {
             super::provider::FieldName::Named(name) => name.data(db).clone(),
             super::provider::FieldName::Positional(idx) => idx.to_string(),
         };
         Some(FieldHandle {
-            key,
+            target_key: Some(key),
+            owner: None,
+            index: key.index,
+            access: reflected.name,
             ty: reflected.ty,
+            ty_scope,
             name: StringId::new(db, name),
         })
     }
 
-    /// This field's `FieldKey` identity — the part of the handle that flows into
-    /// generated HIR, provenance, and identity comparisons (NOT a scalar read).
-    fn key(&self) -> FieldKey {
-        self.key
+    fn new_nominal(
+        db: &'db dyn HirDb,
+        owner: ItemKind<'db>,
+        index: usize,
+        access: FieldName<'db>,
+        ty: TypeId<'db>,
+        ty_scope: crate::hir_def::TopLevelMod<'db>,
+    ) -> Self {
+        let name = match access {
+            FieldName::Named(name) => name.data(db).clone(),
+            FieldName::Positional(index) => index.to_string(),
+        };
+        Self {
+            target_key: None,
+            owner: Some(owner),
+            index,
+            access,
+            ty,
+            ty_scope,
+            name: StringId::new(db, name),
+        }
+    }
+
+    /// This target field's relative identity for initialization/provenance.
+    fn target_key(&self) -> Option<FieldKey> {
+        self.target_key
+    }
+
+    fn access(&self) -> FieldName<'db> {
+        self.access
     }
 
     /// This handle's read-only scalar property vocabulary (`ty`/`name`), as a
@@ -778,7 +838,13 @@ impl<'db> FieldHandle<'db> {
     /// dispatch `match` (TD5c).
     fn scalar_reads(&self) -> [(&'static str, ScalarRead<'db>); 2] {
         [
-            ("ty", ScalarRead::Ty(self.ty)),
+            (
+                "ty",
+                ScalarRead::Ty(TypeHandle {
+                    ty: self.ty,
+                    top_mod: self.ty_scope,
+                }),
+            ),
             ("name", ScalarRead::Str(self.name)),
         ]
     }
@@ -875,9 +941,9 @@ enum BinaryCompare<'db> {
     /// `self_index < other_index` (variant declaration-order precedence).
     Precedes(usize),
     /// `self_ty == other_ty` (syntactic type identity).
-    SameTy(TypeId<'db>),
-    /// `self_field == other_field` (`FieldKey` identity).
-    SameField(FieldKey),
+    SameTy(TypeHandle<'db>),
+    /// `self_field == other_field` (owner-qualified field identity).
+    SameField(FieldHandle<'db>),
 }
 
 /// A binary read resolved by a handle's/vocabulary's name table (TD5c): the
@@ -913,7 +979,7 @@ impl ReflectionCompare {
             }),
             ("same_field", Value::Field(field)) => Some(BinaryRead {
                 operand: CompareOperand::Field,
-                apply: BinaryCompare::SameField(field.key()),
+                apply: BinaryCompare::SameField(*field),
             }),
             _ => None,
         }
@@ -941,11 +1007,14 @@ impl<'db> BinaryRead<'db> {
                 BinaryCompare::Precedes(lhs_index),
                 Value::Variant(other),
             ) => Some(lhs_index < other.index()),
-            (CompareOperand::Ty, BinaryCompare::SameTy(lhs_ty), Value::Ty(rhs_ty)) => {
-                Some(lhs_ty == *rhs_ty)
+            (CompareOperand::Ty, BinaryCompare::SameTy(lhs), Value::Ty(rhs)) => {
+                // Preserve the established syntactic-type comparison. Scope
+                // provenance is carried for normalization/reflection, not to
+                // redefine this existing operation's equality contract.
+                Some(lhs.ty == rhs.ty)
             }
-            (CompareOperand::Field, BinaryCompare::SameField(lhs_field), Value::Field(rhs)) => {
-                Some(lhs_field == rhs.key())
+            (CompareOperand::Field, BinaryCompare::SameField(lhs), Value::Field(rhs)) => {
+                Some(lhs == *rhs)
             }
             _ => None,
         }
@@ -2238,7 +2307,12 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                         );
                         return Err(self.invalid_quote(expr, &detail));
                     };
-                    let field = field.key();
+                    let Some(field) = field.target_key() else {
+                        return Err(self.invalid_quote(
+                            expr,
+                            "variant binder holes require a field of the derive target",
+                        ));
+                    };
                     if field.variant != Some(variant) {
                         let detail = format!(
                             "the field does not belong to the variant matched by `{}`",
@@ -2261,7 +2335,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                     return Err(self.invalid_quote(expr, &detail));
                 };
                 let base = self.elab_template_expr(base, template, sig, binders)?;
-                Ok(self.push_gen(GenExpr::FieldGet(base, field.key())))
+                Ok(self.push_gen(GenExpr::FieldGet(base, field.access())))
             }
             Expr::MethodCall(receiver, method, generic_args, args) => {
                 let Some(method) = method.to_opt() else {
@@ -2637,6 +2711,10 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                     return Err(self.unsupported_expr(expr));
                 }
                 match method_name.as_str() {
+                    "fields" => self
+                        .nominal_field_sequence(ty)
+                        .map(Value::Seq)
+                        .ok_or_else(|| self.unsupported_expr(expr)),
                     "constructor" => self
                         .ground_nominal_parts(ty)
                         .map(|(constructor, _)| Value::Ty(constructor))
@@ -2652,12 +2730,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                         .map(|types| Value::Seq(types.into_iter().map(Value::Ty).collect()))
                         .ok_or_else(|| self.unsupported_expr(expr)),
                     "normalized_preorder_types" => {
-                        let scope = if ty == self.configured_provider_ty {
-                            self.request_top_mod.scope()
-                        } else {
-                            self.provider_top_mod.scope()
-                        };
-                        let plan = base_ground_type_plan(self.db, ty, scope)
+                        let plan = base_ground_type_plan(self.db, ty.ty, ty.top_mod.scope())
                             .map_err(|_| self.unsupported_expr(expr))?;
                         let plan_id = self.normalized_plans.len();
                         let root = plan.root;
@@ -2674,12 +2747,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                         ))
                     }
                     "normalized_postorder_types" => {
-                        let scope = if ty == self.configured_provider_ty {
-                            self.request_top_mod.scope()
-                        } else {
-                            self.provider_top_mod.scope()
-                        };
-                        let plan = base_ground_type_plan(self.db, ty, scope)
+                        let plan = base_ground_type_plan(self.db, ty.ty, ty.top_mod.scope())
                             .map_err(|_| self.unsupported_expr(expr))?;
                         let plan_id = self.normalized_plans.len();
                         let root = plan.root;
@@ -2837,8 +2905,11 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
     /// Every path segment must be an identifier, namespace segments may not
     /// carry arguments, and every final-segment argument must be a present type
     /// or a literal natural const. Any other shape returns `None`.
-    fn ground_nominal_parts(&self, ty: TypeId<'db>) -> Option<(TypeId<'db>, Vec<GroundArg<'db>>)> {
-        let TypeKind::Path(Partial::Present(path)) = ty.data(self.db) else {
+    fn ground_nominal_parts(
+        &self,
+        ty: TypeHandle<'db>,
+    ) -> Option<(TypeHandle<'db>, Vec<GroundArg<'db>>)> {
+        let TypeKind::Path(Partial::Present(path)) = ty.ty.data(self.db) else {
             return None;
         };
         for idx in 0..path.segment_index(self.db) {
@@ -2860,7 +2931,10 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
         let mut args = Vec::with_capacity(raw_args.len());
         for arg in raw_args {
             args.push(match arg {
-                GenericArg::Type(arg) => GroundArg::Ty(arg.ty.to_opt()?),
+                GenericArg::Type(arg) => GroundArg::Ty(TypeHandle {
+                    ty: arg.ty.to_opt()?,
+                    top_mod: ty.top_mod,
+                }),
                 GenericArg::Const(arg) => {
                     let ConstGenericArgValue::Expr(Partial::Present(body)) = arg.value else {
                         return None;
@@ -2875,17 +2949,20 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 GenericArg::AssocType(_) => return None,
             });
         }
-        let constructor = TypeId::new(
-            self.db,
-            TypeKind::Path(Partial::Present(path.strip_generic_args(self.db))),
-        );
+        let constructor = TypeHandle {
+            ty: TypeId::new(
+                self.db,
+                TypeKind::Path(Partial::Present(path.strip_generic_args(self.db))),
+            ),
+            top_mod: ty.top_mod,
+        };
         Some((constructor, args))
     }
 
     /// Bounded preorder traversal of type-valued edges in a ground nominal
     /// tree. It gives ordinary provider `for` loops finite recursive reach
     /// without admitting executor recursion or `while`.
-    fn ground_type_preorder(&self, root: TypeId<'db>) -> Option<Vec<TypeId<'db>>> {
+    fn ground_type_preorder(&self, root: TypeHandle<'db>) -> Option<Vec<TypeHandle<'db>>> {
         let mut pending = vec![root];
         let mut out = Vec::new();
         while let Some(ty) = pending.pop() {
@@ -2952,6 +3029,43 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
         out
     }
 
+    /// Enumerates fields of a concrete, non-generic nominal struct through
+    /// base-graph identity. The returned handles are owner-qualified and may
+    /// drive generated access from any already-generated base expression.
+    /// Generic field substitution and enum payload traversal stay fail-closed
+    /// until their type-occurrence environments are represented explicitly.
+    fn nominal_field_sequence(&self, ty: TypeHandle<'db>) -> Option<Vec<Value<'db>>> {
+        let TypeKind::Path(Partial::Present(path)) = ty.ty.data(self.db) else {
+            return None;
+        };
+        let owner = resolve_base_item(self.db, ty.top_mod, *path)?;
+        let ItemKind::Struct(struct_) = owner else {
+            return None;
+        };
+        if !struct_.generic_params(self.db).data(self.db).is_empty() {
+            return None;
+        }
+        let top_mod = struct_.top_mod(self.db);
+        struct_
+            .fields(self.db)
+            .data(self.db)
+            .iter()
+            .enumerate()
+            .map(|(index, field)| {
+                let name = field.name.to_opt()?;
+                let ty = field.type_ref().to_opt()?;
+                Some(Value::Field(FieldHandle::new_nominal(
+                    self.db,
+                    owner,
+                    index,
+                    FieldName::Named(name),
+                    ty,
+                    top_mod,
+                )))
+            })
+            .collect()
+    }
+
     /// Builds the ordinary sequence value produced by a `reflect.*` iterable
     /// method (`fields`/`variants`); `None` for any other name (the executor
     /// maps that to "unsupported", exactly as an unrecognized read would). The
@@ -2969,13 +3083,14 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                     .struct_fields()
                     .iter()
                     .filter_map(|field| {
-                        FieldHandle::new(
+                        FieldHandle::new_target(
                             self.db,
                             self.reflection,
                             FieldKey {
                                 variant: field.variant,
                                 index: field.index,
                             },
+                            self.request_top_mod,
                         )
                         .map(Value::Field)
                     })
@@ -3015,13 +3130,14 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                     .fields
                     .iter()
                     .filter_map(|field| {
-                        FieldHandle::new(
+                        FieldHandle::new_target(
                             self.db,
                             self.reflection,
                             FieldKey {
                                 variant: field.variant,
                                 index: field.index,
                             },
+                            self.request_top_mod,
                         )
                         .map(Value::Field)
                     })
@@ -3046,7 +3162,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             return None;
         }
         match self.eval_expr(*receiver).ok()? {
-            Value::Field(field) => Some(field.key()),
+            Value::Field(field) => field.target_key(),
             _ => None,
         }
     }
@@ -3102,7 +3218,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 // Either way the executor no longer OWNS the requirement.
                 let field_origin = self.require_field_origin(arg.expr);
                 self.effects.push(ProviderEffect::Require {
-                    ty,
+                    ty: ty.ty,
                     trait_path,
                     field_origin,
                 });
@@ -3277,7 +3393,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 let Value::Field(field) = self.eval_expr(field.expr)? else {
                     return Err(self.unsupported_expr(expr));
                 };
-                Ok(self.push_expr(GenExpr::FieldGet(base, field.key())))
+                Ok(self.push_expr(GenExpr::FieldGet(base, field.access())))
             }
             ("eq", [lhs, rhs]) => {
                 let lhs = self.gen_expr_arg(lhs.expr)?;
@@ -3304,7 +3420,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                     call_args.push(self.gen_expr_arg(arg.expr)?);
                 }
                 Ok(self.push_expr(GenExpr::TraitCall {
-                    ty,
+                    ty: ty.ty,
                     method,
                     args: call_args,
                 }))
@@ -3314,7 +3430,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                     return Err(self.unsupported_expr(ty_arg.expr));
                 };
                 let name = self.string_value_ident(name_arg.expr)?;
-                Ok(self.push_expr(GenExpr::TraitConst { ty, name }))
+                Ok(self.push_expr(GenExpr::TraitConst { ty: ty.ty, name }))
             }
             ("call", [receiver_arg, method_arg, extra @ ..]) => {
                 let receiver = self.gen_expr_arg(receiver_arg.expr)?;
@@ -3335,7 +3451,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 };
                 // The callee path is the type as written with the function
                 // name appended, so only path types can be call targets.
-                let TypeKind::Path(Partial::Present(ty_path)) = ty.data(self.db) else {
+                let TypeKind::Path(Partial::Present(ty_path)) = ty.ty.data(self.db) else {
                     return Err(self.unsupported_expr(ty_arg.expr));
                 };
                 let method = self.string_value_ident(method_arg.expr)?;
@@ -3394,7 +3510,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                     return Err(self.unsupported_expr(ty_arg.expr));
                 };
                 let name = self.string_value_ident(name_arg.expr)?;
-                Ok(self.push_ty(GenTy::Projection { ty, name }))
+                Ok(self.push_ty(GenTy::Projection { ty: ty.ty, name }))
             }
             // --- misc --------------------------------------------------
             ("keccak", [arg]) => {
@@ -3426,7 +3542,12 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 let Value::Field(field) = self.eval_expr(field_arg.expr)? else {
                     return Err(self.unsupported_expr(field_arg.expr));
                 };
-                let field = field.key();
+                let Some(field) = field.target_key() else {
+                    return Err(self.invalid_method(
+                        field_arg.expr,
+                        "target initialization requires a field of the derive target",
+                    ));
+                };
                 let value = self.gen_expr_arg(value_arg.expr)?;
                 let extended = match &self.exprs[init.0] {
                     GenExpr::StructInit { fields } => {
@@ -3504,7 +3625,12 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                     return Err(self.unsupported_expr(field_arg.expr));
                 };
                 let variant = variant.index();
-                let field = field.key();
+                let Some(field) = field.target_key() else {
+                    return Err(self.invalid_method(
+                        field_arg.expr,
+                        "variant binders require a field of the derive target",
+                    ));
+                };
                 if field.variant != Some(variant) {
                     return Err(self.invalid_method(
                         field_arg.expr,
@@ -3523,14 +3649,26 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             // always re-spelled the goal trait's own method declaration, so it
             // is now INFERRED at `emit_method(name, body)` (see
             // `infer_method_sig`) instead of authored op-by-op.
-            ("target_ty", []) => Ok(Value::Ty(self.target_ty)),
-            ("provider_ty", []) => Ok(Value::Ty(self.configured_provider_ty)),
-            ("self_ty", []) => Ok(Value::Ty(TypeId::fallback_self_ty(self.db))),
+            ("target_ty", []) => Ok(Value::Ty(TypeHandle {
+                ty: self.target_ty,
+                top_mod: self.request_top_mod,
+            })),
+            ("provider_ty", []) => Ok(Value::Ty(TypeHandle {
+                ty: self.configured_provider_ty,
+                top_mod: self.request_top_mod,
+            })),
+            ("self_ty", []) => Ok(Value::Ty(TypeHandle {
+                ty: TypeId::fallback_self_ty(self.db),
+                top_mod: self.provider_top_mod,
+            })),
             ("ty", []) => {
                 let Some(path) = self.single_type_generic_arg(generic_args) else {
                     return Err(self.unsupported_expr(expr));
                 };
-                Ok(Value::Ty(path))
+                Ok(Value::Ty(TypeHandle {
+                    ty: path,
+                    top_mod: self.provider_top_mod,
+                }))
             }
             // TD5c: `same_ty`/`same_field` are spelled `builder.*` but are pure
             // read-only identity comparisons (mis-shelved by spelling, per the
@@ -3549,7 +3687,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                         return Err(self.unsupported_expr(rhs.expr));
                     };
                     let rhs_ctor =
-                        base_ground_constructor(self.db, rhs_ty, self.provider_top_mod.scope())
+                        base_ground_constructor(self.db, rhs_ty.ty, rhs_ty.top_mod.scope())
                             .map_err(|_| self.unsupported_expr(rhs.expr))?;
                     return Ok(Value::Bool(lhs_ctor == rhs_ctor));
                 }
@@ -3865,7 +4003,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
         match self.eval_expr(expr)? {
             Value::GenTy(id) => Ok(id),
             Value::Ty(ty) => {
-                let Value::GenTy(id) = self.push_ty(GenTy::Concrete(ty)) else {
+                let Value::GenTy(id) = self.push_ty(GenTy::Concrete(ty.ty)) else {
                     unreachable!("push_ty returns a GenTy value");
                 };
                 Ok(id)

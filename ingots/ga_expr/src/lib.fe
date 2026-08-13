@@ -123,8 +123,8 @@ const fn vector_support_width(_ support: usize, _ dimension: usize) -> usize {
 
 /// Generated scalar result of a sparse symmetric-metric product between two
 /// packed `VectorInput`s. The configured provider carries the static
-/// `GaProgram`; the target record contains only first-leaf then second-leaf
-/// runtime coefficients, each packed in ascending generator order.
+/// `GaProgram`; the target record contains one field per nominal leaf identity,
+/// whose nested coefficient record is packed in ascending generator order.
 pub trait EvaluateVectorScalarF32 {
     fn scalar(_ operands: Self) -> f32
 }
@@ -132,8 +132,8 @@ pub trait EvaluateVectorScalarF32 {
 /// Structural Fe/FCO compiler for [`EvaluateVectorScalarF32`]. It recognizes
 /// operator and metric-term constructors, never a complete expression alias or
 /// a precomputed candidate mask. The current carrier contract is deliberately
-/// narrow: two structurally occurring vector leaves, `ScalarProduct` at the
-/// root, and `AlgebraicBalanced`'s deterministic four-term chunk reduction.
+/// narrow: two distinct nominal vector leaves, `ScalarProduct` at the root,
+/// and `AlgebraicBalanced`'s deterministic four-term chunk reduction.
 pub struct CompileVectorScalarF32<Program> {}
 
 impl<Program> Derive<EvaluateVectorScalarF32>
@@ -147,14 +147,6 @@ impl<Program> Derive<EvaluateVectorScalarF32>
         )
     {
         let operands = builder.arg_ref("operands")
-        let zero = operands
-        let field_index: usize = 0
-        for field in reflect.fields() {
-            if field_index == 0 { zero = builder.field_get(operands, field) }
-            field_index = field_index + 1
-        }
-        zero = builder.sub(zero, zero)
-        let fields = reflect.fields()
         let program_types = 0..0
 
         for configured in builder.provider_ty().normalized_preorder_types() {
@@ -234,105 +226,136 @@ impl<Program> Derive<EvaluateVectorScalarF32>
                     }
                 }
 
-                // The narrow carrier contract follows structural occurrence:
-                // the left leaf's compact coefficients, then the right leaf's.
-                // Their nominal identity types remain available in the
-                // descriptor for the later arbitrary-tree DAG/CSE layer.
-                let left_width = vector_support_width(left_support, dimension)
-
-                let sum0 = zero
-                let sum1 = zero
-                let sum2 = zero
-                let survivor: usize = 0
-                for metric_node in metric_nodes {
+                // Bind each nominal leaf identity to exactly one top-level
+                // carrier field, then reflect the nested coefficient record.
+                // No author-maintained slot number or flat positional offset
+                // enters this mapping.
+                let left_base = operands
+                let right_base = operands
+                let left_fields = 0..0
+                let right_fields = 0..0
+                let left_matches: usize = 0
+                let right_matches: usize = 0
+                for carrier_field in reflect.fields() {
                     if builder.same_ty(
-                        metric_node.constructor(),
-                        builder.ty<MetricTerm>(),
+                        left.at(0).constructor(), carrier_field.ty(),
                     ) {
-                        let ordinal: usize = 0
-                        let metric_left: usize = dimension
-                        let metric_right: usize = dimension
-                        let magnitude: usize = 0
-                        let negative: usize = 0
-                        for metric_arg in metric_node.generic_args() {
-                            if metric_arg.is_const() {
-                                if ordinal == 0 {
-                                    metric_left = metric_arg.const_value()
-                                }
-                                if ordinal == 1 {
-                                    metric_right = metric_arg.const_value()
-                                }
-                                if ordinal == 2 {
-                                    magnitude = metric_arg.const_value()
-                                }
-                                if ordinal == 3 {
-                                    negative = metric_arg.const_value()
-                                }
-                                ordinal = ordinal + 1
-                            }
-                        }
+                        left_base = builder.field_get(operands, carrier_field)
+                        left_fields = carrier_field.ty().fields()
+                        left_matches = left_matches + 1
+                    }
+                    if builder.same_ty(
+                        right.at(0).constructor(), carrier_field.ty(),
+                    ) {
+                        right_base = builder.field_get(operands, carrier_field)
+                        right_fields = carrier_field.ty().fields()
+                        right_matches = right_matches + 1
+                    }
+                }
+                let left_width = vector_support_width(left_support, dimension)
+                let right_width = vector_support_width(right_support, dimension)
 
-                        // A symmetric entry can contribute in either operand
-                        // orientation. Diagonal entries are considered once.
-                        for orientation in 0..2 {
-                            let left_generator = metric_left
-                            let right_generator = metric_right
-                            if orientation == 1 {
-                                left_generator = metric_right
-                                right_generator = metric_left
+                if left_matches == 1 && right_matches == 1
+                    && left_fields.len() == left_width
+                    && right_fields.len() == right_width
+                    && left_width > 0 && right_width > 0
+                {
+                    let first = builder.field_get(left_base, left_fields.at(0))
+                    let zero = builder.sub(first, first)
+                    let sum0 = zero
+                    let sum1 = zero
+                    let sum2 = zero
+                    let survivor: usize = 0
+                    for metric_node in metric_nodes {
+                        if builder.same_ty(
+                            metric_node.constructor(),
+                            builder.ty<MetricTerm>(),
+                        ) {
+                            let ordinal: usize = 0
+                            let metric_left: usize = dimension
+                            let metric_right: usize = dimension
+                            let magnitude: usize = 0
+                            let negative: usize = 0
+                            for metric_arg in metric_node.generic_args() {
+                                if metric_arg.is_const() {
+                                    if ordinal == 0 {
+                                        metric_left = metric_arg.const_value()
+                                    }
+                                    if ordinal == 1 {
+                                        metric_right = metric_arg.const_value()
+                                    }
+                                    if ordinal == 2 {
+                                        magnitude = metric_arg.const_value()
+                                    }
+                                    if ordinal == 3 {
+                                        negative = metric_arg.const_value()
+                                    }
+                                    ordinal = ordinal + 1
+                                }
                             }
-                            if magnitude > 0
-                                && (orientation == 0 || metric_left != metric_right)
-                                && vector_support_has(
-                                    left_support, left_generator,
-                                )
-                                && vector_support_has(
-                                    right_support, right_generator,
-                                )
-                            {
-                                let left_field = vector_support_rank(
-                                    left_support, left_generator,
-                                )
-                                let right_field = vector_support_rank(
-                                    right_support, right_generator,
-                                ) + left_width
-                                let lhs = zero
-                                let rhs = zero
-                                lhs = builder.field_get(
-                                    operands, fields.at(left_field),
-                                )
-                                rhs = builder.field_get(
-                                    operands, fields.at(right_field),
-                                )
 
-                                let base = builder.mul(lhs, rhs)
-                                let term = base
-                                for _copy in 1..magnitude {
-                                    term = builder.add(term, base)
+                            // A symmetric entry can contribute in either
+                            // operand orientation. Diagonal entries are
+                            // considered once.
+                            for orientation in 0..2 {
+                                let left_generator = metric_left
+                                let right_generator = metric_right
+                                if orientation == 1 {
+                                    left_generator = metric_right
+                                    right_generator = metric_left
                                 }
-                                if negative == 1 { term = builder.neg(term) }
-                                if survivor < 4 {
-                                    sum0 = builder.add(sum0, term)
-                                } else if survivor < 8 {
-                                    sum1 = builder.add(sum1, term)
-                                } else {
-                                    sum2 = builder.add(sum2, term)
+                                if magnitude > 0
+                                    && (orientation == 0
+                                        || metric_left != metric_right)
+                                    && vector_support_has(
+                                        left_support, left_generator,
+                                    )
+                                    && vector_support_has(
+                                        right_support, right_generator,
+                                    )
+                                {
+                                    let left_field = vector_support_rank(
+                                        left_support, left_generator,
+                                    )
+                                    let right_field = vector_support_rank(
+                                        right_support, right_generator,
+                                    )
+                                    let lhs = builder.field_get(
+                                        left_base, left_fields.at(left_field),
+                                    )
+                                    let rhs = builder.field_get(
+                                        right_base, right_fields.at(right_field),
+                                    )
+
+                                    let base = builder.mul(lhs, rhs)
+                                    let term = base
+                                    for _copy in 1..magnitude {
+                                        term = builder.add(term, base)
+                                    }
+                                    if negative == 1 { term = builder.neg(term) }
+                                    if survivor < 4 {
+                                        sum0 = builder.add(sum0, term)
+                                    } else if survivor < 8 {
+                                        sum1 = builder.add(sum1, term)
+                                    } else {
+                                        sum2 = builder.add(sum2, term)
+                                    }
+                                    survivor = survivor + 1
                                 }
-                                survivor = survivor + 1
                             }
                         }
                     }
-                }
-                if dimension > 0 && survivor > 0
-                    && builder.same_ty(
-                        program_types.at(2).constructor(),
-                        builder.ty<AlgebraicBalanced>(),
-                    )
-                {
-                    builder.emit_method(
-                        "scalar",
-                        builder.add(builder.add(sum0, sum1), sum2),
-                    )
+                    if dimension > 0 && survivor > 0
+                        && builder.same_ty(
+                            program_types.at(2).constructor(),
+                            builder.ty<AlgebraicBalanced>(),
+                        )
+                    {
+                        builder.emit_method(
+                            "scalar",
+                            builder.add(builder.add(sum0, sum1), sum2),
+                        )
+                    }
                 }
             }
         }

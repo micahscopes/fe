@@ -446,6 +446,85 @@ derive Inspect for OpenTarget<A> using Configured<Config<A>>
 }
 
 #[test]
+fn nested_nominal_fields_drive_hygienic_generated_access() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_nested_fields.fe".into(),
+        r#"
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+
+trait ReadNested { fn read(_ value: Self) -> u32 }
+struct Pair { left: u32, right: u32 }
+struct Carrier { pair: Pair }
+struct NestedReader {}
+
+impl Derive<ReadNested> for NestedReader {
+    const fn derive<T>(ev: own Evidence<ReadNested<T>>) -> Evidence<ReadNested<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<ReadNested<T>>)
+    {
+        let value = builder.arg_ref("value")
+        let nested = value
+        for outer in reflect.fields() {
+            let inner_index: usize = 0
+            for inner in outer.ty().fields() {
+                if inner_index == 1 {
+                    nested = builder.field_get(
+                        builder.field_get(value, outer), inner,
+                    )
+                }
+                inner_index = inner_index + 1
+            }
+        }
+        builder.emit_method("read", nested)
+        builder.finish()
+        ev
+    }
+}
+
+derive ReadNested for Carrier using NestedReader
+fn proves_nested(value: Carrier) -> u32 {
+    <Carrier as ReadNested>::read(value)
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
+fn nested_generic_field_reflection_fails_closed_without_substitution() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_nested_generic_fields.fe".into(),
+        r#"
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+trait Inspect {}
+struct Boxed<A> { value: A }
+struct Carrier { boxed: Boxed<u32> }
+struct Inspector {}
+impl Derive<Inspect> for Inspector {
+    const fn derive<T>(ev: own Evidence<Inspect<T>>) -> Evidence<Inspect<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<Inspect<T>>)
+    {
+        for outer in reflect.fields() {
+            for _inner in outer.ty().fields() {}
+        }
+        builder.finish()
+        ev
+    }
+}
+derive Inspect for Carrier using Inspector
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let rendered = fe_hir::test_db::format_diagnostics(&db, &db.run_on_top_mod(top_mod));
+    assert!(
+        rendered.contains("this construct is not supported in derive provider bodies"),
+        "generic nested field reflection must fail closed:\n{rendered}"
+    );
+}
+
+#[test]
 fn normalized_ground_type_inspection_fails_closed_on_forwarded_params() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(

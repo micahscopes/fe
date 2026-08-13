@@ -74,6 +74,16 @@ declared) while provider code and ordinary `ty<T>()` remain scoped to the
 provider module. The configured type must still be finite and ground; the same
 base-graph, node, unfold, and execution bounds fail closed.
 
+A concrete type handle also exposes `fields()` as an ordinary read-only
+sequence. This is not a builder command: the base graph resolves the nominal
+struct, and each returned owner-qualified `Field` handle carries its declared
+type/name plus hygienic access identity. Consequently
+`builder.field_get(builder.field_get(value, outer), inner)` can generate nested
+record access without a string path or domain-specific metadata. The initial
+surface deliberately accepts concrete non-generic structs only. Generic field
+substitution and enum payload reflection fail closed until their occurrence
+environments are modeled explicitly.
+
 ## Natural iteration
 
 Provider `for` accepts an ordinary `Value::Seq`. Reflection iterators and exact
