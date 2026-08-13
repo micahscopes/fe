@@ -1,10 +1,10 @@
 {
   "artifacts": {
     "canonical_adapters": [],
-    "wasm": "fe-render-9bdceb8f30a58df0.wasm",
-    "wasm_bytes": 7097,
-    "wgsl": "fe-render-8491a8e7a6d852cd.wgsl",
-    "wgsl_bytes": 8311
+    "wasm": "fe-render-e1eafc41a14bf0c2.wasm",
+    "wasm_bytes": 7203,
+    "wgsl": "fe-render-0a7e039726edfb9d.wgsl",
+    "wgsl_bytes": 8648
   },
   "browser_runtime": null,
   "canonical_interface": null,
@@ -22,7 +22,7 @@
         "members": [
           {
             "arg_index": 2,
-            "doc": "Pencil parameter: [0, 1] sweeps sphere -> sphere -> radical plane.",
+            "doc": "Pencil parameter: [0, 1] sweeps cylinder -> sphere-like -> plane pair.",
             "name": "lambda",
             "offset": 0,
             "scalar": "f32",
@@ -30,7 +30,7 @@
           },
           {
             "arg_index": 3,
-            "doc": "Rotation of the generator axis in the slice plane.",
+            "doc": "Rotation of the member about the y axis; makes the xz cross term live.",
             "name": "theta",
             "offset": 4,
             "scalar": "f32",
@@ -96,7 +96,7 @@
             "members": [
               {
                 "arg_index": 2,
-                "doc": "Pencil parameter: [0, 1] sweeps sphere -> sphere -> radical plane.",
+                "doc": "Pencil parameter: [0, 1] sweeps cylinder -> sphere-like -> plane pair.",
                 "name": "lambda",
                 "offset": 0,
                 "scalar": "f32",
@@ -104,7 +104,7 @@
               },
               {
                 "arg_index": 3,
-                "doc": "Rotation of the generator axis in the slice plane.",
+                "doc": "Rotation of the member about the y axis; makes the xz cross term live.",
                 "name": "theta",
                 "offset": 4,
                 "scalar": "f32",
@@ -159,8 +159,8 @@
           0
         ]
       },
-      "shader": "fe-render-8491a8e7a6d852cd.wgsl",
-      "shader_bytes": 8311,
+      "shader": "fe-render-0a7e039726edfb9d.wgsl",
+      "shader_bytes": 8648,
       "source_entry": "shade"
     }
   ],
@@ -168,16 +168,6 @@
   "protocol_version": 6,
   "provenance": {
     "authored_sources": [
-      {
-        "id": "demos/sketches/cga3d/fe.toml",
-        "kind": "fe_manifest",
-        "sha256": "5f5d5108c1e7b66faea56973dce8975c1c98128b62003ddd4f2184758e6a9bd8"
-      },
-      {
-        "id": "demos/sketches/cga3d/src/lib.fe",
-        "kind": "fe",
-        "sha256": "bd97cd2774872774413b816c7d5f48ecda19b038f4d66d7462e541688f8b9e44"
-      },
       {
         "id": "demos/sketches/fmath/fe.toml",
         "kind": "fe_manifest",
@@ -197,6 +187,16 @@
         "id": "demos/sketches/gallery_palette/src/lib.fe",
         "kind": "fe",
         "sha256": "0cb7e3b8c34d99a6b292ea1015bfe7f4d44ebf56c0adb495f43dd8b115827bd5"
+      },
+      {
+        "id": "demos/sketches/qcga/fe.toml",
+        "kind": "fe_manifest",
+        "sha256": "c4b51b4fd6323a9db5bc6e358f9deda74db208b6fd8f53ac662d11e739b4e898"
+      },
+      {
+        "id": "demos/sketches/qcga/src/lib.fe",
+        "kind": "fe",
+        "sha256": "dac63d16c7109d05d911368406023e10dc321fe897bb79b91ce57869c5512b02"
       },
       {
         "id": "ingots/core/fe.toml",
@@ -326,7 +326,7 @@
       {
         "id": "ingots/core/src/pending.fe",
         "kind": "fe",
-        "sha256": "856277c9832fed02bf21794ee8eb2a96d8e45a9113cfeed6885b56b35525746d"
+        "sha256": "a518e1697e9b3482341f595ce0d0c6b1118bba552ea073cfa96bcc2b0ac41720"
       },
       {
         "id": "ingots/core/src/prelude.fe",
@@ -385,9 +385,9 @@
     ],
     "fixed_host": {
       "artifact": {
-        "bytes": 97605,
-        "path": "fe-render-runtime-cec557e016b19129.js",
-        "sha256": "cec557e016b191294671a4175857e2b7a6d30060e15b7fd18ef2bc669e00c559"
+        "bytes": 100868,
+        "path": "fe-render-runtime-5651e0a987d052e0.js",
+        "sha256": "5651e0a987d052e0af090e95acd240e5d2f3ef0882157d0100b7ca1fc17ec69a"
       },
       "contract": "fixed_versioned_demo_blind_browser_host",
       "name": "fe-render-runtime",
@@ -412,7 +412,7 @@
         "sha256": "c4aa56a000bbd49b18c39f2bfcba969625a5fb4d692859efb504863aa36a1859"
       }
     ],
-    "source_id": "cga3d"
+    "source_id": "qcga"
   },
   "resources": [],
   "source_entry": "shade",
@@ -426,7 +426,7 @@
     },
     "params": [
       {
-        "doc": "Pencil parameter: [0, 1] sweeps sphere -> sphere -> radical plane.",
+        "doc": "Pencil parameter: [0, 1] sweeps cylinder -> sphere-like -> plane pair.",
         "init": 0.15,
         "kind": "unit",
         "max": 1.0,
@@ -434,7 +434,7 @@
         "name": "lambda"
       },
       {
-        "doc": "Rotation of the generator axis in the slice plane.",
+        "doc": "Rotation of the member about the y axis; makes the xz cross term live.",
         "init": 0.6,
         "kind": "angle",
         "max": 6.2831855,
