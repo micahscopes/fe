@@ -36,6 +36,7 @@ const MAX_SURFACE_EVENT_BATCH = Math.floor(0x7fffffff / SURFACE_EVENT_STRIDE);
 const COARSE_POINTER_GPU_MAX_DIMENSION = 256;
 const COARSE_POINTER_CPU_MAX_DIMENSION = 128;
 const CPU_MAX_DIMENSION = 256;
+const GPU_BYTES_PER_ROW_ALIGNMENT = 256;
 
 /** Preserve aspect while enforcing an implementation resource ceiling. */
 export function fitBackingExtent(width, height, maxDimension = Infinity) {
@@ -49,6 +50,73 @@ export function fitBackingExtent(width, height, maxDimension = Infinity) {
 
 function hasCoarsePointer() {
   return globalThis.matchMedia?.("(pointer: coarse)")?.matches === true;
+}
+
+/** Decode one tightly specified WebGPU canvas readback into browser RGBA
+ * pixels. Canvas rows are padded to WebGPU's copy alignment; the copy is
+ * made while the presented texture is still owned by our submission, so it
+ * does not depend on a browser retaining compositor contents for a later
+ * `createImageBitmap(canvas)` call. */
+export function unpackCanvasReadback(bytes, width, height, bytesPerRow, format) {
+  if (format !== "rgba8unorm" && format !== "rgba8unorm-srgb" &&
+      format !== "bgra8unorm" && format !== "bgra8unorm-srgb") {
+    throw new Error(`fe render runtime: poster readback does not support canvas format ${format}`);
+  }
+  const rowBytes = width * 4;
+  if (bytesPerRow < rowBytes || bytes.length < bytesPerRow * height) {
+    throw new Error("fe render runtime: poster readback buffer is shorter than its declared extent");
+  }
+  const rgba = new Uint8ClampedArray(rowBytes * height);
+  const bgra = format.startsWith("bgra");
+  for (let y = 0; y < height; y++) {
+    const sourceRow = y * bytesPerRow;
+    const destinationRow = y * rowBytes;
+    for (let x = 0; x < width; x++) {
+      const source = sourceRow + x * 4;
+      const destination = destinationRow + x * 4;
+      rgba[destination] = bytes[source + (bgra ? 2 : 0)];
+      rgba[destination + 1] = bytes[source + 1];
+      rgba[destination + 2] = bytes[source + (bgra ? 0 : 2)];
+      rgba[destination + 3] = bytes[source + 3];
+    }
+  }
+  return rgba;
+}
+
+function encodeCanvasReadback(device, encoder, texture, width, height, format) {
+  const bytesPerRow = Math.ceil((width * 4) / GPU_BYTES_PER_ROW_ALIGNMENT) *
+    GPU_BYTES_PER_ROW_ALIGNMENT;
+  const buffer = device.createBuffer({
+    size: bytesPerRow * height,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  });
+  encoder.copyTextureToBuffer(
+    { texture },
+    { buffer, bytesPerRow, rowsPerImage: height },
+    { width, height, depthOrArrayLayers: 1 },
+  );
+  return { buffer, width, height, bytesPerRow, format };
+}
+
+async function readCanvasReadback(readback) {
+  const { buffer, width, height, bytesPerRow, format } = readback;
+  try {
+    await buffer.mapAsync(GPUMapMode.READ);
+    return unpackCanvasReadback(
+      new Uint8Array(buffer.getMappedRange()),
+      width,
+      height,
+      bytesPerRow,
+      format,
+    );
+  } finally {
+    try {
+      buffer.unmap();
+    } catch {
+      // A failed map or device loss can leave the buffer unmapped already.
+    }
+    buffer.destroy();
+  }
 }
 
 export function rasterDrawVertexCount(pass) {
@@ -332,12 +400,13 @@ function writeUniformBuffer(device, uniformBuffer, span, members, uniforms) {
   device.queue.writeBuffer(uniformBuffer, 0, buffer);
 }
 
-function presentFrame(device, context, pipeline, bindGroup) {
+function presentFrame(device, context, pipeline, bindGroup, capture) {
   const encoder = device.createCommandEncoder();
+  const texture = context.getCurrentTexture();
   const pass = encoder.beginRenderPass({
     colorAttachments: [
       {
-        view: context.getCurrentTexture().createView(),
+        view: texture.createView(),
         clearValue: { r: 0, g: 0, b: 0, a: 1 },
         loadOp: "clear",
         storeOp: "store",
@@ -348,7 +417,11 @@ function presentFrame(device, context, pipeline, bindGroup) {
   if (bindGroup) pass.setBindGroup(0, bindGroup);
   pass.draw(3);
   pass.end();
+  const readback = capture
+    ? encodeCanvasReadback(device, encoder, texture, capture.width, capture.height, capture.format)
+    : null;
   device.queue.submit([encoder.finish()]);
+  return readback;
 }
 
 function deepFreeze(value) {
@@ -1046,7 +1119,7 @@ export class FeSurfaceElement extends HTMLElement {
     }
   }
 
-  _presentOn(context, uniforms) {
+  _presentOn(context, uniforms, capture = null) {
     if (this._graph) {
       const { device, passRecords } = this._gpu;
       for (const record of passRecords) {
@@ -1065,6 +1138,7 @@ export class FeSurfaceElement extends HTMLElement {
         }
       }
       const encoder = device.createCommandEncoder();
+      let texture = null;
       for (const record of passRecords) {
         if (record.pass.layout.mode === "compute") {
           const compute = encoder.beginComputePass();
@@ -1075,9 +1149,10 @@ export class FeSurfaceElement extends HTMLElement {
           compute.dispatchWorkgroups(dispatch[0], dispatch[1], dispatch[2]);
           compute.end();
         } else {
+          texture ??= context.getCurrentTexture();
           const render = encoder.beginRenderPass({
             colorAttachments: [{
-              view: context.getCurrentTexture().createView(),
+              view: texture.createView(),
               clearValue: { r: 0, g: 0, b: 0, a: 1 },
               loadOp: "clear",
               storeOp: "store",
@@ -1089,14 +1164,27 @@ export class FeSurfaceElement extends HTMLElement {
           render.end();
         }
       }
+      if (capture && !texture) {
+        throw new Error("fe render runtime: cannot capture a pass graph with no render pass");
+      }
+      const readback = capture
+        ? encodeCanvasReadback(
+            device,
+            encoder,
+            texture,
+            capture.width,
+            capture.height,
+            capture.format,
+          )
+        : null;
       device.queue.submit([encoder.finish()]);
-      return;
+      return readback;
     }
     const { device, pipeline, bindGroup, uniformBuffer } = this._gpu;
     if (uniformBuffer) {
       writeUniformBuffer(device, uniformBuffer, this._inputBinding.span, this._members, uniforms);
     }
-    presentFrame(device, context, pipeline, bindGroup);
+    return presentFrame(device, context, pipeline, bindGroup, capture);
   }
 
   _callKernel(px, py, uniforms) {
@@ -1275,31 +1363,26 @@ export class FeSurfaceElement extends HTMLElement {
     }
     try {
       try {
-        context.configure({ device: gpu.device, format: gpu.format, alphaMode: "opaque" });
+        context.configure({
+          device: gpu.device,
+          format: gpu.format,
+          alphaMode: "opaque",
+          usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+        });
       } catch (error) {
         throw new Error(`fe render runtime: poster context configuration failed: ${error?.message ?? String(error)}`, { cause: error });
       }
       try {
-        this._presentOn(context, this._uniforms);
+        const readback = this._presentOn(context, this._uniforms, { width, height, format: gpu.format });
+        const pixels = await readCanvasReadback(readback);
+        this._paintPosterPixels(pixels, width, height);
       } catch (error) {
         throw new Error(`fe render runtime: poster command submission failed: ${error?.message ?? String(error)}`, { cause: error });
       }
-      try {
-        await gpu.device.queue.onSubmittedWorkDone();
-      } catch (error) {
-        throw new Error(`fe render runtime: poster GPU completion failed: ${error?.message ?? String(error)}`, { cause: error });
-      }
-      await new Promise((resolve) => {
-        requestAnimationFrame(() => requestAnimationFrame(resolve));
-      });
-      let bitmap;
-      try {
-        bitmap = await createImageBitmap(posterSource);
-      } catch (error) {
-        throw new Error(`fe render runtime: poster bitmap capture failed: ${error?.message ?? String(error)}`, { cause: error });
-      }
-      context.unconfigure();
-      this._paintPoster(bitmap, width, height);
+      // Read the exact texture in the same GPU submission. Waiting for two
+      // compositor frames and then snapshotting the canvas is observably
+      // unreliable on mobile WebGPU: the swap texture may already have been
+      // discarded, producing a black poster after a valid live frame.
     } finally {
       try {
         context.unconfigure();
@@ -1312,13 +1395,13 @@ export class FeSurfaceElement extends HTMLElement {
     }
   }
 
-  _paintPoster(bitmap, width, height) {
+  _paintPosterPixels(pixels, width, height) {
     this._posterCanvas.width = width;
     this._posterCanvas.height = height;
     const ctx = this._posterCanvas.getContext("2d");
-    ctx.clearRect(0, 0, width, height);
-    ctx.drawImage(bitmap, 0, 0, width, height);
-    bitmap.close?.();
+    const image = ctx.createImageData(width, height);
+    image.data.set(pixels);
+    ctx.putImageData(image, 0, 0);
   }
 
   async _capturePosterFromLive() {
@@ -1327,11 +1410,13 @@ export class FeSurfaceElement extends HTMLElement {
     const gpu = this._gpu;
     try {
       await gpu.device.queue.onSubmittedWorkDone();
-      await new Promise((resolve) => {
-        requestAnimationFrame(() => requestAnimationFrame(resolve));
+      const readback = this._presentOn(context, this._uniforms, {
+        width: this._backingWidth,
+        height: this._backingHeight,
+        format: gpu.format,
       });
-      const bitmap = await createImageBitmap(this._liveCanvas);
-      this._paintPoster(bitmap, this._backingWidth, this._backingHeight);
+      const pixels = await readCanvasReadback(readback);
+      this._paintPosterPixels(pixels, this._backingWidth, this._backingHeight);
     } finally {
       try {
         context.unconfigure();
@@ -1411,7 +1496,12 @@ export class FeSurfaceElement extends HTMLElement {
     this._liveCanvas.width = this._backingWidth;
     this._liveCanvas.height = this._backingHeight;
     const context = this._liveCanvas.getContext("webgpu");
-    context.configure({ device: gpu.device, format: gpu.format, alphaMode: "opaque" });
+    context.configure({
+      device: gpu.device,
+      format: gpu.format,
+      alphaMode: "opaque",
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+    });
     this._liveContext = context;
     this._presentOn(context, this._uniforms);
     this._posterCanvas.hidden = true;

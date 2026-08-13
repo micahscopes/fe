@@ -7,13 +7,69 @@ import test from "node:test";
 globalThis.HTMLElement = class HTMLElement {};
 globalThis.customElements = { define() {} };
 
-const { FeSurfaceElement, SurfaceEventKind, SurfaceQueueAction, fitBackingExtent, rasterDrawVertexCount, requiresGpuPassGraph, writeSurfaceEventBatch } =
+const { FeSurfaceElement, SurfaceEventKind, SurfaceQueueAction, fitBackingExtent, rasterDrawVertexCount, requiresGpuPassGraph, unpackCanvasReadback, writeSurfaceEventBatch } =
   await import("./fe-render-runtime.js");
 
 test("runtime backing ceilings preserve aspect instead of cropping mobile work", () => {
   assert.deepEqual(fitBackingExtent(512, 256, 128), { width: 128, height: 64 });
   assert.deepEqual(fitBackingExtent(96, 64, 128), { width: 96, height: 64 });
   assert.deepEqual(fitBackingExtent(512, 256), { width: 512, height: 256 });
+});
+
+test("poster readback removes row padding and normalizes canvas channel order", () => {
+  const rgbaSource = new Uint8Array(256);
+  rgbaSource.set([1, 2, 3, 255, 4, 5, 6, 254]);
+  assert.deepEqual(
+    [...unpackCanvasReadback(rgbaSource, 2, 1, 256, "rgba8unorm")],
+    [1, 2, 3, 255, 4, 5, 6, 254],
+  );
+
+  const bgraSource = new Uint8Array(512);
+  bgraSource.set([30, 20, 10, 255], 0);
+  bgraSource.set([60, 50, 40, 253], 256);
+  assert.deepEqual(
+    [...unpackCanvasReadback(bgraSource, 1, 2, 256, "bgra8unorm")],
+    [10, 20, 30, 255, 40, 50, 60, 253],
+  );
+});
+
+test("poster copy is encoded after rendering in the same GPU submission", () => {
+  globalThis.GPUBufferUsage = { COPY_DST: 1, MAP_READ: 2 };
+  const trace = [];
+  const buffer = {};
+  const encoder = {
+    beginRenderPass() {
+      trace.push("render-begin");
+      return {
+        setPipeline() {},
+        draw() {},
+        end() { trace.push("render-end"); },
+      };
+    },
+    copyTextureToBuffer() { trace.push("copy"); },
+    finish() { trace.push("finish"); return {}; },
+  };
+  const device = {
+    createCommandEncoder() { return encoder; },
+    createBuffer() { return buffer; },
+    queue: { submit() { trace.push("submit"); } },
+  };
+  const context = {
+    getCurrentTexture() {
+      return { createView() { return {}; } };
+    },
+  };
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._graph = false;
+  surface._gpu = { device, pipeline: {}, bindGroup: null, uniformBuffer: null };
+
+  const readback = surface._presentOn(
+    context,
+    [],
+    { width: 1, height: 1, format: "rgba8unorm" },
+  );
+  assert.equal(readback.buffer, buffer);
+  assert.deepEqual(trace, ["render-begin", "render-end", "copy", "finish", "submit"]);
 });
 
 test("poster-only surfaces destroy all retained GPU buffers exactly once", () => {

@@ -792,11 +792,15 @@ Origin: honesty audit of Claude Code session
   poster-only loading. Poster capture and off-viewport suspension now destroy
   retained GPU buffers/pipeline references, pointer capture is unwound across
   suspension/cancellation, and the narrow gallery layout no longer overflows
-  its viewport. Until typed device-capability facts exist, the fixed runtime
+  its viewport. Poster pixels are copied from the rendered WebGPU texture into
+  an aligned readback buffer in the same command submission; the runtime no
+  longer waits for the compositor and snapshots a possibly discarded canvas,
+  which could replace a valid frame with a black poster on mobile. Until typed
+  device-capability facts exist, the fixed runtime
   also applies an explicit coarse-pointer/CPU backing-store safety ceiling;
   this is marked host debt, not the final authoring model. Responsive quality
   selection must move into a Fe policy consuming browser/device capabilities
-  through the runtime-control spine. Sixteen fixed render-runtime tests, six
+  through the runtime-control spine. Eighteen fixed render-runtime tests, six
   bootstrap tests, and a fresh optimized precompile of all 12 render bundles,
   one Fe page projection, and two resident components are green.
 - A static mobile workload audit identified the next concrete quality slice.
