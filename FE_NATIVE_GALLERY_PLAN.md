@@ -791,9 +791,18 @@ Origin: honesty audit of Claude Code session
   output by task generation. The two-site Wasmtime gate runs through that
   production bridge for success, failure, and cancellation, while independent
   host-runtime gates cover traps, stale/duplicate delivery, cleanup, and equal
-  raw pending ordinals under distinct typed handler identities. Concrete
-  browser-machine adapter emission and true recursive linked frames remain the
-  active materialization slice.
+  raw pending ordinals under distinct typed handler identities. The compiler
+  now projects each public materialized task into a concrete ES module from the
+  same target-neutral machine used by Wasm lowering: exact generated start/
+  resume symbols, scalar lanes, task-step union ranges, typed delivery layouts,
+  and suspension-site identities are not caller-authored or recovered from a
+  manifest. A fixed demo-blind browser runtime validates those lanes, keeps
+  continuation frames opaque and affine, and rejects forged/stale reuse. An
+  independent Bun capstone executes actual Fe Wasm through two suspension
+  sites and proves success, both failure sites, both cancellation sites,
+  distinct typed identities for equal raw pending ordinals, and one-shot frame
+  custody. Canonical artifact publication, real standards handlers, and true
+  recursive linked frames remain the active materialization slice.
 - A mobile-safety follow-up keeps the sequential policy in the resident Fe
   shell but changes its fixed opcode-14 realization from cold-to-live to
   poster-only loading. Poster capture and off-viewport suspension now destroy

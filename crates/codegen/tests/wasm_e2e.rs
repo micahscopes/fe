@@ -16,8 +16,9 @@
 use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
-    BackendKind, OptLevel, WasmCompileOptions, compile_runtime_package_wasm_with_options,
-    layout_for,
+    BackendKind, MATERIALIZED_TASK_RUNTIME_JS, OptLevel, WasmCompileOptions,
+    compile_runtime_package_wasm_with_options, emit_materialized_task_adapter_js, layout_for,
+    materialized_task_adapters,
 };
 use fe_host_runtime::{
     MaterializedExecutor, MaterializedTaskMachine, MaterializedTaskStep, PendingToken,
@@ -405,6 +406,127 @@ pub fn task(
     );
     assert_eq!(cancelled.pending(cancelled_task), None);
     assert_eq!(cancelled.take_output(cancelled_task), None);
+}
+
+#[test]
+fn compiler_emitted_browser_machine_drives_actual_two_site_wasm() {
+    const SOURCE: &str = r#"
+use core::pending::{Pending, TaskOutcome}
+use std::host::raw::suspend
+use std::wasm::WasmBackend
+
+pub fn task(
+    _ first_pending: own Pending<WasmBackend, u32>,
+    _ second_pending: own Pending<WasmBackend, u32>,
+    _ seed: u32,
+) -> u32 {
+    let first_outcome: TaskOutcome<u32, u32> = suspend(first_pending)
+    let first = match first_outcome {
+        TaskOutcome::Success(value) => value + seed
+        TaskOutcome::Failure(error) => error
+        TaskOutcome::Cancelled => seed
+    }
+    let second_outcome: TaskOutcome<u32, u32> = suspend(second_pending)
+    match second_outcome {
+        TaskOutcome::Success(value) => first + value
+        TaskOutcome::Failure(error) => error
+        TaskOutcome::Cancelled => first
+    }
+}
+"#;
+    if !std::process::Command::new("bun")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        return;
+    }
+
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///browser_materialized_task.fe").unwrap();
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(SOURCE.to_owned()));
+    let file = db.workspace().get(&db, &url).unwrap();
+    let top_mod = db.top_mod(file);
+    let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "task").unwrap();
+    let adapters = materialized_task_adapters(&db, &package).unwrap();
+    assert_eq!(adapters.len(), 1);
+    assert_eq!(adapters[0].name, "task");
+    assert_eq!(adapters[0].continuations.len(), 2);
+    let adapter = emit_materialized_task_adapter_js(&adapters, "./materialized-task.js")
+        .unwrap()
+        .expect("public resumable task emits one browser adapter");
+    assert!(!adapter.contains("JSON.parse"));
+    assert!(!adapter.contains("manifest"));
+    let wasm =
+        compile_runtime_package_wasm_with_options(&db, &package, WasmCompileOptions::default())
+            .unwrap()
+            .bytes;
+    wasmparser::validate(&wasm).unwrap();
+
+    let directory = tempfile::tempdir().unwrap();
+    let wasm_path = directory.path().join("task.wasm");
+    let runtime_path = directory.path().join("materialized-task.js");
+    let adapter_path = directory.path().join("task-adapter.mjs");
+    let test_path = directory.path().join("task-browser.mjs");
+    std::fs::write(&wasm_path, wasm).unwrap();
+    std::fs::write(&runtime_path, MATERIALIZED_TASK_RUNTIME_JS).unwrap();
+    std::fs::write(&adapter_path, adapter).unwrap();
+    let script = format!(
+        r#"
+import {{ createMaterializedTaskRegistry }} from {adapter_url:?};
+import {{ taskCancelled, taskFailure, taskSuccess }} from {runtime_url:?};
+const bytes = await Bun.file({wasm_path:?}).arrayBuffer();
+const {{ instance }} = await WebAssembly.instantiate(bytes, {{}});
+const machine = createMaterializedTaskRegistry(instance.exports).task;
+const first = machine.start([41, 41, 5]);
+if (first.kind !== "suspended" || first.pending.lanes[0] !== 41) throw new Error("bad first suspension");
+const firstFrame = first.frame;
+const second = machine.resume(firstFrame, taskSuccess([7]));
+if (second.kind !== "suspended" || second.pending.lanes[0] !== 41) throw new Error("bad second suspension");
+if (first.pending.handler === second.pending.handler) throw new Error("typed pending identities collided");
+const complete = machine.resume(second.frame, taskSuccess([8]));
+if (complete.kind !== "complete" || complete.output[0] !== 20) throw new Error("bad completion");
+let staleRejected = false;
+try {{ machine.resume(firstFrame, taskCancelled()); }}
+catch (error) {{ staleRejected = /stale, forged, or already resumed/.test(String(error)); }}
+if (!staleRejected) throw new Error("consumed frame was reusable");
+const failed = machine.start([51, 52, 5]);
+const afterFirstFailure = machine.resume(failed.frame, taskFailure([3]));
+if (afterFirstFailure.kind !== "suspended" || afterFirstFailure.pending.lanes[0] !== 52) throw new Error("first failure was not delivered");
+const failureThenSuccess = machine.resume(afterFirstFailure.frame, taskSuccess([8]));
+if (failureThenSuccess.kind !== "complete" || failureThenSuccess.output[0] !== 11) throw new Error("first failure branch was wrong");
+const failedSecond = machine.start([53, 54, 5]);
+const beforeSecondFailure = machine.resume(failedSecond.frame, taskSuccess([7]));
+const secondFailure = machine.resume(beforeSecondFailure.frame, taskFailure([4]));
+if (secondFailure.kind !== "complete" || secondFailure.output[0] !== 4) throw new Error("second failure was not delivered");
+const cancelled = machine.start([61, 62, 5]);
+const afterCancellation = machine.resume(cancelled.frame, taskCancelled());
+if (afterCancellation.kind !== "suspended" || afterCancellation.pending.lanes[0] !== 62) throw new Error("first cancellation was not delivered");
+const cancellation = machine.resume(afterCancellation.frame, taskCancelled());
+if (cancellation.kind !== "complete" || cancellation.output[0] !== 5) throw new Error("second cancellation was not delivered");
+let forgedRejected = false;
+const forged = machine.start([71, 72, 5]);
+try {{ machine.resume(forged.frame, {{ kind: "success", lanes: [9] }}); }}
+catch (error) {{ forgedRejected = /not constructed by this runtime/.test(String(error)); }}
+if (!forgedRejected) throw new Error("forged outcome reached Fe");
+"#,
+        adapter_url = format!("file://{}", adapter_path.display()),
+        runtime_url = format!("file://{}", runtime_path.display()),
+        wasm_path = wasm_path.display().to_string(),
+    );
+    std::fs::write(&test_path, script).unwrap();
+    let output = std::process::Command::new("bun")
+        .arg("run")
+        .arg(&test_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "compiler-emitted browser continuation adapter failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
 }
 
 #[test]

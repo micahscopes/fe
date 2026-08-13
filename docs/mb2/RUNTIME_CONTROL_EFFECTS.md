@@ -129,8 +129,12 @@ manifest-driven.
    provider body materialize successfully. Recursive resumable SCCs remain an
    explicit linked-frame boundary. The target-neutral host runtime now owns
    materialized inputs, exact site frames, pending-operation routing, and
-   completed outputs by generation-tagged task token; browser adapter emission
-   remains.
+   completed outputs by generation-tagged task token. The compiler now also
+   projects public materialized tasks into a concrete ES module from that same
+   machine: exact start/resume export names, scalar lanes, union ranges, and
+   suspension-site identities are generated rather than restated. Publishing
+   those adapters through canonical browser artifacts and attaching standards
+   handlers remains.
 3. [in progress] Materialize fixed Wasm re-entry exports and connect them to the
    existing generation-safe executor. Direct tasks now emit compiler-named
    `__fe_task_start_*` and `__fe_task_resume_*_N` exports with no `fe:control`
@@ -144,8 +148,14 @@ manifest-driven.
    generation-safe FIFO executor, including success, failure, and cancellation.
    Pending identity is a materializer-owned type rather than a raw ordinal, and
    an independent gate proves equal ordinals in distinct handler variants
-   cannot capture each other's continuations. Compiler emission of concrete
-   browser machine adapters and recursive linked frames remain.
+   cannot capture each other's continuations. A fixed, demo-blind browser task
+   runtime now consumes the compiler-emitted module, validates typed scalar and
+   inactive-union lanes, keeps frames opaque and affine, and rejects forged or
+   stale outcomes. A Bun gate drives actual compiled Fe Wasm through two
+   suspension sites—including equal raw pending ordinals—and independently
+   exercises Fe success, failure, cancellation, and stale-frame branches.
+   Canonical bundle publication, real timer/receive/Worker/WebGPU handlers, and
+   recursive linked frames remain.
 4. [todo] Interpret timer/receive/spawn and callback completion through that path on
    MainThread and Worker placements; retain blocking `Wait` only where legal.
 5. [todo] Derive browser `EventSource` handlers and move the gallery activation/timer
