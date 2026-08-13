@@ -7,8 +7,93 @@ import test from "node:test";
 globalThis.HTMLElement = class HTMLElement {};
 globalThis.customElements = { define() {} };
 
-const { FeSurfaceElement, SurfaceEventKind, SurfaceQueueAction, rasterDrawVertexCount, requiresGpuPassGraph, writeSurfaceEventBatch } =
+const { FeSurfaceElement, SurfaceEventKind, SurfaceQueueAction, fitBackingExtent, rasterDrawVertexCount, requiresGpuPassGraph, writeSurfaceEventBatch } =
   await import("./fe-render-runtime.js");
+
+test("runtime backing ceilings preserve aspect instead of cropping mobile work", () => {
+  assert.deepEqual(fitBackingExtent(512, 256, 128), { width: 128, height: 64 });
+  assert.deepEqual(fitBackingExtent(96, 64, 128), { width: 96, height: 64 });
+  assert.deepEqual(fitBackingExtent(512, 256), { width: 512, height: 256 });
+});
+
+test("poster-only surfaces destroy all retained GPU buffers exactly once", () => {
+  const surface = Object.create(FeSurfaceElement.prototype);
+  const trace = [];
+  const shared = { destroy: () => trace.push("shared") };
+  const output = { destroy: () => trace.push("output") };
+  surface._gpu = {
+    resourceBuffers: new Map([
+      ["input", shared],
+      ["alias", shared],
+      ["output", output],
+    ]),
+  };
+  surface._releaseGpuResources();
+  assert.equal(surface._gpu, null);
+  assert.deepEqual(trace, ["shared", "output"]);
+  surface._releaseGpuResources();
+  assert.deepEqual(trace, ["shared", "output"]);
+
+  surface._gpu = { uniformBuffer: { destroy: () => trace.push("uniform") } };
+  surface._releaseGpuResources();
+  assert.deepEqual(trace, ["shared", "output", "uniform"]);
+});
+
+test("mobile pointer capture is single-owner and restores native touch scrolling", () => {
+  const listeners = new Map();
+  const captures = [];
+  const canvas = {
+    style: { touchAction: "pan-y" },
+    addEventListener(name, callback) { listeners.set(name, callback); },
+    removeEventListener(name) { listeners.delete(name); },
+    getBoundingClientRect() { return { left: 0, top: 0, width: 100, height: 100 }; },
+    setPointerCapture(pointer) { captures.push(["set", pointer]); },
+    releasePointerCapture(pointer) { captures.push(["release", pointer]); },
+  };
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._surfaceTransitionKernel = () => {};
+  surface._control = null;
+  surface._controlKernel = null;
+  surface._adoptedCanvas = null;
+  surface._mode = "webgpu";
+  surface._liveCanvas = canvas;
+  surface._posterCanvas = null;
+  surface._gestureListeners = null;
+  surface._backingWidth = 100;
+  surface._backingHeight = 100;
+  const delivered = [];
+  surface._applyGesture = event => delivered.push(event);
+
+  surface._wireGestures();
+  assert.equal(canvas.style.touchAction, "none");
+  assert.equal(listeners.has("lostpointercapture"), true);
+  listeners.get("pointerdown")({
+    button: 0, pointerId: 7, clientX: 10, clientY: 20, buttons: 1,
+    timeStamp: 1, preventDefault() {},
+  });
+  listeners.get("pointerdown")({
+    button: 0, pointerId: 8, clientX: 30, clientY: 40, buttons: 1,
+    timeStamp: 2, preventDefault() {},
+  });
+  let movePrevented = false;
+  listeners.get("pointermove")({
+    pointerId: 7, clientX: 15, clientY: 27, buttons: 1, timeStamp: 3,
+    preventDefault() { movePrevented = true; },
+  });
+  listeners.get("pointercancel")({
+    pointerId: 7, clientX: 15, clientY: 27, buttons: 0, timeStamp: 4,
+  });
+  assert.equal(movePrevented, true);
+  assert.deepEqual(captures, [["set", 7], ["release", 7]]);
+  assert.deepEqual(
+    delivered.map(event => event.eventKind),
+    [SurfaceEventKind.PointerDown, SurfaceEventKind.PointerMove, SurfaceEventKind.PointerUp],
+  );
+
+  surface._unwireGestures();
+  assert.equal(canvas.style.touchAction, "pan-y");
+  assert.equal(listeners.size, 0);
+});
 
 test("fixed host consumes the Fe-derived authored-raster draw count", () => {
   assert.equal(rasterDrawVertexCount({ draw_vertices: 7 }), 7);

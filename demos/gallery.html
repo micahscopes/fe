@@ -151,6 +151,17 @@
   .source-inspector .message { padding: 24px; color: #aeb8cc; }
   .source-inspector .error { color: #ff9c9c; white-space: pre-wrap; }
   .source-inspector[hidden], .source-inspector [hidden] { display: none !important; }
+  @media (max-width: 600px) {
+    body { padding: 12px; }
+    .gallery-head { margin-bottom: 16px; }
+    .grid { grid-template-columns: minmax(0, 1fr); gap: 18px; }
+    .grid > figure { min-width: 0; padding: 9px; contain-intrinsic-size: auto 560px; }
+    .todo-app .todo-heading { font-size: 52px; }
+    .todo-app .footer { display: grid; gap: 8px; }
+    .todo-app .todo-count, .todo-app .clear-completed { float: none; }
+    .todo-app .filters { position: static; }
+    .source-inspector { inset: 8px; }
+  }
 </style>
 </head>
 <body>

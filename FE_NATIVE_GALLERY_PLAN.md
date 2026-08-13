@@ -740,6 +740,18 @@ Origin: honesty audit of Claude Code session
   execution, borrow expiry, release, and stale rejection end to end. This is
   architectural composting before the real MIR suspension/re-entry slice, not
   a claim that main-thread suspension or browser handlers already exist.
+- A mobile-safety follow-up keeps the sequential policy in the resident Fe
+  shell but changes its fixed opcode-14 realization from cold-to-live to
+  poster-only loading. Poster capture and off-viewport suspension now destroy
+  retained GPU buffers/pipeline references, pointer capture is unwound across
+  suspension/cancellation, and the narrow gallery layout no longer overflows
+  its viewport. Until typed device-capability facts exist, the fixed runtime
+  also applies an explicit coarse-pointer/CPU backing-store safety ceiling;
+  this is marked host debt, not the final authoring model. Responsive quality
+  selection must move into a Fe policy consuming browser/device capabilities
+  through the runtime-control spine. Sixteen fixed render-runtime tests, six
+  bootstrap tests, and a fresh optimized precompile of all 12 render bundles,
+  one Fe page projection, and two resident components are green.
 
 This ledger records achieved evidence, not a relaxation of the phases or the
 Definition of done below.

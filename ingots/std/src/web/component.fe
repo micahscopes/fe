@@ -35,9 +35,11 @@ pub enum ComponentEventKind {
     /// A compiler-correlated cold render surface became available beneath
     /// this component. Its opaque one-based sequence token is in `request`.
     SurfaceDiscovered,
-    /// A previously requested surface reached live presentation.
+    /// A previously requested surface finished its poster-only load.
+    /// The legacy `Live` spelling is retained for append-only ABI/source
+    /// compatibility; the fixed host no longer leaves sequenced tiles live.
     SurfaceLive,
-    /// A previously requested surface failed during activation.
+    /// A previously requested surface failed during loading.
     SurfaceError,
     /// A previously requested surface exceeded the Fe-selected deadline.
     SurfaceTimeout,
@@ -194,7 +196,7 @@ impl SequentialSurfaceActivation {
 
     pub fn write(self, writer: ComponentWriter, timeout_ms: u32) -> ComponentWriter {
         if self.issue {
-            writer.activate_surface(sequence: self.next, timeout_ms: timeout_ms)
+            writer.load_surface(sequence: self.next, timeout_ms: timeout_ms)
         } else {
             writer
         }
@@ -497,13 +499,20 @@ impl ComponentWriter {
         writer.bytes(value: value)
     }
 
-    /// Request cold-to-live activation of one compiler-correlated surface.
+    /// Request a poster-only load of one compiler-correlated surface.
     /// Completion or failure returns through the append-only surface event
     /// kinds; ordering, deadline, and fail-open policy remain Fe-owned.
-    pub fn activate_surface(self, sequence: u32, timeout_ms: u32) -> Self {
+    pub fn load_surface(self, sequence: u32, timeout_ms: u32) -> Self {
         let writer = self.byte(value: 14)
         let writer = writer.word(value: sequence)
         writer.word(value: timeout_ms)
+    }
+
+    /// Compatibility spelling for the original opcode-14 API. Sequenced
+    /// gallery callers now use `load_surface`; the fixed wire opcode remains
+    /// append-only for already-compiled components.
+    pub fn activate_surface(self, sequence: u32, timeout_ms: u32) -> Self {
+        self.load_surface(sequence: sequence, timeout_ms: timeout_ms)
     }
 
     pub fn finish(self) -> BrowserBytes {

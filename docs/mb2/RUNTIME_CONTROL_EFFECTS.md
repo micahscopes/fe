@@ -124,7 +124,9 @@ manifest-driven.
    from handwritten JavaScript into Fe handlers and structured scopes.
 7. Route WebGPU completion, device loss/recovery, and resource lifetime through
    the same outcome/scope machinery.
-8. Delete remaining semantic render-manifest fetch/interpretation after typed
+8. Expose typed device/viewport capability facts so Fe owns responsive render
+   quality; delete the fixed host's temporary coarse-pointer/CPU safety cap.
+9. Delete remaining semantic render-manifest fetch/interpretation after typed
    exports carry the complete contract.
 
 Each slice needs an independent semantic oracle. Generated-byte equality is
