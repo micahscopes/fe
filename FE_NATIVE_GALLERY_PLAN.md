@@ -771,8 +771,16 @@ Origin: honesty audit of Claude Code session
   Wasm payload-enum value lane required by `TaskOutcome`, including executable
   construction/match/extraction, public argument/result flattening, invalid-tag
   traps, and the previously walled effectful `Result` flagship. Executable MIR
-  block splitting, live-value persistence/reconstruction, and fixed Wasm
-  start/resume exports remain the active materialization slice.
+  block splitting now consumes direct nominal suspension calls into a verified
+  target-neutral `Complete | SuspendedN` machine: every suspension variant owns
+  its pending token plus only that site's live frame, while each continuation
+  receives those exact locals followed by its typed `TaskOutcome` delivery.
+  Wasm emits compiler-named start/resume exports with no `fe:control` import;
+  independent Wasmtime gates execute success, failure, cancellation, forged-tag
+  trapping, and a two-site chain whose inactive variant lanes remain zero.
+  Linked caller/callee frames, host-owned frame persistence, and connection to
+  the generation-safe executor remain the active materialization slice; a real
+  Fe effect-provider chain fails explicitly at that linked-frame boundary.
 - A mobile-safety follow-up keeps the sequential policy in the resident Fe
   shell but changes its fixed opcode-14 realization from cold-to-live to
   poster-only loading. Poster capture and off-viewport suspension now destroy

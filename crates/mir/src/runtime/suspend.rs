@@ -15,8 +15,9 @@ use rustc_hash::FxHashSet;
 use crate::{MirDb, RuntimeControlEffectFuncKind, RuntimeInstance, runtime_control_effect_kind};
 
 use super::{
-    PlaceElem, PlaceRoot, RBlock, RBlockId, RExpr, RLocalId, RStmt, RTerminator, RuntimeBody,
-    RuntimeBuiltin, RuntimeClass, RuntimeLocalRoot, RuntimePackage, RuntimePlace,
+    EnumLayoutKey, EnumVariantLayout, LayoutId, LayoutKey, PlaceElem, PlaceRoot, RBlock, RBlockId,
+    RExpr, RLocal, RLocalId, RStmt, RTerminator, RuntimeBody, RuntimeBuiltin, RuntimeCarrier,
+    RuntimeClass, RuntimeLocalRoot, RuntimePackage, RuntimeParam, RuntimePlace, VariantId,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -82,6 +83,48 @@ pub enum RuntimeSuspensionPlanError {
     },
     LiveValueHasNoRuntimeClass {
         local: RLocalId,
+    },
+}
+
+/// One executable target-neutral state-machine body. State zero is the normal
+/// authored entry. Every nonzero segment receives exactly the frame values
+/// live at its suspension point plus the typed delivery local populated on
+/// re-entry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeContinuationSegment<'db> {
+    pub continuation_state: u32,
+    pub body: RuntimeBody<'db>,
+}
+
+/// Compiler-created payload-enum protocol between continuation segments and a
+/// backend materializer. Variant zero is `Complete`; variant N is the Nth
+/// suspension point and carries its pending token followed by that point's
+/// exact live frame. This is internal MIR, not a host manifest or authoring
+/// surface.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeResumableMachine<'db> {
+    pub source: RuntimeInstance<'db>,
+    pub step_layout: LayoutId<'db>,
+    pub entry: RuntimeContinuationSegment<'db>,
+    pub continuations: Box<[RuntimeContinuationSegment<'db>]>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RuntimeSuspensionMaterializeError<'db> {
+    CalleeFrameRequired {
+        body: RuntimeInstance<'db>,
+        callee: RuntimeInstance<'db>,
+    },
+    SuspendingTailFrameRequired {
+        body: RuntimeInstance<'db>,
+        callee: RuntimeInstance<'db>,
+    },
+    MissingRuntimeClass {
+        local: RLocalId,
+    },
+    UnsupportedTerminalCall {
+        block: RBlockId,
+        callee: RuntimeInstance<'db>,
     },
 }
 
@@ -259,6 +302,294 @@ pub fn derive_runtime_resumable_plans<'db>(
         });
     }
     Ok(plans)
+}
+
+/// Split one directly-suspending body into executable target-neutral segments.
+///
+/// This first materialization layer deliberately refuses a suspending callee
+/// or tail call: those require a linked stack of per-body frames, not an
+/// approximation that happens to work when a helper is inlined. Direct sites,
+/// including sites reached again through loops, are fully split. Backends can
+/// persist the returned enum's typed lanes and invoke the selected continuation
+/// with its exact variant payload plus one typed `TaskOutcome` delivery.
+pub fn materialize_runtime_resumable_machine<'db>(
+    db: &'db dyn MirDb,
+    plan: &RuntimeResumableBodyPlan<'db>,
+) -> Result<RuntimeResumableMachine<'db>, RuntimeSuspensionMaterializeError<'db>> {
+    for point in &plan.points {
+        if let RuntimeSuspensionCause::Callee { callee } = point.cause {
+            return Err(RuntimeSuspensionMaterializeError::CalleeFrameRequired {
+                body: plan.body,
+                callee,
+            });
+        }
+    }
+    if let Some(tail) = plan.suspending_tails.first() {
+        return Err(
+            RuntimeSuspensionMaterializeError::SuspendingTailFrameRequired {
+                body: plan.body,
+                callee: tail.callee,
+            },
+        );
+    }
+
+    let source_body = plan.body.body(db);
+    let complete_fields = source_body
+        .signature
+        .ret
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+    let mut variants = Vec::with_capacity(plan.points.len() + 1);
+    variants.push(EnumVariantLayout {
+        name: "Complete".to_owned(),
+        fields: complete_fields,
+    });
+    for point in &plan.points {
+        let RuntimeSuspensionCause::Effect { pending } = point.cause else {
+            unreachable!("callee suspension was rejected above")
+        };
+        let mut fields = Vec::with_capacity(point.live_values.len() + 1);
+        fields.push(
+            source_body
+                .value_class(pending)
+                .cloned()
+                .ok_or(RuntimeSuspensionMaterializeError::MissingRuntimeClass { local: pending })?,
+        );
+        for local in &point.live_values {
+            fields.push(
+                source_body.value_class(*local).cloned().ok_or(
+                    RuntimeSuspensionMaterializeError::MissingRuntimeClass { local: *local },
+                )?,
+            );
+        }
+        variants.push(EnumVariantLayout {
+            name: format!("Suspended{}", point.continuation_state),
+            fields: fields.into_boxed_slice(),
+        });
+    }
+    let step_layout = LayoutId::new(
+        db,
+        LayoutKey::Enum(EnumLayoutKey {
+            // This layout is compiler-owned and has no distinct authored type.
+            // Unit is provenance only; exact runtime fields above are the ABI.
+            source_ty: hir::analysis::ty::ty_def::TyId::unit(db),
+            variants: variants.into_boxed_slice(),
+        }),
+    );
+    let point_by_position = plan
+        .points
+        .iter()
+        .map(|point| ((point.block, point.statement as usize), point))
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    let entry_body =
+        materialize_segment_body(db, &source_body, step_layout, &point_by_position, None)?;
+    let entry = RuntimeContinuationSegment {
+        continuation_state: 0,
+        body: entry_body,
+    };
+    let continuations = plan
+        .points
+        .iter()
+        .map(|point| {
+            materialize_segment_body(
+                db,
+                &source_body,
+                step_layout,
+                &point_by_position,
+                Some(point),
+            )
+            .map(|body| RuntimeContinuationSegment {
+                continuation_state: point.continuation_state,
+                body,
+            })
+        })
+        .collect::<Result<Box<[_]>, _>>()?;
+    Ok(RuntimeResumableMachine {
+        source: plan.body,
+        step_layout,
+        entry,
+        continuations,
+    })
+}
+
+fn materialize_segment_body<'db>(
+    db: &'db dyn MirDb,
+    source: &RuntimeBody<'db>,
+    step_layout: LayoutId<'db>,
+    points: &std::collections::BTreeMap<(RBlockId, usize), &RuntimeSuspensionPoint<'db>>,
+    resume_from: Option<&RuntimeSuspensionPoint<'db>>,
+) -> Result<RuntimeBody<'db>, RuntimeSuspensionMaterializeError<'db>> {
+    let mut body = source.clone();
+    let step_class = RuntimeClass::AggregateValue {
+        layout: step_layout,
+    };
+    let step_local = RLocalId::from_u32(body.locals.len() as u32);
+    body.locals.push(RLocal {
+        semantic_ty: hir::analysis::ty::ty_def::TyId::unit(db),
+        carrier: RuntimeCarrier::Value(step_class.clone()),
+        root: RuntimeLocalRoot::None,
+    });
+    body.signature.ret = Some(step_class);
+
+    let block_shift = usize::from(resume_from.is_some());
+    let mut blocks = Vec::with_capacity(source.blocks.len() + block_shift);
+    if let Some(point) = resume_from {
+        body.signature.params = point
+            .live_values
+            .iter()
+            .copied()
+            .chain(std::iter::once(point.delivery))
+            .map(|local| {
+                let class = source
+                    .value_class(local)
+                    .cloned()
+                    .ok_or(RuntimeSuspensionMaterializeError::MissingRuntimeClass { local })?;
+                Ok(RuntimeParam { local, class })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let original = &source.blocks[point.block.index()];
+        blocks.push(materialize_block(
+            original,
+            point.block,
+            point.statement as usize + 1,
+            step_layout,
+            step_local,
+            points,
+            1,
+        )?);
+    }
+    for (index, block) in source.blocks.iter().enumerate() {
+        blocks.push(materialize_block(
+            block,
+            RBlockId::new(index),
+            0,
+            step_layout,
+            step_local,
+            points,
+            block_shift,
+        )?);
+    }
+    body.blocks = blocks;
+    Ok(body)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn materialize_block<'db>(
+    source: &RBlock<'db>,
+    original_block: RBlockId,
+    start_statement: usize,
+    step_layout: LayoutId<'db>,
+    step_local: RLocalId,
+    points: &std::collections::BTreeMap<(RBlockId, usize), &RuntimeSuspensionPoint<'db>>,
+    block_shift: usize,
+) -> Result<RBlock<'db>, RuntimeSuspensionMaterializeError<'db>> {
+    let mut stmts = Vec::new();
+    for (relative, statement) in source.stmts[start_statement..].iter().enumerate() {
+        let statement_index = start_statement + relative;
+        let Some(point) = points.get(&(original_block, statement_index)).copied() else {
+            stmts.push(statement.clone());
+            continue;
+        };
+        let RuntimeSuspensionCause::Effect { pending } = point.cause else {
+            unreachable!("callee suspension was rejected before segment construction")
+        };
+        let variant = VariantId {
+            enum_layout: step_layout,
+            index: point.continuation_state as u16,
+        };
+        let fields = std::iter::once(pending)
+            .chain(point.live_values.iter().copied())
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        stmts.push(RStmt::Assign {
+            dst: step_local,
+            expr: RExpr::EnumMake {
+                layout: step_layout,
+                variant,
+                fields,
+            },
+        });
+        return Ok(RBlock {
+            stmts,
+            terminator: RTerminator::Return(Some(step_local)),
+        });
+    }
+
+    let terminator = match &source.terminator {
+        RTerminator::Return(value) => {
+            stmts.push(RStmt::Assign {
+                dst: step_local,
+                expr: RExpr::EnumMake {
+                    layout: step_layout,
+                    variant: VariantId {
+                        enum_layout: step_layout,
+                        index: 0,
+                    },
+                    fields: value.iter().copied().collect::<Vec<_>>().into_boxed_slice(),
+                },
+            });
+            RTerminator::Return(Some(step_local))
+        }
+        RTerminator::TerminalCall { callee, .. } => {
+            return Err(RuntimeSuspensionMaterializeError::UnsupportedTerminalCall {
+                block: original_block,
+                callee: *callee,
+            });
+        }
+        other => shift_terminator(other, block_shift),
+    };
+    Ok(RBlock { stmts, terminator })
+}
+
+fn shift_block(block: RBlockId, by: usize) -> RBlockId {
+    RBlockId::new(block.index() + by)
+}
+
+fn shift_terminator<'db>(terminator: &RTerminator<'db>, by: usize) -> RTerminator<'db> {
+    match terminator {
+        RTerminator::Goto(block) => RTerminator::Goto(shift_block(*block, by)),
+        RTerminator::Branch {
+            cond,
+            then_bb,
+            else_bb,
+        } => RTerminator::Branch {
+            cond: *cond,
+            then_bb: shift_block(*then_bb, by),
+            else_bb: shift_block(*else_bb, by),
+        },
+        RTerminator::SwitchScalar {
+            discr,
+            cases,
+            default,
+        } => RTerminator::SwitchScalar {
+            discr: *discr,
+            cases: cases
+                .iter()
+                .map(|(value, block)| (value.clone(), shift_block(*block, by)))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            default: shift_block(*default, by),
+        },
+        RTerminator::MatchEnumTag {
+            tag,
+            enum_layout,
+            cases,
+            default,
+        } => RTerminator::MatchEnumTag {
+            tag: *tag,
+            enum_layout: *enum_layout,
+            cases: cases
+                .iter()
+                .map(|(variant, block)| (*variant, shift_block(*block, by)))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            default: default.map(|block| shift_block(block, by)),
+        },
+        other => other.clone(),
+    }
 }
 
 fn body_directly_suspends(db: &dyn MirDb, body: &RuntimeBody<'_>) -> bool {

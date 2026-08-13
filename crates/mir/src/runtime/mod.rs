@@ -25,9 +25,11 @@ pub use pretty::{
     format_runtime_verify_failure,
 };
 pub use suspend::{
-    RuntimeContinuationFrameSlot, RuntimeResumableBodyPlan, RuntimeSuspendingTail,
-    RuntimeSuspensionCause, RuntimeSuspensionPlanError, RuntimeSuspensionPoint,
+    RuntimeContinuationFrameSlot, RuntimeContinuationSegment, RuntimeResumableBodyPlan,
+    RuntimeResumableMachine, RuntimeSuspendingTail, RuntimeSuspensionCause,
+    RuntimeSuspensionMaterializeError, RuntimeSuspensionPlanError, RuntimeSuspensionPoint,
     derive_runtime_resumable_plans, derive_runtime_suspension_points,
+    materialize_runtime_resumable_machine,
 };
 pub use transform::{
     RuntimeAggregateFacts, RuntimeArgFact, RuntimeArgShapeKey, RuntimeScalarConstFacts,

@@ -1,8 +1,10 @@
 use common::InputDb;
 use driver::DriverDataBase;
 use fe_mir::{
-    RuntimeFunctionOwner, RuntimeSuspensionCause, derive_runtime_resumable_plans,
-    derive_runtime_suspension_points, runtime::build_wasm_runtime_package_for_entry,
+    Layout, RExpr, RStmt, RuntimeFunctionOwner, RuntimeSuspensionCause,
+    derive_runtime_resumable_plans, derive_runtime_suspension_points,
+    materialize_runtime_resumable_machine, runtime::build_wasm_runtime_package_for_entry,
+    verify_runtime_body,
 };
 use hir::analysis::ty::ty_check::BodyOwner;
 use url::Url;
@@ -113,6 +115,52 @@ fn nominal_suspend_derives_state_pending_delivery_and_exact_live_values() {
         !point.live_values.contains(&params[2].local),
         "an unused parameter must not inflate the continuation frame"
     );
+
+    let plans = derive_runtime_resumable_plans(&db, package).unwrap();
+    let plan = plans
+        .iter()
+        .find(|plan| plan.body == function.instance(&db))
+        .unwrap();
+    let machine = materialize_runtime_resumable_machine(&db, plan).unwrap();
+    let Layout::Enum(step) = machine.step_layout.data(&db) else {
+        panic!("the machine result must be a compiler-derived payload enum");
+    };
+    assert_eq!(step.variants.len(), 2);
+    assert_eq!(step.variants[0].name, "Complete");
+    assert_eq!(step.variants[1].name, "Suspended1");
+    assert_eq!(step.variants[1].fields.len(), 2);
+    assert_eq!(machine.continuations.len(), 1);
+    assert_eq!(
+        machine.continuations[0]
+            .body
+            .signature
+            .params
+            .iter()
+            .map(|param| param.local)
+            .collect::<Vec<_>>(),
+        vec![params[1].local, point.delivery],
+        "re-entry receives the exact live frame followed by the typed delivery"
+    );
+    let view: &dyn fe_mir::MirDb = &db;
+    for segment in std::iter::once(&machine.entry).chain(machine.continuations.iter()) {
+        verify_runtime_body(&db, &view, &segment.body).unwrap_or_else(|error| {
+            panic!("materialized segment failed MIR verification: {error:?}")
+        });
+        assert!(
+            !segment.body.blocks.iter().any(|block| {
+                block.stmts.iter().any(|statement| {
+                    matches!(
+                        statement,
+                        RStmt::Assign {
+                            expr: RExpr::Call { callee, .. },
+                            ..
+                        } if fe_mir::runtime_control_effect_kind(&db, *callee).is_some()
+                    )
+                })
+            }),
+            "materialized segments must consume, not import, the nominal suspend operation"
+        );
+    }
 }
 
 #[test]

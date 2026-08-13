@@ -120,10 +120,18 @@ manifest-driven.
 2. [in progress] Split MIR at suspension points and persist/reconstruct live
    state. Exact live sets, stable continuation-state assignment, typed frame
    layouts, and fixed-point propagation through ordinary helpers/effect
-   providers are landed. Executable block splitting and frame persistence/
-   reconstruction remain.
-3. [todo] Materialize fixed Wasm re-entry exports and connect them to the existing
-   generation-safe executor.
+   providers are landed. Direct suspensions now split into verified executable
+   segments: a compiler-created `Complete | SuspendedN` payload enum carries
+   each site's pending token and exact live frame, and typed re-entry parameters
+   reconstruct those locals. Linked caller/callee frames and host-owned frame
+   persistence remain.
+3. [in progress] Materialize fixed Wasm re-entry exports and connect them to the
+   existing generation-safe executor. Direct tasks now emit compiler-named
+   `__fe_task_start_*` and `__fe_task_resume_*_N` exports with no `fe:control`
+   import. Wasmtime gates execute success, failure, cancellation, invalid-tag
+   trapping, and a two-site suspension chain. Transitive effect/provider stacks
+   still fail explicitly at linked-frame materialization; executor wiring
+   remains.
 4. [todo] Interpret timer/receive/spawn and callback completion through that path on
    MainThread and Worker placements; retain blocking `Wait` only where legal.
 5. [todo] Derive browser `EventSource` handlers and move the gallery activation/timer

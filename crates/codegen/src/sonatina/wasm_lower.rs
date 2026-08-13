@@ -162,7 +162,7 @@ pub fn compile_runtime_package_wasm_with_guest_callbacks(
     let isa = create_wasm32_isa();
     let builder = ModuleBuilder::new(ModuleCtx::new(&isa));
     let mut lowerer =
-        PortableModuleLowerer::new(db, builder, &isa, package, HashSet::new(), &[], true);
+        PortableModuleLowerer::new(db, builder, &isa, package, HashSet::new(), &[], true)?;
     lowerer.declare_functions()?;
     lowerer.lower_bodies()?;
     lowerer.synthesize_guest_callbacks(callbacks)?;
@@ -287,7 +287,7 @@ fn compile_runtime_package_wasm_inner(
         wrapped_lane_names,
         export_aliases,
         validate_host_enum_params,
-    );
+    )?;
     lowerer.declare_functions()?;
     lowerer.lower_bodies()?;
     for lane in canonical_lanes {
@@ -384,7 +384,7 @@ pub(crate) fn compile_runtime_package_native(
     ));
     let builder = ModuleBuilder::new(ModuleCtx::new(&isa));
     let mut lowerer =
-        PortableModuleLowerer::new(db, builder, &isa, package, HashSet::new(), &[], true);
+        PortableModuleLowerer::new(db, builder, &isa, package, HashSet::new(), &[], true)?;
     lowerer.declare_functions()?;
     lowerer.lower_bodies()?;
     Ok(lowerer.finish())
@@ -2584,6 +2584,19 @@ fn drop_dead_scalar_constants_and_copies(body: &mut RuntimeBody<'_>) {
     }
 }
 
+fn normalize_portable_body<'db>(
+    db: &'db DriverDataBase,
+    instance: RuntimeInstance<'db>,
+    body: &mut RuntimeBody<'db>,
+) {
+    reify_static_aggregate_params(db, body);
+    repair_scalar_semantic_types_from_array_projections(db, body);
+    lower_usize_array_place_classes(db, body);
+    narrow_usize_scalars(db, instance, body);
+    drop_dead_pure_aggregate_values(db, body);
+    drop_dead_scalar_constants_and_copies(body);
+}
+
 struct PortableModuleLowerer<'db, 'a, I>
 where
     I: Isa<InstSet = NativeInstSet>,
@@ -2597,8 +2610,18 @@ where
     func_map: FxHashMap<RuntimeInstance<'db>, FuncRef>,
     resource_element_cache: FxHashMap<TyId<'db>, GpuResourceElementType>,
     resource_type_cache: FxHashMap<TyId<'db>, Type>,
+    /// Compiler-derived continuation segments. Their symbols and typed bodies
+    /// come exclusively from the MIR suspension machine; no manifest or host
+    /// entry table participates in declaration or lowering.
+    resumable_continuations: Vec<PreparedResumableContinuation<'db>>,
     wrapped_lane_names: HashSet<String>,
     validate_host_enum_params: bool,
+}
+
+struct PreparedResumableContinuation<'db> {
+    symbol: String,
+    body: RuntimeBody<'db>,
+    func_ref: Option<FuncRef>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2628,15 +2651,10 @@ where
         wrapped_lane_names: HashSet<String>,
         export_aliases: &[(String, String)],
         validate_host_enum_params: bool,
-    ) -> Self {
+    ) -> Result<Self, LowerError> {
         let mut prepared_bodies = prepare_inline_value_bodies(db, package).bodies;
         for (instance, body) in &mut prepared_bodies {
-            reify_static_aggregate_params(db, body);
-            repair_scalar_semantic_types_from_array_projections(db, body);
-            lower_usize_array_place_classes(db, body);
-            narrow_usize_scalars(db, *instance, body);
-            drop_dead_pure_aggregate_values(db, body);
-            drop_dead_scalar_constants_and_copies(body);
+            normalize_portable_body(db, *instance, body);
         }
         let mut func_symbols = assign_sonatina_function_symbols(db, package);
         for function in package.functions(db) {
@@ -2650,7 +2668,47 @@ where
                 func_symbols.insert(instance, export.clone());
             }
         }
-        Self {
+        let plans = mir::derive_runtime_resumable_plans(db, *package).map_err(|error| {
+            LowerError::Unsupported(format!(
+                "failed to derive Wasm continuation frames: {error:?}"
+            ))
+        })?;
+        let mut resumable_continuations = Vec::new();
+        for plan in &plans {
+            let machine =
+                mir::materialize_runtime_resumable_machine(db, plan).map_err(|error| {
+                    LowerError::Unsupported(format!(
+                        "Wasm resumable stack materialization is incomplete for `{}`: {error:?}",
+                        func_symbols
+                            .get(&plan.body)
+                            .cloned()
+                            .unwrap_or_else(|| mir::runtime_instance_symbol_key(db, plan.body))
+                    ))
+                })?;
+            let authored_symbol = func_symbols
+                .get(&plan.body)
+                .cloned()
+                .unwrap_or_else(|| mir::runtime_instance_symbol_key(db, plan.body));
+            let start_symbol = format!("__fe_task_start_{authored_symbol}");
+            func_symbols.insert(plan.body, start_symbol);
+            let mut entry_body = machine.entry.body;
+            normalize_portable_body(db, plan.body, &mut entry_body);
+            prepared_bodies.insert(plan.body, entry_body);
+            for continuation in machine.continuations {
+                let symbol = format!(
+                    "__fe_task_resume_{authored_symbol}_{}",
+                    continuation.continuation_state
+                );
+                let mut body = continuation.body;
+                normalize_portable_body(db, plan.body, &mut body);
+                resumable_continuations.push(PreparedResumableContinuation {
+                    symbol,
+                    body,
+                    func_ref: None,
+                });
+            }
+        }
+        Ok(Self {
             db,
             builder,
             isa,
@@ -2660,9 +2718,10 @@ where
             func_map: FxHashMap::default(),
             resource_element_cache: FxHashMap::default(),
             resource_type_cache: FxHashMap::default(),
+            resumable_continuations,
             wrapped_lane_names,
             validate_host_enum_params,
-        }
+        })
     }
 
     fn finish(self) -> Module {
@@ -2700,6 +2759,9 @@ where
                 continue;
             }
             let instance = function.instance(self.db);
+            if mir::runtime_control_effect_kind(self.db, instance).is_some() {
+                continue;
+            }
             if let Some(module) = mir::host_import_module(self.db, instance) {
                 modules.insert(self.function_symbol(instance), module);
             }
@@ -2835,10 +2897,11 @@ where
             if gpu_intrinsic(self.db, instance).is_some() {
                 continue;
             }
-            if let Some(control) = mir::runtime_control_effect_kind(self.db, instance) {
-                return Err(LowerError::Unsupported(format!(
-                    "compiler-recognized control operation `{control:?}` reached ordinary Wasm import lowering; resumable frame/re-entry materialization is required"
-                )));
+            if mir::runtime_control_effect_kind(self.db, instance).is_some() {
+                // The nominal declaration has already been consumed by the
+                // compiler-derived state machine. It is neither a function nor
+                // an import in the emitted module.
+                continue;
             }
             if let Some(name) = mir::host_import_name(self.db, instance) {
                 if let Some(descriptor) = mir::indirect_host_result(self.db, instance) {
@@ -2887,6 +2950,17 @@ where
             self.builder.ctx.set_inline_hint(func_ref, inline_hint);
             self.func_map.insert(instance, func_ref);
         }
+        for index in 0..self.resumable_continuations.len() {
+            let symbol = self.resumable_continuations[index].symbol.clone();
+            let body = self.resumable_continuations[index].body.clone();
+            let signature = self.lower_body_signature(&symbol, Linkage::Public, &body)?;
+            let func_ref = self.builder.declare_function(signature).map_err(|err| {
+                LowerError::Internal(format!(
+                    "failed to declare Wasm continuation `{symbol}`: {err}"
+                ))
+            })?;
+            self.resumable_continuations[index].func_ref = Some(func_ref);
+        }
         Ok(())
     }
 
@@ -2903,6 +2977,23 @@ where
         // 1:1 through `ty_for_class` exactly as before. The flattening order is
         // preserved so the prologue's running wasm-arg index matches, and a
         // scalar-tuple RETURN becomes a wasm multi-value result the host reads.
+        let linkage = if self.wrapped_lane_names.contains(&symbol) {
+            // The host ABI is a synthesized canonical or surface-frame
+            // wrapper. Its underlying typed Fe lane remains an internal
+            // implementation dependency even though it seeded the package.
+            Linkage::Private
+        } else {
+            linkage_for_runtime(function.linkage(self.db))
+        };
+        self.lower_body_signature(&symbol, linkage, &body)
+    }
+
+    fn lower_body_signature(
+        &mut self,
+        symbol: &str,
+        linkage: Linkage,
+        body: &RuntimeBody<'db>,
+    ) -> Result<Signature, LowerError> {
         let mut args = Vec::with_capacity(body.signature.params.len());
         for param in &body.signature.params {
             let semantic_ty = body
@@ -2940,15 +3031,7 @@ where
                 }
             }
         };
-        let linkage = if self.wrapped_lane_names.contains(&symbol) {
-            // The host ABI is a synthesized canonical or surface-frame
-            // wrapper. Its underlying typed Fe lane remains an internal
-            // implementation dependency even though it seeded the package.
-            Linkage::Private
-        } else {
-            linkage_for_runtime(function.linkage(self.db))
-        };
-        Ok(Signature::new(&symbol, linkage, &args, &ret_tys))
+        Ok(Signature::new(symbol, linkage, &args, &ret_tys))
     }
 
     fn lower_bodies(&mut self) -> Result<(), LowerError> {
@@ -2980,6 +3063,28 @@ where
                     )),
                     LowerError::Internal(message) => LowerError::Internal(format!(
                         "{message}; while lowering Wasm function `{symbol}`"
+                    )),
+                    other => other,
+                })?;
+        }
+        for index in 0..self.resumable_continuations.len() {
+            let symbol = self.resumable_continuations[index].symbol.clone();
+            let body = self.resumable_continuations[index].body.clone();
+            let func_ref = self.resumable_continuations[index]
+                .func_ref
+                .ok_or_else(|| {
+                    LowerError::Internal(format!(
+                        "Wasm continuation `{symbol}` lowered before declaration"
+                    ))
+                })?;
+            PortableFunctionLowerer::new(self, body, func_ref, true)?
+                .lower()
+                .map_err(|error| match error {
+                    LowerError::Unsupported(message) => LowerError::Unsupported(format!(
+                        "{message}; while lowering compiler-derived Wasm continuation `{symbol}`"
+                    )),
+                    LowerError::Internal(message) => LowerError::Internal(format!(
+                        "{message}; while lowering compiler-derived Wasm continuation `{symbol}`"
                     )),
                     other => other,
                 })?;

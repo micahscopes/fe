@@ -57,18 +57,18 @@ fn compile_to_wasm_err(name: &str, source: &str) -> String {
 }
 
 #[test]
-fn compiler_recognized_suspend_fails_at_the_missing_materializer_not_host_abi() {
-    let error = compile_to_wasm_err(
-        "resumable_requires_materializer.fe",
+fn compiler_recognized_suspend_materializes_start_and_typed_resume_exports() {
+    let wasm = compile_to_wasm(
+        "resumable_materialized.fe",
         r#"
 use core::pending::{Pending, TaskOutcome}
 use std::host::raw::suspend
 use std::wasm::WasmBackend
 
-pub fn task(_ pending: own Pending<WasmBackend, u32>) -> u32 {
+pub fn task(_ pending: own Pending<WasmBackend, u32>, _ kept: u32) -> u32 {
     let outcome: TaskOutcome<u32, u32> = suspend(pending)
     match outcome {
-        TaskOutcome::Success(value) => value
+        TaskOutcome::Success(value) => value + kept
         TaskOutcome::Failure(error) => error
         TaskOutcome::Cancelled => 0
     }
@@ -76,8 +76,135 @@ pub fn task(_ pending: own Pending<WasmBackend, u32>) -> u32 {
 "#,
     );
     assert!(
-        error.contains("resumable frame/re-entry materialization is required"),
-        "a suspend point must never degrade into an aggregate host import: {error}"
+        func_imports(&wasm).is_empty(),
+        "the nominal suspend boundary must be consumed by codegen, never emitted as a host import"
+    );
+    let (mut store, instance) = instantiate(&wasm);
+    let start = instance
+        .get_typed_func::<(i32, i32), (i32, i32, i32, i32)>(&mut store, "__fe_task_start_task")
+        .expect("compiler-derived start export");
+    let resume = instance
+        .get_typed_func::<(i32, i32, i32, i32), (i32, i32, i32, i32)>(
+            &mut store,
+            "__fe_task_resume_task_1",
+        )
+        .expect("compiler-derived typed continuation export");
+
+    assert_eq!(
+        start.call(&mut store, (77, 5)).unwrap(),
+        (1, 0, 77, 5),
+        "Suspended1 carries the pending token and exact live frame; Complete is inactive"
+    );
+    assert_eq!(
+        resume.call(&mut store, (5, 1, 0, 9)).unwrap(),
+        (0, 14, 0, 0),
+        "a successful typed delivery reconstructs the frame and completes"
+    );
+    assert_eq!(
+        resume.call(&mut store, (5, 0, 3, 0)).unwrap(),
+        (0, 3, 0, 0),
+        "a failure delivery follows authored Fe policy"
+    );
+    assert_eq!(
+        resume.call(&mut store, (5, 2, 0, 0)).unwrap(),
+        (0, 0, 0, 0),
+        "cancellation is an ordinary typed delivery"
+    );
+    assert!(
+        resume.call(&mut store, (5, 3, 0, 0)).is_err(),
+        "a forged TaskOutcome tag must trap at the generated public boundary"
+    );
+}
+
+#[test]
+fn two_suspend_sites_chain_through_distinct_exact_frames() {
+    let wasm = compile_to_wasm(
+        "two_resumable_sites.fe",
+        r#"
+use core::pending::{Pending, TaskOutcome}
+use std::host::raw::suspend
+use std::wasm::WasmBackend
+
+pub fn task(
+    _ first_pending: own Pending<WasmBackend, u32>,
+    _ second_pending: own Pending<WasmBackend, u32>,
+    _ seed: u32,
+) -> u32 {
+    let first_outcome: TaskOutcome<u32, u32> = suspend(first_pending)
+    let first = match first_outcome {
+        TaskOutcome::Success(value) => value + seed
+        TaskOutcome::Failure(error) => error
+        TaskOutcome::Cancelled => seed
+    }
+    let second_outcome: TaskOutcome<u32, u32> = suspend(second_pending)
+    match second_outcome {
+        TaskOutcome::Success(value) => first + value
+        TaskOutcome::Failure(error) => error
+        TaskOutcome::Cancelled => first
+    }
+}
+"#,
+    );
+    assert!(func_imports(&wasm).is_empty());
+    let (mut store, instance) = instantiate(&wasm);
+    type Step = (i32, i32, i32, i32, i32, i32, i32);
+    let start = instance
+        .get_typed_func::<(i32, i32, i32), Step>(&mut store, "__fe_task_start_task")
+        .unwrap();
+    let resume1 = instance
+        .get_typed_func::<(i32, i32, i32, i32, i32), Step>(&mut store, "__fe_task_resume_task_1")
+        .unwrap();
+    let resume2 = instance
+        .get_typed_func::<(i32, i32, i32, i32), Step>(&mut store, "__fe_task_resume_task_2")
+        .unwrap();
+
+    assert_eq!(
+        start.call(&mut store, (41, 42, 5)).unwrap(),
+        (1, 0, 41, 42, 5, 0, 0)
+    );
+    assert_eq!(
+        resume1.call(&mut store, (42, 5, 1, 0, 7)).unwrap(),
+        (2, 0, 0, 0, 0, 42, 12),
+        "site two retains only its pending token and the computed first value"
+    );
+    assert_eq!(
+        resume2.call(&mut store, (12, 1, 0, 8)).unwrap(),
+        (0, 20, 0, 0, 0, 0, 0)
+    );
+}
+
+#[test]
+fn transitive_suspend_stack_fails_at_linked_frame_materialization() {
+    let error = compile_to_wasm_err(
+        "transitive_resumable_stack.fe",
+        r#"
+use core::pending::{Pending, Suspend, TaskOutcome}
+use std::host::Resumable
+use std::wasm::WasmBackend
+
+fn through_effect(_ pending: own Pending<WasmBackend, u32>) -> TaskOutcome<u32, u32>
+    uses (s: Suspend<WasmBackend, u32>)
+{
+    s.suspend(pending)
+}
+
+pub fn task(_ pending: own Pending<WasmBackend, u32>) -> u32 {
+    with (Suspend<WasmBackend, u32> = Resumable {}) {
+        let outcome = through_effect(pending)
+        match outcome {
+            TaskOutcome::Success(value) => value
+            TaskOutcome::Failure(error) => error
+            TaskOutcome::Cancelled => 0
+        }
+    }
+}
+"#,
+    );
+    assert!(
+        error.contains("resumable stack materialization is incomplete")
+            && (error.contains("CalleeFrameRequired")
+                || error.contains("SuspendingTailFrameRequired")),
+        "a transitive effect stack must fail at its explicit linked-frame boundary, never degrade to an import: {error}"
     );
 }
 
