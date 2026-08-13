@@ -165,7 +165,7 @@ const fn geometric_negative(
     _ left: usize, _ right: usize, _ negative_squares: usize,
 ) -> bool {
     let metric_negatives = finite_blade_grade(left & right & negative_squares)
-    let negative = merge_negative(left, right)
+    let mut negative = merge_negative(left, right)
     if (metric_negatives & 1) == 1 { negative = !negative }
     negative
 }
