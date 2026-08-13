@@ -57,12 +57,22 @@ Generated patterns:
 
 Generated types:
 
-- `ty`, `target_ty`, `self_ty`, `str_ty`, `tuple_ty`, `with_elem_ty`,
+- `ty`, `target_ty`, `provider_ty`, `self_ty`, `str_ty`, `tuple_ty`, `with_elem_ty`,
   `trait_assoc_ty`
 
-The canonical inventory currently contains 44 operations. Reflection reads are
+The canonical inventory currently contains 45 operations. Reflection reads are
 not string-dispatched `ImplBuilder` commands; typed handle vocabularies own
 them, so the bespoke reflection-operation inventory is empty.
+
+`provider_ty()` is the exact provider type selected at the derive request. A
+named `using Compile<Program>` selection therefore exposes the ground
+`Compile<Program>` tree without inserting a phantom configuration field into
+the target. Its full type is part of the memoized expansion key: two distinct
+program arguments cannot reuse one generated implementation. Ground
+normalization starts from the request module (where `Program` aliases are
+declared) while provider code and ordinary `ty<T>()` remain scoped to the
+provider module. The configured type must still be finite and ground; the same
+base-graph, node, unfold, and execution bounds fail closed.
 
 ## Natural iteration
 

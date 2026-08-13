@@ -573,7 +573,7 @@ Origin: honesty audit of Claude Code session
   those are the clearest domain representation, but hand-expanded GA
   coefficient routing/evaluation/gradient constructions are debt to replace,
   not an acceptable per-demo specialization.
-- The first honest G2/G3 structural slice is now green. One unchanged Fe FCO
+- The first operator-substitution G2/G3 prototype is now green. One unchanged Fe FCO
   provider lowers both `Sum<Outer<A,B>,Outer<A,B>>` and the structurally
   different `Neg<Outer<Sum<A,B>,Difference<A,B>>>` by reflecting a zero-sized
   `GaProgram` marker and folding its ground type in normalized postorder. New
@@ -582,11 +582,28 @@ Origin: honesty audit of Claude Code session
   expression name is involved. The independent gate executes 1,004 cases per
   tree bit-for-bit against separate Rust tree interpreters, then requires
   browser-valid WGSL with no runtime loop/branch/switch and no host algebra
-  import. This closes the earlier false-genericity objection for the stated
-  three-dimensional `Input`/`Sum`/`Difference`/`Neg`/`Outer` subset. It does
-  not yet close G2/G3 for the full `ga_expr` vocabulary: general diagonal
+  import. This proves structural dispatch across two trees, but it is not a
+  generic GA implementation: dimension, carrier layout, output shape, and the
+  five accepted constructors remain fixed in the fixture. General diagonal
   metric signs/products, compact output types, reflected slot/support
-  derivation, DAG sharing, and QCGA consumption remain open.
+  derivation, and DAG sharing remain open.
+- A configured-provider follow-through now eliminates the phantom program
+  field for the first real QCGA consumer. `using
+  CompileVectorScalarF32<GaProgram<...>>` is reflected by FCO as exact ground
+  Fe type data and keyed into expansion memoization. `ga_expr` adds sparse
+  symmetric metric terms and packed high-dimensional vector supports; the
+  QCGA incidence path now declares its 15-generator paper-null metric and
+  `ScalarProduct<Point,Quadric>` through that shared provider. The retired
+  demo-local code included a 144-candidate mask, twelve-term recursive plan,
+  and 24-way field-selection ladder. Independent evidence is green for 259
+  scalar cases, zero host imports, the actual rank-8 pencil solve, and QCGA
+  typechecking. A second substitution gate varies dimension, supports, metric
+  signs/magnitudes, carrier width, and operand order through the same provider
+  over 131 independent inputs. This establishes genericity only for the
+  provider's explicitly narrow two-vector scalar-product contract. The full
+  operator vocabulary/DAG remains open, and current 41-44 second in-process
+  gates make provider/dependency caching a named performance prerequisite
+  rather than something to hand-wave away.
 - The surface fixed host now observes the canonical Wasm arena's documented
   top-level-call lifetime. Initializer, explicit resident-state replacement,
   scheduling policy, legacy control, immediate transition, and scheduled

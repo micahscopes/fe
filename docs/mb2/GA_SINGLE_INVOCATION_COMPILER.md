@@ -135,10 +135,10 @@ This is a real end-to-end proof of the staging route. It is **not yet** a
 general lowering from every arbitrary expression node to exact terms. The
 prototype's exact plan constructor is specialized to the twice-wedge example.
 
-### Structural expression-lowering slice
+### Structural expression-lowering prototype
 
-`crates/codegen/tests/fixtures/ga_expr_generic_fco` is the first genuinely
-structural G2/G3 slice. One unchanged Fe provider lowers two different ground
+`crates/codegen/tests/fixtures/ga_expr_generic_fco` is an operator-substitution
+G2/G3 prototype. One unchanged Fe provider lowers two different ground
 trees:
 
 ```fe
@@ -157,8 +157,9 @@ name or tree shape appears in the provider.
 The independent gate executes 1,004 inputs for each tree in Wasmtime and
 compares bit-for-bit with separately authored Rust tree interpreters. It also
 requires browser-valid WGSL with no runtime loop, branch, or switch and no host
-algebra import. This closes the specific objection that the earlier
-`(a ^ b) + (a ^ b)` proof could merely be a bespoke candidate table.
+algebra import. This demonstrates structural operator dispatch beyond the
+earlier bespoke candidate table; two selected trees do not by themselves
+establish a generic GA implementation.
 
 Its boundary is explicit:
 
@@ -167,12 +168,54 @@ Its boundary is explicit:
 - `Input`/`Sum`/`Difference`/`Neg`/`Outer` only;
 - a dense eight-lane compile-time intermediate (absent runtime terms are still
   omitted through support-aware emission); and
-- a zero-sized marker field because derive-provider goal arguments are not yet
-  exposed as ground reflection handles.
+- a zero-sized marker field retained by this initial fixture; the configured
+  provider slice below removes it from later runtime carriers.
 
 General diagonal metric products, the remaining node vocabulary, compact typed
 outputs, stable expression DAG sharing, and deriving input slots/support from
 the reflected record are still required before this is the final GA façade.
+
+### Configured provider and QCGA sparse-metric slice
+
+FCO now retains a named provider's exact ground configuration. The intended
+facade is executable:
+
+```fe
+derive EvaluateVectorScalarF32 for Operands using CompileVectorScalarF32<
+    GaProgram<ScalarProduct<Point, Quadric>, QcgaMetric, AlgebraicBalanced>
+>
+```
+
+`builder.provider_ty()` exposes that configured type to the Fe provider, and
+the exact type participates in the expansion cache key. Runtime `Operands`
+contains only packed coefficients—no `GaProgram` marker, manifest, numeric
+operator ID, or Rust-generated plan.
+
+`ga_expr` now includes `VectorInput<Slot, GeneratorSupport>`,
+`SparseSymmetricMetric<Dimension, Terms>`, and exact signed `MetricTerm` leaves.
+`CompileVectorScalarF32<Program>` structurally recognizes a two-vector
+`ScalarProduct`, iterates only the metric's nonzero entries and applicable
+symmetric orientations, derives packed reflected-field ranks from supports,
+and emits a deterministic four-term-chunk scalar reduction. This represents
+QCGA's 15-generator paper-null basis honestly; it does not pretend the six
+off-diagonal null pairs form a diagonal metric.
+
+The independent sparse-metric gate executes 259 QCGA-shaped deterministic
+cases bit-for-bit against a separately tabled Rust oracle with no Wasm host
+imports. A second 131-case configuration changes dimension, supports, metric
+signs and magnitudes, carrier width, and expression operand order while using
+the same provider. `qcga_pencil` consumes that provider in its actual incidence
+solver; its rank-8 pencil acceptance and ordinary typecheck gates pass after
+deleting the demo-local 144-candidate mask, recursive twelve-term plan, and
+24-way provider selection ladder.
+
+This establishes a bounded generic scalar-product facility, not a generic GA
+expression compiler or complete off-diagonal Clifford product compiler. It
+also exposes a compile-performance frontier: the isolated
+in-process semantic/Wasm gate takes roughly 41 seconds and the QCGA typecheck
+about 44 seconds on the current development host; the standalone CLI cold path
+was materially slower. Provider expansion/ground-plan caching and dependency
+analysis need profiling before this is considered the final ergonomic path.
 
 ## Semantic model
 

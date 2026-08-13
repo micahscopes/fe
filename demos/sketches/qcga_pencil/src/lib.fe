@@ -58,7 +58,6 @@
 
 use core::marker::Copy
 use core::actor::InitialState
-use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
 use core::{AllocatedBrowserBytes, BrowserBytes, HostEffect, MainThread}
 use core::effect_ref::alloc_bytes
 use core::num::IntDowncast
@@ -84,8 +83,10 @@ use std::web::view::{
     SurfaceEvent,
     SurfaceState,
 }
-use sparse_clifford::{
-    Nat, PlanLength, SparsePlan, Term, plan_mask_candidate, plan_mask_cardinality,
+use ga_expr::{
+    AlgebraicBalanced, CompileVectorScalarF32, EvaluateVectorScalarF32, GaProgram,
+    MetricSum, MetricTerm, MetricZero, ScalarProduct, SparseSymmetricMetric,
+    VectorInput,
 }
 use fmath::{
     PI, TAU, Vec3, abs, clamp01, cos, dot3, from_i32, max, min,
@@ -97,285 +98,58 @@ extern {
 }
 
 // ---------------------------------------------------------------------------
-// The planned sparse QCGA incidence contraction.
+// Sparse structural QCGA incidence.
 //
-// Copied intact from
-// crates/codegen/tests/fixtures/spirv/qcga3d_sparse_planned_incidence.fe
-// (the artifact documented in docs/mb2/QCGA_SPARSE_PLANNER.md), modulo this
-// comment and the import block above. It represents two 12-blade paper-null
-// support lists, Fe CTFE enumerates their 144 candidate pairs and retains the
-// 12 metric survivors, and one FCO provider publishes the aggregate
-// contraction. It plans exactly this null-vector contraction; it is not a
-// general QCGA product engine.
+// The metric and expression below are ordinary Fe type data consumed by the
+// shared `ga_expr` vector-scalar provider. Unlike the retired local provider,
+// this contains no 144-candidate mask, recursive twelve-term plan, or 24-way
+// field-selection ladder. The six null pairs are the actual sparse symmetric
+// metric; input supports determine which oriented products survive.
 // ---------------------------------------------------------------------------
 
-const POINT_TERMS: usize = 12
-const QUADRIC_TERMS: usize = 12
-const CANDIDATES: usize = POINT_TERMS * QUADRIC_TERMS
+type QcgaMetricTerms = MetricSum<
+    MetricTerm<0, 0, 1, 0>,
+    MetricSum<
+        MetricTerm<1, 1, 1, 0>,
+        MetricSum<
+            MetricTerm<2, 2, 1, 0>,
+            MetricSum<
+                MetricTerm<3, 9, 1, 1>,
+                MetricSum<
+                    MetricTerm<4, 10, 1, 1>,
+                    MetricSum<
+                        MetricTerm<5, 11, 1, 1>,
+                        MetricSum<
+                            MetricTerm<6, 12, 1, 1>,
+                            MetricSum<
+                                MetricTerm<7, 13, 1, 1>,
+                                MetricSum<MetricTerm<8, 14, 1, 1>, MetricZero>,
+                            >,
+                        >,
+                    >,
+                >,
+            >,
+        >,
+    >,
+>
+type QcgaMetric = SparseSymmetricMetric<15, QcgaMetricTerms>
 
-// Slots in the paper-null basis:
-// e1,e2,e3, eo1..eo6, ei1..ei6.
-const fn point_blade(_ slot: usize) -> usize {
-    if slot < 6 { slot } else { slot + 3 }
-}
+// Point coefficients occupy generators {0..5, 9..14}; dual quadrics occupy
+// {0..11}. Both are packed in ascending generator order at runtime.
+type QcgaPoint = VectorInput<0, 32319>
+type QcgaDualQuadric = VectorInput<1, 4095>
+type QcgaIncidence = ScalarProduct<QcgaPoint, QcgaDualQuadric>
 
-const fn quadric_blade(_ slot: usize) -> usize {
-    slot
-}
-
-const fn candidate_left(_ candidate: usize) -> usize {
-    candidate / 12
-}
-
-const fn candidate_right(_ candidate: usize) -> usize {
-    candidate % 12
-}
-
-// +1 for equal Euclidean blades, -1 for eo_k/ei_k and ei_k/eo_k, 0
-// otherwise. Encoding: 0=annihilated, 1=positive, 2=negative.
-const fn contraction_sign(_ candidate: usize) -> usize {
-    let left = point_blade(candidate_left(candidate))
-    let right = quadric_blade(candidate_right(candidate))
-    let mut sign: usize = 0
-    if left == right {
-        if left < 3 { sign = 1 }
-    }
-    if left >= 3 {
-        if left < 9 {
-            if right == left + 6 { sign = 2 }
-        }
-    }
-    if left >= 9 {
-        if right + 6 == left { sign = 2 }
-    }
-    sign
-}
-
-const fn incidence_keep_word(_ first: usize, _ last: usize) -> u32 {
-    let mut candidate: usize = first
-    let mut keep_bits: u32 = 0
-    while candidate < last {
-        if contraction_sign(candidate) != 0 {
-            keep_bits =
-                keep_bits | ((1 as u32) << (candidate - first).downcast_truncate())
-        }
-        candidate = candidate + 1
-    }
-    keep_bits
-}
-
-const INCIDENCE_KEEP0: u32 = incidence_keep_word(0, 24)
-const INCIDENCE_KEEP1: u32 = incidence_keep_word(24, 48)
-const INCIDENCE_KEEP2: u32 = incidence_keep_word(48, 72)
-const INCIDENCE_KEEP3: u32 = incidence_keep_word(72, 96)
-const INCIDENCE_KEEP4: u32 = incidence_keep_word(96, 120)
-const INCIDENCE_KEEP5: u32 = incidence_keep_word(120, 144)
-const INCIDENCE_KEEP6: u32 = 0
-const INCIDENCE_KEEP7: u32 = 0
-
-const fn survivor_count() -> usize {
-    plan_mask_cardinality(
-        INCIDENCE_KEEP0, INCIDENCE_KEEP1, INCIDENCE_KEEP2,
-        INCIDENCE_KEEP3, INCIDENCE_KEEP4, INCIDENCE_KEEP5,
-        INCIDENCE_KEEP6, INCIDENCE_KEEP7, CANDIDATES,
-    )
-}
-
-const fn survivor_candidate(_ target: usize) -> usize {
-    plan_mask_candidate(
-        INCIDENCE_KEEP0, INCIDENCE_KEEP1, INCIDENCE_KEEP2,
-        INCIDENCE_KEEP3, INCIDENCE_KEEP4, INCIDENCE_KEEP5,
-        INCIDENCE_KEEP6, INCIDENCE_KEEP7, CANDIDATES, target,
-    )
-}
-
-static_assert(survivor_count() == 12)
-static_assert(INCIDENCE_KEEP0 == 8193)
-static_assert(INCIDENCE_KEEP1 == 2097156)
-static_assert(INCIDENCE_KEEP2 == 8389632)
-static_assert(INCIDENCE_KEEP3 == 65544)
-static_assert(INCIDENCE_KEEP4 == 262176)
-static_assert(INCIDENCE_KEEP5 == 1048704)
-
-// The exact imported ground plan consumes the named CTFE-derived mask and
-// candidate-count constants directly; normalized provider reflection unfolds
-// only its twelve retained Term nodes.
-type IncidencePlan12 =
-    SparsePlan<
-        INCIDENCE_KEEP0, INCIDENCE_KEEP1, INCIDENCE_KEEP2, INCIDENCE_KEEP3,
-        INCIDENCE_KEEP4, INCIDENCE_KEEP5, INCIDENCE_KEEP6, INCIDENCE_KEEP7,
-        CANDIDATES,
-        12,
-    >
-static_assert(survivor_candidate(0) == 0)
-static_assert(survivor_candidate(1) == 13)
-static_assert(survivor_candidate(2) == 26)
-static_assert(survivor_candidate(3) == 45)
-static_assert(survivor_candidate(4) == 58)
-static_assert(survivor_candidate(5) == 71)
-static_assert(survivor_candidate(6) == 75)
-static_assert(survivor_candidate(7) == 88)
-static_assert(survivor_candidate(8) == 101)
-static_assert(survivor_candidate(9) == 114)
-static_assert(survivor_candidate(10) == 127)
-static_assert(survivor_candidate(11) == 140)
-
-fn takes_nat12(_ value: Nat<12>) {}
-fn planned_support_has_twelve_terms(value: <IncidencePlan12 as PlanLength>::Out) {
-    takes_nat12(value)
-}
-
-// Flat reflected carrier: the first twelve fields are the point support list,
-// the second twelve are the dual-quadric support list. The provider selects
-// fields exclusively from the CTFE support functions above.
 struct SparseIncidenceOperands {
     p0: f32, p1: f32, p2: f32, p3: f32, p4: f32, p5: f32,
     p6: f32, p7: f32, p8: f32, p9: f32, p10: f32, p11: f32,
     q0: f32, q1: f32, q2: f32, q3: f32, q4: f32, q5: f32,
     q6: f32, q7: f32, q8: f32, q9: f32, q10: f32, q11: f32,
 }
-impl Copy for SparseIncidenceOperands {}
 
-trait PlannedIncidence {
-    fn incidence(_ operands: SparseIncidenceOperands) -> f32
-}
-
-struct QcgaIncidenceProvider {}
-impl Derive<PlannedIncidence> for QcgaIncidenceProvider {
-    const fn derive<T>(ev: own Evidence<PlannedIncidence<T>>) -> Evidence<PlannedIncidence<T>>
-        uses (reflect: Reflect<T>, builder: mut ImplBuilder<PlannedIncidence<T>>)
-    {
-        let operands = builder.arg_ref("operands")
-        let p0 = operands
-        let p1 = operands
-        let p2 = operands
-        let p3 = operands
-        let p4 = operands
-        let p5 = operands
-        let p6 = operands
-        let p7 = operands
-        let p8 = operands
-        let p9 = operands
-        let p10 = operands
-        let p11 = operands
-        let q0 = operands
-        let q1 = operands
-        let q2 = operands
-        let q3 = operands
-        let q4 = operands
-        let q5 = operands
-        let q6 = operands
-        let q7 = operands
-        let q8 = operands
-        let q9 = operands
-        let q10 = operands
-        let q11 = operands
-        let field_index = 0
-        for field in reflect.fields() {
-            if field_index == 0 { p0 = builder.field_get(operands, field) }
-            if field_index == 1 { p1 = builder.field_get(operands, field) }
-            if field_index == 2 { p2 = builder.field_get(operands, field) }
-            if field_index == 3 { p3 = builder.field_get(operands, field) }
-            if field_index == 4 { p4 = builder.field_get(operands, field) }
-            if field_index == 5 { p5 = builder.field_get(operands, field) }
-            if field_index == 6 { p6 = builder.field_get(operands, field) }
-            if field_index == 7 { p7 = builder.field_get(operands, field) }
-            if field_index == 8 { p8 = builder.field_get(operands, field) }
-            if field_index == 9 { p9 = builder.field_get(operands, field) }
-            if field_index == 10 { p10 = builder.field_get(operands, field) }
-            if field_index == 11 { p11 = builder.field_get(operands, field) }
-            if field_index == 12 { q0 = builder.field_get(operands, field) }
-            if field_index == 13 { q1 = builder.field_get(operands, field) }
-            if field_index == 14 { q2 = builder.field_get(operands, field) }
-            if field_index == 15 { q3 = builder.field_get(operands, field) }
-            if field_index == 16 { q4 = builder.field_get(operands, field) }
-            if field_index == 17 { q5 = builder.field_get(operands, field) }
-            if field_index == 18 { q6 = builder.field_get(operands, field) }
-            if field_index == 19 { q7 = builder.field_get(operands, field) }
-            if field_index == 20 { q8 = builder.field_get(operands, field) }
-            if field_index == 21 { q9 = builder.field_get(operands, field) }
-            if field_index == 22 { q10 = builder.field_get(operands, field) }
-            if field_index == 23 { q11 = builder.field_get(operands, field) }
-            field_index = field_index + 1
-        }
-        let zero = builder.sub(p0, p0)
-        let sum0 = zero
-        let sum1 = zero
-        let sum2 = zero
-        let survivor = 0
-        // Interpret the exact normalized imported SparsePlan rather than
-        // rescanning its 144-candidate source universe. Each Term carries the
-        // canonical candidate identity selected by the shared CTFE planner.
-        for nested in builder.ty<IncidencePlan12>().normalized_preorder_types() {
-            if builder.same_ty(nested.constructor(), builder.ty<Term>()) {
-                let candidate: usize = 144
-                for arg in nested.generic_args() {
-                    if arg.is_const() { candidate = arg.const_value() }
-                }
-
-                // Keep the QCGA metric semantics explicit at the provider
-                // boundary. The plan guarantees that this branch is reached
-                // exactly twelve times, in ascending candidate order.
-                if candidate < 144 {
-                    let left_slot = candidate / 12
-                    let right_slot = candidate % 12
-                    let sign = 0
-                    if left_slot == right_slot {
-                        if left_slot < 3 { sign = 1 }
-                    }
-                    if left_slot >= 3 {
-                        if left_slot < 6 {
-                            if right_slot == left_slot + 6 { sign = 2 }
-                        }
-                    }
-                    if left_slot >= 6 {
-                        if right_slot + 3 == left_slot { sign = 2 }
-                    }
-                    if sign != 0 {
-                        let left = p0
-                        if left_slot == 1 { left = p1 }
-                        if left_slot == 2 { left = p2 }
-                        if left_slot == 3 { left = p3 }
-                        if left_slot == 4 { left = p4 }
-                        if left_slot == 5 { left = p5 }
-                        if left_slot == 6 { left = p6 }
-                        if left_slot == 7 { left = p7 }
-                        if left_slot == 8 { left = p8 }
-                        if left_slot == 9 { left = p9 }
-                        if left_slot == 10 { left = p10 }
-                        if left_slot == 11 { left = p11 }
-
-                        let right = q0
-                        if right_slot == 1 { right = q1 }
-                        if right_slot == 2 { right = q2 }
-                        if right_slot == 3 { right = q3 }
-                        if right_slot == 4 { right = q4 }
-                        if right_slot == 5 { right = q5 }
-                        if right_slot == 6 { right = q6 }
-                        if right_slot == 7 { right = q7 }
-                        if right_slot == 8 { right = q8 }
-                        if right_slot == 9 { right = q9 }
-                        if right_slot == 10 { right = q10 }
-                        if right_slot == 11 { right = q11 }
-
-                        let term = builder.mul(left, right)
-                        if sign == 2 { term = builder.neg(term) }
-                        if survivor < 4 { sum0 = builder.add(sum0, term) }
-                        else if survivor < 8 { sum1 = builder.add(sum1, term) }
-                        else { sum2 = builder.add(sum2, term) }
-                        survivor = survivor + 1
-                    }
-                }
-            }
-        }
-        let result = builder.add(builder.add(sum0, sum1), sum2)
-        builder.emit_method("incidence", result)
-        builder.finish()
-        ev
-    }
-}
-
-derive PlannedIncidence for SparseIncidenceOperands using QcgaIncidenceProvider
+derive EvaluateVectorScalarF32 for SparseIncidenceOperands using CompileVectorScalarF32<
+    GaProgram<QcgaIncidence, QcgaMetric, AlgebraicBalanced>
+>
 
 pub fn qcga3d_incidence_planned(
     x: f32, y: f32, z: f32,
@@ -385,7 +159,7 @@ pub fn qcga3d_incidence_planned(
     let half: f32 = 0.5
     let j_third: f32 = j / 3.0
     let negative_j_third: f32 = 0.0 - j_third
-    <SparseIncidenceOperands as PlannedIncidence>::incidence(SparseIncidenceOperands {
+    <SparseIncidenceOperands as EvaluateVectorScalarF32>::scalar(SparseIncidenceOperands {
         p0: x, p1: y, p2: z,
         p3: 1.0, p4: 1.0, p5: 1.0,
         p6: x * x * half, p7: y * y * half, p8: z * z * half,

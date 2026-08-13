@@ -794,6 +794,12 @@ pub(super) struct ProviderExpansionKey<'db> {
     parent_vis: Visibility,
     #[return_ref]
     provider: ValidatedProvider<'db>,
+    /// The provider type selected at the request site. Named selections retain
+    /// their exact ground arguments (`Compile<Program>`); canonical selections
+    /// use the provider declaration's implementor type. This is part of the
+    /// memoization identity so differently configured providers never share an
+    /// expansion.
+    configured_provider_ty: TypeId<'db>,
     #[return_ref]
     reflection: TargetReflection<'db>,
     self_ty: TypeId<'db>,
@@ -827,13 +833,22 @@ pub(super) fn expand_provider_impl<'db>(
     let parent = key.parent(db);
     let parent_vis = key.parent_vis(db);
     let provider = key.provider(db);
+    let configured_provider_ty = key.configured_provider_ty(db);
     let reflection = key.reflection(db);
     let self_ty = key.self_ty(db);
     let target_name = key.target_name(db);
     let generics = key.generics(db);
     let desugared = key.desugared(db);
 
-    match ProviderExecutor::run(db, provider, reflection, self_ty, target_name) {
+    match ProviderExecutor::run(
+        db,
+        provider,
+        reflection,
+        self_ty,
+        target_name,
+        configured_provider_ty,
+        top_mod,
+    ) {
         Ok(output) => {
             let trait_ref = TraitRefId::new(db, Partial::Present(provider.trait_path));
 
@@ -937,6 +952,14 @@ fn execute_requests<'db>(
             parent,
             parent_vis,
             provider.clone(),
+            match request.selection {
+                ProviderSelection::Named(path) => {
+                    TypeId::new(db, TypeKind::Path(Partial::Present(path)))
+                }
+                ProviderSelection::Canonical => {
+                    provider.provider.type_ref(db).to_opt().unwrap_or(self_ty)
+                }
+            },
             reflection.clone(),
             self_ty,
             target_name,

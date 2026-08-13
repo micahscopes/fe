@@ -128,6 +128,7 @@ const RECOGNIZED_BUILDER_OPS: &[&str] = &[
     // B-build: generated types
     "ty",
     "target_ty",
+    "provider_ty",
     "self_ty",
     "str_ty",
     "tuple_ty",
@@ -185,8 +186,8 @@ const _: () = {
     // inferred from the goal trait's declaration at `emit_method(name, body)`
     // (43 → 39). Domain-neutral generated integer literal, subtraction,
     // multiplication, negation, and explicit expression sharing builders then
-    // extend the audited codegen subset (39 → 44).
-    assert!(RECOGNIZED_BUILDER_OPS.len() == 44);
+    // extend the audited codegen subset (39 → 45).
+    assert!(RECOGNIZED_BUILDER_OPS.len() == 45);
     // TD5c: was 7, then 4, now 0; ALL reflection reads — non-iterating (onto the
     // typed read-only handles `ReflectHandle`/`FieldHandle`/`VariantHandle`) AND
     // the `fields`/`variants` iterables (now ordinary method calls returning a
@@ -1008,6 +1009,13 @@ pub(super) struct ProviderExecutor<'a, 'db> {
     /// The impl self type with generic args applied (`Pair<A, B>`), exposed
     /// as `builder.target_ty()`.
     target_ty: TypeId<'db>,
+    /// Exact provider type selected at the derive site. For
+    /// `using Compile<Program>` this retains `Program` as phase-safe ground
+    /// configuration, independently of the target's runtime layout.
+    configured_provider_ty: TypeId<'db>,
+    /// The derive request's module, used to normalize ground provider
+    /// arguments whose aliases are declared next to the target.
+    request_top_mod: crate::hir_def::TopLevelMod<'db>,
     // TD5c: the target's bare name (exposed as `reflect.target_name()`) is no
     // longer ambient executor state — it lives on the typed `ReflectHandle`
     // carried by `Value::Reflect`, which owns that read.
@@ -1050,6 +1058,8 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
         reflection: &'a TargetReflection<'db>,
         target_ty: TypeId<'db>,
         target_name: IdentId<'db>,
+        configured_provider_ty: TypeId<'db>,
+        request_top_mod: crate::hir_def::TopLevelMod<'db>,
     ) -> Result<ProviderOutput<'db>, ExecError> {
         let mut initial_scope = Vec::new();
         for &name in &provider.param_names {
@@ -1071,6 +1081,8 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             body: provider.body,
             reflection,
             target_ty,
+            configured_provider_ty,
+            request_top_mod,
             provider_top_mod: provider.provider.top_mod(db),
             goal_trait_path: provider.trait_path,
             scopes: vec![initial_scope],
@@ -2640,9 +2652,13 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                         .map(|types| Value::Seq(types.into_iter().map(Value::Ty).collect()))
                         .ok_or_else(|| self.unsupported_expr(expr)),
                     "normalized_preorder_types" => {
-                        let plan =
-                            base_ground_type_plan(self.db, ty, self.provider_top_mod.scope())
-                                .map_err(|_| self.unsupported_expr(expr))?;
+                        let scope = if ty == self.configured_provider_ty {
+                            self.request_top_mod.scope()
+                        } else {
+                            self.provider_top_mod.scope()
+                        };
+                        let plan = base_ground_type_plan(self.db, ty, scope)
+                            .map_err(|_| self.unsupported_expr(expr))?;
                         let plan_id = self.normalized_plans.len();
                         let root = plan.root;
                         self.normalized_plans.push(plan);
@@ -2658,9 +2674,13 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                         ))
                     }
                     "normalized_postorder_types" => {
-                        let plan =
-                            base_ground_type_plan(self.db, ty, self.provider_top_mod.scope())
-                                .map_err(|_| self.unsupported_expr(expr))?;
+                        let scope = if ty == self.configured_provider_ty {
+                            self.request_top_mod.scope()
+                        } else {
+                            self.provider_top_mod.scope()
+                        };
+                        let plan = base_ground_type_plan(self.db, ty, scope)
+                            .map_err(|_| self.unsupported_expr(expr))?;
                         let plan_id = self.normalized_plans.len();
                         let root = plan.root;
                         self.normalized_plans.push(plan);
@@ -3504,6 +3524,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             // is now INFERRED at `emit_method(name, body)` (see
             // `infer_method_sig`) instead of authored op-by-op.
             ("target_ty", []) => Ok(Value::Ty(self.target_ty)),
+            ("provider_ty", []) => Ok(Value::Ty(self.configured_provider_ty)),
             ("self_ty", []) => Ok(Value::Ty(TypeId::fallback_self_ty(self.db))),
             ("ty", []) => {
                 let Some(path) = self.single_type_generic_arg(generic_args) else {
@@ -4103,7 +4124,7 @@ mod freeze_guard {
         // Pin the count too, so a same-size swap is still flagged for review.
         assert_eq!(
             RECOGNIZED_BUILDER_OPS.len(),
-            44,
+            45,
             "FREEZE (TD5.0): the builder command surface changed size; update the count \
              and docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md as part of a TD5 rung. \
              (TD5c moved `same_ty`/`same_field` — mis-shelved `builder.*`-spelled identity \
@@ -4111,7 +4132,8 @@ mod freeze_guard {
              DEVX-A dropped the four signature-dance ops `method`/`with_self`/`with_arg`/`returns` \
              — the emitted method's signature is inferred from the goal trait's declaration at \
              `emit_method(name, body)`, 43 → 39. Domain-neutral integer literals and \
-             subtract/multiply/negate/share construction add five audited operations, 39 → 44.)"
+             subtract/multiply/negate/share construction add five audited operations, 39 → 44; \
+             configured provider-type reflection adds one, 44 → 45.)"
         );
     }
 
@@ -4181,8 +4203,8 @@ mod freeze_guard {
 
     #[test]
     fn total_recognized_method_surface_is_pinned() {
-        // The full named method surface the freeze pins: 44 builder ops + 0
-        // reflection reads = 44 distinct literals. TD5c first moved the three
+        // The full named method surface the freeze pins: 45 builder ops + 0
+        // reflection reads = 45 distinct literals. TD5c first moved the three
         // `reflect.*` scalar reads onto `ReflectHandle` (54 → 51), then moved
         // the `field.*`/`variant.*` reads onto `FieldHandle`/`VariantHandle`
         // (RECOGNIZED_REFLECT_OPS → 0) and `same_ty`/`same_field` onto
@@ -4195,7 +4217,7 @@ mod freeze_guard {
         // `builder.*` is the executor's only named surface.
         let total = RECOGNIZED_BUILDER_OPS.len() + RECOGNIZED_REFLECT_OPS.len();
         assert_eq!(
-            total, 44,
+            total, 45,
             "FREEZE (TD5.0): the recognized command surface changed size. A new op requires \
              a TD5 category decision — see docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md."
         );

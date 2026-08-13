@@ -1,4 +1,4 @@
-//! A genuinely structural FCO lowering for a bounded GA expression language.
+//! A structural FCO prototype for a bounded GA expression language.
 //!
 //! One unchanged provider evaluates any finite ground tree made from
 //! `Input`, `Sum`, `Difference`, `Neg`, and `Outer` in three dimensions. The
@@ -7,10 +7,11 @@
 //! emits straight-line scalar Fe; no runtime node tag, blade loop, or planner
 //! survives into Wasm/WGSL.
 //!
-//! This is intentionally a G2/G3 vertical slice rather than a claim that the
-//! complete `ga_expr` vocabulary is lowered. It uses two packed three-lane
-//! inputs with support {e0,e1,e2}; reflected input-shape/slot derivation and
-//! general diagonal metric signs remain the next layers.
+//! This is intentionally an operator-substitution prototype rather than a
+//! claim of generic GA lowering. It uses two packed three-lane inputs with
+//! support {e0,e1,e2}; dimension, carrier layout, output shape, supported
+//! constructors, reflected input-shape/slot derivation, and general diagonal
+//! metric signs remain fixed or incomplete.
 
 use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
 use core::num::IntDowncast

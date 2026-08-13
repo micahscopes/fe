@@ -5,4 +5,4 @@ version = "0.1.0"
 [dependencies]
 core = true
 fmath = "../fmath"
-sparse_clifford = "../../../ingots/sparse_clifford"
+ga_expr = "../../../ingots/ga_expr"

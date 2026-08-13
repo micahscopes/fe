@@ -1133,7 +1133,13 @@ pub(super) fn select_provider<'db>(
             .filter(|provider| goal_matches_provider(db, from, goal_path, provider, false))
             .collect(),
         ProviderSelection::Named(path) => {
-            let Some(selected) = path.as_ident(db) else {
+            // Selection may configure a bare generic provider
+            // (`using Compile<Program>`). Strip only its generic arguments;
+            // retaining the old bare-path boundary avoids turning a merely
+            // same-named qualified path into provider identity. The exact
+            // applied path is retained by the derive expansion key and
+            // exposed to FCO separately.
+            let Some(selected) = path.strip_generic_args(db).as_ident(db) else {
                 return SelectionOutcome::NotFound {
                     wrong_goal_heads: Vec::new(),
                 };

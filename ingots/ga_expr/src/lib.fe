@@ -10,16 +10,18 @@
 //! policy, and FCO emission are later layers described in
 //! `docs/mb2/GA_SINGLE_INVOCATION_COMPILER.md`.
 //!
-//! The implemented metric family is bounded diagonal/orthogonal geometry with
-//! at most five generators, matching `sparse_clifford::BladeSet`. Outer and
-//! Poincare-dual support are metric-independent inside that envelope. General
-//! symmetric/off-diagonal metrics require the exact term planner; they are not
-//! approximated by pretending the diagonal support rule applies.
+//! Conservative whole-multivector `GaSupport` is currently bounded to
+//! diagonal/orthogonal geometry with at most five generators, matching
+//! `sparse_clifford::BladeSet`. A separate configured provider below handles a
+//! high-dimensional, sparse symmetric metric for the explicitly narrower
+//! vector scalar-product contract. General off-diagonal Clifford products are
+//! not approximated by pretending the diagonal support rule applies.
 
 use sparse_clifford::{
     BladeSet, blade_grade, blade_set, support_capacity_mask, support_dimension_valid,
     support_gp, support_grade,
 }
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
 
 /// A bounded diagonal metric. Bit `i` of `NONZERO_SQUARES` says generator `i`
 /// has a nonzero square; its sign belongs to exact coefficient planning and
@@ -41,6 +43,12 @@ impl<const Dimension: u32, const NonzeroSquares: u32> StaticDiagonalMetric
 /// One runtime multivector input. `Slot` is semantic leaf identity for the
 /// later term/DAG planner; `Mask` is a bitset over basis-blade indices.
 pub struct Input<const Slot: usize, const Mask: u32> {}
+
+/// A sparse grade-1 input for dimensions whose full `2^dimension` blade set
+/// does not fit the bounded `GaSupport` bitset. Bit `i` of `GeneratorSupport`
+/// names generator `i`; runtime coefficients are packed in ascending generator
+/// order. This is the natural carrier for QCGA's sparse 15-generator vectors.
+pub struct VectorInput<const Slot: usize, const GeneratorSupport: usize> {}
 
 pub struct Sum<A, B> {}
 pub struct Difference<A, B> {}
@@ -68,6 +76,270 @@ pub struct AlgebraicBalanced {}
 /// A fully static compilation request. `E` is the expression, `M` the metric,
 /// and `P` the numerical policy. The value contains no runtime metadata.
 pub struct GaProgram<E, M, P> {}
+
+/// A sparse symmetric bilinear form. `Terms` is any finite ground type tree
+/// containing `MetricTerm` leaves. A term stores one unordered matrix entry;
+/// the structural scalar provider applies it in either operand orientation.
+pub struct SparseSymmetricMetric<const Dimension: usize, Terms> {}
+
+pub struct MetricZero {}
+pub struct MetricSum<A, B> {}
+
+/// One exact nonzero symmetric-metric entry. `Magnitude` is a natural exact
+/// coefficient and `Negative` is 0 or 1. The first implementation emits
+/// magnitude by repeated strict addition, preserving a visible scalar policy.
+pub struct MetricTerm<
+    const LeftGenerator: usize,
+    const RightGenerator: usize,
+    const Magnitude: usize,
+    const Negative: usize,
+> {}
+
+const fn vector_support_has(_ support: usize, _ generator: usize) -> bool {
+    ((support >> generator) & 1) == 1
+}
+
+const fn vector_support_rank(_ support: usize, _ generator: usize) -> usize {
+    let mut probe: usize = 0
+    let mut rank: usize = 0
+    while probe < generator {
+        if vector_support_has(support, probe) { rank = rank + 1 }
+        probe = probe + 1
+    }
+    rank
+}
+
+const fn vector_support_width(_ support: usize, _ dimension: usize) -> usize {
+    let mut generator: usize = 0
+    let mut width: usize = 0
+    while generator < dimension {
+        if vector_support_has(support, generator) { width = width + 1 }
+        generator = generator + 1
+    }
+    width
+}
+
+/// Generated scalar result of a sparse symmetric-metric product between two
+/// packed `VectorInput`s. The configured provider carries the static
+/// `GaProgram`; the target record contains only slot 0 then slot 1 runtime
+/// coefficients, each packed in ascending generator order.
+pub trait EvaluateVectorScalarF32 {
+    fn scalar(_ operands: Self) -> f32
+}
+
+/// Structural Fe/FCO compiler for [`EvaluateVectorScalarF32`]. It recognizes
+/// operator and metric-term constructors, never a complete expression alias or
+/// a precomputed candidate mask. The current carrier contract is deliberately
+/// narrow: two distinct slots numbered 0 and 1, `ScalarProduct` at the root,
+/// and `AlgebraicBalanced`'s deterministic four-term chunk reduction.
+pub struct CompileVectorScalarF32<Program> {}
+
+impl<Program> Derive<EvaluateVectorScalarF32>
+    for CompileVectorScalarF32<Program>
+{
+    const fn derive<T>(ev: own Evidence<EvaluateVectorScalarF32<T>>)
+        -> Evidence<EvaluateVectorScalarF32<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<EvaluateVectorScalarF32<T>>,
+        )
+    {
+        let operands = builder.arg_ref("operands")
+        let zero = operands
+        let field_index: usize = 0
+        for field in reflect.fields() {
+            if field_index == 0 { zero = builder.field_get(operands, field) }
+            field_index = field_index + 1
+        }
+        zero = builder.sub(zero, zero)
+        let fields = reflect.fields()
+        let program_types = 0..0
+
+        for configured in builder.provider_ty().normalized_preorder_types() {
+            if builder.same_ty(configured.constructor(), builder.ty<GaProgram>()) {
+                for arg in configured.generic_args() {
+                    if arg.is_type() { program_types = program_types.append(arg.ty()) }
+                }
+            }
+        }
+
+        let descriptors = 0..0
+        if program_types.len() == 3 {
+            for node in program_types.at(0).normalized_postorder_types() {
+                let recognized: usize = 0
+                if builder.same_ty(node.constructor(), builder.ty<VectorInput>()) {
+                    recognized = 1
+                    let ordinal: usize = 0
+                    let slot: usize = 2
+                    let support: usize = 0
+                    for arg in node.generic_args() {
+                        if arg.is_const() {
+                            if ordinal == 0 { slot = arg.const_value() }
+                            if ordinal == 1 { support = arg.const_value() }
+                            ordinal = ordinal + 1
+                        }
+                    }
+                    descriptors = descriptors.append(
+                        (0..0).append(slot).append(support),
+                    )
+                }
+                if builder.same_ty(node.constructor(), builder.ty<ScalarProduct>()) {
+                    recognized = 1
+                    // Two leaves reduce to one scalar-product descriptor. A
+                    // second operator consequently poisons the final arity.
+                    if descriptors.len() == 2 {
+                        let right = descriptors.last()
+                        descriptors = descriptors.without_last()
+                        let left = descriptors.last()
+                        descriptors = descriptors.without_last()
+                        descriptors = descriptors.append(
+                            (0..0)
+                                .append(left.at(0)).append(left.at(1))
+                                .append(right.at(0)).append(right.at(1)),
+                        )
+                    }
+                }
+                if recognized == 0 { descriptors = descriptors.append(0) }
+            }
+        }
+
+        if descriptors.len() == 1 {
+            let expression = descriptors.at(0)
+            if expression.len() == 4 {
+                let left_slot = expression.at(0)
+                let left_support = expression.at(1)
+                let right_slot = expression.at(2)
+                let right_support = expression.at(3)
+                let metric_nodes = program_types.at(1).normalized_preorder_types()
+                let dimension: usize = 0
+                for metric_node in metric_nodes {
+                    if builder.same_ty(
+                        metric_node.constructor(),
+                        builder.ty<SparseSymmetricMetric>(),
+                    ) {
+                        for metric_arg in metric_node.generic_args() {
+                            if metric_arg.is_const() {
+                                dimension = metric_arg.const_value()
+                            }
+                        }
+                    }
+                }
+
+                // Slots are semantic leaf identity for now. The reflected
+                // carrier stores slot 0 before slot 1, so determine slot 0's
+                // width from the expression rather than hard-coding either
+                // operand orientation.
+                let support0 = left_support
+                if right_slot == 0 { support0 = right_support }
+                let slot0_width = vector_support_width(support0, dimension)
+
+                let sum0 = zero
+                let sum1 = zero
+                let sum2 = zero
+                let survivor: usize = 0
+                for metric_node in metric_nodes {
+                    if builder.same_ty(
+                        metric_node.constructor(),
+                        builder.ty<MetricTerm>(),
+                    ) {
+                        let ordinal: usize = 0
+                        let metric_left: usize = dimension
+                        let metric_right: usize = dimension
+                        let magnitude: usize = 0
+                        let negative: usize = 0
+                        for metric_arg in metric_node.generic_args() {
+                            if metric_arg.is_const() {
+                                if ordinal == 0 {
+                                    metric_left = metric_arg.const_value()
+                                }
+                                if ordinal == 1 {
+                                    metric_right = metric_arg.const_value()
+                                }
+                                if ordinal == 2 {
+                                    magnitude = metric_arg.const_value()
+                                }
+                                if ordinal == 3 {
+                                    negative = metric_arg.const_value()
+                                }
+                                ordinal = ordinal + 1
+                            }
+                        }
+
+                        // A symmetric entry can contribute in either operand
+                        // orientation. Diagonal entries are considered once.
+                        for orientation in 0..2 {
+                            let left_generator = metric_left
+                            let right_generator = metric_right
+                            if orientation == 1 {
+                                left_generator = metric_right
+                                right_generator = metric_left
+                            }
+                            if magnitude > 0
+                                && (orientation == 0 || metric_left != metric_right)
+                                && vector_support_has(
+                                    left_support, left_generator,
+                                )
+                                && vector_support_has(
+                                    right_support, right_generator,
+                                )
+                            {
+                                let left_field = vector_support_rank(
+                                    left_support, left_generator,
+                                )
+                                if left_slot == 1 {
+                                    left_field = left_field + slot0_width
+                                }
+                                let right_field = vector_support_rank(
+                                    right_support, right_generator,
+                                )
+                                if right_slot == 1 {
+                                    right_field = right_field + slot0_width
+                                }
+                                let lhs = zero
+                                let rhs = zero
+                                lhs = builder.field_get(
+                                    operands, fields.at(left_field),
+                                )
+                                rhs = builder.field_get(
+                                    operands, fields.at(right_field),
+                                )
+
+                                let base = builder.mul(lhs, rhs)
+                                let term = base
+                                for _copy in 1..magnitude {
+                                    term = builder.add(term, base)
+                                }
+                                if negative == 1 { term = builder.neg(term) }
+                                if survivor < 4 {
+                                    sum0 = builder.add(sum0, term)
+                                } else if survivor < 8 {
+                                    sum1 = builder.add(sum1, term)
+                                } else {
+                                    sum2 = builder.add(sum2, term)
+                                }
+                                survivor = survivor + 1
+                            }
+                        }
+                    }
+                }
+                if left_slot < 2 && right_slot < 2 && left_slot != right_slot
+                    && dimension > 0 && survivor > 0
+                    && builder.same_ty(
+                        program_types.at(2).constructor(),
+                        builder.ty<AlgebraicBalanced>(),
+                    )
+                {
+                    builder.emit_method(
+                        "scalar",
+                        builder.add(builder.add(sum0, sum1), sum2),
+                    )
+                }
+            }
+        }
+        builder.finish()
+        ev
+    }
+}
 
 /// Conservative possible output blades of expression `Self` in metric `M`.
 /// A dense/unknown leaf should explicitly use the metric's capacity mask.

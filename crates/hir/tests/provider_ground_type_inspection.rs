@@ -370,6 +370,82 @@ derive Inspect for Target using Inspector
 }
 
 #[test]
+fn configured_provider_type_is_reflected_for_distinct_configurations() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_ground_configuration.fe".into(),
+        r#"
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+
+trait Inspect { type Out }
+struct Config<A> {}
+struct Yes {}
+struct No {}
+struct Configured<P> {}
+
+impl<P> Derive<Inspect> for Configured<P> {
+    const fn derive<T>(ev: own Evidence<Inspect<T>>) -> Evidence<Inspect<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<Inspect<T>>)
+    {
+        let out = builder.ty<No>()
+        for configured in builder.provider_ty().normalized_preorder_types() {
+            if builder.same_ty(configured.constructor(), builder.ty<Yes>()) {
+                out = builder.ty<Yes>()
+            }
+        }
+        builder.emit_assoc_ty("Out", out)
+        builder.finish()
+        ev
+    }
+}
+
+struct TargetYes {}
+struct TargetNo {}
+derive Inspect for TargetYes using Configured<Config<Yes>>
+derive Inspect for TargetNo using Configured<Config<No>>
+
+fn takes_yes(_ value: Yes) {}
+fn takes_no(_ value: No) {}
+fn proves_yes(value: <TargetYes as Inspect>::Out) { takes_yes(value) }
+fn proves_no(value: <TargetNo as Inspect>::Out) { takes_no(value) }
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
+fn configured_provider_type_fails_closed_when_not_ground() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_open_configuration.fe".into(),
+        r#"
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+trait Inspect {}
+struct Config<A> {}
+struct Configured<P> {}
+impl<P> Derive<Inspect> for Configured<P> {
+    const fn derive<T>(ev: own Evidence<Inspect<T>>) -> Evidence<Inspect<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<Inspect<T>>)
+    {
+        for _node in builder.provider_ty().normalized_preorder_types() {}
+        builder.finish()
+        ev
+    }
+}
+struct OpenTarget<A> { value: A }
+derive Inspect for OpenTarget<A> using Configured<Config<A>>
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let rendered = fe_hir::test_db::format_diagnostics(&db, &db.run_on_top_mod(top_mod));
+    assert!(
+        rendered.contains("this construct is not supported in derive provider bodies"),
+        "open configured provider types must fail closed:\n{rendered}"
+    );
+}
+
+#[test]
 fn normalized_ground_type_inspection_fails_closed_on_forwarded_params() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(

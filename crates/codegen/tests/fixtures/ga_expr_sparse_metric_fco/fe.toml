@@ -1,0 +1,7 @@
+[ingot]
+name = "ga_expr_sparse_metric_fco"
+version = "0.1.0"
+
+[dependencies]
+core = "../../../../../ingots/core"
+ga_expr = "../../../../../ingots/ga_expr"
