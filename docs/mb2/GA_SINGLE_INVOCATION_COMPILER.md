@@ -1,6 +1,6 @@
 # A typed sparse GA compiler for one WebGPU invocation
 
-Status: active design plus an executable first slice, 2026-08-12.
+Status: active design plus structural G2/G3 vertical slices, 2026-08-13.
 
 This document specifies the fuller geometric-algebra implementation behind the
 Phase 7 gallery goal. It is deliberately honest about three different things:
@@ -107,7 +107,7 @@ Support analysis is compositional today. It is conservative: it removes
 structural zeros and impossible blades, but does not claim cancellation between
 runtime coefficients.
 
-### Executable vertical slice
+### Specialized executable vertical slice
 
 `crates/codegen/tests/fixtures/ga_expr_fco` expresses
 `(a ^ b) + (a ^ b)` for sparse PGA(2,0,1) line inputs. In Fe it:
@@ -134,6 +134,45 @@ same Fe implementation compiles to browser-valid WGSL with:
 This is a real end-to-end proof of the staging route. It is **not yet** a
 general lowering from every arbitrary expression node to exact terms. The
 prototype's exact plan constructor is specialized to the twice-wedge example.
+
+### Structural expression-lowering slice
+
+`crates/codegen/tests/fixtures/ga_expr_generic_fco` is the first genuinely
+structural G2/G3 slice. One unchanged Fe provider lowers two different ground
+trees:
+
+```fe
+Sum<Outer<LineA, LineB>, Outer<LineA, LineB>>
+Neg<Outer<Sum<LineA, LineB>, Difference<LineA, LineB>>>
+```
+
+The expression is ordinary Fe type data in a zero-sized `GaProgram` marker
+field on the reflected input record. The provider finds that field, traverses
+the expression in normalized postorder, and uses persistent compile-time
+sequences as a value stack. Each stack entry carries conservative support plus
+eight generated scalar components. `Input`, `Sum`, `Difference`, `Neg`, and
+`Outer` are recognized by nominal constructor identity; no complete expression
+name or tree shape appears in the provider.
+
+The independent gate executes 1,004 inputs for each tree in Wasmtime and
+compares bit-for-bit with separately authored Rust tree interpreters. It also
+requires browser-valid WGSL with no runtime loop, branch, or switch and no host
+algebra import. This closes the specific objection that the earlier
+`(a ^ b) + (a ^ b)` proof could merely be a bespoke candidate table.
+
+Its boundary is explicit:
+
+- three dimensions and two packed `{e0,e1,e2}` inputs;
+- strict tree-order evaluation only;
+- `Input`/`Sum`/`Difference`/`Neg`/`Outer` only;
+- a dense eight-lane compile-time intermediate (absent runtime terms are still
+  omitted through support-aware emission); and
+- a zero-sized marker field because derive-provider goal arguments are not yet
+  exposed as ground reflection handles.
+
+General diagonal metric products, the remaining node vocabulary, compact typed
+outputs, stable expression DAG sharing, and deriving input slots/support from
+the reflected record are still required before this is the final GA façade.
 
 ## Semantic model
 
@@ -351,18 +390,22 @@ freely invoke trait solving or arbitrary full-program type normalization
 without creating a generation/analysis cycle.
 
 The currently implemented narrow bridge can normalize and traverse a **closed,
-ground recursive type plan** using base-graph facts, including the local
+ground recursive type plan** in preorder or postorder using base-graph facts,
+including the local
 `AlgebraicTwiceWedgePlan6` fixture and imported ground plans already exercised
 elsewhere. It remains deliberately bounded:
 
-- normalized preorder traversal is capped at 256 nodes;
+- normalized preorder/postorder traversal is capped at 256 nodes;
 - recursive type unfolding is capped at 4,096 steps;
 - a provider run has a 100,000-step / 10,000-command budget; and
 - const-helper support inside provider execution is narrower than ordinary Fe
   CTFE and fails closed on unsupported constructs.
 
 It cannot use generated impls, general associated-type solving, or an open
-symbolic type program. Therefore the robust architecture is two-stage:
+symbolic type program. Persistent bounded compile-time sequences now make
+structural folds over that closed tree possible inside Fe, but do not broaden
+which graph can be observed. Therefore the robust architecture remains
+two-stage:
 
 1. ordinary Fe CTFE materializes a closed, finite plan witness; and
 2. FCO consumes that witness and publishes ordinary executable Fe.

@@ -78,6 +78,26 @@ ends are provider naturals, now produces the same value:
 
 This is intended for bounded plan construction, not open-ended evaluation.
 
+Normalized ground-type handles additionally provide
+`normalized_postorder_types()`. It traverses the same finite, base-graph-only
+plan as `normalized_preorder_types()`, but visits every type-valued child before
+its parent. This lets an ordinary Fe provider express a structural fold with a
+value stack; it does not admit recursive executor calls or merged-graph queries.
+
+Compile-time sequences are immutable values with a deliberately small
+persistent vocabulary:
+
+- `len()`, `at(index)`, and `last()` read a sequence;
+- `append(value)` and `concat(sequence)` return extended sequences;
+- `replace(index, value)` returns a sequence with one element changed; and
+- `without_last()` returns the prefix before the final element.
+
+Indexes must fit `usize` and be in bounds; `last()`/`without_last()` require a
+non-empty sequence. Wrong value kinds and invalid bounds fail closed at the
+provider expression. These operations only rearrange bounded compile-time
+`Value`s. They emit no HIR, mutate no external state, and remain charged to the
+ordinary provider step/command budgets.
+
 ## Integer generated expressions
 
 `GenExpr` preserves unsigned literals and the explicit `Add`, `Sub`, `Mul` and

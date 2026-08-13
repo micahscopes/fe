@@ -1,0 +1,389 @@
+//! A genuinely structural FCO lowering for a bounded GA expression language.
+//!
+//! One unchanged provider evaluates any finite ground tree made from
+//! `Input`, `Sum`, `Difference`, `Neg`, and `Outer` in three dimensions. The
+//! expression is ordinary Fe type data stored in the zero-sized `GaProgram`
+//! marker field of each input record. FCO walks it in normalized postorder and
+//! emits straight-line scalar Fe; no runtime node tag, blade loop, or planner
+//! survives into Wasm/WGSL.
+//!
+//! This is intentionally a G2/G3 vertical slice rather than a claim that the
+//! complete `ga_expr` vocabulary is lowered. It uses two packed three-lane
+//! inputs with support {e0,e1,e2}; reflected input-shape/slot derivation and
+//! general diagonal metric signs remain the next layers.
+
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+use core::num::IntDowncast
+use ga_expr::{
+    Difference, GaProgram, Input, Neg, Outer, Strict, Sum, DiagonalMetric,
+}
+
+extern { fn __i32_from_f32(_: f32) -> i32 }
+
+type Pga2 = DiagonalMetric<3, 6>
+type LineA = Input<0, 22>
+type LineB = Input<1, 22>
+
+type RepeatedExpr = Sum<Outer<LineA, LineB>, Outer<LineA, LineB>>
+type DistributedExpr = Neg<Outer<Sum<LineA, LineB>, Difference<LineA, LineB>>>
+
+static_assert(<RepeatedExpr as ga_expr::GaSupport<Pga2>>::SUPPORT == 104)
+static_assert(<DistributedExpr as ga_expr::GaSupport<Pga2>>::SUPPORT == 104)
+
+const fn has_blade(_ support: usize, _ blade: usize) -> bool {
+    ((support >> blade) & 1) == 1
+}
+
+const fn compact_rank(_ support: usize, _ blade: usize) -> usize {
+    let mut candidate: usize = 0
+    let mut rank: usize = 0
+    while candidate < blade {
+        if has_blade(support, candidate) { rank = rank + 1 }
+        candidate = candidate + 1
+    }
+    rank
+}
+
+const fn outer_survives(_ left: usize, _ right: usize) -> bool {
+    (left & right) == 0
+}
+
+/// Sign of the exterior product of two disjoint basis-blade masks.
+const fn outer_negative(_ left: usize, _ right: usize) -> bool {
+    let mut bit: usize = 0
+    let mut swaps: usize = 0
+    while bit < 3 {
+        if ((left >> bit) & 1) == 1 {
+            let below = right & ((1 << bit) - 1)
+            let mut probe: usize = 0
+            while probe < bit {
+                if ((below >> probe) & 1) == 1 { swaps = swaps + 1 }
+                probe = probe + 1
+            }
+        }
+        bit = bit + 1
+    }
+    (swaps & 1) == 1
+}
+
+const fn support_union(_ left: usize, _ right: usize) -> usize {
+    left | right
+}
+
+const fn support_outer(_ left: usize, _ right: usize) -> usize {
+    let mut left_blade: usize = 0
+    let mut output: usize = 0
+    while left_blade < 8 {
+        if has_blade(left, left_blade) {
+            let mut right_blade: usize = 0
+            while right_blade < 8 {
+                if has_blade(right, right_blade)
+                    && outer_survives(left_blade, right_blade)
+                {
+                    output = output | (1 << (left_blade ^ right_blade))
+                }
+                right_blade = right_blade + 1
+            }
+        }
+        left_blade = left_blade + 1
+    }
+    output
+}
+
+pub trait EvaluateGa3 {
+    fn c0(_ operands: Self) -> f32
+    fn c1(_ operands: Self) -> f32
+    fn c2(_ operands: Self) -> f32
+    fn c3(_ operands: Self) -> f32
+    fn c4(_ operands: Self) -> f32
+    fn c5(_ operands: Self) -> f32
+    fn c6(_ operands: Self) -> f32
+    fn c7(_ operands: Self) -> f32
+}
+
+pub struct StructuralGaProvider {}
+
+struct ScalarOps {}
+impl ScalarOps {
+    fn zero() -> f32 { 0.0 }
+}
+
+impl Derive<EvaluateGa3> for StructuralGaProvider {
+    const fn derive<T>(ev: own Evidence<EvaluateGa3<T>>) -> Evidence<EvaluateGa3<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<EvaluateGa3<T>>,
+        )
+    {
+        let operands = builder.arg_ref("operands")
+        let stack = 0..0
+        let zero = builder.static_call(builder.ty<ScalarOps>(), "zero")
+
+        // The first type argument of the reflected GaProgram marker is the
+        // authored expression. The provider contains no whole-expression name.
+        for marker in reflect.fields() {
+            if builder.same_ty(marker.ty().constructor(), builder.ty<GaProgram>()) {
+                let program_arg: usize = 0
+                for arg in marker.ty().generic_args() {
+                    if program_arg == 0 && arg.is_type() {
+                        for node in arg.ty().normalized_postorder_types() {
+                            let recognized: usize = 0
+                            if builder.same_ty(node.constructor(), builder.ty<Input>()) {
+                                recognized = 1
+                                let ordinal: usize = 0
+                                let slot: usize = 0
+                                let support: usize = 0
+                                for node_arg in node.generic_args() {
+                                    if node_arg.is_const() {
+                                        if ordinal == 0 { slot = node_arg.const_value() }
+                                        if ordinal == 1 { support = node_arg.const_value() }
+                                        ordinal = ordinal + 1
+                                    }
+                                }
+
+                                let value = 0..0
+                                for blade in 0..8 {
+                                    let component = zero
+                                    if has_blade(support, blade) {
+                                        // Field zero is the zero-sized program
+                                        // marker. Each line then occupies its
+                                        // compact three reflected f32 fields.
+                                        let wanted = 1 + slot * 3 + compact_rank(support, blade)
+                                        let field_index: usize = 0
+                                        for field in reflect.fields() {
+                                            if field_index == wanted {
+                                                component = builder.field_get(operands, field)
+                                            }
+                                            field_index = field_index + 1
+                                        }
+                                    }
+                                    value = value.append(component)
+                                }
+                                stack = stack.append((0..0).append(support).append(value))
+                            }
+
+                            if builder.same_ty(node.constructor(), builder.ty<Sum>()) {
+                                recognized = 1
+                                let right = stack.last()
+                                stack = stack.without_last()
+                                let left = stack.last()
+                                stack = stack.without_last()
+                                let support = support_union(left.at(0), right.at(0))
+                                let value = 0..0
+                                for blade in 0..8 {
+                                    let component = zero
+                                    if has_blade(left.at(0), blade)
+                                        && has_blade(right.at(0), blade)
+                                    {
+                                        component = builder.add(
+                                            left.at(1).at(blade),
+                                            right.at(1).at(blade),
+                                        )
+                                    }
+                                    if has_blade(left.at(0), blade)
+                                        && !has_blade(right.at(0), blade)
+                                    {
+                                        component = left.at(1).at(blade)
+                                    }
+                                    if !has_blade(left.at(0), blade)
+                                        && has_blade(right.at(0), blade)
+                                    {
+                                        component = right.at(1).at(blade)
+                                    }
+                                    value = value.append(component)
+                                }
+                                stack = stack.append((0..0).append(support).append(value))
+                            }
+
+                            if builder.same_ty(node.constructor(), builder.ty<Difference>()) {
+                                recognized = 1
+                                let right = stack.last()
+                                stack = stack.without_last()
+                                let left = stack.last()
+                                stack = stack.without_last()
+                                let support = support_union(left.at(0), right.at(0))
+                                let value = 0..0
+                                for blade in 0..8 {
+                                    let component = zero
+                                    if has_blade(left.at(0), blade)
+                                        && has_blade(right.at(0), blade)
+                                    {
+                                        component = builder.sub(
+                                            left.at(1).at(blade),
+                                            right.at(1).at(blade),
+                                        )
+                                    }
+                                    if has_blade(left.at(0), blade)
+                                        && !has_blade(right.at(0), blade)
+                                    {
+                                        component = left.at(1).at(blade)
+                                    }
+                                    if !has_blade(left.at(0), blade)
+                                        && has_blade(right.at(0), blade)
+                                    {
+                                        component = builder.neg(right.at(1).at(blade))
+                                    }
+                                    value = value.append(component)
+                                }
+                                stack = stack.append((0..0).append(support).append(value))
+                            }
+
+                            if builder.same_ty(node.constructor(), builder.ty<Neg>()) {
+                                recognized = 1
+                                let source = stack.last()
+                                stack = stack.without_last()
+                                let value = 0..0
+                                for blade in 0..8 {
+                                    let component = zero
+                                    if has_blade(source.at(0), blade) {
+                                        component = builder.neg(source.at(1).at(blade))
+                                    }
+                                    value = value.append(component)
+                                }
+                                stack = stack.append((0..0).append(source.at(0)).append(value))
+                            }
+
+                            if builder.same_ty(node.constructor(), builder.ty<Outer>()) {
+                                recognized = 1
+                                let right = stack.last()
+                                stack = stack.without_last()
+                                let left = stack.last()
+                                stack = stack.without_last()
+                                let left_support = left.at(0)
+                                let right_support = right.at(0)
+                                let support = support_outer(left_support, right_support)
+                                let value = 0..0
+                                let counts = 0..0
+                                for blade in 0..8 {
+                                    value = value.append(zero)
+                                    counts = counts.append(0)
+                                }
+                                for left_blade in 0..8 {
+                                    for right_blade in 0..8 {
+                                        if has_blade(left_support, left_blade)
+                                            && has_blade(right_support, right_blade)
+                                            && outer_survives(left_blade, right_blade)
+                                        {
+                                            let output = left_blade ^ right_blade
+                                            let term = builder.mul(
+                                                left.at(1).at(left_blade),
+                                                right.at(1).at(right_blade),
+                                            )
+                                            if outer_negative(left_blade, right_blade) {
+                                                term = builder.neg(term)
+                                            }
+                                            if counts.at(output) == 0 {
+                                                value = value.replace(output, term)
+                                            } else {
+                                                value = value.replace(
+                                                    output,
+                                                    builder.add(value.at(output), term),
+                                                )
+                                            }
+                                            counts = counts.replace(output, counts.at(output) + 1)
+                                        }
+                                    }
+                                }
+                                stack = stack.append((0..0).append(support).append(value))
+                            }
+
+                            if recognized == 0 {
+                                // Poison the value stack. An unknown node can
+                                // never silently evaluate as its child.
+                                stack = stack.append(0)
+                            }
+                        }
+                    }
+                    program_arg = program_arg + 1
+                }
+            }
+        }
+
+        // Unknown/malformed trees fail closed: without exactly one result no
+        // methods are emitted, and ordinary trait conformance rejects the impl.
+        if stack.len() == 1 {
+            let result = stack.at(0).at(1)
+            builder.emit_method("c0", result.at(0))
+            builder.emit_method("c1", result.at(1))
+            builder.emit_method("c2", result.at(2))
+            builder.emit_method("c3", result.at(3))
+            builder.emit_method("c4", result.at(4))
+            builder.emit_method("c5", result.at(5))
+            builder.emit_method("c6", result.at(6))
+            builder.emit_method("c7", result.at(7))
+        }
+        builder.finish()
+        ev
+    }
+}
+
+pub struct RepeatedInputs {
+    program: GaProgram<RepeatedExpr, Pga2, Strict>,
+    l0: f32, l1: f32, l2: f32,
+    r0: f32, r1: f32, r2: f32,
+}
+
+pub struct DistributedInputs {
+    program: GaProgram<DistributedExpr, Pga2, Strict>,
+    l0: f32, l1: f32, l2: f32,
+    r0: f32, r1: f32, r2: f32,
+}
+
+derive EvaluateGa3 for RepeatedInputs using StructuralGaProvider
+derive EvaluateGa3 for DistributedInputs using StructuralGaProvider
+
+fn repeated(
+    _ l0: f32, _ l1: f32, _ l2: f32,
+    _ r0: f32, _ r1: f32, _ r2: f32,
+) -> RepeatedInputs {
+    RepeatedInputs {
+        program: GaProgram {},
+        l0: l0, l1: l1, l2: l2,
+        r0: r0, r1: r1, r2: r2,
+    }
+}
+
+fn distributed(
+    _ l0: f32, _ l1: f32, _ l2: f32,
+    _ r0: f32, _ r1: f32, _ r2: f32,
+) -> DistributedInputs {
+    DistributedInputs {
+        program: GaProgram {},
+        l0: l0, l1: l1, l2: l2,
+        r0: r0, r1: r1, r2: r2,
+    }
+}
+
+pub fn repeated_c3(_ l0: f32, _ l1: f32, _ l2: f32, _ r0: f32, _ r1: f32, _ r2: f32) -> f32 {
+    <RepeatedInputs as EvaluateGa3>::c3(repeated(l0, l1, l2, r0, r1, r2))
+}
+pub fn repeated_c5(_ l0: f32, _ l1: f32, _ l2: f32, _ r0: f32, _ r1: f32, _ r2: f32) -> f32 {
+    <RepeatedInputs as EvaluateGa3>::c5(repeated(l0, l1, l2, r0, r1, r2))
+}
+pub fn repeated_c6(_ l0: f32, _ l1: f32, _ l2: f32, _ r0: f32, _ r1: f32, _ r2: f32) -> f32 {
+    <RepeatedInputs as EvaluateGa3>::c6(repeated(l0, l1, l2, r0, r1, r2))
+}
+
+pub fn distributed_c3(_ l0: f32, _ l1: f32, _ l2: f32, _ r0: f32, _ r1: f32, _ r2: f32) -> f32 {
+    <DistributedInputs as EvaluateGa3>::c3(distributed(l0, l1, l2, r0, r1, r2))
+}
+pub fn distributed_c5(_ l0: f32, _ l1: f32, _ l2: f32, _ r0: f32, _ r1: f32, _ r2: f32) -> f32 {
+    <DistributedInputs as EvaluateGa3>::c5(distributed(l0, l1, l2, r0, r1, r2))
+}
+pub fn distributed_c6(_ l0: f32, _ l1: f32, _ l2: f32, _ r0: f32, _ r1: f32, _ r2: f32) -> f32 {
+    <DistributedInputs as EvaluateGa3>::c6(distributed(l0, l1, l2, r0, r1, r2))
+}
+
+pub fn structural_ga_render(
+    _ px: i32, _ py: i32,
+    _ l0: f32, _ l1: f32, _ l2: f32,
+    _ r0: f32, _ r1: f32, _ r2: f32,
+) -> u32 {
+    let a = repeated_c3(l0, l1, l2, r0, r1, r2)
+        + repeated_c5(l0, l1, l2, r0, r1, r2)
+        + repeated_c6(l0, l1, l2, r0, r1, r2)
+    let b = distributed_c3(l0, l1, l2, r0, r1, r2)
+        + distributed_c5(l0, l1, l2, r0, r1, r2)
+        + distributed_c6(l0, l1, l2, r0, r1, r2)
+    __i32_from_f32((a + b).abs() * 256.0).downcast_truncate()
+}

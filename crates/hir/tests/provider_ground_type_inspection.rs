@@ -268,6 +268,108 @@ fn proves_normalized_order(value: <Target as Inspect>::Out) { takes_yes(value) }
 }
 
 #[test]
+fn normalized_postorder_and_persistent_sequences_support_structural_folds() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_normalized_postorder_fold.fe".into(),
+        r#"
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+
+trait Inspect { type Out }
+struct Term<const Candidate: usize> {}
+struct Add<L, R> {}
+struct Neg<A> {}
+struct Yes {}
+struct No {}
+type GroundExpr = Add<Term<4>, Neg<Term<7>>>
+
+struct Target {}
+struct Inspector {}
+impl Derive<Inspect> for Inspector {
+    const fn derive<T>(ev: own Evidence<Inspect<T>>) -> Evidence<Inspect<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<Inspect<T>>)
+    {
+        // Postorder makes the normalized type tree an ordinary value stack:
+        // Term<4>, Term<7>, Neg, Add. These sequence operations are persistent;
+        // every assignment receives a fresh compile-time value.
+        let stack = 0..0
+        for nested in builder.ty<GroundExpr>().normalized_postorder_types() {
+            if builder.same_ty(nested.constructor(), builder.ty<Term>()) {
+                for arg in nested.generic_args() {
+                    if arg.is_const() {
+                        stack = stack.append(arg.const_value())
+                    }
+                }
+            }
+            if builder.same_ty(nested.constructor(), builder.ty<Neg>()) {
+                let value = stack.last()
+                stack = stack.without_last().append(value + 10)
+            }
+            if builder.same_ty(nested.constructor(), builder.ty<Add>()) {
+                let rhs = stack.last()
+                stack = stack.without_last()
+                let lhs = stack.last()
+                stack = stack.without_last().append(lhs * 100 + rhs)
+            }
+        }
+
+        // Exercise indexed reads, concatenation, and functional replacement
+        // independently of the expression fold.
+        let probe = (0..0).append(3).append(8).concat(10..12)
+        let probe = probe.replace(1, 9)
+        let out = builder.ty<No>()
+        if stack.len() == 1 && stack.at(0) == 417
+            && probe.len() == 4 && probe.at(0) == 3
+            && probe.at(1) == 9 && probe.at(2) == 10 && probe.at(3) == 11
+        {
+            out = builder.ty<Yes>()
+        }
+        builder.emit_assoc_ty("Out", out)
+        builder.finish()
+        ev
+    }
+}
+
+derive Inspect for Target using Inspector
+fn takes_yes(_ value: Yes) {}
+fn proves_fold(value: <Target as Inspect>::Out) { takes_yes(value) }
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
+fn persistent_sequence_bounds_fail_closed_at_the_access() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_sequence_bounds.fe".into(),
+        r#"
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+trait Inspect {}
+struct Target {}
+struct Inspector {}
+impl Derive<Inspect> for Inspector {
+    const fn derive<T>(ev: own Evidence<Inspect<T>>) -> Evidence<Inspect<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<Inspect<T>>)
+    {
+        let _invalid = (0..1).at(1)
+        builder.finish()
+        ev
+    }
+}
+derive Inspect for Target using Inspector
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let rendered = fe_hir::test_db::format_diagnostics(&db, &db.run_on_top_mod(top_mod));
+    assert!(
+        rendered.contains("this construct is not supported in derive provider bodies"),
+        "out-of-bounds compile-time sequence access must fail closed:\n{rendered}"
+    );
+}
+
+#[test]
 fn normalized_ground_type_inspection_fails_closed_on_forwarded_params() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(

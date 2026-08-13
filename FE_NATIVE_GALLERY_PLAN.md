@@ -573,6 +573,20 @@ Origin: honesty audit of Claude Code session
   those are the clearest domain representation, but hand-expanded GA
   coefficient routing/evaluation/gradient constructions are debt to replace,
   not an acceptable per-demo specialization.
+- The first honest G2/G3 structural slice is now green. One unchanged Fe FCO
+  provider lowers both `Sum<Outer<A,B>,Outer<A,B>>` and the structurally
+  different `Neg<Outer<Sum<A,B>,Difference<A,B>>>` by reflecting a zero-sized
+  `GaProgram` marker and folding its ground type in normalized postorder. New
+  domain-neutral FCO facilities provide that postorder and bounded immutable
+  sequence reads/append/concat/replace/pop; no Rust GA planner or complete
+  expression name is involved. The independent gate executes 1,004 cases per
+  tree bit-for-bit against separate Rust tree interpreters, then requires
+  browser-valid WGSL with no runtime loop/branch/switch and no host algebra
+  import. This closes the earlier false-genericity objection for the stated
+  three-dimensional `Input`/`Sum`/`Difference`/`Neg`/`Outer` subset. It does
+  not yet close G2/G3 for the full `ga_expr` vocabulary: general diagonal
+  metric signs/products, compact output types, reflected slot/support
+  derivation, DAG sharing, and QCGA consumption remain open.
 - The surface fixed host now observes the canonical Wasm arena's documented
   top-level-call lifetime. Initializer, explicit resident-state replacement,
   scheduling policy, legacy control, immediate transition, and scheduled

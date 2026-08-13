@@ -2657,6 +2657,24 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                                 .collect(),
                         ))
                     }
+                    "normalized_postorder_types" => {
+                        let plan =
+                            base_ground_type_plan(self.db, ty, self.provider_top_mod.scope())
+                                .map_err(|_| self.unsupported_expr(expr))?;
+                        let plan_id = self.normalized_plans.len();
+                        let root = plan.root;
+                        self.normalized_plans.push(plan);
+                        let nodes = self.normalized_type_postorder(plan_id, root);
+                        Ok(Value::Seq(
+                            nodes
+                                .into_iter()
+                                .map(|node| Value::NormalizedTy {
+                                    plan: plan_id,
+                                    node,
+                                })
+                                .collect(),
+                        ))
+                    }
                     _ => Err(self.unsupported_expr(expr)),
                 }
             }
@@ -2683,6 +2701,15 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                     )),
                     "preorder_types" | "normalized_preorder_types" => {
                         let nodes = self.normalized_type_preorder(plan, node);
+                        Ok(Value::Seq(
+                            nodes
+                                .into_iter()
+                                .map(|node| Value::NormalizedTy { plan, node })
+                                .collect(),
+                        ))
+                    }
+                    "normalized_postorder_types" => {
+                        let nodes = self.normalized_type_postorder(plan, node);
                         Ok(Value::Seq(
                             nodes
                                 .into_iter()
@@ -2723,14 +2750,58 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                     _ => Err(self.unsupported_expr(expr)),
                 }
             }
-            // A compile-time sequence (a reflection iterable like
-            // `reflect.variants()`) answers `.len()` with its element count as
-            // a `Value::Int`, the integer source for steering's pure
-            // comparison decisions. Not a `builder.*`/reflection-read op (no
-            // `("name", ..)` arm), so the frozen op surface is unchanged.
-            Value::Seq(items) => match method_name.as_str() {
+            // Compile-time sequences are immutable values. Besides `.len()`,
+            // their bounded persistent operations let providers express
+            // ordinary stack/fold algorithms without giving the executor a
+            // domain-specific planner. Every operation returns a fresh
+            // sequence; no ambient state or runtime artifact is introduced.
+            // This is not a `builder.*`/reflection-read op, so the frozen
+            // command surface remains unchanged.
+            Value::Seq(mut items) => match method_name.as_str() {
                 "len" if args.is_empty() => {
                     Ok(Value::Int(IntegerId::from_usize(self.db, items.len())))
+                }
+                "at" if args.len() == 1 => {
+                    let index = self.int_value(args[0].expr)?;
+                    let Some(index) = index.data(self.db).to_usize() else {
+                        return Err(self.unsupported_expr(args[0].expr));
+                    };
+                    items
+                        .get(index)
+                        .cloned()
+                        .ok_or_else(|| self.unsupported_expr(args[0].expr))
+                }
+                "last" if args.is_empty() => items
+                    .last()
+                    .cloned()
+                    .ok_or_else(|| self.unsupported_expr(expr)),
+                "append" if args.len() == 1 => {
+                    items.push(self.eval_expr(args[0].expr)?);
+                    Ok(Value::Seq(items))
+                }
+                "concat" if args.len() == 1 => {
+                    let Value::Seq(mut suffix) = self.eval_expr(args[0].expr)? else {
+                        return Err(self.unsupported_expr(args[0].expr));
+                    };
+                    items.append(&mut suffix);
+                    Ok(Value::Seq(items))
+                }
+                "replace" if args.len() == 2 => {
+                    let index = self.int_value(args[0].expr)?;
+                    let Some(index) = index.data(self.db).to_usize() else {
+                        return Err(self.unsupported_expr(args[0].expr));
+                    };
+                    if index >= items.len() {
+                        return Err(self.unsupported_expr(args[0].expr));
+                    }
+                    items[index] = self.eval_expr(args[1].expr)?;
+                    Ok(Value::Seq(items))
+                }
+                "without_last" if args.is_empty() => {
+                    if items.pop().is_none() {
+                        return Err(self.unsupported_expr(expr));
+                    }
+                    Ok(Value::Seq(items))
                 }
                 _ => Err(self.unsupported_expr(expr)),
             },
@@ -2826,6 +2897,35 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             for arg in data.args.iter().rev() {
                 if let NormalizedGroundArg::Type(child) = arg {
                     pending.push(*child);
+                }
+            }
+        }
+        out
+    }
+
+    /// Bounded postorder over the same normalized ground-type tree as
+    /// [`Self::normalized_type_preorder`]. The normalized plan is already
+    /// finite and budget-checked; an explicit `(node, visited)` work stack
+    /// keeps provider execution itself non-recursive while making structural
+    /// folds natural to author in Fe.
+    fn normalized_type_postorder(&self, plan: usize, root: usize) -> Vec<usize> {
+        let Some(plan) = self.normalized_plans.get(plan) else {
+            return Vec::new();
+        };
+        let mut pending = vec![(root, false)];
+        let mut out = Vec::new();
+        while let Some((node, visited)) = pending.pop() {
+            let Some(data) = plan.nodes.get(node) else {
+                return Vec::new();
+            };
+            if visited {
+                out.push(node);
+                continue;
+            }
+            pending.push((node, true));
+            for arg in data.args.iter().rev() {
+                if let NormalizedGroundArg::Type(child) = arg {
+                    pending.push((*child, false));
                 }
             }
         }
