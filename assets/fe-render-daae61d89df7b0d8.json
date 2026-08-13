@@ -1069,7 +1069,7 @@
       {
         "id": "ingots/core/src/actor.fe",
         "kind": "fe",
-        "sha256": "683f1e935aaaad0bb7c6a6e3eb03c591ce5a91f60ad0851030a02f1933ce007b"
+        "sha256": "acd18d168aa4d927c5c71eda6f29f96b879045972544f4488de80d73a7486c69"
       },
       {
         "id": "ingots/core/src/atomic.fe",
@@ -1184,7 +1184,7 @@
       {
         "id": "ingots/core/src/pending.fe",
         "kind": "fe",
-        "sha256": "a518e1697e9b3482341f595ce0d0c6b1118bba552ea073cfa96bcc2b0ac41720"
+        "sha256": "a6cbebaa665204c10a696fe78241c0daf05c01f2748a44c7ae38d1672642d2a6"
       },
       {
         "id": "ingots/core/src/prelude.fe",
