@@ -1264,19 +1264,25 @@ pub fn resolve_web_entry(
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ActorStateLeafMetadata {
     name: String,
+    path: Vec<String>,
     doc: Option<String>,
 }
 
 fn append_actor_state_leaves(
     ty: &CanonicalType,
-    field_name: &str,
+    field_path: &[String],
     doc: &Option<String>,
     leaves: &mut Vec<ActorStateLeafMetadata>,
 ) -> Result<(), WebBundleError> {
+    let field_name = field_path
+        .last()
+        .expect("actor state leaves always have a field path");
     match ty {
         CanonicalType::Record(fields) => {
             for field in fields {
-                append_actor_state_leaves(&field.ty, &field.name, doc, leaves)?;
+                let mut nested_path = field_path.to_vec();
+                nested_path.push(field.name.clone());
+                append_actor_state_leaves(&field.ty, &nested_path, doc, leaves)?;
             }
         }
         CanonicalType::Bool
@@ -1287,6 +1293,7 @@ fn append_actor_state_leaves(
         | CanonicalType::U64
         | CanonicalType::F32 => leaves.push(ActorStateLeafMetadata {
             name: field_name.to_owned(),
+            path: field_path.to_vec(),
             doc: doc.clone(),
         }),
         CanonicalType::Variant(variants)
@@ -1294,6 +1301,7 @@ fn append_actor_state_leaves(
         {
             leaves.push(ActorStateLeafMetadata {
                 name: field_name.to_owned(),
+                path: field_path.to_vec(),
                 doc: doc.clone(),
             })
         }
@@ -1307,6 +1315,40 @@ fn append_actor_state_leaves(
                 "GPU actor state field `{field_name}` has non-scalar browser state `{ty:?}`"
             )));
         }
+    }
+    Ok(())
+}
+
+/// Keep the familiar leaf name whenever it is already unique. When nested
+/// value types repeat names such as `x`, derive the shortest unique semantic
+/// suffix (`origin.x`, `right.x`, ...) instead of rejecting the Fe structure
+/// or forcing authors to flatten it by hand.
+fn qualify_repeated_actor_leaf_names(
+    actor_name: &str,
+    leaves: &mut [ActorStateLeafMetadata],
+) -> Result<(), WebBundleError> {
+    for index in 0..leaves.len() {
+        let path_len = leaves[index].path.len();
+        let mut resolved = None;
+        for depth in 1..=path_len {
+            let candidate = leaves[index].path[path_len - depth..].join(".");
+            let unique = leaves.iter().enumerate().all(|(other_index, other)| {
+                if other_index == index || other.path.len() < depth {
+                    return true;
+                }
+                other.path[other.path.len() - depth..].join(".") != candidate
+            });
+            if unique {
+                resolved = Some(candidate);
+                break;
+            }
+        }
+        leaves[index].name = resolved.ok_or_else(|| {
+            WebBundleError::SurfaceProjection(format!(
+                "GPU actor `{actor_name}` recursively flattens indistinguishable state path `{}`",
+                leaves[index].path.join("."),
+            ))
+        })?;
     }
     Ok(())
 }
@@ -1372,16 +1414,15 @@ fn actor_state_shape(
         let canonical =
             canonical_type_from_semantic(db, ty, &format!("surface_state.{}", field.name))
                 .map_err(|error| WebBundleError::SurfaceProjection(error.to_string()))?;
-        append_actor_state_leaves(&canonical, &field.name, &field.doc, &mut leaves)?;
+        append_actor_state_leaves(
+            &canonical,
+            std::slice::from_ref(&field.name),
+            &field.doc,
+            &mut leaves,
+        )?;
         fields.push(CanonicalField::new(field.name.clone(), canonical));
     }
-    let mut names = std::collections::BTreeSet::new();
-    if let Some(duplicate) = leaves.iter().find(|leaf| !names.insert(leaf.name.clone())) {
-        return Err(WebBundleError::SurfaceProjection(format!(
-            "GPU actor `{actor_name}` recursively flattens more than one state leaf named `{}`; leaf names must be unambiguous",
-            duplicate.name
-        )));
-    }
+    qualify_repeated_actor_leaf_names(&actor_name, &mut leaves)?;
     Ok(Some((CanonicalType::Record(fields), leaves)))
 }
 

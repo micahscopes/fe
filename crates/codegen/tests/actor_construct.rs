@@ -300,6 +300,28 @@ fn fullscreen_and_authored_raster_form_one_ordered_fe_pass_graph() {
         base.layout.bindings[0].members[0].name, overlay.layout.bindings[0].members[0].name,
         "both passes derive the same Fe actor-state identity",
     );
+    assert_eq!(
+        base.layout.bindings[0]
+            .members
+            .iter()
+            .map(|member| member.name.as_str())
+            .collect::<Vec<_>>(),
+        ["tint", "lower.x", "lower.y", "upper.x", "upper.y"],
+        "repeated nested vector leaves derive their shortest unique semantic paths",
+    );
+    assert_eq!(
+        base.layout.bindings[0]
+            .members
+            .iter()
+            .map(|member| member.name.as_str())
+            .collect::<Vec<_>>(),
+        overlay.layout.bindings[0]
+            .members
+            .iter()
+            .map(|member| member.name.as_str())
+            .collect::<Vec<_>>(),
+        "every pass sees one compiler-derived nested state layout",
+    );
     assert!(bundle.pass_wgsl[0].source.contains("@fragment"));
     assert!(bundle.pass_wgsl[1].source.contains("@vertex"));
     assert!(bundle.pass_wgsl[1].source.contains("@fragment"));

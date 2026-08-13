@@ -6,6 +6,9 @@
 //! normal/tangent material all come from the shared Fe ingot. The older
 //! all-surface raster actor is retired; this actor owns the sole user-facing
 //! surface and adds only a small source-ordered raster pass for its controls.
+//! Resident Fe also prepares the current pencil member and orthonormal camera
+//! once per accepted state change; fragments consume those typed values rather
+//! than repeating coefficient blends and trigonometry per pixel.
 //!
 //! Production visibility is a genuine iterative implicit-surface march. Every
 //! step evaluates the scale-invariant first-order quadric estimate
@@ -51,22 +54,22 @@ use fmath::{
 use gallery_palette::{clean_white, electric_blue, midnight, spring_green, theorem_gold}
 use qcga_pencil::{
     ControlPoints,
+    PencilCamera,
     PencilFrame,
     PencilParams,
     PencilRay,
+    PencilRenderState,
     PencilSceneState,
-    PickedControl,
     ProjectedPoint,
     Quadric,
     control_point_at_index,
     eval_quadric,
-    initial_pencil_scene,
+    initial_pencil_render,
     pencil_material,
-    pencil_member,
-    pencil_ray,
+    pencil_ray_with_camera,
     pencil_view,
-    project_point,
-    transition_pencil_scene,
+    project_point_with_camera,
+    transition_pencil_render,
 }
 
 const MAX_MARCH_STEPS: i32 = 128
@@ -256,11 +259,12 @@ fn marker_vertex(
     _ vertex_index: u32,
     _ points: ControlPoints,
     _ frame: PencilFrame,
+    _ camera: PencilCamera,
 ) -> RasterVertex<ControlMarkerVarying> {
     let point_index: u32 = vertex_index / 6
     let corner: u32 = vertex_index % 6
-    let projected: ProjectedPoint = project_point(
-        control_point_at_index(points, point_index), frame,
+    let projected: ProjectedPoint = project_point_with_camera(
+        control_point_at_index(points, point_index), camera,
     )
     // Twelve backing pixels in each dimension, independent of aspect ratio.
     let mut sx: f32 = -12.0 / max(frame.view.width, 1.0)
@@ -304,26 +308,26 @@ fn marker_color(_ varying: ControlMarkerVarying) -> i32 {
 }
 
 actor PencilDistanceSurface uses (GpuProgram<WebGpuBackend>) {
-    frame: PencilFrame,
-    points: ControlPoints,
-    picked: PickedControl,
+    scene: PencilSceneState,
+    camera: PencilCamera,
+    member: Quadric,
 
     const fn view() -> Surface<PencilParams> {
         pencil_view()
     }
 
-    fn initial() -> PencilSceneState uses (InitialState) {
-        initial_pencil_scene()
+    fn initial() -> PencilRenderState uses (InitialState) {
+        initial_pencil_render()
     }
 
-    fn navigate(self, event: own SurfaceEvent) -> PencilSceneState
+    fn navigate(self, event: own SurfaceEvent) -> PencilRenderState
         uses (SurfaceTransition, SurfaceScheduling<LatestPerFrame>)
     {
-        transition_pencil_scene(
-            PencilSceneState {
-                frame: self.frame,
-                points: self.points,
-                picked: self.picked,
+        transition_pencil_render(
+            PencilRenderState {
+                scene: self.scene,
+                camera: self.camera,
+                member: self.member,
             },
             event,
         )
@@ -331,14 +335,14 @@ actor PencilDistanceSurface uses (GpuProgram<WebGpuBackend>) {
 
     fn distance_surface(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
         let sample = PixelSample::ordered_2x2(px, py).plane_extent(
-            self.frame.view.width,
-            self.frame.view.height,
+            self.scene.frame.view.width,
+            self.scene.frame.view.height,
         )
-        let ray: PencilRay = pencil_ray(self.frame, sample.u, sample.v)
-        let q: Quadric = pencil_member(self.frame)
+        let ray: PencilRay = pencil_ray_with_camera(self.camera, sample.u, sample.v)
+        let q: Quadric = self.member
         let quality: PencilRenderQuality = pencil_render_quality(
-            self.frame.view.width,
-            self.frame.view.height,
+            self.scene.frame.view.width,
+            self.scene.frame.view.height,
         )
         let hit: PencilDeHit = trace_quadric_de_with_quality(
             q, ray.origin, ray.direction, quality,
@@ -369,7 +373,7 @@ actor PencilDistanceSurface uses (GpuProgram<WebGpuBackend>) {
                 conditioning,
             ))
             let tangent_color: Vec3 = pencil_material(
-                normal, ray.direction, self.frame,
+                normal, ray.direction,
                 0.06,
                 0.0,
             )
@@ -392,7 +396,9 @@ actor PencilDistanceSurface uses (GpuProgram<WebGpuBackend>) {
     fn marker_vertices(self, vertex_index: u32) -> RasterVertex<ControlMarkerVarying>
         uses (VertexStage<ControlMarkerVarying, TriangleList<54>>)
     {
-        marker_vertex(vertex_index, self.points, self.frame)
+        marker_vertex(
+            vertex_index, self.scene.points, self.scene.frame, self.camera,
+        )
     }
 
     fn marker_fragment(self, varying: ControlMarkerVarying) -> i32

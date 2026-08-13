@@ -360,7 +360,7 @@ fn qcga_scene_receipt(bundle: &WebBundle, event: SurfaceEventFixture) -> Vec<was
         .get_typed_func::<(i32, i32), i32>(&mut store, "fe_cabi_alloc")
         .unwrap();
 
-    let mut state = vec![wasmtime::Val::F32(0); 59];
+    let mut state = vec![wasmtime::Val::F32(0); 81];
     state[6] = wasmtime::Val::I32(0);
     state[58] = wasmtime::Val::I32(0);
     initialize
@@ -370,7 +370,7 @@ fn qcga_scene_receipt(bundle: &WebBundle, event: SurfaceEventFixture) -> Vec<was
 
     let pointer = alloc.call(&mut store, (52, 4)).unwrap() as usize;
     write_surface_event_batch(&memory, &mut store, pointer, &[event]);
-    let mut result = vec![wasmtime::Val::F32(0); 59];
+    let mut result = vec![wasmtime::Val::F32(0); 81];
     result[6] = wasmtime::Val::I32(0);
     result[58] = wasmtime::Val::I32(0);
     transition
@@ -2380,8 +2380,8 @@ fn qcga_pencil_de_compiles_as_a_fe_owned_iterative_fragment_surface() {
         "completed DE rays must leave the generated shader loop instead of running a done-flag envelope"
     );
     assert!(
-        de_wgsl.len() < 36_000,
-        "the marker-free Fe QCGA DE pass should remain under 36 kB WGSL (got {})",
+        de_wgsl.len() < 31_000,
+        "the prepared-state Fe QCGA DE pass should remain under 31 kB WGSL (got {})",
         de_wgsl.len(),
     );
     assert_eq!(marker_pass.draw_vertices, Some(54));
@@ -2394,12 +2394,12 @@ fn qcga_pencil_de_compiles_as_a_fe_owned_iterative_fragment_surface() {
         Some("marker_fragment")
     );
     assert!(
-        marker_wgsl.len() < 20_000,
-        "the 54-vertex marker overlay should remain under 20 kB WGSL (got {})",
+        marker_wgsl.len() < 18_000,
+        "the prepared-camera 54-vertex marker overlay should remain under 18 kB WGSL (got {})",
         marker_wgsl.len(),
     );
     assert!(
-        de_wgsl.len() + marker_wgsl.len() < 55_000,
+        de_wgsl.len() + marker_wgsl.len() < 49_000,
         "the distance field plus typed marker overlay should remain compact (got {} + {})",
         de_wgsl.len(),
         marker_wgsl.len(),
@@ -2409,9 +2409,24 @@ fn qcga_pencil_de_compiles_as_a_fe_owned_iterative_fragment_surface() {
         !authored.contains("selected_marker"),
         "control-point projection must not return to the all-fragment distance pass",
     );
+    assert!(
+        !authored.contains("pencil_member(self.") && !authored.contains("pencil_ray(self."),
+        "the render stages must consume resident Fe-prepared member/camera values",
+    );
+    for (name, shader) in [("distance", de_wgsl), ("marker", marker_wgsl)] {
+        assert!(
+            !shader.contains("sin(") && !shader.contains("cos("),
+            "the {name} shader must not rebuild its resident Fe-prepared camera",
+        );
+    }
+    assert!(
+        bundle.wasm.len() < 70_000,
+        "one-time Fe preparation must keep control Wasm under 70 kB (got {})",
+        bundle.wasm.len(),
+    );
     assert_eq!(pass.source_entry, "distance_surface");
     assert_eq!(pass.layout.bindings.len(), 1);
-    assert_eq!(pass.layout.bindings[0].members.len(), 59);
+    assert_eq!(pass.layout.bindings[0].members.len(), 81);
     assert_eq!(
         pass.layout.bindings[0]
             .members
@@ -2478,8 +2493,30 @@ fn qcga_pencil_de_compiles_as_a_fe_owned_iterative_fragment_surface() {
             "p8y",
             "p8z",
             "picked",
+            "origin.x",
+            "origin.y",
+            "origin.z",
+            "right.x",
+            "right.y",
+            "right.z",
+            "up.x",
+            "up.y",
+            "up.z",
+            "forward.x",
+            "forward.y",
+            "forward.z",
+            "a",
+            "b",
+            "c",
+            "d",
+            "e",
+            "f",
+            "g",
+            "h",
+            "i",
+            "j",
         ],
-        "the canonical DE view must consume the complete solved scene state",
+        "the canonical DE view must consume the scene plus Fe-prepared camera/member values",
     );
 
     let event = SurfaceEventFixture {

@@ -56,7 +56,7 @@ use ga_expr::{
     Null, Positive, Prime,
 }
 use fmath::{
-    PI, TAU, Vec3, abs, clamp01, cos, dot3, from_i32, max, min,
+    PI, TAU, Vec3, abs, clamp01, cos, cross3, dot3, from_i32, max, min,
     mix, normalize3, rgba, sin, sqrt, vec3,
 }
 use gallery_palette::{
@@ -487,21 +487,55 @@ pub struct ProjectedPoint {
 }
 impl Copy for ProjectedPoint {}
 
-/// One camera projection construction shared by analytic vertices, marker
-/// vertices, hit testing, and inverse drag scaling.
-pub fn project_point(_ point: ControlPoint, _ frame: PencilFrame) -> ProjectedPoint {
-    let wx: f32 = point.x - frame.basis.cx
-    let wy: f32 = point.y - frame.basis.cy
-    let wz: f32 = point.z - frame.basis.cz
+/// One resident orthonormal camera basis shared by projection and ray
+/// construction. Trigonometry and camera-origin work happen when Fe state
+/// changes, not independently in every fragment or marker vertex.
+pub struct PencilCamera {
+    pub origin: Vec3,
+    pub right: Vec3,
+    pub up: Vec3,
+    pub forward: Vec3,
+}
+impl Copy for PencilCamera {}
+
+pub fn pencil_camera(_ frame: PencilFrame) -> PencilCamera {
     let cyaw: f32 = cos(frame.view.yaw)
     let syaw: f32 = sin(frame.view.yaw)
     let cpit: f32 = cos(frame.view.pitch)
     let spit: f32 = sin(frame.view.pitch)
-    let rx: f32 = cyaw * wx + syaw * wz
-    let rz0: f32 = cyaw * wz - syaw * wx
-    let ry: f32 = cpit * wy - spit * rz0
-    let rz: f32 = spit * wy + cpit * rz0
-    let depth: f32 = rz + frame.view.dist
+    let right: Vec3 = normalize3(vec3(cyaw, 0.0, syaw))
+    let forward_seed: Vec3 = normalize3(vec3(
+        0.0 - syaw * cpit, spit, cyaw * cpit,
+    ))
+    let up: Vec3 = normalize3(cross3(forward_seed, right))
+    let forward: Vec3 = normalize3(cross3(right, up))
+    PencilCamera {
+        origin: vec3(
+            frame.basis.cx - forward.x * frame.view.dist,
+            frame.basis.cy - forward.y * frame.view.dist,
+            frame.basis.cz - forward.z * frame.view.dist,
+        ),
+        right: right,
+        up: up,
+        forward: forward,
+    }
+}
+
+/// Project through an already prepared camera. The old `project_point`
+/// wrapper below remains the zero-import oracle surface for callers whose
+/// camera is not resident state.
+pub fn project_point_with_camera(
+    _ point: ControlPoint,
+    _ camera: PencilCamera,
+) -> ProjectedPoint {
+    let relative: Vec3 = vec3(
+        point.x - camera.origin.x,
+        point.y - camera.origin.y,
+        point.z - camera.origin.z,
+    )
+    let rx: f32 = dot3(relative, camera.right)
+    let ry: f32 = dot3(relative, camera.up)
+    let depth: f32 = dot3(relative, camera.forward)
     ProjectedPoint {
         position: ClipPosition {
             x: rx * FOCAL,
@@ -513,6 +547,12 @@ pub fn project_point(_ point: ControlPoint, _ frame: PencilFrame) -> ProjectedPo
     }
 }
 
+/// One camera projection construction shared by analytic vertices, marker
+/// vertices, hit testing, and inverse drag scaling.
+pub fn project_point(_ point: ControlPoint, _ frame: PencilFrame) -> ProjectedPoint {
+    project_point_with_camera(point, pencil_camera(frame))
+}
+
 /// A world-space ray exactly inverse to `project_point`'s orbit camera. Both
 /// QCGA views therefore share one camera model rather than keeping a raster
 /// matrix and a visually similar raymarch camera in sync by convention.
@@ -522,31 +562,25 @@ pub struct PencilRay {
 }
 impl Copy for PencilRay {}
 
-pub fn pencil_ray(_ frame: PencilFrame, _ u: f32, _ v: f32) -> PencilRay {
-    let cyaw: f32 = cos(frame.view.yaw)
-    let syaw: f32 = sin(frame.view.yaw)
-    let cpit: f32 = cos(frame.view.pitch)
-    let spit: f32 = sin(frame.view.pitch)
-
-    // Camera-space origin (0, 0, -dist), transformed back to world space.
-    let origin: Vec3 = vec3(
-        frame.basis.cx + syaw * cpit * frame.view.dist,
-        frame.basis.cy - spit * frame.view.dist,
-        frame.basis.cz - cyaw * cpit * frame.view.dist,
-    )
-
-    // Camera-space ray (u / focal, v / focal, 1), inverse pitch then yaw.
+pub fn pencil_ray_with_camera(
+    _ camera: PencilCamera,
+    _ u: f32,
+    _ v: f32,
+) -> PencilRay {
     let rx: f32 = u / FOCAL
     let ry: f32 = v / FOCAL
-    let rz: f32 = 1.0
-    let wy: f32 = cpit * ry + spit * rz
-    let rz0: f32 = 0.0 - spit * ry + cpit * rz
-    let wx: f32 = cyaw * rx - syaw * rz0
-    let wz: f32 = syaw * rx + cyaw * rz0
     PencilRay {
-        origin: origin,
-        direction: normalize3(vec3(wx, wy, wz)),
+        origin: camera.origin,
+        direction: normalize3(vec3(
+            camera.forward.x + camera.right.x * rx + camera.up.x * ry,
+            camera.forward.y + camera.right.y * rx + camera.up.y * ry,
+            camera.forward.z + camera.right.z * rx + camera.up.z * ry,
+        )),
     }
+}
+
+pub fn pencil_ray(_ frame: PencilFrame, _ u: f32, _ v: f32) -> PencilRay {
+    pencil_ray_with_camera(pencil_camera(frame), u, v)
 }
 
 /// Historical per-vertex QCGA projection onto the current pencil member.
@@ -954,7 +988,6 @@ fn oracle_scene_vertex(
 pub fn pencil_material(
     _ normal: Vec3,
     _ view: Vec3,
-    _ frame: PencilFrame,
     _ glow: f32,
     _ sheet: f32,
 ) -> Vec3 {
@@ -1002,7 +1035,6 @@ fn shade_varying(_ v: SurfaceVarying, _ frame: PencilFrame) -> u32 {
     let color: Vec3 = pencil_material(
         vec3(v.nx, v.ny, v.nz),
         pencil_ray(frame, 0.0, 0.0).direction,
-        frame,
         v.glow,
         v.sheet,
     )
@@ -1036,7 +1068,7 @@ pub fn solved_basis(_ points: ControlPoints, _ generation: u32) -> PencilBasis {
 
 pub fn pick_control_at(
     _ points: ControlPoints,
-    _ frame: PencilFrame,
+    _ camera: PencilCamera,
     _ pointer_x: f32,
     _ pointer_y: f32,
     _ width: f32,
@@ -1047,7 +1079,9 @@ pub fn pick_control_at(
     let mut index: u32 = 0
     while index < 9 {
         let candidate: PickedControl = picked_from_index(index)
-        let projected: ProjectedPoint = project_point(control_point(points, candidate), frame)
+        let projected: ProjectedPoint = project_point_with_camera(
+            control_point(points, candidate), camera,
+        )
         if projected.depth > NEAR {
             let ndc_x: f32 = projected.position.x / projected.position.w
             let ndc_y: f32 = projected.position.y / projected.position.w
@@ -1069,26 +1103,22 @@ pub fn pick_control_at(
 pub fn drag_control_by(
     _ points: ControlPoints,
     _ picked: PickedControl,
-    _ frame: PencilFrame,
+    _ camera: PencilCamera,
     _ delta_x: f32,
     _ delta_y: f32,
     _ event_width: f32,
     _ event_height: f32,
 ) -> ControlPoints {
     let point: ControlPoint = control_point(points, picked)
-    let projected: ProjectedPoint = project_point(point, frame)
+    let projected: ProjectedPoint = project_point_with_camera(point, camera)
     let width: f32 = max(event_width, 1.0)
     let height: f32 = max(event_height, 1.0)
     let drx: f32 = delta_x * 2.0 * projected.depth / (width * FOCAL)
     let dry: f32 = 0.0 - delta_y * 2.0 * projected.depth / (height * FOCAL)
-    let cyaw: f32 = cos(frame.view.yaw)
-    let syaw: f32 = sin(frame.view.yaw)
-    let cpit: f32 = cos(frame.view.pitch)
-    let spit: f32 = sin(frame.view.pitch)
     let moved: ControlPoint = ControlPoint {
-        x: point.x + cyaw * drx + syaw * spit * dry,
-        y: point.y + cpit * dry,
-        z: point.z + syaw * drx - cyaw * spit * dry,
+        x: point.x + camera.right.x * drx + camera.up.x * dry,
+        y: point.y + camera.right.y * drx + camera.up.y * dry,
+        z: point.z + camera.right.z * drx + camera.up.z * dry,
     }
     // Fe value semantics give the edit an independent owned snapshot. The
     // compiler lowers this whole aggregate copy for both native and Wasm; the
@@ -1137,6 +1167,26 @@ pub struct PencilSceneState {
 }
 impl Copy for PencilSceneState {}
 
+/// A render-ready view of the canonical scene. `scene` remains the single
+/// interaction/solver value; `camera` and `member` are pure derived values
+/// materialized by resident Fe once per accepted state transition. Keeping
+/// them nominal makes this optimization visible in readable Fe instead of a
+/// compiler or JavaScript special case.
+pub struct PencilRenderState {
+    pub scene: PencilSceneState,
+    pub camera: PencilCamera,
+    pub member: Quadric,
+}
+impl Copy for PencilRenderState {}
+
+pub fn prepare_pencil_scene(_ scene: PencilSceneState) -> PencilRenderState {
+    PencilRenderState {
+        scene: scene,
+        camera: pencil_camera(scene.frame),
+        member: pencil_member(scene.frame),
+    }
+}
+
 pub fn initial_pencil_scene() -> PencilSceneState {
     let initial: SolveRequest = defaults(request: DefaultsRequest { generation: 0 })
     let points: ControlPoints = control_points_from_request(initial)
@@ -1157,8 +1207,13 @@ pub fn initial_pencil_scene() -> PencilSceneState {
     }
 }
 
+pub fn initial_pencil_render() -> PencilRenderState {
+    prepare_pencil_scene(initial_pencil_scene())
+}
+
 pub fn transition_pencil_scene(
     _ state: PencilSceneState,
+    _ camera: PencilCamera,
     _ event: own SurfaceEvent,
 ) -> PencilSceneState {
     if event.is_pointer_down() {
@@ -1166,7 +1221,7 @@ pub fn transition_pencil_scene(
             frame: state.frame,
             points: state.points,
             picked: pick_control_at(
-                state.points, state.frame, event.pointer_x, event.pointer_y,
+                state.points, camera, event.pointer_x, event.pointer_y,
                 event.width, event.height,
             ),
         }
@@ -1187,7 +1242,7 @@ pub fn transition_pencil_scene(
             }
             _ => {
                 let points: ControlPoints = drag_control_by(
-                    state.points, state.picked, state.frame,
+                    state.points, state.picked, camera,
                     event.delta_x, event.delta_y, event.width, event.height,
                 )
                 return PencilSceneState {
@@ -1218,6 +1273,15 @@ pub fn transition_pencil_scene(
         points: state.points,
         picked: state.picked,
     }
+}
+
+pub fn transition_pencil_render(
+    _ state: PencilRenderState,
+    _ event: own SurfaceEvent,
+) -> PencilRenderState {
+    prepare_pencil_scene(transition_pencil_scene(
+        state.scene, state.camera, event,
+    ))
 }
 
 // ---------------------------------------------------------------------------

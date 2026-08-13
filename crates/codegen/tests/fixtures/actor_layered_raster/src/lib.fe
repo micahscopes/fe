@@ -16,26 +16,35 @@ use std::webgpu::{
 struct OverlayVarying { heat: f32 }
 impl Copy for OverlayVarying {}
 
+struct Offset { x: f32, y: f32 }
+impl Copy for Offset {}
+
+struct OverlayGeometry { lower: Offset, upper: Offset }
+impl Copy for OverlayGeometry {}
+
 actor LayeredSurface uses (GpuProgram<WebGpuBackend>) {
     tint: f32,
+    geometry: OverlayGeometry,
 
     fn background(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
-        if px + py > 0 && self.tint >= 0.0 { -15720400 } else { 0 }
+        if px + py > 0 && self.tint + self.geometry.lower.x >= 0.0 {
+            -15720400
+        } else { 0 }
     }
 
     fn overlay_vertices(self, vertex_index: u32) -> RasterVertex<OverlayVarying>
         uses (VertexStage<OverlayVarying, TriangleList<6>>)
     {
         let corner: u32 = vertex_index % 6
-        let mut x: f32 = -0.25
-        let mut y: f32 = -0.25
-        if corner == 1 { x = 0.25 }
-        if corner == 2 { y = 0.25 }
-        if corner == 3 { y = 0.25 }
-        if corner == 4 { x = 0.25 }
+        let mut x: f32 = self.geometry.lower.x
+        let mut y: f32 = self.geometry.lower.y
+        if corner == 1 { x = self.geometry.upper.x }
+        if corner == 2 { y = self.geometry.upper.y }
+        if corner == 3 { y = self.geometry.upper.y }
+        if corner == 4 { x = self.geometry.upper.x }
         if corner == 5 {
-            x = 0.25
-            y = 0.25
+            x = self.geometry.upper.x
+            y = self.geometry.upper.y
         }
         RasterVertex {
             position: ClipPosition { x: x, y: y, z: 0.0, w: 1.0 },

@@ -957,6 +957,32 @@ Origin: honesty audit of Claude Code session
   require the named external WebGPU-adapter run; camera/current-member uniform
   hoisting, clipped march intervals, typed device/frame facts, and deletion of
   the temporary host ceiling remain the next mobile workload slice.
+- Camera and current-member preparation now move across the same resident Fe
+  boundary rather than becoming hidden compiler or host specialization. The
+  shared QCGA model exposes an orthonormal `PencilCamera` and a nominal
+  `PencilRenderState { scene, camera, member }`; initialization and every
+  accepted Fe transition rebuild the two pure derived values once in control
+  Wasm. Both GPU passes consume them directly, so generated shaders contain no
+  camera `sin`/`cos` and the DE pass no longer blends all ten pencil
+  coefficients per fragment. This uncovered and closed a general nested-value
+  ergonomics gap: repeated record leaves now receive the shortest unique
+  compiler-derived semantic suffix (`origin.x`, `right.x`, and so on), while
+  already unique leaves retain their concise names. Authors can consequently
+  keep typed `Vec3` records instead of flattening coordinates or maintaining
+  numeric slots. A general layered-raster fixture proves identical derived
+  paths across passes. The QCGA uniform grows from 59 to 81 leaves (88 bytes)
+  and control Wasm from 61,234 to 65,857 bytes, while browser-valid DE WGSL
+  falls from 32,109 to 29,572 bytes and marker WGSL from 17,798 to 16,911:
+  3,424 bytes, or 6.9 percent, removed from the combined GPU program. The
+  independent lifecycle tape proves the prepared camera is orthonormal and
+  aimed at the solved center, updates after orbit input, and preserves all
+  solver leaves; it separately checks the prepared member against all nine
+  control points before and after drag/re-solve. Actor construction remains
+  10/10, the QCGA suite 8/8, and the 500-field/seven-ray analytic oracle green.
+  A fresh optimized publication again verifies 14 Fe modules / 72 deployment
+  files with both Chromium component/gallery tapes green. Clipped march
+  intervals, typed device/frame capability facts, and removal of the temporary
+  host ceiling remain; actual pixels retain the no-adapter qualification.
 
 This ledger records achieved evidence, not a relaxation of the phases or the
 Definition of done below.

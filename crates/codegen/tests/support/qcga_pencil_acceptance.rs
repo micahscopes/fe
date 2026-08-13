@@ -889,7 +889,7 @@ fn canonical_de_actor_owns_the_complete_scene_lifecycle() {
         assert_eq!(marker.source_entry, "marker_fragment");
         assert_eq!(marker.draw_vertices, Some(54));
         assert_eq!(pass.layout.bindings.len(), 1);
-        assert_eq!(pass.layout.bindings[0].members.len(), 59);
+        assert_eq!(pass.layout.bindings[0].members.len(), 81);
         assert_eq!(
             pass.layout.bindings[0]
                 .members
@@ -956,8 +956,30 @@ fn canonical_de_actor_owns_the_complete_scene_lifecycle() {
                 "p8y",
                 "p8z",
                 "picked",
+                "origin.x",
+                "origin.y",
+                "origin.z",
+                "right.x",
+                "right.y",
+                "right.z",
+                "up.x",
+                "up.y",
+                "up.z",
+                "forward.x",
+                "forward.y",
+                "forward.z",
+                "a",
+                "b",
+                "c",
+                "d",
+                "e",
+                "f",
+                "g",
+                "h",
+                "i",
+                "j",
             ],
-            "nested Fe state must recursively derive the shader member identities",
+            "nested Fe state must derive shortest unique camera paths and prepared member identities",
         );
         let surface = bundle.manifest.surface.as_ref().expect("QCGA view");
         assert_eq!(
@@ -977,7 +999,7 @@ fn canonical_de_actor_owns_the_complete_scene_lifecycle() {
         let initialize = instance
             .get_func(&mut store, "fe_surface_initialize_v1")
             .expect("fixed Fe InitialState export");
-        let mut state = vec![wasmtime::Val::F32(0); 59];
+        let mut state = vec![wasmtime::Val::F32(0); 81];
         state[6] = wasmtime::Val::I32(0);
         state[58] = wasmtime::Val::I32(0);
         initialize
@@ -1005,6 +1027,50 @@ fn canonical_de_actor_owns_the_complete_scene_lifecycle() {
             ];
             assert!(oracle(&q0, point).abs() < 1e-4);
             assert!(oracle(&q1, point).abs() < 1e-4);
+        }
+        let member = std::array::from_fn(|index| f32_at(&state, 71 + index));
+        for index in 0..9 {
+            let point = [
+                f32_at(&state, 31 + index * 3) as f64,
+                f32_at(&state, 32 + index * 3) as f64,
+                f32_at(&state, 33 + index * 3) as f64,
+            ];
+            assert!(
+                oracle(&member, point).abs() < 2e-4,
+                "resident Fe-prepared pencil member must contain control point {index}",
+            );
+        }
+        let vector = |offset: usize| {
+            [
+                f32_at(&state, offset) as f64,
+                f32_at(&state, offset + 1) as f64,
+                f32_at(&state, offset + 2) as f64,
+            ]
+        };
+        let dot = |left: [f64; 3], right: [f64; 3]| {
+            left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
+        };
+        let origin = vector(59);
+        let right = vector(62);
+        let up = vector(65);
+        let forward = vector(68);
+        for axis in [right, up, forward] {
+            assert!(
+                (dot(axis, axis) - 1.0).abs() < 2e-4,
+                "prepared camera axis is not unit length: {axis:?}",
+            );
+        }
+        assert!(dot(right, up).abs() < 2e-4);
+        assert!(dot(right, forward).abs() < 2e-4);
+        assert!(dot(up, forward).abs() < 2e-4);
+        for axis in 0..3 {
+            assert!(
+                (origin[axis] + forward[axis] * f32_at(&state, 3) as f64
+                    - f32_at(&state, 7 + axis) as f64)
+                    .abs()
+                    < 2e-4,
+                "prepared camera must look at the solved pencil centre",
+            );
         }
 
         let replace = instance
@@ -1042,7 +1108,7 @@ fn canonical_de_actor_owns_the_complete_scene_lifecycle() {
         let transition = instance
             .get_func(&mut store, "fe_surface_transition_scheduled_v1")
             .expect("scheduled Fe navigation export");
-        let mut next = vec![wasmtime::Val::F32(0); 59];
+        let mut next = vec![wasmtime::Val::F32(0); 81];
         next[6] = wasmtime::Val::I32(0);
         next[58] = wasmtime::Val::I32(0);
         transition
@@ -1057,15 +1123,37 @@ fn canonical_de_actor_owns_the_complete_scene_lifecycle() {
         assert_eq!(f32_at(&next, 2).to_bits(), f32_at(&state, 2).to_bits());
         assert_eq!(f32_at(&next, 3).to_bits(), f32_at(&state, 3).to_bits());
         assert_eq!(
-            next[6..]
+            next[6..59]
                 .iter()
                 .map(|value| format!("{value:?}"))
                 .collect::<Vec<_>>(),
-            state[6..]
+            state[6..59]
                 .iter()
                 .map(|value| format!("{value:?}"))
                 .collect::<Vec<_>>(),
             "navigation must preserve every solver-derived basis leaf exactly",
+        );
+        assert_ne!(
+            next[59..71]
+                .iter()
+                .map(|value| format!("{value:?}"))
+                .collect::<Vec<_>>(),
+            state[59..71]
+                .iter()
+                .map(|value| format!("{value:?}"))
+                .collect::<Vec<_>>(),
+            "resident Fe must refresh the prepared camera after orbit input",
+        );
+        assert_eq!(
+            next[71..81]
+                .iter()
+                .map(|value| format!("{value:?}"))
+                .collect::<Vec<_>>(),
+            state[71..81]
+                .iter()
+                .map(|value| format!("{value:?}"))
+                .collect::<Vec<_>>(),
+            "camera-only input must preserve the prepared pencil member",
         );
 
         // Independent interaction receipt: derive p0's screen location from
@@ -1119,7 +1207,7 @@ fn canonical_de_actor_owns_the_complete_scene_lifecycle() {
             .flat_map(u32::to_le_bytes)
             .collect::<Vec<_>>();
         memory.write(&mut store, pointer, &down_bytes).unwrap();
-        let mut selected = vec![wasmtime::Val::F32(0); 59];
+        let mut selected = vec![wasmtime::Val::F32(0); 81];
         selected[6] = wasmtime::Val::I32(0);
         selected[58] = wasmtime::Val::I32(0);
         transition
@@ -1141,6 +1229,17 @@ fn canonical_de_actor_owns_the_complete_scene_lifecycle() {
                 .collect::<Vec<_>>(),
             "selection changes only the typed PickedControl state",
         );
+        assert_eq!(
+            selected[59..]
+                .iter()
+                .map(|value| format!("{value:?}"))
+                .collect::<Vec<_>>(),
+            state[59..]
+                .iter()
+                .map(|value| format!("{value:?}"))
+                .collect::<Vec<_>>(),
+            "selection must preserve the prepared camera and pencil member",
+        );
 
         let drag_release_bytes = raw_event(9, 12.0, -7.0)
             .into_iter()
@@ -1150,7 +1249,7 @@ fn canonical_de_actor_owns_the_complete_scene_lifecycle() {
         memory
             .write(&mut store, pointer, &drag_release_bytes)
             .unwrap();
-        let mut dragged = vec![wasmtime::Val::F32(0); 59];
+        let mut dragged = vec![wasmtime::Val::F32(0); 81];
         dragged[6] = wasmtime::Val::I32(0);
         dragged[58] = wasmtime::Val::I32(0);
         transition
@@ -1188,6 +1287,7 @@ fn canonical_de_actor_owns_the_complete_scene_lifecycle() {
         );
         let dragged_q0 = std::array::from_fn(|index| f32_at(&dragged, 11 + index));
         let dragged_q1 = std::array::from_fn(|index| f32_at(&dragged, 21 + index));
+        let dragged_member = std::array::from_fn(|index| f32_at(&dragged, 71 + index));
         for index in 0..9 {
             let point = [
                 f32_at(&dragged, 31 + index * 3) as f64,
@@ -1197,6 +1297,10 @@ fn canonical_de_actor_owns_the_complete_scene_lifecycle() {
             assert!(
                 oracle(&dragged_q0, point).abs() < 2e-4 && oracle(&dragged_q1, point).abs() < 2e-4,
                 "re-solved basis must contain dragged point {index}",
+            );
+            assert!(
+                oracle(&dragged_member, point).abs() < 3e-4,
+                "resident Fe must refresh the prepared member after dragging point {index}",
             );
         }
 
