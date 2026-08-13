@@ -15,6 +15,8 @@ use super::{LowerError, lower_runtime::assign_sonatina_function_symbols};
 
 pub const MATERIALIZED_TASK_RUNTIME_JS: &str =
     include_str!("../../assets/browser-runtime/materialized-task.js");
+pub const HOST_COMPLETION_RUNTIME_JS: &str =
+    include_str!("../../assets/browser-runtime/host-completion.js");
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WasmTaskScalar {

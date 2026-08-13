@@ -16,9 +16,9 @@
 use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
-    BackendKind, MATERIALIZED_TASK_RUNTIME_JS, OptLevel, WasmCompileOptions,
-    compile_runtime_package_wasm_with_options, emit_materialized_task_adapter_js, layout_for,
-    materialized_task_adapters,
+    BackendKind, HOST_COMPLETION_RUNTIME_JS, MATERIALIZED_TASK_RUNTIME_JS, OptLevel,
+    WasmCompileOptions, compile_runtime_package_wasm_with_options,
+    emit_materialized_task_adapter_js, layout_for, materialized_task_adapters,
 };
 use fe_host_runtime::{
     MaterializedExecutor, MaterializedTaskMachine, MaterializedTaskStep, PendingToken,
@@ -524,6 +524,151 @@ if (!forgedRejected) throw new Error("forged outcome reached Fe");
     assert!(
         output.status.success(),
         "compiler-emitted browser continuation adapter failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
+fn fe_timer_and_receive_resume_through_browser_completion_broker() {
+    const SOURCE: &str = r#"
+use core::pending::{Recv, Suspend, TaskOutcome, Timer}
+use std::host::{HostTimer, Resumable}
+use std::wasm::WasmBackend
+
+fn sleep_once(_ ms: u64) -> u64
+    uses (timer: mut Timer<WasmBackend>, suspend: Suspend<WasmBackend, u32>)
+{
+    let pending = timer.sleep_begin(ms)
+    let outcome: TaskOutcome<u32, u64> = suspend.suspend(pending)
+    match outcome {
+        TaskOutcome::Success(woke_at) => woke_at
+        TaskOutcome::Failure(_) => 4001
+        TaskOutcome::Cancelled => 4002
+    }
+}
+
+pub fn sleep_task(_ ms: u64) -> u64 {
+    with (Timer<WasmBackend> = HostTimer {}, Suspend<WasmBackend, u32> = Resumable {}) {
+        sleep_once(ms)
+    }
+}
+
+fn receive_once() -> u64
+    uses (receive: mut Recv<WasmBackend>, suspend: Suspend<WasmBackend, u32>)
+{
+    let pending = receive.recv_begin()
+    let outcome: TaskOutcome<u32, u64> = suspend.suspend(pending)
+    match outcome {
+        TaskOutcome::Success(value) => value
+        TaskOutcome::Failure(_) => 5001
+        TaskOutcome::Cancelled => 5002
+    }
+}
+
+pub fn receive_task() -> u64 {
+    with (Recv<WasmBackend> = HostTimer {}, Suspend<WasmBackend, u32> = Resumable {}) {
+        receive_once()
+    }
+}
+"#;
+    if !std::process::Command::new("bun")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        return;
+    }
+
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///browser_host_completion.fe").unwrap();
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(SOURCE.to_owned()));
+    let file = db.workspace().get(&db, &url).unwrap();
+    let top_mod = db.top_mod(file);
+    let entries = vec!["sleep_task".to_owned(), "receive_task".to_owned()];
+    let package = mir::build_wasm_runtime_package_for_entries(&db, top_mod, &entries).unwrap();
+    let adapters = materialized_task_adapters(&db, &package).unwrap();
+    assert_eq!(adapters.len(), 2);
+    assert!(adapters.iter().any(|adapter| adapter.name == "sleep_task"));
+    assert!(
+        adapters
+            .iter()
+            .any(|adapter| adapter.name == "receive_task")
+    );
+    let adapter = emit_materialized_task_adapter_js(&adapters, "./materialized-task.js")
+        .unwrap()
+        .expect("public Fe timer and receive tasks emit browser adapters");
+    let wasm =
+        compile_runtime_package_wasm_with_options(&db, &package, WasmCompileOptions::default())
+            .unwrap()
+            .bytes;
+    wasmparser::validate(&wasm).unwrap();
+    let imports = func_imports(&wasm);
+    assert!(imports.contains(&("fe:host".to_owned(), "sleep_begin".to_owned())));
+    assert!(imports.contains(&("fe:host".to_owned(), "recv_begin".to_owned())));
+    assert!(!imports.iter().any(|(_, name)| name == "wait"));
+
+    let directory = tempfile::tempdir().unwrap();
+    let wasm_path = directory.path().join("host-completion.wasm");
+    let task_runtime_path = directory.path().join("materialized-task.js");
+    let host_runtime_path = directory.path().join("host-completion.js");
+    let adapter_path = directory.path().join("task-adapter.mjs");
+    let test_path = directory.path().join("host-completion-browser.mjs");
+    std::fs::write(&wasm_path, wasm).unwrap();
+    std::fs::write(&task_runtime_path, MATERIALIZED_TASK_RUNTIME_JS).unwrap();
+    std::fs::write(&host_runtime_path, HOST_COMPLETION_RUNTIME_JS).unwrap();
+    std::fs::write(&adapter_path, adapter).unwrap();
+    let script = format!(
+        r#"
+import {{ createMaterializedTaskRegistry }} from {adapter_url:?};
+import {{ createHostCompletionBroker }} from {host_runtime_url:?};
+const broker = createHostCompletionBroker();
+const bytes = await Bun.file({wasm_path:?}).arrayBuffer();
+const {{ instance }} = await WebAssembly.instantiate(bytes, broker.imports);
+const tasks = createMaterializedTaskRegistry(instance.exports);
+
+const before = BigInt(Math.trunc(performance.now()));
+const sleep = await broker.run(tasks.sleep_task, [1n]);
+const after = BigInt(Math.trunc(performance.now()));
+if (sleep.length !== 1 || sleep[0] < before || sleep[0] > after) throw new Error("Fe timer did not observe the browser wake timestamp");
+
+const received = broker.run(tasks.receive_task, []);
+if (!broker.post(0xe7e7n)) throw new Error("Fe receive token was not registered");
+const receiveOutput = await received;
+if (receiveOutput.length !== 1 || receiveOutput[0] !== 0xe7e7n) throw new Error("Fe receive success policy was wrong");
+
+const failed = broker.run(tasks.receive_task, []);
+if (!broker.failNextReceive(23)) throw new Error("Fe receive failure was not registered");
+const failureOutput = await failed;
+if (failureOutput.length !== 1 || failureOutput[0] !== 5001n) throw new Error("Fe receive failure policy was bypassed");
+
+const timerController = new AbortController();
+const cancelledTimer = broker.run(tasks.sleep_task, [10_000n], {{ signal: timerController.signal }});
+timerController.abort();
+const timerCancellation = await cancelledTimer;
+if (timerCancellation.length !== 1 || timerCancellation[0] !== 4002n) throw new Error("Fe timer cancellation policy was bypassed");
+
+const receiveController = new AbortController();
+const cancelledReceive = broker.run(tasks.receive_task, [], {{ signal: receiveController.signal }});
+receiveController.abort();
+const receiveCancellation = await cancelledReceive;
+if (receiveCancellation.length !== 1 || receiveCancellation[0] !== 5002n) throw new Error("Fe receive cancellation policy was bypassed");
+if (broker.activeCount() !== 0 || broker.cancelAll() !== 0) throw new Error("browser broker leaked completed operations");
+"#,
+        adapter_url = format!("file://{}", adapter_path.display()),
+        host_runtime_url = format!("file://{}", host_runtime_path.display()),
+        wasm_path = wasm_path.display().to_string(),
+    );
+    std::fs::write(&test_path, script).unwrap();
+    let output = std::process::Command::new("bun")
+        .arg("run")
+        .arg(&test_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "Fe timer/receive browser completion capstone failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );

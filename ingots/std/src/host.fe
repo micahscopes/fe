@@ -47,9 +47,9 @@ pub struct HostTimer {}
 
 /// Non-blocking interpreter for the same broker-completed token rail. The
 /// compiler recognizes the nominal `std::host::raw::suspend` operation in this
-/// provider body. Direct-site continuation state and liveness are derived now;
-/// frame splitting and fixed re-entry export materialization are the active
-/// compiler slice. The ZST is authority evidence only; it carries no host id.
+/// provider body. The compiler derives exact continuation frames and fixed
+/// start/resume exports; the browser HostTimer/Recv broker drives those exports
+/// without blocking. The ZST is authority evidence only; it carries no host id.
 pub struct Resumable {}
 
 impl Suspend<WasmBackend, u32> for Resumable {

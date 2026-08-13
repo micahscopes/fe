@@ -59,14 +59,14 @@ pub use sonatina::{
     compile_runtime_package_native_surface_transition4_f32,
 };
 pub use sonatina::{
-    LowerError, MATERIALIZED_TASK_RUNTIME_JS, SonatinaContractBytecode, SonatinaTestOptions,
-    WasmCompileOptions, WasmTaskAdapter, WasmTaskContinuation, WasmTaskDelivery, WasmTaskRange,
-    WasmTaskScalar, compile_runtime_package_wasm_with_options, emit_ingot_sonatina_bytecode,
-    emit_ingot_sonatina_ir, emit_ingot_sonatina_ir_optimized, emit_materialized_task_adapter_js,
-    emit_module_sonatina_bytecode, emit_module_sonatina_ir, emit_module_sonatina_ir_optimized,
-    emit_runtime_package_sonatina_ir, emit_runtime_package_sonatina_ir_optimized,
-    emit_test_ingot_sonatina, emit_test_module_sonatina, materialized_task_adapters,
-    validate_module_sonatina_ir,
+    HOST_COMPLETION_RUNTIME_JS, LowerError, MATERIALIZED_TASK_RUNTIME_JS, SonatinaContractBytecode,
+    SonatinaTestOptions, WasmCompileOptions, WasmTaskAdapter, WasmTaskContinuation,
+    WasmTaskDelivery, WasmTaskRange, WasmTaskScalar, compile_runtime_package_wasm_with_options,
+    emit_ingot_sonatina_bytecode, emit_ingot_sonatina_ir, emit_ingot_sonatina_ir_optimized,
+    emit_materialized_task_adapter_js, emit_module_sonatina_bytecode, emit_module_sonatina_ir,
+    emit_module_sonatina_ir_optimized, emit_runtime_package_sonatina_ir,
+    emit_runtime_package_sonatina_ir_optimized, emit_test_ingot_sonatina,
+    emit_test_module_sonatina, materialized_task_adapters, validate_module_sonatina_ir,
 };
 #[cfg(feature = "spirv-backend")]
 pub use sonatina::{

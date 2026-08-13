@@ -122,6 +122,10 @@ function laneZero(value, lane) {
   return lane.bits === 64 ? value === 0n : value === 0 || value === false;
 }
 
+function encodedZero(lane) {
+  return lane.bits === 64 ? 0n : 0;
+}
+
 function vector(value, lanes, name, encode) {
   if (!Array.isArray(value) || value.length !== lanes.length) {
     throw new TypeError(`${name} must contain exactly ${lanes.length} lanes`);
@@ -242,7 +246,7 @@ export function createMaterializedTaskMachine(definition) {
       frameDetails.delete(frame);
       const { continuation, lanes: frameLanes } = saved;
       const delivery = continuation.delivery;
-      const encoded = new Array(delivery.lanes.length).fill(0);
+      const encoded = delivery.lanes.map(encodedZero);
       encoded[0] = delivered.kind === "failure" ? 0 : delivered.kind === "success" ? 1 : 2;
       const payload = delivered.kind === "failure"
         ? delivery.failure

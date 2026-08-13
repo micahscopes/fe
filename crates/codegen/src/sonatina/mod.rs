@@ -11,8 +11,9 @@ mod spirv_lower;
 mod wasm_lower;
 
 pub use materialized_task::{
-    MATERIALIZED_TASK_RUNTIME_JS, WasmTaskAdapter, WasmTaskContinuation, WasmTaskDelivery,
-    WasmTaskRange, WasmTaskScalar, emit_materialized_task_adapter_js, materialized_task_adapters,
+    HOST_COMPLETION_RUNTIME_JS, MATERIALIZED_TASK_RUNTIME_JS, WasmTaskAdapter,
+    WasmTaskContinuation, WasmTaskDelivery, WasmTaskRange, WasmTaskScalar,
+    emit_materialized_task_adapter_js, materialized_task_adapters,
 };
 #[cfg(all(
     feature = "spirv-backend",

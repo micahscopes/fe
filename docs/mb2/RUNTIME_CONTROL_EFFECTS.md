@@ -156,8 +156,18 @@ manifest-driven.
    exercises Fe success, failure, cancellation, and stale-frame branches.
    Canonical bundle publication, real timer/receive/Worker/WebGPU handlers, and
    recursive linked frames remain.
-4. [todo] Interpret timer/receive/spawn and callback completion through that path on
-   MainThread and Worker placements; retain blocking `Wait` only where legal.
+4. [in progress] Interpret timer/receive/spawn and callback completion through
+   that path on MainThread and Worker placements; retain blocking `Wait` only
+   where legal. The first fixed, non-blocking `HostTimer`/`Recv` broker is now
+   executable: `sleep_begin` uses a monotonic clock plus real scheduled timer,
+   `recv_begin` enters one FIFO host-post lane, `AbortSignal` delivers typed
+   cancellation, and a trapping Fe invocation cancels host work minted by that
+   invocation. The broker drives the compiler-generated machine until Fe
+   completes and explicitly rejects blocking `wait`. A compiled-Fe Bun gate
+   exercises timer success, receive success/failure, both cancellations, and
+   cleanup through the actual `HostTimer` and `Resumable` provider bodies.
+   MessagePort/EventSource attachment, spawn/Worker placement, canonical task
+   artifact discovery, and structured child scopes remain.
 5. [todo] Derive browser `EventSource` handlers and move the gallery activation/timer
    loop onto the same resident/reactive interpreter.
 6. [todo] Move Worker admission, cancellation, restart/backoff, and supervision policy

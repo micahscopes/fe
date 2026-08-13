@@ -1,0 +1,253 @@
+// Fixed browser realization for std::host's broker-completed Timer/Recv rail.
+//
+// Fe owns the task body, outcome matching, retry/cancellation policy, and every
+// subsequent suspension. This module owns only standards clocks/timers, the
+// finite pending-token table, FIFO receive delivery, and driving the opaque
+// compiler-generated continuation machine.
+
+import { taskCancelled, taskFailure, taskSuccess } from "./materialized-task.js";
+
+const MAX_U32 = 0xffff_ffff;
+const MAX_U64 = (1n << 64n) - 1n;
+const MAX_TIMER_CHUNK_MS = 0x7fff_ffffn;
+
+function u32(value, name) {
+  if (!Number.isInteger(value) || value < 0 || value > MAX_U32) {
+    throw new TypeError(`${name} must be a u32`);
+  }
+  return value;
+}
+
+function u64(value, name) {
+  if (typeof value !== "bigint" || value < 0n || value > MAX_U64) {
+    throw new TypeError(`${name} must be a u64 bigint`);
+  }
+  return value;
+}
+
+function defaultClock() {
+  if (typeof performance === "undefined" || typeof performance.now !== "function") {
+    throw new Error("fe host completion runtime requires a monotonic performance.now clock");
+  }
+  return BigInt(Math.max(0, Math.trunc(performance.now())));
+}
+
+function pendingToken(pending) {
+  if (!pending || typeof pending !== "object" || Array.isArray(pending)) {
+    throw new TypeError("Fe host pending operation must be an object");
+  }
+  const keys = Object.keys(pending).sort();
+  if (keys.join("\0") !== "handler\0lanes"
+      || !pending.handler || typeof pending.handler !== "object"
+      || !Array.isArray(pending.lanes) || pending.lanes.length !== 1) {
+    throw new TypeError("Fe host pending operation has the wrong compiler-derived shape");
+  }
+  return u32(pending.lanes[0], "Fe host pending token");
+}
+
+function abortSignal(value) {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object"
+      || typeof value.addEventListener !== "function"
+      || typeof value.removeEventListener !== "function"
+      || typeof value.aborted !== "boolean") {
+    throw new TypeError("signal must implement the AbortSignal interface");
+  }
+  return value;
+}
+
+export function createHostCompletionBroker(options = {}) {
+  if (!options || typeof options !== "object" || Array.isArray(options)) {
+    throw new TypeError("host completion options must be an object");
+  }
+  const clock = options.clock ?? defaultClock;
+  const schedule = options.schedule ?? setTimeout;
+  const cancelSchedule = options.cancelSchedule ?? clearTimeout;
+  if (typeof clock !== "function" || typeof schedule !== "function"
+      || typeof cancelSchedule !== "function") {
+    throw new TypeError("host completion clock and scheduling hooks must be callable");
+  }
+
+  let nextToken = 0;
+  const slots = new Map();
+  const receives = [];
+
+  const readClock = () => u64(clock(), "monotonic clock result");
+
+  const allocate = (kind) => {
+    if (nextToken > MAX_U32) {
+      throw new RangeError("Fe host pending-token space is exhausted");
+    }
+    const token = nextToken;
+    nextToken += 1;
+    let resolve;
+    const settled = new Promise((value) => { resolve = value; });
+    const slot = {
+      token,
+      kind,
+      state: "pending",
+      claimed: false,
+      handler: undefined,
+      cancelWork: undefined,
+      resolve,
+      settled,
+    };
+    slots.set(token, slot);
+    if (kind === "receive") receives.push(token);
+    return slot;
+  };
+
+  const settle = (slot, outcome) => {
+    if (slot.state !== "pending") return false;
+    slot.state = "settled";
+    if (slot.cancelWork !== undefined) slot.cancelWork();
+    slot.resolve(outcome);
+    return true;
+  };
+
+  const beginTimer = (rawDelay) => {
+    if (typeof rawDelay !== "bigint") {
+      throw new TypeError("fe:host::sleep_begin requires an i64 Wasm carrier");
+    }
+    const delay = BigInt.asUintN(64, rawDelay);
+    const started = readClock();
+    if (delay > MAX_U64 - started) {
+      throw new RangeError("Fe timer deadline exceeds u64 monotonic time");
+    }
+    const deadline = started + delay;
+    const slot = allocate("timer");
+    let handle;
+    const arm = () => {
+      const now = readClock();
+      if (now >= deadline) {
+        settle(slot, taskSuccess([now]));
+        return;
+      }
+      const remaining = deadline - now;
+      const chunk = remaining > MAX_TIMER_CHUNK_MS ? MAX_TIMER_CHUNK_MS : remaining;
+      handle = schedule(arm, Number(chunk));
+    };
+    slot.cancelWork = () => {
+      if (handle !== undefined) cancelSchedule(handle);
+    };
+    try {
+      const initial = delay > MAX_TIMER_CHUNK_MS ? MAX_TIMER_CHUNK_MS : delay;
+      handle = schedule(arm, Number(initial));
+    } catch (error) {
+      slots.delete(slot.token);
+      throw error;
+    }
+    return slot.token | 0;
+  };
+
+  const beginReceive = () => allocate("receive").token | 0;
+
+  const firstPendingReceive = () => {
+    while (receives.length > 0) {
+      const slot = slots.get(receives.shift());
+      if (slot !== undefined && slot.kind === "receive" && slot.state === "pending") {
+        return slot;
+      }
+    }
+    return undefined;
+  };
+
+  const awaitPending = async (pending, signal) => {
+    const token = pendingToken(pending);
+    const slot = slots.get(token);
+    if (slot === undefined) {
+      throw new TypeError("Fe host pending token is stale, foreign, or unknown");
+    }
+    if (slot.claimed) {
+      throw new TypeError("Fe host pending token was already claimed by a continuation");
+    }
+    slot.claimed = true;
+    slot.handler = pending.handler;
+    const onAbort = () => settle(slot, taskCancelled());
+    if (signal !== undefined) {
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
+    }
+    try {
+      return await slot.settled;
+    } finally {
+      if (signal !== undefined) signal.removeEventListener("abort", onAbort);
+      slots.delete(token);
+    }
+  };
+
+  const invokeMachine = (invoke) => {
+    const tokenCheckpoint = nextToken;
+    try {
+      const step = invoke();
+      if (!step || typeof step !== "object"
+          || (step.kind !== "suspended" && step.kind !== "complete")
+          || (step.kind === "complete" && !Array.isArray(step.output))) {
+        throw new TypeError("materialized Fe task returned an invalid step");
+      }
+      return step;
+    } catch (error) {
+      for (const [token, slot] of slots) {
+        if (token >= tokenCheckpoint) {
+          if (slot.cancelWork !== undefined) slot.cancelWork();
+          slots.delete(token);
+        }
+      }
+      throw error;
+    }
+  };
+
+  const run = async (machine, input, runOptions = {}) => {
+    if (!machine || typeof machine.start !== "function" || typeof machine.resume !== "function") {
+      throw new TypeError("host completion runner requires a materialized Fe task machine");
+    }
+    if (!runOptions || typeof runOptions !== "object" || Array.isArray(runOptions)) {
+      throw new TypeError("host completion run options must be an object");
+    }
+    const signal = abortSignal(runOptions.signal);
+    let step = invokeMachine(() => machine.start(input));
+    while (step.kind === "suspended") {
+      const outcome = await awaitPending(step.pending, signal);
+      step = invokeMachine(() => machine.resume(step.frame, outcome));
+    }
+    return step.output;
+  };
+
+  const post = (value) => {
+    const checked = u64(value, "receive value");
+    const slot = firstPendingReceive();
+    return slot === undefined ? false : settle(slot, taskSuccess([checked]));
+  };
+
+  const failNextReceive = (error) => {
+    const checked = u32(error, "receive error");
+    const slot = firstPendingReceive();
+    return slot === undefined ? false : settle(slot, taskFailure([checked]));
+  };
+
+  const cancelAll = () => {
+    let cancelled = 0;
+    for (const slot of slots.values()) {
+      if (settle(slot, taskCancelled())) cancelled += 1;
+    }
+    return cancelled;
+  };
+
+  const host = Object.freeze({
+    host_now: () => BigInt.asIntN(64, readClock()),
+    sleep_begin: beginTimer,
+    recv_begin: beginReceive,
+    wait: () => {
+      throw new Error("fe:host::wait is unavailable in the non-blocking browser broker");
+    },
+  });
+
+  return Object.freeze({
+    imports: Object.freeze({ "fe:host": host }),
+    run,
+    post,
+    failNextReceive,
+    cancelAll,
+    activeCount: () => slots.size,
+  });
+}

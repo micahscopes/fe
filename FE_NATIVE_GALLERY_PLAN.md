@@ -803,6 +803,19 @@ Origin: honesty audit of Claude Code session
   distinct typed identities for equal raw pending ordinals, and one-shot frame
   custody. Canonical artifact publication, real standards handlers, and true
   recursive linked frames remain the active materialization slice.
+- The first real browser-host realization now drives that generated machine
+  without blocking. A fixed, demo-blind `HostTimer`/`Recv` broker implements
+  the existing `fe:host::{sleep_begin,recv_begin,host_now}` imports with a
+  monotonic clock, scheduled timers, FIFO host posts, typed receive failure,
+  and `AbortSignal` cancellation; it rejects `wait` on this placement. Fe still
+  owns every success/failure/cancellation match and every subsequent suspend.
+  An independent capstone compiles ordinary Fe tasks using `Timer`, `Recv`,
+  `Suspend`, `HostTimer`, and `Resumable`, then runs their actual Wasm through a
+  real timer plus receive success/failure and both cancellation paths under
+  Bun. A separate mechanics gate covers invalid delivery, timer cleanup when a
+  Fe invocation traps, and non-consuming rejection of malformed posts.
+  MessagePort/EventSource attachment, Worker/spawn placement, structured child
+  scopes, and canonical task-package discovery remain open.
 - A mobile-safety follow-up keeps the sequential policy in the resident Fe
   shell but changes its fixed opcode-14 realization from cold-to-live to
   poster-only loading. Poster capture and off-viewport suspension now destroy
