@@ -538,6 +538,12 @@ impl<'db> AttrListId<'db> {
         self.has_marker_attr(db, "actor_projection")
     }
 
+    /// Marks a self-less actor behavior whose resumable body belongs to the
+    /// actor's host-managed lifetime scope.
+    pub fn is_actor_scoped_task(self, db: &'db dyn HirDb) -> bool {
+        self.has_marker_attr(db, "actor_scoped_task")
+    }
+
     /// Marks a self-less actor behavior whose const result is a typed page
     /// description projected by build tooling before runtime discovery.
     pub fn is_actor_page_projection(self, db: &'db dyn HirDb) -> bool {

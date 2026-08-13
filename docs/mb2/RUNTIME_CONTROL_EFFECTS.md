@@ -161,8 +161,12 @@ manifest-driven.
    stale outcomes. A Bun gate drives actual compiled Fe Wasm through two
    suspension sites—including equal raw pending ordinals—and independently
    exercises Fe success, failure, cancellation, and stale-frame branches.
-   Canonical bundle publication, real timer/receive/Worker/WebGPU handlers, and
-   recursive linked frames remain.
+   Resident actors may now select any number of zero-argument resumable
+   behaviors through the nominal target-neutral `ScopedTask` role. Those roots
+   join the actor's Wasm package; the compiler emits their exact adapters and
+   the HTML precompiler publishes one content-addressed executable ES-module
+   package with no task JSON or caller-authored task-name/ID table. General
+   non-component task publication and recursive linked frames remain.
 4. [in progress] Interpret timer/receive/spawn and callback completion through
    that path on MainThread and Worker placements; retain blocking `Wait` only
    where legal. The first fixed, non-blocking `HostTimer`/`Recv` broker is now
@@ -176,8 +180,14 @@ manifest-driven.
    compiled-Fe Bun gate
    exercises timer success, receive success/failure, both cancellations, and
    cleanup through the actual `HostTimer` and `Resumable` provider bodies.
-   MessagePort/EventSource attachment, spawn/Worker placement, canonical task
-   artifact discovery, and structured child scopes remain.
+   The fixed component host starts compiler-enumerated `ScopedTask` machines at
+   connection, shares one completion broker, and aborts the scope on
+   disconnection; reconnect creates a fresh lifetime without exposing task
+   names. A publication gate imports the generated package under Bun and runs
+   an actual Fe timer task to its checked wake timestamp, while a separate
+   lifecycle gate proves start/cancel/restart mechanics. MessagePort/EventSource
+   attachment, spawn/Worker placement, nested child scopes, and migration of
+   the gallery surface loader remain.
 5. [todo] Derive browser `EventSource` handlers and move the gallery activation/timer
    loop onto the same resident/reactive interpreter.
 6. [todo] Move Worker admission, cancellation, restart/backoff, and supervision policy

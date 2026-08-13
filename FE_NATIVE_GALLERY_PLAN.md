@@ -830,6 +830,25 @@ Origin: honesty audit of Claude Code session
   compiled Fe-to-Wasm capstones pass for the two-site machine, timer/receive
   broker, and compiler-emitted browser adapter. This correctness distinction
   is behavioral evidence, not generated-byte equality.
+- Resident actors now have a compiler-derived background-task authoring path.
+  A self-less behavior selects the nominal target-neutral `ScopedTask` role;
+  the compiler roots it beside the actor's initializer/transition/projection,
+  derives its resumable MIR machine, and emits fixed start/resume adapters.
+  HTML publication writes one content-addressed three-module package (generated
+  adapter, fixed materialized-task runtime, fixed completion broker) and only a
+  standard executable-module reference on the component script—there is no
+  task JSON, hand-authored entry name, numeric task ID, or JavaScript task
+  inventory. The deployment verifier pins the package digest, exact file set,
+  and fixed runtime bytes. The fixed component host enumerates the generated
+  machines, starts them for each connected lifetime, and aborts them on
+  disconnect; reconnect gets a fresh scope. Independent evidence includes
+  role/zero-input/export-shape checks, the ordinary resident actor regression,
+  a lifecycle start/cancel/restart tape, and a real precompile -> static package
+  -> Bun -> Fe Wasm timer execution whose wake timestamp is checked. This is
+  the canonical component-task publication prerequisite, not yet the
+  EventSource/surface-loader migration: typed event attachment and a Fe-owned
+  race/select construction remain necessary before opcode 14's Promise/timer
+  realization can be deleted honestly.
 - A mobile-safety follow-up keeps the sequential policy in the resident Fe
   shell but changes its fixed opcode-14 realization from cold-to-live to
   poster-only loading. Poster capture and off-viewport suspension now destroy

@@ -21,6 +21,14 @@ pub struct InitialState {}
 #[actor_projection]
 pub struct ProjectState {}
 
+/// A self-less actor behavior whose resumable body lives for one host-owned
+/// actor scope. Resident component hosts start these tasks when their actor is
+/// connected and cancel them when that scope closes. The compiler derives the
+/// task's continuation machine from the behavior; authors do not name exports
+/// or maintain a parallel task table.
+#[actor_scoped_task]
+pub struct ScopedTask {}
+
 /// A self-less actor behavior whose const result describes page structure.
 /// Build tooling may project this typed value before runtime artifacts are
 /// discovered; the authored behavior name and concrete page vocabulary remain

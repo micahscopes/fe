@@ -11,8 +11,9 @@ use hir::hir_def::{ActorTransition, TopLevelMod};
 
 use crate::actor_semantics::{nominal_attrs, resolve_metadata_ty, semantic_actors};
 use crate::{
-    CanonicalField, CanonicalType, LowerError, WasmCompileOptions, canonical_type_from_semantic,
-    compile_runtime_package_wasm_with_options,
+    CanonicalField, CanonicalType, LowerError, WasmCompileOptions, WasmTaskAdapter,
+    canonical_type_from_semantic, compile_runtime_package_wasm_with_options,
+    materialized_task_adapters,
 };
 
 pub const RESIDENT_ACTOR_TRANSITION_EXPORT: &str = "fe_actor_transition_v1";
@@ -34,12 +35,16 @@ pub struct ResidentActorContract {
     pub projection_leaf_count: usize,
     pub event_tag_limits: Vec<(usize, u32)>,
     pub state_tag_limits: Vec<(usize, u32)>,
+    /// Source identities of role-selected scoped tasks. These stay inside the
+    /// compiler; the browser receives only generated fixed task adapters.
+    pub scoped_task_source_entries: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResidentActorArtifact {
     pub contract: ResidentActorContract,
     pub wasm: Vec<u8>,
+    pub scoped_tasks: Vec<WasmTaskAdapter>,
 }
 
 #[derive(Debug)]
@@ -90,6 +95,17 @@ fn behavior_is_projection(db: &DriverDataBase, behavior: hir::hir_def::Func<'_>)
         .filter_map(|path| resolve_metadata_ty(db, path, behavior.scope()))
         .filter_map(|ty| nominal_attrs(db, ty))
         .any(|attrs| attrs.is_actor_projection(db))
+}
+
+fn behavior_is_scoped_task(db: &DriverDataBase, behavior: hir::hir_def::Func<'_>) -> bool {
+    behavior
+        .actor_roles(db)
+        .data(db)
+        .iter()
+        .filter_map(|role| role.key_path.to_opt())
+        .filter_map(|path| resolve_metadata_ty(db, path, behavior.scope()))
+        .filter_map(|ty| nominal_attrs(db, ty))
+        .any(|attrs| attrs.is_actor_scoped_task(db))
 }
 
 fn scalar_layout(
@@ -343,6 +359,28 @@ pub fn resident_actor_contract(
         &mut projection_tag_limits,
     )?;
 
+    let mut scoped_task_source_entries = Vec::new();
+    for task in actor
+        .behaviors
+        .iter()
+        .copied()
+        .filter(|behavior| behavior_is_scoped_task(db, *behavior))
+    {
+        let name = task
+            .name(db)
+            .to_opt()
+            .map(|name| name.data(db).to_string())
+            .ok_or_else(|| {
+                ResidentActorError::Contract("scoped task has no resolvable name".to_owned())
+            })?;
+        if !task.arg_tys(db).is_empty() {
+            return Err(ResidentActorError::Contract(format!(
+                "scoped task `{name}` must be self-less and take no arguments"
+            )));
+        }
+        scoped_task_source_entries.push(name);
+    }
+
     Ok(Some(ResidentActorContract {
         actor: actor_name,
         init_source_entry,
@@ -356,6 +394,7 @@ pub fn resident_actor_contract(
         projection_leaf_count,
         event_tag_limits,
         state_tag_limits,
+        scoped_task_source_entries,
     }))
 }
 
@@ -380,16 +419,24 @@ pub fn compile_resident_actor_with_optimization(
     let Some(contract) = resident_actor_contract(db, top_mod)? else {
         return Ok(None);
     };
-    let package = mir::build_wasm_runtime_package_for_entries(
-        db,
-        top_mod,
-        &[
-            contract.init_source_entry.clone(),
-            contract.projection_source_entry.clone(),
-            contract.source_entry.clone(),
-        ],
-    )
-    .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
+    let mut entries = vec![
+        contract.init_source_entry.clone(),
+        contract.projection_source_entry.clone(),
+        contract.source_entry.clone(),
+    ];
+    entries.extend(contract.scoped_task_source_entries.iter().cloned());
+    let package = mir::build_wasm_runtime_package_for_entries(db, top_mod, &entries)
+        .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
+    let scoped_tasks =
+        materialized_task_adapters(db, &package).map_err(ResidentActorError::Lower)?;
+    if scoped_tasks.len() != contract.scoped_task_source_entries.len() {
+        return Err(ResidentActorError::Contract(format!(
+            "actor `{}` declares {} scoped task behavior(s), but {} resumable machine(s) were materialized",
+            contract.actor,
+            contract.scoped_task_source_entries.len(),
+            scoped_tasks.len(),
+        )));
+    }
     let options = WasmCompileOptions::default()
         .with_resident_actor_transition_checked(
             &contract.source_entry,
@@ -421,5 +468,6 @@ pub fn compile_resident_actor_with_optimization(
     Ok(Some(ResidentActorArtifact {
         contract,
         wasm: artifact.bytes,
+        scoped_tasks,
     }))
 }

@@ -26,6 +26,59 @@ fn fixture() -> (DriverDataBase, Url) {
     (db, url)
 }
 
+fn scoped_task_fixture() -> (DriverDataBase, common::file::File) {
+    const SOURCE: &str = r#"
+use core::actor::{InitialState, ProjectState, ResidentTransition, ScopedTask}
+use core::pending::{Suspend, TaskOutcome, Timer}
+use std::host::{HostTimer, Resumable}
+use std::wasm::WasmBackend
+
+pub struct Tick { pub value: u32 }
+pub struct TickState { pub value: u32 }
+pub struct TickProjection { pub value: u32 }
+
+fn sleep_once(_ ms: u64) -> u64
+    uses (timer: mut Timer<WasmBackend>, suspend: Suspend<WasmBackend, u32>)
+{
+    let pending = timer.sleep_begin(ms)
+    let result: TaskOutcome<u32, u64> = suspend.suspend(pending)
+    match result {
+        TaskOutcome::Success(woke_at) => woke_at
+        TaskOutcome::Failure(_) => 4001
+        TaskOutcome::Cancelled => 4002
+    }
+}
+
+actor Clock {
+    value: u32,
+
+    fn initial() -> TickState uses (InitialState) {
+        TickState { value: 0 }
+    }
+
+    fn receive(self, event: Tick) -> TickState uses (ResidentTransition) {
+        TickState { value: self.value + event.value }
+    }
+
+    fn project(self) -> TickProjection uses (ProjectState) {
+        TickProjection { value: self.value }
+    }
+
+    fn heartbeat() -> u64 uses (ScopedTask) {
+        with (Timer<WasmBackend> = HostTimer {}, Suspend<WasmBackend, u32> = Resumable {}) {
+            sleep_once(1)
+        }
+    }
+}
+"#;
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///web_component_scoped_task.fe").unwrap();
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(SOURCE.to_owned()));
+    let file = db.workspace().get(&db, &url).unwrap();
+    (db, file)
+}
+
 fn function_exports(wasm: &[u8]) -> Vec<String> {
     let mut exports = Vec::new();
     for payload in wasmparser::Parser::new(0).parse_all(wasm) {
@@ -355,5 +408,43 @@ fn fe_component_actor_owns_lifecycle_selection_and_resident_state() {
             .call(&mut store, (99, 0, 0, 0, 0, 0.0, 11.0, 0, 0))
             .is_err(),
         "an invalid fieldless-enum tag must trap before Fe can interpret it"
+    );
+}
+
+#[test]
+fn resident_actor_scoped_task_is_role_selected_and_materialized_without_a_task_table() {
+    let (db, file) = scoped_task_fixture();
+    let top_mod = db.top_mod(file);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "component scoped-task fixture diagnostics:\n{diagnostics}"
+    );
+
+    let artifact = compile_resident_actor(&db, top_mod)
+        .expect("resident actor plus scoped task contract")
+        .expect("role-selected resident actor");
+    assert_eq!(artifact.contract.actor, "Clock");
+    assert_eq!(artifact.contract.scoped_task_source_entries, ["heartbeat"]);
+    let [task] = artifact.scoped_tasks.as_slice() else {
+        panic!("expected exactly one compiler-materialized scoped task")
+    };
+    assert!(
+        task.input.is_empty(),
+        "scoped actor tasks start without host arguments"
+    );
+    assert_eq!(task.continuations.len(), 1);
+    assert_eq!(task.continuations[0].state, 1);
+
+    let exports = function_exports(&artifact.wasm);
+    assert!(exports.iter().any(|name| name == &task.start_export));
+    assert!(
+        exports
+            .iter()
+            .any(|name| name == &task.continuations[0].export)
+    );
+    assert!(
+        !exports.iter().any(|name| name == "heartbeat"),
+        "the authored behavior name must not become a Wasm discovery ABI"
     );
 }

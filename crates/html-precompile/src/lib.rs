@@ -783,6 +783,7 @@ pub fn verify_precompiled_site(index_path: &Path) -> Result<VerificationReport, 
                 context: format!("{context} manifest {}", manifest.display()),
                 detail: format!("invalid JSON: {error}"),
             })?;
+        verify_scoped_task_deployment(root, script, &context, &mut verified)?;
         if attr(script, RENDER_SCRIPT_MARKER).is_some() {
             verify_render_deployment(root, script, &manifest, &value, &context, &mut verified)?;
             verified.insert(manifest);
@@ -902,6 +903,111 @@ pub fn verify_precompiled_site(index_path: &Path) -> Result<VerificationReport, 
         modules: scripts.len(),
         files: verified.len(),
     })
+}
+
+fn verify_scoped_task_deployment(
+    root: &Path,
+    script: &Handle,
+    context: &str,
+    verified: &mut BTreeSet<PathBuf>,
+) -> Result<(), VerificationError> {
+    let Some(reference) = attr(script, "data-fe-scoped-tasks") else {
+        return Ok(());
+    };
+    if attr(script, "data-fe-component").is_none() {
+        return Err(VerificationError {
+            context: format!("{context} data-fe-scoped-tasks"),
+            detail: "scoped actor tasks require data-fe-component".to_owned(),
+        });
+    }
+    let entry = deployment_file(root, &reference, &format!("{context} data-fe-scoped-tasks"))?;
+    if entry.file_name().and_then(|name| name.to_str()) != Some("tasks.js") {
+        return Err(VerificationError {
+            context: format!("{context} data-fe-scoped-tasks"),
+            detail: "scoped-task entry must be named tasks.js".to_owned(),
+        });
+    }
+    let directory = entry.parent().ok_or_else(|| VerificationError {
+        context: format!("{context} data-fe-scoped-tasks"),
+        detail: "scoped-task entry has no package directory".to_owned(),
+    })?;
+    let directory_name = directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    let prefix = directory_name.strip_prefix("fe-task-").unwrap_or("");
+    if prefix.len() != 16 || !prefix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(VerificationError {
+            context: format!("{context} data-fe-scoped-tasks"),
+            detail: format!(
+                "scoped-task package directory {directory_name:?} has no 16-hex digest prefix"
+            ),
+        });
+    }
+    let mut names = std::fs::read_dir(directory)
+        .map_err(|error| VerificationError {
+            context: format!("{context} scoped-task package"),
+            detail: format!("cannot inspect {}: {error}", directory.display()),
+        })?
+        .map(|entry| {
+            entry
+                .map_err(|error| VerificationError {
+                    context: format!("{context} scoped-task package"),
+                    detail: format!("cannot inspect directory entry: {error}"),
+                })?
+                .file_name()
+                .into_string()
+                .map_err(|_| VerificationError {
+                    context: format!("{context} scoped-task package"),
+                    detail: "package contains a non-UTF-8 filename".to_owned(),
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    names.sort();
+    if names != ["host-completion.js", "materialized-task.js", "tasks.js"] {
+        return Err(VerificationError {
+            context: format!("{context} scoped-task package"),
+            detail: format!("expected exactly the three fixed package modules, found {names:?}"),
+        });
+    }
+    let materialized = directory.join("materialized-task.js");
+    let completion = directory.join("host-completion.js");
+    let entry_bytes = std::fs::read(&entry).map_err(|error| VerificationError {
+        context: format!("{context} scoped-task entry"),
+        detail: format!("cannot read {}: {error}", entry.display()),
+    })?;
+    let materialized_bytes = std::fs::read(&materialized).map_err(|error| VerificationError {
+        context: format!("{context} scoped-task runtime"),
+        detail: format!("cannot read {}: {error}", materialized.display()),
+    })?;
+    let completion_bytes = std::fs::read(&completion).map_err(|error| VerificationError {
+        context: format!("{context} host completion runtime"),
+        detail: format!("cannot read {}: {error}", completion.display()),
+    })?;
+    if materialized_bytes != fe_compiler_facade::MATERIALIZED_TASK_RUNTIME_JS.as_bytes()
+        || completion_bytes != fe_compiler_facade::HOST_COMPLETION_RUNTIME_JS.as_bytes()
+    {
+        return Err(VerificationError {
+            context: format!("{context} scoped-task package"),
+            detail: "fixed browser runtime bytes do not match this compiler".to_owned(),
+        });
+    }
+    let mut package =
+        Vec::with_capacity(entry_bytes.len() + materialized_bytes.len() + completion_bytes.len());
+    package.extend_from_slice(&entry_bytes);
+    package.extend_from_slice(&materialized_bytes);
+    package.extend_from_slice(&completion_bytes);
+    let digest = sha256_hex(&package);
+    if !digest.starts_with(prefix) {
+        return Err(VerificationError {
+            context: format!("{context} scoped-task package"),
+            detail: format!("package digest {digest} does not match directory prefix {prefix}"),
+        });
+    }
+    verified.insert(entry);
+    verified.insert(materialized);
+    verified.insert(completion);
+    Ok(())
 }
 
 fn verify_render_deployment(
@@ -1640,7 +1746,7 @@ fn precompile_html_impl(
             entries: vec![entry.clone()],
             options: CompileOptions::default(),
         };
-        let (result, component_view) = if is_component {
+        let (result, component_view, scoped_tasks) = if is_component {
             let compiled =
                 fe_compiler_facade::compile_resident_component(&request).map_err(|error| {
                     PrecompileError::Compile {
@@ -1648,7 +1754,7 @@ fn precompile_html_impl(
                         detail: error.to_string(),
                     }
                 })?;
-            (compiled.compilation, compiled.view)
+            (compiled.compilation, compiled.view, compiled.scoped_tasks)
         } else {
             let result = fe_compiler_facade::compile(&request).map_err(|error| {
                 PrecompileError::Compile {
@@ -1656,7 +1762,7 @@ fn precompile_html_impl(
                     detail: error.to_string(),
                 }
             })?;
-            (result, None)
+            (result, None, Vec::new())
         };
         if result.artifacts.is_empty() {
             return Err(PrecompileError::Diagnostics {
@@ -1679,6 +1785,10 @@ fn precompile_html_impl(
         insert_identical(&mut assets, wasm_path.clone(), wasm.bytes.clone())?;
 
         let published = PublishedArtifact::from_artifact(wasm, &wasm_path);
+        let scoped_task_path = publish_scoped_task_package(&scoped_tasks, &mut assets)?;
+        let scoped_task_reference = scoped_task_path
+            .as_deref()
+            .map(|path| published_reference(&base_url, &document_url, path));
         let manifest = PublishedModuleManifest {
             protocol: result.protocol,
             compiler: result.compiler,
@@ -1741,6 +1851,7 @@ fn precompile_html_impl(
             &published_reference(&base_url, &document_url, &manifest_path),
             selection_path.as_deref(),
             adapter_path.as_deref(),
+            scoped_task_reference.as_deref(),
             &wasm.sha256,
         );
         modules.push(manifest);
@@ -3284,12 +3395,52 @@ fn pin_published_attribution(
     Ok(())
 }
 
+fn publish_scoped_task_package(
+    tasks: &[fe_compiler_facade::WasmTaskAdapter],
+    assets: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<Option<String>, PrecompileError> {
+    if tasks.is_empty() {
+        return Ok(None);
+    }
+    let mut entry =
+        fe_compiler_facade::emit_materialized_task_adapter_js(tasks, "./materialized-task.js")
+            .map_err(|error| PrecompileError::Serialize(error.to_string()))?
+            .ok_or_else(|| {
+                PrecompileError::Serialize(
+                    "scoped actor tasks produced no compiler-derived browser adapter".to_owned(),
+                )
+            })?;
+    entry.push_str("\nexport { createHostCompletionBroker } from \"./host-completion.js\";\n");
+    let materialized = fe_compiler_facade::MATERIALIZED_TASK_RUNTIME_JS.as_bytes();
+    let completion = fe_compiler_facade::HOST_COMPLETION_RUNTIME_JS.as_bytes();
+    let mut package_bytes = Vec::with_capacity(entry.len() + materialized.len() + completion.len());
+    package_bytes.extend_from_slice(entry.as_bytes());
+    package_bytes.extend_from_slice(materialized);
+    package_bytes.extend_from_slice(completion);
+    let digest = sha256_hex(&package_bytes);
+    let directory = format!("assets/fe-task-{}", &digest[..16]);
+    let entry_path = format!("{directory}/tasks.js");
+    insert_identical(assets, entry_path.clone(), entry.into_bytes())?;
+    insert_identical(
+        assets,
+        format!("{directory}/materialized-task.js"),
+        materialized.to_vec(),
+    )?;
+    insert_identical(
+        assets,
+        format!("{directory}/host-completion.js"),
+        completion.to_vec(),
+    )?;
+    Ok(Some(entry_path))
+}
+
 fn rewrite_script(
     node: &Handle,
     wasm_path: &str,
     manifest_path: &str,
     selection_path: Option<&str>,
     adapter_path: Option<&str>,
+    scoped_task_path: Option<&str>,
     sha256: &str,
 ) {
     set_attr(node, "type", ARTIFACT_SCRIPT_TYPE);
@@ -3306,6 +3457,11 @@ fn rewrite_script(
         set_attr(node, "data-fe-adapter", adapter_path);
     } else {
         remove_attr(node, "data-fe-adapter");
+    }
+    if let Some(scoped_task_path) = scoped_task_path {
+        set_attr(node, "data-fe-scoped-tasks", scoped_task_path);
+    } else {
+        remove_attr(node, "data-fe-scoped-tasks");
     }
     let digest = hex_to_bytes(sha256);
     set_attr(
@@ -4178,6 +4334,163 @@ actor ExamplePage {
         assert!(bootstrap.contains("customElements.define(\"fe-component\""));
         assert!(bootstrap.contains("fe_actor_transition_v1"));
         assert!(bootstrap.contains("[data-fe-view]"));
+    }
+
+    #[test]
+    fn resident_scoped_task_is_published_as_executable_modules_without_task_json() {
+        let html = r#"<!doctype html><script type="application/fe" data-fe-component>
+use core::actor::{InitialState, ProjectState, ResidentTransition, ScopedTask}
+use core::pending::{Suspend, TaskOutcome, Timer}
+use std::host::{HostTimer, Resumable}
+use std::wasm::WasmBackend
+
+struct Event { value: u32 }
+struct State { value: u32 }
+struct Patch { visible_mask: u32, focus_target: u32, flags: u32, commands_ptr: u32, commands_len: u32 }
+
+fn sleep_once(_ ms: u64) -> u64
+    uses (timer: mut Timer<WasmBackend>, suspend: Suspend<WasmBackend, u32>)
+{
+    let pending = timer.sleep_begin(ms)
+    let outcome: TaskOutcome<u32, u64> = suspend.suspend(pending)
+    match outcome {
+        TaskOutcome::Success(value) => value
+        TaskOutcome::Failure(_) => 7
+        TaskOutcome::Cancelled => 0
+    }
+}
+
+actor App {
+    value: u32,
+    fn initial() -> State uses (InitialState) { State { value: 0 } }
+    fn receive(self, event: Event) -> State uses (ResidentTransition) {
+        State { value: self.value + event.value }
+    }
+    fn project(self) -> Patch uses (ProjectState) {
+        Patch { visible_mask: 0, focus_target: 0, flags: 0, commands_ptr: 0, commands_len: 0 }
+    }
+    fn clock() -> u64 uses (ScopedTask) {
+        with (Timer<WasmBackend> = HostTimer {}, Suspend<WasmBackend, u32> = Resumable {}) {
+            sleep_once(1)
+        }
+    }
+}
+</script>"#;
+        let output = precompile_html("https://example.test/task.html", html, |_| {
+            panic!("inline scoped-task component has no external source")
+        })
+        .expect("precompile resident component scoped task");
+
+        assert!(output.html.contains("data-fe-scoped-tasks="));
+        let task_assets = output
+            .assets
+            .iter()
+            .filter(|(path, _)| path.contains("/fe-task-") || path.starts_with("assets/fe-task-"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            task_assets.len(),
+            3,
+            "one executable task package is expected"
+        );
+        assert!(task_assets.iter().any(|(path, bytes)| {
+            path.ends_with("/tasks.js")
+                && std::str::from_utf8(bytes)
+                    .is_ok_and(|source| source.contains("createMaterializedTaskRegistry"))
+        }));
+        assert!(
+            task_assets
+                .iter()
+                .any(|(path, _)| path.ends_with("/materialized-task.js"))
+        );
+        assert!(
+            task_assets
+                .iter()
+                .any(|(path, _)| path.ends_with("/host-completion.js"))
+        );
+        assert!(
+            !task_assets.iter().any(|(path, _)| path.ends_with(".json")),
+            "continuation/task semantics must not be serialized into JSON"
+        );
+        let task_entry = task_assets
+            .iter()
+            .find(|(path, _)| path.ends_with("/tasks.js"))
+            .map(|(path, _)| (*path).clone())
+            .expect("published scoped-task entry module");
+        let module = &output.modules[0];
+        assert!(
+            module
+                .interface
+                .imports
+                .iter()
+                .any(|import| { import.module == "fe:host" && import.name == "sleep_begin" })
+        );
+        assert!(
+            module
+                .interface
+                .exports
+                .iter()
+                .any(|export| { export.name.starts_with("__fe_task_start_") })
+        );
+        assert!(
+            module
+                .interface
+                .exports
+                .iter()
+                .any(|export| { export.name.starts_with("__fe_task_resume_") })
+        );
+
+        if !std::process::Command::new("bun")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            return;
+        }
+        let deployment = tempfile::tempdir().expect("scoped-task deployment directory");
+        for (path, bytes) in &output.assets {
+            let destination = deployment.path().join(path);
+            std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            std::fs::write(destination, bytes).unwrap();
+        }
+        let index_path = deployment.path().join("index.html");
+        std::fs::write(&index_path, &output.html).unwrap();
+        let report = verify_precompiled_site(&index_path)
+            .expect("deployment verifier accepts the complete scoped-task package");
+        assert_eq!(report.modules, 1);
+        let wasm_path = deployment.path().join(&module.artifacts[0].url);
+        let task_path = deployment.path().join(task_entry);
+        let script_path = deployment.path().join("run-scoped-task.mjs");
+        let task_url = Url::from_file_path(task_path).unwrap().to_string();
+        let script = format!(
+            r#"
+import {{ createMaterializedTaskRegistry, createHostCompletionBroker }} from {task_url};
+const broker = createHostCompletionBroker();
+const bytes = await Bun.file({wasm_path:?}).arrayBuffer();
+const {{ instance }} = await WebAssembly.instantiate(bytes, broker.imports);
+const machines = Object.values(createMaterializedTaskRegistry(instance.exports));
+if (machines.length !== 1) throw new Error("expected one scoped task");
+const before = BigInt(Math.trunc(performance.now()));
+const output = await broker.run(machines[0], []);
+const after = BigInt(Math.trunc(performance.now()));
+if (output.length !== 1 || output[0] < before || output[0] > after) {{
+  throw new Error("published Fe scoped timer task returned the wrong wake timestamp");
+}}
+"#,
+            task_url = serde_json::to_string(&task_url).unwrap(),
+            wasm_path = wasm_path.display().to_string(),
+        );
+        std::fs::write(&script_path, script).unwrap();
+        let execution = std::process::Command::new("bun")
+            .arg("run")
+            .arg(&script_path)
+            .output()
+            .unwrap();
+        assert!(
+            execution.status.success(),
+            "published scoped-task package failed under Bun:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&execution.stdout),
+            String::from_utf8_lossy(&execution.stderr),
+        );
     }
 
     #[test]

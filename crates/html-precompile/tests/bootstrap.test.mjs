@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   bootFeArtifacts,
   decodeComponentCommands,
+  FeComponentElement,
   registerFeImportProvider,
 } from "../assets/bootstrap.js";
 
@@ -173,6 +174,42 @@ test("component resource commands decode strictly without interpreting policy", 
     () => decodeComponentCommands(Uint8Array.from([12, 1, 0, 0, 0, 1, 0, 0, 0, 0xff])),
     /Invalid byte sequence|encoded data was not valid/,
   );
+});
+
+test("component scoped tasks start per connection and cancel with their actor scope", async () => {
+  const component = new FeComponentElement();
+  const machine = { start() {}, resume() {} };
+  const signals = [];
+  const broker = {
+    run(received, input, { signal }) {
+      assert.equal(received, machine);
+      assert.deepEqual(input, []);
+      signals.push(signal);
+      return new Promise((resolve, reject) => {
+        signal.addEventListener("abort", () => {
+          const error = new Error("cancelled");
+          error.name = "AbortError";
+          reject(error);
+        }, { once: true });
+      });
+    },
+    cancelAll() { return 0; },
+  };
+
+  component._active = true;
+  component.attachFeScopedTasks([machine], broker);
+  assert.equal(signals.length, 1);
+  assert.equal(signals[0].aborted, false);
+
+  component._active = false;
+  component.disconnectedCallback();
+  assert.equal(signals[0].aborted, true);
+  await Promise.resolve();
+
+  component._active = true;
+  component._startScopedTasks();
+  assert.equal(signals.length, 2);
+  assert.equal(signals[1].aborted, false);
 });
 
 test("bootstrap registers a selected adapter before real Wasm import preflight", async () => {

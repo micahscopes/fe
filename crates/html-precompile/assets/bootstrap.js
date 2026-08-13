@@ -245,7 +245,7 @@ export function decodeComponentCommands(bytes) {
  * focus choice, and prevent-default policy.
  */
 const FeHTMLElement = globalThis.HTMLElement ?? class {};
-class FeComponentElement extends FeHTMLElement {
+export class FeComponentElement extends FeHTMLElement {
   constructor() {
     super();
     this._instance = null;
@@ -259,6 +259,9 @@ class FeComponentElement extends FeHTMLElement {
     this._surfaceObserver = null;
     this._discoveredSurfaces = new Set();
     this._surfaceLoads = new Map();
+    this._scopedTaskMachines = null;
+    this._scopedTaskBroker = null;
+    this._scopedTaskLifetime = null;
     this._readyPromise = new Promise((resolve, reject) => {
       this._resolveReady = resolve;
       this._rejectReady = reject;
@@ -289,6 +292,8 @@ class FeComponentElement extends FeHTMLElement {
     this._surfaceLoads.clear();
     for (const controller of this._resourceLoads) controller.abort();
     this._resourceLoads.clear();
+    this._scopedTaskLifetime?.abort();
+    this._scopedTaskLifetime = null;
   }
 
   adoptedCallback() {
@@ -315,6 +320,24 @@ class FeComponentElement extends FeHTMLElement {
     return this._readyPromise;
   }
 
+  attachFeScopedTasks(machines, broker) {
+    if (!Array.isArray(machines) || machines.length === 0 ||
+        machines.some(machine => typeof machine?.start !== "function" ||
+          typeof machine?.resume !== "function")) {
+      throw new TypeError("fe-component scoped tasks require generated task machines");
+    }
+    if (!broker || typeof broker.run !== "function" || typeof broker.cancelAll !== "function") {
+      throw new TypeError("fe-component scoped tasks require the fixed completion broker");
+    }
+    if (this._scopedTaskMachines &&
+        (this._scopedTaskMachines !== machines || this._scopedTaskBroker !== broker)) {
+      throw new Error("fe-component already owns a different scoped-task package");
+    }
+    this._scopedTaskMachines = machines;
+    this._scopedTaskBroker = broker;
+    if (this._active) this._startScopedTasks();
+  }
+
   async _connect() {
     if (!this._instance || this._active) return;
     if (!this._initialized) {
@@ -325,8 +348,20 @@ class FeComponentElement extends FeHTMLElement {
     this._installListeners();
     this._send(COMPONENT_EVENT.connected, 0, 0, 0, 0, 0, performance.now());
     this._discoverSurfaces();
+    this._startScopedTasks();
     this._resolveReady(this);
     this.dispatchEvent(new CustomEvent("fe-ready", { detail: this }));
+  }
+
+  _startScopedTasks() {
+    if (!this._active || !this._scopedTaskMachines || this._scopedTaskLifetime) return;
+    const lifetime = new AbortController();
+    this._scopedTaskLifetime = lifetime;
+    for (const machine of this._scopedTaskMachines) {
+      this._scopedTaskBroker.run(machine, [], { signal: lifetime.signal }).catch(error => {
+        if (error?.name !== "AbortError") this._fail(error);
+      });
+    }
   }
 
   _installListeners() {
@@ -778,7 +813,7 @@ if (typeof customElements !== "undefined" && !customElements.get("fe-component")
   customElements.define("fe-component", FeComponentElement);
 }
 
-async function runFeComponent(script, instance) {
+async function runFeComponent(script, instance, scopedTasks) {
   const selector = script.dataset.feMount;
   let component = selector ? document.querySelector(selector) : null;
   if (component && !(component instanceof FeComponentElement)) {
@@ -788,7 +823,11 @@ async function runFeComponent(script, instance) {
     component = document.createElement("fe-component");
     script.insertAdjacentElement("afterend", component);
   }
-  await component.attachFeInstance(instance);
+  const ready = component.attachFeInstance(instance);
+  if (scopedTasks) {
+    component.attachFeScopedTasks(scopedTasks.machines, scopedTasks.broker);
+  }
+  await ready;
   return component;
 }
 
@@ -886,6 +925,19 @@ async function run(element) {
       }
       const module = await WebAssembly.compile(bytes);
       const context = { element, manifest, module };
+      let scopedTasks;
+      if (element.dataset.feScopedTasks) {
+        const taskModule = await import(new URL(element.dataset.feScopedTasks, element.baseURI));
+        if (typeof taskModule.createMaterializedTaskRegistry !== "function" ||
+            typeof taskModule.createHostCompletionBroker !== "function") {
+          throw new Error("compiler-published scoped-task package has an invalid fixed interface");
+        }
+        scopedTasks = {
+          taskModule,
+          broker: taskModule.createHostCompletionBroker(),
+          machines: null,
+        };
+      }
       let selectedImports;
       if (element.dataset.feAdapter) {
         const environmentFactory = globalThis.feAdapterEnvironment;
@@ -902,7 +954,10 @@ async function run(element) {
         selectedImports =
           adapterModule.createFeHostAdapter(environment.host, environment.runtime).imports;
       }
-      const imports = await importsFor(context, selectedImports);
+      const directImports = {};
+      mergeImports(directImports, selectedImports);
+      mergeImports(directImports, scopedTasks?.broker.imports);
+      const imports = await importsFor(context, directImports);
       for (const required of WebAssembly.Module.imports(module)) {
         if (!Object.hasOwn(imports, required.module) ||
             !Object.hasOwn(imports[required.module], required.name)) {
@@ -910,8 +965,15 @@ async function run(element) {
         }
       }
       const instance = await WebAssembly.instantiate(module, imports);
+      if (scopedTasks) {
+        const registry = scopedTasks.taskModule.createMaterializedTaskRegistry(instance.exports);
+        scopedTasks.machines = Object.values(registry);
+        if (scopedTasks.machines.length === 0) {
+          throw new Error("compiler-published scoped-task package contains no task machines");
+        }
+      }
       if (element.dataset.feComponent !== undefined) {
-        const component = await runFeComponent(element, instance);
+        const component = await runFeComponent(element, instance, scopedTasks);
         const result = { instance, module, manifest, component, value: undefined };
         element.feResult = result;
         element.dataset.feState = "complete";

@@ -20,8 +20,10 @@ use fe_compiler_protocol::{
 use url::Url;
 
 pub use codegen::{
-    ComponentProjection, PageAttributeKind, PageElement, PageProjection, PageProjectionOp,
-    ProjectedPageAttribute, ProjectedPageComponent, ProjectedPageRender,
+    ComponentProjection, HOST_COMPLETION_RUNTIME_JS, MATERIALIZED_TASK_RUNTIME_JS,
+    PageAttributeKind, PageElement, PageProjection, PageProjectionOp, ProjectedPageAttribute,
+    ProjectedPageComponent, ProjectedPageRender, WasmTaskAdapter,
+    emit_materialized_task_adapter_js,
 };
 
 /// In-memory result of projecting a role-selected Fe page. This is a direct
@@ -40,6 +42,10 @@ pub struct PageProjectionResult {
 pub struct ResidentComponentCompileResult {
     pub compilation: CompileResult,
     pub view: Option<ComponentProjection>,
+    /// Compiler-derived, self-less actor tasks that share the resident Wasm.
+    /// This stays typed in build memory; HTML publication emits executable ES
+    /// modules rather than serializing a task manifest.
+    pub scoped_tasks: Vec<WasmTaskAdapter>,
 }
 
 #[derive(Debug)]
@@ -209,6 +215,7 @@ fn compile_wasm_with_component_view(
                 source_dependencies,
             ),
             view: None,
+            scoped_tasks: Vec::new(),
         });
     }
     let top_mod = db.top_mod(root_file);
@@ -226,7 +233,7 @@ fn compile_wasm_with_component_view(
     let optimize = request.options.optimization != fe_compiler_protocol::OptimizationLevel::None;
     let resident = codegen::compile_resident_actor_with_optimization(&db, top_mod, optimize)
         .map_err(|error| CompileFacadeError::Backend(error.to_string()))?;
-    let bytes = if let Some(actor) = resident {
+    let (bytes, scoped_tasks) = if let Some(actor) = resident {
         if let Some(view) = &view
             && view.actor != actor.contract.actor
         {
@@ -235,7 +242,7 @@ fn compile_wasm_with_component_view(
                 view.actor, actor.contract.actor
             )));
         }
-        actor.wasm
+        (actor.wasm, actor.scoped_tasks)
     } else {
         if let Some(view) = &view {
             return Err(CompileFacadeError::Backend(format!(
@@ -256,9 +263,12 @@ fn compile_wasm_with_component_view(
                 },
             )
             .map_err(|error| CompileFacadeError::Backend(error.to_string()))?;
-        output.into_bytecode().ok_or_else(|| {
-            CompileFacadeError::Artifact("Wasm backend returned no bytes".to_owned())
-        })?
+        (
+            output.into_bytecode().ok_or_else(|| {
+                CompileFacadeError::Artifact("Wasm backend returned no bytes".to_owned())
+            })?,
+            Vec::new(),
+        )
     };
     wasmparser::validate(&bytes)
         .map_err(|error| CompileFacadeError::Artifact(format!("invalid Wasm: {error}")))?;
@@ -278,6 +288,7 @@ fn compile_wasm_with_component_view(
             source_dependencies,
         ),
         view,
+        scoped_tasks,
     })
 }
 
