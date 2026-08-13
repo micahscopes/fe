@@ -1265,7 +1265,7 @@
       {
         "id": "fmath/src/lib.fe",
         "kind": "fe",
-        "sha256": "24947e823177be0b57b757cbdde66ced2e1b8f97f3d8adb042cfd1d59290a0d6"
+        "sha256": "f4f98d96f8c67a87b01b842ba2a13527fcbe91c51d311df757187bce034983ce"
       }
     ],
     "compiler": "fe",

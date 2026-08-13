@@ -1,10 +1,10 @@
 {
   "artifacts": {
     "canonical_adapters": [],
-    "wasm": "fe-render-b6d0eed893c2d9fa.wasm",
-    "wasm_bytes": 69059,
-    "wgsl": "fe-render-5499b0f97a62a6a0.wgsl",
-    "wgsl_bytes": 45314
+    "wasm": "fe-render-b1c1016a51a6cf31.wasm",
+    "wasm_bytes": 70980,
+    "wgsl": "fe-render-2af4775c953201a9.wgsl",
+    "wgsl_bytes": 45659
   },
   "browser_runtime": null,
   "canonical_interface": null,
@@ -55,15 +55,15 @@
           {
             "arg_index": 6,
             "doc": null,
-            "name": "generation",
+            "name": "width",
             "offset": 16,
-            "scalar": "i32",
+            "scalar": "f32",
             "width": 4
           },
           {
             "arg_index": 7,
             "doc": null,
-            "name": "cx",
+            "name": "height",
             "offset": 20,
             "scalar": "f32",
             "width": 4
@@ -71,15 +71,15 @@
           {
             "arg_index": 8,
             "doc": null,
-            "name": "cy",
+            "name": "generation",
             "offset": 24,
-            "scalar": "f32",
+            "scalar": "i32",
             "width": 4
           },
           {
             "arg_index": 9,
             "doc": null,
-            "name": "cz",
+            "name": "cx",
             "offset": 28,
             "scalar": "f32",
             "width": 4
@@ -87,7 +87,7 @@
           {
             "arg_index": 10,
             "doc": null,
-            "name": "pencil_free",
+            "name": "cy",
             "offset": 32,
             "scalar": "f32",
             "width": 4
@@ -95,7 +95,7 @@
           {
             "arg_index": 11,
             "doc": null,
-            "name": "a0",
+            "name": "cz",
             "offset": 36,
             "scalar": "f32",
             "width": 4
@@ -103,7 +103,7 @@
           {
             "arg_index": 12,
             "doc": null,
-            "name": "b0",
+            "name": "pencil_free",
             "offset": 40,
             "scalar": "f32",
             "width": 4
@@ -111,7 +111,7 @@
           {
             "arg_index": 13,
             "doc": null,
-            "name": "c0",
+            "name": "a0",
             "offset": 44,
             "scalar": "f32",
             "width": 4
@@ -119,7 +119,7 @@
           {
             "arg_index": 14,
             "doc": null,
-            "name": "d0",
+            "name": "b0",
             "offset": 48,
             "scalar": "f32",
             "width": 4
@@ -127,7 +127,7 @@
           {
             "arg_index": 15,
             "doc": null,
-            "name": "e0",
+            "name": "c0",
             "offset": 52,
             "scalar": "f32",
             "width": 4
@@ -135,7 +135,7 @@
           {
             "arg_index": 16,
             "doc": null,
-            "name": "f0",
+            "name": "d0",
             "offset": 56,
             "scalar": "f32",
             "width": 4
@@ -143,7 +143,7 @@
           {
             "arg_index": 17,
             "doc": null,
-            "name": "g0",
+            "name": "e0",
             "offset": 60,
             "scalar": "f32",
             "width": 4
@@ -151,7 +151,7 @@
           {
             "arg_index": 18,
             "doc": null,
-            "name": "h0",
+            "name": "f0",
             "offset": 64,
             "scalar": "f32",
             "width": 4
@@ -159,7 +159,7 @@
           {
             "arg_index": 19,
             "doc": null,
-            "name": "i0",
+            "name": "g0",
             "offset": 68,
             "scalar": "f32",
             "width": 4
@@ -167,7 +167,7 @@
           {
             "arg_index": 20,
             "doc": null,
-            "name": "j0",
+            "name": "h0",
             "offset": 72,
             "scalar": "f32",
             "width": 4
@@ -175,7 +175,7 @@
           {
             "arg_index": 21,
             "doc": null,
-            "name": "a1",
+            "name": "i0",
             "offset": 76,
             "scalar": "f32",
             "width": 4
@@ -183,7 +183,7 @@
           {
             "arg_index": 22,
             "doc": null,
-            "name": "b1",
+            "name": "j0",
             "offset": 80,
             "scalar": "f32",
             "width": 4
@@ -191,7 +191,7 @@
           {
             "arg_index": 23,
             "doc": null,
-            "name": "c1",
+            "name": "a1",
             "offset": 84,
             "scalar": "f32",
             "width": 4
@@ -199,7 +199,7 @@
           {
             "arg_index": 24,
             "doc": null,
-            "name": "d1",
+            "name": "b1",
             "offset": 88,
             "scalar": "f32",
             "width": 4
@@ -207,7 +207,7 @@
           {
             "arg_index": 25,
             "doc": null,
-            "name": "e1",
+            "name": "c1",
             "offset": 92,
             "scalar": "f32",
             "width": 4
@@ -215,7 +215,7 @@
           {
             "arg_index": 26,
             "doc": null,
-            "name": "f1",
+            "name": "d1",
             "offset": 96,
             "scalar": "f32",
             "width": 4
@@ -223,7 +223,7 @@
           {
             "arg_index": 27,
             "doc": null,
-            "name": "g1",
+            "name": "e1",
             "offset": 100,
             "scalar": "f32",
             "width": 4
@@ -231,7 +231,7 @@
           {
             "arg_index": 28,
             "doc": null,
-            "name": "h1",
+            "name": "f1",
             "offset": 104,
             "scalar": "f32",
             "width": 4
@@ -239,7 +239,7 @@
           {
             "arg_index": 29,
             "doc": null,
-            "name": "i1",
+            "name": "g1",
             "offset": 108,
             "scalar": "f32",
             "width": 4
@@ -247,7 +247,7 @@
           {
             "arg_index": 30,
             "doc": null,
-            "name": "j1",
+            "name": "h1",
             "offset": 112,
             "scalar": "f32",
             "width": 4
@@ -255,7 +255,7 @@
           {
             "arg_index": 31,
             "doc": null,
-            "name": "p0x",
+            "name": "i1",
             "offset": 116,
             "scalar": "f32",
             "width": 4
@@ -263,7 +263,7 @@
           {
             "arg_index": 32,
             "doc": null,
-            "name": "p0y",
+            "name": "j1",
             "offset": 120,
             "scalar": "f32",
             "width": 4
@@ -271,7 +271,7 @@
           {
             "arg_index": 33,
             "doc": null,
-            "name": "p0z",
+            "name": "p0x",
             "offset": 124,
             "scalar": "f32",
             "width": 4
@@ -279,7 +279,7 @@
           {
             "arg_index": 34,
             "doc": null,
-            "name": "p1x",
+            "name": "p0y",
             "offset": 128,
             "scalar": "f32",
             "width": 4
@@ -287,7 +287,7 @@
           {
             "arg_index": 35,
             "doc": null,
-            "name": "p1y",
+            "name": "p0z",
             "offset": 132,
             "scalar": "f32",
             "width": 4
@@ -295,7 +295,7 @@
           {
             "arg_index": 36,
             "doc": null,
-            "name": "p1z",
+            "name": "p1x",
             "offset": 136,
             "scalar": "f32",
             "width": 4
@@ -303,7 +303,7 @@
           {
             "arg_index": 37,
             "doc": null,
-            "name": "p2x",
+            "name": "p1y",
             "offset": 140,
             "scalar": "f32",
             "width": 4
@@ -311,7 +311,7 @@
           {
             "arg_index": 38,
             "doc": null,
-            "name": "p2y",
+            "name": "p1z",
             "offset": 144,
             "scalar": "f32",
             "width": 4
@@ -319,7 +319,7 @@
           {
             "arg_index": 39,
             "doc": null,
-            "name": "p2z",
+            "name": "p2x",
             "offset": 148,
             "scalar": "f32",
             "width": 4
@@ -327,7 +327,7 @@
           {
             "arg_index": 40,
             "doc": null,
-            "name": "p3x",
+            "name": "p2y",
             "offset": 152,
             "scalar": "f32",
             "width": 4
@@ -335,7 +335,7 @@
           {
             "arg_index": 41,
             "doc": null,
-            "name": "p3y",
+            "name": "p2z",
             "offset": 156,
             "scalar": "f32",
             "width": 4
@@ -343,7 +343,7 @@
           {
             "arg_index": 42,
             "doc": null,
-            "name": "p3z",
+            "name": "p3x",
             "offset": 160,
             "scalar": "f32",
             "width": 4
@@ -351,7 +351,7 @@
           {
             "arg_index": 43,
             "doc": null,
-            "name": "p4x",
+            "name": "p3y",
             "offset": 164,
             "scalar": "f32",
             "width": 4
@@ -359,7 +359,7 @@
           {
             "arg_index": 44,
             "doc": null,
-            "name": "p4y",
+            "name": "p3z",
             "offset": 168,
             "scalar": "f32",
             "width": 4
@@ -367,7 +367,7 @@
           {
             "arg_index": 45,
             "doc": null,
-            "name": "p4z",
+            "name": "p4x",
             "offset": 172,
             "scalar": "f32",
             "width": 4
@@ -375,7 +375,7 @@
           {
             "arg_index": 46,
             "doc": null,
-            "name": "p5x",
+            "name": "p4y",
             "offset": 176,
             "scalar": "f32",
             "width": 4
@@ -383,7 +383,7 @@
           {
             "arg_index": 47,
             "doc": null,
-            "name": "p5y",
+            "name": "p4z",
             "offset": 180,
             "scalar": "f32",
             "width": 4
@@ -391,7 +391,7 @@
           {
             "arg_index": 48,
             "doc": null,
-            "name": "p5z",
+            "name": "p5x",
             "offset": 184,
             "scalar": "f32",
             "width": 4
@@ -399,7 +399,7 @@
           {
             "arg_index": 49,
             "doc": null,
-            "name": "p6x",
+            "name": "p5y",
             "offset": 188,
             "scalar": "f32",
             "width": 4
@@ -407,7 +407,7 @@
           {
             "arg_index": 50,
             "doc": null,
-            "name": "p6y",
+            "name": "p5z",
             "offset": 192,
             "scalar": "f32",
             "width": 4
@@ -415,7 +415,7 @@
           {
             "arg_index": 51,
             "doc": null,
-            "name": "p6z",
+            "name": "p6x",
             "offset": 196,
             "scalar": "f32",
             "width": 4
@@ -423,7 +423,7 @@
           {
             "arg_index": 52,
             "doc": null,
-            "name": "p7x",
+            "name": "p6y",
             "offset": 200,
             "scalar": "f32",
             "width": 4
@@ -431,7 +431,7 @@
           {
             "arg_index": 53,
             "doc": null,
-            "name": "p7y",
+            "name": "p6z",
             "offset": 204,
             "scalar": "f32",
             "width": 4
@@ -439,7 +439,7 @@
           {
             "arg_index": 54,
             "doc": null,
-            "name": "p7z",
+            "name": "p7x",
             "offset": 208,
             "scalar": "f32",
             "width": 4
@@ -447,7 +447,7 @@
           {
             "arg_index": 55,
             "doc": null,
-            "name": "p8x",
+            "name": "p7y",
             "offset": 212,
             "scalar": "f32",
             "width": 4
@@ -455,7 +455,7 @@
           {
             "arg_index": 56,
             "doc": null,
-            "name": "p8y",
+            "name": "p7z",
             "offset": 216,
             "scalar": "f32",
             "width": 4
@@ -463,7 +463,7 @@
           {
             "arg_index": 57,
             "doc": null,
-            "name": "p8z",
+            "name": "p8x",
             "offset": 220,
             "scalar": "f32",
             "width": 4
@@ -471,16 +471,32 @@
           {
             "arg_index": 58,
             "doc": null,
-            "name": "picked",
+            "name": "p8y",
             "offset": 224,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 59,
+            "doc": null,
+            "name": "p8z",
+            "offset": 228,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 60,
+            "doc": null,
+            "name": "picked",
+            "offset": 232,
             "scalar": "i32",
             "width": 4
           }
         ],
         "name": "input",
         "role": "input",
-        "span": 228,
-        "stride": 228
+        "span": 236,
+        "stride": 236
       }
     ],
     "builtin_inputs": [
@@ -553,15 +569,15 @@
               {
                 "arg_index": 6,
                 "doc": null,
-                "name": "generation",
+                "name": "width",
                 "offset": 16,
-                "scalar": "i32",
+                "scalar": "f32",
                 "width": 4
               },
               {
                 "arg_index": 7,
                 "doc": null,
-                "name": "cx",
+                "name": "height",
                 "offset": 20,
                 "scalar": "f32",
                 "width": 4
@@ -569,15 +585,15 @@
               {
                 "arg_index": 8,
                 "doc": null,
-                "name": "cy",
+                "name": "generation",
                 "offset": 24,
-                "scalar": "f32",
+                "scalar": "i32",
                 "width": 4
               },
               {
                 "arg_index": 9,
                 "doc": null,
-                "name": "cz",
+                "name": "cx",
                 "offset": 28,
                 "scalar": "f32",
                 "width": 4
@@ -585,7 +601,7 @@
               {
                 "arg_index": 10,
                 "doc": null,
-                "name": "pencil_free",
+                "name": "cy",
                 "offset": 32,
                 "scalar": "f32",
                 "width": 4
@@ -593,7 +609,7 @@
               {
                 "arg_index": 11,
                 "doc": null,
-                "name": "a0",
+                "name": "cz",
                 "offset": 36,
                 "scalar": "f32",
                 "width": 4
@@ -601,7 +617,7 @@
               {
                 "arg_index": 12,
                 "doc": null,
-                "name": "b0",
+                "name": "pencil_free",
                 "offset": 40,
                 "scalar": "f32",
                 "width": 4
@@ -609,7 +625,7 @@
               {
                 "arg_index": 13,
                 "doc": null,
-                "name": "c0",
+                "name": "a0",
                 "offset": 44,
                 "scalar": "f32",
                 "width": 4
@@ -617,7 +633,7 @@
               {
                 "arg_index": 14,
                 "doc": null,
-                "name": "d0",
+                "name": "b0",
                 "offset": 48,
                 "scalar": "f32",
                 "width": 4
@@ -625,7 +641,7 @@
               {
                 "arg_index": 15,
                 "doc": null,
-                "name": "e0",
+                "name": "c0",
                 "offset": 52,
                 "scalar": "f32",
                 "width": 4
@@ -633,7 +649,7 @@
               {
                 "arg_index": 16,
                 "doc": null,
-                "name": "f0",
+                "name": "d0",
                 "offset": 56,
                 "scalar": "f32",
                 "width": 4
@@ -641,7 +657,7 @@
               {
                 "arg_index": 17,
                 "doc": null,
-                "name": "g0",
+                "name": "e0",
                 "offset": 60,
                 "scalar": "f32",
                 "width": 4
@@ -649,7 +665,7 @@
               {
                 "arg_index": 18,
                 "doc": null,
-                "name": "h0",
+                "name": "f0",
                 "offset": 64,
                 "scalar": "f32",
                 "width": 4
@@ -657,7 +673,7 @@
               {
                 "arg_index": 19,
                 "doc": null,
-                "name": "i0",
+                "name": "g0",
                 "offset": 68,
                 "scalar": "f32",
                 "width": 4
@@ -665,7 +681,7 @@
               {
                 "arg_index": 20,
                 "doc": null,
-                "name": "j0",
+                "name": "h0",
                 "offset": 72,
                 "scalar": "f32",
                 "width": 4
@@ -673,7 +689,7 @@
               {
                 "arg_index": 21,
                 "doc": null,
-                "name": "a1",
+                "name": "i0",
                 "offset": 76,
                 "scalar": "f32",
                 "width": 4
@@ -681,7 +697,7 @@
               {
                 "arg_index": 22,
                 "doc": null,
-                "name": "b1",
+                "name": "j0",
                 "offset": 80,
                 "scalar": "f32",
                 "width": 4
@@ -689,7 +705,7 @@
               {
                 "arg_index": 23,
                 "doc": null,
-                "name": "c1",
+                "name": "a1",
                 "offset": 84,
                 "scalar": "f32",
                 "width": 4
@@ -697,7 +713,7 @@
               {
                 "arg_index": 24,
                 "doc": null,
-                "name": "d1",
+                "name": "b1",
                 "offset": 88,
                 "scalar": "f32",
                 "width": 4
@@ -705,7 +721,7 @@
               {
                 "arg_index": 25,
                 "doc": null,
-                "name": "e1",
+                "name": "c1",
                 "offset": 92,
                 "scalar": "f32",
                 "width": 4
@@ -713,7 +729,7 @@
               {
                 "arg_index": 26,
                 "doc": null,
-                "name": "f1",
+                "name": "d1",
                 "offset": 96,
                 "scalar": "f32",
                 "width": 4
@@ -721,7 +737,7 @@
               {
                 "arg_index": 27,
                 "doc": null,
-                "name": "g1",
+                "name": "e1",
                 "offset": 100,
                 "scalar": "f32",
                 "width": 4
@@ -729,7 +745,7 @@
               {
                 "arg_index": 28,
                 "doc": null,
-                "name": "h1",
+                "name": "f1",
                 "offset": 104,
                 "scalar": "f32",
                 "width": 4
@@ -737,7 +753,7 @@
               {
                 "arg_index": 29,
                 "doc": null,
-                "name": "i1",
+                "name": "g1",
                 "offset": 108,
                 "scalar": "f32",
                 "width": 4
@@ -745,7 +761,7 @@
               {
                 "arg_index": 30,
                 "doc": null,
-                "name": "j1",
+                "name": "h1",
                 "offset": 112,
                 "scalar": "f32",
                 "width": 4
@@ -753,7 +769,7 @@
               {
                 "arg_index": 31,
                 "doc": null,
-                "name": "p0x",
+                "name": "i1",
                 "offset": 116,
                 "scalar": "f32",
                 "width": 4
@@ -761,7 +777,7 @@
               {
                 "arg_index": 32,
                 "doc": null,
-                "name": "p0y",
+                "name": "j1",
                 "offset": 120,
                 "scalar": "f32",
                 "width": 4
@@ -769,7 +785,7 @@
               {
                 "arg_index": 33,
                 "doc": null,
-                "name": "p0z",
+                "name": "p0x",
                 "offset": 124,
                 "scalar": "f32",
                 "width": 4
@@ -777,7 +793,7 @@
               {
                 "arg_index": 34,
                 "doc": null,
-                "name": "p1x",
+                "name": "p0y",
                 "offset": 128,
                 "scalar": "f32",
                 "width": 4
@@ -785,7 +801,7 @@
               {
                 "arg_index": 35,
                 "doc": null,
-                "name": "p1y",
+                "name": "p0z",
                 "offset": 132,
                 "scalar": "f32",
                 "width": 4
@@ -793,7 +809,7 @@
               {
                 "arg_index": 36,
                 "doc": null,
-                "name": "p1z",
+                "name": "p1x",
                 "offset": 136,
                 "scalar": "f32",
                 "width": 4
@@ -801,7 +817,7 @@
               {
                 "arg_index": 37,
                 "doc": null,
-                "name": "p2x",
+                "name": "p1y",
                 "offset": 140,
                 "scalar": "f32",
                 "width": 4
@@ -809,7 +825,7 @@
               {
                 "arg_index": 38,
                 "doc": null,
-                "name": "p2y",
+                "name": "p1z",
                 "offset": 144,
                 "scalar": "f32",
                 "width": 4
@@ -817,7 +833,7 @@
               {
                 "arg_index": 39,
                 "doc": null,
-                "name": "p2z",
+                "name": "p2x",
                 "offset": 148,
                 "scalar": "f32",
                 "width": 4
@@ -825,7 +841,7 @@
               {
                 "arg_index": 40,
                 "doc": null,
-                "name": "p3x",
+                "name": "p2y",
                 "offset": 152,
                 "scalar": "f32",
                 "width": 4
@@ -833,7 +849,7 @@
               {
                 "arg_index": 41,
                 "doc": null,
-                "name": "p3y",
+                "name": "p2z",
                 "offset": 156,
                 "scalar": "f32",
                 "width": 4
@@ -841,7 +857,7 @@
               {
                 "arg_index": 42,
                 "doc": null,
-                "name": "p3z",
+                "name": "p3x",
                 "offset": 160,
                 "scalar": "f32",
                 "width": 4
@@ -849,7 +865,7 @@
               {
                 "arg_index": 43,
                 "doc": null,
-                "name": "p4x",
+                "name": "p3y",
                 "offset": 164,
                 "scalar": "f32",
                 "width": 4
@@ -857,7 +873,7 @@
               {
                 "arg_index": 44,
                 "doc": null,
-                "name": "p4y",
+                "name": "p3z",
                 "offset": 168,
                 "scalar": "f32",
                 "width": 4
@@ -865,7 +881,7 @@
               {
                 "arg_index": 45,
                 "doc": null,
-                "name": "p4z",
+                "name": "p4x",
                 "offset": 172,
                 "scalar": "f32",
                 "width": 4
@@ -873,7 +889,7 @@
               {
                 "arg_index": 46,
                 "doc": null,
-                "name": "p5x",
+                "name": "p4y",
                 "offset": 176,
                 "scalar": "f32",
                 "width": 4
@@ -881,7 +897,7 @@
               {
                 "arg_index": 47,
                 "doc": null,
-                "name": "p5y",
+                "name": "p4z",
                 "offset": 180,
                 "scalar": "f32",
                 "width": 4
@@ -889,7 +905,7 @@
               {
                 "arg_index": 48,
                 "doc": null,
-                "name": "p5z",
+                "name": "p5x",
                 "offset": 184,
                 "scalar": "f32",
                 "width": 4
@@ -897,7 +913,7 @@
               {
                 "arg_index": 49,
                 "doc": null,
-                "name": "p6x",
+                "name": "p5y",
                 "offset": 188,
                 "scalar": "f32",
                 "width": 4
@@ -905,7 +921,7 @@
               {
                 "arg_index": 50,
                 "doc": null,
-                "name": "p6y",
+                "name": "p5z",
                 "offset": 192,
                 "scalar": "f32",
                 "width": 4
@@ -913,7 +929,7 @@
               {
                 "arg_index": 51,
                 "doc": null,
-                "name": "p6z",
+                "name": "p6x",
                 "offset": 196,
                 "scalar": "f32",
                 "width": 4
@@ -921,7 +937,7 @@
               {
                 "arg_index": 52,
                 "doc": null,
-                "name": "p7x",
+                "name": "p6y",
                 "offset": 200,
                 "scalar": "f32",
                 "width": 4
@@ -929,7 +945,7 @@
               {
                 "arg_index": 53,
                 "doc": null,
-                "name": "p7y",
+                "name": "p6z",
                 "offset": 204,
                 "scalar": "f32",
                 "width": 4
@@ -937,7 +953,7 @@
               {
                 "arg_index": 54,
                 "doc": null,
-                "name": "p7z",
+                "name": "p7x",
                 "offset": 208,
                 "scalar": "f32",
                 "width": 4
@@ -945,7 +961,7 @@
               {
                 "arg_index": 55,
                 "doc": null,
-                "name": "p8x",
+                "name": "p7y",
                 "offset": 212,
                 "scalar": "f32",
                 "width": 4
@@ -953,7 +969,7 @@
               {
                 "arg_index": 56,
                 "doc": null,
-                "name": "p8y",
+                "name": "p7z",
                 "offset": 216,
                 "scalar": "f32",
                 "width": 4
@@ -961,7 +977,7 @@
               {
                 "arg_index": 57,
                 "doc": null,
-                "name": "p8z",
+                "name": "p8x",
                 "offset": 220,
                 "scalar": "f32",
                 "width": 4
@@ -969,16 +985,32 @@
               {
                 "arg_index": 58,
                 "doc": null,
-                "name": "picked",
+                "name": "p8y",
                 "offset": 224,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 59,
+                "doc": null,
+                "name": "p8z",
+                "offset": 228,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 60,
+                "doc": null,
+                "name": "picked",
+                "offset": 232,
                 "scalar": "i32",
                 "width": 4
               }
             ],
             "name": "input",
             "role": "input",
-            "span": 228,
-            "stride": 228
+            "span": 236,
+            "stride": 236
           }
         ],
         "builtin_inputs": [
@@ -1007,8 +1039,8 @@
           0
         ]
       },
-      "shader": "fe-render-5499b0f97a62a6a0.wgsl",
-      "shader_bytes": 45314,
+      "shader": "fe-render-2af4775c953201a9.wgsl",
+      "shader_bytes": 45659,
       "source_entry": "distance_surface"
     }
   ],
@@ -1024,7 +1056,7 @@
       {
         "id": "demos/sketches/fmath/src/lib.fe",
         "kind": "fe",
-        "sha256": "24947e823177be0b57b757cbdde66ced2e1b8f97f3d8adb042cfd1d59290a0d6"
+        "sha256": "f4f98d96f8c67a87b01b842ba2a13527fcbe91c51d311df757187bce034983ce"
       },
       {
         "id": "demos/sketches/gallery_palette/fe.toml",
@@ -1044,7 +1076,7 @@
       {
         "id": "demos/sketches/qcga_pencil/src/lib.fe",
         "kind": "fe",
-        "sha256": "4dfe47133bf4216000e836a668cc5ce53b4a3dcd2dd8d3977a0e15550dc83650"
+        "sha256": "2dbd83249c8bf88470434340ba0641a72cb1642bd3597c0c0957ef29a851334d"
       },
       {
         "id": "demos/sketches/qcga_pencil_de/fe.toml",
@@ -1054,7 +1086,7 @@
       {
         "id": "demos/sketches/qcga_pencil_de/src/lib.fe",
         "kind": "fe",
-        "sha256": "708d4631bbffdfec040ee4824c68f7d098abb3ada2dc645d0ddd7f1180633b60"
+        "sha256": "bd5f484e7b9360c44a2d7f68af60fd14ee58fa981dd0c0022cbfa776d3044326"
       },
       {
         "id": "ingots/core/fe.toml",
@@ -1310,6 +1342,16 @@
         "max": 12.0,
         "min": 1.5,
         "name": "dist"
+      },
+      {
+        "kind": "extent_x",
+        "name": "width",
+        "visible": false
+      },
+      {
+        "kind": "extent_y",
+        "name": "height",
+        "visible": false
       }
     ],
     "pipeline": {
