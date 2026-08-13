@@ -1,16 +1,16 @@
 {
   "artifacts": {
     "canonical_adapters": [],
-    "wasm": "fe-render-b1c1016a51a6cf31.wasm",
-    "wasm_bytes": 70980,
-    "wgsl": "fe-render-2af4775c953201a9.wgsl",
-    "wgsl_bytes": 45659
+    "wasm": "fe-render-401a2c9a46c66a28.wasm",
+    "wasm_bytes": 61234,
+    "wgsl": "fe-render-0f416c3c386bbf2a.wgsl",
+    "wgsl_bytes": 32109
   },
   "browser_runtime": null,
   "canonical_interface": null,
   "canonical_status": {
     "embedded": false,
-    "omission_reason": "canonical interface was not requested",
+    "omission_reason": "GPU resource pass graph has no CPU fallback or canonical Wasm message lane",
     "policy": "disabled"
   },
   "layout": {
@@ -1039,9 +1039,522 @@
           0
         ]
       },
-      "shader": "fe-render-2af4775c953201a9.wgsl",
-      "shader_bytes": 45659,
+      "shader": "fe-render-0f416c3c386bbf2a.wgsl",
+      "shader_bytes": 32109,
       "source_entry": "distance_surface"
+    },
+    {
+      "draw_vertices": 54,
+      "layout": {
+        "bindings": [
+          {
+            "access": "read",
+            "binding": 0,
+            "group": 0,
+            "members": [
+              {
+                "arg_index": 1,
+                "doc": null,
+                "name": "lambda",
+                "offset": 0,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 2,
+                "doc": null,
+                "name": "yaw",
+                "offset": 4,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 3,
+                "doc": null,
+                "name": "pitch",
+                "offset": 8,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 4,
+                "doc": null,
+                "name": "dist",
+                "offset": 12,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 5,
+                "doc": null,
+                "name": "width",
+                "offset": 16,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 6,
+                "doc": null,
+                "name": "height",
+                "offset": 20,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 7,
+                "doc": null,
+                "name": "generation",
+                "offset": 24,
+                "scalar": "i32",
+                "width": 4
+              },
+              {
+                "arg_index": 8,
+                "doc": null,
+                "name": "cx",
+                "offset": 28,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 9,
+                "doc": null,
+                "name": "cy",
+                "offset": 32,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 10,
+                "doc": null,
+                "name": "cz",
+                "offset": 36,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 11,
+                "doc": null,
+                "name": "pencil_free",
+                "offset": 40,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 12,
+                "doc": null,
+                "name": "a0",
+                "offset": 44,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 13,
+                "doc": null,
+                "name": "b0",
+                "offset": 48,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 14,
+                "doc": null,
+                "name": "c0",
+                "offset": 52,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 15,
+                "doc": null,
+                "name": "d0",
+                "offset": 56,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 16,
+                "doc": null,
+                "name": "e0",
+                "offset": 60,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 17,
+                "doc": null,
+                "name": "f0",
+                "offset": 64,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 18,
+                "doc": null,
+                "name": "g0",
+                "offset": 68,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 19,
+                "doc": null,
+                "name": "h0",
+                "offset": 72,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 20,
+                "doc": null,
+                "name": "i0",
+                "offset": 76,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 21,
+                "doc": null,
+                "name": "j0",
+                "offset": 80,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 22,
+                "doc": null,
+                "name": "a1",
+                "offset": 84,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 23,
+                "doc": null,
+                "name": "b1",
+                "offset": 88,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 24,
+                "doc": null,
+                "name": "c1",
+                "offset": 92,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 25,
+                "doc": null,
+                "name": "d1",
+                "offset": 96,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 26,
+                "doc": null,
+                "name": "e1",
+                "offset": 100,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 27,
+                "doc": null,
+                "name": "f1",
+                "offset": 104,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 28,
+                "doc": null,
+                "name": "g1",
+                "offset": 108,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 29,
+                "doc": null,
+                "name": "h1",
+                "offset": 112,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 30,
+                "doc": null,
+                "name": "i1",
+                "offset": 116,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 31,
+                "doc": null,
+                "name": "j1",
+                "offset": 120,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 32,
+                "doc": null,
+                "name": "p0x",
+                "offset": 124,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 33,
+                "doc": null,
+                "name": "p0y",
+                "offset": 128,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 34,
+                "doc": null,
+                "name": "p0z",
+                "offset": 132,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 35,
+                "doc": null,
+                "name": "p1x",
+                "offset": 136,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 36,
+                "doc": null,
+                "name": "p1y",
+                "offset": 140,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 37,
+                "doc": null,
+                "name": "p1z",
+                "offset": 144,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 38,
+                "doc": null,
+                "name": "p2x",
+                "offset": 148,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 39,
+                "doc": null,
+                "name": "p2y",
+                "offset": 152,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 40,
+                "doc": null,
+                "name": "p2z",
+                "offset": 156,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 41,
+                "doc": null,
+                "name": "p3x",
+                "offset": 160,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 42,
+                "doc": null,
+                "name": "p3y",
+                "offset": 164,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 43,
+                "doc": null,
+                "name": "p3z",
+                "offset": 168,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 44,
+                "doc": null,
+                "name": "p4x",
+                "offset": 172,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 45,
+                "doc": null,
+                "name": "p4y",
+                "offset": 176,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 46,
+                "doc": null,
+                "name": "p4z",
+                "offset": 180,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 47,
+                "doc": null,
+                "name": "p5x",
+                "offset": 184,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 48,
+                "doc": null,
+                "name": "p5y",
+                "offset": 188,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 49,
+                "doc": null,
+                "name": "p5z",
+                "offset": 192,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 50,
+                "doc": null,
+                "name": "p6x",
+                "offset": 196,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 51,
+                "doc": null,
+                "name": "p6y",
+                "offset": 200,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 52,
+                "doc": null,
+                "name": "p6z",
+                "offset": 204,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 53,
+                "doc": null,
+                "name": "p7x",
+                "offset": 208,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 54,
+                "doc": null,
+                "name": "p7y",
+                "offset": 212,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 55,
+                "doc": null,
+                "name": "p7z",
+                "offset": 216,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 56,
+                "doc": null,
+                "name": "p8x",
+                "offset": 220,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 57,
+                "doc": null,
+                "name": "p8y",
+                "offset": 224,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 58,
+                "doc": null,
+                "name": "p8z",
+                "offset": 228,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 59,
+                "doc": null,
+                "name": "picked",
+                "offset": 232,
+                "scalar": "i32",
+                "width": 4
+              }
+            ],
+            "name": "state",
+            "role": "input",
+            "span": 236,
+            "stride": 236
+          }
+        ],
+        "builtin_inputs": [
+          {
+            "arg_index": 0,
+            "scalar": "u32",
+            "source": "vertex_index"
+          }
+        ],
+        "color_target_format": "rgba8unorm",
+        "entry_point": "marker_fragment",
+        "fragment_entry": "marker_fragment",
+        "mode": "render",
+        "result": null,
+        "vertex_entry": "marker_vertices",
+        "word": "u32",
+        "word_bytes": 4,
+        "workgroup_size": [
+          0,
+          0,
+          0
+        ]
+      },
+      "shader": "fe-render-a2526e3875d10c34.wgsl",
+      "shader_bytes": 17798,
+      "source_entry": "marker_fragment"
     }
   ],
   "protocol": "fe-web-bundle",
@@ -1086,7 +1599,7 @@
       {
         "id": "demos/sketches/qcga_pencil_de/src/lib.fe",
         "kind": "fe",
-        "sha256": "bd5f484e7b9360c44a2d7f68af60fd14ee58fa981dd0c0022cbfa776d3044326"
+        "sha256": "7b8e31a02b98cdd907bbabcd6c83acd23ca726151719d632d6fb35a02a29e5a5"
       },
       {
         "id": "ingots/core/fe.toml",
@@ -1268,6 +1781,7 @@
     "compiler_version": "26.2.0",
     "fe_responsibilities": [
       "gpu_program",
+      "gpu_pass_graph",
       "surface_declaration",
       "control_transition",
       "scheduling_policy",
@@ -1275,9 +1789,9 @@
     ],
     "fixed_host": {
       "artifact": {
-        "bytes": 100868,
-        "path": "fe-render-runtime-5651e0a987d052e0.js",
-        "sha256": "5651e0a987d052e0af090e95acd240e5d2f3ef0882157d0100b7ca1fc17ec69a"
+        "bytes": 101339,
+        "path": "fe-render-runtime-1f162833dbd44410.js",
+        "sha256": "1f162833dbd4441003f60c6bb520591a46ef079e1ef53640f48a5b513e98a919"
       },
       "contract": "fixed_versioned_demo_blind_browser_host",
       "name": "fe-render-runtime",

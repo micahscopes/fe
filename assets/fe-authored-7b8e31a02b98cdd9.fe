@@ -3,8 +3,9 @@
 //! This is the canonical gallery VIEW of `qcga_pencil::PencilSceneState`, not
 //! a second solver or interaction implementation. Initialization, controls,
 //! camera projection, point picking, drag geometry, re-solving, and the vivid
-//! normal/tangent material all come from the shared Fe ingot. The older raster
-//! actor is retired; this actor owns the sole GPU and user-facing surface.
+//! normal/tangent material all come from the shared Fe ingot. The older
+//! all-surface raster actor is retired; this actor owns the sole user-facing
+//! surface and adds only a small source-ordered raster pass for its controls.
 //!
 //! Production visibility is a genuine iterative implicit-surface march. Every
 //! step evaluates the scale-invariant first-order quadric estimate
@@ -16,11 +17,16 @@ use core::actor::InitialState
 use core::marker::Copy
 use core::num::IntDowncast
 use std::webgpu::{
+    ClipPosition,
+    FragmentStage,
     FragmentSurface,
     GpuProgram,
     LatestPerFrame,
+    RasterVertex,
     SurfaceScheduling,
     SurfaceTransition,
+    TriangleList,
+    VertexStage,
     WebGpuBackend,
 }
 use std::web::view::{Surface, SurfaceEvent}
@@ -50,6 +56,7 @@ use qcga_pencil::{
     PencilRay,
     PencilSceneState,
     PickedControl,
+    ProjectedPoint,
     Quadric,
     control_point_at_index,
     eval_quadric,
@@ -238,46 +245,62 @@ fn sky(_ direction: Vec3) -> Vec3 {
     ))
 }
 
-fn selected_marker(
+/// Typed payload for the small marker overlay. The fullscreen distance field
+/// no longer projects all nine control points in every fragment: projection
+/// runs for 54 authored vertices (six per point), and source-ordered pass
+/// composition preserves the already rendered field beneath them.
+struct ControlMarkerVarying { phase: f32 }
+impl Copy for ControlMarkerVarying {}
+
+fn marker_vertex(
+    _ vertex_index: u32,
     _ points: ControlPoints,
     _ frame: PencilFrame,
-    _ px: i32,
-    _ py: i32,
-    _ width: f32,
-    _ height: f32,
-) -> Vec3 {
-    let mut nearest: f32 = 1000000.0
-    let mut nearest_index: i32 = -1
-    let mut index: u32 = 0
-    while index < 9 {
-        let projected = project_point(control_point_at_index(points, index), frame)
-        if projected.depth > 0.25 {
-            let sx: f32 = (projected.position.x / projected.position.w * 0.5 + 0.5)
-                * width
-            let sy: f32 = (0.5 - projected.position.y / projected.position.w * 0.5)
-                * height
-            let dx: f32 = sx - from_i32(px)
-            let dy: f32 = sy - from_i32(py)
-            let distance2: f32 = dx * dx + dy * dy
-            if distance2 < nearest {
-                nearest = distance2
-                nearest_index = index.downcast_truncate()
-            }
+) -> RasterVertex<ControlMarkerVarying> {
+    let point_index: u32 = vertex_index / 6
+    let corner: u32 = vertex_index % 6
+    let projected: ProjectedPoint = project_point(
+        control_point_at_index(points, point_index), frame,
+    )
+    // Twelve backing pixels in each dimension, independent of aspect ratio.
+    let mut sx: f32 = -12.0 / max(frame.view.width, 1.0)
+    let mut sy: f32 = -12.0 / max(frame.view.height, 1.0)
+    if corner == 1 { sx = 0.0 - sx }
+    if corner == 2 { sy = 0.0 - sy }
+    if corner == 3 { sy = 0.0 - sy }
+    if corner == 4 { sx = 0.0 - sx }
+    if corner == 5 {
+        sx = 0.0 - sx
+        sy = 0.0 - sy
+    }
+    let w: f32 = projected.position.w
+    let position: ClipPosition = if projected.depth > 0.25 {
+        ClipPosition {
+            x: projected.position.x + sx * w,
+            y: projected.position.y + sy * w,
+            z: projected.position.z - 0.001 * w,
+            w: w,
         }
-        index = index + 1
-    }
-    if nearest < 42.0 {
-        let phase: f32 = from_i32(nearest_index) / 8.0
-        let gold = theorem_gold()
-        let white = clean_white()
-        mix3(
-            vec3(gold.red, gold.green, gold.blue),
-            vec3(white.red, white.green, white.blue),
-            phase,
-        )
     } else {
-        vec3(-1.0, -1.0, -1.0)
+        ClipPosition { x: 2.0, y: 2.0, z: 2.0, w: 1.0 }
     }
+    RasterVertex {
+        position: position,
+        varying: ControlMarkerVarying {
+            phase: from_i32(point_index.downcast_truncate()) / 8.0,
+        },
+    }
+}
+
+fn marker_color(_ varying: ControlMarkerVarying) -> i32 {
+    let phase: f32 = clamp01(varying.phase)
+    let gold = theorem_gold()
+    let white = clean_white()
+    rgba(
+        gold.red + (white.red - gold.red) * phase,
+        gold.green + (white.green - gold.green) * phase,
+        gold.blue + (white.blue - gold.blue) * phase,
+    )
 }
 
 actor PencilDistanceSurface uses (GpuProgram<WebGpuBackend>) {
@@ -361,20 +384,20 @@ actor PencilDistanceSurface uses (GpuProgram<WebGpuBackend>) {
         } else {
             background
         }
-        // Selection is resident Fe control state. Render markers do not match
-        // its enum in shader code, preserving the backend's fail-closed rule
-        // for enum traps while keeping the browser geometry-blind.
-        let marker: Vec3 = selected_marker(
-            self.points,
-            self.frame,
-            px,
-            py,
-            self.frame.view.width,
-            self.frame.view.height,
-        )
-        let color: Vec3 = if marker.x >= 0.0 { marker } else { linear }
         // `pencil_material` already returns shared display colour; applying a
         // DE-only square-root transfer here would wash out that palette.
-        rgba(clamp01(color.x), clamp01(color.y), clamp01(color.z))
+        rgba(clamp01(linear.x), clamp01(linear.y), clamp01(linear.z))
+    }
+
+    fn marker_vertices(self, vertex_index: u32) -> RasterVertex<ControlMarkerVarying>
+        uses (VertexStage<ControlMarkerVarying, TriangleList<54>>)
+    {
+        marker_vertex(vertex_index, self.points, self.frame)
+    }
+
+    fn marker_fragment(self, varying: ControlMarkerVarying) -> i32
+        uses (FragmentStage<ControlMarkerVarying>)
+    {
+        marker_color(varying)
     }
 }
