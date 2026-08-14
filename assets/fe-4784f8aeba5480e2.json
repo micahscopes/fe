@@ -9,14 +9,14 @@
     "build": "workspace"
   },
   "target": "wasm",
-  "source_set_sha256": "18fd7da4329bd5d762709c87564926ca7a511b539ae2dd9d32aac833a3350f95",
+  "source_set_sha256": "3586ac2d3d522c2a08321bb7ea863b45129a51466d455b66cb31186e2f165f03",
   "source_dependencies": {
     "version": 1,
-    "root": "file:///workspace/fe-worktrees/mb2/demos/sketches/source_inspector/src/lib.fe",
+    "root": "file:///workspace/fe-worktrees/mb2/demos/sketches/event_studio/src/lib.fe",
     "sources": [
       {
-        "url": "file:///workspace/fe-worktrees/mb2/demos/sketches/source_inspector/src/lib.fe",
-        "sha256": "ba401e6d8b8a95bd185429e2acaec9f02a962f554505e42b011b39563556e067"
+        "url": "file:///workspace/fe-worktrees/mb2/demos/sketches/event_studio/src/lib.fe",
+        "sha256": "b33f48845b7151881fb86781d7aed7fa544da22e8e6f300e9c294dd3be8a4bb3"
       }
     ]
   },
@@ -31,43 +31,22 @@
         "results": []
       },
       {
-        "module": "fe:host",
-        "name": "race_begin",
+        "module": "fe:web-component-events",
+        "name": "pointer_begin",
         "signature_complete": false,
         "params": [],
         "results": []
       },
       {
-        "module": "fe:host",
-        "name": "sleep_begin",
-        "signature_complete": false,
-        "params": [],
-        "results": []
-      },
-      {
-        "module": "fe:web-document",
-        "name": "visibility_begin",
-        "signature_complete": false,
-        "params": [],
-        "results": []
-      },
-      {
-        "module": "fe:web-surface",
-        "name": "load_begin",
-        "signature_complete": false,
-        "params": [],
-        "results": []
-      },
-      {
-        "module": "fe:web-surface",
-        "name": "next_begin",
+        "module": "fe:web-component-events",
+        "name": "wheel_begin",
         "signature_complete": false,
         "params": [],
         "results": []
       },
       {
         "module": "fe:web-window",
-        "name": "animation_frame_begin",
+        "name": "viewport_begin",
         "signature_complete": false,
         "params": [],
         "results": []
@@ -76,56 +55,84 @@
     "exports": [
       {
         "module": "",
-        "name": "__fe_task_resume_activate_surfaces_1",
+        "name": "__fe_task_resume_watch_pointer_1",
         "signature_complete": false,
         "params": [],
         "results": []
       },
       {
         "module": "",
-        "name": "__fe_task_resume_activate_surfaces_2",
+        "name": "__fe_task_resume_watch_pointer_2",
         "signature_complete": false,
         "params": [],
         "results": []
       },
       {
         "module": "",
-        "name": "__fe_task_resume_activate_surfaces_3",
+        "name": "__fe_task_resume_watch_pointer_3",
         "signature_complete": false,
         "params": [],
         "results": []
       },
       {
         "module": "",
-        "name": "__fe_task_resume_activate_surfaces_4",
+        "name": "__fe_task_resume_watch_viewport_1",
         "signature_complete": false,
         "params": [],
         "results": []
       },
       {
         "module": "",
-        "name": "__fe_task_resume_activate_surfaces_5",
+        "name": "__fe_task_resume_watch_viewport_2",
         "signature_complete": false,
         "params": [],
         "results": []
       },
       {
         "module": "",
-        "name": "__fe_task_resume_activate_surfaces_6",
+        "name": "__fe_task_resume_watch_viewport_3",
         "signature_complete": false,
         "params": [],
         "results": []
       },
       {
         "module": "",
-        "name": "__fe_task_resume_activate_surfaces_7",
+        "name": "__fe_task_resume_watch_wheel_1",
         "signature_complete": false,
         "params": [],
         "results": []
       },
       {
         "module": "",
-        "name": "__fe_task_start_activate_surfaces",
+        "name": "__fe_task_resume_watch_wheel_2",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "__fe_task_resume_watch_wheel_3",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "__fe_task_start_watch_pointer",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "__fe_task_start_watch_viewport",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "__fe_task_start_watch_wheel",
         "signature_complete": false,
         "params": [],
         "results": []
@@ -180,9 +187,9 @@
       "name": "module.wasm",
       "kind": "wasm_module",
       "media_type": "application/wasm",
-      "sha256": "544ab8a24e30179f442f337843c2a008641b4e40d4a0c11a35c66fbfd0a5eb97",
-      "byte_len": 145344,
-      "url": "assets/fe-544ab8a24e30179f.wasm"
+      "sha256": "173e745a72b411d87af66bfd67ac2d224c993ae3d025cc0668ab15f3cf603557",
+      "byte_len": 191337,
+      "url": "assets/fe-173e745a72b411d8.wasm"
     }
   ]
 }

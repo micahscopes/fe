@@ -1,0 +1,585 @@
+//! Event Studio: a resident Fe component driven by typed browser streams.
+//!
+//! The browser owns standards listeners only while an observation is pending.
+//! Affine subscriptions and Fe tasks own iteration, quantization, failure
+//! policy, actor delivery, state, and DOM projection. There is no JavaScript
+//! application callback or hidden host-side reactive graph.
+
+use core::actor::{ActorSink, ScopedTask}
+use core::pending::{Suspend, TaskOutcome}
+use std::actor::{ActorMessage, BrowserActorSink}
+use std::reactive::{Event, EventSource, Stream}
+use std::host::Resumable
+use std::wasm::WasmBackend
+use std::web::component_events::{
+    BrowserPointerEvents,
+    BrowserWheelEvents,
+    PointerSample,
+    WheelSample,
+}
+use std::web::window_events::{BrowserViewportEvents, Viewport}
+use std::web::component::{
+    BrowserBytes,
+    ComponentEvent,
+    ComponentEventKind,
+    ComponentPatch,
+    ComponentWriter,
+    InitialState,
+    ProjectState,
+    ResidentTransition,
+    allocate_component_buffer,
+}
+use std::web::identity::{
+    ComponentAction,
+    ComponentActionProvider,
+    ComponentSchema,
+    ComponentSchemaProvider,
+    Part,
+    Text,
+}
+use std::web::page::{
+    ComponentComposition,
+    ComponentView,
+    PageAttribute,
+    PageBuilder,
+    PageElement,
+    PageText,
+}
+
+const PATCH_CAPACITY: u32 = 1024
+const VIEW_CAPACITY: usize = 96
+
+extern {
+    fn __i32_from_f32(_: f32) -> i32
+}
+
+const fn ui_text(value: String<31>) -> PageText {
+    PageText::one(value: value)
+}
+
+enum StudioAction {
+    Unknown,
+    ViewportObserved,
+    PointerObserved,
+    WheelObserved,
+    ViewportFailed,
+}
+
+impl Copy for StudioAction {}
+
+/// One nominal mailbox payload. The compiler derives its scalar Wasm shape;
+/// neither the task nor the fixed browser boundary assigns field IDs or packs
+/// values into an application-specific integer protocol.
+struct StudioTask {
+    viewport_width: f32,
+    viewport_height: f32,
+    viewport_device_pixel_ratio: f32,
+    pointer_id: u32,
+    pointer_x: f32,
+    pointer_y: f32,
+    pointer_buttons: u32,
+    wheel_delta_y: f32,
+    error: u32,
+}
+
+impl Copy for StudioTask {}
+
+derive ComponentAction for StudioAction using ComponentActionProvider
+
+struct StudioParts {
+    width: Part<Text>,
+    height: Part<Text>,
+    pixel_ratio: Part<Text>,
+    observations: Part<Text>,
+    pointer_x: Part<Text>,
+    pointer_y: Part<Text>,
+    pointer_events: Part<Text>,
+    wheel_events: Part<Text>,
+    failures: Part<Text>,
+}
+
+derive ComponentSchema for StudioParts using ComponentSchemaProvider
+
+pub struct StudioState {
+    pub patch_ptr: u32,
+    pub width: u32,
+    pub height: u32,
+    pub pixel_ratio_percent: u32,
+    pub observations: u32,
+    pub pointer_x: u32,
+    pub pointer_y: u32,
+    pub pointer_events: u32,
+    pub wheel_events: u32,
+    pub failures: u32,
+    pub connected: bool,
+}
+
+fn bounded_dimension(value: f32) -> u32 {
+    let bounded = if value >= 0.0 && value <= 100000.0 {
+        value
+    } else {
+        100000.0
+    }
+    __i32_from_f32(bounded).downcast_unchecked()
+}
+
+fn bounded_pixel_ratio(value: f32) -> u32 {
+    let percent = value * 100.0
+    let bounded = if percent >= 0.0 && percent <= 10000.0 {
+        percent
+    } else {
+        10000.0
+    }
+    __i32_from_f32(bounded).downcast_unchecked()
+}
+
+fn bounded_position(value: f32) -> u32 {
+    let bounded = if value < 0.0 {
+        0.0
+    } else {
+        if value <= 100000.0 { value } else { 100000.0 }
+    }
+    __i32_from_f32(bounded).downcast_unchecked()
+}
+
+fn viewport_task(viewport: Viewport) -> StudioTask {
+    StudioTask {
+        viewport_width: viewport.width,
+        viewport_height: viewport.height,
+        viewport_device_pixel_ratio: viewport.device_pixel_ratio,
+        pointer_id: 0,
+        pointer_x: 0.0,
+        pointer_y: 0.0,
+        pointer_buttons: 0,
+        wheel_delta_y: 0.0,
+        error: 0,
+    }
+}
+
+fn pointer_task(sample: PointerSample) -> StudioTask {
+    StudioTask {
+        viewport_width: 0.0,
+        viewport_height: 0.0,
+        viewport_device_pixel_ratio: 0.0,
+        pointer_id: sample.pointer_id,
+        pointer_x: sample.client_x,
+        pointer_y: sample.client_y,
+        pointer_buttons: sample.buttons,
+        wheel_delta_y: 0.0,
+        error: 0,
+    }
+}
+
+fn wheel_task(sample: WheelSample) -> StudioTask {
+    StudioTask {
+        viewport_width: 0.0,
+        viewport_height: 0.0,
+        viewport_device_pixel_ratio: 0.0,
+        pointer_id: 0,
+        pointer_x: sample.client_x,
+        pointer_y: sample.client_y,
+        pointer_buttons: 0,
+        wheel_delta_y: sample.delta_y,
+        error: 0,
+    }
+}
+
+fn failed_task(error: u32) -> StudioTask {
+    StudioTask {
+        viewport_width: 0.0,
+        viewport_height: 0.0,
+        viewport_device_pixel_ratio: 0.0,
+        pointer_id: 0,
+        pointer_x: 0.0,
+        pointer_y: 0.0,
+        pointer_buttons: 0,
+        wheel_delta_y: 0.0,
+        error: error,
+    }
+}
+
+fn report(target: StudioAction, payload: StudioTask) -> bool
+uses (
+    sink: mut ActorSink<WasmBackend, ComponentEvent<StudioAction, StudioTask>>,
+    suspend: Suspend<WasmBackend, u32>,
+)
+{
+    let event = ComponentEvent<StudioAction, StudioTask>::task_payload(
+        target: target,
+        payload: payload,
+    )
+    let outcome: TaskOutcome<u32, ()> = ActorMessage::new(event).send()
+    match outcome {
+        TaskOutcome::Success(_,) => true,
+        TaskOutcome::Failure(_,) => false,
+        TaskOutcome::Cancelled => false,
+    }
+}
+
+fn observe_viewports() -> u32
+uses (
+    viewport_events: mut EventSource<Viewport>,
+    sink: mut ActorSink<WasmBackend, ComponentEvent<StudioAction, StudioTask>>,
+    suspend: Suspend<WasmBackend, u32>,
+)
+{
+    let stream: Stream<Viewport> = Stream::new()
+    let mut subscription = stream.subscribe()
+    let mut observations: u32 = 0
+    let mut running = true
+    while running {
+        let next = stream.next_ready(subscription)
+        subscription = next.0
+        match next.1 {
+            Event::Occurrence(viewport,) => {
+                let delivered = report(
+                    target: StudioAction::ViewportObserved,
+                    payload: viewport_task(viewport),
+                )
+                if delivered {
+                    observations = observations + 1
+                    running = true
+                } else {
+                    running = false
+                }
+            },
+            Event::Absent => {},
+            Event::End => {
+                running = false
+            },
+            Event::Failure(error,) => {
+                report(
+                    target: StudioAction::ViewportFailed,
+                    payload: failed_task(error),
+                )
+                running = false
+            },
+            Event::Cancelled => {
+                stream.cancel(subscription)
+                return observations
+            },
+        }
+    }
+    stream.cancel(subscription)
+    observations
+}
+
+fn observe_pointers() -> u32
+uses (
+    pointer_events: mut EventSource<PointerSample>,
+    sink: mut ActorSink<WasmBackend, ComponentEvent<StudioAction, StudioTask>>,
+    suspend: Suspend<WasmBackend, u32>,
+)
+{
+    let stream: Stream<PointerSample> = Stream::new()
+    let mut subscription = stream.subscribe()
+    let mut observations: u32 = 0
+    let mut running = true
+    while running {
+        let next = stream.next_ready(subscription)
+        subscription = next.0
+        match next.1 {
+            Event::Occurrence(sample,) => {
+                running = report(
+                    target: StudioAction::PointerObserved,
+                    payload: pointer_task(sample),
+                )
+                if running {
+                    observations = observations + 1
+                }
+            },
+            Event::Absent => {},
+            Event::End => {
+                running = false
+            },
+            Event::Failure(error,) => {
+                report(
+                    target: StudioAction::ViewportFailed,
+                    payload: failed_task(error),
+                )
+                running = false
+            },
+            Event::Cancelled => {
+                stream.cancel(subscription)
+                return observations
+            },
+        }
+    }
+    stream.cancel(subscription)
+    observations
+}
+
+fn observe_wheels() -> u32
+uses (
+    wheel_events: mut EventSource<WheelSample>,
+    sink: mut ActorSink<WasmBackend, ComponentEvent<StudioAction, StudioTask>>,
+    suspend: Suspend<WasmBackend, u32>,
+)
+{
+    let stream: Stream<WheelSample> = Stream::new()
+    let mut subscription = stream.subscribe()
+    let mut observations: u32 = 0
+    let mut running = true
+    while running {
+        let next = stream.next_ready(subscription)
+        subscription = next.0
+        match next.1 {
+            Event::Occurrence(sample,) => {
+                running = report(
+                    target: StudioAction::WheelObserved,
+                    payload: wheel_task(sample),
+                )
+                if running {
+                    observations = observations + 1
+                }
+            },
+            Event::Absent => {},
+            Event::End => {
+                running = false
+            },
+            Event::Failure(error,) => {
+                report(
+                    target: StudioAction::ViewportFailed,
+                    payload: failed_task(error),
+                )
+                running = false
+            },
+            Event::Cancelled => {
+                stream.cancel(subscription)
+                return observations
+            },
+        }
+    }
+    stream.cancel(subscription)
+    observations
+}
+
+actor EventStudio {
+    patch_ptr: u32,
+    width: u32,
+    height: u32,
+    pixel_ratio_percent: u32,
+    observations: u32,
+    pointer_x: u32,
+    pointer_y: u32,
+    pointer_events: u32,
+    wheel_events: u32,
+    failures: u32,
+    connected: bool,
+
+    const fn view() -> ComponentView<VIEW_CAPACITY> uses (ComponentComposition) {
+        let ui = <StudioParts as ComponentSchema>::component_parts()
+        PageBuilder::new()
+            .open(element: PageElement::Section)
+            .attribute(value: PageAttribute::class(value: "event-studio-panel"))
+            .open(element: PageElement::Heading2)
+            .text(value: ui_text(value: "Event Studio"))
+            .close()
+            .open(element: PageElement::Paragraph)
+            .attribute(value: PageAttribute::class(value: "event-studio-copy"))
+            .text(value: ui_text(value: "Resize, point, touch, or "))
+            .text(value: ui_text(value: "wheel: typed Fe streams own "))
+            .text(value: ui_text(value: "update."))
+            .close()
+            .open(element: PageElement::Div)
+            .attribute(value: PageAttribute::class(value: "event-studio-grid"))
+            .open(element: PageElement::Paragraph)
+            .text(value: ui_text(value: "width · "))
+            .open(element: PageElement::Strong)
+            .attribute(value: PageAttribute::node(value: ui.width))
+            .text(value: ui_text(value: "0"))
+            .close()
+            .text(value: ui_text(value: " css px"))
+            .close()
+            .open(element: PageElement::Paragraph)
+            .text(value: ui_text(value: "height · "))
+            .open(element: PageElement::Strong)
+            .attribute(value: PageAttribute::node(value: ui.height))
+            .text(value: ui_text(value: "0"))
+            .close()
+            .text(value: ui_text(value: " css px"))
+            .close()
+            .open(element: PageElement::Paragraph)
+            .text(value: ui_text(value: "dpr × 100 · "))
+            .open(element: PageElement::Strong)
+            .attribute(value: PageAttribute::node(value: ui.pixel_ratio))
+            .text(value: ui_text(value: "0"))
+            .close()
+            .close()
+            .open(element: PageElement::Paragraph)
+            .text(value: ui_text(value: "pointer x · "))
+            .open(element: PageElement::Strong)
+            .attribute(value: PageAttribute::node(value: ui.pointer_x))
+            .text(value: ui_text(value: "0"))
+            .close()
+            .text(value: ui_text(value: " css px"))
+            .close()
+            .open(element: PageElement::Paragraph)
+            .text(value: ui_text(value: "pointer y · "))
+            .open(element: PageElement::Strong)
+            .attribute(value: PageAttribute::node(value: ui.pointer_y))
+            .text(value: ui_text(value: "0"))
+            .close()
+            .text(value: ui_text(value: " css px"))
+            .close()
+            .open(element: PageElement::Paragraph)
+            .text(value: ui_text(value: "pointer events · "))
+            .open(element: PageElement::Strong)
+            .attribute(value: PageAttribute::node(value: ui.pointer_events))
+            .text(value: ui_text(value: "0"))
+            .close()
+            .close()
+            .open(element: PageElement::Paragraph)
+            .text(value: ui_text(value: "wheel events · "))
+            .open(element: PageElement::Strong)
+            .attribute(value: PageAttribute::node(value: ui.wheel_events))
+            .text(value: ui_text(value: "0"))
+            .close()
+            .close()
+            .open(element: PageElement::Paragraph)
+            .text(value: ui_text(value: "observations · "))
+            .open(element: PageElement::Strong)
+            .attribute(value: PageAttribute::node(value: ui.observations))
+            .text(value: ui_text(value: "0"))
+            .close()
+            .close()
+            .open(element: PageElement::Paragraph)
+            .text(value: ui_text(value: "failures · "))
+            .open(element: PageElement::Strong)
+            .attribute(value: PageAttribute::node(value: ui.failures))
+            .text(value: ui_text(value: "0"))
+            .close()
+            .close()
+            .close()
+            .close()
+            .finish_component()
+    }
+
+    fn initial() -> StudioState uses (InitialState) {
+        let patch = allocate_component_buffer(capacity: PATCH_CAPACITY)
+        StudioState {
+            patch_ptr: patch.ptr,
+            width: 0,
+            height: 0,
+            pixel_ratio_percent: 0,
+            observations: 0,
+            pointer_x: 0,
+            pointer_y: 0,
+            pointer_events: 0,
+            wheel_events: 0,
+            failures: 0,
+            connected: false,
+        }
+    }
+
+    fn watch_viewport() -> u32 uses (ScopedTask) {
+        with (
+            EventSource<Viewport> = BrowserViewportEvents::new(),
+            ActorSink<WasmBackend, ComponentEvent<StudioAction, StudioTask>> = BrowserActorSink {},
+            Suspend<WasmBackend, u32> = Resumable {},
+        ) {
+            observe_viewports()
+        }
+    }
+
+    fn watch_pointer() -> u32 uses (ScopedTask) {
+        with (
+            EventSource<PointerSample> = BrowserPointerEvents::new(),
+            ActorSink<WasmBackend, ComponentEvent<StudioAction, StudioTask>> = BrowserActorSink {},
+            Suspend<WasmBackend, u32> = Resumable {},
+        ) {
+            observe_pointers()
+        }
+    }
+
+    fn watch_wheel() -> u32 uses (ScopedTask) {
+        with (
+            EventSource<WheelSample> = BrowserWheelEvents::new(),
+            ActorSink<WasmBackend, ComponentEvent<StudioAction, StudioTask>> = BrowserActorSink {},
+            Suspend<WasmBackend, u32> = Resumable {},
+        ) {
+            observe_wheels()
+        }
+    }
+
+    fn receive(self, event: own ComponentEvent<StudioAction, StudioTask>) -> StudioState
+        uses (ResidentTransition)
+    {
+        let mut width = self.width
+        let mut height = self.height
+        let mut pixel_ratio_percent = self.pixel_ratio_percent
+        let mut observations = self.observations
+        let mut pointer_x = self.pointer_x
+        let mut pointer_y = self.pointer_y
+        let mut pointer_events = self.pointer_events
+        let mut wheel_events = self.wheel_events
+        let mut failures = self.failures
+        let mut connected = self.connected
+        match event.kind {
+            ComponentEventKind::Connected => { connected = true }
+            ComponentEventKind::Disconnected => { connected = false }
+            ComponentEventKind::TaskMessage => {
+                if connected {
+                    match event.target {
+                        StudioAction::ViewportObserved => {
+                            width = bounded_dimension(value: event.task.viewport_width)
+                            height = bounded_dimension(value: event.task.viewport_height)
+                            pixel_ratio_percent = bounded_pixel_ratio(
+                                value: event.task.viewport_device_pixel_ratio,
+                            )
+                            observations = observations + 1
+                        }
+                        StudioAction::PointerObserved => {
+                            pointer_x = bounded_position(value: event.task.pointer_x)
+                            pointer_y = bounded_position(value: event.task.pointer_y)
+                            pointer_events = pointer_events + 1
+                        }
+                        StudioAction::WheelObserved => {
+                            pointer_x = bounded_position(value: event.task.pointer_x)
+                            pointer_y = bounded_position(value: event.task.pointer_y)
+                            wheel_events = wheel_events + 1
+                        }
+                        StudioAction::ViewportFailed => { failures = failures + 1 }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+        StudioState {
+            patch_ptr: self.patch_ptr,
+            width: width,
+            height: height,
+            pixel_ratio_percent: pixel_ratio_percent,
+            observations: observations,
+            pointer_x: pointer_x,
+            pointer_y: pointer_y,
+            pointer_events: pointer_events,
+            wheel_events: wheel_events,
+            failures: failures,
+            connected: connected,
+        }
+    }
+
+    fn project(self) -> ComponentPatch uses (ProjectState) {
+        let ui = <StudioParts as ComponentSchema>::component_parts()
+        let writer = ComponentWriter::new(
+            buffer: BrowserBytes { ptr: self.patch_ptr, len: PATCH_CAPACITY },
+        )
+            .set_u32_text(target: ui.width, value: self.width)
+            .set_u32_text(target: ui.height, value: self.height)
+            .set_u32_text(target: ui.pixel_ratio, value: self.pixel_ratio_percent)
+            .set_u32_text(target: ui.observations, value: self.observations)
+            .set_u32_text(target: ui.pointer_x, value: self.pointer_x)
+            .set_u32_text(target: ui.pointer_y, value: self.pointer_y)
+            .set_u32_text(target: ui.pointer_events, value: self.pointer_events)
+            .set_u32_text(target: ui.wheel_events, value: self.wheel_events)
+            .set_u32_text(target: ui.failures, value: self.failures)
+        ComponentPatch::new(
+            visible_mask: 0,
+            focus_target: StudioAction::Unknown,
+            prevent_default: false,
+            commands: writer.finish(),
+        )
+    }
+}

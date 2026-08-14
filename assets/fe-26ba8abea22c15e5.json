@@ -9,14 +9,14 @@
     "build": "workspace"
   },
   "target": "wasm",
-  "source_set_sha256": "8e4beec9931b44bb04d943dd8b26ba6555eccccd335e4704d8671599cf7c77d0",
+  "source_set_sha256": "18fd7da4329bd5d762709c87564926ca7a511b539ae2dd9d32aac833a3350f95",
   "source_dependencies": {
     "version": 1,
-    "root": "file:///workspace/fe-worktrees/mb2/demos/sketches/event_studio/src/lib.fe",
+    "root": "file:///workspace/fe-worktrees/mb2/demos/sketches/source_inspector/src/lib.fe",
     "sources": [
       {
-        "url": "file:///workspace/fe-worktrees/mb2/demos/sketches/event_studio/src/lib.fe",
-        "sha256": "1e042c2e9b682e17dcfd18adf845951545fb63f7990f6f6eaed7e9962c37cc4b"
+        "url": "file:///workspace/fe-worktrees/mb2/demos/sketches/source_inspector/src/lib.fe",
+        "sha256": "ba401e6d8b8a95bd185429e2acaec9f02a962f554505e42b011b39563556e067"
       }
     ]
   },
@@ -31,8 +31,43 @@
         "results": []
       },
       {
+        "module": "fe:host",
+        "name": "race_begin",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "fe:host",
+        "name": "sleep_begin",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "fe:web-document",
+        "name": "visibility_begin",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "fe:web-surface",
+        "name": "load_begin",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "fe:web-surface",
+        "name": "next_begin",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
         "module": "fe:web-window",
-        "name": "viewport_begin",
+        "name": "animation_frame_begin",
         "signature_complete": false,
         "params": [],
         "results": []
@@ -41,49 +76,56 @@
     "exports": [
       {
         "module": "",
-        "name": "__fe_task_resume_watch_viewport_1",
+        "name": "__fe_task_resume_activate_surfaces_1",
         "signature_complete": false,
         "params": [],
         "results": []
       },
       {
         "module": "",
-        "name": "__fe_task_resume_watch_viewport_2",
+        "name": "__fe_task_resume_activate_surfaces_2",
         "signature_complete": false,
         "params": [],
         "results": []
       },
       {
         "module": "",
-        "name": "__fe_task_resume_watch_viewport_3",
+        "name": "__fe_task_resume_activate_surfaces_3",
         "signature_complete": false,
         "params": [],
         "results": []
       },
       {
         "module": "",
-        "name": "__fe_task_resume_watch_viewport_4",
+        "name": "__fe_task_resume_activate_surfaces_4",
         "signature_complete": false,
         "params": [],
         "results": []
       },
       {
         "module": "",
-        "name": "__fe_task_resume_watch_viewport_5",
+        "name": "__fe_task_resume_activate_surfaces_5",
         "signature_complete": false,
         "params": [],
         "results": []
       },
       {
         "module": "",
-        "name": "__fe_task_resume_watch_viewport_6",
+        "name": "__fe_task_resume_activate_surfaces_6",
         "signature_complete": false,
         "params": [],
         "results": []
       },
       {
         "module": "",
-        "name": "__fe_task_start_watch_viewport",
+        "name": "__fe_task_resume_activate_surfaces_7",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "__fe_task_start_activate_surfaces",
         "signature_complete": false,
         "params": [],
         "results": []
@@ -138,9 +180,9 @@
       "name": "module.wasm",
       "kind": "wasm_module",
       "media_type": "application/wasm",
-      "sha256": "002267cbdce647cef8e9612d1f2f03250ac4f6af752397e497a6e20e1e38e52b",
-      "byte_len": 83133,
-      "url": "assets/fe-002267cbdce647ce.wasm"
+      "sha256": "58dbaf5c4b8a5c41a818aeefca7cb6a824fce49548c5034f142b11c2497f2d9a",
+      "byte_len": 145344,
+      "url": "assets/fe-58dbaf5c4b8a5c41.wasm"
     }
   ]
 }
