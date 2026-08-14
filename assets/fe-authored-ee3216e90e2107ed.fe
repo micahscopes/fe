@@ -6,9 +6,7 @@
 //! resident-program declarations; it contains no gallery titles, paths, tile
 //! structure, Todo markup, or SourceInspector policy.
 
-use std::web::page::{
-    Page, PageAttribute, PageBuilder, PageComposition, PageElement, PageText,
-}
+use std::web::page::{Page, PageAttribute, PageBuilder, PageComposition, PageElement, PageText}
 use source_inspector::InspectorAction
 
 const CAPACITY: usize = 512
@@ -25,9 +23,7 @@ const fn t3(_ first: String<31>, _ second: String<31>, _ third: String<31>) -> P
     PageText::three(first: first, second: second, third: third)
 }
 
-struct GalleryBuilder {
-    page: PageBuilder<CAPACITY>,
-}
+struct GalleryBuilder { page: PageBuilder<CAPACITY> }
 
 impl GalleryBuilder {
     const fn new() -> Self {
@@ -57,9 +53,13 @@ impl GalleryBuilder {
             .text(value: t("."))
             .close()
             .open(element: PageElement::Anchor)
-            .attribute(value: PageAttribute::href(value: t2("sketches/gallery_page/", "src/lib.fe")))
+            .attribute(
+                value: PageAttribute::href(value: t2("sketches/gallery_page/", "src/lib.fe")),
+            )
             .attribute(value: PageAttribute::publish())
-            .attribute(value: PageAttribute::action(value: InspectorAction::Source))
+            .attribute(
+                value: PageAttribute::action(value: InspectorAction::Source),
+            )
             .text(value: t("page source"))
             .close()
             .close()
@@ -68,13 +68,9 @@ impl GalleryBuilder {
         Self { page: page }
     }
 
-    const fn caption(
-        self,
-        title: PageText,
-        description: PageText,
-        source: PageText,
-    ) -> Self {
-        let page = self.page
+    const fn caption(self, title: PageText, description: PageText, source: PageText) -> Self {
+        let page = self
+            .page
             .open(element: PageElement::Figcaption)
             .open(element: PageElement::Bold)
             .text(value: title)
@@ -86,7 +82,9 @@ impl GalleryBuilder {
             .open(element: PageElement::Anchor)
             .attribute(value: PageAttribute::href(value: source))
             .attribute(value: PageAttribute::publish())
-            .attribute(value: PageAttribute::action(value: InspectorAction::Source))
+            .attribute(
+                value: PageAttribute::action(value: InspectorAction::Source),
+            )
             .text(value: t("source"))
             .close()
             .close()
@@ -100,15 +98,10 @@ impl GalleryBuilder {
         source: PageText,
         program: PageText,
     ) -> Self {
-        let builder = Self {
-            page: self.page.open(element: PageElement::Figure),
-        }.caption(title: title, description: description, source: source)
-        let page = builder.page
-            // Compatibility workaround for browser WebGPU implementations
-            // which can crash or lose their shared device when a gallery
-            // initializes many surfaces in one burst. This is not a WebGPU or
-            // Fe semantic requirement: the resident Fe shell deliberately
-            // advances this compiler-derived sequence one surface at a time.
+        let builder = Self { page: self.page.open(element: PageElement::Figure) }
+            .caption(title: title, description: description, source: source)
+        let page = builder
+            .page
             .render_sequenced(
                 source: program,
                 wgsl_action: InspectorAction::Wgsl,
@@ -122,18 +115,45 @@ impl GalleryBuilder {
     /// The component module owns its initial DOM; the page owns only placement
     /// and presentation classes around that resident actor.
     const fn todo_mount(self) -> Self {
-        let builder = Self {
-            page: self.page.open(element: PageElement::Figure),
-        }.caption(
-            title: t("TodoMVC"),
-            description: t2("resident Fe state → keyed ", "DOM effects"),
-            source: t("sketches/todomvc/src/lib.fe"),
-        )
-        let page = builder.page
-            .component(source: t("sketches/todomvc/src/lib.fe"), mount: "gallery-todomvc")
+        let builder = Self { page: self.page.open(element: PageElement::Figure) }
+            .caption(
+                title: t("TodoMVC"),
+                description: t2("resident Fe state → keyed ", "DOM effects"),
+                source: t("sketches/todomvc/src/lib.fe"),
+            )
+        let page = builder
+            .page
+            .component(
+                source: t("sketches/todomvc/src/lib.fe"),
+                mount: "gallery-todomvc",
+            )
             .open(element: PageElement::FeComponent)
             .attribute(value: PageAttribute::id(value: "gallery-todomvc"))
             .attribute(value: PageAttribute::class(value: "todo-app"))
+            .close()
+            .close()
+        Self { page: page }
+    }
+
+    /// A real browser-event acceptance demo. Its resident Fe task consumes the
+    /// typed viewport EventSource; the host contributes only the standards
+    /// resize observation and abort signal.
+    const fn event_studio_mount(self) -> Self {
+        let builder = Self { page: self.page.open(element: PageElement::Figure) }
+            .caption(
+                title: t("Event Studio"),
+                description: t2("typed viewport stream → ", "resident Fe actor"),
+                source: t2("sketches/event_studio/", "src/lib.fe"),
+            )
+        let page = builder
+            .page
+            .component(
+                source: t2("sketches/event_studio/", "src/lib.fe"),
+                mount: "gallery-event-studio",
+            )
+            .open(element: PageElement::FeComponent)
+            .attribute(value: PageAttribute::id(value: "gallery-event-studio"))
+            .attribute(value: PageAttribute::class(value: "event-studio"))
             .close()
             .close()
         Self { page: page }
@@ -144,9 +164,7 @@ impl GalleryBuilder {
     }
 
     const fn finish(self) -> Page<CAPACITY> {
-        self.page
-            .close()
-            .finish(title: t("Fe · GPU gallery"))
+        self.page.close().finish(title: t("Fe · GPU gallery"))
     }
 }
 
@@ -162,6 +180,7 @@ actor GalleryPage {
                 program: t("sketches/gradient"),
             )
             .todo_mount()
+            .event_studio_mount()
             .render_tile(
                 title: t("cga3d"),
                 description: t("sparse Clifford sphere pencil"),

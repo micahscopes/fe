@@ -1,10 +1,10 @@
 {
   "artifacts": {
     "canonical_adapters": [],
-    "wasm": "fe-render-f491a5ce39cb3387.wasm",
-    "wasm_bytes": 7810,
-    "wgsl": "fe-render-a9adf9a867eebb06.wgsl",
-    "wgsl_bytes": 5051
+    "wasm": "fe-render-a1947d2bd2db314e.wasm",
+    "wasm_bytes": 8427,
+    "wgsl": "fe-render-8491a8e7a6d852cd.wgsl",
+    "wgsl_bytes": 8311
   },
   "browser_runtime": null,
   "canonical_interface": null,
@@ -22,31 +22,31 @@
         "members": [
           {
             "arg_index": 2,
-            "doc": null,
-            "name": "angle",
+            "doc": "Pencil parameter: [0, 1] sweeps sphere -> sphere -> radical plane.",
+            "name": "lambda",
             "offset": 0,
             "scalar": "f32",
             "width": 4
           },
           {
             "arg_index": 3,
-            "doc": null,
-            "name": "offset",
+            "doc": "Rotation of the generator axis in the slice plane.",
+            "name": "theta",
             "offset": 4,
             "scalar": "f32",
             "width": 4
           },
           {
             "arg_index": 4,
-            "doc": null,
-            "name": "spread",
+            "doc": "Half-extent of the visible slice in world units.",
+            "name": "zoom",
             "offset": 8,
             "scalar": "f32",
             "width": 4
           },
           {
             "arg_index": 5,
-            "doc": null,
+            "doc": "Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).",
             "name": "res",
             "offset": 12,
             "scalar": "f32",
@@ -96,31 +96,31 @@
             "members": [
               {
                 "arg_index": 2,
-                "doc": null,
-                "name": "angle",
+                "doc": "Pencil parameter: [0, 1] sweeps sphere -> sphere -> radical plane.",
+                "name": "lambda",
                 "offset": 0,
                 "scalar": "f32",
                 "width": 4
               },
               {
                 "arg_index": 3,
-                "doc": null,
-                "name": "offset",
+                "doc": "Rotation of the generator axis in the slice plane.",
+                "name": "theta",
                 "offset": 4,
                 "scalar": "f32",
                 "width": 4
               },
               {
                 "arg_index": 4,
-                "doc": null,
-                "name": "spread",
+                "doc": "Half-extent of the visible slice in world units.",
+                "name": "zoom",
                 "offset": 8,
                 "scalar": "f32",
                 "width": 4
               },
               {
                 "arg_index": 5,
-                "doc": null,
+                "doc": "Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).",
                 "name": "res",
                 "offset": 12,
                 "scalar": "f32",
@@ -159,8 +159,8 @@
           0
         ]
       },
-      "shader": "fe-render-a9adf9a867eebb06.wgsl",
-      "shader_bytes": 5051,
+      "shader": "fe-render-8491a8e7a6d852cd.wgsl",
+      "shader_bytes": 8311,
       "source_entry": "shade"
     }
   ],
@@ -168,6 +168,16 @@
   "protocol_version": 6,
   "provenance": {
     "authored_sources": [
+      {
+        "id": "demos/sketches/cga3d/fe.toml",
+        "kind": "fe_manifest",
+        "sha256": "5f5d5108c1e7b66faea56973dce8975c1c98128b62003ddd4f2184758e6a9bd8"
+      },
+      {
+        "id": "demos/sketches/cga3d/src/lib.fe",
+        "kind": "fe",
+        "sha256": "36487b516864cc409d9cd7d76151e5106afa31da90b1d99a31370c0186c4dbdc"
+      },
       {
         "id": "demos/sketches/fmath/fe.toml",
         "kind": "fe_manifest",
@@ -187,16 +197,6 @@
         "id": "demos/sketches/gallery_palette/src/lib.fe",
         "kind": "fe",
         "sha256": "0cb7e3b8c34d99a6b292ea1015bfe7f4d44ebf56c0adb495f43dd8b115827bd5"
-      },
-      {
-        "id": "demos/sketches/gradient/fe.toml",
-        "kind": "fe_manifest",
-        "sha256": "246e7a1e7a8959897df989f06468424ca4231c158692664e830292457b5566f8"
-      },
-      {
-        "id": "demos/sketches/gradient/src/lib.fe",
-        "kind": "fe",
-        "sha256": "3982b691c9ac66223ccdccac47afb8940bb0a66d60dc2f1b751f620d950c11fd"
       },
       {
         "id": "ingots/core/fe.toml",
@@ -352,6 +352,26 @@
         "id": "ingots/core/src/string.fe",
         "kind": "fe",
         "sha256": "30c74bb93e905658ec71c0ae81f16279cb20b4db446e69149b48418a7f359886"
+      },
+      {
+        "id": "ingots/ga_expr/fe.toml",
+        "kind": "fe_manifest",
+        "sha256": "80259843807c9443a948b142edd6e29fc6cb5d801676e9269a53f12b49293dd9"
+      },
+      {
+        "id": "ingots/ga_expr/src/lib.fe",
+        "kind": "fe",
+        "sha256": "4aac3f0b22a916e8ea75742b6b7f880d40dfca234fec5da8a0ba19f123f27927"
+      },
+      {
+        "id": "ingots/sparse_clifford/fe.toml",
+        "kind": "fe_manifest",
+        "sha256": "86dbfce53a6b656e590a36f9624d2bbfe9222e13299d07cefef340a284a191ed"
+      },
+      {
+        "id": "ingots/sparse_clifford/src/lib.fe",
+        "kind": "fe",
+        "sha256": "bc75b3743ca9c2c373d06253625d4ae97de359c4d039865e30a4776abc7aa18e"
       }
     ],
     "compiler": "fe",
@@ -391,10 +411,10 @@
       {
         "id": "gallery.html",
         "kind": "html",
-        "sha256": "c4aa56a000bbd49b18c39f2bfcba969625a5fb4d692859efb504863aa36a1859"
+        "sha256": "543dd4a51d64bfafba36295de53f3e78b84fe94183c3526b7b8eaa816bdbe520"
       }
     ],
-    "source_id": "gradient"
+    "source_id": "cga3d"
   },
   "resources": [],
   "source_entry": "shade",
@@ -408,27 +428,31 @@
     },
     "params": [
       {
-        "init": 0.55,
+        "doc": "Pencil parameter: [0, 1] sweeps sphere -> sphere -> radical plane.",
+        "init": 0.15,
+        "kind": "unit",
+        "max": 1.0,
+        "min": 0.0,
+        "name": "lambda"
+      },
+      {
+        "doc": "Rotation of the generator axis in the slice plane.",
+        "init": 0.6,
         "kind": "angle",
         "max": 6.2831855,
         "min": 0.0,
-        "name": "angle"
+        "name": "theta"
       },
       {
-        "init": 0.0,
-        "kind": "range",
-        "max": 0.5,
-        "min": -0.5,
-        "name": "offset"
-      },
-      {
-        "init": 1.4,
+        "doc": "Half-extent of the visible slice in world units.",
+        "init": 1.6,
         "kind": "range",
         "max": 4.0,
         "min": 0.5,
-        "name": "spread"
+        "name": "zoom"
       },
       {
+        "doc": "Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).",
         "kind": "extent_x",
         "name": "res",
         "visible": false

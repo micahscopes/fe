@@ -180,9 +180,9 @@
       "name": "module.wasm",
       "kind": "wasm_module",
       "media_type": "application/wasm",
-      "sha256": "a699c1f98427bcfebf93a039799d398f1294326a0c3fb0f6ea59a6d4eaf03196",
-      "byte_len": 105135,
-      "url": "assets/fe-a699c1f98427bcfe.wasm"
+      "sha256": "544ab8a24e30179f442f337843c2a008641b4e40d4a0c11a35c66fbfd0a5eb97",
+      "byte_len": 145344,
+      "url": "assets/fe-544ab8a24e30179f.wasm"
     }
   ]
 }

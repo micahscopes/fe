@@ -1,0 +1,323 @@
+//! Event Studio: a resident Fe component driven by a typed viewport stream.
+//!
+//! The browser owns one standards `resize` listener only while an observation
+//! is pending. The affine subscription owns the previous `Viewport`; this Fe
+//! task owns iteration, quantization, failure policy, actor delivery, state,
+//! and DOM projection. There is no JavaScript application callback or hidden
+//! host-side reactive graph.
+
+use core::actor::{ActorSink, ScopedTask}
+use core::pending::{Suspend, TaskOutcome}
+use std::actor::{ActorMessage, BrowserActorSink}
+use std::reactive::{Event, EventSource, Stream}
+use std::host::Resumable
+use std::wasm::WasmBackend
+use std::web::window_events::{BrowserViewportEvents, Viewport}
+use std::web::component::{
+    BrowserBytes,
+    ComponentEvent,
+    ComponentEventKind,
+    ComponentPatch,
+    ComponentWriter,
+    InitialState,
+    ProjectState,
+    ResidentTransition,
+    allocate_component_buffer,
+}
+use std::web::identity::{
+    ComponentAction,
+    ComponentActionProvider,
+    ComponentSchema,
+    ComponentSchemaProvider,
+    Part,
+    Text,
+}
+use std::web::page::{
+    ComponentComposition,
+    ComponentView,
+    PageAttribute,
+    PageBuilder,
+    PageElement,
+    PageText,
+}
+
+const PATCH_CAPACITY: u32 = 1024
+const VIEW_CAPACITY: usize = 64
+
+extern {
+    fn __i32_from_f32(_: f32) -> i32
+}
+
+const fn ui_text(value: String<31>) -> PageText {
+    PageText::one(value: value)
+}
+
+enum StudioAction {
+    Unknown,
+    WidthObserved,
+    HeightObserved,
+    PixelRatioObserved,
+    ViewportCommitted,
+    ViewportFailed,
+}
+
+impl Copy for StudioAction {}
+
+derive ComponentAction for StudioAction using ComponentActionProvider
+
+struct StudioParts {
+    width: Part<Text>,
+    height: Part<Text>,
+    pixel_ratio: Part<Text>,
+    observations: Part<Text>,
+    failures: Part<Text>,
+}
+
+derive ComponentSchema for StudioParts using ComponentSchemaProvider
+
+pub struct StudioState {
+    pub patch_ptr: u32,
+    pub width: u32,
+    pub height: u32,
+    pub pixel_ratio_percent: u32,
+    pub observations: u32,
+    pub failures: u32,
+    pub connected: bool,
+}
+
+fn bounded_dimension(value: f32) -> u32 {
+    let bounded = if value >= 0.0 && value <= 100000.0 {
+        value
+    } else {
+        100000.0
+    }
+    __i32_from_f32(bounded).downcast_unchecked()
+}
+
+fn bounded_pixel_ratio(value: f32) -> u32 {
+    let percent = value * 100.0
+    let bounded = if percent >= 0.0 && percent <= 10000.0 {
+        percent
+    } else {
+        10000.0
+    }
+    __i32_from_f32(bounded).downcast_unchecked()
+}
+
+fn report(target: StudioAction, detail: u32) -> bool
+uses (
+    sink: mut ActorSink<WasmBackend, ComponentEvent<StudioAction>>,
+    suspend: Suspend<WasmBackend, u32>,
+)
+{
+    let event = ComponentEvent<StudioAction>::task_message(target: target, detail: detail)
+    let outcome: TaskOutcome<u32, ()> = ActorMessage::new(event).send()
+    match outcome {
+        TaskOutcome::Success(_,) => true,
+        TaskOutcome::Failure(_,) => false,
+        TaskOutcome::Cancelled => false,
+    }
+}
+
+fn observe_viewports() -> u32
+uses (
+    viewport_events: mut EventSource<Viewport>,
+    sink: mut ActorSink<WasmBackend, ComponentEvent<StudioAction>>,
+    suspend: Suspend<WasmBackend, u32>,
+)
+{
+    let stream: Stream<Viewport> = Stream::new()
+    let mut subscription = stream.subscribe()
+    let mut observations: u32 = 0
+    let mut running = true
+    while running {
+        let next = stream.next_ready(subscription)
+        subscription = next.0
+        match next.1 {
+            Event::Occurrence(viewport,) => {
+                let delivered = report(
+                        target: StudioAction::WidthObserved,
+                        detail: bounded_dimension(value: viewport.width),
+                    )
+                    && report(
+                        target: StudioAction::HeightObserved,
+                        detail: bounded_dimension(value: viewport.height),
+                    )
+                    && report(
+                        target: StudioAction::PixelRatioObserved,
+                        detail: bounded_pixel_ratio(value: viewport.device_pixel_ratio),
+                    )
+                if delivered {
+                    observations = observations + 1
+                    running = report(
+                        target: StudioAction::ViewportCommitted,
+                        detail: observations,
+                    )
+                } else {
+                    running = false
+                }
+            },
+            Event::Absent => {},
+            Event::End => {
+                running = false
+            },
+            Event::Failure(error,) => {
+                report(target: StudioAction::ViewportFailed, detail: error)
+                running = false
+            },
+            Event::Cancelled => {
+                stream.cancel(subscription)
+                return observations
+            },
+        }
+    }
+    stream.cancel(subscription)
+    observations
+}
+
+actor EventStudio {
+    patch_ptr: u32,
+    width: u32,
+    height: u32,
+    pixel_ratio_percent: u32,
+    observations: u32,
+    failures: u32,
+    connected: bool,
+
+    const fn view() -> ComponentView<VIEW_CAPACITY> uses (ComponentComposition) {
+        let ui = <StudioParts as ComponentSchema>::component_parts()
+        PageBuilder::new()
+            .open(element: PageElement::Section)
+            .attribute(value: PageAttribute::class(value: "event-studio-panel"))
+            .open(element: PageElement::Heading2)
+            .text(value: ui_text(value: "Event Studio"))
+            .close()
+            .open(element: PageElement::Paragraph)
+            .attribute(value: PageAttribute::class(value: "event-studio-copy"))
+            .text(value: ui_text(value: "Resize the viewport: one typed "))
+            .text(value: ui_text(value: "Fe stream owns every update."))
+            .close()
+            .open(element: PageElement::Div)
+            .attribute(value: PageAttribute::class(value: "event-studio-grid"))
+            .open(element: PageElement::Paragraph)
+            .text(value: ui_text(value: "width · "))
+            .open(element: PageElement::Strong)
+            .attribute(value: PageAttribute::node(value: ui.width))
+            .text(value: ui_text(value: "0"))
+            .close()
+            .text(value: ui_text(value: " css px"))
+            .close()
+            .open(element: PageElement::Paragraph)
+            .text(value: ui_text(value: "height · "))
+            .open(element: PageElement::Strong)
+            .attribute(value: PageAttribute::node(value: ui.height))
+            .text(value: ui_text(value: "0"))
+            .close()
+            .text(value: ui_text(value: " css px"))
+            .close()
+            .open(element: PageElement::Paragraph)
+            .text(value: ui_text(value: "dpr × 100 · "))
+            .open(element: PageElement::Strong)
+            .attribute(value: PageAttribute::node(value: ui.pixel_ratio))
+            .text(value: ui_text(value: "0"))
+            .close()
+            .close()
+            .open(element: PageElement::Paragraph)
+            .text(value: ui_text(value: "observations · "))
+            .open(element: PageElement::Strong)
+            .attribute(value: PageAttribute::node(value: ui.observations))
+            .text(value: ui_text(value: "0"))
+            .close()
+            .close()
+            .open(element: PageElement::Paragraph)
+            .text(value: ui_text(value: "failures · "))
+            .open(element: PageElement::Strong)
+            .attribute(value: PageAttribute::node(value: ui.failures))
+            .text(value: ui_text(value: "0"))
+            .close()
+            .close()
+            .close()
+            .close()
+            .finish_component()
+    }
+
+    fn initial() -> StudioState uses (InitialState) {
+        let patch = allocate_component_buffer(capacity: PATCH_CAPACITY)
+        StudioState {
+            patch_ptr: patch.ptr,
+            width: 0,
+            height: 0,
+            pixel_ratio_percent: 0,
+            observations: 0,
+            failures: 0,
+            connected: false,
+        }
+    }
+
+    fn watch_viewport() -> u32 uses (ScopedTask) {
+        with (
+            EventSource<Viewport> = BrowserViewportEvents::new(),
+            ActorSink<WasmBackend, ComponentEvent<StudioAction>> = BrowserActorSink {},
+            Suspend<WasmBackend, u32> = Resumable {},
+        ) {
+            observe_viewports()
+        }
+    }
+
+    fn receive(self, event: own ComponentEvent<StudioAction>) -> StudioState
+        uses (ResidentTransition)
+    {
+        let mut width = self.width
+        let mut height = self.height
+        let mut pixel_ratio_percent = self.pixel_ratio_percent
+        let mut observations = self.observations
+        let mut failures = self.failures
+        let mut connected = self.connected
+        match event.kind {
+            ComponentEventKind::Connected => { connected = true }
+            ComponentEventKind::Disconnected => { connected = false }
+            ComponentEventKind::TaskMessage => {
+                if connected {
+                    match event.target {
+                        StudioAction::WidthObserved => { width = event.detail }
+                        StudioAction::HeightObserved => { height = event.detail }
+                        StudioAction::PixelRatioObserved => {
+                            pixel_ratio_percent = event.detail
+                        }
+                        StudioAction::ViewportCommitted => { observations = observations + 1 }
+                        StudioAction::ViewportFailed => { failures = failures + 1 }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+        StudioState {
+            patch_ptr: self.patch_ptr,
+            width: width,
+            height: height,
+            pixel_ratio_percent: pixel_ratio_percent,
+            observations: observations,
+            failures: failures,
+            connected: connected,
+        }
+    }
+
+    fn project(self) -> ComponentPatch uses (ProjectState) {
+        let ui = <StudioParts as ComponentSchema>::component_parts()
+        let writer = ComponentWriter::new(
+            buffer: BrowserBytes { ptr: self.patch_ptr, len: PATCH_CAPACITY },
+        )
+            .set_u32_text(target: ui.width, value: self.width)
+            .set_u32_text(target: ui.height, value: self.height)
+            .set_u32_text(target: ui.pixel_ratio, value: self.pixel_ratio_percent)
+            .set_u32_text(target: ui.observations, value: self.observations)
+            .set_u32_text(target: ui.failures, value: self.failures)
+        ComponentPatch::new(
+            visible_mask: 0,
+            focus_target: StudioAction::Unknown,
+            prevent_default: false,
+            commands: writer.finish(),
+        )
+    }
+}

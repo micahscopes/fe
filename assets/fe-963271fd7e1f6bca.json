@@ -1,0 +1,146 @@
+{
+  "protocol": {
+    "major": 1,
+    "minor": 1
+  },
+  "compiler": {
+    "name": "fe",
+    "version": "0.1.0",
+    "build": "workspace"
+  },
+  "target": "wasm",
+  "source_set_sha256": "8e4beec9931b44bb04d943dd8b26ba6555eccccd335e4704d8671599cf7c77d0",
+  "source_dependencies": {
+    "version": 1,
+    "root": "file:///workspace/fe-worktrees/mb2/demos/sketches/event_studio/src/lib.fe",
+    "sources": [
+      {
+        "url": "file:///workspace/fe-worktrees/mb2/demos/sketches/event_studio/src/lib.fe",
+        "sha256": "1e042c2e9b682e17dcfd18adf845951545fb63f7990f6f6eaed7e9962c37cc4b"
+      }
+    ]
+  },
+  "entry": "fe_actor_initialize_v1",
+  "interface": {
+    "imports": [
+      {
+        "module": "fe:actor",
+        "name": "send_begin",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "fe:web-window",
+        "name": "viewport_begin",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      }
+    ],
+    "exports": [
+      {
+        "module": "",
+        "name": "__fe_task_resume_watch_viewport_1",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "__fe_task_resume_watch_viewport_2",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "__fe_task_resume_watch_viewport_3",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "__fe_task_resume_watch_viewport_4",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "__fe_task_resume_watch_viewport_5",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "__fe_task_resume_watch_viewport_6",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "__fe_task_start_watch_viewport",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "fe_actor_initialize_v1",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "fe_actor_project_v1",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "fe_actor_state_replace_v1",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "fe_actor_transition_v1",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "fe_cabi_alloc",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "fe_cabi_reset",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      }
+    ],
+    "resources": []
+  },
+  "artifacts": [
+    {
+      "name": "module.wasm",
+      "kind": "wasm_module",
+      "media_type": "application/wasm",
+      "sha256": "002267cbdce647cef8e9612d1f2f03250ac4f6af752397e497a6e20e1e38e52b",
+      "byte_len": 83133,
+      "url": "assets/fe-002267cbdce647ce.wasm"
+    }
+  ]
+}

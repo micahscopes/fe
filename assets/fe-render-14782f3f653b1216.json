@@ -1,10 +1,10 @@
 {
   "artifacts": {
     "canonical_adapters": [],
-    "wasm": "fe-render-f6a11bb4f6956896.wasm",
-    "wasm_bytes": 7844,
-    "wgsl": "fe-render-cd19975c11152900.wgsl",
-    "wgsl_bytes": 5585
+    "wasm": "fe-render-f4f3af578b2b3e61.wasm",
+    "wasm_bytes": 12402,
+    "wgsl": "fe-render-eaab2bb29c706701.wgsl",
+    "wgsl_bytes": 83496
   },
   "browser_runtime": null,
   "canonical_interface": null,
@@ -22,8 +22,8 @@
         "members": [
           {
             "arg_index": 2,
-            "doc": "Advances the animation; `zoom` and `warp` are exposed for the page.",
-            "name": "time",
+            "doc": null,
+            "name": "yaw",
             "offset": 0,
             "scalar": "f32",
             "width": 4
@@ -31,7 +31,7 @@
           {
             "arg_index": 3,
             "doc": null,
-            "name": "zoom",
+            "name": "pitch",
             "offset": 4,
             "scalar": "f32",
             "width": 4
@@ -39,24 +39,32 @@
           {
             "arg_index": 4,
             "doc": null,
-            "name": "warp",
+            "name": "distance",
             "offset": 8,
             "scalar": "f32",
             "width": 4
           },
           {
             "arg_index": 5,
-            "doc": "Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).",
-            "name": "res",
+            "doc": null,
+            "name": "morph",
             "offset": 12,
+            "scalar": "f32",
+            "width": 4
+          },
+          {
+            "arg_index": 6,
+            "doc": null,
+            "name": "res",
+            "offset": 16,
             "scalar": "f32",
             "width": 4
           }
         ],
         "name": "input",
         "role": "input",
-        "span": 16,
-        "stride": 16
+        "span": 20,
+        "stride": 20
       }
     ],
     "builtin_inputs": [
@@ -96,8 +104,8 @@
             "members": [
               {
                 "arg_index": 2,
-                "doc": "Advances the animation; `zoom` and `warp` are exposed for the page.",
-                "name": "time",
+                "doc": null,
+                "name": "yaw",
                 "offset": 0,
                 "scalar": "f32",
                 "width": 4
@@ -105,7 +113,7 @@
               {
                 "arg_index": 3,
                 "doc": null,
-                "name": "zoom",
+                "name": "pitch",
                 "offset": 4,
                 "scalar": "f32",
                 "width": 4
@@ -113,24 +121,32 @@
               {
                 "arg_index": 4,
                 "doc": null,
-                "name": "warp",
+                "name": "distance",
                 "offset": 8,
                 "scalar": "f32",
                 "width": 4
               },
               {
                 "arg_index": 5,
-                "doc": "Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).",
-                "name": "res",
+                "doc": null,
+                "name": "morph",
                 "offset": 12,
+                "scalar": "f32",
+                "width": 4
+              },
+              {
+                "arg_index": 6,
+                "doc": null,
+                "name": "res",
+                "offset": 16,
                 "scalar": "f32",
                 "width": 4
               }
             ],
             "name": "input",
             "role": "input",
-            "span": 16,
-            "stride": 16
+            "span": 20,
+            "stride": 20
           }
         ],
         "builtin_inputs": [
@@ -159,9 +175,9 @@
           0
         ]
       },
-      "shader": "fe-render-cd19975c11152900.wgsl",
-      "shader_bytes": 5585,
-      "source_entry": "plasma"
+      "shader": "fe-render-eaab2bb29c706701.wgsl",
+      "shader_bytes": 83496,
+      "source_entry": "render"
     }
   ],
   "protocol": "fe-web-bundle",
@@ -179,14 +195,14 @@
         "sha256": "f1338c9967680a58a91b9c1b0ae3da9480f1896ba433499cbf09974917d3059f"
       },
       {
-        "id": "plasma/fe.toml",
+        "id": "raymarch/fe.toml",
         "kind": "fe_manifest",
-        "sha256": "22aa43476bed75e280ec9ae457cc95277b50559e656f090520ee682527c74554"
+        "sha256": "2e11d5580b4b60e17d917b30b28c0f2190499008cb1f471744bae0dd5b238748"
       },
       {
-        "id": "plasma/src/lib.fe",
+        "id": "raymarch/src/lib.fe",
         "kind": "fe",
-        "sha256": "d90eefb547604c32e1c991993fa28ebfa180efd9b21f95e57b973fdb53b117f6"
+        "sha256": "e1e61e78d8720723ed1d82b7e29885129f818b1f68151e8464e6070862a593c8"
       }
     ],
     "compiler": "fe",
@@ -226,13 +242,13 @@
       {
         "id": "gallery.html",
         "kind": "html",
-        "sha256": "c4aa56a000bbd49b18c39f2bfcba969625a5fb4d692859efb504863aa36a1859"
+        "sha256": "543dd4a51d64bfafba36295de53f3e78b84fe94183c3526b7b8eaa816bdbe520"
       }
     ],
-    "source_id": "plasma"
+    "source_id": "raymarch"
   },
   "resources": [],
-  "source_entry": "plasma",
+  "source_entry": "render",
   "surface": {
     "activate": "pointer",
     "extent": {
@@ -243,29 +259,34 @@
     },
     "params": [
       {
-        "doc": "Advances the animation; `zoom` and `warp` are exposed for the page.",
-        "init": 0.0,
-        "kind": "range",
-        "max": 20.0,
+        "init": 0.72,
+        "kind": "angle",
+        "max": 6.2831855,
         "min": 0.0,
-        "name": "time"
+        "name": "yaw"
       },
       {
-        "init": 3.0,
+        "init": 0.28,
+        "kind": "range",
+        "max": 1.05,
+        "min": -1.05,
+        "name": "pitch"
+      },
+      {
+        "init": 4.6,
         "kind": "range",
         "max": 8.0,
-        "min": 1.0,
-        "name": "zoom"
+        "min": 2.8,
+        "name": "distance"
       },
       {
-        "init": 0.8,
-        "kind": "range",
-        "max": 2.0,
+        "init": 0.58,
+        "kind": "unit",
+        "max": 1.0,
         "min": 0.0,
-        "name": "warp"
+        "name": "morph"
       },
       {
-        "doc": "Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).",
         "kind": "extent_x",
         "name": "res",
         "visible": false
