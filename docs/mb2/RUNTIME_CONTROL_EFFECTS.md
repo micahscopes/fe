@@ -217,7 +217,9 @@ manifest-driven.
    uses it to pace poster loads across frames and owns the fail-open policy;
    the host no longer invents a delay or sequencing rule. Pointer, wheel,
    resize, device-loss, and MessagePort handlers—and the resident outer gallery
-   actor that combines all of them—remain.
+   actor that combines all of them—remain. `Stream<T>::next_ready` is the first
+   shared consumer combinator extracted from these handlers: it skips pure
+   absence while preserving the sole affine successor and every terminal case.
 6. [todo] Move Worker admission, cancellation, restart/backoff, and supervision policy
    from handwritten JavaScript into Fe handlers and structured scopes.
 7. [todo] Route WebGPU completion, device loss/recovery, and resource lifetime through

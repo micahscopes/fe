@@ -42,6 +42,31 @@ struct CounterSource {
     next_value: u32,
 }
 
+struct SparseSource {}
+impl Copy for SparseSource {}
+
+impl EventSource<u32> for SparseSource {
+    fn subscribe(mut self) -> Subscription<u32> {
+        Subscription::new()
+    }
+
+    fn next(mut self, _ subscription: own Subscription<u32>) -> (Subscription<u32>, Event<u32>) {
+        let advanced = subscription.advance()
+        let event = if advanced.1 == 0 {
+            Event::absent()
+        } else if advanced.1 == 1 {
+            Event::occurrence(value: 73)
+        } else {
+            Event::end()
+        }
+        (advanced.0, event)
+    }
+
+    fn cancel(mut self, _ subscription: own Subscription<u32>) -> Cancelled {
+        Cancelled { consumed: subscription.cursor() }
+    }
+}
+
 impl EventSource<u32> for CounterSource {
     fn subscribe(mut self) -> Subscription<u32> {
         Subscription::new()
@@ -149,4 +174,19 @@ fn absence_survives_map_filter_and_hold() {
     let selected = filter_event(absent, AtLeastFour {})
     assert(!selected.is_occurrence())
     assert(hold(Stepped { held: 9 }, selected).held == 9)
+}
+
+#[test]
+fn next_ready_skips_absence_and_preserves_terminal_state() {
+    let stream: Stream<u32> = Stream::new()
+    with (EventSource<u32> = SparseSource {}) {
+        let first = stream.next_ready(stream.subscribe())
+        assert(first.1.value_or(fallback: 0) == 73)
+        let terminal = stream.next_ready(first.0)
+        match terminal.1 {
+            Event::End => {}
+            _ => { assert(false) }
+        }
+        assert(stream.cancel(terminal.0).consumed == 3)
+    }
 }

@@ -180,7 +180,7 @@ fn await_document_visible() -> bool
     let mut ready = false
     let mut running = true
     while running {
-        let next = stream.next(subscription)
+        let next = stream.next_ready(subscription)
         subscription = next.0
         match next.1 {
             Event::Occurrence(state) => {
@@ -242,7 +242,7 @@ fn activate_gallery_surfaces() -> u32
     let mut loaded: u32 = 0
     let mut running: bool = true
     while running {
-        let next = stream.next(subscription)
+        let next = stream.next_ready(subscription)
         subscription = next.0
         match next.1 {
             Event::Occurrence(surface) => {
@@ -265,26 +265,17 @@ fn activate_gallery_surfaces() -> u32
                     }
                 }
                 if pace_with_frames {
-                    let mut waiting_for_frame = true
-                    while waiting_for_frame {
-                        let frame = frame_stream.next(frame_subscription)
-                        frame_subscription = frame.0
-                        match frame.1 {
-                            Event::Occurrence(_) => { waiting_for_frame = false }
-                            Event::Absent => {}
-                            Event::End => {
-                                pace_with_frames = false
-                                waiting_for_frame = false
-                            }
-                            Event::Failure(_) => {
-                                pace_with_frames = false
-                                waiting_for_frame = false
-                            }
-                            Event::Cancelled => {
-                                stream.cancel(subscription)
-                                frame_stream.cancel(frame_subscription)
-                                return loaded
-                            }
+                    let frame = frame_stream.next_ready(frame_subscription)
+                    frame_subscription = frame.0
+                    match frame.1 {
+                        Event::Occurrence(_) => {}
+                        Event::Absent => {}
+                        Event::End => { pace_with_frames = false }
+                        Event::Failure(_) => { pace_with_frames = false }
+                        Event::Cancelled => {
+                            stream.cancel(subscription)
+                            frame_stream.cancel(frame_subscription)
+                            return loaded
                         }
                     }
                 }

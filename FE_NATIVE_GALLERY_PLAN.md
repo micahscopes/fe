@@ -1103,6 +1103,14 @@ Origin: honesty audit of Claude Code session
   verifies 14 Fe modules / 73 deployment files, and passes the real Chromium
   gallery/SourceInspector tape; standalone TodoMVC again verifies one module /
   three files and passes its Chromium tape.
+- The three real browser sources also paid back their first reusable reactive
+  ergonomic. `Stream<T>::next_ready` consumes an affine subscription through
+  any number of `Absent` polls and returns the sole successor with either an
+  occurrence or the exact end/failure/cancellation observation. SourceInspector
+  now uses that one combinator for surface, visibility, and frame streams rather
+  than spelling three polling loops. A pure Fe `SparseSource` tape proves an
+  absence followed by an occurrence and then exhaustion, including the final
+  consumed cursor; the browser sequencing oracle remains unchanged.
 
 This ledger records achieved evidence, not a relaxation of the phases or the
 Definition of done below.

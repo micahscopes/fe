@@ -236,6 +236,45 @@ impl<T> Stream<T> {
         next_event(subscription)
     }
 
+    /// Consume source positions until an occurrence or terminal observation is
+    /// ready. Sources may use `Absent` for a synchronous empty poll; consumers
+    /// that need a value-or-terminal boundary should not each reimplement this
+    /// affine forwarding loop.
+    pub fn next_ready(
+        self,
+        _ subscription: own Subscription<T>,
+    ) -> (Subscription<T>, Event<T>)
+        uses (source: mut EventSource<T>)
+    {
+        let mut current = subscription
+        let mut ready: Event<T> = Event::absent()
+        let mut waiting = true
+        while waiting {
+            let next = next_event(current)
+            current = next.0
+            match next.1 {
+                Event::Occurrence(value) => {
+                    ready = Event::occurrence(value: value)
+                    waiting = false
+                }
+                Event::Absent => {}
+                Event::End => {
+                    ready = Event::end()
+                    waiting = false
+                }
+                Event::Failure(error) => {
+                    ready = Event::failure(error: error)
+                    waiting = false
+                }
+                Event::Cancelled => {
+                    ready = Event::cancelled()
+                    waiting = false
+                }
+            }
+        }
+        (current, ready)
+    }
+
     pub fn cancel(self, _ subscription: own Subscription<T>) -> Cancelled
         uses (source: mut EventSource<T>)
     {
