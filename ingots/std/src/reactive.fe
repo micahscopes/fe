@@ -157,6 +157,14 @@ impl<T> Subscription<T> {
         self.cursor
     }
 
+    /// Consume this token while replacing its source-defined position. This
+    /// preserves affine ownership while allowing a state-shaped source to keep
+    /// one compact observation marker per subscription instead of hiding it in
+    /// a shared handler or host-side subscription graph.
+    pub fn with_cursor(own self, _ cursor: u32) -> Self {
+        Self { cursor: cursor }
+    }
+
     /// Consume this position and return `(successor, old_cursor)`.
     pub fn advance(own self) -> (Self, u32) {
         (Self { cursor: self.cursor + 1 }, self.cursor)

@@ -1066,6 +1066,26 @@ Origin: honesty audit of Claude Code session
   surface sequence settling in order. The independently precompiled TodoMVC
   publication verifies one Fe module / three files and passes its complete
   Chromium behavior, keyed-identity, focus, UTF-8, and lifecycle tape.
+- Document visibility is the second browser `EventSource` and the first one
+  carrying a standards lifecycle value rather than a compiler declaration.
+  `BrowserVisibilityEvents : EventSource<DocumentVisibility>` reports an
+  initial typed `Visible | Hidden` observation and then waits for a distinct
+  state. The affine `Subscription<DocumentVisibility>` owns its last
+  observation cursor, so neither a mutable provider reference nor a permanent
+  JavaScript subscription enters the suspended frame. The fixed adapter closes
+  the check-to-listen race and realizes one abortable `visibilitychange`
+  listener; it cannot decide whether hidden work proceeds. SourceInspector's
+  scoped Fe task now waits while hidden, fails open if visibility observation
+  itself fails, and only then begins the surface stream. Its generated-adapter
+  gate supplies `Hidden` followed by `Visible` and rejects any surface pull
+  before the Fe loop observes the latter. Separate fixed-host and standards-
+  adapter tapes cover typed state retention, between-pull change detection,
+  invalid states, cancellation, and exact listener cleanup. Pointer, wheel,
+  resize, animation-frame, device-loss, and MessagePort handlers remain. A
+  fresh optimized publication compiles all twelve render bundles and verifies
+  14 Fe modules / 73 deployment files; its real Chromium gallery/SourceInspector
+  tape passes. The independently rebuilt TodoMVC publication again verifies one
+  module / three files and passes its complete Chromium behavior tape.
 
 This ledger records achieved evidence, not a relaxation of the phases or the
 Definition of done below.

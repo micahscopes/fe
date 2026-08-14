@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   bootFeArtifacts,
+  createDocumentEventSource,
   decodeComponentCommands,
   FeComponentElement,
   registerFeImportProvider,
@@ -34,6 +35,31 @@ async function digest(bytes) {
   const value = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
   return Array.from(value, byte => byte.toString(16).padStart(2, "0")).join("");
 }
+
+test("document visibility adapter reports state changes without a permanent listener", async () => {
+  const documentTarget = new EventTarget();
+  documentTarget.visibilityState = "hidden";
+  const source = createDocumentEventSource(documentTarget);
+
+  assert.equal(await source.visibility(false, false), 1);
+
+  const visible = source.visibility(true, true);
+  documentTarget.visibilityState = "visible";
+  documentTarget.dispatchEvent(new Event("visibilitychange"));
+  assert.equal(await visible, 0);
+
+  // A change between Fe pulls is observed synchronously from current state.
+  documentTarget.visibilityState = "hidden";
+  assert.equal(await source.visibility(true, false), 1);
+
+  const controller = new AbortController();
+  const cancelled = source.visibility(true, true, controller.signal);
+  controller.abort();
+  await assert.rejects(cancelled, error => error.name === "AbortError");
+
+  documentTarget.visibilityState = "prerender";
+  assert.throws(() => source.visibility(false, false), /unsupported Document\.visibilityState/);
+});
 
 function installFetch(bytes) {
   return async url => String(url).endsWith(".json")

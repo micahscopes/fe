@@ -1,0 +1,19 @@
+//! Private standards import for document visibility observations.
+//!
+//! The fixed browser adapter receives only whether Fe has observed a value and
+//! Fe's boolean projection of whether that value was `Hidden`. It reports the
+//! current state immediately when it changed, otherwise it waits for
+//! `visibilitychange`. Pause/retry/load policy remains entirely in the
+//! consuming Fe task.
+
+use core::pending::Pending
+use ingot::wasm::WasmBackend
+use super::DocumentVisibility
+
+#[wasm_import(module = "fe:web-document")]
+extern {
+    pub unsafe fn visibility_begin(
+        _ seen: bool,
+        _ previous_hidden: bool,
+    ) -> Pending<WasmBackend, DocumentVisibility>
+}

@@ -1,0 +1,82 @@
+//! Typed document-level browser events over the canonical reactive/effect rail.
+//!
+//! Visibility is state-shaped: the first pull reports the current standard
+//! `Document.visibilityState`, while later pulls wait until it differs from the
+//! last value Fe observed. Fe projects that typed state to one private
+//! `previous_hidden` boundary fact, so a change between pulls is not lost and
+//! JavaScript retains no application subscription graph or policy.
+
+use core::pending::{Suspend, TaskOutcome}
+use ingot::wasm::WasmBackend
+use super::super::host::Resumable
+use super::super::reactive::{Cancelled, Event, EventSource, Subscription}
+use raw::visibility_begin as raw_visibility_begin
+
+const UNOBSERVED_CURSOR: u32 = 0
+const VISIBLE_CURSOR: u32 = 1
+const HIDDEN_CURSOR: u32 = 2
+
+/// The complete standards visibility state used by the browser adapter.
+pub enum DocumentVisibility {
+    Visible,
+    Hidden,
+}
+
+impl Copy for DocumentVisibility {}
+
+/// Browser interpreter for document visibility observations.
+///
+/// The affine `Subscription` owns the last observed state; the handler itself
+/// is zero-sized and retains no hidden shared source state. It is not a
+/// scheduler: the consumer decides whether hidden work is paused, cancelled,
+/// retried, or ignored.
+pub struct BrowserVisibilityEvents {}
+
+impl BrowserVisibilityEvents {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+impl EventSource<DocumentVisibility> for BrowserVisibilityEvents {
+    fn subscribe(mut self) -> Subscription<DocumentVisibility> {
+        Subscription::new()
+    }
+
+    fn next(
+        mut self,
+        _ subscription: own Subscription<DocumentVisibility>,
+    ) -> (Subscription<DocumentVisibility>, Event<DocumentVisibility>) {
+        // The source's private cursor states never escape as observations;
+        // authored consumers see only the typed `DocumentVisibility` value.
+        let cursor = subscription.cursor()
+        let successor = subscription.advance().0
+        let seen = cursor != UNOBSERVED_CURSOR
+        let previous_hidden = cursor == HIDDEN_CURSOR
+        let outcome: TaskOutcome<u32, DocumentVisibility> =
+            <Resumable as Suspend<WasmBackend, u32>>::suspend(
+                Resumable {}, raw_visibility_begin(seen, previous_hidden),
+            )
+        match outcome {
+            TaskOutcome::Success(visibility) => {
+                let next_cursor = match visibility {
+                    DocumentVisibility::Visible => VISIBLE_CURSOR
+                    DocumentVisibility::Hidden => HIDDEN_CURSOR
+                }
+                (
+                    successor.with_cursor(cursor: next_cursor),
+                    Event::occurrence(value: visibility),
+                )
+            }
+            TaskOutcome::Failure(error) => (successor, Event::failure(error: error))
+            TaskOutcome::Cancelled => (successor, Event::cancelled())
+        }
+    }
+
+    fn cancel(
+        mut self,
+        _ subscription: own Subscription<DocumentVisibility>,
+    ) -> Cancelled {
+        Cancelled { consumed: subscription.cursor() }
+    }
+}

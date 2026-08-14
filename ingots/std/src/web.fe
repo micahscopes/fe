@@ -12,12 +12,16 @@
 //! session can establish token provenance. Values returned by a safe operation
 //! are provenance-preserving wrappers.
 //!
-//! Owned strings, string results, callbacks, events, promises, and asynchronous
-//! operations are not exposed here. Adding a method for any of those shapes
-//! before the canonical allocator/callback ownership protocols execute would be
-//! unsound; generation or facade review must fail closed instead.
+//! Owned strings and unrestricted callbacks/promises are not exposed here.
+//! The narrow asynchronous operations in `document_events` and `surface_task`
+//! are interpreted through the canonical affine runtime-control rail: authored
+//! Fe sees typed `EventSource<T>`/`Pending<B, T>` values, while the fixed host
+//! realizes only the corresponding standards operation. Adding any broader
+//! shape before its ownership protocol executes remains unsound and must fail
+//! closed.
 
 pub use component::{self, *}
+pub use document_events::{self, *}
 pub use page::{self, *}
 pub use surface_task::{self, *}
 pub use view::{self, *}

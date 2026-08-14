@@ -207,9 +207,14 @@ manifest-driven.
    and cancellation; the fixed host still only observes declarations and
    realizes poster loads. This required a general instance-aware runtime-MIR
    fix for generic effect bindings, pinned by executable generic Wasm and
-   mutable Fe handler tapes. Pointer, wheel, resize, animation-frame,
-   visibility, device-loss, and MessagePort handlers—and the resident outer
-   gallery actor that combines them—remain.
+   mutable Fe handler tapes. `BrowserVisibilityEvents` is now a second concrete
+   handler. Its affine subscription owns the last typed document visibility;
+   the fixed standards adapter reports the initial state or waits with one
+   abortable listener for a distinct state. SourceInspector's Fe task pauses
+   poster activation while hidden and owns the fail-open/cancellation policy.
+   Pointer, wheel, resize, animation-frame, device-loss, and MessagePort
+   handlers—and the resident outer gallery actor that combines all of them—
+   remain.
 6. [todo] Move Worker admission, cancellation, restart/backoff, and supervision policy
    from handwritten JavaScript into Fe handlers and structured scopes.
 7. [todo] Route WebGPU completion, device loss/recovery, and resource lifetime through

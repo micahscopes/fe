@@ -220,8 +220,10 @@ fn source_inspector_owns_selection_loading_stale_response_and_presentation_polic
         .expect("SourceInspector authored Fe source");
     assert!(
         source.contains("Stream<SurfaceToken>")
-            && source.contains("EventSource<SurfaceToken> = BrowserSurfaceEvents {}"),
-        "sequential gallery loading must consume the standard typed Fe reactive surface"
+            && source.contains("EventSource<SurfaceToken> = BrowserSurfaceEvents {}")
+            && source.contains("Stream<DocumentVisibility>")
+            && source.contains("EventSource<DocumentVisibility> = BrowserVisibilityEvents::new()"),
+        "gallery loading must consume typed Fe surface and visibility streams"
     );
     assert!(
         !source.contains("loader.next_begin"),
@@ -280,10 +282,20 @@ import {{ createMaterializedTaskRegistry }} from {adapter_url:?};
 import {{ createHostCompletionBroker }} from {host_runtime_url:?};
 const tokens = [11n, 22n, 0n];
 const loads = [];
+const visibilityCalls = [];
+const visibilityStates = [1, 0];
 const broker = createHostCompletionBroker({{
+  documentEvents: {{
+    visibility: async (seen, previousHidden, signal) => {{
+      if (signal.aborted) throw new DOMException("cancelled", "AbortError");
+      visibilityCalls.push([seen, previousHidden]);
+      return visibilityStates.shift();
+    }},
+  }},
   surface: {{
     next: async signal => {{
       if (signal.aborted) throw new DOMException("cancelled", "AbortError");
+      if (visibilityStates.length !== 0) throw new Error("surface pull began while hidden");
       return tokens.shift();
     }},
     load: async (token, signal) => {{
@@ -300,6 +312,10 @@ const tasks = createMaterializedTaskRegistry(instance.exports);
 if (Object.keys(tasks).join() !== "activate_surfaces") throw new Error("task registry drift");
 const output = await broker.run(tasks.activate_surfaces, []);
 if (output.length !== 1 || output[0] !== 2) throw new Error(`Fe surface policy returned ${{output}}`);
+if (visibilityCalls.length !== 2 || visibilityCalls[0][0] !== false || visibilityCalls[0][1] !== false
+    || visibilityCalls[1][0] !== true || visibilityCalls[1][1] !== true) {{
+  throw new Error("Fe did not retain typed visibility state while gating surface work");
+}}
 if (loads.length !== 2 || loads[0] !== 11n || loads[1] !== 22n) throw new Error("host reordered surface tokens");
 if (tokens.length !== 0) throw new Error("Fe did not pull the end sentinel");
 if (broker.activeCount() !== 0 || broker.cancelAll() !== 0) throw new Error("surface task leaked pending work");
@@ -331,6 +347,13 @@ if (broker.activeCount() !== 0 || broker.cancelAll() !== 0) throw new Error("sur
         .unwrap();
     linker
         .func_wrap("fe:web-surface", "load_begin", |_surface: i64| -> i32 { 0 })
+        .unwrap();
+    linker
+        .func_wrap(
+            "fe:web-document",
+            "visibility_begin",
+            |_seen: i32, _previous: i32| -> i32 { 0 },
+        )
         .unwrap();
     linker
         .func_wrap("fe:host", "sleep_begin", |_delay: i64| -> i32 { 0 })

@@ -33,6 +33,70 @@ async function importsFor(context, additions) {
   return imports;
 }
 
+function documentVisibilityTag(documentTarget) {
+  if (documentTarget.visibilityState === "visible") return 0;
+  if (documentTarget.visibilityState === "hidden") return 1;
+  throw new RangeError(
+    `unsupported Document.visibilityState ${String(documentTarget.visibilityState)}`,
+  );
+}
+
+/**
+ * Fixed standards adapter for Fe's typed document visibility EventSource.
+ * The first pull returns the current state. A later pull returns immediately
+ * when the state changed between Fe continuations, otherwise it owns exactly
+ * one abortable `visibilitychange` listener until a distinct state arrives.
+ */
+export function createDocumentEventSource(documentTarget = globalThis.document) {
+  if (!documentTarget || typeof documentTarget !== "object"
+      || typeof documentTarget.addEventListener !== "function"
+      || typeof documentTarget.removeEventListener !== "function") {
+    throw new TypeError("document event source requires a Document-like EventTarget");
+  }
+  return Object.freeze({
+    visibility(seen, previousHidden, signal) {
+      if (typeof seen !== "boolean" || typeof previousHidden !== "boolean") {
+        throw new TypeError("document visibility observation has invalid typed state");
+      }
+      const current = documentVisibilityTag(documentTarget);
+      const previous = previousHidden ? 1 : 0;
+      if (!seen || current !== previous) return current;
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        const cleanup = () => {
+          documentTarget.removeEventListener("visibilitychange", onChange);
+          signal?.removeEventListener("abort", onAbort);
+        };
+        const finish = (complete, value) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          complete(value);
+        };
+        const onChange = () => {
+          const next = documentVisibilityTag(documentTarget);
+          if (next !== previous) finish(resolve, next);
+        };
+        const onAbort = () => {
+          const error = new Error("document visibility observation was cancelled");
+          error.name = "AbortError";
+          finish(reject, error);
+        };
+        documentTarget.addEventListener("visibilitychange", onChange);
+        signal?.addEventListener("abort", onAbort, { once: true });
+        if (signal?.aborted) {
+          onAbort();
+          return;
+        }
+        // Close the check-to-listen race without retaining a permanent host
+        // subscription. Visibility is state-shaped, so the latest distinct
+        // value is the complete standards fact Fe needs.
+        onChange();
+      });
+    },
+  });
+}
+
 async function sha256Hex(bytes) {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
   return Array.from(digest, byte => byte.toString(16).padStart(2, "0")).join("");
@@ -1043,8 +1107,12 @@ async function run(element) {
         const needsSurfaceCapability = WebAssembly.Module.imports(module).some(
           value => value.module === "fe:web-surface",
         );
-        const brokerOptions = needsSurfaceCapability ? {
-          surface: {
+        const needsDocumentCapability = WebAssembly.Module.imports(module).some(
+          value => value.module === "fe:web-document",
+        );
+        const brokerOptions = {};
+        if (needsSurfaceCapability) {
+          brokerOptions.surface = {
             next: signal => {
               if (!surfaceScope.component) {
                 throw new Error("surface task started before its Fe component was attached");
@@ -1057,8 +1125,11 @@ async function run(element) {
               }
               return surfaceScope.component._loadSurfaceTask(token, signal);
             },
-          },
-        } : {};
+          };
+        }
+        if (needsDocumentCapability) {
+          brokerOptions.documentEvents = createDocumentEventSource(document);
+        }
         scopedTasks = {
           taskModule,
           broker: taskModule.createHostCompletionBroker(brokerOptions),

@@ -7,6 +7,7 @@ const u64 = Object.freeze({ kind: "unsigned", bits: 64 });
 const state = Object.freeze({ kind: "enum_tag", bits: 8, variants: 2 });
 const outcome = Object.freeze({ kind: "enum_tag", bits: 8, variants: 3 });
 const race = Object.freeze({ kind: "enum_tag", bits: 8, variants: 2 });
+const visibility = Object.freeze({ kind: "enum_tag", bits: 8, variants: 2 });
 
 function machine(start, cancelled = 77n, failed = 88n, onCancel = () => {}) {
   return createMaterializedTaskMachine({
@@ -69,6 +70,34 @@ function raceMachine(broker, delay) {
   });
 }
 
+function visibilityMachine(start, onCancel = () => {}) {
+  return createMaterializedTaskMachine({
+    input: [],
+    step: [state, u32, u32],
+    complete: { start: 1, count: 1 },
+    start,
+    continuations: [{
+      state: 1,
+      range: { start: 2, count: 1 },
+      pending: { start: 2, count: 1 },
+      frame: { start: 3, count: 0 },
+      delivery: {
+        lanes: [outcome, u32, visibility],
+        failure: { start: 1, count: 1 },
+        success: { start: 2, count: 1 },
+      },
+      invoke(tag, error, value) {
+        if (tag === 0) return [0, 100 + error, 0];
+        if (tag === 2) {
+          onCancel();
+          return [0, 200, 0];
+        }
+        return [0, value, 0];
+      },
+    }],
+  });
+}
+
 describe("browser HostTimer/Recv completion broker", () => {
   test("typed surface hooks resume Fe with opaque u64 results and failures", async () => {
     const seen = [];
@@ -126,6 +155,58 @@ describe("browser HostTimer/Recv completion broker", () => {
     controller.abort();
     await expect(result).rejects.toBeInstanceOf(Error);
     expect(aborts).toBe(1);
+    expect(broker.activeCount()).toBe(0);
+  });
+
+  test("typed document visibility resumes Fe and preserves observation state", async () => {
+    let current = 0;
+    const calls = [];
+    const broker = createHostCompletionBroker({
+      documentEvents: {
+        visibility: async (seen, previousHidden, signal) => {
+          expect(signal.aborted).toBeFalse();
+          calls.push([seen, previousHidden]);
+          return current;
+        },
+      },
+    });
+    const initial = visibilityMachine(() => [
+      1, 0, broker.imports["fe:web-document"].visibility_begin(0, 0) >>> 0,
+    ]);
+    expect(await broker.run(initial, [])).toEqual([0]);
+
+    current = 1;
+    const changed = visibilityMachine(() => [
+      1, 0, broker.imports["fe:web-document"].visibility_begin(1, 0) >>> 0,
+    ]);
+    expect(await broker.run(changed, [])).toEqual([1]);
+    expect(calls).toEqual([[false, false], [true, false]]);
+    expect(broker.activeCount()).toBe(0);
+  });
+
+  test("document visibility cancellation aborts observation exactly once", async () => {
+    let hostAborts = 0;
+    let feCancellations = 0;
+    const broker = createHostCompletionBroker({
+      documentEvents: {
+        visibility: (_seen, _previous, signal) => new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => {
+            hostAborts += 1;
+            reject(new DOMException("cancelled", "AbortError"));
+          }, { once: true });
+        }),
+      },
+    });
+    const waiting = visibilityMachine(() => [
+      1, 0, broker.imports["fe:web-document"].visibility_begin(1, 0) >>> 0,
+    ], () => { feCancellations += 1; });
+    const controller = new AbortController();
+    const result = broker.run(waiting, [], { signal: controller.signal });
+    await Promise.resolve();
+    controller.abort();
+    await expect(result).rejects.toBeInstanceOf(Error);
+    expect(hostAborts).toBe(1);
+    expect(feCancellations).toBe(1);
     expect(broker.activeCount()).toBe(0);
   });
 

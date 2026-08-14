@@ -16,7 +16,10 @@ use core::pending::{Race, RaceOutcome, Suspend, TaskOutcome, Timer}
 use std::reactive::{Event, EventSource, Stream}
 use std::host::{HostTimer, Resumable}
 use std::wasm::WasmBackend
-use std::web::{BrowserSurfaceEvents, BrowserSurfaceLoader, SurfaceLoader, SurfaceToken}
+use std::web::{
+    BrowserSurfaceEvents, BrowserSurfaceLoader, BrowserVisibilityEvents,
+    DocumentVisibility, SurfaceLoader, SurfaceToken,
+}
 use std::web::page::{
     ComponentComposition, ComponentView, PageAttribute, PageBuilder, PageElement, PageText,
 }
@@ -166,6 +169,50 @@ fn is_success(status: u32) -> bool {
     status >= 200 && status < 300
 }
 
+/// Do not begin expensive gallery poster work while the document is hidden.
+/// The fixed adapter supplies only the standards visibility observation; this
+/// loop owns the pause, failure, exhaustion, and cancellation decisions in Fe.
+fn await_document_visible() -> bool
+    uses (visibility: mut EventSource<DocumentVisibility>)
+{
+    let stream: Stream<DocumentVisibility> = Stream::new()
+    let mut subscription = stream.subscribe()
+    let mut ready = false
+    let mut running = true
+    while running {
+        let next = stream.next(subscription)
+        subscription = next.0
+        match next.1 {
+            Event::Occurrence(state) => {
+                match state {
+                    DocumentVisibility::Visible => {
+                        ready = true
+                        running = false
+                    }
+                    DocumentVisibility::Hidden => {}
+                }
+            }
+            Event::Absent => {}
+            // Visibility is an optimization boundary. If observation becomes
+            // unavailable, fail open instead of preventing gallery progress.
+            Event::End => {
+                ready = true
+                running = false
+            }
+            Event::Failure(_) => {
+                ready = true
+                running = false
+            }
+            Event::Cancelled => {
+                stream.cancel(subscription)
+                return false
+            }
+        }
+    }
+    stream.cancel(subscription)
+    ready
+}
+
 /// Load gallery posters one at a time. This is a compatibility policy for
 /// browser WebGPU implementations observed losing a shared device during burst
 /// initialization, not a semantic requirement of Fe or WebGPU.
@@ -177,12 +224,14 @@ fn is_success(status: u32) -> bool {
 fn activate_gallery_surfaces() -> u32
     uses (
         events: mut EventSource<SurfaceToken>,
+        visibility: mut EventSource<DocumentVisibility>,
         loader: mut SurfaceLoader<WasmBackend>,
         timer: mut Timer<WasmBackend>,
         race: mut Race<WasmBackend>,
         suspend: Suspend<WasmBackend, u32>,
     )
 {
+    if !await_document_visible() { return 0 }
     let stream: Stream<SurfaceToken> = Stream::new()
     let mut subscription = stream.subscribe()
     let mut loaded: u32 = 0
@@ -344,6 +393,7 @@ actor SourceInspector {
     fn activate_surfaces() -> u32 uses (ScopedTask) {
         with (
             EventSource<SurfaceToken> = BrowserSurfaceEvents {},
+            EventSource<DocumentVisibility> = BrowserVisibilityEvents::new(),
             SurfaceLoader<WasmBackend> = BrowserSurfaceLoader {},
             Timer<WasmBackend> = HostTimer {},
             Race<WasmBackend> = Resumable {},
