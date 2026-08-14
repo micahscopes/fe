@@ -9,14 +9,14 @@
     "build": "workspace"
   },
   "target": "wasm",
-  "source_set_sha256": "3586ac2d3d522c2a08321bb7ea863b45129a51466d455b66cb31186e2f165f03",
+  "source_set_sha256": "0fff962e155a573f2f68c36aadb9c0fb00802da15182338e01acc7d255c27341",
   "source_dependencies": {
     "version": 1,
     "root": "file:///workspace/fe-worktrees/mb2/demos/sketches/event_studio/src/lib.fe",
     "sources": [
       {
         "url": "file:///workspace/fe-worktrees/mb2/demos/sketches/event_studio/src/lib.fe",
-        "sha256": "b33f48845b7151881fb86781d7aed7fa544da22e8e6f300e9c294dd3be8a4bb3"
+        "sha256": "949036fcc94e20662c92decc527f758134004d0ae81c9579cffa72985da627ff"
       }
     ]
   },
@@ -26,6 +26,13 @@
       {
         "module": "fe:actor",
         "name": "send_begin",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "fe:host",
+        "name": "sleep_begin",
         "signature_complete": false,
         "params": [],
         "results": []
@@ -45,6 +52,20 @@
         "results": []
       },
       {
+        "module": "fe:web-document",
+        "name": "visibility_begin",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "fe:web-window",
+        "name": "animation_frame_begin",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
         "module": "fe:web-window",
         "name": "viewport_begin",
         "signature_complete": false,
@@ -53,6 +74,48 @@
       }
     ],
     "exports": [
+      {
+        "module": "",
+        "name": "__fe_task_resume_watch_frame_clock_1",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "__fe_task_resume_watch_frame_clock_2",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "__fe_task_resume_watch_frame_clock_3",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "__fe_task_resume_watch_frame_clock_4",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "__fe_task_resume_watch_frame_clock_5",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "__fe_task_resume_watch_frame_clock_6",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
       {
         "module": "",
         "name": "__fe_task_resume_watch_pointer_1",
@@ -97,6 +160,27 @@
       },
       {
         "module": "",
+        "name": "__fe_task_resume_watch_visibility_1",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "__fe_task_resume_watch_visibility_2",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "__fe_task_resume_watch_visibility_3",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
         "name": "__fe_task_resume_watch_wheel_1",
         "signature_complete": false,
         "params": [],
@@ -118,6 +202,13 @@
       },
       {
         "module": "",
+        "name": "__fe_task_start_watch_frame_clock",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
         "name": "__fe_task_start_watch_pointer",
         "signature_complete": false,
         "params": [],
@@ -126,6 +217,13 @@
       {
         "module": "",
         "name": "__fe_task_start_watch_viewport",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "__fe_task_start_watch_visibility",
         "signature_complete": false,
         "params": [],
         "results": []
@@ -187,9 +285,9 @@
       "name": "module.wasm",
       "kind": "wasm_module",
       "media_type": "application/wasm",
-      "sha256": "173e745a72b411d87af66bfd67ac2d224c993ae3d025cc0668ab15f3cf603557",
-      "byte_len": 191337,
-      "url": "assets/fe-173e745a72b411d8.wasm"
+      "sha256": "049ac9be558d6b7b239633d12805029663e8313845eac32d8f58013cedd07065",
+      "byte_len": 267826,
+      "url": "assets/fe-049ac9be558d6b7b.wasm"
     }
   ]
 }
