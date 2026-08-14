@@ -176,7 +176,7 @@
       {
         "id": "fmath/src/lib.fe",
         "kind": "fe",
-        "sha256": "f4f98d96f8c67a87b01b842ba2a13527fcbe91c51d311df757187bce034983ce"
+        "sha256": "f1338c9967680a58a91b9c1b0ae3da9480f1896ba433499cbf09974917d3059f"
       },
       {
         "id": "plasma/fe.toml",

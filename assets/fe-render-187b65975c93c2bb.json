@@ -3,8 +3,8 @@
     "canonical_adapters": [],
     "wasm": "fe-render-640916642f7b64ce.wasm",
     "wasm_bytes": 67091,
-    "wgsl": "fe-render-3e674108a50a9144.wgsl",
-    "wgsl_bytes": 29572
+    "wgsl": "fe-render-06bbb73937fea0d2.wgsl",
+    "wgsl_bytes": 31752
   },
   "browser_runtime": null,
   "canonical_interface": null,
@@ -1391,8 +1391,8 @@
           0
         ]
       },
-      "shader": "fe-render-3e674108a50a9144.wgsl",
-      "shader_bytes": 29572,
+      "shader": "fe-render-06bbb73937fea0d2.wgsl",
+      "shader_bytes": 31752,
       "source_entry": "distance_surface"
     },
     {
@@ -2097,7 +2097,7 @@
       {
         "id": "demos/sketches/fmath/src/lib.fe",
         "kind": "fe",
-        "sha256": "f4f98d96f8c67a87b01b842ba2a13527fcbe91c51d311df757187bce034983ce"
+        "sha256": "f1338c9967680a58a91b9c1b0ae3da9480f1896ba433499cbf09974917d3059f"
       },
       {
         "id": "demos/sketches/gallery_palette/fe.toml",
@@ -2127,7 +2127,7 @@
       {
         "id": "demos/sketches/qcga_pencil_de/src/lib.fe",
         "kind": "fe",
-        "sha256": "491116bb1cff36020e284a4b2403e193afc3b59cdf340bb84158bcac7a047e09"
+        "sha256": "c59a21be58a6ba4d294a0e374997a8166ee415031231e436e792fb2ebde95488"
       },
       {
         "id": "ingots/core/fe.toml",
