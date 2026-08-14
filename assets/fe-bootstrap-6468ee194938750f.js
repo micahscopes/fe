@@ -97,6 +97,47 @@ export function createDocumentEventSource(documentTarget = globalThis.document) 
   });
 }
 
+/** Fixed standards adapter for one cancellable animation-frame observation. */
+export function createWindowEventSource(windowTarget = globalThis) {
+  if (!windowTarget || typeof windowTarget !== "object"
+      || typeof windowTarget.requestAnimationFrame !== "function"
+      || typeof windowTarget.cancelAnimationFrame !== "function") {
+    throw new TypeError("window event source requires animation-frame functions");
+  }
+  return Object.freeze({
+    animationFrame(signal) {
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        let handle;
+        const cleanup = () => signal?.removeEventListener("abort", onAbort);
+        const finish = (complete, value) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          complete(value);
+        };
+        const onFrame = timestamp => finish(resolve, timestamp);
+        const onAbort = () => {
+          if (handle !== undefined) windowTarget.cancelAnimationFrame(handle);
+          const error = new Error("animation-frame observation was cancelled");
+          error.name = "AbortError";
+          finish(reject, error);
+        };
+        signal?.addEventListener("abort", onAbort, { once: true });
+        if (signal?.aborted) {
+          onAbort();
+          return;
+        }
+        try {
+          handle = windowTarget.requestAnimationFrame(onFrame);
+        } catch (error) {
+          finish(reject, error);
+        }
+      });
+    },
+  });
+}
+
 async function sha256Hex(bytes) {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
   return Array.from(digest, byte => byte.toString(16).padStart(2, "0")).join("");
@@ -1110,6 +1151,9 @@ async function run(element) {
         const needsDocumentCapability = WebAssembly.Module.imports(module).some(
           value => value.module === "fe:web-document",
         );
+        const needsWindowCapability = WebAssembly.Module.imports(module).some(
+          value => value.module === "fe:web-window",
+        );
         const brokerOptions = {};
         if (needsSurfaceCapability) {
           brokerOptions.surface = {
@@ -1129,6 +1173,9 @@ async function run(element) {
         }
         if (needsDocumentCapability) {
           brokerOptions.documentEvents = createDocumentEventSource(document);
+        }
+        if (needsWindowCapability) {
+          brokerOptions.windowEvents = createWindowEventSource(globalThis);
         }
         scopedTasks = {
           taskModule,
