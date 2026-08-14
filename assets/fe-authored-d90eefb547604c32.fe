@@ -1,0 +1,109 @@
+//! Interference plasma, as an actor that RENDERS.
+//!
+//! Three plane waves and one radial wave, summed and read through a palette.
+//! `PlasmaSurface` is the shader program declared as an `actor`: its uniforms
+//! (`time`, `zoom`, `warp`) are the actor's fields, its one `FragmentSurface`
+//! behavior is the per-pixel stage, and `fe web build --mode render` derives the
+//! render entry and mode from the actor rather than from `--entry`/`--mode`.
+//!
+//!     fe web build demos/sketches/plasma --out <dir>
+//!
+//! Software rendering (lavapipe/SwiftShader) in the sandbox; no performance or
+//! parallelism claim (VISION 3.1).
+
+use std::webgpu::{
+    FragmentSurface, GpuProgram, LatestPerFrame, ResponsiveBacking,
+    SurfaceQuality, SurfaceScheduling, SurfaceTransition, WebGpuBackend,
+}
+use std::web::view::{
+    ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface,
+    SurfaceEvent, SurfaceState,
+}
+use fmath::{from_i32, palette, sin, sqrt}
+
+/// The per-demo params record: field names bind, by name identity, to the
+/// actor's state fields (checked at projection time).
+struct PlasmaParams {
+    time: Param,
+    zoom: Param,
+    warp: Param,
+    res: Param,
+}
+
+struct PlasmaViewState {
+    time: f32,
+    zoom: f32,
+    warp: f32,
+    res: f32,
+}
+
+impl SurfaceState for PlasmaViewState {
+    type Params = PlasmaParams
+}
+
+derive ApplyParamBindings for PlasmaViewState using ParamBindingsProvider
+
+const fn plasma_params() -> PlasmaParams {
+    PlasmaParams {
+        time: Param::range(min: 0.0, max: 20.0, init: 0.0)
+            .drag_x(per_px: 0.025),
+        zoom: Param::range(min: 1.0, max: 8.0, init: 3.0)
+            .wheel_scale(in_factor: 0.875, out_factor: 1.125),
+        warp: Param::range(min: 0.0, max: 2.0, init: 0.8)
+            .drag_y(per_px: 0.005),
+        res: Param::extent_x(),
+    }
+}
+
+actor PlasmaSurface uses (
+    GpuProgram<WebGpuBackend>, SurfaceQuality<ResponsiveBacking>,
+) {
+    /// Advances the animation; `zoom` and `warp` are exposed for the page.
+    time: f32,
+    zoom: f32,
+    warp: f32,
+    /// Surface extent in pixels (runtime-fed; replaces `const RESOLUTION`).
+    res: f32,
+
+    /// The surface declaration: CTFE-evaluated at bundle time and projected
+    /// into the manifest `surface` section. Never lowered to wasm or WGSL.
+    const fn view() -> Surface<PlasmaParams> {
+        Surface {
+            extent: Extent::square(512),
+            params: plasma_params(),
+        }
+    }
+
+    /// Drag changes phase and radial warp; wheel changes spatial scale.
+    fn navigate(self, event: own SurfaceEvent) -> PlasmaViewState
+        uses (SurfaceTransition, SurfaceScheduling<LatestPerFrame>)
+    {
+        let current = PlasmaViewState {
+            time: self.time,
+            zoom: self.zoom,
+            warp: self.warp,
+            res: self.res,
+        }
+        current.apply_param_bindings(plasma_params(), event)
+    }
+
+    /// Pixel coordinate in, packed RGBA8 word out. The uniform record is the
+    /// actor's own fields, reached as `self.*`.
+    fn plasma(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
+        // Pixel centre to [-1, 1], y up.
+        let u: f32 = (from_i32(px) + 0.5) / self.res * 2.0 - 1.0
+        let v: f32 = 1.0 - (from_i32(py) + 0.5) / self.res * 2.0
+
+        let x: f32 = u * self.zoom
+        let y: f32 = v * self.zoom
+        let radius: f32 = sqrt(x * x + y * y)
+
+        let mut field: f32 = sin(x + self.time)
+        field = field + sin(y * 1.3 - self.time * 0.7)
+        field = field + sin((x + y) * 0.8 + self.time * 0.3)
+        field = field + sin(radius * 2.1 - self.time * 1.1) * self.warp
+
+        // Four waves in [-1, 1] each; fold the sum back into a unit interval.
+        palette(field * 0.125 + 0.5, 0.0, 0.33, 0.67)
+    }
+}
