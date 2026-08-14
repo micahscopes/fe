@@ -245,8 +245,11 @@ try {
     await page.waitForFunction(() => {
       const component = document.querySelector("#gallery-event-studio");
       const values = component?.querySelectorAll(".event-studio-grid strong");
-      return component?._active === true && values?.length === 9
-        && Number(values[7].textContent) >= 1;
+      return component?._active === true && values?.length === 14
+        && Number(values[8].textContent) >= 1
+        && Number(values[9].textContent) >= 1
+        && Number(values[10].textContent) >= 1
+        && Number(values[12].textContent) >= 1;
     });
     const eventStudioBefore = await page.evaluate(() => {
       const values = document.querySelectorAll("#gallery-event-studio .event-studio-grid strong");
@@ -254,11 +257,20 @@ try {
         width: Number(values[0].textContent),
         height: Number(values[1].textContent),
         devicePixelRatioPercent: Number(values[2].textContent),
-        observations: Number(values[7].textContent),
-        failures: Number(values[8].textContent),
+        visible: Number(values[7].textContent),
+        visibilityEvents: Number(values[8].textContent),
+        frameEvents: Number(values[9].textContent),
+        timerEvents: Number(values[10].textContent),
+        observations: Number(values[12].textContent),
+        failures: Number(values[13].textContent),
       };
     });
     assert.equal(eventStudioBefore.failures, 0);
+    assert.equal(eventStudioBefore.visible, 1);
+    assert.equal(eventStudioBefore.visibilityEvents, 1);
+    assert.ok(eventStudioBefore.frameEvents >= 1);
+    assert.ok(eventStudioBefore.timerEvents === eventStudioBefore.frameEvents ||
+      eventStudioBefore.timerEvents === eventStudioBefore.frameEvents + 1);
     await page.evaluate(() => {
       const component = document.querySelector("#gallery-event-studio");
       component.dispatchEvent(new PointerEvent("pointermove", {
@@ -291,7 +303,7 @@ try {
       return Number(values[0]?.textContent) === 777
         && Number(values[1]?.textContent) === 555
         && Number(values[2]?.textContent) === 200
-        && Number(values[7]?.textContent) > previousObservations;
+        && Number(values[12]?.textContent) > previousObservations;
     }, {}, eventStudioBefore.observations);
     assert.equal(await page.$eval(
       "#gallery-event-studio .event-studio-grid p:last-child strong",

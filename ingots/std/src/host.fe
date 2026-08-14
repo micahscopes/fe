@@ -1,5 +1,12 @@
 use ingot::wasm::WasmBackend
-use raw::{host_now, sleep_begin as raw_sleep_begin, recv_begin as raw_recv_begin, race_begin as raw_race_begin, wait as block_deliver, suspend as suspend_continuation}
+use raw::{
+    host_now,
+    sleep_begin as raw_sleep_begin,
+    recv_begin as raw_recv_begin,
+    race_begin as raw_race_begin,
+    wait as block_deliver,
+    suspend as suspend_continuation,
+}
 
 // mb2 CE-7: the EXTERNAL-COMPLETION clients (`Timer` and `recv`), the
 // completion-cell rail's THIRD kind of client. `std::webgpu` proved the rail with
@@ -52,6 +59,16 @@ pub struct HostTimer {}
 /// without blocking. The ZST is authority evidence only; it carries no host id.
 pub struct Resumable {}
 
+/// Suspend the current Fe continuation for at least `milliseconds` using the
+/// ordinary timer control effect. This is the reusable asynchronous operation;
+/// `HostTimer` and `Resumable` remain replaceable handlers selected by the
+/// surrounding scope, so stream pacing does not acquire a second scheduler.
+pub fn sleep(_ milliseconds: u64) -> TaskOutcome<u32, u64>
+uses (timer: mut Timer<WasmBackend>, suspend: Suspend<WasmBackend, u32>)
+{
+    suspend.suspend(timer.sleep_begin(milliseconds))
+}
+
 impl Suspend<WasmBackend, u32> for Resumable {
     fn suspend<T>(self, _ pending: own Pending<WasmBackend, T>) -> TaskOutcome<u32, T> {
         suspend_continuation(pending)
@@ -59,9 +76,11 @@ impl Suspend<WasmBackend, u32> for Resumable {
 }
 
 impl Race<WasmBackend> for Resumable {
-    fn race<T>(mut self, _ left: own Pending<WasmBackend, T>, _ right: own Pending<WasmBackend, T>)
-        -> Pending<WasmBackend, RaceOutcome<T>>
-    {
+    fn race<T>(
+        mut self,
+        _ left: own Pending<WasmBackend, T>,
+        _ right: own Pending<WasmBackend, T>,
+    ) -> Pending<WasmBackend, RaceOutcome<T>> {
         raw_race_begin(left, right)
     }
 }

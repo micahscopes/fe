@@ -4341,24 +4341,12 @@ actor ExamplePage {
         let html = r#"<!doctype html><script type="application/fe" data-fe-component>
 use core::actor::{InitialState, ProjectState, ResidentTransition, ScopedTask}
 use core::pending::{Suspend, TaskOutcome, Timer}
-use std::host::{HostTimer, Resumable}
+use std::host::{HostTimer, Resumable, sleep}
 use std::wasm::WasmBackend
 
 struct Event { value: u32 }
 struct State { value: u32 }
 struct Patch { visible_mask: u32, focus_target: u32, flags: u32, commands_ptr: u32, commands_len: u32 }
-
-fn sleep_once(_ ms: u64) -> u64
-    uses (timer: mut Timer<WasmBackend>, suspend: Suspend<WasmBackend, u32>)
-{
-    let pending = timer.sleep_begin(ms)
-    let outcome: TaskOutcome<u32, u64> = suspend.suspend(pending)
-    match outcome {
-        TaskOutcome::Success(value) => value
-        TaskOutcome::Failure(_) => 7
-        TaskOutcome::Cancelled => 0
-    }
-}
 
 actor App {
     value: u32,
@@ -4371,7 +4359,11 @@ actor App {
     }
     fn clock() -> u64 uses (ScopedTask) {
         with (Timer<WasmBackend> = HostTimer {}, Suspend<WasmBackend, u32> = Resumable {}) {
-            sleep_once(1)
+            match sleep(milliseconds: 1) {
+                TaskOutcome::Success(value) => value
+                TaskOutcome::Failure(_) => 7
+                TaskOutcome::Cancelled => 0
+            }
         }
     }
 }

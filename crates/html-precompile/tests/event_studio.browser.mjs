@@ -139,8 +139,13 @@ try {
       pointerY: Number(values[4]?.textContent),
       pointerEvents: Number(values[5]?.textContent),
       wheelEvents: Number(values[6]?.textContent),
-      observations: Number(values[7]?.textContent),
-      failures: Number(values[8]?.textContent),
+      visible: Number(values[7]?.textContent),
+      visibilityEvents: Number(values[8]?.textContent),
+      frameEvents: Number(values[9]?.textContent),
+      timerEvents: Number(values[10]?.textContent),
+      frameTimestamp: Number(values[11]?.textContent),
+      observations: Number(values[12]?.textContent),
+      failures: Number(values[13]?.textContent),
       states: globalThis.__feEventStudioE2E.states.length,
       errors: globalThis.__feEventStudioE2E.errors,
     };
@@ -150,22 +155,55 @@ try {
     const component = document.querySelector("#event-studio");
     const values = component?.querySelectorAll(".event-studio-grid strong");
     return script?.dataset.feState === "complete" && component?._active === true
-      && Number(values?.[7]?.textContent) >= 1;
+      && Number(values?.[8]?.textContent) >= 1
+      && Number(values?.[9]?.textContent) >= 1
+      && Number(values?.[10]?.textContent) >= 1
+      && Number(values?.[12]?.textContent) >= 1;
   });
   const initial = await readStudio();
-  assert.deepEqual(initial, {
-    width: 640,
-    height: 480,
-    devicePixelRatioPercent: 150,
-    pointerX: 0,
-    pointerY: 0,
-    pointerEvents: 0,
-    wheelEvents: 0,
-    observations: 1,
-    failures: 0,
-    states: 2,
-    errors: [],
+  assert.equal(initial.width, 640);
+  assert.equal(initial.height, 480);
+  assert.equal(initial.devicePixelRatioPercent, 150);
+  assert.equal(initial.pointerX, 0);
+  assert.equal(initial.pointerY, 0);
+  assert.equal(initial.pointerEvents, 0);
+  assert.equal(initial.wheelEvents, 0);
+  assert.equal(initial.visible, 1);
+  assert.equal(initial.visibilityEvents, 1);
+  assert.ok(initial.frameEvents >= 1);
+  assert.ok(initial.timerEvents === initial.frameEvents ||
+    initial.timerEvents === initial.frameEvents + 1);
+  assert.ok(initial.frameTimestamp > 0);
+  assert.equal(initial.observations, 1);
+  assert.equal(initial.failures, 0);
+  assert.deepEqual(initial.errors, []);
+
+  // The fixed adapter reports only the standards state and event. Fe owns the
+  // typed visibility stream, actor message, and projection policy.
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      value: "hidden",
+    });
+    document.dispatchEvent(new Event("visibilitychange"));
   });
+  await page.waitForFunction(previous => {
+    const values = document.querySelectorAll("#event-studio .event-studio-grid strong");
+    return values[7]?.textContent === "0"
+      && Number(values[8]?.textContent) === previous + 1;
+  }, {}, initial.visibilityEvents);
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      value: "visible",
+    });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await page.waitForFunction(previous => {
+    const values = document.querySelectorAll("#event-studio .event-studio-grid strong");
+    return values[7]?.textContent === "1"
+      && Number(values[8]?.textContent) === previous + 2;
+  }, {}, initial.visibilityEvents);
 
   await page.evaluate(() => {
     document.querySelector("#event-studio").dispatchEvent(new PointerEvent("pointermove", {
@@ -185,19 +223,15 @@ try {
     return values[3]?.textContent === "123" && values[4]?.textContent === "222"
       && values[5]?.textContent === "1";
   });
-  assert.deepEqual(await readStudio(), {
-    width: 640,
-    height: 480,
-    devicePixelRatioPercent: 150,
-    pointerX: 123,
-    pointerY: 222,
-    pointerEvents: 1,
-    wheelEvents: 0,
-    observations: 1,
-    failures: 0,
-    states: 3,
-    errors: [],
-  });
+  const afterPointer = await readStudio();
+  assert.equal(afterPointer.pointerX, 123);
+  assert.equal(afterPointer.pointerY, 222);
+  assert.equal(afterPointer.pointerEvents, 1);
+  assert.equal(afterPointer.wheelEvents, 0);
+  assert.equal(afterPointer.visible, 1);
+  assert.equal(afterPointer.visibilityEvents, initial.visibilityEvents + 2);
+  assert.equal(afterPointer.failures, 0);
+  assert.deepEqual(afterPointer.errors, []);
 
   await page.evaluate(() => {
     document.querySelector("#event-studio").dispatchEvent(new WheelEvent("wheel", {
@@ -216,39 +250,29 @@ try {
     return values[3]?.textContent === "210" && values[4]?.textContent === "111"
       && values[6]?.textContent === "1";
   });
-  assert.deepEqual(await readStudio(), {
-    width: 640,
-    height: 480,
-    devicePixelRatioPercent: 150,
-    pointerX: 210,
-    pointerY: 111,
-    pointerEvents: 1,
-    wheelEvents: 1,
-    observations: 1,
-    failures: 0,
-    states: 4,
-    errors: [],
-  });
+  const afterWheel = await readStudio();
+  assert.equal(afterWheel.pointerX, 210);
+  assert.equal(afterWheel.pointerY, 111);
+  assert.equal(afterWheel.pointerEvents, 1);
+  assert.equal(afterWheel.wheelEvents, 1);
+  assert.equal(afterWheel.visible, 1);
+  assert.equal(afterWheel.visibilityEvents, initial.visibilityEvents + 2);
+  assert.equal(afterWheel.failures, 0);
+  assert.deepEqual(afterWheel.errors, []);
 
   await page.setViewport({ width: 777, height: 555, deviceScaleFactor: 2 });
   await page.waitForFunction(() => {
     const values = document.querySelectorAll("#event-studio .event-studio-grid strong");
     return values[0]?.textContent === "777" && values[1]?.textContent === "555"
-      && values[2]?.textContent === "200" && values[7]?.textContent === "2";
+      && values[2]?.textContent === "200" && values[12]?.textContent === "2";
   });
-  assert.deepEqual(await readStudio(), {
-    width: 777,
-    height: 555,
-    devicePixelRatioPercent: 200,
-    pointerX: 210,
-    pointerY: 111,
-    pointerEvents: 1,
-    wheelEvents: 1,
-    observations: 2,
-    failures: 0,
-    states: 5,
-    errors: [],
-  });
+  const afterResize = await readStudio();
+  assert.equal(afterResize.width, 777);
+  assert.equal(afterResize.height, 555);
+  assert.equal(afterResize.devicePixelRatioPercent, 200);
+  assert.equal(afterResize.observations, 2);
+  assert.equal(afterResize.failures, 0);
+  assert.deepEqual(afterResize.errors, []);
 
   // Reconnection cancels the old affine pull, starts one fresh scoped task,
   // and observes the current standards state exactly once.
@@ -262,25 +286,22 @@ try {
   await page.waitForFunction(() => {
     const values = document.querySelectorAll("#event-studio .event-studio-grid strong");
     return document.querySelector("#event-studio")?._active === true
-      && values[7]?.textContent === "3";
+      && values[8]?.textContent === "4"
+      && values[12]?.textContent === "3";
   });
-  assert.deepEqual(await readStudio(), {
-    width: 777,
-    height: 555,
-    devicePixelRatioPercent: 200,
-    pointerX: 210,
-    pointerY: 111,
-    pointerEvents: 1,
-    wheelEvents: 1,
-    observations: 3,
-    failures: 0,
-    // The disconnected projection is dispatched after detachment, so the
-    // document-level oracle observes reconnect + one rich task message only.
-    states: 7,
-    errors: [],
-  });
+  const reconnected = await readStudio();
+  assert.equal(reconnected.width, 777);
+  assert.equal(reconnected.height, 555);
+  assert.equal(reconnected.devicePixelRatioPercent, 200);
+  assert.equal(reconnected.pointerEvents, 1);
+  assert.equal(reconnected.wheelEvents, 1);
+  assert.equal(reconnected.visible, 1);
+  assert.equal(reconnected.visibilityEvents, initial.visibilityEvents + 3);
+  assert.equal(reconnected.observations, 3);
+  assert.equal(reconnected.failures, 0);
+  assert.deepEqual(reconnected.errors, []);
   assert.deepEqual(browserErrors, []);
-  console.log("ok: Fe Event Studio typed viewport, pointer/touch, wheel, and lifecycle streams");
+  console.log("ok: Fe Event Studio viewport, pointer/touch, wheel, visibility, paced frame/timer, and lifecycle streams");
 } finally {
   await browser.close();
   await new Promise(resolvePromise => server.close(resolvePromise));

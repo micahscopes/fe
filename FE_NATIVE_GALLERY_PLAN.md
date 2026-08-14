@@ -1121,9 +1121,10 @@ Origin: honesty audit of Claude Code session
   unchanged, and closes the check-to-listen race. Broker and adapter tapes pin
   three-lane delivery, between-pull changes, and exact cancellation/cleanup.
 - **Event Studio is now present as a resident Fe component and gallery tile.**
-  Three concurrent actor-scoped Fe tasks own viewport, Pointer Events, and
-  wheel stream iteration, quantization, actor delivery, failure policy,
-  resident state, DOM projection, and reconnect behavior. Pointer Events unify
+  Five concurrent actor-scoped Fe tasks own viewport, Pointer Events, wheel,
+  document visibility, and paced frame/timer iteration, quantization, actor
+  delivery, failure policy, resident state, DOM projection, and reconnect
+  behavior. Pointer Events unify
   mouse, pen, and touch as one typed `PointerSample`; wheel retains signed XYZ
   deltas, delta mode, cursor position, control modifier, and timestamp. The
   fixed component-scoped adapter owns four pointer listeners or one wheel
@@ -1140,9 +1141,30 @@ Origin: honesty audit of Claude Code session
   page/resident projections in 158.435 seconds, verifies 15 Fe modules / 79
   deployment files, and passes both the combined Chromium gallery/inspector
   tape (including the real resize) and the complete TodoMVC tape.
-  Visibility/frame/timer traces, device loss,
-  map/filter/scan/merge/switch/latest, throttle/debounce, and bounded
+  Device loss, map/filter/scan/merge/switch/latest, debounce, and bounded
   backpressure remain for this same demo.
+- Event Studio now exercises document visibility and an efficient Fe-owned
+  frame throttle over the shared runtime-control rail. The frame task suspends
+  through the ordinary typed timer effect first and requests exactly one
+  animation frame only after the interval elapses; the browser therefore does
+  not deliver 60 frame callbacks per second merely for Fe to discard them.
+  `std::host::sleep` centralizes timer-token minting plus continuation
+  suspension without selecting a provider or adding a scheduler. The fixed
+  host still realizes only `setTimeout`, `requestAnimationFrame`, and
+  `visibilitychange`; Fe owns their order, rate, cancellation, failure policy,
+  actor messages, and projection. A standalone Chromium tape proves initial
+  visibility, hidden/visible transitions, paced timer/frame progress, existing
+  pointer/wheel/resize behavior, and five-scope reconnect cleanup. The
+  independent Wasmtime reducer now covers all seven task actions and exact
+  20-leaf event / 16-leaf state shapes. The complete 33-test HTML precompiler
+  suite is green. A cold exact gallery rebuild completed in 152.066 seconds,
+  verifies 15 Fe modules / 79 deployment files, and passes the combined
+  Chromium gallery/SourceInspector/Event Studio tape plus the independent
+  TodoMVC browser tape. An attempted fluent `StudioTask::empty().with_*`
+  authoring form type-checks but exact resident-Wasm lowering still rejects
+  the aggregate `self` parameter; the explicit scalarizable constructors stay
+  in the example until general aggregate-parameter scalarization lands. This
+  is a compiler ergonomic gap, not permission for a JavaScript codec.
 - Rich scoped-task messages no longer need to decompose one semantic value into
   a sequence of scalar `detail` messages. `ComponentEvent<A, P>` carries an
   application-defined nominal payload tail, `ActorSink` still validates its
