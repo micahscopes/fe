@@ -193,6 +193,76 @@ pub fn mix3(_ a: Vec3, _ b: Vec3, _ amount: f32) -> Vec3 {
     )
 }
 
+/// A finite parameter interval along a normalized world-space ray. `active`
+/// is false when the ray misses the clipping domain or the domain lies wholly
+/// outside the caller's non-negative distance budget.
+pub struct RayInterval {
+    pub start: f32,
+    pub end: f32,
+    pub active: bool,
+}
+
+impl Copy for RayInterval {}
+
+/// Intersect a normalized ray with a finite sphere and clamp the result to
+/// `[0, max_distance]`. All inputs are finite and `radius`/`max_distance` are
+/// non-negative domain parameters. This clips a rendering/search DOMAIN; it
+/// says nothing about whether an implicit surface exists inside that domain.
+/// Callers can consequently avoid marching known-empty space without
+/// replacing their field evaluator with an analytic surface intersection.
+pub fn unit_ray_sphere_interval(
+    _ origin: Vec3,
+    _ unit_direction: Vec3,
+    _ center: Vec3,
+    _ radius: f32,
+    _ max_distance: f32,
+) -> RayInterval {
+    let offset: Vec3 = sub3(origin, center)
+    let half_b: f32 = dot3(offset, unit_direction)
+    let discriminant: f32 =
+        half_b * half_b - (dot3(offset, offset) - radius * radius)
+    // Evaluate one uniform arithmetic path across a GPU wave. For a miss the
+    // absolute value keeps sqrt finite and `active` rejects the inert bounds;
+    // no lane needs a discriminant branch before the expensive march.
+    let root: f32 = sqrt(abs(discriminant))
+    let near: f32 = -half_b - root
+    let far: f32 = -half_b + root
+    // Branch-free max(0, near) and min(max_distance, far), valid under the
+    // finite-input contract above. This is materially smaller than lowering
+    // the full IEEE min/max NaN policy into every fragment.
+    let start: f32 = 0.5 * (near + abs(near))
+    let end: f32 = 0.5 * (far + max_distance - abs(far - max_distance))
+    RayInterval {
+        start: start,
+        end: end,
+        active: discriminant >= 0.0 && end > start,
+    }
+}
+
+/// The same finite-sphere interval specialized for a camera whose origin is
+/// `target - unit_forward * camera_distance`. Forward-facing camera rays and
+/// the caller's finite distance/radius bounds guarantee intersections lie in
+/// front of the camera. This avoids reconstructing the target offset in every
+/// fragment while preserving the general interval above for arbitrary rays.
+pub fn targeted_camera_sphere_interval(
+    _ unit_forward: Vec3,
+    _ unit_direction: Vec3,
+    _ camera_distance: f32,
+    _ radius: f32,
+) -> RayInterval {
+    let half_b: f32 = -camera_distance * dot3(unit_forward, unit_direction)
+    let discriminant: f32 =
+        half_b * half_b - (camera_distance * camera_distance - radius * radius)
+    let root: f32 = sqrt(abs(discriminant))
+    let near: f32 = -half_b - root
+    let far: f32 = -half_b + root
+    RayInterval {
+        start: 0.5 * (near + abs(near)),
+        end: far,
+        active: discriminant >= 0.0,
+    }
+}
+
 /// A world-space camera ray derived entirely in Fe.
 pub struct OrbitRay {
     pub origin: Vec3,

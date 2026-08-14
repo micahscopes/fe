@@ -13,8 +13,10 @@
 //! Production visibility is a genuine iterative implicit-surface march. Every
 //! step evaluates the scale-invariant first-order quadric estimate
 //! `abs(F(p)) / length(gradient F(p))`; no analytic ray/quadric intersection is
-//! used here. Exact quadratic roots intentionally live only in the independent
-//! Rust acceptance oracle, where a different algorithm has proof value.
+//! used here. A generic ray/sphere interval clips the finite scene domain
+//! before iteration, but does not solve or classify the quadric. Exact
+//! ray/quadric roots intentionally live only in the independent Rust
+//! acceptance oracle, where a different algorithm has proof value.
 
 use core::actor::InitialState
 use core::marker::Copy
@@ -37,6 +39,7 @@ use std::webgpu::{
 use std::web::view::{Surface, SurfaceEvent}
 use fmath::{
     PixelSample,
+    RayInterval,
     Vec3,
     abs,
     add3,
@@ -51,6 +54,8 @@ use fmath::{
     normalize3,
     rgba,
     scale3,
+    targeted_camera_sphere_interval,
+    unit_ray_sphere_interval,
     vec3,
 }
 use gallery_palette::{clean_white, electric_blue, midnight, spring_green, theorem_gold}
@@ -78,6 +83,9 @@ const MAX_MARCH_STEPS: i32 = 128
 const MAX_SHADOW_STEPS: i32 = 20
 const FAR_CLIP: f32 = 18.0
 const HIT_EPSILON: f32 = 0.0014
+/// Explicit finite display domain for unbounded pencil members. This clips
+/// the scene, not the quadric equation; visibility inside remains iterative.
+const SCENE_CLIP_RADIUS: f32 = 3.0
 
 /// Extent-responsive work budget selected in Fe from raw backing-store facts.
 /// The fixed browser host may impose an emergency resource ceiling, but it
@@ -129,6 +137,8 @@ fn refine_quadric_hit(
     _ direction: Vec3,
     _ seed: f32,
     _ refinement_steps: i32,
+    _ interval_start: f32,
+    _ interval_end: f32,
 ) -> f32 {
     let mut distance: f32 = seed
     let mut i: i32 = 0
@@ -138,7 +148,7 @@ fn refine_quadric_hit(
         let slope: f32 = dot3(quadric_gradient(q, point), direction)
         if abs(slope) > 0.00001 {
             let correction: f32 = clamp(field / slope, -0.12, 0.12)
-            distance = clamp(distance - correction, 0.0, FAR_CLIP)
+            distance = clamp(distance - correction, interval_start, interval_end)
         }
         i = i + 1
     }
@@ -157,6 +167,33 @@ pub fn trace_quadric_de(_ q: Quadric, _ origin: Vec3, _ direction: Vec3) -> Penc
     )
 }
 
+/// Scene-local finite domain shared by production and semantic gates. The
+/// sphere intersection is only a broad-phase interval; it never substitutes
+/// an analytic quadric root for the distance-estimator march.
+pub fn pencil_de_interval(
+    _ origin: Vec3,
+    _ direction: Vec3,
+    _ center: Vec3,
+) -> RayInterval {
+    unit_ray_sphere_interval(
+        origin, normalize3(direction), center, SCENE_CLIP_RADIUS, FAR_CLIP,
+    )
+}
+
+/// Prepared-camera form used by the fragment hot path. `PencilCamera`
+/// guarantees the origin/forward/center relationship required by the shared
+/// specialization, while this public wrapper gives semantic gates the exact
+/// production interval decision without exposing shader internals.
+pub fn pencil_camera_de_interval(
+    _ unit_forward: Vec3,
+    _ unit_direction: Vec3,
+    _ camera_distance: f32,
+) -> RayInterval {
+    targeted_camera_sphere_interval(
+        unit_forward, unit_direction, camera_distance, SCENE_CLIP_RADIUS,
+    )
+}
+
 /// Quality-parameterized production marcher. `break` is semantically
 /// important here: completed rays leave the shader loop instead of spending
 /// the rest of a fixed 128-iteration envelope checking a `done` flag.
@@ -166,8 +203,61 @@ pub fn trace_quadric_de_with_quality(
     _ direction: Vec3,
     _ quality: PencilRenderQuality,
 ) -> PencilDeHit {
-    let direction: Vec3 = normalize3(direction)
-    let mut distance: f32 = 0.0
+    trace_quadric_de_in_interval(
+        q,
+        origin,
+        direction,
+        quality,
+        RayInterval { start: 0.0, end: FAR_CLIP, active: true },
+    )
+}
+
+/// Quality-parameterized iterative march restricted to an explicit finite
+/// ray interval. A rejected interval returns before the loop; accepted rays
+/// retain the exact same field estimate, hit test, and Newton polish as the
+/// unbounded entry above.
+pub fn trace_quadric_de_in_interval(
+    _ q: Quadric,
+    _ origin: Vec3,
+    _ direction: Vec3,
+    _ quality: PencilRenderQuality,
+    _ interval: RayInterval,
+) -> PencilDeHit {
+    let interval_start: f32 = interval.start
+    let interval_end: f32 = interval.end
+    if interval.active == false
+        || interval_start < 0.0
+        || interval_end > FAR_CLIP
+        || interval_end <= interval_start
+    {
+        return PencilDeHit {
+            distance: interval_start, hit: 0, steps: 0, residual: 1.0,
+        }
+    }
+    trace_quadric_de_in_unit_interval(
+        q, origin, normalize3(direction), quality, interval,
+    )
+}
+
+/// The hot-path form consumes the unit ray already constructed by the shared
+/// camera. Keeping that fact in the type-level call structure avoids
+/// normalizing the same ray again in every fragment.
+fn trace_quadric_de_in_unit_interval(
+    _ q: Quadric,
+    _ origin: Vec3,
+    _ unit_direction: Vec3,
+    _ quality: PencilRenderQuality,
+    _ interval: RayInterval,
+) -> PencilDeHit {
+    let interval_start: f32 = interval.start
+    let interval_end: f32 = interval.end
+    if interval.active == false {
+        return PencilDeHit {
+            distance: interval_start, hit: 0, steps: 0, residual: 1.0,
+        }
+    }
+    let direction: Vec3 = unit_direction
+    let mut distance: f32 = interval_start
     let mut hit: i32 = 0
     let mut steps: i32 = quality.march_steps
     let mut residual: f32 = 1.0
@@ -183,7 +273,7 @@ pub fn trace_quadric_de_with_quality(
             break
         }
         distance = distance + clamp(estimate * 0.68, 0.00035, 0.48)
-        if distance > FAR_CLIP {
+        if distance > interval_end {
             steps = i
             break
         }
@@ -192,6 +282,7 @@ pub fn trace_quadric_de_with_quality(
     if hit == 1 {
         distance = refine_quadric_hit(
             q, origin, direction, distance, quality.refinement_steps,
+            interval_start, interval_end,
         )
         let point: Vec3 = add3(origin, scale3(direction, distance))
         residual = abs(eval_quadric(q, point.x, point.y, point.z))
@@ -202,19 +293,15 @@ pub fn trace_quadric_de_with_quality(
 fn soft_shadow(_ q: Quadric, _ p: Vec3, _ light: Vec3) -> f32 {
     let mut shade: f32 = 1.0
     let mut distance: f32 = 0.018
-    let mut done: i32 = 0
     let mut i: i32 = 0
     while i < MAX_SHADOW_STEPS {
-        if done == 0 {
-            let sample: Vec3 = add3(p, scale3(light, distance))
-            let estimate: f32 = quadric_distance(q, sample)
-            shade = min(shade, 13.0 * estimate / distance)
-            if estimate < 0.0008 || distance > 8.0 {
-                done = 1
-            } else {
-                distance = distance + clamp(estimate * 0.72, 0.012, 0.42)
-            }
+        let sample: Vec3 = add3(p, scale3(light, distance))
+        let estimate: f32 = quadric_distance(q, sample)
+        shade = min(shade, 13.0 * estimate / distance)
+        if estimate < 0.0008 || distance > 8.0 {
+            break
         }
+        distance = distance + clamp(estimate * 0.72, 0.012, 0.42)
         i = i + 1
     }
     clamp01(shade)
@@ -348,8 +435,11 @@ actor PencilDistanceSurface uses (
             self.scene.frame.view.width,
             self.scene.frame.view.height,
         )
-        let hit: PencilDeHit = trace_quadric_de_with_quality(
-            q, ray.origin, ray.direction, quality,
+        let interval: RayInterval = pencil_camera_de_interval(
+            self.camera.forward, ray.direction, self.scene.frame.view.dist,
+        )
+        let hit: PencilDeHit = trace_quadric_de_in_unit_interval(
+            q, ray.origin, ray.direction, quality, interval,
         )
         let background: Vec3 = sky(ray.direction)
         let linear: Vec3 = if hit.hit == 1 {

@@ -1009,6 +1009,28 @@ Origin: honesty audit of Claude Code session
   the real Chromium gallery/SourceInspector and TodoMVC tapes pass.
   Frame-duration feedback and clipped QCGA march intervals remain the next
   quality slices.
+- QCGA rays now enter the iterative distance-estimator only inside an explicit
+  Fe-authored finite scene domain. `fmath::RayInterval` supplies an arbitrary
+  normalized-ray/sphere intersection plus a prepared-camera specialization;
+  the latter consumes the resident camera's already-normalized forward/ray and
+  distance instead of rebuilding center offsets or normalizing again in every
+  fragment. Its finite-input arithmetic is branch-uniform up to the one final
+  activity decision, so a missed domain skips the 64/96/128-step loop while an
+  accepted ray begins at the sphere entrance and exits at its far boundary.
+  This is only broad-phase clipping: production visibility still evaluates
+  `abs(F) / length(gradient F)` iteratively and performs the same bounded
+  Newton polish; exact ray/quadric roots remain solely in the independent Rust
+  oracle. That oracle executes 500 field samples, seven analytic-root rays,
+  the arbitrary interval, and six prepared-camera intervals. It measures 37
+  clipped steps versus 159 unclipped, including three arbitrary and two exact
+  prepared-camera whole-loop rejects. The source and browser gates retain real
+  primary/shadow `break` exits and validate 31,752 bytes of DE WGSL plus 16,911
+  bytes of marker WGSL under the existing 49 kB combined budget; shared-state
+  control Wasm remains 67,091 bytes. The focused fmath typecheck, independent
+  oracle, QCGA browser-profile compile gate, and complete eight-part QCGA
+  lifecycle/solve/interaction suite are green. Frame-duration
+  feedback remains the next quality slice; actual pixels retain the named
+  external-adapter qualification.
 
 This ledger records achieved evidence, not a relaxation of the phases or the
 Definition of done below.

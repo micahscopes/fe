@@ -1,13 +1,16 @@
 //! Thin scalar exports over the production Fe DE functions. Expected values
 //! and analytic roots live only in the independent Rust acceptance oracle.
 
-use fmath::vec3
+use fmath::{RayInterval, vec3}
 use qcga_pencil::Quadric
 use qcga_pencil_de::{
     PencilDeHit,
+    pencil_camera_de_interval,
+    pencil_de_interval,
     pencil_render_quality,
     quadric_distance,
     trace_quadric_de,
+    trace_quadric_de_in_interval,
     trace_quadric_de_with_quality,
 }
 
@@ -93,6 +96,31 @@ pub fn de_trace_hit(
         vec3(ox, oy, oz),
         vec3(dx, dy, dz),
     ).hit
+}
+
+pub fn de_trace_steps(
+    _ a: f32,
+    _ b: f32,
+    _ c: f32,
+    _ d: f32,
+    _ e: f32,
+    _ f: f32,
+    _ g: f32,
+    _ h: f32,
+    _ i: f32,
+    _ j: f32,
+    _ ox: f32,
+    _ oy: f32,
+    _ oz: f32,
+    _ dx: f32,
+    _ dy: f32,
+    _ dz: f32,
+) -> i32 {
+    trace_quadric_de(
+        quadric(a, b, c, d, e, f, g, h, i, j),
+        vec3(ox, oy, oz),
+        vec3(dx, dy, dz),
+    ).steps
 }
 
 pub fn de_quality_march_steps(_ width: f32, _ height: f32) -> i32 {
@@ -181,4 +209,75 @@ pub fn de_quality_trace_hit(
         a, b, c, d, e, f, g, h, i, j,
         ox, oy, oz, dx, dy, dz, width, height,
     ).hit
+}
+
+/// One complete mixed-scalar receipt for the exact production combination:
+/// extent-selected work budget plus the broad-phase scene interval. Rust
+/// supplies the independent interval and analytic quadric expectations.
+pub fn de_clipped_quality_trace(
+    _ a: f32,
+    _ b: f32,
+    _ c: f32,
+    _ d: f32,
+    _ e: f32,
+    _ f: f32,
+    _ g: f32,
+    _ h: f32,
+    _ i: f32,
+    _ j: f32,
+    _ ox: f32,
+    _ oy: f32,
+    _ oz: f32,
+    _ dx: f32,
+    _ dy: f32,
+    _ dz: f32,
+    _ cx: f32,
+    _ cy: f32,
+    _ cz: f32,
+    _ width: f32,
+    _ height: f32,
+) -> PencilDeHit {
+    let origin = vec3(ox, oy, oz)
+    let direction = vec3(dx, dy, dz)
+    trace_quadric_de_in_interval(
+        quadric(a, b, c, d, e, f, g, h, i, j),
+        origin,
+        direction,
+        pencil_render_quality(width, height),
+        pencil_de_interval(origin, direction, vec3(cx, cy, cz)),
+    )
+}
+
+/// Expose the generic domain decision as one typed aggregate rather than
+/// restating start/end/active as three unrelated test functions.
+pub fn de_scene_interval(
+    _ ox: f32,
+    _ oy: f32,
+    _ oz: f32,
+    _ dx: f32,
+    _ dy: f32,
+    _ dz: f32,
+    _ cx: f32,
+    _ cy: f32,
+    _ cz: f32,
+) -> RayInterval {
+    pencil_de_interval(
+        vec3(ox, oy, oz), vec3(dx, dy, dz), vec3(cx, cy, cz),
+    )
+}
+
+/// Exact interval specialization consumed by the prepared-camera fragment
+/// path. Its camera relationship is independently reconstructed in Rust.
+pub fn de_camera_scene_interval(
+    _ dx: f32,
+    _ dy: f32,
+    _ dz: f32,
+    _ fx: f32,
+    _ fy: f32,
+    _ fz: f32,
+    _ camera_distance: f32,
+) -> RayInterval {
+    pencil_camera_de_interval(
+        vec3(fx, fy, fz), vec3(dx, dy, dz), camera_distance,
+    )
 }

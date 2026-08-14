@@ -2467,8 +2467,8 @@ fn qcga_pencil_de_compiles_as_a_fe_owned_iterative_fragment_surface() {
         "completed DE rays must leave the generated shader loop instead of running a done-flag envelope"
     );
     assert!(
-        de_wgsl.len() < 31_000,
-        "the prepared-state Fe QCGA DE pass should remain under 31 kB WGSL (got {})",
+        de_wgsl.len() < 32_000,
+        "the prepared-state, scene-clipped Fe QCGA DE pass should remain under 32 kB WGSL (got {})",
         de_wgsl.len(),
     );
     assert_eq!(marker_pass.draw_vertices, Some(54));
@@ -2492,6 +2492,11 @@ fn qcga_pencil_de_compiles_as_a_fe_owned_iterative_fragment_surface() {
         marker_wgsl.len(),
     );
     let authored = include_str!("../../../demos/sketches/qcga_pencil_de/src/lib.fe");
+    assert!(
+        authored.contains("targeted_camera_sphere_interval")
+            && authored.contains("trace_quadric_de_in_unit_interval"),
+        "the production shader must consume the reusable broad-phase interval before its iterative surface classifier",
+    );
     assert!(
         !authored.contains("selected_marker"),
         "control-point projection must not return to the all-fragment distance pass",
