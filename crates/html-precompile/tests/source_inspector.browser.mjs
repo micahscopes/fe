@@ -239,14 +239,14 @@ try {
       ],
     });
 
-    // Event Studio is the browser-event acceptance tile: a real standards
-    // resize crosses the fixed adapter, the typed Fe EventSource, the affine
-    // subscription, an actor-scoped task, and the resident Fe projection.
+    // Event Studio is the browser-event acceptance tile: real standards
+    // resize/pointer/wheel facts cross fixed adapters, typed Fe EventSources,
+    // affine subscriptions, actor-scoped tasks, and the resident projection.
     await page.waitForFunction(() => {
       const component = document.querySelector("#gallery-event-studio");
       const values = component?.querySelectorAll(".event-studio-grid strong");
-      return component?._active === true && values?.length === 5
-        && Number(values[3].textContent) >= 1;
+      return component?._active === true && values?.length === 9
+        && Number(values[7].textContent) >= 1;
     });
     const eventStudioBefore = await page.evaluate(() => {
       const values = document.querySelectorAll("#gallery-event-studio .event-studio-grid strong");
@@ -254,18 +254,44 @@ try {
         width: Number(values[0].textContent),
         height: Number(values[1].textContent),
         devicePixelRatioPercent: Number(values[2].textContent),
-        observations: Number(values[3].textContent),
-        failures: Number(values[4].textContent),
+        observations: Number(values[7].textContent),
+        failures: Number(values[8].textContent),
       };
     });
     assert.equal(eventStudioBefore.failures, 0);
+    await page.evaluate(() => {
+      const component = document.querySelector("#gallery-event-studio");
+      component.dispatchEvent(new PointerEvent("pointermove", {
+        bubbles: true,
+        composed: true,
+        pointerId: 23,
+        pointerType: "pen",
+        clientX: 144.5,
+        clientY: 233.75,
+        buttons: 1,
+        isPrimary: true,
+        pressure: 0.5,
+      }));
+      component.dispatchEvent(new WheelEvent("wheel", {
+        bubbles: true,
+        composed: true,
+        deltaY: -4.5,
+        deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+        clientX: 166.25,
+        clientY: 244.5,
+      }));
+    });
+    await page.waitForFunction(() => {
+      const values = document.querySelectorAll("#gallery-event-studio .event-studio-grid strong");
+      return Number(values[5]?.textContent) === 1 && Number(values[6]?.textContent) === 1;
+    });
     await page.setViewport({ width: 777, height: 555, deviceScaleFactor: 2 });
     await page.waitForFunction(previousObservations => {
       const values = document.querySelectorAll("#gallery-event-studio .event-studio-grid strong");
       return Number(values[0]?.textContent) === 777
         && Number(values[1]?.textContent) === 555
         && Number(values[2]?.textContent) === 200
-        && Number(values[3]?.textContent) > previousObservations;
+        && Number(values[7]?.textContent) > previousObservations;
     }, {}, eventStudioBefore.observations);
     assert.equal(await page.$eval(
       "#gallery-event-studio .event-studio-grid p:last-child strong",

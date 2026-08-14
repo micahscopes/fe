@@ -5,10 +5,12 @@ import { createMaterializedTaskMachine } from "./materialized-task.js";
 const u32 = Object.freeze({ kind: "unsigned", bits: 32 });
 const u64 = Object.freeze({ kind: "unsigned", bits: 64 });
 const f32 = Object.freeze({ kind: "f32", bits: 32 });
+const bool = Object.freeze({ kind: "bool", bits: 1 });
 const state = Object.freeze({ kind: "enum_tag", bits: 8, variants: 2 });
 const outcome = Object.freeze({ kind: "enum_tag", bits: 8, variants: 3 });
 const race = Object.freeze({ kind: "enum_tag", bits: 8, variants: 2 });
 const visibility = Object.freeze({ kind: "enum_tag", bits: 8, variants: 2 });
+const enum4 = Object.freeze({ kind: "enum_tag", bits: 8, variants: 4 });
 
 function machine(start, cancelled = 77n, failed = 88n, onCancel = () => {}) {
   return createMaterializedTaskMachine({
@@ -150,6 +152,35 @@ function viewportMachine(start, onCancel = () => {}) {
           return [0, -200, 0, 0, 0];
         }
         return [0, width, height, devicePixelRatio, 0];
+      },
+    }],
+  });
+}
+
+function browserRecordMachine(fields, start, onCancel = () => {}) {
+  const pending = 1 + fields.length;
+  return createMaterializedTaskMachine({
+    input: [],
+    step: [state, ...fields, u32],
+    complete: { start: 1, count: fields.length },
+    start,
+    continuations: [{
+      state: 1,
+      range: { start: pending, count: 1 },
+      pending: { start: pending, count: 1 },
+      frame: { start: pending + 1, count: 0 },
+      delivery: {
+        lanes: [outcome, u32, ...fields],
+        failure: { start: 1, count: 1 },
+        success: { start: 2, count: fields.length },
+      },
+      invoke(tag, error, ...values) {
+        if (tag === 0) return [0, ...fields.map(() => 0), 0];
+        if (tag === 2) {
+          onCancel();
+          return [0, ...fields.map(() => 0), 0];
+        }
+        return [0, ...values, 0];
       },
     }],
   });
@@ -431,6 +462,97 @@ describe("browser HostTimer/Recv completion broker", () => {
     ], () => { feCancellations += 1; });
     const controller = new AbortController();
     const result = broker.run(viewport, [], { signal: controller.signal });
+    await Promise.resolve();
+    controller.abort();
+    await expect(result).rejects.toBeInstanceOf(Error);
+    expect(hostAborts).toBe(1);
+    expect(feCancellations).toBe(1);
+    expect(broker.activeCount()).toBe(0);
+  });
+
+  test("typed component pointer and wheel facts resume Fe without a JS gesture policy", async () => {
+    const broker = createHostCompletionBroker({
+      componentEvents: {
+        pointer: async signal => {
+          expect(signal.aborted).toBeFalse();
+          return {
+            phase: 1,
+            device: 2,
+            pointerId: 41,
+            clientX: -3.5,
+            clientY: 72.25,
+            buttons: 1,
+            primary: true,
+            pressure: 0.75,
+            timestamp: 19.5,
+          };
+        },
+        wheel: async signal => {
+          expect(signal.aborted).toBeFalse();
+          return {
+            deltaX: -1.25,
+            deltaY: 8.5,
+            deltaZ: 0,
+            mode: 1,
+            clientX: 21,
+            clientY: -7,
+            control: false,
+            timestamp: 23,
+          };
+        },
+      },
+    });
+    const pointer = browserRecordMachine(
+      [enum4, enum4, u32, f32, f32, u32, bool, f32, f32],
+      () => [
+        1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        broker.imports["fe:web-component-events"].pointer_begin() >>> 0,
+      ],
+    );
+    expect(await broker.run(pointer, [])).toEqual([
+      1, 2, 41, -3.5, 72.25, 1, true, 0.75, 19.5,
+    ]);
+
+    const wheel = browserRecordMachine(
+      [f32, f32, f32, enum4, f32, f32, bool, f32],
+      () => [
+        1, 0, 0, 0, 0, 0, 0, 0, 0,
+        broker.imports["fe:web-component-events"].wheel_begin() >>> 0,
+      ],
+    );
+    expect(await broker.run(wheel, [])).toEqual([
+      -1.25, 8.5, 0, 1, 21, -7, false, 23,
+    ]);
+    expect(broker.activeCount()).toBe(0);
+  });
+
+  test("component pointer cancellation reaches the listener source and Fe once", async () => {
+    let hostAborts = 0;
+    let feCancellations = 0;
+    const broker = createHostCompletionBroker({
+      componentEvents: {
+        pointer: signal => new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => {
+            hostAborts += 1;
+            reject(new DOMException("cancelled", "AbortError"));
+          }, { once: true });
+        }),
+        wheel: async () => ({
+          deltaX: 0, deltaY: 0, deltaZ: 0, mode: 0,
+          clientX: 0, clientY: 0, control: false, timestamp: 0,
+        }),
+      },
+    });
+    const pointer = browserRecordMachine(
+      [enum4, enum4, u32, f32, f32, u32, bool, f32, f32],
+      () => [
+        1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        broker.imports["fe:web-component-events"].pointer_begin() >>> 0,
+      ],
+      () => { feCancellations += 1; },
+    );
+    const controller = new AbortController();
+    const result = broker.run(pointer, [], { signal: controller.signal });
     await Promise.resolve();
     controller.abort();
     await expect(result).rejects.toBeInstanceOf(Error);

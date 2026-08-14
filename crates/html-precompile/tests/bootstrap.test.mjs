@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   bootFeArtifacts,
+  createComponentEventSource,
   createDocumentEventSource,
   createWindowEventSource,
   decodeComponentCommands,
@@ -134,6 +135,58 @@ test("window viewport adapter reports typed changes without permanent host state
   const cancelled = source.viewport(true, 720, 600, 3, controller.signal);
   controller.abort();
   await assert.rejects(cancelled, error => error.name === "AbortError");
+});
+
+test("component pointer and wheel adapters own exactly one pending pull", async () => {
+  const component = new EventTarget();
+  const attached = [];
+  const detached = [];
+  const add = component.addEventListener.bind(component);
+  const remove = component.removeEventListener.bind(component);
+  component.addEventListener = (type, listener, options) => {
+    attached.push(type);
+    add(type, listener, options);
+  };
+  component.removeEventListener = (type, listener, options) => {
+    detached.push(type);
+    remove(type, listener, options);
+  };
+  const source = createComponentEventSource(() => component);
+
+  const pendingPointer = source.pointer();
+  const pointer = new Event("pointermove");
+  Object.defineProperties(pointer, {
+    pointerType: { value: "touch" },
+    pointerId: { value: 17 },
+    clientX: { value: -2.5 },
+    clientY: { value: 91.25 },
+    buttons: { value: 1 },
+    isPrimary: { value: true },
+    pressure: { value: 0.625 },
+  });
+  component.dispatchEvent(pointer);
+  assert.deepEqual(await pendingPointer, {
+    phase: 1,
+    device: 2,
+    pointerId: 17,
+    clientX: -2.5,
+    clientY: 91.25,
+    buttons: 1,
+    primary: true,
+    pressure: 0.625,
+    timestamp: Math.fround(pointer.timeStamp),
+  });
+  assert.deepEqual(attached, ["pointerdown", "pointermove", "pointerup", "pointercancel"]);
+  assert.deepEqual(detached, attached);
+
+  const controller = new AbortController();
+  const pendingWheel = source.wheel(controller.signal);
+  controller.abort();
+  await assert.rejects(pendingWheel, error => error.name === "AbortError");
+  assert.deepEqual(attached, [
+    "pointerdown", "pointermove", "pointerup", "pointercancel", "wheel",
+  ]);
+  assert.deepEqual(detached, attached);
 });
 
 function installFetch(bytes) {
@@ -319,8 +372,8 @@ test("scoped task events cross opaquely into the resident transition and project
   const patches = [];
   component._instance = {
     exports: {
-      fe_actor_transition_v1(...event) {
-        transitions.push(event);
+      fe_actor_transition_v1(kind, value, stamp) {
+        transitions.push([kind, value, stamp]);
         return [41];
       },
       fe_actor_project_v1() {
@@ -348,6 +401,44 @@ test("scoped task events cross opaquely into the resident transition and project
     error => error.name === "AbortError",
   );
   assert.equal(transitions.length, 1, "stale actor events must not enter Fe");
+});
+
+test("browser component events zero-fill only a compiler-derived task payload tail", () => {
+  const component = new FeComponentElement();
+  const transitions = [];
+  component._instance = {
+    exports: {
+      fe_actor_transition_v1(
+        kind, target, request, key, detail, value, timestamp, textPointer, textLength,
+        taskWidth, taskHeight, taskRatio, taskError,
+      ) {
+        transitions.push([
+          kind, target, request, key, detail, value, timestamp, textPointer, textLength,
+          taskWidth, taskHeight, taskRatio, taskError,
+        ]);
+        return [17];
+      },
+      fe_actor_project_v1() {
+        return [0, 0, 0, 0, 0];
+      },
+    },
+  };
+  component._initialized = true;
+  component._active = true;
+  component._applyPatch = () => {};
+
+  component._send(0, 0, 0, 0, 0, 0, 12.5);
+  assert.deepEqual(transitions, [[
+    0, 0, 0, 0, 0, 0, 12.5, 0, 0,
+    0, 0, 0, 0,
+  ]]);
+  assert.throws(
+    () => component._sendScopedTaskEvent(
+      [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3],
+      new AbortController().signal,
+    ),
+    /has 12 lanes; transition expects 13/,
+  );
 });
 
 test("bootstrap registers a selected adapter before real Wasm import preflight", async () => {

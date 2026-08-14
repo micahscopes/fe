@@ -66,7 +66,15 @@ impl Copy for KeyboardKey {}
 /// One untouched event delivered to a resident Fe component actor. Scalars
 /// cross as ordinary Wasm values; `text` crosses through the canonical
 /// `(pointer, length)` UTF-8 descriptor owned by the fixed host boundary.
-pub struct ComponentEvent<A = u32> {
+/// Empty task-payload tail used by components whose scoped tasks need only
+/// the long-lived component envelope's `detail` lane. It has no canonical
+/// Wasm leaves, so existing browser component events retain their nine-lane
+/// boundary.
+pub struct NoTaskPayload {}
+
+impl Copy for NoTaskPayload {}
+
+pub struct ComponentEvent<A = u32, P = NoTaskPayload> {
     pub kind: ComponentEventKind,
     /// Fe-declared action identity attached by generated page composition.
     pub target: A,
@@ -85,11 +93,15 @@ pub struct ComponentEvent<A = u32> {
     /// Untouched UTF-8 control value in Wasm memory. The fixed host reuses one
     /// bounded scratch allocation; Fe decides whether and how to retain it.
     pub text: BrowserString,
+    /// Fe-authored payload available only to compiler-materialized scoped
+    /// tasks. The fixed browser event adapter supplies the canonical zero
+    /// value for these trailing lanes and never interprets their shape.
+    pub task: P,
 }
 
-impl<A: Copy> Copy for ComponentEvent<A> {}
+impl<A: Copy, P: Copy> Copy for ComponentEvent<A, P> {}
 
-impl<A: Copy> ComponentEvent<A> {
+impl<A: Copy> ComponentEvent<A, NoTaskPayload> {
     /// Construct an application-typed event for delivery from an actor-scoped
     /// task. Browser-only lanes are zero because no standards event or host
     /// resource payload is being impersonated.
@@ -103,6 +115,26 @@ impl<A: Copy> ComponentEvent<A> {
             value: 0.0,
             timestamp: 0.0,
             text: BrowserString { ptr: 0, len: 0 },
+            task: NoTaskPayload {},
+        }
+    }
+}
+
+impl<A: Copy, P: Copy> ComponentEvent<A, P> {
+    /// Construct one rich, nominal message for delivery from an actor-scoped
+    /// task. Unlike the legacy detail helper above, every payload field stays
+    /// typed in Fe and is flattened only by the compiler at the fixed sink.
+    pub fn task_payload(target: A, payload: P) -> Self {
+        Self {
+            kind: ComponentEventKind::TaskMessage,
+            target: target,
+            request: 0,
+            key: 0,
+            detail: 0,
+            value: 0.0,
+            timestamp: 0.0,
+            text: BrowserString { ptr: 0, len: 0 },
+            task: payload,
         }
     }
 

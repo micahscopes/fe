@@ -44,6 +44,13 @@ function finiteF32(value, name) {
   return Math.fround(value);
 }
 
+function signedF32(value, name) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new TypeError(`${name} must be a finite number`);
+  }
+  return Math.fround(value);
+}
+
 function defaultClock() {
   if (typeof performance === "undefined" || typeof performance.now !== "function") {
     throw new Error("fe host completion runtime requires a monotonic performance.now clock");
@@ -85,6 +92,7 @@ export function createHostCompletionBroker(options = {}) {
   const surface = options.surface;
   const documentEvents = options.documentEvents;
   const windowEvents = options.windowEvents;
+  const componentEvents = options.componentEvents;
   const actorEvents = options.actorEvents;
   if (typeof clock !== "function" || typeof schedule !== "function"
       || typeof cancelSchedule !== "function") {
@@ -104,6 +112,12 @@ export function createHostCompletionBroker(options = {}) {
       || typeof windowEvents.animationFrame !== "function"
       || typeof windowEvents.viewport !== "function")) {
     throw new TypeError("host completion window hooks must provide animationFrame and viewport");
+  }
+  if (componentEvents !== undefined && (!componentEvents
+      || typeof componentEvents !== "object"
+      || typeof componentEvents.pointer !== "function"
+      || typeof componentEvents.wheel !== "function")) {
+    throw new TypeError("host completion component hooks must provide pointer and wheel");
   }
   if (actorEvents !== undefined && (!actorEvents
       || typeof actorEvents !== "object"
@@ -301,6 +315,77 @@ export function createHostCompletionBroker(options = {}) {
     );
   };
 
+  const beginPointer = () => {
+    if (componentEvents === undefined) {
+      throw new Error(
+        "fe:web-component-events::pointer_begin requires a component capability",
+      );
+    }
+    return beginBrowserOperation(
+      "component-pointer",
+      signal => componentEvents.pointer(signal),
+      value => {
+        if (!value || typeof value !== "object" || Array.isArray(value)) {
+          throw new TypeError("component pointer result must be an object");
+        }
+        const phase = u32(value.phase, "pointer phase");
+        const device = u32(value.device, "pointer device");
+        const pressure = finiteF32(value.pressure, "pointer pressure");
+        if (phase > 3 || device > 3 || pressure > 1) {
+          throw new TypeError("component pointer result is outside its declared Fe vocabulary");
+        }
+        if (typeof value.primary !== "boolean") {
+          throw new TypeError("pointer primary flag must be boolean");
+        }
+        return [
+          phase,
+          device,
+          u32(value.pointerId, "pointer identity"),
+          signedF32(value.clientX, "pointer client x"),
+          signedF32(value.clientY, "pointer client y"),
+          u32(value.buttons, "pointer buttons"),
+          value.primary,
+          pressure,
+          finiteF32(value.timestamp, "pointer timestamp"),
+        ];
+      },
+    );
+  };
+
+  const beginWheel = () => {
+    if (componentEvents === undefined) {
+      throw new Error(
+        "fe:web-component-events::wheel_begin requires a component capability",
+      );
+    }
+    return beginBrowserOperation(
+      "component-wheel",
+      signal => componentEvents.wheel(signal),
+      value => {
+        if (!value || typeof value !== "object" || Array.isArray(value)) {
+          throw new TypeError("component wheel result must be an object");
+        }
+        const mode = u32(value.mode, "wheel delta mode");
+        if (mode > 3) {
+          throw new TypeError("component wheel result is outside its declared Fe vocabulary");
+        }
+        if (typeof value.control !== "boolean") {
+          throw new TypeError("wheel control flag must be boolean");
+        }
+        return [
+          signedF32(value.deltaX, "wheel delta x"),
+          signedF32(value.deltaY, "wheel delta y"),
+          signedF32(value.deltaZ, "wheel delta z"),
+          mode,
+          signedF32(value.clientX, "wheel client x"),
+          signedF32(value.clientY, "wheel client y"),
+          value.control,
+          finiteF32(value.timestamp, "wheel timestamp"),
+        ];
+      },
+    );
+  };
+
   const beginActorSend = (...lanes) => {
     if (actorEvents === undefined) {
       throw new Error("fe:actor::send_begin requires a resident actor capability");
@@ -490,6 +575,10 @@ export function createHostCompletionBroker(options = {}) {
     animation_frame_begin: beginAnimationFrame,
     viewport_begin: beginViewport,
   });
+  const componentEventImports = Object.freeze({
+    pointer_begin: beginPointer,
+    wheel_begin: beginWheel,
+  });
   const actorImports = Object.freeze({
     send_begin: beginActorSend,
   });
@@ -498,6 +587,9 @@ export function createHostCompletionBroker(options = {}) {
   if (surface !== undefined) imports["fe:web-surface"] = surfaceImports;
   if (documentEvents !== undefined) imports["fe:web-document"] = documentImports;
   if (windowEvents !== undefined) imports["fe:web-window"] = windowImports;
+  if (componentEvents !== undefined) {
+    imports["fe:web-component-events"] = componentEventImports;
+  }
   if (actorEvents !== undefined) imports["fe:actor"] = actorImports;
 
   return Object.freeze({

@@ -21,6 +21,7 @@
 //! closed.
 
 pub use component::{self, *}
+pub use component_events::{self, *}
 pub use document_events::{self, *}
 pub use page::{self, *}
 pub use surface_task::{self, *}

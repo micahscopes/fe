@@ -1,0 +1,11 @@
+//! Private standards imports for one abortable component-scoped observation.
+
+use core::pending::Pending
+use ingot::wasm::WasmBackend
+use super::{PointerSample, WheelSample}
+
+#[wasm_import(module = "fe:web-component-events")]
+extern {
+    pub unsafe fn pointer_begin() -> Pending<WasmBackend, PointerSample>
+    pub unsafe fn wheel_begin() -> Pending<WasmBackend, WheelSample>
+}

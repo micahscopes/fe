@@ -140,14 +140,14 @@ impl GalleryBuilder {
         Self { page: page }
     }
 
-    /// A real browser-event acceptance demo. Its resident Fe task consumes the
-    /// typed viewport EventSource; the host contributes only the standards
-    /// resize observation and abort signal.
+    /// A real browser-event acceptance demo. Resident Fe tasks consume typed
+    /// viewport, Pointer Event, and wheel sources; the host contributes only
+    /// standards observations and abort signals.
     const fn event_studio_mount(self) -> Self {
         let builder = Self { page: self.page.open(element: PageElement::Figure) }
             .caption(
                 title: t("Event Studio"),
-                description: t2("typed viewport stream → ", "resident Fe actor"),
+                description: t2("typed browser streams → ", "resident Fe actor"),
                 source: t2("sketches/event_studio/", "src/lib.fe"),
             )
         let page = builder

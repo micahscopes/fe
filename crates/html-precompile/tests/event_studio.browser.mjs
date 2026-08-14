@@ -135,8 +135,12 @@ try {
       width: Number(values[0]?.textContent),
       height: Number(values[1]?.textContent),
       devicePixelRatioPercent: Number(values[2]?.textContent),
-      observations: Number(values[3]?.textContent),
-      failures: Number(values[4]?.textContent),
+      pointerX: Number(values[3]?.textContent),
+      pointerY: Number(values[4]?.textContent),
+      pointerEvents: Number(values[5]?.textContent),
+      wheelEvents: Number(values[6]?.textContent),
+      observations: Number(values[7]?.textContent),
+      failures: Number(values[8]?.textContent),
       states: globalThis.__feEventStudioE2E.states.length,
       errors: globalThis.__feEventStudioE2E.errors,
     };
@@ -146,16 +150,83 @@ try {
     const component = document.querySelector("#event-studio");
     const values = component?.querySelectorAll(".event-studio-grid strong");
     return script?.dataset.feState === "complete" && component?._active === true
-      && Number(values?.[3]?.textContent) >= 1;
+      && Number(values?.[7]?.textContent) >= 1;
   });
   const initial = await readStudio();
   assert.deepEqual(initial, {
     width: 640,
     height: 480,
     devicePixelRatioPercent: 150,
+    pointerX: 0,
+    pointerY: 0,
+    pointerEvents: 0,
+    wheelEvents: 0,
     observations: 1,
     failures: 0,
-    states: 5,
+    states: 2,
+    errors: [],
+  });
+
+  await page.evaluate(() => {
+    document.querySelector("#event-studio").dispatchEvent(new PointerEvent("pointermove", {
+      bubbles: true,
+      composed: true,
+      pointerId: 17,
+      pointerType: "touch",
+      clientX: 123.75,
+      clientY: 222.5,
+      buttons: 1,
+      isPrimary: true,
+      pressure: 0.625,
+    }));
+  });
+  await page.waitForFunction(() => {
+    const values = document.querySelectorAll("#event-studio .event-studio-grid strong");
+    return values[3]?.textContent === "123" && values[4]?.textContent === "222"
+      && values[5]?.textContent === "1";
+  });
+  assert.deepEqual(await readStudio(), {
+    width: 640,
+    height: 480,
+    devicePixelRatioPercent: 150,
+    pointerX: 123,
+    pointerY: 222,
+    pointerEvents: 1,
+    wheelEvents: 0,
+    observations: 1,
+    failures: 0,
+    states: 3,
+    errors: [],
+  });
+
+  await page.evaluate(() => {
+    document.querySelector("#event-studio").dispatchEvent(new WheelEvent("wheel", {
+      bubbles: true,
+      composed: true,
+      deltaX: -1.25,
+      deltaY: 8.5,
+      deltaMode: WheelEvent.DOM_DELTA_LINE,
+      clientX: 210.25,
+      clientY: 111.75,
+      ctrlKey: true,
+    }));
+  });
+  await page.waitForFunction(() => {
+    const values = document.querySelectorAll("#event-studio .event-studio-grid strong");
+    return values[3]?.textContent === "210" && values[4]?.textContent === "111"
+      && values[6]?.textContent === "1";
+  });
+  assert.deepEqual(await readStudio(), {
+    width: 640,
+    height: 480,
+    devicePixelRatioPercent: 150,
+    pointerX: 210,
+    pointerY: 111,
+    pointerEvents: 1,
+    wheelEvents: 1,
+    observations: 1,
+    failures: 0,
+    states: 4,
     errors: [],
   });
 
@@ -163,15 +234,19 @@ try {
   await page.waitForFunction(() => {
     const values = document.querySelectorAll("#event-studio .event-studio-grid strong");
     return values[0]?.textContent === "777" && values[1]?.textContent === "555"
-      && values[2]?.textContent === "200" && values[3]?.textContent === "2";
+      && values[2]?.textContent === "200" && values[7]?.textContent === "2";
   });
   assert.deepEqual(await readStudio(), {
     width: 777,
     height: 555,
     devicePixelRatioPercent: 200,
+    pointerX: 210,
+    pointerY: 111,
+    pointerEvents: 1,
+    wheelEvents: 1,
     observations: 2,
     failures: 0,
-    states: 9,
+    states: 5,
     errors: [],
   });
 
@@ -187,21 +262,25 @@ try {
   await page.waitForFunction(() => {
     const values = document.querySelectorAll("#event-studio .event-studio-grid strong");
     return document.querySelector("#event-studio")?._active === true
-      && values[3]?.textContent === "3";
+      && values[7]?.textContent === "3";
   });
   assert.deepEqual(await readStudio(), {
     width: 777,
     height: 555,
     devicePixelRatioPercent: 200,
+    pointerX: 210,
+    pointerY: 111,
+    pointerEvents: 1,
+    wheelEvents: 1,
     observations: 3,
     failures: 0,
     // The disconnected projection is dispatched after detachment, so the
-    // document-level oracle observes reconnect + four task messages only.
-    states: 14,
+    // document-level oracle observes reconnect + one rich task message only.
+    states: 7,
     errors: [],
   });
   assert.deepEqual(browserErrors, []);
-  console.log("ok: Fe Event Studio typed viewport stream, resize, DPR, and lifecycle");
+  console.log("ok: Fe Event Studio typed viewport, pointer/touch, wheel, and lifecycle streams");
 } finally {
   await browser.close();
   await new Promise(resolvePromise => server.close(resolvePromise));

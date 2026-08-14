@@ -1,0 +1,158 @@
+//! Typed occurrence streams scoped to the owning resident web component.
+//!
+//! The fixed browser capability attaches listeners only while a Fe pull is
+//! pending and returns untouched standards facts. Fe owns iteration,
+//! scheduling, gesture interpretation, actor delivery, and state. Pointer
+//! Events deliberately unify mouse, pen, and touch at the standards boundary.
+
+use core::pending::{Suspend, TaskOutcome}
+use ingot::wasm::WasmBackend
+use super::super::host::Resumable
+use super::super::reactive::{Cancelled, Event, EventSource, Subscription}
+use raw::{pointer_begin as raw_pointer_begin, wheel_begin as raw_wheel_begin}
+
+pub enum PointerPhase {
+    Down,
+    Move,
+    Up,
+    Cancel,
+}
+
+impl Copy for PointerPhase {}
+
+pub enum PointerDevice {
+    Mouse,
+    Pen,
+    Touch,
+    Other,
+}
+
+impl Copy for PointerDevice {}
+
+pub struct PointerSample {
+    pub phase: PointerPhase,
+    pub device: PointerDevice,
+    pub pointer_id: u32,
+    pub client_x: f32,
+    pub client_y: f32,
+    pub buttons: u32,
+    pub primary: bool,
+    pub pressure: f32,
+    pub timestamp: f32,
+}
+
+impl Copy for PointerSample {}
+
+pub enum WheelDeltaMode {
+    Pixel,
+    Line,
+    Page,
+    Other,
+}
+
+impl Copy for WheelDeltaMode {}
+
+pub struct WheelSample {
+    pub delta_x: f32,
+    pub delta_y: f32,
+    pub delta_z: f32,
+    pub mode: WheelDeltaMode,
+    pub client_x: f32,
+    pub client_y: f32,
+    pub control: bool,
+    pub timestamp: f32,
+}
+
+impl Copy for WheelSample {}
+
+pub struct BrowserPointerEvents {}
+pub struct BrowserWheelEvents {}
+
+impl BrowserPointerEvents {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+impl BrowserWheelEvents {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+impl EventSource<PointerSample> for BrowserPointerEvents {
+    fn subscribe(mut self) -> Subscription<PointerSample> {
+        Subscription::new(
+            initial: PointerSample {
+                phase: PointerPhase::Cancel,
+                device: PointerDevice::Other,
+                pointer_id: 0,
+                client_x: 0.0,
+                client_y: 0.0,
+                buttons: 0,
+                primary: false,
+                pressure: 0.0,
+                timestamp: 0.0,
+            },
+        )
+    }
+
+    fn next(mut self, _ subscription: own Subscription<PointerSample>) -> (
+        Subscription<PointerSample>,
+        Event<PointerSample>,
+    ) {
+        let successor = subscription.advance().0
+        let outcome: TaskOutcome<u32, PointerSample> = <Resumable as Suspend<
+            WasmBackend,
+            u32,
+        >>::suspend(Resumable {}, raw_pointer_begin())
+        let event = match outcome {
+            TaskOutcome::Success(sample,) => Event::occurrence(value: sample),
+            TaskOutcome::Failure(error,) => Event::failure(error: error),
+            TaskOutcome::Cancelled => Event::cancelled(),
+        }
+        (successor, event)
+    }
+
+    fn cancel(mut self, _ subscription: own Subscription<PointerSample>) -> Cancelled {
+        Cancelled { consumed: subscription.cursor() }
+    }
+}
+
+impl EventSource<WheelSample> for BrowserWheelEvents {
+    fn subscribe(mut self) -> Subscription<WheelSample> {
+        Subscription::new(
+            initial: WheelSample {
+                delta_x: 0.0,
+                delta_y: 0.0,
+                delta_z: 0.0,
+                mode: WheelDeltaMode::Pixel,
+                client_x: 0.0,
+                client_y: 0.0,
+                control: false,
+                timestamp: 0.0,
+            },
+        )
+    }
+
+    fn next(mut self, _ subscription: own Subscription<WheelSample>) -> (
+        Subscription<WheelSample>,
+        Event<WheelSample>,
+    ) {
+        let successor = subscription.advance().0
+        let outcome: TaskOutcome<u32, WheelSample> = <Resumable as Suspend<
+            WasmBackend,
+            u32,
+        >>::suspend(Resumable {}, raw_wheel_begin())
+        let event = match outcome {
+            TaskOutcome::Success(sample,) => Event::occurrence(value: sample),
+            TaskOutcome::Failure(error,) => Event::failure(error: error),
+            TaskOutcome::Cancelled => Event::cancelled(),
+        }
+        (successor, event)
+    }
+
+    fn cancel(mut self, _ subscription: own Subscription<WheelSample>) -> Cancelled {
+        Cancelled { consumed: subscription.cursor() }
+    }
+}

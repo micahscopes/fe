@@ -211,6 +211,149 @@ export function createWindowEventSource(windowTarget = globalThis) {
   });
 }
 
+function finiteEventNumber(value, label) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new TypeError(`${label} must be a finite number`);
+  }
+  return Math.fround(value);
+}
+
+function eventU32(value, label) {
+  if (!Number.isInteger(value) || value < 0 || value > 0xffff_ffff) {
+    throw new TypeError(`${label} must be an unsigned 32-bit integer`);
+  }
+  return value >>> 0;
+}
+
+function pointerPhase(type) {
+  switch (type) {
+    case "pointerdown": return 0;
+    case "pointermove": return 1;
+    case "pointerup": return 2;
+    case "pointercancel": return 3;
+    default: throw new TypeError(`unsupported PointerEvent type ${String(type)}`);
+  }
+}
+
+function pointerDevice(pointerType) {
+  switch (pointerType) {
+    case "mouse": return 0;
+    case "pen": return 1;
+    case "touch": return 2;
+    default: return 3;
+  }
+}
+
+function wheelDeltaMode(deltaMode) {
+  switch (deltaMode) {
+    case 0: return 0;
+    case 1: return 1;
+    case 2: return 2;
+    default: return 3;
+  }
+}
+
+function oneComponentEvent(resolveComponent, types, signal, decode, label) {
+  const component = resolveComponent();
+  if (!component || typeof component.addEventListener !== "function"
+      || typeof component.removeEventListener !== "function") {
+    throw new Error(`${label} requires an attached resident Fe component`);
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      for (const type of types) component.removeEventListener(type, onEvent);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const finish = (complete, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      complete(value);
+    };
+    const onEvent = event => {
+      if (!eventBelongsToComponent(event, component)) return;
+      try {
+        finish(resolve, decode(event));
+      } catch (error) {
+        finish(reject, error);
+      }
+    };
+    const onAbort = () => {
+      const error = new Error(`${label} observation was cancelled`);
+      error.name = "AbortError";
+      finish(reject, error);
+    };
+    for (const type of types) component.addEventListener(type, onEvent, { passive: true });
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+  });
+}
+
+/**
+ * Fixed, component-scoped standards source. It owns listeners only for one
+ * pending Fe pull and returns raw PointerEvent/WheelEvent facts; gesture math,
+ * scheduling, pointer identity policy, and application state remain in Fe.
+ */
+export function createComponentEventSource(resolveComponent) {
+  if (typeof resolveComponent !== "function") {
+    throw new TypeError("component event source requires a component resolver");
+  }
+  return Object.freeze({
+    pointer(signal) {
+      return oneComponentEvent(
+        resolveComponent,
+        ["pointerdown", "pointermove", "pointerup", "pointercancel"],
+        signal,
+        event => {
+          const pressure = finiteEventNumber(event.pressure, "PointerEvent.pressure");
+          if (pressure < 0 || pressure > 1) {
+            throw new TypeError("PointerEvent.pressure must be within [0, 1]");
+          }
+          if (typeof event.isPrimary !== "boolean") {
+            throw new TypeError("PointerEvent.isPrimary must be boolean");
+          }
+          return Object.freeze({
+            phase: pointerPhase(event.type),
+            device: pointerDevice(event.pointerType),
+            pointerId: eventU32(event.pointerId, "PointerEvent.pointerId"),
+            clientX: finiteEventNumber(event.clientX, "PointerEvent.clientX"),
+            clientY: finiteEventNumber(event.clientY, "PointerEvent.clientY"),
+            buttons: eventU32(event.buttons, "PointerEvent.buttons"),
+            primary: event.isPrimary,
+            pressure,
+            timestamp: finiteEventNumber(event.timeStamp, "PointerEvent.timeStamp"),
+          });
+        },
+        "component pointer",
+      );
+    },
+    wheel(signal) {
+      return oneComponentEvent(
+        resolveComponent,
+        ["wheel"],
+        signal,
+        event => {
+          if (typeof event.ctrlKey !== "boolean") {
+            throw new TypeError("WheelEvent.ctrlKey must be boolean");
+          }
+          return Object.freeze({
+            deltaX: finiteEventNumber(event.deltaX, "WheelEvent.deltaX"),
+            deltaY: finiteEventNumber(event.deltaY, "WheelEvent.deltaY"),
+            deltaZ: finiteEventNumber(event.deltaZ, "WheelEvent.deltaZ"),
+            mode: wheelDeltaMode(event.deltaMode),
+            clientX: finiteEventNumber(event.clientX, "WheelEvent.clientX"),
+            clientY: finiteEventNumber(event.clientY, "WheelEvent.clientY"),
+            control: event.ctrlKey,
+            timestamp: finiteEventNumber(event.timeStamp, "WheelEvent.timeStamp"),
+          });
+        },
+        "component wheel",
+      );
+    },
+  });
+}
+
 async function sha256Hex(bytes) {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
   return Array.from(digest, byte => byte.toString(16).padStart(2, "0")).join("");
@@ -747,7 +890,7 @@ export class FeComponentElement extends FeHTMLElement {
       throw new Error("fe-component received an event before Fe initialization");
     }
     const [textPointer, textLength] = this._writeEventText(text, textLimit);
-    return this._sendResidentEvent([
+    return this._sendBrowserEvent([
       kind >>> 0,
       target >>> 0,
       request >>> 0,
@@ -760,6 +903,24 @@ export class FeComponentElement extends FeHTMLElement {
     ]);
   }
 
+  _sendBrowserEvent(event) {
+    const transition = this._instance?.exports?.[ACTOR_TRANSITION];
+    const expected = transition?.length;
+    if (!Number.isInteger(expected) || expected < event.length) {
+      throw new Error(
+        `resident Fe browser event has ${event.length} lanes; transition expects ${String(expected)}`,
+      );
+    }
+    // A component may extend the fixed nine-lane standards envelope with a
+    // Fe-authored scoped-task payload. The Wasm function signature is the
+    // compiler-derived schema: browser-originated events supply the canonical
+    // zero value for that trailing task-only record, without JSON metadata or
+    // a JavaScript field codec.
+    const complete = event.slice();
+    while (complete.length < expected) complete.push(0);
+    return this._sendResidentEvent(complete);
+  }
+
   _sendResidentEvent(event) {
     if (!this._instance || !this._initialized) {
       throw new Error("fe-component received an event before Fe initialization");
@@ -767,7 +928,13 @@ export class FeComponentElement extends FeHTMLElement {
     if (!Array.isArray(event)) {
       throw new TypeError("resident Fe event must be compiler-flattened lanes");
     }
-    this._state = values(this._instance.exports[ACTOR_TRANSITION](...event));
+    const transition = this._instance.exports[ACTOR_TRANSITION];
+    if (event.length !== transition.length) {
+      throw new Error(
+        `resident Fe event has ${event.length} lanes; transition expects ${transition.length}`,
+      );
+    }
+    this._state = values(transition(...event));
     const patch = values(this._instance.exports[ACTOR_PROJECT]());
     if (patch.length !== 5 || patch.some(value => (value >>> 0) !== value)) {
       throw new Error(
@@ -1244,6 +1411,9 @@ async function run(element) {
         const needsWindowCapability = WebAssembly.Module.imports(module).some(
           value => value.module === "fe:web-window",
         );
+        const needsComponentEventCapability = WebAssembly.Module.imports(module).some(
+          value => value.module === "fe:web-component-events",
+        );
         const needsActorCapability = WebAssembly.Module.imports(module).some(
           value => value.module === "fe:actor",
         );
@@ -1269,6 +1439,11 @@ async function run(element) {
         }
         if (needsWindowCapability) {
           brokerOptions.windowEvents = createWindowEventSource(globalThis);
+        }
+        if (needsComponentEventCapability) {
+          brokerOptions.componentEvents = createComponentEventSource(
+            () => surfaceScope.component,
+          );
         }
         if (needsActorCapability) {
           brokerOptions.actorEvents = {
