@@ -66,7 +66,11 @@ test("window animation-frame adapter resolves or cancels exactly one request", a
   let nextHandle = 1;
   const callbacks = new Map();
   const cancelled = [];
-  const windowTarget = {
+  const windowTarget = new EventTarget();
+  Object.assign(windowTarget, {
+    innerWidth: 800,
+    innerHeight: 600,
+    devicePixelRatio: 2,
     requestAnimationFrame(callback) {
       const handle = nextHandle++;
       callbacks.set(handle, callback);
@@ -76,7 +80,7 @@ test("window animation-frame adapter resolves or cancels exactly one request", a
       cancelled.push(handle);
       callbacks.delete(handle);
     },
-  };
+  });
   const source = createWindowEventSource(windowTarget);
 
   const first = source.animationFrame();
@@ -90,6 +94,46 @@ test("window animation-frame adapter resolves or cancels exactly one request", a
   await assert.rejects(second, error => error.name === "AbortError");
   assert.deepEqual(cancelled, [2]);
   assert.equal(callbacks.size, 0);
+});
+
+test("window viewport adapter reports typed changes without permanent host state", async () => {
+  const windowTarget = new EventTarget();
+  Object.assign(windowTarget, {
+    innerWidth: 800,
+    innerHeight: 600,
+    devicePixelRatio: 2,
+    requestAnimationFrame() { return 1; },
+    cancelAnimationFrame() {},
+  });
+  const source = createWindowEventSource(windowTarget);
+
+  assert.deepEqual(await source.viewport(false, 0, 0, 0), {
+    width: 800,
+    height: 600,
+    devicePixelRatio: 2,
+  });
+
+  const resized = source.viewport(true, 800, 600, 2);
+  windowTarget.innerWidth = 720;
+  windowTarget.dispatchEvent(new Event("resize"));
+  assert.deepEqual(await resized, {
+    width: 720,
+    height: 600,
+    devicePixelRatio: 2,
+  });
+
+  // A change between Fe pulls is observed synchronously from current state.
+  windowTarget.devicePixelRatio = 3;
+  assert.deepEqual(await source.viewport(true, 720, 600, 2), {
+    width: 720,
+    height: 600,
+    devicePixelRatio: 3,
+  });
+
+  const controller = new AbortController();
+  const cancelled = source.viewport(true, 720, 600, 3, controller.signal);
+  controller.abort();
+  await assert.rejects(cancelled, error => error.name === "AbortError");
 });
 
 function installFetch(bytes) {

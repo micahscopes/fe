@@ -44,33 +44,33 @@ pub struct BrowserSurfaceEvents {}
 
 impl EventSource<SurfaceToken> for BrowserSurfaceEvents {
     fn subscribe(mut self) -> Subscription<SurfaceToken> {
-        Subscription::new()
+        Subscription::new(initial: SurfaceToken { raw: 0 })
     }
 
-    fn next(
-        mut self,
-        _ subscription: own Subscription<SurfaceToken>,
-    ) -> (Subscription<SurfaceToken>, Event<SurfaceToken>) {
+    fn next(mut self, _ subscription: own Subscription<SurfaceToken>) -> (
+        Subscription<SurfaceToken>,
+        Event<SurfaceToken>,
+    ) {
         let successor = subscription.advance().0
-        let outcome: TaskOutcome<u32, SurfaceToken> =
-            <Resumable as Suspend<WasmBackend, u32>>::suspend(
-                Resumable {}, raw_next_begin(),
-            )
+        let outcome: TaskOutcome<u32, SurfaceToken> = <Resumable as Suspend<
+            WasmBackend,
+            u32,
+        >>::suspend(Resumable {}, raw_next_begin())
         let event = match outcome {
-            TaskOutcome::Success(surface) => {
-                if surface.is_end() { Event::end() }
-                else { Event::occurrence(value: surface) }
-            }
-            TaskOutcome::Failure(error) => Event::failure(error: error)
-            TaskOutcome::Cancelled => Event::cancelled()
+            TaskOutcome::Success(surface,) => {
+                if surface.is_end() {
+                    Event::end()
+                } else {
+                    Event::occurrence(value: surface)
+                }
+            },
+            TaskOutcome::Failure(error,) => Event::failure(error: error),
+            TaskOutcome::Cancelled => Event::cancelled(),
         }
         (successor, event)
     }
 
-    fn cancel(
-        mut self,
-        _ subscription: own Subscription<SurfaceToken>,
-    ) -> Cancelled {
+    fn cancel(mut self, _ subscription: own Subscription<SurfaceToken>) -> Cancelled {
         Cancelled { consumed: subscription.cursor() }
     }
 }

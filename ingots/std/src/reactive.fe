@@ -42,7 +42,8 @@
 //!
 //! ## Scope of this slice
 //!
-//! v1 `T` is word-sized `Copy` values (the sampled-value grammar). There is no
+//! v1 `T` is compiler-flattenable `Copy` values, including closed records such
+//! as a viewport observation (the sampled-value grammar). There is no
 //! continuous-time interval reasoning, no push-pull optimization, and no
 //! dynamic-network GC. `map_event`, `filter_event`, and `hold` are pure
 //! transformations of occurrences. Acquisition, polling and cancellation are
@@ -61,7 +62,7 @@ use core::Fn
 /// signal is a value over time you can `sample`. Concept-named trait with a verb
 /// method, the `core::conal::Functor::map` pattern.
 ///
-/// v1 `T` is a word-sized `Copy` value (the sampled-value grammar).
+/// v1 `T` is a compiler-flattenable `Copy` value (the sampled-value grammar).
 pub trait Signal<T> {
     /// Sample the signal at time `t_ms` (milliseconds). No `uses` row: sampling
     /// is pure, checked pure, by construction.
@@ -99,9 +100,7 @@ impl Signal<u32> for Stepped {
 /// nothing it calls can smuggle one either.
 pub struct Combine2<A, B, F> { pub a: A, pub b: B, pub f: F }
 
-impl<A: Signal<u32>, B: Signal<u32>, F: Fn<(u32, u32), u32>> Signal<u32>
-    for Combine2<A, B, F>
-{
+impl<A: Signal<u32>, B: Signal<u32>, F: Fn<(u32, u32), u32>> Signal<u32> for Combine2<A, B, F> {
     fn sample(self, _ t_ms: u64) -> u32 {
         self.f.call((self.a.sample(t_ms), self.b.sample(t_ms)))
     }
@@ -112,30 +111,45 @@ impl<A: Signal<u32>, B: Signal<u32>, F: Fn<(u32, u32), u32>> Signal<u32>
 /// reserved and browser adapters cannot collapse those cases into a boolean.
 #[must_use]
 pub enum Event<T> {
-    Occurrence(T),
+    Occurrence(T,),
     Absent,
     End,
-    Failure(u32),
+    Failure(u32,),
     Cancelled,
 }
 
 impl<T: Copy> Copy for Event<T> {}
 
 impl<T> Event<T> {
-    pub fn occurrence(_ value: T) -> Self { Self::Occurrence(value) }
-    pub fn absent() -> Self { Self::Absent }
-    pub fn end() -> Self { Self::End }
-    pub fn failure(_ error: u32) -> Self { Self::Failure(error) }
-    pub fn cancelled() -> Self { Self::Cancelled }
+    pub fn occurrence(_ value: T) -> Self {
+        Self::Occurrence(value)
+    }
+    pub fn absent() -> Self {
+        Self::Absent
+    }
+    pub fn end() -> Self {
+        Self::End
+    }
+    pub fn failure(_ error: u32) -> Self {
+        Self::Failure(error)
+    }
+    pub fn cancelled() -> Self {
+        Self::Cancelled
+    }
 }
 
 impl<T: Copy> Event<T> {
     pub fn is_occurrence(self) -> bool {
-        match self { Self::Occurrence(_) => true, _ => false }
+        match self {
+            Self::Occurrence(_,) => true,
+            _ => false,
+        }
     }
-
     pub fn value_or(self, _ fallback: T) -> T {
-        match self { Self::Occurrence(value) => value, _ => fallback }
+        match self {
+            Self::Occurrence(value,) => value,
+            _ => fallback,
+        }
     }
 }
 
@@ -144,37 +158,53 @@ impl<T: Copy> Event<T> {
 /// `next` must consume the old value and return the successor; `cancel`
 /// consumes the final value. Consequently a caller cannot accidentally retain
 /// two live owners of one subscription.
-pub struct Subscription<T> {
-    cursor: u32,
-}
+pub struct Subscription<T> { cursor: u32, observed: bool, observation: T }
 
 impl<T> Subscription<T> {
-    pub fn new() -> Self {
-        Self { cursor: 0 }
+    /// Create an unobserved subscription with a well-typed source-defined
+    /// initial value. `observation` is meaningful only after
+    /// `has_observation` becomes true; no payload value is reserved as a
+    /// sentinel.
+    pub fn new(_ initial: T) -> Self {
+        Self { cursor: 0, observed: false, observation: initial }
     }
-
     pub fn cursor(self) -> u32 {
         self.cursor
     }
 
-    /// Consume this token while replacing its source-defined position. This
-    /// preserves affine ownership while allowing a state-shaped source to keep
-    /// one compact observation marker per subscription instead of hiding it in
-    /// a shared handler or host-side subscription graph.
-    pub fn with_cursor(own self, _ cursor: u32) -> Self {
-        Self { cursor: cursor }
+    /// Whether this subscription has committed a source observation.
+    pub fn has_observation(self) -> bool {
+        self.observed
+    }
+    pub fn with_observation(own self, _ value: T) -> Self {
+        Self { cursor: self.cursor, observed: true, observation: value }
     }
 
     /// Consume this position and return `(successor, old_cursor)`.
     pub fn advance(own self) -> (Self, u32) {
-        (Self { cursor: self.cursor + 1 }, self.cursor)
+        (
+            Self {
+                cursor: self.cursor + 1,
+                observed: self.observed,
+                observation: self.observation,
+            },
+            self.cursor,
+        )
+    }
+}
+
+impl<T: Copy> Subscription<T> {
+    /// The last typed state observed by this subscription. Callers use
+    /// `has_observation` to distinguish the source-defined initial value from
+    /// an actual occurrence. Copy is explicit because observing must not split
+    /// the affine token's ownership of a non-Copy payload.
+    pub fn observation(self) -> T {
+        self.observation
     }
 }
 
 /// Observable cleanup result used by source-independent tests and adapters.
-pub struct Cancelled {
-    pub consumed: u32,
-}
+pub struct Cancelled { pub consumed: u32 }
 
 /// Generic event/subscription runtime-control authority.
 ///
@@ -190,16 +220,14 @@ pub trait EventSource<T> {
 }
 
 /// Acquire one subscription through the current runtime effect handler.
-pub fn subscribe_event<T>() -> Subscription<T>
-    uses (source: mut EventSource<T>)
-{
+pub fn subscribe_event<T>() -> Subscription<T> uses (source: mut EventSource<T>) {
     source.subscribe()
 }
 
 /// Consume one subscription position and retrieve its next occurrence through
 /// the current handler. The returned successor is the only live owner.
 pub fn next_event<T>(_ subscription: own Subscription<T>) -> (Subscription<T>, Event<T>)
-    uses (source: mut EventSource<T>)
+uses (source: mut EventSource<T>)
 {
     source.next(subscription)
 }
@@ -207,7 +235,7 @@ pub fn next_event<T>(_ subscription: own Subscription<T>) -> (Subscription<T>, E
 /// Cancel the current subscription through its owning handler. Cancellation is
 /// affine: this consumes the token, so a second cancellation cannot type-check.
 pub fn cancel_event<T>(_ subscription: own Subscription<T>) -> Cancelled
-    uses (source: mut EventSource<T>)
+uses (source: mut EventSource<T>)
 {
     source.cancel(subscription)
 }
@@ -223,15 +251,11 @@ impl<T> Stream<T> {
     pub fn new() -> Self {
         Self {}
     }
-
-    pub fn subscribe(self) -> Subscription<T>
-        uses (source: mut EventSource<T>)
-    {
+    pub fn subscribe(self) -> Subscription<T> uses (source: mut EventSource<T>) {
         subscribe_event()
     }
-
     pub fn next(self, _ subscription: own Subscription<T>) -> (Subscription<T>, Event<T>)
-        uses (source: mut EventSource<T>)
+    uses (source: mut EventSource<T>)
     {
         next_event(subscription)
     }
@@ -240,11 +264,8 @@ impl<T> Stream<T> {
     /// ready. Sources may use `Absent` for a synchronous empty poll; consumers
     /// that need a value-or-terminal boundary should not each reimplement this
     /// affine forwarding loop.
-    pub fn next_ready(
-        self,
-        _ subscription: own Subscription<T>,
-    ) -> (Subscription<T>, Event<T>)
-        uses (source: mut EventSource<T>)
+    pub fn next_ready(self, _ subscription: own Subscription<T>) -> (Subscription<T>, Event<T>)
+    uses (source: mut EventSource<T>)
     {
         let mut current = subscription
         let mut ready: Event<T> = Event::absent()
@@ -253,30 +274,29 @@ impl<T> Stream<T> {
             let next = next_event(current)
             current = next.0
             match next.1 {
-                Event::Occurrence(value) => {
+                Event::Occurrence(value,) => {
                     ready = Event::occurrence(value: value)
                     waiting = false
-                }
-                Event::Absent => {}
+                },
+                Event::Absent => {},
                 Event::End => {
                     ready = Event::end()
                     waiting = false
-                }
-                Event::Failure(error) => {
+                },
+                Event::Failure(error,) => {
                     ready = Event::failure(error: error)
                     waiting = false
-                }
+                },
                 Event::Cancelled => {
                     ready = Event::cancelled()
                     waiting = false
-                }
+                },
             }
         }
         (current, ready)
     }
-
     pub fn cancel(self, _ subscription: own Subscription<T>) -> Cancelled
-        uses (source: mut EventSource<T>)
+    uses (source: mut EventSource<T>)
     {
         cancel_event(subscription)
     }
@@ -285,29 +305,32 @@ impl<T> Stream<T> {
 /// Purely transform a present occurrence, preserving absence.
 pub fn map_event<T: Copy, U, F: Fn<T, U>>(_ event: Event<T>, _ f: F) -> Event<U> {
     match event {
-        Event::Occurrence(value) => Event::occurrence(value: f.call(value))
-        Event::Absent => Event::absent()
-        Event::End => Event::end()
-        Event::Failure(error) => Event::failure(error: error)
-        Event::Cancelled => Event::cancelled()
+        Event::Occurrence(value,) => Event::occurrence(value: f.call(value)),
+        Event::Absent => Event::absent(),
+        Event::End => Event::end(),
+        Event::Failure(error,) => Event::failure(error: error),
+        Event::Cancelled => Event::cancelled(),
     }
 }
 
 /// Purely retain an occurrence when `predicate` accepts its value.
 pub fn filter_event<T: Copy, P: Fn<T, bool>>(_ event: Event<T>, _ predicate: P) -> Event<T> {
     match event {
-        Event::Occurrence(value) => {
-            if predicate.call(value) { Event::occurrence(value: value) }
-            else { Event::absent() }
-        }
-        _ => event
+        Event::Occurrence(value,) => {
+            if predicate.call(value) {
+                Event::occurrence(value: value)
+            } else {
+                Event::absent()
+            }
+        },
+        _ => event,
     }
 }
 
 /// Step a held signal from one occurrence. Absence preserves the old value.
 pub fn hold(_ current: Stepped, _ event: Event<u32>) -> Stepped {
     match event {
-        Event::Occurrence(value) => Stepped { held: value }
-        _ => current
+        Event::Occurrence(value,) => Stepped { held: value },
+        _ => current,
     }
 }

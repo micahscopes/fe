@@ -101,8 +101,9 @@ export function createHostCompletionBroker(options = {}) {
   }
   if (windowEvents !== undefined && (!windowEvents
       || typeof windowEvents !== "object"
-      || typeof windowEvents.animationFrame !== "function")) {
-    throw new TypeError("host completion window hooks must provide animationFrame");
+      || typeof windowEvents.animationFrame !== "function"
+      || typeof windowEvents.viewport !== "function")) {
+    throw new TypeError("host completion window hooks must provide animationFrame and viewport");
   }
   if (actorEvents !== undefined && (!actorEvents
       || typeof actorEvents !== "object"
@@ -257,6 +258,46 @@ export function createHostCompletionBroker(options = {}) {
       "window-animation-frame",
       signal => windowEvents.animationFrame(signal),
       value => [finiteF32(value, "animation frame timestamp")],
+    );
+  };
+
+  const beginViewport = (
+    rawSeen,
+    rawPreviousWidth,
+    rawPreviousHeight,
+    rawPreviousDevicePixelRatio,
+  ) => {
+    if (windowEvents === undefined) {
+      throw new Error("fe:web-window::viewport_begin requires a window capability");
+    }
+    if (rawSeen !== 0 && rawSeen !== 1) {
+      throw new TypeError("fe:web-window::viewport_begin seen flag must be a Fe bool");
+    }
+    const previousWidth = finiteF32(rawPreviousWidth, "previous viewport width");
+    const previousHeight = finiteF32(rawPreviousHeight, "previous viewport height");
+    const previousDevicePixelRatio = finiteF32(
+      rawPreviousDevicePixelRatio,
+      "previous viewport device pixel ratio",
+    );
+    return beginBrowserOperation(
+      "window-viewport",
+      signal => windowEvents.viewport(
+        rawSeen === 1,
+        previousWidth,
+        previousHeight,
+        previousDevicePixelRatio,
+        signal,
+      ),
+      value => {
+        if (!value || typeof value !== "object" || Array.isArray(value)) {
+          throw new TypeError("window viewport result must be an object");
+        }
+        return [
+          finiteF32(value.width, "viewport width"),
+          finiteF32(value.height, "viewport height"),
+          finiteF32(value.devicePixelRatio, "viewport device pixel ratio"),
+        ];
+      },
     );
   };
 
@@ -447,6 +488,7 @@ export function createHostCompletionBroker(options = {}) {
   });
   const windowImports = Object.freeze({
     animation_frame_begin: beginAnimationFrame,
+    viewport_begin: beginViewport,
   });
   const actorImports = Object.freeze({
     send_begin: beginActorSend,

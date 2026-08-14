@@ -345,6 +345,7 @@ const broker = createHostCompletionBroker({{
       trace.push(`frame:${{timestamp}}`);
       return timestamp;
     }},
+    viewport: async () => ({{ width: 800, height: 600, devicePixelRatio: 2 }}),
   }},
   surface: {{
     next: async signal => {{

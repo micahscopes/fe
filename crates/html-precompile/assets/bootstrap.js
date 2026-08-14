@@ -97,12 +97,37 @@ export function createDocumentEventSource(documentTarget = globalThis.document) 
   });
 }
 
-/** Fixed standards adapter for one cancellable animation-frame observation. */
+function windowViewport(windowTarget) {
+  const width = windowTarget.innerWidth;
+  const height = windowTarget.innerHeight;
+  const devicePixelRatio = windowTarget.devicePixelRatio;
+  if (typeof width !== "number" || !Number.isFinite(width) || width < 0
+      || typeof height !== "number" || !Number.isFinite(height) || height < 0
+      || typeof devicePixelRatio !== "number" || !Number.isFinite(devicePixelRatio)
+      || devicePixelRatio < 0) {
+    throw new TypeError("window viewport values must be non-negative finite numbers");
+  }
+  return Object.freeze({
+    width: Math.fround(width),
+    height: Math.fround(height),
+    devicePixelRatio: Math.fround(devicePixelRatio),
+  });
+}
+
+function sameViewport(left, right) {
+  return left.width === right.width
+    && left.height === right.height
+    && left.devicePixelRatio === right.devicePixelRatio;
+}
+
+/** Fixed standards adapter for cancellable window observations. */
 export function createWindowEventSource(windowTarget = globalThis) {
   if (!windowTarget || typeof windowTarget !== "object"
       || typeof windowTarget.requestAnimationFrame !== "function"
-      || typeof windowTarget.cancelAnimationFrame !== "function") {
-    throw new TypeError("window event source requires animation-frame functions");
+      || typeof windowTarget.cancelAnimationFrame !== "function"
+      || typeof windowTarget.addEventListener !== "function"
+      || typeof windowTarget.removeEventListener !== "function") {
+    throw new TypeError("window event source requires animation-frame and EventTarget functions");
   }
   return Object.freeze({
     animationFrame(signal) {
@@ -133,6 +158,54 @@ export function createWindowEventSource(windowTarget = globalThis) {
         } catch (error) {
           finish(reject, error);
         }
+      });
+    },
+    viewport(seen, previousWidth, previousHeight, previousDevicePixelRatio, signal) {
+      if (typeof seen !== "boolean"
+          || typeof previousWidth !== "number" || !Number.isFinite(previousWidth)
+          || typeof previousHeight !== "number" || !Number.isFinite(previousHeight)
+          || typeof previousDevicePixelRatio !== "number"
+          || !Number.isFinite(previousDevicePixelRatio)) {
+        throw new TypeError("window viewport observation has invalid typed state");
+      }
+      const previous = Object.freeze({
+        width: Math.fround(previousWidth),
+        height: Math.fround(previousHeight),
+        devicePixelRatio: Math.fround(previousDevicePixelRatio),
+      });
+      const current = windowViewport(windowTarget);
+      if (!seen || !sameViewport(current, previous)) return current;
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        const cleanup = () => {
+          windowTarget.removeEventListener("resize", onResize);
+          signal?.removeEventListener("abort", onAbort);
+        };
+        const finish = (complete, value) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          complete(value);
+        };
+        const onResize = () => {
+          const next = windowViewport(windowTarget);
+          if (!sameViewport(next, previous)) finish(resolve, next);
+        };
+        const onAbort = () => {
+          const error = new Error("window viewport observation was cancelled");
+          error.name = "AbortError";
+          finish(reject, error);
+        };
+        windowTarget.addEventListener("resize", onResize);
+        signal?.addEventListener("abort", onAbort, { once: true });
+        if (signal?.aborted) {
+          onAbort();
+          return;
+        }
+        // Close the check-to-listen race. Fe owns the previous typed viewport
+        // and decides how resize affects application state; this adapter owns
+        // no subscription graph or scheduling policy.
+        onResize();
       });
     },
   });

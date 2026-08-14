@@ -8,46 +8,98 @@ use core::pending::{Suspend, TaskOutcome}
 use ingot::wasm::WasmBackend
 use super::super::host::Resumable
 use super::super::reactive::{Cancelled, Event, EventSource, Subscription}
-use raw::animation_frame_begin as raw_animation_frame_begin
+use raw::{animation_frame_begin as raw_animation_frame_begin, viewport_begin as raw_viewport_begin}
 
-pub struct AnimationFrame {
-    pub timestamp: f32,
-}
+pub struct AnimationFrame { pub timestamp: f32 }
 
 impl Copy for AnimationFrame {}
 
+/// One complete viewport observation. Dimensions are CSS pixels; the device
+/// pixel ratio is kept separate so Fe can decide its own render resolution and
+/// mobile quality policy.
+pub struct Viewport { pub width: f32, pub height: f32, pub device_pixel_ratio: f32 }
+
+impl Copy for Viewport {}
+
 pub struct BrowserAnimationFrames {}
+pub struct BrowserViewportEvents {}
 
 impl BrowserAnimationFrames {
-    pub fn new() -> Self { Self {} }
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+impl BrowserViewportEvents {
+    pub fn new() -> Self {
+        Self {}
+    }
 }
 
 impl EventSource<AnimationFrame> for BrowserAnimationFrames {
     fn subscribe(mut self) -> Subscription<AnimationFrame> {
-        Subscription::new()
+        Subscription::new(initial: AnimationFrame { timestamp: 0.0 })
     }
 
-    fn next(
-        mut self,
-        _ subscription: own Subscription<AnimationFrame>,
-    ) -> (Subscription<AnimationFrame>, Event<AnimationFrame>) {
+    fn next(mut self, _ subscription: own Subscription<AnimationFrame>) -> (
+        Subscription<AnimationFrame>,
+        Event<AnimationFrame>,
+    ) {
         let successor = subscription.advance().0
-        let outcome: TaskOutcome<u32, AnimationFrame> =
-            <Resumable as Suspend<WasmBackend, u32>>::suspend(
-                Resumable {}, raw_animation_frame_begin(),
-            )
+        let outcome: TaskOutcome<u32, AnimationFrame> = <Resumable as Suspend<
+            WasmBackend,
+            u32,
+        >>::suspend(Resumable {}, raw_animation_frame_begin())
         let event = match outcome {
-            TaskOutcome::Success(frame) => Event::occurrence(value: frame)
-            TaskOutcome::Failure(error) => Event::failure(error: error)
-            TaskOutcome::Cancelled => Event::cancelled()
+            TaskOutcome::Success(frame,) => Event::occurrence(value: frame),
+            TaskOutcome::Failure(error,) => Event::failure(error: error),
+            TaskOutcome::Cancelled => Event::cancelled(),
         }
         (successor, event)
     }
 
-    fn cancel(
-        mut self,
-        _ subscription: own Subscription<AnimationFrame>,
-    ) -> Cancelled {
+    fn cancel(mut self, _ subscription: own Subscription<AnimationFrame>) -> Cancelled {
+        Cancelled { consumed: subscription.cursor() }
+    }
+}
+
+/// State-shaped viewport observations over the same affine runtime-control
+/// rail. The subscription—not JavaScript—owns the last typed viewport. The
+/// fixed browser adapter merely reports the current standard values or waits
+/// for one abortable `resize` event when they are unchanged.
+impl EventSource<Viewport> for BrowserViewportEvents {
+    fn subscribe(mut self) -> Subscription<Viewport> {
+        Subscription::new(
+            initial: Viewport { width: 0.0, height: 0.0, device_pixel_ratio: 0.0 },
+        )
+    }
+
+    fn next(mut self, _ subscription: own Subscription<Viewport>) -> (
+        Subscription<Viewport>,
+        Event<Viewport>,
+    ) {
+        let seen = subscription.has_observation()
+        let previous = subscription.observation()
+        let successor = subscription.advance().0
+        let outcome: TaskOutcome<u32, Viewport> = <Resumable as Suspend<WasmBackend, u32>>::suspend(
+            Resumable {},
+            raw_viewport_begin(
+                seen,
+                previous.width,
+                previous.height,
+                previous.device_pixel_ratio,
+            ),
+        )
+        match outcome {
+            TaskOutcome::Success(viewport,) => {
+                (successor.with_observation(value: viewport), Event::occurrence(value: viewport))
+            },
+            TaskOutcome::Failure(error,) => (successor, Event::failure(error: error)),
+            TaskOutcome::Cancelled => (successor, Event::cancelled()),
+        }
+    }
+
+    fn cancel(mut self, _ subscription: own Subscription<Viewport>) -> Cancelled {
         Cancelled { consumed: subscription.cursor() }
     }
 }

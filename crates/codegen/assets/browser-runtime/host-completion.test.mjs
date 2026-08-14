@@ -127,6 +127,34 @@ function animationFrameMachine(start, onCancel = () => {}) {
   });
 }
 
+function viewportMachine(start, onCancel = () => {}) {
+  return createMaterializedTaskMachine({
+    input: [],
+    step: [state, f32, f32, f32, u32],
+    complete: { start: 1, count: 3 },
+    start,
+    continuations: [{
+      state: 1,
+      range: { start: 4, count: 1 },
+      pending: { start: 4, count: 1 },
+      frame: { start: 5, count: 0 },
+      delivery: {
+        lanes: [outcome, u32, f32, f32, f32],
+        failure: { start: 1, count: 1 },
+        success: { start: 2, count: 3 },
+      },
+      invoke(tag, error, width, height, devicePixelRatio) {
+        if (tag === 0) return [0, -100 - error, 0, 0, 0];
+        if (tag === 2) {
+          onCancel();
+          return [0, -200, 0, 0, 0];
+        }
+        return [0, width, height, devicePixelRatio, 0];
+      },
+    }],
+  });
+}
+
 function actorSendMachine(start, onCancel = () => {}) {
   return createMaterializedTaskMachine({
     input: [],
@@ -323,6 +351,7 @@ describe("browser HostTimer/Recv completion broker", () => {
           calls += 1;
           return 17.25;
         },
+        viewport: async () => ({ width: 800, height: 600, devicePixelRatio: 2 }),
       },
     });
     const frame = animationFrameMachine(() => [
@@ -344,6 +373,7 @@ describe("browser HostTimer/Recv completion broker", () => {
             reject(new DOMException("cancelled", "AbortError"));
           }, { once: true });
         }),
+        viewport: async () => ({ width: 800, height: 600, devicePixelRatio: 2 }),
       },
     });
     const frame = animationFrameMachine(() => [
@@ -351,6 +381,56 @@ describe("browser HostTimer/Recv completion broker", () => {
     ], () => { feCancellations += 1; });
     const controller = new AbortController();
     const result = broker.run(frame, [], { signal: controller.signal });
+    await Promise.resolve();
+    controller.abort();
+    await expect(result).rejects.toBeInstanceOf(Error);
+    expect(hostAborts).toBe(1);
+    expect(feCancellations).toBe(1);
+    expect(broker.activeCount()).toBe(0);
+  });
+
+  test("typed viewport values resume Fe without a host-side subscription graph", async () => {
+    const calls = [];
+    const broker = createHostCompletionBroker({
+      windowEvents: {
+        animationFrame: async () => 0,
+        viewport: async (seen, width, height, devicePixelRatio, signal) => {
+          expect(signal.aborted).toBeFalse();
+          calls.push([seen, width, height, devicePixelRatio]);
+          return { width: 720, height: 480, devicePixelRatio: 2.5 };
+        },
+      },
+    });
+    const viewport = viewportMachine(() => [
+      1, 0, 0, 0,
+      broker.imports["fe:web-window"].viewport_begin(1, 800, 600, 2) >>> 0,
+    ]);
+    expect(await broker.run(viewport, [])).toEqual([720, 480, 2.5]);
+    expect(calls).toEqual([[true, 800, 600, 2]]);
+    expect(broker.activeCount()).toBe(0);
+  });
+
+  test("viewport cancellation reaches host and Fe exactly once", async () => {
+    let hostAborts = 0;
+    let feCancellations = 0;
+    const broker = createHostCompletionBroker({
+      windowEvents: {
+        animationFrame: async () => 0,
+        viewport: (_seen, _width, _height, _dpr, signal) =>
+          new Promise((_resolve, reject) => {
+            signal.addEventListener("abort", () => {
+              hostAborts += 1;
+              reject(new DOMException("cancelled", "AbortError"));
+            }, { once: true });
+          }),
+      },
+    });
+    const viewport = viewportMachine(() => [
+      1, 0, 0, 0,
+      broker.imports["fe:web-window"].viewport_begin(1, 800, 600, 2) >>> 0,
+    ], () => { feCancellations += 1; });
+    const controller = new AbortController();
+    const result = broker.run(viewport, [], { signal: controller.signal });
     await Promise.resolve();
     controller.abort();
     await expect(result).rejects.toBeInstanceOf(Error);

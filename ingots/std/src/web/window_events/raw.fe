@@ -2,9 +2,15 @@
 
 use core::pending::Pending
 use ingot::wasm::WasmBackend
-use super::AnimationFrame
+use super::{AnimationFrame, Viewport}
 
 #[wasm_import(module = "fe:web-window")]
 extern {
     pub unsafe fn animation_frame_begin() -> Pending<WasmBackend, AnimationFrame>
+    pub unsafe fn viewport_begin(
+        _ seen: bool,
+        _ previous_width: f32,
+        _ previous_height: f32,
+        _ previous_device_pixel_ratio: f32,
+    ) -> Pending<WasmBackend, Viewport>
 }

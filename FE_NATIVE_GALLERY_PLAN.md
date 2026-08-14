@@ -717,8 +717,8 @@ Origin: honesty audit of Claude Code session
   `review code`, and `much much more`; subsequent reducer operations treat
   those records exactly like keyboard-created items. Its independent semantic
   actor tape passes with the seeded keys and next-ID policy.
-- Mandelbrot-specific native transition tapes, general typed
-  lifecycle/reactive streams, pointer capture, picking/messages, resident
+- Mandelbrot-specific native transition tapes, the remaining typed pointer /
+  wheel / touch / device-loss streams, pointer capture, picking/messages, resident
   outer-gallery orchestration, and runtime-manifest removal remain open.
 - The first runtime-control/reactive consolidation slice is landed. `Stream`
   is now zero-state vocabulary over one explicit `mut EventSource` effect;
@@ -1097,13 +1097,13 @@ Origin: honesty audit of Claude Code session
   both subscriptions on cancellation/end. The generated-adapter oracle pins
   the exact hidden -> visible -> pull/load -> frame -> pull/load -> frame -> end
   sequence, while separate broker/bootstrap tapes cover typed f32 delivery and
-  exact host/Fe cancellation. Pointer, wheel, resize, device-loss, and
+  exact host/Fe cancellation. Pointer, wheel, device-loss, and
   MessagePort handlers remain. The full 33-test HTML precompiler suite is
   green. A fresh optimized publication compiles all twelve render bundles,
   verifies 14 Fe modules / 73 deployment files, and passes the real Chromium
   gallery/SourceInspector tape; standalone TodoMVC again verifies one module /
   three files and passes its Chromium tape.
-- The three real browser sources also paid back their first reusable reactive
+- The first three real browser sources also paid back their first reusable reactive
   ergonomic. `Stream<T>::next_ready` consumes an affine subscription through
   any number of `Absent` polls and returns the sole successor with either an
   occurrence or the exact end/failure/cancellation observation. SourceInspector
@@ -1111,6 +1111,30 @@ Origin: honesty audit of Claude Code session
   than spelling three polling loops. A pure Fe `SparseSource` tape proves an
   absence followed by an occurrence and then exhaustion, including the final
   consumed cursor; the browser sequencing oracle remains unchanged.
+- Viewport resize is the fourth concrete browser `EventSource` and the first
+  state-shaped aggregate event. `Subscription<T>` now owns an explicit
+  `observed` fact plus the last compiler-flattenable typed value, so neither a
+  reserved numeric cursor encoding nor a JavaScript subscription graph stands
+  in for Fe state. `BrowserViewportEvents` suspends an affine pull with
+  `Viewport { width, height, device_pixel_ratio }`; the fixed adapter reports
+  current standards values, owns one abortable `resize` listener only while
+  unchanged, and closes the check-to-listen race. Broker and adapter tapes pin
+  three-lane delivery, between-pull changes, and exact cancellation/cleanup.
+- **Event Studio is now present as a resident Fe component and gallery tile.**
+  Its actor-scoped Fe task owns stream iteration, viewport quantization,
+  ordered actor delivery, failure policy, resident state, DOM projection, and
+  reconnect behavior. The first slice intentionally covers resize/DPR rather
+  than pretending the full planned event algebra is done. A standalone exact
+  publication verifies one Fe module / six files, and a real Chromium receipt
+  proves initial 640x480 @ 1.5 DPR, resize to 777x555 @ 2 DPR, and one fresh
+  observation after affine scope cancellation/reconnect with no host errors.
+  The exact cache-disabled full gallery compiles 12 render bundles plus three
+  page/resident projections in 158.435 seconds, verifies 15 Fe modules / 79
+  deployment files, and passes both the combined Chromium gallery/inspector
+  tape (including the real resize) and the complete TodoMVC tape.
+  Pointer/touch, wheel, visibility/frame/timer traces, device loss,
+  map/filter/scan/merge/switch/latest, throttle/debounce, and bounded
+  backpressure remain for this same demo.
 - Actor-scoped tasks can now deliver ordinary typed values back into their
   owning resident Fe actor. `ActorSink<B, E>` is one keyed effect and
   `ActorMessage<E>::send` uses the existing affine `Pending`/`Suspend` rail;
@@ -1133,13 +1157,13 @@ Origin: honesty audit of Claude Code session
   the already-instantiated query whenever the solver result is not closed; a
   direct and inherent-method HIR regression pins the concrete type.
   Independent evidence is green for the four-part resident actor suite, the
-  SourceInspector and TodoMVC semantic reducer gates, 16 fixed completion-
-  broker tests, 10 bootstrap tests, and all 33 HTML precompiler tests. A fresh
+  SourceInspector and TodoMVC semantic reducer gates, 18 fixed completion-
+  broker tests, 11 bootstrap tests, and all 33 HTML precompiler tests. A fresh
   optimized publication compiled 12 render bundles in 129.475 seconds and
   verified 14 Fe modules / 73 deployment files. Its real Chromium gallery tape
   observes the exact resident sequence—connection, progress 1 through 12, then
   completion without failure—and the independent TodoMVC Chromium tape also
-  passes. Pointer/wheel/resize/device-loss/MessagePort sources, cross-actor and
+  passes. Pointer/wheel/device-loss/MessagePort sources, cross-actor and
   Worker/GPU sinks, and the fully combined resident gallery actor remain open.
 - QCGA Pencil now exposes two Fe-owned display modes through the general
   `Param::toggle` vocabulary. The default unchecked mode marches the full
@@ -1572,8 +1596,9 @@ and tested in Fe; JavaScript merely supplies frame/GPU-completion facts.
 3. Add the MIR suspension/re-entry transform for resumable Fe tasks.
 4. Make actor state resident in a live Fe instance instead of couriered in
    JavaScript uniform arrays.
-5. Provide browser implementations of Fe `EventSource` for pointer, wheel,
-   resize, animation-frame, visibility, and device-loss streams.
+5. Complete browser `EventSource` coverage. Landed: compiler-correlated render
+   surfaces, visibility, animation frame, and aggregate viewport resize.
+   Remaining: pointer/touch, wheel, device loss, and MessagePort streams.
 6. Re-orient `std::reactive::{Event, Stream, Signal}` around runtime control
    effects before putting it on the real gallery path. Values and combinators
    remain pure Fe descriptions/reducers; subscribe, await-next, yield, wake,

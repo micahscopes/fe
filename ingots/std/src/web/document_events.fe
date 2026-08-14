@@ -12,10 +12,6 @@ use super::super::host::Resumable
 use super::super::reactive::{Cancelled, Event, EventSource, Subscription}
 use raw::visibility_begin as raw_visibility_begin
 
-const UNOBSERVED_CURSOR: u32 = 0
-const VISIBLE_CURSOR: u32 = 1
-const HIDDEN_CURSOR: u32 = 2
-
 /// The complete standards visibility state used by the browser adapter.
 pub enum DocumentVisibility {
     Visible,
@@ -40,43 +36,40 @@ impl BrowserVisibilityEvents {
 
 impl EventSource<DocumentVisibility> for BrowserVisibilityEvents {
     fn subscribe(mut self) -> Subscription<DocumentVisibility> {
-        Subscription::new()
+        Subscription::new(initial: DocumentVisibility::Visible)
     }
 
-    fn next(
-        mut self,
-        _ subscription: own Subscription<DocumentVisibility>,
-    ) -> (Subscription<DocumentVisibility>, Event<DocumentVisibility>) {
-        // The source's private cursor states never escape as observations;
-        // authored consumers see only the typed `DocumentVisibility` value.
-        let cursor = subscription.cursor()
+    fn next(mut self, _ subscription: own Subscription<DocumentVisibility>) -> (
+        Subscription<DocumentVisibility>,
+        Event<DocumentVisibility>,
+    ) {
+        let seen = subscription.has_observation()
+        let previous_hidden = if seen {
+            match subscription.observation() {
+                DocumentVisibility::Visible => false,
+                DocumentVisibility::Hidden => true,
+            }
+        } else {
+            false
+        }
         let successor = subscription.advance().0
-        let seen = cursor != UNOBSERVED_CURSOR
-        let previous_hidden = cursor == HIDDEN_CURSOR
-        let outcome: TaskOutcome<u32, DocumentVisibility> =
-            <Resumable as Suspend<WasmBackend, u32>>::suspend(
-                Resumable {}, raw_visibility_begin(seen, previous_hidden),
-            )
+        let outcome: TaskOutcome<u32, DocumentVisibility> = <Resumable as Suspend<
+            WasmBackend,
+            u32,
+        >>::suspend(Resumable {}, raw_visibility_begin(seen, previous_hidden))
         match outcome {
-            TaskOutcome::Success(visibility) => {
-                let next_cursor = match visibility {
-                    DocumentVisibility::Visible => VISIBLE_CURSOR
-                    DocumentVisibility::Hidden => HIDDEN_CURSOR
-                }
+            TaskOutcome::Success(visibility,) => {
                 (
-                    successor.with_cursor(cursor: next_cursor),
+                    successor.with_observation(value: visibility),
                     Event::occurrence(value: visibility),
                 )
-            }
-            TaskOutcome::Failure(error) => (successor, Event::failure(error: error))
-            TaskOutcome::Cancelled => (successor, Event::cancelled())
+            },
+            TaskOutcome::Failure(error,) => (successor, Event::failure(error: error)),
+            TaskOutcome::Cancelled => (successor, Event::cancelled()),
         }
     }
 
-    fn cancel(
-        mut self,
-        _ subscription: own Subscription<DocumentVisibility>,
-    ) -> Cancelled {
+    fn cancel(mut self, _ subscription: own Subscription<DocumentVisibility>) -> Cancelled {
         Cancelled { consumed: subscription.cursor() }
     }
 }

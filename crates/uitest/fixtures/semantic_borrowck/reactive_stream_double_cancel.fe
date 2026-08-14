@@ -8,7 +8,7 @@ impl Copy for Source {}
 
 impl EventSource<u32> for Source {
     fn subscribe(mut self) -> Subscription<u32> {
-        Subscription::new()
+        Subscription::new(initial: 0)
     }
 
     fn next(mut self, _ subscription: own Subscription<u32>) -> (Subscription<u32>, Event<u32>) {
@@ -21,7 +21,7 @@ impl EventSource<u32> for Source {
 }
 
 fn double_stream_cancel(_ stream: Stream<u32>, _ subscription: own Subscription<u32>)
-    uses (source: mut EventSource<u32>)
+uses (source: mut EventSource<u32>)
 {
     stream.cancel(subscription)
     stream.cancel(subscription)

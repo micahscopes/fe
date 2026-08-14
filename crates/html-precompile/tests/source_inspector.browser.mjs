@@ -218,12 +218,13 @@ try {
     })), {
       title: "Fe · GPU gallery",
       pageMarker: false,
-      figures: 13,
+      figures: 14,
       surfaces: 12,
-      components: 2,
+      components: 3,
       captions: [
         "gradient",
         "TodoMVC",
+        "Event Studio",
         "cga3d",
         "qcga",
         "qcga pencil",
@@ -237,6 +238,39 @@ try {
         "rollcall pipeline",
       ],
     });
+
+    // Event Studio is the browser-event acceptance tile: a real standards
+    // resize crosses the fixed adapter, the typed Fe EventSource, the affine
+    // subscription, an actor-scoped task, and the resident Fe projection.
+    await page.waitForFunction(() => {
+      const component = document.querySelector("#gallery-event-studio");
+      const values = component?.querySelectorAll(".event-studio-grid strong");
+      return component?._active === true && values?.length === 5
+        && Number(values[3].textContent) >= 1;
+    });
+    const eventStudioBefore = await page.evaluate(() => {
+      const values = document.querySelectorAll("#gallery-event-studio .event-studio-grid strong");
+      return {
+        width: Number(values[0].textContent),
+        height: Number(values[1].textContent),
+        devicePixelRatioPercent: Number(values[2].textContent),
+        observations: Number(values[3].textContent),
+        failures: Number(values[4].textContent),
+      };
+    });
+    assert.equal(eventStudioBefore.failures, 0);
+    await page.setViewport({ width: 777, height: 555, deviceScaleFactor: 2 });
+    await page.waitForFunction(previousObservations => {
+      const values = document.querySelectorAll("#gallery-event-studio .event-studio-grid strong");
+      return Number(values[0]?.textContent) === 777
+        && Number(values[1]?.textContent) === 555
+        && Number(values[2]?.textContent) === 200
+        && Number(values[3]?.textContent) > previousObservations;
+    }, {}, eventStudioBefore.observations);
+    assert.equal(await page.$eval(
+      "#gallery-event-studio .event-studio-grid p:last-child strong",
+      node => Number(node.textContent),
+    ), 0);
 
     // Exercise the DEC tile through the real generated browser actor path:
     // `<fe-surface>.post` -> generated canonical validators/router -> module
