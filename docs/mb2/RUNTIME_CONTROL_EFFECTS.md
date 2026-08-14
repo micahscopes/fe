@@ -190,15 +190,26 @@ manifest-driven.
    disconnection; reconnect creates a fresh lifetime without exposing task
    names. A publication gate imports the generated package under Bun and runs
    an actual Fe timer task to its checked wake timestamp, while a separate
-   lifecycle gate proves start/cancel/restart mechanics. MessagePort/EventSource
-   attachment, spawn/Worker placement, nested child scopes, and migration of
-   the gallery surface loader remain. The first structured combinator is also
+   lifecycle gate proves start/cancel/restart mechanics. MessagePort
+   attachment, spawn/Worker placement, and nested child scopes remain. The
+   first structured combinator is also
    executable: `Race<WasmBackend>` consumes two affine same-payload tokens and
    the browser broker cancels the loser. A real Fe receive-vs-timer gate covers
    left/right success, child failure, explicit cancellation, and complete slot/
    timer cleanup; no `Promise.race` or winner tag appears in application JS.
-5. [todo] Derive browser `EventSource` handlers and move the gallery activation/timer
-   loop onto the same resident/reactive interpreter.
+5. [in progress] Derive browser `EventSource` handlers and move gallery lifecycle
+   onto the same resident/reactive interpreter. The first real handler is now
+   `BrowserSurfaceEvents : EventSource<SurfaceToken>`: it interprets the fixed
+   compiler-correlated `next_begin` operation through `Resumable`, maps its
+   typed outcome to occurrence/end/failure/cancellation, and is consumed by
+   SourceInspector's actor-scoped `Stream<SurfaceToken>` loop. Fe owns the
+   subscription, ordering, timeout race, fail-open load policy, exhaustion,
+   and cancellation; the fixed host still only observes declarations and
+   realizes poster loads. This required a general instance-aware runtime-MIR
+   fix for generic effect bindings, pinned by executable generic Wasm and
+   mutable Fe handler tapes. Pointer, wheel, resize, animation-frame,
+   visibility, device-loss, and MessagePort handlers—and the resident outer
+   gallery actor that combines them—remain.
 6. [todo] Move Worker admission, cancellation, restart/backoff, and supervision policy
    from handwritten JavaScript into Fe handlers and structured scopes.
 7. [todo] Route WebGPU completion, device loss/recovery, and resource lifetime through

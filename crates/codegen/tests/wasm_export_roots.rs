@@ -111,6 +111,59 @@ fn wasm_param_carrying_pub_fns_are_export_roots() {
     );
 }
 
+/// A generic trait effect can remain unresolved on its declaration template
+/// while being fully closed on the semantic instance reached by a concrete
+/// caller. Runtime MIR must enumerate that instantiated binding on both sides
+/// of every forwarded call. This stateful execution pins the failure mode that
+/// first appeared when `Stream<SurfaceToken>` entered SourceInspector: omitting
+/// the binding made callers pass one provider address to a callee whose runtime
+/// signature exposed no corresponding local. A second generic forwarding
+/// boundary ensures the concrete zero-sized provider is not rediscovered from
+/// the root expression; the instantiated effect environment must carry it.
+/// The separate reactive Fe tape pins mutable handler state.
+#[test]
+fn wasm_generic_effect_forwarding_preserves_runtime_provider() {
+    let source = r#"
+trait Source<T> {
+    fn read(self) -> T
+}
+
+struct Empty {}
+impl Copy for Empty {}
+
+impl Source<u32> for Empty {
+    fn read(self) -> u32 {
+        42
+    }
+}
+
+fn pull<T>() -> T uses (source: Source<T>) {
+    source.read()
+}
+
+fn relay<T>() -> T uses (source: Source<T>) {
+    pull()
+}
+
+pub fn run() -> u32 {
+    with (Source<u32> = Empty {}) {
+        let first: u32 = pull()
+        let second: u32 = relay()
+        first * 100 + second
+    }
+}
+"#;
+    let wasm = compile_to_wasm("wasm_generic_effect_forwarding.fe", source);
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &wasm).expect("valid generic-effect Wasm");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("zero-import instance");
+    let run = instance
+        .get_typed_func::<(), i32>(&mut store, "run")
+        .expect("run export");
+    assert_eq!(run.call(&mut store, ()).unwrap(), 4242);
+}
+
 /// The wasm backend fails closed on contracts (interop doc 9.2): the wasm root
 /// path has no contract lowering, so a module with a contract is rejected
 /// rather than given silent EVM-shaped behavior.

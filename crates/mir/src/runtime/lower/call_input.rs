@@ -10,7 +10,10 @@ use crate::{
 
 use super::{
     boundary::{BoundarySiteAllocator, StagedBoundary, default_by_place_boundary},
-    classify::{desired_runtime_effect_arg_boundary, runtime_effect_binding_plan_for_binding_idx},
+    classify::{
+        desired_runtime_effect_arg_boundary, runtime_effect_binding_exists_for_binding_idx,
+        runtime_effect_binding_plan_for_binding_idx,
+    },
     place::resolved_effect_arg_address_space,
     type_info::{
         RuntimeTypeEnv, provider_class_for_target_in_env, runtime_zero_sized_transport_ty,
@@ -136,8 +139,12 @@ fn compile_effect_arg_plan<'db>(
     boundary_sites: &mut BoundarySiteAllocator,
 ) -> CompiledEffectArgPlan<'db> {
     let space = resolved_effect_arg_address_space(db, body, arg);
+    let has_effect_binding =
+        runtime_effect_binding_exists_for_binding_idx(db, semantic, arg.binding_idx);
     let binding_plan = runtime_effect_binding_plan_for_binding_idx(db, semantic, arg.binding_idx);
-    if binding_plan.is_none() && effect_arg_is_runtime_zst(db, body, type_env, arg) {
+    if binding_plan.is_none()
+        && (has_effect_binding || effect_arg_is_runtime_zst(db, body, type_env, arg))
+    {
         return CompiledEffectArgPlan::Erased;
     }
     let boundary =

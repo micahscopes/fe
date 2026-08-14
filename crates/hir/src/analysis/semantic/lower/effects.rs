@@ -2,8 +2,8 @@ use crate::{
     analysis::{
         HirAnalysisDb,
         semantic::{
-            SEffectArg, SEffectArgValue, SOperand, SPlace, SValueId,
-            provisional_provider_binding_for_instance_effect,
+            SEffectArg, SEffectArgValue, SOperand, SPlace, SValueId, SemanticInstance,
+            instantiated_effect_env, provisional_provider_binding_for_instance_effect,
             provisional_provider_idx_for_requirement,
             resolved_provider_binding_for_instance_effect,
         },
@@ -140,6 +140,47 @@ pub fn owner_effect_bindings<'db>(
                 })
                 .map(LocalBinding::effect_param)
                 .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// Runtime-visible effect bindings for one fully instantiated semantic body.
+///
+/// The owner-only query above is sufficient when the declaration's effect
+/// environment resolves without generic substitution. A generic effect such
+/// as `EventSource<T>` may be unresolved on the template while its concrete
+/// semantic instance is closed. Runtime MIR must enumerate the latter: call
+/// sites already carry its instantiated provider argument, and omitting the
+/// corresponding body local makes the resolved call signature inconsistent.
+pub fn semantic_instance_effect_bindings<'db>(
+    db: &'db dyn HirAnalysisDb,
+    instance: SemanticInstance<'db>,
+) -> Vec<LocalBinding<'db>> {
+    let Some(env) = instantiated_effect_env(db, instance) else {
+        return Vec::new();
+    };
+    env.requirements(db)
+        .iter()
+        .filter(|requirement| {
+            matches!(
+                requirement.key.kind(),
+                EffectKeyKind::Type | EffectKeyKind::Trait
+            )
+        })
+        .filter_map(|requirement| {
+            let provider_idx = env
+                .resolutions(db)
+                .iter()
+                .find(|resolution| resolution.requirement_idx == requirement.binding_idx)?
+                .provider_idx;
+            Some(LocalBinding::EffectParam {
+                site: requirement.binding_site,
+                idx: requirement.binding_idx as usize,
+                binding_name: requirement.binding_name,
+                provider_idx,
+                key_path: requirement.binding_path,
+                is_mut: requirement.is_mut,
+            })
         })
         .collect()
 }

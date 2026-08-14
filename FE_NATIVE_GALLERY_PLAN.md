@@ -1034,6 +1034,38 @@ Origin: honesty audit of Claude Code session
   and TodoMVC tapes pass against those artifacts. Frame-duration feedback
   remains the next quality slice; actual pixels retain the named
   external-adapter qualification.
+- The first standards-shaped browser `EventSource<T>` now runs on that same
+  compiler-generated suspension rail. `Event<T>` is a typed closed vocabulary
+  for occurrence, absence, exhaustion, operation failure, and structured
+  cancellation; `Subscription<T>` remains affine, and `Stream<T>` is still a
+  zero-state Fe facade over the installed handler rather than a second
+  scheduler. `BrowserSurfaceEvents` interprets the existing fixed
+  `fe:web-surface::next_begin` operation into
+  `Event<SurfaceToken>`, while `SurfaceLoader` has contracted to poster-load
+  realization only. SourceInspector's actor-scoped gallery task consumes that
+  stream, owns end/failure/cancellation policy, races each load against its Fe
+  timer, and always consumes its subscription; the source contract gate
+  forbids a return to `loader.next_begin`. No import name, task JSON, manifest
+  field, surface count, selector, or demo case was added to the host.
+- That migration exposed and fixed a general monomorphized-effect compiler
+  bug. Owner-only effect enumeration could omit `EventSource<T>` on a generic
+  declaration even though the concrete semantic instance had a closed
+  provider resolution. Callers consequently transported a provider argument
+  that the callee runtime signature could not map to a semantic local.
+  Semantic and runtime MIR now enumerate bindings from the instantiated effect
+  environment, and caller effect planning uses the identical instance-aware
+  binding. An executable two-boundary generic-effect Wasm regression pins the
+  zero-width case; the existing mutable reactive tape pins state retention and
+  affine cleanup. The complete 83-test MIR unit suite, four-test Wasm export
+  suite, both affine double-cancel diagnostics, missing-handler diagnostic,
+  and SourceInspector Wasmtime plus generated-adapter/Bun gate are green. This
+  establishes one real browser EventSource handler, not yet the general
+  pointer/wheel/resize/frame/visibility/device-loss family. A fresh optimized
+  gallery publication verifies 14 Fe modules / 73 deployment files and its
+  real Chromium gallery/SourceInspector tape observes the compiler-derived
+  surface sequence settling in order. The independently precompiled TodoMVC
+  publication verifies one Fe module / three files and passes its complete
+  Chromium behavior, keyed-identity, focus, UTF-8, and lifecycle tape.
 
 This ledger records achieved evidence, not a relaxation of the phases or the
 Definition of done below.

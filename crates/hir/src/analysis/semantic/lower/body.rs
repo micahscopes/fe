@@ -38,7 +38,7 @@ use crate::{
 };
 
 use super::{
-    effects::{owner_effect_bindings, provisional_owner_effect_bindings},
+    effects::{provisional_owner_effect_bindings, semantic_instance_effect_bindings},
     local_facts::{initial_snapshot_source, ordinary_direct_value_role},
 };
 
@@ -104,7 +104,9 @@ pub(crate) fn lower_to_smir_with_call_sites<'a, 'db>(
             push_binding_local(binding);
             idx += 1;
         }
-        for binding in owner_effect_bindings_for_mode(db, template_owner, binding_role_mode) {
+        for binding in
+            owner_effect_bindings_for_mode(db, instance, template_owner, binding_role_mode)
+        {
             push_binding_local(binding);
         }
         return SemanticBody {
@@ -151,11 +153,12 @@ pub(crate) fn lower_to_smir_with_call_sites<'a, 'db>(
 
 fn owner_effect_bindings_for_mode<'db>(
     db: &'db dyn HirAnalysisDb,
+    instance: SemanticInstance<'db>,
     owner: BodyOwner<'db>,
     binding_role_mode: BindingRoleMode,
 ) -> Vec<LocalBinding<'db>> {
     match binding_role_mode {
-        BindingRoleMode::Final => owner_effect_bindings(db, owner),
+        BindingRoleMode::Final => semantic_instance_effect_bindings(db, instance),
         BindingRoleMode::Provisional => provisional_owner_effect_bindings(db, owner),
     }
 }
@@ -352,7 +355,12 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
     }
 
     fn owner_effect_bindings(&self) -> Vec<LocalBinding<'db>> {
-        owner_effect_bindings_for_mode(self.db, self.template_owner, self.binding_role_mode)
+        owner_effect_bindings_for_mode(
+            self.db,
+            self.instance,
+            self.template_owner,
+            self.binding_role_mode,
+        )
     }
 
     fn binding_role(&self, binding: LocalBinding<'db>) -> SemanticLocalRole<'db> {

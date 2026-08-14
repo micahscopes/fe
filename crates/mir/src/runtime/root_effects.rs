@@ -1,7 +1,8 @@
 use hir::{
     analysis::{
         semantic::{
-            SemanticInstance, owner_effect_bindings, resolved_provider_binding_for_instance_effect,
+            SemanticInstance, resolved_provider_binding_for_instance_effect,
+            semantic_instance_effect_bindings,
         },
         ty::{
             ProviderAddressSpace,
@@ -43,7 +44,6 @@ pub(crate) fn entry_effect_arg_plans<'db>(
     context: EntryEffectContext<'db>,
     semantic: SemanticInstance<'db>,
 ) -> Result<Vec<EntryEffectArgPlan<'db>>, LowerError> {
-    let owner = semantic.key(db).owner(db);
     let (contract_fields, total_code_slots) = if let Some(contract) = context.contract() {
         (
             Some(
@@ -59,7 +59,7 @@ pub(crate) fn entry_effect_arg_plans<'db>(
     } else {
         (None, 0)
     };
-    owner_effect_bindings(db, owner)
+    semantic_instance_effect_bindings(db, semantic)
         .into_iter()
         .filter_map(|binding| {
             let provider = resolved_provider_binding_for_instance_effect(db, semantic, binding)?;

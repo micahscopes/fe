@@ -1,5 +1,5 @@
 use hir::analysis::{
-    semantic::{SemanticInstance, owner_effect_bindings, same_owner_effect_binding},
+    semantic::{SemanticInstance, same_owner_effect_binding, semantic_instance_effect_bindings},
     ty::ty_check::{BodyOwner, LocalBinding, ParamSite},
     ty::ty_def::TyId,
 };
@@ -24,6 +24,26 @@ pub(crate) fn runtime_param_locals<'db>(
     let entries = runtime_visible_binding_plans(db, semantic);
     if entries.len() != params.len() {
         let owner = semantic.key(db).owner(db);
+        let owner_name = match owner {
+            BodyOwner::Func(func) => {
+                let name = func
+                    .name(db)
+                    .to_opt()
+                    .map(|name| name.data(db).to_string())
+                    .unwrap_or_else(|| "<anonymous function>".to_string());
+                func.scope()
+                    .parent(db)
+                    .and_then(|scope| scope.pretty_path(db))
+                    .map(|path| format!("{path}::{name}"))
+                    .unwrap_or_else(|| {
+                        format!(
+                            "{name} in {:?}",
+                            func.scope().parent(db).map(|scope| scope.item())
+                        )
+                    })
+            }
+            _ => format!("{owner:?}"),
+        };
         let binding_debug = entries
             .iter()
             .map(|entry| {
@@ -39,7 +59,7 @@ pub(crate) fn runtime_param_locals<'db>(
             .collect::<Vec<_>>()
             .join("; ");
         panic!(
-            "failed to map runtime params to semantic locals for {:?} owner={:?}: expected {} runtime-visible params, got {}; params={params:?}; visible_bindings=[{}]",
+            "failed to map runtime params to semantic locals for {:?} owner={:?} ({owner_name}): expected {} runtime-visible params, got {}; params={params:?}; visible_bindings=[{}]",
             semantic.key(db),
             owner,
             entries.len(),
@@ -96,7 +116,7 @@ pub(crate) fn runtime_visible_binding_plans<'db>(
         if !matches!(plan, RuntimeParamPlan::Erased) {
             entries.push(RuntimeVisibleBindingPlan {
                 binding,
-                local: runtime_visible_binding_local(db, owner, typed_body, binding),
+                local: runtime_visible_binding_local(db, semantic, owner, typed_body, binding),
                 semantic_ty: runtime_visible_binding_semantic_ty(db, semantic, typed_body, binding),
                 plan,
             });
@@ -137,7 +157,7 @@ pub(crate) fn runtime_visible_binding_plans<'db>(
         }
     }
 
-    for binding in owner_effect_bindings(db, owner) {
+    for binding in semantic_instance_effect_bindings(db, semantic) {
         let plan = owner_effect_binding_boundary(db, semantic, binding)
             .map(RuntimeParamPlan::Boundary)
             .unwrap_or(RuntimeParamPlan::Erased);
@@ -149,6 +169,7 @@ pub(crate) fn runtime_visible_binding_plans<'db>(
 
 fn runtime_visible_binding_local<'db>(
     db: &'db dyn MirDb,
+    semantic: SemanticInstance<'db>,
     owner: BodyOwner<'db>,
     typed_body: &hir::analysis::ty::ty_check::TypedBody<'db>,
     binding: LocalBinding<'db>,
@@ -180,7 +201,7 @@ fn runtime_visible_binding_local<'db>(
             next += 1;
         }
     }
-    for effect_binding in owner_effect_bindings(db, owner) {
+    for effect_binding in semantic_instance_effect_bindings(db, semantic) {
         if same_owner_effect_binding(effect_binding, binding) {
             return hir::analysis::semantic::SLocalId::from_u32(next);
         }

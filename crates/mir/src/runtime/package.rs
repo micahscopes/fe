@@ -5,7 +5,7 @@ use hir::{
         semantic::{
             GenericSubst, ImplEnv, ManualContractSection, RootSemanticInstanceError,
             SemanticInstance, SemanticInstanceKey, get_or_build_semantic_instance,
-            owner_effect_bindings, root_semantic_instance_key, same_owner_effect_binding,
+            root_semantic_instance_key, same_owner_effect_binding,
         },
         ty::{
             const_ty::ConstTyData,
@@ -902,8 +902,7 @@ fn wasm_root_has_surviving_effect_param<'db>(
     db: &'db dyn MirDb,
     semantic: SemanticInstance<'db>,
 ) -> bool {
-    let owner = semantic.key(db).owner(db);
-    let effect_bindings = owner_effect_bindings(db, owner);
+    let effect_bindings = hir::analysis::semantic::semantic_instance_effect_bindings(db, semantic);
     if effect_bindings.is_empty() {
         return false;
     }
@@ -2105,7 +2104,7 @@ pub(crate) fn runtime_instance_for_semantic_with_visible_param_overrides<'db>(
         .iter()
         .map(|entry| {
             override_class(entry).unwrap_or_else(|| {
-                runtime_class_for_visible_binding_entry(db, semantic, typed_body, owner, env, entry)
+                runtime_class_for_visible_binding_entry(db, semantic, typed_body, env, entry)
             })
         })
         .collect();
@@ -2117,11 +2116,10 @@ fn runtime_class_for_visible_binding_entry<'db>(
     db: &'db dyn MirDb,
     semantic: SemanticInstance<'db>,
     typed_body: &hir::analysis::ty::ty_check::TypedBody<'db>,
-    owner: BodyOwner<'db>,
     env: RuntimeTypeEnv<'db>,
     entry: &RuntimeVisibleBindingPlan<'db>,
 ) -> RuntimeClass<'db> {
-    if owner_effect_bindings(db, owner)
+    if hir::analysis::semantic::semantic_instance_effect_bindings(db, semantic)
         .into_iter()
         .any(|binding| same_owner_effect_binding(binding, entry.binding))
     {

@@ -13,9 +13,10 @@ use std::web::component::{
 }
 use core::actor::ScopedTask
 use core::pending::{Race, RaceOutcome, Suspend, TaskOutcome, Timer}
+use std::reactive::{Event, EventSource, Stream}
 use std::host::{HostTimer, Resumable}
 use std::wasm::WasmBackend
-use std::web::{BrowserSurfaceLoader, SurfaceLoader, SurfaceToken}
+use std::web::{BrowserSurfaceEvents, BrowserSurfaceLoader, SurfaceLoader, SurfaceToken}
 use std::web::page::{
     ComponentComposition, ComponentView, PageAttribute, PageBuilder, PageElement, PageText,
 }
@@ -175,42 +176,50 @@ fn is_success(status: u32) -> bool {
 /// gallery; disconnect cancellation terminates the task immediately.
 fn activate_gallery_surfaces() -> u32
     uses (
+        events: mut EventSource<SurfaceToken>,
         loader: mut SurfaceLoader<WasmBackend>,
         timer: mut Timer<WasmBackend>,
         race: mut Race<WasmBackend>,
         suspend: Suspend<WasmBackend, u32>,
     )
 {
+    let stream: Stream<SurfaceToken> = Stream::new()
+    let mut subscription = stream.subscribe()
     let mut loaded: u32 = 0
     let mut running: bool = true
     while running {
-        let next_pending = loader.next_begin()
-        let next: TaskOutcome<u32, SurfaceToken> = suspend.suspend(next_pending)
-        match next {
-            TaskOutcome::Failure(_) => { running = false }
-            TaskOutcome::Cancelled => { return loaded }
-            TaskOutcome::Success(surface) => {
-                if surface.is_end() {
-                    running = false
-                } else {
-                    let load_pending = loader.load_begin(surface)
-                    let timeout_pending = timer.sleep_begin(SURFACE_ACTIVATION_TIMEOUT_MS)
-                    let first = race.race(load_pending, timeout_pending)
-                    let completion: TaskOutcome<u32, RaceOutcome<u64>> = suspend.suspend(first)
-                    match completion {
-                        TaskOutcome::Success(winner) => {
-                            match winner {
-                                RaceOutcome::Left(_) => { loaded = loaded + 1 }
-                                RaceOutcome::Right(_) => { loaded = loaded + 1 }
-                            }
+        let next = stream.next(subscription)
+        subscription = next.0
+        match next.1 {
+            Event::Occurrence(surface) => {
+                let load_pending = loader.load_begin(surface)
+                let timeout_pending = timer.sleep_begin(SURFACE_ACTIVATION_TIMEOUT_MS)
+                let first = race.race(load_pending, timeout_pending)
+                let completion: TaskOutcome<u32, RaceOutcome<u64>> = suspend.suspend(first)
+                match completion {
+                    TaskOutcome::Success(winner) => {
+                        match winner {
+                            RaceOutcome::Left(_) => { loaded = loaded + 1 }
+                            RaceOutcome::Right(_) => { loaded = loaded + 1 }
                         }
-                        TaskOutcome::Failure(_) => { loaded = loaded + 1 }
-                        TaskOutcome::Cancelled => { return loaded }
+                    }
+                    TaskOutcome::Failure(_) => { loaded = loaded + 1 }
+                    TaskOutcome::Cancelled => {
+                        stream.cancel(subscription)
+                        return loaded
                     }
                 }
             }
+            Event::Absent => {}
+            Event::End => { running = false }
+            Event::Failure(_) => { running = false }
+            Event::Cancelled => {
+                stream.cancel(subscription)
+                return loaded
+            }
         }
     }
+    stream.cancel(subscription)
     loaded
 }
 
@@ -334,6 +343,7 @@ actor SourceInspector {
 
     fn activate_surfaces() -> u32 uses (ScopedTask) {
         with (
+            EventSource<SurfaceToken> = BrowserSurfaceEvents {},
             SurfaceLoader<WasmBackend> = BrowserSurfaceLoader {},
             Timer<WasmBackend> = HostTimer {},
             Race<WasmBackend> = Resumable {},

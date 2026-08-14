@@ -7,9 +7,9 @@
 use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
-    compile_resident_actor, emit_materialized_task_adapter_js, HOST_COMPLETION_RUNTIME_JS,
-    MATERIALIZED_TASK_RUNTIME_JS, RESIDENT_ACTOR_INITIALIZE_EXPORT, RESIDENT_ACTOR_PROJECT_EXPORT,
-    RESIDENT_ACTOR_TRANSITION_EXPORT,
+    HOST_COMPLETION_RUNTIME_JS, MATERIALIZED_TASK_RUNTIME_JS, RESIDENT_ACTOR_INITIALIZE_EXPORT,
+    RESIDENT_ACTOR_PROJECT_EXPORT, RESIDENT_ACTOR_TRANSITION_EXPORT, compile_resident_actor,
+    emit_materialized_task_adapter_js,
 };
 use hir::hir_def::HirIngot;
 use url::Url;
@@ -216,6 +216,17 @@ fn source_inspector_owns_selection_loading_stale_response_and_presentation_polic
         .join("../../demos/sketches/source_inspector")
         .canonicalize()
         .expect("SourceInspector ingot path");
+    let source = std::fs::read_to_string(path.join("src/lib.fe"))
+        .expect("SourceInspector authored Fe source");
+    assert!(
+        source.contains("Stream<SurfaceToken>")
+            && source.contains("EventSource<SurfaceToken> = BrowserSurfaceEvents {}"),
+        "sequential gallery loading must consume the standard typed Fe reactive surface"
+    );
+    assert!(
+        !source.contains("loader.next_begin"),
+        "surface discovery must not bypass EventSource through the loader authority"
+    );
     let url = Url::from_directory_path(path).expect("SourceInspector URL");
     let mut db = DriverDataBase::default();
     assert!(
@@ -371,7 +382,8 @@ if (broker.activeCount() !== 0 || broker.cancelAll() !== 0) throw new Error("sur
         },
         // Legacy surface lifecycle events are valid transport facts, but the
         // canonical actor no longer stores or interprets them. Its scoped Fe
-        // task owns sequencing through typed Pending/TaskOutcome values.
+        // task owns sequencing through EventSource<SurfaceToken>, Stream, and
+        // the shared typed runtime-control Pending/TaskOutcome rail.
         Event {
             kind: 9,
             target: 0,

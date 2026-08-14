@@ -1,8 +1,9 @@
 //! Private host-import surface for compiler-correlated render declarations.
 //!
 //! Each operation mints an ordinary browser-completed `Pending` token. The
-//! fixed host may enumerate declarations and realize one poster load, but it
-//! cannot choose sequencing, timeout, retry, or cancellation policy.
+//! parent module interprets `next_begin` as a typed reactive `EventSource`;
+//! the fixed host may enumerate declarations and realize one poster load, but
+//! it cannot choose sequencing, timeout, retry, or cancellation policy.
 
 use core::pending::Pending
 use ingot::wasm::WasmBackend

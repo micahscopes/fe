@@ -28,6 +28,7 @@ pub(crate) use instance::{
 pub use ir::*;
 pub use lower::{
     effect_param_site, lower_to_smir, owner_effect_bindings, same_owner_effect_binding,
+    semantic_instance_effect_bindings,
 };
 pub use verify::{SemanticVerifyError, verify_semantic_body};
 pub use view_projection::{

@@ -1,8 +1,8 @@
 // Event acquisition has one explicit runtime-control authority. A consumer
 // cannot silently construct or poll a second source outside a handler scope.
 
-use std::reactive::subscribe_event
+use std::reactive::{Subscription, subscribe_event}
 
 fn missing_event_source() {
-    subscribe_event()
+    let subscription: Subscription<u32> = subscribe_event()
 }
