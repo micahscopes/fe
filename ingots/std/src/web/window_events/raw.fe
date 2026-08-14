@@ -1,0 +1,10 @@
+//! Private standards import for one abortable animation-frame observation.
+
+use core::pending::Pending
+use ingot::wasm::WasmBackend
+use super::AnimationFrame
+
+#[wasm_import(module = "fe:web-window")]
+extern {
+    pub unsafe fn animation_frame_begin() -> Pending<WasmBackend, AnimationFrame>
+}

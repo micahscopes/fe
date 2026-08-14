@@ -1,0 +1,53 @@
+//! Typed window-level browser events over the canonical reactive/effect rail.
+//!
+//! Each animation-frame pull owns one browser request through suspension and
+//! receives the untouched standards timestamp as a typed Fe value. The fixed
+//! adapter does not decide what work is paced, sampled, or presented.
+
+use core::pending::{Suspend, TaskOutcome}
+use ingot::wasm::WasmBackend
+use super::super::host::Resumable
+use super::super::reactive::{Cancelled, Event, EventSource, Subscription}
+use raw::animation_frame_begin as raw_animation_frame_begin
+
+pub struct AnimationFrame {
+    pub timestamp: f32,
+}
+
+impl Copy for AnimationFrame {}
+
+pub struct BrowserAnimationFrames {}
+
+impl BrowserAnimationFrames {
+    pub fn new() -> Self { Self {} }
+}
+
+impl EventSource<AnimationFrame> for BrowserAnimationFrames {
+    fn subscribe(mut self) -> Subscription<AnimationFrame> {
+        Subscription::new()
+    }
+
+    fn next(
+        mut self,
+        _ subscription: own Subscription<AnimationFrame>,
+    ) -> (Subscription<AnimationFrame>, Event<AnimationFrame>) {
+        let successor = subscription.advance().0
+        let outcome: TaskOutcome<u32, AnimationFrame> =
+            <Resumable as Suspend<WasmBackend, u32>>::suspend(
+                Resumable {}, raw_animation_frame_begin(),
+            )
+        let event = match outcome {
+            TaskOutcome::Success(frame) => Event::occurrence(value: frame)
+            TaskOutcome::Failure(error) => Event::failure(error: error)
+            TaskOutcome::Cancelled => Event::cancelled()
+        }
+        (successor, event)
+    }
+
+    fn cancel(
+        mut self,
+        _ subscription: own Subscription<AnimationFrame>,
+    ) -> Cancelled {
+        Cancelled { consumed: subscription.cursor() }
+    }
+}

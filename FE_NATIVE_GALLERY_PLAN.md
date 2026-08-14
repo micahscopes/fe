@@ -1086,6 +1086,23 @@ Origin: honesty audit of Claude Code session
   14 Fe modules / 73 deployment files; its real Chromium gallery/SourceInspector
   tape passes. The independently rebuilt TodoMVC publication again verifies one
   module / three files and passes its complete Chromium behavior tape.
+- Animation frames are the third concrete browser `EventSource` and the first
+  continuously requested clock stream. `BrowserAnimationFrames` suspends one
+  affine pull through the same generated continuation rail and returns an
+  `AnimationFrame { timestamp: f32 }`; the fixed window adapter owns exactly
+  one cancellable `requestAnimationFrame` request and supplies only the raw
+  standards timestamp. SourceInspector now paces each completed, timed-out, or
+  failed poster activation through that stream before pulling the next surface.
+  Fe decides to continue without pacing if the frame source fails and consumes
+  both subscriptions on cancellation/end. The generated-adapter oracle pins
+  the exact hidden -> visible -> pull/load -> frame -> pull/load -> frame -> end
+  sequence, while separate broker/bootstrap tapes cover typed f32 delivery and
+  exact host/Fe cancellation. Pointer, wheel, resize, device-loss, and
+  MessagePort handlers remain. The full 33-test HTML precompiler suite is
+  green. A fresh optimized publication compiles all twelve render bundles,
+  verifies 14 Fe modules / 73 deployment files, and passes the real Chromium
+  gallery/SourceInspector tape; standalone TodoMVC again verifies one module /
+  three files and passes its Chromium tape.
 
 This ledger records achieved evidence, not a relaxation of the phases or the
 Definition of done below.

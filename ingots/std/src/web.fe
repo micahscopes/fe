@@ -25,6 +25,7 @@ pub use document_events::{self, *}
 pub use page::{self, *}
 pub use surface_task::{self, *}
 pub use view::{self, *}
+pub use window_events::{self, *}
 
 use raw::{
     document_get_document_element,

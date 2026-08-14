@@ -221,6 +221,8 @@ fn source_inspector_owns_selection_loading_stale_response_and_presentation_polic
     assert!(
         source.contains("Stream<SurfaceToken>")
             && source.contains("EventSource<SurfaceToken> = BrowserSurfaceEvents {}")
+            && source.contains("Stream<AnimationFrame>")
+            && source.contains("EventSource<AnimationFrame> = BrowserAnimationFrames::new()")
             && source.contains("Stream<DocumentVisibility>")
             && source.contains("EventSource<DocumentVisibility> = BrowserVisibilityEvents::new()"),
         "gallery loading must consume typed Fe surface and visibility streams"
@@ -282,25 +284,40 @@ import {{ createMaterializedTaskRegistry }} from {adapter_url:?};
 import {{ createHostCompletionBroker }} from {host_runtime_url:?};
 const tokens = [11n, 22n, 0n];
 const loads = [];
+const trace = [];
 const visibilityCalls = [];
 const visibilityStates = [1, 0];
+const frameTimes = [16.0, 32.0];
 const broker = createHostCompletionBroker({{
   documentEvents: {{
     visibility: async (seen, previousHidden, signal) => {{
       if (signal.aborted) throw new DOMException("cancelled", "AbortError");
       visibilityCalls.push([seen, previousHidden]);
-      return visibilityStates.shift();
+      const state = visibilityStates.shift();
+      trace.push(`visibility:${{state}}`);
+      return state;
+    }},
+  }},
+  windowEvents: {{
+    animationFrame: async signal => {{
+      if (signal.aborted) throw new DOMException("cancelled", "AbortError");
+      const timestamp = frameTimes.shift();
+      trace.push(`frame:${{timestamp}}`);
+      return timestamp;
     }},
   }},
   surface: {{
     next: async signal => {{
       if (signal.aborted) throw new DOMException("cancelled", "AbortError");
       if (visibilityStates.length !== 0) throw new Error("surface pull began while hidden");
-      return tokens.shift();
+      const token = tokens.shift();
+      trace.push(`next:${{token}}`);
+      return token;
     }},
     load: async (token, signal) => {{
       if (signal.aborted) throw new DOMException("cancelled", "AbortError");
       loads.push(token);
+      trace.push(`load:${{token}}`);
       if (token === 22n) throw new Error("synthetic surface failure");
       return token;
     }},
@@ -315,6 +332,9 @@ if (output.length !== 1 || output[0] !== 2) throw new Error(`Fe surface policy r
 if (visibilityCalls.length !== 2 || visibilityCalls[0][0] !== false || visibilityCalls[0][1] !== false
     || visibilityCalls[1][0] !== true || visibilityCalls[1][1] !== true) {{
   throw new Error("Fe did not retain typed visibility state while gating surface work");
+}}
+if (trace.join() !== "visibility:1,visibility:0,next:11,load:11,frame:16,next:22,load:22,frame:32,next:0") {{
+  throw new Error(`Fe did not pace surface activation by animation frame: ${{trace}}`);
 }}
 if (loads.length !== 2 || loads[0] !== 11n || loads[1] !== 22n) throw new Error("host reordered surface tokens");
 if (tokens.length !== 0) throw new Error("Fe did not pull the end sentinel");
@@ -354,6 +374,9 @@ if (broker.activeCount() !== 0 || broker.cancelAll() !== 0) throw new Error("sur
             "visibility_begin",
             |_seen: i32, _previous: i32| -> i32 { 0 },
         )
+        .unwrap();
+    linker
+        .func_wrap("fe:web-window", "animation_frame_begin", || -> i32 { 0 })
         .unwrap();
     linker
         .func_wrap("fe:host", "sleep_begin", |_delay: i64| -> i32 { 0 })

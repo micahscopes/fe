@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   bootFeArtifacts,
   createDocumentEventSource,
+  createWindowEventSource,
   decodeComponentCommands,
   FeComponentElement,
   registerFeImportProvider,
@@ -59,6 +60,36 @@ test("document visibility adapter reports state changes without a permanent list
 
   documentTarget.visibilityState = "prerender";
   assert.throws(() => source.visibility(false, false), /unsupported Document\.visibilityState/);
+});
+
+test("window animation-frame adapter resolves or cancels exactly one request", async () => {
+  let nextHandle = 1;
+  const callbacks = new Map();
+  const cancelled = [];
+  const windowTarget = {
+    requestAnimationFrame(callback) {
+      const handle = nextHandle++;
+      callbacks.set(handle, callback);
+      return handle;
+    },
+    cancelAnimationFrame(handle) {
+      cancelled.push(handle);
+      callbacks.delete(handle);
+    },
+  };
+  const source = createWindowEventSource(windowTarget);
+
+  const first = source.animationFrame();
+  callbacks.get(1)(12.5);
+  callbacks.delete(1);
+  assert.equal(await first, 12.5);
+
+  const controller = new AbortController();
+  const second = source.animationFrame(controller.signal);
+  controller.abort();
+  await assert.rejects(second, error => error.name === "AbortError");
+  assert.deepEqual(cancelled, [2]);
+  assert.equal(callbacks.size, 0);
 });
 
 function installFetch(bytes) {

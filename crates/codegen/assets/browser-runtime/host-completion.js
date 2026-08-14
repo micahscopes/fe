@@ -37,6 +37,13 @@ function u64(value, name) {
   return value;
 }
 
+function finiteF32(value, name) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new TypeError(`${name} must be a non-negative finite number`);
+  }
+  return Math.fround(value);
+}
+
 function defaultClock() {
   if (typeof performance === "undefined" || typeof performance.now !== "function") {
     throw new Error("fe host completion runtime requires a monotonic performance.now clock");
@@ -77,6 +84,7 @@ export function createHostCompletionBroker(options = {}) {
   const cancelSchedule = options.cancelSchedule ?? clearTimeout;
   const surface = options.surface;
   const documentEvents = options.documentEvents;
+  const windowEvents = options.windowEvents;
   if (typeof clock !== "function" || typeof schedule !== "function"
       || typeof cancelSchedule !== "function") {
     throw new TypeError("host completion clock and scheduling hooks must be callable");
@@ -89,6 +97,11 @@ export function createHostCompletionBroker(options = {}) {
       || typeof documentEvents !== "object"
       || typeof documentEvents.visibility !== "function")) {
     throw new TypeError("host completion document hooks must provide visibility");
+  }
+  if (windowEvents !== undefined && (!windowEvents
+      || typeof windowEvents !== "object"
+      || typeof windowEvents.animationFrame !== "function")) {
+    throw new TypeError("host completion window hooks must provide animationFrame");
   }
 
   let nextToken = 0;
@@ -227,6 +240,17 @@ export function createHostCompletionBroker(options = {}) {
         }
         return [visibility];
       },
+    );
+  };
+
+  const beginAnimationFrame = () => {
+    if (windowEvents === undefined) {
+      throw new Error("fe:web-window::animation_frame_begin requires a window capability");
+    }
+    return beginBrowserOperation(
+      "window-animation-frame",
+      signal => windowEvents.animationFrame(signal),
+      value => [finiteF32(value, "animation frame timestamp")],
     );
   };
 
@@ -400,10 +424,14 @@ export function createHostCompletionBroker(options = {}) {
   const documentImports = Object.freeze({
     visibility_begin: beginDocumentVisibility,
   });
+  const windowImports = Object.freeze({
+    animation_frame_begin: beginAnimationFrame,
+  });
 
   const imports = { "fe:host": host };
   if (surface !== undefined) imports["fe:web-surface"] = surfaceImports;
   if (documentEvents !== undefined) imports["fe:web-document"] = documentImports;
+  if (windowEvents !== undefined) imports["fe:web-window"] = windowImports;
 
   return Object.freeze({
     imports: Object.freeze(imports),

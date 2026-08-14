@@ -212,9 +212,12 @@ manifest-driven.
    the fixed standards adapter reports the initial state or waits with one
    abortable listener for a distinct state. SourceInspector's Fe task pauses
    poster activation while hidden and owns the fail-open/cancellation policy.
-   Pointer, wheel, resize, animation-frame, device-loss, and MessagePort
-   handlers—and the resident outer gallery actor that combines all of them—
-   remain.
+   `BrowserAnimationFrames` is the third handler: each pull owns one cancellable
+   standards frame request and returns its typed timestamp. The same Fe task
+   uses it to pace poster loads across frames and owns the fail-open policy;
+   the host no longer invents a delay or sequencing rule. Pointer, wheel,
+   resize, device-loss, and MessagePort handlers—and the resident outer gallery
+   actor that combines all of them—remain.
 6. [todo] Move Worker admission, cancellation, restart/backoff, and supervision policy
    from handwritten JavaScript into Fe handlers and structured scopes.
 7. [todo] Route WebGPU completion, device loss/recovery, and resource lifetime through

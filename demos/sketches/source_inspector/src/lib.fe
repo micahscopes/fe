@@ -17,8 +17,8 @@ use std::reactive::{Event, EventSource, Stream}
 use std::host::{HostTimer, Resumable}
 use std::wasm::WasmBackend
 use std::web::{
-    BrowserSurfaceEvents, BrowserSurfaceLoader, BrowserVisibilityEvents,
-    DocumentVisibility, SurfaceLoader, SurfaceToken,
+    AnimationFrame, BrowserAnimationFrames, BrowserSurfaceEvents, BrowserSurfaceLoader,
+    BrowserVisibilityEvents, DocumentVisibility, SurfaceLoader, SurfaceToken,
 }
 use std::web::page::{
     ComponentComposition, ComponentView, PageAttribute, PageBuilder, PageElement, PageText,
@@ -217,13 +217,15 @@ fn await_document_visible() -> bool
 /// browser WebGPU implementations observed losing a shared device during burst
 /// initialization, not a semantic requirement of Fe or WebGPU.
 ///
-/// The fixed host reports the next compiler-correlated declaration and realizes
-/// one `<fe-surface>.load()`. Fe owns ordering, timeout, fail-open behavior, and
-/// cancellation. A timed-out or failed surface cannot stall the rest of the
-/// gallery; disconnect cancellation terminates the task immediately.
+/// The fixed host reports compiler-correlated declarations, document
+/// visibility, and animation-frame timestamps, and realizes one
+/// `<fe-surface>.load()`. Fe owns ordering, pacing, timeout, fail-open behavior,
+/// and cancellation. A timed-out or failed surface cannot stall the rest of
+/// the gallery; disconnect cancellation terminates the task immediately.
 fn activate_gallery_surfaces() -> u32
     uses (
         events: mut EventSource<SurfaceToken>,
+        frames: mut EventSource<AnimationFrame>,
         visibility: mut EventSource<DocumentVisibility>,
         loader: mut SurfaceLoader<WasmBackend>,
         timer: mut Timer<WasmBackend>,
@@ -234,6 +236,9 @@ fn activate_gallery_surfaces() -> u32
     if !await_document_visible() { return 0 }
     let stream: Stream<SurfaceToken> = Stream::new()
     let mut subscription = stream.subscribe()
+    let frame_stream: Stream<AnimationFrame> = Stream::new()
+    let mut frame_subscription = frame_stream.subscribe()
+    let mut pace_with_frames = true
     let mut loaded: u32 = 0
     let mut running: bool = true
     while running {
@@ -255,7 +260,32 @@ fn activate_gallery_surfaces() -> u32
                     TaskOutcome::Failure(_) => { loaded = loaded + 1 }
                     TaskOutcome::Cancelled => {
                         stream.cancel(subscription)
+                        frame_stream.cancel(frame_subscription)
                         return loaded
+                    }
+                }
+                if pace_with_frames {
+                    let mut waiting_for_frame = true
+                    while waiting_for_frame {
+                        let frame = frame_stream.next(frame_subscription)
+                        frame_subscription = frame.0
+                        match frame.1 {
+                            Event::Occurrence(_) => { waiting_for_frame = false }
+                            Event::Absent => {}
+                            Event::End => {
+                                pace_with_frames = false
+                                waiting_for_frame = false
+                            }
+                            Event::Failure(_) => {
+                                pace_with_frames = false
+                                waiting_for_frame = false
+                            }
+                            Event::Cancelled => {
+                                stream.cancel(subscription)
+                                frame_stream.cancel(frame_subscription)
+                                return loaded
+                            }
+                        }
                     }
                 }
             }
@@ -264,11 +294,13 @@ fn activate_gallery_surfaces() -> u32
             Event::Failure(_) => { running = false }
             Event::Cancelled => {
                 stream.cancel(subscription)
+                frame_stream.cancel(frame_subscription)
                 return loaded
             }
         }
     }
     stream.cancel(subscription)
+    frame_stream.cancel(frame_subscription)
     loaded
 }
 
@@ -393,6 +425,7 @@ actor SourceInspector {
     fn activate_surfaces() -> u32 uses (ScopedTask) {
         with (
             EventSource<SurfaceToken> = BrowserSurfaceEvents {},
+            EventSource<AnimationFrame> = BrowserAnimationFrames::new(),
             EventSource<DocumentVisibility> = BrowserVisibilityEvents::new(),
             SurfaceLoader<WasmBackend> = BrowserSurfaceLoader {},
             Timer<WasmBackend> = HostTimer {},
