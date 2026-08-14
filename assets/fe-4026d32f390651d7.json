@@ -1,0 +1,188 @@
+{
+  "protocol": {
+    "major": 1,
+    "minor": 1
+  },
+  "compiler": {
+    "name": "fe",
+    "version": "0.1.0",
+    "build": "workspace"
+  },
+  "target": "wasm",
+  "source_set_sha256": "18fd7da4329bd5d762709c87564926ca7a511b539ae2dd9d32aac833a3350f95",
+  "source_dependencies": {
+    "version": 1,
+    "root": "file:///workspace/fe-worktrees/mb2/demos/sketches/source_inspector/src/lib.fe",
+    "sources": [
+      {
+        "url": "file:///workspace/fe-worktrees/mb2/demos/sketches/source_inspector/src/lib.fe",
+        "sha256": "ba401e6d8b8a95bd185429e2acaec9f02a962f554505e42b011b39563556e067"
+      }
+    ]
+  },
+  "entry": "fe_actor_initialize_v1",
+  "interface": {
+    "imports": [
+      {
+        "module": "fe:actor",
+        "name": "send_begin",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "fe:host",
+        "name": "race_begin",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "fe:host",
+        "name": "sleep_begin",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "fe:web-document",
+        "name": "visibility_begin",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "fe:web-surface",
+        "name": "load_begin",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "fe:web-surface",
+        "name": "next_begin",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "fe:web-window",
+        "name": "animation_frame_begin",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      }
+    ],
+    "exports": [
+      {
+        "module": "",
+        "name": "__fe_task_resume_activate_surfaces_1",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "__fe_task_resume_activate_surfaces_2",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "__fe_task_resume_activate_surfaces_3",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "__fe_task_resume_activate_surfaces_4",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "__fe_task_resume_activate_surfaces_5",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "__fe_task_resume_activate_surfaces_6",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "__fe_task_resume_activate_surfaces_7",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "__fe_task_start_activate_surfaces",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "fe_actor_initialize_v1",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "fe_actor_project_v1",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "fe_actor_state_replace_v1",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "fe_actor_transition_v1",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "fe_cabi_alloc",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "fe_cabi_reset",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      }
+    ],
+    "resources": []
+  },
+  "artifacts": [
+    {
+      "name": "module.wasm",
+      "kind": "wasm_module",
+      "media_type": "application/wasm",
+      "sha256": "a699c1f98427bcfebf93a039799d398f1294326a0c3fb0f6ea59a6d4eaf03196",
+      "byte_len": 105135,
+      "url": "assets/fe-a699c1f98427bcfe.wasm"
+    }
+  ]
+}
