@@ -9,14 +9,14 @@
     "build": "workspace"
   },
   "target": "wasm",
-  "source_set_sha256": "adabb08412282a84988a3d97003669270cf77eea7c6dcad088b5b0a957f2eac9",
+  "source_set_sha256": "5b7ec18d095ee570b43f734f67f6eb5e1b8cdec7f85226f59dc491f642fc9c8a",
   "source_dependencies": {
     "version": 1,
     "root": "file:///workspace/fe-worktrees/mb2/demos/sketches/source_inspector/src/lib.fe",
     "sources": [
       {
         "url": "file:///workspace/fe-worktrees/mb2/demos/sketches/source_inspector/src/lib.fe",
-        "sha256": "294737b2afd5fe307622a4ebb02ccfe8e1f722bc298be44f26229cfa0caef414"
+        "sha256": "061e7ab8013c8971fd1283a5f58712c556605194183977f47569c21bd3c2d95e"
       }
     ]
   },
@@ -33,6 +33,13 @@
       {
         "module": "fe:host",
         "name": "sleep_begin",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "fe:web-document",
+        "name": "visibility_begin",
         "signature_complete": false,
         "params": [],
         "results": []
@@ -63,6 +70,13 @@
       {
         "module": "",
         "name": "__fe_task_resume_activate_surfaces_2",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "__fe_task_resume_activate_surfaces_3",
         "signature_complete": false,
         "params": [],
         "results": []
@@ -124,9 +138,9 @@
       "name": "module.wasm",
       "kind": "wasm_module",
       "media_type": "application/wasm",
-      "sha256": "7555eb387fff88d37cf8d3c2ed9c76310a7425c5e2faab6615209dda424a446c",
-      "byte_len": 26587,
-      "url": "assets/fe-7555eb387fff88d3.wasm"
+      "sha256": "9fe835c3035d7e16437dc5315fb614f5df834f70b4908284b1d5d24c547a4c2f",
+      "byte_len": 34625,
+      "url": "assets/fe-9fe835c3035d7e16.wasm"
     }
   ]
 }

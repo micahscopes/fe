@@ -76,6 +76,7 @@ export function createHostCompletionBroker(options = {}) {
   const schedule = options.schedule ?? setTimeout;
   const cancelSchedule = options.cancelSchedule ?? clearTimeout;
   const surface = options.surface;
+  const documentEvents = options.documentEvents;
   if (typeof clock !== "function" || typeof schedule !== "function"
       || typeof cancelSchedule !== "function") {
     throw new TypeError("host completion clock and scheduling hooks must be callable");
@@ -83,6 +84,11 @@ export function createHostCompletionBroker(options = {}) {
   if (surface !== undefined && (!surface || typeof surface !== "object"
       || typeof surface.next !== "function" || typeof surface.load !== "function")) {
     throw new TypeError("host completion surface hooks must provide next and load");
+  }
+  if (documentEvents !== undefined && (!documentEvents
+      || typeof documentEvents !== "object"
+      || typeof documentEvents.visibility !== "function")) {
+    throw new TypeError("host completion document hooks must provide visibility");
   }
 
   let nextToken = 0;
@@ -159,15 +165,12 @@ export function createHostCompletionBroker(options = {}) {
 
   const beginReceive = () => allocate("receive").token | 0;
 
-  const beginSurfaceOperation = (kind, invoke) => {
-    if (surface === undefined) {
-      throw new Error(`fe:web-surface::${kind}_begin requires a surface capability`);
-    }
-    const slot = allocate(`surface-${kind}`);
+  const beginBrowserOperation = (kind, invoke, successLanes) => {
+    const slot = allocate(kind);
     const controller = new AbortController();
     slot.cancelWork = () => controller.abort();
     Promise.resolve().then(() => invoke(controller.signal)).then(value => {
-      settle(slot, taskSuccess([u64(value, `surface ${kind} result`)]));
+      settle(slot, taskSuccess(successLanes(value)));
     }).catch(() => {
       // The browser boundary deliberately reports only a stable typed failure
       // fact. Error strings, DOM identities, and retry policy do not become a
@@ -176,6 +179,17 @@ export function createHostCompletionBroker(options = {}) {
       settle(slot, taskFailure([1]));
     });
     return slot.token | 0;
+  };
+
+  const beginSurfaceOperation = (kind, invoke) => {
+    if (surface === undefined) {
+      throw new Error(`fe:web-surface::${kind}_begin requires a surface capability`);
+    }
+    return beginBrowserOperation(
+      `surface-${kind}`,
+      invoke,
+      value => [u64(value, `surface ${kind} result`)],
+    );
   };
 
   const beginSurfaceNext = () => beginSurfaceOperation(
@@ -189,6 +203,31 @@ export function createHostCompletionBroker(options = {}) {
     }
     const checked = BigInt.asUintN(64, rawSurface);
     return beginSurfaceOperation("load", signal => surface.load(checked, signal));
+  };
+
+  const beginDocumentVisibility = (rawSeen, rawPreviousHidden) => {
+    if (documentEvents === undefined) {
+      throw new Error("fe:web-document::visibility_begin requires a document capability");
+    }
+    if (rawSeen !== 0 && rawSeen !== 1) {
+      throw new TypeError("fe:web-document::visibility_begin seen flag must be a Fe bool");
+    }
+    if (rawPreviousHidden !== 0 && rawPreviousHidden !== 1) {
+      throw new TypeError(
+        "fe:web-document::visibility_begin previous-hidden flag must be a Fe bool",
+      );
+    }
+    return beginBrowserOperation(
+      "document-visibility",
+      signal => documentEvents.visibility(rawSeen === 1, rawPreviousHidden === 1, signal),
+      value => {
+        const visibility = u32(value, "document visibility result");
+        if (visibility > 1) {
+          throw new TypeError("document visibility result is not a declared Fe variant");
+        }
+        return [visibility];
+      },
+    );
   };
 
   const beginRace = (rawLeft, rawRight) => {
@@ -358,9 +397,13 @@ export function createHostCompletionBroker(options = {}) {
     next_begin: beginSurfaceNext,
     load_begin: beginSurfaceLoad,
   });
+  const documentImports = Object.freeze({
+    visibility_begin: beginDocumentVisibility,
+  });
 
   const imports = { "fe:host": host };
   if (surface !== undefined) imports["fe:web-surface"] = surfaceImports;
+  if (documentEvents !== undefined) imports["fe:web-document"] = documentImports;
 
   return Object.freeze({
     imports: Object.freeze(imports),
