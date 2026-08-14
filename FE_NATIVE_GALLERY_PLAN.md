@@ -1028,8 +1028,11 @@ Origin: honesty audit of Claude Code session
   bytes of marker WGSL under the existing 49 kB combined budget; shared-state
   control Wasm remains 67,091 bytes. The focused fmath typecheck, independent
   oracle, QCGA browser-profile compile gate, and complete eight-part QCGA
-  lifecycle/solve/interaction suite are green. Frame-duration
-  feedback remains the next quality slice; actual pixels retain the named
+  lifecycle/solve/interaction suite are green. A fresh optimized publication
+  compiled all twelve render bundles in 116.9 seconds and verified 14 Fe
+  modules / 73 deployment files; the real Chromium gallery/SourceInspector
+  and TodoMVC tapes pass against those artifacts. Frame-duration feedback
+  remains the next quality slice; actual pixels retain the named
   external-adapter qualification.
 
 This ledger records achieved evidence, not a relaxation of the phases or the
