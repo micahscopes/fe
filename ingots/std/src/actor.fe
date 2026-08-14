@@ -1,0 +1,41 @@
+//! Runtime-control interpretation for typed resident-actor messages.
+//!
+//! `BrowserActorSink` is only placement/handler evidence. The event stays a
+//! normal Fe value, the compiler flattens its concrete type, and the fixed
+//! browser handler carries those lanes to the owning resident transition. No
+//! task name, event tag table, payload width, or application reducer appears in
+//! JavaScript or JSON.
+
+use core::actor::ActorSink
+use core::pending::{Pending, Suspend, TaskOutcome}
+use ingot::wasm::WasmBackend
+use raw::send_begin as raw_send_begin
+
+pub struct BrowserActorSink {}
+
+impl<E> ActorSink<WasmBackend, E> for BrowserActorSink {
+    fn send_begin(mut self, _ event: own E) -> Pending<WasmBackend, ()> {
+        raw_send_begin(event)
+    }
+}
+
+/// One owned event waiting to be sent to its resident actor. Carrying `E` in
+/// the receiver lets ordinary method inference determine the exact keyed sink
+/// effect; callers do not repeat the event type in a generic argument list.
+pub struct ActorMessage<E> { event: E }
+
+impl<E> ActorMessage<E> {
+    pub fn new(_ event: own E) -> Self { Self { event: event } }
+
+    /// Send this event and suspend until the owning actor has accepted and
+    /// projected it.
+    pub fn send(own self) -> TaskOutcome<u32, ()>
+        uses (
+            sink: mut ActorSink<WasmBackend, E>,
+            suspend: Suspend<WasmBackend, u32>,
+        )
+    {
+        let pending = sink.send_begin(self.event)
+        suspend.suspend(pending)
+    }
+}

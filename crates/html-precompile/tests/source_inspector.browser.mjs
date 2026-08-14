@@ -191,10 +191,16 @@ try {
 
   const isGallery = await page.$(".gallery-head") !== null;
   if (isGallery) {
-    assert.equal(
-      await page.evaluate(() => globalThis.__feInspectorE2E.states.length),
-      1,
-      "typed surface loading leaked legacy discovery events through the resident reducer",
+    assert.deepEqual(
+      await page.evaluate(() => globalThis.__feInspectorE2E.states.map(
+        state => state.slice(14, 18),
+      )),
+      [
+        [1, 0, 0, 0],
+        ...Array.from({ length: 12 }, (_, index) => [index + 2, index + 1, 0, 0]),
+        [14, 12, 1, 0],
+      ],
+      "scoped Fe task did not deliver exact progress/completion states to its resident actor",
     );
     assert.deepEqual(
       await page.evaluate(() => globalThis.__feInspectorE2E.surfaceSettled),
@@ -268,7 +274,12 @@ try {
         const detail = surface.shadowRoot?.querySelector(".notice")?.textContent ??
           "QCGA pencil failed to boot";
         const unavailable = /no WebGPU adapter is available|WebGPU is required|does not expose WebGPU/.test(detail);
-        if (tolerateUnavailable && unavailable) return { skipped: true, detail };
+        if (tolerateUnavailable && unavailable) return {
+          skipped: true,
+          detail,
+          togglePresent: Boolean(surface.shadowRoot?.querySelector('input[type="checkbox"]')),
+          bounded: surface.params.bounded,
+        };
         throw new Error(detail);
       }
       await surface.live();
@@ -289,11 +300,54 @@ try {
         x: Math.max(24, Math.min(innerWidth - 24, rect.left + rect.width * 0.06)),
         y: Math.max(24, Math.min(innerHeight - 24, rect.top + rect.height * 0.06)),
         yaw: surface.params.yaw,
-        certificate: surface._uniforms.slice(4),
-        picked: surface._uniforms.at(-1),
+        certificate: surface._uniforms.slice(
+          surface._memberIndexByName.get("generation"),
+          surface._memberIndexByName.get("picked"),
+        ),
+        picked: surface._uniforms[surface._memberIndexByName.get("picked")],
+        togglePresent: Boolean(surface.shadowRoot?.querySelector('input[type="checkbox"]')),
+        bounded: surface.params.bounded,
       };
     }, tolerateUnavailableWebGpu);
+    assert.equal(qcgaPointer.togglePresent, true,
+      "the generic Fe toggle Param did not render as a browser checkbox");
+    assert.equal(qcgaPointer.bounded, 0,
+      "the QCGA pencil must default to its infinite-fade mode");
     if (!qcgaPointer.skipped) {
+      await page.evaluate(() => {
+        const figure = Array.from(document.querySelectorAll(".grid > figure"))
+          .find(node => node.querySelector("figcaption > b")?.textContent === "qcga pencil");
+        figure.querySelector("fe-surface").shadowRoot.querySelector('input[type="checkbox"]').click();
+      });
+      await page.waitForFunction(() => {
+        const figure = Array.from(document.querySelectorAll(".grid > figure"))
+          .find(node => node.querySelector("figcaption > b")?.textContent === "qcga pencil");
+        const surface = figure.querySelector("fe-surface");
+        return surface.params.bounded === 1 && surface._pendingSurfaceEvents.length === 0;
+      });
+      assert.equal(await page.evaluate(() => {
+        const figure = Array.from(document.querySelectorAll(".grid > figure"))
+          .find(node => node.querySelector("figcaption > b")?.textContent === "qcga pencil");
+        const surface = figure.querySelector("fe-surface");
+        const index = surface._memberIndexByName.get("bounded");
+        return surface._uniforms[index];
+      }), 1, "the checkbox did not cross the typed ParamEdit lane into Fe state");
+      await page.evaluate(() => {
+        const figure = Array.from(document.querySelectorAll(".grid > figure"))
+          .find(node => node.querySelector("figcaption > b")?.textContent === "qcga pencil");
+        figure.querySelector("fe-surface").shadowRoot.querySelector('input[type="checkbox"]').click();
+      });
+      await page.waitForFunction(() => {
+        const figure = Array.from(document.querySelectorAll(".grid > figure"))
+          .find(node => node.querySelector("figcaption > b")?.textContent === "qcga pencil");
+        const surface = figure.querySelector("fe-surface");
+        return surface.params.bounded === 0 && surface._pendingSurfaceEvents.length === 0;
+      });
+      await page.evaluate(() => {
+        const figure = Array.from(document.querySelectorAll(".grid > figure"))
+          .find(node => node.querySelector("figcaption > b")?.textContent === "qcga pencil");
+        figure.querySelector("fe-surface").__qcgaTestFrames = 0;
+      });
       await page.mouse.move(qcgaPointer.x, qcgaPointer.y);
       await page.mouse.down();
       await page.waitForFunction(() => {
@@ -306,7 +360,8 @@ try {
         const figure = Array.from(document.querySelectorAll(".grid > figure"))
           .find(node => node.querySelector("figcaption > b")?.textContent === "qcga pencil");
         const surface = figure.querySelector("fe-surface");
-        return { frames: surface.__qcgaTestFrames, picked: surface._uniforms.at(-1) };
+        const picked = surface._memberIndexByName.get("picked");
+        return { frames: surface.__qcgaTestFrames, picked: surface._uniforms[picked] };
       });
       assert.equal(qcgaAfterDown.picked, qcgaPointer.picked,
         "marker-free orbit press unexpectedly selected a QCGA control point");
@@ -323,7 +378,13 @@ try {
         const figure = Array.from(document.querySelectorAll(".grid > figure"))
           .find(node => node.querySelector("figcaption > b")?.textContent === "qcga pencil");
         const surface = figure.querySelector("fe-surface");
-        return { yaw: surface.params.yaw, certificate: surface._uniforms.slice(4) };
+        return {
+          yaw: surface.params.yaw,
+          certificate: surface._uniforms.slice(
+            surface._memberIndexByName.get("generation"),
+            surface._memberIndexByName.get("picked"),
+          ),
+        };
       });
       assert.notEqual(qcgaAfter.yaw, qcgaPointer.yaw,
         "raw pointer movement did not cross the resident Fe QCGA transition");

@@ -7,6 +7,9 @@ use qcga_pencil_de::{
     PencilDeHit,
     pencil_camera_de_interval,
     pencil_de_interval,
+    pencil_display_interval,
+    pencil_display_mode,
+    pencil_domain_fade,
     pencil_render_quality,
     quadric_distance,
     trace_quadric_de,
@@ -279,5 +282,45 @@ pub fn de_camera_scene_interval(
 ) -> RayInterval {
     pencil_camera_de_interval(
         vec3(fx, fy, fz), vec3(dx, dy, dz), camera_distance,
+    )
+}
+
+/// Exact Fe-owned display-mode policy consumed by the fragment. The scalar is
+/// the generic toggle carrier; mode interpretation remains inside Fe.
+pub fn de_display_interval(
+    _ bounded: f32,
+    _ dx: f32,
+    _ dy: f32,
+    _ dz: f32,
+    _ fx: f32,
+    _ fy: f32,
+    _ fz: f32,
+    _ camera_distance: f32,
+) -> RayInterval {
+    pencil_display_interval(
+        pencil_display_mode(bounded),
+        vec3(fx, fy, fz),
+        vec3(dx, dy, dz),
+        camera_distance,
+    )
+}
+
+pub fn de_domain_fade(
+    _ bounded: f32,
+    _ dx: f32,
+    _ dy: f32,
+    _ dz: f32,
+    _ fx: f32,
+    _ fy: f32,
+    _ fz: f32,
+    _ camera_distance: f32,
+    _ hit_distance: f32,
+) -> f32 {
+    pencil_domain_fade(
+        pencil_display_mode(bounded),
+        vec3(fx, fy, fz),
+        vec3(dx, dy, dz),
+        camera_distance,
+        hit_distance,
     )
 }

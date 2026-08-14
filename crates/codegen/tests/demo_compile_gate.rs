@@ -451,9 +451,9 @@ fn qcga_scene_receipt(bundle: &WebBundle, event: SurfaceEventFixture) -> Vec<was
         .get_typed_func::<(i32, i32), i32>(&mut store, "fe_cabi_alloc")
         .unwrap();
 
-    let mut state = vec![wasmtime::Val::F32(0); 81];
-    state[6] = wasmtime::Val::I32(0);
-    state[58] = wasmtime::Val::I32(0);
+    let mut state = vec![wasmtime::Val::F32(0); 82];
+    state[7] = wasmtime::Val::I32(0);
+    state[59] = wasmtime::Val::I32(0);
     initialize
         .call(&mut store, &[], &mut state)
         .expect("execute shared QCGA initialization");
@@ -461,9 +461,9 @@ fn qcga_scene_receipt(bundle: &WebBundle, event: SurfaceEventFixture) -> Vec<was
 
     let pointer = alloc.call(&mut store, (52, 4)).unwrap() as usize;
     write_surface_event_batch(&memory, &mut store, pointer, &[event]);
-    let mut result = vec![wasmtime::Val::F32(0); 81];
-    result[6] = wasmtime::Val::I32(0);
-    result[58] = wasmtime::Val::I32(0);
+    let mut result = vec![wasmtime::Val::F32(0); 82];
+    result[7] = wasmtime::Val::I32(0);
+    result[59] = wasmtime::Val::I32(0);
     transition
         .call(
             &mut store,
@@ -2467,8 +2467,8 @@ fn qcga_pencil_de_compiles_as_a_fe_owned_iterative_fragment_surface() {
         "completed DE rays must leave the generated shader loop instead of running a done-flag envelope"
     );
     assert!(
-        de_wgsl.len() < 32_000,
-        "the prepared-state, scene-clipped Fe QCGA DE pass should remain under 32 kB WGSL (got {})",
+        de_wgsl.len() < 36_000,
+        "the prepared-state, dual-mode Fe QCGA DE pass should remain under 36 kB WGSL (got {})",
         de_wgsl.len(),
     );
     assert_eq!(marker_pass.draw_vertices, Some(54));
@@ -2486,7 +2486,7 @@ fn qcga_pencil_de_compiles_as_a_fe_owned_iterative_fragment_surface() {
         marker_wgsl.len(),
     );
     assert!(
-        de_wgsl.len() + marker_wgsl.len() < 49_000,
+        de_wgsl.len() + marker_wgsl.len() < 53_000,
         "the distance field plus typed marker overlay should remain compact (got {} + {})",
         de_wgsl.len(),
         marker_wgsl.len(),
@@ -2495,7 +2495,7 @@ fn qcga_pencil_de_compiles_as_a_fe_owned_iterative_fragment_surface() {
     assert!(
         authored.contains("targeted_camera_sphere_interval")
             && authored.contains("trace_quadric_de_in_unit_interval"),
-        "the production shader must consume the reusable broad-phase interval before its iterative surface classifier",
+        "the optional bounded mode must consume the reusable broad-phase interval before its iterative surface classifier",
     );
     assert!(
         !authored.contains("selected_marker"),
@@ -2518,7 +2518,7 @@ fn qcga_pencil_de_compiles_as_a_fe_owned_iterative_fragment_surface() {
     );
     assert_eq!(pass.source_entry, "distance_surface");
     assert_eq!(pass.layout.bindings.len(), 1);
-    assert_eq!(pass.layout.bindings[0].members.len(), 81);
+    assert_eq!(pass.layout.bindings[0].members.len(), 82);
     assert_eq!(
         pass.layout.bindings[0]
             .members
@@ -2532,6 +2532,7 @@ fn qcga_pencil_de_compiles_as_a_fe_owned_iterative_fragment_surface() {
             "dist",
             "width",
             "height",
+            "bounded",
             "generation",
             "cx",
             "cy",
@@ -2654,16 +2655,40 @@ fn qcga_pencil_de_compiles_as_a_fe_owned_iterative_fragment_surface() {
         ],
         "the canonical DE transition must apply Fe-owned orbit and dolly policy",
     );
-    assert_eq!(i32_at(6), 0, "camera motion must not re-solve the pencil");
+    assert_eq!(f32_at(6), 0.0, "infinite fade must be the default mode");
+    assert_eq!(i32_at(7), 0, "camera motion must not re-solve the pencil");
     assert_eq!(
-        f32_at(10),
+        f32_at(11),
         1.0,
         "the initial rank-8 pencil certificate must survive"
     );
     assert_eq!(
-        i32_at(58),
+        i32_at(59),
         0,
         "camera motion must not invent a picked control"
+    );
+
+    let bounded_receipt = qcga_scene_receipt(
+        &bundle,
+        SurfaceEventFixture {
+            pointer_x: 0.0,
+            pointer_y: 0.0,
+            delta_x: 0.0,
+            delta_y: 0.0,
+            wheel_delta: 0.0,
+            wheel_mode: 0,
+            buttons: 0,
+            timestamp: 43.0,
+            width: 512.0,
+            height: 512.0,
+            event_kind: 1,
+            param_index: 6,
+            param_value: 1.0,
+        },
+    );
+    assert!(
+        matches!(bounded_receipt[6], wasmtime::Val::F32(bits) if f32::from_bits(bits) == 1.0),
+        "the generic toggle Param must enter the FCO-derived Fe transition as canonical 1.0 state",
     );
     eprintln!(
         "Fe QCGA DE receipt: {} authored view lines -> {} B DE + {} B marker browser-valid WGSL, {} B shared-state control Wasm",

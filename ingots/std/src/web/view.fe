@@ -242,6 +242,10 @@ pub enum ParamKind {
     ExtentX,
     /// Bound to the live canvas height in pixels.
     ExtentY,
+    /// A user-visible boolean control transported as canonical `0.0 | 1.0`
+    /// scalar state. The fixed browser host presents this kind as a checkbox;
+    /// Fe still owns initialization, normalization, and application policy.
+    Toggle,
 }
 
 /// One declared interactive parameter. `min`/`max`/`init` are plain data; range
@@ -292,6 +296,14 @@ impl Param {
     /// An integer slider over `[min, max]`, starting at `init`.
     pub const fn int(min: f32, max: f32, init: f32) -> Param {
         Param::new(ParamKind::Int, min, max, init)
+    }
+
+    /// A checkbox starting either unchecked or checked. Its scalar carrier is
+    /// deliberate: it remains compatible with GPU uniforms while application
+    /// code can immediately interpret it as an enum or boolean policy.
+    pub const fn toggle(init: bool) -> Param {
+        let value: f32 = if init { 1.0 } else { 0.0 }
+        Param::new(ParamKind::Toggle, 0.0, 1.0, value)
     }
 
     /// A constant value carried into the uniform record but not shown as a
@@ -395,6 +407,7 @@ impl Param {
             ParamKind::Fixed => current,
             ParamKind::ExtentX => event.width,
             ParamKind::ExtentY => event.height,
+            ParamKind::Toggle => if next >= 0.5 { 1.0 } else { 0.0 },
         }
     }
 }

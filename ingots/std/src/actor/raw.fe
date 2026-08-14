@@ -1,0 +1,14 @@
+//! Private fixed-host operation used by `BrowserActorSink`.
+//!
+//! The generic event is monomorphized from the actor's Fe source. Its flattened
+//! Wasm parameters are validated against the resident transition by the actor
+//! compiler, so this import has no caller-authored schema and cannot be used to
+//! smuggle an unrelated event type into the actor.
+
+use core::pending::Pending
+use ingot::wasm::WasmBackend
+
+#[host_import(module = "fe:actor")]
+extern {
+    pub unsafe fn send_begin<E>(_ event: own E) -> Pending<WasmBackend, ()>
+}

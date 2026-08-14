@@ -3853,6 +3853,32 @@ pub fn call_invalid() -> u32 {
     );
 }
 
+#[test]
+fn aggregate_enum_host_result_still_requires_indirect_codec() {
+    let source = r#"
+pub enum HostChoice {
+    Empty,
+    Value { value: u32 },
+}
+
+#[host_import(module = "fe:test")]
+extern {
+    pub unsafe fn read_choice() -> HostChoice
+}
+
+pub fn call_read_choice() -> HostChoice {
+    read_choice()
+}
+"#;
+    let error = compile_to_wasm_err("aggregate_enum_host_result_requires_codec.fe", source);
+    assert!(
+        error.contains(
+            "extern host import `read_choice` return type `HostChoice` is not representable"
+        ),
+        "{error}"
+    );
+}
+
 // ===========================================================================
 // R3.4b THE KEYSTONE: a Fe-compiled-to-wasm host program drives the WebGPU
 // `Dispatch` + `Wait` capability import table against a wasmtime FAKE DEVICE and

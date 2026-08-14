@@ -3526,14 +3526,24 @@ impl<'db> TyChecker<'db> {
                     instantiated.fold_with(self.db, &mut table),
                     &slot_bindings,
                 );
-                let specialized = if matches!(mode, WitnessBuildMode::SeededRequirement)
-                    && (stored_value_contains_implicit_layout_params(self.db, solved_inst)
-                        || stored_value_contains_out_of_scope_params(self.db, scope, solved_inst))
-                {
-                    instantiated
-                } else {
-                    solved_inst
-                };
+                // Prefer the solver's normalized specialization when it is a
+                // closed key. Its selected implementor may instead retain a
+                // blanket impl's own generic parameter (for example `E` in
+                // `impl<E> ActorSink<WasmBackend, E> for Sink`). That parameter
+                // is proof-local and must not re-generalize the exact authored
+                // `with (ActorSink<WasmBackend, Tick> = ...)` witness. In that
+                // case preserve the already-instantiated query key. This rule
+                // is identical for explicit and seeded witnesses: closure, not
+                // the source of the witness, decides which representation is
+                // stable to store.
+                let specialized =
+                    if stored_value_contains_implicit_layout_params(self.db, solved_inst)
+                        || stored_value_contains_out_of_scope_params(self.db, scope, solved_inst)
+                    {
+                        instantiated
+                    } else {
+                        solved_inst
+                    };
                 let Some(key) = finalize_stored_effect_key(
                     self.db,
                     StoredEffectKey::Trait(StoredTraitKey {

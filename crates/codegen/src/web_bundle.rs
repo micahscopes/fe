@@ -3310,7 +3310,7 @@ pub struct WebSurfaceParam {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doc: Option<String>,
     /// The kind vocabulary: `range` | `unit` | `angle` | `log` | `int` |
-    /// `fixed` | `extent_x` | `extent_y`.
+    /// `fixed` | `extent_x` | `extent_y` | `toggle`.
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min: Option<f32>,

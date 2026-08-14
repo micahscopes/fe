@@ -327,6 +327,10 @@ pub struct PencilControls {
     /// not user controls or a JavaScript-selected quality tier.
     pub width: f32,
     pub height: f32,
+    /// `0.0` selects the full ray budget with atmospheric fade; `1.0` selects
+    /// the finite-domain performance mode. `Param::toggle` canonicalizes this
+    /// carrier, while the renderer immediately interprets it as a typed mode.
+    pub bounded: f32,
 }
 impl Copy for PencilControls {}
 
@@ -365,6 +369,10 @@ pub struct PencilParams {
     pub dist: Param,
     pub width: Param,
     pub height: Param,
+    /// Optional finite-domain performance mode. It is last so the shared
+    /// `PencilControls` fields retain their declaration-order parameter indices;
+    /// the DE actor owns this additional state leaf and its policy.
+    pub bounded: Param,
 }
 
 impl SurfaceState for PencilControls {
@@ -383,6 +391,7 @@ pub const fn pencil_params() -> PencilParams {
             .wheel_scale(in_factor: 0.88, out_factor: 1.14),
         width: Param::extent_x(),
         height: Param::extent_y(),
+        bounded: Param::toggle(init: false),
     }
 }
 
@@ -768,6 +777,7 @@ impl RadialProjectionOracle {
                     lambda: 0.15,
                     yaw: 0.6, pitch: 0.35, dist: 4.0,
                     width: PENCIL_RESOLUTION, height: PENCIL_RESOLUTION,
+                    bounded: 0.0,
                 },
                 basis: PencilBasis {
                     generation: 0,
@@ -1199,6 +1209,7 @@ pub fn initial_pencil_scene() -> PencilSceneState {
                 dist: 4.0,
                 width: PENCIL_RESOLUTION,
                 height: PENCIL_RESOLUTION,
+                bounded: 0.0,
             },
             basis: solved_basis(points, 0),
         },
@@ -1731,6 +1742,7 @@ pub fn probe(request: own VertexProbe) -> ProbeResponse {
             dist: request.dist,
             width: PENCIL_RESOLUTION,
             height: PENCIL_RESOLUTION,
+            bounded: 0.0,
         },
         basis: PencilBasis {
             generation: request.generation,

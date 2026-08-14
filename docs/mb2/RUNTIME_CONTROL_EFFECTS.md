@@ -220,6 +220,15 @@ manifest-driven.
    actor that combines all of them—remain. `Stream<T>::next_ready` is the first
    shared consumer combinator extracted from these handlers: it skips pure
    absence while preserving the sole affine successor and every terminal case.
+   `ActorSink<B, E>` now closes the first task-to-resident edge on this same
+   rail. SourceInspector sends typed surface progress/completion/failure values
+   from its scoped task into its resident reducer; the fixed broker transports
+   opaque compiler-flattened lanes and inherits the canonical generation and
+   cancellation table. Compilation requires the instantiated normalized event
+   type—not merely its flattened width—to be identical to the resident actor's
+   nominal event, and a same-layout impostor gate fails closed. Cross-actor,
+   MessagePort, Worker, and GPU destinations remain future handlers rather
+   than implied capabilities of this owning-scope mailbox.
 6. [todo] Move Worker admission, cancellation, restart/backoff, and supervision policy
    from handwritten JavaScript into Fe handlers and structured scopes.
 7. [todo] Route WebGPU completion, device loss/recovery, and resource lifetime through

@@ -8,6 +8,7 @@ use driver::DriverDataBase;
 use fe_codegen::{
     CanonicalType, RESIDENT_ACTOR_INITIALIZE_EXPORT, RESIDENT_ACTOR_PROJECT_EXPORT,
     RESIDENT_ACTOR_STATE_REPLACE_EXPORT, RESIDENT_ACTOR_TRANSITION_EXPORT, compile_resident_actor,
+    emit_materialized_task_adapter_js,
 };
 use hir::hir_def::HirIngot;
 use url::Url;
@@ -75,6 +76,72 @@ actor Clock {
     let url = Url::parse("file:///web_component_scoped_task.fe").unwrap();
     db.workspace()
         .touch(&mut db, url.clone(), Some(SOURCE.to_owned()));
+    let file = db.workspace().get(&db, &url).unwrap();
+    (db, file)
+}
+
+fn actor_sink_fixture(event_ty: &str) -> (DriverDataBase, common::file::File) {
+    let source = format!(
+        r#"
+use core::actor::{{ActorSink, InitialState, ProjectState, ResidentTransition, ScopedTask}}
+use core::pending::{{Suspend, TaskOutcome}}
+use std::actor::{{ActorMessage, BrowserActorSink}}
+use std::host::Resumable
+use std::wasm::WasmBackend
+
+pub enum TickKind {{ Add, Reset }}
+impl Copy for TickKind {{}}
+pub struct Tick {{ pub kind: TickKind, pub value: u32 }}
+// Deliberately layout-identical to `Tick`: the resident contract must compare
+// semantic Fe identity rather than accepting an equal flattened lane shape.
+pub struct Other {{ pub kind: TickKind, pub value: u32 }}
+pub struct TickState {{ pub value: u32, pub messages: u32 }}
+pub struct TickProjection {{ pub value: u32, pub messages: u32 }}
+
+actor Clock {{
+    value: u32,
+    messages: u32,
+
+    fn initial() -> TickState uses (InitialState) {{
+        TickState {{ value: 2, messages: 0 }}
+    }}
+
+    fn receive(self, event: Tick) -> TickState uses (ResidentTransition) {{
+        match event.kind {{
+            TickKind::Add => TickState {{
+                value: self.value + event.value,
+                messages: self.messages + 1,
+            }}
+            TickKind::Reset => TickState {{ value: 0, messages: self.messages + 1 }}
+        }}
+    }}
+
+    fn project(self) -> TickProjection uses (ProjectState) {{
+        TickProjection {{ value: self.value, messages: self.messages }}
+    }}
+
+    fn heartbeat() -> u32 uses (ScopedTask) {{
+        with (
+            ActorSink<WasmBackend, {event_ty}> = BrowserActorSink {{}},
+            Suspend<WasmBackend, u32> = Resumable {{}},
+        ) {{
+            let message: ActorMessage<{event_ty}> = ActorMessage::new(
+                {event_ty} {{ kind: TickKind::Add, value: 7 }}
+            )
+            let outcome: TaskOutcome<u32, ()> = message.send()
+            match outcome {{
+                TaskOutcome::Success(_) => 71
+                TaskOutcome::Failure(error) => 100 + error
+                TaskOutcome::Cancelled => 200
+            }}
+        }}
+    }}
+}}
+"#,
+    );
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///web_component_actor_sink.fe").unwrap();
+    db.workspace().touch(&mut db, url.clone(), Some(source));
     let file = db.workspace().get(&db, &url).unwrap();
     (db, file)
 }
@@ -446,5 +513,131 @@ fn resident_actor_scoped_task_is_role_selected_and_materialized_without_a_task_t
     assert!(
         !exports.iter().any(|name| name == "heartbeat"),
         "the authored behavior name must not become a Wasm discovery ABI"
+    );
+}
+
+#[test]
+fn scoped_task_sends_typed_event_into_resident_actor_through_generated_continuation() {
+    let (db, file) = actor_sink_fixture("Tick");
+    let top_mod = db.top_mod(file);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "actor-sink fixture diagnostics:\n{diagnostics}"
+    );
+
+    let artifact = compile_resident_actor(&db, top_mod)
+        .expect("resident actor sink contract")
+        .expect("role-selected resident actor");
+    assert_eq!(artifact.scoped_tasks.len(), 1);
+    let imports = wasmparser::Parser::new(0)
+        .parse_all(&artifact.wasm)
+        .filter_map(|payload| match payload.expect("valid Wasm") {
+            wasmparser::Payload::ImportSection(reader) => Some(
+                reader
+                    .into_imports()
+                    .map(|import| {
+                        let import = import.expect("valid import");
+                        (import.module.to_owned(), import.name.to_owned())
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+        .flatten()
+        .collect::<Vec<_>>();
+    assert!(imports.contains(&("fe:actor".to_owned(), "send_begin".to_owned())));
+
+    if !std::process::Command::new("bun")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        return;
+    }
+    let directory = tempfile::tempdir().expect("actor-sink execution directory");
+    let wasm_path = directory.path().join("actor.wasm");
+    let adapter_path = directory.path().join("tasks.mjs");
+    let task_runtime_path = directory.path().join("materialized-task.js");
+    let host_runtime_path = directory.path().join("host-completion.js");
+    std::fs::write(&wasm_path, &artifact.wasm).unwrap();
+    std::fs::write(
+        &adapter_path,
+        emit_materialized_task_adapter_js(&artifact.scoped_tasks, "./materialized-task.js")
+            .expect("emit actor task adapter")
+            .expect("one actor task adapter"),
+    )
+    .unwrap();
+    std::fs::write(&task_runtime_path, fe_codegen::MATERIALIZED_TASK_RUNTIME_JS).unwrap();
+    std::fs::write(&host_runtime_path, fe_codegen::HOST_COMPLETION_RUNTIME_JS).unwrap();
+    let runner = directory.path().join("run.mjs");
+    std::fs::write(
+        &runner,
+        format!(
+            r#"
+import {{ createMaterializedTaskRegistry }} from {adapter:?};
+import {{ createHostCompletionBroker }} from {host:?};
+const accepted = [];
+let instance;
+const broker = createHostCompletionBroker({{
+  actorEvents: {{
+    send(event, signal) {{
+      if (signal.aborted) throw new DOMException("stale actor scope", "AbortError");
+      accepted.push(event);
+      instance.exports.fe_actor_transition_v1(...event);
+    }},
+  }},
+}});
+const bytes = await Bun.file({wasm:?}).arrayBuffer();
+({{ instance }} = await WebAssembly.instantiate(bytes, broker.imports));
+const initial = instance.exports.fe_actor_initialize_v1();
+if (initial[0] !== 2 || initial[1] !== 0) throw new Error(`bad initial state ${{initial}}`);
+const machines = Object.values(createMaterializedTaskRegistry(instance.exports));
+if (machines.length !== 1) throw new Error("expected one generated task");
+const output = await broker.run(machines[0], []);
+const projected = instance.exports.fe_actor_project_v1();
+if (output.length !== 1 || output[0] !== 71) throw new Error(`bad task output ${{output}}`);
+if (accepted.length !== 1 || accepted[0][0] !== 0 || accepted[0][1] !== 7) {{
+  throw new Error(`bad opaque event ${{accepted}}`);
+}}
+if (projected[0] !== 9 || projected[1] !== 1) {{
+  throw new Error(`resident reducer did not receive event: ${{projected}}`);
+}}
+if (broker.activeCount() !== 0) throw new Error("actor send leaked pending work");
+"#,
+            adapter = Url::from_file_path(&adapter_path).unwrap().to_string(),
+            host = Url::from_file_path(&host_runtime_path).unwrap().to_string(),
+            wasm = wasm_path.display().to_string(),
+        ),
+    )
+    .unwrap();
+    let output = std::process::Command::new("bun")
+        .arg("run")
+        .arg(&runner)
+        .output()
+        .expect("run actor-sink continuation under Bun");
+    assert!(
+        output.status.success(),
+        "actor-sink continuation failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
+fn resident_actor_rejects_scoped_sink_with_different_event_type() {
+    let (db, file) = actor_sink_fixture("Other");
+    let top_mod = db.top_mod(file);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "mismatched sink source diagnostics:\n{diagnostics}"
+    );
+    let error = compile_resident_actor(&db, top_mod)
+        .expect_err("mismatched typed actor sink must fail closed")
+        .to_string();
+    assert!(
+        error.contains("typed sink event differs from its resident transition"),
+        "unexpected mismatched-sink diagnostic: {error}",
     );
 }

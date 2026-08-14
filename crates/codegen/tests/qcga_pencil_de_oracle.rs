@@ -188,6 +188,11 @@ fn normalize(v: [f32; 3]) -> [f32; 3] {
     [v[0] / length, v[1] / length, v[2] / length]
 }
 
+fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
+    let t = ((value - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 /// Independent f64 broad-phase model for the production Fe sphere interval.
 /// This is deliberately separate from the analytic quadric-root oracle below:
 /// the interval only establishes where iteration is permitted.
@@ -499,8 +504,64 @@ fn production_qcga_de_matches_fields_and_independent_analytic_hits() {
         "prepared-camera fixture must cover whole-loop rejects",
     );
 
+    // The default mode restores the unbounded silhouette by marching the full
+    // camera interval. The checkbox selects the already-proved finite sphere
+    // interval, but Fe feathers that optimization domain before its boundary.
+    for (index, (forward, camera_distance, direction)) in camera_cases.into_iter().enumerate() {
+        let forward = normalize(forward);
+        let direction = normalize(direction);
+        let mut default_args = vec![0.0];
+        default_args.extend(direction);
+        default_args.extend(forward);
+        default_args.push(camera_distance);
+        let (start, end, active) =
+            call_interval_named(&mut store, &instance, "de_display_interval", &default_args);
+        assert_eq!((start, end, active), (0.0, 18.0, 1));
+
+        default_args[0] = 1.0;
+        let bounded =
+            call_interval_named(&mut store, &instance, "de_display_interval", &default_args);
+        let mut camera_args = direction.to_vec();
+        camera_args.extend(forward);
+        camera_args.push(camera_distance);
+        let direct = call_interval_named(
+            &mut store,
+            &instance,
+            "de_camera_scene_interval",
+            &camera_args,
+        );
+        assert_eq!(bounded, direct, "bounded display case {index}");
+    }
+
+    let fade_args = |bounded: f32, hit_distance: f32| {
+        [bounded, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 4.0, hit_distance]
+    };
+    assert_eq!(
+        call_f32(
+            &mut store,
+            &instance,
+            "de_domain_fade",
+            &fade_args(0.0, 1.0),
+        ),
+        0.0,
+        "infinite mode must never expose a domain boundary",
+    );
+    for (distance, radial_distance) in [(4.0, 0.0), (1.45, 2.55), (1.0, 3.0)] {
+        let got = call_f32(
+            &mut store,
+            &instance,
+            "de_domain_fade",
+            &fade_args(1.0, distance),
+        );
+        let want = smoothstep(2.1, 3.0, radial_distance);
+        assert!(
+            (got - want).abs() <= 0.000002,
+            "bounded fade at radial distance {radial_distance}: Fe {got} != independent {want}",
+        );
+    }
+
     eprintln!(
-        "QCGA DE oracle: {field_samples} independently evaluated fields + {} full/mobile/clipped analytic-root rays ({hits} full hits); clipped steps {clipped_steps} < {full_steps}, {rejected_intervals} generic + {camera_rejects} prepared-camera whole-loop skips; Fe-owned quality tiers green",
+        "QCGA DE oracle: {field_samples} independently evaluated fields + {} full/mobile/clipped analytic-root rays ({hits} full hits); clipped steps {clipped_steps} < {full_steps}, {rejected_intervals} generic + {camera_rejects} prepared-camera whole-loop skips; Fe-owned quality and display modes green",
         rays.len(),
     );
 }

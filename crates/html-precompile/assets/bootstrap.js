@@ -674,7 +674,7 @@ export class FeComponentElement extends FeHTMLElement {
       throw new Error("fe-component received an event before Fe initialization");
     }
     const [textPointer, textLength] = this._writeEventText(text, textLimit);
-    this._state = values(this._instance.exports[ACTOR_TRANSITION](
+    return this._sendResidentEvent([
       kind >>> 0,
       target >>> 0,
       request >>> 0,
@@ -684,7 +684,17 @@ export class FeComponentElement extends FeHTMLElement {
       Math.fround(timestamp),
       textPointer,
       textLength,
-    ));
+    ]);
+  }
+
+  _sendResidentEvent(event) {
+    if (!this._instance || !this._initialized) {
+      throw new Error("fe-component received an event before Fe initialization");
+    }
+    if (!Array.isArray(event)) {
+      throw new TypeError("resident Fe event must be compiler-flattened lanes");
+    }
+    this._state = values(this._instance.exports[ACTOR_TRANSITION](...event));
     const patch = values(this._instance.exports[ACTOR_PROJECT]());
     if (patch.length !== 5 || patch.some(value => (value >>> 0) !== value)) {
       throw new Error(
@@ -693,6 +703,13 @@ export class FeComponentElement extends FeHTMLElement {
     }
     this._applyPatch(patch.map(value => value >>> 0));
     return patch;
+  }
+
+  _sendScopedTaskEvent(event, signal) {
+    if (signal?.aborted || !this._active) {
+      throw new DOMException("resident actor scope is no longer active", "AbortError");
+    }
+    return this._sendResidentEvent(event);
   }
 
   _applyPatch(patch) {
@@ -1154,6 +1171,9 @@ async function run(element) {
         const needsWindowCapability = WebAssembly.Module.imports(module).some(
           value => value.module === "fe:web-window",
         );
+        const needsActorCapability = WebAssembly.Module.imports(module).some(
+          value => value.module === "fe:actor",
+        );
         const brokerOptions = {};
         if (needsSurfaceCapability) {
           brokerOptions.surface = {
@@ -1176,6 +1196,16 @@ async function run(element) {
         }
         if (needsWindowCapability) {
           brokerOptions.windowEvents = createWindowEventSource(globalThis);
+        }
+        if (needsActorCapability) {
+          brokerOptions.actorEvents = {
+            send: (event, signal) => {
+              if (!surfaceScope.component) {
+                throw new Error("actor task started before its Fe component was attached");
+              }
+              return surfaceScope.component._sendScopedTaskEvent(event, signal);
+            },
+          };
         }
         scopedTasks = {
           taskModule,

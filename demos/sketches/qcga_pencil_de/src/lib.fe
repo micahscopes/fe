@@ -54,6 +54,7 @@ use fmath::{
     normalize3,
     rgba,
     scale3,
+    smoothstep,
     targeted_camera_sphere_interval,
     unit_ray_sphere_interval,
     vec3,
@@ -86,6 +87,21 @@ const HIT_EPSILON: f32 = 0.0014
 /// Explicit finite display domain for unbounded pencil members. This clips
 /// the scene, not the quadric equation; visibility inside remains iterative.
 const SCENE_CLIP_RADIUS: f32 = 3.0
+/// The bounded mode becomes transparent before its finite broad-phase sphere,
+/// so the optimization never appears as a geometric cut plane/silhouette.
+const SCENE_FADE_START: f32 = 2.1
+
+/// Fe-owned interpretation of the checkbox's canonical scalar carrier. A
+/// nominal policy record keeps raw scalar tags out of the renderer while also
+/// lowering to WebGPU without requiring a shader trap channel for invalid enum
+/// discriminants. The browser does not select or understand either algorithm.
+pub struct PencilDisplayMode { pub bounded: bool }
+
+impl Copy for PencilDisplayMode {}
+
+pub fn pencil_display_mode(_ bounded: f32) -> PencilDisplayMode {
+    PencilDisplayMode { bounded: bounded >= 0.5 }
+}
 
 /// Extent-responsive work budget selected in Fe from raw backing-store facts.
 /// The fixed browser host may impose an emergency resource ceiling, but it
@@ -192,6 +208,43 @@ pub fn pencil_camera_de_interval(
     targeted_camera_sphere_interval(
         unit_forward, unit_direction, camera_distance, SCENE_CLIP_RADIUS,
     )
+}
+
+/// Select the actual march domain in Fe. The default infinite-fade mode uses
+/// the full renderer budget and recovers the unbounded quadric silhouette;
+/// the checked bounded mode retains the mobile-friendly sphere rejection.
+pub fn pencil_display_interval(
+    _ mode: PencilDisplayMode,
+    _ unit_forward: Vec3,
+    _ unit_direction: Vec3,
+    _ camera_distance: f32,
+) -> RayInterval {
+    if mode.bounded {
+        pencil_camera_de_interval(unit_forward, unit_direction, camera_distance)
+    } else {
+        RayInterval { start: 0.0, end: FAR_CLIP, active: true }
+    }
+}
+
+/// Feather the optional finite display domain into the same sky used by
+/// distance fog. Relative position is reconstructed from the prepared camera
+/// basis, so no scene center or geometry convention crosses into JavaScript.
+pub fn pencil_domain_fade(
+    _ mode: PencilDisplayMode,
+    _ unit_forward: Vec3,
+    _ unit_direction: Vec3,
+    _ camera_distance: f32,
+    _ hit_distance: f32,
+) -> f32 {
+    if mode.bounded {
+        let relative: Vec3 = add3(
+            scale3(unit_direction, hit_distance),
+            scale3(unit_forward, 0.0 - camera_distance),
+        )
+        smoothstep(SCENE_FADE_START, SCENE_CLIP_RADIUS, length3(relative))
+    } else {
+        0.0
+    }
 }
 
 /// Quality-parameterized production marcher. `break` is semantically
@@ -435,7 +488,11 @@ actor PencilDistanceSurface uses (
             self.scene.frame.view.width,
             self.scene.frame.view.height,
         )
-        let interval: RayInterval = pencil_camera_de_interval(
+        let mode: PencilDisplayMode = pencil_display_mode(
+            self.scene.frame.view.bounded,
+        )
+        let interval: RayInterval = pencil_display_interval(
+            mode,
             self.camera.forward, ray.direction, self.scene.frame.view.dist,
         )
         let hit: PencilDeHit = trace_quadric_de_in_unit_interval(
@@ -478,7 +535,15 @@ actor PencilDistanceSurface uses (
             // secondary DE samples enter colour.
             let surface: Vec3 = tangent_color
             let fog: f32 = clamp01((hit.distance - 7.0) / 11.0)
-            mix3(surface, background, fog * fog)
+            let domain_fade: f32 = pencil_domain_fade(
+                mode,
+                self.camera.forward,
+                ray.direction,
+                self.scene.frame.view.dist,
+                hit.distance,
+            )
+            let fade: f32 = 1.0 - (1.0 - fog * fog) * (1.0 - domain_fade)
+            mix3(surface, background, fade)
         } else {
             background
         }

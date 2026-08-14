@@ -193,6 +193,31 @@ pub enum RuntimeControlEffectFuncKind {
     Suspend,
 }
 
+/// Nominal actor-scope operations which remain ordinary host imports but need
+/// compiler validation against the resident actor contract. Kept distinct
+/// from [`RuntimeControlEffectFuncKind`]: these operations do not split control
+/// flow themselves; their returned `Pending` value may subsequently be passed
+/// to the ordinary suspension operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
+pub enum RuntimeActorEffectFuncKind {
+    SendBegin,
+}
+
+#[salsa::tracked]
+pub fn runtime_actor_effect_func_kind<'db>(
+    db: &'db dyn HirAnalysisDb,
+    func: Func<'db>,
+) -> Option<RuntimeActorEffectFuncKind> {
+    let kind = func.top_mod(db).ingot(db).kind(db);
+    let path = runtime_builtin_func_path(db, func)?;
+    match (kind, path.as_slice()) {
+        (IngotKind::Std, ["actor", "raw", "send_begin"]) => {
+            Some(RuntimeActorEffectFuncKind::SendBegin)
+        }
+        _ => None,
+    }
+}
+
 #[salsa::tracked]
 pub fn runtime_control_effect_func_kind<'db>(
     db: &'db dyn HirAnalysisDb,

@@ -43,6 +43,11 @@ pub enum ComponentEventKind {
     SurfaceError,
     /// A previously requested surface exceeded the Fe-selected deadline.
     SurfaceTimeout,
+    /// An event sent by a compiler-materialized task into its owning resident
+    /// component actor. The fixed host never synthesizes this variant from a
+    /// DOM event: it transports the task's complete compiler-flattened
+    /// `ComponentEvent<A>` value without interpreting `target` or its payload.
+    TaskMessage,
 }
 
 impl Copy for ComponentEventKind {}
@@ -85,6 +90,22 @@ pub struct ComponentEvent<A = u32> {
 impl<A: Copy> Copy for ComponentEvent<A> {}
 
 impl<A: Copy> ComponentEvent<A> {
+    /// Construct an application-typed event for delivery from an actor-scoped
+    /// task. Browser-only lanes are zero because no standards event or host
+    /// resource payload is being impersonated.
+    pub fn task_message(target: A, detail: u32) -> Self {
+        Self {
+            kind: ComponentEventKind::TaskMessage,
+            target: target,
+            request: 0,
+            key: 0,
+            detail: detail,
+            value: 0.0,
+            timestamp: 0.0,
+            text: BrowserString { ptr: 0, len: 0 },
+        }
+    }
+
     pub fn is_lifecycle(self) -> bool {
         match self.kind {
             ComponentEventKind::Connected => true,

@@ -4,11 +4,11 @@ pub mod runtime;
 pub mod verify;
 
 pub use db::MirDb;
-pub use hir::analysis::ty::corelib::RuntimeControlEffectFuncKind;
+pub use hir::analysis::ty::corelib::{RuntimeActorEffectFuncKind, RuntimeControlEffectFuncKind};
 pub use instance::{
     HostResultCodec, IndirectHostResult, RuntimeInstance, RuntimeInstanceKey,
     get_or_build_runtime_instance, host_import_module, host_import_name, indirect_host_result,
-    runtime_control_effect_kind, wasm_import_module, wasm_import_name,
+    runtime_actor_effect_kind, runtime_control_effect_kind, wasm_import_module, wasm_import_name,
 };
 pub use runtime::{
     AddressSpaceKind, ArrayLayout, BorrowAccess, BorrowTransportSet, ConstNode, ConstRegion,

@@ -678,6 +678,8 @@ export class FeSurfaceElement extends HTMLElement {
   async _bootSurface() {
     this._teardown();
     this._fsm = "cold";
+    this._panel.replaceChildren();
+    this._controlRows = [];
     const manifestAttr = this.getAttribute("manifest");
     if (!manifestAttr) {
       this._fail(new Error("fe-surface: `manifest` attribute is required"));
@@ -847,6 +849,10 @@ export class FeSurfaceElement extends HTMLElement {
       // resolved. They remain useful diagnostics even when poster rendering
       // subsequently fails because this browser has no usable WebGPU device.
       this._updateMeta();
+      // Controls are an independently useful projection of the Fe-authored
+      // view. Materialize them before GPU acquisition so an unavailable
+      // adapter cannot erase that authored interface (or its diagnostics).
+      this._renderControls();
       await this._renderPosterWithRecovery();
       this._renderControls();
       this._updateMeta();
@@ -867,7 +873,10 @@ export class FeSurfaceElement extends HTMLElement {
     const notice = document.createElement("div");
     notice.className = "control notice";
     notice.textContent = error?.message ?? String(error);
-    this._panel.replaceChildren(notice);
+    // Keep any Fe-projected controls that were materialized before GPU
+    // acquisition. The failure notice reports the unavailable host facility;
+    // it must not erase the successfully derived application interface.
+    this._panel.append(notice);
     console.error("[fe web] fe-surface failed to mount:", error);
     this._rejectReady?.(error);
     this._dispatch("fe-error", error);
@@ -2505,6 +2514,7 @@ export class FeSurfaceElement extends HTMLElement {
       const label = document.createElement("label");
       const value = document.createElement("b");
       const isInt = param.kind === "int";
+      const isToggle = param.kind === "toggle";
       const min = typeof param.min === "number" ? param.min : 0;
       const max = typeof param.max === "number" ? param.max : 1;
       const isLog = param.kind === "log" && min > 0 && max > min;
@@ -2514,6 +2524,7 @@ export class FeSurfaceElement extends HTMLElement {
       const decode = isLog ? (v) => 10 ** (+v) : (v) => +v;
       const format = (v) => {
         const number = +v;
+        if (isToggle) return number >= 0.5 ? "on" : "off";
         if (isInt) return number.toFixed(0);
         if (isLog && (number < 0.01 || number >= 1000)) return number.toExponential(2);
         return Number(number.toPrecision(8)).toString();
@@ -2523,26 +2534,37 @@ export class FeSurfaceElement extends HTMLElement {
       name.textContent = param.name;
       label.append(name, value);
       const input = document.createElement("input");
-      input.type = "range";
-      const inputMin = isLog ? Math.log10(min) : min;
-      const inputMax = isLog ? Math.log10(max) : max;
-      input.min = String(inputMin);
-      input.max = String(inputMax);
-      input.step = isInt ? "1" : String((inputMax - inputMin) / 200 || 0.01);
-      input.value = String(encode(this._uniforms[index]));
-      input.oninput = () => {
-        this._applyParamEdit(index, decode(input.value), paramIndex);
-      };
+      input.type = isToggle ? "checkbox" : "range";
+      if (isToggle) {
+        input.checked = this._uniforms[index] >= 0.5;
+        input.oninput = () => {
+          this._applyParamEdit(index, input.checked ? 1 : 0, paramIndex);
+        };
+      } else {
+        const inputMin = isLog ? Math.log10(min) : min;
+        const inputMax = isLog ? Math.log10(max) : max;
+        input.min = String(inputMin);
+        input.max = String(inputMax);
+        input.step = isInt ? "1" : String((inputMax - inputMin) / 200 || 0.01);
+        input.value = String(encode(this._uniforms[index]));
+        input.oninput = () => {
+          this._applyParamEdit(index, decode(input.value), paramIndex);
+        };
+      }
       row.append(label, input);
       this._panel.append(row);
-      this._controlRows.push({ index, input, value, format, encode });
+      this._controlRows.push({ index, input, value, format, encode, isToggle });
     });
   }
 
   _refreshControlValues() {
     for (const row of this._controlRows) {
       row.value.textContent = row.format(this._uniforms[row.index]);
-      row.input.value = String(row.encode(this._uniforms[row.index]));
+      if (row.isToggle) {
+        row.input.checked = this._uniforms[row.index] >= 0.5;
+      } else {
+        row.input.value = String(row.encode(this._uniforms[row.index]));
+      }
     }
   }
 

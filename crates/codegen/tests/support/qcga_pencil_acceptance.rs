@@ -23,8 +23,9 @@
 //!    NEGATIVE: an empty quadric emits no geometry at all.
 //! 7. `mesh_oracle` and `probe` agree bit for bit; stream length pins
 //!    VERTEX_COUNT.
-//! 8. The canonical DE actor owns initialization, typed interaction, bounded
-//!    arena reuse, and the only QCGA Pencil GPU entry after raster retirement.
+//! 8. The canonical DE actor owns initialization, typed interaction, its
+//!    infinite-fade/bounded display policy, bounded arena reuse, and the only
+//!    QCGA Pencil GPU entry after raster retirement.
 
 use std::path::Path;
 
@@ -889,7 +890,7 @@ fn canonical_de_actor_owns_the_complete_scene_lifecycle() {
         assert_eq!(marker.source_entry, "marker_fragment");
         assert_eq!(marker.draw_vertices, Some(54));
         assert_eq!(pass.layout.bindings.len(), 1);
-        assert_eq!(pass.layout.bindings[0].members.len(), 81);
+        assert_eq!(pass.layout.bindings[0].members.len(), 82);
         assert_eq!(
             pass.layout.bindings[0]
                 .members
@@ -903,6 +904,7 @@ fn canonical_de_actor_owns_the_complete_scene_lifecycle() {
                 "dist",
                 "width",
                 "height",
+                "bounded",
                 "generation",
                 "cx",
                 "cy",
@@ -988,9 +990,17 @@ fn canonical_de_actor_owns_the_complete_scene_lifecycle() {
                 .iter()
                 .map(|param| param.name.as_str())
                 .collect::<Vec<_>>(),
-            ["lambda", "yaw", "pitch", "dist", "width", "height"],
+            [
+                "lambda", "yaw", "pitch", "dist", "width", "height", "bounded"
+            ],
             "InitialState supplies complete defaults; view() exposes controls and typed extents",
         );
+        let bounded = surface.params.last().expect("bounded display param");
+        assert_eq!(bounded.kind, "toggle");
+        assert_eq!(bounded.min, Some(0.0));
+        assert_eq!(bounded.max, Some(1.0));
+        assert_eq!(bounded.init, Some(0.0));
+        assert!(bounded.visible);
         assert!(bundle.manifest.control.is_none());
         let engine = wasmtime::Engine::default();
         let module = wasmtime::Module::new(&engine, &bundle.wasm).expect("QCGA control Wasm");
@@ -999,9 +1009,9 @@ fn canonical_de_actor_owns_the_complete_scene_lifecycle() {
         let initialize = instance
             .get_func(&mut store, "fe_surface_initialize_v1")
             .expect("fixed Fe InitialState export");
-        let mut state = vec![wasmtime::Val::F32(0); 81];
-        state[6] = wasmtime::Val::I32(0);
-        state[58] = wasmtime::Val::I32(0);
+        let mut state = vec![wasmtime::Val::F32(0); 82];
+        state[7] = wasmtime::Val::I32(0);
+        state[59] = wasmtime::Val::I32(0);
         initialize
             .call(&mut store, &[], &mut state)
             .expect("execute Fe solver-backed initialization");
@@ -1015,25 +1025,26 @@ fn canonical_de_actor_owns_the_complete_scene_lifecycle() {
         assert_eq!(f32_at(&state, 3).to_bits(), 4.0f32.to_bits());
         assert_eq!(f32_at(&state, 4).to_bits(), 512.0f32.to_bits());
         assert_eq!(f32_at(&state, 5).to_bits(), 512.0f32.to_bits());
-        assert!(matches!(state[6], wasmtime::Val::I32(0)));
-        assert_eq!(f32_at(&state, 10).to_bits(), 1.0f32.to_bits());
-        let q0 = std::array::from_fn(|index| f32_at(&state, 11 + index));
-        let q1 = std::array::from_fn(|index| f32_at(&state, 21 + index));
+        assert_eq!(f32_at(&state, 6).to_bits(), 0.0f32.to_bits());
+        assert!(matches!(state[7], wasmtime::Val::I32(0)));
+        assert_eq!(f32_at(&state, 11).to_bits(), 1.0f32.to_bits());
+        let q0 = std::array::from_fn(|index| f32_at(&state, 12 + index));
+        let q1 = std::array::from_fn(|index| f32_at(&state, 22 + index));
         for index in 0..9 {
             let point = [
-                f32_at(&state, 31 + index * 3) as f64,
                 f32_at(&state, 32 + index * 3) as f64,
                 f32_at(&state, 33 + index * 3) as f64,
+                f32_at(&state, 34 + index * 3) as f64,
             ];
             assert!(oracle(&q0, point).abs() < 1e-4);
             assert!(oracle(&q1, point).abs() < 1e-4);
         }
-        let member = std::array::from_fn(|index| f32_at(&state, 71 + index));
+        let member = std::array::from_fn(|index| f32_at(&state, 72 + index));
         for index in 0..9 {
             let point = [
-                f32_at(&state, 31 + index * 3) as f64,
                 f32_at(&state, 32 + index * 3) as f64,
                 f32_at(&state, 33 + index * 3) as f64,
+                f32_at(&state, 34 + index * 3) as f64,
             ];
             assert!(
                 oracle(&member, point).abs() < 2e-4,
@@ -1050,10 +1061,10 @@ fn canonical_de_actor_owns_the_complete_scene_lifecycle() {
         let dot = |left: [f64; 3], right: [f64; 3]| {
             left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
         };
-        let origin = vector(59);
-        let right = vector(62);
-        let up = vector(65);
-        let forward = vector(68);
+        let origin = vector(60);
+        let right = vector(63);
+        let up = vector(66);
+        let forward = vector(69);
         for axis in [right, up, forward] {
             assert!(
                 (dot(axis, axis) - 1.0).abs() < 2e-4,
@@ -1066,7 +1077,7 @@ fn canonical_de_actor_owns_the_complete_scene_lifecycle() {
         for axis in 0..3 {
             assert!(
                 (origin[axis] + forward[axis] * f32_at(&state, 3) as f64
-                    - f32_at(&state, 7 + axis) as f64)
+                    - f32_at(&state, 8 + axis) as f64)
                     .abs()
                     < 2e-4,
                 "prepared camera must look at the solved pencil centre",
@@ -1108,9 +1119,9 @@ fn canonical_de_actor_owns_the_complete_scene_lifecycle() {
         let transition = instance
             .get_func(&mut store, "fe_surface_transition_scheduled_v1")
             .expect("scheduled Fe navigation export");
-        let mut next = vec![wasmtime::Val::F32(0); 81];
-        next[6] = wasmtime::Val::I32(0);
-        next[58] = wasmtime::Val::I32(0);
+        let mut next = vec![wasmtime::Val::F32(0); 82];
+        next[7] = wasmtime::Val::I32(0);
+        next[59] = wasmtime::Val::I32(0);
         transition
             .call(
                 &mut store,
@@ -1123,37 +1134,86 @@ fn canonical_de_actor_owns_the_complete_scene_lifecycle() {
         assert_eq!(f32_at(&next, 2).to_bits(), f32_at(&state, 2).to_bits());
         assert_eq!(f32_at(&next, 3).to_bits(), f32_at(&state, 3).to_bits());
         assert_eq!(
-            next[6..59]
+            next[7..60]
                 .iter()
                 .map(|value| format!("{value:?}"))
                 .collect::<Vec<_>>(),
-            state[6..59]
+            state[7..60]
                 .iter()
                 .map(|value| format!("{value:?}"))
                 .collect::<Vec<_>>(),
             "navigation must preserve every solver-derived basis leaf exactly",
         );
         assert_ne!(
-            next[59..71]
+            next[60..72]
                 .iter()
                 .map(|value| format!("{value:?}"))
                 .collect::<Vec<_>>(),
-            state[59..71]
+            state[60..72]
                 .iter()
                 .map(|value| format!("{value:?}"))
                 .collect::<Vec<_>>(),
             "resident Fe must refresh the prepared camera after orbit input",
         );
         assert_eq!(
-            next[71..81]
+            next[72..82]
                 .iter()
                 .map(|value| format!("{value:?}"))
                 .collect::<Vec<_>>(),
-            state[71..81]
+            state[72..82]
                 .iter()
                 .map(|value| format!("{value:?}"))
                 .collect::<Vec<_>>(),
             "camera-only input must preserve the prepared pencil member",
+        );
+
+        // The browser checkbox is only a presentation of the generic Fe
+        // `Param::toggle`. Prove the typed ParamEdit reaches the FCO-derived
+        // transition and changes exactly the authored `bounded` leaf.
+        replace.call(&mut store, &state, &mut []).unwrap();
+        let toggle_words = [
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            0,
+            0,
+            2.0f32.to_bits(),
+            512.0f32.to_bits(),
+            512.0f32.to_bits(),
+            1,
+            6,
+            1.0f32.to_bits(),
+        ];
+        let toggle_bytes = toggle_words
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect::<Vec<_>>();
+        memory.write(&mut store, pointer, &toggle_bytes).unwrap();
+        let mut toggled = vec![wasmtime::Val::F32(0); 82];
+        toggled[7] = wasmtime::Val::I32(0);
+        toggled[59] = wasmtime::Val::I32(0);
+        transition
+            .call(
+                &mut store,
+                &[wasmtime::Val::I32(pointer as i32), wasmtime::Val::I32(1)],
+                &mut toggled,
+            )
+            .expect("execute FCO-derived Fe toggle edit");
+        assert_eq!(f32_at(&toggled, 6), 1.0);
+        assert_eq!(
+            toggled[..6]
+                .iter()
+                .chain(&toggled[7..])
+                .map(|value| format!("{value:?}"))
+                .collect::<Vec<_>>(),
+            state[..6]
+                .iter()
+                .chain(&state[7..])
+                .map(|value| format!("{value:?}"))
+                .collect::<Vec<_>>(),
+            "the mode edit must preserve every non-toggle scene leaf exactly",
         );
 
         // Independent interaction receipt: derive p0's screen location from
@@ -1162,14 +1222,14 @@ fn canonical_de_actor_owns_the_complete_scene_lifecycle() {
         // checks semantic state and incidence; generated bytes are irrelevant.
         replace.call(&mut store, &state, &mut []).unwrap();
         let point0 = [
-            f32_at(&state, 31) as f64,
             f32_at(&state, 32) as f64,
             f32_at(&state, 33) as f64,
+            f32_at(&state, 34) as f64,
         ];
         let center = [
-            f32_at(&state, 7) as f64,
             f32_at(&state, 8) as f64,
             f32_at(&state, 9) as f64,
+            f32_at(&state, 10) as f64,
         ];
         let yaw = f32_at(&state, 1) as f64;
         let pitch = f32_at(&state, 2) as f64;
@@ -1207,9 +1267,9 @@ fn canonical_de_actor_owns_the_complete_scene_lifecycle() {
             .flat_map(u32::to_le_bytes)
             .collect::<Vec<_>>();
         memory.write(&mut store, pointer, &down_bytes).unwrap();
-        let mut selected = vec![wasmtime::Val::F32(0); 81];
-        selected[6] = wasmtime::Val::I32(0);
-        selected[58] = wasmtime::Val::I32(0);
+        let mut selected = vec![wasmtime::Val::F32(0); 82];
+        selected[7] = wasmtime::Val::I32(0);
+        selected[59] = wasmtime::Val::I32(0);
         transition
             .call(
                 &mut store,
@@ -1217,24 +1277,24 @@ fn canonical_de_actor_owns_the_complete_scene_lifecycle() {
                 &mut selected,
             )
             .expect("Fe PointerDown must select the projected control point");
-        assert!(matches!(selected[58], wasmtime::Val::I32(1)), "p0 enum tag");
+        assert!(matches!(selected[59], wasmtime::Val::I32(1)), "p0 enum tag");
         assert_eq!(
-            selected[..58]
+            selected[..59]
                 .iter()
                 .map(|value| format!("{value:?}"))
                 .collect::<Vec<_>>(),
-            state[..58]
+            state[..59]
                 .iter()
                 .map(|value| format!("{value:?}"))
                 .collect::<Vec<_>>(),
             "selection changes only the typed PickedControl state",
         );
         assert_eq!(
-            selected[59..]
+            selected[60..]
                 .iter()
                 .map(|value| format!("{value:?}"))
                 .collect::<Vec<_>>(),
-            state[59..]
+            state[60..]
                 .iter()
                 .map(|value| format!("{value:?}"))
                 .collect::<Vec<_>>(),
@@ -1249,9 +1309,9 @@ fn canonical_de_actor_owns_the_complete_scene_lifecycle() {
         memory
             .write(&mut store, pointer, &drag_release_bytes)
             .unwrap();
-        let mut dragged = vec![wasmtime::Val::F32(0); 81];
-        dragged[6] = wasmtime::Val::I32(0);
-        dragged[58] = wasmtime::Val::I32(0);
+        let mut dragged = vec![wasmtime::Val::F32(0); 82];
+        dragged[7] = wasmtime::Val::I32(0);
+        dragged[59] = wasmtime::Val::I32(0);
         transition
             .call(
                 &mut store,
@@ -1259,40 +1319,40 @@ fn canonical_de_actor_owns_the_complete_scene_lifecycle() {
                 &mut dragged,
             )
             .expect("ordered Fe PointerMove + PointerUp batch");
-        assert!(matches!(dragged[6], wasmtime::Val::I32(1)), "one re-solve");
+        assert!(matches!(dragged[7], wasmtime::Val::I32(1)), "one re-solve");
         assert!(
-            matches!(dragged[58], wasmtime::Val::I32(0)),
+            matches!(dragged[59], wasmtime::Val::I32(0)),
             "release clears pick"
         );
         assert_ne!(
             [
-                f32_at(&dragged, 31),
                 f32_at(&dragged, 32),
-                f32_at(&dragged, 33)
+                f32_at(&dragged, 33),
+                f32_at(&dragged, 34)
             ]
             .map(f32::to_bits),
-            [f32_at(&state, 31), f32_at(&state, 32), f32_at(&state, 33)].map(f32::to_bits),
+            [f32_at(&state, 32), f32_at(&state, 33), f32_at(&state, 34)].map(f32::to_bits),
             "drag must move the selected point",
         );
         assert_eq!(
-            dragged[34..58]
+            dragged[35..59]
                 .iter()
                 .map(|value| format!("{value:?}"))
                 .collect::<Vec<_>>(),
-            state[34..58]
+            state[35..59]
                 .iter()
                 .map(|value| format!("{value:?}"))
                 .collect::<Vec<_>>(),
             "drag must preserve all eight unselected points exactly",
         );
-        let dragged_q0 = std::array::from_fn(|index| f32_at(&dragged, 11 + index));
-        let dragged_q1 = std::array::from_fn(|index| f32_at(&dragged, 21 + index));
-        let dragged_member = std::array::from_fn(|index| f32_at(&dragged, 71 + index));
+        let dragged_q0 = std::array::from_fn(|index| f32_at(&dragged, 12 + index));
+        let dragged_q1 = std::array::from_fn(|index| f32_at(&dragged, 22 + index));
+        let dragged_member = std::array::from_fn(|index| f32_at(&dragged, 72 + index));
         for index in 0..9 {
             let point = [
-                f32_at(&dragged, 31 + index * 3) as f64,
                 f32_at(&dragged, 32 + index * 3) as f64,
                 f32_at(&dragged, 33 + index * 3) as f64,
+                f32_at(&dragged, 34 + index * 3) as f64,
             ];
             assert!(
                 oracle(&dragged_q0, point).abs() < 2e-4 && oracle(&dragged_q1, point).abs() < 2e-4,
@@ -1317,7 +1377,7 @@ fn canonical_de_actor_owns_the_complete_scene_lifecycle() {
         let mut event_pointer = None;
         let mut post_solve_cursor = None;
         let mut bounded_pages = None;
-        let initial_generation = match selected[6] {
+        let initial_generation = match selected[7] {
             wasmtime::Val::I32(value) => value,
             ref value => panic!("generation is not i32: {value:?}"),
         };
@@ -1342,9 +1402,9 @@ fn canonical_de_actor_owns_the_complete_scene_lifecycle() {
                 )
                 .expect("allocation-heavy Fe pencil solve stays live");
             assert!(
-                matches!(stressed[6], wasmtime::Val::I32(value) if value == initial_generation + iteration + 1)
+                matches!(stressed[7], wasmtime::Val::I32(value) if value == initial_generation + iteration + 1)
             );
-            assert!(matches!(stressed[58], wasmtime::Val::I32(1)));
+            assert!(matches!(stressed[59], wasmtime::Val::I32(1)));
 
             let current_cursor = alloc.call(&mut store, (1, 1)).unwrap();
             let current_pages = memory.size(&store);

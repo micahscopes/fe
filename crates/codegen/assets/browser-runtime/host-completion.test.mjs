@@ -127,7 +127,82 @@ function animationFrameMachine(start, onCancel = () => {}) {
   });
 }
 
+function actorSendMachine(start, onCancel = () => {}) {
+  return createMaterializedTaskMachine({
+    input: [],
+    step: [state, u32, u32],
+    complete: { start: 1, count: 1 },
+    start,
+    continuations: [{
+      state: 1,
+      range: { start: 2, count: 1 },
+      pending: { start: 2, count: 1 },
+      frame: { start: 3, count: 0 },
+      delivery: {
+        lanes: [outcome, u32],
+        failure: { start: 1, count: 1 },
+        success: { start: 2, count: 0 },
+      },
+      invoke(tag, error) {
+        if (tag === 0) return [0, 100 + error, 0];
+        if (tag === 2) {
+          onCancel();
+          return [0, 200, 0];
+        }
+        return [0, 1, 0];
+      },
+    }],
+  });
+}
+
 describe("browser HostTimer/Recv completion broker", () => {
+  test("typed actor sends remain opaque and resume only after acceptance", async () => {
+    const accepted = [];
+    const broker = createHostCompletionBroker({
+      actorEvents: {
+        async send(event, signal) {
+          expect(signal.aborted).toBeFalse();
+          accepted.push(event);
+        },
+      },
+    });
+    const sending = actorSendMachine(() => [
+      1, 0, broker.imports["fe:actor"].send_begin(3, 0.25, 9n) >>> 0,
+    ]);
+    expect(await broker.run(sending, [])).toEqual([1]);
+    expect(accepted).toEqual([[3, 0.25, 9n]]);
+    expect(Object.isFrozen(accepted[0])).toBeTrue();
+    expect(broker.activeCount()).toBe(0);
+  });
+
+  test("actor-send scope cancellation suppresses stale delivery exactly once", async () => {
+    let hostAborts = 0;
+    let feCancellations = 0;
+    const broker = createHostCompletionBroker({
+      actorEvents: {
+        send(_event, signal) {
+          return new Promise((_resolve, reject) => {
+            signal.addEventListener("abort", () => {
+              hostAborts += 1;
+              reject(new DOMException("cancelled", "AbortError"));
+            }, { once: true });
+          });
+        },
+      },
+    });
+    const sending = actorSendMachine(() => [
+      1, 0, broker.imports["fe:actor"].send_begin(7) >>> 0,
+    ], () => { feCancellations += 1; });
+    const controller = new AbortController();
+    const result = broker.run(sending, [], { signal: controller.signal });
+    await Promise.resolve();
+    controller.abort();
+    await expect(result).rejects.toBeInstanceOf(Error);
+    expect(hostAborts).toBe(1);
+    expect(feCancellations).toBe(1);
+    expect(broker.activeCount()).toBe(0);
+  });
+
   test("typed surface hooks resume Fe with opaque u64 results and failures", async () => {
     const seen = [];
     const broker = createHostCompletionBroker({

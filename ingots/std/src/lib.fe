@@ -6,6 +6,7 @@ pub use gpu::{self, *}
 pub use webgpu::{self, *}
 pub use worker::{self, *}
 pub use host::{self, *}
+pub use actor::{self, *}
 pub use conal
 pub use reactive
 pub use web

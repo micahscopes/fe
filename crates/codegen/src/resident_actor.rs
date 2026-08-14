@@ -7,6 +7,10 @@
 use std::fmt;
 
 use compiler_db::DriverDataBase;
+use hir::analysis::{
+    semantic::instantiate_with_generic_args,
+    ty::{normalize::normalize_ty, ty_check::BodyOwner},
+};
 use hir::hir_def::{ActorTransition, TopLevelMod};
 
 use crate::actor_semantics::{nominal_attrs, resolve_metadata_ty, semantic_actors};
@@ -170,6 +174,153 @@ fn scalar_layout(
         // deliberately not mistaken for scalar state leaves.
         CanonicalType::Bytes | CanonicalType::String | CanonicalType::List { .. } => Ok(2),
     }
+}
+
+/// Validate every canonical actor-sink operation in the compiled package
+/// against the unique resident event. The fixed browser handler forwards the
+/// import's already-flattened scalar parameters directly to the fixed resident
+/// transition export, so accepting a merely same-width or caller-described
+/// layout here would turn JavaScript into an implicit event codec.
+fn validate_actor_sink_events(
+    db: &DriverDataBase,
+    package: &mir::RuntimePackage<'_>,
+    contract: &ResidentActorContract,
+) -> Result<(), ResidentActorError> {
+    let resident_functions = package
+        .functions(db)
+        .into_iter()
+        .filter(|function| {
+            function.linkage(db) == mir::RuntimeLinkage::Internal
+                && function.symbol(db).as_str() == contract.source_entry.as_str()
+        })
+        .collect::<Vec<_>>();
+    let [resident] = resident_functions.as_slice() else {
+        return Err(ResidentActorError::Contract(format!(
+            "actor `{}` resident transition `{}` resolved to {} runtime roots",
+            contract.actor,
+            contract.source_entry,
+            resident_functions.len(),
+        )));
+    };
+    let resident_body = resident.instance(db).body(db);
+    let Some(event) = resident_body.signature.params.first() else {
+        return Err(ResidentActorError::Contract(format!(
+            "actor `{}` resident transition has no runtime event parameter",
+            contract.actor,
+        )));
+    };
+    let mir::instance::RuntimeInstanceSource::Semantic(resident_semantic) =
+        resident.instance(db).key(db).source(db)
+    else {
+        return Err(ResidentActorError::Contract(format!(
+            "actor `{}` resident transition is not a semantic Fe function",
+            contract.actor,
+        )));
+    };
+    let BodyOwner::Func(resident_func) = resident_semantic.key(db).owner(db) else {
+        return Err(ResidentActorError::Contract(format!(
+            "actor `{}` resident transition is not a Fe function",
+            contract.actor,
+        )));
+    };
+    // Read the authored semantic argument rather than the runtime local's
+    // lowering carrier. The latter may be a representation-preserving `View`
+    // wrapper even though the public actor boundary consumes the same nominal
+    // value type.
+    let resident_event_ty = resident_func
+        .arg_tys(db)
+        .first()
+        .map(|ty| *ty.skip_binder())
+        .ok_or_else(|| {
+            ResidentActorError::Contract(format!(
+                "actor `{}` resident transition has no semantic event type",
+                contract.actor,
+            ))
+        })?;
+    let resident_event_ty = instantiate_with_generic_args(
+        db,
+        resident_event_ty,
+        resident_semantic.key(db).subst(db).generic_args(db),
+    );
+    let mut resident_event_ty = normalize_ty(
+        db,
+        resident_event_ty,
+        resident_func.scope(),
+        resident_semantic.assumptions(db),
+    );
+    while let Some(inner) = resident_event_ty.as_view(db) {
+        resident_event_ty = inner;
+    }
+
+    for function in package.functions(db) {
+        let instance = function.instance(db);
+        if mir::runtime_actor_effect_kind(db, instance)
+            != Some(mir::RuntimeActorEffectFuncKind::SendBegin)
+        {
+            continue;
+        }
+        let body = instance.body(db);
+        let [sent] = body.signature.params.as_slice() else {
+            return Err(ResidentActorError::Contract(format!(
+                "actor `{}` typed sink must take exactly one event value; found {} parameters",
+                contract.actor,
+                body.signature.params.len(),
+            )));
+        };
+        let mir::instance::RuntimeInstanceSource::Semantic(sink_semantic) =
+            instance.key(db).source(db)
+        else {
+            return Err(ResidentActorError::Contract(format!(
+                "actor `{}` typed sink is not a semantic Fe function",
+                contract.actor,
+            )));
+        };
+        let BodyOwner::Func(sink_func) = sink_semantic.key(db).owner(db) else {
+            return Err(ResidentActorError::Contract(format!(
+                "actor `{}` typed sink is not a Fe function",
+                contract.actor,
+            )));
+        };
+        let sink_event_ty = sink_func
+            .arg_tys(db)
+            .first()
+            .map(|ty| *ty.skip_binder())
+            .ok_or_else(|| {
+                ResidentActorError::Contract(format!(
+                    "actor `{}` typed sink declaration has no event type",
+                    contract.actor,
+                ))
+            })?;
+        let sink_event_ty = instantiate_with_generic_args(
+            db,
+            sink_event_ty,
+            sink_semantic.key(db).subst(db).generic_args(db),
+        );
+        let mut sink_event_ty = normalize_ty(
+            db,
+            sink_event_ty,
+            sink_func.scope(),
+            sink_semantic.assumptions(db),
+        );
+        while let Some(inner) = sink_event_ty.as_view(db) {
+            sink_event_ty = inner;
+        }
+        if sink_event_ty != resident_event_ty {
+            return Err(ResidentActorError::Contract(format!(
+                "actor `{}` typed sink event differs from its resident transition: sent `{}`, resident `{}`",
+                contract.actor,
+                sink_event_ty.pretty_print(db),
+                resident_event_ty.pretty_print(db),
+            )));
+        }
+        if sent.class != event.class {
+            return Err(ResidentActorError::Contract(format!(
+                "actor `{}` typed sink event differs from its resident transition: sent {:?}, resident {:?}",
+                contract.actor, sent.class, event.class,
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Recover and validate the module's unique resident actor behavior.
@@ -427,6 +578,7 @@ pub fn compile_resident_actor_with_optimization(
     entries.extend(contract.scoped_task_source_entries.iter().cloned());
     let package = mir::build_wasm_runtime_package_for_entries(db, top_mod, &entries)
         .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
+    validate_actor_sink_events(db, &package, &contract)?;
     let scoped_tasks =
         materialized_task_adapters(db, &package).map_err(ResidentActorError::Lower)?;
     if scoped_tasks.len() != contract.scoped_task_source_entries.len() {

@@ -1,4 +1,4 @@
-// Fixed browser realization for std::host's broker-completed Timer/Recv rail.
+// Fixed browser realization for broker-completed Fe runtime-control effects.
 //
 // Fe owns the task body, outcome matching, retry/cancellation policy, and every
 // subsequent suspension. This module owns only standards clocks/timers, the
@@ -85,6 +85,7 @@ export function createHostCompletionBroker(options = {}) {
   const surface = options.surface;
   const documentEvents = options.documentEvents;
   const windowEvents = options.windowEvents;
+  const actorEvents = options.actorEvents;
   if (typeof clock !== "function" || typeof schedule !== "function"
       || typeof cancelSchedule !== "function") {
     throw new TypeError("host completion clock and scheduling hooks must be callable");
@@ -102,6 +103,11 @@ export function createHostCompletionBroker(options = {}) {
       || typeof windowEvents !== "object"
       || typeof windowEvents.animationFrame !== "function")) {
     throw new TypeError("host completion window hooks must provide animationFrame");
+  }
+  if (actorEvents !== undefined && (!actorEvents
+      || typeof actorEvents !== "object"
+      || typeof actorEvents.send !== "function")) {
+    throw new TypeError("host completion actor hooks must provide send");
   }
 
   let nextToken = 0;
@@ -251,6 +257,21 @@ export function createHostCompletionBroker(options = {}) {
       "window-animation-frame",
       signal => windowEvents.animationFrame(signal),
       value => [finiteF32(value, "animation frame timestamp")],
+    );
+  };
+
+  const beginActorSend = (...lanes) => {
+    if (actorEvents === undefined) {
+      throw new Error("fe:actor::send_begin requires a resident actor capability");
+    }
+    // Wasm has already enforced the compiler-derived scalar signature. Keep
+    // the values opaque: the fixed broker neither decodes an event nor knows
+    // which resident transition will consume it.
+    const event = Object.freeze([...lanes]);
+    return beginBrowserOperation(
+      "actor-send",
+      signal => actorEvents.send(event, signal),
+      () => [],
     );
   };
 
@@ -427,11 +448,15 @@ export function createHostCompletionBroker(options = {}) {
   const windowImports = Object.freeze({
     animation_frame_begin: beginAnimationFrame,
   });
+  const actorImports = Object.freeze({
+    send_begin: beginActorSend,
+  });
 
   const imports = { "fe:host": host };
   if (surface !== undefined) imports["fe:web-surface"] = surfaceImports;
   if (documentEvents !== undefined) imports["fe:web-document"] = documentImports;
   if (windowEvents !== undefined) imports["fe:web-window"] = windowImports;
+  if (actorEvents !== undefined) imports["fe:actor"] = actorImports;
 
   return Object.freeze({
     imports: Object.freeze(imports),

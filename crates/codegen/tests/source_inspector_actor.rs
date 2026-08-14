@@ -14,7 +14,7 @@ use fe_codegen::{
 use hir::hir_def::HirIngot;
 use url::Url;
 
-const STATE_LEAVES: usize = 15;
+const STATE_LEAVES: usize = 18;
 
 fn i32_results(values: &[wasmtime::Val]) -> Vec<i32> {
     values
@@ -40,6 +40,9 @@ struct Model {
     prevent_default: bool,
     focus_close: bool,
     revision: u32,
+    surfaces_settled: u32,
+    surface_sequence_complete: bool,
+    surface_sequence_failed: bool,
 }
 
 impl Default for Model {
@@ -57,6 +60,9 @@ impl Default for Model {
             prevent_default: false,
             focus_close: false,
             revision: 0,
+            surfaces_settled: 0,
+            surface_sequence_complete: false,
+            surface_sequence_failed: false,
         }
     }
 }
@@ -79,6 +85,9 @@ fn reduce(model: &mut Model, event: Event<'_>) {
     match event.kind {
         0 => {
             model.connected = true;
+            model.surfaces_settled = 0;
+            model.surface_sequence_complete = false;
+            model.surface_sequence_failed = false;
             model.revision += 1;
         }
         1 => {
@@ -113,6 +122,22 @@ fn reduce(model: &mut Model, event: Event<'_>) {
             model.byte_len = event.detail;
             model.content = event.text.to_owned();
             model.status = u32::from(!(200..300).contains(&event.key)) + 1;
+            model.revision += 1;
+        }
+        13 if model.connected && event.target == 6 && event.detail > model.surfaces_settled => {
+            model.surfaces_settled = event.detail;
+            model.revision += 1;
+        }
+        13 if model.connected && event.target == 7 => {
+            model.surfaces_settled = event.detail;
+            model.surface_sequence_complete = true;
+            model.surface_sequence_failed = false;
+            model.revision += 1;
+        }
+        13 if model.connected && event.target == 8 => {
+            model.surfaces_settled = event.detail;
+            model.surface_sequence_complete = true;
+            model.surface_sequence_failed = true;
             model.revision += 1;
         }
         _ => {}
@@ -224,7 +249,11 @@ fn source_inspector_owns_selection_loading_stale_response_and_presentation_polic
             && source.contains("Stream<AnimationFrame>")
             && source.contains("EventSource<AnimationFrame> = BrowserAnimationFrames::new()")
             && source.contains("Stream<DocumentVisibility>")
-            && source.contains("EventSource<DocumentVisibility> = BrowserVisibilityEvents::new()"),
+            && source.contains("EventSource<DocumentVisibility> = BrowserVisibilityEvents::new()")
+            && source.contains(
+                "ActorSink<WasmBackend, ComponentEvent<InspectorAction>> = BrowserActorSink {}"
+            )
+            && source.contains("ComponentEventKind::TaskMessage"),
         "gallery loading must consume typed Fe surface and visibility streams"
     );
     assert!(
@@ -288,7 +317,18 @@ const trace = [];
 const visibilityCalls = [];
 const visibilityStates = [1, 0];
 const frameTimes = [16.0, 32.0];
+const actorEvents = [];
+let residentState = [];
+let instance;
 const broker = createHostCompletionBroker({{
+  actorEvents: {{
+    send(event, signal) {{
+      if (signal.aborted) throw new DOMException("cancelled", "AbortError");
+      actorEvents.push(event);
+      trace.push(`actor:${{event[1]}}:${{event[4]}}`);
+      residentState = instance.exports.fe_actor_transition_v1(...event);
+    }},
+  }},
   documentEvents: {{
     visibility: async (seen, previousHidden, signal) => {{
       if (signal.aborted) throw new DOMException("cancelled", "AbortError");
@@ -324,7 +364,9 @@ const broker = createHostCompletionBroker({{
   }},
 }});
 const bytes = await Bun.file({wasm_path:?}).arrayBuffer();
-const {{ instance }} = await WebAssembly.instantiate(bytes, broker.imports);
+({{ instance }} = await WebAssembly.instantiate(bytes, broker.imports));
+instance.exports.fe_actor_initialize_v1();
+instance.exports.fe_actor_transition_v1(0, 0, 0, 0, 0, 0, 0, 0, 0);
 const tasks = createMaterializedTaskRegistry(instance.exports);
 if (Object.keys(tasks).join() !== "activate_surfaces") throw new Error("task registry drift");
 const output = await broker.run(tasks.activate_surfaces, []);
@@ -333,8 +375,17 @@ if (visibilityCalls.length !== 2 || visibilityCalls[0][0] !== false || visibilit
     || visibilityCalls[1][0] !== true || visibilityCalls[1][1] !== true) {{
   throw new Error("Fe did not retain typed visibility state while gating surface work");
 }}
-if (trace.join() !== "visibility:1,visibility:0,next:11,load:11,frame:16,next:22,load:22,frame:32,next:0") {{
+if (trace.join() !== "visibility:1,visibility:0,next:11,load:11,actor:6:1,frame:16,next:22,load:22,actor:6:2,frame:32,next:0,actor:7:2") {{
   throw new Error(`Fe did not pace surface activation by animation frame: ${{trace}}`);
+}}
+if (actorEvents.length !== 3
+    || actorEvents[0].join() !== "13,6,0,0,1,0,0,0,0"
+    || actorEvents[1].join() !== "13,6,0,0,2,0,0,0,0"
+    || actorEvents[2].join() !== "13,7,0,0,2,0,0,0,0") {{
+  throw new Error(`scoped task did not deliver typed resident events: ${{JSON.stringify(actorEvents)}}`);
+}}
+if (residentState[15] !== 2 || residentState[16] !== 1 || residentState[17] !== 0) {{
+  throw new Error(`resident Fe state did not retain surface completion: ${{residentState}}`);
 }}
 if (loads.length !== 2 || loads[0] !== 11n || loads[1] !== 22n) throw new Error("host reordered surface tokens");
 if (tokens.length !== 0) throw new Error("Fe did not pull the end sentinel");
@@ -386,6 +437,22 @@ if (broker.activeCount() !== 0 || broker.cancelAll() !== 0) throw new Error("sur
             0
         })
         .unwrap();
+    linker
+        .func_wrap(
+            "fe:actor",
+            "send_begin",
+            |_kind: i32,
+             _target: i32,
+             _request: i32,
+             _key: i32,
+             _detail: i32,
+             _value: f32,
+             _timestamp: f32,
+             _text_ptr: i32,
+             _text_len: i32|
+             -> i32 { 0 },
+        )
+        .unwrap();
     let instance = linker.instantiate(&mut store, &module).unwrap();
     let memory = instance.get_memory(&mut store, "memory").unwrap();
     let initialize = instance
@@ -424,6 +491,22 @@ if (broker.activeCount() !== 0 || broker.cancelAll() !== 0) throw new Error("sur
             request: 0,
             key: 0,
             detail: 0,
+            text: "",
+        },
+        Event {
+            kind: 13,
+            target: 6,
+            request: 0,
+            key: 0,
+            detail: 1,
+            text: "",
+        },
+        Event {
+            kind: 13,
+            target: 7,
+            request: 0,
+            key: 0,
+            detail: 2,
             text: "",
         },
         // Legacy surface lifecycle events are valid transport facts, but the
@@ -654,6 +737,20 @@ if (broker.activeCount() !== 0 || broker.cancelAll() !== 0) throw new Error("sur
         );
         assert_eq!(actual[13] != 0, model.focus_close, "focus at {index}");
         assert_eq!(actual[14] as u32, model.revision, "revision at {index}");
+        assert_eq!(
+            actual[15] as u32, model.surfaces_settled,
+            "settled surfaces at {index}"
+        );
+        assert_eq!(
+            actual[16] != 0,
+            model.surface_sequence_complete,
+            "surface completion at {index}"
+        );
+        assert_eq!(
+            actual[17] != 0,
+            model.surface_sequence_failed,
+            "surface failure at {index}"
+        );
         let patch = project.call(&mut store, ()).unwrap();
         let expected = expected_projection(&model);
         assert_eq!(

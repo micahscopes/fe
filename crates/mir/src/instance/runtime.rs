@@ -1,6 +1,9 @@
 use cranelift_entity::EntityRef;
 use hir::analysis::semantic::{SemanticInstance, check_semantic_borrows, check_semantic_noesc};
-use hir::analysis::ty::corelib::{RuntimeControlEffectFuncKind, runtime_control_effect_func_kind};
+use hir::analysis::ty::corelib::{
+    RuntimeActorEffectFuncKind, RuntimeControlEffectFuncKind, runtime_actor_effect_func_kind,
+    runtime_control_effect_func_kind,
+};
 use hir::analysis::ty::ty_check::BodyOwner;
 use hir::analysis::ty::ty_def::TyId;
 use hir::hir_def::Func;
@@ -188,6 +191,23 @@ pub fn runtime_control_effect_kind<'db>(
     runtime_control_effect_func_kind(db, func)
 }
 
+/// Recover a nominal actor-scope operation from its resolved standard-library
+/// declaration. The import module/name remains host ABI, while this identity is
+/// what lets the resident compiler reject an application-authored lookalike or
+/// a sink whose event type differs from its owning actor.
+pub fn runtime_actor_effect_kind<'db>(
+    db: &'db dyn MirDb,
+    instance: RuntimeInstance<'db>,
+) -> Option<RuntimeActorEffectFuncKind> {
+    let RuntimeInstanceSource::Semantic(semantic) = instance.key(db).source(db) else {
+        return None;
+    };
+    let BodyOwner::Func(func) = semantic.key(db).owner(db) else {
+        return None;
+    };
+    runtime_actor_effect_func_kind(db, func)
+}
+
 /// Codec-versioned indirect aggregate result metadata carried unchanged from
 /// the authored extern declaration into backend lowering.
 pub fn indirect_host_result<'db>(
@@ -247,6 +267,31 @@ fn is_host_import_boundary_class(db: &dyn MirDb, class: &RuntimeClass<'_>) -> bo
     }
 }
 
+/// Input-only extension of the flat host boundary. Parameters originate in Fe,
+/// so Wasm can flatten closed arrays and enums using its existing checked value
+/// lane without asking the host for a schema. Results deliberately keep the
+/// narrower rule above and require the owned indirect codec for these shapes.
+fn is_host_import_param_boundary_class(db: &dyn MirDb, class: &RuntimeClass<'_>) -> bool {
+    match class {
+        RuntimeClass::AggregateValue { layout } => match layout.data(db) {
+            Layout::Struct(struct_layout) => struct_layout
+                .fields
+                .iter()
+                .all(|field| is_host_import_param_boundary_class(db, field)),
+            Layout::Array(array_layout) => {
+                is_host_import_param_boundary_class(db, &array_layout.elem)
+            }
+            Layout::Enum(enum_layout) => enum_layout.variants.iter().all(|variant| {
+                variant
+                    .fields
+                    .iter()
+                    .all(|field| is_host_import_param_boundary_class(db, field))
+            }),
+        },
+        _ => is_host_import_boundary_class(db, class),
+    }
+}
+
 fn external_declaration_body<'db>(
     db: &'db dyn MirDb,
     instance: RuntimeInstance<'db>,
@@ -283,7 +328,7 @@ fn external_declaration_body<'db>(
         if compiler_consumed_control {
             break;
         }
-        if !is_host_import_boundary_class(db, &param.class) {
+        if !is_host_import_param_boundary_class(db, &param.class) {
             let ty = func
                 .arg_tys(db)
                 .get(idx)

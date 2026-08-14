@@ -62,6 +62,7 @@ pub enum ViewParamKind {
     Fixed,
     ExtentX,
     ExtentY,
+    Toggle,
 }
 
 impl ViewParamKind {
@@ -76,6 +77,7 @@ impl ViewParamKind {
             Self::Fixed => "fixed",
             Self::ExtentX => "extent_x",
             Self::ExtentY => "extent_y",
+            Self::Toggle => "toggle",
         }
     }
 
@@ -99,6 +101,7 @@ impl ViewParamKind {
             "Fixed" => Self::Fixed,
             "ExtentX" => Self::ExtentX,
             "ExtentY" => Self::ExtentY,
+            "Toggle" => Self::Toggle,
             _ => return None,
         })
     }

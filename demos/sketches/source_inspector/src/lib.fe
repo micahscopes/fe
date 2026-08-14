@@ -11,8 +11,9 @@ use std::web::component::{
     ComponentPatch, ComponentWriter, InitialState, KeyboardKey, ProjectState, ResidentTransition,
     allocate_component_buffer, component_string,
 }
-use core::actor::ScopedTask
+use core::actor::{ActorSink, ScopedTask}
 use core::pending::{Race, RaceOutcome, Suspend, TaskOutcome, Timer}
+use std::actor::{ActorMessage, BrowserActorSink}
 use std::reactive::{Event, EventSource, Stream}
 use std::host::{HostTimer, Resumable}
 use std::wasm::WasmBackend
@@ -35,6 +36,9 @@ pub enum InspectorAction {
     Wasm,
     Manifest,
     Close,
+    SurfaceProgress,
+    SurfaceComplete,
+    SurfaceFailed,
 }
 
 impl Copy for InspectorAction {}
@@ -54,7 +58,10 @@ impl InspectorAction {
             Self::Wgsl => ArtifactKind::Wgsl,
             Self::Wasm => ArtifactKind::Wasm,
             Self::Manifest => ArtifactKind::Manifest,
-            Self::Source | Self::Unknown | Self::Close => ArtifactKind::Source,
+            Self::Source | Self::Unknown | Self::Close |
+            Self::SurfaceProgress | Self::SurfaceComplete | Self::SurfaceFailed => {
+                ArtifactKind::Source
+            }
         }
     }
 }
@@ -135,6 +142,9 @@ pub struct InspectorState {
     pub prevent_default: bool,
     pub focus_close: bool,
     pub revision: u32,
+    pub surfaces_settled: u32,
+    pub surface_sequence_complete: bool,
+    pub surface_sequence_failed: bool,
 }
 
 fn byte_at(ptr: u32, index: u32) -> BrowserPtr<u32> {
@@ -167,6 +177,28 @@ fn copy_content(destination: u32, value: own BrowserString) -> u32 {
 
 fn is_success(status: u32) -> bool {
     status >= 200 && status < 300
+}
+
+/// Deliver one task-owned lifecycle value through the actor's typed mailbox.
+/// The browser sees only the compiler-flattened `ComponentEvent` lanes; this
+/// Fe module owns the action meanings and the resident-state policy.
+fn report_surface_state(target: InspectorAction, settled: u32) -> bool
+    uses (
+        sink: mut ActorSink<WasmBackend, ComponentEvent<InspectorAction>>,
+        suspend: Suspend<WasmBackend, u32>,
+    )
+{
+    let event: ComponentEvent<InspectorAction> = ComponentEvent<InspectorAction>::task_message(
+        target: target,
+        detail: settled,
+    )
+    let message: ActorMessage<ComponentEvent<InspectorAction>> = ActorMessage::new(event)
+    let outcome: TaskOutcome<u32, ()> = message.send()
+    match outcome {
+        TaskOutcome::Success(_) => true
+        TaskOutcome::Failure(_) => false
+        TaskOutcome::Cancelled => false
+    }
 }
 
 /// Do not begin expensive gallery poster work while the document is hidden.
@@ -230,6 +262,7 @@ fn activate_gallery_surfaces() -> u32
         loader: mut SurfaceLoader<WasmBackend>,
         timer: mut Timer<WasmBackend>,
         race: mut Race<WasmBackend>,
+        sink: mut ActorSink<WasmBackend, ComponentEvent<InspectorAction>>,
         suspend: Suspend<WasmBackend, u32>,
     )
 {
@@ -264,6 +297,14 @@ fn activate_gallery_surfaces() -> u32
                         return loaded
                     }
                 }
+                if !report_surface_state(
+                    target: InspectorAction::SurfaceProgress,
+                    settled: loaded,
+                ) {
+                    stream.cancel(subscription)
+                    frame_stream.cancel(frame_subscription)
+                    return loaded
+                }
                 if pace_with_frames {
                     let frame = frame_stream.next_ready(frame_subscription)
                     frame_subscription = frame.0
@@ -281,8 +322,20 @@ fn activate_gallery_surfaces() -> u32
                 }
             }
             Event::Absent => {}
-            Event::End => { running = false }
-            Event::Failure(_) => { running = false }
+            Event::End => {
+                report_surface_state(
+                    target: InspectorAction::SurfaceComplete,
+                    settled: loaded,
+                )
+                running = false
+            }
+            Event::Failure(_) => {
+                report_surface_state(
+                    target: InspectorAction::SurfaceFailed,
+                    settled: loaded,
+                )
+                running = false
+            }
             Event::Cancelled => {
                 stream.cancel(subscription)
                 frame_stream.cancel(frame_subscription)
@@ -311,6 +364,9 @@ actor SourceInspector {
     prevent_default: bool,
     focus_close: bool,
     revision: u32,
+    surfaces_settled: u32,
+    surface_sequence_complete: bool,
+    surface_sequence_failed: bool,
 
     const fn view() -> ComponentView<VIEW_CAPACITY> uses (ComponentComposition) {
         let ui = <InspectorParts as ComponentSchema>::component_parts()
@@ -410,6 +466,9 @@ actor SourceInspector {
             prevent_default: false,
             focus_close: false,
             revision: 0,
+            surfaces_settled: 0,
+            surface_sequence_complete: false,
+            surface_sequence_failed: false,
         }
     }
 
@@ -421,6 +480,7 @@ actor SourceInspector {
             SurfaceLoader<WasmBackend> = BrowserSurfaceLoader {},
             Timer<WasmBackend> = HostTimer {},
             Race<WasmBackend> = Resumable {},
+            ActorSink<WasmBackend, ComponentEvent<InspectorAction>> = BrowserActorSink {},
             Suspend<WasmBackend, u32> = Resumable {},
         ) {
             activate_gallery_surfaces()
@@ -443,10 +503,16 @@ actor SourceInspector {
         let mut prevent_default = false
         let mut focus_close = false
         let mut revision = self.revision
+        let mut surfaces_settled = self.surfaces_settled
+        let mut surface_sequence_complete = self.surface_sequence_complete
+        let mut surface_sequence_failed = self.surface_sequence_failed
 
         match event.kind {
             ComponentEventKind::Connected => {
                 connected = true
+                surfaces_settled = 0
+                surface_sequence_complete = false
+                surface_sequence_failed = false
                 revision = revision + 1
             }
             ComponentEventKind::Disconnected => {
@@ -507,6 +573,31 @@ actor SourceInspector {
                     revision = revision + 1
                 }
             }
+            ComponentEventKind::TaskMessage => {
+                if connected {
+                    match event.target {
+                        InspectorAction::SurfaceProgress => {
+                            if event.detail > surfaces_settled {
+                                surfaces_settled = event.detail
+                                revision = revision + 1
+                            }
+                        }
+                        InspectorAction::SurfaceComplete => {
+                            surfaces_settled = event.detail
+                            surface_sequence_complete = true
+                            surface_sequence_failed = false
+                            revision = revision + 1
+                        }
+                        InspectorAction::SurfaceFailed => {
+                            surfaces_settled = event.detail
+                            surface_sequence_complete = true
+                            surface_sequence_failed = true
+                            revision = revision + 1
+                        }
+                        _ => {}
+                    }
+                }
+            }
             _ => {}
         }
 
@@ -526,6 +617,9 @@ actor SourceInspector {
             prevent_default: prevent_default,
             focus_close: focus_close,
             revision: revision,
+            surfaces_settled: surfaces_settled,
+            surface_sequence_complete: surface_sequence_complete,
+            surface_sequence_failed: surface_sequence_failed,
         }
     }
 

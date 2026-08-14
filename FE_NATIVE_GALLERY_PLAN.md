@@ -1111,6 +1111,62 @@ Origin: honesty audit of Claude Code session
   than spelling three polling loops. A pure Fe `SparseSource` tape proves an
   absence followed by an occurrence and then exhaustion, including the final
   consumed cursor; the browser sequencing oracle remains unchanged.
+- Actor-scoped tasks can now deliver ordinary typed values back into their
+  owning resident Fe actor. `ActorSink<B, E>` is one keyed effect and
+  `ActorMessage<E>::send` uses the existing affine `Pending`/`Suspend` rail;
+  only the nominal `std::actor::raw::send_begin` declaration becomes the fixed
+  `fe:actor` import. The resident compiler compares the sink's instantiated,
+  normalized Fe event type with the actor transition's nominal event type and
+  separately checks its runtime representation. A negative gate uses a
+  different record with the *same* enum/u32 layout, so this contract cannot be
+  satisfied by byte width or flattened-lane coincidence. The fixed broker
+  keeps every event lane opaque, inherits generation/AbortSignal/stale-delivery
+  rules from the canonical completion table, and invokes exactly one resident
+  transition plus projection; it contains no component action or payload
+  table and adds no JSON.
+- SourceInspector is the first real consumer. Its scoped Fe surface-loading
+  task sends typed progress, completion, and failure actions to the resident
+  reducer, which owns the corresponding state. This also exposed and fixed a
+  general effect-key bug: an explicit closed witness selected through a
+  blanket generic provider could retain the provider impl's proof-local type
+  parameter and re-generalize the authored key. The stored key now preserves
+  the already-instantiated query whenever the solver result is not closed; a
+  direct and inherent-method HIR regression pins the concrete type.
+  Independent evidence is green for the four-part resident actor suite, the
+  SourceInspector and TodoMVC semantic reducer gates, 16 fixed completion-
+  broker tests, 10 bootstrap tests, and all 33 HTML precompiler tests. A fresh
+  optimized publication compiled 12 render bundles in 129.475 seconds and
+  verified 14 Fe modules / 73 deployment files. Its real Chromium gallery tape
+  observes the exact resident sequence—connection, progress 1 through 12, then
+  completion without failure—and the independent TodoMVC Chromium tape also
+  passes. Pointer/wheel/resize/device-loss/MessagePort sources, cross-actor and
+  Worker/GPU sinks, and the fully combined resident gallery actor remain open.
+- QCGA Pencil now exposes two Fe-owned display modes through the general
+  `Param::toggle` vocabulary. The default unchecked mode marches the full
+  renderer interval and restores the atmospheric fade for unbounded pencil
+  members; the checked bounded mode retains the finite sphere broad phase but
+  feathers its domain into the same sky instead of exposing a hard clip. The
+  browser presents a checkbox and transports only the ordinary typed
+  `ParamEdit`; a nominal Fe `PencilDisplayMode { bounded: bool }` selects the
+  interval and fade algorithms. A fieldless enum was deliberately not replaced
+  by numeric tags after the render backend correctly rejected its generated
+  `Unreachable`; trap-free exhaustive shader-enum lowering is recorded as a
+  compiler task below.
+- The new mixed-scalar state ABI is re-proved rather than accepted by layout
+  coincidence. Wasmtime establishes the unchecked default, the derived param
+  index, canonical toggle normalization, exact preservation of every other
+  scene leaf, and both display intervals/fades. The full eight-part QCGA suite,
+  its 500-field/analytic-ray DE oracle, browser-profile compilation, 24 fixed
+  render-runtime tests, 58 codegen unit tests, resident actor/SourceInspector/
+  TodoMVC gates, and fixed completion/bootstrap suites are green. The generic
+  runtime now materializes Fe controls before GPU acquisition and appends a
+  host-failure notice without erasing them; Chromium therefore proves the
+  checkbox and infinite-fade default even on this machine's adapter-unavailable
+  path. A final cache-disabled optimized publication compiled all twelve
+  render bundles in 120.034 seconds and verified 14 Fe modules / 73 files; its
+  exact gallery/SourceInspector browser tape passes. The QCGA shaders remain
+  within explicit dual-mode budgets at 34,510 bytes of DE WGSL plus 16,928
+  bytes of marker WGSL and 67,617 bytes of shared-state control Wasm.
 
 This ledger records achieved evidence, not a relaxation of the phases or the
 Definition of done below.
@@ -1505,7 +1561,12 @@ and tested in Fe; JavaScript merely supplies frame/GPU-completion facts.
    implement boolean unary `!`/`Unary::Not`, exercise it in generated Wasm,
    audit the ordinary operator/control matrix against native, and pin every
    discovered gap with a semantic regression rather than generated-byte
-   equality.
+   equality. Do the same for exhaustive fieldless-enum control in render
+   stages: WGSL/SPIR-V lowering must prove the discriminant closed or emit a
+   trap-free structured switch, rather than inserting an `Unreachable` into a
+   shader ABI that intentionally has no trap channel. Until then, nominal
+   policy records with boolean fields are the honest shader-safe form; demos
+   must not replace the missing lowering with anonymous numeric tags.
 1. Finish canonical allocator/PostReturn and rich-record transport.
 2. Connect generated WebIDL callback adapters to compiled Fe callback bodies.
 3. Add the MIR suspension/re-entry transform for resumable Fe tasks.
@@ -1742,6 +1803,30 @@ no application math or schedule in Rust/JavaScript/JSON scaffolding.
    wiring implementation.
 3. Require a new-demo generalization test: a new interactive actor must need
    only Fe source and no runtime/compiler change.
+4. After the Phase 3 control spine is reusable, add one **Event Studio**
+   acceptance demo rather than a collection of artificial operator samples.
+   It visibly traces pointer/touch, wheel, resize, visibility, frame, timer,
+   and device-loss sources and composes them in Fe with map/filter/scan,
+   merge/switch/latest, throttle/debounce, cancellation, and bounded
+   backpressure. Deterministic tapes and a real-browser receipt must establish
+   behavior; the fixed host may report standards facts but may not reconstruct
+   the stream graph.
+5. Treat the resident gallery itself as the router/lifecycle acceptance demo:
+   URL state, nested component ownership, ordered surface activation,
+   cancellation, and failure recovery must use the same general Fe effects.
+   Do not add a parallel router runtime merely to make a standalone sample.
+6. Evolve the Mandelbrot proof capstone into a **Proof Queue** consumer of
+   structured scopes and Worker/MessagePort effects: Fe owns submission,
+   progress, cancellation, retry, canonical proof values, and verification;
+   the host transports opaque bytes and browser facts only.
+7. Once the Phase 6 primitives execute, add a CPU-oracle-checked **GPU Kernel
+   Lab** over reusable NTT/MSM/GA kernels. It must exercise workgroup memory,
+   barriers, capability-gated subgroups, dispatch/await, and device recovery
+   through the ordinary Fe vocabulary, not laboratory-only host calls.
+8. Add a compact fetch/stream consumer only when canonical URL, response-body,
+   abort, timeout, and backpressure effects exist. It should prove nested
+   component and network lifecycles without expanding the fixed browser host
+   into an application-aware data client.
 
 Exit condition: the raw Fe demos are short and readable while expanding through
 CTFE/providers/reflection into the full typed program.

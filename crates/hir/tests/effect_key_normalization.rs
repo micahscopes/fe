@@ -243,6 +243,45 @@ fn diagnostics_for<'db>(
 }
 
 #[test]
+fn explicit_trait_effect_key_remains_concrete_with_generic_provider_impl() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        Utf8PathBuf::from(
+            "explicit_trait_effect_key_remains_concrete_with_generic_provider_impl.fe",
+        ),
+        r#"
+trait Cap<A, B> {}
+
+struct Provider {}
+impl<B> Cap<u8, B> for Provider {}
+
+struct Message<T> {
+    value: T,
+}
+
+impl<T> Message<T> {
+    fn send(own self) uses (cap: mut Cap<u8, T>) {}
+}
+
+fn needs() uses (cap: mut Cap<u8, u16>) {}
+
+fn caller() {
+    let message: Message<u16> = Message { value: 7 }
+    with (Cap<u8, u16> = Provider {}) {
+        needs()
+        message.send()
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let caller = find_func(&db, top_mod, "caller");
+    let call = find_method_call_expr(&db, caller);
+    assert_callable_generic_arg(&db, caller, call, 0, "u16");
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
 fn impl_method_effect_keys_match_after_assoc_normalization() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(

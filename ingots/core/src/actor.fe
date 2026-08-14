@@ -3,6 +3,22 @@
 //! These types describe how a backend may invoke an authored actor behavior;
 //! they do not name a host platform or prescribe application event vocabulary.
 
+use super::backend::Backend
+use super::pending::Pending
+
+/// Typed mailbox authority for sending one value to the resident transition
+/// owned by the current actor scope. A provider chooses the realization; the
+/// event type remains ordinary Fe data and must agree with that actor's
+/// `ResidentTransition` input.
+///
+/// The begin-shaped operation deliberately returns the same affine `Pending`
+/// token used by timers, browser sources, Workers, and GPU completion. Sending
+/// from a resumable task therefore has one cancellation/failure model rather
+/// than a component-only callback protocol.
+pub trait ActorSink<B: Backend, E> {
+    fn send_begin(mut self, _ event: own E) -> Pending<B, ()>
+}
+
 /// A behavior whose complete returned state remains resident between calls.
 /// The behavior takes one ordinary event value before its flattened actor
 /// fields and returns the complete non-resource state in declaration order.

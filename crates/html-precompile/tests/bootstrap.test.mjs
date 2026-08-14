@@ -269,6 +269,43 @@ test("component scoped tasks start per connection and cancel with their actor sc
   assert.equal(signals[1].aborted, false);
 });
 
+test("scoped task events cross opaquely into the resident transition and project once", () => {
+  const component = new FeComponentElement();
+  const transitions = [];
+  const patches = [];
+  component._instance = {
+    exports: {
+      fe_actor_transition_v1(...event) {
+        transitions.push(event);
+        return [41];
+      },
+      fe_actor_project_v1() {
+        return [0, 0, 0, 0, 0];
+      },
+    },
+  };
+  component._initialized = true;
+  component._active = true;
+  component._applyPatch = patch => patches.push(patch);
+
+  const controller = new AbortController();
+  component._sendScopedTaskEvent([3, 0.25, 9n], controller.signal);
+  assert.deepEqual(transitions, [[3, 0.25, 9n]]);
+  assert.deepEqual(patches, [[0, 0, 0, 0, 0]]);
+
+  controller.abort();
+  assert.throws(
+    () => component._sendScopedTaskEvent([4], controller.signal),
+    error => error.name === "AbortError",
+  );
+  component._active = false;
+  assert.throws(
+    () => component._sendScopedTaskEvent([5], new AbortController().signal),
+    error => error.name === "AbortError",
+  );
+  assert.equal(transitions.length, 1, "stale actor events must not enter Fe");
+});
+
 test("bootstrap registers a selected adapter before real Wasm import preflight", async () => {
   const wasm = Uint8Array.from([
     0, 97, 115, 109, 1, 0, 0, 0,
