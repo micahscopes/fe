@@ -302,6 +302,207 @@ impl<T> Stream<T> {
     }
 }
 
+/// Overflow semantics for a bounded Fe-owned event queue.
+///
+/// `DropNewest` preserves every value already admitted. `KeepLatest` evicts
+/// the oldest queued value and admits the new one, which is the useful policy
+/// for pointer, viewport, and animation state where stale work has less value
+/// than the newest observation. The policy is data, not host behavior.
+pub enum OverflowPolicy {
+    DropNewest,
+    KeepLatest,
+}
+
+impl Copy for OverflowPolicy {}
+
+/// A bounded, allocation-free queue for explicit backpressure policy.
+///
+/// The queue is a pure Fe value. An interpreter may schedule producers and
+/// consumers however it likes, but admission, eviction, FIFO order, and the
+/// observable dropped count remain application/library semantics. `initial`
+/// initializes otherwise-unused slot storage and is never treated as an
+/// occurrence. Today's resident-Wasm value ABI admits capacities one through
+/// four; a const-generic array backing can remove that implementation ceiling
+/// once nested arrays in returned aggregate values are scalarized.
+pub struct BoundedQueue<T> {
+    value0: T,
+    value1: T,
+    value2: T,
+    value3: T,
+    capacity: u32,
+    head: u32,
+    len: u32,
+    dropped: u32,
+    admitted: bool,
+}
+
+/// A `Latest` value is the same queue protocol initialized with one slot by
+/// `latest`; the alias contributes no second implementation or host protocol.
+pub type Latest<T> = BoundedQueue<T>
+
+pub fn latest<T: Copy>(_ initial: T) -> Latest<T> {
+    BoundedQueue::new(initial: initial, capacity: 1)
+}
+
+impl<T: Copy> BoundedQueue<T> {
+    pub fn new(_ initial: T, _ capacity: u32) -> Self {
+        if capacity == 0 || capacity > 4 {
+            core::panic()
+        }
+        Self {
+            value0: initial,
+            value1: initial,
+            value2: initial,
+            value3: initial,
+            capacity: capacity,
+            head: 0,
+            len: 0,
+            dropped: 0,
+            admitted: false,
+        }
+    }
+    pub fn capacity(self) -> u32 {
+        self.capacity
+    }
+    pub fn queued(self) -> u32 {
+        self.len
+    }
+    pub fn dropped(self) -> u32 {
+        self.dropped
+    }
+    pub fn last_offer_admitted(self) -> bool {
+        self.admitted
+    }
+
+    /// Offer one value under the selected bounded-overflow policy. The returned
+    /// queue records whether the new value itself was admitted through
+    /// `last_offer_admitted`.
+    pub fn offer(self, _ value: T, _ overflow: OverflowPolicy) -> Self {
+        let mut value0 = self.value0
+        let mut value1 = self.value1
+        let mut value2 = self.value2
+        let mut value3 = self.value3
+        let mut head = self.head
+        let mut len = self.len
+        let mut dropped = self.dropped
+        if len == self.capacity {
+            dropped = dropped + 1
+            match overflow {
+                OverflowPolicy::DropNewest => {
+                    return Self {
+                        value0: value0,
+                        value1: value1,
+                        value2: value2,
+                        value3: value3,
+                        capacity: self.capacity,
+                        head: head,
+                        len: len,
+                        dropped: dropped,
+                        admitted: false,
+                    }
+                },
+                OverflowPolicy::KeepLatest => {
+                    head = (head + 1) % self.capacity
+                    len = len - 1
+                },
+            }
+        }
+        let tail = (head + len) % self.capacity
+        if tail == 0 {
+            value0 = value
+        } else if tail == 1 {
+            value1 = value
+        } else if tail == 2 {
+            value2 = value
+        } else {
+            value3 = value
+        }
+        Self {
+            value0: value0,
+            value1: value1,
+            value2: value2,
+            value3: value3,
+            capacity: self.capacity,
+            head: head,
+            len: len + 1,
+            dropped: dropped,
+            admitted: true,
+        }
+    }
+
+    /// Observe the oldest admitted value, or report ordinary absence when the
+    /// bounded queue is empty. Terminal source states remain the responsibility
+    /// of the surrounding stream; the queue invents none.
+    pub fn front(self) -> Event<T> {
+        if self.len == 0 {
+            Event::absent()
+        } else {
+            let value = if self.head == 0 {
+                self.value0
+            } else if self.head == 1 {
+                self.value1
+            } else if self.head == 2 {
+                self.value2
+            } else {
+                self.value3
+            }
+            Event::occurrence(value: value)
+        }
+    }
+
+    /// Consume the oldest slot. Splitting `front` from `consume` keeps this
+    /// functional value API scalarizable on current Wasm lowering: no method
+    /// needs a mutable aggregate receiver or a nested `(queue, event)` result.
+    pub fn consume(self) -> Self {
+        if self.len == 0 {
+            return self
+        }
+        Self {
+            value0: self.value0,
+            value1: self.value1,
+            value2: self.value2,
+            value3: self.value3,
+            capacity: self.capacity,
+            head: (self.head + 1) % self.capacity,
+            len: self.len - 1,
+            dropped: self.dropped,
+            admitted: self.admitted,
+        }
+    }
+}
+
+/// Stateful pure scan over typed observations.
+///
+/// Each present occurrence updates the accumulator; absence and terminal states
+/// leave it unchanged without fabricating a step. `Event` is `Copy`, so callers
+/// can independently propagate the original terminal observation. The
+/// accumulator is held in Fe and the reducer remains a pure `Fn`, so neither a
+/// JavaScript closure graph nor an effectful callback can hide behind `scan`.
+pub struct Scan<S> { state: S, steps: u32 }
+
+impl<S> Scan<S> {
+    pub fn new(_ initial: S) -> Self {
+        Self { state: initial, steps: 0 }
+    }
+}
+
+impl<S: Copy> Scan<S> {
+    pub fn state(self) -> S {
+        self.state
+    }
+    pub fn steps(self) -> u32 {
+        self.steps
+    }
+    pub fn step<T: Copy, F: Fn<(S, T), S>>(self, _ event: Event<T>, _ reducer: F) -> Self {
+        match event {
+            Event::Occurrence(value,) => {
+                Self { state: reducer.call((self.state, value)), steps: self.steps + 1 }
+            },
+            _ => self,
+        }
+    }
+}
+
 /// Purely transform a present occurrence, preserving absence.
 pub fn map_event<T: Copy, U, F: Fn<T, U>>(_ event: Event<T>, _ f: F) -> Event<U> {
     match event {

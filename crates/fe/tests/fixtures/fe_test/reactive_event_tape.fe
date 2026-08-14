@@ -5,15 +5,20 @@
 
 use core::Fn
 use std::reactive::{
+    BoundedQueue,
     Cancelled,
     Event,
     EventSource,
+    Latest,
+    OverflowPolicy,
+    Scan,
     Stepped,
     Stream,
     Subscription,
     cancel_event,
     filter_event,
     hold,
+    latest,
     map_event,
     next_event,
     subscribe_event,
@@ -102,6 +107,14 @@ struct AtLeastFour {}
 impl Fn<u32, bool> for AtLeastFour {
     fn call(self, _ value: own u32) -> bool {
         value >= 4
+    }
+}
+
+struct Sum {}
+
+impl Fn<(u32, u32), u32> for Sum {
+    fn call(self, _ values: own (u32, u32)) -> u32 {
+        values.0 + values.1
     }
 }
 
@@ -199,4 +212,77 @@ fn next_ready_skips_absence_and_preserves_terminal_state() {
         }
         assert(stream.cancel(terminal.0).consumed == 3)
     }
+}
+
+#[test]
+fn scan_is_stateful_pure_and_preserves_non_occurrences() {
+    let mut scan = Scan::new(initial: 1)
+    let absent: Event<u32> = Event::absent()
+    scan = scan.step(event: absent, reducer: Sum {})
+    assert(!absent.is_occurrence())
+    assert(scan.state() == 1)
+    assert(scan.steps() == 0)
+
+    scan = scan.step(event: Event::occurrence(value: 2), reducer: Sum {})
+    assert(scan.state() == 3)
+    scan = scan.step(event: Event::occurrence(value: 4), reducer: Sum {})
+    assert(scan.state() == 7)
+    assert(scan.steps() == 2)
+
+    let failure: Event<u32> = Event::failure(error: 91)
+    scan = scan.step(event: failure, reducer: Sum {})
+    match failure {
+        Event::Failure(error,) => {
+            assert(error == 91)
+        },
+        _ => {
+            assert(false)
+        },
+    }
+    assert(scan.state() == 7)
+    assert(scan.steps() == 2)
+}
+
+#[test]
+fn bounded_queue_makes_drop_policy_and_fifo_order_observable() {
+    let mut queue: BoundedQueue<u32> = BoundedQueue::new(initial: 0, capacity: 3)
+    assert(queue.capacity() == 3)
+    queue = queue.offer(value: 10, overflow: OverflowPolicy::DropNewest)
+    assert(queue.last_offer_admitted())
+    queue = queue.offer(value: 20, overflow: OverflowPolicy::DropNewest)
+    assert(queue.last_offer_admitted())
+    queue = queue.offer(value: 30, overflow: OverflowPolicy::DropNewest)
+    assert(queue.last_offer_admitted())
+    queue = queue.offer(value: 40, overflow: OverflowPolicy::DropNewest)
+    assert(!queue.last_offer_admitted())
+    assert(queue.queued() == 3)
+    assert(queue.dropped() == 1)
+
+    assert(queue.front().value_or(fallback: 0) == 10)
+    queue = queue.consume()
+    queue = queue.offer(value: 40, overflow: OverflowPolicy::DropNewest)
+    assert(queue.last_offer_admitted())
+    queue = queue.offer(value: 50, overflow: OverflowPolicy::KeepLatest)
+    assert(queue.last_offer_admitted())
+    assert(queue.queued() == 3)
+    assert(queue.dropped() == 2)
+    assert(queue.front().value_or(fallback: 0) == 30)
+    queue = queue.consume()
+    assert(queue.front().value_or(fallback: 0) == 40)
+    queue = queue.consume()
+    assert(queue.front().value_or(fallback: 0) == 50)
+    queue = queue.consume()
+    assert(!queue.front().is_occurrence())
+}
+
+#[test]
+fn latest_is_a_one_slot_keep_latest_queue() {
+    let mut latest: Latest<u32> = latest(initial: 0)
+    latest = latest.offer(value: 17, overflow: OverflowPolicy::KeepLatest)
+    latest = latest.offer(value: 23, overflow: OverflowPolicy::KeepLatest)
+    assert(latest.capacity() == 1)
+    assert(latest.queued() == 1)
+    assert(latest.dropped() == 1)
+    assert(latest.last_offer_admitted())
+    assert(latest.front().value_or(fallback: 0) == 23)
 }

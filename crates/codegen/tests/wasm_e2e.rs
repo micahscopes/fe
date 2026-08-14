@@ -2135,6 +2135,89 @@ pub fn accumulate(n: i32, x: f32) -> f32 {
     );
 }
 
+/// Pure scan bookkeeping is useful to browser applications only if its pleasant
+/// Fe value API survives the real resident-Wasm backend. The scalar receipt
+/// independently asserts semantics instead of relying on a byte match.
+#[test]
+fn reactive_scan_executes_on_wasm() {
+    let scan_source = r#"
+use core::Fn
+use std::reactive::{Event, Scan}
+
+struct Sum {}
+
+impl Fn<(u32, u32), u32> for Sum {
+    fn call(self, _ values: own (u32, u32)) -> u32 {
+        values.0 + values.1
+    }
+}
+
+pub fn scan_receipt() -> u32 {
+    let mut scan = Scan::new(initial: 1)
+    scan = scan.step(event: Event::absent(), reducer: Sum {})
+    scan = scan.step(event: Event::occurrence(value: 2), reducer: Sum {})
+    scan = scan.step(event: Event::occurrence(value: 4), reducer: Sum {})
+    scan.state() * 10 + scan.steps()
+}
+"#;
+    let scan_wasm = compile_to_wasm("wasm_reactive_scan.fe", scan_source);
+    assert!(
+        func_imports(&scan_wasm).is_empty(),
+        "pure scan bookkeeping must not conceal a host implementation"
+    );
+    let (mut scan_store, scan_instance) = instantiate(&scan_wasm);
+    let scan = scan_instance
+        .get_typed_func::<(), i32>(&mut scan_store, "scan_receipt")
+        .expect("scan_receipt export");
+    assert_eq!(scan.call(&mut scan_store, ()).unwrap(), 72);
+}
+
+/// The bounded queue gate additionally exercises allocation-free slot storage,
+/// explicit overflow policy, and aggregate call transport under wasmtime.
+#[test]
+fn reactive_bounded_queue_executes_on_wasm() {
+    let queue_source = r#"
+use std::reactive::{BoundedQueue, OverflowPolicy}
+
+pub fn queue_receipt() -> u32 {
+    let mut queue: BoundedQueue<u32> = BoundedQueue::new(initial: 0, capacity: 3)
+    queue = queue.offer(value: 10, overflow: OverflowPolicy::DropNewest)
+    queue = queue.offer(value: 20, overflow: OverflowPolicy::DropNewest)
+    queue = queue.offer(value: 30, overflow: OverflowPolicy::DropNewest)
+    queue = queue.offer(value: 40, overflow: OverflowPolicy::DropNewest)
+    if queue.last_offer_admitted() { return 0 }
+
+    let first = queue.front().value_or(fallback: 0)
+    queue = queue.consume()
+    queue = queue.offer(value: 40, overflow: OverflowPolicy::DropNewest)
+    queue = queue.offer(value: 50, overflow: OverflowPolicy::KeepLatest)
+    let dropped = queue.dropped()
+    let queued = queue.queued()
+    let second = queue.front().value_or(fallback: 0)
+    queue = queue.consume()
+    let third = queue.front().value_or(fallback: 0)
+    queue = queue.consume()
+    let fourth = queue.front().value_or(fallback: 0)
+    first + second * 100 + third * 10000 + fourth * 1000000
+        + dropped * 100000000 + queued * 1000000000
+}
+"#;
+    let queue_wasm = compile_to_wasm("wasm_reactive_queue.fe", queue_source);
+    assert!(
+        func_imports(&queue_wasm).is_empty(),
+        "pure queue bookkeeping must not conceal a host implementation"
+    );
+    let (mut queue_store, queue_instance) = instantiate(&queue_wasm);
+    let queue = queue_instance
+        .get_typed_func::<(), i32>(&mut queue_store, "queue_receipt")
+        .expect("queue_receipt export");
+    assert_eq!(
+        queue.call(&mut queue_store, ()).unwrap() as u32,
+        3_250_403_010,
+        "FIFO order, both overflow policies, drop count, and queue length"
+    );
+}
+
 fn int_cmp<'a>(
     instance: &wasmtime::Instance,
     store: &mut wasmtime::Store<()>,
