@@ -325,6 +325,42 @@ fn fullscreen_and_authored_raster_form_one_ordered_fe_pass_graph() {
     assert!(bundle.pass_wgsl[0].source.contains("@fragment"));
     assert!(bundle.pass_wgsl[1].source.contains("@vertex"));
     assert!(bundle.pass_wgsl[1].source.contains("@fragment"));
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &bundle.wasm).expect("quality-only Wasm module");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance =
+        wasmtime::Instance::new(&mut store, &module, &[]).expect("quality-only Wasm instance");
+    let quality = instance
+        .get_typed_func::<(f32, f32, f32, f32, f32, f32, i32, i32), (f32, f32)>(
+            &mut store,
+            "fe_surface_quality_v1",
+        )
+        .expect("fixed quality export");
+    assert_eq!(
+        quality
+            .call(&mut store, (900.0, 700.0, 3.0, 640.0, 360.0, 4096.0, 1, 1),)
+            .expect("execute fixture-selected quality policy"),
+        (320.0, 180.0),
+        "the exact source-selected policy must execute; neither browser nor compiler may substitute the standard policy",
+    );
+    let exports = wasmparser::Parser::new(0)
+        .parse_all(&bundle.wasm)
+        .filter_map(|payload| match payload.expect("quality Wasm payload") {
+            wasmparser::Payload::ExportSection(section) => Some(
+                section
+                    .into_iter()
+                    .map(|entry| entry.expect("quality export").name.to_owned())
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+        .flatten()
+        .collect::<Vec<_>>();
+    assert!(exports.iter().any(|name| name == "fe_surface_quality_v1"));
+    assert!(
+        !exports.iter().any(|name| name == "decide_fixture"),
+        "the authored policy method must remain private",
+    );
 }
 
 #[test]

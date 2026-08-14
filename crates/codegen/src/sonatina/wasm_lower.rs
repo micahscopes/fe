@@ -136,7 +136,7 @@ pub fn compile_runtime_package_wasm(
     db: &DriverDataBase,
     package: &RuntimePackage<'_>,
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
-    compile_runtime_package_wasm_with_canonical_lanes(db, package, &[], &[], None, None, None, None)
+    compile_runtime_package_wasm_with_canonical_lanes(db, package, &[], &[], None, None, None, &[])
 }
 
 /// Build the shared Sonatina module for a shader target. Shader entrypoints
@@ -147,7 +147,7 @@ pub(crate) fn compile_runtime_package_shader_ir(
     db: &DriverDataBase,
     package: &RuntimePackage<'_>,
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
-    compile_runtime_package_wasm_inner(db, package, &[], &[], None, None, None, None, false)
+    compile_runtime_package_wasm_inner(db, package, &[], &[], None, None, None, &[], false)
 }
 
 /// Overlay-only callback-capstone entry point. The default pin cannot name the
@@ -178,7 +178,7 @@ pub(crate) fn compile_runtime_package_wasm_with_canonical_lanes(
     resident_transition: Option<&super::WasmResidentTransition>,
     resident_initializer: Option<&super::WasmResidentInitializer>,
     resident_projection: Option<&super::WasmResidentProjection>,
-    resident_policy: Option<&super::WasmResidentPolicy>,
+    resident_policies: &[super::WasmResidentPolicy],
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
     compile_runtime_package_wasm_inner(
         db,
@@ -188,7 +188,7 @@ pub(crate) fn compile_runtime_package_wasm_with_canonical_lanes(
         resident_transition,
         resident_initializer,
         resident_projection,
-        resident_policy,
+        resident_policies,
         true,
     )
 }
@@ -202,7 +202,7 @@ fn compile_runtime_package_wasm_inner(
     resident_transition: Option<&super::WasmResidentTransition>,
     resident_initializer: Option<&super::WasmResidentInitializer>,
     resident_projection: Option<&super::WasmResidentProjection>,
-    resident_policy: Option<&super::WasmResidentPolicy>,
+    resident_policies: &[super::WasmResidentPolicy],
     validate_host_enum_params: bool,
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
     // Reject unsupported indirect host results before constructing any
@@ -261,7 +261,7 @@ fn compile_runtime_package_wasm_inner(
     if let Some(projection) = resident_projection {
         wrapped_lane_names.insert(projection.source.clone());
     }
-    if let Some(policy) = resident_policy {
+    for policy in resident_policies {
         let assigned = assign_sonatina_function_symbols(db, package);
         let policy_symbols = assigned
             .into_iter()
@@ -304,8 +304,8 @@ fn compile_runtime_package_wasm_inner(
             "resident actor initializer/projection requires a resident transition".to_owned(),
         ));
     }
-    if let Some(policy) = resident_policy {
-        lowerer.synthesize_resident_policy(policy)?;
+    for (policy_index, policy) in resident_policies.iter().enumerate() {
+        lowerer.synthesize_resident_policy(policy, policy_index)?;
     }
     let import_modules = lowerer.import_modules();
     Ok((lowerer.finish(), import_modules))
@@ -3917,10 +3917,11 @@ where
     fn synthesize_resident_policy(
         &mut self,
         policy: &super::WasmResidentPolicy,
+        policy_index: usize,
     ) -> Result<(), LowerError> {
-        if policy.event_fields == 0 || policy.state_fields == 0 || policy.decision_fields == 0 {
+        if policy.event_fields == 0 || policy.decision_fields == 0 {
             return Err(LowerError::Unsupported(
-                "resident policy requires non-empty event, state, and decision records".to_owned(),
+                "derived policy requires non-empty fact and decision records".to_owned(),
             ));
         }
         let candidates = self
@@ -4004,7 +4005,7 @@ where
             .enumerate()
             .map(|(index, ty)| {
                 self.builder.declare_gv(GlobalVariableData::new(
-                    format!("__fe_resident_policy_state_v1_{index}"),
+                    format!("__fe_resident_policy_{policy_index}_state_v1_{index}"),
                     *ty,
                     Linkage::Private,
                     false,

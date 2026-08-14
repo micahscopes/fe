@@ -983,6 +983,32 @@ Origin: honesty audit of Claude Code session
   files with both Chromium component/gallery tapes green. Clipped march
   intervals, typed device/frame capability facts, and removal of the temporary
   host ceiling remain; actual pixels retain the no-adapter qualification.
+- Responsive backing-store selection is now a structurally selected Fe
+  policy rather than a coarse-pointer branch in the fixed browser host.
+  `SurfaceQuality<P>` selects one ordinary public Fe function by the nominal
+  `SurfaceQualityFacts -> SurfaceBackingExtent` shape; the compiler roots that
+  exact function privately and exposes only fixed `fe_surface_quality_v1`.
+  All twelve canonical render actors select `ResponsiveBacking`, while a
+  fixture-local `HalfDeclaredBacking` proves the compiler and browser cannot
+  substitute the standard implementation or recognize its authored method
+  name. The browser supplies untouched CSS width/height, DPR, declared extent,
+  coarse-pointer, GPU-availability, and device-limit facts, validates Fe's
+  complete integral decision, and realizes it at poster creation, live
+  viewport resize, GPU recovery, and GPU-to-CPU fallback. The former GPU/CPU
+  coarse-pointer constants and duplicate CPU clamp are deleted; the fixed
+  256-pixel CPU ceiling remains only for legacy artifacts without a typed
+  policy. Independent Wasmtime cases cover desktop, portrait, coarse GPU,
+  CPU, device-limit, and missing-geometry facts; fixed-host tests separately
+  prove raw-fact transport, exact realization beyond the deleted host ceiling,
+  invalid-decision rejection, live resize, device fallback, and adopted-canvas
+  recovery. The fixed render-runtime suite is 24/24, the complete codegen unit
+  suite is 58/58, and all 30 serialized gallery gates pass in 2,523.58
+  seconds, including the 3,520-event exact Mandelbrot tape and unchanged
+  shader/work receipts. A fresh release publication compiled twelve render
+  bundles in 126.1 seconds and verified 14 Fe modules / 73 deployment files;
+  the real Chromium gallery/SourceInspector and TodoMVC tapes pass.
+  Frame-duration feedback and clipped QCGA march intervals remain the next
+  quality slices.
 
 This ledger records achieved evidence, not a relaxation of the phases or the
 Definition of done below.

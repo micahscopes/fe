@@ -203,8 +203,13 @@ manifest-driven.
    from handwritten JavaScript into Fe handlers and structured scopes.
 7. [todo] Route WebGPU completion, device loss/recovery, and resource lifetime through
    the same outcome/scope machinery.
-8. [todo] Expose typed device/viewport capability facts so Fe owns responsive render
-   quality; delete the fixed host's temporary coarse-pointer/CPU safety cap.
+8. [in progress] Expose typed device/viewport capability facts so Fe owns responsive
+   render quality. `SurfaceQuality<P>` now receives raw CSS/DPR/pointer/GPU/
+   device-limit facts and returns the complete backing extent at cold boot,
+   live resize, recovery, and GPU-to-CPU fallback. The temporary host
+   coarse-pointer policy is deleted; one CPU implementation ceiling remains
+   solely for legacy artifacts without the typed export. Frame-duration facts
+   and adaptive work budgets still need to join this policy/effect path.
 9. [todo] Delete remaining semantic render-manifest fetch/interpretation after typed
    exports carry the complete contract.
 

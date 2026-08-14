@@ -161,10 +161,11 @@ pub struct WasmCompileOptions {
     resident_initializer: Option<WasmResidentInitializer>,
     /// Optional read-only projection of current resident state.
     resident_projection: Option<WasmResidentProjection>,
-    /// Optional Fe-authored resident presentation policy. Unlike a render
-    /// manifest, this is compiler-only lowering metadata and never crosses the
-    /// host boundary as data.
-    resident_policy: Option<WasmResidentPolicy>,
+    /// Fe-authored policies lowered behind independent fixed exports. Unlike a
+    /// render manifest, this is compiler-only lowering metadata and never
+    /// crosses the host boundary as data. A policy may retain private state
+    /// (presentation scheduling) or be pure (backing-quality selection).
+    resident_policies: Vec<WasmResidentPolicy>,
     /// Compiler-owned public ABI aliases. The selected Fe source name remains
     /// ordinary application vocabulary while a fixed host contract can
     /// discover its export without a side manifest.
@@ -287,7 +288,7 @@ impl WasmCompileOptions {
         event_tag_limits: Vec<(usize, u32)>,
         state_tag_limits: Vec<(usize, u32)>,
     ) -> Self {
-        self.resident_policy = Some(WasmResidentPolicy {
+        let policy = WasmResidentPolicy {
             callee_instance_key: callee_instance_key.into(),
             export: export.into(),
             event_first,
@@ -296,7 +297,10 @@ impl WasmCompileOptions {
             decision_fields,
             event_tag_limits,
             state_tag_limits,
-        });
+        };
+        self.resident_policies
+            .retain(|existing| existing.export != policy.export);
+        self.resident_policies.push(policy);
         self
     }
 
@@ -365,7 +369,7 @@ pub fn compile_runtime_package_wasm_with_options(
             options.resident_transition.as_ref(),
             options.resident_initializer.as_ref(),
             options.resident_projection.as_ref(),
-            options.resident_policy.as_ref(),
+            &options.resident_policies,
         )?;
     // Sonatina's `Pipeline` is ISA-independent (`EvmPipeline` is the
     // EVM-specific one) and `EvmCompile::optimize` runs it with no target

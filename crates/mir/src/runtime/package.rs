@@ -519,9 +519,9 @@ pub fn build_wasm_runtime_package_for_entries_with_internal_funcs<'db>(
     entry_names: &[String],
     internal_funcs: &[Func<'db>],
 ) -> Result<RuntimePackage<'db>, LowerError> {
-    if entry_names.is_empty() {
+    if entry_names.is_empty() && internal_funcs.is_empty() {
         return Err(LowerError::Unsupported(
-            "requested web entry set must not be empty".to_owned(),
+            "requested Wasm root set must not be empty".to_owned(),
         ));
     }
     let mut seen = FxHashSet::default();
@@ -634,7 +634,7 @@ fn build_wasm_runtime_package_impl<'db>(
             )));
         }
     }
-    if entry_funcs.is_empty() {
+    if entry_funcs.is_empty() && internal_funcs.is_empty() {
         if let Some(rejection) = rejections.first() {
             return Err(LowerError::Unsupported(format_runtime_root_rejection(
                 db, rejection,
@@ -666,7 +666,7 @@ fn build_wasm_runtime_package_impl<'db>(
     // Mutual-recursion corollary: if every admitted candidate is a callee of
     // another, the seed set is empty. There is no export entry then; fail closed
     // naming the rule rather than emit an empty module.
-    if seed_funcs.is_empty() {
+    if seed_funcs.is_empty() && !entry_funcs.is_empty() {
         return Err(LowerError::Unsupported(
             "the wasm backend found no export root: every `pub` top-level function of \
              the entry module is reachable as a callee of another (mutually recursive \

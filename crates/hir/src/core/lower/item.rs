@@ -250,7 +250,7 @@ fn validate_struct_attrs<'db>(
             AttrRule::supported(
                 "gpu_control",
                 GPU_IDENT_FORM,
-                "`#[gpu_control(surface)]`, `#[gpu_control(typed_surface)]`, or `#[gpu_control(surface_schedule)]`",
+                "`#[gpu_control(surface)]`, `#[gpu_control(typed_surface)]`, `#[gpu_control(surface_schedule)]`, or `#[gpu_control(surface_quality)]`",
             ),
             AttrRule::supported("web_surface_event", BARE_FORM, "`#[web_surface_event]`"),
             AttrRule::supported(
@@ -267,6 +267,16 @@ fn validate_struct_attrs<'db>(
                 "web_surface_schedule_step",
                 BARE_FORM,
                 "`#[web_surface_schedule_step]`",
+            ),
+            AttrRule::supported(
+                "web_surface_quality_facts",
+                BARE_FORM,
+                "`#[web_surface_quality_facts]`",
+            ),
+            AttrRule::supported(
+                "web_surface_backing_extent",
+                BARE_FORM,
+                "`#[web_surface_backing_extent]`",
             ),
             AttrRule::supported("gpu_workgroup", BARE_FORM, "`#[gpu_workgroup]`"),
             AttrRule::supported("gpu_dispatch", GPU_IDENT_FORM, "`#[gpu_dispatch(fixed)]`"),

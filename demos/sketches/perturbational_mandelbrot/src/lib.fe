@@ -9,7 +9,9 @@ use std::webgpu::{
     FragmentSurface as Display,
     GpuProgram as PassGraph,
     LatestPerFrame,
+    ResponsiveBacking,
     StorageBuffer as OrbitBuffer,
+    SurfaceQuality,
     SurfaceScheduling,
     SurfaceTransition,
     Workgroup as Threads,
@@ -164,7 +166,9 @@ const fn mandelbrot_params() -> MandelbrotParams {
     }
 }
 
-actor PerturbationalMandelbrot uses (PassGraph<WebGpuBackend>) {
+actor PerturbationalMandelbrot uses (
+    PassGraph<WebGpuBackend>, SurfaceQuality<ResponsiveBacking>,
+) {
     orbit: OrbitBuffer<ComplexQF32Bits, ORBIT_SAMPLES>,
     /// Most-significant word of a four-word center expansion. Fe gesture math
     /// updates this and the three hidden low words together.

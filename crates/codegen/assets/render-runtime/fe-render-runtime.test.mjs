@@ -10,10 +10,195 @@ globalThis.customElements = { define() {} };
 const { FeSurfaceElement, SurfaceEventKind, SurfaceQueueAction, fitBackingExtent, rasterDrawVertexCount, requiresGpuPassGraph, unpackCanvasReadback, writeSurfaceEventBatch } =
   await import("./fe-render-runtime.js");
 
-test("runtime backing ceilings preserve aspect instead of cropping mobile work", () => {
+test("legacy CPU backing ceiling preserves aspect instead of cropping work", () => {
   assert.deepEqual(fitBackingExtent(512, 256, 128), { width: 128, height: 64 });
   assert.deepEqual(fitBackingExtent(96, 64, 128), { width: 96, height: 64 });
   assert.deepEqual(fitBackingExtent(512, 256), { width: 512, height: 256 });
+});
+
+test("fixed host supplies raw capability facts and realizes Fe backing extent exactly", () => {
+  const oldDpr = globalThis.devicePixelRatio;
+  const oldMatchMedia = globalThis.matchMedia;
+  try {
+    globalThis.devicePixelRatio = 2;
+    globalThis.matchMedia = query => ({ matches: query === "(pointer: coarse)" });
+    const surface = Object.create(FeSurfaceElement.prototype);
+    surface._surface = { extent: { width: 512, height: 256 } };
+    surface._adoptedCanvas = null;
+    surface._stage = {
+      getBoundingClientRect() { return { width: 200, height: 100 }; },
+    };
+    surface._runWasmArenaEpoch = call => call();
+    let received;
+    surface._surfaceQualityKernel = (...facts) => {
+      received = facts;
+      // Deliberately larger than the deleted host coarse-pointer ceiling.
+      return [400, 200];
+    };
+    const extent = surface._computeBackingExtent({
+      device: { limits: { maxTextureDimension2D: 4096 } },
+    });
+    assert.deepEqual(received, [200, 100, 2, 512, 256, 4096, 1, 1]);
+    assert.deepEqual(extent, { width: 400, height: 200 });
+  } finally {
+    globalThis.devicePixelRatio = oldDpr;
+    globalThis.matchMedia = oldMatchMedia;
+  }
+});
+
+test("fixed host rejects malformed Fe backing decisions without choosing a replacement", () => {
+  const oldDpr = globalThis.devicePixelRatio;
+  const oldMatchMedia = globalThis.matchMedia;
+  try {
+    globalThis.devicePixelRatio = 1;
+    globalThis.matchMedia = () => ({ matches: false });
+    const surface = Object.create(FeSurfaceElement.prototype);
+    surface._surface = { extent: { width: 512, height: 256 } };
+    surface._adoptedCanvas = null;
+    surface._stage = {
+      getBoundingClientRect() { return { width: 512, height: 256 }; },
+    };
+    surface._runWasmArenaEpoch = call => call();
+    const gpu = { device: { limits: { maxTextureDimension2D: 384 } } };
+    for (const invalid of [[0, 64], [128.5, 64], [385, 64], [128], [NaN, 64]]) {
+      surface._surfaceQualityKernel = () => invalid;
+      assert.throws(
+        () => surface._computeBackingExtent(gpu),
+        /Fe surface quality policy returned an invalid backing extent/,
+      );
+    }
+  } finally {
+    globalThis.devicePixelRatio = oldDpr;
+    globalThis.matchMedia = oldMatchMedia;
+  }
+});
+
+test("live resize re-runs the Fe policy against current GPU facts and realizes its extent", async () => {
+  const gpu = { device: { limits: { maxTextureDimension2D: 2048 } } };
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._fsm = "live";
+  surface._mode = "webgpu";
+  surface._gpu = gpu;
+  surface._resizePending = false;
+  surface._backingWidth = 400;
+  surface._backingHeight = 200;
+  surface._uniforms = [400, 200, 9];
+  surface._members = [
+    { name: "width" },
+    { name: "height" },
+    { name: "scene" },
+  ];
+  surface._surface = { params: [
+    { name: "width", kind: "extent_x" },
+    { name: "height", kind: "extent_y" },
+    { name: "scene", kind: "drag_x" },
+  ] };
+  surface._adoptedCanvas = null;
+  surface._liveCanvas = { width: 400, height: 200 };
+  const capabilities = [];
+  surface._computeBackingExtent = currentGpu => {
+    capabilities.push(currentGpu);
+    return { width: 320, height: 160 };
+  };
+  const replacements = [];
+  surface._replaceSurfaceState = next => {
+    replacements.push(next);
+    surface._uniforms = next;
+  };
+  const filters = [];
+  surface._applyExtentAndFilter = (...extent) => filters.push(extent);
+  let renders = 0;
+  surface._render = () => { renders += 1; };
+
+  await surface._refreshLiveBackingExtent();
+
+  assert.deepEqual(capabilities, [gpu]);
+  assert.deepEqual(replacements, [[320, 160, 9]]);
+  assert.deepEqual(filters, [[320, 160]]);
+  assert.deepEqual([surface._liveCanvas.width, surface._liveCanvas.height], [320, 160]);
+  assert.equal(renders, 1);
+  assert.equal(surface._resizePending, false);
+});
+
+test("device fallback re-runs Fe quality with CPU capability before rendering", async () => {
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._fsm = "live";
+  surface._mode = "webgpu";
+  surface._gpu = { device: {} };
+  surface._liveContext = null;
+  surface._adoptedContext = null;
+  surface._adoptedCanvas = null;
+  surface._kernel = () => {};
+  surface._uniforms = [1];
+  surface._posterCanvas = { hidden: true, width: 0, height: 0 };
+  surface._liveCanvas = { hidden: false, width: 400, height: 200 };
+  surface._deliverSurfaceLifecycle = () => {};
+  surface._dispatch = () => {};
+  surface._updateBadge = () => {};
+  const capabilities = [];
+  surface._applyBackingExtent = gpu => {
+    capabilities.push(gpu);
+    surface._backingWidth = 128;
+    surface._backingHeight = 64;
+    return true;
+  };
+  const renders = [];
+  surface._renderWasmInto = (_canvas, width, height) => renders.push([width, height]);
+
+  await surface._onDeviceLoss(null);
+
+  assert.deepEqual(capabilities, [null]);
+  assert.deepEqual(renders, [[128, 64]]);
+  assert.deepEqual([surface._posterCanvas.width, surface._posterCanvas.height], [128, 64]);
+  assert.equal(surface._mode, "wasm-2d");
+  assert.equal(surface._liveCanvas.hidden, true);
+  assert.equal(surface._posterCanvas.hidden, false);
+});
+
+test("adopted-canvas recovery reconfigures the fresh GPU before Fe quality and presentation", async () => {
+  const freshGpu = { device: { marker: "fresh" }, format: "rgba8unorm" };
+  const configurations = [];
+  const context = { configure(options) { configurations.push(options); } };
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._fsm = "ready";
+  surface._mode = "webgpu";
+  surface._adoptedCanvas = {
+    width: 400,
+    height: 200,
+    getContext(kind) {
+      assert.equal(kind, "webgpu");
+      return context;
+    },
+  };
+  surface._adoptedContext = null;
+  surface._deliverSurfaceLifecycle = () => {};
+  surface._ensurePipeline = async () => freshGpu;
+  const capabilities = [];
+  surface._applyBackingExtent = gpu => {
+    capabilities.push(gpu);
+    surface._backingWidth = 300;
+    surface._backingHeight = 150;
+    return true;
+  };
+  const presentations = [];
+  surface._presentOn = (configuredContext, uniforms) => {
+    presentations.push([configuredContext, uniforms]);
+  };
+  surface._uniforms = [7];
+  let entered = 0;
+  surface._enterLive = () => { entered += 1; };
+
+  await surface._goLive();
+
+  assert.deepEqual(configurations, [{
+    device: freshGpu.device,
+    format: freshGpu.format,
+    alphaMode: "opaque",
+  }]);
+  assert.deepEqual(capabilities, [freshGpu]);
+  assert.deepEqual(presentations, [[context, [7]]]);
+  assert.deepEqual([surface._adoptedCanvas.width, surface._adoptedCanvas.height], [300, 150]);
+  assert.equal(entered, 1);
 });
 
 test("poster readback removes row padding and normalizes canvas channel order", () => {

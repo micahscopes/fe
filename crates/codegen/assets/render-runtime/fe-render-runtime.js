@@ -33,8 +33,8 @@
 const DEFAULT_SIZE = 256; // dispatch/canvas size for a v4 manifest with no declared `surface.extent`.
 const SURFACE_EVENT_STRIDE = 52;
 const MAX_SURFACE_EVENT_BATCH = Math.floor(0x7fffffff / SURFACE_EVENT_STRIDE);
-const COARSE_POINTER_GPU_MAX_DIMENSION = 256;
-const COARSE_POINTER_CPU_MAX_DIMENSION = 128;
+// Legacy CPU-only artifacts receive one fixed implementation ceiling. Typed
+// `SurfaceQuality<P>` artifacts own all responsive/coarse-pointer policy in Fe.
 const CPU_MAX_DIMENSION = 256;
 const GPU_BYTES_PER_ROW_ALIGNMENT = 256;
 
@@ -508,6 +508,7 @@ export class FeSurfaceElement extends HTMLElement {
     this._surfaceTransitionStateResident = false;
     this._surfaceStateReplaceKernel = null;
     this._surfaceScheduleKernel = null;
+    this._surfaceQualityKernel = null;
     this._surfaceTransitionMemory = null;
     this._surfaceTransitionAlloc = null;
     this._wasmArenaReset = null;
@@ -524,6 +525,8 @@ export class FeSurfaceElement extends HTMLElement {
     this._surfaceInitializerKernel = null;
     this._liveContext = null; // GPUCanvasContext on `_liveCanvas`
     this._adoptedContext = null; // GPUCanvasContext on `_adoptedCanvas`
+    this._resizeObserver = null;
+    this._resizePending = false;
     this._resolveReady = null;
     this._rejectReady = null;
     this._resolveLive = null;
@@ -588,6 +591,7 @@ export class FeSurfaceElement extends HTMLElement {
     if (this._fsm === "cold") await this._readyPromise.catch(() => {});
     if (this._fsm !== "live") return;
     await this._capturePosterFromLive();
+    this._unwireResizeObserver();
     this._fsm = "frozen";
     this._dispatch("fe-statechange", { state: "frozen" });
   }
@@ -629,7 +633,10 @@ export class FeSurfaceElement extends HTMLElement {
   connectedCallback() {
     attachedSurfaces.add(this);
     if (this._booted) {
-      if (this._fsm === "live") this._wireSuspendObserver();
+      if (this._fsm === "live") {
+        this._wireSuspendObserver();
+        this._wireResizeObserver();
+      }
       return;
     }
     if (this.getAttribute("boot") !== "manual") this.load();
@@ -638,6 +645,8 @@ export class FeSurfaceElement extends HTMLElement {
   disconnectedCallback() {
     this._suspendObserver?.disconnect();
     this._activationObserver?.disconnect();
+    this._resizeObserver?.disconnect();
+    this._resizeObserver = null;
     attachedSurfaces.delete(this);
   }
 
@@ -746,6 +755,7 @@ export class FeSurfaceElement extends HTMLElement {
       this._surfaceTransitionStateResident = false;
       this._surfaceStateReplaceKernel = null;
       this._surfaceScheduleKernel = null;
+      this._surfaceQualityKernel = null;
       const arenaReset = instance?.exports.fe_cabi_reset;
       if (arenaReset !== undefined && typeof arenaReset !== "function") {
         throw new Error("fe render runtime: canonical arena reset export is not callable");
@@ -806,6 +816,11 @@ export class FeSurfaceElement extends HTMLElement {
           "fe render runtime: scheduled surface transition is missing its resident Fe scheduling policy export",
         );
       }
+      const surfaceQuality = instance?.exports.fe_surface_quality_v1;
+      if (surfaceQuality !== undefined && typeof surfaceQuality !== "function") {
+        throw new Error("fe render runtime: surface quality export is not callable");
+      }
+      this._surfaceQualityKernel = surfaceQuality ?? null;
       if (this._control) {
         const controlFn = instance?.exports[this._control.export];
         if (typeof controlFn === "function") {
@@ -931,26 +946,117 @@ export class FeSurfaceElement extends HTMLElement {
 
   // -- extent -----------------------------------------------------------
 
-  /** Backing store = min(declared surface.extent, css-px * devicePixelRatio):
-   * never upsampled past the kernel's declared resolution, never rendered
-   * larger than the box actually needs at the current DPR. */
-  _computeBackingExtent() {
+  /** Supply untouched standards/device facts to an optional Fe policy and
+   * validate its complete backing-store decision before realizing it. Legacy
+   * artifacts retain the historical declared/CSS calculation, with only the
+   * CPU implementation ceiling kept in this host. */
+  _computeBackingExtent(gpu = null) {
     const declaredWidth = this._surface?.extent?.width ?? DEFAULT_SIZE;
     const declaredHeight = this._surface?.extent?.height ?? declaredWidth;
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = Number(globalThis.devicePixelRatio ?? 0);
     const probe = this._adoptedCanvas || this._stage || this;
     const rect = probe.getBoundingClientRect();
-    const cssWidth = rect.width || declaredWidth;
-    const cssHeight = rect.height || declaredHeight;
-    const extent = {
-      width: Math.max(1, Math.min(declaredWidth, Math.round(cssWidth * dpr))),
-      height: Math.max(1, Math.min(declaredHeight, Math.round(cssHeight * dpr))),
-    };
-    return fitBackingExtent(
-      extent.width,
-      extent.height,
-      hasCoarsePointer() ? COARSE_POINTER_GPU_MAX_DIMENSION : Infinity,
+    const cssWidth = Number(rect.width);
+    const cssHeight = Number(rect.height);
+    const maxTextureDimension = Number(
+      gpu?.device?.limits?.maxTextureDimension2D ?? 0,
     );
+    const facts = [
+      cssWidth,
+      cssHeight,
+      dpr,
+      declaredWidth,
+      declaredHeight,
+      maxTextureDimension,
+      hasCoarsePointer() ? 1 : 0,
+      gpu ? 1 : 0,
+    ];
+    if (!facts.slice(0, 6).every(Number.isFinite)) {
+      throw new Error("fe render runtime: surface quality facts must be finite");
+    }
+    if (this._surfaceQualityKernel) {
+      const reply = this._runWasmArenaEpoch(() => this._surfaceQualityKernel(...facts));
+      const extent = Array.isArray(reply) ? reply : [reply];
+      if (
+        extent.length !== 2 ||
+        !extent.every((value) => Number.isFinite(value) && Number.isInteger(value) && value >= 1) ||
+        extent[0] > declaredWidth ||
+        extent[1] > declaredHeight ||
+        (gpu && maxTextureDimension > 0 &&
+          (extent[0] > maxTextureDimension || extent[1] > maxTextureDimension))
+      ) {
+        throw new Error(
+          "fe render runtime: Fe surface quality policy returned an invalid backing extent",
+        );
+      }
+      return { width: extent[0], height: extent[1] };
+    }
+
+    const effectiveDpr = dpr > 0 ? dpr : 1;
+    const effectiveCssWidth = cssWidth > 0 ? cssWidth : declaredWidth;
+    const effectiveCssHeight = cssHeight > 0 ? cssHeight : declaredHeight;
+    const extent = {
+      width: Math.max(1, Math.min(declaredWidth, Math.round(effectiveCssWidth * effectiveDpr))),
+      height: Math.max(1, Math.min(declaredHeight, Math.round(effectiveCssHeight * effectiveDpr))),
+    };
+    return gpu ? extent : fitBackingExtent(extent.width, extent.height, CPU_MAX_DIMENSION);
+  }
+
+  /** Ask Fe for the complete current backing decision, then commit exactly
+   * that decision to resident state. This boundary is used at cold boot,
+   * viewport resize, and device-capability transitions; the fixed host never
+   * carries a quality tier or substitutes a different typed-policy result. */
+  _applyBackingExtent(gpu = null) {
+    const { width, height } = this._computeBackingExtent(gpu);
+    const changed = width !== this._backingWidth || height !== this._backingHeight;
+    if (!changed) return false;
+    this._backingWidth = width;
+    this._backingHeight = height;
+    this._replaceSurfaceState(
+      withExtentUniforms(this._members, this._surface, this._uniforms, width, height),
+    );
+    this._applyExtentAndFilter(width, height);
+    return changed;
+  }
+
+  _resizePresentationCanvases() {
+    const canvas = this._adoptedCanvas ||
+      (this._mode === "webgpu" ? this._liveCanvas : this._posterCanvas);
+    if (!canvas) return;
+    canvas.width = this._backingWidth;
+    canvas.height = this._backingHeight;
+  }
+
+  /** A ResizeObserver supplies only the changed standards geometry. The
+   * selected Fe policy is re-run against the current GPU/CPU capability and
+   * its exact decision becomes the next resident extent and presentation. */
+  async _refreshLiveBackingExtent() {
+    if (this._fsm !== "live" || this._resizePending) return;
+    this._resizePending = true;
+    try {
+      const gpu = this._mode === "webgpu"
+        ? (this._gpu ?? await this._ensurePipeline())
+        : null;
+      if (!this._applyBackingExtent(gpu)) return;
+      this._resizePresentationCanvases();
+      this._render();
+    } finally {
+      this._resizePending = false;
+    }
+  }
+
+  _wireResizeObserver() {
+    if (this._resizeObserver || typeof ResizeObserver !== "function") return;
+    this._resizeObserver = new ResizeObserver(() => {
+      this._refreshLiveBackingExtent().catch(error => this._fail(error));
+    });
+    this._resizeObserver.observe(this);
+  }
+
+  _unwireResizeObserver() {
+    this._resizeObserver?.disconnect();
+    this._resizeObserver = null;
+    this._resizePending = false;
   }
 
   async _resolveGpu() {
@@ -1289,15 +1395,11 @@ export class FeSurfaceElement extends HTMLElement {
    * gallery of N tiles costing zero configured swap chains until a tile goes
    * live (FE_WEB_V5_ORCHESTRATION_DESIGN.md section 6). */
   async _renderPoster() {
-    const { width, height } = this._computeBackingExtent();
-    this._backingWidth = width;
-    this._backingHeight = height;
-    this._replaceSurfaceState(
-      withExtentUniforms(this._members, this._surface, this._uniforms, width, height),
-    );
-    this._applyExtentAndFilter(width, height);
-
     const gpu = await this._ensurePipeline();
+    this._applyBackingExtent(gpu);
+    const width = this._backingWidth;
+    const height = this._backingHeight;
+
     if (!gpu) {
       if (!this._kernel) {
         if (this._pipelineError) {
@@ -1310,28 +1412,11 @@ export class FeSurfaceElement extends HTMLElement {
           "fe render runtime: WebGPU is required for this resource pass graph",
         );
       }
-      const cpuExtent = fitBackingExtent(
-        width,
-        height,
-        hasCoarsePointer() ? COARSE_POINTER_CPU_MAX_DIMENSION : CPU_MAX_DIMENSION,
-      );
-      this._backingWidth = cpuExtent.width;
-      this._backingHeight = cpuExtent.height;
-      this._replaceSurfaceState(
-        withExtentUniforms(
-          this._members,
-          this._surface,
-          this._uniforms,
-          cpuExtent.width,
-          cpuExtent.height,
-        ),
-      );
-      this._applyExtentAndFilter(cpuExtent.width, cpuExtent.height);
       this._mode = "wasm-2d";
       this._renderWasmInto(
         this._adoptedCanvas || this._posterCanvas,
-        cpuExtent.width,
-        cpuExtent.height,
+        width,
+        height,
         this._uniforms,
       );
       return;
@@ -1469,8 +1554,29 @@ export class FeSurfaceElement extends HTMLElement {
     if (this._adoptedCanvas) {
       // Already presenting (webgpu, kept configured) or cheap to re-run
       // (wasm-2d); "live" is a state/event transition here, not new work.
+      let gpu = null;
+      if (this._mode === "webgpu") {
+        gpu = await this._ensurePipeline();
+        if (!gpu) {
+          if (!this._kernel) {
+            this._fail(sharedGpuFailure ?? new Error(
+              "fe render runtime: WebGPU is required for this resource pass graph",
+            ));
+            return;
+          }
+          this._mode = "wasm-2d";
+        } else if (!this._adoptedContext) {
+          const context = this._adoptedCanvas.getContext("webgpu");
+          context.configure({ device: gpu.device, format: gpu.format, alphaMode: "opaque" });
+          this._adoptedContext = context;
+        }
+      }
+      this._applyBackingExtent(gpu);
+      this._resizePresentationCanvases();
       if (this._mode === "wasm-2d") {
         this._renderWasmInto(this._adoptedCanvas, this._backingWidth, this._backingHeight, this._uniforms);
+      } else {
+        this._presentOn(this._adoptedContext, this._uniforms);
       }
       this._enterLive();
       return;
@@ -1479,6 +1585,8 @@ export class FeSurfaceElement extends HTMLElement {
     if (this._mode === "wasm-2d") {
       // No swap chain, so no cost distinction between "ready" and "live":
       // the poster canvas IS the live canvas in the CPU fallback.
+      this._applyBackingExtent(null);
+      this._resizePresentationCanvases();
       this._renderWasmInto(this._posterCanvas, this._backingWidth, this._backingHeight, this._uniforms);
       this._enterLive();
       return;
@@ -1495,10 +1603,13 @@ export class FeSurfaceElement extends HTMLElement {
         return;
       }
       this._mode = "wasm-2d";
+      this._applyBackingExtent(null);
+      this._resizePresentationCanvases();
       this._renderWasmInto(this._posterCanvas, this._backingWidth, this._backingHeight, this._uniforms);
       this._enterLive();
       return;
     }
+    this._applyBackingExtent(gpu);
     this._createLiveCanvas();
     this._liveCanvas.width = this._backingWidth;
     this._liveCanvas.height = this._backingHeight;
@@ -1519,6 +1630,7 @@ export class FeSurfaceElement extends HTMLElement {
   _enterLive() {
     this._fsm = "live";
     this._wireSuspendObserver();
+    this._wireResizeObserver();
     this._wireGestures();
     this._updateBadge();
     this._resolveLive();
@@ -1546,6 +1658,7 @@ export class FeSurfaceElement extends HTMLElement {
   async _suspend() {
     await this._capturePosterFromLive();
     this._unwireGestures();
+    this._unwireResizeObserver();
     this._fsm = "suspended";
     this._deliverSurfaceLifecycle(SurfaceEventKind.Hidden);
     this._dispatch("fe-statechange", { state: "suspended" });
@@ -1669,6 +1782,8 @@ export class FeSurfaceElement extends HTMLElement {
         return;
       }
       this._mode = "wasm-2d";
+      this._applyBackingExtent(null);
+      this._resizePresentationCanvases();
       this._renderWasmInto(
         this._adoptedCanvas || this._posterCanvas,
         this._backingWidth,
@@ -1702,6 +1817,8 @@ export class FeSurfaceElement extends HTMLElement {
     this._surfaceStateReplaceKernel = null;
     this._surfaceTransitionStateResident = false;
     this._surfaceScheduleKernel = null;
+    this._surfaceQualityKernel = null;
+    this._unwireResizeObserver();
     if (this._liveContext) {
       try {
         this._liveContext.unconfigure();

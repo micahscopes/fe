@@ -178,6 +178,97 @@ fn assert_scheduled_typed_surface(bundle: &WebBundle) {
     );
 }
 
+fn assert_typed_surface_quality(bundle: &WebBundle) {
+    let exports = wasm_function_export_names(&bundle.wasm);
+    assert!(
+        exports.iter().any(|name| name == "fe_surface_quality_v1"),
+        "a responsive canonical surface must expose its Fe quality policy"
+    );
+    assert!(
+        !exports.iter().any(|name| name == "choose"),
+        "the authored quality function name must remain private"
+    );
+    assert!(
+        bundle
+            .manifest
+            .provenance
+            .fe_responsibilities
+            .contains(&WebFeResponsibility::BackingQualityPolicy)
+    );
+    assert!(
+        bundle
+            .manifest
+            .provenance
+            .fixed_host
+            .responsibilities
+            .contains(&WebHostResponsibility::DeviceCapabilityFacts)
+    );
+    assert!(
+        !bundle
+            .manifest
+            .provenance
+            .fixed_host
+            .responsibilities
+            .contains(&WebHostResponsibility::BackingStorePolicy),
+        "the fixed host must not claim the backing decision for a typed Fe policy"
+    );
+}
+
+fn assert_responsive_scheduled_surface(bundle: &WebBundle) {
+    assert_scheduled_typed_surface(bundle);
+    assert_typed_surface_quality(bundle);
+}
+
+fn call_surface_quality(
+    bundle: &WebBundle,
+    facts: (f32, f32, f32, f32, f32, f32, i32, i32),
+) -> (f32, f32) {
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &bundle.wasm).expect("surface quality Wasm");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance =
+        wasmtime::Instance::new(&mut store, &module, &[]).expect("surface quality instance");
+    let quality = instance
+        .get_typed_func::<(f32, f32, f32, f32, f32, f32, i32, i32), (f32, f32)>(
+            &mut store,
+            "fe_surface_quality_v1",
+        )
+        .expect("fixed surface quality export");
+    quality
+        .call(&mut store, facts)
+        .expect("Fe quality decision")
+}
+
+fn responsive_backing_oracle(facts: (f32, f32, f32, f32, f32, f32, i32, i32)) -> (f32, f32) {
+    let (css_width, css_height, dpr, declared_width, declared_height, device_limit, coarse, gpu) =
+        facts;
+    let axis = |css: f32, declared: f32| {
+        let css = if css > 0.0 { css } else { declared };
+        let dpr = if dpr > 0.0 { dpr } else { 1.0 };
+        1.0f32.max(declared.min((css * dpr).round()))
+    };
+    let mut width = axis(css_width, declared_width);
+    let mut height = axis(css_height, declared_height);
+    let mut ceiling = declared_width.max(declared_height);
+    if gpu == 1 {
+        if device_limit > 0.0 {
+            ceiling = ceiling.min(device_limit);
+        }
+        if coarse == 1 {
+            ceiling = ceiling.min(256.0);
+        }
+    } else {
+        ceiling = if coarse == 1 { 128.0 } else { 256.0 };
+    }
+    let longest = width.max(height);
+    if longest > ceiling {
+        let scale = ceiling / longest;
+        width = 1.0f32.max((width * scale).round());
+        height = 1.0f32.max((height * scale).round());
+    }
+    (width, height)
+}
+
 fn assert_initial_zoom(bundle: &WebBundle, expected: f32) {
     assert_initial_param(bundle, "zoom", expected);
 }
@@ -1231,10 +1322,8 @@ fn curated_sketch_sources_have_no_legacy_gesture_abi() {
 fn known_color_pass_graph_compiles() {
     let bundle = compile_actor_ingot("demos/sketches/known_color");
     assert_browser_wgsl(&bundle.wgsl);
-    assert!(
-        bundle.wasm.is_empty(),
-        "typed resource graph has no CPU fallback"
-    );
+    wasmparser::validate(&bundle.wasm).expect("quality-only Wasm should be valid");
+    assert_typed_surface_quality(&bundle);
     assert_eq!(bundle.manifest.resources.len(), 1);
     assert_eq!(bundle.manifest.passes.len(), 2);
 }
@@ -1242,10 +1331,8 @@ fn known_color_pass_graph_compiles() {
 #[test]
 fn rollcall_pipeline_pass_graph_compiles_with_external_resources_and_private_mem() {
     let bundle = compile_actor_ingot("demos/sketches/rollcall_pipeline");
-    assert!(
-        bundle.wasm.is_empty(),
-        "typed pass graph has no CPU fallback"
-    );
+    wasmparser::validate(&bundle.wasm).expect("quality-only Wasm should be valid");
+    assert_typed_surface_quality(&bundle);
     assert_eq!(bundle.manifest.protocol_version, 6);
     assert_eq!(bundle.manifest.resources.len(), 2);
     assert_eq!(bundle.manifest.passes.len(), 3);
@@ -1303,7 +1390,7 @@ fn rollcall_pipeline_pass_graph_compiles_with_external_resources_and_private_mem
 fn perturbational_mandelbrot_graph_compiles() {
     let bundle = compile_actor_ingot("demos/sketches/perturbational_mandelbrot");
     wasmparser::validate(&bundle.wasm).expect("the Fe control lane must be valid Wasm");
-    assert_scheduled_typed_surface(&bundle);
+    assert_responsive_scheduled_surface(&bundle);
     assert_initial_param(&bundle, "center_x_w0", -1.1723285913467407);
     assert_initial_param(&bundle, "center_x_w1", -0.000000008653259442326089);
     assert_initial_param(&bundle, "center_x_w2", 0.00000000000000016498233784400384);
@@ -1639,7 +1726,7 @@ fn cga3d_sketch_compiles() {
     let bundle = compile_actor_ingot("demos/sketches/cga3d");
     assert_browser_wgsl(&bundle.wgsl);
     wasmparser::validate(&bundle.wasm).expect("cga3d wasm should be valid");
-    assert_scheduled_typed_surface(&bundle);
+    assert_responsive_scheduled_surface(&bundle);
     assert_eq!(
         call_four_state_transition(&bundle, 10.0, -5.0, -1.0, [0.15, 0.6, 1.6, 512.0], 640.0,),
         [
@@ -1718,7 +1805,7 @@ fn qcga_sketch_compiles() {
     let bundle = compile_actor_ingot("demos/sketches/qcga");
     assert_browser_wgsl(&bundle.wgsl);
     wasmparser::validate(&bundle.wasm).expect("qcga wasm should be valid");
-    assert_scheduled_typed_surface(&bundle);
+    assert_responsive_scheduled_surface(&bundle);
     assert_eq!(
         call_four_state_transition(&bundle, 10.0, -5.0, -1.0, [0.15, 0.6, 1.6, 512.0], 640.0,),
         [
@@ -1735,7 +1822,7 @@ fn desargues_sketch_compiles() {
     let bundle = compile_actor_ingot("demos/sketches/desargues");
     assert_browser_wgsl(&bundle.wgsl);
     wasmparser::validate(&bundle.wasm).expect("desargues wasm should be valid");
-    assert_scheduled_typed_surface(&bundle);
+    assert_responsive_scheduled_surface(&bundle);
     assert_eq!(
         call_four_state_transition(&bundle, 10.0, -5.0, -1.0, [0.62, 0.0, 2.4, 512.0], 640.0,),
         [
@@ -1752,7 +1839,7 @@ fn mandelbrot_sketch_compiles() {
     let bundle = compile_actor_ingot("demos/sketches/mandelbrot");
     assert_browser_wgsl(&bundle.wgsl);
     wasmparser::validate(&bundle.wasm).expect("mandelbrot sketch wasm should be valid");
-    assert_scheduled_typed_surface(&bundle);
+    assert_responsive_scheduled_surface(&bundle);
     assert_initial_zoom(&bundle, 1.0);
 
     // The render entry MUST be exported under its BARE source name, matching
@@ -2276,7 +2363,7 @@ fn plasma_sketch_compiles() {
     let bundle = compile_actor_ingot("demos/sketches/plasma");
     assert_browser_wgsl(&bundle.wgsl);
     wasmparser::validate(&bundle.wasm).expect("plasma wasm should be valid");
-    assert_scheduled_typed_surface(&bundle);
+    assert_responsive_scheduled_surface(&bundle);
     assert_eq!(
         call_four_state_transition(&bundle, 10.0, -5.0, -1.0, [0.0, 3.0, 0.8, 512.0], 640.0,),
         [10.0f32 * 0.025, 3.0f32 * 0.875, 0.8f32 - 5.0 * 0.005, 640.0,]
@@ -2288,7 +2375,7 @@ fn raymarch_sketch_compiles_with_fe_owned_camera_and_bounded_shader() {
     let bundle = compile_actor_ingot("demos/sketches/raymarch");
     assert_browser_wgsl(&bundle.wgsl);
     wasmparser::validate(&bundle.wasm).expect("raymarch control Wasm should be valid");
-    assert_scheduled_typed_surface(&bundle);
+    assert_responsive_scheduled_surface(&bundle);
     assert_initial_param(&bundle, "yaw", 0.72);
     assert_initial_param(&bundle, "pitch", 0.28);
     assert_initial_param(&bundle, "distance", 4.6);
@@ -2370,7 +2457,7 @@ fn qcga_pencil_de_compiles_as_a_fe_owned_iterative_fragment_surface() {
         .expect("authored marker shader bytes")
         .source;
     wasmparser::validate(&bundle.wasm).expect("QCGA pencil DE control Wasm should be valid");
-    assert_scheduled_typed_surface(&bundle);
+    assert_responsive_scheduled_surface(&bundle);
     assert!(
         de_wgsl.contains("loop"),
         "the DE view must retain its authored iterative march"
@@ -2589,7 +2676,21 @@ fn gradient_sketch_compiles() {
     let bundle = compile_actor_ingot("demos/sketches/gradient");
     assert_browser_wgsl(&bundle.wgsl);
     wasmparser::validate(&bundle.wasm).expect("gradient wasm should be valid");
-    assert_scheduled_typed_surface(&bundle);
+    assert_responsive_scheduled_surface(&bundle);
+    for facts in [
+        (180.0, 100.0, 2.0, 512.0, 512.0, 8192.0, 0, 1),
+        (180.0, 100.0, 2.0, 512.0, 512.0, 8192.0, 1, 1),
+        (100.0, 200.0, 2.0, 512.0, 512.0, 8192.0, 1, 1),
+        (180.0, 100.0, 2.0, 512.0, 512.0, 8192.0, 1, 0),
+        (180.0, 100.0, 2.0, 512.0, 512.0, 192.0, 0, 1),
+        (0.0, 0.0, 0.0, 512.0, 512.0, 8192.0, 1, 1),
+    ] {
+        assert_eq!(
+            call_surface_quality(&bundle, facts),
+            responsive_backing_oracle(facts),
+            "Fe backing policy must match an independent standards-fact oracle for {facts:?}",
+        );
+    }
     assert_eq!(
         call_state_batch(
             &bundle,
@@ -2675,7 +2776,7 @@ fn dec_sketch_compiles() {
     let bundle = compile_actor_ingot("demos/sketches/dec");
     assert_browser_wgsl(&bundle.wgsl);
     wasmparser::validate(&bundle.wasm).expect("dec wasm should be valid");
-    assert_scheduled_typed_surface(&bundle);
+    assert_responsive_scheduled_surface(&bundle);
     assert_eq!(
         call_state_batch(
             &bundle,

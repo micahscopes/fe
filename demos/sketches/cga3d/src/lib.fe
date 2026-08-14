@@ -32,7 +32,8 @@
 
 use core::marker::Copy
 use std::webgpu::{
-    FragmentSurface, GpuProgram, LatestPerFrame, SurfaceScheduling, SurfaceTransition, WebGpuBackend,
+    FragmentSurface, GpuProgram, LatestPerFrame, ResponsiveBacking,
+    SurfaceQuality, SurfaceScheduling, SurfaceTransition, WebGpuBackend,
 }
 use std::web::view::{
     ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface,
@@ -166,7 +167,9 @@ const fn cga3d_params() -> Cga3dParams {
     }
 }
 
-actor Cga3dSurface uses (GpuProgram<WebGpuBackend>) {
+actor Cga3dSurface uses (
+    GpuProgram<WebGpuBackend>, SurfaceQuality<ResponsiveBacking>,
+) {
     /// Pencil parameter: [0, 1] sweeps sphere -> sphere -> radical plane.
     lambda: f32,
     /// Rotation of the generator axis in the slice plane.

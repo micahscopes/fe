@@ -26,6 +26,8 @@ use std::webgpu::{
     GpuProgram,
     LatestPerFrame,
     RasterVertex,
+    ResponsiveBacking,
+    SurfaceQuality,
     SurfaceScheduling,
     SurfaceTransition,
     TriangleList,
@@ -307,7 +309,9 @@ fn marker_color(_ varying: ControlMarkerVarying) -> i32 {
     )
 }
 
-actor PencilDistanceSurface uses (GpuProgram<WebGpuBackend>) {
+actor PencilDistanceSurface uses (
+    GpuProgram<WebGpuBackend>, SurfaceQuality<ResponsiveBacking>,
+) {
     scene: PencilSceneState,
     camera: PencilCamera,
     member: Quadric,

@@ -5,6 +5,7 @@ use core::conal::Functor
 use core::contracts::Target
 use core::Fn
 use core::MemPtr
+use core::num::FloatRounding
 use super::web::{
     SurfaceEventKind,
     SurfaceQueueAction,
@@ -185,6 +186,92 @@ pub struct DropWhilePresenting {}
 /// neither a wrapper behavior nor a reserved function name is required.
 #[gpu_control(surface_schedule)]
 pub struct SurfaceScheduling<P> {}
+
+/// Select a Fe policy for the surface's physical backing extent. The browser
+/// reports raw CSS/device facts through one fixed typed export and realizes the
+/// returned extent. Policy identity and implementation remain Fe type data;
+/// no quality tier or browser rule is projected into the render manifest.
+#[gpu_control(surface_quality)]
+pub struct SurfaceQuality<P> {}
+
+/// Raw standards/device facts available when a surface backing store is
+/// chosen. Width-like values are f32 because browser CSS geometry and DPR are
+/// floating point; WebGPU texture limits are exactly representable at this
+/// scale. The browser does not clamp or classify these values first.
+#[web_surface_quality_facts]
+pub struct SurfaceQualityFacts {
+    pub css_width: f32,
+    pub css_height: f32,
+    pub device_pixel_ratio: f32,
+    pub declared_width: f32,
+    pub declared_height: f32,
+    pub max_texture_dimension_2d: f32,
+    pub coarse_pointer: bool,
+    pub gpu_available: bool,
+}
+
+impl Copy for SurfaceQualityFacts {}
+
+/// Fe's complete backing-store decision. Values are integral f32s at this
+/// fixed browser boundary; the host validates that property before assigning
+/// them to the standards canvas width/height integers.
+#[web_surface_backing_extent]
+pub struct SurfaceBackingExtent {
+    pub width: f32,
+    pub height: f32,
+}
+
+impl Copy for SurfaceBackingExtent {}
+
+/// The canonical responsive gallery policy. The numerical ceilings that used
+/// to live in JavaScript are ordinary Fe policy here: coarse GPU surfaces use
+/// at most 256 pixels on their longer edge, CPU fallbacks use 128 on coarse
+/// pointers and 256 otherwise, and all GPU choices respect the reported device
+/// texture limit. Aspect is preserved when a ceiling applies.
+pub struct ResponsiveBacking {}
+
+fn quality_min(_ left: f32, _ right: f32) -> f32 {
+    if left < right { left } else { right }
+}
+
+fn quality_max(_ left: f32, _ right: f32) -> f32 {
+    if left > right { left } else { right }
+}
+
+fn quality_axis(_ css: f32, _ dpr: f32, _ declared: f32) -> f32 {
+    let mut css_extent: f32 = css
+    if css_extent > 0.0 == false { css_extent = declared }
+    let mut ratio: f32 = dpr
+    if ratio > 0.0 == false { ratio = 1.0 }
+    quality_max(1.0, quality_min(declared, (css_extent * ratio).round()))
+}
+
+impl ResponsiveBacking {
+    pub fn choose(_ facts: own SurfaceQualityFacts) -> SurfaceBackingExtent {
+        let mut width: f32 = quality_axis(
+            facts.css_width, facts.device_pixel_ratio, facts.declared_width,
+        )
+        let mut height: f32 = quality_axis(
+            facts.css_height, facts.device_pixel_ratio, facts.declared_height,
+        )
+        let mut ceiling: f32 = quality_max(facts.declared_width, facts.declared_height)
+        if facts.gpu_available {
+            if facts.max_texture_dimension_2d > 0.0 {
+                ceiling = quality_min(ceiling, facts.max_texture_dimension_2d)
+            }
+            if facts.coarse_pointer { ceiling = quality_min(ceiling, 256.0) }
+        } else {
+            ceiling = if facts.coarse_pointer { 128.0 } else { 256.0 }
+        }
+        let longest: f32 = quality_max(width, height)
+        if longest > ceiling {
+            let scale: f32 = ceiling / longest
+            width = quality_max(1.0, (width * scale).round())
+            height = quality_max(1.0, (height * scale).round())
+        }
+        SurfaceBackingExtent { width: width, height: height }
+    }
+}
 
 impl LatestPerFrame {
     /// Keep at most one presentation in flight. Browser input remains raw and

@@ -9,7 +9,9 @@ use std::webgpu::{
     FixedDispatch as Once,
     FragmentSurface as Pixel,
     GpuProgram as Program,
+    ResponsiveBacking,
     StorageBuffer as Shared,
+    SurfaceQuality,
     Workgroup as Threads,
     WebGpuBackend,
 }
@@ -19,7 +21,9 @@ pub struct ComplexF32Bits {
     pub im_bits: u32,
 }
 
-actor KnownColor uses (Program<WebGpuBackend>) {
+actor KnownColor uses (
+    Program<WebGpuBackend>, SurfaceQuality<ResponsiveBacking>,
+) {
     orbit: Shared<ComplexF32Bits, 1>,
 
     fn seed(self) uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>) {

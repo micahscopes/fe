@@ -11,7 +11,8 @@
 //! claim, no parallelism claim (VISION 3.1).
 
 use std::webgpu::{
-    FragmentSurface, GpuProgram, LatestPerFrame, SurfaceScheduling, SurfaceTransition, WebGpuBackend,
+    FragmentSurface, GpuProgram, LatestPerFrame, ResponsiveBacking,
+    SurfaceQuality, SurfaceScheduling, SurfaceTransition, WebGpuBackend,
 }
 use std::web::view::{
     ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface,
@@ -53,7 +54,9 @@ const fn gradient_params() -> GradientParams {
     }
 }
 
-actor GradientSurface uses (GpuProgram<WebGpuBackend>) {
+actor GradientSurface uses (
+    GpuProgram<WebGpuBackend>, SurfaceQuality<ResponsiveBacking>,
+) {
     angle: f32,
     offset: f32,
     spread: f32,

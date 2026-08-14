@@ -57,6 +57,7 @@ pub enum GpuControl {
     Surface,
     TypedSurface,
     SurfaceSchedule,
+    SurfaceQuality,
 }
 
 /// Target-neutral stateful actor transition selected by a nominal role type.
@@ -515,6 +516,7 @@ impl<'db> AttrListId<'db> {
             "surface" => Some(GpuControl::Surface),
             "typed_surface" => Some(GpuControl::TypedSurface),
             "surface_schedule" => Some(GpuControl::SurfaceSchedule),
+            "surface_quality" => Some(GpuControl::SurfaceQuality),
             _ => None,
         }
     }
@@ -602,6 +604,17 @@ impl<'db> AttrListId<'db> {
     /// the decisions the fixed host must obey.
     pub fn is_web_surface_schedule_step(self, db: &'db dyn HirDb) -> bool {
         self.has_marker_attr(db, "web_surface_schedule_step")
+    }
+
+    /// Marks raw browser/device facts supplied to a Fe backing-quality policy.
+    /// Consumers validate the complete record before exposing a fixed ABI.
+    pub fn is_web_surface_quality_facts(self, db: &'db dyn HirDb) -> bool {
+        self.has_marker_attr(db, "web_surface_quality_facts")
+    }
+
+    /// Marks the physical backing extent selected by a Fe quality policy.
+    pub fn is_web_surface_backing_extent(self, db: &'db dyn HirDb) -> bool {
+        self.has_marker_attr(db, "web_surface_backing_extent")
     }
 
     pub fn arithmetic_mode(self, db: &'db dyn HirDb) -> Option<ArithmeticMode> {

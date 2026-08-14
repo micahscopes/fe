@@ -68,7 +68,8 @@
 //! ~768 px at `zoom = 1e-16`, which a df64 center could not reach.
 
 use std::webgpu::{
-    FragmentSurface, GpuProgram, LatestPerFrame, SurfaceScheduling, SurfaceTransition, WebGpuBackend,
+    FragmentSurface, GpuProgram, LatestPerFrame, ResponsiveBacking,
+    SurfaceQuality, SurfaceScheduling, SurfaceTransition, WebGpuBackend,
 }
 use std::web::view::{
     ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface,
@@ -251,7 +252,9 @@ const fn mandelbrot_params() -> MandelbrotParams {
     }
 }
 
-actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
+actor MandelbrotSurface uses (
+    GpuProgram<WebGpuBackend>, SurfaceQuality<ResponsiveBacking>,
+) {
     /// Complex-plane centre, as a flat FOUR-WORD `Expansion<4>` per axis
     /// (`w0..w3`, most significant first, kept flat so the typed Wasm ABI and
     /// render uniform layout are plain f32 members): `w0` carries the

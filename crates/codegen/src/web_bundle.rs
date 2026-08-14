@@ -85,6 +85,10 @@ const SURFACE_INITIALIZER_EXPORT: &str = "fe_surface_initialize_v1";
 /// Fixed binary discovery point for a resident Fe presentation policy. The
 /// policy's authored behavior name and private state never enter the manifest.
 const TYPED_SURFACE_SCHEDULE_EXPORT: &str = "fe_surface_schedule_v2";
+/// Fixed binary discovery point for a Fe backing-quality policy. The browser
+/// supplies raw viewport/device facts and realizes the returned integral
+/// extent; the selected policy type and authored function name remain private.
+const TYPED_SURFACE_QUALITY_EXPORT: &str = "fe_surface_quality_v1";
 const CANONICAL_INTERFACE_JS: &str = include_str!("../assets/canonical-interface.js");
 /// Compiler-emitted host page for render bundles. It reads `manifest.json` and
 /// drives the two lowerings of the render kernel it describes: `shader.wgsl`
@@ -216,6 +220,7 @@ impl WebProvenance {
         has_control: bool,
         has_pass_graph: bool,
         has_fe_schedule: bool,
+        has_fe_quality: bool,
     ) -> Self {
         self.generated_artifacts = vec![
             WebGeneratedArtifactKind::Manifest,
@@ -247,6 +252,13 @@ impl WebProvenance {
                 .responsibilities
                 .push(WebHostResponsibility::PresentationClock);
             self.fixed_host.responsibilities.sort();
+        }
+        if has_fe_quality {
+            self.fe_responsibilities
+                .push(WebFeResponsibility::BackingQualityPolicy);
+            self.fixed_host
+                .responsibilities
+                .retain(|role| *role != WebHostResponsibility::BackingStorePolicy);
         }
         if has_pass_graph {
             self.fe_responsibilities
@@ -299,6 +311,7 @@ pub enum WebFeResponsibility {
     ControlTransition,
     SchedulingPolicy,
     ResidentActorState,
+    BackingQualityPolicy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -308,6 +321,12 @@ pub enum WebHostResponsibility {
     InputTransport,
     PresentationScheduler,
     PresentationClock,
+    /// Legacy/default selection of the canvas backing extent. A typed
+    /// `SurfaceQuality<P>` policy removes this responsibility from the host.
+    BackingStorePolicy,
+    /// Standards/device facts (CSS geometry, DPR, pointer media query, and GPU
+    /// limits) supplied without application-specific interpretation.
+    DeviceCapabilityFacts,
     WebGpuExecutor,
     Lifecycle,
     WasmLoader,
@@ -333,6 +352,8 @@ impl WebFixedHostProvenance {
                 WebHostResponsibility::DomSurface,
                 WebHostResponsibility::InputTransport,
                 WebHostResponsibility::PresentationScheduler,
+                WebHostResponsibility::BackingStorePolicy,
+                WebHostResponsibility::DeviceCapabilityFacts,
                 WebHostResponsibility::WebGpuExecutor,
                 WebHostResponsibility::Lifecycle,
                 WebHostResponsibility::WasmLoader,
@@ -1082,6 +1103,30 @@ fn behavior_surface_policy_ty<'db>(
         })
 }
 
+fn actor_surface_quality_policy_tys<'db>(
+    db: &'db DriverDataBase,
+    actor: &SemanticActor<'db>,
+) -> Vec<TyId<'db>> {
+    actor
+        .state
+        .actor_placement(db)
+        .data(db)
+        .iter()
+        .filter_map(|role| role.key_path.to_opt())
+        .filter_map(|path| resolve_metadata_ty(db, path, actor.state.scope()))
+        .filter_map(|ty| {
+            let attrs = nominal_attrs(db, ty)?;
+            if attrs.gpu_control(db) != Some(GpuControl::SurfaceQuality) {
+                return None;
+            }
+            let [policy_ty] = ty.generic_args(db) else {
+                return None;
+            };
+            Some(*policy_ty)
+        })
+        .collect()
+}
+
 fn gpu_actor_name_for_entry(
     db: &DriverDataBase,
     top_mod: TopLevelMod<'_>,
@@ -1698,6 +1743,21 @@ struct ResolvedSurfaceSchedulePolicy<'db> {
     contract: TypedSurfaceScheduleContract,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TypedSurfaceQualityContract {
+    fact_fields: usize,
+    decision_fields: usize,
+}
+
+/// An ordinary Fe policy selected solely from the actor's nominal
+/// `SurfaceQuality<P>` capability. It is a pure, stateless sibling of the
+/// resident scheduling policy and never becomes manifest data.
+#[derive(Debug, Clone)]
+struct ResolvedSurfaceQualityPolicy<'db> {
+    func: Func<'db>,
+    contract: TypedSurfaceQualityContract,
+}
+
 fn typed_surface_transition_export(contract: &TypedSurfaceTransitionContract) -> &'static str {
     if contract.scheduled {
         TYPED_SURFACE_SCHEDULED_EXPORT
@@ -1828,6 +1888,26 @@ fn canonical_surface_schedule_step_type() -> CanonicalType {
         CanonicalField::new("present", CanonicalType::Bool),
         CanonicalField::new("request_frame", CanonicalType::Bool),
         CanonicalField::new("queue", canonical_surface_queue_action_type()),
+    ])
+}
+
+fn canonical_surface_quality_facts_type() -> CanonicalType {
+    CanonicalType::Record(vec![
+        CanonicalField::new("css_width", CanonicalType::F32),
+        CanonicalField::new("css_height", CanonicalType::F32),
+        CanonicalField::new("device_pixel_ratio", CanonicalType::F32),
+        CanonicalField::new("declared_width", CanonicalType::F32),
+        CanonicalField::new("declared_height", CanonicalType::F32),
+        CanonicalField::new("max_texture_dimension_2d", CanonicalType::F32),
+        CanonicalField::new("coarse_pointer", CanonicalType::Bool),
+        CanonicalField::new("gpu_available", CanonicalType::Bool),
+    ])
+}
+
+fn canonical_surface_backing_extent_type() -> CanonicalType {
+    CanonicalType::Record(vec![
+        CanonicalField::new("width", CanonicalType::F32),
+        CanonicalField::new("height", CanonicalType::F32),
     ])
 }
 
@@ -2241,6 +2321,135 @@ fn resolve_surface_schedule_policy<'db>(
     }))
 }
 
+fn surface_quality_function_shape(db: &DriverDataBase, func: Func<'_>) -> bool {
+    let arg_tys = func.arg_tys(db);
+    arg_tys.len() == 1
+        && nominal_attrs(db, *arg_tys[0].skip_binder())
+            .is_some_and(|attrs| attrs.is_web_surface_quality_facts(db))
+        && nominal_attrs(db, func.return_ty(db))
+            .is_some_and(|attrs| attrs.is_web_surface_backing_extent(db))
+}
+
+/// Resolve the backing policy selected on the GPU actor itself. Actor-level
+/// placement keeps the policy available to pure compute/render graphs which
+/// have no application transition and therefore no control behavior to adorn.
+fn resolve_surface_quality_policy<'db>(
+    db: &'db DriverDataBase,
+    top_mod: TopLevelMod<'db>,
+    source_entry: &str,
+) -> Result<Option<ResolvedSurfaceQualityPolicy<'db>>, WebBundleError> {
+    let actors = semantic_actors(db, top_mod);
+    let Some(actor) = actors.iter().find(|actor| {
+        actor_is_gpu_program(db, actor)
+            && actor.behaviors.iter().any(|behavior| {
+                behavior
+                    .name(db)
+                    .to_opt()
+                    .is_some_and(|name| name.data(db) == source_entry)
+            })
+    }) else {
+        return Ok(None);
+    };
+    let policies = actor_surface_quality_policy_tys(db, actor);
+    let policy_ty = match policies.as_slice() {
+        [] => return Ok(None),
+        [policy] => *policy,
+        _ => {
+            return Err(WebBundleError::SurfaceProjection(format!(
+                "surface actor `{source_entry}` selects {} SurfaceQuality policies; exactly one is allowed",
+                policies.len()
+            )));
+        }
+    };
+    let policy_name = policy_ty.pretty_print(db);
+    let policy_ingot = policy_ty.ingot(db).ok_or_else(|| {
+        WebBundleError::SurfaceProjection(format!(
+            "SurfaceQuality policy `{policy_name}` is not owned by a resolvable Fe ingot"
+        ))
+    })?;
+    let candidates = policy_ingot
+        .all_impls(db)
+        .iter()
+        .copied()
+        .filter(|impl_| impl_.admissible_inherent_impl_ty(db) == Some(policy_ty))
+        .flat_map(|impl_| impl_.funcs(db))
+        .filter(|func| {
+            func.vis(db) == Visibility::Public
+                && !func.is_extern(db)
+                && func.body(db).is_some()
+                && surface_quality_function_shape(db, *func)
+        })
+        .collect::<Vec<_>>();
+    let func = match candidates.as_slice() {
+        [func] => *func,
+        [] => {
+            return Err(WebBundleError::SurfaceProjection(format!(
+                "SurfaceQuality policy `{policy_name}` has no unique public Fe implementation with nominal SurfaceQualityFacts -> SurfaceBackingExtent shape"
+            )));
+        }
+        _ => {
+            return Err(WebBundleError::SurfaceProjection(format!(
+                "SurfaceQuality policy `{policy_name}` has {} structurally matching Fe implementations; exactly one is required",
+                candidates.len()
+            )));
+        }
+    };
+    let contract = typed_surface_quality_contract(db, func, &policy_name)?;
+    Ok(Some(ResolvedSurfaceQualityPolicy { func, contract }))
+}
+
+fn typed_surface_quality_contract(
+    db: &DriverDataBase,
+    func: Func<'_>,
+    policy_name: &str,
+) -> Result<TypedSurfaceQualityContract, WebBundleError> {
+    let arg_tys = func.arg_tys(db);
+    if arg_tys.len() != 1 {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "SurfaceQuality policy `{policy_name}` must take exactly one SurfaceQualityFacts record; found {} semantic arguments",
+            arg_tys.len()
+        )));
+    }
+    let facts_ty = *arg_tys[0].skip_binder();
+    if !nominal_attrs(db, facts_ty).is_some_and(|attrs| attrs.is_web_surface_quality_facts(db)) {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "SurfaceQuality policy `{policy_name}` must take the nominal #[web_surface_quality_facts] record"
+        )));
+    }
+    let result_ty = func.return_ty(db);
+    if !nominal_attrs(db, result_ty).is_some_and(|attrs| attrs.is_web_surface_backing_extent(db)) {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "SurfaceQuality policy `{policy_name}` must return the nominal #[web_surface_backing_extent] record"
+        )));
+    }
+    let facts = canonical_type_from_semantic(db, facts_ty, "surface_quality_facts")
+        .map_err(|error| WebBundleError::SurfaceProjection(error.to_string()))?;
+    let extent = canonical_type_from_semantic(db, result_ty, "surface_backing_extent")
+        .map_err(|error| WebBundleError::SurfaceProjection(error.to_string()))?;
+    let expected_facts = canonical_surface_quality_facts_type();
+    let expected_extent = canonical_surface_backing_extent_type();
+    if facts != expected_facts || extent != expected_extent {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "SurfaceQuality policy `{policy_name}` differs from the fixed typed quality ABI: expected {expected_facts:?} -> {expected_extent:?}; got {facts:?} -> {extent:?}"
+        )));
+    }
+    let mut fact_tag_limits = Vec::new();
+    let fact_fields =
+        surface_scalar_tag_limits(&facts, "surface_quality_facts", 0, &mut fact_tag_limits)?;
+    let mut extent_tag_limits = Vec::new();
+    let decision_fields =
+        surface_scalar_tag_limits(&extent, "surface_backing_extent", 0, &mut extent_tag_limits)?;
+    if fact_fields != 8 || decision_fields != 2 {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "SurfaceQuality policy `{policy_name}` must flatten to 8 fact and 2 extent leaves; got {fact_fields} and {decision_fields}"
+        )));
+    }
+    Ok(TypedSurfaceQualityContract {
+        fact_fields,
+        decision_fields,
+    })
+}
+
 /// Compile the exact ordinary Fe scheduling policy structurally selected by a
 /// GPU actor for native differential execution. The caller names only the
 /// actor's render entry; its control behavior, nominal policy type, unique
@@ -2381,6 +2590,23 @@ fn with_typed_surface_schedule(
         contract.decision_fields,
         contract.event_tag_limits.clone(),
         contract.state_tag_limits.clone(),
+    )
+}
+
+fn with_typed_surface_quality(
+    options: WasmCompileOptions,
+    source: &str,
+    contract: &TypedSurfaceQualityContract,
+) -> WasmCompileOptions {
+    options.with_resident_policy(
+        source,
+        TYPED_SURFACE_QUALITY_EXPORT,
+        true,
+        contract.fact_fields,
+        0,
+        contract.decision_fields,
+        Vec::new(),
+        Vec::new(),
     )
 }
 
@@ -3321,6 +3547,7 @@ impl WebBundle {
             ));
         }
         let control_export = actor_update_export_name(db, top_mod, &options.source_entry)?;
+        let quality_policy = resolve_surface_quality_policy(db, top_mod, &options.source_entry)?;
         let fragment_entries = program
             .stages
             .iter()
@@ -3508,7 +3735,9 @@ impl WebBundle {
             &options.source_entry,
             &resource_field_indices,
         )?;
-        let (wasm, control, has_fe_schedule) = if control_export.is_some() || initializer.is_some()
+        let (wasm, control, has_fe_schedule) = if control_export.is_some()
+            || initializer.is_some()
+            || quality_policy.is_some()
         {
             // A pass graph remains GPU-only for all rendering and resource
             // work. Its optional Wasm artifact contains only Fe-authored state
@@ -3553,8 +3782,10 @@ impl WebBundle {
             }
             let internal_funcs = schedule_policy
                 .as_ref()
-                .map(|policy| vec![policy.func])
-                .unwrap_or_default();
+                .map(|policy| policy.func)
+                .into_iter()
+                .chain(quality_policy.as_ref().map(|policy| policy.func))
+                .collect::<Vec<_>>();
             let control_package = mir::build_wasm_runtime_package_for_entries_with_internal_funcs(
                 db,
                 top_mod,
@@ -3583,6 +3814,16 @@ impl WebBundle {
                     wasm_options,
                     &policy_instance_key,
                     policy.event_first,
+                    &policy.contract,
+                );
+            }
+            if let Some(policy) = quality_policy.as_ref() {
+                let policy_instance_key =
+                    mir::runtime_package_instance_key_for_func(db, control_package, policy.func)
+                        .map_err(|error| WebBundleError::Lower(error.to_string()))?;
+                wasm_options = with_typed_surface_quality(
+                    wasm_options,
+                    &policy_instance_key,
                     &policy.contract,
                 );
             }
@@ -3629,6 +3870,7 @@ impl WebBundle {
             control_export.is_some(),
             passes.len() > 1 || !resources.is_empty(),
             has_fe_schedule,
+            quality_policy.is_some(),
         );
         let manifest = WebBundleManifest {
             protocol: WEB_BUNDLE_PROTOCOL.to_owned(),
@@ -3701,6 +3943,7 @@ impl WebBundle {
         // would need `control_export` routed around canonical-lane derivation
         // too, so that unsupported combination remains fail-closed.
         let control_export = actor_update_export_name(db, top_mod, &options.source_entry)?;
+        let quality_policy = resolve_surface_quality_policy(db, top_mod, &options.source_entry)?;
         let typed_transition = control_export
             .as_deref()
             .map(|export| {
@@ -3836,8 +4079,10 @@ impl WebBundle {
         }
         let internal_funcs = schedule_policy
             .as_ref()
-            .map(|policy| vec![policy.func])
-            .unwrap_or_default();
+            .map(|policy| policy.func)
+            .into_iter()
+            .chain(quality_policy.as_ref().map(|policy| policy.func))
+            .collect::<Vec<_>>();
         let wasm_package = mir::build_wasm_runtime_package_for_entries_with_internal_funcs(
             db,
             top_mod,
@@ -3884,6 +4129,13 @@ impl WebBundle {
                 policy.event_first,
                 &policy.contract,
             );
+        }
+        if let Some(policy) = quality_policy.as_ref() {
+            let policy_instance_key =
+                mir::runtime_package_instance_key_for_func(db, wasm_package, policy.func)
+                    .map_err(|error| WebBundleError::Lower(error.to_string()))?;
+            wasm_options =
+                with_typed_surface_quality(wasm_options, &policy_instance_key, &policy.contract);
         }
         let wasm = compile_runtime_package_wasm_with_options(
             db,
@@ -3958,6 +4210,7 @@ impl WebBundle {
             typed_transition
                 .as_ref()
                 .is_some_and(|contract| contract.scheduled),
+            quality_policy.is_some(),
         );
         let manifest = WebBundleManifest {
             protocol: WEB_BUNDLE_PROTOCOL.to_string(),
@@ -4823,6 +5076,8 @@ pub fn shade(x: u32, y: u32) -> u32 {
                 WebHostResponsibility::DomSurface,
                 WebHostResponsibility::InputTransport,
                 WebHostResponsibility::PresentationScheduler,
+                WebHostResponsibility::BackingStorePolicy,
+                WebHostResponsibility::DeviceCapabilityFacts,
                 WebHostResponsibility::WebGpuExecutor,
                 WebHostResponsibility::Lifecycle,
                 WebHostResponsibility::WasmLoader,

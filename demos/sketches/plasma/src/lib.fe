@@ -12,7 +12,8 @@
 //! parallelism claim (VISION 3.1).
 
 use std::webgpu::{
-    FragmentSurface, GpuProgram, LatestPerFrame, SurfaceScheduling, SurfaceTransition, WebGpuBackend,
+    FragmentSurface, GpuProgram, LatestPerFrame, ResponsiveBacking,
+    SurfaceQuality, SurfaceScheduling, SurfaceTransition, WebGpuBackend,
 }
 use std::web::view::{
     ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface,
@@ -54,7 +55,9 @@ const fn plasma_params() -> PlasmaParams {
     }
 }
 
-actor PlasmaSurface uses (GpuProgram<WebGpuBackend>) {
+actor PlasmaSurface uses (
+    GpuProgram<WebGpuBackend>, SurfaceQuality<ResponsiveBacking>,
+) {
     /// Advances the animation; `zoom` and `warp` are exposed for the page.
     time: f32,
     zoom: f32,

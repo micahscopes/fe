@@ -8,6 +8,9 @@ use std::webgpu::{
     FragmentSurface,
     GpuProgram,
     RasterVertex,
+    SurfaceBackingExtent,
+    SurfaceQuality,
+    SurfaceQualityFacts,
     TriangleList,
     VertexStage,
     WebGpuBackend,
@@ -22,7 +25,22 @@ impl Copy for Offset {}
 struct OverlayGeometry { lower: Offset, upper: Offset }
 impl Copy for OverlayGeometry {}
 
-actor LayeredSurface uses (GpuProgram<WebGpuBackend>) {
+/// A deliberately fixture-local policy with a non-reserved method name. Its
+/// distinct arithmetic proves actor construction selects policy by Fe type
+/// and semantic record shape rather than recognizing `ResponsiveBacking`.
+struct HalfDeclaredBacking {}
+impl HalfDeclaredBacking {
+    pub fn decide_fixture(_ facts: own SurfaceQualityFacts) -> SurfaceBackingExtent {
+        SurfaceBackingExtent {
+            width: facts.declared_width * 0.5,
+            height: facts.declared_height * 0.5,
+        }
+    }
+}
+
+actor LayeredSurface uses (
+    GpuProgram<WebGpuBackend>, SurfaceQuality<HalfDeclaredBacking>,
+) {
     tint: f32,
     geometry: OverlayGeometry,
 
