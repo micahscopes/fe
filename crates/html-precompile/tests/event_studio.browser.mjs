@@ -153,6 +153,9 @@ try {
       deviceGeneration: Number(values[18]?.textContent),
       deviceEvents: Number(values[19]?.textContent),
       deviceMissed: Number(values[20]?.textContent),
+      queueGeneration: Number(values[21]?.textContent),
+      queueEvents: Number(values[22]?.textContent),
+      queueMissed: Number(values[23]?.textContent),
       states: globalThis.__feEventStudioE2E.states.length,
       errors: globalThis.__feEventStudioE2E.errors,
     };
@@ -186,6 +189,9 @@ try {
   assert.ok(initial.latestValue >= 4 && initial.latestValue % 4 === 0);
   assert.equal(initial.observations, 1);
   assert.equal(initial.failures, 0);
+  assert.equal(initial.queueGeneration, 0);
+  assert.equal(initial.queueEvents, 0);
+  assert.equal(initial.queueMissed, 0);
   assert.deepEqual(initial.errors, []);
 
   // The fixed adapter reports only the standards state and event. Fe owns the
@@ -384,7 +390,7 @@ try {
   assert.equal(afterCaptureCancellation.failures, 0);
   assert.deepEqual(afterCaptureCancellation.errors, []);
   assert.deepEqual(browserErrors, []);
-  console.log("ok: Fe Event Studio viewport, Fe-selected scoped pointer capture, merged bounded pointer/wheel buffering, visibility, shared-device lifecycle, paced frame/timer, Scan forwarding, latest values, and lifecycle streams");
+console.log("ok: Fe Event Studio viewport, Fe-selected scoped pointer capture, merged bounded pointer/wheel buffering, visibility, shared-device lifecycle/queue completion, paced frame/timer, Scan forwarding, latest values, and lifecycle streams");
 } finally {
   await browser.close();
   await new Promise(resolvePromise => server.close(resolvePromise));

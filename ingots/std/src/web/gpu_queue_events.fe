@@ -1,0 +1,63 @@
+//! Typed completion facts for the page's actual shared WebGPU queue.
+//!
+//! A queue-idle observation means that every command submitted before the
+//! fixed host's corresponding `GPUQueue.onSubmittedWorkDone()` observation has
+//! completed. It deliberately does not mint application-visible submission
+//! IDs: Fe consumers usually need backpressure/liveness, while the browser
+//! queue remains an opaque standards authority. Generation separates recovered
+//! devices; sequence and `missed` make the bounded transport honest.
+
+use core::default::Default
+use core::pending::{Suspend, TaskOutcome}
+use ingot::wasm::WasmBackend
+use super::super::host::Resumable
+use super::super::reactive::{Cancelled, Event, EventSource, Subscription}
+use raw::queue_idle_begin as raw_queue_idle_begin
+
+#[derive(Default)]
+pub struct GpuQueueIdle {
+    pub generation: u32,
+    pub sequence: u32,
+    pub missed: u32,
+}
+
+impl Copy for GpuQueueIdle {}
+
+pub struct BrowserGpuQueueIdleEvents {}
+
+impl BrowserGpuQueueIdleEvents {
+    pub fn new() -> Self { Self {} }
+}
+
+impl EventSource<GpuQueueIdle> for BrowserGpuQueueIdleEvents {
+    fn subscribe(mut self) -> Subscription<GpuQueueIdle> {
+        Subscription::new(initial: GpuQueueIdle::default())
+    }
+
+    fn next(mut self, _ subscription: own Subscription<GpuQueueIdle>) -> (
+        Subscription<GpuQueueIdle>,
+        Event<GpuQueueIdle>,
+    ) {
+        let seen = subscription.has_observation()
+        let previous_sequence = if seen { subscription.observation().sequence } else { 0 }
+        let successor = subscription.advance().0
+        let outcome: TaskOutcome<u32, GpuQueueIdle> = <Resumable as Suspend<
+            WasmBackend,
+            u32,
+        >>::suspend(Resumable {}, raw_queue_idle_begin(seen, previous_sequence))
+        match outcome {
+            TaskOutcome::Success(idle,) => {
+                (
+                    successor.with_observation(value: idle),
+                    Event::occurrence(value: idle),
+                )
+            },
+            TaskOutcome::Failure(error,) => (successor, Event::failure(error: error)),
+            TaskOutcome::Cancelled => (successor, Event::cancelled()),
+        }
+    }
+
+    fn cancel(mut self, _ subscription: own Subscription<GpuQueueIdle>) -> Cancelled {
+        Cancelled { consumed: subscription.cursor() }
+    }
+}

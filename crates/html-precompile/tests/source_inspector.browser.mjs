@@ -245,7 +245,7 @@ try {
     await page.waitForFunction(() => {
       const component = document.querySelector("#gallery-event-studio");
       const values = component?.querySelectorAll(".event-studio-grid strong");
-      return component?._active === true && values?.length === 21
+      return component?._active === true && values?.length === 24
         && Number(values[8].textContent) >= 1
         && Number(values[9].textContent) >= 1
         && Number(values[10].textContent) >= 1
@@ -272,6 +272,9 @@ try {
         deviceGeneration: Number(values[18].textContent),
         deviceEvents: Number(values[19].textContent),
         deviceMissed: Number(values[20].textContent),
+        queueGeneration: Number(values[21].textContent),
+        queueEvents: Number(values[22].textContent),
+        queueMissed: Number(values[23].textContent),
       };
     });
     assert.equal(eventStudioBefore.failures, 0);
@@ -286,6 +289,9 @@ try {
     assert.equal(eventStudioBefore.deviceReason, 0);
     assert.ok(eventStudioBefore.deviceEvents >= 1);
     assert.equal(eventStudioBefore.deviceMissed, 0);
+    assert.ok(eventStudioBefore.queueGeneration >= 0);
+    assert.ok(eventStudioBefore.queueEvents >= 0);
+    assert.equal(eventStudioBefore.queueMissed, 0);
     if (eventStudioBefore.deviceKind === 1) {
       assert.ok(eventStudioBefore.deviceGeneration >= 1);
     }

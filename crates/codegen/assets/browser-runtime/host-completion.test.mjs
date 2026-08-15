@@ -631,6 +631,29 @@ describe("browser HostTimer/Recv completion broker", () => {
     expect(broker.activeCount()).toBe(0);
   });
 
+  test("typed shared-GPU queue-idle facts resume Fe without host scheduling policy", async () => {
+    const calls = [];
+    const broker = createHostCompletionBroker({
+      gpuQueueIdleEvents: {
+        observe: async (seen, previousSequence, signal) => {
+          expect(signal.aborted).toBeFalse();
+          calls.push([seen, previousSequence]);
+          return { generation: 7, sequence: 14, missed: 2 };
+        },
+      },
+    });
+    const idle = browserRecordMachine(
+      [u32, u32, u32],
+      () => [
+        1, 0, 0, 0,
+        broker.imports["fe:web-gpu"].queue_idle_begin(1, 11) >>> 0,
+      ],
+    );
+    expect(await broker.run(idle, [])).toEqual([7, 14, 2]);
+    expect(calls).toEqual([[true, 11]]);
+    expect(broker.activeCount()).toBe(0);
+  });
+
   test("typed component pointer and wheel facts resume Fe without a JS gesture policy", async () => {
     const broker = createHostCompletionBroker({
       componentEvents: {

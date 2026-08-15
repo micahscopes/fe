@@ -1,0 +1,13 @@
+//! Private fixed-host import for shared WebGPU queue-idle observations.
+
+use core::pending::Pending
+use ingot::wasm::WasmBackend
+use super::GpuQueueIdle
+
+#[wasm_import(module = "fe:web-gpu")]
+extern {
+    pub unsafe fn queue_idle_begin(
+        _ seen: bool,
+        _ previous_sequence: u32,
+    ) -> Pending<WasmBackend, GpuQueueIdle>
+}

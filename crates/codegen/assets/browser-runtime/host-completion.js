@@ -96,6 +96,7 @@ export function createHostCompletionBroker(options = {}) {
   const documentEvents = options.documentEvents;
   const windowEvents = options.windowEvents;
   const gpuDeviceEvents = options.gpuDeviceEvents;
+  const gpuQueueIdleEvents = options.gpuQueueIdleEvents;
   const componentEvents = options.componentEvents;
   const actorEvents = options.actorEvents;
   if (typeof clock !== "function" || typeof schedule !== "function"
@@ -121,6 +122,11 @@ export function createHostCompletionBroker(options = {}) {
       || typeof gpuDeviceEvents !== "object"
       || typeof gpuDeviceEvents.observe !== "function")) {
     throw new TypeError("host completion GPU-device hooks must provide observe");
+  }
+  if (gpuQueueIdleEvents !== undefined && (!gpuQueueIdleEvents
+      || typeof gpuQueueIdleEvents !== "object"
+      || typeof gpuQueueIdleEvents.observe !== "function")) {
+    throw new TypeError("host completion GPU-queue hooks must provide observe");
   }
   if (componentEvents !== undefined && (!componentEvents
       || typeof componentEvents !== "object"
@@ -380,6 +386,34 @@ export function createHostCompletionBroker(options = {}) {
           u32(event.generation, "GPU device generation"),
           u32(event.sequence, "GPU device event sequence"),
           u32(event.missed, "GPU device missed-event count"),
+        ];
+      },
+    );
+  };
+
+  const beginGpuQueueIdle = (rawSeen, rawPreviousSequence) => {
+    if (gpuQueueIdleEvents === undefined) {
+      throw new Error("fe:web-gpu::queue_idle_begin requires a GPU-queue capability");
+    }
+    if (rawSeen !== 0 && rawSeen !== 1) {
+      throw new TypeError("fe:web-gpu::queue_idle_begin seen flag must be a Fe bool");
+    }
+    const previousSequence = u32(
+      rawPreviousSequence,
+      "fe:web-gpu::queue_idle_begin previous sequence",
+    );
+    return beginBrowserOperation(
+      "gpu-queue-idle",
+      signal => gpuQueueIdleEvents.observe(rawSeen !== 0, previousSequence, signal),
+      3,
+      event => {
+        if (!event || typeof event !== "object" || Array.isArray(event)) {
+          throw new TypeError("GPU queue-idle result must be an object");
+        }
+        return [
+          u32(event.generation, "GPU queue-idle generation"),
+          u32(event.sequence, "GPU queue-idle sequence"),
+          u32(event.missed, "GPU queue-idle missed-event count"),
         ];
       },
     );
@@ -792,6 +826,7 @@ export function createHostCompletionBroker(options = {}) {
   });
   const gpuDeviceImports = Object.freeze({
     device_event_begin: beginGpuDeviceEvent,
+    queue_idle_begin: beginGpuQueueIdle,
   });
   const componentEventImports = Object.freeze({
     pointer_begin: beginPointer,
@@ -806,7 +841,9 @@ export function createHostCompletionBroker(options = {}) {
   if (surface !== undefined) imports["fe:web-surface"] = surfaceImports;
   if (documentEvents !== undefined) imports["fe:web-document"] = documentImports;
   if (windowEvents !== undefined) imports["fe:web-window"] = windowImports;
-  if (gpuDeviceEvents !== undefined) imports["fe:web-gpu"] = gpuDeviceImports;
+  if (gpuDeviceEvents !== undefined || gpuQueueIdleEvents !== undefined) {
+    imports["fe:web-gpu"] = gpuDeviceImports;
+  }
   if (componentEvents !== undefined) {
     imports["fe:web-component-events"] = componentEventImports;
   }

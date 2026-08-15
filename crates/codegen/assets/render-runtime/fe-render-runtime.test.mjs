@@ -7,7 +7,7 @@ import test from "node:test";
 globalThis.HTMLElement = class HTMLElement {};
 globalThis.customElements = { define() {} };
 
-const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, fitBackingExtent, rasterDrawVertexCount, requiresGpuPassGraph, unpackCanvasReadback, writeSurfaceEventBatch } =
+const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fitBackingExtent, rasterDrawVertexCount, requiresGpuPassGraph, unpackCanvasReadback, writeSurfaceEventBatch } =
   await import("./fe-render-runtime.js");
 
 test("shared GPU lifecycle channel replays ordered typed facts and reports bounded gaps", async () => {
@@ -48,6 +48,27 @@ test("shared GPU lifecycle observation is affine and cancellable", async () => {
     () => channel.publish(GpuDeviceEventKind.Unknown, GpuDeviceLossReason.NotLost, 0),
     /cannot publish the Fe placeholder/,
   );
+});
+
+test("shared GPU queue-idle channel reports generations, replay gaps, and cancellation", async () => {
+  const channel = createGpuQueueIdleChannel(2);
+  const first = channel.observe(false, 0);
+  channel.publish(3);
+  assert.deepEqual(await first, { generation: 3, sequence: 1, missed: 0 });
+
+  channel.publish(3);
+  channel.publish(4);
+  assert.deepEqual(await channel.observe(true, 0), {
+    generation: 3, sequence: 2, missed: 1,
+  });
+  assert.deepEqual(await channel.observe(false, 0), {
+    generation: 4, sequence: 3, missed: 0,
+  });
+
+  const controller = new AbortController();
+  const pending = channel.observe(true, 3, controller.signal);
+  controller.abort();
+  await assert.rejects(pending, error => error.name === "AbortError");
 });
 
 test("typed recovery transports raw device facts and validates Fe recovery decisions", () => {

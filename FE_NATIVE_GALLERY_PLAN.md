@@ -1389,13 +1389,12 @@ Origin: honesty audit of Claude Code session
   instead of silently substituting latest state for a complete tape.
 - Independent evidence covers ordered replay, bounded gaps, malformed tags,
   exactly-once cancellation at both host and Fe boundaries, the nominal
-  39-leaf Event Studio mailbox, and the 23-leaf resident reducer. The fixed
-  render-runtime suite is 26/26, completion broker 24/24, bootstrap 15/15, the
-  Event Studio Wasmtime oracle passes, an optimized publication verifies 15 Fe
-  modules / 79 files, and its combined real-Chromium gallery tape observes the
-  source on the adapter-unavailable path. JavaScript still owns the two-attempt
-  shared-device retry and fallback choice; moving that decision into Fe is the
-  next recovery slice, not claimed by this source checkpoint.
+  device-lifecycle portion of Event Studio's now 42-leaf mailbox and 26-leaf
+  resident reducer. The focused lifecycle channel, completion broker,
+  bootstrap, and Event Studio Wasmtime oracles pass; an optimized publication
+  verifies 15 Fe modules / 79 files, and its combined real-Chromium gallery tape
+  observes the source on the adapter-unavailable path. Shared-device retry and
+  fallback choice were subsequently moved into the Fe policy recorded below.
 - Resident text is now an ordinary Fe library rather than application-local
   byte poking or a browser codec. `std::text` provides bounded `Utf8View` and
   `Utf8Buffer` values with complete scalar decoding, boundary/slice/prefix,
@@ -1460,6 +1459,35 @@ Origin: honesty audit of Claude Code session
   leg; its policy and coordinator semantics are covered here by native,
   Wasmtime, and deterministic fixed-host evidence rather than claimed from the
   unavailable adapter.
+- Shared GPU completion is now a real affine Fe browser source rather than only
+  a surface-scheduler enum. `BrowserGpuQueueIdleEvents` yields typed
+  `GpuQueueIdle` facts—device generation, monotonic observation sequence, and
+  explicit bounded-history loss—through the same `Pending`/`Suspend` and
+  `EventSource` rail as visibility, animation frames, pointer capture, and
+  device lifecycle. The abstraction deliberately exposes no raw `GPUQueue`,
+  numeric submission identity, or application callback: an occurrence means
+  every command preceding a queue-idle boundary already observed by the fixed
+  render host has completed. Fe owns subscription state, stale/history policy,
+  forwarding, and backpressure decisions.
+- Event Studio consumes this source in a sixth scoped Fe task through the
+  general `forward_to_actor` loop and its resident reducer now projects queue
+  generation/event/miss state. The render runtime publishes only successful
+  idle observations from its existing submission/readback waits, adding no
+  per-frame polling loop or second WebGPU device; device lifecycle and queue
+  completion share one demo-blind bounded replay transport rather than
+  duplicating host machinery. Independent replay/gap/
+  cancellation tests cover the fixed channel; the completion broker validates
+  the exact three-leaf result and resumes Fe opaquely; generated-Wasm inspection
+  proves the canonical demo imports `fe:web-gpu::queue_idle_begin`; and the
+  independent resident reducer executes the resulting 42-leaf mailbox against
+  26 leaves of state. The focused actor oracle and all 72 fixed runtime/broker/
+  bootstrap tests pass; the complete 58-test codegen library suite and all 33
+  HTML-precompiler library cases are green as well. A fresh optimized standalone
+  publication verifies one Fe module / seven files and passes its real Chromium
+  behavior tape. The final cold gallery build compiles all twelve render bundles
+  in 395.058 seconds, verifies 15 Fe modules / 79 deployment files, and passes
+  the combined real-Chromium gallery / SourceInspector / Event Studio tape on
+  the adapter-unavailable path.
 
 This ledger records achieved evidence, not a relaxation of the phases or the
 Definition of done below.
@@ -1520,11 +1548,10 @@ general interface rather than open a parallel demo-specific lane.
 The lifecycle/value, QCGA interaction, shared DE scene, first general actor
 effects, true producer/consumer composition, rich aggregate payloads, merged
 sources, deterministic time, switch/latest, and bounded sharing described
-above are substantially landed. The current vertical slice is now the
-remaining browser sources: MessagePort, fetch, and GPU completion. Fe-owned
-shared-device recovery policy is landed; completing those three sources closes
-this multiplying control axis before returning to shared interaction and
-GPU/GA generalization.
+above are substantially landed. GPU completion and Fe-owned shared-device
+recovery policy are now landed. The current vertical slice is the two remaining
+browser sources—MessagePort and fetch—whose completion closes this multiplying
+control axis before returning to shared interaction and GPU/GA generalization.
 
 ## Ingot utility maturity map (2026-08-14 audit)
 
@@ -1555,8 +1582,8 @@ layers, not beside reusable application utilities.
 | --- | --- | --- | --- |
 | Runtime control | Typed `Pending`, `TaskOutcome`, nominal `Suspend`, generated continuation states, resident/scoped actors, typed actor sinks, timer suspension | One `std::runtime` facade; reusable source-to-actor forwarding; explicit scope/supervision policies | ZIO-like typed environment/exit/scope in Fe without a boxed monadic runtime; compiler-derived task handles and exactly-once structured cancellation |
 | Reactive | Typed `Event`, affine `Subscription`, effect-backed `EventSource`/`AsyncEventSource`, zero-state `Stream`, `next_ready`, pure event map/filter/hold, executable `Scan`, `BoundedQueue`, `Latest`, `VirtualTime`, leading `Throttle`, trailing `Debounce`, `SwitchLatest`, bounded `SharedReplay`, non-destructive nested heterogeneous `Select`, two-source merged buffering, and exact Event Studio browser evidence | Lift the proven policies into one stream-graph surface; fuse effectful interpreters and structured shared cancellation | Static typed stream graphs with map/filter/scan/merge/switch/sample/throttle/debounce/share/replay fused by FCO into continuation machines |
-| Browser sources | Render surfaces, visibility, animation frames, viewport, raw Pointer Events, Fe-selected primary-pointer capture, wheel, the actual shared WebGPU device lifecycle, and Fe-owned shared-device recovery; host listeners are scoped and demo-blind | MessagePort, fetch, and GPU-completion sources; move render surfaces onto the same capture/coordinate vocabulary | Standards-derived adapters generated from typed capabilities, with Fe owning combination, retry, lifetime, and gesture policy |
-| Components/pages | FCO-derived action/part identity, resident reducers, keyed repeats, Fe page composition, TodoMVC/Event Studio/SourceInspector | Split browser resource effects from DOM projection; typed resident UTF-8 stores/projectors; seal raw part minting and patch buffers | Compiler derives action sums, opaque target identities, event dispatch, initial DOM, minimal projection, tasks, and resources from state/handlers/view |
+| Browser sources | Render surfaces, visibility, animation frames, viewport, raw Pointer Events, Fe-selected primary-pointer capture, wheel, the actual shared WebGPU device lifecycle and queue-idle completion stream, and Fe-owned shared-device recovery; host listeners are scoped and demo-blind | MessagePort and fetch sources; move render surfaces onto the same capture/coordinate vocabulary | Standards-derived adapters generated from typed capabilities, with Fe owning combination, retry, lifetime, and gesture policy |
+| Components/pages | FCO-derived action/part identity, resident reducers, keyed repeats, Fe page composition, TodoMVC/Event Studio/SourceInspector | Fe HTML quasiquotes lowering to existing component values; typed custom-element `attr:`/`prop:`/`on:`/slot composition; split browser resource effects from DOM projection; seal raw part minting and patch buffers | Compiler derives action sums, opaque target identities, event dispatch, dependencies, initial DOM, minimal projection, tasks, and resources from state/handlers/view; no JavaScript template runtime or component registry |
 | Surface interaction | FCO-derived parameter binding and cursor-aware Fe transitions; QCGA picking/drag/solve is Fe | Shared `PointerTracker`, `PanZoom`, `Orbit`, `PickDrag`, `RangeControl`, coordinate-space types, and capture requests | One typed interaction algebra consumed by every 2D/3D surface with no host gesture state |
 | Scheduling/render | Latest-per-frame, sample-latest, throttle, debounce, accumulate/drop policies, responsive backing, typed pass graphs | Parameterize policies; split `std::webgpu` into program/surface/schedule/quality/resource/compute/device; shared marcher/material packages | Typed kernel values derive identity, layouts, grids, capabilities, and launch; real shared-memory/barrier/subgroup lowering with portable fallbacks |
 | Math/color/precision | Shared scalar/vector/ray/sampling kernels, gallery palette, expansions/fixed arithmetic, BN254 Montgomery multiplication | Promote demo-local libraries; method-oriented vectors/cameras/colors; nominal `Fixed<L>` and `FieldElement<M,L>`; checked nonzero dimensions | Target-neutral numeric traits and compiler-supported fixed arrays remove recursive/storage and target-layout seams |
@@ -1756,9 +1783,10 @@ and transitional component opcodes are still composting targets.
   still narrow and mostly pure vocabulary.
 - The safe browser surface now exposes typed asynchronous event sources through
   runtime-control effects, including a distinct Fe-selected scoped pointer-
-  capture source, the actual shared WebGPU device lifecycle, and actor-level
-  Fe-owned recovery policy. MessagePort, fetch, GPU completion, render-surface
-  capture migration, and richer structured resource effects remain open.
+  capture source, the actual shared WebGPU device lifecycle, queue-idle GPU
+  completion, and actor-level Fe-owned recovery policy. MessagePort, fetch,
+  render-surface capture migration, and richer structured resource effects
+  remain open.
 - The render manifest is compiler-generated rather than hand-authored, but it
   is still a semantic runtime protocol: bootstrap/render code interprets its
   passes, resources, controls, and artifact paths, and Fe page code still
@@ -2001,8 +2029,8 @@ and tested in Fe; JavaScript merely supplies frame/GPU-completion facts.
    surfaces, visibility, animation frame, aggregate viewport resize,
    component-scoped Pointer Events (mouse/pen/touch), Fe-selected scoped
    primary-pointer capture, wheel, the actual shared-device lifecycle, and
-   Fe-owned device recovery. Remaining: MessagePort, fetch, and GPU-completion
-   streams.
+   queue-idle GPU completion, plus Fe-owned device recovery. Remaining:
+   MessagePort and fetch streams.
 6. Re-orient `std::reactive::{Event, Stream, Signal}` around runtime control
    effects before putting it on the real gallery path. Values and combinators
    remain pure Fe descriptions/reducers; subscribe, await-next, yield, wake,
@@ -2040,13 +2068,13 @@ and tested in Fe; JavaScript merely supplies frame/GPU-completion facts.
 Current reactive status: the synchronous/effect-backed source spine,
 `next_ready`, event-level map/filter/hold, pure `Scan`, explicit bounded queue,
 `Latest`, deterministic virtual time, throttle/debounce, switch/latest, bounded
-sharing/replay, shared source-to-actor forwarding, six real browser source
+sharing/replay, shared source-to-actor forwarding, seven real browser source
 families, scoped cancellation, and paced timer/frame task are landed with
 semantic and browser gates. Event Studio proves scan-based forwarding and real
 concurrent merged Pointer Event/wheel buffering through nested non-destructive
 heterogeneous `Select`; its timer retains a separate deterministic `Latest`
-probe. Next are MessagePort, fetch, and GPU-completion sources, followed by the
-unified stream-graph authoring layer. The
+probe. Next are MessagePort and fetch sources, followed by the unified
+stream-graph authoring layer. The
 four-slot queue is an honest current-Wasm envelope; general nested-array/
 target-sized aggregate scalarization must recover the ideal const-generic
 implementation.
@@ -2087,6 +2115,17 @@ the compatibility shell once that theme covers it.
 4. Retire handwritten `demos/gallery.html` after a compatibility window.
 5. Keep CSS initially as a fixed, selectable compiler-shipped theme; grow Fe
    page/style vocabulary only where it removes repeated application policy.
+6. Add a Fe-native HTML quasiquote/template surface that lowers into the
+   existing `ComponentView`/`PageBuilder` values. Static fragments, typed value
+   holes, conditionals, keyed repeats, slots, and event actions must reuse FCO-
+   derived parts/actions and resident projection rather than introducing a
+   JavaScript template runtime.
+7. Make ordinary standards/custom elements first-class template composition
+   targets, including external component libraries: distinguish typed
+   `attr:`, `prop:`, and `on:` bindings, preserve custom event payload types and
+   resource ownership, and keep Fe-owned components on their stronger derived
+   state/patch path. No per-component JavaScript glue or caller-authored JSON
+   registry should be required.
 
 Exit condition: one Fe page entrypoint composes the entire gallery.
 

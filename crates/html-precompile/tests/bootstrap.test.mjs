@@ -5,6 +5,7 @@ import {
   createComponentEventSource,
   createDocumentEventSource,
   createGpuDeviceEventSource,
+  createGpuQueueIdleEventSource,
   createWindowEventSource,
   decodeComponentCommands,
   FeComponentElement,
@@ -154,6 +155,25 @@ test("GPU device adapter observes the shared render runtime without acquiring an
   assert.throws(
     () => createGpuDeviceEventSource({}),
     /fixed render runtime lifecycle export/,
+  );
+});
+
+test("GPU queue-idle adapter exposes only the shared runtime's typed completion facts", async () => {
+  const calls = [];
+  const source = createGpuQueueIdleEventSource({
+    observeSharedGpuQueueIdle(seen, previousSequence, signal) {
+      calls.push([seen, previousSequence, signal]);
+      return { generation: 4, sequence: 12, missed: 2 };
+    },
+  });
+  const controller = new AbortController();
+  assert.deepEqual(await source.observe(true, 9, controller.signal), {
+    generation: 4, sequence: 12, missed: 2,
+  });
+  assert.deepEqual(calls, [[true, 9, controller.signal]]);
+  assert.throws(
+    () => createGpuQueueIdleEventSource({}),
+    /fixed render runtime completion export/,
   );
 });
 

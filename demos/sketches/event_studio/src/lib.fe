@@ -31,6 +31,7 @@ use std::web::gpu_device_events::{
     GpuDeviceEventKind,
     GpuDeviceLossReason,
 }
+use std::web::gpu_queue_events::{BrowserGpuQueueIdleEvents, GpuQueueIdle}
 use std::web::window_events::{
     AnimationFrame,
     BrowserAnimationFrames,
@@ -67,7 +68,7 @@ use std::web::page::{
 }
 
 const PATCH_CAPACITY: u32 = 1024
-const VIEW_CAPACITY: usize = 232
+const VIEW_CAPACITY: usize = 264
 const FRAME_PACE_MS: u64 = 500
 
 extern {
@@ -88,6 +89,7 @@ enum StudioAction {
     FrameObserved,
     TimerElapsed,
     DeviceObserved,
+    QueueIdleObserved,
 }
 
 impl Copy for StudioAction {}
@@ -116,6 +118,7 @@ struct StudioTask {
     error: u32,
     latest_value: u32,
     device: GpuDeviceEvent,
+    queue_idle: GpuQueueIdle,
 }
 
 impl Copy for StudioTask {}
@@ -161,6 +164,11 @@ impl StudioTask {
         self.device = value
         self
     }
+
+    fn with_queue_idle(mut self, value: GpuQueueIdle) -> Self {
+        self.queue_idle = value
+        self
+    }
 }
 
 derive ComponentAction for StudioAction using ComponentActionProvider
@@ -187,6 +195,9 @@ struct StudioParts {
     device_generation: Part<Text>,
     device_events: Part<Text>,
     device_missed: Part<Text>,
+    queue_generation: Part<Text>,
+    queue_events: Part<Text>,
+    queue_missed: Part<Text>,
 }
 
 derive ComponentSchema for StudioParts using ComponentSchemaProvider
@@ -215,6 +226,9 @@ pub struct StudioState {
     pub device_generation: u32,
     pub device_events: u32,
     pub device_missed: u32,
+    pub queue_generation: u32,
+    pub queue_events: u32,
+    pub queue_missed: u32,
 }
 
 fn bounded_dimension(value: f32) -> u32 {
@@ -294,12 +308,14 @@ struct ViewportMessage {}
 struct GestureMerge {}
 struct VisibilityMessage {}
 struct DeviceMessage {}
+struct QueueIdleMessage {}
 struct FailureMessage {}
 
 impl Copy for ViewportMessage {}
 impl Copy for GestureMerge {}
 impl Copy for VisibilityMessage {}
 impl Copy for DeviceMessage {}
+impl Copy for QueueIdleMessage {}
 impl Copy for FailureMessage {}
 
 impl Fn<Viewport, ComponentEvent<StudioAction, StudioTask>> for ViewportMessage {
@@ -372,6 +388,15 @@ impl Fn<GpuDeviceEvent, ComponentEvent<StudioAction, StudioTask>> for DeviceMess
         task_message(
             target: StudioAction::DeviceObserved,
             payload: StudioTask::default().with_device(value: device),
+        )
+    }
+}
+
+impl Fn<GpuQueueIdle, ComponentEvent<StudioAction, StudioTask>> for QueueIdleMessage {
+    fn call(self, _ idle: own GpuQueueIdle) -> ComponentEvent<StudioAction, StudioTask> {
+        task_message(
+            target: StudioAction::QueueIdleObserved,
+            payload: StudioTask::default().with_queue_idle(value: idle),
         )
     }
 }
@@ -456,6 +481,16 @@ uses (
 )
 {
     forward_to_actor(map: DeviceMessage {}, map_failure: FailureMessage {}).delivered
+}
+
+fn observe_queue_idle() -> u32
+uses (
+    queue_idle_events: mut EventSource<GpuQueueIdle>,
+    sink: mut ActorSink<WasmBackend, ComponentEvent<StudioAction, StudioTask>>,
+    suspend: Suspend<WasmBackend, u32>,
+)
+{
+    forward_to_actor(map: QueueIdleMessage {}, map_failure: FailureMessage {}).delivered
 }
 
 /// Pull one animation frame only after the Fe timer interval has elapsed.
@@ -552,6 +587,9 @@ actor EventStudio {
     device_generation: u32,
     device_events: u32,
     device_missed: u32,
+    queue_generation: u32,
+    queue_events: u32,
+    queue_missed: u32,
 
     const fn view() -> ComponentView<VIEW_CAPACITY> uses (ComponentComposition) {
         let ui = <StudioParts as ComponentSchema>::component_parts()
@@ -572,7 +610,7 @@ actor EventStudio {
             .text(value: ui_text(value: "Fe selects scoped capture; "))
             .text(value: ui_text(value: "pointer + wheel share one "))
             .text(value: ui_text(value: "bounded queue; paced clock "))
-            .text(value: ui_text(value: "shared GPU lifecycle is Fe."))
+            .text(value: ui_text(value: "GPU lifecycle + idle are Fe."))
             .close()
             .open(element: PageElement::Div)
             .attribute(value: PageAttribute::class(value: "event-studio-grid"))
@@ -727,6 +765,27 @@ actor EventStudio {
             .text(value: ui_text(value: "0"))
             .close()
             .close()
+            .open(element: PageElement::Paragraph)
+            .text(value: ui_text(value: "queue generation · "))
+            .open(element: PageElement::Strong)
+            .attribute(value: PageAttribute::node(value: ui.queue_generation))
+            .text(value: ui_text(value: "0"))
+            .close()
+            .close()
+            .open(element: PageElement::Paragraph)
+            .text(value: ui_text(value: "queue idle events · "))
+            .open(element: PageElement::Strong)
+            .attribute(value: PageAttribute::node(value: ui.queue_events))
+            .text(value: ui_text(value: "0"))
+            .close()
+            .close()
+            .open(element: PageElement::Paragraph)
+            .text(value: ui_text(value: "queue history missed · "))
+            .open(element: PageElement::Strong)
+            .attribute(value: PageAttribute::node(value: ui.queue_missed))
+            .text(value: ui_text(value: "0"))
+            .close()
+            .close()
             .close()
             .close()
             .finish_component()
@@ -758,6 +817,9 @@ actor EventStudio {
             device_generation: 0,
             device_events: 0,
             device_missed: 0,
+            queue_generation: 0,
+            queue_events: 0,
+            queue_missed: 0,
         }
     }
 
@@ -806,6 +868,16 @@ actor EventStudio {
         }
     }
 
+    fn watch_queue_idle() -> u32 uses (ScopedTask) {
+        with (
+            EventSource<GpuQueueIdle> = BrowserGpuQueueIdleEvents::new(),
+            ActorSink<WasmBackend, ComponentEvent<StudioAction, StudioTask>> = BrowserActorSink {},
+            Suspend<WasmBackend, u32> = Resumable {},
+        ) {
+            observe_queue_idle()
+        }
+    }
+
     fn watch_frame_clock() -> u32 uses (ScopedTask) {
         with (
             EventSource<AnimationFrame> = BrowserAnimationFrames::new(),
@@ -842,6 +914,9 @@ actor EventStudio {
         let mut device_generation = self.device_generation
         let mut device_events = self.device_events
         let mut device_missed = self.device_missed
+        let mut queue_generation = self.queue_generation
+        let mut queue_events = self.queue_events
+        let mut queue_missed = self.queue_missed
         match event.kind {
             ComponentEventKind::Connected => { connected = true }
             ComponentEventKind::Disconnected => { connected = false }
@@ -890,6 +965,11 @@ actor EventStudio {
                             device_events = device_events + 1
                             device_missed = device_missed + event.task.device.missed
                         }
+                        StudioAction::QueueIdleObserved => {
+                            queue_generation = event.task.queue_idle.generation
+                            queue_events = queue_events + 1
+                            queue_missed = queue_missed + event.task.queue_idle.missed
+                        }
                         StudioAction::StreamFailed => { failures = failures + 1 }
                         _ => {}
                     }
@@ -921,6 +1001,9 @@ actor EventStudio {
             device_generation: device_generation,
             device_events: device_events,
             device_missed: device_missed,
+            queue_generation: queue_generation,
+            queue_events: queue_events,
+            queue_missed: queue_missed,
         }
     }
 
@@ -950,6 +1033,9 @@ actor EventStudio {
             .set_u32_text(target: ui.device_generation, value: self.device_generation)
             .set_u32_text(target: ui.device_events, value: self.device_events)
             .set_u32_text(target: ui.device_missed, value: self.device_missed)
+            .set_u32_text(target: ui.queue_generation, value: self.queue_generation)
+            .set_u32_text(target: ui.queue_events, value: self.queue_events)
+            .set_u32_text(target: ui.queue_missed, value: self.queue_missed)
         ComponentPatch::new(
             visible_mask: 0,
             focus_target: StudioAction::Unknown,

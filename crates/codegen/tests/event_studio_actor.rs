@@ -14,8 +14,8 @@ use fe_codegen::{
 use hir::hir_def::HirIngot;
 use url::Url;
 
-const STATE_LEAVES: usize = 23;
-const EVENT_LEAVES: usize = 39;
+const STATE_LEAVES: usize = 26;
+const EVENT_LEAVES: usize = 42;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct Model {
@@ -41,6 +41,9 @@ struct Model {
     device_generation: u32,
     device_events: u32,
     device_missed: u32,
+    queue_generation: u32,
+    queue_events: u32,
+    queue_missed: u32,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -64,6 +67,9 @@ struct Event {
     device_generation: u32,
     device_sequence: u32,
     device_missed: u32,
+    queue_generation: u32,
+    queue_sequence: u32,
+    queue_missed: u32,
 }
 
 fn bounded_dimension(value: f32) -> u32 {
@@ -127,6 +133,11 @@ fn reduce(mut model: Model, event: Event) -> Model {
                 model.device_events += 1;
                 model.device_missed += event.device_missed;
             }
+            9 => {
+                model.queue_generation = event.queue_generation;
+                model.queue_events += 1;
+                model.queue_missed += event.queue_missed;
+            }
             _ => {}
         },
         _ => {}
@@ -175,6 +186,9 @@ fn event_values(event: Event) -> Vec<wasmtime::Val> {
         wasmtime::Val::I32(event.device_generation as i32),
         wasmtime::Val::I32(event.device_sequence as i32),
         wasmtime::Val::I32(event.device_missed as i32),
+        wasmtime::Val::I32(event.queue_generation as i32),
+        wasmtime::Val::I32(event.queue_sequence as i32),
+        wasmtime::Val::I32(event.queue_missed as i32),
     ]
 }
 
@@ -209,6 +223,9 @@ fn state_values(values: &[wasmtime::Val]) -> Model {
         device_generation: words[20],
         device_events: words[21],
         device_missed: words[22],
+        queue_generation: words[23],
+        queue_events: words[24],
+        queue_missed: words[25],
     }
 }
 
@@ -244,6 +261,7 @@ fn event_studio_matches_independent_browser_stream_and_lifecycle_oracle() {
             "watch_gestures",
             "watch_visibility",
             "watch_device",
+            "watch_queue_idle",
             "watch_frame_clock"
         ]
     );
@@ -268,6 +286,12 @@ fn event_studio_matches_independent_browser_stream_and_lifecycle_oracle() {
             .imports()
             .any(|import| import.module() == "fe:web-gpu" && import.name() == "device_event_begin"),
         "Event Studio must compile the typed shared-device lifecycle source"
+    );
+    assert!(
+        module
+            .imports()
+            .any(|import| import.module() == "fe:web-gpu" && import.name() == "queue_idle_begin"),
+        "Event Studio must compile the typed shared-queue completion source"
     );
     let mut store = wasmtime::Store::new(&engine, ());
     let mut linker = wasmtime::Linker::new(&engine);
@@ -312,6 +336,13 @@ fn event_studio_matches_independent_browser_stream_and_lifecycle_oracle() {
         .func_wrap(
             "fe:web-gpu",
             "device_event_begin",
+            |_seen: i32, _previous_sequence: i32| -> i32 { 0 },
+        )
+        .unwrap();
+    linker
+        .func_wrap(
+            "fe:web-gpu",
+            "queue_idle_begin",
             |_seen: i32, _previous_sequence: i32| -> i32 { 0 },
         )
         .unwrap();
@@ -429,6 +460,21 @@ fn event_studio_matches_independent_browser_stream_and_lifecycle_oracle() {
             device_generation: 2,
             device_sequence: 4,
             device_missed: 1,
+            ..Event::default()
+        },
+        Event {
+            kind: 13,
+            target: 9,
+            queue_generation: 2,
+            queue_sequence: 11,
+            ..Event::default()
+        },
+        Event {
+            kind: 13,
+            target: 9,
+            queue_generation: 3,
+            queue_sequence: 14,
+            queue_missed: 2,
             ..Event::default()
         },
         Event {
