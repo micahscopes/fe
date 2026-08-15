@@ -7,8 +7,48 @@ import test from "node:test";
 globalThis.HTMLElement = class HTMLElement {};
 globalThis.customElements = { define() {} };
 
-const { FeSurfaceElement, SurfaceEventKind, SurfaceQueueAction, fitBackingExtent, rasterDrawVertexCount, requiresGpuPassGraph, unpackCanvasReadback, writeSurfaceEventBatch } =
+const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, SurfaceEventKind, SurfaceQueueAction, createGpuDeviceLifecycleChannel, fitBackingExtent, rasterDrawVertexCount, requiresGpuPassGraph, unpackCanvasReadback, writeSurfaceEventBatch } =
   await import("./fe-render-runtime.js");
+
+test("shared GPU lifecycle channel replays ordered typed facts and reports bounded gaps", async () => {
+  const channel = createGpuDeviceLifecycleChannel(2);
+  const waiting = channel.observe(false, 0);
+  channel.publish(GpuDeviceEventKind.Available, GpuDeviceLossReason.NotLost, 1);
+  assert.deepEqual(await waiting, {
+    kind: 1, reason: 0, generation: 1, sequence: 1, missed: 0,
+  });
+
+  channel.publish(GpuDeviceEventKind.Lost, GpuDeviceLossReason.Unknown, 1);
+  channel.publish(GpuDeviceEventKind.Available, GpuDeviceLossReason.NotLost, 2);
+  assert.deepEqual(await channel.observe(true, 1), {
+    kind: 2, reason: 1, generation: 1, sequence: 2, missed: 0,
+  });
+
+  // Sequence 2 and 3 are retained. A consumer that last saw sequence 0 gets
+  // the first retained fact plus an explicit one-event history gap.
+  assert.deepEqual(await channel.observe(true, 0), {
+    kind: 2, reason: 1, generation: 1, sequence: 2, missed: 1,
+  });
+  assert.deepEqual(await channel.observe(false, 0), {
+    kind: 1, reason: 0, generation: 2, sequence: 3, missed: 0,
+  });
+});
+
+test("shared GPU lifecycle observation is affine and cancellable", async () => {
+  const channel = createGpuDeviceLifecycleChannel();
+  const controller = new AbortController();
+  const pending = channel.observe(false, 0, controller.signal);
+  controller.abort();
+  await assert.rejects(pending, error => error.name === "AbortError");
+  channel.publish(GpuDeviceEventKind.Unavailable, GpuDeviceLossReason.NotLost, 0);
+  assert.deepEqual(await channel.observe(false, 0), {
+    kind: 3, reason: 0, generation: 0, sequence: 1, missed: 0,
+  });
+  assert.throws(
+    () => channel.publish(GpuDeviceEventKind.Unknown, GpuDeviceLossReason.NotLost, 0),
+    /cannot publish the Fe placeholder/,
+  );
+});
 
 test("legacy CPU backing ceiling preserves aspect instead of cropping work", () => {
   assert.deepEqual(fitBackingExtent(512, 256, 128), { width: 128, height: 64 });

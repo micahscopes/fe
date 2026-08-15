@@ -1,0 +1,97 @@
+//! Typed lifecycle facts for the page's actual shared WebGPU render device.
+//!
+//! The fixed render host owns browser `GPUAdapter`/`GPUDevice` objects and the
+//! `GPUDevice.lost` promise. It reports only stable tags, generation, ordering,
+//! and bounded-history loss. It never transports or parses the implementation-
+//! defined diagnostic message. Fe consumers own retry, fallback, degradation,
+//! cancellation, and supervision policy.
+
+use core::default::Default
+use core::pending::{Suspend, TaskOutcome}
+use ingot::wasm::WasmBackend
+use super::super::host::Resumable
+use super::super::reactive::{Cancelled, Event, EventSource, Subscription}
+use raw::device_event_begin as raw_device_event_begin
+
+#[derive(Default)]
+pub enum GpuDeviceEventKind {
+    /// Subscription placeholder. The fixed host never publishes this value.
+    #[default]
+    Unknown,
+    Available,
+    Lost,
+    Unavailable,
+}
+
+impl Copy for GpuDeviceEventKind {}
+
+#[derive(Default)]
+pub enum GpuDeviceLossReason {
+    /// The event is not a device-loss fact.
+    #[default]
+    NotLost,
+    /// The platform supplied `GPUDeviceLostReason::unknown`.
+    Unknown,
+    /// The device was explicitly destroyed and must not be reacquired as an
+    /// automatic recovery response.
+    Destroyed,
+}
+
+impl Copy for GpuDeviceLossReason {}
+
+/// One immutable shared-device lifecycle fact.
+///
+/// `generation` changes only when a newly acquired device becomes available.
+/// `sequence` orders all facts. `missed` is non-zero when the consumer fell
+/// behind the fixed host's bounded replay history; Fe can therefore choose an
+/// honest resynchronization policy rather than silently treating latest state
+/// as a complete event tape.
+#[derive(Default)]
+pub struct GpuDeviceEvent {
+    pub kind: GpuDeviceEventKind,
+    pub reason: GpuDeviceLossReason,
+    pub generation: u32,
+    pub sequence: u32,
+    pub missed: u32,
+}
+
+impl Copy for GpuDeviceEvent {}
+
+pub struct BrowserGpuDeviceEvents {}
+
+impl BrowserGpuDeviceEvents {
+    pub fn new() -> Self { Self {} }
+}
+
+impl EventSource<GpuDeviceEvent> for BrowserGpuDeviceEvents {
+    fn subscribe(mut self) -> Subscription<GpuDeviceEvent> {
+        Subscription::new(initial: GpuDeviceEvent::default())
+    }
+
+    fn next(mut self, _ subscription: own Subscription<GpuDeviceEvent>) -> (
+        Subscription<GpuDeviceEvent>,
+        Event<GpuDeviceEvent>,
+    ) {
+        let seen = subscription.has_observation()
+        let previous_sequence = if seen { subscription.observation().sequence } else { 0 }
+        let successor = subscription.advance().0
+        let outcome: TaskOutcome<u32, GpuDeviceEvent> = <Resumable as Suspend<
+            WasmBackend,
+            u32,
+        >>::suspend(Resumable {}, raw_device_event_begin(seen, previous_sequence))
+        match outcome {
+            TaskOutcome::Success(device,) => {
+                (
+                    successor.with_observation(value: device),
+                    Event::occurrence(value: device),
+                )
+            },
+            TaskOutcome::Failure(error,) => (successor, Event::failure(error: error)),
+            TaskOutcome::Cancelled => (successor, Event::cancelled()),
+        }
+    }
+
+    fn cancel(mut self, _ subscription: own Subscription<GpuDeviceEvent>) -> Cancelled {
+        Cancelled { consumed: subscription.cursor() }
+    }
+}

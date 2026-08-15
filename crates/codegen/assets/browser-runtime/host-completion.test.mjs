@@ -11,6 +11,7 @@ const outcome = Object.freeze({ kind: "enum_tag", bits: 8, variants: 3 });
 const race = Object.freeze({ kind: "enum_tag", bits: 8, variants: 2 });
 const selection = Object.freeze({ kind: "enum_tag", bits: 8, variants: 6 });
 const visibility = Object.freeze({ kind: "enum_tag", bits: 8, variants: 2 });
+const enum3 = Object.freeze({ kind: "enum_tag", bits: 8, variants: 3 });
 const enum4 = Object.freeze({ kind: "enum_tag", bits: 8, variants: 4 });
 const enum5 = Object.freeze({ kind: "enum_tag", bits: 8, variants: 5 });
 
@@ -568,6 +569,60 @@ describe("browser HostTimer/Recv completion broker", () => {
     ], () => { feCancellations += 1; });
     const controller = new AbortController();
     const result = broker.run(viewport, [], { signal: controller.signal });
+    await Promise.resolve();
+    controller.abort();
+    await expect(result).rejects.toBeInstanceOf(Error);
+    expect(hostAborts).toBe(1);
+    expect(feCancellations).toBe(1);
+    expect(broker.activeCount()).toBe(0);
+  });
+
+  test("typed shared-GPU lifecycle facts resume Fe in sequence", async () => {
+    const calls = [];
+    const broker = createHostCompletionBroker({
+      gpuDeviceEvents: {
+        observe: async (seen, previousSequence, signal) => {
+          expect(signal.aborted).toBeFalse();
+          calls.push([seen, previousSequence]);
+          return { kind: 2, reason: 1, generation: 7, sequence: 12, missed: 3 };
+        },
+      },
+    });
+    const lifecycle = browserRecordMachine(
+      [enum4, enum3, u32, u32, u32],
+      () => [
+        1, 0, 0, 0, 0, 0,
+        broker.imports["fe:web-gpu"].device_event_begin(1, 9) >>> 0,
+      ],
+    );
+    expect(await broker.run(lifecycle, [])).toEqual([2, 1, 7, 12, 3]);
+    expect(calls).toEqual([[true, 9]]);
+    expect(broker.activeCount()).toBe(0);
+  });
+
+  test("shared-GPU lifecycle cancellation reaches the source and Fe once", async () => {
+    let hostAborts = 0;
+    let feCancellations = 0;
+    const broker = createHostCompletionBroker({
+      gpuDeviceEvents: {
+        observe: (_seen, _previousSequence, signal) => new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => {
+            hostAborts += 1;
+            reject(new DOMException("cancelled", "AbortError"));
+          }, { once: true });
+        }),
+      },
+    });
+    const lifecycle = browserRecordMachine(
+      [enum4, enum3, u32, u32, u32],
+      () => [
+        1, 0, 0, 0, 0, 0,
+        broker.imports["fe:web-gpu"].device_event_begin(0, 0) >>> 0,
+      ],
+      () => { feCancellations += 1; },
+    );
+    const controller = new AbortController();
+    const result = broker.run(lifecycle, [], { signal: controller.signal });
     await Promise.resolve();
     controller.abort();
     await expect(result).rejects.toBeInstanceOf(Error);

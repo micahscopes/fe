@@ -148,6 +148,11 @@ try {
       latestValue: Number(values[13]?.textContent),
       observations: Number(values[14]?.textContent),
       failures: Number(values[15]?.textContent),
+      deviceKind: Number(values[16]?.textContent),
+      deviceReason: Number(values[17]?.textContent),
+      deviceGeneration: Number(values[18]?.textContent),
+      deviceEvents: Number(values[19]?.textContent),
+      deviceMissed: Number(values[20]?.textContent),
       states: globalThis.__feEventStudioE2E.states.length,
       errors: globalThis.__feEventStudioE2E.errors,
     };
@@ -379,7 +384,7 @@ try {
   assert.equal(afterCaptureCancellation.failures, 0);
   assert.deepEqual(afterCaptureCancellation.errors, []);
   assert.deepEqual(browserErrors, []);
-  console.log("ok: Fe Event Studio viewport, Fe-selected scoped pointer capture, merged bounded pointer/wheel buffering, visibility, paced frame/timer, Scan forwarding, latest values, and lifecycle streams");
+  console.log("ok: Fe Event Studio viewport, Fe-selected scoped pointer capture, merged bounded pointer/wheel buffering, visibility, shared-device lifecycle, paced frame/timer, Scan forwarding, latest values, and lifecycle streams");
 } finally {
   await browser.close();
   await new Promise(resolvePromise => server.close(resolvePromise));

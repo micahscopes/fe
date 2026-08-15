@@ -845,6 +845,15 @@ pub fn verify_precompiled_site(index_path: &Path) -> Result<VerificationReport, 
                 verified.insert(path);
             }
         }
+        if let Some(reference) = attr(script, RENDER_RUNTIME_ATTR) {
+            let runtime = deployment_file(
+                root,
+                &reference,
+                &format!("{context} {RENDER_RUNTIME_ATTR}"),
+            )?;
+            verify_addressed_file(&runtime, &format!("{context} render runtime"))?;
+            verified.insert(runtime);
+        }
     }
 
     if let Some(bootstrap) = find_attr_element(&dom.document, BOOTSTRAP_MARKER)
@@ -1784,6 +1793,23 @@ fn precompile_html_impl(
         let wasm_path = format!("assets/fe-{}.wasm", &wasm.sha256[..16]);
         insert_identical(&mut assets, wasm_path.clone(), wasm.bytes.clone())?;
 
+        // A resident Fe task observing the shared WebGPU device must consume
+        // the exact same fixed runtime module as render surfaces. Publish and
+        // point this component at that content-addressed capability; never
+        // request a second device or invent a page-global event protocol.
+        let needs_gpu_device_runtime = result
+            .interface
+            .imports
+            .iter()
+            .any(|import| import.module == "fe:web-gpu");
+        let gpu_device_runtime_reference = if needs_gpu_device_runtime {
+            let runtime =
+                publish_render_runtime(render_runtime_js, &mut assets, &mut render_runtime_asset)?;
+            Some(published_reference(&base_url, &document_url, &runtime.path))
+        } else {
+            None
+        };
+
         let published = PublishedArtifact::from_artifact(wasm, &wasm_path);
         let scoped_task_path = publish_scoped_task_package(&scoped_tasks, &mut assets)?;
         let scoped_task_reference = scoped_task_path
@@ -1854,6 +1880,9 @@ fn precompile_html_impl(
             scoped_task_reference.as_deref(),
             &wasm.sha256,
         );
+        if let Some(runtime) = gpu_device_runtime_reference.as_deref() {
+            set_attr(&script, RENDER_RUNTIME_ATTR, runtime);
+        }
         modules.push(manifest);
     }
 

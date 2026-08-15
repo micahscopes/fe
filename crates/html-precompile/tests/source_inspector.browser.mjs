@@ -245,12 +245,13 @@ try {
     await page.waitForFunction(() => {
       const component = document.querySelector("#gallery-event-studio");
       const values = component?.querySelectorAll(".event-studio-grid strong");
-      return component?._active === true && values?.length === 16
+      return component?._active === true && values?.length === 21
         && Number(values[8].textContent) >= 1
         && Number(values[9].textContent) >= 1
         && Number(values[10].textContent) >= 1
         && Number(values[13].textContent) >= 4
-        && Number(values[14].textContent) >= 1;
+        && Number(values[14].textContent) >= 1
+        && Number(values[19].textContent) >= 1;
     });
     const eventStudioBefore = await page.evaluate(() => {
       const values = document.querySelectorAll("#gallery-event-studio .event-studio-grid strong");
@@ -266,6 +267,11 @@ try {
         latestValue: Number(values[13].textContent),
         observations: Number(values[14].textContent),
         failures: Number(values[15].textContent),
+        deviceKind: Number(values[16].textContent),
+        deviceReason: Number(values[17].textContent),
+        deviceGeneration: Number(values[18].textContent),
+        deviceEvents: Number(values[19].textContent),
+        deviceMissed: Number(values[20].textContent),
       };
     });
     assert.equal(eventStudioBefore.failures, 0);
@@ -276,6 +282,13 @@ try {
       eventStudioBefore.timerEvents === eventStudioBefore.frameEvents + 1);
     assert.equal(eventStudioBefore.boundedDrops, 0);
     assert.ok(eventStudioBefore.latestValue >= 4 && eventStudioBefore.latestValue % 4 === 0);
+    assert.ok(eventStudioBefore.deviceKind === 1 || eventStudioBefore.deviceKind === 3);
+    assert.equal(eventStudioBefore.deviceReason, 0);
+    assert.ok(eventStudioBefore.deviceEvents >= 1);
+    assert.equal(eventStudioBefore.deviceMissed, 0);
+    if (eventStudioBefore.deviceKind === 1) {
+      assert.ok(eventStudioBefore.deviceGeneration >= 1);
+    }
     // Hold the first generic actor acceptance while six genuine PointerEvents
     // and one genuine WheelEvent arrive. The host knows neither the shared
     // queue nor KeepLatest policy; Fe keeps both heterogeneous sources and the

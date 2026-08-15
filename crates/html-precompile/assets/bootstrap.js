@@ -211,6 +211,25 @@ export function createWindowEventSource(windowTarget = globalThis) {
   });
 }
 
+/**
+ * Fixed bridge to the one shared render-device lifecycle owned by the
+ * content-addressed render runtime module. This deliberately does not request
+ * a second adapter/device and does not choose retry or fallback policy.
+ */
+export function createGpuDeviceEventSource(renderRuntimeModule) {
+  if (!renderRuntimeModule || typeof renderRuntimeModule !== "object"
+      || typeof renderRuntimeModule.observeSharedGpuDevice !== "function") {
+    throw new TypeError(
+      "GPU device event source requires the fixed render runtime lifecycle export",
+    );
+  }
+  return Object.freeze({
+    observe(seen, previousSequence, signal) {
+      return renderRuntimeModule.observeSharedGpuDevice(seen, previousSequence, signal);
+    },
+  });
+}
+
 function finiteEventNumber(value, label) {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     throw new TypeError(`${label} must be a finite number`);
@@ -1476,6 +1495,9 @@ async function run(element) {
         const needsWindowCapability = WebAssembly.Module.imports(module).some(
           value => value.module === "fe:web-window",
         );
+        const needsGpuDeviceCapability = WebAssembly.Module.imports(module).some(
+          value => value.module === "fe:web-gpu",
+        );
         const needsComponentEventCapability = WebAssembly.Module.imports(module).some(
           value => value.module === "fe:web-component-events",
         );
@@ -1504,6 +1526,16 @@ async function run(element) {
         }
         if (needsWindowCapability) {
           brokerOptions.windowEvents = createWindowEventSource(globalThis);
+        }
+        if (needsGpuDeviceCapability) {
+          const runtimeReference = element.dataset.feRenderRuntime;
+          if (!runtimeReference) {
+            throw new Error(
+              "fe:web-gpu requires the compiler-published shared render runtime capability",
+            );
+          }
+          const runtimeModule = await import(new URL(runtimeReference, element.baseURI));
+          brokerOptions.gpuDeviceEvents = createGpuDeviceEventSource(runtimeModule);
         }
         if (needsComponentEventCapability) {
           brokerOptions.componentEvents = createComponentEventSource(

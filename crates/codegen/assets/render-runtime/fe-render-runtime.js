@@ -158,6 +158,122 @@ export const SurfaceQueueAction = Object.freeze({
   Drop: 2,
 });
 
+/** Fixed tags of `std::web::gpu_device_events::GpuDeviceEventKind`.
+ * `Unknown` is an Fe-side placeholder and is never published by this host. */
+export const GpuDeviceEventKind = Object.freeze({
+  Unknown: 0,
+  Available: 1,
+  Lost: 2,
+  Unavailable: 3,
+});
+
+/** Fixed tags of `std::web::gpu_device_events::GpuDeviceLossReason`.
+ * The implementation-defined `GPUDeviceLostInfo.message` is deliberately not
+ * transported or parsed as application policy. */
+export const GpuDeviceLossReason = Object.freeze({
+  NotLost: 0,
+  Unknown: 1,
+  Destroyed: 2,
+});
+
+const GPU_DEVICE_EVENT_HISTORY = 32;
+const MAX_U32 = 0xffff_ffff;
+
+function checkedU32(value, label) {
+  if (!Number.isInteger(value) || value < 0 || value > MAX_U32) {
+    throw new TypeError(`${label} must be a u32`);
+  }
+  return value;
+}
+
+/**
+ * A bounded, replayable page-wide lifecycle channel. This is fixed host
+ * transport, not a recovery scheduler: it preserves every retained device
+ * fact in sequence order and reports any history gap to Fe. The consuming Fe
+ * task owns retry, degradation, and failure policy.
+ */
+export function createGpuDeviceLifecycleChannel(capacity = GPU_DEVICE_EVENT_HISTORY) {
+  if (!Number.isSafeInteger(capacity) || capacity <= 0) {
+    throw new TypeError("GPU device lifecycle history capacity must be positive");
+  }
+  const history = [];
+  const waiters = new Set();
+  let sequence = 0;
+
+  const nextAfter = (seen, previousSequence) => {
+    if (history.length === 0) return null;
+    if (!seen) return Object.freeze({ ...history[history.length - 1], missed: 0 });
+    const earliest = history[0].sequence;
+    const selected = history.find(event => event.sequence > previousSequence);
+    if (!selected) return null;
+    const missed = previousSequence + 1 < earliest ? earliest - previousSequence - 1 : 0;
+    return Object.freeze({ ...selected, missed });
+  };
+
+  const flush = () => {
+    for (const waiter of [...waiters]) {
+      const event = nextAfter(waiter.seen, waiter.previousSequence);
+      if (event) waiter.finish(waiter.resolve, event);
+    }
+  };
+
+  const publish = (kind, reason, generation) => {
+    checkedU32(kind, "GPU device event kind");
+    checkedU32(reason, "GPU device loss reason");
+    checkedU32(generation, "GPU device generation");
+    if (kind === GpuDeviceEventKind.Unknown) {
+      throw new RangeError("the host cannot publish the Fe placeholder GPU device event");
+    }
+    if (sequence === MAX_U32) {
+      throw new RangeError("GPU device lifecycle sequence space is exhausted");
+    }
+    sequence += 1;
+    const event = Object.freeze({ kind, reason, generation, sequence });
+    history.push(event);
+    if (history.length > capacity) history.shift();
+    flush();
+    return event;
+  };
+
+  const observe = (seen, previousSequence, signal) => {
+    if (typeof seen !== "boolean") {
+      throw new TypeError("GPU device observation seen flag must be boolean");
+    }
+    checkedU32(previousSequence, "GPU device previous sequence");
+    if (seen && previousSequence > sequence) {
+      throw new RangeError("GPU device previous sequence is newer than the host channel");
+    }
+    const immediate = nextAfter(seen, previousSequence);
+    if (immediate) return immediate;
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const waiter = {
+        seen,
+        previousSequence,
+        resolve,
+        finish(complete, value) {
+          if (settled) return;
+          settled = true;
+          waiters.delete(waiter);
+          signal?.removeEventListener("abort", onAbort);
+          complete(value);
+        },
+      };
+      const onAbort = () => {
+        const error = new Error("GPU device lifecycle observation was cancelled");
+        error.name = "AbortError";
+        waiter.finish(reject, error);
+      };
+      waiters.add(waiter);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted) onAbort();
+      else flush(); // close the observe-to-register race
+    });
+  };
+
+  return Object.freeze({ publish, observe });
+}
+
 /** Write the fixed DFS layout of untouched `std::web::SurfaceEvent` records.
  * This is transport only: the compiler-lowered Fe scheduling wrapper owns
  * coalescing and calls the authored transition inside Wasm. */
@@ -190,12 +306,29 @@ let sharedGpuPromise;
 let sharedGpuFailure;
 let sharedGpuRecoveryPromise;
 let pendingDeviceLoss;
+let sharedGpuGeneration = 0;
+const sharedGpuDeviceLifecycle = createGpuDeviceLifecycleChannel();
 const DEVICE_STABILITY_MS = 50;
 const DEVICE_LOSS_CONFIRMATION_MS = 250;
 const MAX_RECOVERY_ATTEMPTS = 2;
 /** Every currently connected `<fe-surface>`, live or not (module-level so a
  * `device.lost` event, which is a page-wide fact, can reach every element). */
 const attachedSurfaces = new Set();
+
+/** Observe the actual shared render-device lifecycle. The bootstrap passes
+ * this fixed capability to Fe's `GpuDeviceEvent` source; it does not subscribe
+ * to a second WebGPU device and cannot choose recovery policy. */
+export function observeSharedGpuDevice(seen, previousSequence, signal) {
+  return sharedGpuDeviceLifecycle.observe(seen, previousSequence, signal);
+}
+
+function publishGpuUnavailable(reason = GpuDeviceLossReason.NotLost) {
+  return sharedGpuDeviceLifecycle.publish(
+    GpuDeviceEventKind.Unavailable,
+    reason,
+    sharedGpuGeneration,
+  );
+}
 
 /** One WebGPU adapter/device for the whole page, requested at most once. */
 function acquireSharedGpu() {
@@ -211,12 +344,14 @@ async function requestGpu() {
     sharedGpuFailure = new Error(
       "fe render runtime: WebGPU requires a secure context; serve this page over HTTPS or localhost",
     );
+    publishGpuUnavailable();
     return null;
   }
   if (!navigator.gpu) {
     sharedGpuFailure = new Error(
       "fe render runtime: this browser does not expose WebGPU (navigator.gpu is unavailable)",
     );
+    publishGpuUnavailable();
     return null;
   }
   try {
@@ -226,6 +361,7 @@ async function requestGpu() {
         "fe render runtime: no WebGPU adapter is available (requestAdapter returned null). " +
         "Check browser WebGPU support, hardware acceleration, the GPU blocklist, and chrome://gpu on Chromium.",
       );
+      publishGpuUnavailable();
       return null;
     }
     const device = await adapter.requestDevice();
@@ -241,19 +377,34 @@ async function requestGpu() {
       sharedGpuFailure = new Error(
         `fe render runtime: WebGPU device initialization failed: ${detail}`,
       );
+      publishGpuUnavailable(
+        initialState.info?.reason === "destroyed"
+          ? GpuDeviceLossReason.Destroyed
+          : GpuDeviceLossReason.Unknown,
+      );
       return null;
     }
     device.addEventListener("uncapturederror", (event) => {
       console.error("[fe web] uncaptured WebGPU error:", event.error);
     });
     device.lost.then((info) => handleSharedDeviceLoss(device, info));
-    return { adapter, device };
+    if (sharedGpuGeneration === MAX_U32) {
+      throw new RangeError("WebGPU shared-device generation space is exhausted");
+    }
+    sharedGpuGeneration += 1;
+    sharedGpuDeviceLifecycle.publish(
+      GpuDeviceEventKind.Available,
+      GpuDeviceLossReason.NotLost,
+      sharedGpuGeneration,
+    );
+    return { adapter, device, generation: sharedGpuGeneration };
   } catch (error) {
     sharedGpuFailure = new Error(
       `fe render runtime: WebGPU initialization failed: ${error?.message ?? String(error)}`,
       { cause: error },
     );
     console.warn("[fe web] WebGPU initialization failed:", error);
+    publishGpuUnavailable();
     return null;
   }
 }
@@ -289,6 +440,14 @@ async function drainDeviceLosses() {
     console.warn(`[fe web] WebGPU device lost (${info?.reason ?? "unknown"}): ${info?.message ?? ""}`);
     const current = sharedGpuPromise ? await sharedGpuPromise.catch(() => null) : null;
     if (current && current.device !== deadDevice) continue;
+    const reason = info?.reason === "destroyed"
+      ? GpuDeviceLossReason.Destroyed
+      : GpuDeviceLossReason.Unknown;
+    sharedGpuDeviceLifecycle.publish(
+      GpuDeviceEventKind.Lost,
+      reason,
+      current?.generation ?? sharedGpuGeneration,
+    );
 
     let fresh = null;
     if (attempts < MAX_RECOVERY_ATTEMPTS) {
@@ -300,6 +459,7 @@ async function drainDeviceLosses() {
         `fe render runtime: WebGPU device recovery stopped after ${MAX_RECOVERY_ATTEMPTS} failed attempts`,
       );
       sharedGpuPromise = Promise.resolve(null);
+      publishGpuUnavailable(reason);
     }
     for (const surface of attachedSurfaces) {
       try {

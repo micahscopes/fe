@@ -4,6 +4,7 @@ import {
   bootFeArtifacts,
   createComponentEventSource,
   createDocumentEventSource,
+  createGpuDeviceEventSource,
   createWindowEventSource,
   decodeComponentCommands,
   FeComponentElement,
@@ -135,6 +136,25 @@ test("window viewport adapter reports typed changes without permanent host state
   const cancelled = source.viewport(true, 720, 600, 3, controller.signal);
   controller.abort();
   await assert.rejects(cancelled, error => error.name === "AbortError");
+});
+
+test("GPU device adapter observes the shared render runtime without acquiring another device", async () => {
+  const calls = [];
+  const source = createGpuDeviceEventSource({
+    observeSharedGpuDevice(seen, previousSequence, signal) {
+      calls.push([seen, previousSequence, signal]);
+      return { kind: 2, reason: 1, generation: 4, sequence: 9, missed: 0 };
+    },
+  });
+  const controller = new AbortController();
+  assert.deepEqual(await source.observe(true, 8, controller.signal), {
+    kind: 2, reason: 1, generation: 4, sequence: 9, missed: 0,
+  });
+  assert.deepEqual(calls, [[true, 8, controller.signal]]);
+  assert.throws(
+    () => createGpuDeviceEventSource({}),
+    /fixed render runtime lifecycle export/,
+  );
 });
 
 test("component pointer and wheel adapters own exactly one pending pull", async () => {

@@ -1,0 +1,13 @@
+//! Private fixed-host import for the shared WebGPU device lifecycle.
+
+use core::pending::Pending
+use ingot::wasm::WasmBackend
+use super::GpuDeviceEvent
+
+#[wasm_import(module = "fe:web-gpu")]
+extern {
+    pub unsafe fn device_event_begin(
+        _ seen: bool,
+        _ previous_sequence: u32,
+    ) -> Pending<WasmBackend, GpuDeviceEvent>
+}
