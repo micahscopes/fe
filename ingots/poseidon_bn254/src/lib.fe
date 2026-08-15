@@ -6,7 +6,8 @@
 use core::num::{IntDowncast, mul_mod_u256}
 use core::marker::Copy
 
-use precision::field::{FieldWords, LIMB_BITS}
+use precision::bn254_fr::Bn254Fr
+use precision::field::{FieldElement, FieldWords, LIMB_BITS}
 use bitpack::self_shrink_9
 
 pub use bitpack
@@ -20,8 +21,10 @@ pub const MDS_ENTRY_COUNT: usize = WIDTH * WIDTH
 pub const PARAMETER_COUNT: usize = ROUND_CONSTANT_COUNT + MDS_ENTRY_COUNT
 
 const FIELD_SIZE: u32 = 254
-const LIMBS: usize = 20
+pub const LIMBS: usize = 20
 const BN254_FR_PRIME: u256 = 21888242871839275222246405745257275088548364400416034343698204186575808495617
+
+pub type Fr = FieldElement<LIMBS, Bn254Fr>
 
 struct Grain80 { state: u128, outputs: u32, available: u32 }
 impl Copy for Grain80 {}
@@ -282,4 +285,61 @@ pub fn parameter_word(_ parameter: u32, _ word: u32) -> u32 {
     } else {
         PARAMETERS.mds[(parameter as usize) - ROUND_CONSTANT_COUNT][word as usize]
     }
+}
+
+fn is_full_round(_ round: usize) -> bool {
+    let half = FULL_ROUNDS / 2
+    round < half || round >= half + PARTIAL_ROUNDS
+}
+
+/// Apply the canonical 8-full/57-partial Poseidon t=3 permutation. The field
+/// operations and parameter schedule remain ordinary Fe code; only the
+/// parameter construction itself is evaluated at compile time.
+pub fn permute3(_ input: own [Fr; WIDTH]) -> [Fr; WIDTH] {
+    let parameters = PARAMETERS
+    let mut state = input
+    let mut round: usize = 0
+    while round < ROUND_COUNT {
+        let mut lane: usize = 0
+        while lane < WIDTH {
+            let parameter = parameters.round_constants[round * WIDTH + lane]
+            state[lane] = state[lane] + Fr::from_montgomery_words(parameter)
+            lane = lane + 1
+        }
+
+        state[0] = state[0].pow5()
+        if is_full_round(round) {
+            state[1] = state[1].pow5()
+            state[2] = state[2].pow5()
+        }
+
+        let before_mix = state
+        let mut mixed: [Fr; WIDTH] = [Fr::zero(); WIDTH]
+        let mut row: usize = 0
+        while row < WIDTH {
+            let mut column: usize = 0
+            while column < WIDTH {
+                let coefficient = parameters.mds[row * WIDTH + column]
+                mixed[row] = mixed[row]
+                    + before_mix[column] * Fr::from_montgomery_words(coefficient)
+                column = column + 1
+            }
+            row = row + 1
+        }
+        state = mixed
+        round = round + 1
+    }
+    state
+}
+
+/// Circomlib-compatible two-input compression over already-imported field
+/// elements. The zero capacity lane is part of this named construction.
+pub fn hash2(_ left: Fr, _ right: Fr) -> Fr {
+    permute3([Fr::zero(), left, right])[0]
+}
+
+/// Convenience boundary for ordinary u32 inputs and canonical plain output
+/// words. Larger callers should import `Fr` once and use `hash2` directly.
+pub fn hash2_u32(_ left: u32, _ right: u32) -> FieldWords<LIMBS> {
+    hash2(Fr::from_u32(left), Fr::from_u32(right)).to_plain_words()
 }

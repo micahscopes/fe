@@ -1,0 +1,9 @@
+use wasm_transitive_trait_facade::{field_sum_low_word, sum}
+
+pub fn transitive_sum(left: u32, right: u32) -> u32 {
+    sum(left, right)
+}
+
+pub fn transitive_field_sum_low_word(left: u32, right: u32) -> u32 {
+    field_sum_low_word(left, right)
+}

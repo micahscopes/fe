@@ -1,0 +1,11 @@
+use core::ops::Add
+
+pub struct Number { pub value: u32 }
+
+impl core::marker::Copy for Number {}
+
+impl Add for Number {
+    fn add(own self, _ other: own Number) -> Number {
+        Number { value: self.value + other.value }
+    }
+}

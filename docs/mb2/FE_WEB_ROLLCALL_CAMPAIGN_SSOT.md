@@ -187,8 +187,9 @@ Legend:
   the one-million-step default. Gate: `poseidon_bn254_derived_oracle.rs`
   independently reproduces the plain-field constants, exhaustively checks all
   262,144 self-shrinker inputs, checks all 4,080 derived Montgomery words, and
-  requires zero-import Wasm. This closes parameter provenance, not the pending
-  permutation or trace commitment.
+  executes the concise Fe permutation against canonical and independent bigint
+  hash vectors in zero-import Wasm. This closes parameter provenance and the
+  Wasm permutation lift, not the pending trace commitment.
 - [~] Fe now generates nominal `EscapeWitness`, `EscapeTraceRow`, and expanded
   `EscapeAirRow` values. Compiled Wasm matches an independent i64 replay across
   directed, invalid, and 512 deterministic cases. Every signed Q12
@@ -228,7 +229,7 @@ Legend:
   next-power-of-two domain without replaying the orbit. Its gate rejects each
   public/shape mutation independently. Cryptographically binding that metadata,
   the domain-separated Poseidon trace commitment, composition, and FRI remain
-  pending. The reusable field API's SPIR-V helper-call seam and permutation
+  pending. The reusable field API's SPIR-V helper-call seam and GPU permutation
   lift also remain open. No trace root is claimed yet. This is executable
   initial AIR evidence rather than a proof.
 - [ ] Produce a succinct proof whose verifier is demonstrably cheaper than

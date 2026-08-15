@@ -1,0 +1,8 @@
+[ingot]
+name = "wasm_transitive_trait_facade"
+version = "0.1.0"
+
+[dependencies]
+core = "../../../../../ingots/core"
+precision = "../../../../../demos/sketches/precision"
+wasm_transitive_trait_provider = "../wasm_transitive_trait_provider"

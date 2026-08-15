@@ -1,0 +1,15 @@
+use wasm_transitive_trait_provider::Number
+use precision::bn254_fr::Bn254Fr
+use precision::field::FieldElement
+
+pub fn sum(left: u32, right: u32) -> u32 {
+    let a = Number { value: left }
+    let b = Number { value: right }
+    (a + b).value
+}
+
+pub fn field_sum_low_word(left: u32, right: u32) -> u32 {
+    let a = FieldElement<20, Bn254Fr>::from_u32(left)
+    let b = FieldElement<20, Bn254Fr>::from_u32(right)
+    (a + b).to_plain_words()[0]
+}

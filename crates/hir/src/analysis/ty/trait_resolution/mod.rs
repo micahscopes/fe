@@ -546,7 +546,7 @@ impl<'db> TraitSolveCx<'db> {
         }
     }
 
-    pub(crate) fn normalization_scope_for_trait_inst(
+    pub fn normalization_scope_for_trait_inst(
         self,
         db: &'db dyn HirAnalysisDb,
         inst: TraitInstId<'db>,

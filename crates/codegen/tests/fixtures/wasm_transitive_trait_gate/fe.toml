@@ -1,0 +1,6 @@
+[ingot]
+name = "wasm_transitive_trait_gate"
+version = "0.1.0"
+
+[dependencies]
+wasm_transitive_trait_facade = "../wasm_transitive_trait_facade"

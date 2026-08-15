@@ -2364,6 +2364,13 @@ pub(crate) fn resolve_runtime_call_key<'db>(
             })
             .collect::<Vec<TraitInstId<'db>>>(),
     );
+    // Re-resolution belongs to the concrete trait receiver's environment, not
+    // an outer entry ingot that happened to instantiate the call graph. This
+    // matters for constrained generic impls exposed through a facade: the root
+    // consumer need not repeat the facade's implementation dependency merely
+    // so MIR can rediscover an impl that type checking already accepted.
+    let resolution_scope = TraitSolveCx::new(db, normalization_scope)
+        .normalization_scope_for_trait_inst(db, concrete_inst);
     // FCO "slide" cascade C1 (+ M3): consume the RECORDED implementor as the
     // resolution SOURCE where typeck committed one, re-resolve only where it did
     // not. The recorded implementor comes from one of two carriers:
@@ -2419,7 +2426,7 @@ pub(crate) fn resolve_runtime_call_key<'db>(
         // invariant on `recorded_implementor_is_valid_candidate`. Never fires under
         // coherence; a hard failure (never silently lower against a bad record),
         // mirroring the `None` branch's determinism assertion below.
-        if !TraitSolveCx::new(db, caller_key.impl_env(db).normalization_scope(db))
+        if !TraitSolveCx::new(db, resolution_scope)
             .with_assumptions(assumptions)
             .recorded_implementor_is_valid_candidate(db, concrete_inst, recorded_implementor)
         {
@@ -2434,8 +2441,7 @@ pub(crate) fn resolve_runtime_call_key<'db>(
         }
         let Some(resolved) = resolve_trait_method_instance_with_implementor(
             db,
-            TraitSolveCx::new(db, caller_key.impl_env(db).normalization_scope(db))
-                .with_assumptions(assumptions),
+            TraitSolveCx::new(db, resolution_scope).with_assumptions(assumptions),
             concrete_inst,
             method_name,
             recorded_implementor,
@@ -2452,8 +2458,7 @@ pub(crate) fn resolve_runtime_call_key<'db>(
     } else {
         let Some(resolved) = resolve_trait_method_instance(
             db,
-            TraitSolveCx::new(db, caller_key.impl_env(db).normalization_scope(db))
-                .with_assumptions(assumptions),
+            TraitSolveCx::new(db, resolution_scope).with_assumptions(assumptions),
             concrete_inst,
             method_name,
         ) else {
@@ -2546,7 +2551,7 @@ pub(crate) fn resolve_runtime_call_key<'db>(
         // exactly this record.
         ImplEnv::new(
             db,
-            caller_key.impl_env(db).normalization_scope(db),
+            resolution_scope,
             assumptions,
             witnesses.into_iter().collect::<Vec<_>>(),
         )

@@ -171,6 +171,32 @@ fn reference_parameters() -> Vec<BigUint> {
     parameters
 }
 
+fn reference_hash2(left: u32, right: u32, parameters: &[BigUint]) -> BigUint {
+    let prime = bn254_fr_prime();
+    let mut state = [BigUint::from(0u32), left.into(), right.into()];
+    for round in 0..65 {
+        for lane in 0..WIDTH {
+            state[lane] = (&state[lane] + &parameters[round * WIDTH + lane]) % &prime;
+        }
+        state[0] = state[0].modpow(&BigUint::from(5u32), &prime);
+        if round < 4 || round >= 61 {
+            state[1] = state[1].modpow(&BigUint::from(5u32), &prime);
+            state[2] = state[2].modpow(&BigUint::from(5u32), &prime);
+        }
+        let before_mix = state.clone();
+        for row in 0..WIDTH {
+            state[row] = BigUint::from(0u32);
+            for column in 0..WIDTH {
+                state[row] = (&state[row]
+                    + &before_mix[column]
+                        * &parameters[ROUND_CONSTANT_COUNT + row * WIDTH + column])
+                    % &prime;
+            }
+        }
+    }
+    state[0].clone()
+}
+
 fn compile_gate() -> Vec<u8> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/poseidon_bn254_derived_oracle_ingot");
@@ -220,6 +246,22 @@ fn fe_derivation_matches_canonical_parameters_and_exhaustive_self_shrinker() {
         canonical_round_constants
     );
     assert_eq!(&reference[ROUND_CONSTANT_COUNT..], canonical_mds);
+    assert_eq!(
+        reference_hash2(0, 0, &reference),
+        BigUint::parse_bytes(
+            b"2098f5fb9e239eab3ceac3f27b81e481dc3124d55ffed523a839ee8446b64864",
+            16,
+        )
+        .unwrap()
+    );
+    assert_eq!(
+        reference_hash2(1, 2, &reference),
+        BigUint::parse_bytes(
+            b"115cc0f5e7d690413df64c6b9662e9cf2a3617f2743245519e19607a4417189a",
+            16,
+        )
+        .unwrap()
+    );
 
     let wasm = compile_gate();
     let engine = wasmtime::Engine::default();
@@ -236,6 +278,9 @@ fn fe_derivation_matches_canonical_parameters_and_exhaustive_self_shrinker() {
     let self_shrink = instance
         .get_typed_func::<u32, u32>(&mut store, "derived_self_shrink_9")
         .unwrap();
+    let hash2 = instance
+        .get_func(&mut store, "derived_hash2")
+        .expect("derived_hash2 export");
     let arena_reset = instance
         .get_typed_func::<(), ()>(&mut store, "fe_cabi_reset")
         .expect("materialized const lookup must expose the canonical arena reset");
@@ -270,6 +315,29 @@ fn fe_derivation_matches_canonical_parameters_and_exhaustive_self_shrinker() {
                 "parameter {parameter}, Montgomery word {word}"
             );
         }
+    }
+
+    for (left, right) in [(0, 0), (1, 2), (13, 21), (u32::MAX, 0xdead_beef)] {
+        arena_reset.call(&mut store, ()).unwrap();
+        let mut output = vec![wasmtime::Val::I32(0); LIMBS];
+        hash2
+            .call(
+                &mut store,
+                &[
+                    wasmtime::Val::I32(left as i32),
+                    wasmtime::Val::I32(right as i32),
+                ],
+                &mut output,
+            )
+            .unwrap_or_else(|error| panic!("hash2({left}, {right}) trapped: {error}"));
+        let mut actual = BigUint::from(0u32);
+        for (word, value) in output.into_iter().enumerate() {
+            let wasmtime::Val::I32(value) = value else {
+                panic!("hash2 output word {word} was not i32")
+            };
+            actual += BigUint::from(value as u32) << (word * LIMB_BITS);
+        }
+        assert_eq!(actual, reference_hash2(left, right, &reference));
     }
     assert_eq!(reference.len(), PARAMETER_COUNT);
 }

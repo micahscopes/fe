@@ -524,8 +524,8 @@ impl<const L: usize, M> FieldElement<L, M>
     where M: Modulus<L>, Limbs<L>: Head + ShiftAppend + Copy,
 {
     /// Import already-canonical Montgomery words. This is intended for
-    /// audited parameter tables such as Poseidon constants.
-    pub fn from_montgomery_words(_ words: FieldWords<L>) -> Self {
+    /// audited parameters such as CTFE-derived Poseidon constants.
+    pub fn from_montgomery_words(_ words: own FieldWords<L>) -> Self {
         Self { words: words }
     }
 
