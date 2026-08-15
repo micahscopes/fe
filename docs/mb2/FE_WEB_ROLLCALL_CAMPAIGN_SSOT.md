@@ -165,11 +165,14 @@ Legend:
   separate future `EntersAttractor` claim. Gate:
   `mandelbrot_bounded_claim_oracle.rs` and
   `MANDELBROT_BOUNDED_PROOF_SPEC.md`.
-- [~] Fe now generates nominal `EscapeWitness` and `EscapeTraceRow` values, and
-  compiled Wasm matches an independent i64 replay across directed, invalid,
-  and 512 deterministic cases. Expanded AIR columns and domain-separated
-  Poseidon trace commitment are still pending, so this is witness evidence
-  rather than a proof.
+- [~] Fe now generates nominal `EscapeWitness`, `EscapeTraceRow`, and expanded
+  `EscapeAirRow` values. Compiled Wasm matches an independent i64 replay across
+  directed, invalid, and 512 deterministic cases. Every signed Q12
+  quotient/remainder and directed transition is checked, and one-unit
+  mutations in all 11 expanded columns reject. Field-polynomial constraints,
+  signed range proofs, activity/padding, and the domain-separated Poseidon
+  trace commitment are still pending, so this is witness evidence rather than
+  a proof.
 - [ ] Produce a succinct proof whose verifier is demonstrably cheaper than
   replaying the orbit.
 - [ ] Define a typed proof encoding and prove browser/native verifier parity,

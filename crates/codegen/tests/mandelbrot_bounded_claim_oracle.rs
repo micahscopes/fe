@@ -30,6 +30,17 @@ struct Witness {
     row: Row,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AirRow {
+    row: Row,
+    rr: i32,
+    ii: i32,
+    q_re: i32,
+    r_re: i32,
+    q_im: i32,
+    r_im: i32,
+}
+
 fn valid_claim(c_re: i32, c_im: i32, bound: u32) -> bool {
     (-8192..4096).contains(&c_re) && (-6144..6144).contains(&c_im) && bound <= 1_048_576
 }
@@ -51,6 +62,42 @@ fn reference_row(step: u32, zr: i32, zi: i32) -> Row {
         magnitude: magnitude as i32,
         terminal: magnitude >= RADIUS_SQUARED_Q24,
     }
+}
+
+fn reference_air_row(step: u32, zr: i32, zi: i32) -> AirRow {
+    let row = reference_row(step, zr, zi);
+    let rr = i64::from(zr) * i64::from(zr);
+    let ii = i64::from(zi) * i64::from(zi);
+    let real_numerator = rr - ii;
+    let imaginary_numerator = 2 * i64::from(zr) * i64::from(zi);
+    let q_re = real_numerator >> 12;
+    let q_im = imaginary_numerator >> 12;
+    let r_re = real_numerator - q_re * 4096;
+    let r_im = imaginary_numerator - q_im * 4096;
+    assert!((0..4096).contains(&r_re));
+    assert!((0..4096).contains(&r_im));
+    AirRow {
+        row,
+        rr: rr as i32,
+        ii: ii as i32,
+        q_re: q_re as i32,
+        r_re: r_re as i32,
+        q_im: q_im as i32,
+        r_im: r_im as i32,
+    }
+}
+
+fn air_row_holds(row: AirRow) -> bool {
+    row == reference_air_row(row.row.step, row.row.zr, row.row.zi)
+}
+
+fn transition_holds(c_re: i32, c_im: i32, row: AirRow, next: AirRow) -> bool {
+    air_row_holds(row)
+        && air_row_holds(next)
+        && !row.row.terminal
+        && next.row.step == row.row.step + 1
+        && next.row.zr == row.q_re + c_re
+        && next.row.zi == row.q_im + c_im
 }
 
 fn reference_rows(c_re: i32, c_im: i32, bound: u32) -> Vec<Row> {
@@ -197,6 +244,37 @@ fn wasm_row(
     }
 }
 
+fn wasm_air_row(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    c_re: i32,
+    c_im: i32,
+    target: u32,
+) -> AirRow {
+    let words = call_words(
+        store,
+        instance,
+        "escape_air_row_q12",
+        [c_re, c_im, target as i32],
+        11,
+    );
+    AirRow {
+        row: Row {
+            step: words[0] as u32,
+            zr: words[1],
+            zi: words[2],
+            magnitude: words[5],
+            terminal: words[10] == 1,
+        },
+        rr: words[3],
+        ii: words[4],
+        q_re: words[6],
+        r_re: words[7],
+        q_im: words[8],
+        r_im: words[9],
+    }
+}
+
 #[test]
 fn fe_bounded_escape_witness_matches_independent_i64_model() {
     let bytes = compile();
@@ -232,12 +310,36 @@ fn fe_bounded_escape_witness_matches_independent_i64_model() {
                     "directed row ({c_re}, {c_im}) Z_{}",
                     expected_row.step
                 );
+                let expected_air =
+                    reference_air_row(expected_row.step, expected_row.zr, expected_row.zi);
+                let observed_air =
+                    wasm_air_row(&mut store, &instance, c_re, c_im, expected_row.step);
+                assert_eq!(
+                    observed_air, expected_air,
+                    "directed AIR row ({c_re}, {c_im}) Z_{}",
+                    expected_row.step
+                );
+                assert!(air_row_holds(observed_air));
+            }
+            for pair in rows.windows(2) {
+                let row = reference_air_row(pair[0].step, pair[0].zr, pair[0].zi);
+                let next = reference_air_row(pair[1].step, pair[1].zr, pair[1].zi);
+                assert!(
+                    transition_holds(c_re, c_im, row, next),
+                    "directed AIR transition ({c_re}, {c_im}) Z_{}",
+                    row.row.step
+                );
             }
             if expected.escaped {
                 assert_eq!(
                     wasm_row(&mut store, &instance, c_re, c_im, expected.row.step + 7),
                     expected.row,
                     "post-terminal row requests must clamp"
+                );
+                assert_eq!(
+                    wasm_air_row(&mut store, &instance, c_re, c_im, expected.row.step + 7),
+                    reference_air_row(expected.row.step, expected.row.zr, expected.row.zi,),
+                    "post-terminal AIR row requests must clamp"
                 );
             }
         }
@@ -280,6 +382,86 @@ fn fe_bounded_escape_witness_matches_independent_i64_model() {
             wasm_witness(&mut store, &instance, c_re, c_im, bound),
             reference_witness(c_re, c_im, bound),
             "deterministic case {case}, pixel ({px}, {py}), bound {bound}"
+        );
+    }
+
+    // Every expanded column is load-bearing. This is not yet a polynomial AIR
+    // verifier, but it ensures the independent integer relation rejects a
+    // one-unit mutation in each witness column before arithmetization.
+    let rows = reference_rows(-3048, 2216, 255);
+    let base = reference_air_row(rows[0].step, rows[0].zr, rows[0].zi);
+    let next = reference_air_row(rows[1].step, rows[1].zr, rows[1].zi);
+    let mutations = [
+        AirRow {
+            row: Row {
+                step: base.row.step + 1,
+                ..base.row
+            },
+            ..base
+        },
+        AirRow {
+            row: Row {
+                zr: base.row.zr + 1,
+                ..base.row
+            },
+            ..base
+        },
+        AirRow {
+            row: Row {
+                zi: base.row.zi + 1,
+                ..base.row
+            },
+            ..base
+        },
+        AirRow {
+            rr: base.rr + 1,
+            ..base
+        },
+        AirRow {
+            ii: base.ii + 1,
+            ..base
+        },
+        AirRow {
+            row: Row {
+                magnitude: base.row.magnitude + 1,
+                ..base.row
+            },
+            ..base
+        },
+        AirRow {
+            q_re: base.q_re + 1,
+            ..base
+        },
+        AirRow {
+            r_re: base.r_re + 1,
+            ..base
+        },
+        AirRow {
+            q_im: base.q_im + 1,
+            ..base
+        },
+        AirRow {
+            r_im: base.r_im + 1,
+            ..base
+        },
+        AirRow {
+            row: Row {
+                terminal: !base.row.terminal,
+                ..base.row
+            },
+            ..base
+        },
+    ];
+    for (column, mutation) in mutations.into_iter().enumerate() {
+        if column != 0 {
+            assert!(
+                !air_row_holds(mutation),
+                "mutated row-local AIR column {column} must reject"
+            );
+        }
+        assert!(
+            !transition_holds(-3048, 2216, mutation, next),
+            "transition with mutated AIR column {column} must reject"
         );
     }
 }

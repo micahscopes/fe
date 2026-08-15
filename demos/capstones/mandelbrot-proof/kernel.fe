@@ -27,6 +27,25 @@ pub struct EscapeTraceRow {
 
 impl Copy for EscapeTraceRow {}
 
+/// Canonical quotient and Euclidean remainder for one arithmetic Q12 shift.
+/// `numerator = quotient * 4096 + remainder`, with `0 <= remainder < 4096`.
+pub struct ShiftQ12 { pub quotient: i32, pub remainder: i32 }
+
+impl Copy for ShiftQ12 {}
+
+/// Integer columns from which the first AIR will be formed. Keeping these
+/// nominal makes the authored witness readable while the scalar export below
+/// exposes the exact flattened column order to independent gates.
+pub struct EscapeAirRow {
+    pub semantic: EscapeTraceRow,
+    pub rr: i32,
+    pub ii: i32,
+    pub real_shift: ShiftQ12,
+    pub imaginary_shift: ShiftQ12,
+}
+
+impl Copy for EscapeAirRow {}
+
 pub struct EscapeWitness { pub valid_claim: bool, pub escaped: bool, pub row: EscapeTraceRow }
 
 impl Copy for EscapeWitness {}
@@ -35,14 +54,31 @@ fn square(_ value: i32) -> i32 {
     value * value
 }
 
-fn trace_row(_ step: u32, _ z: ComplexQ12) -> EscapeTraceRow {
-    let magnitude_squared_q24 = square(z.re) + square(z.im)
-    EscapeTraceRow {
-        step: step,
-        z: z,
-        magnitude_squared_q24: magnitude_squared_q24,
-        terminal: magnitude_squared_q24 >= ESCAPE_RADIUS_SQUARED_Q24,
+fn decompose_q12(_ numerator: i32) -> ShiftQ12 {
+    let quotient = numerator >> 12
+    ShiftQ12 { quotient: quotient, remainder: numerator - quotient * Q12_SCALE }
+}
+
+fn air_row(_ step: u32, _ z: ComplexQ12) -> EscapeAirRow {
+    let rr = square(z.re)
+    let ii = square(z.im)
+    let magnitude_squared_q24 = rr + ii
+    EscapeAirRow {
+        semantic: EscapeTraceRow {
+            step: step,
+            z: z,
+            magnitude_squared_q24: magnitude_squared_q24,
+            terminal: magnitude_squared_q24 >= ESCAPE_RADIUS_SQUARED_Q24,
+        },
+        rr: rr,
+        ii: ii,
+        real_shift: decompose_q12(rr - ii),
+        imaginary_shift: decompose_q12((z.re * 2) * z.im),
     }
+}
+
+fn trace_row(_ step: u32, _ z: ComplexQ12) -> EscapeTraceRow {
+    air_row(step, z).semantic
 }
 
 fn advance(_ z: ComplexQ12, _ c: ComplexQ12) -> ComplexQ12 {
@@ -118,6 +154,14 @@ impl EscapesByQ12 {
         }
         trace_row(step, z)
     }
+
+    /// Return the expanded integer columns for the same clamped trace row.
+    /// These values are deterministic even at the terminal row; only an active
+    /// nonterminal row is constrained to transition to its successor.
+    pub fn air_row_at(self, _ target: u32) -> EscapeAirRow {
+        let row = self.row_at(target)
+        air_row(row.step, row.z)
+    }
 }
 
 /// Compact scalar boundary for Wasm/native oracle gates. Fields are ordered as
@@ -151,4 +195,35 @@ pub fn escape_trace_row_q12(_ c_re_q12: i32, _ c_im_q12: i32, _ target: u32) -> 
 ) {
     let row = EscapesByQ12::new(c_re_q12, c_im_q12, target).row_at(target)
     (row.step, row.z.re, row.z.im, row.magnitude_squared_q24, if row.terminal { 1 } else { 0 })
+}
+
+/// Expanded row projection ordered as
+/// `(step, zr, zi, rr, ii, magnitude, q_re, r_re, q_im, r_im, terminal)`.
+pub fn escape_air_row_q12(_ c_re_q12: i32, _ c_im_q12: i32, _ target: u32) -> (
+    u32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    u32,
+) {
+    let row = EscapesByQ12::new(c_re_q12, c_im_q12, target).air_row_at(target)
+    (
+        row.semantic.step,
+        row.semantic.z.re,
+        row.semantic.z.im,
+        row.rr,
+        row.ii,
+        row.semantic.magnitude_squared_q24,
+        row.real_shift.quotient,
+        row.real_shift.remainder,
+        row.imaginary_shift.quotient,
+        row.imaginary_shift.remainder,
+        if row.semantic.terminal { 1 } else { 0 },
+    )
 }

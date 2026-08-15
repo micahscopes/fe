@@ -75,13 +75,17 @@ The terminal bit is false before row `k` and true at row `k`. This proves that
 but it cannot construct an `EscapesByQ12` proof.
 
 `demos/capstones/mandelbrot-proof/kernel.fe` is the single authored transition.
-Its `EscapeWitness` and `EscapeTraceRow` values are the current Fe witness
-surface. Scalar tuple exports exist only so independent Wasm and native gates
-can inspect the nominal values without a JSON interface.
+Its `EscapeWitness`, `EscapeTraceRow`, and `EscapeAirRow` values are the current
+Fe witness surface. Scalar tuple exports exist only so independent Wasm and
+native gates can inspect the nominal values without a JSON interface.
 
-The current semantic row exposes `step`, `z`, `magnitude`, and `terminal`.
-Materializing and constraining `rr`, `ii`, quotient, and remainder columns is
-part of the pending AIR layer, not evidence already claimed by this slice.
+The Fe witness now exposes the expanded integer row as `EscapeAirRow`, with
+`rr`, `ii`, and canonical arithmetic-shift quotient/remainder pairs alongside
+the semantic row. The independent Wasm gate checks every value, every directed
+transition, and one-unit mutations in every column. Converting these integer
+relations into field-polynomial constraints, including signed range proofs,
+activity, terminal uniqueness, and padding, remains part of the pending AIR
+layer.
 
 ## Commitment and proof direction
 
