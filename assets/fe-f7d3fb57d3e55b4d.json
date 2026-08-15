@@ -9,14 +9,14 @@
     "build": "workspace"
   },
   "target": "wasm",
-  "source_set_sha256": "6bf1bee59429376a912ebd5cc4990190513afe4f3246b8df4e1e19f1faa4c4a5",
+  "source_set_sha256": "922bbf78a31e680ebffe9127879d947a5b17e95f75b59487246f72b993188d22",
   "source_dependencies": {
     "version": 1,
     "root": "file:///workspace/fe-worktrees/mb2/demos/sketches/event_studio/src/lib.fe",
     "sources": [
       {
         "url": "file:///workspace/fe-worktrees/mb2/demos/sketches/event_studio/src/lib.fe",
-        "sha256": "6710177cd2171e193beb25c75234b3a032273049b9fee0ca4a9083e2d47fc91a"
+        "sha256": "597aee50d0d0ad2fbe29dd0d317c9da62466e8613da3d787be4c412c4f9dee9f"
       }
     ]
   },
@@ -66,6 +66,13 @@
         "results": []
       },
       {
+        "module": "fe:web-gpu",
+        "name": "device_event_begin",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
         "module": "fe:web-window",
         "name": "animation_frame_begin",
         "signature_complete": false,
@@ -81,6 +88,27 @@
       }
     ],
     "exports": [
+      {
+        "module": "",
+        "name": "__fe_task_resume_watch_device_1",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "__fe_task_resume_watch_device_2",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "__fe_task_resume_watch_device_3",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
       {
         "module": "",
         "name": "__fe_task_resume_watch_frame_clock_1",
@@ -216,6 +244,13 @@
       },
       {
         "module": "",
+        "name": "__fe_task_start_watch_device",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
         "name": "__fe_task_start_watch_frame_clock",
         "signature_complete": false,
         "params": [],
@@ -292,9 +327,9 @@
       "name": "module.wasm",
       "kind": "wasm_module",
       "media_type": "application/wasm",
-      "sha256": "c68ff096d01a12cfbda001660f0b8af750cb368782c94cbe82c8647f80f1c64b",
-      "byte_len": 1616823,
-      "url": "assets/fe-c68ff096d01a12cf.wasm"
+      "sha256": "3defdef62d29a5db1c5ef9c1dd7a457f83dd469c5573b8ab33d60a3d0d9f9ba8",
+      "byte_len": 2006447,
+      "url": "assets/fe-3defdef62d29a5db.wasm"
     }
   ]
 }

@@ -95,6 +95,7 @@ export function createHostCompletionBroker(options = {}) {
   const surface = options.surface;
   const documentEvents = options.documentEvents;
   const windowEvents = options.windowEvents;
+  const gpuDeviceEvents = options.gpuDeviceEvents;
   const componentEvents = options.componentEvents;
   const actorEvents = options.actorEvents;
   if (typeof clock !== "function" || typeof schedule !== "function"
@@ -115,6 +116,11 @@ export function createHostCompletionBroker(options = {}) {
       || typeof windowEvents.animationFrame !== "function"
       || typeof windowEvents.viewport !== "function")) {
     throw new TypeError("host completion window hooks must provide animationFrame and viewport");
+  }
+  if (gpuDeviceEvents !== undefined && (!gpuDeviceEvents
+      || typeof gpuDeviceEvents !== "object"
+      || typeof gpuDeviceEvents.observe !== "function")) {
+    throw new TypeError("host completion GPU-device hooks must provide observe");
   }
   if (componentEvents !== undefined && (!componentEvents
       || typeof componentEvents !== "object"
@@ -339,6 +345,41 @@ export function createHostCompletionBroker(options = {}) {
           finiteF32(value.width, "viewport width"),
           finiteF32(value.height, "viewport height"),
           finiteF32(value.devicePixelRatio, "viewport device pixel ratio"),
+        ];
+      },
+    );
+  };
+
+  const beginGpuDeviceEvent = (rawSeen, rawPreviousSequence) => {
+    if (gpuDeviceEvents === undefined) {
+      throw new Error("fe:web-gpu::device_event_begin requires a GPU-device capability");
+    }
+    if (rawSeen !== 0 && rawSeen !== 1) {
+      throw new TypeError("fe:web-gpu::device_event_begin seen flag must be a Fe bool");
+    }
+    const previousSequence = u32(
+      rawPreviousSequence,
+      "fe:web-gpu::device_event_begin previous sequence",
+    );
+    return beginBrowserOperation(
+      "gpu-device-event",
+      signal => gpuDeviceEvents.observe(rawSeen !== 0, previousSequence, signal),
+      5,
+      event => {
+        if (!event || typeof event !== "object" || Array.isArray(event)) {
+          throw new TypeError("GPU device event result must be an object");
+        }
+        const kind = u32(event.kind, "GPU device event kind");
+        const reason = u32(event.reason, "GPU device loss reason");
+        if (kind === 0 || kind > 3 || reason > 2) {
+          throw new TypeError("GPU device event is outside its declared Fe vocabulary");
+        }
+        return [
+          kind,
+          reason,
+          u32(event.generation, "GPU device generation"),
+          u32(event.sequence, "GPU device event sequence"),
+          u32(event.missed, "GPU device missed-event count"),
         ];
       },
     );
@@ -749,6 +790,9 @@ export function createHostCompletionBroker(options = {}) {
     animation_frame_begin: beginAnimationFrame,
     viewport_begin: beginViewport,
   });
+  const gpuDeviceImports = Object.freeze({
+    device_event_begin: beginGpuDeviceEvent,
+  });
   const componentEventImports = Object.freeze({
     pointer_begin: beginPointer,
     captured_pointer_begin: beginCapturedPointer,
@@ -762,6 +806,7 @@ export function createHostCompletionBroker(options = {}) {
   if (surface !== undefined) imports["fe:web-surface"] = surfaceImports;
   if (documentEvents !== undefined) imports["fe:web-document"] = documentImports;
   if (windowEvents !== undefined) imports["fe:web-window"] = windowImports;
+  if (gpuDeviceEvents !== undefined) imports["fe:web-gpu"] = gpuDeviceImports;
   if (componentEvents !== undefined) {
     imports["fe:web-component-events"] = componentEventImports;
   }
