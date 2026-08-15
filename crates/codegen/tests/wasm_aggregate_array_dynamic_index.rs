@@ -25,11 +25,28 @@ pub fn pick(index: u32) -> (u32, u32) {
 }
 "#;
 
-fn compile() -> Vec<u8> {
+const CONST_SOURCE: &str = r#"
+struct Pair { left: u32, right: u32 }
+
+impl Copy for Pair {}
+
+const VALUES: [Pair; 3] = [
+    Pair { left: 3, right: 5 },
+    Pair { left: 7, right: 11 },
+    Pair { left: 13, right: 17 },
+]
+
+pub fn pick(index: u32) -> (u32, u32) {
+    let pair = VALUES[index as usize]
+    (pair.left, pair.right)
+}
+"#;
+
+fn compile(source: &str, name: &str) -> Vec<u8> {
     let mut db = DriverDataBase::default();
-    let url = Url::parse("file:///wasm_aggregate_array_dynamic_index.fe").unwrap();
+    let url = Url::parse(&format!("file:///{name}.fe")).unwrap();
     db.workspace()
-        .touch(&mut db, url.clone(), Some(SOURCE.to_owned()));
+        .touch(&mut db, url.clone(), Some(source.to_owned()));
     let file = db.workspace().get(&db, &url).unwrap();
     let top_mod = db.top_mod(file);
     let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
@@ -46,7 +63,18 @@ fn compile() -> Vec<u8> {
 
 #[test]
 fn dynamic_aggregate_array_index_executes_and_traps_out_of_bounds() {
-    let bytes = compile();
+    assert_pick_executes_and_traps(compile(SOURCE, "wasm_aggregate_array_dynamic_index"));
+}
+
+#[test]
+fn dynamic_const_aggregate_array_index_executes_and_traps_out_of_bounds() {
+    assert_pick_executes_and_traps(compile(
+        CONST_SOURCE,
+        "wasm_const_aggregate_array_dynamic_index",
+    ));
+}
+
+fn assert_pick_executes_and_traps(bytes: Vec<u8>) {
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, bytes).unwrap();
     let mut store = wasmtime::Store::new(&engine, ());

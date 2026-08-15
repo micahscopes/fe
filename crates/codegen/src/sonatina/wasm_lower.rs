@@ -511,6 +511,117 @@ fn reify_inline_const_aggregates<'db>(db: &'db DriverDataBase, body: &mut Runtim
         Some(())
     }
 
+    fn projected_ref_root(place: &RuntimePlace<'_>) -> Option<RLocalId> {
+        if place.path.is_empty() {
+            return None;
+        }
+        match place.root {
+            PlaceRoot::Ref(root) => Some(root),
+            PlaceRoot::Slot(_) | PlaceRoot::Ptr { .. } | PlaceRoot::Provider(_) => None,
+        }
+    }
+
+    fn projected_roots_in_expr(expr: &RExpr<'_>, roots: &mut HashSet<RLocalId>) {
+        let place = match expr {
+            RExpr::MaterializePlaceToObject { place }
+            | RExpr::AddrOf { place }
+            | RExpr::Load { place } => place,
+            _ => return,
+        };
+        if let Some(root) = projected_ref_root(place) {
+            roots.insert(root);
+        }
+    }
+
+    fn rewrite_projected_place(
+        place: &mut RuntimePlace<'_>,
+        addressable: &FxHashMap<RLocalId, RLocalId>,
+    ) {
+        let Some(root) = projected_ref_root(place) else {
+            return;
+        };
+        if let Some(object) = addressable.get(&root) {
+            place.root = PlaceRoot::Ref(*object);
+        }
+    }
+
+    fn rewrite_projected_expr(expr: &mut RExpr<'_>, addressable: &FxHashMap<RLocalId, RLocalId>) {
+        match expr {
+            RExpr::MaterializePlaceToObject { place }
+            | RExpr::AddrOf { place }
+            | RExpr::Load { place } => rewrite_projected_place(place, addressable),
+            _ => {}
+        }
+    }
+
+    let mut const_origin_sets = body
+        .blocks
+        .iter()
+        .flat_map(|block| &block.stmts)
+        .filter_map(|stmt| match stmt {
+            RStmt::Assign {
+                dst,
+                expr: RExpr::ConstRef { .. },
+            } => Some((*dst, HashSet::from([*dst]))),
+            _ => None,
+        })
+        .collect::<FxHashMap<_, _>>();
+    loop {
+        let mut changed = false;
+        for block in &body.blocks {
+            for stmt in &block.stmts {
+                let RStmt::Assign { dst, expr } = stmt else {
+                    continue;
+                };
+                let src = match expr {
+                    RExpr::Use(src) | RExpr::RetagRef { value: src } => src,
+                    _ => continue,
+                };
+                if let Some(origins) = const_origin_sets.get(src).cloned() {
+                    let destination = const_origin_sets.entry(*dst).or_default();
+                    let previous_len = destination.len();
+                    destination.extend(origins);
+                    changed |= destination.len() != previous_len;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let const_origins = const_origin_sets
+        .into_iter()
+        .filter_map(|(alias, origins)| {
+            (origins.len() == 1).then(|| (alias, *origins.iter().next().unwrap()))
+        })
+        .collect::<FxHashMap<_, _>>();
+    let mut projected_const_roots = HashSet::new();
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            match stmt {
+                RStmt::Assign { expr, .. } => {
+                    let mut roots = HashSet::new();
+                    projected_roots_in_expr(expr, &mut roots);
+                    for root in roots {
+                        if let Some(origin) = const_origins.get(&root) {
+                            projected_const_roots.insert(*origin);
+                        }
+                    }
+                }
+                RStmt::Store { dst, .. } | RStmt::CopyInto { dst, .. } => {
+                    if let Some(root) = projected_ref_root(dst)
+                        && let Some(origin) = const_origins.get(&root)
+                    {
+                        projected_const_roots.insert(*origin);
+                    }
+                }
+                RStmt::EnumAssertVariant { .. }
+                | RStmt::EnumSetTag { .. }
+                | RStmt::EnumWriteVariant { .. } => {}
+            }
+        }
+    }
+
     // Reify every const handle whose ConstNode `emit` can expand into scalar
     // leaves + AggregateMake (structs and arrays; enums return None below and
     // stay fail-closed). This was formerly gated to const refs consumed by a
@@ -518,10 +629,13 @@ fn reify_inline_const_aggregates<'db>(db: &'db DriverDataBase, body: &mut Runtim
     // consumed as a call receiver and as an AggregateMake field, never a
     // whole-value Load, so that gate left them as `Ref{Const, AggregateValue}`
     // and `ty_for_class` rejected them. Expanding unconditionally is sound: a
-    // reifiable const aggregate IS a value, and this pass never rewrites a
-    // projection/borrow consumer, so any such consumer keeps its prior behavior.
+    // reifiable const aggregate IS a value. A projected consumer additionally
+    // receives one arena-backed copy, and only its places are redirected to
+    // that private object. Ordinary value consumers keep the flattened value,
+    // so materialization neither introduces aliasing nor changes call shapes.
+    let mut addressable = FxHashMap::default();
     let (locals, blocks) = (&mut body.locals, &mut body.blocks);
-    for block in blocks {
+    for block in blocks.iter_mut() {
         let mut rewritten = Vec::with_capacity(block.stmts.len());
         for stmt in std::mem::take(&mut block.stmts) {
             if let RStmt::Assign {
@@ -540,6 +654,20 @@ fn reify_inline_const_aggregates<'db>(db: &'db DriverDataBase, body: &mut Runtim
                 )
                 .is_some()
                 {
+                    if projected_const_roots.contains(dst) {
+                        let object = RLocalId::from_u32(locals.len() as u32);
+                        let semantic_ty = locals[dst.as_u32() as usize].semantic_ty;
+                        locals.push(RLocal {
+                            semantic_ty,
+                            carrier: RuntimeCarrier::Value(RuntimeClass::object_ref(*layout)),
+                            root: RuntimeLocalRoot::None,
+                        });
+                        rewritten.push(RStmt::Assign {
+                            dst: object,
+                            expr: RExpr::MaterializeToObject { src: *dst },
+                        });
+                        addressable.insert(*dst, object);
+                    }
                     continue;
                 }
             }
@@ -588,6 +716,29 @@ fn reify_inline_const_aggregates<'db>(db: &'db DriverDataBase, body: &mut Runtim
             rewritten.push(stmt);
         }
         block.stmts = rewritten;
+    }
+    let alias_objects = const_origins
+        .iter()
+        .filter_map(|(alias, origin)| {
+            addressable
+                .get(origin)
+                .copied()
+                .map(|object| (*alias, object))
+        })
+        .collect::<Vec<_>>();
+    addressable.extend(alias_objects);
+    for block in blocks.iter_mut() {
+        for stmt in &mut block.stmts {
+            match stmt {
+                RStmt::Assign { expr, .. } => rewrite_projected_expr(expr, &addressable),
+                RStmt::Store { dst, .. } | RStmt::CopyInto { dst, .. } => {
+                    rewrite_projected_place(dst, &addressable)
+                }
+                RStmt::EnumAssertVariant { .. }
+                | RStmt::EnumSetTag { .. }
+                | RStmt::EnumWriteVariant { .. } => {}
+            }
+        }
     }
     if let Some(ret) = body.blocks.iter().find_map(|block| match block.terminator {
         RTerminator::Return(Some(value)) => Some(value),
