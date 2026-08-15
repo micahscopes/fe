@@ -1,0 +1,117 @@
+import { createMaterializedTaskMachine } from "./materialized-task.js";
+
+function required(value, name) {
+  if (typeof value !== "function") throw new TypeError(`missing materialized task export ${name}`);
+  return value;
+}
+
+export function createMaterializedTaskRegistry(wasmExports) {
+  const registry = Object.create(null);
+  const task0StartName = "__fe_task_start_watch_frame_clock";
+  const task0Start = required(wasmExports[task0StartName], task0StartName);
+  const task0Resume0Name = "__fe_task_resume_watch_frame_clock_1";
+  const task0Resume0 = required(wasmExports[task0Resume0Name], task0Resume0Name);
+  const task0Resume1Name = "__fe_task_resume_watch_frame_clock_2";
+  const task0Resume1 = required(wasmExports[task0Resume1Name], task0Resume1Name);
+  const task0Resume2Name = "__fe_task_resume_watch_frame_clock_3";
+  const task0Resume2 = required(wasmExports[task0Resume2Name], task0Resume2Name);
+  const task0Resume3Name = "__fe_task_resume_watch_frame_clock_4";
+  const task0Resume3 = required(wasmExports[task0Resume3Name], task0Resume3Name);
+  const task0Resume4Name = "__fe_task_resume_watch_frame_clock_5";
+  const task0Resume4 = required(wasmExports[task0Resume4Name], task0Resume4Name);
+  const task0Resume5Name = "__fe_task_resume_watch_frame_clock_6";
+  const task0Resume5 = required(wasmExports[task0Resume5Name], task0Resume5Name);
+  registry["watch_frame_clock"] = createMaterializedTaskMachine({
+    input: [],
+    step: [{ kind: "enum_tag", bits: 8, variants: 7 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "bool", bits: 1 }, { kind: "f32", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "bool", bits: 1 }, { kind: "f32", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "bool", bits: 1 }, { kind: "f32", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "bool", bits: 1 }, { kind: "enum_tag", bits: 8, variants: 5 }, { kind: "f32", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "bool", bits: 1 }, { kind: "unsigned", bits: 32 }, { kind: "bool", bits: 1 }, { kind: "f32", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "bool", bits: 1 }, { kind: "f32", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "bool", bits: 1 }, { kind: "f32", bits: 32 }, { kind: "unsigned", bits: 32 }],
+    complete: { start: 1, count: 1 },
+    start: (...lanes) => task0Start(...lanes),
+    continuations: [
+      { state: 1, range: { start: 2, count: 5 }, pending: { start: 2, count: 1 }, frame: { start: 3, count: 4 }, delivery: { lanes: [{ kind: "enum_tag", bits: 8, variants: 3 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 64 }], failure: { start: 1, count: 1 }, success: { start: 2, count: 1 } }, invoke: (...lanes) => task0Resume0(...lanes) },
+      { state: 2, range: { start: 7, count: 5 }, pending: { start: 7, count: 1 }, frame: { start: 8, count: 4 }, delivery: { lanes: [{ kind: "enum_tag", bits: 8, variants: 3 }, { kind: "unsigned", bits: 32 }], failure: { start: 1, count: 1 }, success: { start: 2, count: 0 } }, invoke: (...lanes) => task0Resume1(...lanes) },
+      { state: 3, range: { start: 12, count: 5 }, pending: { start: 12, count: 1 }, frame: { start: 13, count: 4 }, delivery: { lanes: [{ kind: "enum_tag", bits: 8, variants: 3 }, { kind: "unsigned", bits: 32 }], failure: { start: 1, count: 1 }, success: { start: 2, count: 0 } }, invoke: (...lanes) => task0Resume2(...lanes) },
+      { state: 4, range: { start: 17, count: 10 }, pending: { start: 17, count: 1 }, frame: { start: 18, count: 9 }, delivery: { lanes: [{ kind: "enum_tag", bits: 8, variants: 3 }, { kind: "unsigned", bits: 32 }, { kind: "f32", bits: 32 }], failure: { start: 1, count: 1 }, success: { start: 2, count: 1 } }, invoke: (...lanes) => task0Resume3(...lanes) },
+      { state: 5, range: { start: 27, count: 5 }, pending: { start: 27, count: 1 }, frame: { start: 28, count: 4 }, delivery: { lanes: [{ kind: "enum_tag", bits: 8, variants: 3 }, { kind: "unsigned", bits: 32 }], failure: { start: 1, count: 1 }, success: { start: 2, count: 0 } }, invoke: (...lanes) => task0Resume4(...lanes) },
+      { state: 6, range: { start: 32, count: 5 }, pending: { start: 32, count: 1 }, frame: { start: 33, count: 4 }, delivery: { lanes: [{ kind: "enum_tag", bits: 8, variants: 3 }, { kind: "unsigned", bits: 32 }], failure: { start: 1, count: 1 }, success: { start: 2, count: 0 } }, invoke: (...lanes) => task0Resume5(...lanes) },
+    ],
+  });
+  const task1StartName = "__fe_task_start_watch_pointer";
+  const task1Start = required(wasmExports[task1StartName], task1StartName);
+  const task1Resume0Name = "__fe_task_resume_watch_pointer_1";
+  const task1Resume0 = required(wasmExports[task1Resume0Name], task1Resume0Name);
+  const task1Resume1Name = "__fe_task_resume_watch_pointer_2";
+  const task1Resume1 = required(wasmExports[task1Resume1Name], task1Resume1Name);
+  const task1Resume2Name = "__fe_task_resume_watch_pointer_3";
+  const task1Resume2 = required(wasmExports[task1Resume2Name], task1Resume2Name);
+  registry["watch_pointer"] = createMaterializedTaskMachine({
+    input: [],
+    step: [{ kind: "enum_tag", bits: 8, variants: 4 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "enum_tag", bits: 8, variants: 5 }, { kind: "bool", bits: 1 }, { kind: "enum_tag", bits: 8, variants: 5 }, { kind: "enum_tag", bits: 8, variants: 4 }, { kind: "enum_tag", bits: 8, variants: 4 }, { kind: "unsigned", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "bool", bits: 1 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "bool", bits: 1 }, { kind: "unsigned", bits: 32 }, { kind: "bool", bits: 1 }, { kind: "enum_tag", bits: 8, variants: 4 }, { kind: "enum_tag", bits: 8, variants: 4 }, { kind: "unsigned", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "bool", bits: 1 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "bool", bits: 1 }, { kind: "enum_tag", bits: 8, variants: 4 }, { kind: "enum_tag", bits: 8, variants: 4 }, { kind: "unsigned", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "bool", bits: 1 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "enum_tag", bits: 8, variants: 5 }, { kind: "bool", bits: 1 }, { kind: "enum_tag", bits: 8, variants: 4 }, { kind: "enum_tag", bits: 8, variants: 4 }, { kind: "unsigned", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "bool", bits: 1 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "bool", bits: 1 }, { kind: "enum_tag", bits: 8, variants: 4 }, { kind: "enum_tag", bits: 8, variants: 4 }, { kind: "unsigned", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "bool", bits: 1 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }],
+    complete: { start: 1, count: 1 },
+    start: (...lanes) => task1Start(...lanes),
+    continuations: [
+      { state: 1, range: { start: 2, count: 29 }, pending: { start: 2, count: 1 }, frame: { start: 3, count: 28 }, delivery: { lanes: [{ kind: "enum_tag", bits: 8, variants: 3 }, { kind: "unsigned", bits: 32 }, { kind: "enum_tag", bits: 8, variants: 4 }, { kind: "enum_tag", bits: 8, variants: 4 }, { kind: "unsigned", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "bool", bits: 1 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }], failure: { start: 1, count: 1 }, success: { start: 2, count: 9 } }, invoke: (...lanes) => task1Resume0(...lanes) },
+      { state: 2, range: { start: 31, count: 26 }, pending: { start: 31, count: 1 }, frame: { start: 32, count: 25 }, delivery: { lanes: [{ kind: "enum_tag", bits: 8, variants: 3 }, { kind: "unsigned", bits: 32 }], failure: { start: 1, count: 1 }, success: { start: 2, count: 0 } }, invoke: (...lanes) => task1Resume1(...lanes) },
+      { state: 3, range: { start: 57, count: 15 }, pending: { start: 57, count: 1 }, frame: { start: 58, count: 14 }, delivery: { lanes: [{ kind: "enum_tag", bits: 8, variants: 3 }, { kind: "unsigned", bits: 32 }], failure: { start: 1, count: 1 }, success: { start: 2, count: 0 } }, invoke: (...lanes) => task1Resume2(...lanes) },
+    ],
+  });
+  const task2StartName = "__fe_task_start_watch_viewport";
+  const task2Start = required(wasmExports[task2StartName], task2StartName);
+  const task2Resume0Name = "__fe_task_resume_watch_viewport_1";
+  const task2Resume0 = required(wasmExports[task2Resume0Name], task2Resume0Name);
+  const task2Resume1Name = "__fe_task_resume_watch_viewport_2";
+  const task2Resume1 = required(wasmExports[task2Resume1Name], task2Resume1Name);
+  const task2Resume2Name = "__fe_task_resume_watch_viewport_3";
+  const task2Resume2 = required(wasmExports[task2Resume2Name], task2Resume2Name);
+  registry["watch_viewport"] = createMaterializedTaskMachine({
+    input: [],
+    step: [{ kind: "enum_tag", bits: 8, variants: 4 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "enum_tag", bits: 8, variants: 5 }, { kind: "bool", bits: 1 }, { kind: "enum_tag", bits: 8, variants: 5 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "bool", bits: 1 }, { kind: "unsigned", bits: 32 }, { kind: "bool", bits: 1 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "bool", bits: 1 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "enum_tag", bits: 8, variants: 5 }, { kind: "bool", bits: 1 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "bool", bits: 1 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }],
+    complete: { start: 1, count: 1 },
+    start: (...lanes) => task2Start(...lanes),
+    continuations: [
+      { state: 1, range: { start: 2, count: 17 }, pending: { start: 2, count: 1 }, frame: { start: 3, count: 16 }, delivery: { lanes: [{ kind: "enum_tag", bits: 8, variants: 3 }, { kind: "unsigned", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }], failure: { start: 1, count: 1 }, success: { start: 2, count: 3 } }, invoke: (...lanes) => task2Resume0(...lanes) },
+      { state: 2, range: { start: 19, count: 14 }, pending: { start: 19, count: 1 }, frame: { start: 20, count: 13 }, delivery: { lanes: [{ kind: "enum_tag", bits: 8, variants: 3 }, { kind: "unsigned", bits: 32 }], failure: { start: 1, count: 1 }, success: { start: 2, count: 0 } }, invoke: (...lanes) => task2Resume1(...lanes) },
+      { state: 3, range: { start: 33, count: 9 }, pending: { start: 33, count: 1 }, frame: { start: 34, count: 8 }, delivery: { lanes: [{ kind: "enum_tag", bits: 8, variants: 3 }, { kind: "unsigned", bits: 32 }], failure: { start: 1, count: 1 }, success: { start: 2, count: 0 } }, invoke: (...lanes) => task2Resume2(...lanes) },
+    ],
+  });
+  const task3StartName = "__fe_task_start_watch_visibility";
+  const task3Start = required(wasmExports[task3StartName], task3StartName);
+  const task3Resume0Name = "__fe_task_resume_watch_visibility_1";
+  const task3Resume0 = required(wasmExports[task3Resume0Name], task3Resume0Name);
+  const task3Resume1Name = "__fe_task_resume_watch_visibility_2";
+  const task3Resume1 = required(wasmExports[task3Resume1Name], task3Resume1Name);
+  const task3Resume2Name = "__fe_task_resume_watch_visibility_3";
+  const task3Resume2 = required(wasmExports[task3Resume2Name], task3Resume2Name);
+  registry["watch_visibility"] = createMaterializedTaskMachine({
+    input: [],
+    step: [{ kind: "enum_tag", bits: 8, variants: 4 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "enum_tag", bits: 8, variants: 5 }, { kind: "bool", bits: 1 }, { kind: "enum_tag", bits: 8, variants: 5 }, { kind: "enum_tag", bits: 8, variants: 2 }, { kind: "unsigned", bits: 32 }, { kind: "bool", bits: 1 }, { kind: "unsigned", bits: 32 }, { kind: "bool", bits: 1 }, { kind: "enum_tag", bits: 8, variants: 2 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "bool", bits: 1 }, { kind: "enum_tag", bits: 8, variants: 2 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "enum_tag", bits: 8, variants: 5 }, { kind: "bool", bits: 1 }, { kind: "enum_tag", bits: 8, variants: 2 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "bool", bits: 1 }, { kind: "enum_tag", bits: 8, variants: 2 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }],
+    complete: { start: 1, count: 1 },
+    start: (...lanes) => task3Start(...lanes),
+    continuations: [
+      { state: 1, range: { start: 2, count: 13 }, pending: { start: 2, count: 1 }, frame: { start: 3, count: 12 }, delivery: { lanes: [{ kind: "enum_tag", bits: 8, variants: 3 }, { kind: "unsigned", bits: 32 }, { kind: "enum_tag", bits: 8, variants: 2 }], failure: { start: 1, count: 1 }, success: { start: 2, count: 1 } }, invoke: (...lanes) => task3Resume0(...lanes) },
+      { state: 2, range: { start: 15, count: 10 }, pending: { start: 15, count: 1 }, frame: { start: 16, count: 9 }, delivery: { lanes: [{ kind: "enum_tag", bits: 8, variants: 3 }, { kind: "unsigned", bits: 32 }], failure: { start: 1, count: 1 }, success: { start: 2, count: 0 } }, invoke: (...lanes) => task3Resume1(...lanes) },
+      { state: 3, range: { start: 25, count: 7 }, pending: { start: 25, count: 1 }, frame: { start: 26, count: 6 }, delivery: { lanes: [{ kind: "enum_tag", bits: 8, variants: 3 }, { kind: "unsigned", bits: 32 }], failure: { start: 1, count: 1 }, success: { start: 2, count: 0 } }, invoke: (...lanes) => task3Resume2(...lanes) },
+    ],
+  });
+  const task4StartName = "__fe_task_start_watch_wheel";
+  const task4Start = required(wasmExports[task4StartName], task4StartName);
+  const task4Resume0Name = "__fe_task_resume_watch_wheel_1";
+  const task4Resume0 = required(wasmExports[task4Resume0Name], task4Resume0Name);
+  const task4Resume1Name = "__fe_task_resume_watch_wheel_2";
+  const task4Resume1 = required(wasmExports[task4Resume1Name], task4Resume1Name);
+  const task4Resume2Name = "__fe_task_resume_watch_wheel_3";
+  const task4Resume2 = required(wasmExports[task4Resume2Name], task4Resume2Name);
+  registry["watch_wheel"] = createMaterializedTaskMachine({
+    input: [],
+    step: [{ kind: "enum_tag", bits: 8, variants: 4 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "enum_tag", bits: 8, variants: 5 }, { kind: "bool", bits: 1 }, { kind: "enum_tag", bits: 8, variants: 5 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "enum_tag", bits: 8, variants: 4 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "bool", bits: 1 }, { kind: "f32", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "bool", bits: 1 }, { kind: "unsigned", bits: 32 }, { kind: "bool", bits: 1 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "enum_tag", bits: 8, variants: 4 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "bool", bits: 1 }, { kind: "f32", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "bool", bits: 1 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "enum_tag", bits: 8, variants: 4 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "bool", bits: 1 }, { kind: "f32", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "enum_tag", bits: 8, variants: 5 }, { kind: "bool", bits: 1 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "enum_tag", bits: 8, variants: 4 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "bool", bits: 1 }, { kind: "f32", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "bool", bits: 1 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "enum_tag", bits: 8, variants: 4 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "bool", bits: 1 }, { kind: "f32", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }, { kind: "unsigned", bits: 32 }],
+    complete: { start: 1, count: 1 },
+    start: (...lanes) => task4Start(...lanes),
+    continuations: [
+      { state: 1, range: { start: 2, count: 27 }, pending: { start: 2, count: 1 }, frame: { start: 3, count: 26 }, delivery: { lanes: [{ kind: "enum_tag", bits: 8, variants: 3 }, { kind: "unsigned", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "enum_tag", bits: 8, variants: 4 }, { kind: "f32", bits: 32 }, { kind: "f32", bits: 32 }, { kind: "bool", bits: 1 }, { kind: "f32", bits: 32 }], failure: { start: 1, count: 1 }, success: { start: 2, count: 8 } }, invoke: (...lanes) => task4Resume0(...lanes) },
+      { state: 2, range: { start: 29, count: 24 }, pending: { start: 29, count: 1 }, frame: { start: 30, count: 23 }, delivery: { lanes: [{ kind: "enum_tag", bits: 8, variants: 3 }, { kind: "unsigned", bits: 32 }], failure: { start: 1, count: 1 }, success: { start: 2, count: 0 } }, invoke: (...lanes) => task4Resume1(...lanes) },
+      { state: 3, range: { start: 53, count: 14 }, pending: { start: 53, count: 1 }, frame: { start: 54, count: 13 }, delivery: { lanes: [{ kind: "enum_tag", bits: 8, variants: 3 }, { kind: "unsigned", bits: 32 }], failure: { start: 1, count: 1 }, success: { start: 2, count: 0 } }, invoke: (...lanes) => task4Resume2(...lanes) },
+    ],
+  });
+  return Object.freeze(registry);
+}
+
+export { createHostCompletionBroker } from "./host-completion.js";

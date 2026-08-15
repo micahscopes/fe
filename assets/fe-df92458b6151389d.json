@@ -9,14 +9,14 @@
     "build": "workspace"
   },
   "target": "wasm",
-  "source_set_sha256": "0fff962e155a573f2f68c36aadb9c0fb00802da15182338e01acc7d255c27341",
+  "source_set_sha256": "34ded2ed848fef4a38499639bda348428451bba157f4f1d9cb822b8e48b15974",
   "source_dependencies": {
     "version": 1,
     "root": "file:///workspace/fe-worktrees/mb2/demos/sketches/event_studio/src/lib.fe",
     "sources": [
       {
         "url": "file:///workspace/fe-worktrees/mb2/demos/sketches/event_studio/src/lib.fe",
-        "sha256": "949036fcc94e20662c92decc527f758134004d0ae81c9579cffa72985da627ff"
+        "sha256": "b46823e6c4def63a383e4aa62fdcfbc42a31e6c721613e23dd83a5058717c54b"
       }
     ]
   },
@@ -285,9 +285,9 @@
       "name": "module.wasm",
       "kind": "wasm_module",
       "media_type": "application/wasm",
-      "sha256": "049ac9be558d6b7b239633d12805029663e8313845eac32d8f58013cedd07065",
-      "byte_len": 267826,
-      "url": "assets/fe-049ac9be558d6b7b.wasm"
+      "sha256": "a8cefe356152a6d5f26a15ff91da0d0a0628a8cc9363a280cace9138be4522be",
+      "byte_len": 426178,
+      "url": "assets/fe-a8cefe356152a6d5.wasm"
     }
   ]
 }

@@ -6,9 +6,10 @@
 //! application callback or hidden host-side reactive graph.
 
 use core::actor::{ActorSink, ScopedTask}
+use core::Fn
 use core::pending::{Suspend, TaskOutcome, Timer}
-use std::actor::{ActorMessage, BrowserActorSink}
-use std::reactive::{Event, EventSource, Stream}
+use std::actor::{ActorMessage, BrowserActorSink, forward_to_actor}
+use std::reactive::{BoundedQueue, Event, EventSource, Latest, OverflowPolicy, Stream, latest}
 use std::host::{HostTimer, Resumable, sleep}
 use std::wasm::WasmBackend
 use std::web::component_events::{
@@ -53,7 +54,7 @@ use std::web::page::{
 }
 
 const PATCH_CAPACITY: u32 = 1024
-const VIEW_CAPACITY: usize = 160
+const VIEW_CAPACITY: usize = 184
 const FRAME_PACE_MS: u64 = 500
 
 extern {
@@ -92,6 +93,8 @@ struct StudioTask {
     document_hidden: bool,
     frame_timestamp: f32,
     error: u32,
+    bounded_drops: u32,
+    latest_value: u32,
 }
 
 impl Copy for StudioTask {}
@@ -112,6 +115,8 @@ struct StudioParts {
     frame_events: Part<Text>,
     timer_events: Part<Text>,
     frame_timestamp: Part<Text>,
+    bounded_drops: Part<Text>,
+    latest_value: Part<Text>,
     failures: Part<Text>,
 }
 
@@ -132,6 +137,8 @@ pub struct StudioState {
     pub frame_events: u32,
     pub timer_events: u32,
     pub frame_timestamp: u32,
+    pub bounded_drops: u32,
+    pub latest_value: u32,
     pub failures: u32,
     pub connected: bool,
 }
@@ -177,6 +184,8 @@ fn viewport_task(viewport: Viewport) -> StudioTask {
         document_hidden: false,
         frame_timestamp: 0.0,
         error: 0,
+        bounded_drops: 0,
+        latest_value: 0,
     }
 }
 
@@ -193,6 +202,8 @@ fn pointer_task(sample: PointerSample) -> StudioTask {
         document_hidden: false,
         frame_timestamp: 0.0,
         error: 0,
+        bounded_drops: 0,
+        latest_value: 0,
     }
 }
 
@@ -209,6 +220,8 @@ fn wheel_task(sample: WheelSample) -> StudioTask {
         document_hidden: false,
         frame_timestamp: 0.0,
         error: 0,
+        bounded_drops: 0,
+        latest_value: 0,
     }
 }
 
@@ -228,6 +241,8 @@ fn visibility_task(visibility: DocumentVisibility) -> StudioTask {
         },
         frame_timestamp: 0.0,
         error: 0,
+        bounded_drops: 0,
+        latest_value: 0,
     }
 }
 
@@ -244,10 +259,24 @@ fn frame_task(frame: AnimationFrame) -> StudioTask {
         document_hidden: false,
         frame_timestamp: frame.timestamp,
         error: 0,
+        bounded_drops: 0,
+        latest_value: 0,
     }
 }
 
-fn timer_task() -> StudioTask {
+fn timer_task(sequence: u32) -> StudioTask {
+    // A deterministic four-value producer burst enters a three-slot Fe queue.
+    // This is an explicit acceptance probe for policy semantics, not a claim
+    // that browser pointer delivery is already concurrently buffered in Fe.
+    let base = sequence * 4
+    let mut queue: BoundedQueue<u32> = BoundedQueue::new(initial: 0, capacity: 3)
+    queue = queue.offer(value: base + 1, overflow: OverflowPolicy::DropNewest)
+    queue = queue.offer(value: base + 2, overflow: OverflowPolicy::DropNewest)
+    queue = queue.offer(value: base + 3, overflow: OverflowPolicy::DropNewest)
+    queue = queue.offer(value: base + 4, overflow: OverflowPolicy::DropNewest)
+    let mut newest: Latest<u32> = latest(initial: 0)
+    newest = newest.offer(value: base + 1, overflow: OverflowPolicy::KeepLatest)
+    newest = newest.offer(value: base + 4, overflow: OverflowPolicy::KeepLatest)
     StudioTask {
         viewport_width: 0.0,
         viewport_height: 0.0,
@@ -260,6 +289,8 @@ fn timer_task() -> StudioTask {
         document_hidden: false,
         frame_timestamp: 0.0,
         error: 0,
+        bounded_drops: queue.dropped(),
+        latest_value: newest.front().value_or(fallback: 0),
     }
 }
 
@@ -276,6 +307,75 @@ fn failed_task(error: u32) -> StudioTask {
         document_hidden: false,
         frame_timestamp: 0.0,
         error: error,
+        bounded_drops: 0,
+        latest_value: 0,
+    }
+}
+
+fn task_message(target: StudioAction, payload: StudioTask) -> ComponentEvent<
+    StudioAction,
+    StudioTask,
+> {
+    ComponentEvent<StudioAction, StudioTask>::task_payload(target: target, payload: payload)
+}
+
+struct ViewportMessage {}
+struct PointerMessage {}
+struct WheelMessage {}
+struct VisibilityMessage {}
+struct FailureMessage {}
+
+impl Copy for ViewportMessage {}
+impl Copy for PointerMessage {}
+impl Copy for WheelMessage {}
+impl Copy for VisibilityMessage {}
+impl Copy for FailureMessage {}
+
+impl Fn<Viewport, ComponentEvent<StudioAction, StudioTask>> for ViewportMessage {
+    fn call(self, _ viewport: own Viewport) -> ComponentEvent<StudioAction, StudioTask> {
+        task_message(
+            target: StudioAction::ViewportObserved,
+            payload: viewport_task(viewport),
+        )
+    }
+}
+
+impl Fn<PointerSample, ComponentEvent<StudioAction, StudioTask>> for PointerMessage {
+    fn call(self, _ sample: own PointerSample) -> ComponentEvent<StudioAction, StudioTask> {
+        task_message(
+            target: StudioAction::PointerObserved,
+            payload: pointer_task(sample),
+        )
+    }
+}
+
+impl Fn<WheelSample, ComponentEvent<StudioAction, StudioTask>> for WheelMessage {
+    fn call(self, _ sample: own WheelSample) -> ComponentEvent<StudioAction, StudioTask> {
+        task_message(
+            target: StudioAction::WheelObserved,
+            payload: wheel_task(sample),
+        )
+    }
+}
+
+impl Fn<DocumentVisibility, ComponentEvent<StudioAction, StudioTask>> for VisibilityMessage {
+    fn call(self, _ visibility: own DocumentVisibility) -> ComponentEvent<
+        StudioAction,
+        StudioTask,
+    > {
+        task_message(
+            target: StudioAction::VisibilityObserved,
+            payload: visibility_task(visibility),
+        )
+    }
+}
+
+impl Fn<u32, ComponentEvent<StudioAction, StudioTask>> for FailureMessage {
+    fn call(self, _ error: own u32) -> ComponentEvent<StudioAction, StudioTask> {
+        task_message(
+            target: StudioAction::StreamFailed,
+            payload: failed_task(error),
+        )
     }
 }
 
@@ -285,10 +385,7 @@ uses (
     suspend: Suspend<WasmBackend, u32>,
 )
 {
-    let event = ComponentEvent<StudioAction, StudioTask>::task_payload(
-        target: target,
-        payload: payload,
-    )
+    let event = task_message(target: target, payload: payload)
     let outcome: TaskOutcome<u32, ()> = ActorMessage::new(event).send()
     match outcome {
         TaskOutcome::Success(_,) => true,
@@ -304,45 +401,7 @@ uses (
     suspend: Suspend<WasmBackend, u32>,
 )
 {
-    let stream: Stream<Viewport> = Stream::new()
-    let mut subscription = stream.subscribe()
-    let mut observations: u32 = 0
-    let mut running = true
-    while running {
-        let next = stream.next_ready(subscription)
-        subscription = next.0
-        match next.1 {
-            Event::Occurrence(viewport,) => {
-                let delivered = report(
-                    target: StudioAction::ViewportObserved,
-                    payload: viewport_task(viewport),
-                )
-                if delivered {
-                    observations = observations + 1
-                    running = true
-                } else {
-                    running = false
-                }
-            },
-            Event::Absent => {},
-            Event::End => {
-                running = false
-            },
-            Event::Failure(error,) => {
-                report(
-                    target: StudioAction::StreamFailed,
-                    payload: failed_task(error),
-                )
-                running = false
-            },
-            Event::Cancelled => {
-                stream.cancel(subscription)
-                return observations
-            },
-        }
-    }
-    stream.cancel(subscription)
-    observations
+    forward_to_actor(map: ViewportMessage {}, map_failure: FailureMessage {}).delivered
 }
 
 fn observe_pointers() -> u32
@@ -352,42 +411,7 @@ uses (
     suspend: Suspend<WasmBackend, u32>,
 )
 {
-    let stream: Stream<PointerSample> = Stream::new()
-    let mut subscription = stream.subscribe()
-    let mut observations: u32 = 0
-    let mut running = true
-    while running {
-        let next = stream.next_ready(subscription)
-        subscription = next.0
-        match next.1 {
-            Event::Occurrence(sample,) => {
-                running = report(
-                    target: StudioAction::PointerObserved,
-                    payload: pointer_task(sample),
-                )
-                if running {
-                    observations = observations + 1
-                }
-            },
-            Event::Absent => {},
-            Event::End => {
-                running = false
-            },
-            Event::Failure(error,) => {
-                report(
-                    target: StudioAction::StreamFailed,
-                    payload: failed_task(error),
-                )
-                running = false
-            },
-            Event::Cancelled => {
-                stream.cancel(subscription)
-                return observations
-            },
-        }
-    }
-    stream.cancel(subscription)
-    observations
+    forward_to_actor(map: PointerMessage {}, map_failure: FailureMessage {}).delivered
 }
 
 fn observe_wheels() -> u32
@@ -397,42 +421,7 @@ uses (
     suspend: Suspend<WasmBackend, u32>,
 )
 {
-    let stream: Stream<WheelSample> = Stream::new()
-    let mut subscription = stream.subscribe()
-    let mut observations: u32 = 0
-    let mut running = true
-    while running {
-        let next = stream.next_ready(subscription)
-        subscription = next.0
-        match next.1 {
-            Event::Occurrence(sample,) => {
-                running = report(
-                    target: StudioAction::WheelObserved,
-                    payload: wheel_task(sample),
-                )
-                if running {
-                    observations = observations + 1
-                }
-            },
-            Event::Absent => {},
-            Event::End => {
-                running = false
-            },
-            Event::Failure(error,) => {
-                report(
-                    target: StudioAction::StreamFailed,
-                    payload: failed_task(error),
-                )
-                running = false
-            },
-            Event::Cancelled => {
-                stream.cancel(subscription)
-                return observations
-            },
-        }
-    }
-    stream.cancel(subscription)
-    observations
+    forward_to_actor(map: WheelMessage {}, map_failure: FailureMessage {}).delivered
 }
 
 fn observe_visibility() -> u32
@@ -442,42 +431,7 @@ uses (
     suspend: Suspend<WasmBackend, u32>,
 )
 {
-    let stream: Stream<DocumentVisibility> = Stream::new()
-    let mut subscription = stream.subscribe()
-    let mut observations: u32 = 0
-    let mut running = true
-    while running {
-        let next = stream.next_ready(subscription)
-        subscription = next.0
-        match next.1 {
-            Event::Occurrence(visibility,) => {
-                running = report(
-                    target: StudioAction::VisibilityObserved,
-                    payload: visibility_task(visibility),
-                )
-                if running {
-                    observations = observations + 1
-                }
-            },
-            Event::Absent => {},
-            Event::End => {
-                running = false
-            },
-            Event::Failure(error,) => {
-                report(
-                    target: StudioAction::StreamFailed,
-                    payload: failed_task(error),
-                )
-                running = false
-            },
-            Event::Cancelled => {
-                stream.cancel(subscription)
-                return observations
-            },
-        }
-    }
-    stream.cancel(subscription)
-    observations
+    forward_to_actor(map: VisibilityMessage {}, map_failure: FailureMessage {}).delivered
 }
 
 /// Pull one animation frame only after the Fe timer interval has elapsed.
@@ -498,7 +452,10 @@ uses (
     while running {
         match sleep(milliseconds: FRAME_PACE_MS) {
             TaskOutcome::Success(_,) => {
-                running = report(target: StudioAction::TimerElapsed, payload: timer_task())
+                running = report(
+                    target: StudioAction::TimerElapsed,
+                    payload: timer_task(sequence: observations),
+                )
                 if running {
                     let next = stream.next_ready(subscription)
                     subscription = next.0
@@ -562,6 +519,8 @@ actor EventStudio {
     frame_events: u32,
     timer_events: u32,
     frame_timestamp: u32,
+    bounded_drops: u32,
+    latest_value: u32,
     failures: u32,
     connected: bool,
 
@@ -578,6 +537,12 @@ actor EventStudio {
             .text(value: ui_text(value: "Resize, point, touch, or "))
             .text(value: ui_text(value: "wheel: typed Fe streams own "))
             .text(value: ui_text(value: "update."))
+            .close()
+            .open(element: PageElement::Paragraph)
+            .attribute(value: PageAttribute::class(value: "event-studio-copy"))
+            .text(value: ui_text(value: "A deterministic Fe burst makes "))
+            .text(value: ui_text(value: "bounded drops and latest-value "))
+            .text(value: ui_text(value: "replacement visible."))
             .close()
             .open(element: PageElement::Div)
             .attribute(value: PageAttribute::class(value: "event-studio-grid"))
@@ -670,6 +635,20 @@ actor EventStudio {
             .close()
             .close()
             .open(element: PageElement::Paragraph)
+            .text(value: ui_text(value: "bounded drops · "))
+            .open(element: PageElement::Strong)
+            .attribute(value: PageAttribute::node(value: ui.bounded_drops))
+            .text(value: ui_text(value: "0"))
+            .close()
+            .close()
+            .open(element: PageElement::Paragraph)
+            .text(value: ui_text(value: "latest sample · "))
+            .open(element: PageElement::Strong)
+            .attribute(value: PageAttribute::node(value: ui.latest_value))
+            .text(value: ui_text(value: "0"))
+            .close()
+            .close()
+            .open(element: PageElement::Paragraph)
             .text(value: ui_text(value: "observations · "))
             .open(element: PageElement::Strong)
             .attribute(value: PageAttribute::node(value: ui.observations))
@@ -705,6 +684,8 @@ actor EventStudio {
             frame_events: 0,
             timer_events: 0,
             frame_timestamp: 0,
+            bounded_drops: 0,
+            latest_value: 0,
             failures: 0,
             connected: false,
         }
@@ -777,6 +758,8 @@ actor EventStudio {
         let mut frame_events = self.frame_events
         let mut timer_events = self.timer_events
         let mut frame_timestamp = self.frame_timestamp
+        let mut bounded_drops = self.bounded_drops
+        let mut latest_value = self.latest_value
         let mut failures = self.failures
         let mut connected = self.connected
         match event.kind {
@@ -811,7 +794,11 @@ actor EventStudio {
                             frame_timestamp = bounded_dimension(value: event.task.frame_timestamp)
                             frame_events = frame_events + 1
                         }
-                        StudioAction::TimerElapsed => { timer_events = timer_events + 1 }
+                        StudioAction::TimerElapsed => {
+                            timer_events = timer_events + 1
+                            bounded_drops = bounded_drops + event.task.bounded_drops
+                            latest_value = event.task.latest_value
+                        }
                         StudioAction::StreamFailed => { failures = failures + 1 }
                         _ => {}
                     }
@@ -834,6 +821,8 @@ actor EventStudio {
             frame_events: frame_events,
             timer_events: timer_events,
             frame_timestamp: frame_timestamp,
+            bounded_drops: bounded_drops,
+            latest_value: latest_value,
             failures: failures,
             connected: connected,
         }
@@ -857,6 +846,8 @@ actor EventStudio {
             .set_u32_text(target: ui.frame_events, value: self.frame_events)
             .set_u32_text(target: ui.timer_events, value: self.timer_events)
             .set_u32_text(target: ui.frame_timestamp, value: self.frame_timestamp)
+            .set_u32_text(target: ui.bounded_drops, value: self.bounded_drops)
+            .set_u32_text(target: ui.latest_value, value: self.latest_value)
             .set_u32_text(target: ui.failures, value: self.failures)
         ComponentPatch::new(
             visible_mask: 0,
