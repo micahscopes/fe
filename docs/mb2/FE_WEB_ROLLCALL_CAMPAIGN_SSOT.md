@@ -214,10 +214,14 @@ Legend:
   imaginary quotient 19, and remainders 12. One nominal Fe entry checks the
   whole row, and its gate accepts a terminal row while reporting exactly the
   three deliberately malformed columns in a combined adversarial row.
-  Public-claim validation/comparison, the domain-separated Poseidon trace
-  commitment, composition, and FRI remain pending. The reusable field API's
-  SPIR-V helper-call seam and permutation lift also remain open. No trace root
-  is claimed yet. This is executable initial AIR evidence rather than a proof.
+  A separate cheap Fe verifier boundary validates the canonical public point
+  and bound, terminal step, `trace_length = terminal_step + 1`, and exact
+  next-power-of-two domain without replaying the orbit. Its gate rejects each
+  public/shape mutation independently. Cryptographically binding that metadata,
+  the domain-separated Poseidon trace commitment, composition, and FRI remain
+  pending. The reusable field API's SPIR-V helper-call seam and permutation
+  lift also remain open. No trace root is claimed yet. This is executable
+  initial AIR evidence rather than a proof.
 - [ ] Produce a succinct proof whose verifier is demonstrably cheaper than
   replaying the orbit.
 - [ ] Define a typed proof encoding and prove browser/native verifier parity,

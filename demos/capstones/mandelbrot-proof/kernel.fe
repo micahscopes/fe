@@ -137,6 +137,18 @@ fn next_power_of_two(_ value: u32) -> u32 {
     result
 }
 
+fn public_proof_domain_holds(
+    _ claim: EscapesByQ12,
+    _ terminal_step: u32,
+    _ trace_length: u32,
+    _ padded_length: u32,
+) -> bool {
+    if !claim.is_valid() || terminal_step > claim.bound { return false }
+    let expected_trace_length = terminal_step + 1
+    trace_length == expected_trace_length
+        && padded_length == next_power_of_two(expected_trace_length)
+}
+
 fn air_residuals(_ row: EscapeAirRow) -> EscapeAirResiduals {
     let x: i64 = row.semantic.z.re.downcast_truncate()
     let y: i64 = row.semantic.z.im.downcast_truncate()
@@ -559,6 +571,22 @@ pub fn escape_proof_shape_q12(
         shape.trace_length,
         shape.padded_length,
     )
+}
+
+/// Cheap verifier boundary for public claim and trace-domain metadata. This
+/// validates shape without replaying the orbit; AIR first/pair/last constraints
+/// establish that the committed trace actually reaches the alleged terminal
+/// step.
+pub fn escape_public_proof_domain_holds_q12(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ bound: u32,
+    _ terminal_step: u32,
+    _ trace_length: u32,
+    _ padded_length: u32,
+) -> u32 {
+    let claim = EscapesByQ12::new(c_re_q12, c_im_q12, bound)
+    if public_proof_domain_holds(claim, terminal_step, trace_length, padded_length) { 1 } else { 0 }
 }
 
 /// Padded row projection ordered as `(valid, active, terminal)` followed by

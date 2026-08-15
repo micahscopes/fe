@@ -674,6 +674,30 @@ fn wasm_proof_shape(
     }
 }
 
+fn wasm_public_proof_domain_holds(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    c_re: i32,
+    c_im: i32,
+    bound: u32,
+    shape: ProofShape,
+) -> bool {
+    call_words(
+        store,
+        instance,
+        "escape_public_proof_domain_holds_q12",
+        &[
+            c_re,
+            c_im,
+            bound as i32,
+            shape.terminal_step as i32,
+            shape.trace_length as i32,
+            shape.padded_length as i32,
+        ],
+        1,
+    ) == [1]
+}
+
 fn wasm_proof_row(
     store: &mut wasmtime::Store<()>,
     instance: &wasmtime::Instance,
@@ -965,6 +989,17 @@ fn fe_bounded_escape_witness_matches_independent_i64_model() {
         );
 
         if expected_shape.valid {
+            assert!(
+                wasm_public_proof_domain_holds(
+                    &mut store,
+                    &instance,
+                    c_re,
+                    c_im,
+                    bound,
+                    expected_shape,
+                ),
+                "public proof domain ({c_re}, {c_im}, {bound})"
+            );
             assert!(expected_shape.padded_length.is_power_of_two());
             assert!(expected_shape.padded_length >= expected_shape.trace_length);
             assert!(expected_shape.padded_length < expected_shape.trace_length * 2);
@@ -1151,6 +1186,22 @@ fn fe_bounded_escape_witness_matches_independent_i64_model() {
             !wasm_proof_row(&mut store, &instance, c_re, c_im, bound, 0).valid,
             "an invalid claim cannot materialize proof rows"
         );
+        assert!(
+            !wasm_public_proof_domain_holds(
+                &mut store,
+                &instance,
+                c_re,
+                c_im,
+                bound,
+                ProofShape {
+                    valid: true,
+                    terminal_step: 0,
+                    trace_length: 1,
+                    padded_length: 1,
+                },
+            ),
+            "an invalid public claim cannot acquire a proof domain"
+        );
     }
 
     let mut state = 0x243f_6a88u32;
@@ -1210,6 +1261,54 @@ fn fe_bounded_escape_witness_matches_independent_i64_model() {
         !wasm_pair_holds(&mut store, &instance, -3048, 2216, 0, base, next),
         "Fe verifier must reject a bound smaller than the directed pair"
     );
+
+    let valid_domain = reference_proof_shape(4095, 4095, 2);
+    assert!(valid_domain.valid);
+    for (label, c_re, c_im, bound, shape) in [
+        ("point", 4096, 4095, 2, valid_domain),
+        (
+            "bound",
+            4095,
+            4095,
+            valid_domain.terminal_step - 1,
+            valid_domain,
+        ),
+        (
+            "terminal step",
+            4095,
+            4095,
+            2,
+            ProofShape {
+                terminal_step: valid_domain.terminal_step - 1,
+                ..valid_domain
+            },
+        ),
+        (
+            "trace length",
+            4095,
+            4095,
+            2,
+            ProofShape {
+                trace_length: valid_domain.trace_length + 1,
+                ..valid_domain
+            },
+        ),
+        (
+            "padded length",
+            4095,
+            4095,
+            2,
+            ProofShape {
+                padded_length: valid_domain.padded_length * 2,
+                ..valid_domain
+            },
+        ),
+    ] {
+        assert!(
+            !wasm_public_proof_domain_holds(&mut store, &instance, c_re, c_im, bound, shape,),
+            "public proof domain must reject altered {label}"
+        );
+    }
 
     let mut noncanonical_real = base;
     noncanonical_real.q_re -= 1;

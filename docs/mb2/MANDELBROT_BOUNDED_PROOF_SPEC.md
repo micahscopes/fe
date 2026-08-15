@@ -115,10 +115,13 @@ magnitude 31; real and imaginary quotients 18 and 19; and each remainder 12.
 One nominal Fe entry evaluates all ten column groups. The independent gate
 accepts a real terminal row and checks that a combined malformed row reports
 exactly its negative-zero coordinate, 4096 remainder, and premature terminal
-groups. Public claim validity remains an explicit verifier boundary: it must
-check the canonical point box and bound before accepting a proof. The accepted
-point already feeds the field transition constraints; the bound and committed
-trace-shape metadata still need their verifier binding.
+groups. `escape_public_proof_domain_holds_q12` is the explicit cheap verifier
+boundary. Without orbit replay, it checks the canonical point box and bound,
+requires the alleged terminal step not to exceed that bound, binds semantic
+length to `terminal_step + 1`, and derives the exact next-power-of-two domain.
+The gate rejects mutations of every input category. The accepted point already
+feeds the field transition constraints. Bound and shape still need
+cryptographic binding through the pending transcript.
 
 The integer constraint evaluator rejects any alleged row whose coordinate
 magnitude exceeds 24576 before evaluating the doubled cross-product. This is
