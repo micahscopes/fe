@@ -51,6 +51,8 @@
 //! checked-pure.
 
 use core::Fn
+use core::backend::Backend
+use core::pending::Pending
 
 /// A Signal: denotationally `time -> T`, sampled. PURE BY CONSTRUCTION.
 ///
@@ -216,6 +218,25 @@ pub struct Cancelled { pub consumed: u32 }
 pub trait EventSource<T> {
     fn subscribe(mut self) -> Subscription<T>
     fn next(mut self, _ subscription: own Subscription<T>) -> (Subscription<T>, Event<T>)
+    fn cancel(mut self, _ subscription: own Subscription<T>) -> Cancelled
+}
+
+/// Begin-shaped asynchronous source authority over the shared affine pending
+/// rail.
+///
+/// `EventSource::next` is intentionally convenient for serialized consumers,
+/// but it hides the pending pull inside its handler. A producer/consumer loop
+/// must be able to keep that pull alive while independently awaiting a sink.
+/// `AsyncEventSource` exposes exactly that control edge: `next_begin` consumes
+/// the subscription, returns its sole successor, and mints one typed pending
+/// observation. It does not select, buffer, schedule, or interpret failures;
+/// those remain visible Fe policy in the consumer.
+pub trait AsyncEventSource<B: Backend, T> {
+    fn subscribe(mut self) -> Subscription<T>
+    fn next_begin(
+        mut self,
+        _ subscription: own Subscription<T>,
+    ) -> (Subscription<T>, Pending<B, T>)
     fn cancel(mut self, _ subscription: own Subscription<T>) -> Cancelled
 }
 

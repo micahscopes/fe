@@ -41,7 +41,7 @@
 // composes into the trait's `wait<T> -> T`; the host client only ever instantiates
 // it at `T = u64`, where it monomorphizes to the `wait(i32) -> i64` import.
 
-use core::pending::{Pending, RaceOutcome, TaskOutcome}
+use core::pending::{Pending, RaceOutcome, SelectOutcome, TaskOutcome}
 use ingot::wasm::WasmBackend
 
 /// Module `fe:host` (broker-serviced host-completion lane): read the clock, mint a
@@ -77,6 +77,15 @@ extern {
         _ left: Pending<WasmBackend, T>,
         _ right: Pending<WasmBackend, T>,
     ) -> Pending<WasmBackend, RaceOutcome<T>>
+
+    /// Consume two heterogeneous broker tokens and mint one token completed by
+    /// the first success. Unlike `race_begin`, the fixed host returns the
+    /// still-affine loser inside `SelectOutcome`; child failure/cancellation is
+    /// side-tagged for Fe and cancels the loser.
+    pub unsafe fn select_begin<E, L, R>(
+        _ left: Pending<WasmBackend, L>,
+        _ right: Pending<WasmBackend, R>,
+    ) -> Pending<WasmBackend, SelectOutcome<WasmBackend, E, L, R>>
 
     /// Block the calling agent until the cell `pending` is READY, DELIVERING its
     /// `u64` payload (interop 4.1: `Atomics.wait` on the status slot, then read the

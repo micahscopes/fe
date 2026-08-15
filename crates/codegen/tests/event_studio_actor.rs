@@ -85,6 +85,7 @@ fn reduce(mut model: Model, event: Event) -> Model {
                 model.pointer_x = bounded_position(event.pointer_x);
                 model.pointer_y = bounded_position(event.pointer_y);
                 model.pointer_events += 1;
+                model.bounded_drops = event.bounded_drops;
             }
             3 => {
                 model.pointer_x = bounded_position(event.pointer_x);
@@ -102,7 +103,6 @@ fn reduce(mut model: Model, event: Event) -> Model {
             }
             7 => {
                 model.timer_events += 1;
-                model.bounded_drops += event.bounded_drops;
                 model.latest_value = event.latest_value;
             }
             _ => {}
@@ -229,6 +229,13 @@ fn event_studio_matches_independent_browser_stream_and_lifecycle_oracle() {
         .func_wrap("fe:host", "sleep_begin", |_milliseconds: i64| -> i32 { 0 })
         .unwrap();
     linker
+        .func_wrap(
+            "fe:host",
+            "select_begin",
+            |_left: i32, _right: i32| -> i32 { 0 },
+        )
+        .unwrap();
+    linker
         .func_wrap("fe:web-component-events", "pointer_begin", || -> i32 { 0 })
         .unwrap();
     linker
@@ -290,6 +297,7 @@ fn event_studio_matches_independent_browser_stream_and_lifecycle_oracle() {
             target: 2,
             pointer_x: 123.75,
             pointer_y: 222.5,
+            bounded_drops: 2,
             ..Event::default()
         },
         Event {
@@ -314,7 +322,7 @@ fn event_studio_matches_independent_browser_stream_and_lifecycle_oracle() {
         Event {
             kind: 13,
             target: 7,
-            bounded_drops: 1,
+            bounded_drops: 0,
             latest_value: 4,
             ..Event::default()
         },

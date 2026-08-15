@@ -8,9 +8,11 @@
 
 use core::actor::ActorSink
 use core::Fn
-use core::pending::{Pending, Suspend, TaskOutcome}
+use core::pending::{Pending, Select, SelectOutcome, Suspend, TaskOutcome}
 use ingot::wasm::WasmBackend
-use super::reactive::{Event, EventSource, Scan, Stream}
+use super::reactive::{
+    AsyncEventSource, BoundedQueue, Event, EventSource, OverflowPolicy, Scan, Stream,
+}
 use raw::send_begin as raw_send_begin
 
 pub struct BrowserActorSink {}
@@ -58,6 +60,18 @@ impl Copy for ForwardTerminal {}
 pub struct ForwardReport { pub delivered: u32, pub error: u32, pub terminal: ForwardTerminal }
 
 impl Copy for ForwardReport {}
+
+/// Observable completion of a genuinely concurrent bounded forwarding scope.
+/// `dropped` is the queue policy's cumulative decision, not a host listener or
+/// promise statistic.
+pub struct BufferedForwardReport {
+    pub delivered: u32,
+    pub dropped: u32,
+    pub error: u32,
+    pub terminal: ForwardTerminal,
+}
+
+impl Copy for BufferedForwardReport {}
 
 struct CountDelivered {}
 
@@ -145,4 +159,204 @@ uses (
     }
     stream.cancel(subscription)
     ForwardReport { delivered: delivered.state(), error: error, terminal: terminal }
+}
+
+/// Forward an asynchronous source through a bounded Fe-owned queue while one
+/// actor delivery remains independently in flight.
+///
+/// The source pull and sink send are heterogeneous affine `Pending` values.
+/// `Select` returns the loser on success, so repeated source wins can fill the
+/// queue without cancelling or restarting the sink, and a sink win preserves
+/// the already-attached source listener. Admission, eviction, ordering,
+/// delivery accounting, terminal classification, and failure mapping all run
+/// here in Fe. The fixed host owns only promise/listener realization and token
+/// arbitration.
+pub fn buffer_to_actor<
+    T: Copy,
+    E: Copy,
+    F: Fn<(T, u32), E> + Copy,
+    G: Fn<u32, E> + Copy,
+>(
+    _ initial: T,
+    _ capacity: u32,
+    _ overflow: OverflowPolicy,
+    _ map: F,
+    _ map_failure: G,
+) -> BufferedForwardReport
+uses (
+    source: mut AsyncEventSource<WasmBackend, T>,
+    sink: mut ActorSink<WasmBackend, E>,
+    select: mut Select<WasmBackend, u32>,
+    suspend: Suspend<WasmBackend, u32>,
+)
+{
+    let mut subscription = source.subscribe()
+    let (first_subscription, first_pending) = source.next_begin(subscription)
+    subscription = first_subscription
+    let first: TaskOutcome<u32, T> = suspend.suspend(first_pending)
+    match first {
+        TaskOutcome::Success(first_value,) => {
+            // The value handed to the sink is no longer part of the waiting
+            // backlog. This distinction is essential for `KeepLatest`: a
+            // queued overflow may evict the oldest *waiting* value, but can
+            // never retract the value already accepted by an in-flight send.
+            let mut queue = BoundedQueue::new(initial: initial, capacity: capacity)
+            let mut delivered: u32 = 0
+            let mut error: u32 = 0
+            let mut terminal = ForwardTerminal::SourceEnd
+
+            let (next_subscription, next_source) = source.next_begin(subscription)
+            subscription = next_subscription
+            let mut source_pending = next_source
+            let mut sink_pending = sink.send_begin(
+                map.call((first_value, queue.dropped()))
+            )
+
+            while true {
+                let selected_pending = select.select(source_pending, sink_pending)
+                let selected: TaskOutcome<
+                    u32,
+                    SelectOutcome<WasmBackend, u32, T, ()>,
+                > = suspend.suspend(selected_pending)
+                match selected {
+                    TaskOutcome::Success(selection,) => match selection {
+                        SelectOutcome::Left(source_winner,) => {
+                            queue = queue.offer(
+                                value: source_winner.value,
+                                overflow: overflow,
+                            )
+                            let (successor, next_pending) = source.next_begin(subscription)
+                            subscription = successor
+                            source_pending = next_pending
+                            sink_pending = source_winner.right
+                        },
+                        SelectOutcome::Right(sink_winner,) => {
+                            delivered = delivered + 1
+                            if queue.queued() > 0 {
+                                let next_value = queue.front().value_or(fallback: initial)
+                                queue = queue.consume()
+                                source_pending = sink_winner.left
+                                sink_pending = sink.send_begin(
+                                    map.call((next_value, queue.dropped()))
+                                )
+                            } else {
+                                let observed: TaskOutcome<u32, T> =
+                                    suspend.suspend(sink_winner.left)
+                                match observed {
+                                    TaskOutcome::Success(value,) => {
+                                        let (successor, next_pending) =
+                                            source.next_begin(subscription)
+                                        subscription = successor
+                                        source_pending = next_pending
+                                        sink_pending = sink.send_begin(
+                                            map.call((value, queue.dropped()))
+                                        )
+                                    },
+                                    TaskOutcome::Failure(source_error,) => {
+                                        error = source_error
+                                        let failure = ActorMessage::new(
+                                            event: map_failure.call(source_error)
+                                        ).send()
+                                        match failure {
+                                            TaskOutcome::Success(_,) => {
+                                                terminal = ForwardTerminal::SourceFailure
+                                            },
+                                            TaskOutcome::Failure(sink_error,) => {
+                                                error = sink_error
+                                                terminal = ForwardTerminal::SinkFailure
+                                            },
+                                            TaskOutcome::Cancelled => {
+                                                terminal = ForwardTerminal::SinkCancelled
+                                            },
+                                        }
+                                        break
+                                    },
+                                    TaskOutcome::Cancelled => {
+                                        terminal = ForwardTerminal::SourceCancelled
+                                        break
+                                    },
+                                }
+                            }
+                        },
+                        SelectOutcome::LeftFailure(source_error,) => {
+                            error = source_error
+                            let failure = ActorMessage::new(
+                                event: map_failure.call(source_error)
+                            ).send()
+                            match failure {
+                                TaskOutcome::Success(_,) => {
+                                    terminal = ForwardTerminal::SourceFailure
+                                },
+                                TaskOutcome::Failure(sink_error,) => {
+                                    error = sink_error
+                                    terminal = ForwardTerminal::SinkFailure
+                                },
+                                TaskOutcome::Cancelled => {
+                                    terminal = ForwardTerminal::SinkCancelled
+                                },
+                            }
+                            break
+                        },
+                        SelectOutcome::RightFailure(sink_error,) => {
+                            error = sink_error
+                            terminal = ForwardTerminal::SinkFailure
+                            break
+                        },
+                        SelectOutcome::LeftCancelled => {
+                            terminal = ForwardTerminal::SourceCancelled
+                            break
+                        },
+                        SelectOutcome::RightCancelled => {
+                            terminal = ForwardTerminal::SinkCancelled
+                            break
+                        },
+                    },
+                    TaskOutcome::Failure(select_error,) => {
+                        error = select_error
+                        terminal = ForwardTerminal::SourceFailure
+                        break
+                    },
+                    TaskOutcome::Cancelled => {
+                        terminal = ForwardTerminal::SourceCancelled
+                        break
+                    },
+                }
+            }
+            source.cancel(subscription)
+            BufferedForwardReport {
+                delivered: delivered,
+                dropped: queue.dropped(),
+                error: error,
+                terminal: terminal,
+            }
+        },
+        TaskOutcome::Failure(source_error,) => {
+            let failure = ActorMessage::new(event: map_failure.call(source_error)).send()
+            let mut error = source_error
+            let terminal = match failure {
+                TaskOutcome::Success(_,) => ForwardTerminal::SourceFailure,
+                TaskOutcome::Failure(sink_error,) => {
+                    error = sink_error
+                    ForwardTerminal::SinkFailure
+                },
+                TaskOutcome::Cancelled => ForwardTerminal::SinkCancelled,
+            }
+            source.cancel(subscription)
+            BufferedForwardReport {
+                delivered: 0,
+                dropped: 0,
+                error: error,
+                terminal: terminal,
+            }
+        },
+        TaskOutcome::Cancelled => {
+            source.cancel(subscription)
+            BufferedForwardReport {
+                delivered: 0,
+                dropped: 0,
+                error: 0,
+                terminal: ForwardTerminal::SourceCancelled,
+            }
+        },
+    }
 }

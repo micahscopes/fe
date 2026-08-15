@@ -9,6 +9,7 @@ const bool = Object.freeze({ kind: "bool", bits: 1 });
 const state = Object.freeze({ kind: "enum_tag", bits: 8, variants: 2 });
 const outcome = Object.freeze({ kind: "enum_tag", bits: 8, variants: 3 });
 const race = Object.freeze({ kind: "enum_tag", bits: 8, variants: 2 });
+const selection = Object.freeze({ kind: "enum_tag", bits: 8, variants: 6 });
 const visibility = Object.freeze({ kind: "enum_tag", bits: 8, variants: 2 });
 const enum4 = Object.freeze({ kind: "enum_tag", bits: 8, variants: 4 });
 
@@ -68,6 +69,41 @@ function raceMachine(broker, delay) {
         if (tag === 0) return [0, BigInt(error), 0];
         if (tag === 2) return [0, 0n, 0];
         return [0, winner === 0 ? left : right + 10_000n, 0];
+      },
+    }],
+  });
+}
+
+function selectTerminalMachine(broker, delay) {
+  return createMaterializedTaskMachine({
+    input: [],
+    step: [state, u64, u32],
+    complete: { start: 1, count: 1 },
+    start() {
+      const receive = broker.imports["fe:host"].recv_begin();
+      const timer = broker.imports["fe:host"].sleep_begin(delay);
+      return [1, 0n, broker.imports["fe:host"].select_begin(receive, timer) >>> 0];
+    },
+    continuations: [{
+      state: 1,
+      range: { start: 2, count: 1 },
+      pending: { start: 2, count: 1 },
+      frame: { start: 3, count: 0 },
+      delivery: {
+        lanes: [outcome, u32, selection, u64, u32, u32, u64, u32, u32],
+        failure: { start: 1, count: 1 },
+        success: { start: 2, count: 7 },
+      },
+      invoke(tag, outerError, selected, leftValue, rightToken, leftToken,
+        rightValue, leftError, rightError) {
+        if (tag === 0) return [0, 10_000n + BigInt(outerError), 0];
+        if (tag === 2) return [0, 11_000n, 0];
+        if (selected === 0) return [0, leftValue + BigInt(rightToken), 0];
+        if (selected === 1) return [0, rightValue + BigInt(leftToken), 0];
+        if (selected === 2) return [0, 20_000n + BigInt(leftError), 0];
+        if (selected === 3) return [0, 30_000n + BigInt(rightError), 0];
+        if (selected === 4) return [0, 40_000n, 0];
+        return [0, 50_000n, 0];
       },
     }],
   });
@@ -598,6 +634,15 @@ describe("browser HostTimer/Recv completion broker", () => {
     const after = BigInt(Math.trunc(performance.now()));
     expect(timerWins[0] - 10_000n >= before).toBeTrue();
     expect(timerWins[0] - 10_000n <= after).toBeTrue();
+    expect(broker.activeCount()).toBe(0);
+    expect(broker.post(99n)).toBeFalse();
+  });
+
+  test("select side-tags child failure and cancels its unreachable loser", async () => {
+    const broker = createHostCompletionBroker();
+    const selected = broker.run(selectTerminalMachine(broker, 10_000n), []);
+    expect(broker.failNextReceive(7)).toBeTrue();
+    expect(await selected).toEqual([20_007n]);
     expect(broker.activeCount()).toBe(0);
     expect(broker.post(99n)).toBeFalse();
   });

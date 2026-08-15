@@ -4,6 +4,7 @@ use raw::{
     sleep_begin as raw_sleep_begin,
     recv_begin as raw_recv_begin,
     race_begin as raw_race_begin,
+    select_begin as raw_select_begin,
     wait as block_deliver,
     suspend as suspend_continuation,
 }
@@ -34,7 +35,10 @@ use raw::{
 // keeps the broker/fork completion graph acyclic (ruling R2) and is exactly why
 // these external sources may use the `Notify` door's keyhole while `Notify` itself
 // stays reserved (no Fe-side self-completion provider is admitted).
-pub use core::pending::{Pending, Race, RaceOutcome, TaskOutcome, Timer, Recv, Wait, Suspend}
+pub use core::pending::{
+    Pending, Race, RaceOutcome, Select, SelectOutcome, SelectedLeft, SelectedRight,
+    TaskOutcome, Timer, Recv, Wait, Suspend,
+}
 
 /// The host external-completion provider (control-effects CE-7): a ZST that
 /// provides the host-completion authorities on the wasm backend. It carries THREE
@@ -82,6 +86,16 @@ impl Race<WasmBackend> for Resumable {
         _ right: own Pending<WasmBackend, T>,
     ) -> Pending<WasmBackend, RaceOutcome<T>> {
         raw_race_begin(left, right)
+    }
+}
+
+impl Select<WasmBackend, u32> for Resumable {
+    fn select<L, R>(
+        mut self,
+        _ left: own Pending<WasmBackend, L>,
+        _ right: own Pending<WasmBackend, R>,
+    ) -> Pending<WasmBackend, SelectOutcome<WasmBackend, u32, L, R>> {
+        raw_select_begin(left, right)
     }
 }
 

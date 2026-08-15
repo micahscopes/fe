@@ -754,6 +754,205 @@ if (broker.activeCount() !== 0 || broker.cancelAll() !== 0) throw new Error("bro
 }
 
 #[test]
+fn fe_select_preserves_a_heterogeneous_loser_across_repeated_source_wins() {
+    const SOURCE: &str = r#"
+use core::actor::ActorSink
+use core::pending::{Recv, Select, SelectOutcome, Suspend, TaskOutcome}
+use std::actor::BrowserActorSink
+use std::host::{HostTimer, Resumable}
+use std::wasm::WasmBackend
+
+fn receive_twice_while_sink_is_busy(_ message: u32) -> u64
+uses (
+    receive: mut Recv<WasmBackend>,
+    sink: mut ActorSink<WasmBackend, u32>,
+    select: mut Select<WasmBackend, u32>,
+    suspend: Suspend<WasmBackend, u32>,
+)
+{
+    let first_receive = receive.recv_begin()
+    let sending = sink.send_begin(message)
+    let first_pending = select.select(first_receive, sending)
+    let first: TaskOutcome<u32, SelectOutcome<WasmBackend, u32, u64, ()>> =
+        suspend.suspend(first_pending)
+    match first {
+        TaskOutcome::Success(first_winner,) => match first_winner {
+            SelectOutcome::Left(first_selected,) => {
+                let second_receive = receive.recv_begin()
+                let second_pending = select.select(second_receive, first_selected.right)
+                let second: TaskOutcome<u32, SelectOutcome<WasmBackend, u32, u64, ()>> =
+                    suspend.suspend(second_pending)
+                match second {
+                    TaskOutcome::Success(second_winner,) => match second_winner {
+                        SelectOutcome::Left(second_selected,) => {
+                            let accepted: TaskOutcome<u32, ()> =
+                                suspend.suspend(second_selected.right)
+                            match accepted {
+                                TaskOutcome::Success(_,) => first_selected.value * 1000 + second_selected.value
+                                TaskOutcome::Failure(_,) => 70000
+                                TaskOutcome::Cancelled => 71000
+                            }
+                        }
+                        SelectOutcome::Right(second_selected,) => {
+                            let remaining: TaskOutcome<u32, u64> =
+                                suspend.suspend(second_selected.left)
+                            match remaining {
+                                TaskOutcome::Success(value,) => 72000 + value
+                                TaskOutcome::Failure(_,) => 72100
+                                TaskOutcome::Cancelled => 72200
+                            }
+                        }
+                        SelectOutcome::LeftFailure(_) => 72300
+                        SelectOutcome::RightFailure(_) => 72400
+                        SelectOutcome::LeftCancelled => 72500
+                        SelectOutcome::RightCancelled => 72600
+                    }
+                    TaskOutcome::Failure(_,) => 73000
+                    TaskOutcome::Cancelled => 74000
+                }
+            }
+            SelectOutcome::Right(first_selected,) => {
+                let remaining: TaskOutcome<u32, u64> =
+                    suspend.suspend(first_selected.left)
+                match remaining {
+                    TaskOutcome::Success(value,) => 75000 + value
+                    TaskOutcome::Failure(_,) => 75100
+                    TaskOutcome::Cancelled => 75200
+                }
+            }
+            SelectOutcome::LeftFailure(_) => 75300
+            SelectOutcome::RightFailure(_) => 75400
+            SelectOutcome::LeftCancelled => 75500
+            SelectOutcome::RightCancelled => 75600
+        }
+        TaskOutcome::Failure(_,) => 76000
+        TaskOutcome::Cancelled => 77000
+    }
+}
+
+pub fn select_task(_ message: u32) -> u64 {
+    with (
+        Recv<WasmBackend> = HostTimer {},
+        ActorSink<WasmBackend, u32> = BrowserActorSink {},
+        Select<WasmBackend, u32> = Resumable {},
+        Suspend<WasmBackend, u32> = Resumable {},
+    ) {
+        receive_twice_while_sink_is_busy(message)
+    }
+}
+"#;
+    if !std::process::Command::new("bun")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        return;
+    }
+
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///browser_host_select.fe").unwrap();
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(SOURCE.to_owned()));
+    let file = db.workspace().get(&db, &url).unwrap();
+    let top_mod = db.top_mod(file);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "select fixture diagnostics:\n{diagnostics}"
+    );
+    let entries = vec!["select_task".to_owned()];
+    let package = mir::build_wasm_runtime_package_for_entries(&db, top_mod, &entries).unwrap();
+    let adapters = materialized_task_adapters(&db, &package).unwrap();
+    assert_eq!(adapters.len(), 1);
+    assert_eq!(adapters[0].name, "select_task");
+    let adapter = emit_materialized_task_adapter_js(&adapters, "./materialized-task.js")
+        .unwrap()
+        .expect("public Fe select task emits a browser adapter");
+    let wasm =
+        compile_runtime_package_wasm_with_options(&db, &package, WasmCompileOptions::default())
+            .unwrap()
+            .bytes;
+    wasmparser::validate(&wasm).unwrap();
+    let imports = func_imports(&wasm);
+    assert!(imports.contains(&("fe:host".to_owned(), "select_begin".to_owned())));
+    assert!(imports.contains(&("fe:host".to_owned(), "recv_begin".to_owned())));
+    assert!(imports.contains(&("fe:actor".to_owned(), "send_begin".to_owned())));
+
+    let directory = tempfile::tempdir().unwrap();
+    let wasm_path = directory.path().join("host-select.wasm");
+    let task_runtime_path = directory.path().join("materialized-task.js");
+    let host_runtime_path = directory.path().join("host-completion.js");
+    let adapter_path = directory.path().join("task-adapter.mjs");
+    let test_path = directory.path().join("host-select-browser.mjs");
+    std::fs::write(&wasm_path, wasm).unwrap();
+    std::fs::write(&task_runtime_path, MATERIALIZED_TASK_RUNTIME_JS).unwrap();
+    std::fs::write(&host_runtime_path, HOST_COMPLETION_RUNTIME_JS).unwrap();
+    std::fs::write(&adapter_path, adapter).unwrap();
+    let script = format!(
+        r#"
+import {{ createMaterializedTaskRegistry }} from {adapter_url:?};
+import {{ createHostCompletionBroker }} from {host_runtime_url:?};
+
+let accept;
+const accepted = [];
+const broker = createHostCompletionBroker({{
+  actorEvents: {{
+    send(event, signal) {{
+      accepted.push(event);
+      return new Promise((resolve, reject) => {{
+        accept = resolve;
+        signal.addEventListener("abort", () => reject(new Error("aborted")), {{ once: true }});
+      }});
+    }},
+  }},
+}});
+const bytes = await Bun.file({wasm_path:?}).arrayBuffer();
+const {{ instance }} = await WebAssembly.instantiate(bytes, broker.imports);
+const tasks = createMaterializedTaskRegistry(instance.exports);
+const running = broker.run(tasks.select_task, [91]);
+
+async function postEventually(value) {{
+  for (let attempt = 0; attempt < 100; attempt += 1) {{
+    if (broker.post(value)) return;
+    await new Promise(resolve => setTimeout(resolve, 0));
+  }}
+  throw new Error(`Fe did not preserve a pending receive for ${{value}}`);
+}}
+
+await postEventually(17n);
+await postEventually(23n);
+if (accepted.length !== 1 || accepted[0][0] !== 91) {{
+  throw new Error("the heterogeneous sink operation was not kept in flight");
+}}
+if (typeof accept !== "function") throw new Error("the sink was not pending");
+accept();
+const output = await running;
+if (output.length !== 1 || output[0] !== 17023n) {{
+  throw new Error(`Fe select did not retain both source winners: ${{output}}`);
+}}
+if (broker.activeCount() !== 0 || broker.cancelAll() !== 0) {{
+  throw new Error("non-destructive select leaked a pending token");
+}}
+"#,
+        adapter_url = format!("file://{}", adapter_path.display()),
+        host_runtime_url = format!("file://{}", host_runtime_path.display()),
+        wasm_path = wasm_path.display().to_string(),
+    );
+    std::fs::write(&test_path, script).unwrap();
+    let output = std::process::Command::new("bun")
+        .arg("run")
+        .arg(&test_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "Fe heterogeneous select browser capstone failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
 fn transitive_effect_provider_stack_flattens_to_exact_executable_frame() {
     let wasm = compile_to_wasm(
         "transitive_resumable_stack.fe",

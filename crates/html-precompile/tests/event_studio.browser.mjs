@@ -160,7 +160,6 @@ try {
       && Number(values?.[8]?.textContent) >= 1
       && Number(values?.[9]?.textContent) >= 1
       && Number(values?.[10]?.textContent) >= 1
-      && Number(values?.[12]?.textContent) >= 1
       && Number(values?.[13]?.textContent) >= 4
       && Number(values?.[14]?.textContent) >= 1;
   });
@@ -178,7 +177,7 @@ try {
   assert.ok(initial.timerEvents === initial.frameEvents ||
     initial.timerEvents === initial.frameEvents + 1);
   assert.ok(initial.frameTimestamp > 0);
-  assert.equal(initial.boundedDrops, initial.timerEvents);
+  assert.equal(initial.boundedDrops, 0);
   assert.ok(initial.latestValue >= 4 && initial.latestValue % 4 === 0);
   assert.equal(initial.observations, 1);
   assert.equal(initial.failures, 0);
@@ -211,28 +210,66 @@ try {
       && Number(values[8]?.textContent) === previous + 2;
   }, {}, initial.visibilityEvents);
 
-  await page.evaluate(() => {
-    document.querySelector("#event-studio").dispatchEvent(new PointerEvent("pointermove", {
+  // Deliberately hold the first generic actor acceptance while delivering six
+  // real PointerEvents. This is an independent scheduling oracle: the fixed
+  // host still knows no queue policy, while Fe's non-destructive Select keeps
+  // its listener alive and its three-slot KeepLatest queue decides which
+  // observations survive. A fast machine therefore cannot satisfy this gate
+  // merely because every actor transition happens to complete immediately.
+  await page.evaluate(async () => {
+    const component = document.querySelector("#event-studio");
+    const originalSend = component._sendScopedTaskEvent.bind(component);
+    let holdFirst = true;
+    let releaseFirst;
+    component._sendScopedTaskEvent = (event, signal) => {
+      if (!holdFirst) return originalSend(event, signal);
+      holdFirst = false;
+      return new Promise((resolvePromise, reject) => {
+        releaseFirst = () => {
+          try { resolvePromise(originalSend(event, signal)); }
+          catch (error) { reject(error); }
+        };
+        signal.addEventListener("abort", () => {
+          reject(new DOMException("test-delayed actor send aborted", "AbortError"));
+        }, { once: true });
+      });
+    };
+    const dispatch = index => component.dispatchEvent(new PointerEvent("pointermove", {
       bubbles: true,
       composed: true,
       pointerId: 17,
       pointerType: "touch",
-      clientX: 123.75,
-      clientY: 222.5,
+      clientX: 123.75 + index,
+      clientY: 222.5 + index,
       buttons: 1,
       isPrimary: true,
       pressure: 0.625,
     }));
+    for (let index = 0; index < 6; index += 1) {
+      dispatch(index);
+      await new Promise(resolvePromise => setTimeout(resolvePromise, 0));
+    }
+    if (typeof releaseFirst !== "function") {
+      throw new Error("the first Fe actor send was not held in flight");
+    }
+    releaseFirst();
   });
-  await page.waitForFunction(() => {
-    const values = document.querySelectorAll("#event-studio .event-studio-grid strong");
-    return values[3]?.textContent === "123" && values[4]?.textContent === "222"
-      && values[5]?.textContent === "1";
-  });
+  try {
+    await page.waitForFunction(() => {
+      const values = document.querySelectorAll("#event-studio .event-studio-grid strong");
+      return values[3]?.textContent === "128" && values[4]?.textContent === "227"
+        && values[5]?.textContent === "4" && values[12]?.textContent === "2";
+    });
+  } catch (error) {
+    throw new Error(`bounded pointer receipt did not settle: ${JSON.stringify(await readStudio())}`, {
+      cause: error,
+    });
+  }
   const afterPointer = await readStudio();
-  assert.equal(afterPointer.pointerX, 123);
-  assert.equal(afterPointer.pointerY, 222);
-  assert.equal(afterPointer.pointerEvents, 1);
+  assert.equal(afterPointer.pointerX, 128);
+  assert.equal(afterPointer.pointerY, 227);
+  assert.equal(afterPointer.pointerEvents, 4);
+  assert.equal(afterPointer.boundedDrops, 2);
   assert.equal(afterPointer.wheelEvents, 0);
   assert.equal(afterPointer.visible, 1);
   assert.equal(afterPointer.visibilityEvents, initial.visibilityEvents + 2);
@@ -259,7 +296,7 @@ try {
   const afterWheel = await readStudio();
   assert.equal(afterWheel.pointerX, 210);
   assert.equal(afterWheel.pointerY, 111);
-  assert.equal(afterWheel.pointerEvents, 1);
+  assert.equal(afterWheel.pointerEvents, 4);
   assert.equal(afterWheel.wheelEvents, 1);
   assert.equal(afterWheel.visible, 1);
   assert.equal(afterWheel.visibilityEvents, initial.visibilityEvents + 2);
@@ -299,7 +336,7 @@ try {
   assert.equal(reconnected.width, 777);
   assert.equal(reconnected.height, 555);
   assert.equal(reconnected.devicePixelRatioPercent, 200);
-  assert.equal(reconnected.pointerEvents, 1);
+  assert.equal(reconnected.pointerEvents, 4);
   assert.equal(reconnected.wheelEvents, 1);
   assert.equal(reconnected.visible, 1);
   assert.equal(reconnected.visibilityEvents, initial.visibilityEvents + 3);
@@ -307,7 +344,7 @@ try {
   assert.equal(reconnected.failures, 0);
   assert.deepEqual(reconnected.errors, []);
   assert.deepEqual(browserErrors, []);
-  console.log("ok: Fe Event Studio viewport, pointer/touch, wheel, visibility, paced frame/timer, Scan forwarding, bounded drops, latest values, and lifecycle streams");
+  console.log("ok: Fe Event Studio viewport, concurrent bounded pointer buffering, wheel, visibility, paced frame/timer, Scan forwarding, latest values, and lifecycle streams");
 } finally {
   await browser.close();
   await new Promise(resolvePromise => server.close(resolvePromise));

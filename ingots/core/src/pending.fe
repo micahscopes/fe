@@ -74,6 +74,54 @@ pub trait Race<B: Backend> {
         -> Pending<B, RaceOutcome<T>>
 }
 
+/// A left-hand successful selection together with the still-live right-hand
+/// operation. The losing token remains affine: it is returned exactly once and
+/// may be selected or suspended again, but the original token arguments have
+/// both been consumed.
+pub struct SelectedLeft<B: Backend, L, R> {
+    pub value: L,
+    pub right: Pending<B, R>,
+}
+
+/// A right-hand successful selection together with the still-live left-hand
+/// operation.
+pub struct SelectedRight<B: Backend, L, R> {
+    pub left: Pending<B, L>,
+    pub value: R,
+}
+
+/// The successful result of observing whichever of two heterogeneous pending
+/// operations completes first without cancelling the other one.
+///
+/// This is deliberately different from `RaceOutcome`: a race is terminal and
+/// cancels its loser, while a select is the control primitive needed by a
+/// producer/consumer loop to retain an outstanding source pull while a sink is
+/// busy (or retain the sink while more source observations arrive).
+#[must_use]
+pub enum SelectOutcome<B: Backend, E, L, R> {
+    Left(SelectedLeft<B, L, R>,),
+    Right(SelectedRight<B, L, R>,),
+    LeftFailure(E,),
+    RightFailure(E,),
+    LeftCancelled,
+    RightCancelled,
+}
+
+/// Non-destructively select between two broker-completed operations.
+///
+/// On child success the winning value and losing affine token are delivered in
+/// `SelectOutcome`. A child failure or cancellation becomes a side-specific
+/// `SelectOutcome` terminal and cancels the loser, so no token can become
+/// unreachable. Cancelling the select's owning scope remains the outer
+/// `TaskOutcome::Cancelled` and cancels both children.
+pub trait Select<B: Backend, E> {
+    fn select<L, R>(
+        mut self,
+        _ left: own Pending<B, L>,
+        _ right: own Pending<B, R>,
+    ) -> Pending<B, SelectOutcome<B, E, L, R>>
+}
+
 /// The authority to suspend the current resumable Fe continuation until a
 /// pending operation reaches one terminal outcome. Unlike `Wait`, this never
 /// blocks an agent: the compiler splits the surrounding runtime MIR, retains

@@ -8,7 +8,9 @@
 use core::pending::{Suspend, TaskOutcome}
 use ingot::wasm::WasmBackend
 use super::super::host::Resumable
-use super::super::reactive::{Cancelled, Event, EventSource, Subscription}
+use super::super::reactive::{
+    AsyncEventSource, Cancelled, Event, EventSource, Subscription,
+}
 use raw::{pointer_begin as raw_pointer_begin, wheel_begin as raw_wheel_begin}
 
 pub enum PointerPhase {
@@ -43,6 +45,24 @@ pub struct PointerSample {
 
 impl Copy for PointerSample {}
 
+impl PointerSample {
+    /// Well-typed storage for an unobserved subscription. No field is a
+    /// sentinel; callers must still consult `Subscription::has_observation`.
+    pub fn placeholder() -> Self {
+        Self {
+            phase: PointerPhase::Cancel,
+            device: PointerDevice::Other,
+            pointer_id: 0,
+            client_x: 0.0,
+            client_y: 0.0,
+            buttons: 0,
+            primary: false,
+            pressure: 0.0,
+            timestamp: 0.0,
+        }
+    }
+}
+
 pub enum WheelDeltaMode {
     Pixel,
     Line,
@@ -65,6 +85,21 @@ pub struct WheelSample {
 
 impl Copy for WheelSample {}
 
+impl WheelSample {
+    pub fn placeholder() -> Self {
+        Self {
+            delta_x: 0.0,
+            delta_y: 0.0,
+            delta_z: 0.0,
+            mode: WheelDeltaMode::Pixel,
+            client_x: 0.0,
+            client_y: 0.0,
+            control: false,
+            timestamp: 0.0,
+        }
+    }
+}
+
 pub struct BrowserPointerEvents {}
 pub struct BrowserWheelEvents {}
 
@@ -80,32 +115,57 @@ impl BrowserWheelEvents {
     }
 }
 
+impl AsyncEventSource<WasmBackend, PointerSample> for BrowserPointerEvents {
+    fn subscribe(mut self) -> Subscription<PointerSample> {
+        Subscription::new(initial: PointerSample::placeholder())
+    }
+
+    fn next_begin(
+        mut self,
+        _ subscription: own Subscription<PointerSample>,
+    ) -> (Subscription<PointerSample>, core::pending::Pending<WasmBackend, PointerSample>) {
+        (subscription.advance().0, raw_pointer_begin())
+    }
+
+    fn cancel(mut self, _ subscription: own Subscription<PointerSample>) -> Cancelled {
+        Cancelled { consumed: subscription.cursor() }
+    }
+}
+
+impl AsyncEventSource<WasmBackend, WheelSample> for BrowserWheelEvents {
+    fn subscribe(mut self) -> Subscription<WheelSample> {
+        Subscription::new(initial: WheelSample::placeholder())
+    }
+
+    fn next_begin(
+        mut self,
+        _ subscription: own Subscription<WheelSample>,
+    ) -> (Subscription<WheelSample>, core::pending::Pending<WasmBackend, WheelSample>) {
+        (subscription.advance().0, raw_wheel_begin())
+    }
+
+    fn cancel(mut self, _ subscription: own Subscription<WheelSample>) -> Cancelled {
+        Cancelled { consumed: subscription.cursor() }
+    }
+}
+
 impl EventSource<PointerSample> for BrowserPointerEvents {
     fn subscribe(mut self) -> Subscription<PointerSample> {
-        Subscription::new(
-            initial: PointerSample {
-                phase: PointerPhase::Cancel,
-                device: PointerDevice::Other,
-                pointer_id: 0,
-                client_x: 0.0,
-                client_y: 0.0,
-                buttons: 0,
-                primary: false,
-                pressure: 0.0,
-                timestamp: 0.0,
-            },
-        )
+        Subscription::new(initial: PointerSample::placeholder())
     }
 
     fn next(mut self, _ subscription: own Subscription<PointerSample>) -> (
         Subscription<PointerSample>,
         Event<PointerSample>,
     ) {
-        let successor = subscription.advance().0
+        let (successor, pending) = <BrowserPointerEvents as AsyncEventSource<
+            WasmBackend,
+            PointerSample,
+        >>::next_begin(self, subscription)
         let outcome: TaskOutcome<u32, PointerSample> = <Resumable as Suspend<
             WasmBackend,
             u32,
-        >>::suspend(Resumable {}, raw_pointer_begin())
+        >>::suspend(Resumable {}, pending)
         let event = match outcome {
             TaskOutcome::Success(sample,) => Event::occurrence(value: sample),
             TaskOutcome::Failure(error,) => Event::failure(error: error),
@@ -121,29 +181,21 @@ impl EventSource<PointerSample> for BrowserPointerEvents {
 
 impl EventSource<WheelSample> for BrowserWheelEvents {
     fn subscribe(mut self) -> Subscription<WheelSample> {
-        Subscription::new(
-            initial: WheelSample {
-                delta_x: 0.0,
-                delta_y: 0.0,
-                delta_z: 0.0,
-                mode: WheelDeltaMode::Pixel,
-                client_x: 0.0,
-                client_y: 0.0,
-                control: false,
-                timestamp: 0.0,
-            },
-        )
+        Subscription::new(initial: WheelSample::placeholder())
     }
 
     fn next(mut self, _ subscription: own Subscription<WheelSample>) -> (
         Subscription<WheelSample>,
         Event<WheelSample>,
     ) {
-        let successor = subscription.advance().0
+        let (successor, pending) = <BrowserWheelEvents as AsyncEventSource<
+            WasmBackend,
+            WheelSample,
+        >>::next_begin(self, subscription)
         let outcome: TaskOutcome<u32, WheelSample> = <Resumable as Suspend<
             WasmBackend,
             u32,
-        >>::suspend(Resumable {}, raw_wheel_begin())
+        >>::suspend(Resumable {}, pending)
         let event = match outcome {
             TaskOutcome::Success(sample,) => Event::occurrence(value: sample),
             TaskOutcome::Failure(error,) => Event::failure(error: error),

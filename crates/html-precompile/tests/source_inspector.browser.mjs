@@ -249,7 +249,6 @@ try {
         && Number(values[8].textContent) >= 1
         && Number(values[9].textContent) >= 1
         && Number(values[10].textContent) >= 1
-        && Number(values[12].textContent) >= 1
         && Number(values[13].textContent) >= 4
         && Number(values[14].textContent) >= 1;
     });
@@ -275,21 +274,49 @@ try {
     assert.ok(eventStudioBefore.frameEvents >= 1);
     assert.ok(eventStudioBefore.timerEvents === eventStudioBefore.frameEvents ||
       eventStudioBefore.timerEvents === eventStudioBefore.frameEvents + 1);
-    assert.equal(eventStudioBefore.boundedDrops, eventStudioBefore.timerEvents);
+    assert.equal(eventStudioBefore.boundedDrops, 0);
     assert.ok(eventStudioBefore.latestValue >= 4 && eventStudioBefore.latestValue % 4 === 0);
-    await page.evaluate(() => {
+    // Hold the first generic actor acceptance while six genuine PointerEvents
+    // arrive. The host knows neither the queue capacity nor KeepLatest policy;
+    // Fe's Select keeps source and sink independently in flight and its
+    // three-slot waiting backlog decides which observations survive.
+    await page.evaluate(async () => {
       const component = document.querySelector("#gallery-event-studio");
-      component.dispatchEvent(new PointerEvent("pointermove", {
+      const originalSend = component._sendScopedTaskEvent.bind(component);
+      let holdFirst = true;
+      let releaseFirst;
+      component._sendScopedTaskEvent = (event, signal) => {
+        if (!holdFirst) return originalSend(event, signal);
+        holdFirst = false;
+        return new Promise((resolvePromise, reject) => {
+          releaseFirst = () => {
+            try { resolvePromise(originalSend(event, signal)); }
+            catch (error) { reject(error); }
+          };
+          signal.addEventListener("abort", () => {
+            reject(new DOMException("test-delayed actor send aborted", "AbortError"));
+          }, { once: true });
+        });
+      };
+      const dispatch = index => component.dispatchEvent(new PointerEvent("pointermove", {
         bubbles: true,
         composed: true,
         pointerId: 23,
-        pointerType: "pen",
-        clientX: 144.5,
-        clientY: 233.75,
+        pointerType: "touch",
+        clientX: 123.75 + index,
+        clientY: 222.5 + index,
         buttons: 1,
         isPrimary: true,
-        pressure: 0.5,
+        pressure: 0.625,
       }));
+      for (let index = 0; index < 6; index += 1) {
+        dispatch(index);
+        await new Promise(resolvePromise => setTimeout(resolvePromise, 0));
+      }
+      if (typeof releaseFirst !== "function") {
+        throw new Error("the first Fe actor send was not held in flight");
+      }
+      releaseFirst();
       component.dispatchEvent(new WheelEvent("wheel", {
         bubbles: true,
         composed: true,
@@ -301,7 +328,11 @@ try {
     });
     await page.waitForFunction(() => {
       const values = document.querySelectorAll("#gallery-event-studio .event-studio-grid strong");
-      return Number(values[5]?.textContent) === 1 && Number(values[6]?.textContent) === 1;
+      return Number(values[3]?.textContent) === 128
+        && Number(values[4]?.textContent) === 227
+        && Number(values[5]?.textContent) === 4
+        && Number(values[6]?.textContent) === 1
+        && Number(values[12]?.textContent) === 2;
     });
     await page.setViewport({ width: 777, height: 555, deviceScaleFactor: 2 });
     await page.waitForFunction(previousObservations => {

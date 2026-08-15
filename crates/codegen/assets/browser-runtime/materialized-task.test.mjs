@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   createMaterializedTaskMachine,
   raceTaskOutcome,
+  selectTaskOutcome,
   taskCancelled,
   taskFailure,
   taskSuccess,
@@ -12,6 +13,7 @@ const u64 = Object.freeze({ kind: "unsigned", bits: 64 });
 const state = Object.freeze({ kind: "enum_tag", bits: 8, variants: 3 });
 const outcome = Object.freeze({ kind: "enum_tag", bits: 8, variants: 3 });
 const race = Object.freeze({ kind: "enum_tag", bits: 8, variants: 2 });
+const select = Object.freeze({ kind: "enum_tag", bits: 8, variants: 6 });
 
 function definition(overrides = {}) {
   return {
@@ -150,5 +152,61 @@ describe("compiler-materialized browser task machine", () => {
     const failed = machine.start([43]);
     const failure = raceTaskOutcome(failed.pending, taskFailure([5]), "left");
     expect(machine.resume(failed.frame, failure)).toEqual({ kind: "complete", output: [5n] });
+  });
+
+  test("heterogeneous selects return one affine loser and side-tag child terminals", () => {
+    const machine = createMaterializedTaskMachine({
+      input: [u32],
+      step: [Object.freeze({ kind: "enum_tag", bits: 8, variants: 2 }), u64, u32],
+      complete: { start: 1, count: 1 },
+      start(token) { return [1, 0n, token]; },
+      continuations: [{
+        state: 1,
+        range: { start: 2, count: 1 },
+        pending: { start: 2, count: 1 },
+        frame: { start: 3, count: 0 },
+        delivery: {
+          // TaskOutcome<u32, SelectOutcome<B, u32, u64, u32>>
+          lanes: [outcome, u32, select, u64, u32, u32, u32, u32, u32],
+          failure: { start: 1, count: 1 },
+          success: { start: 2, count: 7 },
+        },
+        invoke(tag, outerError, selected, leftValue, rightToken, leftToken,
+          rightValue, leftError, rightError) {
+          if (tag === 0) return [0, 90_000n + BigInt(outerError), 0];
+          if (tag === 2) return [0, 91_000n, 0];
+          if (selected === 0) return [0, leftValue * 100n + BigInt(rightToken), 0];
+          if (selected === 1) return [0, BigInt(leftToken) * 100n + BigInt(rightValue), 0];
+          if (selected === 2) return [0, 92_000n + BigInt(leftError), 0];
+          if (selected === 3) return [0, 93_000n + BigInt(rightError), 0];
+          if (selected === 4) return [0, 94_000n, 0];
+          return [0, 95_000n, 0];
+        },
+      }],
+    });
+
+    const left = machine.start([51]);
+    expect(machine.resume(
+      left.frame,
+      selectTaskOutcome(left.pending, taskSuccess([9n]), "left", 42),
+    )).toEqual({ kind: "complete", output: [942n] });
+
+    const right = machine.start([52]);
+    expect(machine.resume(
+      right.frame,
+      selectTaskOutcome(right.pending, taskSuccess([7]), "right", 43),
+    )).toEqual({ kind: "complete", output: [4307n] });
+
+    const leftFailure = machine.start([53]);
+    expect(machine.resume(
+      leftFailure.frame,
+      selectTaskOutcome(leftFailure.pending, taskFailure([5]), "left", 44),
+    )).toEqual({ kind: "complete", output: [92_005n] });
+
+    const rightCancelled = machine.start([54]);
+    expect(machine.resume(
+      rightCancelled.frame,
+      selectTaskOutcome(rightCancelled.pending, taskCancelled(), "right", 45),
+    )).toEqual({ kind: "complete", output: [95_000n] });
   });
 });
