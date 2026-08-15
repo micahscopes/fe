@@ -88,14 +88,25 @@ directed pair of alleged rows. The independent gate mutates all 11 columns on
 both sides, the public point, and the bound. It also proves that residual-zero
 but noncanonical quotient/remainder pairs reject. These integer residuals have
 not yet been lifted into the proof field. Bit decomposition, signed range
-proofs, activity, terminal uniqueness, and padding remain part of the pending
-AIR layer.
+proofs, and algebraic enforcement of activity, terminal uniqueness, and
+padding remain part of the pending AIR layer.
 
 The integer constraint evaluator rejects any alleged row whose coordinate
 magnitude exceeds 24576 before evaluating the doubled cross-product. This is
 the conservative envelope induced by one transition from an in-radius row and
 the canonical public-point domain. The gate includes `i32::MIN` adversarial
 coordinates, so widened host arithmetic is not an implicit trust assumption.
+
+For an escaping claim with least terminal step `k`, the Fe witness derives
+`trace_length = k + 1` and the least power-of-two `padded_length` greater than
+or equal to it. Rows `0..k` are active, exactly row `k` carries the proof
+terminal marker, and later rows repeat row `k` while clearing both activity
+and the proof terminal marker. Requests at or beyond `padded_length` fail
+closed. Invalid and non-escaping claims have no proof shape. The independent
+gate checks every row and encoding in directed traces, counts exactly one
+terminal marker, and separately derives both lengths. These are canonical
+witness-shape semantics. Their proof-field transition constraints remain
+pending.
 
 ## Commitment and proof direction
 
@@ -106,10 +117,11 @@ element. Claim, numeric-model version, padded trace length, and terminal row
 are transcript inputs.
 
 `escape_air_row_encoding_q12` now materializes that canonical row encoding in
-Fe. It gives zero only the positive sign and emits a fixed 15-word order. The
-independent Wasm gate checks it against a separately derived encoder for every
-directed row. This is an encoding gate only. It is not a trace hash or a
-commitment.
+Fe. It gives zero only the positive sign and emits a fixed 15-word order.
+`escape_proof_row_encoding_q12` adds the activity and unique-terminal words to
+that encoding. The independent Wasm gate checks both against separately
+derived encoders for every directed and padded row. This is an encoding gate
+only. It is not a trace hash or a commitment.
 
 The reusable field substrate is now the modulus-branded
 `precision::field::FieldElement<L, M>` over array-native 13-bit limbs. It has

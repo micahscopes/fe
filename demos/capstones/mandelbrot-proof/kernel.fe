@@ -70,6 +70,28 @@ pub struct EscapeWitness { pub valid_claim: bool, pub escaped: bool, pub row: Es
 
 impl Copy for EscapeWitness {}
 
+/// Shape of a proof-producing trace. A valid shape exists only for a valid
+/// claim that actually escapes by its bound.
+pub struct EscapeProofShape {
+    pub valid: bool,
+    pub terminal_step: u32,
+    pub trace_length: u32,
+    pub padded_length: u32,
+}
+
+impl Copy for EscapeProofShape {}
+
+/// One row in the power-of-two proof trace. Padding repeats the terminal AIR
+/// values while clearing both activity and the unique terminal marker.
+pub struct PaddedEscapeAirRow {
+    pub valid: bool,
+    pub active: bool,
+    pub terminal: bool,
+    pub air: EscapeAirRow,
+}
+
+impl Copy for PaddedEscapeAirRow {}
+
 fn square(_ value: i32) -> i32 {
     value * value
 }
@@ -81,6 +103,32 @@ fn decompose_q12(_ numerator: i32) -> ShiftQ12 {
 
 fn signed_magnitude(_ value: i32) -> SignedMagnitude32 {
     SignedMagnitude32 { negative: value < 0, magnitude: value.unsigned_abs() }
+}
+
+fn air_encoding(_ row: EscapeAirRow) -> [u32; 15] {
+    let zr = signed_magnitude(row.semantic.z.re)
+    let zi = signed_magnitude(row.semantic.z.im)
+    let q_re = signed_magnitude(row.real_shift.quotient)
+    let q_im = signed_magnitude(row.imaginary_shift.quotient)
+    [
+        row.semantic.step,
+        if zr.negative { 1 } else { 0 }, zr.magnitude,
+        if zi.negative { 1 } else { 0 }, zi.magnitude,
+        row.rr.downcast_unchecked(),
+        row.ii.downcast_unchecked(),
+        row.semantic.magnitude_squared_q24.downcast_unchecked(),
+        if q_re.negative { 1 } else { 0 }, q_re.magnitude,
+        row.real_shift.remainder.downcast_unchecked(),
+        if q_im.negative { 1 } else { 0 }, q_im.magnitude,
+        row.imaginary_shift.remainder.downcast_unchecked(),
+        if row.semantic.terminal { 1 } else { 0 },
+    ]
+}
+
+fn next_power_of_two(_ value: u32) -> u32 {
+    let mut result: u32 = 1
+    while result < value { result = result * 2 }
+    result
 }
 
 fn air_residuals(_ row: EscapeAirRow) -> EscapeAirResiduals {
@@ -277,6 +325,54 @@ impl EscapesByQ12 {
         let row = self.row_at(target)
         air_row(row.step, row.z)
     }
+
+    /// Derive the semantic and padded lengths for a proof-producing trace.
+    /// This is prover-side witness work. A succinct verifier consumes the
+    /// committed shape and constraints rather than replaying this search.
+    pub fn proof_shape(self) -> EscapeProofShape {
+        let witness = self.witness()
+        if !witness.valid_claim || !witness.escaped {
+            return EscapeProofShape {
+                valid: false,
+                terminal_step: NO_ESCAPE_STEP,
+                trace_length: 0,
+                padded_length: 0,
+            }
+        }
+        let trace_length = witness.row.step + 1
+        EscapeProofShape {
+            valid: true,
+            terminal_step: witness.row.step,
+            trace_length: trace_length,
+            padded_length: next_power_of_two(trace_length),
+        }
+    }
+
+    /// Produce one row of the padded proof trace. Requests outside the padded
+    /// domain fail closed. Inactive rows repeat the terminal AIR values so the
+    /// padding transition is algebraically simple and uniquely determined.
+    /// This random-access oracle helper replays the prefix; the production
+    /// prover will stream the trace once rather than call it for every row.
+    pub fn proof_row_at(self, _ target: u32) -> PaddedEscapeAirRow {
+        let shape = self.proof_shape()
+        if !shape.valid || target >= shape.padded_length {
+            return PaddedEscapeAirRow {
+                valid: false,
+                active: false,
+                terminal: false,
+                air: air_row(0, ComplexQ12 { re: 0, im: 0 }),
+            }
+        }
+        let active = target < shape.trace_length
+        let terminal = target == shape.terminal_step
+        let semantic_step = if active { target } else { shape.terminal_step }
+        PaddedEscapeAirRow {
+            valid: true,
+            active: active,
+            terminal: terminal,
+            air: self.air_row_at(semantic_step),
+        }
+    }
 }
 
 /// Compact scalar boundary for Wasm/native oracle gates. Fields are ordered as
@@ -356,22 +452,81 @@ pub fn escape_air_row_encoding_q12(
     u32, u32, u32, u32, u32, u32, u32,
 ) {
     let row = EscapesByQ12::new(c_re_q12, c_im_q12, target).air_row_at(target)
-    let zr = signed_magnitude(row.semantic.z.re)
-    let zi = signed_magnitude(row.semantic.z.im)
-    let q_re = signed_magnitude(row.real_shift.quotient)
-    let q_im = signed_magnitude(row.imaginary_shift.quotient)
+    let words = air_encoding(row)
     (
-        row.semantic.step,
-        if zr.negative { 1 } else { 0 }, zr.magnitude,
-        if zi.negative { 1 } else { 0 }, zi.magnitude,
-        row.rr.downcast_unchecked(),
-        row.ii.downcast_unchecked(),
-        row.semantic.magnitude_squared_q24.downcast_unchecked(),
-        if q_re.negative { 1 } else { 0 }, q_re.magnitude,
-        row.real_shift.remainder.downcast_unchecked(),
-        if q_im.negative { 1 } else { 0 }, q_im.magnitude,
-        row.imaginary_shift.remainder.downcast_unchecked(),
-        if row.semantic.terminal { 1 } else { 0 },
+        words[0], words[1], words[2], words[3], words[4],
+        words[5], words[6], words[7], words[8], words[9],
+        words[10], words[11], words[12], words[13], words[14],
+    )
+}
+
+/// Proof trace shape ordered as
+/// `(valid, terminal_step, semantic_length, padded_length)`.
+pub fn escape_proof_shape_q12(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ bound: u32,
+) -> (u32, u32, u32, u32) {
+    let shape = EscapesByQ12::new(c_re_q12, c_im_q12, bound).proof_shape()
+    (
+        if shape.valid { 1 } else { 0 },
+        shape.terminal_step,
+        shape.trace_length,
+        shape.padded_length,
+    )
+}
+
+/// Padded row projection ordered as `(valid, active, terminal)` followed by
+/// the 11 integer AIR columns.
+pub fn escape_proof_row_q12(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ bound: u32,
+    _ target: u32,
+) -> (
+    u32, u32, u32, u32, i32, i32, i32,
+    i32, i32, i32, i32, i32, i32, u32,
+) {
+    let row = EscapesByQ12::new(c_re_q12, c_im_q12, bound).proof_row_at(target)
+    (
+        if row.valid { 1 } else { 0 },
+        if row.active { 1 } else { 0 },
+        if row.terminal { 1 } else { 0 },
+        row.air.semantic.step,
+        row.air.semantic.z.re,
+        row.air.semantic.z.im,
+        row.air.rr,
+        row.air.ii,
+        row.air.semantic.magnitude_squared_q24,
+        row.air.real_shift.quotient,
+        row.air.real_shift.remainder,
+        row.air.imaginary_shift.quotient,
+        row.air.imaginary_shift.remainder,
+        if row.air.semantic.terminal { 1 } else { 0 },
+    )
+}
+
+/// Padded commitment-row encoding. The first word is a boundary-validity bit;
+/// the remaining 17 words are the 15 canonical AIR words followed by
+/// `(active, unique_terminal)`.
+pub fn escape_proof_row_encoding_q12(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ bound: u32,
+    _ target: u32,
+) -> (
+    u32, u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    let row = EscapesByQ12::new(c_re_q12, c_im_q12, bound).proof_row_at(target)
+    let words = air_encoding(row.air)
+    (
+        if row.valid { 1 } else { 0 },
+        words[0], words[1], words[2], words[3], words[4],
+        words[5], words[6], words[7], words[8], words[9],
+        words[10], words[11], words[12], words[13], words[14],
+        if row.active { 1 } else { 0 },
+        if row.terminal { 1 } else { 0 },
     )
 }
 

@@ -41,6 +41,22 @@ struct AirRow {
     r_im: i32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProofShape {
+    valid: bool,
+    terminal_step: u32,
+    trace_length: u32,
+    padded_length: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PaddedAirRow {
+    valid: bool,
+    active: bool,
+    terminal: bool,
+    air: AirRow,
+}
+
 fn valid_claim(c_re: i32, c_im: i32, bound: u32) -> bool {
     (-8192..4096).contains(&c_re) && (-6144..6144).contains(&c_im) && bound <= 1_048_576
 }
@@ -212,6 +228,25 @@ fn reference_witness(c_re: i32, c_im: i32, bound: u32) -> Witness {
     }
 }
 
+fn reference_proof_shape(c_re: i32, c_im: i32, bound: u32) -> ProofShape {
+    let witness = reference_witness(c_re, c_im, bound);
+    if !witness.valid || !witness.escaped {
+        return ProofShape {
+            valid: false,
+            terminal_step: NO_ESCAPE_STEP,
+            trace_length: 0,
+            padded_length: 0,
+        };
+    }
+    let trace_length = witness.row.step + 1;
+    ProofShape {
+        valid: true,
+        terminal_step: witness.row.step,
+        trace_length,
+        padded_length: trace_length.next_power_of_two(),
+    }
+}
+
 fn compile() -> Vec<u8> {
     let mut db = DriverDataBase::default();
     let url = Url::parse("file:///mandelbrot_bounded_proof.fe").expect("fixture URL");
@@ -337,6 +372,82 @@ fn wasm_air_row(
         q_im: words[8],
         r_im: words[9],
     }
+}
+
+fn wasm_proof_shape(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    c_re: i32,
+    c_im: i32,
+    bound: u32,
+) -> ProofShape {
+    let words = call_words(
+        store,
+        instance,
+        "escape_proof_shape_q12",
+        &[c_re, c_im, bound as i32],
+        4,
+    );
+    ProofShape {
+        valid: words[0] == 1,
+        terminal_step: words[1] as u32,
+        trace_length: words[2] as u32,
+        padded_length: words[3] as u32,
+    }
+}
+
+fn wasm_proof_row(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    c_re: i32,
+    c_im: i32,
+    bound: u32,
+    target: u32,
+) -> PaddedAirRow {
+    let words = call_words(
+        store,
+        instance,
+        "escape_proof_row_q12",
+        &[c_re, c_im, bound as i32, target as i32],
+        14,
+    );
+    PaddedAirRow {
+        valid: words[0] == 1,
+        active: words[1] == 1,
+        terminal: words[2] == 1,
+        air: AirRow {
+            row: Row {
+                step: words[3] as u32,
+                zr: words[4],
+                zi: words[5],
+                magnitude: words[8],
+                terminal: words[13] == 1,
+            },
+            rr: words[6],
+            ii: words[7],
+            q_re: words[9],
+            r_re: words[10],
+            q_im: words[11],
+            r_im: words[12],
+        },
+    }
+}
+
+fn wasm_proof_encoding(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    c_re: i32,
+    c_im: i32,
+    bound: u32,
+    target: u32,
+) -> Vec<i32> {
+    call_words(
+        store,
+        instance,
+        "escape_proof_row_encoding_q12",
+        &[c_re, c_im, bound as i32, target as i32],
+        18,
+    )
 }
 
 fn air_row_words(row: AirRow) -> [i32; 11] {
@@ -476,6 +587,82 @@ fn fe_bounded_escape_witness_matches_independent_i64_model() {
             "directed claim ({c_re}, {c_im}, {bound})"
         );
 
+        let expected_shape = reference_proof_shape(c_re, c_im, bound);
+        let observed_shape = wasm_proof_shape(&mut store, &instance, c_re, c_im, bound);
+        assert_eq!(
+            observed_shape, expected_shape,
+            "proof trace shape ({c_re}, {c_im}, {bound})"
+        );
+
+        if expected_shape.valid {
+            assert!(expected_shape.padded_length.is_power_of_two());
+            assert!(expected_shape.padded_length >= expected_shape.trace_length);
+            assert!(expected_shape.padded_length < expected_shape.trace_length * 2);
+            let semantic_rows = reference_rows(c_re, c_im, bound);
+            let terminal_air = reference_air_row(
+                expected_shape.terminal_step,
+                expected.row.zr,
+                expected.row.zi,
+            );
+            let mut active_count = 0u32;
+            let mut terminal_count = 0u32;
+            for target in 0..expected_shape.padded_length {
+                let active = target < expected_shape.trace_length;
+                let terminal = target == expected_shape.terminal_step;
+                let expected_air = if active {
+                    let row = semantic_rows[target as usize];
+                    reference_air_row(row.step, row.zr, row.zi)
+                } else {
+                    terminal_air
+                };
+                let expected_proof_row = PaddedAirRow {
+                    valid: true,
+                    active,
+                    terminal,
+                    air: expected_air,
+                };
+                assert_eq!(
+                    wasm_proof_row(&mut store, &instance, c_re, c_im, bound, target,),
+                    expected_proof_row,
+                    "padded proof row ({c_re}, {c_im}) at {target}"
+                );
+
+                let mut expected_encoding = vec![1];
+                expected_encoding.extend(reference_encoding(expected_air));
+                expected_encoding.push(i32::from(active));
+                expected_encoding.push(i32::from(terminal));
+                assert_eq!(
+                    wasm_proof_encoding(&mut store, &instance, c_re, c_im, bound, target,),
+                    expected_encoding,
+                    "padded proof encoding ({c_re}, {c_im}) at {target}"
+                );
+                active_count += u32::from(active);
+                terminal_count += u32::from(terminal);
+            }
+            assert_eq!(active_count, expected_shape.trace_length);
+            assert_eq!(
+                terminal_count, 1,
+                "the padded trace has one terminal marker"
+            );
+            assert!(
+                !wasm_proof_row(
+                    &mut store,
+                    &instance,
+                    c_re,
+                    c_im,
+                    bound,
+                    expected_shape.padded_length,
+                )
+                .valid,
+                "row requests outside the padded domain fail closed"
+            );
+        } else {
+            assert!(
+                !wasm_proof_row(&mut store, &instance, c_re, c_im, bound, 0).valid,
+                "a non-escaping claim cannot materialize proof rows"
+            );
+        }
+
         if expected.valid {
             let rows = reference_rows(c_re, c_im, bound);
             for expected_row in rows.iter().copied() {
@@ -563,6 +750,14 @@ fn fe_bounded_escape_witness_matches_independent_i64_model() {
                 NO_ESCAPE_STEP
             },
             NO_ESCAPE_STEP
+        );
+        assert_eq!(
+            wasm_proof_shape(&mut store, &instance, c_re, c_im, bound),
+            reference_proof_shape(c_re, c_im, bound)
+        );
+        assert!(
+            !wasm_proof_row(&mut store, &instance, c_re, c_im, bound, 0).valid,
+            "an invalid claim cannot materialize proof rows"
         );
     }
 

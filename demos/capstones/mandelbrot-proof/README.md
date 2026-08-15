@@ -12,8 +12,10 @@ every expanded column. Fe also emits the canonical sign-plus-magnitude row
 encoding, evaluates widened integer polynomial residuals, and verifies an
 alleged directed row pair. The gate mutates both rows and public claim values,
 including a residual-zero noncanonical shift decomposition. This is constraint
-evidence, not yet proof-field AIR or a succinct proof. It checks semantics, not
-artifact bytes:
+evidence, not yet proof-field AIR or a succinct proof. Escaping witnesses also
+derive a power-of-two proof shape with one terminal marker and deterministic
+inactive padding; invalid and non-escaping claims cannot produce proof rows.
+It checks semantics, not artifact bytes:
 
 ```console
 cargo nextest run --release --locked -p fe-codegen --test mandelbrot_bounded_claim_oracle

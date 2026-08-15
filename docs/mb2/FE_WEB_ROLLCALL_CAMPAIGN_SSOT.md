@@ -185,12 +185,16 @@ Legend:
   sign-plus-magnitude row encoding, and verifies alleged directed row pairs.
   The gate mutates all 11 columns on both sides, the public point, and the
   bound, and rejects residual-zero noncanonical shift decompositions. The
-  residuals are not yet proof-field constraints. Signed bit/range proofs,
-  activity/padding, and the domain-separated Poseidon trace commitment remain
-  pending. The reusable modulus-branded array field layer executes on Wasm,
-  but its SPIR-V helper-call seam and the permutation lift remain open. No
-  trace root is claimed yet. This remains constraint evidence rather than a
-  proof.
+  residuals are not yet proof-field constraints. Fe now also derives the
+  semantic and next-power-of-two trace lengths, emits active rows followed by
+  deterministic terminal-state padding, and marks exactly one terminal row.
+  The independent gate checks every directed padded row and rejects invalid,
+  non-escaping, and out-of-domain requests. Algebraic activity/padding rules,
+  signed bit/range proofs, and the domain-separated Poseidon trace commitment
+  remain pending. The reusable modulus-branded array field layer executes on
+  Wasm, but its SPIR-V helper-call seam and the permutation lift remain open.
+  No trace root is claimed yet. This remains constraint and witness-shape
+  evidence rather than a proof.
 - [ ] Produce a succinct proof whose verifier is demonstrably cheaper than
   replaying the orbit.
 - [ ] Define a typed proof encoding and prove browser/native verifier parity,
