@@ -9,7 +9,10 @@ use core::actor::{ActorSink, ScopedTask}
 use core::default::Default
 use core::Fn
 use core::pending::{Select, Suspend, TaskOutcome, Timer}
-use std::actor::{ActorMessage, BrowserActorSink, buffer_to_actor, forward_to_actor}
+use std::actor::{
+    ActorMessage, BrowserActorSink, MergePolicy, MergeSide,
+    forward_to_actor, merge_buffer_to_actor,
+}
 use std::reactive::{
     AsyncEventSource, Event, EventSource, Latest, OverflowPolicy, Stream, latest,
 }
@@ -120,8 +123,9 @@ impl StudioTask {
         self
     }
 
-    fn with_wheel(mut self, value: WheelSample) -> Self {
+    fn with_wheel(mut self, value: WheelSample, dropped: u32) -> Self {
         self.wheel = value
+        self.pointer.dropped = dropped
         self
     }
 
@@ -221,8 +225,8 @@ fn bounded_position(value: f32) -> u32 {
 fn timer_task(sequence: u32) -> StudioTask {
     let base = sequence * 4
     // Keep the deterministic one-slot probe as visible `Latest` evidence. The
-    // bounded-drop counter now comes from the genuinely concurrent pointer
-    // producer/consumer below rather than this synthetic timer burst.
+    // bounded-drop counter now comes from the genuinely concurrent merged
+    // pointer/wheel producer-consumer graph rather than this synthetic burst.
     let mut newest: Latest<u32> = latest(initial: 0)
     newest = newest.offer(value: base + 1, overflow: OverflowPolicy::KeepLatest)
     newest = newest.offer(value: base + 4, overflow: OverflowPolicy::KeepLatest)
@@ -247,14 +251,12 @@ fn task_message(target: StudioAction, payload: own StudioTask) -> ComponentEvent
 }
 
 struct ViewportMessage {}
-struct BufferedPointerMessage {}
-struct WheelMessage {}
+struct GestureMerge {}
 struct VisibilityMessage {}
 struct FailureMessage {}
 
 impl Copy for ViewportMessage {}
-impl Copy for BufferedPointerMessage {}
-impl Copy for WheelMessage {}
+impl Copy for GestureMerge {}
 impl Copy for VisibilityMessage {}
 impl Copy for FailureMessage {}
 
@@ -267,25 +269,47 @@ impl Fn<Viewport, ComponentEvent<StudioAction, StudioTask>> for ViewportMessage 
     }
 }
 
-impl Fn<(PointerSample, u32), ComponentEvent<StudioAction, StudioTask>> for BufferedPointerMessage {
-    fn call(
+impl MergePolicy<
+    PointerSample,
+    WheelSample,
+    ComponentEvent<StudioAction, StudioTask>,
+> for GestureMerge {
+    fn map_left(
         self,
-        _ observation: own (PointerSample, u32),
+        _ sample: own PointerSample,
+        _ dropped: u32,
     ) -> ComponentEvent<StudioAction, StudioTask> {
-        let (sample, dropped) = observation
         task_message(
             target: StudioAction::PointerObserved,
             payload: StudioTask::default().with_pointer(sample: sample, dropped: dropped),
         )
     }
-}
-
-impl Fn<WheelSample, ComponentEvent<StudioAction, StudioTask>> for WheelMessage {
-    fn call(self, _ sample: own WheelSample) -> ComponentEvent<StudioAction, StudioTask> {
+    fn map_right(
+        self,
+        _ sample: own WheelSample,
+        _ dropped: u32,
+    ) -> ComponentEvent<StudioAction, StudioTask> {
         task_message(
             target: StudioAction::WheelObserved,
-            payload: StudioTask::default().with_wheel(value: sample),
+            payload: StudioTask::default().with_wheel(value: sample, dropped: dropped),
         )
+    }
+
+    fn map_failure(
+        self,
+        _ side: MergeSide,
+        _ error: u32,
+    ) -> ComponentEvent<StudioAction, StudioTask> {
+        match side {
+            MergeSide::Left => task_message(
+                target: StudioAction::StreamFailed,
+                payload: StudioTask::default().with_error(value: error),
+            ),
+            MergeSide::Right => task_message(
+                target: StudioAction::StreamFailed,
+                payload: StudioTask::default().with_error(value: error),
+            ),
+        }
     }
 }
 
@@ -335,33 +359,32 @@ uses (
     forward_to_actor(map: ViewportMessage {}, map_failure: FailureMessage {}).delivered
 }
 
-fn observe_pointers() -> u32
+fn observe_gestures() -> u32
 uses (
     pointer_events: mut AsyncEventSource<WasmBackend, PointerSample>,
+    wheel_events: mut AsyncEventSource<WasmBackend, WheelSample>,
     sink: mut ActorSink<WasmBackend, ComponentEvent<StudioAction, StudioTask>>,
     select: mut Select<WasmBackend, u32>,
     suspend: Suspend<WasmBackend, u32>,
 )
 {
-    buffer_to_actor(
-        initial: PointerSample::placeholder(),
+    merge_buffer_to_actor<
+        PointerSample,
+        WheelSample,
+        ComponentEvent<StudioAction, StudioTask>,
+        GestureMerge,
+    >(
+        initial: task_message(
+            target: StudioAction::StreamFailed,
+            payload: StudioTask::default(),
+        ),
         capacity: 3,
-        // Pointer state is time-varying: preserve the in-flight value, then
-        // keep the newest bounded backlog while the actor is busy.
+        // Pointer and wheel listeners stay independently pending while one
+        // actor delivery is in flight. The merged Fe queue preserves that
+        // in-flight value and keeps the newest bounded shared backlog.
         overflow: OverflowPolicy::KeepLatest,
-        map: BufferedPointerMessage {},
-        map_failure: FailureMessage {},
+        policy: GestureMerge {},
     ).delivered
-}
-
-fn observe_wheels() -> u32
-uses (
-    wheel_events: mut EventSource<WheelSample>,
-    sink: mut ActorSink<WasmBackend, ComponentEvent<StudioAction, StudioTask>>,
-    suspend: Suspend<WasmBackend, u32>,
-)
-{
-    forward_to_actor(map: WheelMessage {}, map_failure: FailureMessage {}).delivered
 }
 
 fn observe_visibility() -> u32
@@ -480,7 +503,7 @@ actor EventStudio {
             .close()
             .open(element: PageElement::Paragraph)
             .attribute(value: PageAttribute::class(value: "event-studio-copy"))
-            .text(value: ui_text(value: "Pointer bursts enter a bounded "))
+            .text(value: ui_text(value: "Pointer + wheel share bounded "))
             .text(value: ui_text(value: "Fe queue; paced clock shows "))
             .text(value: ui_text(value: "latest-value replacement."))
             .close()
@@ -641,24 +664,15 @@ actor EventStudio {
         }
     }
 
-    fn watch_pointer() -> u32 uses (ScopedTask) {
+    fn watch_gestures() -> u32 uses (ScopedTask) {
         with (
             AsyncEventSource<WasmBackend, PointerSample> = BrowserPointerEvents::new(),
+            AsyncEventSource<WasmBackend, WheelSample> = BrowserWheelEvents::new(),
             ActorSink<WasmBackend, ComponentEvent<StudioAction, StudioTask>> = BrowserActorSink {},
             Select<WasmBackend, u32> = Resumable {},
             Suspend<WasmBackend, u32> = Resumable {},
         ) {
-            observe_pointers()
-        }
-    }
-
-    fn watch_wheel() -> u32 uses (ScopedTask) {
-        with (
-            EventSource<WheelSample> = BrowserWheelEvents::new(),
-            ActorSink<WasmBackend, ComponentEvent<StudioAction, StudioTask>> = BrowserActorSink {},
-            Suspend<WasmBackend, u32> = Resumable {},
-        ) {
-            observe_wheels()
+            observe_gestures()
         }
     }
 
@@ -727,6 +741,7 @@ actor EventStudio {
                             pointer_x = bounded_position(value: event.task.wheel.client_x)
                             pointer_y = bounded_position(value: event.task.wheel.client_y)
                             wheel_events = wheel_events + 1
+                            bounded_drops = event.task.pointer.dropped
                         }
                         StudioAction::VisibilityObserved => {
                             visible = match event.task.visibility {

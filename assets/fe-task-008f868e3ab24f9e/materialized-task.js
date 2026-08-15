@@ -201,21 +201,15 @@ export function taskOutcomeKind(outcome) {
 /// `RaceOutcome<T>` success layout of `pending`. Failure/cancellation retain
 /// their outer `TaskOutcome` meaning. The schema and outcome are both opaque
 /// runtime authorities, so the host cannot invent payload widths or tags.
-export function raceTaskOutcome(pending, outcome, side) {
-  const continuation = pendingDetails.get(pending);
+function raceTaskOutcomeForSchemas(schemas, outcome, side) {
   const delivered = outcomeDetails.get(outcome);
-  if (continuation === undefined || delivered === undefined) {
-    throw new TypeError("task race requires runtime-owned pending and outcome values");
+  if (delivered === undefined) {
+    throw new TypeError("task race requires a runtime-owned outcome value");
   }
   if (side !== "left" && side !== "right") {
     throw new TypeError("task race side must be left or right");
   }
   if (delivered.kind !== "success") return outcome;
-  const { delivery } = continuation;
-  const schemas = delivery.lanes.slice(
-    delivery.success.start,
-    delivery.success.start + delivery.success.count,
-  );
   if (schemas.length < 3 || schemas[0].kind !== "enum_tag" || schemas[0].variants !== 2
       || (schemas.length - 1) % 2 !== 0) {
     throw new TypeError("task race success is not RaceOutcome<T>");
@@ -238,31 +232,49 @@ export function raceTaskOutcome(pending, outcome, side) {
   return taskSuccess(lanes);
 }
 
+export function raceTaskOutcome(pending, outcome, side) {
+  const continuation = pendingDetails.get(pending);
+  if (continuation === undefined) {
+    throw new TypeError("task race requires a runtime-owned pending value");
+  }
+  const { delivery } = continuation;
+  return raceTaskOutcomeForSchemas(delivery.lanes.slice(
+    delivery.success.start,
+    delivery.success.start + delivery.success.count,
+  ), outcome, side);
+}
+
 /// Lift one heterogeneous child success into the compiler-derived
 /// `SelectOutcome<B, E, L, R>` layout while returning the still-affine loser
 /// token in the winning variant. Child failure/cancellation remains the outer
 /// `TaskOutcome` terminal, so the broker can cancel the otherwise unreachable
 /// loser. No application schema or payload width is supplied by the host: the
-/// winning width comes from the runtime-owned child delivery and the complete
-/// envelope comes from the continuation compiled from Fe.
-export function selectTaskOutcome(pending, outcome, side, loserToken) {
-  const continuation = pendingDetails.get(pending);
+/// primitive width comes from the fixed effect ABI and the complete envelope
+/// comes from the continuation compiled from Fe.
+function selectTaskOutcomeForSchemas(
+  schemas,
+  errorWidth,
+  outcome,
+  side,
+  loserToken,
+  leftWidth,
+  rightWidth,
+) {
   const delivered = outcomeDetails.get(outcome);
-  if (continuation === undefined || delivered === undefined) {
-    throw new TypeError("task select requires runtime-owned pending and outcome values");
+  if (delivered === undefined) {
+    throw new TypeError("task select requires a runtime-owned outcome value");
   }
   if (side !== "left" && side !== "right") {
     throw new TypeError("task select side must be left or right");
   }
-  const { delivery } = continuation;
-  const schemas = delivery.lanes.slice(
-    delivery.success.start,
-    delivery.success.start + delivery.success.count,
-  );
-  const errorWidth = delivery.failure.count;
   if (schemas.length < 3 + 2 * errorWidth || schemas[0].kind !== "enum_tag"
       || schemas[0].variants !== 6) {
     throw new TypeError("task select success is not SelectOutcome<B, E, L, R>");
+  }
+  if (!Number.isSafeInteger(leftWidth) || leftWidth < 0
+      || !Number.isSafeInteger(rightWidth) || rightWidth < 0
+      || schemas.length !== 3 + leftWidth + rightWidth + 2 * errorWidth) {
+    throw new TypeError("task select variants do not fill the compiler-derived envelope");
   }
 
   const lanes = schemas.map(encodedZero);
@@ -286,13 +298,12 @@ export function selectTaskOutcome(pending, outcome, side, loserToken) {
     throw new TypeError("task select loser must be a u32 affine token");
   }
 
-  const winnerWidth = delivered.lanes.length;
-  const otherWidth = schemas.length - winnerWidth - 3 - 2 * errorWidth;
-  if (otherWidth < 0) {
-    throw new TypeError("task select child is wider than its SelectOutcome envelope");
+  const winnerWidth = side === "left" ? leftWidth : rightWidth;
+  if (delivered.lanes.length !== winnerWidth) {
+    throw new TypeError(
+      `task select ${side} child must contain exactly ${winnerWidth} lanes`,
+    );
   }
-  const leftWidth = side === "left" ? winnerWidth : otherWidth;
-  const rightWidth = side === "right" ? winnerWidth : otherWidth;
   const leftLoserIndex = 1 + leftWidth;
   const rightVariantStart = leftLoserIndex + 1;
   const rightLoserIndex = rightVariantStart;
@@ -303,10 +314,6 @@ export function selectTaskOutcome(pending, outcome, side, loserToken) {
       throw new TypeError("task select variants must carry one u32 Pending loser token");
     }
   }
-  if (rightVariantStart + 1 + rightWidth + 2 * errorWidth !== schemas.length) {
-    throw new TypeError("task select variants do not fill the compiler-derived envelope");
-  }
-
   lanes[0] = side === "left" ? 0 : 1;
   if (side === "left") {
     for (let index = 0; index < leftWidth; index += 1) {
@@ -320,6 +327,113 @@ export function selectTaskOutcome(pending, outcome, side, loserToken) {
     }
   }
   return taskSuccess(lanes);
+}
+
+export function selectTaskOutcome(pending, outcome, side, loserToken) {
+  const continuation = pendingDetails.get(pending);
+  const delivered = outcomeDetails.get(outcome);
+  if (continuation === undefined || delivered === undefined) {
+    throw new TypeError("task select requires runtime-owned pending and outcome values");
+  }
+  const { delivery } = continuation;
+  const schemas = delivery.lanes.slice(
+    delivery.success.start,
+    delivery.success.start + delivery.success.count,
+  );
+  const errorWidth = delivery.failure.count;
+  const winnerWidth = delivered.lanes.length;
+  const otherWidth = schemas.length - winnerWidth - 3 - 2 * errorWidth;
+  if (otherWidth < 0) {
+    throw new TypeError("task select child is wider than its SelectOutcome envelope");
+  }
+  return selectTaskOutcomeForSchemas(
+    schemas,
+    errorWidth,
+    outcome,
+    side,
+    loserToken,
+    side === "left" ? winnerWidth : otherWidth,
+    side === "right" ? winnerWidth : otherWidth,
+  );
+}
+
+function materializeTrace(trace, schemas, errorWidth) {
+  if (!trace || typeof trace !== "object" || Array.isArray(trace)) {
+    throw new TypeError("task completion trace must be a runtime-owned object");
+  }
+  if (trace.kind === "terminal") {
+    const delivered = outcomeDetails.get(trace.outcome);
+    if (delivered === undefined) {
+      throw new TypeError("task completion trace contains a foreign outcome");
+    }
+    const expectedWidth = delivered.kind === "success"
+      ? schemas.length
+      : delivered.kind === "failure" ? errorWidth : 0;
+    if (delivered.lanes.length !== expectedWidth) {
+      throw new TypeError(
+        `task ${delivered.kind} trace must contain exactly ${expectedWidth} lanes`,
+      );
+    }
+    return trace.outcome;
+  }
+  if (trace.kind === "race") {
+    const width = trace.width;
+    if (!Number.isSafeInteger(width) || width < 0 || schemas.length !== 1 + 2 * width) {
+      throw new TypeError("task race trace does not match its compiler-derived envelope");
+    }
+    const childStart = trace.side === "left" ? 1 : 1 + width;
+    const outcome = materializeTrace(
+      trace.winner,
+      schemas.slice(childStart, childStart + width),
+      errorWidth,
+    );
+    return raceTaskOutcomeForSchemas(schemas, outcome, trace.side);
+  }
+  if (trace.kind === "select") {
+    const { leftWidth, rightWidth } = trace;
+    if (!Number.isSafeInteger(leftWidth) || leftWidth < 0
+        || !Number.isSafeInteger(rightWidth) || rightWidth < 0
+        || schemas.length !== 3 + leftWidth + rightWidth + 2 * errorWidth) {
+      throw new TypeError("task select trace does not match its compiler-derived envelope");
+    }
+    const childStart = trace.side === "left" ? 1 : leftWidth + 3;
+    const childWidth = trace.side === "left" ? leftWidth : rightWidth;
+    const outcome = materializeTrace(
+      trace.winner,
+      schemas.slice(childStart, childStart + childWidth),
+      errorWidth,
+    );
+    return selectTaskOutcomeForSchemas(
+      schemas,
+      errorWidth,
+      outcome,
+      trace.side,
+      trace.loserToken,
+      leftWidth,
+      rightWidth,
+    );
+  }
+  throw new TypeError(`unknown task completion trace kind ${String(trace.kind)}`);
+}
+
+/// Materialize a possibly nested race/select completion only when the outer
+/// compiler-generated continuation supplies the complete scalar envelope.
+/// The broker records token custody and winner structure; it never guesses a
+/// payload width or fills application lanes from host-authored metadata.
+export function materializeTaskOutcome(pending, trace) {
+  const continuation = pendingDetails.get(pending);
+  if (continuation === undefined) {
+    throw new TypeError("task completion requires a runtime-owned pending value");
+  }
+  const { delivery } = continuation;
+  return materializeTrace(
+    trace,
+    delivery.lanes.slice(
+      delivery.success.start,
+      delivery.success.start + delivery.success.count,
+    ),
+    delivery.failure.count,
+  );
 }
 
 export function createMaterializedTaskMachine(definition) {

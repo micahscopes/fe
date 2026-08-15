@@ -6,6 +6,7 @@
 // compiler-generated continuation machine.
 
 import {
+  materializeTaskOutcome,
   raceTaskOutcome,
   selectTaskOutcome,
   taskCancelled,
@@ -133,9 +134,13 @@ export function createHostCompletionBroker(options = {}) {
 
   const readClock = () => u64(clock(), "monotonic clock result");
 
-  const allocate = (kind) => {
+  const allocate = (kind, successWidth, failureWidth = 1) => {
     if (nextToken > MAX_U32) {
       throw new RangeError("Fe host pending-token space is exhausted");
+    }
+    if (!Number.isSafeInteger(successWidth) || successWidth < 0
+        || !Number.isSafeInteger(failureWidth) || failureWidth < 0) {
+      throw new TypeError("Fe host pending widths must be non-negative safe integers");
     }
     const token = nextToken;
     nextToken += 1;
@@ -144,6 +149,8 @@ export function createHostCompletionBroker(options = {}) {
     const slot = {
       token,
       kind,
+      successWidth,
+      failureWidth,
       state: "pending",
       claimed: false,
       handler: undefined,
@@ -162,11 +169,12 @@ export function createHostCompletionBroker(options = {}) {
     cancelled = false,
     raceSide = undefined,
     loserToken = undefined,
+    trace = undefined,
   ) => {
     if (slot.state !== "pending") return false;
     slot.state = "settled";
     if (slot.cancelWork !== undefined) slot.cancelWork();
-    slot.resolve(Object.freeze({ outcome, cancelled, raceSide, loserToken }));
+    slot.resolve(Object.freeze({ outcome, cancelled, raceSide, loserToken, trace }));
     return true;
   };
 
@@ -180,7 +188,7 @@ export function createHostCompletionBroker(options = {}) {
       throw new RangeError("Fe timer deadline exceeds u64 monotonic time");
     }
     const deadline = started + delay;
-    const slot = allocate("timer");
+    const slot = allocate("timer", 1);
     let handle;
     const arm = () => {
       const now = readClock();
@@ -205,14 +213,20 @@ export function createHostCompletionBroker(options = {}) {
     return slot.token | 0;
   };
 
-  const beginReceive = () => allocate("receive").token | 0;
+  const beginReceive = () => allocate("receive", 1).token | 0;
 
-  const beginBrowserOperation = (kind, invoke, successLanes) => {
-    const slot = allocate(kind);
+  const beginBrowserOperation = (kind, invoke, successWidth, successLanes) => {
+    const slot = allocate(kind, successWidth);
     const controller = new AbortController();
     slot.cancelWork = () => controller.abort();
     Promise.resolve().then(() => invoke(controller.signal)).then(value => {
-      settle(slot, taskSuccess(successLanes(value)));
+      const lanes = successLanes(value);
+      if (!Array.isArray(lanes) || lanes.length !== successWidth) {
+        throw new TypeError(
+          `${kind} completion must contain exactly ${successWidth} success lanes`,
+        );
+      }
+      settle(slot, taskSuccess(lanes));
     }).catch(() => {
       // The browser boundary deliberately reports only a stable typed failure
       // fact. Error strings, DOM identities, and retry policy do not become a
@@ -230,6 +244,7 @@ export function createHostCompletionBroker(options = {}) {
     return beginBrowserOperation(
       `surface-${kind}`,
       invoke,
+      1,
       value => [u64(value, `surface ${kind} result`)],
     );
   };
@@ -262,6 +277,7 @@ export function createHostCompletionBroker(options = {}) {
     return beginBrowserOperation(
       "document-visibility",
       signal => documentEvents.visibility(rawSeen === 1, rawPreviousHidden === 1, signal),
+      1,
       value => {
         const visibility = u32(value, "document visibility result");
         if (visibility > 1) {
@@ -279,6 +295,7 @@ export function createHostCompletionBroker(options = {}) {
     return beginBrowserOperation(
       "window-animation-frame",
       signal => windowEvents.animationFrame(signal),
+      1,
       value => [finiteF32(value, "animation frame timestamp")],
     );
   };
@@ -310,6 +327,7 @@ export function createHostCompletionBroker(options = {}) {
         previousDevicePixelRatio,
         signal,
       ),
+      3,
       value => {
         if (!value || typeof value !== "object" || Array.isArray(value)) {
           throw new TypeError("window viewport result must be an object");
@@ -332,6 +350,7 @@ export function createHostCompletionBroker(options = {}) {
     return beginBrowserOperation(
       "component-pointer",
       signal => componentEvents.pointer(signal),
+      9,
       value => {
         if (!value || typeof value !== "object" || Array.isArray(value)) {
           throw new TypeError("component pointer result must be an object");
@@ -369,6 +388,7 @@ export function createHostCompletionBroker(options = {}) {
     return beginBrowserOperation(
       "component-wheel",
       signal => componentEvents.wheel(signal),
+      8,
       value => {
         if (!value || typeof value !== "object" || Array.isArray(value)) {
           throw new TypeError("component wheel result must be an object");
@@ -405,6 +425,7 @@ export function createHostCompletionBroker(options = {}) {
     return beginBrowserOperation(
       "actor-send",
       signal => actorEvents.send(event, signal),
+      0,
       () => [],
     );
   };
@@ -425,7 +446,15 @@ export function createHostCompletionBroker(options = {}) {
         throw new TypeError("Fe race input is stale, settled, foreign, or already claimed");
       }
     }
-    const race = allocate("race");
+    if (left.successWidth !== right.successWidth
+        || left.failureWidth !== right.failureWidth) {
+      throw new TypeError("Fe race inputs must have the same runtime result widths");
+    }
+    const race = allocate(
+      "race",
+      1 + 2 * left.successWidth,
+      left.failureWidth,
+    );
     left.claimed = true;
     right.claimed = true;
     race.cancelWork = () => {
@@ -442,12 +471,24 @@ export function createHostCompletionBroker(options = {}) {
         slots.delete(child.token);
       }
     };
-    left.settled.then(delivery => {
-      settle(race, delivery.outcome, delivery.cancelled, "left");
-    });
-    right.settled.then(delivery => {
-      settle(race, delivery.outcome, delivery.cancelled, "right");
-    });
+    const choose = (side, delivery) => {
+      if (race.state !== "pending") return;
+      if (taskOutcomeKind(delivery.outcome) !== "success") {
+        settle(race, delivery.outcome, delivery.cancelled);
+        return;
+      }
+      settle(race, taskSuccess([]), delivery.cancelled, undefined, undefined, Object.freeze({
+        kind: "race",
+        side,
+        width: left.successWidth,
+        winner: delivery.trace ?? Object.freeze({
+          kind: "terminal",
+          outcome: delivery.outcome,
+        }),
+      }));
+    };
+    left.settled.then(delivery => choose("left", delivery));
+    right.settled.then(delivery => choose("right", delivery));
     return race.token | 0;
   };
 
@@ -471,7 +512,14 @@ export function createHostCompletionBroker(options = {}) {
         throw new TypeError("Fe select input is stale, foreign, or already claimed");
       }
     }
-    const selected = allocate("select");
+    if (left.failureWidth !== right.failureWidth) {
+      throw new TypeError("Fe select inputs must have the same runtime failure width");
+    }
+    const selected = allocate(
+      "select",
+      3 + left.successWidth + right.successWidth + 2 * left.failureWidth,
+      left.failureWidth,
+    );
     left.claimed = true;
     right.claimed = true;
     selected.cancelWork = () => {
@@ -491,19 +539,14 @@ export function createHostCompletionBroker(options = {}) {
     };
     const choose = (winner, loser, side, delivery) => {
       if (selected.state !== "pending") return;
+      let loserToken;
       if (taskOutcomeKind(delivery.outcome) === "success") {
         // Transfer custody of the loser back into Fe. Clearing cancelWork is
         // essential because `settle` ordinarily uses it to cancel children.
         loser.claimed = false;
         selected.cancelWork = undefined;
         slots.delete(winner.token);
-        settle(
-          selected,
-          delivery.outcome,
-          false,
-          side,
-          loser.token,
-        );
+        loserToken = loser.token;
       } else {
         // Failure/cancellation is terminal and has no payload position in
         // which an affine loser could be returned. The normal cancelWork path
@@ -511,8 +554,21 @@ export function createHostCompletionBroker(options = {}) {
         // Child terminals are typed SelectOutcome variants, not cancellation
         // of the owning scoped task. The broker cancels the unreachable loser
         // but lets Fe observe and classify the winning side.
-        settle(selected, delivery.outcome, false, side);
+        // `settle` below runs the normal cancelWork path, consuming the
+        // unreachable loser exactly once before Fe observes the side-tagged
+        // terminal as a successful SelectOutcome value.
       }
+      settle(selected, taskSuccess([]), false, undefined, undefined, Object.freeze({
+        kind: "select",
+        side,
+        loserToken,
+        leftWidth: left.successWidth,
+        rightWidth: right.successWidth,
+        winner: delivery.trace ?? Object.freeze({
+          kind: "terminal",
+          outcome: delivery.outcome,
+        }),
+      }));
     };
     left.settled.then(delivery => choose(left, right, "left", delivery));
     right.settled.then(delivery => choose(right, left, "right", delivery));
@@ -563,6 +619,14 @@ export function createHostCompletionBroker(options = {}) {
             delivery.raceSide,
             delivery.loserToken,
           ),
+          cancelled: delivery.cancelled,
+          raceSide: undefined,
+          loserToken: undefined,
+        });
+      }
+      if (delivery.trace !== undefined) {
+        return Object.freeze({
+          outcome: materializeTaskOutcome(pending, delivery.trace),
           cancelled: delivery.cancelled,
           raceSide: undefined,
           loserToken: undefined,
