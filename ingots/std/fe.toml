@@ -3,4 +3,5 @@ name = "std"
 version = "0.1.0"
 
 [dependencies]
+core = true
 core_derives = true

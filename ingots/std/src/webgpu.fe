@@ -261,14 +261,18 @@ impl StandardSurfaceRecovery {
                 if event.device_required {
                     match event.reason {
                         GpuDeviceLossReason::Destroyed => {
-                            action = recovery_terminal(event.software_fallback)
+                            action = recovery_terminal(
+                                software_fallback: event.software_fallback,
+                            )
                         }
                         _ => {
                             if attempts < 2 {
                                 attempts = attempts + 1
                                 action = SurfaceRecoveryAction::RetryDevice
                             } else {
-                                action = recovery_terminal(event.software_fallback)
+                                action = recovery_terminal(
+                                    software_fallback: event.software_fallback,
+                                )
                             }
                         }
                     }
@@ -282,7 +286,9 @@ impl StandardSurfaceRecovery {
                         attempts = attempts + 1
                         action = SurfaceRecoveryAction::RetryDevice
                     } else {
-                        action = recovery_terminal(event.software_fallback)
+                        action = recovery_terminal(
+                            software_fallback: event.software_fallback,
+                        )
                     }
                 }
             }

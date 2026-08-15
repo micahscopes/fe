@@ -248,6 +248,8 @@ pub enum ParamKind {
     Toggle,
 }
 
+impl Copy for ParamKind {}
+
 /// One declared interactive parameter. `min`/`max`/`init` are plain data; range
 /// sanity (min < max, init in range) is checked at the projection boundary, not
 /// in the type (ranges are data). Fields are private: a `Param` is only ever

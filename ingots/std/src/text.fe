@@ -180,8 +180,8 @@ impl Utf8View {
     pub fn trim_ascii(self) -> Self {
         let mut start: u32 = 0
         let mut end = self.len
-        while start < end && ascii_space(self.byte(index: start)) { start = start + 1 }
-        while end > start && ascii_space(self.byte(index: end - 1)) { end = end - 1 }
+        while start < end && ascii_space(value: self.byte(index: start)) { start = start + 1 }
+        while end > start && ascii_space(value: self.byte(index: end - 1)) { end = end - 1 }
         Self { ptr: self.ptr + start, len: end - start }
     }
 
@@ -312,11 +312,11 @@ impl Utf8Buffer {
     }
 
     pub fn replace_browser(self, _ value: own BrowserString) -> Utf8Write {
-        self.replace(Utf8View::from_browser(value))
+        self.replace(value: Utf8View::from_browser(value))
     }
 
     pub fn replace_trimmed_browser(self, _ value: own BrowserString) -> Utf8Write {
-        self.replace(Utf8View::from_browser(value).trim_ascii())
+        self.replace(value: Utf8View::from_browser(value).trim_ascii())
     }
 
     /// Copy an inferred owned `[u8; N]`. A source string literal selects this
@@ -503,8 +503,9 @@ impl<const CAPACITY: u32> TextSlot<CAPACITY> {
 
 const fn table_span(capacity: u32, count: u32, stride: u32, prefix: u32) -> u32 {
     if count == 0 { return prefix }
-    if stride < capacity { core::panic() }
-    prefix + (count - 1) * stride + capacity
+    // Checked const subtraction rejects overlapping table rows without an
+    // effectful panic inside CTFE.
+    prefix + count * capacity + (count - 1) * (stride - capacity)
 }
 
 /// A homogeneous, optionally strided table of bounded strings. `PREFIX`
@@ -530,7 +531,12 @@ impl<
     const STRIDE: u32,
     const PREFIX: u32,
 > TextLayout for TextTable<CAPACITY, COUNT, STRIDE, PREFIX> {
-    const BYTE_CAPACITY: u32 = table_span(CAPACITY, COUNT, STRIDE, PREFIX)
+    const BYTE_CAPACITY: u32 = table_span(
+        capacity: CAPACITY,
+        count: COUNT,
+        stride: STRIDE,
+        prefix: PREFIX,
+    )
     const fn text_layout_at(_ offset: u32) -> Self { Self { offset: offset } }
 }
 
