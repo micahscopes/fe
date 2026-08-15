@@ -7416,18 +7416,50 @@ where
         let RuntimeClass::AggregateValue { .. } = resolved.result_class.clone() else {
             return Ok(None);
         };
-        let (addr_local, mut current_class) = match resolved.root_kind {
+        // Dynamic indexing is sound only when the root names storage owned by
+        // this function: a local object or the arena copy made for a flattened
+        // aggregate parameter. Other memory references retain the prior
+        // constant-projection envelope and cannot widen a host region.
+        let (addr_local, mut current_class, allow_dynamic_index) = match resolved.root_kind {
+            mir::ResolvedPlaceRootKind::Ref { value, class }
+                if matches!(
+                    self.body.value_class(value),
+                    Some(RuntimeClass::Ref {
+                        kind: RefKind::Object,
+                        ..
+                    })
+                ) =>
+            {
+                (value, class, true)
+            }
+            mir::ResolvedPlaceRootKind::Ref { value, class }
+                if self.body.value_class(value).is_some_and(|class| {
+                    matches!(
+                        class,
+                        RuntimeClass::Ref {
+                            kind: RefKind::Provider {
+                                space: AddressSpaceKind::Memory,
+                                ..
+                            },
+                            pointee,
+                            ..
+                        } if matches!(pointee.as_ref(), RuntimeClass::AggregateValue { .. })
+                    )
+                }) =>
+            {
+                (value, class, true)
+            }
             mir::ResolvedPlaceRootKind::Ref { value, class }
                 if self.body.value_class(value).is_some_and(|class| {
                     self.module.memory_lowerable_ref_layout(class).is_some()
                 }) =>
             {
-                (value, class)
+                (value, class, false)
             }
             mir::ResolvedPlaceRootKind::Slot { local, class }
                 if self.materialized_param_slots.contains(&local) =>
             {
-                (local, class)
+                (local, class, true)
             }
             _ => return Ok(None),
         };
@@ -7455,10 +7487,7 @@ where
                         })?;
                     current_class = class;
                 }
-                mir::ResolvedPlaceElem::Index {
-                    index: IndexSource::Constant(index),
-                    class,
-                } => {
+                mir::ResolvedPlaceElem::Index { index, class } => {
                     let RuntimeClass::AggregateValue { layout } = current_class else {
                         return Err(LowerError::Internal(
                             "resolved aggregate index base is not an array".to_owned(),
@@ -7469,25 +7498,63 @@ where
                             "resolved aggregate index layout is not an array".to_owned(),
                         ));
                     };
-                    if (index as u64) >= array.len {
-                        return Err(LowerError::Unsupported(format!(
-                            "wasm aggregate constant index {index} is out of bounds for length {}",
-                            array.len
-                        )));
-                    }
                     let stride =
                         mir::array_elem_size_bytes(self.module.db, layout, crate::WASM_LAYOUT);
-                    byte_offset = byte_offset
-                        .checked_add(index.checked_mul(stride).ok_or_else(|| {
-                            LowerError::Unsupported(
-                                "wasm aggregate element byte offset overflow".to_owned(),
-                            )
-                        })?)
-                        .ok_or_else(|| {
-                            LowerError::Unsupported(
-                                "wasm aggregate element byte offset overflow".to_owned(),
-                            )
-                        })?;
+                    match index {
+                        IndexSource::Constant(index) => {
+                            if (index as u64) >= array.len {
+                                return Err(LowerError::Unsupported(format!(
+                                    "wasm aggregate constant index {index} is out of bounds for length {}",
+                                    array.len
+                                )));
+                            }
+                            byte_offset = byte_offset
+                                .checked_add(index.checked_mul(stride).ok_or_else(|| {
+                                    LowerError::Unsupported(
+                                        "wasm aggregate element byte offset overflow".to_owned(),
+                                    )
+                                })?)
+                                .ok_or_else(|| {
+                                    LowerError::Unsupported(
+                                        "wasm aggregate element byte offset overflow".to_owned(),
+                                    )
+                                })?;
+                        }
+                        IndexSource::Dynamic(index_local) if allow_dynamic_index => {
+                            addr = self.offset_addr(addr, byte_offset)?;
+                            byte_offset = 0;
+                            let is = self.inst_set();
+                            let index = self.local_value(index_local)?;
+                            let len = i32::try_from(array.len).map_err(|_| {
+                                LowerError::Unsupported(format!(
+                                    "wasm aggregate array length {} exceeds i32",
+                                    array.len
+                                ))
+                            })?;
+                            let len = self.fb.make_imm_value(Immediate::I32(len));
+                            let in_bounds = self.fb.insert_inst(Lt::new(is, index, len), Type::I1);
+                            let trap = self.trap_block();
+                            let ok = self.fb.append_block();
+                            self.fb
+                                .insert_inst_no_result(Br::new(is, in_bounds, ok, trap));
+                            self.fb.switch_to_block(ok);
+                            let stride = i32::try_from(stride).map_err(|_| {
+                                LowerError::Unsupported(format!(
+                                    "wasm aggregate array element stride {stride} exceeds i32"
+                                ))
+                            })?;
+                            let stride = self.fb.make_imm_value(Immediate::I32(stride));
+                            let scaled =
+                                self.fb.insert_inst(Mul::new(is, index, stride), Type::I32);
+                            addr = self.fb.insert_inst(Add::new(is, addr, scaled), Type::I32);
+                        }
+                        IndexSource::Dynamic(_) => {
+                            return Err(LowerError::Unsupported(
+                                "wasm aggregate dynamic index requires function-local or materialized aggregate storage"
+                                    .to_owned(),
+                            ));
+                        }
+                    }
                     current_class = class;
                 }
                 other => {
