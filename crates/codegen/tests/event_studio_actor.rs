@@ -14,7 +14,7 @@ use hir::hir_def::HirIngot;
 use url::Url;
 
 const STATE_LEAVES: usize = 18;
-const EVENT_LEAVES: usize = 22;
+const EVENT_LEAVES: usize = 34;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct Model {
@@ -44,8 +44,11 @@ struct Event {
     viewport_width: f32,
     viewport_height: f32,
     viewport_dpr: f32,
+    pointer_phase: u32,
+    pointer_device: u32,
     pointer_x: f32,
     pointer_y: f32,
+    wheel_mode: u32,
     document_hidden: bool,
     frame_timestamp: f32,
     bounded_drops: u32,
@@ -126,15 +129,27 @@ fn event_values(event: Event) -> Vec<wasmtime::Val> {
         wasmtime::Val::F32(event.viewport_width.to_bits()),
         wasmtime::Val::F32(event.viewport_height.to_bits()),
         wasmtime::Val::F32(event.viewport_dpr.to_bits()),
+        wasmtime::Val::I32(event.pointer_phase as i32),
+        wasmtime::Val::I32(event.pointer_device as i32),
         wasmtime::Val::I32(17),
         wasmtime::Val::F32(event.pointer_x.to_bits()),
         wasmtime::Val::F32(event.pointer_y.to_bits()),
         wasmtime::Val::I32(1),
+        wasmtime::Val::I32(1),
+        wasmtime::Val::F32(0.625f32.to_bits()),
         wasmtime::Val::F32(8.5f32.to_bits()),
+        wasmtime::Val::I32(event.bounded_drops as i32),
+        wasmtime::Val::F32(0.0f32.to_bits()),
+        wasmtime::Val::F32((-4.5f32).to_bits()),
+        wasmtime::Val::F32(0.0f32.to_bits()),
+        wasmtime::Val::I32(event.wheel_mode as i32),
+        wasmtime::Val::F32(event.pointer_x.to_bits()),
+        wasmtime::Val::F32(event.pointer_y.to_bits()),
+        wasmtime::Val::I32(0),
+        wasmtime::Val::F32(9.5f32.to_bits()),
         wasmtime::Val::I32(event.document_hidden as i32),
         wasmtime::Val::F32(event.frame_timestamp.to_bits()),
         wasmtime::Val::I32(1),
-        wasmtime::Val::I32(event.bounded_drops as i32),
         wasmtime::Val::I32(event.latest_value as i32),
     ]
 }
@@ -295,6 +310,8 @@ fn event_studio_matches_independent_browser_stream_and_lifecycle_oracle() {
         Event {
             kind: 13,
             target: 2,
+            pointer_phase: 1,
+            pointer_device: 2,
             pointer_x: 123.75,
             pointer_y: 222.5,
             bounded_drops: 2,
@@ -374,5 +391,22 @@ fn event_studio_matches_independent_browser_stream_and_lifecycle_oracle() {
             .call(&mut store, &event_values(invalid), &mut output)
             .is_err(),
         "invalid compiler-derived action tags must trap before Fe observes them"
+    );
+
+    let invalid_pointer_phase = Event {
+        kind: 13,
+        target: 2,
+        pointer_phase: 99,
+        ..tape[3]
+    };
+    assert!(
+        transition
+            .call(
+                &mut store,
+                &event_values(invalid_pointer_phase),
+                &mut output,
+            )
+            .is_err(),
+        "invalid nested PointerPhase tags must trap at the generated boundary"
     );
 }

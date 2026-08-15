@@ -3021,6 +3021,20 @@ where
                 args.push(self.gpu_resource_type(semantic_ty)?);
             } else if let Some(elem_tys) = self.scalar_tuple_element_tys(&param.class) {
                 args.extend(elem_tys);
+            } else if matches!(linkage, Linkage::Private)
+                && self.is_memory_lowerable_object_ref(&param.class)
+            {
+                // A mutable owned aggregate receiver is object-backed inside
+                // one generated Wasm module. Its caller has already
+                // materialized an independent Fe value in the canonical arena,
+                // and the function lowerer represents the receiver as that i32
+                // arena address. Admit the same representation in PRIVATE
+                // helper signatures so ordinary fluent value methods can edit
+                // their owned copy. Public, continuation, and host-visible
+                // signatures deliberately stay on the recursively flattened
+                // value ABI: an arena pointer must never become application or
+                // browser protocol.
+                args.push(Type::I32);
             } else {
                 args.push(self.ty_for_class(&param.class).map_err(|error| match error {
                     LowerError::Unsupported(message) => LowerError::Unsupported(format!(
@@ -5224,7 +5238,11 @@ where
                 Layout::Array(array_layout) => {
                     self.aggregate_is_memory_lowerable(&array_layout.elem)
                 }
-                Layout::Enum(_) => false,
+                // A payload-free enum is one compact target-layout tag in
+                // memory and one canonical i32 lane in the value ABI. Payload
+                // enums still need a tagged-union memory policy and remain
+                // fail-closed.
+                Layout::Enum(_) => self.fieldless_enum_tag(*layout).is_some(),
             },
             RuntimeClass::Ref { .. } | RuntimeClass::RawAddr { .. } => false,
         }
@@ -5747,6 +5765,7 @@ where
                 self.fb.def_var(var, value);
                 Ok(())
             }
+            RStmt::CopyInto { dst, src } => self.lower_copy_value_into_place(dst, *src),
             RStmt::Store { dst, src }
                 if matches!((&dst.root, &*dst.path), (PlaceRoot::Slot(_), [])) =>
             {
@@ -6947,9 +6966,41 @@ where
                     }
                     Ok(())
                 }
-                Layout::Enum(_) => Err(LowerError::Unsupported(
-                    "wasm target: payload-enum materialization is not implemented".to_owned(),
-                )),
+                Layout::Enum(_) => {
+                    let tag = self.module.fieldless_enum_tag(*layout).ok_or_else(|| {
+                        LowerError::Unsupported(
+                            "wasm target: payload-enum materialization is not implemented"
+                                .to_owned(),
+                        )
+                    })?;
+                    let value = *leaves.get(*cursor).ok_or_else(|| {
+                        LowerError::Internal(
+                            "materialized enum is missing its canonical tag leaf".to_owned(),
+                        )
+                    })?;
+                    let compact_ty = scalar_ty_r1(&tag)?;
+                    let actual_ty = self.fb.type_of(value);
+                    let stored = if actual_ty == compact_ty {
+                        value
+                    } else if actual_ty == Type::I32
+                        && matches!(compact_ty, Type::I1 | Type::I8 | Type::I16)
+                    {
+                        self.fb
+                            .insert_inst(Trunc::new(self.inst_set(), value, compact_ty), compact_ty)
+                    } else {
+                        return Err(LowerError::Internal(format!(
+                            "materialized enum tag has value type {actual_ty:?}, compact memory requires {compact_ty:?}"
+                        )));
+                    };
+                    self.fb.insert_inst_no_result(Mstore::new(
+                        self.inst_set(),
+                        pointer,
+                        stored,
+                        compact_ty,
+                    ));
+                    *cursor += 1;
+                    Ok(())
+                }
             },
             RuntimeClass::Ref { .. } | RuntimeClass::RawAddr { .. } => {
                 Err(LowerError::Unsupported(
@@ -6957,6 +7008,64 @@ where
                 ))
             }
         }
+    }
+
+    /// Store one recursively flattened Fe value into an addressable aggregate
+    /// projection. This is the write-side twin of aggregate-place loading: the
+    /// source remains a value tree, the destination address and every nested
+    /// offset come from MIR's target layout, and no pointer aliases escape into
+    /// the value ABI. It enables ordinary `mut self` value builders to assign a
+    /// complete nested record rather than spelling one store per scalar leaf.
+    fn lower_copy_value_into_place(
+        &mut self,
+        destination: &RuntimePlace<'db>,
+        source: RLocalId,
+    ) -> Result<(), LowerError> {
+        let Some((pointer, destination_class)) = self.raw_memory_aggregate_place(destination)?
+        else {
+            return Err(LowerError::Unsupported(format!(
+                "wasm target: aggregate copy destination is not canonical-arena-backed: {destination:?}"
+            )));
+        };
+        let source_class = self.body.value_class(source).cloned().ok_or_else(|| {
+            LowerError::Internal(format!("aggregate copy source {source:?} has no class"))
+        })?;
+        if !matches!(source_class, RuntimeClass::AggregateValue { .. }) {
+            return Err(LowerError::Unsupported(format!(
+                "wasm target: aggregate copy source {source:?} is not a flattened value"
+            )));
+        }
+        if !source_class.shares_runtime_rep_with(self.module.db, &destination_class) {
+            return Err(LowerError::Unsupported(format!(
+                "wasm target: aggregate copy source and destination layouts differ: {source_class:?} / {destination_class:?}"
+            )));
+        }
+        if !self.module.aggregate_is_memory_lowerable(&source_class) {
+            return Err(LowerError::Unsupported(format!(
+                "wasm target: aggregate copy source {source:?} has non-memory-lowerable leaves"
+            )));
+        }
+        let shape = self.module.flat_shape(&source_class).ok_or_else(|| {
+            LowerError::Unsupported(format!(
+                "wasm target: aggregate copy source {source:?} cannot be recursively flattened"
+            ))
+        })?;
+        let leaves = self.local_flat_values(source)?;
+        if leaves.len() != shape.leaf_count() {
+            return Err(LowerError::Internal(format!(
+                "aggregate copy source {source:?} exposed {} leaves for shape {shape:?}",
+                leaves.len()
+            )));
+        }
+        let mut cursor = 0usize;
+        self.store_materialized_leaves(pointer, &source_class, &leaves, &mut cursor)?;
+        if cursor != leaves.len() {
+            return Err(LowerError::Internal(format!(
+                "aggregate copy source {source:?} consumed {cursor} of {} leaves",
+                leaves.len()
+            )));
+        }
+        Ok(())
     }
 
     /// Load a flattened product from its target-layout memory representation.
@@ -6973,6 +7082,21 @@ where
         match (class, shape) {
             (RuntimeClass::Scalar(_), FlatShape::Leaf(ty)) => {
                 values.push(self.load_memory_scalar(pointer, *ty));
+                Ok(())
+            }
+            (RuntimeClass::AggregateValue { layout }, FlatShape::Leaf(Type::I32))
+                if self.module.fieldless_enum_tag(*layout).is_some() =>
+            {
+                let tag = self.module.fieldless_enum_tag(*layout).unwrap();
+                let compact_ty = scalar_ty_r1(&tag)?;
+                let compact = self.load_memory_scalar(pointer, compact_ty);
+                let canonical = if compact_ty == Type::I32 {
+                    compact
+                } else {
+                    self.fb
+                        .insert_inst(Zext::new(self.inst_set(), compact, Type::I32), Type::I32)
+                };
+                values.push(canonical);
                 Ok(())
             }
             (RuntimeClass::AggregateValue { layout }, FlatShape::Product(fields)) => {

@@ -5,11 +5,13 @@
 //! adapter does not decide what work is paced, sampled, or presented.
 
 use core::pending::{Suspend, TaskOutcome}
+use core::default::Default
 use ingot::wasm::WasmBackend
 use super::super::host::Resumable
 use super::super::reactive::{Cancelled, Event, EventSource, Subscription}
 use raw::{animation_frame_begin as raw_animation_frame_begin, viewport_begin as raw_viewport_begin}
 
+#[derive(Default)]
 pub struct AnimationFrame { pub timestamp: f32 }
 
 impl Copy for AnimationFrame {}
@@ -17,6 +19,7 @@ impl Copy for AnimationFrame {}
 /// One complete viewport observation. Dimensions are CSS pixels; the device
 /// pixel ratio is kept separate so Fe can decide its own render resolution and
 /// mobile quality policy.
+#[derive(Default)]
 pub struct Viewport { pub width: f32, pub height: f32, pub device_pixel_ratio: f32 }
 
 impl Copy for Viewport {}

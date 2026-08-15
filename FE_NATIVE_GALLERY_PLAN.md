@@ -1300,6 +1300,28 @@ Origin: honesty audit of Claude Code session
   combined SourceInspector Chromium oracle repeats the same exact four-delivery/
   two-drop receipt. The timer retains only the independent one-slot `Latest`
   probe; bounded drops now come from actual concurrent browser traffic.
+- The first rich aggregate/resumable ergonomics slice removes Event Studio's
+  flattened browser-fact shadow record. Private Wasm helpers now admit an
+  object-backed `mut self` only as an internal canonical-arena address; public,
+  continuation, and host signatures remain recursively flattened values.
+  Whole nested-record assignment writes compiler-derived target-layout leaves,
+  and payload-free enum leaves round-trip between their compact memory tag and
+  canonical i32 value lane. An executed heterogeneous nested-record regression
+  uses a fluent owned builder, whole-record replacement, a fieldless enum,
+  `u32`/`u64`/`bool` leaves, suspension, success, and cancellation; its exact
+  start/resume receipts prove no pointer escapes into the continuation ABI.
+  `PointerSample`, `WheelSample`, `Viewport`, `AnimationFrame`, and
+  `DocumentVisibility` now derive `Default` in Fe, and Event Studio nests those
+  actual nominal facts in its mailbox. This deletes 80 lines and all repeated
+  13-field zero-fill constructors. The independent reducer executes the new
+  34-leaf event, checks the same state semantics, and additionally rejects a
+  forged nested `PointerPhase`; standalone Chromium repeats the real concurrent
+  four-delivery/two-drop receipt. The complete 84-test Wasm execution suite,
+  35-test runtime-handle suite, and 33-test HTML-precompiler suite are green;
+  a fresh optimized publication verifies 15 Fe modules / 79 deployment files
+  and passes the combined real Chromium gallery/SourceInspector/Event Studio
+  tape. Payload-enum memory, general target-sized metadata, and the ideal
+  const-generic queue backing remain separate work.
 
 This ledger records achieved evidence, not a relaxation of the phases or the
 Definition of done below.
@@ -1357,13 +1379,12 @@ general interface rather than open a parallel demo-specific lane.
    surface. Optimization may specialize compiler-derived structure, but must
    preserve independent semantic oracles rather than substituting byte matches.
 
-The lifecycle/value, QCGA interaction, shared DE scene, and first general actor
-effect slices described above are substantially landed. The current vertical
-slice is now: landed scan/latest/bounded policy and true producer/consumer
-composition -> rich aggregate payload scalarization -> merge/switch/sharing
-and deterministic time -> remaining browser sources. This completes one
-multiplying axis before returning to shared interaction and GPU/GA
-generalization.
+The lifecycle/value, QCGA interaction, shared DE scene, first general actor
+effects, true producer/consumer composition, and first rich aggregate payload
+slice described above are substantially landed. The current vertical slice is
+now: merge/switch/sharing and deterministic time -> remaining browser sources.
+This completes one multiplying axis before returning to shared interaction and
+GPU/GA generalization.
 
 ## Ingot utility maturity map (2026-08-14 audit)
 
@@ -1427,10 +1448,11 @@ layers, not beside reusable application utilities.
 
 ### Utilities that need compiler work to become ideal
 
-- General aggregate scalarization across returned/resumable values, including
-  nested arrays, portable target-sized metadata, and mutable aggregate receiver
-  ergonomics. This removes the current four-slot queue backing and verbose
-  scalar message constructors.
+- Finish aggregate scalarization beyond the landed nested struct, fieldless-
+  enum, whole-copy, mutable-receiver, return, and resumable value path:
+  payload-enum memory, nested const-generic arrays, and portable target-sized
+  metadata must remove the current four-slot queue backing without exposing
+  arena pointers.
 - FCO reflection/type emission rich enough to derive component action sums,
   opaque part types, view projection, task bodies, and typed task/kernel handles
   instead of public numeric constructors or parallel declarations.
@@ -1819,12 +1841,13 @@ and tested in Fe; JavaScript merely supplies frame/GPU-completion facts.
    shader ABI that intentionally has no trap channel. Until then, nominal
    policy records with boolean fields are the honest shader-safe form; demos
    must not replace the missing lowering with anonymous numeric tags.
-1. Finish canonical allocator/PostReturn and rich-record transport. In
-   particular, scalarize nested record fields retained inside resumable Wasm
-   locals: a `StudioTask { viewport: Viewport, ... }` currently reaches an
-   unsupported aggregate `Ref` local, so the working nominal payload names its
-   viewport leaves directly. Pin the general fix with an executed nested rich-
-   mailbox regression; do not replace it with packed integers or field IDs.
+1. Finish canonical allocator/PostReturn and rich-record transport. Landed:
+   nested records and fieldless enums cross resumable Wasm as flattened values;
+   private fluent `mut self` helpers use internal object storage; whole nested
+   assignment is target-layout-derived; and Event Studio carries actual nominal
+   browser facts with an executed rich-mailbox regression. Remaining:
+   payload-enum memory, nested const-generic arrays, and portable target-sized
+   metadata. Do not replace those gaps with packed integers or field IDs.
 2. Connect generated WebIDL callback adapters to compiled Fe callback bodies.
 3. Add the MIR suspension/re-entry transform for resumable Fe tasks.
 4. Make actor state resident in a live Fe instance instead of couriered in
@@ -2178,8 +2201,9 @@ order:
    cancellation. The broader stream graph remains.
 3. **Landed:** repeated source-to-actor loops are consolidated behind a typed
    Fe utility without hiding effects, authority, or failure policy.
-4. Fix rich aggregate/resumable scalarization, then simplify Event Studio's
-   messages and constructors using derived defaults and nominal payloads.
+4. **Landed:** rich nested struct/fieldless-enum values survive suspension;
+   private fluent owned builders and whole nested assignment execute; Event
+   Studio uses Fe-derived defaults and actual nominal browser facts.
 5. Complete merge, switch/latest, sharing/replay, debounce/throttle, and virtual
    time before opening a parallel reactive runtime.
 6. Add pointer capture, device loss, MessagePort, fetch, and GPU-completion

@@ -7,13 +7,16 @@
 //! JavaScript retains no application subscription graph or policy.
 
 use core::pending::{Suspend, TaskOutcome}
+use core::default::Default
 use ingot::wasm::WasmBackend
 use super::super::host::Resumable
 use super::super::reactive::{Cancelled, Event, EventSource, Subscription}
 use raw::visibility_begin as raw_visibility_begin
 
 /// The complete standards visibility state used by the browser adapter.
+#[derive(Default)]
 pub enum DocumentVisibility {
+    #[default]
     Visible,
     Hidden,
 }

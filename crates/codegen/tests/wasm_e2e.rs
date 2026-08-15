@@ -255,6 +255,114 @@ pub fn task(_ pending: own Pending<WasmBackend, u32>, _ kept: u32) -> u32 {
 }
 
 #[test]
+fn nested_aggregate_value_survives_a_resumable_frame() {
+    let wasm = compile_to_wasm(
+        "nested_aggregate_resumable.fe",
+        r#"
+use core::pending::{Pending, TaskOutcome}
+use std::host::raw::suspend
+use std::wasm::WasmBackend
+
+enum Mode {
+    Cold,
+    Hot,
+}
+
+impl Copy for Mode {}
+
+struct Inner {
+    low: u32,
+    wide: u64,
+    mode: Mode,
+}
+
+impl Copy for Inner {}
+
+struct Payload {
+    inner: Inner,
+    enabled: bool,
+    tail: u32,
+}
+
+impl Copy for Payload {}
+
+impl Payload {
+    fn with_inner(mut self, value: Inner) -> Self {
+        self.inner = value
+        self
+    }
+}
+
+fn payload(seed: u32) -> Payload {
+    Payload {
+        inner: Inner { low: seed + 1, wide: 4_294_967_311, mode: Mode::Cold },
+        enabled: true,
+        tail: seed + 2,
+    }
+}
+
+pub fn task(_ pending: own Pending<WasmBackend, u32>, _ seed: u32) -> u64 {
+    let kept = payload(seed).with_inner(value: Inner {
+        low: seed + 9,
+        wide: 4_294_967_311,
+        mode: Mode::Hot,
+    })
+    let outcome: TaskOutcome<u32, u32> = suspend(pending)
+    match outcome {
+        TaskOutcome::Success(value) => {
+            let narrow = kept.inner.low + kept.tail + value
+            let widened: u64 = narrow.downcast_unchecked()
+            kept.inner.wide + widened
+        }
+        TaskOutcome::Failure(error) => {
+            let widened: u64 = error.downcast_unchecked()
+            widened
+        }
+        TaskOutcome::Cancelled => match kept.inner.mode {
+            Mode::Hot => if kept.enabled { 17 } else { 18 },
+            Mode::Cold => 19,
+        }
+    }
+}
+"#,
+    );
+    assert!(func_imports(&wasm).is_empty());
+    let (mut store, instance) = instantiate(&wasm);
+    let start = instance
+        .get_typed_func::<(i32, i32), (i32, i64, i32, i32, i64, i32, i32, i32)>(
+            &mut store,
+            "__fe_task_start_task",
+        )
+        .expect("nested aggregate task start export");
+    let resume = instance
+        .get_typed_func::<
+            (i32, i64, i32, i32, i32, i32, i32, i32),
+            (i32, i64, i32, i32, i64, i32, i32, i32),
+        >(&mut store, "__fe_task_resume_task_1")
+        .expect("nested aggregate continuation export");
+
+    assert_eq!(
+        start.call(&mut store, (77, 5)).unwrap(),
+        (1, 0, 77, 14, 4_294_967_311, 1, 1, 7),
+        "the fluent mut-own helper must return an independent nested value and the frame must preserve every heterogeneous leaf",
+    );
+    assert_eq!(
+        resume
+            .call(&mut store, (14, 4_294_967_311, 1, 1, 7, 1, 0, 3))
+            .unwrap(),
+        (0, 4_294_967_335, 0, 0, 0, 0, 0, 0),
+        "typed success must reconstruct the nested frame and execute through its projected fields",
+    );
+    assert_eq!(
+        resume
+            .call(&mut store, (14, 4_294_967_311, 1, 1, 7, 2, 0, 0))
+            .unwrap(),
+        (0, 17, 0, 0, 0, 0, 0, 0),
+        "cancellation must retain the nested boolean leaf rather than an untyped numeric placeholder",
+    );
+}
+
+#[test]
 fn two_suspend_sites_chain_through_distinct_exact_frames() {
     let wasm = compile_to_wasm(
         "two_resumable_sites.fe",

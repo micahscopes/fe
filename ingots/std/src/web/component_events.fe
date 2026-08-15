@@ -6,6 +6,7 @@
 //! Events deliberately unify mouse, pen, and touch at the standards boundary.
 
 use core::pending::{Suspend, TaskOutcome}
+use core::default::Default
 use ingot::wasm::WasmBackend
 use super::super::host::Resumable
 use super::super::reactive::{
@@ -13,24 +14,29 @@ use super::super::reactive::{
 }
 use raw::{pointer_begin as raw_pointer_begin, wheel_begin as raw_wheel_begin}
 
+#[derive(Default)]
 pub enum PointerPhase {
     Down,
     Move,
     Up,
+    #[default]
     Cancel,
 }
 
 impl Copy for PointerPhase {}
 
+#[derive(Default)]
 pub enum PointerDevice {
     Mouse,
     Pen,
     Touch,
+    #[default]
     Other,
 }
 
 impl Copy for PointerDevice {}
 
+#[derive(Default)]
 pub struct PointerSample {
     pub phase: PointerPhase,
     pub device: PointerDevice,
@@ -49,21 +55,13 @@ impl PointerSample {
     /// Well-typed storage for an unobserved subscription. No field is a
     /// sentinel; callers must still consult `Subscription::has_observation`.
     pub fn placeholder() -> Self {
-        Self {
-            phase: PointerPhase::Cancel,
-            device: PointerDevice::Other,
-            pointer_id: 0,
-            client_x: 0.0,
-            client_y: 0.0,
-            buttons: 0,
-            primary: false,
-            pressure: 0.0,
-            timestamp: 0.0,
-        }
+        Self::default()
     }
 }
 
+#[derive(Default)]
 pub enum WheelDeltaMode {
+    #[default]
     Pixel,
     Line,
     Page,
@@ -72,6 +70,7 @@ pub enum WheelDeltaMode {
 
 impl Copy for WheelDeltaMode {}
 
+#[derive(Default)]
 pub struct WheelSample {
     pub delta_x: f32,
     pub delta_y: f32,
@@ -87,16 +86,7 @@ impl Copy for WheelSample {}
 
 impl WheelSample {
     pub fn placeholder() -> Self {
-        Self {
-            delta_x: 0.0,
-            delta_y: 0.0,
-            delta_z: 0.0,
-            mode: WheelDeltaMode::Pixel,
-            client_x: 0.0,
-            client_y: 0.0,
-            control: false,
-            timestamp: 0.0,
-        }
+        Self::default()
     }
 }
 
