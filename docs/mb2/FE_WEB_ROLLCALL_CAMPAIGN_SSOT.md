@@ -170,9 +170,42 @@ Legend:
 - [ ] Run proof submission and verification through structured Fe tasks,
   Worker/MessagePort effects, cancellation, and backpressure.
 
+## External real-GPU handoff
+
+Run these from commit `0d7f3eddd` or later on a Linux host whose printed
+adapter is a hardware adapter. Do not set `MB2_ALLOW_GPU_SKIP`; a skip is a
+failed campaign gate. `WGPU_BACKEND=vulkan` keeps the path browser-profile
+compatible. On a non-Linux host, omit that variable and retain every other
+condition.
+
+```console
+mkdir -p /workspace/tmp /workspace/.sccache
+env -u MB2_ALLOW_GPU_SKIP TMPDIR=/workspace/tmp CARGO_INCREMENTAL=0 SCCACHE_DIR=/workspace/.sccache WGPU_BACKEND=vulkan cargo nextest run --release --locked -p fe-codegen --test known_color_pass_graph_e2e
+env -u MB2_ALLOW_GPU_SKIP TMPDIR=/workspace/tmp CARGO_INCREMENTAL=0 SCCACHE_DIR=/workspace/.sccache WGPU_BACKEND=vulkan cargo nextest run --release --locked -p fe-codegen --test rollcall_pass_graph_e2e
+env -u MB2_ALLOW_GPU_SKIP TMPDIR=/workspace/tmp CARGO_INCREMENTAL=0 SCCACHE_DIR=/workspace/.sccache WGPU_BACKEND=vulkan cargo nextest run --release --locked -p fe-codegen --test precision_fixed_orbit_gpu_oracle
+env -u MB2_ALLOW_GPU_SKIP TMPDIR=/workspace/tmp CARGO_INCREMENTAL=0 SCCACHE_DIR=/workspace/.sccache WGPU_BACKEND=vulkan cargo nextest run --release --locked -p fe-codegen --test perturbational_mandelbrot_gpu_oracle
+```
+
+Acceptance requires four passing test binaries, no `SKIPPED` line, and a
+printed adapter that is not SwiftShader, llvmpipe, or another software
+fallback. The semantic receipts are:
+
+- Known Color preserves storage bits `0x3f800000` and `0xc0000000`, then paints
+  pixel `[0, 0, 128, 255]`.
+- Rollcall preserves leaves `[3, 5, 7, 9, 11, 13, 15, 17]`, produces nodes
+  `[896599, 12151, 30583, 185, 377, 569, 761, 8]`, leaves its private-memory
+  trap at zero, and paints pixel `[95, 166, 5, 255]`.
+- `Fixed<8>` matches every packed and exact audit word for all directed orbit
+  checkpoints and emits the explicit invalid-reference sentinel for the
+  escaping `(1, 1)` case.
+- Perturbation matches the independent BigInt `Fixed<8>` classifier, reports
+  no false classifications, resolves the escaping-reference overlap with zero
+  magenta pixels, and shows magenta only for the four deliberately ambiguous
+  boundary samples.
+
 ## Immediate burn-down order
 
-1. Hand the exact real-GPU commands and expected receipts to Micah.
+1. Run the external real-GPU handoff above.
 2. Start the bounded-proof specification and independent oracle before adding
    more gallery polish.
 3. Finish typed fetch, then Worker/port placement and supervision on the one
