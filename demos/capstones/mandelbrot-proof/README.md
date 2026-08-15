@@ -25,8 +25,9 @@ bounds, their 12-bit profile bounds Q12 remainders, and a high-bit OR binds the
 terminal flag to the exact `2^26` escape threshold. The gate first demonstrates
 that equality/state constraints alone accept alternate remainders, negative
 zero, and premature termination, then proves the companion range constraints
-reject all three. These witnesses still need to be wired across every trace and
-public-claim column.
+reject all three. `RangedAirRow` wires every trace column to a type-level Fe
+width and checks the complete row through one nominal entry. Public-claim
+validation and bound/shape binding remain explicit verifier work.
 
 Escaping witnesses derive a power-of-two proof shape with one terminal marker
 and deterministic inactive padding; invalid and non-escaping claims cannot

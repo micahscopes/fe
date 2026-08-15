@@ -534,6 +534,43 @@ fn terminal_range_args(terminal: bool, magnitude: u32) -> Vec<i32> {
     args
 }
 
+fn append_unsigned_range(args: &mut Vec<i32>, value: u32, width: usize) {
+    args.push(value as i32);
+    args.extend(bit_range_witness(value, width));
+}
+
+fn append_signed_range(args: &mut Vec<i32>, value: [i32; 2], width: usize) {
+    args.extend(value);
+    args.extend(bit_range_witness(value[1] as u32, width));
+}
+
+fn ranged_air_args(row: AirRow, zr_override: Option<[i32; 2]>) -> Vec<i32> {
+    let mut args = Vec::with_capacity(426);
+    append_unsigned_range(&mut args, row.row.step, 21);
+    append_signed_range(
+        &mut args,
+        zr_override.unwrap_or_else(|| sign_magnitude(row.row.zr)),
+        15,
+    );
+    append_signed_range(&mut args, sign_magnitude(row.row.zi), 15);
+    append_unsigned_range(&mut args, row.rr as u32, 30);
+    append_unsigned_range(&mut args, row.ii as u32, 30);
+    append_unsigned_range(&mut args, row.row.magnitude as u32, 31);
+    append_signed_range(&mut args, sign_magnitude(row.q_re), 18);
+    append_unsigned_range(&mut args, row.r_re as u32, 12);
+    append_signed_range(&mut args, sign_magnitude(row.q_im), 19);
+    append_unsigned_range(&mut args, row.r_im as u32, 12);
+    args.push(i32::from(row.row.terminal));
+    let magnitude_witness = bit_range_witness(row.row.magnitude as u32, 31);
+    let mut seen = 0i32;
+    args.extend(magnitude_witness[26..31].iter().map(|bit| {
+        seen |= *bit;
+        seen
+    }));
+    assert_eq!(args.len(), 426);
+    args
+}
+
 fn wasm_witness(
     store: &mut wasmtime::Store<()>,
     instance: &wasmtime::Instance,
@@ -1391,6 +1428,7 @@ fn mandelbrot_residual_polynomials_execute_in_bn254_without_host_shims() {
     let unsigned32_export = "mandelbrot_bn254_unsigned32_range_residual_masks";
     let signed32_export = "mandelbrot_bn254_signed32_range_residual_masks";
     let terminal_export = "mandelbrot_bn254_terminal_residual_masks";
+    let row_range_export = "mandelbrot_bn254_row_range_residual_masks";
     for (c_re, c_im, bound) in [(-8192, -6144, 100), (4095, 4095, 2), (-3048, 2216, 255)] {
         let rows = reference_rows(c_re, c_im, bound);
         let mut selected = vec![0usize, rows.len() - 1];
@@ -1895,4 +1933,50 @@ fn mandelbrot_residual_polynomials_execute_in_bn254_without_host_shims() {
         0,
         "the high-bit prefix OR must obey its quadratic recurrence"
     );
+
+    let mut row_range_store = wasmtime::Store::new(&engine, ());
+    let row_range_instance = wasmtime::Instance::new(&mut row_range_store, &module, &[])
+        .expect("instantiate BN254 typed-row range arena");
+    assert_eq!(
+        call_masks(
+            &mut row_range_store,
+            &row_range_instance,
+            row_range_export,
+            &ranged_air_args(terminal_air, None),
+            10,
+        ),
+        vec![0; 10],
+        "one typed terminal row must satisfy every Fe-authored column width"
+    );
+
+    let mut invalid_ranged_row = base;
+    invalid_ranged_row.r_re += 4096;
+    invalid_ranged_row.row.terminal = true;
+    let mut invalid_store = wasmtime::Store::new(&engine, ());
+    let invalid_instance = wasmtime::Instance::new(&mut invalid_store, &module, &[])
+        .expect("instantiate independent BN254 invalid-row arena");
+    let invalid_masks = call_masks(
+        &mut invalid_store,
+        &invalid_instance,
+        row_range_export,
+        &ranged_air_args(invalid_ranged_row, Some([1, 0])),
+        10,
+    );
+    assert_ne!(
+        invalid_masks[1], 0,
+        "typed zr range must reject negative zero"
+    );
+    assert_ne!(
+        invalid_masks[6], 0,
+        "typed remainder range must reject 4096"
+    );
+    assert_ne!(
+        invalid_masks[9], 0,
+        "typed magnitude range must reject premature terminal"
+    );
+    for (column, mask) in invalid_masks.into_iter().enumerate() {
+        if !matches!(column, 1 | 6 | 9) {
+            assert_eq!(mask, 0, "unexpected typed-row range residual {column}");
+        }
+    }
 }

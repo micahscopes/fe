@@ -209,11 +209,15 @@ Legend:
   The independent oracle proves that these companion constraints close the
   formerly accepted alternate remainder, negative-zero, and premature-terminal
   counterexamples, including exact threshold boundaries and malformed OR
-  witnesses. Wiring the range witness into every trace/public-claim column,
-  public-domain comparisons, the domain-separated Poseidon trace commitment,
-  composition, and FRI remain pending. The reusable field API's SPIR-V
-  helper-call seam and permutation lift also remain open. No trace root is
-  claimed yet. This is executable initial AIR evidence rather than a proof.
+  witnesses. `RangedAirRow` now wires every trace-row column to a Fe type-level
+  width: step 21, coordinates 15, squares 30, magnitude 31, real quotient 18,
+  imaginary quotient 19, and remainders 12. One nominal Fe entry checks the
+  whole row, and its gate accepts a terminal row while reporting exactly the
+  three deliberately malformed columns in a combined adversarial row.
+  Public-claim validation/comparison, the domain-separated Poseidon trace
+  commitment, composition, and FRI remain pending. The reusable field API's
+  SPIR-V helper-call seam and permutation lift also remain open. No trace root
+  is claimed yet. This is executable initial AIR evidence rather than a proof.
 - [ ] Produce a succinct proof whose verifier is demonstrably cheaper than
   replaying the orbit.
 - [ ] Define a typed proof encoding and prove browser/native verifier parity,

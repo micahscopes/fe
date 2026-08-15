@@ -62,6 +62,39 @@ pub struct OrWitness<const N: usize> { pub any: [u32; N] }
 
 impl<const N: usize> core::marker::Copy for OrWitness<N> {}
 
+pub struct RangedUnsigned<const N: usize> {
+    pub value: u32,
+    pub witness: BitRangeWitness<N>,
+}
+
+impl<const N: usize> core::marker::Copy for RangedUnsigned<N> {}
+
+pub struct RangedSigned<const N: usize> {
+    pub value: SignedWord,
+    pub witness: BitRangeWitness<N>,
+}
+
+impl<const N: usize> core::marker::Copy for RangedSigned<N> {}
+
+/// Every numeric column of one Mandelbrot AIR row with its typed range
+/// witness. The widths are part of the Fe type, not host-side metadata.
+pub struct RangedAirRow {
+    pub step: RangedUnsigned<21>,
+    pub zr: RangedSigned<15>,
+    pub zi: RangedSigned<15>,
+    pub rr: RangedUnsigned<30>,
+    pub ii: RangedUnsigned<30>,
+    pub magnitude: RangedUnsigned<31>,
+    pub q_re: RangedSigned<18>,
+    pub r_re: RangedUnsigned<12>,
+    pub q_im: RangedSigned<19>,
+    pub r_im: RangedUnsigned<12>,
+    pub terminal: u32,
+    pub terminal_high_any: OrWitness<5>,
+}
+
+impl core::marker::Copy for RangedAirRow {}
+
 struct SignedField { sign: Fr, magnitude: Fr, value: Fr }
 
 impl core::marker::Copy for SignedField {}
@@ -240,6 +273,32 @@ fn range_residual_masks<const N: usize>(
         any_relation_mask,
         residual_flag(value - reconstructed),
     )
+}
+
+fn combined_range_mask<const N: usize>(
+    _ value: u32,
+    _ witness: BitRangeWitness<N>,
+) -> u32 {
+    let masks = range_residual_masks<N>(Fr::from_u32(value), witness)
+    masks.0 | masks.1 | masks.2 | masks.3
+}
+
+fn combined_signed_range_mask<const N: usize>(
+    _ value: SignedWord,
+    _ witness: BitRangeWitness<N>,
+) -> u32 {
+    let masks = range_residual_masks<N>(Fr::from_u32(value.magnitude), witness)
+    let mut nonzero = Fr::zero()
+    let count: u32 = N.downcast_truncate()
+    let mut i: u32 = 0
+    while i < count {
+        nonzero = Fr::from_u32(witness.any[i as usize])
+        i = i + 1
+    }
+    let sign = Fr::from_u32(value.sign)
+    masks.0 | masks.1 | masks.2 | masks.3
+        | residual_flag(bit_residual(sign))
+        | residual_flag(sign * (Fr::one() - nonzero))
 }
 
 fn residual_mask<const N: usize>(_ residuals: [Fr; N]) -> u32 {
@@ -493,5 +552,31 @@ pub fn mandelbrot_bn254_terminal_residual_masks(
         high_any_bit_mask,
         high_relation_mask,
         residual_flag(terminal - previous),
+    )
+}
+
+/// Wire every row column to its Fe-authored width. Result order is `(step,
+/// zr, zi, rr, ii, q_re, r_re, q_im, r_im, magnitude_and_terminal)`.
+pub fn mandelbrot_bn254_row_range_residual_masks(
+    _ row: RangedAirRow,
+) -> (u32, u32, u32, u32, u32, u32, u32, u32, u32, u32) {
+    let terminal = mandelbrot_bn254_terminal_residual_masks(
+        row.terminal,
+        row.magnitude.value,
+        row.magnitude.witness,
+        row.terminal_high_any,
+    )
+    (
+        combined_range_mask<21>(row.step.value, row.step.witness),
+        combined_signed_range_mask<15>(row.zr.value, row.zr.witness),
+        combined_signed_range_mask<15>(row.zi.value, row.zi.witness),
+        combined_range_mask<30>(row.rr.value, row.rr.witness),
+        combined_range_mask<30>(row.ii.value, row.ii.witness),
+        combined_signed_range_mask<18>(row.q_re.value, row.q_re.witness),
+        combined_range_mask<12>(row.r_re.value, row.r_re.witness),
+        combined_signed_range_mask<19>(row.q_im.value, row.q_im.witness),
+        combined_range_mask<12>(row.r_im.value, row.r_im.witness),
+        terminal.0 | terminal.1 | terminal.2 | terminal.3
+            | terminal.4 | terminal.5 | terminal.6 | terminal.7,
     )
 }

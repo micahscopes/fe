@@ -109,8 +109,16 @@ enforces the unique i32 minimum: magnitude `2^31` requires negative sign and
 all lower magnitude bits zero. Twelve-bit reconstruction bounds each Q12
 remainder. The oracle accepts boundary values and rejects mutated bits, OR
 columns, reconstruction, negative zero, and both directions of i32 overflow.
-The proof trace still needs these generic witnesses wired to every applicable
-row and public-claim column.
+`RangedAirRow` wires the generic witnesses to every trace-row column with widths
+encoded in Fe types: step 21 bits; each coordinate 15; each square 30;
+magnitude 31; real and imaginary quotients 18 and 19; and each remainder 12.
+One nominal Fe entry evaluates all ten column groups. The independent gate
+accepts a real terminal row and checks that a combined malformed row reports
+exactly its negative-zero coordinate, 4096 remainder, and premature terminal
+groups. Public claim validity remains an explicit verifier boundary: it must
+check the canonical point box and bound before accepting a proof. The accepted
+point already feeds the field transition constraints; the bound and committed
+trace-shape metadata still need their verifier binding.
 
 The integer constraint evaluator rejects any alleged row whose coordinate
 magnitude exceeds 24576 before evaluating the doubled cross-product. This is
