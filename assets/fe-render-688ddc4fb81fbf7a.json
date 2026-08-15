@@ -1,0 +1,303 @@
+{
+  "artifacts": {
+    "canonical_adapters": [],
+    "wasm": "fe-render-7ce804855291d877.wasm",
+    "wasm_bytes": 2184,
+    "wgsl": "fe-render-7a9a90df7d8ce323.wgsl",
+    "wgsl_bytes": 513
+  },
+  "browser_runtime": null,
+  "canonical_interface": null,
+  "canonical_status": {
+    "embedded": false,
+    "omission_reason": "GPU resource pass graph has no CPU fallback or canonical Wasm message lane",
+    "policy": "disabled"
+  },
+  "layout": {
+    "bindings": [
+      {
+        "access": "read",
+        "binding": 0,
+        "group": 0,
+        "members": [],
+        "name": "leaves",
+        "role": "resource",
+        "span": 4,
+        "stride": 4
+      },
+      {
+        "access": "read",
+        "binding": 1,
+        "group": 0,
+        "members": [],
+        "name": "nodes",
+        "role": "resource",
+        "span": 4,
+        "stride": 4
+      }
+    ],
+    "builtin_inputs": [
+      {
+        "arg_index": 0,
+        "scalar": "i32",
+        "source": "fragment_position_x"
+      },
+      {
+        "arg_index": 1,
+        "scalar": "i32",
+        "source": "fragment_position_y"
+      }
+    ],
+    "color_target_format": "rgba8unorm",
+    "entry_point": "fs_main",
+    "fragment_entry": "fs_main",
+    "mode": "render",
+    "result": null,
+    "vertex_entry": "vs_fullscreen",
+    "word": "u32",
+    "word_bytes": 4,
+    "workgroup_size": [
+      0,
+      0,
+      0
+    ]
+  },
+  "passes": [
+    {
+      "dispatch": [
+        1,
+        1,
+        1
+      ],
+      "layout": {
+        "bindings": [
+          {
+            "access": "read_write",
+            "binding": 0,
+            "group": 0,
+            "members": [],
+            "name": "leaves",
+            "role": "resource",
+            "span": 4,
+            "stride": 4
+          },
+          {
+            "access": "read_write",
+            "binding": 1,
+            "group": 0,
+            "members": [],
+            "name": "nodes",
+            "role": "resource",
+            "span": 4,
+            "stride": 4
+          }
+        ],
+        "builtin_inputs": [],
+        "color_target_format": null,
+        "entry_point": "main",
+        "fragment_entry": null,
+        "mode": "compute",
+        "result": null,
+        "vertex_entry": null,
+        "word": "u32",
+        "word_bytes": 4,
+        "workgroup_size": [
+          1,
+          1,
+          1
+        ]
+      },
+      "shader": "fe-render-450f49277d0ddae1.wgsl",
+      "shader_bytes": 923,
+      "source_entry": "collect"
+    },
+    {
+      "dispatch": [
+        1,
+        1,
+        1
+      ],
+      "layout": {
+        "bindings": [
+          {
+            "access": "read_write",
+            "binding": 0,
+            "group": 0,
+            "members": [],
+            "name": "leaves",
+            "role": "resource",
+            "span": 4,
+            "stride": 4
+          },
+          {
+            "access": "read_write",
+            "binding": 1,
+            "group": 0,
+            "members": [],
+            "name": "nodes",
+            "role": "resource",
+            "span": 4,
+            "stride": 4
+          },
+          {
+            "access": "read_write",
+            "binding": 2,
+            "group": 0,
+            "members": [],
+            "name": "trap",
+            "role": "output",
+            "span": 4,
+            "stride": 4
+          }
+        ],
+        "builtin_inputs": [],
+        "color_target_format": null,
+        "entry_point": "main",
+        "fragment_entry": null,
+        "mode": "compute",
+        "result": null,
+        "vertex_entry": null,
+        "word": "u32",
+        "word_bytes": 4,
+        "workgroup_size": [
+          1,
+          1,
+          1
+        ]
+      },
+      "shader": "fe-render-eab91e95e0717d48.wgsl",
+      "shader_bytes": 10511,
+      "source_entry": "fold"
+    },
+    {
+      "layout": {
+        "bindings": [
+          {
+            "access": "read",
+            "binding": 0,
+            "group": 0,
+            "members": [],
+            "name": "leaves",
+            "role": "resource",
+            "span": 4,
+            "stride": 4
+          },
+          {
+            "access": "read",
+            "binding": 1,
+            "group": 0,
+            "members": [],
+            "name": "nodes",
+            "role": "resource",
+            "span": 4,
+            "stride": 4
+          }
+        ],
+        "builtin_inputs": [
+          {
+            "arg_index": 0,
+            "scalar": "i32",
+            "source": "fragment_position_x"
+          },
+          {
+            "arg_index": 1,
+            "scalar": "i32",
+            "source": "fragment_position_y"
+          }
+        ],
+        "color_target_format": "rgba8unorm",
+        "entry_point": "fs_main",
+        "fragment_entry": "fs_main",
+        "mode": "render",
+        "result": null,
+        "vertex_entry": "vs_fullscreen",
+        "word": "u32",
+        "word_bytes": 4,
+        "workgroup_size": [
+          0,
+          0,
+          0
+        ]
+      },
+      "shader": "fe-render-7a9a90df7d8ce323.wgsl",
+      "shader_bytes": 513,
+      "source_entry": "display"
+    }
+  ],
+  "protocol": "fe-web-bundle",
+  "protocol_version": 6,
+  "provenance": {
+    "authored_sources": [
+      {
+        "id": "rollcall_pipeline/fe.toml",
+        "kind": "fe_manifest",
+        "sha256": "097dc0f576c9e73a1e1474a1495a19d417e325385aec76620604b264d9e6c915"
+      },
+      {
+        "id": "rollcall_pipeline/src/lib.fe",
+        "kind": "fe",
+        "sha256": "1045eac1423fccbf96cb4cc684e04a4836bc311870cce699ff2aee97914eda6d"
+      }
+    ],
+    "compiler": "fe",
+    "compiler_version": "26.2.0",
+    "fe_responsibilities": [
+      "gpu_program",
+      "gpu_pass_graph",
+      "backing_quality_policy",
+      "device_recovery_policy"
+    ],
+    "fixed_host": {
+      "artifact": {
+        "bytes": 120646,
+        "path": "fe-render-runtime-9309cdd905c41533.js",
+        "sha256": "9309cdd905c41533c43dab77edf8e6f623cd7ae09d26a40b114f1d4f18772baf"
+      },
+      "contract": "fixed_versioned_demo_blind_browser_host",
+      "name": "fe-render-runtime",
+      "responsibilities": [
+        "dom_surface",
+        "input_transport",
+        "presentation_scheduler",
+        "device_capability_facts",
+        "web_gpu_executor",
+        "lifecycle",
+        "wasm_loader"
+      ]
+    },
+    "generated_artifacts": [
+      "manifest",
+      "wasm",
+      "wgsl"
+    ],
+    "non_fe_authored_sources": [
+      {
+        "id": "gallery.html",
+        "kind": "html",
+        "sha256": "543dd4a51d64bfafba36295de53f3e78b84fe94183c3526b7b8eaa816bdbe520"
+      }
+    ],
+    "source_id": "rollcall_pipeline"
+  },
+  "resources": [
+    {
+      "binding": 0,
+      "element": "U32",
+      "group": 0,
+      "length": 8,
+      "name": "leaves",
+      "span": 4,
+      "stride": 4
+    },
+    {
+      "binding": 1,
+      "element": "U32",
+      "group": 0,
+      "length": 8,
+      "name": "nodes",
+      "span": 4,
+      "stride": 4
+    }
+  ],
+  "source_entry": "display"
+}

@@ -1,0 +1,343 @@
+//! A full 3D signed-distance-field renderer, authored as one Fe actor.
+//!
+//! `RaymarchSurface` traces a camera ray through a smooth union of three tori,
+//! a breathing core, two satellites, and an infinite floor. The same distance
+//! estimator drives primary visibility, finite-difference normals, ambient
+//! occlusion, and soft shadows. Fe owns camera interaction and every rendering
+//! policy; the fixed browser adapter supplies raw events and executes the
+//! generated WGSL.
+//!
+//! This intentionally reuses `fmath::PixelSample::ordered_2x2`: one ordered
+//! subpixel sample per fragment keeps the expensive march at one ray per pixel.
+//! It is not presented as multi-sample AA. The scene is a compact ordinary Fe
+//! program rather than handwritten WGSL or a Rust/JavaScript shader generator.
+
+use core::marker::Copy
+use std::webgpu::{
+    FragmentSurface, GpuProgram, LatestPerFrame, ResponsiveBacking,
+    StandardSurfaceRecovery, SurfaceQuality, SurfaceRecovery, SurfaceScheduling,
+    SurfaceTransition, WebGpuBackend,
+}
+use std::web::view::{
+    ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface,
+    SurfaceEvent, SurfaceState,
+}
+use fmath::{
+    abs, add3, clamp, clamp01, cos, dot3, floor, fract, from_i32,
+    length3, max, min, mix, mix3, normalize3, orbit_ray, rgba, scale3,
+    smoothstep, sqrt, sub3, to_i32, vec3, OrbitRay, PixelSample, Vec3, TAU,
+}
+
+const MAX_MARCH_STEPS: i32 = 112
+const MAX_SHADOW_STEPS: i32 = 28
+const FAR_CLIP: f32 = 18.0
+const HIT_EPSILON: f32 = 0.0015
+
+fn smooth_union(_ a: f32, _ b: f32, _ radius: f32) -> f32 {
+    let blend: f32 = clamp01(0.5 + 0.5 * (b - a) / radius)
+    mix(b, a, blend) - radius * blend * (1.0 - blend)
+}
+
+fn sphere_distance(_ p: Vec3, _ radius: f32) -> f32 {
+    length3(p) - radius
+}
+
+fn torus_y_distance(_ p: Vec3, _ major: f32, _ tube: f32) -> f32 {
+    let ring: f32 = sqrt(p.x * p.x + p.z * p.z) - major
+    sqrt(ring * ring + p.y * p.y) - tube
+}
+
+fn torus_x_distance(_ p: Vec3, _ major: f32, _ tube: f32) -> f32 {
+    let ring: f32 = sqrt(p.y * p.y + p.z * p.z) - major
+    sqrt(ring * ring + p.x * p.x) - tube
+}
+
+fn torus_z_distance(_ p: Vec3, _ major: f32, _ tube: f32) -> f32 {
+    let ring: f32 = sqrt(p.x * p.x + p.y * p.y) - major
+    sqrt(ring * ring + p.z * p.z) - tube
+}
+
+/// The production distance estimator, kept public so an independent Wasm
+/// oracle can exercise the same Fe function without becoming runtime code.
+pub fn scene_distance(_ x: f32, _ y: f32, _ z: f32, _ morph: f32) -> f32 {
+    let p: Vec3 = vec3(x, y, z)
+    let major: f32 = 0.72 + 0.18 * morph
+    let tube: f32 = 0.105 + 0.055 * (1.0 - morph)
+    let ring_y: f32 = torus_y_distance(p, major, tube)
+    let ring_x: f32 = torus_x_distance(p, major, tube)
+    let ring_z: f32 = torus_z_distance(p, major, tube)
+    let rings: f32 = smooth_union(
+        smooth_union(ring_x, ring_y, 0.13), ring_z, 0.13,
+    )
+    let core: f32 = sphere_distance(p, 0.28 + 0.11 * morph)
+    let body: f32 = smooth_union(rings, core, 0.18)
+
+    let satellite_radius: f32 = 0.13 + 0.035 * morph
+    let satellite_a: f32 = sphere_distance(
+        vec3(p.x - 1.12, p.y - 0.16, p.z + 0.18), satellite_radius,
+    )
+    let satellite_b: f32 = sphere_distance(
+        vec3(p.x + 1.12, p.y + 0.12, p.z - 0.18), satellite_radius,
+    )
+    let sculpture: f32 = smooth_union(
+        smooth_union(body, satellite_a, 0.11), satellite_b, 0.11,
+    )
+    let floor_distance: f32 = p.y + 1.22
+    min(sculpture, floor_distance)
+}
+
+pub struct RayHit {
+    pub distance: f32,
+    pub hit: i32,
+    pub steps: i32,
+}
+
+impl Copy for RayHit {}
+
+fn march(_ origin: Vec3, _ direction: Vec3, _ morph: f32) -> RayHit {
+    let mut distance: f32 = 0.0
+    let mut hit: i32 = 0
+    let mut done: i32 = 0
+    let mut steps: i32 = MAX_MARCH_STEPS
+    let mut i: i32 = 0
+    while i < MAX_MARCH_STEPS {
+        if done == 0 {
+            let p: Vec3 = add3(origin, scale3(direction, distance))
+            let estimate: f32 = scene_distance(p.x, p.y, p.z, morph)
+            let epsilon: f32 = HIT_EPSILON * (1.0 + distance * 0.035)
+            if estimate < epsilon {
+                hit = 1
+                done = 1
+                steps = i
+            } else {
+                distance = distance + estimate * 0.78
+                if distance > FAR_CLIP {
+                    done = 1
+                    steps = i
+                }
+            }
+        }
+        i = i + 1
+    }
+    RayHit { distance: distance, hit: hit, steps: steps }
+}
+
+/// Scalar ray receipt for the independent Wasm oracle. The rendered fragment
+/// calls the same `march` construction and additionally consumes hit/step data.
+pub fn trace_ray_distance(
+    _ ox: f32, _ oy: f32, _ oz: f32,
+    _ dx: f32, _ dy: f32, _ dz: f32,
+    _ morph: f32,
+) -> f32 {
+    march(vec3(ox, oy, oz), normalize3(vec3(dx, dy, dz)), morph).distance
+}
+
+fn estimate_normal(_ p: Vec3, _ morph: f32) -> Vec3 {
+    let epsilon: f32 = 0.0025
+    let nx: f32 = scene_distance(p.x + epsilon, p.y, p.z, morph) -
+        scene_distance(p.x - epsilon, p.y, p.z, morph)
+    let ny: f32 = scene_distance(p.x, p.y + epsilon, p.z, morph) -
+        scene_distance(p.x, p.y - epsilon, p.z, morph)
+    let nz: f32 = scene_distance(p.x, p.y, p.z + epsilon, morph) -
+        scene_distance(p.x, p.y, p.z - epsilon, morph)
+    normalize3(vec3(nx, ny, nz))
+}
+
+fn ambient_occlusion(_ p: Vec3, _ normal: Vec3, _ morph: f32) -> f32 {
+    let mut occlusion: f32 = 0.0
+    let mut weight: f32 = 1.0
+    let mut i: i32 = 1
+    while i <= 5 {
+        let height: f32 = 0.035 + from_i32(i) * 0.055
+        let estimate: f32 = scene_distance(
+            p.x + normal.x * height,
+            p.y + normal.y * height,
+            p.z + normal.z * height,
+            morph,
+        )
+        occlusion = occlusion + (height - estimate) * weight
+        weight = weight * 0.62
+        i = i + 1
+    }
+    clamp01(1.0 - occlusion * 1.35)
+}
+
+fn soft_shadow(_ p: Vec3, _ light: Vec3, _ morph: f32) -> f32 {
+    let mut shade: f32 = 1.0
+    let mut distance: f32 = 0.025
+    let mut done: i32 = 0
+    let mut i: i32 = 0
+    while i < MAX_SHADOW_STEPS {
+        if done == 0 {
+            let q: Vec3 = add3(p, scale3(light, distance))
+            let estimate: f32 = scene_distance(q.x, q.y, q.z, morph)
+            shade = min(shade, 14.0 * estimate / distance)
+            if estimate < 0.001 || distance > 9.0 {
+                done = 1
+            } else {
+                distance = distance + clamp(estimate, 0.018, 0.34)
+            }
+        }
+        i = i + 1
+    }
+    clamp01(shade)
+}
+
+fn power4(_ value: f32) -> f32 {
+    let square: f32 = value * value
+    square * square
+}
+
+fn power16(_ value: f32) -> f32 {
+    let fourth: f32 = power4(value)
+    fourth * fourth * fourth * fourth
+}
+
+fn sky_color(_ direction: Vec3) -> Vec3 {
+    let horizon: f32 = clamp01(0.5 + 0.5 * direction.y)
+    let low: Vec3 = vec3(0.035, 0.045, 0.075)
+    let high: Vec3 = vec3(0.19, 0.29, 0.46)
+    let mut color: Vec3 = mix3(low, high, horizon)
+    let sun_direction: Vec3 = normalize3(vec3(-0.46, 0.72, -0.52))
+    let sun: f32 = power16(max(0.0, dot3(direction, sun_direction)))
+    color = add3(color, scale3(vec3(1.0, 0.66, 0.28), sun * 1.8))
+    color
+}
+
+fn floor_color(_ p: Vec3) -> Vec3 {
+    let checker: i32 = (to_i32(floor(p.x * 1.25)) + to_i32(floor(p.z * 1.25))) & 1
+    let tile: f32 = from_i32(checker)
+    let base: Vec3 = mix3(vec3(0.055, 0.065, 0.085), vec3(0.095, 0.12, 0.15), tile)
+    let gx: f32 = abs(fract(p.x * 0.625) - 0.5)
+    let gz: f32 = abs(fract(p.z * 0.625) - 0.5)
+    let grid: f32 = smoothstep(0.455, 0.495, max(gx, gz))
+    add3(base, scale3(vec3(0.18, 0.24, 0.31), grid * 0.35))
+}
+
+fn sculpture_color(_ p: Vec3, _ normal: Vec3, _ morph: f32) -> Vec3 {
+    let phase: f32 = 0.10 * p.y + 0.055 * p.x + 0.035 * normal.z + 0.08 * morph
+    vec3(
+        0.28 + 0.48 * (0.5 + 0.5 * cos(TAU * (phase + 0.00))),
+        0.24 + 0.52 * (0.5 + 0.5 * cos(TAU * (phase + 0.33))),
+        0.30 + 0.55 * (0.5 + 0.5 * cos(TAU * (phase + 0.67))),
+    )
+}
+
+fn surface_color(
+    _ p: Vec3, _ normal: Vec3, _ view_direction: Vec3,
+    _ morph: f32,
+) -> Vec3 {
+    let light: Vec3 = normalize3(vec3(-0.46, 0.72, -0.52))
+    let diffuse: f32 = max(0.0, dot3(normal, light))
+    let shadow_origin: Vec3 = add3(p, scale3(normal, 0.008))
+    let shadow: f32 = soft_shadow(shadow_origin, light, morph)
+    let occlusion: f32 = ambient_occlusion(p, normal, morph)
+    let half_vector: Vec3 = normalize3(sub3(light, view_direction))
+    let specular: f32 = power16(max(0.0, dot3(normal, half_vector))) * shadow
+    let facing: f32 = max(0.0, dot3(normal, scale3(view_direction, -1.0)))
+    let rim: f32 = power4(1.0 - facing)
+
+    let base: Vec3 = if p.y < -1.15 {
+        floor_color(p)
+    } else {
+        sculpture_color(p, normal, morph)
+    }
+    let lighting: f32 = (0.17 + 0.83 * diffuse * shadow) * occlusion
+    add3(
+        scale3(base, lighting),
+        add3(
+            scale3(vec3(1.0, 0.78, 0.48), specular * 0.72),
+            scale3(vec3(0.18, 0.38, 0.72), rim * 0.18 * occlusion),
+        ),
+    )
+}
+
+struct RaymarchParams {
+    yaw: Param,
+    pitch: Param,
+    distance: Param,
+    morph: Param,
+    res: Param,
+}
+
+struct RaymarchViewState {
+    yaw: f32,
+    pitch: f32,
+    distance: f32,
+    morph: f32,
+    res: f32,
+}
+
+impl SurfaceState for RaymarchViewState {
+    type Params = RaymarchParams
+}
+
+derive ApplyParamBindings for RaymarchViewState using ParamBindingsProvider
+
+const fn raymarch_params() -> RaymarchParams {
+    RaymarchParams {
+        yaw: Param::angle(init: 0.72).drag_x(per_px: 0.008),
+        pitch: Param::range(min: -1.05, max: 1.05, init: 0.28)
+            .drag_y(per_px: -0.006),
+        distance: Param::range(min: 2.8, max: 8.0, init: 4.6)
+            .wheel_scale(in_factor: 0.875, out_factor: 1.125),
+        morph: Param::unit(init: 0.58),
+        res: Param::extent_x(),
+    }
+}
+
+actor RaymarchSurface uses (
+    GpuProgram<WebGpuBackend>, SurfaceQuality<ResponsiveBacking>,
+    SurfaceRecovery<StandardSurfaceRecovery>,
+) {
+    yaw: f32,
+    pitch: f32,
+    distance: f32,
+    morph: f32,
+    res: f32,
+
+    const fn view() -> Surface<RaymarchParams> {
+        Surface {
+            extent: Extent::square(512),
+            params: raymarch_params(),
+        }
+    }
+
+    fn navigate(self, event: own SurfaceEvent) -> RaymarchViewState
+        uses (SurfaceTransition, SurfaceScheduling<LatestPerFrame>)
+    {
+        RaymarchViewState {
+            yaw: self.yaw,
+            pitch: self.pitch,
+            distance: self.distance,
+            morph: self.morph,
+            res: self.res,
+        }.apply_param_bindings(raymarch_params(), event)
+    }
+
+    fn render(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
+        let sample = PixelSample::ordered_2x2(px, py).plane(self.res)
+        let ray: OrbitRay = orbit_ray(
+            self.yaw, self.pitch, self.distance,
+            sample.u, sample.v, -0.08, 0.78,
+        )
+        let hit: RayHit = march(ray.origin, ray.direction, self.morph)
+        let sky: Vec3 = sky_color(ray.direction)
+        let linear: Vec3 = if hit.hit == 1 {
+            let p: Vec3 = add3(ray.origin, scale3(ray.direction, hit.distance))
+            let normal: Vec3 = estimate_normal(p, self.morph)
+            let surface: Vec3 = surface_color(p, normal, ray.direction, self.morph)
+            let fog: f32 = clamp01((hit.distance - 6.0) / 10.0)
+            mix3(surface, sky, fog * fog)
+        } else {
+            sky
+        }
+
+        // Cheap gamma-2 display transform; all policy remains authored in Fe.
+        rgba(
+            sqrt(clamp01(linear.x)),
+            sqrt(clamp01(linear.y)),
+            sqrt(clamp01(linear.z)),
+        )
+    }
+}

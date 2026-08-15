@@ -1,0 +1,571 @@
+//! Distance-estimator view of the solved QCGA pencil.
+//!
+//! This is the canonical gallery VIEW of `qcga_pencil::PencilSceneState`, not
+//! a second solver or interaction implementation. Initialization, controls,
+//! camera projection, point picking, drag geometry, re-solving, and the vivid
+//! normal/tangent material all come from the shared Fe ingot. The older
+//! all-surface raster actor is retired; this actor owns the sole user-facing
+//! surface and adds only a small source-ordered raster pass for its controls.
+//! Resident Fe also prepares the current pencil member and orthonormal camera
+//! once per accepted state change; fragments consume those typed values rather
+//! than repeating coefficient blends and trigonometry per pixel.
+//!
+//! Production visibility is a genuine iterative implicit-surface march. Every
+//! step evaluates the scale-invariant first-order quadric estimate
+//! `abs(F(p)) / length(gradient F(p))`; no analytic ray/quadric intersection is
+//! used here. A generic ray/sphere interval clips the finite scene domain
+//! before iteration, but does not solve or classify the quadric. Exact
+//! ray/quadric roots intentionally live only in the independent Rust
+//! acceptance oracle, where a different algorithm has proof value.
+
+use core::actor::InitialState
+use core::marker::Copy
+use core::num::IntDowncast
+use std::webgpu::{
+    ClipPosition,
+    FragmentStage,
+    FragmentSurface,
+    GpuProgram,
+    LatestPerFrame,
+    RasterVertex,
+    ResponsiveBacking,
+    StandardSurfaceRecovery,
+    SurfaceQuality,
+    SurfaceRecovery,
+    SurfaceScheduling,
+    SurfaceTransition,
+    TriangleList,
+    VertexStage,
+    WebGpuBackend,
+}
+use std::web::view::{Surface, SurfaceEvent}
+use fmath::{
+    PixelSample,
+    RayInterval,
+    Vec3,
+    abs,
+    add3,
+    clamp,
+    clamp01,
+    dot3,
+    from_i32,
+    length3,
+    max,
+    min,
+    mix3,
+    normalize3,
+    rgba,
+    scale3,
+    smoothstep,
+    targeted_camera_sphere_interval,
+    unit_ray_sphere_interval,
+    vec3,
+}
+use gallery_palette::{clean_white, electric_blue, midnight, spring_green, theorem_gold}
+use qcga_pencil::{
+    ControlPoints,
+    PencilCamera,
+    PencilFrame,
+    PencilParams,
+    PencilRay,
+    PencilRenderState,
+    PencilSceneState,
+    ProjectedPoint,
+    Quadric,
+    control_point_at_index,
+    eval_quadric,
+    initial_pencil_render,
+    pencil_material,
+    pencil_ray_with_camera,
+    pencil_view,
+    project_point_with_camera,
+    transition_pencil_render,
+}
+
+const MAX_MARCH_STEPS: i32 = 128
+const MAX_SHADOW_STEPS: i32 = 20
+const FAR_CLIP: f32 = 18.0
+const HIT_EPSILON: f32 = 0.0014
+/// Explicit finite display domain for unbounded pencil members. This clips
+/// the scene, not the quadric equation; visibility inside remains iterative.
+const SCENE_CLIP_RADIUS: f32 = 3.0
+/// The bounded mode becomes transparent before its finite broad-phase sphere,
+/// so the optimization never appears as a geometric cut plane/silhouette.
+const SCENE_FADE_START: f32 = 2.1
+
+/// Fe-owned interpretation of the checkbox's canonical scalar carrier. A
+/// nominal policy record keeps raw scalar tags out of the renderer while also
+/// lowering to WebGPU without requiring a shader trap channel for invalid enum
+/// discriminants. The browser does not select or understand either algorithm.
+pub struct PencilDisplayMode { pub bounded: bool }
+
+impl Copy for PencilDisplayMode {}
+
+pub fn pencil_display_mode(_ bounded: f32) -> PencilDisplayMode {
+    PencilDisplayMode { bounded: bounded >= 0.5 }
+}
+
+/// Extent-responsive work budget selected in Fe from raw backing-store facts.
+/// The fixed browser host may impose an emergency resource ceiling, but it
+/// does not choose these algorithmic tiers or reconstruct their thresholds.
+pub struct PencilRenderQuality {
+    pub march_steps: i32,
+    pub refinement_steps: i32,
+}
+impl Copy for PencilRenderQuality {}
+
+pub fn pencil_render_quality(_ width: f32, _ height: f32) -> PencilRenderQuality {
+    let longest: f32 = max(width, height)
+    if longest <= 256.0 {
+        return PencilRenderQuality { march_steps: 64, refinement_steps: 2 }
+    }
+    if longest <= 384.0 {
+        return PencilRenderQuality { march_steps: 96, refinement_steps: 3 }
+    }
+    PencilRenderQuality { march_steps: MAX_MARCH_STEPS, refinement_steps: 4 }
+}
+
+/// Exact analytic gradient of the canonical quadric coefficient convention.
+pub fn quadric_gradient(_ q: Quadric, _ p: Vec3) -> Vec3 {
+    vec3(
+        2.0 * q.a * p.x + q.d * p.y + q.e * p.z + q.g,
+        2.0 * q.b * p.y + q.d * p.x + q.f * p.z + q.h,
+        2.0 * q.c * p.z + q.e * p.x + q.f * p.y + q.i,
+    )
+}
+
+/// First-order, coefficient-scale-invariant distance estimate for an implicit
+/// quadric. Degenerate-gradient regions remain finite and conservative; the
+/// bounded march subsequently fails open to the sky rather than inventing a
+/// surface.
+pub fn quadric_distance(_ q: Quadric, _ p: Vec3) -> f32 {
+    abs(eval_quadric(q, p.x, p.y, p.z)) / max(length3(quadric_gradient(q, p)), 0.00001)
+}
+
+pub struct PencilDeHit { pub distance: f32, pub hit: i32, pub steps: i32, pub residual: f32 }
+
+/// Polish a marcher hit with a few bounded Newton steps along the same ray.
+/// This remains an iterative implicit-field method (and works for degenerate
+/// members); it does not construct or choose analytic quadratic roots. The
+/// refinement removes the visible `distance += estimate` terraces before the
+/// exact gradient is used for shading.
+fn refine_quadric_hit(
+    _ q: Quadric,
+    _ origin: Vec3,
+    _ direction: Vec3,
+    _ seed: f32,
+    _ refinement_steps: i32,
+    _ interval_start: f32,
+    _ interval_end: f32,
+) -> f32 {
+    let mut distance: f32 = seed
+    let mut i: i32 = 0
+    while i < refinement_steps {
+        let point: Vec3 = add3(origin, scale3(direction, distance))
+        let field: f32 = eval_quadric(q, point.x, point.y, point.z)
+        let slope: f32 = dot3(quadric_gradient(q, point), direction)
+        if abs(slope) > 0.00001 {
+            let correction: f32 = clamp(field / slope, -0.12, 0.12)
+            distance = clamp(distance - correction, interval_start, interval_end)
+        }
+        i = i + 1
+    }
+    distance
+}
+
+/// The production DE march. The 0.68 safety factor and bounded maximum step
+/// keep first-order estimates stable across ellipsoids, cones, plane pairs,
+/// and unbounded hyperboloids without consulting an analytic root.
+pub fn trace_quadric_de(_ q: Quadric, _ origin: Vec3, _ direction: Vec3) -> PencilDeHit {
+    trace_quadric_de_with_quality(
+        q,
+        origin,
+        direction,
+        PencilRenderQuality { march_steps: MAX_MARCH_STEPS, refinement_steps: 4 },
+    )
+}
+
+/// Scene-local finite domain shared by production and semantic gates. The
+/// sphere intersection is only a broad-phase interval; it never substitutes
+/// an analytic quadric root for the distance-estimator march.
+pub fn pencil_de_interval(
+    _ origin: Vec3,
+    _ direction: Vec3,
+    _ center: Vec3,
+) -> RayInterval {
+    unit_ray_sphere_interval(
+        origin, normalize3(direction), center, SCENE_CLIP_RADIUS, FAR_CLIP,
+    )
+}
+
+/// Prepared-camera form used by the fragment hot path. `PencilCamera`
+/// guarantees the origin/forward/center relationship required by the shared
+/// specialization, while this public wrapper gives semantic gates the exact
+/// production interval decision without exposing shader internals.
+pub fn pencil_camera_de_interval(
+    _ unit_forward: Vec3,
+    _ unit_direction: Vec3,
+    _ camera_distance: f32,
+) -> RayInterval {
+    targeted_camera_sphere_interval(
+        unit_forward, unit_direction, camera_distance, SCENE_CLIP_RADIUS,
+    )
+}
+
+/// Select the actual march domain in Fe. The default infinite-fade mode uses
+/// the full renderer budget and recovers the unbounded quadric silhouette;
+/// the checked bounded mode retains the mobile-friendly sphere rejection.
+pub fn pencil_display_interval(
+    _ mode: PencilDisplayMode,
+    _ unit_forward: Vec3,
+    _ unit_direction: Vec3,
+    _ camera_distance: f32,
+) -> RayInterval {
+    if mode.bounded {
+        pencil_camera_de_interval(unit_forward, unit_direction, camera_distance)
+    } else {
+        RayInterval { start: 0.0, end: FAR_CLIP, active: true }
+    }
+}
+
+/// Feather the optional finite display domain into the same sky used by
+/// distance fog. Relative position is reconstructed from the prepared camera
+/// basis, so no scene center or geometry convention crosses into JavaScript.
+pub fn pencil_domain_fade(
+    _ mode: PencilDisplayMode,
+    _ unit_forward: Vec3,
+    _ unit_direction: Vec3,
+    _ camera_distance: f32,
+    _ hit_distance: f32,
+) -> f32 {
+    if mode.bounded {
+        let relative: Vec3 = add3(
+            scale3(unit_direction, hit_distance),
+            scale3(unit_forward, 0.0 - camera_distance),
+        )
+        smoothstep(SCENE_FADE_START, SCENE_CLIP_RADIUS, length3(relative))
+    } else {
+        0.0
+    }
+}
+
+/// Quality-parameterized production marcher. `break` is semantically
+/// important here: completed rays leave the shader loop instead of spending
+/// the rest of a fixed 128-iteration envelope checking a `done` flag.
+pub fn trace_quadric_de_with_quality(
+    _ q: Quadric,
+    _ origin: Vec3,
+    _ direction: Vec3,
+    _ quality: PencilRenderQuality,
+) -> PencilDeHit {
+    trace_quadric_de_in_interval(
+        q,
+        origin,
+        direction,
+        quality,
+        RayInterval { start: 0.0, end: FAR_CLIP, active: true },
+    )
+}
+
+/// Quality-parameterized iterative march restricted to an explicit finite
+/// ray interval. A rejected interval returns before the loop; accepted rays
+/// retain the exact same field estimate, hit test, and Newton polish as the
+/// unbounded entry above.
+pub fn trace_quadric_de_in_interval(
+    _ q: Quadric,
+    _ origin: Vec3,
+    _ direction: Vec3,
+    _ quality: PencilRenderQuality,
+    _ interval: RayInterval,
+) -> PencilDeHit {
+    let interval_start: f32 = interval.start
+    let interval_end: f32 = interval.end
+    if interval.active == false
+        || interval_start < 0.0
+        || interval_end > FAR_CLIP
+        || interval_end <= interval_start
+    {
+        return PencilDeHit {
+            distance: interval_start, hit: 0, steps: 0, residual: 1.0,
+        }
+    }
+    trace_quadric_de_in_unit_interval(
+        q, origin, normalize3(direction), quality, interval,
+    )
+}
+
+/// The hot-path form consumes the unit ray already constructed by the shared
+/// camera. Keeping that fact in the type-level call structure avoids
+/// normalizing the same ray again in every fragment.
+fn trace_quadric_de_in_unit_interval(
+    _ q: Quadric,
+    _ origin: Vec3,
+    _ unit_direction: Vec3,
+    _ quality: PencilRenderQuality,
+    _ interval: RayInterval,
+) -> PencilDeHit {
+    let interval_start: f32 = interval.start
+    let interval_end: f32 = interval.end
+    if interval.active == false {
+        return PencilDeHit {
+            distance: interval_start, hit: 0, steps: 0, residual: 1.0,
+        }
+    }
+    let direction: Vec3 = unit_direction
+    let mut distance: f32 = interval_start
+    let mut hit: i32 = 0
+    let mut steps: i32 = quality.march_steps
+    let mut residual: f32 = 1.0
+    let mut i: i32 = 0
+    while i < quality.march_steps {
+        let p: Vec3 = add3(origin, scale3(direction, distance))
+        let estimate: f32 = quadric_distance(q, p)
+        residual = abs(eval_quadric(q, p.x, p.y, p.z))
+        let epsilon: f32 = HIT_EPSILON * (1.0 + distance * 0.025)
+        if estimate < epsilon {
+            hit = 1
+            steps = i
+            break
+        }
+        distance = distance + clamp(estimate * 0.68, 0.00035, 0.48)
+        if distance > interval_end {
+            steps = i
+            break
+        }
+        i = i + 1
+    }
+    if hit == 1 {
+        distance = refine_quadric_hit(
+            q, origin, direction, distance, quality.refinement_steps,
+            interval_start, interval_end,
+        )
+        let point: Vec3 = add3(origin, scale3(direction, distance))
+        residual = abs(eval_quadric(q, point.x, point.y, point.z))
+    }
+    PencilDeHit { distance: distance, hit: hit, steps: steps, residual: residual }
+}
+
+fn soft_shadow(_ q: Quadric, _ p: Vec3, _ light: Vec3) -> f32 {
+    let mut shade: f32 = 1.0
+    let mut distance: f32 = 0.018
+    let mut i: i32 = 0
+    while i < MAX_SHADOW_STEPS {
+        let sample: Vec3 = add3(p, scale3(light, distance))
+        let estimate: f32 = quadric_distance(q, sample)
+        shade = min(shade, 13.0 * estimate / distance)
+        if estimate < 0.0008 || distance > 8.0 {
+            break
+        }
+        distance = distance + clamp(estimate * 0.72, 0.012, 0.42)
+        i = i + 1
+    }
+    clamp01(shade)
+}
+
+fn ambient_occlusion(_ q: Quadric, _ p: Vec3, _ normal: Vec3) -> f32 {
+    let mut occlusion: f32 = 0.0
+    let mut weight: f32 = 1.0
+    let mut i: i32 = 1
+    while i <= 4 {
+        let height: f32 = 0.025 + 0.065 * from_i32(i)
+        let estimate: f32 = quadric_distance(q, add3(p, scale3(normal, height)))
+        occlusion = occlusion + max(0.0, height - estimate) * weight
+        weight = weight * 0.58
+        i = i + 1
+    }
+    clamp01(1.0 - occlusion * 1.6)
+}
+
+fn sky(_ direction: Vec3) -> Vec3 {
+    let horizon: f32 = clamp01(0.5 + 0.5 * direction.y)
+    let ground = midnight()
+    let cool = electric_blue()
+    let warm = spring_green()
+    let base: Vec3 = mix3(
+        vec3(ground.red, ground.green, ground.blue),
+        vec3(cool.red * 0.38, cool.green * 0.38, cool.blue * 0.38),
+        horizon,
+    )
+    let glow: f32 = clamp01(1.0 - abs(direction.y + 0.08) * 4.0)
+    add3(base, scale3(
+        vec3(warm.red, warm.green, warm.blue), glow * glow * 0.14,
+    ))
+}
+
+/// Typed payload for the small marker overlay. The fullscreen distance field
+/// no longer projects all nine control points in every fragment: projection
+/// runs for 54 authored vertices (six per point), and source-ordered pass
+/// composition preserves the already rendered field beneath them.
+struct ControlMarkerVarying { phase: f32 }
+impl Copy for ControlMarkerVarying {}
+
+fn marker_vertex(
+    _ vertex_index: u32,
+    _ points: ControlPoints,
+    _ frame: PencilFrame,
+    _ camera: PencilCamera,
+) -> RasterVertex<ControlMarkerVarying> {
+    let point_index: u32 = vertex_index / 6
+    let corner: u32 = vertex_index % 6
+    let projected: ProjectedPoint = project_point_with_camera(
+        control_point_at_index(points, point_index), camera,
+    )
+    // Twelve backing pixels in each dimension, independent of aspect ratio.
+    let mut sx: f32 = -12.0 / max(frame.view.width, 1.0)
+    let mut sy: f32 = -12.0 / max(frame.view.height, 1.0)
+    if corner == 1 { sx = 0.0 - sx }
+    if corner == 2 { sy = 0.0 - sy }
+    if corner == 3 { sy = 0.0 - sy }
+    if corner == 4 { sx = 0.0 - sx }
+    if corner == 5 {
+        sx = 0.0 - sx
+        sy = 0.0 - sy
+    }
+    let w: f32 = projected.position.w
+    let position: ClipPosition = if projected.depth > 0.25 {
+        ClipPosition {
+            x: projected.position.x + sx * w,
+            y: projected.position.y + sy * w,
+            z: projected.position.z - 0.001 * w,
+            w: w,
+        }
+    } else {
+        ClipPosition { x: 2.0, y: 2.0, z: 2.0, w: 1.0 }
+    }
+    RasterVertex {
+        position: position,
+        varying: ControlMarkerVarying {
+            phase: from_i32(point_index.downcast_truncate()) / 8.0,
+        },
+    }
+}
+
+fn marker_color(_ varying: ControlMarkerVarying) -> i32 {
+    let phase: f32 = clamp01(varying.phase)
+    let gold = theorem_gold()
+    let white = clean_white()
+    rgba(
+        gold.red + (white.red - gold.red) * phase,
+        gold.green + (white.green - gold.green) * phase,
+        gold.blue + (white.blue - gold.blue) * phase,
+    )
+}
+
+actor PencilDistanceSurface uses (
+    GpuProgram<WebGpuBackend>, SurfaceQuality<ResponsiveBacking>,
+    SurfaceRecovery<StandardSurfaceRecovery>,
+) {
+    scene: PencilSceneState,
+    camera: PencilCamera,
+    member: Quadric,
+
+    const fn view() -> Surface<PencilParams> {
+        pencil_view()
+    }
+
+    fn initial() -> PencilRenderState uses (InitialState) {
+        initial_pencil_render()
+    }
+
+    fn navigate(self, event: own SurfaceEvent) -> PencilRenderState
+        uses (SurfaceTransition, SurfaceScheduling<LatestPerFrame>)
+    {
+        transition_pencil_render(
+            PencilRenderState {
+                scene: self.scene,
+                camera: self.camera,
+                member: self.member,
+            },
+            event,
+        )
+    }
+
+    fn distance_surface(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
+        let sample = PixelSample::ordered_2x2(px, py).plane_extent(
+            self.scene.frame.view.width,
+            self.scene.frame.view.height,
+        )
+        let ray: PencilRay = pencil_ray_with_camera(self.camera, sample.u, sample.v)
+        let q: Quadric = self.member
+        let quality: PencilRenderQuality = pencil_render_quality(
+            self.scene.frame.view.width,
+            self.scene.frame.view.height,
+        )
+        let mode: PencilDisplayMode = pencil_display_mode(
+            self.scene.frame.view.bounded,
+        )
+        let interval: RayInterval = pencil_display_interval(
+            mode,
+            self.camera.forward, ray.direction, self.scene.frame.view.dist,
+        )
+        let hit: PencilDeHit = trace_quadric_de_in_unit_interval(
+            q, ray.origin, ray.direction, quality, interval,
+        )
+        let background: Vec3 = sky(ray.direction)
+        let linear: Vec3 = if hit.hit == 1 {
+            let point: Vec3 = add3(ray.origin, scale3(ray.direction, hit.distance))
+            let gradient: Vec3 = quadric_gradient(q, point)
+            let gradient_length: f32 = length3(gradient)
+            let mut geometric_normal: Vec3 = scale3(
+                gradient, 1.0 / max(gradient_length, 0.00001),
+            )
+            // Q and -Q are one projective surface, so first remove that sign
+            // ambiguity by facing the normal toward the camera ray.
+            if dot3(geometric_normal, ray.direction) > 0.0 {
+                geometric_normal = scale3(geometric_normal, -1.0)
+            }
+            // At a singular pencil member |gradient F| genuinely approaches
+            // zero and no unique surface normal exists. Fade to a view-stable
+            // fallback only in that ill-conditioned neighbourhood; ordinary
+            // members retain the exact analytic normal.
+            let conditioning: f32 = clamp01(
+                (gradient_length - 0.001) / 0.035,
+            )
+            let normal: Vec3 = normalize3(mix3(
+                scale3(ray.direction, -1.0),
+                geometric_normal,
+                conditioning,
+            ))
+            let tangent_color: Vec3 = pencil_material(
+                normal, ray.direction,
+                0.06,
+                0.0,
+            )
+            // The quadric is smooth and two-sided. Iterative self-shadow/AO
+            // probes can cross a neighbouring sheet as the pencil morphs,
+            // creating moving contour bands unrelated to the material. Keep
+            // its shading analytic and continuous; neither marcher steps nor
+            // secondary DE samples enter colour.
+            let surface: Vec3 = tangent_color
+            let fog: f32 = clamp01((hit.distance - 7.0) / 11.0)
+            let domain_fade: f32 = pencil_domain_fade(
+                mode,
+                self.camera.forward,
+                ray.direction,
+                self.scene.frame.view.dist,
+                hit.distance,
+            )
+            let fade: f32 = 1.0 - (1.0 - fog * fog) * (1.0 - domain_fade)
+            mix3(surface, background, fade)
+        } else {
+            background
+        }
+        // `pencil_material` already returns shared display colour; applying a
+        // DE-only square-root transfer here would wash out that palette.
+        rgba(clamp01(linear.x), clamp01(linear.y), clamp01(linear.z))
+    }
+
+    fn marker_vertices(self, vertex_index: u32) -> RasterVertex<ControlMarkerVarying>
+        uses (VertexStage<ControlMarkerVarying, TriangleList<54>>)
+    {
+        marker_vertex(
+            vertex_index, self.scene.points, self.scene.frame, self.camera,
+        )
+    }
+
+    fn marker_fragment(self, varying: ControlMarkerVarying) -> i32
+        uses (FragmentStage<ControlMarkerVarying>)
+    {
+        marker_color(varying)
+    }
+}
