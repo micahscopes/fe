@@ -221,6 +221,19 @@ fn event_studio_matches_independent_browser_stream_and_lifecycle_oracle() {
 
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, &artifact.wasm).unwrap();
+    assert!(
+        module.imports().any(|import| {
+            import.module() == "fe:web-component-events"
+                && import.name() == "captured_pointer_begin"
+        }),
+        "Event Studio must compile its Fe-selected capture source"
+    );
+    assert!(
+        !module.imports().any(|import| {
+            import.module() == "fe:web-component-events" && import.name() == "pointer_begin"
+        }),
+        "the raw pointer source must not silently acquire capture policy"
+    );
     let mut store = wasmtime::Store::new(&engine, ());
     let mut linker = wasmtime::Linker::new(&engine);
     linker
@@ -251,7 +264,11 @@ fn event_studio_matches_independent_browser_stream_and_lifecycle_oracle() {
         )
         .unwrap();
     linker
-        .func_wrap("fe:web-component-events", "pointer_begin", || -> i32 { 0 })
+        .func_wrap(
+            "fe:web-component-events",
+            "captured_pointer_begin",
+            || -> i32 { 0 },
+        )
         .unwrap();
     linker
         .func_wrap("fe:web-component-events", "wheel_begin", || -> i32 { 0 })

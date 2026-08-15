@@ -503,9 +503,10 @@ actor EventStudio {
             .close()
             .open(element: PageElement::Paragraph)
             .attribute(value: PageAttribute::class(value: "event-studio-copy"))
-            .text(value: ui_text(value: "Pointer + wheel share bounded "))
-            .text(value: ui_text(value: "Fe queue; paced clock shows "))
-            .text(value: ui_text(value: "latest-value replacement."))
+            .text(value: ui_text(value: "Fe selects scoped capture; "))
+            .text(value: ui_text(value: "pointer + wheel share one "))
+            .text(value: ui_text(value: "bounded queue; paced clock "))
+            .text(value: ui_text(value: "shows latest replacement."))
             .close()
             .open(element: PageElement::Div)
             .attribute(value: PageAttribute::class(value: "event-studio-grid"))
@@ -666,7 +667,10 @@ actor EventStudio {
 
     fn watch_gestures() -> u32 uses (ScopedTask) {
         with (
-            AsyncEventSource<WasmBackend, PointerSample> = BrowserPointerEvents::new(),
+            // Capture is selected here in Fe as source policy. The fixed host
+            // only realizes the standards operation; it cannot infer a drag,
+            // choose an identity, or silently enable capture for the raw source.
+            AsyncEventSource<WasmBackend, PointerSample> = BrowserPointerEvents::new().capture_primary(),
             AsyncEventSource<WasmBackend, WheelSample> = BrowserWheelEvents::new(),
             ActorSink<WasmBackend, ComponentEvent<StudioAction, StudioTask>> = BrowserActorSink {},
             Select<WasmBackend, u32> = Resumable {},

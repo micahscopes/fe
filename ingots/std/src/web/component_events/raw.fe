@@ -7,5 +7,6 @@ use super::{PointerSample, WheelSample}
 #[wasm_import(module = "fe:web-component-events")]
 extern {
     pub unsafe fn pointer_begin() -> Pending<WasmBackend, PointerSample>
+    pub unsafe fn captured_pointer_begin() -> Pending<WasmBackend, PointerSample>
     pub unsafe fn wheel_begin() -> Pending<WasmBackend, WheelSample>
 }

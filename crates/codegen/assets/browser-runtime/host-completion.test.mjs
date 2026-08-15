@@ -12,6 +12,7 @@ const race = Object.freeze({ kind: "enum_tag", bits: 8, variants: 2 });
 const selection = Object.freeze({ kind: "enum_tag", bits: 8, variants: 6 });
 const visibility = Object.freeze({ kind: "enum_tag", bits: 8, variants: 2 });
 const enum4 = Object.freeze({ kind: "enum_tag", bits: 8, variants: 4 });
+const enum5 = Object.freeze({ kind: "enum_tag", bits: 8, variants: 5 });
 
 function machine(start, cancelled = 77n, failed = 88n, onCancel = () => {}) {
   return createMaterializedTaskMachine({
@@ -592,6 +593,20 @@ describe("browser HostTimer/Recv completion broker", () => {
             timestamp: 19.5,
           };
         },
+        capturedPointer: async signal => {
+          expect(signal.aborted).toBeFalse();
+          return {
+            phase: 4,
+            device: 1,
+            pointerId: 42,
+            clientX: 5,
+            clientY: 6,
+            buttons: 0,
+            primary: true,
+            pressure: 0,
+            timestamp: 20,
+          };
+        },
         wheel: async signal => {
           expect(signal.aborted).toBeFalse();
           return {
@@ -608,7 +623,7 @@ describe("browser HostTimer/Recv completion broker", () => {
       },
     });
     const pointer = browserRecordMachine(
-      [enum4, enum4, u32, f32, f32, u32, bool, f32, f32],
+      [enum5, enum4, u32, f32, f32, u32, bool, f32, f32],
       () => [
         1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         broker.imports["fe:web-component-events"].pointer_begin() >>> 0,
@@ -616,6 +631,17 @@ describe("browser HostTimer/Recv completion broker", () => {
     );
     expect(await broker.run(pointer, [])).toEqual([
       1, 2, 41, -3.5, 72.25, 1, true, 0.75, 19.5,
+    ]);
+
+    const capturedPointer = browserRecordMachine(
+      [enum5, enum4, u32, f32, f32, u32, bool, f32, f32],
+      () => [
+        1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        broker.imports["fe:web-component-events"].captured_pointer_begin() >>> 0,
+      ],
+    );
+    expect(await broker.run(capturedPointer, [])).toEqual([
+      4, 1, 42, 5, 6, 0, true, 0, 20,
     ]);
 
     const wheel = browserRecordMachine(
@@ -642,6 +668,10 @@ describe("browser HostTimer/Recv completion broker", () => {
             reject(new DOMException("cancelled", "AbortError"));
           }, { once: true });
         }),
+        capturedPointer: async () => ({
+          phase: 3, device: 0, pointerId: 0, clientX: 0, clientY: 0,
+          buttons: 0, primary: true, pressure: 0, timestamp: 0,
+        }),
         wheel: async () => ({
           deltaX: 0, deltaY: 0, deltaZ: 0, mode: 0,
           clientX: 0, clientY: 0, control: false, timestamp: 0,
@@ -649,7 +679,7 @@ describe("browser HostTimer/Recv completion broker", () => {
       },
     });
     const pointer = browserRecordMachine(
-      [enum4, enum4, u32, f32, f32, u32, bool, f32, f32],
+      [enum5, enum4, u32, f32, f32, u32, bool, f32, f32],
       () => [
         1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         broker.imports["fe:web-component-events"].pointer_begin() >>> 0,

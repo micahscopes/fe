@@ -328,8 +328,58 @@ try {
   assert.equal(reconnected.observations, 3);
   assert.equal(reconnected.failures, 0);
   assert.deepEqual(reconnected.errors, []);
+
+  // Capture is selected by `BrowserPointerEvents::capture_primary()` in Fe.
+  // The fixed adapter realizes only the standards operations. Holding capture
+  // across a component disconnect then proves the affine task cancellation
+  // releases it even though no pointerup/cancel event arrived.
+  await page.evaluate(() => {
+    const component = document.querySelector("#event-studio");
+    const captured = new Set();
+    globalThis.__feCaptureOperations = [];
+    component.setPointerCapture = pointerId => {
+      captured.add(pointerId);
+      globalThis.__feCaptureOperations.push(["capture", pointerId]);
+    };
+    component.hasPointerCapture = pointerId => captured.has(pointerId);
+    component.releasePointerCapture = pointerId => {
+      captured.delete(pointerId);
+      globalThis.__feCaptureOperations.push(["release", pointerId]);
+    };
+    component.dispatchEvent(new PointerEvent("pointerdown", {
+      bubbles: true,
+      composed: true,
+      pointerId: 37,
+      pointerType: "touch",
+      clientX: 144.5,
+      clientY: 211.25,
+      buttons: 1,
+      isPrimary: true,
+      pressure: 0.5,
+    }));
+  });
+  await page.waitForFunction(previousPointers => {
+    const values = document.querySelectorAll("#event-studio .event-studio-grid strong");
+    return Number(values[5]?.textContent) === previousPointers + 1
+      && globalThis.__feCaptureOperations?.length === 1;
+  }, {}, reconnected.pointerEvents);
+  await page.evaluate(() => {
+    const component = document.querySelector("#event-studio");
+    const marker = document.createComment("captured-event-studio-position");
+    component.before(marker);
+    component.remove();
+    marker.replaceWith(component);
+  });
+  await page.waitForFunction(() => document.querySelector("#event-studio")?._active === true
+    && globalThis.__feCaptureOperations?.length === 2);
+  assert.deepEqual(await page.evaluate(() => globalThis.__feCaptureOperations), [
+    ["capture", 37], ["release", 37],
+  ]);
+  const afterCaptureCancellation = await readStudio();
+  assert.equal(afterCaptureCancellation.failures, 0);
+  assert.deepEqual(afterCaptureCancellation.errors, []);
   assert.deepEqual(browserErrors, []);
-  console.log("ok: Fe Event Studio viewport, merged bounded pointer/wheel buffering, visibility, paced frame/timer, Scan forwarding, latest values, and lifecycle streams");
+  console.log("ok: Fe Event Studio viewport, Fe-selected scoped pointer capture, merged bounded pointer/wheel buffering, visibility, paced frame/timer, Scan forwarding, latest values, and lifecycle streams");
 } finally {
   await browser.close();
   await new Promise(resolvePromise => server.close(resolvePromise));

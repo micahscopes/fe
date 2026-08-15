@@ -189,6 +189,73 @@ test("component pointer and wheel adapters own exactly one pending pull", async 
   assert.deepEqual(detached, attached);
 });
 
+test("Fe-selected primary pointer capture has an exact scoped lifecycle", async () => {
+  const component = new EventTarget();
+  const captured = new Set();
+  const operations = [];
+  component.setPointerCapture = pointerId => {
+    captured.add(pointerId);
+    operations.push(["capture", pointerId]);
+  };
+  component.hasPointerCapture = pointerId => captured.has(pointerId);
+  component.releasePointerCapture = pointerId => {
+    captured.delete(pointerId);
+    operations.push(["release", pointerId]);
+  };
+  const source = createComponentEventSource(() => component);
+
+  const pointer = (type, pointerId, primary = true) => {
+    const event = new Event(type);
+    Object.defineProperties(event, {
+      pointerType: { value: "touch" },
+      pointerId: { value: pointerId },
+      clientX: { value: 12 },
+      clientY: { value: 34 },
+      buttons: { value: type === "pointerup" ? 0 : 1 },
+      isPrimary: { value: primary },
+      pressure: { value: type === "pointerup" ? 0 : 0.5 },
+    });
+    return event;
+  };
+
+  const down = source.capturedPointer();
+  component.dispatchEvent(pointer("pointerdown", 17));
+  assert.equal((await down).phase, 0);
+  assert.deepEqual(operations, [["capture", 17]]);
+
+  const secondary = source.capturedPointer();
+  component.dispatchEvent(pointer("pointerdown", 18, false));
+  assert.equal((await secondary).pointerId, 18);
+  assert.deepEqual(operations, [["capture", 17]]);
+
+  const up = source.capturedPointer();
+  component.dispatchEvent(pointer("pointerup", 17));
+  assert.equal((await up).phase, 2);
+  assert.deepEqual(operations, [["capture", 17], ["release", 17]]);
+
+  const secondDown = source.capturedPointer();
+  component.dispatchEvent(pointer("pointerdown", 23));
+  await secondDown;
+  const controller = new AbortController();
+  const cancelled = source.capturedPointer(controller.signal);
+  controller.abort();
+  await assert.rejects(cancelled, error => error.name === "AbortError");
+  assert.deepEqual(operations, [
+    ["capture", 17], ["release", 17], ["capture", 23], ["release", 23],
+  ]);
+
+  const thirdDown = source.capturedPointer();
+  component.dispatchEvent(pointer("pointerdown", 29));
+  await thirdDown;
+  const lost = source.capturedPointer();
+  component.dispatchEvent(pointer("lostpointercapture", 29));
+  assert.equal((await lost).phase, 4);
+  assert.deepEqual(operations, [
+    ["capture", 17], ["release", 17], ["capture", 23], ["release", 23],
+    ["capture", 29],
+  ]);
+});
+
 function installFetch(bytes) {
   return async url => String(url).endsWith(".json")
     ? {

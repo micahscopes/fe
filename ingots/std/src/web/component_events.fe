@@ -12,7 +12,11 @@ use super::super::host::Resumable
 use super::super::reactive::{
     AsyncEventSource, Cancelled, Event, EventSource, Subscription,
 }
-use raw::{pointer_begin as raw_pointer_begin, wheel_begin as raw_wheel_begin}
+use raw::{
+    captured_pointer_begin as raw_captured_pointer_begin,
+    pointer_begin as raw_pointer_begin,
+    wheel_begin as raw_wheel_begin,
+}
 
 #[derive(Default)]
 pub enum PointerPhase {
@@ -21,6 +25,10 @@ pub enum PointerPhase {
     Up,
     #[default]
     Cancel,
+    /// The browser reported that an active pointer capture ended outside the
+    /// ordinary up/cancel path. Appending this standards fact preserves all
+    /// existing phase ordinals while letting Fe terminate gesture state.
+    LostCapture,
 }
 
 impl Copy for PointerPhase {}
@@ -91,11 +99,23 @@ impl WheelSample {
 }
 
 pub struct BrowserPointerEvents {}
+/// Pointer Events with an explicit Fe-selected capture policy. The fixed host
+/// captures the first primary pointer on `Down`, releases it on `Up`/`Cancel`,
+/// reports unexpected loss as `PointerPhase::LostCapture`, and releases any
+/// retained capture when the owning affine subscription is cancelled.
+pub struct BrowserCapturedPointerEvents {}
 pub struct BrowserWheelEvents {}
 
 impl BrowserPointerEvents {
     pub fn new() -> Self {
         Self {}
+    }
+
+    /// Select primary-pointer capture as part of the typed Fe source graph.
+    /// The raw source remains available when native browser targeting is the
+    /// intended policy; JavaScript never chooses between the two.
+    pub fn capture_primary(own self) -> BrowserCapturedPointerEvents {
+        BrowserCapturedPointerEvents {}
     }
 }
 
@@ -115,6 +135,23 @@ impl AsyncEventSource<WasmBackend, PointerSample> for BrowserPointerEvents {
         _ subscription: own Subscription<PointerSample>,
     ) -> (Subscription<PointerSample>, core::pending::Pending<WasmBackend, PointerSample>) {
         (subscription.advance().0, raw_pointer_begin())
+    }
+
+    fn cancel(mut self, _ subscription: own Subscription<PointerSample>) -> Cancelled {
+        Cancelled { consumed: subscription.cursor() }
+    }
+}
+
+impl AsyncEventSource<WasmBackend, PointerSample> for BrowserCapturedPointerEvents {
+    fn subscribe(mut self) -> Subscription<PointerSample> {
+        Subscription::new(initial: PointerSample::placeholder())
+    }
+
+    fn next_begin(
+        mut self,
+        _ subscription: own Subscription<PointerSample>,
+    ) -> (Subscription<PointerSample>, core::pending::Pending<WasmBackend, PointerSample>) {
+        (subscription.advance().0, raw_captured_pointer_begin())
     }
 
     fn cancel(mut self, _ subscription: own Subscription<PointerSample>) -> Cancelled {
@@ -149,6 +186,36 @@ impl EventSource<PointerSample> for BrowserPointerEvents {
         Event<PointerSample>,
     ) {
         let (successor, pending) = <BrowserPointerEvents as AsyncEventSource<
+            WasmBackend,
+            PointerSample,
+        >>::next_begin(self, subscription)
+        let outcome: TaskOutcome<u32, PointerSample> = <Resumable as Suspend<
+            WasmBackend,
+            u32,
+        >>::suspend(Resumable {}, pending)
+        let event = match outcome {
+            TaskOutcome::Success(sample,) => Event::occurrence(value: sample),
+            TaskOutcome::Failure(error,) => Event::failure(error: error),
+            TaskOutcome::Cancelled => Event::cancelled(),
+        }
+        (successor, event)
+    }
+
+    fn cancel(mut self, _ subscription: own Subscription<PointerSample>) -> Cancelled {
+        Cancelled { consumed: subscription.cursor() }
+    }
+}
+
+impl EventSource<PointerSample> for BrowserCapturedPointerEvents {
+    fn subscribe(mut self) -> Subscription<PointerSample> {
+        Subscription::new(initial: PointerSample::placeholder())
+    }
+
+    fn next(mut self, _ subscription: own Subscription<PointerSample>) -> (
+        Subscription<PointerSample>,
+        Event<PointerSample>,
+    ) {
+        let (successor, pending) = <BrowserCapturedPointerEvents as AsyncEventSource<
             WasmBackend,
             PointerSample,
         >>::next_begin(self, subscription)
