@@ -6,6 +6,7 @@
 //! application callback or hidden host-side reactive graph.
 
 use core::actor::{ActorSink, ScopedTask}
+use core::default::Default
 use core::Fn
 use core::pending::{Select, Suspend, TaskOutcome, Timer}
 use std::actor::{ActorMessage, BrowserActorSink, buffer_to_actor, forward_to_actor}
@@ -81,26 +82,69 @@ enum StudioAction {
 
 impl Copy for StudioAction {}
 
-/// One nominal mailbox payload. The compiler derives its scalar Wasm shape;
-/// neither the task nor the fixed browser boundary assigns field IDs or packs
-/// values into an application-specific integer protocol.
+/// Pointer policy adds only the Fe-owned cumulative drop count to the complete
+/// standards observation. Keeping this nominal pair avoids both parallel
+/// scalar fields and an application-specific packed protocol.
+#[derive(Default)]
+struct BufferedPointer {
+    sample: PointerSample,
+    dropped: u32,
+}
+
+impl Copy for BufferedPointer {}
+
+/// One nominal mailbox payload built from the actual browser fact types. The
+/// compiler recursively derives its scalar Wasm shape; neither tasks nor the
+/// fixed browser boundary assign field IDs or flatten these values by hand.
+#[derive(Default)]
 struct StudioTask {
-    viewport_width: f32,
-    viewport_height: f32,
-    viewport_device_pixel_ratio: f32,
-    pointer_id: u32,
-    pointer_x: f32,
-    pointer_y: f32,
-    pointer_buttons: u32,
-    wheel_delta_y: f32,
-    document_hidden: bool,
-    frame_timestamp: f32,
+    viewport: Viewport,
+    pointer: BufferedPointer,
+    wheel: WheelSample,
+    visibility: DocumentVisibility,
+    frame: AnimationFrame,
     error: u32,
-    bounded_drops: u32,
     latest_value: u32,
 }
 
 impl Copy for StudioTask {}
+
+impl StudioTask {
+    fn with_viewport(mut self, value: Viewport) -> Self {
+        self.viewport = value
+        self
+    }
+
+    fn with_pointer(mut self, sample: PointerSample, dropped: u32) -> Self {
+        self.pointer = BufferedPointer { sample: sample, dropped: dropped }
+        self
+    }
+
+    fn with_wheel(mut self, value: WheelSample) -> Self {
+        self.wheel = value
+        self
+    }
+
+    fn with_visibility(mut self, value: DocumentVisibility) -> Self {
+        self.visibility = value
+        self
+    }
+
+    fn with_frame(mut self, value: AnimationFrame) -> Self {
+        self.frame = value
+        self
+    }
+
+    fn with_error(mut self, value: u32) -> Self {
+        self.error = value
+        self
+    }
+
+    fn with_latest(mut self, value: u32) -> Self {
+        self.latest_value = value
+        self
+    }
+}
 
 derive ComponentAction for StudioAction using ComponentActionProvider
 
@@ -174,99 +218,6 @@ fn bounded_position(value: f32) -> u32 {
     __i32_from_f32(bounded).downcast_unchecked()
 }
 
-fn viewport_task(viewport: Viewport) -> StudioTask {
-    StudioTask {
-        viewport_width: viewport.width,
-        viewport_height: viewport.height,
-        viewport_device_pixel_ratio: viewport.device_pixel_ratio,
-        pointer_id: 0,
-        pointer_x: 0.0,
-        pointer_y: 0.0,
-        pointer_buttons: 0,
-        wheel_delta_y: 0.0,
-        document_hidden: false,
-        frame_timestamp: 0.0,
-        error: 0,
-        bounded_drops: 0,
-        latest_value: 0,
-    }
-}
-
-fn pointer_task(sample: PointerSample) -> StudioTask {
-    StudioTask {
-        viewport_width: 0.0,
-        viewport_height: 0.0,
-        viewport_device_pixel_ratio: 0.0,
-        pointer_id: sample.pointer_id,
-        pointer_x: sample.client_x,
-        pointer_y: sample.client_y,
-        pointer_buttons: sample.buttons,
-        wheel_delta_y: 0.0,
-        document_hidden: false,
-        frame_timestamp: 0.0,
-        error: 0,
-        bounded_drops: 0,
-        latest_value: 0,
-    }
-}
-
-fn wheel_task(sample: WheelSample) -> StudioTask {
-    StudioTask {
-        viewport_width: 0.0,
-        viewport_height: 0.0,
-        viewport_device_pixel_ratio: 0.0,
-        pointer_id: 0,
-        pointer_x: sample.client_x,
-        pointer_y: sample.client_y,
-        pointer_buttons: 0,
-        wheel_delta_y: sample.delta_y,
-        document_hidden: false,
-        frame_timestamp: 0.0,
-        error: 0,
-        bounded_drops: 0,
-        latest_value: 0,
-    }
-}
-
-fn visibility_task(visibility: DocumentVisibility) -> StudioTask {
-    StudioTask {
-        viewport_width: 0.0,
-        viewport_height: 0.0,
-        viewport_device_pixel_ratio: 0.0,
-        pointer_id: 0,
-        pointer_x: 0.0,
-        pointer_y: 0.0,
-        pointer_buttons: 0,
-        wheel_delta_y: 0.0,
-        document_hidden: match visibility {
-            DocumentVisibility::Visible => false,
-            DocumentVisibility::Hidden => true,
-        },
-        frame_timestamp: 0.0,
-        error: 0,
-        bounded_drops: 0,
-        latest_value: 0,
-    }
-}
-
-fn frame_task(frame: AnimationFrame) -> StudioTask {
-    StudioTask {
-        viewport_width: 0.0,
-        viewport_height: 0.0,
-        viewport_device_pixel_ratio: 0.0,
-        pointer_id: 0,
-        pointer_x: 0.0,
-        pointer_y: 0.0,
-        pointer_buttons: 0,
-        wheel_delta_y: 0.0,
-        document_hidden: false,
-        frame_timestamp: frame.timestamp,
-        error: 0,
-        bounded_drops: 0,
-        latest_value: 0,
-    }
-}
-
 fn timer_task(sequence: u32) -> StudioTask {
     let base = sequence * 4
     // Keep the deterministic one-slot probe as visible `Latest` evidence. The
@@ -275,39 +226,7 @@ fn timer_task(sequence: u32) -> StudioTask {
     let mut newest: Latest<u32> = latest(initial: 0)
     newest = newest.offer(value: base + 1, overflow: OverflowPolicy::KeepLatest)
     newest = newest.offer(value: base + 4, overflow: OverflowPolicy::KeepLatest)
-    StudioTask {
-        viewport_width: 0.0,
-        viewport_height: 0.0,
-        viewport_device_pixel_ratio: 0.0,
-        pointer_id: 0,
-        pointer_x: 0.0,
-        pointer_y: 0.0,
-        pointer_buttons: 0,
-        wheel_delta_y: 0.0,
-        document_hidden: false,
-        frame_timestamp: 0.0,
-        error: 0,
-        bounded_drops: 0,
-        latest_value: newest.front().value_or(fallback: 0),
-    }
-}
-
-fn failed_task(error: u32) -> StudioTask {
-    StudioTask {
-        viewport_width: 0.0,
-        viewport_height: 0.0,
-        viewport_device_pixel_ratio: 0.0,
-        pointer_id: 0,
-        pointer_x: 0.0,
-        pointer_y: 0.0,
-        pointer_buttons: 0,
-        wheel_delta_y: 0.0,
-        document_hidden: false,
-        frame_timestamp: 0.0,
-        error: error,
-        bounded_drops: 0,
-        latest_value: 0,
-    }
+    StudioTask::default().with_latest(value: newest.front().value_or(fallback: 0))
 }
 
 fn task_message(target: StudioAction, payload: own StudioTask) -> ComponentEvent<
@@ -343,7 +262,7 @@ impl Fn<Viewport, ComponentEvent<StudioAction, StudioTask>> for ViewportMessage 
     fn call(self, _ viewport: own Viewport) -> ComponentEvent<StudioAction, StudioTask> {
         task_message(
             target: StudioAction::ViewportObserved,
-            payload: viewport_task(viewport),
+            payload: StudioTask::default().with_viewport(value: viewport),
         )
     }
 }
@@ -354,11 +273,9 @@ impl Fn<(PointerSample, u32), ComponentEvent<StudioAction, StudioTask>> for Buff
         _ observation: own (PointerSample, u32),
     ) -> ComponentEvent<StudioAction, StudioTask> {
         let (sample, dropped) = observation
-        let mut payload = pointer_task(sample)
-        payload.bounded_drops = dropped
         task_message(
             target: StudioAction::PointerObserved,
-            payload: payload,
+            payload: StudioTask::default().with_pointer(sample: sample, dropped: dropped),
         )
     }
 }
@@ -367,7 +284,7 @@ impl Fn<WheelSample, ComponentEvent<StudioAction, StudioTask>> for WheelMessage 
     fn call(self, _ sample: own WheelSample) -> ComponentEvent<StudioAction, StudioTask> {
         task_message(
             target: StudioAction::WheelObserved,
-            payload: wheel_task(sample),
+            payload: StudioTask::default().with_wheel(value: sample),
         )
     }
 }
@@ -379,7 +296,7 @@ impl Fn<DocumentVisibility, ComponentEvent<StudioAction, StudioTask>> for Visibi
     > {
         task_message(
             target: StudioAction::VisibilityObserved,
-            payload: visibility_task(visibility),
+            payload: StudioTask::default().with_visibility(value: visibility),
         )
     }
 }
@@ -388,7 +305,7 @@ impl Fn<u32, ComponentEvent<StudioAction, StudioTask>> for FailureMessage {
     fn call(self, _ error: own u32) -> ComponentEvent<StudioAction, StudioTask> {
         task_message(
             target: StudioAction::StreamFailed,
-            payload: failed_task(error),
+            payload: StudioTask::default().with_error(value: error),
         )
     }
 }
@@ -486,7 +403,7 @@ uses (
                         Event::Occurrence(frame,) => {
                             running = report(
                                 target: StudioAction::FrameObserved,
-                                payload: frame_task(frame),
+                                payload: StudioTask::default().with_frame(value: frame),
                             )
                             if running {
                                 observations = observations + 1
@@ -499,7 +416,7 @@ uses (
                         Event::Failure(error,) => {
                             report(
                                 target: StudioAction::StreamFailed,
-                                payload: failed_task(error),
+                                payload: StudioTask::default().with_error(value: error),
                             )
                             running = false
                         },
@@ -513,7 +430,7 @@ uses (
             TaskOutcome::Failure(error,) => {
                 report(
                     target: StudioAction::StreamFailed,
-                    payload: failed_task(error),
+                    payload: StudioTask::default().with_error(value: error),
                 )
                 running = false
             },
@@ -793,30 +710,33 @@ actor EventStudio {
                 if connected {
                     match event.target {
                         StudioAction::ViewportObserved => {
-                            width = bounded_dimension(value: event.task.viewport_width)
-                            height = bounded_dimension(value: event.task.viewport_height)
+                            width = bounded_dimension(value: event.task.viewport.width)
+                            height = bounded_dimension(value: event.task.viewport.height)
                             pixel_ratio_percent = bounded_pixel_ratio(
-                                value: event.task.viewport_device_pixel_ratio,
+                                value: event.task.viewport.device_pixel_ratio,
                             )
                             observations = observations + 1
                         }
                         StudioAction::PointerObserved => {
-                            pointer_x = bounded_position(value: event.task.pointer_x)
-                            pointer_y = bounded_position(value: event.task.pointer_y)
+                            pointer_x = bounded_position(value: event.task.pointer.sample.client_x)
+                            pointer_y = bounded_position(value: event.task.pointer.sample.client_y)
                             pointer_events = pointer_events + 1
-                            bounded_drops = event.task.bounded_drops
+                            bounded_drops = event.task.pointer.dropped
                         }
                         StudioAction::WheelObserved => {
-                            pointer_x = bounded_position(value: event.task.pointer_x)
-                            pointer_y = bounded_position(value: event.task.pointer_y)
+                            pointer_x = bounded_position(value: event.task.wheel.client_x)
+                            pointer_y = bounded_position(value: event.task.wheel.client_y)
                             wheel_events = wheel_events + 1
                         }
                         StudioAction::VisibilityObserved => {
-                            visible = !event.task.document_hidden
+                            visible = match event.task.visibility {
+                                DocumentVisibility::Visible => true,
+                                DocumentVisibility::Hidden => false,
+                            }
                             visibility_events = visibility_events + 1
                         }
                         StudioAction::FrameObserved => {
-                            frame_timestamp = bounded_dimension(value: event.task.frame_timestamp)
+                            frame_timestamp = bounded_dimension(value: event.task.frame.timestamp)
                             frame_events = frame_events + 1
                         }
                         StudioAction::TimerElapsed => {
