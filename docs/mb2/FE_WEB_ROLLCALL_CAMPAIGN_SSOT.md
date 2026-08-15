@@ -189,11 +189,14 @@ Legend:
   semantic and next-power-of-two trace lengths, emits active rows followed by
   deterministic terminal-state padding, and marks exactly one terminal row.
   The independent gate checks every directed padded row and rejects invalid,
-  non-escaping, and out-of-domain requests. Algebraic activity/padding rules,
-  signed bit/range proofs, and the domain-separated Poseidon trace commitment
-  remain pending. The reusable modulus-branded array field layer executes on
-  Wasm, but its SPIR-V helper-call seam and the permutation lift remain open.
-  No trace root is claimed yet. This remains constraint and witness-shape
+  non-escaping, and out-of-domain requests. Fe first/pair/last constraints now
+  make activity monotone, terminal unique, and padding an exact terminal-state
+  fixed point. The gate rejects non-bit flags, premature inactivity,
+  nonterminal closure, and mutated padding. Proof-field reduction, signed
+  bit/range proofs, and the domain-separated Poseidon trace commitment remain
+  pending. The reusable modulus-branded array field layer executes on Wasm,
+  but its SPIR-V helper-call seam and the permutation lift remain open. No
+  trace root is claimed yet. This remains executable integer-constraint
   evidence rather than a proof.
 - [ ] Produce a succinct proof whose verifier is demonstrably cheaper than
   replaying the orbit.

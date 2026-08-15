@@ -88,8 +88,7 @@ directed pair of alleged rows. The independent gate mutates all 11 columns on
 both sides, the public point, and the bound. It also proves that residual-zero
 but noncanonical quotient/remainder pairs reject. These integer residuals have
 not yet been lifted into the proof field. Bit decomposition, signed range
-proofs, and algebraic enforcement of activity, terminal uniqueness, and
-padding remain part of the pending AIR layer.
+proofs, and the proof-field lift remain part of the pending AIR layer.
 
 The integer constraint evaluator rejects any alleged row whose coordinate
 magnitude exceeds 24576 before evaluating the doubled cross-product. This is
@@ -105,8 +104,17 @@ and the proof terminal marker. Requests at or beyond `padded_length` fail
 closed. Invalid and non-escaping claims have no proof shape. The independent
 gate checks every row and encoding in directed traces, counts exactly one
 terminal marker, and separately derives both lengths. These are canonical
-witness-shape semantics. Their proof-field transition constraints remain
-pending.
+witness-shape semantics.
+
+The Fe integer constraint surface now also checks the first row, every padded
+pair, and the final row. Activity is monotone. An active nonterminal row must
+take the Mandelbrot transition to another active row. The unique active
+terminal row must transition to inactive padding when another row exists, and
+inactive padding must remain an exact fixed point of the terminal AIR values.
+The last row must be either that active terminal or inactive padding. The gate
+rejects non-bit flags, premature inactivity, a nonterminal final row, and
+one-unit mutations of the padding fixed point. These are executable integer
+constraints. Their reduction to proof-field polynomials is still pending.
 
 ## Commitment and proof direction
 

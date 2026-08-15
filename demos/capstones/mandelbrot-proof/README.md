@@ -15,7 +15,9 @@ including a residual-zero noncanonical shift decomposition. This is constraint
 evidence, not yet proof-field AIR or a succinct proof. Escaping witnesses also
 derive a power-of-two proof shape with one terminal marker and deterministic
 inactive padding; invalid and non-escaping claims cannot produce proof rows.
-It checks semantics, not artifact bytes:
+Fe first/pair/last constraints make activity monotone and the padding values a
+terminal-state fixed point. These constraints still need proof-field and
+low-degree enforcement. The gate checks semantics, not artifact bytes:
 
 ```console
 cargo nextest run --release --locked -p fe-codegen --test mandelbrot_bounded_claim_oracle

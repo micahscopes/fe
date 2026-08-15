@@ -92,6 +92,12 @@ pub struct PaddedEscapeAirRow {
 
 impl Copy for PaddedEscapeAirRow {}
 
+/// Scalar oracle boundary for one flattened AIR row. The proof model remains
+/// nominal; this tuple only keeps Wasm gate wrappers concise.
+pub type EscapeAirWords = (
+    u32, i32, i32, i32, i32, i32, i32, i32, i32, i32, u32,
+)
+
 fn square(_ value: i32) -> i32 {
     value * value
 }
@@ -220,6 +226,85 @@ fn projected_air_row(
         real_shift: ShiftQ12 { quotient: q_re, remainder: r_re },
         imaginary_shift: ShiftQ12 { quotient: q_im, remainder: r_im },
     }
+}
+
+fn air_row_from_words(_ words: EscapeAirWords) -> EscapeAirRow {
+    let (step, zr, zi, rr, ii, magnitude, q_re, r_re, q_im, r_im, terminal) = words
+    projected_air_row(
+        step: step,
+        zr: zr,
+        zi: zi,
+        rr: rr,
+        ii: ii,
+        magnitude: magnitude,
+        q_re: q_re,
+        r_re: r_re,
+        q_im: q_im,
+        r_im: r_im,
+        terminal: terminal == 1,
+    )
+}
+
+fn air_words_have_canonical_terminal(_ words: EscapeAirWords) -> bool {
+    let (_, _, _, _, _, _, _, _, _, _, terminal) = words
+    terminal <= 1
+}
+
+fn air_rows_equal(_ left: EscapeAirRow, _ right: EscapeAirRow) -> bool {
+    left.semantic.step == right.semantic.step
+        && left.semantic.z.re == right.semantic.z.re
+        && left.semantic.z.im == right.semantic.z.im
+        && left.rr == right.rr
+        && left.ii == right.ii
+        && left.semantic.magnitude_squared_q24 == right.semantic.magnitude_squared_q24
+        && left.real_shift.quotient == right.real_shift.quotient
+        && left.real_shift.remainder == right.real_shift.remainder
+        && left.imaginary_shift.quotient == right.imaginary_shift.quotient
+        && left.imaginary_shift.remainder == right.imaginary_shift.remainder
+        && left.semantic.terminal == right.semantic.terminal
+}
+
+fn padded_air_row_holds(_ row: PaddedEscapeAirRow) -> bool {
+    if !row.valid || !air_row_holds(row.air) { return false }
+    if row.terminal && !row.active { return false }
+    if row.active {
+        row.terminal == row.air.semantic.terminal
+    } else {
+        !row.terminal && row.air.semantic.terminal
+    }
+}
+
+fn padded_air_transition_holds(
+    _ claim: EscapesByQ12,
+    _ row: PaddedEscapeAirRow,
+    _ next: PaddedEscapeAirRow,
+) -> bool {
+    if !claim.is_valid() || !padded_air_row_holds(row) || !padded_air_row_holds(next) {
+        return false
+    }
+    if row.active {
+        if row.terminal {
+            !next.active && !next.terminal && air_rows_equal(row.air, next.air)
+        } else {
+            next.active && air_transition_holds(claim, row.air, next.air)
+        }
+    } else {
+        !next.active && !next.terminal && air_rows_equal(row.air, next.air)
+    }
+}
+
+fn padded_air_first_row_holds(_ claim: EscapesByQ12, _ row: PaddedEscapeAirRow) -> bool {
+    claim.is_valid()
+        && padded_air_row_holds(row)
+        && row.active
+        && !row.terminal
+        && row.air.semantic.step == 0
+        && row.air.semantic.z.re == 0
+        && row.air.semantic.z.im == 0
+}
+
+fn padded_air_last_row_holds(_ row: PaddedEscapeAirRow) -> bool {
+    padded_air_row_holds(row) && (row.terminal || !row.active)
 }
 
 fn air_row(_ step: u32, _ z: ComplexQ12) -> EscapeAirRow {
@@ -653,4 +738,92 @@ pub fn escape_air_pair_holds_q12(
         terminal: next_terminal == 1,
     )
     if air_transition_holds(claim, row, next) { 1 } else { 0 }
+}
+
+/// Verify one pair in the active/terminal/padding state machine. The flattened
+/// tuples are a Wasm oracle boundary; all constraint logic consumes nominal
+/// Fe rows. Pair constraints make activity monotone, terminal unique, and
+/// padding a fixed point of the terminal AIR values.
+pub fn escape_padded_air_pair_holds_q12(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ bound: u32,
+    _ row_active: u32,
+    _ row_terminal: u32,
+    _ row_words: EscapeAirWords,
+    _ next_active: u32,
+    _ next_terminal: u32,
+    _ next_words: EscapeAirWords,
+) -> u32 {
+    if row_active > 1
+        || row_terminal > 1
+        || next_active > 1
+        || next_terminal > 1
+        || !air_words_have_canonical_terminal(row_words)
+        || !air_words_have_canonical_terminal(next_words)
+    {
+        return 0
+    }
+    let row = PaddedEscapeAirRow {
+        valid: true,
+        active: row_active == 1,
+        terminal: row_terminal == 1,
+        air: air_row_from_words(row_words),
+    }
+    let next = PaddedEscapeAirRow {
+        valid: true,
+        active: next_active == 1,
+        terminal: next_terminal == 1,
+        air: air_row_from_words(next_words),
+    }
+    let claim = EscapesByQ12::new(c_re_q12, c_im_q12, bound)
+    if padded_air_transition_holds(claim, row, next) { 1 } else { 0 }
+}
+
+/// Constrain the first padded row to the canonical active `z_0 = 0` boundary.
+pub fn escape_padded_air_first_holds_q12(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ bound: u32,
+    _ active: u32,
+    _ terminal: u32,
+    _ words: EscapeAirWords,
+) -> u32 {
+    if active > 1
+        || terminal > 1
+        || !air_words_have_canonical_terminal(words)
+    {
+        return 0
+    }
+    let row = PaddedEscapeAirRow {
+        valid: true,
+        active: active == 1,
+        terminal: terminal == 1,
+        air: air_row_from_words(words),
+    }
+    let claim = EscapesByQ12::new(c_re_q12, c_im_q12, bound)
+    if padded_air_first_row_holds(claim, row) { 1 } else { 0 }
+}
+
+/// Constrain the final padded-domain row to be either the active terminal row
+/// or inactive terminal-state padding. Together with pair constraints this
+/// proves that the trace reaches exactly one terminal marker.
+pub fn escape_padded_air_last_holds_q12(
+    _ active: u32,
+    _ terminal: u32,
+    _ words: EscapeAirWords,
+) -> u32 {
+    if active > 1
+        || terminal > 1
+        || !air_words_have_canonical_terminal(words)
+    {
+        return 0
+    }
+    let row = PaddedEscapeAirRow {
+        valid: true,
+        active: active == 1,
+        terminal: terminal == 1,
+        air: air_row_from_words(words),
+    }
+    if padded_air_last_row_holds(row) { 1 } else { 0 }
 }

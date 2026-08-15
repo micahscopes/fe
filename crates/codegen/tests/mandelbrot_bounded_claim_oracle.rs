@@ -561,6 +561,98 @@ fn wasm_pair_holds(
     call_words(store, instance, "escape_air_pair_holds_q12", &args, 1) == [1]
 }
 
+fn wasm_padded_pair_holds_raw(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    c_re: i32,
+    c_im: i32,
+    bound: u32,
+    row_active: i32,
+    row_terminal: i32,
+    row: AirRow,
+    next_active: i32,
+    next_terminal: i32,
+    next: AirRow,
+) -> bool {
+    let mut args = vec![c_re, c_im, bound as i32, row_active, row_terminal];
+    args.extend(air_row_words(row));
+    args.push(next_active);
+    args.push(next_terminal);
+    args.extend(air_row_words(next));
+    call_words(
+        store,
+        instance,
+        "escape_padded_air_pair_holds_q12",
+        &args,
+        1,
+    ) == [1]
+}
+
+fn wasm_padded_pair_holds(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    c_re: i32,
+    c_im: i32,
+    bound: u32,
+    row: PaddedAirRow,
+    next: PaddedAirRow,
+) -> bool {
+    wasm_padded_pair_holds_raw(
+        store,
+        instance,
+        c_re,
+        c_im,
+        bound,
+        i32::from(row.active),
+        i32::from(row.terminal),
+        row.air,
+        i32::from(next.active),
+        i32::from(next.terminal),
+        next.air,
+    )
+}
+
+fn wasm_padded_first_holds(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    c_re: i32,
+    c_im: i32,
+    bound: u32,
+    row: PaddedAirRow,
+) -> bool {
+    let mut args = vec![
+        c_re,
+        c_im,
+        bound as i32,
+        i32::from(row.active),
+        i32::from(row.terminal),
+    ];
+    args.extend(air_row_words(row.air));
+    call_words(
+        store,
+        instance,
+        "escape_padded_air_first_holds_q12",
+        &args,
+        1,
+    ) == [1]
+}
+
+fn wasm_padded_last_holds(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    row: PaddedAirRow,
+) -> bool {
+    let mut args = vec![i32::from(row.active), i32::from(row.terminal)];
+    args.extend(air_row_words(row.air));
+    call_words(
+        store,
+        instance,
+        "escape_padded_air_last_holds_q12",
+        &args,
+        1,
+    ) == [1]
+}
+
 #[test]
 fn fe_bounded_escape_witness_matches_independent_i64_model() {
     let bytes = compile();
@@ -606,6 +698,7 @@ fn fe_bounded_escape_witness_matches_independent_i64_model() {
             );
             let mut active_count = 0u32;
             let mut terminal_count = 0u32;
+            let mut padded_rows = Vec::new();
             for target in 0..expected_shape.padded_length {
                 let active = target < expected_shape.trace_length;
                 let terminal = target == expected_shape.terminal_step;
@@ -621,6 +714,7 @@ fn fe_bounded_escape_witness_matches_independent_i64_model() {
                     terminal,
                     air: expected_air,
                 };
+                padded_rows.push(expected_proof_row);
                 assert_eq!(
                     wasm_proof_row(&mut store, &instance, c_re, c_im, bound, target,),
                     expected_proof_row,
@@ -643,6 +737,26 @@ fn fe_bounded_escape_witness_matches_independent_i64_model() {
             assert_eq!(
                 terminal_count, 1,
                 "the padded trace has one terminal marker"
+            );
+            assert!(
+                wasm_padded_first_holds(&mut store, &instance, c_re, c_im, bound, padded_rows[0],),
+                "Fe first-row constraint ({c_re}, {c_im}, {bound})"
+            );
+            for (index, pair) in padded_rows.windows(2).enumerate() {
+                assert!(
+                    wasm_padded_pair_holds(
+                        &mut store, &instance, c_re, c_im, bound, pair[0], pair[1],
+                    ),
+                    "Fe padded transition ({c_re}, {c_im}, {bound}) at {index}"
+                );
+            }
+            assert!(
+                wasm_padded_last_holds(
+                    &mut store,
+                    &instance,
+                    *padded_rows.last().expect("proof trace has a final row"),
+                ),
+                "Fe last-row constraint ({c_re}, {c_im}, {bound})"
             );
             assert!(
                 !wasm_proof_row(
@@ -893,4 +1007,122 @@ fn fe_bounded_escape_witness_matches_independent_i64_model() {
         !wasm_pair_holds(&mut store, &instance, -3048, 2216, 255, unsafe_row, next),
         "out-of-domain alleged coordinates must reject before widened arithmetic"
     );
+
+    let active_base = PaddedAirRow {
+        valid: true,
+        active: true,
+        terminal: false,
+        air: base,
+    };
+    let active_next = PaddedAirRow {
+        valid: true,
+        active: true,
+        terminal: false,
+        air: next,
+    };
+    assert!(wasm_padded_pair_holds(
+        &mut store,
+        &instance,
+        -3048,
+        2216,
+        255,
+        active_base,
+        active_next,
+    ));
+    for (column, mutation) in one_unit_mutations(base).into_iter().enumerate() {
+        assert!(
+            !wasm_padded_pair_holds(
+                &mut store,
+                &instance,
+                -3048,
+                2216,
+                255,
+                PaddedAirRow {
+                    air: mutation,
+                    ..active_base
+                },
+                active_next,
+            ),
+            "padded constraint must reject current AIR mutation {column}"
+        );
+    }
+    assert!(!wasm_padded_pair_holds_raw(
+        &mut store, &instance, -3048, 2216, 255, 2, 0, base, 1, 0, next,
+    ));
+    assert!(!wasm_padded_pair_holds_raw(
+        &mut store, &instance, -3048, 2216, 255, 1, 0, base, 2, 0, next,
+    ));
+    assert!(
+        !wasm_padded_first_holds(
+            &mut store,
+            &instance,
+            -3048,
+            2216,
+            255,
+            PaddedAirRow {
+                active: false,
+                ..active_base
+            },
+        ),
+        "the first row must be active"
+    );
+    assert!(
+        !wasm_padded_last_holds(&mut store, &instance, active_next),
+        "an active nonterminal row cannot close the padded domain"
+    );
+
+    let padded_case_rows = reference_rows(4095, 4095, 2);
+    let terminal_air = {
+        let row = *padded_case_rows.last().expect("directed point escapes");
+        reference_air_row(row.step, row.zr, row.zi)
+    };
+    let terminal_proof_row = PaddedAirRow {
+        valid: true,
+        active: true,
+        terminal: true,
+        air: terminal_air,
+    };
+    let padding_row = PaddedAirRow {
+        valid: true,
+        active: false,
+        terminal: false,
+        air: terminal_air,
+    };
+    assert_eq!(reference_proof_shape(4095, 4095, 2).padded_length, 4);
+    assert!(wasm_padded_pair_holds(
+        &mut store,
+        &instance,
+        4095,
+        4095,
+        2,
+        terminal_proof_row,
+        padding_row,
+    ));
+    assert!(wasm_padded_pair_holds(
+        &mut store,
+        &instance,
+        4095,
+        4095,
+        2,
+        padding_row,
+        padding_row,
+    ));
+    assert!(wasm_padded_last_holds(&mut store, &instance, padding_row,));
+    for (column, mutation) in one_unit_mutations(terminal_air).into_iter().enumerate() {
+        assert!(
+            !wasm_padded_pair_holds(
+                &mut store,
+                &instance,
+                4095,
+                4095,
+                2,
+                padding_row,
+                PaddedAirRow {
+                    air: mutation,
+                    ..padding_row
+                },
+            ),
+            "padding fixed point must reject AIR mutation {column}"
+        );
+    }
 }
