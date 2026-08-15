@@ -435,6 +435,7 @@ fn builtin_source_str(source: SpirvBuiltinSource) -> &'static str {
         SpirvBuiltinSource::GlobalInvocationIdY => "GlobalInvocationIdY",
         SpirvBuiltinSource::FragmentPositionX => "FragmentPositionX",
         SpirvBuiltinSource::FragmentPositionY => "FragmentPositionY",
+        SpirvBuiltinSource::VertexIndex => "VertexIndex",
     }
 }
 
