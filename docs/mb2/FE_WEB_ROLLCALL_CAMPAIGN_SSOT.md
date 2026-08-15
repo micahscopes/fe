@@ -188,19 +188,24 @@ Legend:
   sign-plus-magnitude row encoding, and verifies alleged directed row pairs.
   The gate mutates all 11 columns on both sides, the public point, and the
   bound, and rejects residual-zero noncanonical shift decompositions. The
-  residuals are not yet proof-field constraints. Fe now also derives the
-  semantic and next-power-of-two trace lengths, emits active rows followed by
-  deterministic terminal-state padding, and marks exactly one terminal row.
-  The independent gate checks every directed padded row and rejects invalid,
-  non-escaping, and out-of-domain requests. Fe first/pair/last constraints now
-  make activity monotone, terminal unique, and padding an exact terminal-state
-  fixed point. The gate rejects non-bit flags, premature inactivity,
-  nonterminal closure, and mutated padding. Proof-field reduction, signed
-  bit/range proofs, and the domain-separated Poseidon trace commitment remain
-  pending. The reusable modulus-branded array field layer executes on Wasm,
-  but its SPIR-V helper-call seam and the permutation lift remain open. No
-  trace root is claimed yet. This remains executable integer-constraint
-  evidence rather than a proof.
+  first proof-field slice now evaluates nine row-local and nine transition
+  residuals directly in BN254 Fr. It reconstructs signed values algebraically,
+  constrains every supplied sign as a bit, executes as self-contained Fe Wasm
+  with zero function imports, and rejects directed one-unit mutations. Fe also
+  derives the semantic and next-power-of-two trace lengths, emits active rows
+  followed by deterministic terminal-state padding, and marks exactly one
+  terminal row. The independent gate checks every directed padded row and
+  rejects invalid, non-escaping, and out-of-domain requests. Fe integer
+  first/pair/last constraints make activity monotone, terminal unique, and
+  padding an exact terminal-state fixed point. The gate rejects non-bit flags,
+  premature inactivity, nonterminal closure, and mutated padding. Range and
+  bit decomposition, canonical positive zero, proof-field activity/terminal/
+  padding constraints, and the domain-separated Poseidon trace commitment
+  remain pending. The gate deliberately demonstrates that field equalities
+  alone still accept an out-of-range remainder decomposition and negative
+  zero. The reusable field API's SPIR-V helper-call seam and permutation lift
+  also remain open. No trace root is claimed yet. This is executable initial
+  AIR evidence rather than a proof.
 - [ ] Produce a succinct proof whose verifier is demonstrably cheaper than
   replaying the orbit.
 - [ ] Define a typed proof encoding and prove browser/native verifier parity,

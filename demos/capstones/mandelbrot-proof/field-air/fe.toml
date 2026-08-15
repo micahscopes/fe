@@ -1,0 +1,7 @@
+[ingot]
+name = "mandelbrot_proof_field_air"
+version = "0.1.0"
+
+[dependencies]
+core = "../../../../ingots/core"
+precision = "../../../sketches/precision"

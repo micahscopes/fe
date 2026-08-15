@@ -11,13 +11,23 @@ quotient/remainder against an i64 model, and rejects one-unit mutations in
 every expanded column. Fe also emits the canonical sign-plus-magnitude row
 encoding, evaluates widened integer polynomial residuals, and verifies an
 alleged directed row pair. The gate mutates both rows and public claim values,
-including a residual-zero noncanonical shift decomposition. This is constraint
-evidence, not yet proof-field AIR or a succinct proof. Escaping witnesses also
-derive a power-of-two proof shape with one terminal marker and deterministic
-inactive padding; invalid and non-escaping claims cannot produce proof rows.
-Fe first/pair/last constraints make activity monotone and the padding values a
-terminal-state fixed point. These constraints still need proof-field and
-low-degree enforcement. The gate checks semantics, not artifact bytes:
+including a residual-zero noncanonical shift decomposition.
+
+`field-air` is a separate Fe ingot that lifts nine local and nine transition
+residuals into BN254 Fr through the reusable modulus-branded field API. Its
+Wasm has no function imports. The independent gate checks directed residuals,
+one-unit mutations, and sign-bit rejection. It also records the remaining
+soundness boundary honestly: equality-only constraints still accept an
+out-of-range remainder decomposition and negative zero until range and
+canonical-zero constraints land.
+
+Escaping witnesses derive a power-of-two proof shape with one terminal marker
+and deterministic inactive padding; invalid and non-escaping claims cannot
+produce proof rows. Fe integer first/pair/last constraints make activity
+monotone and the padding values a terminal-state fixed point. Their proof-field
+and low-degree enforcement remain pending. This is executable constraint
+evidence, not yet a succinct proof. The gate checks semantics, not artifact
+bytes:
 
 ```console
 cargo nextest run --release --locked -p fe-codegen --test mandelbrot_bounded_claim_oracle

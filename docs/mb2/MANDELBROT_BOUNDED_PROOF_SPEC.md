@@ -1,6 +1,6 @@
 # Bounded Mandelbrot proof specification
 
-Status: v0 numeric claim and witness contract
+Status: v0 numeric claim, witness contract, and initial BN254 constraints
 
 This specification deliberately proves a bounded execution claim, not general
 Mandelbrot membership and not vague convergence.
@@ -79,16 +79,30 @@ Its `EscapeWitness`, `EscapeTraceRow`, and `EscapeAirRow` values are the current
 Fe witness surface. Scalar tuple exports exist only so independent Wasm and
 native gates can inspect the nominal values without a JSON interface.
 
-The Fe witness now exposes the expanded integer row as `EscapeAirRow`, with
+The Fe witness exposes the expanded integer row as `EscapeAirRow`, with
 `rr`, `ii`, and canonical arithmetic-shift quotient/remainder pairs alongside
 the semantic row. The independent Wasm gate checks every value, every directed
 transition, and one-unit mutations in every column. Fe now also evaluates the
 five row-local polynomial residuals over widened i64 values and verifies a
 directed pair of alleged rows. The independent gate mutates all 11 columns on
 both sides, the public point, and the bound. It also proves that residual-zero
-but noncanonical quotient/remainder pairs reject. These integer residuals have
-not yet been lifted into the proof field. Bit decomposition, signed range
-proofs, and the proof-field lift remain part of the pending AIR layer.
+but noncanonical quotient/remainder pairs reject at the integer boundary.
+
+`demos/capstones/mandelbrot-proof/field-air` is the first proof-field lift. Its
+Fe code evaluates nine row-local residuals and nine directed-transition
+residuals in BN254 Fr. Signed integers are supplied as sign-plus-magnitude and
+reconstructed as `(1 - 2s) * magnitude`; `s * (s - 1)` constrains each supplied
+sign to a bit. The local equations constrain `rr = x^2`, `ii = y^2`, their
+sum, and both Q12 shift equalities. The transition equations constrain the
+step and next coordinates. The compiled Wasm has no function imports, and the
+independent gate checks directed rows, mutations, and a non-bit sign.
+
+This slice deliberately does not claim range soundness. The same gate exhibits
+two zero-residual counterexamples: replacing `(q, r)` with `(q - 1, r + 4096)`
+still satisfies the shift equality, and sign-one magnitude-zero still denotes
+field zero. Limb/bit range decomposition and canonical positive-zero
+constraints must close both cases. Activity, terminal, and padding constraints
+also remain on the widened integer surface until their proof-field lift lands.
 
 The integer constraint evaluator rejects any alleged row whose coordinate
 magnitude exceeds 24576 before evaluating the doubled cross-product. This is
@@ -106,7 +120,7 @@ gate checks every row and encoding in directed traces, counts exactly one
 terminal marker, and separately derives both lengths. These are canonical
 witness-shape semantics.
 
-The Fe integer constraint surface now also checks the first row, every padded
+The Fe integer constraint surface also checks the first row, every padded
 pair, and the final row. Activity is monotone. An active nonterminal row must
 take the Mandelbrot transition to another active row. The unique active
 terminal row must transition to inactive padding when another row exists, and
@@ -131,17 +145,17 @@ that encoding. The independent Wasm gate checks both against separately
 derived encoders for every directed and padded row. This is an encoding gate
 only. It is not a trace hash or a commitment.
 
-The reusable field substrate is now the modulus-branded
+The reusable field substrate is the modulus-branded
 `precision::field::FieldElement<L, M>` over array-native 13-bit limbs. It has
 independently checked addition, subtraction, negation, multiplication, `pow5`,
 signed/unsigned embedding, and Montgomery conversion on a second modulus,
-while BN254 multiplication remains bit-identical to both prior kernels. This
-API executes on Wasm. Its honest SPIR-V gate currently fails
-closed on the retained array-returning `mul_words` call, so aggregate-return
-inlining or shader function-call lowering is required before it replaces the
-call-free generated GPU kernel. Poseidon constants and the permutation still
-need to be lifted from the proven generated fixture before a trace root can be
-claimed.
+while BN254 multiplication remains bit-identical to both prior kernels. The
+field-AIR ingot now consumes this API directly on Wasm. Its honest SPIR-V gate
+currently fails closed on the retained array-returning `mul_words` call, so
+aggregate-return inlining or shader function-call lowering is required before
+it replaces the call-free generated GPU kernel. Poseidon constants and the
+permutation still need to be lifted from the proven generated fixture before a
+trace root can be claimed.
 
 The intended succinct construction is a transparent AIR plus FRI over a field
 with an audited two-adic domain. The first implementation should reuse the

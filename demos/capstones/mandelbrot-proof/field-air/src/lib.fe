@@ -1,0 +1,130 @@
+//! BN254 evaluation of the bounded Mandelbrot AIR polynomials.
+//!
+//! This is the proof-field lift of the integer residuals in `../kernel.fe`.
+//! It consumes the canonical sign-plus-magnitude columns, reconstructs signed
+//! field values algebraically as `(1 - 2s) * magnitude`, constrains every sign
+//! with `s * (s - 1)`, and evaluates the row and transition equalities in
+//! BN254 Fr. Range decomposition, terminal-threshold comparison, composition,
+//! and low-degree testing remain separate proof layers.
+
+use precision::bn254_fr::Bn254Fr
+use precision::field::FieldElement
+
+type Fr = FieldElement<20, Bn254Fr>
+
+fn field_is_zero(_ value: Fr) -> bool {
+    let words = value.to_montgomery_words()
+    let mut i: u32 = 0
+    while i < 20 {
+        if words[i as usize] != 0 { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn bit_residual(_ word: Fr) -> Fr {
+    word * (word - Fr::one())
+}
+
+fn signed_value(_ sign: Fr, _ magnitude: Fr) -> Fr {
+    magnitude - sign * magnitude * Fr::from_u32(2)
+}
+
+fn residual_mask<const N: usize>(_ residuals: [Fr; N]) -> u32 {
+    let mut mask: u32 = 0
+    let mut i: u32 = 0
+    let count: u32 = N.downcast_truncate()
+    while i < count {
+        if !field_is_zero(residuals[i as usize]) { mask = mask | (1 << i) }
+        i = i + 1
+    }
+    mask
+}
+
+/// Evaluate the five local Mandelbrot equalities and the four sign-bit
+/// polynomials. Bit `i` is one exactly when residual `i` is nonzero:
+/// `(x_sign, y_sign, q_re_sign, q_im_sign, x^2, y^2, magnitude,
+/// real_shift, imaginary_shift)`.
+pub fn mandelbrot_bn254_local_residual_mask(
+    zr_sign: u32,
+    zr_magnitude: u32,
+    zi_sign: u32,
+    zi_magnitude: u32,
+    rr: u32,
+    ii: u32,
+    magnitude: u32,
+    q_re_sign: u32,
+    q_re_magnitude: u32,
+    r_re: u32,
+    q_im_sign: u32,
+    q_im_magnitude: u32,
+    r_im: u32,
+) -> u32 {
+    let sx = Fr::from_u32(zr_sign)
+    let sy = Fr::from_u32(zi_sign)
+    let sqr = Fr::from_u32(q_re_sign)
+    let sqi = Fr::from_u32(q_im_sign)
+    let x = signed_value(sx, Fr::from_u32(zr_magnitude))
+    let y = signed_value(sy, Fr::from_u32(zi_magnitude))
+    let qre = signed_value(sqr, Fr::from_u32(q_re_magnitude))
+    let qim = signed_value(sqi, Fr::from_u32(q_im_magnitude))
+    let rr_field = Fr::from_u32(rr)
+    let ii_field = Fr::from_u32(ii)
+    let magnitude_field = Fr::from_u32(magnitude)
+    let scale = Fr::from_u32(4096)
+    residual_mask<9>([
+        bit_residual(sx),
+        bit_residual(sy),
+        bit_residual(sqr),
+        bit_residual(sqi),
+        rr_field - x.square(),
+        ii_field - y.square(),
+        magnitude_field - rr_field - ii_field,
+        rr_field - ii_field - scale * qre - Fr::from_u32(r_re),
+        Fr::from_u32(2) * x * y - scale * qim - Fr::from_u32(r_im),
+    ])
+}
+
+/// Evaluate the directed-row equalities plus the six sign-bit polynomials.
+/// Residual order is `(c_re_sign, c_im_sign, q_re_sign, q_im_sign,
+/// next_x_sign, next_y_sign, step, next_x, next_y)`.
+pub fn mandelbrot_bn254_transition_residual_mask(
+    c_re_sign: u32,
+    c_re_magnitude: u32,
+    c_im_sign: u32,
+    c_im_magnitude: u32,
+    step: u32,
+    q_re_sign: u32,
+    q_re_magnitude: u32,
+    q_im_sign: u32,
+    q_im_magnitude: u32,
+    next_step: u32,
+    next_zr_sign: u32,
+    next_zr_magnitude: u32,
+    next_zi_sign: u32,
+    next_zi_magnitude: u32,
+) -> u32 {
+    let scx = Fr::from_u32(c_re_sign)
+    let scy = Fr::from_u32(c_im_sign)
+    let sqr = Fr::from_u32(q_re_sign)
+    let sqi = Fr::from_u32(q_im_sign)
+    let snx = Fr::from_u32(next_zr_sign)
+    let sny = Fr::from_u32(next_zi_sign)
+    let cx = signed_value(scx, Fr::from_u32(c_re_magnitude))
+    let cy = signed_value(scy, Fr::from_u32(c_im_magnitude))
+    let qre = signed_value(sqr, Fr::from_u32(q_re_magnitude))
+    let qim = signed_value(sqi, Fr::from_u32(q_im_magnitude))
+    let next_x = signed_value(snx, Fr::from_u32(next_zr_magnitude))
+    let next_y = signed_value(sny, Fr::from_u32(next_zi_magnitude))
+    residual_mask<9>([
+        bit_residual(scx),
+        bit_residual(scy),
+        bit_residual(sqr),
+        bit_residual(sqi),
+        bit_residual(snx),
+        bit_residual(sny),
+        Fr::from_u32(next_step) - Fr::from_u32(step) - Fr::one(),
+        next_x - qre - cx,
+        next_y - qim - cy,
+    ])
+}

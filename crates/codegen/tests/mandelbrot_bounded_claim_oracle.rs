@@ -7,6 +7,8 @@
 use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{BackendKind, OptLevel, layout_for};
+use hir::hir_def::HirIngot;
+use std::path::Path;
 use url::Url;
 use wasmtime::Val;
 
@@ -269,6 +271,51 @@ fn compile() -> Vec<u8> {
     bytes
 }
 
+fn compile_field_air() -> Vec<u8> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../demos/capstones/mandelbrot-proof/field-air");
+    let url = Url::from_directory_path(path.canonicalize().unwrap()).unwrap();
+    let mut db = DriverDataBase::default();
+    assert!(
+        !driver::init_ingot(&mut db, &url),
+        "Mandelbrot BN254 AIR ingot initialization diagnostics"
+    );
+    let ingot = db
+        .workspace()
+        .containing_ingot(&db, url)
+        .expect("Mandelbrot BN254 AIR ingot");
+    let top_mod = ingot.root_mod(&db);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "Mandelbrot BN254 AIR diagnostics:\n{diagnostics}"
+    );
+    let bytes = BackendKind::Wasm
+        .create()
+        .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
+        .expect("Mandelbrot BN254 AIR should compile to Wasm")
+        .into_bytecode()
+        .expect("Wasm backend should emit bytes");
+    wasmparser::validate(&bytes).expect("Mandelbrot BN254 AIR Wasm should validate");
+    bytes
+}
+
+fn function_imports(bytes: &[u8]) -> Vec<(String, String)> {
+    use wasmparser::{Payload, TypeRef};
+    let mut imports = Vec::new();
+    for payload in wasmparser::Parser::new(0).parse_all(bytes) {
+        if let Payload::ImportSection(reader) = payload.expect("valid Wasm payload") {
+            for import in reader.into_imports() {
+                let import = import.expect("valid import entry");
+                if let TypeRef::Func(_) = import.ty {
+                    imports.push((import.module.to_string(), import.name.to_string()));
+                }
+            }
+        }
+    }
+    imports
+}
+
 fn call_words(
     store: &mut wasmtime::Store<()>,
     instance: &wasmtime::Instance,
@@ -291,6 +338,77 @@ fn call_words(
             other => panic!("{name} result must be i32, got {other:?}"),
         })
         .collect()
+}
+
+fn call_mask(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    name: &str,
+    args: &[i32],
+) -> u32 {
+    let function = instance
+        .get_func(&mut *store, name)
+        .unwrap_or_else(|| panic!("{name} export should exist"));
+    let params = args.iter().copied().map(Val::I32).collect::<Vec<_>>();
+    let mut results = [Val::I32(0)];
+    function
+        .call(&mut *store, &params, &mut results)
+        .unwrap_or_else(|error| panic!("{name} should execute: {error:?}"));
+    match results[0] {
+        Val::I32(word) => word as u32,
+        ref other => panic!("{name} result must be i32, got {other:?}"),
+    }
+}
+
+fn sign_magnitude(value: i32) -> [i32; 2] {
+    [i32::from(value < 0), value.unsigned_abs() as i32]
+}
+
+fn field_local_args(row: AirRow) -> [i32; 13] {
+    let zr = sign_magnitude(row.row.zr);
+    let zi = sign_magnitude(row.row.zi);
+    let q_re = sign_magnitude(row.q_re);
+    let q_im = sign_magnitude(row.q_im);
+    [
+        zr[0],
+        zr[1],
+        zi[0],
+        zi[1],
+        row.rr,
+        row.ii,
+        row.row.magnitude,
+        q_re[0],
+        q_re[1],
+        row.r_re,
+        q_im[0],
+        q_im[1],
+        row.r_im,
+    ]
+}
+
+fn field_transition_args(c_re: i32, c_im: i32, row: AirRow, next: AirRow) -> [i32; 14] {
+    let c_re = sign_magnitude(c_re);
+    let c_im = sign_magnitude(c_im);
+    let q_re = sign_magnitude(row.q_re);
+    let q_im = sign_magnitude(row.q_im);
+    let next_zr = sign_magnitude(next.row.zr);
+    let next_zi = sign_magnitude(next.row.zi);
+    [
+        c_re[0],
+        c_re[1],
+        c_im[0],
+        c_im[1],
+        row.row.step as i32,
+        q_re[0],
+        q_re[1],
+        q_im[0],
+        q_im[1],
+        next.row.step as i32,
+        next_zr[0],
+        next_zr[1],
+        next_zi[0],
+        next_zi[1],
+    ]
 }
 
 fn wasm_witness(
@@ -1125,4 +1243,180 @@ fn fe_bounded_escape_witness_matches_independent_i64_model() {
             "padding fixed point must reject AIR mutation {column}"
         );
     }
+}
+
+#[test]
+fn mandelbrot_residual_polynomials_execute_in_bn254_without_host_shims() {
+    let bytes = compile_field_air();
+    assert_eq!(
+        function_imports(&bytes),
+        Vec::<(String, String)>::new(),
+        "BN254 AIR evaluation must be self-contained Fe/Wasm"
+    );
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, bytes).expect("load BN254 AIR Wasm");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance =
+        wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate BN254 AIR Wasm");
+
+    let local_export = "mandelbrot_bn254_local_residual_mask";
+    let transition_export = "mandelbrot_bn254_transition_residual_mask";
+    for (c_re, c_im, bound) in [(-8192, -6144, 100), (4095, 4095, 2), (-3048, 2216, 255)] {
+        let rows = reference_rows(c_re, c_im, bound);
+        let mut selected = vec![0usize, rows.len() - 1];
+        if rows.len() > 2 {
+            selected.push(1);
+            selected.push(rows.len() / 2);
+        }
+        selected.sort_unstable();
+        selected.dedup();
+        for index in selected {
+            let row = rows[index];
+            let air = reference_air_row(row.step, row.zr, row.zi);
+            assert_eq!(
+                call_mask(&mut store, &instance, local_export, &field_local_args(air),),
+                0,
+                "BN254 local residuals ({c_re}, {c_im}) Z_{}",
+                row.step
+            );
+            if index + 1 < rows.len() {
+                let next = rows[index + 1];
+                let next_air = reference_air_row(next.step, next.zr, next.zi);
+                assert_eq!(
+                    call_mask(
+                        &mut store,
+                        &instance,
+                        transition_export,
+                        &field_transition_args(c_re, c_im, air, next_air),
+                    ),
+                    0,
+                    "BN254 transition residuals ({c_re}, {c_im}) Z_{}",
+                    row.step
+                );
+            }
+        }
+    }
+
+    let rows = reference_rows(-3048, 2216, 255);
+    let base = reference_air_row(rows[0].step, rows[0].zr, rows[0].zi);
+    let next = reference_air_row(rows[1].step, rows[1].zr, rows[1].zi);
+    for (column, mutation) in one_unit_mutations(base).into_iter().enumerate() {
+        if (1..=9).contains(&column) {
+            assert_ne!(
+                call_mask(
+                    &mut store,
+                    &instance,
+                    local_export,
+                    &field_local_args(mutation),
+                ),
+                0,
+                "BN254 local residuals must reject AIR mutation {column}"
+            );
+        }
+    }
+
+    for (label, mutated_c_re, mutated_c_im, mutated_row, mutated_next) in [
+        ("c_re", -3047, 2216, base, next),
+        ("c_im", -3048, 2217, base, next),
+        (
+            "q_re",
+            -3048,
+            2216,
+            AirRow {
+                q_re: base.q_re + 1,
+                ..base
+            },
+            next,
+        ),
+        (
+            "q_im",
+            -3048,
+            2216,
+            AirRow {
+                q_im: base.q_im + 1,
+                ..base
+            },
+            next,
+        ),
+        (
+            "next_step",
+            -3048,
+            2216,
+            base,
+            AirRow {
+                row: Row {
+                    step: next.row.step + 1,
+                    ..next.row
+                },
+                ..next
+            },
+        ),
+        (
+            "next_zr",
+            -3048,
+            2216,
+            base,
+            AirRow {
+                row: Row {
+                    zr: next.row.zr + 1,
+                    ..next.row
+                },
+                ..next
+            },
+        ),
+        (
+            "next_zi",
+            -3048,
+            2216,
+            base,
+            AirRow {
+                row: Row {
+                    zi: next.row.zi + 1,
+                    ..next.row
+                },
+                ..next
+            },
+        ),
+    ] {
+        assert_ne!(
+            call_mask(
+                &mut store,
+                &instance,
+                transition_export,
+                &field_transition_args(mutated_c_re, mutated_c_im, mutated_row, mutated_next),
+            ),
+            0,
+            "BN254 transition residuals must reject {label} mutation"
+        );
+    }
+
+    let mut non_bit_sign = field_local_args(base);
+    non_bit_sign[0] = 2;
+    assert_ne!(
+        call_mask(&mut store, &instance, local_export, &non_bit_sign,) & 1,
+        0,
+        "the x sign polynomial must reject a non-bit"
+    );
+
+    let mut noncanonical_shift = base;
+    noncanonical_shift.q_re -= 1;
+    noncanonical_shift.r_re += 4096;
+    assert_eq!(
+        call_mask(
+            &mut store,
+            &instance,
+            local_export,
+            &field_local_args(noncanonical_shift),
+        ),
+        0,
+        "equalities alone cannot reject a residual-zero out-of-range remainder"
+    );
+
+    let mut negative_zero = field_local_args(base);
+    negative_zero[0] = 1;
+    assert_eq!(
+        call_mask(&mut store, &instance, local_export, &negative_zero,),
+        0,
+        "canonical-zero enforcement still requires the pending range/encoding columns"
+    );
 }
