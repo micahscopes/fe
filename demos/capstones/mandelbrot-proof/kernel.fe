@@ -9,6 +9,7 @@ pub const Q12_SCALE: i32 = 4096
 pub const ESCAPE_RADIUS_SQUARED_Q24: i32 = 67108864
 pub const NO_ESCAPE_STEP: u32 = 4294967295
 pub const MAX_CLAIM_BOUND: u32 = 1048576
+pub const MAX_TRACE_COORDINATE_MAGNITUDE: u32 = 24576
 
 pub struct ComplexQ12 { pub re: i32, pub im: i32 }
 
@@ -46,6 +47,25 @@ pub struct EscapeAirRow {
 
 impl Copy for EscapeAirRow {}
 
+/// Canonical encoding of one signed i32 for later field absorption. Zero has
+/// sign bit zero, so every integer has exactly one encoding.
+pub struct SignedMagnitude32 { pub negative: bool, pub magnitude: u32 }
+
+impl Copy for SignedMagnitude32 {}
+
+/// Row-local polynomial residuals, evaluated over widened integers before the
+/// same relations are lifted into a proof field. A valid row makes all five
+/// values zero. Range and boolean relations remain separate checks.
+pub struct EscapeAirResiduals {
+    pub real_square: i64,
+    pub imaginary_square: i64,
+    pub magnitude_sum: i64,
+    pub real_shift: i64,
+    pub imaginary_shift: i64,
+}
+
+impl Copy for EscapeAirResiduals {}
+
 pub struct EscapeWitness { pub valid_claim: bool, pub escaped: bool, pub row: EscapeTraceRow }
 
 impl Copy for EscapeWitness {}
@@ -57,6 +77,101 @@ fn square(_ value: i32) -> i32 {
 fn decompose_q12(_ numerator: i32) -> ShiftQ12 {
     let quotient = numerator >> 12
     ShiftQ12 { quotient: quotient, remainder: numerator - quotient * Q12_SCALE }
+}
+
+fn signed_magnitude(_ value: i32) -> SignedMagnitude32 {
+    SignedMagnitude32 { negative: value < 0, magnitude: value.unsigned_abs() }
+}
+
+fn air_residuals(_ row: EscapeAirRow) -> EscapeAirResiduals {
+    let x: i64 = row.semantic.z.re.downcast_truncate()
+    let y: i64 = row.semantic.z.im.downcast_truncate()
+    let rr: i64 = row.rr.downcast_truncate()
+    let ii: i64 = row.ii.downcast_truncate()
+    let magnitude: i64 = row.semantic.magnitude_squared_q24.downcast_truncate()
+    let q_re: i64 = row.real_shift.quotient.downcast_truncate()
+    let r_re: i64 = row.real_shift.remainder.downcast_truncate()
+    let q_im: i64 = row.imaginary_shift.quotient.downcast_truncate()
+    let r_im: i64 = row.imaginary_shift.remainder.downcast_truncate()
+    let scale: i64 = Q12_SCALE.downcast_truncate()
+    EscapeAirResiduals {
+        real_square: rr - x * x,
+        imaginary_square: ii - y * y,
+        magnitude_sum: magnitude - rr - ii,
+        real_shift: rr - ii - scale * q_re - r_re,
+        imaginary_shift: 2 * x * y - scale * q_im - r_im,
+    }
+}
+
+fn residuals_are_zero(_ residuals: EscapeAirResiduals) -> bool {
+    residuals.real_square == 0
+        && residuals.imaginary_square == 0
+        && residuals.magnitude_sum == 0
+        && residuals.real_shift == 0
+        && residuals.imaginary_shift == 0
+}
+
+fn coordinates_are_arithmetic_safe(_ row: EscapeAirRow) -> bool {
+    row.semantic.z.re.unsigned_abs() <= MAX_TRACE_COORDINATE_MAGNITUDE
+        && row.semantic.z.im.unsigned_abs() <= MAX_TRACE_COORDINATE_MAGNITUDE
+}
+
+fn air_row_holds(_ row: EscapeAirRow) -> bool {
+    if !coordinates_are_arithmetic_safe(row) { return false }
+    let remainders_are_canonical = row.real_shift.remainder >= 0
+        && row.real_shift.remainder < Q12_SCALE
+        && row.imaginary_shift.remainder >= 0
+        && row.imaginary_shift.remainder < Q12_SCALE
+    let derived_values_are_nonnegative = row.rr >= 0
+        && row.ii >= 0
+        && row.semantic.magnitude_squared_q24 >= 0
+    residuals_are_zero(air_residuals(row))
+        && remainders_are_canonical
+        && derived_values_are_nonnegative
+        && row.semantic.terminal
+            == (row.semantic.magnitude_squared_q24 >= ESCAPE_RADIUS_SQUARED_Q24)
+}
+
+fn air_transition_holds(
+    _ claim: EscapesByQ12,
+    _ row: EscapeAirRow,
+    _ next: EscapeAirRow,
+) -> bool {
+    claim.is_valid()
+        && row.semantic.step < claim.bound
+        && !row.semantic.terminal
+        && air_row_holds(row)
+        && air_row_holds(next)
+        && next.semantic.step == row.semantic.step + 1
+        && next.semantic.z.re == row.real_shift.quotient + claim.c.re
+        && next.semantic.z.im == row.imaginary_shift.quotient + claim.c.im
+}
+
+fn projected_air_row(
+    _ step: u32,
+    _ zr: i32,
+    _ zi: i32,
+    _ rr: i32,
+    _ ii: i32,
+    _ magnitude: i32,
+    _ q_re: i32,
+    _ r_re: i32,
+    _ q_im: i32,
+    _ r_im: i32,
+    _ terminal: bool,
+) -> EscapeAirRow {
+    EscapeAirRow {
+        semantic: EscapeTraceRow {
+            step: step,
+            z: ComplexQ12 { re: zr, im: zi },
+            magnitude_squared_q24: magnitude,
+            terminal: terminal,
+        },
+        rr: rr,
+        ii: ii,
+        real_shift: ShiftQ12 { quotient: q_re, remainder: r_re },
+        imaginary_shift: ShiftQ12 { quotient: q_im, remainder: r_im },
+    }
 }
 
 fn air_row(_ step: u32, _ z: ComplexQ12) -> EscapeAirRow {
@@ -226,4 +341,161 @@ pub fn escape_air_row_q12(_ c_re_q12: i32, _ c_im_q12: i32, _ target: u32) -> (
         row.imaginary_shift.remainder,
         if row.semantic.terminal { 1 } else { 0 },
     )
+}
+
+/// Canonical row encoding for commitment leaves. Signed columns are encoded
+/// as `(negative, magnitude)` and zero always has `negative = 0`. The order is
+/// `(step, zr_sign, zr_mag, zi_sign, zi_mag, rr, ii, magnitude, q_re_sign,
+/// q_re_mag, r_re, q_im_sign, q_im_mag, r_im, terminal)`.
+pub fn escape_air_row_encoding_q12(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ target: u32,
+) -> (
+    u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32,
+) {
+    let row = EscapesByQ12::new(c_re_q12, c_im_q12, target).air_row_at(target)
+    let zr = signed_magnitude(row.semantic.z.re)
+    let zi = signed_magnitude(row.semantic.z.im)
+    let q_re = signed_magnitude(row.real_shift.quotient)
+    let q_im = signed_magnitude(row.imaginary_shift.quotient)
+    (
+        row.semantic.step,
+        if zr.negative { 1 } else { 0 }, zr.magnitude,
+        if zi.negative { 1 } else { 0 }, zi.magnitude,
+        row.rr.downcast_unchecked(),
+        row.ii.downcast_unchecked(),
+        row.semantic.magnitude_squared_q24.downcast_unchecked(),
+        if q_re.negative { 1 } else { 0 }, q_re.magnitude,
+        row.real_shift.remainder.downcast_unchecked(),
+        if q_im.negative { 1 } else { 0 }, q_im.magnitude,
+        row.imaginary_shift.remainder.downcast_unchecked(),
+        if row.semantic.terminal { 1 } else { 0 },
+    )
+}
+
+/// Inspect the five row-local polynomial residuals plus the four non-
+/// polynomial validity relations. The scalar boundary exists for independent
+/// Wasm gates; the constraint implementation consumes nominal Fe values.
+pub fn escape_air_residuals_q12(
+    _ step: u32,
+    _ zr: i32,
+    _ zi: i32,
+    _ rr: i32,
+    _ ii: i32,
+    _ magnitude: i32,
+    _ q_re: i32,
+    _ r_re: i32,
+    _ q_im: i32,
+    _ r_im: i32,
+    _ terminal: u32,
+) -> (i64, i64, i64, i64, i64, u32, u32, u32, u32) {
+    let row = projected_air_row(
+        step: step,
+        zr: zr,
+        zi: zi,
+        rr: rr,
+        ii: ii,
+        magnitude: magnitude,
+        q_re: q_re,
+        r_re: r_re,
+        q_im: q_im,
+        r_im: r_im,
+        terminal: terminal == 1,
+    )
+    let safe_coordinates = coordinates_are_arithmetic_safe(row)
+    let residuals = if safe_coordinates {
+        air_residuals(row)
+    } else {
+        EscapeAirResiduals {
+            real_square: 1,
+            imaginary_square: 1,
+            magnitude_sum: 1,
+            real_shift: 1,
+            imaginary_shift: 1,
+        }
+    }
+    let canonical_remainders = row.real_shift.remainder >= 0
+        && row.real_shift.remainder < Q12_SCALE
+        && row.imaginary_shift.remainder >= 0
+        && row.imaginary_shift.remainder < Q12_SCALE
+    let nonnegative_derived = row.rr >= 0
+        && row.ii >= 0
+        && row.semantic.magnitude_squared_q24 >= 0
+    let canonical_terminal = terminal <= 1
+        && row.semantic.terminal
+            == (row.semantic.magnitude_squared_q24 >= ESCAPE_RADIUS_SQUARED_Q24)
+    (
+        residuals.real_square,
+        residuals.imaginary_square,
+        residuals.magnitude_sum,
+        residuals.real_shift,
+        residuals.imaginary_shift,
+        if canonical_remainders { 1 } else { 0 },
+        if nonnegative_derived { 1 } else { 0 },
+        if canonical_terminal { 1 } else { 0 },
+        if safe_coordinates { 1 } else { 0 },
+    )
+}
+
+/// Verify one directed pair of alleged AIR rows using the Fe-authored
+/// constraints. The independent gate mutates every scalar lane and requires
+/// rejection. This is constraint evidence, not yet a field AIR or a proof.
+pub fn escape_air_pair_holds_q12(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ bound: u32,
+    _ row_step: u32,
+    _ row_zr: i32,
+    _ row_zi: i32,
+    _ row_rr: i32,
+    _ row_ii: i32,
+    _ row_magnitude: i32,
+    _ row_q_re: i32,
+    _ row_r_re: i32,
+    _ row_q_im: i32,
+    _ row_r_im: i32,
+    _ row_terminal: u32,
+    _ next_step: u32,
+    _ next_zr: i32,
+    _ next_zi: i32,
+    _ next_rr: i32,
+    _ next_ii: i32,
+    _ next_magnitude: i32,
+    _ next_q_re: i32,
+    _ next_r_re: i32,
+    _ next_q_im: i32,
+    _ next_r_im: i32,
+    _ next_terminal: u32,
+) -> u32 {
+    if row_terminal > 1 || next_terminal > 1 { return 0 }
+    let claim = EscapesByQ12::new(c_re_q12, c_im_q12, bound)
+    let row = projected_air_row(
+        step: row_step,
+        zr: row_zr,
+        zi: row_zi,
+        rr: row_rr,
+        ii: row_ii,
+        magnitude: row_magnitude,
+        q_re: row_q_re,
+        r_re: row_r_re,
+        q_im: row_q_im,
+        r_im: row_r_im,
+        terminal: row_terminal == 1,
+    )
+    let next = projected_air_row(
+        step: next_step,
+        zr: next_zr,
+        zi: next_zi,
+        rr: next_rr,
+        ii: next_ii,
+        magnitude: next_magnitude,
+        q_re: next_q_re,
+        r_re: next_r_re,
+        q_im: next_q_im,
+        r_im: next_r_im,
+        terminal: next_terminal == 1,
+    )
+    if air_transition_holds(claim, row, next) { 1 } else { 0 }
 }

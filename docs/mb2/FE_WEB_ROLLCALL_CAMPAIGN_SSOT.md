@@ -180,14 +180,17 @@ Legend:
 - [~] Fe now generates nominal `EscapeWitness`, `EscapeTraceRow`, and expanded
   `EscapeAirRow` values. Compiled Wasm matches an independent i64 replay across
   directed, invalid, and 512 deterministic cases. Every signed Q12
-  quotient/remainder and directed transition is checked, and one-unit
-  mutations in all 11 expanded columns reject. Field-polynomial constraints,
-  signed range proofs, activity/padding, and the domain-separated Poseidon
-  trace commitment are still pending. The reusable modulus-branded array field
-  layer needed to replace the monolithic generated Poseidon fixture now
-  executes on Wasm, but its SPIR-V helper-call seam and the permutation lift
-  remain open. No trace root is claimed yet. This remains witness evidence
-  rather than a proof.
+  quotient/remainder and directed transition is checked. Fe evaluates five
+  widened integer polynomial residuals, emits a canonical 15-word
+  sign-plus-magnitude row encoding, and verifies alleged directed row pairs.
+  The gate mutates all 11 columns on both sides, the public point, and the
+  bound, and rejects residual-zero noncanonical shift decompositions. The
+  residuals are not yet proof-field constraints. Signed bit/range proofs,
+  activity/padding, and the domain-separated Poseidon trace commitment remain
+  pending. The reusable modulus-branded array field layer executes on Wasm,
+  but its SPIR-V helper-call seam and the permutation lift remain open. No
+  trace root is claimed yet. This remains constraint evidence rather than a
+  proof.
 - [ ] Produce a succinct proof whose verifier is demonstrably cheaper than
   replaying the orbit.
 - [ ] Define a typed proof encoding and prove browser/native verifier parity,

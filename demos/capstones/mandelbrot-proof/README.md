@@ -8,7 +8,12 @@ succinct proof.
 expanded integer columns needed by the first AIR. The independent Rust oracle
 executes the compiled Fe Wasm, compares every row value and signed Q12
 quotient/remainder against an i64 model, and rejects one-unit mutations in
-every expanded column. It checks semantics, not artifact bytes:
+every expanded column. Fe also emits the canonical sign-plus-magnitude row
+encoding, evaluates widened integer polynomial residuals, and verifies an
+alleged directed row pair. The gate mutates both rows and public claim values,
+including a residual-zero noncanonical shift decomposition. This is constraint
+evidence, not yet proof-field AIR or a succinct proof. It checks semantics, not
+artifact bytes:
 
 ```console
 cargo nextest run --release --locked -p fe-codegen --test mandelbrot_bounded_claim_oracle

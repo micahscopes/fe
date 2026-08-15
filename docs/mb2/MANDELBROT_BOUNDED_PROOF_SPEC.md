@@ -82,10 +82,20 @@ native gates can inspect the nominal values without a JSON interface.
 The Fe witness now exposes the expanded integer row as `EscapeAirRow`, with
 `rr`, `ii`, and canonical arithmetic-shift quotient/remainder pairs alongside
 the semantic row. The independent Wasm gate checks every value, every directed
-transition, and one-unit mutations in every column. Converting these integer
-relations into field-polynomial constraints, including signed range proofs,
-activity, terminal uniqueness, and padding, remains part of the pending AIR
-layer.
+transition, and one-unit mutations in every column. Fe now also evaluates the
+five row-local polynomial residuals over widened i64 values and verifies a
+directed pair of alleged rows. The independent gate mutates all 11 columns on
+both sides, the public point, and the bound. It also proves that residual-zero
+but noncanonical quotient/remainder pairs reject. These integer residuals have
+not yet been lifted into the proof field. Bit decomposition, signed range
+proofs, activity, terminal uniqueness, and padding remain part of the pending
+AIR layer.
+
+The integer constraint evaluator rejects any alleged row whose coordinate
+magnitude exceeds 24576 before evaluating the doubled cross-product. This is
+the conservative envelope induced by one transition from an in-radius row and
+the canonical public-point domain. The gate includes `i32::MIN` adversarial
+coordinates, so widened host arithmetic is not an implicit trust assumption.
 
 ## Commitment and proof direction
 
@@ -94,6 +104,12 @@ canonical row encodings. Signed integers are encoded as a sign bit plus bounded
 magnitude, not by silently treating a negative i32 as an unconstrained field
 element. Claim, numeric-model version, padded trace length, and terminal row
 are transcript inputs.
+
+`escape_air_row_encoding_q12` now materializes that canonical row encoding in
+Fe. It gives zero only the positive sign and emits a fixed 15-word order. The
+independent Wasm gate checks it against a separately derived encoder for every
+directed row. This is an encoding gate only. It is not a trace hash or a
+commitment.
 
 The reusable field substrate is now the modulus-branded
 `precision::field::FieldElement<L, M>` over array-native 13-bit limbs. It has

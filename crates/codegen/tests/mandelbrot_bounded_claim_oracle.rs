@@ -100,6 +100,70 @@ fn transition_holds(c_re: i32, c_im: i32, row: AirRow, next: AirRow) -> bool {
         && next.row.zi == row.q_im + c_im
 }
 
+fn one_unit_mutations(base: AirRow) -> [AirRow; 11] {
+    [
+        AirRow {
+            row: Row {
+                step: base.row.step + 1,
+                ..base.row
+            },
+            ..base
+        },
+        AirRow {
+            row: Row {
+                zr: base.row.zr + 1,
+                ..base.row
+            },
+            ..base
+        },
+        AirRow {
+            row: Row {
+                zi: base.row.zi + 1,
+                ..base.row
+            },
+            ..base
+        },
+        AirRow {
+            rr: base.rr + 1,
+            ..base
+        },
+        AirRow {
+            ii: base.ii + 1,
+            ..base
+        },
+        AirRow {
+            row: Row {
+                magnitude: base.row.magnitude + 1,
+                ..base.row
+            },
+            ..base
+        },
+        AirRow {
+            q_re: base.q_re + 1,
+            ..base
+        },
+        AirRow {
+            r_re: base.r_re + 1,
+            ..base
+        },
+        AirRow {
+            q_im: base.q_im + 1,
+            ..base
+        },
+        AirRow {
+            r_im: base.r_im + 1,
+            ..base
+        },
+        AirRow {
+            row: Row {
+                terminal: !base.row.terminal,
+                ..base.row
+            },
+            ..base
+        },
+    ]
+}
+
 fn reference_rows(c_re: i32, c_im: i32, bound: u32) -> Vec<Row> {
     assert!(valid_claim(c_re, c_im, bound));
     let mut rows = Vec::new();
@@ -174,13 +238,13 @@ fn call_words(
     store: &mut wasmtime::Store<()>,
     instance: &wasmtime::Instance,
     name: &str,
-    args: [i32; 3],
+    args: &[i32],
     result_count: usize,
 ) -> Vec<i32> {
     let function = instance
         .get_func(&mut *store, name)
         .unwrap_or_else(|| panic!("{name} export should exist"));
-    let params = args.into_iter().map(Val::I32).collect::<Vec<_>>();
+    let params = args.iter().copied().map(Val::I32).collect::<Vec<_>>();
     let mut results = vec![Val::I32(0); result_count];
     function
         .call(&mut *store, &params, &mut results)
@@ -205,7 +269,7 @@ fn wasm_witness(
         store,
         instance,
         "escape_witness_q12",
-        [c_re, c_im, bound as i32],
+        &[c_re, c_im, bound as i32],
         6,
     );
     Witness {
@@ -232,7 +296,7 @@ fn wasm_row(
         store,
         instance,
         "escape_trace_row_q12",
-        [c_re, c_im, target as i32],
+        &[c_re, c_im, target as i32],
         5,
     );
     Row {
@@ -255,7 +319,7 @@ fn wasm_air_row(
         store,
         instance,
         "escape_air_row_q12",
-        [c_re, c_im, target as i32],
+        &[c_re, c_im, target as i32],
         11,
     );
     AirRow {
@@ -273,6 +337,117 @@ fn wasm_air_row(
         q_im: words[8],
         r_im: words[9],
     }
+}
+
+fn air_row_words(row: AirRow) -> [i32; 11] {
+    [
+        row.row.step as i32,
+        row.row.zr,
+        row.row.zi,
+        row.rr,
+        row.ii,
+        row.row.magnitude,
+        row.q_re,
+        row.r_re,
+        row.q_im,
+        row.r_im,
+        i32::from(row.row.terminal),
+    ]
+}
+
+fn reference_encoding(row: AirRow) -> Vec<i32> {
+    fn signed(value: i32) -> [i32; 2] {
+        [i32::from(value < 0), value.unsigned_abs() as i32]
+    }
+    let zr = signed(row.row.zr);
+    let zi = signed(row.row.zi);
+    let q_re = signed(row.q_re);
+    let q_im = signed(row.q_im);
+    vec![
+        row.row.step as i32,
+        zr[0],
+        zr[1],
+        zi[0],
+        zi[1],
+        row.rr,
+        row.ii,
+        row.row.magnitude,
+        q_re[0],
+        q_re[1],
+        row.r_re,
+        q_im[0],
+        q_im[1],
+        row.r_im,
+        i32::from(row.row.terminal),
+    ]
+}
+
+fn wasm_encoding(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    c_re: i32,
+    c_im: i32,
+    target: u32,
+) -> Vec<i32> {
+    call_words(
+        store,
+        instance,
+        "escape_air_row_encoding_q12",
+        &[c_re, c_im, target as i32],
+        15,
+    )
+}
+
+fn wasm_residuals(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    row: AirRow,
+    terminal_word: i32,
+) -> ([i64; 5], [i32; 4]) {
+    let mut args = air_row_words(row);
+    args[10] = terminal_word;
+    let function = instance
+        .get_func(&mut *store, "escape_air_residuals_q12")
+        .expect("escape_air_residuals_q12 export should exist");
+    let params = args.into_iter().map(Val::I32).collect::<Vec<_>>();
+    let mut results = vec![
+        Val::I64(0),
+        Val::I64(0),
+        Val::I64(0),
+        Val::I64(0),
+        Val::I64(0),
+        Val::I32(0),
+        Val::I32(0),
+        Val::I32(0),
+        Val::I32(0),
+    ];
+    function
+        .call(&mut *store, &params, &mut results)
+        .expect("escape_air_residuals_q12 should execute");
+    let residuals = std::array::from_fn(|index| match results[index] {
+        Val::I64(value) => value,
+        ref other => panic!("residual {index} must be i64, got {other:?}"),
+    });
+    let relations = std::array::from_fn(|index| match results[index + 5] {
+        Val::I32(value) => value,
+        ref other => panic!("relation {index} must be i32, got {other:?}"),
+    });
+    (residuals, relations)
+}
+
+fn wasm_pair_holds(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    c_re: i32,
+    c_im: i32,
+    bound: u32,
+    row: AirRow,
+    next: AirRow,
+) -> bool {
+    let mut args = vec![c_re, c_im, bound as i32];
+    args.extend(air_row_words(row));
+    args.extend(air_row_words(next));
+    call_words(store, instance, "escape_air_pair_holds_q12", &args, 1) == [1]
 }
 
 #[test]
@@ -320,6 +495,23 @@ fn fe_bounded_escape_witness_matches_independent_i64_model() {
                     expected_row.step
                 );
                 assert!(air_row_holds(observed_air));
+                assert_eq!(
+                    wasm_encoding(&mut store, &instance, c_re, c_im, expected_row.step),
+                    reference_encoding(expected_air),
+                    "canonical AIR encoding ({c_re}, {c_im}) Z_{}",
+                    expected_row.step
+                );
+                assert_eq!(
+                    wasm_residuals(
+                        &mut store,
+                        &instance,
+                        expected_air,
+                        i32::from(expected_air.row.terminal),
+                    ),
+                    ([0; 5], [1; 4]),
+                    "Fe residuals and non-polynomial relations ({c_re}, {c_im}) Z_{}",
+                    expected_row.step
+                );
             }
             for pair in rows.windows(2) {
                 let row = reference_air_row(pair[0].step, pair[0].zr, pair[0].zi);
@@ -327,6 +519,11 @@ fn fe_bounded_escape_witness_matches_independent_i64_model() {
                 assert!(
                     transition_holds(c_re, c_im, row, next),
                     "directed AIR transition ({c_re}, {c_im}) Z_{}",
+                    row.row.step
+                );
+                assert!(
+                    wasm_pair_holds(&mut store, &instance, c_re, c_im, bound, row, next),
+                    "Fe AIR pair verifier ({c_re}, {c_im}) Z_{}",
                     row.row.step
                 );
             }
@@ -391,68 +588,7 @@ fn fe_bounded_escape_witness_matches_independent_i64_model() {
     let rows = reference_rows(-3048, 2216, 255);
     let base = reference_air_row(rows[0].step, rows[0].zr, rows[0].zi);
     let next = reference_air_row(rows[1].step, rows[1].zr, rows[1].zi);
-    let mutations = [
-        AirRow {
-            row: Row {
-                step: base.row.step + 1,
-                ..base.row
-            },
-            ..base
-        },
-        AirRow {
-            row: Row {
-                zr: base.row.zr + 1,
-                ..base.row
-            },
-            ..base
-        },
-        AirRow {
-            row: Row {
-                zi: base.row.zi + 1,
-                ..base.row
-            },
-            ..base
-        },
-        AirRow {
-            rr: base.rr + 1,
-            ..base
-        },
-        AirRow {
-            ii: base.ii + 1,
-            ..base
-        },
-        AirRow {
-            row: Row {
-                magnitude: base.row.magnitude + 1,
-                ..base.row
-            },
-            ..base
-        },
-        AirRow {
-            q_re: base.q_re + 1,
-            ..base
-        },
-        AirRow {
-            r_re: base.r_re + 1,
-            ..base
-        },
-        AirRow {
-            q_im: base.q_im + 1,
-            ..base
-        },
-        AirRow {
-            r_im: base.r_im + 1,
-            ..base
-        },
-        AirRow {
-            row: Row {
-                terminal: !base.row.terminal,
-                ..base.row
-            },
-            ..base
-        },
-    ];
-    for (column, mutation) in mutations.into_iter().enumerate() {
+    for (column, mutation) in one_unit_mutations(base).into_iter().enumerate() {
         if column != 0 {
             assert!(
                 !air_row_holds(mutation),
@@ -463,5 +599,103 @@ fn fe_bounded_escape_witness_matches_independent_i64_model() {
             !transition_holds(-3048, 2216, mutation, next),
             "transition with mutated AIR column {column} must reject"
         );
+        assert!(
+            !wasm_pair_holds(&mut store, &instance, -3048, 2216, 255, mutation, next),
+            "Fe verifier must reject current-row AIR mutation {column}"
+        );
     }
+    for (column, mutation) in one_unit_mutations(next).into_iter().enumerate() {
+        assert!(
+            !wasm_pair_holds(&mut store, &instance, -3048, 2216, 255, base, mutation),
+            "Fe verifier must reject next-row AIR mutation {column}"
+        );
+    }
+
+    assert!(
+        !wasm_pair_holds(&mut store, &instance, -3047, 2216, 255, base, next),
+        "Fe verifier must reject an altered public real coordinate"
+    );
+    assert!(
+        !wasm_pair_holds(&mut store, &instance, -3048, 2217, 255, base, next),
+        "Fe verifier must reject an altered public imaginary coordinate"
+    );
+    assert!(
+        !wasm_pair_holds(&mut store, &instance, -3048, 2216, 0, base, next),
+        "Fe verifier must reject a bound smaller than the directed pair"
+    );
+
+    let mut noncanonical_real = base;
+    noncanonical_real.q_re -= 1;
+    noncanonical_real.r_re += 4096;
+    let (real_residuals, real_relations) =
+        wasm_residuals(&mut store, &instance, noncanonical_real, 0);
+    assert_eq!(real_residuals, [0; 5]);
+    assert_eq!(real_relations, [0, 1, 1, 1]);
+    assert!(
+        !wasm_pair_holds(
+            &mut store,
+            &instance,
+            -3048,
+            2216,
+            255,
+            noncanonical_real,
+            next,
+        ),
+        "a residual-zero but noncanonical real quotient/remainder must reject"
+    );
+
+    let mut noncanonical_imaginary = base;
+    noncanonical_imaginary.q_im -= 1;
+    noncanonical_imaginary.r_im += 4096;
+    let (imaginary_residuals, imaginary_relations) =
+        wasm_residuals(&mut store, &instance, noncanonical_imaginary, 0);
+    assert_eq!(imaginary_residuals, [0; 5]);
+    assert_eq!(imaginary_relations, [0, 1, 1, 1]);
+    assert!(
+        !wasm_pair_holds(
+            &mut store,
+            &instance,
+            -3048,
+            2216,
+            255,
+            noncanonical_imaginary,
+            next,
+        ),
+        "a residual-zero but noncanonical imaginary quotient/remainder must reject"
+    );
+
+    let zero_encoding = wasm_encoding(&mut store, &instance, -3048, 2216, 0);
+    assert_eq!(
+        zero_encoding[1], 0,
+        "zero real coordinate has positive sign"
+    );
+    assert_eq!(
+        zero_encoding[3], 0,
+        "zero imaginary coordinate has positive sign"
+    );
+    assert_eq!(zero_encoding[8], 0, "zero real quotient has positive sign");
+    assert_eq!(
+        zero_encoding[11], 0,
+        "zero imaginary quotient has positive sign"
+    );
+
+    let (terminal_residuals, terminal_relations) = wasm_residuals(&mut store, &instance, base, 2);
+    assert_eq!(terminal_residuals, [0; 5]);
+    assert_eq!(terminal_relations, [1, 1, 0, 1]);
+
+    let unsafe_row = AirRow {
+        row: Row {
+            zr: i32::MIN,
+            zi: i32::MIN,
+            ..base.row
+        },
+        ..base
+    };
+    let (unsafe_residuals, unsafe_relations) = wasm_residuals(&mut store, &instance, unsafe_row, 0);
+    assert_eq!(unsafe_residuals, [1; 5]);
+    assert_eq!(unsafe_relations[3], 0);
+    assert!(
+        !wasm_pair_holds(&mut store, &instance, -3048, 2216, 255, unsafe_row, next),
+        "out-of-domain alleged coordinates must reject before widened arithmetic"
+    );
 }
