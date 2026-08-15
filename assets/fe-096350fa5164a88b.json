@@ -9,14 +9,14 @@
     "build": "workspace"
   },
   "target": "wasm",
-  "source_set_sha256": "922bbf78a31e680ebffe9127879d947a5b17e95f75b59487246f72b993188d22",
+  "source_set_sha256": "308b4f263de1269dbc8c1ff5f6b75b1fe1e59381d9aa11f106068a60bb64d70f",
   "source_dependencies": {
     "version": 1,
     "root": "file:///workspace/fe-worktrees/mb2/demos/sketches/event_studio/src/lib.fe",
     "sources": [
       {
         "url": "file:///workspace/fe-worktrees/mb2/demos/sketches/event_studio/src/lib.fe",
-        "sha256": "597aee50d0d0ad2fbe29dd0d317c9da62466e8613da3d787be4c412c4f9dee9f"
+        "sha256": "4a47b1a8d6afc9b47540301c7ffe83cf30ff3cd66d0fa4ab5c67c4f38dc0c3a4"
       }
     ]
   },
@@ -68,6 +68,13 @@
       {
         "module": "fe:web-gpu",
         "name": "device_event_begin",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "fe:web-gpu",
+        "name": "queue_idle_begin",
         "signature_complete": false,
         "params": [],
         "results": []
@@ -202,6 +209,27 @@
       },
       {
         "module": "",
+        "name": "__fe_task_resume_watch_queue_idle_1",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "__fe_task_resume_watch_queue_idle_2",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "__fe_task_resume_watch_queue_idle_3",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
         "name": "__fe_task_resume_watch_viewport_1",
         "signature_complete": false,
         "params": [],
@@ -259,6 +287,13 @@
       {
         "module": "",
         "name": "__fe_task_start_watch_gestures",
+        "signature_complete": false,
+        "params": [],
+        "results": []
+      },
+      {
+        "module": "",
+        "name": "__fe_task_start_watch_queue_idle",
         "signature_complete": false,
         "params": [],
         "results": []
@@ -327,9 +362,9 @@
       "name": "module.wasm",
       "kind": "wasm_module",
       "media_type": "application/wasm",
-      "sha256": "3defdef62d29a5db1c5ef9c1dd7a457f83dd469c5573b8ab33d60a3d0d9f9ba8",
-      "byte_len": 2006447,
-      "url": "assets/fe-3defdef62d29a5db.wasm"
+      "sha256": "2c1b1aed429841c6f928176297b816dd90eef00372f7140add406fdde881f5a2",
+      "byte_len": 2198786,
+      "url": "assets/fe-2c1b1aed429841c6.wasm"
     }
   ]
 }

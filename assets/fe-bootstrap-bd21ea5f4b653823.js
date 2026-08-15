@@ -230,6 +230,25 @@ export function createGpuDeviceEventSource(renderRuntimeModule) {
   });
 }
 
+/**
+ * Fixed bridge to queue-idle facts already observed by the shared render
+ * runtime. The adapter exposes no GPU object and creates no submission/fence
+ * identity; Fe owns the resulting stream and every scheduling decision.
+ */
+export function createGpuQueueIdleEventSource(renderRuntimeModule) {
+  if (!renderRuntimeModule || typeof renderRuntimeModule !== "object"
+      || typeof renderRuntimeModule.observeSharedGpuQueueIdle !== "function") {
+    throw new TypeError(
+      "GPU queue-idle source requires the fixed render runtime completion export",
+    );
+  }
+  return Object.freeze({
+    observe(seen, previousSequence, signal) {
+      return renderRuntimeModule.observeSharedGpuQueueIdle(seen, previousSequence, signal);
+    },
+  });
+}
+
 function finiteEventNumber(value, label) {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     throw new TypeError(`${label} must be a finite number`);
@@ -1495,8 +1514,14 @@ async function run(element) {
         const needsWindowCapability = WebAssembly.Module.imports(module).some(
           value => value.module === "fe:web-window",
         );
-        const needsGpuDeviceCapability = WebAssembly.Module.imports(module).some(
+        const gpuCapabilityImports = WebAssembly.Module.imports(module).filter(
           value => value.module === "fe:web-gpu",
+        );
+        const needsGpuDeviceCapability = gpuCapabilityImports.some(
+          value => value.name === "device_event_begin",
+        );
+        const needsGpuQueueIdleCapability = gpuCapabilityImports.some(
+          value => value.name === "queue_idle_begin",
         );
         const needsComponentEventCapability = WebAssembly.Module.imports(module).some(
           value => value.module === "fe:web-component-events",
@@ -1527,7 +1552,7 @@ async function run(element) {
         if (needsWindowCapability) {
           brokerOptions.windowEvents = createWindowEventSource(globalThis);
         }
-        if (needsGpuDeviceCapability) {
+        if (needsGpuDeviceCapability || needsGpuQueueIdleCapability) {
           const runtimeReference = element.dataset.feRenderRuntime;
           if (!runtimeReference) {
             throw new Error(
@@ -1535,7 +1560,12 @@ async function run(element) {
             );
           }
           const runtimeModule = await import(new URL(runtimeReference, element.baseURI));
-          brokerOptions.gpuDeviceEvents = createGpuDeviceEventSource(runtimeModule);
+          if (needsGpuDeviceCapability) {
+            brokerOptions.gpuDeviceEvents = createGpuDeviceEventSource(runtimeModule);
+          }
+          if (needsGpuQueueIdleCapability) {
+            brokerOptions.gpuQueueIdleEvents = createGpuQueueIdleEventSource(runtimeModule);
+          }
         }
         if (needsComponentEventCapability) {
           brokerOptions.componentEvents = createComponentEventSource(

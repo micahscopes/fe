@@ -1281,9 +1281,9 @@
     ],
     "fixed_host": {
       "artifact": {
-        "bytes": 120646,
-        "path": "fe-render-runtime-9309cdd905c41533.js",
-        "sha256": "9309cdd905c41533c43dab77edf8e6f623cd7ae09d26a40b114f1d4f18772baf"
+        "bytes": 122596,
+        "path": "fe-render-runtime-ea792867197d147a.js",
+        "sha256": "ea792867197d147ae1f94877b0e74721ce16c7277de8b0f0843d9c6ece14cdeb"
       },
       "contract": "fixed_versioned_demo_blind_browser_host",
       "name": "fe-render-runtime",

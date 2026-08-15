@@ -187,6 +187,7 @@ export const GpuDeviceLossReason = Object.freeze({
 });
 
 const GPU_DEVICE_EVENT_HISTORY = 32;
+const GPU_QUEUE_IDLE_HISTORY = 64;
 const MAX_U32 = 0xffff_ffff;
 
 function checkedU32(value, label) {
@@ -196,15 +197,9 @@ function checkedU32(value, label) {
   return value;
 }
 
-/**
- * A bounded, replayable page-wide lifecycle channel. This is fixed host
- * transport, not a recovery scheduler: it preserves every retained device
- * fact in sequence order and reports any history gap to Fe. The consuming Fe
- * task owns retry, degradation, and failure policy.
- */
-export function createGpuDeviceLifecycleChannel(capacity = GPU_DEVICE_EVENT_HISTORY) {
+function createBoundedGpuFactChannel(capacity, labels, project) {
   if (!Number.isSafeInteger(capacity) || capacity <= 0) {
-    throw new TypeError("GPU device lifecycle history capacity must be positive");
+    throw new TypeError(`${labels.history} history capacity must be positive`);
   }
   const history = [];
   const waiters = new Set();
@@ -227,18 +222,13 @@ export function createGpuDeviceLifecycleChannel(capacity = GPU_DEVICE_EVENT_HIST
     }
   };
 
-  const publish = (kind, reason, generation) => {
-    checkedU32(kind, "GPU device event kind");
-    checkedU32(reason, "GPU device loss reason");
-    checkedU32(generation, "GPU device generation");
-    if (kind === GpuDeviceEventKind.Unknown) {
-      throw new RangeError("the host cannot publish the Fe placeholder GPU device event");
-    }
+  const publish = (...values) => {
+    const projected = project(...values);
     if (sequence === MAX_U32) {
-      throw new RangeError("GPU device lifecycle sequence space is exhausted");
+      throw new RangeError(`${labels.history} sequence space is exhausted`);
     }
     sequence += 1;
-    const event = Object.freeze({ kind, reason, generation, sequence });
+    const event = Object.freeze({ ...projected, sequence });
     history.push(event);
     if (history.length > capacity) history.shift();
     flush();
@@ -247,11 +237,11 @@ export function createGpuDeviceLifecycleChannel(capacity = GPU_DEVICE_EVENT_HIST
 
   const observe = (seen, previousSequence, signal) => {
     if (typeof seen !== "boolean") {
-      throw new TypeError("GPU device observation seen flag must be boolean");
+      throw new TypeError(`${labels.observation} observation seen flag must be boolean`);
     }
-    checkedU32(previousSequence, "GPU device previous sequence");
+    checkedU32(previousSequence, `${labels.previous} previous sequence`);
     if (seen && previousSequence > sequence) {
-      throw new RangeError("GPU device previous sequence is newer than the host channel");
+      throw new RangeError(`${labels.previous} previous sequence is newer than the host channel`);
     }
     const immediate = nextAfter(seen, previousSequence);
     if (immediate) return immediate;
@@ -270,7 +260,7 @@ export function createGpuDeviceLifecycleChannel(capacity = GPU_DEVICE_EVENT_HIST
         },
       };
       const onAbort = () => {
-        const error = new Error("GPU device lifecycle observation was cancelled");
+        const error = new Error(`${labels.cancellation} observation was cancelled`);
         error.name = "AbortError";
         waiter.finish(reject, error);
       };
@@ -282,6 +272,56 @@ export function createGpuDeviceLifecycleChannel(capacity = GPU_DEVICE_EVENT_HIST
   };
 
   return Object.freeze({ publish, observe });
+}
+
+/**
+ * A bounded, replayable page-wide lifecycle channel. This is fixed host
+ * transport, not a recovery scheduler: it preserves every retained device
+ * fact in sequence order and reports any history gap to Fe. The consuming Fe
+ * task owns retry, degradation, and failure policy.
+ */
+export function createGpuDeviceLifecycleChannel(capacity = GPU_DEVICE_EVENT_HISTORY) {
+  return createBoundedGpuFactChannel(
+    capacity,
+    {
+      history: "GPU device lifecycle",
+      observation: "GPU device",
+      previous: "GPU device",
+      cancellation: "GPU device lifecycle",
+    },
+    (kind, reason, generation) => {
+      checkedU32(kind, "GPU device event kind");
+      checkedU32(reason, "GPU device loss reason");
+      checkedU32(generation, "GPU device generation");
+      if (kind === GpuDeviceEventKind.Unknown) {
+        throw new RangeError("the host cannot publish the Fe placeholder GPU device event");
+      }
+      return { kind, reason, generation };
+    },
+  );
+}
+
+/**
+ * Bounded transport for queue-idle facts already observed by the fixed render
+ * host. An occurrence means all work submitted before the corresponding
+ * `onSubmittedWorkDone()`/readback boundary completed. It does not expose raw
+ * queue objects or invent application submission IDs; Fe owns all downstream
+ * backpressure and scheduling policy.
+ */
+export function createGpuQueueIdleChannel(capacity = GPU_QUEUE_IDLE_HISTORY) {
+  return createBoundedGpuFactChannel(
+    capacity,
+    {
+      history: "GPU queue-idle",
+      observation: "GPU queue-idle",
+      previous: "GPU queue-idle",
+      cancellation: "GPU queue-idle",
+    },
+    generation => {
+      checkedU32(generation, "GPU queue-idle generation");
+      return { generation };
+    },
+  );
 }
 
 /** Write the fixed DFS layout of untouched `std::web::SurfaceEvent` records.
@@ -318,6 +358,7 @@ let sharedGpuRecoveryPromise;
 let pendingDeviceLoss;
 let sharedGpuGeneration = 0;
 const sharedGpuDeviceLifecycle = createGpuDeviceLifecycleChannel();
+const sharedGpuQueueIdle = createGpuQueueIdleChannel();
 const DEVICE_STABILITY_MS = 50;
 const DEVICE_LOSS_CONFIRMATION_MS = 250;
 /** Every currently connected `<fe-surface>`, live or not (module-level so a
@@ -329,6 +370,20 @@ const attachedSurfaces = new Set();
  * to a second WebGPU device and cannot choose recovery policy. */
 export function observeSharedGpuDevice(seen, previousSequence, signal) {
   return sharedGpuDeviceLifecycle.observe(seen, previousSequence, signal);
+}
+
+/** Observe queue-idle facts from the actual shared render device. */
+export function observeSharedGpuQueueIdle(seen, previousSequence, signal) {
+  return sharedGpuQueueIdle.observe(seen, previousSequence, signal);
+}
+
+function publishSharedGpuQueueIdle(gpu) {
+  return sharedGpuQueueIdle.publish(gpu?.generation ?? sharedGpuGeneration);
+}
+
+async function awaitSharedGpuQueueIdle(gpu) {
+  await gpu.device.queue.onSubmittedWorkDone();
+  return publishSharedGpuQueueIdle(gpu);
 }
 
 function publishGpuUnavailable(reason = GpuDeviceLossReason.NotLost) {
@@ -1348,7 +1403,7 @@ export class FeSurfaceElement extends HTMLElement {
     }
   }
 
-  async _buildPassGraph(device) {
+  async _buildPassGraph(device, generation) {
     const format = this._layout.color_target_format || navigator.gpu.getPreferredCanvasFormat();
     const shaderSources = await Promise.all(
       this._passShaderUrls.map(async (url) => (await fetchOrThrow(url, "WGSL pass shader")).text()),
@@ -1449,7 +1504,7 @@ export class FeSurfaceElement extends HTMLElement {
           });
       passRecords.push({ pass, pipeline, bindGroup, inputs, outputs });
     }
-    return { device, format, passRecords, resourceBuffers };
+    return { device, generation, format, passRecords, resourceBuffers };
   }
 
   async _ensurePipeline() {
@@ -1460,7 +1515,7 @@ export class FeSurfaceElement extends HTMLElement {
     if (this._gpu && this._gpu.device === device) return this._gpu;
     try {
       if (this._graph) {
-        this._gpu = await this._buildPassGraph(device);
+        this._gpu = await this._buildPassGraph(device, gpu.generation);
         return this._gpu;
       }
       const wgsl = await (await fetchOrThrow(this._wgslUrl, "WGSL shader")).text();
@@ -1496,7 +1551,14 @@ export class FeSurfaceElement extends HTMLElement {
         fragment: { module: shaderModule, entryPoint: this._layout.fragment_entry, targets: [{ format }] },
         primitive: { topology: "triangle-list" },
       });
-      this._gpu = { device, format, pipeline, bindGroup, uniformBuffer };
+      this._gpu = {
+        device,
+        generation: gpu.generation,
+        format,
+        pipeline,
+        bindGroup,
+        uniformBuffer,
+      };
       return this._gpu;
     } catch (error) {
       this._pipelineError = error;
@@ -1719,7 +1781,7 @@ export class FeSurfaceElement extends HTMLElement {
       this._adoptedCanvas.height = height;
       this._adoptedContext = context;
       this._presentOn(context, this._uniforms);
-      await gpu.device.queue.onSubmittedWorkDone();
+      await awaitSharedGpuQueueIdle(gpu);
       return;
     }
     // Use the ordinary HTML live canvas, briefly attached and visible, for the
@@ -1751,6 +1813,7 @@ export class FeSurfaceElement extends HTMLElement {
       try {
         const readback = this._presentOn(context, this._uniforms, { width, height, format: gpu.format });
         const pixels = await readCanvasReadback(readback);
+        publishSharedGpuQueueIdle(gpu);
         this._paintPosterPixels(pixels, width, height);
       } catch (error) {
         throw new Error(`fe render runtime: poster command submission failed: ${error?.message ?? String(error)}`, { cause: error });
@@ -1785,13 +1848,14 @@ export class FeSurfaceElement extends HTMLElement {
     const context = this._liveContext;
     const gpu = this._gpu;
     try {
-      await gpu.device.queue.onSubmittedWorkDone();
+      await awaitSharedGpuQueueIdle(gpu);
       const readback = this._presentOn(context, this._uniforms, {
         width: this._backingWidth,
         height: this._backingHeight,
         format: gpu.format,
       });
       const pixels = await readCanvasReadback(readback);
+      publishSharedGpuQueueIdle(gpu);
       this._paintPosterPixels(pixels, this._backingWidth, this._backingHeight);
     } finally {
       try {
@@ -2811,7 +2875,7 @@ export class FeSurfaceElement extends HTMLElement {
       try {
         this._render();
         const queue = this._mode === "webgpu" ? this._gpu?.device?.queue : null;
-        if (queue?.onSubmittedWorkDone) await queue.onSubmittedWorkDone();
+        if (queue?.onSubmittedWorkDone) await awaitSharedGpuQueueIdle(this._gpu);
       } finally {
         const complete = this._runSurfaceSchedule(SurfaceEventKind.GpuComplete);
         this._applySurfaceQueueAction(complete);
@@ -2838,7 +2902,7 @@ export class FeSurfaceElement extends HTMLElement {
       this._render();
       const queue = this._mode === "webgpu" ? this._gpu?.device?.queue : null;
       if (queue?.onSubmittedWorkDone) {
-        await queue.onSubmittedWorkDone();
+        await awaitSharedGpuQueueIdle(this._gpu);
         this._deliverSurfaceBoundary(SurfaceEventKind.GpuComplete, undefined, false);
       }
     } finally {
