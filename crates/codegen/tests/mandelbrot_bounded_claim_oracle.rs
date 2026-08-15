@@ -360,6 +360,26 @@ fn call_mask(
     }
 }
 
+fn call_mask_pair(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    name: &str,
+    args: &[i32],
+) -> (u32, u32) {
+    let function = instance
+        .get_func(&mut *store, name)
+        .unwrap_or_else(|| panic!("{name} export should exist"));
+    let params = args.iter().copied().map(Val::I32).collect::<Vec<_>>();
+    let mut results = [Val::I32(0), Val::I32(0)];
+    function
+        .call(&mut *store, &params, &mut results)
+        .unwrap_or_else(|error| panic!("{name} should execute: {error:?}"));
+    match (&results[0], &results[1]) {
+        (Val::I32(left), Val::I32(right)) => (*left as u32, *right as u32),
+        other => panic!("{name} results must be i32, got {other:?}"),
+    }
+}
+
 fn sign_magnitude(value: i32) -> [i32; 2] {
     [i32::from(value < 0), value.unsigned_abs() as i32]
 }
@@ -409,6 +429,49 @@ fn field_transition_args(c_re: i32, c_im: i32, row: AirRow, next: AirRow) -> [i3
         next_zi[0],
         next_zi[1],
     ]
+}
+
+fn field_air_encoding(row: AirRow) -> [i32; 15] {
+    let zr = sign_magnitude(row.row.zr);
+    let zi = sign_magnitude(row.row.zi);
+    let q_re = sign_magnitude(row.q_re);
+    let q_im = sign_magnitude(row.q_im);
+    [
+        row.row.step as i32,
+        zr[0],
+        zr[1],
+        zi[0],
+        zi[1],
+        row.rr,
+        row.ii,
+        row.row.magnitude,
+        q_re[0],
+        q_re[1],
+        row.r_re,
+        q_im[0],
+        q_im[1],
+        row.r_im,
+        i32::from(row.row.terminal),
+    ]
+}
+
+fn field_proof_encoding(active: bool, terminal: bool, row: AirRow) -> [i32; 17] {
+    let mut words = [0; 17];
+    words[0] = i32::from(active);
+    words[1] = i32::from(terminal);
+    words[2..].copy_from_slice(&field_air_encoding(row));
+    words
+}
+
+fn field_pair_args(c_re: i32, c_im: i32, row: [i32; 17], next: [i32; 17]) -> Vec<i32> {
+    let c_re = sign_magnitude(c_re);
+    let c_im = sign_magnitude(c_im);
+    let mut args = Vec::with_capacity(38);
+    args.extend(c_re);
+    args.extend(c_im);
+    args.extend(row);
+    args.extend(next);
+    args
 }
 
 fn wasm_witness(
@@ -1261,6 +1324,9 @@ fn mandelbrot_residual_polynomials_execute_in_bn254_without_host_shims() {
 
     let local_export = "mandelbrot_bn254_local_residual_mask";
     let transition_export = "mandelbrot_bn254_transition_residual_mask";
+    let padded_pair_export = "mandelbrot_bn254_padded_pair_residual_masks";
+    let padded_first_export = "mandelbrot_bn254_padded_first_residual_mask";
+    let padded_last_export = "mandelbrot_bn254_padded_last_residual_mask";
     for (c_re, c_im, bound) in [(-8192, -6144, 100), (4095, 4095, 2), (-3048, 2216, 255)] {
         let rows = reference_rows(c_re, c_im, bound);
         let mut selected = vec![0usize, rows.len() - 1];
@@ -1418,5 +1484,152 @@ fn mandelbrot_residual_polynomials_execute_in_bn254_without_host_shims() {
         call_mask(&mut store, &instance, local_export, &negative_zero,),
         0,
         "canonical-zero enforcement still requires the pending range/encoding columns"
+    );
+
+    let base_proof = field_proof_encoding(true, false, base);
+    let next_proof = field_proof_encoding(true, false, next);
+    assert_eq!(
+        call_mask_pair(
+            &mut store,
+            &instance,
+            padded_pair_export,
+            &field_pair_args(-3048, 2216, base_proof, next_proof),
+        ),
+        (0, 0),
+        "an active nonterminal pair must satisfy both state and selected math"
+    );
+    assert_eq!(
+        call_mask(&mut store, &instance, padded_first_export, &base_proof),
+        0,
+        "the canonical initial row must satisfy the BN254 boundary"
+    );
+    assert_ne!(
+        call_mask(&mut store, &instance, padded_last_export, &base_proof),
+        0,
+        "an active nonterminal row cannot close the BN254 domain"
+    );
+
+    let padded_rows = reference_rows(4095, 4095, 2);
+    let terminal_air = reference_air_row(
+        padded_rows.last().unwrap().step,
+        padded_rows.last().unwrap().zr,
+        padded_rows.last().unwrap().zi,
+    );
+    let terminal_proof = field_proof_encoding(true, true, terminal_air);
+    let padding_proof = field_proof_encoding(false, false, terminal_air);
+    assert_eq!(
+        call_mask_pair(
+            &mut store,
+            &instance,
+            padded_pair_export,
+            &field_pair_args(4095, 4095, terminal_proof, padding_proof),
+        ),
+        (0, 0),
+        "the terminal-to-padding fixed point must satisfy BN254 constraints"
+    );
+    assert_eq!(
+        call_mask_pair(
+            &mut store,
+            &instance,
+            padded_pair_export,
+            &field_pair_args(4095, 4095, padding_proof, padding_proof),
+        ),
+        (0, 0),
+        "padding must remain a fixed point"
+    );
+    assert_eq!(
+        call_mask(&mut store, &instance, padded_last_export, &terminal_proof),
+        0,
+        "an active terminal row may close an unpadded domain"
+    );
+    assert_eq!(
+        call_mask(&mut store, &instance, padded_last_export, &padding_proof),
+        0,
+        "inactive padding may close a padded domain"
+    );
+
+    let mut inactive_successor = next_proof;
+    inactive_successor[0] = 0;
+    assert_ne!(
+        call_mask_pair(
+            &mut store,
+            &instance,
+            padded_pair_export,
+            &field_pair_args(-3048, 2216, base_proof, inactive_successor),
+        )
+        .0,
+        0,
+        "activity cannot stop before a terminal row"
+    );
+    let mut non_bit_active = base_proof;
+    non_bit_active[0] = 2;
+    assert_ne!(
+        call_mask(&mut store, &instance, padded_first_export, &non_bit_active),
+        0,
+        "the active column must be boolean"
+    );
+    for column in 2..padding_proof.len() {
+        let mut changed_padding = padding_proof;
+        changed_padding[column] += 1;
+        let changed_padding_masks = call_mask_pair(
+            &mut store,
+            &instance,
+            padded_pair_export,
+            &field_pair_args(4095, 4095, padding_proof, changed_padding),
+        );
+        assert_ne!(
+            changed_padding_masks.0, 0,
+            "terminal-state padding must reject encoded AIR mutation {column}"
+        );
+        assert_eq!(
+            changed_padding_masks.1, 0,
+            "the Mandelbrot transition must be disabled on padding"
+        );
+    }
+    let wrong_claim_masks = call_mask_pair(
+        &mut store,
+        &instance,
+        padded_pair_export,
+        &field_pair_args(-3047, 2216, base_proof, next_proof),
+    );
+    assert_eq!(wrong_claim_masks.0, 0);
+    assert_ne!(
+        wrong_claim_masks.1, 0,
+        "the selected transition must bind the public point"
+    );
+    assert_eq!(
+        wrong_claim_masks.1,
+        call_mask(
+            &mut store,
+            &instance,
+            transition_export,
+            &field_transition_args(-3047, 2216, base, next),
+        ),
+        "an active nonterminal selector must preserve every transition residual"
+    );
+
+    let mut premature_air = next;
+    premature_air.row.terminal = true;
+    let premature_terminal = field_proof_encoding(true, true, premature_air);
+    let premature_padding = field_proof_encoding(false, false, premature_air);
+    assert_eq!(
+        call_mask_pair(
+            &mut store,
+            &instance,
+            padded_pair_export,
+            &field_pair_args(-3048, 2216, base_proof, premature_terminal),
+        ),
+        (0, 0),
+        "state and transition equalities do not yet constrain the escape threshold"
+    );
+    assert_eq!(
+        call_mask_pair(
+            &mut store,
+            &instance,
+            padded_pair_export,
+            &field_pair_args(-3048, 2216, premature_terminal, premature_padding),
+        ),
+        (0, 0),
+        "the pending threshold comparison is required to reject premature closure"
     );
 }

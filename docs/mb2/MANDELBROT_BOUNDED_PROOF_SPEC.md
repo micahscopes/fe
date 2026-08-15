@@ -128,7 +128,24 @@ inactive padding must remain an exact fixed point of the terminal AIR values.
 The last row must be either that active terminal or inactive padding. The gate
 rejects non-bit flags, premature inactivity, a nonterminal final row, and
 one-unit mutations of the padding fixed point. These are executable integer
-constraints. Their reduction to proof-field polynomials is still pending.
+constraints and remain the independent semantic reference for the field lift.
+
+The first/pair/last state machine is now also reduced to BN254 polynomials.
+Nested nominal `EncodedAirRow` and `EncodedProofRow` values preserve the typed
+Fe boundary while Wasm flattens them for the independent oracle. Per-row
+constraints make activity, the unique terminal marker, and the semantic escape
+flag boolean; relate the unique marker to an active escape row; and require
+inactive rows to retain the semantic terminal flag. Pair constraints select
+the Mandelbrot transition only for an active nonterminal row. Terminal and
+inactive rows instead select exact equality of all 15 encoded AIR words and
+force the successor to inactive nonterminal padding. First and last
+constraints establish `z_0 = 0` and prohibit an active nonterminal final row.
+
+These state polynomials do not yet relate the semantic terminal flag to
+`magnitude >= 67108864`. The gate constructs a correct nonterminal transition,
+changes its successor into a premature terminal row, pads from it, and records
+that all current field residuals are zero. A sound proof requires the pending
+range/threshold columns to reject that counterexample.
 
 ## Commitment and proof direction
 

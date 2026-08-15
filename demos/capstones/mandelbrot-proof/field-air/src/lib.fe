@@ -12,6 +12,65 @@ use precision::field::FieldElement
 
 type Fr = FieldElement<20, Bn254Fr>
 
+/// Canonical signed witness input. Range and canonical-zero constraints are a
+/// separate layer; this nominal shape prevents callers from confusing sign
+/// and magnitude lanes while that layer is being added.
+pub struct SignedWord { pub sign: u32, pub magnitude: u32 }
+
+impl core::marker::Copy for SignedWord {}
+
+/// The canonical 15-word AIR encoding, with signed columns kept nominal at the
+/// Fe boundary instead of exposed as an untyped word-number protocol.
+pub struct EncodedAirRow {
+    pub step: u32,
+    pub zr: SignedWord,
+    pub zi: SignedWord,
+    pub rr: u32,
+    pub ii: u32,
+    pub magnitude: u32,
+    pub q_re: SignedWord,
+    pub r_re: u32,
+    pub q_im: SignedWord,
+    pub r_im: u32,
+    pub terminal: u32,
+}
+
+impl core::marker::Copy for EncodedAirRow {}
+
+/// One padded trace row. `terminal` is the unique proof marker, while
+/// `air.terminal` records the escape predicate on the repeated semantic row.
+pub struct EncodedProofRow {
+    pub active: u32,
+    pub terminal: u32,
+    pub air: EncodedAirRow,
+}
+
+impl core::marker::Copy for EncodedProofRow {}
+
+struct SignedField { sign: Fr, magnitude: Fr, value: Fr }
+
+impl core::marker::Copy for SignedField {}
+
+struct AirFieldRow {
+    step: Fr,
+    zr: SignedField,
+    zi: SignedField,
+    rr: Fr,
+    ii: Fr,
+    magnitude: Fr,
+    q_re: SignedField,
+    r_re: Fr,
+    q_im: SignedField,
+    r_im: Fr,
+    terminal: Fr,
+}
+
+impl core::marker::Copy for AirFieldRow {}
+
+struct ProofFieldRow { active: Fr, terminal: Fr, air: AirFieldRow }
+
+impl core::marker::Copy for ProofFieldRow {}
+
 fn field_is_zero(_ value: Fr) -> bool {
     let words = value.to_montgomery_words()
     let mut i: u32 = 0
@@ -28,6 +87,108 @@ fn bit_residual(_ word: Fr) -> Fr {
 
 fn signed_value(_ sign: Fr, _ magnitude: Fr) -> Fr {
     magnitude - sign * magnitude * Fr::from_u32(2)
+}
+
+fn signed_field(_ word: SignedWord) -> SignedField {
+    let sign = Fr::from_u32(word.sign)
+    let magnitude = Fr::from_u32(word.magnitude)
+    SignedField { sign: sign, magnitude: magnitude, value: signed_value(sign, magnitude) }
+}
+
+fn air_field_row(_ row: EncodedAirRow) -> AirFieldRow {
+    AirFieldRow {
+        step: Fr::from_u32(row.step),
+        zr: signed_field(row.zr),
+        zi: signed_field(row.zi),
+        rr: Fr::from_u32(row.rr),
+        ii: Fr::from_u32(row.ii),
+        magnitude: Fr::from_u32(row.magnitude),
+        q_re: signed_field(row.q_re),
+        r_re: Fr::from_u32(row.r_re),
+        q_im: signed_field(row.q_im),
+        r_im: Fr::from_u32(row.r_im),
+        terminal: Fr::from_u32(row.terminal),
+    }
+}
+
+fn proof_field_row(_ row: EncodedProofRow) -> ProofFieldRow {
+    ProofFieldRow {
+        active: Fr::from_u32(row.active),
+        terminal: Fr::from_u32(row.terminal),
+        air: air_field_row(row.air),
+    }
+}
+
+fn air_words(_ row: AirFieldRow) -> [Fr; 15] {
+    [
+        row.step,
+        row.zr.sign, row.zr.magnitude,
+        row.zi.sign, row.zi.magnitude,
+        row.rr,
+        row.ii,
+        row.magnitude,
+        row.q_re.sign, row.q_re.magnitude,
+        row.r_re,
+        row.q_im.sign, row.q_im.magnitude,
+        row.r_im,
+        row.terminal,
+    ]
+}
+
+fn local_residuals(_ row: AirFieldRow) -> [Fr; 9] {
+    let scale = Fr::from_u32(4096)
+    [
+        bit_residual(row.zr.sign),
+        bit_residual(row.zi.sign),
+        bit_residual(row.q_re.sign),
+        bit_residual(row.q_im.sign),
+        row.rr - row.zr.value.square(),
+        row.ii - row.zi.value.square(),
+        row.magnitude - row.rr - row.ii,
+        row.rr - row.ii - scale * row.q_re.value - row.r_re,
+        Fr::from_u32(2) * row.zr.value * row.zi.value - scale * row.q_im.value - row.r_im,
+    ]
+}
+
+fn transition_residuals(
+    _ c_re: SignedField,
+    _ c_im: SignedField,
+    _ row: AirFieldRow,
+    _ next: AirFieldRow,
+) -> [Fr; 9] {
+    [
+        bit_residual(c_re.sign),
+        bit_residual(c_im.sign),
+        bit_residual(row.q_re.sign),
+        bit_residual(row.q_im.sign),
+        bit_residual(next.zr.sign),
+        bit_residual(next.zi.sign),
+        next.step - row.step - Fr::one(),
+        next.zr.value - row.q_re.value - c_re.value,
+        next.zi.value - row.q_im.value - c_im.value,
+    ]
+}
+
+fn scaled_residual_mask<const N: usize>(_ selector: Fr, _ residuals: [Fr; N]) -> u32 {
+    let mut selected: [Fr; N] = [Fr::zero(); N]
+    let count: u32 = N.downcast_truncate()
+    let mut i: u32 = 0
+    while i < count {
+        selected[i as usize] = selector * residuals[i as usize]
+        i = i + 1
+    }
+    residual_mask<N>(selected)
+}
+
+fn row_state_residuals(_ row: ProofFieldRow) -> [Fr; 5] {
+    let one = Fr::one()
+    [
+        bit_residual(row.active),
+        bit_residual(row.terminal),
+        bit_residual(row.air.terminal),
+        row.terminal - row.active * row.air.terminal,
+        (one - row.active) * (row.air.terminal - one),
+    ]
 }
 
 fn residual_mask<const N: usize>(_ residuals: [Fr; N]) -> u32 {
@@ -60,29 +221,20 @@ pub fn mandelbrot_bn254_local_residual_mask(
     q_im_magnitude: u32,
     r_im: u32,
 ) -> u32 {
-    let sx = Fr::from_u32(zr_sign)
-    let sy = Fr::from_u32(zi_sign)
-    let sqr = Fr::from_u32(q_re_sign)
-    let sqi = Fr::from_u32(q_im_sign)
-    let x = signed_value(sx, Fr::from_u32(zr_magnitude))
-    let y = signed_value(sy, Fr::from_u32(zi_magnitude))
-    let qre = signed_value(sqr, Fr::from_u32(q_re_magnitude))
-    let qim = signed_value(sqi, Fr::from_u32(q_im_magnitude))
-    let rr_field = Fr::from_u32(rr)
-    let ii_field = Fr::from_u32(ii)
-    let magnitude_field = Fr::from_u32(magnitude)
-    let scale = Fr::from_u32(4096)
-    residual_mask<9>([
-        bit_residual(sx),
-        bit_residual(sy),
-        bit_residual(sqr),
-        bit_residual(sqi),
-        rr_field - x.square(),
-        ii_field - y.square(),
-        magnitude_field - rr_field - ii_field,
-        rr_field - ii_field - scale * qre - Fr::from_u32(r_re),
-        Fr::from_u32(2) * x * y - scale * qim - Fr::from_u32(r_im),
-    ])
+    let row = air_field_row(EncodedAirRow {
+        step: 0,
+        zr: SignedWord { sign: zr_sign, magnitude: zr_magnitude },
+        zi: SignedWord { sign: zi_sign, magnitude: zi_magnitude },
+        rr: rr,
+        ii: ii,
+        magnitude: magnitude,
+        q_re: SignedWord { sign: q_re_sign, magnitude: q_re_magnitude },
+        r_re: r_re,
+        q_im: SignedWord { sign: q_im_sign, magnitude: q_im_magnitude },
+        r_im: r_im,
+        terminal: 0,
+    })
+    residual_mask<9>(local_residuals(row))
 }
 
 /// Evaluate the directed-row equalities plus the six sign-bit polynomials.
@@ -104,27 +256,104 @@ pub fn mandelbrot_bn254_transition_residual_mask(
     next_zi_sign: u32,
     next_zi_magnitude: u32,
 ) -> u32 {
-    let scx = Fr::from_u32(c_re_sign)
-    let scy = Fr::from_u32(c_im_sign)
-    let sqr = Fr::from_u32(q_re_sign)
-    let sqi = Fr::from_u32(q_im_sign)
-    let snx = Fr::from_u32(next_zr_sign)
-    let sny = Fr::from_u32(next_zi_sign)
-    let cx = signed_value(scx, Fr::from_u32(c_re_magnitude))
-    let cy = signed_value(scy, Fr::from_u32(c_im_magnitude))
-    let qre = signed_value(sqr, Fr::from_u32(q_re_magnitude))
-    let qim = signed_value(sqi, Fr::from_u32(q_im_magnitude))
-    let next_x = signed_value(snx, Fr::from_u32(next_zr_magnitude))
-    let next_y = signed_value(sny, Fr::from_u32(next_zi_magnitude))
-    residual_mask<9>([
-        bit_residual(scx),
-        bit_residual(scy),
-        bit_residual(sqr),
-        bit_residual(sqi),
-        bit_residual(snx),
-        bit_residual(sny),
-        Fr::from_u32(next_step) - Fr::from_u32(step) - Fr::one(),
-        next_x - qre - cx,
-        next_y - qim - cy,
+    let zero = SignedWord { sign: 0, magnitude: 0 }
+    let row = air_field_row(EncodedAirRow {
+        step: step,
+        zr: zero,
+        zi: zero,
+        rr: 0,
+        ii: 0,
+        magnitude: 0,
+        q_re: SignedWord { sign: q_re_sign, magnitude: q_re_magnitude },
+        r_re: 0,
+        q_im: SignedWord { sign: q_im_sign, magnitude: q_im_magnitude },
+        r_im: 0,
+        terminal: 0,
+    })
+    let next = air_field_row(EncodedAirRow {
+        step: next_step,
+        zr: SignedWord { sign: next_zr_sign, magnitude: next_zr_magnitude },
+        zi: SignedWord { sign: next_zi_sign, magnitude: next_zi_magnitude },
+        rr: 0,
+        ii: 0,
+        magnitude: 0,
+        q_re: zero,
+        r_re: 0,
+        q_im: zero,
+        r_im: 0,
+        terminal: 0,
+    })
+    residual_mask<9>(transition_residuals(
+        signed_field(SignedWord { sign: c_re_sign, magnitude: c_re_magnitude }),
+        signed_field(SignedWord { sign: c_im_sign, magnitude: c_im_magnitude }),
+        row,
+        next,
+    ))
+}
+
+/// Constrain one padded trace pair. The first mask contains the boolean state
+/// machine and terminal-state fixed point. The second contains the Mandelbrot
+/// transition residuals selected only on an active nonterminal row.
+pub fn mandelbrot_bn254_padded_pair_residual_masks(
+    _ c_re: SignedWord,
+    _ c_im: SignedWord,
+    _ row: EncodedProofRow,
+    _ next: EncodedProofRow,
+) -> (u32, u32) {
+    let one = Fr::one()
+    let row = proof_field_row(row)
+    let next = proof_field_row(next)
+    let continue_selector = row.active * (one - row.terminal)
+    let freeze_selector = row.terminal + (one - row.active)
+    let row_state = row_state_residuals(row)
+    let next_state = row_state_residuals(next)
+    let state_mask = residual_mask<13>([
+        row_state[0], row_state[1], row_state[2], row_state[3], row_state[4],
+        next_state[0], next_state[1], next_state[2], next_state[3], next_state[4],
+        continue_selector * (next.active - one),
+        freeze_selector * next.active,
+        freeze_selector * next.terminal,
+    ])
+    let row_words = air_words(row.air)
+    let next_words = air_words(next.air)
+    let mut equality: [Fr; 15] = [Fr::zero(); 15]
+    let mut i: u32 = 0
+    while i < 15 {
+        equality[i as usize] = freeze_selector
+            * (next_words[i as usize] - row_words[i as usize])
+        i = i + 1
+    }
+    let equality_mask = residual_mask<15>(equality)
+    let transition_mask = scaled_residual_mask<9>(
+        continue_selector,
+        transition_residuals(signed_field(c_re), signed_field(c_im), row.air, next.air),
+    )
+    (state_mask | (equality_mask << 13), transition_mask)
+}
+
+/// Constrain the canonical first row: active, not terminal, step zero, and
+/// `z_0 = (0, 0)`. Row-local arithmetic is checked by the ordinary local mask.
+pub fn mandelbrot_bn254_padded_first_residual_mask(_ row: EncodedProofRow) -> u32 {
+    let row = proof_field_row(row)
+    let state = row_state_residuals(row)
+    residual_mask<12>([
+        state[0], state[1], state[2], state[3], state[4],
+        row.active - Fr::one(),
+        row.terminal,
+        row.air.step,
+        row.air.zr.sign,
+        row.air.zr.magnitude,
+        row.air.zi.sign,
+        row.air.zi.magnitude,
+    ])
+}
+
+/// Constrain the final domain row to active-terminal or inactive padding.
+pub fn mandelbrot_bn254_padded_last_residual_mask(_ row: EncodedProofRow) -> u32 {
+    let row = proof_field_row(row)
+    let state = row_state_residuals(row)
+    residual_mask<6>([
+        state[0], state[1], state[2], state[3], state[4],
+        row.active * (Fr::one() - row.terminal),
     ])
 }

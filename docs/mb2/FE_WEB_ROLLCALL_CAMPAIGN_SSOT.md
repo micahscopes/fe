@@ -195,17 +195,20 @@ Legend:
   derives the semantic and next-power-of-two trace lengths, emits active rows
   followed by deterministic terminal-state padding, and marks exactly one
   terminal row. The independent gate checks every directed padded row and
-  rejects invalid, non-escaping, and out-of-domain requests. Fe integer
-  first/pair/last constraints make activity monotone, terminal unique, and
-  padding an exact terminal-state fixed point. The gate rejects non-bit flags,
-  premature inactivity, nonterminal closure, and mutated padding. Range and
-  bit decomposition, canonical positive zero, proof-field activity/terminal/
-  padding constraints, and the domain-separated Poseidon trace commitment
-  remain pending. The gate deliberately demonstrates that field equalities
-  alone still accept an out-of-range remainder decomposition and negative
-  zero. The reusable field API's SPIR-V helper-call seam and permutation lift
-  also remain open. No trace root is claimed yet. This is executable initial
-  AIR evidence rather than a proof.
+  rejects invalid, non-escaping, and out-of-domain requests. Fe integer and
+  BN254 first/pair/last constraints make activity monotone, terminal unique,
+  select Mandelbrot transitions only on active nonterminal rows, and make
+  padding an exact terminal-state fixed point. The field boundary uses nested
+  nominal Fe rows rather than a numeric lane protocol. The gate rejects
+  non-bit flags, premature inactivity, nonterminal closure, public-point
+  mutation, and mutated padding. Range and bit decomposition, canonical
+  positive zero, the terminal-threshold comparison, and the domain-separated
+  Poseidon trace commitment remain pending. The gate deliberately demonstrates
+  that the current field equalities still accept an out-of-range remainder
+  decomposition, negative zero, and a premature terminal marker. The reusable
+  field API's SPIR-V helper-call seam and permutation lift also remain open. No
+  trace root is claimed yet. This is executable initial AIR evidence rather
+  than a proof.
 - [ ] Produce a succinct proof whose verifier is demonstrably cheaper than
   replaying the orbit.
 - [ ] Define a typed proof encoding and prove browser/native verifier parity,
