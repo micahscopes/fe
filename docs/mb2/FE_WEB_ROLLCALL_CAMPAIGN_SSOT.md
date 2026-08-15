@@ -160,9 +160,16 @@ Legend:
 
 ## G. Bounded-proof capstone
 
-- [ ] Specify the exact bounded claim, separating `EscapesBy<N>` from any
-  attractor or convergence claim.
-- [ ] Generate a Fe witness and commit to its trace.
+- [x] `EscapesByQ12` is specified as a least-terminal-row claim with an exact
+  signed Q12 domain, arithmetic-shift rounding, i32 safety argument, and a
+  separate future `EntersAttractor` claim. Gate:
+  `mandelbrot_bounded_claim_oracle.rs` and
+  `MANDELBROT_BOUNDED_PROOF_SPEC.md`.
+- [~] Fe now generates nominal `EscapeWitness` and `EscapeTraceRow` values, and
+  compiled Wasm matches an independent i64 replay across directed, invalid,
+  and 512 deterministic cases. Expanded AIR columns and domain-separated
+  Poseidon trace commitment are still pending, so this is witness evidence
+  rather than a proof.
 - [ ] Produce a succinct proof whose verifier is demonstrably cheaper than
   replaying the orbit.
 - [ ] Define a typed proof encoding and prove browser/native verifier parity,

@@ -1,0 +1,154 @@
+//! Fe witness semantics for the bounded Mandelbrot escape claim.
+//!
+//! This is not yet a succinct proof system. It is the single authored numeric
+//! transition that a prover will arithmetize and that independent tests replay.
+//! The public tuple exports are scalar Wasm lanes for oracle work; the authored
+//! model remains nominal and typed.
+
+pub const Q12_SCALE: i32 = 4096
+pub const ESCAPE_RADIUS_SQUARED_Q24: i32 = 67108864
+pub const NO_ESCAPE_STEP: u32 = 4294967295
+pub const MAX_CLAIM_BOUND: u32 = 1048576
+
+pub struct ComplexQ12 { pub re: i32, pub im: i32 }
+
+impl Copy for ComplexQ12 {}
+
+pub struct EscapesByQ12 { pub c: ComplexQ12, pub bound: u32 }
+
+impl Copy for EscapesByQ12 {}
+
+pub struct EscapeTraceRow {
+    pub step: u32,
+    pub z: ComplexQ12,
+    pub magnitude_squared_q24: i32,
+    pub terminal: bool,
+}
+
+impl Copy for EscapeTraceRow {}
+
+pub struct EscapeWitness { pub valid_claim: bool, pub escaped: bool, pub row: EscapeTraceRow }
+
+impl Copy for EscapeWitness {}
+
+fn square(_ value: i32) -> i32 {
+    value * value
+}
+
+fn trace_row(_ step: u32, _ z: ComplexQ12) -> EscapeTraceRow {
+    let magnitude_squared_q24 = square(z.re) + square(z.im)
+    EscapeTraceRow {
+        step: step,
+        z: z,
+        magnitude_squared_q24: magnitude_squared_q24,
+        terminal: magnitude_squared_q24 >= ESCAPE_RADIUS_SQUARED_Q24,
+    }
+}
+
+fn advance(_ z: ComplexQ12, _ c: ComplexQ12) -> ComplexQ12 {
+    let rr = square(z.re)
+    let ii = square(z.im)
+    ComplexQ12 { re: ((rr - ii) >> 12) + c.re, im: (((z.re * 2) * z.im) >> 12) + c.im }
+}
+
+impl EscapesByQ12 {
+    pub fn new(_ c_re_q12: i32, _ c_im_q12: i32, _ bound: u32) -> Self {
+        Self { c: ComplexQ12 { re: c_re_q12, im: c_im_q12 }, bound: bound }
+    }
+
+    /// The first proof profile is exactly the canonical 512 by 512 Q12 view.
+    /// These bounds, together with the radius check before every transition,
+    /// keep every authored i32 product and sum in range.
+    pub fn is_valid(self) -> bool {
+        self.c.re >= -8192
+            && self.c.re < 4096
+            && self.c.im >= -6144
+            && self.c.im < 6144
+            && self.bound <= MAX_CLAIM_BOUND
+    }
+
+    /// Materialize the least escape row at or before `bound`. A non-escaping
+    /// claim returns its final checked row and keeps `escaped` false.
+    pub fn witness(self) -> EscapeWitness {
+        if !self.is_valid() {
+            return EscapeWitness {
+                valid_claim: false,
+                escaped: false,
+                row: trace_row(0, ComplexQ12 { re: 0, im: 0 }),
+            }
+        }
+
+        let mut step: u32 = 0
+        let mut z = ComplexQ12 { re: 0, im: 0 }
+        while step <= self.bound {
+            let row = trace_row(step, z)
+            if row.terminal {
+                return EscapeWitness { valid_claim: true, escaped: true, row: row }
+            }
+            if step == self.bound {
+                return EscapeWitness { valid_claim: true, escaped: false, row: row }
+            }
+            z = advance(z, self.c)
+            step = step + 1
+        }
+
+        // The equality return above makes this unreachable, but a total return
+        // keeps the transition explicit to every backend.
+        EscapeWitness {
+            valid_claim: false,
+            escaped: false,
+            row: trace_row(0, ComplexQ12 { re: 0, im: 0 }),
+        }
+    }
+
+    /// Produce one row of the same witness sequence. Requests after the first
+    /// escape clamp to that terminal row, so no caller can manufacture a trace
+    /// suffix after termination.
+    pub fn row_at(self, _ target: u32) -> EscapeTraceRow {
+        if !self.is_valid() {
+            return trace_row(0, ComplexQ12 { re: 0, im: 0 })
+        }
+        let mut step: u32 = 0
+        let mut z = ComplexQ12 { re: 0, im: 0 }
+        while step < target {
+            let row = trace_row(step, z)
+            if row.terminal { return row }
+            z = advance(z, self.c)
+            step = step + 1
+        }
+        trace_row(step, z)
+    }
+}
+
+/// Compact scalar boundary for Wasm/native oracle gates. Fields are ordered as
+/// `(valid, escaped, step, zr, zi, magnitude_squared_q24)`.
+pub fn escape_witness_q12(_ c_re_q12: i32, _ c_im_q12: i32, _ bound: u32) -> (
+    u32,
+    u32,
+    u32,
+    i32,
+    i32,
+    i32,
+) {
+    let witness = EscapesByQ12::new(c_re_q12, c_im_q12, bound).witness()
+    (
+        if witness.valid_claim { 1 } else { 0 },
+        if witness.escaped { 1 } else { 0 },
+        witness.row.step,
+        witness.row.z.re,
+        witness.row.z.im,
+        witness.row.magnitude_squared_q24,
+    )
+}
+
+/// Compact row projection ordered as `(step, zr, zi, magnitude, terminal)`.
+pub fn escape_trace_row_q12(_ c_re_q12: i32, _ c_im_q12: i32, _ target: u32) -> (
+    u32,
+    i32,
+    i32,
+    i32,
+    u32,
+) {
+    let row = EscapesByQ12::new(c_re_q12, c_im_q12, target).row_at(target)
+    (row.step, row.z.re, row.z.im, row.magnitude_squared_q24, if row.terminal { 1 } else { 0 })
+}
