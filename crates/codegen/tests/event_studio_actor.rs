@@ -13,8 +13,8 @@ use fe_codegen::{
 use hir::hir_def::HirIngot;
 use url::Url;
 
-const STATE_LEAVES: usize = 16;
-const EVENT_LEAVES: usize = 20;
+const STATE_LEAVES: usize = 18;
+const EVENT_LEAVES: usize = 22;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct Model {
@@ -31,6 +31,8 @@ struct Model {
     frame_events: u32,
     timer_events: u32,
     frame_timestamp: u32,
+    bounded_drops: u32,
+    latest_value: u32,
     failures: u32,
     connected: bool,
 }
@@ -46,6 +48,8 @@ struct Event {
     pointer_y: f32,
     document_hidden: bool,
     frame_timestamp: f32,
+    bounded_drops: u32,
+    latest_value: u32,
 }
 
 fn bounded_dimension(value: f32) -> u32 {
@@ -96,7 +100,11 @@ fn reduce(mut model: Model, event: Event) -> Model {
                 model.frame_timestamp = bounded_dimension(event.frame_timestamp);
                 model.frame_events += 1;
             }
-            7 => model.timer_events += 1,
+            7 => {
+                model.timer_events += 1;
+                model.bounded_drops += event.bounded_drops;
+                model.latest_value = event.latest_value;
+            }
             _ => {}
         },
         _ => {}
@@ -126,6 +134,8 @@ fn event_values(event: Event) -> Vec<wasmtime::Val> {
         wasmtime::Val::I32(event.document_hidden as i32),
         wasmtime::Val::F32(event.frame_timestamp.to_bits()),
         wasmtime::Val::I32(1),
+        wasmtime::Val::I32(event.bounded_drops as i32),
+        wasmtime::Val::I32(event.latest_value as i32),
     ]
 }
 
@@ -151,8 +161,10 @@ fn state_values(values: &[wasmtime::Val]) -> Model {
         frame_events: words[11],
         timer_events: words[12],
         frame_timestamp: words[13],
-        failures: words[14],
-        connected: words[15] != 0,
+        bounded_drops: words[14],
+        latest_value: words[15],
+        failures: words[16],
+        connected: words[17] != 0,
     }
 }
 
@@ -302,6 +314,8 @@ fn event_studio_matches_independent_browser_stream_and_lifecycle_oracle() {
         Event {
             kind: 13,
             target: 7,
+            bounded_drops: 1,
+            latest_value: 4,
             ..Event::default()
         },
         Event {

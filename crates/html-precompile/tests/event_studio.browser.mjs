@@ -144,8 +144,10 @@ try {
       frameEvents: Number(values[9]?.textContent),
       timerEvents: Number(values[10]?.textContent),
       frameTimestamp: Number(values[11]?.textContent),
-      observations: Number(values[12]?.textContent),
-      failures: Number(values[13]?.textContent),
+      boundedDrops: Number(values[12]?.textContent),
+      latestValue: Number(values[13]?.textContent),
+      observations: Number(values[14]?.textContent),
+      failures: Number(values[15]?.textContent),
       states: globalThis.__feEventStudioE2E.states.length,
       errors: globalThis.__feEventStudioE2E.errors,
     };
@@ -158,7 +160,9 @@ try {
       && Number(values?.[8]?.textContent) >= 1
       && Number(values?.[9]?.textContent) >= 1
       && Number(values?.[10]?.textContent) >= 1
-      && Number(values?.[12]?.textContent) >= 1;
+      && Number(values?.[12]?.textContent) >= 1
+      && Number(values?.[13]?.textContent) >= 4
+      && Number(values?.[14]?.textContent) >= 1;
   });
   const initial = await readStudio();
   assert.equal(initial.width, 640);
@@ -174,6 +178,8 @@ try {
   assert.ok(initial.timerEvents === initial.frameEvents ||
     initial.timerEvents === initial.frameEvents + 1);
   assert.ok(initial.frameTimestamp > 0);
+  assert.equal(initial.boundedDrops, initial.timerEvents);
+  assert.ok(initial.latestValue >= 4 && initial.latestValue % 4 === 0);
   assert.equal(initial.observations, 1);
   assert.equal(initial.failures, 0);
   assert.deepEqual(initial.errors, []);
@@ -264,7 +270,7 @@ try {
   await page.waitForFunction(() => {
     const values = document.querySelectorAll("#event-studio .event-studio-grid strong");
     return values[0]?.textContent === "777" && values[1]?.textContent === "555"
-      && values[2]?.textContent === "200" && values[12]?.textContent === "2";
+      && values[2]?.textContent === "200" && values[14]?.textContent === "2";
   });
   const afterResize = await readStudio();
   assert.equal(afterResize.width, 777);
@@ -287,7 +293,7 @@ try {
     const values = document.querySelectorAll("#event-studio .event-studio-grid strong");
     return document.querySelector("#event-studio")?._active === true
       && values[8]?.textContent === "4"
-      && values[12]?.textContent === "3";
+      && values[14]?.textContent === "3";
   });
   const reconnected = await readStudio();
   assert.equal(reconnected.width, 777);
@@ -301,7 +307,7 @@ try {
   assert.equal(reconnected.failures, 0);
   assert.deepEqual(reconnected.errors, []);
   assert.deepEqual(browserErrors, []);
-  console.log("ok: Fe Event Studio viewport, pointer/touch, wheel, visibility, paced frame/timer, and lifecycle streams");
+  console.log("ok: Fe Event Studio viewport, pointer/touch, wheel, visibility, paced frame/timer, Scan forwarding, bounded drops, latest values, and lifecycle streams");
 } finally {
   await browser.close();
   await new Promise(resolvePromise => server.close(resolvePromise));

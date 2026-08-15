@@ -1248,6 +1248,29 @@ Origin: honesty audit of Claude Code session
   compiler gaps are recorded below; they are not hidden behind a JavaScript
   queue. Event Studio does not yet consume this queue, so bounded browser
   backpressure remains an integration task rather than an inferred claim.
+- The first real stream-to-actor consolidation now consumes that substrate.
+  `std::actor::forward_to_actor` owns affine subscription, `next_ready`
+  iteration, exact-once cancellation, actor suspension, a `Scan` of successful
+  deliveries, and distinct source-end/source-failure/source-cancel/sink-failure/
+  sink-cancel terminals. Its observation and failure mappings are pure `Fn`
+  values, so applications supply semantics without hiding authority or a
+  callback graph. Event Studio's four duplicated viewport/pointer/wheel/
+  visibility loops are replaced by four small nominal mappers over this one Fe
+  utility; the paced frame task remains separate because its timer-before-frame
+  ordering is meaningful application policy.
+- Event Studio also places `BoundedQueue` and `Latest` on the real resident
+  browser-Wasm path. Each Fe-owned timer tick runs a plainly labelled,
+  deterministic four-value acceptance burst through a three-slot
+  `DropNewest` queue and a one-slot `KeepLatest` queue, then projects cumulative
+  drops and the newest value. The source says explicitly that this proves policy
+  execution and is not yet a claim of concurrent pointer buffering. The
+  independent resident oracle now checks a 22-leaf nominal event and 18-leaf
+  state, including drop/latest semantics; standalone Chromium observes the real
+  standards streams, scan forwarding, bounded drops, latest replacement, and
+  five-scope reconnect cleanup. The combined gallery/SourceInspector Chromium
+  tape passes as well, a warm exact publication verifies 15 Fe modules / 79
+  files, and all 33 HTML-precompiler tests are green. No host queue, mapper
+  table, or reactive JSON was added.
 
 This ledger records achieved evidence, not a relaxation of the phases or the
 Definition of done below.
@@ -1340,7 +1363,7 @@ layers, not beside reusable application utilities.
 | Utility family | Proven now | Possible-now consolidation | Ideal/compiler-enabled endpoint |
 | --- | --- | --- | --- |
 | Runtime control | Typed `Pending`, `TaskOutcome`, nominal `Suspend`, generated continuation states, resident/scoped actors, typed actor sinks, timer suspension | One `std::runtime` facade; reusable source-to-actor forwarding; explicit scope/supervision policies | ZIO-like typed environment/exit/scope in Fe without a boxed monadic runtime; compiler-derived task handles and exactly-once structured cancellation |
-| Reactive | Typed `Event`, affine `Subscription`, effect-backed `EventSource`, zero-state `Stream`, `next_ready`, pure event map/filter/hold, executable `Scan`, `BoundedQueue`, and `Latest` | Stream-level scan/latest/backpressure, deterministic virtual-time tapes, shared forwarding loops, Event Studio integration | Static typed stream graphs with map/filter/scan/merge/switch/sample/throttle/debounce/share/replay fused by FCO into continuation machines |
+| Reactive | Typed `Event`, affine `Subscription`, effect-backed `EventSource`, zero-state `Stream`, `next_ready`, pure event map/filter/hold, executable `Scan`, `BoundedQueue`, `Latest`, shared source-to-actor forwarding, and Event Studio browser evidence | Stream-level merge/switch/sharing, deterministic virtual time, and true concurrent producer/consumer buffering | Static typed stream graphs with map/filter/scan/merge/switch/sample/throttle/debounce/share/replay fused by FCO into continuation machines |
 | Browser sources | Render surfaces, visibility, animation frames, viewport, Pointer Events, wheel; host listeners are scoped and demo-blind | Pointer capture, device loss, MessagePort, fetch, and GPU-completion sources; unify surface/component pointer facts | Standards-derived adapters generated from typed capabilities, with Fe owning combination, retry, lifetime, and gesture policy |
 | Components/pages | FCO-derived action/part identity, resident reducers, keyed repeats, Fe page composition, TodoMVC/Event Studio/SourceInspector | Split browser resource effects from DOM projection; typed resident UTF-8 stores/projectors; seal raw part minting and patch buffers | Compiler derives action sums, opaque target identities, event dispatch, initial DOM, minimal projection, tasks, and resources from state/handlers/view |
 | Surface interaction | FCO-derived parameter binding and cursor-aware Fe transitions; QCGA picking/drag/solve is Fe | Shared `PointerTracker`, `PanZoom`, `Orbit`, `PickDrag`, `RangeControl`, coordinate-space types, and capture requests | One typed interaction algebra consumed by every 2D/3D surface with no host gesture state |
@@ -1815,14 +1838,16 @@ and tested in Fe; JavaScript merely supplies frame/GPU-completion facts.
 
 Current reactive status: the synchronous/effect-backed source spine,
 `next_ready`, event-level map/filter/hold, pure `Scan`, explicit bounded queue,
-`Latest`, six real browser source families, scoped cancellation, and paced
-timer/frame task are landed with semantic gates. Event Studio currently proves
-the sources and five task lifetimes, not the complete combinator family. Next
-are stream-level scan/latest/backpressure with visible drop evidence, then
-merge/switch/sharing and the remaining device-loss/MessagePort/capture/fetch/
-GPU-completion sources. The four-slot queue is an honest current-Wasm envelope;
-general nested-array/target-sized aggregate scalarization must recover the
-ideal const-generic implementation.
+`Latest`, shared source-to-actor forwarding, six real browser source families,
+scoped cancellation, and paced timer/frame task are landed with semantic and
+browser gates. Event Studio proves scan-based forwarding and visibly executes a
+bounded/latest acceptance burst, but correctly labels it as deterministic
+policy evidence rather than concurrent pointer buffering. Next are true
+producer/consumer composition, merge/switch/sharing and deterministic virtual
+time, then the remaining device-loss/MessagePort/capture/fetch/GPU-completion
+sources. The four-slot queue is an honest current-Wasm envelope; general nested-
+array/target-sized aggregate scalarization must recover the ideal const-generic
+implementation.
 
 Exit condition: browser events resume a resident Fe actor; Fe owns combination,
 cancellation, state transitions, and scheduling policy.
@@ -2114,14 +2139,14 @@ The original provenance, typed surface ABI, Mandelbrot parity, Fe scheduling,
 resident state, and first runtime-control slices are landed. Continue in this
 order:
 
-1. Land pure `Scan`, bounded queue, and `Latest` with Fe and exact Wasm semantic
-   gates; preserve the compiler blockers discovered by the ideal const-generic
-   representation.
-2. Lift those policies to stream-level combinators and make Event Studio expose
-   accumulation, latest replacement, bounded drops, and exact cancellation in
-   its resident Fe state.
-3. Consolidate repeated source-to-actor loops behind a typed Fe utility without
-   hiding effects, authority, or failure policy.
+1. **Landed:** pure `Scan`, bounded queue, and `Latest` with Fe and exact Wasm
+   semantic gates, preserving the compiler blockers discovered by the ideal
+   const-generic representation.
+2. **Partly landed:** Event Studio now exposes scan accumulation, latest
+   replacement, bounded drops, and exact cancellation; true concurrent
+   producer/consumer buffering and the broader stream graph remain.
+3. **Landed:** repeated source-to-actor loops are consolidated behind a typed
+   Fe utility without hiding effects, authority, or failure policy.
 4. Fix rich aggregate/resumable scalarization, then simplify Event Studio's
    messages and constructors using derived defaults and nominal payloads.
 5. Complete merge, switch/latest, sharing/replay, debounce/throttle, and virtual

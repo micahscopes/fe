@@ -7,8 +7,10 @@
 //! JavaScript or JSON.
 
 use core::actor::ActorSink
+use core::Fn
 use core::pending::{Pending, Suspend, TaskOutcome}
 use ingot::wasm::WasmBackend
+use super::reactive::{Event, EventSource, Scan, Stream}
 use raw::send_begin as raw_send_begin
 
 pub struct BrowserActorSink {}
@@ -25,17 +27,122 @@ impl<E> ActorSink<WasmBackend, E> for BrowserActorSink {
 pub struct ActorMessage<E> { event: E }
 
 impl<E> ActorMessage<E> {
-    pub fn new(_ event: own E) -> Self { Self { event: event } }
+    pub fn new(_ event: own E) -> Self {
+        Self { event: event }
+    }
 
     /// Send this event and suspend until the owning actor has accepted and
     /// projected it.
     pub fn send(own self) -> TaskOutcome<u32, ()>
-        uses (
-            sink: mut ActorSink<WasmBackend, E>,
-            suspend: Suspend<WasmBackend, u32>,
-        )
+    uses (sink: mut ActorSink<WasmBackend, E>, suspend: Suspend<WasmBackend, u32>)
     {
         let pending = sink.send_begin(self.event)
         suspend.suspend(pending)
     }
+}
+
+/// Why a source-to-actor forwarding scope stopped. The cases stay nominal and
+/// distinct: source exhaustion is not cancellation, a source transport error
+/// is not sink rejection, and neither reserves an application payload value.
+pub enum ForwardTerminal {
+    SourceEnd,
+    SourceFailure,
+    SourceCancelled,
+    SinkFailure,
+    SinkCancelled,
+}
+
+impl Copy for ForwardTerminal {}
+
+/// Observable completion of one affine forwarding scope.
+pub struct ForwardReport { pub delivered: u32, pub error: u32, pub terminal: ForwardTerminal }
+
+impl Copy for ForwardReport {}
+
+struct CountDelivered {}
+
+impl<T> Fn<(u32, T), u32> for CountDelivered {
+    fn call(self, _ pair: own (u32, T)) -> u32 {
+        pair.0 + 1
+    }
+}
+
+/// Forward one typed source into the owning resident actor.
+///
+/// `map` and `map_failure` are pure Fe values. The function owns the sole
+/// subscription, exact-once cleanup, terminal distinctions, delivered-value
+/// scan, and suspension points; the browser cannot reconstruct this graph or
+/// choose its failure policy. Applications provide only the semantic mapping
+/// from observations/errors into their nominal actor event.
+pub fn forward_to_actor<T: Copy, E, F: Fn<T, E> + Copy, G: Fn<u32, E> + Copy>(
+    _ map: F,
+    _ map_failure: G,
+) -> ForwardReport
+uses (
+    source: mut EventSource<T>,
+    sink: mut ActorSink<WasmBackend, E>,
+    suspend: Suspend<WasmBackend, u32>,
+)
+{
+    let stream: Stream<T> = Stream::new()
+    let mut subscription = stream.subscribe()
+    let mut delivered = Scan::new(initial: 0)
+    let mut error: u32 = 0
+    let mut terminal = ForwardTerminal::SourceEnd
+    let mut running = true
+    while running {
+        let next = stream.next_ready(subscription)
+        subscription = next.0
+        match next.1 {
+            Event::Occurrence(value,) => {
+                let outcome = ActorMessage::new(event: map.call(value)).send()
+                match outcome {
+                    TaskOutcome::Success(_,) => {
+                        delivered = delivered
+                            .step(
+                                event: Event::occurrence(value: value),
+                                reducer: CountDelivered {},
+                            )
+                    },
+                    TaskOutcome::Failure(sink_error,) => {
+                        error = sink_error
+                        terminal = ForwardTerminal::SinkFailure
+                        running = false
+                    },
+                    TaskOutcome::Cancelled => {
+                        terminal = ForwardTerminal::SinkCancelled
+                        running = false
+                    },
+                }
+            },
+            Event::Absent => {},
+            Event::End => {
+                terminal = ForwardTerminal::SourceEnd
+                running = false
+            },
+            Event::Failure(source_error,) => {
+                error = source_error
+                let outcome = ActorMessage::new(event: map_failure.call(source_error)).send()
+                match outcome {
+                    TaskOutcome::Success(_,) => {
+                        terminal = ForwardTerminal::SourceFailure
+                    },
+                    TaskOutcome::Failure(sink_error,) => {
+                        error = sink_error
+                        terminal = ForwardTerminal::SinkFailure
+                    },
+                    TaskOutcome::Cancelled => {
+                        terminal = ForwardTerminal::SinkCancelled
+                    },
+                }
+                running = false
+            },
+            Event::Cancelled => {
+                terminal = ForwardTerminal::SourceCancelled
+                running = false
+            },
+        }
+    }
+    stream.cancel(subscription)
+    ForwardReport { delivered: delivered.state(), error: error, terminal: terminal }
 }
