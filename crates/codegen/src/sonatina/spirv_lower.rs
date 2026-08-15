@@ -309,7 +309,7 @@ fn inline_spirv_calls(module: &mut sonatina_ir::Module) {
         // In the SPIR-V lane the inliner is a LEGALITY pass, not an optimization:
         // `ensure_spirv_entry_call_free` below makes any residual call in the entry
         // a hard error, because the SPIR-V translator consumes only the entry
-        // function. So inline UNCONDITIONALLY — the per-inlinee size caps and depth
+        // function. So inline UNCONDITIONALLY. The per-inlinee size caps and depth
         // are 0 ("no cap": `exceeds_cap`/depth gate on `> 0`) and the thresholds are
         // maxed so the cost model never declines a call. The only remaining
         // decliners are the genuinely-irreducible cases (`#[inline(never)]`, a
@@ -375,13 +375,17 @@ fn ensure_spirv_entry_call_free(module: &sonatina_ir::Module) -> Result<(), Lowe
                     .get_sig(callee)
                     .map(|signature| signature.name().to_string())
                     .unwrap_or_else(|| format!("{callee:?}"));
-                Some(callee_name)
+                let linkage = module.ctx.func_linkage(callee);
+                let hints = module.ctx.func_hints(callee);
+                Some(format!(
+                    "`{callee_name}` (linkage={linkage:?}, hints={hints:?})"
+                ))
             })
         })
     });
     match residual {
         Some(callee) => Err(LowerError::Spirv(format!(
-            "SPIR-V entry `{entry_name}` is not call-free after bounded inlining; residual call to `{callee}`"
+            "SPIR-V entry `{entry_name}` is not call-free after bounded inlining; residual call to {callee}"
         ))),
         None => Ok(()),
     }
@@ -412,19 +416,22 @@ fn ensure_spirv_entries_call_free(
                 function.layout.iter_inst(block).find_map(|inst| {
                     let call = function.dfg.call_info(inst)?;
                     let callee = call.callee();
-                    Some(
-                        module
+                    Some({
+                        let name = module
                             .ctx
                             .get_sig(callee)
                             .map(|signature| signature.name().to_string())
-                            .unwrap_or_else(|| format!("{callee:?}")),
-                    )
+                            .unwrap_or_else(|| format!("{callee:?}"));
+                        let linkage = module.ctx.func_linkage(callee);
+                        let hints = module.ctx.func_hints(callee);
+                        format!("`{name}` (linkage={linkage:?}, hints={hints:?})")
+                    })
                 })
             })
         });
         if let Some(callee) = residual {
             return Err(LowerError::Spirv(format!(
-                "SPIR-V entry `{entry_name}` is not call-free after bounded inlining; residual call to `{callee}`"
+                "SPIR-V entry `{entry_name}` is not call-free after bounded inlining; residual call to {callee}"
             )));
         }
     }

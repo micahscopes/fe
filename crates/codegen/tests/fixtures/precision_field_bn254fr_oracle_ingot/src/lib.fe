@@ -26,8 +26,21 @@
 //! 0..19, bit-for-bit, over representative + edge BN254 Fr operand pairs
 //! (0, 1, p-1, near-2^256, random), run under wasmtime.
 
-use precision::field::{mul, Limbs, LimbLast, LimbMore}
+use precision::field::{mul, FieldElement, Limbs, LimbLast, LimbMore}
 use precision::bn254_fr::Bn254Fr
+
+pub fn field_bn254fr_roundtrip_u32(value: u32) -> (
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    let words = FieldElement<20, Bn254Fr>::from_u32(value).to_plain_words()
+    (
+        words[0], words[1], words[2], words[3], words[4],
+        words[5], words[6], words[7], words[8], words[9],
+        words[10], words[11], words[12], words[13], words[14],
+        words[15], words[16], words[17], words[18], words[19],
+    )
+}
 
 fn build_a(a0: u32, a1: u32, a2: u32, a3: u32, a4: u32, a5: u32, a6: u32, a7: u32, a8: u32, a9: u32, a10: u32, a11: u32, a12: u32, a13: u32, a14: u32, a15: u32, a16: u32, a17: u32, a18: u32, a19: u32) -> Limbs<20> {
     LimbMore { lead: a0, tail: LimbMore { lead: a1, tail: LimbMore { lead: a2, tail: LimbMore { lead: a3, tail: LimbMore { lead: a4, tail: LimbMore { lead: a5, tail: LimbMore { lead: a6, tail: LimbMore { lead: a7, tail: LimbMore { lead: a8, tail: LimbMore { lead: a9, tail: LimbMore { lead: a10, tail: LimbMore { lead: a11, tail: LimbMore { lead: a12, tail: LimbMore { lead: a13, tail: LimbMore { lead: a14, tail: LimbMore { lead: a15, tail: LimbMore { lead: a16, tail: LimbMore { lead: a17, tail: LimbMore { lead: a18, tail: LimbLast { value: a19 } } } } } } } } } } } } } } } } } } } }
@@ -140,4 +153,3 @@ pub fn field_bn254fr_mul_limb19(a0: u32, a1: u32, a2: u32, a3: u32, a4: u32, a5:
     let out = field_bn254fr_mul_result(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15, b16, b17, b18, b19)
     out.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.value
 }
-

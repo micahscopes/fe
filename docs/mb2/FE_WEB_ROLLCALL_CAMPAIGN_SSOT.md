@@ -40,6 +40,18 @@ Legend:
   backends. Gates: `precision_field_bn254fr_oracle.rs`,
   `loop_form_bn254_poseidon_hash2_matches_circomlib_and_u256_form_on_wasm_at_o0_and_o2`,
   and `poseidon_bn254_loop_native_cranelift_leg_is_honestly_reported`.
+- [x] Reusable field arithmetic now has an array-native `FieldWords<L>` core
+  and modulus-branded `FieldElement<L, M>` values with `+`, `*`, and canonical
+  Montgomery conversion. The structural HList API delegates to the same CIOS
+  core. The ProbeP51 gate checks both APIs, addition, multiplication, and u32
+  roundtrips against an independent bigint model; the BN254 gate remains
+  limb-identical to both established kernels.
+- [!] The reusable `FieldElement` API is executed on Wasm but is not yet a GPU
+  application API. The honest SPIR-V leg currently fails closed because the
+  call-free shader lowering retains the array-returning private `mul_words`
+  call. The proven generated Poseidon/Merkle kernels remain the GPU path.
+  Closing this requires aggregate-return inlining or real SPIR-V function-call
+  lowering, not consumer-side source expansion.
 - [!] Type-level limb expansion is intentionally not the crypto scaling path.
   The loop-form field kernel is the answer unless a new measured gate disproves
   it.
@@ -171,8 +183,11 @@ Legend:
   quotient/remainder and directed transition is checked, and one-unit
   mutations in all 11 expanded columns reject. Field-polynomial constraints,
   signed range proofs, activity/padding, and the domain-separated Poseidon
-  trace commitment are still pending, so this is witness evidence rather than
-  a proof.
+  trace commitment are still pending. The reusable modulus-branded array field
+  layer needed to replace the monolithic generated Poseidon fixture now
+  executes on Wasm, but its SPIR-V helper-call seam and the permutation lift
+  remain open. No trace root is claimed yet. This remains witness evidence
+  rather than a proof.
 - [ ] Produce a succinct proof whose verifier is demonstrably cheaper than
   replaying the orbit.
 - [ ] Define a typed proof encoding and prove browser/native verifier parity,

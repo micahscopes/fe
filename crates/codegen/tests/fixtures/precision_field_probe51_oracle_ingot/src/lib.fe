@@ -19,7 +19,10 @@
 //! BN254. Per-limb wasm-export wrappers, same convention as
 //! `precision_field_bn254fr_oracle_ingot`.
 
-use precision::field::{mul, Limbs, LimbLast, LimbMore, Modulus, mont_mu, LIMB_BITS}
+use precision::field::{
+    mul, FieldElement, FieldWords, Limbs, LimbLast, LimbMore, Modulus,
+    MontgomeryModulus, mont_mu, LIMB_BITS,
+}
 
 pub struct ProbeP51 {}
 
@@ -29,6 +32,10 @@ impl Modulus<4> for ProbeP51 {
     }
 
     fn mu() -> u32 { 8065 }
+}
+
+impl MontgomeryModulus<4> for ProbeP51 {
+    fn r2_words() -> FieldWords<4> { [1028, 8, 0, 0] }
 }
 
 static_assert(mont_mu(8063, LIMB_BITS) == 8065)
@@ -43,6 +50,18 @@ fn build_b(b0: u32, b1: u32, b2: u32, b3: u32) -> Limbs<4> {
 
 fn probe51_mul_result(a0: u32, a1: u32, a2: u32, a3: u32, b0: u32, b1: u32, b2: u32, b3: u32) -> Limbs<4> {
     mul<4, ProbeP51>(build_a(a0, a1, a2, a3), build_b(b0, b1, b2, b3))
+}
+
+fn probe51_mul_words_result(a0: u32, a1: u32, a2: u32, a3: u32, b0: u32, b1: u32, b2: u32, b3: u32) -> FieldWords<4> {
+    let a = FieldElement<4, ProbeP51>::from_montgomery_words([a0, a1, a2, a3])
+    let b = FieldElement<4, ProbeP51>::from_montgomery_words([b0, b1, b2, b3])
+    (a * b).to_montgomery_words()
+}
+
+fn probe51_add_words_result(a0: u32, a1: u32, a2: u32, a3: u32, b0: u32, b1: u32, b2: u32, b3: u32) -> FieldWords<4> {
+    let a = FieldElement<4, ProbeP51>::from_montgomery_words([a0, a1, a2, a3])
+    let b = FieldElement<4, ProbeP51>::from_montgomery_words([b0, b1, b2, b3])
+    (a + b).to_montgomery_words()
 }
 
 pub fn probe51_mul_limb0(a0: u32, a1: u32, a2: u32, a3: u32, b0: u32, b1: u32, b2: u32, b3: u32) -> u32 {
@@ -63,4 +82,52 @@ pub fn probe51_mul_limb2(a0: u32, a1: u32, a2: u32, a3: u32, b0: u32, b1: u32, b
 pub fn probe51_mul_limb3(a0: u32, a1: u32, a2: u32, a3: u32, b0: u32, b1: u32, b2: u32, b3: u32) -> u32 {
     let out = probe51_mul_result(a0, a1, a2, a3, b0, b1, b2, b3)
     out.tail.tail.tail.value
+}
+
+pub fn probe51_words_mul_limb0(a0: u32, a1: u32, a2: u32, a3: u32, b0: u32, b1: u32, b2: u32, b3: u32) -> u32 {
+    probe51_mul_words_result(a0, a1, a2, a3, b0, b1, b2, b3)[0]
+}
+
+pub fn probe51_words_mul_limb1(a0: u32, a1: u32, a2: u32, a3: u32, b0: u32, b1: u32, b2: u32, b3: u32) -> u32 {
+    probe51_mul_words_result(a0, a1, a2, a3, b0, b1, b2, b3)[1]
+}
+
+pub fn probe51_words_mul_limb2(a0: u32, a1: u32, a2: u32, a3: u32, b0: u32, b1: u32, b2: u32, b3: u32) -> u32 {
+    probe51_mul_words_result(a0, a1, a2, a3, b0, b1, b2, b3)[2]
+}
+
+pub fn probe51_words_mul_limb3(a0: u32, a1: u32, a2: u32, a3: u32, b0: u32, b1: u32, b2: u32, b3: u32) -> u32 {
+    probe51_mul_words_result(a0, a1, a2, a3, b0, b1, b2, b3)[3]
+}
+
+pub fn probe51_words_add_limb0(a0: u32, a1: u32, a2: u32, a3: u32, b0: u32, b1: u32, b2: u32, b3: u32) -> u32 {
+    probe51_add_words_result(a0, a1, a2, a3, b0, b1, b2, b3)[0]
+}
+
+pub fn probe51_words_add_limb1(a0: u32, a1: u32, a2: u32, a3: u32, b0: u32, b1: u32, b2: u32, b3: u32) -> u32 {
+    probe51_add_words_result(a0, a1, a2, a3, b0, b1, b2, b3)[1]
+}
+
+pub fn probe51_words_add_limb2(a0: u32, a1: u32, a2: u32, a3: u32, b0: u32, b1: u32, b2: u32, b3: u32) -> u32 {
+    probe51_add_words_result(a0, a1, a2, a3, b0, b1, b2, b3)[2]
+}
+
+pub fn probe51_words_add_limb3(a0: u32, a1: u32, a2: u32, a3: u32, b0: u32, b1: u32, b2: u32, b3: u32) -> u32 {
+    probe51_add_words_result(a0, a1, a2, a3, b0, b1, b2, b3)[3]
+}
+
+pub fn probe51_roundtrip_u32_limb0(value: u32) -> u32 {
+    FieldElement<4, ProbeP51>::from_u32(value).to_plain_words()[0]
+}
+
+pub fn probe51_roundtrip_u32_limb1(value: u32) -> u32 {
+    FieldElement<4, ProbeP51>::from_u32(value).to_plain_words()[1]
+}
+
+pub fn probe51_roundtrip_u32_limb2(value: u32) -> u32 {
+    FieldElement<4, ProbeP51>::from_u32(value).to_plain_words()[2]
+}
+
+pub fn probe51_roundtrip_u32_limb3(value: u32) -> u32 {
+    FieldElement<4, ProbeP51>::from_u32(value).to_plain_words()[3]
 }

@@ -18,7 +18,9 @@
 //! independently derives from `P0` -- if either constant drifts, `fe check`
 //! fails closed.
 
-use super::field::{LimbLast, LimbMore, Limbs, Modulus, mont_mu, LIMB_BITS}
+use super::field::{
+    FieldWords, LimbLast, LimbMore, Limbs, Modulus, MontgomeryModulus, mont_mu, LIMB_BITS,
+}
 
 pub struct Bn254Fr {}
 
@@ -30,6 +32,13 @@ impl Modulus<20> for Bn254Fr {
     }
 
     fn mu() -> u32 { 8191 }
+}
+
+impl MontgomeryModulus<20> for Bn254Fr {
+    fn r2_words() -> FieldWords<20> {
+        [1781, 2925, 5300, 368, 7395, 1646, 1416, 6340, 8118, 6687,
+         3668, 5603, 1986, 2079, 1400, 6264, 290, 5245, 84, 5]
+    }
 }
 
 static_assert(mont_mu(P0, LIMB_BITS) == 8191)

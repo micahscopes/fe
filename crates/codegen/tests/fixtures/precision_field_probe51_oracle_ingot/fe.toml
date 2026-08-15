@@ -3,4 +3,5 @@ name = "precision_field_probe51_oracle_gate"
 version = "0.1.0"
 
 [dependencies]
+core = "../../../../../ingots/core"
 precision = "../../../../../demos/sketches/precision"

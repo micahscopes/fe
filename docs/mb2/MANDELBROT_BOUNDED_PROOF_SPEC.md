@@ -95,6 +95,17 @@ magnitude, not by silently treating a negative i32 as an unconstrained field
 element. Claim, numeric-model version, padded trace length, and terminal row
 are transcript inputs.
 
+The reusable field substrate is now the modulus-branded
+`precision::field::FieldElement<L, M>` over array-native 13-bit limbs. It has
+independently checked addition, multiplication, and Montgomery conversion on a
+second modulus, while BN254 multiplication remains bit-identical to both prior
+kernels. This API executes on Wasm. Its honest SPIR-V gate currently fails
+closed on the retained array-returning `mul_words` call, so aggregate-return
+inlining or shader function-call lowering is required before it replaces the
+call-free generated GPU kernel. Poseidon constants and the permutation still
+need to be lifted from the proven generated fixture before a trace root can be
+claimed.
+
 The intended succinct construction is a transparent AIR plus FRI over a field
 with an audited two-adic domain. The first implementation should reuse the
 Fe field, Poseidon, and Merkle work already exercised by Rollcall. It must add:

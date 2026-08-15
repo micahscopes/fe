@@ -119,8 +119,8 @@ fn oversized_ordinary_inlinee_is_inlined_by_the_legality_pass() {
 fn recursive_ordinary_inlinee_fails_closed_with_callee_name() {
     // Recursion is genuinely irreducible for the inliner (`allow_inline_recursive`
     // is false), so even under the unconditional legality pass a self-recursive
-    // call survives as a residual and fails closed with the callee named — the
-    // fail-closed diagnostic the repurposed size test no longer covers.
+    // call survives as a residual and fails closed with the callee named. This
+    // is the fail-closed diagnostic the repurposed size test no longer covers.
     let source = r#"
 fn recur(x: i32) -> i32 { if x == 0 { 0 } else { recur(x: x - 1) } }
 pub fn recur_entry(x: i32) -> i32 { recur(x: x) }

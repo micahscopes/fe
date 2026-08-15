@@ -65,6 +65,15 @@ fn to_limbs(x: &BigUint, n: usize) -> Vec<u32> {
         .collect()
 }
 
+fn from_limbs(words: &[u32]) -> BigUint {
+    words
+        .iter()
+        .enumerate()
+        .fold(BigUint::from(0u32), |value, (index, word)| {
+            value | (BigUint::from(*word) << (LIMB_BITS * index))
+        })
+}
+
 /// The INDEPENDENT bigint oracle: `a*b*R^-1 mod p` via num-bigint (which
 /// knows nothing of 13-bit limbs or CIOS), decomposed into `n` limbs.
 fn mont_oracle(a: &BigUint, b: &BigUint, p: &BigUint, n: usize) -> Vec<u32> {
@@ -218,6 +227,28 @@ fn field_mul_limbs(
     out
 }
 
+fn bn254_roundtrip_u32(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    value: u32,
+) -> Vec<u32> {
+    use wasmtime::Val;
+    let function = instance
+        .get_func(&mut *store, "field_bn254fr_roundtrip_u32")
+        .expect("`field_bn254fr_roundtrip_u32` export should exist");
+    let mut results = vec![Val::I32(0); N];
+    function
+        .call(&mut *store, &[Val::I32(value as i32)], &mut results)
+        .unwrap_or_else(|error| panic!("BN254 u32 roundtrip should run: {error:?}"));
+    results
+        .into_iter()
+        .map(|result| match result {
+            Val::I32(word) => word as u32,
+            other => panic!("BN254 roundtrip result must be i32, got {other:?}"),
+        })
+        .collect()
+}
+
 /// THE GATE: `Field<p>::mul` at BN254 Fr matches BOTH existing kernels AND
 /// the independent num-bigint Montgomery oracle, limb for limb, over
 /// representative + edge operand pairs.
@@ -290,6 +321,14 @@ fn field_mul_matches_both_bn254_fr_kernels_and_bigint_oracle() {
     let (mut unrolled_store, unrolled_instance) = instantiate(&unrolled_wasm);
     let (mut loop_store, loop_instance) = instantiate(&loop_wasm);
     let (mut field_store, field_instance) = instantiate(&field_wasm);
+
+    for value in [0, 1, 8191, 8192, 65_535, u32::MAX] {
+        assert_eq!(
+            bn254_roundtrip_u32(&mut field_store, &field_instance, value),
+            to_limbs(&BigUint::from(value), n),
+            "BN254 u32 -> Montgomery -> plain roundtrip for {value}"
+        );
+    }
 
     for (name, al, bl, oracle) in &cases {
         let got_unrolled = reference_field_mul_limbs(
@@ -390,6 +429,60 @@ fn compile_probe51_gate_ingot_to_wasm() -> Vec<u8> {
     bytes
 }
 
+#[test]
+fn modulus_branded_field_element_spirv_leg_is_honestly_reported() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/precision_field_probe51_oracle_ingot");
+    let url = Url::from_directory_path(path.canonicalize().unwrap()).unwrap();
+    let mut db = DriverDataBase::default();
+    assert!(
+        !driver::init_ingot(&mut db, &url),
+        "precision FieldElement SPIR-V gate ingot initialization diagnostics"
+    );
+    let ingot = db
+        .workspace()
+        .containing_ingot(&db, url)
+        .expect("precision FieldElement SPIR-V gate ingot");
+    let top_mod = ingot.root_mod(&db);
+    let package =
+        mir::build_wasm_runtime_package_for_entry(&db, top_mod, "probe51_words_mul_limb0")
+            .expect("modulus-branded FieldElement should build a runtime package");
+    match fe_codegen::compile_runtime_package_spirv_with_workgroup(&db, &package, [1, 1, 1]) {
+        Ok(artifact) => {
+            assert_eq!(artifact.words.first().copied(), Some(0x0723_0203));
+            assert_eq!(
+                artifact.layout.word,
+                sonatina_codegen::isa::spirv::WordKind::U32
+            );
+            let wgsl = artifact.wgsl.expect("naga should emit browser WGSL");
+            let module = naga::front::wgsl::parse_str(&wgsl).expect("WGSL should reparse");
+            let mut validator = naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::default(),
+            );
+            validator
+                .validate(&module)
+                .expect("FieldElement WGSL should validate in the browser profile");
+        }
+        Err(error) => {
+            let message = error.to_string();
+            assert!(
+                message.contains("residual call to `mul_words`"),
+                "unexpected FieldElement SPIR-V failure: {message}"
+            );
+            assert!(
+                message.contains("linkage=Private") && !message.contains("ALWAYSINLINE"),
+                "the diagnostic must identify an ordinary private Fe helper: {message}"
+            );
+            eprintln!(
+                "FieldElement SPIR-V leg is not yet available: the call-free shader lowering \
+                 retained the array-returning Fe helper `mul_words`. Wasm semantics remain \
+                 independently executed; generated call-free GPU kernels remain canonical."
+            );
+        }
+    }
+}
+
 /// Execute the ProbeP51 gate ingot's per-limb wrappers
 /// (`probe51_mul_limb{k}(a0..a3,b0..b3) -> u32`) over all `N4` limb indices.
 fn probe51_field_mul_limbs(
@@ -397,11 +490,12 @@ fn probe51_field_mul_limbs(
     instance: &wasmtime::Instance,
     a_limbs: &[u32],
     b_limbs: &[u32],
+    prefix: &str,
 ) -> Vec<u32> {
     use wasmtime::Val;
     let mut out = Vec::with_capacity(N4);
     for k in 0..N4 {
-        let fn_name = format!("probe51_mul_limb{k}");
+        let fn_name = format!("{prefix}_limb{k}");
         let f = instance
             .get_func(&mut *store, &fn_name)
             .unwrap_or_else(|| panic!("`{fn_name}` export should exist"));
@@ -419,6 +513,27 @@ fn probe51_field_mul_limbs(
             Val::I32(v) => v as u32,
             other => panic!("{fn_name} result must be i32, got {other:?}"),
         });
+    }
+    out
+}
+
+fn probe51_roundtrip_u32(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    value: u32,
+) -> Vec<u32> {
+    let mut out = Vec::with_capacity(N4);
+    for k in 0..N4 {
+        let fn_name = format!("probe51_roundtrip_u32_limb{k}");
+        let function = instance
+            .get_typed_func::<i32, i32>(&mut *store, &fn_name)
+            .unwrap_or_else(|_| panic!("`{fn_name}` export should exist"));
+        out.push(
+            function
+                .call(&mut *store, value as i32)
+                .unwrap_or_else(|error| panic!("{fn_name}({value}) should run: {error:?}"))
+                as u32,
+        );
     }
     out
 }
@@ -489,7 +604,23 @@ fn field_mul_l4_second_modulus_matches_probe_kernel_and_bigint_oracle() {
             bl,
             n,
         );
-        let got_field = probe51_field_mul_limbs(&mut field_store, &field_instance, al, bl);
+        let got_field =
+            probe51_field_mul_limbs(&mut field_store, &field_instance, al, bl, "probe51_mul");
+        let got_words = probe51_field_mul_limbs(
+            &mut field_store,
+            &field_instance,
+            al,
+            bl,
+            "probe51_words_mul",
+        );
+        let got_sum = probe51_field_mul_limbs(
+            &mut field_store,
+            &field_instance,
+            al,
+            bl,
+            "probe51_words_add",
+        );
+        let sum_oracle = to_limbs(&((from_limbs(al) + from_limbs(bl)) % &p), n);
 
         assert_eq!(
             &got_probe, oracle,
@@ -505,12 +636,33 @@ fn field_mul_l4_second_modulus_matches_probe_kernel_and_bigint_oracle() {
             "Field<p>::mul::<4, ProbeP51>({name}) must be BIT-IDENTICAL, limb for limb, to the \
              independent 4-limb field_mul_probe kernel"
         );
+        assert_eq!(
+            &got_words, oracle,
+            "FieldWords::mul_words::<4, ProbeP51>({name}) must equal the num-bigint Montgomery \
+             oracle a*b*R^-1 mod p"
+        );
+        assert_eq!(
+            &got_words, &got_field,
+            "array-native and structural Field<p> boundaries must agree limb for limb for {name}"
+        );
+        assert_eq!(
+            got_sum, sum_oracle,
+            "modulus-branded FieldElement addition must equal (a+b) mod p for {name}"
+        );
+    }
+
+    for value in [0, 1, 8191, 8192, 65_535, u32::MAX] {
+        assert_eq!(
+            probe51_roundtrip_u32(&mut field_store, &field_instance, value),
+            to_limbs(&BigUint::from(value), n),
+            "u32 -> Montgomery -> plain roundtrip for {value}"
+        );
     }
 
     eprintln!(
-        "  Field<p>::mul::<4, ProbeP51> (p = 2^51 - 129, NON-BN254) == field_mul_probe == \
-         num-bigint Montgomery oracle, limb-for-limb, over {} operand products: the general \
-         loop form is not a re-blessed BN254 kernel.",
+        "  Field<p>::mul and array-native mul_words at ProbeP51 (p = 2^51 - 129, NON-BN254) \
+         == field_mul_probe == num-bigint Montgomery oracle, limb-for-limb, over {} operand \
+         products: the general loop form is not a re-blessed BN254 kernel.",
         cases.len()
     );
 }

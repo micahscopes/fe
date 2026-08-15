@@ -82,6 +82,7 @@
 //! monomorphized by any live call site, so they add zero emitted code today).
 
 use core::marker::Copy
+use core::ops::{Add, Mul}
 
 // -----------------------------------------------------------------------------
 // Limb storage: a linear, LEAST-SIGNIFICANT-LIMB-FIRST HList (`lead` = limb 0).
@@ -323,7 +324,217 @@ pub trait Modulus<const L: usize> {
     fn mu() -> u32
 }
 
-/// `Field<p>::mul`: the general entry point, LOOP FORM. `L` and `M` are
+/// Backend-neutral least-significant-limb-first field storage. This is the
+/// native representation for repeated runtime arithmetic such as Poseidon and FRI;
+/// the older `Limbs<L>` HList remains as a structural/FCO boundary adapter.
+pub type FieldWords<const L: usize> = [u32; L]
+
+/// A modulus that also supplies `R^2 mod p`, enabling canonical conversion
+/// from ordinary radix words into Montgomery form. This separate extension
+/// leaves arithmetic-only modulus implementations lightweight.
+pub trait MontgomeryModulus<const L: usize>: Modulus<L> {
+    fn r2_words() -> FieldWords<L>
+}
+
+fn modulus_words<const L: usize, M: Modulus<L>>() -> FieldWords<L>
+    where Limbs<L>: Head + ShiftAppend + Copy,
+{
+    let ln: u32 = L.downcast_truncate()
+    let mut words: FieldWords<L> = [0; L]
+    let mut source: Limbs<L> = M::p_limbs()
+    let mut i: u32 = 0
+    while i < ln {
+        words[i as usize] = source.head()
+        source = <Limbs<L> as ShiftAppend>::shift_append(t: source, v: 0)
+        i = i + 1
+    }
+    words
+}
+
+/// Array-native CIOS multiplication. Inputs and output are canonical field
+/// words in Montgomery form, so repeated calls compose without conversions.
+/// The modulus is still derived from the `Modulus<L>` instance rather than
+/// accepted as an untyped runtime array.
+pub fn mul_words<const L: usize, M: Modulus<L>>(
+    _ a: FieldWords<L>,
+    _ b: FieldWords<L>,
+) -> FieldWords<L>
+    where Limbs<L>: Head + ShiftAppend + Copy,
+{
+    let ln: u32 = L.downcast_truncate()
+    let mu: u32 = M::mu()
+
+    let pp = modulus_words<L, M>()
+
+    // CIOS core. The two limbs above position L-1 are scalar locals, keeping
+    // emitted code independent of L while preserving the required headroom.
+    let mut t: FieldWords<L> = [0; L]
+    let mut t_l: u32 = 0
+    let mut t_l1: u32 = 0
+    let mut r: u32 = 0
+    while r < ln {
+        let b_r: u32 = b[r as usize]
+        let mut c: u32 = 0
+        let mut j: u32 = 0
+        while j < ln {
+            let s: u32 = t[j as usize] + a[j as usize] * b_r + c
+            c = s >> LIMB_BITS
+            t[j as usize] = s - c * LIMB_BASE
+            j = j + 1
+        }
+        let s_l: u32 = t_l + c
+        let c_hi: u32 = s_l >> LIMB_BITS
+        t_l = s_l - c_hi * LIMB_BASE
+        t_l1 = c_hi
+
+        let m0: u32 = t[0] * mu
+        let m: u32 = m0 - (m0 >> LIMB_BITS) * LIMB_BASE
+        let mut cr: u32 = (t[0] + m * pp[0]) >> LIMB_BITS
+        let mut jr: u32 = 1
+        while jr < ln {
+            let sr: u32 = t[jr as usize] + m * pp[jr as usize] + cr
+            cr = sr >> LIMB_BITS
+            t[(jr - 1) as usize] = sr - cr * LIMB_BASE
+            jr = jr + 1
+        }
+        let s_top: u32 = t_l + cr
+        cr = s_top >> LIMB_BITS
+        t[(ln - 1) as usize] = s_top - cr * LIMB_BASE
+        t_l = t_l1 + cr
+        r = r + 1
+    }
+
+    let mut d: FieldWords<L> = [0; L]
+    let mut borrow: u32 = 0
+    let mut jc: u32 = 0
+    while jc < ln {
+        let dd: u32 = t[jc as usize] + LIMB_BASE - pp[jc as usize] - borrow
+        let db: u32 = dd >> LIMB_BITS
+        borrow = 1 - db
+        d[jc as usize] = dd - db * LIMB_BASE
+        jc = jc + 1
+    }
+    let keep_t: u32 = borrow
+    let keep_d: u32 = 1 - borrow
+    let mut out: FieldWords<L> = [0; L]
+    let mut js: u32 = 0
+    while js < ln {
+        out[js as usize] = keep_t * t[js as usize] + keep_d * d[js as usize]
+        js = js + 1
+    }
+    out
+}
+
+/// Canonical modular addition over the same array-native representation.
+/// The `2p < B^L` modulus precondition guarantees the top carry is zero.
+pub fn add_words<const L: usize, M: Modulus<L>>(
+    _ a: FieldWords<L>,
+    _ b: FieldWords<L>,
+) -> FieldWords<L>
+    where Limbs<L>: Head + ShiftAppend + Copy,
+{
+    let ln: u32 = L.downcast_truncate()
+    let pp = modulus_words<L, M>()
+    let mut sum: FieldWords<L> = [0; L]
+    let mut carry: u32 = 0
+    let mut i: u32 = 0
+    while i < ln {
+        let total = a[i as usize] + b[i as usize] + carry
+        carry = total >> LIMB_BITS
+        sum[i as usize] = total - carry * LIMB_BASE
+        i = i + 1
+    }
+
+    let mut difference: FieldWords<L> = [0; L]
+    let mut borrow: u32 = 0
+    let mut j: u32 = 0
+    while j < ln {
+        let value = sum[j as usize] + LIMB_BASE - pp[j as usize] - borrow
+        let no_borrow = value >> LIMB_BITS
+        borrow = 1 - no_borrow
+        difference[j as usize] = value - no_borrow * LIMB_BASE
+        j = j + 1
+    }
+    let keep_sum = borrow
+    let keep_difference = 1 - borrow
+    let mut out: FieldWords<L> = [0; L]
+    let mut k: u32 = 0
+    while k < ln {
+        out[k as usize] = keep_sum * sum[k as usize]
+            + keep_difference * difference[k as usize]
+        k = k + 1
+    }
+    out
+}
+
+/// A modulus-branded field element. The brand prevents accidental arithmetic
+/// between equally wide elements belonging to different fields, while the
+/// runtime representation remains exactly `[u32; L]`.
+pub struct FieldElement<const L: usize, M> { words: FieldWords<L> }
+
+impl<const L: usize, M> Copy for FieldElement<L, M> {}
+
+impl<const L: usize, M> FieldElement<L, M>
+    where M: Modulus<L>, Limbs<L>: Head + ShiftAppend + Copy,
+{
+    /// Import already-canonical Montgomery words. This is intended for
+    /// audited parameter tables such as Poseidon constants.
+    pub fn from_montgomery_words(_ words: FieldWords<L>) -> Self {
+        Self { words: words }
+    }
+
+    pub fn to_montgomery_words(self) -> FieldWords<L> {
+        self.words
+    }
+
+    pub fn to_plain_words(self) -> FieldWords<L> {
+        let mut one: FieldWords<L> = [0; L]
+        one[0] = 1
+        mul_words<L, M>(self.words, one)
+    }
+}
+
+impl<const L: usize, M> FieldElement<L, M>
+    where M: MontgomeryModulus<L>, Limbs<L>: Head + ShiftAppend + Copy,
+{
+    pub fn from_plain_words(_ words: FieldWords<L>) -> Self {
+        Self { words: mul_words<L, M>(words, M::r2_words()) }
+    }
+
+    /// Convert every u32 without truncation. Three 13-bit limbs are enough for
+    /// all 32 input bits; the const predicate rejects narrower field layouts.
+    pub fn from_u32(_ value: u32) -> Self where L >= 3 {
+        let ln: u32 = L.downcast_truncate()
+        let mut words: FieldWords<L> = [0; L]
+        let mut rest = value
+        let mut i: u32 = 0
+        while i < ln {
+            let next = rest >> LIMB_BITS
+            words[i as usize] = rest - next * LIMB_BASE
+            rest = next
+            i = i + 1
+        }
+        Self::from_plain_words(words)
+    }
+}
+
+impl<const L: usize, M> Add for FieldElement<L, M>
+    where M: Modulus<L>, Limbs<L>: Head + ShiftAppend + Copy,
+{
+    fn add(own self, _ other: own Self) -> Self {
+        Self { words: add_words<L, M>(self.words, other.words) }
+    }
+}
+
+impl<const L: usize, M> Mul for FieldElement<L, M>
+    where M: Modulus<L>, Limbs<L>: Head + ShiftAppend + Copy,
+{
+    fn mul(own self, _ other: own Self) -> Self {
+        Self { words: mul_words<L, M>(self.words, other.words) }
+    }
+}
+
+/// `Field<p>::mul`: the structural boundary entry point. `L` and `M` are
 /// explicit at every call site (mirrors `Expansion<N>`'s own doctrine: consts
 /// are not inferred from a concrete argument by this compiler).
 ///
@@ -337,13 +548,12 @@ pub trait Modulus<const L: usize> {
 /// touch as `t[20]`/`t[21]`: no padded TYPE exists, so `Pad2`/`{L+2}`/the
 /// DropLast wart all dissolve and the return type is plain `Limbs<L>`.
 ///
-/// BOUNDARY (Stage 1): operands and the modulus arrive as `Limbs<L>` cons
+/// BOUNDARY: operands arrive as `Limbs<L>` cons
 /// chains (the committed call/oracle ABI). O(L)-code spill/rebuild `while`
 /// loops move them to/from the `[u32; L]` arrays over the committed `Head` /
 /// `ShiftAppend` / `Zero` folds (spill: read `head()`, rotate down; rebuild:
-/// feed limb 0..L-1 into `shift_append` from `zero()`). This costs O(L^2)
-/// runtime limb moves per call but O(L) EMITTED bytes; Stage 2 flips the
-/// boundary to `[u32; L]` and deletes these adapters. Zero compiler changes.
+/// feed limb 0..L-1 into `shift_append` from `zero()`). Runtime-heavy callers
+/// use `mul_words` directly and pay neither operand spill nor result rebuild.
 ///
 /// SOUNDNESS PRECONDITION (now explicit): `2p < B^L` (one headroom bit in the
 /// top limb). Then with `a,b < p` every intermediate fits the window plus the
@@ -356,89 +566,30 @@ pub fn mul<const L: usize, M: Modulus<L>>(_ a: Limbs<L>, _ b: Limbs<L>) -> Limbs
     where Limbs<L>: Head + ShiftAppend + Zero + Copy,
 {
     let ln: u32 = L.downcast_truncate()
-    let mu: u32 = M::mu()
 
-    // ---- boundary spill (Stage 1 only; O(L) emitted code) ----
+    // ---- structural boundary spill ----
     // read limb 0 (`head`), rotate the chain down (`shift_append(_, 0)`), so
     // step i observes original limb i.
-    let mut aa: [u32; L] = [0; L]
-    let mut bb: [u32; L] = [0; L]
-    let mut pp: [u32; L] = [0; L]
+    let mut aa: FieldWords<L> = [0; L]
+    let mut bb: FieldWords<L> = [0; L]
     let mut sa: Limbs<L> = a
     let mut sb: Limbs<L> = b
-    let mut sp: Limbs<L> = M::p_limbs()
     let mut i: u32 = 0
     while i < ln {
         aa[i as usize] = sa.head()
         bb[i as usize] = sb.head()
-        pp[i as usize] = sp.head()
         sa = <Limbs<L> as ShiftAppend>::shift_append(t: sa, v: 0)
         sb = <Limbs<L> as ShiftAppend>::shift_append(t: sb, v: 0)
-        sp = <Limbs<L> as ShiftAppend>::shift_append(t: sp, v: 0)
         i = i + 1
     }
 
-    // ---- CIOS core (the enduring O(1)-code kernel; headroom = two scalars) ----
-    let mut t: [u32; L] = [0; L]
-    let mut t_l: u32 = 0
-    let mut t_l1: u32 = 0
-    let mut r: u32 = 0
-    while r < ln {
-        // multiply phase: t += aa * bb[r]
-        let b_r: u32 = bb[r as usize]
-        let mut c: u32 = 0
-        let mut j: u32 = 0
-        while j < ln {
-            let s: u32 = t[j as usize] + aa[j as usize] * b_r + c
-            c = s >> LIMB_BITS
-            t[j as usize] = s - c * LIMB_BASE
-            j = j + 1
-        }
-        let s_l: u32 = t_l + c
-        let c_hi: u32 = s_l >> LIMB_BITS
-        t_l = s_l - c_hi * LIMB_BASE
-        t_l1 = c_hi
-        // reduction phase: t := (t + m*pp) / B, m = (t[0]*mu) mod B
-        let m0: u32 = t[0] * mu
-        let m: u32 = m0 - (m0 >> LIMB_BITS) * LIMB_BASE
-        let mut cr: u32 = (t[0] + m * pp[0]) >> LIMB_BITS
-        let mut jr: u32 = 1
-        while jr < ln {
-            let sr: u32 = t[jr as usize] + m * pp[jr as usize] + cr
-            cr = sr >> LIMB_BITS
-            let jm1: u32 = jr - 1
-            t[jm1 as usize] = sr - cr * LIMB_BASE
-            jr = jr + 1
-        }
-        let s_top: u32 = t_l + cr
-        cr = s_top >> LIMB_BITS
-        let lm1: u32 = ln - 1
-        t[lm1 as usize] = s_top - cr * LIMB_BASE
-        t_l = t_l1 + cr
-        r = r + 1
-    }
-    // final t < 2p < B^L (precondition above), so t_l == t_l1 == 0 here.
+    let words = mul_words<L, M>(aa, bb)
 
-    // ---- constant-time canonicalize: compute d = t - p (base-complement) ----
-    let mut d: [u32; L] = [0; L]
-    let mut borrow: u32 = 0
-    let mut jc: u32 = 0
-    while jc < ln {
-        let dd: u32 = t[jc as usize] + LIMB_BASE - pp[jc as usize] - borrow
-        let db: u32 = dd >> LIMB_BITS
-        borrow = 1 - db
-        d[jc as usize] = dd - db * LIMB_BASE
-        jc = jc + 1
-    }
-    let keep_t: u32 = borrow
-    let keep_d: u32 = 1 - borrow
-
-    // ---- select + boundary rebuild (Stage 1 only; O(L) emitted code) ----
+    // ---- structural boundary rebuild ----
     let mut out: Limbs<L> = <Limbs<L> as Zero>::zero()
     let mut js: u32 = 0
     while js < ln {
-        let v: u32 = keep_t * t[js as usize] + keep_d * d[js as usize]
-        out = <Limbs<L> as ShiftAppend>::shift_append(t: out, v: v)
+        out = <Limbs<L> as ShiftAppend>::shift_append(t: out, v: words[js as usize])
         js = js + 1
     }
     out
