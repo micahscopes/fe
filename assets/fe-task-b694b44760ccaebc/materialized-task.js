@@ -124,6 +124,7 @@ function laneZero(value, lane) {
 }
 
 function encodedZero(lane) {
+  if (lane.kind === "bool") return false;
   return lane.bits === 64 ? 0n : 0;
 }
 
@@ -185,6 +186,17 @@ export function taskCancelled() {
   return outcome;
 }
 
+/// Inspect only the terminal class of a runtime-owned task outcome. The fixed
+/// completion broker uses this to decide whether a non-destructive select may
+/// hand its loser back to Fe; application payloads remain opaque lanes.
+export function taskOutcomeKind(outcome) {
+  const delivered = outcomeDetails.get(outcome);
+  if (delivered === undefined) {
+    throw new TypeError("task outcome was not constructed by this runtime");
+  }
+  return delivered.kind;
+}
+
 /// Lift one same-payload child completion into the compiler-derived
 /// `RaceOutcome<T>` success layout of `pending`. Failure/cancellation retain
 /// their outer `TaskOutcome` meaning. The schema and outcome are both opaque
@@ -222,6 +234,90 @@ export function raceTaskOutcome(pending, outcome, side) {
   const start = side === "left" ? 1 : 1 + width;
   for (let index = 0; index < width; index += 1) {
     lanes[start + index] = delivered.lanes[index];
+  }
+  return taskSuccess(lanes);
+}
+
+/// Lift one heterogeneous child success into the compiler-derived
+/// `SelectOutcome<B, E, L, R>` layout while returning the still-affine loser
+/// token in the winning variant. Child failure/cancellation remains the outer
+/// `TaskOutcome` terminal, so the broker can cancel the otherwise unreachable
+/// loser. No application schema or payload width is supplied by the host: the
+/// winning width comes from the runtime-owned child delivery and the complete
+/// envelope comes from the continuation compiled from Fe.
+export function selectTaskOutcome(pending, outcome, side, loserToken) {
+  const continuation = pendingDetails.get(pending);
+  const delivered = outcomeDetails.get(outcome);
+  if (continuation === undefined || delivered === undefined) {
+    throw new TypeError("task select requires runtime-owned pending and outcome values");
+  }
+  if (side !== "left" && side !== "right") {
+    throw new TypeError("task select side must be left or right");
+  }
+  const { delivery } = continuation;
+  const schemas = delivery.lanes.slice(
+    delivery.success.start,
+    delivery.success.start + delivery.success.count,
+  );
+  const errorWidth = delivery.failure.count;
+  if (schemas.length < 3 + 2 * errorWidth || schemas[0].kind !== "enum_tag"
+      || schemas[0].variants !== 6) {
+    throw new TypeError("task select success is not SelectOutcome<B, E, L, R>");
+  }
+
+  const lanes = schemas.map(encodedZero);
+  if (delivered.kind === "failure") {
+    if (delivered.lanes.length !== errorWidth) {
+      throw new TypeError(`task select child failure must contain ${errorWidth} lanes`);
+    }
+    lanes[0] = side === "left" ? 2 : 3;
+    const errorStart = schemas.length - 2 * errorWidth
+      + (side === "left" ? 0 : errorWidth);
+    for (let index = 0; index < errorWidth; index += 1) {
+      lanes[errorStart + index] = delivered.lanes[index];
+    }
+    return taskSuccess(lanes);
+  }
+  if (delivered.kind === "cancelled") {
+    lanes[0] = side === "left" ? 4 : 5;
+    return taskSuccess(lanes);
+  }
+  if (!Number.isInteger(loserToken) || loserToken < 0 || loserToken > 0xffff_ffff) {
+    throw new TypeError("task select loser must be a u32 affine token");
+  }
+
+  const winnerWidth = delivered.lanes.length;
+  const otherWidth = schemas.length - winnerWidth - 3 - 2 * errorWidth;
+  if (otherWidth < 0) {
+    throw new TypeError("task select child is wider than its SelectOutcome envelope");
+  }
+  const leftWidth = side === "left" ? winnerWidth : otherWidth;
+  const rightWidth = side === "right" ? winnerWidth : otherWidth;
+  const leftLoserIndex = 1 + leftWidth;
+  const rightVariantStart = leftLoserIndex + 1;
+  const rightLoserIndex = rightVariantStart;
+  const leftTokenSchema = schemas[leftLoserIndex];
+  const rightTokenSchema = schemas[rightLoserIndex];
+  for (const tokenSchema of [leftTokenSchema, rightTokenSchema]) {
+    if (tokenSchema?.kind !== "unsigned" || tokenSchema.bits !== 32) {
+      throw new TypeError("task select variants must carry one u32 Pending loser token");
+    }
+  }
+  if (rightVariantStart + 1 + rightWidth + 2 * errorWidth !== schemas.length) {
+    throw new TypeError("task select variants do not fill the compiler-derived envelope");
+  }
+
+  lanes[0] = side === "left" ? 0 : 1;
+  if (side === "left") {
+    for (let index = 0; index < leftWidth; index += 1) {
+      lanes[1 + index] = delivered.lanes[index];
+    }
+    lanes[leftLoserIndex] = loserToken;
+  } else {
+    lanes[rightLoserIndex] = loserToken;
+    for (let index = 0; index < rightWidth; index += 1) {
+      lanes[rightVariantStart + 1 + index] = delivered.lanes[index];
+    }
   }
   return taskSuccess(lanes);
 }

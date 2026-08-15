@@ -7,9 +7,11 @@
 
 use core::actor::{ActorSink, ScopedTask}
 use core::Fn
-use core::pending::{Suspend, TaskOutcome, Timer}
-use std::actor::{ActorMessage, BrowserActorSink, forward_to_actor}
-use std::reactive::{BoundedQueue, Event, EventSource, Latest, OverflowPolicy, Stream, latest}
+use core::pending::{Select, Suspend, TaskOutcome, Timer}
+use std::actor::{ActorMessage, BrowserActorSink, buffer_to_actor, forward_to_actor}
+use std::reactive::{
+    AsyncEventSource, Event, EventSource, Latest, OverflowPolicy, Stream, latest,
+}
 use std::host::{HostTimer, Resumable, sleep}
 use std::wasm::WasmBackend
 use std::web::component_events::{
@@ -27,6 +29,7 @@ use std::web::window_events::{
 }
 use std::web::component::{
     BrowserBytes,
+    BrowserString,
     ComponentEvent,
     ComponentEventKind,
     ComponentPatch,
@@ -265,15 +268,10 @@ fn frame_task(frame: AnimationFrame) -> StudioTask {
 }
 
 fn timer_task(sequence: u32) -> StudioTask {
-    // A deterministic four-value producer burst enters a three-slot Fe queue.
-    // This is an explicit acceptance probe for policy semantics, not a claim
-    // that browser pointer delivery is already concurrently buffered in Fe.
     let base = sequence * 4
-    let mut queue: BoundedQueue<u32> = BoundedQueue::new(initial: 0, capacity: 3)
-    queue = queue.offer(value: base + 1, overflow: OverflowPolicy::DropNewest)
-    queue = queue.offer(value: base + 2, overflow: OverflowPolicy::DropNewest)
-    queue = queue.offer(value: base + 3, overflow: OverflowPolicy::DropNewest)
-    queue = queue.offer(value: base + 4, overflow: OverflowPolicy::DropNewest)
+    // Keep the deterministic one-slot probe as visible `Latest` evidence. The
+    // bounded-drop counter now comes from the genuinely concurrent pointer
+    // producer/consumer below rather than this synthetic timer burst.
     let mut newest: Latest<u32> = latest(initial: 0)
     newest = newest.offer(value: base + 1, overflow: OverflowPolicy::KeepLatest)
     newest = newest.offer(value: base + 4, overflow: OverflowPolicy::KeepLatest)
@@ -289,7 +287,7 @@ fn timer_task(sequence: u32) -> StudioTask {
         document_hidden: false,
         frame_timestamp: 0.0,
         error: 0,
-        bounded_drops: queue.dropped(),
+        bounded_drops: 0,
         latest_value: newest.front().value_or(fallback: 0),
     }
 }
@@ -312,21 +310,31 @@ fn failed_task(error: u32) -> StudioTask {
     }
 }
 
-fn task_message(target: StudioAction, payload: StudioTask) -> ComponentEvent<
+fn task_message(target: StudioAction, payload: own StudioTask) -> ComponentEvent<
     StudioAction,
     StudioTask,
 > {
-    ComponentEvent<StudioAction, StudioTask>::task_payload(target: target, payload: payload)
+    ComponentEvent<StudioAction, StudioTask> {
+        kind: ComponentEventKind::TaskMessage,
+        target: target,
+        request: 0,
+        key: 0,
+        detail: 0,
+        value: 0.0,
+        timestamp: 0.0,
+        text: BrowserString { ptr: 0, len: 0 },
+        task: payload,
+    }
 }
 
 struct ViewportMessage {}
-struct PointerMessage {}
+struct BufferedPointerMessage {}
 struct WheelMessage {}
 struct VisibilityMessage {}
 struct FailureMessage {}
 
 impl Copy for ViewportMessage {}
-impl Copy for PointerMessage {}
+impl Copy for BufferedPointerMessage {}
 impl Copy for WheelMessage {}
 impl Copy for VisibilityMessage {}
 impl Copy for FailureMessage {}
@@ -340,11 +348,17 @@ impl Fn<Viewport, ComponentEvent<StudioAction, StudioTask>> for ViewportMessage 
     }
 }
 
-impl Fn<PointerSample, ComponentEvent<StudioAction, StudioTask>> for PointerMessage {
-    fn call(self, _ sample: own PointerSample) -> ComponentEvent<StudioAction, StudioTask> {
+impl Fn<(PointerSample, u32), ComponentEvent<StudioAction, StudioTask>> for BufferedPointerMessage {
+    fn call(
+        self,
+        _ observation: own (PointerSample, u32),
+    ) -> ComponentEvent<StudioAction, StudioTask> {
+        let (sample, dropped) = observation
+        let mut payload = pointer_task(sample)
+        payload.bounded_drops = dropped
         task_message(
             target: StudioAction::PointerObserved,
-            payload: pointer_task(sample),
+            payload: payload,
         )
     }
 }
@@ -406,12 +420,21 @@ uses (
 
 fn observe_pointers() -> u32
 uses (
-    pointer_events: mut EventSource<PointerSample>,
+    pointer_events: mut AsyncEventSource<WasmBackend, PointerSample>,
     sink: mut ActorSink<WasmBackend, ComponentEvent<StudioAction, StudioTask>>,
+    select: mut Select<WasmBackend, u32>,
     suspend: Suspend<WasmBackend, u32>,
 )
 {
-    forward_to_actor(map: PointerMessage {}, map_failure: FailureMessage {}).delivered
+    buffer_to_actor(
+        initial: PointerSample::placeholder(),
+        capacity: 3,
+        // Pointer state is time-varying: preserve the in-flight value, then
+        // keep the newest bounded backlog while the actor is busy.
+        overflow: OverflowPolicy::KeepLatest,
+        map: BufferedPointerMessage {},
+        map_failure: FailureMessage {},
+    ).delivered
 }
 
 fn observe_wheels() -> u32
@@ -540,9 +563,9 @@ actor EventStudio {
             .close()
             .open(element: PageElement::Paragraph)
             .attribute(value: PageAttribute::class(value: "event-studio-copy"))
-            .text(value: ui_text(value: "A deterministic Fe burst makes "))
-            .text(value: ui_text(value: "bounded drops and latest-value "))
-            .text(value: ui_text(value: "replacement visible."))
+            .text(value: ui_text(value: "Pointer bursts enter a bounded "))
+            .text(value: ui_text(value: "Fe queue; paced clock shows "))
+            .text(value: ui_text(value: "latest-value replacement."))
             .close()
             .open(element: PageElement::Div)
             .attribute(value: PageAttribute::class(value: "event-studio-grid"))
@@ -703,8 +726,9 @@ actor EventStudio {
 
     fn watch_pointer() -> u32 uses (ScopedTask) {
         with (
-            EventSource<PointerSample> = BrowserPointerEvents::new(),
+            AsyncEventSource<WasmBackend, PointerSample> = BrowserPointerEvents::new(),
             ActorSink<WasmBackend, ComponentEvent<StudioAction, StudioTask>> = BrowserActorSink {},
+            Select<WasmBackend, u32> = Resumable {},
             Suspend<WasmBackend, u32> = Resumable {},
         ) {
             observe_pointers()
@@ -780,6 +804,7 @@ actor EventStudio {
                             pointer_x = bounded_position(value: event.task.pointer_x)
                             pointer_y = bounded_position(value: event.task.pointer_y)
                             pointer_events = pointer_events + 1
+                            bounded_drops = event.task.bounded_drops
                         }
                         StudioAction::WheelObserved => {
                             pointer_x = bounded_position(value: event.task.pointer_x)
@@ -796,7 +821,6 @@ actor EventStudio {
                         }
                         StudioAction::TimerElapsed => {
                             timer_events = timer_events + 1
-                            bounded_drops = bounded_drops + event.task.bounded_drops
                             latest_value = event.task.latest_value
                         }
                         StudioAction::StreamFailed => { failures = failures + 1 }

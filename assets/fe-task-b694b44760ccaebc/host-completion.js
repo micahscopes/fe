@@ -7,8 +7,10 @@
 
 import {
   raceTaskOutcome,
+  selectTaskOutcome,
   taskCancelled,
   taskFailure,
+  taskOutcomeKind,
   taskSuccess,
 } from "./materialized-task.js";
 
@@ -154,11 +156,17 @@ export function createHostCompletionBroker(options = {}) {
     return slot;
   };
 
-  const settle = (slot, outcome, cancelled = false, raceSide = undefined) => {
+  const settle = (
+    slot,
+    outcome,
+    cancelled = false,
+    raceSide = undefined,
+    loserToken = undefined,
+  ) => {
     if (slot.state !== "pending") return false;
     slot.state = "settled";
     if (slot.cancelWork !== undefined) slot.cancelWork();
-    slot.resolve(Object.freeze({ outcome, cancelled, raceSide }));
+    slot.resolve(Object.freeze({ outcome, cancelled, raceSide, loserToken }));
     return true;
   };
 
@@ -443,6 +451,74 @@ export function createHostCompletionBroker(options = {}) {
     return race.token | 0;
   };
 
+  const beginSelect = (rawLeft, rawRight) => {
+    if (!Number.isInteger(rawLeft) || !Number.isInteger(rawRight)) {
+      throw new TypeError("fe:host::select_begin requires two i32 Wasm carriers");
+    }
+    const leftToken = rawLeft >>> 0;
+    const rightToken = rawRight >>> 0;
+    if (leftToken === rightToken) {
+      throw new TypeError("Fe select inputs must be distinct affine pending tokens");
+    }
+    const left = slots.get(leftToken);
+    const right = slots.get(rightToken);
+    for (const child of [left, right]) {
+      // A token returned as the loser of an earlier select may already have
+      // settled before Fe selects it again. It is still a valid unconsumed
+      // Pending value; awaiting its promise simply chooses it immediately.
+      if (child === undefined || (child.state !== "pending" && child.state !== "settled")
+          || child.claimed) {
+        throw new TypeError("Fe select input is stale, foreign, or already claimed");
+      }
+    }
+    const selected = allocate("select");
+    left.claimed = true;
+    right.claimed = true;
+    selected.cancelWork = () => {
+      for (const child of [left, right]) {
+        if (child.state === "pending") {
+          child.state = "settled";
+          if (child.cancelWork !== undefined) child.cancelWork();
+          child.resolve(Object.freeze({
+            outcome: taskCancelled(),
+            cancelled: true,
+            raceSide: undefined,
+            loserToken: undefined,
+          }));
+        }
+        slots.delete(child.token);
+      }
+    };
+    const choose = (winner, loser, side, delivery) => {
+      if (selected.state !== "pending") return;
+      if (taskOutcomeKind(delivery.outcome) === "success") {
+        // Transfer custody of the loser back into Fe. Clearing cancelWork is
+        // essential because `settle` ordinarily uses it to cancel children.
+        loser.claimed = false;
+        selected.cancelWork = undefined;
+        slots.delete(winner.token);
+        settle(
+          selected,
+          delivery.outcome,
+          false,
+          side,
+          loser.token,
+        );
+      } else {
+        // Failure/cancellation is terminal and has no payload position in
+        // which an affine loser could be returned. The normal cancelWork path
+        // therefore cancels and removes it exactly once.
+        // Child terminals are typed SelectOutcome variants, not cancellation
+        // of the owning scoped task. The broker cancels the unreachable loser
+        // but lets Fe observe and classify the winning side.
+        settle(selected, delivery.outcome, false, side);
+      }
+    };
+    left.settled.then(delivery => choose(left, right, "left", delivery));
+    right.settled.then(delivery => choose(right, left, "right", delivery));
+    return selected.token | 0;
+  };
+
   const firstPendingReceive = () => {
     while (receives.length > 0) {
       const slot = slots.get(receives.shift());
@@ -471,11 +547,25 @@ export function createHostCompletionBroker(options = {}) {
     }
     try {
       const delivery = await slot.settled;
-      if (delivery.raceSide !== undefined) {
+      if (delivery.raceSide !== undefined && slot.kind === "race") {
         return Object.freeze({
           outcome: raceTaskOutcome(pending, delivery.outcome, delivery.raceSide),
           cancelled: delivery.cancelled,
           raceSide: undefined,
+          loserToken: undefined,
+        });
+      }
+      if (delivery.raceSide !== undefined && slot.kind === "select") {
+        return Object.freeze({
+          outcome: selectTaskOutcome(
+            pending,
+            delivery.outcome,
+            delivery.raceSide,
+            delivery.loserToken,
+          ),
+          cancelled: delivery.cancelled,
+          raceSide: undefined,
+          loserToken: undefined,
         });
       }
       return delivery;
@@ -559,6 +649,7 @@ export function createHostCompletionBroker(options = {}) {
     sleep_begin: beginTimer,
     recv_begin: beginReceive,
     race_begin: beginRace,
+    select_begin: beginSelect,
     wait: () => {
       throw new Error("fe:host::wait is unavailable in the non-blocking browser broker");
     },

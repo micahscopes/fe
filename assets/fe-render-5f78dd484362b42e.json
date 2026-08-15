@@ -2281,7 +2281,7 @@
       {
         "id": "ingots/core/src/pending.fe",
         "kind": "fe",
-        "sha256": "a6cbebaa665204c10a696fe78241c0daf05c01f2748a44c7ae38d1672642d2a6"
+        "sha256": "1dfbc488a06d2642946f51bea18a6d956ea66310f92586ff686ce76ac11af51b"
       },
       {
         "id": "ingots/core/src/prelude.fe",
