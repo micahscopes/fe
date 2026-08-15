@@ -69,7 +69,8 @@
 
 use std::webgpu::{
     FragmentSurface, GpuProgram, LatestPerFrame, ResponsiveBacking,
-    SurfaceQuality, SurfaceScheduling, SurfaceTransition, WebGpuBackend,
+    StandardSurfaceRecovery, SurfaceQuality, SurfaceRecovery, SurfaceScheduling,
+    SurfaceTransition, WebGpuBackend,
 }
 use std::web::view::{
     ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface,
@@ -254,6 +255,7 @@ const fn mandelbrot_params() -> MandelbrotParams {
 
 actor MandelbrotSurface uses (
     GpuProgram<WebGpuBackend>, SurfaceQuality<ResponsiveBacking>,
+    SurfaceRecovery<StandardSurfaceRecovery>,
 ) {
     /// Complex-plane centre, as a flat FOUR-WORD `Expansion<4>` per axis
     /// (`w0..w3`, most significant first, kept flat so the typed Wasm ABI and

@@ -10,8 +10,10 @@ use std::webgpu::{
     GpuProgram as PassGraph,
     LatestPerFrame,
     ResponsiveBacking,
+    StandardSurfaceRecovery,
     StorageBuffer as OrbitBuffer,
     SurfaceQuality,
+    SurfaceRecovery,
     SurfaceScheduling,
     SurfaceTransition,
     Workgroup as Threads,
@@ -168,6 +170,7 @@ const fn mandelbrot_params() -> MandelbrotParams {
 
 actor PerturbationalMandelbrot uses (
     PassGraph<WebGpuBackend>, SurfaceQuality<ResponsiveBacking>,
+    SurfaceRecovery<StandardSurfaceRecovery>,
 ) {
     orbit: OrbitBuffer<ComplexQF32Bits, ORBIT_SAMPLES>,
     /// Most-significant word of a four-word center expansion. Fe gesture math

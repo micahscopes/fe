@@ -1,0 +1,170 @@
+//! Executable semantic surface for `std::text`.
+//!
+//! Every entry delegates to the production Fe implementation. The Rust gate
+//! supplies bytes and interprets receipts independently; this ingot is not a
+//! second UTF-8 implementation and byte identity is never the oracle.
+
+use std::text::{
+    TextLayout, TextLayoutProvider, TextSlot, TextTable, Utf8Buffer, Utf8View,
+}
+
+fn text(_ ptr: u32, _ len: u32) -> Utf8View {
+    Utf8Buffer::with_len(ptr: ptr, len: len, capacity: len).view()
+}
+
+fn hash(_ value: Utf8View) -> u32 {
+    let mut state: u32 = 2166136261
+    let mut index: u32 = 0
+    while index < value.len() {
+        state = (state ^ value.byte(index: index) as u32) * 16777619
+        index = index + 1
+    }
+    state
+}
+
+fn view_receipt(_ value: Utf8View) -> u64 {
+    ((value.len() as u64) << 32) | (hash(value: value) as u64)
+}
+
+pub fn utf8_valid(ptr: u32, len: u32) -> u32 {
+    if text(ptr: ptr, len: len).is_valid() { 1 } else { 0 }
+}
+
+pub fn utf8_char_count(ptr: u32, len: u32) -> u32 {
+    text(ptr: ptr, len: len).char_count()
+}
+
+pub fn utf8_boundary(ptr: u32, len: u32, index: u32) -> u32 {
+    if text(ptr: ptr, len: len).is_char_boundary(index: index) { 1 } else { 0 }
+}
+
+pub fn utf8_decode(ptr: u32, len: u32, index: u32) -> u64 {
+    let decoded = text(ptr: ptr, len: len).decode(index: index)
+    let valid: u64 = if decoded.valid { 1 } else { 0 }
+    (decoded.value as u64) | ((decoded.next as u64) << 32) | (valid << 63)
+}
+
+pub fn utf8_prefix(ptr: u32, len: u32, capacity: u32) -> u64 {
+    view_receipt(value: text(ptr: ptr, len: len).prefix(capacity: capacity))
+}
+
+pub fn utf8_slice(ptr: u32, len: u32, start: u32, end: u32) -> u64 {
+    let sliced = text(ptr: ptr, len: len).slice(start: start, end: end)
+    if sliced.valid == false { return 0 }
+    ((1 as u64) << 63) | view_receipt(value: sliced.view)
+}
+
+pub fn utf8_relations(
+    left_ptr: u32,
+    left_len: u32,
+    right_ptr: u32,
+    right_len: u32,
+) -> u32 {
+    let left = text(ptr: left_ptr, len: left_len)
+    let right = text(ptr: right_ptr, len: right_len)
+    let mut receipt: u32 = 0
+    if left.equals(other: right) { receipt = receipt | 1 }
+    if left.starts_with(prefix: right) { receipt = receipt | 2 }
+    if left.ends_with(suffix: right) { receipt = receipt | 4 }
+    if left.contains(needle: right) { receipt = receipt | 8 }
+    if left.compare(other: right) < 0 { receipt = receipt | 16 }
+    if left.compare(other: right) == 0 { receipt = receipt | 32 }
+    if left.compare(other: right) > 0 { receipt = receipt | 64 }
+    receipt
+}
+
+fn write_receipt(_ len: u32, _ truncated: bool, _ valid: bool) -> u32 {
+    let truncated_bit: u32 = if truncated { 1 } else { 0 }
+    let valid_bit: u32 = if valid { 1 } else { 0 }
+    len | (truncated_bit << 16) | (valid_bit << 17)
+}
+
+pub fn utf8_replace(
+    destination: u32,
+    capacity: u32,
+    source: u32,
+    source_len: u32,
+) -> u32 {
+    let write = Utf8Buffer::empty(
+        ptr: destination,
+        capacity: capacity,
+    ).replace(value: text(ptr: source, len: source_len))
+    write_receipt(
+        len: write.buffer.len(),
+        truncated: write.truncated,
+        valid: write.valid,
+    )
+}
+
+pub fn utf8_append(
+    destination: u32,
+    len: u32,
+    capacity: u32,
+    source: u32,
+    source_len: u32,
+) -> u32 {
+    let write = Utf8Buffer::with_len(
+        ptr: destination,
+        len: len,
+        capacity: capacity,
+    ).append(suffix: text(ptr: source, len: source_len))
+    write_receipt(
+        len: write.buffer.len(),
+        truncated: write.truncated,
+        valid: write.valid,
+    )
+}
+
+pub fn utf8_literal(destination: u32, capacity: u32) -> u32 {
+    let write = Utf8Buffer::empty(
+        ptr: destination,
+        capacity: capacity,
+    ).replace_literal("A¢ह🌍z")
+    write_receipt(
+        len: write.buffer.len(),
+        truncated: write.truncated,
+        valid: write.valid,
+    )
+}
+
+pub fn utf8_literal4(
+    destination: u32,
+    capacity: u32,
+    a: u8,
+    b: u8,
+    c: u8,
+    d: u8,
+) -> u32 {
+    let write = Utf8Buffer::empty(
+        ptr: destination,
+        capacity: capacity,
+    ).replace_literal([a, b, c, d])
+    write_receipt(
+        len: write.buffer.len(),
+        truncated: write.truncated,
+        valid: write.valid,
+    )
+}
+
+const FIRST_CAPACITY: u32 = 5
+const ROW_CAPACITY: u32 = 7
+const ROW_COUNT: u32 = 3
+const ROW_STRIDE: u32 = 10
+const ROW_PREFIX: u32 = 2
+const LAST_CAPACITY: u32 = 2
+
+struct OracleLayout {
+    first: TextSlot<FIRST_CAPACITY>,
+    rows: TextTable<ROW_CAPACITY, ROW_COUNT, ROW_STRIDE, ROW_PREFIX>,
+    last: TextSlot<LAST_CAPACITY>,
+}
+
+derive TextLayout for OracleLayout using TextLayoutProvider
+
+pub fn text_layout_receipt(base: u32) -> u64 {
+    let layout = <OracleLayout as TextLayout>::text_layout()
+    let first = layout.first.buffer(base: base, len: 0).browser_string().ptr - base
+    let row = layout.rows.buffer(base: base, index: 2, len: 0).browser_string().ptr - base
+    let last = layout.last.buffer(base: base, len: 0).browser_string().ptr - base
+    (first as u64) | ((row as u64) << 16) | ((last as u64) << 32)
+}

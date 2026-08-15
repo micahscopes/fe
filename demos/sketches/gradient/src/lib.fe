@@ -12,7 +12,8 @@
 
 use std::webgpu::{
     FragmentSurface, GpuProgram, LatestPerFrame, ResponsiveBacking,
-    SurfaceQuality, SurfaceScheduling, SurfaceTransition, WebGpuBackend,
+    StandardSurfaceRecovery, SurfaceQuality, SurfaceRecovery, SurfaceScheduling,
+    SurfaceTransition, WebGpuBackend,
 }
 use std::web::view::{
     ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface,
@@ -56,6 +57,7 @@ const fn gradient_params() -> GradientParams {
 
 actor GradientSurface uses (
     GpuProgram<WebGpuBackend>, SurfaceQuality<ResponsiveBacking>,
+    SurfaceRecovery<StandardSurfaceRecovery>,
 ) {
     angle: f32,
     offset: f32,

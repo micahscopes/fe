@@ -27,7 +27,8 @@
 use core::marker::Copy
 use std::webgpu::{
     FragmentSurface, GpuProgram, LatestPerFrame, ResponsiveBacking,
-    SurfaceQuality, SurfaceScheduling, SurfaceTransition, WebGpuBackend,
+    StandardSurfaceRecovery, SurfaceQuality, SurfaceRecovery, SurfaceScheduling,
+    SurfaceTransition, WebGpuBackend,
 }
 use std::web::view::{
     ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface,
@@ -169,6 +170,7 @@ const fn qcga_params() -> QcgaParams {
 
 actor QcgaSurface uses (
     GpuProgram<WebGpuBackend>, SurfaceQuality<ResponsiveBacking>,
+    SurfaceRecovery<StandardSurfaceRecovery>,
 ) {
     /// Pencil parameter: [0, 1] sweeps cylinder -> sphere-like -> plane pair.
     lambda: f32,

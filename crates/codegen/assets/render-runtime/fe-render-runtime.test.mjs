@@ -7,7 +7,7 @@ import test from "node:test";
 globalThis.HTMLElement = class HTMLElement {};
 globalThis.customElements = { define() {} };
 
-const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, SurfaceEventKind, SurfaceQueueAction, createGpuDeviceLifecycleChannel, fitBackingExtent, rasterDrawVertexCount, requiresGpuPassGraph, unpackCanvasReadback, writeSurfaceEventBatch } =
+const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, fitBackingExtent, rasterDrawVertexCount, requiresGpuPassGraph, unpackCanvasReadback, writeSurfaceEventBatch } =
   await import("./fe-render-runtime.js");
 
 test("shared GPU lifecycle channel replays ordered typed facts and reports bounded gaps", async () => {
@@ -48,6 +48,163 @@ test("shared GPU lifecycle observation is affine and cancellable", async () => {
     () => channel.publish(GpuDeviceEventKind.Unknown, GpuDeviceLossReason.NotLost, 0),
     /cannot publish the Fe placeholder/,
   );
+});
+
+test("typed recovery transports raw device facts and validates Fe recovery decisions", () => {
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._runWasmArenaEpoch = call => call();
+  const calls = [];
+  surface._surfaceRecoveryKernel = (...facts) => {
+    calls.push(facts);
+    return SurfaceRecoveryAction.RetryDevice;
+  };
+  assert.equal(
+    surface._runSurfaceRecovery(
+      GpuDeviceEventKind.Lost,
+      GpuDeviceLossReason.Unknown,
+      true,
+      true,
+      7,
+    ),
+    SurfaceRecoveryAction.RetryDevice,
+  );
+  assert.deepEqual(calls, [[
+    GpuDeviceEventKind.Lost,
+    GpuDeviceLossReason.Unknown,
+    1,
+    1,
+    7,
+  ]]);
+
+  surface._surfaceRecoveryKernel = () => 4;
+  assert.throws(
+    () => surface._runSurfaceRecovery(
+      GpuDeviceEventKind.Lost,
+      GpuDeviceLossReason.Unknown,
+      true,
+      true,
+      7,
+    ),
+    /invalid action/,
+  );
+});
+
+test("shared recovery aggregates Fe retry demand and has no host retry budget", async () => {
+  const trace = [];
+  const fake = (name, actions) => ({
+    _beginDeviceLoss(reason, generation) {
+      trace.push(`${name}:lost:${reason}:${generation}`);
+      return actions.shift();
+    },
+    _continueDeviceRecovery(reason, generation) {
+      trace.push(`${name}:unavailable:${reason}:${generation}`);
+      return actions.shift();
+    },
+    async _realizeDeviceRecovery(action) {
+      trace.push(`${name}:realize:${action}`);
+    },
+    async _completeDeviceRecovery(gpu) {
+      trace.push(`${name}:recovered:${gpu.generation}`);
+    },
+    _fail(error) {
+      trace.push(`${name}:error:${error.message}`);
+    },
+  });
+  const first = fake("first", [
+    SurfaceRecoveryAction.RetryDevice,
+    SurfaceRecoveryAction.RetryDevice,
+    SurfaceRecoveryAction.DegradeToWasm,
+  ]);
+  const second = fake("second", [
+    SurfaceRecoveryAction.RetryDevice,
+    SurfaceRecoveryAction.FailSurface,
+  ]);
+  const idle = fake("idle", [SurfaceRecoveryAction.NoAction]);
+  let acquisitions = 0;
+  const result = await coordinateSurfaceRecovery(
+    [first, second, idle],
+    GpuDeviceLossReason.Unknown,
+    4,
+    async () => {
+      acquisitions += 1;
+      trace.push(`acquire:${acquisitions}`);
+      return null;
+    },
+  );
+  assert.equal(result, null);
+  assert.equal(acquisitions, 2, "two Fe-selected rounds, not one request per surface");
+  assert.deepEqual(trace, [
+    "first:lost:1:4",
+    "second:lost:1:4",
+    "idle:lost:1:4",
+    "idle:realize:0",
+    "acquire:1",
+    "first:unavailable:1:4",
+    "second:unavailable:1:4",
+    "second:realize:3",
+    "acquire:2",
+    "first:unavailable:1:4",
+    "first:realize:2",
+  ]);
+
+  trace.length = 0;
+  const left = fake("left", [SurfaceRecoveryAction.RetryDevice]);
+  const right = fake("right", [SurfaceRecoveryAction.RetryDevice]);
+  const waitingPoster = fake("poster", [SurfaceRecoveryAction.NoAction]);
+  acquisitions = 0;
+  const fresh = { generation: 5 };
+  assert.equal(
+    await coordinateSurfaceRecovery(
+      [left, right, waitingPoster],
+      GpuDeviceLossReason.Unknown,
+      4,
+      async () => {
+        acquisitions += 1;
+        return fresh;
+      },
+    ),
+    fresh,
+  );
+  assert.equal(acquisitions, 1);
+  assert.deepEqual(trace, [
+    "left:lost:1:4",
+    "right:lost:1:4",
+    "poster:lost:1:4",
+    "poster:realize:0",
+    "left:recovered:5",
+    "right:recovered:5",
+    "poster:recovered:5",
+  ]);
+});
+
+test("shared device loss does not fail or recover a surface already on its Fe-selected Wasm fallback", async () => {
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._fsm = "live";
+  surface._mode = "wasm-2d";
+  surface._posterRecoveryActive = false;
+  surface._recoveryObservedLoss = false;
+  let lifecycle = 0;
+  surface._deliverSurfaceLifecycle = () => { lifecycle += 1; };
+
+  const action = surface._beginDeviceLoss(GpuDeviceLossReason.Unknown, 4);
+  assert.equal(action, SurfaceRecoveryAction.NoAction);
+  await surface._realizeDeviceRecovery(action, GpuDeviceLossReason.Unknown, 4);
+  await surface._completeDeviceRecovery({ generation: 5 }, 4);
+
+  assert.equal(surface._mode, "wasm-2d");
+  assert.equal(surface._fsm, "live");
+  assert.equal(lifecycle, 0);
+});
+
+test("ordinary poster failures preserve the original error outside device recovery", async () => {
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._gpuOverride = undefined;
+  surface._posterRecoveryActive = false;
+  const original = new Error("ordinary pass-graph failure");
+  surface._renderPoster = async () => { throw original; };
+
+  await assert.rejects(surface._renderPosterWithRecovery(), error => error === original);
+  assert.equal(surface._posterRecoveryActive, false);
 });
 
 test("legacy CPU backing ceiling preserves aspect instead of cropping work", () => {
@@ -164,6 +321,7 @@ test("device fallback re-runs Fe quality with CPU capability before rendering", 
   const surface = Object.create(FeSurfaceElement.prototype);
   surface._fsm = "live";
   surface._mode = "webgpu";
+  surface._recoveryWasLive = true;
   surface._gpu = { device: {} };
   surface._liveContext = null;
   surface._adoptedContext = null;
@@ -185,7 +343,11 @@ test("device fallback re-runs Fe quality with CPU capability before rendering", 
   const renders = [];
   surface._renderWasmInto = (_canvas, width, height) => renders.push([width, height]);
 
-  await surface._onDeviceLoss(null);
+  await surface._realizeDeviceRecovery(
+    SurfaceRecoveryAction.DegradeToWasm,
+    GpuDeviceLossReason.Unknown,
+    1,
+  );
 
   assert.deepEqual(capabilities, [null]);
   assert.deepEqual(renders, [[128, 64]]);
@@ -854,7 +1016,11 @@ test("the fixed host obeys resident Fe lifecycle scheduling decisions", () => {
 
   assert.deepEqual(
     surface._deliverSurfaceLifecycle(SurfaceEventKind.GpuComplete, 21.5),
-    { present: false, requestFrame: true, queueAction: 0 },
+    {
+      present: false,
+      requestFrame: true,
+      queueAction: 0,
+    },
   );
   assert.deepEqual(scheduleCalls, [[SurfaceEventKind.GpuComplete, 21.5, 1]]);
   assert.equal(requested, 1);
@@ -948,7 +1114,7 @@ test("the fixed host realizes Fe-authored sample and drop queue effects", () => 
   surface._surfaceScheduleKernel = () => [0, 0, 3];
   assert.throws(
     () => surface._runSurfaceSchedule(SurfaceEventKind.Gesture, 1, 1),
-    /valid queue action/,
+    /must return present\/request_frame and a valid queue action/,
   );
 });
 

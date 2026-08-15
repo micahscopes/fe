@@ -250,7 +250,7 @@ fn validate_struct_attrs<'db>(
             AttrRule::supported(
                 "gpu_control",
                 GPU_IDENT_FORM,
-                "`#[gpu_control(surface)]`, `#[gpu_control(typed_surface)]`, `#[gpu_control(surface_schedule)]`, or `#[gpu_control(surface_quality)]`",
+                "`#[gpu_control(surface)]`, `#[gpu_control(typed_surface)]`, `#[gpu_control(surface_schedule)]`, `#[gpu_control(surface_quality)]`, or `#[gpu_control(surface_recovery)]`",
             ),
             AttrRule::supported("web_surface_event", BARE_FORM, "`#[web_surface_event]`"),
             AttrRule::supported(
@@ -277,6 +277,21 @@ fn validate_struct_attrs<'db>(
                 "web_surface_backing_extent",
                 BARE_FORM,
                 "`#[web_surface_backing_extent]`",
+            ),
+            AttrRule::supported(
+                "web_surface_recovery_event",
+                BARE_FORM,
+                "`#[web_surface_recovery_event]`",
+            ),
+            AttrRule::supported(
+                "web_surface_recovery_state",
+                BARE_FORM,
+                "`#[web_surface_recovery_state]`",
+            ),
+            AttrRule::supported(
+                "web_surface_recovery_step",
+                BARE_FORM,
+                "`#[web_surface_recovery_step]`",
             ),
             AttrRule::supported("gpu_workgroup", BARE_FORM, "`#[gpu_workgroup]`"),
             AttrRule::supported("gpu_dispatch", GPU_IDENT_FORM, "`#[gpu_dispatch(fixed)]`"),

@@ -301,11 +301,6 @@ pub fn allocate_component_buffer(capacity: u32) -> BrowserBytes {
     BrowserBytes { ptr: allocation.address(), len: capacity }
 }
 
-/// Borrow UTF-8 bytes already held in resident Wasm memory.
-pub fn component_string(ptr: u32, len: u32) -> BrowserString {
-    BrowserString { ptr: ptr, len: len }
-}
-
 /// A compact Fe-side builder for the fixed component effect vocabulary.
 /// Commands are deliberately defined here in Fe so application code remains
 /// readable and the browser host only transports and applies typed effects.

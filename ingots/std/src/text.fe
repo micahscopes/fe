@@ -1,0 +1,551 @@
+//! Bounded UTF-8 values for resident/browser Fe programs.
+//!
+//! `String<N>` remains the compact inline word used by contracts and CTFE.
+//! This module covers longer, mutable resident text in wasm32 memory. It keeps
+//! the browser ABI's `(ptr, len)` descriptor at the edge while application code
+//! works with UTF-8 views, bounded buffers, code points, and typed text regions.
+//!
+//! String literals contextually lower to `[u8; N]`, so
+//! `buffer.replace_literal("hello")` infers `N` and emits the literal bytes from
+//! Fe source. No application-authored byte list or host-side codec is involved.
+
+use core::{BrowserPtr, BrowserString, Copy}
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+
+fn byte_at(ptr: u32, index: u32) -> BrowserPtr<u8> {
+    BrowserPtr::from_u32(ptr + index)
+}
+
+fn ascii_space(value: u8) -> bool {
+    value == 32 || value == 9 || value == 10 || value == 13
+}
+
+/// One decoded Unicode scalar value. `next` is the next byte offset.
+pub struct Utf8CodePoint {
+    pub value: u32,
+    pub next: u32,
+    pub valid: bool,
+}
+
+impl Copy for Utf8CodePoint {}
+
+/// A checked slice attempt. An invalid byte boundary returns `valid = false`
+/// and an empty view rather than manufacturing malformed UTF-8.
+pub struct Utf8Slice {
+    pub view: Utf8View,
+    pub valid: bool,
+}
+
+impl Copy for Utf8Slice {}
+
+/// A borrowed UTF-8 byte range in resident wasm32 memory.
+pub struct Utf8View {
+    ptr: u32,
+    len: u32,
+}
+
+impl Copy for Utf8View {}
+
+impl Utf8View {
+    /// Adopt the fixed host boundary's validated UTF-8 descriptor.
+    pub fn from_browser(_ value: own BrowserString) -> Self {
+        Self { ptr: value.ptr, len: value.len }
+    }
+
+    /// Empty UTF-8 at an arbitrary resident address.
+    pub fn empty() -> Self {
+        Self { ptr: 0, len: 0 }
+    }
+
+    pub fn len(self) -> u32 { self.len }
+    pub fn is_empty(self) -> bool { self.len == 0 }
+
+    pub fn browser_string(self) -> BrowserString {
+        BrowserString { ptr: self.ptr, len: self.len }
+    }
+
+    pub fn byte(self, index: u32) -> u8 {
+        if index >= self.len { core::panic() }
+        byte_at(ptr: self.ptr, index: index).read()
+    }
+
+    pub fn is_char_boundary(self, index: u32) -> bool {
+        if index == 0 || index == self.len { return true }
+        if index > self.len { return false }
+        (self.byte(index: index) & 192) != 128
+    }
+
+    /// Decode one scalar with full overlong/surrogate/range validation.
+    pub fn decode(self, index: u32) -> Utf8CodePoint {
+        if index >= self.len {
+            return Utf8CodePoint { value: 0, next: index, valid: false }
+        }
+        let b0: u32 = self.byte(index: index) as u32
+        if b0 < 128 {
+            return Utf8CodePoint { value: b0, next: index + 1, valid: true }
+        }
+        if b0 >= 194 && b0 <= 223 && index + 1 < self.len {
+            let b1: u32 = self.byte(index: index + 1) as u32
+            if (b1 & 192) == 128 {
+                return Utf8CodePoint {
+                    value: ((b0 & 31) << 6) | (b1 & 63),
+                    next: index + 2,
+                    valid: true,
+                }
+            }
+        }
+        if b0 >= 224 && b0 <= 239 && index + 2 < self.len {
+            let b1: u32 = self.byte(index: index + 1) as u32
+            let b2: u32 = self.byte(index: index + 2) as u32
+            let continuation = (b1 & 192) == 128 && (b2 & 192) == 128
+            let range = (b0 != 224 || b1 >= 160) && (b0 != 237 || b1 < 160)
+            if continuation && range {
+                return Utf8CodePoint {
+                    value: ((b0 & 15) << 12) | ((b1 & 63) << 6) | (b2 & 63),
+                    next: index + 3,
+                    valid: true,
+                }
+            }
+        }
+        if b0 >= 240 && b0 <= 244 && index + 3 < self.len {
+            let b1: u32 = self.byte(index: index + 1) as u32
+            let b2: u32 = self.byte(index: index + 2) as u32
+            let b3: u32 = self.byte(index: index + 3) as u32
+            let continuation = (b1 & 192) == 128 && (b2 & 192) == 128 && (b3 & 192) == 128
+            let range = (b0 != 240 || b1 >= 144) && (b0 != 244 || b1 < 144)
+            if continuation && range {
+                return Utf8CodePoint {
+                    value: ((b0 & 7) << 18) | ((b1 & 63) << 12) | ((b2 & 63) << 6) | (b3 & 63),
+                    next: index + 4,
+                    valid: true,
+                }
+            }
+        }
+        Utf8CodePoint { value: 0, next: index + 1, valid: false }
+    }
+
+    pub fn is_valid(self) -> bool {
+        let mut index: u32 = 0
+        while index < self.len {
+            let decoded = self.decode(index: index)
+            if decoded.valid == false { return false }
+            index = decoded.next
+        }
+        true
+    }
+
+    pub fn char_count(self) -> u32 {
+        let mut index: u32 = 0
+        let mut count: u32 = 0
+        while index < self.len {
+            let decoded = self.decode(index: index)
+            if decoded.valid == false { core::panic() }
+            index = decoded.next
+            count = count + 1
+        }
+        count
+    }
+
+    pub fn slice(self, start: u32, end: u32) -> Utf8Slice {
+        if start > end || end > self.len
+            || self.is_char_boundary(index: start) == false
+            || self.is_char_boundary(index: end) == false
+        {
+            return Utf8Slice { view: Self::empty(), valid: false }
+        }
+        Utf8Slice {
+            view: Self { ptr: self.ptr + start, len: end - start },
+            valid: true,
+        }
+    }
+
+    /// Largest valid prefix whose byte length does not exceed `capacity`.
+    pub fn prefix(self, capacity: u32) -> Self {
+        if self.len <= capacity { return self }
+        let mut index: u32 = 0
+        let mut end: u32 = 0
+        while index < self.len {
+            let decoded = self.decode(index: index)
+            if decoded.valid == false { core::panic() }
+            if decoded.next > capacity {
+                return Self { ptr: self.ptr, len: end }
+            }
+            end = decoded.next
+            index = decoded.next
+        }
+        Self { ptr: self.ptr, len: end }
+    }
+
+    /// Trim the ASCII whitespace recognized by HTML form conventions.
+    pub fn trim_ascii(self) -> Self {
+        let mut start: u32 = 0
+        let mut end = self.len
+        while start < end && ascii_space(self.byte(index: start)) { start = start + 1 }
+        while end > start && ascii_space(self.byte(index: end - 1)) { end = end - 1 }
+        Self { ptr: self.ptr + start, len: end - start }
+    }
+
+    pub fn equals(self, other: Utf8View) -> bool {
+        if self.len != other.len { return false }
+        let mut index: u32 = 0
+        while index < self.len {
+            if self.byte(index: index) != other.byte(index: index) { return false }
+            index = index + 1
+        }
+        true
+    }
+
+    /// Bytewise UTF-8 ordering, which agrees with Unicode scalar ordering.
+    pub fn compare(self, other: Utf8View) -> i32 {
+        let limit = if self.len < other.len { self.len } else { other.len }
+        let mut index: u32 = 0
+        while index < limit {
+            let left = self.byte(index: index)
+            let right = other.byte(index: index)
+            if left < right { return -1 }
+            if left > right { return 1 }
+            index = index + 1
+        }
+        if self.len < other.len { return -1 }
+        if self.len > other.len { return 1 }
+        0
+    }
+
+    pub fn starts_with(self, prefix: Utf8View) -> bool {
+        if prefix.len > self.len { return false }
+        let mut index: u32 = 0
+        while index < prefix.len {
+            if self.byte(index: index) != prefix.byte(index: index) { return false }
+            index = index + 1
+        }
+        true
+    }
+
+    pub fn ends_with(self, suffix: Utf8View) -> bool {
+        if suffix.len > self.len { return false }
+        let start = self.len - suffix.len
+        let mut index: u32 = 0
+        while index < suffix.len {
+            if self.byte(index: start + index) != suffix.byte(index: index) { return false }
+            index = index + 1
+        }
+        true
+    }
+
+    pub fn contains(self, needle: Utf8View) -> bool {
+        if needle.len == 0 { return true }
+        if needle.len > self.len { return false }
+        let mut start: u32 = 0
+        while start + needle.len <= self.len {
+            let mut index: u32 = 0
+            while index < needle.len
+                && self.byte(index: start + index) == needle.byte(index: index)
+            {
+                index = index + 1
+            }
+            if index == needle.len { return true }
+            start = start + 1
+        }
+        false
+    }
+}
+
+/// Result of a bounded mutation. `truncated` is explicit policy evidence;
+/// `valid` reports whether an arbitrary byte-array literal/value was UTF-8.
+pub struct Utf8Write {
+    pub buffer: Utf8Buffer,
+    pub truncated: bool,
+    pub valid: bool,
+}
+
+impl Copy for Utf8Write {}
+
+/// A bounded mutable resident string. Mutations return the new descriptor;
+/// byte ownership remains in the caller-provided resident allocation.
+pub struct Utf8Buffer {
+    ptr: u32,
+    len: u32,
+    capacity: u32,
+}
+
+impl Copy for Utf8Buffer {}
+
+impl Utf8Buffer {
+    pub fn empty(ptr: u32, capacity: u32) -> Self {
+        Self { ptr: ptr, len: 0, capacity: capacity }
+    }
+
+    pub fn with_len(ptr: u32, len: u32, capacity: u32) -> Self {
+        if len > capacity { core::panic() }
+        Self { ptr: ptr, len: len, capacity: capacity }
+    }
+
+    pub fn len(self) -> u32 { self.len }
+    pub fn capacity(self) -> u32 { self.capacity }
+    pub fn is_empty(self) -> bool { self.len == 0 }
+    pub fn view(self) -> Utf8View { Utf8View { ptr: self.ptr, len: self.len } }
+    pub fn browser_string(self) -> BrowserString { self.view().browser_string() }
+
+    pub fn clear(self) -> Self { Self { ptr: self.ptr, len: 0, capacity: self.capacity } }
+
+    pub fn clear_storage(self) -> Self {
+        let mut index: u32 = 0
+        while index < self.capacity {
+            byte_at(ptr: self.ptr, index: index).write(0)
+            index = index + 1
+        }
+        self.clear()
+    }
+
+    pub fn replace(self, value: Utf8View) -> Utf8Write {
+        let retained = value.prefix(capacity: self.capacity)
+        let mut index: u32 = 0
+        while index < retained.len {
+            byte_at(ptr: self.ptr, index: index).write(retained.byte(index: index))
+            index = index + 1
+        }
+        Utf8Write {
+            buffer: Self { ptr: self.ptr, len: retained.len, capacity: self.capacity },
+            truncated: retained.len != value.len,
+            valid: true,
+        }
+    }
+
+    pub fn replace_browser(self, _ value: own BrowserString) -> Utf8Write {
+        self.replace(Utf8View::from_browser(value))
+    }
+
+    pub fn replace_trimmed_browser(self, _ value: own BrowserString) -> Utf8Write {
+        self.replace(Utf8View::from_browser(value).trim_ascii())
+    }
+
+    /// Copy an inferred owned `[u8; N]`. A source string literal selects this
+    /// shape automatically. The complete aggregate remains a Fe value; the
+    /// runtime does not receive a host-side codec or byte list.
+    pub fn replace_literal<const N: usize>(self, _ value: own [u8; N]) -> Utf8Write {
+        let source_len = value.len()
+        let mut source_index: usize = 0
+        let mut destination_index: u32 = 0
+        let mut retaining = true
+        let mut valid = true
+        while source_index < source_len {
+            let b0: u32 = value[source_index] as u32
+            let mut width: usize = 0
+            if b0 < 128 { width = 1 }
+            if b0 >= 194 && b0 <= 223 {
+                if source_index + 1 < source_len {
+                    let b1: u32 = value[source_index + 1] as u32
+                    if (b1 & 192) == 128 { width = 2 }
+                }
+            }
+            if b0 >= 224 && b0 <= 239 {
+                if source_index + 2 < source_len {
+                    let b1: u32 = value[source_index + 1] as u32
+                    let b2: u32 = value[source_index + 2] as u32
+                    let continuation = (b1 & 192) == 128 && (b2 & 192) == 128
+                    let range = (b0 != 224 || b1 >= 160) && (b0 != 237 || b1 < 160)
+                    if continuation && range { width = 3 }
+                }
+            }
+            if b0 >= 240 && b0 <= 244 {
+                if source_index + 3 < source_len {
+                    let b1: u32 = value[source_index + 1] as u32
+                    let b2: u32 = value[source_index + 2] as u32
+                    let b3: u32 = value[source_index + 3] as u32
+                    let continuation = (b1 & 192) == 128
+                        && (b2 & 192) == 128
+                        && (b3 & 192) == 128
+                    let range = (b0 != 240 || b1 >= 144) && (b0 != 244 || b1 < 144)
+                    if continuation && range { width = 4 }
+                }
+            }
+            if width == 0 {
+                valid = false
+                retaining = false
+                source_index = source_index + 1
+            } else {
+                let mut fits = false
+                if width == 1 { fits = destination_index + 1 <= self.capacity }
+                if width == 2 { fits = destination_index + 2 <= self.capacity }
+                if width == 3 { fits = destination_index + 3 <= self.capacity }
+                if width == 4 { fits = destination_index + 4 <= self.capacity }
+                if retaining && fits {
+                    byte_at(ptr: self.ptr, index: destination_index).write(value[source_index])
+                    if width > 1 {
+                        byte_at(ptr: self.ptr, index: destination_index + 1)
+                            .write(value[source_index + 1])
+                    }
+                    if width > 2 {
+                        byte_at(ptr: self.ptr, index: destination_index + 2)
+                            .write(value[source_index + 2])
+                    }
+                    if width > 3 {
+                        byte_at(ptr: self.ptr, index: destination_index + 3)
+                            .write(value[source_index + 3])
+                    }
+                    if width == 1 { destination_index = destination_index + 1 }
+                    if width == 2 { destination_index = destination_index + 2 }
+                    if width == 3 { destination_index = destination_index + 3 }
+                    if width == 4 { destination_index = destination_index + 4 }
+                } else {
+                    retaining = false
+                }
+                if width == 1 { source_index = source_index + 1 }
+                if width == 2 { source_index = source_index + 2 }
+                if width == 3 { source_index = source_index + 3 }
+                if width == 4 { source_index = source_index + 4 }
+            }
+        }
+        Utf8Write {
+            buffer: Self {
+                ptr: self.ptr,
+                len: destination_index,
+                capacity: self.capacity,
+            },
+            truncated: retaining == false,
+            valid: valid,
+        }
+    }
+
+    pub fn append(self, suffix: Utf8View) -> Utf8Write {
+        let available = self.capacity - self.len
+        let retained = suffix.prefix(capacity: available)
+        let mut index: u32 = 0
+        while index < retained.len {
+            byte_at(ptr: self.ptr, index: self.len + index).write(retained.byte(index: index))
+            index = index + 1
+        }
+        Utf8Write {
+            buffer: Self {
+                ptr: self.ptr,
+                len: self.len + retained.len,
+                capacity: self.capacity,
+            },
+            truncated: retained.len != suffix.len,
+            valid: true,
+        }
+    }
+}
+
+/// A recursively composable resident text layout. Slots, strided tables, and
+/// FCO-derived records all implement this same interface, so a derived layout
+/// can itself become a region of a larger layout without a parallel trait or
+/// an application-authored offset table.
+pub trait TextLayout {
+    const BYTE_CAPACITY: u32
+    const fn text_layout_at(_ offset: u32) -> Self
+
+    const fn text_layout() -> Self {
+        Self::text_layout_at(offset: 0)
+    }
+}
+
+/// Typed zero seed for the provider's generated `u32` offset fold. Using an
+/// associated constant rather than an untyped integer literal lets ordinary
+/// checking infer every intermediate addition.
+impl TextLayout for () {
+    const BYTE_CAPACITY: u32 = 0
+    const fn text_layout_at(_ offset: u32) -> Self { () }
+}
+
+pub struct TextLayoutProvider {}
+
+impl Derive<TextLayout> for TextLayoutProvider {
+    const fn derive<T>(ev: own Evidence<TextLayout<T>>) -> Evidence<TextLayout<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<TextLayout<T>>,
+        )
+    {
+        let mut layout = builder.struct_init()
+        let mut span = builder.trait_const(
+            builder.ty<()>(), "BYTE_CAPACITY",
+        )
+        let origin = builder.arg_ref("offset")
+        for field in reflect.fields() {
+            builder.require<TextLayout>(field.ty())
+            layout = builder.with_field(
+                layout,
+                field,
+                builder.trait_call(
+                    field.ty(),
+                    "text_layout_at",
+                    builder.add(origin, span),
+                ),
+            )
+            span = builder.add(
+                span,
+                builder.trait_const(field.ty(), "BYTE_CAPACITY"),
+            )
+        }
+        builder.emit_const("BYTE_CAPACITY", builder.ty<u32>(), span)
+        builder.emit_method("text_layout_at", layout)
+        builder.finish()
+        ev
+    }
+}
+
+/// One bounded string in a derived layout.
+pub struct TextSlot<const CAPACITY: u32> { offset: u32 }
+
+impl<const CAPACITY: u32> Copy for TextSlot<CAPACITY> {}
+
+impl<const CAPACITY: u32> TextLayout for TextSlot<CAPACITY> {
+    const BYTE_CAPACITY: u32 = CAPACITY
+    const fn text_layout_at(_ offset: u32) -> Self { Self { offset: offset } }
+}
+
+impl<const CAPACITY: u32> TextSlot<CAPACITY> {
+    pub fn buffer(self, base: u32, len: u32) -> Utf8Buffer {
+        Utf8Buffer::with_len(ptr: base + self.offset, len: len, capacity: CAPACITY)
+    }
+}
+
+const fn table_span(capacity: u32, count: u32, stride: u32, prefix: u32) -> u32 {
+    if count == 0 { return prefix }
+    if stride < capacity { core::panic() }
+    prefix + (count - 1) * stride + capacity
+}
+
+/// A homogeneous, optionally strided table of bounded strings. `PREFIX`
+/// permits interleaved record headers without leaking pointer arithmetic into
+/// the application. Bounds and stride invariants are checked in Fe.
+pub struct TextTable<
+    const CAPACITY: u32,
+    const COUNT: u32,
+    const STRIDE: u32,
+    const PREFIX: u32,
+> { offset: u32 }
+
+impl<
+    const CAPACITY: u32,
+    const COUNT: u32,
+    const STRIDE: u32,
+    const PREFIX: u32,
+> Copy for TextTable<CAPACITY, COUNT, STRIDE, PREFIX> {}
+
+impl<
+    const CAPACITY: u32,
+    const COUNT: u32,
+    const STRIDE: u32,
+    const PREFIX: u32,
+> TextLayout for TextTable<CAPACITY, COUNT, STRIDE, PREFIX> {
+    const BYTE_CAPACITY: u32 = table_span(CAPACITY, COUNT, STRIDE, PREFIX)
+    const fn text_layout_at(_ offset: u32) -> Self { Self { offset: offset } }
+}
+
+impl<
+    const CAPACITY: u32,
+    const COUNT: u32,
+    const STRIDE: u32,
+    const PREFIX: u32,
+> TextTable<CAPACITY, COUNT, STRIDE, PREFIX> {
+    pub fn buffer(self, base: u32, index: u32, len: u32) -> Utf8Buffer {
+        if index >= COUNT { core::panic() }
+        Utf8Buffer::with_len(
+            ptr: base + self.offset + PREFIX + index * STRIDE,
+            len: len,
+            capacity: CAPACITY,
+        )
+    }
+}

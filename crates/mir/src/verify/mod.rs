@@ -36,6 +36,7 @@ pub enum VerifyError<'db> {
         crate::runtime::RuntimeObject<'db>,
         crate::runtime::RuntimeSectionName,
     ),
+    InvalidFunctionBody(String, Box<RuntimeVerifyFailure<'db>>),
     DuplicateRuntimeSymbol(String),
 }
 
@@ -43,11 +44,11 @@ impl<'db> VerifyError<'db> {
     pub fn local(&self) -> Option<RLocalId> {
         match self {
             VerifyError::MissingRuntimeLocal(local)
+            | VerifyError::ErasedRuntimeValue(local)
             | VerifyError::SlotCarrierMismatch(local)
             | VerifyError::MissingEnumVariantProof(local)
             | VerifyError::InvalidExprClass(local) => Some(*local),
             VerifyError::MissingRuntimeBlock(_)
-            | VerifyError::ErasedRuntimeValue(_)
             | VerifyError::InvalidLayoutRefView(_)
             | VerifyError::InvalidConstRegion(_)
             | VerifyError::InvalidVariant(_, _)
@@ -64,6 +65,7 @@ impl<'db> VerifyError<'db> {
             | VerifyError::InvalidPackageFunction(_)
             | VerifyError::InvalidPackageObject(_)
             | VerifyError::InvalidPackageSection(_, _)
+            | VerifyError::InvalidFunctionBody(_, _)
             | VerifyError::DuplicateRuntimeSymbol(_) => None,
         }
     }

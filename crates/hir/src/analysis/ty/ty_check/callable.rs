@@ -15,11 +15,10 @@ use super::{BodyOwner, ExprProp, LocalBinding, TyChecker};
 use crate::analysis::{
     HirAnalysisDb,
     ty::{
-        const_ty::{HoleAnchor, HoleMinter, LayoutHoleArgSite},
+        const_ty::{ConstTyData, HoleAnchor, HoleMinter, LayoutHoleArgSite},
         corelib::resolve_lib_func_path,
         diagnostics::{BodyDiag, FuncBodyDiag},
         fold::{AssocTySubst, TyFoldable, TyFolder},
-        normalize::normalize_ty,
         trait_def::TraitInstId,
         trait_resolution::constraint::collect_func_decl_constraints,
         ty_def::{BorrowKind, CapabilityKind},
@@ -614,7 +613,7 @@ impl<'db> Callable<'db> {
 
     fn compile_time_string_literal_arg_expected(
         &self,
-        tc: &TyChecker<'db>,
+        tc: &mut TyChecker<'db>,
         expr: ExprId,
         arg_idx: usize,
     ) -> Option<TyId<'db>> {
@@ -623,17 +622,39 @@ impl<'db> Callable<'db> {
             return None;
         };
 
-        let mut expected = self
-            .callable_def
-            .arg_tys(tc.db)
-            .get(arg_idx)?
-            .instantiate(tc.db, &self.generic_args);
+        let declared_expected = *self.callable_def.arg_tys(tc.db).get(arg_idx)?;
+        // Preserve the callable declaration's outer constructor as well. A
+        // dependent parameter such as `[u8; N]` can instantiate to an
+        // inference variable until `N` is learned from the argument, but the
+        // declaration already tells us unambiguously which literal
+        // representation is required.
+        let mut declared_value_ty = declared_expected.instantiate_identity();
+        while let Some((_, inner)) = declared_value_ty.as_capability(tc.db) {
+            declared_value_ty = inner;
+        }
+        let declared_byte_array = tc.string_literal_should_use_byte_array(declared_value_ty);
+        let (declared_base, declared_args) = declared_value_ty.decompose_ty_app(tc.db);
+        let declared_generic_string = declared_base.is_string(tc.db)
+            && matches!(
+                declared_args.first().map(|arg| arg.data(tc.db)),
+                Some(TyData::ConstTy(const_ty))
+                    if matches!(const_ty.data(tc.db), ConstTyData::TyParam(..))
+            );
+        let mut expected = declared_expected.instantiate(tc.db, &self.generic_args);
         if let Some(inst) = self.trait_inst {
             let mut subst = AssocTySubst::new(inst);
             expected = expected.fold_with(tc.db, &mut subst);
         }
-        let expected = normalize_ty(tc.db, expected, tc.env.scope(), tc.env.assumptions());
-        if tc.string_literal_should_use_byte_array(expected)
+        // Resolve inference bindings as well as aliases before deciding the
+        // contextual literal representation. Generic `[u8; N]` parameters
+        // commonly arrive here as a type variable already bound to
+        // `[u8; _]`; the database-only normalizer cannot observe that binding.
+        let expected = tc.normalize_ty(expected);
+        if declared_generic_string {
+            return Some(TyId::string_with_len(tc.db, string_id.len_bytes(tc.db)));
+        }
+        if declared_byte_array
+            || tc.string_literal_should_use_byte_array(expected)
             || self
                 .callable_def
                 .accepts_compile_time_string_literal_bytes(tc.db, tc.env.scope())

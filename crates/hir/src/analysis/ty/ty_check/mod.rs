@@ -2674,16 +2674,35 @@ impl<'db> TyChecker<'db> {
     }
 
     pub(crate) fn string_literal_should_use_byte_array(&self, expected: TyId<'db>) -> bool {
-        let expected = normalize_ty(self.db, expected, self.env.scope(), self.env.assumptions());
-        let (base, args) = expected.decompose_ty_app(self.db);
-        matches!(
-            base.data(self.db),
-            TyData::TyBase(TyBase::Prim(crate::analysis::ty::ty_def::PrimTy::Array))
-        ) && args.len() == 2
-            && matches!(
-                args[0].data(self.db),
-                TyData::TyBase(TyBase::Prim(crate::analysis::ty::ty_def::PrimTy::U8))
-            )
+        let is_byte_array = |mut ty: TyId<'db>| {
+            // Function parameters carry their capability in the type. A
+            // literal passed to `view [u8; N]` still needs an owned byte-array
+            // representation before the ordinary view coercion is applied.
+            while let Some((_, inner)) = ty.as_capability(self.db) {
+                ty = inner;
+            }
+            let (base, args) = ty.decompose_ty_app(self.db);
+            matches!(
+                base.data(self.db),
+                TyData::TyBase(TyBase::Prim(crate::analysis::ty::ty_def::PrimTy::Array))
+            ) && args.len() == 2
+                && matches!(
+                    args[0].data(self.db),
+                    TyData::TyBase(TyBase::Prim(crate::analysis::ty::ty_def::PrimTy::U8))
+                )
+        };
+        // Preserve the outer array constructor before normalization. A generic
+        // callable such as `fn literal<const N>(value: [u8; N])` carries an
+        // unresolved const hole while its string-literal argument supplies N;
+        // normalizing that hole first can obscure the otherwise concrete
+        // `[u8; _]` expectation and incorrectly fall back to `String<N>`.
+        is_byte_array(expected)
+            || is_byte_array(normalize_ty(
+                self.db,
+                expected,
+                self.env.scope(),
+                self.env.assumptions(),
+            ))
     }
 
     fn lower_ty(

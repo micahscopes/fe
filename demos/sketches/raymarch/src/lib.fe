@@ -15,7 +15,8 @@
 use core::marker::Copy
 use std::webgpu::{
     FragmentSurface, GpuProgram, LatestPerFrame, ResponsiveBacking,
-    SurfaceQuality, SurfaceScheduling, SurfaceTransition, WebGpuBackend,
+    StandardSurfaceRecovery, SurfaceQuality, SurfaceRecovery, SurfaceScheduling,
+    SurfaceTransition, WebGpuBackend,
 }
 use std::web::view::{
     ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface,
@@ -287,6 +288,7 @@ const fn raymarch_params() -> RaymarchParams {
 
 actor RaymarchSurface uses (
     GpuProgram<WebGpuBackend>, SurfaceQuality<ResponsiveBacking>,
+    SurfaceRecovery<StandardSurfaceRecovery>,
 ) {
     yaw: f32,
     pitch: f32,

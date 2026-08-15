@@ -7,6 +7,8 @@ use core::Fn
 use core::MemPtr
 use core::num::FloatRounding
 use super::web::{
+    GpuDeviceEventKind,
+    GpuDeviceLossReason,
     SurfaceEventKind,
     SurfaceQueueAction,
     SurfaceScheduleEvent,
@@ -194,6 +196,110 @@ pub struct SurfaceScheduling<P> {}
 #[gpu_control(surface_quality)]
 pub struct SurfaceQuality<P> {}
 
+/// Actor-level shared-device recovery policy. Placement beside
+/// `GpuProgram<WebGpuBackend>` keeps the decision available to pure GPU pass
+/// graphs that have no application transition or presentation scheduler.
+#[gpu_control(surface_recovery)]
+pub struct SurfaceRecovery<P> {}
+
+/// Raw lifecycle/capability facts for one surface affected by the page's
+/// shared WebGPU device. Browser objects remain opaque host authorities.
+#[web_surface_recovery_event]
+pub struct SurfaceRecoveryEvent {
+    pub kind: GpuDeviceEventKind,
+    pub reason: GpuDeviceLossReason,
+    pub device_required: bool,
+    pub software_fallback: bool,
+    pub generation: u32,
+}
+
+impl Copy for SurfaceRecoveryEvent {}
+
+/// Private Fe supervision state for one loss episode.
+#[web_surface_recovery_state]
+pub struct SurfaceRecoveryState {
+    pub device_lost: bool,
+    pub attempts: u32,
+}
+
+impl Copy for SurfaceRecoveryState {}
+
+pub enum SurfaceRecoveryAction {
+    NoAction,
+    RetryDevice,
+    DegradeToWasm,
+    FailSurface,
+}
+
+impl Copy for SurfaceRecoveryAction {}
+
+#[web_surface_recovery_step]
+pub struct SurfaceRecoveryStep {
+    pub state: SurfaceRecoveryState,
+    pub action: SurfaceRecoveryAction,
+}
+
+impl Copy for SurfaceRecoveryStep {}
+
+/// Default gallery policy: spend at most two replacement-device requests for
+/// an authoritative unknown loss, never retry an explicitly destroyed device,
+/// then use a generated Wasm fallback when one exists or fail visibly.
+pub struct StandardSurfaceRecovery {}
+
+impl StandardSurfaceRecovery {
+    pub fn decide(
+        _ event: own SurfaceRecoveryEvent,
+        _ state: own SurfaceRecoveryState,
+    ) -> SurfaceRecoveryStep {
+        let mut device_lost: bool = state.device_lost
+        let mut attempts: u32 = state.attempts
+        let mut action: SurfaceRecoveryAction = SurfaceRecoveryAction::NoAction
+
+        match event.kind {
+            GpuDeviceEventKind::Lost => {
+                device_lost = true
+                if event.device_required {
+                    match event.reason {
+                        GpuDeviceLossReason::Destroyed => {
+                            action = recovery_terminal(event.software_fallback)
+                        }
+                        _ => {
+                            if attempts < 2 {
+                                attempts = attempts + 1
+                                action = SurfaceRecoveryAction::RetryDevice
+                            } else {
+                                action = recovery_terminal(event.software_fallback)
+                            }
+                        }
+                    }
+                }
+            }
+            GpuDeviceEventKind::Unavailable => {
+                let recovering: bool = device_lost || attempts > 0
+                device_lost = true
+                if event.device_required {
+                    if recovering && attempts < 2 {
+                        attempts = attempts + 1
+                        action = SurfaceRecoveryAction::RetryDevice
+                    } else {
+                        action = recovery_terminal(event.software_fallback)
+                    }
+                }
+            }
+            GpuDeviceEventKind::Available => {
+                device_lost = false
+                attempts = 0
+            }
+            GpuDeviceEventKind::Unknown => {}
+        }
+
+        SurfaceRecoveryStep {
+            state: SurfaceRecoveryState { device_lost, attempts },
+            action,
+        }
+    }
+}
+
 /// Raw standards/device facts available when a surface backing store is
 /// chosen. Width-like values are f32 because browser CSS geometry and DPR are
 /// floating point; WebGPU texture limits are exactly representable at this
@@ -339,6 +445,14 @@ impl LatestPerFrame {
             request_frame: request_frame,
             queue: SurfaceQueueAction::Retain,
         }
+    }
+}
+
+fn recovery_terminal(software_fallback: bool) -> SurfaceRecoveryAction {
+    if software_fallback {
+        SurfaceRecoveryAction::DegradeToWasm
+    } else {
+        SurfaceRecoveryAction::FailSurface
     }
 }
 

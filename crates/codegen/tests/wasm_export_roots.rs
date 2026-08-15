@@ -111,6 +111,61 @@ fn wasm_param_carrying_pub_fns_are_export_roots() {
     );
 }
 
+/// Wasm physically carries Fe's `u8`/`i8`/`u16`/`i16` values in i32
+/// registers. Narrow immediates and memory/parameter values must be explicitly
+/// extended to the same semantic interpretation before bitwise operations or
+/// comparisons; incidental high register bits are not language semantics.
+#[test]
+fn wasm_narrow_integer_operations_ignore_physical_i32_extension() {
+    let source = r#"
+pub fn u8_continuation(value: u8) -> u32 {
+    if (value & 192) == 128 { 1 } else { 0 }
+}
+
+pub fn u16_high_byte(value: u16) -> u32 {
+    if (value & 65280) == 43776 { 1 } else { 0 }
+}
+
+pub fn i8_before_minus_one(value: i8) -> u32 {
+    if value < -1 { 1 } else { 0 }
+}
+
+pub fn i16_before_minus_one(value: i16) -> u32 {
+    if value < -1 { 1 } else { 0 }
+}
+"#;
+    let wasm = compile_to_wasm("wasm_narrow_integer_ops.fe", source);
+    wasmparser::validate(&wasm).expect("narrow integer Wasm validates");
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &wasm).unwrap();
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+
+    let u8_continuation = instance
+        .get_typed_func::<i32, i32>(&mut store, "u8_continuation")
+        .unwrap();
+    assert_eq!(u8_continuation.call(&mut store, 0xa2).unwrap(), 1);
+    assert_eq!(u8_continuation.call(&mut store, 0xc2).unwrap(), 0);
+
+    let u16_high_byte = instance
+        .get_typed_func::<i32, i32>(&mut store, "u16_high_byte")
+        .unwrap();
+    assert_eq!(u16_high_byte.call(&mut store, 0xabe7).unwrap(), 1);
+    assert_eq!(u16_high_byte.call(&mut store, 0xace7).unwrap(), 0);
+
+    let i8_before = instance
+        .get_typed_func::<i32, i32>(&mut store, "i8_before_minus_one")
+        .unwrap();
+    assert_eq!(i8_before.call(&mut store, -128).unwrap(), 1);
+    assert_eq!(i8_before.call(&mut store, 127).unwrap(), 0);
+
+    let i16_before = instance
+        .get_typed_func::<i32, i32>(&mut store, "i16_before_minus_one")
+        .unwrap();
+    assert_eq!(i16_before.call(&mut store, -32_768).unwrap(), 1);
+    assert_eq!(i16_before.call(&mut store, 32_767).unwrap(), 0);
+}
+
 /// A generic trait effect can remain unresolved on its declaration template
 /// while being fully closed on the semantic instance reached by a concrete
 /// caller. Runtime MIR must enumerate that instantiated binding on both sides

@@ -9,5 +9,6 @@ pub use host::{self, *}
 pub use actor::{self, *}
 pub use conal
 pub use reactive
+pub use text
 pub use web
 pub use prelude

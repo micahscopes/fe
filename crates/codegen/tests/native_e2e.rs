@@ -7,9 +7,12 @@
 use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
-    NativeSurfaceEvent, NativeSurfaceEventKind, NativeSurfaceQueueAction,
-    NativeSurfaceScheduleArtifact, NativeSurfaceScheduleState, NativeSurfaceScheduleStep,
-    WebBuildOptions, WebBundle, WebBundleMode, compile_native_surface_schedule_policy,
+    NativeGpuDeviceEventKind, NativeGpuDeviceLossReason, NativeSurfaceEvent,
+    NativeSurfaceEventKind, NativeSurfaceQueueAction, NativeSurfaceRecoveryAction,
+    NativeSurfaceRecoveryArtifact, NativeSurfaceRecoveryEvent, NativeSurfaceRecoveryState,
+    NativeSurfaceRecoveryStep, NativeSurfaceScheduleArtifact, NativeSurfaceScheduleState,
+    NativeSurfaceScheduleStep, WebBuildOptions, WebBundle, WebBundleMode,
+    compile_native_surface_recovery_policy, compile_native_surface_schedule_policy,
     compile_runtime_package_native_i32_entry,
     compile_runtime_package_native_surface_transition4_f32, resolve_web_entry,
 };
@@ -43,6 +46,7 @@ fn compile_param_binding_surface_backends() -> Result<
     (
         fe_codegen::NativeSurfaceTransition4F32Artifact,
         NativeSurfaceScheduleArtifact,
+        NativeSurfaceRecoveryArtifact,
         WebBundle,
     ),
     String,
@@ -77,13 +81,15 @@ fn compile_param_binding_surface_backends() -> Result<
     }
     let schedule = compile_native_surface_schedule_policy(&db, top_mod, &entry)
         .map_err(|error| error.to_string())?;
+    let recovery = compile_native_surface_recovery_policy(&db, top_mod, &entry)
+        .map_err(|error| error.to_string())?;
     let browser = WebBundle::compile(
         &db,
         top_mod,
         WebBuildOptions::render(entry, Some("param_binding_actor".to_owned())),
     )
     .map_err(|error| error.to_string())?;
-    Ok((native, schedule, browser))
+    Ok((native, schedule, recovery, browser))
 }
 
 fn param_binding_oracle(mut state: [f32; 4], event: NativeSurfaceEvent) -> [f32; 4] {
@@ -251,10 +257,56 @@ fn assert_surface_schedule_step_eq(
     );
 }
 
+fn standard_surface_recovery_oracle(
+    event: NativeSurfaceRecoveryEvent,
+    mut state: NativeSurfaceRecoveryState,
+) -> NativeSurfaceRecoveryStep {
+    let mut action = NativeSurfaceRecoveryAction::NoAction;
+    let terminal = if event.software_fallback {
+        NativeSurfaceRecoveryAction::DegradeToWasm
+    } else {
+        NativeSurfaceRecoveryAction::FailSurface
+    };
+    match event.kind {
+        NativeGpuDeviceEventKind::Lost => {
+            state.device_lost = true;
+            if event.device_required {
+                if event.reason == NativeGpuDeviceLossReason::Destroyed {
+                    action = terminal;
+                } else if state.attempts < 2 {
+                    state.attempts += 1;
+                    action = NativeSurfaceRecoveryAction::RetryDevice;
+                } else {
+                    action = terminal;
+                }
+            }
+        }
+        NativeGpuDeviceEventKind::Unavailable => {
+            let recovering = state.device_lost || state.attempts > 0;
+            state.device_lost = true;
+            if event.device_required {
+                if recovering && state.attempts < 2 {
+                    state.attempts += 1;
+                    action = NativeSurfaceRecoveryAction::RetryDevice;
+                } else {
+                    action = terminal;
+                }
+            }
+        }
+        NativeGpuDeviceEventKind::Available => {
+            state.device_lost = false;
+            state.attempts = 0;
+        }
+        NativeGpuDeviceEventKind::Unknown => {}
+    }
+    NativeSurfaceRecoveryStep { state, action }
+}
+
 #[test]
 fn native_browser_and_oracle_agree_on_the_real_typed_surface_transition() {
-    let (native, native_schedule, browser) = compile_param_binding_surface_backends()
-        .expect("typed ParamBindings transition should compile for native and browser targets");
+    let (native, native_schedule, native_recovery, browser) =
+        compile_param_binding_surface_backends()
+            .expect("typed ParamBindings transition should compile for native and browser targets");
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, &browser.wasm).expect("browser control Wasm");
     let mut store = wasmtime::Store::new(&engine, ());
@@ -490,6 +542,160 @@ fn native_browser_and_oracle_agree_on_the_real_typed_surface_transition() {
             "browser scheduling decisions diverged from the independent oracle at tape step {step}",
         );
         policy_state = expected_step.state;
+    }
+
+    let recovery = instance
+        .get_func(&mut store, "fe_surface_recovery_v1")
+        .expect("resident Fe recovery export");
+    let recovery_tape = [
+        NativeSurfaceRecoveryEvent {
+            kind: NativeGpuDeviceEventKind::Unknown,
+            reason: NativeGpuDeviceLossReason::NotLost,
+            device_required: true,
+            software_fallback: false,
+            generation: 0,
+        },
+        NativeSurfaceRecoveryEvent {
+            kind: NativeGpuDeviceEventKind::Available,
+            reason: NativeGpuDeviceLossReason::NotLost,
+            device_required: true,
+            software_fallback: false,
+            generation: 1,
+        },
+        NativeSurfaceRecoveryEvent {
+            kind: NativeGpuDeviceEventKind::Lost,
+            reason: NativeGpuDeviceLossReason::Unknown,
+            device_required: true,
+            software_fallback: false,
+            generation: 1,
+        },
+        NativeSurfaceRecoveryEvent {
+            kind: NativeGpuDeviceEventKind::Unavailable,
+            reason: NativeGpuDeviceLossReason::NotLost,
+            device_required: true,
+            software_fallback: false,
+            generation: 1,
+        },
+        NativeSurfaceRecoveryEvent {
+            kind: NativeGpuDeviceEventKind::Unavailable,
+            reason: NativeGpuDeviceLossReason::NotLost,
+            device_required: true,
+            software_fallback: false,
+            generation: 1,
+        },
+        NativeSurfaceRecoveryEvent {
+            kind: NativeGpuDeviceEventKind::Available,
+            reason: NativeGpuDeviceLossReason::NotLost,
+            device_required: true,
+            software_fallback: false,
+            generation: 2,
+        },
+        NativeSurfaceRecoveryEvent {
+            kind: NativeGpuDeviceEventKind::Lost,
+            reason: NativeGpuDeviceLossReason::Unknown,
+            device_required: false,
+            software_fallback: false,
+            generation: 2,
+        },
+        NativeSurfaceRecoveryEvent {
+            kind: NativeGpuDeviceEventKind::Available,
+            reason: NativeGpuDeviceLossReason::NotLost,
+            device_required: true,
+            software_fallback: false,
+            generation: 3,
+        },
+        NativeSurfaceRecoveryEvent {
+            kind: NativeGpuDeviceEventKind::Lost,
+            reason: NativeGpuDeviceLossReason::Destroyed,
+            device_required: true,
+            software_fallback: true,
+            generation: 3,
+        },
+        NativeSurfaceRecoveryEvent {
+            kind: NativeGpuDeviceEventKind::Available,
+            reason: NativeGpuDeviceLossReason::NotLost,
+            device_required: true,
+            software_fallback: false,
+            generation: 4,
+        },
+        NativeSurfaceRecoveryEvent {
+            kind: NativeGpuDeviceEventKind::Unavailable,
+            reason: NativeGpuDeviceLossReason::NotLost,
+            device_required: true,
+            software_fallback: true,
+            generation: 4,
+        },
+        NativeSurfaceRecoveryEvent {
+            kind: NativeGpuDeviceEventKind::Available,
+            reason: NativeGpuDeviceLossReason::NotLost,
+            device_required: true,
+            software_fallback: false,
+            generation: 5,
+        },
+        NativeSurfaceRecoveryEvent {
+            kind: NativeGpuDeviceEventKind::Lost,
+            reason: NativeGpuDeviceLossReason::Unknown,
+            device_required: true,
+            software_fallback: true,
+            generation: 5,
+        },
+        NativeSurfaceRecoveryEvent {
+            kind: NativeGpuDeviceEventKind::Unavailable,
+            reason: NativeGpuDeviceLossReason::NotLost,
+            device_required: true,
+            software_fallback: true,
+            generation: 5,
+        },
+        NativeSurfaceRecoveryEvent {
+            kind: NativeGpuDeviceEventKind::Unavailable,
+            reason: NativeGpuDeviceLossReason::NotLost,
+            device_required: true,
+            software_fallback: true,
+            generation: 5,
+        },
+    ];
+    let mut recovery_state = NativeSurfaceRecoveryState::ZERO;
+    for (step, event) in recovery_tape.into_iter().enumerate() {
+        let expected_step = standard_surface_recovery_oracle(event, recovery_state);
+        let native_step = native_recovery.call(event, recovery_state);
+        assert_eq!(
+            native_step, expected_step,
+            "native recovery diverged from the independent oracle at tape step {step}"
+        );
+
+        let mut browser_action = [wasmtime::Val::I32(-1)];
+        recovery
+            .call(
+                &mut store,
+                &[
+                    wasmtime::Val::I32(event.kind as i32),
+                    wasmtime::Val::I32(event.reason as i32),
+                    wasmtime::Val::I32(event.device_required as i32),
+                    wasmtime::Val::I32(event.software_fallback as i32),
+                    wasmtime::Val::I32(event.generation as i32),
+                ],
+                &mut browser_action,
+            )
+            .unwrap_or_else(|error| panic!("browser recovery failed at tape step {step}: {error}"));
+        let actual_action = match browser_action {
+            [wasmtime::Val::I32(action)] => action,
+            other => panic!("browser recovery returned {other:?} at tape step {step}"),
+        };
+        assert_eq!(
+            actual_action, expected_step.action as i32,
+            "browser recovery diverged from the independent oracle at tape step {step}"
+        );
+        recovery_state = expected_step.state;
+    }
+
+    for invalid_event in [[4, 0, 1, 0, 9], [0, 3, 1, 0, 9]] {
+        recovery
+            .call(
+                &mut store,
+                &invalid_event.map(wasmtime::Val::I32),
+                &mut [wasmtime::Val::I32(-1)],
+            )
+            .expect_err("out-of-range recovery enum facts must trap before Fe observes them");
     }
 }
 

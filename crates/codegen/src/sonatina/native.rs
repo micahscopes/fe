@@ -86,6 +86,49 @@ pub enum NativeSurfaceEventKind {
     PointerUp,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum NativeGpuDeviceLossReason {
+    NotLost,
+    Unknown,
+    Destroyed,
+}
+
+/// The semantic variants of `std::web::GpuDeviceEventKind` at the fixed
+/// recovery-policy boundary. This is intentionally distinct from
+/// [`NativeSurfaceEventKind`]: recovery consumes the shared device lifecycle,
+/// not presentation/input events.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum NativeGpuDeviceEventKind {
+    Unknown,
+    Available,
+    Lost,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeSurfaceRecoveryEvent {
+    pub kind: NativeGpuDeviceEventKind,
+    pub reason: NativeGpuDeviceLossReason,
+    pub device_required: bool,
+    pub software_fallback: bool,
+    pub generation: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeSurfaceRecoveryState {
+    pub device_lost: bool,
+    pub attempts: u32,
+}
+
+impl NativeSurfaceRecoveryState {
+    pub const ZERO: Self = Self {
+        device_lost: false,
+        attempts: 0,
+    };
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct NativeSurfaceEvent {
     pub pointer_x: f32,
@@ -197,6 +240,110 @@ impl NativeSurfaceQueueAction {
             1 => Self::KeepLatest,
             2 => Self::Drop,
             _ => panic!("verified Fe surface policy returned invalid queue tag {tag}"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum NativeSurfaceRecoveryAction {
+    NoAction,
+    RetryDevice,
+    DegradeToWasm,
+    FailSurface,
+}
+
+impl NativeSurfaceRecoveryAction {
+    fn from_tag(tag: u32) -> Self {
+        match tag {
+            0 => Self::NoAction,
+            1 => Self::RetryDevice,
+            2 => Self::DegradeToWasm,
+            3 => Self::FailSurface,
+            _ => panic!("verified Fe surface policy returned invalid recovery tag {tag}"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeSurfaceRecoveryStep {
+    pub state: NativeSurfaceRecoveryState,
+    pub action: NativeSurfaceRecoveryAction,
+}
+
+/// An owning JIT artifact for the exact Fe shared-device recovery policy.
+/// Policy state is explicit here so the independent native tape can compare
+/// every intermediate value; the generated browser wrapper keeps the same
+/// state in private Wasm globals and exposes only the selected action.
+pub struct NativeSurfaceRecoveryArtifact {
+    artifact: CraneliftArtifact,
+    entry: String,
+    event_first: bool,
+}
+
+impl NativeSurfaceRecoveryArtifact {
+    pub fn entry_name(&self) -> &str {
+        &self.entry
+    }
+
+    pub fn call(
+        &self,
+        event: NativeSurfaceRecoveryEvent,
+        state: NativeSurfaceRecoveryState,
+    ) -> NativeSurfaceRecoveryStep {
+        #[rustfmt::skip]
+        type EventFirst = extern "C" fn(
+            *mut u128,
+            i32, i32, i8, i8, i32,
+            i8, i32,
+        );
+        #[rustfmt::skip]
+        type StateFirst = extern "C" fn(
+            *mut u128,
+            i8, i32,
+            i32, i32, i8, i8, i32,
+        );
+
+        let mut results = [0u128; 3];
+        // SAFETY: construction verifies the exact private Sonatina signature,
+        // including the semantically discovered event/state argument order.
+        unsafe {
+            let pointer = self
+                .artifact
+                .get_func_ptr::<()>(&self.entry)
+                .expect("verified native surface recovery policy disappeared from its artifact");
+            if self.event_first {
+                let function: EventFirst = std::mem::transmute(pointer);
+                function(
+                    results.as_mut_ptr(),
+                    event.kind as i32,
+                    event.reason as i32,
+                    event.device_required as i8,
+                    event.software_fallback as i8,
+                    event.generation as i32,
+                    state.device_lost as i8,
+                    state.attempts as i32,
+                );
+            } else {
+                let function: StateFirst = std::mem::transmute(pointer);
+                function(
+                    results.as_mut_ptr(),
+                    state.device_lost as i8,
+                    state.attempts as i32,
+                    event.kind as i32,
+                    event.reason as i32,
+                    event.device_required as i8,
+                    event.software_fallback as i8,
+                    event.generation as i32,
+                );
+            }
+        }
+        NativeSurfaceRecoveryStep {
+            state: NativeSurfaceRecoveryState {
+                device_lost: results[0] as u8 != 0,
+                attempts: results[1] as u32,
+            },
+            action: NativeSurfaceRecoveryAction::from_tag(results[2] as u32),
         }
     }
 }
@@ -341,6 +488,38 @@ pub(crate) fn compile_runtime_package_native_surface_schedule(
     let expected_definitions = expected_definition_names(&module);
     let artifact = compile_and_verify_definitions(module, &expected_definitions)?;
     Ok(NativeSurfaceScheduleArtifact {
+        artifact,
+        entry: entry.to_owned(),
+        event_first,
+    })
+}
+
+#[cfg(feature = "spirv-backend")]
+pub(crate) fn compile_runtime_package_native_surface_recovery(
+    db: &DriverDataBase,
+    package: &RuntimePackage<'_>,
+    entry: &str,
+    event_first: bool,
+) -> Result<NativeSurfaceRecoveryArtifact, LowerError> {
+    let module = wasm_lower::compile_runtime_package_native(db, package)?;
+    let event = [Type::I32, Type::I32, Type::I1, Type::I1, Type::I32];
+    let state = [Type::I1, Type::I32];
+    let expected_args = if event_first {
+        event.into_iter().chain(state).collect::<Vec<_>>()
+    } else {
+        state.into_iter().chain(event).collect::<Vec<_>>()
+    };
+    let expected_results = [Type::I1, Type::I32, Type::I32];
+    resolve_checked_function(
+        &module,
+        entry,
+        Linkage::Public,
+        &expected_args,
+        &expected_results,
+    )?;
+    let expected_definitions = expected_definition_names(&module);
+    let artifact = compile_and_verify_definitions(module, &expected_definitions)?;
+    Ok(NativeSurfaceRecoveryArtifact {
         artifact,
         entry: entry.to_owned(),
         event_first,

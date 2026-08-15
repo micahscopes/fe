@@ -33,7 +33,8 @@
 use core::marker::Copy
 use std::webgpu::{
     FragmentSurface, GpuProgram, LatestPerFrame, ResponsiveBacking,
-    SurfaceQuality, SurfaceScheduling, SurfaceTransition, WebGpuBackend,
+    StandardSurfaceRecovery, SurfaceQuality, SurfaceRecovery, SurfaceScheduling,
+    SurfaceTransition, WebGpuBackend,
 }
 use std::web::view::{
     ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface,
@@ -169,6 +170,7 @@ const fn cga3d_params() -> Cga3dParams {
 
 actor Cga3dSurface uses (
     GpuProgram<WebGpuBackend>, SurfaceQuality<ResponsiveBacking>,
+    SurfaceRecovery<StandardSurfaceRecovery>,
 ) {
     /// Pencil parameter: [0, 1] sweeps sphere -> sphere -> radical plane.
     lambda: f32,

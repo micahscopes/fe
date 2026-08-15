@@ -10,8 +10,10 @@ use std::webgpu::{
     FragmentSurface as Pixel,
     GpuProgram as Program,
     ResponsiveBacking,
+    StandardSurfaceRecovery,
     StorageBuffer as Shared,
     SurfaceQuality,
+    SurfaceRecovery,
     Workgroup as Threads,
     WebGpuBackend,
 }
@@ -23,6 +25,7 @@ pub struct ComplexF32Bits {
 
 actor KnownColor uses (
     Program<WebGpuBackend>, SurfaceQuality<ResponsiveBacking>,
+    SurfaceRecovery<StandardSurfaceRecovery>,
 ) {
     orbit: Shared<ComplexF32Bits, 1>,
 

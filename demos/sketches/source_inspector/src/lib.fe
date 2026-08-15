@@ -7,10 +7,11 @@
 //! URL/fetch/DOM/surface effects and returns raw lifecycle facts.
 
 use std::web::component::{
-    BrowserBytes, BrowserPtr, BrowserString, ComponentEvent, ComponentEventKind,
+    BrowserBytes, BrowserString, ComponentEvent, ComponentEventKind,
     ComponentPatch, ComponentWriter, InitialState, KeyboardKey, ProjectState, ResidentTransition,
-    allocate_component_buffer, component_string,
+    allocate_component_buffer,
 }
+use std::text::Utf8Buffer
 use core::actor::{ActorSink, ScopedTask}
 use core::pending::{Race, RaceOutcome, Suspend, TaskOutcome, Timer}
 use std::actor::{ActorMessage, BrowserActorSink}
@@ -147,32 +148,16 @@ pub struct InspectorState {
     pub surface_sequence_failed: bool,
 }
 
-fn byte_at(ptr: u32, index: u32) -> BrowserPtr<u32> {
-    BrowserPtr::from_u32(ptr + index)
-}
-
 fn copy_url(destination: u32, value: own BrowserString) -> u32 {
     // Browser-resolved anchor hrefs are ASCII URLs. Bound the retained value
     // so malformed or adversarial pages cannot grow component state.
-    let len = if value.len < URL_CAPACITY { value.len } else { URL_CAPACITY }
-    let mut index: u32 = 0
-    while index < len {
-        let source: BrowserPtr<u32> = BrowserPtr::from_u32(value.ptr + index)
-        byte_at(ptr: destination, index: index).write(source.read() & 255)
-        index = index + 1
-    }
-    len
+    Utf8Buffer::empty(ptr: destination, capacity: URL_CAPACITY)
+        .replace_browser(value).buffer.len()
 }
 
 fn copy_content(destination: u32, value: own BrowserString) -> u32 {
-    let len = if value.len < CONTENT_CAPACITY { value.len } else { CONTENT_CAPACITY }
-    let mut index: u32 = 0
-    while index < len {
-        let source: BrowserPtr<u32> = BrowserPtr::from_u32(value.ptr + index)
-        byte_at(ptr: destination, index: index).write(source.read() & 255)
-        index = index + 1
-    }
-    len
+    Utf8Buffer::empty(ptr: destination, capacity: CONTENT_CAPACITY)
+        .replace_browser(value).buffer.len()
 }
 
 fn is_success(status: u32) -> bool {
@@ -625,8 +610,12 @@ actor SourceInspector {
 
     fn project(self) -> ComponentPatch uses (ProjectState) {
         let ui = <InspectorParts as ComponentSchema>::component_parts()
-        let url = component_string(ptr: self.url_ptr, len: self.url_len)
-        let content = component_string(ptr: self.content_ptr, len: self.content_len)
+        let url = Utf8Buffer::with_len(
+            ptr: self.url_ptr, len: self.url_len, capacity: URL_CAPACITY,
+        ).browser_string()
+        let content = Utf8Buffer::with_len(
+            ptr: self.content_ptr, len: self.content_len, capacity: CONTENT_CAPACITY,
+        ).browser_string()
         let mut visible_mask: u32 = 0
         if self.connected && self.open {
             visible_mask = visible_mask | ui.overlay.bit()

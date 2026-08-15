@@ -4,8 +4,8 @@
 //! its state names, or its chosen bindings.
 
 use std::webgpu::{
-    FragmentSurface, GpuProgram, LatestPerFrame, SurfaceScheduling, SurfaceTransition,
-    WebGpuBackend,
+    FragmentSurface, GpuProgram, LatestPerFrame, StandardSurfaceRecovery, SurfaceRecovery,
+    SurfaceScheduling, SurfaceTransition, WebGpuBackend,
 }
 use std::web::view::{
     ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface,
@@ -44,7 +44,10 @@ const fn probe_params() -> ProbeParams {
     }
 }
 
-actor ParamBindingProbe uses (GpuProgram<WebGpuBackend>) {
+actor ParamBindingProbe uses (
+    GpuProgram<WebGpuBackend>,
+    SurfaceRecovery<StandardSurfaceRecovery>,
+) {
     steps: f32,
     phase: f32,
     zoom: f32,

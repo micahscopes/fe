@@ -34,7 +34,8 @@
 use core::marker::Copy
 use std::webgpu::{
     FragmentSurface, GpuProgram, LatestPerFrame, ResponsiveBacking,
-    SurfaceQuality, SurfaceScheduling, SurfaceTransition, WebGpuBackend,
+    StandardSurfaceRecovery, SurfaceQuality, SurfaceRecovery, SurfaceScheduling,
+    SurfaceTransition, WebGpuBackend,
 }
 use gaplay::{
     DESA_FB, DESA_FC, Line, Point, desa_a, desa_b, desa_c, desa_o, desargues_image,
@@ -106,6 +107,7 @@ const fn desargues_params() -> DesarguesParams {
 
 actor Desargues2d uses (
     GpuProgram<WebGpuBackend>, SurfaceQuality<ResponsiveBacking>,
+    SurfaceRecovery<StandardSurfaceRecovery>,
 ) {
     /// Perspective sweep: slides the second triangle along the rays from O.
     sweep: f32,

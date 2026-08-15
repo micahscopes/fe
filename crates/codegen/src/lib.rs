@@ -49,10 +49,12 @@ pub use resident_actor::{
 ))]
 pub use sonatina::{
     GRID_LOOP_NATIVE_ENTRY_ARITY, MERKLE_ROOT_NATIVE_ENTRY_ARITY, MERKLE8_ROOT_NATIVE_ENTRY_ARITY,
-    NativeGridLoopEntryArtifact, NativeI32EntryArtifact, NativeMerkle8RootEntryArtifact,
-    NativeMerkleRootEntryArtifact, NativeSurfaceEvent, NativeSurfaceEventKind,
-    NativeSurfaceQueueAction, NativeSurfaceScheduleArtifact, NativeSurfaceScheduleState,
-    NativeSurfaceScheduleStep, NativeSurfaceTransition4F32Artifact,
+    NativeGpuDeviceEventKind, NativeGpuDeviceLossReason, NativeGridLoopEntryArtifact,
+    NativeI32EntryArtifact, NativeMerkle8RootEntryArtifact, NativeMerkleRootEntryArtifact,
+    NativeSurfaceEvent, NativeSurfaceEventKind, NativeSurfaceQueueAction,
+    NativeSurfaceRecoveryAction, NativeSurfaceRecoveryArtifact, NativeSurfaceRecoveryEvent,
+    NativeSurfaceRecoveryState, NativeSurfaceRecoveryStep, NativeSurfaceScheduleArtifact,
+    NativeSurfaceScheduleState, NativeSurfaceScheduleStep, NativeSurfaceTransition4F32Artifact,
     compile_runtime_package_native_grid_loop_entry, compile_runtime_package_native_i32_entry,
     compile_runtime_package_native_merkle_root_entry,
     compile_runtime_package_native_merkle8_root_entry,
@@ -87,13 +89,6 @@ pub use test_output::{ExpectedRevert, TestMetadata, TestModuleOutput, parse_expe
 pub fn standalone_ctfe_ingot_source(source: &str) -> String {
     source.replace("pub const fn ", "const fn ")
 }
-#[cfg(all(
-    feature = "spirv-backend",
-    feature = "native-backend",
-    not(target_arch = "wasm32"),
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
-pub use web_bundle::compile_native_surface_schedule_policy;
 #[cfg(feature = "spirv-backend")]
 pub use web_bundle::{
     WEB_ACTOR_RUNTIME_PROTOCOL, WEB_ACTOR_RUNTIME_VERSION, WEB_BUNDLE_PROTOCOL,
@@ -106,4 +101,13 @@ pub use web_bundle::{
     WebFixedHostProvenance, WebGeneratedArtifact, WebGeneratedArtifactKind, WebHostResponsibility,
     WebLayout, WebPass, WebPassShader, WebProvenance, WebResource, WebResult, WebScalarKind,
     WebSourceProvenance, actor_gpu_program, actor_web_entry, render_runtime_js, resolve_web_entry,
+};
+#[cfg(all(
+    feature = "spirv-backend",
+    feature = "native-backend",
+    not(target_arch = "wasm32"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+pub use web_bundle::{
+    compile_native_surface_recovery_policy, compile_native_surface_schedule_policy,
 };

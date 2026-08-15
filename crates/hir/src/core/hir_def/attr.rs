@@ -58,6 +58,7 @@ pub enum GpuControl {
     TypedSurface,
     SurfaceSchedule,
     SurfaceQuality,
+    SurfaceRecovery,
 }
 
 /// Target-neutral stateful actor transition selected by a nominal role type.
@@ -517,6 +518,7 @@ impl<'db> AttrListId<'db> {
             "typed_surface" => Some(GpuControl::TypedSurface),
             "surface_schedule" => Some(GpuControl::SurfaceSchedule),
             "surface_quality" => Some(GpuControl::SurfaceQuality),
+            "surface_recovery" => Some(GpuControl::SurfaceRecovery),
             _ => None,
         }
     }
@@ -615,6 +617,18 @@ impl<'db> AttrListId<'db> {
     /// Marks the physical backing extent selected by a Fe quality policy.
     pub fn is_web_surface_backing_extent(self, db: &'db dyn HirDb) -> bool {
         self.has_marker_attr(db, "web_surface_backing_extent")
+    }
+
+    pub fn is_web_surface_recovery_event(self, db: &'db dyn HirDb) -> bool {
+        self.has_marker_attr(db, "web_surface_recovery_event")
+    }
+
+    pub fn is_web_surface_recovery_state(self, db: &'db dyn HirDb) -> bool {
+        self.has_marker_attr(db, "web_surface_recovery_state")
+    }
+
+    pub fn is_web_surface_recovery_step(self, db: &'db dyn HirDb) -> bool {
+        self.has_marker_attr(db, "web_surface_recovery_step")
     }
 
     pub fn arithmetic_mode(self, db: &'db dyn HirDb) -> Option<ArithmeticMode> {

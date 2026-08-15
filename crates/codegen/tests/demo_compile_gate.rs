@@ -214,9 +214,30 @@ fn assert_typed_surface_quality(bundle: &WebBundle) {
     );
 }
 
+fn assert_typed_surface_recovery(bundle: &WebBundle) {
+    let exports = wasm_function_export_names(&bundle.wasm);
+    assert!(
+        exports.iter().any(|name| name == "fe_surface_recovery_v1"),
+        "a canonical GPU surface must expose its actor-selected Fe recovery policy"
+    );
+    assert!(
+        !exports.iter().any(|name| name == "decide"),
+        "the authored recovery function name must remain private"
+    );
+    assert!(
+        bundle
+            .manifest
+            .provenance
+            .fe_responsibilities
+            .contains(&WebFeResponsibility::DeviceRecoveryPolicy),
+        "provenance must attribute retry/degrade/fail selection to Fe"
+    );
+}
+
 fn assert_responsive_scheduled_surface(bundle: &WebBundle) {
     assert_scheduled_typed_surface(bundle);
     assert_typed_surface_quality(bundle);
+    assert_typed_surface_recovery(bundle);
 }
 
 fn call_surface_quality(
@@ -1315,6 +1336,25 @@ fn curated_sketch_sources_have_no_legacy_gesture_abi() {
                 );
             }
         }
+        if source.contains("SurfaceQuality<ResponsiveBacking>") {
+            assert!(
+                source.contains("SurfaceRecovery<StandardSurfaceRecovery>"),
+                "{} must select the ordinary shared-device recovery policy on its GPU actor",
+                source_path.display()
+            );
+            for redundant in [
+                "SurfaceRecoveryEvent",
+                "SurfaceRecoveryState",
+                "SurfaceRecoveryStep",
+                "fn recover",
+            ] {
+                assert!(
+                    !source.contains(redundant),
+                    "{} reintroduced an application recovery wrapper `{redundant}`; select the policy only through SurfaceRecovery<P>",
+                    source_path.display()
+                );
+            }
+        }
     }
 }
 
@@ -1324,6 +1364,7 @@ fn known_color_pass_graph_compiles() {
     assert_browser_wgsl(&bundle.wgsl);
     wasmparser::validate(&bundle.wasm).expect("quality-only Wasm should be valid");
     assert_typed_surface_quality(&bundle);
+    assert_typed_surface_recovery(&bundle);
     assert_eq!(bundle.manifest.resources.len(), 1);
     assert_eq!(bundle.manifest.passes.len(), 2);
 }
@@ -1333,6 +1374,7 @@ fn rollcall_pipeline_pass_graph_compiles_with_external_resources_and_private_mem
     let bundle = compile_actor_ingot("demos/sketches/rollcall_pipeline");
     wasmparser::validate(&bundle.wasm).expect("quality-only Wasm should be valid");
     assert_typed_surface_quality(&bundle);
+    assert_typed_surface_recovery(&bundle);
     assert_eq!(bundle.manifest.protocol_version, 6);
     assert_eq!(bundle.manifest.resources.len(), 2);
     assert_eq!(bundle.manifest.passes.len(), 3);
@@ -2798,6 +2840,35 @@ fn surface_scheduling_rejects_missing_structural_fe_policy() {
         rendered.contains("MissingSchedulePolicy")
             && rendered.contains("no unique public Fe implementation"),
         "the diagnostic must name the missing structural Fe scheduling contract: {rendered}"
+    );
+}
+
+#[test]
+fn surface_recovery_rejects_missing_structural_fe_policy() {
+    let path = repo_root().join("demos/sketches/gradient/src/lib.fe");
+    let mut source = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+    assert!(
+        source.contains("SurfaceRecovery<StandardSurfaceRecovery>"),
+        "gradient must select its actor-level recovery policy by nominal type"
+    );
+    source = source.replacen(
+        "SurfaceRecovery<StandardSurfaceRecovery>",
+        "SurfaceRecovery<MissingRecoveryPolicy>",
+        1,
+    );
+    source = source.replacen(
+        "actor GradientSurface",
+        "struct MissingRecoveryPolicy {}\n\nactor GradientSurface",
+        1,
+    );
+    let error = compile_actor_ingot_with_root_source("demos/sketches/gradient", source)
+        .expect_err("a selected recovery policy without a structural Fe implementation must fail");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("MissingRecoveryPolicy")
+            && rendered.contains("no unique public Fe implementation"),
+        "the diagnostic must name the missing structural Fe recovery contract: {rendered}"
     );
 }
 

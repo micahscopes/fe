@@ -366,6 +366,54 @@ pub fn root() -> u8 {
 }
 
 #[test]
+fn string_literal_infers_generic_byte_array_length_from_callable_shape() {
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///string_generic_byte_array.fe").unwrap();
+    let src = r#"
+fn literal_len<const N: usize>(_ value: [u8; N]) -> usize {
+    N
+}
+
+pub fn root() -> usize {
+    literal_len(value: "hello, 世界")
+}
+"#;
+
+    let file = db.workspace().touch(&mut db, url, Some(src.to_string()));
+    let top_mod = db.top_mod(file);
+    let diags = db.run_on_top_mod(top_mod);
+    assert!(
+        diags.is_empty(),
+        "unexpected diagnostics: {}",
+        diags.format_diags(&db)
+    );
+}
+
+#[test]
+fn string_literal_infers_generic_inline_string_length_from_callable_shape() {
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///string_generic_inline.fe").unwrap();
+    let src = r#"
+fn literal_len<const N: usize>(_ value: String<N>) -> usize {
+    N
+}
+
+pub fn root() -> usize {
+    literal_len(value: "hello, 世界")
+}
+"#;
+
+    let file = db.workspace().touch(&mut db, url, Some(src.to_string()));
+    let top_mod = db.top_mod(file);
+    let diags = db.run_on_top_mod(top_mod);
+    assert!(
+        diags.is_empty(),
+        "unexpected diagnostics: {}",
+        diags.format_diags(&db)
+    );
+}
+
+#[test]
 fn long_string_literals_can_pick_up_dynstring_api_from_later_use() {
     let mut db = DriverDataBase::default();
     let url = Url::parse("file:///long_string_dynstring_api.fe").unwrap();

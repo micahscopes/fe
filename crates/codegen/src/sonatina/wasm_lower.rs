@@ -1688,6 +1688,13 @@ fn is_usize_semantic_ty<'db>(
     while let Some(inner) = ty.as_view(db) {
         ty = inner;
     }
+    // A reified const generic such as `N` is represented by its evaluated
+    // `ConstTy`, not directly by the primitive type that carries the value.
+    // Its runtime width is nevertheless the width of that const's declared
+    // type (`usize` here), so wasm32 legalization must inspect that carrier.
+    if let Some(const_value_ty) = ty.const_ty_ty(db) {
+        ty = const_value_ty;
+    }
     matches!(
         ty.base_ty(db).data(db),
         TyData::TyBase(TyBase::Prim(PrimTy::Usize))
@@ -1813,6 +1820,24 @@ fn narrow_usize_scalars<'db>(
             } else {
                 ok = false;
             }
+        }
+    }
+
+    let mut saw_return = false;
+    let mut all_returns_narrowed = true;
+    for block in &staged.blocks {
+        if let RTerminator::Return(Some(value)) = &block.terminator {
+            saw_return = true;
+            all_returns_narrowed &= is_narrowed(value);
+        }
+    }
+    if saw_return && all_returns_narrowed {
+        match &mut staged.signature.ret {
+            Some(RuntimeClass::Scalar(scalar)) if is_u256_unsigned(scalar.repr) => {
+                scalar.repr = USIZE_WASM_REPR;
+            }
+            Some(RuntimeClass::Scalar(scalar)) if scalar.repr == USIZE_WASM_REPR => {}
+            _ => ok = false,
         }
     }
 
@@ -6426,7 +6451,12 @@ where
                         )),
                     };
                 }
-                let callee_body = callee.body(self.module.db);
+                let callee_body = self.module.prepared_bodies.get(callee).ok_or_else(|| {
+                    LowerError::Internal(format!(
+                        "prepared Wasm body for `{}` is missing",
+                        self.module.function_symbol(*callee),
+                    ))
+                })?;
                 let callee_class = callee_body.signature.ret.as_ref().ok_or_else(|| {
                     LowerError::Unsupported(format!(
                         "wasm target: unit-returning call to `{}` cannot initialize an aggregate",
@@ -6540,12 +6570,48 @@ where
                     )),
                     other => other,
                 })?;
-                if source_ty != target_ty {
-                    return Err(LowerError::Unsupported(format!(
-                        "wasm target: non-identity scalar cast `{source_ty:?}` -> `{target_ty:?}` must lower through a dedicated numeric builtin"
-                    )));
+                let source = self.local_value(*value)?;
+                if source_ty == target_ty {
+                    return Ok(source);
                 }
-                self.local_value(*value)
+                let int_bits = |ty| match ty {
+                    Type::I1 => Some(1),
+                    Type::I8 => Some(8),
+                    Type::I16 => Some(16),
+                    Type::I32 => Some(32),
+                    Type::I64 => Some(64),
+                    _ => None,
+                };
+                let (Some(source_bits), Some(target_bits)) =
+                    (int_bits(source_ty), int_bits(target_ty))
+                else {
+                    return Err(LowerError::Unsupported(format!(
+                        "wasm target: scalar cast `{source_ty:?}` -> `{target_ty:?}` is outside the integer cast envelope"
+                    )));
+                };
+                let is = self.inst_set();
+                if source_bits > target_bits {
+                    Ok(self
+                        .fb
+                        .insert_inst(Trunc::new(is, source, target_ty), target_ty))
+                } else {
+                    let source_signed = matches!(
+                        self.body.value_class(*value),
+                        Some(RuntimeClass::Scalar(ScalarClass {
+                            repr: ScalarRepr::Int { signed: true, .. },
+                            ..
+                        }))
+                    );
+                    if source_signed && source_ty != Type::I1 {
+                        Ok(self
+                            .fb
+                            .insert_inst(Sext::new(is, source, target_ty), target_ty))
+                    } else {
+                        Ok(self
+                            .fb
+                            .insert_inst(Zext::new(is, source, target_ty), target_ty))
+                    }
+                }
             }
             RExpr::Bitcast { value, to } => {
                 let source_ty = self.local_ty(*value)?;
@@ -6565,7 +6631,15 @@ where
                     ))
                 }
             }
-            RExpr::Call { callee, args } => self.lower_call(*callee, args),
+            RExpr::Call { callee, args } => self.lower_call(*callee, args).map_err(|error| {
+                let symbol = self.module.function_symbol(*callee);
+                match error {
+                    LowerError::Unsupported(message) => LowerError::Unsupported(format!(
+                        "{message}; while calling `{symbol}` into {dst:?}"
+                    )),
+                    other => other,
+                }
+            }),
             RExpr::Builtin(builtin) => self.lower_builtin(builtin, dst),
             // R3.4b step 2: single-scalar-field newtype construction/projection is
             // a no-op on the represented word. `AggregateMake` of one field yields
@@ -8066,14 +8140,15 @@ where
                 }))
             )
         });
-        let is = self.inst_set();
         // Keep the MIR operand ids for the signedness key (the value class lives on
         // the RLocalId, not the sonatina ValueId, which is signless). The sonatina
         // ValueIds shadow below for the instruction constructors.
         let (lhs_local, rhs_local) = (lhs, rhs);
+        let (lhs_ty, rhs_ty) = (self.local_ty(lhs_local)?, self.local_ty(rhs_local)?);
         let lhs = self.local_value(lhs)?;
         let rhs = self.local_value(rhs)?;
         if float_operands {
+            let is = self.inst_set();
             let BinOp::Comp(comp) = op else {
                 return Err(LowerError::Unsupported(format!(
                     "wasm target: f32 binary op `{op:?}` is not supported; arithmetic must lower through IntrinsicArith"
@@ -8102,10 +8177,28 @@ where
             // non-overflowing values.
             BinOp::Arith(arith) => {
                 let ty = self.local_ty(dst)?;
-                Ok(match arith {
-                    ArithBinOp::Add => self.fb.insert_inst(Add::new(is, lhs, rhs), ty),
-                    ArithBinOp::Sub => self.fb.insert_inst(Sub::new(is, lhs, rhs), ty),
-                    ArithBinOp::Mul => self.fb.insert_inst(Mul::new(is, lhs, rhs), ty),
+                // WebAssembly has only i32/i64 integer registers. Narrow
+                // Sonatina values are consequently represented by i32 at the
+                // WAFFLE boundary, where a u8 immediate such as 128 can arrive
+                // sign-extended while a memory load arrives zero-extended.
+                // Canonicalize both narrow operands explicitly before any
+                // operation, then truncate value results back to Fe's logical
+                // width. This makes `u8 & 192 == 128` and the rest of the
+                // narrow integer matrix independent of incidental register
+                // extension.
+                let signed_shift = matches!(arith, ArithBinOp::RShift)
+                    && self.operand_signedness(lhs_local, rhs_local)?;
+                let lhs = self.promote_narrow_int(lhs, lhs_ty, signed_shift);
+                let rhs = self.promote_narrow_int(rhs, rhs_ty, false);
+                let op_ty = match ty {
+                    Type::I8 | Type::I16 => Type::I32,
+                    _ => ty,
+                };
+                let is = self.inst_set();
+                let result = match arith {
+                    ArithBinOp::Add => self.fb.insert_inst(Add::new(is, lhs, rhs), op_ty),
+                    ArithBinOp::Sub => self.fb.insert_inst(Sub::new(is, lhs, rhs), op_ty),
+                    ArithBinOp::Mul => self.fb.insert_inst(Mul::new(is, lhs, rhs), op_ty),
                     ArithBinOp::RShift => {
                         // Sonatina's shift constructor order is (bits, value), the
                         // EVM path's convention (lower_runtime.rs:4101-4109). Signed
@@ -8116,31 +8209,32 @@ where
                         // translator, so neither is a silent-skip path; the u32
                         // color-ramp shift (`(i * 655) >> 8`, the M4 coloring) flows
                         // end to end on both backends.
-                        if self.operand_signedness(lhs_local, rhs_local)? {
-                            self.fb.insert_inst(Sar::new(is, rhs, lhs), ty)
+                        if signed_shift {
+                            self.fb.insert_inst(Sar::new(is, rhs, lhs), op_ty)
                         } else {
-                            self.fb.insert_inst(Shr::new(is, rhs, lhs), ty)
+                            self.fb.insert_inst(Shr::new(is, rhs, lhs), op_ty)
                         }
                     }
                     // Left shift is bit-identical for signed and unsigned, so no
                     // signedness branch. Shift constructor order is (bits, value)
                     // like Sar/Shr (EVM precedent lower_runtime.rs:4128).
-                    ArithBinOp::LShift => self.fb.insert_inst(Shl::new(is, rhs, lhs), ty),
+                    ArithBinOp::LShift => self.fb.insert_inst(Shl::new(is, rhs, lhs), op_ty),
                     // Bitwise: direct operand order. The sonatina fork's SPIR-V
                     // emitter maps And/Or/Xor as of e423231f + 43e9f3b0 (the R2
                     // bitwise re-pin), matching the wasm translator leg. This is
                     // exactly blake3's op set (XOR + shifts + wrapping Add), so a
                     // blake3 const fn lowers on the runtime legs, not just CTFE.
-                    ArithBinOp::BitAnd => self.fb.insert_inst(And::new(is, lhs, rhs), ty),
-                    ArithBinOp::BitOr => self.fb.insert_inst(Or::new(is, lhs, rhs), ty),
-                    ArithBinOp::BitXor => self.fb.insert_inst(Xor::new(is, lhs, rhs), ty),
+                    ArithBinOp::BitAnd => self.fb.insert_inst(And::new(is, lhs, rhs), op_ty),
+                    ArithBinOp::BitOr => self.fb.insert_inst(Or::new(is, lhs, rhs), op_ty),
+                    ArithBinOp::BitXor => self.fb.insert_inst(Xor::new(is, lhs, rhs), op_ty),
                     other => {
                         return Err(LowerError::Unsupported(format!(
                             "wasm target (R1) arithmetic op `{other:?}` is not supported \
                              (div/rem/pow are R2)"
                         )));
                     }
-                })
+                };
+                Ok(self.restore_narrow_int(result, ty, op_ty))
             }
             BinOp::Comp(comp) => {
                 // Sign-aware (M2): the whole matrix derives from a signed/unsigned
@@ -8148,6 +8242,12 @@ where
                 // sonatina type (signless). The key is symmetric in the pair, so the
                 // `>`/`>=`/`<=` operand swaps below reuse it unchanged.
                 let signed = self.operand_signedness(lhs_local, rhs_local)?;
+                // Equality compares raw bit patterns; ordered comparisons use
+                // the semantic signedness carried by RuntimeClass.
+                let ordered = !matches!(comp, CompBinOp::Eq | CompBinOp::NotEq);
+                let lhs = self.promote_narrow_int(lhs, lhs_ty, signed && ordered);
+                let rhs = self.promote_narrow_int(rhs, rhs_ty, signed && ordered);
+                let is = self.inst_set();
                 Ok(match comp {
                     // i32 -> Slt, u32 -> Lt.
                     CompBinOp::Lt => self.int_lt(lhs, rhs, signed),
@@ -8185,6 +8285,33 @@ where
             other => Err(LowerError::Unsupported(format!(
                 "wasm target (R1) binary op `{other:?}` is not supported"
             ))),
+        }
+    }
+
+    /// Normalize a logical i8/i16 into WebAssembly's physical i32 register.
+    /// The explicit extension is semantic: it removes any dependence on how a
+    /// preceding immediate or narrow memory load happened to populate the high
+    /// register bits.
+    fn promote_narrow_int(&mut self, value: ValueId, ty: Type, signed: bool) -> ValueId {
+        if !matches!(ty, Type::I8 | Type::I16) {
+            return value;
+        }
+        let is = self.inst_set();
+        if signed {
+            self.fb
+                .insert_inst(Sext::new(is, value, Type::I32), Type::I32)
+        } else {
+            self.fb
+                .insert_inst(Zext::new(is, value, Type::I32), Type::I32)
+        }
+    }
+
+    fn restore_narrow_int(&mut self, value: ValueId, logical: Type, physical: Type) -> ValueId {
+        if logical == physical {
+            value
+        } else {
+            let is = self.inst_set();
+            self.fb.insert_inst(Trunc::new(is, value, logical), logical)
         }
     }
 
@@ -8287,7 +8414,19 @@ where
             *self.module.func_map.get(&callee).ok_or_else(|| {
                 LowerError::Internal("wasm call target was not declared".to_string())
             })?;
-        let ret_class = callee.body(self.module.db).signature.ret.clone();
+        let ret_class = self
+            .module
+            .prepared_bodies
+            .get(&callee)
+            .ok_or_else(|| {
+                LowerError::Internal(format!(
+                    "prepared Wasm body for `{}` is missing",
+                    self.module.function_symbol(callee),
+                ))
+            })?
+            .signature
+            .ret
+            .clone();
         let ret_ty = match ret_class {
             Some(class) => self.module.ty_for_class(&class)?,
             None => {

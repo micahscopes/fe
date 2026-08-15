@@ -89,6 +89,9 @@ const TYPED_SURFACE_SCHEDULE_EXPORT: &str = "fe_surface_schedule_v2";
 /// supplies raw viewport/device facts and realizes the returned integral
 /// extent; the selected policy type and authored function name remain private.
 const TYPED_SURFACE_QUALITY_EXPORT: &str = "fe_surface_quality_v1";
+/// Fixed discovery point for the actor-level Fe shared-device policy. Its
+/// private supervision state remains resident in generated Wasm.
+const TYPED_SURFACE_RECOVERY_EXPORT: &str = "fe_surface_recovery_v1";
 const CANONICAL_INTERFACE_JS: &str = include_str!("../assets/canonical-interface.js");
 /// Compiler-emitted host page for render bundles. It reads `manifest.json` and
 /// drives the two lowerings of the render kernel it describes: `shader.wgsl`
@@ -221,6 +224,7 @@ impl WebProvenance {
         has_pass_graph: bool,
         has_fe_schedule: bool,
         has_fe_quality: bool,
+        has_fe_recovery: bool,
     ) -> Self {
         self.generated_artifacts = vec![
             WebGeneratedArtifactKind::Manifest,
@@ -259,6 +263,10 @@ impl WebProvenance {
             self.fixed_host
                 .responsibilities
                 .retain(|role| *role != WebHostResponsibility::BackingStorePolicy);
+        }
+        if has_fe_recovery {
+            self.fe_responsibilities
+                .push(WebFeResponsibility::DeviceRecoveryPolicy);
         }
         if has_pass_graph {
             self.fe_responsibilities
@@ -312,6 +320,7 @@ pub enum WebFeResponsibility {
     SchedulingPolicy,
     ResidentActorState,
     BackingQualityPolicy,
+    DeviceRecoveryPolicy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1127,6 +1136,30 @@ fn actor_surface_quality_policy_tys<'db>(
         .collect()
 }
 
+fn actor_surface_recovery_policy_tys<'db>(
+    db: &'db DriverDataBase,
+    actor: &SemanticActor<'db>,
+) -> Vec<TyId<'db>> {
+    actor
+        .state
+        .actor_placement(db)
+        .data(db)
+        .iter()
+        .filter_map(|role| role.key_path.to_opt())
+        .filter_map(|path| resolve_metadata_ty(db, path, actor.state.scope()))
+        .filter_map(|ty| {
+            let attrs = nominal_attrs(db, ty)?;
+            if attrs.gpu_control(db) != Some(GpuControl::SurfaceRecovery) {
+                return None;
+            }
+            let [policy_ty] = ty.generic_args(db) else {
+                return None;
+            };
+            Some(*policy_ty)
+        })
+        .collect()
+}
+
 fn gpu_actor_name_for_entry(
     db: &DriverDataBase,
     top_mod: TopLevelMod<'_>,
@@ -1758,6 +1791,22 @@ struct ResolvedSurfaceQualityPolicy<'db> {
     contract: TypedSurfaceQualityContract,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TypedSurfaceRecoveryContract {
+    event_fields: usize,
+    state_fields: usize,
+    decision_fields: usize,
+    event_tag_limits: Vec<(usize, u32)>,
+    state_tag_limits: Vec<(usize, u32)>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedSurfaceRecoveryPolicy<'db> {
+    func: Func<'db>,
+    event_first: bool,
+    contract: TypedSurfaceRecoveryContract,
+}
+
 fn typed_surface_transition_export(contract: &TypedSurfaceTransitionContract) -> &'static str {
     if contract.scheduled {
         TYPED_SURFACE_SCHEDULED_EXPORT
@@ -1859,6 +1908,30 @@ fn canonical_surface_schedule_event_type() -> CanonicalType {
     ])
 }
 
+fn canonical_gpu_device_loss_reason_type() -> CanonicalType {
+    CanonicalType::Variant(
+        ["not_lost", "unknown", "destroyed"]
+            .into_iter()
+            .map(|name| CanonicalVariant {
+                name: name.to_owned(),
+                fields: Vec::new(),
+            })
+            .collect(),
+    )
+}
+
+fn canonical_gpu_device_event_kind_type() -> CanonicalType {
+    CanonicalType::Variant(
+        ["unknown", "available", "lost", "unavailable"]
+            .into_iter()
+            .map(|name| CanonicalVariant {
+                name: name.to_owned(),
+                fields: Vec::new(),
+            })
+            .collect(),
+    )
+}
+
 fn canonical_surface_schedule_state_type() -> CanonicalType {
     CanonicalType::Record(vec![
         CanonicalField::new("presenting", CanonicalType::Bool),
@@ -1880,6 +1953,47 @@ fn canonical_surface_queue_action_type() -> CanonicalType {
             })
             .collect(),
     )
+}
+
+fn canonical_surface_recovery_action_type() -> CanonicalType {
+    CanonicalType::Variant(
+        [
+            "no_action",
+            "retry_device",
+            "degrade_to_wasm",
+            "fail_surface",
+        ]
+        .into_iter()
+        .map(|name| CanonicalVariant {
+            name: name.to_owned(),
+            fields: Vec::new(),
+        })
+        .collect(),
+    )
+}
+
+fn canonical_surface_recovery_event_type() -> CanonicalType {
+    CanonicalType::Record(vec![
+        CanonicalField::new("kind", canonical_gpu_device_event_kind_type()),
+        CanonicalField::new("reason", canonical_gpu_device_loss_reason_type()),
+        CanonicalField::new("device_required", CanonicalType::Bool),
+        CanonicalField::new("software_fallback", CanonicalType::Bool),
+        CanonicalField::new("generation", CanonicalType::U32),
+    ])
+}
+
+fn canonical_surface_recovery_state_type() -> CanonicalType {
+    CanonicalType::Record(vec![
+        CanonicalField::new("device_lost", CanonicalType::Bool),
+        CanonicalField::new("attempts", CanonicalType::U32),
+    ])
+}
+
+fn canonical_surface_recovery_step_type() -> CanonicalType {
+    CanonicalType::Record(vec![
+        CanonicalField::new("state", canonical_surface_recovery_state_type()),
+        CanonicalField::new("action", canonical_surface_recovery_action_type()),
+    ])
 }
 
 fn canonical_surface_schedule_step_type() -> CanonicalType {
@@ -2450,6 +2564,216 @@ fn typed_surface_quality_contract(
     })
 }
 
+fn surface_recovery_arg_order(db: &DriverDataBase, func: Func<'_>) -> Option<bool> {
+    let arg_tys = func.arg_tys(db);
+    if arg_tys.len() != 2
+        || !nominal_attrs(db, func.return_ty(db))
+            .is_some_and(|attrs| attrs.is_web_surface_recovery_step(db))
+    {
+        return None;
+    }
+    let first = *arg_tys[0].skip_binder();
+    let second = *arg_tys[1].skip_binder();
+    let first_attrs = nominal_attrs(db, first)?;
+    let second_attrs = nominal_attrs(db, second)?;
+    if first_attrs.is_web_surface_recovery_event(db)
+        && second_attrs.is_web_surface_recovery_state(db)
+    {
+        Some(true)
+    } else if first_attrs.is_web_surface_recovery_state(db)
+        && second_attrs.is_web_surface_recovery_event(db)
+    {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn resolve_surface_recovery_policy<'db>(
+    db: &'db DriverDataBase,
+    top_mod: TopLevelMod<'db>,
+    source_entry: &str,
+) -> Result<Option<ResolvedSurfaceRecoveryPolicy<'db>>, WebBundleError> {
+    let actors = semantic_actors(db, top_mod);
+    let Some(actor) = actors.iter().find(|actor| {
+        actor_is_gpu_program(db, actor)
+            && actor.behaviors.iter().any(|behavior| {
+                behavior
+                    .name(db)
+                    .to_opt()
+                    .is_some_and(|name| name.data(db) == source_entry)
+            })
+    }) else {
+        return Ok(None);
+    };
+    let policies = actor_surface_recovery_policy_tys(db, actor);
+    let policy_ty = match policies.as_slice() {
+        [] => return Ok(None),
+        [policy] => *policy,
+        _ => {
+            return Err(WebBundleError::SurfaceProjection(format!(
+                "surface actor `{source_entry}` selects {} SurfaceRecovery policies; exactly one is allowed",
+                policies.len()
+            )));
+        }
+    };
+    let policy_name = policy_ty.pretty_print(db);
+    let policy_ingot = policy_ty.ingot(db).ok_or_else(|| {
+        WebBundleError::SurfaceProjection(format!(
+            "SurfaceRecovery policy `{policy_name}` is not owned by a resolvable Fe ingot"
+        ))
+    })?;
+    let candidates = policy_ingot
+        .all_impls(db)
+        .iter()
+        .copied()
+        .filter(|impl_| impl_.admissible_inherent_impl_ty(db) == Some(policy_ty))
+        .flat_map(|impl_| impl_.funcs(db))
+        .filter(|func| {
+            func.vis(db) == Visibility::Public && !func.is_extern(db) && func.body(db).is_some()
+        })
+        .filter_map(|func| {
+            surface_recovery_arg_order(db, func).map(|event_first| (func, event_first))
+        })
+        .collect::<Vec<_>>();
+    let (func, event_first) = match candidates.as_slice() {
+        [(func, event_first)] => (*func, *event_first),
+        [] => {
+            return Err(WebBundleError::SurfaceProjection(format!(
+                "SurfaceRecovery policy `{policy_name}` has no unique public Fe implementation with nominal SurfaceRecoveryEvent/SurfaceRecoveryState -> SurfaceRecoveryStep shape"
+            )));
+        }
+        _ => {
+            return Err(WebBundleError::SurfaceProjection(format!(
+                "SurfaceRecovery policy `{policy_name}` has {} structurally matching Fe implementations; exactly one is required",
+                candidates.len()
+            )));
+        }
+    };
+    let contract = typed_surface_recovery_contract(db, func, event_first, &policy_name)?;
+    Ok(Some(ResolvedSurfaceRecoveryPolicy {
+        func,
+        event_first,
+        contract,
+    }))
+}
+
+fn typed_surface_recovery_contract(
+    db: &DriverDataBase,
+    func: Func<'_>,
+    event_first: bool,
+    policy_name: &str,
+) -> Result<TypedSurfaceRecoveryContract, WebBundleError> {
+    let arg_tys = func.arg_tys(db);
+    if arg_tys.len() != 2 {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "SurfaceRecovery policy `{policy_name}` must take exactly SurfaceRecoveryEvent and SurfaceRecoveryState; found {} semantic arguments",
+            arg_tys.len()
+        )));
+    }
+    let (event_ty, state_ty) = if event_first {
+        (*arg_tys[0].skip_binder(), *arg_tys[1].skip_binder())
+    } else {
+        (*arg_tys[1].skip_binder(), *arg_tys[0].skip_binder())
+    };
+    if !nominal_attrs(db, event_ty).is_some_and(|attrs| attrs.is_web_surface_recovery_event(db)) {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "SurfaceRecovery policy `{policy_name}` must take the nominal #[web_surface_recovery_event] record"
+        )));
+    }
+    if !nominal_attrs(db, state_ty).is_some_and(|attrs| attrs.is_web_surface_recovery_state(db)) {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "SurfaceRecovery policy `{policy_name}` must take the nominal #[web_surface_recovery_state] record"
+        )));
+    }
+    let result_ty = func.return_ty(db);
+    if !nominal_attrs(db, result_ty).is_some_and(|attrs| attrs.is_web_surface_recovery_step(db)) {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "SurfaceRecovery policy `{policy_name}` must return the nominal #[web_surface_recovery_step] record"
+        )));
+    }
+
+    let event = canonical_type_from_semantic(db, event_ty, "surface_recovery_event")
+        .map_err(|error| WebBundleError::SurfaceProjection(error.to_string()))?;
+    let state = canonical_type_from_semantic(db, state_ty, "surface_recovery_state")
+        .map_err(|error| WebBundleError::SurfaceProjection(error.to_string()))?;
+    let step = canonical_type_from_semantic(db, result_ty, "surface_recovery_step")
+        .map_err(|error| WebBundleError::SurfaceProjection(error.to_string()))?;
+    let expected_event = canonical_surface_recovery_event_type();
+    let expected_state = canonical_surface_recovery_state_type();
+    let expected_step = canonical_surface_recovery_step_type();
+    if event != expected_event || state != expected_state || step != expected_step {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "SurfaceRecovery policy `{policy_name}` differs from the fixed typed recovery ABI: expected {expected_event:?}, {expected_state:?} -> {expected_step:?}; got {event:?}, {state:?} -> {step:?}"
+        )));
+    }
+
+    let mut event_tag_limits = Vec::new();
+    let event_fields =
+        surface_scalar_tag_limits(&event, "surface_recovery_event", 0, &mut event_tag_limits)?;
+    let mut state_tag_limits = Vec::new();
+    let state_fields =
+        surface_scalar_tag_limits(&state, "surface_recovery_state", 0, &mut state_tag_limits)?;
+    let mut step_tag_limits = Vec::new();
+    let step_fields =
+        surface_scalar_tag_limits(&step, "surface_recovery_step", 0, &mut step_tag_limits)?;
+    let decision_fields = step_fields.checked_sub(state_fields).ok_or_else(|| {
+        WebBundleError::SurfaceProjection(format!(
+            "SurfaceRecovery policy `{policy_name}` reply is shorter than its resident state"
+        ))
+    })?;
+    if event_fields != 5 || state_fields != 2 || decision_fields != 1 {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "SurfaceRecovery policy `{policy_name}` must flatten to 5 event, 2 state, and 1 decision leaves; got {event_fields}, {state_fields}, and {decision_fields}"
+        )));
+    }
+    Ok(TypedSurfaceRecoveryContract {
+        event_fields,
+        state_fields,
+        decision_fields,
+        event_tag_limits,
+        state_tag_limits,
+    })
+}
+
+/// Compile the exact ordinary Fe recovery policy structurally selected by a
+/// GPU actor for native differential execution. The actor's render entry is
+/// used only to select its nominal `SurfaceRecovery<P>` capability; the JIT
+/// artifact contains the selected Fe policy and its transitive callees, not a
+/// parallel Rust implementation of the policy.
+#[cfg(all(
+    feature = "native-backend",
+    not(target_arch = "wasm32"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+pub fn compile_native_surface_recovery_policy(
+    db: &DriverDataBase,
+    top_mod: TopLevelMod<'_>,
+    source_entry: &str,
+) -> Result<crate::NativeSurfaceRecoveryArtifact, WebBundleError> {
+    let policy = resolve_surface_recovery_policy(db, top_mod, source_entry)?.ok_or_else(|| {
+        WebBundleError::SurfaceProjection(format!(
+            "surface actor `{source_entry}` has no SurfaceRecovery<P> policy"
+        ))
+    })?;
+    let package = mir::build_wasm_runtime_package_for_entries_with_internal_funcs(
+        db,
+        top_mod,
+        &[],
+        std::slice::from_ref(&policy.func),
+    )
+    .map_err(|error| WebBundleError::Lower(error.to_string()))?;
+    let symbol = mir::runtime_package_symbol_for_func(db, package, policy.func)
+        .map_err(|error| WebBundleError::Lower(error.to_string()))?;
+    crate::sonatina::compile_runtime_package_native_surface_recovery(
+        db,
+        &package,
+        &symbol,
+        policy.event_first,
+    )
+    .map_err(|error| WebBundleError::Lower(error.to_string()))
+}
+
 /// Compile the exact ordinary Fe scheduling policy structurally selected by a
 /// GPU actor for native differential execution. The caller names only the
 /// actor's render entry; its control behavior, nominal policy type, unique
@@ -2607,6 +2931,24 @@ fn with_typed_surface_quality(
         contract.decision_fields,
         Vec::new(),
         Vec::new(),
+    )
+}
+
+fn with_typed_surface_recovery(
+    options: WasmCompileOptions,
+    source: &str,
+    event_first: bool,
+    contract: &TypedSurfaceRecoveryContract,
+) -> WasmCompileOptions {
+    options.with_resident_policy(
+        source,
+        TYPED_SURFACE_RECOVERY_EXPORT,
+        event_first,
+        contract.event_fields,
+        contract.state_fields,
+        contract.decision_fields,
+        contract.event_tag_limits.clone(),
+        contract.state_tag_limits.clone(),
     )
 }
 
@@ -3548,6 +3890,7 @@ impl WebBundle {
         }
         let control_export = actor_update_export_name(db, top_mod, &options.source_entry)?;
         let quality_policy = resolve_surface_quality_policy(db, top_mod, &options.source_entry)?;
+        let recovery_policy = resolve_surface_recovery_policy(db, top_mod, &options.source_entry)?;
         let fragment_entries = program
             .stages
             .iter()
@@ -3738,6 +4081,7 @@ impl WebBundle {
         let (wasm, control, has_fe_schedule) = if control_export.is_some()
             || initializer.is_some()
             || quality_policy.is_some()
+            || recovery_policy.is_some()
         {
             // A pass graph remains GPU-only for all rendering and resource
             // work. Its optional Wasm artifact contains only Fe-authored state
@@ -3785,6 +4129,7 @@ impl WebBundle {
                 .map(|policy| policy.func)
                 .into_iter()
                 .chain(quality_policy.as_ref().map(|policy| policy.func))
+                .chain(recovery_policy.as_ref().map(|policy| policy.func))
                 .collect::<Vec<_>>();
             let control_package = mir::build_wasm_runtime_package_for_entries_with_internal_funcs(
                 db,
@@ -3824,6 +4169,17 @@ impl WebBundle {
                 wasm_options = with_typed_surface_quality(
                     wasm_options,
                     &policy_instance_key,
+                    &policy.contract,
+                );
+            }
+            if let Some(policy) = recovery_policy.as_ref() {
+                let policy_instance_key =
+                    mir::runtime_package_instance_key_for_func(db, control_package, policy.func)
+                        .map_err(|error| WebBundleError::Lower(error.to_string()))?;
+                wasm_options = with_typed_surface_recovery(
+                    wasm_options,
+                    &policy_instance_key,
+                    policy.event_first,
                     &policy.contract,
                 );
             }
@@ -3871,6 +4227,7 @@ impl WebBundle {
             passes.len() > 1 || !resources.is_empty(),
             has_fe_schedule,
             quality_policy.is_some(),
+            recovery_policy.is_some(),
         );
         let manifest = WebBundleManifest {
             protocol: WEB_BUNDLE_PROTOCOL.to_owned(),
@@ -3944,6 +4301,7 @@ impl WebBundle {
         // too, so that unsupported combination remains fail-closed.
         let control_export = actor_update_export_name(db, top_mod, &options.source_entry)?;
         let quality_policy = resolve_surface_quality_policy(db, top_mod, &options.source_entry)?;
+        let recovery_policy = resolve_surface_recovery_policy(db, top_mod, &options.source_entry)?;
         let typed_transition = control_export
             .as_deref()
             .map(|export| {
@@ -4082,6 +4440,7 @@ impl WebBundle {
             .map(|policy| policy.func)
             .into_iter()
             .chain(quality_policy.as_ref().map(|policy| policy.func))
+            .chain(recovery_policy.as_ref().map(|policy| policy.func))
             .collect::<Vec<_>>();
         let wasm_package = mir::build_wasm_runtime_package_for_entries_with_internal_funcs(
             db,
@@ -4136,6 +4495,17 @@ impl WebBundle {
                     .map_err(|error| WebBundleError::Lower(error.to_string()))?;
             wasm_options =
                 with_typed_surface_quality(wasm_options, &policy_instance_key, &policy.contract);
+        }
+        if let Some(policy) = recovery_policy.as_ref() {
+            let policy_instance_key =
+                mir::runtime_package_instance_key_for_func(db, wasm_package, policy.func)
+                    .map_err(|error| WebBundleError::Lower(error.to_string()))?;
+            wasm_options = with_typed_surface_recovery(
+                wasm_options,
+                &policy_instance_key,
+                policy.event_first,
+                &policy.contract,
+            );
         }
         let wasm = compile_runtime_package_wasm_with_options(
             db,
@@ -4211,6 +4581,7 @@ impl WebBundle {
                 .as_ref()
                 .is_some_and(|contract| contract.scheduled),
             quality_policy.is_some(),
+            recovery_policy.is_some(),
         );
         let manifest = WebBundleManifest {
             protocol: WEB_BUNDLE_PROTOCOL.to_string(),

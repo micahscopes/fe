@@ -849,8 +849,20 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
                 }
             }
             None => panic!(
-                "typed path expression is missing semantic value-path classification: owner={:?} expr={expr:?} data={:?} ty={} ty_data={:?} binding={:?} const_ref={:?} code_region_ref={:?}",
+                "typed path expression is missing semantic value-path classification: owner={:?} owner_name={:?} expr={expr:?} span={:?} path={:?} data={:?} ty={} ty_data={:?} binding={:?} const_ref={:?} code_region_ref={:?}",
                 self.template_owner,
+                match self.template_owner {
+                    BodyOwner::Func(func) =>
+                        func.name(self.db).to_opt().map(|ident| ident.data(self.db)),
+                    _ => None,
+                },
+                expr.span(self.body),
+                match self.body.exprs(self.db)[expr] {
+                    Partial::Present(Expr::Path(Partial::Present(path))) => {
+                        Some(path.pretty_print(self.db))
+                    }
+                    _ => None,
+                },
                 self.body.exprs(self.db)[expr],
                 self.expr_ty(expr).pretty_print(self.db),
                 self.expr_ty(expr).data(self.db),

@@ -8,7 +8,7 @@ use crate::{
         RuntimeSyntheticSpec,
         code_region::{code_region_runtime_entry, code_region_section_name, code_region_symbol},
     },
-    verify::{VerifyError, verify_runtime_body},
+    verify::{VerifyError, verify_runtime_body_detailed},
 };
 
 struct PackageView<'db> {
@@ -76,7 +76,9 @@ pub fn verify_runtime_package<'db>(
             ));
         }
         let body = function.instance(db).body(db);
-        verify_runtime_body(db, &view, &body)?;
+        verify_runtime_body_detailed(db, &view, &body).map_err(|failure| {
+            VerifyError::InvalidFunctionBody(function.symbol(db).clone(), Box::new(failure))
+        })?;
         verify_code_region_refs(&view, &body)?;
         verify_synthetic_function(function.owner(db), &body)?;
     }

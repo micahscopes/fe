@@ -6,6 +6,7 @@ use hir::analysis::{
     },
     ty::{ty_check::BodyOwner, ty_def::TyId},
 };
+use hir::hir_def::{Expr, Partial};
 
 use crate::runtime::{AddressSpaceKind, RuntimeBoundarySpec, RuntimeCarrier, RuntimeClass};
 
@@ -171,8 +172,37 @@ impl<'a, 'carriers, 'roots, 'cache, 'db> RuntimeArgSelector<'a, 'carriers, 'root
                 };
                 let local = self.env.body().locals.get(arg.local.index());
                 let local_ty = local.map(|local| local.ty.pretty_print(self.env.db()));
+                let instance_key = self
+                    .env
+                    .body()
+                    .owner
+                    .key(self.env.db());
+                let generic_args = instance_key
+                    .subst(self.env.db())
+                    .generic_args(self.env.db())
+                    .iter()
+                    .map(|ty| ty.pretty_print(self.env.db()))
+                    .collect::<Vec<_>>();
+                let origin_expr = arg.origin.and_then(|expr| {
+                    let body = instance_key.typed_body(self.env.db()).body()?;
+                    Some(match body.exprs(self.env.db())[expr] {
+                        Partial::Present(Expr::Path(Partial::Present(path))) => {
+                            format!("path {}", path.pretty_print(self.env.db()))
+                        }
+                        Partial::Present(Expr::Cast(inner, Partial::Present(ty))) => {
+                            let inner = match body.exprs(self.env.db())[inner] {
+                                Partial::Present(Expr::Path(Partial::Present(path))) => {
+                                    format!("path {}", path.pretty_print(self.env.db()))
+                                }
+                                ref data => format!("{data:?}"),
+                            };
+                            format!("cast {inner} as {}", ty.pretty_print(self.env.db()))
+                        }
+                        ref data => format!("{data:?}"),
+                    })
+                });
                 panic!(
-                    "semantic operand has no lowerable runtime source for class: owner={owner:?}; owner_name={owner_name:?}; arg={arg:?}; target={target:?}; local_ty={local_ty:?}; local={local:?}",
+                    "semantic operand has no lowerable runtime source for class: owner={owner:?}; owner_name={owner_name:?}; generic_args={generic_args:?}; origin_expr={origin_expr:?}; arg={arg:?}; target={target:?}; local_ty={local_ty:?}; local={local:?}",
                 )
             })
     }

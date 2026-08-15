@@ -12,8 +12,10 @@ use std::webgpu::{
     FragmentSurface as Display,
     GpuProgram as Pipeline,
     ResponsiveBacking,
+    StandardSurfaceRecovery,
     StorageBuffer as Tape,
     SurfaceQuality,
+    SurfaceRecovery,
     Workgroup as Threads,
     WebGpuBackend,
 }
@@ -24,6 +26,7 @@ fn parent(left: u32, right: u32) -> u32 {
 
 actor RollcallPipeline uses (
     Pipeline<WebGpuBackend>, SurfaceQuality<ResponsiveBacking>,
+    SurfaceRecovery<StandardSurfaceRecovery>,
 ) {
     leaves: Tape<u32, 8>,
     nodes: Tape<u32, 8>,

@@ -58,7 +58,8 @@ use core::marker::Copy
 use core::{HostEffect, MainThread, Worker}
 use std::webgpu::{
     Dispatch, FragmentSurface, GpuProgram, LatestPerFrame, ResponsiveBacking,
-    SurfaceQuality, SurfaceScheduling, SurfaceTransition, WebGpuBackend,
+    StandardSurfaceRecovery, SurfaceQuality, SurfaceRecovery, SurfaceScheduling,
+    SurfaceTransition, WebGpuBackend,
 }
 use std::web::view::{
     ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface,
@@ -835,6 +836,7 @@ const fn dec_params() -> DecParams {
 
 actor DecSurface uses (
     GpuProgram<WebGpuBackend>, SurfaceQuality<ResponsiveBacking>,
+    SurfaceRecovery<StandardSurfaceRecovery>,
 ) {
     /// 0-cochain value at the hexagon's centre vertex.
     c0: f32,

@@ -7,7 +7,10 @@
 use std::web::component::{
     BrowserBytes, BrowserString, ComponentEvent, ComponentEventKind, ComponentPatch,
     BrowserPtr, ComponentWriter, InitialState, KeyboardKey, ProjectState, ResidentTransition,
-    allocate_component_buffer, component_string,
+    allocate_component_buffer,
+}
+use std::text::{
+    TextLayout, TextLayoutProvider, TextTable, Utf8Buffer, Utf8View,
 }
 use std::web::page::{
     ComponentComposition, ComponentView, PageAttribute, PageBuilder, PageElement, PageText,
@@ -119,8 +122,17 @@ pub struct TodoState {
     pub revision: u32,
 }
 
-fn byte_at(ptr: u32, index: u32) -> BrowserPtr<u32> {
-    BrowserPtr::from_u32(ptr + index)
+/// FCO derives the base offset and complete span of the interleaved title
+/// table. The application names capacity/count/stride once and never performs
+/// title pointer arithmetic.
+struct TodoTextLayout {
+    titles: TextTable<TITLE_CAPACITY, MAX_TODOS, TODO_STRIDE, TODO_HEADER_BYTES>,
+}
+
+derive TextLayout for TodoTextLayout using TextLayoutProvider
+
+fn todo_text_layout() -> TodoTextLayout {
+    <TodoTextLayout as TextLayout>::text_layout()
 }
 
 fn word_at(ptr: u32, index: u32) -> BrowserPtr<u32> {
@@ -133,14 +145,6 @@ fn read_word(ptr: u32, index: u32) -> u32 {
 
 fn write_word(ptr: u32, index: u32, value: u32) {
     word_at(ptr: ptr, index: index).write(value)
-}
-
-fn clear_bytes(ptr: u32, len: u32) {
-    let mut index: u32 = 0
-    while index < len {
-        byte_at(ptr: ptr, index: index).write(0)
-        index = index + 1
-    }
 }
 
 fn slot_offset(index: u32) -> u32 {
@@ -171,87 +175,47 @@ fn title_len(todos: u32, index: u32) -> u32 {
     read_word(ptr: todos, index: slot_offset(index: index)) >> 1
 }
 
-fn title_ptr(todos: u32, index: u32) -> u32 {
-    todos + slot_offset(index: index) + TODO_HEADER_BYTES
+fn title(todos: u32, index: u32) -> Utf8View {
+    todo_text_layout().titles.buffer(
+        base: todos,
+        index: index,
+        len: title_len(todos: todos, index: index),
+    ).view()
 }
 
-fn title(todos: u32, index: u32) -> BrowserString {
-    component_string(ptr: title_ptr(todos: todos, index: index), len: title_len(todos: todos, index: index))
+fn draft_buffer(ptr: u32, len: u32) -> Utf8Buffer {
+    Utf8Buffer::with_len(ptr: ptr, len: len, capacity: TITLE_CAPACITY)
 }
 
-fn is_space(value: u32) -> bool {
-    value == 32 || value == 9 || value == 10 || value == 13
-}
-
-fn trim(value: own BrowserString) -> BrowserString {
-    let mut start: u32 = 0
-    let mut end: u32 = value.len
-    while start < end {
-        let source: BrowserPtr<u32> = BrowserPtr::from_u32(value.ptr + start)
-        if is_space(value: source.read() & 255) == false { break }
-        start = start + 1
-    }
-    while end > start {
-        let source: BrowserPtr<u32> = BrowserPtr::from_u32(value.ptr + end - 1)
-        if is_space(value: source.read() & 255) == false { break }
-        end = end - 1
-    }
-    component_string(ptr: value.ptr + start, len: end - start)
-}
-
-fn utf8_prefix_len(value: own BrowserString, capacity: u32) -> u32 {
-    let mut len = value.len
-    if len <= capacity { return len }
-    len = capacity
-    // Host input is valid UTF-8. If the first excluded byte is a continuation
-    // byte, retreat to the lead byte so the retained prefix stays valid.
-    while len > 0 {
-        let next: BrowserPtr<u32> = BrowserPtr::from_u32(value.ptr + len)
-        if next.read() & 192 != 128 { break }
-        len = len - 1
-    }
-    len
-}
-
-fn copy_text(destination: u32, capacity: u32, value: own BrowserString) -> u32 {
-    let len = utf8_prefix_len(value: value, capacity: capacity)
-    let mut index: u32 = 0
-    while index < len {
-        let source: BrowserPtr<u32> = BrowserPtr::from_u32(value.ptr + index)
-        byte_at(ptr: destination, index: index).write(source.read() & 255)
-        index = index + 1
-    }
-    len
-}
-
-fn set_title(todos: u32, index: u32, value: own BrowserString) -> u32 {
-    let trimmed = trim(value: value)
-    let len = copy_text(
-        destination: title_ptr(todos: todos, index: index),
-        capacity: TITLE_CAPACITY,
-        value: trimmed,
-    )
+fn set_title(todos: u32, index: u32, value: Utf8View) -> u32 {
+    let write = todo_text_layout().titles.buffer(
+        base: todos,
+        index: index,
+        len: title_len(todos: todos, index: index),
+    ).replace(value: value.trim_ascii())
+    let len = write.buffer.len()
     let present: u32 = if occupied(todos: todos, index: index) { 1 } else { 0 }
     write_word(ptr: todos, index: slot_offset(index: index), value: (len << 1) | present)
     len
 }
 
-/// Seed one ordinary todo slot from a small fixed UTF-8/ASCII byte record.
-/// These are real resident items: subsequent reducer operations do not know
-/// or care that they came from initial state rather than a keyboard event.
-fn seed_todo_header(todos: u32, index: u32, id: u32, len: u32) -> u32 {
+/// Seed an ordinary item directly from a Fe string literal. Contextual literal
+/// lowering infers its owned `[u8; N]`; FCO-derived layout supplies the
+/// destination. No byte list exists here.
+fn seed_todo<const N: usize>(todos: u32, index: u32, id: u32, value: own [u8; N]) {
+    let write = todo_text_layout().titles.buffer(
+        base: todos,
+        index: index,
+        len: 0,
+    ).replace_literal(value)
+    if write.valid == false || write.truncated { core::panic() }
     write_word(
         ptr: todos,
         index: slot_offset(index: index),
-        value: (len << 1) | 1,
+        value: (write.buffer.len() << 1) | 1,
     )
     write_word(ptr: todos, index: slot_offset(index: index) + 4, value: id)
     write_word(ptr: todos, index: slot_offset(index: index) + 8, value: 0)
-    title_ptr(todos: todos, index: index)
-}
-
-fn seed_byte(destination: u32, offset: u32, value: u32) {
-    byte_at(ptr: destination, index: offset).write(value)
 }
 
 fn find_slot(todos: u32, key: u32) -> u32 {
@@ -434,44 +398,10 @@ actor TodoApp {
         let todos = allocate_component_buffer(capacity: TODO_STORAGE_BYTES)
         let patch = allocate_component_buffer(capacity: PATCH_CAPACITY)
         let draft = allocate_component_buffer(capacity: TITLE_CAPACITY)
-        clear_bytes(ptr: todos.ptr, len: todos.len)
-        let strings = seed_todo_header(todos: todos.ptr, index: 0, id: 1, len: 7)
-        seed_byte(destination: strings, offset: 0, value: 115)
-        seed_byte(destination: strings, offset: 1, value: 116)
-        seed_byte(destination: strings, offset: 2, value: 114)
-        seed_byte(destination: strings, offset: 3, value: 105)
-        seed_byte(destination: strings, offset: 4, value: 110)
-        seed_byte(destination: strings, offset: 5, value: 103)
-        seed_byte(destination: strings, offset: 6, value: 115)
-
-        let review = seed_todo_header(todos: todos.ptr, index: 1, id: 2, len: 11)
-        seed_byte(destination: review, offset: 0, value: 114)
-        seed_byte(destination: review, offset: 1, value: 101)
-        seed_byte(destination: review, offset: 2, value: 118)
-        seed_byte(destination: review, offset: 3, value: 105)
-        seed_byte(destination: review, offset: 4, value: 101)
-        seed_byte(destination: review, offset: 5, value: 119)
-        seed_byte(destination: review, offset: 6, value: 32)
-        seed_byte(destination: review, offset: 7, value: 99)
-        seed_byte(destination: review, offset: 8, value: 111)
-        seed_byte(destination: review, offset: 9, value: 100)
-        seed_byte(destination: review, offset: 10, value: 101)
-
-        let more = seed_todo_header(todos: todos.ptr, index: 2, id: 3, len: 14)
-        seed_byte(destination: more, offset: 0, value: 109)
-        seed_byte(destination: more, offset: 1, value: 117)
-        seed_byte(destination: more, offset: 2, value: 99)
-        seed_byte(destination: more, offset: 3, value: 104)
-        seed_byte(destination: more, offset: 4, value: 32)
-        seed_byte(destination: more, offset: 5, value: 109)
-        seed_byte(destination: more, offset: 6, value: 117)
-        seed_byte(destination: more, offset: 7, value: 99)
-        seed_byte(destination: more, offset: 8, value: 104)
-        seed_byte(destination: more, offset: 9, value: 32)
-        seed_byte(destination: more, offset: 10, value: 109)
-        seed_byte(destination: more, offset: 11, value: 111)
-        seed_byte(destination: more, offset: 12, value: 114)
-        seed_byte(destination: more, offset: 13, value: 101)
+        let _ = Utf8Buffer::empty(ptr: todos.ptr, capacity: todos.len).clear_storage()
+        seed_todo(todos: todos.ptr, index: 0, id: 1, value: "strings")
+        seed_todo(todos: todos.ptr, index: 1, id: 2, value: "review code")
+        seed_todo(todos: todos.ptr, index: 2, id: 3, value: "much much more")
         TodoState {
             todos_ptr: todos.ptr,
             patch_ptr: patch.ptr,
@@ -493,7 +423,6 @@ actor TodoApp {
         let todos = self.todos_ptr
         let patch = self.patch_ptr
         let draft = self.draft_ptr
-        let draft_capacity = TITLE_CAPACITY
         let mut count = self.count
         let mut next_id = self.next_id
         let mut filter = self.filter
@@ -542,11 +471,8 @@ actor TodoApp {
                         TodoAction::BeginEdit => {
                             let index = find_slot(todos: todos, key: event.key)
                             if event.click_count() >= 2 && index < MAX_TODOS {
-                                draft_len = copy_text(
-                                    destination: draft,
-                                    capacity: draft_capacity,
-                                    value: title(todos: todos, index: index),
-                                )
+                                draft_len = draft_buffer(ptr: draft, len: draft_len)
+                                    .replace(value: title(todos: todos, index: index)).buffer.len()
                                 editing = event.key
                                 focus_edit = true
                             }
@@ -554,11 +480,8 @@ actor TodoApp {
                         TodoAction::EditButton => {
                             let index = find_slot(todos: todos, key: event.key)
                             if index < MAX_TODOS {
-                                draft_len = copy_text(
-                                    destination: draft,
-                                    capacity: draft_capacity,
-                                    value: title(todos: todos, index: index),
-                                )
+                                draft_len = draft_buffer(ptr: draft, len: draft_len)
+                                    .replace(value: title(todos: todos, index: index)).buffer.len()
                                 editing = event.key
                                 focus_edit = true
                             }
@@ -604,11 +527,8 @@ actor TodoApp {
                 match action {
                     TodoAction::EditInput => {
                         if connected && event.key == editing {
-                            draft_len = copy_text(
-                                destination: draft,
-                                capacity: draft_capacity,
-                                value: event.text,
-                            )
+                            draft_len = draft_buffer(ptr: draft, len: draft_len)
+                                .replace_browser(event.text).buffer.len()
                             revision = revision + 1
                         }
                     }
@@ -621,9 +541,9 @@ actor TodoApp {
                         KeyboardKey::Enter => {
                             match action {
                                 TodoAction::NewTodo => {
-                                    let value = trim(value: event.text)
+                                    let value = Utf8View::from_browser(event.text).trim_ascii()
                                     let index = find_empty(todos: todos)
-                                    if value.len > 0 && index < MAX_TODOS {
+                                    if value.len() > 0 && index < MAX_TODOS {
                                         write_word(ptr: todos, index: slot_offset(index: index), value: 1)
                                         write_word(ptr: todos, index: slot_offset(index: index) + 4, value: next_id)
                                         write_word(ptr: todos, index: slot_offset(index: index) + 8, value: 0)
@@ -637,9 +557,9 @@ actor TodoApp {
                                 TodoAction::EditInput => {
                                     if event.key == editing {
                                         let index = find_slot(todos: todos, key: event.key)
-                                        let value = trim(value: component_string(ptr: draft, len: draft_len))
+                                        let value = draft_buffer(ptr: draft, len: draft_len).view().trim_ascii()
                                         if index < MAX_TODOS {
-                                            if value.len == 0 {
+                                            if value.len() == 0 {
                                                 remove_at(todos: todos, index: index)
                                                 count = count - 1
                                             } else {
@@ -719,7 +639,7 @@ actor TodoApp {
             enabled: self.filter.is_completed(),
         )
         if self.clear_input {
-            writer = writer.set_value(target: ui.new_todo, value: component_string(ptr: 0, len: 0))
+            writer = writer.set_value(target: ui.new_todo, value: Utf8View::empty().browser_string())
         }
 
         writer = writer.repeat_begin(region: ui.list)
@@ -729,7 +649,7 @@ actor TodoApp {
                 let is_completed = completed(todos: todos, index: index)
                 if self.filter.includes(is_completed: is_completed) {
                     let key = todo_id(todos: todos, index: index)
-                    let value = title(todos: todos, index: index)
+                    let value = title(todos: todos, index: index).browser_string()
                     writer = writer.repeat_item(key: key)
                     writer = writer.set_text(target: ui.row_title, value: value)
                     writer = writer.set_checked(target: ui.row_toggle, checked: is_completed)
@@ -746,7 +666,7 @@ actor TodoApp {
                     if key == self.editing {
                         writer = writer.set_value(
                             target: ui.row_edit,
-                            value: component_string(ptr: self.draft_ptr, len: self.draft_len),
+                            value: draft_buffer(ptr: self.draft_ptr, len: self.draft_len).browser_string(),
                         )
                         if self.focus_edit {
                             writer = writer.focus(target: ui.row_edit)

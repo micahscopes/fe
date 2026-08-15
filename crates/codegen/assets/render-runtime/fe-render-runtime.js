@@ -158,6 +158,16 @@ export const SurfaceQueueAction = Object.freeze({
   Drop: 2,
 });
 
+/** Fixed tags of Fe's device-recovery effect. Every canonical surface policy
+ * returns one; this host only aggregates shared retry demand and realizes the
+ * selected per-surface terminal action. */
+export const SurfaceRecoveryAction = Object.freeze({
+  NoAction: 0,
+  RetryDevice: 1,
+  DegradeToWasm: 2,
+  FailSurface: 3,
+});
+
 /** Fixed tags of `std::web::gpu_device_events::GpuDeviceEventKind`.
  * `Unknown` is an Fe-side placeholder and is never published by this host. */
 export const GpuDeviceEventKind = Object.freeze({
@@ -310,7 +320,6 @@ let sharedGpuGeneration = 0;
 const sharedGpuDeviceLifecycle = createGpuDeviceLifecycleChannel();
 const DEVICE_STABILITY_MS = 50;
 const DEVICE_LOSS_CONFIRMATION_MS = 250;
-const MAX_RECOVERY_ATTEMPTS = 2;
 /** Every currently connected `<fe-surface>`, live or not (module-level so a
  * `device.lost` event, which is a page-wide fact, can reach every element). */
 const attachedSurfaces = new Set();
@@ -433,7 +442,6 @@ function handleSharedDeviceLoss(deadDevice, info) {
 }
 
 async function drainDeviceLosses() {
-  let attempts = 0;
   while (pendingDeviceLoss) {
     const { deadDevice, info } = pendingDeviceLoss;
     pendingDeviceLoss = undefined;
@@ -448,27 +456,81 @@ async function drainDeviceLosses() {
       reason,
       current?.generation ?? sharedGpuGeneration,
     );
+    // Never leave the dead device reachable while Fe decides whether there is
+    // page-wide replacement demand. Retry requests are aggregated below; the
+    // host does not retain an independent attempt budget.
+    sharedGpuPromise = Promise.resolve(null);
+    await coordinateSurfaceRecovery(
+      [...attachedSurfaces],
+      reason,
+      current?.generation ?? sharedGpuGeneration,
+      async () => {
+        sharedGpuPromise = undefined;
+        return acquireSharedGpu();
+      },
+    );
+  }
+}
 
-    let fresh = null;
-    if (attempts < MAX_RECOVERY_ATTEMPTS) {
-      attempts += 1;
-      sharedGpuPromise = undefined;
-      fresh = await acquireSharedGpu();
-    } else {
-      sharedGpuFailure = new Error(
-        `fe render runtime: WebGPU device recovery stopped after ${MAX_RECOVERY_ATTEMPTS} failed attempts`,
-      );
-      sharedGpuPromise = Promise.resolve(null);
-      publishGpuUnavailable(reason);
+/**
+ * Ask every affected surface's resident Fe policy what to do, aggregate all
+ * `RetryDevice` decisions into exactly one shared acquisition per round, and
+ * realize terminal decisions independently. Repeated rounds exist only while
+ * at least one Fe policy requests them; this host owns no retry count.
+ *
+ * Exported for a deterministic fixed-host oracle. Production passes the
+ * actual connected surfaces and `acquireSharedGpu` realization.
+ */
+export async function coordinateSurfaceRecovery(
+  surfaces,
+  reason,
+  generation,
+  acquire,
+) {
+  let retrying = [];
+  const passive = [];
+  for (const surface of surfaces) {
+    try {
+      const action = surface._beginDeviceLoss(reason, generation);
+      if (action === SurfaceRecoveryAction.RetryDevice) retrying.push(surface);
+      else {
+        await surface._realizeDeviceRecovery(action, reason, generation);
+        // A poster-only/cold surface may not need the replacement device now,
+        // but its Fe supervision state still observes `Available` if another
+        // surface causes the shared device to be reacquired.
+        if (action === SurfaceRecoveryAction.NoAction) passive.push(surface);
+      }
+    } catch (error) {
+      surface._fail(error);
     }
-    for (const surface of attachedSurfaces) {
+  }
+
+  while (retrying.length > 0) {
+    const fresh = await acquire();
+    if (fresh) {
+      for (const surface of [...retrying, ...passive]) {
+        try {
+          await surface._completeDeviceRecovery(fresh, generation);
+        } catch (error) {
+          surface._fail(error);
+        }
+      }
+      return fresh;
+    }
+
+    const next = [];
+    for (const surface of retrying) {
       try {
-        await surface._onDeviceLoss(fresh);
+        const action = surface._continueDeviceRecovery(reason, generation);
+        if (action === SurfaceRecoveryAction.RetryDevice) next.push(surface);
+        else await surface._realizeDeviceRecovery(action, reason, generation);
       } catch (error) {
         surface._fail(error);
       }
     }
+    retrying = next;
   }
+  return null;
 }
 
 /** A failed WebGPU operation is not evidence of device loss by itself. Wait a
@@ -668,6 +730,7 @@ export class FeSurfaceElement extends HTMLElement {
     this._surfaceTransitionStateResident = false;
     this._surfaceStateReplaceKernel = null;
     this._surfaceScheduleKernel = null;
+    this._surfaceRecoveryKernel = null;
     this._surfaceQualityKernel = null;
     this._surfaceTransitionMemory = null;
     this._surfaceTransitionAlloc = null;
@@ -677,6 +740,9 @@ export class FeSurfaceElement extends HTMLElement {
     this._resources = [];
     this._graph = false;
     this._posterAttemptedDevice = null;
+    this._posterRecoveryActive = false;
+    this._recoveryObservedLoss = false;
+    this._recoveryWasLive = false;
     this._gestureListeners = null; // { canvas, onPointerDown, onPointerMove, onPointerUp, onWheel }
     this._gestureFrame = null;
     this._gesturePresenting = false;
@@ -917,6 +983,7 @@ export class FeSurfaceElement extends HTMLElement {
       this._surfaceTransitionStateResident = false;
       this._surfaceStateReplaceKernel = null;
       this._surfaceScheduleKernel = null;
+      this._surfaceRecoveryKernel = null;
       this._surfaceQualityKernel = null;
       const arenaReset = instance?.exports.fe_cabi_reset;
       if (arenaReset !== undefined && typeof arenaReset !== "function") {
@@ -970,6 +1037,11 @@ export class FeSurfaceElement extends HTMLElement {
         ? surfaceSchedule
         : null;
       this._surfaceScheduleHasQueueAction = typeof surfaceScheduleV2 === "function";
+      const surfaceRecovery = instance?.exports.fe_surface_recovery_v1;
+      if (surfaceRecovery !== undefined && typeof surfaceRecovery !== "function") {
+        throw new Error("fe render runtime: surface recovery export is not callable");
+      }
+      this._surfaceRecoveryKernel = surfaceRecovery ?? null;
       if (
         this._surfaceTransitionSchedule === "resident" &&
         !this._surfaceScheduleKernel
@@ -1229,7 +1301,51 @@ export class FeSurfaceElement extends HTMLElement {
   }
 
   async _resolveGpu() {
-    return this._gpuOverride ?? (await acquireSharedGpu());
+    if (this._mode === "wasm-2d") return null;
+    if (this._gpuOverride !== undefined) return this._gpuOverride;
+
+    let gpu = await acquireSharedGpu();
+    if (gpu || !this._surfaceRecoveryKernel) return gpu;
+
+    // Initial capability failure and lazy post-loss demand both enter the same
+    // Fe policy. The policy's resident `device_lost`/attempt state distinguishes
+    // those episodes; this loop exists only while Fe returns `RetryDevice`.
+    this._recoveryWasLive = this._fsm === "live";
+    for (;;) {
+      const action = this._runSurfaceRecovery(
+        GpuDeviceEventKind.Unavailable,
+        GpuDeviceLossReason.NotLost,
+        true,
+        Boolean(this._kernel),
+        sharedGpuGeneration,
+      );
+      if (action === SurfaceRecoveryAction.RetryDevice) {
+        sharedGpuPromise = undefined;
+        gpu = await acquireSharedGpu();
+        if (!gpu) continue;
+        this._runSurfaceRecovery(
+          GpuDeviceEventKind.Available,
+          GpuDeviceLossReason.NotLost,
+          true,
+          Boolean(this._kernel),
+          gpu.generation ?? sharedGpuGeneration,
+        );
+        this._deliverSurfaceLifecycle(SurfaceEventKind.DeviceRecovered);
+        return gpu;
+      }
+      await this._realizeDeviceRecovery(
+        action,
+        GpuDeviceLossReason.NotLost,
+        sharedGpuGeneration,
+        true,
+      );
+      if (action === SurfaceRecoveryAction.FailSurface) {
+        throw sharedGpuFailure ?? new Error(
+          "fe render runtime: Fe recovery policy rejected unavailable WebGPU",
+        );
+      }
+      return null;
+    }
   }
 
   async _buildPassGraph(device) {
@@ -1525,21 +1641,19 @@ export class FeSurfaceElement extends HTMLElement {
    * device. This covers first-submit backend loss without masking ordinary
    * pass-graph errors or allowing an unbounded request/retry loop. */
   async _renderPosterWithRecovery() {
-    let lastError;
-    for (let attempt = 0; attempt <= MAX_RECOVERY_ATTEMPTS; attempt++) {
+    for (;;) {
+      this._posterRecoveryActive = true;
       this._posterAttemptedDevice = null;
       try {
         await this._renderPoster();
         this._posterAttemptedDevice = null;
         return;
       } catch (error) {
-        lastError = error;
         const attemptedDevice = this._posterAttemptedDevice;
         this._posterAttemptedDevice = null;
         if (
           this._gpuOverride ||
-          !attemptedDevice ||
-          attempt === MAX_RECOVERY_ATTEMPTS
+          !attemptedDevice
         ) {
           throw error;
         }
@@ -1547,16 +1661,17 @@ export class FeSurfaceElement extends HTMLElement {
         if (!loss.lost) throw error;
 
         await (sharedGpuRecoveryPromise ?? handleSharedDeviceLoss(attemptedDevice, loss.info));
+        if (this._fsm === "error") throw error;
+        if (this._mode === "wasm-2d") continue;
         const freshGpu = await acquireSharedGpu();
         if (!freshGpu || freshGpu.device === attemptedDevice) throw error;
         this._releaseGpuResources();
         this._pipelineError = null;
-        console.warn(
-          `[fe web] retrying initial poster after confirmed device loss (${attempt + 1}/${MAX_RECOVERY_ATTEMPTS})`,
-        );
+        console.warn("[fe web] retrying initial poster after Fe-selected device recovery");
+      } finally {
+        this._posterRecoveryActive = false;
       }
     }
-    throw lastError;
   }
 
   /** Render ONE frame at the current (initial) uniforms, capture it as a
@@ -1921,9 +2036,18 @@ export class FeSurfaceElement extends HTMLElement {
     }
   }
 
-  async _onDeviceLoss(freshGpu) {
-    if (this._mode !== "webgpu") return; // wasm-2d surfaces hold no device resources.
-    this._deliverSurfaceLifecycle(SurfaceEventKind.DeviceLost);
+  _deviceRecoveryRequired() {
+    return this._mode === "webgpu" &&
+      (this._fsm === "live" || this._posterRecoveryActive === true);
+  }
+
+  _beginDeviceLoss(reason, generation) {
+    if (this._mode !== "webgpu") {
+      this._recoveryObservedLoss = false;
+      return SurfaceRecoveryAction.NoAction;
+    }
+    this._recoveryObservedLoss = true;
+    this._recoveryWasLive = this._fsm === "live";
     this._gpu = null;
     if (this._liveContext) {
       try {
@@ -1941,18 +2065,78 @@ export class FeSurfaceElement extends HTMLElement {
       }
       this._adoptedContext = null;
     }
-    if (this._fsm !== "live") return; // posters rebuild lazily on the next `.live()`.
-    this._dispatch("fe-statechange", { state: this._fsm, reason: "device-lost" });
-    if (!freshGpu) {
-      if (!this._kernel) {
-        this._fail(sharedGpuFailure ?? new Error(
-          "fe render runtime: WebGPU device recovery failed for a GPU-only pass graph",
-        ));
-        return;
+    const required = this._deviceRecoveryRequired();
+    this._deliverSurfaceLifecycle(SurfaceEventKind.DeviceLost);
+    const action = this._runSurfaceRecovery(
+      GpuDeviceEventKind.Lost,
+      reason,
+      required,
+      Boolean(this._kernel),
+      generation,
+    );
+    if (this._recoveryWasLive) {
+      this._dispatch("fe-statechange", { state: this._fsm, reason: "device-lost" });
+    }
+    // Pre-v3 bundles have no Fe recovery decision. They remain readable as
+    // compatibility artifacts, but never regain the deleted host retry budget.
+    if (!this._surfaceRecoveryKernel) {
+      return required
+        ? (this._kernel
+          ? SurfaceRecoveryAction.DegradeToWasm
+          : SurfaceRecoveryAction.FailSurface)
+        : SurfaceRecoveryAction.NoAction;
+    }
+    return action ?? SurfaceRecoveryAction.FailSurface;
+  }
+
+  _continueDeviceRecovery(reason, generation) {
+    const action = this._runSurfaceRecovery(
+      GpuDeviceEventKind.Unavailable,
+      reason,
+      true,
+      Boolean(this._kernel),
+      generation,
+    );
+    if (!this._surfaceRecoveryKernel) {
+      return this._kernel
+        ? SurfaceRecoveryAction.DegradeToWasm
+        : SurfaceRecoveryAction.FailSurface;
+    }
+    return action ?? SurfaceRecoveryAction.FailSurface;
+  }
+
+  async _realizeDeviceRecovery(action, _reason, _generation, deferPresentation = false) {
+    if (action === SurfaceRecoveryAction.NoAction) {
+      if (this._deviceRecoveryRequired()) {
+        throw new Error(
+          "fe render runtime: Fe recovery policy returned no action for a surface requiring a device",
+        );
       }
-      this._mode = "wasm-2d";
-      this._applyBackingExtent(null);
-      this._resizePresentationCanvases();
+      return;
+    }
+    if (action === SurfaceRecoveryAction.RetryDevice) {
+      throw new Error(
+        "fe render runtime: shared retry must be realized by the page-wide recovery coordinator",
+      );
+    }
+    if (action === SurfaceRecoveryAction.FailSurface) {
+      this._recoveryObservedLoss = false;
+      this._fail(sharedGpuFailure ?? new Error(
+        "fe render runtime: Fe recovery policy failed a GPU-only surface",
+      ));
+      return;
+    }
+    if (action !== SurfaceRecoveryAction.DegradeToWasm || !this._kernel) {
+      throw new Error(
+        "fe render runtime: Fe recovery policy selected an unavailable Wasm fallback",
+      );
+    }
+
+    this._mode = "wasm-2d";
+    this._recoveryObservedLoss = false;
+    this._applyBackingExtent(null);
+    this._resizePresentationCanvases();
+    if (this._recoveryWasLive && !deferPresentation) {
       this._renderWasmInto(
         this._adoptedCanvas || this._posterCanvas,
         this._backingWidth,
@@ -1963,12 +2147,24 @@ export class FeSurfaceElement extends HTMLElement {
         this._liveCanvas.hidden = true;
         this._posterCanvas.hidden = false;
       }
-      this._updateBadge();
-      this._dispatch("fe-statechange", { state: this._fsm, reason: "device-unavailable" });
-      return;
     }
-    this._fsm = "ready"; // force `_goLive` back through the real pipeline-build path.
+    this._updateBadge();
+    this._dispatch("fe-statechange", { state: this._fsm, reason: "device-unavailable" });
+  }
+
+  async _completeDeviceRecovery(freshGpu, _lostGeneration) {
+    if (!this._recoveryObservedLoss) return;
+    this._recoveryObservedLoss = false;
+    this._runSurfaceRecovery(
+      GpuDeviceEventKind.Available,
+      GpuDeviceLossReason.NotLost,
+      this._deviceRecoveryRequired(),
+      Boolean(this._kernel),
+      freshGpu.generation ?? sharedGpuGeneration,
+    );
     this._deliverSurfaceLifecycle(SurfaceEventKind.DeviceRecovered);
+    if (!this._recoveryWasLive) return;
+    this._fsm = "ready"; // force `_goLive` through the fresh pipeline-build path.
     await this._goLive();
     this._dispatch("fe-statechange", { state: this._fsm, reason: "device-recovered" });
   }
@@ -1986,6 +2182,9 @@ export class FeSurfaceElement extends HTMLElement {
     this._surfaceStateReplaceKernel = null;
     this._surfaceTransitionStateResident = false;
     this._surfaceScheduleKernel = null;
+    this._surfaceRecoveryKernel = null;
+    this._recoveryObservedLoss = false;
+    this._recoveryWasLive = false;
     this._surfaceQualityKernel = null;
     this._unwireResizeObserver();
     if (this._liveContext) {
@@ -2455,6 +2654,39 @@ export class FeSurfaceElement extends HTMLElement {
       requestFrame: decisions[1] === 1,
       queueAction: expected === 3 ? decisions[2] : SurfaceQueueAction.Retain,
     };
+  }
+
+  /** Invoke the actor-level Fe device policy. Its two supervision fields stay
+   * resident in Wasm; only the selected recovery action crosses this boundary.
+   * This exists independently of application transitions and presentation
+   * scheduling, so a pure compute/render pass graph owns the same policy. */
+  _runSurfaceRecovery(
+    kind,
+    reason,
+    deviceRequired,
+    softwareFallback,
+    generation,
+  ) {
+    if (!this._surfaceRecoveryKernel) return null;
+    const reply = this._runWasmArenaEpoch(() => this._surfaceRecoveryKernel(
+      kind,
+      reason,
+      deviceRequired ? 1 : 0,
+      softwareFallback ? 1 : 0,
+      generation,
+    ));
+    const decisions = Array.isArray(reply) ? reply : [reply];
+    if (
+      decisions.length !== 1 ||
+      !Number.isInteger(decisions[0]) ||
+      decisions[0] < SurfaceRecoveryAction.NoAction ||
+      decisions[0] > SurfaceRecoveryAction.FailSurface
+    ) {
+      throw new Error(
+        "fe render runtime: resident surface recovery policy returned an invalid action",
+      );
+    }
+    return decisions[0];
   }
 
   /** Realize the Fe policy's bounded raw-queue effect. Numeric identities are
