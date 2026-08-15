@@ -19,7 +19,8 @@
 //! fails closed.
 
 use super::field::{
-    FieldWords, LimbLast, LimbMore, Limbs, Modulus, MontgomeryModulus, mont_mu, LIMB_BITS,
+    FieldWords, LimbLast, LimbMore, Limbs, Modulus, MontgomeryModulus,
+    U32EmbeddingModulus, mont_mu, LIMB_BITS,
 }
 
 pub struct Bn254Fr {}
@@ -40,5 +41,7 @@ impl MontgomeryModulus<20> for Bn254Fr {
          3668, 5603, 1986, 2079, 1400, 6264, 290, 5245, 84, 5]
     }
 }
+
+impl U32EmbeddingModulus<20> for Bn254Fr {}
 
 static_assert(mont_mu(P0, LIMB_BITS) == 8191)

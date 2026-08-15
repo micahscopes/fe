@@ -82,7 +82,7 @@
 //! monomorphized by any live call site, so they add zero emitted code today).
 
 use core::marker::Copy
-use core::ops::{Add, Mul}
+use core::ops::{Add, Mul, Neg, Sub}
 
 // -----------------------------------------------------------------------------
 // Limb storage: a linear, LEAST-SIGNIFICANT-LIMB-FIRST HList (`lead` = limb 0).
@@ -336,6 +336,10 @@ pub trait MontgomeryModulus<const L: usize>: Modulus<L> {
     fn r2_words() -> FieldWords<L>
 }
 
+/// A Montgomery modulus strictly larger than every u32. Implementers carry
+/// this audited promise so `from_u32` can embed without a runtime reduction.
+pub trait U32EmbeddingModulus<const L: usize>: MontgomeryModulus<L> {}
+
 fn modulus_words<const L: usize, M: Modulus<L>>() -> FieldWords<L>
     where Limbs<L>: Head + ShiftAppend + Copy,
 {
@@ -467,6 +471,48 @@ pub fn add_words<const L: usize, M: Modulus<L>>(
     out
 }
 
+/// Canonical modular negation. The zero mask keeps `-0` canonical instead of
+/// returning the modulus itself.
+pub fn neg_words<const L: usize, M: Modulus<L>>(
+    _ value: FieldWords<L>,
+) -> FieldWords<L>
+    where Limbs<L>: Head + ShiftAppend + Copy,
+{
+    let ln: u32 = L.downcast_truncate()
+    let pp = modulus_words<L, M>()
+    let mut difference: FieldWords<L> = [0; L]
+    let mut borrow: u32 = 0
+    let mut nonzero: u32 = 0
+    let mut i: u32 = 0
+    while i < ln {
+        let digit = value[i as usize]
+        if digit != 0 { nonzero = 1 }
+        let total = pp[i as usize] + LIMB_BASE - digit - borrow
+        let no_borrow = total >> LIMB_BITS
+        borrow = 1 - no_borrow
+        difference[i as usize] = total - no_borrow * LIMB_BASE
+        i = i + 1
+    }
+    let mut out: FieldWords<L> = [0; L]
+    let mut j: u32 = 0
+    while j < ln {
+        out[j as usize] = difference[j as usize] * nonzero
+        j = j + 1
+    }
+    out
+}
+
+/// Canonical modular subtraction, composed from the shared addition and
+/// negation kernels so there is one normalization policy.
+pub fn sub_words<const L: usize, M: Modulus<L>>(
+    _ a: FieldWords<L>,
+    _ b: FieldWords<L>,
+) -> FieldWords<L>
+    where Limbs<L>: Head + ShiftAppend + Copy,
+{
+    add_words<L, M>(a, neg_words<L, M>(b))
+}
+
 /// A modulus-branded field element. The brand prevents accidental arithmetic
 /// between equally wide elements belonging to different fields, while the
 /// runtime representation remains exactly `[u32; L]`.
@@ -492,6 +538,19 @@ impl<const L: usize, M> FieldElement<L, M>
         one[0] = 1
         mul_words<L, M>(self.words, one)
     }
+
+    pub fn zero() -> Self {
+        Self { words: [0; L] }
+    }
+
+    pub fn square(self) -> Self {
+        self * self
+    }
+
+    pub fn pow5(self) -> Self {
+        let squared = self.square()
+        squared.square() * self
+    }
 }
 
 impl<const L: usize, M> FieldElement<L, M>
@@ -500,7 +559,11 @@ impl<const L: usize, M> FieldElement<L, M>
     pub fn from_plain_words(_ words: FieldWords<L>) -> Self {
         Self { words: mul_words<L, M>(words, M::r2_words()) }
     }
+}
 
+impl<const L: usize, M> FieldElement<L, M>
+    where M: U32EmbeddingModulus<L>, Limbs<L>: Head + ShiftAppend + Copy,
+{
     /// Convert every u32 without truncation. Three 13-bit limbs are enough for
     /// all 32 input bits; the const predicate rejects narrower field layouts.
     pub fn from_u32(_ value: u32) -> Self where L >= 3 {
@@ -515,6 +578,15 @@ impl<const L: usize, M> FieldElement<L, M>
             i = i + 1
         }
         Self::from_plain_words(words)
+    }
+
+    pub fn from_i32(_ value: i32) -> Self where L >= 3 {
+        let magnitude = Self::from_u32(value.unsigned_abs())
+        if value < 0 { -magnitude } else { magnitude }
+    }
+
+    pub fn one() -> Self where L >= 3 {
+        Self::from_u32(1)
     }
 }
 
@@ -531,6 +603,22 @@ impl<const L: usize, M> Mul for FieldElement<L, M>
 {
     fn mul(own self, _ other: own Self) -> Self {
         Self { words: mul_words<L, M>(self.words, other.words) }
+    }
+}
+
+impl<const L: usize, M> Sub for FieldElement<L, M>
+    where M: Modulus<L>, Limbs<L>: Head + ShiftAppend + Copy,
+{
+    fn sub(own self, _ other: own Self) -> Self {
+        Self { words: sub_words<L, M>(self.words, other.words) }
+    }
+}
+
+impl<const L: usize, M> Neg for FieldElement<L, M>
+    where M: Modulus<L>, Limbs<L>: Head + ShiftAppend + Copy,
+{
+    fn neg(own self) -> Self {
+        Self { words: neg_words<L, M>(self.words) }
     }
 }
 

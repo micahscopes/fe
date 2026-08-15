@@ -133,9 +133,10 @@ only. It is not a trace hash or a commitment.
 
 The reusable field substrate is now the modulus-branded
 `precision::field::FieldElement<L, M>` over array-native 13-bit limbs. It has
-independently checked addition, multiplication, and Montgomery conversion on a
-second modulus, while BN254 multiplication remains bit-identical to both prior
-kernels. This API executes on Wasm. Its honest SPIR-V gate currently fails
+independently checked addition, subtraction, negation, multiplication, `pow5`,
+signed/unsigned embedding, and Montgomery conversion on a second modulus,
+while BN254 multiplication remains bit-identical to both prior kernels. This
+API executes on Wasm. Its honest SPIR-V gate currently fails
 closed on the retained array-returning `mul_words` call, so aggregate-return
 inlining or shader function-call lowering is required before it replaces the
 call-free generated GPU kernel. Poseidon constants and the permutation still

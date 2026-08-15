@@ -538,6 +538,30 @@ fn probe51_roundtrip_u32(
     out
 }
 
+fn probe51_tuple_words(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    name: &str,
+    args: &[i32],
+) -> Vec<u32> {
+    use wasmtime::Val;
+    let function = instance
+        .get_func(&mut *store, name)
+        .unwrap_or_else(|| panic!("`{name}` export should exist"));
+    let params = args.iter().copied().map(Val::I32).collect::<Vec<_>>();
+    let mut results = vec![Val::I32(0); N4];
+    function
+        .call(&mut *store, &params, &mut results)
+        .unwrap_or_else(|error| panic!("{name} should run: {error:?}"));
+    results
+        .into_iter()
+        .map(|result| match result {
+            Val::I32(word) => word as u32,
+            other => panic!("{name} result must be i32, got {other:?}"),
+        })
+        .collect()
+}
+
 #[test]
 fn field_mul_l4_second_modulus_matches_probe_kernel_and_bigint_oracle() {
     let p = probe51_prime();
@@ -620,7 +644,42 @@ fn field_mul_l4_second_modulus_matches_probe_kernel_and_bigint_oracle() {
             bl,
             "probe51_words_add",
         );
-        let sum_oracle = to_limbs(&((from_limbs(al) + from_limbs(bl)) % &p), n);
+        let a_value = from_limbs(al);
+        let b_value = from_limbs(bl);
+        let sum_oracle = to_limbs(&((&a_value + &b_value) % &p), n);
+        let difference_oracle = to_limbs(&((&a_value + &p - &b_value) % &p), n);
+        let negation_oracle = if a_value == BigUint::from(0u32) {
+            vec![0; n]
+        } else {
+            to_limbs(&(&p - &a_value), n)
+        };
+        let squared = from_limbs(&mont_oracle(&a_value, &a_value, &p, n));
+        let fourth = from_limbs(&mont_oracle(&squared, &squared, &p, n));
+        let pow5_oracle = mont_oracle(&fourth, &a_value, &p, n);
+        let binary_args = al
+            .iter()
+            .chain(bl)
+            .map(|word| *word as i32)
+            .collect::<Vec<_>>();
+        let unary_args = al.iter().map(|word| *word as i32).collect::<Vec<_>>();
+        let got_difference = probe51_tuple_words(
+            &mut field_store,
+            &field_instance,
+            "probe51_words_sub",
+            &binary_args,
+        );
+        let got_negation = probe51_tuple_words(
+            &mut field_store,
+            &field_instance,
+            "probe51_words_neg",
+            &unary_args,
+        );
+        let got_pow5 = probe51_tuple_words(
+            &mut field_store,
+            &field_instance,
+            "probe51_words_pow5",
+            &unary_args,
+        );
 
         assert_eq!(
             &got_probe, oracle,
@@ -649,6 +708,18 @@ fn field_mul_l4_second_modulus_matches_probe_kernel_and_bigint_oracle() {
             got_sum, sum_oracle,
             "modulus-branded FieldElement addition must equal (a+b) mod p for {name}"
         );
+        assert_eq!(
+            got_difference, difference_oracle,
+            "modulus-branded FieldElement subtraction must equal (a-b) mod p for {name}"
+        );
+        assert_eq!(
+            got_negation, negation_oracle,
+            "modulus-branded FieldElement negation must equal -a mod p for {name}"
+        );
+        assert_eq!(
+            got_pow5, pow5_oracle,
+            "modulus-branded FieldElement pow5 must retain Montgomery form for {name}"
+        );
     }
 
     for value in [0, 1, 8191, 8192, 65_535, u32::MAX] {
@@ -656,6 +727,24 @@ fn field_mul_l4_second_modulus_matches_probe_kernel_and_bigint_oracle() {
             probe51_roundtrip_u32(&mut field_store, &field_instance, value),
             to_limbs(&BigUint::from(value), n),
             "u32 -> Montgomery -> plain roundtrip for {value}"
+        );
+    }
+
+    for value in [i32::MIN, -65_535, -1, 0, 1, 65_535, i32::MAX] {
+        let expected = if value < 0 {
+            &p - BigUint::from(value.unsigned_abs())
+        } else {
+            BigUint::from(value as u32)
+        };
+        assert_eq!(
+            probe51_tuple_words(
+                &mut field_store,
+                &field_instance,
+                "probe51_signed_roundtrip",
+                &[value],
+            ),
+            to_limbs(&expected, n),
+            "signed i32 -> field -> plain roundtrip for {value}"
         );
     }
 

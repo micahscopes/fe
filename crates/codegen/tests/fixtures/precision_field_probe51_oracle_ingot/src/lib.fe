@@ -21,7 +21,7 @@
 
 use precision::field::{
     mul, FieldElement, FieldWords, Limbs, LimbLast, LimbMore, Modulus,
-    MontgomeryModulus, mont_mu, LIMB_BITS,
+    MontgomeryModulus, U32EmbeddingModulus, mont_mu, LIMB_BITS,
 }
 
 pub struct ProbeP51 {}
@@ -37,6 +37,8 @@ impl Modulus<4> for ProbeP51 {
 impl MontgomeryModulus<4> for ProbeP51 {
     fn r2_words() -> FieldWords<4> { [1028, 8, 0, 0] }
 }
+
+impl U32EmbeddingModulus<4> for ProbeP51 {}
 
 static_assert(mont_mu(8063, LIMB_BITS) == 8065)
 
@@ -62,6 +64,37 @@ fn probe51_add_words_result(a0: u32, a1: u32, a2: u32, a3: u32, b0: u32, b1: u32
     let a = FieldElement<4, ProbeP51>::from_montgomery_words([a0, a1, a2, a3])
     let b = FieldElement<4, ProbeP51>::from_montgomery_words([b0, b1, b2, b3])
     (a + b).to_montgomery_words()
+}
+
+pub fn probe51_words_sub(
+    a0: u32, a1: u32, a2: u32, a3: u32,
+    b0: u32, b1: u32, b2: u32, b3: u32,
+) -> (u32, u32, u32, u32) {
+    let a = FieldElement<4, ProbeP51>::from_montgomery_words([a0, a1, a2, a3])
+    let b = FieldElement<4, ProbeP51>::from_montgomery_words([b0, b1, b2, b3])
+    let words = (a - b).to_montgomery_words()
+    (words[0], words[1], words[2], words[3])
+}
+
+pub fn probe51_words_neg(
+    a0: u32, a1: u32, a2: u32, a3: u32,
+) -> (u32, u32, u32, u32) {
+    let a = FieldElement<4, ProbeP51>::from_montgomery_words([a0, a1, a2, a3])
+    let words = (-a).to_montgomery_words()
+    (words[0], words[1], words[2], words[3])
+}
+
+pub fn probe51_words_pow5(
+    a0: u32, a1: u32, a2: u32, a3: u32,
+) -> (u32, u32, u32, u32) {
+    let a = FieldElement<4, ProbeP51>::from_montgomery_words([a0, a1, a2, a3])
+    let words = a.pow5().to_montgomery_words()
+    (words[0], words[1], words[2], words[3])
+}
+
+pub fn probe51_signed_roundtrip(value: i32) -> (u32, u32, u32, u32) {
+    let words = FieldElement<4, ProbeP51>::from_i32(value).to_plain_words()
+    (words[0], words[1], words[2], words[3])
 }
 
 pub fn probe51_mul_limb0(a0: u32, a1: u32, a2: u32, a3: u32, b0: u32, b1: u32, b2: u32, b3: u32) -> u32 {

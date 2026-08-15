@@ -41,11 +41,14 @@ Legend:
   `loop_form_bn254_poseidon_hash2_matches_circomlib_and_u256_form_on_wasm_at_o0_and_o2`,
   and `poseidon_bn254_loop_native_cranelift_leg_is_honestly_reported`.
 - [x] Reusable field arithmetic now has an array-native `FieldWords<L>` core
-  and modulus-branded `FieldElement<L, M>` values with `+`, `*`, and canonical
-  Montgomery conversion. The structural HList API delegates to the same CIOS
-  core. The ProbeP51 gate checks both APIs, addition, multiplication, and u32
-  roundtrips against an independent bigint model; the BN254 gate remains
-  limb-identical to both established kernels.
+  and modulus-branded `FieldElement<L, M>` values with `+`, `-`, unary `-`,
+  `*`, `square`, `pow5`, and canonical Montgomery conversion. A separate
+  `U32EmbeddingModulus<L>` promise prevents direct `u32`/`i32` embedding into
+  moduli too small to represent every input. The structural HList API delegates
+  to the same CIOS core. The ProbeP51 gate checks both APIs, all four arithmetic
+  operations, `pow5`, signed and unsigned roundtrips, and zero canonicalization
+  against an independent bigint model; the BN254 gate remains limb-identical
+  to both established kernels.
 - [!] The reusable `FieldElement` API is executed on Wasm but is not yet a GPU
   application API. The honest SPIR-V leg currently fails closed because the
   call-free shader lowering retains the array-returning private `mul_words`
