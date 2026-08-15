@@ -122,12 +122,12 @@
       ],
       "artifact": null,
       "verification": {
-        "status": "not_run",
+        "status": "verified",
         "scope": "root(111,222,333,444), all 20 output limbs",
         "command": "cargo run -p fe-codegen --features native-backend --example gen_rollcall_evidence",
         "test": "generator native/Cranelift execution",
-        "result": null,
-        "note": "Native execution is not currently possible on the pinned Sonatina rev for this array-using kernel: internal error: native backend skipped definitions: poseidon_merkle_root_loop Same root cause as the SPIR-V leg (function-local array lowering via MemAllocDynamic is wasm-only on this pin); re-lands with the fork re-pin (Decision 5). See RUNG4_ASSEMBLY_PLAN.md."
+        "result": "root == wasm root (0x5cf2d2ed8ae159967517ecc028e2991e2d0726659964184a65278f6dd580448)",
+        "note": null
       }
     },
     {
@@ -140,8 +140,8 @@
       "artifact": {
         "kind": "wasm-module",
         "path": "demos/rollcall/gen/kernel.wasm",
-        "bytes": 118115,
-        "sha256": "89e2bf35acea137b960fb9eb3d55718f78e0c7378d04221e330268ae7ddc6a2f"
+        "bytes": 1482687,
+        "sha256": "c6768925a089c094e8b43f8bce71383a1bb67985757bdf2e72dff7cd94ba77cf"
       },
       "verification": {
         "status": "verified",
@@ -161,12 +161,12 @@
       ],
       "artifact": null,
       "verification": {
-        "status": "not_run",
+        "status": "validated",
         "scope": "naga SPIR-V translation + validation",
         "command": "cargo run -p fe-codegen --features native-backend --example gen_rollcall_evidence",
         "test": "generator SPIR-V compile + naga validation",
-        "result": null,
-        "note": "GPU validation is not currently possible on the pinned Sonatina rev for this array-using kernel: spirv backend: spirv translation error: spirv: instruction `mem.alloc_dynamic` is unsupported by the SPIR-V translator The private-storage heap emulation it needs (SpirvLayout.trap) exists only on the unpushed fork branch rung3-spirv-arrays-v2 (same-day revert b55f051e9 -> 40f8a1f27 on this branch); re-lands with the fork re-pin (Decision 5). GPU EXECUTION would additionally need lavapipe, unavailable in this sandbox regardless. See RUNG4_ASSEMBLY_PLAN.md."
+        "result": "naga-validated SPIR-V module",
+        "note": "This is validation only, never a live GPU execution claim. No Vulkan adapter (lavapipe) is available in this sandbox, so GPU EXECUTION is pending lavapipe on a host that has one."
       }
     }
   ]

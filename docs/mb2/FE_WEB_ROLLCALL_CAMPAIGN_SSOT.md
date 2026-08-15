@@ -61,8 +61,8 @@ Legend:
   Chromium SourceInspector/gallery tape.
 - [~] Typed `MessagePort<u64>` observation is implemented through the ordinary
   `EventSource` and completion broker. The focused broker suite and
-  `fe_message_port_event_source_resumes_from_a_real_port` pass. This item closes
-  when the current checkpoint passes G5 and lands.
+  `fe_message_port_event_source_resumes_from_a_real_port` pass, and the slice is
+  landed at `c1817e477`. This item closes when the final G5 run passes.
 - [ ] Add fetch as a typed Fe source and consume it from SourceInspector without
   application-specific host policy.
 - [ ] Attach opaque ports through Fe-owned spawn/Worker placement, then derive
@@ -123,11 +123,16 @@ Legend:
 - [ ] Contract the fixed JavaScript runtime to standards observation and GPU
   realization, with no application policy or demo vocabulary.
 - [ ] Finish migrating, reclassifying, or retiring every legacy showcase.
+- [ ] Establish cold, warm, and invalidation compile budgets. The 2026-08-15
+  Rollcall evidence refresh took 5m 14s to rebuild a broad release codegen
+  chain after a generator-only source edit, which is the current invalidation
+  baseline to beat.
 
 ## F. Rollcall cryptographic capstone
 
-- [~] Current exact full-workspace release CI baseline. The present checkpoint
-  must pass G5 before any further capstone claim is promoted.
+- [~] Current exact full-workspace release CI baseline. The repo-root Fe test
+  boundary passes all 20 workspace inputs after `54e0ff2d5`; the one exact G5
+  run is reserved for the final DONE gate.
 - [x] Fe Poseidon-Merkle executes on Wasm and native Cranelift and agrees with
   independent/circomlib-derived values. Gates:
   `rollcall_prove_on_wasm_commit_on_evm_and_verify_membership_end_to_end`,
@@ -141,9 +146,12 @@ Legend:
   `poseidon_merkle_root_loop_compiles_naga_valid_spirv`,
   `poseidon_merkle8_root_loop_compiles_naga_valid_spirv`, and
   `rollcall_merkle_root_spirv_validation_is_honestly_reported`.
-- [ ] Regenerate `demos/rollcall/evidence.json`. Its native and WebGPU entries
-  are stale and must report the current four legs honestly from one source
-  digest.
+- [x] `demos/rollcall/evidence.json` is regenerated from source digest
+  `8b8303603bd4937fb883c8d970a2fcd10e551ba8c424873f1e5f04eb15de06db`.
+  It records Wasm and native execution with equal 20-limb roots, local EVM
+  acceptance and rejection receipts, and SPIR-V validation without claiming
+  live GPU execution. Gates: the four tests in
+  `rollcall_evidence_verify.rs`.
 - [M] Execute the Rollcall pass graph and exact result/pixel oracles on real
   WebGPU hardware. Gate: `rollcall_pass_graph_executes_exact_u32_and_pixel_oracles_on_webgpu`.
 - [M] Confirm the on-chain product scope before extending the verifier: target
@@ -164,14 +172,13 @@ Legend:
 
 ## Immediate burn-down order
 
-1. Land the typed MessagePort checkpoint after G5.
-2. Regenerate and verify the Rollcall four-leg evidence, with WebGPU marked
-   honestly if hardware remains unavailable.
-3. Hand the exact real-GPU commands and expected receipts to Micah.
-4. Finish typed fetch, then Worker/port placement and supervision on the one
+1. Hand the exact real-GPU commands and expected receipts to Micah.
+2. Start the bounded-proof specification and independent oracle before adding
+   more gallery polish.
+3. Finish typed fetch, then Worker/port placement and supervision on the one
    runtime-control spine.
-5. Start the bounded-proof specification and oracle before adding more gallery
-   polish.
+4. Delete the runtime manifest and finish the legacy disposition.
+5. Run the exact G5 command once at the final DONE gate.
 
 The Definition of done is not yet met. In particular, the real-GPU gate,
 manifest deletion, Worker/DEC general messaging, complete legacy disposition,

@@ -14,15 +14,12 @@
 //!     reinvented).
 //!
 //! HONESTY, not optimism: every leg's evidence entry states what actually
-//! happened when this generator ran, never an assumed outcome. As of this
-//! rung, on the pinned Sonatina rev, wasm and EVM genuinely EXECUTE the real
-//! kernel and cross-check equal; native/Cranelift and GPU/SPIR-V both
-//! currently fail closed with the SAME root cause (function-local
-//! `[u32; N]` arrays lower to `MemAllocDynamic`, which only the wasm
-//! backend's canonical arena currently supports on this pin) -- see
-//! `RUNG4_ASSEMBLY_PLAN.md`. If a future run of this generator finds either
-//! leg now succeeds (the fork re-pin, Decision 5), it records that instead;
-//! nothing here is hand-typed to force a particular verdict.
+//! happened when this generator ran, never an assumed outcome. The current
+//! compiler can execute the Wasm and native/Cranelift legs, cross-check the EVM
+//! leg, and compile a Naga-validated SPIR-V module from the same source. This
+//! generator does not execute that module on WebGPU hardware, so validation is
+//! recorded separately from execution. Any failed attempt remains an explicit
+//! `not_run` entry with the actual error from that run.
 //!
 //! Run: `cargo run -p fe-codegen --features native-backend --example
 //! gen_rollcall_evidence`
@@ -592,11 +589,9 @@ fn main() {
                 result: None,
                 note: Some(Box::leak(
                     format!(
-                        "Native execution is not currently possible on the pinned Sonatina rev for \
-                     this array-using kernel: {message} Same root cause as the SPIR-V leg \
-                     (function-local array lowering via MemAllocDynamic is wasm-only on this \
-                     pin); re-lands with the fork re-pin (Decision 5). See \
-                     RUNG4_ASSEMBLY_PLAN.md."
+                        "Native execution failed honestly on this generator run: {message} No \
+                     result was recorded. Re-run the native Rollcall gates before changing this \
+                     status."
                     )
                     .into_boxed_str(),
                 )),
@@ -638,13 +633,9 @@ fn main() {
                 result: None,
                 note: Some(Box::leak(
                     format!(
-                        "GPU validation is not currently possible on the pinned Sonatina rev for \
-                     this array-using kernel: {message} The private-storage heap emulation it \
-                     needs (SpirvLayout.trap) exists only on the unpushed fork branch \
-                     rung3-spirv-arrays-v2 (same-day revert b55f051e9 -> 40f8a1f27 on this \
-                     branch); re-lands with the fork re-pin (Decision 5). GPU EXECUTION would \
-                     additionally need lavapipe, unavailable in this sandbox regardless. See \
-                     RUNG4_ASSEMBLY_PLAN.md."
+                        "SPIR-V compilation or Naga validation failed honestly on this generator \
+                     run: {message} No GPU result was recorded. Live WebGPU execution is a \
+                     separate hardware gate."
                     )
                     .into_boxed_str(),
                 )),
