@@ -12,6 +12,7 @@ use core::pending::{Pending, Select, SelectOutcome, Suspend, TaskOutcome}
 use ingot::wasm::WasmBackend
 use super::reactive::{
     AsyncEventSource, BoundedQueue, Event, EventSource, OverflowPolicy, Scan, Stream,
+    Subscription,
 }
 use raw::send_begin as raw_send_begin
 
@@ -73,6 +74,54 @@ pub struct BufferedForwardReport {
 
 impl Copy for BufferedForwardReport {}
 
+/// Origin of a value or terminal observation in a statically merged stream.
+/// The side is a nominal Fe value, not an integer understood by the host.
+pub enum MergeSide {
+    Left,
+    Right,
+}
+
+impl Copy for MergeSide {}
+
+/// Why a two-source merged forwarding scope stopped. Side-specific source
+/// terminals remain distinguishable from the merge interpreter, owning scope,
+/// and actor sink.
+pub enum MergeTerminal {
+    LeftFailure,
+    RightFailure,
+    LeftCancelled,
+    RightCancelled,
+    SelectFailure,
+    ScopeCancelled,
+    SinkFailure,
+    SinkCancelled,
+}
+
+impl Copy for MergeTerminal {}
+
+/// Observable completion of a real two-source merged/buffered graph.
+pub struct MergedForwardReport {
+    pub delivered: u32,
+    pub dropped: u32,
+    pub error: u32,
+    pub terminal: MergeTerminal,
+}
+
+impl Copy for MergedForwardReport {}
+
+/// Pure application policy for one statically typed two-source merge.
+///
+/// Keeping the two observation mappings and side-specific failure mapping in
+/// one nominal value makes the authored graph explicit while avoiding three
+/// independent mapper types in every resumable instantiation. `dropped` is the
+/// queue's cumulative count after this admission attempt, so an admitted
+/// `KeepLatest` value carries the exact Fe-owned policy decision.
+pub trait MergePolicy<L, R, E> {
+    fn map_left(self, _ value: own L, _ dropped: u32) -> E
+    fn map_right(self, _ value: own R, _ dropped: u32) -> E
+    fn map_failure(self, _ side: MergeSide, _ error: u32) -> E
+}
+
 struct CountDelivered {}
 
 impl<T> Fn<(u32, T), u32> for CountDelivered {
@@ -104,7 +153,7 @@ uses (
     let mut error: u32 = 0
     let mut terminal = ForwardTerminal::SourceEnd
     let mut running = true
-    while running {
+    while true {
         let next = stream.next_ready(subscription)
         subscription = next.0
         match next.1 {
@@ -358,5 +407,471 @@ uses (
                 terminal: ForwardTerminal::SourceCancelled,
             }
         },
+    }
+}
+
+fn send_merge_failure<L, R, E, P: MergePolicy<L, R, E> + Copy>(
+    _ side: MergeSide,
+    _ error: u32,
+    _ policy: P,
+) -> TaskOutcome<u32, ()>
+uses (
+    sink: mut ActorSink<WasmBackend, E>,
+    suspend: Suspend<WasmBackend, u32>,
+)
+{
+    ActorMessage::new(event: policy.map_failure(side: side, error: error)).send()
+}
+
+/// Consume the actor send retained by an outer selection after the merged
+/// source group terminates. Keeping this suspension in one helper makes the
+/// affine outcome structural: every nonterminal source arm rebuilds the group,
+/// while every terminal arm transfers all remaining tokens here and returns.
+fn finish_merged_source_terminal<L, R>(
+    _ left_subscription: own Subscription<L>,
+    _ right_subscription: own Subscription<R>,
+    _ retained_sink: own Pending<WasmBackend, ()>,
+    _ delivered: u32,
+    _ dropped: u32,
+    _ error: u32,
+    _ terminal: MergeTerminal,
+) -> MergedForwardReport
+uses (
+    left_source: mut AsyncEventSource<WasmBackend, L>,
+    right_source: mut AsyncEventSource<WasmBackend, R>,
+    suspend: Suspend<WasmBackend, u32>,
+)
+{
+    let accepted: TaskOutcome<u32, ()> = suspend.suspend(retained_sink)
+    let mut final_delivered = delivered
+    let mut final_error = error
+    let mut final_terminal = terminal
+    match accepted {
+        TaskOutcome::Success(_,) => {
+            final_delivered = final_delivered + 1
+        },
+        TaskOutcome::Failure(sink_error,) => {
+            final_error = sink_error
+            final_terminal = MergeTerminal::SinkFailure
+        },
+        TaskOutcome::Cancelled => {
+            final_terminal = MergeTerminal::SinkCancelled
+        },
+    }
+    left_source.cancel(left_subscription)
+    right_source.cancel(right_subscription)
+    MergedForwardReport {
+        delivered: final_delivered,
+        dropped: dropped,
+        error: final_error,
+        terminal: final_terminal,
+    }
+}
+
+/// Drive an already-armed two-source merge while one actor delivery may be in
+/// flight.
+///
+/// The nested `Select` is the important shape: the inner selection retains the
+/// losing source pull; the outer selection retains either that complete source
+/// group or the sink. Thus JavaScript never reconstructs a three-way stream
+/// graph, and Fe can admit/evict values in its own bounded queue while all
+/// independently live affine operations remain reachable.
+fn drive_merged_sources<
+    L: Copy,
+    R: Copy,
+    E: Copy,
+    P: MergePolicy<L, R, E> + Copy,
+>(
+    _ left_subscription: own Subscription<L>,
+    _ right_subscription: own Subscription<R>,
+    _ source_group: own Pending<
+        WasmBackend,
+        SelectOutcome<WasmBackend, u32, L, R>,
+    >,
+    _ initial: E,
+    _ capacity: u32,
+    _ overflow: OverflowPolicy,
+    _ policy: P,
+) -> MergedForwardReport
+uses (
+    left_source: mut AsyncEventSource<WasmBackend, L>,
+    right_source: mut AsyncEventSource<WasmBackend, R>,
+    sink: mut ActorSink<WasmBackend, E>,
+    select: mut Select<WasmBackend, u32>,
+    suspend: Suspend<WasmBackend, u32>,
+)
+{
+    let mut left_subscription = left_subscription
+    let mut right_subscription = right_subscription
+    let mut source_group = source_group
+    let mut queue = BoundedQueue::new(initial: initial, capacity: capacity)
+    let mut delivered: u32 = 0
+
+    // With no actor send in flight, await the already-armed pair directly.
+    // After a sink catches up to an empty backlog, control returns to this same
+    // suspension site; the continuation shape does not multiply per branch.
+    while true {
+        let source_outcome: TaskOutcome<
+            u32,
+            SelectOutcome<WasmBackend, u32, L, R>,
+        > = suspend.suspend(source_group)
+        let mut event = initial
+        match source_outcome {
+            TaskOutcome::Success(source_selection,) => match source_selection {
+                SelectOutcome::Left(left_winner,) => {
+                    event = policy.map_left(
+                        value: left_winner.value,
+                        dropped: queue.dropped(),
+                    )
+                    let (successor, next_left) =
+                        left_source.next_begin(left_subscription)
+                    left_subscription = successor
+                    source_group = select.select(next_left, left_winner.right)
+                },
+                SelectOutcome::Right(right_winner,) => {
+                    event = policy.map_right(
+                        value: right_winner.value,
+                        dropped: queue.dropped(),
+                    )
+                    let (successor, next_right) =
+                        right_source.next_begin(right_subscription)
+                    right_subscription = successor
+                    source_group = select.select(right_winner.left, next_right)
+                },
+                SelectOutcome::LeftFailure(source_error,) => {
+                    left_source.cancel(left_subscription)
+                    right_source.cancel(right_subscription)
+                    return MergedForwardReport {
+                        delivered: delivered,
+                        dropped: queue.dropped(),
+                        error: source_error,
+                        terminal: MergeTerminal::LeftFailure,
+                    }
+                },
+                SelectOutcome::RightFailure(source_error,) => {
+                    left_source.cancel(left_subscription)
+                    right_source.cancel(right_subscription)
+                    return MergedForwardReport {
+                        delivered: delivered,
+                        dropped: queue.dropped(),
+                        error: source_error,
+                        terminal: MergeTerminal::RightFailure,
+                    }
+                },
+                SelectOutcome::LeftCancelled => {
+                    left_source.cancel(left_subscription)
+                    right_source.cancel(right_subscription)
+                    return MergedForwardReport {
+                        delivered: delivered,
+                        dropped: queue.dropped(),
+                        error: 0,
+                        terminal: MergeTerminal::LeftCancelled,
+                    }
+                },
+                SelectOutcome::RightCancelled => {
+                    left_source.cancel(left_subscription)
+                    right_source.cancel(right_subscription)
+                    return MergedForwardReport {
+                        delivered: delivered,
+                        dropped: queue.dropped(),
+                        error: 0,
+                        terminal: MergeTerminal::RightCancelled,
+                    }
+                },
+            },
+            TaskOutcome::Failure(select_error,) => {
+                left_source.cancel(left_subscription)
+                right_source.cancel(right_subscription)
+                return MergedForwardReport {
+                    delivered: delivered,
+                    dropped: queue.dropped(),
+                    error: select_error,
+                    terminal: MergeTerminal::SelectFailure,
+                }
+            },
+            TaskOutcome::Cancelled => {
+                left_source.cancel(left_subscription)
+                right_source.cancel(right_subscription)
+                return MergedForwardReport {
+                    delivered: delivered,
+                    dropped: queue.dropped(),
+                    error: 0,
+                    terminal: MergeTerminal::ScopeCancelled,
+                }
+            },
+        }
+
+        let mut sink_pending = sink.send_begin(event)
+        while true {
+                let selected = select.select(source_group, sink_pending)
+                let outcome: TaskOutcome<
+                    u32,
+                    SelectOutcome<
+                        WasmBackend,
+                        u32,
+                        SelectOutcome<WasmBackend, u32, L, R>,
+                        (),
+                    >,
+                > = suspend.suspend(selected)
+                match outcome {
+                    TaskOutcome::Success(selection,) => match selection {
+                        SelectOutcome::Left(source_winner,) => {
+                            let retained_sink = source_winner.right
+                            match source_winner.value {
+                                SelectOutcome::Left(left_winner,) => {
+                                    let next_dropped = if queue.queued() == queue.capacity() {
+                                        queue.dropped() + 1
+                                    } else {
+                                        queue.dropped()
+                                    }
+                                    queue = queue.offer(
+                                        value: policy.map_left(
+                                            value: left_winner.value,
+                                            dropped: next_dropped,
+                                        ),
+                                        overflow: overflow,
+                                    )
+                                    let (successor, next_left) =
+                                        left_source.next_begin(left_subscription)
+                                    left_subscription = successor
+                                    source_group = select.select(next_left, left_winner.right)
+                                },
+                                SelectOutcome::Right(right_winner,) => {
+                                    let next_dropped = if queue.queued() == queue.capacity() {
+                                        queue.dropped() + 1
+                                    } else {
+                                        queue.dropped()
+                                    }
+                                    queue = queue.offer(
+                                        value: policy.map_right(
+                                            value: right_winner.value,
+                                            dropped: next_dropped,
+                                        ),
+                                        overflow: overflow,
+                                    )
+                                    let (successor, next_right) =
+                                        right_source.next_begin(right_subscription)
+                                    right_subscription = successor
+                                    source_group = select.select(right_winner.left, next_right)
+                                },
+                                SelectOutcome::LeftFailure(failure,) => {
+                                    return finish_merged_source_terminal<L, R>(
+                                        left_subscription: left_subscription,
+                                        right_subscription: right_subscription,
+                                        retained_sink: retained_sink,
+                                        delivered: delivered,
+                                        dropped: queue.dropped(),
+                                        error: failure,
+                                        terminal: MergeTerminal::LeftFailure,
+                                    )
+                                },
+                                SelectOutcome::RightFailure(failure,) => {
+                                    return finish_merged_source_terminal<L, R>(
+                                        left_subscription: left_subscription,
+                                        right_subscription: right_subscription,
+                                        retained_sink: retained_sink,
+                                        delivered: delivered,
+                                        dropped: queue.dropped(),
+                                        error: failure,
+                                        terminal: MergeTerminal::RightFailure,
+                                    )
+                                },
+                                SelectOutcome::LeftCancelled => {
+                                    return finish_merged_source_terminal<L, R>(
+                                        left_subscription: left_subscription,
+                                        right_subscription: right_subscription,
+                                        retained_sink: retained_sink,
+                                        delivered: delivered,
+                                        dropped: queue.dropped(),
+                                        error: 0,
+                                        terminal: MergeTerminal::LeftCancelled,
+                                    )
+                                },
+                                SelectOutcome::RightCancelled => {
+                                    return finish_merged_source_terminal<L, R>(
+                                        left_subscription: left_subscription,
+                                        right_subscription: right_subscription,
+                                        retained_sink: retained_sink,
+                                        delivered: delivered,
+                                        dropped: queue.dropped(),
+                                        error: 0,
+                                        terminal: MergeTerminal::RightCancelled,
+                                    )
+                                },
+                            }
+                            sink_pending = retained_sink
+                        },
+                        SelectOutcome::Right(sink_winner,) => {
+                            delivered = delivered + 1
+                            if queue.queued() > 0 {
+                                let next_event = queue.front().value_or(fallback: initial)
+                                queue = queue.consume()
+                                source_group = sink_winner.left
+                                sink_pending = sink.send_begin(next_event)
+                            } else {
+                                source_group = sink_winner.left
+                                break
+                            }
+                        },
+                        SelectOutcome::LeftFailure(select_error,) => {
+                            left_source.cancel(left_subscription)
+                            right_source.cancel(right_subscription)
+                            return MergedForwardReport {
+                                delivered: delivered,
+                                dropped: queue.dropped(),
+                                error: select_error,
+                                terminal: MergeTerminal::SelectFailure,
+                            }
+                        },
+                        SelectOutcome::RightFailure(sink_error,) => {
+                            left_source.cancel(left_subscription)
+                            right_source.cancel(right_subscription)
+                            return MergedForwardReport {
+                                delivered: delivered,
+                                dropped: queue.dropped(),
+                                error: sink_error,
+                                terminal: MergeTerminal::SinkFailure,
+                            }
+                        },
+                        SelectOutcome::LeftCancelled => {
+                            left_source.cancel(left_subscription)
+                            right_source.cancel(right_subscription)
+                            return MergedForwardReport {
+                                delivered: delivered,
+                                dropped: queue.dropped(),
+                                error: 0,
+                                terminal: MergeTerminal::ScopeCancelled,
+                            }
+                        },
+                        SelectOutcome::RightCancelled => {
+                            left_source.cancel(left_subscription)
+                            right_source.cancel(right_subscription)
+                            return MergedForwardReport {
+                                delivered: delivered,
+                                dropped: queue.dropped(),
+                                error: 0,
+                                terminal: MergeTerminal::SinkCancelled,
+                            }
+                        },
+                    },
+                    TaskOutcome::Failure(select_error,) => {
+                        left_source.cancel(left_subscription)
+                        right_source.cancel(right_subscription)
+                        return MergedForwardReport {
+                            delivered: delivered,
+                            dropped: queue.dropped(),
+                            error: select_error,
+                            terminal: MergeTerminal::SelectFailure,
+                        }
+                    },
+                    TaskOutcome::Cancelled => {
+                        left_source.cancel(left_subscription)
+                        right_source.cancel(right_subscription)
+                        return MergedForwardReport {
+                            delivered: delivered,
+                            dropped: queue.dropped(),
+                            error: 0,
+                            terminal: MergeTerminal::ScopeCancelled,
+                        }
+                    },
+            }
+        }
+    }
+
+    // `while` is currently statement-typed in Fe even when its condition is
+    // the literal `true`. This value is unreachable, but keeps the helper's
+    // declared product explicit until loop-divergence analysis can derive it.
+    MergedForwardReport {
+        delivered: delivered,
+        dropped: queue.dropped(),
+        error: 0,
+        terminal: MergeTerminal::ScopeCancelled,
+    }
+}
+
+/// Merge two independently pending typed sources into one bounded actor stream.
+///
+/// Both listeners are armed before the first suspension. The same Fe-owned
+/// queue then applies one explicit overflow policy across the merged graph
+/// while actor delivery proceeds independently. `L` and `R` are intentionally
+/// distinct nominal source payloads; authors merging two sources with the same
+/// representation give them distinct wrapper types rather than host IDs.
+pub fn merge_buffer_to_actor<
+    L: Copy,
+    R: Copy,
+    E: Copy,
+    P: MergePolicy<L, R, E> + Copy,
+>(
+    _ initial: E,
+    _ capacity: u32,
+    _ overflow: OverflowPolicy,
+    _ policy: P,
+) -> MergedForwardReport
+uses (
+    left_source: mut AsyncEventSource<WasmBackend, L>,
+    right_source: mut AsyncEventSource<WasmBackend, R>,
+    sink: mut ActorSink<WasmBackend, E>,
+    select: mut Select<WasmBackend, u32>,
+    suspend: Suspend<WasmBackend, u32>,
+)
+{
+    let left_subscription = left_source.subscribe()
+    let right_subscription = right_source.subscribe()
+    let (left_successor, left_pending) = left_source.next_begin(left_subscription)
+    let (right_successor, right_pending) = right_source.next_begin(right_subscription)
+    let report = drive_merged_sources(
+        left_subscription: left_successor,
+        right_subscription: right_successor,
+        source_group: select.select(left_pending, right_pending),
+        initial: initial,
+        capacity: capacity,
+        overflow: overflow,
+        policy: policy,
+    )
+    // Keep only the four semantic leaves live across the optional failure
+    // notification suspension. The public API remains one nominal report, but
+    // the generated continuation does not need to retain an aggregate backing
+    // object merely to return those same leaves afterward.
+    let delivered = report.delivered
+    let dropped = report.dropped
+    let report_error = report.error
+    let report_terminal = report.terminal
+    let mut final_error = report_error
+    let mut final_terminal = report_terminal
+    let mut report_failure = false
+    let mut failure_side = MergeSide::Left
+    match report_terminal {
+        MergeTerminal::LeftFailure => {
+            report_failure = true
+            failure_side = MergeSide::Left
+        },
+        MergeTerminal::RightFailure => {
+            report_failure = true
+            failure_side = MergeSide::Right
+        },
+        _ => {},
+    }
+    if report_failure {
+        let failure = send_merge_failure<L, R, E, P>(
+            side: failure_side,
+            error: report_error,
+            policy: policy,
+        )
+        match failure {
+            TaskOutcome::Success(_,) => {},
+            TaskOutcome::Failure(sink_error,) => {
+                final_error = sink_error
+                final_terminal = MergeTerminal::SinkFailure
+            },
+            TaskOutcome::Cancelled => {
+                final_terminal = MergeTerminal::SinkCancelled
+            },
+        }
+    }
+    MergedForwardReport {
+        delivered: delivered,
+        dropped: dropped,
+        error: final_error,
+        terminal: final_terminal,
     }
 }

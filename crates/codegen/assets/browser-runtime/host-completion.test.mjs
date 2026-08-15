@@ -109,6 +109,75 @@ function selectTerminalMachine(broker, delay) {
   });
 }
 
+function nestedSelectMachine(broker, delay) {
+  return createMaterializedTaskMachine({
+    input: [],
+    step: [state, u64, u32],
+    complete: { start: 1, count: 1 },
+    start() {
+      const receive = broker.imports["fe:host"].recv_begin();
+      const innerTimer = broker.imports["fe:host"].sleep_begin(delay);
+      const inner = broker.imports["fe:host"].select_begin(receive, innerTimer);
+      const outerTimer = broker.imports["fe:host"].sleep_begin(delay);
+      return [1, 0n, broker.imports["fe:host"].select_begin(inner, outerTimer) >>> 0];
+    },
+    continuations: [{
+      state: 1,
+      range: { start: 2, count: 1 },
+      pending: { start: 2, count: 1 },
+      frame: { start: 3, count: 0 },
+      delivery: {
+        // TaskOutcome<u32, SelectOutcome<B, u32,
+        //   SelectOutcome<B, u32, u64, u64>, u64>>
+        lanes: [
+          outcome, u32,
+          selection,
+          selection, u64, u32, u32, u64, u32, u32,
+          u32, u32, u64, u32, u32,
+        ],
+        failure: { start: 1, count: 1 },
+        success: { start: 2, count: 13 },
+      },
+      invoke(
+        tag,
+        outerError,
+        outerSelected,
+        innerSelected,
+        innerLeftValue,
+        innerRightToken,
+        _innerLeftToken,
+        _innerRightValue,
+        _innerLeftError,
+        _innerRightError,
+        outerRightToken,
+        _outerLeftToken,
+        _outerRightValue,
+        _outerLeftError,
+        _outerRightError,
+      ) {
+        if (tag === 0) return [0, 90_000_000n + BigInt(outerError), 0];
+        if (tag === 2) return [0, 91_000_000n, 0];
+        if (outerSelected !== 0) return [0, 92_000_000n, 0];
+        if (innerSelected === 2) {
+          return [
+            0,
+            20_000_000n + BigInt(_innerLeftError) * 1_000n + BigInt(outerRightToken),
+            0,
+          ];
+        }
+        if (innerSelected !== 0) return [0, 93_000_000n, 0];
+        return [
+          0,
+          innerLeftValue * 1_000_000n
+            + BigInt(innerRightToken) * 1_000n
+            + BigInt(outerRightToken),
+          0,
+        ];
+      },
+    }],
+  });
+}
+
 function visibilityMachine(start, onCancel = () => {}) {
   return createMaterializedTaskMachine({
     input: [],
@@ -645,6 +714,28 @@ describe("browser HostTimer/Recv completion broker", () => {
     expect(await selected).toEqual([20_007n]);
     expect(broker.activeCount()).toBe(0);
     expect(broker.post(99n)).toBeFalse();
+  });
+
+  test("nested selects materialize both compiler-derived envelopes and affine losers", async () => {
+    const broker = createHostCompletionBroker();
+    const selected = broker.run(nestedSelectMachine(broker, 10_000n), []);
+    expect(broker.post(17n)).toBeTrue();
+    expect(await selected).toEqual([17_001_003n]);
+    // The fake continuation deliberately returns the two affine loser tokens
+    // instead of cancelling them. Their exact survival proves the broker did
+    // not flatten the inner Select or accidentally consume the outer loser.
+    expect(broker.activeCount()).toBe(2);
+    expect(broker.cancelAll()).toBe(2);
+    expect(broker.cancelAll()).toBe(0);
+
+    const failedBroker = createHostCompletionBroker();
+    const failed = failedBroker.run(nestedSelectMachine(failedBroker, 10_000n), []);
+    expect(failedBroker.failNextReceive(7)).toBeTrue();
+    expect(await failed).toEqual([20_007_003n]);
+    // The failed inner source consumes its unreachable sibling; the outer
+    // successful selection still returns its one live loser to Fe.
+    expect(failedBroker.activeCount()).toBe(1);
+    expect(failedBroker.cancelAll()).toBe(1);
   });
 
   test("race inputs are distinct affine tokens and failed starts clean them", async () => {

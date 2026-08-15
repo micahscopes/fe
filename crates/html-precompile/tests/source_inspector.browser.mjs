@@ -277,9 +277,10 @@ try {
     assert.equal(eventStudioBefore.boundedDrops, 0);
     assert.ok(eventStudioBefore.latestValue >= 4 && eventStudioBefore.latestValue % 4 === 0);
     // Hold the first generic actor acceptance while six genuine PointerEvents
-    // arrive. The host knows neither the queue capacity nor KeepLatest policy;
-    // Fe's Select keeps source and sink independently in flight and its
-    // three-slot waiting backlog decides which observations survive.
+    // and one genuine WheelEvent arrive. The host knows neither the shared
+    // queue nor KeepLatest policy; Fe keeps both heterogeneous sources and the
+    // sink independently in flight, and its three-slot waiting backlog decides
+    // which observations survive.
     await page.evaluate(async () => {
       const component = document.querySelector("#gallery-event-studio");
       const originalSend = component._sendScopedTaskEvent.bind(component);
@@ -316,7 +317,6 @@ try {
       if (typeof releaseFirst !== "function") {
         throw new Error("the first Fe actor send was not held in flight");
       }
-      releaseFirst();
       component.dispatchEvent(new WheelEvent("wheel", {
         bubbles: true,
         composed: true,
@@ -325,14 +325,16 @@ try {
         clientX: 166.25,
         clientY: 244.5,
       }));
+      await new Promise(resolvePromise => setTimeout(resolvePromise, 0));
+      releaseFirst();
     });
     await page.waitForFunction(() => {
       const values = document.querySelectorAll("#gallery-event-studio .event-studio-grid strong");
-      return Number(values[3]?.textContent) === 128
-        && Number(values[4]?.textContent) === 227
-        && Number(values[5]?.textContent) === 4
+      return Number(values[3]?.textContent) === 166
+        && Number(values[4]?.textContent) === 244
+        && Number(values[5]?.textContent) === 3
         && Number(values[6]?.textContent) === 1
-        && Number(values[12]?.textContent) === 2;
+        && Number(values[12]?.textContent) === 3;
     });
     await page.setViewport({ width: 777, height: 555, deviceScaleFactor: 2 });
     await page.waitForFunction(previousObservations => {

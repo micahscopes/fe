@@ -94,6 +94,7 @@ fn reduce(mut model: Model, event: Event) -> Model {
                 model.pointer_x = bounded_position(event.pointer_x);
                 model.pointer_y = bounded_position(event.pointer_y);
                 model.wheel_events += 1;
+                model.bounded_drops = event.bounded_drops;
             }
             4 => model.failures += 1,
             5 => {
@@ -212,8 +213,7 @@ fn event_studio_matches_independent_browser_stream_and_lifecycle_oracle() {
         artifact.contract.scoped_task_source_entries,
         [
             "watch_viewport",
-            "watch_pointer",
-            "watch_wheel",
+            "watch_gestures",
             "watch_visibility",
             "watch_frame_clock"
         ]
@@ -322,6 +322,7 @@ fn event_studio_matches_independent_browser_stream_and_lifecycle_oracle() {
             target: 3,
             pointer_x: 210.25,
             pointer_y: 111.75,
+            bounded_drops: 3,
             ..Event::default()
         },
         Event {

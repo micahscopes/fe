@@ -357,6 +357,8 @@ pub struct BoundedQueue<T> {
     admitted: bool,
 }
 
+impl<T: Copy> Copy for BoundedQueue<T> {}
+
 /// A `Latest` value is the same queue protocol initialized with one slot by
 /// `latest`; the alias contributes no second implementation or host protocol.
 pub type Latest<T> = BoundedQueue<T>
@@ -471,6 +473,28 @@ impl<T: Copy> BoundedQueue<T> {
         }
     }
 
+    /// Observe one retained value relative to the queue head without consuming
+    /// it. This is the primitive used by Fe-owned multicast/replay cursors:
+    /// each subscriber advances independently while the shared queue remains
+    /// one immutable value in actor state.
+    pub fn at(self, _ offset: u32) -> Event<T> {
+        if offset >= self.len {
+            Event::absent()
+        } else {
+            let slot = (self.head + offset) % self.capacity
+            let value = if slot == 0 {
+                self.value0
+            } else if slot == 1 {
+                self.value1
+            } else if slot == 2 {
+                self.value2
+            } else {
+                self.value3
+            }
+            Event::occurrence(value: value)
+        }
+    }
+
     /// Consume the oldest slot. Splitting `front` from `consume` keeps this
     /// functional value API scalarizable on current Wasm lowering: no method
     /// needs a mutable aggregate receiver or a nested `(queue, event)` result.
@@ -521,6 +545,259 @@ impl<S: Copy> Scan<S> {
             },
             _ => self,
         }
+    }
+}
+
+/// A deterministic monotonic clock for stream-policy interpretation.
+///
+/// This is ordinary Fe state, not a test-only JavaScript fake. Production
+/// handlers can advance it from standards timestamps while native and Wasm
+/// tests advance the exact same value from an authored tape. Moving backwards
+/// is rejected instead of silently changing debounce/throttle meaning.
+pub struct VirtualTime { now_ms: u64 }
+
+impl Copy for VirtualTime {}
+
+impl VirtualTime {
+    pub fn new(_ start_ms: u64) -> Self {
+        Self { now_ms: start_ms }
+    }
+
+    pub fn now(self) -> u64 {
+        self.now_ms
+    }
+
+    pub fn advance_to(self, _ instant_ms: u64) -> Self {
+        if instant_ms < self.now_ms {
+            core::panic()
+        }
+        Self { now_ms: instant_ms }
+    }
+}
+
+/// Leading-edge throttle policy over a monotonic clock.
+///
+/// `can_emit` is a pure decision. `commit` records an admitted occurrence and
+/// rejects a caller that attempts to commit a value the policy did not admit;
+/// the interpreter cannot accidentally drift from the tested decision rule.
+pub struct Throttle {
+    interval_ms: u64,
+    last_ms: u64,
+    emitted: bool,
+}
+
+impl Copy for Throttle {}
+
+impl Throttle {
+    pub fn new(_ interval_ms: u64) -> Self {
+        Self { interval_ms: interval_ms, last_ms: 0, emitted: false }
+    }
+
+    pub fn can_emit(self, _ clock: VirtualTime) -> bool {
+        !self.emitted || (
+            clock.now() >= self.last_ms
+                && clock.now() - self.last_ms >= self.interval_ms
+        )
+    }
+
+    pub fn commit(self, _ clock: VirtualTime) -> Self {
+        if !self.can_emit(clock: clock) {
+            core::panic()
+        }
+        Self { interval_ms: self.interval_ms, last_ms: clock.now(), emitted: true }
+    }
+}
+
+/// Trailing-edge debounce state. Every push replaces the pending value and
+/// moves its due instant; `event` exposes it only after virtual/real time has
+/// reached that instant. The caller consumes an emitted value explicitly, so
+/// repeated polling cannot fabricate multiple occurrences.
+pub struct Debounce<T> {
+    pending: T,
+    delay_ms: u64,
+    due_ms: u64,
+    waiting: bool,
+}
+
+impl<T: Copy> Copy for Debounce<T> {}
+
+impl<T: Copy> Debounce<T> {
+    pub fn new(_ initial: T, _ delay_ms: u64) -> Self {
+        Self { pending: initial, delay_ms: delay_ms, due_ms: 0, waiting: false }
+    }
+
+    pub fn push(self, _ clock: VirtualTime, _ value: T) -> Self {
+        Self {
+            pending: value,
+            delay_ms: self.delay_ms,
+            due_ms: clock.now() + self.delay_ms,
+            waiting: true,
+        }
+    }
+
+    pub fn ready(self, _ clock: VirtualTime) -> bool {
+        self.waiting && clock.now() >= self.due_ms
+    }
+
+    pub fn event(self, _ clock: VirtualTime) -> Event<T> {
+        if self.ready(clock: clock) {
+            Event::occurrence(value: self.pending)
+        } else {
+            Event::absent()
+        }
+    }
+
+    pub fn consume(self, _ clock: VirtualTime) -> Self {
+        if !self.ready(clock: clock) {
+            core::panic()
+        }
+        Self {
+            pending: self.pending,
+            delay_ms: self.delay_ms,
+            due_ms: self.due_ms,
+            waiting: false,
+        }
+    }
+}
+
+/// Opaque generation of the currently selected inner stream. A generation is
+/// semantic cancellation state, not an application/host ID table.
+pub struct SwitchToken { generation: u64 }
+
+impl Copy for SwitchToken {}
+
+/// Pure stale-completion suppression for `switch/latest` interpretation.
+///
+/// An interpreter owns cancellation/wakeup realization. Fe increments the
+/// generation when switching and accepts occurrences or terminals only from
+/// the current token, so a late browser/Worker completion cannot re-enter the
+/// new stream merely because a host slot was recycled.
+pub struct SwitchLatest { generation: u64, switches: u64 }
+
+impl Copy for SwitchLatest {}
+
+impl SwitchLatest {
+    pub fn new() -> Self {
+        Self { generation: 0, switches: 0 }
+    }
+
+    pub fn token(self) -> SwitchToken {
+        SwitchToken { generation: self.generation }
+    }
+
+    pub fn switch(self) -> Self {
+        if self.generation == 18446744073709551615 {
+            core::panic()
+        }
+        Self { generation: self.generation + 1, switches: self.switches + 1 }
+    }
+
+    pub fn switches(self) -> u64 {
+        self.switches
+    }
+
+    pub fn accept<T: Copy>(self, _ token: SwitchToken, _ event: Event<T>) -> Event<T> {
+        if token.generation == self.generation {
+            event
+        } else {
+            Event::absent()
+        }
+    }
+}
+
+/// One independent reader of a shared replay window.
+pub struct ReplayCursor { sequence: u64, missed: u64 }
+
+impl Copy for ReplayCursor {}
+
+impl ReplayCursor {
+    pub fn missed(self) -> u64 {
+        self.missed
+    }
+}
+
+/// Bounded Fe-owned multicast/replay state.
+///
+/// `publish` happens exactly once, regardless of reader count. Each
+/// `ReplayCursor` observes the retained window independently; a lagging reader
+/// is advanced to the oldest retained sequence and receives an exact missed
+/// count. Handlers may supply wakeups, but neither storage, eviction, replay,
+/// nor subscriber progress is reconstructed in JavaScript.
+pub struct SharedReplay<T> {
+    values: BoundedQueue<T>,
+    first_sequence: u64,
+    next_sequence: u64,
+}
+
+impl<T: Copy> Copy for SharedReplay<T> {}
+
+impl<T: Copy> SharedReplay<T> {
+    pub fn new(_ initial: T, _ capacity: u32) -> Self {
+        Self {
+            values: BoundedQueue::new(initial: initial, capacity: capacity),
+            first_sequence: 0,
+            next_sequence: 0,
+        }
+    }
+
+    pub fn publish(self, _ value: T) -> Self {
+        let before = self.values.dropped()
+        let values = self.values.offer(value: value, overflow: OverflowPolicy::KeepLatest)
+        let first_sequence = if values.dropped() > before {
+            self.first_sequence + 1
+        } else {
+            self.first_sequence
+        }
+        Self {
+            values: values,
+            first_sequence: first_sequence,
+            next_sequence: self.next_sequence + 1,
+        }
+    }
+
+    /// Subscribe to future values only.
+    pub fn subscribe_live(self) -> ReplayCursor {
+        ReplayCursor { sequence: self.next_sequence, missed: 0 }
+    }
+
+    /// Subscribe to the complete currently retained replay window.
+    pub fn subscribe_replay(self) -> ReplayCursor {
+        ReplayCursor { sequence: self.first_sequence, missed: 0 }
+    }
+
+    pub fn retained(self) -> u32 {
+        self.values.queued()
+    }
+
+    pub fn published(self) -> u64 {
+        self.next_sequence
+    }
+
+    pub fn reconcile(self, _ cursor: ReplayCursor) -> ReplayCursor {
+        let mut current = cursor
+        if current.sequence < self.first_sequence {
+            current.missed = current.missed + self.first_sequence - current.sequence
+            current.sequence = self.first_sequence
+        }
+        current
+    }
+
+    pub fn event(self, _ cursor: ReplayCursor) -> Event<T> {
+        let current = self.reconcile(cursor: cursor)
+        if current.sequence >= self.next_sequence {
+            Event::absent()
+        } else {
+            let offset: u32 = (current.sequence - self.first_sequence).downcast_unchecked()
+            self.values.at(offset: offset)
+        }
+    }
+
+    pub fn advance(self, _ cursor: ReplayCursor) -> ReplayCursor {
+        let mut current = self.reconcile(cursor: cursor)
+        if current.sequence < self.next_sequence {
+            current.sequence = current.sequence + 1
+        }
+        current
     }
 }
 

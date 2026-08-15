@@ -4,7 +4,7 @@ use hir::analysis::{
         NEffectArg, NEffectArgValue, NOperand, NSPlace, ReadMode, SLocalId, SemanticLocalKind,
         borrowck::NLocalOrigin,
     },
-    ty::ty_def::TyId,
+    ty::{ty_check::BodyOwner, ty_def::TyId},
 };
 
 use crate::runtime::{AddressSpaceKind, RuntimeBoundarySpec, RuntimeCarrier, RuntimeClass};
@@ -161,10 +161,18 @@ impl<'a, 'carriers, 'roots, 'cache, 'db> RuntimeArgSelector<'a, 'carriers, 'root
     ) -> SelectedRuntimeArg<'db> {
         self.try_selected_semantic_operand_for_class(arg, target)
             .unwrap_or_else(|| {
+                let owner = self.env.body().owner.key(self.env.db()).owner(self.env.db());
+                let owner_name = match owner {
+                    BodyOwner::Func(func) => func
+                        .name(self.env.db())
+                        .to_opt()
+                        .map(|name| name.data(self.env.db())),
+                    _ => None,
+                };
+                let local = self.env.body().locals.get(arg.local.index());
+                let local_ty = local.map(|local| local.ty.pretty_print(self.env.db()));
                 panic!(
-                    "semantic operand has no lowerable runtime source for class: owner={:?}; arg={arg:?}; target={target:?}; local={:?}",
-                    self.env.body().owner.key(self.env.db()).owner(self.env.db()),
-                    self.env.body().locals.get(arg.local.index()),
+                    "semantic operand has no lowerable runtime source for class: owner={owner:?}; owner_name={owner_name:?}; arg={arg:?}; target={target:?}; local_ty={local_ty:?}; local={local:?}",
                 )
             })
     }

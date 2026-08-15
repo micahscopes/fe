@@ -426,10 +426,18 @@ fn lower_runtime_body<'db>(
                 external_declaration_body(db, instance, func)?
             } else {
                 if let Err(diag) = check_semantic_borrows(db, semantic) {
+                    let details = diag
+                        .sub_diagnostics
+                        .iter()
+                        .map(|label| format!("{} at {:?}", label.message, label.span))
+                        .collect::<Vec<_>>()
+                        .join("; ");
                     return Err(LowerError::Unsupported(format!(
-                        "semantic borrow checking failed for {:?}: {}",
+                        "semantic borrow checking failed for {:?}: {}{}{}",
                         semantic.key(db),
-                        diag.message
+                        diag.message,
+                        if details.is_empty() { "" } else { ": " },
+                        details,
                     )));
                 }
                 if let Err(diag) = check_semantic_noesc(db, semantic) {

@@ -2525,6 +2525,117 @@ pub fn queue_receipt() -> u32 {
     );
 }
 
+/// Virtual time, switch/latest generations, and multicast replay are ordinary
+/// Fe values. Execute their semantic receipts in Wasmtime so a future host
+/// adapter cannot become the untested owner of timing, stale-completion, or
+/// replay policy.
+#[test]
+fn reactive_virtual_time_switch_and_replay_execute_on_wasm() {
+    let source = r#"
+use std::reactive::{
+    Debounce, Event, SharedReplay, SwitchLatest, Throttle, VirtualTime,
+}
+
+pub fn virtual_time_receipt() -> u32 {
+    let mut clock = VirtualTime::new(start_ms: 100)
+    let mut throttle = Throttle::new(interval_ms: 10)
+    let mut receipt: u32 = 0
+    if throttle.can_emit(clock: clock) { receipt = receipt + 1 }
+    throttle = throttle.commit(clock: clock)
+
+    clock = clock.advance_to(instant_ms: 109)
+    if !throttle.can_emit(clock: clock) { receipt = receipt + 2 }
+    clock = clock.advance_to(instant_ms: 110)
+    if throttle.can_emit(clock: clock) { receipt = receipt + 4 }
+    throttle = throttle.commit(clock: clock)
+
+    let mut debounce: Debounce<u32> = Debounce::new(initial: 0, delay_ms: 10)
+    debounce = debounce.push(clock: clock, value: 7)
+    clock = clock.advance_to(instant_ms: 115)
+    debounce = debounce.push(clock: clock, value: 9)
+    clock = clock.advance_to(instant_ms: 124)
+    if !debounce.ready(clock: clock) { receipt = receipt + 8 }
+    clock = clock.advance_to(instant_ms: 125)
+    receipt = receipt + debounce.event(clock: clock).value_or(fallback: 0) * 100
+    debounce = debounce.consume(clock: clock)
+    if !debounce.ready(clock: clock) { receipt = receipt + 16 }
+    receipt
+}
+
+pub fn rewind_traps() -> u64 {
+    VirtualTime::new(start_ms: 10).advance_to(instant_ms: 9).now()
+}
+
+pub fn switch_receipt() -> u64 {
+    let mut selected = SwitchLatest::new()
+    let old = selected.token()
+    let before = selected.accept(token: old, event: Event::occurrence(value: 42u64))
+        .value_or(fallback: 0)
+    selected = selected.switch()
+    let stale = selected.accept(token: old, event: Event::occurrence(value: 88u64))
+        .value_or(fallback: 7)
+    let current = selected.accept(
+        token: selected.token(),
+        event: Event::occurrence(value: 99u64),
+    ).value_or(fallback: 0)
+    before + stale * 100 + current * 10000 + selected.switches() * 10000000
+}
+
+pub fn replay_receipt() -> u32 {
+    let mut shared: SharedReplay<u32> = SharedReplay::new(initial: 0, capacity: 3)
+    let lagging = shared.subscribe_live()
+    shared = shared.publish(value: 10)
+    shared = shared.publish(value: 20)
+    shared = shared.publish(value: 30)
+    shared = shared.publish(value: 40)
+
+    let mut replay = shared.subscribe_replay()
+    let first = shared.event(cursor: replay).value_or(fallback: 0)
+    replay = shared.advance(cursor: replay)
+    let second = shared.event(cursor: replay).value_or(fallback: 0)
+
+    let caught_up = shared.reconcile(cursor: lagging)
+    let lagged_value = shared.event(cursor: caught_up).value_or(fallback: 0)
+    let missed: u32 = caught_up.missed().downcast_unchecked()
+    let published: u32 = shared.published().downcast_unchecked()
+    first
+        + second * 100
+        + lagged_value * 10000
+        + missed * 1000000
+        + shared.retained() * 10000000
+        + published * 100000000
+}
+"#;
+    let wasm = compile_to_wasm("wasm_reactive_time_switch_replay.fe", source);
+    assert!(
+        func_imports(&wasm).is_empty(),
+        "virtual time, switching, and replay must not conceal a host implementation"
+    );
+    let (mut store, instance) = instantiate(&wasm);
+    let virtual_time = instance
+        .get_typed_func::<(), i32>(&mut store, "virtual_time_receipt")
+        .expect("virtual_time_receipt export");
+    assert_eq!(virtual_time.call(&mut store, ()).unwrap(), 931);
+
+    let rewind = instance
+        .get_typed_func::<(), i64>(&mut store, "rewind_traps")
+        .expect("rewind_traps export");
+    assert!(
+        rewind.call(&mut store, ()).is_err(),
+        "virtual time must reject a backwards clock step"
+    );
+
+    let switch = instance
+        .get_typed_func::<(), i64>(&mut store, "switch_receipt")
+        .expect("switch_receipt export");
+    assert_eq!(switch.call(&mut store, ()).unwrap() as u64, 10_990_742);
+
+    let replay = instance
+        .get_typed_func::<(), i32>(&mut store, "replay_receipt")
+        .expect("replay_receipt export");
+    assert_eq!(replay.call(&mut store, ()).unwrap() as u64, 431_203_020);
+}
+
 fn int_cmp<'a>(
     instance: &wasmtime::Instance,
     store: &mut wasmtime::Store<()>,
