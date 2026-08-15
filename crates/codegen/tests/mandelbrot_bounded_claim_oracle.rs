@@ -380,6 +380,19 @@ fn call_mask_pair(
     }
 }
 
+fn call_masks(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    name: &str,
+    args: &[i32],
+    result_count: usize,
+) -> Vec<u32> {
+    call_words(store, instance, name, args, result_count)
+        .into_iter()
+        .map(|word| word as u32)
+        .collect()
+}
+
 fn sign_magnitude(value: i32) -> [i32; 2] {
     [i32::from(value < 0), value.unsigned_abs() as i32]
 }
@@ -471,6 +484,53 @@ fn field_pair_args(c_re: i32, c_im: i32, row: [i32; 17], next: [i32; 17]) -> Vec
     args.extend(c_im);
     args.extend(row);
     args.extend(next);
+    args
+}
+
+fn bit_range_witness(value: u32, width: usize) -> Vec<i32> {
+    let bits = (0..width)
+        .map(|index| ((value >> index) & 1) as i32)
+        .collect::<Vec<_>>();
+    let mut seen = 0i32;
+    let any = bits
+        .iter()
+        .map(|bit| {
+            seen |= *bit;
+            seen
+        })
+        .collect::<Vec<_>>();
+    let mut witness = bits;
+    witness.extend(any);
+    witness
+}
+
+fn unsigned_range_args(value: u32, width: usize) -> Vec<i32> {
+    let mut args = vec![value as i32];
+    args.extend(bit_range_witness(value, width));
+    args
+}
+
+fn signed_range_args(value: i32) -> Vec<i32> {
+    let signed = sign_magnitude(value);
+    let mut args = vec![signed[0], signed[1]];
+    args.extend(bit_range_witness(value.unsigned_abs(), 32));
+    args
+}
+
+fn terminal_range_args(terminal: bool, magnitude: u32) -> Vec<i32> {
+    let witness = bit_range_witness(magnitude, 31);
+    let bits = &witness[..31];
+    let mut seen = 0i32;
+    let high_any = bits[26..31]
+        .iter()
+        .map(|bit| {
+            seen |= *bit;
+            seen
+        })
+        .collect::<Vec<_>>();
+    let mut args = vec![i32::from(terminal), magnitude as i32];
+    args.extend(witness);
+    args.extend(high_any);
     args
 }
 
@@ -1327,6 +1387,10 @@ fn mandelbrot_residual_polynomials_execute_in_bn254_without_host_shims() {
     let padded_pair_export = "mandelbrot_bn254_padded_pair_residual_masks";
     let padded_first_export = "mandelbrot_bn254_padded_first_residual_mask";
     let padded_last_export = "mandelbrot_bn254_padded_last_residual_mask";
+    let unsigned12_export = "mandelbrot_bn254_unsigned12_range_residual_masks";
+    let unsigned32_export = "mandelbrot_bn254_unsigned32_range_residual_masks";
+    let signed32_export = "mandelbrot_bn254_signed32_range_residual_masks";
+    let terminal_export = "mandelbrot_bn254_terminal_residual_masks";
     for (c_re, c_im, bound) in [(-8192, -6144, 100), (4095, 4095, 2), (-3048, 2216, 255)] {
         let rows = reference_rows(c_re, c_im, bound);
         let mut selected = vec![0usize, rows.len() - 1];
@@ -1483,7 +1547,130 @@ fn mandelbrot_residual_polynomials_execute_in_bn254_without_host_shims() {
     assert_eq!(
         call_mask(&mut store, &instance, local_export, &negative_zero,),
         0,
-        "canonical-zero enforcement still requires the pending range/encoding columns"
+        "local equalities alone cannot distinguish negative zero"
+    );
+
+    let mut range_store = wasmtime::Store::new(&engine, ());
+    let range_instance = wasmtime::Instance::new(&mut range_store, &module, &[])
+        .expect("instantiate independent BN254 range arena");
+    for value in [0, 4095] {
+        assert_eq!(
+            call_masks(
+                &mut range_store,
+                &range_instance,
+                unsigned12_export,
+                &unsigned_range_args(value, 12),
+                4,
+            ),
+            vec![0; 4],
+            "canonical 12-bit decomposition for {value}"
+        );
+    }
+    let out_of_range_remainder = noncanonical_shift.r_re as u32;
+    let out_of_range_masks = call_masks(
+        &mut range_store,
+        &range_instance,
+        unsigned12_export,
+        &unsigned_range_args(out_of_range_remainder, 12),
+        4,
+    );
+    assert_ne!(
+        out_of_range_masks[3], 0,
+        "12-bit reconstruction must close the alternate-remainder counterexample"
+    );
+    let mut malformed_bits = unsigned_range_args(7, 12);
+    malformed_bits[1] = 2;
+    assert_ne!(
+        call_masks(
+            &mut range_store,
+            &range_instance,
+            unsigned12_export,
+            &malformed_bits,
+            4,
+        )[0],
+        0,
+        "each range limb must be boolean"
+    );
+    let mut malformed_any = unsigned_range_args(7, 12);
+    malformed_any[1 + 12 + 4] ^= 1;
+    let malformed_any_masks = call_masks(
+        &mut range_store,
+        &range_instance,
+        unsigned12_export,
+        &malformed_any,
+        4,
+    );
+    assert!(
+        malformed_any_masks[1] != 0 || malformed_any_masks[2] != 0,
+        "the prefix-OR witness must be boolean and recurrent"
+    );
+
+    let mut wide_range_store = wasmtime::Store::new(&engine, ());
+    let wide_range_instance = wasmtime::Instance::new(&mut wide_range_store, &module, &[])
+        .expect("instantiate independent BN254 wide-range arena");
+    assert_eq!(
+        call_masks(
+            &mut wide_range_store,
+            &wide_range_instance,
+            unsigned32_export,
+            &unsigned_range_args(u32::MAX, 32),
+            4,
+        ),
+        vec![0; 4],
+        "full u32 decomposition must retain the high bit"
+    );
+    for value in [0, i32::MIN] {
+        assert_eq!(
+            call_masks(
+                &mut range_store,
+                &range_instance,
+                signed32_export,
+                &signed_range_args(value),
+                8,
+            ),
+            vec![0; 8],
+            "canonical signed decomposition for {value}"
+        );
+    }
+    let mut negative_zero_range = vec![1, 0];
+    negative_zero_range.extend(bit_range_witness(0, 32));
+    let negative_zero_masks = call_masks(
+        &mut range_store,
+        &range_instance,
+        signed32_export,
+        &negative_zero_range,
+        8,
+    );
+    assert_ne!(
+        negative_zero_masks[5], 0,
+        "the prefix-OR terminal must force zero to positive sign"
+    );
+    let mut positive_i32_overflow = vec![0, i32::MIN];
+    positive_i32_overflow.extend(bit_range_witness(1u32 << 31, 32));
+    assert_ne!(
+        call_masks(
+            &mut wide_range_store,
+            &wide_range_instance,
+            signed32_export,
+            &positive_i32_overflow,
+            8,
+        )[6],
+        0,
+        "magnitude 2^31 is valid only for the negative i32 minimum"
+    );
+    let overflowing_magnitude = (1u32 << 31) | 1;
+    let mut negative_i32_overflow = vec![1, overflowing_magnitude as i32];
+    negative_i32_overflow.extend(bit_range_witness(overflowing_magnitude, 32));
+    assert_ne!(
+        call_masks(
+            &mut wide_range_store,
+            &wide_range_instance,
+            signed32_export,
+            &negative_i32_overflow,
+            8,
+        )[7],
+        0,
+        "i32::MIN cannot carry lower magnitude bits"
     );
 
     let base_proof = field_proof_encoding(true, false, base);
@@ -1631,5 +1818,81 @@ fn mandelbrot_residual_polynomials_execute_in_bn254_without_host_shims() {
         ),
         (0, 0),
         "the pending threshold comparison is required to reject premature closure"
+    );
+    let mut threshold_store = wasmtime::Store::new(&engine, ());
+    let threshold_instance = wasmtime::Instance::new(&mut threshold_store, &module, &[])
+        .expect("instantiate independent BN254 threshold arena");
+    assert_eq!(
+        call_masks(
+            &mut threshold_store,
+            &threshold_instance,
+            terminal_export,
+            &terminal_range_args(false, next.row.magnitude as u32),
+            8,
+        ),
+        vec![0; 8],
+        "the actual nonterminal magnitude must satisfy the threshold constraints"
+    );
+    assert_ne!(
+        call_masks(
+            &mut threshold_store,
+            &threshold_instance,
+            terminal_export,
+            &terminal_range_args(true, next.row.magnitude as u32),
+            8,
+        )[7],
+        0,
+        "the threshold relation must close the premature-terminal counterexample"
+    );
+    assert_eq!(
+        call_masks(
+            &mut threshold_store,
+            &threshold_instance,
+            terminal_export,
+            &terminal_range_args(true, terminal_air.row.magnitude as u32),
+            8,
+        ),
+        vec![0; 8],
+        "the actual terminal magnitude must satisfy the threshold constraints"
+    );
+    for (terminal, magnitude) in [(false, (1u32 << 26) - 1), (true, 1u32 << 26)] {
+        assert_eq!(
+            call_masks(
+                &mut threshold_store,
+                &threshold_instance,
+                terminal_export,
+                &terminal_range_args(terminal, magnitude),
+                8,
+            ),
+            vec![0; 8],
+            "the exact 2^26 threshold boundary must be canonical"
+        );
+    }
+    let mut non_bit_terminal = terminal_range_args(true, 1u32 << 26);
+    non_bit_terminal[0] = 2;
+    assert_ne!(
+        call_masks(
+            &mut threshold_store,
+            &threshold_instance,
+            terminal_export,
+            &non_bit_terminal,
+            8,
+        )[4],
+        0,
+        "the semantic terminal flag must be boolean"
+    );
+    let mut malformed_high_any = terminal_range_args(true, 1u32 << 26);
+    let high_any_index = malformed_high_any.len() - 3;
+    malformed_high_any[high_any_index] ^= 1;
+    assert_ne!(
+        call_masks(
+            &mut threshold_store,
+            &threshold_instance,
+            terminal_export,
+            &malformed_high_any,
+            8,
+        )[6],
+        0,
+        "the high-bit prefix OR must obey its quadratic recurrence"
     );
 }

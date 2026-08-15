@@ -4,8 +4,9 @@
 //! It consumes the canonical sign-plus-magnitude columns, reconstructs signed
 //! field values algebraically as `(1 - 2s) * magnitude`, constrains every sign
 //! with `s * (s - 1)`, and evaluates the row and transition equalities in
-//! BN254 Fr. Range decomposition, terminal-threshold comparison, composition,
-//! and low-degree testing remain separate proof layers.
+//! BN254 Fr. Generic bit decomposition, quadratic prefix OR, canonical-zero,
+//! signed-i32, and terminal-threshold residuals live below. Full row wiring,
+//! composition, commitments, and low-degree testing remain separate layers.
 
 use precision::bn254_fr::Bn254Fr
 use precision::field::FieldElement
@@ -47,6 +48,20 @@ pub struct EncodedProofRow {
 
 impl core::marker::Copy for EncodedProofRow {}
 
+/// Low-degree range witness. `bits` reconstruct the value, while `any` is the
+/// inclusive prefix OR. The latter gives canonical-zero and nonzero predicates
+/// without one high-degree product over every bit.
+pub struct BitRangeWitness<const N: usize> {
+    pub bits: [u32; N],
+    pub any: [u32; N],
+}
+
+impl<const N: usize> core::marker::Copy for BitRangeWitness<N> {}
+
+pub struct OrWitness<const N: usize> { pub any: [u32; N] }
+
+impl<const N: usize> core::marker::Copy for OrWitness<N> {}
+
 struct SignedField { sign: Fr, magnitude: Fr, value: Fr }
 
 impl core::marker::Copy for SignedField {}
@@ -83,6 +98,10 @@ fn field_is_zero(_ value: Fr) -> bool {
 
 fn bit_residual(_ word: Fr) -> Fr {
     word * (word - Fr::one())
+}
+
+fn residual_flag(_ residual: Fr) -> u32 {
+    if field_is_zero(residual) { 0 } else { 1 }
 }
 
 fn signed_value(_ sign: Fr, _ magnitude: Fr) -> Fr {
@@ -189,6 +208,38 @@ fn row_state_residuals(_ row: ProofFieldRow) -> [Fr; 5] {
         row.terminal - row.active * row.air.terminal,
         (one - row.active) * (row.air.terminal - one),
     ]
+}
+
+fn range_residual_masks<const N: usize>(
+    _ value: Fr,
+    _ witness: BitRangeWitness<N>,
+) -> (u32, u32, u32, u32) {
+    let mut bit_mask: u32 = 0
+    let mut any_bit_mask: u32 = 0
+    let mut any_relation_mask: u32 = 0
+    let mut reconstructed = Fr::zero()
+    let mut weight = Fr::one()
+    let mut previous_any = Fr::zero()
+    let count: u32 = N.downcast_truncate()
+    let mut i: u32 = 0
+    while i < count {
+        let bit = Fr::from_u32(witness.bits[i as usize])
+        let any = Fr::from_u32(witness.any[i as usize])
+        if !field_is_zero(bit_residual(bit)) { bit_mask = bit_mask | (1 << i) }
+        if !field_is_zero(bit_residual(any)) { any_bit_mask = any_bit_mask | (1 << i) }
+        let relation = any - previous_any - bit + previous_any * bit
+        if !field_is_zero(relation) { any_relation_mask = any_relation_mask | (1 << i) }
+        reconstructed = reconstructed + bit * weight
+        weight = weight + weight
+        previous_any = any
+        i = i + 1
+    }
+    (
+        bit_mask,
+        any_bit_mask,
+        any_relation_mask,
+        residual_flag(value - reconstructed),
+    )
 }
 
 fn residual_mask<const N: usize>(_ residuals: [Fr; N]) -> u32 {
@@ -356,4 +407,91 @@ pub fn mandelbrot_bn254_padded_last_residual_mask(_ row: EncodedProofRow) -> u32
         state[0], state[1], state[2], state[3], state[4],
         row.active * (Fr::one() - row.terminal),
     ])
+}
+
+/// Constrain an unsigned 12-bit value, used by each Euclidean Q12 remainder.
+pub fn mandelbrot_bn254_unsigned12_range_residual_masks(
+    _ value: u32,
+    _ witness: BitRangeWitness<12>,
+) -> (u32, u32, u32, u32) {
+    range_residual_masks<12>(Fr::from_u32(value), witness)
+}
+
+/// Constrain an arbitrary u32 witness column without trusting the Wasm lane's
+/// host type as proof evidence.
+pub fn mandelbrot_bn254_unsigned32_range_residual_masks(
+    _ value: u32,
+    _ witness: BitRangeWitness<32>,
+) -> (u32, u32, u32, u32) {
+    range_residual_masks<32>(Fr::from_u32(value), witness)
+}
+
+/// Constrain sign-plus-magnitude as a unique signed 32-bit field encoding.
+/// The final residual forces zero to have positive sign.
+pub fn mandelbrot_bn254_signed32_range_residual_masks(
+    _ value: SignedWord,
+    _ witness: BitRangeWitness<32>,
+) -> (u32, u32, u32, u32, u32, u32, u32, u32) {
+    let sign = Fr::from_u32(value.sign)
+    let range = range_residual_masks<32>(Fr::from_u32(value.magnitude), witness)
+    let nonzero = Fr::from_u32(witness.any[31])
+    let high = Fr::from_u32(witness.bits[31])
+    let lower_nonzero = Fr::from_u32(witness.any[30])
+    (
+        residual_flag(bit_residual(sign)),
+        range.0,
+        range.1,
+        range.2,
+        range.3,
+        residual_flag(sign * (Fr::one() - nonzero)),
+        residual_flag(high * (sign - Fr::one())),
+        residual_flag(high * lower_nonzero),
+    )
+}
+
+/// Constrain the semantic terminal flag. Magnitude is 31-bit in the canonical
+/// trace domain, and the escape threshold is exactly `2^26`, so terminal is
+/// the OR of magnitude bits 26 through 30. `high_any` carries that five-step
+/// OR through quadratic relations.
+pub fn mandelbrot_bn254_terminal_residual_masks(
+    _ terminal: u32,
+    _ magnitude: u32,
+    _ magnitude_witness: BitRangeWitness<31>,
+    _ high_any: OrWitness<5>,
+) -> (u32, u32, u32, u32, u32, u32, u32, u32) {
+    let terminal = Fr::from_u32(terminal)
+    let magnitude_range = range_residual_masks<31>(
+        Fr::from_u32(magnitude),
+        magnitude_witness,
+    )
+    let high_bits = [
+        Fr::from_u32(magnitude_witness.bits[26]),
+        Fr::from_u32(magnitude_witness.bits[27]),
+        Fr::from_u32(magnitude_witness.bits[28]),
+        Fr::from_u32(magnitude_witness.bits[29]),
+        Fr::from_u32(magnitude_witness.bits[30]),
+    ]
+    let mut high_any_bit_mask: u32 = 0
+    let mut high_relation_mask: u32 = 0
+    let mut previous = Fr::zero()
+    let mut i: u32 = 0
+    while i < 5 {
+        let bit = high_bits[i as usize]
+        let any = Fr::from_u32(high_any.any[i as usize])
+        if !field_is_zero(bit_residual(any)) { high_any_bit_mask = high_any_bit_mask | (1 << i) }
+        let relation = any - previous - bit + previous * bit
+        if !field_is_zero(relation) { high_relation_mask = high_relation_mask | (1 << i) }
+        previous = any
+        i = i + 1
+    }
+    (
+        magnitude_range.0,
+        magnitude_range.1,
+        magnitude_range.2,
+        magnitude_range.3,
+        residual_flag(bit_residual(terminal)),
+        high_any_bit_mask,
+        high_relation_mask,
+        residual_flag(terminal - previous),
+    )
 }

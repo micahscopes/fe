@@ -201,14 +201,19 @@ Legend:
   padding an exact terminal-state fixed point. The field boundary uses nested
   nominal Fe rows rather than a numeric lane protocol. The gate rejects
   non-bit flags, premature inactivity, nonterminal closure, public-point
-  mutation, and mutated padding. Range and bit decomposition, canonical
-  positive zero, the terminal-threshold comparison, and the domain-separated
-  Poseidon trace commitment remain pending. The gate deliberately demonstrates
-  that the current field equalities still accept an out-of-range remainder
-  decomposition, negative zero, and a premature terminal marker. The reusable
-  field API's SPIR-V helper-call seam and permutation lift also remain open. No
-  trace root is claimed yet. This is executable initial AIR evidence rather
-  than a proof.
+  mutation, and mutated padding. A generic low-degree range witness now adds
+  boolean bits, exact BN254 reconstruction, and a quadratic prefix OR. Its
+  signed form enforces canonical positive zero and the asymmetric i32 minimum.
+  The Q12 remainder gate uses 12 bits. Because the escape threshold is exactly
+  `2^26`, a five-step high-bit OR now constrains the semantic terminal flag.
+  The independent oracle proves that these companion constraints close the
+  formerly accepted alternate remainder, negative-zero, and premature-terminal
+  counterexamples, including exact threshold boundaries and malformed OR
+  witnesses. Wiring the range witness into every trace/public-claim column,
+  public-domain comparisons, the domain-separated Poseidon trace commitment,
+  composition, and FRI remain pending. The reusable field API's SPIR-V
+  helper-call seam and permutation lift also remain open. No trace root is
+  claimed yet. This is executable initial AIR evidence rather than a proof.
 - [ ] Produce a succinct proof whose verifier is demonstrably cheaper than
   replaying the orbit.
 - [ ] Define a typed proof encoding and prove browser/native verifier parity,

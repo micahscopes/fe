@@ -97,12 +97,20 @@ sum, and both Q12 shift equalities. The transition equations constrain the
 step and next coordinates. The compiled Wasm has no function imports, and the
 independent gate checks directed rows, mutations, and a non-bit sign.
 
-This slice deliberately does not claim range soundness. The same gate exhibits
-two zero-residual counterexamples: replacing `(q, r)` with `(q - 1, r + 4096)`
-still satisfies the shift equality, and sign-one magnitude-zero still denotes
-field zero. Limb/bit range decomposition and canonical positive-zero
-constraints must close both cases. Activity, terminal, and padding constraints
-also remain on the widened integer surface until their proof-field lift lands.
+The equality slice alone deliberately does not claim range soundness. The gate
+exhibits two zero-residual counterexamples: replacing `(q, r)` with
+`(q - 1, r + 4096)` still satisfies the shift equality, and sign-one
+magnitude-zero still denotes field zero. Companion BN254 range polynomials now
+close both cases. A generic `BitRangeWitness<N>` supplies boolean little-endian
+bits and an inclusive prefix OR. Linear reconstruction binds the bits to the
+field value. Quadratic OR relations expose nonzero without a high-degree
+product, allowing sign-one zero to be rejected. The signed-32 profile also
+enforces the unique i32 minimum: magnitude `2^31` requires negative sign and
+all lower magnitude bits zero. Twelve-bit reconstruction bounds each Q12
+remainder. The oracle accepts boundary values and rejects mutated bits, OR
+columns, reconstruction, negative zero, and both directions of i32 overflow.
+The proof trace still needs these generic witnesses wired to every applicable
+row and public-claim column.
 
 The integer constraint evaluator rejects any alleged row whose coordinate
 magnitude exceeds 24576 before evaluating the doubled cross-product. This is
@@ -141,11 +149,15 @@ inactive rows instead select exact equality of all 15 encoded AIR words and
 force the successor to inactive nonterminal padding. First and last
 constraints establish `z_0 = 0` and prohibit an active nonterminal final row.
 
-These state polynomials do not yet relate the semantic terminal flag to
+The state polynomials alone do not relate the semantic terminal flag to
 `magnitude >= 67108864`. The gate constructs a correct nonterminal transition,
 changes its successor into a premature terminal row, pads from it, and records
-that all current field residuals are zero. A sound proof requires the pending
-range/threshold columns to reject that counterexample.
+that the state and transition residuals are still zero. The companion range
+layer closes the gap. Magnitude is reconstructed from 31 bits, and the escape
+threshold is exactly `2^26`, so a five-step quadratic prefix OR over bits 26
+through 30 equals the terminal flag. The oracle accepts `2^26 - 1` as
+nonterminal and `2^26` as terminal, rejects the premature marker, and rejects
+non-bit terminal and malformed high-OR witnesses.
 
 ## Commitment and proof direction
 

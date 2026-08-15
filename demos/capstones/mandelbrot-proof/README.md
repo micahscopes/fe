@@ -19,10 +19,14 @@ Wasm has no function imports. The independent gate checks directed residuals,
 one-unit mutations, and sign-bit rejection. BN254 first/pair/last polynomials
 also constrain activity, the unique terminal marker, selected Mandelbrot
 transitions, and exact terminal-state padding through nested nominal Fe rows.
-The gate records the remaining soundness boundary honestly: current field
-constraints still accept an out-of-range remainder decomposition, negative
-zero, and a premature terminal marker until range, canonical-zero, and
-threshold constraints land.
+Generic low-degree range polynomials add bit reconstruction and a quadratic
+prefix OR. Their signed profile enforces canonical positive zero and i32
+bounds, their 12-bit profile bounds Q12 remainders, and a high-bit OR binds the
+terminal flag to the exact `2^26` escape threshold. The gate first demonstrates
+that equality/state constraints alone accept alternate remainders, negative
+zero, and premature termination, then proves the companion range constraints
+reject all three. These witnesses still need to be wired across every trace and
+public-claim column.
 
 Escaping witnesses derive a power-of-two proof shape with one terminal marker
 and deterministic inactive padding; invalid and non-escaping claims cannot
