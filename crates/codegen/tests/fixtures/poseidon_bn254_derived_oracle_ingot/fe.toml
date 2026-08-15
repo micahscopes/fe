@@ -1,0 +1,6 @@
+[ingot]
+name = "poseidon_bn254_derived_oracle_gate"
+version = "0.1.0"
+
+[dependencies]
+poseidon_bn254 = "../../../../../ingots/poseidon_bn254"

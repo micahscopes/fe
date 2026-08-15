@@ -264,6 +264,8 @@ pub fn runtime_builtin_func_kind<'db>(
         (IngotKind::Std, ["evm", "ops", "extcodesize"]) => RuntimeBuiltinFuncKind::ExtCodeSize,
         (IngotKind::Std, ["evm", "ops", "extcodehash"]) => RuntimeBuiltinFuncKind::ExtCodeHash,
         (IngotKind::Std, ["evm", "ops", "keccak256"]) => RuntimeBuiltinFuncKind::Keccak256,
+        (IngotKind::Core, ["num", "__addmod_u256"]) => RuntimeBuiltinFuncKind::AddMod,
+        (IngotKind::Core, ["num", "__mulmod_u256"]) => RuntimeBuiltinFuncKind::MulMod,
         (IngotKind::Std, ["evm", "ops", "addmod"]) => RuntimeBuiltinFuncKind::AddMod,
         (IngotKind::Std, ["evm", "ops", "mulmod"]) => RuntimeBuiltinFuncKind::MulMod,
         (IngotKind::Std, ["evm", "ops", "byte"]) => RuntimeBuiltinFuncKind::Byte,

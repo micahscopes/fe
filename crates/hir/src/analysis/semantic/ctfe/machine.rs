@@ -54,6 +54,38 @@ impl Default for CtfeConfig {
     }
 }
 
+const MAX_EXPLICIT_CTFE_STEP_LIMIT: usize = 20_000_000;
+
+/// Ordinary consts retain the conservative default. A deliberately expensive
+/// const item can request a bounded larger budget with
+/// `#[const_eval_limit = N]`; the cap keeps source from disabling the compiler's
+/// resource guard entirely.
+fn config_for_const_owner<'db>(db: &'db dyn HirAnalysisDb, owner: BodyOwner<'db>) -> CtfeConfig {
+    let mut config = CtfeConfig::default();
+    let mut item = match owner {
+        BodyOwner::Const(const_) => Some(crate::hir_def::ItemKind::Const(const_)),
+        BodyOwner::AnonConstBody { body, .. } => body.scope().parent_item(db),
+        BodyOwner::Func(_) | BodyOwner::ContractInit { .. } | BodyOwner::ContractRecvArm { .. } => {
+            None
+        }
+    };
+    while let Some(crate::hir_def::ItemKind::Body(body)) = item {
+        item = body.scope().parent_item(db);
+    }
+    let Some(attrs) = item.and_then(|item| item.attrs(db)) else {
+        return config;
+    };
+    let Some(requested) = attrs
+        .get_attr(db, "const_eval_limit")
+        .and_then(|attr| attr.int_value(db))
+        .and_then(|value| value.to_usize())
+    else {
+        return config;
+    };
+    config.step_limit = requested.min(MAX_EXPLICIT_CTFE_STEP_LIMIT);
+    config
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Update)]
 pub enum CtfeError<'db> {
     NotConstEvaluable {
@@ -198,7 +230,8 @@ pub fn eval_const_instance<'db>(
     db: &'db dyn HirAnalysisDb,
     instance: SemanticInstance<'db>,
 ) -> Result<SemConstId<'db>, CtfeError<'db>> {
-    let mut machine = CtfeMachine::new(db, CtfeConfig::default());
+    let owner = instance.key(db).owner(db);
+    let mut machine = CtfeMachine::new(db, config_for_const_owner(db, owner));
     machine.eval_root(
         instance,
         Vec::new(),
@@ -229,7 +262,8 @@ pub fn eval_const_ref<'db>(
     db: &'db dyn HirAnalysisDb,
     cref: SemanticConstRef<'db>,
 ) -> Result<SemConstId<'db>, CtfeError<'db>> {
-    let mut machine = CtfeMachine::new(db, CtfeConfig::default());
+    let owner = cref.instance(db).owner(db);
+    let mut machine = CtfeMachine::new(db, config_for_const_owner(db, owner));
     machine.eval_root(
         SemanticInstance::new(db, cref.instance(db)),
         Vec::new(),
@@ -330,7 +364,7 @@ pub fn eval_body_owner_const_with_args<'db>(
         ImplEnv::empty(db, owner.scope()),
     );
     let instance = get_or_build_semantic_instance(db, key);
-    let mut machine = CtfeMachine::new(db, CtfeConfig::default());
+    let mut machine = CtfeMachine::new(db, config_for_const_owner(db, owner));
     machine.eval_root(
         instance,
         args.into_iter()
@@ -436,7 +470,8 @@ fn eval_completed_const_item<'db>(
     key: SemanticInstanceKey<'db>,
 ) -> Option<MemoizedConstCall<'db>> {
     let instance = get_or_build_semantic_instance(db, key);
-    let mut machine = CtfeMachine::new(db, CtfeConfig::default());
+    let owner = key.owner(db);
+    let mut machine = CtfeMachine::new(db, config_for_const_owner(db, owner));
     machine.memoize_const_items = false;
     let value = machine
         .eval_root(instance, Vec::new(), SemOrigin::Body(key.owner(db)))
@@ -4075,6 +4110,25 @@ mod memo_tests {
         (db, BodyOwner::Func(func))
     }
 
+    fn const_fixture(source: &str) -> (&'static HirAnalysisTestDb, BodyOwner<'static>) {
+        let db = Box::leak(Box::new(HirAnalysisTestDb::default()));
+        let file = db.new_stand_alone("ctfe_const_budget.fe".into(), source);
+        let (top_mod, _) = db.top_mod(file);
+        let const_ = top_mod
+            .all_items(db)
+            .iter()
+            .find_map(|item| match item {
+                crate::hir_def::ItemKind::Const(const_)
+                    if matches!(const_.name(db), Partial::Present(name) if name.data(db) == "LIMITED") =>
+                {
+                    Some(*const_)
+                }
+                _ => None,
+            })
+            .expect("missing LIMITED const");
+        (db, BodyOwner::Const(const_))
+    }
+
     fn outcome(db: &HirAnalysisTestDb, result: &Result<SemConstId<'_>, CtfeError<'_>>) -> String {
         fn error(err: &CtfeError<'_>) -> String {
             match err {
@@ -4110,6 +4164,41 @@ const fn root() -> usize {
         assert!(
             eval_body_owner_const(db, owner, Vec::new()).is_ok(),
             "the ordinary one-million-step CTFE path must remain independent"
+        );
+    }
+
+    #[test]
+    fn const_item_step_budget_is_read_from_its_attribute() {
+        let (db, owner) = const_fixture(
+            r#"
+#[const_eval_limit = 37]
+const LIMITED: usize = 1 + 2
+"#,
+        );
+        let attrs = match owner {
+            BodyOwner::Const(const_) => crate::hir_def::ItemKind::Const(const_)
+                .attrs(db)
+                .expect("const attrs"),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            config_for_const_owner(db, owner).step_limit,
+            37,
+            "lowered attrs: {:?}",
+            attrs.data(db)
+        );
+        assert_eq!(CtfeConfig::default().step_limit, 1_000_000);
+
+        let (capped_db, capped_owner) = const_fixture(
+            r#"
+#[const_eval_limit = 999999999]
+const LIMITED: usize = 1 + 2
+"#,
+        );
+        assert_eq!(
+            config_for_const_owner(capped_db, capped_owner).step_limit,
+            MAX_EXPLICIT_CTFE_STEP_LIMIT,
+            "source must not disable the compiler's explicit CTFE ceiling"
         );
     }
 

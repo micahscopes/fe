@@ -359,6 +359,16 @@ fn zero_immediate(ty: Type) -> Option<Immediate> {
     }
 }
 
+fn all_ones_immediate(ty: Type) -> Option<Immediate> {
+    match ty {
+        Type::I8 => Some(Immediate::I8(-1)),
+        Type::I16 => Some(Immediate::I16(-1)),
+        Type::I32 => Some(Immediate::I32(-1)),
+        Type::I64 => Some(Immediate::I64(-1)),
+        _ => None,
+    }
+}
+
 /// Lower through the same fail-closed portable instruction vocabulary as Wasm,
 /// but attach the host-native data layout required by Cranelift.
 #[cfg(all(
@@ -7429,12 +7439,32 @@ where
         place: &RuntimePlace<'db>,
         dst: RLocalId,
     ) -> Result<ValueId, LowerError> {
+        let dst_class = self.body.value_class(dst).cloned().ok_or_else(|| {
+            LowerError::Internal(format!("materialization destination {dst:?} has no class"))
+        })?;
+        let layout = self.module.object_value_layout(&dst_class).ok_or_else(|| {
+            LowerError::Internal(format!(
+                "materialization destination {dst:?} is not an object value"
+            ))
+        })?;
+
         if !place.path.is_empty() {
-            return Err(LowerError::Unsupported(
-                "wasm target: projected aggregate-place materialization is not implemented"
-                    .to_owned(),
-            ));
+            let Some((source_pointer, source_class)) = self.raw_memory_aggregate_place(place)?
+            else {
+                return Err(LowerError::Unsupported(
+                    "wasm target: projected aggregate materialization requires canonical-arena storage"
+                        .to_owned(),
+                ));
+            };
+            if source_class.aggregate_layout() != Some(layout) {
+                return Err(LowerError::Unsupported(
+                    "wasm target: projected aggregate materialization source/destination layouts differ"
+                        .to_owned(),
+                ));
+            }
+            return self.lower_deep_object_copy(source_pointer, layout);
         }
+
         let source = match place.root {
             PlaceRoot::Ref(source) => source,
             _ => {
@@ -7444,14 +7474,6 @@ where
                 ));
             }
         };
-        let dst_class = self.body.value_class(dst).cloned().ok_or_else(|| {
-            LowerError::Internal(format!("materialization destination {dst:?} has no class"))
-        })?;
-        let layout = self.module.object_value_layout(&dst_class).ok_or_else(|| {
-            LowerError::Internal(format!(
-                "materialization destination {dst:?} is not an object value"
-            ))
-        })?;
         let source_class = self.body.value_class(source).cloned().ok_or_else(|| {
             LowerError::Internal(format!("materialization source {source:?} has no class"))
         })?;
@@ -8567,12 +8589,32 @@ where
             };
         }
         let is = self.inst_set();
+        let logical_ty = self.local_ty(value)?;
         let value = self.local_value(value)?;
         match op {
             // Fe's logical `!` is typed over bool before MIR. Sonatina carries
             // that as i1; Wasm represents it as i32 and translates IsZero to
             // the width-correct `i32.eqz` while retaining an i1 result in IR.
             UnOp::Not => Ok(self.fb.insert_inst(IsZero::new(is, value), Type::I1)),
+            // Sonatina has no unary complement instruction. XOR with an
+            // all-ones value is exactly `~x` for every admitted integer width.
+            // Narrow Fe integers use Wasm's physical i32 lane and are
+            // truncated back to their logical width after the operation.
+            UnOp::BitNot => {
+                let physical_ty = match logical_ty {
+                    Type::I8 | Type::I16 => Type::I32,
+                    other => other,
+                };
+                let value = self.promote_narrow_int(value, logical_ty, false);
+                let ones = all_ones_immediate(physical_ty).ok_or_else(|| {
+                    LowerError::Unsupported(format!(
+                        "wasm target: bitwise-not does not support `{logical_ty:?}`"
+                    ))
+                })?;
+                let ones = self.fb.make_imm_value(ones);
+                let complemented = self.fb.insert_inst(Xor::new(is, value, ones), physical_ty);
+                Ok(self.restore_narrow_int(complemented, logical_ty, physical_ty))
+            }
             other => Err(LowerError::Unsupported(format!(
                 "wasm target (R1) unary op `{other:?}` is not supported"
             ))),

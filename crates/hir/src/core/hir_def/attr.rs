@@ -790,6 +790,16 @@ impl<'db> AttrListId<'db> {
 }
 
 impl<'db> NormalAttr<'db> {
+    /// Returns this attribute's top-level integer value.
+    ///
+    /// For example, `#[const_eval_limit = 2000000]` returns two million.
+    pub fn int_value(&self, db: &'db dyn HirDb) -> Option<num_bigint::BigUint> {
+        match &self.value {
+            Some(AttrArgValue::Lit(super::LitKind::Int(int_id))) => Some(int_id.data(db).clone()),
+            _ => None,
+        }
+    }
+
     /// Returns true if this attribute has an argument with the given key (no value).
     ///
     /// For example, `#[test(should_revert)]` has the argument `should_revert`.

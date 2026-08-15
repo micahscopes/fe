@@ -42,6 +42,25 @@ pub fn pick(index: u32) -> (u32, u32) {
 }
 "#;
 
+const NESTED_CONST_SOURCE: &str = r#"
+const VALUES: [[u32; 2]; 3] = [
+    [3, 5],
+    [7, 11],
+    [13, 17],
+]
+
+pub fn pick(row: u32, column: u32) -> u32 {
+    let selected = VALUES[row as usize]
+    selected[column as usize]
+}
+
+pub fn mutate_copy(row: u32, column: u32, replacement: u32) -> (u32, u32) {
+    let mut selected = VALUES[row as usize]
+    selected[column as usize] = replacement
+    (selected[column as usize], VALUES[row as usize][column as usize])
+}
+"#;
+
 fn compile(source: &str, name: &str) -> Vec<u8> {
     let mut db = DriverDataBase::default();
     let url = Url::parse(&format!("file:///{name}.fe")).unwrap();
@@ -72,6 +91,46 @@ fn dynamic_const_aggregate_array_index_executes_and_traps_out_of_bounds() {
         CONST_SOURCE,
         "wasm_const_aggregate_array_dynamic_index",
     ));
+}
+
+#[test]
+fn nested_dynamic_const_array_indexes_execute_and_trap_out_of_bounds() {
+    let bytes = compile(
+        NESTED_CONST_SOURCE,
+        "wasm_nested_const_aggregate_array_dynamic_index",
+    );
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, bytes).unwrap();
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+    let pick = instance
+        .get_typed_func::<(i32, i32), i32>(&mut store, "pick")
+        .expect("pick export");
+    let mutate_copy = instance
+        .get_typed_func::<(i32, i32, i32), (i32, i32)>(&mut store, "mutate_copy")
+        .expect("mutate_copy export");
+    for (row, column, expected) in [
+        (0, 0, 3),
+        (0, 1, 5),
+        (1, 0, 7),
+        (1, 1, 11),
+        (2, 0, 13),
+        (2, 1, 17),
+    ] {
+        assert_eq!(pick.call(&mut store, (row, column)).unwrap(), expected);
+    }
+    assert_eq!(
+        mutate_copy.call(&mut store, (1, 0, 29)).unwrap(),
+        (29, 7),
+        "the selected row must be an independent Fe value"
+    );
+    assert_eq!(pick.call(&mut store, (1, 0)).unwrap(), 7);
+    for (row, column) in [(3, 0), (0, 2), (-1, 0), (0, -1)] {
+        assert!(
+            pick.call(&mut store, (row, column)).is_err(),
+            "out-of-bounds index ({row}, {column}) must trap"
+        );
+    }
 }
 
 fn assert_pick_executes_and_traps(bytes: Vec<u8>) {

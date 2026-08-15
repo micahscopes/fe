@@ -8,6 +8,22 @@ use super::panic
 extern {
     const fn __bitcast<From, To>(_: From) -> To
     const fn __int_truncate<From: IntWord, To: IntWord>(_: From) -> To
+    const fn __addmod_u256(_: u256, _: u256, _: u256) -> u256
+    const fn __mulmod_u256(_: u256, _: u256, _: u256) -> u256
+}
+
+/// Modular addition with a full-width intermediate. A zero modulus returns
+/// zero. This is a target-neutral numeric primitive, including during CTFE;
+/// individual backends may fail closed when they cannot execute it at runtime.
+pub const fn add_mod_u256(_ a: u256, _ b: u256, _ modulus: u256) -> u256 {
+    __addmod_u256(a, b, modulus)
+}
+
+/// Modular multiplication with a 512-bit intermediate. A zero modulus returns
+/// zero. This is a target-neutral numeric primitive, including during CTFE;
+/// individual backends may fail closed when they cannot execute it at runtime.
+pub const fn mul_mod_u256(_ a: u256, _ b: u256, _ modulus: u256) -> u256 {
+    __mulmod_u256(a, b, modulus)
 }
 
 // Generic checked arithmetic intrinsics for primitive integer types.

@@ -1,0 +1,285 @@
+//! Canonical Poseidon t=3 parameters for BN254 Fr, derived inside Fe from the
+//! Hades Grain construction. The authoring surface contains the seed fields,
+//! LFSR transition, self-shrinking policy, field rejection rule, and Cauchy
+//! matrix construction. It contains no generated round-constant or MDS table.
+
+use core::num::{IntDowncast, mul_mod_u256}
+use core::marker::Copy
+
+use precision::field::{FieldWords, LIMB_BITS}
+use bitpack::self_shrink_9
+
+pub use bitpack
+
+pub const WIDTH: usize = 3
+pub const FULL_ROUNDS: usize = 8
+pub const PARTIAL_ROUNDS: usize = 57
+pub const ROUND_COUNT: usize = FULL_ROUNDS + PARTIAL_ROUNDS
+pub const ROUND_CONSTANT_COUNT: usize = ROUND_COUNT * WIDTH
+pub const MDS_ENTRY_COUNT: usize = WIDTH * WIDTH
+pub const PARAMETER_COUNT: usize = ROUND_CONSTANT_COUNT + MDS_ENTRY_COUNT
+
+const FIELD_SIZE: u32 = 254
+const LIMBS: usize = 20
+const BN254_FR_PRIME: u256 = 21888242871839275222246405745257275088548364400416034343698204186575808495617
+
+struct Grain80 { state: u128, outputs: u32, available: u32 }
+impl Copy for Grain80 {}
+
+struct PoseidonT3Parameters {
+    round_constants: [FieldWords<LIMBS>; ROUND_CONSTANT_COUNT],
+    mds: [FieldWords<LIMBS>; MDS_ENTRY_COUNT],
+}
+impl Copy for PoseidonT3Parameters {}
+
+const fn append_seed_bits(_ seed: u128, _ value: u128, _ width: u32) -> u128 {
+    (seed << (width as u128)) | value
+}
+
+const fn grain_seed() -> Grain80 {
+    let mut packed: u128 = 0
+    packed = append_seed_bits(packed, 1, 2)              // prime field
+    packed = append_seed_bits(packed, 0, 4)              // x^5 S-box
+    packed = append_seed_bits(packed, 254, 12)            // field size
+    packed = append_seed_bits(packed, 3, 12)              // state width
+    packed = append_seed_bits(packed, 8, 10)              // full rounds
+    packed = append_seed_bits(packed, 57, 10)             // partial rounds
+    packed = append_seed_bits(packed, (1 << 30) - 1, 30)  // terminal ones
+
+    // Store sequence index zero in bit zero. This makes a block of future
+    // recurrence bits a directly consumable little-endian bit stream.
+    let mut state: u128 = 0
+    let mut i: u32 = 0
+    while i < 80 {
+        let source = 79 - i
+        let bit = (packed >> (source as u128)) & 1
+        state = state | (bit << (i as u128))
+        i = i + 1
+    }
+    Grain80 { state: state, outputs: 0, available: 0 }
+}
+
+/// Advance by at most 18 bits. Every bit in this block depends only on the
+/// current 80-bit state because the nearest recurrence tap is index 62. The
+/// six shifted words therefore compute 18 ordinary one-bit LFSR steps in one
+/// exact bit-sliced operation.
+const fn grain_advance(_ source: Grain80, _ count: u32) -> Grain80 {
+    let shift = count as u128
+    let mask = (1 << shift) - 1
+    let bits = ((source.state >> 62)
+        ^ (source.state >> 51)
+        ^ (source.state >> 38)
+        ^ (source.state >> 23)
+        ^ (source.state >> 13)
+        ^ source.state) & mask
+    let raw: u32 = bits.downcast_truncate()
+
+    let admitted = self_shrink_9(raw)
+    Grain80 {
+        state: (source.state >> shift) | (bits << ((80 - count) as u128)),
+        outputs: admitted.0,
+        available: admitted.1,
+    }
+}
+
+const fn grain_warm() -> Grain80 {
+    let mut grain = grain_seed()
+    let mut i: u32 = 0
+    while i < 8 {
+        grain = grain_advance(grain, 18)
+        i = i + 1
+    }
+    grain = grain_advance(grain, 16)
+    grain.outputs = 0
+    grain.available = 0
+    grain
+}
+
+/// Read a big-endian bit string, matching `int("".join(bits), 2)` in the
+/// reference generator. The self-shrinker consumes the raw stream in pairs:
+/// a zero selector discards its data bit, while a one selector admits it.
+const fn grain_random_bits(_ source: Grain80, _ count: u32) -> (Grain80, u256) {
+    let mut grain = source
+    let mut value: u256 = 0
+    let mut i: u32 = 0
+    while i < count {
+        if grain.available == 0 {
+            grain = grain_advance(grain, 18)
+        }
+        let remaining = count - i
+        let take = if grain.available < remaining { grain.available } else { remaining }
+        let after = grain.available - take
+        let mask = (1 << take) - 1
+        let batch = (grain.outputs >> after) & mask
+        value = (value << (take as u256)) | (batch as u256)
+        grain.outputs = grain.outputs & ((1 << after) - 1)
+        grain.available = after
+        i = i + take
+    }
+    (grain, value)
+}
+
+const fn grain_field_element(_ source: Grain80) -> (Grain80, u256) {
+    let mut grain = source
+    let mut value: u256 = BN254_FR_PRIME
+    while value >= BN254_FR_PRIME {
+        let next = grain_random_bits(grain, FIELD_SIZE)
+        grain = next.0
+        value = next.1
+    }
+    (grain, value)
+}
+
+const fn montgomery_radix() -> u256 {
+    let mut value: u256 = 1
+    let mut i: u32 = 0
+    let limb_count: u32 = LIMBS.downcast_truncate()
+    while i < LIMB_BITS * limb_count {
+        value = value + value
+        if value >= BN254_FR_PRIME { value = value - BN254_FR_PRIME }
+        i = i + 1
+    }
+    value
+}
+
+const fn montgomery_words(_ plain: u256, _ radix: u256) -> FieldWords<LIMBS> {
+    let mut value = mul_mod_u256(plain, radix, BN254_FR_PRIME)
+    let mut words: FieldWords<LIMBS> = [0; LIMBS]
+    let mut i: usize = 0
+    while i < LIMBS {
+        words[i] = (value & 8191).downcast_truncate()
+        value = value >> (LIMB_BITS as u256)
+        i = i + 1
+    }
+    words
+}
+
+const fn field_pow(_ base: u256, _ exponent: u256) -> u256 {
+    let mut x = base
+    let mut e = exponent
+    let mut result: u256 = 1
+    while e != 0 {
+        if (e & 1) == 1 {
+            result = mul_mod_u256(result, x, BN254_FR_PRIME)
+        }
+        x = mul_mod_u256(x, x, BN254_FR_PRIME)
+        e = e >> 1
+    }
+    result
+}
+
+const fn mds_candidate_valid(_ values: [u256; 6]) -> bool {
+    let mut i: usize = 0
+    while i < 6 {
+        let mut j: usize = i + 1
+        while j < 6 {
+            if values[i] == values[j] { return false }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    let mut row: usize = 0
+    while row < WIDTH {
+        let mut column: usize = 0
+        while column < WIDTH {
+            let mut denominator = values[row] + values[WIDTH + column]
+            if denominator >= BN254_FR_PRIME {
+                denominator = denominator - BN254_FR_PRIME
+            }
+            if denominator == 0 { return false }
+            column = column + 1
+        }
+        row = row + 1
+    }
+    true
+}
+
+const fn grain_mds_values(_ source: Grain80) -> (Grain80, [u256; 6]) {
+    let mut grain = source
+    let mut values: [u256; 6] = [0; 6]
+    let mut valid = false
+    while !valid {
+        let mut i: usize = 0
+        while i < 6 {
+            let next = grain_random_bits(grain, FIELD_SIZE)
+            grain = next.0
+            values[i] = next.1 % BN254_FR_PRIME
+            i = i + 1
+        }
+        valid = mds_candidate_valid(values)
+    }
+    (grain, values)
+}
+
+/// Invert all nine Cauchy denominators with one exponentiation and a reverse
+/// batch-inversion pass.
+const fn derive_mds(_ values: [u256; 6], _ radix: u256) -> [FieldWords<LIMBS>; MDS_ENTRY_COUNT] {
+    let mut denominators: [u256; MDS_ENTRY_COUNT] = [0; MDS_ENTRY_COUNT]
+    let mut row: usize = 0
+    while row < WIDTH {
+        let mut column: usize = 0
+        while column < WIDTH {
+            let index = row * WIDTH + column
+            let mut denominator = values[row] + values[WIDTH + column]
+            if denominator >= BN254_FR_PRIME {
+                denominator = denominator - BN254_FR_PRIME
+            }
+            denominators[index] = denominator
+            column = column + 1
+        }
+        row = row + 1
+    }
+
+    let mut prefixes: [u256; MDS_ENTRY_COUNT] = [0; MDS_ENTRY_COUNT]
+    prefixes[0] = denominators[0]
+    let mut i: usize = 1
+    while i < MDS_ENTRY_COUNT {
+        prefixes[i] = mul_mod_u256(prefixes[i - 1], denominators[i], BN254_FR_PRIME)
+        i = i + 1
+    }
+
+    let mut inverse = field_pow(prefixes[MDS_ENTRY_COUNT - 1], BN254_FR_PRIME - 2)
+    let mut entries: [FieldWords<LIMBS>; MDS_ENTRY_COUNT] = [[0; LIMBS]; MDS_ENTRY_COUNT]
+    let mut remaining = MDS_ENTRY_COUNT
+    while remaining > 0 {
+        let index = remaining - 1
+        let prefix = if index == 0 { 1 } else { prefixes[index - 1] }
+        let value = mul_mod_u256(inverse, prefix, BN254_FR_PRIME)
+        entries[index] = montgomery_words(value, radix)
+        inverse = mul_mod_u256(inverse, denominators[index], BN254_FR_PRIME)
+        remaining = remaining - 1
+    }
+    entries
+}
+
+const fn derive_poseidon_t3_parameters() -> PoseidonT3Parameters {
+    let radix = montgomery_radix()
+    let mut grain = grain_warm()
+    let mut round_constants: [FieldWords<LIMBS>; ROUND_CONSTANT_COUNT] =
+        [[0; LIMBS]; ROUND_CONSTANT_COUNT]
+    let mut i: usize = 0
+    while i < ROUND_CONSTANT_COUNT {
+        let next = grain_field_element(grain)
+        grain = next.0
+        round_constants[i] = montgomery_words(next.1, radix)
+        i = i + 1
+    }
+    let mds = grain_mds_values(grain)
+    PoseidonT3Parameters {
+        round_constants: round_constants,
+        mds: derive_mds(mds.1, radix),
+    }
+}
+
+#[const_eval_limit = 16000000]
+const PARAMETERS: PoseidonT3Parameters = derive_poseidon_t3_parameters()
+
+/// Read one little-endian 13-bit Montgomery word. Parameters 0..194 are round
+/// constants; 195..203 are the row-major 3x3 MDS entries.
+pub fn parameter_word(_ parameter: u32, _ word: u32) -> u32 {
+    if parameter < ROUND_CONSTANT_COUNT.downcast_truncate() {
+        PARAMETERS.round_constants[parameter as usize][word as usize]
+    } else {
+        PARAMETERS.mds[(parameter as usize) - ROUND_CONSTANT_COUNT][word as usize]
+    }
+}

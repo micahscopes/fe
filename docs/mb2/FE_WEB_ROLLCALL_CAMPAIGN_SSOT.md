@@ -180,6 +180,15 @@ Legend:
   separate future `EntersAttractor` claim. Gate:
   `mandelbrot_bounded_claim_oracle.rs` and
   `MANDELBROT_BOUNDED_PROOF_SPEC.md`.
+- [x] Canonical Poseidon BN254 Fr t=3 parameters now derive inside Fe from the
+  typed Grain seed, LFSR, self-shrinking rule, rejection sampling, Cauchy MDS
+  construction, and batch inversion. There is no generated parameter table.
+  The opt-in const budget remains compiler-capped, while ordinary consts retain
+  the one-million-step default. Gate: `poseidon_bn254_derived_oracle.rs`
+  independently reproduces the plain-field constants, exhaustively checks all
+  262,144 self-shrinker inputs, checks all 4,080 derived Montgomery words, and
+  requires zero-import Wasm. This closes parameter provenance, not the pending
+  permutation or trace commitment.
 - [~] Fe now generates nominal `EscapeWitness`, `EscapeTraceRow`, and expanded
   `EscapeAirRow` values. Compiled Wasm matches an independent i64 replay across
   directed, invalid, and 512 deterministic cases. Every signed Q12

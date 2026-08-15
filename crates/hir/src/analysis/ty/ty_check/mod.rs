@@ -533,14 +533,13 @@ pub fn check_const_value<'db>(
         return Vec::new();
     }
 
-    const_body_ctfe_diags(db, body, const_.ty(db), false)
+    const_owner_ctfe_diags(db, BodyOwner::Const(const_), body, false)
 }
 
-/// CTFE-validates an anonymous const body (a top-level `const` initializer or
-/// an inherent associated-const value). Mirrors the validation top-level
-/// consts get, so a body that type-checks but is not const-evaluable (e.g.
-/// `const C: u256 = ordinary_fn()`) is rejected here rather than only when
-/// referenced.
+/// CTFE-validates an anonymous const body, such as an inherent associated-const
+/// value. Top-level consts use `BodyOwner::Const` through the helper below so
+/// item-level evaluation metadata remains visible. In either case, a body that
+/// type-checks but is not const-evaluable is rejected before it is referenced.
 ///
 /// `allow_type_level` must be true for consts on generic impls: their value
 /// (e.g. `256 / BITS`) is legitimately parametric and is fully evaluated per
@@ -554,6 +553,15 @@ pub(crate) fn const_body_ctfe_diags<'db>(
     allow_type_level: bool,
 ) -> Vec<FuncBodyDiag<'db>> {
     let owner = BodyOwner::AnonConstBody { body, expected };
+    const_owner_ctfe_diags(db, owner, body, allow_type_level)
+}
+
+fn const_owner_ctfe_diags<'db>(
+    db: &'db dyn HirAnalysisDb,
+    owner: BodyOwner<'db>,
+    body: Body<'db>,
+    allow_type_level: bool,
+) -> Vec<FuncBodyDiag<'db>> {
     let mut diags = Vec::new();
     match eval_body_owner_const(db, owner, Vec::new()) {
         Ok(value) => {

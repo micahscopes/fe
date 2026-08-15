@@ -510,7 +510,12 @@ impl<'db> AttrArgValue<'db> {
                 Some(Self::Ident(IdentId::lower_token(ctxt, token)))
             }
             Some(ast::AttrArgValueKind::Lit(lit)) => Some(Self::Lit(LitKind::lower_ast(ctxt, lit))),
-            Some(ast::AttrArgValueKind::Expr(_)) => None,
+            Some(ast::AttrArgValueKind::Expr(expr)) => match expr.kind() {
+                ast::ExprKind::Lit(lit) => lit
+                    .lit()
+                    .map(|lit| Self::Lit(LitKind::lower_ast(ctxt, lit))),
+                _ => None,
+            },
             None => None,
         }
     }

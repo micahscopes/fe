@@ -1,0 +1,13 @@
+//! Thin Wasm gate for the Fe-authored canonical Poseidon derivation.
+
+use poseidon_bn254::parameter_word
+use poseidon_bn254::bitpack::self_shrink_9
+
+pub fn derived_parameter_word(parameter: u32, word: u32) -> u32 {
+    parameter_word(parameter, word)
+}
+
+pub fn derived_self_shrink_9(raw: u32) -> u32 {
+    let admitted = self_shrink_9(raw)
+    admitted.0 | (admitted.1 << 16)
+}
