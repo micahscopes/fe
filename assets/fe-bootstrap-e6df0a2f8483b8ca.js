@@ -231,6 +231,7 @@ function pointerPhase(type) {
     case "pointermove": return 1;
     case "pointerup": return 2;
     case "pointercancel": return 3;
+    case "lostpointercapture": return 4;
     default: throw new TypeError(`unsupported PointerEvent type ${String(type)}`);
   }
 }
@@ -253,7 +254,14 @@ function wheelDeltaMode(deltaMode) {
   }
 }
 
-function oneComponentEvent(resolveComponent, types, signal, decode, label) {
+function oneComponentEvent(
+  resolveComponent,
+  types,
+  signal,
+  decode,
+  label,
+  onAbortCleanup = () => {},
+) {
   const component = resolveComponent();
   if (!component || typeof component.addEventListener !== "function"
       || typeof component.removeEventListener !== "function") {
@@ -261,6 +269,7 @@ function oneComponentEvent(resolveComponent, types, signal, decode, label) {
   }
   return new Promise((resolve, reject) => {
     let settled = false;
+    let settling = false;
     const cleanup = () => {
       for (const type of types) component.removeEventListener(type, onEvent);
       signal?.removeEventListener("abort", onAbort);
@@ -272,9 +281,10 @@ function oneComponentEvent(resolveComponent, types, signal, decode, label) {
       complete(value);
     };
     const onEvent = event => {
-      if (!eventBelongsToComponent(event, component)) return;
+      if (settled || settling || !eventBelongsToComponent(event, component)) return;
+      settling = true;
       try {
-        finish(resolve, decode(event));
+        finish(resolve, decode(event, component));
       } catch (error) {
         finish(reject, error);
       }
@@ -283,10 +293,37 @@ function oneComponentEvent(resolveComponent, types, signal, decode, label) {
       const error = new Error(`${label} observation was cancelled`);
       error.name = "AbortError";
       finish(reject, error);
+      try {
+        onAbortCleanup(component);
+      } catch {
+        // Cancellation cleanup is best-effort. The affine Fe operation still
+        // receives its one structured cancellation outcome.
+      }
     };
     for (const type of types) component.addEventListener(type, onEvent, { passive: true });
     signal?.addEventListener("abort", onAbort, { once: true });
     if (signal?.aborted) onAbort();
+  });
+}
+
+function decodePointerEvent(event) {
+  const pressure = finiteEventNumber(event.pressure, "PointerEvent.pressure");
+  if (pressure < 0 || pressure > 1) {
+    throw new TypeError("PointerEvent.pressure must be within [0, 1]");
+  }
+  if (typeof event.isPrimary !== "boolean") {
+    throw new TypeError("PointerEvent.isPrimary must be boolean");
+  }
+  return Object.freeze({
+    phase: pointerPhase(event.type),
+    device: pointerDevice(event.pointerType),
+    pointerId: eventU32(event.pointerId, "PointerEvent.pointerId"),
+    clientX: finiteEventNumber(event.clientX, "PointerEvent.clientX"),
+    clientY: finiteEventNumber(event.clientY, "PointerEvent.clientY"),
+    buttons: eventU32(event.buttons, "PointerEvent.buttons"),
+    primary: event.isPrimary,
+    pressure,
+    timestamp: finiteEventNumber(event.timeStamp, "PointerEvent.timeStamp"),
   });
 }
 
@@ -299,33 +336,61 @@ export function createComponentEventSource(resolveComponent) {
   if (typeof resolveComponent !== "function") {
     throw new TypeError("component event source requires a component resolver");
   }
+  let capturedPointerId = null;
+
+  const releaseCapturedPointer = component => {
+    if (capturedPointerId === null) return;
+    const pointerId = capturedPointerId;
+    capturedPointerId = null;
+    if (typeof component.hasPointerCapture === "function"
+        && !component.hasPointerCapture(pointerId)) return;
+    if (typeof component.releasePointerCapture !== "function") {
+      throw new Error("captured component pointer source requires releasePointerCapture");
+    }
+    component.releasePointerCapture(pointerId);
+  };
+
   return Object.freeze({
     pointer(signal) {
       return oneComponentEvent(
         resolveComponent,
         ["pointerdown", "pointermove", "pointerup", "pointercancel"],
         signal,
-        event => {
-          const pressure = finiteEventNumber(event.pressure, "PointerEvent.pressure");
-          if (pressure < 0 || pressure > 1) {
-            throw new TypeError("PointerEvent.pressure must be within [0, 1]");
-          }
-          if (typeof event.isPrimary !== "boolean") {
-            throw new TypeError("PointerEvent.isPrimary must be boolean");
-          }
-          return Object.freeze({
-            phase: pointerPhase(event.type),
-            device: pointerDevice(event.pointerType),
-            pointerId: eventU32(event.pointerId, "PointerEvent.pointerId"),
-            clientX: finiteEventNumber(event.clientX, "PointerEvent.clientX"),
-            clientY: finiteEventNumber(event.clientY, "PointerEvent.clientY"),
-            buttons: eventU32(event.buttons, "PointerEvent.buttons"),
-            primary: event.isPrimary,
-            pressure,
-            timestamp: finiteEventNumber(event.timeStamp, "PointerEvent.timeStamp"),
-          });
-        },
+        decodePointerEvent,
         "component pointer",
+      );
+    },
+    capturedPointer(signal) {
+      return oneComponentEvent(
+        resolveComponent,
+        [
+          "pointerdown",
+          "pointermove",
+          "pointerup",
+          "pointercancel",
+          "lostpointercapture",
+        ],
+        signal,
+        (event, component) => {
+          const sample = decodePointerEvent(event);
+          if (event.type === "pointerdown" && sample.primary
+              && capturedPointerId === null) {
+            if (typeof component.setPointerCapture !== "function") {
+              throw new Error("captured component pointer source requires setPointerCapture");
+            }
+            component.setPointerCapture(sample.pointerId);
+            capturedPointerId = sample.pointerId;
+          } else if (sample.pointerId === capturedPointerId
+              && event.type === "lostpointercapture") {
+            capturedPointerId = null;
+          } else if (sample.pointerId === capturedPointerId
+              && (event.type === "pointerup" || event.type === "pointercancel")) {
+            releaseCapturedPointer(component);
+          }
+          return sample;
+        },
+        "captured component pointer",
+        releaseCapturedPointer,
       );
     },
     wheel(signal) {

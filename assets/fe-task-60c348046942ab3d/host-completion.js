@@ -119,8 +119,11 @@ export function createHostCompletionBroker(options = {}) {
   if (componentEvents !== undefined && (!componentEvents
       || typeof componentEvents !== "object"
       || typeof componentEvents.pointer !== "function"
+      || typeof componentEvents.capturedPointer !== "function"
       || typeof componentEvents.wheel !== "function")) {
-    throw new TypeError("host completion component hooks must provide pointer and wheel");
+    throw new TypeError(
+      "host completion component hooks must provide pointer, capturedPointer, and wheel",
+    );
   }
   if (actorEvents !== undefined && (!actorEvents
       || typeof actorEvents !== "object"
@@ -341,6 +344,32 @@ export function createHostCompletionBroker(options = {}) {
     );
   };
 
+  const pointerResultLanes = value => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new TypeError("component pointer result must be an object");
+    }
+    const phase = u32(value.phase, "pointer phase");
+    const device = u32(value.device, "pointer device");
+    const pressure = finiteF32(value.pressure, "pointer pressure");
+    if (phase > 4 || device > 3 || pressure > 1) {
+      throw new TypeError("component pointer result is outside its declared Fe vocabulary");
+    }
+    if (typeof value.primary !== "boolean") {
+      throw new TypeError("pointer primary flag must be boolean");
+    }
+    return [
+      phase,
+      device,
+      u32(value.pointerId, "pointer identity"),
+      signedF32(value.clientX, "pointer client x"),
+      signedF32(value.clientY, "pointer client y"),
+      u32(value.buttons, "pointer buttons"),
+      value.primary,
+      pressure,
+      finiteF32(value.timestamp, "pointer timestamp"),
+    ];
+  };
+
   const beginPointer = () => {
     if (componentEvents === undefined) {
       throw new Error(
@@ -351,31 +380,21 @@ export function createHostCompletionBroker(options = {}) {
       "component-pointer",
       signal => componentEvents.pointer(signal),
       9,
-      value => {
-        if (!value || typeof value !== "object" || Array.isArray(value)) {
-          throw new TypeError("component pointer result must be an object");
-        }
-        const phase = u32(value.phase, "pointer phase");
-        const device = u32(value.device, "pointer device");
-        const pressure = finiteF32(value.pressure, "pointer pressure");
-        if (phase > 3 || device > 3 || pressure > 1) {
-          throw new TypeError("component pointer result is outside its declared Fe vocabulary");
-        }
-        if (typeof value.primary !== "boolean") {
-          throw new TypeError("pointer primary flag must be boolean");
-        }
-        return [
-          phase,
-          device,
-          u32(value.pointerId, "pointer identity"),
-          signedF32(value.clientX, "pointer client x"),
-          signedF32(value.clientY, "pointer client y"),
-          u32(value.buttons, "pointer buttons"),
-          value.primary,
-          pressure,
-          finiteF32(value.timestamp, "pointer timestamp"),
-        ];
-      },
+      pointerResultLanes,
+    );
+  };
+
+  const beginCapturedPointer = () => {
+    if (componentEvents === undefined) {
+      throw new Error(
+        "fe:web-component-events::captured_pointer_begin requires a component capability",
+      );
+    }
+    return beginBrowserOperation(
+      "component-captured-pointer",
+      signal => componentEvents.capturedPointer(signal),
+      9,
+      pointerResultLanes,
     );
   };
 
@@ -732,6 +751,7 @@ export function createHostCompletionBroker(options = {}) {
   });
   const componentEventImports = Object.freeze({
     pointer_begin: beginPointer,
+    captured_pointer_begin: beginCapturedPointer,
     wheel_begin: beginWheel,
   });
   const actorImports = Object.freeze({
