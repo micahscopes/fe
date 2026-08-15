@@ -862,6 +862,110 @@ if (broker.activeCount() !== 0 || broker.cancelAll() !== 0) throw new Error("bro
 }
 
 #[test]
+fn fe_message_port_event_source_resumes_from_a_real_port() {
+    const SOURCE: &str = r#"
+use std::reactive::{Event, EventSource, Stream}
+use std::web::message_port_events::{
+    BrowserMessagePortEvents,
+    MessagePortMessage,
+}
+
+pub fn receive_message() -> u64 {
+    with (EventSource<MessagePortMessage> = BrowserMessagePortEvents::new()) {
+        let stream: Stream<MessagePortMessage> = Stream::new()
+        let subscription = stream.subscribe()
+        let next = stream.next_ready(subscription)
+        match next.1 {
+            Event::Occurrence(message,) => message.value
+            Event::Absent => 1
+            Event::End => 2
+            Event::Failure(_) => 3
+            Event::Cancelled => 4
+        }
+    }
+}
+"#;
+    if !std::process::Command::new("bun")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        return;
+    }
+
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///message_port_event_source.fe").unwrap();
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(SOURCE.to_owned()));
+    let file = db.workspace().get(&db, &url).unwrap();
+    let top_mod = db.top_mod(file);
+    let package =
+        mir::build_wasm_runtime_package_for_entry(&db, top_mod, "receive_message").unwrap();
+    let adapters = materialized_task_adapters(&db, &package).unwrap();
+    assert_eq!(adapters.len(), 1);
+    let adapter = emit_materialized_task_adapter_js(&adapters, "./materialized-task.js")
+        .unwrap()
+        .expect("MessagePort EventSource emits a browser task adapter");
+    let wasm =
+        compile_runtime_package_wasm_with_options(&db, &package, WasmCompileOptions::default())
+            .unwrap()
+            .bytes;
+    wasmparser::validate(&wasm).unwrap();
+    assert!(
+        func_imports(&wasm)
+            .contains(&("fe:web-message-port".to_owned(), "message_begin".to_owned(),)),
+        "typed MessagePort source must retain its fixed host import"
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    let wasm_path = directory.path().join("message-port.wasm");
+    let task_runtime_path = directory.path().join("materialized-task.js");
+    let host_runtime_path = directory.path().join("host-completion.js");
+    let adapter_path = directory.path().join("task-adapter.mjs");
+    let test_path = directory.path().join("message-port-browser.mjs");
+    std::fs::write(&wasm_path, wasm).unwrap();
+    std::fs::write(&task_runtime_path, MATERIALIZED_TASK_RUNTIME_JS).unwrap();
+    std::fs::write(&host_runtime_path, HOST_COMPLETION_RUNTIME_JS).unwrap();
+    std::fs::write(&adapter_path, adapter).unwrap();
+    let script = format!(
+        r#"
+import {{ createMaterializedTaskRegistry }} from {adapter_url:?};
+import {{ createHostCompletionBroker, createMessagePortEventSource }} from {host_runtime_url:?};
+const channel = new MessageChannel();
+const messages = createMessagePortEventSource(channel.port1);
+const broker = createHostCompletionBroker({{ messagePortEvents: messages }});
+const bytes = await Bun.file({wasm_path:?}).arrayBuffer();
+const {{ instance }} = await WebAssembly.instantiate(bytes, broker.imports);
+const task = createMaterializedTaskRegistry(instance.exports).receive_message;
+const receiving = broker.run(task, []);
+channel.port2.postMessage(0xe806n);
+const output = await receiving;
+if (output.length !== 1 || output[0] !== 0xe806n) {{
+  throw new Error(`Fe MessagePort event policy was bypassed: ${{String(output)}}`);
+}}
+if (broker.activeCount() !== 0) throw new Error("MessagePort completion leaked a broker slot");
+messages.close();
+channel.port2.close();
+"#,
+        adapter_url = format!("file://{}", adapter_path.display()),
+        host_runtime_url = format!("file://{}", host_runtime_path.display()),
+        wasm_path = wasm_path.display().to_string(),
+    );
+    std::fs::write(&test_path, script).unwrap();
+    let output = std::process::Command::new("bun")
+        .arg("run")
+        .arg(&test_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "Fe MessagePort EventSource capstone failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
 fn fe_select_preserves_a_heterogeneous_loser_across_repeated_source_wins() {
     const SOURCE: &str = r#"
 use core::actor::ActorSink

@@ -283,7 +283,7 @@ CompileVectorScalarF32<GaProgram<
 
 `builder.provider_ty()` exposes that configured type to the Fe provider, and
 the exact type participates in the expansion cache key. Runtime `Operands`
-contains only packed coefficients—no `GaProgram` marker, manifest, numeric
+contains only packed coefficients, with no `GaProgram` marker, manifest, numeric
 operator ID, or Rust-generated plan.
 
 `ga_expr` retains the numeric migration forms
@@ -311,8 +311,8 @@ type Point = Vector<PointCoefficients>
 ```
 
 FCO derives dimension, vector support, runtime packing, diagonal signs, and
-each symmetric null pairing from those records. Pair marker identity—not
-declaration proximity or matching numeric suffixes—connects `Null<P>` to
+each symmetric null pairing from those records. Pair marker identity, not
+declaration proximity or matching numeric suffixes, connects `Null<P>` to
 `Prime<P>`, and each marker must occur exactly once on each side. For a fully
 explicit sparse symmetric form, `SymmetricMatrixMetric<Basis, Matrix>` aligns
 named row/cell records to a `BasisVector` record and accepts exact
@@ -553,7 +553,7 @@ Commutative child sorting is policy-dependent: it is permitted for exact
 domains and `AlgebraicBalanced`, but not as a floating-point transformation in
 `Strict`.
 
-The hash-consing implementation should be ordinary bounded Fe CTFE data—a
+The hash-consing implementation should be ordinary bounded Fe CTFE data: a
 fixed node arena and deterministic open-addressed map or sorted lookup. It must
 record capacity, collisions/probes, and failed insertions. FCO's current
 `builder.share` is the emission primitive, not an automatic CSE pass.
@@ -737,21 +737,21 @@ metric square and prove the semantic gates fail.
 
 ## Implementation milestones
 
-### G0 — existing algebra foundations (complete)
+### G0: existing algebra foundations (complete)
 
 - bounded sparse supports and diagonal product/grade operations;
 - sparse plan witnesses and provider-emitted straight-line arithmetic;
 - dense independent recurrences and CGA/QCGA examples; and
 - explicit FCO shared-expression emission.
 
-### G1 — typed expression/support layer (first slice complete)
+### G1: typed expression/support layer (first slice complete)
 
 - static metric/expression/numeric-policy vocabulary;
 - compositional support for the core operators;
 - exact typed term vocabulary; and
 - one executable CTFE/FCO/Wasm/WGSL vertical slice with independent semantics.
 
-### G2 — general exact binary operators (bounded strict slice complete)
+### G2: general exact binary operators (bounded strict slice complete)
 
 - derive term plans for arbitrary sparse leaves under `Sum`, `Difference`,
   `Neg`, `Geometric`, `Outer`, contractions, grade, reverse, and dual;
@@ -764,7 +764,7 @@ oracles, including degenerate metrics and adversarial floating values. The
 current substitution suite covers the full operator vocabulary at dimensions
 2 and 3 with strict bit parity and no runtime planning in WGSL.
 
-### G3 — arbitrary finite expression trees (bounded strict slice complete)
+### G3: arbitrary finite expression trees (bounded strict slice complete)
 
 - recursively interpret any ground composition of supported nodes (complete
   for `Strict` inside the five-generator envelope);
@@ -779,7 +779,7 @@ alias/input record and no provider/compiler changes. Remaining acceptance is
 `AlgebraicBalanced`, explicit capacity/path diagnostics, and generated-tree
 property coverage.
 
-### G4 — shared DAG and scheduler
+### G4: shared DAG and scheduler
 
 - bounded Fe CTFE node arena and deterministic hash-consing;
 - policy-aware reduction construction;
@@ -791,7 +791,7 @@ Acceptance: independently repeated leaves/products load/compute once, semantic
 gates remain green, and adversarial expressions stay within published compile
 and register-pressure budgets.
 
-### G5 — gallery integration
+### G5: gallery integration
 
 - replace bespoke PGA/CGA/QCGA plan providers with the common expression
   compiler incrementally;
@@ -803,14 +803,14 @@ and register-pressure budgets.
 Acceptance: each migrated demo deletes more bespoke planning code than it
 adds, and application behavior remains Fe-owned.
 
-### G6 — broader metrics and scalar domains
+### G6: broader metrics and scalar domains
 
 - general symmetric metric expansion with exact finite planning;
 - exact rational/modular coefficient domains;
 - orientation-safe metric/Poincare duals; and
 - capacity-scaled support storage beyond dimension five.
 
-### G7 — optional workgroup scheduler
+### G7: optional workgroup scheduler
 
 - compute-stage typed entry and invocation identity;
 - workgroup storage and barrier lowering in Fe/WebGPU;

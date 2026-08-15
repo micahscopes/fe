@@ -2,8 +2,10 @@
 
 Status: active direction
 
-Origin: honesty audit of Claude Code session
-`e806786e-dff4-43c1-b25f-849ba82a8a02` and the subsequent Codex gallery work.
+Current authoritative burn-down:
+[`docs/mb2/FE_WEB_ROLLCALL_CAMPAIGN_SSOT.md`](docs/mb2/FE_WEB_ROLLCALL_CAMPAIGN_SSOT.md).
+This document remains the design record, evidence narrative, and Definition of
+done; do not derive a second master checklist from its historical ledger.
 
 ## Execution ledger (2026-08-12)
 
@@ -760,7 +762,7 @@ Origin: honesty audit of Claude Code session
   computes exact CFG liveness at every direct suspension point. An independent
   Fe-source oracle proves that a used parameter enters the frame while a dead
   sibling does not. The executor also now delivers `Cancelled` to the Fe task
-  body before terminal notification—closing a real semantic hole where the
+  body before terminal notification, closing a real semantic hole where the
   table became cancelled without the continuation observing the typed outcome.
   Success/failure/cancellation, exact-once notification, dead-value exclusion,
   and nominal recognition are semantic tests, not generated-byte comparisons.
@@ -836,7 +838,7 @@ Origin: honesty audit of Claude Code session
   derives its resumable MIR machine, and emits fixed start/resume adapters.
   HTML publication writes one content-addressed three-module package (generated
   adapter, fixed materialized-task runtime, fixed completion broker) and only a
-  standard executable-module reference on the component script—there is no
+  standard executable-module reference on the component script; there is no
   task JSON, hand-authored entry name, numeric task ID, or JavaScript task
   inventory. The deployment verifier pins the package digest, exact file set,
   and fixed runtime bytes. The fixed component host enumerates the generated
@@ -1202,8 +1204,8 @@ Origin: honesty audit of Claude Code session
   broker tests, 11 bootstrap tests, and all 33 HTML precompiler tests. A fresh
   optimized publication compiled 12 render bundles in 129.475 seconds and
   verified 14 Fe modules / 73 deployment files. Its real Chromium gallery tape
-  observes the exact resident sequence—connection, progress 1 through 12, then
-  completion without failure—and the independent TodoMVC Chromium tape also
+  observes the exact resident sequence: connection, progress 1 through 12, then
+  completion without failure. The independent TodoMVC Chromium tape also
   passes. Pointer/wheel/device-loss/MessagePort sources, cross-actor and
   Worker/GPU sinks, and the fully combined resident gallery actor remain open.
 - QCGA Pencil now exposes two Fe-owned display modes through the general
@@ -1427,8 +1429,8 @@ Origin: honesty audit of Claude Code session
   public Fe implementation over nominal lifecycle event/state/step records;
   the generated fixed `fe_surface_recovery_v1` wrapper validates host enum
   facts, retains the two supervision fields in private Wasm globals, and
-  returns only the selected action. All twelve canonical GPU actors—including
-  the two pure compute/render pass graphs without a control transition—select
+  returns only the selected action. All twelve canonical GPU actors, including
+  the two pure compute/render pass graphs without a control transition, select
   that policy. Provenance explicitly attributes device-recovery policy to Fe;
   no manifest field, policy name, per-demo wrapper, or host attempt constant
   exists.
@@ -1461,8 +1463,8 @@ Origin: honesty audit of Claude Code session
   unavailable adapter.
 - Shared GPU completion is now a real affine Fe browser source rather than only
   a surface-scheduler enum. `BrowserGpuQueueIdleEvents` yields typed
-  `GpuQueueIdle` facts—device generation, monotonic observation sequence, and
-  explicit bounded-history loss—through the same `Pending`/`Suspend` and
+  `GpuQueueIdle` facts (device generation, monotonic observation sequence, and
+  explicit bounded-history loss) through the same `Pending`/`Suspend` and
   `EventSource` rail as visibility, animation frames, pointer capture, and
   device lifecycle. The abstraction deliberately exposes no raw `GPUQueue`,
   numeric submission identity, or application callback: an occurrence means
@@ -1488,6 +1490,22 @@ Origin: honesty audit of Claude Code session
   in 395.058 seconds, verifies 15 Fe modules / 79 deployment files, and passes
   the combined real-Chromium gallery / SourceInspector / Event Studio tape on
   the adapter-unavailable path.
+- The first standards `MessagePort` source is now typed Fe vocabulary rather
+  than an actor-envelope convention. `BrowserMessagePortEvents` suspends on a
+  fixed `fe:web-message-port::message_begin` capability and delivers
+  `MessagePortMessage { sequence, missed, value: u64 }` through the ordinary
+  affine `EventSource` rail. The intentionally narrow `u64` payload proves the
+  transport without blessing JavaScript's unrestricted structured-clone graph
+  or introducing JSON; richer messages must use compiler-derived canonical
+  value layouts. The fixed adapter owns one opaque port, a 64-value mechanics
+  window, exact listener/abort/close cleanup, and type rejection; Fe owns
+  subscription state, loss response, buffering/routing policy, and task
+  cancellation. Independent broker tests cover order, replay gaps, invalid
+  values, cancellation, and opaque Wasm continuation delivery. A real compiled
+  Fe task additionally suspends on the import and resumes from a real
+  `MessageChannel`. Worker/spawn placement must still supply this opaque
+  capability through a structured Fe scope; no gallery application acquires a
+  port through JavaScript glue.
 
 This ledger records achieved evidence, not a relaxation of the phases or the
 Definition of done below.
@@ -1548,10 +1566,12 @@ general interface rather than open a parallel demo-specific lane.
 The lifecycle/value, QCGA interaction, shared DE scene, first general actor
 effects, true producer/consumer composition, rich aggregate payloads, merged
 sources, deterministic time, switch/latest, and bounded sharing described
-above are substantially landed. GPU completion and Fe-owned shared-device
-recovery policy are now landed. The current vertical slice is the two remaining
-browser sources—MessagePort and fetch—whose completion closes this multiplying
-control axis before returning to shared interaction and GPU/GA generalization.
+above are substantially landed. GPU completion, typed MessagePort observation,
+and Fe-owned shared-device recovery are now landed. The current vertical slice
+is the remaining fetch source. Worker/spawn placement and rich compiler-derived
+port payloads remain their own structured-scope work. Completing fetch closes
+this multiplying control axis before returning to shared interaction and
+GPU/GA generalization.
 
 ## Ingot utility maturity map (2026-08-14 audit)
 
@@ -1582,7 +1602,7 @@ layers, not beside reusable application utilities.
 | --- | --- | --- | --- |
 | Runtime control | Typed `Pending`, `TaskOutcome`, nominal `Suspend`, generated continuation states, resident/scoped actors, typed actor sinks, timer suspension | One `std::runtime` facade; reusable source-to-actor forwarding; explicit scope/supervision policies | ZIO-like typed environment/exit/scope in Fe without a boxed monadic runtime; compiler-derived task handles and exactly-once structured cancellation |
 | Reactive | Typed `Event`, affine `Subscription`, effect-backed `EventSource`/`AsyncEventSource`, zero-state `Stream`, `next_ready`, pure event map/filter/hold, executable `Scan`, `BoundedQueue`, `Latest`, `VirtualTime`, leading `Throttle`, trailing `Debounce`, `SwitchLatest`, bounded `SharedReplay`, non-destructive nested heterogeneous `Select`, two-source merged buffering, and exact Event Studio browser evidence | Lift the proven policies into one stream-graph surface; fuse effectful interpreters and structured shared cancellation | Static typed stream graphs with map/filter/scan/merge/switch/sample/throttle/debounce/share/replay fused by FCO into continuation machines |
-| Browser sources | Render surfaces, visibility, animation frames, viewport, raw Pointer Events, Fe-selected primary-pointer capture, wheel, the actual shared WebGPU device lifecycle and queue-idle completion stream, and Fe-owned shared-device recovery; host listeners are scoped and demo-blind | MessagePort and fetch sources; move render surfaces onto the same capture/coordinate vocabulary | Standards-derived adapters generated from typed capabilities, with Fe owning combination, retry, lifetime, and gesture policy |
+| Browser sources | Render surfaces, visibility, animation frames, viewport, raw Pointer Events, Fe-selected primary-pointer capture, wheel, typed `MessagePort<u64>` observations, the actual shared WebGPU device lifecycle and queue-idle completion stream, and Fe-owned shared-device recovery; host listeners are scoped and demo-blind | Fetch sources, Worker/spawn attachment for opaque ports, compiler-derived rich message payloads; move render surfaces onto the same capture/coordinate vocabulary | Standards-derived adapters generated from typed capabilities, with Fe owning combination, retry, lifetime, and gesture policy |
 | Components/pages | FCO-derived action/part identity, resident reducers, keyed repeats, Fe page composition, TodoMVC/Event Studio/SourceInspector | Fe HTML quasiquotes lowering to existing component values; typed custom-element `attr:`/`prop:`/`on:`/slot composition; split browser resource effects from DOM projection; seal raw part minting and patch buffers | Compiler derives action sums, opaque target identities, event dispatch, dependencies, initial DOM, minimal projection, tasks, and resources from state/handlers/view; no JavaScript template runtime or component registry |
 | Surface interaction | FCO-derived parameter binding and cursor-aware Fe transitions; QCGA picking/drag/solve is Fe | Shared `PointerTracker`, `PanZoom`, `Orbit`, `PickDrag`, `RangeControl`, coordinate-space types, and capture requests | One typed interaction algebra consumed by every 2D/3D surface with no host gesture state |
 | Scheduling/render | Latest-per-frame, sample-latest, throttle, debounce, accumulate/drop policies, responsive backing, typed pass graphs | Parameterize policies; split `std::webgpu` into program/surface/schedule/quality/resource/compute/device; shared marcher/material packages | Typed kernel values derive identity, layouts, grids, capabilities, and launch; real shared-memory/barrier/subgroup lowering with portable fallbacks |
@@ -1783,10 +1803,11 @@ and transitional component opcodes are still composting targets.
   still narrow and mostly pure vocabulary.
 - The safe browser surface now exposes typed asynchronous event sources through
   runtime-control effects, including a distinct Fe-selected scoped pointer-
-  capture source, the actual shared WebGPU device lifecycle, queue-idle GPU
-  completion, and actor-level Fe-owned recovery policy. MessagePort, fetch,
-  render-surface capture migration, and richer structured resource effects
-  remain open.
+  capture source, typed `MessagePort<u64>` observations, the actual shared
+  WebGPU device lifecycle, queue-idle GPU completion, and actor-level Fe-owned
+  recovery policy. Fetch, Worker/spawn port placement, rich canonical message
+  values, render-surface capture migration, and richer structured resource
+  effects remain open.
 - The render manifest is compiler-generated rather than hand-authored, but it
   is still a semantic runtime protocol: bootstrap/render code interprets its
   passes, resources, controls, and artifact paths, and Fe page code still
@@ -2028,9 +2049,10 @@ and tested in Fe; JavaScript merely supplies frame/GPU-completion facts.
 5. Complete browser `EventSource` coverage. Landed: compiler-correlated render
    surfaces, visibility, animation frame, aggregate viewport resize,
    component-scoped Pointer Events (mouse/pen/touch), Fe-selected scoped
-   primary-pointer capture, wheel, the actual shared-device lifecycle, and
-   queue-idle GPU completion, plus Fe-owned device recovery. Remaining:
-   MessagePort and fetch streams.
+   primary-pointer capture, wheel, typed `MessagePort<u64>` observations, the
+   actual shared-device lifecycle, and queue-idle GPU completion, plus Fe-owned
+   device recovery. Remaining: fetch streams; Worker/spawn port placement and
+   rich canonical port payloads remain a separate scope/placement slice.
 6. Re-orient `std::reactive::{Event, Stream, Signal}` around runtime control
    effects before putting it on the real gallery path. Values and combinators
    remain pure Fe descriptions/reducers; subscribe, await-next, yield, wake,
@@ -2073,8 +2095,9 @@ families, scoped cancellation, and paced timer/frame task are landed with
 semantic and browser gates. Event Studio proves scan-based forwarding and real
 concurrent merged Pointer Event/wheel buffering through nested non-destructive
 heterogeneous `Select`; its timer retains a separate deterministic `Latest`
-probe. Next are MessagePort and fetch sources, followed by the unified
-stream-graph authoring layer. The
+probe. Typed `MessagePort<u64>` observation is now landed with a real compiled
+Fe/`MessageChannel` oracle. Next is fetch, followed by the unified stream-graph
+authoring layer. The
 four-slot queue is an honest current-Wasm envelope; general nested-array/
 target-sized aggregate scalarization must recover the ideal const-generic
 implementation.

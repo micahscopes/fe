@@ -1,0 +1,70 @@
+//! Typed `MessagePort` deliveries over Fe's runtime-control/reactive rail.
+//!
+//! This first transport value is deliberately smaller than JavaScript's
+//! unrestricted structured-clone universe: one `u64` application value plus
+//! ordering and honest bounded-history loss. It is enough to prove attachment,
+//! suspension, cancellation, and backpressure without introducing a JSON
+//! envelope or a host-authored actor protocol. Rich payloads belong on the
+//! compiler-derived canonical-value boundary, not in handwritten JavaScript.
+
+use core::default::Default
+use core::pending::{Suspend, TaskOutcome}
+use ingot::wasm::WasmBackend
+use super::super::host::Resumable
+use super::super::reactive::{Cancelled, Event, EventSource, Subscription}
+use raw::message_begin as raw_message_begin
+
+/// One standards `message` delivery.
+///
+/// `sequence` orders values observed by this port attachment. `missed` is the
+/// number of values evicted from the fixed host's finite replay window between
+/// this subscription's observations, so Fe can choose its own loss policy.
+#[derive(Default)]
+pub struct MessagePortMessage {
+    pub sequence: u32,
+    pub missed: u32,
+    pub value: u64,
+}
+
+impl Copy for MessagePortMessage {}
+
+/// Browser realization selected for a scoped task that has been given a
+/// standards `MessagePort` capability by its placement/scope.
+pub struct BrowserMessagePortEvents {}
+
+impl BrowserMessagePortEvents {
+    pub fn new() -> Self { Self {} }
+}
+
+impl EventSource<MessagePortMessage> for BrowserMessagePortEvents {
+    fn subscribe(mut self) -> Subscription<MessagePortMessage> {
+        Subscription::new(initial: MessagePortMessage::default())
+    }
+
+    fn next(mut self, _ subscription: own Subscription<MessagePortMessage>) -> (
+        Subscription<MessagePortMessage>,
+        Event<MessagePortMessage>,
+    ) {
+        let seen = subscription.has_observation()
+        let previous_sequence = if seen { subscription.observation().sequence } else { 0 }
+        let successor = subscription.advance().0
+        let outcome: TaskOutcome<u32, MessagePortMessage> = <Resumable as Suspend<
+            WasmBackend,
+            u32,
+        >>::suspend(Resumable {}, raw_message_begin(seen, previous_sequence))
+        match outcome {
+            TaskOutcome::Success(message,) => {
+                (
+                    successor.with_observation(value: message),
+                    Event::occurrence(value: message),
+                )
+            },
+            TaskOutcome::Failure(error,) => (successor, Event::failure(error: error)),
+            TaskOutcome::Cancelled => (successor, Event::cancelled()),
+        }
+    }
+
+    fn cancel(mut self, _ subscription: own Subscription<MessagePortMessage>) -> Cancelled {
+        Cancelled { consumed: subscription.cursor() }
+    }
+}

@@ -18,6 +18,7 @@ import {
 const MAX_U32 = 0xffff_ffff;
 const MAX_U64 = (1n << 64n) - 1n;
 const MAX_TIMER_CHUNK_MS = 0x7fff_ffffn;
+const MESSAGE_PORT_REPLAY_LIMIT = 64;
 
 export class FeTaskCancelled extends Error {
   constructor() {
@@ -85,6 +86,136 @@ function abortSignal(value) {
   return value;
 }
 
+/**
+ * Fixed standards adapter for one typed MessagePort value stream.
+ *
+ * The port remains an opaque browser authority. This adapter accepts only the
+ * first honest canonical payload supported by the Fe surface (`u64`), retains
+ * a finite replay window, and reports any eviction as `missed`. It does not
+ * decode an actor envelope, choose a queue policy, or route application work.
+ * Rich structured-clone values will use compiler-derived canonical layouts
+ * rather than a handwritten JSON/message schema.
+ */
+export function createMessagePortEventSource(port) {
+  if (!port || typeof port !== "object"
+      || typeof port.addEventListener !== "function"
+      || typeof port.removeEventListener !== "function"
+      || typeof port.postMessage !== "function") {
+    throw new TypeError("MessagePort event source requires a MessagePort-like object");
+  }
+
+  let sequence = 0;
+  let terminal;
+  const history = [];
+  const pending = new Set();
+
+  const abortError = message => {
+    const error = new Error(message);
+    error.name = "AbortError";
+    return error;
+  };
+  const rejectAll = error => {
+    if (terminal !== undefined) return;
+    terminal = error;
+    port.removeEventListener("message", onMessage);
+    port.removeEventListener("messageerror", onMessageError);
+    port.close?.();
+    for (const observation of [...pending]) {
+      pending.delete(observation);
+      observation.cleanup();
+      observation.reject(error);
+    }
+  };
+  const candidate = (seen, previousSequence) => {
+    const next = history.find(entry => !seen || entry.sequence > previousSequence);
+    if (next === undefined) return undefined;
+    const expected = seen ? previousSequence + 1 : 1;
+    return Object.freeze({
+      sequence: next.sequence,
+      missed: next.sequence - expected,
+      value: next.value,
+    });
+  };
+  const deliver = observation => {
+    const value = candidate(observation.seen, observation.previousSequence);
+    if (value === undefined) return false;
+    pending.delete(observation);
+    observation.cleanup();
+    observation.resolve(value);
+    return true;
+  };
+  const flush = () => {
+    for (const observation of [...pending]) deliver(observation);
+  };
+  const onMessage = event => {
+    const value = event?.data;
+    if (typeof value !== "bigint" || value < 0n || value > MAX_U64) {
+      rejectAll(new TypeError("MessagePort event payload must be a canonical Fe u64 bigint"));
+      return;
+    }
+    if (sequence === MAX_U32) {
+      rejectAll(new RangeError("MessagePort event sequence space is exhausted"));
+      return;
+    }
+    sequence += 1;
+    history.push(Object.freeze({ sequence, value }));
+    if (history.length > MESSAGE_PORT_REPLAY_LIMIT) history.shift();
+    flush();
+  };
+  const onMessageError = () => {
+    rejectAll(new Error("MessagePort could not deserialize an incoming value"));
+  };
+
+  port.addEventListener("message", onMessage);
+  port.addEventListener("messageerror", onMessageError);
+  try {
+    port.start?.();
+  } catch (error) {
+    port.removeEventListener("message", onMessage);
+    port.removeEventListener("messageerror", onMessageError);
+    throw error;
+  }
+
+  return Object.freeze({
+    observe(seen, previousSequence, signal) {
+      if (typeof seen !== "boolean") {
+        throw new TypeError("MessagePort observation seen flag must be boolean");
+      }
+      u32(previousSequence, "MessagePort previous sequence");
+      if (!seen && previousSequence !== 0) {
+        throw new TypeError("first MessagePort observation must use sequence zero");
+      }
+      if (seen && previousSequence > sequence) {
+        throw new TypeError("MessagePort observation sequence is foreign or from the future");
+      }
+      if (terminal !== undefined) return Promise.reject(terminal);
+      const ready = candidate(seen, previousSequence);
+      if (ready !== undefined) return ready;
+      return new Promise((resolve, reject) => {
+        const observation = {
+          seen,
+          previousSequence,
+          resolve,
+          reject,
+          cleanup: () => signal?.removeEventListener("abort", onAbort),
+        };
+        const onAbort = () => {
+          if (!pending.delete(observation)) return;
+          observation.cleanup();
+          reject(abortError("MessagePort observation was cancelled"));
+        };
+        pending.add(observation);
+        signal?.addEventListener("abort", onAbort, { once: true });
+        if (signal?.aborted) onAbort();
+      });
+    },
+    close() {
+      if (terminal !== undefined) return;
+      rejectAll(abortError("MessagePort event source was closed"));
+    },
+  });
+}
+
 export function createHostCompletionBroker(options = {}) {
   if (!options || typeof options !== "object" || Array.isArray(options)) {
     throw new TypeError("host completion options must be an object");
@@ -97,6 +228,7 @@ export function createHostCompletionBroker(options = {}) {
   const windowEvents = options.windowEvents;
   const gpuDeviceEvents = options.gpuDeviceEvents;
   const gpuQueueIdleEvents = options.gpuQueueIdleEvents;
+  const messagePortEvents = options.messagePortEvents;
   const componentEvents = options.componentEvents;
   const actorEvents = options.actorEvents;
   if (typeof clock !== "function" || typeof schedule !== "function"
@@ -127,6 +259,11 @@ export function createHostCompletionBroker(options = {}) {
       || typeof gpuQueueIdleEvents !== "object"
       || typeof gpuQueueIdleEvents.observe !== "function")) {
     throw new TypeError("host completion GPU-queue hooks must provide observe");
+  }
+  if (messagePortEvents !== undefined && (!messagePortEvents
+      || typeof messagePortEvents !== "object"
+      || typeof messagePortEvents.observe !== "function")) {
+    throw new TypeError("host completion MessagePort hooks must provide observe");
   }
   if (componentEvents !== undefined && (!componentEvents
       || typeof componentEvents !== "object"
@@ -414,6 +551,38 @@ export function createHostCompletionBroker(options = {}) {
           u32(event.generation, "GPU queue-idle generation"),
           u32(event.sequence, "GPU queue-idle sequence"),
           u32(event.missed, "GPU queue-idle missed-event count"),
+        ];
+      },
+    );
+  };
+
+  const beginMessagePortMessage = (rawSeen, rawPreviousSequence) => {
+    if (messagePortEvents === undefined) {
+      throw new Error(
+        "fe:web-message-port::message_begin requires a MessagePort capability",
+      );
+    }
+    if (rawSeen !== 0 && rawSeen !== 1) {
+      throw new TypeError(
+        "fe:web-message-port::message_begin seen flag must be a Fe bool",
+      );
+    }
+    const previousSequence = u32(
+      rawPreviousSequence,
+      "fe:web-message-port::message_begin previous sequence",
+    );
+    return beginBrowserOperation(
+      "message-port-message",
+      signal => messagePortEvents.observe(rawSeen !== 0, previousSequence, signal),
+      3,
+      message => {
+        if (!message || typeof message !== "object" || Array.isArray(message)) {
+          throw new TypeError("MessagePort result must be an object");
+        }
+        return [
+          u32(message.sequence, "MessagePort result sequence"),
+          u32(message.missed, "MessagePort result missed count"),
+          u64(message.value, "MessagePort result value"),
         ];
       },
     );
@@ -828,6 +997,9 @@ export function createHostCompletionBroker(options = {}) {
     device_event_begin: beginGpuDeviceEvent,
     queue_idle_begin: beginGpuQueueIdle,
   });
+  const messagePortImports = Object.freeze({
+    message_begin: beginMessagePortMessage,
+  });
   const componentEventImports = Object.freeze({
     pointer_begin: beginPointer,
     captured_pointer_begin: beginCapturedPointer,
@@ -843,6 +1015,9 @@ export function createHostCompletionBroker(options = {}) {
   if (windowEvents !== undefined) imports["fe:web-window"] = windowImports;
   if (gpuDeviceEvents !== undefined || gpuQueueIdleEvents !== undefined) {
     imports["fe:web-gpu"] = gpuDeviceImports;
+  }
+  if (messagePortEvents !== undefined) {
+    imports["fe:web-message-port"] = messagePortImports;
   }
   if (componentEvents !== undefined) {
     imports["fe:web-component-events"] = componentEventImports;

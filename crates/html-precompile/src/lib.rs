@@ -3439,7 +3439,9 @@ fn publish_scoped_task_package(
                     "scoped actor tasks produced no compiler-derived browser adapter".to_owned(),
                 )
             })?;
-    entry.push_str("\nexport { createHostCompletionBroker } from \"./host-completion.js\";\n");
+    entry.push_str(
+        "\nexport { createHostCompletionBroker, createMessagePortEventSource } from \"./host-completion.js\";\n",
+    );
     let materialized = fe_compiler_facade::MATERIALIZED_TASK_RUNTIME_JS.as_bytes();
     let completion = fe_compiler_facade::HOST_COMPLETION_RUNTIME_JS.as_bytes();
     let mut package_bytes = Vec::with_capacity(entry.len() + materialized.len() + completion.len());
@@ -4415,8 +4417,10 @@ actor App {
         );
         assert!(task_assets.iter().any(|(path, bytes)| {
             path.ends_with("/tasks.js")
-                && std::str::from_utf8(bytes)
-                    .is_ok_and(|source| source.contains("createMaterializedTaskRegistry"))
+                && std::str::from_utf8(bytes).is_ok_and(|source| {
+                    source.contains("createMaterializedTaskRegistry")
+                        && source.contains("createMessagePortEventSource")
+                })
         }));
         assert!(
             task_assets

@@ -164,7 +164,7 @@ manifest-driven.
    runtime now consumes the compiler-emitted module, validates typed scalar and
    inactive-union lanes, keeps frames opaque and affine, and rejects forged or
    stale outcomes. A Bun gate drives actual compiled Fe Wasm through two
-   suspension sites—including equal raw pending ordinals—and independently
+   suspension sites, including equal raw pending ordinals, and independently
    exercises Fe success, failure, cancellation, and stale-frame branches.
    Resident actors may now select any number of zero-argument resumable
    behaviors through the nominal target-neutral `ScopedTask` role. Those roots
@@ -190,8 +190,10 @@ manifest-driven.
    disconnection; reconnect creates a fresh lifetime without exposing task
    names. A publication gate imports the generated package under Bun and runs
    an actual Fe timer task to its checked wake timestamp, while a separate
-   lifecycle gate proves start/cancel/restart mechanics. MessagePort
-   attachment, spawn/Worker placement, and nested child scopes remain. The
+   lifecycle gate proves start/cancel/restart mechanics. A typed
+   `MessagePort<u64>` observation source now runs on this broker and is proven
+   against a real `MessageChannel`; attachment through Fe-owned spawn/Worker
+   placement, rich compiler-derived payloads, and nested child scopes remain. The
    first structured combinator is also
    executable: `Race<WasmBackend>` consumes two affine same-payload tokens and
    the browser broker cancels the loser. A real Fe receive-vs-timer gate covers
@@ -212,12 +214,14 @@ manifest-driven.
    the fixed standards adapter reports the initial state or waits with one
    abortable listener for a distinct state. SourceInspector's Fe task pauses
    poster activation while hidden and owns the fail-open/cancellation policy.
-   `BrowserAnimationFrames` is the third handler: each pull owns one cancellable
+   `BrowserAnimationFrames` is another handler: each pull owns one cancellable
    standards frame request and returns its typed timestamp. The same Fe task
    uses it to pace poster loads across frames and owns the fail-open policy;
-   the host no longer invents a delay or sequencing rule. Pointer, wheel,
-   resize, device-loss, and MessagePort handlers—and the resident outer gallery
-   actor that combines all of them—remain. `Stream<T>::next_ready` is the first
+   the host no longer invents a delay or sequencing rule. Viewport, component-
+   scoped pointer/capture, wheel, shared-device lifecycle, queue completion,
+   and narrow typed MessagePort observations now use the same rail. Fetch,
+   Worker/spawn port attachment, rich canonical port values, and the resident
+   outer-gallery actor that combines all sources remain. `Stream<T>::next_ready` is the first
    shared consumer combinator extracted from these handlers: it skips pure
    absence while preserving the sole affine successor and every terminal case.
    `ActorSink<B, E>` now closes the first task-to-resident edge on this same
@@ -225,9 +229,9 @@ manifest-driven.
    from its scoped task into its resident reducer; the fixed broker transports
    opaque compiler-flattened lanes and inherits the canonical generation and
    cancellation table. Compilation requires the instantiated normalized event
-   type—not merely its flattened width—to be identical to the resident actor's
+   type, not merely its flattened width, to be identical to the resident actor's
    nominal event, and a same-layout impostor gate fails closed. Cross-actor,
-   MessagePort, Worker, and GPU destinations remain future handlers rather
+   Worker/MessagePort, and GPU destinations remain future handlers rather
    than implied capabilities of this owning-scope mailbox.
 6. [todo] Move Worker admission, cancellation, restart/backoff, and supervision policy
    from handwritten JavaScript into Fe handlers and structured scopes.

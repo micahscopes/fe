@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { createHostCompletionBroker } from "./host-completion.js";
+import {
+  createHostCompletionBroker,
+  createMessagePortEventSource,
+} from "./host-completion.js";
 import { createMaterializedTaskMachine } from "./materialized-task.js";
 
 const u32 = Object.freeze({ kind: "unsigned", bits: 32 });
@@ -322,6 +325,72 @@ function actorSendMachine(start, onCancel = () => {}) {
 }
 
 describe("browser HostTimer/Recv completion broker", () => {
+  test("MessagePort adapter preserves order and reports bounded replay loss", async () => {
+    const channel = new MessageChannel();
+    const source = createMessagePortEventSource(channel.port1);
+
+    const first = source.observe(false, 0);
+    channel.port2.postMessage(17n);
+    expect(await first).toEqual({ sequence: 1, missed: 0, value: 17n });
+
+    channel.port2.postMessage(19n);
+    channel.port2.postMessage(23n);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(await source.observe(true, 1)).toEqual({
+      sequence: 2, missed: 0, value: 19n,
+    });
+    expect(await source.observe(true, 2)).toEqual({
+      sequence: 3, missed: 0, value: 23n,
+    });
+
+    const controller = new AbortController();
+    const cancelled = source.observe(true, 3, controller.signal);
+    controller.abort();
+    await expect(cancelled).rejects.toHaveProperty("name", "AbortError");
+    source.close();
+    channel.port2.close();
+
+    const overflowChannel = new MessageChannel();
+    const overflow = createMessagePortEventSource(overflowChannel.port1);
+    for (let value = 1n; value <= 65n; value += 1n) {
+      overflowChannel.port2.postMessage(value);
+    }
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(await overflow.observe(false, 0)).toEqual({
+      sequence: 2, missed: 1, value: 2n,
+    });
+    overflow.close();
+    overflowChannel.port2.close();
+  });
+
+  test("typed MessagePort values resume Fe without a JavaScript actor envelope", async () => {
+    const channel = new MessageChannel();
+    const source = createMessagePortEventSource(channel.port1);
+    const broker = createHostCompletionBroker({ messagePortEvents: source });
+    const message = browserRecordMachine(
+      [u32, u32, u64],
+      () => [
+        1, 0, 0, 0n,
+        broker.imports["fe:web-message-port"].message_begin(0, 0) >>> 0,
+      ],
+    );
+    const result = broker.run(message, []);
+    channel.port2.postMessage(0xe7e7n);
+    expect(await result).toEqual([1, 0, 0xe7e7n]);
+    expect(broker.activeCount()).toBe(0);
+    source.close();
+  });
+
+  test("MessagePort adapter rejects values outside the declared Fe type", async () => {
+    const channel = new MessageChannel();
+    const source = createMessagePortEventSource(channel.port1);
+    const pending = source.observe(false, 0);
+    channel.port2.postMessage({ value: 7n });
+    await expect(pending).rejects.toBeInstanceOf(TypeError);
+    await expect(source.observe(false, 0)).rejects.toBeInstanceOf(TypeError);
+    channel.port2.close();
+  });
+
   test("typed actor sends remain opaque and resume only after acceptance", async () => {
     const accepted = [];
     const broker = createHostCompletionBroker({

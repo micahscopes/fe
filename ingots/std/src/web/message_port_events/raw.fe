@@ -1,0 +1,13 @@
+//! Private fixed-host import for standards `MessagePort` observations.
+
+use core::pending::Pending
+use ingot::wasm::WasmBackend
+use super::MessagePortMessage
+
+#[wasm_import(module = "fe:web-message-port")]
+extern {
+    pub unsafe fn message_begin(
+        _ seen: bool,
+        _ previous_sequence: u32,
+    ) -> Pending<WasmBackend, MessagePortMessage>
+}
