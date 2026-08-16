@@ -6,6 +6,7 @@ use fe_codegen::{BackendKind, OptLevel, layout_for};
 use hir::hir_def::HirIngot;
 use num_bigint::BigUint;
 use std::path::Path;
+use std::sync::OnceLock;
 use url::Url;
 
 const WIDTH: usize = 3;
@@ -300,24 +301,27 @@ fn statement_commitment(
     .clone()
 }
 
-fn compile_gate() -> Vec<u8> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../demos/capstones/mandelbrot-proof/commitment");
-    let url = Url::from_directory_path(path.canonicalize().unwrap()).unwrap();
-    let mut db = DriverDataBase::default();
-    assert!(!driver::init_ingot(&mut db, &url), "commitment diagnostics");
-    let ingot = db.workspace().containing_ingot(&db, url).unwrap();
-    let top_mod = ingot.root_mod(&db);
-    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
-    assert!(diagnostics.is_empty(), "{diagnostics}");
-    let wasm = BackendKind::Wasm
-        .create()
-        .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
-        .expect("Mandelbrot commitment should compile")
-        .into_bytecode()
-        .expect("Wasm bytecode");
-    wasmparser::validate(&wasm).unwrap();
-    wasm
+fn compile_gate() -> &'static [u8] {
+    static WASM: OnceLock<Vec<u8>> = OnceLock::new();
+    WASM.get_or_init(|| {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../demos/capstones/mandelbrot-proof/commitment");
+        let url = Url::from_directory_path(path.canonicalize().unwrap()).unwrap();
+        let mut db = DriverDataBase::default();
+        assert!(!driver::init_ingot(&mut db, &url), "commitment diagnostics");
+        let ingot = db.workspace().containing_ingot(&db, url).unwrap();
+        let top_mod = ingot.root_mod(&db);
+        let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+        assert!(diagnostics.is_empty(), "{diagnostics}");
+        let wasm = BackendKind::Wasm
+            .create()
+            .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
+            .expect("Mandelbrot commitment should compile")
+            .into_bytecode()
+            .expect("Wasm bytecode");
+        wasmparser::validate(&wasm).unwrap();
+        wasm
+    })
 }
 
 fn call_root(
@@ -487,5 +491,44 @@ fn fe_trace_and_statement_match_independent_orbit_encoding_poseidon_and_merkle_m
     assert_eq!(
         call_statement(&mut store, &bind, &reset, &statement, &reordered),
         reordered_statement
+    );
+}
+
+#[test]
+fn fe_statement_reclaims_its_compiler_proven_arena_frame() {
+    let parameters = parameters();
+    let rows = four_row_escape_trace();
+    let statement = PublicStatement {
+        c_re: signed(3072),
+        c_im: signed(0),
+        bound: 16,
+        terminal_step: 3,
+        trace_length: 4,
+        padded_length: 4,
+    };
+    let expected = statement_commitment(&statement, &rows, &parameters);
+    let wasm = compile_gate();
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, wasm).unwrap();
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+    let bind = instance
+        .get_func(&mut store, "statement_commitment4_plain_words")
+        .unwrap();
+    let reset = instance
+        .get_typed_func::<(), ()>(&mut store, "fe_cabi_reset")
+        .unwrap();
+    let alloc = instance
+        .get_typed_func::<(i32, i32), i32>(&mut store, "fe_cabi_alloc")
+        .unwrap();
+
+    assert_eq!(
+        call_statement(&mut store, &bind, &reset, &statement, &rows),
+        expected
+    );
+    assert_eq!(
+        alloc.call(&mut store, (1, 1)).unwrap(),
+        1024,
+        "the statement call must leave no non-escaping Fe temporary live"
     );
 }

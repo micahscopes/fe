@@ -190,6 +190,21 @@ Legend:
   executes the concise Fe permutation against canonical and independent bigint
   hash vectors in zero-import Wasm. This closes parameter provenance and the
   Wasm permutation lift. The first bounded trace commitment is recorded below.
+- [x] Allocation-heavy proof code now has explicit, checked Wasm arena scopes
+  rather than a larger memory ceiling or an application reset convention.
+  Sonatina commit `c0252605862035f812ce0ef2cd0e4c82d2261d51` adds typed
+  `mem.checkpoint` and `mem.rewind` IR operations; rewind traps unless its token
+  lies between the arena base and current cursor. Fe derives scopes through a
+  fail-closed interprocedural escape proof. Whole memory-lowerable aggregate
+  references may cross proved-safe Fe calls as borrows, while host/effect/GPU
+  calls, providers, raw addresses, transport returns, transport stores, and
+  nonlocal address formation remain ineligible. The real four-row statement
+  call still matches the independent orbit, encoding, Poseidon, Merkle, and
+  mutation oracle, then leaves the next canonical allocation at exactly byte
+  1024. The canonical-arena suite separately proves that returned browser
+  allocations remain live. Gates: `mandelbrot_trace_commitment_oracle.rs`,
+  `wasm_canonical_arena.rs`, and
+  `local_u32_array_runtime_index_runs_on_wasm_and_traps_out_of_bounds`.
 - [~] Fe now generates nominal `EscapeWitness`, `EscapeTraceRow`, and expanded
   `EscapeAirRow` values. Compiled Wasm matches an independent i64 replay across
   directed, invalid, and 512 deterministic cases. Every signed Q12
@@ -283,8 +298,9 @@ fallback. The semantic receipts are:
 ## Immediate burn-down order
 
 1. Run the external real-GPU handoff above.
-2. Start the bounded-proof specification and independent oracle before adding
-   more gallery polish.
+2. Generalize the fixed four-row commitment to power-of-two traces, then add
+   Fiat-Shamir challenges, composition constraints, and the first FRI layer
+   under independent mutation and cost oracles.
 3. Finish typed fetch, then Worker/port placement and supervision on the one
    runtime-control spine.
 4. Delete the runtime manifest and finish the legacy disposition.

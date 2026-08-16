@@ -6415,6 +6415,13 @@ pub fn probe(k: u32) -> u32 {
     let probe = instance
         .get_typed_func::<i32, i32>(&mut store, "probe")
         .expect("`probe` export should exist");
+    let alloc = instance
+        .get_typed_func::<(i32, i32), i32>(&mut store, "fe_cabi_alloc")
+        .expect("the local array requires the canonical arena");
+    let reset = instance
+        .get_typed_func::<(), ()>(&mut store, "fe_cabi_reset")
+        .expect("the canonical arena must expose its top-level reset");
+    reset.call(&mut store, ()).unwrap();
 
     // Rust oracle: a[i] = i*i for i in 0..8, so probe(k) == k*k for k in 0..8.
     for k in 0..8_i32 {
@@ -6424,6 +6431,13 @@ pub fn probe(k: u32) -> u32 {
             .unwrap_or_else(|err| panic!("probe({k}) should run: {err}"));
         assert_eq!(got, expected, "probe({k}) should be {expected}");
     }
+
+    assert_eq!(
+        alloc.call(&mut store, (1, 1)).unwrap(),
+        1024,
+        "successful calls must reclaim compiler-proven non-escaping array frames"
+    );
+    reset.call(&mut store, ()).unwrap();
 
     // Out-of-bounds indexes trap (wasm `unreachable`), the portable image of the
     // EVM revert an OOB index takes.

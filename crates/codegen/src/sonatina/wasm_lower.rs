@@ -69,7 +69,10 @@ use sonatina_ir::{
         cast::{Bitcast, F32ToI32, I32ToF32, Sext, Trunc, Zext},
         cmp::{Eq as CmpEq, Feq, Fle, Flt, IsZero, Lt, Slt},
         control_flow::{Br, Call, Jump, Phi, Return, Unreachable},
-        data::{MemAllocDynamic, Mload, Mstore, ObjIndex, ObjLoad, ObjProj, ObjStore},
+        data::{
+            MemAllocDynamic, MemCheckpoint, MemRewind, Mload, Mstore, ObjIndex, ObjLoad, ObjProj,
+            ObjStore,
+        },
         logic::{And, Or, Xor},
         native::inst_set::NativeInstSet,
     },
@@ -147,7 +150,18 @@ pub(crate) fn compile_runtime_package_shader_ir(
     db: &DriverDataBase,
     package: &RuntimePackage<'_>,
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
-    compile_runtime_package_wasm_inner(db, package, &[], &[], None, None, None, &[], false)
+    compile_runtime_package_wasm_inner(
+        db,
+        package,
+        &[],
+        &[],
+        None,
+        None,
+        None,
+        &[],
+        false,
+        false,
+    )
 }
 
 /// Overlay-only callback-capstone entry point. The default pin cannot name the
@@ -161,8 +175,16 @@ pub fn compile_runtime_package_wasm_with_guest_callbacks(
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
     let isa = create_wasm32_isa();
     let builder = ModuleBuilder::new(ModuleCtx::new(&isa));
-    let mut lowerer =
-        PortableModuleLowerer::new(db, builder, &isa, package, HashSet::new(), &[], true)?;
+    let mut lowerer = PortableModuleLowerer::new(
+        db,
+        builder,
+        &isa,
+        package,
+        HashSet::new(),
+        &[],
+        true,
+        true,
+    )?;
     lowerer.declare_functions()?;
     lowerer.lower_bodies()?;
     lowerer.synthesize_guest_callbacks(callbacks)?;
@@ -190,6 +212,7 @@ pub(crate) fn compile_runtime_package_wasm_with_canonical_lanes(
         resident_projection,
         resident_policies,
         true,
+        true,
     )
 }
 
@@ -204,6 +227,7 @@ fn compile_runtime_package_wasm_inner(
     resident_projection: Option<&super::WasmResidentProjection>,
     resident_policies: &[super::WasmResidentPolicy],
     validate_host_enum_params: bool,
+    enable_scoped_arena: bool,
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
     // Reject unsupported indirect host results before constructing any
     // Sonatina signatures. A local wrapper may itself return the authored enum
@@ -287,6 +311,7 @@ fn compile_runtime_package_wasm_inner(
         wrapped_lane_names,
         export_aliases,
         validate_host_enum_params,
+        enable_scoped_arena,
     )?;
     lowerer.declare_functions()?;
     lowerer.lower_bodies()?;
@@ -393,8 +418,16 @@ pub(crate) fn compile_runtime_package_native(
         OperatingSystem::Native,
     ));
     let builder = ModuleBuilder::new(ModuleCtx::new(&isa));
-    let mut lowerer =
-        PortableModuleLowerer::new(db, builder, &isa, package, HashSet::new(), &[], true)?;
+    let mut lowerer = PortableModuleLowerer::new(
+        db,
+        builder,
+        &isa,
+        package,
+        HashSet::new(),
+        &[],
+        true,
+        false,
+    )?;
     lowerer.declare_functions()?;
     lowerer.lower_bodies()?;
     Ok(lowerer.finish())
@@ -2802,6 +2835,10 @@ where
     resumable_continuations: Vec<PreparedResumableContinuation<'db>>,
     wrapped_lane_names: HashSet<String>,
     validate_host_enum_params: bool,
+    /// Bodies whose arena-backed locals are compiler-proven not to escape.
+    /// Only the Wasm lowering enables these scopes. Shader and native paths do
+    /// not emit arena-control instructions their backends cannot realize.
+    scoped_arena_bodies: HashSet<RuntimeInstance<'db>>,
 }
 
 struct PreparedResumableContinuation<'db> {
@@ -2809,6 +2846,11 @@ struct PreparedResumableContinuation<'db> {
     linkage: RuntimeLinkage,
     body: RuntimeBody<'db>,
     func_ref: Option<FuncRef>,
+}
+
+struct ScopedArenaAnalysis<'db> {
+    allocates: bool,
+    callees: HashSet<RuntimeInstance<'db>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2838,6 +2880,7 @@ where
         wrapped_lane_names: HashSet<String>,
         export_aliases: &[(String, String)],
         validate_host_enum_params: bool,
+        enable_scoped_arena: bool,
     ) -> Result<Self, LowerError> {
         let mut prepared_bodies = prepare_inline_value_bodies(db, package).bodies;
         for (instance, body) in &mut prepared_bodies {
@@ -2907,7 +2950,7 @@ where
                 });
             }
         }
-        Ok(Self {
+        let mut lowerer = Self {
             db,
             builder,
             isa,
@@ -2920,7 +2963,12 @@ where
             resumable_continuations,
             wrapped_lane_names,
             validate_host_enum_params,
-        })
+            scoped_arena_bodies: HashSet::new(),
+        };
+        if enable_scoped_arena {
+            lowerer.scoped_arena_bodies = lowerer.derive_scoped_arena_bodies();
+        }
+        Ok(lowerer)
     }
 
     fn finish(self) -> Module {
@@ -3270,7 +3318,14 @@ where
             let validate_enum_params = self.validate_host_enum_params
                 && function.linkage(self.db) == RuntimeLinkage::Internal
                 && !self.wrapped_lane_names.contains(&symbol);
-            PortableFunctionLowerer::new(self, body, func_ref, validate_enum_params)?
+            let scoped_arena = self.scoped_arena_bodies.contains(&instance);
+            PortableFunctionLowerer::new(
+                self,
+                body,
+                func_ref,
+                validate_enum_params,
+                scoped_arena,
+            )?
                 .lower()
                 .map_err(|error| match error {
                     LowerError::Unsupported(message) => LowerError::Unsupported(format!(
@@ -3292,7 +3347,7 @@ where
                         "Wasm continuation `{symbol}` lowered before declaration"
                     ))
                 })?;
-            PortableFunctionLowerer::new(self, body, func_ref, true)?
+            PortableFunctionLowerer::new(self, body, func_ref, true, false)?
                 .lower()
                 .map_err(|error| match error {
                     LowerError::Unsupported(message) => LowerError::Unsupported(format!(
@@ -5336,6 +5391,317 @@ where
         ))
     }
 
+    /// Derive the closed set of ordinary Fe functions whose arena-backed
+    /// temporaries cannot cross a function boundary. The analysis starts from
+    /// a strict local allowlist, then removes every body that calls outside the
+    /// remaining set. This fixed point admits mutually recursive pure helpers
+    /// while failing closed on host effects, raw addresses, providers, and
+    /// pointer escape. Aggregate references may cross an ordinary Fe call as
+    /// scoped borrows: the callee's checkpoint is taken after the caller-owned
+    /// object exists, and the callee may neither return that reference nor
+    /// store a newly allocated reference through it.
+    fn derive_scoped_arena_bodies(&self) -> HashSet<RuntimeInstance<'db>> {
+        let resumable_owners = self
+            .resumable_continuations
+            .iter()
+            .map(|continuation| continuation.body.owner)
+            .collect::<HashSet<_>>();
+        let analyses = self
+            .prepared_bodies
+            .iter()
+            .filter(|(instance, _)| !resumable_owners.contains(instance))
+            .filter_map(|(instance, body)| {
+                self.analyze_scoped_arena_body(body)
+                    .ok()
+                    .map(|analysis| (*instance, analysis))
+            })
+            .collect::<FxHashMap<_, _>>();
+        let mut safe = analyses.keys().copied().collect::<HashSet<_>>();
+        loop {
+            let rejected = safe
+                .iter()
+                .copied()
+                .filter(|instance| {
+                    analyses[instance]
+                        .callees
+                        .iter()
+                        .any(|callee| !safe.contains(callee))
+                })
+                .collect::<Vec<_>>();
+            if rejected.is_empty() {
+                break;
+            }
+            for instance in rejected {
+                safe.remove(&instance);
+            }
+        }
+        safe.retain(|instance| analyses[instance].allocates);
+        safe
+    }
+
+    fn analyze_scoped_arena_body(
+        &self,
+        body: &RuntimeBody<'db>,
+    ) -> Result<ScopedArenaAnalysis<'db>, &'static str> {
+        if body.blocks.is_empty() {
+            return Err("body has no blocks");
+        }
+        if body.signature.params.iter().any(|param| {
+            body.local(param.local).is_none_or(|local| {
+                semantic_gpu_resource(self.db, local.semantic_ty)
+                    || !self.scoped_arena_param_is_admissible(&param.class)
+            })
+        }) {
+            return Err("inadmissible parameter boundary");
+        }
+        if body.signature.ret.as_ref().is_some_and(|class| {
+            class.contains_transport(self.db) || self.flat_shape(class).is_none()
+        }) {
+            return Err("inadmissible return boundary");
+        }
+
+        let mut analysis = ScopedArenaAnalysis {
+            allocates: body.signature.params.iter().any(|param| {
+                matches!(
+                    body.local(param.local).map(|local| &local.root),
+                    Some(RuntimeLocalRoot::Slot(_))
+                ) && self.scalar_tuple_element_tys(&param.class).is_some()
+            }),
+            callees: HashSet::new(),
+        };
+        for block in &body.blocks {
+            for stmt in &block.stmts {
+                match stmt {
+                    RStmt::Assign { dst: _, expr } => {
+                        self.analyze_scoped_arena_expr(body, expr, &mut analysis)?;
+                    }
+                    RStmt::EnumAssertVariant { .. } => {}
+                    RStmt::Store { dst, src } => {
+                        if !self.scoped_arena_place_is_local(body, dst, true)
+                            || body
+                                .value_class(*src)
+                                .is_some_and(|class| class.contains_transport(self.db))
+                        {
+                            return Err("store may escape through a nonlocal place");
+                        }
+                    }
+                    RStmt::CopyInto { dst, src } => {
+                        if !self.scoped_arena_place_is_local(body, dst, true)
+                            || !self.scoped_arena_copy_source_is_local(body, *src)
+                        {
+                            return Err("copy may escape through a nonlocal place");
+                        }
+                    }
+                    RStmt::EnumSetTag { root, .. } => {
+                        if !self.scoped_arena_writable_ref(body, *root) {
+                            return Err("enum tag write targets a nonlocal reference");
+                        }
+                    }
+                    RStmt::EnumWriteVariant { root, fields, .. } => {
+                        if !self.scoped_arena_writable_ref(body, *root)
+                            || fields.iter().any(|field| {
+                                body.value_class(*field)
+                                    .is_some_and(|class| class.contains_transport(self.db))
+                            })
+                        {
+                            return Err("enum payload write may escape");
+                        }
+                    }
+                }
+            }
+            match &block.terminator {
+                RTerminator::Goto(_)
+                | RTerminator::Branch { .. }
+                | RTerminator::SwitchScalar { .. }
+                | RTerminator::MatchEnumTag { .. }
+                | RTerminator::Trap
+                | RTerminator::Return(_)
+                | RTerminator::Stop => {}
+                RTerminator::TerminalCall { .. }
+                | RTerminator::ReturnData { .. }
+                | RTerminator::Revert { .. }
+                | RTerminator::SelfDestruct { .. } => {
+                    return Err("effectful terminal may expose arena state");
+                }
+            }
+        }
+        Ok(analysis)
+    }
+
+    fn analyze_scoped_arena_expr(
+        &self,
+        body: &RuntimeBody<'db>,
+        expr: &RExpr<'db>,
+        analysis: &mut ScopedArenaAnalysis<'db>,
+    ) -> Result<(), &'static str> {
+        match expr {
+            RExpr::Use(src) => {
+                analysis.allocates |= body
+                    .value_class(*src)
+                    .is_some_and(|class| self.is_memory_lowerable_object_ref(class));
+            }
+            RExpr::ConstScalar(_)
+            | RExpr::Unary { .. }
+            | RExpr::Binary { .. }
+            | RExpr::Cast { .. }
+            | RExpr::Bitcast { .. }
+            | RExpr::ConstRef { .. }
+            | RExpr::AggregateExtract { .. }
+            | RExpr::EnumTagOfValue { .. }
+            | RExpr::EnumIsVariant { .. }
+            | RExpr::EnumExtract { .. } => {}
+            RExpr::AllocObject { .. }
+            | RExpr::MaterializeToObject { .. }
+            | RExpr::MaterializePlaceToObject { .. } => {
+                analysis.allocates = true;
+                if let RExpr::MaterializePlaceToObject { place } = expr
+                    && !self.scoped_arena_place_is_local(body, place, false)
+                {
+                    return Err("place materialization reads a nonlocal place");
+                }
+            }
+            RExpr::Builtin(builtin) if scoped_arena_builtin_is_pure(builtin) => {}
+            RExpr::Call { callee, args } => {
+                if mir::host_import_name(self.db, *callee).is_some()
+                    || mir::runtime_control_effect_kind(self.db, *callee).is_some()
+                    || gpu_intrinsic(self.db, *callee).is_some()
+                {
+                    return Err("call crosses a host, effect, or GPU boundary");
+                }
+                let callee_body = self
+                    .prepared_bodies
+                    .get(callee)
+                    .ok_or("call target has no prepared body")?;
+                if callee_body.blocks.is_empty()
+                    || args.len() != callee_body.signature.params.len()
+                    || args.iter().zip(&callee_body.signature.params).any(
+                        |(arg, param)| {
+                            !self.scoped_arena_param_is_admissible(&param.class)
+                                || (body
+                                    .value_class(*arg)
+                                    .is_some_and(|class| class.contains_transport(self.db))
+                                    && !self.scoped_arena_borrowed_ref(body, *arg))
+                        },
+                    )
+                    || callee_body.signature.ret.as_ref().is_some_and(|class| {
+                        class.contains_transport(self.db) || self.flat_shape(class).is_none()
+                    })
+                {
+                    return Err("call boundary can carry an escaping reference");
+                }
+                analysis.callees.insert(*callee);
+            }
+            RExpr::AggregateMake { fields, .. } | RExpr::EnumMake { fields, .. } => {
+                if fields.iter().any(|field| {
+                    body.value_class(*field)
+                        .is_some_and(|class| class.contains_transport(self.db))
+                }) {
+                    return Err("aggregate value contains a transport");
+                }
+            }
+            RExpr::Load { place } => {
+                if !self.scoped_arena_place_is_local(body, place, false) {
+                    return Err("load reads a nonlocal place");
+                }
+            }
+            RExpr::EnumGetTag { root } | RExpr::EnumAssertVariantRef { root, .. } => {
+                if !self.scoped_arena_read_ref_is_local(body, *root) {
+                    return Err("enum reference reads a nonlocal object");
+                }
+            }
+            RExpr::Placeholder { .. } => return Err("placeholder expression remains"),
+            RExpr::Builtin(_) => return Err("effectful builtin expression remains"),
+            RExpr::ProviderFromRaw { .. } => return Err("raw address becomes a provider"),
+            RExpr::WordToRawAddr { .. } => return Err("integer becomes a raw address"),
+            RExpr::ProviderToRaw { .. } => return Err("provider becomes a raw address"),
+            RExpr::RetagRef { .. } => return Err("reference capability is retagged"),
+            RExpr::AddrOf { place } => {
+                if !self.scoped_arena_place_is_local(body, place, false) {
+                    return Err("address of a nonlocal place is observed");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn scoped_arena_param_is_admissible(&self, class: &RuntimeClass<'db>) -> bool {
+        if !class.contains_transport(self.db) {
+            return self.flat_shape(class).is_some();
+        }
+        matches!(
+            class,
+            RuntimeClass::Ref {
+                pointee,
+                kind: RefKind::Const | RefKind::Object,
+                view: RefView::Whole,
+            } if self.aggregate_is_memory_lowerable(pointee)
+        )
+    }
+
+    /// A reference is scope-local when it is either an object created in this
+    /// body or an aggregate borrow received from its caller. Calls may pass
+    /// either kind only to another body admitted by the same fixed-point proof.
+    /// This type check is backed by the expression allowlist above: allocation,
+    /// materialization, an admitted parameter, a const region, and `AddrOf` an
+    /// already-local place are the only reference origins that survive. Raw,
+    /// provider, retagged, effect-returned, and transport-returned origins all
+    /// reject the body before reaching this predicate.
+    fn scoped_arena_borrowed_ref(&self, body: &RuntimeBody<'db>, local: RLocalId) -> bool {
+        matches!(
+            body.value_class(local),
+            Some(RuntimeClass::Ref {
+                pointee,
+                kind: RefKind::Const | RefKind::Object,
+                view: RefView::Whole,
+            }) if self.aggregate_is_memory_lowerable(pointee)
+        )
+    }
+
+    fn scoped_arena_writable_ref(&self, body: &RuntimeBody<'db>, local: RLocalId) -> bool {
+        matches!(
+            body.value_class(local),
+            Some(RuntimeClass::Ref {
+                pointee,
+                kind: RefKind::Object,
+                view: RefView::Whole,
+            }) if self.aggregate_is_memory_lowerable(pointee)
+        )
+    }
+
+    fn scoped_arena_read_ref_is_local(&self, body: &RuntimeBody<'db>, local: RLocalId) -> bool {
+        self.scoped_arena_borrowed_ref(body, local)
+            || matches!(
+                body.value_class(local),
+                Some(RuntimeClass::Ref {
+                    kind: RefKind::Const,
+                    ..
+                })
+            )
+    }
+
+    fn scoped_arena_copy_source_is_local(&self, body: &RuntimeBody<'db>, local: RLocalId) -> bool {
+        body.value_class(local).is_some_and(|class| {
+            !class.contains_transport(self.db)
+                || self.scoped_arena_borrowed_ref(body, local)
+        })
+    }
+
+    fn scoped_arena_place_is_local(
+        &self,
+        body: &RuntimeBody<'db>,
+        place: &RuntimePlace<'db>,
+        write: bool,
+    ) -> bool {
+        match place.root {
+            PlaceRoot::Slot(_) => true,
+            PlaceRoot::Ref(local) => {
+                self.scoped_arena_writable_ref(body, local)
+                    || (!write && self.scoped_arena_read_ref_is_local(body, local))
+            }
+            PlaceRoot::Provider(_) | PlaceRoot::Ptr { .. } => false,
+        }
+    }
+
     /// Change 1: whether `class` is a function-local aggregate behind an object /
     /// memory-provider reference that lowers to an `i32` linear-memory pointer.
     /// True for `Ref{kind: Object | Provider{space: Memory}, view: Whole}` whose
@@ -5625,6 +5991,32 @@ where
     }
 }
 
+fn scoped_arena_builtin_is_pure(builtin: &RuntimeBuiltin<'_>) -> bool {
+    matches!(
+        builtin,
+        RuntimeBuiltin::IntTruncate { .. }
+            | RuntimeBuiltin::AddMod { .. }
+            | RuntimeBuiltin::MulMod { .. }
+            | RuntimeBuiltin::Byte { .. }
+            | RuntimeBuiltin::SignExtend { .. }
+            | RuntimeBuiltin::IntrinsicArith { .. }
+            | RuntimeBuiltin::Saturating { .. }
+            | RuntimeBuiltin::F32FromI32 { .. }
+            | RuntimeBuiltin::I32FromF32 { .. }
+            | RuntimeBuiltin::F32Sqrt { .. }
+            | RuntimeBuiltin::F32Abs { .. }
+            | RuntimeBuiltin::F32Min { .. }
+            | RuntimeBuiltin::F32Max { .. }
+            | RuntimeBuiltin::F32MinRelaxed { .. }
+            | RuntimeBuiltin::F32MaxRelaxed { .. }
+            | RuntimeBuiltin::F32Clamp { .. }
+            | RuntimeBuiltin::F32Floor { .. }
+            | RuntimeBuiltin::F32Ceil { .. }
+            | RuntimeBuiltin::F32Trunc { .. }
+            | RuntimeBuiltin::F32Round { .. }
+    )
+}
+
 /// R1 scalar type mapping: reuses the target-neutral scalar carrier mapping but
 /// rejects anything wider than i64 (and anything address-shaped), which fails
 /// closed per the ratified "u256-on-wasm is out of scope" decision.
@@ -5681,6 +6073,8 @@ where
     /// would take). Created on first use so functions with no such check emit no
     /// trap block.
     trap_block: Option<BlockId>,
+    scoped_arena: bool,
+    arena_checkpoint: Option<ValueId>,
 }
 
 impl<'ctx, 'db, 'a, I> PortableFunctionLowerer<'ctx, 'db, 'a, I>
@@ -5692,6 +6086,7 @@ where
         body: RuntimeBody<'db>,
         func_ref: FuncRef,
         validate_enum_params: bool,
+        scoped_arena: bool,
     ) -> Result<Self, LowerError> {
         let mut fb = module.builder.func_builder::<InstInserter>(func_ref);
         let prologue_block = fb.append_block();
@@ -5777,6 +6172,8 @@ where
             materialized_param_slots,
             validate_enum_params,
             trap_block: None,
+            scoped_arena,
+            arena_checkpoint: None,
         })
     }
 
@@ -5794,6 +6191,13 @@ where
         // bind those N args to the param's N element variables. For every other
         // param this is one arg to one variable, identical to before.
         self.fb.switch_to_block(self.prologue_block);
+        if self.scoped_arena {
+            let checkpoint_ty = self.fb.ptr_type(Type::I8);
+            let checkpoint = self
+                .fb
+                .insert_inst(MemCheckpoint::new(is), checkpoint_ty);
+            self.arena_checkpoint = Some(checkpoint);
+        }
         let params = self.body.signature.params.clone();
         let arg_values: Vec<ValueId> = self.fb.args().to_vec();
         let mut wasm_arg_idx = 0usize;
@@ -8714,15 +9118,18 @@ where
                 if let Some(elem_vars) = self.tuple_vars.get(value).cloned() {
                     let values: Vec<ValueId> =
                         elem_vars.iter().map(|var| self.fb.use_var(*var)).collect();
+                    self.rewind_scoped_arena();
                     self.fb.insert_return_values(&values);
                 } else {
                     let value = self.local_value(*value)?;
+                    self.rewind_scoped_arena();
                     self.fb.insert_inst_no_result(Return::new_single(is, value));
                 }
             }
             // A unit return and a `Stop` (the synthetic main-root exit) both
             // become a plain wasm return.
             RTerminator::Return(None) | RTerminator::Stop => {
+                self.rewind_scoped_arena();
                 self.fb.insert_inst_no_result(Return::new_unit(is));
             }
             RTerminator::Goto(target) => {
@@ -8786,6 +9193,7 @@ where
                 if gpu_intrinsic(self.module.db, *callee) == Some(GpuIntrinsic::StorageStore) =>
             {
                 self.lower_gpu_storage_store(args)?;
+                self.rewind_scoped_arena();
                 self.fb.insert_inst_no_result(Return::new_unit(is));
             }
             RTerminator::Trap => {
@@ -8799,6 +9207,13 @@ where
             }
         }
         Ok(())
+    }
+
+    fn rewind_scoped_arena(&mut self) {
+        if let Some(checkpoint) = self.arena_checkpoint {
+            self.fb
+                .insert_inst_no_result(MemRewind::new(self.inst_set(), checkpoint));
+        }
     }
 
     fn local_value(&mut self, local: RLocalId) -> Result<ValueId, LowerError> {
