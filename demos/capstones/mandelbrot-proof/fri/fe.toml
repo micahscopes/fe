@@ -1,0 +1,10 @@
+[ingot]
+name = "mandelbrot_proof_fri"
+version = "0.1.0"
+
+[dependencies]
+core = "../../../../ingots/core"
+mandelbrot_proof_composition = "../composition"
+mandelbrot_proof_commitment = "../commitment"
+mandelbrot_proof_field_air = "../field-air"
+precision = "../../../sketches/precision"

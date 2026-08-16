@@ -76,8 +76,12 @@ constraints under the post-auxiliary challenge. It commits those evaluations
 under typed `"CR01"` and `"CN01"` domains, binds the root through `"CT01"`, and
 derives the first FRI fold challenge through `"FC01"`. A zero-import Wasm gate
 compares every evaluation, root, and transcript value with an independent
-bigint direct-DFT and Poseidon model. FRI folding and query openings remain
-pending.
+bigint direct-DFT and Poseidon model. The `fri` ingot uses that challenge to
+fold each `(f(x), f(-x))` pair onto the squared eight-point domain, commits the
+eight values under `"FR01"` and `"FN01"`, binds them with `"FT01"`, and derives
+`"FC02"`. The oracle checks both the pair formula and an independently
+interpolated even/odd coefficient formula. Remaining folds and query openings
+remain pending.
 
 Escaping witnesses derive a power-of-two proof shape with one terminal marker
 and deterministic inactive padding; invalid and non-escaping claims cannot

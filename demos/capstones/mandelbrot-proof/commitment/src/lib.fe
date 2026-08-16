@@ -1,13 +1,28 @@
 //! Domain-separated Poseidon commitment to canonical bounded-Mandelbrot rows.
 
 use mandelbrot_proof_kernel::{
-    AUXILIARY_ROW_BITS, ENCODED_PROOF_ROW_WIDTHS, EncodedProofRow, EscapesByQ12,
-    EscapeTraceStream, MAX_PADDED_TRACE_LENGTH, PaddedEscapeAirRow, SignedWord,
-    encode_proof_row, encode_signed_word, encoded_auxiliary_row_bit,
-    encoded_proof_row_words, padded_trace_length,
+    AUXILIARY_ROW_BITS,
+    ENCODED_PROOF_ROW_WIDTHS,
+    EncodedProofRow,
+    EscapesByQ12,
+    EscapeTraceStream,
+    MAX_PADDED_TRACE_LENGTH,
+    PaddedEscapeAirRow,
+    SignedWord,
+    encode_proof_row,
+    encode_signed_word,
+    encoded_auxiliary_row_bit,
+    encoded_proof_row_words,
+    padded_trace_length,
 }
 use poseidon_bn254::{
-    Fr, LIMBS, WORD_BITS, PoseidonDomain, bind_plain_words, commit_plain_words, compress,
+    Fr,
+    LIMBS,
+    WORD_BITS,
+    PoseidonDomain,
+    bind_plain_words,
+    commit_plain_words,
+    compress,
     plain_words,
 }
 
@@ -20,14 +35,7 @@ const AUXILIARY_FIELDS: usize = 2
 /// Widths implied by the public-domain and proof-shape checks: signed Q12
 /// point components, the inclusive 2^20 bound, terminal step, semantic trace
 /// length, and a padded length that may reach 2^21.
-const ESCAPES_BY_Q12_PUBLIC_WIDTHS: [u32; PUBLIC_WORDS] = [
-    1, 14,
-    1, 13,
-    21,
-    21,
-    21,
-    22,
-]
+const ESCAPES_BY_Q12_PUBLIC_WIDTHS: [u32; PUBLIC_WORDS] = [1, 14, 1, 13, 21, 21, 21, 22]
 
 /// Pack a four-byte ASCII protocol label without a numeric magic constant.
 const fn protocol_tag(_ label: String<4>) -> u32 {
@@ -49,6 +57,10 @@ pub struct MandelbrotCompositionRowV1 {}
 pub struct MandelbrotCompositionNodeV1 {}
 pub struct MandelbrotCompositionTranscriptV1 {}
 pub struct MandelbrotFriFoldV1 {}
+pub struct MandelbrotFriLayerRowV1 {}
+pub struct MandelbrotFriLayerNodeV1 {}
+pub struct MandelbrotFriLayerTranscriptV1 {}
+pub struct MandelbrotFriFoldV2 {}
 
 impl PoseidonDomain for MandelbrotRowV1 {
     const TAG: u32 = protocol_tag("MR01")
@@ -92,6 +104,22 @@ impl PoseidonDomain for MandelbrotCompositionTranscriptV1 {
 
 impl PoseidonDomain for MandelbrotFriFoldV1 {
     const TAG: u32 = protocol_tag("FC01")
+}
+
+impl PoseidonDomain for MandelbrotFriLayerRowV1 {
+    const TAG: u32 = protocol_tag("FR01")
+}
+
+impl PoseidonDomain for MandelbrotFriLayerNodeV1 {
+    const TAG: u32 = protocol_tag("FN01")
+}
+
+impl PoseidonDomain for MandelbrotFriLayerTranscriptV1 {
+    const TAG: u32 = protocol_tag("FT01")
+}
+
+impl PoseidonDomain for MandelbrotFriFoldV2 {
+    const TAG: u32 = protocol_tag("FC02")
 }
 
 /// Public statement already validated by the cheap proof-domain boundary.
@@ -143,6 +171,15 @@ impl core::marker::Copy for CompositionTranscriptDigest {}
 pub struct FriFoldChallenge { pub value: Fr }
 impl core::marker::Copy for FriFoldChallenge {}
 
+pub struct FriLayerDigest { pub value: Fr }
+impl core::marker::Copy for FriLayerDigest {}
+
+pub struct FriLayerTranscriptDigest { pub value: Fr }
+impl core::marker::Copy for FriLayerTranscriptDigest {}
+
+pub struct FriFoldChallenge2 { pub value: Fr }
+impl core::marker::Copy for FriFoldChallenge2 {}
+
 /// Result of one canonical prover-side pass. Invalid and non-escaping claims
 /// fail closed instead of exposing a digest for an incomplete trace.
 pub struct StreamedCommitment {
@@ -159,10 +196,7 @@ pub struct StreamedCommitment {
 
 impl core::marker::Copy for StreamedCommitment {}
 
-fn pack_words<const N: usize>(
-    _ source: own [u32; N],
-    _ widths: own [u32; N],
-) -> [u32; LIMBS] {
+fn pack_words<const N: usize>(_ source: own [u32; N], _ widths: own [u32; N]) -> [u32; LIMBS] {
     let mut packed: [u32; LIMBS] = [0; LIMBS]
     let mut field: usize = 0
     let mut offset: u32 = 0
@@ -174,8 +208,7 @@ fn pack_words<const N: usize>(
             let destination = offset + bit
             let limb = destination / WORD_BITS
             let shift = destination - limb * WORD_BITS
-            packed[limb as usize] = packed[limb as usize]
-                | (((value >> bit) & 1) << shift)
+            packed[limb as usize] = packed[limb as usize] | (((value >> bit) & 1) << shift)
             bit = bit + 1
         }
         offset = offset + width
@@ -189,14 +222,19 @@ fn packed_row(_ row: own EncodedProofRow) -> [u32; LIMBS] {
 }
 
 fn packed_public(_ public: own EscapesByQ12Public) -> [u32; LIMBS] {
-    pack_words<PUBLIC_WORDS>([
-        public.c_re.sign, public.c_re.magnitude,
-        public.c_im.sign, public.c_im.magnitude,
-        public.bound,
-        public.terminal_step,
-        public.trace_length,
-        public.padded_length,
-    ], ESCAPES_BY_Q12_PUBLIC_WIDTHS)
+    pack_words<PUBLIC_WORDS>(
+        [
+            public.c_re.sign,
+            public.c_re.magnitude,
+            public.c_im.sign,
+            public.c_im.magnitude,
+            public.bound,
+            public.terminal_step,
+            public.trace_length,
+            public.padded_length,
+        ],
+        ESCAPES_BY_Q12_PUBLIC_WIDTHS,
+    )
 }
 
 fn packed_auxiliary_row(_ row: own EncodedProofRow) -> [[u32; LIMBS]; AUXILIARY_FIELDS] {
@@ -216,9 +254,7 @@ fn packed_auxiliary_row(_ row: own EncodedProofRow) -> [[u32; LIMBS]; AUXILIARY_
 }
 
 pub fn row_commitment(_ row: own EncodedProofRow) -> TraceDigest {
-    TraceDigest {
-        value: commit_plain_words<MandelbrotRowV1>(packed_row(row)),
-    }
+    TraceDigest { value: commit_plain_words<MandelbrotRowV1>(packed_row(row)) }
 }
 
 pub fn auxiliary_row_commitment(_ row: own EncodedProofRow) -> AuxiliaryDigest {
@@ -232,27 +268,19 @@ pub fn auxiliary_row_commitment(_ row: own EncodedProofRow) -> AuxiliaryDigest {
 }
 
 pub fn node_commitment(_ left: own TraceDigest, _ right: own TraceDigest) -> TraceDigest {
-    TraceDigest {
-        value: compress<MandelbrotNodeV1>(left.value, right.value),
-    }
+    TraceDigest { value: compress<MandelbrotNodeV1>(left.value, right.value) }
 }
 
 /// Streaming Merkle state for every proof domain admitted by the public Q12
 /// bound. Slot `level` holds the completed left subtree of width `2^level`
 /// selected by the corresponding set bit in `count`.
-struct RawFrontier {
-    count: u32,
-    nodes: [Fr; TRACE_FRONTIER_LEVELS],
-}
+struct RawFrontier { count: u32, nodes: [Fr; TRACE_FRONTIER_LEVELS] }
 
 impl core::marker::Copy for RawFrontier {}
 
 impl RawFrontier {
     fn empty() -> Self {
-        Self {
-            count: 0,
-            nodes: [Fr::zero(); TRACE_FRONTIER_LEVELS],
-        }
+        Self { count: 0, nodes: [Fr::zero(); TRACE_FRONTIER_LEVELS] }
     }
 
     fn complete_root(self) -> Fr {
@@ -266,10 +294,7 @@ impl RawFrontier {
     }
 }
 
-fn push_merkle<D: PoseidonDomain>(
-    _ frontier: own RawFrontier,
-    _ leaf: Fr,
-) -> RawFrontier {
+fn push_merkle<D: PoseidonDomain>(_ frontier: own RawFrontier, _ leaf: Fr) -> RawFrontier {
     let mut frontier = frontier
     let mut carry = leaf
     let mut occupied = frontier.count
@@ -287,19 +312,27 @@ fn push_merkle<D: PoseidonDomain>(
 struct TraceFrontier { raw: RawFrontier }
 impl core::marker::Copy for TraceFrontier {}
 impl TraceFrontier {
-    fn empty() -> Self { Self { raw: RawFrontier::empty() } }
+    fn empty() -> Self {
+        Self { raw: RawFrontier::empty() }
+    }
     fn push(mut self, _ leaf: TraceDigest) -> Self {
         self.raw = push_merkle<MandelbrotNodeV1>(self.raw, leaf.value)
         self
     }
-    fn complete_root(self) -> TraceDigest { TraceDigest { value: self.raw.complete_root() } }
-    fn count(self) -> u32 { self.raw.count }
+    fn complete_root(self) -> TraceDigest {
+        TraceDigest { value: self.raw.complete_root() }
+    }
+    fn count(self) -> u32 {
+        self.raw.count
+    }
 }
 
 struct AuxiliaryFrontier { raw: RawFrontier }
 impl core::marker::Copy for AuxiliaryFrontier {}
 impl AuxiliaryFrontier {
-    fn empty() -> Self { Self { raw: RawFrontier::empty() } }
+    fn empty() -> Self {
+        Self { raw: RawFrontier::empty() }
+    }
     fn push(mut self, _ leaf: AuxiliaryDigest) -> Self {
         self.raw = push_merkle<MandelbrotAuxiliaryNodeV1>(self.raw, leaf.value)
         self
@@ -312,13 +345,30 @@ impl AuxiliaryFrontier {
 struct CompositionFrontier { raw: RawFrontier }
 impl core::marker::Copy for CompositionFrontier {}
 impl CompositionFrontier {
-    fn empty() -> Self { Self { raw: RawFrontier::empty() } }
+    fn empty() -> Self {
+        Self { raw: RawFrontier::empty() }
+    }
     fn push(mut self, _ leaf: CompositionDigest) -> Self {
         self.raw = push_merkle<MandelbrotCompositionNodeV1>(self.raw, leaf.value)
         self
     }
     fn complete_root(self) -> CompositionDigest {
         CompositionDigest { value: self.raw.complete_root() }
+    }
+}
+
+struct FriLayerFrontier { raw: RawFrontier }
+impl core::marker::Copy for FriLayerFrontier {}
+impl FriLayerFrontier {
+    fn empty() -> Self {
+        Self { raw: RawFrontier::empty() }
+    }
+    fn push(mut self, _ leaf: FriLayerDigest) -> Self {
+        self.raw = push_merkle<MandelbrotFriLayerNodeV1>(self.raw, leaf.value)
+        self
+    }
+    fn complete_root(self) -> FriLayerDigest {
+        FriLayerDigest { value: self.raw.complete_root() }
     }
 }
 
@@ -340,14 +390,12 @@ fn invalid_streamed_commitment() -> StreamedCommitment {
 /// Active rows are never retained after entering the Merkle frontier. Once
 /// the least terminal row is found, its AIR values are reused for the uniquely
 /// defined inactive suffix up to the next power-of-two domain.
-pub fn stream_statement_q12(
-    _ c_re_q12: i32,
-    _ c_im_q12: i32,
-    _ bound: u32,
-) -> StreamedCommitment {
+pub fn stream_statement_q12(_ c_re_q12: i32, _ c_im_q12: i32, _ bound: u32) -> StreamedCommitment {
     let claim = EscapesByQ12::new(c_re_q12, c_im_q12, bound)
     let mut stream = EscapeTraceStream::new(claim)
-    if !stream.is_valid() { return invalid_streamed_commitment() }
+    if !stream.is_valid() {
+        return invalid_streamed_commitment()
+    }
 
     let mut frontier = TraceFrontier::empty()
     let mut auxiliary = AuxiliaryFrontier::empty()
@@ -357,7 +405,9 @@ pub fn stream_statement_q12(
         frontier = frontier.push(row_commitment(encoded))
         auxiliary = auxiliary.push(auxiliary_row_commitment(encoded))
         if row.terminal { break }
-        if !stream.can_advance() { return invalid_streamed_commitment() }
+        if !stream.can_advance() {
+            return invalid_streamed_commitment()
+        }
         stream = stream.advance()
     }
 
@@ -405,10 +455,8 @@ pub fn stream_statement_q12(
 /// Fold a compile-time-checked power-of-two row domain through an O(log N)
 /// frontier. The production streamer below updates this same shape as it emits
 /// rows, without retaining the Merkle tree or its leaves.
-fn trace_root_power_of_two<const N: usize>(
-    _ rows: own [EncodedProofRow; N],
-) -> TraceDigest
-    where N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N & (N - 1)) == 0 },
+fn trace_root_power_of_two<const N: usize>(_ rows: own [EncodedProofRow; N]) -> TraceDigest
+where N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N & (N - 1)) == 0 }
 {
     let mut frontier = TraceFrontier::empty()
     let mut row: usize = 0
@@ -423,7 +471,7 @@ fn statement_commitment_power_of_two<const N: usize>(
     _ public: own EscapesByQ12Public,
     _ rows: own [EncodedProofRow; N],
 ) -> StatementDigest
-    where N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N & (N - 1)) == 0 },
+where N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N & (N - 1)) == 0 }
 {
     bind_statement(public, trace_root_power_of_two<N>(rows))
 }
@@ -455,24 +503,18 @@ pub fn bind_auxiliary_trace(
     }
 }
 
-pub fn composition_challenge(
-    _ transcript: own ProofTranscriptDigest,
-) -> CompositionChallenge {
-    CompositionChallenge {
-        value: compress<MandelbrotCompositionV1>(transcript.value, Fr::zero()),
-    }
+pub fn composition_challenge(_ transcript: own ProofTranscriptDigest) -> CompositionChallenge {
+    CompositionChallenge { value: compress<MandelbrotCompositionV1>(transcript.value, Fr::zero()) }
 }
 
 pub fn composition_row_commitment(_ value: Fr) -> CompositionDigest {
-    CompositionDigest {
-        value: compress<MandelbrotCompositionRowV1>(value, Fr::zero()),
-    }
+    CompositionDigest { value: compress<MandelbrotCompositionRowV1>(value, Fr::zero()) }
 }
 
 pub fn composition_root_power_of_two<const N: usize>(
     _ evaluations: own [Fr; N],
 ) -> CompositionDigest
-    where N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N & (N - 1)) == 0 },
+where N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N & (N - 1)) == 0 }
 {
     let mut frontier = CompositionFrontier::empty()
     let mut index: usize = 0
@@ -488,19 +530,41 @@ pub fn bind_composition(
     _ composition: CompositionDigest,
 ) -> CompositionTranscriptDigest {
     CompositionTranscriptDigest {
-        value: compress<MandelbrotCompositionTranscriptV1>(
-            transcript.value,
-            composition.value,
-        ),
+        value: compress<MandelbrotCompositionTranscriptV1>(transcript.value, composition.value),
     }
 }
 
-pub fn fri_fold_challenge(
-    _ transcript: CompositionTranscriptDigest,
-) -> FriFoldChallenge {
-    FriFoldChallenge {
-        value: compress<MandelbrotFriFoldV1>(transcript.value, Fr::zero()),
+pub fn fri_fold_challenge(_ transcript: CompositionTranscriptDigest) -> FriFoldChallenge {
+    FriFoldChallenge { value: compress<MandelbrotFriFoldV1>(transcript.value, Fr::zero()) }
+}
+
+pub fn fri_layer_row_commitment(_ value: Fr) -> FriLayerDigest {
+    FriLayerDigest { value: compress<MandelbrotFriLayerRowV1>(value, Fr::zero()) }
+}
+
+pub fn fri_layer_root_power_of_two<const N: usize>(_ evaluations: own [Fr; N]) -> FriLayerDigest
+where N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N & (N - 1)) == 0 }
+{
+    let mut frontier = FriLayerFrontier::empty()
+    let mut index: usize = 0
+    while index < N {
+        frontier = frontier.push(fri_layer_row_commitment(evaluations[index]))
+        index = index + 1
     }
+    frontier.complete_root()
+}
+
+pub fn bind_fri_layer(
+    _ transcript: CompositionTranscriptDigest,
+    _ layer: FriLayerDigest,
+) -> FriLayerTranscriptDigest {
+    FriLayerTranscriptDigest {
+        value: compress<MandelbrotFriLayerTranscriptV1>(transcript.value, layer.value),
+    }
+}
+
+pub fn fri_fold_challenge2(_ transcript: FriLayerTranscriptDigest) -> FriFoldChallenge2 {
+    FriFoldChallenge2 { value: compress<MandelbrotFriFoldV2>(transcript.value, Fr::zero()) }
 }
 
 pub fn statement_commitment4(
@@ -541,7 +605,9 @@ pub fn streamed_statement_q12_plain_words(
 ) -> [u32; 44] {
     let generated = stream_statement_q12(c_re_q12, c_im_q12, bound)
     let mut output: [u32; 44] = [0; 44]
-    if !generated.valid { return output }
+    if !generated.valid {
+        return output
+    }
 
     output[0] = 1
     output[1] = generated.terminal_step
@@ -569,7 +635,9 @@ pub fn streamed_proof_transcript_q12_plain_words(
 ) -> [u32; 84] {
     let generated = stream_statement_q12(c_re_q12, c_im_q12, bound)
     let mut output: [u32; 84] = [0; 84]
-    if !generated.valid { return output }
+    if !generated.valid {
+        return output
+    }
 
     output[0] = 1
     output[1] = generated.terminal_step

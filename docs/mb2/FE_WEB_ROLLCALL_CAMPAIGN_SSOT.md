@@ -308,9 +308,16 @@ Legend:
   transcript Poseidon trees. Changed challenges, changed claims, invalid
   claims, non-escaping claims, and out-of-domain evaluations are covered. The
   zero-import Wasm result agrees through the final `"FC01"` field value. The
-  first FRI folding layer, query proof, verifier-cost evidence, and proof
-  encoding remain pending. The reusable field API's SPIR-V helper-call seam
-  and GPU permutation lift also remain open.
+  first actual FRI layer now pairs composition evaluations at `x` and `-x`,
+  folds their even and odd parts under that challenge onto the squared
+  eight-point domain, commits typed `"FR01"` leaves under `"FN01"`, binds the
+  layer through `"FT01"`, and derives `"FC02"`. The independent bigint gate
+  checks all eight values both from the pair formula and from separately
+  interpolated even/odd coefficients, then reconstructs the root, transcript,
+  next challenge, and fail-closed invalid result. Remaining FRI layers, query
+  proofs, verifier-cost evidence, and proof encoding remain pending. The
+  reusable field API's SPIR-V helper-call seam and GPU permutation lift also
+  remain open.
   This is a general-tree statement-commitment milestone and executable AIR
   evidence, not yet a succinct proof.
 - [ ] Produce a succinct proof whose verifier is demonstrably cheaper than
@@ -356,9 +363,9 @@ fallback. The semantic receipts are:
 ## Immediate burn-down order
 
 1. Run the external real-GPU handoff above.
-2. Build and gate the first FRI folding layer from the now-committed
-   composition evaluations, then add query openings and measured evidence that
-   verification is cheaper than replaying the orbit.
+2. Complete the remaining FRI layers, add authenticated query openings, and
+   produce measured evidence that verification is cheaper than replaying the
+   orbit.
 3. Finish typed fetch, then Worker/port placement and supervision on the one
    runtime-control spine.
 4. Delete the runtime manifest and finish the legacy disposition.

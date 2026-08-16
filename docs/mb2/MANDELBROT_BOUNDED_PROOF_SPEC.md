@@ -205,7 +205,10 @@ disjoint 16-point coset, folds the four constraint families with consecutive
 challenge powers and their distinct zerofiers, and commits the result under
 typed `"CR01"` leaves and `"CN01"` nodes. Typed `"CT01"` then binds the
 composition root to the ordered transcript before `"FC01"` derives the first
-FRI fold challenge. The actual FRI folding and query schedule remain open.
+FRI fold challenge. The first fold now pairs values at `x` and `-x`, evaluates
+the challenge-weighted even/odd polynomial on the squared eight-point domain,
+commits it under `"FR01"` and `"FN01"`, binds it with `"FT01"`, and derives
+`"FC02"`. Remaining folds and the authenticated query schedule remain open.
 
 `escape_air_row_encoding_q12` now materializes that canonical row encoding in
 Fe. It gives zero only the positive sign and emits a fixed 15-word order.
@@ -249,8 +252,9 @@ before the same field implementation runs as an application GPU kernel.
 The production power-of-two main and auxiliary trace streams, ordered
 pre-composition transcript, 708-constraint composition, composition
 commitment, post-composition transcript, and first FRI challenge now execute.
-FRI folding, query openings, verifier-cost evidence, and the reusable proof
-encoding remain open.
+The first 16-to-8 FRI fold and its transcript stage also execute. Remaining
+folds, query openings, verifier-cost evidence, and the reusable proof encoding
+remain open.
 
 The intended succinct construction is a transparent AIR plus FRI over a field
 with an audited two-adic domain. The first implementation should reuse the

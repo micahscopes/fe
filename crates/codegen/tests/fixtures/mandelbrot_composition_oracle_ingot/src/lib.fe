@@ -1,8 +1,9 @@
-//! Narrow Wasm boundary for the independent composition algebra oracle.
+//! Narrow Wasm boundary for the independent composition and FRI oracle.
 //! Production obtains its challenge from the typed post-auxiliary transcript;
 //! this fixture accepts a u32 only to isolate the polynomial calculation.
 
 use mandelbrot_proof_composition::{compose4x16, evaluate_composition_point4x16}
+use mandelbrot_proof_fri::fold_composition4x16
 use precision::bn254_fr::Bn254Fr
 use precision::field::FieldElement
 
@@ -11,6 +12,44 @@ pub struct ProductionCompositionWords {
     pub root: [u32; 20],
     pub transcript: [u32; 20],
     pub fri: [u32; 20],
+}
+
+pub struct FriLayerProductionWords {
+    pub valid: u32,
+    pub evaluations: [[u32; 20]; 8],
+    pub root: [u32; 20],
+    pub transcript: [u32; 20],
+    pub next_challenge: [u32; 20],
+}
+
+pub fn fri_layer4x16_production_words(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ bound: u32,
+) -> FriLayerProductionWords {
+    let proof = fold_composition4x16(c_re_q12, c_im_q12, bound)
+    let mut evaluations: [[u32; 20]; 8] = [
+        [0; 20],
+        [0; 20],
+        [0; 20],
+        [0; 20],
+        [0; 20],
+        [0; 20],
+        [0; 20],
+        [0; 20],
+    ]
+    let mut index: usize = 0
+    while index < 8 {
+        evaluations[index] = proof.evaluations[index].to_plain_words()
+        index = index + 1
+    }
+    FriLayerProductionWords {
+        valid: if proof.valid { 1 } else { 0 },
+        evaluations: evaluations,
+        root: proof.root.value.to_plain_words(),
+        transcript: proof.transcript.value.to_plain_words(),
+        next_challenge: proof.next_challenge.value.to_plain_words(),
+    }
 }
 
 pub fn composition4x16_production_words(

@@ -5,4 +5,5 @@ version = "0.1.0"
 [dependencies]
 core = "../../../../../ingots/core"
 mandelbrot_proof_composition = "../../../../../demos/capstones/mandelbrot-proof/composition"
+mandelbrot_proof_fri = "../../../../../demos/capstones/mandelbrot-proof/fri"
 precision = "../../../../../demos/sketches/precision"

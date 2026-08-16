@@ -1,0 +1,82 @@
+//! First Fe-native FRI fold for the bounded Mandelbrot composition polynomial.
+//!
+//! Evaluations at `x` and `-x` are folded into an evaluation at `x^2` using
+//! the transcript-derived `FC01` challenge. The eight resulting values are
+//! committed before `FC02` is derived.
+
+use mandelbrot_proof_composition::{CompositionProof, compose4x16}
+use mandelbrot_proof_commitment::{
+    FriFoldChallenge2,
+    FriLayerDigest,
+    FriLayerTranscriptDigest,
+    bind_fri_layer,
+    fri_fold_challenge2,
+    fri_layer_root_power_of_two,
+}
+use mandelbrot_proof_field_air::Fr
+use precision::bn254_fr::Bn254Fr
+use precision::field::FieldElement
+use precision::polynomial::radix2_log
+
+type Field = FieldElement<20, Bn254Fr>
+
+pub struct FriProof8 {
+    pub valid: bool,
+    pub composition: CompositionProof<16>,
+    pub evaluations: [Fr; 8],
+    pub root: FriLayerDigest,
+    pub transcript: FriLayerTranscriptDigest,
+    pub next_challenge: FriFoldChallenge2,
+}
+
+impl core::marker::Copy for FriProof8 {}
+
+fn invalid_fri(_ composition: CompositionProof<16>) -> FriProof8 {
+    FriProof8 {
+        valid: false,
+        composition: composition,
+        evaluations: [Fr::zero(); 8],
+        root: FriLayerDigest { value: Fr::zero() },
+        transcript: FriLayerTranscriptDigest { value: Fr::zero() },
+        next_challenge: FriFoldChallenge2 { value: Fr::zero() },
+    }
+}
+
+/// Fold a 16-point composition codeword to the squared eight-point domain.
+/// For each pair `(f(x), f(-x))`, the next value is
+/// `even(x^2) + challenge * odd(x^2)`.
+pub fn fold_composition4x16(_ c_re_q12: i32, _ c_im_q12: i32, _ bound: u32) -> FriProof8 {
+    let composition = compose4x16(c_re_q12, c_im_q12, bound)
+    if !composition.valid {
+        return invalid_fri(composition)
+    }
+
+    let inverse_two = Fr::from_u32(2).inverse_or_zero()
+    let root = Field::two_adic_root(radix2_log<16>())
+    let mut point = Fr::from_u32(5)
+    let mut evaluations = [Fr::zero(); 8]
+    let mut index: usize = 0
+    while index < 8 {
+        if point.is_zero() {
+            return invalid_fri(composition)
+        }
+        let positive = composition.evaluations[index]
+        let negative = composition.evaluations[index + 8]
+        let even = (positive + negative) * inverse_two
+        let odd = (positive - negative) * inverse_two * point.inverse_or_zero()
+        evaluations[index] = even + composition.fri.value * odd
+        point = point * root
+        index = index + 1
+    }
+
+    let layer_root = fri_layer_root_power_of_two<8>(evaluations)
+    let transcript = bind_fri_layer(composition.transcript, layer_root)
+    FriProof8 {
+        valid: true,
+        composition: composition,
+        evaluations: evaluations,
+        root: layer_root,
+        transcript: transcript,
+        next_challenge: fri_fold_challenge2(transcript),
+    }
+}
