@@ -9,12 +9,72 @@ use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{BackendKind, OptLevel, layout_for};
 use hir::hir_def::HirIngot;
+use num_bigint::BigUint;
 use std::path::Path;
 use url::Url;
 use wasmtime::Val;
 
 const MODULUS: u32 = 2_013_265_921;
 const TWO_ADICITY: u32 = 27;
+const EXT_NONRESIDUE: u32 = 11;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Ext4([u32; 4]);
+
+impl Ext4 {
+    const ZERO: Self = Self([0; 4]);
+    const ONE: Self = Self([1, 0, 0, 0]);
+
+    fn reduced(words: [u32; 4]) -> Self {
+        Self(words.map(|word| word % MODULUS))
+    }
+
+    fn add(self, other: Self) -> Self {
+        let modulus = u64::from(MODULUS);
+        Self(core::array::from_fn(|index| {
+            ((u64::from(self.0[index]) + u64::from(other.0[index])) % modulus) as u32
+        }))
+    }
+
+    /// Independent schoolbook convolution in F[X]/(X^4 - 11).
+    fn mul(self, other: Self) -> Self {
+        let modulus = u64::from(MODULUS);
+        let mut output = [0u64; 4];
+        for left in 0..4 {
+            for right in 0..4 {
+                let mut term = u64::from(self.0[left]) * u64::from(other.0[right]) % modulus;
+                let mut degree = left + right;
+                if degree >= 4 {
+                    degree -= 4;
+                    term = term * u64::from(EXT_NONRESIDUE) % modulus;
+                }
+                output[degree] = (output[degree] + term) % modulus;
+            }
+        }
+        Self(output.map(|word| word as u32))
+    }
+
+    fn pow_big(self, mut exponent: BigUint) -> Self {
+        let mut result = Self::ONE;
+        let mut base = self;
+        while exponent.bits() != 0 {
+            if exponent.bit(0) {
+                result = result.mul(base);
+            }
+            base = base.mul(base);
+            exponent >>= 1usize;
+        }
+        result
+    }
+
+    fn inverse_or_zero(self) -> Self {
+        if self == Self::ZERO {
+            return Self::ZERO;
+        }
+        let order = BigUint::from(MODULUS).pow(4);
+        self.pow_big(order - BigUint::from(2u32))
+    }
+}
 
 fn fixture_url() -> Url {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -294,4 +354,120 @@ fn baby_bear_multiply_lowers_to_browser_u32_spirv() {
     validator
         .validate(&module)
         .expect("BabyBear WGSL should validate in the browser profile");
+}
+
+#[test]
+fn baby_bear_quartic_extension_matches_independent_polynomial_oracle() {
+    let bytes = compile_wasm();
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, bytes).expect("BabyBear module should load");
+    assert!(
+        module.imports().next().is_none(),
+        "extension gate must be zero-import"
+    );
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("BabyBear module should instantiate");
+
+    let values = [
+        Ext4::ZERO,
+        Ext4::ONE,
+        Ext4([0, 1, 0, 0]),
+        Ext4([1, 2, 3, 4]),
+        Ext4([MODULUS - 1, MODULUS - 2, 17, 99]),
+        Ext4::reduced([u32::MAX, 0x8000_0000, 123_456_789, MODULUS + 1]),
+        Ext4([998_244_353, 1_000_000_007, 42, 1_234_567_890]),
+    ];
+
+    for &left in &values {
+        for &right in &values {
+            let mut arguments = Vec::with_capacity(8);
+            arguments.extend_from_slice(&left.0);
+            arguments.extend_from_slice(&right.0);
+            assert_eq!(
+                call(&mut store, &instance, "baby_bear_ext4_add", &arguments, 4,),
+                left.add(right).0,
+                "extension addition mismatch for {left:?} + {right:?}",
+            );
+            assert_eq!(
+                call(&mut store, &instance, "baby_bear_ext4_mul", &arguments, 4,),
+                left.mul(right).0,
+                "extension multiplication mismatch for {left:?} * {right:?}",
+            );
+        }
+    }
+
+    for &value in &values {
+        let inverse = Ext4(
+            call(&mut store, &instance, "baby_bear_ext4_inverse", &value.0, 4)
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(
+            inverse,
+            value.inverse_or_zero(),
+            "extension inverse differs from independent exponentiation for {value:?}",
+        );
+        assert_eq!(
+            value.mul(inverse),
+            if value == Ext4::ZERO {
+                Ext4::ZERO
+            } else {
+                Ext4::ONE
+            },
+            "extension inverse product mismatch for {value:?}",
+        );
+        for exponent in [0, 1, 2, 3, 17, 255, 65_537] {
+            let mut arguments = value.0.to_vec();
+            arguments.push(exponent);
+            assert_eq!(
+                call(&mut store, &instance, "baby_bear_ext4_pow", &arguments, 4,),
+                value.pow_big(BigUint::from(exponent)).0,
+                "extension power mismatch for {value:?}^{exponent}",
+            );
+        }
+    }
+}
+
+#[test]
+fn baby_bear_quartic_multiply_lowers_to_branch_free_browser_spirv() {
+    let db = initialized_db();
+    let ingot = db
+        .workspace()
+        .containing_ingot(&db, fixture_url())
+        .expect("BabyBear oracle fixture ingot");
+    let top_mod = ingot.root_mod(&db);
+    for entry in [
+        "baby_bear_ext4_mul_c0",
+        "baby_bear_ext4_mul_c1",
+        "baby_bear_ext4_mul_c2",
+        "baby_bear_ext4_mul_c3",
+    ] {
+        let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, entry)
+            .expect("BabyBear extension coefficient should build a runtime package");
+        let artifact =
+            fe_codegen::compile_runtime_package_spirv_with_workgroup(&db, &package, [1, 1, 1])
+                .expect("BabyBear extension coefficient should lower to SPIR-V");
+        assert_eq!(artifact.words.first().copied(), Some(0x0723_0203));
+        assert_eq!(
+            artifact.layout.word,
+            sonatina_codegen::isa::spirv::WordKind::U32,
+        );
+        let wgsl = artifact
+            .wgsl
+            .expect("Naga should emit BabyBear extension WGSL");
+        assert!(!wgsl.contains("i64") && !wgsl.contains("u64"));
+        assert!(
+            !wgsl.contains("if "),
+            "BabyBear extension multiply must remain branch-free in browser WGSL",
+        );
+        let module = naga::front::wgsl::parse_str(&wgsl).expect("extension WGSL should parse");
+        let mut validator = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::default(),
+        );
+        validator
+            .validate(&module)
+            .expect("extension WGSL should validate in the browser profile");
+    }
 }

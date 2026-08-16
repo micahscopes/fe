@@ -373,8 +373,19 @@ Legend:
   16-bit partial products, and the BabyBear instance derives its inverse,
   `R^2`, and maximal two-adic root in Fe. The independent u64 gate covers
   arithmetic, inverses, powers, and all subgroup orders; the same multiply
-  lowers to Naga-validated u32-only SPIR-V/WGSL. Quartic challenges, Poseidon,
-  packing, and the protocol retarget remain pending.
+  lowers to Naga-validated u32-only SPIR-V/WGSL. Generic
+  `BinomialExtension4<M>` now supplies the canonical BabyBear challenge field
+  `F[X]/(X^4 - 11)` without a BabyBear-specific arithmetic body. Its
+  zero-import Wasm gate checks addition, schoolbook multiplication, powers,
+  and the tower inverse against an independently implemented u64/BigUint
+  polynomial model. Every output coefficient of the same Fe multiplication
+  lowers to branch-free, u32-only, Naga-valid WGSL. This slice also fixes the
+  shared semantic place model so literal array indices remain
+  `Index(Constant)`: distinct affine element moves are now accepted while a
+  repeated move of the same element still fails. Gates:
+  `precision_baby_bear_oracle.rs`, `semantic_borrowck.rs`, and the three
+  `arr_const_index_*` UI fixtures. BabyBear Poseidon, injective packing, and
+  the complete protocol retarget remain pending.
 - [ ] Make the production claim a chunked recursive high-precision recurrence,
   not one monolithic fixed-Q12 trace. BabyBear is the proof field, not the
   numeric precision ceiling: derive each signed fixed-point coordinate from a

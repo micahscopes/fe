@@ -12,6 +12,7 @@ use super::word_field::{
     montgomery_r2_u32,
     montgomery_word_u32,
 }
+use super::binomial_extension::{BinomialExtension4, WordBinomialExtension4}
 use super::field::pow_mod_u256
 
 pub const BABY_BEAR_MODULUS: u32 = 2013265921
@@ -31,6 +32,7 @@ const TWO_ADIC_ROOT_MONTGOMERY: u32 =
 
 pub struct BabyBearModulus {}
 pub type BabyBear = WordField<BabyBearModulus>
+pub type BabyBearExt4 = BinomialExtension4<BabyBearModulus>
 
 impl WordPrime31 for BabyBearModulus {
     fn modulus() -> u32 { BABY_BEAR_MODULUS }
@@ -41,6 +43,10 @@ impl WordPrime31 for BabyBearModulus {
 impl WordTwoAdicPrime for BabyBearModulus {
     const TWO_ADICITY: u32 = BABY_BEAR_TWO_ADICITY
     fn two_adic_root_montgomery() -> u32 { TWO_ADIC_ROOT_MONTGOMERY }
+}
+
+impl WordBinomialExtension4 for BabyBearModulus {
+    fn nonresidue() -> u32 { 11 }
 }
 
 pub const fn baby_bear_montgomery_neg_inverse() -> u32 { MONTGOMERY_NEG_INVERSE }

@@ -185,7 +185,7 @@ impl<M: WordPrime31> WordField<M> {
     }
 
     pub fn inverse_or_zero(self) -> Self {
-        if self.is_zero() { Self::zero() } else { self.pow_u32(M::modulus() - 2) }
+        self.pow_u32(M::modulus() - 2)
     }
 }
 

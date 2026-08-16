@@ -2,9 +2,125 @@
 
 use precision::baby_bear::{
     BabyBear,
+    BabyBearExt4,
     baby_bear_montgomery_neg_inverse,
     baby_bear_montgomery_r2,
     baby_bear_two_adic_root_plain,
+}
+
+pub fn baby_bear_ext4_add(
+    _ a0: u32,
+    _ a1: u32,
+    _ a2: u32,
+    _ a3: u32,
+    _ b0: u32,
+    _ b1: u32,
+    _ b2: u32,
+    _ b3: u32,
+) -> (u32, u32, u32, u32) {
+    let result = BabyBearExt4::from_u32s([a0, a1, a2, a3]) +
+        BabyBearExt4::from_u32s([b0, b1, b2, b3])
+    let words = result.to_u32s()
+    (words[0], words[1], words[2], words[3])
+}
+
+pub fn baby_bear_ext4_mul(
+    _ a0: u32,
+    _ a1: u32,
+    _ a2: u32,
+    _ a3: u32,
+    _ b0: u32,
+    _ b1: u32,
+    _ b2: u32,
+    _ b3: u32,
+) -> (u32, u32, u32, u32) {
+    let result = BabyBearExt4::from_u32s([a0, a1, a2, a3]) *
+        BabyBearExt4::from_u32s([b0, b1, b2, b3])
+    let words = result.to_u32s()
+    (words[0], words[1], words[2], words[3])
+}
+
+pub fn baby_bear_ext4_mul_c0(
+    _ a0: u32,
+    _ a1: u32,
+    _ a2: u32,
+    _ a3: u32,
+    _ b0: u32,
+    _ b1: u32,
+    _ b2: u32,
+    _ b3: u32,
+) -> u32 {
+    let result = BabyBearExt4::from_u32s([a0, a1, a2, a3]) *
+        BabyBearExt4::from_u32s([b0, b1, b2, b3])
+    result.to_u32s()[0]
+}
+
+pub fn baby_bear_ext4_mul_c1(
+    _ a0: u32,
+    _ a1: u32,
+    _ a2: u32,
+    _ a3: u32,
+    _ b0: u32,
+    _ b1: u32,
+    _ b2: u32,
+    _ b3: u32,
+) -> u32 {
+    let result = BabyBearExt4::from_u32s([a0, a1, a2, a3]) *
+        BabyBearExt4::from_u32s([b0, b1, b2, b3])
+    result.to_u32s()[1]
+}
+
+pub fn baby_bear_ext4_mul_c2(
+    _ a0: u32,
+    _ a1: u32,
+    _ a2: u32,
+    _ a3: u32,
+    _ b0: u32,
+    _ b1: u32,
+    _ b2: u32,
+    _ b3: u32,
+) -> u32 {
+    let result = BabyBearExt4::from_u32s([a0, a1, a2, a3]) *
+        BabyBearExt4::from_u32s([b0, b1, b2, b3])
+    result.to_u32s()[2]
+}
+
+pub fn baby_bear_ext4_mul_c3(
+    _ a0: u32,
+    _ a1: u32,
+    _ a2: u32,
+    _ a3: u32,
+    _ b0: u32,
+    _ b1: u32,
+    _ b2: u32,
+    _ b3: u32,
+) -> u32 {
+    let result = BabyBearExt4::from_u32s([a0, a1, a2, a3]) *
+        BabyBearExt4::from_u32s([b0, b1, b2, b3])
+    result.to_u32s()[3]
+}
+
+pub fn baby_bear_ext4_inverse(
+    _ a0: u32,
+    _ a1: u32,
+    _ a2: u32,
+    _ a3: u32,
+) -> (u32, u32, u32, u32) {
+    let result = BabyBearExt4::from_u32s([a0, a1, a2, a3]).inverse_or_zero()
+    let words = result.to_u32s()
+    (words[0], words[1], words[2], words[3])
+}
+
+pub fn baby_bear_ext4_pow(
+    _ a0: u32,
+    _ a1: u32,
+    _ a2: u32,
+    _ a3: u32,
+    _ exponent: u32,
+) -> (u32, u32, u32, u32) {
+    let result = BabyBearExt4::from_u32s([a0, a1, a2, a3]).pow_u32(exponent)
+    let words = result.to_u32s()
+    (words[0], words[1], words[2], words[3])
 }
 
 pub fn baby_bear_parameters() -> (u32, u32, u32) {

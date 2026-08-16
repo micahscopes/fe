@@ -1,0 +1,177 @@
+//! Generic quartic binomial extension over a u32-native word prime.
+//!
+//! Elements are coefficients in `F[X] / (X^4 - W)`. The base modulus brand
+//! supplies only the canonical nonresidue `W`; addition, multiplication, and
+//! inversion are authored once here. BabyBear selects `W = 11`, matching the
+//! canonical Plonky3 challenge field.
+
+use core::marker::Copy
+use core::ops::{Add, Mul, Neg, Sub}
+use super::word_field::{WordField, WordPrime31}
+
+pub trait WordBinomialExtension4: WordPrime31 {
+    fn nonresidue() -> u32
+}
+
+pub struct BinomialExtension4<M> { coefficients: [WordField<M>; 4] }
+impl<M> Copy for BinomialExtension4<M> {}
+
+impl<M: WordBinomialExtension4> BinomialExtension4<M> {
+    pub const fn zero() -> Self {
+        Self { coefficients: [WordField<M>::zero(); 4] }
+    }
+
+    pub fn one() -> Self {
+        Self {
+            coefficients: [
+                WordField<M>::one(),
+                WordField<M>::zero(),
+                WordField<M>::zero(),
+                WordField<M>::zero(),
+            ],
+        }
+    }
+
+    pub fn from_base(_ value: WordField<M>) -> Self {
+        Self {
+            coefficients: [
+                value,
+                WordField<M>::zero(),
+                WordField<M>::zero(),
+                WordField<M>::zero(),
+            ],
+        }
+    }
+
+    pub fn from_u32s(_ values: [u32; 4]) -> Self {
+        Self {
+            coefficients: [
+                WordField<M>::from_u32(values[0]),
+                WordField<M>::from_u32(values[1]),
+                WordField<M>::from_u32(values[2]),
+                WordField<M>::from_u32(values[3]),
+            ],
+        }
+    }
+
+    pub fn to_u32s(self) -> [u32; 4] {
+        [
+            self.coefficients[0].to_u32(),
+            self.coefficients[1].to_u32(),
+            self.coefficients[2].to_u32(),
+            self.coefficients[3].to_u32(),
+        ]
+    }
+
+    pub fn coefficient(self, _ index: usize) -> WordField<M> {
+        self.coefficients[index]
+    }
+
+    pub fn is_zero(self) -> bool {
+        self.coefficients[0].is_zero()
+            && self.coefficients[1].is_zero()
+            && self.coefficients[2].is_zero()
+            && self.coefficients[3].is_zero()
+    }
+
+    pub fn equals(self, _ other: Self) -> bool {
+        self.coefficients[0].equals(other.coefficients[0])
+            && self.coefficients[1].equals(other.coefficients[1])
+            && self.coefficients[2].equals(other.coefficients[2])
+            && self.coefficients[3].equals(other.coefficients[3])
+    }
+
+    pub fn square(self) -> Self { self * self }
+
+    pub fn pow_u32(self, _ exponent: u32) -> Self {
+        let mut result = Self::one()
+        let mut base = self
+        let mut exponent = exponent
+        while exponent != 0 {
+            if (exponent & 1) == 1 { result = result * base }
+            base = base.square()
+            exponent = exponent >> 1
+        }
+        result
+    }
+
+    /// Quartic inverse through the quadratic tower
+    /// `F < F[X²]/(X⁴-W) < F[X]/(X⁴-W)`. Zero maps to zero through the base
+    /// field's `inverse_or_zero`, so the operation fails closed without a
+    /// second representation or sentinel.
+    pub fn inverse_or_zero(self) -> Self {
+        let a0 = self.coefficients[0]
+        let a1 = self.coefficients[1]
+        let a2 = self.coefficients[2]
+        let a3 = self.coefficients[3]
+        let w = WordField<M>::from_u32(M::nonresidue())
+        let two = WordField<M>::one() + WordField<M>::one()
+
+        let norm0 = a0 * a0 + w * a2 * a2 - two * w * a1 * a3
+        let norm1 = two * a0 * a2 - a1 * a1 - w * a3 * a3
+        let norm_inverse = (norm0 * norm0 - w * norm1 * norm1).inverse_or_zero()
+        let inverse0 = norm0 * norm_inverse
+        let inverse1 = -norm1 * norm_inverse
+
+        let even0 = a0 * inverse0 + w * a2 * inverse1
+        let even1 = a0 * inverse1 + a2 * inverse0
+        let odd0 = a1 * inverse0 + w * a3 * inverse1
+        let odd1 = a1 * inverse1 + a3 * inverse0
+        Self { coefficients: [even0, -odd0, even1, -odd1] }
+    }
+}
+
+impl<M: WordBinomialExtension4> Add for BinomialExtension4<M> {
+    fn add(own self, _ other: own Self) -> Self {
+        Self {
+            coefficients: [
+                self.coefficients[0] + other.coefficients[0],
+                self.coefficients[1] + other.coefficients[1],
+                self.coefficients[2] + other.coefficients[2],
+                self.coefficients[3] + other.coefficients[3],
+            ],
+        }
+    }
+}
+
+impl<M: WordBinomialExtension4> Sub for BinomialExtension4<M> {
+    fn sub(own self, _ other: own Self) -> Self {
+        Self {
+            coefficients: [
+                self.coefficients[0] - other.coefficients[0],
+                self.coefficients[1] - other.coefficients[1],
+                self.coefficients[2] - other.coefficients[2],
+                self.coefficients[3] - other.coefficients[3],
+            ],
+        }
+    }
+}
+
+impl<M: WordBinomialExtension4> Neg for BinomialExtension4<M> {
+    fn neg(own self) -> Self {
+        Self {
+            coefficients: [
+                -self.coefficients[0],
+                -self.coefficients[1],
+                -self.coefficients[2],
+                -self.coefficients[3],
+            ],
+        }
+    }
+}
+
+impl<M: WordBinomialExtension4> Mul for BinomialExtension4<M> {
+    fn mul(own self, _ other: own Self) -> Self {
+        let a = self.coefficients
+        let b = other.coefficients
+        let w = WordField<M>::from_u32(M::nonresidue())
+        Self {
+            coefficients: [
+                a[0] * b[0] + w * (a[1] * b[3] + a[2] * b[2] + a[3] * b[1]),
+                a[0] * b[1] + a[1] * b[0] + w * (a[2] * b[3] + a[3] * b[2]),
+                a[0] * b[2] + a[1] * b[1] + a[2] * b[0] + w * a[3] * b[3],
+                a[0] * b[3] + a[1] * b[2] + a[2] * b[1] + a[3] * b[0],
+            ],
+        }
+    }
+}
