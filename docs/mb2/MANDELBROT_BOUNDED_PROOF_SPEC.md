@@ -227,7 +227,12 @@ unsupported-order rejection through compiled Fe Wasm. One generic Fe
 Cooley-Tukey transform supplies forward NTT and inverse interpolation.
 Compile-time predicates reject zero, non-power-of-two, and field-unsupported
 domains; direct bigint DFT and round-trip gates exercise the same algorithm at
-4, 8, and 16 points. The
+4, 8, and 16 points. Its generic coset low-degree extension interpolates base
+evaluations, applies a multiplicative shift in coefficient form, zero-pads,
+and evaluates on a larger subgroup. The typed result is invalid and all-zero
+when the shift is zero or lies in the base subgroup, so composition cannot
+silently evaluate on roots of the trace zerofier. Independent direct bigint
+interpolation and evaluation gate 4-to-16 and 8-to-16 extensions. The
 field-AIR ingot now consumes this API directly on Wasm. Canonical Poseidon
 parameters derive from Grain inside Fe, and the concise Fe permutation now
 executes the fixed four-row commitment in zero-import Wasm. Its honest SPIR-V
@@ -236,8 +241,7 @@ so aggregate-return inlining or shader function-call lowering is required
 before the same field implementation runs as an application GPU kernel.
 The production power-of-two main and auxiliary trace streams, ordered
 pre-composition transcript, and first Fiat-Shamir challenge now execute.
-Low-degree extension, composition, later transcript stages, and FRI remain
-open.
+Composition, later transcript stages, and FRI remain open.
 
 The intended succinct construction is a transparent AIR plus FRI over a field
 with an audited two-adic domain. The first implementation should reuse the

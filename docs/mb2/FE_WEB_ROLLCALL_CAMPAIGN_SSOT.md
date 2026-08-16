@@ -284,7 +284,12 @@ Legend:
   table or size-specialized butterfly schedule. Const predicates reject zero,
   non-power-of-two, and field-unsupported domains. Independent direct bigint
   DFTs and round trips gate the same generic implementation at 4, 8, and 16
-  points. Low-degree extension, composition, later transcript stages, and FRI
+  points. Generic Fe coset low-degree extension now interpolates the base trace,
+  shifts its coefficients, zero-pads, and evaluates on the larger subgroup. A
+  typed validity bit rejects zero shifts and shifts inside the base subgroup,
+  preventing evaluation on the trace zerofier's roots. Independent direct
+  bigint interpolation/evaluation gates 4-to-16 and 8-to-16 extensions and
+  fail-closed invalid cosets. Composition, later transcript stages, and FRI
   remain pending. The reusable field API's SPIR-V helper-call seam and GPU
   permutation lift also remain open.
   This is a general-tree statement-commitment milestone and executable AIR
@@ -333,9 +338,9 @@ fallback. The semantic receipts are:
 
 1. Run the external real-GPU handoff above.
 2. Build composition constraints from the main and Fe-derived auxiliary
-   columns. Use the now-gated generic Fe radix-2 interpolation to add
-   low-degree extension, then bind the composition commitment before deriving
-   FRI challenges under independent mutation and cost oracles.
+   columns on the now-gated disjoint coset low-degree extension, then bind the
+   composition commitment before deriving FRI challenges under independent
+   mutation and cost oracles.
 3. Finish typed fetch, then Worker/port placement and supervision on the one
    runtime-control spine.
 4. Delete the runtime manifest and finish the legacy disposition.

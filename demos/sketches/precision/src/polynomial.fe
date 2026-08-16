@@ -131,3 +131,56 @@ pub fn radix2_intt<const N: usize, const L: usize, M>(
 {
     transform<N, L, M>(evaluations, true)
 }
+
+/// A low-degree extension plus the proof that its evaluation coset is
+/// disjoint from the base trace subgroup. Invalid shifts fail closed with an
+/// all-zero evaluation vector and `valid = false`.
+pub struct Radix2CosetLde<const N: usize, const L: usize, M> {
+    pub valid: bool,
+    pub evaluations: [FieldElement<L, M>; N],
+}
+
+impl<const N: usize, const L: usize, M> Copy for Radix2CosetLde<N, L, M> {}
+
+pub fn radix2_coset_lde<
+    const N: usize,
+    const OUT: usize,
+    const L: usize,
+    M,
+>(
+    _ base_evaluations: own [FieldElement<L, M>; N],
+    _ shift: FieldElement<L, M>,
+) -> Radix2CosetLde<OUT, L, M>
+    where
+        N > 0,
+        { (N & (N - 1)) == 0 },
+        { radix2_log_unchecked<N>() <= M::TWO_ADICITY },
+        OUT > 0,
+        OUT > N,
+        { (OUT & (OUT - 1)) == 0 },
+        { radix2_log_unchecked<OUT>() <= M::TWO_ADICITY },
+        { (OUT % N) == 0 },
+        L >= 3,
+        M: TwoAdicModulus<L> + U32EmbeddingModulus<L>,
+        Limbs<L>: Head + ShiftAppend + Copy,
+{
+    let zero = FieldElement<L, M>::zero()
+    let one = FieldElement<L, M>::one()
+    if shift.is_zero() || (shift.pow_u32(N.downcast_truncate()) - one).is_zero() {
+        return Radix2CosetLde { valid: false, evaluations: [zero; OUT] }
+    }
+
+    let coefficients = radix2_intt<N, L, M>(base_evaluations)
+    let mut shifted_coefficients: [FieldElement<L, M>; OUT] = [zero; OUT]
+    let mut shift_power = one
+    let mut index: usize = 0
+    while index < N {
+        shifted_coefficients[index] = coefficients[index] * shift_power
+        shift_power = shift_power * shift
+        index = index + 1
+    }
+    Radix2CosetLde {
+        valid: true,
+        evaluations: radix2_ntt<OUT, L, M>(shifted_coefficients),
+    }
+}

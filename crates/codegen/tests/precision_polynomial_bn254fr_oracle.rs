@@ -133,6 +133,87 @@ fn direct_dft(values: &[u32], modulus: &BigUint) -> Vec<BigUint> {
         .collect()
 }
 
+fn subgroup_root(log_n: u32, modulus: &BigUint) -> BigUint {
+    let root_exponent = (modulus - BigUint::from(1u32)) >> 28usize;
+    BigUint::from(5u32)
+        .modpow(&root_exponent, modulus)
+        .modpow(&(BigUint::from(1u32) << (28u32 - log_n)), modulus)
+}
+
+fn direct_coset_lde(
+    evaluations: &[u32],
+    output_size: usize,
+    shift: u32,
+    modulus: &BigUint,
+) -> Vec<BigUint> {
+    let input_size = evaluations.len();
+    let input_root = subgroup_root(input_size.trailing_zeros(), modulus);
+    let inverse_root = input_root.modpow(&(modulus - BigUint::from(2u32)), modulus);
+    let inverse_size = BigUint::from(input_size).modpow(&(modulus - BigUint::from(2u32)), modulus);
+    let coefficients = (0..input_size)
+        .map(|coefficient| {
+            let sum =
+                evaluations
+                    .iter()
+                    .enumerate()
+                    .fold(BigUint::from(0u32), |sum, (sample, value)| {
+                        let exponent = BigUint::from((sample * coefficient) as u32);
+                        (sum + BigUint::from(*value) * inverse_root.modpow(&exponent, modulus))
+                            % modulus
+                    });
+            (sum * &inverse_size) % modulus
+        })
+        .collect::<Vec<_>>();
+    let output_root = subgroup_root(output_size.trailing_zeros(), modulus);
+    (0..output_size)
+        .map(|output| {
+            let point = (BigUint::from(shift)
+                * output_root.modpow(&BigUint::from(output as u32), modulus))
+                % modulus;
+            coefficients
+                .iter()
+                .rev()
+                .fold(BigUint::from(0u32), |value, coefficient| {
+                    (value * &point + coefficient) % modulus
+                })
+        })
+        .collect()
+}
+
+fn call_lde_words(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    name: &str,
+    output: usize,
+    shift: u32,
+    evaluations: &[u32],
+) -> (bool, Vec<u32>) {
+    let function = instance
+        .get_func(&mut *store, name)
+        .unwrap_or_else(|| panic!("`{name}` export should exist"));
+    let mut params = Vec::with_capacity(evaluations.len() + 2);
+    params.push(Val::I32(output as i32));
+    params.push(Val::I32(shift as i32));
+    params.extend(evaluations.iter().map(|value| Val::I32(*value as i32)));
+    let mut results = vec![Val::I32(0); LIMBS + 1];
+    function
+        .call(&mut *store, &params, &mut results)
+        .unwrap_or_else(|error| panic!("{name}[{output}] should run: {error:?}"));
+    let valid = match results[0] {
+        Val::I32(value) => value != 0,
+        ref other => panic!("{name} validity must be i32, got {other:?}"),
+    };
+    let words = results
+        .into_iter()
+        .skip(1)
+        .map(|result| match result {
+            Val::I32(word) => word as u32,
+            other => panic!("{name} result must be i32, got {other:?}"),
+        })
+        .collect();
+    (valid, words)
+}
+
 #[test]
 fn generic_radix2_ntt_and_intt_match_direct_bigint_dft() {
     let wasm = compile_gate();
@@ -178,4 +259,43 @@ fn generic_radix2_ntt_and_intt_match_direct_bigint_dft() {
         vec![0; LIMBS],
         "the test boundary must fail closed on an invalid output index",
     );
+}
+
+#[test]
+fn generic_coset_lde_matches_direct_interpolation_and_evaluation() {
+    let wasm = compile_gate();
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, wasm).expect("Wasm module should load");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("zero-import gate should instantiate");
+    let modulus = prime();
+    let shift = 5u32;
+
+    for (name, evaluations) in [
+        ("coset_lde4_to16_words", vec![2, 3, 5, 7]),
+        (
+            "coset_lde8_to16_words",
+            vec![5, 15, 39, 77, 129, 195, 275, 369],
+        ),
+    ] {
+        let expected = direct_coset_lde(&evaluations, 16, shift, &modulus);
+        for output in 0..16 {
+            let (valid, words) =
+                call_lde_words(&mut store, &instance, name, output, shift, &evaluations);
+            assert!(valid, "shift 5 must define a disjoint evaluation coset");
+            assert_eq!(
+                words,
+                to_limbs(&expected[output]),
+                "generic Fe coset LDE output {output} must equal direct bigint interpolation and evaluation",
+            );
+        }
+
+        for invalid_shift in [0, 1] {
+            let (valid, words) =
+                call_lde_words(&mut store, &instance, name, 0, invalid_shift, &evaluations);
+            assert!(!valid, "shift {invalid_shift} must be rejected");
+            assert_eq!(words, vec![0; LIMBS], "invalid cosets must fail closed");
+        }
+    }
 }

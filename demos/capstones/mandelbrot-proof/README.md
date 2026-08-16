@@ -66,7 +66,11 @@ roots through order `2^28`. An independent bigint gate checks the compiled Fe
 Wasm values and exact subgroup orders. One generic Fe radix-2 transform now
 provides forward NTT and inverse interpolation, rejects invalid domains through
 const predicates, and matches direct bigint DFTs at 4, 8, and 16 points.
-Low-degree extension, composition, and FRI remain pending.
+Generic Fe coset low-degree extension now interpolates, shifts coefficients,
+zero-pads, and evaluates at a larger domain. Its typed validity bit rejects
+zero or base-subgroup shifts, and independent direct bigint interpolation and
+evaluation gate 4-to-16 and 8-to-16 extensions. Composition and FRI remain
+pending.
 
 Escaping witnesses derive a power-of-two proof shape with one terminal marker
 and deterministic inactive padding; invalid and non-escaping claims cannot

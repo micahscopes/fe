@@ -5,7 +5,9 @@
 
 use precision::bn254_fr::Bn254Fr
 use precision::field::{FieldElement, FieldWords}
-use precision::polynomial::{radix2_intt, radix2_ntt}
+use precision::polynomial::{
+    Radix2CosetLde, radix2_coset_lde, radix2_intt, radix2_ntt,
+}
 
 fn words_tuple(_ words: FieldWords<20>) -> (
     u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
@@ -25,6 +27,24 @@ fn output_words<const N: usize>(
 ) -> FieldWords<20> {
     if output >= N { return [0; 20] }
     values[output].to_plain_words()
+}
+
+fn lde_tuple<const N: usize>(
+    _ lde: own Radix2CosetLde<N, 20, Bn254Fr>,
+    _ output: usize,
+) -> (
+    bool,
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    let words = output_words<N>(lde.evaluations, output)
+    (
+        lde.valid,
+        words[0], words[1], words[2], words[3], words[4],
+        words[5], words[6], words[7], words[8], words[9],
+        words[10], words[11], words[12], words[13], words[14],
+        words[15], words[16], words[17], words[18], words[19],
+    )
 }
 
 pub fn ntt4_words(output: u32, a0: u32, a1: u32, a2: u32, a3: u32) -> (
@@ -155,4 +175,47 @@ pub fn roundtrip16_words(
         FieldElement<20, Bn254Fr>::from_u32(a15),
         ])
     ), output as usize))
+}
+
+pub fn coset_lde4_to16_words(
+    output: u32, shift: u32,
+    a0: u32, a1: u32, a2: u32, a3: u32,
+) -> (
+    bool,
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    lde_tuple<16>(radix2_coset_lde<4, 16, 20, Bn254Fr>(
+        [
+            FieldElement<20, Bn254Fr>::from_u32(a0),
+            FieldElement<20, Bn254Fr>::from_u32(a1),
+            FieldElement<20, Bn254Fr>::from_u32(a2),
+            FieldElement<20, Bn254Fr>::from_u32(a3),
+        ],
+        FieldElement<20, Bn254Fr>::from_u32(shift),
+    ), output as usize)
+}
+
+pub fn coset_lde8_to16_words(
+    output: u32, shift: u32,
+    a0: u32, a1: u32, a2: u32, a3: u32,
+    a4: u32, a5: u32, a6: u32, a7: u32,
+) -> (
+    bool,
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    lde_tuple<16>(radix2_coset_lde<8, 16, 20, Bn254Fr>(
+        [
+            FieldElement<20, Bn254Fr>::from_u32(a0),
+            FieldElement<20, Bn254Fr>::from_u32(a1),
+            FieldElement<20, Bn254Fr>::from_u32(a2),
+            FieldElement<20, Bn254Fr>::from_u32(a3),
+            FieldElement<20, Bn254Fr>::from_u32(a4),
+            FieldElement<20, Bn254Fr>::from_u32(a5),
+            FieldElement<20, Bn254Fr>::from_u32(a6),
+            FieldElement<20, Bn254Fr>::from_u32(a7),
+        ],
+        FieldElement<20, Bn254Fr>::from_u32(shift),
+    ), output as usize)
 }
