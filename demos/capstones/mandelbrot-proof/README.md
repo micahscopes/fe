@@ -28,7 +28,16 @@ zero, and premature termination, then proves the companion range constraints
 reject all three. `RangedAirRow` wires every trace column to a type-level Fe
 width and checks the complete row through one nominal entry. A cheap Fe verifier
 boundary validates the public point, bound, terminal step, semantic length, and
-padded domain without replaying the orbit. Transcript binding remains pending.
+padded domain without replaying the orbit.
+
+`commitment` adds the first executable trace root. The canonical 17-column row
+schema has 210 audited bits, which Fe packs injectively into one BN254 field
+element. Fe derives typed row and node domains from `"MR01"` and `"MN01"`, then
+computes a four-leaf Poseidon Merkle root in zero-import Wasm. The independent
+oracle reconstructs the orbit, row packing, canonical Poseidon permutation,
+and tree. It mutates every committed column and row order. General trace
+lengths, public-metadata transcript binding, composition, and FRI remain
+pending.
 
 Escaping witnesses derive a power-of-two proof shape with one terminal marker
 and deterministic inactive padding; invalid and non-escaping claims cannot
@@ -40,6 +49,7 @@ semantics, not artifact bytes:
 
 ```console
 cargo nextest run --release --locked -p fe-codegen --test mandelbrot_bounded_claim_oracle
+cargo nextest run --release --locked -p fe-codegen --test mandelbrot_trace_commitment_oracle
 ```
 
 The canonical claim, integer semantics, witness columns, commitment plan, and

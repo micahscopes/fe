@@ -1,0 +1,83 @@
+//! Domain-separated Poseidon commitment to canonical bounded-Mandelbrot rows.
+
+use mandelbrot_proof_field_air::{
+    ENCODED_PROOF_ROW_WIDTHS, EncodedProofRow, encoded_proof_row_words,
+}
+use poseidon_bn254::{Fr, LIMBS, PoseidonDomain, commit_plain_words, compress, plain_words}
+
+const ROW_WORDS: usize = 17
+
+/// Pack a four-byte ASCII protocol label without a numeric magic constant.
+const fn protocol_tag(_ label: String<4>) -> u32 {
+    let bytes = label.as_bytes()
+    ((bytes[0] as u32) << 24)
+        | ((bytes[1] as u32) << 16)
+        | ((bytes[2] as u32) << 8)
+        | (bytes[3] as u32)
+}
+
+pub struct MandelbrotRowV1 {}
+pub struct MandelbrotNodeV1 {}
+
+impl PoseidonDomain for MandelbrotRowV1 {
+    const TAG: u32 = protocol_tag("MR01")
+}
+
+impl PoseidonDomain for MandelbrotNodeV1 {
+    const TAG: u32 = protocol_tag("MN01")
+}
+
+/// A digest whose constructor fixes the row and node domain policy.
+pub struct TraceDigest { value: Fr }
+
+impl core::marker::Copy for TraceDigest {}
+
+fn packed_row(_ row: own EncodedProofRow) -> [u32; LIMBS] {
+    let source = encoded_proof_row_words(row)
+    let mut packed: [u32; LIMBS] = [0; LIMBS]
+    let mut field: usize = 0
+    let mut offset: u32 = 0
+    while field < ROW_WORDS {
+        let width = ENCODED_PROOF_ROW_WIDTHS[field]
+        let value = source[field]
+        let mut bit: u32 = 0
+        while bit < width {
+            let destination = offset + bit
+            let limb = destination / 13
+            let shift = destination - limb * 13
+            packed[limb as usize] = packed[limb as usize]
+                | (((value >> bit) & 1) << shift)
+            bit = bit + 1
+        }
+        offset = offset + width
+        field = field + 1
+    }
+    packed
+}
+
+pub fn row_commitment(_ row: own EncodedProofRow) -> TraceDigest {
+    TraceDigest {
+        value: commit_plain_words<MandelbrotRowV1>(packed_row(row)),
+    }
+}
+
+pub fn node_commitment(_ left: own TraceDigest, _ right: own TraceDigest) -> TraceDigest {
+    TraceDigest {
+        value: compress<MandelbrotNodeV1>(left.value, right.value),
+    }
+}
+
+/// First executable trace-root gate: four canonical rows, two tree levels.
+pub fn trace_root4(_ rows: own [EncodedProofRow; 4]) -> TraceDigest {
+    let leaf0 = row_commitment(rows[0])
+    let leaf1 = row_commitment(rows[1])
+    let leaf2 = row_commitment(rows[2])
+    let leaf3 = row_commitment(rows[3])
+    let left = node_commitment(leaf0, leaf1)
+    let right = node_commitment(leaf2, leaf3)
+    node_commitment(left, right)
+}
+
+pub fn trace_root4_plain_words(_ rows: own [EncodedProofRow; 4]) -> [u32; 20] {
+    plain_words(trace_root4(rows).value)
+}

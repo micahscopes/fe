@@ -1,0 +1,8 @@
+[ingot]
+name = "mandelbrot_proof_commitment"
+version = "0.1.0"
+
+[dependencies]
+core = "../../../../ingots/core"
+mandelbrot_proof_field_air = "../field-air"
+poseidon_bn254 = "../../../../ingots/poseidon_bn254"

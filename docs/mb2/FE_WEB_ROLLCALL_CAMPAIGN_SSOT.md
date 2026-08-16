@@ -189,7 +189,7 @@ Legend:
   262,144 self-shrinker inputs, checks all 4,080 derived Montgomery words, and
   executes the concise Fe permutation against canonical and independent bigint
   hash vectors in zero-import Wasm. This closes parameter provenance and the
-  Wasm permutation lift, not the pending trace commitment.
+  Wasm permutation lift. The first bounded trace commitment is recorded below.
 - [~] Fe now generates nominal `EscapeWitness`, `EscapeTraceRow`, and expanded
   `EscapeAirRow` values. Compiled Wasm matches an independent i64 replay across
   directed, invalid, and 512 deterministic cases. Every signed Q12
@@ -227,11 +227,16 @@ Legend:
   A separate cheap Fe verifier boundary validates the canonical public point
   and bound, terminal step, `trace_length = terminal_step + 1`, and exact
   next-power-of-two domain without replaying the orbit. Its gate rejects each
-  public/shape mutation independently. Cryptographically binding that metadata,
-  the domain-separated Poseidon trace commitment, composition, and FRI remain
+  public/shape mutation independently. A first real commitment slice now packs
+  the 17 range-constrained columns into one injective 210-bit field encoding,
+  derives typed `"MR01"` row and `"MN01"` node domains in Fe, and computes a
+  four-leaf Poseidon Merkle root in zero-import Wasm. The independent oracle
+  reconstructs the orbit, encoding, canonical permutation, and tree, mutates
+  every column, and proves row-order sensitivity. General trace lengths,
+  cryptographic binding of public metadata, composition, and FRI remain
   pending. The reusable field API's SPIR-V helper-call seam and GPU permutation
-  lift also remain open. No trace root is claimed yet. This is executable
-  initial AIR evidence rather than a proof.
+  lift also remain open. This is a trace-commitment milestone and executable
+  AIR evidence, not yet a succinct proof.
 - [ ] Produce a succinct proof whose verifier is demonstrably cheaper than
   replaying the orbit.
 - [ ] Define a typed proof encoding and prove browser/native verifier parity,

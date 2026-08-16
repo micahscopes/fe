@@ -48,6 +48,46 @@ pub struct EncodedProofRow {
 
 impl core::marker::Copy for EncodedProofRow {}
 
+/// Audited bit widths for the canonical commitment encoding below. Their sum
+/// is 210, so every range-valid row has an injective representation in one
+/// BN254 field element. Range constraints, rather than truncating masks, make
+/// this packing sound.
+pub const ENCODED_PROOF_ROW_WIDTHS: [u32; 17] = [
+    21,
+    1, 15,
+    1, 15,
+    30,
+    30,
+    31,
+    1, 18,
+    12,
+    1, 19,
+    12,
+    1,
+    1,
+    1,
+]
+
+/// Canonical commitment words for one padded proof row. The order is the 15
+/// AIR words followed by `(active, unique_terminal)`.
+pub fn encoded_proof_row_words(_ row: own EncodedProofRow) -> [u32; 17] {
+    [
+        row.air.step,
+        row.air.zr.sign, row.air.zr.magnitude,
+        row.air.zi.sign, row.air.zi.magnitude,
+        row.air.rr,
+        row.air.ii,
+        row.air.magnitude,
+        row.air.q_re.sign, row.air.q_re.magnitude,
+        row.air.r_re,
+        row.air.q_im.sign, row.air.q_im.magnitude,
+        row.air.r_im,
+        row.air.terminal,
+        row.active,
+        row.terminal,
+    ]
+}
+
 /// Low-degree range witness. `bits` reconstruct the value, while `any` is the
 /// inclusive prefix OR. The latter gives canonical-zero and nonzero predicates
 /// without one high-degree product over every bit.

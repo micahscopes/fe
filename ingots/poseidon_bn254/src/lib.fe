@@ -26,6 +26,10 @@ const BN254_FR_PRIME: u256 = 218882428718392752222464057452572750885483644004160
 
 pub type Fr = FieldElement<LIMBS, Bn254Fr>
 
+/// A type-level Poseidon capacity tag. Callers define semantic domains with
+/// named marker types instead of threading untyped integer selectors.
+pub trait PoseidonDomain { const TAG: u32 }
+
 struct Grain80 { state: u128, outputs: u32, available: u32 }
 impl Copy for Grain80 {}
 
@@ -338,8 +342,28 @@ pub fn hash2(_ left: Fr, _ right: Fr) -> Fr {
     permute3([Fr::zero(), left, right])[0]
 }
 
+/// Compress two field elements with a type-selected capacity lane.
+pub fn compress<D: PoseidonDomain>(_ left: Fr, _ right: Fr) -> Fr {
+    permute3([Fr::from_u32(D::TAG), left, right])[0]
+}
+
+/// Commit one already-range-checked little-endian radix-2^13 field encoding.
+/// The caller owns the injective schema; this facade keeps field construction
+/// and the domain-separated capacity lane inside the Poseidon ingot.
+pub fn commit_plain_words<D: PoseidonDomain>(
+    _ words: own FieldWords<LIMBS>,
+) -> Fr {
+    compress<D>(Fr::from_plain_words(words), Fr::zero())
+}
+
+/// Canonical plain-word boundary for callers that otherwise remain insulated
+/// from the field implementation ingot.
+pub fn plain_words(_ value: Fr) -> FieldWords<LIMBS> {
+    value.to_plain_words()
+}
+
 /// Convenience boundary for ordinary u32 inputs and canonical plain output
 /// words. Larger callers should import `Fr` once and use `hash2` directly.
 pub fn hash2_u32(_ left: u32, _ right: u32) -> FieldWords<LIMBS> {
-    hash2(Fr::from_u32(left), Fr::from_u32(right)).to_plain_words()
+    plain_words(hash2(Fr::from_u32(left), Fr::from_u32(right)))
 }

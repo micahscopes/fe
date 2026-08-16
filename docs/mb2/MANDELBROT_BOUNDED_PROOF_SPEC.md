@@ -172,30 +172,38 @@ non-bit terminal and malformed high-OR witnesses.
 
 ## Commitment and proof direction
 
-The trace commitment will be a domain-separated Poseidon Merkle tree over
-canonical row encodings. Signed integers are encoded as a sign bit plus bounded
+The trace commitment is a domain-separated Poseidon Merkle tree over canonical
+row encodings. Signed integers are encoded as a sign bit plus bounded
 magnitude, not by silently treating a negative i32 as an unconstrained field
-element. Claim, numeric-model version, padded trace length, and terminal row
-are transcript inputs.
+element. The first executable slice commits an exact four-row escaping trace.
+Fe derives the row and node tags from the visible string literals `"MR01"` and
+`"MN01"`; no numeric protocol identifiers or generated parameter tables appear
+in the implementation. Claim, numeric-model version, padded trace length, and
+terminal row still need binding into the general transcript.
 
 `escape_air_row_encoding_q12` now materializes that canonical row encoding in
 Fe. It gives zero only the positive sign and emits a fixed 15-word order.
 `escape_proof_row_encoding_q12` adds the activity and unique-terminal words to
-that encoding. The independent Wasm gate checks both against separately
-derived encoders for every directed and padded row. This is an encoding gate
-only. It is not a trace hash or a commitment.
+that encoding. The 17 audited column widths total 210 bits, so every
+range-valid row packs injectively into one BN254 field element. Fe performs
+that transparent packing and computes the four leaves and two-level Merkle
+tree. An independent bigint oracle reconstructs the orbit, packing, canonical
+Poseidon permutation, and tree, then mutates every logical column and row
+order. This is a real fixed-size trace commitment, not yet a general proof.
 
 The reusable field substrate is the modulus-branded
 `precision::field::FieldElement<L, M>` over array-native 13-bit limbs. It has
 independently checked addition, subtraction, negation, multiplication, `pow5`,
 signed/unsigned embedding, and Montgomery conversion on a second modulus,
 while BN254 multiplication remains bit-identical to both prior kernels. The
-field-AIR ingot now consumes this API directly on Wasm. Its honest SPIR-V gate
-currently fails closed on the retained array-returning `mul_words` call, so
-aggregate-return inlining or shader function-call lowering is required before
-it replaces the call-free generated GPU kernel. Poseidon constants and the
-permutation still need to be lifted from the proven generated fixture before a
-trace root can be claimed.
+field-AIR ingot now consumes this API directly on Wasm. Canonical Poseidon
+parameters derive from Grain inside Fe, and the concise Fe permutation now
+executes the fixed four-row commitment in zero-import Wasm. Its honest SPIR-V
+gate currently fails closed on the retained array-returning `mul_words` call,
+so aggregate-return inlining or shader function-call lowering is required
+before the same field implementation runs as an application GPU kernel.
+General power-of-two trace commitments, metadata transcript binding,
+composition, and FRI remain open.
 
 The intended succinct construction is a transparent AIR plus FRI over a field
 with an audited two-adic domain. The first implementation should reuse the
