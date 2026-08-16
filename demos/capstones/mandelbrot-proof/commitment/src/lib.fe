@@ -27,10 +27,13 @@ use poseidon_bn254::{
 }
 use poseidon_merkle::{
     MerklePairPath,
+    MerkleQuartetPath,
     pair_path_from_leaves,
     pair_path_two,
     pair_verify,
     pair_verify_two,
+    quartet_path_from_leaves,
+    quartet_verify,
 }
 
 const ROW_WORDS: usize = 17
@@ -59,10 +62,7 @@ const fn protocol_round_tag(_ prefix: String<2>, _ round: u32) -> u32 {
     let bytes = prefix.as_bytes()
     let tens = round / 10
     let ones = round - tens * 10
-    ((bytes[0] as u32) << 24)
-        | ((bytes[1] as u32) << 16)
-        | ((48 + tens) << 8)
-        | (48 + ones)
+    ((bytes[0] as u32) << 24) | ((bytes[1] as u32) << 16) | ((48 + tens) << 8) | (48 + ones)
 }
 
 pub struct MandelbrotRowV1 {}
@@ -71,6 +71,12 @@ pub struct MandelbrotTranscriptV1 {}
 pub struct MandelbrotAuxiliaryRowV1 {}
 pub struct MandelbrotAuxiliaryNodeV1 {}
 pub struct MandelbrotAuxiliaryTranscriptV1 {}
+pub struct MandelbrotMainLdeRowV1 {}
+pub struct MandelbrotMainLdeNodeV1 {}
+pub struct MandelbrotMainLdeTranscriptV1 {}
+pub struct MandelbrotAuxiliaryLdeRowV1 {}
+pub struct MandelbrotAuxiliaryLdeNodeV1 {}
+pub struct MandelbrotAuxiliaryLdeTranscriptV1 {}
 pub struct MandelbrotCompositionV1 {}
 pub struct MandelbrotCompositionRowV1 {}
 pub struct MandelbrotCompositionNodeV1 {}
@@ -103,6 +109,30 @@ impl PoseidonDomain for MandelbrotAuxiliaryNodeV1 {
 
 impl PoseidonDomain for MandelbrotAuxiliaryTranscriptV1 {
     const TAG: u32 = protocol_tag("AT01")
+}
+
+impl PoseidonDomain for MandelbrotMainLdeRowV1 {
+    const TAG: u32 = protocol_tag("MR02")
+}
+
+impl PoseidonDomain for MandelbrotMainLdeNodeV1 {
+    const TAG: u32 = protocol_tag("MN02")
+}
+
+impl PoseidonDomain for MandelbrotMainLdeTranscriptV1 {
+    const TAG: u32 = protocol_tag("MT02")
+}
+
+impl PoseidonDomain for MandelbrotAuxiliaryLdeRowV1 {
+    const TAG: u32 = protocol_tag("AR02")
+}
+
+impl PoseidonDomain for MandelbrotAuxiliaryLdeNodeV1 {
+    const TAG: u32 = protocol_tag("AN02")
+}
+
+impl PoseidonDomain for MandelbrotAuxiliaryLdeTranscriptV1 {
+    const TAG: u32 = protocol_tag("AT02")
 }
 
 impl PoseidonDomain for MandelbrotCompositionV1 {
@@ -177,6 +207,21 @@ pub struct ProofTranscriptDigest { pub value: Fr }
 
 impl core::marker::Copy for ProofTranscriptDigest {}
 
+/// Commitments to the field-valued low-degree extensions. These are distinct
+/// from the base-row roots above: the verifier opens these trees at the FRI
+/// query positions instead of receiving the complete trace.
+pub struct MainLdeDigest { pub value: Fr }
+impl core::marker::Copy for MainLdeDigest {}
+
+pub struct AuxiliaryLdeDigest { pub value: Fr }
+impl core::marker::Copy for AuxiliaryLdeDigest {}
+
+pub struct MainLdeTranscriptDigest { pub value: Fr }
+impl core::marker::Copy for MainLdeTranscriptDigest {}
+
+pub struct AirLdeTranscriptDigest { pub value: Fr }
+impl core::marker::Copy for AirLdeTranscriptDigest {}
+
 pub struct CompositionChallenge { pub value: Fr }
 
 impl core::marker::Copy for CompositionChallenge {}
@@ -211,14 +256,33 @@ pub struct CompositionPairPath<const DEPTH: usize> {
 }
 impl<const DEPTH: usize> core::marker::Copy for CompositionPairPath<DEPTH> {}
 
+pub struct MainLdeQuartetPath<const DEPTH: usize> {
+    pub valid: bool,
+    pub index: u32,
+    pub first_siblings: [Fr; DEPTH],
+    pub second_siblings: [Fr; DEPTH],
+    pub third_siblings: [Fr; DEPTH],
+    pub fourth_siblings: [Fr; DEPTH],
+}
+impl<const DEPTH: usize> core::marker::Copy for MainLdeQuartetPath<DEPTH> {}
+
+pub struct AuxiliaryLdeQuartetPath<const DEPTH: usize> {
+    pub valid: bool,
+    pub index: u32,
+    pub first_siblings: [Fr; DEPTH],
+    pub second_siblings: [Fr; DEPTH],
+    pub third_siblings: [Fr; DEPTH],
+    pub fourth_siblings: [Fr; DEPTH],
+}
+impl<const DEPTH: usize> core::marker::Copy for AuxiliaryLdeQuartetPath<DEPTH> {}
+
 pub struct FriLayerPairPath<const ROUND: u32, const DEPTH: usize> {
     pub valid: bool,
     pub index: u32,
     pub positive_siblings: [Fr; DEPTH],
     pub negative_siblings: [Fr; DEPTH],
 }
-impl<const ROUND: u32, const DEPTH: usize> core::marker::Copy
-    for FriLayerPairPath<ROUND, DEPTH> {}
+impl<const ROUND: u32, const DEPTH: usize> core::marker::Copy for FriLayerPairPath<ROUND, DEPTH> {}
 
 /// Result of one canonical prover-side pass. Invalid and non-escaping claims
 /// fail closed instead of exposing a digest for an incomplete trace.
@@ -231,7 +295,6 @@ pub struct StreamedCommitment {
     pub auxiliary: AuxiliaryDigest,
     pub statement: StatementDigest,
     pub proof_transcript: ProofTranscriptDigest,
-    pub composition: CompositionChallenge,
 }
 
 impl core::marker::Copy for StreamedCommitment {}
@@ -382,6 +445,36 @@ impl AuxiliaryFrontier {
     }
 }
 
+struct MainLdeFrontier { raw: RawFrontier }
+impl core::marker::Copy for MainLdeFrontier {}
+impl MainLdeFrontier {
+    fn empty() -> Self {
+        Self { raw: RawFrontier::empty() }
+    }
+    fn push(mut self, _ leaf: MainLdeDigest) -> Self {
+        self.raw = push_merkle<MandelbrotMainLdeNodeV1>(self.raw, leaf.value)
+        self
+    }
+    fn complete_root(self) -> MainLdeDigest {
+        MainLdeDigest { value: self.raw.complete_root() }
+    }
+}
+
+struct AuxiliaryLdeFrontier { raw: RawFrontier }
+impl core::marker::Copy for AuxiliaryLdeFrontier {}
+impl AuxiliaryLdeFrontier {
+    fn empty() -> Self {
+        Self { raw: RawFrontier::empty() }
+    }
+    fn push(mut self, _ leaf: AuxiliaryLdeDigest) -> Self {
+        self.raw = push_merkle<MandelbrotAuxiliaryLdeNodeV1>(self.raw, leaf.value)
+        self
+    }
+    fn complete_root(self) -> AuxiliaryLdeDigest {
+        AuxiliaryLdeDigest { value: self.raw.complete_root() }
+    }
+}
+
 struct CompositionFrontier { raw: RawFrontier }
 impl core::marker::Copy for CompositionFrontier {}
 impl CompositionFrontier {
@@ -422,7 +515,6 @@ fn invalid_streamed_commitment() -> StreamedCommitment {
         auxiliary: AuxiliaryDigest { value: Fr::zero() },
         statement: StatementDigest { value: Fr::zero() },
         proof_transcript: ProofTranscriptDigest { value: Fr::zero() },
-        composition: CompositionChallenge { value: Fr::zero() },
     }
 }
 
@@ -488,7 +580,6 @@ pub fn stream_statement_q12(_ c_re_q12: i32, _ c_im_q12: i32, _ bound: u32) -> S
         auxiliary: auxiliary,
         statement: statement,
         proof_transcript: proof_transcript,
-        composition: composition_challenge(proof_transcript),
     }
 }
 
@@ -543,7 +634,182 @@ pub fn bind_auxiliary_trace(
     }
 }
 
-pub fn composition_challenge(_ transcript: own ProofTranscriptDigest) -> CompositionChallenge {
+fn field_row_commitment<D: PoseidonDomain, const N: usize>(_ values: ref [Fr; N]) -> Fr
+where N > 0
+{
+    let mut digest = Fr::from_u32(N.downcast_truncate())
+    let mut column: usize = 0
+    while column < N {
+        digest = compress<D>(digest, values[column])
+        column = column + 1
+    }
+    digest
+}
+
+pub fn main_lde_row_commitment(_ values: ref [Fr; ROW_WORDS]) -> MainLdeDigest {
+    MainLdeDigest { value: field_row_commitment<MandelbrotMainLdeRowV1, ROW_WORDS>(values) }
+}
+
+pub fn auxiliary_lde_row_commitment(
+    _ values: ref [Fr; AUXILIARY_ROW_BITS],
+) -> AuxiliaryLdeDigest {
+    AuxiliaryLdeDigest {
+        value: field_row_commitment<MandelbrotAuxiliaryLdeRowV1, AUXILIARY_ROW_BITS>(values),
+    }
+}
+
+pub fn main_lde_root_power_of_two<const N: usize>(_ leaves: own [MainLdeDigest; N]) -> MainLdeDigest
+where N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N & (N - 1)) == 0 }
+{
+    let mut frontier = MainLdeFrontier::empty()
+    let mut index: usize = 0
+    while index < N {
+        frontier = frontier.push(leaves[index])
+        index = index + 1
+    }
+    frontier.complete_root()
+}
+
+pub fn auxiliary_lde_root_power_of_two<const N: usize>(
+    _ leaves: own [AuxiliaryLdeDigest; N],
+) -> AuxiliaryLdeDigest
+where N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N & (N - 1)) == 0 }
+{
+    let mut frontier = AuxiliaryLdeFrontier::empty()
+    let mut index: usize = 0
+    while index < N {
+        frontier = frontier.push(leaves[index])
+        index = index + 1
+    }
+    frontier.complete_root()
+}
+
+pub fn main_lde_quartet_path_power_of_two<const N: usize, const QUARTER: usize, const DEPTH: usize>(
+    _ leaves: own [MainLdeDigest; N],
+    _ index: u32,
+) -> MainLdeQuartetPath<DEPTH>
+where
+    N > 3, N <= MAX_PADDED_TRACE_LENGTH, QUARTER > 0, { QUARTER + QUARTER + QUARTER + QUARTER == N }
+{
+    let mut raw_leaves = [Fr::zero(); N]
+    let mut cursor: usize = 0
+    while cursor < N {
+        raw_leaves[cursor] = leaves[cursor].value
+        cursor = cursor + 1
+    }
+    let raw = quartet_path_from_leaves<MandelbrotMainLdeNodeV1, N, QUARTER, DEPTH>(
+        raw_leaves,
+        index,
+    )
+    MainLdeQuartetPath {
+        valid: raw.valid,
+        index: raw.index,
+        first_siblings: raw.first_siblings,
+        second_siblings: raw.second_siblings,
+        third_siblings: raw.third_siblings,
+        fourth_siblings: raw.fourth_siblings,
+    }
+}
+
+pub fn auxiliary_lde_quartet_path_power_of_two<
+    const N: usize,
+    const QUARTER: usize,
+    const DEPTH: usize,
+>(_ leaves: own [AuxiliaryLdeDigest; N], _ index: u32) -> AuxiliaryLdeQuartetPath<DEPTH>
+where
+    N > 3, N <= MAX_PADDED_TRACE_LENGTH, QUARTER > 0, { QUARTER + QUARTER + QUARTER + QUARTER == N }
+{
+    let mut raw_leaves = [Fr::zero(); N]
+    let mut cursor: usize = 0
+    while cursor < N {
+        raw_leaves[cursor] = leaves[cursor].value
+        cursor = cursor + 1
+    }
+    let raw = quartet_path_from_leaves<MandelbrotAuxiliaryLdeNodeV1, N, QUARTER, DEPTH>(
+        raw_leaves,
+        index,
+    )
+    AuxiliaryLdeQuartetPath {
+        valid: raw.valid,
+        index: raw.index,
+        first_siblings: raw.first_siblings,
+        second_siblings: raw.second_siblings,
+        third_siblings: raw.third_siblings,
+        fourth_siblings: raw.fourth_siblings,
+    }
+}
+
+pub fn verify_main_lde_quartet_path<const DEPTH: usize>(
+    _ first: MainLdeDigest,
+    _ second: MainLdeDigest,
+    _ third: MainLdeDigest,
+    _ fourth: MainLdeDigest,
+    _ path: own MainLdeQuartetPath<DEPTH>,
+    _ root: MainLdeDigest,
+) -> bool {
+    let shared = MerkleQuartetPath {
+        valid: path.valid,
+        index: path.index,
+        first_siblings: path.first_siblings,
+        second_siblings: path.second_siblings,
+        third_siblings: path.third_siblings,
+        fourth_siblings: path.fourth_siblings,
+    }
+    quartet_verify<MandelbrotMainLdeNodeV1, DEPTH>(
+        root.value,
+        first.value,
+        second.value,
+        third.value,
+        fourth.value,
+        shared,
+    )
+}
+
+pub fn verify_auxiliary_lde_quartet_path<const DEPTH: usize>(
+    _ first: AuxiliaryLdeDigest,
+    _ second: AuxiliaryLdeDigest,
+    _ third: AuxiliaryLdeDigest,
+    _ fourth: AuxiliaryLdeDigest,
+    _ path: own AuxiliaryLdeQuartetPath<DEPTH>,
+    _ root: AuxiliaryLdeDigest,
+) -> bool {
+    let shared = MerkleQuartetPath {
+        valid: path.valid,
+        index: path.index,
+        first_siblings: path.first_siblings,
+        second_siblings: path.second_siblings,
+        third_siblings: path.third_siblings,
+        fourth_siblings: path.fourth_siblings,
+    }
+    quartet_verify<MandelbrotAuxiliaryLdeNodeV1, DEPTH>(
+        root.value,
+        first.value,
+        second.value,
+        third.value,
+        fourth.value,
+        shared,
+    )
+}
+
+pub fn bind_main_lde(
+    _ transcript: ProofTranscriptDigest,
+    _ main: MainLdeDigest,
+) -> MainLdeTranscriptDigest {
+    MainLdeTranscriptDigest {
+        value: compress<MandelbrotMainLdeTranscriptV1>(transcript.value, main.value),
+    }
+}
+
+pub fn bind_auxiliary_lde(
+    _ transcript: MainLdeTranscriptDigest,
+    _ auxiliary: AuxiliaryLdeDigest,
+) -> AirLdeTranscriptDigest {
+    AirLdeTranscriptDigest {
+        value: compress<MandelbrotAuxiliaryLdeTranscriptV1>(transcript.value, auxiliary.value),
+    }
+}
+
+pub fn composition_challenge(_ transcript: own AirLdeTranscriptDigest) -> CompositionChallenge {
     CompositionChallenge { value: compress<MandelbrotCompositionV1>(transcript.value, Fr::zero()) }
 }
 
@@ -565,15 +831,11 @@ where N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N & (N - 1)) == 0 }
     frontier.complete_root()
 }
 
-pub fn composition_pair_path_power_of_two<
-    const N: usize,
-    const HALF: usize,
-    const DEPTH: usize,
->(
+pub fn composition_pair_path_power_of_two<const N: usize, const HALF: usize, const DEPTH: usize>(
     _ evaluations: own [Fr; N],
     _ index: u32,
 ) -> CompositionPairPath<DEPTH>
-    where N > 1, N <= MAX_PADDED_TRACE_LENGTH, HALF > 0, { HALF + HALF == N },
+where N > 1, N <= MAX_PADDED_TRACE_LENGTH, HALF > 0, { HALF + HALF == N }
 {
     let mut leaves = [Fr::zero(); N]
     let mut cursor: usize = 0
@@ -581,12 +843,7 @@ pub fn composition_pair_path_power_of_two<
         leaves[cursor] = composition_row_commitment(evaluations[cursor]).value
         cursor = cursor + 1
     }
-    let raw = pair_path_from_leaves<
-        MandelbrotCompositionNodeV1,
-        N,
-        HALF,
-        DEPTH,
-    >(leaves, index)
+    let raw = pair_path_from_leaves<MandelbrotCompositionNodeV1, N, HALF, DEPTH>(leaves, index)
     CompositionPairPath {
         valid: raw.valid,
         index: raw.index,
@@ -619,7 +876,7 @@ pub fn verify_composition_pair_path<const DEPTH: usize>(
 }
 
 pub fn bind_composition(
-    _ transcript: ProofTranscriptDigest,
+    _ transcript: AirLdeTranscriptDigest,
     _ composition: CompositionDigest,
 ) -> CompositionTranscriptDigest {
     CompositionTranscriptDigest {
@@ -632,7 +889,7 @@ pub fn fri_fold_challenge(_ transcript: CompositionTranscriptDigest) -> FriFoldC
 }
 
 pub fn fri_layer_row_commitment<const ROUND: u32>(_ value: Fr) -> FriLayerDigest<ROUND>
-    where { ROUND > 0 }, { ROUND < 100 },
+where { ROUND > 0 }, { ROUND < 100 }
 {
     FriLayerDigest { value: compress<MandelbrotFriLayerRow<ROUND>>(value, Fr::zero()) }
 }
@@ -640,7 +897,7 @@ pub fn fri_layer_row_commitment<const ROUND: u32>(_ value: Fr) -> FriLayerDigest
 pub fn fri_layer_root_power_of_two<const ROUND: u32, const N: usize>(
     _ evaluations: own [Fr; N],
 ) -> FriLayerDigest<ROUND>
-    where { ROUND > 0 }, { ROUND < 100 }, N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N & (N - 1)) == 0 },
+where { ROUND > 0 }, { ROUND < 100 }, N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N & (N - 1)) == 0 }
 {
     let mut frontier = FriLayerFrontier<ROUND>::empty()
     let mut index: usize = 0
@@ -656,17 +913,20 @@ pub fn fri_layer_pair_path_power_of_two<
     const N: usize,
     const HALF: usize,
     const DEPTH: usize,
->(
-    _ evaluations: own [Fr; N],
-    _ index: u32,
-) -> FriLayerPairPath<ROUND, DEPTH>
-    where
-        { ROUND > 0 },
-        { ROUND < 100 },
-        N > 1,
-        N <= MAX_PADDED_TRACE_LENGTH,
-        HALF > 0,
-        { HALF + HALF == N },
+>(_ evaluations: own [Fr; N], _ index: u32) -> FriLayerPairPath<ROUND, DEPTH>
+where
+    {
+        ROUND > 0
+    },
+    {
+        ROUND < 100
+    },
+    N > 1,
+    N <= MAX_PADDED_TRACE_LENGTH,
+    HALF > 0,
+    {
+        HALF + HALF == N
+    }
 {
     let mut leaves = [Fr::zero(); N]
     let mut cursor: usize = 0
@@ -674,12 +934,7 @@ pub fn fri_layer_pair_path_power_of_two<
         leaves[cursor] = fri_layer_row_commitment<ROUND>(evaluations[cursor]).value
         cursor = cursor + 1
     }
-    let raw = pair_path_from_leaves<
-        MandelbrotFriLayerNode<ROUND>,
-        N,
-        HALF,
-        DEPTH,
-    >(leaves, index)
+    let raw = pair_path_from_leaves<MandelbrotFriLayerNode<ROUND>, N, HALF, DEPTH>(leaves, index)
     FriLayerPairPath {
         valid: raw.valid,
         index: raw.index,
@@ -694,7 +949,7 @@ pub fn verify_fri_layer_pair_path<const ROUND: u32, const DEPTH: usize>(
     _ path: own FriLayerPairPath<ROUND, DEPTH>,
     _ root: FriLayerDigest<ROUND>,
 ) -> bool
-    where { ROUND > 0 }, { ROUND < 100 },
+where { ROUND > 0 }, { ROUND < 100 }
 {
     if !path.valid {
         return false
@@ -713,10 +968,11 @@ pub fn verify_fri_layer_pair_path<const ROUND: u32, const DEPTH: usize>(
     )
 }
 
-pub fn fri_layer_pair_path_two<const ROUND: u32>(
-    _ evaluations: own [Fr; 2],
-) -> FriLayerPairPath<ROUND, 0>
-    where { ROUND > 0 }, { ROUND < 100 },
+pub fn fri_layer_pair_path_two<const ROUND: u32>(_ evaluations: own [Fr; 2]) -> FriLayerPairPath<
+    ROUND,
+    0,
+>
+where { ROUND > 0 }, { ROUND < 100 }
 {
     let raw = pair_path_two(0)
     FriLayerPairPath {
@@ -733,7 +989,7 @@ pub fn verify_fri_layer_pair_path_two<const ROUND: u32>(
     _ path: own FriLayerPairPath<ROUND, 0>,
     _ root: FriLayerDigest<ROUND>,
 ) -> bool
-    where { ROUND > 0 }, { ROUND < 100 },
+where { ROUND > 0 }, { ROUND < 100 }
 {
     let shared = MerklePairPath {
         valid: path.valid,
@@ -762,7 +1018,7 @@ pub fn bind_next_fri_layer<const PREVIOUS: u32, const ROUND: u32>(
     _ transcript: FriLayerTranscriptDigest<PREVIOUS>,
     _ layer: FriLayerDigest<ROUND>,
 ) -> FriLayerTranscriptDigest<ROUND>
-    where { PREVIOUS > 0 }, { ROUND == PREVIOUS + 1 }, { ROUND < 100 },
+where { PREVIOUS > 0 }, { ROUND == PREVIOUS + 1 }, { ROUND < 100 }
 {
     FriLayerTranscriptDigest {
         value: compress<MandelbrotFriLayerTranscript<ROUND>>(transcript.value, layer.value),
@@ -772,21 +1028,17 @@ pub fn bind_next_fri_layer<const PREVIOUS: u32, const ROUND: u32>(
 pub fn fri_next_fold_challenge<const ROUND: u32, const NEXT: u32>(
     _ transcript: FriLayerTranscriptDigest<ROUND>,
 ) -> FriFoldChallenge<NEXT>
-    where { ROUND > 0 }, { NEXT == ROUND + 1 }, { NEXT < 100 },
+where { ROUND > 0 }, { NEXT == ROUND + 1 }, { NEXT < 100 }
 {
-    FriFoldChallenge {
-        value: compress<MandelbrotFriFold<NEXT>>(transcript.value, Fr::zero()),
-    }
+    FriFoldChallenge { value: compress<MandelbrotFriFold<NEXT>>(transcript.value, Fr::zero()) }
 }
 
 pub fn fri_query_challenge<const ROUND: u32, const QUERY: u32>(
     _ transcript: FriLayerTranscriptDigest<ROUND>,
 ) -> FriQueryChallenge<QUERY>
-    where { ROUND > 0 }, { ROUND < 100 }, { QUERY > 0 }, { QUERY < 100 },
+where { ROUND > 0 }, { ROUND < 100 }, { QUERY > 0 }, { QUERY < 100 }
 {
-    FriQueryChallenge {
-        value: compress<MandelbrotFriQuery<QUERY>>(transcript.value, Fr::zero()),
-    }
+    FriQueryChallenge { value: compress<MandelbrotFriQuery<QUERY>>(transcript.value, Fr::zero()) }
 }
 
 pub fn statement_commitment4(
@@ -846,17 +1098,17 @@ pub fn streamed_statement_q12_plain_words(
     output
 }
 
-/// Full pre-composition transcript boundary. The 84 words contain metadata,
-/// main root, auxiliary root, the digest that binds both roots to the public
-/// statement, and only then the composition challenge. All auxiliary columns
-/// are derived and committed inside the same Fe pass.
-pub fn streamed_proof_transcript_q12_plain_words(
+/// Base-trace transcript boundary. The 64 words contain metadata, the main
+/// base-row root, the auxiliary base-row root, and the digest binding both to
+/// the public statement. The composition challenge is intentionally absent:
+/// it is derived only after the field-valued LDE roots are committed.
+pub fn streamed_base_proof_transcript_q12_plain_words(
     _ c_re_q12: i32,
     _ c_im_q12: i32,
     _ bound: u32,
-) -> [u32; 84] {
+) -> [u32; 64] {
     let generated = stream_statement_q12(c_re_q12, c_im_q12, bound)
-    let mut output: [u32; 84] = [0; 84]
+    let mut output: [u32; 64] = [0; 64]
     if !generated.valid {
         return output
     }
@@ -868,13 +1120,11 @@ pub fn streamed_proof_transcript_q12_plain_words(
     let trace = plain_words(generated.trace.value)
     let auxiliary = plain_words(generated.auxiliary.value)
     let transcript = plain_words(generated.proof_transcript.value)
-    let composition = plain_words(generated.composition.value)
     let mut limb: usize = 0
     while limb < LIMBS {
         output[4 + limb] = trace[limb]
         output[24 + limb] = auxiliary[limb]
         output[44 + limb] = transcript[limb]
-        output[64 + limb] = composition[limb]
         limb = limb + 1
     }
     output

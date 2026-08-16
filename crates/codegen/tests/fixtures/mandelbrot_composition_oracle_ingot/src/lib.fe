@@ -2,13 +2,35 @@
 //! Production obtains its challenge from the typed post-auxiliary transcript;
 //! this fixture accepts a u32 only to isolate the polynomial calculation.
 
-use mandelbrot_proof_composition::{compose4x16, evaluate_composition_point4x16}
+use core::{BrowserBytes, BrowserPtr, alloc_browser_bytes}
+use mandelbrot_proof_composition::{
+    CompositionProof,
+    evaluate_composition_point4x16,
+    materialized_row_parity_code4x16,
+    opened_numerator_parity_mask4x16,
+    EMPTY_AIR_LDE_COMMITMENT16,
+}
 use mandelbrot_proof_fri::{
+    FriCommitmentQuery4x16,
+    FriProof8,
+    FriProofComplete,
     fold_all_composition4x16,
-    fold_composition4x16,
-    prove_fri_commitment_query4x16,
+    INVALID_COMMITMENT_QUERY4X16,
+    open_fri_commitment_query4x16,
     verify_fri_commitment_query4x16,
 }
+use mandelbrot_proof_commitment::{
+    EscapesByQ12Public,
+    auxiliary_lde_row_commitment,
+    bind_auxiliary_lde,
+    bind_auxiliary_trace,
+    bind_main_lde,
+    bind_statement,
+    composition_challenge,
+    main_lde_row_commitment,
+}
+use mandelbrot_proof_field_air::main_lde_row_values
+use mandelbrot_proof_kernel::encode_signed_word
 use precision::bn254_fr::Bn254Fr
 use precision::field::FieldElement
 
@@ -63,20 +85,298 @@ pub struct FriQueryProductionWords {
     pub final_evaluation: [u32; 20],
 }
 
-pub fn fri_commitment_query4x16_production_words(
+pub struct AirLdeQueryProductionWords {
+    pub valid: u32,
+    pub verified: u32,
+    pub query_index: u32,
+    pub main_root: [u32; 20],
+    pub auxiliary_root: [u32; 20],
+    pub transcript: [u32; 20],
+    pub composition_challenge: [u32; 20],
+    pub main_leaves: [[u32; 20]; 4],
+    pub auxiliary_leaves: [[u32; 20]; 4],
+    pub main_first_siblings: [[u32; 20]; 2],
+    pub main_second_siblings: [[u32; 20]; 2],
+    pub main_third_siblings: [[u32; 20]; 2],
+    pub main_fourth_siblings: [[u32; 20]; 2],
+    pub auxiliary_first_siblings: [[u32; 20]; 2],
+    pub auxiliary_second_siblings: [[u32; 20]; 2],
+    pub auxiliary_third_siblings: [[u32; 20]; 2],
+    pub auxiliary_fourth_siblings: [[u32; 20]; 2],
+}
+
+/// One complete fixture receipt derived from one prover state. Keeping the
+/// independently inspected sections nominal avoids recomputing the expensive
+/// field-valued LDE commitment for each Wasm export.
+pub struct CompleteProductionWords {
+    pub composition: ProductionCompositionWords,
+    pub first: FriLayerProductionWords,
+    pub remaining: FriRemainingProductionWords,
+    pub query: FriQueryProductionWords,
+    pub air_lde: AirLdeQueryProductionWords,
+    pub mutation_acceptance_mask: u32,
+}
+
+fn complete_production_word_count() -> u32 {
+    // Nominal section widths: composition, first FRI layer, remaining FRI
+    // layers, query, and authenticated AIR opening.
+    61 + 221 + 301 + 423 + 563 + 1
+}
+
+struct ReceiptWriter { buffer: BrowserBytes, cursor: u32 }
+
+impl core::marker::Copy for ReceiptWriter {}
+
+impl ReceiptWriter {
+    fn new() -> Self {
+        let allocation = alloc_browser_bytes(complete_production_word_count() * 4)
+        Self {
+            buffer: BrowserBytes {
+                ptr: allocation.address(),
+                len: complete_production_word_count() * 4,
+            },
+            cursor: 0,
+        }
+    }
+
+    fn word(self, _ value: u32) -> Self {
+        if self.cursor >= complete_production_word_count() {
+            return self
+        }
+        let destination: BrowserPtr<u32> = BrowserPtr::from_u32(self.buffer.ptr + self.cursor * 4)
+        destination.write(value)
+        Self { buffer: self.buffer, cursor: self.cursor + 1 }
+    }
+
+    fn field(self, _ value: [u32; 20]) -> Self {
+        let mut writer = self
+        let mut index: usize = 0
+        while index < 20 {
+            writer = writer.word(value[index])
+            index = index + 1
+        }
+        writer
+    }
+
+    fn fields2(self, _ values: [[u32; 20]; 2]) -> Self {
+        let mut writer = self
+        let mut index: usize = 0
+        while index < 2 {
+            writer = writer.field(values[index])
+            index = index + 1
+        }
+        writer
+    }
+
+    fn fields3(self, _ values: [[u32; 20]; 3]) -> Self {
+        let mut writer = self
+        let mut index: usize = 0
+        while index < 3 {
+            writer = writer.field(values[index])
+            index = index + 1
+        }
+        writer
+    }
+
+    fn fields4(self, _ values: [[u32; 20]; 4]) -> Self {
+        let mut writer = self
+        let mut index: usize = 0
+        while index < 4 {
+            writer = writer.field(values[index])
+            index = index + 1
+        }
+        writer
+    }
+
+    fn fields8(self, _ values: [[u32; 20]; 8]) -> Self {
+        let mut writer = self
+        let mut index: usize = 0
+        while index < 8 {
+            writer = writer.field(values[index])
+            index = index + 1
+        }
+        writer
+    }
+
+    fn finish(self) -> BrowserBytes {
+        if self.cursor != complete_production_word_count() {
+            return BrowserBytes { ptr: self.buffer.ptr, len: 0 }
+        }
+        BrowserBytes { ptr: self.buffer.ptr, len: self.cursor * 4 }
+    }
+}
+
+fn encode_complete_production(_ receipt: ref CompleteProductionWords) -> BrowserBytes {
+    let mut writer = ReceiptWriter::new()
+    writer = writer.word(receipt.composition.valid)
+    writer = writer.field(receipt.composition.root)
+    writer = writer.field(receipt.composition.transcript)
+    writer = writer.field(receipt.composition.fri)
+
+    writer = writer.word(receipt.first.valid)
+    writer = writer.fields8(receipt.first.evaluations)
+    writer = writer.field(receipt.first.root)
+    writer = writer.field(receipt.first.transcript)
+    writer = writer.field(receipt.first.next_challenge)
+
+    writer = writer.word(receipt.remaining.valid)
+    writer = writer.fields4(receipt.remaining.second)
+    writer = writer.field(receipt.remaining.second_root)
+    writer = writer.field(receipt.remaining.second_transcript)
+    writer = writer.field(receipt.remaining.third_challenge)
+    writer = writer.fields2(receipt.remaining.third)
+    writer = writer.field(receipt.remaining.third_root)
+    writer = writer.field(receipt.remaining.third_transcript)
+    writer = writer.field(receipt.remaining.fourth_challenge)
+    writer = writer.field(receipt.remaining.final_evaluation)
+    writer = writer.field(receipt.remaining.final_root)
+    writer = writer.field(receipt.remaining.final_transcript)
+
+    writer = writer.word(receipt.query.valid)
+    writer = writer.word(receipt.query.verified)
+    writer = writer.word(receipt.query.query_index)
+    writer = writer.field(receipt.query.composition_positive)
+    writer = writer.field(receipt.query.composition_negative)
+    writer = writer.fields3(receipt.query.composition_positive_siblings)
+    writer = writer.fields3(receipt.query.composition_negative_siblings)
+    writer = writer.field(receipt.query.first_positive)
+    writer = writer.field(receipt.query.first_negative)
+    writer = writer.fields2(receipt.query.first_positive_siblings)
+    writer = writer.fields2(receipt.query.first_negative_siblings)
+    writer = writer.field(receipt.query.second_positive)
+    writer = writer.field(receipt.query.second_negative)
+    writer = writer.field(receipt.query.second_positive_sibling)
+    writer = writer.field(receipt.query.second_negative_sibling)
+    writer = writer.field(receipt.query.third_positive)
+    writer = writer.field(receipt.query.third_negative)
+    writer = writer.field(receipt.query.final_evaluation)
+
+    writer = writer.word(receipt.air_lde.valid)
+    writer = writer.word(receipt.air_lde.verified)
+    writer = writer.word(receipt.air_lde.query_index)
+    writer = writer.field(receipt.air_lde.main_root)
+    writer = writer.field(receipt.air_lde.auxiliary_root)
+    writer = writer.field(receipt.air_lde.transcript)
+    writer = writer.field(receipt.air_lde.composition_challenge)
+    writer = writer.fields4(receipt.air_lde.main_leaves)
+    writer = writer.fields4(receipt.air_lde.auxiliary_leaves)
+    writer = writer.fields2(receipt.air_lde.main_first_siblings)
+    writer = writer.fields2(receipt.air_lde.main_second_siblings)
+    writer = writer.fields2(receipt.air_lde.main_third_siblings)
+    writer = writer.fields2(receipt.air_lde.main_fourth_siblings)
+    writer = writer.fields2(receipt.air_lde.auxiliary_first_siblings)
+    writer = writer.fields2(receipt.air_lde.auxiliary_second_siblings)
+    writer = writer.fields2(receipt.air_lde.auxiliary_third_siblings)
+    writer = writer.fields2(receipt.air_lde.auxiliary_fourth_siblings)
+    writer = writer.word(receipt.mutation_acceptance_mask)
+    writer.finish()
+}
+
+fn air_lde_query_words(
     _ c_re_q12: i32,
     _ c_im_q12: i32,
     _ bound: u32,
+    _ proof: FriCommitmentQuery4x16,
+    _ verified: bool,
+) -> AirLdeQueryProductionWords {
+    let public = EscapesByQ12Public {
+        c_re: encode_signed_word(c_re_q12),
+        c_im: encode_signed_word(c_im_q12),
+        bound: bound,
+        terminal_step: proof.terminal_step,
+        trace_length: proof.trace_length,
+        padded_length: proof.padded_length,
+    }
+    let statement = bind_statement(public, proof.trace)
+    let base = bind_auxiliary_trace(statement, proof.auxiliary)
+    let main = bind_main_lde(base, proof.main_lde_root)
+    let transcript = bind_auxiliary_lde(main, proof.auxiliary_lde_root)
+    let challenge = composition_challenge(transcript)
+    let first_main_values = main_lde_row_values(proof.air_lde.rows[0].main)
+    let second_main_values = main_lde_row_values(proof.air_lde.rows[1].main)
+    let third_main_values = main_lde_row_values(proof.air_lde.rows[2].main)
+    let fourth_main_values = main_lde_row_values(proof.air_lde.rows[3].main)
+    AirLdeQueryProductionWords {
+        valid: if proof.valid { 1 } else { 0 },
+        verified: if verified { 1 } else { 0 },
+        query_index: proof.query_index,
+        main_root: proof.main_lde_root.value.to_plain_words(),
+        auxiliary_root: proof.auxiliary_lde_root.value.to_plain_words(),
+        transcript: transcript.value.to_plain_words(),
+        composition_challenge: challenge.value.to_plain_words(),
+        main_leaves: [
+            main_lde_row_commitment(ref first_main_values)
+                .value
+                .to_plain_words(),
+            main_lde_row_commitment(ref second_main_values)
+                .value
+                .to_plain_words(),
+            main_lde_row_commitment(ref third_main_values)
+                .value
+                .to_plain_words(),
+            main_lde_row_commitment(ref fourth_main_values)
+                .value
+                .to_plain_words(),
+        ],
+        auxiliary_leaves: [
+            auxiliary_lde_row_commitment(ref proof.air_lde.rows[0].auxiliary.values)
+                .value
+                .to_plain_words(),
+            auxiliary_lde_row_commitment(ref proof.air_lde.rows[1].auxiliary.values)
+                .value
+                .to_plain_words(),
+            auxiliary_lde_row_commitment(ref proof.air_lde.rows[2].auxiliary.values)
+                .value
+                .to_plain_words(),
+            auxiliary_lde_row_commitment(ref proof.air_lde.rows[3].auxiliary.values)
+                .value
+                .to_plain_words(),
+        ],
+        main_first_siblings: [
+            proof.air_lde.main_path.first_siblings[0].to_plain_words(),
+            proof.air_lde.main_path.first_siblings[1].to_plain_words(),
+        ],
+        main_second_siblings: [
+            proof.air_lde.main_path.second_siblings[0].to_plain_words(),
+            proof.air_lde.main_path.second_siblings[1].to_plain_words(),
+        ],
+        main_third_siblings: [
+            proof.air_lde.main_path.third_siblings[0].to_plain_words(),
+            proof.air_lde.main_path.third_siblings[1].to_plain_words(),
+        ],
+        main_fourth_siblings: [
+            proof.air_lde.main_path.fourth_siblings[0].to_plain_words(),
+            proof.air_lde.main_path.fourth_siblings[1].to_plain_words(),
+        ],
+        auxiliary_first_siblings: [
+            proof.air_lde.auxiliary_path.first_siblings[0].to_plain_words(),
+            proof.air_lde.auxiliary_path.first_siblings[1].to_plain_words(),
+        ],
+        auxiliary_second_siblings: [
+            proof.air_lde.auxiliary_path.second_siblings[0].to_plain_words(),
+            proof.air_lde.auxiliary_path.second_siblings[1].to_plain_words(),
+        ],
+        auxiliary_third_siblings: [
+            proof.air_lde.auxiliary_path.third_siblings[0].to_plain_words(),
+            proof.air_lde.auxiliary_path.third_siblings[1].to_plain_words(),
+        ],
+        auxiliary_fourth_siblings: [
+            proof.air_lde.auxiliary_path.fourth_siblings[0].to_plain_words(),
+            proof.air_lde.auxiliary_path.fourth_siblings[1].to_plain_words(),
+        ],
+    }
+}
+
+fn query_words(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ bound: u32,
+    _ proof: FriCommitmentQuery4x16,
+    _ verified: bool,
 ) -> FriQueryProductionWords {
-    let proof = prove_fri_commitment_query4x16(c_re_q12, c_im_q12, bound)
     FriQueryProductionWords {
         valid: if proof.valid { 1 } else { 0 },
-        verified: if verify_fri_commitment_query4x16(
-            c_re_q12,
-            c_im_q12,
-            bound,
-            proof,
-        ) { 1 } else { 0 },
+        verified: if verified { 1 } else { 0 },
         query_index: proof.query_index,
         composition_positive: proof.composition.positive.to_plain_words(),
         composition_negative: proof.composition.negative.to_plain_words(),
@@ -110,12 +410,7 @@ pub fn fri_commitment_query4x16_production_words(
     }
 }
 
-pub fn fri_remaining4x16_production_words(
-    _ c_re_q12: i32,
-    _ c_im_q12: i32,
-    _ bound: u32,
-) -> FriRemainingProductionWords {
-    let proof = fold_all_composition4x16(c_re_q12, c_im_q12, bound)
+fn remaining_words(_ proof: FriProofComplete) -> FriRemainingProductionWords {
     let mut second: [[u32; 20]; 4] = [[0; 20], [0; 20], [0; 20], [0; 20]]
     let mut third: [[u32; 20]; 2] = [[0; 20], [0; 20]]
     let mut index: usize = 0
@@ -144,12 +439,7 @@ pub fn fri_remaining4x16_production_words(
     }
 }
 
-pub fn fri_layer4x16_production_words(
-    _ c_re_q12: i32,
-    _ c_im_q12: i32,
-    _ bound: u32,
-) -> FriLayerProductionWords {
-    let proof = fold_composition4x16(c_re_q12, c_im_q12, bound)
+fn first_words(_ proof: FriProof8) -> FriLayerProductionWords {
     let mut evaluations: [[u32; 20]; 8] = [
         [0; 20],
         [0; 20],
@@ -174,18 +464,107 @@ pub fn fri_layer4x16_production_words(
     }
 }
 
-pub fn composition4x16_production_words(
-    _ c_re_q12: i32,
-    _ c_im_q12: i32,
-    _ bound: u32,
-) -> ProductionCompositionWords {
-    let proof = compose4x16(c_re_q12, c_im_q12, bound)
+fn composition_words(_ proof: CompositionProof<16>) -> ProductionCompositionWords {
     ProductionCompositionWords {
         valid: if proof.valid { 1 } else { 0 },
         root: proof.root.value.to_plain_words(),
         transcript: proof.transcript.value.to_plain_words(),
         fri: proof.fri.value.to_plain_words(),
     }
+}
+
+fn zero_complete_production_bytes() -> BrowserBytes {
+    let mut writer = ReceiptWriter::new()
+    let mut index: u32 = 0
+    while index < complete_production_word_count() {
+        writer = writer.word(0)
+        index = index + 1
+    }
+    writer.finish()
+}
+
+pub fn complete_production_bytes(_ c_re_q12: i32, _ c_im_q12: i32, _ bound: u32) -> BrowserBytes {
+    let mut air_lde = EMPTY_AIR_LDE_COMMITMENT16
+    let complete = fold_all_composition4x16(c_re_q12, c_im_q12, bound, mut air_lde)
+    if !complete.valid {
+        return zero_complete_production_bytes()
+    }
+    let mut query = INVALID_COMMITMENT_QUERY4X16
+    let opened = open_fri_commitment_query4x16(
+        c_re_q12,
+        c_im_q12,
+        bound,
+        complete,
+        air_lde,
+        mut query,
+    )
+    if !opened {
+        return zero_complete_production_bytes()
+    }
+    let verified = verify_fri_commitment_query4x16(c_re_q12, c_im_q12, bound, query)
+    let mutation_acceptance_mask = authenticated_query_mutation_acceptance_mask(
+        c_re_q12,
+        c_im_q12,
+        bound,
+        query,
+    )
+    let receipt = CompleteProductionWords {
+        composition: composition_words(complete.first.composition),
+        first: first_words(complete.first),
+        remaining: remaining_words(complete),
+        query: query_words(c_re_q12, c_im_q12, bound, query, verified),
+        air_lde: air_lde_query_words(c_re_q12, c_im_q12, bound, query, verified),
+        mutation_acceptance_mask: mutation_acceptance_mask,
+    }
+    encode_complete_production(ref receipt)
+}
+
+/// Exercise the typed verifier boundary with one representative mutation from
+/// every authenticated layer. A set bit means the verifier accepted that
+/// mutation. Canonical byte decoding has a separate, still-pending malformed
+/// encoding gate.
+fn authenticated_query_mutation_acceptance_mask(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ bound: u32,
+    _ proof: FriCommitmentQuery4x16,
+) -> u32 {
+    let one = FieldElement<20, Bn254Fr>::one()
+    let mut accepted: u32 = 0
+    let mut mutation: u32 = 0
+    while mutation < 11 {
+        let mut mutated = proof
+        match mutation {
+            0 => {
+                mutated.air_lde.rows[0].main.air.step =
+                    mutated.air_lde.rows[0].main.air.step + one
+            }
+            1 => {
+                mutated.air_lde.main_path.first_siblings[0] =
+                    mutated.air_lde.main_path.first_siblings[0] + one
+            }
+            2 => { mutated.main_lde_root.value = mutated.main_lde_root.value + one }
+            3 => { mutated.auxiliary_lde_root.value = mutated.auxiliary_lde_root.value + one }
+            4 => { mutated.composition.positive = mutated.composition.positive + one }
+            5 => {
+                mutated.composition.path.negative_siblings[0] =
+                    mutated.composition.path.negative_siblings[0] + one
+            }
+            6 => { mutated.first.positive = mutated.first.positive + one }
+            7 => {
+                mutated.second.path.positive_siblings[0] =
+                    mutated.second.path.positive_siblings[0] + one
+            }
+            8 => { mutated.final_evaluation = mutated.final_evaluation + one }
+            9 => { mutated.query_index = mutated.query_index ^ 1 }
+            _ => { mutated.terminal_step = mutated.terminal_step + 1 }
+        }
+        if verify_fri_commitment_query4x16(c_re_q12, c_im_q12, bound, mutated) {
+            accepted = accepted | (1 << mutation)
+        }
+        mutation = mutation + 1
+    }
+    accepted
 }
 
 pub fn composition4x16_challenge_evaluation_words(
@@ -251,4 +630,29 @@ pub fn composition4x16_challenge_evaluation_words(
         words[18],
         words[19],
     )
+}
+
+pub fn composition4x16_opened_parity_mask(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ bound: u32,
+    _ challenge: u32,
+    _ evaluation: u32,
+) -> u32 {
+    opened_numerator_parity_mask4x16(
+        c_re_q12,
+        c_im_q12,
+        bound,
+        FieldElement<20, Bn254Fr>::from_u32(challenge),
+        evaluation as usize,
+    )
+}
+
+pub fn composition4x16_materialized_row_parity_code(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ bound: u32,
+    _ evaluation: u32,
+) -> u32 {
+    materialized_row_parity_code4x16(c_re_q12, c_im_q12, bound, evaluation as usize)
 }

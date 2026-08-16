@@ -8,10 +8,7 @@
 
 use poseidon_bn254::{Fr, LIMBS, PoseidonDomain, compress, plain_words}
 
-pub struct MerkleRoot {
-    pub valid: bool,
-    pub value: Fr,
-}
+pub struct MerkleRoot { pub valid: bool, pub value: Fr }
 impl core::marker::Copy for MerkleRoot {}
 
 pub struct MerklePairPath<const DEPTH: usize> {
@@ -21,6 +18,20 @@ pub struct MerklePairPath<const DEPTH: usize> {
     pub negative_siblings: [Fr; DEPTH],
 }
 impl<const DEPTH: usize> core::marker::Copy for MerklePairPath<DEPTH> {}
+
+/// Compact authentication data for one common local position in each quarter
+/// of a power-of-two tree. A STARK transition query needs exactly this shape:
+/// `x`, `x * g`, `-x`, and `-x * g` occupy corresponding positions in four
+/// consecutive quarters of the LDE domain.
+pub struct MerkleQuartetPath<const DEPTH: usize> {
+    pub valid: bool,
+    pub index: u32,
+    pub first_siblings: [Fr; DEPTH],
+    pub second_siblings: [Fr; DEPTH],
+    pub third_siblings: [Fr; DEPTH],
+    pub fourth_siblings: [Fr; DEPTH],
+}
+impl<const DEPTH: usize> core::marker::Copy for MerkleQuartetPath<DEPTH> {}
 
 fn invalid_root() -> MerkleRoot {
     MerkleRoot { valid: false, value: Fr::zero() }
@@ -32,6 +43,17 @@ fn invalid_pair_path<const DEPTH: usize>() -> MerklePairPath<DEPTH> {
         index: 0,
         positive_siblings: [Fr::zero(); DEPTH],
         negative_siblings: [Fr::zero(); DEPTH],
+    }
+}
+
+fn invalid_quartet_path<const DEPTH: usize>() -> MerkleQuartetPath<DEPTH> {
+    MerkleQuartetPath {
+        valid: false,
+        index: 0,
+        first_siblings: [Fr::zero(); DEPTH],
+        second_siblings: [Fr::zero(); DEPTH],
+        third_siblings: [Fr::zero(); DEPTH],
+        fourth_siblings: [Fr::zero(); DEPTH],
     }
 }
 
@@ -104,11 +126,8 @@ pub fn pair_path_from_leaves<
     const N: usize,
     const HALF: usize,
     const DEPTH: usize,
->(
-    _ leaves: own [Fr; N],
-    _ index: u32,
-) -> MerklePairPath<DEPTH>
-    where N > 1, HALF > 0, { HALF + HALF == N },
+>(_ leaves: own [Fr; N], _ index: u32) -> MerklePairPath<DEPTH>
+where N > 1, HALF > 0, { HALF + HALF == N }
 {
     let mut expected_half: usize = 1
     let mut level: usize = 0
@@ -194,6 +213,126 @@ pub fn pair_verify<D: PoseidonDomain, const DEPTH: usize>(
     _ path: own MerklePairPath<DEPTH>,
 ) -> bool {
     let opened = pair_root<D, DEPTH>(positive_leaf, negative_leaf, path)
+    opened.valid && field_values_equal(opened.value, expected)
+}
+
+/// Build the compact four-quarter opening. Each leaf is authenticated only to
+/// its quarter root. The verifier reconstructs the final two levels exactly
+/// once, eliminating the redundant upper siblings in four ordinary paths.
+pub fn quartet_path_from_leaves<
+    D: PoseidonDomain,
+    const N: usize,
+    const QUARTER: usize,
+    const DEPTH: usize,
+>(_ leaves: own [Fr; N], _ index: u32) -> MerkleQuartetPath<DEPTH>
+where N > 3, QUARTER > 0, { QUARTER + QUARTER + QUARTER + QUARTER == N }
+{
+    let mut expected_quarter: usize = 1
+    let mut level: usize = 0
+    while level < DEPTH {
+        expected_quarter = expected_quarter + expected_quarter
+        level = level + 1
+    }
+    let quarter_u32: u32 = QUARTER.downcast_truncate()
+    if expected_quarter != QUARTER || index >= quarter_u32 {
+        return invalid_quartet_path<DEPTH>()
+    }
+
+    let mut nodes = leaves
+    let mut first: usize = index as usize
+    let mut second: usize = first + QUARTER
+    let mut third: usize = second + QUARTER
+    let mut fourth: usize = third + QUARTER
+    let mut width: usize = N
+    let mut first_siblings = [Fr::zero(); DEPTH]
+    let mut second_siblings = [Fr::zero(); DEPTH]
+    let mut third_siblings = [Fr::zero(); DEPTH]
+    let mut fourth_siblings = [Fr::zero(); DEPTH]
+    level = 0
+    while level < DEPTH {
+        first_siblings[level] = nodes[first ^ 1]
+        second_siblings[level] = nodes[second ^ 1]
+        third_siblings[level] = nodes[third ^ 1]
+        fourth_siblings[level] = nodes[fourth ^ 1]
+
+        let parent_count = width / 2
+        let mut parent: usize = 0
+        while parent < parent_count {
+            nodes[parent] = compress<D>(nodes[parent + parent], nodes[parent + parent + 1])
+            parent = parent + 1
+        }
+        first = first / 2
+        second = second / 2
+        third = third / 2
+        fourth = fourth / 2
+        width = parent_count
+        level = level + 1
+    }
+    MerkleQuartetPath {
+        valid: width == 4,
+        index: index,
+        first_siblings: first_siblings,
+        second_siblings: second_siblings,
+        third_siblings: third_siblings,
+        fourth_siblings: fourth_siblings,
+    }
+}
+
+pub fn quartet_root<D: PoseidonDomain, const DEPTH: usize>(
+    _ first_leaf: Fr,
+    _ second_leaf: Fr,
+    _ third_leaf: Fr,
+    _ fourth_leaf: Fr,
+    _ path: own MerkleQuartetPath<DEPTH>,
+) -> MerkleRoot {
+    if !path.valid {
+        return invalid_root()
+    }
+    let mut quarter: u32 = 1
+    let mut shape_level: usize = 0
+    while shape_level < DEPTH {
+        quarter = quarter + quarter
+        shape_level = shape_level + 1
+    }
+    if path.index >= quarter {
+        return invalid_root()
+    }
+
+    let mut first = first_leaf
+    let mut second = second_leaf
+    let mut third = third_leaf
+    let mut fourth = fourth_leaf
+    let mut index = path.index
+    let mut level: usize = 0
+    while level < DEPTH {
+        if (index & 1) == 0 {
+            first = compress<D>(first, path.first_siblings[level])
+            second = compress<D>(second, path.second_siblings[level])
+            third = compress<D>(third, path.third_siblings[level])
+            fourth = compress<D>(fourth, path.fourth_siblings[level])
+        } else {
+            first = compress<D>(path.first_siblings[level], first)
+            second = compress<D>(path.second_siblings[level], second)
+            third = compress<D>(path.third_siblings[level], third)
+            fourth = compress<D>(path.fourth_siblings[level], fourth)
+        }
+        index = index / 2
+        level = level + 1
+    }
+    let left = compress<D>(first, second)
+    let right = compress<D>(third, fourth)
+    MerkleRoot { valid: true, value: compress<D>(left, right) }
+}
+
+pub fn quartet_verify<D: PoseidonDomain, const DEPTH: usize>(
+    _ expected: Fr,
+    _ first_leaf: Fr,
+    _ second_leaf: Fr,
+    _ third_leaf: Fr,
+    _ fourth_leaf: Fr,
+    _ path: own MerkleQuartetPath<DEPTH>,
+) -> bool {
+    let opened = quartet_root<D, DEPTH>(first_leaf, second_leaf, third_leaf, fourth_leaf, path)
     opened.valid && field_values_equal(opened.value, expected)
 }
 

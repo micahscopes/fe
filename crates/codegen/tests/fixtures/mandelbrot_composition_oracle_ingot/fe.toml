@@ -5,5 +5,8 @@ version = "0.1.0"
 [dependencies]
 core = "../../../../../ingots/core"
 mandelbrot_proof_composition = "../../../../../demos/capstones/mandelbrot-proof/composition"
+mandelbrot_proof_commitment = "../../../../../demos/capstones/mandelbrot-proof/commitment"
+mandelbrot_proof_field_air = "../../../../../demos/capstones/mandelbrot-proof/field-air"
 mandelbrot_proof_fri = "../../../../../demos/capstones/mandelbrot-proof/fri"
+mandelbrot_proof_kernel = "../../../../../demos/capstones/mandelbrot-proof/kernel"
 precision = "../../../../../demos/sketches/precision"

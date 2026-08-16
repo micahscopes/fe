@@ -7,19 +7,43 @@
 
 use mandelbrot_proof_kernel::{EscapesByQ12, encode_signed_word, encoded_proof_trace_exact}
 use mandelbrot_proof_field_air::{
+    AirLdeRow,
     Fr,
     MandelbrotConstraintNumerators,
+    air_lde_row4_first_mismatch,
+    main_lde_row_values,
     mandelbrot_constraint_numerators_trace4,
+    mandelbrot_constraint_numerators_opened,
     signed_field,
+    write_air_lde_row4,
+    ZERO_AIR_LDE_ROW,
 }
 use mandelbrot_proof_commitment::{
+    AirLdeTranscriptDigest,
+    AuxiliaryLdeDigest,
+    AuxiliaryLdeQuartetPath,
     CompositionDigest,
+    CompositionChallenge,
     CompositionTranscriptDigest,
     FriFoldChallenge,
+    MainLdeDigest,
+    MainLdeQuartetPath,
+    ProofTranscriptDigest,
+    auxiliary_lde_quartet_path_power_of_two,
+    auxiliary_lde_root_power_of_two,
+    auxiliary_lde_row_commitment,
+    bind_auxiliary_lde,
     bind_composition,
+    bind_main_lde,
     composition_root_power_of_two,
+    composition_challenge,
     fri_fold_challenge,
+    main_lde_quartet_path_power_of_two,
+    main_lde_root_power_of_two,
+    main_lde_row_commitment,
     stream_statement_q12,
+    verify_auxiliary_lde_quartet_path,
+    verify_main_lde_quartet_path,
 }
 use precision::bn254_fr::Bn254Fr
 use precision::field::FieldElement
@@ -34,13 +58,161 @@ impl core::marker::Copy for CompositionEvaluations16 {}
 pub struct CompositionPoint { pub valid: bool, pub value: Fr }
 impl core::marker::Copy for CompositionPoint {}
 
+/// Prover state for the two field-valued LDE trees. Only the roots and one
+/// four-row opening enter the eventual proof; retaining leaf digests here lets
+/// the Fiat-Shamir-selected paths be built without recomputing every row hash.
+pub struct AirLdeCommitment16 {
+    pub valid: bool,
+    pub main_leaves: [MainLdeDigest; 16],
+    pub auxiliary_leaves: [AuxiliaryLdeDigest; 16],
+    pub main_root: MainLdeDigest,
+    pub auxiliary_root: AuxiliaryLdeDigest,
+    pub transcript: AirLdeTranscriptDigest,
+    pub composition: CompositionChallenge,
+}
+impl core::marker::Copy for AirLdeCommitment16 {}
+
+/// Canonical quarter order is `(r, r + 4, r + 8, r + 12)`, where
+/// `r = query_index mod 4`. This covers both current/next rows at `x` and
+/// `-x`, independent of which half of the first FRI domain supplied `x`.
+pub struct AirLdeQuartetOpening4x16 {
+    pub valid: bool,
+    pub rows: [AirLdeRow; 4],
+    pub main_path: MainLdeQuartetPath<2>,
+    pub auxiliary_path: AuxiliaryLdeQuartetPath<2>,
+}
+impl core::marker::Copy for AirLdeQuartetOpening4x16 {}
+
 fn invalid_point() -> CompositionPoint {
     CompositionPoint { valid: false, value: Fr::zero() }
 }
 
+/// Caller-owned prover workspace. Keeping the initializer as a value avoids a
+/// flattened aggregate return while preserving a nominal Fe state object.
+pub const EMPTY_AIR_LDE_COMMITMENT16: AirLdeCommitment16 = AirLdeCommitment16 {
+    valid: false,
+    main_leaves: [MainLdeDigest { value: Fr::zero() }; 16],
+    auxiliary_leaves: [AuxiliaryLdeDigest { value: Fr::zero() }; 16],
+    main_root: MainLdeDigest { value: Fr::zero() },
+    auxiliary_root: AuxiliaryLdeDigest { value: Fr::zero() },
+    transcript: AirLdeTranscriptDigest { value: Fr::zero() },
+    composition: CompositionChallenge { value: Fr::zero() },
+}
+
+/// Caller-owned verifier workspace. This must remain a compile-time value:
+/// four complete AIR rows are far larger than Wasm's multi-value result cap.
+pub const INVALID_AIR_LDE_QUARTET_OPENING4X16: AirLdeQuartetOpening4x16 =
+    AirLdeQuartetOpening4x16 {
+        valid: false,
+        rows: [ZERO_AIR_LDE_ROW; 4],
+        main_path: MainLdeQuartetPath {
+            valid: false,
+            index: 0,
+            first_siblings: [Fr::zero(); 2],
+            second_siblings: [Fr::zero(); 2],
+            third_siblings: [Fr::zero(); 2],
+            fourth_siblings: [Fr::zero(); 2],
+        },
+        auxiliary_path: AuxiliaryLdeQuartetPath {
+            valid: false,
+            index: 0,
+            first_siblings: [Fr::zero(); 2],
+            second_siblings: [Fr::zero(); 2],
+            third_siblings: [Fr::zero(); 2],
+            fourth_siblings: [Fr::zero(); 2],
+        },
+    }
+
+fn lde_point4x16(_ evaluation: usize) -> CompositionPoint {
+    if evaluation >= 16 {
+        return invalid_point()
+    }
+    let shift = Fr::from_u32(5)
+    let one = Fr::one()
+    if shift.is_zero() || (shift.pow_u32(16) - one).is_zero() {
+        return invalid_point()
+    }
+    let output_root = Field::two_adic_root(radix2_log<16>())
+    let evaluation_u32: u32 = evaluation.downcast_truncate()
+    CompositionPoint { valid: true, value: shift * output_root.pow_u32(evaluation_u32) }
+}
+
+pub fn commit_air_lde4x16(
+    _ rows: own [mandelbrot_proof_kernel::EncodedProofRow; 4],
+    _ transcript: ProofTranscriptDigest,
+) -> AirLdeCommitment16 {
+    let zero_main = MainLdeDigest { value: Fr::zero() }
+    let zero_auxiliary = AuxiliaryLdeDigest { value: Fr::zero() }
+    let mut main_leaves = [zero_main; 16]
+    let mut auxiliary_leaves = [zero_auxiliary; 16]
+    let mut evaluation: usize = 0
+    while evaluation < 16 {
+        let point = lde_point4x16(evaluation)
+        if !point.valid {
+            return EMPTY_AIR_LDE_COMMITMENT16
+        }
+        let mut row = ZERO_AIR_LDE_ROW
+        write_air_lde_row4(rows, point.value, mut row)
+        let main_values = main_lde_row_values(row.main)
+        main_leaves[evaluation] = main_lde_row_commitment(ref main_values)
+        auxiliary_leaves[evaluation] = auxiliary_lde_row_commitment(ref row.auxiliary.values)
+        evaluation = evaluation + 1
+    }
+    let main_root = main_lde_root_power_of_two<16>(main_leaves)
+    let auxiliary_root = auxiliary_lde_root_power_of_two<16>(auxiliary_leaves)
+    let main_transcript = bind_main_lde(transcript, main_root)
+    let air_transcript = bind_auxiliary_lde(main_transcript, auxiliary_root)
+    AirLdeCommitment16 {
+        valid: true,
+        main_leaves: main_leaves,
+        auxiliary_leaves: auxiliary_leaves,
+        main_root: main_root,
+        auxiliary_root: auxiliary_root,
+        transcript: air_transcript,
+        composition: composition_challenge(air_transcript),
+    }
+}
+
+fn composition_value_at(
+    _ point: Fr,
+    _ numerators: MandelbrotConstraintNumerators,
+) -> CompositionPoint {
+    let one = Fr::one()
+    let last_trace_point = Field::two_adic_root(radix2_log<4>()).inverse_or_zero()
+    let trace_zerofier = point.pow_u32(4) - one
+    if trace_zerofier.is_zero() || (point - one).is_zero() || (point - last_trace_point).is_zero() {
+        return invalid_point()
+    }
+    let trace_inverse = trace_zerofier.inverse_or_zero()
+    let value = numerators.all_rows * trace_inverse
+        + numerators.pair_rows * (point - last_trace_point) * trace_inverse
+        + numerators.first_row * (point - one).inverse_or_zero()
+        + numerators.last_row * (point - last_trace_point).inverse_or_zero()
+    CompositionPoint { valid: true, value: value }
+}
+
+/// Recompute one composition value from authenticated current and next LDE
+/// rows. The public point and zerofiers remain verifier-derived.
+pub fn evaluate_composition_opened4x16(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ challenge: Fr,
+    _ evaluation: usize,
+    _ row: AirLdeRow,
+    _ next: AirLdeRow,
+) -> CompositionPoint {
+    let point = lde_point4x16(evaluation)
+    if !point.valid {
+        return invalid_point()
+    }
+    let c_re = signed_field(encode_signed_word(c_re_q12))
+    let c_im = signed_field(encode_signed_word(c_im_q12))
+    let numerators = mandelbrot_constraint_numerators_opened(challenge, c_re, c_im, row, next)
+    composition_value_at(point.value, numerators)
+}
+
 /// Evaluate the Fe-derived composition polynomial at one point of the 4x16
-/// coset. The only inputs are the public claim, one folding challenge, and the
-/// point index. Main and auxiliary trace columns are both derived in Fe.
+/// coset. Main and auxiliary trace columns are both derived in Fe.
 pub fn evaluate_composition_point4x16(
     _ c_re_q12: i32,
     _ c_im_q12: i32,
@@ -56,38 +228,99 @@ pub fn evaluate_composition_point4x16(
     if !trace.valid {
         return invalid_point()
     }
-
-    let shift = Fr::from_u32(5)
-    let one = Fr::one()
-    if shift.is_zero() || (shift.pow_u32(16) - one).is_zero() {
+    let point = lde_point4x16(evaluation)
+    if !point.valid {
         return invalid_point()
     }
     let c_re = signed_field(encode_signed_word(c_re_q12))
     let c_im = signed_field(encode_signed_word(c_im_q12))
-    let output_root = Field::two_adic_root(radix2_log<16>())
     let trace_root = Field::two_adic_root(radix2_log<4>())
-    let last_trace_point = Field::two_adic_root(radix2_log<4>()).inverse_or_zero()
-    let evaluation_u32: u32 = evaluation.downcast_truncate()
-    let point = shift * output_root.pow_u32(evaluation_u32)
-    let next_point = point * trace_root
-    let numerators: MandelbrotConstraintNumerators = mandelbrot_constraint_numerators_trace4(
+    let numerators = mandelbrot_constraint_numerators_trace4(
         challenge,
         c_re,
         c_im,
         trace.rows,
-        point,
-        next_point,
+        point.value,
+        point.value * trace_root,
     )
-    let trace_zerofier = point.pow_u32(4) - one
-    if trace_zerofier.is_zero() || (point - one).is_zero() || (point - last_trace_point).is_zero() {
-        return invalid_point()
+    composition_value_at(point.value, numerators)
+}
+
+/// Check that the direct trace and authenticated-row interpreters of the one
+/// generic AIR fold agree at a coset point. Each bit identifies a constraint
+/// family mismatch: all-row, pair-row, first-row, or last-row.
+pub fn opened_numerator_parity_mask4x16(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ bound: u32,
+    _ challenge: Fr,
+    _ evaluation: usize,
+) -> u32 {
+    if evaluation >= 16 {
+        return 15
     }
-    let trace_inverse = trace_zerofier.inverse_or_zero()
-    let value = numerators.all_rows * trace_inverse
-        + numerators.pair_rows * (point - last_trace_point) * trace_inverse
-        + numerators.first_row * (point - one).inverse_or_zero()
-        + numerators.last_row * (point - last_trace_point).inverse_or_zero()
-    CompositionPoint { valid: true, value: value }
+    let claim = EscapesByQ12::new(c_re_q12, c_im_q12, bound)
+    let trace = encoded_proof_trace_exact<4>(claim)
+    let point = lde_point4x16(evaluation)
+    let next_point = lde_point4x16((evaluation + 4) & 15)
+    if !trace.valid || !point.valid || !next_point.valid {
+        return 15
+    }
+    let c_re = signed_field(encode_signed_word(c_re_q12))
+    let c_im = signed_field(encode_signed_word(c_im_q12))
+    let trace_root = Field::two_adic_root(radix2_log<4>())
+    let direct = mandelbrot_constraint_numerators_trace4(
+        challenge,
+        c_re,
+        c_im,
+        trace.rows,
+        point.value,
+        point.value * trace_root,
+    )
+    let mut row = ZERO_AIR_LDE_ROW
+    let mut next = ZERO_AIR_LDE_ROW
+    write_air_lde_row4(trace.rows, point.value, mut row)
+    write_air_lde_row4(trace.rows, next_point.value, mut next)
+    let opened = mandelbrot_constraint_numerators_opened(challenge, c_re, c_im, row, next)
+    let mut mask: u32 = 0
+    if !(direct.all_rows - opened.all_rows).is_zero() { mask = mask | 1 }
+    if !(direct.pair_rows - opened.pair_rows).is_zero() { mask = mask | 2 }
+    if !(direct.first_row - opened.first_row).is_zero() { mask = mask | 4 }
+    if !(direct.last_row - opened.last_row).is_zero() { mask = mask | 8 }
+    mask
+}
+
+/// Diagnose materialized current/next rows and the radix-two next-point map.
+/// Current-row field indices are one-based, next-row indices add 1000, and a
+/// next-point mismatch is 10000.
+pub fn materialized_row_parity_code4x16(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ bound: u32,
+    _ evaluation: usize,
+) -> u32 {
+    if evaluation >= 16 {
+        return 10000
+    }
+    let trace = encoded_proof_trace_exact<4>(EscapesByQ12::new(c_re_q12, c_im_q12, bound))
+    let point = lde_point4x16(evaluation)
+    let next_point = lde_point4x16((evaluation + 4) & 15)
+    if !trace.valid || !point.valid || !next_point.valid {
+        return 10000
+    }
+    let trace_root = Field::two_adic_root(radix2_log<4>())
+    if !(next_point.value - point.value * trace_root).is_zero() {
+        return 10000
+    }
+    let current_mismatch = air_lde_row4_first_mismatch(trace.rows, point.value)
+    if current_mismatch != 0 {
+        return current_mismatch
+    }
+    let next_mismatch = air_lde_row4_first_mismatch(trace.rows, next_point.value)
+    if next_mismatch != 0 {
+        return 1000 + next_mismatch
+    }
+    0
 }
 
 pub fn evaluate_composition4x16(
@@ -109,8 +342,130 @@ pub fn evaluate_composition4x16(
     CompositionEvaluations16 { valid: true, values: values }
 }
 
+pub fn open_air_lde_quartet4x16(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ bound: u32,
+    _ query_index: u32,
+    _ main_leaves: [MainLdeDigest; 16],
+    _ auxiliary_leaves: [AuxiliaryLdeDigest; 16],
+    _ opening: mut AirLdeQuartetOpening4x16,
+) -> bool {
+    opening.valid = false
+    if query_index >= 8 {
+        return false
+    }
+    let claim = EscapesByQ12::new(c_re_q12, c_im_q12, bound)
+    let trace = encoded_proof_trace_exact<4>(claim)
+    if !trace.valid {
+        return false
+    }
+    let local_index = query_index & 3
+    let first = lde_point4x16(local_index as usize)
+    let second = lde_point4x16((local_index + 4) as usize)
+    let third = lde_point4x16((local_index + 8) as usize)
+    let fourth = lde_point4x16((local_index + 12) as usize)
+    if !first.valid || !second.valid || !third.valid || !fourth.valid {
+        return false
+    }
+    let main_path = main_lde_quartet_path_power_of_two<16, 4, 2>(main_leaves, local_index)
+    let auxiliary_path = auxiliary_lde_quartet_path_power_of_two<16, 4, 2>(
+        auxiliary_leaves,
+        local_index,
+    )
+    if !main_path.valid || !auxiliary_path.valid {
+        return false
+    }
+    write_air_lde_row4(trace.rows, first.value, mut opening.rows[0])
+    write_air_lde_row4(trace.rows, second.value, mut opening.rows[1])
+    write_air_lde_row4(trace.rows, third.value, mut opening.rows[2])
+    write_air_lde_row4(trace.rows, fourth.value, mut opening.rows[3])
+    opening.main_path = main_path
+    opening.auxiliary_path = auxiliary_path
+    opening.valid = true
+    true
+}
+
+pub fn verify_air_lde_quartet4x16(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ challenge: Fr,
+    _ query_index: u32,
+    _ opening: AirLdeQuartetOpening4x16,
+    _ main_root: MainLdeDigest,
+    _ auxiliary_root: AuxiliaryLdeDigest,
+    _ positive_composition: Fr,
+    _ negative_composition: Fr,
+) -> bool {
+    if !opening.valid || query_index >= 8 {
+        return false
+    }
+    let local_index = query_index & 3
+    if opening.main_path.index != local_index || opening.auxiliary_path.index != local_index {
+        return false
+    }
+
+    let first_main_values = main_lde_row_values(opening.rows[0].main)
+    let second_main_values = main_lde_row_values(opening.rows[1].main)
+    let third_main_values = main_lde_row_values(opening.rows[2].main)
+    let fourth_main_values = main_lde_row_values(opening.rows[3].main)
+    let first_main = main_lde_row_commitment(ref first_main_values)
+    let second_main = main_lde_row_commitment(ref second_main_values)
+    let third_main = main_lde_row_commitment(ref third_main_values)
+    let fourth_main = main_lde_row_commitment(ref fourth_main_values)
+    let first_auxiliary = auxiliary_lde_row_commitment(ref opening.rows[0].auxiliary.values)
+    let second_auxiliary = auxiliary_lde_row_commitment(ref opening.rows[1].auxiliary.values)
+    let third_auxiliary = auxiliary_lde_row_commitment(ref opening.rows[2].auxiliary.values)
+    let fourth_auxiliary = auxiliary_lde_row_commitment(ref opening.rows[3].auxiliary.values)
+    if !verify_main_lde_quartet_path<2>(
+            first_main,
+            second_main,
+            third_main,
+            fourth_main,
+            opening.main_path,
+            main_root,
+        )
+        || !verify_auxiliary_lde_quartet_path<2>(
+            first_auxiliary,
+            second_auxiliary,
+            third_auxiliary,
+            fourth_auxiliary,
+            opening.auxiliary_path,
+            auxiliary_root,
+        ) {
+        return false
+    }
+
+    let positive_quarter: usize = if query_index < 4 { 0 } else { 1 }
+    let positive_next_quarter = (positive_quarter + 1) & 3
+    let negative_quarter = (positive_quarter + 2) & 3
+    let negative_next_quarter = (positive_quarter + 3) & 3
+    let positive = evaluate_composition_opened4x16(
+        c_re_q12,
+        c_im_q12,
+        challenge,
+        query_index as usize,
+        opening.rows[positive_quarter],
+        opening.rows[positive_next_quarter],
+    )
+    let negative = evaluate_composition_opened4x16(
+        c_re_q12,
+        c_im_q12,
+        challenge,
+        (query_index + 8) as usize,
+        opening.rows[negative_quarter],
+        opening.rows[negative_next_quarter],
+    )
+    positive.valid
+        && negative.valid
+        && (positive.value - positive_composition).is_zero()
+        && (negative.value - negative_composition).is_zero()
+}
+
 pub struct CompositionProof<const N: usize> {
     pub valid: bool,
+    pub main_lde_root: MainLdeDigest,
+    pub auxiliary_lde_root: AuxiliaryLdeDigest,
     pub evaluations: [Fr; N],
     pub root: CompositionDigest,
     pub transcript: CompositionTranscriptDigest,
@@ -121,6 +476,8 @@ impl<const N: usize> core::marker::Copy for CompositionProof<N> {}
 fn invalid_composition<const N: usize>() -> CompositionProof<N> {
     CompositionProof {
         valid: false,
+        main_lde_root: MainLdeDigest { value: Fr::zero() },
+        auxiliary_lde_root: AuxiliaryLdeDigest { value: Fr::zero() },
         evaluations: [Fr::zero(); N],
         root: CompositionDigest { value: Fr::zero() },
         transcript: CompositionTranscriptDigest { value: Fr::zero() },
@@ -128,24 +485,41 @@ fn invalid_composition<const N: usize>() -> CompositionProof<N> {
     }
 }
 
-pub fn compose4x16(_ c_re_q12: i32, _ c_im_q12: i32, _ bound: u32) -> CompositionProof<16> {
+pub fn compose4x16(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ bound: u32,
+    _ air_lde: mut AirLdeCommitment16,
+) -> CompositionProof<16> {
     let commitments = stream_statement_q12(c_re_q12, c_im_q12, bound)
     if !commitments.valid || commitments.padded_length != 4 {
         return invalid_composition<16>()
     }
+    let claim = EscapesByQ12::new(c_re_q12, c_im_q12, bound)
+    let trace = encoded_proof_trace_exact<4>(claim)
+    if !trace.valid {
+        return invalid_composition<16>()
+    }
+    let committed_air = commit_air_lde4x16(trace.rows, commitments.proof_transcript)
+    if !committed_air.valid {
+        return invalid_composition<16>()
+    }
+    air_lde = committed_air
     let composed = evaluate_composition4x16(
         c_re_q12,
         c_im_q12,
         bound,
-        commitments.composition.value,
+        committed_air.composition.value,
     )
     if !composed.valid {
         return invalid_composition<16>()
     }
     let root = composition_root_power_of_two<16>(composed.values)
-    let transcript = bind_composition(commitments.proof_transcript, root)
+    let transcript = bind_composition(committed_air.transcript, root)
     CompositionProof {
         valid: true,
+        main_lde_root: committed_air.main_root,
+        auxiliary_lde_root: committed_air.auxiliary_root,
         evaluations: composed.values,
         root: root,
         transcript: transcript,

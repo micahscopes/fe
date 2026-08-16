@@ -425,18 +425,6 @@ fn proof_transcript(statement: &BigUint, auxiliary: &BigUint, parameters: &[BigU
     .clone()
 }
 
-fn composition_challenge(transcript: &BigUint, parameters: &[BigUint]) -> BigUint {
-    permute(
-        [
-            protocol_tag(b"MC01"),
-            transcript.clone(),
-            BigUint::from(0u32),
-        ],
-        parameters,
-    )[0]
-    .clone()
-}
-
 fn compile_gate() -> &'static [u8] {
     static WASM: OnceLock<Vec<u8>> = OnceLock::new();
     WASM.get_or_init(|| {
@@ -455,7 +443,7 @@ fn compile_gate() -> &'static [u8] {
             .expect("Mandelbrot commitment should compile")
             .into_bytecode()
             .expect("Wasm bytecode");
-        wasmparser::validate(&wasm).unwrap();
+        wasmparser::validate(&wasm).expect("Mandelbrot commitment Wasm should validate");
         wasm
     })
 }
@@ -798,7 +786,7 @@ fn fe_streams_the_canonical_trace_directly_into_the_frontier() {
         .get_func(&mut store, "streamed_statement_q12_plain_words")
         .unwrap();
     let generate_proof = instance
-        .get_func(&mut store, "streamed_proof_transcript_q12_plain_words")
+        .get_func(&mut store, "streamed_base_proof_transcript_q12_plain_words")
         .unwrap();
     let reset = instance
         .get_typed_func::<(), ()>(&mut store, "fe_cabi_reset")
@@ -825,7 +813,6 @@ fn fe_streams_the_canonical_trace_directly_into_the_frontier() {
         let expected_statement = statement_commitment(&statement, &rows, &parameters);
         let expected_transcript =
             proof_transcript(&expected_statement, &expected_auxiliary, &parameters);
-        let expected_composition = composition_challenge(&expected_transcript, &parameters);
         let actual =
             call_streamed_claim_output(&mut store, &generate, &reset, c_re, c_im, bound, 44);
         assert_eq!(actual[0], 1);
@@ -835,12 +822,11 @@ fn fe_streams_the_canonical_trace_directly_into_the_frontier() {
         assert_eq!(plain_limbs(&actual[4..24]), expected_root);
         assert_eq!(plain_limbs(&actual[24..44]), expected_statement);
         let actual_proof =
-            call_streamed_claim_output(&mut store, &generate_proof, &reset, c_re, c_im, bound, 84);
+            call_streamed_claim_output(&mut store, &generate_proof, &reset, c_re, c_im, bound, 64);
         assert_eq!(&actual_proof[..4], &actual[..4]);
         assert_eq!(plain_limbs(&actual_proof[4..24]), expected_root);
         assert_eq!(plain_limbs(&actual_proof[24..44]), expected_auxiliary);
         assert_eq!(plain_limbs(&actual_proof[44..64]), expected_transcript);
-        assert_eq!(plain_limbs(&actual_proof[64..84]), expected_composition);
         assert_eq!(
             alloc.call(&mut store, (1, 1)).unwrap(),
             1024,
@@ -853,7 +839,7 @@ fn fe_streams_the_canonical_trace_directly_into_the_frontier() {
             call_streamed_claim_output(&mut store, &generate, &reset, c_re, c_im, bound, 44);
         assert!(actual.iter().all(|word| *word == 0));
         let actual_proof =
-            call_streamed_claim_output(&mut store, &generate_proof, &reset, c_re, c_im, bound, 84);
+            call_streamed_claim_output(&mut store, &generate_proof, &reset, c_re, c_im, bound, 64);
         assert!(actual_proof.iter().all(|word| *word == 0));
         assert_eq!(
             alloc.call(&mut store, (1, 1)).unwrap(),

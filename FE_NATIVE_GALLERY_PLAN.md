@@ -2299,6 +2299,15 @@ no application math or schedule in Rust/JavaScript/JSON scaffolding.
    - finish one BN254 toy proof only as a complete protocol-shape and exactness
      gate, then retarget to BabyBear before interpreting the prover dependency
      plan through Conal/CTFE WebGPU schedules; never ship a BN254 WGSL prover;
+   - make the production statement chunked and recursive: BabyBear supplies the
+     proof field while each Mandelbrot coordinate uses a const-generic vector
+     of bounded fixed-point limbs, initially the established 13-bit
+     `Fixed<L>` representation; derive tiled limb convolution and staged carry
+     normalization from `L`, prove exact iteration chunks with typed
+     multi-limb boundary states, and recursively merge adjacent chunks only
+     when their boundary states match; fixed-size typed digests keep recursive
+     receipts compact while independent gates cover rounding, carries,
+     continuity, and mutated boundaries;
    - encode the proof as a canonical typed Fe value, transport/submit only its
      bytes through the fixed host, and run the same Fe verifier in browser
      Wasm, native differential tests, and the contract backend where supported;

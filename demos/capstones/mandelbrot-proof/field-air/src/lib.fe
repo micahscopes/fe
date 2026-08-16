@@ -30,29 +30,76 @@ pub use mandelbrot_proof_kernel::{
 
 pub type Fr = FieldElement<20, Bn254Fr>
 
-pub struct SignedField { sign: Fr, magnitude: Fr, value: Fr }
+pub const MAIN_LDE_ROW_FIELDS: usize = 17
+
+pub struct SignedField { pub sign: Fr, pub magnitude: Fr, pub value: Fr }
 
 impl core::marker::Copy for SignedField {}
 
-struct AirFieldRow {
-    step: Fr,
-    zr: SignedField,
-    zi: SignedField,
-    rr: Fr,
-    ii: Fr,
-    magnitude: Fr,
-    q_re: SignedField,
-    r_re: Fr,
-    q_im: SignedField,
-    r_im: Fr,
-    terminal: Fr,
+pub struct AirFieldRow {
+    pub step: Fr,
+    pub zr: SignedField,
+    pub zi: SignedField,
+    pub rr: Fr,
+    pub ii: Fr,
+    pub magnitude: Fr,
+    pub q_re: SignedField,
+    pub r_re: Fr,
+    pub q_im: SignedField,
+    pub r_im: Fr,
+    pub terminal: Fr,
 }
 
 impl core::marker::Copy for AirFieldRow {}
 
-struct ProofFieldRow { active: Fr, terminal: Fr, air: AirFieldRow }
+/// The 17 main-trace columns evaluated at one LDE point. Keeping the semantic
+/// row nominal lets AIR code use names while commitment code receives one
+/// canonical field order through `main_lde_row_values`.
+pub struct MainLdeRow { pub active: Fr, pub terminal: Fr, pub air: AirFieldRow }
 
-impl core::marker::Copy for ProofFieldRow {}
+impl core::marker::Copy for MainLdeRow {}
+
+/// The 411 range and prefix columns evaluated at the same LDE point.
+pub struct AuxiliaryLdeRow { pub values: [Fr; AUXILIARY_ROW_BITS] }
+
+impl core::marker::Copy for AuxiliaryLdeRow {}
+
+/// One authenticated AIR leaf before row and auxiliary commitments are
+/// domain-separated. This is the verifier-facing witness shape as well as the
+/// prover's derived LDE row, so there is no parallel numeric lane protocol.
+pub struct AirLdeRow { pub main: MainLdeRow, pub auxiliary: AuxiliaryLdeRow }
+
+impl core::marker::Copy for AirLdeRow {}
+
+const ZERO_SIGNED_FIELD: SignedField = SignedField {
+    sign: Fr::zero(),
+    magnitude: Fr::zero(),
+    value: Fr::zero(),
+}
+
+/// Compile-time storage initializer for a caller-owned LDE row. This is a
+/// value rather than a runtime constructor so the 428-field row never becomes
+/// a flattened function result in Wasm.
+pub const ZERO_AIR_LDE_ROW: AirLdeRow = AirLdeRow {
+    main: MainLdeRow {
+        active: Fr::zero(),
+        terminal: Fr::zero(),
+        air: AirFieldRow {
+            step: Fr::zero(),
+            zr: ZERO_SIGNED_FIELD,
+            zi: ZERO_SIGNED_FIELD,
+            rr: Fr::zero(),
+            ii: Fr::zero(),
+            magnitude: Fr::zero(),
+            q_re: ZERO_SIGNED_FIELD,
+            r_re: Fr::zero(),
+            q_im: ZERO_SIGNED_FIELD,
+            r_im: Fr::zero(),
+            terminal: Fr::zero(),
+        },
+    },
+    auxiliary: AuxiliaryLdeRow { values: [Fr::zero(); AUXILIARY_ROW_BITS] },
+}
 
 fn field_is_zero(_ value: Fr) -> bool {
     let words = value.to_montgomery_words()
@@ -100,8 +147,8 @@ fn air_field_row(_ row: EncodedAirRow) -> AirFieldRow {
     }
 }
 
-fn proof_field_row(_ row: EncodedProofRow) -> ProofFieldRow {
-    ProofFieldRow {
+fn proof_field_row(_ row: EncodedProofRow) -> MainLdeRow {
+    MainLdeRow {
         active: Fr::from_u32(row.active),
         terminal: Fr::from_u32(row.terminal),
         air: air_field_row(row.air),
@@ -124,6 +171,29 @@ fn air_words(_ row: AirFieldRow) -> [Fr; 15] {
         row.q_im.sign,
         row.q_im.magnitude,
         row.r_im,
+        row.terminal,
+    ]
+}
+
+pub fn main_lde_row_values(_ row: MainLdeRow) -> [Fr; MAIN_LDE_ROW_FIELDS] {
+    let air = air_words(row.air)
+    [
+        air[0],
+        air[1],
+        air[2],
+        air[3],
+        air[4],
+        air[5],
+        air[6],
+        air[7],
+        air[8],
+        air[9],
+        air[10],
+        air[11],
+        air[12],
+        air[13],
+        air[14],
+        row.active,
         row.terminal,
     ]
 }
@@ -173,7 +243,7 @@ fn scaled_residual_mask<const N: usize>(_ selector: Fr, _ residuals: [Fr; N]) ->
     residual_mask<N>(selected)
 }
 
-fn row_state_residuals(_ row: ProofFieldRow) -> [Fr; 5] {
+fn row_state_residuals(_ row: MainLdeRow) -> [Fr; 5] {
     let one = Fr::one()
     [
         bit_residual(row.active),
@@ -334,47 +404,132 @@ fn signed_field_point(_ sign: Fr, _ magnitude: Fr) -> SignedField {
     SignedField { sign: sign, magnitude: magnitude, value: signed_value(sign, magnitude) }
 }
 
-fn proof_field_row_point4(_ rows: own [EncodedProofRow; 4], _ point: Fr) -> ProofFieldRow {
-    ProofFieldRow {
-        active: main_column_point4(rows, 15, point),
-        terminal: main_column_point4(rows, 16, point),
+/// A constraint column source. The derived trace-point and authenticated
+/// opening implementations below feed one shared AIR evaluator.
+trait AirColumnView: core::marker::Copy {
+    fn main(self, _ column: usize) -> Fr
+    fn auxiliary(self, _ column: usize) -> Fr
+}
+
+struct TracePoint4 { rows: [EncodedProofRow; 4], point: Fr }
+
+impl core::marker::Copy for TracePoint4 {}
+
+impl AirColumnView for TracePoint4 {
+    fn main(self, _ column: usize) -> Fr {
+        main_column_point4(self.rows, column, self.point)
+    }
+
+    fn auxiliary(self, _ column: usize) -> Fr {
+        auxiliary_column_point4(self.rows, column, self.point)
+    }
+}
+
+fn main_lde_row_value(_ row: MainLdeRow, _ column: usize) -> Fr {
+    if column >= MAIN_LDE_ROW_FIELDS {
+        return Fr::zero()
+    }
+    main_lde_row_values(row)[column]
+}
+
+impl AirColumnView for AirLdeRow {
+    fn main(self, _ column: usize) -> Fr {
+        main_lde_row_value(self.main, column)
+    }
+
+    fn auxiliary(self, _ column: usize) -> Fr {
+        if column >= AUXILIARY_ROW_BITS {
+            return Fr::zero()
+        }
+        self.auxiliary.values[column]
+    }
+}
+
+fn main_lde_row_from_view<V: AirColumnView>(_ view: V) -> MainLdeRow {
+    MainLdeRow {
+        active: view.main(15),
+        terminal: view.main(16),
         air: AirFieldRow {
-            step: main_column_point4(rows, 0, point),
-            zr: signed_field_point(
-                main_column_point4(rows, 1, point),
-                main_column_point4(rows, 2, point),
-            ),
-            zi: signed_field_point(
-                main_column_point4(rows, 3, point),
-                main_column_point4(rows, 4, point),
-            ),
-            rr: main_column_point4(rows, 5, point),
-            ii: main_column_point4(rows, 6, point),
-            magnitude: main_column_point4(rows, 7, point),
-            q_re: signed_field_point(
-                main_column_point4(rows, 8, point),
-                main_column_point4(rows, 9, point),
-            ),
-            r_re: main_column_point4(rows, 10, point),
-            q_im: signed_field_point(
-                main_column_point4(rows, 11, point),
-                main_column_point4(rows, 12, point),
-            ),
-            r_im: main_column_point4(rows, 13, point),
-            terminal: main_column_point4(rows, 14, point),
+            step: view.main(0),
+            zr: signed_field_point(view.main(1), view.main(2)),
+            zi: signed_field_point(view.main(3), view.main(4)),
+            rr: view.main(5),
+            ii: view.main(6),
+            magnitude: view.main(7),
+            q_re: signed_field_point(view.main(8), view.main(9)),
+            r_re: view.main(10),
+            q_im: signed_field_point(view.main(11), view.main(12)),
+            r_im: view.main(13),
+            terminal: view.main(14),
         },
     }
+}
+
+/// Derive one complete field-valued AIR row from the canonical four-row trace.
+/// This is used both to build LDE commitments and to materialize the four rows
+/// selected by a Fiat-Shamir query.
+pub fn write_air_lde_row4(
+    _ rows: own [EncodedProofRow; 4],
+    _ point: Fr,
+    _ output: mut AirLdeRow,
+) {
+    let view = TracePoint4 { rows: rows, point: point }
+    output.main.active = view.main(15)
+    output.main.terminal = view.main(16)
+    output.main.air.step = view.main(0)
+    output.main.air.zr = signed_field_point(view.main(1), view.main(2))
+    output.main.air.zi = signed_field_point(view.main(3), view.main(4))
+    output.main.air.rr = view.main(5)
+    output.main.air.ii = view.main(6)
+    output.main.air.magnitude = view.main(7)
+    output.main.air.q_re = signed_field_point(view.main(8), view.main(9))
+    output.main.air.r_re = view.main(10)
+    output.main.air.q_im = signed_field_point(view.main(11), view.main(12))
+    output.main.air.r_im = view.main(13)
+    output.main.air.terminal = view.main(14)
+    let mut column: usize = 0
+    while column < AUXILIARY_ROW_BITS {
+        output.auxiliary.values[column] = view.auxiliary(column)
+        column = column + 1
+    }
+}
+
+/// Return the one-based index of the first field that differs between direct
+/// trace interpolation and the materialized row, or zero when all 428 fields
+/// agree. Main columns precede auxiliary columns in the diagnostic index.
+pub fn air_lde_row4_first_mismatch(
+    _ rows: own [EncodedProofRow; 4],
+    _ point: Fr,
+) -> u32 {
+    let view = TracePoint4 { rows: rows, point: point }
+    let mut row = ZERO_AIR_LDE_ROW
+    write_air_lde_row4(rows, point, mut row)
+    let main = main_lde_row_values(row.main)
+    let mut column: usize = 0
+    while column < MAIN_LDE_ROW_FIELDS {
+        if !(view.main(column) - main[column]).is_zero() {
+            return (column + 1).downcast_truncate()
+        }
+        column = column + 1
+    }
+    column = 0
+    while column < AUXILIARY_ROW_BITS {
+        if !(view.auxiliary(column) - row.auxiliary.values[column]).is_zero() {
+            return (MAIN_LDE_ROW_FIELDS + column + 1).downcast_truncate()
+        }
+        column = column + 1
+    }
+    0
 }
 
 /// Stream one interpolated bit range into the challenge-power fold. Keeping
 /// the canonical rows and cursor compact avoids a giant field-valued witness
 /// aggregate at the Wasm boundary.
-fn absorb_range_columns<const N: usize>(
+fn absorb_range_columns<const N: usize, V: AirColumnView>(
     _ fold: own ConstraintFold,
     _ value: Fr,
-    _ rows: own [EncodedProofRow; 4],
+    _ view: V,
     _ start: usize,
-    _ point: Fr,
 ) -> ConstraintFold {
     let mut fold = fold
     let mut reconstructed = Fr::zero()
@@ -382,8 +537,8 @@ fn absorb_range_columns<const N: usize>(
     let mut previous_any = Fr::zero()
     let mut index: usize = 0
     while index < N {
-        let bit = auxiliary_column_point4(rows, start + index, point)
-        let any = auxiliary_column_point4(rows, start + N + index, point)
+        let bit = view.auxiliary(start + index)
+        let any = view.auxiliary(start + N + index)
         fold = fold.absorb(bit_residual(bit))
         fold = fold.absorb(bit_residual(any))
         fold = fold.absorb(any - previous_any - bit + previous_any * bit)
@@ -395,36 +550,34 @@ fn absorb_range_columns<const N: usize>(
     fold.absorb(value - reconstructed)
 }
 
-fn absorb_signed_range_columns<const N: usize>(
+fn absorb_signed_range_columns<const N: usize, V: AirColumnView>(
     _ fold: own ConstraintFold,
     _ sign: Fr,
     _ magnitude: Fr,
-    _ rows: own [EncodedProofRow; 4],
+    _ view: V,
     _ start: usize,
-    _ point: Fr,
 ) -> ConstraintFold {
     let mut fold = fold.absorb(bit_residual(sign))
-    fold = absorb_range_columns<N>(fold, magnitude, rows, start, point)
-    let nonzero = auxiliary_column_point4(rows, start + 2 * N - 1, point)
+    fold = absorb_range_columns<N, V>(fold, magnitude, view, start)
+    let nonzero = view.auxiliary(start + 2 * N - 1)
     fold.absorb(sign * (Fr::one() - nonzero))
 }
 
-fn absorb_terminal_range_columns(
+fn absorb_terminal_range_columns<V: AirColumnView>(
     _ fold: own ConstraintFold,
     _ magnitude: Fr,
     _ terminal: Fr,
-    _ rows: own [EncodedProofRow; 4],
+    _ view: V,
     _ magnitude_start: usize,
     _ terminal_start: usize,
-    _ point: Fr,
 ) -> ConstraintFold {
-    let mut fold = absorb_range_columns<31>(fold, magnitude, rows, magnitude_start, point)
+    let mut fold = absorb_range_columns<31, V>(fold, magnitude, view, magnitude_start)
     fold = fold.absorb(bit_residual(terminal))
     let mut previous = Fr::zero()
     let mut index: usize = 0
     while index < 5 {
-        let bit = auxiliary_column_point4(rows, magnitude_start + index + 26, point)
-        let any = auxiliary_column_point4(rows, terminal_start + index, point)
+        let bit = view.auxiliary(magnitude_start + index + 26)
+        let any = view.auxiliary(terminal_start + index)
         fold = fold.absorb(bit_residual(any))
         fold = fold.absorb(any - previous - bit + previous * bit)
         previous = any
@@ -435,18 +588,16 @@ fn absorb_terminal_range_columns(
 
 /// Fold every AIR constraint with consecutive powers of one transcript-derived
 /// challenge. The four outputs remain separate because each constraint family
-/// has a different zerofier in the composition polynomial. Main and auxiliary
-/// values are interpolated directly from four canonical Fe rows at `point`.
-pub fn mandelbrot_constraint_numerators_trace4(
+/// has a different zerofier in the composition polynomial.
+fn mandelbrot_constraint_numerators_from_views<Row: AirColumnView, Next: AirColumnView>(
     _ challenge: Fr,
     _ c_re: SignedField,
     _ c_im: SignedField,
-    _ rows: own [EncodedProofRow; 4],
-    _ point: Fr,
-    _ next_point: Fr,
+    _ row_view: Row,
+    _ next_view: Next,
 ) -> MandelbrotConstraintNumerators {
-    let row = proof_field_row_point4(rows, point)
-    let next = proof_field_row_point4(rows, next_point)
+    let row = main_lde_row_from_view<Row>(row_view)
+    let next = main_lde_row_from_view<Next>(next_view)
     let one = Fr::one()
     let continue_selector = row.active * (one - row.terminal)
     let freeze_selector = row.terminal + (one - row.active)
@@ -455,53 +606,49 @@ pub fn mandelbrot_constraint_numerators_trace4(
     fold = absorb_residuals<9>(fold, local_residuals(row.air))
     fold = absorb_residuals<5>(fold, row_state_residuals(row))
     let mut cursor: usize = 0
-    fold = absorb_range_columns<21>(fold, row.air.step, rows, cursor, point)
+    fold = absorb_range_columns<21, Row>(fold, row.air.step, row_view, cursor)
     cursor = cursor + 2 * 21
-    fold = absorb_signed_range_columns<15>(
+    fold = absorb_signed_range_columns<15, Row>(
         fold,
         row.air.zr.sign,
         row.air.zr.magnitude,
-        rows,
+        row_view,
         cursor,
-        point,
     )
     cursor = cursor + 2 * 15
-    fold = absorb_signed_range_columns<15>(
+    fold = absorb_signed_range_columns<15, Row>(
         fold,
         row.air.zi.sign,
         row.air.zi.magnitude,
-        rows,
+        row_view,
         cursor,
-        point,
     )
     cursor = cursor + 2 * 15
-    fold = absorb_range_columns<30>(fold, row.air.rr, rows, cursor, point)
+    fold = absorb_range_columns<30, Row>(fold, row.air.rr, row_view, cursor)
     cursor = cursor + 2 * 30
-    fold = absorb_range_columns<30>(fold, row.air.ii, rows, cursor, point)
+    fold = absorb_range_columns<30, Row>(fold, row.air.ii, row_view, cursor)
     cursor = cursor + 2 * 30
     let magnitude_start = cursor
     cursor = cursor + 2 * 31
-    fold = absorb_signed_range_columns<18>(
+    fold = absorb_signed_range_columns<18, Row>(
         fold,
         row.air.q_re.sign,
         row.air.q_re.magnitude,
-        rows,
+        row_view,
         cursor,
-        point,
     )
     cursor = cursor + 2 * 18
-    fold = absorb_range_columns<12>(fold, row.air.r_re, rows, cursor, point)
+    fold = absorb_range_columns<12, Row>(fold, row.air.r_re, row_view, cursor)
     cursor = cursor + 2 * 12
-    fold = absorb_signed_range_columns<19>(
+    fold = absorb_signed_range_columns<19, Row>(
         fold,
         row.air.q_im.sign,
         row.air.q_im.magnitude,
-        rows,
+        row_view,
         cursor,
-        point,
     )
     cursor = cursor + 2 * 19
-    fold = absorb_range_columns<12>(fold, row.air.r_im, rows, cursor, point)
+    fold = absorb_range_columns<12, Row>(fold, row.air.r_im, row_view, cursor)
     cursor = cursor + 2 * 12
     if cursor + 5 != AUXILIARY_ROW_BITS {
         return MandelbrotConstraintNumerators {
@@ -511,14 +658,13 @@ pub fn mandelbrot_constraint_numerators_trace4(
             last_row: Fr::zero(),
         }
     }
-    fold = absorb_terminal_range_columns(
+    fold = absorb_terminal_range_columns<Row>(
         fold,
         row.air.magnitude,
         row.air.terminal,
-        rows,
+        row_view,
         magnitude_start,
         cursor,
-        point,
     )
     let all_rows = fold.value
 
@@ -567,6 +713,42 @@ pub fn mandelbrot_constraint_numerators_trace4(
         first_row: first_row,
         last_row: fold.value,
     }
+}
+
+/// Prover-side evaluation directly from the four canonical Fe rows.
+pub fn mandelbrot_constraint_numerators_trace4(
+    _ challenge: Fr,
+    _ c_re: SignedField,
+    _ c_im: SignedField,
+    _ rows: own [EncodedProofRow; 4],
+    _ point: Fr,
+    _ next_point: Fr,
+) -> MandelbrotConstraintNumerators {
+    mandelbrot_constraint_numerators_from_views<TracePoint4, TracePoint4>(
+        challenge,
+        c_re,
+        c_im,
+        TracePoint4 { rows: rows, point: point },
+        TracePoint4 { rows: rows, point: next_point },
+    )
+}
+
+/// Verifier-side evaluation from two authenticated field-valued rows. It is
+/// the same generic constraint fold as the prover path, not a second formula.
+pub fn mandelbrot_constraint_numerators_opened(
+    _ challenge: Fr,
+    _ c_re: SignedField,
+    _ c_im: SignedField,
+    _ row: AirLdeRow,
+    _ next: AirLdeRow,
+) -> MandelbrotConstraintNumerators {
+    mandelbrot_constraint_numerators_from_views<AirLdeRow, AirLdeRow>(
+        challenge,
+        c_re,
+        c_im,
+        row,
+        next,
+    )
 }
 
 /// Evaluate the five local Mandelbrot equalities and the four sign-bit

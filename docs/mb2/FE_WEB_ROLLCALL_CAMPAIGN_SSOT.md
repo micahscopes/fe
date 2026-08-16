@@ -340,14 +340,27 @@ Legend:
   field values and typed Fe capacity domains. The Fe verifier rebuilds the
   public transcript, checks every path and index, and checks all four folds.
   The independent bigint oracle separately derives the query, every opened
-  evaluation, every sibling, and every root. The zero-import Wasm gate passes.
-  This authenticates the FRI chain but does not yet reconnect the composition
-  opening to authenticated main and auxiliary AIR columns. Those openings,
-  verifier-cost evidence, malformed-proof rejection, and proof encoding remain
-  pending. The reusable field API's SPIR-V helper-call seam remains open as a
-  compiler issue, but BN254 will not be ported into the proof WGSL path.
-  This is a general-tree statement-commitment milestone and executable AIR
-  evidence, not yet a succinct proof.
+  evaluation, every sibling, and every root. The composition opening is now
+  reconnected to authenticated main and auxiliary AIR columns. The prover
+  commits all 16 field-valued rows under typed `"MR02"`/`"MN02"` and
+  `"AR02"`/`"AN02"` domains, binds both roots through `"AT02"`, and opens the
+  four rows needed for the queried current/next pair. The Fe verifier rebuilds
+  both quartet paths, the ordered transcript and composition challenge, then
+  recomputes the alleged composition evaluations through the same generic
+  `AirColumnView` constraint interpreter. The independent bigint gate derives
+  every LDE field, leaf, sibling, root, challenge, and recomputed numerator; it
+  passes against zero-import Wasm. A separate typed-verifier gate mutates an
+  opened row, quartet path, AIR roots, FRI values and paths, query index, and
+  public metadata; every mutation is rejected. Reaching those gates exposed
+  and fixed a general Wasm lowering bug where forwarding an `AddrOf` borrow
+  deep-copied its pointee and detached mutable writes from caller storage.
+  Separate execution
+  gates now prove mutable-borrow identity and preserve ordinary aggregate
+  deep-copy semantics. Verifier-cost evidence, systematic malformed-proof
+  rejection, and canonical proof encoding remain pending. The reusable field
+  API's SPIR-V helper-call seam remains open as a compiler issue, but BN254 will
+  not be ported into the proof WGSL path. This is an authenticated AIR and FRI
+  query milestone, not yet a succinct proof.
 - [ ] Produce a succinct proof whose verifier is demonstrably cheaper than
   replaying the orbit.
 - [ ] Finish one complete BN254 toy proof and verifier accept/reject boundary,
@@ -356,10 +369,30 @@ Legend:
   challenges, new injective packing, Fe-derived field-specific Poseidon, and
   new independent vectors. Same-source Fe Wasm/native agreement is parity;
   the separately implemented bigint model remains the semantic oracle.
+- [ ] Make the production claim a chunked recursive high-precision recurrence,
+  not one monolithic fixed-Q12 trace. BabyBear is the proof field, not the
+  numeric precision ceiling: derive each signed fixed-point coordinate from a
+  const-generic vector of bounded base-field limbs, initially reusing the
+  established 13-bit `Fixed<L>` representation. Leaf proofs certify exact
+  iteration chunks and their multi-limb boundary states. Parent proofs require
+  adjacent boundary equality and compress two certified intervals into one
+  typed accumulator. Derive convolution tiles and staged carry normalization
+  from the limb count, commit boundary states through fixed-size typed digests,
+  and independently gate rounding, range, carry, chunk-continuity, and mutated
+  boundary failures. The browser should progressively schedule leaf chunks and
+  binary merges through the same Fe task, cancellation, and backpressure spine
+  used by rendering.
 - [ ] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
-  The existing type schedules and backend vocabulary are groundwork, not
-  evidence of executed workgroup/shared-memory lowering.
+  This begins by consolidating two existing, independently gated NTT strands:
+  `ntt_schedule.fe` derives the `RBin<Pair, k>` stage tree and
+  `BarrierReq<k>` from one type-level depth, while `ntt_par_exec.fe` executes
+  the corresponding explicit fork/barrier schedule under revm and checks it
+  against the sequential transform. The production field-generic
+  `precision::polynomial::radix2_ntt` is not yet an interpretation of that
+  derived schedule, and no workgroup/shared-memory WebGPU implementation has
+  executed. The work is consolidation plus a new backend interpreter, not a
+  fresh Conal NTT design.
 - [ ] Run the complete published browser page through Chrome after the
   BabyBear prover exists: acquire WebGPU, generate the proof, transport its
   typed receipt, verify it through revm-Wasm, reject a mutated receipt, and
@@ -415,13 +448,15 @@ fallback. The semantic receipts are:
 1. Finish S0 by running the existing Rollcall accept/reject vectors through
    revm-Wasm in actual Chromium. Keep the bridge raw and application-blind.
 2. Run the external real-GPU handoff above before beginning the proof GPU port.
-3. Reconnect the authenticated composition query to main and auxiliary AIR
-   openings, then add canonical proof encoding on the BN254 toy protocol,
-   including one end-to-end accept/reject boundary.
-4. Retarget the protocol to BabyBear with independent exactness gates. Do not
-   port BN254 Fr to WGSL.
-5. Lower the BabyBear prover through Fe Conal/CTFE WebGPU schedules, then run
-   the complete proof/verify/tamper page through Chrome.
+3. Add canonical proof encoding around the now-authenticated BN254 AIR/FRI
+   query, including systematic malformed-receipt rejection and one complete
+   end-to-end accept/reject boundary.
+4. Retarget the protocol to BabyBear with independent exactness gates, then
+   derive the multi-limb chunk and recursive-accumulator statement. Do not port
+   BN254 Fr to WGSL.
+5. Lower the BabyBear leaf prover and recursive merges through Fe Conal/CTFE
+   WebGPU schedules, then run the complete progressive proof/verify/tamper page
+   through Chrome.
 6. Finish typed fetch, then Worker/port placement and supervision on the one
    runtime-control spine.
 7. Delete the runtime manifest and finish the legacy disposition.

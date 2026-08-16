@@ -5,6 +5,7 @@ use driver::DriverDataBase;
 use fe_codegen::{BackendKind, OptLevel, layout_for};
 use hir::hir_def::HirIngot;
 use num_bigint::BigUint;
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::OnceLock;
 use url::Url;
@@ -708,6 +709,12 @@ struct PairOpeningOracle {
     root: BigUint,
 }
 
+struct QuartetOpeningOracle {
+    leaves: [BigUint; 4],
+    siblings: [Vec<BigUint>; 4],
+    root: BigUint,
+}
+
 fn pair_opening_oracle(
     evaluations: &[BigUint],
     row_label: &[u8; 4],
@@ -747,7 +754,59 @@ fn pair_opening_oracle(
     }
 }
 
+fn quartet_opening_oracle(
+    leaves: &[BigUint],
+    index: usize,
+    node_label: &[u8; 4],
+    parameters: &[BigUint],
+) -> QuartetOpeningOracle {
+    assert!(leaves.len() >= 4 && leaves.len().is_power_of_two());
+    let quarter = leaves.len() / 4;
+    assert!(index < quarter);
+    let mut nodes = leaves.to_vec();
+    let mut positions = [
+        index,
+        index + quarter,
+        index + 2 * quarter,
+        index + 3 * quarter,
+    ];
+    let mut siblings: [Vec<BigUint>; 4] = std::array::from_fn(|_| Vec::new());
+    while nodes.len() > 4 {
+        for lane in 0..4 {
+            siblings[lane].push(nodes[positions[lane] ^ 1].clone());
+            positions[lane] /= 2;
+        }
+        nodes = nodes
+            .chunks_exact(2)
+            .map(|pair| hash(node_label, pair[0].clone(), pair[1].clone(), parameters))
+            .collect();
+    }
+    let left = hash(node_label, nodes[0].clone(), nodes[1].clone(), parameters);
+    let right = hash(node_label, nodes[2].clone(), nodes[3].clone(), parameters);
+    QuartetOpeningOracle {
+        leaves: std::array::from_fn(|lane| leaves[index + lane * quarter].clone()),
+        siblings,
+        root: hash(node_label, left, right, parameters),
+    }
+}
+
+fn field_row_commitment(label: &[u8; 4], values: &[F], parameters: &[BigUint]) -> BigUint {
+    let mut digest = BigUint::from(values.len() as u32);
+    for value in values {
+        digest = hash(label, digest, value.0.clone(), parameters);
+    }
+    digest
+}
+
 struct ProductionOracle {
+    main_lde_rows: Vec<[F; 17]>,
+    auxiliary_lde_rows: Vec<Vec<F>>,
+    main_lde_leaves: Vec<BigUint>,
+    auxiliary_lde_leaves: Vec<BigUint>,
+    main_lde_root: BigUint,
+    auxiliary_lde_root: BigUint,
+    air_lde_transcript: BigUint,
+    composition_challenge: BigUint,
     evaluations: Vec<BigUint>,
     root: BigUint,
     transcript: BigUint,
@@ -808,9 +867,44 @@ fn production_oracle(rows: &[ProofRow; 4], c_re: i64, c_im: i64, bound: u32) -> 
     );
     let statement = hash(b"MT01", public, trace_root, &parameters);
     let proof_transcript = hash(b"AT01", statement, auxiliary_root, &parameters);
+    let output_root = subgroup_root(4);
+    let main_lde_rows = (0..16)
+        .map(|index| {
+            let point = F::from_u32(5).mul(&output_root.pow_u32(index));
+            main_at(rows, &point)
+        })
+        .collect::<Vec<_>>();
+    let auxiliary_lde_rows = (0..16)
+        .map(|index| {
+            let point = F::from_u32(5).mul(&output_root.pow_u32(index));
+            auxiliary_at(rows, &point)
+        })
+        .collect::<Vec<_>>();
+    let main_lde_leaves = main_lde_rows
+        .iter()
+        .map(|row| field_row_commitment(b"MR02", row, &parameters))
+        .collect::<Vec<_>>();
+    let auxiliary_lde_leaves = auxiliary_lde_rows
+        .iter()
+        .map(|row| field_row_commitment(b"AR02", row, &parameters))
+        .collect::<Vec<_>>();
+    let main_lde_root = merkle_root(main_lde_leaves.clone(), b"MN02", &parameters);
+    let auxiliary_lde_root = merkle_root(auxiliary_lde_leaves.clone(), b"AN02", &parameters);
+    let main_lde_transcript = hash(
+        b"MT02",
+        proof_transcript,
+        main_lde_root.clone(),
+        &parameters,
+    );
+    let air_lde_transcript = hash(
+        b"AT02",
+        main_lde_transcript,
+        auxiliary_lde_root.clone(),
+        &parameters,
+    );
     let challenge = hash(
         b"MC01",
-        proof_transcript.clone(),
+        air_lde_transcript.clone(),
         BigUint::from(0u32),
         &parameters,
     );
@@ -826,7 +920,12 @@ fn production_oracle(rows: &[ProofRow; 4], c_re: i64, c_im: i64, bound: u32) -> 
         b"CN01",
         &parameters,
     );
-    let transcript = hash(b"CT01", proof_transcript, root.clone(), &parameters);
+    let transcript = hash(
+        b"CT01",
+        air_lde_transcript.clone(),
+        root.clone(),
+        &parameters,
+    );
     let fri = hash(
         b"FC01",
         transcript.clone(),
@@ -834,6 +933,14 @@ fn production_oracle(rows: &[ProofRow; 4], c_re: i64, c_im: i64, bound: u32) -> 
         &parameters,
     );
     ProductionOracle {
+        main_lde_rows,
+        auxiliary_lde_rows,
+        main_lde_leaves,
+        auxiliary_lde_leaves,
+        main_lde_root,
+        auxiliary_lde_root,
+        air_lde_transcript,
+        composition_challenge: challenge,
         evaluations,
         root,
         transcript,
@@ -957,6 +1064,133 @@ fn fri_fold_layer_oracle(
         next_challenge,
     }
 }
+
+fn assert_wasm_function_signature_limits(bytes: &[u8]) {
+    const MAX_FUNCTION_PARAMS: usize = 1000;
+    const MAX_FUNCTION_RESULTS: usize = 1000;
+
+    fn read_u32(bytes: &[u8], cursor: &mut usize) -> u32 {
+        let mut value = 0u32;
+        let mut shift = 0u32;
+        loop {
+            let byte = *bytes
+                .get(*cursor)
+                .expect("Wasm varuint should remain within its section");
+            *cursor += 1;
+            value |= u32::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return value;
+            }
+            shift += 7;
+            assert!(shift < 35, "Wasm varuint32 is too large");
+        }
+    }
+
+    fn read_name(bytes: &[u8], cursor: &mut usize) -> String {
+        let length = read_u32(bytes, cursor) as usize;
+        let end = *cursor + length;
+        let name = std::str::from_utf8(
+            bytes
+                .get(*cursor..end)
+                .expect("Wasm name should remain within its section"),
+        )
+        .expect("Wasm names should be UTF-8")
+        .to_owned();
+        *cursor = end;
+        name
+    }
+
+    assert_eq!(&bytes[..8], b"\0asm\x01\0\0\0", "canonical Wasm header");
+    let mut signatures = Vec::<(usize, usize)>::new();
+    let mut function_type_indices = Vec::<u32>::new();
+    let mut function_names = BTreeMap::<u32, String>::new();
+    let mut module_cursor = 8usize;
+    while module_cursor < bytes.len() {
+        let section_id = bytes[module_cursor];
+        module_cursor += 1;
+        let section_length = read_u32(bytes, &mut module_cursor) as usize;
+        let section_start = module_cursor;
+        let section_end = section_start + section_length;
+        let section = bytes
+            .get(section_start..section_end)
+            .expect("Wasm section should remain within the module");
+        module_cursor = section_end;
+
+        if section_id == 1 {
+            let mut cursor = 0usize;
+            let count = read_u32(section, &mut cursor);
+            for _ in 0..count {
+                assert_eq!(section[cursor], 0x60, "proof Wasm should use MVP function types");
+                cursor += 1;
+                let params = read_u32(section, &mut cursor) as usize;
+                cursor += params;
+                let results = read_u32(section, &mut cursor) as usize;
+                cursor += results;
+                assert!(cursor <= section.len(), "Wasm function type should fit its section");
+                signatures.push((params, results));
+            }
+            assert_eq!(cursor, section.len(), "complete Wasm type section");
+        } else if section_id == 2 {
+            let mut cursor = 0usize;
+            let count = read_u32(section, &mut cursor);
+            assert_eq!(count, 0, "composition gate must remain zero-import Wasm");
+        } else if section_id == 3 {
+            let mut cursor = 0usize;
+            let count = read_u32(section, &mut cursor);
+            for _ in 0..count {
+                function_type_indices.push(read_u32(section, &mut cursor));
+            }
+            assert_eq!(cursor, section.len(), "complete Wasm function section");
+        } else if section_id == 0 {
+            let mut cursor = 0usize;
+            if read_name(section, &mut cursor) != "name" {
+                continue;
+            }
+            while cursor < section.len() {
+                let subsection_id = section[cursor];
+                cursor += 1;
+                let subsection_length = read_u32(section, &mut cursor) as usize;
+                let subsection_end = cursor + subsection_length;
+                assert!(subsection_end <= section.len(), "Wasm name subsection bounds");
+                if subsection_id == 1 {
+                    let count = read_u32(section, &mut cursor);
+                    for _ in 0..count {
+                        let index = read_u32(section, &mut cursor);
+                        function_names.insert(index, read_name(section, &mut cursor));
+                    }
+                }
+                cursor = subsection_end;
+            }
+        }
+    }
+
+    let oversized = function_type_indices
+        .iter()
+        .enumerate()
+        .filter_map(|(function_index, type_index)| {
+            let (params, results) = signatures
+                .get(*type_index as usize)
+                .copied()
+                .expect("Wasm function should reference a function type");
+            if params <= MAX_FUNCTION_PARAMS && results <= MAX_FUNCTION_RESULTS {
+                return None;
+            }
+            let name = function_names
+                .get(&(function_index as u32))
+                .map(String::as_str)
+                .unwrap_or("<unnamed>");
+            Some(format!(
+                "function {function_index} `{name}` uses type {type_index}: {params} params, {results} results"
+            ))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        oversized.is_empty(),
+        "composition Wasm exceeds function signature limits:\n{}",
+        oversized.join("\n"),
+    );
+}
+
 fn compile_gate() -> Vec<u8> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/mandelbrot_composition_oracle_ingot");
@@ -979,6 +1213,7 @@ fn compile_gate() -> Vec<u8> {
         .expect("composition gate should compile")
         .into_bytecode()
         .expect("Wasm output should be bytecode");
+    assert_wasm_function_signature_limits(&bytes);
     wasmparser::validate(&bytes).expect("composition Wasm should validate");
     bytes
 }
@@ -1004,6 +1239,34 @@ fn call_words(
             Val::I32(word) => word as u32,
             other => panic!("{name} result must be i32, got {other:?}"),
         })
+        .collect()
+}
+
+fn call_byte_words(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    name: &str,
+    args: (i32, i32, i32),
+    result_count: usize,
+) -> Vec<u32> {
+    let function = instance
+        .get_typed_func::<(i32, i32, i32), (i32, i32)>(&mut *store, name)
+        .unwrap_or_else(|error| panic!("`{name}` byte export should exist: {error:?}"));
+    let (pointer, length) = function
+        .call(&mut *store, args)
+        .unwrap_or_else(|error| panic!("{name} should run: {error:?}"));
+    assert!(pointer >= 0, "{name} pointer must be nonnegative");
+    assert_eq!(length as usize, result_count * 4, "{name} byte length");
+    let memory = instance
+        .get_memory(&mut *store, "memory")
+        .expect("composition Wasm should export memory");
+    let mut bytes = vec![0u8; length as usize];
+    memory
+        .read(&*store, pointer as usize, &mut bytes)
+        .unwrap_or_else(|error| panic!("{name} bytes should be readable: {error:?}"));
+    bytes
+        .chunks_exact(4)
+        .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
         .collect()
 }
 
@@ -1047,6 +1310,30 @@ fn composition_and_complete_fri_chain_match_independent_bigint_oracle() {
             plain_limbs(&output[1..]),
             composition_at(&rows, 3072, 0, F::from_u32(7), evaluation).0,
             "independent composition mismatch at coset point {evaluation}",
+        );
+        let row_parity = call_words(
+            &mut store,
+            &instance,
+            "composition4x16_materialized_row_parity_code",
+            &[3072, 0, 16, evaluation as i32],
+            1,
+        );
+        assert_eq!(
+            row_parity,
+            vec![0],
+            "materialized AIR row differs at coset point {evaluation}",
+        );
+        let parity = call_words(
+            &mut store,
+            &instance,
+            "composition4x16_opened_parity_mask",
+            &[3072, 0, 16, 7, evaluation as i32],
+            1,
+        );
+        assert_eq!(
+            parity,
+            vec![0],
+            "direct and authenticated-row AIR interpreters differ at coset point {evaluation}",
         );
     }
 
@@ -1092,13 +1379,23 @@ fn composition_and_complete_fri_chain_match_independent_bigint_oracle() {
         );
     }
 
-    let production = call_words(
+    let complete = call_byte_words(
         &mut store,
         &instance,
-        "composition4x16_production_words",
-        &[3072, 0, 16],
-        61,
+        "complete_production_bytes",
+        (3072, 0, 16),
+        1570,
     );
+    assert_eq!(
+        complete[1569],
+        0,
+        "typed verifier accepted an authenticated query mutation",
+    );
+    let production = &complete[0..61];
+    let fri = &complete[61..282];
+    let remaining = &complete[282..583];
+    let query = &complete[583..1006];
+    let air_query = &complete[1006..1569];
     assert_eq!(production[0], 1);
     let oracle = production_oracle(&rows, 3072, 0, 16);
     assert_eq!(plain_limbs(&production[1..21]), oracle.root);
@@ -1148,13 +1445,6 @@ fn composition_and_complete_fri_chain_match_independent_bigint_oracle() {
         false,
     );
 
-    let fri = call_words(
-        &mut store,
-        &instance,
-        "fri_layer4x16_production_words",
-        &[3072, 0, 16],
-        221,
-    );
     assert_eq!(fri[0], 1);
     for evaluation in 0..8 {
         let start = 1 + evaluation * 20;
@@ -1174,13 +1464,6 @@ fn composition_and_complete_fri_chain_match_independent_bigint_oracle() {
             .expect("round one must derive FC02"),
     );
 
-    let remaining = call_words(
-        &mut store,
-        &instance,
-        "fri_remaining4x16_production_words",
-        &[3072, 0, 16],
-        301,
-    );
     assert_eq!(remaining[0], 1);
     for evaluation in 0..4 {
         let start = 1 + evaluation * 20;
@@ -1236,6 +1519,32 @@ fn composition_and_complete_fri_chain_match_independent_bigint_oracle() {
         & 7;
     let first_index = query_index & 3;
     let second_index = first_index & 1;
+    let local_air_index = query_index as usize & 3;
+    let main_air_opening = quartet_opening_oracle(
+        &oracle.main_lde_leaves,
+        local_air_index,
+        b"MN02",
+        &parameters,
+    );
+    let auxiliary_air_opening = quartet_opening_oracle(
+        &oracle.auxiliary_lde_leaves,
+        local_air_index,
+        b"AN02",
+        &parameters,
+    );
+    assert_eq!(main_air_opening.root, oracle.main_lde_root);
+    assert_eq!(auxiliary_air_opening.root, oracle.auxiliary_lde_root);
+    for quarter in 0..4 {
+        let row = local_air_index + quarter * 4;
+        assert_eq!(
+            main_air_opening.leaves[quarter],
+            field_row_commitment(b"MR02", &oracle.main_lde_rows[row], &parameters),
+        );
+        assert_eq!(
+            auxiliary_air_opening.leaves[quarter],
+            field_row_commitment(b"AR02", &oracle.auxiliary_lde_rows[row], &parameters),
+        );
+    }
     let composition_opening = pair_opening_oracle(
         &oracle.evaluations,
         b"CR01",
@@ -1263,13 +1572,42 @@ fn composition_and_complete_fri_chain_match_independent_bigint_oracle() {
     assert_eq!(second_opening.root, fri2.root);
     assert_eq!(third_opening.root, fri3.root);
 
-    let query = call_words(
-        &mut store,
-        &instance,
-        "fri_commitment_query4x16_production_words",
-        &[3072, 0, 16],
-        423,
+    assert_eq!(&air_query[0..3], &[1, 1, query_index]);
+    let mut air_cursor = 3;
+    assert_eq!(
+        next_plain_field(&air_query, &mut air_cursor),
+        oracle.main_lde_root,
     );
+    assert_eq!(
+        next_plain_field(&air_query, &mut air_cursor),
+        oracle.auxiliary_lde_root,
+    );
+    assert_eq!(
+        next_plain_field(&air_query, &mut air_cursor),
+        oracle.air_lde_transcript,
+    );
+    assert_eq!(
+        next_plain_field(&air_query, &mut air_cursor),
+        oracle.composition_challenge,
+    );
+    for leaf in &main_air_opening.leaves {
+        assert_eq!(next_plain_field(&air_query, &mut air_cursor), *leaf);
+    }
+    for leaf in &auxiliary_air_opening.leaves {
+        assert_eq!(next_plain_field(&air_query, &mut air_cursor), *leaf);
+    }
+    for quarter in 0..4 {
+        for sibling in &main_air_opening.siblings[quarter] {
+            assert_eq!(next_plain_field(&air_query, &mut air_cursor), *sibling);
+        }
+    }
+    for quarter in 0..4 {
+        for sibling in &auxiliary_air_opening.siblings[quarter] {
+            assert_eq!(next_plain_field(&air_query, &mut air_cursor), *sibling);
+        }
+    }
+    assert_eq!(air_cursor, air_query.len());
+
     assert_eq!(&query[0..3], &[1, 1, query_index]);
     let mut cursor = 3;
     assert_eq!(
@@ -1325,21 +1663,12 @@ fn composition_and_complete_fri_chain_match_independent_bigint_oracle() {
     assert_eq!(next_plain_field(&query, &mut cursor), fri4.evaluations[0]);
     assert_eq!(cursor, query.len());
 
-    let invalid_fri = call_words(
+    let invalid_complete = call_byte_words(
         &mut store,
         &instance,
-        "fri_layer4x16_production_words",
-        &[0, 0, 16],
-        221,
+        "complete_production_bytes",
+        (0, 0, 16),
+        1570,
     );
-    assert_eq!(invalid_fri, vec![0; 221]);
-
-    let invalid_remaining = call_words(
-        &mut store,
-        &instance,
-        "fri_remaining4x16_production_words",
-        &[0, 0, 16],
-        301,
-    );
-    assert_eq!(invalid_remaining, vec![0; 301]);
+    assert_eq!(invalid_complete, vec![0; 1570]);
 }

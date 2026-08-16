@@ -4,8 +4,18 @@
 //! the transcript-derived `FC01` challenge. The eight resulting values are
 //! committed before `FC02` is derived.
 
-use mandelbrot_proof_composition::{CompositionProof, compose4x16}
+use mandelbrot_proof_composition::{
+    AirLdeCommitment16,
+    AirLdeQuartetOpening4x16,
+    CompositionProof,
+    compose4x16,
+    EMPTY_AIR_LDE_COMMITMENT16,
+    INVALID_AIR_LDE_QUARTET_OPENING4X16,
+    open_air_lde_quartet4x16,
+    verify_air_lde_quartet4x16,
+}
 use mandelbrot_proof_commitment::{
+    AuxiliaryLdeDigest,
     AuxiliaryDigest,
     CompositionDigest,
     CompositionPairPath,
@@ -14,10 +24,13 @@ use mandelbrot_proof_commitment::{
     FriLayerDigest,
     FriLayerPairPath,
     FriLayerTranscriptDigest,
+    MainLdeDigest,
     TraceDigest,
+    bind_auxiliary_lde,
     bind_auxiliary_trace,
     bind_composition,
     bind_fri_layer,
+    bind_main_lde,
     bind_next_fri_layer,
     bind_statement,
     composition_challenge,
@@ -59,10 +72,7 @@ pub struct FriProof8 {
 
 impl core::marker::Copy for FriProof8 {}
 
-pub struct FriFoldEvaluations<const N: usize> {
-    pub valid: bool,
-    pub evaluations: [Fr; N],
-}
+pub struct FriFoldEvaluations<const N: usize> { pub valid: bool, pub evaluations: [Fr; N] }
 impl<const N: usize> core::marker::Copy for FriFoldEvaluations<N> {}
 
 pub struct FriRound<const ROUND: u32, const N: usize, const NEXT: u32> {
@@ -72,8 +82,11 @@ pub struct FriRound<const ROUND: u32, const N: usize, const NEXT: u32> {
     pub transcript: FriLayerTranscriptDigest<ROUND>,
     pub next_challenge: FriFoldChallenge<NEXT>,
 }
-impl<const ROUND: u32, const N: usize, const NEXT: u32> core::marker::Copy
-    for FriRound<ROUND, N, NEXT> {}
+impl<const ROUND: u32, const N: usize, const NEXT: u32> core::marker::Copy for FriRound<
+    ROUND,
+    N,
+    NEXT,
+> {}
 
 pub struct FriFinalRound<const ROUND: u32> {
     pub valid: bool,
@@ -104,12 +117,12 @@ pub struct FriQueryPair<const ROUND: u32, const DEPTH: usize> {
     pub negative: Fr,
     pub path: FriLayerPairPath<ROUND, DEPTH>,
 }
-impl<const ROUND: u32, const DEPTH: usize> core::marker::Copy
-    for FriQueryPair<ROUND, DEPTH> {}
+impl<const ROUND: u32, const DEPTH: usize> core::marker::Copy for FriQueryPair<ROUND, DEPTH> {}
 
 /// Public commitments and one transcript-derived FRI query for the current
-/// four-row, sixteen-point executable slice. This authenticates the FRI fold
-/// chain. Trace/AIR column openings remain a separate proof layer.
+/// four-row, sixteen-point executable slice. It authenticates both the FRI
+/// fold chain and the four main/auxiliary LDE rows needed to recompute the two
+/// queried composition evaluations.
 pub struct FriCommitmentQuery4x16 {
     pub valid: bool,
     pub terminal_step: u32,
@@ -117,12 +130,15 @@ pub struct FriCommitmentQuery4x16 {
     pub padded_length: u32,
     pub trace: TraceDigest,
     pub auxiliary: AuxiliaryDigest,
+    pub main_lde_root: MainLdeDigest,
+    pub auxiliary_lde_root: AuxiliaryLdeDigest,
     pub composition_root: CompositionDigest,
     pub first_root: FriLayerDigest<1>,
     pub second_root: FriLayerDigest<2>,
     pub third_root: FriLayerDigest<3>,
     pub final_root: FriLayerDigest<4>,
     pub query_index: u32,
+    pub air_lde: AirLdeQuartetOpening4x16,
     pub composition: CompositionQueryPair<3>,
     pub first: FriQueryPair<1, 2>,
     pub second: FriQueryPair<2, 1>,
@@ -135,8 +151,7 @@ fn invalid_fold<const N: usize>() -> FriFoldEvaluations<N> {
     FriFoldEvaluations { valid: false, evaluations: [Fr::zero(); N] }
 }
 
-fn invalid_round<const ROUND: u32, const N: usize, const NEXT: u32>()
-    -> FriRound<ROUND, N, NEXT> {
+fn invalid_round<const ROUND: u32, const N: usize, const NEXT: u32>() -> FriRound<ROUND, N, NEXT> {
     FriRound {
         valid: false,
         evaluations: [Fr::zero(); N],
@@ -165,7 +180,7 @@ fn invalid_complete(_ first: FriProof8) -> FriProofComplete {
     }
 }
 
-fn invalid_composition_pair<const DEPTH: usize>() -> CompositionQueryPair<DEPTH> {
+const fn invalid_composition_pair<const DEPTH: usize>() -> CompositionQueryPair<DEPTH> {
     CompositionQueryPair {
         positive: Fr::zero(),
         negative: Fr::zero(),
@@ -178,8 +193,7 @@ fn invalid_composition_pair<const DEPTH: usize>() -> CompositionQueryPair<DEPTH>
     }
 }
 
-fn invalid_query_pair<const ROUND: u32, const DEPTH: usize>()
-    -> FriQueryPair<ROUND, DEPTH> {
+const fn invalid_query_pair<const ROUND: u32, const DEPTH: usize>() -> FriQueryPair<ROUND, DEPTH> {
     FriQueryPair {
         positive: Fr::zero(),
         negative: Fr::zero(),
@@ -192,7 +206,10 @@ fn invalid_query_pair<const ROUND: u32, const DEPTH: usize>()
     }
 }
 
-fn invalid_commitment_query4x16() -> FriCommitmentQuery4x16 {
+/// Compile-time initializer for the caller-owned query workspace. A runtime
+/// constructor would expose the complete authenticated opening as a flattened
+/// Wasm multi-value result.
+pub const INVALID_COMMITMENT_QUERY4X16: FriCommitmentQuery4x16 =
     FriCommitmentQuery4x16 {
         valid: false,
         terminal_step: 0,
@@ -200,19 +217,21 @@ fn invalid_commitment_query4x16() -> FriCommitmentQuery4x16 {
         padded_length: 0,
         trace: TraceDigest { value: Fr::zero() },
         auxiliary: AuxiliaryDigest { value: Fr::zero() },
+        main_lde_root: MainLdeDigest { value: Fr::zero() },
+        auxiliary_lde_root: AuxiliaryLdeDigest { value: Fr::zero() },
         composition_root: CompositionDigest { value: Fr::zero() },
         first_root: FriLayerDigest { value: Fr::zero() },
         second_root: FriLayerDigest { value: Fr::zero() },
         third_root: FriLayerDigest { value: Fr::zero() },
         final_root: FriLayerDigest { value: Fr::zero() },
         query_index: 0,
+        air_lde: INVALID_AIR_LDE_QUARTET_OPENING4X16,
         composition: invalid_composition_pair<3>(),
         first: invalid_query_pair<1, 2>(),
         second: invalid_query_pair<2, 1>(),
         third: invalid_query_pair<3, 0>(),
         final_evaluation: Fr::zero(),
     }
-}
 
 fn invalid_fri(_ composition: CompositionProof<16>) -> FriProof8 {
     FriProof8 {
@@ -232,7 +251,7 @@ pub fn fold_fri_evaluations<const N: usize, const OUT: usize>(
     _ challenge: Fr,
     _ shift: Fr,
 ) -> FriFoldEvaluations<OUT>
-    where N > 0, N > 1, { (N & (N - 1)) == 0 }, OUT > 0, { OUT + OUT == N },
+where N > 0, N > 1, { (N & (N - 1)) == 0 }, OUT > 0, { OUT + OUT == N }
 {
     if shift.is_zero() {
         return invalid_fold<OUT>()
@@ -257,8 +276,13 @@ pub fn fold_fri_evaluations<const N: usize, const OUT: usize>(
 /// Fold a 16-point composition codeword to the squared eight-point domain.
 /// For each pair `(f(x), f(-x))`, the next value is
 /// `even(x^2) + challenge * odd(x^2)`.
-pub fn fold_composition4x16(_ c_re_q12: i32, _ c_im_q12: i32, _ bound: u32) -> FriProof8 {
-    let composition = compose4x16(c_re_q12, c_im_q12, bound)
+pub fn fold_composition4x16(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ bound: u32,
+    _ air_lde: mut AirLdeCommitment16,
+) -> FriProof8 {
+    let composition = compose4x16(c_re_q12, c_im_q12, bound, mut air_lde)
     if !composition.valid {
         return invalid_fri(composition)
     }
@@ -296,20 +320,38 @@ pub fn fold_next_fri_round<
     _ challenge: FriFoldChallenge<ROUND>,
     _ shift: Fr,
 ) -> FriRound<ROUND, OUT, NEXT>
-    where
-        { PREVIOUS > 0 },
-        { ROUND > 0 },
-        { ROUND == PREVIOUS + 1 },
-        { ROUND < 100 },
-        { NEXT == ROUND + 1 },
-        { NEXT < 100 },
-        N > 0,
-        N > 1,
-        { (N & (N - 1)) == 0 },
-        OUT > 0,
-        OUT <= MAX_PADDED_TRACE_LENGTH,
-        { (OUT & (OUT - 1)) == 0 },
-        { OUT + OUT == N },
+where
+    {
+        PREVIOUS > 0
+    },
+    {
+        ROUND > 0
+    },
+    {
+        ROUND == PREVIOUS + 1
+    },
+    {
+        ROUND < 100
+    },
+    {
+        NEXT == ROUND + 1
+    },
+    {
+        NEXT < 100
+    },
+    N > 0,
+    N > 1,
+    {
+        (N & (N - 1)) == 0
+    },
+    OUT > 0,
+    OUT <= MAX_PADDED_TRACE_LENGTH,
+    {
+        (OUT & (OUT - 1)) == 0
+    },
+    {
+        OUT + OUT == N
+    }
 {
     let folded = fold_fri_evaluations<N, OUT>(evaluations, challenge.value, shift)
     if !folded.valid {
@@ -326,20 +368,13 @@ pub fn fold_next_fri_round<
     }
 }
 
-pub fn fold_final_fri_round<
-    const PREVIOUS: u32,
-    const ROUND: u32,
->(
+pub fn fold_final_fri_round<const PREVIOUS: u32, const ROUND: u32>(
     _ evaluations: own [Fr; 2],
     _ transcript: FriLayerTranscriptDigest<PREVIOUS>,
     _ challenge: FriFoldChallenge<ROUND>,
     _ shift: Fr,
 ) -> FriFinalRound<ROUND>
-    where
-        { PREVIOUS > 0 },
-        { ROUND > 0 },
-        { ROUND == PREVIOUS + 1 },
-        { ROUND < 100 },
+where { PREVIOUS > 0 }, { ROUND > 0 }, { ROUND == PREVIOUS + 1 }, { ROUND < 100 }
 {
     let folded = fold_fri_evaluations<2, 1>(evaluations, challenge.value, shift)
     if !folded.valid {
@@ -361,8 +396,9 @@ pub fn fold_all_composition4x16(
     _ c_re_q12: i32,
     _ c_im_q12: i32,
     _ bound: u32,
+    _ air_lde: mut AirLdeCommitment16,
 ) -> FriProofComplete {
-    let first = fold_composition4x16(c_re_q12, c_im_q12, bound)
+    let first = fold_composition4x16(c_re_q12, c_im_q12, bound, mut air_lde)
     if !first.valid {
         return invalid_complete(first)
     }
@@ -408,18 +444,21 @@ pub fn fold_all_composition4x16(
 /// Commit the complete fold chain and open the transcript-selected pair in
 /// every layer. The paired positions are `index` and `index + N / 2`, which
 /// are evaluations at `x` and `-x` on each radix-two domain.
-pub fn prove_fri_commitment_query4x16(
+pub fn open_fri_commitment_query4x16(
     _ c_re_q12: i32,
     _ c_im_q12: i32,
     _ bound: u32,
-) -> FriCommitmentQuery4x16 {
-    let complete = fold_all_composition4x16(c_re_q12, c_im_q12, bound)
+    _ complete: FriProofComplete,
+    _ air_lde: AirLdeCommitment16,
+    _ proof: mut FriCommitmentQuery4x16,
+) -> bool {
+    proof.valid = false
     if !complete.valid {
-        return invalid_commitment_query4x16()
+        return false
     }
     let commitments = stream_statement_q12(c_re_q12, c_im_q12, bound)
     if !commitments.valid || commitments.padded_length != 4 {
-        return invalid_commitment_query4x16()
+        return false
     }
 
     let query = fri_query_challenge<4, 1>(complete.final_round.transcript)
@@ -440,48 +479,73 @@ pub fn prove_fri_commitment_query4x16(
         second_index,
     )
     let third_path = fri_layer_pair_path_two<3>(complete.third.evaluations)
-    if !composition_path.valid || !first_path.valid || !second_path.valid || !third_path.valid {
-        return invalid_commitment_query4x16()
+    let air_opened = open_air_lde_quartet4x16(
+        c_re_q12,
+        c_im_q12,
+        bound,
+        query_index,
+        air_lde.main_leaves,
+        air_lde.auxiliary_leaves,
+        mut proof.air_lde,
+    )
+    if !composition_path.valid
+        || !first_path.valid
+        || !second_path.valid
+        || !third_path.valid
+        || !air_opened {
+        return false
     }
 
     let composition_index: usize = query_index as usize
     let first_position: usize = first_index as usize
     let second_position: usize = second_index as usize
-    FriCommitmentQuery4x16 {
-        valid: true,
-        terminal_step: commitments.terminal_step,
-        trace_length: commitments.trace_length,
-        padded_length: commitments.padded_length,
-        trace: commitments.trace,
-        auxiliary: commitments.auxiliary,
-        composition_root: complete.first.composition.root,
-        first_root: complete.first.root,
-        second_root: complete.second.root,
-        third_root: complete.third.root,
-        final_root: complete.final_round.root,
-        query_index: query_index,
-        composition: CompositionQueryPair {
-            positive: complete.first.composition.evaluations[composition_index],
-            negative: complete.first.composition.evaluations[composition_index + 8],
-            path: composition_path,
-        },
-        first: FriQueryPair {
-            positive: complete.first.evaluations[first_position],
-            negative: complete.first.evaluations[first_position + 4],
-            path: first_path,
-        },
-        second: FriQueryPair {
-            positive: complete.second.evaluations[second_position],
-            negative: complete.second.evaluations[second_position + 2],
-            path: second_path,
-        },
-        third: FriQueryPair {
-            positive: complete.third.evaluations[0],
-            negative: complete.third.evaluations[1],
-            path: third_path,
-        },
-        final_evaluation: complete.final_round.evaluation,
+    proof.terminal_step = commitments.terminal_step
+    proof.trace_length = commitments.trace_length
+    proof.padded_length = commitments.padded_length
+    proof.trace = commitments.trace
+    proof.auxiliary = commitments.auxiliary
+    proof.main_lde_root = air_lde.main_root
+    proof.auxiliary_lde_root = air_lde.auxiliary_root
+    proof.composition_root = complete.first.composition.root
+    proof.first_root = complete.first.root
+    proof.second_root = complete.second.root
+    proof.third_root = complete.third.root
+    proof.final_root = complete.final_round.root
+    proof.query_index = query_index
+    proof.composition = CompositionQueryPair {
+        positive: complete.first.composition.evaluations[composition_index],
+        negative: complete.first.composition.evaluations[composition_index + 8],
+        path: composition_path,
     }
+    proof.first = FriQueryPair {
+        positive: complete.first.evaluations[first_position],
+        negative: complete.first.evaluations[first_position + 4],
+        path: first_path,
+    }
+    proof.second = FriQueryPair {
+        positive: complete.second.evaluations[second_position],
+        negative: complete.second.evaluations[second_position + 2],
+        path: second_path,
+    }
+    proof.third = FriQueryPair {
+        positive: complete.third.evaluations[0],
+        negative: complete.third.evaluations[1],
+        path: third_path,
+    }
+    proof.final_evaluation = complete.final_round.evaluation
+    proof.valid = true
+    true
+}
+
+pub fn prove_fri_commitment_query4x16(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ bound: u32,
+    _ proof: mut FriCommitmentQuery4x16,
+) -> bool {
+    let mut air_lde = EMPTY_AIR_LDE_COMMITMENT16
+    let complete = fold_all_composition4x16(c_re_q12, c_im_q12, bound, mut air_lde)
+    open_fri_commitment_query4x16(c_re_q12, c_im_q12, bound, complete, air_lde, mut proof)
 }
 
 fn fold_pair_at<const N: usize>(
@@ -491,7 +555,7 @@ fn fold_pair_at<const N: usize>(
     _ shift: Fr,
     _ index: u32,
 ) -> Fr
-    where N > 0, N > 1, { (N & (N - 1)) == 0 },
+where N > 0, N > 1, { (N & (N - 1)) == 0 }
 {
     let root = Field::two_adic_root(radix2_log<N>())
     let point = shift * root.pow_u32(index)
@@ -499,28 +563,29 @@ fn fold_pair_at<const N: usize>(
     folded.evaluations[0]
 }
 
-/// Verify the transcript, compact Merkle openings, and all four binary FRI
-/// folds without regenerating the committed trace or composition codeword.
-/// This is deliberately only the FRI commitment layer: an end-to-end proof
-/// must additionally authenticate the queried AIR columns and recompute the
-/// opened composition value from them.
+/// Verify the transcript, authenticated main and auxiliary AIR rows, the two
+/// recomputed composition values, compact Merkle openings, and all four binary
+/// FRI folds without regenerating the committed trace or composition codeword.
+/// Canonical proof decoding and malformed-byte rejection are the remaining
+/// boundary around this typed verifier.
 pub fn verify_fri_commitment_query4x16(
     _ c_re_q12: i32,
     _ c_im_q12: i32,
     _ bound: u32,
-    _ proof: own FriCommitmentQuery4x16,
+    _ proof: FriCommitmentQuery4x16,
 ) -> bool {
     if !proof.valid || proof.padded_length != 4 {
         return false
     }
     if escape_public_proof_domain_holds_q12(
-        c_re_q12,
-        c_im_q12,
-        bound,
-        proof.terminal_step,
-        proof.trace_length,
-        proof.padded_length,
-    ) == 0 {
+            c_re_q12,
+            c_im_q12,
+            bound,
+            proof.terminal_step,
+            proof.trace_length,
+            proof.padded_length,
+        )
+        == 0 {
         return false
     }
 
@@ -534,8 +599,10 @@ pub fn verify_fri_commitment_query4x16(
     }
     let statement = bind_statement(public, proof.trace)
     let proof_transcript = bind_auxiliary_trace(statement, proof.auxiliary)
-    let composition = composition_challenge(proof_transcript)
-    let composition_transcript = bind_composition(proof_transcript, proof.composition_root)
+    let main_lde_transcript = bind_main_lde(proof_transcript, proof.main_lde_root)
+    let air_lde_transcript = bind_auxiliary_lde(main_lde_transcript, proof.auxiliary_lde_root)
+    let composition = composition_challenge(air_lde_transcript)
+    let composition_transcript = bind_composition(air_lde_transcript, proof.composition_root)
     let first_challenge = fri_fold_challenge(composition_transcript)
     let first_transcript = bind_fri_layer(composition_transcript, proof.first_root)
     let second_challenge = fri_next_fold_challenge<1, 2>(first_transcript)
@@ -557,31 +624,47 @@ pub fn verify_fri_commitment_query4x16(
         return false
     }
     if !verify_composition_pair_path<3>(
-        proof.composition.positive,
-        proof.composition.negative,
-        proof.composition.path,
-        proof.composition_root,
-    ) || !verify_fri_layer_pair_path<1, 2>(
-        proof.first.positive,
-        proof.first.negative,
-        proof.first.path,
-        proof.first_root,
-    ) || !verify_fri_layer_pair_path<2, 1>(
-        proof.second.positive,
-        proof.second.negative,
-        proof.second.path,
-        proof.second_root,
-    ) || !verify_fri_layer_pair_path_two<3>(
-        proof.third.positive,
-        proof.third.negative,
-        proof.third.path,
-        proof.third_root,
-    ) {
+            proof.composition.positive,
+            proof.composition.negative,
+            proof.composition.path,
+            proof.composition_root,
+        )
+        || !verify_fri_layer_pair_path<1, 2>(
+            proof.first.positive,
+            proof.first.negative,
+            proof.first.path,
+            proof.first_root,
+        )
+        || !verify_fri_layer_pair_path<2, 1>(
+            proof.second.positive,
+            proof.second.negative,
+            proof.second.path,
+            proof.second_root,
+        )
+        || !verify_fri_layer_pair_path_two<3>(
+            proof.third.positive,
+            proof.third.negative,
+            proof.third.path,
+            proof.third_root,
+        ) {
         return false
     }
     if !field_values_equal(
         fri_layer_row_commitment<4>(proof.final_evaluation).value,
         proof.final_root.value,
+    ) {
+        return false
+    }
+    if !verify_air_lde_quartet4x16(
+        c_re_q12,
+        c_im_q12,
+        composition.value,
+        query_index,
+        proof.air_lde,
+        proof.main_lde_root,
+        proof.auxiliary_lde_root,
+        proof.composition.positive,
+        proof.composition.negative,
     ) {
         return false
     }
@@ -593,7 +676,11 @@ pub fn verify_fri_commitment_query4x16(
         Fr::from_u32(5),
         query_index,
     )
-    let expected_first = if query_index < 4 { proof.first.positive } else { proof.first.negative }
+    let expected_first = if query_index < 4 {
+        proof.first.positive
+    } else {
+        proof.first.negative
+    }
     if !field_values_equal(first_fold, expected_first) {
         return false
     }
@@ -606,7 +693,11 @@ pub fn verify_fri_commitment_query4x16(
         shift2,
         first_index,
     )
-    let expected_second = if first_index < 2 { proof.second.positive } else { proof.second.negative }
+    let expected_second = if first_index < 2 {
+        proof.second.positive
+    } else {
+        proof.second.negative
+    }
     if !field_values_equal(second_fold, expected_second) {
         return false
     }
@@ -619,7 +710,11 @@ pub fn verify_fri_commitment_query4x16(
         shift3,
         second_index,
     )
-    let expected_third = if second_index == 0 { proof.third.positive } else { proof.third.negative }
+    let expected_third = if second_index == 0 {
+        proof.third.positive
+    } else {
+        proof.third.negative
+    }
     if !field_values_equal(third_fold, expected_third) {
         return false
     }

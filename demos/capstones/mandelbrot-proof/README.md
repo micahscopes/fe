@@ -91,9 +91,19 @@ equation. The shared pure `poseidon_merkle` ingot adapts zk-kit binary-path
 semantics to field values and typed capacity domains. The bigint oracle
 independently derives `FQ01`, every selected evaluation, every sibling, and
 all four roots. The full gate passes in zero-import Wasm. This authenticates
-the FRI chain only: AIR column openings, canonical proof encoding, mutation
-rejection at that encoding boundary, and measured verifier cost remain
-pending.
+the FRI chain and its composition claim against the AIR. The prover also
+commits all 16 field-valued main and auxiliary LDE rows under typed
+`"MR02"`/`"MN02"` and `"AR02"`/`"AN02"` domains, then binds both roots through
+`"AT02"` before deriving the composition challenge. Its query opens the four
+rows containing the selected current/next pair. The Fe verifier checks both
+quartet paths, rebuilds the ordered transcript, and recomputes the two alleged
+composition evaluations through the same generic constraint interpreter. The
+independent bigint oracle separately derives every opened field, row digest,
+sibling, root, challenge, and recomputed numerator. Canonical proof encoding,
+systematic malformed-proof rejection at that boundary, and measured verifier
+cost remain pending. The typed verifier already rejects representative
+mutations across authenticated AIR rows and paths, FRI values and paths,
+transcript roots, the query index, and public metadata.
 
 Escaping witnesses derive a power-of-two proof shape with one terminal marker
 and deterministic inactive padding; invalid and non-escaping claims cannot

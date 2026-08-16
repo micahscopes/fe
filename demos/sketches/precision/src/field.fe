@@ -615,7 +615,7 @@ impl<const L: usize, M> FieldElement<L, M>
         mul_words<L, M>(self.words, one)
     }
 
-    pub fn zero() -> Self {
+    pub const fn zero() -> Self {
         Self { words: [0; L] }
     }
 
