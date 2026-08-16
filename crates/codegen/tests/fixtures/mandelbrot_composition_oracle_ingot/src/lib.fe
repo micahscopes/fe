@@ -3,7 +3,12 @@
 //! this fixture accepts a u32 only to isolate the polynomial calculation.
 
 use mandelbrot_proof_composition::{compose4x16, evaluate_composition_point4x16}
-use mandelbrot_proof_fri::{fold_all_composition4x16, fold_composition4x16}
+use mandelbrot_proof_fri::{
+    fold_all_composition4x16,
+    fold_composition4x16,
+    prove_fri_commitment_query4x16,
+    verify_fri_commitment_query4x16,
+}
 use precision::bn254_fr::Bn254Fr
 use precision::field::FieldElement
 
@@ -35,6 +40,74 @@ pub struct FriRemainingProductionWords {
     pub final_evaluation: [u32; 20],
     pub final_root: [u32; 20],
     pub final_transcript: [u32; 20],
+}
+
+pub struct FriQueryProductionWords {
+    pub valid: u32,
+    pub verified: u32,
+    pub query_index: u32,
+    pub composition_positive: [u32; 20],
+    pub composition_negative: [u32; 20],
+    pub composition_positive_siblings: [[u32; 20]; 3],
+    pub composition_negative_siblings: [[u32; 20]; 3],
+    pub first_positive: [u32; 20],
+    pub first_negative: [u32; 20],
+    pub first_positive_siblings: [[u32; 20]; 2],
+    pub first_negative_siblings: [[u32; 20]; 2],
+    pub second_positive: [u32; 20],
+    pub second_negative: [u32; 20],
+    pub second_positive_sibling: [u32; 20],
+    pub second_negative_sibling: [u32; 20],
+    pub third_positive: [u32; 20],
+    pub third_negative: [u32; 20],
+    pub final_evaluation: [u32; 20],
+}
+
+pub fn fri_commitment_query4x16_production_words(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ bound: u32,
+) -> FriQueryProductionWords {
+    let proof = prove_fri_commitment_query4x16(c_re_q12, c_im_q12, bound)
+    FriQueryProductionWords {
+        valid: if proof.valid { 1 } else { 0 },
+        verified: if verify_fri_commitment_query4x16(
+            c_re_q12,
+            c_im_q12,
+            bound,
+            proof,
+        ) { 1 } else { 0 },
+        query_index: proof.query_index,
+        composition_positive: proof.composition.positive.to_plain_words(),
+        composition_negative: proof.composition.negative.to_plain_words(),
+        composition_positive_siblings: [
+            proof.composition.path.positive_siblings[0].to_plain_words(),
+            proof.composition.path.positive_siblings[1].to_plain_words(),
+            proof.composition.path.positive_siblings[2].to_plain_words(),
+        ],
+        composition_negative_siblings: [
+            proof.composition.path.negative_siblings[0].to_plain_words(),
+            proof.composition.path.negative_siblings[1].to_plain_words(),
+            proof.composition.path.negative_siblings[2].to_plain_words(),
+        ],
+        first_positive: proof.first.positive.to_plain_words(),
+        first_negative: proof.first.negative.to_plain_words(),
+        first_positive_siblings: [
+            proof.first.path.positive_siblings[0].to_plain_words(),
+            proof.first.path.positive_siblings[1].to_plain_words(),
+        ],
+        first_negative_siblings: [
+            proof.first.path.negative_siblings[0].to_plain_words(),
+            proof.first.path.negative_siblings[1].to_plain_words(),
+        ],
+        second_positive: proof.second.positive.to_plain_words(),
+        second_negative: proof.second.negative.to_plain_words(),
+        second_positive_sibling: proof.second.path.positive_siblings[0].to_plain_words(),
+        second_negative_sibling: proof.second.path.negative_siblings[0].to_plain_words(),
+        third_positive: proof.third.positive.to_plain_words(),
+        third_negative: proof.third.negative.to_plain_words(),
+        final_evaluation: proof.final_evaluation.to_plain_words(),
+    }
 }
 
 pub fn fri_remaining4x16_production_words(

@@ -1,0 +1,7 @@
+[ingot]
+name = "poseidon_merkle"
+version = "0.1.0"
+
+[dependencies]
+core = { path = "../core" }
+poseidon_bn254 = "../poseidon_bn254"

@@ -83,7 +83,16 @@ rounds. Fe derives the `FR`, `FN`, `FT`, and next-round `FC` Poseidon domains
 from each const round index, without a copied round table. The oracle checks
 every value using both the pair formula and an independently interpolated
 even/odd coefficient formula, then reconstructs every root, transcript, and
-challenge. Authenticated query openings and measured verifier cost remain
+challenge. After `"FT04"`, typed `"FQ01"` selects one index in the positive
+half of the 16-point domain. Fe opens each `(x, -x)` pair with compact
+depth-3, depth-2, depth-1, and two-leaf Merkle paths, then independently
+rebuilds the transcript and verifies every authentication path and fold
+equation. The shared pure `poseidon_merkle` ingot adapts zk-kit binary-path
+semantics to field values and typed capacity domains. The bigint oracle
+independently derives `FQ01`, every selected evaluation, every sibling, and
+all four roots. The full gate passes in zero-import Wasm. This authenticates
+the FRI chain only: AIR column openings, canonical proof encoding, mutation
+rejection at that encoding boundary, and measured verifier cost remain
 pending.
 
 Escaping witnesses derive a power-of-two proof shape with one terminal marker

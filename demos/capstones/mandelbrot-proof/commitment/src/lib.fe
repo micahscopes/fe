@@ -25,6 +25,13 @@ use poseidon_bn254::{
     compress,
     plain_words,
 }
+use poseidon_merkle::{
+    MerklePairPath,
+    pair_path_from_leaves,
+    pair_path_two,
+    pair_verify,
+    pair_verify_two,
+}
 
 const ROW_WORDS: usize = 17
 const PUBLIC_WORDS: usize = 8
@@ -72,6 +79,7 @@ struct MandelbrotFriFold<const ROUND: u32> {}
 struct MandelbrotFriLayerRow<const ROUND: u32> {}
 struct MandelbrotFriLayerNode<const ROUND: u32> {}
 struct MandelbrotFriLayerTranscript<const ROUND: u32> {}
+struct MandelbrotFriQuery<const QUERY: u32> {}
 
 impl PoseidonDomain for MandelbrotRowV1 {
     const TAG: u32 = protocol_tag("MR01")
@@ -129,6 +137,10 @@ impl<const ROUND: u32> PoseidonDomain for MandelbrotFriLayerTranscript<ROUND> {
     const TAG: u32 = protocol_round_tag("FT", ROUND)
 }
 
+impl<const QUERY: u32> PoseidonDomain for MandelbrotFriQuery<QUERY> {
+    const TAG: u32 = protocol_round_tag("FQ", QUERY)
+}
+
 /// Public statement already validated by the cheap proof-domain boundary.
 /// Keeping its shape nominal prevents transcript fields from becoming an
 /// untyped positional protocol at Fe call sites.
@@ -183,6 +195,30 @@ impl<const ROUND: u32> core::marker::Copy for FriLayerDigest<ROUND> {}
 
 pub struct FriLayerTranscriptDigest<const ROUND: u32> { pub value: Fr }
 impl<const ROUND: u32> core::marker::Copy for FriLayerTranscriptDigest<ROUND> {}
+
+pub struct FriQueryChallenge<const QUERY: u32> { pub value: Fr }
+impl<const QUERY: u32> core::marker::Copy for FriQueryChallenge<QUERY> {}
+
+/// Authentication paths for two leaves at local positions `index` and
+/// `index + N / 2`. Each half is authenticated only to its half-root; the
+/// verifier combines those roots once. This avoids carrying the two redundant
+/// root-level siblings found in separate Merkle paths.
+pub struct CompositionPairPath<const DEPTH: usize> {
+    pub valid: bool,
+    pub index: u32,
+    pub positive_siblings: [Fr; DEPTH],
+    pub negative_siblings: [Fr; DEPTH],
+}
+impl<const DEPTH: usize> core::marker::Copy for CompositionPairPath<DEPTH> {}
+
+pub struct FriLayerPairPath<const ROUND: u32, const DEPTH: usize> {
+    pub valid: bool,
+    pub index: u32,
+    pub positive_siblings: [Fr; DEPTH],
+    pub negative_siblings: [Fr; DEPTH],
+}
+impl<const ROUND: u32, const DEPTH: usize> core::marker::Copy
+    for FriLayerPairPath<ROUND, DEPTH> {}
 
 /// Result of one canonical prover-side pass. Invalid and non-escaping claims
 /// fail closed instead of exposing a digest for an incomplete trace.
@@ -529,6 +565,59 @@ where N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N & (N - 1)) == 0 }
     frontier.complete_root()
 }
 
+pub fn composition_pair_path_power_of_two<
+    const N: usize,
+    const HALF: usize,
+    const DEPTH: usize,
+>(
+    _ evaluations: own [Fr; N],
+    _ index: u32,
+) -> CompositionPairPath<DEPTH>
+    where N > 1, N <= MAX_PADDED_TRACE_LENGTH, HALF > 0, { HALF + HALF == N },
+{
+    let mut leaves = [Fr::zero(); N]
+    let mut cursor: usize = 0
+    while cursor < N {
+        leaves[cursor] = composition_row_commitment(evaluations[cursor]).value
+        cursor = cursor + 1
+    }
+    let raw = pair_path_from_leaves<
+        MandelbrotCompositionNodeV1,
+        N,
+        HALF,
+        DEPTH,
+    >(leaves, index)
+    CompositionPairPath {
+        valid: raw.valid,
+        index: raw.index,
+        positive_siblings: raw.positive_siblings,
+        negative_siblings: raw.negative_siblings,
+    }
+}
+
+pub fn verify_composition_pair_path<const DEPTH: usize>(
+    _ positive: Fr,
+    _ negative: Fr,
+    _ path: own CompositionPairPath<DEPTH>,
+    _ root: CompositionDigest,
+) -> bool {
+    if !path.valid {
+        return false
+    }
+    let shared = MerklePairPath {
+        valid: true,
+        index: path.index,
+        positive_siblings: path.positive_siblings,
+        negative_siblings: path.negative_siblings,
+    }
+    pair_verify<MandelbrotCompositionNodeV1, DEPTH>(
+        root.value,
+        composition_row_commitment(positive).value,
+        composition_row_commitment(negative).value,
+        shared,
+    )
+}
+
 pub fn bind_composition(
     _ transcript: ProofTranscriptDigest,
     _ composition: CompositionDigest,
@@ -562,6 +651,104 @@ pub fn fri_layer_root_power_of_two<const ROUND: u32, const N: usize>(
     frontier.complete_root()
 }
 
+pub fn fri_layer_pair_path_power_of_two<
+    const ROUND: u32,
+    const N: usize,
+    const HALF: usize,
+    const DEPTH: usize,
+>(
+    _ evaluations: own [Fr; N],
+    _ index: u32,
+) -> FriLayerPairPath<ROUND, DEPTH>
+    where
+        { ROUND > 0 },
+        { ROUND < 100 },
+        N > 1,
+        N <= MAX_PADDED_TRACE_LENGTH,
+        HALF > 0,
+        { HALF + HALF == N },
+{
+    let mut leaves = [Fr::zero(); N]
+    let mut cursor: usize = 0
+    while cursor < N {
+        leaves[cursor] = fri_layer_row_commitment<ROUND>(evaluations[cursor]).value
+        cursor = cursor + 1
+    }
+    let raw = pair_path_from_leaves<
+        MandelbrotFriLayerNode<ROUND>,
+        N,
+        HALF,
+        DEPTH,
+    >(leaves, index)
+    FriLayerPairPath {
+        valid: raw.valid,
+        index: raw.index,
+        positive_siblings: raw.positive_siblings,
+        negative_siblings: raw.negative_siblings,
+    }
+}
+
+pub fn verify_fri_layer_pair_path<const ROUND: u32, const DEPTH: usize>(
+    _ positive: Fr,
+    _ negative: Fr,
+    _ path: own FriLayerPairPath<ROUND, DEPTH>,
+    _ root: FriLayerDigest<ROUND>,
+) -> bool
+    where { ROUND > 0 }, { ROUND < 100 },
+{
+    if !path.valid {
+        return false
+    }
+    let shared = MerklePairPath {
+        valid: true,
+        index: path.index,
+        positive_siblings: path.positive_siblings,
+        negative_siblings: path.negative_siblings,
+    }
+    pair_verify<MandelbrotFriLayerNode<ROUND>, DEPTH>(
+        root.value,
+        fri_layer_row_commitment<ROUND>(positive).value,
+        fri_layer_row_commitment<ROUND>(negative).value,
+        shared,
+    )
+}
+
+pub fn fri_layer_pair_path_two<const ROUND: u32>(
+    _ evaluations: own [Fr; 2],
+) -> FriLayerPairPath<ROUND, 0>
+    where { ROUND > 0 }, { ROUND < 100 },
+{
+    let raw = pair_path_two(0)
+    FriLayerPairPath {
+        valid: raw.valid,
+        index: raw.index,
+        positive_siblings: raw.positive_siblings,
+        negative_siblings: raw.negative_siblings,
+    }
+}
+
+pub fn verify_fri_layer_pair_path_two<const ROUND: u32>(
+    _ positive: Fr,
+    _ negative: Fr,
+    _ path: own FriLayerPairPath<ROUND, 0>,
+    _ root: FriLayerDigest<ROUND>,
+) -> bool
+    where { ROUND > 0 }, { ROUND < 100 },
+{
+    let shared = MerklePairPath {
+        valid: path.valid,
+        index: path.index,
+        positive_siblings: path.positive_siblings,
+        negative_siblings: path.negative_siblings,
+    }
+    pair_verify_two<MandelbrotFriLayerNode<ROUND>>(
+        root.value,
+        fri_layer_row_commitment<ROUND>(positive).value,
+        fri_layer_row_commitment<ROUND>(negative).value,
+        shared,
+    )
+}
+
 pub fn bind_fri_layer(
     _ transcript: CompositionTranscriptDigest,
     _ layer: FriLayerDigest<1>,
@@ -589,6 +776,16 @@ pub fn fri_next_fold_challenge<const ROUND: u32, const NEXT: u32>(
 {
     FriFoldChallenge {
         value: compress<MandelbrotFriFold<NEXT>>(transcript.value, Fr::zero()),
+    }
+}
+
+pub fn fri_query_challenge<const ROUND: u32, const QUERY: u32>(
+    _ transcript: FriLayerTranscriptDigest<ROUND>,
+) -> FriQueryChallenge<QUERY>
+    where { ROUND > 0 }, { ROUND < 100 }, { QUERY > 0 }, { QUERY < 100 },
+{
+    FriQueryChallenge {
+        value: compress<MandelbrotFriQuery<QUERY>>(transcript.value, Fr::zero()),
     }
 }
 

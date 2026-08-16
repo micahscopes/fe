@@ -1,0 +1,220 @@
+//! Pure BN254 Poseidon Merkle utilities.
+//!
+//! The binary path fold follows zk-kit.fe's `zkkit_merkle` contract-facing
+//! reference, but removes its EVM effect and `u256` boundary. Protocol callers
+//! select the Poseidon capacity domain through a marker type instead of a
+//! runtime ID. The later BabyBear utility should preserve this proof shape,
+//! not route BN254 multi-limb arithmetic into WGSL.
+
+use poseidon_bn254::{Fr, LIMBS, PoseidonDomain, compress, plain_words}
+
+pub struct MerkleRoot {
+    pub valid: bool,
+    pub value: Fr,
+}
+impl core::marker::Copy for MerkleRoot {}
+
+pub struct MerklePairPath<const DEPTH: usize> {
+    pub valid: bool,
+    pub index: u32,
+    pub positive_siblings: [Fr; DEPTH],
+    pub negative_siblings: [Fr; DEPTH],
+}
+impl<const DEPTH: usize> core::marker::Copy for MerklePairPath<DEPTH> {}
+
+fn invalid_root() -> MerkleRoot {
+    MerkleRoot { valid: false, value: Fr::zero() }
+}
+
+fn invalid_pair_path<const DEPTH: usize>() -> MerklePairPath<DEPTH> {
+    MerklePairPath {
+        valid: false,
+        index: 0,
+        positive_siblings: [Fr::zero(); DEPTH],
+        negative_siblings: [Fr::zero(); DEPTH],
+    }
+}
+
+pub fn field_values_equal(_ left: Fr, _ right: Fr) -> bool {
+    let left_words = plain_words(left)
+    let right_words = plain_words(right)
+    let mut limb: usize = 0
+    while limb < LIMBS {
+        if left_words[limb] != right_words[limb] {
+            return false
+        }
+        limb = limb + 1
+    }
+    true
+}
+
+/// Fold a conventional bottom-up sibling path. The low bit of `path_index`
+/// selects the leaf side, matching zk-kit binary Merkle proofs.
+pub fn binary_root<D: PoseidonDomain, const MAX_DEPTH: usize>(
+    _ leaf: Fr,
+    _ depth: usize,
+    _ path_index: u32,
+    _ siblings: own [Fr; MAX_DEPTH],
+) -> MerkleRoot {
+    if depth > MAX_DEPTH || depth >= 32 {
+        return invalid_root()
+    }
+    let mut capacity: u32 = 1
+    let mut shape_level: usize = 0
+    while shape_level < depth {
+        capacity = capacity + capacity
+        shape_level = shape_level + 1
+    }
+    if path_index >= capacity {
+        return invalid_root()
+    }
+
+    let mut node = leaf
+    let mut index = path_index
+    let mut level: usize = 0
+    while level < depth {
+        let sibling = siblings[level]
+        node = if (index & 1) == 0 {
+            compress<D>(node, sibling)
+        } else {
+            compress<D>(sibling, node)
+        }
+        index = index / 2
+        level = level + 1
+    }
+    MerkleRoot { valid: true, value: node }
+}
+
+pub fn binary_verify<D: PoseidonDomain, const MAX_DEPTH: usize>(
+    _ expected: Fr,
+    _ leaf: Fr,
+    _ depth: usize,
+    _ path_index: u32,
+    _ siblings: own [Fr; MAX_DEPTH],
+) -> bool {
+    let opened = binary_root<D, MAX_DEPTH>(leaf, depth, path_index, siblings)
+    opened.valid && field_values_equal(opened.value, expected)
+}
+
+/// Construct the compact authentication data for leaves at `index` and
+/// `index + N / 2`. Separate paths would each carry the other half-root; this
+/// representation derives both half-roots and hashes them together once.
+pub fn pair_path_from_leaves<
+    D: PoseidonDomain,
+    const N: usize,
+    const HALF: usize,
+    const DEPTH: usize,
+>(
+    _ leaves: own [Fr; N],
+    _ index: u32,
+) -> MerklePairPath<DEPTH>
+    where N > 1, HALF > 0, { HALF + HALF == N },
+{
+    let mut expected_half: usize = 1
+    let mut level: usize = 0
+    while level < DEPTH {
+        expected_half = expected_half + expected_half
+        level = level + 1
+    }
+    let half_u32: u32 = HALF.downcast_truncate()
+    if expected_half != HALF || index >= half_u32 {
+        return invalid_pair_path<DEPTH>()
+    }
+
+    let mut nodes = leaves
+    let mut positive: usize = index as usize
+    let mut negative: usize = positive + HALF
+    let mut width: usize = N
+    let mut positive_siblings = [Fr::zero(); DEPTH]
+    let mut negative_siblings = [Fr::zero(); DEPTH]
+    level = 0
+    while level < DEPTH {
+        positive_siblings[level] = nodes[positive ^ 1]
+        negative_siblings[level] = nodes[negative ^ 1]
+
+        let parent_count = width / 2
+        let mut parent: usize = 0
+        while parent < parent_count {
+            nodes[parent] = compress<D>(nodes[parent + parent], nodes[parent + parent + 1])
+            parent = parent + 1
+        }
+        positive = positive / 2
+        negative = negative / 2
+        width = parent_count
+        level = level + 1
+    }
+    MerklePairPath {
+        valid: width == 2,
+        index: index,
+        positive_siblings: positive_siblings,
+        negative_siblings: negative_siblings,
+    }
+}
+
+pub fn pair_root<D: PoseidonDomain, const DEPTH: usize>(
+    _ positive_leaf: Fr,
+    _ negative_leaf: Fr,
+    _ path: own MerklePairPath<DEPTH>,
+) -> MerkleRoot {
+    if !path.valid {
+        return invalid_root()
+    }
+    let mut half: u32 = 1
+    let mut shape_level: usize = 0
+    while shape_level < DEPTH {
+        half = half + half
+        shape_level = shape_level + 1
+    }
+    if path.index >= half {
+        return invalid_root()
+    }
+
+    let mut positive = positive_leaf
+    let mut negative = negative_leaf
+    let mut index = path.index
+    let mut level: usize = 0
+    while level < DEPTH {
+        if (index & 1) == 0 {
+            positive = compress<D>(positive, path.positive_siblings[level])
+            negative = compress<D>(negative, path.negative_siblings[level])
+        } else {
+            positive = compress<D>(path.positive_siblings[level], positive)
+            negative = compress<D>(path.negative_siblings[level], negative)
+        }
+        index = index / 2
+        level = level + 1
+    }
+    MerkleRoot { valid: true, value: compress<D>(positive, negative) }
+}
+
+pub fn pair_verify<D: PoseidonDomain, const DEPTH: usize>(
+    _ expected: Fr,
+    _ positive_leaf: Fr,
+    _ negative_leaf: Fr,
+    _ path: own MerklePairPath<DEPTH>,
+) -> bool {
+    let opened = pair_root<D, DEPTH>(positive_leaf, negative_leaf, path)
+    opened.valid && field_values_equal(opened.value, expected)
+}
+
+/// Base case for a two-leaf tree. Keeping this separate avoids asking a
+/// backend to lower an unreachable dynamic index into an erased `[Fr; 0]`.
+pub fn pair_path_two(_ index: u32) -> MerklePairPath<0> {
+    MerklePairPath {
+        valid: index == 0,
+        index: index,
+        positive_siblings: [Fr::zero(); 0],
+        negative_siblings: [Fr::zero(); 0],
+    }
+}
+
+pub fn pair_verify_two<D: PoseidonDomain>(
+    _ expected: Fr,
+    _ positive_leaf: Fr,
+    _ negative_leaf: Fr,
+    _ path: own MerklePairPath<0>,
+) -> bool {
+    path.valid
+        && path.index == 0
+        && field_values_equal(compress<D>(positive_leaf, negative_leaf), expected)
+}

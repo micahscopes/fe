@@ -316,14 +316,34 @@ Legend:
   table or host-derived protocol constant. The independent bigint gate checks
   every folded value both from the pair formula and from separately
   interpolated even/odd coefficients, then reconstructs every root,
-  transcript, next challenge, and fail-closed invalid result. Authenticated
-  query proofs, verifier-cost evidence, and proof encoding remain pending. The
-  reusable field API's SPIR-V helper-call seam and GPU permutation lift also
-  remain open.
+  transcript, next challenge, and fail-closed invalid result. Typed `"FQ01"`
+  now derives one query index only after `"FT04"`. Compact pair paths
+  authenticate the selected composition values and each corresponding FRI
+  pair through depth 3, 2, 1, and the explicit two-leaf base case. A pure
+  reusable `poseidon_merkle` ingot adapts zk-kit binary-path semantics to
+  field values and typed Fe capacity domains. The Fe verifier rebuilds the
+  public transcript, checks every path and index, and checks all four folds.
+  The independent bigint oracle separately derives the query, every opened
+  evaluation, every sibling, and every root. The zero-import Wasm gate passes.
+  This authenticates the FRI chain but does not yet reconnect the composition
+  opening to authenticated main and auxiliary AIR columns. Those openings,
+  verifier-cost evidence, malformed-proof rejection, and proof encoding remain
+  pending. The reusable field API's SPIR-V helper-call seam remains open as a
+  compiler issue, but BN254 will not be ported into the proof WGSL path.
   This is a general-tree statement-commitment milestone and executable AIR
   evidence, not yet a succinct proof.
 - [ ] Produce a succinct proof whose verifier is demonstrably cheaper than
   replaying the orbit.
+- [ ] Finish one complete BN254 toy proof and verifier accept/reject boundary,
+  then retarget the protocol to BabyBear before any prover GPU work. BN254 Fr
+  must not be ported to WGSL. The BabyBear gate requires extension-field
+  challenges, new injective packing, Fe-derived field-specific Poseidon, and
+  new independent vectors. Same-source Fe Wasm/native agreement is parity;
+  the separately implemented bigint model remains the semantic oracle.
+- [ ] Interpret the BabyBear proof dependency plan through the Conal/CTFE
+  WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
+  The existing type schedules and backend vocabulary are groundwork, not
+  evidence of executed workgroup/shared-memory lowering.
 - [ ] Define a typed proof encoding and prove browser/native verifier parity,
   malformed-proof rejection, and mutation rejection.
 - [ ] Run proof submission and verification through structured Fe tasks,
@@ -364,13 +384,18 @@ fallback. The semantic receipts are:
 
 ## Immediate burn-down order
 
-1. Run the external real-GPU handoff above.
-2. Add authenticated FRI query openings and produce measured evidence that
-   verification is cheaper than replaying the orbit.
-3. Finish typed fetch, then Worker/port placement and supervision on the one
+1. Run the external real-GPU handoff above before beginning the proof GPU port.
+2. Reconnect the authenticated composition query to main and auxiliary AIR
+   openings, then add canonical proof encoding on the BN254 toy protocol,
+   including one end-to-end accept/reject boundary.
+3. Retarget the protocol to BabyBear with independent exactness gates. Do not
+   port BN254 Fr to WGSL.
+4. Execute the field-agnostic revm-in-browser risk gate, then lower the
+   BabyBear prover through Fe Conal/CTFE WebGPU schedules.
+5. Finish typed fetch, then Worker/port placement and supervision on the one
    runtime-control spine.
-4. Delete the runtime manifest and finish the legacy disposition.
-5. Run the exact G5 command once at the final DONE gate.
+6. Delete the runtime manifest and finish the legacy disposition.
+7. Run the exact G5 command once at the final DONE gate.
 
 The Definition of done is not yet met. In particular, the real-GPU gate,
 manifest deletion, Worker/DEC general messaging, complete legacy disposition,

@@ -1,6 +1,6 @@
 # Bounded Mandelbrot proof specification
 
-Status: v0 numeric claim, witness contract, and initial BN254 constraints
+Status: v0 BN254 toy protocol in progress, BabyBear retarget required before GPU proving
 
 This specification deliberately proves a bounded execution claim, not general
 Mandelbrot membership and not vague convergence.
@@ -205,10 +205,14 @@ disjoint 16-point coset, folds the four constraint families with consecutive
 challenge powers and their distinct zerofiers, and commits the result under
 typed `"CR01"` leaves and `"CN01"` nodes. Typed `"CT01"` then binds the
 composition root to the ordered transcript before `"FC01"` derives the first
-FRI fold challenge. The first fold now pairs values at `x` and `-x`, evaluates
-the challenge-weighted even/odd polynomial on the squared eight-point domain,
-commits it under `"FR01"` and `"FN01"`, binds it with `"FT01"`, and derives
-`"FC02"`. Remaining folds and the authenticated query schedule remain open.
+FRI fold challenge. Four generic folds pair values at `x` and `-x`, evaluate
+the challenge-weighted even/odd polynomial on each squared domain, and commit
+the complete 16-to-8-to-4-to-2-to-1 chain under const-derived `"FR"`, `"FN"`,
+`"FT"`, and `"FC"` domains. After `"FT04"`, typed `"FQ01"` selects one of the
+eight positive-half indices. Compact pair paths authenticate the selected
+`(x, -x)` composition values and corresponding pairs in every FRI layer. The
+verifier independently rebuilds the transcript, checks path indices and
+roots, and checks all four fold equations through the final leaf.
 
 `escape_air_row_encoding_q12` now materializes that canonical row encoding in
 Fe. It gives zero only the positive sign and emits a fixed 15-word order.
@@ -251,10 +255,12 @@ so aggregate-return inlining or shader function-call lowering is required
 before the same field implementation runs as an application GPU kernel.
 The production power-of-two main and auxiliary trace streams, ordered
 pre-composition transcript, 708-constraint composition, composition
-commitment, post-composition transcript, and first FRI challenge now execute.
-The first 16-to-8 FRI fold and its transcript stage also execute. Remaining
-folds, query openings, verifier-cost evidence, and the reusable proof encoding
-remain open.
+commitment, complete 16-to-1 FRI chain, and one transcript-selected compact
+query now execute. The query authenticates every FRI fold against its committed
+layer. It does not yet authenticate the main and auxiliary AIR column values
+needed to recompute the opened composition evaluation. Those AIR openings,
+verifier-cost evidence, malformed-proof rejection, and the reusable proof
+encoding remain open.
 
 The intended succinct construction is a transparent AIR plus FRI over a field
 with an audited two-adic domain. The first implementation should reuse the
@@ -268,15 +274,41 @@ Fe field, Poseidon, and Merkle work already exercised by Rollcall. It must add:
 - trace and composition commitments;
 - FRI folding, openings, and malformed-opening rejection.
 
+### Field staging decision
+
+BN254 Fr is the protocol-shape field, not the WebGPU prover field. Complete one
+toy end-to-end accept/reject proof on BN254 so the statement, AIR, commitment,
+transcript, FRI query, and encoding contracts are fixed and independently
+audited. Do not port the BN254 multi-limb arithmetic to WGSL.
+
+Before any proof-generation GPU work, retarget the generic field, polynomial,
+commitment, transcript, and FRI layers to BabyBear. The retarget must add the
+extension-field challenge surface required by the chosen soundness policy,
+derive field-specific Poseidon parameters in Fe, redo injective row packing,
+and establish new published-vector and independent bigint gates. A protocol
+layer that cannot be retargeted without copying its algorithm is evidence of a
+baked BN254 assumption and must be generalized rather than duplicated.
+
+The BabyBear prover is then lowered from one exact Fe dependency plan through
+the Conal/CTFE WebGPU interpreter. Its stages include trace-column encoding,
+NTT/LDE, AIR evaluation and composition, Poseidon leaves, Merkle reductions,
+and FRI folds. Small serial transcript and canonical-encoding work remains in
+Fe Wasm. Browser WebGPU consumes Fe-emitted WGSL; native `wgpu` may consume the
+same Fe-authored kernel semantics through its supported shader artifact. The
+scalar Fe Wasm execution is a cross-backend parity gate. The separately
+implemented bigint model is the independent semantic oracle.
+
 The proof is not called succinct until both conditions hold:
 
 1. proof size and verifier work grow polylogarithmically in the padded bound;
 2. measured Fe verifier work is lower than replaying the same orbit at the
    demonstrated bound.
 
-A composition Merkle root without the completed low-degree argument is not
-sufficient. Until FRI folding and authenticated query openings are checked, it
-remains only executable composition evidence rather than a succinct proof.
+A composition Merkle root and internally consistent FRI chain are not
+sufficient. Until the authenticated composition query is reconnected to main
+and auxiliary AIR openings, the construction does not prove that the committed
+low-degree codeword is the composition of a valid Mandelbrot trace. It remains
+an authenticated FRI commitment layer rather than a complete succinct proof.
 
 ## Required gates
 

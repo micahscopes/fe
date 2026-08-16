@@ -2204,6 +2204,11 @@ explicit compiler/runtime track:
    kernels selected by the actual Fe proof system. Prefer reusable primitives
    shared by browser proof generation, Mandelbrot reachability, and standalone
    crypto demos over proof-specific GPU shims.
+   Complete the bounded toy protocol on BN254 to freeze and gate its shape,
+   then retarget it to BabyBear, including extension-field challenges and new
+   independent vectors, before GPU proving. Do not port BN254 Fr arithmetic to
+   WGSL. Any protocol code that resists the retarget is a baked field assumption
+   to remove, not an excuse for a second proof implementation.
 7. Keep the prover/verifier boundary honest. WebGPU may accelerate witness and
    proof generation, but canonical typed Fe owns the statement, transcript,
    field/curve parameters, proof encoding, and verification. The verifier must
@@ -2289,6 +2294,9 @@ no application math or schedule in Rust/JavaScript/JSON scaffolding.
      produce a genuinely succinct reachability proof (using the existing Fe
      field/Poseidon/Merkle foundations as building blocks), so verification is
      asymptotically and concretely cheaper than replaying the full orbit;
+   - finish one BN254 toy proof only as a complete protocol-shape and exactness
+     gate, then retarget to BabyBear before interpreting the prover dependency
+     plan through Conal/CTFE WebGPU schedules; never ship a BN254 WGSL prover;
    - encode the proof as a canonical typed Fe value, transport/submit only its
      bytes through the fixed host, and run the same Fe verifier in browser
      Wasm, native differential tests, and the contract backend where supported;

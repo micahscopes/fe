@@ -700,6 +700,53 @@ fn merkle_root(mut level: Vec<BigUint>, node_label: &[u8; 4], parameters: &[BigU
     level.pop().unwrap()
 }
 
+struct PairOpeningOracle {
+    positive: BigUint,
+    negative: BigUint,
+    positive_siblings: Vec<BigUint>,
+    negative_siblings: Vec<BigUint>,
+    root: BigUint,
+}
+
+fn pair_opening_oracle(
+    evaluations: &[BigUint],
+    row_label: &[u8; 4],
+    node_label: &[u8; 4],
+    index: usize,
+    parameters: &[BigUint],
+) -> PairOpeningOracle {
+    assert!(evaluations.len() > 1 && evaluations.len().is_power_of_two());
+    let half = evaluations.len() / 2;
+    assert!(index < half);
+    let mut nodes = evaluations
+        .iter()
+        .cloned()
+        .map(|value| hash(row_label, value, BigUint::from(0u32), parameters))
+        .collect::<Vec<_>>();
+    let mut positive = index;
+    let mut negative = index + half;
+    let mut positive_siblings = Vec::new();
+    let mut negative_siblings = Vec::new();
+    while nodes.len() > 2 {
+        positive_siblings.push(nodes[positive ^ 1].clone());
+        negative_siblings.push(nodes[negative ^ 1].clone());
+        nodes = nodes
+            .chunks_exact(2)
+            .map(|pair| hash(node_label, pair[0].clone(), pair[1].clone(), parameters))
+            .collect();
+        positive /= 2;
+        negative /= 2;
+    }
+    let root = hash(node_label, nodes[0].clone(), nodes[1].clone(), parameters);
+    PairOpeningOracle {
+        positive: evaluations[index].clone(),
+        negative: evaluations[index + half].clone(),
+        positive_siblings,
+        negative_siblings,
+        root,
+    }
+}
+
 struct ProductionOracle {
     evaluations: Vec<BigUint>,
     root: BigUint,
@@ -970,6 +1017,12 @@ fn plain_limbs(words: &[u32]) -> BigUint {
         })
 }
 
+fn next_plain_field(words: &[u32], cursor: &mut usize) -> BigUint {
+    let start = *cursor;
+    *cursor += 20;
+    plain_limbs(&words[start..*cursor])
+}
+
 #[test]
 fn composition_and_complete_fri_chain_match_independent_bigint_oracle() {
     let wasm = compile_gate();
@@ -1167,6 +1220,110 @@ fn composition_and_complete_fri_chain_match_independent_bigint_oracle() {
     assert_eq!(plain_limbs(&remaining[261..281]), fri4.root);
     assert_eq!(plain_limbs(&remaining[281..301]), fri4.transcript);
     assert!(fri4.next_challenge.is_none());
+
+    let parameters = poseidon_parameters();
+    let query_challenge = hash(
+        b"FQ01",
+        fri4.transcript.clone(),
+        BigUint::from(0u32),
+        &parameters,
+    );
+    let query_index = query_challenge
+        .to_u32_digits()
+        .first()
+        .copied()
+        .unwrap_or(0)
+        & 7;
+    let first_index = query_index & 3;
+    let second_index = first_index & 1;
+    let composition_opening = pair_opening_oracle(
+        &oracle.evaluations,
+        b"CR01",
+        b"CN01",
+        query_index as usize,
+        &parameters,
+    );
+    let first_opening = pair_opening_oracle(
+        &fri1.evaluations,
+        b"FR01",
+        b"FN01",
+        first_index as usize,
+        &parameters,
+    );
+    let second_opening = pair_opening_oracle(
+        &fri2.evaluations,
+        b"FR02",
+        b"FN02",
+        second_index as usize,
+        &parameters,
+    );
+    let third_opening = pair_opening_oracle(&fri3.evaluations, b"FR03", b"FN03", 0, &parameters);
+    assert_eq!(composition_opening.root, oracle.root);
+    assert_eq!(first_opening.root, fri1.root);
+    assert_eq!(second_opening.root, fri2.root);
+    assert_eq!(third_opening.root, fri3.root);
+
+    let query = call_words(
+        &mut store,
+        &instance,
+        "fri_commitment_query4x16_production_words",
+        &[3072, 0, 16],
+        423,
+    );
+    assert_eq!(&query[0..3], &[1, 1, query_index]);
+    let mut cursor = 3;
+    assert_eq!(
+        next_plain_field(&query, &mut cursor),
+        composition_opening.positive
+    );
+    assert_eq!(
+        next_plain_field(&query, &mut cursor),
+        composition_opening.negative
+    );
+    for sibling in &composition_opening.positive_siblings {
+        assert_eq!(next_plain_field(&query, &mut cursor), *sibling);
+    }
+    for sibling in &composition_opening.negative_siblings {
+        assert_eq!(next_plain_field(&query, &mut cursor), *sibling);
+    }
+    assert_eq!(
+        next_plain_field(&query, &mut cursor),
+        first_opening.positive
+    );
+    assert_eq!(
+        next_plain_field(&query, &mut cursor),
+        first_opening.negative
+    );
+    for sibling in &first_opening.positive_siblings {
+        assert_eq!(next_plain_field(&query, &mut cursor), *sibling);
+    }
+    for sibling in &first_opening.negative_siblings {
+        assert_eq!(next_plain_field(&query, &mut cursor), *sibling);
+    }
+    assert_eq!(
+        next_plain_field(&query, &mut cursor),
+        second_opening.positive
+    );
+    assert_eq!(
+        next_plain_field(&query, &mut cursor),
+        second_opening.negative
+    );
+    for sibling in &second_opening.positive_siblings {
+        assert_eq!(next_plain_field(&query, &mut cursor), *sibling);
+    }
+    for sibling in &second_opening.negative_siblings {
+        assert_eq!(next_plain_field(&query, &mut cursor), *sibling);
+    }
+    assert_eq!(
+        next_plain_field(&query, &mut cursor),
+        third_opening.positive
+    );
+    assert_eq!(
+        next_plain_field(&query, &mut cursor),
+        third_opening.negative
+    );
+    assert_eq!(next_plain_field(&query, &mut cursor), fri4.evaluations[0]);
+    assert_eq!(cursor, query.len());
 
     let invalid_fri = call_words(
         &mut store,
