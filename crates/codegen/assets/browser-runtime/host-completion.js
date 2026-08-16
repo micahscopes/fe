@@ -838,6 +838,32 @@ export function createHostCompletionBroker(options = {}) {
     return selected.token | 0;
   };
 
+  const cancelPending = (rawPending) => {
+    if (!Number.isInteger(rawPending)) {
+      throw new TypeError("fe:host::cancel_pending requires an i32 Wasm carrier");
+    }
+    const token = rawPending >>> 0;
+    const slot = slots.get(token);
+    if (slot === undefined || slot.claimed) {
+      throw new TypeError(
+        "Fe pending cancellation token is stale, foreign, or already claimed",
+      );
+    }
+    const active = slot.state === "pending";
+    if (active) {
+      slot.state = "settled";
+      if (slot.cancelWork !== undefined) slot.cancelWork();
+      slot.resolve(Object.freeze({
+        outcome: taskCancelled(),
+        cancelled: true,
+        raceSide: undefined,
+        loserToken: undefined,
+      }));
+    }
+    slots.delete(token);
+    return active ? 1 : 0;
+  };
+
   const firstPendingReceive = () => {
     while (receives.length > 0) {
       const slot = slots.get(receives.shift());
@@ -977,6 +1003,7 @@ export function createHostCompletionBroker(options = {}) {
     recv_begin: beginReceive,
     race_begin: beginRace,
     select_begin: beginSelect,
+    cancel_pending: cancelPending,
     wait: () => {
       throw new Error("fe:host::wait is unavailable in the non-blocking browser broker");
     },

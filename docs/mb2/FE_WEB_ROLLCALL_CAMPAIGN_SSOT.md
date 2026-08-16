@@ -2,7 +2,7 @@
 
 Status: authoritative campaign burn-down
 
-Updated: 2026-08-16
+Updated: 2026-08-17
 
 Goal spine: write the math, get the kernel, keep the proof.
 
@@ -69,6 +69,14 @@ Legend:
   replay/share, race, throttle, debounce, and deterministic time. Gates:
   `wasm_e2e.rs`, `host-completion.test.mjs`, and
   `fe-render-runtime.test.mjs`.
+- [x] A non-destructive `Select` loser can now be consumed explicitly through
+  the backend-generic affine `PendingCancellation<B>` effect. The fixed broker
+  aborts active browser work, consumes already-settled unclaimed tokens, and
+  rejects stale or claimed tokens. The heterogeneous select capstone preserves
+  its sink loser across two source wins, then Fe cancels it exactly once and
+  leaves no broker slot. Gates:
+  `fe_select_preserves_a_heterogeneous_loser_across_repeated_source_wins` and
+  `typed pending cancellation consumes active and already-settled losers`.
 - [x] Typed browser sources cover render-surface facts, visibility, animation
   frames, viewport, raw pointer events, Fe-selected capture, wheel, shared
   WebGPU lifecycle, queue-idle completion, and Fe-owned recovery. Gates:
@@ -78,8 +86,15 @@ Legend:
   `EventSource` and completion broker. The focused broker suite and
   `fe_message_port_event_source_resumes_from_a_real_port` pass, and the slice is
   landed at `c1817e477`. This item closes when the final G5 run passes.
-- [ ] Add fetch as a typed Fe source and consume it from SourceInspector without
-  application-specific host policy.
+- [ ] Add fetch as a generated typed Fe source and consume it from
+  SourceInspector without application-specific host policy. This gate must
+  extend generated WebIDL `Promise<T>` transport onto the existing
+  `Pending<WasmBackend, T>` continuation rail. It does not permit a permanent
+  `fe:web-fetch` import whose JavaScript manually mirrors Fe field order or
+  success-lane widths. SourceInspector must own switch-latest cancellation,
+  HTTP classification, stale-response rejection, and presentation policy in
+  Fe; fixed JavaScript may only realize browser standards mechanics and the
+  generated canonical transport.
 - [ ] Attach opaque ports through Fe-owned spawn/Worker placement, then derive
   rich canonical message payloads from Fe types.
 - [ ] Add structured child scopes, admission, supervision, and restart/backoff

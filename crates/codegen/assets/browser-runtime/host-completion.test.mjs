@@ -893,6 +893,20 @@ describe("browser HostTimer/Recv completion broker", () => {
     expect(broker.post(99n)).toBeFalse();
   });
 
+  test("typed pending cancellation consumes active and already-settled losers", () => {
+    const broker = createHostCompletionBroker();
+    const active = broker.imports["fe:host"].recv_begin();
+    expect(broker.imports["fe:host"].cancel_pending(active)).toBe(1);
+    expect(broker.activeCount()).toBe(0);
+    expect(() => broker.imports["fe:host"].cancel_pending(active))
+      .toThrow(/stale, foreign, or already claimed/);
+
+    const settled = broker.imports["fe:host"].recv_begin();
+    expect(broker.post(23n)).toBeTrue();
+    expect(broker.imports["fe:host"].cancel_pending(settled)).toBe(0);
+    expect(broker.activeCount()).toBe(0);
+  });
+
   test("nested selects materialize both compiler-derived envelopes and affine losers", async () => {
     const broker = createHostCompletionBroker();
     const selected = broker.run(nestedSelectMachine(broker, 10_000n), []);

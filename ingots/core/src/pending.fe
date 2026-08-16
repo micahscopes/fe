@@ -122,6 +122,16 @@ pub trait Select<B: Backend, E> {
     ) -> Pending<B, SelectOutcome<B, E, L, R>>
 }
 
+/// Consume one still-live pending operation without awaiting its payload.
+///
+/// This is the cancellation edge returned losers from `Select` need for a
+/// genuine switch-latest interpreter. The backend handler may report that the
+/// operation had already settled, but ownership is consumed in either case:
+/// after this call no Fe continuation can observe the discarded payload.
+pub trait PendingCancellation<B: Backend> {
+    fn cancel_pending<T>(mut self, _ pending: own Pending<B, T>) -> bool
+}
+
 /// The authority to suspend the current resumable Fe continuation until a
 /// pending operation reaches one terminal outcome. Unlike `Wait`, this never
 /// blocks an agent: the compiler splits the surrounding runtime MIR, retains

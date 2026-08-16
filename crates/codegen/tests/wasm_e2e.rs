@@ -969,7 +969,7 @@ channel.port2.close();
 fn fe_select_preserves_a_heterogeneous_loser_across_repeated_source_wins() {
     const SOURCE: &str = r#"
 use core::actor::ActorSink
-use core::pending::{Recv, Select, SelectOutcome, Suspend, TaskOutcome}
+use core::pending::{PendingCancellation, Recv, Select, SelectOutcome, Suspend, TaskOutcome}
 use std::actor::BrowserActorSink
 use std::host::{HostTimer, Resumable}
 use std::wasm::WasmBackend
@@ -978,6 +978,7 @@ fn receive_twice_while_sink_is_busy(_ message: u32) -> u64
 uses (
     receive: mut Recv<WasmBackend>,
     sink: mut ActorSink<WasmBackend, u32>,
+    cancellation: mut PendingCancellation<WasmBackend>,
     select: mut Select<WasmBackend, u32>,
     suspend: Suspend<WasmBackend, u32>,
 )
@@ -997,12 +998,11 @@ uses (
                 match second {
                     TaskOutcome::Success(second_winner,) => match second_winner {
                         SelectOutcome::Left(second_selected,) => {
-                            let accepted: TaskOutcome<u32, ()> =
-                                suspend.suspend(second_selected.right)
-                            match accepted {
-                                TaskOutcome::Success(_,) => first_selected.value * 1000 + second_selected.value
-                                TaskOutcome::Failure(_,) => 70000
-                                TaskOutcome::Cancelled => 71000
+                            let discarded = cancellation.cancel_pending(second_selected.right)
+                            if discarded {
+                                first_selected.value * 1000 + second_selected.value
+                            } else {
+                                70000
                             }
                         }
                         SelectOutcome::Right(second_selected,) => {
@@ -1046,6 +1046,7 @@ pub fn select_task(_ message: u32) -> u64 {
     with (
         Recv<WasmBackend> = HostTimer {},
         ActorSink<WasmBackend, u32> = BrowserActorSink {},
+        PendingCancellation<WasmBackend> = Resumable {},
         Select<WasmBackend, u32> = Resumable {},
         Suspend<WasmBackend, u32> = Resumable {},
     ) {
@@ -1087,6 +1088,7 @@ pub fn select_task(_ message: u32) -> u64 {
     wasmparser::validate(&wasm).unwrap();
     let imports = func_imports(&wasm);
     assert!(imports.contains(&("fe:host".to_owned(), "select_begin".to_owned())));
+    assert!(imports.contains(&("fe:host".to_owned(), "cancel_pending".to_owned())));
     assert!(imports.contains(&("fe:host".to_owned(), "recv_begin".to_owned())));
     assert!(imports.contains(&("fe:actor".to_owned(), "send_begin".to_owned())));
 
@@ -1105,15 +1107,17 @@ pub fn select_task(_ message: u32) -> u64 {
 import {{ createMaterializedTaskRegistry }} from {adapter_url:?};
 import {{ createHostCompletionBroker }} from {host_runtime_url:?};
 
-let accept;
 const accepted = [];
+let aborted = 0;
 const broker = createHostCompletionBroker({{
   actorEvents: {{
     send(event, signal) {{
       accepted.push(event);
       return new Promise((resolve, reject) => {{
-        accept = resolve;
-        signal.addEventListener("abort", () => reject(new Error("aborted")), {{ once: true }});
+        signal.addEventListener("abort", () => {{
+          aborted += 1;
+          reject(new Error("aborted"));
+        }}, {{ once: true }});
       }});
     }},
   }},
@@ -1136,12 +1140,11 @@ await postEventually(23n);
 if (accepted.length !== 1 || accepted[0][0] !== 91) {{
   throw new Error("the heterogeneous sink operation was not kept in flight");
 }}
-if (typeof accept !== "function") throw new Error("the sink was not pending");
-accept();
 const output = await running;
 if (output.length !== 1 || output[0] !== 17023n) {{
   throw new Error(`Fe select did not retain both source winners: ${{output}}`);
 }}
+if (aborted !== 1) throw new Error("Fe did not cancel the discarded affine sink loser");
 if (broker.activeCount() !== 0 || broker.cancelAll() !== 0) {{
   throw new Error("non-destructive select leaked a pending token");
 }}

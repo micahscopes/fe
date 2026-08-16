@@ -87,6 +87,11 @@ extern {
         _ right: Pending<WasmBackend, R>,
     ) -> Pending<WasmBackend, SelectOutcome<WasmBackend, E, L, R>>
 
+    /// Consume one unclaimed pending token and discard its eventual payload.
+    /// The boolean reports whether browser work was still active when it was
+    /// cancelled; a token that settled before this call is still consumed.
+    pub unsafe fn cancel_pending<T>(_ pending: Pending<WasmBackend, T>) -> bool
+
     /// Block the calling agent until the cell `pending` is READY, DELIVERING its
     /// `u64` payload (interop 4.1: `Atomics.wait` on the status slot, then read the
     /// result slot). In the degraded, no-isolation mode this import is not provided;

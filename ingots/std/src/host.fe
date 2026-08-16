@@ -5,6 +5,7 @@ use raw::{
     recv_begin as raw_recv_begin,
     race_begin as raw_race_begin,
     select_begin as raw_select_begin,
+    cancel_pending as raw_cancel_pending,
     wait as block_deliver,
     suspend as suspend_continuation,
 }
@@ -36,7 +37,8 @@ use raw::{
 // these external sources may use the `Notify` door's keyhole while `Notify` itself
 // stays reserved (no Fe-side self-completion provider is admitted).
 pub use core::pending::{
-    Pending, Race, RaceOutcome, Select, SelectOutcome, SelectedLeft, SelectedRight,
+    Pending, PendingCancellation, Race, RaceOutcome, Select, SelectOutcome,
+    SelectedLeft, SelectedRight,
     TaskOutcome, Timer, Recv, Wait, Suspend,
 }
 
@@ -96,6 +98,12 @@ impl Select<WasmBackend, u32> for Resumable {
         _ right: own Pending<WasmBackend, R>,
     ) -> Pending<WasmBackend, SelectOutcome<WasmBackend, u32, L, R>> {
         raw_select_begin(left, right)
+    }
+}
+
+impl PendingCancellation<WasmBackend> for Resumable {
+    fn cancel_pending<T>(mut self, _ pending: own Pending<WasmBackend, T>) -> bool {
+        raw_cancel_pending(pending)
     }
 }
 
