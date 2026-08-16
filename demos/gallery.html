@@ -11,10 +11,9 @@
   crates/codegen/assets/render-runtime/fe-render-runtime.js and
   FE_WEB_V5_ORCHESTRATION_DESIGN.md section 3/6 for the element/lifecycle.
 
-  This is the standards-based successor to the Trunk gallery in `index.html`
-  (which is a `data-trunk rel="copy-dir"` manifest, NOT application/fe, so
-  `fe web dev index.html` renders nothing). Keep both until the Trunk lane is
-  retired.
+  This is the sole gallery source. The former `gallery/index.html` Trunk page
+  was retired after its unique examples were either promoted to this Fe page
+  or retained as explicitly separate legacy showcases.
 
   `data-fe-entry` is OMITTED on purpose: the entry is derived from each sketch's
   `actor` declaration (Cga3dSurface, QcgaSurface, ...), never guessed here.

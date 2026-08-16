@@ -7,6 +7,31 @@ use hir::hir_def::HirIngot;
 use url::Url;
 
 #[test]
+fn repository_has_one_canonical_gallery_source() {
+    let demos = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("demos")
+        .canonicalize()
+        .expect("repository demos directory");
+    assert!(
+        demos.join("gallery.html").is_file(),
+        "the canonical Fe gallery source must remain demos/gallery.html"
+    );
+    assert!(
+        !demos.join("gallery").exists(),
+        "the retired Trunk gallery directory must not return"
+    );
+
+    let legacy_index = std::fs::read_to_string(demos.join("index.html"))
+        .expect("legacy showcase landing page");
+    assert!(
+        !legacy_index.contains("copy-dir\" href=\"gallery")
+            && !legacy_index.contains("href=\"gallery/\""),
+        "the legacy landing page must not copy or link a second gallery lane"
+    );
+}
+
+#[test]
 fn role_selected_fe_page_projects_typed_structure_without_json() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/web_page_actor")

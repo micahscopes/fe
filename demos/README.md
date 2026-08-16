@@ -44,9 +44,11 @@ Compiler-produced Wasm/WGSL artifacts, served from one isolated origin via Trunk
 demos/serve.sh --serve
 ```
 
-Open `http://127.0.0.1:8788/`. The landing page (`demos/index.html`) links every
-demo, including the curated `gallery/`. Pass `--no-watch` after `--serve` for a
-fixed (non-live-reload) server:
+Open `http://127.0.0.1:8788/`. The landing page (`demos/index.html`) links the
+remaining explicitly legacy showcases. The canonical Fe gallery is served by
+the `fe web dev demos/gallery.html` command above and no longer has a parallel
+Trunk page. Pass `--no-watch` after `--serve` for a fixed (non-live-reload)
+server:
 
 ```sh
 demos/serve.sh cga3d-interactive --serve --no-watch
@@ -68,7 +70,7 @@ demos/
   webgpu-<name>-interactive/  generate.sh (fe web build + gated ctl codegen) + live-pump.js + main.js
   capstones/<name>/           non-actor, multi-backend-target kernels + evidence.json
   shared/                     cross-demo JS: host-runtime, gpu-timestamp, live-pump.js, ...
-  gallery/                    curated geometric-algebra showcase (static page, no build step)
+  gallery.html                canonical Fe-composed gallery source
   fe-sandbox/                 highlighted-editor / compiler-in-the-browser page
   webgpu-keystone/            gen/ (scalar cross-backend bundle) + webgpu-runner.js/wasm-runner.js,
                                the shared kernel-blind runners imported by 6+ other demo dirs

@@ -138,6 +138,17 @@ Legend:
 - [x] The canonical gallery rejects authored browser JavaScript and undeclared
   bundle inputs. Gates: `canonical_gallery_rejects_authored_browser_javascript`
   and `canonical_gallery_rejects_forbidden_non_fe_bundle_inputs`.
+- [x] The duplicate Trunk gallery lane is retired. `demos/gallery.html` is the
+  sole gallery source; `demos/gallery/`, its `copy-dir` declaration, and the
+  legacy landing link are gone. Gate:
+  `repository_has_one_canonical_gallery_source`.
+- [~] The current compiler worktree again compiles all 12 canonical render
+  actors in one sweep, plus all three resident actors and the Fe page
+  projection. The perturbation regression was a redundant fresh-record
+  materialize/load round trip inside `build_reference`; a representation-
+  checked RMIR identity fold removes it, with its own focused semantic gate.
+  This slice closes when it is landed and the browser/runtime gates below are
+  repeated.
 - [ ] Delete the runtime render manifest. Replace it with compiler-derived typed
   or binary exports for resource, pass, recovery, presentation, and artifact
   location semantics.
