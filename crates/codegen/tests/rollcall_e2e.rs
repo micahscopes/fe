@@ -45,6 +45,7 @@ use ethers_core::types::U256 as AbiU256;
 use fe_codegen::{BackendKind, OptLevel, layout_for};
 use fe_contract_harness::{
     Address, ExecutionOptions, FeContractHarness, RuntimeInstance, U256, bytes_to_u256,
+    encode_function_call,
 };
 use num_bigint::BigUint;
 use url::Url;
@@ -247,6 +248,77 @@ fn path_tokens(path: &[AbiU256]) -> Token {
     Token::FixedArray(path.iter().copied().map(Token::Uint).collect())
 }
 
+const ROLLCALL_BROWSER_FIXTURE_DIR: &str = "../revm-browser/tests/fixtures/rollcall_depth4";
+
+struct RollcallBrowserFixture {
+    runtime: Vec<u8>,
+    commit_calldata: Vec<u8>,
+    accept_calldata: Vec<u8>,
+    reject_calldata: Vec<u8>,
+}
+
+fn rollcall_browser_fixture(
+    harness: &FeContractHarness,
+    root: AbiU256,
+    leaf: AbiU256,
+    target_index: usize,
+    path: &[AbiU256],
+) -> RollcallBrowserFixture {
+    let commit_calldata = encode_function_call("commit(uint256)", &[Token::Uint(root)])
+        .expect("commit calldata should encode");
+    let accept_calldata = encode_function_call(
+        "verifyMembership(uint256,uint256,uint256[4])",
+        &[
+            Token::Uint(leaf),
+            Token::Uint(AbiU256::from(target_index as u64)),
+            path_tokens(path),
+        ],
+    )
+    .expect("accept calldata should encode");
+    let mut tampered_path = path.to_vec();
+    tampered_path[0] += AbiU256::from(1u64);
+    let reject_calldata = encode_function_call(
+        "verifyMembership(uint256,uint256,uint256[4])",
+        &[
+            Token::Uint(leaf),
+            Token::Uint(AbiU256::from(target_index as u64)),
+            path_tokens(&tampered_path),
+        ],
+    )
+    .expect("reject calldata should encode");
+
+    RollcallBrowserFixture {
+        runtime: hex::decode(harness.runtime_bytecode())
+            .expect("Fe runtime bytecode should be valid hex"),
+        commit_calldata,
+        accept_calldata,
+        reject_calldata,
+    }
+}
+
+fn assert_rollcall_browser_fixture_matches(fixture: &RollcallBrowserFixture) {
+    assert_eq!(
+        fixture.runtime,
+        include_bytes!("../../revm-browser/tests/fixtures/rollcall_depth4/runtime.bin"),
+        "browser runtime fixture must be the current Fe-generated RollcallRegistry runtime"
+    );
+    assert_eq!(
+        fixture.commit_calldata,
+        include_bytes!("../../revm-browser/tests/fixtures/rollcall_depth4/commit.calldata.bin"),
+        "browser commit calldata must match the native ABI encoder byte-for-byte"
+    );
+    assert_eq!(
+        fixture.accept_calldata,
+        include_bytes!("../../revm-browser/tests/fixtures/rollcall_depth4/accept.calldata.bin"),
+        "browser accepting calldata must match the native proof vector byte-for-byte"
+    );
+    assert_eq!(
+        fixture.reject_calldata,
+        include_bytes!("../../revm-browser/tests/fixtures/rollcall_depth4/reject.calldata.bin"),
+        "browser rejecting calldata must match the native mutation vector byte-for-byte"
+    );
+}
+
 /// D=4 correctness suite: a real 16-leaf tree, a valid membership proof
 /// (accept), a tampered proof (fail-closed reject), and the bonus claim flow
 /// (a valid claim flips the bit once; replaying the same valid proof on an
@@ -273,6 +345,9 @@ fn rollcall_registry_accept_reject_and_claim_at_depth4() {
 
     let registry_harness = FeContractHarness::compile("RollcallRegistry", &source)
         .expect("RollcallRegistry should compile");
+    let browser_fixture =
+        rollcall_browser_fixture(&registry_harness, root, leaf, target_index, &path);
+    assert_rollcall_browser_fixture_matches(&browser_fixture);
     let mut registry = registry_harness
         .deploy_with_init()
         .expect("RollcallRegistry should deploy under revm");
@@ -415,6 +490,48 @@ fn rollcall_registry_accept_reject_and_claim_at_depth4() {
         !decode_bool(&second_claim.return_data),
         "a second claim of an already-claimed index must be rejected even with a valid proof"
     );
+}
+
+/// Explicit maintenance command for the raw browser execution vectors. The
+/// non-ignored depth-4 test independently derives and pins every byte.
+#[test]
+#[ignore = "writes the reviewed browser fixture files"]
+fn regenerate_rollcall_depth4_browser_fixture() {
+    const DEPTH: usize = 4;
+    let source = rollcall_source(DEPTH);
+    let hash2_harness =
+        FeContractHarness::compile("Hash2Exec", &source).expect("Hash2Exec should compile");
+    let mut hash2_instance = hash2_harness
+        .deploy_with_init()
+        .expect("Hash2Exec should deploy under revm");
+    let levels = build_tree(&mut hash2_instance, DEPTH);
+    let root = levels[DEPTH][0];
+    let target_index = 5usize;
+    let leaf = levels[0][target_index];
+    let path = sibling_path(&levels, target_index);
+    let registry_harness = FeContractHarness::compile("RollcallRegistry", &source)
+        .expect("RollcallRegistry should compile");
+    let fixture = rollcall_browser_fixture(&registry_harness, root, leaf, target_index, &path);
+
+    let directory =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(ROLLCALL_BROWSER_FIXTURE_DIR);
+    std::fs::write(directory.join("runtime.bin"), fixture.runtime)
+        .expect("write Fe runtime fixture");
+    std::fs::write(
+        directory.join("commit.calldata.bin"),
+        fixture.commit_calldata,
+    )
+    .expect("write commit calldata fixture");
+    std::fs::write(
+        directory.join("accept.calldata.bin"),
+        fixture.accept_calldata,
+    )
+    .expect("write accepting calldata fixture");
+    std::fs::write(
+        directory.join("reject.calldata.bin"),
+        fixture.reject_calldata,
+    )
+    .expect("write rejecting calldata fixture");
 }
 
 fn to_abi_u256_to_revm(value: AbiU256) -> U256 {

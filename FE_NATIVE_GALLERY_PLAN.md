@@ -1856,7 +1856,9 @@ reserved-name, positional, scalar-only ABI is bespoke surface area to remove.
 - Every interactive render tile has typed Fe `SurfaceTransition` controls and
   Fe-declared `LatestPerFrame` scheduling. None emits the legacy JSON `control`
   block.
-- Known-color and rollcall are pure Fe-derived GPU graphs with no Wasm module.
+- Known-color and rollcall are pure Fe-derived GPU graphs whose rendering and
+  resource work has no CPU fallback. Their small Wasm artifacts now contain
+  only the Fe-authored responsive-backing and device-recovery policies.
 - Perturbational Mandelbrot is a two-pass Fe GPU graph; its Wasm is the typed
   Fe control lane only.
 - No tile has its own `main.js`.

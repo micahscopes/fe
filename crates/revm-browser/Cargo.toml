@@ -1,0 +1,22 @@
+[package]
+name = "fe-revm-browser"
+version = "0.1.0"
+edition.workspace = true
+license = "Apache-2.0"
+description = "Generic revm execution engine for Fe-generated EVM bytecode in browsers"
+
+[features]
+# The default wasm-bindgen test runner uses Node as a fast Wasm parity gate.
+# Enable this feature for the same test binary's real-browser acceptance run.
+browser-tests = []
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+revm = { version = "33.1.0", default-features = false, features = ["std"] }
+wasm-bindgen = "0.2"
+
+[dev-dependencies]
+wasm-bindgen-test.workspace = true

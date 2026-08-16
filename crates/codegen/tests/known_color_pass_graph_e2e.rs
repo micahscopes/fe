@@ -10,7 +10,7 @@ use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
     WebBinding, WebBindingAccess, WebBindingRole, WebBuildOptions, WebBundle, WebBundleMode,
-    resolve_web_entry,
+    WebFeResponsibility, resolve_web_entry,
 };
 use hir::hir_def::HirIngot;
 use url::Url;
@@ -169,8 +169,35 @@ fn known_color_graph_preserves_typed_bits_and_exact_pixel_on_webgpu() {
     let bundle = compile_known_color_graph();
     assert_eq!(bundle.manifest.protocol_version, 6);
     assert!(
-        bundle.wasm.is_empty(),
-        "typed pass graph has no CPU fallback"
+        !bundle.wasm.is_empty(),
+        "the Fe-authored surface quality and recovery policies need their control Wasm"
+    );
+    assert_eq!(
+        bundle.manifest.artifacts.wasm_bytes,
+        Some(bundle.wasm.len() as u64)
+    );
+    assert!(
+        bundle
+            .manifest
+            .provenance
+            .fe_responsibilities
+            .contains(&WebFeResponsibility::BackingQualityPolicy)
+    );
+    assert!(
+        bundle
+            .manifest
+            .provenance
+            .fe_responsibilities
+            .contains(&WebFeResponsibility::DeviceRecoveryPolicy)
+    );
+    assert!(
+        bundle
+            .manifest
+            .canonical_status
+            .omission_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("no CPU fallback")),
+        "control Wasm must not be mislabeled as a CPU rendering fallback"
     );
     assert_eq!(bundle.manifest.resources.len(), 1);
     assert_eq!(bundle.manifest.passes.len(), 2);

@@ -2,7 +2,7 @@
 
 Status: authoritative campaign burn-down
 
-Updated: 2026-08-15
+Updated: 2026-08-16
 
 Goal spine: write the math, get the kernel, keep the proof.
 
@@ -96,11 +96,17 @@ Legend:
   state and navigation, glitch handling, and independent CPU/GPU receipts.
   Gates: `perturbational_mandelbrot_gpu_oracle.rs`,
   `precision_fixed_orbit_gpu_oracle.rs`, and `demo_compile_gate.rs`.
+- [x] All four named GPU substrate gates execute locally without a skip on the
+  llvmpipe Vulkan CPU driver. Known Color, Rollcall, the independent bigint
+  `Fixed<8>` orbit oracle, and the independent perturbation classifier all
+  pass. This proves actual shader dispatch and readback on a software Vulkan
+  implementation, not merely SPIR-V or WGSL validation.
 - [ ] Replace modeled shader operation counts with measurements derived from
   the lowered Naga representation, and establish frame/submission budgets.
-- [M] Execute the GPU gates on real WebGPU hardware. This host has no
-  `/dev/dri`, and `MB2_ALLOW_GPU_SKIP` is not completion evidence. This is the
-  campaign's highest-risk external gate.
+- [M] Execute the same GPU gates on real WebGPU hardware. This host still has
+  no `/dev/dri`; llvmpipe is execution evidence but not hardware performance
+  or driver-diversity evidence. `MB2_ALLOW_GPU_SKIP` remains forbidden at this
+  gate.
 
 ## D. Geometric algebra compiler and examples
 
@@ -157,6 +163,16 @@ Legend:
   honest depth-20 gas measurement exist. Gates:
   `rollcall_registry_accept_reject_and_claim_at_depth4` and
   `rollcall_registry_gas_at_depth20_is_l2_honest`.
+- [~] The field-agnostic S0 browser engine exists as `fe-revm-browser`. It is a
+  generic persistent revm session that accepts only raw Fe EVM runtime bytes
+  and raw calldata, with no ABI, proof, packing, or application logic in Rust
+  or JavaScript. The existing native Rollcall test derives and byte-pins the
+  depth-4 runtime plus commit/accept/reject calldata. The `wasm32-unknown-unknown`
+  engine executes those vectors and returns the exact native-derived true and
+  false ABI words. The remaining S0 gate is the same execution in actual
+  Chromium; local `wasm-pack` reached the browser runner but this host lacks a
+  discoverable `chromedriver`. This is same-source cross-target parity. The
+  independently derived Rollcall/Poseidon gates remain semantic truth.
 - [x] The same Fe loop-form Merkle body compiles to Naga-valid SPIR-V. Gates:
   `poseidon_merkle_root_loop_compiles_naga_valid_spirv`,
   `poseidon_merkle8_root_loop_compiles_naga_valid_spirv`, and
@@ -344,6 +360,11 @@ Legend:
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
   The existing type schedules and backend vocabulary are groundwork, not
   evidence of executed workgroup/shared-memory lowering.
+- [ ] Run the complete published browser page through Chrome after the
+  BabyBear prover exists: acquire WebGPU, generate the proof, transport its
+  typed receipt, verify it through revm-Wasm, reject a mutated receipt, and
+  capture console and device-loss failures. Shader compilation alone cannot
+  satisfy this gate.
 - [ ] Define a typed proof encoding and prove browser/native verifier parity,
   malformed-proof rejection, and mutation rejection.
 - [ ] Run proof submission and verification through structured Fe tasks,
@@ -357,12 +378,19 @@ failed campaign gate. `WGPU_BACKEND=vulkan` keeps the path browser-profile
 compatible. On a non-Linux host, omit that variable and retain every other
 condition.
 
+On Nix, `vulkaninfo` may find a wrapped loader while `wgpu` cannot dynamically
+load `libvulkan.so.1`. Make the Vulkan loader's `lib` directory discoverable
+through `LD_LIBRARY_PATH` before running these commands. This sandbox required
+`/nix/store/7krvb015vp4wq7lj6v3wadjy4q9asc8q-vulkan-loader-1.4.341.0/lib`.
+Use `--no-capture` when collecting the final receipt so the adapter name is in
+the evidence.
+
 ```console
 mkdir -p /workspace/tmp /workspace/.sccache
-env -u MB2_ALLOW_GPU_SKIP TMPDIR=/workspace/tmp CARGO_INCREMENTAL=0 SCCACHE_DIR=/workspace/.sccache WGPU_BACKEND=vulkan cargo nextest run --release --locked -p fe-codegen --test known_color_pass_graph_e2e
-env -u MB2_ALLOW_GPU_SKIP TMPDIR=/workspace/tmp CARGO_INCREMENTAL=0 SCCACHE_DIR=/workspace/.sccache WGPU_BACKEND=vulkan cargo nextest run --release --locked -p fe-codegen --test rollcall_pass_graph_e2e
-env -u MB2_ALLOW_GPU_SKIP TMPDIR=/workspace/tmp CARGO_INCREMENTAL=0 SCCACHE_DIR=/workspace/.sccache WGPU_BACKEND=vulkan cargo nextest run --release --locked -p fe-codegen --test precision_fixed_orbit_gpu_oracle
-env -u MB2_ALLOW_GPU_SKIP TMPDIR=/workspace/tmp CARGO_INCREMENTAL=0 SCCACHE_DIR=/workspace/.sccache WGPU_BACKEND=vulkan cargo nextest run --release --locked -p fe-codegen --test perturbational_mandelbrot_gpu_oracle
+env -u MB2_ALLOW_GPU_SKIP TMPDIR=/workspace/tmp CARGO_INCREMENTAL=0 SCCACHE_DIR=/workspace/.sccache WGPU_BACKEND=vulkan cargo nextest run --release --locked --no-capture -p fe-codegen --test known_color_pass_graph_e2e
+env -u MB2_ALLOW_GPU_SKIP TMPDIR=/workspace/tmp CARGO_INCREMENTAL=0 SCCACHE_DIR=/workspace/.sccache WGPU_BACKEND=vulkan cargo nextest run --release --locked --no-capture -p fe-codegen --test rollcall_pass_graph_e2e
+env -u MB2_ALLOW_GPU_SKIP TMPDIR=/workspace/tmp CARGO_INCREMENTAL=0 SCCACHE_DIR=/workspace/.sccache WGPU_BACKEND=vulkan cargo nextest run --release --locked --no-capture -p fe-codegen --test precision_fixed_orbit_gpu_oracle
+env -u MB2_ALLOW_GPU_SKIP TMPDIR=/workspace/tmp CARGO_INCREMENTAL=0 SCCACHE_DIR=/workspace/.sccache WGPU_BACKEND=vulkan cargo nextest run --release --locked --no-capture -p fe-codegen --test perturbational_mandelbrot_gpu_oracle
 ```
 
 Acceptance requires four passing test binaries, no `SKIPPED` line, and a
@@ -384,18 +412,20 @@ fallback. The semantic receipts are:
 
 ## Immediate burn-down order
 
-1. Run the external real-GPU handoff above before beginning the proof GPU port.
-2. Reconnect the authenticated composition query to main and auxiliary AIR
+1. Finish S0 by running the existing Rollcall accept/reject vectors through
+   revm-Wasm in actual Chromium. Keep the bridge raw and application-blind.
+2. Run the external real-GPU handoff above before beginning the proof GPU port.
+3. Reconnect the authenticated composition query to main and auxiliary AIR
    openings, then add canonical proof encoding on the BN254 toy protocol,
    including one end-to-end accept/reject boundary.
-3. Retarget the protocol to BabyBear with independent exactness gates. Do not
+4. Retarget the protocol to BabyBear with independent exactness gates. Do not
    port BN254 Fr to WGSL.
-4. Execute the field-agnostic revm-in-browser risk gate, then lower the
-   BabyBear prover through Fe Conal/CTFE WebGPU schedules.
-5. Finish typed fetch, then Worker/port placement and supervision on the one
+5. Lower the BabyBear prover through Fe Conal/CTFE WebGPU schedules, then run
+   the complete proof/verify/tamper page through Chrome.
+6. Finish typed fetch, then Worker/port placement and supervision on the one
    runtime-control spine.
-6. Delete the runtime manifest and finish the legacy disposition.
-7. Run the exact G5 command once at the final DONE gate.
+7. Delete the runtime manifest and finish the legacy disposition.
+8. Run the exact G5 command once at the final DONE gate.
 
 The Definition of done is not yet met. In particular, the real-GPU gate,
 manifest deletion, Worker/DEC general messaging, complete legacy disposition,
