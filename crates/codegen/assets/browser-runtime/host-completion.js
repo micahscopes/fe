@@ -20,6 +20,8 @@ const MAX_U64 = (1n << 64n) - 1n;
 const MAX_TIMER_CHUNK_MS = 0x7fff_ffffn;
 const MESSAGE_PORT_REPLAY_LIMIT = 64;
 
+export const FE_GENERATED_COMPLETION_CONTRACT = "fe:generated-completion/v1";
+
 export class FeTaskCancelled extends Error {
   constructor() {
     super("Fe task was cancelled");
@@ -387,6 +389,31 @@ export function createHostCompletionBroker(options = {}) {
       settle(slot, taskFailure([1]));
     });
     return slot.token | 0;
+  };
+
+  const beginGeneratedCompletion = (identity, invoke, successWidth, lowerSuccess) => {
+    if (typeof identity !== "string" || identity.length === 0) {
+      throw new TypeError("generated completion identity must be a non-empty string");
+    }
+    if (typeof invoke !== "function" || typeof lowerSuccess !== "function") {
+      throw new TypeError("generated completion hooks must be callable");
+    }
+    return beginBrowserOperation(
+      `generated:${identity}`,
+      invoke,
+      successWidth,
+      value => {
+        const lowered = lowerSuccess(value);
+        if (successWidth === 0) {
+          if (lowered !== undefined
+              && (!Array.isArray(lowered) || lowered.length !== 0)) {
+            throw new TypeError("generated unit completion must lower to no lanes");
+          }
+          return [];
+        }
+        return Array.isArray(lowered) ? lowered : [lowered];
+      },
+    );
   };
 
   const beginSurfaceOperation = (kind, invoke) => {
@@ -1051,8 +1078,14 @@ export function createHostCompletionBroker(options = {}) {
   }
   if (actorEvents !== undefined) imports["fe:actor"] = actorImports;
 
+  const completions = Object.freeze({
+    protocol: FE_GENERATED_COMPLETION_CONTRACT,
+    begin: beginGeneratedCompletion,
+  });
+
   return Object.freeze({
     imports: Object.freeze(imports),
+    completions,
     run,
     post,
     failNextReceive,

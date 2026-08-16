@@ -907,6 +907,48 @@ describe("browser HostTimer/Recv completion broker", () => {
     expect(broker.activeCount()).toBe(0);
   });
 
+  test("generated promise transport lowers values on the ordinary typed rail", async () => {
+    const broker = createHostCompletionBroker();
+    const generated = browserRecordMachine(
+      [u32, u32],
+      () => [
+        1, 0, 0,
+        broker.completions.begin(
+          "resource/channel/receive",
+          async signal => {
+            expect(signal.aborted).toBeFalse();
+            return { sequence: 23, value: 41 };
+          },
+          2,
+          value => [value.sequence, value.value],
+        ) >>> 0,
+      ],
+    );
+    expect(await broker.run(generated, [])).toEqual([23, 41]);
+    expect(broker.activeCount()).toBe(0);
+  });
+
+  test("generated promise transport cancellation reaches its standards hook", async () => {
+    const broker = createHostCompletionBroker();
+    let aborted = 0;
+    const token = broker.completions.begin(
+      "resource/channel/receive",
+      signal => new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => {
+          aborted += 1;
+          reject(new DOMException("cancelled", "AbortError"));
+        }, { once: true });
+      }),
+      1,
+      value => value,
+    );
+    await Promise.resolve();
+    expect(broker.imports["fe:host"].cancel_pending(token)).toBe(1);
+    await Promise.resolve();
+    expect(aborted).toBe(1);
+    expect(broker.activeCount()).toBe(0);
+  });
+
   test("nested selects materialize both compiler-derived envelopes and affine losers", async () => {
     const broker = createHostCompletionBroker();
     const selected = broker.run(nestedSelectMachine(broker, 10_000n), []);

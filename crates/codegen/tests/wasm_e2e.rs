@@ -1168,6 +1168,153 @@ if (broker.activeCount() !== 0 || broker.cancelAll() !== 0) {{
 }
 
 #[test]
+fn generated_webidl_scalar_promise_resumes_a_real_fe_task() {
+    if !std::process::Command::new("bun")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        return;
+    }
+    let world = fe_webidl_bindgen::parse(
+        "interface Channel { Promise<unsigned long> receive(); };",
+    )
+    .unwrap();
+    let semantic = fe_webidl_bindgen::build_adapter_plan(
+        &world,
+        "scalar-promise",
+        "fe:host",
+    )
+    .unwrap();
+    let transport_plan = fe_webidl_bindgen::build_transport_plan(&semantic).unwrap();
+    let bindings = fe_webidl_bindgen::emit_fe_flat_host_imports(&world, "fe:host").unwrap();
+    let source = format!(
+        "{bindings}\n{}",
+        r#"
+use core::pending::{Suspend, TaskOutcome}
+use std::host::Resumable
+
+fn receive(_ channel: Channel) -> u32
+uses (suspend: Suspend<WasmBackend, u32>)
+{
+    let pending = channel_receive(self_: channel)
+    let outcome: TaskOutcome<u32, u32> = suspend.suspend(pending)
+    match outcome {
+        TaskOutcome::Success(value,) => value
+        TaskOutcome::Failure(error,) => 1000 + error
+        TaskOutcome::Cancelled => 2000
+    }
+}
+
+pub fn receive_task(_ channel: Channel) -> u32 {
+    with (Suspend<WasmBackend, u32> = Resumable {}) {
+        receive(channel)
+    }
+}
+"#
+    );
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///generated_webidl_scalar_promise.fe").unwrap();
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(source));
+    let file = db.workspace().get(&db, &url).unwrap();
+    let top_mod = db.top_mod(file);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "generated Promise fixture diagnostics:\n{diagnostics}"
+    );
+    let package =
+        mir::build_wasm_runtime_package_for_entry(&db, top_mod, "receive_task").unwrap();
+    let adapters = materialized_task_adapters(&db, &package).unwrap();
+    assert_eq!(adapters.len(), 1);
+    let task_adapter = emit_materialized_task_adapter_js(&adapters, "./materialized-task.js")
+        .unwrap()
+        .expect("generated Promise Fe task emits a browser adapter");
+    let wasm =
+        compile_runtime_package_wasm_with_options(&db, &package, WasmCompileOptions::default())
+            .unwrap()
+            .bytes;
+    wasmparser::validate(&wasm).unwrap();
+    let imports = func_imports(&wasm);
+    assert!(imports.contains(&("fe:host".to_owned(), "channel_receive".to_owned())));
+    assert!(!imports.contains(&("fe:control".to_owned(), "suspend".to_owned())));
+
+    let directory = tempfile::tempdir().unwrap();
+    let wasm_path = directory.path().join("generated-promise.wasm");
+    let task_runtime_path = directory.path().join("materialized-task.js");
+    let host_runtime_path = directory.path().join("host-completion.js");
+    let task_adapter_path = directory.path().join("task-adapter.mjs");
+    let transport_path = directory.path().join("transport.mjs");
+    let script_path = directory.path().join("execute.mjs");
+    std::fs::write(&wasm_path, wasm).unwrap();
+    std::fs::write(&task_runtime_path, MATERIALIZED_TASK_RUNTIME_JS).unwrap();
+    std::fs::write(&host_runtime_path, HOST_COMPLETION_RUNTIME_JS).unwrap();
+    std::fs::write(&task_adapter_path, task_adapter).unwrap();
+    std::fs::write(
+        &transport_path,
+        fe_webidl_bindgen::emit_js_core_wasm_transport(&transport_plan),
+    )
+    .unwrap();
+    let script = format!(
+        r#"
+import {{ createMaterializedTaskRegistry }} from {task_adapter_url:?};
+import {{ createHostCompletionBroker }} from {host_runtime_url:?};
+import {{ createFeCoreWasmTransport }} from {transport_url:?};
+
+const broker = createHostCompletionBroker();
+const codec = {{
+  protocol: "fe:host-wasm-codec/v1",
+  supports: () => true,
+  createSession() {{
+    return {{
+      attach() {{}},
+      liftArguments(identity, lanes) {{
+        if (identity !== "resource/Channel/channel_receive") throw new Error("wrong identity");
+        return lanes;
+      }},
+      lowerResult(_identity, value) {{ return value; }},
+    }};
+  }},
+}};
+const semanticAdapter = {{ imports: {{ "fe:host": {{
+  channel_receive: handle => Promise.resolve(handle + 35),
+}} }} }};
+const transport = createFeCoreWasmTransport(codec, semanticAdapter, broker.completions);
+const imports = {{ "fe:host": {{
+  ...broker.imports["fe:host"],
+  ...transport.imports["fe:host"],
+}} }};
+const bytes = await Bun.file({wasm_path:?}).arrayBuffer();
+const {{ instance }} = await WebAssembly.instantiate(bytes, imports);
+transport.attach(instance);
+const task = createMaterializedTaskRegistry(instance.exports).receive_task;
+const output = await broker.run(task, [7]);
+if (output.length !== 1 || output[0] !== 42) {{
+  throw new Error(`generated Promise bypassed Fe semantics: ${{String(output)}}`);
+}}
+if (broker.activeCount() !== 0) throw new Error("generated Promise leaked a broker token");
+"#,
+        task_adapter_url = format!("file://{}", task_adapter_path.display()),
+        host_runtime_url = format!("file://{}", host_runtime_path.display()),
+        transport_url = format!("file://{}", transport_path.display()),
+        wasm_path = wasm_path.display().to_string(),
+    );
+    std::fs::write(&script_path, script).unwrap();
+    let execution = std::process::Command::new("bun")
+        .arg("run")
+        .arg(&script_path)
+        .output()
+        .unwrap();
+    assert!(
+        execution.status.success(),
+        "generated Promise Fe/Wasm capstone failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&execution.stdout),
+        String::from_utf8_lossy(&execution.stderr),
+    );
+}
+
+#[test]
 fn transitive_effect_provider_stack_flattens_to_exact_executable_frame() {
     let wasm = compile_to_wasm(
         "transitive_resumable_stack.fe",

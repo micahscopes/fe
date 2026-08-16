@@ -17,6 +17,7 @@ use fe_host_wasm_codec::{
 use crate::{AdapterPlan, BindgenError};
 
 pub const HOST_WASM_CODEC_CONTRACT: &str = JS_CODEC_CONTRACT;
+pub const GENERATED_COMPLETION_CONTRACT: &str = "fe:generated-completion/v1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransportPlan {
@@ -71,9 +72,8 @@ pub struct CallbackTransport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FutureTransport {
     pub operation_identity: String,
-    pub completion_export: String,
-    pub cancellation_export: String,
-    pub blocker: String,
+    pub success: Vec<CoreValueType>,
+    pub blocker: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,9 +124,6 @@ pub fn build_transport_plan(plan: &AdapterPlan) -> Result<TransportPlan, Bindgen
                 })?;
             let identity = format!("resource/{}/{}", resource.name, function.import_name);
             let is_async = method.signature.async_;
-            let blocker = is_async.then(|| {
-                "core-Wasm async import/future token mechanics are not executable yet".to_owned()
-            });
             let mut signature = method.signature.clone();
             if method.receiver != Receiver::Static {
                 signature.params.insert(
@@ -140,34 +137,42 @@ pub fn build_transport_plan(plan: &AdapterPlan) -> Result<TransportPlan, Bindgen
                     },
                 );
             }
-            let codec_plan = if is_async {
-                None
+            let mut transport_signature = signature;
+            transport_signature.async_ = false;
+            let codec_plan = codec_function_plan(
+                world,
+                &resource.name,
+                &function.abi_method_name,
+                transport_signature,
+                BoundaryDirection::GuestToHost,
+            )?;
+            let requirements = codec_plan.requirements.clone();
+            let mut core = codec_core_signature(&codec_plan);
+            let blocker = if is_async
+                && (requirements.contains(&PlanRequirement::PostReturn)
+                    || codec_plan
+                        .result
+                        .as_ref()
+                        .is_some_and(|result| matches!(result.layout.flat, Flattening::Indirect)))
+            {
+                Some(
+                    "generated Promise transport requires continuation-scoped post-return for rich results"
+                        .to_owned(),
+                )
             } else {
-                Some(codec_function_plan(
-                    world,
-                    &resource.name,
-                    &function.abi_method_name,
-                    signature,
-                    BoundaryDirection::GuestToHost,
-                )?)
+                None
             };
-            let requirements = codec_plan
-                .as_ref()
-                .map(|plan| plan.requirements.clone())
-                .unwrap_or_else(|| BTreeSet::from([PlanRequirement::FutureTable]));
-            let core = codec_plan.as_ref().map(codec_core_signature);
             let post_return_export = requirements
                 .contains(&PlanRequirement::PostReturn)
                 .then(|| post_return_name(&identity));
             required_codec_features.extend(requirements.iter().copied());
             if is_async {
+                let success = core.results.clone();
+                core.results = vec![CoreValueType::I32];
                 futures.push(FutureTransport {
                     operation_identity: identity.clone(),
-                    completion_export: stable_entry("__fe_future_complete", &identity),
-                    cancellation_export: stable_entry("__fe_future_cancel", &identity),
-                    blocker:
-                        "future completion exports require compiler-generated async entrypoints"
-                            .to_owned(),
+                    success,
+                    blocker: blocker.clone(),
                 });
             }
             functions.push(TransportFunction {
@@ -175,7 +180,7 @@ pub fn build_transport_plan(plan: &AdapterPlan) -> Result<TransportPlan, Bindgen
                 module: plan.module.clone(),
                 import_name: function.import_name.clone(),
                 kind: TransportKind::ResourceMethod,
-                core,
+                core: Some(core),
                 requirements,
                 post_return_export,
                 blocker,
@@ -346,16 +351,36 @@ fn stable_hash(value: &str) -> u64 {
 /// Emit a two-phase Instance binder against a separately supplied codec.
 ///
 /// No codec ships in this crate. The binder fails before exposing imports when
-/// the codec lacks a requirement, and rejects async methods/trampolines whose
-/// compiler mechanics do not exist yet.
+/// the codec lacks a requirement. Direct scalar Promise results use the shared
+/// generated-completion rail; rich Promise results and callback trampolines
+/// remain blocked until their continuation-scoped ownership mechanics exist.
 pub fn emit_js_core_wasm_transport(plan: &TransportPlan) -> String {
+    let has_futures = !plan.futures.is_empty();
+    let needs_realloc = plan
+        .required_codec_features
+        .contains(&PlanRequirement::Realloc);
     let mut output = format!(
         "// @generated transport blueprint; layout is delegated to the codec.\n\
          export const FE_HOST_WASM_CODEC_CONTRACT = {:?};\n\
-         export function createFeCoreWasmTransport(codec, semanticAdapter) {{\n\
+         {}export function createFeCoreWasmTransport(codec, semanticAdapter{}) {{\n\
          \x20 if (codec.protocol !== FE_HOST_WASM_CODEC_CONTRACT) throw new TypeError(`expected ${{FE_HOST_WASM_CODEC_CONTRACT}} codec`);\n\
+         {}\
          \x20 const required = [",
-        HOST_WASM_CODEC_CONTRACT
+        HOST_WASM_CODEC_CONTRACT,
+        if has_futures {
+            format!(
+                "export const FE_GENERATED_COMPLETION_CONTRACT = {:?};\n\n",
+                GENERATED_COMPLETION_CONTRACT
+            )
+        } else {
+            String::new()
+        },
+        if has_futures { ", completions" } else { "" },
+        if has_futures {
+            "  if (completions?.protocol !== FE_GENERATED_COMPLETION_CONTRACT || typeof completions.begin !== \"function\") throw new TypeError(`expected ${FE_GENERATED_COMPLETION_CONTRACT} completion rail`);\n"
+        } else {
+            ""
+        },
     );
     for requirement in &plan.required_codec_features {
         output.push_str(&format!("{:?},", requirement_name(*requirement)));
@@ -390,18 +415,43 @@ pub fn emit_js_core_wasm_transport(plan: &TransportPlan) -> String {
             ));
             continue;
         }
-        output.push_str(&format!(
-            "    {:?}: (...coreArgs) => {{\n\
-             \x20     const args = session.liftArguments({:?}, coreArgs);\n\
-             \x20     const result = semanticAdapter.imports[{:?}][{:?}](...args);\n\
-             \x20     return session.lowerResult({:?}, result);\n\
-             \x20   }},\n",
-            function.import_name,
-            function.identity,
-            function.module,
-            function.import_name,
-            function.identity,
-        ));
+        if let Some(future) = plan
+            .futures
+            .iter()
+            .find(|future| future.operation_identity == function.identity)
+        {
+            output.push_str(&format!(
+                "    {:?}: (...coreArgs) => {{\n\
+                 \x20     const args = session.liftArguments({:?}, coreArgs);\n\
+                 \x20     return completions.begin(\n\
+                 \x20       {:?},\n\
+                 \x20       _signal => semanticAdapter.imports[{:?}][{:?}](...args),\n\
+                 \x20       {},\n\
+                 \x20       value => session.lowerResult({:?}, value),\n\
+                 \x20     );\n\
+                 \x20   }},\n",
+                function.import_name,
+                function.identity,
+                function.identity,
+                function.module,
+                function.import_name,
+                future.success.len(),
+                function.identity,
+            ));
+        } else {
+            output.push_str(&format!(
+                "    {:?}: (...coreArgs) => {{\n\
+                 \x20     const args = session.liftArguments({:?}, coreArgs);\n\
+                 \x20     const result = semanticAdapter.imports[{:?}][{:?}](...args);\n\
+                 \x20     return session.lowerResult({:?}, result);\n\
+                 \x20   }},\n",
+                function.import_name,
+                function.identity,
+                function.module,
+                function.import_name,
+                function.identity,
+            ));
+        }
     }
     output.push_str("  };\n");
     output.push_str("  const postReturnNames = {");
@@ -427,7 +477,7 @@ pub fn emit_js_core_wasm_transport(plan: &TransportPlan) -> String {
          \x20   const alloc = exports[{:?}];\n\
          \x20   const realloc = exports[{:?}];\n\
          \x20   if (!(memory instanceof WebAssembly.Memory)) throw new TypeError(\"missing canonical memory export\");\n\
-         \x20   if (typeof alloc !== \"function\" || typeof realloc !== \"function\") throw new TypeError(\"missing canonical allocator exports\");\n\
+         {}\
          \x20   const postReturns = Object.fromEntries(Object.entries(postReturnNames).map(([identity, name]) => {{\n\
          \x20     const cleanup = exports[name];\n\
          \x20     if (typeof cleanup !== \"function\") throw new TypeError(`missing post-return export ${{name}} for ${{identity}}`);\n\
@@ -439,6 +489,11 @@ pub fn emit_js_core_wasm_transport(plan: &TransportPlan) -> String {
         plan.memory.memory_export,
         plan.memory.alloc_export,
         plan.memory.realloc_export,
+        if needs_realloc {
+            "    if (typeof alloc !== \"function\" || typeof realloc !== \"function\") throw new TypeError(\"missing canonical allocator exports\");\n"
+        } else {
+            ""
+        },
     ));
     output.push_str(&format!(
         "  return {{ imports: {{ {:?}: imports }}, attach, session }};\n}}\n",
@@ -498,14 +553,20 @@ mod tests {
             .iter()
             .find(|function| function.import_name == "channel_receive")
             .unwrap();
-        assert!(receive.core.is_none());
-        assert!(receive.blocker.as_deref().unwrap().contains("async"));
-        assert_eq!(first.futures.len(), 1);
-        assert!(
-            first.futures[0]
-                .completion_export
-                .starts_with("__fe_future_complete_")
+        assert_eq!(
+            receive.core,
+            Some(CoreSignature {
+                params: vec![CoreValueType::I32],
+                results: vec![CoreValueType::I32],
+            })
         );
+        assert!(receive.blocker.as_deref().unwrap().contains("post-return"));
+        assert_eq!(first.futures.len(), 1);
+        assert_eq!(
+            first.futures[0].success,
+            [CoreValueType::I32, CoreValueType::I32]
+        );
+        assert!(first.futures[0].blocker.is_some());
         assert_eq!(first.callbacks.len(), 1);
         assert!(first.callbacks[0].export_name.starts_with("__fe_callback_"));
         assert_eq!(
@@ -555,7 +616,7 @@ mod tests {
     }
 
     #[test]
-    fn javascript_binder_delegates_layout_and_fails_closed_for_async() {
+    fn javascript_binder_delegates_layout_and_fails_closed_for_rich_async_results() {
         let world = parse(FIXTURE).unwrap();
         let adapter = build_adapter_plan(&world, "transport-test", "fe:host").unwrap();
         let plan = build_transport_plan(&adapter).unwrap();
@@ -567,13 +628,136 @@ mod tests {
         assert!(js.contains("missing canonical memory export"));
         assert!(js.contains("missing canonical allocator exports"));
         assert!(js.contains("postReturns"));
-        assert!(js.contains("core-Wasm async import/future token mechanics"));
+        assert!(js.contains("continuation-scoped post-return"));
         assert!(js.contains("transport blueprint is not executable"));
         // Memory is a mandatory transport surface checked by `attach`, not an
         // optional codec capability advertised through `supports`.
         assert!(!js.contains("\"canonical_memory\""));
         assert!(js.contains("const memory = exports[\"memory\"]"));
         assert!(!js.contains("core::browser"));
+    }
+
+    #[test]
+    fn scalar_promises_use_generated_pending_and_the_completion_rail() {
+        let world = parse("interface Channel { Promise<unsigned long> receive(); };").unwrap();
+        let adapter = build_adapter_plan(&world, "scalar-promise", "fe:host").unwrap();
+        let plan = build_transport_plan(&adapter).unwrap();
+        let receive = plan
+            .functions
+            .iter()
+            .find(|function| function.import_name == "channel_receive")
+            .unwrap();
+        assert!(receive.blocker.is_none());
+        assert_eq!(
+            receive.core,
+            Some(CoreSignature {
+                params: vec![CoreValueType::I32],
+                results: vec![CoreValueType::I32],
+            })
+        );
+        assert_eq!(plan.futures[0].success, [CoreValueType::I32]);
+        assert!(plan.futures[0].blocker.is_none());
+        assert!(
+            !plan
+                .required_codec_features
+                .contains(&PlanRequirement::FutureTable)
+        );
+
+        let fe = crate::emit_fe_flat_host_imports(&world, "fe:host").unwrap();
+        assert!(fe.contains("use core::pending::Pending"), "{fe}");
+        assert!(fe.contains("use std::wasm::WasmBackend"), "{fe}");
+        assert!(fe.contains("channel_receive(self_: Channel) -> Pending<WasmBackend, u32>"));
+
+        let js = emit_js_core_wasm_transport(&plan);
+        assert!(js.contains(GENERATED_COMPLETION_CONTRACT), "{js}");
+        assert!(js.contains("return completions.begin("), "{js}");
+        assert!(js.contains("value => session.lowerResult("), "{js}");
+        assert!(!js.contains("transport blueprint is not executable: generated"));
+        assert!(!js.contains("missing canonical allocator exports"));
+    }
+
+    #[test]
+    fn generated_scalar_promise_transport_executes_its_semantic_completion() {
+        if !std::process::Command::new("bun")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            return;
+        }
+        let world = parse("interface Channel { Promise<unsigned long> receive(); };").unwrap();
+        let adapter = build_adapter_plan(&world, "scalar-promise", "fe:host").unwrap();
+        let plan = build_transport_plan(&adapter).unwrap();
+        let transport = emit_js_core_wasm_transport(&plan);
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("fe-webidl-promise-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let transport_path = directory.join("transport.mjs");
+        let script_path = directory.join("execute.mjs");
+        std::fs::write(&transport_path, transport).unwrap();
+        let script = format!(
+            r#"
+import {{ createFeCoreWasmTransport }} from {transport_url:?};
+
+let settled;
+const completions = {{
+  protocol: "fe:generated-completion/v1",
+  begin(identity, invoke, width, lower) {{
+    if (identity !== "resource/Channel/channel_receive" || width !== 1) {{
+      throw new Error(`wrong generated completion ${{identity}}/${{width}}`);
+    }}
+    settled = Promise.resolve().then(() => invoke(new AbortController().signal)).then(lower);
+    return 73;
+  }},
+}};
+const codec = {{
+  protocol: "fe:host-wasm-codec/v1",
+  supports: () => true,
+  createSession() {{
+    return {{
+      attach() {{}},
+      liftArguments(identity, lanes) {{
+        if (identity !== "resource/Channel/channel_receive") throw new Error("wrong identity");
+        return lanes;
+      }},
+      lowerResult(_identity, value) {{ return value; }},
+    }};
+  }},
+}};
+const semanticAdapter = {{ imports: {{ "fe:host": {{
+  channel_receive: handle => Promise.resolve(handle + 35),
+}} }} }};
+const transport = createFeCoreWasmTransport(codec, semanticAdapter, completions);
+transport.attach({{ exports: {{
+  memory: new WebAssembly.Memory({{ initial: 1 }}),
+  cabi_alloc() {{ return 0; }},
+  cabi_realloc() {{ return 0; }},
+}} }});
+const token = transport.imports["fe:host"].channel_receive(7);
+if (token !== 73) throw new Error(`wrong pending token ${{token}}`);
+const value = await settled;
+if (value !== 42) throw new Error(`wrong scalar completion ${{value}}`);
+"#,
+            transport_url = format!("file://{}", transport_path.display()),
+        );
+        std::fs::write(&script_path, script).unwrap();
+        let execution = std::process::Command::new("bun")
+            .arg("run")
+            .arg(&script_path)
+            .output()
+            .unwrap();
+        let cleanup = std::fs::remove_dir_all(&directory);
+        assert!(
+            execution.status.success(),
+            "generated scalar Promise transport failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&execution.stdout),
+            String::from_utf8_lossy(&execution.stderr),
+        );
+        cleanup.unwrap();
     }
 
     #[test]

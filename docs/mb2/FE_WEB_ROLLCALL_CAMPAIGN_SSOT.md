@@ -77,6 +77,23 @@ Legend:
   leaves no broker slot. Gates:
   `fe_select_preserves_a_heterogeneous_loser_across_repeated_source_wins` and
   `typed pending cancellation consumes active and already-settled losers`.
+- [x] Generated WebIDL scalar `Promise<T>` operations now emit
+  `Pending<WasmBackend, T>` and execute on the same completion and continuation
+  rail. The transport derives its success width from the canonical codec plan,
+  adds no operation-specific JavaScript schema, preserves byte-identical sync
+  binders, and does not require an allocator for scalar-only worlds. The full
+  gate compiles the generated Fe declaration, retains the generated Wasm
+  import, settles through the fixed broker, resumes the compiler-derived Fe
+  continuation, checks the semantic value `42`, and observes no token leak.
+  Gates: `scalar_promises_use_generated_pending_and_the_completion_rail`,
+  `generated_scalar_promise_transport_executes_its_semantic_completion`, and
+  `generated_webidl_scalar_promise_resumes_a_real_fe_task`.
+- [!] Rich generated Promise results remain deliberately blocked. Their
+  canonical memory must stay live across races and selects, then run
+  post-return cleanup only after the winning Fe continuation consumes the
+  value. The real Fe Wasm allocator ABI must also be used rather than the
+  blueprint's historical `cabi_alloc`/`cabi_realloc` names. Fetch cannot close
+  by weakening either lifetime or allocator gate.
 - [x] Typed browser sources cover render-surface facts, visibility, animation
   frames, viewport, raw pointer events, Fe-selected capture, wheel, shared
   WebGPU lifecycle, queue-idle completion, and Fe-owned recovery. Gates:

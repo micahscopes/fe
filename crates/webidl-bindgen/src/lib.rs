@@ -49,9 +49,9 @@ pub use selection::{
     select_adapter_operations,
 };
 pub use transport_plan::{
-    CallbackTransport, CoreSignature, CoreValueType, FutureTransport, MemorySurfacePlan,
-    TransportFunction, TransportKind, TransportPlan, build_transport_plan,
-    emit_js_core_wasm_transport,
+    CallbackTransport, CoreSignature, CoreValueType, FutureTransport,
+    GENERATED_COMPLETION_CONTRACT, MemorySurfacePlan, TransportFunction, TransportKind,
+    TransportPlan, build_transport_plan, emit_js_core_wasm_transport,
 };
 
 /// A linked, deterministic subset of one Web IDL definition graph.
@@ -2271,6 +2271,9 @@ fn emit_fe_import_layer(
         output.push_str(
             "use core::{BrowserLatin1String, BrowserList, BrowserString, BrowserUtf16String}\n\n",
         );
+        if world_has_promise_operations(world) {
+            output.push_str("use core::pending::Pending\nuse std::wasm::WasmBackend\n\n");
+        }
     }
     for interface in world.interfaces.values() {
         output.push_str(&format!(
@@ -2486,9 +2489,25 @@ fn emit_fe_import_layer(
                             )?
                         ));
                     }
-                    let result =
-                        fe_import_type(world, &operation.result, &function, rich_flat_values)?;
-                    let arrow = if result != "()" {
+                    let (result, async_) = match resolve_typedef(world, &operation.result) {
+                        TypeRef::Promise(payload) if rich_flat_values => (
+                            fe_import_type(world, payload, &function, rich_flat_values)?,
+                            true,
+                        ),
+                        TypeRef::Promise(_) => {
+                            return Err(BindgenError::new(
+                                format!("operation `{function}` result"),
+                                "Promise results require typed Pending emission",
+                            ));
+                        }
+                        _ => (
+                            fe_import_type(world, &operation.result, &function, rich_flat_values)?,
+                            false,
+                        ),
+                    };
+                    let arrow = if async_ {
+                        format!(" -> Pending<WasmBackend, {result}>")
+                    } else if result != "()" {
                         format!(" -> {result}")
                     } else {
                         String::new()
@@ -2556,9 +2575,25 @@ fn emit_fe_import_layer(
                             )?
                         ));
                     }
-                    let result =
-                        fe_import_type(world, &operation.result, &function, rich_flat_values)?;
-                    let arrow = if result != "()" {
+                    let (result, async_) = match resolve_typedef(world, &operation.result) {
+                        TypeRef::Promise(payload) if rich_flat_values => (
+                            fe_import_type(world, payload, &function, rich_flat_values)?,
+                            true,
+                        ),
+                        TypeRef::Promise(_) => {
+                            return Err(BindgenError::new(
+                                format!("namespace operation `{function}` result"),
+                                "Promise results require typed Pending emission",
+                            ));
+                        }
+                        _ => (
+                            fe_import_type(world, &operation.result, &function, rich_flat_values)?,
+                            false,
+                        ),
+                    };
+                    let arrow = if async_ {
+                        format!(" -> Pending<WasmBackend, {result}>")
+                    } else if result != "()" {
                         format!(" -> {result}")
                     } else {
                         String::new()
@@ -2573,6 +2608,26 @@ fn emit_fe_import_layer(
     }
     output.push_str("}\n");
     Ok(output)
+}
+
+fn world_has_promise_operations(world: &World) -> bool {
+    world.interfaces.values().any(|interface| {
+        interface.members.iter().any(|member| {
+            matches!(
+                member,
+                Member::Operation(operation)
+                    if matches!(resolve_typedef(world, &operation.result), TypeRef::Promise(_))
+            )
+        })
+    }) || world.namespaces.values().any(|namespace| {
+        namespace.members.iter().any(|member| {
+            matches!(
+                member,
+                NamespaceMember::Operation(operation)
+                    if matches!(resolve_typedef(world, &operation.result), TypeRef::Promise(_))
+            )
+        })
+    })
 }
 
 /// Emit a JavaScript import adapter for the v0 scalar/handle ABI.
