@@ -1037,6 +1037,73 @@ fn entry() -> Pair {
 }
 
 #[test]
+fn const_initialized_aggregate_mut_borrow_and_later_read_share_one_root() {
+    with_runtime_package!(
+        "const_initialized_aggregate_mut_borrow_and_later_read_share_one_root.fe",
+        r#"struct Large { values: [u32; 1001] }
+
+impl core::marker::Copy for Large {}
+
+const EMPTY: Large = Large { values: [0; 1001] }
+
+fn write_first(_ output: mut Large) {
+    output.values[0] = 7
+}
+
+pub fn probe() -> u32 {
+    let mut output = EMPTY
+    write_first(mut output)
+    output.values[0]
+}
+"#,
+        |db, package| {
+            let body = runtime_body_for_symbol(&db, package, "probe");
+            let output = body
+                .locals
+                .iter()
+                .enumerate()
+                .find_map(|(idx, local)| {
+                    (local.semantic_ty.pretty_print(&db).contains("Large")
+                        && matches!(local.root, RuntimeLocalRoot::Slot(_) | RuntimeLocalRoot::Ref(_)))
+                    .then_some(RLocalId::from_u32(idx as u32))
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "const-initialized aggregate borrowed mutably should have caller-owned storage:\n{body:#?}"
+                    )
+                });
+
+            assert!(
+                runtime_body_stmts(&body).any(|stmt| {
+                    matches!(
+                        stmt,
+                        RStmt::Assign {
+                            expr: RExpr::AddrOf { place },
+                            ..
+                        } if matches!(place.root, PlaceRoot::Slot(root) | PlaceRoot::Ref(root) if root == output)
+                            && place.path.is_empty()
+                    )
+                }),
+                "mutable borrow should address the output root:\n{body:#?}"
+            );
+            assert!(
+                runtime_body_stmts(&body).any(|stmt| {
+                    matches!(
+                        stmt,
+                        RStmt::Assign {
+                            expr: RExpr::Load { place },
+                            ..
+                        } if matches!(place.root, PlaceRoot::Slot(root) | PlaceRoot::Ref(root) if root == output)
+                            && !place.path.is_empty()
+                    )
+                }),
+                "the post-call read should observe the same output root:\n{body:#?}"
+            );
+        }
+    );
+}
+
+#[test]
 fn owned_aggregate_values_with_place_style_reads_get_object_backed_runtime_storage() {
     with_runtime_package!(
         "owned_aggregate_values_with_place_style_reads_get_object_backed_runtime_storage.fe",

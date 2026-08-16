@@ -7101,7 +7101,10 @@ where
                 // latter. Materialize an independent value here: Fe aggregate
                 // copy semantics are deep even though this target represents
                 // addressable aggregates by arena pointers.
-                if self.is_object_ref_local(*src) && !self.is_fresh_object_binding(*src) {
+                if self.is_object_ref_local(*src)
+                    && !self.is_fresh_object_binding(*src)
+                    && !self.is_borrow_alias_binding(*src)
+                {
                     let class = self.body.value_class(*src).cloned().ok_or_else(|| {
                         LowerError::Internal(format!(
                             "aggregate copy source {src:?} has no runtime class"
@@ -9261,6 +9264,44 @@ where
             }
         }
         has_fresh_def
+    }
+
+    /// Whether an object-ref local denotes a borrow of existing storage rather
+    /// than an owned aggregate value. Forwarding this pointer must preserve
+    /// identity: copying the pointee would turn a mutable borrow into a write to
+    /// a detached temporary, so the caller would not observe the mutation.
+    fn is_borrow_alias_binding(&self, local: RLocalId) -> bool {
+        fn visit(
+            body: &RuntimeBody<'_>,
+            local: RLocalId,
+            visiting: &mut HashSet<RLocalId>,
+        ) -> bool {
+            if !visiting.insert(local) {
+                return false;
+            }
+            let mut has_definition = false;
+            for block in &body.blocks {
+                for stmt in &block.stmts {
+                    let RStmt::Assign { dst, expr } = stmt else {
+                        continue;
+                    };
+                    if *dst != local {
+                        continue;
+                    }
+                    has_definition = true;
+                    match expr {
+                        RExpr::AddrOf { .. } => {}
+                        RExpr::Use(source) | RExpr::RetagRef { value: source }
+                            if visit(body, *source, visiting) => {}
+                        _ => return false,
+                    }
+                }
+            }
+            visiting.remove(&local);
+            has_definition
+        }
+
+        visit(&self.body, local, &mut HashSet::new())
     }
 
     fn var_for(&self, local: RLocalId) -> Result<Variable, LowerError> {

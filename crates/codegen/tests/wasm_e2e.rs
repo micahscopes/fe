@@ -6449,6 +6449,42 @@ pub fn probe(k: u32) -> u32 {
     }
 }
 
+/// A mutable borrow must materialize a const-initialized large aggregate as
+/// caller-owned writable storage. The caller must observe callee writes after
+/// the borrow returns, even when the aggregate is passed as one Wasm pointer.
+#[test]
+fn mut_borrow_of_large_const_initialized_aggregate_writes_back_on_wasm() {
+    let source = r#"
+struct Large { values: [u32; 1001] }
+
+impl core::marker::Copy for Large {}
+
+const EMPTY: Large = Large { values: [0; 1001] }
+
+fn write_first(_ output: mut Large) {
+    output.values[0] = 7
+}
+
+pub fn probe() -> u32 {
+    let mut output = EMPTY
+    write_first(mut output)
+    output.values[0]
+}
+"#;
+    let wasm = compile_to_wasm("wasm_large_mut_borrow_writeback.fe", source);
+    let (mut store, instance) = instantiate(&wasm);
+    let probe = instance
+        .get_typed_func::<(), i32>(&mut store, "probe")
+        .expect("`probe` export should exist");
+    assert_eq!(
+        probe
+            .call(&mut store, ())
+            .expect("large mutable borrow should execute"),
+        7,
+        "the caller must observe the callee's write through the mutable borrow",
+    );
+}
+
 /// A private fixed-array parameter is flattened at the call boundary and
 /// materialized into independent target-layout memory for dynamic indexing.
 /// `u8` arrays are intentionally packed at one byte per element, so this gate
