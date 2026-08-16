@@ -114,7 +114,7 @@ pub struct CompositionProof<const N: usize> {
     pub evaluations: [Fr; N],
     pub root: CompositionDigest,
     pub transcript: CompositionTranscriptDigest,
-    pub fri: FriFoldChallenge,
+    pub fri: FriFoldChallenge<1>,
 }
 impl<const N: usize> core::marker::Copy for CompositionProof<N> {}
 

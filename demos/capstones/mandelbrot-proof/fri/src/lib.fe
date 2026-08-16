@@ -6,14 +6,17 @@
 
 use mandelbrot_proof_composition::{CompositionProof, compose4x16}
 use mandelbrot_proof_commitment::{
-    FriFoldChallenge2,
+    FriFoldChallenge,
     FriLayerDigest,
     FriLayerTranscriptDigest,
     bind_fri_layer,
-    fri_fold_challenge2,
+    bind_next_fri_layer,
+    fri_layer_row_commitment,
     fri_layer_root_power_of_two,
+    fri_next_fold_challenge,
 }
 use mandelbrot_proof_field_air::Fr
+use mandelbrot_proof_kernel::MAX_PADDED_TRACE_LENGTH
 use precision::bn254_fr::Bn254Fr
 use precision::field::FieldElement
 use precision::polynomial::radix2_log
@@ -24,12 +27,79 @@ pub struct FriProof8 {
     pub valid: bool,
     pub composition: CompositionProof<16>,
     pub evaluations: [Fr; 8],
-    pub root: FriLayerDigest,
-    pub transcript: FriLayerTranscriptDigest,
-    pub next_challenge: FriFoldChallenge2,
+    pub root: FriLayerDigest<1>,
+    pub transcript: FriLayerTranscriptDigest<1>,
+    pub next_challenge: FriFoldChallenge<2>,
 }
 
 impl core::marker::Copy for FriProof8 {}
+
+pub struct FriFoldEvaluations<const N: usize> {
+    pub valid: bool,
+    pub evaluations: [Fr; N],
+}
+impl<const N: usize> core::marker::Copy for FriFoldEvaluations<N> {}
+
+pub struct FriRound<const ROUND: u32, const N: usize, const NEXT: u32> {
+    pub valid: bool,
+    pub evaluations: [Fr; N],
+    pub root: FriLayerDigest<ROUND>,
+    pub transcript: FriLayerTranscriptDigest<ROUND>,
+    pub next_challenge: FriFoldChallenge<NEXT>,
+}
+impl<const ROUND: u32, const N: usize, const NEXT: u32> core::marker::Copy
+    for FriRound<ROUND, N, NEXT> {}
+
+pub struct FriFinalRound<const ROUND: u32> {
+    pub valid: bool,
+    pub evaluation: Fr,
+    pub root: FriLayerDigest<ROUND>,
+    pub transcript: FriLayerTranscriptDigest<ROUND>,
+}
+impl<const ROUND: u32> core::marker::Copy for FriFinalRound<ROUND> {}
+
+pub struct FriProofComplete {
+    pub valid: bool,
+    pub first: FriProof8,
+    pub second: FriRound<2, 4, 3>,
+    pub third: FriRound<3, 2, 4>,
+    pub final_round: FriFinalRound<4>,
+}
+impl core::marker::Copy for FriProofComplete {}
+
+fn invalid_fold<const N: usize>() -> FriFoldEvaluations<N> {
+    FriFoldEvaluations { valid: false, evaluations: [Fr::zero(); N] }
+}
+
+fn invalid_round<const ROUND: u32, const N: usize, const NEXT: u32>()
+    -> FriRound<ROUND, N, NEXT> {
+    FriRound {
+        valid: false,
+        evaluations: [Fr::zero(); N],
+        root: FriLayerDigest { value: Fr::zero() },
+        transcript: FriLayerTranscriptDigest { value: Fr::zero() },
+        next_challenge: FriFoldChallenge { value: Fr::zero() },
+    }
+}
+
+fn invalid_final<const ROUND: u32>() -> FriFinalRound<ROUND> {
+    FriFinalRound {
+        valid: false,
+        evaluation: Fr::zero(),
+        root: FriLayerDigest { value: Fr::zero() },
+        transcript: FriLayerTranscriptDigest { value: Fr::zero() },
+    }
+}
+
+fn invalid_complete(_ first: FriProof8) -> FriProofComplete {
+    FriProofComplete {
+        valid: false,
+        first: first,
+        second: invalid_round<2, 4, 3>(),
+        third: invalid_round<3, 2, 4>(),
+        final_round: invalid_final<4>(),
+    }
+}
 
 fn invalid_fri(_ composition: CompositionProof<16>) -> FriProof8 {
     FriProof8 {
@@ -38,8 +108,37 @@ fn invalid_fri(_ composition: CompositionProof<16>) -> FriProof8 {
         evaluations: [Fr::zero(); 8],
         root: FriLayerDigest { value: Fr::zero() },
         transcript: FriLayerTranscriptDigest { value: Fr::zero() },
-        next_challenge: FriFoldChallenge2 { value: Fr::zero() },
+        next_challenge: FriFoldChallenge { value: Fr::zero() },
     }
+}
+
+/// One reusable FRI binary fold. `shift * H_N` is mapped to
+/// `shift^2 * H_OUT`, where `OUT = N / 2`.
+pub fn fold_fri_evaluations<const N: usize, const OUT: usize>(
+    _ evaluations: own [Fr; N],
+    _ challenge: Fr,
+    _ shift: Fr,
+) -> FriFoldEvaluations<OUT>
+    where N > 0, N > 1, { (N & (N - 1)) == 0 }, OUT > 0, { OUT + OUT == N },
+{
+    if shift.is_zero() {
+        return invalid_fold<OUT>()
+    }
+    let inverse_two = Fr::from_u32(2).inverse_or_zero()
+    let root = Field::two_adic_root(radix2_log<N>())
+    let mut point = shift
+    let mut folded = [Fr::zero(); OUT]
+    let mut index: usize = 0
+    while index < OUT {
+        let positive = evaluations[index]
+        let negative = evaluations[index + OUT]
+        let even = (positive + negative) * inverse_two
+        let odd = (positive - negative) * inverse_two * point.inverse_or_zero()
+        folded[index] = even + challenge * odd
+        point = point * root
+        index = index + 1
+    }
+    FriFoldEvaluations { valid: true, evaluations: folded }
 }
 
 /// Fold a 16-point composition codeword to the squared eight-point domain.
@@ -51,32 +150,144 @@ pub fn fold_composition4x16(_ c_re_q12: i32, _ c_im_q12: i32, _ bound: u32) -> F
         return invalid_fri(composition)
     }
 
-    let inverse_two = Fr::from_u32(2).inverse_or_zero()
-    let root = Field::two_adic_root(radix2_log<16>())
-    let mut point = Fr::from_u32(5)
-    let mut evaluations = [Fr::zero(); 8]
-    let mut index: usize = 0
-    while index < 8 {
-        if point.is_zero() {
-            return invalid_fri(composition)
-        }
-        let positive = composition.evaluations[index]
-        let negative = composition.evaluations[index + 8]
-        let even = (positive + negative) * inverse_two
-        let odd = (positive - negative) * inverse_two * point.inverse_or_zero()
-        evaluations[index] = even + composition.fri.value * odd
-        point = point * root
-        index = index + 1
+    let folded = fold_fri_evaluations<16, 8>(
+        composition.evaluations,
+        composition.fri.value,
+        Fr::from_u32(5),
+    )
+    if !folded.valid {
+        return invalid_fri(composition)
     }
 
-    let layer_root = fri_layer_root_power_of_two<8>(evaluations)
+    let layer_root = fri_layer_root_power_of_two<1, 8>(folded.evaluations)
     let transcript = bind_fri_layer(composition.transcript, layer_root)
     FriProof8 {
         valid: true,
         composition: composition,
-        evaluations: evaluations,
+        evaluations: folded.evaluations,
         root: layer_root,
         transcript: transcript,
-        next_challenge: fri_fold_challenge2(transcript),
+        next_challenge: fri_next_fold_challenge<1, 2>(transcript),
+    }
+}
+
+pub fn fold_next_fri_round<
+    const PREVIOUS: u32,
+    const ROUND: u32,
+    const N: usize,
+    const OUT: usize,
+    const NEXT: u32,
+>(
+    _ evaluations: own [Fr; N],
+    _ transcript: FriLayerTranscriptDigest<PREVIOUS>,
+    _ challenge: FriFoldChallenge<ROUND>,
+    _ shift: Fr,
+) -> FriRound<ROUND, OUT, NEXT>
+    where
+        { PREVIOUS > 0 },
+        { ROUND > 0 },
+        { ROUND == PREVIOUS + 1 },
+        { ROUND < 100 },
+        { NEXT == ROUND + 1 },
+        { NEXT < 100 },
+        N > 0,
+        N > 1,
+        { (N & (N - 1)) == 0 },
+        OUT > 0,
+        OUT <= MAX_PADDED_TRACE_LENGTH,
+        { (OUT & (OUT - 1)) == 0 },
+        { OUT + OUT == N },
+{
+    let folded = fold_fri_evaluations<N, OUT>(evaluations, challenge.value, shift)
+    if !folded.valid {
+        return invalid_round<ROUND, OUT, NEXT>()
+    }
+    let root = fri_layer_root_power_of_two<ROUND, OUT>(folded.evaluations)
+    let next_transcript = bind_next_fri_layer<PREVIOUS, ROUND>(transcript, root)
+    FriRound {
+        valid: true,
+        evaluations: folded.evaluations,
+        root: root,
+        transcript: next_transcript,
+        next_challenge: fri_next_fold_challenge<ROUND, NEXT>(next_transcript),
+    }
+}
+
+pub fn fold_final_fri_round<
+    const PREVIOUS: u32,
+    const ROUND: u32,
+>(
+    _ evaluations: own [Fr; 2],
+    _ transcript: FriLayerTranscriptDigest<PREVIOUS>,
+    _ challenge: FriFoldChallenge<ROUND>,
+    _ shift: Fr,
+) -> FriFinalRound<ROUND>
+    where
+        { PREVIOUS > 0 },
+        { ROUND > 0 },
+        { ROUND == PREVIOUS + 1 },
+        { ROUND < 100 },
+{
+    let folded = fold_fri_evaluations<2, 1>(evaluations, challenge.value, shift)
+    if !folded.valid {
+        return invalid_final<ROUND>()
+    }
+    let root = fri_layer_row_commitment<ROUND>(folded.evaluations[0])
+    let next_transcript = bind_next_fri_layer<PREVIOUS, ROUND>(transcript, root)
+    FriFinalRound {
+        valid: true,
+        evaluation: folded.evaluations[0],
+        root: root,
+        transcript: next_transcript,
+    }
+}
+
+/// Materialize the complete 16-to-1 FRI commitment chain. Query openings and
+/// verification remain separate protocol layers.
+pub fn fold_all_composition4x16(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ bound: u32,
+) -> FriProofComplete {
+    let first = fold_composition4x16(c_re_q12, c_im_q12, bound)
+    if !first.valid {
+        return invalid_complete(first)
+    }
+    let shift1 = Fr::from_u32(5)
+    let shift2 = shift1.square()
+    let second = fold_next_fri_round<1, 2, 8, 4, 3>(
+        first.evaluations,
+        first.transcript,
+        first.next_challenge,
+        shift2,
+    )
+    if !second.valid {
+        return invalid_complete(first)
+    }
+    let shift3 = shift2.square()
+    let third = fold_next_fri_round<2, 3, 4, 2, 4>(
+        second.evaluations,
+        second.transcript,
+        second.next_challenge,
+        shift3,
+    )
+    if !third.valid {
+        return invalid_complete(first)
+    }
+    let final_round = fold_final_fri_round<3, 4>(
+        third.evaluations,
+        third.transcript,
+        third.next_challenge,
+        shift3.square(),
+    )
+    if !final_round.valid {
+        return invalid_complete(first)
+    }
+    FriProofComplete {
+        valid: true,
+        first: first,
+        second: second,
+        third: third,
+        final_round: final_round,
     }
 }

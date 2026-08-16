@@ -1,4 +1,4 @@
-//! Independent bigint oracle for the first Fe-authored composition polynomial.
+//! Independent bigint oracle for the Fe-authored composition and FRI chain.
 
 use common::InputDb;
 use driver::DriverDataBase;
@@ -711,7 +711,7 @@ struct FriLayerOracle {
     evaluations: Vec<BigUint>,
     root: BigUint,
     transcript: BigUint,
-    next_challenge: BigUint,
+    next_challenge: Option<BigUint>,
 }
 
 fn production_oracle(rows: &[ProofRow; 4], c_re: i64, c_im: i64, bound: u32) -> ProductionOracle {
@@ -794,13 +794,22 @@ fn production_oracle(rows: &[ProofRow; 4], c_re: i64, c_im: i64, bound: u32) -> 
     }
 }
 
-fn interpolate_composition_coset(evaluations: &[BigUint]) -> Vec<F> {
-    assert_eq!(evaluations.len(), 16);
-    let root = subgroup_root(4);
+fn protocol_round_label(prefix: &[u8; 2], round: u32) -> [u8; 4] {
+    assert!((1..100).contains(&round));
+    [
+        prefix[0],
+        prefix[1],
+        b'0' + (round / 10) as u8,
+        b'0' + (round % 10) as u8,
+    ]
+}
+
+fn interpolate_coset(evaluations: &[BigUint], shift: &F) -> Vec<F> {
+    assert!(evaluations.len() > 1 && evaluations.len().is_power_of_two());
+    let root = subgroup_root(evaluations.len().trailing_zeros());
     let inverse_root = root.inverse();
-    let inverse_size = F::from_u32(16).inverse();
-    let shift = F::from_u32(5);
-    (0..16)
+    let inverse_size = F::from_u32(evaluations.len() as u32).inverse();
+    (0..evaluations.len())
         .map(|coefficient| {
             let mut scaled = F::zero();
             for (sample, value) in evaluations.iter().enumerate() {
@@ -815,32 +824,41 @@ fn interpolate_composition_coset(evaluations: &[BigUint]) -> Vec<F> {
         .collect()
 }
 
-fn fri_layer_oracle(production: &ProductionOracle) -> FriLayerOracle {
+fn fri_fold_layer_oracle(
+    input: &[BigUint],
+    previous_transcript: &BigUint,
+    challenge_words: &BigUint,
+    shift: F,
+    round: u32,
+    derive_next_challenge: bool,
+) -> FriLayerOracle {
+    assert!(input.len() > 1 && input.len().is_power_of_two());
     let parameters = poseidon_parameters();
-    let challenge = F(production.fri.clone());
+    let challenge = F(challenge_words.clone());
     let inverse_two = F::from_u32(2).inverse();
-    let root16 = subgroup_root(4);
-    let mut point = F::from_u32(5);
-    let mut evaluations = Vec::with_capacity(8);
-    for index in 0..8 {
-        let positive = F(production.evaluations[index].clone());
-        let negative = F(production.evaluations[index + 8].clone());
+    let root = subgroup_root(input.len().trailing_zeros());
+    let output_len = input.len() / 2;
+    let mut point = shift.clone();
+    let mut evaluations = Vec::with_capacity(output_len);
+    for index in 0..output_len {
+        let positive = F(input[index].clone());
+        let negative = F(input[index + output_len].clone());
         let even = positive.add(&negative).mul(&inverse_two);
         let odd = positive
             .sub(&negative)
             .mul(&inverse_two)
             .mul(&point.inverse());
         evaluations.push(even.add(&challenge.mul(&odd)).0);
-        point = point.mul(&root16);
+        point = point.mul(&root);
     }
 
-    let coefficients = interpolate_composition_coset(&production.evaluations);
-    let folded_coefficients = (0..8)
+    let coefficients = interpolate_coset(input, &shift);
+    let folded_coefficients = (0..output_len)
         .map(|coefficient| {
             coefficients[2 * coefficient].add(&challenge.mul(&coefficients[2 * coefficient + 1]))
         })
         .collect::<Vec<_>>();
-    point = F::from_u32(5);
+    point = shift;
     for (index, folded) in evaluations.iter().enumerate() {
         let squared_point = point.square();
         let expected = folded_coefficients
@@ -851,32 +869,40 @@ fn fri_layer_oracle(production: &ProductionOracle) -> FriLayerOracle {
             });
         assert_eq!(
             &expected.0, folded,
-            "pair fold and coefficient fold differ at FRI point {index}",
+            "pair fold and coefficient fold differ at FRI round {round}, point {index}",
         );
-        point = point.mul(&root16);
+        point = point.mul(&root);
     }
 
+    let row_label = protocol_round_label(b"FR", round);
+    let node_label = protocol_round_label(b"FN", round);
+    let transcript_label = protocol_round_label(b"FT", round);
     let root = merkle_root(
         evaluations
             .iter()
             .cloned()
-            .map(|value| hash(b"FR01", value, BigUint::from(0u32), &parameters))
+            .map(|value| hash(&row_label, value, BigUint::from(0u32), &parameters))
             .collect(),
-        b"FN01",
+        &node_label,
         &parameters,
     );
     let transcript = hash(
-        b"FT01",
-        production.transcript.clone(),
+        &transcript_label,
+        previous_transcript.clone(),
         root.clone(),
         &parameters,
     );
-    let next_challenge = hash(
-        b"FC02",
-        transcript.clone(),
-        BigUint::from(0u32),
-        &parameters,
-    );
+    let next_challenge = if derive_next_challenge {
+        let challenge_label = protocol_round_label(b"FC", round + 1);
+        Some(hash(
+            &challenge_label,
+            transcript.clone(),
+            BigUint::from(0u32),
+            &parameters,
+        ))
+    } else {
+        None
+    };
     FriLayerOracle {
         evaluations,
         root,
@@ -884,7 +910,6 @@ fn fri_layer_oracle(production: &ProductionOracle) -> FriLayerOracle {
         next_challenge,
     }
 }
-
 fn compile_gate() -> Vec<u8> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/mandelbrot_composition_oracle_ingot");
@@ -946,7 +971,7 @@ fn plain_limbs(words: &[u32]) -> BigUint {
 }
 
 #[test]
-fn composition_and_first_fri_layer_match_independent_bigint_oracle() {
+fn composition_and_complete_fri_chain_match_independent_bigint_oracle() {
     let wasm = compile_gate();
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, wasm).expect("Wasm module should load");
@@ -1023,10 +1048,52 @@ fn composition_and_first_fri_layer_match_independent_bigint_oracle() {
     );
     assert_eq!(production[0], 1);
     let oracle = production_oracle(&rows, 3072, 0, 16);
-    let fri_oracle = fri_layer_oracle(&oracle);
     assert_eq!(plain_limbs(&production[1..21]), oracle.root);
     assert_eq!(plain_limbs(&production[21..41]), oracle.transcript);
     assert_eq!(plain_limbs(&production[41..61]), oracle.fri);
+
+    let shift1 = F::from_u32(5);
+    let fri1 = fri_fold_layer_oracle(
+        &oracle.evaluations,
+        &oracle.transcript,
+        &oracle.fri,
+        shift1.clone(),
+        1,
+        true,
+    );
+    let shift2 = shift1.square();
+    let fri2 = fri_fold_layer_oracle(
+        &fri1.evaluations,
+        &fri1.transcript,
+        fri1.next_challenge
+            .as_ref()
+            .expect("round one must derive FC02"),
+        shift2.clone(),
+        2,
+        true,
+    );
+    let shift3 = shift2.square();
+    let fri3 = fri_fold_layer_oracle(
+        &fri2.evaluations,
+        &fri2.transcript,
+        fri2.next_challenge
+            .as_ref()
+            .expect("round two must derive FC03"),
+        shift3.clone(),
+        3,
+        true,
+    );
+    let shift4 = shift3.square();
+    let fri4 = fri_fold_layer_oracle(
+        &fri3.evaluations,
+        &fri3.transcript,
+        fri3.next_challenge
+            .as_ref()
+            .expect("round three must derive FC04"),
+        shift4,
+        4,
+        false,
+    );
 
     let fri = call_words(
         &mut store,
@@ -1040,13 +1107,66 @@ fn composition_and_first_fri_layer_match_independent_bigint_oracle() {
         let start = 1 + evaluation * 20;
         assert_eq!(
             plain_limbs(&fri[start..start + 20]),
-            fri_oracle.evaluations[evaluation],
+            fri1.evaluations[evaluation],
             "independent first FRI fold mismatch at point {evaluation}",
         );
     }
-    assert_eq!(plain_limbs(&fri[161..181]), fri_oracle.root);
-    assert_eq!(plain_limbs(&fri[181..201]), fri_oracle.transcript);
-    assert_eq!(plain_limbs(&fri[201..221]), fri_oracle.next_challenge);
+    assert_eq!(plain_limbs(&fri[161..181]), fri1.root);
+    assert_eq!(plain_limbs(&fri[181..201]), fri1.transcript);
+    assert_eq!(
+        plain_limbs(&fri[201..221]),
+        *fri1
+            .next_challenge
+            .as_ref()
+            .expect("round one must derive FC02"),
+    );
+
+    let remaining = call_words(
+        &mut store,
+        &instance,
+        "fri_remaining4x16_production_words",
+        &[3072, 0, 16],
+        301,
+    );
+    assert_eq!(remaining[0], 1);
+    for evaluation in 0..4 {
+        let start = 1 + evaluation * 20;
+        assert_eq!(
+            plain_limbs(&remaining[start..start + 20]),
+            fri2.evaluations[evaluation],
+            "independent second FRI fold mismatch at point {evaluation}",
+        );
+    }
+    assert_eq!(plain_limbs(&remaining[81..101]), fri2.root);
+    assert_eq!(plain_limbs(&remaining[101..121]), fri2.transcript);
+    assert_eq!(
+        plain_limbs(&remaining[121..141]),
+        *fri2
+            .next_challenge
+            .as_ref()
+            .expect("round two must derive FC03"),
+    );
+    for evaluation in 0..2 {
+        let start = 141 + evaluation * 20;
+        assert_eq!(
+            plain_limbs(&remaining[start..start + 20]),
+            fri3.evaluations[evaluation],
+            "independent third FRI fold mismatch at point {evaluation}",
+        );
+    }
+    assert_eq!(plain_limbs(&remaining[181..201]), fri3.root);
+    assert_eq!(plain_limbs(&remaining[201..221]), fri3.transcript);
+    assert_eq!(
+        plain_limbs(&remaining[221..241]),
+        *fri3
+            .next_challenge
+            .as_ref()
+            .expect("round three must derive FC04"),
+    );
+    assert_eq!(plain_limbs(&remaining[241..261]), fri4.evaluations[0]);
+    assert_eq!(plain_limbs(&remaining[261..281]), fri4.root);
+    assert_eq!(plain_limbs(&remaining[281..301]), fri4.transcript);
+    assert!(fri4.next_challenge.is_none());
 
     let invalid_fri = call_words(
         &mut store,
@@ -1056,4 +1176,13 @@ fn composition_and_first_fri_layer_match_independent_bigint_oracle() {
         221,
     );
     assert_eq!(invalid_fri, vec![0; 221]);
+
+    let invalid_remaining = call_words(
+        &mut store,
+        &instance,
+        "fri_remaining4x16_production_words",
+        &[0, 0, 16],
+        301,
+    );
+    assert_eq!(invalid_remaining, vec![0; 301]);
 }

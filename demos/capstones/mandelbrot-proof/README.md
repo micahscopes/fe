@@ -77,11 +77,14 @@ under typed `"CR01"` and `"CN01"` domains, binds the root through `"CT01"`, and
 derives the first FRI fold challenge through `"FC01"`. A zero-import Wasm gate
 compares every evaluation, root, and transcript value with an independent
 bigint direct-DFT and Poseidon model. The `fri` ingot uses that challenge to
-fold each `(f(x), f(-x))` pair onto the squared eight-point domain, commits the
-eight values under `"FR01"` and `"FN01"`, binds them with `"FT01"`, and derives
-`"FC02"`. The oracle checks both the pair formula and an independently
-interpolated even/odd coefficient formula. Remaining folds and query openings
-remain pending.
+fold each `(f(x), f(-x))` pair through the complete
+16-to-8-to-4-to-2-to-1 chain. One const-generic Fe fold implements all four
+rounds. Fe derives the `FR`, `FN`, `FT`, and next-round `FC` Poseidon domains
+from each const round index, without a copied round table. The oracle checks
+every value using both the pair formula and an independently interpolated
+even/odd coefficient formula, then reconstructs every root, transcript, and
+challenge. Authenticated query openings and measured verifier cost remain
+pending.
 
 Escaping witnesses derive a power-of-two proof shape with one terminal marker
 and deterministic inactive padding; invalid and non-escaping claims cannot

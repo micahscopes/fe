@@ -3,7 +3,7 @@
 //! this fixture accepts a u32 only to isolate the polynomial calculation.
 
 use mandelbrot_proof_composition::{compose4x16, evaluate_composition_point4x16}
-use mandelbrot_proof_fri::fold_composition4x16
+use mandelbrot_proof_fri::{fold_all_composition4x16, fold_composition4x16}
 use precision::bn254_fr::Bn254Fr
 use precision::field::FieldElement
 
@@ -20,6 +20,55 @@ pub struct FriLayerProductionWords {
     pub root: [u32; 20],
     pub transcript: [u32; 20],
     pub next_challenge: [u32; 20],
+}
+
+pub struct FriRemainingProductionWords {
+    pub valid: u32,
+    pub second: [[u32; 20]; 4],
+    pub second_root: [u32; 20],
+    pub second_transcript: [u32; 20],
+    pub third_challenge: [u32; 20],
+    pub third: [[u32; 20]; 2],
+    pub third_root: [u32; 20],
+    pub third_transcript: [u32; 20],
+    pub fourth_challenge: [u32; 20],
+    pub final_evaluation: [u32; 20],
+    pub final_root: [u32; 20],
+    pub final_transcript: [u32; 20],
+}
+
+pub fn fri_remaining4x16_production_words(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ bound: u32,
+) -> FriRemainingProductionWords {
+    let proof = fold_all_composition4x16(c_re_q12, c_im_q12, bound)
+    let mut second: [[u32; 20]; 4] = [[0; 20], [0; 20], [0; 20], [0; 20]]
+    let mut third: [[u32; 20]; 2] = [[0; 20], [0; 20]]
+    let mut index: usize = 0
+    while index < 4 {
+        second[index] = proof.second.evaluations[index].to_plain_words()
+        index = index + 1
+    }
+    index = 0
+    while index < 2 {
+        third[index] = proof.third.evaluations[index].to_plain_words()
+        index = index + 1
+    }
+    FriRemainingProductionWords {
+        valid: if proof.valid { 1 } else { 0 },
+        second: second,
+        second_root: proof.second.root.value.to_plain_words(),
+        second_transcript: proof.second.transcript.value.to_plain_words(),
+        third_challenge: proof.second.next_challenge.value.to_plain_words(),
+        third: third,
+        third_root: proof.third.root.value.to_plain_words(),
+        third_transcript: proof.third.transcript.value.to_plain_words(),
+        fourth_challenge: proof.third.next_challenge.value.to_plain_words(),
+        final_evaluation: proof.final_round.evaluation.to_plain_words(),
+        final_root: proof.final_round.root.value.to_plain_words(),
+        final_transcript: proof.final_round.transcript.value.to_plain_words(),
+    }
 }
 
 pub fn fri_layer4x16_production_words(

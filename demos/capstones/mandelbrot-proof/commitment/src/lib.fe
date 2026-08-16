@@ -46,6 +46,18 @@ const fn protocol_tag(_ label: String<4>) -> u32 {
         | (bytes[3] as u32)
 }
 
+/// Derive a two-letter, two-digit protocol domain such as `FR01` or `FC04`.
+/// Public constructors constrain rounds to the representable `01..99` range.
+const fn protocol_round_tag(_ prefix: String<2>, _ round: u32) -> u32 {
+    let bytes = prefix.as_bytes()
+    let tens = round / 10
+    let ones = round - tens * 10
+    ((bytes[0] as u32) << 24)
+        | ((bytes[1] as u32) << 16)
+        | ((48 + tens) << 8)
+        | (48 + ones)
+}
+
 pub struct MandelbrotRowV1 {}
 pub struct MandelbrotNodeV1 {}
 pub struct MandelbrotTranscriptV1 {}
@@ -56,11 +68,10 @@ pub struct MandelbrotCompositionV1 {}
 pub struct MandelbrotCompositionRowV1 {}
 pub struct MandelbrotCompositionNodeV1 {}
 pub struct MandelbrotCompositionTranscriptV1 {}
-pub struct MandelbrotFriFoldV1 {}
-pub struct MandelbrotFriLayerRowV1 {}
-pub struct MandelbrotFriLayerNodeV1 {}
-pub struct MandelbrotFriLayerTranscriptV1 {}
-pub struct MandelbrotFriFoldV2 {}
+struct MandelbrotFriFold<const ROUND: u32> {}
+struct MandelbrotFriLayerRow<const ROUND: u32> {}
+struct MandelbrotFriLayerNode<const ROUND: u32> {}
+struct MandelbrotFriLayerTranscript<const ROUND: u32> {}
 
 impl PoseidonDomain for MandelbrotRowV1 {
     const TAG: u32 = protocol_tag("MR01")
@@ -102,24 +113,20 @@ impl PoseidonDomain for MandelbrotCompositionTranscriptV1 {
     const TAG: u32 = protocol_tag("CT01")
 }
 
-impl PoseidonDomain for MandelbrotFriFoldV1 {
-    const TAG: u32 = protocol_tag("FC01")
+impl<const ROUND: u32> PoseidonDomain for MandelbrotFriFold<ROUND> {
+    const TAG: u32 = protocol_round_tag("FC", ROUND)
 }
 
-impl PoseidonDomain for MandelbrotFriLayerRowV1 {
-    const TAG: u32 = protocol_tag("FR01")
+impl<const ROUND: u32> PoseidonDomain for MandelbrotFriLayerRow<ROUND> {
+    const TAG: u32 = protocol_round_tag("FR", ROUND)
 }
 
-impl PoseidonDomain for MandelbrotFriLayerNodeV1 {
-    const TAG: u32 = protocol_tag("FN01")
+impl<const ROUND: u32> PoseidonDomain for MandelbrotFriLayerNode<ROUND> {
+    const TAG: u32 = protocol_round_tag("FN", ROUND)
 }
 
-impl PoseidonDomain for MandelbrotFriLayerTranscriptV1 {
-    const TAG: u32 = protocol_tag("FT01")
-}
-
-impl PoseidonDomain for MandelbrotFriFoldV2 {
-    const TAG: u32 = protocol_tag("FC02")
+impl<const ROUND: u32> PoseidonDomain for MandelbrotFriLayerTranscript<ROUND> {
+    const TAG: u32 = protocol_round_tag("FT", ROUND)
 }
 
 /// Public statement already validated by the cheap proof-domain boundary.
@@ -168,17 +175,14 @@ impl core::marker::Copy for CompositionDigest {}
 pub struct CompositionTranscriptDigest { pub value: Fr }
 impl core::marker::Copy for CompositionTranscriptDigest {}
 
-pub struct FriFoldChallenge { pub value: Fr }
-impl core::marker::Copy for FriFoldChallenge {}
+pub struct FriFoldChallenge<const ROUND: u32> { pub value: Fr }
+impl<const ROUND: u32> core::marker::Copy for FriFoldChallenge<ROUND> {}
 
-pub struct FriLayerDigest { pub value: Fr }
-impl core::marker::Copy for FriLayerDigest {}
+pub struct FriLayerDigest<const ROUND: u32> { pub value: Fr }
+impl<const ROUND: u32> core::marker::Copy for FriLayerDigest<ROUND> {}
 
-pub struct FriLayerTranscriptDigest { pub value: Fr }
-impl core::marker::Copy for FriLayerTranscriptDigest {}
-
-pub struct FriFoldChallenge2 { pub value: Fr }
-impl core::marker::Copy for FriFoldChallenge2 {}
+pub struct FriLayerTranscriptDigest<const ROUND: u32> { pub value: Fr }
+impl<const ROUND: u32> core::marker::Copy for FriLayerTranscriptDigest<ROUND> {}
 
 /// Result of one canonical prover-side pass. Invalid and non-escaping claims
 /// fail closed instead of exposing a digest for an incomplete trace.
@@ -357,17 +361,17 @@ impl CompositionFrontier {
     }
 }
 
-struct FriLayerFrontier { raw: RawFrontier }
-impl core::marker::Copy for FriLayerFrontier {}
-impl FriLayerFrontier {
+struct FriLayerFrontier<const ROUND: u32> { raw: RawFrontier }
+impl<const ROUND: u32> core::marker::Copy for FriLayerFrontier<ROUND> {}
+impl<const ROUND: u32> FriLayerFrontier<ROUND> {
     fn empty() -> Self {
         Self { raw: RawFrontier::empty() }
     }
-    fn push(mut self, _ leaf: FriLayerDigest) -> Self {
-        self.raw = push_merkle<MandelbrotFriLayerNodeV1>(self.raw, leaf.value)
+    fn push(mut self, _ leaf: FriLayerDigest<ROUND>) -> Self {
+        self.raw = push_merkle<MandelbrotFriLayerNode<ROUND>>(self.raw, leaf.value)
         self
     }
-    fn complete_root(self) -> FriLayerDigest {
+    fn complete_root(self) -> FriLayerDigest<ROUND> {
         FriLayerDigest { value: self.raw.complete_root() }
     }
 }
@@ -534,21 +538,25 @@ pub fn bind_composition(
     }
 }
 
-pub fn fri_fold_challenge(_ transcript: CompositionTranscriptDigest) -> FriFoldChallenge {
-    FriFoldChallenge { value: compress<MandelbrotFriFoldV1>(transcript.value, Fr::zero()) }
+pub fn fri_fold_challenge(_ transcript: CompositionTranscriptDigest) -> FriFoldChallenge<1> {
+    FriFoldChallenge { value: compress<MandelbrotFriFold<1>>(transcript.value, Fr::zero()) }
 }
 
-pub fn fri_layer_row_commitment(_ value: Fr) -> FriLayerDigest {
-    FriLayerDigest { value: compress<MandelbrotFriLayerRowV1>(value, Fr::zero()) }
-}
-
-pub fn fri_layer_root_power_of_two<const N: usize>(_ evaluations: own [Fr; N]) -> FriLayerDigest
-where N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N & (N - 1)) == 0 }
+pub fn fri_layer_row_commitment<const ROUND: u32>(_ value: Fr) -> FriLayerDigest<ROUND>
+    where { ROUND > 0 }, { ROUND < 100 },
 {
-    let mut frontier = FriLayerFrontier::empty()
+    FriLayerDigest { value: compress<MandelbrotFriLayerRow<ROUND>>(value, Fr::zero()) }
+}
+
+pub fn fri_layer_root_power_of_two<const ROUND: u32, const N: usize>(
+    _ evaluations: own [Fr; N],
+) -> FriLayerDigest<ROUND>
+    where { ROUND > 0 }, { ROUND < 100 }, N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N & (N - 1)) == 0 },
+{
+    let mut frontier = FriLayerFrontier<ROUND>::empty()
     let mut index: usize = 0
     while index < N {
-        frontier = frontier.push(fri_layer_row_commitment(evaluations[index]))
+        frontier = frontier.push(fri_layer_row_commitment<ROUND>(evaluations[index]))
         index = index + 1
     }
     frontier.complete_root()
@@ -556,15 +564,32 @@ where N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N & (N - 1)) == 0 }
 
 pub fn bind_fri_layer(
     _ transcript: CompositionTranscriptDigest,
-    _ layer: FriLayerDigest,
-) -> FriLayerTranscriptDigest {
+    _ layer: FriLayerDigest<1>,
+) -> FriLayerTranscriptDigest<1> {
     FriLayerTranscriptDigest {
-        value: compress<MandelbrotFriLayerTranscriptV1>(transcript.value, layer.value),
+        value: compress<MandelbrotFriLayerTranscript<1>>(transcript.value, layer.value),
     }
 }
 
-pub fn fri_fold_challenge2(_ transcript: FriLayerTranscriptDigest) -> FriFoldChallenge2 {
-    FriFoldChallenge2 { value: compress<MandelbrotFriFoldV2>(transcript.value, Fr::zero()) }
+pub fn bind_next_fri_layer<const PREVIOUS: u32, const ROUND: u32>(
+    _ transcript: FriLayerTranscriptDigest<PREVIOUS>,
+    _ layer: FriLayerDigest<ROUND>,
+) -> FriLayerTranscriptDigest<ROUND>
+    where { PREVIOUS > 0 }, { ROUND == PREVIOUS + 1 }, { ROUND < 100 },
+{
+    FriLayerTranscriptDigest {
+        value: compress<MandelbrotFriLayerTranscript<ROUND>>(transcript.value, layer.value),
+    }
+}
+
+pub fn fri_next_fold_challenge<const ROUND: u32, const NEXT: u32>(
+    _ transcript: FriLayerTranscriptDigest<ROUND>,
+) -> FriFoldChallenge<NEXT>
+    where { ROUND > 0 }, { NEXT == ROUND + 1 }, { NEXT < 100 },
+{
+    FriFoldChallenge {
+        value: compress<MandelbrotFriFold<NEXT>>(transcript.value, Fr::zero()),
+    }
 }
 
 pub fn statement_commitment4(

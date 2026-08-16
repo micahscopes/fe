@@ -307,15 +307,17 @@ Legend:
   points, and independently derives the main, auxiliary, composition, and
   transcript Poseidon trees. Changed challenges, changed claims, invalid
   claims, non-escaping claims, and out-of-domain evaluations are covered. The
-  zero-import Wasm result agrees through the final `"FC01"` field value. The
-  first actual FRI layer now pairs composition evaluations at `x` and `-x`,
-  folds their even and odd parts under that challenge onto the squared
-  eight-point domain, commits typed `"FR01"` leaves under `"FN01"`, binds the
-  layer through `"FT01"`, and derives `"FC02"`. The independent bigint gate
-  checks all eight values both from the pair formula and from separately
-  interpolated even/odd coefficients, then reconstructs the root, transcript,
-  next challenge, and fail-closed invalid result. Remaining FRI layers, query
-  proofs, verifier-cost evidence, and proof encoding remain pending. The
+  zero-import composition boundary agrees through the `"FC01"` field value.
+  The complete FRI fold chain then pairs evaluations at `x` and `-x` through the
+  16-to-8-to-4-to-2-to-1 domains. One const-generic Fe fold implements every
+  round, while a Fe const function derives the `"FR01"` through `"FR04"`,
+  `"FN01"` through `"FN04"`, `"FT01"` through `"FT04"`, and `"FC02"` through
+  `"FC04"` Poseidon domains from the round index. There is no copied round
+  table or host-derived protocol constant. The independent bigint gate checks
+  every folded value both from the pair formula and from separately
+  interpolated even/odd coefficients, then reconstructs every root,
+  transcript, next challenge, and fail-closed invalid result. Authenticated
+  query proofs, verifier-cost evidence, and proof encoding remain pending. The
   reusable field API's SPIR-V helper-call seam and GPU permutation lift also
   remain open.
   This is a general-tree statement-commitment milestone and executable AIR
@@ -363,9 +365,8 @@ fallback. The semantic receipts are:
 ## Immediate burn-down order
 
 1. Run the external real-GPU handoff above.
-2. Complete the remaining FRI layers, add authenticated query openings, and
-   produce measured evidence that verification is cheaper than replaying the
-   orbit.
+2. Add authenticated FRI query openings and produce measured evidence that
+   verification is cheaper than replaying the orbit.
 3. Finish typed fetch, then Worker/port placement and supervision on the one
    runtime-control spine.
 4. Delete the runtime manifest and finish the legacy disposition.
