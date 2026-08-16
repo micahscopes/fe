@@ -1,14 +1,6 @@
-// mb2 CE-4 JEWEL: the array-element generalization of the affine completion-token
-// guard (see webgpu_double_wait_moved.fe). Moving a non-`Copy` value out of a fixed
-// array index consumes that element; a SECOND move of the SAME constant index is a
-// use-after-move (16-0002). This is exactly the double-consume hazard the token rail
-// cannot tolerate, reachable here by plain user code with no tokens involved.
-//
-// Soundness posture (CE-4 diagnosis): the semantic place lowering records every array
-// index as `Index(Dynamic)` (constant indices are coarsened, never `Index(Constant)`),
-// so any two index accesses on the same array root `may_alias` as `May`. The second
-// move therefore conflicts. This robustly FAIL-CLOSES the double-consume hazard. This
-// fixture pins that guard so it can never silently regress.
+// Moving a non-`Copy` value out of a fixed array index consumes that element. A
+// second move of the same `Index(Constant)` is a use-after-move (16-0002). This is
+// the array-element form of the affine completion-token guard.
 
 struct Widget {
     n: u32,

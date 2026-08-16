@@ -1619,6 +1619,46 @@ impl Table {
 }
 
 #[test]
+fn literal_array_index_remains_constant_in_semantic_place() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "semantic_borrowck.fe".into(),
+        r#"
+struct Table {
+    used: [u8; 4],
+}
+
+impl Table {
+    fn get(self) -> u8 {
+        self.used[2]
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let normalized = normalized_func_body(&db, top_mod, "get");
+    let place = normalized
+        .blocks
+        .iter()
+        .flat_map(|block| block.stmts.iter())
+        .find_map(|stmt| match &stmt.kind {
+            NSStmtKind::Assign {
+                dst,
+                expr: NExpr::ReadPlace { place, .. },
+            } if normalized.locals[dst.index()].ty.pretty_print(&db) == "u8" => Some(place),
+            _ => None,
+        })
+        .expect("literal-index element read");
+    assert_eq!(
+        place.path.iter().cloned().collect::<Vec<_>>(),
+        vec![
+            Projection::Field(0),
+            Projection::Index(IndexSource::Constant(2)),
+        ]
+    );
+}
+
+#[test]
 fn owned_aggregate_value_boundaries_project_from_the_owned_local() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(

@@ -288,6 +288,11 @@ impl<'db> SPlace<'db> {
         self.path
             .push(Projection::Index(IndexSource::Dynamic(index)));
     }
+
+    pub fn push_constant_index(&mut self, index: usize) {
+        self.path
+            .push(Projection::Index(IndexSource::Constant(index)));
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Update)]

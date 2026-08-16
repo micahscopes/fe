@@ -5,9 +5,9 @@ expression: diags
 input_file: fixtures/semantic_borrowck/arr_const_index_double_move.fe
 ---
 error[16-0002]: move conflict in `fn same_index_double_move`
-   ┌─ arr_const_index_double_move.fe:27:13
+   ┌─ arr_const_index_double_move.fe:19:13
    │
-26 │     consume(arr[0])
+18 │     consume(arr[0])
    │             ------ value is moved here
-27 │     consume(arr[0])
+19 │     consume(arr[0])
    │             ^^^^^^ cannot use a value after it was moved

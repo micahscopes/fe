@@ -4,8 +4,9 @@ use crate::{
         semantic::{FieldIndex, SPlace},
         ty::ty_def::TyId,
     },
-    hir_def::ExprId,
+    hir_def::{Expr, ExprId, LitKind, Partial},
 };
+use num_traits::ToPrimitive;
 
 use super::body::SmirLowerCtxt;
 
@@ -36,8 +37,18 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
                     place.push_field(FieldIndex(index));
                 }
                 PlaceProjection::Index { index_expr, .. } => {
-                    let index = self.lower_expr(index_expr);
-                    place.push_dynamic_index(index);
+                    let literal_index = match index_expr.data(self.db, self.body) {
+                        Partial::Present(Expr::Lit(LitKind::Int(value))) => {
+                            value.data(self.db).to_usize()
+                        }
+                        _ => None,
+                    };
+                    if let Some(index) = literal_index {
+                        place.push_constant_index(index);
+                    } else {
+                        let index = self.lower_expr(index_expr);
+                        place.push_dynamic_index(index);
+                    }
                 }
             }
         }

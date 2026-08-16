@@ -1,8 +1,6 @@
-// mb2 CE-4 POSITIVE pin: a SINGLE move of a non-`Copy` value out of a fixed array index
-// is SOUND and must stay ALLOWED. The fail-closed floor rejects only the DOUBLE/repeat
-// consume (see arr_const_index_double_move.fe), not the first, one-shot consumption of a
-// fixed element. This fixture guards against the floor being over-implemented into a
-// blanket "no move out of an array index" rule. It must compile with no diagnostics.
+// A single move of a non-`Copy` value out of a fixed array index is sound and must
+// remain accepted. The companion double-move fixture proves that precise constant
+// indexing does not weaken the repeated-consumption guard.
 
 struct Widget {
     n: u32,
