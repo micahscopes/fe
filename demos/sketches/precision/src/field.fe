@@ -82,6 +82,7 @@
 //! monomorphized by any live call site, so they add zero emitted code today).
 
 use core::marker::Copy
+use core::num::mul_mod_u256
 use core::ops::{Add, Mul, Neg, Sub}
 
 // -----------------------------------------------------------------------------
@@ -336,9 +337,63 @@ pub trait MontgomeryModulus<const L: usize>: Modulus<L> {
     fn r2_words() -> FieldWords<L>
 }
 
+/// A modulus audited to be prime. This brand is what makes Fermat inversion
+/// a valid field operation rather than an unchecked ring operation.
+pub trait PrimeModulus<const L: usize>: MontgomeryModulus<L> {}
+
 /// A Montgomery modulus strictly larger than every u32. Implementers carry
 /// this audited promise so `from_u32` can embed without a runtime reduction.
 pub trait U32EmbeddingModulus<const L: usize>: MontgomeryModulus<L> {}
+
+/// Prime modulus with a canonical generator for its largest power-of-two
+/// multiplicative subgroup. The root is supplied in Montgomery form and must
+/// have exact order `2^two_adicity()`.
+pub trait TwoAdicModulus<const L: usize>: PrimeModulus<L> {
+    fn two_adicity() -> u32
+    fn two_adic_root_words() -> FieldWords<L>
+}
+
+pub const fn pow_mod_u256(_ base: u256, _ exponent: u256, _ modulus: u256) -> u256 {
+    let mut base = base % modulus
+    let mut exponent = exponent
+    let mut result: u256 = 1
+    while exponent != 0 {
+        if (exponent & 1) == 1 {
+            result = mul_mod_u256(result, base, modulus)
+        }
+        base = mul_mod_u256(base, base, modulus)
+        exponent = exponent >> 1
+    }
+    result
+}
+
+pub const fn montgomery_radix_u256(_ modulus: u256, _ bits: u32) -> u256 {
+    let mut value: u256 = 1
+    let mut i: u32 = 0
+    while i < bits {
+        value = value + value
+        if value >= modulus { value = value - modulus }
+        i = i + 1
+    }
+    value
+}
+
+pub const fn montgomery_words_from_u256<const L: usize>(
+    _ plain: u256,
+    _ modulus: u256,
+) -> FieldWords<L> {
+    let limb_count: u32 = L.downcast_truncate()
+    let radix = montgomery_radix_u256(modulus, LIMB_BITS * limb_count)
+    let mut value = mul_mod_u256(plain, radix, modulus)
+    let mut words: FieldWords<L> = [0; L]
+    let mut i: u32 = 0
+    while i < limb_count {
+        words[i as usize] = (value & 8191).downcast_truncate()
+        value = value >> (LIMB_BITS as u256)
+        i = i + 1
+    }
+    words
+}
 
 fn modulus_words<const L: usize, M: Modulus<L>>() -> FieldWords<L>
     where Limbs<L>: Head + ShiftAppend + Copy,
@@ -350,6 +405,27 @@ fn modulus_words<const L: usize, M: Modulus<L>>() -> FieldWords<L>
     while i < ln {
         words[i as usize] = source.head()
         source = <Limbs<L> as ShiftAppend>::shift_append(t: source, v: 0)
+        i = i + 1
+    }
+    words
+}
+
+fn modulus_minus_two_words<const L: usize, M: Modulus<L>>() -> FieldWords<L>
+    where Limbs<L>: Head + ShiftAppend + Copy,
+{
+    let mut words = modulus_words<L, M>()
+    let count: u32 = L.downcast_truncate()
+    let mut borrow: u32 = 2
+    let mut i: u32 = 0
+    while borrow != 0 && i < count {
+        let word = words[i as usize]
+        if word >= borrow {
+            words[i as usize] = word - borrow
+            borrow = 0
+        } else {
+            words[i as usize] = LIMB_BASE + word - borrow
+            borrow = 1
+        }
         i = i + 1
     }
     words
@@ -543,6 +619,15 @@ impl<const L: usize, M> FieldElement<L, M>
         Self { words: [0; L] }
     }
 
+    pub fn is_zero(self) -> bool {
+        let mut i: usize = 0
+        while i < L {
+            if self.words[i] != 0 { return false }
+            i = i + 1
+        }
+        true
+    }
+
     pub fn square(self) -> Self {
         self * self
     }
@@ -558,6 +643,55 @@ impl<const L: usize, M> FieldElement<L, M>
 {
     pub fn from_plain_words(_ words: FieldWords<L>) -> Self {
         Self { words: mul_words<L, M>(words, M::r2_words()) }
+    }
+
+    pub fn pow_words(self, _ exponent: FieldWords<L>) -> Self {
+        let mut one: FieldWords<L> = [0; L]
+        one[0] = 1
+        let mut result = Self::from_plain_words(one)
+        let mut base = self
+        let mut word: usize = 0
+        while word < L {
+            let mut bits = exponent[word]
+            let mut bit: u32 = 0
+            while bit < LIMB_BITS {
+                if (bits & 1) == 1 { result = result * base }
+                base = base.square()
+                bits = bits >> 1
+                bit = bit + 1
+            }
+            word = word + 1
+        }
+        result
+    }
+
+}
+
+impl<const L: usize, M> FieldElement<L, M>
+    where M: PrimeModulus<L>, Limbs<L>: Head + ShiftAppend + Copy,
+{
+    /// Fermat inverse for the prime modulus. Zero maps to zero, allowing a
+    /// caller to fail closed with `is_zero()` without a second exponentiation.
+    pub fn inverse_or_zero(self) -> Self {
+        self.pow_words(modulus_minus_two_words<L, M>())
+    }
+}
+
+impl<const L: usize, M> FieldElement<L, M>
+    where M: TwoAdicModulus<L>, Limbs<L>: Head + ShiftAppend + Copy,
+{
+    /// Primitive root for a requested power-of-two subgroup. Unsupported
+    /// orders fail closed as zero.
+    pub fn two_adic_root(_ log_order: u32) -> Self {
+        let adicity = M::two_adicity()
+        if log_order > adicity { return Self::zero() }
+        let mut root = Self::from_montgomery_words(M::two_adic_root_words())
+        let mut remaining = adicity - log_order
+        while remaining > 0 {
+            root = root.square()
+            remaining = remaining - 1
+        }
+        root
     }
 }
 

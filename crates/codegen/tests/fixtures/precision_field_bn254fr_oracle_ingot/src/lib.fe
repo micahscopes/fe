@@ -26,19 +26,75 @@
 //! 0..19, bit-for-bit, over representative + edge BN254 Fr operand pairs
 //! (0, 1, p-1, near-2^256, random), run under wasmtime.
 
-use precision::field::{mul, FieldElement, Limbs, LimbLast, LimbMore}
+use precision::field::{mul, FieldElement, FieldWords, Limbs, LimbLast, LimbMore}
 use precision::bn254_fr::Bn254Fr
 
-pub fn field_bn254fr_roundtrip_u32(value: u32) -> (
+fn words_tuple(_ words: FieldWords<20>) -> (
     u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
     u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
 ) {
-    let words = FieldElement<20, Bn254Fr>::from_u32(value).to_plain_words()
     (
         words[0], words[1], words[2], words[3], words[4],
         words[5], words[6], words[7], words[8], words[9],
         words[10], words[11], words[12], words[13], words[14],
         words[15], words[16], words[17], words[18], words[19],
+    )
+}
+
+fn exponent_words_u32(_ exponent: u32) -> FieldWords<20> {
+    let mut words: FieldWords<20> = [0; 20]
+    words[0] = exponent & 8191
+    words[1] = (exponent >> 13) & 8191
+    words[2] = exponent >> 26
+    words
+}
+
+pub fn field_bn254fr_roundtrip_u32(value: u32) -> (
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    words_tuple(FieldElement<20, Bn254Fr>::from_u32(value).to_plain_words())
+}
+
+pub fn field_bn254fr_pow_u32(base: u32, exponent: u32) -> (
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    words_tuple(
+        FieldElement<20, Bn254Fr>::from_u32(base)
+            .pow_words(exponent_words_u32(exponent))
+            .to_plain_words()
+    )
+}
+
+pub fn field_bn254fr_inverse_u32(value: u32) -> (
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    words_tuple(
+        FieldElement<20, Bn254Fr>::from_u32(value)
+            .inverse_or_zero()
+            .to_plain_words()
+    )
+}
+
+pub fn field_bn254fr_two_adic_root(log_order: u32) -> (
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    words_tuple(
+        FieldElement<20, Bn254Fr>::two_adic_root(log_order).to_plain_words()
+    )
+}
+
+pub fn field_bn254fr_two_adic_root_power(log_order: u32, exponent: u32) -> (
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    words_tuple(
+        FieldElement<20, Bn254Fr>::two_adic_root(log_order)
+            .pow_words(exponent_words_u32(exponent))
+            .to_plain_words()
     )
 }
 

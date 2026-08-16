@@ -20,10 +20,21 @@
 
 use super::field::{
     FieldWords, LimbLast, LimbMore, Limbs, Modulus, MontgomeryModulus,
-    U32EmbeddingModulus, mont_mu, LIMB_BITS,
+    PrimeModulus, TwoAdicModulus, U32EmbeddingModulus, mont_mu,
+    montgomery_words_from_u256, pow_mod_u256, LIMB_BITS,
 }
 
 pub struct Bn254Fr {}
+
+const BN254_FR_PRIME: u256 = 21888242871839275222246405745257275088548364400416034343698204186575808495617
+pub const BN254_FR_TWO_ADICITY: u32 = 28
+const TWO_ADIC_ROOT_PLAIN: u256 = pow_mod_u256(
+    5,
+    (BN254_FR_PRIME - 1) >> (BN254_FR_TWO_ADICITY as u256),
+    BN254_FR_PRIME,
+)
+const TWO_ADIC_ROOT_WORDS: FieldWords<20> =
+    montgomery_words_from_u256<20>(TWO_ADIC_ROOT_PLAIN, BN254_FR_PRIME)
 
 const P0: u32 = 1
 
@@ -43,5 +54,16 @@ impl MontgomeryModulus<20> for Bn254Fr {
 }
 
 impl U32EmbeddingModulus<20> for Bn254Fr {}
+impl PrimeModulus<20> for Bn254Fr {}
+
+impl TwoAdicModulus<20> for Bn254Fr {
+    fn two_adicity() -> u32 { BN254_FR_TWO_ADICITY }
+    fn two_adic_root_words() -> FieldWords<20> { TWO_ADIC_ROOT_WORDS }
+}
 
 static_assert(mont_mu(P0, LIMB_BITS) == 8191)
+static_assert(pow_mod_u256(TWO_ADIC_ROOT_PLAIN, 1 << 28, BN254_FR_PRIME) == 1)
+static_assert(
+    pow_mod_u256(TWO_ADIC_ROOT_PLAIN, 1 << 27, BN254_FR_PRIME)
+        == BN254_FR_PRIME - 1
+)

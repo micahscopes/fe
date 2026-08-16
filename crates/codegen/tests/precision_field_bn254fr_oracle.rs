@@ -249,6 +249,132 @@ fn bn254_roundtrip_u32(
         .collect()
 }
 
+fn bn254_tuple_words(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    name: &str,
+    args: &[u32],
+) -> Vec<u32> {
+    use wasmtime::Val;
+    let function = instance
+        .get_func(&mut *store, name)
+        .unwrap_or_else(|| panic!("`{name}` export should exist"));
+    let params = args
+        .iter()
+        .copied()
+        .map(|word| Val::I32(word as i32))
+        .collect::<Vec<_>>();
+    let mut results = vec![Val::I32(0); N];
+    function
+        .call(&mut *store, &params, &mut results)
+        .unwrap_or_else(|error| panic!("{name} should run: {error:?}"));
+    results
+        .into_iter()
+        .map(|result| match result {
+            Val::I32(word) => word as u32,
+            other => panic!("{name} result must be i32, got {other:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn bn254_field_power_inverse_and_two_adic_roots_match_bigint_oracle() {
+    let p = bn254_fr_prime();
+    let one = BigUint::from(1u32);
+    let p_minus_two = &p - BigUint::from(2u32);
+    let root_exponent = (&p - &one) >> 28usize;
+    let maximal_root = BigUint::from(5u32).modpow(&root_exponent, &p);
+    let wasm = compile_field_gate_ingot_to_wasm();
+    let (mut store, instance) = instantiate(&wasm);
+
+    for (base, exponent) in [
+        (0u32, 0u32),
+        (0, 19),
+        (1, u32::MAX),
+        (2, 31),
+        (5, 65_537),
+        (u32::MAX, u32::MAX),
+    ] {
+        let expected = BigUint::from(base).modpow(&BigUint::from(exponent), &p);
+        assert_eq!(
+            bn254_tuple_words(
+                &mut store,
+                &instance,
+                "field_bn254fr_pow_u32",
+                &[base, exponent],
+            ),
+            to_limbs(&expected, N),
+            "Fe square-and-multiply must match bigint for {base}^{exponent}",
+        );
+    }
+
+    for value in [0u32, 1, 2, 5, 65_537, u32::MAX] {
+        let expected = if value == 0 {
+            BigUint::from(0u32)
+        } else {
+            BigUint::from(value).modpow(&p_minus_two, &p)
+        };
+        let inverse =
+            bn254_tuple_words(&mut store, &instance, "field_bn254fr_inverse_u32", &[value]);
+        assert_eq!(
+            inverse,
+            to_limbs(&expected, N),
+            "Fe Fermat inverse must match bigint for {value}",
+        );
+        if value != 0 {
+            assert_eq!(
+                (BigUint::from(value) * from_limbs(&inverse)) % &p,
+                one,
+                "Fe inverse must be multiplicative for {value}",
+            );
+        }
+    }
+
+    for log_order in [0u32, 1, 2, 4, 8, 16, 28] {
+        let expected = maximal_root.modpow(&(BigUint::from(1u32) << (28u32 - log_order)), &p);
+        assert_eq!(
+            bn254_tuple_words(
+                &mut store,
+                &instance,
+                "field_bn254fr_two_adic_root",
+                &[log_order],
+            ),
+            to_limbs(&expected, N),
+            "Fe-derived 2^{log_order} root must match bigint derivation",
+        );
+
+        let order = 1u32 << log_order;
+        assert_eq!(
+            bn254_tuple_words(
+                &mut store,
+                &instance,
+                "field_bn254fr_two_adic_root_power",
+                &[log_order, order],
+            ),
+            to_limbs(&one, N),
+            "root^{order} must equal one",
+        );
+        if log_order > 0 {
+            assert_eq!(
+                bn254_tuple_words(
+                    &mut store,
+                    &instance,
+                    "field_bn254fr_two_adic_root_power",
+                    &[log_order, order >> 1],
+                ),
+                to_limbs(&(&p - &one), N),
+                "root^(order/2) must equal minus one",
+            );
+        }
+    }
+
+    assert_eq!(
+        bn254_tuple_words(&mut store, &instance, "field_bn254fr_two_adic_root", &[29],),
+        vec![0; N],
+        "unsupported two-adic orders must fail closed",
+    );
+}
+
 /// THE GATE: `Field<p>::mul` at BN254 Fr matches BOTH existing kernels AND
 /// the independent num-bigint Montgomery oracle, limb for limb, over
 /// representative + edge operand pairs.

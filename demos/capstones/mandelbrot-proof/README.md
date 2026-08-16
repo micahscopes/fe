@@ -59,7 +59,12 @@ typed `"MC01"` derive the field-native composition challenge. The independent
 oracle reconstructs all auxiliary columns, packing, both trees, the ordered
 transcript, and the challenge for all three streamed domains. No host-authored
 range witness or pre-auxiliary challenge crosses the production API.
-Composition and FRI remain pending.
+The shared precision ingot now derives BN254 Fr's maximal two-adic root from
+the prime and generator 5 in Fe, converts it to Montgomery form without a
+generated table, and provides field exponentiation, fail-closed inversion, and
+roots through order `2^28`. An independent bigint gate checks the compiled Fe
+Wasm values and exact subgroup orders. Radix-2 interpolation and low-degree
+extension, composition, and FRI remain pending.
 
 Escaping witnesses derive a power-of-two proof shape with one terminal marker
 and deterministic inactive padding; invalid and non-escaping claims cannot

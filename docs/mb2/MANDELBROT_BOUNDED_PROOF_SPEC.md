@@ -217,7 +217,13 @@ The reusable field substrate is the modulus-branded
 `precision::field::FieldElement<L, M>` over array-native 13-bit limbs. It has
 independently checked addition, subtraction, negation, multiplication, `pow5`,
 signed/unsigned embedding, and Montgomery conversion on a second modulus,
-while BN254 multiplication remains bit-identical to both prior kernels. The
+while BN254 multiplication remains bit-identical to both prior kernels. It now
+also derives BN254 Fr's maximal two-adic root from the prime and generator 5
+inside Fe, converts it to Montgomery form at compile time, and exposes generic
+square-and-multiply, Fermat inversion, and subgroup roots through `2^28`.
+There is no generated root table. An independent bigint gate checks ordinary
+powers, the full-width `p - 2` exponent, exact subgroup orders, and
+unsupported-order rejection through compiled Fe Wasm. The
 field-AIR ingot now consumes this API directly on Wasm. Canonical Poseidon
 parameters derive from Grain inside Fe, and the concise Fe permutation now
 executes the fixed four-row commitment in zero-import Wasm. Its honest SPIR-V
@@ -226,7 +232,8 @@ so aggregate-return inlining or shader function-call lowering is required
 before the same field implementation runs as an application GPU kernel.
 The production power-of-two main and auxiliary trace streams, ordered
 pre-composition transcript, and first Fiat-Shamir challenge now execute.
-Composition, later transcript stages, and FRI remain open.
+Radix-2 interpolation and low-degree extension, composition, later transcript
+stages, and FRI remain open.
 
 The intended succinct construction is a transparent AIR plus FRI over a field
 with an audited two-adic domain. The first implementation should reuse the
