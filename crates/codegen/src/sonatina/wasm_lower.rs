@@ -2696,6 +2696,138 @@ fn stmt_uses_host_memory_pointer(stmt: &RStmt<'_>) -> bool {
     }
 }
 
+/// Keep residual call sites aligned with parameters that the portable backend
+/// reified from memory-provider references into flattened aggregate values.
+///
+/// Runtime MIR deliberately presents many `Copy` records through provider
+/// references. `reify_static_aggregate_params` turns a read-only helper
+/// parameter into its value ABI when every use is a static projection. A call
+/// that survives the bounded inliner must undergo the same conversion at its
+/// boundary: load the complete caller-owned value, then pass its scalar leaves.
+/// Otherwise the callee signature expects N leaves while the caller contributes
+/// one provider pointer, producing malformed Wasm.
+fn reify_residual_call_arguments<'db>(
+    db: &'db DriverDataBase,
+    package: &RuntimePackage<'db>,
+    bodies: &mut FxHashMap<RuntimeInstance<'db>, RuntimeBody<'db>>,
+) {
+    let reified_params = package
+        .functions(db)
+        .into_iter()
+        .filter_map(|function| {
+            let instance = function.instance(db);
+            let original = instance.body(db);
+            let prepared = bodies.get(&instance)?;
+            if original.signature.params.len() != prepared.signature.params.len() {
+                return None;
+            }
+            let params = original
+                .signature
+                .params
+                .iter()
+                .zip(&prepared.signature.params)
+                .map(|(original, prepared)| match (&original.class, &prepared.class) {
+                    (
+                        RuntimeClass::Ref {
+                            pointee,
+                            kind:
+                                RefKind::Object
+                                | RefKind::Provider {
+                                    space: AddressSpaceKind::Memory,
+                                    ..
+                                },
+                            view: RefView::Whole,
+                        },
+                        prepared @ RuntimeClass::AggregateValue { .. },
+                    ) if pointee.shares_runtime_rep_with(db, prepared) => Some(prepared.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            params.iter().any(Option::is_some).then_some((instance, params))
+        })
+        .collect::<FxHashMap<_, _>>();
+    if reified_params.is_empty() {
+        return;
+    }
+
+    fn adapt_args<'db>(
+        db: &'db DriverDataBase,
+        locals: &mut Vec<RLocal<'db>>,
+        emitted: &mut Vec<RStmt<'db>>,
+        args: &mut [RLocalId],
+        params: &[Option<RuntimeClass<'db>>],
+    ) {
+        if args.len() != params.len() {
+            return;
+        }
+        for (arg, target) in args.iter_mut().zip(params) {
+            let Some(target) = target else {
+                continue;
+            };
+            let source = *arg;
+            let Some(local) = locals.get(source.as_u32() as usize) else {
+                continue;
+            };
+            let RuntimeCarrier::Value(RuntimeClass::Ref {
+                pointee,
+                kind:
+                    RefKind::Object
+                    | RefKind::Provider {
+                        space: AddressSpaceKind::Memory,
+                        ..
+                    },
+                view: RefView::Whole,
+            }) = &local.carrier
+            else {
+                continue;
+            };
+            if !pointee.shares_runtime_rep_with(db, target) {
+                continue;
+            }
+            let value = RLocalId::from_u32(locals.len() as u32);
+            locals.push(RLocal {
+                semantic_ty: local.semantic_ty,
+                carrier: RuntimeCarrier::Value(target.clone()),
+                root: RuntimeLocalRoot::None,
+            });
+            emitted.push(RStmt::Assign {
+                dst: value,
+                expr: RExpr::Load {
+                    place: RuntimePlace {
+                        root: PlaceRoot::Ref(source),
+                        path: Box::default(),
+                    },
+                },
+            });
+            *arg = value;
+        }
+    }
+
+    for body in bodies.values_mut() {
+        let (locals, blocks) = (&mut body.locals, &mut body.blocks);
+        for block in blocks {
+            let mut rewritten = Vec::with_capacity(block.stmts.len());
+            for mut stmt in std::mem::take(&mut block.stmts) {
+                if let RStmt::Assign {
+                    expr: RExpr::Call { callee, args },
+                    ..
+                } = &mut stmt
+                    && let Some(params) = reified_params.get(callee)
+                {
+                    adapt_args(db, locals, &mut rewritten, args, params);
+                }
+                rewritten.push(stmt);
+            }
+            if let RTerminator::TerminalCall { callee, args } = &mut block.terminator
+                && let Some(params) = reified_params.get(callee)
+            {
+                adapt_args(db, locals, &mut rewritten, args, params);
+            }
+            block.stmts = rewritten;
+        }
+    }
+}
+
 fn drop_dead_pure_aggregate_values<'db>(db: &'db DriverDataBase, body: &mut RuntimeBody<'db>) {
     fn is_pure_aggregate_def(expr: &RExpr<'_>) -> bool {
         matches!(
@@ -2886,6 +3018,7 @@ where
         for (instance, body) in &mut prepared_bodies {
             normalize_portable_body(db, *instance, body);
         }
+        reify_residual_call_arguments(db, package, &mut prepared_bodies);
         let mut func_symbols = assign_sonatina_function_symbols(db, package);
         for function in package.functions(db) {
             let instance = function.instance(db);
@@ -6434,7 +6567,7 @@ where
             *self.module.func_map.get(&callee).ok_or_else(|| {
                 LowerError::Internal("wasm call target was not declared".to_string())
             })?;
-        let arg_vals = self.call_arg_values(args)?;
+        let arg_vals = self.checked_call_arg_values(callee, callee_ref, args)?;
         self.fb
             .insert_inst_no_result(Call::new(is, callee_ref, arg_vals.into_iter().collect()));
         Ok(())
@@ -6568,6 +6701,53 @@ where
         let mut values = Vec::new();
         for arg in args {
             values.extend(self.local_flat_values(*arg)?);
+        }
+        Ok(values)
+    }
+
+    /// Flatten one residual call only when its concrete Sonatina signature and
+    /// the caller's prepared value lanes agree exactly. Cross-body portable
+    /// normalization can change a private helper from a provider-reference ABI
+    /// to a recursive value ABI; any missed boundary adaptation must fail here,
+    /// before an invalid Wasm call reaches the binary emitter.
+    fn checked_call_arg_values(
+        &mut self,
+        callee: RuntimeInstance<'db>,
+        callee_ref: FuncRef,
+        args: &[RLocalId],
+    ) -> Result<Vec<ValueId>, LowerError> {
+        let values = self.call_arg_values(args)?;
+        let expected = self
+            .module
+            .builder
+            .ctx
+            .get_sig(callee_ref)
+            .ok_or_else(|| LowerError::Internal("wasm call target has no signature".to_owned()))?
+            .args()
+            .to_vec();
+        let classes = || {
+            args.iter()
+                .map(|arg| self.body.value_class(*arg).cloned())
+                .collect::<Vec<_>>()
+        };
+        if values.len() != expected.len() {
+            return Err(LowerError::Internal(format!(
+                "call to `{}` flattened {} arguments from {:?}, but its Wasm signature requires {}",
+                self.module.function_symbol(callee),
+                values.len(),
+                classes(),
+                expected.len(),
+            )));
+        }
+        for (index, (value, expected)) in values.iter().zip(expected).enumerate() {
+            let actual = self.fb.type_of(*value);
+            if actual != expected {
+                return Err(LowerError::Internal(format!(
+                    "call to `{}` flattened argument {index} as {actual:?} from {:?}, but its Wasm signature requires {expected:?}",
+                    self.module.function_symbol(callee),
+                    classes(),
+                )));
+            }
         }
         Ok(values)
     }
@@ -7055,7 +7235,7 @@ where
                 let callee_ref = *self.module.func_map.get(callee).ok_or_else(|| {
                     LowerError::Internal("wasm call target was not declared".to_string())
                 })?;
-                let arg_vals = self.call_arg_values(args)?;
+                let arg_vals = self.checked_call_arg_values(*callee, callee_ref, args)?;
                 let results = self
                     .fb
                     .insert_call_results(callee_ref, arg_vals.into_iter().collect());
@@ -9104,7 +9284,7 @@ where
                 ));
             }
         };
-        let arg_vals = self.call_arg_values(args)?;
+        let arg_vals = self.checked_call_arg_values(callee, callee_ref, args)?;
         Ok(self.fb.insert_inst(
             Call::new(is, callee_ref, arg_vals.into_iter().collect()),
             ret_ty,

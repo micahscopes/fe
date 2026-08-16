@@ -61,6 +61,39 @@ pub fn mutate_copy(row: u32, column: u32, replacement: u32) -> (u32, u32) {
 }
 "#;
 
+const BORROWED_AGGREGATE_ARGUMENT_SOURCE: &str = r#"
+struct Pair { left: u32, right: u32 }
+
+impl Copy for Pair {}
+
+fn combine(_ left: Pair, _ right: Pair) -> Pair {
+    Pair {
+        left: left.left + right.left,
+        right: left.right + right.right,
+    }
+}
+
+fn fold(_ values: mut [Pair; 3]) -> Pair {
+    let mut digest = Pair { left: 0, right: 0 }
+    let mut index: usize = 0
+    while index < 3 {
+        digest = combine(digest, values[index])
+        index = index + 1
+    }
+    digest
+}
+
+pub fn sum() -> (u32, u32) {
+    let mut values = [
+        Pair { left: 3, right: 5 },
+        Pair { left: 7, right: 11 },
+        Pair { left: 13, right: 17 },
+    ]
+    let result = fold(mut values)
+    (result.left, result.right)
+}
+"#;
+
 fn compile(source: &str, name: &str) -> Vec<u8> {
     let mut db = DriverDataBase::default();
     let url = Url::parse(&format!("file:///{name}.fe")).unwrap();
@@ -131,6 +164,22 @@ fn nested_dynamic_const_array_indexes_execute_and_trap_out_of_bounds() {
             "out-of-bounds index ({row}, {column}) must trap"
         );
     }
+}
+
+#[test]
+fn borrowed_dynamic_aggregate_array_element_passes_all_lanes_to_value_parameter() {
+    let bytes = compile(
+        BORROWED_AGGREGATE_ARGUMENT_SOURCE,
+        "wasm_borrowed_aggregate_array_argument",
+    );
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, bytes).unwrap();
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+    let sum = instance
+        .get_typed_func::<(), (i32, i32)>(&mut store, "sum")
+        .expect("sum export");
+    assert_eq!(sum.call(&mut store, ()).unwrap(), (23, 33));
 }
 
 fn assert_pick_executes_and_traps(bytes: Vec<u8>) {
