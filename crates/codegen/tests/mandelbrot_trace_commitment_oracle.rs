@@ -345,18 +345,6 @@ fn statement_commitment(
     .clone()
 }
 
-fn composition_challenge(statement: &BigUint, parameters: &[BigUint]) -> BigUint {
-    permute(
-        [
-            protocol_tag(b"MC01"),
-            statement.clone(),
-            BigUint::from(0u32),
-        ],
-        parameters,
-    )[0]
-    .clone()
-}
-
 fn compile_gate() -> &'static [u8] {
     static WASM: OnceLock<Vec<u8>> = OnceLock::new();
     WASM.get_or_init(|| {
@@ -717,9 +705,6 @@ fn fe_streams_the_canonical_trace_directly_into_the_frontier() {
     let generate = instance
         .get_func(&mut store, "streamed_statement_q12_plain_words")
         .unwrap();
-    let challenge = instance
-        .get_func(&mut store, "streamed_composition_challenge_q12_plain_words")
-        .unwrap();
     let reset = instance
         .get_typed_func::<(), ()>(&mut store, "fe_cabi_reset")
         .unwrap();
@@ -750,17 +735,10 @@ fn fe_streams_the_canonical_trace_directly_into_the_frontier() {
         assert_eq!(actual[3], rows.len() as u32);
         assert_eq!(plain_limbs(&actual[4..24]), expected_root);
         assert_eq!(plain_limbs(&actual[24..44]), expected_statement);
-        let actual_challenge =
-            call_streamed_claim_output(&mut store, &challenge, &reset, c_re, c_im, bound, 24);
-        assert_eq!(&actual_challenge[..4], &actual[..4]);
-        assert_eq!(
-            plain_limbs(&actual_challenge[4..24]),
-            composition_challenge(&expected_statement, &parameters),
-        );
         assert_eq!(
             alloc.call(&mut store, (1, 1)).unwrap(),
             1024,
-            "the one-pass Fe transcript must reclaim every local temporary"
+            "the one-pass Fe generator must reclaim every local temporary"
         );
     }
 
@@ -768,9 +746,6 @@ fn fe_streams_the_canonical_trace_directly_into_the_frontier() {
         let actual =
             call_streamed_claim_output(&mut store, &generate, &reset, c_re, c_im, bound, 44);
         assert!(actual.iter().all(|word| *word == 0));
-        let actual_challenge =
-            call_streamed_claim_output(&mut store, &challenge, &reset, c_re, c_im, bound, 24);
-        assert!(actual_challenge.iter().all(|word| *word == 0));
         assert_eq!(
             alloc.call(&mut store, (1, 1)).unwrap(),
             1024,

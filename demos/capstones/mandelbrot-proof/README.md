@@ -50,12 +50,10 @@ four-row column, row order, and both inactive padding positions of a six-active
 row, eight-row domain. A distinct `"MT01"` domain binds each trace root to an
 injective 114-bit encoding of the public point, bound, terminal step, semantic
 length, and padded length. Every public field is independently mutated.
-A typed `"MC01"` Fiat-Shamir stage derives the first field-native composition
-challenge from that bound statement inside Fe. Poseidon already returns a
-canonical BN254 Fr element, so this stage hides no reduction, rejection, or
-numeric selector. The independent oracle reconstructs the challenge for all
-three streamed domains. Composition, later transcript stages, and FRI remain
-pending.
+The low-degree range checks currently consume bit-decomposition and prefix-OR
+auxiliary columns. Those columns must be Fe-derived and committed before the
+composition challenge is sampled. That auxiliary commitment, the subsequent
+typed Fiat-Shamir stage, composition, and FRI remain pending.
 
 Escaping witnesses derive a power-of-two proof shape with one terminal marker
 and deterministic inactive padding; invalid and non-escaping claims cannot
