@@ -391,29 +391,121 @@ export function createHostCompletionBroker(options = {}) {
     return slot.token | 0;
   };
 
-  const beginGeneratedCompletion = (identity, invoke, successWidth, lowerSuccess) => {
+  const beginGeneratedCompletion = (
+    identity,
+    invoke,
+    successWidth,
+    lowerSuccess,
+    releaseSuccess,
+  ) => {
     if (typeof identity !== "string" || identity.length === 0) {
       throw new TypeError("generated completion identity must be a non-empty string");
     }
-    if (typeof invoke !== "function" || typeof lowerSuccess !== "function") {
+    if (typeof invoke !== "function" || typeof lowerSuccess !== "function"
+        || typeof releaseSuccess !== "function") {
       throw new TypeError("generated completion hooks must be callable");
     }
-    return beginBrowserOperation(
-      `generated:${identity}`,
-      invoke,
-      successWidth,
-      value => {
-        const lowered = lowerSuccess(value);
-        if (successWidth === 0) {
-          if (lowered !== undefined
-              && (!Array.isArray(lowered) || lowered.length !== 0)) {
-            throw new TypeError("generated unit completion must lower to no lanes");
-          }
-          return [];
+    const slot = allocate(`generated:${identity}`, successWidth);
+    const controller = new AbortController();
+    slot.cancelWork = () => controller.abort();
+    Promise.resolve().then(() => invoke(controller.signal)).then(value => {
+      // Keep the standards value opaque until the final outer continuation has
+      // won every race/select. Canonical lowering may allocate guest memory;
+      // doing it here would make settled losers retain allocations and would
+      // force the broker to understand operation-specific result layouts.
+      settle(slot, taskSuccess([]), false, undefined, undefined, Object.freeze({
+        kind: "generated",
+        identity,
+        lowerSuccess,
+        releaseSuccess,
+        successWidth,
+        value,
+      }));
+    }).catch(() => {
+      settle(slot, taskFailure([1]));
+    });
+    return slot.token | 0;
+  };
+
+  const lowerCompletionTrace = trace => {
+    if (!trace || typeof trace !== "object" || Array.isArray(trace)) {
+      throw new TypeError("generated completion trace must be an object");
+    }
+    if (trace.kind === "generated") {
+      let released = false;
+      const release = () => {
+        if (released) {
+          throw new TypeError("generated completion allocation was already released");
         }
-        return Array.isArray(lowered) ? lowered : [lowered];
-      },
-    );
+        released = true;
+        trace.releaseSuccess();
+      };
+      let lowered;
+      try {
+        lowered = trace.lowerSuccess(trace.value);
+      } catch (error) {
+        try {
+          release();
+        } catch (cleanupError) {
+          throw new AggregateError(
+            [error, cleanupError],
+            `generated completion ${trace.identity} lowering and cleanup both failed`,
+          );
+        }
+        throw error;
+      }
+      let lanes;
+      if (trace.successWidth === 0) {
+        if (lowered !== undefined
+            && (!Array.isArray(lowered) || lowered.length !== 0)) {
+          try {
+            release();
+          } catch (cleanupError) {
+            throw new AggregateError(
+              [new TypeError("generated unit completion must lower to no lanes"), cleanupError],
+              `generated completion ${trace.identity} validation and cleanup both failed`,
+            );
+          }
+          throw new TypeError("generated unit completion must lower to no lanes");
+        }
+        lanes = [];
+      } else {
+        lanes = Array.isArray(lowered) ? lowered : [lowered];
+        if (lanes.length !== trace.successWidth) {
+          try {
+            release();
+          } catch (cleanupError) {
+            throw new AggregateError(
+              [new TypeError(
+                `generated completion must contain exactly ${trace.successWidth} success lanes`,
+              ), cleanupError],
+              `generated completion ${trace.identity} validation and cleanup both failed`,
+            );
+          }
+          throw new TypeError(
+            `generated completion must contain exactly ${trace.successWidth} success lanes`,
+          );
+        }
+      }
+      return Object.freeze({
+        release,
+        trace: Object.freeze({
+          kind: "terminal",
+          outcome: taskSuccess(lanes),
+        }),
+      });
+    }
+    if (trace.kind === "terminal") {
+      return Object.freeze({ release: undefined, trace });
+    }
+    if (trace.kind === "race" || trace.kind === "select") {
+      const winner = lowerCompletionTrace(trace.winner);
+      return Object.freeze({
+        release: winner.release,
+        trace: Object.freeze({ ...trace, winner: winner.trace }),
+      });
+    }
+    throw new TypeError(`unknown generated completion trace kind ${String(trace.kind)}`);
   };
 
   const beginSurfaceOperation = (kind, invoke) => {
@@ -941,12 +1033,19 @@ export function createHostCompletionBroker(options = {}) {
         });
       }
       if (delivery.trace !== undefined) {
-        return Object.freeze({
-          outcome: materializeTaskOutcome(pending, delivery.trace),
-          cancelled: delivery.cancelled,
-          raceSide: undefined,
-          loserToken: undefined,
-        });
+        const lowered = lowerCompletionTrace(delivery.trace);
+        try {
+          return Object.freeze({
+            outcome: materializeTaskOutcome(pending, lowered.trace),
+            cancelled: delivery.cancelled,
+            raceSide: undefined,
+            loserToken: undefined,
+            release: lowered.release,
+          });
+        } catch (error) {
+          if (lowered.release !== undefined) lowered.release();
+          throw error;
+        }
       }
       return delivery;
     } finally {
@@ -992,7 +1091,29 @@ export function createHostCompletionBroker(options = {}) {
     while (step.kind === "suspended") {
       const delivery = await awaitPending(step.pending, signal);
       const tokenCheckpoint = nextToken;
-      step = invokeMachine(() => machine.resume(step.frame, delivery.outcome));
+      let resumed;
+      let resumeError;
+      try {
+        resumed = invokeMachine(() => machine.resume(step.frame, delivery.outcome));
+      } catch (error) {
+        resumeError = error;
+      }
+      let releaseError;
+      try {
+        delivery.release?.();
+      } catch (error) {
+        releaseError = error;
+        discardSince(tokenCheckpoint);
+      }
+      if (resumeError !== undefined && releaseError !== undefined) {
+        throw new AggregateError(
+          [resumeError, releaseError],
+          "Fe continuation and generated completion cleanup both failed",
+        );
+      }
+      if (resumeError !== undefined) throw resumeError;
+      if (releaseError !== undefined) throw releaseError;
+      step = resumed;
       if (delivery.cancelled) {
         // Cancellation is delivered exactly once so Fe can release its owned
         // state. It remains the task's terminal verdict even if that cleanup

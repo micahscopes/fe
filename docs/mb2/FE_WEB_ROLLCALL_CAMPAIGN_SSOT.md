@@ -88,12 +88,21 @@ Legend:
   Gates: `scalar_promises_use_generated_pending_and_the_completion_rail`,
   `generated_scalar_promise_transport_executes_its_semantic_completion`, and
   `generated_webidl_scalar_promise_resumes_a_real_fe_task`.
-- [!] Rich generated Promise results remain deliberately blocked. Their
-  canonical memory must stay live across races and selects, then run
-  post-return cleanup only after the winning Fe continuation consumes the
-  value. The real Fe Wasm allocator ABI must also be used rather than the
-  blueprint's historical `cabi_alloc`/`cabi_realloc` names. Fetch cannot close
-  by weakening either lifetime or allocator gate.
+- [~] Direct rich generated Promise results now use deferred canonical
+  lowering. The broker retains the standards value opaquely across nested
+  races and selects, allocates only after the final Fe continuation wins
+  custody, invokes that exact continuation synchronously, and runs its
+  generated post-return cleanup on success or trap. The compiler now wires
+  Sonatina's checked LIFO `cabi_realloc` and operation-specific post-return
+  exports instead of inventing a JavaScript allocator. A real generated
+  `Promise<USVString>` reaches Fe UTF-8 logic and returns the allocator to its
+  exact baseline. Settled losers remain allocation-free, and materialization
+  fails closed when a direct or record-nested borrowed host descriptor would
+  survive another suspension without first being copied into Fe-owned
+  storage. Indirect canonical results remain blocked. Gates:
+  `generated_webidl_string_promise_releases_after_the_real_fe_continuation`,
+  `browser_task_rejects_borrowed_host_storage_across_a_second_suspension`, and
+  the generated-result cases in `host-completion.test.mjs`.
 - [x] Typed browser sources cover render-surface facts, visibility, animation
   frames, viewport, raw pointer events, Fe-selected capture, wheel, shared
   WebGPU lifecycle, queue-idle completion, and Fe-owned recovery. Gates:

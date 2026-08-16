@@ -183,6 +183,61 @@ function nestedSelectMachine(broker, delay) {
   });
 }
 
+function nestedGeneratedSelectMachine(broker, beginGenerated, delay) {
+  return createMaterializedTaskMachine({
+    input: [],
+    step: [state, u32, u32],
+    complete: { start: 1, count: 1 },
+    start() {
+      const generated = beginGenerated();
+      const innerTimer = broker.imports["fe:host"].sleep_begin(delay);
+      const inner = broker.imports["fe:host"].select_begin(generated, innerTimer);
+      const outerTimer = broker.imports["fe:host"].sleep_begin(delay);
+      return [1, 0, broker.imports["fe:host"].select_begin(inner, outerTimer) >>> 0];
+    },
+    continuations: [{
+      state: 1,
+      range: { start: 2, count: 1 },
+      pending: { start: 2, count: 1 },
+      frame: { start: 3, count: 0 },
+      delivery: {
+        // TaskOutcome<u32, SelectOutcome<B, u32,
+        //   SelectOutcome<B, u32, u32, u64>, u64>>
+        lanes: [
+          outcome, u32,
+          selection,
+          selection, u32, u32, u32, u64, u32, u32,
+          u32, u32, u64, u32, u32,
+        ],
+        failure: { start: 1, count: 1 },
+        success: { start: 2, count: 13 },
+      },
+      invoke(
+        tag,
+        _outerError,
+        outerSelected,
+        innerSelected,
+        generatedValue,
+        _innerRightToken,
+        _innerLeftToken,
+        _innerRightValue,
+        _innerLeftError,
+        _innerRightError,
+        _outerRightToken,
+        _outerLeftToken,
+        _outerRightValue,
+        _outerLeftError,
+        _outerRightError,
+      ) {
+        if (tag !== 1 || outerSelected !== 0 || innerSelected !== 0) {
+          throw new Error("generated completion did not win both nested selects");
+        }
+        return [0, generatedValue, 0];
+      },
+    }],
+  });
+}
+
 function visibilityMachine(start, onCancel = () => {}) {
   return createMaterializedTaskMachine({
     input: [],
@@ -909,22 +964,112 @@ describe("browser HostTimer/Recv completion broker", () => {
 
   test("generated promise transport lowers values on the ordinary typed rail", async () => {
     const broker = createHostCompletionBroker();
-    const generated = browserRecordMachine(
+    const events = [];
+    const materialized = browserRecordMachine(
       [u32, u32],
       () => [
         1, 0, 0,
         broker.completions.begin(
           "resource/channel/receive",
           async signal => {
+            events.push("invoke");
             expect(signal.aborted).toBeFalse();
             return { sequence: 23, value: 41 };
           },
           2,
-          value => [value.sequence, value.value],
+          value => {
+            events.push("lower");
+            return [value.sequence, value.value];
+          },
+          () => { events.push("release"); },
         ) >>> 0,
       ],
     );
+    const generated = {
+      start: input => materialized.start(input),
+      resume(frame, delivered) {
+        events.push("resume");
+        return materialized.resume(frame, delivered);
+      },
+    };
     expect(await broker.run(generated, [])).toEqual([23, 41]);
+    expect(events).toEqual(["invoke", "lower", "resume", "release"]);
+    expect(broker.activeCount()).toBe(0);
+  });
+
+  test("settled generated losers are allocation-free until Fe claims them", async () => {
+    const broker = createHostCompletionBroker();
+    let lowered = 0;
+    let released = 0;
+    const token = broker.completions.begin(
+      "resource/channel/receive",
+      () => Promise.resolve({ value: 41 }),
+      1,
+      value => {
+        lowered += 1;
+        return value.value;
+      },
+      () => { released += 1; },
+    );
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(broker.imports["fe:host"].cancel_pending(token)).toBe(0);
+    expect(lowered).toBe(0);
+    expect(released).toBe(0);
+    expect(broker.activeCount()).toBe(0);
+  });
+
+  test("generated values lower once after nested select custody reaches Fe", async () => {
+    const broker = createHostCompletionBroker();
+    const events = [];
+    const materialized = nestedGeneratedSelectMachine(
+      broker,
+      () => broker.completions.begin(
+        "resource/channel/receive",
+        () => Promise.resolve({ value: 41 }),
+        1,
+        value => {
+          events.push("lower");
+          return value.value;
+        },
+        () => { events.push("release"); },
+      ),
+      10_000n,
+    );
+    const generated = {
+      start: input => materialized.start(input),
+      resume(frame, delivered) {
+        events.push("resume");
+        return materialized.resume(frame, delivered);
+      },
+    };
+    expect(await broker.run(generated, [])).toEqual([41]);
+    expect(events).toEqual(["lower", "resume", "release"]);
+    expect(broker.activeCount()).toBe(2);
+    expect(broker.cancelAll()).toBe(2);
+  });
+
+  test("generated storage is released when the Fe continuation traps", async () => {
+    const broker = createHostCompletionBroker();
+    let released = 0;
+    const materialized = browserRecordMachine(
+      [u32],
+      () => [
+        1, 0,
+        broker.completions.begin(
+          "resource/channel/receive",
+          () => Promise.resolve({ value: 41 }),
+          1,
+          value => value.value,
+          () => { released += 1; },
+        ) >>> 0,
+      ],
+    );
+    const generated = {
+      start: input => materialized.start(input),
+      resume() { throw new Error("Fe continuation trap"); },
+    };
+    await expect(broker.run(generated, [])).rejects.toThrow(/Fe continuation trap/);
+    expect(released).toBe(1);
     expect(broker.activeCount()).toBe(0);
   });
 
@@ -941,6 +1086,7 @@ describe("browser HostTimer/Recv completion broker", () => {
       }),
       1,
       value => value,
+      () => {},
     );
     await Promise.resolve();
     expect(broker.imports["fe:host"].cancel_pending(token)).toBe(1);

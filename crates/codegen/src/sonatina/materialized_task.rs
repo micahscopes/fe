@@ -9,6 +9,10 @@
 use std::collections::HashSet;
 
 use compiler_db::DriverDataBase;
+use hir::{
+    analysis::ty::{adt_def::AdtRef, ty_def::TyId},
+    hir_def::HostType,
+};
 use mir::{Layout, LayoutId, RuntimeClass, RuntimeLinkage, RuntimePackage, ScalarRepr, ScalarRole};
 
 use super::{LowerError, lower_runtime::assign_sonatina_function_symbols};
@@ -200,6 +204,72 @@ fn flatten_classes<'db>(
     Ok(output)
 }
 
+fn retains_borrowed_host_storage<'db>(
+    db: &'db DriverDataBase,
+    ty: TyId<'db>,
+    active: &mut HashSet<TyId<'db>>,
+) -> bool {
+    let ty = ty.as_view(db).unwrap_or(ty);
+    if !active.insert(ty) {
+        return false;
+    }
+    let retained = match ty.adt_def(db).map(|adt| adt.adt_ref(db)) {
+        Some(AdtRef::Struct(struct_)) => {
+            if matches!(
+                struct_
+                    .scope()
+                    .attrs(db)
+                    .and_then(|attrs| attrs.host_type(db)),
+                Some(HostType::Bytes | HostType::String | HostType::List)
+            ) {
+                true
+            } else {
+                ty.field_types(db)
+                    .into_iter()
+                    .any(|field| retains_borrowed_host_storage(db, field, active))
+            }
+        }
+        Some(AdtRef::Enum(enum_)) => {
+            let args = ty.generic_args(db);
+            enum_.variants(db).any(|variant| {
+                variant.field_tys(db).into_iter().any(|field| {
+                    retains_borrowed_host_storage(db, field.instantiate(db, args), active)
+                })
+            })
+        }
+        None => ty
+            .generic_args(db)
+            .iter()
+            .copied()
+            .any(|arg| retains_borrowed_host_storage(db, arg, active)),
+    };
+    active.remove(&ty);
+    retained
+}
+
+fn reject_borrowed_host_frame<'db>(
+    db: &'db DriverDataBase,
+    plan: &mir::RuntimeResumableBodyPlan<'db>,
+    live_values: &[mir::RLocalId],
+    task: &str,
+    state: u32,
+) -> Result<(), LowerError> {
+    let mut active = HashSet::new();
+    for local in live_values {
+        let semantic_ty = plan
+            .flattened_body
+            .local(*local)
+            .ok_or_else(|| LowerError::Internal("live runtime local is missing".to_owned()))?
+            .semantic_ty;
+        if retains_borrowed_host_storage(db, semantic_ty, &mut active) {
+            return Err(unsupported(format!(
+                "task `{task}` continuation {state} retains borrowed browser storage; copy it into Fe-owned storage before suspending again"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn delivery_layout<'db>(
     db: &'db DriverDataBase,
     class: &'db RuntimeClass<'db>,
@@ -324,6 +394,13 @@ pub fn materialized_task_adapters<'db>(
             .zip(machine.continuations.iter())
             .zip(variant_ranges.into_iter().skip(1))
         {
+            reject_borrowed_host_frame(
+                db,
+                &plan,
+                &point.live_values,
+                &name,
+                point.continuation_state,
+            )?;
             let pending_class = plan
                 .flattened_body
                 .value_class(match point.cause {

@@ -160,6 +160,7 @@ pub(crate) struct WasmResidentPolicy {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WasmCompileOptions {
     canonical_arena: bool,
+    canonical_stack_post_returns: Vec<String>,
     canonical_lanes: Vec<crate::CanonicalLane>,
     /// At most one compiler-lowered resident actor transition. Its underlying
     /// authored Fe behavior stays private; the fixed wrapper and state-seeding
@@ -188,6 +189,19 @@ pub struct WasmCompileOptions {
 impl WasmCompileOptions {
     pub fn with_canonical_arena(mut self) -> Self {
         self.canonical_arena = true;
+        self
+    }
+
+    /// Use the checked LIFO canonical-memory surface required by generated
+    /// rich host results. The supplied post-return exports come from the same
+    /// generated binding plan as the host adapter. Sonatina routes ordinary Fe
+    /// dynamic allocations through this allocator too, so this replaces rather
+    /// than layers over the resettable arena.
+    pub fn with_canonical_stack_memory(
+        mut self,
+        post_returns: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.canonical_stack_post_returns = post_returns.into_iter().map(Into::into).collect();
         self
     }
 
@@ -399,7 +413,13 @@ pub fn compile_runtime_package_wasm_with_options(
     // translator without the allocator and fail; this mirrors the
     // `BackendKind::Wasm` driver scan in `backend.rs`. A no-alloc module stays
     // byte-identical to the pre-arena default, preserving the opt-in assertions.
-    let backend = if options.canonical_arena || wasm_lower::module_emits_dynamic_alloc(&module) {
+    let backend = if !options.canonical_stack_post_returns.is_empty() {
+        backend.with_canonical_stack_memory(
+            sonatina_codegen::isa::wasm::CanonicalStackMemoryManifest::new(
+                options.canonical_stack_post_returns,
+            ),
+        )
+    } else if options.canonical_arena || wasm_lower::module_emits_dynamic_alloc(&module) {
         backend.with_canonical_arena()
     } else {
         backend

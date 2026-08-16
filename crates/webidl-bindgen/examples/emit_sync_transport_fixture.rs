@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use fe_webidl_bindgen::{
     CoreSignature, CoreValueType, MemorySurfacePlan, TransportFunction, TransportKind,
@@ -11,7 +11,6 @@ fn main() {
         module: "fe:fixture".into(),
         memory: MemorySurfacePlan {
             memory_export: "memory".into(),
-            alloc_export: "cabi_alloc".into(),
             realloc_export: "cabi_realloc".into(),
         },
         functions: vec![TransportFunction {
@@ -37,6 +36,13 @@ fn main() {
             post_return_export: Some("cabi_post_fixture_send".into()),
             blocker: None,
         }],
+        codec_plans: BTreeMap::from([(
+            "fixture/send".into(),
+            serde_json::from_str(include_str!(
+                "../../../demos/shared/host-wasm-codec-v1.fixture.json"
+            ))
+            .unwrap(),
+        )]),
         callbacks: vec![],
         futures: vec![],
         required_codec_features: BTreeSet::from([

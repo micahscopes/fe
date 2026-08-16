@@ -26,6 +26,9 @@ use fe_host_runtime::{
 };
 use url::Url;
 
+const HOST_WASM_CODEC_RUNTIME_JS: &str =
+    include_str!("../../../demos/shared/host-wasm-codec-v1.js");
+
 type TwoSiteStep = (i32, i32, i32, i32, i32, i32, i32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1176,16 +1179,11 @@ fn generated_webidl_scalar_promise_resumes_a_real_fe_task() {
     {
         return;
     }
-    let world = fe_webidl_bindgen::parse(
-        "interface Channel { Promise<unsigned long> receive(); };",
-    )
-    .unwrap();
-    let semantic = fe_webidl_bindgen::build_adapter_plan(
-        &world,
-        "scalar-promise",
-        "fe:host",
-    )
-    .unwrap();
+    let world =
+        fe_webidl_bindgen::parse("interface Channel { Promise<unsigned long> receive(); };")
+            .unwrap();
+    let semantic =
+        fe_webidl_bindgen::build_adapter_plan(&world, "scalar-promise", "fe:host").unwrap();
     let transport_plan = fe_webidl_bindgen::build_transport_plan(&semantic).unwrap();
     let bindings = fe_webidl_bindgen::emit_fe_flat_host_imports(&world, "fe:host").unwrap();
     let source = format!(
@@ -1215,8 +1213,7 @@ pub fn receive_task(_ channel: Channel) -> u32 {
     );
     let mut db = DriverDataBase::default();
     let url = Url::parse("file:///generated_webidl_scalar_promise.fe").unwrap();
-    db.workspace()
-        .touch(&mut db, url.clone(), Some(source));
+    db.workspace().touch(&mut db, url.clone(), Some(source));
     let file = db.workspace().get(&db, &url).unwrap();
     let top_mod = db.top_mod(file);
     let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
@@ -1224,8 +1221,7 @@ pub fn receive_task(_ channel: Channel) -> u32 {
         diagnostics.is_empty(),
         "generated Promise fixture diagnostics:\n{diagnostics}"
     );
-    let package =
-        mir::build_wasm_runtime_package_for_entry(&db, top_mod, "receive_task").unwrap();
+    let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "receive_task").unwrap();
     let adapters = materialized_task_adapters(&db, &package).unwrap();
     assert_eq!(adapters.len(), 1);
     let task_adapter = emit_materialized_task_adapter_js(&adapters, "./materialized-task.js")
@@ -1274,6 +1270,7 @@ const codec = {{
         return lanes;
       }},
       lowerResult(_identity, value) {{ return value; }},
+      finish() {{}},
     }};
   }},
 }};
@@ -1311,6 +1308,211 @@ if (broker.activeCount() !== 0) throw new Error("generated Promise leaked a brok
         "generated Promise Fe/Wasm capstone failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&execution.stdout),
         String::from_utf8_lossy(&execution.stderr),
+    );
+}
+
+#[test]
+fn generated_webidl_string_promise_releases_after_the_real_fe_continuation() {
+    if !std::process::Command::new("bun")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        return;
+    }
+    let world =
+        fe_webidl_bindgen::parse("interface Channel { Promise<USVString> receive(); };").unwrap();
+    let semantic =
+        fe_webidl_bindgen::build_adapter_plan(&world, "string-promise", "fe:host").unwrap();
+    let transport_plan = fe_webidl_bindgen::build_transport_plan(&semantic).unwrap();
+    let bindings = fe_webidl_bindgen::emit_fe_flat_host_imports(&world, "fe:host").unwrap();
+    let source = format!(
+        "{bindings}\n{}",
+        r#"
+use core::pending::{Suspend, TaskOutcome}
+use std::host::Resumable
+use std::text::Utf8View
+
+fn receive(_ channel: Channel) -> u32
+uses (suspend: Suspend<WasmBackend, u32>)
+{
+    let pending = channel_receive(self_: channel)
+    let outcome: TaskOutcome<u32, BrowserString> = suspend.suspend(pending)
+    match outcome {
+        TaskOutcome::Success(value,) => {
+            let view = Utf8View::from_browser(value)
+            view.len() * 1000
+                + (view.byte(index: 0) as u32)
+                + (view.byte(index: 1) as u32)
+                + (view.byte(index: 2) as u32)
+        }
+        TaskOutcome::Failure(error,) => 10000 + error
+        TaskOutcome::Cancelled => 20000
+    }
+}
+
+pub fn receive_task(_ channel: Channel) -> u32 {
+    with (Suspend<WasmBackend, u32> = Resumable {}) {
+        receive(channel)
+    }
+}
+"#,
+    );
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///generated_webidl_string_promise.fe").unwrap();
+    db.workspace().touch(&mut db, url.clone(), Some(source));
+    let file = db.workspace().get(&db, &url).unwrap();
+    let top_mod = db.top_mod(file);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "generated string Promise fixture diagnostics:\n{diagnostics}"
+    );
+    let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "receive_task").unwrap();
+    let adapters = materialized_task_adapters(&db, &package).unwrap();
+    assert_eq!(adapters.len(), 1);
+    let task_adapter = emit_materialized_task_adapter_js(&adapters, "./materialized-task.js")
+        .unwrap()
+        .expect("generated string Promise task emits a browser adapter");
+    let post_returns = transport_plan
+        .functions
+        .iter()
+        .filter_map(|function| function.post_return_export.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(post_returns.len(), 1);
+    let wasm = compile_runtime_package_wasm_with_options(
+        &db,
+        &package,
+        WasmCompileOptions::default().with_canonical_stack_memory(post_returns.clone()),
+    )
+    .unwrap()
+    .bytes;
+    wasmparser::validate(&wasm).unwrap();
+    let imports = func_imports(&wasm);
+    assert!(imports.contains(&("fe:host".to_owned(), "channel_receive".to_owned())));
+    assert!(!imports.contains(&("fe:control".to_owned(), "suspend".to_owned())));
+
+    let directory = tempfile::tempdir().unwrap();
+    let wasm_path = directory.path().join("generated-string-promise.wasm");
+    let task_runtime_path = directory.path().join("materialized-task.js");
+    let host_runtime_path = directory.path().join("host-completion.js");
+    let codec_runtime_path = directory.path().join("host-wasm-codec-v1.js");
+    let task_adapter_path = directory.path().join("task-adapter.mjs");
+    let transport_path = directory.path().join("transport.mjs");
+    let script_path = directory.path().join("execute.mjs");
+    std::fs::write(&wasm_path, wasm).unwrap();
+    std::fs::write(&task_runtime_path, MATERIALIZED_TASK_RUNTIME_JS).unwrap();
+    std::fs::write(&host_runtime_path, HOST_COMPLETION_RUNTIME_JS).unwrap();
+    std::fs::write(&codec_runtime_path, HOST_WASM_CODEC_RUNTIME_JS).unwrap();
+    std::fs::write(&task_adapter_path, task_adapter).unwrap();
+    std::fs::write(
+        &transport_path,
+        fe_webidl_bindgen::emit_js_core_wasm_transport(&transport_plan),
+    )
+    .unwrap();
+    let codec_plans = serde_json::to_string(&transport_plan.codec_plans).unwrap();
+    let post_return = &post_returns[0];
+    let script = format!(
+        r#"
+import {{ createMaterializedTaskRegistry }} from {task_adapter_url:?};
+import {{ createHostCompletionBroker }} from {host_runtime_url:?};
+import {{ createFeHostWasmCodec }} from {codec_runtime_url:?};
+import {{ createFeCoreWasmTransport }} from {transport_url:?};
+
+const broker = createHostCompletionBroker();
+const codec = createFeHostWasmCodec({codec_plans});
+const semanticAdapter = {{ imports: {{ "fe:host": {{
+  channel_receive: handle => {{
+    if (handle !== 7) throw new Error(`wrong Channel handle ${{handle}}`);
+    return Promise.resolve("hé");
+  }},
+}} }} }};
+const transport = createFeCoreWasmTransport(codec, semanticAdapter, broker.completions);
+const imports = {{ "fe:host": {{
+  ...broker.imports["fe:host"],
+  ...transport.imports["fe:host"],
+}} }};
+const bytes = await Bun.file({wasm_path:?}).arrayBuffer();
+const {{ instance }} = await WebAssembly.instantiate(bytes, imports);
+transport.attach(instance);
+const task = createMaterializedTaskRegistry(instance.exports).receive_task;
+const output = await broker.run(task, [7]);
+if (output.length !== 1 || output[0] !== 3468) {{
+  throw new Error(`generated string Promise bypassed Fe memory semantics: ${{String(output)}}`);
+}}
+if (broker.activeCount() !== 0) throw new Error("generated string Promise leaked a broker token");
+const probe = instance.exports.cabi_realloc(0, 0, 1, 1);
+if (probe !== 1040) {{
+  throw new Error(`generated string Promise leaked canonical memory: ${{probe}}`);
+}}
+instance.exports[{post_return:?}](probe, 1, 1);
+"#,
+        task_adapter_url = format!("file://{}", task_adapter_path.display()),
+        host_runtime_url = format!("file://{}", host_runtime_path.display()),
+        codec_runtime_url = format!("file://{}", codec_runtime_path.display()),
+        transport_url = format!("file://{}", transport_path.display()),
+        wasm_path = wasm_path.display().to_string(),
+    );
+    std::fs::write(&script_path, script).unwrap();
+    let execution = std::process::Command::new("bun")
+        .arg("run")
+        .arg(&script_path)
+        .output()
+        .unwrap();
+    assert!(
+        execution.status.success(),
+        "generated string Promise Fe/Wasm capstone failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&execution.stdout),
+        String::from_utf8_lossy(&execution.stderr),
+    );
+}
+
+#[test]
+fn browser_task_rejects_borrowed_host_storage_across_a_second_suspension() {
+    const SOURCE: &str = r#"
+use core::BrowserString
+use core::pending::{Pending, TaskOutcome}
+use std::host::raw::suspend
+use std::wasm::WasmBackend
+
+struct Envelope { text: BrowserString }
+
+pub fn task(
+    _ first: own Pending<WasmBackend, BrowserString>,
+    _ second: own Pending<WasmBackend, u32>,
+) -> u32 {
+    let first_outcome: TaskOutcome<u32, BrowserString> = suspend(first)
+    let borrowed = match first_outcome {
+        TaskOutcome::Success(value) => Envelope { text: value }
+        TaskOutcome::Failure(_) => Envelope { text: BrowserString { ptr: 0, len: 0 } }
+        TaskOutcome::Cancelled => Envelope { text: BrowserString { ptr: 0, len: 0 } }
+    }
+    let second_outcome: TaskOutcome<u32, u32> = suspend(second)
+    match second_outcome {
+        TaskOutcome::Success(value) => borrowed.text.len + value
+        TaskOutcome::Failure(error) => borrowed.text.len + error
+        TaskOutcome::Cancelled => borrowed.text.len
+    }
+}
+"#;
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///borrowed_host_frame.fe").unwrap();
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(SOURCE.to_owned()));
+    let file = db.workspace().get(&db, &url).unwrap();
+    let top_mod = db.top_mod(file);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "borrowed host frame fixture diagnostics:\n{diagnostics}"
+    );
+    let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "task").unwrap();
+    let error = materialized_task_adapters(&db, &package).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("retains borrowed browser storage; copy it into Fe-owned storage"),
+        "unexpected borrowed host frame error: {error}"
     );
 }
 

@@ -19,16 +19,15 @@ export function createFeCoreWasmTransport(codec, semanticAdapter) {
   const attach = instance => {
     const exports = instance.exports;
     const memory = exports["memory"];
-    const alloc = exports["cabi_alloc"];
     const realloc = exports["cabi_realloc"];
     if (!(memory instanceof WebAssembly.Memory)) throw new TypeError("missing canonical memory export");
-    if (typeof alloc !== "function" || typeof realloc !== "function") throw new TypeError("missing canonical allocator exports");
+    if (typeof realloc !== "function") throw new TypeError("missing canonical realloc export");
     const postReturns = Object.fromEntries(Object.entries(postReturnNames).map(([identity, name]) => {
       const cleanup = exports[name];
       if (typeof cleanup !== "function") throw new TypeError(`missing post-return export ${name} for ${identity}`);
       return [identity, cleanup];
     }));
-    session.attach({ instance, memory, alloc, realloc, postReturns });
+    session.attach({ instance, memory, realloc, postReturns });
     return instance;
   };
   return { imports: { "fe:fixture": imports }, attach, session };

@@ -4,14 +4,15 @@
 //! entry points and codec operations; it does not duplicate memory layout or
 //! lift/lower algorithms.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use fe_host_abi::{
     Function, FunctionType, Handle, HandleOwnership, Param, Receiver, Type, TypeDefKind,
 };
 use fe_host_wasm_codec::{
-    BoundaryDirection, CoreType as CodecCoreType, Flattening, FunctionPlan as CodecFunctionPlan,
-    JS_CODEC_CONTRACT, PlanRequirement,
+    BoundaryDirection, CoreType as CodecCoreType, FE_HOST_WASM_ABI, FE_HOST_WASM_ABI_VERSION,
+    Flattening, FunctionPlan as CodecFunctionPlan, JS_CODEC_CONTRACT, PlanRequirement,
+    SerializableCodecPlan,
 };
 
 use crate::{AdapterPlan, BindgenError};
@@ -25,6 +26,10 @@ pub struct TransportPlan {
     pub module: String,
     pub memory: MemorySurfacePlan,
     pub functions: Vec<TransportFunction>,
+    /// Exact generated canonical layouts keyed by the same operation identity
+    /// used by the transport. This is build-time adapter data, not a runtime
+    /// application manifest.
+    pub codec_plans: BTreeMap<String, SerializableCodecPlan>,
     pub callbacks: Vec<CallbackTransport>,
     pub futures: Vec<FutureTransport>,
     pub required_codec_features: BTreeSet<PlanRequirement>,
@@ -33,7 +38,6 @@ pub struct TransportPlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemorySurfacePlan {
     pub memory_export: String,
-    pub alloc_export: String,
     pub realloc_export: String,
 }
 
@@ -93,6 +97,7 @@ pub enum CoreValueType {
 pub fn build_transport_plan(plan: &AdapterPlan) -> Result<TransportPlan, BindgenError> {
     let world = &plan.host_abi;
     let mut functions = Vec::new();
+    let mut codec_plans = BTreeMap::new();
     let mut callbacks = Vec::new();
     let mut futures = Vec::new();
     let mut required_codec_features = BTreeSet::new();
@@ -149,14 +154,13 @@ pub fn build_transport_plan(plan: &AdapterPlan) -> Result<TransportPlan, Bindgen
             let requirements = codec_plan.requirements.clone();
             let mut core = codec_core_signature(&codec_plan);
             let blocker = if is_async
-                && (requirements.contains(&PlanRequirement::PostReturn)
-                    || codec_plan
-                        .result
-                        .as_ref()
-                        .is_some_and(|result| matches!(result.layout.flat, Flattening::Indirect)))
+                && codec_plan
+                    .result
+                    .as_ref()
+                    .is_some_and(|result| matches!(result.layout.flat, Flattening::Indirect))
             {
                 Some(
-                    "generated Promise transport requires continuation-scoped post-return for rich results"
+                    "generated Promise transport requires direct canonical success lanes; indirect result materialization is not implemented"
                         .to_owned(),
                 )
             } else {
@@ -165,6 +169,15 @@ pub fn build_transport_plan(plan: &AdapterPlan) -> Result<TransportPlan, Bindgen
             let post_return_export = requirements
                 .contains(&PlanRequirement::PostReturn)
                 .then(|| post_return_name(&identity));
+            codec_plans.insert(
+                identity.clone(),
+                SerializableCodecPlan {
+                    contract: JS_CODEC_CONTRACT.to_owned(),
+                    abi: FE_HOST_WASM_ABI.to_owned(),
+                    abi_version: FE_HOST_WASM_ABI_VERSION,
+                    function: codec_plan.clone(),
+                },
+            );
             required_codec_features.extend(requirements.iter().copied());
             if is_async {
                 let success = core.results.clone();
@@ -270,10 +283,10 @@ pub fn build_transport_plan(plan: &AdapterPlan) -> Result<TransportPlan, Bindgen
         module: plan.module.clone(),
         memory: MemorySurfacePlan {
             memory_export: "memory".to_owned(),
-            alloc_export: "cabi_alloc".to_owned(),
             realloc_export: "cabi_realloc".to_owned(),
         },
         functions,
+        codec_plans,
         callbacks,
         futures,
         required_codec_features,
@@ -351,9 +364,10 @@ fn stable_hash(value: &str) -> u64 {
 /// Emit a two-phase Instance binder against a separately supplied codec.
 ///
 /// No codec ships in this crate. The binder fails before exposing imports when
-/// the codec lacks a requirement. Direct scalar Promise results use the shared
-/// generated-completion rail; rich Promise results and callback trampolines
-/// remain blocked until their continuation-scoped ownership mechanics exist.
+/// the codec lacks a requirement. Direct canonical Promise results use the
+/// shared generated-completion rail and release their result allocation after
+/// the exact Fe continuation invocation. Indirect Promise results and callback
+/// trampolines remain blocked.
 pub fn emit_js_core_wasm_transport(plan: &TransportPlan) -> String {
     let has_futures = !plan.futures.is_empty();
     let needs_realloc = plan
@@ -428,6 +442,7 @@ pub fn emit_js_core_wasm_transport(plan: &TransportPlan) -> String {
                  \x20       _signal => semanticAdapter.imports[{:?}][{:?}](...args),\n\
                  \x20       {},\n\
                  \x20       value => session.lowerResult({:?}, value),\n\
+                 \x20       () => session.finish({:?}),\n\
                  \x20     );\n\
                  \x20   }},\n",
                 function.import_name,
@@ -436,6 +451,7 @@ pub fn emit_js_core_wasm_transport(plan: &TransportPlan) -> String {
                 function.module,
                 function.import_name,
                 future.success.len(),
+                function.identity,
                 function.identity,
             ));
         } else {
@@ -474,7 +490,6 @@ pub fn emit_js_core_wasm_transport(plan: &TransportPlan) -> String {
         "  const attach = instance => {{\n\
          \x20   const exports = instance.exports;\n\
          \x20   const memory = exports[{:?}];\n\
-         \x20   const alloc = exports[{:?}];\n\
          \x20   const realloc = exports[{:?}];\n\
          \x20   if (!(memory instanceof WebAssembly.Memory)) throw new TypeError(\"missing canonical memory export\");\n\
          {}\
@@ -483,14 +498,13 @@ pub fn emit_js_core_wasm_transport(plan: &TransportPlan) -> String {
          \x20     if (typeof cleanup !== \"function\") throw new TypeError(`missing post-return export ${{name}} for ${{identity}}`);\n\
          \x20     return [identity, cleanup];\n\
          \x20   }}));\n\
-         \x20   session.attach({{ instance, memory, alloc, realloc, postReturns }});\n\
+         \x20   session.attach({{ instance, memory, realloc, postReturns }});\n\
          \x20   return instance;\n\
          \x20 }};\n",
         plan.memory.memory_export,
-        plan.memory.alloc_export,
         plan.memory.realloc_export,
         if needs_realloc {
-            "    if (typeof alloc !== \"function\" || typeof realloc !== \"function\") throw new TypeError(\"missing canonical allocator exports\");\n"
+            "    if (typeof realloc !== \"function\") throw new TypeError(\"missing canonical realloc export\");\n"
         } else {
             ""
         },
@@ -560,13 +574,13 @@ mod tests {
                 results: vec![CoreValueType::I32],
             })
         );
-        assert!(receive.blocker.as_deref().unwrap().contains("post-return"));
+        assert!(receive.blocker.is_none());
         assert_eq!(first.futures.len(), 1);
         assert_eq!(
             first.futures[0].success,
             [CoreValueType::I32, CoreValueType::I32]
         );
-        assert!(first.futures[0].blocker.is_some());
+        assert!(first.futures[0].blocker.is_none());
         assert_eq!(first.callbacks.len(), 1);
         assert!(first.callbacks[0].export_name.starts_with("__fe_callback_"));
         assert_eq!(
@@ -616,7 +630,7 @@ mod tests {
     }
 
     #[test]
-    fn javascript_binder_delegates_layout_and_fails_closed_for_rich_async_results() {
+    fn javascript_binder_delegates_layout_and_emits_continuation_scoped_cleanup() {
         let world = parse(FIXTURE).unwrap();
         let adapter = build_adapter_plan(&world, "transport-test", "fe:host").unwrap();
         let plan = build_transport_plan(&adapter).unwrap();
@@ -626,9 +640,9 @@ mod tests {
         assert!(js.contains("session.liftArguments"));
         assert!(js.contains("session.lowerResult"));
         assert!(js.contains("missing canonical memory export"));
-        assert!(js.contains("missing canonical allocator exports"));
+        assert!(js.contains("missing canonical realloc export"));
         assert!(js.contains("postReturns"));
-        assert!(js.contains("continuation-scoped post-return"));
+        assert!(js.contains("session.finish"));
         assert!(js.contains("transport blueprint is not executable"));
         // Memory is a mandatory transport surface checked by `attach`, not an
         // optional codec capability advertised through `supports`.
@@ -673,7 +687,7 @@ mod tests {
         assert!(js.contains("return completions.begin("), "{js}");
         assert!(js.contains("value => session.lowerResult("), "{js}");
         assert!(!js.contains("transport blueprint is not executable: generated"));
-        assert!(!js.contains("missing canonical allocator exports"));
+        assert!(!js.contains("missing canonical realloc export"));
     }
 
     #[test]
@@ -725,6 +739,7 @@ const codec = {{
         return lanes;
       }},
       lowerResult(_identity, value) {{ return value; }},
+      finish() {{}},
     }};
   }},
 }};
@@ -815,7 +830,6 @@ if (value !== 42) throw new Error(`wrong scalar completion ${{value}}`);
             module: "fe:fixture".to_owned(),
             memory: MemorySurfacePlan {
                 memory_export: "memory".to_owned(),
-                alloc_export: "cabi_alloc".to_owned(),
                 realloc_export: "cabi_realloc".to_owned(),
             },
             functions: vec![TransportFunction {
@@ -835,6 +849,13 @@ if (value !== 42) throw new Error(`wrong scalar completion ${{value}}`);
                 post_return_export: Some("cabi_post_fixture_send".to_owned()),
                 blocker: None,
             }],
+            codec_plans: BTreeMap::from([(
+                "fixture/send".to_owned(),
+                serde_json::from_str(include_str!(
+                    "../../../demos/shared/host-wasm-codec-v1.fixture.json"
+                ))
+                .unwrap(),
+            )]),
             callbacks: vec![],
             futures: vec![],
             required_codec_features: BTreeSet::from([
