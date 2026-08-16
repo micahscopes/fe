@@ -63,8 +63,10 @@ The shared precision ingot now derives BN254 Fr's maximal two-adic root from
 the prime and generator 5 in Fe, converts it to Montgomery form without a
 generated table, and provides field exponentiation, fail-closed inversion, and
 roots through order `2^28`. An independent bigint gate checks the compiled Fe
-Wasm values and exact subgroup orders. Radix-2 interpolation and low-degree
-extension, composition, and FRI remain pending.
+Wasm values and exact subgroup orders. One generic Fe radix-2 transform now
+provides forward NTT and inverse interpolation, rejects invalid domains through
+const predicates, and matches direct bigint DFTs at 4, 8, and 16 points.
+Low-degree extension, composition, and FRI remain pending.
 
 Escaping witnesses derive a power-of-two proof shape with one terminal marker
 and deterministic inactive padding; invalid and non-escaping claims cannot

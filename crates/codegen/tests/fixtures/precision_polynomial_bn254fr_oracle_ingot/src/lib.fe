@@ -1,0 +1,158 @@
+//! Wasm boundary for the generic Fe radix-2 polynomial transform gate.
+//! The size-specific wrappers only construct input arrays for independently
+//! callable monomorphizations. All butterfly and twiddle logic remains in
+//! `precision::polynomial`.
+
+use precision::bn254_fr::Bn254Fr
+use precision::field::{FieldElement, FieldWords}
+use precision::polynomial::{radix2_intt, radix2_ntt}
+
+fn words_tuple(_ words: FieldWords<20>) -> (
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    (
+        words[0], words[1], words[2], words[3], words[4],
+        words[5], words[6], words[7], words[8], words[9],
+        words[10], words[11], words[12], words[13], words[14],
+        words[15], words[16], words[17], words[18], words[19],
+    )
+}
+
+fn output_words<const N: usize>(
+    _ values: own [FieldElement<20, Bn254Fr>; N],
+    _ output: usize,
+) -> FieldWords<20> {
+    if output >= N { return [0; 20] }
+    values[output].to_plain_words()
+}
+
+pub fn ntt4_words(output: u32, a0: u32, a1: u32, a2: u32, a3: u32) -> (
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    words_tuple(output_words<4>(radix2_ntt<4, 20, Bn254Fr>([
+        FieldElement<20, Bn254Fr>::from_u32(a0),
+        FieldElement<20, Bn254Fr>::from_u32(a1),
+        FieldElement<20, Bn254Fr>::from_u32(a2),
+        FieldElement<20, Bn254Fr>::from_u32(a3),
+    ]), output as usize))
+}
+
+pub fn roundtrip4_words(output: u32, a0: u32, a1: u32, a2: u32, a3: u32) -> (
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    words_tuple(output_words<4>(radix2_intt<4, 20, Bn254Fr>(
+        radix2_ntt<4, 20, Bn254Fr>([
+        FieldElement<20, Bn254Fr>::from_u32(a0),
+        FieldElement<20, Bn254Fr>::from_u32(a1),
+        FieldElement<20, Bn254Fr>::from_u32(a2),
+        FieldElement<20, Bn254Fr>::from_u32(a3),
+        ])
+    ), output as usize))
+}
+
+pub fn ntt8_words(
+    output: u32,
+    a0: u32, a1: u32, a2: u32, a3: u32,
+    a4: u32, a5: u32, a6: u32, a7: u32,
+) -> (
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    words_tuple(output_words<8>(radix2_ntt<8, 20, Bn254Fr>([
+        FieldElement<20, Bn254Fr>::from_u32(a0),
+        FieldElement<20, Bn254Fr>::from_u32(a1),
+        FieldElement<20, Bn254Fr>::from_u32(a2),
+        FieldElement<20, Bn254Fr>::from_u32(a3),
+        FieldElement<20, Bn254Fr>::from_u32(a4),
+        FieldElement<20, Bn254Fr>::from_u32(a5),
+        FieldElement<20, Bn254Fr>::from_u32(a6),
+        FieldElement<20, Bn254Fr>::from_u32(a7),
+    ]), output as usize))
+}
+
+pub fn roundtrip8_words(
+    output: u32,
+    a0: u32, a1: u32, a2: u32, a3: u32,
+    a4: u32, a5: u32, a6: u32, a7: u32,
+) -> (
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    words_tuple(output_words<8>(radix2_intt<8, 20, Bn254Fr>(
+        radix2_ntt<8, 20, Bn254Fr>([
+        FieldElement<20, Bn254Fr>::from_u32(a0),
+        FieldElement<20, Bn254Fr>::from_u32(a1),
+        FieldElement<20, Bn254Fr>::from_u32(a2),
+        FieldElement<20, Bn254Fr>::from_u32(a3),
+        FieldElement<20, Bn254Fr>::from_u32(a4),
+        FieldElement<20, Bn254Fr>::from_u32(a5),
+        FieldElement<20, Bn254Fr>::from_u32(a6),
+        FieldElement<20, Bn254Fr>::from_u32(a7),
+        ])
+    ), output as usize))
+}
+
+pub fn ntt16_words(
+    output: u32,
+    a0: u32, a1: u32, a2: u32, a3: u32,
+    a4: u32, a5: u32, a6: u32, a7: u32,
+    a8: u32, a9: u32, a10: u32, a11: u32,
+    a12: u32, a13: u32, a14: u32, a15: u32,
+) -> (
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    words_tuple(output_words<16>(radix2_ntt<16, 20, Bn254Fr>([
+        FieldElement<20, Bn254Fr>::from_u32(a0),
+        FieldElement<20, Bn254Fr>::from_u32(a1),
+        FieldElement<20, Bn254Fr>::from_u32(a2),
+        FieldElement<20, Bn254Fr>::from_u32(a3),
+        FieldElement<20, Bn254Fr>::from_u32(a4),
+        FieldElement<20, Bn254Fr>::from_u32(a5),
+        FieldElement<20, Bn254Fr>::from_u32(a6),
+        FieldElement<20, Bn254Fr>::from_u32(a7),
+        FieldElement<20, Bn254Fr>::from_u32(a8),
+        FieldElement<20, Bn254Fr>::from_u32(a9),
+        FieldElement<20, Bn254Fr>::from_u32(a10),
+        FieldElement<20, Bn254Fr>::from_u32(a11),
+        FieldElement<20, Bn254Fr>::from_u32(a12),
+        FieldElement<20, Bn254Fr>::from_u32(a13),
+        FieldElement<20, Bn254Fr>::from_u32(a14),
+        FieldElement<20, Bn254Fr>::from_u32(a15),
+    ]), output as usize))
+}
+
+pub fn roundtrip16_words(
+    output: u32,
+    a0: u32, a1: u32, a2: u32, a3: u32,
+    a4: u32, a5: u32, a6: u32, a7: u32,
+    a8: u32, a9: u32, a10: u32, a11: u32,
+    a12: u32, a13: u32, a14: u32, a15: u32,
+) -> (
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    words_tuple(output_words<16>(radix2_intt<16, 20, Bn254Fr>(
+        radix2_ntt<16, 20, Bn254Fr>([
+        FieldElement<20, Bn254Fr>::from_u32(a0),
+        FieldElement<20, Bn254Fr>::from_u32(a1),
+        FieldElement<20, Bn254Fr>::from_u32(a2),
+        FieldElement<20, Bn254Fr>::from_u32(a3),
+        FieldElement<20, Bn254Fr>::from_u32(a4),
+        FieldElement<20, Bn254Fr>::from_u32(a5),
+        FieldElement<20, Bn254Fr>::from_u32(a6),
+        FieldElement<20, Bn254Fr>::from_u32(a7),
+        FieldElement<20, Bn254Fr>::from_u32(a8),
+        FieldElement<20, Bn254Fr>::from_u32(a9),
+        FieldElement<20, Bn254Fr>::from_u32(a10),
+        FieldElement<20, Bn254Fr>::from_u32(a11),
+        FieldElement<20, Bn254Fr>::from_u32(a12),
+        FieldElement<20, Bn254Fr>::from_u32(a13),
+        FieldElement<20, Bn254Fr>::from_u32(a14),
+        FieldElement<20, Bn254Fr>::from_u32(a15),
+        ])
+    ), output as usize))
+}

@@ -1,0 +1,7 @@
+[ingot]
+name = "precision_polynomial_bn254fr_oracle_gate"
+version = "0.1.0"
+
+[dependencies]
+core = "../../../../../ingots/core"
+precision = "../../../../../demos/sketches/precision"

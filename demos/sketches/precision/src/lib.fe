@@ -70,6 +70,7 @@
 pub use field
 pub use bn254_fr
 pub use fixed
+pub use polynomial
 
 /// Knuth's TwoSum: exact `a + b` as `(s, e)` with `s + e == a + b` over the
 /// reals, for ANY `a`, `b`. Verbatim from the hand df64 (mandelbrot/src/lib.fe).

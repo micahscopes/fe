@@ -41,14 +41,6 @@ fn words_tuple(_ words: FieldWords<20>) -> (
     )
 }
 
-fn exponent_words_u32(_ exponent: u32) -> FieldWords<20> {
-    let mut words: FieldWords<20> = [0; 20]
-    words[0] = exponent & 8191
-    words[1] = (exponent >> 13) & 8191
-    words[2] = exponent >> 26
-    words
-}
-
 pub fn field_bn254fr_roundtrip_u32(value: u32) -> (
     u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
     u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
@@ -62,7 +54,7 @@ pub fn field_bn254fr_pow_u32(base: u32, exponent: u32) -> (
 ) {
     words_tuple(
         FieldElement<20, Bn254Fr>::from_u32(base)
-            .pow_words(exponent_words_u32(exponent))
+            .pow_u32(exponent)
             .to_plain_words()
     )
 }
@@ -93,7 +85,7 @@ pub fn field_bn254fr_two_adic_root_power(log_order: u32, exponent: u32) -> (
 ) {
     words_tuple(
         FieldElement<20, Bn254Fr>::two_adic_root(log_order)
-            .pow_words(exponent_words_u32(exponent))
+            .pow_u32(exponent)
             .to_plain_words()
     )
 }

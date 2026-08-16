@@ -223,7 +223,11 @@ inside Fe, converts it to Montgomery form at compile time, and exposes generic
 square-and-multiply, Fermat inversion, and subgroup roots through `2^28`.
 There is no generated root table. An independent bigint gate checks ordinary
 powers, the full-width `p - 2` exponent, exact subgroup orders, and
-unsupported-order rejection through compiled Fe Wasm. The
+unsupported-order rejection through compiled Fe Wasm. One generic Fe
+Cooley-Tukey transform supplies forward NTT and inverse interpolation.
+Compile-time predicates reject zero, non-power-of-two, and field-unsupported
+domains; direct bigint DFT and round-trip gates exercise the same algorithm at
+4, 8, and 16 points. The
 field-AIR ingot now consumes this API directly on Wasm. Canonical Poseidon
 parameters derive from Grain inside Fe, and the concise Fe permutation now
 executes the fixed four-row commitment in zero-import Wasm. Its honest SPIR-V
@@ -232,8 +236,8 @@ so aggregate-return inlining or shader function-call lowering is required
 before the same field implementation runs as an application GPU kernel.
 The production power-of-two main and auxiliary trace streams, ordered
 pre-composition transcript, and first Fiat-Shamir challenge now execute.
-Radix-2 interpolation and low-degree extension, composition, later transcript
-stages, and FRI remain open.
+Low-degree extension, composition, later transcript stages, and FRI remain
+open.
 
 The intended succinct construction is a transparent AIR plus FRI over a field
 with an audited two-adic domain. The first implementation should reuse the

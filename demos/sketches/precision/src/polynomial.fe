@@ -1,0 +1,133 @@
+//! Generic radix-2 polynomial transforms over a modulus-branded Fe field.
+//!
+//! This module deliberately derives every twiddle from the field's audited
+//! maximal two-adic root. It contains no generated root table and no
+//! size-specialized butterfly schedule. Const predicates reject zero,
+//! non-power-of-two, or field-unsupported domains before lowering.
+
+use super::field::{
+    FieldElement, Limbs, ShiftAppend, Head, TwoAdicModulus,
+    U32EmbeddingModulus,
+}
+use core::marker::Copy
+
+const fn radix2_log_unchecked<const N: usize>() -> u32 {
+    let mut remaining: usize = N
+    let mut log: u32 = 0
+    while remaining > 1 {
+        remaining = remaining >> 1
+        log = log + 1
+    }
+    log
+}
+
+pub const fn radix2_log<const N: usize>() -> u32
+    where N > 0, { (N & (N - 1)) == 0 },
+{
+    radix2_log_unchecked<N>()
+}
+
+fn reverse_low_bits(_ value: usize, _ width: u32) -> usize {
+    let mut source = value
+    let mut reversed: usize = 0
+    let mut bit: u32 = 0
+    while bit < width {
+        reversed = (reversed << 1) | (source & 1)
+        source = source >> 1
+        bit = bit + 1
+    }
+    reversed
+}
+
+/// Cooley-Tukey radix-2 transform. The inverse uses the inverse root and
+/// multiplies by `N^-1`; it is therefore genuine interpolation, not a second
+/// forward transform with reordered output.
+fn transform<const N: usize, const L: usize, M>(
+    _ values: own [FieldElement<L, M>; N],
+    _ inverse: bool,
+) -> [FieldElement<L, M>; N]
+    where
+        N > 0,
+        { (N & (N - 1)) == 0 },
+        { radix2_log_unchecked<N>() <= M::TWO_ADICITY },
+        L >= 3,
+        M: TwoAdicModulus<L> + U32EmbeddingModulus<L>,
+        Limbs<L>: Head + ShiftAppend + Copy,
+{
+    let log_n = radix2_log<N>()
+    let mut values = values
+    let mut index: usize = 0
+    while index < N {
+        let reversed = reverse_low_bits(index, log_n)
+        if reversed > index {
+            let value = values[index]
+            values[index] = values[reversed]
+            values[reversed] = value
+        }
+        index = index + 1
+    }
+
+    let mut root = FieldElement<L, M>::two_adic_root(log_n)
+    if inverse { root = root.inverse_or_zero() }
+    let one = FieldElement<L, M>::one()
+    let mut width: usize = 2
+    while width <= N {
+        let twiddle_step: u32 = (N / width).downcast_truncate()
+        let stage_root = root.pow_u32(twiddle_step)
+        let half = width >> 1
+        let mut block: usize = 0
+        while block < N {
+            let mut twiddle = one
+            let mut offset: usize = 0
+            while offset < half {
+                let even = values[block + offset]
+                let odd = values[block + offset + half] * twiddle
+                values[block + offset] = even + odd
+                values[block + offset + half] = even - odd
+                twiddle = twiddle * stage_root
+                offset = offset + 1
+            }
+            block = block + width
+        }
+        width = width << 1
+    }
+
+    if inverse {
+        let scale = FieldElement<L, M>::from_u32(N.downcast_truncate())
+            .inverse_or_zero()
+        let mut i: usize = 0
+        while i < N {
+            values[i] = values[i] * scale
+            i = i + 1
+        }
+    }
+    values
+}
+
+pub fn radix2_ntt<const N: usize, const L: usize, M>(
+    _ coefficients: own [FieldElement<L, M>; N],
+) -> [FieldElement<L, M>; N]
+    where
+        N > 0,
+        { (N & (N - 1)) == 0 },
+        { radix2_log_unchecked<N>() <= M::TWO_ADICITY },
+        L >= 3,
+        M: TwoAdicModulus<L> + U32EmbeddingModulus<L>,
+        Limbs<L>: Head + ShiftAppend + Copy,
+{
+    transform<N, L, M>(coefficients, false)
+}
+
+pub fn radix2_intt<const N: usize, const L: usize, M>(
+    _ evaluations: own [FieldElement<L, M>; N],
+) -> [FieldElement<L, M>; N]
+    where
+        N > 0,
+        { (N & (N - 1)) == 0 },
+        { radix2_log_unchecked<N>() <= M::TWO_ADICITY },
+        L >= 3,
+        M: TwoAdicModulus<L> + U32EmbeddingModulus<L>,
+        Limbs<L>: Head + ShiftAppend + Copy,
+{
+    transform<N, L, M>(evaluations, true)
+}

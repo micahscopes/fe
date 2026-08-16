@@ -349,7 +349,7 @@ pub trait U32EmbeddingModulus<const L: usize>: MontgomeryModulus<L> {}
 /// multiplicative subgroup. The root is supplied in Montgomery form and must
 /// have exact order `2^two_adicity()`.
 pub trait TwoAdicModulus<const L: usize>: PrimeModulus<L> {
-    fn two_adicity() -> u32
+    const TWO_ADICITY: u32
     fn two_adic_root_words() -> FieldWords<L>
 }
 
@@ -665,6 +665,22 @@ impl<const L: usize, M> FieldElement<L, M>
         result
     }
 
+    pub fn pow_u32(self, _ exponent: u32) -> Self {
+        let mut result = Self::from_plain_words({
+            let mut one: FieldWords<L> = [0; L]
+            one[0] = 1
+            one
+        })
+        let mut base = self
+        let mut exponent = exponent
+        while exponent != 0 {
+            if (exponent & 1) == 1 { result = result * base }
+            base = base.square()
+            exponent = exponent >> 1
+        }
+        result
+    }
+
 }
 
 impl<const L: usize, M> FieldElement<L, M>
@@ -683,7 +699,7 @@ impl<const L: usize, M> FieldElement<L, M>
     /// Primitive root for a requested power-of-two subgroup. Unsupported
     /// orders fail closed as zero.
     pub fn two_adic_root(_ log_order: u32) -> Self {
-        let adicity = M::two_adicity()
+        let adicity = M::TWO_ADICITY
         if log_order > adicity { return Self::zero() }
         let mut root = Self::from_montgomery_words(M::two_adic_root_words())
         let mut remaining = adicity - log_order

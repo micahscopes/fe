@@ -279,10 +279,14 @@ Legend:
   fail-closed Fermat inversion, and roots through order `2^28`. An independent
   bigint Wasm gate checks ordinary powers, the full-width `p - 2` inverse,
   exact root orders, and unsupported-order rejection while retaining the
-  existing BN254 and second-modulus gates. Radix-2 transform, interpolation,
-  low-degree extension, composition, later transcript stages, and FRI remain
-  pending. The reusable field API's SPIR-V helper-call seam and GPU permutation
-  lift also remain open.
+  existing BN254 and second-modulus gates. One generic Fe Cooley-Tukey
+  transform now provides forward NTT and inverse interpolation with no root
+  table or size-specialized butterfly schedule. Const predicates reject zero,
+  non-power-of-two, and field-unsupported domains. Independent direct bigint
+  DFTs and round trips gate the same generic implementation at 4, 8, and 16
+  points. Low-degree extension, composition, later transcript stages, and FRI
+  remain pending. The reusable field API's SPIR-V helper-call seam and GPU
+  permutation lift also remain open.
   This is a general-tree statement-commitment milestone and executable AIR
   evidence, not yet a succinct proof.
 - [ ] Produce a succinct proof whose verifier is demonstrably cheaper than
@@ -329,10 +333,9 @@ fallback. The semantic receipts are:
 
 1. Run the external real-GPU handoff above.
 2. Build composition constraints from the main and Fe-derived auxiliary
-   columns. Use the now-gated Fe-derived two-adic roots to add radix-2
-   interpolation and low-degree extension, then bind the composition
-   commitment before deriving FRI challenges under independent mutation and
-   cost oracles.
+   columns. Use the now-gated generic Fe radix-2 interpolation to add
+   low-degree extension, then bind the composition commitment before deriving
+   FRI challenges under independent mutation and cost oracles.
 3. Finish typed fetch, then Worker/port placement and supervision on the one
    runtime-control spine.
 4. Delete the runtime manifest and finish the legacy disposition.

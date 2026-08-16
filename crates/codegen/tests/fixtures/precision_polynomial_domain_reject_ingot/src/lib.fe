@@ -1,0 +1,41 @@
+//! Deliberately invalid transform instantiations for the domain-shape gate.
+
+use precision::bn254_fr::Bn254Fr
+use precision::field::{
+    FieldElement, FieldWords, LimbLast, LimbMore, Limbs, Modulus,
+    MontgomeryModulus, PrimeModulus, TwoAdicModulus, U32EmbeddingModulus,
+}
+use precision::polynomial::radix2_ntt
+
+struct AdicityTwo {}
+
+impl Modulus<3> for AdicityTwo {
+    fn p_limbs() -> Limbs<3> {
+        LimbMore { lead: 17, tail: LimbMore { lead: 0, tail: LimbLast { value: 0 } } }
+    }
+    fn mu() -> u32 { 4819 }
+}
+
+impl MontgomeryModulus<3> for AdicityTwo {
+    fn r2_words() -> FieldWords<3> { [1, 0, 0] }
+}
+
+impl PrimeModulus<3> for AdicityTwo {}
+impl U32EmbeddingModulus<3> for AdicityTwo {}
+
+impl TwoAdicModulus<3> for AdicityTwo {
+    const TWO_ADICITY: u32 = 2
+    fn two_adic_root_words() -> FieldWords<3> { [1, 0, 0] }
+}
+
+pub fn rejects_non_power_of_two(
+    _ values: own [FieldElement<20, Bn254Fr>; 3],
+) -> [FieldElement<20, Bn254Fr>; 3] {
+    radix2_ntt<3, 20, Bn254Fr>(values)
+}
+
+pub fn rejects_field_unsupported_order(
+    _ values: own [FieldElement<3, AdicityTwo>; 8],
+) -> [FieldElement<3, AdicityTwo>; 8] {
+    radix2_ntt<8, 3, AdicityTwo>(values)
+}

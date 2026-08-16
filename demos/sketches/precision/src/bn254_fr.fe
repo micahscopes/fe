@@ -57,7 +57,7 @@ impl U32EmbeddingModulus<20> for Bn254Fr {}
 impl PrimeModulus<20> for Bn254Fr {}
 
 impl TwoAdicModulus<20> for Bn254Fr {
-    fn two_adicity() -> u32 { BN254_FR_TWO_ADICITY }
+    const TWO_ADICITY: u32 = BN254_FR_TWO_ADICITY
     fn two_adic_root_words() -> FieldWords<20> { TWO_ADIC_ROOT_WORDS }
 }
 
