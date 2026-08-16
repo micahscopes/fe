@@ -248,17 +248,23 @@ Legend:
   Poseidon Merkle root in zero-import Wasm. The tree shape is no longer
   hand-authored: a 22-slot Fe frontier folds any CTFE-proved nonzero
   power-of-two domain through `2^21` while retaining O(log N) digests. Four-row
-  compatibility and an eight-row domain both execute. The independent oracle
-  reconstructs the orbit, encoding, canonical permutation, and trees, mutates
-  every four-row column, proves row-order sensitivity, and binds both inactive
-  padding positions in a six-active-row/eight-row trace. A distinct typed
-  `"MT01"` domain binds each root to an injective 114-bit encoding of the public
-  point, bound, terminal step, semantic length, and padded length. The same
-  independent gate mutates every public field, and both statement sizes return
-  their compiler-proven arena frames to byte 1024. Wiring the production
-  general-length trace generator directly into the frontier, Fiat-Shamir
-  challenge derivation, composition, and FRI remain pending. The reusable
-  field API's SPIR-V helper-call seam and GPU permutation lift also remain open.
+  compatibility and an eight-row domain both execute. The canonical transition
+  and encoded-row schema now live in one reusable Fe kernel ingot consumed by
+  both the AIR and commitment layers. A stateful Fe cursor retains the current
+  expanded AIR row and advances from its exact Q12 quotients. The production
+  commitment consumes that cursor once, folds each active row immediately,
+  derives terminal-state padding in Fe, and accepts no host-authored witness
+  rows. Its gate covers 4-row, 8-row, and 16-row domains, invalid and
+  non-escaping rejection, and exact arena reclamation to byte 1024. The
+  independent oracle reconstructs the orbit, encoding, canonical permutation,
+  and trees, mutates every four-row column, proves row-order sensitivity, and
+  binds both inactive padding positions in a six-active-row/eight-row trace. A
+  distinct typed `"MT01"` domain binds each root to an injective 114-bit
+  encoding of the public point, bound, terminal step, semantic length, and
+  padded length. The same independent gate mutates every public field.
+  Fiat-Shamir challenge derivation, composition, and FRI remain pending. The
+  reusable field API's SPIR-V helper-call seam and GPU permutation lift also
+  remain open.
   This is a general-tree statement-commitment milestone and executable AIR
   evidence, not yet a succinct proof.
 - [ ] Produce a succinct proof whose verifier is demonstrably cheaper than
@@ -304,9 +310,9 @@ fallback. The semantic receipts are:
 ## Immediate burn-down order
 
 1. Run the external real-GPU handoff above.
-2. Stream the production general-length trace into the power-of-two frontier,
-   then add Fiat-Shamir challenges, composition constraints, and the first FRI
-   layer under independent mutation and cost oracles.
+2. Add Fiat-Shamir challenges, composition constraints, and the first FRI layer
+   to the streamed power-of-two trace under independent mutation and cost
+   oracles.
 3. Finish typed fetch, then Worker/port placement and supervision on the one
    runtime-control spine.
 4. Delete the runtime manifest and finish the legacy disposition.

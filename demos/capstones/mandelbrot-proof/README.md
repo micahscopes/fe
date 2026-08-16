@@ -4,8 +4,10 @@ This directory begins the proof capstone with one exact Fe-authored statement
 and witness transition. It does not claim that the current witness is a
 succinct proof.
 
-`kernel.fe` defines `EscapesByQ12`, the least terminal trace row, and the
-expanded integer columns needed by the first AIR. The independent Rust oracle
+The `kernel` Fe ingot defines `EscapesByQ12`, the least terminal trace row, and
+the expanded integer columns needed by the first AIR. It also owns the one
+canonical encoded-row schema shared by the AIR and commitment ingots. The
+independent Rust oracle
 executes the compiled Fe Wasm, compares every row value and signed Q12
 quotient/remainder against an i64 model, and rejects one-unit mutations in
 every expanded column. Fe also emits the canonical sign-plus-magnitude row
@@ -13,10 +15,11 @@ encoding, evaluates widened integer polynomial residuals, and verifies an
 alleged directed row pair. The gate mutates both rows and public claim values,
 including a residual-zero noncanonical shift decomposition.
 
-`field-air` is a separate Fe ingot that lifts nine local and nine transition
-residuals into BN254 Fr through the reusable modulus-branded field API. Its
-Wasm has no function imports. The independent gate checks directed residuals,
-one-unit mutations, and sign-bit rejection. BN254 first/pair/last polynomials
+`field-air` is a separate Fe ingot that consumes that schema and lifts nine
+local and nine transition residuals into BN254 Fr through the reusable
+modulus-branded field API. Its Wasm has no function imports. The independent
+gate checks directed residuals, one-unit mutations, and sign-bit rejection.
+BN254 first/pair/last polynomials
 also constrain activity, the unique terminal marker, selected Mandelbrot
 transitions, and exact terminal-state padding through nested nominal Fe rows.
 Generic low-degree range polynomials add bit reconstruction and a quadratic
@@ -34,16 +37,19 @@ padded domain without replaying the orbit.
 row schema has 210 audited bits, which Fe packs injectively into one BN254
 field element. Fe derives typed row and node domains from `"MR01"` and
 `"MN01"`. A 22-slot Fe Merkle frontier accepts only CTFE-proved nonzero
-power-of-two domains through `2^21`, so it retains O(log N) digests and can
-later consume a one-pass trace generator without retaining the tree or its
-leaves. The four-row compatibility boundary and a new eight-row boundary both
-execute in zero-import Wasm. The independent oracle reconstructs the orbit,
-row packing, canonical Poseidon permutation, and tree. It mutates every
+power-of-two domains through `2^21`, so it retains O(log N) digests. The kernel
+now exposes a stateful Fe trace stream that retains the current expanded row
+and advances from its exact Q12 quotients. The production commitment consumes
+that stream once, immediately folds each active row into the frontier, and
+derives the terminal-state padding in Fe. No host-authored witness rows cross
+that API. Four-row and eight-row compatibility boundaries remain as useful
+mutation gates, while the production gate also crosses into a 16-row domain.
+All execute in zero-import Wasm. The independent oracle reconstructs the
+orbit, row packing, canonical Poseidon permutation, and tree. It mutates every
 four-row column, row order, and both inactive padding positions of a six-active
 row, eight-row domain. A distinct `"MT01"` domain binds each trace root to an
 injective 114-bit encoding of the public point, bound, terminal step, semantic
-length, and padded length. Every public field is independently mutated. Wiring
-the production general-length trace generator directly into the frontier,
+length, and padded length. Every public field is independently mutated.
 Fiat-Shamir challenges, composition, and FRI remain pending.
 
 Escaping witnesses derive a power-of-two proof shape with one terminal marker

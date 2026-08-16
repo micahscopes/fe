@@ -87,17 +87,17 @@ fn air_row(step: u32, zr: i64, zi: i64) -> AirRow {
 }
 
 fn four_row_escape_trace() -> Vec<ProofRow> {
-    let rows = escape_trace(3072, 0);
+    let rows = escape_trace(3072, 0, 16);
     assert_eq!(rows.len(), 4);
     assert_eq!(rows.iter().map(|row| row.terminal).sum::<u32>(), 1);
     rows
 }
 
-fn escape_trace(c_re: i64, c_im: i64) -> Vec<ProofRow> {
+fn escape_trace(c_re: i64, c_im: i64, bound: u32) -> Vec<ProofRow> {
     let mut zr = 0i64;
     let mut zi = 0i64;
     let mut rows = Vec::new();
-    for step in 0..16 {
+    for step in 0..=bound {
         let air = air_row(step, zr, zi);
         let terminal = air.terminal;
         rows.push(ProofRow {
@@ -117,7 +117,7 @@ fn escape_trace(c_re: i64, c_im: i64) -> Vec<ProofRow> {
 }
 
 fn eight_row_escape_trace() -> Vec<ProofRow> {
-    let mut rows = escape_trace(2048, 0);
+    let mut rows = escape_trace(2048, 0, 16);
     assert_eq!(rows.len(), 6);
     let terminal = rows.last().unwrap().air.clone();
     while rows.len() < 8 {
@@ -129,6 +129,21 @@ fn eight_row_escape_trace() -> Vec<ProofRow> {
     }
     assert_eq!(rows.iter().map(|row| row.active).sum::<u32>(), 6);
     assert_eq!(rows.iter().map(|row| row.terminal).sum::<u32>(), 1);
+    rows
+}
+
+fn padded_escape_trace(c_re: i64, c_im: i64, bound: u32) -> Vec<ProofRow> {
+    let mut rows = escape_trace(c_re, c_im, bound);
+    assert_eq!(rows.last().unwrap().terminal, 1);
+    let terminal = rows.last().unwrap().air.clone();
+    let padded_length = rows.len().next_power_of_two();
+    while rows.len() < padded_length {
+        rows.push(ProofRow {
+            active: 0,
+            terminal: 0,
+            air: terminal.clone(),
+        });
+    }
     rows
 }
 
@@ -408,6 +423,42 @@ fn call_statement(
         })
 }
 
+fn plain_limbs(words: &[u32]) -> BigUint {
+    assert_eq!(words.len(), LIMBS);
+    words
+        .iter()
+        .enumerate()
+        .fold(BigUint::from(0u32), |value, (word, limb)| {
+            value + (BigUint::from(*limb) << (word * LIMB_BITS))
+        })
+}
+
+fn call_streamed_statement(
+    store: &mut wasmtime::Store<()>,
+    generate: &wasmtime::Func,
+    reset: &wasmtime::TypedFunc<(), ()>,
+    c_re: i32,
+    c_im: i32,
+    bound: u32,
+) -> Vec<u32> {
+    reset.call(&mut *store, ()).unwrap();
+    let arguments = [
+        wasmtime::Val::I32(c_re),
+        wasmtime::Val::I32(c_im),
+        wasmtime::Val::I32(bound as i32),
+    ];
+    let mut output = vec![wasmtime::Val::I32(0); 44];
+    generate.call(&mut *store, &arguments, &mut output).unwrap();
+    output
+        .into_iter()
+        .enumerate()
+        .map(|(word, value)| match value {
+            wasmtime::Val::I32(value) => value as u32,
+            _ => panic!("streamed output word {word} was not i32"),
+        })
+        .collect()
+}
+
 #[test]
 fn fe_trace_and_statement_match_independent_orbit_encoding_poseidon_and_merkle_model() {
     let parameters = parameters();
@@ -610,9 +661,11 @@ fn fe_eight_row_frontier_matches_independent_tree_and_binds_padding() {
         let mut mutated = rows.clone();
         mutated[padding_row].air.step += 1;
         let expected_mutation = trace_root_power_of_two(&mutated, &parameters);
-        let expected_statement_mutation =
-            statement_commitment(&statement, &mutated, &parameters);
-        assert_ne!(expected_mutation, expected_root, "padding row {padding_row}");
+        let expected_statement_mutation = statement_commitment(&statement, &mutated, &parameters);
+        assert_ne!(
+            expected_mutation, expected_root,
+            "padding row {padding_row}"
+        );
         assert_ne!(
             expected_statement_mutation, expected_statement,
             "statement padding row {padding_row}"
@@ -637,4 +690,63 @@ fn fe_eight_row_frontier_matches_independent_tree_and_binds_padding() {
         call_root(&mut store, &root, &reset, &reordered),
         expected_reordered
     );
+}
+
+#[test]
+fn fe_streams_the_canonical_trace_directly_into_the_frontier() {
+    let parameters = parameters();
+    let wasm = compile_gate();
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, wasm).unwrap();
+    assert!(module.imports().next().is_none());
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+    let generate = instance
+        .get_func(&mut store, "streamed_statement_q12_plain_words")
+        .unwrap();
+    let reset = instance
+        .get_typed_func::<(), ()>(&mut store, "fe_cabi_reset")
+        .unwrap();
+    let alloc = instance
+        .get_typed_func::<(i32, i32), i32>(&mut store, "fe_cabi_alloc")
+        .unwrap();
+
+    for (c_re, c_im, bound, rows, terminal_step) in [
+        (3072, 0, 16, four_row_escape_trace(), 3),
+        (2048, 0, 16, eight_row_escape_trace(), 5),
+        (-7296, -128, 32, padded_escape_trace(-7296, -128, 32), 9),
+    ] {
+        let statement = PublicStatement {
+            c_re: signed(i64::from(c_re)),
+            c_im: signed(i64::from(c_im)),
+            bound,
+            terminal_step,
+            trace_length: terminal_step + 1,
+            padded_length: rows.len() as u32,
+        };
+        let expected_root = trace_root_power_of_two(&rows, &parameters);
+        let expected_statement = statement_commitment(&statement, &rows, &parameters);
+        let actual = call_streamed_statement(&mut store, &generate, &reset, c_re, c_im, bound);
+        assert_eq!(actual[0], 1);
+        assert_eq!(actual[1], terminal_step);
+        assert_eq!(actual[2], terminal_step + 1);
+        assert_eq!(actual[3], rows.len() as u32);
+        assert_eq!(plain_limbs(&actual[4..24]), expected_root);
+        assert_eq!(plain_limbs(&actual[24..44]), expected_statement);
+        assert_eq!(
+            alloc.call(&mut store, (1, 1)).unwrap(),
+            1024,
+            "the one-pass Fe generator must reclaim every local temporary"
+        );
+    }
+
+    for (c_re, c_im, bound) in [(0, 0, 16), (3072, 0, 2), (4096, 0, 16), (0, 0, 1_048_577)] {
+        let actual = call_streamed_statement(&mut store, &generate, &reset, c_re, c_im, bound);
+        assert!(actual.iter().all(|word| *word == 0));
+        assert_eq!(
+            alloc.call(&mut store, (1, 1)).unwrap(),
+            1024,
+            "failed claims must also reclaim the one-pass generator frame"
+        );
+    }
 }

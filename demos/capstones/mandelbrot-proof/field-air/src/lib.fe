@@ -1,6 +1,7 @@
 //! BN254 evaluation of the bounded Mandelbrot AIR polynomials.
 //!
-//! This is the proof-field lift of the integer residuals in `../kernel.fe`.
+//! This is the proof-field lift of the integer residuals in the reusable
+//! `mandelbrot_proof_kernel` ingot.
 //! It consumes the canonical sign-plus-magnitude columns, reconstructs signed
 //! field values algebraically as `(1 - 2s) * magnitude`, constrains every sign
 //! with `s * (s - 1)`, and evaluates the row and transition equalities in
@@ -10,83 +11,12 @@
 
 use precision::bn254_fr::Bn254Fr
 use precision::field::FieldElement
+pub use mandelbrot_proof_kernel::{
+    EncodedAirRow, EncodedProofRow, SignedWord, ENCODED_PROOF_ROW_WIDTHS,
+    encoded_proof_row_words,
+}
 
 type Fr = FieldElement<20, Bn254Fr>
-
-/// Canonical signed witness input. Range and canonical-zero constraints are a
-/// separate layer; this nominal shape prevents callers from confusing sign
-/// and magnitude lanes while that layer is being added.
-pub struct SignedWord { pub sign: u32, pub magnitude: u32 }
-
-impl core::marker::Copy for SignedWord {}
-
-/// The canonical 15-word AIR encoding, with signed columns kept nominal at the
-/// Fe boundary instead of exposed as an untyped word-number protocol.
-pub struct EncodedAirRow {
-    pub step: u32,
-    pub zr: SignedWord,
-    pub zi: SignedWord,
-    pub rr: u32,
-    pub ii: u32,
-    pub magnitude: u32,
-    pub q_re: SignedWord,
-    pub r_re: u32,
-    pub q_im: SignedWord,
-    pub r_im: u32,
-    pub terminal: u32,
-}
-
-impl core::marker::Copy for EncodedAirRow {}
-
-/// One padded trace row. `terminal` is the unique proof marker, while
-/// `air.terminal` records the escape predicate on the repeated semantic row.
-pub struct EncodedProofRow {
-    pub active: u32,
-    pub terminal: u32,
-    pub air: EncodedAirRow,
-}
-
-impl core::marker::Copy for EncodedProofRow {}
-
-/// Audited bit widths for the canonical commitment encoding below. Their sum
-/// is 210, so every range-valid row has an injective representation in one
-/// BN254 field element. Range constraints, rather than truncating masks, make
-/// this packing sound.
-pub const ENCODED_PROOF_ROW_WIDTHS: [u32; 17] = [
-    21,
-    1, 15,
-    1, 15,
-    30,
-    30,
-    31,
-    1, 18,
-    12,
-    1, 19,
-    12,
-    1,
-    1,
-    1,
-]
-
-/// Canonical commitment words for one padded proof row. The order is the 15
-/// AIR words followed by `(active, unique_terminal)`.
-pub fn encoded_proof_row_words(_ row: own EncodedProofRow) -> [u32; 17] {
-    [
-        row.air.step,
-        row.air.zr.sign, row.air.zr.magnitude,
-        row.air.zi.sign, row.air.zi.magnitude,
-        row.air.rr,
-        row.air.ii,
-        row.air.magnitude,
-        row.air.q_re.sign, row.air.q_re.magnitude,
-        row.air.r_re,
-        row.air.q_im.sign, row.air.q_im.magnitude,
-        row.air.r_im,
-        row.air.terminal,
-        row.active,
-        row.terminal,
-    ]
-}
 
 /// Low-degree range witness. `bits` reconstruct the value, while `any` is the
 /// inclusive prefix OR. The latter gives canonical-zero and nonzero predicates

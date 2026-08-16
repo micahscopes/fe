@@ -12,7 +12,6 @@ use std::path::Path;
 use url::Url;
 use wasmtime::Val;
 
-const SOURCE: &str = include_str!("../../../demos/capstones/mandelbrot-proof/kernel.fe");
 const RADIUS_SQUARED_Q24: i64 = 67_108_864;
 const NO_ESCAPE_STEP: u32 = u32::MAX;
 
@@ -250,12 +249,19 @@ fn reference_proof_shape(c_re: i32, c_im: i32, bound: u32) -> ProofShape {
 }
 
 fn compile() -> Vec<u8> {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../demos/capstones/mandelbrot-proof/kernel");
+    let url = Url::from_directory_path(path.canonicalize().unwrap()).unwrap();
     let mut db = DriverDataBase::default();
-    let url = Url::parse("file:///mandelbrot_bounded_proof.fe").expect("fixture URL");
-    db.workspace()
-        .touch(&mut db, url.clone(), Some(SOURCE.to_owned()));
-    let file = db.workspace().get(&db, &url).expect("fixture file");
-    let top_mod = db.top_mod(file);
+    assert!(
+        !driver::init_ingot(&mut db, &url),
+        "Mandelbrot proof kernel ingot initialization diagnostics"
+    );
+    let ingot = db
+        .workspace()
+        .containing_ingot(&db, url)
+        .expect("Mandelbrot proof kernel ingot");
+    let top_mod = ingot.root_mod(&db);
     let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
     assert!(
         diagnostics.is_empty(),

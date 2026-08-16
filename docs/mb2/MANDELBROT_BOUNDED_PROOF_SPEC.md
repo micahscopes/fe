@@ -74,7 +74,7 @@ The terminal bit is false before row `k` and true at row `k`. This proves that
 `k` is the least escape index. A non-escaping trace may be useful prover input,
 but it cannot construct an `EscapesByQ12` proof.
 
-`demos/capstones/mandelbrot-proof/kernel.fe` is the single authored transition.
+`demos/capstones/mandelbrot-proof/kernel/src/lib.fe` is the single authored transition.
 Its `EscapeWitness`, `EscapeTraceRow`, and `EscapeAirRow` values are the current
 Fe witness surface. Scalar tuple exports exist only so independent Wasm and
 native gates can inspect the nominal values without a JSON interface.

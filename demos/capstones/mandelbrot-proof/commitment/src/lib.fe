@@ -1,7 +1,9 @@
 //! Domain-separated Poseidon commitment to canonical bounded-Mandelbrot rows.
 
-use mandelbrot_proof_field_air::{
-    ENCODED_PROOF_ROW_WIDTHS, EncodedProofRow, SignedWord, encoded_proof_row_words,
+use mandelbrot_proof_kernel::{
+    ENCODED_PROOF_ROW_WIDTHS, EncodedProofRow, EscapesByQ12, EscapeTraceStream,
+    PaddedEscapeAirRow, SignedWord, encode_proof_row, encode_signed_word,
+    encoded_proof_row_words, padded_trace_length,
 }
 use poseidon_bn254::{
     Fr, LIMBS, WORD_BITS, PoseidonDomain, bind_plain_words, commit_plain_words, compress,
@@ -75,6 +77,19 @@ impl core::marker::Copy for TraceDigest {}
 pub struct StatementDigest { value: Fr }
 
 impl core::marker::Copy for StatementDigest {}
+
+/// Result of one canonical prover-side pass. Invalid and non-escaping claims
+/// fail closed instead of exposing a digest for an incomplete trace.
+struct StreamedCommitment {
+    valid: bool,
+    terminal_step: u32,
+    trace_length: u32,
+    padded_length: u32,
+    trace: TraceDigest,
+    statement: StatementDigest,
+}
+
+impl core::marker::Copy for StreamedCommitment {}
 
 fn pack_words<const N: usize>(
     _ source: own [u32; N],
@@ -172,9 +187,75 @@ impl TraceFrontier {
     }
 }
 
+fn invalid_streamed_commitment() -> StreamedCommitment {
+    StreamedCommitment {
+        valid: false,
+        terminal_step: 0,
+        trace_length: 0,
+        padded_length: 0,
+        trace: TraceDigest { value: Fr::zero() },
+        statement: StatementDigest { value: Fr::zero() },
+    }
+}
+
+/// Generate, encode, and commit the canonical proof trace in one Fe pass.
+/// Active rows are never retained after entering the Merkle frontier. Once
+/// the least terminal row is found, its AIR values are reused for the uniquely
+/// defined inactive suffix up to the next power-of-two domain.
+fn stream_statement_q12(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ bound: u32,
+) -> StreamedCommitment {
+    let claim = EscapesByQ12::new(c_re_q12, c_im_q12, bound)
+    let mut stream = EscapeTraceStream::new(claim)
+    if !stream.is_valid() { return invalid_streamed_commitment() }
+
+    let mut frontier = TraceFrontier::empty()
+    while true {
+        let row = stream.current_proof_row()
+        frontier = frontier.push(encode_proof_row(row))
+        if row.terminal { break }
+        if !stream.can_advance() { return invalid_streamed_commitment() }
+        stream = stream.advance()
+    }
+
+    let terminal_air = stream.current_air_row()
+    let terminal_step = terminal_air.semantic.step
+    let trace_length = terminal_step + 1
+    let padded_length = padded_trace_length(trace_length)
+    let padding = PaddedEscapeAirRow {
+        valid: true,
+        active: false,
+        terminal: false,
+        air: terminal_air,
+    }
+    while frontier.count < padded_length {
+        frontier = frontier.push(encode_proof_row(padding))
+    }
+
+    let trace = frontier.complete_root()
+    let public = EscapesByQ12Public {
+        c_re: encode_signed_word(c_re_q12),
+        c_im: encode_signed_word(c_im_q12),
+        bound: bound,
+        terminal_step: terminal_step,
+        trace_length: trace_length,
+        padded_length: padded_length,
+    }
+    StreamedCommitment {
+        valid: true,
+        terminal_step: terminal_step,
+        trace_length: trace_length,
+        padded_length: padded_length,
+        trace: trace,
+        statement: bind_statement(public, trace),
+    }
+}
+
 /// Fold a compile-time-checked power-of-two row domain through an O(log N)
-/// frontier. This is the same shape a future one-pass trace generator can
-/// update as it emits rows, without retaining the Merkle tree or its leaves.
+/// frontier. The production streamer below updates this same shape as it emits
+/// rows, without retaining the Merkle tree or its leaves.
 fn trace_root_power_of_two<const N: usize>(
     _ rows: own [EncodedProofRow; N],
 ) -> TraceDigest
@@ -241,4 +322,32 @@ pub fn statement_commitment8_plain_words(
     _ rows: own [EncodedProofRow; 8],
 ) -> [u32; 20] {
     plain_words(statement_commitment_power_of_two<8>(public, rows).value)
+}
+
+/// Scalar Wasm oracle boundary for the production one-pass Fe generator.
+/// The 44 words are `(valid, terminal_step, trace_length, padded_length)`, the
+/// 20 trace-root limbs, then the 20 public-statement limbs. Internally all
+/// stages remain nominal, and no host-authored witness rows cross this API.
+pub fn streamed_statement_q12_plain_words(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ bound: u32,
+) -> [u32; 44] {
+    let generated = stream_statement_q12(c_re_q12, c_im_q12, bound)
+    let mut output: [u32; 44] = [0; 44]
+    if !generated.valid { return output }
+
+    output[0] = 1
+    output[1] = generated.terminal_step
+    output[2] = generated.trace_length
+    output[3] = generated.padded_length
+    let trace = plain_words(generated.trace.value)
+    let statement = plain_words(generated.statement.value)
+    let mut limb: usize = 0
+    while limb < LIMBS {
+        output[4 + limb] = trace[limb]
+        output[24 + limb] = statement[limb]
+        limb = limb + 1
+    }
+    output
 }
