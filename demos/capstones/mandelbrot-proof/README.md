@@ -69,20 +69,28 @@ const predicates, and matches direct bigint DFTs at 4, 8, and 16 points.
 Generic Fe coset low-degree extension now interpolates, shifts coefficients,
 zero-pads, and evaluates at a larger domain. Its typed validity bit rejects
 zero or output-subgroup shifts, and independent direct bigint interpolation and
-evaluation gate 4-to-16 and 8-to-16 extensions. Composition and FRI remain
+evaluation gate 4-to-16 and 8-to-16 extensions. The `composition` ingot derives
+the exact four-row trace in Fe, evaluates all 17 main and 411 Fe-derived
+auxiliary columns on a disjoint 16-point coset, and folds all 708 AIR
+constraints under the post-auxiliary challenge. It commits those evaluations
+under typed `"CR01"` and `"CN01"` domains, binds the root through `"CT01"`, and
+derives the first FRI fold challenge through `"FC01"`. A zero-import Wasm gate
+compares every evaluation, root, and transcript value with an independent
+bigint direct-DFT and Poseidon model. FRI folding and query openings remain
 pending.
 
 Escaping witnesses derive a power-of-two proof shape with one terminal marker
 and deterministic inactive padding; invalid and non-escaping claims cannot
 produce proof rows. Fe integer first/pair/last constraints make activity
 monotone and the padding values a terminal-state fixed point. Their proof-field
-form now executes, while low-degree composition remains pending. This is
-executable constraint evidence, not yet a succinct proof. The gate checks
-semantics, not artifact bytes:
+form and the first low-degree composition now execute. This is executable
+constraint evidence, not yet a succinct proof. The gate checks semantics, not
+artifact bytes:
 
 ```console
 cargo nextest run --release --locked -p fe-codegen --test mandelbrot_bounded_claim_oracle
 cargo nextest run --release --locked -p fe-codegen --test mandelbrot_trace_commitment_oracle
+cargo nextest run --release --locked -p fe-codegen --test mandelbrot_composition_oracle
 ```
 
 The canonical claim, integer semantics, witness columns, commitment plan, and

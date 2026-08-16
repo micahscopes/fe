@@ -11,15 +11,26 @@
 
 use precision::bn254_fr::Bn254Fr
 use precision::field::FieldElement
+use precision::polynomial::radix2_intt
 pub use mandelbrot_proof_kernel::{
-    BitRangeWitness, ENCODED_PROOF_ROW_WIDTHS, EncodedAirRow, EncodedProofRow,
-    OrWitness, RangedAirRow, RangedSigned, RangedUnsigned, SignedWord,
-    derive_ranged_air_row, encoded_proof_row_words,
+    AUXILIARY_ROW_BITS,
+    BitRangeWitness,
+    ENCODED_PROOF_ROW_WIDTHS,
+    EncodedAirRow,
+    EncodedProofRow,
+    OrWitness,
+    RangedAirRow,
+    RangedSigned,
+    RangedUnsigned,
+    SignedWord,
+    derive_ranged_air_row,
+    encoded_auxiliary_row_bit,
+    encoded_proof_row_words,
 }
 
-type Fr = FieldElement<20, Bn254Fr>
+pub type Fr = FieldElement<20, Bn254Fr>
 
-struct SignedField { sign: Fr, magnitude: Fr, value: Fr }
+pub struct SignedField { sign: Fr, magnitude: Fr, value: Fr }
 
 impl core::marker::Copy for SignedField {}
 
@@ -47,7 +58,9 @@ fn field_is_zero(_ value: Fr) -> bool {
     let words = value.to_montgomery_words()
     let mut i: u32 = 0
     while i < 20 {
-        if words[i as usize] != 0 { return false }
+        if words[i as usize] != 0 {
+            return false
+        }
         i = i + 1
     }
     true
@@ -65,7 +78,7 @@ fn signed_value(_ sign: Fr, _ magnitude: Fr) -> Fr {
     magnitude - sign * magnitude * Fr::from_u32(2)
 }
 
-fn signed_field(_ word: SignedWord) -> SignedField {
+pub fn signed_field(_ word: SignedWord) -> SignedField {
     let sign = Fr::from_u32(word.sign)
     let magnitude = Fr::from_u32(word.magnitude)
     SignedField { sign: sign, magnitude: magnitude, value: signed_value(sign, magnitude) }
@@ -98,14 +111,18 @@ fn proof_field_row(_ row: EncodedProofRow) -> ProofFieldRow {
 fn air_words(_ row: AirFieldRow) -> [Fr; 15] {
     [
         row.step,
-        row.zr.sign, row.zr.magnitude,
-        row.zi.sign, row.zi.magnitude,
+        row.zr.sign,
+        row.zr.magnitude,
+        row.zi.sign,
+        row.zi.magnitude,
         row.rr,
         row.ii,
         row.magnitude,
-        row.q_re.sign, row.q_re.magnitude,
+        row.q_re.sign,
+        row.q_re.magnitude,
         row.r_re,
-        row.q_im.sign, row.q_im.magnitude,
+        row.q_im.sign,
+        row.q_im.magnitude,
         row.r_im,
         row.terminal,
     ]
@@ -167,10 +184,12 @@ fn row_state_residuals(_ row: ProofFieldRow) -> [Fr; 5] {
     ]
 }
 
-fn range_residual_masks<const N: usize>(
-    _ value: Fr,
-    _ witness: BitRangeWitness<N>,
-) -> (u32, u32, u32, u32) {
+fn range_residual_masks<const N: usize>(_ value: Fr, _ witness: BitRangeWitness<N>) -> (
+    u32,
+    u32,
+    u32,
+    u32,
+) {
     let mut bit_mask: u32 = 0
     let mut any_bit_mask: u32 = 0
     let mut any_relation_mask: u32 = 0
@@ -182,27 +201,25 @@ fn range_residual_masks<const N: usize>(
     while i < count {
         let bit = Fr::from_u32(witness.bits[i as usize])
         let any = Fr::from_u32(witness.any[i as usize])
-        if !field_is_zero(bit_residual(bit)) { bit_mask = bit_mask | (1 << i) }
-        if !field_is_zero(bit_residual(any)) { any_bit_mask = any_bit_mask | (1 << i) }
+        if !field_is_zero(bit_residual(bit)) {
+            bit_mask = bit_mask | (1 << i)
+        }
+        if !field_is_zero(bit_residual(any)) {
+            any_bit_mask = any_bit_mask | (1 << i)
+        }
         let relation = any - previous_any - bit + previous_any * bit
-        if !field_is_zero(relation) { any_relation_mask = any_relation_mask | (1 << i) }
+        if !field_is_zero(relation) {
+            any_relation_mask = any_relation_mask | (1 << i)
+        }
         reconstructed = reconstructed + bit * weight
         weight = weight + weight
         previous_any = any
         i = i + 1
     }
-    (
-        bit_mask,
-        any_bit_mask,
-        any_relation_mask,
-        residual_flag(value - reconstructed),
-    )
+    (bit_mask, any_bit_mask, any_relation_mask, residual_flag(value - reconstructed))
 }
 
-fn combined_range_mask<const N: usize>(
-    _ value: u32,
-    _ witness: BitRangeWitness<N>,
-) -> u32 {
+fn combined_range_mask<const N: usize>(_ value: u32, _ witness: BitRangeWitness<N>) -> u32 {
     let masks = range_residual_masks<N>(Fr::from_u32(value), witness)
     masks.0 | masks.1 | masks.2 | masks.3
 }
@@ -220,7 +237,10 @@ fn combined_signed_range_mask<const N: usize>(
         i = i + 1
     }
     let sign = Fr::from_u32(value.sign)
-    masks.0 | masks.1 | masks.2 | masks.3
+    masks.0
+        | masks.1
+        | masks.2
+        | masks.3
         | residual_flag(bit_residual(sign))
         | residual_flag(sign * (Fr::one() - nonzero))
 }
@@ -230,10 +250,323 @@ fn residual_mask<const N: usize>(_ residuals: [Fr; N]) -> u32 {
     let mut i: u32 = 0
     let count: u32 = N.downcast_truncate()
     while i < count {
-        if !field_is_zero(residuals[i as usize]) { mask = mask | (1 << i) }
+        if !field_is_zero(residuals[i as usize]) {
+            mask = mask | (1 << i)
+        }
         i = i + 1
     }
     mask
+}
+
+pub struct MandelbrotConstraintNumerators {
+    pub all_rows: Fr,
+    pub pair_rows: Fr,
+    pub first_row: Fr,
+    pub last_row: Fr,
+}
+
+impl core::marker::Copy for MandelbrotConstraintNumerators {}
+
+struct ConstraintFold { challenge: Fr, power: Fr, value: Fr }
+impl core::marker::Copy for ConstraintFold {}
+
+impl ConstraintFold {
+    fn new(_ challenge: Fr) -> Self {
+        Self { challenge: challenge, power: Fr::one(), value: Fr::zero() }
+    }
+
+    fn absorb(mut self, _ residual: Fr) -> Self {
+        self.value = self.value + self.power * residual
+        self.power = self.power * self.challenge
+        self
+    }
+
+    fn next_family(mut self) -> Self {
+        self.value = Fr::zero()
+        self
+    }
+}
+
+fn absorb_residuals<const N: usize>(
+    _ fold: own ConstraintFold,
+    _ residuals: [Fr; N],
+) -> ConstraintFold {
+    let mut fold = fold
+    let mut index: usize = 0
+    while index < N {
+        fold = fold.absorb(residuals[index])
+        index = index + 1
+    }
+    fold
+}
+
+fn extend_column_point4(_ values: own [Fr; 4], _ point: Fr) -> Fr {
+    let coefficients = radix2_intt<4, 20, Bn254Fr>(values)
+    ((coefficients[3] * point + coefficients[2]) * point + coefficients[1]) * point
+        + coefficients[0]
+}
+
+fn main_column_point4(_ rows: own [EncodedProofRow; 4], _ column: usize, _ point: Fr) -> Fr {
+    extend_column_point4(
+        [
+            Fr::from_u32(encoded_proof_row_words(rows[0])[column]),
+            Fr::from_u32(encoded_proof_row_words(rows[1])[column]),
+            Fr::from_u32(encoded_proof_row_words(rows[2])[column]),
+            Fr::from_u32(encoded_proof_row_words(rows[3])[column]),
+        ],
+        point,
+    )
+}
+
+fn auxiliary_column_point4(_ rows: own [EncodedProofRow; 4], _ column: usize, _ point: Fr) -> Fr {
+    extend_column_point4(
+        [
+            Fr::from_u32(encoded_auxiliary_row_bit(rows[0].air, column)),
+            Fr::from_u32(encoded_auxiliary_row_bit(rows[1].air, column)),
+            Fr::from_u32(encoded_auxiliary_row_bit(rows[2].air, column)),
+            Fr::from_u32(encoded_auxiliary_row_bit(rows[3].air, column)),
+        ],
+        point,
+    )
+}
+
+fn signed_field_point(_ sign: Fr, _ magnitude: Fr) -> SignedField {
+    SignedField { sign: sign, magnitude: magnitude, value: signed_value(sign, magnitude) }
+}
+
+fn proof_field_row_point4(_ rows: own [EncodedProofRow; 4], _ point: Fr) -> ProofFieldRow {
+    ProofFieldRow {
+        active: main_column_point4(rows, 15, point),
+        terminal: main_column_point4(rows, 16, point),
+        air: AirFieldRow {
+            step: main_column_point4(rows, 0, point),
+            zr: signed_field_point(
+                main_column_point4(rows, 1, point),
+                main_column_point4(rows, 2, point),
+            ),
+            zi: signed_field_point(
+                main_column_point4(rows, 3, point),
+                main_column_point4(rows, 4, point),
+            ),
+            rr: main_column_point4(rows, 5, point),
+            ii: main_column_point4(rows, 6, point),
+            magnitude: main_column_point4(rows, 7, point),
+            q_re: signed_field_point(
+                main_column_point4(rows, 8, point),
+                main_column_point4(rows, 9, point),
+            ),
+            r_re: main_column_point4(rows, 10, point),
+            q_im: signed_field_point(
+                main_column_point4(rows, 11, point),
+                main_column_point4(rows, 12, point),
+            ),
+            r_im: main_column_point4(rows, 13, point),
+            terminal: main_column_point4(rows, 14, point),
+        },
+    }
+}
+
+/// Stream one interpolated bit range into the challenge-power fold. Keeping
+/// the canonical rows and cursor compact avoids a giant field-valued witness
+/// aggregate at the Wasm boundary.
+fn absorb_range_columns<const N: usize>(
+    _ fold: own ConstraintFold,
+    _ value: Fr,
+    _ rows: own [EncodedProofRow; 4],
+    _ start: usize,
+    _ point: Fr,
+) -> ConstraintFold {
+    let mut fold = fold
+    let mut reconstructed = Fr::zero()
+    let mut weight = Fr::one()
+    let mut previous_any = Fr::zero()
+    let mut index: usize = 0
+    while index < N {
+        let bit = auxiliary_column_point4(rows, start + index, point)
+        let any = auxiliary_column_point4(rows, start + N + index, point)
+        fold = fold.absorb(bit_residual(bit))
+        fold = fold.absorb(bit_residual(any))
+        fold = fold.absorb(any - previous_any - bit + previous_any * bit)
+        reconstructed = reconstructed + bit * weight
+        weight = weight + weight
+        previous_any = any
+        index = index + 1
+    }
+    fold.absorb(value - reconstructed)
+}
+
+fn absorb_signed_range_columns<const N: usize>(
+    _ fold: own ConstraintFold,
+    _ sign: Fr,
+    _ magnitude: Fr,
+    _ rows: own [EncodedProofRow; 4],
+    _ start: usize,
+    _ point: Fr,
+) -> ConstraintFold {
+    let mut fold = fold.absorb(bit_residual(sign))
+    fold = absorb_range_columns<N>(fold, magnitude, rows, start, point)
+    let nonzero = auxiliary_column_point4(rows, start + 2 * N - 1, point)
+    fold.absorb(sign * (Fr::one() - nonzero))
+}
+
+fn absorb_terminal_range_columns(
+    _ fold: own ConstraintFold,
+    _ magnitude: Fr,
+    _ terminal: Fr,
+    _ rows: own [EncodedProofRow; 4],
+    _ magnitude_start: usize,
+    _ terminal_start: usize,
+    _ point: Fr,
+) -> ConstraintFold {
+    let mut fold = absorb_range_columns<31>(fold, magnitude, rows, magnitude_start, point)
+    fold = fold.absorb(bit_residual(terminal))
+    let mut previous = Fr::zero()
+    let mut index: usize = 0
+    while index < 5 {
+        let bit = auxiliary_column_point4(rows, magnitude_start + index + 26, point)
+        let any = auxiliary_column_point4(rows, terminal_start + index, point)
+        fold = fold.absorb(bit_residual(any))
+        fold = fold.absorb(any - previous - bit + previous * bit)
+        previous = any
+        index = index + 1
+    }
+    fold.absorb(terminal - previous)
+}
+
+/// Fold every AIR constraint with consecutive powers of one transcript-derived
+/// challenge. The four outputs remain separate because each constraint family
+/// has a different zerofier in the composition polynomial. Main and auxiliary
+/// values are interpolated directly from four canonical Fe rows at `point`.
+pub fn mandelbrot_constraint_numerators_trace4(
+    _ challenge: Fr,
+    _ c_re: SignedField,
+    _ c_im: SignedField,
+    _ rows: own [EncodedProofRow; 4],
+    _ point: Fr,
+    _ next_point: Fr,
+) -> MandelbrotConstraintNumerators {
+    let row = proof_field_row_point4(rows, point)
+    let next = proof_field_row_point4(rows, next_point)
+    let one = Fr::one()
+    let continue_selector = row.active * (one - row.terminal)
+    let freeze_selector = row.terminal + (one - row.active)
+
+    let mut fold = ConstraintFold::new(challenge)
+    fold = absorb_residuals<9>(fold, local_residuals(row.air))
+    fold = absorb_residuals<5>(fold, row_state_residuals(row))
+    let mut cursor: usize = 0
+    fold = absorb_range_columns<21>(fold, row.air.step, rows, cursor, point)
+    cursor = cursor + 2 * 21
+    fold = absorb_signed_range_columns<15>(
+        fold,
+        row.air.zr.sign,
+        row.air.zr.magnitude,
+        rows,
+        cursor,
+        point,
+    )
+    cursor = cursor + 2 * 15
+    fold = absorb_signed_range_columns<15>(
+        fold,
+        row.air.zi.sign,
+        row.air.zi.magnitude,
+        rows,
+        cursor,
+        point,
+    )
+    cursor = cursor + 2 * 15
+    fold = absorb_range_columns<30>(fold, row.air.rr, rows, cursor, point)
+    cursor = cursor + 2 * 30
+    fold = absorb_range_columns<30>(fold, row.air.ii, rows, cursor, point)
+    cursor = cursor + 2 * 30
+    let magnitude_start = cursor
+    cursor = cursor + 2 * 31
+    fold = absorb_signed_range_columns<18>(
+        fold,
+        row.air.q_re.sign,
+        row.air.q_re.magnitude,
+        rows,
+        cursor,
+        point,
+    )
+    cursor = cursor + 2 * 18
+    fold = absorb_range_columns<12>(fold, row.air.r_re, rows, cursor, point)
+    cursor = cursor + 2 * 12
+    fold = absorb_signed_range_columns<19>(
+        fold,
+        row.air.q_im.sign,
+        row.air.q_im.magnitude,
+        rows,
+        cursor,
+        point,
+    )
+    cursor = cursor + 2 * 19
+    fold = absorb_range_columns<12>(fold, row.air.r_im, rows, cursor, point)
+    cursor = cursor + 2 * 12
+    if cursor + 5 != AUXILIARY_ROW_BITS {
+        return MandelbrotConstraintNumerators {
+            all_rows: Fr::zero(),
+            pair_rows: Fr::zero(),
+            first_row: Fr::zero(),
+            last_row: Fr::zero(),
+        }
+    }
+    fold = absorb_terminal_range_columns(
+        fold,
+        row.air.magnitude,
+        row.air.terminal,
+        rows,
+        magnitude_start,
+        cursor,
+        point,
+    )
+    let all_rows = fold.value
+
+    fold = fold.next_family()
+    let row_state = row_state_residuals(row)
+    let next_state = row_state_residuals(next)
+    fold = absorb_residuals<5>(fold, row_state)
+    fold = absorb_residuals<5>(fold, next_state)
+    fold = fold.absorb(continue_selector * (next.active - one))
+    fold = fold.absorb(freeze_selector * next.active)
+    fold = fold.absorb(freeze_selector * next.terminal)
+    let row_words = air_words(row.air)
+    let next_words = air_words(next.air)
+    let mut column: usize = 0
+    while column < 15 {
+        fold = fold.absorb(freeze_selector * (next_words[column] - row_words[column]))
+        column = column + 1
+    }
+    let transition = transition_residuals(c_re, c_im, row.air, next.air)
+    column = 0
+    while column < 9 {
+        fold = fold.absorb(continue_selector * transition[column])
+        column = column + 1
+    }
+    let pair_rows = fold.value
+
+    fold = fold.next_family()
+    let first_state = row_state_residuals(row)
+    fold = absorb_residuals<5>(fold, first_state)
+    fold = fold.absorb(row.active - one)
+    fold = fold.absorb(row.terminal)
+    fold = fold.absorb(row.air.step)
+    fold = fold.absorb(row.air.zr.sign)
+    fold = fold.absorb(row.air.zr.magnitude)
+    fold = fold.absorb(row.air.zi.sign)
+    fold = fold.absorb(row.air.zi.magnitude)
+    let first_row = fold.value
+
+    fold = fold.next_family()
+    let last_state = row_state_residuals(row)
+    fold = absorb_residuals<5>(fold, last_state)
+    fold = fold.absorb(row.active * (one - row.terminal))
+    MandelbrotConstraintNumerators {
+        all_rows: all_rows,
+        pair_rows: pair_rows,
+        first_row: first_row,
+        last_row: fold.value,
+    }
 }
 
 /// Evaluate the five local Mandelbrot equalities and the four sign-bit
@@ -255,19 +588,21 @@ pub fn mandelbrot_bn254_local_residual_mask(
     q_im_magnitude: u32,
     r_im: u32,
 ) -> u32 {
-    let row = air_field_row(EncodedAirRow {
-        step: 0,
-        zr: SignedWord { sign: zr_sign, magnitude: zr_magnitude },
-        zi: SignedWord { sign: zi_sign, magnitude: zi_magnitude },
-        rr: rr,
-        ii: ii,
-        magnitude: magnitude,
-        q_re: SignedWord { sign: q_re_sign, magnitude: q_re_magnitude },
-        r_re: r_re,
-        q_im: SignedWord { sign: q_im_sign, magnitude: q_im_magnitude },
-        r_im: r_im,
-        terminal: 0,
-    })
+    let row = air_field_row(
+        EncodedAirRow {
+            step: 0,
+            zr: SignedWord { sign: zr_sign, magnitude: zr_magnitude },
+            zi: SignedWord { sign: zi_sign, magnitude: zi_magnitude },
+            rr: rr,
+            ii: ii,
+            magnitude: magnitude,
+            q_re: SignedWord { sign: q_re_sign, magnitude: q_re_magnitude },
+            r_re: r_re,
+            q_im: SignedWord { sign: q_im_sign, magnitude: q_im_magnitude },
+            r_im: r_im,
+            terminal: 0,
+        },
+    )
     residual_mask<9>(local_residuals(row))
 }
 
@@ -291,38 +626,44 @@ pub fn mandelbrot_bn254_transition_residual_mask(
     next_zi_magnitude: u32,
 ) -> u32 {
     let zero = SignedWord { sign: 0, magnitude: 0 }
-    let row = air_field_row(EncodedAirRow {
-        step: step,
-        zr: zero,
-        zi: zero,
-        rr: 0,
-        ii: 0,
-        magnitude: 0,
-        q_re: SignedWord { sign: q_re_sign, magnitude: q_re_magnitude },
-        r_re: 0,
-        q_im: SignedWord { sign: q_im_sign, magnitude: q_im_magnitude },
-        r_im: 0,
-        terminal: 0,
-    })
-    let next = air_field_row(EncodedAirRow {
-        step: next_step,
-        zr: SignedWord { sign: next_zr_sign, magnitude: next_zr_magnitude },
-        zi: SignedWord { sign: next_zi_sign, magnitude: next_zi_magnitude },
-        rr: 0,
-        ii: 0,
-        magnitude: 0,
-        q_re: zero,
-        r_re: 0,
-        q_im: zero,
-        r_im: 0,
-        terminal: 0,
-    })
-    residual_mask<9>(transition_residuals(
-        signed_field(SignedWord { sign: c_re_sign, magnitude: c_re_magnitude }),
-        signed_field(SignedWord { sign: c_im_sign, magnitude: c_im_magnitude }),
-        row,
-        next,
-    ))
+    let row = air_field_row(
+        EncodedAirRow {
+            step: step,
+            zr: zero,
+            zi: zero,
+            rr: 0,
+            ii: 0,
+            magnitude: 0,
+            q_re: SignedWord { sign: q_re_sign, magnitude: q_re_magnitude },
+            r_re: 0,
+            q_im: SignedWord { sign: q_im_sign, magnitude: q_im_magnitude },
+            r_im: 0,
+            terminal: 0,
+        },
+    )
+    let next = air_field_row(
+        EncodedAirRow {
+            step: next_step,
+            zr: SignedWord { sign: next_zr_sign, magnitude: next_zr_magnitude },
+            zi: SignedWord { sign: next_zi_sign, magnitude: next_zi_magnitude },
+            rr: 0,
+            ii: 0,
+            magnitude: 0,
+            q_re: zero,
+            r_re: 0,
+            q_im: zero,
+            r_im: 0,
+            terminal: 0,
+        },
+    )
+    residual_mask<9>(
+        transition_residuals(
+            signed_field(SignedWord { sign: c_re_sign, magnitude: c_re_magnitude }),
+            signed_field(SignedWord { sign: c_im_sign, magnitude: c_im_magnitude }),
+            row,
+            next,
+        ),
+    )
 }
 
 /// Constrain one padded trace pair. The first mask contains the boolean state
@@ -341,20 +682,29 @@ pub fn mandelbrot_bn254_padded_pair_residual_masks(
     let freeze_selector = row.terminal + (one - row.active)
     let row_state = row_state_residuals(row)
     let next_state = row_state_residuals(next)
-    let state_mask = residual_mask<13>([
-        row_state[0], row_state[1], row_state[2], row_state[3], row_state[4],
-        next_state[0], next_state[1], next_state[2], next_state[3], next_state[4],
-        continue_selector * (next.active - one),
-        freeze_selector * next.active,
-        freeze_selector * next.terminal,
-    ])
+    let state_mask = residual_mask<13>(
+        [
+            row_state[0],
+            row_state[1],
+            row_state[2],
+            row_state[3],
+            row_state[4],
+            next_state[0],
+            next_state[1],
+            next_state[2],
+            next_state[3],
+            next_state[4],
+            continue_selector * (next.active - one),
+            freeze_selector * next.active,
+            freeze_selector * next.terminal,
+        ],
+    )
     let row_words = air_words(row.air)
     let next_words = air_words(next.air)
     let mut equality: [Fr; 15] = [Fr::zero(); 15]
     let mut i: u32 = 0
     while i < 15 {
-        equality[i as usize] = freeze_selector
-            * (next_words[i as usize] - row_words[i as usize])
+        equality[i as usize] = freeze_selector * (next_words[i as usize] - row_words[i as usize])
         i = i + 1
     }
     let equality_mask = residual_mask<15>(equality)
@@ -370,26 +720,31 @@ pub fn mandelbrot_bn254_padded_pair_residual_masks(
 pub fn mandelbrot_bn254_padded_first_residual_mask(_ row: EncodedProofRow) -> u32 {
     let row = proof_field_row(row)
     let state = row_state_residuals(row)
-    residual_mask<12>([
-        state[0], state[1], state[2], state[3], state[4],
-        row.active - Fr::one(),
-        row.terminal,
-        row.air.step,
-        row.air.zr.sign,
-        row.air.zr.magnitude,
-        row.air.zi.sign,
-        row.air.zi.magnitude,
-    ])
+    residual_mask<12>(
+        [
+            state[0],
+            state[1],
+            state[2],
+            state[3],
+            state[4],
+            row.active - Fr::one(),
+            row.terminal,
+            row.air.step,
+            row.air.zr.sign,
+            row.air.zr.magnitude,
+            row.air.zi.sign,
+            row.air.zi.magnitude,
+        ],
+    )
 }
 
 /// Constrain the final domain row to active-terminal or inactive padding.
 pub fn mandelbrot_bn254_padded_last_residual_mask(_ row: EncodedProofRow) -> u32 {
     let row = proof_field_row(row)
     let state = row_state_residuals(row)
-    residual_mask<6>([
-        state[0], state[1], state[2], state[3], state[4],
-        row.active * (Fr::one() - row.terminal),
-    ])
+    residual_mask<6>(
+        [state[0], state[1], state[2], state[3], state[4], row.active * (Fr::one() - row.terminal)],
+    )
 }
 
 /// Constrain an unsigned 12-bit value, used by each Euclidean Q12 remainder.
@@ -443,10 +798,7 @@ pub fn mandelbrot_bn254_terminal_residual_masks(
     _ high_any: OrWitness<5>,
 ) -> (u32, u32, u32, u32, u32, u32, u32, u32) {
     let terminal = Fr::from_u32(terminal)
-    let magnitude_range = range_residual_masks<31>(
-        Fr::from_u32(magnitude),
-        magnitude_witness,
-    )
+    let magnitude_range = range_residual_masks<31>(Fr::from_u32(magnitude), magnitude_witness)
     let high_bits = [
         Fr::from_u32(magnitude_witness.bits[26]),
         Fr::from_u32(magnitude_witness.bits[27]),
@@ -461,9 +813,13 @@ pub fn mandelbrot_bn254_terminal_residual_masks(
     while i < 5 {
         let bit = high_bits[i as usize]
         let any = Fr::from_u32(high_any.any[i as usize])
-        if !field_is_zero(bit_residual(any)) { high_any_bit_mask = high_any_bit_mask | (1 << i) }
+        if !field_is_zero(bit_residual(any)) {
+            high_any_bit_mask = high_any_bit_mask | (1 << i)
+        }
         let relation = any - previous - bit + previous * bit
-        if !field_is_zero(relation) { high_relation_mask = high_relation_mask | (1 << i) }
+        if !field_is_zero(relation) {
+            high_relation_mask = high_relation_mask | (1 << i)
+        }
         previous = any
         i = i + 1
     }
@@ -481,9 +837,18 @@ pub fn mandelbrot_bn254_terminal_residual_masks(
 
 /// Wire every row column to its Fe-authored width. Result order is `(step,
 /// zr, zi, rr, ii, q_re, r_re, q_im, r_im, magnitude_and_terminal)`.
-pub fn mandelbrot_bn254_row_range_residual_masks(
-    _ row: RangedAirRow,
-) -> (u32, u32, u32, u32, u32, u32, u32, u32, u32, u32) {
+pub fn mandelbrot_bn254_row_range_residual_masks(_ row: RangedAirRow) -> (
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+) {
     let terminal = mandelbrot_bn254_terminal_residual_masks(
         row.terminal,
         row.magnitude.value,
@@ -500,16 +865,31 @@ pub fn mandelbrot_bn254_row_range_residual_masks(
         combined_range_mask<12>(row.r_re.value, row.r_re.witness),
         combined_signed_range_mask<19>(row.q_im.value, row.q_im.witness),
         combined_range_mask<12>(row.r_im.value, row.r_im.witness),
-        terminal.0 | terminal.1 | terminal.2 | terminal.3
-            | terminal.4 | terminal.5 | terminal.6 | terminal.7,
+        terminal.0
+            | terminal.1
+            | terminal.2
+            | terminal.3
+            | terminal.4
+            | terminal.5
+            | terminal.6
+            | terminal.7,
     )
 }
 
 /// Prover-side Fe derivation followed by the independent constraint surface.
 /// This boundary demonstrates that range witnesses need not be authored or
 /// serialized by the host before they enter the auxiliary trace commitment.
-pub fn mandelbrot_bn254_derived_row_range_residual_masks(
-    _ row: EncodedAirRow,
-) -> (u32, u32, u32, u32, u32, u32, u32, u32, u32, u32) {
+pub fn mandelbrot_bn254_derived_row_range_residual_masks(_ row: EncodedAirRow) -> (
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+) {
     mandelbrot_bn254_row_range_residual_masks(derive_ranged_air_row(row))
 }

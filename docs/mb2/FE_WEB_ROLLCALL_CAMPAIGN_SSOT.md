@@ -290,9 +290,27 @@ Legend:
   preventing the evaluation coset from intersecting the trace zerofier's
   roots. Independent direct
   bigint interpolation/evaluation gates 4-to-16 and 8-to-16 extensions and
-  fail-closed invalid cosets. Composition, later transcript stages, and FRI
-  remain pending. The reusable field API's SPIR-V helper-call seam and GPU
-  permutation lift also remain open.
+  fail-closed invalid cosets. The first genuine composition layer is now
+  Fe-authored end to end. It derives the exact four-row canonical trace in Fe,
+  evaluates all 17 main and 411 auxiliary column polynomials on a disjoint
+  16-point coset, and folds 708 constraints with consecutive powers of the
+  post-auxiliary `"MC01"` challenge. All-row, pair-row, first-row, and last-row
+  families retain their distinct zerofiers. The fold streams scalar column
+  evaluations from compact semantic rows, avoiding both a 428-by-16 field
+  matrix and Wasm's current flattened-aggregate parameter limit. There is no
+  host witness or generated column table. Typed `"CR01"` leaves and `"CN01"`
+  nodes commit the composition evaluations, `"CT01"` binds that root to the
+  ordered proof transcript, and `"FC01"` derives the first FRI fold challenge.
+  `mandelbrot_composition_oracle.rs` independently reconstructs the integer
+  trace and every auxiliary bit, uses a direct bigint inverse DFT rather than
+  Fe's radix-2 schedule, evaluates every constraint and zerofier at all 16
+  points, and independently derives the main, auxiliary, composition, and
+  transcript Poseidon trees. Changed challenges, changed claims, invalid
+  claims, non-escaping claims, and out-of-domain evaluations are covered. The
+  zero-import Wasm result agrees through the final `"FC01"` field value. The
+  first FRI folding layer, query proof, verifier-cost evidence, and proof
+  encoding remain pending. The reusable field API's SPIR-V helper-call seam
+  and GPU permutation lift also remain open.
   This is a general-tree statement-commitment milestone and executable AIR
   evidence, not yet a succinct proof.
 - [ ] Produce a succinct proof whose verifier is demonstrably cheaper than
@@ -338,10 +356,9 @@ fallback. The semantic receipts are:
 ## Immediate burn-down order
 
 1. Run the external real-GPU handoff above.
-2. Build composition constraints from the main and Fe-derived auxiliary
-   columns on the now-gated disjoint coset low-degree extension, then bind the
-   composition commitment before deriving FRI challenges under independent
-   mutation and cost oracles.
+2. Build and gate the first FRI folding layer from the now-committed
+   composition evaluations, then add query openings and measured evidence that
+   verification is cheaper than replaying the orbit.
 3. Finish typed fetch, then Worker/port placement and supervision on the one
    runtime-control spine.
 4. Delete the runtime manifest and finish the legacy disposition.

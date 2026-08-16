@@ -192,13 +192,20 @@ transcript schedule is therefore:
 4. absorb the composition commitment before deriving out-of-domain and FRI
    challenges.
 
-Steps 1 through 3 now execute. The kernel derives the ten bit decompositions,
+Steps 1 through 3 now execute. Step 4 executes through the composition
+commitment and first FRI fold challenge. The kernel derives the ten bit
+decompositions,
 their inclusive prefix ORs, and the five-bit terminal-threshold prefix in Fe.
 The resulting 411 bits pack into two 253-bit field elements, then typed
 `"AR01"` leaves and `"AN01"` nodes form the auxiliary tree. Typed `"AT01"`
 binds the main statement to that auxiliary root before `"MC01"` derives the
 composition challenge. No provisional pre-auxiliary challenge is part of the
-protocol. Step 4 remains open.
+protocol. Fe evaluates the 17 main and 411 auxiliary column polynomials on a
+disjoint 16-point coset, folds the four constraint families with consecutive
+challenge powers and their distinct zerofiers, and commits the result under
+typed `"CR01"` leaves and `"CN01"` nodes. Typed `"CT01"` then binds the
+composition root to the ordered transcript before `"FC01"` derives the first
+FRI fold challenge. The actual FRI folding and query schedule remain open.
 
 `escape_air_row_encoding_q12` now materializes that canonical row encoding in
 Fe. It gives zero only the positive sign and emits a fixed 15-word order.
@@ -240,8 +247,10 @@ gate currently fails closed on the retained array-returning `mul_words` call,
 so aggregate-return inlining or shader function-call lowering is required
 before the same field implementation runs as an application GPU kernel.
 The production power-of-two main and auxiliary trace streams, ordered
-pre-composition transcript, and first Fiat-Shamir challenge now execute.
-Composition, later transcript stages, and FRI remain open.
+pre-composition transcript, 708-constraint composition, composition
+commitment, post-composition transcript, and first FRI challenge now execute.
+FRI folding, query openings, verifier-cost evidence, and the reusable proof
+encoding remain open.
 
 The intended succinct construction is a transparent AIR plus FRI over a field
 with an audited two-adic domain. The first implementation should reuse the
@@ -261,9 +270,9 @@ The proof is not called succinct until both conditions hold:
 2. measured Fe verifier work is lower than replaying the same orbit at the
    demonstrated bound.
 
-A Merkle root plus sampled transition rows is not sufficient. Without the AIR
-composition and low-degree argument, it remains only a probabilistic spot check
-of a committed trace.
+A composition Merkle root without the completed low-degree argument is not
+sufficient. Until FRI folding and authenticated query openings are checked, it
+remains only executable composition evidence rather than a succinct proof.
 
 ## Required gates
 

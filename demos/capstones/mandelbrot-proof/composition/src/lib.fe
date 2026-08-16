@@ -1,0 +1,154 @@
+//! Fe-native low-degree AIR composition for the bounded Mandelbrot trace.
+//!
+//! The kernel owns canonical semantic encodings for the 17 main columns and
+//! 411 auxiliary columns. This layer evaluates each column polynomial directly
+//! at one coset point, then reconstructs nominal field rows. No host-authored
+//! witness matrix or numeric column-ID API crosses an ingot boundary.
+
+use mandelbrot_proof_kernel::{EscapesByQ12, encode_signed_word, encoded_proof_trace_exact}
+use mandelbrot_proof_field_air::{
+    Fr,
+    MandelbrotConstraintNumerators,
+    mandelbrot_constraint_numerators_trace4,
+    signed_field,
+}
+use mandelbrot_proof_commitment::{
+    CompositionDigest,
+    CompositionTranscriptDigest,
+    FriFoldChallenge,
+    bind_composition,
+    composition_root_power_of_two,
+    fri_fold_challenge,
+    stream_statement_q12,
+}
+use precision::bn254_fr::Bn254Fr
+use precision::field::FieldElement
+use precision::polynomial::radix2_log
+
+const LIMBS: usize = 20
+type Field = FieldElement<LIMBS, Bn254Fr>
+
+pub struct CompositionEvaluations16 { pub valid: bool, pub values: [Fr; 16] }
+impl core::marker::Copy for CompositionEvaluations16 {}
+
+pub struct CompositionPoint { pub valid: bool, pub value: Fr }
+impl core::marker::Copy for CompositionPoint {}
+
+fn invalid_point() -> CompositionPoint {
+    CompositionPoint { valid: false, value: Fr::zero() }
+}
+
+/// Evaluate the Fe-derived composition polynomial at one point of the 4x16
+/// coset. The only inputs are the public claim, one folding challenge, and the
+/// point index. Main and auxiliary trace columns are both derived in Fe.
+pub fn evaluate_composition_point4x16(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ bound: u32,
+    _ challenge: Fr,
+    _ evaluation: usize,
+) -> CompositionPoint {
+    if evaluation >= 16 {
+        return invalid_point()
+    }
+    let claim = EscapesByQ12::new(c_re_q12, c_im_q12, bound)
+    let trace = encoded_proof_trace_exact<4>(claim)
+    if !trace.valid {
+        return invalid_point()
+    }
+
+    let shift = Fr::from_u32(5)
+    let one = Fr::one()
+    if shift.is_zero() || (shift.pow_u32(16) - one).is_zero() {
+        return invalid_point()
+    }
+    let c_re = signed_field(encode_signed_word(c_re_q12))
+    let c_im = signed_field(encode_signed_word(c_im_q12))
+    let output_root = Field::two_adic_root(radix2_log<16>())
+    let trace_root = Field::two_adic_root(radix2_log<4>())
+    let last_trace_point = Field::two_adic_root(radix2_log<4>()).inverse_or_zero()
+    let evaluation_u32: u32 = evaluation.downcast_truncate()
+    let point = shift * output_root.pow_u32(evaluation_u32)
+    let next_point = point * trace_root
+    let numerators: MandelbrotConstraintNumerators = mandelbrot_constraint_numerators_trace4(
+        challenge,
+        c_re,
+        c_im,
+        trace.rows,
+        point,
+        next_point,
+    )
+    let trace_zerofier = point.pow_u32(4) - one
+    if trace_zerofier.is_zero() || (point - one).is_zero() || (point - last_trace_point).is_zero() {
+        return invalid_point()
+    }
+    let trace_inverse = trace_zerofier.inverse_or_zero()
+    let value = numerators.all_rows * trace_inverse
+        + numerators.pair_rows * (point - last_trace_point) * trace_inverse
+        + numerators.first_row * (point - one).inverse_or_zero()
+        + numerators.last_row * (point - last_trace_point).inverse_or_zero()
+    CompositionPoint { valid: true, value: value }
+}
+
+pub fn evaluate_composition4x16(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ bound: u32,
+    _ challenge: Fr,
+) -> CompositionEvaluations16 {
+    let mut values = [Fr::zero(); 16]
+    let mut evaluation: usize = 0
+    while evaluation < 16 {
+        let point = evaluate_composition_point4x16(c_re_q12, c_im_q12, bound, challenge, evaluation)
+        if !point.valid {
+            return CompositionEvaluations16 { valid: false, values: [Fr::zero(); 16] }
+        }
+        values[evaluation] = point.value
+        evaluation = evaluation + 1
+    }
+    CompositionEvaluations16 { valid: true, values: values }
+}
+
+pub struct CompositionProof<const N: usize> {
+    pub valid: bool,
+    pub evaluations: [Fr; N],
+    pub root: CompositionDigest,
+    pub transcript: CompositionTranscriptDigest,
+    pub fri: FriFoldChallenge,
+}
+impl<const N: usize> core::marker::Copy for CompositionProof<N> {}
+
+fn invalid_composition<const N: usize>() -> CompositionProof<N> {
+    CompositionProof {
+        valid: false,
+        evaluations: [Fr::zero(); N],
+        root: CompositionDigest { value: Fr::zero() },
+        transcript: CompositionTranscriptDigest { value: Fr::zero() },
+        fri: FriFoldChallenge { value: Fr::zero() },
+    }
+}
+
+pub fn compose4x16(_ c_re_q12: i32, _ c_im_q12: i32, _ bound: u32) -> CompositionProof<16> {
+    let commitments = stream_statement_q12(c_re_q12, c_im_q12, bound)
+    if !commitments.valid || commitments.padded_length != 4 {
+        return invalid_composition<16>()
+    }
+    let composed = evaluate_composition4x16(
+        c_re_q12,
+        c_im_q12,
+        bound,
+        commitments.composition.value,
+    )
+    if !composed.valid {
+        return invalid_composition<16>()
+    }
+    let root = composition_root_power_of_two<16>(composed.values)
+    let transcript = bind_composition(commitments.proof_transcript, root)
+    CompositionProof {
+        valid: true,
+        evaluations: composed.values,
+        root: root,
+        transcript: transcript,
+        fri: fri_fold_challenge(transcript),
+    }
+}

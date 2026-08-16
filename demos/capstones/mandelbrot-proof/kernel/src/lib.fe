@@ -9,6 +9,7 @@ pub const Q12_SCALE: i32 = 4096
 pub const ESCAPE_RADIUS_SQUARED_Q24: i32 = 67108864
 pub const NO_ESCAPE_STEP: u32 = 4294967295
 pub const MAX_CLAIM_BOUND: u32 = 1048576
+pub const MAX_PADDED_TRACE_LENGTH: usize = 2097152
 pub const MAX_TRACE_COORDINATE_MAGNITUDE: u32 = 24576
 
 pub struct ComplexQ12 { pub re: i32, pub im: i32 }
@@ -173,6 +174,9 @@ pub struct RangedAirRow {
 
 impl core::marker::Copy for RangedAirRow {}
 
+pub const AUXILIARY_RANGE_BITS: usize = 21 + 15 + 15 + 30 + 30 + 31 + 18 + 12 + 19 + 12
+pub const AUXILIARY_ROW_BITS: usize = 2 * AUXILIARY_RANGE_BITS + 5
+
 /// Audited widths for the canonical commitment encoding. Their sum is 210,
 /// so every range-valid row has an injective representation in BN254 Fr.
 pub const ENCODED_PROOF_ROW_WIDTHS: [u32; 17] = [
@@ -200,6 +204,18 @@ pub struct EscapeTraceStream {
 }
 
 impl core::marker::Copy for EscapeTraceStream {}
+
+/// Canonical Fe-materialized proof trace for a statically selected domain.
+/// This is used after the streaming trace commitments have fixed the
+/// Fiat-Shamir challenge. It accepts no host-authored witness rows.
+pub struct EncodedProofTrace<const N: usize> {
+    pub valid: bool,
+    pub terminal_step: u32,
+    pub trace_length: u32,
+    pub rows: [EncodedProofRow; N],
+}
+
+impl<const N: usize> core::marker::Copy for EncodedProofTrace<N> {}
 
 /// Scalar oracle boundary for one flattened AIR row. The proof model remains
 /// nominal; this tuple only keeps Wasm gate wrappers concise.
@@ -352,6 +368,43 @@ pub fn derive_ranged_air_row(_ row: EncodedAirRow) -> RangedAirRow {
         terminal: row.terminal,
         terminal_high_any: derive_terminal_high_any(magnitude),
     }
+}
+
+fn serialized_range_bit<const N: usize>(
+    _ witness: BitRangeWitness<N>,
+    _ index: usize,
+) -> u32 {
+    if index < N { witness.bits[index] } else { witness.any[index - N] }
+}
+
+/// Canonical semantic auxiliary-row accessor shared by commitment and
+/// composition. The cursor advances through nominal witness widths, so there
+/// is no second author-maintained offset table.
+pub fn encoded_auxiliary_row_bit(_ row: EncodedAirRow, _ index: usize) -> u32 {
+    if index >= AUXILIARY_ROW_BITS { return 0 }
+    let ranged = derive_ranged_air_row(row)
+    let mut cursor = index
+    if cursor < 2 * 21 { return serialized_range_bit<21>(ranged.step.witness, cursor) }
+    cursor = cursor - 2 * 21
+    if cursor < 2 * 15 { return serialized_range_bit<15>(ranged.zr.witness, cursor) }
+    cursor = cursor - 2 * 15
+    if cursor < 2 * 15 { return serialized_range_bit<15>(ranged.zi.witness, cursor) }
+    cursor = cursor - 2 * 15
+    if cursor < 2 * 30 { return serialized_range_bit<30>(ranged.rr.witness, cursor) }
+    cursor = cursor - 2 * 30
+    if cursor < 2 * 30 { return serialized_range_bit<30>(ranged.ii.witness, cursor) }
+    cursor = cursor - 2 * 30
+    if cursor < 2 * 31 { return serialized_range_bit<31>(ranged.magnitude.witness, cursor) }
+    cursor = cursor - 2 * 31
+    if cursor < 2 * 18 { return serialized_range_bit<18>(ranged.q_re.witness, cursor) }
+    cursor = cursor - 2 * 18
+    if cursor < 2 * 12 { return serialized_range_bit<12>(ranged.r_re.witness, cursor) }
+    cursor = cursor - 2 * 12
+    if cursor < 2 * 19 { return serialized_range_bit<19>(ranged.q_im.witness, cursor) }
+    cursor = cursor - 2 * 19
+    if cursor < 2 * 12 { return serialized_range_bit<12>(ranged.r_im.witness, cursor) }
+    cursor = cursor - 2 * 12
+    ranged.terminal_high_any.any[cursor]
 }
 
 fn air_encoding(_ row: EscapeAirRow) -> [u32; 15] {
@@ -616,6 +669,70 @@ impl EscapeTraceStream {
         }
         self.current = air_row(self.current.semantic.step + 1, z)
         self
+    }
+}
+
+pub fn encoded_proof_trace_exact<const N: usize>(
+    _ claim: EscapesByQ12,
+) -> EncodedProofTrace<N>
+    where N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N & (N - 1)) == 0 },
+{
+    let mut stream = EscapeTraceStream::new(claim)
+    let seed = encode_proof_row(stream.current_proof_row())
+    let mut rows: [EncodedProofRow; N] = [seed; N]
+    if !stream.is_valid() {
+        return EncodedProofTrace {
+            valid: false,
+            terminal_step: 0,
+            trace_length: 0,
+            rows: rows,
+        }
+    }
+
+    let mut index: usize = 0
+    while true {
+        let current = stream.current_proof_row()
+        rows[index] = encode_proof_row(current)
+        if current.terminal { break }
+        if index + 1 >= N || !stream.can_advance() {
+            return EncodedProofTrace {
+                valid: false,
+                terminal_step: 0,
+                trace_length: 0,
+                rows: rows,
+            }
+        }
+        stream = stream.advance()
+        index = index + 1
+    }
+
+    let terminal_air = stream.current_air_row()
+    let terminal_index: u32 = index.downcast_truncate()
+    let trace_length: u32 = terminal_index + 1
+    if padded_trace_length(trace_length) != N.downcast_truncate() {
+        return EncodedProofTrace {
+            valid: false,
+            terminal_step: 0,
+            trace_length: 0,
+            rows: rows,
+        }
+    }
+    let padding = encode_proof_row(PaddedEscapeAirRow {
+        valid: true,
+        active: false,
+        terminal: false,
+        air: terminal_air,
+    })
+    index = index + 1
+    while index < N {
+        rows[index] = padding
+        index = index + 1
+    }
+    EncodedProofTrace {
+        valid: true,
+        terminal_step: terminal_air.semantic.step,
+        trace_length: trace_length,
+        rows: rows,
     }
 }
 

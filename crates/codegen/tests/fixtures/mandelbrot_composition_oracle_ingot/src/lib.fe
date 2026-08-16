@@ -1,0 +1,93 @@
+//! Narrow Wasm boundary for the independent composition algebra oracle.
+//! Production obtains its challenge from the typed post-auxiliary transcript;
+//! this fixture accepts a u32 only to isolate the polynomial calculation.
+
+use mandelbrot_proof_composition::{compose4x16, evaluate_composition_point4x16}
+use precision::bn254_fr::Bn254Fr
+use precision::field::FieldElement
+
+pub struct ProductionCompositionWords {
+    pub valid: u32,
+    pub root: [u32; 20],
+    pub transcript: [u32; 20],
+    pub fri: [u32; 20],
+}
+
+pub fn composition4x16_production_words(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ bound: u32,
+) -> ProductionCompositionWords {
+    let proof = compose4x16(c_re_q12, c_im_q12, bound)
+    ProductionCompositionWords {
+        valid: if proof.valid { 1 } else { 0 },
+        root: proof.root.value.to_plain_words(),
+        transcript: proof.transcript.value.to_plain_words(),
+        fri: proof.fri.value.to_plain_words(),
+    }
+}
+
+pub fn composition4x16_challenge_evaluation_words(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ bound: u32,
+    _ challenge: u32,
+    _ evaluation: u32,
+) -> (
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+) {
+    if evaluation >= 16 {
+        return (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    }
+    let composed = evaluate_composition_point4x16(
+        c_re_q12,
+        c_im_q12,
+        bound,
+        FieldElement<20, Bn254Fr>::from_u32(challenge),
+        evaluation as usize,
+    )
+    let words = composed.value.to_plain_words()
+    (
+        if composed.valid { 1 } else { 0 },
+        words[0],
+        words[1],
+        words[2],
+        words[3],
+        words[4],
+        words[5],
+        words[6],
+        words[7],
+        words[8],
+        words[9],
+        words[10],
+        words[11],
+        words[12],
+        words[13],
+        words[14],
+        words[15],
+        words[16],
+        words[17],
+        words[18],
+        words[19],
+    )
+}

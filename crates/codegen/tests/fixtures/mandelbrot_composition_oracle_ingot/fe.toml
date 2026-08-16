@@ -1,0 +1,8 @@
+[ingot]
+name = "mandelbrot_composition_oracle_gate"
+version = "0.1.0"
+
+[dependencies]
+core = "../../../../../ingots/core"
+mandelbrot_proof_composition = "../../../../../demos/capstones/mandelbrot-proof/composition"
+precision = "../../../../../demos/sketches/precision"
