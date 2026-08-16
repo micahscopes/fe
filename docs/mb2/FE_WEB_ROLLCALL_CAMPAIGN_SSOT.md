@@ -263,11 +263,17 @@ Legend:
   encoding of the public point, bound, terminal step, semantic length, and
   padded length. The same independent gate mutates every public field. The
   low-degree range checks consume bit-decomposition and prefix-OR auxiliary
-  columns. Fe must derive and commit those columns before sampling a
-  composition challenge, otherwise a prover could adapt them after seeing the
-  randomizer. No provisional pre-auxiliary challenge remains in the protocol.
-  Auxiliary commitments, the correctly ordered typed transcript, composition,
-  and FRI remain pending. The
+  columns. The kernel now derives all ten decompositions, their inclusive
+  prefix ORs, and the five-bit terminal-threshold prefix in Fe. Their canonical
+  411-bit row encoding is split into two injective 253-bit BN254 elements,
+  committed under typed `"AR01"` leaves and `"AN01"` nodes, and folded beside
+  the main trace in the same pass. Typed `"AT01"` binds the public main-trace
+  statement to the auxiliary root before `"MC01"` derives the composition
+  challenge. The independent oracle reconstructs every auxiliary bit, packing,
+  both trees, the ordered transcript, and the challenge for 4-row, 8-row, and
+  16-row domains. Invalid and non-escaping claims fail closed, no host-authored
+  range witness enters the production API, and the arena returns to byte 1024.
+  Composition, later transcript stages, and FRI remain pending. The
   reusable field API's SPIR-V helper-call seam and GPU permutation lift also
   remain open.
   This is a general-tree statement-commitment milestone and executable AIR
@@ -315,9 +321,9 @@ fallback. The semantic receipts are:
 ## Immediate burn-down order
 
 1. Run the external real-GPU handoff above.
-2. Derive and commit the range/OR auxiliary trace in Fe, then bind its root
-   before deriving composition and FRI challenges under independent mutation
-   and cost oracles.
+2. Build composition constraints from the main and Fe-derived auxiliary
+   columns, then bind the composition commitment before deriving FRI
+   challenges under independent mutation and cost oracles.
 3. Finish typed fetch, then Worker/port placement and supervision on the one
    runtime-control spine.
 4. Delete the runtime manifest and finish the legacy disposition.

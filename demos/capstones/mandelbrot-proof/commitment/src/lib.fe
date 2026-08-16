@@ -1,8 +1,9 @@
 //! Domain-separated Poseidon commitment to canonical bounded-Mandelbrot rows.
 
 use mandelbrot_proof_kernel::{
-    ENCODED_PROOF_ROW_WIDTHS, EncodedProofRow, EscapesByQ12, EscapeTraceStream,
-    PaddedEscapeAirRow, SignedWord, encode_proof_row, encode_signed_word,
+    BitRangeWitness, ENCODED_PROOF_ROW_WIDTHS, EncodedProofRow, EscapesByQ12,
+    EscapeTraceStream, PaddedEscapeAirRow, RangedAirRow, SignedWord,
+    derive_ranged_air_row, encode_proof_row, encode_signed_word,
     encoded_proof_row_words, padded_trace_length,
 }
 use poseidon_bn254::{
@@ -14,6 +15,9 @@ const ROW_WORDS: usize = 17
 const PUBLIC_WORDS: usize = 8
 const TRACE_FRONTIER_LEVELS: usize = 22
 const MAX_PADDED_TRACE_LENGTH: usize = 2097152
+const AUXILIARY_ROW_BITS: u32 = 411
+const AUXILIARY_FIELD_BITS: u32 = 253
+const AUXILIARY_FIELDS: usize = 2
 
 /// Widths implied by the public-domain and proof-shape checks: signed Q12
 /// point components, the inclusive 2^20 bound, terminal step, semantic trace
@@ -39,6 +43,10 @@ const fn protocol_tag(_ label: String<4>) -> u32 {
 pub struct MandelbrotRowV1 {}
 pub struct MandelbrotNodeV1 {}
 pub struct MandelbrotTranscriptV1 {}
+pub struct MandelbrotAuxiliaryRowV1 {}
+pub struct MandelbrotAuxiliaryNodeV1 {}
+pub struct MandelbrotAuxiliaryTranscriptV1 {}
+pub struct MandelbrotCompositionV1 {}
 
 impl PoseidonDomain for MandelbrotRowV1 {
     const TAG: u32 = protocol_tag("MR01")
@@ -50,6 +58,22 @@ impl PoseidonDomain for MandelbrotNodeV1 {
 
 impl PoseidonDomain for MandelbrotTranscriptV1 {
     const TAG: u32 = protocol_tag("MT01")
+}
+
+impl PoseidonDomain for MandelbrotAuxiliaryRowV1 {
+    const TAG: u32 = protocol_tag("AR01")
+}
+
+impl PoseidonDomain for MandelbrotAuxiliaryNodeV1 {
+    const TAG: u32 = protocol_tag("AN01")
+}
+
+impl PoseidonDomain for MandelbrotAuxiliaryTranscriptV1 {
+    const TAG: u32 = protocol_tag("AT01")
+}
+
+impl PoseidonDomain for MandelbrotCompositionV1 {
+    const TAG: u32 = protocol_tag("MC01")
 }
 
 /// Public statement already validated by the cheap proof-domain boundary.
@@ -66,10 +90,15 @@ pub struct EscapesByQ12Public {
 
 impl core::marker::Copy for EscapesByQ12Public {}
 
-/// A digest whose constructor fixes the row and node domain policy.
+/// Main and auxiliary roots remain nominally distinct even though their
+/// frontier storage shares one field-level implementation below.
 pub struct TraceDigest { value: Fr }
 
 impl core::marker::Copy for TraceDigest {}
+
+pub struct AuxiliaryDigest { value: Fr }
+
+impl core::marker::Copy for AuxiliaryDigest {}
 
 /// The public statement and trace root are distinct nominal stages, so later
 /// verifier code cannot accidentally treat an unbound tree root as a proof
@@ -77,6 +106,15 @@ impl core::marker::Copy for TraceDigest {}
 pub struct StatementDigest { value: Fr }
 
 impl core::marker::Copy for StatementDigest {}
+
+/// Public claim plus the ordered main and auxiliary trace commitments.
+pub struct ProofTranscriptDigest { value: Fr }
+
+impl core::marker::Copy for ProofTranscriptDigest {}
+
+pub struct CompositionChallenge { value: Fr }
+
+impl core::marker::Copy for CompositionChallenge {}
 
 /// Result of one canonical prover-side pass. Invalid and non-escaping claims
 /// fail closed instead of exposing a digest for an incomplete trace.
@@ -86,10 +124,59 @@ struct StreamedCommitment {
     trace_length: u32,
     padded_length: u32,
     trace: TraceDigest,
+    auxiliary: AuxiliaryDigest,
     statement: StatementDigest,
+    proof_transcript: ProofTranscriptDigest,
+    composition: CompositionChallenge,
 }
 
 impl core::marker::Copy for StreamedCommitment {}
+
+/// Canonical 411-bit auxiliary-row serializer. Ten bit decompositions carry
+/// 203 bits and 203 inclusive prefix-OR values; the terminal threshold adds
+/// five more prefix values. Two 253-bit chunks are each injective in BN254 Fr.
+struct AuxiliaryRowPacker {
+    words: [[u32; LIMBS]; AUXILIARY_FIELDS],
+    offset: u32,
+}
+
+impl core::marker::Copy for AuxiliaryRowPacker {}
+
+impl AuxiliaryRowPacker {
+    fn empty() -> Self {
+        Self { words: [[0; LIMBS]; AUXILIARY_FIELDS], offset: 0 }
+    }
+
+    fn push_bit(mut self, _ bit: u32) -> Self {
+        let field = self.offset / AUXILIARY_FIELD_BITS
+        let within = self.offset - field * AUXILIARY_FIELD_BITS
+        let limb = within / WORD_BITS
+        let shift = within - limb * WORD_BITS
+        self.words[field as usize][limb as usize] =
+            self.words[field as usize][limb as usize] | ((bit & 1) << shift)
+        self.offset = self.offset + 1
+        self
+    }
+
+}
+
+fn pack_witness<const N: usize>(
+    _ packed: own AuxiliaryRowPacker,
+    _ witness: BitRangeWitness<N>,
+) -> AuxiliaryRowPacker {
+    let mut packed = packed
+    let mut i: usize = 0
+    while i < N {
+        packed = packed.push_bit(witness.bits[i])
+        i = i + 1
+    }
+    i = 0
+    while i < N {
+        packed = packed.push_bit(witness.any[i])
+        i = i + 1
+    }
+    packed
+}
 
 fn pack_words<const N: usize>(
     _ source: own [u32; N],
@@ -131,9 +218,44 @@ fn packed_public(_ public: own EscapesByQ12Public) -> [u32; LIMBS] {
     ], ESCAPES_BY_Q12_PUBLIC_WIDTHS)
 }
 
+fn packed_auxiliary_row(_ row: own EncodedProofRow) -> [[u32; LIMBS]; AUXILIARY_FIELDS] {
+    let ranged: RangedAirRow = derive_ranged_air_row(row.air)
+    let mut packed = AuxiliaryRowPacker::empty()
+    packed = pack_witness<21>(packed, ranged.step.witness)
+    packed = pack_witness<15>(packed, ranged.zr.witness)
+    packed = pack_witness<15>(packed, ranged.zi.witness)
+    packed = pack_witness<30>(packed, ranged.rr.witness)
+    packed = pack_witness<30>(packed, ranged.ii.witness)
+    packed = pack_witness<31>(packed, ranged.magnitude.witness)
+    packed = pack_witness<18>(packed, ranged.q_re.witness)
+    packed = pack_witness<12>(packed, ranged.r_re.witness)
+    packed = pack_witness<19>(packed, ranged.q_im.witness)
+    packed = pack_witness<12>(packed, ranged.r_im.witness)
+    let mut high: u32 = 0
+    while high < 5 {
+        packed = packed.push_bit(ranged.terminal_high_any.any[high as usize])
+        high = high + 1
+    }
+    if packed.offset != AUXILIARY_ROW_BITS {
+        let zero: [u32; LIMBS] = [0; LIMBS]
+        return [zero, zero]
+    }
+    packed.words
+}
+
 pub fn row_commitment(_ row: own EncodedProofRow) -> TraceDigest {
     TraceDigest {
         value: commit_plain_words<MandelbrotRowV1>(packed_row(row)),
+    }
+}
+
+pub fn auxiliary_row_commitment(_ row: own EncodedProofRow) -> AuxiliaryDigest {
+    let packed = packed_auxiliary_row(row)
+    AuxiliaryDigest {
+        value: compress<MandelbrotAuxiliaryRowV1>(
+            Fr::from_plain_words(packed[0]),
+            Fr::from_plain_words(packed[1]),
+        ),
     }
 }
 
@@ -146,37 +268,22 @@ pub fn node_commitment(_ left: own TraceDigest, _ right: own TraceDigest) -> Tra
 /// Streaming Merkle state for every proof domain admitted by the public Q12
 /// bound. Slot `level` holds the completed left subtree of width `2^level`
 /// selected by the corresponding set bit in `count`.
-struct TraceFrontier {
+struct RawFrontier {
     count: u32,
-    nodes: [TraceDigest; TRACE_FRONTIER_LEVELS],
+    nodes: [Fr; TRACE_FRONTIER_LEVELS],
 }
 
-impl core::marker::Copy for TraceFrontier {}
+impl core::marker::Copy for RawFrontier {}
 
-impl TraceFrontier {
+impl RawFrontier {
     fn empty() -> Self {
-        let zero = TraceDigest { value: Fr::zero() }
         Self {
             count: 0,
-            nodes: [zero; TRACE_FRONTIER_LEVELS],
+            nodes: [Fr::zero(); TRACE_FRONTIER_LEVELS],
         }
     }
 
-    fn push(mut self, _ row: own EncodedProofRow) -> Self {
-        let mut carry = row_commitment(row)
-        let mut occupied = self.count
-        let mut level: usize = 0
-        while (occupied & 1) == 1 {
-            carry = node_commitment(self.nodes[level], carry)
-            occupied = occupied >> 1
-            level = level + 1
-        }
-        self.nodes[level] = carry
-        self.count = self.count + 1
-        self
-    }
-
-    fn complete_root(self) -> TraceDigest {
+    fn complete_root(self) -> Fr {
         let mut level: usize = 0
         let mut width: u32 = 1
         while width < self.count {
@@ -187,6 +294,49 @@ impl TraceFrontier {
     }
 }
 
+fn push_merkle<D: PoseidonDomain>(
+    _ frontier: own RawFrontier,
+    _ leaf: Fr,
+) -> RawFrontier {
+    let mut frontier = frontier
+    let mut carry = leaf
+    let mut occupied = frontier.count
+    let mut level: usize = 0
+    while (occupied & 1) == 1 {
+        carry = compress<D>(frontier.nodes[level], carry)
+        occupied = occupied >> 1
+        level = level + 1
+    }
+    frontier.nodes[level] = carry
+    frontier.count = frontier.count + 1
+    frontier
+}
+
+struct TraceFrontier { raw: RawFrontier }
+impl core::marker::Copy for TraceFrontier {}
+impl TraceFrontier {
+    fn empty() -> Self { Self { raw: RawFrontier::empty() } }
+    fn push(mut self, _ leaf: TraceDigest) -> Self {
+        self.raw = push_merkle<MandelbrotNodeV1>(self.raw, leaf.value)
+        self
+    }
+    fn complete_root(self) -> TraceDigest { TraceDigest { value: self.raw.complete_root() } }
+    fn count(self) -> u32 { self.raw.count }
+}
+
+struct AuxiliaryFrontier { raw: RawFrontier }
+impl core::marker::Copy for AuxiliaryFrontier {}
+impl AuxiliaryFrontier {
+    fn empty() -> Self { Self { raw: RawFrontier::empty() } }
+    fn push(mut self, _ leaf: AuxiliaryDigest) -> Self {
+        self.raw = push_merkle<MandelbrotAuxiliaryNodeV1>(self.raw, leaf.value)
+        self
+    }
+    fn complete_root(self) -> AuxiliaryDigest {
+        AuxiliaryDigest { value: self.raw.complete_root() }
+    }
+}
+
 fn invalid_streamed_commitment() -> StreamedCommitment {
     StreamedCommitment {
         valid: false,
@@ -194,7 +344,10 @@ fn invalid_streamed_commitment() -> StreamedCommitment {
         trace_length: 0,
         padded_length: 0,
         trace: TraceDigest { value: Fr::zero() },
+        auxiliary: AuxiliaryDigest { value: Fr::zero() },
         statement: StatementDigest { value: Fr::zero() },
+        proof_transcript: ProofTranscriptDigest { value: Fr::zero() },
+        composition: CompositionChallenge { value: Fr::zero() },
     }
 }
 
@@ -212,9 +365,12 @@ fn stream_statement_q12(
     if !stream.is_valid() { return invalid_streamed_commitment() }
 
     let mut frontier = TraceFrontier::empty()
+    let mut auxiliary = AuxiliaryFrontier::empty()
     while true {
         let row = stream.current_proof_row()
-        frontier = frontier.push(encode_proof_row(row))
+        let encoded = encode_proof_row(row)
+        frontier = frontier.push(row_commitment(encoded))
+        auxiliary = auxiliary.push(auxiliary_row_commitment(encoded))
         if row.terminal { break }
         if !stream.can_advance() { return invalid_streamed_commitment() }
         stream = stream.advance()
@@ -230,11 +386,14 @@ fn stream_statement_q12(
         terminal: false,
         air: terminal_air,
     }
-    while frontier.count < padded_length {
-        frontier = frontier.push(encode_proof_row(padding))
+    while frontier.count() < padded_length {
+        let encoded = encode_proof_row(padding)
+        frontier = frontier.push(row_commitment(encoded))
+        auxiliary = auxiliary.push(auxiliary_row_commitment(encoded))
     }
 
     let trace = frontier.complete_root()
+    let auxiliary = auxiliary.complete_root()
     let public = EscapesByQ12Public {
         c_re: encode_signed_word(c_re_q12),
         c_im: encode_signed_word(c_im_q12),
@@ -243,13 +402,18 @@ fn stream_statement_q12(
         trace_length: trace_length,
         padded_length: padded_length,
     }
+    let statement = bind_statement(public, trace)
+    let proof_transcript = bind_auxiliary_trace(statement, auxiliary)
     StreamedCommitment {
         valid: true,
         terminal_step: terminal_step,
         trace_length: trace_length,
         padded_length: padded_length,
         trace: trace,
-        statement: bind_statement(public, trace),
+        auxiliary: auxiliary,
+        statement: statement,
+        proof_transcript: proof_transcript,
+        composition: composition_challenge(proof_transcript),
     }
 }
 
@@ -264,7 +428,7 @@ fn trace_root_power_of_two<const N: usize>(
     let mut frontier = TraceFrontier::empty()
     let mut row: usize = 0
     while row < N {
-        frontier = frontier.push(rows[row])
+        frontier = frontier.push(row_commitment(rows[row]))
         row = row + 1
     }
     frontier.complete_root()
@@ -294,6 +458,23 @@ pub fn bind_statement(
 ) -> StatementDigest {
     StatementDigest {
         value: bind_plain_words<MandelbrotTranscriptV1>(packed_public(public), trace.value),
+    }
+}
+
+pub fn bind_auxiliary_trace(
+    _ statement: own StatementDigest,
+    _ auxiliary: own AuxiliaryDigest,
+) -> ProofTranscriptDigest {
+    ProofTranscriptDigest {
+        value: compress<MandelbrotAuxiliaryTranscriptV1>(statement.value, auxiliary.value),
+    }
+}
+
+pub fn composition_challenge(
+    _ transcript: own ProofTranscriptDigest,
+) -> CompositionChallenge {
+    CompositionChallenge {
+        value: compress<MandelbrotCompositionV1>(transcript.value, Fr::zero()),
     }
 }
 
@@ -347,6 +528,38 @@ pub fn streamed_statement_q12_plain_words(
     while limb < LIMBS {
         output[4 + limb] = trace[limb]
         output[24 + limb] = statement[limb]
+        limb = limb + 1
+    }
+    output
+}
+
+/// Full pre-composition transcript boundary. The 84 words contain metadata,
+/// main root, auxiliary root, the digest that binds both roots to the public
+/// statement, and only then the composition challenge. All auxiliary columns
+/// are derived and committed inside the same Fe pass.
+pub fn streamed_proof_transcript_q12_plain_words(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ bound: u32,
+) -> [u32; 84] {
+    let generated = stream_statement_q12(c_re_q12, c_im_q12, bound)
+    let mut output: [u32; 84] = [0; 84]
+    if !generated.valid { return output }
+
+    output[0] = 1
+    output[1] = generated.terminal_step
+    output[2] = generated.trace_length
+    output[3] = generated.padded_length
+    let trace = plain_words(generated.trace.value)
+    let auxiliary = plain_words(generated.auxiliary.value)
+    let transcript = plain_words(generated.proof_transcript.value)
+    let composition = plain_words(generated.composition.value)
+    let mut limb: usize = 0
+    while limb < LIMBS {
+        output[4 + limb] = trace[limb]
+        output[24 + limb] = auxiliary[limb]
+        output[44 + limb] = transcript[limb]
+        output[64 + limb] = composition[limb]
         limb = limb + 1
     }
     output

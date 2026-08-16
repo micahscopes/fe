@@ -1534,6 +1534,7 @@ fn mandelbrot_residual_polynomials_execute_in_bn254_without_host_shims() {
     let signed32_export = "mandelbrot_bn254_signed32_range_residual_masks";
     let terminal_export = "mandelbrot_bn254_terminal_residual_masks";
     let row_range_export = "mandelbrot_bn254_row_range_residual_masks";
+    let derived_row_range_export = "mandelbrot_bn254_derived_row_range_residual_masks";
     for (c_re, c_im, bound) in [(-8192, -6144, 100), (4095, 4095, 2), (-3048, 2216, 255)] {
         let rows = reference_rows(c_re, c_im, bound);
         let mut selected = vec![0usize, rows.len() - 1];
@@ -2053,6 +2054,17 @@ fn mandelbrot_residual_polynomials_execute_in_bn254_without_host_shims() {
         vec![0; 10],
         "one typed terminal row must satisfy every Fe-authored column width"
     );
+    assert_eq!(
+        call_masks(
+            &mut row_range_store,
+            &row_range_instance,
+            derived_row_range_export,
+            &field_air_encoding(terminal_air),
+            10,
+        ),
+        vec![0; 10],
+        "Fe-derived auxiliary columns must satisfy every range constraint"
+    );
 
     let mut invalid_ranged_row = base;
     invalid_ranged_row.r_re += 4096;
@@ -2084,4 +2096,20 @@ fn mandelbrot_residual_polynomials_execute_in_bn254_without_host_shims() {
             assert_eq!(mask, 0, "unexpected typed-row range residual {column}");
         }
     }
+
+    let mut derived_invalid = field_air_encoding(base);
+    derived_invalid[1] = 1;
+    derived_invalid[2] = 0;
+    derived_invalid[10] += 4096;
+    derived_invalid[14] = 1;
+    let derived_invalid_masks = call_masks(
+        &mut row_range_store,
+        &row_range_instance,
+        derived_row_range_export,
+        &derived_invalid,
+        10,
+    );
+    assert_ne!(derived_invalid_masks[1], 0);
+    assert_ne!(derived_invalid_masks[6], 0);
+    assert_ne!(derived_invalid_masks[9], 0);
 }

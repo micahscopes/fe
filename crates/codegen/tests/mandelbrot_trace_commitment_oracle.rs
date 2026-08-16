@@ -169,6 +169,48 @@ fn commitment_words(row: &ProofRow) -> [u32; 17] {
     ]
 }
 
+fn append_range_witness(bits: &mut Vec<u32>, value: u32, width: usize) {
+    let decomposition: Vec<_> = (0..width).map(|bit| (value >> bit) & 1).collect();
+    bits.extend(decomposition.iter().copied());
+    let mut seen = 0u32;
+    bits.extend(decomposition.into_iter().map(|bit| {
+        seen |= bit;
+        seen
+    }));
+}
+
+fn auxiliary_bits(row: &ProofRow) -> Vec<u32> {
+    let mut bits = Vec::with_capacity(411);
+    append_range_witness(&mut bits, row.air.step, 21);
+    append_range_witness(&mut bits, row.air.zr.magnitude, 15);
+    append_range_witness(&mut bits, row.air.zi.magnitude, 15);
+    append_range_witness(&mut bits, row.air.rr, 30);
+    append_range_witness(&mut bits, row.air.ii, 30);
+    append_range_witness(&mut bits, row.air.magnitude, 31);
+    append_range_witness(&mut bits, row.air.q_re.magnitude, 18);
+    append_range_witness(&mut bits, row.air.r_re, 12);
+    append_range_witness(&mut bits, row.air.q_im.magnitude, 19);
+    append_range_witness(&mut bits, row.air.r_im, 12);
+    let mut seen = 0u32;
+    bits.extend((26..31).map(|bit| {
+        seen |= (row.air.magnitude >> bit) & 1;
+        seen
+    }));
+    assert_eq!(bits.len(), 411);
+    assert!(bits.iter().all(|bit| *bit <= 1));
+    bits
+}
+
+fn packed_auxiliary(row: &ProofRow) -> [BigUint; 2] {
+    let mut packed = [BigUint::from(0u32), BigUint::from(0u32)];
+    for (offset, bit) in auxiliary_bits(row).into_iter().enumerate() {
+        let field = offset / 253;
+        let within = offset % 253;
+        packed[field] += BigUint::from(bit) << within;
+    }
+    packed
+}
+
 fn runtime_words(row: &ProofRow) -> [u32; 17] {
     [
         row.active,
@@ -304,6 +346,15 @@ fn row_commitment(row: &ProofRow, parameters: &[BigUint]) -> BigUint {
     .clone()
 }
 
+fn auxiliary_row_commitment(row: &ProofRow, parameters: &[BigUint]) -> BigUint {
+    let packed = packed_auxiliary(row);
+    permute(
+        [protocol_tag(b"AR01"), packed[0].clone(), packed[1].clone()],
+        parameters,
+    )[0]
+    .clone()
+}
+
 fn node_commitment(left: BigUint, right: BigUint, parameters: &[BigUint]) -> BigUint {
     permute([protocol_tag(b"MN01"), left, right], parameters)[0].clone()
 }
@@ -318,6 +369,27 @@ fn trace_root_power_of_two(rows: &[ProofRow], parameters: &[BigUint]) -> BigUint
         level = level
             .chunks_exact(2)
             .map(|pair| node_commitment(pair[0].clone(), pair[1].clone(), parameters))
+            .collect();
+    }
+    level.pop().unwrap()
+}
+
+fn auxiliary_root_power_of_two(rows: &[ProofRow], parameters: &[BigUint]) -> BigUint {
+    assert!(!rows.is_empty() && rows.len().is_power_of_two());
+    let mut level: Vec<_> = rows
+        .iter()
+        .map(|row| auxiliary_row_commitment(row, parameters))
+        .collect();
+    while level.len() > 1 {
+        level = level
+            .chunks_exact(2)
+            .map(|pair| {
+                permute(
+                    [protocol_tag(b"AN01"), pair[0].clone(), pair[1].clone()],
+                    parameters,
+                )[0]
+                .clone()
+            })
             .collect();
     }
     level.pop().unwrap()
@@ -339,6 +411,26 @@ fn statement_commitment(
             protocol_tag(b"MT01"),
             pack_words(public_words(statement), PUBLIC_WIDTHS),
             trace_root_power_of_two(rows, parameters),
+        ],
+        parameters,
+    )[0]
+    .clone()
+}
+
+fn proof_transcript(statement: &BigUint, auxiliary: &BigUint, parameters: &[BigUint]) -> BigUint {
+    permute(
+        [protocol_tag(b"AT01"), statement.clone(), auxiliary.clone()],
+        parameters,
+    )[0]
+    .clone()
+}
+
+fn composition_challenge(transcript: &BigUint, parameters: &[BigUint]) -> BigUint {
+    permute(
+        [
+            protocol_tag(b"MC01"),
+            transcript.clone(),
+            BigUint::from(0u32),
         ],
         parameters,
     )[0]
@@ -705,6 +797,9 @@ fn fe_streams_the_canonical_trace_directly_into_the_frontier() {
     let generate = instance
         .get_func(&mut store, "streamed_statement_q12_plain_words")
         .unwrap();
+    let generate_proof = instance
+        .get_func(&mut store, "streamed_proof_transcript_q12_plain_words")
+        .unwrap();
     let reset = instance
         .get_typed_func::<(), ()>(&mut store, "fe_cabi_reset")
         .unwrap();
@@ -726,7 +821,11 @@ fn fe_streams_the_canonical_trace_directly_into_the_frontier() {
             padded_length: rows.len() as u32,
         };
         let expected_root = trace_root_power_of_two(&rows, &parameters);
+        let expected_auxiliary = auxiliary_root_power_of_two(&rows, &parameters);
         let expected_statement = statement_commitment(&statement, &rows, &parameters);
+        let expected_transcript =
+            proof_transcript(&expected_statement, &expected_auxiliary, &parameters);
+        let expected_composition = composition_challenge(&expected_transcript, &parameters);
         let actual =
             call_streamed_claim_output(&mut store, &generate, &reset, c_re, c_im, bound, 44);
         assert_eq!(actual[0], 1);
@@ -735,6 +834,13 @@ fn fe_streams_the_canonical_trace_directly_into_the_frontier() {
         assert_eq!(actual[3], rows.len() as u32);
         assert_eq!(plain_limbs(&actual[4..24]), expected_root);
         assert_eq!(plain_limbs(&actual[24..44]), expected_statement);
+        let actual_proof =
+            call_streamed_claim_output(&mut store, &generate_proof, &reset, c_re, c_im, bound, 84);
+        assert_eq!(&actual_proof[..4], &actual[..4]);
+        assert_eq!(plain_limbs(&actual_proof[4..24]), expected_root);
+        assert_eq!(plain_limbs(&actual_proof[24..44]), expected_auxiliary);
+        assert_eq!(plain_limbs(&actual_proof[44..64]), expected_transcript);
+        assert_eq!(plain_limbs(&actual_proof[64..84]), expected_composition);
         assert_eq!(
             alloc.call(&mut store, (1, 1)).unwrap(),
             1024,
@@ -746,6 +852,9 @@ fn fe_streams_the_canonical_trace_directly_into_the_frontier() {
         let actual =
             call_streamed_claim_output(&mut store, &generate, &reset, c_re, c_im, bound, 44);
         assert!(actual.iter().all(|word| *word == 0));
+        let actual_proof =
+            call_streamed_claim_output(&mut store, &generate_proof, &reset, c_re, c_im, bound, 84);
+        assert!(actual_proof.iter().all(|word| *word == 0));
         assert_eq!(
             alloc.call(&mut store, (1, 1)).unwrap(),
             1024,

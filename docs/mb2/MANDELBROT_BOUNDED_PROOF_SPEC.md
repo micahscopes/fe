@@ -181,19 +181,24 @@ Fe derives the row and node tags from the visible string literals `"MR01"` and
 in the implementation. Claim, numeric-model version, padded trace length, and
 terminal row are bound for this fixed slice by a third typed domain, `"MT01"`.
 The low-degree range argument introduces bit-decomposition and prefix-OR
-auxiliary trace columns. Their root must be absorbed after the main root and
-before any composition randomizer is sampled. Sampling from the main root
-alone would let a prover adapt the auxiliary columns after seeing the
-challenge. The typed transcript schedule is therefore:
+auxiliary trace columns. Their root is absorbed after the main root and before
+the composition randomizer is sampled. Sampling from the main root alone would
+let a prover adapt the auxiliary columns after seeing the challenge. The typed
+transcript schedule is therefore:
 
 1. bind the public claim and main-trace root;
 2. derive and commit every auxiliary trace column used by composition;
-3. absorb the ordered auxiliary roots and derive the composition challenge;
+3. absorb the ordered auxiliary root and derive the composition challenge;
 4. absorb the composition commitment before deriving out-of-domain and FRI
    challenges.
 
-Steps 2 through 4 remain open. No provisional pre-auxiliary challenge is part
-of the protocol.
+Steps 1 through 3 now execute. The kernel derives the ten bit decompositions,
+their inclusive prefix ORs, and the five-bit terminal-threshold prefix in Fe.
+The resulting 411 bits pack into two 253-bit field elements, then typed
+`"AR01"` leaves and `"AN01"` nodes form the auxiliary tree. Typed `"AT01"`
+binds the main statement to that auxiliary root before `"MC01"` derives the
+composition challenge. No provisional pre-auxiliary challenge is part of the
+protocol. Step 4 remains open.
 
 `escape_air_row_encoding_q12` now materializes that canonical row encoding in
 Fe. It gives zero only the positive sign and emits a fixed 15-word order.
@@ -219,9 +224,9 @@ executes the fixed four-row commitment in zero-import Wasm. Its honest SPIR-V
 gate currently fails closed on the retained array-returning `mul_words` call,
 so aggregate-return inlining or shader function-call lowering is required
 before the same field implementation runs as an application GPU kernel.
-The production power-of-two main-trace stream now executes. Fe-derived
-auxiliary commitments, the correctly ordered Fiat-Shamir stages, composition,
-and FRI remain open.
+The production power-of-two main and auxiliary trace streams, ordered
+pre-composition transcript, and first Fiat-Shamir challenge now execute.
+Composition, later transcript stages, and FRI remain open.
 
 The intended succinct construction is a transparent AIR plus FRI over a field
 with an audited two-adic domain. The first implementation should reuse the

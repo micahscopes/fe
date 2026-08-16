@@ -12,58 +12,12 @@
 use precision::bn254_fr::Bn254Fr
 use precision::field::FieldElement
 pub use mandelbrot_proof_kernel::{
-    EncodedAirRow, EncodedProofRow, SignedWord, ENCODED_PROOF_ROW_WIDTHS,
-    encoded_proof_row_words,
+    BitRangeWitness, ENCODED_PROOF_ROW_WIDTHS, EncodedAirRow, EncodedProofRow,
+    OrWitness, RangedAirRow, RangedSigned, RangedUnsigned, SignedWord,
+    derive_ranged_air_row, encoded_proof_row_words,
 }
 
 type Fr = FieldElement<20, Bn254Fr>
-
-/// Low-degree range witness. `bits` reconstruct the value, while `any` is the
-/// inclusive prefix OR. The latter gives canonical-zero and nonzero predicates
-/// without one high-degree product over every bit.
-pub struct BitRangeWitness<const N: usize> {
-    pub bits: [u32; N],
-    pub any: [u32; N],
-}
-
-impl<const N: usize> core::marker::Copy for BitRangeWitness<N> {}
-
-pub struct OrWitness<const N: usize> { pub any: [u32; N] }
-
-impl<const N: usize> core::marker::Copy for OrWitness<N> {}
-
-pub struct RangedUnsigned<const N: usize> {
-    pub value: u32,
-    pub witness: BitRangeWitness<N>,
-}
-
-impl<const N: usize> core::marker::Copy for RangedUnsigned<N> {}
-
-pub struct RangedSigned<const N: usize> {
-    pub value: SignedWord,
-    pub witness: BitRangeWitness<N>,
-}
-
-impl<const N: usize> core::marker::Copy for RangedSigned<N> {}
-
-/// Every numeric column of one Mandelbrot AIR row with its typed range
-/// witness. The widths are part of the Fe type, not host-side metadata.
-pub struct RangedAirRow {
-    pub step: RangedUnsigned<21>,
-    pub zr: RangedSigned<15>,
-    pub zi: RangedSigned<15>,
-    pub rr: RangedUnsigned<30>,
-    pub ii: RangedUnsigned<30>,
-    pub magnitude: RangedUnsigned<31>,
-    pub q_re: RangedSigned<18>,
-    pub r_re: RangedUnsigned<12>,
-    pub q_im: RangedSigned<19>,
-    pub r_im: RangedUnsigned<12>,
-    pub terminal: u32,
-    pub terminal_high_any: OrWitness<5>,
-}
-
-impl core::marker::Copy for RangedAirRow {}
 
 struct SignedField { sign: Fr, magnitude: Fr, value: Fr }
 
@@ -549,4 +503,13 @@ pub fn mandelbrot_bn254_row_range_residual_masks(
         terminal.0 | terminal.1 | terminal.2 | terminal.3
             | terminal.4 | terminal.5 | terminal.6 | terminal.7,
     )
+}
+
+/// Prover-side Fe derivation followed by the independent constraint surface.
+/// This boundary demonstrates that range witnesses need not be authored or
+/// serialized by the host before they enter the auxiliary trace commitment.
+pub fn mandelbrot_bn254_derived_row_range_residual_masks(
+    _ row: EncodedAirRow,
+) -> (u32, u32, u32, u32, u32, u32, u32, u32, u32, u32) {
+    mandelbrot_bn254_row_range_residual_masks(derive_ranged_air_row(row))
 }

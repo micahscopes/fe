@@ -50,10 +50,16 @@ four-row column, row order, and both inactive padding positions of a six-active
 row, eight-row domain. A distinct `"MT01"` domain binds each trace root to an
 injective 114-bit encoding of the public point, bound, terminal step, semantic
 length, and padded length. Every public field is independently mutated.
-The low-degree range checks currently consume bit-decomposition and prefix-OR
-auxiliary columns. Those columns must be Fe-derived and committed before the
-composition challenge is sampled. That auxiliary commitment, the subsequent
-typed Fiat-Shamir stage, composition, and FRI remain pending.
+The kernel now derives every bit-decomposition and prefix-OR auxiliary column
+in Fe. Their canonical 411-bit row encoding is split into two injective 253-bit
+BN254 elements, committed under typed `"AR01"` leaves and `"AN01"` nodes, and
+folded beside the main trace in the same pass. An `"AT01"` transcript stage
+binds the auxiliary root after the public main-trace statement; only then does
+typed `"MC01"` derive the field-native composition challenge. The independent
+oracle reconstructs all auxiliary columns, packing, both trees, the ordered
+transcript, and the challenge for all three streamed domains. No host-authored
+range witness or pre-auxiliary challenge crosses the production API.
+Composition and FRI remain pending.
 
 Escaping witnesses derive a power-of-two proof shape with one terminal marker
 and deterministic inactive padding; invalid and non-escaping claims cannot

@@ -126,6 +126,53 @@ pub struct EncodedProofRow {
 
 impl core::marker::Copy for EncodedProofRow {}
 
+/// Low-degree range witness. `bits` reconstruct the value, while `any` is the
+/// inclusive prefix OR used by canonical-zero and threshold constraints.
+pub struct BitRangeWitness<const N: usize> {
+    pub bits: [u32; N],
+    pub any: [u32; N],
+}
+
+impl<const N: usize> core::marker::Copy for BitRangeWitness<N> {}
+
+pub struct OrWitness<const N: usize> { pub any: [u32; N] }
+
+impl<const N: usize> core::marker::Copy for OrWitness<N> {}
+
+pub struct RangedUnsigned<const N: usize> {
+    pub value: u32,
+    pub witness: BitRangeWitness<N>,
+}
+
+impl<const N: usize> core::marker::Copy for RangedUnsigned<N> {}
+
+pub struct RangedSigned<const N: usize> {
+    pub value: SignedWord,
+    pub witness: BitRangeWitness<N>,
+}
+
+impl<const N: usize> core::marker::Copy for RangedSigned<N> {}
+
+/// Every non-boolean AIR column paired with its protocol width and canonical
+/// Fe-derived bit witness. The terminal threshold prefix is retained because
+/// it is an auxiliary low-degree trace column in its own right.
+pub struct RangedAirRow {
+    pub step: RangedUnsigned<21>,
+    pub zr: RangedSigned<15>,
+    pub zi: RangedSigned<15>,
+    pub rr: RangedUnsigned<30>,
+    pub ii: RangedUnsigned<30>,
+    pub magnitude: RangedUnsigned<31>,
+    pub q_re: RangedSigned<18>,
+    pub r_re: RangedUnsigned<12>,
+    pub q_im: RangedSigned<19>,
+    pub r_im: RangedUnsigned<12>,
+    pub terminal: u32,
+    pub terminal_high_any: OrWitness<5>,
+}
+
+impl core::marker::Copy for RangedAirRow {}
+
 /// Audited widths for the canonical commitment encoding. Their sum is 210,
 /// so every range-valid row has an injective representation in BN254 Fr.
 pub const ENCODED_PROOF_ROW_WIDTHS: [u32; 17] = [
@@ -223,6 +270,88 @@ pub fn encoded_proof_row_words(_ row: own EncodedProofRow) -> [u32; 17] {
         row.active,
         row.terminal,
     ]
+}
+
+pub fn derive_bit_range_witness<const N: usize>(
+    _ value: u32,
+) -> BitRangeWitness<N>
+    where N <= 32,
+{
+    let mut bits: [u32; N] = [0; N]
+    let mut any: [u32; N] = [0; N]
+    let mut seen: u32 = 0
+    let count: u32 = N.downcast_truncate()
+    let mut i: u32 = 0
+    while i < count {
+        let bit = (value >> i) & 1
+        seen = seen | bit
+        bits[i as usize] = bit
+        any[i as usize] = seen
+        i = i + 1
+    }
+    BitRangeWitness { bits: bits, any: any }
+}
+
+fn derive_terminal_high_any(_ magnitude: BitRangeWitness<31>) -> OrWitness<5> {
+    let mut any: [u32; 5] = [0; 5]
+    let mut seen: u32 = 0
+    let mut i: u32 = 0
+    while i < 5 {
+        seen = seen | magnitude.bits[(26 + i) as usize]
+        any[i as usize] = seen
+        i = i + 1
+    }
+    OrWitness { any: any }
+}
+
+/// Derive every auxiliary range column from the canonical main-trace row.
+/// This is prover work in Fe, not data supplied through a host manifest.
+pub fn derive_ranged_air_row(_ row: EncodedAirRow) -> RangedAirRow {
+    let magnitude = derive_bit_range_witness<31>(row.magnitude)
+    RangedAirRow {
+        step: RangedUnsigned {
+            value: row.step,
+            witness: derive_bit_range_witness<21>(row.step),
+        },
+        zr: RangedSigned {
+            value: row.zr,
+            witness: derive_bit_range_witness<15>(row.zr.magnitude),
+        },
+        zi: RangedSigned {
+            value: row.zi,
+            witness: derive_bit_range_witness<15>(row.zi.magnitude),
+        },
+        rr: RangedUnsigned {
+            value: row.rr,
+            witness: derive_bit_range_witness<30>(row.rr),
+        },
+        ii: RangedUnsigned {
+            value: row.ii,
+            witness: derive_bit_range_witness<30>(row.ii),
+        },
+        magnitude: RangedUnsigned {
+            value: row.magnitude,
+            witness: magnitude,
+        },
+        q_re: RangedSigned {
+            value: row.q_re,
+            witness: derive_bit_range_witness<18>(row.q_re.magnitude),
+        },
+        r_re: RangedUnsigned {
+            value: row.r_re,
+            witness: derive_bit_range_witness<12>(row.r_re),
+        },
+        q_im: RangedSigned {
+            value: row.q_im,
+            witness: derive_bit_range_witness<19>(row.q_im.magnitude),
+        },
+        r_im: RangedUnsigned {
+            value: row.r_im,
+            witness: derive_bit_range_witness<12>(row.r_im),
+        },
+        terminal: row.terminal,
+        terminal_high_any: derive_terminal_high_any(magnitude),
+    }
 }
 
 fn air_encoding(_ row: EscapeAirRow) -> [u32; 15] {
