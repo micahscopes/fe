@@ -137,7 +137,11 @@ pub fn build_transport_plan(plan: &AdapterPlan) -> Result<TransportPlan, Bindgen
                         name: "self".to_owned(),
                         type_: Type::Handle(Handle {
                             resource: resource.name.clone(),
-                            ownership: HandleOwnership::Borrow,
+                            ownership: if method.receiver == Receiver::Own {
+                                HandleOwnership::Own
+                            } else {
+                                HandleOwnership::Borrow
+                            },
                         }),
                     },
                 );
@@ -530,7 +534,7 @@ fn requirement_name(requirement: PlanRequirement) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{build_adapter_plan, parse};
+    use crate::{build_adapter_plan, emit_fe_flat_host_imports, parse};
 
     const FIXTURE: &str = r#"
         interface Event {};
@@ -540,6 +544,90 @@ mod tests {
             Promise<DOMString> receive();
         };
     "#;
+
+    #[test]
+    fn global_fetch_uses_standards_authority_and_owned_response_resources() {
+        let world = parse(
+            r#"
+                [Global=Window, Exposed=Window]
+                interface Window {
+                    Promise<Response> fetch(USVString input);
+                };
+                [Exposed=Window]
+                interface Response {
+                    readonly attribute unsigned short status;
+                    Promise<USVString> text();
+                    Promise<ArrayBuffer> arrayBuffer();
+                };
+            "#,
+        )
+        .unwrap();
+        assert!(world.interfaces["Window"].attributes.global);
+
+        let fe = emit_fe_flat_host_imports(&world, "fe:web-fetch").unwrap();
+        assert!(
+            fe.contains("window_fetch(input: own BrowserString) -> Pending<WasmBackend, Response>"),
+            "{fe}"
+        );
+        assert!(!fe.contains("window_fetch(self_"), "{fe}");
+        assert!(!fe.contains("window_resource_drop"), "{fe}");
+        assert!(
+            fe.contains("response_resource_drop(self_: own Response)"),
+            "{fe}"
+        );
+        assert!(
+            fe.contains(
+                "response_array_buffer(self_: Response) -> Pending<WasmBackend, BrowserBytes>"
+            ),
+            "{fe}"
+        );
+
+        let adapter = build_adapter_plan(&world, "web-fetch", "fe:web-fetch").unwrap();
+        let window = adapter
+            .resources
+            .iter()
+            .find(|resource| resource.name == "Window")
+            .unwrap();
+        assert_eq!(window.functions.len(), 1);
+        assert!(window.functions[0].static_);
+        let semantic = crate::emit_js_canonical_adapter(&world, &adapter).unwrap();
+        assert!(
+            semantic.contains("host.interfaces[\"Window\"]"),
+            "{semantic}"
+        );
+        assert!(semantic.contains("runtime.resources.drop(selfHandle);"));
+
+        let transport = build_transport_plan(&adapter).unwrap();
+        let fetch = transport
+            .functions
+            .iter()
+            .find(|function| function.import_name == "window_fetch")
+            .unwrap();
+        assert_eq!(
+            fetch.core,
+            Some(CoreSignature {
+                params: vec![CoreValueType::I32, CoreValueType::I32],
+                results: vec![CoreValueType::I32],
+            })
+        );
+        assert!(fetch.post_return_export.is_none());
+
+        let text = transport
+            .functions
+            .iter()
+            .find(|function| function.import_name == "response_text")
+            .unwrap();
+        assert_eq!(
+            transport
+                .futures
+                .iter()
+                .find(|future| future.operation_identity == text.identity)
+                .unwrap()
+                .success,
+            [CoreValueType::I32, CoreValueType::I32]
+        );
+        assert!(text.post_return_export.is_some());
+    }
 
     #[test]
     fn transport_plan_is_stable_and_pairs_semantics_with_core_signatures() {

@@ -5,6 +5,7 @@ export function createHostWasmCodecSession({
   memory,
   realloc,
   postReturn,
+  lowerHandle,
 }) {
   if (plan?.contract !== CONTRACT || plan?.abi !== "fe-host-wasm" || plan?.abi_version !== 1) {
     throw new TypeError(`unsupported Fe host codec contract`);
@@ -12,7 +13,7 @@ export function createHostWasmCodecSession({
   if (!(memory instanceof WebAssembly.Memory)) {
     throw new TypeError(`codec requires WebAssembly.Memory`);
   }
-  if (typeof realloc !== "function") {
+  if (plan?.function?.requirements?.includes("realloc") && typeof realloc !== "function") {
     throw new TypeError(`codec requires cabi_realloc`);
   }
   const requirements = new Set(plan.function.requirements);
@@ -27,6 +28,14 @@ export function createHostWasmCodecSession({
 
   const cleanups = new Map();
   const view = () => new DataView(memory.buffer);
+
+  function handleToken(value) {
+    const token = typeof value === "number" ? value : lowerHandle?.(value);
+    if (!Number.isInteger(token) || token < -0x80000000 || token > 0xffffffff) {
+      throw new TypeError("expected i32 handle token");
+    }
+    return token | 0;
+  }
 
   function remember(ptr, size, align) {
     if (size !== 0) cleanups.set(`${ptr}:${size}:${align}`, { ptr, size, align });
@@ -225,8 +234,7 @@ export function createHostWasmCodecSession({
         lowerBuffer(shape.value, value, offset);
         return;
       case "handle":
-        if (!Number.isInteger(value) || value < 0 || value > 0xffffffff) throw new TypeError("expected i32 handle token");
-        view().setUint32(offset, value, true);
+        view().setUint32(offset, handleToken(value), true);
         return;
       case "future_handle":
         throw new TypeError("future execution is not implemented by codec v1");
@@ -261,7 +269,7 @@ export function createHostWasmCodecSession({
     }
   }
 
-  function lift(layout, offset, ownership = "value") {
+  function lift(layout, offset, ownership = "value", rememberAllocations = true) {
     region(offset, layout.size, layout.align);
     const shape = layout.shape;
     switch (shape.kind) {
@@ -270,21 +278,33 @@ export function createHostWasmCodecSession({
         const [ptr, len] = readDescriptor(offset);
         const unit = shape.value === "utf16" ? 2 : 1;
         region(ptr, len * unit, unit);
-        remember(ptr, len * unit, unit);
+        if (rememberAllocations) remember(ptr, len * unit, unit);
         return decodeString(shape.value, new Uint8Array(memory.buffer, ptr, len * unit));
       }
       case "list": {
         const [ptr, len] = readDescriptor(offset);
         const element = shape.value;
         region(ptr, len * element.size, element.align);
-        remember(ptr, len * element.size, element.align);
-        return Array.from({ length: len }, (_, index) => lift(element, ptr + index * element.size));
+        if (rememberAllocations) remember(ptr, len * element.size, element.align);
+        return Array.from(
+          { length: len },
+          (_, index) => lift(
+            element,
+            ptr + index * element.size,
+            "value",
+            rememberAllocations,
+          ),
+        );
       }
       case "buffer": return liftBuffer(shape.value, offset, ownership);
-      case "handle": return view().getUint32(offset, true);
+      case "handle": return view().getInt32(offset, true);
       case "future_handle": throw new TypeError("future execution is not implemented by codec v1");
-      case "record": return Object.fromEntries(shape.value.map((field) => [field.name, lift(field.layout, offset + field.offset)]));
-      case "tuple": return shape.value.map((field) => lift(field.layout, offset + field.offset));
+      case "record": return Object.fromEntries(shape.value.map((field) => [
+        field.name,
+        lift(field.layout, offset + field.offset, "value", rememberAllocations),
+      ]));
+      case "tuple": return shape.value.map((field) =>
+        lift(field.layout, offset + field.offset, "value", rememberAllocations));
       case "enum": {
         const tag = view().getUint32(offset, true);
         if (tag >= shape.value.cases) throw new TypeError("malformed enum tag");
@@ -301,7 +321,12 @@ export function createHostWasmCodecSession({
         const variant = shape.value;
         if (tag >= variant.cases.length) throw new TypeError("malformed variant tag");
         const payload = variant.cases[tag].payload;
-        return { case: tag, payload: payload ? lift(payload, offset + variant.payload_offset) : null };
+        return {
+          case: tag,
+          payload: payload
+            ? lift(payload, offset + variant.payload_offset, "value", rememberAllocations)
+            : null,
+        };
       }
       default: throw new TypeError(`unknown layout shape ${shape.kind}`);
     }
@@ -313,71 +338,176 @@ export function createHostWasmCodecSession({
     throw new TypeError(`unknown value position`);
   }
 
-  function flatWidth(layout) {
-    if (layout.flat.mode === "indirect") return 1;
-    return layout.flat.types.length;
+  function liftCoreScalar(kind, value) {
+    switch (kind) {
+      case "bool":
+        if (value !== 0 && value !== 1) throw new TypeError(`malformed bool ${value}`);
+        return value === 1;
+      case "i8": return (Number(value) << 24) >> 24;
+      case "u8": return Number(value) & 0xff;
+      case "i16": return (Number(value) << 16) >> 16;
+      case "u16": return Number(value) & 0xffff;
+      case "i32": return Number(value) | 0;
+      case "u32": return Number(value) >>> 0;
+      case "char": {
+        const scalar = Number(value) >>> 0;
+        if (scalar > 0x10ffff || (scalar >= 0xd800 && scalar <= 0xdfff)) {
+          throw new TypeError(`malformed Unicode scalar ${scalar}`);
+        }
+        return scalar;
+      }
+      case "i64": return BigInt.asIntN(64, BigInt(value));
+      case "u64": return BigInt.asUintN(64, BigInt(value));
+      case "f32": return Math.fround(Number(value));
+      case "f64": return Number(value);
+      default: throw new TypeError(`unknown scalar kind ${kind}`);
+    }
   }
 
-  function writeFlat(layout, coreArgs, state, offset) {
-    const shape = layout.shape;
+  function liftFlat(layout, coreArgs, state, ownership = "value") {
     if (layout.flat.mode === "indirect") {
       throw new TypeError("indirect values are represented by their pointer");
     }
+    const shape = layout.shape;
     switch (shape.kind) {
-      case "scalar":
-        writeScalar(shape.value, offset, coreArgs[state.index++]);
-        return;
-      case "handle":
-        view().setUint32(offset, Number(coreArgs[state.index++]), true);
-        return;
-      case "string":
-      case "list":
-      case "buffer": {
-        const ptr = Number(coreArgs[state.index++]);
-        const len = Number(coreArgs[state.index++]);
-        writeDescriptor(offset, ptr, len);
-        return;
+      case "scalar": return liftCoreScalar(shape.value, coreArgs[state.index++]);
+      case "handle": return Number(coreArgs[state.index++]) | 0;
+      case "string": {
+        const ptr = Number(coreArgs[state.index++]) >>> 0;
+        const len = Number(coreArgs[state.index++]) >>> 0;
+        const unit = shape.value === "utf16" ? 2 : 1;
+        const byteLength = len * unit;
+        if (!Number.isSafeInteger(byteLength)) throw new RangeError("string size overflow");
+        region(ptr, byteLength, unit);
+        return decodeString(
+          shape.value,
+          new Uint8Array(memory.buffer, ptr, byteLength),
+        );
       }
-      case "record":
-      case "tuple":
-        for (const field of shape.value) writeFlat(field.layout, coreArgs, state, offset + field.offset);
-        return;
-      case "enum":
-      case "flags":
-        view().setUint32(offset, Number(coreArgs[state.index++]), true);
-        return;
+      case "list": {
+        const ptr = Number(coreArgs[state.index++]) >>> 0;
+        const len = Number(coreArgs[state.index++]) >>> 0;
+        const element = shape.value;
+        const byteLength = len * element.size;
+        if (!Number.isSafeInteger(byteLength)) throw new RangeError("list size overflow");
+        region(ptr, byteLength, element.align);
+        return Array.from(
+          { length: len },
+          (_, index) => lift(element, ptr + index * element.size, "value", false),
+        );
+      }
+      case "buffer": {
+        const ptr = Number(coreArgs[state.index++]) >>> 0;
+        const len = Number(coreArgs[state.index++]) >>> 0;
+        const spec = bufferSpec(shape.value);
+        const byteLength = len * spec.bytes;
+        if (!Number.isSafeInteger(byteLength)) throw new RangeError("buffer size overflow");
+        region(ptr, byteLength, spec.bytes);
+        const result = new spec.ctor(len);
+        const data = view();
+        for (let index = 0; index < len; index++) {
+          result[index] = spec.bytes === 1
+            ? data[spec.get](ptr + index)
+            : data[spec.get](ptr + index * spec.bytes, true);
+        }
+        if (ownership !== "borrow") remember(ptr, byteLength, spec.bytes);
+        return result;
+      }
+      case "record": return Object.fromEntries(shape.value.map((field) => [
+        field.name,
+        liftFlat(field.layout, coreArgs, state),
+      ]));
+      case "tuple": return shape.value.map((field) =>
+        liftFlat(field.layout, coreArgs, state));
+      case "enum": {
+        const tag = Number(coreArgs[state.index++]) >>> 0;
+        if (tag >= shape.value.cases) throw new TypeError("malformed enum tag");
+        return tag;
+      }
+      case "flags": {
+        const bits = Number(coreArgs[state.index++]) >>> 0;
+        const allowed = shape.value.count === 32 ? 0xffffffff : (2 ** shape.value.count) - 1;
+        if ((bits & ~allowed) !== 0) throw new TypeError("malformed flags");
+        return bits;
+      }
       default:
         throw new TypeError(`${shape.kind} cannot use a direct core signature`);
     }
   }
 
-  function readFlat(layout, offset, output) {
-    const shape = layout.shape;
+  function lowerFlat(layout, value, output, ownership = "value") {
     if (layout.flat.mode === "indirect") {
       throw new TypeError("indirect values are represented by their pointer");
     }
+    const shape = layout.shape;
     switch (shape.kind) {
-      case "scalar":
-        output.push(readScalar(shape.value, offset));
+      case "scalar": {
+        const normalized = liftCoreScalar(
+          shape.value,
+          shape.value === "bool" ? (value ? 1 : 0) : value,
+        );
+        output.push(shape.value === "bool" ? (normalized ? 1 : 0) : normalized);
         return;
+      }
       case "handle":
-        output.push(view().getUint32(offset, true));
+        output.push(handleToken(value));
         return;
-      case "string":
-      case "list":
+      case "string": {
+        const [bytes, unit] = encodeString(shape.value, value);
+        const ptr = allocate(bytes.byteLength, unit);
+        new Uint8Array(memory.buffer, ptr, bytes.byteLength).set(bytes);
+        output.push(ptr, bytes.byteLength / unit);
+        return;
+      }
+      case "list": {
+        if (!Array.isArray(value)) throw new TypeError("expected list");
+        const element = shape.value;
+        const byteLength = value.length * element.size;
+        if (!Number.isSafeInteger(byteLength)) throw new RangeError("list size overflow");
+        const ptr = allocate(byteLength, element.align);
+        value.forEach((item, index) => lower(element, item, ptr + index * element.size));
+        output.push(ptr, value.length);
+        return;
+      }
       case "buffer": {
-        const [ptr, len] = readDescriptor(offset);
-        output.push(ptr, len);
+        const spec = bufferSpec(shape.value);
+        if (!(value instanceof spec.ctor)) throw new TypeError(`expected ${spec.ctor.name}`);
+        const byteLength = value.length * spec.bytes;
+        if (!Number.isSafeInteger(byteLength)) throw new RangeError("buffer size overflow");
+        const ptr = allocate(byteLength, spec.bytes);
+        const data = view();
+        for (let index = 0; index < value.length; index++) {
+          const item = spec.bigint ? BigInt(value[index]) : value[index];
+          if (spec.bytes === 1) data[spec.set](ptr + index, item);
+          else data[spec.set](ptr + index * spec.bytes, item, true);
+        }
+        output.push(ptr, value.length);
         return;
       }
       case "record":
+        for (const field of shape.value) {
+          lowerFlat(field.layout, value[field.name], output);
+        }
+        return;
       case "tuple":
-        for (const field of shape.value) readFlat(field.layout, offset + field.offset, output);
+        if (!Array.isArray(value)) throw new TypeError("expected tuple");
+        shape.value.forEach((field, index) =>
+          lowerFlat(field.layout, value[index], output));
         return;
       case "enum":
-      case "flags":
-        output.push(view().getUint32(offset, true));
+        if (!Number.isInteger(value) || value < 0 || value >= shape.value.cases) {
+          throw new TypeError("malformed enum tag");
+        }
+        output.push(value);
         return;
+      case "flags": {
+        const allowed = shape.value.count === 32 ? 0xffffffff : (2 ** shape.value.count) - 1;
+        if (!Number.isInteger(value) || value < 0 || (value & ~allowed) !== 0) {
+          throw new TypeError("malformed flags");
+        }
+        output.push(value >>> 0);
+        return;
+      }
       default:
         throw new TypeError(`${shape.kind} cannot use a direct core signature`);
     }
@@ -388,11 +518,14 @@ export function createHostWasmCodecSession({
     const state = { index: 0 };
     for (const parameter of plan.function.params) {
       if (parameter.layout.flat.mode === "indirect") {
-        args.push(lift(parameter.layout, Number(coreArgs[state.index++]), parameter.ownership));
+        args.push(lift(
+          parameter.layout,
+          Number(coreArgs[state.index++]),
+          parameter.ownership,
+          false,
+        ));
       } else {
-        const scratch = allocate(parameter.layout.size, parameter.layout.align);
-        writeFlat(parameter.layout, coreArgs, state, scratch);
-        args.push(lift(parameter.layout, scratch, parameter.ownership));
+        args.push(liftFlat(parameter.layout, coreArgs, state, parameter.ownership));
       }
     }
     if (state.index !== coreArgs.length) {
@@ -404,12 +537,14 @@ export function createHostWasmCodecSession({
   function lowerResult(value) {
     const result = plan.function.result;
     if (!result) return undefined;
+    if (result.layout.flat.mode === "direct") {
+      const core = [];
+      lowerFlat(result.layout, value, core, result.ownership);
+      return core.length === 1 ? core[0] : core;
+    }
     const ptr = allocate(result.layout.size, result.layout.align);
     lower(result.layout, value, ptr, result.ownership);
-    if (result.layout.flat.mode === "indirect") return ptr;
-    const core = [];
-    readFlat(result.layout, ptr, core);
-    return core.length === 1 ? core[0] : core;
+    return ptr;
   }
 
   return Object.freeze({
@@ -449,8 +584,14 @@ export function createHostWasmCodecSession({
 ///
 /// `plans` is keyed by the transport function identity used by the generated
 /// binder. Layouts remain entirely Rust-emitted data.
-export function createFeHostWasmCodec(plans) {
+export function createFeHostWasmCodec(plans, options = {}) {
   const byIdentity = plans instanceof Map ? plans : new Map(Object.entries(plans));
+  const needsRealloc = [...byIdentity.values()].some(plan =>
+    plan?.function?.requirements?.includes("realloc"));
+  const resources = options.resources;
+  if (resources !== undefined && typeof resources?.toCore !== "function") {
+    throw new TypeError("codec resources must expose toCore(handle)");
+  }
   const supported = new Set([
     "realloc",
     "post_return",
@@ -476,6 +617,9 @@ export function createFeHostWasmCodec(plans) {
             memory: surface.memory,
             realloc: surface.realloc,
             postReturn: surface.postReturns?.[identity],
+            lowerHandle: resources === undefined
+              ? undefined
+              : handle => resources.toCore(handle),
           });
           sessions.set(identity, session);
         }
@@ -486,7 +630,7 @@ export function createFeHostWasmCodec(plans) {
           if (!(nextSurface?.memory instanceof WebAssembly.Memory)) {
             throw new TypeError("codec attach requires WebAssembly.Memory");
           }
-          if (typeof nextSurface.realloc !== "function") {
+          if (needsRealloc && typeof nextSurface.realloc !== "function") {
             throw new TypeError("codec attach requires cabi_realloc");
           }
           surface = nextSurface;

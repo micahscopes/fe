@@ -8,10 +8,13 @@ pub struct Window { handle: u32 }
 
 #[host_import(module = "fe:web")]
 extern {
+    pub unsafe fn document_resource_drop(self_: own Document)
     pub unsafe fn document_get_document_element(self_: Document) -> Element
+    pub unsafe fn element_resource_drop(self_: own Element)
     pub unsafe fn element_get_child_element_count(self_: Element) -> u32
     pub unsafe fn element_get_hidden(self_: Element) -> bool
     pub unsafe fn element_set_hidden(self_: Element, value: bool)
+    pub unsafe fn window_resource_drop(self_: own Window)
     pub unsafe fn window_get_inner_width(self_: Window) -> u32
     pub unsafe fn window_get_document(self_: Window) -> Document
 }

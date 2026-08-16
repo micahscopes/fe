@@ -132,6 +132,7 @@ pub enum AdapterInvocation {
     AttributeSet,
     AttributeForwardSet,
     Operation,
+    ResourceDrop,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -358,7 +359,7 @@ fn plan_resource(world: &World, interface: &InterfaceDef) -> AdapterResource {
                     abi_method_name: format!("get-{}", attribute.name),
                     member_name: attribute.name.clone(),
                     invocation: AdapterInvocation::AttributeGet,
-                    static_: attribute.static_,
+                    static_: attribute.static_ || interface.attributes.global,
                     params: Vec::new(),
                     result: attribute.type_.clone(),
                     async_: false,
@@ -374,7 +375,7 @@ fn plan_resource(world: &World, interface: &InterfaceDef) -> AdapterResource {
                         abi_method_name: format!("set-{}", attribute.name),
                         member_name: attribute.name.clone(),
                         invocation: AdapterInvocation::AttributeSet,
-                        static_: attribute.static_,
+                        static_: attribute.static_ || interface.attributes.global,
                         params: vec![AdapterParam {
                             name: "value".to_owned(),
                             type_: attribute.type_.clone(),
@@ -428,6 +429,19 @@ fn plan_resource(world: &World, interface: &InterfaceDef) -> AdapterResource {
             }
         }
     }
+    if !interface.attributes.global {
+        functions.push(AdapterFunction {
+            import_name: format!("{}_resource_drop", snake_case(&interface.name)),
+            abi_method_name: "resource-drop".to_owned(),
+            member_name: "resource-drop".to_owned(),
+            invocation: AdapterInvocation::ResourceDrop,
+            static_: false,
+            params: Vec::new(),
+            result: TypeRef::Unit,
+            async_: false,
+            attributes: ExtendedAttributesDef::default(),
+        });
+    }
     functions.sort_by(|left, right| left.import_name.cmp(&right.import_name));
     AdapterResource {
         name: interface.name.clone(),
@@ -463,7 +477,9 @@ fn plan_constructor(interface: &InterfaceDef, constructor: &ConstructorDef) -> A
 }
 
 fn plan_operation(interface: &InterfaceDef, operation: &OperationDef) -> AdapterFunction {
-    plan_operation_like(&interface.name, operation)
+    let mut function = plan_operation_like(&interface.name, operation);
+    function.static_ |= interface.attributes.global;
+    function
 }
 
 fn plan_operation_like(owner: &str, operation: &OperationDef) -> AdapterFunction {
@@ -1281,6 +1297,7 @@ fn emit_function(
                 format!("return {};", to_fe(world, &function.result, &call)?)
             }
         }
+        AdapterInvocation::ResourceDrop => "runtime.resources.drop(selfHandle);".to_owned(),
     };
     output.push_str(&format!(
         "    {:?}: function({}) {{ {} }},\n",

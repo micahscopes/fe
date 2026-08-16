@@ -862,7 +862,7 @@ pub fn lower_host_abi(world: &World, options: &HostAbiOptions) -> Result<abi::Wo
                         lower_value_type(world, &attribute.type_, TypePosition::Result, &context)?;
                     methods.push(abi::ResourceMethod {
                         name: format!("get-{}", attribute.name),
-                        receiver: receiver(attribute.static_),
+                        receiver: receiver(attribute.static_ || interface.attributes.global),
                         signature: abi::FunctionType {
                             params: Vec::new(),
                             result: Some(result.clone()),
@@ -872,7 +872,7 @@ pub fn lower_host_abi(world: &World, options: &HostAbiOptions) -> Result<abi::Wo
                     if !attribute.read_only {
                         methods.push(abi::ResourceMethod {
                             name: format!("set-{}", attribute.name),
-                            receiver: receiver(attribute.static_),
+                            receiver: receiver(attribute.static_ || interface.attributes.global),
                             signature: abi::FunctionType {
                                 params: vec![abi::Param {
                                     name: "value".to_owned(),
@@ -935,9 +935,21 @@ pub fn lower_host_abi(world: &World, options: &HostAbiOptions) -> Result<abi::Wo
                         world,
                         &format!("interface `{}`", interface.name),
                         operation,
+                        interface.attributes.global,
                     )?);
                 }
             }
+        }
+        if !interface.attributes.global {
+            methods.push(abi::ResourceMethod {
+                name: "resource-drop".to_owned(),
+                receiver: abi::Receiver::Own,
+                signature: abi::FunctionType {
+                    params: Vec::new(),
+                    result: None,
+                    async_: false,
+                },
+            });
         }
         methods.sort_by(|left, right| left.name.cmp(&right.name));
         resources.push(abi::Resource {
@@ -977,6 +989,7 @@ pub fn lower_host_abi(world: &World, options: &HostAbiOptions) -> Result<abi::Wo
                         world,
                         &format!("namespace `{}`", namespace.name),
                         operation,
+                        true,
                     )?;
                     imports.push(abi::Function {
                         namespace: namespace.name.clone(),
@@ -1149,6 +1162,7 @@ fn lower_operation(
     world: &World,
     definition: &str,
     operation: &OperationDef,
+    force_static: bool,
 ) -> Result<abi::ResourceMethod, BindgenError> {
     let suffix = if operation.overload > 0 {
         format!("-{}", operation.overload)
@@ -1189,7 +1203,7 @@ fn lower_operation(
     };
     Ok(abi::ResourceMethod {
         name,
-        receiver: receiver(operation.static_),
+        receiver: receiver(operation.static_ || force_static),
         signature: abi::FunctionType {
             params,
             result,
@@ -1660,6 +1674,7 @@ mod tests {
                 "get-label",
                 "lookup",
                 "replace",
+                "resource-drop",
                 "set-active",
                 "snapshot",
                 "write",
@@ -1817,7 +1832,7 @@ mod tests {
                 .iter()
                 .map(|method| method.name.as_str())
                 .collect::<Vec<_>>(),
-            ["value", "value-1"]
+            ["resource-drop", "value", "value-1"]
         );
     }
 
@@ -1937,6 +1952,7 @@ mod tests {
                     same_object: false,
                     legacy_unforgeable: false,
                     put_forwards: None,
+                    global: false,
                     unmodeled: Vec::new(),
                 },
             }]

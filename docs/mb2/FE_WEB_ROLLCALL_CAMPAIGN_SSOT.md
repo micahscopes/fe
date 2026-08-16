@@ -112,15 +112,25 @@ Legend:
   `EventSource` and completion broker. The focused broker suite and
   `fe_message_port_event_source_resumes_from_a_real_port` pass, and the slice is
   landed at `c1817e477`. This item closes when the final G5 run passes.
-- [ ] Add fetch as a generated typed Fe source and consume it from
-  SourceInspector without application-specific host policy. This gate must
-  extend generated WebIDL `Promise<T>` transport onto the existing
-  `Pending<WasmBackend, T>` continuation rail. It does not permit a permanent
-  `fe:web-fetch` import whose JavaScript manually mirrors Fe field order or
-  success-lane widths. SourceInspector must own switch-latest cancellation,
-  HTTP classification, stale-response rejection, and presentation policy in
-  Fe; fixed JavaScript may only realize browser standards mechanics and the
-  generated canonical transport.
+- [~] Add fetch as a generated typed Fe source and consume it from
+  SourceInspector without application-specific host policy. The generated
+  boundary now models `[Global=Window]` without minting a fake Window handle,
+  lowers URL-only `fetch`, `Response.text`, and `Response.arrayBuffer` through
+  the existing `Pending<WasmBackend, T>` continuation rail, maps byte results
+  to canonical `BrowserBytes`, and emits explicit generation-safe disposal for
+  owned Response resources. Direct borrowed guest arguments and scalar or
+  resource results no longer allocate codec scratch memory. Gates:
+  `global_fetch_uses_standards_authority_and_owned_response_resources`, the
+  55-test `fe-webidl-bindgen` suite, the 13-test `fe-host-wasm-codec` suite,
+  the eight Bun codec cases, and the three focused generated-WebIDL real-Wasm
+  cases. Remaining work is compiler publication of the selected core adapter,
+  Fe-authored SourceInspector loading and cancellation, then deletion of
+  component opcodes 12 and 13 plus `_loadResource`. This gate does not permit
+  a permanent `fe:web-fetch` import whose JavaScript manually mirrors Fe field
+  order or success-lane widths. SourceInspector must own switch-latest
+  cancellation, HTTP classification, stale-response rejection, and
+  presentation policy in Fe; fixed JavaScript may only realize browser
+  standards mechanics and the generated canonical transport.
 - [ ] Attach opaque ports through Fe-owned spawn/Worker placement, then derive
   rich canonical message payloads from Fe types.
 - [ ] Add structured child scopes, admission, supervision, and restart/backoff

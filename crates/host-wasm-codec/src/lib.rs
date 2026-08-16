@@ -693,7 +693,7 @@ fn plan_value(
     world: &World,
     type_: &Type,
     position: ValuePosition,
-    _direction: BoundaryDirection,
+    direction: BoundaryDirection,
     requirements: &mut BTreeSet<PlanRequirement>,
 ) -> Result<ValuePlan, CodecError> {
     let layout = layout_validated(world, type_, 0)?;
@@ -723,7 +723,12 @@ fn plan_value(
         }
         _ => TransferOwnership::Value,
     };
-    if contains_allocation(world, type_)? {
+    let host_lowers_value = matches!(
+        (direction, position),
+        (BoundaryDirection::GuestToHost, ValuePosition::Result)
+            | (BoundaryDirection::HostToGuest, ValuePosition::Parameter)
+    );
+    if host_lowers_value && contains_allocation(world, type_)? {
         requirements.extend([PlanRequirement::Realloc, PlanRequirement::PostReturn]);
     }
     Ok(ValuePlan {
@@ -2467,6 +2472,74 @@ mod tests {
             function_plan(&world, &world.imports[0], BoundaryDirection::HostToGuest).unwrap();
         assert_eq!(reverse.direction, BoundaryDirection::HostToGuest);
         assert_eq!(reverse.params[0].ownership, TransferOwnership::Borrow);
+    }
+
+    #[test]
+    fn guest_string_parameters_are_borrowed_while_string_results_require_allocation() {
+        let parameter_only = Function {
+            namespace: "fe:web".into(),
+            name: "fetch".into(),
+            signature: FunctionType {
+                params: vec![Param {
+                    name: "url".into(),
+                    type_: Type::String(StringEncoding::Utf8),
+                }],
+                result: Some(Type::Handle(Handle {
+                    resource: "response".into(),
+                    ownership: HandleOwnership::Own,
+                })),
+                async_: false,
+            },
+        };
+        let result_string = Function {
+            namespace: "fe:web".into(),
+            name: "response-text".into(),
+            signature: FunctionType {
+                params: vec![Param {
+                    name: "response".into(),
+                    type_: Type::Handle(Handle {
+                        resource: "response".into(),
+                        ownership: HandleOwnership::Borrow,
+                    }),
+                }],
+                result: Some(Type::String(StringEncoding::Utf8)),
+                async_: false,
+            },
+        };
+        let world = World {
+            name: "fetch".into(),
+            resources: vec![fe_host_abi::Resource {
+                name: "response".into(),
+                methods: vec![],
+            }],
+            ..World::default()
+        };
+        let parameter_plan =
+            function_plan(&world, &parameter_only, BoundaryDirection::GuestToHost).unwrap();
+        assert!(
+            !parameter_plan
+                .requirements
+                .contains(&PlanRequirement::Realloc)
+        );
+        assert!(
+            !parameter_plan
+                .requirements
+                .contains(&PlanRequirement::PostReturn)
+        );
+        assert!(
+            parameter_plan
+                .requirements
+                .contains(&PlanRequirement::ResourceTransfer)
+        );
+
+        let result_plan =
+            function_plan(&world, &result_string, BoundaryDirection::GuestToHost).unwrap();
+        assert!(result_plan.requirements.contains(&PlanRequirement::Realloc));
+        assert!(
+            result_plan
+                .requirements
+                .contains(&PlanRequirement::PostReturn)
+        );
     }
 
     #[test]

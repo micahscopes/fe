@@ -176,6 +176,91 @@ describe("fe:host-wasm-codec/v1", () => {
     expect(owned.released).toHaveLength(1);
   });
 
+  test("lifts direct guest arguments without allocating or claiming borrowed storage", () => {
+    const memory = new WebAssembly.Memory({ initial: 1 });
+    const bytes = new TextEncoder().encode("hé");
+    new Uint8Array(memory.buffer, 128, bytes.length).set(bytes);
+    const plan = {
+      contract: fixture.contract,
+      abi: fixture.abi,
+      abi_version: fixture.abi_version,
+      function: {
+        namespace: "fe:web",
+        name: "fetch",
+        direction: "guest_to_host",
+        params: [{
+          type_: { kind: "string", value: "utf8" },
+          layout: {
+            size: 8,
+            align: 4,
+            shape: { kind: "string", value: "utf8" },
+            flat: { mode: "direct", types: ["i32", "i32"] },
+          },
+          position: "parameter",
+          ownership: "value",
+        }],
+        result: null,
+        requirements: [],
+      },
+    };
+    const session = createHostWasmCodecSession({
+      plan,
+      memory,
+      realloc() { throw new Error("direct argument lift allocated"); },
+    });
+    expect(session.liftArguments([128, bytes.length])).toEqual(["hé"]);
+    session.finish();
+  });
+
+  test("lowers opaque semantic resources through the generation-safe core token", () => {
+    const opaque = Object.freeze({ resource: "response" });
+    const plan = {
+      contract: fixture.contract,
+      abi: fixture.abi,
+      abi_version: fixture.abi_version,
+      function: {
+        namespace: "fe:web",
+        name: "fetch",
+        direction: "guest_to_host",
+        params: [],
+        result: {
+          type_: {
+            kind: "handle",
+            value: { resource: "response", ownership: "own" },
+          },
+          layout: {
+            size: 4,
+            align: 4,
+            shape: { kind: "handle" },
+            flat: { mode: "direct", types: ["i32"] },
+          },
+          position: "result",
+          ownership: "own",
+        },
+        requirements: ["resource_transfer"],
+      },
+    };
+    const codec = createFeHostWasmCodec(
+      { "resource/window/window_fetch": plan },
+      {
+        resources: {
+          toCore(handle) {
+            if (handle !== opaque) throw new Error("wrong semantic resource");
+            return 0x8001_0001 | 0;
+          },
+        },
+      },
+    );
+    const session = codec.createSession();
+    session.attach({
+      instance: {},
+      memory: new WebAssembly.Memory({ initial: 1 }),
+      realloc: undefined,
+      postReturns: {},
+    });
+    expect(session.lowerResult("resource/window/window_fetch", opaque)).toBe(0x8001_0001 | 0);
+  });
+
   test("executes a generated binder import against an attached Wasm instance", async () => {
     const directory = mkdtempSync(join(tmpdir(), "fe-host-codec-"));
     const wasmPath = join(directory, "fixture.wasm");
