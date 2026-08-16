@@ -298,4 +298,23 @@ fn generic_coset_lde_matches_direct_interpolation_and_evaluation() {
             assert_eq!(words, vec![0; LIMBS], "invalid cosets must fail closed");
         }
     }
+
+    let evaluations = [2, 3, 5, 7];
+    let (valid, words) = call_lde_words(
+        &mut store,
+        &instance,
+        "coset_lde4_to16_root_shift_words",
+        0,
+        0,
+        &evaluations,
+    );
+    assert!(
+        !valid,
+        "an H_16 root shift must be rejected even though it lies outside H_4",
+    );
+    assert_eq!(
+        words,
+        vec![0; LIMBS],
+        "an output-subgroup shift must fail closed",
+    );
 }

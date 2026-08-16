@@ -230,8 +230,8 @@ domains; direct bigint DFT and round-trip gates exercise the same algorithm at
 4, 8, and 16 points. Its generic coset low-degree extension interpolates base
 evaluations, applies a multiplicative shift in coefficient form, zero-pads,
 and evaluates on a larger subgroup. The typed result is invalid and all-zero
-when the shift is zero or lies in the base subgroup, so composition cannot
-silently evaluate on roots of the trace zerofier. Independent direct bigint
+when the shift is zero or lies in the output subgroup, so the evaluation coset
+cannot intersect roots of the trace zerofier. Independent direct bigint
 interpolation and evaluation gate 4-to-16 and 8-to-16 extensions. The
 field-AIR ingot now consumes this API directly on Wasm. Canonical Poseidon
 parameters derive from Grain inside Fe, and the concise Fe permutation now

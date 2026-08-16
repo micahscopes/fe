@@ -166,7 +166,7 @@ pub fn radix2_coset_lde<
 {
     let zero = FieldElement<L, M>::zero()
     let one = FieldElement<L, M>::one()
-    if shift.is_zero() || (shift.pow_u32(N.downcast_truncate()) - one).is_zero() {
+    if shift.is_zero() || (shift.pow_u32(OUT.downcast_truncate()) - one).is_zero() {
         return Radix2CosetLde { valid: false, evaluations: [zero; OUT] }
     }
 

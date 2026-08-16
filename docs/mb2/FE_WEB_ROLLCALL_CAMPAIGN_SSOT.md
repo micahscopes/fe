@@ -286,8 +286,9 @@ Legend:
   DFTs and round trips gate the same generic implementation at 4, 8, and 16
   points. Generic Fe coset low-degree extension now interpolates the base trace,
   shifts its coefficients, zero-pads, and evaluates on the larger subgroup. A
-  typed validity bit rejects zero shifts and shifts inside the base subgroup,
-  preventing evaluation on the trace zerofier's roots. Independent direct
+  typed validity bit rejects zero shifts and shifts inside the output subgroup,
+  preventing the evaluation coset from intersecting the trace zerofier's
+  roots. Independent direct
   bigint interpolation/evaluation gates 4-to-16 and 8-to-16 extensions and
   fail-closed invalid cosets. Composition, later transcript stages, and FRI
   remain pending. The reusable field API's SPIR-V helper-call seam and GPU

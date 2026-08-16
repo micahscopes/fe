@@ -68,7 +68,7 @@ provides forward NTT and inverse interpolation, rejects invalid domains through
 const predicates, and matches direct bigint DFTs at 4, 8, and 16 points.
 Generic Fe coset low-degree extension now interpolates, shifts coefficients,
 zero-pads, and evaluates at a larger domain. Its typed validity bit rejects
-zero or base-subgroup shifts, and independent direct bigint interpolation and
+zero or output-subgroup shifts, and independent direct bigint interpolation and
 evaluation gate 4-to-16 and 8-to-16 extensions. Composition and FRI remain
 pending.
 
