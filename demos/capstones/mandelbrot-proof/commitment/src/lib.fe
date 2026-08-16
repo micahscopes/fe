@@ -39,6 +39,7 @@ const fn protocol_tag(_ label: String<4>) -> u32 {
 pub struct MandelbrotRowV1 {}
 pub struct MandelbrotNodeV1 {}
 pub struct MandelbrotTranscriptV1 {}
+pub struct MandelbrotCompositionV1 {}
 
 impl PoseidonDomain for MandelbrotRowV1 {
     const TAG: u32 = protocol_tag("MR01")
@@ -50,6 +51,10 @@ impl PoseidonDomain for MandelbrotNodeV1 {
 
 impl PoseidonDomain for MandelbrotTranscriptV1 {
     const TAG: u32 = protocol_tag("MT01")
+}
+
+impl PoseidonDomain for MandelbrotCompositionV1 {
+    const TAG: u32 = protocol_tag("MC01")
 }
 
 /// Public statement already validated by the cheap proof-domain boundary.
@@ -77,6 +82,14 @@ impl core::marker::Copy for TraceDigest {}
 pub struct StatementDigest { value: Fr }
 
 impl core::marker::Copy for StatementDigest {}
+
+/// First Fiat-Shamir stage: a field-native randomizer for combining the AIR
+/// residual families. Poseidon already returns a canonical BN254 Fr element,
+/// and zero remains a valid random-oracle output, so no biased reduction or
+/// rejection loop is hidden behind this type.
+pub struct CompositionChallenge { value: Fr }
+
+impl core::marker::Copy for CompositionChallenge {}
 
 /// Result of one canonical prover-side pass. Invalid and non-escaping claims
 /// fail closed instead of exposing a digest for an incomplete trace.
@@ -297,6 +310,14 @@ pub fn bind_statement(
     }
 }
 
+pub fn composition_challenge(
+    _ statement: own StatementDigest,
+) -> CompositionChallenge {
+    CompositionChallenge {
+        value: compress<MandelbrotCompositionV1>(statement.value, Fr::zero()),
+    }
+}
+
 pub fn statement_commitment4(
     _ public: own EscapesByQ12Public,
     _ rows: own [EncodedProofRow; 4],
@@ -347,6 +368,32 @@ pub fn streamed_statement_q12_plain_words(
     while limb < LIMBS {
         output[4 + limb] = trace[limb]
         output[24 + limb] = statement[limb]
+        limb = limb + 1
+    }
+    output
+}
+
+/// Independent-oracle boundary for the first typed Fiat-Shamir stage. The
+/// output is `(valid, terminal_step, trace_length, padded_length)` followed by
+/// the 20 canonical challenge limbs. The trace and statement are still
+/// generated inside Fe from the public claim in the same call.
+pub fn streamed_composition_challenge_q12_plain_words(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ bound: u32,
+) -> [u32; 24] {
+    let generated = stream_statement_q12(c_re_q12, c_im_q12, bound)
+    let mut output: [u32; 24] = [0; 24]
+    if !generated.valid { return output }
+
+    output[0] = 1
+    output[1] = generated.terminal_step
+    output[2] = generated.trace_length
+    output[3] = generated.padded_length
+    let challenge = plain_words(composition_challenge(generated.statement).value)
+    let mut limb: usize = 0
+    while limb < LIMBS {
+        output[4 + limb] = challenge[limb]
         limb = limb + 1
     }
     output

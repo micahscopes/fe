@@ -180,7 +180,11 @@ Fe derives the row and node tags from the visible string literals `"MR01"` and
 `"MN01"`; no numeric protocol identifiers or generated parameter tables appear
 in the implementation. Claim, numeric-model version, padded trace length, and
 terminal row are bound for this fixed slice by a third typed domain, `"MT01"`.
-The general transcript and its challenge schedule remain open.
+A fourth typed domain, `"MC01"`, derives the first composition challenge from
+that bound statement. Poseidon returns a canonical BN254 Fr value directly;
+zero remains a valid random-oracle output, so this stage introduces neither a
+biased reduction nor an untested rejection loop. Transcript stages after the
+composition commitment remain open.
 
 `escape_air_row_encoding_q12` now materializes that canonical row encoding in
 Fe. It gives zero only the positive sign and emits a fixed 15-word order.
@@ -206,8 +210,9 @@ executes the fixed four-row commitment in zero-import Wasm. Its honest SPIR-V
 gate currently fails closed on the retained array-returning `mul_words` call,
 so aggregate-return inlining or shader function-call lowering is required
 before the same field implementation runs as an application GPU kernel.
-General power-of-two trace commitments, Fiat-Shamir challenge derivation,
-composition, and FRI remain open.
+The production power-of-two trace stream and first Fiat-Shamir composition
+challenge now execute. Composition, later transcript stages, and FRI remain
+open.
 
 The intended succinct construction is a transparent AIR plus FRI over a field
 with an audited two-adic domain. The first implementation should reuse the

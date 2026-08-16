@@ -345,6 +345,18 @@ fn statement_commitment(
     .clone()
 }
 
+fn composition_challenge(statement: &BigUint, parameters: &[BigUint]) -> BigUint {
+    permute(
+        [
+            protocol_tag(b"MC01"),
+            statement.clone(),
+            BigUint::from(0u32),
+        ],
+        parameters,
+    )[0]
+    .clone()
+}
+
 fn compile_gate() -> &'static [u8] {
     static WASM: OnceLock<Vec<u8>> = OnceLock::new();
     WASM.get_or_init(|| {
@@ -433,13 +445,14 @@ fn plain_limbs(words: &[u32]) -> BigUint {
         })
 }
 
-fn call_streamed_statement(
+fn call_streamed_claim_output(
     store: &mut wasmtime::Store<()>,
     generate: &wasmtime::Func,
     reset: &wasmtime::TypedFunc<(), ()>,
     c_re: i32,
     c_im: i32,
     bound: u32,
+    output_words: usize,
 ) -> Vec<u32> {
     reset.call(&mut *store, ()).unwrap();
     let arguments = [
@@ -447,7 +460,7 @@ fn call_streamed_statement(
         wasmtime::Val::I32(c_im),
         wasmtime::Val::I32(bound as i32),
     ];
-    let mut output = vec![wasmtime::Val::I32(0); 44];
+    let mut output = vec![wasmtime::Val::I32(0); output_words];
     generate.call(&mut *store, &arguments, &mut output).unwrap();
     output
         .into_iter()
@@ -704,6 +717,9 @@ fn fe_streams_the_canonical_trace_directly_into_the_frontier() {
     let generate = instance
         .get_func(&mut store, "streamed_statement_q12_plain_words")
         .unwrap();
+    let challenge = instance
+        .get_func(&mut store, "streamed_composition_challenge_q12_plain_words")
+        .unwrap();
     let reset = instance
         .get_typed_func::<(), ()>(&mut store, "fe_cabi_reset")
         .unwrap();
@@ -726,23 +742,35 @@ fn fe_streams_the_canonical_trace_directly_into_the_frontier() {
         };
         let expected_root = trace_root_power_of_two(&rows, &parameters);
         let expected_statement = statement_commitment(&statement, &rows, &parameters);
-        let actual = call_streamed_statement(&mut store, &generate, &reset, c_re, c_im, bound);
+        let actual =
+            call_streamed_claim_output(&mut store, &generate, &reset, c_re, c_im, bound, 44);
         assert_eq!(actual[0], 1);
         assert_eq!(actual[1], terminal_step);
         assert_eq!(actual[2], terminal_step + 1);
         assert_eq!(actual[3], rows.len() as u32);
         assert_eq!(plain_limbs(&actual[4..24]), expected_root);
         assert_eq!(plain_limbs(&actual[24..44]), expected_statement);
+        let actual_challenge =
+            call_streamed_claim_output(&mut store, &challenge, &reset, c_re, c_im, bound, 24);
+        assert_eq!(&actual_challenge[..4], &actual[..4]);
+        assert_eq!(
+            plain_limbs(&actual_challenge[4..24]),
+            composition_challenge(&expected_statement, &parameters),
+        );
         assert_eq!(
             alloc.call(&mut store, (1, 1)).unwrap(),
             1024,
-            "the one-pass Fe generator must reclaim every local temporary"
+            "the one-pass Fe transcript must reclaim every local temporary"
         );
     }
 
     for (c_re, c_im, bound) in [(0, 0, 16), (3072, 0, 2), (4096, 0, 16), (0, 0, 1_048_577)] {
-        let actual = call_streamed_statement(&mut store, &generate, &reset, c_re, c_im, bound);
+        let actual =
+            call_streamed_claim_output(&mut store, &generate, &reset, c_re, c_im, bound, 44);
         assert!(actual.iter().all(|word| *word == 0));
+        let actual_challenge =
+            call_streamed_claim_output(&mut store, &challenge, &reset, c_re, c_im, bound, 24);
+        assert!(actual_challenge.iter().all(|word| *word == 0));
         assert_eq!(
             alloc.call(&mut store, (1, 1)).unwrap(),
             1024,
