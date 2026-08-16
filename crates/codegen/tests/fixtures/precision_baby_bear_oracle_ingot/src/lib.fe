@@ -1,0 +1,44 @@
+//! Narrow executable boundary for the u32-native BabyBear field oracle.
+
+use precision::baby_bear::{
+    BabyBear,
+    baby_bear_montgomery_neg_inverse,
+    baby_bear_montgomery_r2,
+    baby_bear_two_adic_root_plain,
+}
+
+pub fn baby_bear_parameters() -> (u32, u32, u32) {
+    (
+        baby_bear_montgomery_neg_inverse(),
+        baby_bear_montgomery_r2(),
+        baby_bear_two_adic_root_plain(),
+    )
+}
+
+pub fn baby_bear_roundtrip(_ value: u32) -> u32 { BabyBear::from_u32(value).to_u32() }
+
+pub fn baby_bear_add(_ left: u32, _ right: u32) -> u32 {
+    (BabyBear::from_u32(left) + BabyBear::from_u32(right)).to_u32()
+}
+
+pub fn baby_bear_sub(_ left: u32, _ right: u32) -> u32 {
+    (BabyBear::from_u32(left) - BabyBear::from_u32(right)).to_u32()
+}
+
+pub fn baby_bear_mul(_ left: u32, _ right: u32) -> u32 {
+    (BabyBear::from_u32(left) * BabyBear::from_u32(right)).to_u32()
+}
+
+pub fn baby_bear_neg(_ value: u32) -> u32 { (-BabyBear::from_u32(value)).to_u32() }
+
+pub fn baby_bear_inverse(_ value: u32) -> u32 {
+    BabyBear::from_u32(value).inverse_or_zero().to_u32()
+}
+
+pub fn baby_bear_pow(_ value: u32, _ exponent: u32) -> u32 {
+    BabyBear::from_u32(value).pow_u32(exponent).to_u32()
+}
+
+pub fn baby_bear_two_adic_root(_ log_order: u32) -> u32 {
+    BabyBear::two_adic_root(log_order).to_u32()
+}

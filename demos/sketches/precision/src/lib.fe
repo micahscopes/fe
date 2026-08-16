@@ -69,6 +69,8 @@
 
 pub use field
 pub use bn254_fr
+pub use word_field
+pub use baby_bear
 pub use fixed
 pub use polynomial
 

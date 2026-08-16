@@ -1,0 +1,228 @@
+//! Portable u32-native prime-field arithmetic for WebGPU proof kernels.
+//!
+//! The field element occupies one `u32`, but multiplication does not assume
+//! `u64` or a `mulhi` instruction. `wide_product` derives both halves of a
+//! 32x32 product from four exact 16x16 products, then one-word Montgomery
+//! reduction keeps the runtime representation canonical. Every prime below
+//! `2^31` can reuse this implementation by supplying one branded parameter
+//! block. BabyBear is the first instance, not a specialized arithmetic fork.
+
+use core::marker::Copy
+use core::num::mul_mod_u256
+use core::ops::{Add, Mul, Neg, Sub}
+
+const HALF_BITS: u32 = 16
+const HALF_BASE: u32 = 65536
+const HALF_MASK: u32 = 65535
+
+/// Audited parameter block for an odd prime strictly below `2^31`.
+///
+/// The bound guarantees canonical addition and the high Montgomery word fit
+/// in a `u32`. Implementations derive the inverse and `R^2` constants in Fe
+/// and expose their folded values through these methods.
+pub trait WordPrime31 {
+    fn modulus() -> u32
+    fn montgomery_neg_inverse() -> u32
+    fn r2() -> u32
+}
+
+/// A word prime with a canonical generator for its largest two-adic subgroup.
+pub trait WordTwoAdicPrime: WordPrime31 {
+    const TWO_ADICITY: u32
+    fn two_adic_root_montgomery() -> u32
+}
+
+struct WideProduct { lo: u32, hi: u32 }
+impl Copy for WideProduct {}
+
+/// Exact low word of a 32x32 product, expressed only with portable u32 ops.
+#[inline(always)]
+fn product_low(_ left: u32, _ right: u32) -> u32 {
+    let left_low = left & HALF_MASK
+    let left_high = left >> HALF_BITS
+    let right_low = right & HALF_MASK
+    let right_high = right >> HALF_BITS
+    let low_low = left_low * right_low
+    let middle = (low_low >> HALF_BITS)
+        + (left_low * right_high & HALF_MASK)
+        + (left_high * right_low & HALF_MASK)
+    (low_low & HALF_MASK) | ((middle & HALF_MASK) << HALF_BITS)
+}
+
+/// Exact 32x32 product as two u32 words. Internal field callers always have at
+/// least one operand below `2^31`, which keeps the final high-word sum below
+/// `2^32` without relying on wrapping arithmetic.
+#[inline(always)]
+fn wide_product(_ left: u32, _ right: u32) -> WideProduct {
+    let left_low = left & HALF_MASK
+    let left_high = left >> HALF_BITS
+    let right_low = right & HALF_MASK
+    let right_high = right >> HALF_BITS
+    let low_low = left_low * right_low
+    let low_high = left_low * right_high
+    let high_low = left_high * right_low
+    let high_high = left_high * right_high
+    let middle = (low_low >> HALF_BITS)
+        + (low_high & HALF_MASK)
+        + (high_low & HALF_MASK)
+    WideProduct {
+        lo: (low_low & HALF_MASK) | ((middle & HALF_MASK) << HALF_BITS),
+        hi: high_high + (low_high >> HALF_BITS) + (high_low >> HALF_BITS)
+            + (middle >> HALF_BITS),
+    }
+}
+
+/// Reduce a value known to be below `2p` with one branch-free subtraction.
+/// The exact borrow is derived from two 16-bit digits, so every intermediate
+/// fits in u32 and no aggregate helper boundary enters the arithmetic kernel.
+#[inline(always)]
+fn canonicalize<M: WordPrime31>(_ value: u32) -> u32 {
+    let modulus = M::modulus()
+    let low = (value & HALF_MASK) + HALF_BASE - (modulus & HALF_MASK)
+    let low_no_borrow = low >> HALF_BITS
+    let high = ((value >> HALF_BITS) + HALF_BASE - (modulus >> HALF_BITS)) -
+        (1 - low_no_borrow)
+    let high_no_borrow = high >> HALF_BITS
+    value - high_no_borrow * modulus
+}
+
+/// Carry out of adding two u32 words, without a comparison or a wider type.
+#[inline(always)]
+fn add_word_carry(_ left: u32, _ right: u32) -> u32 {
+    let low = (left & HALF_MASK) + (right & HALF_MASK)
+    let high = (left >> HALF_BITS) + (right >> HALF_BITS) + (low >> HALF_BITS)
+    high >> HALF_BITS
+}
+
+/// One-word CIOS Montgomery multiplication with `R = 2^32`.
+#[inline(always)]
+pub fn montgomery_mul<M: WordPrime31>(_ left: u32, _ right: u32) -> u32 {
+    let product = wide_product(left, right)
+    let m = product_low(product.lo, M::montgomery_neg_inverse())
+    let reduction = wide_product(m, M::modulus())
+    let carry = add_word_carry(product.lo, reduction.lo)
+    let candidate = product.hi + reduction.hi + carry
+    canonicalize<M>(candidate)
+}
+
+/// CTFE derivation of `-p^-1 mod 2^32` by 2-adic Newton iteration.
+pub const fn montgomery_neg_inverse_u32(_ modulus: u32) -> u32 {
+    let radix: u256 = 1 << (32 as u256)
+    let p: u256 = modulus as u256
+    let mut inverse: u256 = 1
+    let mut iteration: u32 = 0
+    while iteration < 6 {
+        let product = (p * inverse) % radix
+        inverse = (inverse * (radix + 2 - product)) % radix
+        iteration = iteration + 1
+    }
+    ((radix - inverse) % radix).downcast_truncate()
+}
+
+/// CTFE derivation of `2^64 mod p`, the `R^2` import constant.
+pub const fn montgomery_r2_u32(_ modulus: u32) -> u32 {
+    let p: u256 = modulus as u256
+    let mut value: u256 = 1
+    let mut bit: u32 = 0
+    while bit < 64 {
+        value = value + value
+        if value >= p { value = value - p }
+        bit = bit + 1
+    }
+    value.downcast_truncate()
+}
+
+/// CTFE conversion of a plain field value into one-word Montgomery form.
+pub const fn montgomery_word_u32(_ plain: u256, _ modulus: u32) -> u32 {
+    let p: u256 = modulus as u256
+    let mut radix: u256 = 1
+    let mut bit: u32 = 0
+    while bit < 32 {
+        radix = radix + radix
+        if radix >= p { radix = radix - p }
+        bit = bit + 1
+    }
+    mul_mod_u256(plain % p, radix, p).downcast_truncate()
+}
+
+/// One-word Montgomery field element branded by its modulus type.
+pub struct WordField<M> { value: u32 }
+impl<M> Copy for WordField<M> {}
+
+impl<M: WordPrime31> WordField<M> {
+    pub const fn zero() -> Self { Self { value: 0 } }
+
+    /// Import an audited canonical Montgomery word.
+    pub fn from_montgomery_word(_ value: u32) -> Self { Self { value: value } }
+
+    pub fn to_montgomery_word(self) -> u32 { self.value }
+
+    pub fn from_u32(_ value: u32) -> Self {
+        let canonical = value % M::modulus()
+        Self { value: montgomery_mul<M>(canonical, M::r2()) }
+    }
+
+    pub fn to_u32(self) -> u32 { montgomery_mul<M>(self.value, 1) }
+
+    pub fn one() -> Self { Self::from_u32(1) }
+
+    pub fn is_zero(self) -> bool { self.value == 0 }
+
+    pub fn equals(self, _ other: Self) -> bool { self.value == other.value }
+
+    pub fn square(self) -> Self { self * self }
+
+    pub fn pow_u32(self, _ exponent: u32) -> Self {
+        let mut result = Self::one()
+        let mut base = self
+        let mut exponent = exponent
+        while exponent != 0 {
+            if (exponent & 1) == 1 { result = result * base }
+            base = base.square()
+            exponent = exponent >> 1
+        }
+        result
+    }
+
+    pub fn inverse_or_zero(self) -> Self {
+        if self.is_zero() { Self::zero() } else { self.pow_u32(M::modulus() - 2) }
+    }
+}
+
+impl<M: WordTwoAdicPrime> WordField<M> {
+    pub fn two_adic_root(_ log_order: u32) -> Self {
+        if log_order > M::TWO_ADICITY { return Self::zero() }
+        let mut root = Self::from_montgomery_word(M::two_adic_root_montgomery())
+        let mut remaining = M::TWO_ADICITY - log_order
+        while remaining != 0 {
+            root = root.square()
+            remaining = remaining - 1
+        }
+        root
+    }
+}
+
+impl<M: WordPrime31> Add for WordField<M> {
+    fn add(own self, _ other: own Self) -> Self {
+        let sum = self.value + other.value
+        Self { value: canonicalize<M>(sum) }
+    }
+}
+
+impl<M: WordPrime31> Sub for WordField<M> {
+    fn sub(own self, _ other: own Self) -> Self {
+        Self { value: canonicalize<M>(self.value + M::modulus() - other.value) }
+    }
+}
+
+impl<M: WordPrime31> Neg for WordField<M> {
+    fn neg(own self) -> Self {
+        Self { value: canonicalize<M>(M::modulus() - self.value) }
+    }
+}
+
+impl<M: WordPrime31> Mul for WordField<M> {
+    fn mul(own self, _ other: own Self) -> Self {
+        Self { value: montgomery_mul<M>(self.value, other.value) }
+    }
+}

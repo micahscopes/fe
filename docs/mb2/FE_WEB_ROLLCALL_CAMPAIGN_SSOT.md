@@ -354,13 +354,12 @@ Legend:
   public metadata; every mutation is rejected. Reaching those gates exposed
   and fixed a general Wasm lowering bug where forwarding an `AddrOf` borrow
   deep-copied its pointee and detached mutable writes from caller storage.
-  Separate execution
-  gates now prove mutable-borrow identity and preserve ordinary aggregate
-  deep-copy semantics. Verifier-cost evidence, systematic malformed-proof
-  rejection, and canonical proof encoding remain pending. The reusable field
-  API's SPIR-V helper-call seam remains open as a compiler issue, but BN254 will
-  not be ported into the proof WGSL path. This is an authenticated AIR and FRI
-  query milestone, not yet a succinct proof.
+  Separate execution gates now prove mutable-borrow identity and preserve
+  ordinary aggregate deep-copy semantics. Verifier-cost evidence, systematic
+  malformed-proof rejection, and canonical proof encoding remain pending. The
+  reusable field API's SPIR-V helper-call seam remains open as a compiler
+  issue, but BN254 will not be ported into the proof WGSL path. This is an
+  authenticated AIR and FRI query milestone, not yet a succinct proof.
 - [ ] Produce a succinct proof whose verifier is demonstrably cheaper than
   replaying the orbit.
 - [ ] Finish one complete BN254 toy proof and verifier accept/reject boundary,
@@ -368,7 +367,14 @@ Legend:
   must not be ported to WGSL. The BabyBear gate requires extension-field
   challenges, new injective packing, Fe-derived field-specific Poseidon, and
   new independent vectors. Same-source Fe Wasm/native agreement is parity;
-  the separately implemented bigint model remains the semantic oracle.
+  the separately implemented bigint model remains the semantic oracle. The
+  u32-native base-field slice is now real: generic `WordField<M>` derives
+  one-word Montgomery arithmetic from a prime parameter block using portable
+  16-bit partial products, and the BabyBear instance derives its inverse,
+  `R^2`, and maximal two-adic root in Fe. The independent u64 gate covers
+  arithmetic, inverses, powers, and all subgroup orders; the same multiply
+  lowers to Naga-validated u32-only SPIR-V/WGSL. Quartic challenges, Poseidon,
+  packing, and the protocol retarget remain pending.
 - [ ] Make the production claim a chunked recursive high-precision recurrence,
   not one monolithic fixed-Q12 trace. BabyBear is the proof field, not the
   numeric precision ceiling: derive each signed fixed-point coordinate from a
