@@ -14,6 +14,7 @@ const ROUND_CONSTANT_COUNT: usize = WIDTH * ROUNDS;
 const LIMB_BITS: usize = 13;
 const LIMBS: usize = 20;
 const ROW_WIDTHS: [usize; 17] = [21, 1, 15, 1, 15, 30, 30, 31, 1, 18, 12, 1, 19, 12, 1, 1, 1];
+const PUBLIC_WIDTHS: [usize; 8] = [1, 14, 1, 13, 21, 21, 21, 22];
 const SCALE: i64 = 4096;
 const ESCAPE_MAGNITUDE: i64 = 1 << 26;
 const CANONICAL_POSEIDON: &str = include_str!("../../fe/tests/fixtures/fe_test/const_poseidon.fe");
@@ -44,6 +45,16 @@ struct ProofRow {
     active: u32,
     terminal: u32,
     air: AirRow,
+}
+
+#[derive(Clone, Debug)]
+struct PublicStatement {
+    c_re: SignedWord,
+    c_im: SignedWord,
+    bound: u32,
+    terminal_step: u32,
+    trace_length: u32,
+    padded_length: u32,
 }
 
 fn signed(value: i64) -> SignedWord {
@@ -145,6 +156,19 @@ fn runtime_words(row: &ProofRow) -> [u32; 17] {
     ]
 }
 
+fn public_words(statement: &PublicStatement) -> [u32; 8] {
+    [
+        statement.c_re.sign,
+        statement.c_re.magnitude,
+        statement.c_im.sign,
+        statement.c_im.magnitude,
+        statement.bound,
+        statement.terminal_step,
+        statement.trace_length,
+        statement.padded_length,
+    ]
+}
+
 fn bn254_fr_prime() -> BigUint {
     BigUint::parse_bytes(
         b"21888242871839275222246405745257275088548364400416034343698204186575808495617",
@@ -223,16 +247,21 @@ fn protocol_tag(label: &[u8; 4]) -> BigUint {
     BigUint::from(u32::from_be_bytes(*label))
 }
 
-fn row_commitment(row: &ProofRow, parameters: &[BigUint]) -> BigUint {
-    let words = commitment_words(row);
-    assert_eq!(ROW_WIDTHS.iter().sum::<usize>(), 210);
+fn pack_words<const N: usize>(words: [u32; N], widths: [usize; N]) -> BigUint {
     let mut packed = BigUint::from(0u32);
     let mut offset = 0usize;
-    for (value, width) in words.into_iter().zip(ROW_WIDTHS) {
+    for (value, width) in words.into_iter().zip(widths) {
         assert!(BigUint::from(value) < (BigUint::from(1u32) << width));
         packed += BigUint::from(value) << offset;
         offset += width;
     }
+    assert!(offset < 254);
+    packed
+}
+
+fn row_commitment(row: &ProofRow, parameters: &[BigUint]) -> BigUint {
+    assert_eq!(ROW_WIDTHS.iter().sum::<usize>(), 210);
+    let packed = pack_words(commitment_words(row), ROW_WIDTHS);
     permute(
         [protocol_tag(b"MR01"), packed, BigUint::from(0u32)],
         parameters,
@@ -252,6 +281,23 @@ fn trace_root4(rows: &[ProofRow], parameters: &[BigUint]) -> BigUint {
     let left = node_commitment(leaves[0].clone(), leaves[1].clone(), parameters);
     let right = node_commitment(leaves[2].clone(), leaves[3].clone(), parameters);
     node_commitment(left, right, parameters)
+}
+
+fn statement_commitment(
+    statement: &PublicStatement,
+    rows: &[ProofRow],
+    parameters: &[BigUint],
+) -> BigUint {
+    assert_eq!(PUBLIC_WIDTHS.iter().sum::<usize>(), 114);
+    permute(
+        [
+            protocol_tag(b"MT01"),
+            pack_words(public_words(statement), PUBLIC_WIDTHS),
+            trace_root4(rows, parameters),
+        ],
+        parameters,
+    )[0]
+    .clone()
 }
 
 fn compile_gate() -> Vec<u8> {
@@ -300,8 +346,37 @@ fn call_root(
         })
 }
 
+fn call_statement(
+    store: &mut wasmtime::Store<()>,
+    commitment: &wasmtime::Func,
+    reset: &wasmtime::TypedFunc<(), ()>,
+    statement: &PublicStatement,
+    rows: &[ProofRow],
+) -> BigUint {
+    reset.call(&mut *store, ()).unwrap();
+    let arguments: Vec<_> = public_words(statement)
+        .into_iter()
+        .chain(rows.iter().flat_map(runtime_words))
+        .map(|value| wasmtime::Val::I32(value as i32))
+        .collect();
+    assert_eq!(arguments.len(), 76);
+    let mut output = vec![wasmtime::Val::I32(0); LIMBS];
+    commitment
+        .call(&mut *store, &arguments, &mut output)
+        .unwrap();
+    output
+        .into_iter()
+        .enumerate()
+        .fold(BigUint::from(0u32), |value, (word, limb)| {
+            let wasmtime::Val::I32(limb) = limb else {
+                panic!("statement word {word} was not i32")
+            };
+            value + (BigUint::from(limb as u32) << (word * LIMB_BITS))
+        })
+}
+
 #[test]
-fn fe_trace_root_matches_independent_orbit_encoding_poseidon_and_merkle_model() {
+fn fe_trace_and_statement_match_independent_orbit_encoding_poseidon_and_merkle_model() {
     let parameters = parameters();
     assert_eq!(
         permute([0u32.into(), 0u32.into(), 0u32.into()], &parameters)[0],
@@ -313,6 +388,15 @@ fn fe_trace_root_matches_independent_orbit_encoding_poseidon_and_merkle_model() 
     );
     let rows = four_row_escape_trace();
     let expected = trace_root4(&rows, &parameters);
+    let statement = PublicStatement {
+        c_re: signed(3072),
+        c_im: signed(0),
+        bound: 16,
+        terminal_step: 3,
+        trace_length: 4,
+        padded_length: 4,
+    };
+    let expected_statement = statement_commitment(&statement, &rows, &parameters);
 
     let wasm = compile_gate();
     let engine = wasmtime::Engine::default();
@@ -323,11 +407,18 @@ fn fe_trace_root_matches_independent_orbit_encoding_poseidon_and_merkle_model() 
     let root = instance
         .get_func(&mut store, "trace_root4_plain_words")
         .unwrap();
+    let bind = instance
+        .get_func(&mut store, "statement_commitment4_plain_words")
+        .unwrap();
     let reset = instance
         .get_typed_func::<(), ()>(&mut store, "fe_cabi_reset")
         .unwrap();
     let actual = call_root(&mut store, &root, &reset, &rows);
     assert_eq!(actual, expected);
+    assert_eq!(
+        call_statement(&mut store, &bind, &reset, &statement, &rows),
+        expected_statement
+    );
 
     for word in 0..17 {
         let mut mutated = rows.clone();
@@ -367,5 +458,34 @@ fn fe_trace_root_matches_independent_orbit_encoding_poseidon_and_merkle_model() 
     assert_eq!(
         call_root(&mut store, &root, &reset, &reordered),
         reordered_expected
+    );
+
+    for word in 0..8 {
+        let mut mutated = statement.clone();
+        match word {
+            0 => mutated.c_re.sign ^= 1,
+            1 => mutated.c_re.magnitude += 1,
+            2 => mutated.c_im.sign ^= 1,
+            3 => mutated.c_im.magnitude += 1,
+            4 => mutated.bound += 1,
+            5 => mutated.terminal_step += 1,
+            6 => mutated.trace_length += 1,
+            7 => mutated.padded_length += 1,
+            _ => unreachable!(),
+        }
+        let expected_mutation = statement_commitment(&mutated, &rows, &parameters);
+        assert_ne!(expected_mutation, expected_statement, "public word {word}");
+        assert_eq!(
+            call_statement(&mut store, &bind, &reset, &mutated, &rows),
+            expected_mutation,
+            "public word {word} mutation"
+        );
+    }
+
+    let reordered_statement = statement_commitment(&statement, &reordered, &parameters);
+    assert_ne!(reordered_statement, expected_statement);
+    assert_eq!(
+        call_statement(&mut store, &bind, &reset, &statement, &reordered),
+        reordered_statement
     );
 }

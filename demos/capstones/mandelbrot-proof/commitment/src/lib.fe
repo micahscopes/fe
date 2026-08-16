@@ -1,11 +1,27 @@
 //! Domain-separated Poseidon commitment to canonical bounded-Mandelbrot rows.
 
 use mandelbrot_proof_field_air::{
-    ENCODED_PROOF_ROW_WIDTHS, EncodedProofRow, encoded_proof_row_words,
+    ENCODED_PROOF_ROW_WIDTHS, EncodedProofRow, SignedWord, encoded_proof_row_words,
 }
-use poseidon_bn254::{Fr, LIMBS, PoseidonDomain, commit_plain_words, compress, plain_words}
+use poseidon_bn254::{
+    Fr, LIMBS, WORD_BITS, PoseidonDomain, bind_plain_words, commit_plain_words, compress,
+    plain_words,
+}
 
 const ROW_WORDS: usize = 17
+const PUBLIC_WORDS: usize = 8
+
+/// Widths implied by the public-domain and proof-shape checks: signed Q12
+/// point components, the inclusive 2^20 bound, terminal step, semantic trace
+/// length, and a padded length that may reach 2^21.
+const ESCAPES_BY_Q12_PUBLIC_WIDTHS: [u32; PUBLIC_WORDS] = [
+    1, 14,
+    1, 13,
+    21,
+    21,
+    21,
+    22,
+]
 
 /// Pack a four-byte ASCII protocol label without a numeric magic constant.
 const fn protocol_tag(_ label: String<4>) -> u32 {
@@ -18,6 +34,7 @@ const fn protocol_tag(_ label: String<4>) -> u32 {
 
 pub struct MandelbrotRowV1 {}
 pub struct MandelbrotNodeV1 {}
+pub struct MandelbrotTranscriptV1 {}
 
 impl PoseidonDomain for MandelbrotRowV1 {
     const TAG: u32 = protocol_tag("MR01")
@@ -27,24 +44,51 @@ impl PoseidonDomain for MandelbrotNodeV1 {
     const TAG: u32 = protocol_tag("MN01")
 }
 
+impl PoseidonDomain for MandelbrotTranscriptV1 {
+    const TAG: u32 = protocol_tag("MT01")
+}
+
+/// Public statement already validated by the cheap proof-domain boundary.
+/// Keeping its shape nominal prevents transcript fields from becoming an
+/// untyped positional protocol at Fe call sites.
+pub struct EscapesByQ12Public {
+    pub c_re: SignedWord,
+    pub c_im: SignedWord,
+    pub bound: u32,
+    pub terminal_step: u32,
+    pub trace_length: u32,
+    pub padded_length: u32,
+}
+
+impl core::marker::Copy for EscapesByQ12Public {}
+
 /// A digest whose constructor fixes the row and node domain policy.
 pub struct TraceDigest { value: Fr }
 
 impl core::marker::Copy for TraceDigest {}
 
-fn packed_row(_ row: own EncodedProofRow) -> [u32; LIMBS] {
-    let source = encoded_proof_row_words(row)
+/// The public statement and trace root are distinct nominal stages, so later
+/// verifier code cannot accidentally treat an unbound tree root as a proof
+/// statement commitment.
+pub struct StatementDigest { value: Fr }
+
+impl core::marker::Copy for StatementDigest {}
+
+fn pack_words<const N: usize>(
+    _ source: own [u32; N],
+    _ widths: own [u32; N],
+) -> [u32; LIMBS] {
     let mut packed: [u32; LIMBS] = [0; LIMBS]
     let mut field: usize = 0
     let mut offset: u32 = 0
-    while field < ROW_WORDS {
-        let width = ENCODED_PROOF_ROW_WIDTHS[field]
+    while field < N {
+        let width = widths[field]
         let value = source[field]
         let mut bit: u32 = 0
         while bit < width {
             let destination = offset + bit
-            let limb = destination / 13
-            let shift = destination - limb * 13
+            let limb = destination / WORD_BITS
+            let shift = destination - limb * WORD_BITS
             packed[limb as usize] = packed[limb as usize]
                 | (((value >> bit) & 1) << shift)
             bit = bit + 1
@@ -53,6 +97,21 @@ fn packed_row(_ row: own EncodedProofRow) -> [u32; LIMBS] {
         field = field + 1
     }
     packed
+}
+
+fn packed_row(_ row: own EncodedProofRow) -> [u32; LIMBS] {
+    pack_words<ROW_WORDS>(encoded_proof_row_words(row), ENCODED_PROOF_ROW_WIDTHS)
+}
+
+fn packed_public(_ public: own EscapesByQ12Public) -> [u32; LIMBS] {
+    pack_words<PUBLIC_WORDS>([
+        public.c_re.sign, public.c_re.magnitude,
+        public.c_im.sign, public.c_im.magnitude,
+        public.bound,
+        public.terminal_step,
+        public.trace_length,
+        public.padded_length,
+    ], ESCAPES_BY_Q12_PUBLIC_WIDTHS)
 }
 
 pub fn row_commitment(_ row: own EncodedProofRow) -> TraceDigest {
@@ -80,4 +139,27 @@ pub fn trace_root4(_ rows: own [EncodedProofRow; 4]) -> TraceDigest {
 
 pub fn trace_root4_plain_words(_ rows: own [EncodedProofRow; 4]) -> [u32; 20] {
     plain_words(trace_root4(rows).value)
+}
+
+pub fn bind_statement(
+    _ public: own EscapesByQ12Public,
+    _ trace: own TraceDigest,
+) -> StatementDigest {
+    StatementDigest {
+        value: bind_plain_words<MandelbrotTranscriptV1>(packed_public(public), trace.value),
+    }
+}
+
+pub fn statement_commitment4(
+    _ public: own EscapesByQ12Public,
+    _ rows: own [EncodedProofRow; 4],
+) -> StatementDigest {
+    bind_statement(public, trace_root4(rows))
+}
+
+pub fn statement_commitment4_plain_words(
+    _ public: own EscapesByQ12Public,
+    _ rows: own [EncodedProofRow; 4],
+) -> [u32; 20] {
+    plain_words(statement_commitment4(public, rows).value)
 }

@@ -22,6 +22,7 @@ pub const PARAMETER_COUNT: usize = ROUND_CONSTANT_COUNT + MDS_ENTRY_COUNT
 
 const FIELD_SIZE: u32 = 254
 pub const LIMBS: usize = 20
+pub const WORD_BITS: u32 = LIMB_BITS
 const BN254_FR_PRIME: u256 = 21888242871839275222246405745257275088548364400416034343698204186575808495617
 
 pub type Fr = FieldElement<LIMBS, Bn254Fr>
@@ -354,6 +355,15 @@ pub fn commit_plain_words<D: PoseidonDomain>(
     _ words: own FieldWords<LIMBS>,
 ) -> Fr {
     compress<D>(Fr::from_plain_words(words), Fr::zero())
+}
+
+/// Bind an injectively packed public value to an existing digest under a new
+/// typed domain. This is the transcript boundary used by proof statements.
+pub fn bind_plain_words<D: PoseidonDomain>(
+    _ words: own FieldWords<LIMBS>,
+    _ digest: Fr,
+) -> Fr {
+    compress<D>(Fr::from_plain_words(words), digest)
 }
 
 /// Canonical plain-word boundary for callers that otherwise remain insulated

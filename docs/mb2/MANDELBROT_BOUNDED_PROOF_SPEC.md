@@ -179,7 +179,8 @@ element. The first executable slice commits an exact four-row escaping trace.
 Fe derives the row and node tags from the visible string literals `"MR01"` and
 `"MN01"`; no numeric protocol identifiers or generated parameter tables appear
 in the implementation. Claim, numeric-model version, padded trace length, and
-terminal row still need binding into the general transcript.
+terminal row are bound for this fixed slice by a third typed domain, `"MT01"`.
+The general transcript and its challenge schedule remain open.
 
 `escape_air_row_encoding_q12` now materializes that canonical row encoding in
 Fe. It gives zero only the positive sign and emits a fixed 15-word order.
@@ -189,7 +190,10 @@ range-valid row packs injectively into one BN254 field element. Fe performs
 that transparent packing and computes the four leaves and two-level Merkle
 tree. An independent bigint oracle reconstructs the orbit, packing, canonical
 Poseidon permutation, and tree, then mutates every logical column and row
-order. This is a real fixed-size trace commitment, not yet a general proof.
+order. The same gate independently packs the public point, bound, terminal
+step, semantic length, and padded length into 114 bits, binds them to the root,
+and mutates every public field. This is a real fixed-size statement
+commitment, not yet a general proof.
 
 The reusable field substrate is the modulus-branded
 `precision::field::FieldElement<L, M>` over array-native 13-bit limbs. It has
@@ -202,7 +206,7 @@ executes the fixed four-row commitment in zero-import Wasm. Its honest SPIR-V
 gate currently fails closed on the retained array-returning `mul_words` call,
 so aggregate-return inlining or shader function-call lowering is required
 before the same field implementation runs as an application GPU kernel.
-General power-of-two trace commitments, metadata transcript binding,
+General power-of-two trace commitments, Fiat-Shamir challenge derivation,
 composition, and FRI remain open.
 
 The intended succinct construction is a transparent AIR plus FRI over a field

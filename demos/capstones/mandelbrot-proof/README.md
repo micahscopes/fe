@@ -36,8 +36,11 @@ element. Fe derives typed row and node domains from `"MR01"` and `"MN01"`, then
 computes a four-leaf Poseidon Merkle root in zero-import Wasm. The independent
 oracle reconstructs the orbit, row packing, canonical Poseidon permutation,
 and tree. It mutates every committed column and row order. General trace
-lengths, public-metadata transcript binding, composition, and FRI remain
-pending.
+lengths remain pending. For the fixed slice, a distinct `"MT01"` domain binds
+the trace root to an injective 114-bit encoding of the public point, bound,
+terminal step, semantic length, and padded length. Every public field is
+independently mutated. General Fiat-Shamir challenges, composition, and FRI
+remain pending.
 
 Escaping witnesses derive a power-of-two proof shape with one terminal marker
 and deterministic inactive padding; invalid and non-escaping claims cannot
