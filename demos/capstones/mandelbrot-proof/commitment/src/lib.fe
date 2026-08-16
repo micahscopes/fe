@@ -10,6 +10,8 @@ use poseidon_bn254::{
 
 const ROW_WORDS: usize = 17
 const PUBLIC_WORDS: usize = 8
+const TRACE_FRONTIER_LEVELS: usize = 22
+const MAX_PADDED_TRACE_LENGTH: usize = 2097152
 
 /// Widths implied by the public-domain and proof-shape checks: signed Q12
 /// point components, the inclusive 2^20 bound, terminal step, semantic trace
@@ -126,15 +128,79 @@ pub fn node_commitment(_ left: own TraceDigest, _ right: own TraceDigest) -> Tra
     }
 }
 
-/// First executable trace-root gate: four canonical rows, two tree levels.
+/// Streaming Merkle state for every proof domain admitted by the public Q12
+/// bound. Slot `level` holds the completed left subtree of width `2^level`
+/// selected by the corresponding set bit in `count`.
+struct TraceFrontier {
+    count: u32,
+    nodes: [TraceDigest; TRACE_FRONTIER_LEVELS],
+}
+
+impl core::marker::Copy for TraceFrontier {}
+
+impl TraceFrontier {
+    fn empty() -> Self {
+        let zero = TraceDigest { value: Fr::zero() }
+        Self {
+            count: 0,
+            nodes: [zero; TRACE_FRONTIER_LEVELS],
+        }
+    }
+
+    fn push(mut self, _ row: own EncodedProofRow) -> Self {
+        let mut carry = row_commitment(row)
+        let mut occupied = self.count
+        let mut level: usize = 0
+        while (occupied & 1) == 1 {
+            carry = node_commitment(self.nodes[level], carry)
+            occupied = occupied >> 1
+            level = level + 1
+        }
+        self.nodes[level] = carry
+        self.count = self.count + 1
+        self
+    }
+
+    fn complete_root(self) -> TraceDigest {
+        let mut level: usize = 0
+        let mut width: u32 = 1
+        while width < self.count {
+            width = width + width
+            level = level + 1
+        }
+        self.nodes[level]
+    }
+}
+
+/// Fold a compile-time-checked power-of-two row domain through an O(log N)
+/// frontier. This is the same shape a future one-pass trace generator can
+/// update as it emits rows, without retaining the Merkle tree or its leaves.
+fn trace_root_power_of_two<const N: usize>(
+    _ rows: own [EncodedProofRow; N],
+) -> TraceDigest
+    where N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N & (N - 1)) == 0 },
+{
+    let mut frontier = TraceFrontier::empty()
+    let mut row: usize = 0
+    while row < N {
+        frontier = frontier.push(rows[row])
+        row = row + 1
+    }
+    frontier.complete_root()
+}
+
+fn statement_commitment_power_of_two<const N: usize>(
+    _ public: own EscapesByQ12Public,
+    _ rows: own [EncodedProofRow; N],
+) -> StatementDigest
+    where N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N & (N - 1)) == 0 },
+{
+    bind_statement(public, trace_root_power_of_two<N>(rows))
+}
+
+/// Four-row compatibility boundary, now routed through the general frontier.
 pub fn trace_root4(_ rows: own [EncodedProofRow; 4]) -> TraceDigest {
-    let leaf0 = row_commitment(rows[0])
-    let leaf1 = row_commitment(rows[1])
-    let leaf2 = row_commitment(rows[2])
-    let leaf3 = row_commitment(rows[3])
-    let left = node_commitment(leaf0, leaf1)
-    let right = node_commitment(leaf2, leaf3)
-    node_commitment(left, right)
+    trace_root_power_of_two<4>(rows)
 }
 
 pub fn trace_root4_plain_words(_ rows: own [EncodedProofRow; 4]) -> [u32; 20] {
@@ -154,7 +220,7 @@ pub fn statement_commitment4(
     _ public: own EscapesByQ12Public,
     _ rows: own [EncodedProofRow; 4],
 ) -> StatementDigest {
-    bind_statement(public, trace_root4(rows))
+    statement_commitment_power_of_two<4>(public, rows)
 }
 
 pub fn statement_commitment4_plain_words(
@@ -162,4 +228,17 @@ pub fn statement_commitment4_plain_words(
     _ rows: own [EncodedProofRow; 4],
 ) -> [u32; 20] {
     plain_words(statement_commitment4(public, rows).value)
+}
+
+/// First domain-growth boundary: eight rows and three tree levels exercise the
+/// same streaming frontier without another hand-authored tree shape.
+pub fn trace_root8_plain_words(_ rows: own [EncodedProofRow; 8]) -> [u32; 20] {
+    plain_words(trace_root_power_of_two<8>(rows).value)
+}
+
+pub fn statement_commitment8_plain_words(
+    _ public: own EscapesByQ12Public,
+    _ rows: own [EncodedProofRow; 8],
+) -> [u32; 20] {
+    plain_words(statement_commitment_power_of_two<8>(public, rows).value)
 }

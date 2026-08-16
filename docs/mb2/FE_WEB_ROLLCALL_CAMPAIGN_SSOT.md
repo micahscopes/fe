@@ -245,16 +245,22 @@ Legend:
   public/shape mutation independently. A first real commitment slice now packs
   the 17 range-constrained columns into one injective 210-bit field encoding,
   derives typed `"MR01"` row and `"MN01"` node domains in Fe, and computes a
-  four-leaf Poseidon Merkle root in zero-import Wasm. The independent oracle
-  reconstructs the orbit, encoding, canonical permutation, and tree, mutates
-  every column, and proves row-order sensitivity. A distinct typed `"MT01"`
-  domain now binds that root to an injective 114-bit encoding of the public
+  Poseidon Merkle root in zero-import Wasm. The tree shape is no longer
+  hand-authored: a 22-slot Fe frontier folds any CTFE-proved nonzero
+  power-of-two domain through `2^21` while retaining O(log N) digests. Four-row
+  compatibility and an eight-row domain both execute. The independent oracle
+  reconstructs the orbit, encoding, canonical permutation, and trees, mutates
+  every four-row column, proves row-order sensitivity, and binds both inactive
+  padding positions in a six-active-row/eight-row trace. A distinct typed
+  `"MT01"` domain binds each root to an injective 114-bit encoding of the public
   point, bound, terminal step, semantic length, and padded length. The same
-  independent gate mutates every public field. General trace lengths,
-  Fiat-Shamir challenge derivation, composition, and FRI remain pending. The
-  reusable field API's SPIR-V helper-call seam and GPU permutation lift also
-  remain open. This is a fixed-size statement-commitment milestone and
-  executable AIR evidence, not yet a succinct proof.
+  independent gate mutates every public field, and both statement sizes return
+  their compiler-proven arena frames to byte 1024. Wiring the production
+  general-length trace generator directly into the frontier, Fiat-Shamir
+  challenge derivation, composition, and FRI remain pending. The reusable
+  field API's SPIR-V helper-call seam and GPU permutation lift also remain open.
+  This is a general-tree statement-commitment milestone and executable AIR
+  evidence, not yet a succinct proof.
 - [ ] Produce a succinct proof whose verifier is demonstrably cheaper than
   replaying the orbit.
 - [ ] Define a typed proof encoding and prove browser/native verifier parity,
@@ -298,9 +304,9 @@ fallback. The semantic receipts are:
 ## Immediate burn-down order
 
 1. Run the external real-GPU handoff above.
-2. Generalize the fixed four-row commitment to power-of-two traces, then add
-   Fiat-Shamir challenges, composition constraints, and the first FRI layer
-   under independent mutation and cost oracles.
+2. Stream the production general-length trace into the power-of-two frontier,
+   then add Fiat-Shamir challenges, composition constraints, and the first FRI
+   layer under independent mutation and cost oracles.
 3. Finish typed fetch, then Worker/port placement and supervision on the one
    runtime-control spine.
 4. Delete the runtime manifest and finish the legacy disposition.

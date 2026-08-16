@@ -30,17 +30,21 @@ width and checks the complete row through one nominal entry. A cheap Fe verifier
 boundary validates the public point, bound, terminal step, semantic length, and
 padded domain without replaying the orbit.
 
-`commitment` adds the first executable trace root. The canonical 17-column row
-schema has 210 audited bits, which Fe packs injectively into one BN254 field
-element. Fe derives typed row and node domains from `"MR01"` and `"MN01"`, then
-computes a four-leaf Poseidon Merkle root in zero-import Wasm. The independent
-oracle reconstructs the orbit, row packing, canonical Poseidon permutation,
-and tree. It mutates every committed column and row order. General trace
-lengths remain pending. For the fixed slice, a distinct `"MT01"` domain binds
-the trace root to an injective 114-bit encoding of the public point, bound,
-terminal step, semantic length, and padded length. Every public field is
-independently mutated. General Fiat-Shamir challenges, composition, and FRI
-remain pending.
+`commitment` adds the first executable trace roots. The canonical 17-column
+row schema has 210 audited bits, which Fe packs injectively into one BN254
+field element. Fe derives typed row and node domains from `"MR01"` and
+`"MN01"`. A 22-slot Fe Merkle frontier accepts only CTFE-proved nonzero
+power-of-two domains through `2^21`, so it retains O(log N) digests and can
+later consume a one-pass trace generator without retaining the tree or its
+leaves. The four-row compatibility boundary and a new eight-row boundary both
+execute in zero-import Wasm. The independent oracle reconstructs the orbit,
+row packing, canonical Poseidon permutation, and tree. It mutates every
+four-row column, row order, and both inactive padding positions of a six-active
+row, eight-row domain. A distinct `"MT01"` domain binds each trace root to an
+injective 114-bit encoding of the public point, bound, terminal step, semantic
+length, and padded length. Every public field is independently mutated. Wiring
+the production general-length trace generator directly into the frontier,
+Fiat-Shamir challenges, composition, and FRI remain pending.
 
 Escaping witnesses derive a power-of-two proof shape with one terminal marker
 and deterministic inactive padding; invalid and non-escaping claims cannot

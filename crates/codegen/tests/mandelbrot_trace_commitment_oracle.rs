@@ -87,8 +87,13 @@ fn air_row(step: u32, zr: i64, zi: i64) -> AirRow {
 }
 
 fn four_row_escape_trace() -> Vec<ProofRow> {
-    let c_re = 3072i64;
-    let c_im = 0i64;
+    let rows = escape_trace(3072, 0);
+    assert_eq!(rows.len(), 4);
+    assert_eq!(rows.iter().map(|row| row.terminal).sum::<u32>(), 1);
+    rows
+}
+
+fn escape_trace(c_re: i64, c_im: i64) -> Vec<ProofRow> {
     let mut zr = 0i64;
     let mut zi = 0i64;
     let mut rows = Vec::new();
@@ -108,7 +113,21 @@ fn four_row_escape_trace() -> Vec<ProofRow> {
         zr = real_numerator.div_euclid(SCALE) + c_re;
         zi = imaginary_numerator.div_euclid(SCALE) + c_im;
     }
-    assert_eq!(rows.len(), 4);
+    rows
+}
+
+fn eight_row_escape_trace() -> Vec<ProofRow> {
+    let mut rows = escape_trace(2048, 0);
+    assert_eq!(rows.len(), 6);
+    let terminal = rows.last().unwrap().air.clone();
+    while rows.len() < 8 {
+        rows.push(ProofRow {
+            active: 0,
+            terminal: 0,
+            air: terminal.clone(),
+        });
+    }
+    assert_eq!(rows.iter().map(|row| row.active).sum::<u32>(), 6);
     assert_eq!(rows.iter().map(|row| row.terminal).sum::<u32>(), 1);
     rows
 }
@@ -274,14 +293,24 @@ fn node_commitment(left: BigUint, right: BigUint, parameters: &[BigUint]) -> Big
     permute([protocol_tag(b"MN01"), left, right], parameters)[0].clone()
 }
 
-fn trace_root4(rows: &[ProofRow], parameters: &[BigUint]) -> BigUint {
-    let leaves: Vec<_> = rows
+fn trace_root_power_of_two(rows: &[ProofRow], parameters: &[BigUint]) -> BigUint {
+    assert!(!rows.is_empty() && rows.len().is_power_of_two());
+    let mut level: Vec<_> = rows
         .iter()
         .map(|row| row_commitment(row, parameters))
         .collect();
-    let left = node_commitment(leaves[0].clone(), leaves[1].clone(), parameters);
-    let right = node_commitment(leaves[2].clone(), leaves[3].clone(), parameters);
-    node_commitment(left, right, parameters)
+    while level.len() > 1 {
+        level = level
+            .chunks_exact(2)
+            .map(|pair| node_commitment(pair[0].clone(), pair[1].clone(), parameters))
+            .collect();
+    }
+    level.pop().unwrap()
+}
+
+fn trace_root4(rows: &[ProofRow], parameters: &[BigUint]) -> BigUint {
+    assert_eq!(rows.len(), 4);
+    trace_root_power_of_two(rows, parameters)
 }
 
 fn statement_commitment(
@@ -294,7 +323,7 @@ fn statement_commitment(
         [
             protocol_tag(b"MT01"),
             pack_words(public_words(statement), PUBLIC_WIDTHS),
-            trace_root4(rows, parameters),
+            trace_root_power_of_two(rows, parameters),
         ],
         parameters,
     )[0]
@@ -336,7 +365,7 @@ fn call_root(
         .flat_map(runtime_words)
         .map(|value| wasmtime::Val::I32(value as i32))
         .collect();
-    assert_eq!(arguments.len(), 68);
+    assert_eq!(arguments.len(), rows.len() * 17);
     let mut output = vec![wasmtime::Val::I32(0); LIMBS];
     root.call(&mut *store, &arguments, &mut output).unwrap();
     output
@@ -363,7 +392,7 @@ fn call_statement(
         .chain(rows.iter().flat_map(runtime_words))
         .map(|value| wasmtime::Val::I32(value as i32))
         .collect();
-    assert_eq!(arguments.len(), 76);
+    assert_eq!(arguments.len(), 8 + rows.len() * 17);
     let mut output = vec![wasmtime::Val::I32(0); LIMBS];
     commitment
         .call(&mut *store, &arguments, &mut output)
@@ -530,5 +559,82 @@ fn fe_statement_reclaims_its_compiler_proven_arena_frame() {
         alloc.call(&mut store, (1, 1)).unwrap(),
         1024,
         "the statement call must leave no non-escaping Fe temporary live"
+    );
+}
+
+#[test]
+fn fe_eight_row_frontier_matches_independent_tree_and_binds_padding() {
+    let parameters = parameters();
+    let rows = eight_row_escape_trace();
+    let statement = PublicStatement {
+        c_re: signed(2048),
+        c_im: signed(0),
+        bound: 16,
+        terminal_step: 5,
+        trace_length: 6,
+        padded_length: 8,
+    };
+    let expected_root = trace_root_power_of_two(&rows, &parameters);
+    let expected_statement = statement_commitment(&statement, &rows, &parameters);
+
+    let wasm = compile_gate();
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, wasm).unwrap();
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+    let root = instance
+        .get_func(&mut store, "trace_root8_plain_words")
+        .unwrap();
+    let bind = instance
+        .get_func(&mut store, "statement_commitment8_plain_words")
+        .unwrap();
+    let reset = instance
+        .get_typed_func::<(), ()>(&mut store, "fe_cabi_reset")
+        .unwrap();
+    let alloc = instance
+        .get_typed_func::<(i32, i32), i32>(&mut store, "fe_cabi_alloc")
+        .unwrap();
+
+    assert_eq!(call_root(&mut store, &root, &reset, &rows), expected_root);
+    assert_eq!(
+        call_statement(&mut store, &bind, &reset, &statement, &rows),
+        expected_statement
+    );
+    assert_eq!(
+        alloc.call(&mut store, (1, 1)).unwrap(),
+        1024,
+        "the eight-row frontier must reclaim every non-escaping temporary"
+    );
+
+    for padding_row in 6..8 {
+        let mut mutated = rows.clone();
+        mutated[padding_row].air.step += 1;
+        let expected_mutation = trace_root_power_of_two(&mutated, &parameters);
+        let expected_statement_mutation =
+            statement_commitment(&statement, &mutated, &parameters);
+        assert_ne!(expected_mutation, expected_root, "padding row {padding_row}");
+        assert_ne!(
+            expected_statement_mutation, expected_statement,
+            "statement padding row {padding_row}"
+        );
+        assert_eq!(
+            call_root(&mut store, &root, &reset, &mutated),
+            expected_mutation,
+            "padding row {padding_row} mutation"
+        );
+        assert_eq!(
+            call_statement(&mut store, &bind, &reset, &statement, &mutated),
+            expected_statement_mutation,
+            "statement padding row {padding_row} mutation"
+        );
+    }
+
+    let mut reordered = rows.clone();
+    reordered.swap(1, 2);
+    let expected_reordered = trace_root_power_of_two(&reordered, &parameters);
+    assert_ne!(expected_reordered, expected_root);
+    assert_eq!(
+        call_root(&mut store, &root, &reset, &reordered),
+        expected_reordered
     );
 }
