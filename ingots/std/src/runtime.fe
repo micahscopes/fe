@@ -7,6 +7,11 @@
 //! No Worker object, clock, timer, error string, or JavaScript callback enters
 //! the policy surface.
 
+use core::Backend
+use core::pending::{Pending, Suspend, TaskOutcome, Timer}
+
+pub use browser::{BrowserChildPlacement, supervise_browser_child}
+
 pub enum ChildFailureKind {
     None,
     Startup,
@@ -83,6 +88,27 @@ pub struct ChildSupervisionStep {
 }
 
 impl Copy for ChildSupervisionStep {}
+
+/// Target-neutral mechanics required by one structured child scope.
+///
+/// `spawn_begin` completes when the selected placement is ready. A failed
+/// start is delivered through `TaskOutcome::Failure`. Once ready,
+/// `failure_begin` completes only when that epoch's child fails. `close` is an
+/// immediate, idempotent release command. None of these operations may choose
+/// whether or when another epoch is started.
+pub trait ChildPlacement<B: Backend> {
+    fn spawn_begin(mut self, _ epoch: u32) -> Pending<B, ()>
+    fn failure_begin(mut self, _ epoch: u32) -> Pending<B, ()>
+    fn close(mut self, _ epoch: u32)
+}
+
+/// Terminal observation of an owning structured-child loop.
+pub enum ChildScopeExit {
+    Cancelled(u32),
+    Exhausted(u32, ChildFailureKind),
+    TransportFailure(u32, u32),
+    InvariantViolation(u32, ChildSupervisionPhase),
+}
 
 pub struct RestartWindowBudget {
     pub max_restarts: u32,
@@ -231,4 +257,105 @@ impl ChildSupervisionPolicy for RestartWindow {
             delay_ms: delay_ms,
         }
     }
+}
+
+/// Run one child under an ordinary Fe supervision policy.
+///
+/// The handler realizes only spawn, failure observation, timer, and close
+/// mechanics. Fe owns every lifecycle event, restart decision, epoch, delay,
+/// exhaustion branch, and parent-cancellation cleanup. The loop is backend
+/// generic and uses the same affine `Pending`/`Suspend` rail as browser events,
+/// fetch, actor sends, and GPU completion.
+pub fn supervise_child<B: Backend, P: ChildSupervisionPolicy + Copy>(
+    _ policy: P,
+) -> ChildScopeExit
+uses (
+    placement: mut ChildPlacement<B>,
+    timer: mut Timer<B>,
+    suspend: Suspend<B, u32>,
+)
+{
+    let mut state = ChildSupervisionState::initial()
+    let mut event = ChildLifecycleEvent::SpawnRequested
+
+    while true {
+        let step = policy.decide(event: event, state: state)
+        state = step.state
+
+        match step.action {
+            ChildSupervisionAction::NoAction => {
+                match state.phase {
+                    ChildSupervisionPhase::Active => {
+                        let pending = placement.failure_begin(state.epoch)
+                        let outcome: TaskOutcome<u32, ()> = suspend.suspend(pending)
+                        match outcome {
+                            TaskOutcome::Success(_) => {
+                                event = ChildLifecycleEvent::Failed(
+                                    state.epoch,
+                                    ChildFailureKind::Runtime,
+                                    timer.now(),
+                                )
+                            }
+                            TaskOutcome::Failure(error) => {
+                                placement.close(state.epoch)
+                                return ChildScopeExit::TransportFailure(state.epoch, error)
+                            }
+                            TaskOutcome::Cancelled => {
+                                event = ChildLifecycleEvent::ParentCancelled
+                            }
+                        }
+                    }
+                    _ => {
+                        placement.close(state.epoch)
+                        return ChildScopeExit::InvariantViolation(state.epoch, state.phase)
+                    }
+                }
+            }
+            ChildSupervisionAction::Spawn => {
+                let pending = placement.spawn_begin(state.epoch)
+                let outcome: TaskOutcome<u32, ()> = suspend.suspend(pending)
+                match outcome {
+                    TaskOutcome::Success(_) => {
+                        event = ChildLifecycleEvent::Ready(state.epoch)
+                    }
+                    TaskOutcome::Failure(_) => {
+                        event = ChildLifecycleEvent::Failed(
+                            state.epoch,
+                            ChildFailureKind::Startup,
+                            timer.now(),
+                        )
+                    }
+                    TaskOutcome::Cancelled => {
+                        event = ChildLifecycleEvent::ParentCancelled
+                    }
+                }
+            }
+            ChildSupervisionAction::RestartAfter => {
+                let pending = timer.sleep_begin(step.delay_ms)
+                let outcome: TaskOutcome<u32, u64> = suspend.suspend(pending)
+                match outcome {
+                    TaskOutcome::Success(_) => {
+                        event = ChildLifecycleEvent::BackoffElapsed(state.epoch)
+                    }
+                    TaskOutcome::Failure(error) => {
+                        placement.close(state.epoch)
+                        return ChildScopeExit::TransportFailure(state.epoch, error)
+                    }
+                    TaskOutcome::Cancelled => {
+                        event = ChildLifecycleEvent::ParentCancelled
+                    }
+                }
+            }
+            ChildSupervisionAction::Close => {
+                placement.close(state.epoch)
+                return ChildScopeExit::Cancelled(state.epoch)
+            }
+            ChildSupervisionAction::Fail => {
+                placement.close(state.epoch)
+                return ChildScopeExit::Exhausted(state.epoch, state.last_failure)
+            }
+        }
+    }
+
+    ChildScopeExit::InvariantViolation(state.epoch, state.phase)
 }

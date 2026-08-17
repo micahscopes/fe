@@ -1,0 +1,52 @@
+//! Browser handler selection for one structured child scope.
+//!
+//! The fixed host realizes only Worker lifecycle mechanics. The parent module's
+//! target-neutral Fe loop owns policy, epochs, timers, and terminal meaning.
+
+use core::pending::{Pending, Suspend, Timer}
+use ingot::wasm::WasmBackend
+use super::{ChildPlacement, ChildScopeExit, RestartWindow, supervise_child}
+use super::super::host::{HostTimer, Resumable}
+use super::raw::{
+    close as raw_close,
+    failure_begin as raw_failure_begin,
+    spawn_begin as raw_spawn_begin,
+}
+
+pub struct BrowserChildPlacement {}
+
+impl ChildPlacement<WasmBackend> for BrowserChildPlacement {
+    fn spawn_begin(mut self, _ epoch: u32) -> Pending<WasmBackend, ()> {
+        raw_spawn_begin(epoch)
+    }
+
+    fn failure_begin(mut self, _ epoch: u32) -> Pending<WasmBackend, ()> {
+        raw_failure_begin(epoch)
+    }
+
+    fn close(mut self, _ epoch: u32) {
+        raw_close(epoch)
+    }
+}
+
+/// Select the standard browser handlers while retaining the complete policy in
+/// the target-neutral Fe loop.
+pub fn supervise_browser_child(
+    max_restarts: u32,
+    window_ms: u64,
+    backoff_ms: u64,
+) -> ChildScopeExit {
+    with (
+        ChildPlacement<WasmBackend> = BrowserChildPlacement {},
+        Timer<WasmBackend> = HostTimer {},
+        Suspend<WasmBackend, u32> = Resumable {},
+    ) {
+        supervise_child(
+            policy: RestartWindow::bounded(
+                max_restarts: max_restarts,
+                window_ms: window_ms,
+                backoff_ms: backoff_ms,
+            ),
+        )
+    }
+}

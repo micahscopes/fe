@@ -1,0 +1,11 @@
+//! Private fixed-host imports for browser structured-child mechanics.
+
+use core::pending::Pending
+use ingot::wasm::WasmBackend
+
+#[wasm_import(module = "fe:worker-scope")]
+extern {
+    pub unsafe fn spawn_begin(_ epoch: u32) -> Pending<WasmBackend, ()>
+    pub unsafe fn failure_begin(_ epoch: u32) -> Pending<WasmBackend, ()>
+    pub unsafe fn close(_ epoch: u32)
+}

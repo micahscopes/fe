@@ -2462,12 +2462,14 @@ order:
    native/Wasm/runtime/browser rail.
 8. **In progress:** the fixed Module Worker boundary now owns only explicit
    spawn/restart/close and port mechanics. `std::runtime` owns bounded restart,
-   backoff, exhaustion, epoch, and parent-cancellation policy in ordinary Fe,
-   with independent Bun and compiled-Fe Wasmtime gates. Next, expose lifecycle
-   facts and mechanical commands through typed effects, retain policy state in
-   the owning Fe scope, then add rich compiler-derived port payloads. Use that
-   completed control/reactive spine for shared interaction, GPU messages, and
-   the future proof queue.
+   backoff, exhaustion, epoch, and parent-cancellation policy in ordinary Fe.
+   `ChildPlacement<B>` and `supervise_child` now carry that policy through the
+   real `Pending`/`Suspend`/`Timer` rail, with independent Bun mechanics,
+   compiled-Fe Wasmtime reducer, and compiled-Fe/Bun scope gates. Next, connect
+   the fixed capability to the canonical Module Worker and immutable browser
+   package, then add rich compiler-derived port payloads. Use that completed
+   control/reactive spine for shared interaction, GPU messages, and the future
+   proof queue.
 
 Only then resume broad package cosmetics. Promote and split libraries when a
 shared abstraction has at least two real consumers and independent evidence;

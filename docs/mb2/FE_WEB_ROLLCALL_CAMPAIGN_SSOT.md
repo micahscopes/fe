@@ -161,11 +161,13 @@ Legend:
   backoff, or automatic recovery. Ordinary `std::runtime` Fe types and the
   pure `RestartWindow` reducer now own epoch advancement, rolling-window
   admission, restart/backoff selection, exhaustion, and parent cancellation.
-  Independent Bun mechanics and compiled-Fe Wasmtime semantic gates pass.
-  Remaining: route lifecycle facts and spawn/restart/close commands through
-  typed effects, retain the reducer state in the owning Fe scope, and compose
-  nested child scopes. Recursive resumable SCCs must remain explicitly refused
-  until linked affine frames are sound.
+  `ChildPlacement<B>` plus `supervise_child` now run the complete owning scope
+  through the ordinary `Pending`/`Suspend`/`Timer` rail. Independent Bun
+  mechanics, compiled-Fe Wasmtime reducer, and compiled-Fe/Bun structured-scope
+  gates pass. Remaining: connect the capability to the canonical Module Worker
+  object and immutable browser package, then compose nested child scopes.
+  Recursive resumable SCCs must remain explicitly refused until linked affine
+  frames are sound.
 
 ## C. GPU pass graphs and perturbation
 

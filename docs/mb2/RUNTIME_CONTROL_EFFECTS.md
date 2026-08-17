@@ -233,8 +233,17 @@ manifest-driven.
    nominal event, and a same-layout impostor gate fails closed. Cross-actor,
    Worker/MessagePort, and GPU destinations remain future handlers rather
    than implied capabilities of this owning-scope mailbox.
-6. [todo] Move Worker admission, cancellation, restart/backoff, and supervision policy
-   from handwritten JavaScript into Fe handlers and structured scopes.
+6. [in progress] Move Worker admission, cancellation, restart/backoff, and
+   supervision policy into Fe handlers and structured scopes. Handwritten
+   JavaScript retry/backoff policy is deleted. `ChildPlacement<B>` now names
+   only unit-valued spawn, failure-observation, and close mechanics, while the
+   target-neutral `supervise_child` Fe loop combines those operations with the
+   existing affine `Pending`/`Suspend` and `Timer` effects. A compiled Fe/Bun
+   gate proves exact epoch actions, bounded exhaustion, transport-failure
+   distinction, and parent-cancellation close against adversarial host tapes.
+   Remaining: adapt the canonical Module Worker object to this fixed capability,
+   publish/start the owning scope in the real browser package, derive rich port
+   values, and compose nested scopes.
 7. [todo] Route WebGPU completion, device loss/recovery, and resource lifetime through
    the same outcome/scope machinery.
 8. [in progress] Expose typed device/viewport capability facts so Fe owns responsive
