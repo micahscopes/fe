@@ -2460,8 +2460,9 @@ order:
    landed:** shared lifecycle facts, generated standards operations, and
    retry/fail/degrade selection use the same Fe-owned
    native/Wasm/runtime/browser rail.
-8. **In progress:** the fixed Module Worker boundary now owns only explicit
-   spawn/restart/close and port mechanics. `std::runtime` owns bounded restart,
+8. **Landed through multiple nominal siblings:** the fixed Module Worker
+   boundary now owns only explicit spawn/restart/close and port mechanics.
+   `std::runtime` owns bounded restart,
    backoff, startup timeout, exhaustion, epoch, and parent-cancellation policy
    in ordinary Fe. `ChildPlacement<B, C>` and `supervise_child` carry that
    policy through the real `Pending`/`Suspend`/`Timer`/`Select` rail, including
@@ -2472,10 +2473,20 @@ order:
    fixed actor runtime beside the parent task package. Production bootstrap
    attaches it only when the parent imports `fe:worker-scope`; a real Chromium
    gate executes the immutable parent/child link. There is no authored child
-   ID, URL, manifest, or behavior-name table. Next, migrate DEC onto this path,
-   add rich compiler-derived port payloads, admit multiple children, and
-   compose nested scopes. Use that completed control/reactive spine for shared
-   interaction, GPU messages, and the future proof queue.
+   ID, URL, manifest, or behavior-name table. DEC uses this path from its render
+   actor. Every lifecycle operation now retains the nominal child type `C`;
+   MIR derives distinct spawn, failure, and close import identities from that
+   type, and one parent may compile and publish any number of child artifacts.
+   The generated package binds those artifacts through one affine completion
+   broker, so timers, races, cancellation, supervision, and mailbox replies do
+   not split into host-owned token spaces. A two-child Fe gate requests through
+   both typed mailboxes, checks the independent `7 -> 14 -> 19 -> 26` semantic
+   result, cancels both supervisors, closes the correct scopes, and observes no
+   leaked token. No actor name, numeric selector, JSON, or runtime manifest
+   participates. Landed at `db088b0ea`. Next, compose recursive nested scopes,
+   attach opaque ports, and derive rich owned canonical payloads. Use that
+   completed control/reactive spine for shared interaction, GPU messages, and
+   the future proof queue.
 
 Only then resume broad package cosmetics. Promote and split libraries when a
 shared abstraction has at least two real consumers and independent evidence;

@@ -197,9 +197,20 @@ Legend:
   those exact published parent, child, interface, mailbox, and completion
   artifacts whose Fe receipt was `1` with zero leaked tokens. Landed at
   `7d881bcc6`, `8817e726e`, and `838d1c01b`.
-  Remaining: admit multiple nominal children without collapsing them into one
-  import namespace, compose nested scopes, attach opaque ports, derive rich
-  canonical message values, and run the new render-owned DEC task path in real
+  Multiple nominal sibling scopes are now landed at `db088b0ea`. The Fe raw
+  boundary retains `C` on spawn, failure, and close; MIR derives three opaque
+  lifecycle import identities from each semantic child type; resident and
+  render artifacts carry a deterministic collection of compiled children; and
+  generated packages publish each child under its derived key without an actor
+  name, selector, or manifest. The fixed host accepts the resulting typed
+  capability collection but keeps every child on one affine completion-token
+  rail. The semantic two-child gate performs requests through both child Wasm
+  programs, proves `7 -> 14 -> 19 -> 26`, cancels both Fe supervisors, observes
+  the correct close for each nominal scope, and finishes with zero live tokens.
+  The 44-test fixed browser-runtime suite, ten-test resident-actor suite,
+  four-test DEC oracle, and focused HTML publication gate pass.
+  Remaining: compose recursive nested scopes, attach opaque ports, derive rich
+  canonical message values, and run the render-owned DEC task path in real
   Chromium. Recursive resumable SCCs must remain explicitly refused until
   linked affine frames are sound.
 
@@ -602,8 +613,8 @@ fallback. The semantic receipts are:
 5. Lower the BabyBear leaf prover and recursive merges through Fe Conal/CTFE
    WebGPU schedules, then run the complete progressive proof/verify/tamper page
    through Chrome.
-6. Generalize the landed render-owned DEC child path to multiple child
-   namespaces, rich canonical port payloads, and nested scopes, then execute it
+6. With multiple nominal child namespaces landed, generalize the render-owned
+   DEC path to rich canonical port payloads and nested scopes, then execute it
    in real Chromium.
 7. Delete the runtime manifest and finish the legacy disposition.
 8. Run the exact G5 command once at the final DONE gate.
