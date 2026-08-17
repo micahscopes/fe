@@ -178,11 +178,30 @@ Legend:
   There is no authored child ID, child URL, child manifest, behavior-name table,
   or application routing JavaScript. The reproducible Chromium gate
   `structured_worker.browser.mjs` loads the immutable parent, child, generated
-  interface, and Module Worker host over HTTP without errors. Remaining: admit
-  multiple nominal children without collapsing them into one import namespace,
-  compose nested scopes, attach opaque ports, derive rich canonical message
-  values, and migrate DEC onto the path. Recursive resumable SCCs must remain
-  explicitly refused until linked affine frames are sound.
+  interface, and Module Worker host over HTTP without errors.
+  DEC now uses this same path from a render actor. `DecSurface` owns two typed
+  `ScopedTask` behaviors: one runs Fe supervision policy for the nominal
+  `DecOperator` child, and one sends a typed `Cochain0 -> Cochain1` mailbox
+  request and computes the response receipt in Fe. Render-bundle compilation
+  derives those tasks only from the selected GPU actor, compiles the six Worker
+  behaviors into a separate zero-import child, and emits one manifest-free
+  task package. The fixed render runtime inspects only standard Wasm imports,
+  supplies the generated Worker scope/mailbox capability, starts task machines
+  from their compiler-derived input widths, and binds cancellation to the
+  surface lifetime. Direct workspace builds now resolve local `core` and `std`
+  as one nominal graph, eliminating the split `Handles` identity that had
+  invited handwritten relation boilerplate. Gates: the four-test DEC operator
+  suite; `direct_workspace_member_uses_workspace_core_and_std_as_one_graph`;
+  the HTML publication, cache, and deployment-verifier tests; a real one-tile
+  `fe web precompile`/`fe web verify` run with 18 files; and a Bun execution of
+  those exact published parent, child, interface, mailbox, and completion
+  artifacts whose Fe receipt was `1` with zero leaked tokens. Landed at
+  `7d881bcc6`, `8817e726e`, and `838d1c01b`.
+  Remaining: admit multiple nominal children without collapsing them into one
+  import namespace, compose nested scopes, attach opaque ports, derive rich
+  canonical message values, and run the new render-owned DEC task path in real
+  Chromium. Recursive resumable SCCs must remain explicitly refused until
+  linked affine frames are sound.
 
 ## C. GPU pass graphs and perturbation
 
@@ -583,8 +602,9 @@ fallback. The semantic receipts are:
 5. Lower the BabyBear leaf prover and recursive merges through Fe Conal/CTFE
    WebGPU schedules, then run the complete progressive proof/verify/tamper page
    through Chrome.
-6. Migrate DEC's Worker/message lane onto the landed compiler-derived child
-   scope, then derive rich canonical port payloads and nested scopes.
+6. Generalize the landed render-owned DEC child path to multiple child
+   namespaces, rich canonical port payloads, and nested scopes, then execute it
+   in real Chromium.
 7. Delete the runtime manifest and finish the legacy disposition.
 8. Run the exact G5 command once at the final DONE gate.
 
