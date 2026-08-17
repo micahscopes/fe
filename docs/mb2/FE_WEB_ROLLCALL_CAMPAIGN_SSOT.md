@@ -518,15 +518,33 @@ Legend:
   and fixed a general Wasm lowering bug where forwarding an `AddrOf` borrow
   deep-copied its pointee and detached mutable writes from caller storage.
   Separate execution gates now prove mutable-borrow identity and preserve
-  ordinary aggregate deep-copy semantics. Verifier-cost evidence, systematic
-  malformed-proof rejection, and canonical proof encoding remain pending. The
+  ordinary aggregate deep-copy semantics. A reusable `canonical_words` ingot
+  now derives exact word counts and ordered codecs from nominal Fe records via
+  reflection and FCO. Its browser writer and reader interpret those same typed
+  codecs over bounded linear memory without a JSON schema. Signed `i32` words
+  use an exact Fe bitcast, field decoding rejects limbs outside the 13-bit
+  radix and values greater than or equal to the modulus, bool decoding rejects
+  non-bit tags, and const-generic arrays include the zero-length case without
+  transport lanes. The outer `"MBP1"` versioned receipt derives its complete
+  35,503-word layout from the public claim and nested authenticated AIR/FRI
+  query types. One zero-import Wasm gate generates the receipt in Fe, copies it
+  across the generic canonical host ownership/reset boundary, verifies it in
+  Fe, and checks every emitted word against the independent bigint model. It
+  rejects truncated, trailing, and misaligned byte lengths, changed protocol
+  fields and public inputs, invalid bool tags, oversized limbs, the field
+  modulus itself, changed roots, and invalid proof requests. The accepted gate
+  took 1,779.46 seconds and peaked near 10.2 GB RSS in this sandbox, exposing a
+  real generated-function lowering cost that must not become the ordinary
+  edit loop. Verifier-cost evidence and succinctness remain pending. The
   reusable field API's SPIR-V helper-call seam remains open as a compiler
-  issue, but BN254 will not be ported into the proof WGSL path. This is an
-  authenticated AIR and FRI query milestone, not yet a succinct proof.
+  issue, but BN254 will not be ported into the proof WGSL path. This is a
+  complete authenticated toy receipt boundary, not yet a succinct proof.
 - [ ] Produce a succinct proof whose verifier is demonstrably cheaper than
   replaying the orbit.
-- [ ] Finish one complete BN254 toy proof and verifier accept/reject boundary,
-  then retarget the protocol to BabyBear before any prover GPU work. BN254 Fr
+- [x] Finish one complete BN254 toy proof and verifier accept/reject boundary.
+  The Fe-derived canonical receipt and independent whole-word/mutation oracle
+  described above are the acceptance gate.
+- [~] Retarget the protocol to BabyBear before any prover GPU work. BN254 Fr
   must not be ported to WGSL. The BabyBear gate requires extension-field
   challenges, new injective packing, Fe-derived field-specific Poseidon, and
   new independent vectors. Same-source Fe Wasm/native agreement is parity;
@@ -578,8 +596,10 @@ Legend:
   typed receipt, verify it through revm-Wasm, reject a mutated receipt, and
   capture console and device-loss failures. Shader compilation alone cannot
   satisfy this gate.
-- [ ] Define a typed proof encoding and prove browser/native verifier parity,
-  malformed-proof rejection, and mutation rejection.
+- [x] Define a typed proof encoding and prove malformed-proof and mutation
+  rejection in zero-import Fe Wasm against the independent bigint model.
+  Browser/native parity for the eventual BabyBear protocol remains part of the
+  published-page gate above rather than a claim about this BN254 checkpoint.
 - [ ] Run proof submission and verification through structured Fe tasks,
   Worker/MessagePort effects, cancellation, and backpressure.
 
@@ -626,20 +646,17 @@ fallback. The semantic receipts are:
 ## Immediate burn-down order
 
 1. Run the external real-GPU handoff above before beginning the proof GPU port.
-2. Add canonical proof encoding around the now-authenticated BN254 AIR/FRI
-   query, including systematic malformed-receipt rejection and one complete
-   end-to-end accept/reject boundary.
-3. Retarget the protocol to BabyBear with independent exactness gates, then
+2. Retarget the protocol to BabyBear with independent exactness gates, then
    derive the multi-limb chunk and recursive-accumulator statement. Do not port
    BN254 Fr to WGSL.
-4. Lower the BabyBear leaf prover and recursive merges through Fe Conal/CTFE
+3. Lower the BabyBear leaf prover and recursive merges through Fe Conal/CTFE
    WebGPU schedules, then run the complete progressive proof/verify/tamper page
    through Chrome.
-5. With multiple nominal child namespaces landed, generalize the render-owned
+4. With multiple nominal child namespaces landed, generalize the render-owned
    DEC path to rich canonical port payloads and nested scopes, then execute it
    in real Chromium.
-6. Delete the runtime manifest and finish the legacy disposition.
-7. Run the exact G5 command once at the final DONE gate.
+5. Delete the runtime manifest and finish the legacy disposition.
+6. Run the exact G5 command once at the final DONE gate.
 
 The Definition of done is not yet met. In particular, the real-GPU gate,
 manifest deletion, Worker/DEC general messaging, complete legacy disposition,
