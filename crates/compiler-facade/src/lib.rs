@@ -22,8 +22,10 @@ use url::Url;
 pub use codegen::{
     ComponentProjection, HOST_COMPLETION_RUNTIME_JS, MATERIALIZED_TASK_RUNTIME_JS,
     PageAttributeKind, PageElement, PageProjection, PageProjectionOp, ProjectedPageAttribute,
-    ProjectedPageComponent, ProjectedPageRender, StructuredChildActorArtifact, WasmTaskAdapter,
-    browser_actor_runtime_files, emit_canonical_interface_js, emit_materialized_task_adapter_js,
+    ProjectedPageComponent, ProjectedPageRender, ScopedTaskPackage, ScopedTaskPackageFile,
+    StructuredChildActorArtifact, WasmTaskAdapter, browser_actor_runtime_files,
+    emit_canonical_interface_js, emit_materialized_task_adapter_js,
+    materialize_scoped_task_package,
 };
 
 /// In-memory result of projecting a role-selected Fe page. This is a direct

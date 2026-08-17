@@ -10,6 +10,7 @@ mod layout;
 mod page_projection;
 mod resident_actor;
 mod runtime_package;
+mod scoped_task_package;
 mod sonatina;
 mod test_output;
 #[cfg(feature = "spirv-backend")]
@@ -45,6 +46,10 @@ pub use resident_actor::{
     RESIDENT_ACTOR_STATE_REPLACE_EXPORT, RESIDENT_ACTOR_TRANSITION_EXPORT, ResidentActorArtifact,
     ResidentActorContract, ResidentActorError, StructuredChildActorArtifact,
     compile_resident_actor, compile_resident_actor_with_optimization, resident_actor_contract,
+};
+pub use scoped_task_package::{
+    ScopedTaskPackage, ScopedTaskPackageError, ScopedTaskPackageFile,
+    materialize_scoped_task_package,
 };
 #[cfg(all(
     feature = "native-backend",

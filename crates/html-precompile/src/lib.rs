@@ -3529,102 +3529,29 @@ fn publish_scoped_task_package(
     structured_child: Option<&fe_compiler_facade::StructuredChildActorArtifact>,
     assets: &mut BTreeMap<String, Vec<u8>>,
 ) -> Result<Option<String>, PrecompileError> {
-    if tasks.is_empty() {
-        return Ok(None);
-    }
-    let mut entry =
-        fe_compiler_facade::emit_materialized_task_adapter_js(tasks, "./materialized-task.js")
+    let Some(package) =
+        fe_compiler_facade::materialize_scoped_task_package(tasks, structured_child)
             .map_err(|error| PrecompileError::Serialize(error.to_string()))?
-            .ok_or_else(|| {
-                PrecompileError::Serialize(
-                    "scoped actor tasks produced no compiler-derived browser adapter".to_owned(),
-                )
-            })?;
-    entry.push_str(
-        "\nexport { createHostCompletionBroker, createMessagePortEventSource } from \"./host-completion.js\";\n",
-    );
-    let mut child_files = Vec::<(String, Vec<u8>)>::new();
-    if let Some(child) = structured_child {
-        let interface = fe_compiler_facade::emit_canonical_interface_js(&child.interface)
-            .map_err(|error| PrecompileError::Serialize(error.to_string()))?;
-        entry.push_str(
-            r#"
-import {
-  createCanonicalBrowserWorkerScope,
-  createCanonicalWorkerMailboxImports,
-} from "./runtime/actor-client.js";
-import { compileActorMailbox } from "./interface.js";
-
-let structuredChildModule;
-async function compileStructuredChild() {
-  if (structuredChildModule === undefined) {
-    structuredChildModule = (async () => {
-      const response = await fetch(new URL("./child.wasm", import.meta.url), {
-        mode: "cors",
-        credentials: "same-origin",
-      });
-      if (!response.ok) throw new Error("compiler-derived structured child could not be loaded");
-      return WebAssembly.compile(await response.arrayBuffer());
-    })();
-  }
-  return structuredChildModule;
-}
-
-export async function createStructuredWorkerScope() {
-  return createCanonicalBrowserWorkerScope({ wasm: await compileStructuredChild() });
-}
-
-export function createStructuredWorkerMailbox(scope, completions) {
-  return createCanonicalWorkerMailboxImports({
-    scope,
-    completions,
-    mailbox: compileActorMailbox(),
-  });
-}
-"#,
-        );
-        child_files.push(("child.wasm".to_owned(), child.wasm.clone()));
-        child_files.push(("interface.js".to_owned(), interface.into_bytes()));
-        child_files.extend(
-            fe_compiler_facade::browser_actor_runtime_files()
-                .iter()
-                .map(|(path, source)| ((*path).to_owned(), source.as_bytes().to_vec())),
-        );
-    }
-    let materialized = fe_compiler_facade::MATERIALIZED_TASK_RUNTIME_JS.as_bytes();
-    let completion = fe_compiler_facade::HOST_COMPLETION_RUNTIME_JS.as_bytes();
-    let child_len = child_files
+    else {
+        return Ok(None);
+    };
+    let package_len = package
+        .files
         .iter()
-        .map(|(path, bytes)| path.len() + bytes.len() + 1)
+        .map(|file| file.path.len() + file.bytes.len() + 1)
         .sum::<usize>();
-    let mut package_bytes =
-        Vec::with_capacity(entry.len() + materialized.len() + completion.len() + child_len);
-    package_bytes.extend_from_slice(entry.as_bytes());
-    package_bytes.extend_from_slice(materialized);
-    package_bytes.extend_from_slice(completion);
-    for (path, bytes) in &child_files {
-        package_bytes.extend_from_slice(path.as_bytes());
+    let mut package_bytes = Vec::with_capacity(package_len);
+    for file in &package.files {
+        package_bytes.extend_from_slice(file.path.as_bytes());
         package_bytes.push(0);
-        package_bytes.extend_from_slice(bytes);
+        package_bytes.extend_from_slice(&file.bytes);
     }
     let digest = sha256_hex(&package_bytes);
     let directory = format!("assets/fe-task-{}", &digest[..16]);
-    let entry_path = format!("{directory}/tasks.js");
-    insert_identical(assets, entry_path.clone(), entry.into_bytes())?;
-    insert_identical(
-        assets,
-        format!("{directory}/materialized-task.js"),
-        materialized.to_vec(),
-    )?;
-    insert_identical(
-        assets,
-        format!("{directory}/host-completion.js"),
-        completion.to_vec(),
-    )?;
-    for (path, bytes) in child_files {
-        insert_identical(assets, format!("{directory}/{path}"), bytes)?;
+    for file in package.files {
+        insert_identical(assets, format!("{directory}/{}", file.path), file.bytes)?;
     }
-    Ok(Some(entry_path))
+    Ok(Some(format!("{directory}/{}", package.entry_path)))
 }
 
 fn rewrite_script(
