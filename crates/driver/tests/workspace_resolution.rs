@@ -66,6 +66,84 @@ fn with_remote_cache_dir<T>(cache_root: &Utf8PathBuf, f: impl FnOnce() -> T) -> 
     result
 }
 
+#[test]
+fn direct_workspace_member_uses_workspace_core_and_std_as_one_graph() {
+    let temp = TempDir::new().unwrap();
+    let root = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    let core = root.join("core");
+    let std = root.join("std");
+    let consumer = root.join("consumer");
+
+    write_file(
+        &root.join("fe.toml"),
+        r#"
+[workspace]
+name = "identity"
+version = "0.1.0"
+members = [
+  { path = "core", name = "core" },
+  { path = "std", name = "std" },
+  { path = "consumer", name = "consumer" },
+]
+"#,
+    );
+    write_file(
+        &core.join("fe.toml"),
+        r#"
+[ingot]
+name = "core"
+version = "0.1.0"
+"#,
+    );
+    write_file(&core.join("src/lib.fe"), "pub struct Marker {}\n");
+    write_file(
+        &std.join("fe.toml"),
+        r#"
+[ingot]
+name = "std"
+version = "0.1.0"
+
+[dependencies]
+core = true
+"#,
+    );
+    write_file(&std.join("src/lib.fe"), "pub struct Runtime {}\n");
+    write_file(
+        &consumer.join("fe.toml"),
+        r#"
+[ingot]
+name = "consumer"
+version = "0.1.0"
+
+[dependencies]
+core = true
+"#,
+    );
+    write_file(&consumer.join("src/lib.fe"), "pub fn main() {}\n");
+
+    let consumer_url = Url::from_directory_path(consumer.as_std_path()).unwrap();
+    let core_url = Url::from_directory_path(core.as_std_path()).unwrap();
+    let std_url = Url::from_directory_path(std.as_std_path()).unwrap();
+    let mut db = DriverDataBase::default();
+    assert!(!init_ingot(&mut db, &consumer_url));
+
+    let graph_dependencies = db.dependency_graph().dependency_urls(&db, &consumer_url);
+    assert!(graph_dependencies.contains(&core_url));
+    assert!(graph_dependencies.contains(&std_url));
+    let ingot = db.workspace().containing_ingot(&db, consumer_url).unwrap();
+    let dependencies = ingot.dependencies(&db);
+    assert!(
+        dependencies
+            .iter()
+            .any(|(alias, url)| alias == "core" && url == &core_url)
+    );
+    assert!(
+        dependencies
+            .iter()
+            .any(|(alias, url)| alias == "std" && url == &std_url)
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn resolves_workspace_member_by_name_local_through_symlinked_workspace_root() {

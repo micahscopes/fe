@@ -8,8 +8,8 @@ use common::{
         WorkspaceMemberSelection, resolve_dependency_arithmetic_mode,
     },
     dependencies::{
-        DependencyAlias, DependencyArguments, DependencyLocation, LocalFiles, RemoteFiles,
-        WorkspaceMemberRecord,
+        Dependency, DependencyAlias, DependencyArguments, DependencyLocation, LocalFiles,
+        RemoteFiles, WorkspaceMemberRecord,
     },
     urlext::UrlExt,
 };
@@ -647,6 +647,48 @@ impl<'a> IngotHandler<'a> {
         Ok((name, version))
     }
 
+    /// Register the named shape of a containing workspace before resolving an
+    /// individual member's dependencies. Direct `init_ingot(member)` starts at
+    /// that member rather than the workspace node, but implicit foundational
+    /// dependencies still need to select the workspace's `core` and `std` as
+    /// one coherent nominal graph. Full member loading and metadata validation
+    /// remain in `handle_workspace_config` when the workspace itself is a root.
+    fn register_containing_workspace_index(&mut self, workspace_root: &Url) -> Result<(), String> {
+        let Config::Workspace(config) = self.config_at_url(workspace_root)? else {
+            return Err(format!(
+                "Expected workspace config at {workspace_root} while resolving a member"
+            ));
+        };
+        let members = crate::expand_workspace_members(
+            &config.workspace,
+            workspace_root,
+            WorkspaceMemberSelection::All,
+        )?;
+        self.db
+            .dependency_graph()
+            .ensure_workspace_root(self.db, workspace_root);
+        for member in members {
+            self.db.dependency_graph().register_workspace_member_root(
+                self.db,
+                workspace_root,
+                &member.url,
+            );
+            if let Some(name) = member.name {
+                self.db.dependency_graph().register_workspace_member(
+                    self.db,
+                    workspace_root,
+                    WorkspaceMemberRecord {
+                        name,
+                        version: member.version,
+                        path: member.path,
+                        url: member.url,
+                    },
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn handle_workspace_config(
         &mut self,
         resource: &IngotResource,
@@ -1049,6 +1091,12 @@ impl<'a> ResolutionHandler<IngotResolverImpl> for IngotHandler<'a> {
                 workspace_root,
                 &ingot_url,
             );
+            if let Err(error) = self.register_containing_workspace_index(workspace_root) {
+                self.report_error(IngotInitDiagnostics::WorkspaceMembersError {
+                    workspace_url: workspace_root.clone(),
+                    error,
+                });
+            }
         }
 
         self.register_remote_mapping(&ingot_url, &origin);
@@ -1173,8 +1221,45 @@ impl<'a> ResolutionHandler<IngotResolverImpl> for IngotHandler<'a> {
             diagnostics.retain(|diag| !matches!(diag, ConfigDiagnostic::MissingVersion));
         }
 
-        let (config_dependencies, dependency_diagnostics) = config.dependencies(&ingot_url);
+        let (mut config_dependencies, dependency_diagnostics) = config.dependencies(&ingot_url);
         diagnostics.extend(dependency_diagnostics);
+
+        // The HIR always provides implicit `core` and `std` aliases. When a
+        // directly initialized ingot belongs to a source workspace, resolve
+        // and load those workspace members through the same graph as explicit
+        // dependencies. Falling back to the embedded std while the actor is
+        // lowered against a workspace core splits nominal trait identity.
+        if let Some(workspace_root) = workspace_root.as_ref() {
+            let ingot_name = config.metadata.name.as_deref();
+            for dependency_name in ["core", "std"] {
+                if ingot_name == Some(dependency_name)
+                    || (dependency_name == "std"
+                        && matches!(ingot_name, Some("core" | "core_derives")))
+                    || config_dependencies
+                        .iter()
+                        .any(|dependency| dependency.alias == dependency_name)
+                {
+                    continue;
+                }
+                let name = SmolStr::new(dependency_name);
+                if self
+                    .db
+                    .dependency_graph()
+                    .workspace_members_by_name(self.db, workspace_root, &name)
+                    .len()
+                    == 1
+                {
+                    config_dependencies.push(Dependency {
+                        alias: name.clone(),
+                        location: DependencyLocation::WorkspaceCurrent,
+                        arguments: DependencyArguments {
+                            name: Some(name),
+                            ..Default::default()
+                        },
+                    });
+                }
+            }
+        }
 
         if !diagnostics.is_empty() {
             match &origin {

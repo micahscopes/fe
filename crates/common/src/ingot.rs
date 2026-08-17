@@ -272,9 +272,21 @@ impl<'db> Ingot<'db> {
         };
 
         let workspace_member_url = |name: &str| -> Option<Url> {
+            // An ingot initialized directly can have an explicitly resolved
+            // workspace dependency before the driver has registered the ingot
+            // itself as a member. Use that dependency's workspace identity to
+            // keep automatically supplied `core`/`std` on the same source
+            // graph. Mixing a local `core` with builtin `std` creates nominally
+            // distinct copies of foundational traits such as `Handles`.
             let workspace_root = db
                 .dependency_graph()
-                .workspace_root_for_member(db, &base_url)?;
+                .workspace_root_for_member(db, &base_url)
+                .or_else(|| {
+                    deps.iter().find_map(|(_, dependency)| {
+                        db.dependency_graph()
+                            .workspace_root_for_member(db, dependency)
+                    })
+                })?;
             let name = SmolStr::new(name);
             db.dependency_graph()
                 .workspace_members_by_name(db, &workspace_root, &name)
