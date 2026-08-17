@@ -31,12 +31,13 @@
 
 use parser::ast::{self, prelude::*};
 
-use super::FileLowerCtxt;
+use super::{FileLowerCtxt, hir_builder::HirBuilder};
 use crate::{
     hir_def::{
         AttrListId, Body, EffectParamListId, FieldDef, FieldDefListId, Func, FuncModifiers,
-        FuncParam, FuncParamListId, FuncParamMode, FuncParamName, GenericParamListId, IdentId,
-        Partial, Struct, TrackedItemVariant, TypeId, Visibility, WhereClauseId,
+        FuncParam, FuncParamListId, FuncParamMode, FuncParamName, GenericArg, GenericArgListId,
+        GenericParamListId, IdentId, Partial, PathId, Struct, TrackedItemVariant, TraitRefId,
+        TypeGenericArg, TypeId, TypeKind, Visibility, WhereClauseId,
     },
     span::{ActorDesugared, ActorDesugaredFocus, DesugaredOrigin, HirOrigin},
 };
@@ -51,8 +52,17 @@ pub(super) fn lower_actor_as_items<'db>(ctxt: &mut FileLowerCtxt<'db>, ast: ast:
     lower_actor_struct(ctxt, &ast, name, &field_specs);
 
     for behavior in ast.behaviors() {
-        lower_actor_behavior(ctxt, &ast, &field_specs, behavior);
+        let message = lower_actor_behavior(ctxt, &ast, &field_specs, &behavior);
+        if let Some(message) = message {
+            lower_actor_message_impl(ctxt, &ast, &behavior, name, message);
+        }
     }
+}
+
+#[derive(Clone, Copy)]
+struct ActorMessageSpec<'db> {
+    request: TypeId<'db>,
+    response: TypeId<'db>,
 }
 
 /// The `(name, type)` pair of each declared state field, in declaration order.
@@ -130,8 +140,8 @@ fn lower_actor_behavior<'db>(
     ctxt: &mut FileLowerCtxt<'db>,
     actor_ast: &ast::Actor,
     field_specs: &[(IdentId<'db>, Partial<TypeId<'db>>)],
-    behavior: ast::Func,
-) -> Func<'db> {
+    behavior: &ast::Func,
+) -> Option<ActorMessageSpec<'db>> {
     let sig = behavior.sig();
     let name = IdentId::lower_token_partial(ctxt, sig.name());
     let id = ctxt.joined_id(TrackedItemVariant::Func(name));
@@ -175,9 +185,12 @@ fn lower_actor_behavior<'db>(
             });
         }
     }
-    let params = Partial::Present(FuncParamListId::new(ctxt.db(), params));
-
     let ret_ty = sig.ret_ty().map(|ty| TypeId::lower_ast(ctxt, ty));
+    let message = (!has_self && params.len() == 1 && generic_params.data(ctxt.db()).is_empty())
+        .then(|| params[0].ty.to_opt().zip(ret_ty))
+        .flatten()
+        .map(|(request, response)| ActorMessageSpec { request, response });
+    let params = Partial::Present(FuncParamListId::new(ctxt.db(), params));
 
     // The role row is compiler metadata, not a callable effect requirement.
     // Preserve the same lowered paths separately so downstream consumers can
@@ -206,7 +219,7 @@ fn lower_actor_behavior<'db>(
 
     let origin = actor_origin(
         actor_ast,
-        ActorDesugaredFocus::Behavior(ast::AstPtr::new(&behavior)),
+        ActorDesugaredFocus::Behavior(ast::AstPtr::new(behavior)),
     );
     let top_mod = ctxt.top_mod();
     let fn_ = Func::new(
@@ -227,5 +240,50 @@ fn lower_actor_behavior<'db>(
         top_mod,
         origin,
     );
-    ctxt.leave_item_scope(fn_)
+    ctxt.leave_item_scope(fn_);
+    message
+}
+
+/// Materialize the request/response relation declared by one actor behavior.
+///
+/// Both request and response types are generic arguments of the goal, so two
+/// behaviors may intentionally accept the same request carrier when their
+/// response types differ. No selector, behavior name, or host-side table is
+/// introduced.
+fn lower_actor_message_impl<'db>(
+    ctxt: &mut FileLowerCtxt<'db>,
+    actor_ast: &ast::Actor,
+    behavior: &ast::Func,
+    actor_name: Partial<IdentId<'db>>,
+    message: ActorMessageSpec<'db>,
+) {
+    let Some(actor_name) = actor_name.to_opt() else {
+        return;
+    };
+    let db = ctxt.db();
+    let actor_ty = TypeId::new(
+        db,
+        TypeKind::Path(Partial::Present(PathId::from_ident(db, actor_name))),
+    );
+    let args = GenericArgListId::given(
+        db,
+        vec![
+            GenericArg::Type(TypeGenericArg {
+                ty: Partial::Present(message.request),
+            }),
+            GenericArg::Type(TypeGenericArg {
+                ty: Partial::Present(message.response),
+            }),
+        ],
+    );
+    let desugared = ActorDesugared {
+        actor: ast::AstPtr::new(actor_ast),
+        focus: ActorDesugaredFocus::Behavior(ast::AstPtr::new(behavior)),
+    };
+    let mut builder = HirBuilder::new(ctxt, desugared);
+    let trait_path = PathId::from_ident(db, builder.roots().core)
+        .push_str(db, "actor")
+        .push_str_args(db, "Handles", args);
+    let trait_ref = TraitRefId::new(db, Partial::Present(trait_path));
+    builder.impl_trait_assocs_build(trait_ref, actor_ty, |_| (vec![], vec![]));
 }

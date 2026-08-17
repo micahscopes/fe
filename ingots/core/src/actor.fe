@@ -6,6 +6,26 @@
 use super::backend::Backend
 use super::pending::Pending
 
+/// A request/response edge derived from one actor behavior.
+///
+/// Actor lowering synthesizes `Handles<M, R> for C` when actor `C`
+/// declares a self-less behavior taking exactly one `M` and returning `R`.
+/// The relation contains no numeric selector or host-authored lane name. A
+/// backend can therefore prove that a mailbox request belongs to its nominal
+/// child program before choosing a transport interpretation.
+pub trait Handles<M, R> {}
+
+/// Typed request authority for one nominal child actor program.
+///
+/// The capability is already branded by `C`, so callers pass only the request
+/// value. Actor lowering determines `C: Handles<M, R>` from authored
+/// behavior signatures, and the ordinary affine `Pending` rail carries the
+/// response, cancellation, and failure lifecycle.
+pub trait ActorMailbox<B: Backend, C> {
+    fn ask<M, R>(mut self, _ message: own M) -> Pending<B, R>
+        where C: Handles<M, R>
+}
+
 /// Typed mailbox authority for sending one value to the resident transition
 /// owned by the current actor scope. A provider chooses the realization; the
 /// event type remains ordinary Fe data and must agree with that actor's
