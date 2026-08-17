@@ -487,6 +487,10 @@ export function createMaterializedTaskMachine(definition) {
   };
 
   return Object.freeze({
+    inputWidth: definition.input.length,
+    liftInput(input) {
+      return Object.freeze(vector(input, definition.input, "task core input", decodeLane));
+    },
     start(input) {
       const lanes = vector(input, definition.input, "task input", encodeLane);
       return decodeStep(definition.start(...lanes));

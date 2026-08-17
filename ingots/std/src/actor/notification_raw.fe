@@ -1,0 +1,13 @@
+//! Private zero-payload wake edge between one resident actor transition and
+//! its compiler-materialized scoped tasks. Application values never cross this
+//! boundary; Fe retains them in actor-owned memory and observes revisions.
+
+use core::pending::Pending
+use ingot::wasm::WasmBackend
+use super::ActorNotification
+
+#[host_import(module = "fe:actor-notification")]
+extern {
+    pub unsafe fn notify()
+    pub unsafe fn wait_begin() -> Pending<WasmBackend, ActorNotification>
+}

@@ -1,0 +1,43 @@
+//! Safe, standards-derived fetch facade for Fe browser tasks.
+//!
+//! `raw` is byte-for-byte generated from the checked-in WebIDL profile. This
+//! facade adds only Fe ownership ergonomics: the browser global is not forged,
+//! `Response` authority comes only from `fetch_begin`, and callers explicitly
+//! release it after all borrowed operations have completed. HTTP policy,
+//! request correlation, cancellation, body limits, and presentation belong to
+//! the consuming Fe program.
+
+use core::{BrowserBytes, BrowserString}
+use core::pending::Pending
+use std::wasm::WasmBackend
+use raw::{
+    response_array_buffer as raw_array_buffer,
+    response_get_ok as raw_ok,
+    response_get_status as raw_status,
+    response_get_url as raw_url,
+    response_resource_drop as raw_drop,
+    response_text as raw_text,
+    window_fetch as raw_fetch,
+}
+
+pub use raw::Response
+
+pub fn fetch_begin(_ input: own BrowserString) -> Pending<WasmBackend, Response> {
+    raw_fetch(input)
+}
+
+impl Response {
+    pub fn status(self) -> u32 { raw_status(self_: self) as u32 }
+    pub fn ok(self) -> bool { raw_ok(self_: self) }
+    pub fn url(self) -> BrowserString { raw_url(self_: self) }
+
+    pub fn text_begin(self) -> Pending<WasmBackend, BrowserString> {
+        raw_text(self_: self)
+    }
+
+    pub fn bytes_begin(self) -> Pending<WasmBackend, BrowserBytes> {
+        raw_array_buffer(self_: self)
+    }
+
+    pub fn release(own self) { raw_drop(self_: self) }
+}

@@ -1367,6 +1367,9 @@ fn from_fe(world: &World, type_: &TypeRef, expression: &str) -> Result<String, B
             "Array.from({expression}, value => {})",
             from_fe(world, inner, "value")?
         ),
+        TypeRef::Buffer(crate::BufferKind::ArrayBuffer) => format!(
+            "{expression}.buffer.slice({expression}.byteOffset, {expression}.byteOffset + {expression}.byteLength)"
+        ),
         TypeRef::Union(_) => format!("fromFeUnion_{}({expression})", union_suffix(type_)),
         TypeRef::Promise(_) => {
             return Err(BindgenError::new(
@@ -1397,6 +1400,9 @@ fn from_fe_owned(world: &World, type_: &TypeRef, expression: &str) -> Result<Str
         TypeRef::Sequence(inner) => format!(
             "Array.from({expression}, value => {})",
             from_fe_owned(world, inner, "value")?
+        ),
+        TypeRef::Buffer(crate::BufferKind::ArrayBuffer) => format!(
+            "{expression}.buffer.slice({expression}.byteOffset, {expression}.byteOffset + {expression}.byteLength)"
         ),
         TypeRef::Union(_) => {
             format!("takeFeUnion_{}({expression})", union_suffix(type_))
@@ -1431,6 +1437,9 @@ fn to_fe(world: &World, type_: &TypeRef, expression: &str) -> Result<String, Bin
             "Array.from({expression}, value => {})",
             to_fe(world, inner, "value")?
         ),
+        TypeRef::Buffer(crate::BufferKind::ArrayBuffer) => {
+            format!("new Uint8Array({expression})")
+        }
         TypeRef::Union(_) => format!("toFeUnion_{}({expression})", union_suffix(type_)),
         TypeRef::Promise(_) => {
             return Err(BindgenError::new(
@@ -1841,6 +1850,21 @@ mod tests {
         assert!(js.contains("fromFeUnion_"));
         assert!(js.contains("\"fe:web\": imports"));
         assert!(!js.contains("core::browser"));
+    }
+
+    #[test]
+    fn array_buffer_values_cross_as_typed_fe_bytes() {
+        let world = parse(
+            "interface BufferPort { ArrayBuffer echo(ArrayBuffer value); Promise<ArrayBuffer> receive(); };",
+        )
+        .unwrap();
+        let plan = build_adapter_plan(&world, "buffer-port", "fe:buffer").unwrap();
+        let js = emit_js_canonical_adapter(&world, &plan).unwrap();
+        assert!(
+            js.contains(".buffer.slice(value.byteOffset, value.byteOffset + value.byteLength)"),
+            "{js}"
+        );
+        assert!(js.contains("new Uint8Array(value)"), "{js}");
     }
 
     #[test]

@@ -19,11 +19,17 @@ export function createFeCoreWasmTransport(codec, semanticAdapter) {
   const attach = instance => {
     const exports = instance.exports;
     const memory = exports["memory"];
-    const realloc = exports["cabi_realloc"];
+    const canonicalRealloc = exports["cabi_realloc"];
+    const arenaAlloc = exports["fe_cabi_alloc"];
+    const realloc = typeof canonicalRealloc === "function"
+      ? canonicalRealloc
+      : typeof arenaAlloc === "function"
+        ? (_oldPtr, _oldSize, align, size) => arenaAlloc(size, align)
+        : undefined;
     if (!(memory instanceof WebAssembly.Memory)) throw new TypeError("missing canonical memory export");
     if (typeof realloc !== "function") throw new TypeError("missing canonical realloc export");
     const postReturns = Object.fromEntries(Object.entries(postReturnNames).map(([identity, name]) => {
-      const cleanup = exports[name];
+      const cleanup = exports[name] ?? exports["fe_cabi_post_return"];
       if (typeof cleanup !== "function") throw new TypeError(`missing post-return export ${name} for ${identity}`);
       return [identity, cleanup];
     }));

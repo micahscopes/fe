@@ -27,11 +27,9 @@ pub enum ComponentEventKind {
     Change,
     Submit,
     KeyDown,
-    /// Completion of a Fe-requested browser resource effect. `request` is the
-    /// opaque correlation identity chosen by Fe, `key` is the HTTP status (zero
-    /// for a transport failure), `detail` is the byte length, and `text`
-    /// carries a UTF-8 body or failure description.
-    ResourceLoaded,
+    /// Reserved tag from the retired component-command resource transport.
+    /// Generated Web IDL bindings and scoped Fe tasks own resource work now.
+    LegacyResourceLoaded,
     /// A compiler-correlated cold render surface became available beneath
     /// this component. Its opaque one-based sequence token is in `request`.
     SurfaceDiscovered,
@@ -524,26 +522,6 @@ impl ComponentWriter {
     pub fn set_href<N: ComponentTarget<Link>>(self, target: N, value: own BrowserString) -> Self {
         let writer = self.byte(value: 11)
         let writer = writer.word(value: <N as ComponentTarget<Link>>::component_target_id(target))
-        let writer = writer.word(value: value.len)
-        writer.bytes(value: value)
-    }
-
-    /// Ask the fixed browser adapter to fetch one same-origin UTF-8 resource.
-    /// Completion returns as `ComponentEventKind::ResourceLoaded`; request
-    /// identity and stale-response policy remain Fe-owned.
-    pub fn load_text(self, request: u32, value: own BrowserString) -> Self {
-        let writer = self.byte(value: 12)
-        let writer = writer.word(value: request)
-        let writer = writer.word(value: value.len)
-        writer.bytes(value: value)
-    }
-
-    /// Fetch a same-origin binary resource and report only its byte length.
-    /// This keeps binary interpretation out of JavaScript while letting Fe
-    /// decide how to present or otherwise act on the result.
-    pub fn load_bytes(self, request: u32, value: own BrowserString) -> Self {
-        let writer = self.byte(value: 13)
-        let writer = writer.word(value: request)
         let writer = writer.word(value: value.len)
         writer.bytes(value: value)
     }

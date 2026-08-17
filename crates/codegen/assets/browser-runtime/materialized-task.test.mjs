@@ -9,6 +9,7 @@ import {
 } from "./materialized-task.js";
 
 const u32 = Object.freeze({ kind: "unsigned", bits: 32 });
+const bool = Object.freeze({ kind: "bool", bits: 1 });
 const u64 = Object.freeze({ kind: "unsigned", bits: 64 });
 const state = Object.freeze({ kind: "enum_tag", bits: 8, variants: 3 });
 const outcome = Object.freeze({ kind: "enum_tag", bits: 8, variants: 3 });
@@ -62,6 +63,20 @@ function definition(overrides = {}) {
 }
 
 describe("compiler-materialized browser task machine", () => {
+  test("lifts raw actor-state lanes through the compiler layout", () => {
+    const machine = createMaterializedTaskMachine(definition({
+      input: [bool, u32, u32],
+      start(flag, secondPending, seed) {
+        return [0, flag + secondPending + seed, 0, 0, 0, 0, 0];
+      },
+    }));
+    const lifted = machine.liftInput([1, 7, 8]);
+    expect(lifted).toEqual([true, 7, 8]);
+    expect(Object.isFrozen(lifted)).toBe(true);
+    expect(machine.start(lifted)).toEqual({ kind: "complete", output: [16] });
+    expect(() => machine.liftInput([2, 7, 8])).toThrow(/not a Fe bool/);
+  });
+
   test("chains exact frames through success", () => {
     const machine = createMaterializedTaskMachine(definition());
     const first = machine.start([41, 42, 5]);

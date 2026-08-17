@@ -109,15 +109,22 @@ done; do not derive a second master checklist from its historical ledger.
   focused input.
 - The removed handwritten JavaScript code viewer is restored as a real
   resident Fe `SourceInspector`, both standalone and around the canonical
-  gallery. Fe owns artifact-kind selection, open/loading/error state, opaque
-  request identities, stale-completion rejection, text-vs-binary presentation,
-  focus, Escape, and navigation cancellation. The fixed component host adds
-  only same-origin URL/fetch realization plus `href`, text, and byte-count
-  effects. Accepted response bodies are copied into Fe-owned resident memory;
-  an independent Wasmtime tape caught and now guards against accidentally
-  retaining the host's reusable scratch pointer. A Chromium gate opens actual
-  authored Fe and compiler-generated WGSL/Wasm/manifest artifacts through
-  composed shadow-DOM clicks and verifies Fe-owned lifecycle/presentation.
+  gallery. Fe owns artifact-kind selection, open/loading/error state, request
+  revision, switch-latest cancellation, HTTP classification, size limits,
+  stale-completion rejection, text-vs-binary presentation, focus, Escape, and
+  navigation cancellation. Fetch, `Response.text`, and
+  `Response.arrayBuffer` are generated from checked-in Web IDL and use the
+  ordinary scoped-task continuation rail. The fixed completion broker holds
+  only opaque Promise/resource custody and one zero-payload notification edge;
+  it has no URL, request, action, or presentation schema. Accepted response
+  bodies are copied into Fe-owned resident memory and Response handles are
+  explicitly released. The legacy component resource opcodes, `_loadResource`,
+  and `_deliverResource` are deleted. Independent Wasmtime and generated
+  adapter/Bun tapes cover text, bytes, HTTP failure, fetch failure, stale
+  suppression, cancellation, and handle cleanup. A real remote-Chrome gate
+  opens actual authored Fe and compiler-generated WGSL/Wasm/manifest artifacts
+  through composed shadow-DOM clicks and verifies Fe-owned
+  lifecycle/presentation against the immutable publication.
 - Inspectable authored `.fe` files are now ordinary content-addressed
   publication assets. HTML `href` is rewritten in place and the deployment
   verifier checks the direct source digest; there is no asset JSON or new
@@ -1569,13 +1576,14 @@ sources, deterministic time, switch/latest, and bounded sharing described
 above are substantially landed. GPU completion, typed MessagePort observation,
 and Fe-owned shared-device recovery are now landed. The generated fetch WebIDL,
 canonical transport, ownership receipts, content-addressed adapter publication,
-and two-phase bootstrap attachment are landed. The current vertical slice is
-Fe-authored SourceInspector consumption followed by deletion of legacy resource
-opcodes and `_loadResource`. Standards-faithful underlying request abort still
-requires general borrowed-resource support for `RequestInit.signal`, not a
-handwritten fetch exception. Worker/spawn placement and rich compiler-derived
-port payloads remain their own structured-scope work. Completing fetch closes
-this multiplying control axis before returning to shared interaction and
+two-phase bootstrap attachment, Fe-authored SourceInspector consumption, and
+deletion of the legacy resource-loading opcodes are landed. Native HTML tooling
+now compiles dependency-bearing resident components through their initialized
+ingots, while dependency-free virtual components retain the portable facade.
+Standards-faithful underlying request abort still requires general
+borrowed-resource support for `RequestInit.signal`, not a handwritten fetch
+exception. Worker/spawn placement and rich compiler-derived port payloads are
+the next structured-scope work before returning to shared interaction and
 GPU/GA generalization.
 
 ## Ingot utility maturity map (2026-08-14 audit)
@@ -2444,11 +2452,13 @@ order:
 6. **Landed for resident components:** Fe-selected primary-pointer capture,
    unexpected-loss reporting, and affine cancellation release; render surfaces
    remain a shared-interaction consumer.
-7. **Device recovery landed:** shared lifecycle facts and retry/fail/degrade
-   selection are Fe-owned with native/Wasm/runtime/browser evidence. Add
-   MessagePort, fetch, and GPU-completion sources on the same rail.
-8. Use that completed control/reactive spine for shared interaction, Worker/GPU
-   messages, device recovery, and the future proof queue.
+7. **Device recovery, MessagePort observation, GPU completion, and fetch
+   landed:** shared lifecycle facts, generated standards operations, and
+   retry/fail/degrade selection use the same Fe-owned
+   native/Wasm/runtime/browser rail.
+8. Add Worker/spawn placement, rich compiler-derived port payloads, structured
+   supervision, and then use the completed control/reactive spine for shared
+   interaction, GPU messages, and the future proof queue.
 
 Only then resume broad package cosmetics. Promote and split libraries when a
 shared abstraction has at least two real consumers and independent evidence;

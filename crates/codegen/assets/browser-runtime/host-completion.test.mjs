@@ -266,6 +266,34 @@ function visibilityMachine(start, onCancel = () => {}) {
   });
 }
 
+function actorNotificationMachine(start, onCancel = () => {}) {
+  return createMaterializedTaskMachine({
+    input: [],
+    step: [state, u32, u32],
+    complete: { start: 1, count: 1 },
+    start,
+    continuations: [{
+      state: 1,
+      range: { start: 2, count: 1 },
+      pending: { start: 2, count: 1 },
+      frame: { start: 3, count: 0 },
+      delivery: {
+        lanes: [outcome, u32],
+        failure: { start: 1, count: 1 },
+        success: { start: 2, count: 0 },
+      },
+      invoke(tag, error) {
+        if (tag === 0) return [0, 100 + error, 0];
+        if (tag === 2) {
+          onCancel();
+          return [0, 200, 0];
+        }
+        return [0, 41, 0];
+      },
+    }],
+  });
+}
+
 function animationFrameMachine(start, onCancel = () => {}) {
   return createMaterializedTaskMachine({
     input: [],
@@ -380,6 +408,52 @@ function actorSendMachine(start, onCancel = () => {}) {
 }
 
 describe("browser HostTimer/Recv completion broker", () => {
+  test("actor notifications wake one scoped Fe observer and coalesce without payload policy", async () => {
+    const broker = createHostCompletionBroker();
+    const notifications = broker.imports["fe:actor-notification"];
+    notifications.notify();
+    notifications.notify();
+
+    const first = actorNotificationMachine(() => [
+      1, 0, notifications.wait_begin() >>> 0,
+    ]);
+    expect(await broker.run(first, [])).toEqual([41]);
+    expect(broker.activeCount()).toBe(0);
+
+    const second = actorNotificationMachine(() => [
+      1, 0, notifications.wait_begin() >>> 0,
+    ]);
+    const waiting = broker.run(second, []);
+    await Promise.resolve();
+    expect(broker.activeCount()).toBe(1);
+    notifications.notify();
+    expect(await waiting).toEqual([41]);
+    expect(broker.activeCount()).toBe(0);
+  });
+
+  test("actor notification observation is affine and actor-scope cancellable", async () => {
+    const broker = createHostCompletionBroker();
+    const notifications = broker.imports["fe:actor-notification"];
+    let cancelled = 0;
+    const waiting = actorNotificationMachine(
+      () => [1, 0, notifications.wait_begin() >>> 0],
+      () => { cancelled += 1; },
+    );
+    const controller = new AbortController();
+    const result = broker.run(waiting, [], { signal: controller.signal });
+    await Promise.resolve();
+    controller.abort();
+    await expect(result).rejects.toBeInstanceOf(Error);
+    expect(cancelled).toBe(1);
+    expect(broker.activeCount()).toBe(0);
+
+    notifications.notify();
+    const restarted = actorNotificationMachine(() => [
+      1, 0, notifications.wait_begin() >>> 0,
+    ]);
+    expect(await broker.run(restarted, [])).toEqual([41]);
+  });
+
   test("MessagePort adapter preserves order and reports bounded replay loss", async () => {
     const channel = new MessageChannel();
     const source = createMessagePortEventSource(channel.port1);

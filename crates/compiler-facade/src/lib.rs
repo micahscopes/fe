@@ -154,6 +154,52 @@ pub fn compile_resident_component(
     compile_wasm_with_component_view(request, true)
 }
 
+/// Compile a resident component from an already initialized compiler database.
+///
+/// Native HTML tooling uses this path for component sources that belong to a
+/// real ingot, so ordinary Fe dependencies keep their semantic identities.
+/// The protocol-only [`compile_resident_component`] path remains filesystem
+/// independent for supplied virtual source graphs.
+pub fn compile_resident_component_in_db(
+    db: &DriverDataBase,
+    root_file: common::file::File,
+) -> Result<ResidentComponentCompileResult, CompileFacadeError> {
+    let top_mod = db.top_mod(root_file);
+    let complete = db.run_on_top_mod(top_mod).complete(db);
+    let diagnostics = complete
+        .iter()
+        .map(|diagnostic| protocol_diagnostic(db, diagnostic))
+        .collect::<Vec<_>>();
+    let has_error = complete
+        .iter()
+        .any(|diagnostic| diagnostic.severity == Severity::Error);
+    let source_dependencies = source_dependencies_from_db(db, root_file)?;
+    let source_set_sha256 = source_set_sha256_from_db(db, &source_dependencies)?;
+    if has_error {
+        return Ok(ResidentComponentCompileResult {
+            compilation: result_from_parts(
+                CompileTarget::Wasm,
+                source_set_sha256,
+                diagnostics,
+                Vec::new(),
+                InterfaceManifest::default(),
+                source_dependencies,
+            ),
+            view: None,
+            scoped_tasks: Vec::new(),
+        });
+    }
+    compile_wasm_from_db(
+        db,
+        root_file,
+        true,
+        false,
+        source_set_sha256,
+        diagnostics,
+        source_dependencies,
+    )
+}
+
 /// Shared prologue: build the in-memory db from the request's virtual
 /// sources, run diagnostics on the root module once, and hand back the
 /// pieces both target backends need. `root_file` (not `top_mod`) is returned
@@ -218,9 +264,31 @@ fn compile_wasm_with_component_view(
             scoped_tasks: Vec::new(),
         });
     }
+    let optimize = request.options.optimization != fe_compiler_protocol::OptimizationLevel::None;
+    compile_wasm_from_db(
+        &db,
+        root_file,
+        project_view,
+        optimize,
+        source_set_sha256(&request.sources),
+        diagnostics,
+        source_dependencies,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_wasm_from_db(
+    db: &DriverDataBase,
+    root_file: common::file::File,
+    project_view: bool,
+    optimize: bool,
+    source_set_sha256: String,
+    diagnostics: Vec<Diagnostic>,
+    source_dependencies: SourceDependencyInventory,
+) -> Result<ResidentComponentCompileResult, CompileFacadeError> {
     let top_mod = db.top_mod(root_file);
     let view = if project_view {
-        codegen::project_component(&db, top_mod)
+        codegen::project_component(db, top_mod)
             .map_err(|error| CompileFacadeError::Backend(error.to_string()))?
     } else {
         None
@@ -230,8 +298,7 @@ fn compile_wasm_with_component_view(
     // through the same ordinary Wasm target. This is semantic auto-discovery,
     // not a new JSON request mode, entry-name convention, or web/component
     // compiler special case.
-    let optimize = request.options.optimization != fe_compiler_protocol::OptimizationLevel::None;
-    let resident = codegen::compile_resident_actor_with_optimization(&db, top_mod, optimize)
+    let resident = codegen::compile_resident_actor_with_optimization(db, top_mod, optimize)
         .map_err(|error| CompileFacadeError::Backend(error.to_string()))?;
     let (bytes, scoped_tasks) = if let Some(actor) = resident {
         if let Some(view) = &view
@@ -253,14 +320,10 @@ fn compile_wasm_with_component_view(
         let output = BackendKind::Wasm
             .create()
             .compile(
-                &db,
+                db,
                 top_mod,
                 layout_for(BackendKind::Wasm),
-                match request.options.optimization {
-                    fe_compiler_protocol::OptimizationLevel::None => OptLevel::O0,
-                    fe_compiler_protocol::OptimizationLevel::Size
-                    | fe_compiler_protocol::OptimizationLevel::Speed => OptLevel::O1,
-                },
+                if optimize { OptLevel::O1 } else { OptLevel::O0 },
             )
             .map_err(|error| CompileFacadeError::Backend(error.to_string()))?;
         (
@@ -280,8 +343,9 @@ fn compile_wasm_with_component_view(
         bytes,
     )];
     Ok(ResidentComponentCompileResult {
-        compilation: result(
-            request,
+        compilation: result_from_parts(
+            CompileTarget::Wasm,
+            source_set_sha256,
             diagnostics,
             artifacts,
             interface,
@@ -348,6 +412,24 @@ fn result(
     interface: InterfaceManifest,
     source_dependencies: SourceDependencyInventory,
 ) -> CompileResult {
+    result_from_parts(
+        request.target,
+        source_set_sha256(&request.sources),
+        diagnostics,
+        artifacts,
+        interface,
+        source_dependencies,
+    )
+}
+
+fn result_from_parts(
+    target: CompileTarget,
+    source_set_sha256: String,
+    diagnostics: Vec<Diagnostic>,
+    artifacts: Vec<Artifact>,
+    interface: InterfaceManifest,
+    source_dependencies: SourceDependencyInventory,
+) -> CompileResult {
     CompileResult {
         protocol: ProtocolVersion::CURRENT,
         compiler: CompilerIdentity {
@@ -355,8 +437,8 @@ fn result(
             version: env!("CARGO_PKG_VERSION").to_owned(),
             build: "workspace".to_owned(),
         },
-        target: request.target,
-        source_set_sha256: source_set_sha256(&request.sources),
+        target,
+        source_set_sha256,
         source_dependencies: Some(source_dependencies),
         diagnostics,
         artifacts,
@@ -406,6 +488,11 @@ fn source_dependencies_from_db(
     let sources = db
         .source_dependency_urls(root_file)
         .into_iter()
+        // Compiler-owned builtin identities use schemes such as
+        // `builtin-core:/` and cannot be loaded, watched, or published by a
+        // protocol consumer. Real file and virtual sources have hierarchical
+        // URLs and remain in the inventory.
+        .filter(|source_url| source_url.contains("://"))
         .filter_map(|source_url| {
             let url = Url::parse(&source_url).ok()?;
             let file = db.workspace().get(db, &url)?;
@@ -420,6 +507,31 @@ fn source_dependencies_from_db(
         root,
         sources,
     })
+}
+
+fn source_set_sha256_from_db(
+    db: &DriverDataBase,
+    dependencies: &SourceDependencyInventory,
+) -> Result<String, CompileFacadeError> {
+    let mut sources = Vec::with_capacity(dependencies.sources.len());
+    for dependency in &dependencies.sources {
+        let url =
+            Url::parse(&dependency.url).map_err(|error| CompileFacadeError::InvalidSourceUrl {
+                url: dependency.url.clone(),
+                detail: error.to_string(),
+            })?;
+        let file = db.workspace().get(db, &url).ok_or_else(|| {
+            CompileFacadeError::RootUnavailable(format!(
+                "dependency source is not loaded: {}",
+                dependency.url
+            ))
+        })?;
+        sources.push(fe_compiler_protocol::VirtualSource::new(
+            dependency.url.clone(),
+            file.text(db),
+        ));
+    }
+    Ok(source_set_sha256(&sources))
 }
 
 fn protocol_diagnostic(db: &DriverDataBase, diagnostic: &CompleteDiagnostic) -> Diagnostic {

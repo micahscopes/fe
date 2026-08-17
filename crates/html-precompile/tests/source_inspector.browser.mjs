@@ -7,6 +7,9 @@ import { pathToFileURL } from "node:url";
 
 const siteRoot = resolve(process.argv[2] ?? "");
 const tolerateUnavailableWebGpu = process.argv.includes("--allow-unavailable-webgpu");
+const remoteBrowserUrl = process.env.FE_BROWSER_URL ?? null;
+const browserSiteHost = process.env.FE_BROWSER_HOST ?? "127.0.0.1";
+const interceptedOrigin = process.env.FE_BROWSER_ORIGIN ?? null;
 async function exists(path) {
   try {
     await access(path, fsConstants.R_OK);
@@ -62,44 +65,71 @@ const contentTypes = new Map([
   [".wgsl", "text/plain; charset=utf-8"],
   [".fe", "text/plain; charset=utf-8"],
 ]);
+async function siteAsset(value) {
+  const url = new URL(value, "http://fe-gallery.test");
+  const pathname = decodeURIComponent(url.pathname === "/" ? "/index.html" : url.pathname);
+  const candidate = resolve(siteRoot, `.${pathname}`);
+  if (candidate !== siteRoot && !candidate.startsWith(`${siteRoot}${sep}`)) {
+    return { status: 403, body: Buffer.from("outside site root") };
+  }
+  if (!(await exists(candidate))) {
+    return { status: 404, body: Buffer.from("not found") };
+  }
+  const extension = candidate.slice(candidate.lastIndexOf("."));
+  return {
+    status: 200,
+    contentType: contentTypes.get(extension) ?? "application/octet-stream",
+    body: await readFile(candidate),
+  };
+}
 const server = createServer(async (request, response) => {
   try {
-    const url = new URL(request.url, "http://127.0.0.1");
-    const pathname = decodeURIComponent(url.pathname === "/" ? "/index.html" : url.pathname);
-    const candidate = resolve(siteRoot, `.${pathname}`);
-    if (candidate !== siteRoot && !candidate.startsWith(`${siteRoot}${sep}`)) {
-      response.writeHead(403).end("outside site root");
-      return;
-    }
-    if (!(await exists(candidate))) {
-      response.writeHead(404).end("not found");
-      return;
-    }
-    const extension = candidate.slice(candidate.lastIndexOf("."));
-    response.writeHead(200, { "content-type": contentTypes.get(extension) ?? "application/octet-stream" });
-    response.end(await readFile(candidate));
+    const asset = await siteAsset(request.url);
+    response.writeHead(asset.status, asset.contentType
+      ? { "content-type": asset.contentType }
+      : undefined);
+    response.end(asset.body);
   } catch (error) {
     response.writeHead(500).end(String(error));
   }
 });
 await new Promise((resolvePromise, reject) => {
   server.once("error", reject);
-  server.listen(0, "127.0.0.1", resolvePromise);
+  server.listen(0, remoteBrowserUrl ? "0.0.0.0" : "127.0.0.1", resolvePromise);
 });
 const address = server.address();
 if (!address || typeof address === "string") throw new Error("test server has no port");
 
 const imported = await loadPuppeteer();
 const puppeteer = imported.puppeteer ?? imported.default ?? imported;
-const browser = await puppeteer.launch({
-  executablePath: await chromiumPath(),
-  headless: true,
-  args: ["--no-sandbox", "--disable-dev-shm-usage"],
-});
+const browser = remoteBrowserUrl
+  ? await puppeteer.connect({ browserURL: remoteBrowserUrl })
+  : await puppeteer.launch({
+    executablePath: await chromiumPath(),
+    headless: true,
+    args: ["--no-sandbox", "--disable-dev-shm-usage"],
+  });
 
 const browserErrors = [];
+let page;
 try {
-  const page = await browser.newPage();
+  page = await browser.newPage();
+  if (interceptedOrigin) {
+    const origin = new URL(interceptedOrigin).origin;
+    await page.setRequestInterception(true);
+    page.on("request", request => {
+      const url = new URL(request.url());
+      if (url.origin !== origin) {
+        void request.continue();
+        return;
+      }
+      void siteAsset(url).then(asset => request.respond({
+        status: asset.status,
+        contentType: asset.contentType,
+        body: asset.body,
+      })).catch(() => request.abort("failed"));
+    });
+  }
   page.setDefaultTimeout(20_000);
   page.on("console", message => {
     if (message.type() === "error") browserErrors.push(`console: ${message.text()}`);
@@ -110,6 +140,11 @@ try {
       errors: [], states: [], prevented: [], surfaceReady: [], surfaceSettled: [],
       surfaceTerminal: [],
     };
+    const recordError = error => globalThis.__feInspectorE2E.errors.push(
+      String(error?.stack ?? error),
+    );
+    globalThis.addEventListener("fe:bootstrap-error", event => recordError(event.detail));
+    document.addEventListener("fe:error", event => recordError(event.detail), true);
     const recordSurface = (field, event) => {
       if (event.target?.tagName !== "FE-SURFACE") return;
       const sequence = Number(event.target.getAttribute("data-fe-sequence"));
@@ -126,7 +161,7 @@ try {
       recordSurface("surfaceTerminal", event);
       recordSurface("surfaceSettled", event);
       if (event.target?.id === "source-inspector" || event.target?.id === "gallery-shell") {
-        globalThis.__feInspectorE2E.errors.push(String(event.detail?.stack ?? event.detail));
+        recordError(event.detail);
       }
     }, true);
     document.addEventListener("fe-state", event => {
@@ -140,7 +175,8 @@ try {
       if (action) globalThis.__feInspectorE2E.prevented.push([action, event.defaultPrevented]);
     });
   });
-  await page.goto(`http://127.0.0.1:${address.port}/`, {
+  const pageUrl = interceptedOrigin ?? `http://${browserSiteHost}:${address.port}/`;
+  await page.goto(pageUrl, {
     waitUntil: "domcontentloaded",
     timeout: 120_000,
   });
@@ -150,6 +186,7 @@ try {
       const component = document.querySelector("#source-inspector, #gallery-shell");
       const surfaces = Array.from(document.querySelectorAll("fe-surface"));
       const expectedSurfaces = document.querySelector(".gallery-head") ? 12 : 1;
+      if (script?.dataset.feState === "error") return true;
       return script?.dataset.feState === "complete" && component?._active === true &&
         surfaces.length === expectedSurfaces &&
         (tolerateUnavailable
@@ -157,6 +194,11 @@ try {
           : globalThis.__feInspectorE2E.surfaceReady.length === expectedSurfaces) &&
         surfaces.every(surface => surface.shadowRoot?.querySelector('a[href$=".wgsl"]'));
     }, { timeout: 120_000 }, tolerateUnavailableWebGpu);
+    const scriptState = await page.$eval(
+      'script[data-fe-mount="#source-inspector"], script[data-fe-mount="#gallery-shell"]',
+      script => script.dataset.feState,
+    );
+    if (scriptState === "error") throw new Error("resident component bootstrap failed");
   } catch (error) {
     const diagnosis = await page.evaluate(() => ({
       scriptState: document.querySelector('script[data-fe-mount="#source-inspector"], script[data-fe-mount="#gallery-shell"]')?.dataset.feState,
@@ -356,13 +398,29 @@ try {
         && Number(values[12]?.textContent) === 3;
     });
     await page.setViewport({ width: 777, height: 555, deviceScaleFactor: 2 });
-    await page.waitForFunction(previousObservations => {
-      const values = document.querySelectorAll("#gallery-event-studio .event-studio-grid strong");
-      return Number(values[0]?.textContent) === 777
-        && Number(values[1]?.textContent) === 555
-        && Number(values[2]?.textContent) === 200
-        && Number(values[14]?.textContent) > previousObservations;
-    }, {}, eventStudioBefore.observations);
+    if (remoteBrowserUrl) {
+      await page.evaluate(() => globalThis.dispatchEvent(new Event("resize")));
+      const viewport = await page.evaluate(() => ({
+        width: innerWidth,
+        height: innerHeight,
+        deviceScaleFactor: devicePixelRatio,
+      }));
+      await page.waitForFunction(({ previousObservations, viewport }) => {
+        const values = document.querySelectorAll("#gallery-event-studio .event-studio-grid strong");
+        return Number(values[0]?.textContent) === viewport.width
+          && Number(values[1]?.textContent) === viewport.height
+          && Number(values[2]?.textContent) === Math.trunc(viewport.deviceScaleFactor * 100)
+          && Number(values[14]?.textContent) > previousObservations;
+      }, {}, { previousObservations: eventStudioBefore.observations, viewport });
+    } else {
+      await page.waitForFunction(previousObservations => {
+        const values = document.querySelectorAll("#gallery-event-studio .event-studio-grid strong");
+        return Number(values[0]?.textContent) === 777
+          && Number(values[1]?.textContent) === 555
+          && Number(values[2]?.textContent) === 200
+          && Number(values[14]?.textContent) > previousObservations;
+      }, {}, eventStudioBefore.observations);
+    }
     assert.equal(await page.$eval(
       "#gallery-event-studio .event-studio-grid p:last-child strong",
       node => Number(node.textContent),
@@ -643,6 +701,8 @@ try {
   assert.deepEqual(unexpectedBrowserErrors, []);
   console.log(`ok: ${isGallery ? "Fe-composed gallery and " : ""}resident SourceInspector behavior`);
 } finally {
-  await browser.close();
+  if (page) await page.close();
+  if (remoteBrowserUrl) browser.disconnect();
+  else await browser.close();
   await new Promise(resolvePromise => server.close(resolvePromise));
 }

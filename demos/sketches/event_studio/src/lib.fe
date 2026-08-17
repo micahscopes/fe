@@ -304,6 +304,32 @@ fn task_message(target: StudioAction, payload: own StudioTask) -> ComponentEvent
     }
 }
 
+/// A queue-safe application message. The browser-facing `ComponentEvent`
+/// contains a borrowed string lane for ordinary DOM events, so retaining that
+/// envelope across another suspension would be unsound even when the task
+/// message leaves the lane empty. The merged stream buffers only this pure Fe
+/// value and constructs the component envelope at the actor-send boundary.
+struct StudioMessage {
+    target: StudioAction,
+    task: StudioTask,
+}
+
+impl Copy for StudioMessage {}
+
+fn studio_message(target: StudioAction, payload: own StudioTask) -> StudioMessage {
+    StudioMessage { target: target, task: payload }
+}
+
+struct ComponentEnvelope {}
+
+impl Copy for ComponentEnvelope {}
+
+impl Fn<StudioMessage, ComponentEvent<StudioAction, StudioTask>> for ComponentEnvelope {
+    fn call(self, _ message: own StudioMessage) -> ComponentEvent<StudioAction, StudioTask> {
+        task_message(target: message.target, payload: message.task)
+    }
+}
+
 struct ViewportMessage {}
 struct GestureMerge {}
 struct VisibilityMessage {}
@@ -330,14 +356,14 @@ impl Fn<Viewport, ComponentEvent<StudioAction, StudioTask>> for ViewportMessage 
 impl MergePolicy<
     PointerSample,
     WheelSample,
-    ComponentEvent<StudioAction, StudioTask>,
+    StudioMessage,
 > for GestureMerge {
     fn map_left(
         self,
         _ sample: own PointerSample,
         _ dropped: u32,
-    ) -> ComponentEvent<StudioAction, StudioTask> {
-        task_message(
+    ) -> StudioMessage {
+        studio_message(
             target: StudioAction::PointerObserved,
             payload: StudioTask::default().with_pointer(sample: sample, dropped: dropped),
         )
@@ -346,8 +372,8 @@ impl MergePolicy<
         self,
         _ sample: own WheelSample,
         _ dropped: u32,
-    ) -> ComponentEvent<StudioAction, StudioTask> {
-        task_message(
+    ) -> StudioMessage {
+        studio_message(
             target: StudioAction::WheelObserved,
             payload: StudioTask::default().with_wheel(value: sample, dropped: dropped),
         )
@@ -357,13 +383,13 @@ impl MergePolicy<
         self,
         _ side: MergeSide,
         _ error: u32,
-    ) -> ComponentEvent<StudioAction, StudioTask> {
+    ) -> StudioMessage {
         match side {
-            MergeSide::Left => task_message(
+            MergeSide::Left => studio_message(
                 target: StudioAction::StreamFailed,
                 payload: StudioTask::default().with_error(value: error),
             ),
-            MergeSide::Right => task_message(
+            MergeSide::Right => studio_message(
                 target: StudioAction::StreamFailed,
                 payload: StudioTask::default().with_error(value: error),
             ),
@@ -447,10 +473,12 @@ uses (
     merge_buffer_to_actor<
         PointerSample,
         WheelSample,
+        StudioMessage,
         ComponentEvent<StudioAction, StudioTask>,
         GestureMerge,
+        ComponentEnvelope,
     >(
-        initial: task_message(
+        initial: studio_message(
             target: StudioAction::StreamFailed,
             payload: StudioTask::default(),
         ),
@@ -460,6 +488,7 @@ uses (
         // in-flight value and keeps the newest bounded shared backlog.
         overflow: OverflowPolicy::KeepLatest,
         policy: GestureMerge {},
+        envelope: ComponentEnvelope {},
     ).delivered
 }
 

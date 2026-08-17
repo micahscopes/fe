@@ -112,8 +112,8 @@ Legend:
   `EventSource` and completion broker. The focused broker suite and
   `fe_message_port_event_source_resumes_from_a_real_port` pass, and the slice is
   landed at `c1817e477`. This item closes when the final G5 run passes.
-- [~] Add fetch as a generated typed Fe source and consume it from
-  SourceInspector without application-specific host policy. The generated
+- [x] Fetch is a generated typed Fe source consumed by SourceInspector without
+  application-specific host policy. The generated
   boundary now models `[Global=Window]` without minting a fake Window handle,
   lowers URL-only `fetch`, `Response.text`, and `Response.arrayBuffer` through
   the existing `Pending<WasmBackend, T>` continuation rail, maps byte results
@@ -127,23 +127,33 @@ Legend:
   allocate codec scratch memory. Generated completion conversion now returns
   an ownership receipt: Response handles become Fe-owned only after the exact
   continuation returns successfully, while losing races, lowering failures,
-  cancellation, and continuation traps roll them back. Gates:
+  cancellation, and continuation traps roll them back. SourceInspector now
+  runs one actor-scoped Fe resource loop. A whole-state compiler-derived task
+  input gives it only its own Fe state, while a zero-payload notification edge
+  reports that a new command is available. Fe owns request revisions,
+  text/binary selection, switch-latest cancellation, HTTP classification,
+  response limits, stale suppression, presentation, content copying, and
+  explicit Response release. JavaScript owns only opaque Promise/resource
+  custody, cancellation mechanics, continuation invocation, and generated
+  canonical conversion. Component opcodes 12/13, `ComponentWriter.load_text`,
+  `ComponentWriter.load_bytes`, `_loadResource`, and `_deliverResource` are
+  deleted. Dependency-bearing resident components compile through their real
+  initialized ingot, so `browser_fetch` is part of SourceInspector's compiler
+  and watch inventory without adding a manifest. Gates:
   `global_fetch_uses_standards_authority_and_owned_response_resources`, the
-  57-test `fe-webidl-bindgen` suite, the 13-test `fe-host-wasm-codec` suite,
-  the 12-test host-runtime suite, the 34-test completion suite, the 16-test
-  bootstrap suite, the eight Bun codec cases, and the three focused
-  generated-WebIDL real-Wasm cases. Remaining work is Fe-authored
-  SourceInspector loading and cancellation, then deletion of component opcodes
-  12 and 13 plus `_loadResource`. Switch-latest already suppresses stale Fe
-  delivery and rolls back unclaimed authority, but does not yet abort the
-  browser's underlying request. Actual request abort waits for the general
+  59-test `fe-webidl-bindgen` suite plus its four provenance tests, the
+  13-test `fe-host-wasm-codec` suite,
+  the 12-test host-runtime suite, the 36-test completion suite, the 16-test
+  bootstrap suite, the eight Bun codec cases, the resident-actor contract
+  suite, `source_inspector_actor.rs`, the complete 34-test HTML precompile
+  suite, an immutable 3-module/12-render/80-asset gallery publication, and the
+  real remote-Chrome SourceInspector/gallery tape. Switch-latest suppresses
+  stale Fe delivery and rolls back unclaimed authority, but does not yet abort
+  the browser's underlying request. Actual request abort waits for the general
   WebIDL/host-ABI representation of borrowed resources nested in
   `RequestInit.signal`; it must not be smuggled into a handwritten fetch case.
-  This gate does not permit a permanent `fe:web-fetch` import whose JavaScript
-  manually mirrors Fe field order or success-lane widths. SourceInspector must
-  own switch-latest cancellation, HTTP classification, stale-response
-  rejection, and presentation policy in Fe; fixed JavaScript may only realize
-  browser standards mechanics and the generated canonical transport.
+  This gate admits no permanent handwritten `fe:web-fetch` import whose
+  JavaScript mirrors Fe field order or success-lane widths.
 - [ ] Attach opaque ports through Fe-owned spawn/Worker placement, then derive
   rich canonical message payloads from Fe types.
 - [ ] Add structured child scopes, admission, supervision, and restart/backoff
@@ -549,8 +559,8 @@ fallback. The semantic receipts are:
 5. Lower the BabyBear leaf prover and recursive merges through Fe Conal/CTFE
    WebGPU schedules, then run the complete progressive proof/verify/tamper page
    through Chrome.
-6. Finish typed fetch, then Worker/port placement and supervision on the one
-   runtime-control spine.
+6. Add Worker/port placement and supervision on the now-complete typed fetch
+   and runtime-control spine.
 7. Delete the runtime manifest and finish the legacy disposition.
 8. Run the exact G5 command once at the final DONE gate.
 

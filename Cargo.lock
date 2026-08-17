@@ -2858,6 +2858,7 @@ dependencies = [
  "ethers-core",
  "fe-common",
  "fe-compiler-db",
+ "fe-compiler-protocol",
  "fe-contract-harness",
  "fe-driver",
  "fe-hir",

@@ -394,7 +394,7 @@ test("one failed artifact does not prevent sibling artifacts from booting", asyn
   assert.equal(sibling.feResult.value, 42);
 });
 
-test("component resource commands decode strictly without interpreting policy", () => {
+test("retired component resource opcodes fail closed", () => {
   const encoder = new TextEncoder();
   const command = (opcode, id, value) => {
     const text = encoder.encode(value);
@@ -410,14 +410,6 @@ test("component resource commands decode strictly without interpreting policy", 
     decodeComponentCommands(command(11, 9, "https://example.test/a.fe")),
     [{ opcode: 11, target: 9, value: "https://example.test/a.fe" }],
   );
-  assert.deepEqual(
-    decodeComponentCommands(command(12, 41, "https://example.test/a.wgsl")),
-    [{ opcode: 12, request: 41, value: "https://example.test/a.wgsl" }],
-  );
-  assert.deepEqual(
-    decodeComponentCommands(command(13, 42, "https://example.test/a.wasm")),
-    [{ opcode: 13, request: 42, value: "https://example.test/a.wasm" }],
-  );
   const activation = new Uint8Array(9);
   const activationView = new DataView(activation.buffer);
   activation[0] = 14;
@@ -428,23 +420,31 @@ test("component resource commands decode strictly without interpreting policy", 
     [{ opcode: 14, sequence: 7, timeout: 30_000 }],
   );
   assert.throws(
-    () => decodeComponentCommands(command(12, 0, "https://example.test/a.fe")),
-    /request zero is reserved/,
+    () => decodeComponentCommands(command(12, 41, "https://example.test/a.fe")),
+    /unknown command opcode 12/,
   );
   assert.throws(
-    () => decodeComponentCommands(Uint8Array.from([12, 1, 0, 0, 0, 1, 0, 0, 0, 0xff])),
-    /Invalid byte sequence|encoded data was not valid/,
+    () => decodeComponentCommands(command(13, 42, "https://example.test/a.wasm")),
+    /unknown command opcode 13/,
   );
 });
 
 test("component scoped tasks start per connection and cancel with their actor scope", async () => {
   const component = new FeComponentElement();
-  const machine = { start() {}, resume() {} };
+  const machine = {
+    inputWidth: 2,
+    liftInput(input) {
+      assert.deepEqual(input, [17, 1]);
+      return [17, true];
+    },
+    start() {},
+    resume() {},
+  };
   const signals = [];
   const broker = {
     run(received, input, { signal }) {
       assert.equal(received, machine);
-      assert.deepEqual(input, []);
+      assert.deepEqual(input, [17, true]);
       signals.push(signal);
       return new Promise((resolve, reject) => {
         signal.addEventListener("abort", () => {
@@ -458,6 +458,7 @@ test("component scoped tasks start per connection and cancel with their actor sc
   };
 
   component._active = true;
+  component._state = [17, 1];
   component.attachFeScopedTasks([machine], broker);
   assert.equal(signals.length, 1);
   assert.equal(signals[0].aborted, false);

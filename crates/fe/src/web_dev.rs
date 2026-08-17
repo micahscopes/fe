@@ -108,6 +108,7 @@ pub async fn serve(config: DevConfig) -> Result<(), String> {
         load_file_url,
         crate::web::render_compile,
         crate::web::page_compile,
+        crate::web::component_compile,
     );
     let publication = initial
         .active
@@ -270,6 +271,7 @@ async fn watch(
             load_file_url,
             crate::web::render_compile,
             crate::web::page_compile,
+            crate::web::component_compile,
         );
         for event in emitted {
             trace_rebuild_diagnostic(&event);

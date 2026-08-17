@@ -524,10 +524,32 @@ pub fn resident_actor_contract(
             .ok_or_else(|| {
                 ResidentActorError::Contract("scoped task has no resolvable name".to_owned())
             })?;
-        if !task.arg_tys(db).is_empty() {
+        let task_args = task.arg_tys(db);
+        if !task_args.is_empty() && task_args.len() != declaration.fields.len() {
             return Err(ResidentActorError::Contract(format!(
-                "scoped task `{name}` must be self-less and take no arguments"
+                "scoped task `{name}` must be self-less or take self as exactly {} flattened actor-state arguments; found {}",
+                declaration.fields.len(),
+                task_args.len(),
             )));
+        }
+        for (index, (expected, actual)) in arg_tys[1..].iter().zip(&task_args).enumerate() {
+            let expected = canonical_type_from_semantic(
+                db,
+                *expected.skip_binder(),
+                &format!("actor_state.{}", declaration.fields[index].name),
+            )
+            .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
+            let actual = canonical_type_from_semantic(
+                db,
+                *actual.skip_binder(),
+                &format!("scoped_task_state.{}", declaration.fields[index].name),
+            )
+            .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
+            if actual != expected {
+                return Err(ResidentActorError::Contract(format!(
+                    "scoped task `{name}` state argument {index} differs from the actor field: expected {expected:?}, got {actual:?}"
+                )));
+            }
         }
         scoped_task_source_entries.push(name);
     }
@@ -589,24 +611,33 @@ pub fn compile_resident_actor_with_optimization(
             scoped_tasks.len(),
         )));
     }
-    let options = WasmCompileOptions::default()
-        .with_resident_actor_transition_checked(
-            &contract.source_entry,
-            RESIDENT_ACTOR_TRANSITION_EXPORT,
-            RESIDENT_ACTOR_STATE_REPLACE_EXPORT,
-            contract.event_leaf_count,
-            vec![false; contract.state_leaf_count],
-            contract.event_tag_limits.clone(),
-            contract.state_tag_limits.clone(),
-        )
-        .with_resident_actor_initializer(
-            &contract.init_source_entry,
-            RESIDENT_ACTOR_INITIALIZE_EXPORT,
-        )
-        .with_resident_actor_projection(
-            &contract.projection_source_entry,
-            RESIDENT_ACTOR_PROJECT_EXPORT,
-        );
+    // A scoped task can receive generated rich host values between Wasm
+    // continuation entries. Use the checked LIFO canonical stack for every
+    // scoped-task actor so those values have one compiler-owned allocation
+    // lifetime. Generated transports may bind their operation-specific
+    // post-return names to this common implementation.
+    let options = if scoped_tasks.is_empty() {
+        WasmCompileOptions::default()
+    } else {
+        WasmCompileOptions::default().with_canonical_stack_memory(["fe_cabi_post_return"])
+    }
+    .with_resident_actor_transition_checked(
+        &contract.source_entry,
+        RESIDENT_ACTOR_TRANSITION_EXPORT,
+        RESIDENT_ACTOR_STATE_REPLACE_EXPORT,
+        contract.event_leaf_count,
+        vec![false; contract.state_leaf_count],
+        contract.event_tag_limits.clone(),
+        contract.state_tag_limits.clone(),
+    )
+    .with_resident_actor_initializer(
+        &contract.init_source_entry,
+        RESIDENT_ACTOR_INITIALIZE_EXPORT,
+    )
+    .with_resident_actor_projection(
+        &contract.projection_source_entry,
+        RESIDENT_ACTOR_PROJECT_EXPORT,
+    );
     let options = if optimize {
         options.with_optimization()
     } else {

@@ -285,6 +285,8 @@ export function createHostCompletionBroker(options = {}) {
   let nextToken = 0;
   const slots = new Map();
   const receives = [];
+  let actorNotificationReady = false;
+  let actorNotificationWaiter;
 
   const readClock = () => u64(clock(), "monotonic clock result");
 
@@ -368,6 +370,40 @@ export function createHostCompletionBroker(options = {}) {
   };
 
   const beginReceive = () => allocate("receive", 1).token | 0;
+
+  const beginActorNotification = () => {
+    if (actorNotificationWaiter !== undefined) {
+      const previous = slots.get(actorNotificationWaiter);
+      if (previous !== undefined && previous.state === "pending") {
+        throw new TypeError("actor notification permits exactly one pending observer");
+      }
+      actorNotificationWaiter = undefined;
+    }
+    const slot = allocate("actor-notification", 0);
+    slot.cancelWork = () => {
+      if (actorNotificationWaiter === slot.token) actorNotificationWaiter = undefined;
+    };
+    if (actorNotificationReady) {
+      actorNotificationReady = false;
+      settle(slot, taskSuccess([]));
+    } else {
+      actorNotificationWaiter = slot.token;
+    }
+    return slot.token | 0;
+  };
+
+  const notifyActor = () => {
+    if (actorNotificationWaiter !== undefined) {
+      const token = actorNotificationWaiter;
+      actorNotificationWaiter = undefined;
+      const slot = slots.get(token);
+      if (slot !== undefined && slot.state === "pending") {
+        settle(slot, taskSuccess([]));
+        return;
+      }
+    }
+    actorNotificationReady = true;
+  };
 
   const beginBrowserOperation = (kind, invoke, successWidth, successLanes) => {
     const slot = allocate(kind, successWidth);
@@ -1142,6 +1178,8 @@ export function createHostCompletionBroker(options = {}) {
     for (const slot of slots.values()) {
       if (settle(slot, taskCancelled(), true)) cancelled += 1;
     }
+    actorNotificationReady = false;
+    actorNotificationWaiter = undefined;
     return cancelled;
   };
 
@@ -1183,6 +1221,10 @@ export function createHostCompletionBroker(options = {}) {
   const actorImports = Object.freeze({
     send_begin: beginActorSend,
   });
+  const actorNotificationImports = Object.freeze({
+    notify: notifyActor,
+    wait_begin: beginActorNotification,
+  });
 
   const imports = { "fe:host": host };
   if (surface !== undefined) imports["fe:web-surface"] = surfaceImports;
@@ -1198,6 +1240,7 @@ export function createHostCompletionBroker(options = {}) {
     imports["fe:web-component-events"] = componentEventImports;
   }
   if (actorEvents !== undefined) imports["fe:actor"] = actorImports;
+  imports["fe:actor-notification"] = actorNotificationImports;
 
   const completions = Object.freeze({
     protocol: FE_GENERATED_COMPLETION_CONTRACT,

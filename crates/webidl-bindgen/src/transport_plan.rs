@@ -529,11 +529,17 @@ pub fn emit_js_core_wasm_transport(plan: &TransportPlan) -> String {
         "  const attach = instance => {{\n\
          \x20   const exports = instance.exports;\n\
          \x20   const memory = exports[{:?}];\n\
-         \x20   const realloc = exports[{:?}];\n\
+         \x20   const canonicalRealloc = exports[{:?}];\n\
+         \x20   const arenaAlloc = exports[\"fe_cabi_alloc\"];\n\
+         \x20   const realloc = typeof canonicalRealloc === \"function\"\n\
+         \x20     ? canonicalRealloc\n\
+         \x20     : typeof arenaAlloc === \"function\"\n\
+         \x20       ? (_oldPtr, _oldSize, align, size) => arenaAlloc(size, align)\n\
+         \x20       : undefined;\n\
          \x20   if (!(memory instanceof WebAssembly.Memory)) throw new TypeError(\"missing canonical memory export\");\n\
          {}\
          \x20   const postReturns = Object.fromEntries(Object.entries(postReturnNames).map(([identity, name]) => {{\n\
-         \x20     const cleanup = exports[name];\n\
+         \x20     const cleanup = exports[name] ?? exports[\"fe_cabi_post_return\"];\n\
          \x20     if (typeof cleanup !== \"function\") throw new TypeError(`missing post-return export ${{name}} for ${{identity}}`);\n\
          \x20     return [identity, cleanup];\n\
          \x20   }}));\n\
@@ -667,6 +673,16 @@ mod tests {
         assert_eq!(
             HOST_WASM_CODEC_JS,
             include_str!("../../../demos/shared/host-wasm-codec-v1.js")
+        );
+    }
+
+    #[test]
+    fn browser_fetch_fe_bindings_are_generator_owned() {
+        let world = parse(BROWSER_FETCH_WEBIDL).unwrap();
+        let generated = emit_fe_flat_host_imports(&world, "fe:web-fetch").unwrap();
+        assert_eq!(
+            generated,
+            include_str!("../../../ingots/browser_fetch/src/raw.fe")
         );
     }
 

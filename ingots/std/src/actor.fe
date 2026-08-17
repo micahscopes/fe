@@ -11,10 +11,50 @@ use core::Fn
 use core::pending::{Pending, Select, SelectOutcome, Suspend, TaskOutcome}
 use ingot::wasm::WasmBackend
 use super::reactive::{
-    AsyncEventSource, BoundedQueue, Event, EventSource, OverflowPolicy, Scan, Stream,
-    Subscription,
+    AsyncEventSource, BoundedQueue, Cancelled, Event, EventSource, OverflowPolicy, Scan,
+    Stream, Subscription,
 }
 use raw::send_begin as raw_send_begin
+use notification_raw::{notify as raw_notify, wait_begin as raw_notification_wait_begin}
+
+/// One actor-scope wake observation. It deliberately carries no application
+/// payload: resident Fe keeps the latest value in its own state and uses this
+/// edge only to wake a scoped task which can read that state.
+pub struct ActorNotification {}
+
+impl Copy for ActorNotification {}
+
+/// Browser placement for a single-consumer actor-scope notification.
+///
+/// Repeated notifications coalesce until observed. This is a wake primitive,
+/// not a mailbox: payload retention, ordering, revision checks, and overflow
+/// policy remain ordinary Fe values and reactive combinators.
+pub struct BrowserActorNotifications {}
+
+impl BrowserActorNotifications {
+    pub fn new() -> Self { Self {} }
+
+    /// Wake the owning actor's scoped task after resident Fe has published its
+    /// latest state into actor-owned Wasm memory.
+    pub fn notify(mut self) { raw_notify() }
+}
+
+impl AsyncEventSource<WasmBackend, ActorNotification> for BrowserActorNotifications {
+    fn subscribe(mut self) -> Subscription<ActorNotification> {
+        Subscription::new(initial: ActorNotification {})
+    }
+
+    fn next_begin(
+        mut self,
+        _ subscription: own Subscription<ActorNotification>,
+    ) -> (Subscription<ActorNotification>, Pending<WasmBackend, ActorNotification>) {
+        (subscription.advance().0, raw_notification_wait_begin())
+    }
+
+    fn cancel(mut self, _ subscription: own Subscription<ActorNotification>) -> Cancelled {
+        Cancelled { consumed: subscription.cursor() }
+    }
+}
 
 pub struct BrowserActorSink {}
 
@@ -410,17 +450,27 @@ uses (
     }
 }
 
-fn send_merge_failure<L, R, E, P: MergePolicy<L, R, E> + Copy>(
+fn send_merge_failure<
+    L,
+    R,
+    Q,
+    E,
+    P: MergePolicy<L, R, Q> + Copy,
+    F: Fn<Q, E> + Copy,
+>(
     _ side: MergeSide,
     _ error: u32,
     _ policy: P,
+    _ envelope: F,
 ) -> TaskOutcome<u32, ()>
 uses (
     sink: mut ActorSink<WasmBackend, E>,
     suspend: Suspend<WasmBackend, u32>,
 )
 {
-    ActorMessage::new(event: policy.map_failure(side: side, error: error)).send()
+    ActorMessage::new(
+        event: envelope.call(policy.map_failure(side: side, error: error)),
+    ).send()
 }
 
 /// Consume the actor send retained by an outer selection after the merged
@@ -479,8 +529,10 @@ uses (
 fn drive_merged_sources<
     L: Copy,
     R: Copy,
-    E: Copy,
-    P: MergePolicy<L, R, E> + Copy,
+    Q: Copy,
+    E,
+    P: MergePolicy<L, R, Q> + Copy,
+    F: Fn<Q, E> + Copy,
 >(
     _ left_subscription: own Subscription<L>,
     _ right_subscription: own Subscription<R>,
@@ -488,10 +540,11 @@ fn drive_merged_sources<
         WasmBackend,
         SelectOutcome<WasmBackend, u32, L, R>,
     >,
-    _ initial: E,
+    _ initial: Q,
     _ capacity: u32,
     _ overflow: OverflowPolicy,
     _ policy: P,
+    _ envelope: F,
 ) -> MergedForwardReport
 uses (
     left_source: mut AsyncEventSource<WasmBackend, L>,
@@ -601,7 +654,7 @@ uses (
             },
         }
 
-        let mut sink_pending = sink.send_begin(event)
+        let mut sink_pending = sink.send_begin(envelope.call(event))
         while true {
                 let selected = select.select(source_group, sink_pending)
                 let outcome: TaskOutcome<
@@ -707,7 +760,7 @@ uses (
                                 let next_event = queue.front().value_or(fallback: initial)
                                 queue = queue.consume()
                                 source_group = sink_winner.left
-                                sink_pending = sink.send_begin(next_event)
+                                sink_pending = sink.send_begin(envelope.call(next_event))
                             } else {
                                 source_group = sink_winner.left
                                 break
@@ -799,13 +852,16 @@ uses (
 pub fn merge_buffer_to_actor<
     L: Copy,
     R: Copy,
-    E: Copy,
-    P: MergePolicy<L, R, E> + Copy,
+    Q: Copy,
+    E,
+    P: MergePolicy<L, R, Q> + Copy,
+    F: Fn<Q, E> + Copy,
 >(
-    _ initial: E,
+    _ initial: Q,
     _ capacity: u32,
     _ overflow: OverflowPolicy,
     _ policy: P,
+    _ envelope: F,
 ) -> MergedForwardReport
 uses (
     left_source: mut AsyncEventSource<WasmBackend, L>,
@@ -827,6 +883,7 @@ uses (
         capacity: capacity,
         overflow: overflow,
         policy: policy,
+        envelope: envelope,
     )
     // Keep only the four semantic leaves live across the optional failure
     // notification suspension. The public API remains one nominal report, but
@@ -852,10 +909,11 @@ uses (
         _ => {},
     }
     if report_failure {
-        let failure = send_merge_failure<L, R, E, P>(
+        let failure = send_merge_failure<L, R, Q, E, P, F>(
             side: failure_side,
             error: report_error,
             policy: policy,
+            envelope: envelope,
         )
         match failure {
             TaskOutcome::Success(_,) => {},

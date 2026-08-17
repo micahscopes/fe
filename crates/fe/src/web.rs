@@ -15,7 +15,7 @@ use driver::{
     DriverDataBase,
     cli_target::{CliTarget, resolve_cli_target},
 };
-use fe_compiler_facade::PageProjectionResult;
+use fe_compiler_facade::{PageProjectionResult, ResidentComponentCompileResult};
 use fe_compiler_protocol::{
     SOURCE_DEPENDENCY_INVENTORY_VERSION, SourceDependency, SourceDependencyInventory, sha256_hex,
 };
@@ -613,6 +613,59 @@ pub fn render_compile(
 /// while standalone/virtual sources return `Ok(None)` and retain the portable
 /// single-source path.
 pub fn page_compile(url: &Url) -> Result<Option<PageProjectionResult>, String> {
+    let Some((db, root_file, _)) = initialized_source_ingot(url, "page")? else {
+        return Ok(None);
+    };
+    fe_compiler_facade::project_page_in_db(&db, root_file)
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+/// Compile an external resident component through its real initialized ingot.
+/// This is the component counterpart to [`page_compile`]: local Fe dependencies
+/// retain their ordinary identities, while standalone and virtual sources keep
+/// using the portable supplied-source facade.
+pub fn component_compile(url: &Url) -> Result<Option<ResidentComponentCompileResult>, String> {
+    let Some((db, root_file, ingot_dir)) = initialized_source_ingot(url, "component")? else {
+        return Ok(None);
+    };
+    let needs_initialized_ingot = component_ingot_needs_initialized_db(&ingot_dir);
+    if !needs_initialized_ingot {
+        return Ok(None);
+    }
+    fe_compiler_facade::compile_resident_component_in_db(&db, root_file)
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+fn component_ingot_needs_initialized_db(ingot_dir: &Utf8Path) -> bool {
+    let has_explicit_dependency = std::fs::read_to_string(ingot_dir.join("fe.toml"))
+        .ok()
+        .and_then(|content| common::config::Config::parse(&content).ok())
+        .is_some_and(|config| match config {
+            common::config::Config::Ingot(config) => !config.dependency_entries.is_empty(),
+            common::config::Config::Workspace(_) => false,
+        });
+    has_explicit_dependency
+        || walkdir::WalkDir::new(ingot_dir.as_std_path())
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.file_type().is_file()
+                    && entry
+                        .path()
+                        .extension()
+                        .is_some_and(|extension| extension == "fe")
+            })
+            .take(2)
+            .count()
+            > 1
+}
+
+fn initialized_source_ingot(
+    url: &Url,
+    purpose: &str,
+) -> Result<Option<(DriverDataBase, common::file::File, Utf8PathBuf)>, String> {
     let Ok(path) = url.to_file_path() else {
         return Ok(None);
     };
@@ -624,7 +677,7 @@ pub fn page_compile(url: &Url) -> Result<Option<PageProjectionResult>, String> {
     }
     let canonical = path
         .canonicalize_utf8()
-        .map_err(|error| format!("cannot canonicalize page source `{path}`: {error}"))?;
+        .map_err(|error| format!("cannot canonicalize {purpose} source `{path}`: {error}"))?;
     let Some(ingot_dir) = canonical
         .ancestors()
         .skip(1)
@@ -634,32 +687,33 @@ pub fn page_compile(url: &Url) -> Result<Option<PageProjectionResult>, String> {
         return Ok(None);
     };
     let ingot_url = Url::from_directory_path(ingot_dir.as_std_path())
-        .map_err(|_| format!("invalid page ingot path `{ingot_dir}`"))?;
+        .map_err(|_| format!("invalid {purpose} ingot path `{ingot_dir}`"))?;
     let source_url = Url::from_file_path(canonical.as_std_path())
-        .map_err(|_| format!("invalid page source path `{canonical}`"))?;
+        .map_err(|_| format!("invalid {purpose} source path `{canonical}`"))?;
     let mut db = DriverDataBase::default();
     if driver::init_ingot(&mut db, &ingot_url) {
-        return Err(format!("failed to initialize page ingot `{ingot_dir}`"));
+        return Err(format!(
+            "failed to initialize {purpose} ingot `{ingot_dir}`"
+        ));
     }
     let ingot = db
         .workspace()
         .containing_ingot(&db, ingot_url.clone())
-        .ok_or_else(|| format!("page source `{canonical}` is not in an initialized ingot"))?;
+        .ok_or_else(|| format!("{purpose} source `{canonical}` is not in an initialized ingot"))?;
     let mut seen = HashSet::from([ingot_url]);
     let dependency_issues = DependencyIssues::collect(&db, &ingot.base(&db), &mut seen);
     if !dependency_issues.is_empty() {
         return Err(format!(
-            "dependency diagnostics prevent page projection:\n{}",
+            "dependency diagnostics prevent {purpose} compilation:\n{}",
             dependency_issues.format(&db)
         ));
     }
+    drop(dependency_issues);
     let root_file = db
         .workspace()
         .get(&db, &source_url)
-        .ok_or_else(|| format!("page source `{canonical}` was not loaded by its ingot"))?;
-    fe_compiler_facade::project_page_in_db(&db, root_file)
-        .map(Some)
-        .map_err(|error| error.to_string())
+        .ok_or_else(|| format!("{purpose} source `{canonical}` was not loaded by its ingot"))?;
+    Ok(Some((db, root_file, ingot_dir)))
 }
 
 #[derive(Debug, Clone)]

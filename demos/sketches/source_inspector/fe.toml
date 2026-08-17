@@ -1,3 +1,6 @@
 [ingot]
 name = "source_inspector"
 version = "0.1.0"
+
+[dependencies]
+browser_fetch = "../../../ingots/browser_fetch"

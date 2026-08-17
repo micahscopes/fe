@@ -80,6 +80,41 @@ actor Clock {
     (db, file)
 }
 
+fn partial_state_scoped_task_fixture() -> (DriverDataBase, common::file::File) {
+    const SOURCE: &str = r#"
+use core::actor::{InitialState, ProjectState, ResidentTransition, ScopedTask}
+
+pub struct Tick { pub value: u32 }
+pub struct TickState { pub value: u32, pub revision: u32 }
+pub struct TickProjection { pub value: u32 }
+
+actor Clock {
+    value: u32,
+    revision: u32,
+
+    fn initial() -> TickState uses (InitialState) {
+        TickState { value: 0, revision: 0 }
+    }
+
+    fn receive(self, event: Tick) -> TickState uses (ResidentTransition) {
+        TickState { value: self.value + event.value, revision: self.revision + 1 }
+    }
+
+    fn project(self) -> TickProjection uses (ProjectState) {
+        TickProjection { value: self.value }
+    }
+
+    fn heartbeat(value: u32) -> u32 uses (ScopedTask) { value }
+}
+"#;
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///partial_state_scoped_task.fe").unwrap();
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(SOURCE.to_owned()));
+    let file = db.workspace().get(&db, &url).unwrap();
+    (db, file)
+}
+
 fn actor_sink_fixture(event_ty: &str) -> (DriverDataBase, common::file::File) {
     let source = format!(
         r#"
@@ -513,6 +548,27 @@ fn resident_actor_scoped_task_is_role_selected_and_materialized_without_a_task_t
     assert!(
         !exports.iter().any(|name| name == "heartbeat"),
         "the authored behavior name must not become a Wasm discovery ABI"
+    );
+}
+
+#[test]
+fn resident_actor_rejects_scoped_task_with_partial_actor_state() {
+    let (db, file) = partial_state_scoped_task_fixture();
+    let top_mod = db.top_mod(file);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "partial-state scoped-task fixture diagnostics:\n{diagnostics}"
+    );
+
+    let error = compile_resident_actor(&db, top_mod)
+        .expect_err("a partial actor-state task input must fail closed")
+        .to_string();
+    assert!(
+        error.contains(
+            "scoped task `heartbeat` must be self-less or take self as exactly 2 flattened actor-state arguments; found 1"
+        ),
+        "unexpected partial-state diagnostic: {error}",
     );
 }
 

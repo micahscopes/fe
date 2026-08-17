@@ -11,6 +11,11 @@ use fe_codegen::{
     RESIDENT_ACTOR_PROJECT_EXPORT, RESIDENT_ACTOR_TRANSITION_EXPORT, compile_resident_actor,
     emit_materialized_task_adapter_js,
 };
+use fe_compiler_protocol::{InterfaceFunction, InterfaceManifest};
+use fe_webidl_bindgen::{
+    BROWSER_FETCH_WEBIDL, adapter_operation_metadata, build_adapter_plan,
+    emit_js_selected_core_adapter, parse, select_adapter_operations,
+};
 use hir::hir_def::HirIngot;
 use url::Url;
 
@@ -36,13 +41,17 @@ struct Model {
     content: String,
     connected: bool,
     open: bool,
-    issue_load: bool,
     prevent_default: bool,
     focus_close: bool,
     revision: u32,
     surfaces_settled: u32,
     surface_sequence_complete: bool,
     surface_sequence_failed: bool,
+    control_revision: u32,
+    control_request: u32,
+    control_url_len: u32,
+    control_binary: bool,
+    control_active: bool,
 }
 
 impl Default for Model {
@@ -56,13 +65,17 @@ impl Default for Model {
             content: String::new(),
             connected: false,
             open: false,
-            issue_load: false,
             prevent_default: false,
             focus_close: false,
             revision: 0,
             surfaces_settled: 0,
             surface_sequence_complete: false,
             surface_sequence_failed: false,
+            control_revision: 0,
+            control_request: 0,
+            control_url_len: 0,
+            control_binary: false,
+            control_active: false,
         }
     }
 }
@@ -77,8 +90,40 @@ struct Event<'a> {
     text: &'a str,
 }
 
+fn browser_event(kind: u32, target: u32, detail: u32, text: &str) -> Event<'_> {
+    Event {
+        kind,
+        target,
+        request: 0,
+        key: 0,
+        detail,
+        text,
+    }
+}
+
+fn task_event(
+    target: u32,
+    request: u32,
+    status: u32,
+    byte_len: u32,
+    content: &str,
+    surface_settled: u32,
+) -> Event<'_> {
+    Event {
+        kind: 13,
+        target,
+        request,
+        key: status,
+        detail: if surface_settled == 0 {
+            byte_len
+        } else {
+            surface_settled
+        },
+        text: content,
+    }
+}
+
 fn reduce(model: &mut Model, event: Event<'_>) {
-    model.issue_load = false;
     model.prevent_default = false;
     model.focus_close = false;
 
@@ -94,6 +139,11 @@ fn reduce(model: &mut Model, event: Event<'_>) {
             model.connected = false;
             model.open = false;
             model.revision += 1;
+            model.control_revision = model.revision;
+            model.control_request = model.pending;
+            model.control_url_len = model.url.len() as u32;
+            model.control_binary = model.selected == 2;
+            model.control_active = false;
         }
         3 if model.connected && (1..=4).contains(&event.target) && !event.text.is_empty() => {
             model.selected = event.target - 1;
@@ -104,25 +154,33 @@ fn reduce(model: &mut Model, event: Event<'_>) {
             model.byte_len = 0;
             model.content.clear();
             model.open = true;
-            model.issue_load = true;
             model.prevent_default = true;
             model.focus_close = true;
+            model.control_revision = model.revision;
+            model.control_request = model.pending;
+            model.control_url_len = model.url.len() as u32;
+            model.control_binary = model.selected == 2;
+            model.control_active = true;
         }
         3 if model.connected && event.target == 5 && model.open => {
             model.open = false;
             model.prevent_default = true;
             model.revision += 1;
+            model.control_revision = model.revision;
+            model.control_request = model.pending;
+            model.control_url_len = model.url.len() as u32;
+            model.control_binary = model.selected == 2;
+            model.control_active = false;
         }
         7 if model.connected && model.open && event.detail == 27 => {
             model.open = false;
             model.prevent_default = true;
             model.revision += 1;
-        }
-        8 if model.connected && model.open && event.request == model.pending => {
-            model.byte_len = event.detail;
-            model.content = event.text.to_owned();
-            model.status = u32::from(!(200..300).contains(&event.key)) + 1;
-            model.revision += 1;
+            model.control_revision = model.revision;
+            model.control_request = model.pending;
+            model.control_url_len = model.url.len() as u32;
+            model.control_binary = model.selected == 2;
+            model.control_active = false;
         }
         13 if model.connected && event.target == 6 && event.detail > model.surfaces_settled => {
             model.surfaces_settled = event.detail;
@@ -140,6 +198,20 @@ fn reduce(model: &mut Model, event: Event<'_>) {
             model.surface_sequence_failed = true;
             model.revision += 1;
         }
+        13 if model.connected
+            && (event.target == 9 || event.target == 10)
+            && model.open
+            && event.request == model.pending =>
+        {
+            model.byte_len = event.detail;
+            model.content = event.text.to_owned();
+            model.status = if event.target == 9 && (200..300).contains(&event.key) {
+                1
+            } else {
+                2
+            };
+            model.revision += 1;
+        }
         _ => {}
     }
 }
@@ -148,8 +220,6 @@ fn reduce(model: &mut Model, event: Event<'_>) {
 enum Operation {
     Text(u32, String),
     Href(u32, String),
-    LoadText(u32, String),
-    LoadBytes(u32, String),
 }
 
 fn decode(bytes: &[u8]) -> Vec<Operation> {
@@ -178,14 +248,12 @@ fn decode(bytes: &[u8]) -> Vec<Operation> {
     while cursor < bytes.len() {
         let opcode = byte(bytes, &mut cursor);
         match opcode {
-            4 | 11 | 12 | 13 => {
+            4 | 11 => {
                 let id = word(bytes, &mut cursor);
                 let value = text(bytes, &mut cursor);
                 operations.push(match opcode {
                     4 => Operation::Text(id, value),
                     11 => Operation::Href(id, value),
-                    12 => Operation::LoadText(id, value),
-                    13 => Operation::LoadBytes(id, value),
                     _ => unreachable!(),
                 });
             }
@@ -220,13 +288,6 @@ fn expected_projection(model: &Model) -> (u32, u32, u32, Vec<Operation>) {
     } else if model.status == 2 {
         operations.push(Operation::Text(12, model.content.clone()));
     }
-    if model.issue_load {
-        operations.push(if model.selected == 2 {
-            Operation::LoadBytes(model.pending, model.url.clone())
-        } else {
-            Operation::LoadText(model.pending, model.url.clone())
-        });
-    }
     (
         mask,
         u32::from(model.focus_close) * 5,
@@ -251,7 +312,7 @@ fn source_inspector_owns_selection_loading_stale_response_and_presentation_polic
             && source.contains("Stream<DocumentVisibility>")
             && source.contains("EventSource<DocumentVisibility> = BrowserVisibilityEvents::new()")
             && source.contains(
-                "ActorSink<WasmBackend, ComponentEvent<InspectorAction>> = BrowserActorSink {}"
+                "ActorSink<WasmBackend, ComponentEvent<InspectorAction, InspectorTask>> = BrowserActorSink {}"
             )
             && source.contains("ComponentEventKind::TaskMessage"),
         "gallery loading must consume typed Fe surface and visibility streams"
@@ -277,16 +338,17 @@ fn source_inspector_owns_selection_loading_stale_response_and_presentation_polic
         .expect("SourceInspector contract")
         .expect("SourceInspector actor");
     assert_eq!(artifact.contract.actor, "SourceInspector");
-    assert_eq!(artifact.contract.event_leaf_count, 9);
+    assert_eq!(artifact.contract.event_leaf_count, 14);
     assert_eq!(artifact.contract.state_leaf_count, STATE_LEAVES);
     assert_eq!(
         artifact.contract.scoped_task_source_entries,
-        ["activate_surfaces"]
+        ["activate_surfaces", "load_resources"]
     );
-    let [surface_task] = artifact.scoped_tasks.as_slice() else {
-        panic!("SourceInspector must materialize exactly one surface task")
+    let [surface_task, resource_task] = artifact.scoped_tasks.as_slice() else {
+        panic!("SourceInspector must materialize its surface and resource tasks")
     };
     assert!(surface_task.input.is_empty());
+    assert_eq!(resource_task.input.len(), STATE_LEAVES);
 
     if std::process::Command::new("bun")
         .arg("--version")
@@ -298,6 +360,7 @@ fn source_inspector_owns_selection_loading_stale_response_and_presentation_polic
         let task_runtime_path = directory.path().join("materialized-task.js");
         let host_runtime_path = directory.path().join("host-completion.js");
         let adapter_path = directory.path().join("task-adapter.mjs");
+        let fetch_adapter_path = directory.path().join("fetch-adapter.mjs");
         let test_path = directory.path().join("surface-task.mjs");
         let adapter =
             emit_materialized_task_adapter_js(&artifact.scoped_tasks, "./materialized-task.js")
@@ -307,10 +370,45 @@ fn source_inspector_owns_selection_loading_stale_response_and_presentation_polic
         std::fs::write(&task_runtime_path, MATERIALIZED_TASK_RUNTIME_JS).unwrap();
         std::fs::write(&host_runtime_path, HOST_COMPLETION_RUNTIME_JS).unwrap();
         std::fs::write(&adapter_path, adapter).unwrap();
+        let world = parse(BROWSER_FETCH_WEBIDL).unwrap();
+        let fetch_plan = build_adapter_plan(&world, "browser-fetch", "fe:web-fetch").unwrap();
+        let fetch_metadata = adapter_operation_metadata(&fetch_plan, "generated-browser-fetch");
+        let fetch_imports = [
+            "response_array_buffer",
+            "response_get_ok",
+            "response_get_status",
+            "response_get_url",
+            "response_resource_drop",
+            "response_text",
+            "window_fetch",
+        ];
+        let interface = InterfaceManifest {
+            imports: fetch_imports
+                .into_iter()
+                .map(|name| InterfaceFunction {
+                    module: "fe:web-fetch".to_owned(),
+                    name: name.to_owned(),
+                    signature_complete: false,
+                    params: Vec::new(),
+                    results: Vec::new(),
+                })
+                .collect(),
+            ..InterfaceManifest::default()
+        };
+        let fetch_selection = select_adapter_operations(&interface, &fetch_metadata).unwrap();
+        let fetch_adapter = emit_js_selected_core_adapter(
+            &world,
+            &fetch_plan,
+            "generated-browser-fetch",
+            &fetch_selection,
+        )
+        .unwrap();
+        std::fs::write(&fetch_adapter_path, fetch_adapter).unwrap();
         let script = format!(
             r#"
 import {{ createMaterializedTaskRegistry }} from {adapter_url:?};
 import {{ createHostCompletionBroker }} from {host_runtime_url:?};
+import {{ createFeBrowserCoreAdapter }} from {fetch_adapter_url:?};
 const tokens = [11n, 22n, 0n];
 const loads = [];
 const trace = [];
@@ -325,7 +423,7 @@ const broker = createHostCompletionBroker({{
     send(event, signal) {{
       if (signal.aborted) throw new DOMException("cancelled", "AbortError");
       actorEvents.push(event);
-      trace.push(`actor:${{event[1]}}:${{event[4]}}`);
+      trace.push(`actor:${{event[1]}}:${{event[13]}}`);
       residentState = instance.exports.fe_actor_transition_v1(...event);
     }},
   }},
@@ -364,12 +462,39 @@ const broker = createHostCompletionBroker({{
     }},
   }},
 }});
+const fetchCalls = [];
+let resolveSlow;
+const slowFetch = new Promise(resolve => {{ resolveSlow = resolve; }});
+const response = (url, status, text, bytes) => ({{
+  url,
+  status,
+  ok: status >= 200 && status < 300,
+  text: () => Promise.resolve(text),
+  arrayBuffer: () => Promise.resolve(Uint8Array.from(bytes).buffer),
+}});
+const fetchAdapter = createFeBrowserCoreAdapter(broker.completions, {{
+  fetch(input) {{
+    fetchCalls.push(input);
+    if (input.endsWith("/slow.fe")) return slowFetch;
+    if (input.endsWith("/fresh.fe")) return Promise.resolve(response(input, 200, "fresh Fe", []));
+    if (input.endsWith("/module.wasm")) return Promise.resolve(response(input, 200, "", [1, 2, 3, 4, 5]));
+    if (input.endsWith("/missing.wgsl")) return Promise.resolve(response(input, 404, "not found", []));
+    if (input.endsWith("/broken.fe")) return Promise.reject(new Error("synthetic fetch failure"));
+    return Promise.reject(new Error(`unexpected fetch ${{input}}`));
+  }},
+}});
 const bytes = await Bun.file({wasm_path:?}).arrayBuffer();
-({{ instance }} = await WebAssembly.instantiate(bytes, broker.imports));
-instance.exports.fe_actor_initialize_v1();
-instance.exports.fe_actor_transition_v1(0, 0, 0, 0, 0, 0, 0, 0, 0);
+({{ instance }} = await WebAssembly.instantiate(bytes, {{
+  ...broker.imports,
+  ...fetchAdapter.imports,
+}}));
+fetchAdapter.attach(instance);
+residentState = instance.exports.fe_actor_initialize_v1();
+residentState = instance.exports.fe_actor_transition_v1(
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+);
 const tasks = createMaterializedTaskRegistry(instance.exports);
-if (Object.keys(tasks).join() !== "activate_surfaces") throw new Error("task registry drift");
+if (Object.keys(tasks).join() !== "activate_surfaces,load_resources") throw new Error("task registry drift");
 const output = await broker.run(tasks.activate_surfaces, []);
 if (output.length !== 1 || output[0] !== 2) throw new Error(`Fe surface policy returned ${{output}}`);
 if (visibilityCalls.length !== 2 || visibilityCalls[0][0] !== false || visibilityCalls[0][1] !== false
@@ -380,9 +505,9 @@ if (trace.join() !== "visibility:1,visibility:0,next:11,load:11,actor:6:1,frame:
   throw new Error(`Fe did not pace surface activation by animation frame: ${{trace}}`);
 }}
 if (actorEvents.length !== 3
-    || actorEvents[0].join() !== "13,6,0,0,1,0,0,0,0"
-    || actorEvents[1].join() !== "13,6,0,0,2,0,0,0,0"
-    || actorEvents[2].join() !== "13,7,0,0,2,0,0,0,0") {{
+    || actorEvents[0].join() !== "13,6,0,0,0,0,0,0,0,0,0,0,0,1"
+    || actorEvents[1].join() !== "13,6,0,0,0,0,0,0,0,0,0,0,0,2"
+    || actorEvents[2].join() !== "13,7,0,0,0,0,0,0,0,0,0,0,0,2") {{
   throw new Error(`scoped task did not deliver typed resident events: ${{JSON.stringify(actorEvents)}}`);
 }}
 if (residentState[15] !== 2 || residentState[16] !== 1 || residentState[17] !== 0) {{
@@ -391,9 +516,105 @@ if (residentState[15] !== 2 || residentState[16] !== 1 || residentState[17] !== 
 if (loads.length !== 2 || loads[0] !== 11n || loads[1] !== 22n) throw new Error("host reordered surface tokens");
 if (tokens.length !== 0) throw new Error("Fe did not pull the end sentinel");
 if (broker.activeCount() !== 0 || broker.cancelAll() !== 0) throw new Error("surface task leaked pending work");
+
+actorEvents.length = 0;
+const waitFor = async (predicate, message) => {{
+  for (let attempt = 0; attempt < 200; attempt += 1) {{
+    if (predicate()) return;
+    await new Promise(resolve => setTimeout(resolve, 0));
+  }}
+  throw new Error(message);
+}};
+const scratch = instance.exports.cabi_realloc(0, 0, 1, 4096);
+const encode = new TextEncoder();
+const decode = new TextDecoder();
+const activate = (target, url) => {{
+  const encoded = encode.encode(url);
+  new Uint8Array(instance.exports.memory.buffer, scratch, encoded.length).set(encoded);
+  residentState = instance.exports.fe_actor_transition_v1(
+    3, target, 0, 0, 1, 0, 0, scratch, encoded.length,
+    0, 0, 0, 0, 0,
+  );
+}};
+const close = () => {{
+  residentState = instance.exports.fe_actor_transition_v1(
+    3, 5, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0,
+  );
+}};
+const content = () => decode.decode(new Uint8Array(
+  instance.exports.memory.buffer,
+  residentState[8],
+  residentState[9],
+));
+
+const resourceLifetime = new AbortController();
+const resourceRun = broker.run(
+  tasks.load_resources,
+  tasks.load_resources.liftInput(residentState),
+  {{ signal: resourceLifetime.signal }},
+);
+await Promise.resolve();
+activate(1, "https://example.test/slow.fe");
+await waitFor(() => fetchCalls.length === 1, "Fe did not begin the first generated fetch");
+activate(1, "https://example.test/fresh.fe");
+await waitFor(
+  () => residentState[6] === 1 && content() === "fresh Fe",
+  "Fe did not select and commit the newer text request",
+);
+if (fetchCalls.join() !== "https://example.test/slow.fe,https://example.test/fresh.fe") {{
+  throw new Error(`Fe request order drifted: ${{fetchCalls}}`);
+}}
+if (actorEvents.length !== 1 || actorEvents[0][1] !== 9 || actorEvents[0][9] !== 6
+    || actorEvents[0][10] !== 200 || actorEvents[0][12] !== 8) {{
+  throw new Error(`fresh text completion did not use the typed Fe payload: ${{JSON.stringify(actorEvents)}}`);
+}}
+resolveSlow(response("https://example.test/slow.fe", 200, "stale", []));
+await new Promise(resolve => setTimeout(resolve, 0));
+await new Promise(resolve => setTimeout(resolve, 0));
+if (actorEvents.length !== 1 || content() !== "fresh Fe") {{
+  throw new Error("a stale generated fetch completion reached resident Fe state");
+}}
+
+activate(3, "https://example.test/module.wasm");
+await waitFor(
+  () => residentState[6] === 1 && residentState[7] === 5,
+  "Fe did not commit the generated binary response",
+);
+activate(2, "https://example.test/missing.wgsl");
+await waitFor(
+  () => residentState[6] === 2 && content() === "not found",
+  "Fe did not classify a non-success HTTP response",
+);
+activate(1, "https://example.test/broken.fe");
+await waitFor(
+  () => residentState[6] === 2 && content() === "Resource request failed",
+  "Fe did not own generated fetch failure presentation",
+);
+if (actorEvents.map(event => event[1]).join() !== "9,9,9,10"
+    || actorEvents.map(event => event[9]).join() !== "6,8,10,12") {{
+  throw new Error(`resource task correlation drifted: ${{JSON.stringify(actorEvents)}}`);
+}}
+if (fetchAdapter.runtime.inventory().resources !== 0) {{
+  throw new Error("SourceInspector leaked a generated Response authority");
+}}
+close();
+const control = new DataView(instance.exports.memory.buffer, residentState[1], 20);
+if (control.getUint32(16, true) !== 0) throw new Error("close did not publish inactive Fe load state");
+resourceLifetime.abort();
+let cancelled = false;
+try {{ await resourceRun; }}
+catch (error) {{ cancelled = error?.name === "AbortError"; }}
+if (!cancelled) {{
+  throw new Error("resource scope did not retain cancellation as its terminal verdict");
+}}
+if (broker.activeCount() !== 0 || broker.cancelAll() !== 0) {{
+  throw new Error("resource task leaked pending completion work");
+}}
 "#,
             adapter_url = format!("file://{}", adapter_path.display()),
             host_runtime_url = format!("file://{}", host_runtime_path.display()),
+            fetch_adapter_url = format!("file://{}", fetch_adapter_path.display()),
             wasm_path = wasm_path.display().to_string(),
         );
         std::fs::write(&test_path, script).unwrap();
@@ -440,6 +661,55 @@ if (broker.activeCount() !== 0 || broker.cancelAll() !== 0) throw new Error("sur
         .unwrap();
     linker
         .func_wrap(
+            "fe:host",
+            "select_begin",
+            |_left: i32, _right: i32| -> i32 { 0 },
+        )
+        .unwrap();
+    linker
+        .func_wrap("fe:host", "cancel_pending", |_pending: i32| -> i32 { 0 })
+        .unwrap();
+    linker
+        .func_wrap("fe:actor-notification", "notify", || {})
+        .unwrap();
+    linker
+        .func_wrap("fe:actor-notification", "wait_begin", || -> i32 { 0 })
+        .unwrap();
+    linker
+        .func_wrap(
+            "fe:web-fetch",
+            "window_fetch",
+            |_ptr: i32, _len: i32| -> i32 { 0 },
+        )
+        .unwrap();
+    linker
+        .func_wrap(
+            "fe:web-fetch",
+            "response_get_status",
+            |_response: i32| -> i32 { 200 },
+        )
+        .unwrap();
+    linker
+        .func_wrap("fe:web-fetch", "response_text", |_response: i32| -> i32 {
+            0
+        })
+        .unwrap();
+    linker
+        .func_wrap(
+            "fe:web-fetch",
+            "response_array_buffer",
+            |_response: i32| -> i32 { 0 },
+        )
+        .unwrap();
+    linker
+        .func_wrap(
+            "fe:web-fetch",
+            "response_resource_drop",
+            |_response: i32| {},
+        )
+        .unwrap();
+    linker
+        .func_wrap(
             "fe:actor",
             "send_begin",
             |_kind: i32,
@@ -450,7 +720,12 @@ if (broker.activeCount() !== 0 || broker.cancelAll() !== 0) throw new Error("sur
              _value: f32,
              _timestamp: f32,
              _text_ptr: i32,
-             _text_len: i32|
+             _text_len: i32,
+             _task_request: i32,
+             _task_status: i32,
+             _task_byte_len: i32,
+             _task_content_len: i32,
+             _task_surface_settled: i32|
              -> i32 { 0 },
         )
         .unwrap();
@@ -465,16 +740,16 @@ if (broker.activeCount() !== 0 || broker.cancelAll() !== 0) throw new Error("sur
     let project = instance
         .get_typed_func::<(), (i32, i32, i32, i32, i32)>(&mut store, RESIDENT_ACTOR_PROJECT_EXPORT)
         .unwrap();
-    let alloc = instance
-        .get_typed_func::<(i32, i32), i32>(&mut store, "fe_cabi_alloc")
+    let realloc = instance
+        .get_typed_func::<(i32, i32, i32, i32), i32>(&mut store, "cabi_realloc")
         .unwrap();
     let mut initial_results = vec![wasmtime::Val::I32(0); STATE_LEAVES];
     initialize
         .call(&mut store, &[], &mut initial_results)
         .unwrap();
     let initial = i32_results(&initial_results);
-    let pointers = (initial[0], initial[1], initial[7]);
-    let scratch = alloc.call(&mut store, (4096, 1)).unwrap();
+    let pointers = (initial[0], initial[1], initial[2], initial[8]);
+    let scratch = realloc.call(&mut store, (0, 0, 1, 4096)).unwrap();
     let mut model = Model::default();
 
     let tape = [
@@ -684,22 +959,74 @@ if (broker.activeCount() !== 0 || broker.cancelAll() !== 0) throw new Error("sur
             detail: 2,
             text: "ok",
         },
+        browser_event(0, 0, 0, ""),
+        browser_event(3, 1, 1, "https://example.test/b.fe"),
+        task_event(9, 99, 200, 5, "stale", 0),
+        task_event(9, 12, 200, 8, "actor B", 0),
+        browser_event(3, 2, 1, "https://example.test/missing-b.wgsl"),
+        task_event(10, 14, 404, 9, "not found", 0),
+        browser_event(3, 5, 0, ""),
     ];
     for (index, event) in tape.into_iter().enumerate() {
-        memory
-            .write(&mut store, scratch as usize, event.text.as_bytes())
-            .unwrap();
+        let task_message = event.kind == 13;
+        let resource_message = task_message && (event.target == 9 || event.target == 10);
+        if resource_message {
+            memory
+                .write(&mut store, initial[8] as usize, event.text.as_bytes())
+                .unwrap();
+        } else {
+            memory
+                .write(&mut store, scratch as usize, event.text.as_bytes())
+                .unwrap();
+        }
         reduce(&mut model, event);
         let params = [
             wasmtime::Val::I32(event.kind as i32),
             wasmtime::Val::I32(event.target as i32),
-            wasmtime::Val::I32(event.request as i32),
-            wasmtime::Val::I32(event.key as i32),
-            wasmtime::Val::I32(event.detail as i32),
+            wasmtime::Val::I32(if task_message {
+                0
+            } else {
+                event.request as i32
+            }),
+            wasmtime::Val::I32(if task_message { 0 } else { event.key as i32 }),
+            wasmtime::Val::I32(if task_message { 0 } else { event.detail as i32 }),
             wasmtime::Val::F32(0.0f32.to_bits()),
             wasmtime::Val::F32((index as f32).to_bits()),
-            wasmtime::Val::I32(if event.text.is_empty() { 0 } else { scratch }),
-            wasmtime::Val::I32(event.text.len() as i32),
+            wasmtime::Val::I32(if task_message || event.text.is_empty() {
+                0
+            } else {
+                scratch
+            }),
+            wasmtime::Val::I32(if task_message {
+                0
+            } else {
+                event.text.len() as i32
+            }),
+            wasmtime::Val::I32(if resource_message {
+                event.request as i32
+            } else {
+                0
+            }),
+            wasmtime::Val::I32(if resource_message {
+                event.key as i32
+            } else {
+                0
+            }),
+            wasmtime::Val::I32(if resource_message {
+                event.detail as i32
+            } else {
+                0
+            }),
+            wasmtime::Val::I32(if resource_message {
+                event.text.len() as i32
+            } else {
+                0
+            }),
+            wasmtime::Val::I32(if task_message && !resource_message {
+                event.detail as i32
+            } else {
+                0
+            }),
         ];
         let mut actual_results = vec![wasmtime::Val::I32(0); STATE_LEAVES];
         transition
@@ -707,30 +1034,29 @@ if (broker.activeCount() !== 0 || broker.cancelAll() !== 0) throw new Error("sur
             .unwrap_or_else(|error| panic!("SourceInspector event {index}: {error}"));
         let actual = i32_results(&actual_results);
         assert_eq!(
-            (actual[0], actual[1], actual[7]),
+            (actual[0], actual[1], actual[2], actual[8]),
             pointers,
             "persistent pointers at {index}"
         );
         assert_eq!(
-            actual[2] as u32,
+            actual[3] as u32,
             model.url.len() as u32,
             "url length at {index}"
         );
-        assert_eq!(actual[3] as u32, model.selected, "selection at {index}");
+        assert_eq!(actual[4] as u32, model.selected, "selection at {index}");
         assert_eq!(
-            actual[4] as u32, model.pending,
+            actual[5] as u32, model.pending,
             "pending request at {index}"
         );
-        assert_eq!(actual[5] as u32, model.status, "status at {index}");
-        assert_eq!(actual[6] as u32, model.byte_len, "byte length at {index}");
+        assert_eq!(actual[6] as u32, model.status, "status at {index}");
+        assert_eq!(actual[7] as u32, model.byte_len, "byte length at {index}");
         assert_eq!(
-            actual[8] as u32,
+            actual[9] as u32,
             model.content.len() as u32,
             "content length at {index}"
         );
-        assert_eq!(actual[9] != 0, model.connected, "connected at {index}");
-        assert_eq!(actual[10] != 0, model.open, "open at {index}");
-        assert_eq!(actual[11] != 0, model.issue_load, "load effect at {index}");
+        assert_eq!(actual[10] != 0, model.connected, "connected at {index}");
+        assert_eq!(actual[11] != 0, model.open, "open at {index}");
         assert_eq!(
             actual[12] != 0,
             model.prevent_default,
@@ -738,6 +1064,25 @@ if (broker.activeCount() !== 0 || broker.cancelAll() !== 0) throw new Error("sur
         );
         assert_eq!(actual[13] != 0, model.focus_close, "focus at {index}");
         assert_eq!(actual[14] as u32, model.revision, "revision at {index}");
+        let mut control = [0u8; 20];
+        memory
+            .read(&store, initial[1] as usize, &mut control)
+            .unwrap();
+        let control_words = control
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            control_words,
+            [
+                model.control_revision,
+                model.control_request,
+                model.control_url_len,
+                u32::from(model.control_binary),
+                u32::from(model.control_active),
+            ],
+            "Fe-owned load command at {index}"
+        );
         assert_eq!(
             actual[15] as u32, model.surfaces_settled,
             "settled surfaces at {index}"

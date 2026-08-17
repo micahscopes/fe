@@ -53,6 +53,7 @@ test-utils.workspace = true
 url.workspace = true
 hir = { workspace = true, features = ["testutils"] }
 fe-webidl-bindgen = { path = "../webidl-bindgen" }
+fe-compiler-protocol = { path = "../compiler-protocol" }
 fe-host-runtime = { path = "../host-runtime" }
 # Execution harness for the Fe -> wasm acceptance test (mirrors the Sonatina
 # wasm backend's own wasmtime test versions).

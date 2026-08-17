@@ -424,6 +424,7 @@ impl DevelopmentRebuildCoordinator {
             load_source,
             render_compile,
             |_| Ok(None),
+            |_| Ok(None),
         )
     }
 
@@ -441,6 +442,12 @@ impl DevelopmentRebuildCoordinator {
             &Url,
         )
             -> Result<Option<fe_compiler_facade::PageProjectionResult>, String>,
+        mut component_compile: impl FnMut(
+            &Url,
+        ) -> Result<
+            Option<fe_compiler_facade::ResidentComponentCompileResult>,
+            String,
+        >,
     ) -> Vec<DevelopmentRebuildEvent> {
         if batch.generation != self.generation {
             return vec![DevelopmentRebuildEvent::Cancelled {
@@ -474,6 +481,7 @@ impl DevelopmentRebuildCoordinator {
                 &mut load_source,
                 &mut render_compile,
                 &mut page_compile,
+                &mut component_compile,
             );
             append_build_events(&mut events, document_url, report);
         }
@@ -574,6 +582,7 @@ impl DevelopmentPrecompiler {
             load,
             render_compile,
             |_| Ok(None),
+            |_| Ok(None),
         )
     }
 
@@ -592,6 +601,12 @@ impl DevelopmentPrecompiler {
             &Url,
         )
             -> Result<Option<fe_compiler_facade::PageProjectionResult>, String>,
+        component_compile: impl FnMut(
+            &Url,
+        ) -> Result<
+            Option<fe_compiler_facade::ResidentComponentCompileResult>,
+            String,
+        >,
     ) -> DevelopmentBuildReport {
         match discover_external_dependencies(document_url, html) {
             Ok(dependencies) => {
@@ -608,6 +623,7 @@ impl DevelopmentPrecompiler {
             load,
             render_compile,
             page_compile,
+            component_compile,
         ) {
             Ok(output) => {
                 let mut dependencies = self
@@ -1509,6 +1525,7 @@ pub fn precompile_html(
         load,
         |_, _| Ok(None),
         |_| Ok(None),
+        |_| Ok(None),
     )
 }
 
@@ -1529,6 +1546,7 @@ pub fn precompile_html_with_adapter_metadata(
         "",
         load,
         |_, _| Ok(None),
+        |_| Ok(None),
         |_| Ok(None),
     )
 }
@@ -1552,6 +1570,7 @@ pub fn precompile_html_with_adapter_plan(
         "",
         load,
         |_, _| Ok(None),
+        |_| Ok(None),
         |_| Ok(None),
     )
 }
@@ -1594,13 +1613,14 @@ pub fn precompile_html_with_render_lane(
         load,
         render_compile,
         |_| Ok(None),
+        |_| Ok(None),
     )
 }
 
-/// Native/full-workspace form of [`precompile_html_with_render_lane`]. A page
-/// compiler may project an external page source through an initialized ingot;
-/// returning `Ok(None)` retains the portable virtual-source facade. The typed
-/// page result remains in memory and never becomes a runtime manifest.
+/// Native/full-workspace form of [`precompile_html_with_render_lane`]. Page and
+/// resident-component compilers may consume external sources through initialized
+/// ingots; returning `Ok(None)` retains the portable virtual-source facade. The
+/// typed results remain in memory and never become runtime manifests.
 pub fn precompile_html_with_lanes(
     document_url: &str,
     html: &str,
@@ -1608,6 +1628,12 @@ pub fn precompile_html_with_lanes(
     load: impl FnMut(&Url) -> Result<String, String>,
     render_compile: impl FnMut(&Url, Option<&str>) -> Result<Option<RenderBundleArtifact>, String>,
     page_compile: impl FnMut(&Url) -> Result<Option<fe_compiler_facade::PageProjectionResult>, String>,
+    component_compile: impl FnMut(
+        &Url,
+    ) -> Result<
+        Option<fe_compiler_facade::ResidentComponentCompileResult>,
+        String,
+    >,
 ) -> Result<PrecompileOutput, PrecompileError> {
     precompile_html_impl(
         document_url,
@@ -1618,6 +1644,7 @@ pub fn precompile_html_with_lanes(
         load,
         render_compile,
         page_compile,
+        component_compile,
     )
 }
 
@@ -1634,6 +1661,12 @@ fn precompile_html_impl(
         &Url,
     )
         -> Result<Option<fe_compiler_facade::PageProjectionResult>, String>,
+    mut component_compile: impl FnMut(
+        &Url,
+    ) -> Result<
+        Option<fe_compiler_facade::ResidentComponentCompileResult>,
+        String,
+    >,
 ) -> Result<PrecompileOutput, PrecompileError> {
     let canonical_adapter = if adapter_metadata.is_none() && adapter_plan.is_none() {
         let world = fe_webidl_bindgen::parse(BROWSER_FETCH_WEBIDL).map_err(|error| {
@@ -1775,6 +1808,18 @@ fn precompile_html_impl(
         } else {
             entry_attr.unwrap_or_else(|| "main".to_owned())
         };
+        let initialized_component = if is_component {
+            let url = Url::parse(&source_url).map_err(|error| PrecompileError::Compile {
+                source_url: source_url.clone(),
+                detail: error.to_string(),
+            })?;
+            component_compile(&url).map_err(|detail| PrecompileError::Compile {
+                source_url: source_url.clone(),
+                detail,
+            })?
+        } else {
+            None
+        };
         let request = CompileRequest {
             protocol: ProtocolVersion::CURRENT,
             root: source_url.clone(),
@@ -1783,7 +1828,9 @@ fn precompile_html_impl(
             entries: vec![entry.clone()],
             options: CompileOptions::default(),
         };
-        let (result, component_view, scoped_tasks) = if is_component {
+        let (result, component_view, scoped_tasks) = if let Some(compiled) = initialized_component {
+            (compiled.compilation, compiled.view, compiled.scoped_tasks)
+        } else if is_component {
             let compiled =
                 fe_compiler_facade::compile_resident_component(&request).map_err(|error| {
                     PrecompileError::Compile {

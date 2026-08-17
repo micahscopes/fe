@@ -474,7 +474,6 @@ const COMPONENT_EVENT = Object.freeze({
   change: 5,
   submit: 6,
   keyDown: 7,
-  resourceLoaded: 8,
   surfaceDiscovered: 9,
   surfaceLive: 10,
   surfaceError: 11,
@@ -554,7 +553,6 @@ function textualEventValue(event, boundary) {
 
 const COMPONENT_INPUT_CAPACITY = 4096;
 const COMPONENT_COMMAND_LIMIT = 1024 * 1024;
-const COMPONENT_RESOURCE_LIMIT = COMPONENT_COMMAND_LIMIT - 4096;
 const componentTextEncoder = new TextEncoder();
 const componentTextDecoder = new TextDecoder("utf-8", { fatal: true });
 
@@ -624,13 +622,6 @@ export function decodeComponentCommands(bytes) {
         operations.push({ opcode, target, value: text() });
         break;
       }
-      case 12:
-      case 13: {
-        const request = word();
-        if (request === 0) throw new Error("fe-component resource request zero is reserved");
-        operations.push({ opcode, request, value: text() });
-        break;
-      }
       case 6:
       case 7:
       case 10: {
@@ -680,7 +671,6 @@ export class FeComponentElement extends FeHTMLElement {
     this._listeners = null;
     this._inputScratch = 0;
     this._inputCapacity = 0;
-    this._resourceLoads = new Set();
     this._keyedRows = new WeakMap();
     this._surfaceObserver = null;
     this._discoveredSurfaces = new Set();
@@ -721,8 +711,6 @@ export class FeComponentElement extends FeHTMLElement {
     this._surfaceLoads.clear();
     this._surfaceTaskDeclarations = [];
     this._surfaceTaskCursor = 0;
-    for (const controller of this._resourceLoads) controller.abort();
-    this._resourceLoads.clear();
     this._scopedTaskLifetime?.abort();
     this._scopedTaskLifetime = null;
   }
@@ -808,7 +796,27 @@ export class FeComponentElement extends FeHTMLElement {
     }
     this._surfaceTaskCursor = 0;
     for (const machine of this._scopedTaskMachines) {
-      this._scopedTaskBroker.run(machine, [], { signal: lifetime.signal }).catch(error => {
+      const inputWidth = machine.inputWidth ?? 0;
+      if (!Number.isSafeInteger(inputWidth) || inputWidth < 0) {
+        throw new TypeError("scoped Fe task has an invalid compiler-derived input width");
+      }
+      let input = [];
+      if (inputWidth !== 0) {
+        if (inputWidth !== this._state.length) {
+          throw new Error(
+            `scoped Fe task input has ${inputWidth} lanes; actor state has ${this._state.length}`,
+          );
+        }
+        // A self-receiving scoped behavior gets one immutable snapshot of the
+        // actor's complete initialized state. JavaScript neither selects fields
+        // nor interprets them; shared Fe-owned pointers inside that state are
+        // the explicit communication capability.
+        if (typeof machine.liftInput !== "function") {
+          throw new TypeError("scoped Fe task has no compiler-derived input lifter");
+        }
+        input = machine.liftInput(this._state);
+      }
+      this._scopedTaskBroker.run(machine, input, { signal: lifetime.signal }).catch(error => {
         if (error?.name !== "AbortError") this._fail(error);
       });
     }
@@ -969,15 +977,22 @@ export class FeComponentElement extends FeHTMLElement {
     const bytes = boundedUtf8(value, limit);
     if (bytes.byteLength === 0) return [0, 0];
     const exports = this._instance?.exports;
-    if (!(exports?.memory instanceof WebAssembly.Memory) ||
-        typeof exports?.fe_cabi_alloc !== "function") {
+    if (!(exports?.memory instanceof WebAssembly.Memory)) {
       throw new Error("fe-component rich input requires Fe canonical Wasm memory");
+    }
+    const allocate = typeof exports.fe_cabi_alloc === "function"
+      ? (size, align) => exports.fe_cabi_alloc(size, align)
+      : typeof exports.cabi_realloc === "function"
+        ? (size, align) => exports.cabi_realloc(0, 0, align, size)
+        : undefined;
+    if (allocate === undefined) {
+      throw new Error("fe-component rich input requires a canonical Wasm allocator");
     }
     if (bytes.byteLength > this._inputCapacity) {
       let capacity = COMPONENT_INPUT_CAPACITY;
       while (capacity < bytes.byteLength) capacity *= 2;
-      if (capacity > COMPONENT_RESOURCE_LIMIT) capacity = COMPONENT_RESOURCE_LIMIT;
-      this._inputScratch = exports.fe_cabi_alloc(capacity, 1) >>> 0;
+      if (capacity > COMPONENT_COMMAND_LIMIT) capacity = COMPONENT_COMMAND_LIMIT;
+      this._inputScratch = allocate(capacity, 1) >>> 0;
       this._inputCapacity = capacity;
     }
     const end = this._inputScratch + bytes.byteLength;
@@ -988,11 +1003,11 @@ export class FeComponentElement extends FeHTMLElement {
     return [this._inputScratch, bytes.byteLength];
   }
 
-  _send(kind, target, request, key, detail, value, timestamp, text = "", textLimit = COMPONENT_INPUT_CAPACITY) {
+  _send(kind, target, request, key, detail, value, timestamp, text = "") {
     if (!this._instance || !this._initialized) {
       throw new Error("fe-component received an event before Fe initialization");
     }
-    const [textPointer, textLength] = this._writeEventText(text, textLimit);
+    const [textPointer, textLength] = this._writeEventText(text);
     return this._sendBrowserEvent([
       kind >>> 0,
       target >>> 0,
@@ -1177,10 +1192,6 @@ export class FeComponentElement extends FeHTMLElement {
         scope = this;
         continue;
       }
-      if (operation.opcode === 12 || operation.opcode === 13) {
-        this._loadResource(operation, operation.opcode === 12);
-        continue;
-      }
       if (operation.opcode === 14) {
         // Legacy artifacts only; the canonical gallery cannot reach this path.
         this._loadSurface(operation);
@@ -1308,70 +1319,6 @@ export class FeComponentElement extends FeHTMLElement {
         );
       }
     });
-  }
-
-  _loadResource(operation, asText) {
-    let url;
-    try {
-      url = new URL(operation.value, this.baseURI);
-      if (url.origin !== new URL(this.baseURI).origin) {
-        throw new Error("resource effects require a same-origin URL");
-      }
-    } catch (error) {
-      this._deliverResource(operation.request, 0, 0, String(error));
-      return;
-    }
-    const controller = new AbortController();
-    this._resourceLoads.add(controller);
-    (async () => {
-      try {
-        const response = await fetch(url, {
-          mode: "same-origin",
-          credentials: "same-origin",
-          signal: controller.signal,
-        });
-        if (new URL(response.url).origin !== url.origin) {
-          throw new Error("resource effect redirected across origins");
-        }
-        const bytes = new Uint8Array(await response.arrayBuffer());
-        if (bytes.byteLength > COMPONENT_RESOURCE_LIMIT) {
-          throw new Error(`resource exceeds ${COMPONENT_RESOURCE_LIMIT} byte component limit`);
-        }
-        let body = "";
-        if (asText) body = componentTextDecoder.decode(bytes);
-        this._deliverResource(
-          operation.request,
-          response.status >>> 0,
-          bytes.byteLength >>> 0,
-          body,
-        );
-      } catch (error) {
-        if (error?.name !== "AbortError") {
-          this._deliverResource(operation.request, 0, 0, String(error));
-        }
-      } finally {
-        this._resourceLoads.delete(controller);
-      }
-    })();
-  }
-
-  _deliverResource(request, status, byteLength, text) {
-    if (!this._active) return;
-    try {
-      this._send(
-        COMPONENT_EVENT.resourceLoaded,
-        0,
-        request,
-        status,
-        byteLength,
-        0,
-        performance.now(),
-        text,
-        COMPONENT_RESOURCE_LIMIT,
-      );
-    } catch (error) {
-      this._fail(error);
-    }
   }
 
   _fail(error) {

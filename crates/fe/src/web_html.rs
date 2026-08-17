@@ -43,6 +43,7 @@ pub fn precompile(html_path: &Utf8Path, output: &Utf8Path) -> Result<(), String>
         },
         crate::web::render_compile,
         crate::web::page_compile,
+        crate::web::component_compile,
     )
     .map_err(|error| error.to_string())?;
     tracing::info!(
