@@ -322,16 +322,20 @@ Legend:
   honest depth-20 gas measurement exist. Gates:
   `rollcall_registry_accept_reject_and_claim_at_depth4` and
   `rollcall_registry_gas_at_depth20_is_l2_honest`.
-- [~] The field-agnostic S0 browser engine exists as `fe-revm-browser`. It is a
+- [x] The field-agnostic S0 browser engine exists as `fe-revm-browser`. It is a
   generic persistent revm session that accepts only raw Fe EVM runtime bytes
   and raw calldata, with no ABI, proof, packing, or application logic in Rust
   or JavaScript. The existing native Rollcall test derives and byte-pins the
   depth-4 runtime plus commit/accept/reject calldata. The `wasm32-unknown-unknown`
   engine executes those vectors and returns the exact native-derived true and
-  false ABI words. The remaining S0 gate is the same execution in actual
-  Chromium; local `wasm-pack` reached the browser runner but this host lacks a
-  discoverable `chromedriver`. This is same-source cross-target parity. The
-  independently derived Rollcall/Poseidon gates remain semantic truth.
+  false ABI words. The same test now executes in actual Chrome for Testing
+  152.0.7977.42 through its matching ChromeDriver. Gate:
+  `wasm-pack test --chrome --headless --chromedriver <driver> --release`
+  `crates/revm-browser --features browser-tests` with
+  `WASM_BINDGEN_TEST_WEBDRIVER_JSON` selecting the browser binary;
+  `fe_rollcall_verifier_matches_native_accept_and_reject_vectors` passes. This
+  is same-source cross-target parity. The independently derived
+  Rollcall/Poseidon gates remain semantic truth.
 - [x] The same Fe loop-form Merkle body compiles to Naga-valid SPIR-V. Gates:
   `poseidon_merkle_root_loop_compiles_naga_valid_spirv`,
   `poseidon_merkle8_root_loop_compiles_naga_valid_spirv`, and
@@ -621,23 +625,21 @@ fallback. The semantic receipts are:
 
 ## Immediate burn-down order
 
-1. Finish S0 by running the existing Rollcall accept/reject vectors through
-   revm-Wasm in actual Chromium. Keep the bridge raw and application-blind.
-2. Run the external real-GPU handoff above before beginning the proof GPU port.
-3. Add canonical proof encoding around the now-authenticated BN254 AIR/FRI
+1. Run the external real-GPU handoff above before beginning the proof GPU port.
+2. Add canonical proof encoding around the now-authenticated BN254 AIR/FRI
    query, including systematic malformed-receipt rejection and one complete
    end-to-end accept/reject boundary.
-4. Retarget the protocol to BabyBear with independent exactness gates, then
+3. Retarget the protocol to BabyBear with independent exactness gates, then
    derive the multi-limb chunk and recursive-accumulator statement. Do not port
    BN254 Fr to WGSL.
-5. Lower the BabyBear leaf prover and recursive merges through Fe Conal/CTFE
+4. Lower the BabyBear leaf prover and recursive merges through Fe Conal/CTFE
    WebGPU schedules, then run the complete progressive proof/verify/tamper page
    through Chrome.
-6. With multiple nominal child namespaces landed, generalize the render-owned
+5. With multiple nominal child namespaces landed, generalize the render-owned
    DEC path to rich canonical port payloads and nested scopes, then execute it
    in real Chromium.
-7. Delete the runtime manifest and finish the legacy disposition.
-8. Run the exact G5 command once at the final DONE gate.
+6. Delete the runtime manifest and finish the legacy disposition.
+7. Run the exact G5 command once at the final DONE gate.
 
 The Definition of done is not yet met. In particular, the real-GPU gate,
 manifest deletion, Worker/DEC general messaging, complete legacy disposition,
