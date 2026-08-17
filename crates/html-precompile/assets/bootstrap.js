@@ -1479,6 +1479,9 @@ async function run(element) {
         const needsWorkerScopeCapability = WebAssembly.Module.imports(module).some(
           value => value.module === "fe:worker-scope",
         );
+        const needsWorkerMailboxCapability = WebAssembly.Module.imports(module).some(
+          value => value.module === "fe:worker-mailbox",
+        );
         const brokerOptions = {};
         if (needsSurfaceCapability) {
           brokerOptions.surface = {
@@ -1532,17 +1535,33 @@ async function run(element) {
             },
           };
         }
-        if (needsWorkerScopeCapability) {
+        let structuredWorkerScope;
+        if (needsWorkerScopeCapability || needsWorkerMailboxCapability) {
           if (typeof taskModule.createStructuredWorkerScope !== "function") {
             throw new Error(
-              "fe:worker-scope requires a compiler-derived structured child package",
+              "Worker effects require a compiler-derived structured child package",
             );
           }
-          brokerOptions.workerScope = await taskModule.createStructuredWorkerScope();
+          structuredWorkerScope = await taskModule.createStructuredWorkerScope();
+          brokerOptions.workerScope = structuredWorkerScope;
+        }
+        const broker = taskModule.createHostCompletionBroker(brokerOptions);
+        let workerMailboxImports;
+        if (needsWorkerMailboxCapability) {
+          if (typeof taskModule.createStructuredWorkerMailbox !== "function") {
+            throw new Error(
+              "fe:worker-mailbox requires a compiler-derived mailbox adapter",
+            );
+          }
+          workerMailboxImports = taskModule.createStructuredWorkerMailbox(
+            structuredWorkerScope,
+            broker.completions,
+          );
         }
         scopedTasks = {
           taskModule,
-          broker: taskModule.createHostCompletionBroker(brokerOptions),
+          broker,
+          imports: workerMailboxImports,
           surfaceScope,
           machines: null,
         };
@@ -1566,6 +1585,7 @@ async function run(element) {
       const directImports = {};
       mergeImports(directImports, selectedImports);
       mergeImports(directImports, scopedTasks?.broker.imports);
+      mergeImports(directImports, scopedTasks?.imports);
       const imports = await importsFor(context, directImports);
       for (const required of WebAssembly.Module.imports(module)) {
         if (!Object.hasOwn(imports, required.module) ||

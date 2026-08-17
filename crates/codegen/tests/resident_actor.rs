@@ -7,7 +7,8 @@ use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
     CanonicalType, RESIDENT_ACTOR_INITIALIZE_EXPORT, RESIDENT_ACTOR_PROJECT_EXPORT,
-    RESIDENT_ACTOR_STATE_REPLACE_EXPORT, RESIDENT_ACTOR_TRANSITION_EXPORT, compile_resident_actor,
+    RESIDENT_ACTOR_STATE_REPLACE_EXPORT, RESIDENT_ACTOR_TRANSITION_EXPORT,
+    browser_actor_runtime_files, compile_resident_actor, emit_canonical_interface_js,
     emit_materialized_task_adapter_js,
 };
 use hir::hir_def::HirIngot;
@@ -83,8 +84,14 @@ actor Clock {
 fn structured_child_fixture() -> (DriverDataBase, common::file::File) {
     const SOURCE: &str = r#"
 use core::Worker
-use core::actor::{InitialState, ProjectState, ResidentTransition, ScopedTask}
-use std::runtime::{ChildScopeExit, supervise_browser_child}
+use core::actor::{
+    ActorMailbox, ActorSink, InitialState, ProjectState, ResidentTransition, ScopedTask,
+}
+use core::pending::{Pending, Suspend, TaskOutcome}
+use std::actor::{ActorMessage, BrowserActorSink}
+use std::host::Resumable
+use std::runtime::{BrowserActorMailbox, ChildScopeExit, supervise_browser_child}
+use std::wasm::WasmBackend
 
 pub struct Request { pub value: u32 }
 pub struct Response { pub value: u32 }
@@ -98,11 +105,21 @@ actor ArithmeticChild {
     }
 }
 
+fn request_double(_ request: own Request) -> TaskOutcome<u32, Response>
+uses (
+    mailbox: mut ActorMailbox<WasmBackend, ArithmeticChild>,
+    suspend: Suspend<WasmBackend, u32>,
+)
+{
+    let pending: Pending<WasmBackend, Response> = mailbox.ask(request)
+    suspend.suspend(pending)
+}
+
 actor Parent {
     value: u32,
 
     fn initial() -> ParentState uses (InitialState) {
-        ParentState { value: 0 }
+        ParentState { value: 21 }
     }
 
     fn receive(self, event: ParentEvent) -> ParentState uses (ResidentTransition) {
@@ -127,12 +144,144 @@ actor Parent {
             ChildScopeExit::InvariantViolation(epoch, _) => epoch
         }
     }
+
+    fn calculate(self) -> u32 uses (ScopedTask) {
+        let value = with (
+            ActorMailbox<WasmBackend, ArithmeticChild> = BrowserActorMailbox<ArithmeticChild> {},
+            Suspend<WasmBackend, u32> = Resumable {},
+        ) {
+            match request_double(Request { value: self.value }) {
+                TaskOutcome::Success(response,) => response.value
+                TaskOutcome::Failure(error,) => 100 + error
+                TaskOutcome::Cancelled => 200
+            }
+        }
+        with (
+            ActorSink<WasmBackend, ParentEvent> = BrowserActorSink {},
+            Suspend<WasmBackend, u32> = Resumable {},
+        ) {
+            match ActorMessage::new(ParentEvent { value: value }).send() {
+                TaskOutcome::Success(_,) => value
+                TaskOutcome::Failure(error,) => 300 + error
+                TaskOutcome::Cancelled => 400
+            }
+        }
+    }
 }
 "#;
     let mut db = DriverDataBase::default();
     let url = Url::parse("file:///web_component_structured_child.fe").unwrap();
     db.workspace()
         .touch(&mut db, url.clone(), Some(SOURCE.to_owned()));
+    let file = db.workspace().get(&db, &url).unwrap();
+    (db, file)
+}
+
+fn invalid_mailbox_fixture(
+    supervised: bool,
+    forged_response: bool,
+) -> (DriverDataBase, common::file::File) {
+    let claimed_response = if forged_response {
+        "WrongResponse"
+    } else {
+        "Response"
+    };
+    let forged_relation = if forged_response {
+        "impl Handles<Request, WrongResponse> for ArithmeticChild {}"
+    } else {
+        ""
+    };
+    let supervisor = if supervised {
+        r#"
+    fn supervise() -> u32 uses (ScopedTask) {
+        match supervise_browser_child(
+            child: ArithmeticChild {},
+            max_restarts: 1,
+            window_ms: 1000,
+            backoff_ms: 1,
+            startup_timeout_ms: 1000,
+        ) {
+            ChildScopeExit::Cancelled(epoch) => epoch
+            ChildScopeExit::Exhausted(epoch, _) => epoch
+            ChildScopeExit::TransportFailure(epoch, _) => epoch
+            ChildScopeExit::InvariantViolation(epoch, _) => epoch
+        }
+    }
+"#
+    } else {
+        ""
+    };
+    let source = format!(
+        r#"
+use core::Worker
+use core::actor::{{
+    ActorMailbox, Handles, InitialState, ProjectState, ResidentTransition, ScopedTask,
+}}
+use core::pending::{{Pending, Suspend, TaskOutcome}}
+use std::host::Resumable
+use std::runtime::{{BrowserActorMailbox, ChildScopeExit, supervise_browser_child}}
+use std::wasm::WasmBackend
+
+pub struct Request {{ pub value: u32 }}
+pub struct Response {{ pub value: u32 }}
+pub struct WrongResponse {{ pub value: u32 }}
+pub struct ParentEvent {{ pub value: u32 }}
+pub struct ParentState {{ pub value: u32 }}
+pub struct ParentProjection {{ pub value: u32 }}
+
+actor ArithmeticChild {{
+    fn double(request: Request) -> Response uses (Worker) {{
+        Response {{ value: request.value * 2 }}
+    }}
+}}
+
+{forged_relation}
+
+fn request_child(_ request: own Request) -> TaskOutcome<u32, {claimed_response}>
+uses (
+    mailbox: mut ActorMailbox<WasmBackend, ArithmeticChild>,
+    suspend: Suspend<WasmBackend, u32>,
+)
+{{
+    let pending: Pending<WasmBackend, {claimed_response}> = mailbox.ask(request)
+    suspend.suspend(pending)
+}}
+
+actor Parent {{
+    value: u32,
+
+    fn initial() -> ParentState uses (InitialState) {{
+        ParentState {{ value: 21 }}
+    }}
+
+    fn receive(self, event: ParentEvent) -> ParentState uses (ResidentTransition) {{
+        ParentState {{ value: self.value + event.value }}
+    }}
+
+    fn project(self) -> ParentProjection uses (ProjectState) {{
+        ParentProjection {{ value: self.value }}
+    }}
+
+{supervisor}
+
+    fn calculate(self) -> u32 uses (ScopedTask) {{
+        with (
+            ActorMailbox<WasmBackend, ArithmeticChild> = BrowserActorMailbox<ArithmeticChild> {{}},
+            Suspend<WasmBackend, u32> = Resumable {{}},
+        ) {{
+            match request_child(Request {{ value: self.value }}) {{
+                TaskOutcome::Success(response,) => response.value
+                TaskOutcome::Failure(error,) => 100 + error
+                TaskOutcome::Cancelled => 200
+            }}
+        }}
+    }}
+}}
+"#,
+    );
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///web_component_invalid_mailbox.fe").unwrap();
+    db.workspace().touch(&mut db, url.clone(), Some(source));
     let file = db.workspace().get(&db, &url).unwrap();
     (db, file)
 }
@@ -621,6 +770,33 @@ fn resident_actor_derives_a_separate_zero_import_child_from_the_fe_nominal_type(
     let artifact = compile_resident_actor(&db, top_mod)
         .expect("resident actor plus structured child contract")
         .expect("role-selected resident actor");
+    assert_eq!(artifact.scoped_tasks.len(), 2);
+    let parent_imports = wasmparser::Parser::new(0)
+        .parse_all(&artifact.wasm)
+        .filter_map(|payload| match payload.expect("valid parent Wasm") {
+            wasmparser::Payload::ImportSection(reader) => Some(
+                reader
+                    .into_imports()
+                    .map(|import| {
+                        let import = import.expect("valid parent import");
+                        (import.module.to_owned(), import.name.to_owned())
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+        .flatten()
+        .collect::<Vec<_>>();
+    let mailbox_imports = parent_imports
+        .iter()
+        .filter(|(module, _)| module == "fe:worker-mailbox")
+        .collect::<Vec<_>>();
+    let [mailbox_import] = mailbox_imports.as_slice() else {
+        panic!("expected exactly one typed Worker mailbox import: {parent_imports:?}")
+    };
+    assert!(mailbox_import.1.starts_with("request_"));
+    assert_ne!(mailbox_import.1, "ask_begin");
+    assert!(!mailbox_import.1.contains("double"));
     let child = artifact
         .structured_child
         .expect("nominal child type should select one actor artifact");
@@ -628,7 +804,11 @@ fn resident_actor_derives_a_separate_zero_import_child_from_the_fe_nominal_type(
     let [lane] = child.interface.lanes.as_slice() else {
         panic!("expected exactly one canonical child lane")
     };
-    assert_eq!(lane.name, "double");
+    assert!(lane.name.starts_with("request_"));
+    assert!(!lane.name.contains("double"));
+    assert_eq!(lane.name, mailbox_import.1);
+    let expected_export = format!("fe_cabi_{}", lane.name);
+    assert_eq!(lane.export.as_deref(), Some(expected_export.as_str()));
     assert_eq!(
         lane.intent.placement,
         fe_codegen::CanonicalPlacement::Worker
@@ -677,6 +857,201 @@ fn resident_actor_derives_a_separate_zero_import_child_from_the_fe_nominal_type(
         .read(&store, response as usize, &mut value)
         .expect("read child response");
     assert_eq!(u32::from_le_bytes(value), 42);
+}
+
+#[test]
+fn resident_actor_typed_mailbox_round_trips_through_the_compiled_child() {
+    if !std::process::Command::new("bun")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        return;
+    }
+
+    let (db, file) = structured_child_fixture();
+    let top_mod = db.top_mod(file);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "structured-child round-trip diagnostics:\n{diagnostics}"
+    );
+    let artifact = compile_resident_actor(&db, top_mod)
+        .expect("resident actor plus structured child contract")
+        .expect("role-selected resident actor");
+    let child = artifact
+        .structured_child
+        .as_ref()
+        .expect("compiler-derived child artifact");
+    let [lane] = child.interface.lanes.as_slice() else {
+        panic!("expected exactly one canonical child lane")
+    };
+
+    let directory = tempfile::tempdir().expect("typed mailbox execution directory");
+    let parent_wasm = directory.path().join("parent.wasm");
+    let child_wasm = directory.path().join("child.wasm");
+    let task_adapter = directory.path().join("tasks.mjs");
+    let task_runtime = directory.path().join("materialized-task.js");
+    let host_runtime = directory.path().join("host-completion.js");
+    let interface = directory.path().join("interface.js");
+    std::fs::write(&parent_wasm, &artifact.wasm).unwrap();
+    std::fs::write(&child_wasm, &child.wasm).unwrap();
+    std::fs::write(
+        &task_adapter,
+        emit_materialized_task_adapter_js(&artifact.scoped_tasks, "./materialized-task.js")
+            .expect("emit typed mailbox tasks")
+            .expect("typed mailbox tasks exist"),
+    )
+    .unwrap();
+    std::fs::write(&task_runtime, fe_codegen::MATERIALIZED_TASK_RUNTIME_JS).unwrap();
+    std::fs::write(&host_runtime, fe_codegen::HOST_COMPLETION_RUNTIME_JS).unwrap();
+    std::fs::write(
+        &interface,
+        emit_canonical_interface_js(&child.interface).expect("emit child interface"),
+    )
+    .unwrap();
+    for (relative, source) in browser_actor_runtime_files() {
+        let path = directory.path().join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, source).unwrap();
+    }
+
+    let runner = directory.path().join("run-mailbox.mjs");
+    std::fs::write(
+        &runner,
+        format!(
+            r#"
+import {{ createMaterializedTaskRegistry }} from {tasks:?};
+import {{ createHostCompletionBroker }} from {host:?};
+import {{ createModuleWorkerScope }} from "./runtime/module-worker-actor.js";
+import {{ createCanonicalWorkerMailboxImports }} from "./runtime/actor-client.js";
+import {{ createInterfaceCaller, compileActorMailbox }} from "./interface.js";
+
+const parentBytes = await Bun.file({parent_wasm:?}).arrayBuffer();
+const childBytes = await Bun.file({child_wasm:?}).arrayBuffer();
+const child = await WebAssembly.instantiate(childBytes, {{}});
+const caller = createInterfaceCaller(child.instance.exports);
+const mailbox = compileActorMailbox();
+const lane = {lane:?};
+if (Object.keys(mailbox).length !== 1 || !Object.hasOwn(mailbox, lane)) {{
+  throw new Error("compiler-derived mailbox lane drifted");
+}}
+
+const tape = [];
+const scope = createModuleWorkerScope({{
+  async createActor({{ initialEpoch }}) {{
+    tape.push(["spawn", initialEpoch]);
+    let epoch = initialEpoch;
+    return {{
+      request(actualLane, payload, requestId, {{ signal }}) {{
+        if (signal?.aborted) throw new DOMException("cancelled", "AbortError");
+        tape.push(["request", actualLane, payload.value, requestId]);
+        return caller.call(actualLane, payload);
+      }},
+      async restart() {{ epoch += 1; return epoch; }},
+      observeFailure() {{ return new Promise(() => {{}}); }},
+      close() {{ tape.push(["close", epoch]); }},
+      epoch() {{ return epoch; }},
+      status() {{ return {{ state: "ready" }}; }},
+    }};
+  }},
+}});
+await scope.spawn(0);
+
+let instance;
+let residentValue;
+const accepted = [];
+const broker = createHostCompletionBroker({{
+  workerScope: scope,
+  actorEvents: {{
+    send(event, signal) {{
+      if (signal.aborted) throw new DOMException("cancelled", "AbortError");
+      accepted.push(event);
+      residentValue = instance.exports.fe_actor_transition_v1(...event);
+    }},
+  }},
+}});
+const mailboxImports = createCanonicalWorkerMailboxImports({{
+  scope,
+  completions: broker.completions,
+  mailbox,
+}});
+const imports = Object.assign({{}}, broker.imports, mailboxImports);
+({{ instance }} = await WebAssembly.instantiate(parentBytes, imports));
+const initialized = instance.exports.fe_actor_initialize_v1();
+const initialValue = Array.isArray(initialized) ? initialized[0] : initialized;
+if (initialValue !== 21) throw new Error(`bad resident initial state ${{initialized}}`);
+const tasks = createMaterializedTaskRegistry(instance.exports);
+const output = await broker.run(tasks.calculate, [initialValue]);
+if (output.length !== 1 || output[0] !== 42) {{
+  throw new Error(`typed mailbox task returned ${{output}}`);
+}}
+if (residentValue !== 63 || accepted.length !== 1) {{
+  throw new Error(`typed response did not reach resident Fe: ${{residentValue}}`);
+}}
+if (JSON.stringify(tape) !== JSON.stringify([
+  ["spawn", 0], ["request", lane, 21, 0],
+])) {{
+  throw new Error(`mailbox route or payload drifted: ${{JSON.stringify(tape)}}`);
+}}
+if (broker.activeCount() !== 0) throw new Error("typed mailbox leaked completion tokens");
+scope.close(0);
+"#,
+            tasks = Url::from_file_path(&task_adapter).unwrap().to_string(),
+            host = Url::from_file_path(&host_runtime).unwrap().to_string(),
+            parent_wasm = parent_wasm.display().to_string(),
+            child_wasm = child_wasm.display().to_string(),
+            lane = lane.name,
+        ),
+    )
+    .unwrap();
+    let output = std::process::Command::new("bun")
+        .arg("run")
+        .arg(&runner)
+        .output()
+        .expect("run typed mailbox round trip under Bun");
+    assert!(
+        output.status.success(),
+        "typed mailbox round trip failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
+fn resident_actor_rejects_typed_mailbox_without_owning_child_scope() {
+    let (db, file) = invalid_mailbox_fixture(false, false);
+    let top_mod = db.top_mod(file);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "unscoped mailbox fixture diagnostics:\n{diagnostics}"
+    );
+    let error = compile_resident_actor(&db, top_mod)
+        .expect_err("a typed mailbox without an owning child scope must fail closed")
+        .to_string();
+    assert!(
+        error.contains("typed child mailbox requires an owning structured-child scope"),
+        "unexpected unscoped-mailbox diagnostic: {error}",
+    );
+}
+
+#[test]
+fn resident_actor_rejects_forged_handles_relation_without_child_behavior() {
+    let (db, file) = invalid_mailbox_fixture(true, true);
+    let top_mod = db.top_mod(file);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "forged mailbox fixture diagnostics:\n{diagnostics}"
+    );
+    let error = compile_resident_actor(&db, top_mod)
+        .expect_err("a handwritten Handles impl must not invent a child endpoint")
+        .to_string();
+    assert!(
+        error.contains("selects 0 Worker behaviors on `ArithmeticChild`; exactly one is required"),
+        "unexpected forged-mailbox diagnostic: {error}",
+    );
 }
 
 #[test]

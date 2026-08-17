@@ -3,6 +3,7 @@
 //! The fixed host realizes only Worker lifecycle mechanics. The parent module's
 //! target-neutral Fe loop owns policy, epochs, timers, and terminal meaning.
 
+use core::actor::{ActorMailbox, Handles}
 use core::pending::{Pending, PendingCancellation, Select, Suspend, Timer}
 use ingot::wasm::WasmBackend
 use super::{
@@ -15,9 +16,25 @@ use super::{
 }
 use super::super::host::{HostTimer, Resumable}
 use super::raw::{
+    ask_begin as raw_ask_begin,
     close as raw_close,
     failure_begin as raw_failure_begin,
     spawn_begin as raw_spawn_begin,
+}
+
+/// Browser interpretation of one nominal structured child's typed mailbox.
+///
+/// `C` never becomes a host-authored child identifier. It stays in the
+/// monomorphized Fe operation so the compiler can select exactly one authored
+/// child behavior from the request and response types.
+pub struct BrowserActorMailbox<C> {}
+
+impl<C> ActorMailbox<WasmBackend, C> for BrowserActorMailbox<C> {
+    fn ask<M, R>(mut self, _ message: own M) -> Pending<WasmBackend, R>
+        where C: Handles<M, R>
+    {
+        raw_ask_begin<C, M, R>(message)
+    }
 }
 
 pub struct BrowserChildPlacement<C> {}

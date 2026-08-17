@@ -580,6 +580,149 @@ function canonicalActorValidator(codec, name) {
   };
 }
 
+function mailboxScalarWidth(layout, path) {
+  switch (layout.kind) {
+    case "bool":
+    case "u8":
+    case "i32":
+    case "u32":
+    case "i64":
+    case "u64":
+    case "f32": return 1;
+    case "record": return layout.fields.reduce(
+      (width, field) => width + mailboxScalarWidth(field.layout, `${path}.${field.name}`),
+      0,
+    );
+    default:
+      throw new TypeError(
+        `${path} is not an owned scalar mailbox value; canonical memory transport is required`,
+      );
+  }
+}
+
+function liftMailboxScalar(layout, carriers, state, path) {
+  if (layout.kind === "record") {
+    return Object.fromEntries(layout.fields.map((field) => [
+      field.name,
+      liftMailboxScalar(field.layout, carriers, state, `${path}.${field.name}`),
+    ]));
+  }
+  if (state.index >= carriers.length) {
+    throw new TypeError(`${path} has no Wasm carrier`);
+  }
+  const raw = carriers[state.index++];
+  switch (layout.kind) {
+    case "bool":
+      if (raw !== 0 && raw !== 1) throw new TypeError(`${path} is not a Fe bool`);
+      return raw === 1;
+    case "u8": {
+      if (!Number.isInteger(raw) || (raw >>> 0) > 0xff) {
+        throw new TypeError(`${path} is not a Fe u8`);
+      }
+      return raw >>> 0;
+    }
+    case "i32":
+      if (!Number.isInteger(raw)) throw new TypeError(`${path} is not a Fe i32`);
+      return raw | 0;
+    case "u32":
+      if (!Number.isInteger(raw)) throw new TypeError(`${path} is not a Fe u32`);
+      return raw >>> 0;
+    case "i64":
+      if (typeof raw !== "bigint") throw new TypeError(`${path} is not a Fe i64`);
+      return BigInt.asIntN(64, raw);
+    case "u64":
+      if (typeof raw !== "bigint") throw new TypeError(`${path} is not a Fe u64`);
+      return BigInt.asUintN(64, raw);
+    case "f32":
+      if (typeof raw !== "number") throw new TypeError(`${path} is not a Fe f32`);
+      return Math.fround(raw);
+    default:
+      throw new TypeError(`${path} is not a scalar mailbox value`);
+  }
+}
+
+function lowerMailboxScalar(layout, value, output, path) {
+  if (layout.kind === "record") {
+    exactKeys(value, layout.fields.map((field) => field.name), path);
+    for (const field of layout.fields) {
+      lowerMailboxScalar(field.layout, value[field.name], output, `${path}.${field.name}`);
+    }
+    return;
+  }
+  switch (layout.kind) {
+    case "bool":
+      if (typeof value !== "boolean") throw new TypeError(`${path} must be boolean`);
+      output.push(value ? 1 : 0); return;
+    case "u8": output.push(uint(value, path, 0xff)); return;
+    case "i32":
+      if (!Number.isInteger(value) || value < -0x80000000 || value > 0x7fffffff) {
+        throw new TypeError(`${path} must be an i32`);
+      }
+      output.push(value); return;
+    case "u32": output.push(uint(value, path)); return;
+    case "i64":
+      if (typeof value !== "bigint" || value < -(1n << 63n) || value >= (1n << 63n)) {
+        throw new TypeError(`${path} must be an i64 bigint`);
+      }
+      output.push(value); return;
+    case "u64":
+      if (typeof value !== "bigint" || value < 0n || value >= (1n << 64n)) {
+        throw new TypeError(`${path} must be a u64 bigint`);
+      }
+      output.push(value); return;
+    case "f32":
+      if (typeof value !== "number") throw new TypeError(`${path} must be a number`);
+      output.push(Math.fround(value)); return;
+    default:
+      throw new TypeError(`${path} is not a scalar mailbox value`);
+  }
+}
+
+// Compile the scalar parent-Wasm to canonical child-value bridge from the
+// same interface which owns the child Wasm ABI. No request name, field list,
+// response width, or lane selector is supplied by application JavaScript.
+export function compileCanonicalActorMailbox(manifest) {
+  if (!manifest || !Array.isArray(manifest.lanes)) {
+    throw new TypeError("canonical actor interface required");
+  }
+  const lanes = Object.create(null);
+  for (const lane of manifest.lanes) {
+    if (Object.hasOwn(lanes, lane.name)) {
+      throw new TypeError(`duplicate canonical mailbox lane ${lane.name}`);
+    }
+    const requestWidth = mailboxScalarWidth(lane.request, `${lane.name} request`);
+    const responseWidth = mailboxScalarWidth(lane.response, `${lane.name} response`);
+    lanes[lane.name] = Object.freeze({
+      requestWidth,
+      responseWidth,
+      liftRequest(carriers) {
+        if (!Array.isArray(carriers) || carriers.length !== requestWidth) {
+          throw new TypeError(
+            `${lane.name} request must contain exactly ${requestWidth} Wasm carriers`,
+          );
+        }
+        const state = { index: 0 };
+        const value = liftMailboxScalar(
+          lane.request, carriers, state, `${lane.name} request`,
+        );
+        if (state.index !== carriers.length) {
+          throw new TypeError(`${lane.name} request left unconsumed Wasm carriers`);
+        }
+        return value;
+      },
+      lowerResponse(value) {
+        const output = [];
+        lowerMailboxScalar(lane.response, value, output, `${lane.name} response`);
+        if (output.length !== responseWidth) {
+          throw new TypeError(`${lane.name} response scalar width drifted`);
+        }
+        return output;
+      },
+    });
+  }
+  return Object.freeze(lanes);
+}
+
 function canonicalTransferList(layout, value, name, output, seen) {
   switch (layout.kind) {
     case "bytes": {

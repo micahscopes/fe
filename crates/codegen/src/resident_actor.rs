@@ -207,6 +207,156 @@ fn actor_for_nominal_ty<'a, 'db>(
     actors.iter().find(|actor| actor.state == state)
 }
 
+fn canonical_mailbox_scalar_value(ty: &CanonicalType) -> bool {
+    match ty {
+        CanonicalType::Bool
+        | CanonicalType::U8
+        | CanonicalType::I32
+        | CanonicalType::U32
+        | CanonicalType::I64
+        | CanonicalType::U64
+        | CanonicalType::F32 => true,
+        CanonicalType::Record(fields) => fields
+            .iter()
+            .all(|field| canonical_mailbox_scalar_value(&field.ty)),
+        CanonicalType::Variant(_)
+        | CanonicalType::Bytes
+        | CanonicalType::String
+        | CanonicalType::List { .. } => false,
+    }
+}
+
+/// Prove that each parent mailbox import denotes one actual behavior on the
+/// nominal supervised child. The public `Handles` bound is useful authoring
+/// evidence, but this compiler check deliberately does not trust a manually
+/// written impl of that trait to invent a Worker endpoint.
+fn validate_actor_mailbox_requests(
+    db: &DriverDataBase,
+    top_mod: TopLevelMod<'_>,
+    package: mir::RuntimePackage<'_>,
+) -> Result<(), ResidentActorError> {
+    let actors = semantic_actors(db, top_mod);
+    let supervised_child = worker_scope_child_ty(db, package)?;
+    for function in package.functions(db) {
+        let instance = function.instance(db);
+        if mir::runtime_actor_effect_kind(db, instance)
+            != Some(mir::RuntimeActorEffectFuncKind::AskBegin)
+        {
+            continue;
+        }
+        let Some(expected_child) = supervised_child else {
+            return Err(ResidentActorError::Contract(
+                "typed child mailbox requires an owning structured-child scope".to_owned(),
+            ));
+        };
+        if mir::host_import_module(db, instance).as_deref() != Some("fe:worker-mailbox") {
+            return Err(ResidentActorError::Contract(
+                "typed child mailbox resolved outside its nominal host namespace".to_owned(),
+            ));
+        }
+        let semantic = instance.key(db).semantic(db).ok_or_else(|| {
+            ResidentActorError::Contract(
+                "typed child mailbox operation is not a semantic Fe import".to_owned(),
+            )
+        })?;
+        let args = semantic.key(db).subst(db).generic_args(db);
+        let [child, request, response] = args.as_slice() else {
+            return Err(ResidentActorError::Contract(format!(
+                "typed child mailbox must retain child, request, and response types; found {} generic arguments",
+                args.len(),
+            )));
+        };
+        let child = child.as_view(db).unwrap_or(*child);
+        let expected_child = expected_child.as_view(db).unwrap_or(expected_child);
+        if child != expected_child {
+            return Err(ResidentActorError::Contract(format!(
+                "typed mailbox child `{}` differs from supervised child `{}`",
+                child.pretty_print(db),
+                expected_child.pretty_print(db),
+            )));
+        }
+        let request = request.as_view(db).unwrap_or(*request);
+        let response = response.as_view(db).unwrap_or(*response);
+        let actor = actor_for_nominal_ty(db, &actors, child).ok_or_else(|| {
+            ResidentActorError::Contract(format!(
+                "typed mailbox child `{}` is not an actor in this module",
+                child.pretty_print(db),
+            ))
+        })?;
+        let matches = actor
+            .behaviors
+            .iter()
+            .copied()
+            .filter(|behavior| {
+                let Ok(intent) = canonical_lane_intent(db, *behavior) else {
+                    return false;
+                };
+                if intent.execution != CanonicalExecution::Wasm
+                    || intent.placement != CanonicalPlacement::Worker
+                {
+                    return false;
+                }
+                let candidate_args = behavior.arg_tys(db);
+                let [candidate] = candidate_args.as_slice() else {
+                    return false;
+                };
+                let candidate = candidate
+                    .skip_binder()
+                    .as_view(db)
+                    .unwrap_or(*candidate.skip_binder());
+                let returned = behavior
+                    .return_ty(db)
+                    .as_view(db)
+                    .unwrap_or(behavior.return_ty(db));
+                candidate == request && returned == response
+            })
+            .collect::<Vec<_>>();
+        let [behavior] = matches.as_slice() else {
+            return Err(ResidentActorError::Contract(format!(
+                "typed mailbox edge `{} -> {}` selects {} Worker behaviors on `{}`; exactly one is required",
+                request.pretty_print(db),
+                response.pretty_print(db),
+                matches.len(),
+                child.pretty_print(db),
+            )));
+        };
+        let request_value = canonical_type_from_semantic(db, request, "worker_mailbox_request")
+            .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
+        let response_value = canonical_type_from_semantic(db, response, "worker_mailbox_response")
+            .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
+        if !canonical_mailbox_scalar_value(&request_value)
+            || !canonical_mailbox_scalar_value(&response_value)
+        {
+            return Err(ResidentActorError::Contract(
+                "typed child mailbox currently requires owned scalar records; borrowed descriptors and payload variants need the canonical post-return memory bridge"
+                    .to_owned(),
+            ));
+        }
+        let import = mir::host_import_name(db, instance).ok_or_else(|| {
+            ResidentActorError::Contract("typed child mailbox has no generated import".to_owned())
+        })?;
+        let expected_import = mir::actor_mailbox_import_name(db, child, request, response);
+        if import != expected_import {
+            return Err(ResidentActorError::Contract(format!(
+                "typed child mailbox import `{import}` differs from its semantic edge `{expected_import}`"
+            )));
+        }
+        let behavior_name = behavior
+            .name(db)
+            .to_opt()
+            .map(|name| name.data(db).to_owned())
+            .unwrap_or_else(|| "<unnamed>".to_owned());
+        let declaration = canonical_lane_decl_from_func(db, *behavior, &behavior_name, &import)
+            .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
+        if declaration.request != request_value || declaration.response != response_value {
+            return Err(ResidentActorError::Contract(
+                "typed child mailbox edge differs from its canonical Worker declaration".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn wasm_imports(wasm: &[u8]) -> Result<Vec<String>, ResidentActorError> {
     let mut imports = Vec::new();
     for payload in wasmparser::Parser::new(0).parse_all(wasm) {
@@ -274,8 +424,24 @@ fn compile_structured_child(
                 "structured child actor `{actor_name}` behavior `{name}` must execute as Wasm"
             )));
         }
-        let declaration = canonical_lane_decl_from_func(db, *behavior, &name, &name)
+        let behavior_args = behavior.arg_tys(db);
+        let [request] = behavior_args.as_slice() else {
+            return Err(ResidentActorError::Contract(format!(
+                "structured child actor `{actor_name}` behavior `{name}` must take exactly one request"
+            )));
+        };
+        let request = request
+            .skip_binder()
+            .as_view(db)
+            .unwrap_or(*request.skip_binder());
+        let response = behavior
+            .return_ty(db)
+            .as_view(db)
+            .unwrap_or(behavior.return_ty(db));
+        let lane = mir::actor_mailbox_import_name(db, child_ty, request, response);
+        let mut declaration = canonical_lane_decl_from_func(db, *behavior, &name, &lane)
             .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
+        declaration.export = Some(format!("fe_cabi_{lane}"));
         entries.push(name);
         declarations.push(declaration);
     }
@@ -288,7 +454,10 @@ fn compile_structured_child(
         .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
     let package = mir::build_wasm_runtime_package_for_entries(db, top_mod, &entries)
         .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
-    let options = WasmCompileOptions::default().with_canonical_lanes(interface.lanes.clone());
+    let mut options = WasmCompileOptions::default().with_canonical_lanes(interface.lanes.clone());
+    for (source, lane) in entries.iter().zip(&interface.lanes) {
+        options = options.with_export_alias(source, &lane.name);
+    }
     let options = if optimize {
         options.with_optimization()
     } else {
@@ -802,6 +971,7 @@ pub fn compile_resident_actor_with_optimization(
     let package = mir::build_wasm_runtime_package_for_entries(db, top_mod, &entries)
         .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
     validate_actor_sink_events(db, &package, &contract)?;
+    validate_actor_mailbox_requests(db, top_mod, package)?;
     let scoped_tasks =
         materialized_task_adapters(db, &package).map_err(ResidentActorError::Lower)?;
     if scoped_tasks.len() != contract.scoped_task_source_entries.len() {

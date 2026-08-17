@@ -260,6 +260,8 @@ pub fn emit_canonical_interface_js(
          return createCanonicalInterfaceCaller(compiledCanonicalInterface, exports);\n}}\n\
          export function compileActorAdapter() {{\n  \
          return compileCanonicalActorAdapter(canonicalInterfaceManifest, compiledCanonicalInterface);\n}}\n\
+         export function compileActorMailbox() {{\n  \
+         return compileCanonicalActorMailbox(canonicalInterfaceManifest);\n}}\n\
          export function createActorAdapter(exports, options) {{\n  \
          return createCanonicalActorAdapter(canonicalInterfaceManifest, compiledCanonicalInterface, exports, options);\n}}\n\
          export function createHostEffectAdapter(handlers, options) {{\n  \

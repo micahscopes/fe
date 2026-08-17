@@ -8,11 +8,16 @@
     <fe-component id="app"></fe-component>
     <script type="application/fe" data-fe-component data-fe-mount="#app">
 use core::Worker
-use core::actor::ScopedTask
-use std::runtime::{ChildScopeExit, supervise_browser_child}
+use core::actor::{ActorMailbox, ActorSink, ScopedTask}
+use core::pending::{Pending, Suspend, TaskOutcome}
+use std::actor::{ActorMessage, BrowserActorSink}
+use std::host::Resumable
+use std::runtime::{BrowserActorMailbox, ChildScopeExit, supervise_browser_child}
+use std::wasm::WasmBackend
 use std::web::component::{
     BrowserBytes,
     ComponentEvent,
+    ComponentEventKind,
     ComponentPatch,
     InitialState,
     ProjectState,
@@ -29,15 +34,28 @@ actor ArithmeticChild {
     }
 }
 
+fn request_double(_ request: own Request) -> TaskOutcome<u32, Response>
+uses (
+    mailbox: mut ActorMailbox<WasmBackend, ArithmeticChild>,
+    suspend: Suspend<WasmBackend, u32>,
+)
+{
+    let pending: Pending<WasmBackend, Response> = mailbox.ask(request)
+    suspend.suspend(pending)
+}
+
 actor App {
     value: u32,
 
     fn initial() -> State uses (InitialState) {
-        State { value: 0 }
+        State { value: 21 }
     }
 
-    fn receive(self, _ event: own ComponentEvent) -> State uses (ResidentTransition) {
-        State { value: self.value + 1 }
+    fn receive(self, event: own ComponentEvent) -> State uses (ResidentTransition) {
+        match event.kind {
+            ComponentEventKind::TaskMessage => State { value: event.detail }
+            _ => State { value: self.value }
+        }
     }
 
     fn project(self) -> ComponentPatch uses (ProjectState) {
@@ -61,6 +79,30 @@ actor App {
             ChildScopeExit::Exhausted(epoch, _) => epoch
             ChildScopeExit::TransportFailure(epoch, _) => epoch
             ChildScopeExit::InvariantViolation(epoch, _) => epoch
+        }
+    }
+
+    fn calculate(self) -> u32 uses (ScopedTask) {
+        let value = with (
+            ActorMailbox<WasmBackend, ArithmeticChild> = BrowserActorMailbox<ArithmeticChild> {},
+            Suspend<WasmBackend, u32> = Resumable {},
+        ) {
+            match request_double(Request { value: self.value }) {
+                TaskOutcome::Success(response,) => response.value
+                TaskOutcome::Failure(error,) => 100 + error
+                TaskOutcome::Cancelled => 200
+            }
+        }
+        with (
+            ActorSink<WasmBackend, ComponentEvent> = BrowserActorSink {},
+            Suspend<WasmBackend, u32> = Resumable {},
+        ) {
+            let event = ComponentEvent::task_message(target: 0, detail: value)
+            match ActorMessage::new(event).send() {
+                TaskOutcome::Success(_,) => value
+                TaskOutcome::Failure(error,) => 300 + error
+                TaskOutcome::Cancelled => 400
+            }
         }
     }
 }

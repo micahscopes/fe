@@ -18,7 +18,7 @@ use core::pending::{
     Timer,
 }
 
-pub use browser::{BrowserChildPlacement, supervise_browser_child}
+pub use browser::{BrowserActorMailbox, BrowserChildPlacement, supervise_browser_child}
 
 pub enum ChildFailureKind {
     None,

@@ -391,6 +391,23 @@ export function createModuleWorkerScope({ createActor }) {
   let actor;
   let closed = false;
   let spawning = false;
+  const readinessWaiters = new Set();
+
+  const publishReady = () => {
+    if (actor === undefined) return;
+    for (const waiter of readinessWaiters) {
+      waiter.signal?.removeEventListener("abort", waiter.onAbort);
+      waiter.resolve(actor);
+    }
+    readinessWaiters.clear();
+  };
+  const rejectReadiness = (error) => {
+    for (const waiter of readinessWaiters) {
+      waiter.signal?.removeEventListener("abort", waiter.onAbort);
+      waiter.reject(error);
+    }
+    readinessWaiters.clear();
+  };
 
   const checkedEpoch = (epoch) => {
     if (!Number.isSafeInteger(epoch) || epoch < 0) {
@@ -441,6 +458,7 @@ export function createModuleWorkerScope({ createActor }) {
             throw runtimeError("FE_ACTOR_CLOSED", "module Worker scope is closed");
           }
           actor = created;
+          publishReady();
           return;
         }
         if (actor.epoch() === Number.MAX_SAFE_INTEGER || actor.epoch() + 1 !== epoch) {
@@ -467,10 +485,41 @@ export function createModuleWorkerScope({ createActor }) {
       }
       return actor.observeFailure(epoch, { signal });
     },
+    request(lane, payload, rawSignal) {
+      const signal = checkedSignal(rawSignal);
+      if (closed) {
+        return Promise.reject(runtimeError("FE_ACTOR_CLOSED", "module Worker scope is closed"));
+      }
+      const active = actor === undefined
+        ? new Promise((resolve, reject) => {
+          if (signal?.aborted) {
+            reject(runtimeError("FE_ACTOR_ABORTED", "actor request aborted"));
+            return;
+          }
+          const waiter = { signal, resolve, reject, onAbort: null };
+          waiter.onAbort = () => {
+            readinessWaiters.delete(waiter);
+            reject(runtimeError("FE_ACTOR_ABORTED", "actor request aborted"));
+          };
+          signal?.addEventListener("abort", waiter.onAbort, { once: true });
+          readinessWaiters.add(waiter);
+        })
+        : Promise.resolve(actor);
+      return active.then((ready) => {
+        if (typeof ready?.request !== "function") {
+          throw runtimeError(
+            "FE_ACTOR_WORKER_PROTOCOL",
+            "active module Worker actor has no request method",
+          );
+        }
+        return ready.request(lane, payload, 0, { signal });
+      });
+    },
     close(rawEpoch) {
       checkedEpoch(rawEpoch);
       if (closed) return;
       closed = true;
+      rejectReadiness(runtimeError("FE_ACTOR_CLOSED", "module Worker scope is closed"));
       actor?.close();
     },
     status: () => Object.freeze({

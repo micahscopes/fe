@@ -201,6 +201,7 @@ pub enum RuntimeControlEffectFuncKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
 pub enum RuntimeActorEffectFuncKind {
     SendBegin,
+    AskBegin,
 }
 
 #[salsa::tracked]
@@ -213,6 +214,9 @@ pub fn runtime_actor_effect_func_kind<'db>(
     match (kind, path.as_slice()) {
         (IngotKind::Std, ["actor", "raw", "send_begin"]) => {
             Some(RuntimeActorEffectFuncKind::SendBegin)
+        }
+        (IngotKind::Std, ["runtime", "raw", "ask_begin"]) => {
+            Some(RuntimeActorEffectFuncKind::AskBegin)
         }
         _ => None,
     }

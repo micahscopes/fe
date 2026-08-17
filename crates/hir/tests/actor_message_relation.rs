@@ -58,3 +58,35 @@ fn rejects_wrong() {{ accepts_wrong(Child {{}}) }}
         "expected the unwritten response relation to be rejected:\n{rendered}"
     );
 }
+
+#[test]
+fn browser_mailbox_provider_preserves_child_request_and_response_types() {
+    let mut db = HirAnalysisTestDb::default();
+    let source = format!(
+        r#"
+{ACTOR_WITH_SHARED_REQUEST}
+
+use core::actor::ActorMailbox
+use core::pending::Pending
+use std::runtime::BrowserActorMailbox
+use std::wasm::WasmBackend
+
+fn ask_a(_ request: own Request) -> Pending<WasmBackend, ResponseA>
+    uses (mailbox: mut ActorMailbox<WasmBackend, Child>)
+{{
+    mailbox.ask(request)
+}}
+
+fn select_browser_mailbox(_ request: own Request) -> Pending<WasmBackend, ResponseA> {{
+    with (
+        ActorMailbox<WasmBackend, Child> = BrowserActorMailbox<Child> {{}},
+    ) {{
+        ask_a(request)
+    }}
+}}
+"#
+    );
+    let file = db.new_stand_alone("browser_actor_mailbox.fe".into(), &source);
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}

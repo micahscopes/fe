@@ -166,10 +166,33 @@ try {
       })}`,
     );
   }
-  await new Promise(resolvePromise => setTimeout(resolvePromise, 250));
-  const componentErrors = await page.evaluate(() => globalThis.__feStructuredWorkerErrors);
+  try {
+    await page.waitForFunction(() => {
+      const component = document.querySelector("#app");
+      return component?._state?.[0] === 42;
+    });
+  } catch (error) {
+    const snapshot = await page.evaluate(() => ({
+      errors: globalThis.__feStructuredWorkerErrors,
+      state: Array.from(document.querySelector("#app")?._state ?? []),
+    }));
+    throw new Error(
+      `typed Worker mailbox did not produce resident state 42: ${JSON.stringify({
+        snapshot,
+        errors,
+        served,
+        cause: String(error),
+      })}`,
+    );
+  }
+  const observed = await page.evaluate(() => ({
+    errors: globalThis.__feStructuredWorkerErrors,
+    state: Array.from(document.querySelector("#app")?._state ?? []),
+  }));
+  const componentErrors = observed.errors;
   assert.deepEqual(componentErrors, []);
   assert.deepEqual(errors, []);
+  assert.equal(observed.state[0], 42, "typed Worker mailbox must compute 21 -> 42");
   assert.equal(served.filter(path => path.endsWith("/child.wasm")).length, 1);
   assert.equal(served.filter(path => path.endsWith("/runtime/worker-host.js")).length, 1);
   assert.ok(served.filter(path => path.endsWith("/interface.js")).length >= 2);

@@ -3549,7 +3549,11 @@ fn publish_scoped_task_package(
             .map_err(|error| PrecompileError::Serialize(error.to_string()))?;
         entry.push_str(
             r#"
-import { createCanonicalBrowserWorkerScope } from "./runtime/actor-client.js";
+import {
+  createCanonicalBrowserWorkerScope,
+  createCanonicalWorkerMailboxImports,
+} from "./runtime/actor-client.js";
+import { compileActorMailbox } from "./interface.js";
 
 let structuredChildModule;
 async function compileStructuredChild() {
@@ -3568,6 +3572,14 @@ async function compileStructuredChild() {
 
 export async function createStructuredWorkerScope() {
   return createCanonicalBrowserWorkerScope({ wasm: await compileStructuredChild() });
+}
+
+export function createStructuredWorkerMailbox(scope, completions) {
+  return createCanonicalWorkerMailboxImports({
+    scope,
+    completions,
+    mailbox: compileActorMailbox(),
+  });
 }
 "#,
         );
@@ -4688,13 +4700,23 @@ if (output.length !== 1 || output[0] < before || output[0] > after) {{
             .map(|(_, bytes)| std::str::from_utf8(bytes).unwrap())
             .expect("generated task entry");
         assert!(task_entry.contains("createStructuredWorkerScope"));
+        assert!(task_entry.contains("createStructuredWorkerMailbox"));
+        assert!(task_entry.contains("compileActorMailbox"));
         assert!(task_entry.contains("new URL(\"./child.wasm\", import.meta.url)"));
         assert!(!task_entry.contains("ArithmeticChild"));
+        assert!(!task_entry.contains("double"));
         assert!(
             task_assets
                 .iter()
                 .any(|(path, _)| path.ends_with("/interface.js"))
         );
+        let child_interface = task_assets
+            .iter()
+            .find(|(path, _)| path.ends_with("/interface.js"))
+            .map(|(_, bytes)| std::str::from_utf8(bytes).unwrap())
+            .expect("generated child interface");
+        assert!(child_interface.contains("request_"));
+        assert!(!child_interface.contains("double"));
         assert!(
             task_assets
                 .iter()
@@ -4716,6 +4738,18 @@ if (output.length !== 1 || output[0] < before || output[0] > after) {{
                 import.module == "fe:worker-scope" && import.name == "spawn_begin"
             })
         );
+        let mailbox_imports = parent
+            .interface
+            .imports
+            .iter()
+            .filter(|import| import.module == "fe:worker-mailbox")
+            .collect::<Vec<_>>();
+        let [mailbox_import] = mailbox_imports.as_slice() else {
+            panic!("expected one compiler-derived Worker mailbox import")
+        };
+        assert!(mailbox_import.name.starts_with("request_"));
+        assert_ne!(mailbox_import.name, "ask_begin");
+        assert!(!mailbox_import.name.contains("double"));
         let bootstrap = output
             .assets
             .iter()
@@ -4723,7 +4757,9 @@ if (output.length !== 1 || output[0] < before || output[0] > after) {{
             .map(|(_, bytes)| std::str::from_utf8(bytes).unwrap())
             .expect("fixed bootstrap");
         assert!(bootstrap.contains("needsWorkerScopeCapability"));
+        assert!(bootstrap.contains("needsWorkerMailboxCapability"));
         assert!(bootstrap.contains("await taskModule.createStructuredWorkerScope()"));
+        assert!(bootstrap.contains("taskModule.createStructuredWorkerMailbox("));
     }
 
     #[test]

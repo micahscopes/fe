@@ -66,3 +66,40 @@ export function createCanonicalBrowserWorkerScope(options) {
     }),
   });
 }
+
+// Bind compiler-derived scalar mailbox edges to the same structured Worker
+// scope. The opaque lane names and codecs come from the child interface, while
+// this fixed adapter owns only Promise completion and cancellation mechanics.
+export function createCanonicalWorkerMailboxImports({ scope, completions, mailbox }) {
+  if (!scope || typeof scope.request !== "function") {
+    throw new TypeError("canonical Worker mailbox requires a structured scope");
+  }
+  if (completions?.protocol !== "fe:generated-completion/v1"
+      || typeof completions.begin !== "function") {
+    throw new TypeError("canonical Worker mailbox requires the generated completion rail");
+  }
+  if (!mailbox || typeof mailbox !== "object" || Array.isArray(mailbox)) {
+    throw new TypeError("canonical Worker mailbox requires compiler-derived lanes");
+  }
+  const imports = Object.create(null);
+  for (const [lane, codec] of Object.entries(mailbox)) {
+    if (!/^request_[0-9a-f]{16}$/.test(lane)
+        || !Number.isSafeInteger(codec?.requestWidth) || codec.requestWidth < 0
+        || !Number.isSafeInteger(codec?.responseWidth) || codec.responseWidth < 0
+        || typeof codec.liftRequest !== "function"
+        || typeof codec.lowerResponse !== "function") {
+      throw new TypeError("canonical Worker mailbox lane is malformed");
+    }
+    imports[lane] = (...carriers) => {
+      const request = codec.liftRequest(carriers);
+      return completions.begin(
+        `worker-mailbox/${lane}`,
+        signal => scope.request(lane, request, signal),
+        codec.responseWidth,
+        value => codec.lowerResponse(value),
+        () => {},
+      );
+    };
+  }
+  return Object.freeze({ "fe:worker-mailbox": Object.freeze(imports) });
+}

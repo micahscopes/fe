@@ -171,7 +171,38 @@ pub fn host_import_name<'db>(db: &'db dyn MirDb, instance: RuntimeInstance<'db>)
         return None;
     };
     let func = declared_external_func(db, semantic)?;
+    if runtime_actor_effect_func_kind(db, func) == Some(RuntimeActorEffectFuncKind::AskBegin) {
+        let args = semantic.key(db).subst(db).generic_args(db);
+        let [child, request, response] = args.as_slice() else {
+            return None;
+        };
+        return Some(actor_mailbox_import_name(db, *child, *request, *response));
+    }
     Some(func.name(db).to_opt()?.data(db).to_string())
+}
+
+/// Derive the private Wasm import identity for one typed actor request edge.
+///
+/// The name is generated from semantic Fe types and is published only inside
+/// the compiler-owned parent/child package. It prevents distinct generic
+/// `ask_begin` instances from collapsing onto one JavaScript function while
+/// keeping selectors, behavior names, and route IDs out of authored Fe.
+pub fn actor_mailbox_import_name(
+    db: &dyn MirDb,
+    child: TyId<'_>,
+    request: TyId<'_>,
+    response: TyId<'_>,
+) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for ty in [child, request, response] {
+        for byte in ty.pretty_print(db).bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("request_{hash:016x}")
 }
 
 /// Recover the nominal control operation represented by a runtime call. This

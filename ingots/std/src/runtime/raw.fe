@@ -1,8 +1,17 @@
 //! Private fixed-host imports for browser structured-child mechanics.
 
+use core::actor::Handles
 use core::pending::Pending
 use ingot::wasm::WasmBackend
 use super::{ChildRuntimeFailure, ChildStarted}
+
+#[host_import(module = "fe:worker-mailbox")]
+extern {
+    pub unsafe fn ask_begin<C, M, R>(
+        _ message: own M,
+    ) -> Pending<WasmBackend, R>
+        where C: Handles<M, R>
+}
 
 #[wasm_import(module = "fe:worker-scope")]
 extern {
