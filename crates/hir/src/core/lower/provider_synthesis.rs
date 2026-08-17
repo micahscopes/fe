@@ -32,9 +32,9 @@ use crate::{
     HirDb,
     hir_def::{
         ArithBinOp, AssocConstDef, AssocTyDef, BinOp, CompBinOp, Expr, ExprId, Field, FieldIndex,
-        FuncModifiers, GenericArg, IdentId, IntegerId, LitKind, LogicalBinOp, MatchArm, Partial,
-        PathId, PathKind, RecordPatField, TraitRefId, TupleTypeId, TypeBound, TypeId, TypeKind,
-        Visibility, WhereClauseId, WherePredicate,
+        FuncModifiers, FuncParam, FuncParamName, GenericArg, IdentId, IntegerId, LitKind,
+        LogicalBinOp, MatchArm, Partial, PathId, PathKind, RecordPatField, TraitRefId, TupleTypeId,
+        TypeBound, TypeId, TypeKind, Visibility, WhereClauseId, WherePredicate,
     },
     span::DeriveDesugared,
 };
@@ -121,8 +121,17 @@ pub(super) fn synthesize_provider_impl<'db>(
                 let sig = &output.skeleton.sigs[sig.0];
 
                 let mut params = Vec::new();
-                if sig.takes_self {
-                    params.push(builder.param_view_self());
+                if let Some(receiver) = &sig.receiver {
+                    params.push(FuncParam {
+                        mode: receiver.mode,
+                        is_mut: receiver.is_mut,
+                        has_ref_prefix: receiver.has_ref_prefix,
+                        has_own_prefix: receiver.has_own_prefix,
+                        is_label_suppressed: false,
+                        name: Partial::Present(FuncParamName::Ident(IdentId::make_self(db))),
+                        ty: Partial::Present(receiver.ty),
+                        self_ty_fallback: receiver.self_ty_fallback,
+                    });
                 }
                 for (name, ty) in &sig.args {
                     params.push(builder.param_underscore_named(*name, *ty));
@@ -132,7 +141,7 @@ pub(super) fn synthesize_provider_impl<'db>(
                 let body_expr = *body;
                 builder.func_with_body_inline_always(
                     sig.name,
-                    builder.empty_generic_params(),
+                    sig.generic_params,
                     params,
                     sig.ret,
                     FuncModifiers::new(Visibility::Private, false, sig.is_const, false),

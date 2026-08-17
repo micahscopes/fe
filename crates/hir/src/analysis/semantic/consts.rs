@@ -7,7 +7,13 @@ use crate::analysis::{
     HirAnalysisDb,
     semantic::{SemanticInstance, instantiate_with_generic_args},
     ty::{
-        const_ty::{ConstTyData, ConstTyId, EvaluatedConstTy, evaluate_type_level_int_const_expr},
+        const_expr::ConstExpr,
+        const_ty::{
+            ConstTyData, ConstTyId, EvaluatedConstTy, const_ty_from_assoc_const_use,
+            evaluate_type_level_int_const_expr, trait_inst_is_fully_ground,
+        },
+        fold::{TyFoldable, TyFolder},
+        trait_resolution::{PredicateListId, TraitSolveCx},
         ty_def::{PrimTy, TyBase, TyData, TyId, TyVarSort, prim_int_bits},
     },
 };
@@ -358,11 +364,12 @@ pub fn sem_const_eq<'db>(
 }
 
 /// Demands the most concrete form of a type-level (symbolic) const value
-/// under an instance's generic arguments: instantiates the carried const
-/// type with the args, evaluates it at the value's expected type, and folds
-/// integer const expressions. A second round covers structure exposed by the
-/// first evaluation (e.g. a trait const that resolved to another symbolic
-/// form mentioning instantiable params).
+/// under a semantic instance: instantiates the carried const type with the
+/// instance arguments, resolves ground associated-const operands from the
+/// instance's implementation environment, evaluates it at the value's
+/// expected type, and folds integer const expressions. A second round covers
+/// structure exposed by the first evaluation (e.g. a trait const that resolved
+/// to another symbolic form mentioning instantiable params).
 ///
 /// This is the single demand point for turning a `SemConstValue::TypeLevel`
 /// payload concrete; const canonicalization, runtime reification, and the
@@ -372,14 +379,95 @@ pub(crate) fn demand_concrete_const_ty<'db>(
     db: &'db dyn HirAnalysisDb,
     const_ty: TyId<'db>,
     expected: TyId<'db>,
-    generic_args: &[TyId<'db>],
+    instance: SemanticInstance<'db>,
 ) -> Option<ConstTyId<'db>> {
+    /// Normalize an associated-const operand only after its trait instance is
+    /// fully ground.  Definition-site generic bounds deliberately resolve to
+    /// assumption implementors, which have no value body. At a monomorphized
+    /// runtime demand the concrete implementation is authoritative instead.
+    /// A scope-selected override remains fail-closed here until it can be
+    /// consumed directly: never substitute the default implementation for an
+    /// explicitly recorded selection.
+    fn normalize_runtime_assoc_consts<'db>(
+        db: &'db dyn HirAnalysisDb,
+        ty: TyId<'db>,
+        instance: SemanticInstance<'db>,
+    ) -> TyId<'db> {
+        struct RuntimeAssocConstFolder<'db> {
+            instance: SemanticInstance<'db>,
+            remaining: u16,
+        }
+
+        impl<'db> TyFolder<'db> for RuntimeAssocConstFolder<'db> {
+            fn fold_ty(&mut self, db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
+                let folded = ty.super_fold_with(db, self);
+                if self.remaining == 0 {
+                    return folded;
+                }
+                let TyData::ConstTy(const_ty) = folded.data(db) else {
+                    return folded;
+                };
+                let ConstTyData::Abstract(expr, expected_ty) = const_ty.data(db) else {
+                    return folded;
+                };
+                let ConstExpr::TraitConst(assoc) = expr.data(db) else {
+                    return folded;
+                };
+                let inst = assoc.inst();
+                if !trait_inst_is_fully_ground(db, inst) {
+                    return folded;
+                }
+
+                let key = self.instance.key(db);
+                let impl_env = key.impl_env(db);
+                let assumptions = self.instance.assumptions(db);
+                let rebound = assoc.with_env(impl_env.normalization_scope(db), assumptions);
+                let mut resolved = const_ty_from_assoc_const_use(db, rebound);
+
+                if resolved.is_none() && impl_env.selected_implementor_for_goal(db, inst).is_none()
+                {
+                    let resolution_scope = TraitSolveCx::new(db, impl_env.normalization_scope(db))
+                        .normalization_scope_for_trait_inst(db, inst);
+                    let concrete =
+                        assoc.with_env(resolution_scope, PredicateListId::empty_list(db));
+                    resolved = const_ty_from_assoc_const_use(db, concrete);
+                }
+
+                let Some(resolved) = resolved else {
+                    return folded;
+                };
+                let evaluated = resolved.evaluate(db, Some(*expected_ty));
+                if evaluated.ty(db).has_invalid(db) || evaluated == *const_ty {
+                    return folded;
+                }
+
+                self.remaining -= 1;
+                TyId::const_ty(db, evaluated).fold_with(db, self)
+            }
+        }
+
+        ty.fold_with(
+            db,
+            &mut RuntimeAssocConstFolder {
+                instance,
+                remaining: 64,
+            },
+        )
+    }
+
     fn evaluate_and_fold<'db>(
         db: &'db dyn HirAnalysisDb,
         const_ty: ConstTyId<'db>,
         expected: TyId<'db>,
+        instance: SemanticInstance<'db>,
     ) -> ConstTyId<'db> {
         let evaluated = const_ty.evaluate(db, Some(expected));
+        let normalized =
+            normalize_runtime_assoc_consts(db, TyId::const_ty(db, evaluated), instance);
+        let TyData::ConstTy(evaluated) = normalized.data(db) else {
+            unreachable!("normalizing a const ty must yield a const ty");
+        };
+        let evaluated = evaluated.evaluate(db, Some(expected));
         if let ConstTyData::Abstract(expr, expected_ty) = evaluated.data(db)
             && let Some(concrete) = evaluate_type_level_int_const_expr(db, *expr, *expected_ty)
         {
@@ -389,18 +477,19 @@ pub(crate) fn demand_concrete_const_ty<'db>(
         }
     }
 
+    let generic_args = instance.key(db).subst(db).generic_args(db);
     let instantiated = instantiate_with_generic_args(db, const_ty, generic_args);
     let TyData::ConstTy(const_ty) = instantiated.data(db) else {
         return None;
     };
-    let mut evaluated = evaluate_and_fold(db, *const_ty, expected);
+    let mut evaluated = evaluate_and_fold(db, *const_ty, expected, instance);
     if matches!(evaluated.data(db), ConstTyData::Abstract(..)) {
         let reinstantiated =
             instantiate_with_generic_args(db, TyId::const_ty(db, evaluated), generic_args);
         let TyData::ConstTy(reinstantiated) = reinstantiated.data(db) else {
             unreachable!("instantiating a const ty must yield a const ty");
         };
-        evaluated = evaluate_and_fold(db, *reinstantiated, expected);
+        evaluated = evaluate_and_fold(db, *reinstantiated, expected, instance);
     }
     Some(evaluated)
 }
@@ -521,12 +610,7 @@ fn reify_runtime_const_impl<'db>(
             } else {
                 ty
             };
-            let evaluated = demand_concrete_const_ty(
-                db,
-                const_ty,
-                ty,
-                instance.key(db).subst(db).generic_args(db),
-            )?;
+            let evaluated = demand_concrete_const_ty(db, const_ty, ty, instance)?;
             let value = sem_const_from_ty(db, TyId::const_ty(db, evaluated))?;
             if matches!(value.value(db), SemConstValue::TypeLevel { .. }) {
                 return None;

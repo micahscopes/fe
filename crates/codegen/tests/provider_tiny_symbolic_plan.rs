@@ -174,3 +174,105 @@ pub fn run(x: i32) -> i32 {
     assert_eq!(run.call(&mut store, 7).unwrap(), -14);
     assert_eq!(run.call(&mut store, -5).unwrap(), 10);
 }
+
+#[test]
+fn provider_generated_generic_methods_and_associated_consts_run_on_wasm() {
+    let source = r#"
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+
+struct Sink { value: u32 }
+impl core::marker::Copy for Sink {}
+
+trait WordSink: core::marker::Copy {
+    fn write(self, _ value: u32) -> Self
+}
+impl WordSink for Sink {
+    fn write(self, _ value: u32) -> Self { Sink { value: self.value + value } }
+}
+
+trait Encode {
+    const WORDS: u32
+    fn encode<W: WordSink>(self, _ writer: W) -> W
+}
+
+struct Provider {}
+impl Derive<Encode> for Provider {
+    const fn derive<T>(ev: own Evidence<Encode<T>>) -> Evidence<Encode<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<Encode<T>>)
+    {
+        let mut words = builder.int(0)
+        let mut encode = quote(writer) { writer }
+        for field in reflect.fields() {
+            builder.require<Encode>(field.ty())
+            words = builder.add(words, builder.trait_const(field.ty(), "WORDS"))
+            encode = quote(writer) { self.${field}.encode(${encode}) }
+        }
+        builder.emit_const("WORDS", builder.ty<u32>(), words)
+        builder.emit_method(quote {
+            fn encode<W: WordSink>(self, writer: W) -> W { ${encode} }
+        })
+        builder.finish()
+        ev
+    }
+}
+
+impl Encode for u32 {
+    const WORDS: u32 = 1
+    fn encode<W: WordSink>(self, _ writer: W) -> W { writer.write(self) }
+}
+
+impl<T: Encode + core::marker::Copy, const N: usize> Encode for [T; N] {
+    const WORDS: u32 = {
+        let count: u32 = N.downcast_truncate()
+        count * T::WORDS
+    }
+
+    #[inline(always)]
+    fn encode<W: WordSink>(self, _ writer: W) -> W {
+        let mut writer = writer
+        let mut index: usize = 0
+        while index < N {
+            writer = self[index].encode(writer)
+            index = index + 1
+        }
+        writer
+    }
+}
+
+struct Pair { first: u32, second: u32 }
+derive Encode for Pair using Provider
+
+pub fn words() -> u32 { <Pair as Encode>::WORDS }
+pub fn encode_pair() -> u32 {
+    Pair { first: 7, second: 9 }.encode(Sink { value: 0 }).value
+}
+pub fn array_words() -> u32 { <[u32; 4] as Encode>::WORDS }
+pub fn encode_array() -> u32 {
+    let values: [u32; 4] = [1, 2, 3, 4]
+    <[u32; 4] as Encode>::encode(values, Sink { value: 0 }).value
+}
+"#;
+
+    let wasm = compile_to_wasm(source);
+    wasmparser::validate(&wasm).expect("generic provider methods emitted invalid Wasm");
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &wasm).expect("valid Wasm module");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("zero-import instance");
+    let words = instance
+        .get_typed_func::<(), i32>(&mut store, "words")
+        .expect("words export");
+    let encode_pair = instance
+        .get_typed_func::<(), i32>(&mut store, "encode_pair")
+        .expect("encode_pair export");
+    let array_words = instance
+        .get_typed_func::<(), i32>(&mut store, "array_words")
+        .expect("array_words export");
+    let encode_array = instance
+        .get_typed_func::<(), i32>(&mut store, "encode_array")
+        .expect("encode_array export");
+    assert_eq!(words.call(&mut store, ()).unwrap(), 2);
+    assert_eq!(encode_pair.call(&mut store, ()).unwrap(), 16);
+    assert_eq!(array_words.call(&mut store, ()).unwrap(), 4);
+    assert_eq!(encode_array.call(&mut store, ()).unwrap(), 10);
+}

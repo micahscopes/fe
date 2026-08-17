@@ -372,12 +372,7 @@ fn canonicalize_const_value<'db>(
     match value.value(db) {
         SemConstValue::Unit | SemConstValue::Scalar { .. } => value,
         SemConstValue::TypeLevel { ty, const_ty } => {
-            let Some(evaluated) = demand_concrete_const_ty(
-                db,
-                const_ty,
-                ty,
-                instance.key(db).subst(db).generic_args(db),
-            ) else {
+            let Some(evaluated) = demand_concrete_const_ty(db, const_ty, ty, instance) else {
                 return value;
             };
             sem_const_from_ty(db, TyId::const_ty(db, evaluated)).unwrap_or(value)

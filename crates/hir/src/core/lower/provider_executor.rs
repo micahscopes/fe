@@ -41,9 +41,10 @@ use crate::{
     },
     hir_def::{
         ArithBinOp, BinOp, Body, CompBinOp, Cond, CondId, ConstGenericArgValue, Expr, ExprId,
-        FloatId, Func, GenericArg, GenericArgListId, IdentId, IntegerId, ItemKind, LitKind,
-        LogicalBinOp, MatchArm, Partial, Pat, PatId, PathId, PathKind, QuoteBody, Stmt, StmtId,
-        StringId, Trait, TraitRefId, TypeId, TypeKind, scope_graph::ScopeId,
+        FloatId, Func, FuncParamMode, GenericArg, GenericArgListId, GenericParam,
+        GenericParamListId, HirIngot, IdentId, IntegerId, ItemKind, LitKind, LogicalBinOp,
+        MatchArm, Partial, Pat, PatId, PathId, PathKind, QuoteBody, Stmt, StmtId, StringId, Trait,
+        TraitRefId, TypeBound, TypeGenericParam, TypeId, TypeKind, scope_graph::ScopeId,
     },
     span::HirOrigin,
 };
@@ -419,13 +420,30 @@ pub(super) enum GenPat<'db> {
 #[derive(Debug, Clone, PartialEq, Eq, salsa::Update)]
 pub(super) struct GenMethodSig<'db> {
     pub(super) name: IdentId<'db>,
-    pub(super) takes_self: bool,
+    /// Method-local type and const parameters belong to the emitted method,
+    /// not to the surrounding derived impl. Retain the declaration's list so
+    /// parameter and result types can resolve those names during synthesis.
+    pub(super) generic_params: GenericParamListId<'db>,
+    pub(super) receiver: Option<GenReceiver<'db>>,
     pub(super) args: Vec<(IdentId<'db>, TypeId<'db>)>,
     pub(super) ret: Option<TypeId<'db>>,
     /// Constness is part of the goal trait's checked signature just as much as
     /// its parameters and result. Dropping it made provider-generated static
     /// constructors unusable from otherwise valid `const fn` composition.
     pub(super) is_const: bool,
+}
+
+/// The receiver's authored mode is part of a trait method's signature.
+/// In particular, `mut self` lowers to `Mut<Self>` and must not be synthesized
+/// as plain view `self`.
+#[derive(Debug, Clone, PartialEq, Eq, salsa::Update)]
+pub(super) struct GenReceiver<'db> {
+    pub(super) mode: FuncParamMode,
+    pub(super) is_mut: bool,
+    pub(super) has_ref_prefix: bool,
+    pub(super) has_own_prefix: bool,
+    pub(super) ty: TypeId<'db>,
+    pub(super) self_ty_fallback: bool,
 }
 
 /// A field reference: `(variant index, field index)` into the target
@@ -1767,7 +1785,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
     ) -> Result<(), ExecError> {
         let sig_data = &self.sigs[sig.0];
         let method_name = sig_data.name;
-        let takes_self = sig_data.takes_self;
+        let takes_self = sig_data.receiver.is_some();
         let params: Vec<IdentId<'db>> = sig_data.args.iter().map(|(name, _)| *name).collect();
         for open in &template.open {
             if params.contains(open) || binders.iter().any(|(group, _)| group == open) {
@@ -1983,7 +2001,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
     ) -> Result<(), ExecError> {
         let canon = &self.sigs[sig.0];
         let canon_name = canon.name;
-        let canon_takes_self = canon.takes_self;
+        let canon_takes_self = canon.receiver.is_some();
         let canon_args: Vec<IdentId<'db>> = canon.args.iter().map(|(arg, _)| *arg).collect();
 
         let params: Vec<crate::hir_def::FuncParam<'db>> = spelled
@@ -2521,7 +2539,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
         }
         let sig_data = &self.sigs[sig.0];
         let method_name = sig_data.name;
-        let takes_self = sig_data.takes_self;
+        let takes_self = sig_data.receiver.is_some();
         let is_param = sig_data.args.iter().any(|(arg, _)| *arg == name);
         let is_group = binders.iter().any(|(group, _)| *group == name);
         if name.is_self(self.db) {
@@ -3995,12 +4013,28 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             .filter_map(|param| param.name().to_opt())
             .collect();
 
-        let mut takes_self = false;
+        let mut receiver = None;
         let mut args = Vec::new();
         if let Some(params) = method.params_list(self.db).to_opt() {
             for (idx, param) in params.data(self.db).iter().enumerate() {
                 if idx == 0 && param.is_self_param(self.db) {
-                    takes_self = true;
+                    let Some(ty) = param.ty.to_opt() else {
+                        return Err(self.invalid_method(
+                            at,
+                            &format!(
+                                "cannot infer the signature of `{}`: its `self` receiver has no type",
+                                name.data(self.db),
+                            ),
+                        ));
+                    };
+                    receiver = Some(GenReceiver {
+                        mode: param.mode,
+                        is_mut: param.is_mut,
+                        has_ref_prefix: param.has_ref_prefix,
+                        has_own_prefix: param.has_own_prefix,
+                        ty,
+                        self_ty_fallback: param.self_ty_fallback,
+                    });
                     continue;
                 }
                 let Some(arg_name) = param.name() else {
@@ -4036,12 +4070,133 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
 
         self.sigs.push(GenMethodSig {
             name,
-            takes_self,
+            generic_params: self.canonical_method_generic_params(method, goal, trait_def),
+            receiver,
             args,
             ret,
             is_const: method.is_const(self.db),
         });
         Ok(SigId(self.sigs.len() - 1))
+    }
+
+    /// Move method-local generic bounds from the trait declaration into a
+    /// generated impl that may live in another ingot. Bare sibling bounds such
+    /// as `W: WordSink` are valid in the trait's module, but must become
+    /// `canonical_words::WordSink` when the derive consumer lives elsewhere.
+    /// Imported bounds already canonicalize through their `use` declaration.
+    fn canonical_method_generic_params(
+        &self,
+        method: Func<'db>,
+        goal_path: PathId<'db>,
+        goal_trait: Trait<'db>,
+    ) -> GenericParamListId<'db> {
+        let params: Vec<GenericParam<'db>> = method
+            .generic_params(self.db)
+            .data(self.db)
+            .iter()
+            .map(|param| match param {
+                GenericParam::Type(param) => {
+                    let bounds = param
+                        .bounds
+                        .iter()
+                        .map(|bound| match bound {
+                            TypeBound::Trait(bound) => {
+                                let path = match bound.path(self.db) {
+                                    Partial::Present(path) => {
+                                        Partial::Present(self.canonical_method_bound_path(
+                                            path, goal_path, goal_trait,
+                                        ))
+                                    }
+                                    Partial::Absent => Partial::Absent,
+                                };
+                                TypeBound::Trait(TraitRefId::new(self.db, path))
+                            }
+                            TypeBound::Kind(kind) => TypeBound::Kind(kind.clone()),
+                        })
+                        .collect();
+                    GenericParam::Type(TypeGenericParam {
+                        name: param.name,
+                        bounds,
+                        default_ty: param.default_ty,
+                    })
+                }
+                GenericParam::Const(param) => GenericParam::Const(param.clone()),
+            })
+            .collect();
+        GenericParamListId::new(self.db, params)
+    }
+
+    fn canonical_method_bound_path(
+        &self,
+        path: PathId<'db>,
+        goal_path: PathId<'db>,
+        goal_trait: Trait<'db>,
+    ) -> PathId<'db> {
+        if path.parent(self.db).is_some() {
+            return path;
+        }
+        let PathKind::Ident {
+            ident: Partial::Present(ident),
+            generic_args,
+        } = path.kind(self.db)
+        else {
+            return path;
+        };
+
+        let bare = PathId::from_ident(self.db, ident);
+        let imported = canonical_trait_path(self.db, goal_trait.top_mod(self.db), bare);
+        if imported.parent(self.db).is_some() {
+            return PathId::new(
+                self.db,
+                PathKind::Ident {
+                    ident: imported.ident(self.db),
+                    generic_args,
+                },
+                imported.parent(self.db),
+            );
+        }
+
+        let Some(bound_trait) = resolve_trait_def(self.db, goal_trait.top_mod(self.db), bare)
+        else {
+            return path;
+        };
+        if bound_trait.top_mod(self.db) != goal_trait.top_mod(self.db) {
+            return path;
+        }
+        let provider_ingot = goal_trait.top_mod(self.db).ingot(self.db);
+        let request_ingot = self.request_top_mod.ingot(self.db);
+        let external_root = request_ingot
+            .resolved_external_ingots(self.db)
+            .iter()
+            .find_map(|(alias, ingot)| (*ingot == provider_ingot).then_some(*alias));
+        let goal_path = if let Some(alias) = external_root {
+            let Some(goal_ident) = goal_path.ident(self.db).to_opt() else {
+                return path;
+            };
+            PathId::from_ident(self.db, alias).push_ident(self.db, goal_ident)
+        } else if goal_path.parent(self.db).is_none() {
+            let Some(goal_ident) = goal_path.ident(self.db).to_opt() else {
+                return path;
+            };
+            canonical_trait_path(
+                self.db,
+                self.request_top_mod,
+                PathId::from_ident(self.db, goal_ident),
+            )
+        } else {
+            goal_path
+        };
+        let Some(parent) = goal_path.strip_generic_args(self.db).parent(self.db) else {
+            return path;
+        };
+        PathId::new(
+            self.db,
+            PathKind::Ident {
+                ident: Partial::Present(ident),
+                generic_args,
+            },
+            Some(parent),
+        )
     }
 
     /// Finds the goal trait's method `name`, reading the trait's BASE scope

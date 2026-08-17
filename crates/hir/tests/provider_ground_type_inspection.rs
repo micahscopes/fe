@@ -742,6 +742,64 @@ fn use_it(value: Target) -> i32 {
 }
 
 #[test]
+fn provider_generated_methods_retain_method_local_generics() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_method_local_generics.fe".into(),
+        r#"
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+
+trait WordSink: core::marker::Copy {
+    fn write(self, _ value: u32) -> Self
+}
+
+trait Encode {
+    fn encode<W: WordSink>(self, _ writer: W) -> W
+    fn decode<W: WordSink>(mut self, _ writer: W) -> W
+}
+
+struct Provider {}
+impl Derive<Encode> for Provider {
+    const fn derive<T>(ev: own Evidence<Encode<T>>) -> Evidence<Encode<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Encode<T>>,
+        )
+    {
+        builder.emit_method(quote {
+            fn encode<W: WordSink>(self, writer: W) -> W {
+                writer.write(7)
+            }
+        })
+        builder.emit_method(quote {
+            fn decode<W: WordSink>(mut self, writer: W) -> W {
+                writer.write(9)
+            }
+        })
+        builder.finish()
+        ev
+    }
+}
+
+struct Target {}
+derive Encode for Target using Provider
+
+struct Sink { value: u32 }
+impl core::marker::Copy for Sink {}
+impl WordSink for Sink {
+    fn write(self, _ value: u32) -> Self { Sink { value } }
+}
+
+fn use_generated(value: Target, sink: Sink) -> u32 {
+    value.encode(sink).value
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
 fn provider_natural_range_and_integer_codegen_share_the_quote_dag() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(

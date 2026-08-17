@@ -17,7 +17,7 @@ use super::{
     normalize::normalize_ty,
     trait_def::TraitInstId,
     trait_resolution::{ProvisionEnv, TraitSolveCx, constraint::collect_constraints},
-    ty_check::{check_anon_const_body, check_const_body},
+    ty_check::{ConstRef, check_anon_const_body, check_const_body},
     ty_def::{InvalidCause, TyId, TyParam, TyVar},
     ty_lower::{ConstDefaultCompletion, collect_generic_params},
     unify::UnificationTable,
@@ -27,7 +27,8 @@ use crate::analysis::{
     name_resolution::{PathRes, resolve_path},
     semantic::{
         CtfeError, SemConstId, SemConstValue, SemOrigin, VariantIndex, eval_body_owner_const,
-        eval_body_owner_const_with_args, int_ty_shape, normalize_int_to_shape, sem_const_from_ty,
+        eval_body_owner_const_with_args, instantiate_with_generic_args, int_ty_shape,
+        normalize_int_to_shape, sem_const_from_ty,
     },
     ty::trait_resolution::PredicateListId,
     ty::ty_def::{Kind, PrimTy, TyBase, TyData, TyVarSort},
@@ -407,6 +408,20 @@ fn evaluate_int_const_expr_impl<'db>(
         let TyData::ConstTy(const_ty) = ty.data(db) else {
             return None;
         };
+        // Arithmetic expressions frequently retain an associated const as an
+        // operand even after the receiver has become concrete, for example
+        // `1 + (N * Concrete::WORDS)`.  The outer expression evaluator cannot
+        // see through that operand unless it is normalized at the point where
+        // its integer value is demanded.  `evaluate` resolves trait and
+        // inherent const projections and is cycle-recovering; when resolution
+        // makes no progress we keep the original abstract operand and let the
+        // ordinary expression evaluator fail closed below.
+        let evaluated = const_ty.evaluate(db, Some(expected_ty));
+        let const_ty = if evaluated == *const_ty {
+            *const_ty
+        } else {
+            evaluated
+        };
         match const_ty.data(db) {
             ConstTyData::Evaluated(EvaluatedConstTy::LitInt(int_id), _) => {
                 let (bits, signed) = int_ty_shape(db, expected_ty)?;
@@ -546,7 +561,10 @@ fn ty_is_fully_ground<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> bool {
     }
 }
 
-fn trait_inst_is_fully_ground<'db>(db: &'db dyn HirAnalysisDb, inst: TraitInstId<'db>) -> bool {
+pub(crate) fn trait_inst_is_fully_ground<'db>(
+    db: &'db dyn HirAnalysisDb,
+    inst: TraitInstId<'db>,
+) -> bool {
     ty_is_fully_ground(db, inst.self_ty(db))
         && inst
             .args(db)
@@ -1710,6 +1728,37 @@ pub(crate) fn evaluate_const_ty<'db>(
             }
 
             _ => Err(ConstIntError::NotIntExpr),
+        }
+    }
+
+    // A path in a captured generic const body must be resolved from the
+    // instantiated typed body, not from its definition-site syntax.  The
+    // latter still names binder parameters (`T::CONST`) and was therefore
+    // skipped whenever `generic_args` was nonempty.  Instantiate the recorded
+    // semantic const reference first, then evaluate the selected const body.
+    // This is the value-evaluation counterpart of the associated-const
+    // normalizer used for method comparison.
+    if !generic_args.is_empty()
+        && matches!(expr, Expr::Path(_))
+        && let Some(expected) = expected_ty
+    {
+        let (diags, typed_body) = check_anon_const_body(db, body, expected);
+        if diags.is_empty() {
+            let typed_body = instantiate_with_generic_args(db, typed_body.clone(), &generic_args);
+            let resolved = match typed_body.expr_const_ref(body.expr(db)) {
+                Some(ConstRef::Const(const_)) => const_.body(db).to_opt().map(|const_body| {
+                    ConstTyId::from_body(db, const_body, Some(const_.ty(db)), Some(const_))
+                }),
+                Some(ConstRef::TraitConst(assoc)) => const_ty_from_assoc_const_use(db, assoc),
+                Some(ConstRef::InherentConst(use_)) => const_ty_from_inherent_const_use(db, use_),
+                None => None,
+            };
+            if let Some(resolved) = resolved {
+                let evaluated = resolved.evaluate(db, Some(expected));
+                if !evaluated.ty(db).has_invalid(db) {
+                    return evaluated;
+                }
+            }
         }
     }
 

@@ -2919,16 +2919,11 @@ impl<'db> CtfeMachine<'db> {
                     ..
                 } => Ok(value),
                 SemConstValue::TypeLevel { ty, const_ty } if ty == TyId::bool(self.db) => {
-                    let subst = self.frames[frame_idx]
-                        .body
-                        .owner
-                        .key(self.db)
-                        .subst(self.db);
                     let Some(const_ty) = demand_concrete_const_ty(
                         self.db,
                         const_ty,
                         ty,
-                        subst.generic_args(self.db),
+                        self.frames[frame_idx].body.owner,
                     ) else {
                         return Err(CtfeError::InvalidOperation {
                             origin: value.error_origin(origin),
@@ -3015,16 +3010,11 @@ impl<'db> CtfeMachine<'db> {
                     ..
                 } => Ok(value.clone()),
                 SemConstValue::TypeLevel { ty, const_ty } => {
-                    let subst = self.frames[frame_idx]
-                        .body
-                        .owner
-                        .key(self.db)
-                        .subst(self.db);
                     let Some(const_ty) = demand_concrete_const_ty(
                         self.db,
                         const_ty,
                         ty,
-                        subst.generic_args(self.db),
+                        self.frames[frame_idx].body.owner,
                     ) else {
                         return Err(CtfeError::InvalidOperation {
                             origin: value.error_origin(origin),
