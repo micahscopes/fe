@@ -9,7 +9,9 @@
 use compiler_db::DriverDataBase;
 use hir::analysis::{
     name_resolution::{PathRes, resolve_path},
-    ty::{adt_def::AdtRef, trait_resolution::PredicateListId, ty_def::TyId},
+    ty::{
+        adt_def::AdtRef, trait_def::TraitInstId, trait_resolution::PredicateListId, ty_def::TyId,
+    },
 };
 use hir::hir_def::{AttrListId, ItemKind, PathId, Struct, TopLevelMod};
 use hir::span::{ActorDesugaredFocus, DesugaredOrigin, HirOrigin};
@@ -108,6 +110,34 @@ pub(crate) fn resolve_metadata_attrs<'db>(
                 PathRes::Ty(ty) | PathRes::TyAlias(_, ty) => return nominal_attrs(db, ty),
                 _ => {}
             }
+        }
+    }
+    None
+}
+
+/// Resolve a nominal actor role as a trait instance without discarding the
+/// source-supplied generic arguments.
+///
+/// Placement markers need only their declaration attributes, but capability
+/// roles such as `Dispatch<WebGpuBackend>` also use the instantiated backend
+/// type to prove that the capability and backend carry the same identity.
+pub(crate) fn resolve_metadata_trait_inst<'db>(
+    db: &'db dyn hir::analysis::HirAnalysisDb,
+    path: PathId<'db>,
+    scope: hir::hir_def::scope_graph::ScopeId<'db>,
+) -> Option<TraitInstId<'db>> {
+    for candidate in [scope, scope.top_mod(db).scope()] {
+        for candidate_path in [path, path.strip_generic_args(db)] {
+            let Ok(PathRes::Trait(trait_inst)) = resolve_path(
+                db,
+                candidate_path,
+                candidate,
+                PredicateListId::empty_list(db),
+                true,
+            ) else {
+                continue;
+            };
+            return Some(trait_inst);
         }
     }
     None

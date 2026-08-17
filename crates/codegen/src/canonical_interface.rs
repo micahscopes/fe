@@ -23,7 +23,7 @@ use hir::{
 use serde::{Deserialize, Serialize};
 use wasmparser::{CompositeInnerType, ExternalKind, Payload, TypeRef, ValType};
 
-use crate::actor_semantics::resolve_metadata_attrs;
+use crate::actor_semantics::{resolve_metadata_attrs, resolve_metadata_trait_inst};
 
 pub const CANONICAL_INTERFACE_PROTOCOL: &str = "fe-canonical-browser-interface";
 pub const CANONICAL_INTERFACE_VERSION: u32 = 4;
@@ -526,13 +526,13 @@ pub(crate) fn canonical_lane_intent<'db>(
     // requirements. They nevertheless carry the same nominal execution and
     // placement types, so an actor can state `uses (Worker)` directly without
     // manufacturing a runtime provider argument merely to describe topology.
-    for attrs in func
-        .actor_roles(db)
-        .data(db)
-        .iter()
-        .filter_map(|role| role.key_path.to_opt())
-        .filter_map(|path| resolve_metadata_attrs(db, path, func.scope()))
-    {
+    for role in func.actor_roles(db).data(db) {
+        let Some(path) = role.key_path.to_opt() else {
+            continue;
+        };
+        let Some(attrs) = resolve_metadata_attrs(db, path, func.scope()) else {
+            continue;
+        };
         if attrs.host_execution(db) == Some(HostExecution::External) {
             if execution == CanonicalExecution::HostEffect {
                 return Err(error("duplicate canonical host-execution marker"));
@@ -552,10 +552,24 @@ pub(crate) fn canonical_lane_intent<'db>(
             placement = next;
             continue;
         }
-        if attrs.host_capability(db).is_some() {
-            return Err(error(
-                "canonical actor role cannot carry a host capability without a typed effect provider",
-            ));
+        if let Some(identity) = attrs.host_capability(db) {
+            let Some(trait_inst) = resolve_metadata_trait_inst(db, path, func.scope()) else {
+                return Err(error(
+                    "canonical actor capability role must resolve to a nominal trait instance",
+                ));
+            };
+            if trait_inst.args(db).len() == 2
+                && semantic_type_host_capability_backend(db, trait_inst.args(db)[1]).as_deref()
+                    == Some(identity.as_str())
+                && trait_inst.assoc_type_bindings(db).is_empty()
+            {
+                capabilities.push(CanonicalCapabilityRequirement {
+                    capability: CanonicalCapability::new(identity)?,
+                    mutable: role.is_mut,
+                });
+                continue;
+            }
+            return Err(error("canonical actor role has unsupported capability"));
         }
     }
     for requirement in func.effect_requirements(db) {
@@ -1757,6 +1771,44 @@ pub fn update(request: Request) -> Response
     uses (RunElsewhere, OffThread, mut DeviceOps<Device>)
 {
     Response { value: request.value }
+}
+"#,
+            "update",
+        )
+        .unwrap();
+        assert_eq!(
+            declaration.intent,
+            CanonicalLaneIntent {
+                execution: CanonicalExecution::HostEffect,
+                placement: CanonicalPlacement::Worker,
+                capabilities: vec![CanonicalCapabilityRequirement {
+                    capability: CanonicalCapability::new("device_dispatch").unwrap(),
+                    mutable: true,
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn actor_role_capability_preserves_backend_identity_and_mutability() {
+        let declaration = semantic_lane(
+            r#"
+#[host_execution(external)]
+trait RunElsewhere {}
+#[host_placement(worker)]
+trait OffThread {}
+#[host_capability(device_dispatch)]
+trait DeviceOps<B> {}
+#[host_capability_backend(device_dispatch)]
+struct Device {}
+struct Request { value: u32 }
+struct Response { value: u32 }
+actor Dispatcher {
+    fn update(request: Request) -> Response
+        uses (RunElsewhere, OffThread, mut DeviceOps<Device>)
+    {
+        Response { value: request.value }
+    }
 }
 "#,
             "update",

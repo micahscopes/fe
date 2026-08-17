@@ -657,88 +657,69 @@ fn wire2(f: Form<D2>) -> Cochain2 {
 }
 
 // ---------------------------------------------------------------------------
-// The actor lanes. Placement is DECLARED: `uses (Worker)` on the wasm lanes,
-// main-thread host seating on `submit_view`. The generated router enforces
-// both placements; the fixed surface host currently exposes that host lane as
-// unavailable until a standards WebGPU capability provider is connected.
+// The operator actor. Placement is DECLARED on each behavior through
+// `uses (Worker)`. The generated router enforces that placement, and the
+// compiler can recover this complete child program from the nominal
+// `DecOperator` type rather than from a parallel lane-name list.
 // ---------------------------------------------------------------------------
 
-/// Shape of the complex, computed from the graded structure itself.
-pub fn probe(_request: ProbeRequest) -> ComplexInfo
-    uses (Worker)
-{
-    ComplexInfo {
-        vertices: <D0 as OnComplex>::cells(),
-        edges: <D1 as OnComplex>::cells(),
-        faces: <D2 as OnComplex>::cells(),
-        euler: <D0 as OnComplex>::cells() -
-            <D1 as OnComplex>::cells() +
-            <D2 as OnComplex>::cells(),
+actor DecOperator {
+    /// Shape of the complex, computed from the graded structure itself.
+    fn probe(_request: ProbeRequest) -> ComplexInfo
+        uses (Worker)
+    {
+        ComplexInfo {
+            vertices: <D0 as OnComplex>::cells(),
+            edges: <D1 as OnComplex>::cells(),
+            faces: <D2 as OnComplex>::cells(),
+            euler: <D0 as OnComplex>::cells() -
+                <D1 as OnComplex>::cells() +
+                <D2 as OnComplex>::cells(),
+        }
     }
-}
 
-/// Exterior derivative of a 0-form.
-pub fn d0(_ request: Cochain0) -> Cochain1
-    uses (Worker)
-{
-    wire1(f: d(f: form0(c: request)))
-}
-
-/// Exterior derivative of a 1-form.
-pub fn d1(_ request: Cochain1) -> Cochain2
-    uses (Worker)
-{
-    wire2(f: d(f: form1(c: request)))
-}
-
-/// d compose d, through the same typed interior as `d0` and `d1`. The
-/// acceptance test asserts the response is EXACTLY zero for a basis of
-/// 0-forms: the incidence arithmetic is integer-valued, so f32 is exact here.
-pub fn dd0(_ request: Cochain0) -> Cochain2
-    uses (Worker)
-{
-    wire2(f: d(f: d(f: form0(c: request))))
-}
-
-/// The composed 0-form Laplacian (see `laplacian0` for the convention).
-pub fn laplace0(_ request: Cochain0) -> Cochain0
-    uses (Worker)
-{
-    wire0(f: laplacian0(f: form0(c: request)))
-}
-
-/// The five distinct diagonal Hodge weights of this complex, for the oracle.
-pub fn hodge(_request: HodgeRequest) -> HodgeDiagonal
-    uses (Worker)
-{
-    HodgeDiagonal {
-        star0_center: hodge_weight(0, 0),
-        star0_ring: hodge_weight(0, 1),
-        star1_spoke: hodge_weight(1, 0),
-        star1_ring: hodge_weight(1, SECTORS),
-        star2_face: hodge_weight(2, 0),
+    /// Exterior derivative of a 0-form.
+    fn d0(_ request: Cochain0) -> Cochain1
+        uses (Worker)
+    {
+        wire1(f: d(f: form0(c: request)))
     }
-}
 
-/// The render program's message lane: a main-thread host-effect lane holding
-/// the WebGPU dispatch capability. A `ViewRequest` is a draw message carrying
-/// the program's uniform state. The generated browser actor derives and routes
-/// this lane from Fe, but today's fixed surface host rejects invocation because
-/// its standards WebGPU capability provider is not connected yet. It never
-/// fabricates the `submitted` result from the Fe stub below. The separately
-/// working gallery render path is the `DecSurface` actor's `dec_render`
-/// fragment behavior, and `fe web build` derives the render entry and mode from
-/// that declaration.
-///
-/// Named `submit_view`, not `view`: `view` is the reserved const behavior
-/// name a `GpuProgram` actor's surface declaration owns (web v5); this lane
-/// predates that reservation and is a distinct concept (a draw-submission
-/// message, not the actor's own CTFE-projected surface), so it moved out of
-/// the way rather than collide.
-pub fn submit_view(_request: ViewRequest) -> ViewResponse
-    uses (HostEffect, MainThread, mut Dispatch<WebGpuBackend>)
-{
-    ViewResponse { submitted: false }
+    /// Exterior derivative of a 1-form.
+    fn d1(_ request: Cochain1) -> Cochain2
+        uses (Worker)
+    {
+        wire2(f: d(f: form1(c: request)))
+    }
+
+    /// d compose d, through the same typed interior as `d0` and `d1`. The
+    /// acceptance test asserts the response is EXACTLY zero for a basis of
+    /// 0-forms: the incidence arithmetic is integer-valued, so f32 is exact here.
+    fn dd0(_ request: Cochain0) -> Cochain2
+        uses (Worker)
+    {
+        wire2(f: d(f: d(f: form0(c: request))))
+    }
+
+    /// The composed 0-form Laplacian (see `laplacian0` for the convention).
+    fn laplace0(_ request: Cochain0) -> Cochain0
+        uses (Worker)
+    {
+        wire0(f: laplacian0(f: form0(c: request)))
+    }
+
+    /// The five distinct diagonal Hodge weights of this complex, for the oracle.
+    fn hodge(_request: HodgeRequest) -> HodgeDiagonal
+        uses (Worker)
+    {
+        HodgeDiagonal {
+            star0_center: hodge_weight(0, 0),
+            star0_ring: hodge_weight(0, 1),
+            star1_spoke: hodge_weight(1, 0),
+            star1_ring: hodge_weight(1, SECTORS),
+            star2_face: hodge_weight(2, 0),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -855,6 +836,21 @@ actor DecSurface uses (
             extent: Extent::square(512),
             params: dec_params(),
         }
+    }
+
+    /// The render program's message lane: a main-thread host-effect behavior
+    /// holding the WebGPU dispatch capability. A `ViewRequest` is a draw
+    /// message carrying this actor's uniform state. The generated browser actor
+    /// derives and routes the lane from Fe, but today's fixed surface host
+    /// rejects invocation because its standards WebGPU capability provider is
+    /// not connected yet. It never fabricates the `submitted` result below.
+    ///
+    /// Named `submit_view`, not `view`: `view` is the reserved const surface
+    /// declaration behavior, while this is a runtime draw-submission message.
+    fn submit_view(_request: ViewRequest) -> ViewResponse
+        uses (HostEffect, MainThread, mut Dispatch<WebGpuBackend>)
+    {
+        ViewResponse { submitted: false }
     }
 
     fn navigate(self, event: own SurfaceEvent) -> DecViewState
