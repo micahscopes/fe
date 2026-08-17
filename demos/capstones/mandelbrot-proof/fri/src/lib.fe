@@ -58,6 +58,7 @@ use poseidon_merkle::field_values_equal
 use precision::bn254_fr::Bn254Fr
 use precision::field::FieldElement
 use precision::polynomial::radix2_log
+use canonical_words::{CanonicalWords, CanonicalWordsProvider}
 
 type Field = FieldElement<20, Bn254Fr>
 
@@ -111,6 +112,22 @@ pub struct CompositionQueryPair<const DEPTH: usize> {
     pub path: CompositionPairPath<DEPTH>,
 }
 impl<const DEPTH: usize> core::marker::Copy for CompositionQueryPair<DEPTH> {}
+impl<const DEPTH: usize> CanonicalWords for CompositionQueryPair<DEPTH> {
+    const WORDS: u32 = <Fr as CanonicalWords>::WORDS * 2
+        + <CompositionPairPath<DEPTH> as CanonicalWords>::WORDS
+
+    fn encode<W: canonical_words::WordSink>(self, _ writer: W) -> W {
+        let writer = self.positive.encode(writer)
+        let writer = self.negative.encode(writer)
+        self.path.encode(writer)
+    }
+
+    fn decode<R: canonical_words::WordSource>(mut self, _ reader: R) -> R {
+        let reader = self.positive.decode(reader)
+        let reader = self.negative.decode(reader)
+        self.path.decode(reader)
+    }
+}
 
 pub struct FriQueryPair<const ROUND: u32, const DEPTH: usize> {
     pub positive: Fr,
@@ -118,6 +135,22 @@ pub struct FriQueryPair<const ROUND: u32, const DEPTH: usize> {
     pub path: FriLayerPairPath<ROUND, DEPTH>,
 }
 impl<const ROUND: u32, const DEPTH: usize> core::marker::Copy for FriQueryPair<ROUND, DEPTH> {}
+impl<const ROUND: u32, const DEPTH: usize> CanonicalWords for FriQueryPair<ROUND, DEPTH> {
+    const WORDS: u32 = <Fr as CanonicalWords>::WORDS * 2
+        + <FriLayerPairPath<ROUND, DEPTH> as CanonicalWords>::WORDS
+
+    fn encode<W: canonical_words::WordSink>(self, _ writer: W) -> W {
+        let writer = self.positive.encode(writer)
+        let writer = self.negative.encode(writer)
+        self.path.encode(writer)
+    }
+
+    fn decode<R: canonical_words::WordSource>(mut self, _ reader: R) -> R {
+        let reader = self.positive.decode(reader)
+        let reader = self.negative.decode(reader)
+        self.path.decode(reader)
+    }
+}
 
 /// Public commitments and one transcript-derived FRI query for the current
 /// four-row, sixteen-point executable slice. It authenticates both the FRI
@@ -146,6 +179,7 @@ pub struct FriCommitmentQuery4x16 {
     pub final_evaluation: Fr,
 }
 impl core::marker::Copy for FriCommitmentQuery4x16 {}
+derive CanonicalWords for FriCommitmentQuery4x16 using CanonicalWordsProvider
 
 fn invalid_fold<const N: usize>() -> FriFoldEvaluations<N> {
     FriFoldEvaluations { valid: false, evaluations: [Fr::zero(); N] }
@@ -566,8 +600,8 @@ where N > 0, N > 1, { (N & (N - 1)) == 0 }
 /// Verify the transcript, authenticated main and auxiliary AIR rows, the two
 /// recomputed composition values, compact Merkle openings, and all four binary
 /// FRI folds without regenerating the committed trace or composition codeword.
-/// Canonical proof decoding and malformed-byte rejection are the remaining
-/// boundary around this typed verifier.
+/// The Fe-derived canonical receipt decoder supplies this typed boundary and
+/// rejects malformed words before the proof reaches these checks.
 pub fn verify_fri_commitment_query4x16(
     _ c_re_q12: i32,
     _ c_im_q12: i32,

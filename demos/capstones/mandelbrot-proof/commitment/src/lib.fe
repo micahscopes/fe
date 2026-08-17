@@ -35,6 +35,7 @@ use poseidon_merkle::{
     quartet_path_from_leaves,
     quartet_verify,
 }
+use canonical_words::{CanonicalWords, CanonicalWordsProvider}
 
 const ROW_WORDS: usize = 17
 const PUBLIC_WORDS: usize = 8
@@ -190,10 +191,12 @@ impl core::marker::Copy for EscapesByQ12Public {}
 pub struct TraceDigest { pub value: Fr }
 
 impl core::marker::Copy for TraceDigest {}
+derive CanonicalWords for TraceDigest using CanonicalWordsProvider
 
 pub struct AuxiliaryDigest { pub value: Fr }
 
 impl core::marker::Copy for AuxiliaryDigest {}
+derive CanonicalWords for AuxiliaryDigest using CanonicalWordsProvider
 
 /// The public statement and trace root are distinct nominal stages, so later
 /// verifier code cannot accidentally treat an unbound tree root as a proof
@@ -212,9 +215,11 @@ impl core::marker::Copy for ProofTranscriptDigest {}
 /// query positions instead of receiving the complete trace.
 pub struct MainLdeDigest { pub value: Fr }
 impl core::marker::Copy for MainLdeDigest {}
+derive CanonicalWords for MainLdeDigest using CanonicalWordsProvider
 
 pub struct AuxiliaryLdeDigest { pub value: Fr }
 impl core::marker::Copy for AuxiliaryLdeDigest {}
+derive CanonicalWords for AuxiliaryLdeDigest using CanonicalWordsProvider
 
 pub struct MainLdeTranscriptDigest { pub value: Fr }
 impl core::marker::Copy for MainLdeTranscriptDigest {}
@@ -228,6 +233,7 @@ impl core::marker::Copy for CompositionChallenge {}
 
 pub struct CompositionDigest { pub value: Fr }
 impl core::marker::Copy for CompositionDigest {}
+derive CanonicalWords for CompositionDigest using CanonicalWordsProvider
 
 pub struct CompositionTranscriptDigest { pub value: Fr }
 impl core::marker::Copy for CompositionTranscriptDigest {}
@@ -237,6 +243,17 @@ impl<const ROUND: u32> core::marker::Copy for FriFoldChallenge<ROUND> {}
 
 pub struct FriLayerDigest<const ROUND: u32> { pub value: Fr }
 impl<const ROUND: u32> core::marker::Copy for FriLayerDigest<ROUND> {}
+impl<const ROUND: u32> CanonicalWords for FriLayerDigest<ROUND> {
+    const WORDS: u32 = <Fr as CanonicalWords>::WORDS
+
+    fn encode<W: canonical_words::WordSink>(self, _ writer: W) -> W {
+        self.value.encode(writer)
+    }
+
+    fn decode<R: canonical_words::WordSource>(mut self, _ reader: R) -> R {
+        self.value.decode(reader)
+    }
+}
 
 pub struct FriLayerTranscriptDigest<const ROUND: u32> { pub value: Fr }
 impl<const ROUND: u32> core::marker::Copy for FriLayerTranscriptDigest<ROUND> {}
@@ -255,6 +272,25 @@ pub struct CompositionPairPath<const DEPTH: usize> {
     pub negative_siblings: [Fr; DEPTH],
 }
 impl<const DEPTH: usize> core::marker::Copy for CompositionPairPath<DEPTH> {}
+impl<const DEPTH: usize> CanonicalWords for CompositionPairPath<DEPTH> {
+    const WORDS: u32 = <bool as CanonicalWords>::WORDS
+        + <u32 as CanonicalWords>::WORDS
+        + <[Fr; DEPTH] as CanonicalWords>::WORDS * 2
+
+    fn encode<W: canonical_words::WordSink>(self, _ writer: W) -> W {
+        let writer = self.valid.encode(writer)
+        let writer = self.index.encode(writer)
+        let writer = self.positive_siblings.encode(writer)
+        self.negative_siblings.encode(writer)
+    }
+
+    fn decode<R: canonical_words::WordSource>(mut self, _ reader: R) -> R {
+        let reader = self.valid.decode(reader)
+        let reader = self.index.decode(reader)
+        let reader = self.positive_siblings.decode(reader)
+        self.negative_siblings.decode(reader)
+    }
+}
 
 pub struct MainLdeQuartetPath<const DEPTH: usize> {
     pub valid: bool,
@@ -265,6 +301,29 @@ pub struct MainLdeQuartetPath<const DEPTH: usize> {
     pub fourth_siblings: [Fr; DEPTH],
 }
 impl<const DEPTH: usize> core::marker::Copy for MainLdeQuartetPath<DEPTH> {}
+impl<const DEPTH: usize> CanonicalWords for MainLdeQuartetPath<DEPTH> {
+    const WORDS: u32 = <bool as CanonicalWords>::WORDS
+        + <u32 as CanonicalWords>::WORDS
+        + <[Fr; DEPTH] as CanonicalWords>::WORDS * 4
+
+    fn encode<W: canonical_words::WordSink>(self, _ writer: W) -> W {
+        let writer = self.valid.encode(writer)
+        let writer = self.index.encode(writer)
+        let writer = self.first_siblings.encode(writer)
+        let writer = self.second_siblings.encode(writer)
+        let writer = self.third_siblings.encode(writer)
+        self.fourth_siblings.encode(writer)
+    }
+
+    fn decode<R: canonical_words::WordSource>(mut self, _ reader: R) -> R {
+        let reader = self.valid.decode(reader)
+        let reader = self.index.decode(reader)
+        let reader = self.first_siblings.decode(reader)
+        let reader = self.second_siblings.decode(reader)
+        let reader = self.third_siblings.decode(reader)
+        self.fourth_siblings.decode(reader)
+    }
+}
 
 pub struct AuxiliaryLdeQuartetPath<const DEPTH: usize> {
     pub valid: bool,
@@ -275,6 +334,29 @@ pub struct AuxiliaryLdeQuartetPath<const DEPTH: usize> {
     pub fourth_siblings: [Fr; DEPTH],
 }
 impl<const DEPTH: usize> core::marker::Copy for AuxiliaryLdeQuartetPath<DEPTH> {}
+impl<const DEPTH: usize> CanonicalWords for AuxiliaryLdeQuartetPath<DEPTH> {
+    const WORDS: u32 = <bool as CanonicalWords>::WORDS
+        + <u32 as CanonicalWords>::WORDS
+        + <[Fr; DEPTH] as CanonicalWords>::WORDS * 4
+
+    fn encode<W: canonical_words::WordSink>(self, _ writer: W) -> W {
+        let writer = self.valid.encode(writer)
+        let writer = self.index.encode(writer)
+        let writer = self.first_siblings.encode(writer)
+        let writer = self.second_siblings.encode(writer)
+        let writer = self.third_siblings.encode(writer)
+        self.fourth_siblings.encode(writer)
+    }
+
+    fn decode<R: canonical_words::WordSource>(mut self, _ reader: R) -> R {
+        let reader = self.valid.decode(reader)
+        let reader = self.index.decode(reader)
+        let reader = self.first_siblings.decode(reader)
+        let reader = self.second_siblings.decode(reader)
+        let reader = self.third_siblings.decode(reader)
+        self.fourth_siblings.decode(reader)
+    }
+}
 
 pub struct FriLayerPairPath<const ROUND: u32, const DEPTH: usize> {
     pub valid: bool,
@@ -283,6 +365,25 @@ pub struct FriLayerPairPath<const ROUND: u32, const DEPTH: usize> {
     pub negative_siblings: [Fr; DEPTH],
 }
 impl<const ROUND: u32, const DEPTH: usize> core::marker::Copy for FriLayerPairPath<ROUND, DEPTH> {}
+impl<const ROUND: u32, const DEPTH: usize> CanonicalWords for FriLayerPairPath<ROUND, DEPTH> {
+    const WORDS: u32 = <bool as CanonicalWords>::WORDS
+        + <u32 as CanonicalWords>::WORDS
+        + <[Fr; DEPTH] as CanonicalWords>::WORDS * 2
+
+    fn encode<W: canonical_words::WordSink>(self, _ writer: W) -> W {
+        let writer = self.valid.encode(writer)
+        let writer = self.index.encode(writer)
+        let writer = self.positive_siblings.encode(writer)
+        self.negative_siblings.encode(writer)
+    }
+
+    fn decode<R: canonical_words::WordSource>(mut self, _ reader: R) -> R {
+        let reader = self.valid.decode(reader)
+        let reader = self.index.decode(reader)
+        let reader = self.positive_siblings.decode(reader)
+        self.negative_siblings.decode(reader)
+    }
+}
 
 /// Result of one canonical prover-side pass. Invalid and non-escaping claims
 /// fail closed instead of exposing a digest for an incomplete trace.

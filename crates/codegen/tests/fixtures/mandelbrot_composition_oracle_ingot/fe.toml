@@ -9,4 +9,5 @@ mandelbrot_proof_commitment = "../../../../../demos/capstones/mandelbrot-proof/c
 mandelbrot_proof_field_air = "../../../../../demos/capstones/mandelbrot-proof/field-air"
 mandelbrot_proof_fri = "../../../../../demos/capstones/mandelbrot-proof/fri"
 mandelbrot_proof_kernel = "../../../../../demos/capstones/mandelbrot-proof/kernel"
+mandelbrot_proof_receipt = "../../../../../demos/capstones/mandelbrot-proof/receipt"
 precision = "../../../../../demos/sketches/precision"

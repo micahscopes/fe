@@ -799,6 +799,8 @@ fn field_row_commitment(label: &[u8; 4], values: &[F], parameters: &[BigUint]) -
 }
 
 struct ProductionOracle {
+    trace_root: BigUint,
+    auxiliary_root: BigUint,
     main_lde_rows: Vec<[F; 17]>,
     auxiliary_lde_rows: Vec<Vec<F>>,
     main_lde_leaves: Vec<BigUint>,
@@ -865,8 +867,8 @@ fn production_oracle(rows: &[ProofRow; 4], c_re: i64, c_im: i64, bound: u32) -> 
         ],
         PUBLIC_WIDTHS,
     );
-    let statement = hash(b"MT01", public, trace_root, &parameters);
-    let proof_transcript = hash(b"AT01", statement, auxiliary_root, &parameters);
+    let statement = hash(b"MT01", public, trace_root.clone(), &parameters);
+    let proof_transcript = hash(b"AT01", statement, auxiliary_root.clone(), &parameters);
     let output_root = subgroup_root(4);
     let main_lde_rows = (0..16)
         .map(|index| {
@@ -933,6 +935,8 @@ fn production_oracle(rows: &[ProofRow; 4], c_re: i64, c_im: i64, bound: u32) -> 
         &parameters,
     );
     ProductionOracle {
+        trace_root,
+        auxiliary_root,
         main_lde_rows,
         auxiliary_lde_rows,
         main_lde_leaves,
@@ -1120,13 +1124,19 @@ fn assert_wasm_function_signature_limits(bytes: &[u8]) {
             let mut cursor = 0usize;
             let count = read_u32(section, &mut cursor);
             for _ in 0..count {
-                assert_eq!(section[cursor], 0x60, "proof Wasm should use MVP function types");
+                assert_eq!(
+                    section[cursor], 0x60,
+                    "proof Wasm should use MVP function types"
+                );
                 cursor += 1;
                 let params = read_u32(section, &mut cursor) as usize;
                 cursor += params;
                 let results = read_u32(section, &mut cursor) as usize;
                 cursor += results;
-                assert!(cursor <= section.len(), "Wasm function type should fit its section");
+                assert!(
+                    cursor <= section.len(),
+                    "Wasm function type should fit its section"
+                );
                 signatures.push((params, results));
             }
             assert_eq!(cursor, section.len(), "complete Wasm type section");
@@ -1151,7 +1161,10 @@ fn assert_wasm_function_signature_limits(bytes: &[u8]) {
                 cursor += 1;
                 let subsection_length = read_u32(section, &mut cursor) as usize;
                 let subsection_end = cursor + subsection_length;
-                assert!(subsection_end <= section.len(), "Wasm name subsection bounds");
+                assert!(
+                    subsection_end <= section.len(),
+                    "Wasm name subsection bounds"
+                );
                 if subsection_id == 1 {
                     let count = read_u32(section, &mut cursor);
                     for _ in 0..count {
@@ -1249,6 +1262,17 @@ fn call_byte_words(
     args: (i32, i32, i32),
     result_count: usize,
 ) -> Vec<u32> {
+    let (_, _, words) = call_byte_word_buffer(store, instance, name, args);
+    assert_eq!(words.len(), result_count, "{name} word count");
+    words
+}
+
+fn call_byte_word_buffer(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    name: &str,
+    args: (i32, i32, i32),
+) -> (i32, i32, Vec<u32>) {
     let function = instance
         .get_typed_func::<(i32, i32, i32), (i32, i32)>(&mut *store, name)
         .unwrap_or_else(|error| panic!("`{name}` byte export should exist: {error:?}"));
@@ -1256,7 +1280,8 @@ fn call_byte_words(
         .call(&mut *store, args)
         .unwrap_or_else(|error| panic!("{name} should run: {error:?}"));
     assert!(pointer >= 0, "{name} pointer must be nonnegative");
-    assert_eq!(length as usize, result_count * 4, "{name} byte length");
+    assert!(length >= 0, "{name} length must be nonnegative");
+    assert_eq!(length & 3, 0, "{name} byte length must contain words");
     let memory = instance
         .get_memory(&mut *store, "memory")
         .expect("composition Wasm should export memory");
@@ -1264,10 +1289,11 @@ fn call_byte_words(
     memory
         .read(&*store, pointer as usize, &mut bytes)
         .unwrap_or_else(|error| panic!("{name} bytes should be readable: {error:?}"));
-    bytes
+    let words = bytes
         .chunks_exact(4)
         .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
-        .collect()
+        .collect::<Vec<_>>();
+    (pointer, length, words)
 }
 
 fn plain_limbs(words: &[u32]) -> BigUint {
@@ -1284,6 +1310,207 @@ fn next_plain_field(words: &[u32], cursor: &mut usize) -> BigUint {
     let start = *cursor;
     *cursor += 20;
     plain_limbs(&words[start..*cursor])
+}
+
+fn next_receipt_word(words: &[u32], cursor: &mut usize) -> u32 {
+    let value = *words
+        .get(*cursor)
+        .expect("canonical receipt cursor must remain in bounds");
+    *cursor += 1;
+    value
+}
+
+fn canonical_receipt_word_count_model() -> usize {
+    const FIELD: usize = 20;
+    const SIGNED_FIELD: usize = 3 * FIELD;
+    const AIR_FIELD: usize = FIELD
+        + SIGNED_FIELD
+        + SIGNED_FIELD
+        + FIELD
+        + FIELD
+        + FIELD
+        + SIGNED_FIELD
+        + FIELD
+        + SIGNED_FIELD
+        + FIELD
+        + FIELD;
+    const MAIN_ROW: usize = FIELD + FIELD + AIR_FIELD;
+    let auxiliary_row = AUXILIARY_WIDTH * FIELD;
+    let air_row = MAIN_ROW + auxiliary_row;
+    let quartet_path = 2 + 4 * 2 * FIELD;
+    let air_opening = 1 + 4 * air_row + 2 * quartet_path;
+    let pair_query = |depth: usize| 2 * FIELD + 2 + 2 * depth * FIELD;
+    let proof = 4
+        + 9 * FIELD
+        + 1
+        + air_opening
+        + pair_query(3)
+        + pair_query(2)
+        + pair_query(1)
+        + pair_query(0)
+        + FIELD;
+    5 + proof
+}
+
+fn reset_canonical_arena(store: &mut wasmtime::Store<()>, instance: &wasmtime::Instance) {
+    let reset = instance
+        .get_typed_func::<(), ()>(&mut *store, "fe_cabi_reset")
+        .expect("canonical arena reset export");
+    reset
+        .call(&mut *store, ())
+        .expect("canonical arena reset should run");
+}
+
+fn call_receipt_verifier(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    words: &[u32],
+    length: i32,
+) -> bool {
+    // Browser-owned canonical bytes survive the per-call arena reset. Copying
+    // them back into a fresh request allocation models the fixed host ABI and
+    // prevents proof-generation temporaries from becoming verifier residency.
+    reset_canonical_arena(store, instance);
+    let capacity = (words.len() * 4).max(length.max(0) as usize);
+    let allocate = instance
+        .get_typed_func::<(i32, i32), i32>(&mut *store, "fe_cabi_alloc")
+        .expect("canonical arena allocation export");
+    let pointer = allocate
+        .call(&mut *store, (capacity as i32, 4))
+        .expect("canonical receipt input allocation should run");
+    let bytes = words
+        .iter()
+        .flat_map(|word| word.to_le_bytes())
+        .collect::<Vec<_>>();
+    let memory = instance
+        .get_memory(&mut *store, "memory")
+        .expect("composition Wasm should export memory");
+    memory
+        .write(&mut *store, pointer as usize, &bytes)
+        .expect("canonical receipt input should fit memory");
+    let function = instance
+        .get_typed_func::<(i32, i32), i32>(&mut *store, "verify_canonical_receipt_bytes")
+        .expect("canonical receipt verifier export");
+    function
+        .call(&mut *store, (pointer, length))
+        .expect("canonical receipt verifier should run")
+        != 0
+}
+
+fn assert_canonical_pair(
+    words: &[u32],
+    cursor: &mut usize,
+    index: u32,
+    expected: &PairOpeningOracle,
+) {
+    assert_eq!(next_plain_field(words, cursor), expected.positive);
+    assert_eq!(next_plain_field(words, cursor), expected.negative);
+    assert_eq!(next_receipt_word(words, cursor), 1);
+    assert_eq!(next_receipt_word(words, cursor), index);
+    for sibling in &expected.positive_siblings {
+        assert_eq!(next_plain_field(words, cursor), *sibling);
+    }
+    for sibling in &expected.negative_siblings {
+        assert_eq!(next_plain_field(words, cursor), *sibling);
+    }
+}
+
+fn assert_canonical_quartet_path(
+    words: &[u32],
+    cursor: &mut usize,
+    index: u32,
+    expected: &QuartetOpeningOracle,
+) {
+    assert_eq!(next_receipt_word(words, cursor), 1);
+    assert_eq!(next_receipt_word(words, cursor), index);
+    for lane in 0..4 {
+        for sibling in &expected.siblings[lane] {
+            assert_eq!(next_plain_field(words, cursor), *sibling);
+        }
+    }
+}
+
+fn canonical_main_row_values(words: &[F; 17]) -> Vec<BigUint> {
+    let row = proof_field_row(words);
+    [
+        &row.active,
+        &row.terminal,
+        &row.air.step,
+        &row.air.zr.sign,
+        &row.air.zr.magnitude,
+        &row.air.zr.value,
+        &row.air.zi.sign,
+        &row.air.zi.magnitude,
+        &row.air.zi.value,
+        &row.air.rr,
+        &row.air.ii,
+        &row.air.magnitude,
+        &row.air.q_re.sign,
+        &row.air.q_re.magnitude,
+        &row.air.q_re.value,
+        &row.air.r_re,
+        &row.air.q_im.sign,
+        &row.air.q_im.magnitude,
+        &row.air.q_im.value,
+        &row.air.r_im,
+        &row.air.terminal,
+    ]
+    .into_iter()
+    .map(|value| value.0.clone())
+    .collect()
+}
+
+fn radix_limbs(value: &BigUint, count: usize) -> Vec<u32> {
+    let mut remaining = value.clone();
+    let mask = BigUint::from((1u32 << LIMB_BITS) - 1);
+    let mut limbs = Vec::with_capacity(count);
+    for _ in 0..count {
+        limbs.push(
+            (&remaining & &mask)
+                .to_u32_digits()
+                .first()
+                .copied()
+                .unwrap_or(0),
+        );
+        remaining >>= LIMB_BITS;
+    }
+    assert_eq!(remaining, BigUint::from(0u32));
+    limbs
+}
+
+fn assert_receipt_word_mutation_rejected(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    length: i32,
+    words: &[u32],
+    index: usize,
+    replacement: u32,
+) {
+    assert_ne!(replacement, words[index], "mutation must change its word");
+    let mut mutated = words.to_vec();
+    mutated[index] = replacement;
+    assert!(
+        !call_receipt_verifier(store, instance, &mutated, length),
+        "canonical verifier accepted mutation at word {index}",
+    );
+}
+
+fn assert_receipt_field_mutation_rejected(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    length: i32,
+    words: &[u32],
+    start: usize,
+    replacement: &[u32],
+) {
+    assert_eq!(replacement.len(), 20);
+    assert_ne!(replacement, &words[start..start + 20]);
+    let mut mutated = words.to_vec();
+    mutated[start..start + 20].copy_from_slice(replacement);
+    assert!(
+        !call_receipt_verifier(store, instance, &mutated, length),
+        "canonical verifier accepted mutated field at word {start}",
+    );
 }
 
 #[test]
@@ -1387,8 +1614,7 @@ fn composition_and_complete_fri_chain_match_independent_bigint_oracle() {
         1570,
     );
     assert_eq!(
-        complete[1569],
-        0,
+        complete[1569], 0,
         "typed verifier accepted an authenticated query mutation",
     );
     let production = &complete[0..61];
@@ -1662,6 +1888,214 @@ fn composition_and_complete_fri_chain_match_independent_bigint_oracle() {
     );
     assert_eq!(next_plain_field(&query, &mut cursor), fri4.evaluations[0]);
     assert_eq!(cursor, query.len());
+
+    let receipt_word_count = call_words(
+        &mut store,
+        &instance,
+        "canonical_receipt_word_count",
+        &[],
+        1,
+    );
+    let receipt_word_count = receipt_word_count[0] as usize;
+    assert_eq!(receipt_word_count, canonical_receipt_word_count_model());
+
+    reset_canonical_arena(&mut store, &instance);
+    let (_receipt_pointer, receipt_length, receipt) = call_byte_word_buffer(
+        &mut store,
+        &instance,
+        "canonical_receipt_bytes",
+        (3072, 0, 16),
+    );
+    assert_eq!(receipt.len(), receipt_word_count);
+    assert_eq!(receipt_length as usize, receipt_word_count * 4);
+    assert!(
+        call_receipt_verifier(&mut store, &instance, &receipt, receipt_length,),
+        "canonical receipt must survive its Fe-derived codec",
+    );
+
+    let terminal_step = rows
+        .iter()
+        .find(|row| row.terminal == 1)
+        .expect("canonical trace terminal row")
+        .air
+        .step;
+    let mut receipt_cursor = 0;
+    assert_eq!(
+        next_receipt_word(&receipt, &mut receipt_cursor),
+        u32::from_be_bytes(*b"MBP1"),
+    );
+    assert_eq!(next_receipt_word(&receipt, &mut receipt_cursor), 1);
+    assert_eq!(next_receipt_word(&receipt, &mut receipt_cursor), 3072);
+    assert_eq!(next_receipt_word(&receipt, &mut receipt_cursor), 0);
+    assert_eq!(next_receipt_word(&receipt, &mut receipt_cursor), 16);
+    let proof_valid_word = receipt_cursor;
+    assert_eq!(next_receipt_word(&receipt, &mut receipt_cursor), 1);
+    assert_eq!(
+        next_receipt_word(&receipt, &mut receipt_cursor),
+        terminal_step,
+    );
+    assert_eq!(
+        next_receipt_word(&receipt, &mut receipt_cursor),
+        terminal_step + 1,
+    );
+    assert_eq!(next_receipt_word(&receipt, &mut receipt_cursor), 4);
+
+    let first_field_word = receipt_cursor;
+    assert_eq!(
+        next_plain_field(&receipt, &mut receipt_cursor),
+        oracle.trace_root,
+    );
+    assert_eq!(
+        next_plain_field(&receipt, &mut receipt_cursor),
+        oracle.auxiliary_root,
+    );
+    assert_eq!(
+        next_plain_field(&receipt, &mut receipt_cursor),
+        oracle.main_lde_root,
+    );
+    assert_eq!(
+        next_plain_field(&receipt, &mut receipt_cursor),
+        oracle.auxiliary_lde_root,
+    );
+    let composition_root_word = receipt_cursor;
+    assert_eq!(next_plain_field(&receipt, &mut receipt_cursor), oracle.root,);
+    assert_eq!(next_plain_field(&receipt, &mut receipt_cursor), fri1.root,);
+    assert_eq!(next_plain_field(&receipt, &mut receipt_cursor), fri2.root,);
+    assert_eq!(next_plain_field(&receipt, &mut receipt_cursor), fri3.root,);
+    assert_eq!(next_plain_field(&receipt, &mut receipt_cursor), fri4.root,);
+    assert_eq!(
+        next_receipt_word(&receipt, &mut receipt_cursor),
+        query_index,
+    );
+
+    assert_eq!(next_receipt_word(&receipt, &mut receipt_cursor), 1);
+    for quarter in 0..4 {
+        let row = local_air_index + quarter * 4;
+        for expected in canonical_main_row_values(&oracle.main_lde_rows[row]) {
+            assert_eq!(next_plain_field(&receipt, &mut receipt_cursor), expected);
+        }
+        for expected in &oracle.auxiliary_lde_rows[row] {
+            assert_eq!(next_plain_field(&receipt, &mut receipt_cursor), expected.0,);
+        }
+    }
+    assert_canonical_quartet_path(
+        &receipt,
+        &mut receipt_cursor,
+        local_air_index as u32,
+        &main_air_opening,
+    );
+    assert_canonical_quartet_path(
+        &receipt,
+        &mut receipt_cursor,
+        local_air_index as u32,
+        &auxiliary_air_opening,
+    );
+    assert_canonical_pair(
+        &receipt,
+        &mut receipt_cursor,
+        query_index,
+        &composition_opening,
+    );
+    assert_canonical_pair(&receipt, &mut receipt_cursor, first_index, &first_opening);
+    assert_canonical_pair(&receipt, &mut receipt_cursor, second_index, &second_opening);
+    assert_canonical_pair(&receipt, &mut receipt_cursor, 0, &third_opening);
+    assert_eq!(
+        next_plain_field(&receipt, &mut receipt_cursor),
+        fri4.evaluations[0],
+    );
+    assert_eq!(receipt_cursor, receipt.len());
+
+    assert!(!call_receipt_verifier(
+        &mut store,
+        &instance,
+        &receipt,
+        receipt_length - 4,
+    ));
+    assert!(!call_receipt_verifier(
+        &mut store,
+        &instance,
+        &receipt,
+        receipt_length + 4,
+    ));
+    assert!(!call_receipt_verifier(
+        &mut store,
+        &instance,
+        &receipt,
+        receipt_length - 1,
+    ));
+    assert_receipt_word_mutation_rejected(
+        &mut store,
+        &instance,
+        receipt_length,
+        &receipt,
+        0,
+        receipt[0] ^ 1,
+    );
+    assert_receipt_word_mutation_rejected(&mut store, &instance, receipt_length, &receipt, 1, 2);
+    assert_receipt_word_mutation_rejected(&mut store, &instance, receipt_length, &receipt, 2, 3073);
+    assert_receipt_word_mutation_rejected(&mut store, &instance, receipt_length, &receipt, 4, 15);
+    assert_receipt_word_mutation_rejected(
+        &mut store,
+        &instance,
+        receipt_length,
+        &receipt,
+        proof_valid_word,
+        2,
+    );
+    assert_receipt_word_mutation_rejected(
+        &mut store,
+        &instance,
+        receipt_length,
+        &receipt,
+        proof_valid_word,
+        0,
+    );
+    assert_receipt_word_mutation_rejected(
+        &mut store,
+        &instance,
+        receipt_length,
+        &receipt,
+        first_field_word,
+        1 << LIMB_BITS,
+    );
+    assert_receipt_field_mutation_rejected(
+        &mut store,
+        &instance,
+        receipt_length,
+        &receipt,
+        first_field_word,
+        &radix_limbs(modulus(), 20),
+    );
+    let changed_root_limb = receipt[composition_root_word..composition_root_word + 20]
+        .iter()
+        .position(|limb| *limb != 0)
+        .expect("composition root must be nonzero");
+    let changed_root_word = composition_root_word + changed_root_limb;
+    assert_receipt_word_mutation_rejected(
+        &mut store,
+        &instance,
+        receipt_length,
+        &receipt,
+        changed_root_word,
+        receipt[changed_root_word] - 1,
+    );
+    assert!(call_receipt_verifier(
+        &mut store,
+        &instance,
+        &receipt,
+        receipt_length,
+    ));
+
+    reset_canonical_arena(&mut store, &instance);
+    let invalid_receipt = instance
+        .get_typed_func::<(i32, i32, i32), (i32, i32)>(&mut store, "canonical_receipt_bytes")
+        .expect("canonical receipt byte export");
+    assert_eq!(
+        invalid_receipt
+            .call(&mut store, (0, 0, 16))
+            .expect("invalid canonical receipt request should fail closed"),
+        (0, 0),
+    );
 
     let invalid_complete = call_byte_words(
         &mut store,

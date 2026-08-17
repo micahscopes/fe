@@ -12,6 +12,7 @@
 use precision::bn254_fr::Bn254Fr
 use precision::field::FieldElement
 use precision::polynomial::radix2_intt
+use canonical_words::{CanonicalWords, CanonicalWordsProvider}
 pub use mandelbrot_proof_kernel::{
     AUXILIARY_ROW_BITS,
     BitRangeWitness,
@@ -35,6 +36,7 @@ pub const MAIN_LDE_ROW_FIELDS: usize = 17
 pub struct SignedField { pub sign: Fr, pub magnitude: Fr, pub value: Fr }
 
 impl core::marker::Copy for SignedField {}
+derive CanonicalWords for SignedField using CanonicalWordsProvider
 
 pub struct AirFieldRow {
     pub step: Fr,
@@ -51,6 +53,7 @@ pub struct AirFieldRow {
 }
 
 impl core::marker::Copy for AirFieldRow {}
+derive CanonicalWords for AirFieldRow using CanonicalWordsProvider
 
 /// The 17 main-trace columns evaluated at one LDE point. Keeping the semantic
 /// row nominal lets AIR code use names while commitment code receives one
@@ -58,11 +61,13 @@ impl core::marker::Copy for AirFieldRow {}
 pub struct MainLdeRow { pub active: Fr, pub terminal: Fr, pub air: AirFieldRow }
 
 impl core::marker::Copy for MainLdeRow {}
+derive CanonicalWords for MainLdeRow using CanonicalWordsProvider
 
 /// The 411 range and prefix columns evaluated at the same LDE point.
 pub struct AuxiliaryLdeRow { pub values: [Fr; AUXILIARY_ROW_BITS] }
 
 impl core::marker::Copy for AuxiliaryLdeRow {}
+derive CanonicalWords for AuxiliaryLdeRow using CanonicalWordsProvider
 
 /// One authenticated AIR leaf before row and auxiliary commitments are
 /// domain-separated. This is the verifier-facing witness shape as well as the
@@ -70,6 +75,7 @@ impl core::marker::Copy for AuxiliaryLdeRow {}
 pub struct AirLdeRow { pub main: MainLdeRow, pub auxiliary: AuxiliaryLdeRow }
 
 impl core::marker::Copy for AirLdeRow {}
+derive CanonicalWords for AirLdeRow using CanonicalWordsProvider
 
 const ZERO_SIGNED_FIELD: SignedField = SignedField {
     sign: Fr::zero(),

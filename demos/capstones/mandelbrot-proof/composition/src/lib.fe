@@ -48,6 +48,7 @@ use mandelbrot_proof_commitment::{
 use precision::bn254_fr::Bn254Fr
 use precision::field::FieldElement
 use precision::polynomial::radix2_log
+use canonical_words::{CanonicalWords, CanonicalWordsProvider}
 
 const LIMBS: usize = 20
 type Field = FieldElement<LIMBS, Bn254Fr>
@@ -82,6 +83,7 @@ pub struct AirLdeQuartetOpening4x16 {
     pub auxiliary_path: AuxiliaryLdeQuartetPath<2>,
 }
 impl core::marker::Copy for AirLdeQuartetOpening4x16 {}
+derive CanonicalWords for AirLdeQuartetOpening4x16 using CanonicalWordsProvider
 
 fn invalid_point() -> CompositionPoint {
     CompositionPoint { valid: false, value: Fr::zero() }

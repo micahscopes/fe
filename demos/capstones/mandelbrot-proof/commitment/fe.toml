@@ -4,6 +4,8 @@ version = "0.1.0"
 
 [dependencies]
 core = "../../../../ingots/core"
+canonical_words = "../../../../ingots/canonical_words"
 mandelbrot_proof_kernel = "../kernel"
 poseidon_bn254 = "../../../../ingots/poseidon_bn254"
 poseidon_merkle = "../../../../ingots/poseidon_merkle"
+precision = "../../../sketches/precision"

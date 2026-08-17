@@ -31,6 +31,11 @@ use mandelbrot_proof_commitment::{
 }
 use mandelbrot_proof_field_air::main_lde_row_values
 use mandelbrot_proof_kernel::encode_signed_word
+use mandelbrot_proof_receipt::{
+    canonical_receipt_word_count4x16,
+    prove_canonical_receipt_bytes4x16,
+    verify_canonical_receipt_bytes4x16,
+}
 use precision::bn254_fr::Bn254Fr
 use precision::field::FieldElement
 
@@ -481,6 +486,22 @@ fn zero_complete_production_bytes() -> BrowserBytes {
         index = index + 1
     }
     writer.finish()
+}
+
+pub fn canonical_receipt_word_count() -> u32 {
+    canonical_receipt_word_count4x16()
+}
+
+pub fn canonical_receipt_bytes(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ bound: u32,
+) -> BrowserBytes {
+    prove_canonical_receipt_bytes4x16(c_re_q12, c_im_q12, bound)
+}
+
+pub fn verify_canonical_receipt_bytes(_ ptr: u32, _ len: u32) -> bool {
+    verify_canonical_receipt_bytes4x16(BrowserBytes { ptr: ptr, len: len })
 }
 
 pub fn complete_production_bytes(_ c_re_q12: i32, _ c_im_q12: i32, _ bound: u32) -> BrowserBytes {

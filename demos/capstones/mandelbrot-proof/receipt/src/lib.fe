@@ -1,0 +1,100 @@
+//! Canonical bounded-Mandelbrot receipt vocabulary.
+//!
+//! The nested proof records derive their codecs at their declaration sites.
+//! This outer record adds the public claim and protocol header, then derives
+//! its exact size and field order from the same Fe reflection provider.
+
+use canonical_words::{
+    BrowserWordReader,
+    BrowserWordWriter,
+    CanonicalWords,
+    CanonicalWordsProvider,
+}
+use core::BrowserBytes
+use mandelbrot_proof_fri::{
+    FriCommitmentQuery4x16,
+    INVALID_COMMITMENT_QUERY4X16,
+    prove_fri_commitment_query4x16,
+    verify_fri_commitment_query4x16,
+}
+
+const fn receipt_tag(_ label: String<4>) -> u32 {
+    let bytes = label.as_bytes()
+    ((bytes[0] as u32) << 24)
+        | ((bytes[1] as u32) << 16)
+        | ((bytes[2] as u32) << 8)
+        | (bytes[3] as u32)
+}
+
+pub const RECEIPT_MAGIC: u32 = receipt_tag("MBP1")
+pub const RECEIPT_VERSION: u32 = 1
+
+pub struct MandelbrotProofReceipt4x16 {
+    pub magic: u32,
+    pub version: u32,
+    pub c_re_q12: i32,
+    pub c_im_q12: i32,
+    pub bound: u32,
+    pub proof: FriCommitmentQuery4x16,
+}
+impl core::marker::Copy for MandelbrotProofReceipt4x16 {}
+
+derive CanonicalWords for MandelbrotProofReceipt4x16 using CanonicalWordsProvider
+
+pub const INVALID_RECEIPT4X16: MandelbrotProofReceipt4x16 = MandelbrotProofReceipt4x16 {
+    magic: 0,
+    version: 0,
+    c_re_q12: 0,
+    c_im_q12: 0,
+    bound: 0,
+    proof: INVALID_COMMITMENT_QUERY4X16,
+}
+
+pub const fn canonical_receipt_word_count4x16() -> u32 {
+    <MandelbrotProofReceipt4x16 as CanonicalWords>::WORDS
+}
+
+pub fn prove_receipt4x16(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ bound: u32,
+    _ receipt: mut MandelbrotProofReceipt4x16,
+) -> bool {
+    receipt.magic = RECEIPT_MAGIC
+    receipt.version = RECEIPT_VERSION
+    receipt.c_re_q12 = c_re_q12
+    receipt.c_im_q12 = c_im_q12
+    receipt.bound = bound
+    prove_fri_commitment_query4x16(c_re_q12, c_im_q12, bound, mut receipt.proof)
+}
+
+pub fn verify_receipt4x16(_ receipt: MandelbrotProofReceipt4x16) -> bool {
+    receipt.magic == RECEIPT_MAGIC
+        && receipt.version == RECEIPT_VERSION
+        && verify_fri_commitment_query4x16(
+            receipt.c_re_q12,
+            receipt.c_im_q12,
+            receipt.bound,
+            receipt.proof,
+        )
+}
+
+pub fn prove_canonical_receipt_bytes4x16(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ bound: u32,
+) -> BrowserBytes {
+    let mut receipt = INVALID_RECEIPT4X16
+    if !prove_receipt4x16(c_re_q12, c_im_q12, bound, mut receipt) {
+        return BrowserBytes { ptr: 0, len: 0 }
+    }
+    let writer = BrowserWordWriter::allocate(canonical_receipt_word_count4x16())
+    receipt.encode(writer).finish()
+}
+
+pub fn verify_canonical_receipt_bytes4x16(_ bytes: BrowserBytes) -> bool {
+    let mut receipt = INVALID_RECEIPT4X16
+    let reader = BrowserWordReader::new(bytes)
+    let reader = receipt.decode(reader)
+    reader.complete() && verify_receipt4x16(receipt)
+}
