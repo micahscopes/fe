@@ -276,7 +276,7 @@ pub fn compile(request: &CompileRequest) -> Result<WebBundle, String> {
     Ok(bundle)
 }
 
-const RENDER_CACHE_FORMAT: u16 = 2;
+const RENDER_CACHE_FORMAT: u16 = 3;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct RenderCacheMetadata {
@@ -285,6 +285,7 @@ struct RenderCacheMetadata {
     has_wasm: bool,
     pass_shaders: Vec<CachedRenderShader>,
     support_files: Vec<CachedRenderSupport>,
+    scoped_task_files: Vec<CachedRenderSupport>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -398,11 +399,22 @@ fn load_render_cache(
             })
         })
         .collect::<Option<Vec<_>>>()?;
+    let scoped_task_files = metadata
+        .scoped_task_files
+        .into_iter()
+        .map(|support| {
+            Some(RenderSupportArtifact {
+                path: support.path,
+                bytes: std::fs::read(directory.join(support.file)).ok()?,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
     Some(RenderBundleArtifact {
         wasm,
         wgsl: std::fs::read(directory.join("shader.wgsl")).ok()?,
         pass_wgsl,
         support_files,
+        scoped_task_files,
         manifest_json: std::fs::read(directory.join("manifest.json")).ok()?,
         source_dependencies: Some(metadata.source_dependencies),
     })
@@ -451,12 +463,23 @@ fn store_render_cache(
             file,
         });
     }
+    let mut scoped_task_files = Vec::with_capacity(artifact.scoped_task_files.len());
+    for (index, support) in artifact.scoped_task_files.iter().enumerate() {
+        let file = format!("task-support-{index}");
+        std::fs::write(directory.join(&file), &support.bytes)
+            .map_err(|error| format!("failed to cache {file}: {error}"))?;
+        scoped_task_files.push(CachedRenderSupport {
+            path: support.path.clone(),
+            file,
+        });
+    }
     let metadata = serde_json::to_vec_pretty(&RenderCacheMetadata {
         format: RENDER_CACHE_FORMAT,
         source_dependencies,
         has_wasm: artifact.wasm.is_some(),
         pass_shaders,
         support_files,
+        scoped_task_files,
     })
     .map_err(|error| format!("failed to serialize render cache metadata: {error}"))?;
     // Metadata is written last. An interrupted population is therefore a
@@ -486,10 +509,11 @@ fn compile_render_bundle_with_dependencies(
         audit.dependencies
     });
     let manifest_json = bundle.manifest_json().map_err(|error| error.to_string())?;
-    let support_files = bundle
+    let materialized_files = bundle
         .materialized_files()
-        .map_err(|error| error.to_string())?
-        .into_iter()
+        .map_err(|error| error.to_string())?;
+    let support_files = materialized_files
+        .iter()
         .filter(|file| {
             file.path() == "interface.js"
                 || file.path() == "interface.d.ts"
@@ -499,7 +523,18 @@ fn compile_render_bundle_with_dependencies(
             path: file.path().to_owned(),
             bytes: file.bytes().to_vec(),
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let scoped_task_files = materialized_files
+        .iter()
+        .filter_map(|file| {
+            file.path()
+                .strip_prefix("tasks/")
+                .map(|path| RenderSupportArtifact {
+                    path: path.to_owned(),
+                    bytes: file.bytes().to_vec(),
+                })
+        })
+        .collect::<Vec<_>>();
     let wasm = (!bundle.wasm.is_empty()).then_some(bundle.wasm);
     let pass_wgsl = bundle
         .pass_wgsl
@@ -514,6 +549,7 @@ fn compile_render_bundle_with_dependencies(
         wgsl: bundle.wgsl.into_bytes(),
         pass_wgsl,
         support_files,
+        scoped_task_files,
         manifest_json,
         source_dependencies: dependencies,
     })
@@ -926,6 +962,10 @@ mod tests {
                 bytes: b"@compute @workgroup_size(1) fn main() {}".to_vec(),
             }],
             support_files: Vec::new(),
+            scoped_task_files: vec![RenderSupportArtifact {
+                path: "tasks.js".to_owned(),
+                bytes: b"export const task = true;\n".to_vec(),
+            }],
             manifest_json: br#"{"protocol":"fe-web-bundle"}"#.to_vec(),
             source_dependencies: Some(dependencies),
         }
@@ -1102,6 +1142,7 @@ mod tests {
         assert_eq!(loaded.pass_wgsl.len(), 1);
         assert_eq!(loaded.pass_wgsl[0].path, artifact.pass_wgsl[0].path);
         assert_eq!(loaded.pass_wgsl[0].bytes, artifact.pass_wgsl[0].bytes);
+        assert_eq!(loaded.scoped_task_files, artifact.scoped_task_files);
         assert_eq!(loaded.source_dependencies, artifact.source_dependencies);
 
         assert!(

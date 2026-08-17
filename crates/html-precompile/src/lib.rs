@@ -90,6 +90,11 @@ pub struct RenderBundleArtifact {
     /// ...); publication keeps that directory topology intact so generated
     /// ES-module imports remain valid. Empty for a render-only surface.
     pub support_files: Vec<RenderSupportArtifact>,
+    /// Compiler-materialized actor-scoped task package, independent of the
+    /// render manifest. Paths are relative to the package root (`tasks.js`,
+    /// `child.wasm`, `runtime/actor-client.js`, ...), and publication writes
+    /// one content-addressed package plus a DOM reference to its fixed entry.
+    pub scoped_task_files: Vec<RenderSupportArtifact>,
     /// The bundle's fe-web-bundle manifest exactly as
     /// `WebBundle::manifest_json()` produces it. Publication rewrites the
     /// bundle-local artifact and pass shader paths to content-addressed names,
@@ -940,10 +945,10 @@ fn verify_scoped_task_deployment(
     let Some(reference) = attr(script, "data-fe-scoped-tasks") else {
         return Ok(());
     };
-    if attr(script, "data-fe-component").is_none() {
+    if attr(script, "data-fe-component").is_none() && attr(script, RENDER_SCRIPT_MARKER).is_none() {
         return Err(VerificationError {
             context: format!("{context} data-fe-scoped-tasks"),
-            detail: "scoped actor tasks require data-fe-component".to_owned(),
+            detail: "scoped actor tasks require a Fe component or render surface".to_owned(),
         });
     }
     let entry = deployment_file(root, &reference, &format!("{context} data-fe-scoped-tasks"))?;
@@ -970,38 +975,72 @@ fn verify_scoped_task_deployment(
             ),
         });
     }
-    let mut names = std::fs::read_dir(directory)
-        .map_err(|error| VerificationError {
-            context: format!("{context} scoped-task package"),
+    fn collect_files(
+        root: &Path,
+        directory: &Path,
+        context: &str,
+        files: &mut Vec<(String, PathBuf)>,
+    ) -> Result<(), VerificationError> {
+        for entry in std::fs::read_dir(directory).map_err(|error| VerificationError {
+            context: context.to_owned(),
             detail: format!("cannot inspect {}: {error}", directory.display()),
-        })?
-        .map(|entry| {
-            entry
-                .map_err(|error| VerificationError {
-                    context: format!("{context} scoped-task package"),
-                    detail: format!("cannot inspect directory entry: {error}"),
+        })? {
+            let entry = entry.map_err(|error| VerificationError {
+                context: context.to_owned(),
+                detail: format!("cannot inspect directory entry: {error}"),
+            })?;
+            let file_type = entry.file_type().map_err(|error| VerificationError {
+                context: context.to_owned(),
+                detail: format!("cannot inspect {}: {error}", entry.path().display()),
+            })?;
+            if file_type.is_symlink() {
+                return Err(VerificationError {
+                    context: context.to_owned(),
+                    detail: format!("package contains symlink {}", entry.path().display()),
+                });
+            }
+            if file_type.is_dir() {
+                collect_files(root, &entry.path(), context, files)?;
+                continue;
+            }
+            if !file_type.is_file() {
+                return Err(VerificationError {
+                    context: context.to_owned(),
+                    detail: format!("package contains non-file {}", entry.path().display()),
+                });
+            }
+            let relative = entry
+                .path()
+                .strip_prefix(root)
+                .expect("walked scoped-task path is under its root")
+                .to_str()
+                .ok_or_else(|| VerificationError {
+                    context: context.to_owned(),
+                    detail: "package contains a non-UTF-8 path".to_owned(),
                 })?
-                .file_name()
-                .into_string()
-                .map_err(|_| VerificationError {
-                    context: format!("{context} scoped-task package"),
-                    detail: "package contains a non-UTF-8 filename".to_owned(),
-                })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    names.sort();
-    if names != ["host-completion.js", "materialized-task.js", "tasks.js"] {
-        return Err(VerificationError {
-            context: format!("{context} scoped-task package"),
-            detail: format!("expected exactly the three fixed package modules, found {names:?}"),
-        });
+                .replace('\\', "/");
+            files.push((relative, entry.path()));
+        }
+        Ok(())
+    }
+    let package_context = format!("{context} scoped-task package");
+    let mut files = Vec::new();
+    collect_files(directory, directory, &package_context, &mut files)?;
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    let paths = files
+        .iter()
+        .map(|(path, _)| path.as_str())
+        .collect::<BTreeSet<_>>();
+    for required in ["tasks.js", "materialized-task.js", "host-completion.js"] {
+        if !paths.contains(required) {
+            return Err(VerificationError {
+                context: package_context.clone(),
+                detail: format!("package is missing fixed module {required}"),
+            });
+        }
     }
     let materialized = directory.join("materialized-task.js");
     let completion = directory.join("host-completion.js");
-    let entry_bytes = std::fs::read(&entry).map_err(|error| VerificationError {
-        context: format!("{context} scoped-task entry"),
-        detail: format!("cannot read {}: {error}", entry.display()),
-    })?;
     let materialized_bytes = std::fs::read(&materialized).map_err(|error| VerificationError {
         context: format!("{context} scoped-task runtime"),
         detail: format!("cannot read {}: {error}", materialized.display()),
@@ -1018,11 +1057,16 @@ fn verify_scoped_task_deployment(
             detail: "fixed browser runtime bytes do not match this compiler".to_owned(),
         });
     }
-    let mut package =
-        Vec::with_capacity(entry_bytes.len() + materialized_bytes.len() + completion_bytes.len());
-    package.extend_from_slice(&entry_bytes);
-    package.extend_from_slice(&materialized_bytes);
-    package.extend_from_slice(&completion_bytes);
+    let mut package = Vec::new();
+    for (path, file) in &files {
+        let bytes = std::fs::read(file).map_err(|error| VerificationError {
+            context: package_context.clone(),
+            detail: format!("cannot read {}: {error}", file.display()),
+        })?;
+        package.extend_from_slice(path.as_bytes());
+        package.push(0);
+        package.extend_from_slice(&bytes);
+    }
     let digest = sha256_hex(&package);
     if !digest.starts_with(prefix) {
         return Err(VerificationError {
@@ -1030,9 +1074,7 @@ fn verify_scoped_task_deployment(
             detail: format!("package digest {digest} does not match directory prefix {prefix}"),
         });
     }
-    verified.insert(entry);
-    verified.insert(materialized);
-    verified.insert(completion);
+    verified.extend(files.into_iter().map(|(_, path)| path));
     Ok(())
 }
 
@@ -2649,12 +2691,13 @@ fn publish_render_artifacts(
     runtime: &PublishedRenderRuntime,
     document_source: &PublishedDocumentSource,
     assets: &mut BTreeMap<String, Vec<u8>>,
-) -> Result<(Option<String>, String, Option<String>), PrecompileError> {
+) -> Result<(Option<String>, String, Option<String>, Option<String>), PrecompileError> {
     let RenderBundleArtifact {
         wasm,
         wgsl,
         pass_wgsl,
         support_files,
+        scoped_task_files,
         manifest_json,
         source_dependencies: _,
     } = bundle;
@@ -2663,6 +2706,7 @@ fn publish_render_artifacts(
             PrecompileError::Serialize(format!("render bundle manifest is not valid JSON: {error}"))
         })?;
     pin_published_attribution(&mut manifest, runtime, document_source)?;
+    let scoped_task_ref = publish_materialized_scoped_task_package(&scoped_task_files, assets)?;
     if !support_files.is_empty() {
         let mut package_identity = Vec::new();
         let mut support_paths = BTreeSet::new();
@@ -2880,6 +2924,7 @@ fn publish_render_artifacts(
         wasm_ref,
         published_reference(base_url, document_url, &manifest_path),
         wasm_sha256,
+        scoped_task_ref.map(|path| published_reference(base_url, document_url, &path)),
     ))
 }
 
@@ -2926,7 +2971,7 @@ fn publish_render_bundle(
     document_source: &PublishedDocumentSource,
     assets: &mut BTreeMap<String, Vec<u8>>,
 ) -> Result<(), PrecompileError> {
-    let (wasm_ref, manifest_ref, wasm_sha256) = publish_render_artifacts(
+    let (wasm_ref, manifest_ref, wasm_sha256, scoped_task_ref) = publish_render_artifacts(
         base_url,
         document_url,
         bundle,
@@ -2939,6 +2984,7 @@ fn publish_render_bundle(
         wasm_ref.as_deref(),
         &manifest_ref,
         &published_reference(base_url, document_url, &runtime.path),
+        scoped_task_ref.as_deref(),
         wasm_sha256.as_deref(),
     );
     Ok(())
@@ -2960,7 +3006,7 @@ fn publish_authored_surface(
     document_source: &PublishedDocumentSource,
     assets: &mut BTreeMap<String, Vec<u8>>,
 ) -> Result<(), PrecompileError> {
-    let (_wasm_ref, manifest_ref, _wasm_sha256) = publish_render_artifacts(
+    let (_wasm_ref, manifest_ref, _wasm_sha256, scoped_task_ref) = publish_render_artifacts(
         base_url,
         document_url,
         bundle,
@@ -2971,6 +3017,11 @@ fn publish_authored_surface(
     remove_attr(element, "src");
     remove_attr(element, "entry");
     set_attr(element, "manifest", &manifest_ref);
+    if let Some(scoped_task_ref) = scoped_task_ref {
+        set_attr(element, "data-fe-scoped-tasks", &scoped_task_ref);
+    } else {
+        remove_attr(element, "data-fe-scoped-tasks");
+    }
     Ok(())
 }
 
@@ -3535,23 +3586,63 @@ fn publish_scoped_task_package(
     else {
         return Ok(None);
     };
-    let package_len = package
+    let files = package
         .files
-        .iter()
-        .map(|file| file.path.len() + file.bytes.len() + 1)
-        .sum::<usize>();
+        .into_iter()
+        .map(|file| RenderSupportArtifact {
+            path: file.path,
+            bytes: file.bytes,
+        })
+        .collect::<Vec<_>>();
+    publish_materialized_scoped_task_package(&files, assets)
+}
+
+/// Publish the exact manifest-free task package already materialized by a
+/// render bundle. This is intentionally the same path/hash contract used by
+/// resident components: the DOM names only `tasks.js`; task identities,
+/// child actors, codecs, and runtime modules remain compiler-derived files.
+fn publish_materialized_scoped_task_package(
+    files: &[RenderSupportArtifact],
+    assets: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<Option<String>, PrecompileError> {
+    if files.is_empty() {
+        return Ok(None);
+    }
+    let mut paths = BTreeSet::new();
+    let mut package_len = 0usize;
+    for file in files {
+        validate_materialized_support_path(&file.path)?;
+        if !paths.insert(file.path.clone()) {
+            return Err(PrecompileError::Serialize(format!(
+                "scoped task package path `{}` is duplicated",
+                file.path
+            )));
+        }
+        package_len += file.path.len() + file.bytes.len() + 1;
+    }
+    if !paths.contains("tasks.js") {
+        return Err(PrecompileError::Serialize(
+            "scoped task package has no fixed `tasks.js` entry".to_owned(),
+        ));
+    }
+    let mut ordered = files.iter().collect::<Vec<_>>();
+    ordered.sort_by(|left, right| left.path.cmp(&right.path));
     let mut package_bytes = Vec::with_capacity(package_len);
-    for file in &package.files {
+    for file in &ordered {
         package_bytes.extend_from_slice(file.path.as_bytes());
         package_bytes.push(0);
         package_bytes.extend_from_slice(&file.bytes);
     }
     let digest = sha256_hex(&package_bytes);
     let directory = format!("assets/fe-task-{}", &digest[..16]);
-    for file in package.files {
-        insert_identical(assets, format!("{directory}/{}", file.path), file.bytes)?;
+    for file in ordered {
+        insert_identical(
+            assets,
+            format!("{directory}/{}", file.path),
+            file.bytes.clone(),
+        )?;
     }
-    Ok(Some(format!("{directory}/{}", package.entry_path)))
+    Ok(Some(format!("{directory}/tasks.js")))
 }
 
 fn rewrite_script(
@@ -3605,6 +3696,7 @@ fn rewrite_render_script(
     wasm_path: Option<&str>,
     manifest_path: &str,
     render_runtime_path: &str,
+    scoped_task_path: Option<&str>,
     sha256: Option<&str>,
 ) {
     set_attr(node, "type", ARTIFACT_SCRIPT_TYPE);
@@ -3618,6 +3710,11 @@ fn rewrite_render_script(
     set_attr(node, "data-fe-manifest", manifest_path);
     set_attr(node, RENDER_SCRIPT_MARKER, "");
     set_attr(node, RENDER_RUNTIME_ATTR, render_runtime_path);
+    if let Some(scoped_task_path) = scoped_task_path {
+        set_attr(node, "data-fe-scoped-tasks", scoped_task_path);
+    } else {
+        remove_attr(node, "data-fe-scoped-tasks");
+    }
     remove_attr(node, "data-fe-adapter-selection");
     remove_attr(node, "data-fe-adapter");
     if let Some(sha256) = sha256 {
@@ -3694,6 +3791,7 @@ mod tests {
             wgsl: b"wgsl-source".to_vec(),
             pass_wgsl: Vec::new(),
             support_files: Vec::new(),
+            scoped_task_files: Vec::new(),
             manifest_json: br#"{
                 "artifacts": {
                     "wasm": "module.wasm",
@@ -3777,6 +3875,7 @@ mod tests {
                 },
             ],
             support_files: Vec::new(),
+            scoped_task_files: Vec::new(),
             manifest_json: serde_json::to_vec(&serde_json::json!({
                 "protocol": "fe-web-bundle",
                 "protocol_version": 6,
@@ -3828,6 +3927,7 @@ mod tests {
                     bytes: bytes.to_vec(),
                 })
                 .collect(),
+            scoped_task_files: Vec::new(),
             manifest_json: serde_json::to_vec(&serde_json::json!({
                 "protocol": "fe-web-bundle",
                 "protocol_version": 6,
@@ -4062,6 +4162,87 @@ mod tests {
             error.to_string().contains("not exactly declared"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn render_scoped_tasks_publish_outside_the_manifest_with_structured_child_files() {
+        let html = r#"<script type="application/fe" data-fe-src="sketches/actor" data-fe-render></script>"#;
+        let mut bundle = fake_actor_render_bundle();
+        bundle.scoped_task_files = vec![
+            RenderSupportArtifact {
+                path: "tasks.js".to_owned(),
+                bytes: b"export const compilerDerivedTasks = true;\n".to_vec(),
+            },
+            RenderSupportArtifact {
+                path: "materialized-task.js".to_owned(),
+                bytes: fe_compiler_facade::MATERIALIZED_TASK_RUNTIME_JS
+                    .as_bytes()
+                    .to_vec(),
+            },
+            RenderSupportArtifact {
+                path: "host-completion.js".to_owned(),
+                bytes: fe_compiler_facade::HOST_COMPLETION_RUNTIME_JS
+                    .as_bytes()
+                    .to_vec(),
+            },
+            RenderSupportArtifact {
+                path: "child.wasm".to_owned(),
+                bytes: b"child-wasm".to_vec(),
+            },
+            RenderSupportArtifact {
+                path: "interface.js".to_owned(),
+                bytes: b"export const mailbox = {};\n".to_vec(),
+            },
+            RenderSupportArtifact {
+                path: "runtime/actor-client.js".to_owned(),
+                bytes: b"export function createCanonicalBrowserWorkerScope() {}\n".to_vec(),
+            },
+        ];
+        let output = precompile_html_with_render_lane(
+            "https://example.test/index.html",
+            html,
+            "export function mountRenderSurface() {}\n",
+            |_| panic!("no application/fe script sources"),
+            |_, _| Ok(Some(bundle.clone())),
+        )
+        .unwrap();
+
+        assert!(output.html.contains("data-fe-scoped-tasks="));
+        let task_paths = output
+            .assets
+            .keys()
+            .filter(|path| path.contains("/fe-task-"))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(task_paths.len(), bundle.scoped_task_files.len());
+        assert!(
+            task_paths
+                .iter()
+                .any(|path| path.ends_with("/runtime/actor-client.js"))
+        );
+        let manifest = output
+            .assets
+            .iter()
+            .find_map(|(path, bytes)| {
+                (path.ends_with(".json") && bytes.windows(13).any(|part| part == b"fe-web-bundle"))
+                    .then_some(bytes)
+            })
+            .unwrap();
+        let manifest_text = std::str::from_utf8(manifest).unwrap();
+        assert!(!manifest_text.contains("tasks.js"));
+        assert!(!manifest_text.contains("scoped_task"));
+
+        let deployment = tempfile::tempdir().unwrap();
+        write_publication(deployment.path(), &output);
+        verify_precompiled_site(&deployment.path().join("index.html")).unwrap();
+
+        let child = task_paths
+            .iter()
+            .find(|path| path.ends_with("/child.wasm"))
+            .unwrap();
+        std::fs::write(deployment.path().join(child), b"tampered").unwrap();
+        let error = verify_precompiled_site(&deployment.path().join("index.html")).unwrap_err();
+        assert!(error.to_string().contains("package digest"), "{error}");
     }
 
     #[test]

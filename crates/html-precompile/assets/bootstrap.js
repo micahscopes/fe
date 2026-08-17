@@ -1374,6 +1374,12 @@ async function runRenderSurface(element, manifestUrl) {
 
   const surface = document.createElement("fe-surface");
   surface.setAttribute("manifest", manifestUrl.href);
+  if (element.dataset.feScopedTasks) {
+    surface.setAttribute(
+      "data-fe-scoped-tasks",
+      new URL(element.dataset.feScopedTasks, element.baseURI).href,
+    );
+  }
   if (element.dataset.feSequence !== undefined) {
     surface.setAttribute("data-fe-sequence", element.dataset.feSequence);
     surface.setAttribute("boot", "manual");
