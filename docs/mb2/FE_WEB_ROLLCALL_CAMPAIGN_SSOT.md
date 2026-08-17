@@ -162,14 +162,27 @@ Legend:
   pure `RestartWindow` reducer now own epoch advancement, rolling-window
   admission, restart/backoff selection, exhaustion, and parent cancellation.
   `ChildPlacement<B, C>` plus `supervise_child` now run the complete owning scope
-  through the ordinary `Pending`/`Suspend`/`Timer` rail. Independent Bun
-  mechanics, compiled-Fe Wasmtime reducer, and compiled-Fe/Bun structured-scope
-  gates pass. The compiler-packaged `createCanonicalBrowserWorkerScope` now
-  maps Fe-selected epochs to policy-free canonical Worker mechanics. Remaining:
-  publish distinct parent and child Wasm artifacts, attach the capability from
-  the immutable browser package, then compose nested child scopes. Recursive
-  resumable SCCs must remain explicitly refused until linked affine frames are
-  sound.
+  through the ordinary `Pending`/`Suspend`/`Timer` rail. Worker readiness now
+  races the typed spawn pending value against an ordinary Fe timer through
+  `Select`; Fe consumes the losing affine operation through
+  `PendingCancellation`, classifies startup timeout, and spends the same typed
+  restart budget as an immediate spawn failure. Independent Bun mechanics,
+  compiled-Fe Wasmtime reducer, and compiled-Fe/Bun structured-scope gates
+  pass.
+  The compiler now recovers the nominal child type `C` from the parent runtime
+  package, resolves the actor whose state has that type, selects its `Worker`
+  behaviors, and compiles a distinct zero-import canonical child Wasm artifact.
+  The precompiler publishes that child, its generated interface, and the fixed
+  actor runtime beside the parent continuation package. Production bootstrap
+  installs the capability only when the parent imports `fe:worker-scope`.
+  There is no authored child ID, child URL, child manifest, behavior-name table,
+  or application routing JavaScript. The reproducible Chromium gate
+  `structured_worker.browser.mjs` loads the immutable parent, child, generated
+  interface, and Module Worker host over HTTP without errors. Remaining: admit
+  multiple nominal children without collapsing them into one import namespace,
+  compose nested scopes, attach opaque ports, derive rich canonical message
+  values, and migrate DEC onto the path. Recursive resumable SCCs must remain
+  explicitly refused until linked affine frames are sound.
 
 ## C. GPU pass graphs and perturbation
 
@@ -570,8 +583,8 @@ fallback. The semantic receipts are:
 5. Lower the BabyBear leaf prover and recursive merges through Fe Conal/CTFE
    WebGPU schedules, then run the complete progressive proof/verify/tamper page
    through Chrome.
-6. Wire the landed Fe supervision reducer to Worker/port placement through the
-   typed runtime-control spine, then derive rich canonical port payloads.
+6. Migrate DEC's Worker/message lane onto the landed compiler-derived child
+   scope, then derive rich canonical port payloads and nested scopes.
 7. Delete the runtime manifest and finish the legacy disposition.
 8. Run the exact G5 command once at the final DONE gate.
 

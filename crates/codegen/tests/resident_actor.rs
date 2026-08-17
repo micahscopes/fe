@@ -80,6 +80,63 @@ actor Clock {
     (db, file)
 }
 
+fn structured_child_fixture() -> (DriverDataBase, common::file::File) {
+    const SOURCE: &str = r#"
+use core::Worker
+use core::actor::{InitialState, ProjectState, ResidentTransition, ScopedTask}
+use std::runtime::{ChildScopeExit, supervise_browser_child}
+
+pub struct Request { pub value: u32 }
+pub struct Response { pub value: u32 }
+pub struct ParentEvent { pub value: u32 }
+pub struct ParentState { pub value: u32 }
+pub struct ParentProjection { pub value: u32 }
+
+actor ArithmeticChild {
+    fn double(request: Request) -> Response uses (Worker) {
+        Response { value: request.value * 2 }
+    }
+}
+
+actor Parent {
+    value: u32,
+
+    fn initial() -> ParentState uses (InitialState) {
+        ParentState { value: 0 }
+    }
+
+    fn receive(self, event: ParentEvent) -> ParentState uses (ResidentTransition) {
+        ParentState { value: self.value + event.value }
+    }
+
+    fn project(self) -> ParentProjection uses (ProjectState) {
+        ParentProjection { value: self.value }
+    }
+
+    fn supervise() -> u32 uses (ScopedTask) {
+        match supervise_browser_child(
+            child: ArithmeticChild {},
+            max_restarts: 2,
+            window_ms: 1000,
+            backoff_ms: 3,
+            startup_timeout_ms: 1000,
+        ) {
+            ChildScopeExit::Cancelled(epoch) => epoch
+            ChildScopeExit::Exhausted(epoch, _) => epoch
+            ChildScopeExit::TransportFailure(epoch, _) => epoch
+            ChildScopeExit::InvariantViolation(epoch, _) => epoch
+        }
+    }
+}
+"#;
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///web_component_structured_child.fe").unwrap();
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(SOURCE.to_owned()));
+    let file = db.workspace().get(&db, &url).unwrap();
+    (db, file)
+}
+
 fn partial_state_scoped_task_fixture() -> (DriverDataBase, common::file::File) {
     const SOURCE: &str = r#"
 use core::actor::{InitialState, ProjectState, ResidentTransition, ScopedTask}
@@ -549,6 +606,77 @@ fn resident_actor_scoped_task_is_role_selected_and_materialized_without_a_task_t
         !exports.iter().any(|name| name == "heartbeat"),
         "the authored behavior name must not become a Wasm discovery ABI"
     );
+}
+
+#[test]
+fn resident_actor_derives_a_separate_zero_import_child_from_the_fe_nominal_type() {
+    let (db, file) = structured_child_fixture();
+    let top_mod = db.top_mod(file);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "structured-child fixture diagnostics:\n{diagnostics}"
+    );
+
+    let artifact = compile_resident_actor(&db, top_mod)
+        .expect("resident actor plus structured child contract")
+        .expect("role-selected resident actor");
+    let child = artifact
+        .structured_child
+        .expect("nominal child type should select one actor artifact");
+    assert_eq!(child.actor, "ArithmeticChild");
+    let [lane] = child.interface.lanes.as_slice() else {
+        panic!("expected exactly one canonical child lane")
+    };
+    assert_eq!(lane.name, "double");
+    assert_eq!(
+        lane.intent.placement,
+        fe_codegen::CanonicalPlacement::Worker
+    );
+    assert_eq!(lane.request.size, 4);
+    assert_eq!(lane.response.size, 4);
+
+    let child_imports = wasmparser::Parser::new(0)
+        .parse_all(&child.wasm)
+        .filter_map(|payload| match payload.expect("valid child Wasm") {
+            wasmparser::Payload::ImportSection(reader) => Some(reader.count()),
+            _ => None,
+        })
+        .sum::<u32>();
+    assert_eq!(
+        child_imports, 0,
+        "child actor must be independently instantiable"
+    );
+
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &child.wasm).expect("child actor module");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance =
+        wasmtime::Instance::new(&mut store, &module, &[]).expect("zero-import child instance");
+    let memory = instance
+        .get_memory(&mut store, "memory")
+        .expect("child memory");
+    let alloc = instance
+        .get_typed_func::<(i32, i32), i32>(&mut store, "fe_cabi_alloc")
+        .expect("child canonical allocator");
+    let request = alloc.call(&mut store, (4, 4)).expect("request allocation");
+    memory
+        .write(&mut store, request as usize, &21_u32.to_le_bytes())
+        .expect("write child request");
+    let call = instance
+        .get_typed_func::<i32, i32>(
+            &mut store,
+            lane.export.as_deref().expect("child lane export"),
+        )
+        .expect("typed child lane");
+    let response = call
+        .call(&mut store, request)
+        .expect("execute Fe child lane");
+    let mut value = [0_u8; 4];
+    memory
+        .read(&store, response as usize, &mut value)
+        .expect("read child response");
+    assert_eq!(u32::from_le_bytes(value), 42);
 }
 
 #[test]

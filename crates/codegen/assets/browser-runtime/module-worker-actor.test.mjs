@@ -173,9 +173,12 @@ await assert.rejects(createModuleWorkerActor({ workerUrl: "malformed.js", ...sch
 class SilentWorker extends FakeWorker {
   postMessage(message, transfer) { this.message = message; this.transfer = transfer; }
 }
-await assert.rejects(createModuleWorkerActor({ workerUrl: "silent.js", ...schemas,
-  WorkerCtor: SilentWorker, initTimeoutMs: 5 }), (error) =>
-  error.code === "FE_ACTOR_WORKER_TIMEOUT");
+const silentController = new AbortController();
+const silentStart = createModuleWorkerActor({ workerUrl: "silent.js", ...schemas,
+  WorkerCtor: SilentWorker, signal: silentController.signal });
+await new Promise((resolve) => setTimeout(resolve, 0));
+silentController.abort();
+await assert.rejects(silentStart, (error) => error.code === "FE_ACTOR_ABORTED");
 assert.equal(FakeWorker.instances.at(-1).terminated, true);
 
-console.log("canonical module worker transfer/restart/errors plus init timeout: ok");
+console.log("canonical module worker transfer/restart/errors plus external cancellation: ok");

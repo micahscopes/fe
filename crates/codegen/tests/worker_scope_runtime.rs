@@ -27,6 +27,7 @@ pub fn scope_task() -> u64 {
         max_restarts: 2,
         window_ms: 1000,
         backoff_ms: 0,
+        startup_timeout_ms: 5,
     )
     match exit {
         ChildScopeExit::Cancelled(epoch) => 10000 + epoch as u64
@@ -153,6 +154,38 @@ if (JSON.stringify(exhaustedTape) !== expectedExhausted) {{
   throw new Error(`host selected or lost a lifecycle action: ${{JSON.stringify(exhaustedTape)}}`);
 }}
 if (exhausted.broker.activeCount() !== 0) throw new Error("exhausted scope leaked tokens");
+
+// A Worker that never becomes ready is raced against the ordinary Fe Timer
+// effect. Fe cancels each losing browser operation and spends exactly the same
+// typed startup-failure budget as an immediate spawn rejection.
+const timeoutTape = [];
+const timeoutSignals = [];
+const timedOut = await instantiate({{
+  spawn(epoch, signal) {{
+    timeoutTape.push(["spawn", epoch]);
+    timeoutSignals.push(signal);
+    return new Promise((_, reject) => signal.addEventListener(
+      "abort",
+      () => reject(new Error("synthetic readiness operation cancelled")),
+      {{ once: true }},
+    ));
+  }},
+  async failure(epoch) {{ timeoutTape.push(["failure", epoch]); }},
+  close(epoch) {{ timeoutTape.push(["close", epoch]); }},
+}});
+const timeoutOutput = await timedOut.broker.run(timedOut.task, []);
+if (timeoutOutput.length !== 1 || timeoutOutput[0] !== 1002n) {{
+  throw new Error(`Fe startup-timeout result drifted: ${{timeoutOutput}}`);
+}}
+if (JSON.stringify(timeoutTape) !== JSON.stringify([
+  ["spawn", 0], ["spawn", 1], ["spawn", 2], ["close", 2],
+])) {{
+  throw new Error(`host selected readiness policy: ${{JSON.stringify(timeoutTape)}}`);
+}}
+if (timeoutSignals.length !== 3 || timeoutSignals.some(signal => !signal.aborted)) {{
+  throw new Error("Fe did not cancel every losing Worker readiness operation");
+}}
+if (timedOut.broker.activeCount() !== 0) throw new Error("timed-out scope leaked tokens");
 
 // Failure of the observation mechanism is not misclassified as a child crash
 // and does not consume the restart budget.

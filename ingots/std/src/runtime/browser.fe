@@ -3,7 +3,7 @@
 //! The fixed host realizes only Worker lifecycle mechanics. The parent module's
 //! target-neutral Fe loop owns policy, epochs, timers, and terminal meaning.
 
-use core::pending::{Pending, Suspend, Timer}
+use core::pending::{Pending, PendingCancellation, Select, Suspend, Timer}
 use ingot::wasm::WasmBackend
 use super::{
     ChildPlacement,
@@ -46,10 +46,13 @@ pub fn supervise_browser_child<C>(
     max_restarts: u32,
     window_ms: u64,
     backoff_ms: u64,
+    startup_timeout_ms: u64,
 ) -> ChildScopeExit {
     with (
         ChildPlacement<WasmBackend, C> = BrowserChildPlacement<C> {},
         Timer<WasmBackend> = HostTimer {},
+        Select<WasmBackend, u32> = Resumable {},
+        PendingCancellation<WasmBackend> = Resumable {},
         Suspend<WasmBackend, u32> = Resumable {},
     ) {
         supervise_child(
@@ -58,6 +61,7 @@ pub fn supervise_browser_child<C>(
                 max_restarts: max_restarts,
                 window_ms: window_ms,
                 backoff_ms: backoff_ms,
+                startup_timeout_ms: startup_timeout_ms,
             ),
         )
     }

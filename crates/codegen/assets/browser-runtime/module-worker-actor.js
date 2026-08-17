@@ -2,7 +2,6 @@ import { createActorEndpoint } from "./actor-endpoint.js";
 import { createMessagePortActorTransport } from "./message-port-actor.js";
 import { actorEnvelope } from "./actor-coordinator.js";
 
-const INIT_TIMEOUT = 10_000;
 const runtimeError = (code, message) => {
   const error = new Error(`${code}: ${message}`);
   error.name = "ModuleWorkerActorError";
@@ -18,7 +17,7 @@ export async function createModuleWorkerActor(options) {
     workerUrl, init = {}, adapter,
     requestSchema: suppliedRequestSchema,
     resultSchema: suppliedResultSchema,
-    maxPending = 32, initTimeoutMs = INIT_TIMEOUT, initialEpoch = 0, signal,
+    maxPending = 32, initialEpoch = 0, signal,
     createAuxiliaryPorts = () => ({ message: {}, transfer: [], close() {} }),
     WorkerCtor = Worker, MessageChannelCtor = MessageChannel,
     ...unknown
@@ -39,9 +38,6 @@ export async function createModuleWorkerActor(options) {
     resultSchema = adapter.resultSchema;
   }
   if (!requestSchema || !resultSchema) throw new TypeError("actor schemas required");
-  if (!Number.isSafeInteger(initTimeoutMs) || initTimeoutMs < 1) {
-    throw new TypeError("initTimeoutMs must be a positive safe integer");
-  }
   if (!Number.isSafeInteger(initialEpoch) || initialEpoch < 0) {
     throw new TypeError("initialEpoch must be a non-negative safe integer");
   }
@@ -113,7 +109,6 @@ export async function createModuleWorkerActor(options) {
     let cancelReady = () => {};
     const ready = new Promise((resolve, reject) => {
       const cleanup = () => {
-        clearTimeout(timeout);
         channel.port1.removeEventListener("message", onMessage);
         worker.removeEventListener?.("error", onError);
         startSignal?.removeEventListener("abort", onAbort);
@@ -139,9 +134,6 @@ export async function createModuleWorkerActor(options) {
       const onAbort = () => rejectCleanly(
         runtimeError("FE_ACTOR_ABORTED", "module worker start aborted"),
       );
-      const timeout = setTimeout(() => rejectCleanly(
-        runtimeError("FE_ACTOR_WORKER_TIMEOUT", "module worker readiness timed out"),
-      ), initTimeoutMs);
       channel.port1.addEventListener("message", onMessage);
       worker.addEventListener("error", onError);
       startSignal?.addEventListener("abort", onAbort, { once: true });

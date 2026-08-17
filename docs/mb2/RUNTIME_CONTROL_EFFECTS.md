@@ -238,17 +238,24 @@ manifest-driven.
    JavaScript retry/backoff policy is deleted. `ChildPlacement<B, C>` now names
    only unit-valued spawn, failure-observation, and close mechanics, while the
    target-neutral `supervise_child` Fe loop combines those operations with the
-   existing affine `Pending`/`Suspend` and `Timer` effects. A compiled Fe/Bun
-   gate proves exact epoch actions, bounded exhaustion, transport-failure
-   distinction, and parent-cancellation close against adversarial host tapes.
-   `C` brands `ChildStarted<C>` and `ChildRuntimeFailure<C>` pending values, so
-   multiple child programs need no shared numeric identity.
-   `createCanonicalBrowserWorkerScope` now adapts the canonical Module Worker
-   to this capability without adding a timer, budget, or retry loop, and the
-   compiler publishes it with the fixed actor runtime. Remaining: publish
-   distinct parent-scope and child-actor Wasm artifacts, attach/start the owning
-   scope in the real browser package, derive rich port values, and compose
-   nested scopes.
+   existing affine `Pending`/`Suspend`, `Timer`, `Select`, and
+   `PendingCancellation` effects. Worker startup timeout is an ordinary Fe
+   race, including explicit loser cancellation and typed restart-budget
+   accounting. A compiled Fe/Bun gate proves exact epoch actions, bounded
+   exhaustion, startup timeout, transport-failure distinction,
+   parent-cancellation close, and zero leaked broker tokens against adversarial
+   host tapes. `C` brands `ChildStarted<C>` and
+   `ChildRuntimeFailure<C>` pending values, so child programs need no shared
+   numeric identity.
+   The compiler recovers `C` from the semantic parent imports, resolves the
+   matching Fe actor, compiles its `Worker` behaviors into a distinct
+   zero-import canonical Wasm child, and publishes it with the generated
+   interface and fixed actor runtime. The production bootstrap attaches that
+   capability when the parent needs `fe:worker-scope`. A checked-in Chromium
+   gate executes the immutable parent and child package over HTTP. No authored
+   child ID, URL, manifest, or function-name table crosses the boundary.
+   Remaining: multiple children in one parent, rich port values, DEC migration,
+   and nested scopes.
 7. [todo] Route WebGPU completion, device loss/recovery, and resource lifetime through
    the same outcome/scope machinery.
 8. [in progress] Expose typed device/viewport capability facts so Fe owns responsive
@@ -260,6 +267,32 @@ manifest-driven.
    and adaptive work budgets still need to join this policy/effect path.
 9. [todo] Delete remaining semantic render-manifest fetch/interpretation after typed
    exports carry the complete contract.
+
+## Honest browser-host debt
+
+`host-completion.js` is a fixed browser boundary, not application code, but it
+is not the final minimal form. Its legitimate irreducible work is custody of
+standards objects and callbacks: timers, Promises, `AbortController`,
+`MessagePort`, Worker operations, and exact continuation invocation. Fe now
+owns retry, timeout, ordering, winner selection, cancellation meaning,
+backpressure selection, and terminal scope policy.
+
+The remaining compost surface is concrete:
+
+- several browser operations still have handwritten scalar validation and lane
+  lowering in the fixed broker rather than compiler-generated canonical
+  adapters;
+- the broker has an explicit operation import table that should increasingly
+  be derived from the compiled effect interface;
+- the `MessagePort<u64>` source has a fixed replay capacity of 64 in JavaScript;
+  capacity and overflow meaning should be Fe policy while the host retains only
+  finite queue mechanics; and
+- the parent artifact still enters through the transitional general runtime
+  manifest, although the new child link itself adds no JSON manifest.
+
+These are tracked boundary reductions, not permission to add per-demo
+JavaScript. A new application policy must remain in Fe even while these fixed
+mechanics are being generated or narrowed.
 
 Each slice needs an independent semantic oracle. Generated-byte equality is
 never sufficient evidence of continuation, cancellation, or race correctness.

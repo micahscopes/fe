@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Fe structured Worker browser gate</title>
+  </head>
+  <body>
+    <fe-component id="app"></fe-component>
+    <script type="application/fe" data-fe-component data-fe-mount="#app">
+use core::Worker
+use core::actor::ScopedTask
+use std::runtime::{ChildScopeExit, supervise_browser_child}
+use std::web::component::{
+    BrowserBytes,
+    ComponentEvent,
+    ComponentPatch,
+    InitialState,
+    ProjectState,
+    ResidentTransition,
+}
+
+struct Request { value: u32 }
+struct Response { value: u32 }
+struct State { value: u32 }
+
+actor ArithmeticChild {
+    fn double(request: Request) -> Response uses (Worker) {
+        Response { value: request.value * 2 }
+    }
+}
+
+actor App {
+    value: u32,
+
+    fn initial() -> State uses (InitialState) {
+        State { value: 0 }
+    }
+
+    fn receive(self, _ event: own ComponentEvent) -> State uses (ResidentTransition) {
+        State { value: self.value + 1 }
+    }
+
+    fn project(self) -> ComponentPatch uses (ProjectState) {
+        ComponentPatch {
+            visible_mask: 0,
+            focus_target: 0,
+            flags: 0,
+            commands: BrowserBytes { ptr: 0, len: 0 },
+        }
+    }
+
+    fn supervise() -> u32 uses (ScopedTask) {
+        match supervise_browser_child(
+            child: ArithmeticChild {},
+            max_restarts: 2,
+            window_ms: 1000,
+            backoff_ms: 3,
+            startup_timeout_ms: 1000,
+        ) {
+            ChildScopeExit::Cancelled(epoch) => epoch
+            ChildScopeExit::Exhausted(epoch, _) => epoch
+            ChildScopeExit::TransportFailure(epoch, _) => epoch
+            ChildScopeExit::InvariantViolation(epoch, _) => epoch
+        }
+    }
+}
+    </script>
+  </body>
+</html>

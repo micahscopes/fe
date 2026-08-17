@@ -23,8 +23,11 @@ use hir::{
 use serde::{Deserialize, Serialize};
 use wasmparser::{CompositeInnerType, ExternalKind, Payload, TypeRef, ValType};
 
+use crate::actor_semantics::resolve_metadata_attrs;
+
 pub const CANONICAL_INTERFACE_PROTOCOL: &str = "fe-canonical-browser-interface";
 pub const CANONICAL_INTERFACE_VERSION: u32 = 4;
+const CANONICAL_INTERFACE_JS: &str = include_str!("../assets/canonical-interface.js");
 
 const MAX_DEPTH: usize = 64;
 const MAX_NODES: usize = 4096;
@@ -239,6 +242,31 @@ impl fmt::Display for CanonicalInterfaceError {
 
 impl std::error::Error for CanonicalInterfaceError {}
 
+/// Emit the executable canonical adapter for one compiler-derived interface.
+/// The resulting module contains the already-validated type/layout tree and no
+/// application-authored routing table.
+pub fn emit_canonical_interface_js(
+    interface: &CanonicalInterfaceManifest,
+) -> Result<String, CanonicalInterfaceError> {
+    let interface_value = serde_json::to_string(interface).map_err(|error| {
+        self::error(format!("canonical interface serialization failed: {error}"))
+    })?;
+    Ok(format!(
+        "{CANONICAL_INTERFACE_JS}\n\
+         export const canonicalInterfaceManifest = Object.freeze({interface_value});\n\
+         export const compiledCanonicalInterface = \
+         compileCanonicalInterfaceManifest(canonicalInterfaceManifest);\n\
+         export function createInterfaceCaller(exports) {{\n  \
+         return createCanonicalInterfaceCaller(compiledCanonicalInterface, exports);\n}}\n\
+         export function compileActorAdapter() {{\n  \
+         return compileCanonicalActorAdapter(canonicalInterfaceManifest, compiledCanonicalInterface);\n}}\n\
+         export function createActorAdapter(exports, options) {{\n  \
+         return createCanonicalActorAdapter(canonicalInterfaceManifest, compiledCanonicalInterface, exports, options);\n}}\n\
+         export function createHostEffectAdapter(handlers, options) {{\n  \
+         return createCanonicalHostEffectAdapter(canonicalInterfaceManifest, compiledCanonicalInterface, handlers, options);\n}}\n"
+    ))
+}
+
 impl CanonicalInterfaceManifest {
     pub fn build(declarations: Vec<CanonicalLaneDecl>) -> Result<Self, CanonicalInterfaceError> {
         if declarations.is_empty() {
@@ -410,7 +438,7 @@ pub fn canonical_lane_decls_from_module<'db>(
 }
 
 fn function_has_browser_actor_marker(db: &dyn HirAnalysisDb, func: hir::hir_def::Func<'_>) -> bool {
-    func.effect_requirements(db).into_iter().any(|requirement| {
+    let effect_marker = func.effect_requirements(db).into_iter().any(|requirement| {
         let EffectRequirementKey::Trait(trait_inst) = &requirement.key else {
             return false;
         };
@@ -421,10 +449,22 @@ fn function_has_browser_actor_marker(db: &dyn HirAnalysisDb, func: hir::hir_def:
         attrs.host_execution(db).is_some()
             || attrs.host_placement(db).is_some()
             || attrs.host_capability(db).is_some()
-    })
+    });
+    effect_marker
+        || func
+            .actor_roles(db)
+            .data(db)
+            .iter()
+            .filter_map(|role| role.key_path.to_opt())
+            .filter_map(|path| resolve_metadata_attrs(db, path, func.scope()))
+            .any(|attrs| {
+                attrs.host_execution(db).is_some()
+                    || attrs.host_placement(db).is_some()
+                    || attrs.host_capability(db).is_some()
+            })
 }
 
-fn canonical_lane_decl_from_func<'db>(
+pub(crate) fn canonical_lane_decl_from_func<'db>(
     db: &'db dyn HirAnalysisDb,
     func: hir::hir_def::Func<'db>,
     entry_name: &str,
@@ -474,13 +514,50 @@ fn canonical_lane_decl_from_func<'db>(
     })
 }
 
-fn canonical_lane_intent<'db>(
+pub(crate) fn canonical_lane_intent<'db>(
     db: &'db dyn HirAnalysisDb,
     func: hir::hir_def::Func<'db>,
 ) -> Result<CanonicalLaneIntent, CanonicalInterfaceError> {
     let mut execution = CanonicalExecution::Wasm;
     let mut placement = CanonicalPlacement::Any;
     let mut capabilities = Vec::new();
+
+    // Actor behavior roles are compiler metadata rather than callable effect
+    // requirements. They nevertheless carry the same nominal execution and
+    // placement types, so an actor can state `uses (Worker)` directly without
+    // manufacturing a runtime provider argument merely to describe topology.
+    for attrs in func
+        .actor_roles(db)
+        .data(db)
+        .iter()
+        .filter_map(|role| role.key_path.to_opt())
+        .filter_map(|path| resolve_metadata_attrs(db, path, func.scope()))
+    {
+        if attrs.host_execution(db) == Some(HostExecution::External) {
+            if execution == CanonicalExecution::HostEffect {
+                return Err(error("duplicate canonical host-execution marker"));
+            }
+            execution = CanonicalExecution::HostEffect;
+            continue;
+        }
+        let marker_placement = match attrs.host_placement(db) {
+            Some(HostPlacement::MainThread) => Some(CanonicalPlacement::MainThread),
+            Some(HostPlacement::Worker) => Some(CanonicalPlacement::Worker),
+            None => None,
+        };
+        if let Some(next) = marker_placement {
+            if placement != CanonicalPlacement::Any {
+                return Err(error("canonical lane has conflicting placement markers"));
+            }
+            placement = next;
+            continue;
+        }
+        if attrs.host_capability(db).is_some() {
+            return Err(error(
+                "canonical actor role cannot carry a host capability without a typed effect provider",
+            ));
+        }
+    }
     for requirement in func.effect_requirements(db) {
         let EffectRequirementKey::Trait(trait_inst) = &requirement.key else {
             return Err(error("canonical lane has unsupported non-trait effect"));

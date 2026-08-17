@@ -1828,26 +1828,37 @@ fn precompile_html_impl(
             entries: vec![entry.clone()],
             options: CompileOptions::default(),
         };
-        let (result, component_view, scoped_tasks) = if let Some(compiled) = initialized_component {
-            (compiled.compilation, compiled.view, compiled.scoped_tasks)
-        } else if is_component {
-            let compiled =
-                fe_compiler_facade::compile_resident_component(&request).map_err(|error| {
+        let (result, component_view, scoped_tasks, structured_child) =
+            if let Some(compiled) = initialized_component {
+                (
+                    compiled.compilation,
+                    compiled.view,
+                    compiled.scoped_tasks,
+                    compiled.structured_child,
+                )
+            } else if is_component {
+                let compiled =
+                    fe_compiler_facade::compile_resident_component(&request).map_err(|error| {
+                        PrecompileError::Compile {
+                            source_url: source_url.clone(),
+                            detail: error.to_string(),
+                        }
+                    })?;
+                (
+                    compiled.compilation,
+                    compiled.view,
+                    compiled.scoped_tasks,
+                    compiled.structured_child,
+                )
+            } else {
+                let result = fe_compiler_facade::compile(&request).map_err(|error| {
                     PrecompileError::Compile {
                         source_url: source_url.clone(),
                         detail: error.to_string(),
                     }
                 })?;
-            (compiled.compilation, compiled.view, compiled.scoped_tasks)
-        } else {
-            let result = fe_compiler_facade::compile(&request).map_err(|error| {
-                PrecompileError::Compile {
-                    source_url: source_url.clone(),
-                    detail: error.to_string(),
-                }
-            })?;
-            (result, None, Vec::new())
-        };
+                (result, None, Vec::new(), None)
+            };
         if result.artifacts.is_empty() {
             return Err(PrecompileError::Diagnostics {
                 source_url,
@@ -1886,7 +1897,8 @@ fn precompile_html_impl(
         };
 
         let published = PublishedArtifact::from_artifact(wasm, &wasm_path);
-        let scoped_task_path = publish_scoped_task_package(&scoped_tasks, &mut assets)?;
+        let scoped_task_path =
+            publish_scoped_task_package(&scoped_tasks, structured_child.as_ref(), &mut assets)?;
         let scoped_task_reference = scoped_task_path
             .as_deref()
             .map(|path| published_reference(&base_url, &document_url, path));
@@ -3514,6 +3526,7 @@ fn pin_published_attribution(
 
 fn publish_scoped_task_package(
     tasks: &[fe_compiler_facade::WasmTaskAdapter],
+    structured_child: Option<&fe_compiler_facade::StructuredChildActorArtifact>,
     assets: &mut BTreeMap<String, Vec<u8>>,
 ) -> Result<Option<String>, PrecompileError> {
     if tasks.is_empty() {
@@ -3530,12 +3543,58 @@ fn publish_scoped_task_package(
     entry.push_str(
         "\nexport { createHostCompletionBroker, createMessagePortEventSource } from \"./host-completion.js\";\n",
     );
+    let mut child_files = Vec::<(String, Vec<u8>)>::new();
+    if let Some(child) = structured_child {
+        let interface = fe_compiler_facade::emit_canonical_interface_js(&child.interface)
+            .map_err(|error| PrecompileError::Serialize(error.to_string()))?;
+        entry.push_str(
+            r#"
+import { createCanonicalBrowserWorkerScope } from "./runtime/actor-client.js";
+
+let structuredChildModule;
+async function compileStructuredChild() {
+  if (structuredChildModule === undefined) {
+    structuredChildModule = (async () => {
+      const response = await fetch(new URL("./child.wasm", import.meta.url), {
+        mode: "cors",
+        credentials: "same-origin",
+      });
+      if (!response.ok) throw new Error("compiler-derived structured child could not be loaded");
+      return WebAssembly.compile(await response.arrayBuffer());
+    })();
+  }
+  return structuredChildModule;
+}
+
+export async function createStructuredWorkerScope() {
+  return createCanonicalBrowserWorkerScope({ wasm: await compileStructuredChild() });
+}
+"#,
+        );
+        child_files.push(("child.wasm".to_owned(), child.wasm.clone()));
+        child_files.push(("interface.js".to_owned(), interface.into_bytes()));
+        child_files.extend(
+            fe_compiler_facade::browser_actor_runtime_files()
+                .iter()
+                .map(|(path, source)| ((*path).to_owned(), source.as_bytes().to_vec())),
+        );
+    }
     let materialized = fe_compiler_facade::MATERIALIZED_TASK_RUNTIME_JS.as_bytes();
     let completion = fe_compiler_facade::HOST_COMPLETION_RUNTIME_JS.as_bytes();
-    let mut package_bytes = Vec::with_capacity(entry.len() + materialized.len() + completion.len());
+    let child_len = child_files
+        .iter()
+        .map(|(path, bytes)| path.len() + bytes.len() + 1)
+        .sum::<usize>();
+    let mut package_bytes =
+        Vec::with_capacity(entry.len() + materialized.len() + completion.len() + child_len);
     package_bytes.extend_from_slice(entry.as_bytes());
     package_bytes.extend_from_slice(materialized);
     package_bytes.extend_from_slice(completion);
+    for (path, bytes) in &child_files {
+        package_bytes.extend_from_slice(path.as_bytes());
+        package_bytes.push(0);
+        package_bytes.extend_from_slice(bytes);
+    }
     let digest = sha256_hex(&package_bytes);
     let directory = format!("assets/fe-task-{}", &digest[..16]);
     let entry_path = format!("{directory}/tasks.js");
@@ -3550,6 +3609,9 @@ fn publish_scoped_task_package(
         format!("{directory}/host-completion.js"),
         completion.to_vec(),
     )?;
+    for (path, bytes) in child_files {
+        insert_identical(assets, format!("{directory}/{path}"), bytes)?;
+    }
     Ok(Some(entry_path))
 }
 
@@ -4604,6 +4666,64 @@ if (output.length !== 1 || output[0] < before || output[0] > after) {{
             String::from_utf8_lossy(&execution.stdout),
             String::from_utf8_lossy(&execution.stderr),
         );
+    }
+
+    #[test]
+    fn nominal_fe_child_is_published_beside_its_parent_task_without_an_authored_id() {
+        let html = include_str!("../tests/fixtures/structured_worker.html");
+        let output = precompile_html("https://example.test/child.html", html, |_| {
+            panic!("inline structured-child component has no external source")
+        })
+        .expect("precompile resident component with nominal child");
+
+        let task_assets = output
+            .assets
+            .iter()
+            .filter(|(path, _)| path.contains("/fe-task-") || path.starts_with("assets/fe-task-"))
+            .collect::<Vec<_>>();
+        assert_eq!(task_assets.len(), 13, "complete child package inventory");
+        let task_entry = task_assets
+            .iter()
+            .find(|(path, _)| path.ends_with("/tasks.js"))
+            .map(|(_, bytes)| std::str::from_utf8(bytes).unwrap())
+            .expect("generated task entry");
+        assert!(task_entry.contains("createStructuredWorkerScope"));
+        assert!(task_entry.contains("new URL(\"./child.wasm\", import.meta.url)"));
+        assert!(!task_entry.contains("ArithmeticChild"));
+        assert!(
+            task_assets
+                .iter()
+                .any(|(path, _)| path.ends_with("/interface.js"))
+        );
+        assert!(
+            task_assets
+                .iter()
+                .any(|(path, _)| path.ends_with("/runtime/worker-host.js"))
+        );
+        let child_wasm = task_assets
+            .iter()
+            .find(|(path, _)| path.ends_with("/child.wasm"))
+            .map(|(_, bytes)| bytes.as_slice())
+            .expect("separate child Wasm");
+        assert_eq!(&child_wasm[..4], b"\0asm");
+        assert!(
+            !task_assets.iter().any(|(path, _)| path.ends_with(".json")),
+            "the child link is executable compiler output, not a runtime child manifest"
+        );
+        let parent = &output.modules[0];
+        assert!(
+            parent.interface.imports.iter().any(|import| {
+                import.module == "fe:worker-scope" && import.name == "spawn_begin"
+            })
+        );
+        let bootstrap = output
+            .assets
+            .iter()
+            .find(|(path, _)| path.contains("fe-bootstrap-"))
+            .map(|(_, bytes)| std::str::from_utf8(bytes).unwrap())
+            .expect("fixed bootstrap");
+        assert!(bootstrap.contains("needsWorkerScopeCapability"));
+        assert!(bootstrap.contains("await taskModule.createStructuredWorkerScope()"));
     }
 
     #[test]

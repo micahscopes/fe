@@ -2462,16 +2462,20 @@ order:
    native/Wasm/runtime/browser rail.
 8. **In progress:** the fixed Module Worker boundary now owns only explicit
    spawn/restart/close and port mechanics. `std::runtime` owns bounded restart,
-   backoff, exhaustion, epoch, and parent-cancellation policy in ordinary Fe.
-   `ChildPlacement<B, C>` and `supervise_child` now carry that policy through the
-   real `Pending`/`Suspend`/`Timer` rail, with independent Bun mechanics,
-   compiled-Fe Wasmtime reducer, and compiled-Fe/Bun scope gates. The packaged
-   canonical adapter maps Fe epochs onto explicit construction/restart and
-   abortable failure observation with no policy. Next, publish distinct parent
-   scope and child actor Wasm artifacts and attach them from the immutable
-   browser package, then add rich compiler-derived port payloads. Use that
-   completed control/reactive spine for shared interaction, GPU messages, and
-   the future proof queue.
+   backoff, startup timeout, exhaustion, epoch, and parent-cancellation policy
+   in ordinary Fe. `ChildPlacement<B, C>` and `supervise_child` carry that
+   policy through the real `Pending`/`Suspend`/`Timer`/`Select` rail, including
+   explicit affine loser cancellation, with independent Bun mechanics,
+   compiled-Fe Wasmtime reducer, and compiled-Fe/Bun scope gates. The compiler
+   derives the nominal child actor from `C`, compiles a distinct zero-import
+   canonical child Wasm, and publishes it with its generated interface and the
+   fixed actor runtime beside the parent task package. Production bootstrap
+   attaches it only when the parent imports `fe:worker-scope`; a real Chromium
+   gate executes the immutable parent/child link. There is no authored child
+   ID, URL, manifest, or behavior-name table. Next, migrate DEC onto this path,
+   add rich compiler-derived port payloads, admit multiple children, and
+   compose nested scopes. Use that completed control/reactive spine for shared
+   interaction, GPU messages, and the future proof queue.
 
 Only then resume broad package cosmetics. Promote and split libraries when a
 shared abstraction has at least two real consumers and independent evidence;

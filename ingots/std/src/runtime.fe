@@ -8,7 +8,15 @@
 //! the policy surface.
 
 use core::Backend
-use core::pending::{Pending, Suspend, TaskOutcome, Timer}
+use core::pending::{
+    Pending,
+    PendingCancellation,
+    Select,
+    SelectOutcome,
+    Suspend,
+    TaskOutcome,
+    Timer,
+}
 
 pub use browser::{BrowserChildPlacement, supervise_browser_child}
 
@@ -85,6 +93,7 @@ pub struct ChildSupervisionStep {
     pub state: ChildSupervisionState,
     pub action: ChildSupervisionAction,
     pub delay_ms: u64,
+    pub startup_timeout_ms: u64,
 }
 
 impl Copy for ChildSupervisionStep {}
@@ -117,16 +126,23 @@ pub struct RestartWindowBudget {
     pub max_restarts: u32,
     pub window_ms: u64,
     pub backoff_ms: u64,
+    pub startup_timeout_ms: u64,
 }
 
 impl Copy for RestartWindowBudget {}
 
 impl RestartWindowBudget {
-    pub fn bounded(max_restarts: u32, window_ms: u64, backoff_ms: u64) -> Self {
+    pub fn bounded(
+        max_restarts: u32,
+        window_ms: u64,
+        backoff_ms: u64,
+        startup_timeout_ms: u64,
+    ) -> Self {
         Self {
             max_restarts: max_restarts,
             window_ms: if window_ms == 0 { 1 } else { window_ms },
             backoff_ms: backoff_ms,
+            startup_timeout_ms: if startup_timeout_ms == 0 { 1 } else { startup_timeout_ms },
         }
     }
 }
@@ -148,12 +164,18 @@ pub struct RestartWindow {
 impl Copy for RestartWindow {}
 
 impl RestartWindow {
-    pub fn bounded(max_restarts: u32, window_ms: u64, backoff_ms: u64) -> Self {
+    pub fn bounded(
+        max_restarts: u32,
+        window_ms: u64,
+        backoff_ms: u64,
+        startup_timeout_ms: u64,
+    ) -> Self {
         Self {
             budget: RestartWindowBudget::bounded(
                 max_restarts: max_restarts,
                 window_ms: window_ms,
                 backoff_ms: backoff_ms,
+                startup_timeout_ms: startup_timeout_ms,
             ),
         }
     }
@@ -258,6 +280,7 @@ impl ChildSupervisionPolicy for RestartWindow {
             },
             action: action,
             delay_ms: delay_ms,
+            startup_timeout_ms: self.budget.startup_timeout_ms,
         }
     }
 }
@@ -276,6 +299,8 @@ pub fn supervise_child<B: Backend, C, P: ChildSupervisionPolicy + Copy>(
 uses (
     placement: mut ChildPlacement<B, C>,
     timer: mut Timer<B>,
+    select: mut Select<B, u32>,
+    cancellation: mut PendingCancellation<B>,
     suspend: Suspend<B, u32>,
 )
 {
@@ -316,18 +341,52 @@ uses (
                 }
             }
             ChildSupervisionAction::Spawn => {
-                let pending = placement.spawn_begin(state.epoch)
-                let outcome: TaskOutcome<u32, ChildStarted<C>> = suspend.suspend(pending)
+                let spawning = placement.spawn_begin(state.epoch)
+                let timeout = timer.sleep_begin(step.startup_timeout_ms)
+                let selected = select.select(spawning, timeout)
+                let outcome: TaskOutcome<
+                    u32,
+                    SelectOutcome<B, u32, ChildStarted<C>, u64>,
+                > = suspend.suspend(selected)
                 match outcome {
-                    TaskOutcome::Success(_) => {
-                        event = ChildLifecycleEvent::Ready(state.epoch)
+                    TaskOutcome::Success(selection) => {
+                        match selection {
+                            SelectOutcome::Left(winner,) => {
+                                cancellation.cancel_pending(winner.right)
+                                event = ChildLifecycleEvent::Ready(state.epoch)
+                            }
+                            SelectOutcome::Right(winner,) => {
+                                cancellation.cancel_pending(winner.left)
+                                event = ChildLifecycleEvent::Failed(
+                                    state.epoch,
+                                    ChildFailureKind::Startup,
+                                    timer.now(),
+                                )
+                            }
+                            SelectOutcome::LeftFailure(_) => {
+                                event = ChildLifecycleEvent::Failed(
+                                    state.epoch,
+                                    ChildFailureKind::Startup,
+                                    timer.now(),
+                                )
+                            }
+                            SelectOutcome::RightFailure(error,) => {
+                                placement.close(state.epoch)
+                                return ChildScopeExit::TransportFailure(state.epoch, error)
+                            }
+                            SelectOutcome::LeftCancelled => {
+                                placement.close(state.epoch)
+                                return ChildScopeExit::TransportFailure(state.epoch, 1)
+                            }
+                            SelectOutcome::RightCancelled => {
+                                placement.close(state.epoch)
+                                return ChildScopeExit::TransportFailure(state.epoch, 1)
+                            }
+                        }
                     }
-                    TaskOutcome::Failure(_) => {
-                        event = ChildLifecycleEvent::Failed(
-                            state.epoch,
-                            ChildFailureKind::Startup,
-                            timer.now(),
-                        )
+                    TaskOutcome::Failure(error) => {
+                        placement.close(state.epoch)
+                        return ChildScopeExit::TransportFailure(state.epoch, error)
                     }
                     TaskOutcome::Cancelled => {
                         event = ChildLifecycleEvent::ParentCancelled

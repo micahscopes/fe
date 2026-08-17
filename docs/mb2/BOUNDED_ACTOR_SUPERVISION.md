@@ -29,6 +29,12 @@ parent-cancellation propagation are all ordinary Fe data and control flow.
 Browser clocks and timers will remain handler capabilities, but their readings
 are inputs to this reducer rather than JavaScript policy.
 
+Startup readiness follows the same rule. `supervise_child` begins the typed
+spawn and an ordinary timer, selects between them in Fe, explicitly consumes
+the losing affine pending value, and classifies a timer win as
+`ChildFailureKind::Startup`. The browser Worker constructor has no private
+readiness timeout.
+
 Three independent gates protect the boundary:
 
 - `module-worker-lifecycle.test.mjs` proves that fixed JavaScript performs
@@ -42,19 +48,24 @@ Three independent gates protect the boundary:
 - `worker_scope_runtime.rs` compiles the complete `ChildPlacement<B, C>` Fe loop
   through the production suspension/re-entry machinery. A fixed broker supplies
   only unit-valued spawn, failure-observation, and close mechanics. Explicit
-  tapes prove Fe alone selects epochs, timer-backed restart, exhaustion,
-  transport-failure meaning, and exactly-once cancellation cleanup.
+  tapes prove Fe alone selects epochs, timer-backed restart, readiness timeout,
+  exhaustion, transport-failure meaning, and exactly-once cancellation cleanup.
+- `structured_worker.browser.mjs` runs the immutable production package in
+  Chromium and proves that the parent Wasm, separate child Wasm, generated
+  canonical interface, Module Worker host, and bootstrap link load together.
 
 `C` is the nominal child program type. The zero-lane completion payloads are
 `ChildStarted<C>` and `ChildRuntimeFailure<C>`, so distinct child scopes remain
 different Fe handler identities without a runtime ID, URL, or manifest field.
 
 This is not yet the completed structured-scope feature. The target-neutral
-effect, owning Fe loop, and `createCanonicalBrowserWorkerScope` adapter are
-landed and compiler-packaged. The adapter maps each Fe-selected epoch to exactly
-one initial construction or successor restart and exposes abortable runtime
-failure observation. Remaining work must publish distinct parent-scope and
-child-actor Wasm artifacts, attach that capability from the immutable package,
-and prove it in Chromium. Rich message values and nested child scopes remain
+effect, owning Fe loop, `createCanonicalBrowserWorkerScope` adapter, distinct
+parent/child compilation, immutable publication, production bootstrap link,
+and Chromium gate are landed. The compiler derives the child from `C`, selects
+its `Worker` behaviors, and emits a zero-import canonical child; applications
+provide no child ID, URL, manifest, or behavior-name table. The adapter maps
+each Fe-selected epoch to exactly one initial construction or successor restart
+and exposes abortable runtime-failure observation. Multiple children in one
+parent, rich message values, DEC migration, and nested child scopes remain
 later compiler-derived layers. JavaScript must not recreate supervision policy
 around the mechanical operations in the meantime.

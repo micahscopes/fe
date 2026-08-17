@@ -9,15 +9,17 @@ use std::fmt;
 use compiler_db::DriverDataBase;
 use hir::analysis::{
     semantic::instantiate_with_generic_args,
-    ty::{normalize::normalize_ty, ty_check::BodyOwner},
+    ty::{adt_def::AdtRef, normalize::normalize_ty, ty_check::BodyOwner, ty_def::TyId},
 };
 use hir::hir_def::{ActorTransition, TopLevelMod};
 
-use crate::actor_semantics::{nominal_attrs, resolve_metadata_ty, semantic_actors};
+use crate::actor_semantics::{SemanticActor, nominal_attrs, resolve_metadata_ty, semantic_actors};
 use crate::{
-    CanonicalField, CanonicalType, LowerError, WasmCompileOptions, WasmTaskAdapter,
+    CanonicalExecution, CanonicalField, CanonicalInterfaceManifest, CanonicalPlacement,
+    CanonicalType, LowerError, WasmCompileOptions, WasmTaskAdapter,
+    canonical_interface::{canonical_lane_decl_from_func, canonical_lane_intent},
     canonical_type_from_semantic, compile_runtime_package_wasm_with_options,
-    materialized_task_adapters,
+    materialized_task_adapters, verify_canonical_wasm_abi,
 };
 
 pub const RESIDENT_ACTOR_TRANSITION_EXPORT: &str = "fe_actor_transition_v1";
@@ -49,6 +51,19 @@ pub struct ResidentActorArtifact {
     pub contract: ResidentActorContract,
     pub wasm: Vec<u8>,
     pub scoped_tasks: Vec<WasmTaskAdapter>,
+    /// A separately compiled canonical actor selected by the nominal child
+    /// type consumed by this resident actor's Fe supervision task. The browser
+    /// receives no source function name, URL, or child identifier from the
+    /// application. Build tooling publishes this typed artifact beside the
+    /// parent continuation package.
+    pub structured_child: Option<StructuredChildActorArtifact>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructuredChildActorArtifact {
+    pub actor: String,
+    pub wasm: Vec<u8>,
+    pub interface: CanonicalInterfaceManifest,
 }
 
 #[derive(Debug)]
@@ -110,6 +125,192 @@ fn behavior_is_scoped_task(db: &DriverDataBase, behavior: hir::hir_def::Func<'_>
         .filter_map(|path| resolve_metadata_ty(db, path, behavior.scope()))
         .filter_map(|ty| nominal_attrs(db, ty))
         .any(|attrs| attrs.is_actor_scoped_task(db))
+}
+
+fn worker_scope_child_ty<'db>(
+    db: &'db DriverDataBase,
+    package: mir::RuntimePackage<'db>,
+) -> Result<Option<TyId<'db>>, ResidentActorError> {
+    let mut spawned = Vec::new();
+    let mut observed = Vec::new();
+    let mut has_close = false;
+    for function in package.functions(db) {
+        let instance = function.instance(db);
+        if mir::host_import_module(db, instance).as_deref() != Some("fe:worker-scope") {
+            continue;
+        }
+        let name = mir::host_import_name(db, instance).ok_or_else(|| {
+            ResidentActorError::Contract(
+                "structured-child host import has no nominal operation name".to_owned(),
+            )
+        })?;
+        match name.as_str() {
+            "spawn_begin" | "failure_begin" => {
+                let semantic = instance.key(db).semantic(db).ok_or_else(|| {
+                    ResidentActorError::Contract(format!(
+                        "structured-child operation `{name}` is not a semantic Fe import"
+                    ))
+                })?;
+                let args = semantic.key(db).subst(db).generic_args(db);
+                let [child] = args.as_slice() else {
+                    return Err(ResidentActorError::Contract(format!(
+                        "structured-child operation `{name}` must retain exactly one nominal child type; found {} generic arguments",
+                        args.len()
+                    )));
+                };
+                let destinations = if name == "spawn_begin" {
+                    &mut spawned
+                } else {
+                    &mut observed
+                };
+                if !destinations.contains(child) {
+                    destinations.push(*child);
+                }
+            }
+            "close" => has_close = true,
+            other => {
+                return Err(ResidentActorError::Contract(format!(
+                    "unknown structured-child host operation `{other}`"
+                )));
+            }
+        }
+    }
+    if spawned.is_empty() && observed.is_empty() && !has_close {
+        return Ok(None);
+    }
+    if !has_close || spawned != observed {
+        return Err(ResidentActorError::Contract(
+            "structured-child scope must import matching typed spawn/failure operations and close"
+                .to_owned(),
+        ));
+    }
+    let [child] = spawned.as_slice() else {
+        return Err(ResidentActorError::Contract(format!(
+            "one resident Wasm instance currently admits exactly one nominal structured child; found {}",
+            spawned.len()
+        )));
+    };
+    Ok(Some(*child))
+}
+
+fn actor_for_nominal_ty<'a, 'db>(
+    db: &'db DriverDataBase,
+    actors: &'a [SemanticActor<'db>],
+    mut ty: TyId<'db>,
+) -> Option<&'a SemanticActor<'db>> {
+    while let Some(inner) = ty.as_view(db) {
+        ty = inner;
+    }
+    let AdtRef::Struct(state) = ty.adt_def(db)?.adt_ref(db) else {
+        return None;
+    };
+    actors.iter().find(|actor| actor.state == state)
+}
+
+fn wasm_imports(wasm: &[u8]) -> Result<Vec<String>, ResidentActorError> {
+    let mut imports = Vec::new();
+    for payload in wasmparser::Parser::new(0).parse_all(wasm) {
+        if let wasmparser::Payload::ImportSection(section) = payload.map_err(|error| {
+            ResidentActorError::Contract(format!(
+                "structured-child Wasm could not be inspected: {error}"
+            ))
+        })? {
+            for import in section.into_imports() {
+                let import = import.map_err(|error| {
+                    ResidentActorError::Contract(format!(
+                        "structured-child Wasm import could not be inspected: {error}"
+                    ))
+                })?;
+                imports.push(format!("{}::{}", import.module, import.name));
+            }
+        }
+    }
+    Ok(imports)
+}
+
+fn compile_structured_child(
+    db: &DriverDataBase,
+    top_mod: TopLevelMod<'_>,
+    parent_package: mir::RuntimePackage<'_>,
+    optimize: bool,
+) -> Result<Option<StructuredChildActorArtifact>, ResidentActorError> {
+    let Some(child_ty) = worker_scope_child_ty(db, parent_package)? else {
+        return Ok(None);
+    };
+    let actors = semantic_actors(db, top_mod);
+    let actor = actor_for_nominal_ty(db, &actors, child_ty).ok_or_else(|| {
+        ResidentActorError::Contract(format!(
+            "structured-child type `{}` is not the state type of an actor in this module",
+            child_ty.pretty_print(db)
+        ))
+    })?;
+    let actor_name = actor
+        .state
+        .name(db)
+        .to_opt()
+        .map(|name| name.data(db).to_owned())
+        .ok_or_else(|| {
+            ResidentActorError::Contract("structured child actor has no resolvable name".to_owned())
+        })?;
+    let mut declarations = Vec::new();
+    let mut entries = Vec::new();
+    for behavior in &actor.behaviors {
+        let name = behavior
+            .name(db)
+            .to_opt()
+            .map(|name| name.data(db).to_owned())
+            .ok_or_else(|| {
+                ResidentActorError::Contract(format!(
+                    "structured child actor `{actor_name}` has an unnamed behavior"
+                ))
+            })?;
+        let intent = canonical_lane_intent(db, *behavior)
+            .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
+        if intent.placement != CanonicalPlacement::Worker {
+            continue;
+        }
+        if intent.execution != CanonicalExecution::Wasm {
+            return Err(ResidentActorError::Contract(format!(
+                "structured child actor `{actor_name}` behavior `{name}` must execute as Wasm"
+            )));
+        }
+        let declaration = canonical_lane_decl_from_func(db, *behavior, &name, &name)
+            .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
+        entries.push(name);
+        declarations.push(declaration);
+    }
+    if declarations.is_empty() {
+        return Err(ResidentActorError::Contract(format!(
+            "structured child actor `{actor_name}` has no canonical `Worker` behavior"
+        )));
+    }
+    let interface = CanonicalInterfaceManifest::build(declarations)
+        .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
+    let package = mir::build_wasm_runtime_package_for_entries(db, top_mod, &entries)
+        .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
+    let options = WasmCompileOptions::default().with_canonical_lanes(interface.lanes.clone());
+    let options = if optimize {
+        options.with_optimization()
+    } else {
+        options
+    };
+    let wasm = compile_runtime_package_wasm_with_options(db, &package, options)
+        .map_err(ResidentActorError::Lower)?
+        .bytes;
+    verify_canonical_wasm_abi(&wasm, &interface)
+        .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
+    let imports = wasm_imports(&wasm)?;
+    if !imports.is_empty() {
+        return Err(ResidentActorError::Contract(format!(
+            "structured child actor `{actor_name}` is not closed over browser capabilities; generated Worker host cannot satisfy imports {}",
+            imports.join(", ")
+        )));
+    }
+    Ok(Some(StructuredChildActorArtifact {
+        actor: actor_name,
+        wasm,
+        interface,
+    }))
 }
 
 fn scalar_layout(
@@ -611,6 +812,7 @@ pub fn compile_resident_actor_with_optimization(
             scoped_tasks.len(),
         )));
     }
+    let structured_child = compile_structured_child(db, top_mod, package, optimize)?;
     // A scoped task can receive generated rich host values between Wasm
     // continuation entries. Use the checked LIFO canonical stack for every
     // scoped-task actor so those values have one compiler-owned allocation
@@ -652,5 +854,6 @@ pub fn compile_resident_actor_with_optimization(
         contract,
         wasm: artifact.bytes,
         scoped_tasks,
+        structured_child,
     }))
 }

@@ -44,6 +44,7 @@ pub fn supervise(
         max_restarts: max_restarts,
         window_ms: window_ms,
         backoff_ms: backoff_ms,
+        startup_timeout_ms: 25,
     ).decide(
         event: event,
         state: ChildSupervisionState {

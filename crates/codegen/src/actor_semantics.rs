@@ -11,7 +11,7 @@ use hir::analysis::{
     name_resolution::{PathRes, resolve_path},
     ty::{adt_def::AdtRef, trait_resolution::PredicateListId, ty_def::TyId},
 };
-use hir::hir_def::{ItemKind, PathId, Struct, TopLevelMod};
+use hir::hir_def::{AttrListId, ItemKind, PathId, Struct, TopLevelMod};
 use hir::span::{ActorDesugaredFocus, DesugaredOrigin, HirOrigin};
 
 #[derive(Debug)]
@@ -59,7 +59,7 @@ pub(crate) fn semantic_actors<'db>(
 }
 
 pub(crate) fn resolve_metadata_ty<'db>(
-    db: &'db DriverDataBase,
+    db: &'db dyn hir::analysis::HirAnalysisDb,
     path: PathId<'db>,
     scope: hir::hir_def::scope_graph::ScopeId<'db>,
 ) -> Option<TyId<'db>> {
@@ -82,8 +82,39 @@ pub(crate) fn resolve_metadata_ty<'db>(
     None
 }
 
+/// Resolve the attributes carried by one nominal actor role.
+///
+/// Most GPU roles are structs, while target-placement roles such as `Worker`
+/// are traits. Consumers care about the nominal metadata rather than that
+/// syntactic distinction, so keep the resolution rule in one place.
+pub(crate) fn resolve_metadata_attrs<'db>(
+    db: &'db dyn hir::analysis::HirAnalysisDb,
+    path: PathId<'db>,
+    scope: hir::hir_def::scope_graph::ScopeId<'db>,
+) -> Option<AttrListId<'db>> {
+    for candidate in [scope, scope.top_mod(db).scope()] {
+        for candidate_path in [path, path.strip_generic_args(db)] {
+            let Ok(resolved) = resolve_path(
+                db,
+                candidate_path,
+                candidate,
+                PredicateListId::empty_list(db),
+                true,
+            ) else {
+                continue;
+            };
+            match resolved {
+                PathRes::Trait(trait_) => return trait_.def(db).scope().attrs(db),
+                PathRes::Ty(ty) | PathRes::TyAlias(_, ty) => return nominal_attrs(db, ty),
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
 pub(crate) fn nominal_attrs<'db>(
-    db: &'db DriverDataBase,
+    db: &'db dyn hir::analysis::HirAnalysisDb,
     ty: TyId<'db>,
 ) -> Option<hir::hir_def::AttrListId<'db>> {
     let ty = ty.as_view(db).unwrap_or(ty);

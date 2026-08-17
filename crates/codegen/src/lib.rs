@@ -1,5 +1,6 @@
 mod actor_semantics;
 mod backend;
+mod browser_actor_runtime;
 pub mod canonical_interface;
 pub mod capstone_evidence;
 pub mod dispatch;
@@ -18,6 +19,9 @@ pub use backend::{
     Backend, BackendError, BackendKind, BackendOutput, OptLevel, SonatinaBackend, SpirvBackend,
     WasmBackend, layout_for,
 };
+pub use browser_actor_runtime::{
+    BROWSER_ACTOR_RUNTIME_PROTOCOL, BROWSER_ACTOR_RUNTIME_VERSION, browser_actor_runtime_files,
+};
 pub use canonical_interface::{
     CANONICAL_INTERFACE_PROTOCOL, CANONICAL_INTERFACE_VERSION, CanonicalAbi, CanonicalCapability,
     CanonicalCapabilityRequirement, CanonicalEndianness, CanonicalExecution, CanonicalField,
@@ -25,7 +29,7 @@ pub use canonical_interface::{
     CanonicalLaneDecl, CanonicalLaneIntent, CanonicalLayout, CanonicalListElement,
     CanonicalPlacement, CanonicalShape, CanonicalType, CanonicalVariant, CanonicalVariantLayout,
     canonical_lane_decl_from_entry, canonical_lane_decls_from_module, canonical_type_from_semantic,
-    verify_canonical_wasm_abi,
+    emit_canonical_interface_js, verify_canonical_wasm_abi,
 };
 pub use dispatch::DispatchKind;
 pub use layout::{
@@ -39,8 +43,8 @@ pub use page_projection::{
 pub use resident_actor::{
     RESIDENT_ACTOR_INITIALIZE_EXPORT, RESIDENT_ACTOR_PROJECT_EXPORT,
     RESIDENT_ACTOR_STATE_REPLACE_EXPORT, RESIDENT_ACTOR_TRANSITION_EXPORT, ResidentActorArtifact,
-    ResidentActorContract, ResidentActorError, compile_resident_actor,
-    compile_resident_actor_with_optimization, resident_actor_contract,
+    ResidentActorContract, ResidentActorError, StructuredChildActorArtifact,
+    compile_resident_actor, compile_resident_actor_with_optimization, resident_actor_contract,
 };
 #[cfg(all(
     feature = "native-backend",

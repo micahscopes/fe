@@ -14,7 +14,7 @@ use hir::hir_def::HirIngot;
 use url::Url;
 
 type Params = (i32, i32, i32, i64, i32, i32, i64, i32, i32, i32, i64, i64);
-type ResultLanes = (i32, i32, i64, i32, i32, i32, i64);
+type ResultLanes = (i32, i32, i64, i32, i32, i32, i64, i64);
 
 const SPAWN_REQUESTED: i32 = 0;
 const READY: i32 = 1;
@@ -89,6 +89,7 @@ struct Step {
     state: State,
     action: i32,
     delay_ms: i64,
+    startup_timeout_ms: i64,
 }
 
 fn compile_policy() -> Vec<u8> {
@@ -125,6 +126,7 @@ fn decode(lanes: ResultLanes) -> Step {
         },
         action: lanes.5,
         delay_ms: lanes.6,
+        startup_timeout_ms: lanes.7,
     }
 }
 
@@ -183,6 +185,7 @@ fn fe_policy_owns_bounded_restart_backoff_exhaustion_and_parent_cancellation() {
             },
             action: RESTART_AFTER,
             delay_ms: 10,
+            startup_timeout_ms: 25,
         }
     );
 

@@ -38,6 +38,9 @@ use sonatina_codegen::isa::spirv::{
 };
 
 use crate::actor_semantics::{SemanticActor, nominal_attrs, resolve_metadata_ty, semantic_actors};
+use crate::browser_actor_runtime::{
+    BROWSER_ACTOR_RUNTIME_FILES, BROWSER_ACTOR_RUNTIME_PROTOCOL, BROWSER_ACTOR_RUNTIME_VERSION,
+};
 use crate::sonatina::{
     WasmCompileOptions, compile_runtime_package_spirv_authored_raster,
     compile_runtime_package_spirv_compute_with_resources, compile_runtime_package_spirv_grid,
@@ -47,13 +50,13 @@ use crate::sonatina::{
 use crate::{
     CanonicalField, CanonicalInterfaceManifest, CanonicalType, CanonicalVariant,
     canonical_lane_decl_from_entry, canonical_lane_decls_from_module, canonical_type_from_semantic,
-    verify_canonical_wasm_abi,
+    emit_canonical_interface_js, verify_canonical_wasm_abi,
 };
 
 pub const WEB_BUNDLE_PROTOCOL: &str = "fe-web-bundle";
 pub const WEB_BUNDLE_PROTOCOL_VERSION: u32 = 6;
-pub const WEB_ACTOR_RUNTIME_PROTOCOL: &str = "fe-browser-actor-runtime";
-pub const WEB_ACTOR_RUNTIME_VERSION: u32 = 4;
+pub const WEB_ACTOR_RUNTIME_PROTOCOL: &str = BROWSER_ACTOR_RUNTIME_PROTOCOL;
+pub const WEB_ACTOR_RUNTIME_VERSION: u32 = BROWSER_ACTOR_RUNTIME_VERSION;
 
 const WASM_FILE: &str = "module.wasm";
 const WGSL_FILE: &str = "shader.wgsl";
@@ -92,7 +95,6 @@ const TYPED_SURFACE_QUALITY_EXPORT: &str = "fe_surface_quality_v1";
 /// Fixed discovery point for the actor-level Fe shared-device policy. Its
 /// private supervision state remains resident in generated Wasm.
 const TYPED_SURFACE_RECOVERY_EXPORT: &str = "fe_surface_recovery_v1";
-const CANONICAL_INTERFACE_JS: &str = include_str!("../assets/canonical-interface.js");
 /// Compiler-emitted host page for render bundles. It reads `manifest.json` and
 /// drives the two lowerings of the render kernel it describes: `shader.wgsl`
 /// via WebGPU, with a per-pixel `module.wasm` fallback. Emitted verbatim next to
@@ -116,40 +118,7 @@ const RENDER_RUNTIME_JS: &str = include_str!("../assets/render-runtime/fe-render
 pub fn render_runtime_js() -> &'static str {
     RENDER_RUNTIME_JS
 }
-const WEB_ACTOR_RUNTIME: &[(&str, &str)] = &[
-    (
-        "runtime/actor-coordinator.js",
-        include_str!("../assets/browser-runtime/actor-coordinator.js"),
-    ),
-    (
-        "runtime/actor-endpoint.js",
-        include_str!("../assets/browser-runtime/actor-endpoint.js"),
-    ),
-    (
-        "runtime/actor-router.js",
-        include_str!("../assets/browser-runtime/actor-router.js"),
-    ),
-    (
-        "runtime/gpu-actor.js",
-        include_str!("../assets/browser-runtime/gpu-actor.js"),
-    ),
-    (
-        "runtime/message-port-actor.js",
-        include_str!("../assets/browser-runtime/message-port-actor.js"),
-    ),
-    (
-        "runtime/module-worker-actor.js",
-        include_str!("../assets/browser-runtime/module-worker-actor.js"),
-    ),
-    (
-        "runtime/worker-host.js",
-        include_str!("../assets/browser-runtime/worker-host.js"),
-    ),
-    (
-        "runtime/actor-client.js",
-        include_str!("../assets/browser-runtime/actor-client.js"),
-    ),
-];
+const WEB_ACTOR_RUNTIME: &[(&str, &str)] = BROWSER_ACTOR_RUNTIME_FILES;
 static NEXT_STAGING_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -4877,22 +4846,8 @@ fn generated_canonical_adapters(
     let Some(interface) = interface else {
         return Ok((None, None, Vec::new()));
     };
-    let manifest_json = serde_json::to_string(interface)
+    let interface_js = emit_canonical_interface_js(interface)
         .map_err(|error| WebBundleError::Manifest(error.to_string()))?;
-    let interface_js = format!(
-        "{CANONICAL_INTERFACE_JS}\n\
-         export const canonicalInterfaceManifest = Object.freeze({manifest_json});\n\
-         export const compiledCanonicalInterface = \
-         compileCanonicalInterfaceManifest(canonicalInterfaceManifest);\n\
-         export function createInterfaceCaller(exports) {{\n  \
-         return createCanonicalInterfaceCaller(compiledCanonicalInterface, exports);\n}}\n\
-         export function compileActorAdapter() {{\n  \
-         return compileCanonicalActorAdapter(canonicalInterfaceManifest, compiledCanonicalInterface);\n}}\n\
-         export function createActorAdapter(exports, options) {{\n  \
-         return createCanonicalActorAdapter(canonicalInterfaceManifest, compiledCanonicalInterface, exports, options);\n}}\n\
-         export function createHostEffectAdapter(handlers, options) {{\n  \
-         return createCanonicalHostEffectAdapter(canonicalInterfaceManifest, compiledCanonicalInterface, handlers, options);\n}}\n"
-    );
     let interface_d_ts = canonical_interface_declarations(interface)?;
     let artifact = |path: &str, content: &str| WebGeneratedArtifact {
         path: path.to_owned(),

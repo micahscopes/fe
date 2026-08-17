@@ -1476,6 +1476,9 @@ async function run(element) {
         const needsActorCapability = WebAssembly.Module.imports(module).some(
           value => value.module === "fe:actor",
         );
+        const needsWorkerScopeCapability = WebAssembly.Module.imports(module).some(
+          value => value.module === "fe:worker-scope",
+        );
         const brokerOptions = {};
         if (needsSurfaceCapability) {
           brokerOptions.surface = {
@@ -1528,6 +1531,14 @@ async function run(element) {
               return surfaceScope.component._sendScopedTaskEvent(event, signal);
             },
           };
+        }
+        if (needsWorkerScopeCapability) {
+          if (typeof taskModule.createStructuredWorkerScope !== "function") {
+            throw new Error(
+              "fe:worker-scope requires a compiler-derived structured child package",
+            );
+          }
+          brokerOptions.workerScope = await taskModule.createStructuredWorkerScope();
         }
         scopedTasks = {
           taskModule,
