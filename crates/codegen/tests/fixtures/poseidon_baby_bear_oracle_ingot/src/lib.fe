@@ -1,7 +1,26 @@
 //! Executable boundary for the Fe-derived BabyBear Poseidon2 oracle.
 
-use poseidon_baby_bear::{parameter_plain, permute16}
-use precision::baby_bear::BabyBear
+use poseidon_baby_bear::{Poseidon2Domain, commit_packed, parameter_plain, permute16}
+use precision::baby_bear::{BabyBear, BabyBearModulus, BABY_BEAR_MODULUS}
+use precision::word_field_encoding::{PackedFieldBits, pack_bounded_words}
+
+const fn protocol_tag(_ label: String<4>) -> u32 {
+    let bytes = label.as_bytes()
+    ((bytes[0] as u32) << 24)
+        | ((bytes[1] as u32) << 16)
+        | ((bytes[2] as u32) << 8)
+        | (bytes[3] as u32)
+}
+
+struct PackingTestDomain {}
+impl Poseidon2Domain for PackingTestDomain {
+    const TAG: u32 = protocol_tag("BP01")
+}
+
+struct InvalidPackingTestDomain {}
+impl Poseidon2Domain for InvalidPackingTestDomain {
+    const TAG: u32 = BABY_BEAR_MODULUS
+}
 
 pub fn derived_parameter(_ index: u32) -> u32 { parameter_plain(index) }
 
@@ -58,4 +77,104 @@ pub fn poseidon2_permute16_c0(
         a0, a1, a2, a3, a4, a5, a6, a7,
         a8, a9, a10, a11, a12, a13, a14, a15,
     )[0].to_u32()
+}
+
+fn pack4(
+    _ a: u32, _ wa: u32,
+    _ b: u32, _ wb: u32,
+    _ c: u32, _ wc: u32,
+    _ d: u32, _ wd: u32,
+) -> PackedFieldBits<BabyBearModulus, 5> {
+    pack_bounded_words<BabyBearModulus, 4, 5>(
+        [a, b, c, d],
+        [wa, wb, wc, wd],
+    )
+}
+
+pub fn packed4(
+    _ a: u32, _ wa: u32,
+    _ b: u32, _ wb: u32,
+    _ c: u32, _ wc: u32,
+    _ d: u32, _ wd: u32,
+) -> (u32, u32, u32, u32, u32, u32, u32) {
+    let packed = pack4(a, wa, b, wb, c, wc, d, wd)
+    (
+        if packed.is_valid() { 1 } else { 0 },
+        packed.len_bits(),
+        packed.field(0).to_u32(),
+        packed.field(1).to_u32(),
+        packed.field(2).to_u32(),
+        packed.field(3).to_u32(),
+        packed.field(4).to_u32(),
+    )
+}
+
+pub fn packed4_overflow_valid(
+    _ a: u32, _ wa: u32,
+    _ b: u32, _ wb: u32,
+    _ c: u32, _ wc: u32,
+    _ d: u32, _ wd: u32,
+) -> u32 {
+    let packed = pack_bounded_words<BabyBearModulus, 4, 4>(
+        [a, b, c, d],
+        [wa, wb, wc, wd],
+    )
+    if packed.is_valid() { 1 } else { 0 }
+}
+
+pub fn packed4_commitment(
+    _ a: u32, _ wa: u32,
+    _ b: u32, _ wb: u32,
+    _ c: u32, _ wc: u32,
+    _ d: u32, _ wd: u32,
+) -> (u32, u32) {
+    let digest = commit_packed<PackingTestDomain, 5>(pack4(a, wa, b, wb, c, wc, d, wd))
+    (if digest.is_valid() { 1 } else { 0 }, digest.field().to_u32())
+}
+
+pub fn packed4_invalid_domain(
+    _ a: u32, _ wa: u32,
+    _ b: u32, _ wb: u32,
+    _ c: u32, _ wc: u32,
+    _ d: u32, _ wd: u32,
+) -> u32 {
+    let digest = commit_packed<InvalidPackingTestDomain, 5>(
+        pack4(a, wa, b, wb, c, wc, d, wd),
+    )
+    if digest.is_valid() { 1 } else { 0 }
+}
+
+fn pattern411(_ seed: u32) -> PackedFieldBits<BabyBearModulus, 14> {
+    let mut packed = PackedFieldBits<BabyBearModulus, 14>::empty()
+    let mut index: u32 = 0
+    while index < 411 {
+        let bit = ((seed >> (index & 31)) ^ index ^ (index >> 3)) & 1
+        packed = packed.append(bit, 1)
+        index = index + 1
+    }
+    packed
+}
+
+pub fn packed411(_ seed: u32) -> (
+    u32, u32,
+    u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32,
+) {
+    let packed = pattern411(seed)
+    (
+        if packed.is_valid() { 1 } else { 0 },
+        packed.len_bits(),
+        packed.field(0).to_u32(), packed.field(1).to_u32(),
+        packed.field(2).to_u32(), packed.field(3).to_u32(),
+        packed.field(4).to_u32(), packed.field(5).to_u32(),
+        packed.field(6).to_u32(), packed.field(7).to_u32(),
+        packed.field(8).to_u32(), packed.field(9).to_u32(),
+        packed.field(10).to_u32(), packed.field(11).to_u32(),
+        packed.field(12).to_u32(), packed.field(13).to_u32(),
+    )
+}
+
+pub fn packed411_commitment(_ seed: u32) -> (u32, u32) {
+    let digest = commit_packed<PackingTestDomain, 14>(pattern411(seed))
+    (if digest.is_valid() { 1 } else { 0 }, digest.field().to_u32())
 }

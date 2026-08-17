@@ -8,6 +8,7 @@
 use core::num::{IntDowncast, mul_mod_u256}
 use precision::baby_bear::{BabyBear, BABY_BEAR_MODULUS}
 use precision::word_field::montgomery_word_u32
+use precision::word_field_encoding::PackedFieldBits
 use poseidon_grain::{field_element, warm}
 
 pub const WIDTH: usize = 16
@@ -15,6 +16,7 @@ pub const FULL_ROUNDS: usize = 8
 pub const HALF_FULL_ROUNDS: usize = 4
 pub const PARTIAL_ROUNDS: usize = 13
 pub const ROUND_CONSTANT_COUNT: usize = FULL_ROUNDS * WIDTH + PARTIAL_ROUNDS
+pub const PACKED_COMMITMENT_FIELDS: usize = WIDTH - 2
 
 const FIELD_SIZE: u32 = 31
 const MODULUS: u256 = BABY_BEAR_MODULUS as u256
@@ -23,6 +25,24 @@ struct Poseidon2Parameters {
     round_constants: [u32; ROUND_CONSTANT_COUNT],
 }
 impl core::marker::Copy for Poseidon2Parameters {}
+
+/// A nominal protocol stage selects the first capacity lane at checking time.
+pub trait Poseidon2Domain {
+    const TAG: u32
+}
+
+/// Fail-closed result of committing one exact bounded bit string.
+pub struct PackedCommitment { valid: bool, value: BabyBear }
+impl core::marker::Copy for PackedCommitment {}
+
+impl PackedCommitment {
+    pub fn is_valid(self) -> bool { self.valid }
+
+    pub fn field(self) -> BabyBear {
+        if !self.valid { return BabyBear::zero() }
+        self.value
+    }
+}
 
 const fn field_pow(_ base: u256, _ exponent: u256) -> u256 {
     let mut base = base
@@ -214,6 +234,28 @@ pub fn permute16(mut input: own [BabyBear; WIDTH]) -> [BabyBear; WIDTH] {
         round = round + 1
     }
     input
+}
+
+/// Commit an injectively encoded bit string in one typed Poseidon2 call.
+///
+/// Lane zero is the type-selected domain, lane one is the exact bit length,
+/// and the remaining fourteen lanes are 30-bit canonical payloads. Invalid
+/// encodings and noncanonical domain tags fail closed before permutation.
+pub fn commit_packed<D: Poseidon2Domain, const N: usize>(
+    _ packed: own PackedFieldBits<precision::baby_bear::BabyBearModulus, N>,
+) -> PackedCommitment {
+    if !packed.is_valid() || N > PACKED_COMMITMENT_FIELDS || D::TAG >= BABY_BEAR_MODULUS {
+        return PackedCommitment { valid: false, value: BabyBear::zero() }
+    }
+    let mut state: [BabyBear; WIDTH] = [BabyBear::zero(); WIDTH]
+    state[0] = BabyBear::from_u32(D::TAG)
+    state[1] = BabyBear::from_u32(packed.len_bits())
+    let mut index: usize = 0
+    while index < N {
+        state[index + 2] = packed.field(index.downcast_truncate())
+        index = index + 1
+    }
+    PackedCommitment { valid: true, value: permute16(state)[0] }
 }
 
 /// Expose the Fe-derived constants in canonical form for the independent

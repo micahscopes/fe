@@ -70,6 +70,7 @@
 pub use field
 pub use bn254_fr
 pub use word_field
+pub use word_field_encoding
 pub use binomial_extension
 pub use baby_bear
 pub use fixed

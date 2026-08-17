@@ -1,0 +1,105 @@
+//! Injective bounded-bit encodings for portable word fields.
+//!
+//! Every payload lane carries 30 plain bits. Construction requires a modulus
+//! above `2^30`, so conversion to a field element cannot reduce or identify
+//! two payloads.
+//! `bit_length` is part of the value and must be absorbed by commitment
+//! interpreters, preventing trailing-zero ambiguity for variable schemas.
+
+use super::word_field::{WordField, WordPrime31}
+
+pub const FIELD_PAYLOAD_BITS: u32 = 30
+
+/// An exact-length vector of canonical field payloads.
+///
+/// A false `valid` bit poisons the complete value. Constructors reject source
+/// widths above 32, values outside their declared widths, and output overflow.
+pub struct PackedFieldBits<M, const N: usize> {
+    valid: bool,
+    bit_length: u32,
+    fields: [WordField<M>; N],
+}
+
+impl<M, const N: usize> core::marker::Copy for PackedFieldBits<M, N> {}
+
+impl<M: WordPrime31, const N: usize> PackedFieldBits<M, N> {
+    pub fn empty() -> Self {
+        Self {
+            valid: M::modulus() > ((1 as u32) << FIELD_PAYLOAD_BITS),
+            bit_length: 0,
+            fields: [WordField<M>::zero(); N],
+        }
+    }
+
+    fn reject(self) -> Self {
+        Self {
+            valid: false,
+            bit_length: 0,
+            fields: [WordField<M>::zero(); N],
+        }
+    }
+
+    /// Append the low `width` bits of one range-checked word.
+    pub fn append(mut self, _ value: u32, _ width: u32) -> Self {
+        if !self.valid || width > 32 {
+            return self.reject()
+        }
+        if width == 0 {
+            if value != 0 { return self.reject() }
+            return self
+        }
+        if width < 32 && (value >> width) != 0 {
+            return self.reject()
+        }
+
+        let field_count: u32 = N.downcast_truncate()
+        let capacity = field_count * FIELD_PAYLOAD_BITS
+        if self.bit_length > capacity || width > capacity - self.bit_length {
+            return self.reject()
+        }
+
+        let mut remaining = width
+        let mut source_offset: u32 = 0
+        while remaining != 0 {
+            let field = self.bit_length / FIELD_PAYLOAD_BITS
+            let used = self.bit_length - field * FIELD_PAYLOAD_BITS
+            let available = FIELD_PAYLOAD_BITS - used
+            let take = if remaining < available { remaining } else { available }
+            let mask = ((1 as u32) << take) - 1
+            let payload = (value >> source_offset) & mask
+            let current = self.fields[field as usize].to_u32()
+            self.fields[field as usize] = WordField<M>::from_u32(
+                current | (payload << used),
+            )
+            self.bit_length = self.bit_length + take
+            source_offset = source_offset + take
+            remaining = remaining - take
+        }
+        self
+    }
+
+    pub fn is_valid(self) -> bool { self.valid }
+
+    pub fn len_bits(self) -> u32 { self.bit_length }
+
+    pub fn field(self, _ index: u32) -> WordField<M> {
+        if !self.valid || index >= N.downcast_truncate() {
+            return WordField<M>::zero()
+        }
+        self.fields[index as usize]
+    }
+}
+
+/// Interpret a bounded word schema as one injective field-vector encoding.
+pub fn pack_bounded_words<M: WordPrime31, const WORDS: usize, const FIELDS: usize>(
+    _ source: own [u32; WORDS],
+    _ widths: own [u32; WORDS],
+) -> PackedFieldBits<M, FIELDS> {
+    let mut packed = PackedFieldBits<M, FIELDS>::empty()
+    let mut index: usize = 0
+    while index < WORDS {
+        packed = packed.append(source[index], widths[index])
+        index = index + 1
+    }
+    packed
+}
