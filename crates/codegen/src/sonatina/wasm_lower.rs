@@ -7348,6 +7348,18 @@ where
         if let Some(vars) = self.tuple_vars.get(&local).cloned() {
             return Ok(vars.iter().map(|var| self.fb.use_var(*var)).collect());
         }
+        if self.materialized_param_slots.contains(&local) {
+            let class = self.body.value_class(local).cloned().ok_or_else(|| {
+                LowerError::Internal(format!(
+                    "materialized parameter {local:?} has no runtime class"
+                ))
+            })?;
+            let shape = self.local_flat_shape(local)?;
+            let pointer = self.local_value(local)?;
+            let mut values = Vec::with_capacity(shape.leaf_count());
+            self.load_materialized_leaves(pointer, &class, &shape, &mut values)?;
+            return Ok(values);
+        }
         Ok(vec![self.local_value(local)?])
     }
 
@@ -8635,6 +8647,15 @@ where
             return Err(LowerError::Unsupported(format!(
                 "wasm target: materialization source {src:?} has non-scalar memory leaves"
             )));
+        }
+        if self.materialized_param_slots.contains(&src) {
+            // The prologue has already reconstructed this by-value aggregate
+            // parameter in canonical-arena storage so dynamic indexing and
+            // mutation can address it. A later `MaterializeToObject` still
+            // denotes a fresh Fe value. Copy that existing object instead of
+            // trying to flatten its one pointer as though it were every leaf.
+            let source = self.local_value(src)?;
+            return self.lower_deep_object_copy(source, layout);
         }
         let shape = self.module.flat_shape(&class).ok_or_else(|| {
             LowerError::Unsupported(format!(
@@ -9956,11 +9977,19 @@ where
         match terminator {
             RTerminator::Return(Some(value)) => {
                 // R2.1: returning a flattened scalar tuple is a wasm MULTI-VALUE
-                // return of its element words (the host reads the N results). Every
-                // other return is the single-value form.
-                if let Some(elem_vars) = self.tuple_vars.get(value).cloned() {
-                    let values: Vec<ValueId> =
-                        elem_vars.iter().map(|var| self.fb.use_var(*var)).collect();
+                // return of its element words (the host reads the N results).
+                // Addressable by-value parameters retain that public flattened
+                // ABI even though their function-local representation is one
+                // canonical-arena pointer, so load their leaves before rewinding
+                // the scoped arena. Every other return is the single-value form.
+                let flattened = self
+                    .body
+                    .signature
+                    .ret
+                    .as_ref()
+                    .is_some_and(|class| self.module.scalar_tuple_element_tys(class).is_some());
+                if flattened {
+                    let values = self.local_flat_values(*value)?;
                     self.rewind_scoped_arena();
                     self.fb.insert_return_values(&values);
                 } else {

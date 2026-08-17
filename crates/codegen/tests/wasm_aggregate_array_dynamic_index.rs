@@ -115,6 +115,51 @@ impl<const N: usize> Fold for [u32; N] {
 pub fn empty_fold() -> u32 { [0; 0].fold() }
 "#;
 
+const VALUE_PARAMETER_COPY_SOURCE: &str = r#"
+fn replace_first(_ input: own [u32; 4], _ replacement: u32) -> [u32; 4] {
+    let mut output = input
+    output[0] = replacement
+    output
+}
+
+pub fn copy_and_replace(
+    _ first: u32,
+    _ second: u32,
+    _ third: u32,
+    _ fourth: u32,
+    _ replacement: u32,
+) -> (u32, u32, u32, u32) {
+    let output = replace_first([first, second, third, fourth], replacement)
+    (output[0], output[1], output[2], output[3])
+}
+"#;
+
+const NESTED_MUTABLE_ARRAY_BORROW_SOURCE: &str = r#"
+fn increment(_ values: mut [u32; 4], _ index: usize) {
+    values[index] = values[index] + 1
+}
+
+fn increment_twice(_ values: mut [u32; 4]) {
+    increment(mut values, 1)
+    increment(mut values, 2)
+}
+
+fn updated_values(mut values: own [u32; 4]) -> [u32; 4] {
+    increment_twice(mut values)
+    values
+}
+
+pub fn update(
+    _ first: u32,
+    _ second: u32,
+    _ third: u32,
+    _ fourth: u32,
+) -> (u32, u32, u32, u32) {
+    let values = updated_values(values: [first, second, third, fourth])
+    (values[0], values[1], values[2], values[3])
+}
+"#;
+
 fn compile(source: &str, name: &str) -> Vec<u8> {
     let mut db = DriverDataBase::default();
     let url = Url::parse(&format!("file:///{name}.fe")).unwrap();
@@ -217,6 +262,44 @@ fn zero_length_generic_array_keeps_shape_without_transport_lanes() {
         .get_typed_func::<(), i32>(&mut store, "empty_fold")
         .expect("empty_fold export");
     assert_eq!(fold.call(&mut store, ()).unwrap(), 0);
+}
+
+#[test]
+fn copied_value_parameter_materializes_all_aggregate_leaves() {
+    let bytes = compile(
+        VALUE_PARAMETER_COPY_SOURCE,
+        "wasm_copied_value_parameter_materializes_all_aggregate_leaves",
+    );
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, bytes).unwrap();
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+    let replace = instance
+        .get_typed_func::<(i32, i32, i32, i32, i32), (i32, i32, i32, i32)>(
+            &mut store,
+            "copy_and_replace",
+        )
+        .expect("copy_and_replace export");
+    assert_eq!(
+        replace.call(&mut store, (3, 5, 7, 11, 13)).unwrap(),
+        (13, 5, 7, 11),
+    );
+}
+
+#[test]
+fn nested_mutable_array_borrows_preserve_one_backing_object() {
+    let bytes = compile(
+        NESTED_MUTABLE_ARRAY_BORROW_SOURCE,
+        "wasm_nested_mutable_array_borrow",
+    );
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, bytes).unwrap();
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+    let update = instance
+        .get_typed_func::<(i32, i32, i32, i32), (i32, i32, i32, i32)>(&mut store, "update")
+        .expect("update export");
+    assert_eq!(update.call(&mut store, (3, 5, 7, 11)).unwrap(), (3, 6, 8, 11));
 }
 
 fn assert_pick_executes_and_traps(bytes: Vec<u8>) {
