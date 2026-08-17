@@ -64,6 +64,33 @@ impl<'db> RuntimeClass<'db> {
         }
     }
 
+    /// Whether this value contains a fixed array in its by-value layout.
+    ///
+    /// Fixed arrays are the aggregate form whose ordinary runtime operations
+    /// require addressability: an index can be selected dynamically even when
+    /// the enclosing Fe parameter is only a read view. Records and enums made
+    /// exclusively from scalar leaves remain compact value products. A
+    /// reference field does not make its enclosing value array-backed because
+    /// the referenced storage already crosses its own transport boundary.
+    pub fn contains_array_value(&self, db: &'db dyn MirDb) -> bool {
+        match self {
+            Self::Scalar(_) | Self::Ref { .. } | Self::RawAddr { .. } => false,
+            Self::AggregateValue { layout } => match layout.data(db) {
+                Layout::Array(_) => true,
+                Layout::Struct(layout) => layout
+                    .fields
+                    .iter()
+                    .any(|field| field.contains_array_value(db)),
+                Layout::Enum(layout) => layout.variants.iter().any(|variant| {
+                    variant
+                        .fields
+                        .iter()
+                        .any(|field| field.contains_array_value(db))
+                }),
+            },
+        }
+    }
+
     pub fn const_ref(layout: LayoutId<'db>) -> Self {
         Self::Ref {
             pointee: Box::new(Self::AggregateValue { layout }),
@@ -975,6 +1002,7 @@ pub enum RuntimeParamPlan<'db> {
     ReadOnlyView {
         value: RuntimeClass<'db>,
         borrow: RuntimeBoundarySpec<'db>,
+        requires_addressable: bool,
     },
     PassActual,
 }

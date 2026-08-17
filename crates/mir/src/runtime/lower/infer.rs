@@ -851,7 +851,12 @@ fn infer_runtime_local_root<'db>(
     let Some(place_class) = place_class else {
         return RuntimeLocalRoot::None;
     };
-    if runtime_class_has_zero_sized_payload(cx.env.db(), &place_class) {
+    if runtime_class_has_zero_sized_payload(cx.env.db(), &place_class)
+        && !local_data
+            .facts
+            .root_demand
+            .needs_projectable_owned_storage()
+    {
         return RuntimeLocalRoot::None;
     }
     let Some(transport_class) = transport_class else {

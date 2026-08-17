@@ -8,7 +8,9 @@ use hir::analysis::{
 };
 use hir::hir_def::{Expr, Partial};
 
-use crate::runtime::{AddressSpaceKind, RuntimeBoundarySpec, RuntimeCarrier, RuntimeClass};
+use crate::runtime::{
+    AddressSpaceKind, RefKind, RuntimeBoundarySpec, RuntimeCarrier, RuntimeClass,
+};
 
 use super::{
     boundary::{
@@ -214,6 +216,17 @@ impl<'a, 'carriers, 'roots, 'cache, 'db> RuntimeArgSelector<'a, 'carriers, 'root
     ) -> Option<SelectedRuntimeArg<'db>> {
         let local = arg.local;
         if matches!(target, RuntimeClass::AggregateValue { .. })
+            && target.span_words(self.env.db()) == 0
+        {
+            // A zero-leaf product has one runtime representation regardless of
+            // its semantic construction. Preserve its exact aggregate shape in
+            // the private call graph without inventing transport bytes.
+            return Some(SelectedRuntimeArg::placeholder(
+                self.env.body().locals.get(local.index())?.ty,
+                target.clone(),
+            ));
+        }
+        if matches!(target, RuntimeClass::AggregateValue { .. })
             && self.env.boundary_source_transport_sensitive(local)
             && let Some(actual) = self
                 .env
@@ -272,10 +285,36 @@ impl<'a, 'carriers, 'roots, 'cache, 'db> RuntimeArgSelector<'a, 'carriers, 'root
             CompiledValuePassPlan::ExactShapeRefLike(boundary) => self
                 .select_exact_shape_ref_like_value(local, boundary)
                 .or_else(|| self.exact_shape_ref_like_placeholder(local, boundary)),
-            CompiledValuePassPlan::ReadOnlyView { value, borrow } => self
-                .select_free_boundary_compatible_value(local, borrow)
-                .or_else(|| self.select_value_view_arg(local, arg, value))
-                .or_else(|| self.select_materializable_semantic_value(arg, borrow)),
+            CompiledValuePassPlan::ReadOnlyView {
+                value,
+                borrow,
+                requires_addressable,
+            } => {
+                if *requires_addressable {
+                    // A read view over an array-containing value must retain
+                    // target-layout storage for dynamic indexing. Scalar-only
+                    // records remain ordinary compact value products.
+                    self.select_free_boundary_compatible_value(local, borrow)
+                        .or_else(|| self.select_materializable_semantic_value(arg, borrow))
+                } else {
+                    let existing = self.select_free_boundary_compatible_value(local, borrow);
+                    if existing.as_ref().is_some_and(|selected| {
+                        matches!(
+                            selected.class,
+                            RuntimeClass::Ref {
+                                kind: RefKind::Provider { space, .. },
+                                ..
+                            } | RuntimeClass::RawAddr { space, .. }
+                                if space != AddressSpaceKind::Memory
+                        )
+                    }) {
+                        return existing;
+                    }
+                    self.select_value_view_arg(local, arg, value)
+                        .or(existing)
+                        .or_else(|| self.select_materializable_semantic_value(arg, borrow))
+                }
+            }
             CompiledValuePassPlan::BorrowLike(boundary) => {
                 if let Some(selected) = self.select_boundary_compatible_value(local, boundary) {
                     return Some(selected);
@@ -482,7 +521,13 @@ impl<'a, 'carriers, 'roots, 'cache, 'db> RuntimeArgSelector<'a, 'carriers, 'root
     ) -> Option<SelectedRuntimeArg<'db>> {
         self.env
             .actual_aggregate_class_for_source(self.carriers, local)
-            .map(|class| SelectedRuntimeArg::aggregate_from_runtime_source(local, class))
+            .map(|class| {
+                if class.span_words(self.env.db()) == 0 {
+                    SelectedRuntimeArg::placeholder(self.env.body().locals[local.index()].ty, class)
+                } else {
+                    SelectedRuntimeArg::aggregate_from_runtime_source(local, class)
+                }
+            })
     }
 
     fn select_boundary_compatible_value(

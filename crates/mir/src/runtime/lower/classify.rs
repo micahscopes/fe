@@ -2143,6 +2143,32 @@ pub(crate) fn desired_runtime_param_plan<'db>(
     }
     let interface_ty = runtime_interface_ty_in_context(db, binding_ty, scope, assumptions);
     let repr_ty = runtime_repr_ty_in_context(db, binding_ty, scope, assumptions);
+    let ordinary_read_only_view = matches!(
+        binding,
+        LocalBinding::Param {
+            mode: FuncParamMode::View,
+            ..
+        }
+    ) && binding_ty.as_capability(db).is_none();
+    if ordinary_read_only_view {
+        let view = desired_read_only_view_param_plan(db, typed_body, binding, env, binding_ty);
+        let abstract_param = runtime_abstract_param_ty(db, binding_ty, scope, assumptions);
+        let needs_addressable_storage = matches!(
+            view,
+            RuntimeParamPlan::ReadOnlyView {
+                requires_addressable: true,
+                ..
+            }
+        );
+        // A generic receiver can still resolve to a concrete array-containing
+        // layout in the semantic instance's assumption environment. Preserve
+        // that read-only address boundary because dynamic indexing needs it.
+        // Scalar-only generic records retain the established PassActual value
+        // path below, avoiding an arena borrow and copy at every residual call.
+        if needs_addressable_storage || !abstract_param {
+            return view;
+        }
+    }
     if runtime_abstract_param_ty(db, binding_ty, scope, assumptions)
         || matches!(
             repr_ty.base_ty(db).data(db),
@@ -2150,15 +2176,6 @@ pub(crate) fn desired_runtime_param_plan<'db>(
         )
     {
         RuntimeParamPlan::PassActual
-    } else if matches!(
-        binding,
-        LocalBinding::Param {
-            mode: FuncParamMode::View,
-            ..
-        }
-    ) && binding_ty.as_capability(db).is_none()
-    {
-        desired_read_only_view_param_plan(db, typed_body, binding, env, binding_ty)
     } else if let Some((CapabilityKind::View, inner)) = interface_ty.as_capability(db) {
         desired_read_only_view_param_plan(db, typed_body, binding, env, inner)
     } else if interface_ty.as_capability(db).is_some() {
@@ -2209,20 +2226,32 @@ fn desired_read_only_view_param_plan<'db>(
     env: RuntimeTypeEnv<'db>,
     inner: TyId<'db>,
 ) -> RuntimeParamPlan<'db> {
+    let value = stored_class_for_ty_in_context(db, inner, env.scope, env.assumptions);
     let Some(boundary) = boundary_spec_for_ty_in_env(
         db,
         env,
         typed_body.binding_ty(db, binding),
         AddressSpaceKind::Memory,
     ) else {
-        return RuntimeParamPlan::Erased;
+        // A zero-length fixed array has no transport leaves, but its generic
+        // body can still contain a dynamic index. Keep the exact aggregate
+        // shape in the private runtime signature so root inference can provide
+        // an addressable zero-sized slot and target lowering can emit the
+        // ordinary bounds trap. The Wasm ABI still receives zero scalar lanes.
+        return value
+            .aggregate_layout()
+            .map(|_| {
+                RuntimeParamPlan::Boundary(RuntimeBoundarySpec::ExactShape(runtime_param_class(
+                    db, typed_body, binding, env, value,
+                )))
+            })
+            .unwrap_or(RuntimeParamPlan::Erased);
     };
     if binding.is_mut() {
         return RuntimeParamPlan::Boundary(runtime_param_boundary(
             db, typed_body, binding, env, boundary,
         ));
     }
-    let value = stored_class_for_ty_in_context(db, inner, env.scope, env.assumptions);
     if value.aggregate_layout().is_none() {
         return RuntimeParamPlan::Boundary(runtime_param_boundary(
             db, typed_body, binding, env, boundary,
@@ -2236,9 +2265,11 @@ fn desired_read_only_view_param_plan<'db>(
             allow: default_borrow_transport_set(BorrowAccess::ReadOnly, AddressSpaceKind::Memory),
         },
     };
+    let requires_addressable = value.contains_array_value(db);
     RuntimeParamPlan::ReadOnlyView {
         value: runtime_param_class(db, typed_body, binding, env, value),
         borrow,
+        requires_addressable,
     }
 }
 

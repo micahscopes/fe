@@ -308,14 +308,27 @@ pub(super) fn local_read_places_extractable_from_value<'db>(
     body: &NormalizedSemanticBody<'db>,
     local: SLocalId,
 ) -> bool {
-    body.blocks.iter().all(|block| {
+    let statements_are_extractable = body.blocks.iter().all(|block| {
         block.stmts.iter().all(|stmt| match &stmt.kind {
             NSStmtKind::Assign { expr, .. } => {
                 expr_read_places_extractable_from_value(body, local, expr)
             }
             NSStmtKind::Store { .. } => true,
         })
-    })
+    });
+    statements_are_extractable
+        && body.locals.iter().all(|local_data| {
+            [
+                local_data.backing_place(),
+                local_data.snapshot_source_place(),
+            ]
+            .into_iter()
+            .flatten()
+            .all(|place| {
+                place_root_local(body, place) != Some(local)
+                    || place.path.iter().all(value_extractable_projection)
+            })
+        })
 }
 
 fn place_root_local<'db>(

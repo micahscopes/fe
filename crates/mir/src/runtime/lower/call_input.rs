@@ -40,6 +40,7 @@ pub(super) enum CompiledValuePassPlan<'db> {
     ReadOnlyView {
         value: RuntimeClass<'db>,
         borrow: StagedBoundary<'db>,
+        requires_addressable: bool,
     },
     BorrowLike(StagedBoundary<'db>),
 }
@@ -81,9 +82,14 @@ pub(super) fn compile_value_pass_plan<'db>(
     match plan {
         RuntimeParamPlan::Erased => CompiledValuePassPlan::Erased,
         RuntimeParamPlan::PassActual => CompiledValuePassPlan::VisibleValue,
-        RuntimeParamPlan::ReadOnlyView { value, borrow } => CompiledValuePassPlan::ReadOnlyView {
+        RuntimeParamPlan::ReadOnlyView {
+            value,
+            borrow,
+            requires_addressable,
+        } => CompiledValuePassPlan::ReadOnlyView {
             value,
             borrow: boundary_sites.stage(borrow),
+            requires_addressable,
         },
         RuntimeParamPlan::Boundary(RuntimeBoundarySpec::ExactTransport(exact)) => {
             CompiledValuePassPlan::ExactTransport(exact)

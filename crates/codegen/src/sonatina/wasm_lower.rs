@@ -150,18 +150,7 @@ pub(crate) fn compile_runtime_package_shader_ir(
     db: &DriverDataBase,
     package: &RuntimePackage<'_>,
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
-    compile_runtime_package_wasm_inner(
-        db,
-        package,
-        &[],
-        &[],
-        None,
-        None,
-        None,
-        &[],
-        false,
-        false,
-    )
+    compile_runtime_package_wasm_inner(db, package, &[], &[], None, None, None, &[], false, false)
 }
 
 /// Overlay-only callback-capstone entry point. The default pin cannot name the
@@ -175,16 +164,8 @@ pub fn compile_runtime_package_wasm_with_guest_callbacks(
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
     let isa = create_wasm32_isa();
     let builder = ModuleBuilder::new(ModuleCtx::new(&isa));
-    let mut lowerer = PortableModuleLowerer::new(
-        db,
-        builder,
-        &isa,
-        package,
-        HashSet::new(),
-        &[],
-        true,
-        true,
-    )?;
+    let mut lowerer =
+        PortableModuleLowerer::new(db, builder, &isa, package, HashSet::new(), &[], true, true)?;
     lowerer.declare_functions()?;
     lowerer.lower_bodies()?;
     lowerer.synthesize_guest_callbacks(callbacks)?;
@@ -803,16 +784,8 @@ pub(crate) fn compile_runtime_package_native(
         OperatingSystem::Native,
     ));
     let builder = ModuleBuilder::new(ModuleCtx::new(&isa));
-    let mut lowerer = PortableModuleLowerer::new(
-        db,
-        builder,
-        &isa,
-        package,
-        HashSet::new(),
-        &[],
-        true,
-        false,
-    )?;
+    let mut lowerer =
+        PortableModuleLowerer::new(db, builder, &isa, package, HashSet::new(), &[], true, false)?;
     lowerer.declare_functions()?;
     lowerer.lower_bodies()?;
     Ok(lowerer.finish())
@@ -2001,9 +1974,9 @@ fn reify_static_aggregate_params<'db>(db: &'db DriverDataBase, body: &mut Runtim
             RuntimeClass::Ref { pointee, kind, .. }
                 if is_reifiable_aggregate_ref(kind)
                     && matches!(pointee.as_ref(), RuntimeClass::AggregateValue { .. })
-                    && (matches!(kind, RefKind::Const)
-                        || (is_struct_aggregate(db, pointee)
-                            && ref_param_has_only_value_reads(db, body, param.local))) =>
+                    && is_struct_aggregate(db, pointee)
+                    && (!pointee.contains_array_value(db)
+                        || ref_param_has_only_value_reads(db, body, param.local)) =>
             {
                 Some((param.local, pointee.as_ref().clone()))
             }
@@ -3082,15 +3055,17 @@ fn stmt_uses_host_memory_pointer(stmt: &RStmt<'_>) -> bool {
 }
 
 /// Keep residual call sites aligned with parameters that the portable backend
-/// reified from memory-provider references into flattened aggregate values.
+/// reified from borrowed aggregate references into flattened aggregate values.
 ///
-/// Runtime MIR deliberately presents many `Copy` records through provider
-/// references. `reify_static_aggregate_params` turns a read-only helper
-/// parameter into its value ABI when every use is a static projection. A call
+/// Runtime MIR deliberately presents `Copy` values through const, object, or
+/// memory-provider references. `reify_static_aggregate_params` turns an
+/// admissible helper parameter into its value ABI, materializing an independent
+/// callee-local arena copy when dynamic indexing requires addressability. A call
 /// that survives the bounded inliner must undergo the same conversion at its
 /// boundary: load the complete caller-owned value, then pass its scalar leaves.
 /// Otherwise the callee signature expects N leaves while the caller contributes
-/// one provider pointer, producing malformed Wasm.
+/// one borrowed pointer, producing malformed Wasm or leaving an unlowerable
+/// dynamic-index read in the residual helper.
 fn reify_residual_call_arguments<'db>(
     db: &'db DriverDataBase,
     package: &RuntimePackage<'db>,
@@ -3111,24 +3086,32 @@ fn reify_residual_call_arguments<'db>(
                 .params
                 .iter()
                 .zip(&prepared.signature.params)
-                .map(|(original, prepared)| match (&original.class, &prepared.class) {
-                    (
-                        RuntimeClass::Ref {
-                            pointee,
-                            kind:
-                                RefKind::Object
-                                | RefKind::Provider {
-                                    space: AddressSpaceKind::Memory,
-                                    ..
-                                },
-                            view: RefView::Whole,
-                        },
-                        prepared @ RuntimeClass::AggregateValue { .. },
-                    ) if pointee.shares_runtime_rep_with(db, prepared) => Some(prepared.clone()),
-                    _ => None,
-                })
+                .map(
+                    |(original, prepared)| match (&original.class, &prepared.class) {
+                        (
+                            RuntimeClass::Ref {
+                                pointee,
+                                kind:
+                                    RefKind::Const
+                                    | RefKind::Object
+                                    | RefKind::Provider {
+                                        space: AddressSpaceKind::Memory,
+                                        ..
+                                    },
+                                view: RefView::Whole,
+                            },
+                            prepared @ RuntimeClass::AggregateValue { .. },
+                        ) if pointee.shares_runtime_rep_with(db, prepared) => {
+                            Some(prepared.clone())
+                        }
+                        _ => None,
+                    },
+                )
                 .collect::<Vec<_>>();
-            params.iter().any(Option::is_some).then_some((instance, params))
+            params
+                .iter()
+                .any(Option::is_some)
+                .then_some((instance, params))
         })
         .collect::<FxHashMap<_, _>>();
     if reified_params.is_empty() {
@@ -3156,7 +3139,8 @@ fn reify_residual_call_arguments<'db>(
             let RuntimeCarrier::Value(RuntimeClass::Ref {
                 pointee,
                 kind:
-                    RefKind::Object
+                    RefKind::Const
+                    | RefKind::Object
                     | RefKind::Provider {
                         space: AddressSpaceKind::Memory,
                         ..
@@ -3210,6 +3194,132 @@ fn reify_residual_call_arguments<'db>(
             }
             block.stmts = rewritten;
         }
+    }
+}
+
+/// Fold the exact compiler-internal round trip produced when a borrowed
+/// aggregate call boundary is reified back to a flattened value boundary:
+///
+/// ```text
+/// object = MaterializeToObject(value)
+/// loaded = Load(*object)
+/// ```
+///
+/// The two statements must be adjacent, the load must read the whole fresh
+/// object, and all three aggregate representations must agree. Replacing the
+/// load with `Use(value)` is therefore an identity, not an alias analysis. If
+/// the object has no remaining use anywhere in the body, its now-dead internal
+/// materialization is removed as well. This matters for shaders because an
+/// otherwise pure record store inside a loop must not acquire a private arena
+/// allocation merely by crossing a borrow-typed library API.
+fn fold_fresh_materialize_load_roundtrips<'db>(
+    db: &'db DriverDataBase,
+    body: &mut RuntimeBody<'db>,
+) {
+    let mut bypassed = HashSet::new();
+    {
+        let (locals, blocks) = (&body.locals, &mut body.blocks);
+        for block in blocks {
+            let mut previous_materialization: Option<(RLocalId, RLocalId)> = None;
+            for stmt in &mut block.stmts {
+                let folded = match (&previous_materialization, &mut *stmt) {
+                    (
+                        Some((object, value)),
+                        RStmt::Assign {
+                            dst,
+                            expr: RExpr::Load { place },
+                        },
+                    ) if matches!(place.root, PlaceRoot::Ref(root) if root == *object)
+                        && place.path.is_empty() =>
+                    {
+                        let value_class = locals
+                            .get(value.as_u32() as usize)
+                            .and_then(|local| local.carrier.value_class());
+                        let object_class = locals
+                            .get(object.as_u32() as usize)
+                            .and_then(|local| local.carrier.value_class());
+                        let loaded_class = locals
+                            .get(dst.as_u32() as usize)
+                            .and_then(|local| local.carrier.value_class());
+                        let compatible_object = matches!(
+                            object_class,
+                            Some(RuntimeClass::Ref {
+                                pointee,
+                                kind: RefKind::Object,
+                                view: RefView::Whole,
+                            }) if value_class.is_some_and(|value_class| {
+                                value_class.shares_runtime_rep_with(db, pointee)
+                            })
+                        );
+                        if compatible_object
+                            && value_class
+                                .zip(loaded_class)
+                                .is_some_and(|(value, loaded)| {
+                                    value.shares_runtime_rep_with(db, loaded)
+                                })
+                        {
+                            *stmt = RStmt::Assign {
+                                dst: *dst,
+                                expr: RExpr::Use(*value),
+                            };
+                            bypassed.insert(*object);
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    _ => false,
+                };
+                previous_materialization = if folded {
+                    None
+                } else if let RStmt::Assign {
+                    dst,
+                    expr: RExpr::MaterializeToObject { src },
+                } = stmt
+                {
+                    Some((*dst, *src))
+                } else {
+                    None
+                };
+            }
+        }
+    }
+    if bypassed.is_empty() {
+        return;
+    }
+
+    let used = collect_used_locals(body);
+    let removable = bypassed
+        .into_iter()
+        .filter(|candidate| {
+            if used.contains_key(candidate) {
+                return false;
+            }
+            let mut definitions = 0_usize;
+            let only_materializations = body.blocks.iter().all(|block| {
+                block.stmts.iter().all(|stmt| match stmt {
+                    RStmt::Assign { dst, expr } if dst == candidate => {
+                        definitions += 1;
+                        matches!(expr, RExpr::MaterializeToObject { .. })
+                    }
+                    _ => true,
+                })
+            });
+            definitions != 0 && only_materializations
+        })
+        .collect::<HashSet<_>>();
+    if removable.is_empty() {
+        return;
+    }
+    for block in &mut body.blocks {
+        block.stmts.retain(|stmt| {
+            !matches!(stmt, RStmt::Assign { dst, expr: RExpr::MaterializeToObject { .. } }
+                if removable.contains(dst))
+        });
+    }
+    for local in removable {
+        body.locals[local.as_u32() as usize].carrier = RuntimeCarrier::Erased;
+        body.locals[local.as_u32() as usize].root = RuntimeLocalRoot::None;
     }
 }
 
@@ -3404,6 +3514,9 @@ where
             normalize_portable_body(db, *instance, body);
         }
         reify_residual_call_arguments(db, package, &mut prepared_bodies);
+        for body in prepared_bodies.values_mut() {
+            fold_fresh_materialize_load_roundtrips(db, body);
+        }
         let mut func_symbols = assign_sonatina_function_symbols(db, package);
         for function in package.functions(db) {
             let instance = function.instance(db);
@@ -3837,13 +3950,7 @@ where
                 && function.linkage(self.db) == RuntimeLinkage::Internal
                 && !self.wrapped_lane_names.contains(&symbol);
             let scoped_arena = self.scoped_arena_bodies.contains(&instance);
-            PortableFunctionLowerer::new(
-                self,
-                body,
-                func_ref,
-                validate_enum_params,
-                scoped_arena,
-            )?
+            PortableFunctionLowerer::new(self, body, func_ref, validate_enum_params, scoped_arena)?
                 .lower()
                 .map_err(|error| match error {
                     LowerError::Unsupported(message) => LowerError::Unsupported(format!(
@@ -6132,21 +6239,39 @@ where
                     .ok_or("call target has no prepared body")?;
                 if callee_body.blocks.is_empty()
                     || args.len() != callee_body.signature.params.len()
-                    || args.iter().zip(&callee_body.signature.params).any(
-                        |(arg, param)| {
+                    || args
+                        .iter()
+                        .zip(&callee_body.signature.params)
+                        .any(|(arg, param)| {
                             !self.scoped_arena_param_is_admissible(&param.class)
                                 || (body
                                     .value_class(*arg)
                                     .is_some_and(|class| class.contains_transport(self.db))
                                     && !self.scoped_arena_borrowed_ref(body, *arg))
-                        },
-                    )
+                        })
                     || callee_body.signature.ret.as_ref().is_some_and(|class| {
                         class.contains_transport(self.db) || self.flat_shape(class).is_none()
                     })
                 {
                     return Err("call boundary can carry an escaping reference");
                 }
+                analysis.allocates |=
+                    args.iter()
+                        .zip(&callee_body.signature.params)
+                        .any(|(arg, param)| {
+                            matches!(
+                                &param.class,
+                                RuntimeClass::Ref {
+                                    pointee,
+                                    kind: RefKind::Const,
+                                    view: RefView::Whole,
+                                } if body.value_class(*arg).is_some_and(|source| {
+                                    matches!(source, RuntimeClass::AggregateValue { .. })
+                                        && source.shares_runtime_rep_with(self.db, pointee)
+                                        && self.aggregate_is_memory_lowerable(source)
+                                })
+                            )
+                        });
                 analysis.callees.insert(*callee);
             }
             RExpr::AggregateMake { fields, .. } | RExpr::EnumMake { fields, .. } => {
@@ -6239,8 +6364,7 @@ where
 
     fn scoped_arena_copy_source_is_local(&self, body: &RuntimeBody<'db>, local: RLocalId) -> bool {
         body.value_class(local).is_some_and(|class| {
-            !class.contains_transport(self.db)
-                || self.scoped_arena_borrowed_ref(body, local)
+            !class.contains_transport(self.db) || self.scoped_arena_borrowed_ref(body, local)
         })
     }
 
@@ -6260,16 +6384,14 @@ where
         }
     }
 
-    /// Change 1: whether `class` is a function-local aggregate behind an object /
-    /// memory-provider reference that lowers to an `i32` linear-memory pointer.
-    /// True for `Ref{kind: Object | Provider{space: Memory}, view: Whole}` whose
-    /// pointee is a MEMORY-LOWERABLE aggregate (every scalar leaf passes the R1
-    /// scalar envelope): arrays and structs of admissible scalars qualify;
-    /// enums, u128/u256/address/f64 leaves, and nested transports fail closed
-    /// (slice 1). Such a local's SSA value IS its arena pointer; element access
-    /// uses i32 address arithmetic + typed Mload/Mstore. This deliberately does
-    /// NOT widen `ty_for_class` (the signature / flat-shape admissibility SSOT):
-    /// object-ref params/returns keep failing closed.
+    /// Whether `class` is a reference that a private Wasm helper may carry as
+    /// one canonical-arena pointer. Object refs name mutable arena storage and
+    /// const refs are read-only borrows whose call graph is admitted only by
+    /// the scoped-arena escape proof. Both scalar pointees and recursively
+    /// memory-lowerable aggregates use that representation. Memory-provider
+    /// references retain their existing scalar-handle ABI unless their pointee
+    /// is an aggregate already materialized in the arena. Public params and
+    /// returns still go through the flattened value ABI or fail closed.
     fn is_memory_lowerable_object_ref(&self, class: &RuntimeClass<'db>) -> bool {
         let RuntimeClass::Ref {
             pointee,
@@ -6279,18 +6401,17 @@ where
         else {
             return false;
         };
-        if !matches!(
-            kind,
-            RefKind::Object
-                | RefKind::Provider {
-                    space: AddressSpaceKind::Memory,
-                    ..
-                }
-        ) {
-            return false;
+        match kind {
+            RefKind::Const | RefKind::Object => self.aggregate_is_memory_lowerable(pointee),
+            RefKind::Provider {
+                space: AddressSpaceKind::Memory,
+                ..
+            } => {
+                matches!(**pointee, RuntimeClass::AggregateValue { .. })
+                    && self.aggregate_is_memory_lowerable(pointee)
+            }
+            _ => false,
         }
-        matches!(**pointee, RuntimeClass::AggregateValue { .. })
-            && self.aggregate_is_memory_lowerable(pointee)
     }
 
     fn object_value_layout(&self, class: &RuntimeClass<'db>) -> Option<LayoutId<'db>> {
@@ -6308,14 +6429,16 @@ where
         Some(*layout)
     }
 
-    /// Target layout behind any admitted whole aggregate reference. Object
-    /// locals and materialized memory-provider parameters share the same deep
-    /// value-copy rule even though their provenance differs.
+    /// Target layout behind any admitted whole aggregate reference. Const
+    /// borrows, object locals, and materialized memory-provider parameters
+    /// share target-derived address arithmetic while retaining their distinct
+    /// write permissions.
     fn memory_lowerable_ref_layout(&self, class: &RuntimeClass<'db>) -> Option<LayoutId<'db>> {
         let RuntimeClass::Ref {
             pointee,
             kind:
-                RefKind::Object
+                RefKind::Const
+                | RefKind::Object
                 | RefKind::Provider {
                     space: AddressSpaceKind::Memory,
                     ..
@@ -6751,9 +6874,7 @@ where
         self.fb.switch_to_block(self.prologue_block);
         if self.scoped_arena {
             let checkpoint_ty = self.fb.ptr_type(Type::I8);
-            let checkpoint = self
-                .fb
-                .insert_inst(MemCheckpoint::new(is), checkpoint_ty);
+            let checkpoint = self.fb.insert_inst(MemCheckpoint::new(is), checkpoint_ty);
             self.arena_checkpoint = Some(checkpoint);
         }
         let params = self.body.signature.params.clone();
@@ -6893,7 +7014,8 @@ where
                 }
                 let value = self.lower_expr(expr, *dst).map_err(|error| match error {
                     LowerError::Unsupported(message) => LowerError::Unsupported(format!(
-                        "{message}; while lowering assignment destination {dst:?}, expression {expr:?}"
+                        "{message}; while lowering assignment destination {dst:?} with class {:?}, expression {expr:?}",
+                        self.body.value_class(*dst),
                     )),
                     other => other,
                 })?;
@@ -7117,31 +7239,63 @@ where
         Ok(())
     }
 
-    /// Flatten value-carried product-tree arguments in the same DFS declaration
-    /// order used by `lower_signature` and the function prologue. Scalar and
-    /// fieldless-enum arguments remain one Wasm value; structs, fixed arrays,
-    /// and payload enums contribute their recursively flattened leaves.
-    /// Unsupported non-value transports fail closed in `local_flat_values`.
-    fn call_arg_values(&mut self, args: &[RLocalId]) -> Result<Vec<ValueId>, LowerError> {
-        let mut values = Vec::new();
-        for arg in args {
-            values.extend(self.local_flat_values(*arg)?);
-        }
-        Ok(values)
-    }
-
-    /// Flatten one residual call only when its concrete Sonatina signature and
-    /// the caller's prepared value lanes agree exactly. Cross-body portable
-    /// normalization can change a private helper from a provider-reference ABI
-    /// to a recursive value ABI; any missed boundary adaptation must fail here,
-    /// before an invalid Wasm call reaches the binary emitter.
+    /// Lower one residual call only when its concrete Sonatina signature and
+    /// the caller's prepared lanes agree exactly. Most value arguments flatten
+    /// in DFS declaration order. A private read-only aggregate parameter keeps
+    /// one pointer instead: the caller materializes an independent arena copy,
+    /// and the scoped escape proof guarantees its lifetime. Any missed boundary
+    /// adaptation fails here before an invalid Wasm call reaches the emitter.
     fn checked_call_arg_values(
         &mut self,
         callee: RuntimeInstance<'db>,
         callee_ref: FuncRef,
         args: &[RLocalId],
     ) -> Result<Vec<ValueId>, LowerError> {
-        let values = self.call_arg_values(args)?;
+        let params = self
+            .module
+            .prepared_bodies
+            .get(&callee)
+            .ok_or_else(|| LowerError::Internal("prepared Wasm callee is missing".to_owned()))?
+            .signature
+            .params
+            .iter()
+            .map(|param| param.class.clone())
+            .collect::<Vec<_>>();
+        if args.len() != params.len() {
+            return Err(LowerError::Internal(format!(
+                "call to `{}` has {} Fe arguments but {} prepared parameters",
+                self.module.function_symbol(callee),
+                args.len(),
+                params.len(),
+            )));
+        }
+        let mut values = Vec::new();
+        for (arg, param) in args.iter().zip(&params) {
+            let source = self.body.value_class(*arg).cloned().ok_or_else(|| {
+                LowerError::Internal(format!("call argument {arg:?} has no runtime class"))
+            })?;
+            let materialize_read_borrow = matches!(
+                param,
+                RuntimeClass::Ref {
+                    pointee,
+                    kind: RefKind::Const,
+                    view: RefView::Whole,
+                } if matches!(&source, RuntimeClass::AggregateValue { .. })
+                    && source.shares_runtime_rep_with(self.module.db, pointee)
+                    && self.module.aggregate_is_memory_lowerable(&source)
+            );
+            if materialize_read_borrow {
+                if !self.scoped_arena {
+                    return Err(LowerError::Internal(format!(
+                        "call to `{}` requires a scoped aggregate borrow, but its caller failed the arena escape proof",
+                        self.module.function_symbol(callee),
+                    )));
+                }
+                values.push(self.lower_materialize_to_object(*arg)?);
+            } else {
+                values.extend(self.local_flat_values(*arg)?);
+            }
+        }
         let expected = self
             .module
             .builder
@@ -8049,9 +8203,12 @@ where
             // address. Preserve that address as the reference value; the
             // callee's ordinary field loads remain target-layout-derived.
             RExpr::AddrOf { place } => {
+                if let Some((address, _)) = self.raw_memory_scalar_place(place)? {
+                    return Ok(address);
+                }
                 let Some((address, _)) = self.raw_memory_aggregate_place(place)? else {
                     return Err(LowerError::Unsupported(format!(
-                        "wasm target: address-of requires a memory-backed aggregate place: \
+                        "wasm target: address-of requires a memory-backed place: \
                          {place:?}"
                     )));
                 };
@@ -8063,7 +8220,64 @@ where
             // token (`Wait::wait<T>(_ pending: own Pending<T>)`) reaches lowering as
             // exactly this shape (`load *%p`); anything needing an address, an offset,
             // a store, or an object materialization is R2 proper and stays fail-closed.
-            RExpr::Load { place } => self.lower_place_read(place),
+            RExpr::Load { place } => {
+                let dst_class = self.body.value_class(dst).cloned().ok_or_else(|| {
+                    LowerError::Internal(format!("place-read destination {dst:?} has no class"))
+                })?;
+                if let RuntimeClass::AggregateValue { layout } = &dst_class
+                    && (self.module.single_scalar_field(*layout).is_some()
+                        || self.module.fieldless_enum_tag(*layout).is_some())
+                {
+                    let Some((address, projected)) = self.raw_memory_aggregate_place(place)? else {
+                        return Err(LowerError::Unsupported(format!(
+                            "wasm target: scalar-represented aggregate load requires a memory-backed place: {place:?}"
+                        )));
+                    };
+                    if !projected.shares_runtime_rep_with(self.module.db, &dst_class) {
+                        return Err(LowerError::Unsupported(
+                            "wasm target: scalar-represented aggregate load has an incompatible layout"
+                                .to_owned(),
+                        ));
+                    }
+                    if let Some(scalar) = self.module.single_scalar_field(*layout) {
+                        return Ok(self.load_memory_scalar(address, scalar_ty_r1(&scalar)?));
+                    }
+                    let tag = self.module.fieldless_enum_tag(*layout).ok_or_else(|| {
+                        LowerError::Internal(
+                            "scalar-represented aggregate lost its enum tag layout".to_owned(),
+                        )
+                    })?;
+                    let compact_ty = scalar_ty_r1(&tag)?;
+                    let compact = self.load_memory_scalar(address, compact_ty);
+                    return if compact_ty == Type::I32 {
+                        Ok(compact)
+                    } else {
+                        Ok(self
+                            .fb
+                            .insert_inst(Zext::new(self.inst_set(), compact, Type::I32), Type::I32))
+                    };
+                }
+                if let RuntimeClass::Ref { pointee, .. } = &dst_class
+                    && self
+                        .module
+                        .memory_lowerable_ref_layout(&dst_class)
+                        .is_some()
+                {
+                    let Some((address, projected)) = self.raw_memory_aggregate_place(place)? else {
+                        return Err(LowerError::Unsupported(format!(
+                            "wasm target: aggregate borrow requires a memory-backed place: {place:?}"
+                        )));
+                    };
+                    if !projected.shares_runtime_rep_with(self.module.db, pointee) {
+                        return Err(LowerError::Unsupported(
+                            "wasm target: projected aggregate borrow has an incompatible pointee"
+                                .to_owned(),
+                        ));
+                    }
+                    return Ok(address);
+                }
+                self.lower_place_read(place)
+            }
             // Change 2: allocate a function-local aggregate in the wasm canonical
             // arena. The value produced is the aligned i32 linear-memory pointer.
             RExpr::AllocObject { layout } => self.lower_alloc_object(*layout),
@@ -8639,7 +8853,11 @@ where
                     self.module.memory_lowerable_ref_layout(class).is_some()
                 }) =>
             {
-                (value, class, false)
+                // Object and memory-provider refs matched above. The remaining
+                // admitted class is a read-only const borrow inside the private
+                // scoped call graph, so checked indexing through its arena
+                // pointer is sound while stores remain forbidden.
+                (value, class, true)
             }
             mir::ResolvedPlaceRootKind::Slot { local, class }
                 if self.materialized_param_slots.contains(&local) =>
@@ -8826,6 +9044,23 @@ where
                             ..
                         } if matches!(pointee.as_ref(), RuntimeClass::AggregateValue { .. })
                     )
+                }) =>
+            {
+                (value, class, true)
+            }
+            // A private read-only aggregate borrow retains one canonical-arena
+            // pointer instead of flattening potentially thousands of leaves.
+            // Dynamic reads are bounds checked below; write lowering does not
+            // admit `RefKind::Const` destinations.
+            mir::ResolvedPlaceRootKind::Ref { value, class }
+                if matches!(
+                    self.body.value_class(value),
+                    Some(RuntimeClass::Ref {
+                        kind: RefKind::Const,
+                        ..
+                    })
+                ) && self.body.value_class(value).is_some_and(|class| {
+                    self.module.memory_lowerable_ref_layout(class).is_some()
                 }) =>
             {
                 (value, class, true)
@@ -9895,7 +10130,14 @@ where
                     }
                     has_definition = true;
                     match expr {
-                        RExpr::AddrOf { .. } => {}
+                        RExpr::AddrOf { .. } | RExpr::Load { .. }
+                            if matches!(
+                                body.value_class(local),
+                                Some(RuntimeClass::Ref {
+                                    kind: RefKind::Object | RefKind::Const,
+                                    ..
+                                })
+                            ) => {}
                         RExpr::Use(source) | RExpr::RetagRef { value: source }
                             if visit(body, *source, visiting) => {}
                         _ => return false,
@@ -10505,6 +10747,118 @@ pub fn kernel(k: u32) -> u32 {
         assert!(
             !matches!(body.locals[1].carrier, RuntimeCarrier::Erased),
             "a multi-def local with an impure def must not be erased"
+        );
+    }
+
+    #[test]
+    fn fresh_materialize_whole_load_folds_to_original_aggregate_value() {
+        let source = r#"
+pub fn kernel(k: u32) -> u32 {
+    let a: [u32; 2] = [k, k]
+    a[0]
+}
+"#;
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///fresh_materialize_load_fold.fe").unwrap();
+        db.workspace()
+            .touch(&mut db, url.clone(), Some(source.to_string()));
+        let file = db.workspace().get(&db, &url).unwrap();
+        let top_mod = db.top_mod(file);
+        let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+        assert!(diagnostics.is_empty(), "diags:\n{diagnostics}");
+        let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "kernel").unwrap();
+        let real = package.functions(&db)[0].instance(&db).body(&db);
+        let array_local = real
+            .locals
+            .iter()
+            .find(|local| {
+                local
+                    .carrier
+                    .value_class()
+                    .and_then(RuntimeClass::aggregate_layout)
+                    .is_some_and(|layout| matches!(layout.data(&db), Layout::Array(_)))
+            })
+            .expect("kernel should expose its array layout")
+            .clone();
+        let layout = array_local
+            .carrier
+            .value_class()
+            .and_then(RuntimeClass::aggregate_layout)
+            .unwrap();
+        let aggregate = RuntimeClass::AggregateValue { layout };
+
+        let mut body = real.clone();
+        body.provider_bindings.clear();
+        body.signature.params.clear();
+        body.locals = vec![
+            RLocal {
+                semantic_ty: array_local.semantic_ty,
+                carrier: RuntimeCarrier::Value(aggregate.clone()),
+                root: RuntimeLocalRoot::None,
+            },
+            RLocal {
+                semantic_ty: array_local.semantic_ty,
+                carrier: RuntimeCarrier::Value(RuntimeClass::object_ref(layout)),
+                root: RuntimeLocalRoot::None,
+            },
+            RLocal {
+                semantic_ty: array_local.semantic_ty,
+                carrier: RuntimeCarrier::Value(aggregate.clone()),
+                root: RuntimeLocalRoot::None,
+            },
+        ];
+        let value = RLocalId::from_u32(0);
+        let object = RLocalId::from_u32(1);
+        let loaded = RLocalId::from_u32(2);
+        body.blocks.truncate(1);
+        body.blocks[0].stmts = vec![
+            RStmt::Assign {
+                dst: value,
+                expr: RExpr::Placeholder {
+                    class: aggregate.clone(),
+                },
+            },
+            RStmt::Assign {
+                dst: object,
+                expr: RExpr::MaterializeToObject { src: value },
+            },
+            RStmt::Assign {
+                dst: loaded,
+                expr: RExpr::Load {
+                    place: RuntimePlace {
+                        root: PlaceRoot::Ref(object),
+                        path: Box::default(),
+                    },
+                },
+            },
+        ];
+        body.blocks[0].terminator = RTerminator::Return(Some(loaded));
+
+        fold_fresh_materialize_load_roundtrips(&db, &mut body);
+
+        assert!(
+            body.blocks[0].stmts.iter().all(|stmt| !matches!(
+                stmt,
+                RStmt::Assign {
+                    expr: RExpr::MaterializeToObject { .. } | RExpr::Load { .. },
+                    ..
+                }
+            )),
+            "the fresh materialize/load round trip should disappear: {body:#?}"
+        );
+        assert!(
+            body.blocks[0].stmts.iter().any(|stmt| matches!(
+                stmt,
+                RStmt::Assign {
+                    dst,
+                    expr: RExpr::Use(src),
+                } if *dst == loaded && *src == value
+            )),
+            "the loaded value should forward the original aggregate: {body:#?}"
+        );
+        assert!(
+            matches!(body.locals[1].carrier, RuntimeCarrier::Erased),
+            "the unobserved compiler materialization local should be erased"
         );
     }
 }

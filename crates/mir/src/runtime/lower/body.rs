@@ -5042,8 +5042,15 @@ impl<'db> RmirEmitter<'db> {
                     None => format!("missing root {root:?}"),
                 },
             };
+            let semantic = self.key.semantic(self.db);
             panic!(
-                "cannot lower erased place root: place={place:?}; root_info={root_info}; locals={:?}",
+                "cannot lower erased place root: instance={}; runtime_params={:?}; param_plans={:?}; place={place:?}; root_info={root_info}; semantic_locals={:?}; locals={:?}",
+                semantic.map(|semantic| {
+                    crate::runtime::stable_key::semantic_instance_symbol_identity(self.db, semantic)
+                }).unwrap_or_else(|| "<non-semantic>".to_string()),
+                self.key.params(self.db),
+                semantic.map(|semantic| crate::runtime::lower::interface::runtime_param_plans(self.db, semantic)),
+                self.semantic_body.locals,
                 self.locals,
             )
         })
@@ -5265,7 +5272,19 @@ impl<'db> RmirEmitter<'db> {
             .semantic(self.db)
             .expect("runtime const reification requires a semantic instance");
         reify_runtime_const_for_ty(self.db, semantic, expected_ty, value).unwrap_or_else(|| {
-            panic!("semantic const should reify for runtime lowering: {value:?}")
+            let data = value.value(self.db);
+            let type_level = match &data {
+                SemConstValue::TypeLevel { ty, const_ty } => Some((
+                    ty.pretty_print(self.db).to_string(),
+                    const_ty.pretty_print(self.db).to_string(),
+                )),
+                _ => None,
+            };
+            panic!(
+                "semantic const should reify for runtime lowering: value={value:?}, data={data:?}, type_level={type_level:?}, expected_ty={}, instance={}",
+                expected_ty.pretty_print(self.db),
+                crate::runtime::stable_key::semantic_instance_symbol_identity(self.db, semantic),
+            )
         })
     }
 

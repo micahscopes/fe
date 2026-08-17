@@ -99,9 +99,18 @@ where
             RuntimeParamPlan::PassActual => {
                 SelectedRuntimeValueArg::use_value(source, semantic_ty, self.source_class(source))
             }
-            RuntimeParamPlan::ReadOnlyView { value, borrow } => {
+            RuntimeParamPlan::ReadOnlyView {
+                value,
+                borrow,
+                requires_addressable,
+            } => {
                 let source_class = self.source_class(source);
-                let use_plan = self.select_read_only_view_use_plan(source, value, borrow);
+                let use_plan = self.select_read_only_view_use_plan(
+                    source,
+                    value,
+                    borrow,
+                    *requires_addressable,
+                );
                 SelectedRuntimeValueArg {
                     source,
                     semantic_ty,
@@ -146,6 +155,7 @@ where
         source: RLocalId,
         value: &RuntimeClass<'db>,
         borrow: &RuntimeBoundarySpec<'db>,
+        requires_addressable: bool,
     ) -> RuntimeValueUsePlan<'db> {
         let source_class = self.source_class(source);
         let mut value_source = self.cx.runtime_value_source(source).unwrap_or_else(|| {
@@ -157,6 +167,9 @@ where
         if BoundaryMatcher::class_satisfies_boundary(&source_class, borrow) {
             return RuntimeValueUsePlan::UseValue;
         }
+        if &source_class == value && !requires_addressable {
+            return RuntimeValueUsePlan::CoerceValue(value.clone());
+        }
         if let Some(address) = value_source
             .address
             .filter(|address| BoundaryMatcher::class_satisfies_boundary(&address.class, borrow))
@@ -165,9 +178,6 @@ where
                 place: address.place,
                 class: address.class,
             };
-        }
-        if &source_class == value {
-            return RuntimeValueUsePlan::CoerceValue(value.clone());
         }
         self.select_boundary_use_plan(source, borrow)
     }

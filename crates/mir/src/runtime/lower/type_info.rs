@@ -832,6 +832,23 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn view_transport_width_follows_its_target_value() {
+        let db = DriverDataBase::default();
+        let assumptions = PredicateListId::new(&db, Vec::new());
+        let viewed_word = TyId::view_of(&db, TyId::u256(&db));
+        let viewed_unit = TyId::view_of(&db, TyId::unit(&db));
+
+        assert!(
+            !runtime_zero_sized_transport_ty(&db, viewed_word, None, assumptions),
+            "a nonzero viewed value must remain runtime-visible"
+        );
+        assert!(
+            runtime_zero_sized_transport_ty(&db, viewed_unit, None, assumptions),
+            "a viewed zero-sized value may erase with its target"
+        );
+    }
+
     fn assert_memory_provider_ref(class: &RuntimeClass<'_>) {
         let RuntimeClass::Ref { kind, .. } = class else {
             panic!("expected provider ref, got {class:#?}");

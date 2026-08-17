@@ -94,6 +94,27 @@ pub fn sum() -> (u32, u32) {
 }
 "#;
 
+const ZERO_LENGTH_GENERIC_FOLD_SOURCE: &str = r#"
+trait Fold {
+    fn fold(self) -> u32
+}
+
+impl<const N: usize> Fold for [u32; N] {
+    fn fold(self) -> u32 {
+        if N == 0 { return 0 }
+        let mut total: u32 = 0
+        let mut index: usize = 0
+        while index < N {
+            total = total + self[index]
+            index = index + 1
+        }
+        total
+    }
+}
+
+pub fn empty_fold() -> u32 { [0; 0].fold() }
+"#;
+
 fn compile(source: &str, name: &str) -> Vec<u8> {
     let mut db = DriverDataBase::default();
     let url = Url::parse(&format!("file:///{name}.fe")).unwrap();
@@ -180,6 +201,22 @@ fn borrowed_dynamic_aggregate_array_element_passes_all_lanes_to_value_parameter(
         .get_typed_func::<(), (i32, i32)>(&mut store, "sum")
         .expect("sum export");
     assert_eq!(sum.call(&mut store, ()).unwrap(), (23, 33));
+}
+
+#[test]
+fn zero_length_generic_array_keeps_shape_without_transport_lanes() {
+    let bytes = compile(
+        ZERO_LENGTH_GENERIC_FOLD_SOURCE,
+        "wasm_zero_length_generic_array_fold",
+    );
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, bytes).unwrap();
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+    let fold = instance
+        .get_typed_func::<(), i32>(&mut store, "empty_fold")
+        .expect("empty_fold export");
+    assert_eq!(fold.call(&mut store, ()).unwrap(), 0);
 }
 
 fn assert_pick_executes_and_traps(bytes: Vec<u8>) {

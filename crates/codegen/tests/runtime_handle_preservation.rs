@@ -889,6 +889,345 @@ fn entry() -> u256 {
 }
 
 #[test]
+fn read_only_copy_receiver_with_dynamic_index_keeps_projectable_storage() {
+    with_runtime_package!(
+        "read_only_copy_receiver_with_dynamic_index_keeps_projectable_storage.fe",
+        r#"struct Words { values: [u32; 4] }
+
+impl Copy for Words {}
+
+impl Words {
+    fn get(self, index: usize) -> u32 {
+        self.values[index]
+    }
+}
+
+fn entry() -> u32 {
+    Words { values: [3, 5, 7, 11] }.get(2)
+}
+"#,
+        |db, package| {
+            let body = runtime_body_for_symbol(&db, package, "get");
+            let receiver = body.signature.params[0].local;
+
+            assert!(
+                matches!(
+                    body.locals[receiver.as_u32() as usize].root,
+                    RuntimeLocalRoot::Slot(_) | RuntimeLocalRoot::Ref(_)
+                ),
+                "a dynamic receiver projection requires target-layout storage:\n{body:#?}"
+            );
+            assert!(
+                runtime_body_stmts(&body).any(|stmt| {
+                    matches!(
+                        stmt,
+                        RStmt::Assign {
+                            expr: RExpr::Load { place },
+                            ..
+                        } if matches!(place.root, PlaceRoot::Slot(root) | PlaceRoot::Ref(root) if root == receiver)
+                            && matches!(place.path.as_ref(), [PlaceElem::Field(field), PlaceElem::Index(_)] if field.0 == 0)
+                    )
+                }),
+                "the dynamic projection should read from the receiver's runtime root:\n{body:#?}"
+            );
+        }
+    );
+}
+
+#[test]
+fn read_only_copy_record_without_arrays_keeps_value_boundary() {
+    with_runtime_package!(
+        "read_only_copy_record_without_arrays_keeps_value_boundary.fe",
+        r#"struct Pair {
+    left: u32,
+    right: u32,
+}
+
+impl Copy for Pair {}
+
+impl Pair {
+    fn sum(self) -> u32 {
+        self.left + self.right
+    }
+}
+
+fn entry() -> u32 {
+    Pair { left: 3, right: 5 }.sum()
+}
+"#,
+        |db, package| {
+            let body = runtime_body_for_symbol(&db, package, "sum");
+            let receiver = body.signature.params[0].local;
+
+            assert!(
+                matches!(
+                    body.signature.params[0].class,
+                    RuntimeClass::AggregateValue { .. }
+                ),
+                "a scalar-only read view should retain the compact aggregate value boundary:\n{body:#?}"
+            );
+            assert!(
+                matches!(
+                    body.locals[receiver.as_u32() as usize].root,
+                    RuntimeLocalRoot::None
+                ),
+                "a scalar-only read view should not acquire addressable storage:\n{body:#?}"
+            );
+            assert!(
+                body_extracts_param_fields(&body, receiver, &[0, 1]),
+                "scalar-only record fields should extract from the value parameter:\n{body:#?}"
+            );
+            assert!(
+                !body_has_object_materialization(&body),
+                "a scalar-only read view should not materialize an object:\n{body:#?}"
+            );
+        }
+    );
+}
+
+#[test]
+fn const_generic_array_trait_receiver_with_dynamic_index_keeps_projectable_storage() {
+    with_runtime_package!(
+        "const_generic_array_trait_receiver_with_dynamic_index_keeps_projectable_storage.fe",
+        r#"trait Pick {
+    fn get(self, index: usize) -> u32
+}
+
+impl<const N: usize> Pick for [u32; N] {
+    fn get(self, index: usize) -> u32 {
+        self[index]
+    }
+}
+
+fn entry() -> u32 {
+    [3, 5, 7, 11].get(2)
+}
+"#,
+        |db, package| {
+            let body = runtime_body_for_symbol(&db, package, "get");
+            let receiver = body.signature.params[0].local;
+
+            assert!(
+                matches!(
+                    body.locals[receiver.as_u32() as usize].root,
+                    RuntimeLocalRoot::Slot(_) | RuntimeLocalRoot::Ref(_)
+                ),
+                "a const-generic dynamic array projection requires runtime storage:\n{body:#?}"
+            );
+            assert!(
+                runtime_body_stmts(&body).any(|stmt| {
+                    matches!(
+                        stmt,
+                        RStmt::Assign {
+                            expr: RExpr::Load { place },
+                            ..
+                        } if matches!(place.root, PlaceRoot::Slot(root) | PlaceRoot::Ref(root) if root == receiver)
+                            && matches!(place.path.as_ref(), [PlaceElem::Index(_)])
+                    )
+                }),
+                "the generic dynamic projection should read from the receiver root:\n{body:#?}"
+            );
+        }
+    );
+}
+
+#[test]
+fn const_generic_record_array_receiver_with_dynamic_index_keeps_projectable_storage() {
+    with_runtime_package!(
+        "const_generic_record_array_receiver_with_dynamic_index_keeps_projectable_storage.fe",
+        r#"struct Word { value: u32 }
+impl Copy for Word {}
+
+trait Pick {
+    fn get(self, index: usize) -> Word
+}
+
+impl<const N: usize> Pick for [Word; N] {
+    fn get(self, index: usize) -> Word {
+        self[index]
+    }
+}
+
+fn entry() -> u32 {
+    [Word { value: 3 }, Word { value: 5 }, Word { value: 7 }].get(2).value
+}
+"#,
+        |db, package| {
+            let body = runtime_body_for_symbol(&db, package, "get");
+            let receiver = body.signature.params[0].local;
+
+            assert!(
+                matches!(
+                    body.locals[receiver.as_u32() as usize].root,
+                    RuntimeLocalRoot::Slot(_) | RuntimeLocalRoot::Ref(_)
+                ),
+                "a dynamic aggregate-element projection requires runtime storage:\n{body:#?}"
+            );
+            assert!(
+                runtime_body_stmts(&body).any(|stmt| {
+                    matches!(
+                        stmt,
+                        RStmt::Assign {
+                            expr: RExpr::Load { place },
+                            ..
+                        } if matches!(place.root, PlaceRoot::Slot(root) | PlaceRoot::Ref(root) if root == receiver)
+                            && matches!(place.path.as_ref(), [PlaceElem::Index(_)])
+                    )
+                }),
+                "the aggregate-element projection should read from the receiver root:\n{body:#?}"
+            );
+        }
+    );
+}
+
+#[test]
+fn generic_record_array_fold_keeps_dynamic_receiver_storage() {
+    with_runtime_package!(
+        "generic_record_array_fold_keeps_dynamic_receiver_storage.fe",
+        r#"struct Writer { total: u32 }
+impl Copy for Writer {}
+
+struct Word { value: u32 }
+impl Copy for Word {}
+
+trait Encode {
+    fn encode(self, writer: Writer) -> Writer
+}
+
+impl Encode for Word {
+    fn encode(self, writer: Writer) -> Writer {
+        Writer { total: writer.total + self.value }
+    }
+}
+
+impl<T: Encode + Copy, const N: usize> Encode for [T; N] {
+    fn encode(self, writer: Writer) -> Writer {
+        let mut output = writer
+        let mut index: usize = 0
+        while index < N {
+            output = self[index].encode(output)
+            index = index + 1
+        }
+        output
+    }
+}
+
+fn entry() -> u32 {
+    [Word { value: 3 }, Word { value: 5 }, Word { value: 7 }]
+        .encode(Writer { total: 0 })
+        .total
+}
+"#,
+        |db, package| {
+            let body = package
+                .functions(&db)
+                .iter()
+                .copied()
+                .filter(|function| function.symbol(&db).contains("encode"))
+                .map(|function| function.instance(&db).body(&db))
+                .find(|body| {
+                    body.locals.first().is_some_and(|local| {
+                        local
+                            .semantic_ty
+                            .pretty_print(&db)
+                            .to_string()
+                            .starts_with('[')
+                    })
+                })
+                .expect("generic array encode runtime body");
+            let receiver = RLocalId::from_u32(0);
+
+            assert!(
+                matches!(
+                    body.signature.params[0].class,
+                    RuntimeClass::Ref {
+                        kind: RefKind::Object | RefKind::Const,
+                        ..
+                    }
+                ),
+                "a generic read-only view must cross the private runtime boundary as one borrowed aggregate, not a flattened value product:\n{body:#?}"
+            );
+            assert!(
+                matches!(
+                    body.locals[receiver.as_u32() as usize].root,
+                    RuntimeLocalRoot::Slot(_) | RuntimeLocalRoot::Ref(_)
+                ),
+                "a generic dynamic fold requires receiver storage:\n{body:#?}"
+            );
+            assert!(
+                runtime_body_stmts(&body).any(|stmt| {
+                    matches!(
+                        stmt,
+                        RStmt::Assign {
+                            expr: RExpr::Load { place },
+                            ..
+                        } if matches!(place.root, PlaceRoot::Slot(root) | PlaceRoot::Ref(root) if root == receiver)
+                            && matches!(place.path.as_ref(), [PlaceElem::Index(_)])
+                    )
+                }),
+                "the generic fold should read its selected element through the receiver root:\n{body:#?}"
+            );
+        }
+    );
+}
+
+#[test]
+fn zero_length_const_generic_receiver_keeps_projectable_shape() {
+    with_runtime_package!(
+        "zero_length_const_generic_receiver_keeps_projectable_shape.fe",
+        r#"trait Fold {
+    fn fold(self) -> u32
+}
+
+impl<const N: usize> Fold for [u32; N] {
+    fn fold(self) -> u32 {
+        if N == 0 { return 0 }
+        let mut total: u32 = 0
+        let mut index: usize = 0
+        while index < N {
+            total = total + self[index]
+            index = index + 1
+        }
+        total
+    }
+}
+
+fn entry() -> u32 { [0; 0].fold() }
+"#,
+        |db, package| {
+            let body = runtime_body_for_symbol(&db, package, "fold");
+            let receiver = body.signature.params[0].local;
+
+            assert_eq!(
+                body.signature.params[0].class.span_words(&db),
+                0,
+                "the empty array should add no runtime transport words"
+            );
+            assert!(
+                matches!(
+                    body.locals[receiver.as_u32() as usize].root,
+                    RuntimeLocalRoot::Slot(_)
+                ),
+                "a dynamic projection still requires an addressable zero-sized slot:\n{body:#?}"
+            );
+            assert!(
+                runtime_body_stmts(&body).any(|stmt| {
+                    matches!(
+                        stmt,
+                        RStmt::Assign {
+                            expr: RExpr::Load { place },
+                            ..
+                        } if matches!(place.root, PlaceRoot::Slot(root) if root == receiver)
+                            && matches!(place.path.as_ref(), [PlaceElem::Index(_)])
+                    )
+                }),
+                "the generic body should retain its checked dynamic projection:\n{body:#?}"
+            );
+        }
+    );
+}
+
+#[test]
 fn immutable_own_tuple_destructuring_field_reads_stay_unrooted() {
     with_runtime_package!(
         "immutable_own_tuple_destructuring_field_reads_stay_unrooted.fe",
@@ -2199,9 +2538,11 @@ fn use_returned_array() -> u256 {
                 body.contains("extract_value"),
                 "by-value aggregate materialization should structurally extract fields instead of whole-object obj.store:\n{body}"
             );
+            let extracted_leaves = body.matches("extract_value").count();
+            let stored_leaves = body.matches("obj.store").count();
             assert!(
-                body.contains("obj.load"),
-                "object-backed aggregate copies should load leaf values from the source object before storing them:\n{body}"
+                extracted_leaves >= 3 && stored_leaves >= 3,
+                "object-backed aggregate copies should extract and store every array leaf, whether the exact fresh materialize/load identity was folded or retained:\n{body}"
             );
         }
     );
@@ -2242,9 +2583,17 @@ fn exercise() {
                 OptLevel::O0,
             )
             .expect("Sonatina IR");
+            let body = sonatina_function_body(&output, "build");
+            let constructs_a = body
+                .lines()
+                .any(|line| line.contains("enum.make") && line.contains("#A"));
+            let constructs_b = body
+                .lines()
+                .any(|line| line.contains("enum.make") && line.contains("#B"));
+            let preserves_tag = body.contains("enum.set_tag") || body.contains("insert_value");
             assert!(
-                output.contains("enum.set_tag"),
-                "fieldless enum object copies should set the destination enum tag explicitly:\n{output}"
+                constructs_a && constructs_b && preserves_tag,
+                "fieldless enum variants should remain explicit through either object-tag or by-value aggregate lowering:\n{body}"
             );
         }
     );
