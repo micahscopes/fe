@@ -202,6 +202,9 @@ pub enum RuntimeControlEffectFuncKind {
 pub enum RuntimeActorEffectFuncKind {
     SendBegin,
     AskBegin,
+    ChildSpawnBegin,
+    ChildFailureBegin,
+    ChildClose,
 }
 
 #[salsa::tracked]
@@ -217,6 +220,15 @@ pub fn runtime_actor_effect_func_kind<'db>(
         }
         (IngotKind::Std, ["runtime", "raw", "ask_begin"]) => {
             Some(RuntimeActorEffectFuncKind::AskBegin)
+        }
+        (IngotKind::Std, ["runtime", "raw", "spawn_begin"]) => {
+            Some(RuntimeActorEffectFuncKind::ChildSpawnBegin)
+        }
+        (IngotKind::Std, ["runtime", "raw", "failure_begin"]) => {
+            Some(RuntimeActorEffectFuncKind::ChildFailureBegin)
+        }
+        (IngotKind::Std, ["runtime", "raw", "close"]) => {
+            Some(RuntimeActorEffectFuncKind::ChildClose)
         }
         _ => None,
     }

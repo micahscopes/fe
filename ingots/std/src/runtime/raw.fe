@@ -19,5 +19,5 @@ extern {
     pub unsafe fn failure_begin<C>(
         _ epoch: u32,
     ) -> Pending<WasmBackend, ChildRuntimeFailure<C>>
-    pub unsafe fn close(_ epoch: u32)
+    pub unsafe fn close<C>(_ epoch: u32)
 }

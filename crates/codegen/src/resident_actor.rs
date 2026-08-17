@@ -51,12 +51,12 @@ pub struct ResidentActorArtifact {
     pub contract: ResidentActorContract,
     pub wasm: Vec<u8>,
     pub scoped_tasks: Vec<WasmTaskAdapter>,
-    /// A separately compiled canonical actor selected by the nominal child
-    /// type consumed by this resident actor's Fe supervision task. The browser
-    /// receives no source function name, URL, or child identifier from the
-    /// application. Build tooling publishes this typed artifact beside the
-    /// parent continuation package.
-    pub structured_child: Option<StructuredChildActorArtifact>,
+    /// Separately compiled canonical actors selected by the nominal child
+    /// types consumed by this resident actor's Fe supervision tasks. The
+    /// browser receives no source function name, route selector, or authored
+    /// child identifier. Build tooling publishes these typed artifacts beside
+    /// the parent continuation package.
+    pub structured_children: Vec<StructuredChildActorArtifact>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +64,20 @@ pub struct StructuredChildActorArtifact {
     pub actor: String,
     pub wasm: Vec<u8>,
     pub interface: CanonicalInterfaceManifest,
+    pub scope: StructuredChildScopeImports,
+}
+
+/// Compiler-derived host import identities for one nominal child type.
+///
+/// `key` is an opaque package identity derived from the Fe semantic type. It
+/// is never authored, serialized as application data, or interpreted by the
+/// fixed browser runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructuredChildScopeImports {
+    pub key: String,
+    pub spawn: String,
+    pub failure: String,
+    pub close: String,
 }
 
 #[derive(Debug)]
@@ -130,70 +144,153 @@ pub(crate) fn behavior_is_scoped_task(
         .any(|attrs| attrs.is_actor_scoped_task(db))
 }
 
-fn worker_scope_child_ty<'db>(
+#[derive(Debug, Clone)]
+struct WorkerScopeChild<'db> {
+    ty: TyId<'db>,
+    scope: StructuredChildScopeImports,
+    has_spawn: bool,
+    has_failure: bool,
+    has_close: bool,
+}
+
+fn worker_scope_children<'db>(
     db: &'db DriverDataBase,
     package: mir::RuntimePackage<'db>,
-) -> Result<Option<TyId<'db>>, ResidentActorError> {
-    let mut spawned = Vec::new();
-    let mut observed = Vec::new();
-    let mut has_close = false;
+) -> Result<Vec<WorkerScopeChild<'db>>, ResidentActorError> {
+    let mut children = Vec::<WorkerScopeChild<'db>>::new();
     for function in package.functions(db) {
         let instance = function.instance(db);
         if mir::host_import_module(db, instance).as_deref() != Some("fe:worker-scope") {
             continue;
         }
-        let name = mir::host_import_name(db, instance).ok_or_else(|| {
+        let kind = mir::runtime_actor_effect_kind(db, instance).ok_or_else(|| {
             ResidentActorError::Contract(
-                "structured-child host import has no nominal operation name".to_owned(),
+                "structured-child host import is not a nominal standard-library operation"
+                    .to_owned(),
             )
         })?;
-        match name.as_str() {
-            "spawn_begin" | "failure_begin" => {
-                let semantic = instance.key(db).semantic(db).ok_or_else(|| {
-                    ResidentActorError::Contract(format!(
-                        "structured-child operation `{name}` is not a semantic Fe import"
-                    ))
-                })?;
-                let args = semantic.key(db).subst(db).generic_args(db);
-                let [child] = args.as_slice() else {
-                    return Err(ResidentActorError::Contract(format!(
-                        "structured-child operation `{name}` must retain exactly one nominal child type; found {} generic arguments",
-                        args.len()
-                    )));
-                };
-                let destinations = if name == "spawn_begin" {
-                    &mut spawned
-                } else {
-                    &mut observed
-                };
-                if !destinations.contains(child) {
-                    destinations.push(*child);
-                }
-            }
-            "close" => has_close = true,
-            other => {
+        if !matches!(
+            kind,
+            mir::RuntimeActorEffectFuncKind::ChildSpawnBegin
+                | mir::RuntimeActorEffectFuncKind::ChildFailureBegin
+                | mir::RuntimeActorEffectFuncKind::ChildClose
+        ) {
+            return Err(ResidentActorError::Contract(
+                "non-scope actor operation resolved in the structured-child host namespace"
+                    .to_owned(),
+            ));
+        }
+        let semantic = instance.key(db).semantic(db).ok_or_else(|| {
+            ResidentActorError::Contract(
+                "structured-child operation is not a semantic Fe import".to_owned(),
+            )
+        })?;
+        let args = semantic.key(db).subst(db).generic_args(db);
+        let [child] = args.as_slice() else {
+            return Err(ResidentActorError::Contract(format!(
+                "structured-child operation must retain exactly one nominal child type; found {} generic arguments",
+                args.len()
+            )));
+        };
+        let spawn = mir::actor_scope_import_name(
+            db,
+            mir::RuntimeActorEffectFuncKind::ChildSpawnBegin,
+            *child,
+        )
+        .ok_or_else(|| {
+            ResidentActorError::Contract(
+                "compiler rejected the nominal child spawn operation".to_owned(),
+            )
+        })?;
+        let failure = mir::actor_scope_import_name(
+            db,
+            mir::RuntimeActorEffectFuncKind::ChildFailureBegin,
+            *child,
+        )
+        .ok_or_else(|| {
+            ResidentActorError::Contract(
+                "compiler rejected the nominal child failure operation".to_owned(),
+            )
+        })?;
+        let close =
+            mir::actor_scope_import_name(db, mir::RuntimeActorEffectFuncKind::ChildClose, *child)
+                .ok_or_else(|| {
+                ResidentActorError::Contract(
+                    "compiler rejected the nominal child close operation".to_owned(),
+                )
+            })?;
+        let key = spawn
+            .strip_prefix("spawn_")
+            .ok_or_else(|| {
+                ResidentActorError::Contract(
+                    "compiler-derived structured-child spawn identity is malformed".to_owned(),
+                )
+            })?
+            .to_owned();
+        let actual = mir::host_import_name(db, instance).ok_or_else(|| {
+            ResidentActorError::Contract(
+                "structured-child host import has no compiler-derived operation name".to_owned(),
+            )
+        })?;
+        let expected = match kind {
+            mir::RuntimeActorEffectFuncKind::ChildSpawnBegin => &spawn,
+            mir::RuntimeActorEffectFuncKind::ChildFailureBegin => &failure,
+            mir::RuntimeActorEffectFuncKind::ChildClose => &close,
+            mir::RuntimeActorEffectFuncKind::SendBegin
+            | mir::RuntimeActorEffectFuncKind::AskBegin => unreachable!(),
+        };
+        if actual != *expected {
+            return Err(ResidentActorError::Contract(format!(
+                "structured-child import `{actual}` differs from its semantic identity `{expected}`"
+            )));
+        }
+        let index = children
+            .iter()
+            .position(|candidate| candidate.ty == *child)
+            .unwrap_or_else(|| {
+                children.push(WorkerScopeChild {
+                    ty: *child,
+                    scope: StructuredChildScopeImports {
+                        key,
+                        spawn,
+                        failure,
+                        close,
+                    },
+                    has_spawn: false,
+                    has_failure: false,
+                    has_close: false,
+                });
+                children.len() - 1
+            });
+        let child = &mut children[index];
+        match kind {
+            mir::RuntimeActorEffectFuncKind::ChildSpawnBegin => child.has_spawn = true,
+            mir::RuntimeActorEffectFuncKind::ChildFailureBegin => child.has_failure = true,
+            mir::RuntimeActorEffectFuncKind::ChildClose => child.has_close = true,
+            mir::RuntimeActorEffectFuncKind::SendBegin
+            | mir::RuntimeActorEffectFuncKind::AskBegin => unreachable!(),
+        }
+    }
+    for child in &children {
+        if !child.has_spawn || !child.has_failure || !child.has_close {
+            return Err(ResidentActorError::Contract(format!(
+                "structured-child scope `{}` must import matching typed spawn, failure, and close operations",
+                child.ty.pretty_print(db),
+            )));
+        }
+    }
+    children.sort_by(|left, right| left.scope.key.cmp(&right.scope.key));
+    let mut imports = std::collections::BTreeSet::new();
+    for child in &children {
+        for import in [&child.scope.spawn, &child.scope.failure, &child.scope.close] {
+            if !imports.insert(import.clone()) {
                 return Err(ResidentActorError::Contract(format!(
-                    "unknown structured-child host operation `{other}`"
+                    "compiler-derived structured-child import collision at `{import}`"
                 )));
             }
         }
     }
-    if spawned.is_empty() && observed.is_empty() && !has_close {
-        return Ok(None);
-    }
-    if !has_close || spawned != observed {
-        return Err(ResidentActorError::Contract(
-            "structured-child scope must import matching typed spawn/failure operations and close"
-                .to_owned(),
-        ));
-    }
-    let [child] = spawned.as_slice() else {
-        return Err(ResidentActorError::Contract(format!(
-            "one resident Wasm instance currently admits exactly one nominal structured child; found {}",
-            spawned.len()
-        )));
-    };
-    Ok(Some(*child))
+    Ok(children)
 }
 
 fn actor_for_nominal_ty<'a, 'db>(
@@ -239,7 +336,7 @@ fn validate_actor_mailbox_requests(
     package: mir::RuntimePackage<'_>,
 ) -> Result<(), ResidentActorError> {
     let actors = semantic_actors(db, top_mod);
-    let supervised_child = worker_scope_child_ty(db, package)?;
+    let supervised_children = worker_scope_children(db, package)?;
     for function in package.functions(db) {
         let instance = function.instance(db);
         if mir::runtime_actor_effect_kind(db, instance)
@@ -247,11 +344,11 @@ fn validate_actor_mailbox_requests(
         {
             continue;
         }
-        let Some(expected_child) = supervised_child else {
+        if supervised_children.is_empty() {
             return Err(ResidentActorError::Contract(
                 "typed child mailbox requires an owning structured-child scope".to_owned(),
             ));
-        };
+        }
         if mir::host_import_module(db, instance).as_deref() != Some("fe:worker-mailbox") {
             return Err(ResidentActorError::Contract(
                 "typed child mailbox resolved outside its nominal host namespace".to_owned(),
@@ -270,12 +367,14 @@ fn validate_actor_mailbox_requests(
             )));
         };
         let child = child.as_view(db).unwrap_or(*child);
-        let expected_child = expected_child.as_view(db).unwrap_or(expected_child);
-        if child != expected_child {
+        let expected_child = supervised_children.iter().find(|candidate| {
+            let candidate = candidate.ty.as_view(db).unwrap_or(candidate.ty);
+            child == candidate
+        });
+        if expected_child.is_none() {
             return Err(ResidentActorError::Contract(format!(
-                "typed mailbox child `{}` differs from supervised child `{}`",
+                "typed mailbox child `{}` has no matching structured-child scope",
                 child.pretty_print(db),
-                expected_child.pretty_print(db),
             )));
         }
         let request = request.as_view(db).unwrap_or(*request);
@@ -381,121 +480,128 @@ fn wasm_imports(wasm: &[u8]) -> Result<Vec<String>, ResidentActorError> {
     Ok(imports)
 }
 
-fn compile_structured_child(
+fn compile_structured_children(
     db: &DriverDataBase,
     top_mod: TopLevelMod<'_>,
     parent_package: mir::RuntimePackage<'_>,
     optimize: bool,
-) -> Result<Option<StructuredChildActorArtifact>, ResidentActorError> {
-    let Some(child_ty) = worker_scope_child_ty(db, parent_package)? else {
-        return Ok(None);
-    };
+) -> Result<Vec<StructuredChildActorArtifact>, ResidentActorError> {
+    let children = worker_scope_children(db, parent_package)?;
     let actors = semantic_actors(db, top_mod);
-    let actor = actor_for_nominal_ty(db, &actors, child_ty).ok_or_else(|| {
-        ResidentActorError::Contract(format!(
-            "structured-child type `{}` is not the state type of an actor in this module",
-            child_ty.pretty_print(db)
-        ))
-    })?;
-    let actor_name = actor
-        .state
-        .name(db)
-        .to_opt()
-        .map(|name| name.data(db).to_owned())
-        .ok_or_else(|| {
-            ResidentActorError::Contract("structured child actor has no resolvable name".to_owned())
+    let mut artifacts = Vec::with_capacity(children.len());
+    for child in children {
+        let child_ty = child.ty;
+        let actor = actor_for_nominal_ty(db, &actors, child_ty).ok_or_else(|| {
+            ResidentActorError::Contract(format!(
+                "structured-child type `{}` is not the state type of an actor in this module",
+                child_ty.pretty_print(db)
+            ))
         })?;
-    let mut declarations = Vec::new();
-    let mut entries = Vec::new();
-    for behavior in &actor.behaviors {
-        let name = behavior
+        let actor_name = actor
+            .state
             .name(db)
             .to_opt()
             .map(|name| name.data(db).to_owned())
             .ok_or_else(|| {
-                ResidentActorError::Contract(format!(
-                    "structured child actor `{actor_name}` has an unnamed behavior"
-                ))
+                ResidentActorError::Contract(
+                    "structured child actor has no resolvable name".to_owned(),
+                )
             })?;
-        let intent = canonical_lane_intent(db, *behavior)
+        let mut declarations = Vec::new();
+        let mut entries = Vec::new();
+        for behavior in &actor.behaviors {
+            let name = behavior
+                .name(db)
+                .to_opt()
+                .map(|name| name.data(db).to_owned())
+                .ok_or_else(|| {
+                    ResidentActorError::Contract(format!(
+                        "structured child actor `{actor_name}` has an unnamed behavior"
+                    ))
+                })?;
+            let intent = canonical_lane_intent(db, *behavior)
+                .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
+            if intent.placement != CanonicalPlacement::Worker {
+                continue;
+            }
+            if intent.execution != CanonicalExecution::Wasm {
+                return Err(ResidentActorError::Contract(format!(
+                    "structured child actor `{actor_name}` behavior `{name}` must execute as Wasm"
+                )));
+            }
+            let behavior_args = behavior.arg_tys(db);
+            let [request] = behavior_args.as_slice() else {
+                return Err(ResidentActorError::Contract(format!(
+                    "structured child actor `{actor_name}` behavior `{name}` must take exactly one request"
+                )));
+            };
+            let request = request
+                .skip_binder()
+                .as_view(db)
+                .unwrap_or(*request.skip_binder());
+            let response = behavior
+                .return_ty(db)
+                .as_view(db)
+                .unwrap_or(behavior.return_ty(db));
+            let lane = mir::actor_mailbox_import_name(db, child_ty, request, response);
+            let mut declaration = canonical_lane_decl_from_func(db, *behavior, &name, &lane)
+                .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
+            declaration.export = Some(format!("fe_cabi_{lane}"));
+            entries.push(name);
+            declarations.push(declaration);
+        }
+        if declarations.is_empty() {
+            return Err(ResidentActorError::Contract(format!(
+                "structured child actor `{actor_name}` has no canonical `Worker` behavior"
+            )));
+        }
+        let interface = CanonicalInterfaceManifest::build(declarations)
             .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
-        if intent.placement != CanonicalPlacement::Worker {
-            continue;
+        let package = mir::build_wasm_runtime_package_for_entries(db, top_mod, &entries)
+            .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
+        let mut options =
+            WasmCompileOptions::default().with_canonical_lanes(interface.lanes.clone());
+        for (source, lane) in entries.iter().zip(&interface.lanes) {
+            options = options.with_export_alias(source, &lane.name);
         }
-        if intent.execution != CanonicalExecution::Wasm {
-            return Err(ResidentActorError::Contract(format!(
-                "structured child actor `{actor_name}` behavior `{name}` must execute as Wasm"
-            )));
-        }
-        let behavior_args = behavior.arg_tys(db);
-        let [request] = behavior_args.as_slice() else {
-            return Err(ResidentActorError::Contract(format!(
-                "structured child actor `{actor_name}` behavior `{name}` must take exactly one request"
-            )));
+        let options = if optimize {
+            options.with_optimization()
+        } else {
+            options
         };
-        let request = request
-            .skip_binder()
-            .as_view(db)
-            .unwrap_or(*request.skip_binder());
-        let response = behavior
-            .return_ty(db)
-            .as_view(db)
-            .unwrap_or(behavior.return_ty(db));
-        let lane = mir::actor_mailbox_import_name(db, child_ty, request, response);
-        let mut declaration = canonical_lane_decl_from_func(db, *behavior, &name, &lane)
+        let wasm = compile_runtime_package_wasm_with_options(db, &package, options)
+            .map_err(ResidentActorError::Lower)?
+            .bytes;
+        verify_canonical_wasm_abi(&wasm, &interface)
             .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
-        declaration.export = Some(format!("fe_cabi_{lane}"));
-        entries.push(name);
-        declarations.push(declaration);
+        let imports = wasm_imports(&wasm)?;
+        if !imports.is_empty() {
+            return Err(ResidentActorError::Contract(format!(
+                "structured child actor `{actor_name}` is not closed over browser capabilities; generated Worker host cannot satisfy imports {}",
+                imports.join(", ")
+            )));
+        }
+        artifacts.push(StructuredChildActorArtifact {
+            actor: actor_name,
+            wasm,
+            interface,
+            scope: child.scope,
+        });
     }
-    if declarations.is_empty() {
-        return Err(ResidentActorError::Contract(format!(
-            "structured child actor `{actor_name}` has no canonical `Worker` behavior"
-        )));
-    }
-    let interface = CanonicalInterfaceManifest::build(declarations)
-        .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
-    let package = mir::build_wasm_runtime_package_for_entries(db, top_mod, &entries)
-        .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
-    let mut options = WasmCompileOptions::default().with_canonical_lanes(interface.lanes.clone());
-    for (source, lane) in entries.iter().zip(&interface.lanes) {
-        options = options.with_export_alias(source, &lane.name);
-    }
-    let options = if optimize {
-        options.with_optimization()
-    } else {
-        options
-    };
-    let wasm = compile_runtime_package_wasm_with_options(db, &package, options)
-        .map_err(ResidentActorError::Lower)?
-        .bytes;
-    verify_canonical_wasm_abi(&wasm, &interface)
-        .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
-    let imports = wasm_imports(&wasm)?;
-    if !imports.is_empty() {
-        return Err(ResidentActorError::Contract(format!(
-            "structured child actor `{actor_name}` is not closed over browser capabilities; generated Worker host cannot satisfy imports {}",
-            imports.join(", ")
-        )));
-    }
-    Ok(Some(StructuredChildActorArtifact {
-        actor: actor_name,
-        wasm,
-        interface,
-    }))
+    Ok(artifacts)
 }
 
 /// Validate and materialize the target-neutral runtime support shared by
 /// resident and render actors. The caller owns actor-role selection and the
 /// parent root set; this helper proves that the resulting package's typed
-/// mailbox edges correspond to one actual nominal child actor.
+/// mailbox edges correspond to actual nominal child actors.
 pub(crate) fn compile_scoped_task_support(
     db: &DriverDataBase,
     top_mod: TopLevelMod<'_>,
     parent_package: mir::RuntimePackage<'_>,
     expected_tasks: usize,
     optimize: bool,
-) -> Result<(Vec<WasmTaskAdapter>, Option<StructuredChildActorArtifact>), ResidentActorError> {
+) -> Result<(Vec<WasmTaskAdapter>, Vec<StructuredChildActorArtifact>), ResidentActorError> {
     validate_actor_mailbox_requests(db, top_mod, parent_package)?;
     let scoped_tasks =
         materialized_task_adapters(db, &parent_package).map_err(ResidentActorError::Lower)?;
@@ -505,8 +611,8 @@ pub(crate) fn compile_scoped_task_support(
             scoped_tasks.len(),
         )));
     }
-    let structured_child = compile_structured_child(db, top_mod, parent_package, optimize)?;
-    Ok((scoped_tasks, structured_child))
+    let structured_children = compile_structured_children(db, top_mod, parent_package, optimize)?;
+    Ok((scoped_tasks, structured_children))
 }
 
 fn scalar_layout(
@@ -998,7 +1104,7 @@ pub fn compile_resident_actor_with_optimization(
     let package = mir::build_wasm_runtime_package_for_entries(db, top_mod, &entries)
         .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
     validate_actor_sink_events(db, &package, &contract)?;
-    let (scoped_tasks, structured_child) = compile_scoped_task_support(
+    let (scoped_tasks, structured_children) = compile_scoped_task_support(
         db,
         top_mod,
         package,
@@ -1046,6 +1152,6 @@ pub fn compile_resident_actor_with_optimization(
         contract,
         wasm: artifact.bytes,
         scoped_tasks,
-        structured_child,
+        structured_children,
     }))
 }

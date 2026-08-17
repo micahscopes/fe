@@ -390,10 +390,9 @@ fn web_bundle_carries_the_declared_topology() {
     assert!(bundle.interface_js.is_none());
     assert_eq!(bundle.scoped_tasks.len(), 2);
 
-    let child = bundle
-        .structured_child
-        .as_ref()
-        .expect("typed DEC operator child");
+    let [child] = bundle.structured_children.as_slice() else {
+        panic!("expected one typed DEC operator child")
+    };
     assert_eq!(child.actor, "DecOperator");
     assert_eq!(child.interface.lanes.len(), WASM_LANES.len());
     assert!(child.interface.lanes.iter().all(|lane| {
@@ -404,16 +403,21 @@ fn web_bundle_carries_the_declared_topology() {
 
     let files = bundle.materialized_files().unwrap();
     let paths = files.iter().map(|file| file.path()).collect::<Vec<_>>();
-    for expected in [
-        "tasks/tasks.js",
-        "tasks/materialized-task.js",
-        "tasks/host-completion.js",
-        "tasks/child.wasm",
-        "tasks/interface.js",
-        "tasks/runtime/worker-host.js",
-        "tasks/runtime/actor-router.js",
-    ] {
-        assert!(paths.contains(&expected), "missing {expected}: {paths:?}");
+    let expected_paths = [
+        "tasks/tasks.js".to_owned(),
+        "tasks/materialized-task.js".to_owned(),
+        "tasks/host-completion.js".to_owned(),
+        format!("tasks/children/{}/child.wasm", child.scope.key),
+        format!("tasks/children/{}/interface.js", child.scope.key),
+        format!("tasks/children/{}/worker-host.js", child.scope.key),
+        "tasks/runtime/worker-host-core.js".to_owned(),
+        "tasks/runtime/actor-router.js".to_owned(),
+    ];
+    for expected in &expected_paths {
+        assert!(
+            paths.contains(&expected.as_str()),
+            "missing {expected}: {paths:?}"
+        );
     }
     let index = files
         .iter()

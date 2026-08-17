@@ -233,7 +233,7 @@ export function createHostCompletionBroker(options = {}) {
   const messagePortEvents = options.messagePortEvents;
   const componentEvents = options.componentEvents;
   const actorEvents = options.actorEvents;
-  const workerScope = options.workerScope;
+  const workerScopes = options.workerScopes ?? [];
   if (typeof clock !== "function" || typeof schedule !== "function"
       || typeof cancelSchedule !== "function") {
     throw new TypeError("host completion clock and scheduling hooks must be callable");
@@ -282,14 +282,35 @@ export function createHostCompletionBroker(options = {}) {
       || typeof actorEvents.send !== "function")) {
     throw new TypeError("host completion actor hooks must provide send");
   }
-  if (workerScope !== undefined && (!workerScope
-      || typeof workerScope !== "object"
-      || typeof workerScope.spawn !== "function"
-      || typeof workerScope.failure !== "function"
-      || typeof workerScope.close !== "function")) {
-    throw new TypeError(
-      "host completion Worker scope must provide spawn, failure, and close mechanics",
-    );
+  if (!Array.isArray(workerScopes)) {
+    throw new TypeError("host completion Worker scopes must be an array");
+  }
+  if (Object.hasOwn(options, "workerScope")) {
+    throw new TypeError("host completion requires typed workerScopes, not a singular Worker scope");
+  }
+  const workerScopeNames = new Set();
+  for (const capability of workerScopes) {
+    if (!capability || typeof capability !== "object" || Array.isArray(capability)
+        || Object.keys(capability).sort().join("\0") !== "close\0failure\0scope\0spawn"
+        || !capability.scope || typeof capability.scope !== "object"
+        || typeof capability.scope.spawn !== "function"
+        || typeof capability.scope.failure !== "function"
+        || typeof capability.scope.close !== "function"
+        || !/^spawn_[0-9a-f]{16}$/.test(capability.spawn)
+        || !/^failure_[0-9a-f]{16}$/.test(capability.failure)
+        || !/^close_[0-9a-f]{16}$/.test(capability.close)
+        || capability.spawn.slice(6) !== capability.failure.slice(8)
+        || capability.spawn.slice(6) !== capability.close.slice(6)) {
+      throw new TypeError(
+        "host completion Worker scope must provide one compiler-derived typed capability",
+      );
+    }
+    for (const name of [capability.spawn, capability.failure, capability.close]) {
+      if (workerScopeNames.has(name)) {
+        throw new TypeError(`host completion Worker scope import ${name} is duplicated`);
+      }
+      workerScopeNames.add(name);
+    }
   }
 
   let nextToken = 0;
@@ -865,43 +886,6 @@ export function createHostCompletionBroker(options = {}) {
     return [];
   };
 
-  const beginWorkerSpawn = (rawEpoch) => {
-    if (workerScope === undefined) {
-      throw new Error("fe:worker-scope::spawn_begin requires a Worker scope capability");
-    }
-    const epoch = u32(rawEpoch, "Worker scope spawn epoch");
-    return beginBrowserOperation(
-      "worker-scope-spawn",
-      signal => workerScope.spawn(epoch, signal),
-      0,
-      value => workerUnit(value, "spawn"),
-    );
-  };
-
-  const beginWorkerFailure = (rawEpoch) => {
-    if (workerScope === undefined) {
-      throw new Error("fe:worker-scope::failure_begin requires a Worker scope capability");
-    }
-    const epoch = u32(rawEpoch, "Worker scope failure epoch");
-    return beginBrowserOperation(
-      "worker-scope-failure",
-      signal => workerScope.failure(epoch, signal),
-      0,
-      value => workerUnit(value, "failure observation"),
-    );
-  };
-
-  const closeWorker = (rawEpoch) => {
-    if (workerScope === undefined) {
-      throw new Error("fe:worker-scope::close requires a Worker scope capability");
-    }
-    const epoch = u32(rawEpoch, "Worker scope close epoch");
-    const result = workerScope.close(epoch);
-    if (result !== undefined) {
-      throw new TypeError("Worker scope close must return unit");
-    }
-  };
-
   const beginRace = (rawLeft, rawRight) => {
     if (!Number.isInteger(rawLeft) || !Number.isInteger(rawRight)) {
       throw new TypeError("fe:host::race_begin requires two i32 Wasm carriers");
@@ -1279,11 +1263,36 @@ export function createHostCompletionBroker(options = {}) {
     notify: notifyActor,
     wait_begin: beginActorNotification,
   });
-  const workerScopeImports = Object.freeze({
-    spawn_begin: beginWorkerSpawn,
-    failure_begin: beginWorkerFailure,
-    close: closeWorker,
-  });
+  const workerScopeImports = Object.create(null);
+  for (const capability of workerScopes) {
+    const { scope, spawn, failure, close } = capability;
+    workerScopeImports[spawn] = (rawEpoch) => {
+      const epoch = u32(rawEpoch, "Worker scope spawn epoch");
+      return beginBrowserOperation(
+        `worker-scope/${spawn}`,
+        signal => scope.spawn(epoch, signal),
+        0,
+        value => workerUnit(value, "spawn"),
+      );
+    };
+    workerScopeImports[failure] = (rawEpoch) => {
+      const epoch = u32(rawEpoch, "Worker scope failure epoch");
+      return beginBrowserOperation(
+        `worker-scope/${failure}`,
+        signal => scope.failure(epoch, signal),
+        0,
+        value => workerUnit(value, "failure observation"),
+      );
+    };
+    workerScopeImports[close] = (rawEpoch) => {
+      const epoch = u32(rawEpoch, "Worker scope close epoch");
+      const result = scope.close(epoch);
+      if (result !== undefined) {
+        throw new TypeError("Worker scope close must return unit");
+      }
+    };
+  }
+  Object.freeze(workerScopeImports);
 
   const imports = { "fe:host": host };
   if (surface !== undefined) imports["fe:web-surface"] = surfaceImports;
@@ -1299,7 +1308,7 @@ export function createHostCompletionBroker(options = {}) {
     imports["fe:web-component-events"] = componentEventImports;
   }
   if (actorEvents !== undefined) imports["fe:actor"] = actorImports;
-  if (workerScope !== undefined) imports["fe:worker-scope"] = workerScopeImports;
+  if (workerScopes.length !== 0) imports["fe:worker-scope"] = workerScopeImports;
   imports["fe:actor-notification"] = actorNotificationImports;
 
   const completions = Object.freeze({

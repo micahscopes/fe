@@ -97,12 +97,20 @@ pub fn scope_task() -> u64 {
         })
         .flatten()
         .collect::<std::collections::BTreeSet<_>>();
-    for name in ["spawn_begin", "failure_begin", "close"] {
-        assert!(
-            imports.contains(&("fe:worker-scope".to_owned(), name.to_owned())),
-            "compiled Fe scope is missing fe:worker-scope::{name}: {imports:?}"
-        );
-    }
+    let scope_names = imports
+        .iter()
+        .filter(|(module, _)| module == "fe:worker-scope")
+        .map(|(_, name)| name.clone())
+        .collect::<Vec<_>>();
+    let [spawn_name, failure_name, close_name] = ["spawn_", "failure_", "close_"].map(|prefix| {
+        scope_names
+            .iter()
+            .find(|name| name.starts_with(prefix))
+            .unwrap_or_else(|| panic!("compiled Fe scope is missing {prefix}<type>: {imports:?}"))
+            .clone()
+    });
+    assert_eq!(&spawn_name[6..], &failure_name[8..]);
+    assert_eq!(&spawn_name[6..], &close_name[6..]);
     assert!(
         imports.contains(&("fe:host".to_owned(), "sleep_begin".to_owned())),
         "Fe backoff must use the ordinary timer effect: {imports:?}"
@@ -126,8 +134,13 @@ import {{ createMaterializedTaskRegistry }} from {adapter_url:?};
 import {{ createHostCompletionBroker }} from {host_runtime_url:?};
 const bytes = await Bun.file({wasm_path:?}).arrayBuffer();
 
-async function instantiate(workerScope) {{
-  const broker = createHostCompletionBroker({{ workerScope }});
+async function instantiate(scope) {{
+  const broker = createHostCompletionBroker({{ workerScopes: [{{
+    scope,
+    spawn: {spawn_name:?},
+    failure: {failure_name:?},
+    close: {close_name:?},
+  }}] }});
   const {{ instance }} = await WebAssembly.instantiate(bytes, broker.imports);
   return {{ broker, task: createMaterializedTaskRegistry(instance.exports).scope_task }};
 }}
@@ -248,6 +261,9 @@ if (cancellation.broker.activeCount() !== 0) throw new Error("cancelled scope le
         adapter_url = format!("file://{}", adapter_path.display()),
         host_runtime_url = format!("file://{}", host_runtime_path.display()),
         wasm_path = wasm_path.display().to_string(),
+        spawn_name = spawn_name,
+        failure_name = failure_name,
+        close_name = close_name,
     );
     std::fs::write(&test_path, script).unwrap();
     let output = std::process::Command::new("bun")

@@ -5,7 +5,7 @@
 //! children consume one exact runtime instead of maintaining parallel copies.
 
 pub const BROWSER_ACTOR_RUNTIME_PROTOCOL: &str = "fe-browser-actor-runtime";
-pub const BROWSER_ACTOR_RUNTIME_VERSION: u32 = 4;
+pub const BROWSER_ACTOR_RUNTIME_VERSION: u32 = 5;
 
 pub const BROWSER_ACTOR_RUNTIME_FILES: &[(&str, &str)] = &[
     (
@@ -37,8 +37,16 @@ pub const BROWSER_ACTOR_RUNTIME_FILES: &[(&str, &str)] = &[
         include_str!("../assets/browser-runtime/worker-host.js"),
     ),
     (
+        "runtime/worker-host-core.js",
+        include_str!("../assets/browser-runtime/worker-host-core.js"),
+    ),
+    (
         "runtime/actor-client.js",
         include_str!("../assets/browser-runtime/actor-client.js"),
+    ),
+    (
+        "runtime/actor-client-core.js",
+        include_str!("../assets/browser-runtime/actor-client-core.js"),
     ),
 ];
 

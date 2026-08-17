@@ -1541,26 +1541,26 @@ async function run(element) {
             },
           };
         }
-        let structuredWorkerScope;
+        let structuredWorkerScopes = [];
         if (needsWorkerScopeCapability || needsWorkerMailboxCapability) {
-          if (typeof taskModule.createStructuredWorkerScope !== "function") {
+          if (typeof taskModule.createStructuredWorkerScopes !== "function") {
             throw new Error(
-              "Worker effects require a compiler-derived structured child package",
+              "Worker effects require compiler-derived structured child packages",
             );
           }
-          structuredWorkerScope = await taskModule.createStructuredWorkerScope();
-          brokerOptions.workerScope = structuredWorkerScope;
+          structuredWorkerScopes = await taskModule.createStructuredWorkerScopes();
+          brokerOptions.workerScopes = structuredWorkerScopes;
         }
         const broker = taskModule.createHostCompletionBroker(brokerOptions);
         let workerMailboxImports;
         if (needsWorkerMailboxCapability) {
-          if (typeof taskModule.createStructuredWorkerMailbox !== "function") {
+          if (typeof taskModule.createStructuredWorkerMailboxes !== "function") {
             throw new Error(
               "fe:worker-mailbox requires a compiler-derived mailbox adapter",
             );
           }
-          workerMailboxImports = taskModule.createStructuredWorkerMailbox(
-            structuredWorkerScope,
+          workerMailboxImports = taskModule.createStructuredWorkerMailboxes(
+            structuredWorkerScopes,
             broker.completions,
           );
         }

@@ -9,7 +9,7 @@ use fe_codegen::{
     CanonicalType, RESIDENT_ACTOR_INITIALIZE_EXPORT, RESIDENT_ACTOR_PROJECT_EXPORT,
     RESIDENT_ACTOR_STATE_REPLACE_EXPORT, RESIDENT_ACTOR_TRANSITION_EXPORT,
     browser_actor_runtime_files, compile_resident_actor, emit_canonical_interface_js,
-    emit_materialized_task_adapter_js,
+    emit_materialized_task_adapter_js, materialize_scoped_task_package,
 };
 use hir::hir_def::HirIngot;
 use url::Url;
@@ -173,6 +173,18 @@ actor Parent {
     let url = Url::parse("file:///web_component_structured_child.fe").unwrap();
     db.workspace()
         .touch(&mut db, url.clone(), Some(SOURCE.to_owned()));
+    let file = db.workspace().get(&db, &url).unwrap();
+    (db, file)
+}
+
+fn two_structured_children_fixture() -> (DriverDataBase, common::file::File) {
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///web_component_two_structured_children.fe").unwrap();
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(include_str!("fixtures/two_structured_children.fe").to_owned()),
+    );
     let file = db.workspace().get(&db, &url).unwrap();
     (db, file)
 }
@@ -797,9 +809,9 @@ fn resident_actor_derives_a_separate_zero_import_child_from_the_fe_nominal_type(
     assert!(mailbox_import.1.starts_with("request_"));
     assert_ne!(mailbox_import.1, "ask_begin");
     assert!(!mailbox_import.1.contains("double"));
-    let child = artifact
-        .structured_child
-        .expect("nominal child type should select one actor artifact");
+    let [child] = artifact.structured_children.as_slice() else {
+        panic!("nominal child type should select one actor artifact")
+    };
     assert_eq!(child.actor, "ArithmeticChild");
     let [lane] = child.interface.lanes.as_slice() else {
         panic!("expected exactly one canonical child lane")
@@ -879,10 +891,9 @@ fn resident_actor_typed_mailbox_round_trips_through_the_compiled_child() {
     let artifact = compile_resident_actor(&db, top_mod)
         .expect("resident actor plus structured child contract")
         .expect("role-selected resident actor");
-    let child = artifact
-        .structured_child
-        .as_ref()
-        .expect("compiler-derived child artifact");
+    let [child] = artifact.structured_children.as_slice() else {
+        panic!("expected one compiler-derived child artifact")
+    };
     let [lane] = child.interface.lanes.as_slice() else {
         panic!("expected exactly one canonical child lane")
     };
@@ -962,7 +973,12 @@ let instance;
 let residentValue;
 const accepted = [];
 const broker = createHostCompletionBroker({{
-  workerScope: scope,
+  workerScopes: [{{
+    scope,
+    spawn: {scope_spawn:?},
+    failure: {scope_failure:?},
+    close: {scope_close:?},
+  }}],
   actorEvents: {{
     send(event, signal) {{
       if (signal.aborted) throw new DOMException("cancelled", "AbortError");
@@ -1002,6 +1018,9 @@ scope.close(0);
             parent_wasm = parent_wasm.display().to_string(),
             child_wasm = child_wasm.display().to_string(),
             lane = lane.name,
+            scope_spawn = child.scope.spawn,
+            scope_failure = child.scope.failure,
+            scope_close = child.scope.close,
         ),
     )
     .unwrap();
@@ -1013,6 +1032,242 @@ scope.close(0);
     assert!(
         output.status.success(),
         "typed mailbox round trip failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
+fn resident_actor_two_typed_children_share_one_completion_rail_without_identity_shims() {
+    if !std::process::Command::new("bun")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        return;
+    }
+
+    let (db, file) = two_structured_children_fixture();
+    let top_mod = db.top_mod(file);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "two-child fixture diagnostics:\n{diagnostics}"
+    );
+    let artifact = compile_resident_actor(&db, top_mod)
+        .expect("compile two nominal children")
+        .expect("role-selected two-child resident actor");
+    let [child0, child1] = artifact.structured_children.as_slice() else {
+        panic!(
+            "expected two compiler-derived child artifacts, found {}",
+            artifact.structured_children.len()
+        )
+    };
+    assert_ne!(child0.scope.key, child1.scope.key);
+    assert_eq!(artifact.scoped_tasks.len(), 3);
+
+    let parent_imports = wasmparser::Parser::new(0)
+        .parse_all(&artifact.wasm)
+        .filter_map(
+            |payload| match payload.expect("valid two-child parent Wasm") {
+                wasmparser::Payload::ImportSection(reader) => Some(
+                    reader
+                        .into_imports()
+                        .map(|import| {
+                            let import = import.expect("valid two-child parent import");
+                            (import.module.to_owned(), import.name.to_owned())
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            },
+        )
+        .flatten()
+        .collect::<Vec<_>>();
+    let lifecycle_imports = parent_imports
+        .iter()
+        .filter(|(module, _)| module == "fe:worker-scope")
+        .map(|(_, name)| name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let expected_lifecycle = artifact
+        .structured_children
+        .iter()
+        .flat_map(|child| {
+            [
+                child.scope.spawn.as_str(),
+                child.scope.failure.as_str(),
+                child.scope.close.as_str(),
+            ]
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(lifecycle_imports, expected_lifecycle);
+    assert_eq!(lifecycle_imports.len(), 6);
+    assert!(
+        lifecycle_imports
+            .iter()
+            .all(|name| !matches!(*name, "spawn_begin" | "failure_begin" | "close"))
+    );
+
+    let package =
+        materialize_scoped_task_package(&artifact.scoped_tasks, &artifact.structured_children)
+            .expect("materialize two-child task package")
+            .expect("two-child tasks require a package");
+    let entry = package
+        .files
+        .iter()
+        .find(|file| file.path == package.entry_path)
+        .expect("two-child task entry");
+    let entry = std::str::from_utf8(&entry.bytes).expect("UTF-8 task entry");
+    assert!(entry.contains("createStructuredWorkerScopes"));
+    assert!(entry.contains("createStructuredWorkerMailboxes"));
+    assert!(!entry.contains("ScaleChild"));
+    assert!(!entry.contains("OffsetChild"));
+    assert!(!entry.contains("workerScope:"));
+
+    let directory = tempfile::tempdir().expect("two-child execution directory");
+    for file in &package.files {
+        let path = directory.path().join(&file.path);
+        std::fs::create_dir_all(path.parent().expect("package file parent")).unwrap();
+        std::fs::write(path, &file.bytes).unwrap();
+    }
+    let parent_wasm = directory.path().join("parent.wasm");
+    std::fs::write(&parent_wasm, &artifact.wasm).unwrap();
+    let scale_index = artifact
+        .structured_children
+        .iter()
+        .position(|child| child.actor == "ScaleChild")
+        .expect("ScaleChild artifact");
+    let offset_index = artifact
+        .structured_children
+        .iter()
+        .position(|child| child.actor == "OffsetChild")
+        .expect("OffsetChild artifact");
+
+    let runner = directory.path().join("run-two-children.mjs");
+    std::fs::write(
+        &runner,
+        format!(
+            r#"
+import {{
+  createHostCompletionBroker,
+  createMaterializedTaskRegistry,
+  createStructuredWorkerMailboxes,
+}} from "./tasks.js";
+import {{ createInterfaceCaller as createCaller0 }} from "./children/{key0}/interface.js";
+import {{ createInterfaceCaller as createCaller1 }} from "./children/{key1}/interface.js";
+
+const parentBytes = await Bun.file({parent_wasm:?}).arrayBuffer();
+const child0Bytes = await Bun.file(new URL("./children/{key0}/child.wasm", import.meta.url)).arrayBuffer();
+const child1Bytes = await Bun.file(new URL("./children/{key1}/child.wasm", import.meta.url)).arrayBuffer();
+const child0 = await WebAssembly.instantiate(child0Bytes, {{}});
+const child1 = await WebAssembly.instantiate(child1Bytes, {{}});
+const callers = [
+  createCaller0(child0.instance.exports),
+  createCaller1(child1.instance.exports),
+];
+const lifecycle = [[], []];
+const requests = [];
+const makeScope = (index) => Object.freeze({{
+  async spawn(epoch) {{ lifecycle[index].push(["spawn", epoch]); }},
+  failure(epoch, signal) {{
+    lifecycle[index].push(["failure", epoch]);
+    return new Promise((_, reject) => signal.addEventListener(
+      "abort",
+      () => reject(new DOMException("cancelled", "AbortError")),
+      {{ once: true }},
+    ));
+  }},
+  close(epoch) {{ lifecycle[index].push(["close", epoch]); }},
+  request(lane, payload, signal) {{
+    if (signal?.aborted) throw new DOMException("cancelled", "AbortError");
+    requests.push([index, lane, payload.value]);
+    return callers[index].call(lane, payload);
+  }},
+}});
+const scopes = Object.freeze([
+  Object.freeze({{ scope: makeScope(0), spawn: {spawn0:?}, failure: {failure0:?}, close: {close0:?} }}),
+  Object.freeze({{ scope: makeScope(1), spawn: {spawn1:?}, failure: {failure1:?}, close: {close1:?} }}),
+]);
+
+let instance;
+let residentValue;
+const broker = createHostCompletionBroker({{
+  workerScopes: scopes,
+  actorEvents: {{
+    send(event, signal) {{
+      if (signal.aborted) throw new DOMException("cancelled", "AbortError");
+      residentValue = instance.exports.fe_actor_transition_v1(...event);
+    }},
+  }},
+}});
+const mailboxImports = createStructuredWorkerMailboxes(scopes, broker.completions);
+const imports = Object.assign({{}}, broker.imports, mailboxImports);
+({{ instance }} = await WebAssembly.instantiate(parentBytes, imports));
+const initialized = instance.exports.fe_actor_initialize_v1();
+const initialValue = Array.isArray(initialized) ? initialized[0] : initialized;
+if (initialValue !== 7) throw new Error(`bad two-child initial state ${{initialized}}`);
+const tasks = createMaterializedTaskRegistry(instance.exports);
+const calculated = await broker.run(tasks.calculate, [initialValue]);
+if (calculated.length !== 1 || calculated[0] !== 19) {{
+  throw new Error(`two-child Fe calculation drifted: ${{calculated}}`);
+}}
+if (residentValue !== 26) {{
+  throw new Error(`two-child resident transition drifted: ${{residentValue}}`);
+}}
+if (requests.length !== 2 || requests[0][2] !== 7 || requests[1][2] !== 14
+    || requests[0][0] !== {scale_index} || requests[1][0] !== {offset_index}) {{
+  throw new Error(`typed child mailbox routing drifted: ${{JSON.stringify(requests)}}`);
+}}
+if (broker.activeCount() !== 0) throw new Error("two-child mailbox leaked completion tokens");
+
+const cancelSupervisor = async (task, index) => {{
+  const controller = new AbortController();
+  const running = broker.run(task, [], {{ signal: controller.signal }});
+  for (let attempt = 0; attempt < 100 && lifecycle[index].length < 2; attempt += 1) {{
+    await new Promise(resolve => setTimeout(resolve, 0));
+  }}
+  if (JSON.stringify(lifecycle[index]) !== JSON.stringify([["spawn", 0], ["failure", 0]])) {{
+    throw new Error(`wrong nominal child scope was selected: ${{JSON.stringify(lifecycle)}}`);
+  }}
+  controller.abort();
+  let error;
+  try {{ await running; }} catch (caught) {{ error = caught; }}
+  if (error?.name !== "AbortError") throw new Error("scope cancellation was not terminal");
+  if (JSON.stringify(lifecycle[index]) !== JSON.stringify([
+    ["spawn", 0], ["failure", 0], ["close", 0],
+  ])) {{
+    throw new Error(`typed scope cleanup drifted: ${{JSON.stringify(lifecycle[index])}}`);
+  }}
+  if (broker.activeCount() !== 0) throw new Error("typed scope cancellation leaked tokens");
+}};
+await cancelSupervisor(tasks.supervise_scale, {scale_index});
+await cancelSupervisor(tasks.supervise_offset, {offset_index});
+if (lifecycle[0].length !== 3 || lifecycle[1].length !== 3) {{
+  throw new Error(`one nominal scope absorbed another: ${{JSON.stringify(lifecycle)}}`);
+}}
+"#,
+            key0 = child0.scope.key,
+            key1 = child1.scope.key,
+            parent_wasm = parent_wasm.display().to_string(),
+            spawn0 = child0.scope.spawn,
+            failure0 = child0.scope.failure,
+            close0 = child0.scope.close,
+            spawn1 = child1.scope.spawn,
+            failure1 = child1.scope.failure,
+            close1 = child1.scope.close,
+            scale_index = scale_index,
+            offset_index = offset_index,
+        ),
+    )
+    .unwrap();
+    let output = std::process::Command::new("bun")
+        .arg("run")
+        .arg(&runner)
+        .output()
+        .expect("run two-child package under Bun");
+    assert!(
+        output.status.success(),
+        "two-child package failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );

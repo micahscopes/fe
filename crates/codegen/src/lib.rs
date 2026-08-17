@@ -46,7 +46,8 @@ pub use resident_actor::{
     RESIDENT_ACTOR_INITIALIZE_EXPORT, RESIDENT_ACTOR_PROJECT_EXPORT,
     RESIDENT_ACTOR_STATE_REPLACE_EXPORT, RESIDENT_ACTOR_TRANSITION_EXPORT, ResidentActorArtifact,
     ResidentActorContract, ResidentActorError, StructuredChildActorArtifact,
-    compile_resident_actor, compile_resident_actor_with_optimization, resident_actor_contract,
+    StructuredChildScopeImports, compile_resident_actor, compile_resident_actor_with_optimization,
+    resident_actor_contract,
 };
 pub use scoped_task_package::{
     ScopedTaskPackage, ScopedTaskPackageError, ScopedTaskPackageFile,

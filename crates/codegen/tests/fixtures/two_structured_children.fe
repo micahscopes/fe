@@ -1,0 +1,128 @@
+use core::Worker
+use core::actor::{
+    ActorMailbox, ActorSink, InitialState, ProjectState, ResidentTransition, ScopedTask,
+}
+use core::pending::{Pending, Suspend, TaskOutcome}
+use std::actor::{ActorMessage, BrowserActorSink}
+use std::host::Resumable
+use std::runtime::{BrowserActorMailbox, ChildScopeExit, supervise_browser_child}
+use std::wasm::WasmBackend
+
+pub struct ScaleRequest { pub value: u32 }
+pub struct ScaleResponse { pub value: u32 }
+pub struct OffsetRequest { pub value: u32 }
+pub struct OffsetResponse { pub value: u32 }
+pub struct ParentEvent { pub value: u32 }
+pub struct ParentState { pub value: u32 }
+pub struct ParentProjection { pub value: u32 }
+
+actor ScaleChild {
+    fn scale(request: ScaleRequest) -> ScaleResponse uses (Worker) {
+        ScaleResponse { value: request.value * 2 }
+    }
+}
+
+actor OffsetChild {
+    fn offset(request: OffsetRequest) -> OffsetResponse uses (Worker) {
+        OffsetResponse { value: request.value + 5 }
+    }
+}
+
+fn request_scale(_ request: own ScaleRequest) -> TaskOutcome<u32, ScaleResponse>
+uses (
+    mailbox: mut ActorMailbox<WasmBackend, ScaleChild>,
+    suspend: Suspend<WasmBackend, u32>,
+)
+{
+    let pending: Pending<WasmBackend, ScaleResponse> = mailbox.ask(request)
+    suspend.suspend(pending)
+}
+
+fn request_offset(_ request: own OffsetRequest) -> TaskOutcome<u32, OffsetResponse>
+uses (
+    mailbox: mut ActorMailbox<WasmBackend, OffsetChild>,
+    suspend: Suspend<WasmBackend, u32>,
+)
+{
+    let pending: Pending<WasmBackend, OffsetResponse> = mailbox.ask(request)
+    suspend.suspend(pending)
+}
+
+actor Parent {
+    value: u32,
+
+    fn initial() -> ParentState uses (InitialState) {
+        ParentState { value: 7 }
+    }
+
+    fn receive(self, event: ParentEvent) -> ParentState uses (ResidentTransition) {
+        ParentState { value: self.value + event.value }
+    }
+
+    fn project(self) -> ParentProjection uses (ProjectState) {
+        ParentProjection { value: self.value }
+    }
+
+    fn supervise_scale() -> u32 uses (ScopedTask) {
+        match supervise_browser_child(
+            child: ScaleChild {},
+            max_restarts: 1,
+            window_ms: 1000,
+            backoff_ms: 1,
+            startup_timeout_ms: 1000,
+        ) {
+            ChildScopeExit::Cancelled(epoch) => epoch
+            ChildScopeExit::Exhausted(epoch, _) => epoch
+            ChildScopeExit::TransportFailure(epoch, _) => epoch
+            ChildScopeExit::InvariantViolation(epoch, _) => epoch
+        }
+    }
+
+    fn supervise_offset() -> u32 uses (ScopedTask) {
+        match supervise_browser_child(
+            child: OffsetChild {},
+            max_restarts: 1,
+            window_ms: 1000,
+            backoff_ms: 1,
+            startup_timeout_ms: 1000,
+        ) {
+            ChildScopeExit::Cancelled(epoch) => epoch
+            ChildScopeExit::Exhausted(epoch, _) => epoch
+            ChildScopeExit::TransportFailure(epoch, _) => epoch
+            ChildScopeExit::InvariantViolation(epoch, _) => epoch
+        }
+    }
+
+    fn calculate(self) -> u32 uses (ScopedTask) {
+        let scaled = with (
+            ActorMailbox<WasmBackend, ScaleChild> = BrowserActorMailbox<ScaleChild> {},
+            Suspend<WasmBackend, u32> = Resumable {},
+        ) {
+            match request_scale(ScaleRequest { value: self.value }) {
+                TaskOutcome::Success(response,) => response.value
+                TaskOutcome::Failure(error,) => 100 + error
+                TaskOutcome::Cancelled => 200
+            }
+        }
+        let offset = with (
+            ActorMailbox<WasmBackend, OffsetChild> = BrowserActorMailbox<OffsetChild> {},
+            Suspend<WasmBackend, u32> = Resumable {},
+        ) {
+            match request_offset(OffsetRequest { value: scaled }) {
+                TaskOutcome::Success(response,) => response.value
+                TaskOutcome::Failure(error,) => 300 + error
+                TaskOutcome::Cancelled => 400
+            }
+        }
+        with (
+            ActorSink<WasmBackend, ParentEvent> = BrowserActorSink {},
+            Suspend<WasmBackend, u32> = Resumable {},
+        ) {
+            match ActorMessage::new(ParentEvent { value: offset }).send() {
+                TaskOutcome::Success(_,) => offset
+                TaskOutcome::Failure(error,) => 500 + error
+                TaskOutcome::Cancelled => 600
+            }
+        }
+    }
+}

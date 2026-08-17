@@ -52,7 +52,7 @@ impl<C> ChildPlacement<WasmBackend, C> for BrowserChildPlacement<C> {
     }
 
     fn close(mut self, _ epoch: u32) {
-        raw_close(epoch)
+        raw_close<C>(epoch)
     }
 }
 

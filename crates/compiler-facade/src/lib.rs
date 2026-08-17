@@ -23,8 +23,8 @@ pub use codegen::{
     ComponentProjection, HOST_COMPLETION_RUNTIME_JS, MATERIALIZED_TASK_RUNTIME_JS,
     PageAttributeKind, PageElement, PageProjection, PageProjectionOp, ProjectedPageAttribute,
     ProjectedPageComponent, ProjectedPageRender, ScopedTaskPackage, ScopedTaskPackageFile,
-    StructuredChildActorArtifact, WasmTaskAdapter, browser_actor_runtime_files,
-    emit_canonical_interface_js, emit_materialized_task_adapter_js,
+    StructuredChildActorArtifact, StructuredChildScopeImports, WasmTaskAdapter,
+    browser_actor_runtime_files, emit_canonical_interface_js, emit_materialized_task_adapter_js,
     materialize_scoped_task_package,
 };
 
@@ -48,10 +48,10 @@ pub struct ResidentComponentCompileResult {
     /// This stays typed in build memory; HTML publication emits executable ES
     /// modules rather than serializing a task manifest.
     pub scoped_tasks: Vec<WasmTaskAdapter>,
-    /// Optional canonical child program selected by a nominal Fe actor type in
-    /// a scoped task. It remains typed build state until publication emits the
-    /// separate Worker artifact and fixed browser adapter.
-    pub structured_child: Option<StructuredChildActorArtifact>,
+    /// Canonical child programs selected by nominal Fe actor types in scoped
+    /// tasks. They remain typed build state until publication emits separate
+    /// Worker artifacts and fixed browser adapters.
+    pub structured_children: Vec<StructuredChildActorArtifact>,
 }
 
 #[derive(Debug)]
@@ -193,7 +193,7 @@ pub fn compile_resident_component_in_db(
             ),
             view: None,
             scoped_tasks: Vec::new(),
-            structured_child: None,
+            structured_children: Vec::new(),
         });
     }
     compile_wasm_from_db(
@@ -269,7 +269,7 @@ fn compile_wasm_with_component_view(
             ),
             view: None,
             scoped_tasks: Vec::new(),
-            structured_child: None,
+            structured_children: Vec::new(),
         });
     }
     let optimize = request.options.optimization != fe_compiler_protocol::OptimizationLevel::None;
@@ -308,7 +308,7 @@ fn compile_wasm_from_db(
     // compiler special case.
     let resident = codegen::compile_resident_actor_with_optimization(db, top_mod, optimize)
         .map_err(|error| CompileFacadeError::Backend(error.to_string()))?;
-    let (bytes, scoped_tasks, structured_child) = if let Some(actor) = resident {
+    let (bytes, scoped_tasks, structured_children) = if let Some(actor) = resident {
         if let Some(view) = &view
             && view.actor != actor.contract.actor
         {
@@ -317,7 +317,7 @@ fn compile_wasm_from_db(
                 view.actor, actor.contract.actor
             )));
         }
-        (actor.wasm, actor.scoped_tasks, actor.structured_child)
+        (actor.wasm, actor.scoped_tasks, actor.structured_children)
     } else {
         if let Some(view) = &view {
             return Err(CompileFacadeError::Backend(format!(
@@ -339,7 +339,7 @@ fn compile_wasm_from_db(
                 CompileFacadeError::Artifact("Wasm backend returned no bytes".to_owned())
             })?,
             Vec::new(),
-            None,
+            Vec::new(),
         )
     };
     wasmparser::validate(&bytes)
@@ -362,7 +362,7 @@ fn compile_wasm_from_db(
         ),
         view,
         scoped_tasks,
-        structured_child,
+        structured_children,
     })
 }
 

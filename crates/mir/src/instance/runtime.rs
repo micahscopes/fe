@@ -171,14 +171,49 @@ pub fn host_import_name<'db>(db: &'db dyn MirDb, instance: RuntimeInstance<'db>)
         return None;
     };
     let func = declared_external_func(db, semantic)?;
-    if runtime_actor_effect_func_kind(db, func) == Some(RuntimeActorEffectFuncKind::AskBegin) {
-        let args = semantic.key(db).subst(db).generic_args(db);
-        let [child, request, response] = args.as_slice() else {
-            return None;
-        };
-        return Some(actor_mailbox_import_name(db, *child, *request, *response));
+    match runtime_actor_effect_func_kind(db, func) {
+        Some(RuntimeActorEffectFuncKind::AskBegin) => {
+            let args = semantic.key(db).subst(db).generic_args(db);
+            let [child, request, response] = args.as_slice() else {
+                return None;
+            };
+            return Some(actor_mailbox_import_name(db, *child, *request, *response));
+        }
+        Some(
+            kind @ (RuntimeActorEffectFuncKind::ChildSpawnBegin
+            | RuntimeActorEffectFuncKind::ChildFailureBegin
+            | RuntimeActorEffectFuncKind::ChildClose),
+        ) => {
+            let args = semantic.key(db).subst(db).generic_args(db);
+            let [child] = args.as_slice() else {
+                return None;
+            };
+            return actor_scope_import_name(db, kind, *child);
+        }
+        _ => {}
     }
     Some(func.name(db).to_opt()?.data(db).to_string())
+}
+
+fn hash_semantic_types(db: &dyn MirDb, domain: &[u8], tys: &[TyId<'_>]) -> u64 {
+    let mut hash = 0xcbf29ce484222325_u64;
+    if !domain.is_empty() {
+        for byte in domain {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash ^= 0xfe;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    for ty in tys {
+        for byte in ty.pretty_print(db).bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 /// Derive the private Wasm import identity for one typed actor request edge.
@@ -193,16 +228,32 @@ pub fn actor_mailbox_import_name(
     request: TyId<'_>,
     response: TyId<'_>,
 ) -> String {
-    let mut hash = 0xcbf29ce484222325_u64;
-    for ty in [child, request, response] {
-        for byte in ty.pretty_print(db).bytes() {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-        hash ^= 0xff;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
+    // Preserve the established mailbox ABI while sharing the same exact type
+    // hashing implementation with structured-child scope identities.
+    let hash = hash_semantic_types(db, b"", &[child, request, response]);
     format!("request_{hash:016x}")
+}
+
+/// Derive one private Wasm import identity for a typed structured-child scope.
+///
+/// All three lifecycle operations carry the nominal child type through Fe
+/// monomorphization. The shared suffix lets generated packaging bind them to
+/// one child capability without an authored selector or runtime manifest.
+pub fn actor_scope_import_name(
+    db: &dyn MirDb,
+    kind: RuntimeActorEffectFuncKind,
+    child: TyId<'_>,
+) -> Option<String> {
+    let operation = match kind {
+        RuntimeActorEffectFuncKind::ChildSpawnBegin => "spawn",
+        RuntimeActorEffectFuncKind::ChildFailureBegin => "failure",
+        RuntimeActorEffectFuncKind::ChildClose => "close",
+        RuntimeActorEffectFuncKind::SendBegin | RuntimeActorEffectFuncKind::AskBegin => {
+            return None;
+        }
+    };
+    let hash = hash_semantic_types(db, b"actor-scope-v1", &[child]);
+    Some(format!("{operation}_{hash:016x}"))
 }
 
 /// Recover the nominal control operation represented by a runtime call. This

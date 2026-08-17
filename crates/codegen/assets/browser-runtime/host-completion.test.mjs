@@ -570,28 +570,58 @@ describe("browser HostTimer/Recv completion broker", () => {
   test("Worker scope handlers expose mechanics without restart policy", async () => {
     const calls = [];
     let failureSignal;
+    const firstNames = Object.freeze({
+      spawn: "spawn_0000000000000001",
+      failure: "failure_0000000000000001",
+      close: "close_0000000000000001",
+    });
+    const secondNames = Object.freeze({
+      spawn: "spawn_0000000000000002",
+      failure: "failure_0000000000000002",
+      close: "close_0000000000000002",
+    });
     const broker = createHostCompletionBroker({
-      workerScope: {
-        spawn(epoch, signal) {
-          calls.push(["spawn", epoch]);
-          expect(signal).toBeInstanceOf(AbortSignal);
+      workerScopes: [
+        {
+          scope: {
+            spawn(epoch, signal) {
+              calls.push(["first-spawn", epoch]);
+              expect(signal).toBeInstanceOf(AbortSignal);
+            },
+            failure(epoch, signal) {
+              calls.push(["first-failure", epoch]);
+              failureSignal = signal;
+              return new Promise(() => {});
+            },
+            close(epoch) { calls.push(["first-close", epoch]); },
+          },
+          ...firstNames,
         },
-        failure(epoch, signal) {
-          calls.push(["failure", epoch]);
-          failureSignal = signal;
-          return new Promise(() => {});
+        {
+          scope: {
+            spawn(epoch, signal) {
+              calls.push(["second-spawn", epoch]);
+              expect(signal).toBeInstanceOf(AbortSignal);
+            },
+            async failure(epoch) { calls.push(["second-failure", epoch]); },
+            close(epoch) { calls.push(["second-close", epoch]); },
+          },
+          ...secondNames,
         },
-        close(epoch) { calls.push(["close", epoch]); },
-      },
+      ],
     });
     const worker = broker.imports["fe:worker-scope"];
-    const spawned = actorSendMachine(() => [1, 0, worker.spawn_begin(7) >>> 0]);
+    const spawned = actorSendMachine(() => [1, 0, worker[firstNames.spawn](7) >>> 0]);
     expect(await broker.run(spawned, [])).toEqual([1]);
-    expect(calls).toEqual([["spawn", 7]]);
+    const secondSpawned = actorSendMachine(() => [
+      1, 0, worker[secondNames.spawn](3) >>> 0,
+    ]);
+    expect(await broker.run(secondSpawned, [])).toEqual([1]);
+    expect(calls).toEqual([["first-spawn", 7], ["second-spawn", 3]]);
 
     let cancelled = 0;
     const failed = actorSendMachine(
-      () => [1, 0, worker.failure_begin(7) >>> 0],
+      () => [1, 0, worker[firstNames.failure](7) >>> 0],
       () => { cancelled += 1; },
     );
     const controller = new AbortController();
@@ -601,26 +631,37 @@ describe("browser HostTimer/Recv completion broker", () => {
     await expect(observing).rejects.toHaveProperty("name", "AbortError");
     expect(failureSignal.aborted).toBeTrue();
     expect(cancelled).toBe(1);
-    worker.close(7);
-    expect(calls).toEqual([["spawn", 7], ["failure", 7], ["close", 7]]);
+    worker[firstNames.close](7);
+    expect(calls).toEqual([
+      ["first-spawn", 7], ["second-spawn", 3],
+      ["first-failure", 7], ["first-close", 7],
+    ]);
     expect(broker.activeCount()).toBe(0);
 
     const rejected = createHostCompletionBroker({
-      workerScope: {
-        async spawn() { throw new Error("startup failed"); },
-        async failure() {},
-        close() {},
-      },
+      workerScopes: [{
+        scope: {
+          async spawn() { throw new Error("startup failed"); },
+          async failure() {},
+          close() {},
+        },
+        spawn: "spawn_0000000000000003",
+        failure: "failure_0000000000000003",
+        close: "close_0000000000000003",
+      }],
     });
     const rejectedWorker = rejected.imports["fe:worker-scope"];
     const rejectedStart = actorSendMachine(
-      () => [1, 0, rejectedWorker.spawn_begin(0) >>> 0],
+      () => [1, 0, rejectedWorker.spawn_0000000000000003(0) >>> 0],
     );
     expect(await rejected.run(rejectedStart, [])).toEqual([101]);
 
     expect(createHostCompletionBroker().imports["fe:worker-scope"]).toBeUndefined();
     expect(() => createHostCompletionBroker({ workerScope: {} })).toThrow(
-      /must provide spawn, failure, and close/,
+      /requires typed workerScopes/,
+    );
+    expect(() => createHostCompletionBroker({ workerScopes: [{}] })).toThrow(
+      /compiler-derived typed capability/,
     );
   });
 

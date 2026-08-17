@@ -3831,9 +3831,9 @@ pub struct WebBundle {
     /// Compiler-derived continuation machines owned by the selected render
     /// actor. They are published as a manifest-free executable package.
     pub scoped_tasks: Vec<WasmTaskAdapter>,
-    /// One separately compiled nominal child actor, selected from the typed
-    /// mailbox/supervision operations in `scoped_tasks`.
-    pub structured_child: Option<StructuredChildActorArtifact>,
+    /// Separately compiled nominal child actors, selected from the typed
+    /// mailbox and supervision operations in `scoped_tasks`.
+    pub structured_children: Vec<StructuredChildActorArtifact>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4336,7 +4336,7 @@ impl WebBundle {
             interface_js: None,
             interface_d_ts: None,
             scoped_tasks: Vec::new(),
-            structured_child: None,
+            structured_children: Vec::new(),
         })
     }
 
@@ -4529,8 +4529,8 @@ impl WebBundle {
         )
         .map_err(|error| WebBundleError::Lower(error.to_string()))?;
 
-        let (scoped_tasks, structured_child) = if scoped_task_entries.is_empty() {
-            (Vec::new(), None)
+        let (scoped_tasks, structured_children) = if scoped_task_entries.is_empty() {
+            (Vec::new(), Vec::new())
         } else {
             compile_scoped_task_support(db, top_mod, wasm_package, scoped_task_entries.len(), true)
                 .map_err(|error| WebBundleError::EntryDerivation(error.to_string()))?
@@ -4701,7 +4701,7 @@ impl WebBundle {
             interface_js,
             interface_d_ts,
             scoped_tasks,
-            structured_child,
+            structured_children,
         })
     }
 
@@ -4722,7 +4722,7 @@ impl WebBundle {
             .as_ref()
             .map_or(0, |runtime| runtime.artifacts.len());
         let scoped_task_package =
-            materialize_scoped_task_package(&self.scoped_tasks, self.structured_child.as_ref())
+            materialize_scoped_task_package(&self.scoped_tasks, &self.structured_children)
                 .map_err(|error| WebBundleError::Materialization(error.to_string()))?;
         let has_scoped_tasks = scoped_task_package.is_some();
         let scoped_task_file_count = scoped_task_package
@@ -5816,7 +5816,9 @@ pub fn shade(x: u32, y: u32) -> u32 {
                 "runtime/message-port-actor.js",
                 "runtime/module-worker-actor.js",
                 "runtime/worker-host.js",
+                "runtime/worker-host-core.js",
                 "runtime/actor-client.js",
+                "runtime/actor-client-core.js",
                 MANIFEST_FILE,
                 RENDER_RUNTIME_JS_FILE,
                 RENDER_INDEX_FILE,
@@ -5849,7 +5851,7 @@ pub fn shade(x: u32, y: u32) -> u32 {
         assert!(actor_router.contains("FE_ACTOR_CONFLICTING_LANE_DESCRIPTORS"));
         let worker_host = WEB_ACTOR_RUNTIME
             .iter()
-            .find_map(|(path, source)| (*path == "runtime/worker-host.js").then_some(*source))
+            .find_map(|(path, source)| (*path == "runtime/worker-host-core.js").then_some(*source))
             .unwrap();
         assert!(worker_host.contains("createCanonicalIntentRouter"));
         assert!(worker_host.contains("adapter.intents"));
@@ -5857,7 +5859,7 @@ pub fn shade(x: u32, y: u32) -> u32 {
         assert!(!worker_host.contains("[\"render\", \"verify\"]"));
         let actor_client = WEB_ACTOR_RUNTIME
             .iter()
-            .find_map(|(path, source)| (*path == "runtime/actor-client.js").then_some(*source))
+            .find_map(|(path, source)| (*path == "runtime/actor-client-core.js").then_some(*source))
             .unwrap();
         assert!(actor_client.contains("createCanonicalBrowserActor"));
         assert!(actor_client.contains("createCanonicalBrowserWorkerScope"));

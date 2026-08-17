@@ -2311,22 +2311,22 @@ export class FeSurfaceElement extends HTMLElement {
     const needsWorkerScope = required.some(value => value.module === "fe:worker-scope");
     const needsWorkerMailbox = required.some(value => value.module === "fe:worker-mailbox");
     const brokerOptions = {};
-    let structuredWorkerScope;
+    let structuredWorkerScopes = [];
     if (needsWorkerScope || needsWorkerMailbox) {
-      if (typeof taskModule.createStructuredWorkerScope !== "function") {
-        throw new Error("Worker effects require a compiler-derived structured child package");
+      if (typeof taskModule.createStructuredWorkerScopes !== "function") {
+        throw new Error("Worker effects require compiler-derived structured child packages");
       }
-      structuredWorkerScope = await taskModule.createStructuredWorkerScope();
-      brokerOptions.workerScope = structuredWorkerScope;
+      structuredWorkerScopes = await taskModule.createStructuredWorkerScopes();
+      brokerOptions.workerScopes = structuredWorkerScopes;
     }
     const broker = taskModule.createHostCompletionBroker(brokerOptions);
     let mailboxImports;
     if (needsWorkerMailbox) {
-      if (typeof taskModule.createStructuredWorkerMailbox !== "function") {
+      if (typeof taskModule.createStructuredWorkerMailboxes !== "function") {
         throw new Error("fe:worker-mailbox requires a compiler-derived mailbox adapter");
       }
-      mailboxImports = taskModule.createStructuredWorkerMailbox(
-        structuredWorkerScope,
+      mailboxImports = taskModule.createStructuredWorkerMailboxes(
+        structuredWorkerScopes,
         broker.completions,
       );
     }
