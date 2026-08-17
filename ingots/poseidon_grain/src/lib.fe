@@ -1,0 +1,122 @@
+//! Reusable Hades Grain parameter derivation.
+//!
+//! The seed is described by the field bit width, permutation width, and round
+//! counts. Consumers supply the prime only to rejection sampling, so BN254
+//! Poseidon and word-field Poseidon2 share one authored LFSR and
+//! self-shrinking implementation without sharing either field arithmetic or
+//! permutation policy.
+
+use core::num::IntDowncast
+use bitpack::self_shrink_9
+
+pub use bitpack
+
+pub struct Grain80 { state: u128, outputs: u32, available: u32 }
+impl core::marker::Copy for Grain80 {}
+
+const fn append_seed_bits(_ seed: u128, _ value: u128, _ width: u32) -> u128 {
+    (seed << (width as u128)) | value
+}
+
+const fn seed(
+    _ field_size: u32,
+    _ width: u32,
+    _ full_rounds: u32,
+    _ partial_rounds: u32,
+) -> Grain80 {
+    let mut packed: u128 = 0
+    packed = append_seed_bits(packed, 1, 2)                       // prime field
+    packed = append_seed_bits(packed, 0, 4)                       // x^alpha S-box
+    packed = append_seed_bits(packed, field_size as u128, 12)
+    packed = append_seed_bits(packed, width as u128, 12)
+    packed = append_seed_bits(packed, full_rounds as u128, 10)
+    packed = append_seed_bits(packed, partial_rounds as u128, 10)
+    packed = append_seed_bits(packed, (1 << 30) - 1, 30)
+
+    let mut state: u128 = 0
+    let mut index: u32 = 0
+    while index < 80 {
+        let source = 79 - index
+        let bit = (packed >> (source as u128)) & 1
+        state = state | (bit << (index as u128))
+        index = index + 1
+    }
+    Grain80 { state: state, outputs: 0, available: 0 }
+}
+
+/// Advance by at most 18 bits. The recurrence's nearest tap is position 62,
+/// so all bits in the block depend only on the current 80-bit state.
+const fn advance(_ source: Grain80, _ count: u32) -> Grain80 {
+    let shift = count as u128
+    let mask = (1 << shift) - 1
+    let bits = ((source.state >> 62)
+        ^ (source.state >> 51)
+        ^ (source.state >> 38)
+        ^ (source.state >> 23)
+        ^ (source.state >> 13)
+        ^ source.state) & mask
+    let raw: u32 = bits.downcast_truncate()
+    let admitted = self_shrink_9(raw)
+    Grain80 {
+        state: (source.state >> shift) | (bits << ((80 - count) as u128)),
+        outputs: admitted.0,
+        available: admitted.1,
+    }
+}
+
+/// Construct and burn in the canonical 80-bit Grain state.
+pub const fn warm(
+    _ field_size: u32,
+    _ width: u32,
+    _ full_rounds: u32,
+    _ partial_rounds: u32,
+) -> Grain80 {
+    let mut grain = seed(field_size, width, full_rounds, partial_rounds)
+    let mut block: u32 = 0
+    while block < 8 {
+        grain = advance(grain, 18)
+        block = block + 1
+    }
+    grain = advance(grain, 16)
+    grain.outputs = 0
+    grain.available = 0
+    grain
+}
+
+/// Read one big-endian self-shrunk bit string.
+pub const fn random_bits(_ source: Grain80, _ count: u32) -> (Grain80, u256) {
+    let mut grain = source
+    let mut value: u256 = 0
+    let mut consumed: u32 = 0
+    while consumed < count {
+        if grain.available == 0 {
+            grain = advance(grain, 18)
+        }
+        let remaining = count - consumed
+        let take = if grain.available < remaining { grain.available } else { remaining }
+        let after = grain.available - take
+        let mask = (1 << take) - 1
+        let batch = (grain.outputs >> after) & mask
+        value = (value << (take as u256)) | (batch as u256)
+        grain.outputs = grain.outputs & ((1 << after) - 1)
+        grain.available = after
+        consumed = consumed + take
+    }
+    (grain, value)
+}
+
+/// Sample a uniform canonical prime-field element by rejection.
+pub const fn field_element(
+    _ source: Grain80,
+    _ field_size: u32,
+    _ modulus: u256,
+) -> (Grain80, u256) {
+    let mut grain = source
+    let mut value = modulus
+    while value >= modulus {
+        let next = random_bits(grain, field_size)
+        grain = next.0
+        value = next.1
+    }
+    (grain, value)
+}

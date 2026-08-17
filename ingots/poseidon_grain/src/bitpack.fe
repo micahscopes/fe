@@ -1,16 +1,10 @@
-//! Small, table-free bit-packing operations used by the Grain self-shrinker.
-//! The public operation below is exactly equivalent to visiting nine adjacent
-//! selector/data pairs in order, admitting the data bit whenever its selector
-//! is one. It uses broadword compaction so parameter derivation does not spend
-//! nine CTFE loop iterations on every 18-bit LFSR block.
+//! Small, table-free bit-packing operations for the Hades Grain
+//! self-shrinker.
 
 /// Apply the canonical self-shrinking rule to nine chronological pairs.
 /// Returns `(admitted_bits, admitted_count)`, with the earliest admitted bit
 /// at the most-significant occupied position of `admitted_bits`.
 pub const fn self_shrink_9(_ raw: u32) -> (u32, u32) {
-    // Compact bits 0, 2, ... 16 into bits 0..8, once for selectors and once
-    // for data. Keeping these stages in this function avoids charging six
-    // nested CTFE calls for every Grain block.
     let mut selectors = raw & 0x55555
     selectors = (selectors | (selectors >> 1)) & 0x33333
     selectors = (selectors | (selectors >> 2)) & 0x0f0f0f
@@ -22,7 +16,6 @@ pub const fn self_shrink_9(_ raw: u32) -> (u32, u32) {
     data = (data | (data >> 4)) & 0x00ff00ff
     data = (data | (data >> 8)) & 0x0000ffff
 
-    // Close every gap in the selector mask in four broadword stages.
     let mut selected = data & selectors
     let mut moving_mask = ((!selectors) << 1) & 511
     let mut packed_mask = selectors
@@ -48,8 +41,6 @@ pub const fn self_shrink_9(_ raw: u32) -> (u32, u32) {
     population = population + (population >> 8)
     let available = population & 0x1f
 
-    // Extraction packs chronologically into low-to-high positions. Reverse
-    // those bits so the earliest admitted output becomes most significant.
     let mut reversed = selected
     reversed = ((reversed >> 1) & 0x55555555) | ((reversed & 0x55555555) << 1)
     reversed = ((reversed >> 2) & 0x33333333) | ((reversed & 0x33333333) << 2)

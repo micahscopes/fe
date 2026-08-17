@@ -8,9 +8,9 @@ use core::marker::Copy
 
 use precision::bn254_fr::Bn254Fr
 use precision::field::{FieldElement, FieldWords, LIMB_BITS}
-use bitpack::self_shrink_9
+use poseidon_grain::{Grain80, field_element, random_bits, warm}
 
-pub use bitpack
+pub use poseidon_grain::bitpack
 
 pub const WIDTH: usize = 3
 pub const FULL_ROUNDS: usize = 8
@@ -31,112 +31,11 @@ pub type Fr = FieldElement<LIMBS, Bn254Fr>
 /// named marker types instead of threading untyped integer selectors.
 pub trait PoseidonDomain { const TAG: u32 }
 
-struct Grain80 { state: u128, outputs: u32, available: u32 }
-impl Copy for Grain80 {}
-
 struct PoseidonT3Parameters {
     round_constants: [FieldWords<LIMBS>; ROUND_CONSTANT_COUNT],
     mds: [FieldWords<LIMBS>; MDS_ENTRY_COUNT],
 }
 impl Copy for PoseidonT3Parameters {}
-
-const fn append_seed_bits(_ seed: u128, _ value: u128, _ width: u32) -> u128 {
-    (seed << (width as u128)) | value
-}
-
-const fn grain_seed() -> Grain80 {
-    let mut packed: u128 = 0
-    packed = append_seed_bits(packed, 1, 2)              // prime field
-    packed = append_seed_bits(packed, 0, 4)              // x^5 S-box
-    packed = append_seed_bits(packed, 254, 12)            // field size
-    packed = append_seed_bits(packed, 3, 12)              // state width
-    packed = append_seed_bits(packed, 8, 10)              // full rounds
-    packed = append_seed_bits(packed, 57, 10)             // partial rounds
-    packed = append_seed_bits(packed, (1 << 30) - 1, 30)  // terminal ones
-
-    // Store sequence index zero in bit zero. This makes a block of future
-    // recurrence bits a directly consumable little-endian bit stream.
-    let mut state: u128 = 0
-    let mut i: u32 = 0
-    while i < 80 {
-        let source = 79 - i
-        let bit = (packed >> (source as u128)) & 1
-        state = state | (bit << (i as u128))
-        i = i + 1
-    }
-    Grain80 { state: state, outputs: 0, available: 0 }
-}
-
-/// Advance by at most 18 bits. Every bit in this block depends only on the
-/// current 80-bit state because the nearest recurrence tap is index 62. The
-/// six shifted words therefore compute 18 ordinary one-bit LFSR steps in one
-/// exact bit-sliced operation.
-const fn grain_advance(_ source: Grain80, _ count: u32) -> Grain80 {
-    let shift = count as u128
-    let mask = (1 << shift) - 1
-    let bits = ((source.state >> 62)
-        ^ (source.state >> 51)
-        ^ (source.state >> 38)
-        ^ (source.state >> 23)
-        ^ (source.state >> 13)
-        ^ source.state) & mask
-    let raw: u32 = bits.downcast_truncate()
-
-    let admitted = self_shrink_9(raw)
-    Grain80 {
-        state: (source.state >> shift) | (bits << ((80 - count) as u128)),
-        outputs: admitted.0,
-        available: admitted.1,
-    }
-}
-
-const fn grain_warm() -> Grain80 {
-    let mut grain = grain_seed()
-    let mut i: u32 = 0
-    while i < 8 {
-        grain = grain_advance(grain, 18)
-        i = i + 1
-    }
-    grain = grain_advance(grain, 16)
-    grain.outputs = 0
-    grain.available = 0
-    grain
-}
-
-/// Read a big-endian bit string, matching `int("".join(bits), 2)` in the
-/// reference generator. The self-shrinker consumes the raw stream in pairs:
-/// a zero selector discards its data bit, while a one selector admits it.
-const fn grain_random_bits(_ source: Grain80, _ count: u32) -> (Grain80, u256) {
-    let mut grain = source
-    let mut value: u256 = 0
-    let mut i: u32 = 0
-    while i < count {
-        if grain.available == 0 {
-            grain = grain_advance(grain, 18)
-        }
-        let remaining = count - i
-        let take = if grain.available < remaining { grain.available } else { remaining }
-        let after = grain.available - take
-        let mask = (1 << take) - 1
-        let batch = (grain.outputs >> after) & mask
-        value = (value << (take as u256)) | (batch as u256)
-        grain.outputs = grain.outputs & ((1 << after) - 1)
-        grain.available = after
-        i = i + take
-    }
-    (grain, value)
-}
-
-const fn grain_field_element(_ source: Grain80) -> (Grain80, u256) {
-    let mut grain = source
-    let mut value: u256 = BN254_FR_PRIME
-    while value >= BN254_FR_PRIME {
-        let next = grain_random_bits(grain, FIELD_SIZE)
-        grain = next.0
-        value = next.1
-    }
-    (grain, value)
-}
 
 const fn montgomery_radix() -> u256 {
     let mut value: u256 = 1
@@ -209,7 +108,7 @@ const fn grain_mds_values(_ source: Grain80) -> (Grain80, [u256; 6]) {
     while !valid {
         let mut i: usize = 0
         while i < 6 {
-            let next = grain_random_bits(grain, FIELD_SIZE)
+            let next = random_bits(grain, FIELD_SIZE)
             grain = next.0
             values[i] = next.1 % BN254_FR_PRIME
             i = i + 1
@@ -262,12 +161,17 @@ const fn derive_mds(_ values: [u256; 6], _ radix: u256) -> [FieldWords<LIMBS>; M
 
 const fn derive_poseidon_t3_parameters() -> PoseidonT3Parameters {
     let radix = montgomery_radix()
-    let mut grain = grain_warm()
+    let mut grain = warm(
+        FIELD_SIZE,
+        WIDTH.downcast_truncate(),
+        FULL_ROUNDS.downcast_truncate(),
+        PARTIAL_ROUNDS.downcast_truncate(),
+    )
     let mut round_constants: [FieldWords<LIMBS>; ROUND_CONSTANT_COUNT] =
         [[0; LIMBS]; ROUND_CONSTANT_COUNT]
     let mut i: usize = 0
     while i < ROUND_CONSTANT_COUNT {
-        let next = grain_field_element(grain)
+        let next = field_element(grain, FIELD_SIZE, BN254_FR_PRIME)
         grain = next.0
         round_constants[i] = montgomery_words(next.1, radix)
         i = i + 1
