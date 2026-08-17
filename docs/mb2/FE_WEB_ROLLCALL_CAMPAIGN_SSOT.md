@@ -164,10 +164,12 @@ Legend:
   `ChildPlacement<B>` plus `supervise_child` now run the complete owning scope
   through the ordinary `Pending`/`Suspend`/`Timer` rail. Independent Bun
   mechanics, compiled-Fe Wasmtime reducer, and compiled-Fe/Bun structured-scope
-  gates pass. Remaining: connect the capability to the canonical Module Worker
-  object and immutable browser package, then compose nested child scopes.
-  Recursive resumable SCCs must remain explicitly refused until linked affine
-  frames are sound.
+  gates pass. The compiler-packaged `createCanonicalBrowserWorkerScope` now
+  maps Fe-selected epochs to policy-free canonical Worker mechanics. Remaining:
+  publish distinct parent and child Wasm artifacts, attach the capability from
+  the immutable browser package, then compose nested child scopes. Recursive
+  resumable SCCs must remain explicitly refused until linked affine frames are
+  sound.
 
 ## C. GPU pass graphs and perturbation
 

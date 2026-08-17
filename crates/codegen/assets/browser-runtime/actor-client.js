@@ -1,5 +1,8 @@
 import { createCanonicalMainThreadGpuBroker } from "./gpu-actor.js";
-import { createCanonicalModuleWorkerActor } from "./module-worker-actor.js";
+import {
+  createCanonicalModuleWorkerActor,
+  createModuleWorkerScope,
+} from "./module-worker-actor.js";
 import { compileActorAdapter } from "../interface.js";
 
 export async function createCanonicalBrowserActor({
@@ -42,5 +45,24 @@ export async function createCanonicalBrowserActor({
         close: () => broker.close(),
       };
     },
+  });
+}
+
+// Construct the policy-free browser capability consumed by Fe's
+// `ChildPlacement<WasmBackend>` handler. Fe supplies every epoch and decides
+// when this capability is called.
+export function createCanonicalBrowserWorkerScope(options) {
+  if (!options || typeof options !== "object" || Array.isArray(options)) {
+    throw new TypeError("canonical browser Worker scope options must be an object");
+  }
+  if (Object.hasOwn(options, "initialEpoch") || Object.hasOwn(options, "signal")) {
+    throw new TypeError("the owning Fe scope supplies Worker epoch and cancellation");
+  }
+  return createModuleWorkerScope({
+    createActor: ({ initialEpoch, signal }) => createCanonicalBrowserActor({
+      ...options,
+      initialEpoch,
+      signal,
+    }),
   });
 }

@@ -5759,6 +5759,7 @@ pub fn shade(x: u32, y: u32) -> u32 {
             .find_map(|(path, source)| (*path == "runtime/actor-client.js").then_some(*source))
             .unwrap();
         assert!(actor_client.contains("createCanonicalBrowserActor"));
+        assert!(actor_client.contains("createCanonicalBrowserWorkerScope"));
         assert!(actor_client.contains("createCanonicalMainThreadGpuBroker"));
         assert!(actor_client.contains("createCanonicalModuleWorkerActor"));
         assert!(!actor_client.contains("actorEnvelope"));

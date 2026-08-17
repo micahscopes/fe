@@ -46,9 +46,11 @@ Three independent gates protect the boundary:
   transport-failure meaning, and exactly-once cancellation cleanup.
 
 This is not yet the completed structured-scope feature. The target-neutral
-effect and owning Fe loop are landed, but the browser handler is not yet wired
-to the packaged canonical Module Worker object. That connection must expose
-the existing policy-free mechanics as the `workerScope` capability, then prove
-the immutable package in Chromium. Rich message values and nested child scopes
-remain later compiler-derived layers. JavaScript must not recreate supervision
-policy around the mechanical operations in the meantime.
+effect, owning Fe loop, and `createCanonicalBrowserWorkerScope` adapter are
+landed and compiler-packaged. The adapter maps each Fe-selected epoch to exactly
+one initial construction or successor restart and exposes abortable runtime
+failure observation. Remaining work must publish distinct parent-scope and
+child-actor Wasm artifacts, attach that capability from the immutable package,
+and prove it in Chromium. Rich message values and nested child scopes remain
+later compiler-derived layers. JavaScript must not recreate supervision policy
+around the mechanical operations in the meantime.

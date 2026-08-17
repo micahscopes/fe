@@ -18,7 +18,7 @@ export async function createModuleWorkerActor(options) {
     workerUrl, init = {}, adapter,
     requestSchema: suppliedRequestSchema,
     resultSchema: suppliedResultSchema,
-    maxPending = 32, initTimeoutMs = INIT_TIMEOUT,
+    maxPending = 32, initTimeoutMs = INIT_TIMEOUT, initialEpoch = 0, signal,
     createAuxiliaryPorts = () => ({ message: {}, transfer: [], close() {} }),
     WorkerCtor = Worker, MessageChannelCtor = MessageChannel,
     ...unknown
@@ -42,15 +42,36 @@ export async function createModuleWorkerActor(options) {
   if (!Number.isSafeInteger(initTimeoutMs) || initTimeoutMs < 1) {
     throw new TypeError("initTimeoutMs must be a positive safe integer");
   }
-  let epoch = 0;
+  if (!Number.isSafeInteger(initialEpoch) || initialEpoch < 0) {
+    throw new TypeError("initialEpoch must be a non-negative safe integer");
+  }
+  if (signal !== undefined && !(signal instanceof AbortSignal)) {
+    throw new TypeError("module Worker actor signal must be an AbortSignal");
+  }
+  let epoch = initialEpoch;
   let active;
   let closed = false;
   let failure;
+  let failureObserver;
   let transition = Promise.resolve();
   // Manual restart calls reserve replacement ownership synchronously so a
   // same-turn crash of the retiring worker cannot publish a competing failed
   // lifecycle. JavaScript never decides whether another restart should occur.
   let queuedManualRestarts = 0;
+  const rejectFailureObserver = (error) => {
+    if (!failureObserver) return;
+    const observer = failureObserver;
+    failureObserver = undefined;
+    observer.signal?.removeEventListener("abort", observer.onAbort);
+    observer.reject(error);
+  };
+  const publishFailure = (observedEpoch) => {
+    if (!failureObserver || failureObserver.epoch !== observedEpoch) return;
+    const observer = failureObserver;
+    failureObserver = undefined;
+    observer.signal?.removeEventListener("abort", observer.onAbort);
+    observer.resolve();
+  };
   const retire = (instance, reason) => {
     if (!instance || instance.retired) return;
     instance.retired = true;
@@ -62,7 +83,10 @@ export async function createModuleWorkerActor(options) {
     instance.worker.terminate();
     if (active === instance) active = undefined;
   };
-  const start = async () => {
+  const start = async (startSignal) => {
+    if (startSignal?.aborted) {
+      throw runtimeError("FE_ACTOR_ABORTED", "module worker start aborted");
+    }
     const worker = new WorkerCtor(workerUrl, { type: "module" });
     const channel = new MessageChannelCtor();
     const transport = createMessagePortActorTransport(channel.port1, {
@@ -92,6 +116,7 @@ export async function createModuleWorkerActor(options) {
         clearTimeout(timeout);
         channel.port1.removeEventListener("message", onMessage);
         worker.removeEventListener?.("error", onError);
+        startSignal?.removeEventListener("abort", onAbort);
       };
       cancelReady = cleanup;
       const rejectCleanly = (error) => { cleanup(); reject(error); };
@@ -111,11 +136,15 @@ export async function createModuleWorkerActor(options) {
       const onError = () => rejectCleanly(
         runtimeError("FE_ACTOR_WORKER_INIT", "module worker initialization failed"),
       );
+      const onAbort = () => rejectCleanly(
+        runtimeError("FE_ACTOR_ABORTED", "module worker start aborted"),
+      );
       const timeout = setTimeout(() => rejectCleanly(
         runtimeError("FE_ACTOR_WORKER_TIMEOUT", "module worker readiness timed out"),
       ), initTimeoutMs);
       channel.port1.addEventListener("message", onMessage);
       worker.addEventListener("error", onError);
+      startSignal?.addEventListener("abort", onAbort, { once: true });
     });
     try {
       worker.postMessage({ ...init, ...auxiliary.message, type: "init",
@@ -136,9 +165,10 @@ export async function createModuleWorkerActor(options) {
       if (candidate.retired || active !== candidate || closed) return;
       candidate.transport.fail("FE_ACTOR_WORKER_RUNTIME");
       retire(candidate, "module worker crashed");
+      failure = runtimeError("FE_ACTOR_WORKER_RUNTIME", "module worker crashed");
+      publishFailure(epoch);
       // An already-queued explicit restart owns the replacement lifecycle.
       if (queuedManualRestarts > 0) return;
-      failure = runtimeError("FE_ACTOR_WORKER_RUNTIME", "module worker crashed");
       transition = Promise.reject(failure);
       transition.catch(() => {});
     };
@@ -146,7 +176,7 @@ export async function createModuleWorkerActor(options) {
     active = candidate;
   };
 
-  await start();
+  await start(signal);
 
   const awaitTransition = (signal) => {
     if (signal?.aborted) {
@@ -165,7 +195,14 @@ export async function createModuleWorkerActor(options) {
       );
     });
   };
-  const restart = () => {
+  const restart = (options = {}) => {
+    if (!options || typeof options !== "object" || Array.isArray(options)) {
+      return Promise.reject(new TypeError("module Worker restart options must be an object"));
+    }
+    const restartSignal = options.signal;
+    if (restartSignal !== undefined && !(restartSignal instanceof AbortSignal)) {
+      return Promise.reject(new TypeError("module Worker restart signal must be an AbortSignal"));
+    }
     queuedManualRestarts += 1;
     const operation = transition.catch(() => {}).then(async () => {
       // This operation now owns the transition. Release only its reservation;
@@ -173,6 +210,12 @@ export async function createModuleWorkerActor(options) {
       // race on the worker this operation is replacing.
       queuedManualRestarts -= 1;
       if (closed) throw runtimeError("FE_ACTOR_CLOSED", "module worker actor is closed");
+      if (restartSignal?.aborted) {
+        throw runtimeError("FE_ACTOR_ABORTED", "module worker restart aborted");
+      }
+      rejectFailureObserver(
+        runtimeError("FE_ACTOR_WORKER_RESTART", "restarting module worker"),
+      );
       retire(active, "restarting module worker");
       if (epoch === Number.MAX_SAFE_INTEGER) {
         failure = runtimeError("FE_ACTOR_WORKER_TERMINAL", "module worker epoch exhausted");
@@ -181,7 +224,7 @@ export async function createModuleWorkerActor(options) {
       epoch += 1;
       failure = undefined;
       try {
-        await start();
+        await start(restartSignal);
         return epoch;
       } catch (error) {
         failure = error?.name === "ModuleWorkerActorError"
@@ -208,10 +251,60 @@ export async function createModuleWorkerActor(options) {
       if (!active) throw runtimeError("FE_ACTOR_WORKER_RUNTIME", "module worker is unavailable");
       return active.endpoint.request(envelope, options);
     },
+    observeFailure(expectedEpoch, options = {}) {
+      if (!Number.isSafeInteger(expectedEpoch) || expectedEpoch < 0) {
+        return Promise.reject(new TypeError("failure epoch must be a non-negative safe integer"));
+      }
+      if (!options || typeof options !== "object" || Array.isArray(options)) {
+        return Promise.reject(new TypeError("failure observation options must be an object"));
+      }
+      const observeSignal = options.signal;
+      if (observeSignal !== undefined && !(observeSignal instanceof AbortSignal)) {
+        return Promise.reject(new TypeError("failure observation signal must be an AbortSignal"));
+      }
+      if (closed) {
+        return Promise.reject(runtimeError("FE_ACTOR_CLOSED", "module worker actor is closed"));
+      }
+      if (expectedEpoch !== epoch) {
+        return Promise.reject(
+          runtimeError("FE_ACTOR_WORKER_RESTART", "failure observation epoch is stale"),
+        );
+      }
+      if (failure?.code === "FE_ACTOR_WORKER_RUNTIME") return Promise.resolve();
+      if (!active) {
+        return Promise.reject(
+          failure ?? runtimeError("FE_ACTOR_WORKER_RUNTIME", "module worker is unavailable"),
+        );
+      }
+      if (failureObserver) {
+        return Promise.reject(
+          runtimeError("FE_ACTOR_WORKER_PROTOCOL", "failure already has an observer"),
+        );
+      }
+      if (observeSignal?.aborted) {
+        return Promise.reject(runtimeError("FE_ACTOR_ABORTED", "failure observation aborted"));
+      }
+      return new Promise((resolve, reject) => {
+        const onAbort = () => {
+          if (failureObserver?.epoch !== expectedEpoch) return;
+          failureObserver = undefined;
+          reject(runtimeError("FE_ACTOR_ABORTED", "failure observation aborted"));
+        };
+        failureObserver = {
+          epoch: expectedEpoch,
+          signal: observeSignal,
+          onAbort,
+          resolve,
+          reject,
+        };
+        observeSignal?.addEventListener("abort", onAbort, { once: true });
+      });
+    },
     restart,
     close() {
       if (closed) return;
       closed = true;
+      rejectFailureObserver(runtimeError("FE_ACTOR_CLOSED", "module worker actor is closed"));
       retire(active, "module worker actor is closed");
     },
     epoch: () => epoch,
@@ -275,21 +368,122 @@ export async function createCanonicalModuleWorkerActor(options) {
       const code = match?.[0] ?? "FE_ACTOR_REMOTE";
       throw runtimeError(code, "canonical worker request failed");
     },
-    restart() {
+    restart(options) {
       // Reserve the underlying lifecycle transition synchronously. Besides
       // preserving call order, this lets a same-turn crash observe that the
       // explicit restart already owns replacement construction.
       lifecycleVersion += 1;
-      const operation = actor.restart().then((next) => {
+      const operation = actor.restart(options).then((next) => {
         requestId = 0;
         return next;
       });
       restartTail = operation;
       return operation;
     },
+    observeFailure: actor.observeFailure,
     close: actor.close,
     epoch: actor.epoch,
     pendingCount: actor.pendingCount,
     status: actor.status,
+  });
+}
+
+// Adapt one policy-free Module Worker actor to the three mechanical operations
+// consumed by the Fe `ChildPlacement` handler. This adapter has no clock,
+// timer, retry loop, budget, or lifecycle observer of its own. Each spawn epoch
+// is an explicit command from the owning Fe scope.
+export function createModuleWorkerScope({ createActor }) {
+  if (typeof createActor !== "function") {
+    throw new TypeError("module Worker scope requires an actor factory");
+  }
+  let actor;
+  let closed = false;
+  let spawning = false;
+
+  const checkedEpoch = (epoch) => {
+    if (!Number.isSafeInteger(epoch) || epoch < 0) {
+      throw new TypeError("module Worker scope epoch must be a non-negative safe integer");
+    }
+    return epoch;
+  };
+  const checkedSignal = (signal) => {
+    if (signal !== undefined && !(signal instanceof AbortSignal)) {
+      throw new TypeError("module Worker scope signal must be an AbortSignal");
+    }
+    return signal;
+  };
+  const validateActor = (candidate, expectedEpoch) => {
+    for (const method of ["restart", "observeFailure", "close", "epoch"]) {
+      if (typeof candidate?.[method] !== "function") {
+        candidate?.close?.();
+        throw new TypeError(`module Worker scope actor has no ${method} method`);
+      }
+    }
+    if (candidate.epoch() !== expectedEpoch) {
+      candidate.close();
+      throw runtimeError("FE_ACTOR_WORKER_PROTOCOL", "actor factory returned the wrong epoch");
+    }
+    return candidate;
+  };
+
+  return Object.freeze({
+    async spawn(rawEpoch, rawSignal) {
+      const epoch = checkedEpoch(rawEpoch);
+      const signal = checkedSignal(rawSignal);
+      if (closed) throw runtimeError("FE_ACTOR_CLOSED", "module Worker scope is closed");
+      if (spawning) {
+        throw runtimeError("FE_ACTOR_WORKER_PROTOCOL", "module Worker spawn is already active");
+      }
+      if (signal?.aborted) {
+        throw runtimeError("FE_ACTOR_ABORTED", "module Worker spawn aborted");
+      }
+      spawning = true;
+      try {
+        if (actor === undefined) {
+          const created = validateActor(
+            await createActor({ initialEpoch: epoch, signal }),
+            epoch,
+          );
+          if (closed) {
+            created.close();
+            throw runtimeError("FE_ACTOR_CLOSED", "module Worker scope is closed");
+          }
+          actor = created;
+          return;
+        }
+        if (actor.epoch() === Number.MAX_SAFE_INTEGER || actor.epoch() + 1 !== epoch) {
+          throw runtimeError("FE_ACTOR_WORKER_RESTART", "Fe selected a non-successor epoch");
+        }
+        const restarted = await actor.restart({ signal });
+        if (restarted !== epoch || actor.epoch() !== epoch) {
+          throw runtimeError("FE_ACTOR_WORKER_PROTOCOL", "actor restart returned the wrong epoch");
+        }
+      } finally {
+        spawning = false;
+      }
+    },
+    failure(rawEpoch, rawSignal) {
+      const epoch = checkedEpoch(rawEpoch);
+      const signal = checkedSignal(rawSignal);
+      if (closed) {
+        return Promise.reject(runtimeError("FE_ACTOR_CLOSED", "module Worker scope is closed"));
+      }
+      if (actor === undefined) {
+        return Promise.reject(
+          runtimeError("FE_ACTOR_WORKER_PROTOCOL", "failure observation has no active actor"),
+        );
+      }
+      return actor.observeFailure(epoch, { signal });
+    },
+    close(rawEpoch) {
+      checkedEpoch(rawEpoch);
+      if (closed) return;
+      closed = true;
+      actor?.close();
+    },
+    status: () => Object.freeze({
+      state: closed ? "closed" : actor === undefined ? "idle" : actor.status?.().state ?? "ready",
+      epoch: actor?.epoch() ?? null,
+    }),
   });
 }

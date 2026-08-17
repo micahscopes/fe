@@ -241,9 +241,12 @@ manifest-driven.
    existing affine `Pending`/`Suspend` and `Timer` effects. A compiled Fe/Bun
    gate proves exact epoch actions, bounded exhaustion, transport-failure
    distinction, and parent-cancellation close against adversarial host tapes.
-   Remaining: adapt the canonical Module Worker object to this fixed capability,
-   publish/start the owning scope in the real browser package, derive rich port
-   values, and compose nested scopes.
+   `createCanonicalBrowserWorkerScope` now adapts the canonical Module Worker
+   to this capability without adding a timer, budget, or retry loop, and the
+   compiler publishes it with the fixed actor runtime. Remaining: publish
+   distinct parent-scope and child-actor Wasm artifacts, attach/start the owning
+   scope in the real browser package, derive rich port values, and compose
+   nested scopes.
 7. [todo] Route WebGPU completion, device loss/recovery, and resource lifetime through
    the same outcome/scope machinery.
 8. [in progress] Expose typed device/viewport capability facts so Fe owns responsive

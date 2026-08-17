@@ -2465,11 +2465,13 @@ order:
    backoff, exhaustion, epoch, and parent-cancellation policy in ordinary Fe.
    `ChildPlacement<B>` and `supervise_child` now carry that policy through the
    real `Pending`/`Suspend`/`Timer` rail, with independent Bun mechanics,
-   compiled-Fe Wasmtime reducer, and compiled-Fe/Bun scope gates. Next, connect
-   the fixed capability to the canonical Module Worker and immutable browser
-   package, then add rich compiler-derived port payloads. Use that completed
-   control/reactive spine for shared interaction, GPU messages, and the future
-   proof queue.
+   compiled-Fe Wasmtime reducer, and compiled-Fe/Bun scope gates. The packaged
+   canonical adapter maps Fe epochs onto explicit construction/restart and
+   abortable failure observation with no policy. Next, publish distinct parent
+   scope and child actor Wasm artifacts and attach them from the immutable
+   browser package, then add rich compiler-derived port payloads. Use that
+   completed control/reactive spine for shared interaction, GPU messages, and
+   the future proof queue.
 
 Only then resume broad package cosmetics. Promote and split libraries when a
 shared abstraction has at least two real consumers and independent evidence;

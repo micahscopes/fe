@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { actorField, actorResultSchema, exactObject } from "./actor-endpoint.js";
 import { actorEnvelope } from "./actor-coordinator.js";
-import { createCanonicalModuleWorkerActor } from "./module-worker-actor.js";
+import {
+  createCanonicalModuleWorkerActor,
+  createModuleWorkerScope,
+} from "./module-worker-actor.js";
 
 const schemas = {
   requestSchema: {
@@ -50,7 +53,7 @@ class ScriptedWorker {
     this.port.start();
     if (this.behavior === "startup-error") {
       queueMicrotask(() => this.emit("error"));
-    } else {
+    } else if (this.behavior !== "silent") {
       queueMicrotask(() => this.port.postMessage({ type: "ready" }));
     }
   }
@@ -165,5 +168,46 @@ assert.deepEqual(retrying.status(), { state: "ready", epoch: 2, failureCode: nul
 retrying.close();
 assert.deepEqual(retrying.status(), { state: "closed", epoch: 2, failureCode: null });
 await assert.rejects(retrying.restart(), error => error.code === "FE_ACTOR_CLOSED");
+
+// The capability adapter executes only Fe-selected epochs. A failed initial
+// construction does not invent a replacement; the next explicit epoch creates
+// one, runtime failure observation is abortable, and one successor epoch maps
+// to exactly one mechanical restart.
+ScriptedWorker.script = ["startup-error", "hold", "ready"];
+ScriptedWorker.instances = [];
+const scope = createModuleWorkerScope({
+  createActor: ({ initialEpoch, signal }) => actor({ initialEpoch, signal }),
+});
+await assert.rejects(scope.spawn(0), error => error.code === "FE_ACTOR_WORKER_INIT");
+await flush();
+assert.equal(ScriptedWorker.instances.length, 1, "scope must not auto-retry startup");
+assert.equal(ScriptedWorker.instances[0].terminated, true);
+await scope.spawn(1);
+assert.deepEqual(scope.status(), { state: "ready", epoch: 1 });
+const observedFailure = scope.failure(1);
+ScriptedWorker.instances[1].emit("error");
+await observedFailure;
+assert.deepEqual(scope.status(), { state: "failed", epoch: 1 });
+await assert.rejects(scope.spawn(3), error => error.code === "FE_ACTOR_WORKER_RESTART");
+assert.equal(ScriptedWorker.instances.length, 2);
+await scope.spawn(2);
+assert.deepEqual(scope.status(), { state: "ready", epoch: 2 });
+assert.equal(ScriptedWorker.instances.length, 3);
+scope.close(2);
+assert.deepEqual(scope.status(), { state: "closed", epoch: 2 });
+
+// Cancellation during readiness promptly retires the partially constructed
+// Worker and leaves the mechanics adapter idle for Fe's terminal close.
+ScriptedWorker.script = ["silent"];
+ScriptedWorker.instances = [];
+const cancelledScope = createModuleWorkerScope({
+  createActor: ({ initialEpoch, signal }) => actor({ initialEpoch, signal }),
+});
+const spawnController = new AbortController();
+const cancelledSpawn = cancelledScope.spawn(0, spawnController.signal);
+spawnController.abort();
+await assert.rejects(cancelledSpawn, error => error.code === "FE_ACTOR_ABORTED");
+assert.equal(ScriptedWorker.instances[0].terminated, true);
+cancelledScope.close(0);
 
 console.log("policy-free module-worker lifecycle and explicit restart mechanics: ok");
