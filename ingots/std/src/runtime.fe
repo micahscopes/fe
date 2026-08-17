@@ -1,0 +1,234 @@
+//! Target-neutral structured-task lifecycle policy.
+//!
+//! Browser, native, and deterministic test handlers may realize child start,
+//! timer, restart, and close effects. This module owns the decisions: rolling
+//! restart admission, epoch advancement, backoff selection, terminal failure,
+//! and parent-cancellation propagation are ordinary Fe values and functions.
+//! No Worker object, clock, timer, error string, or JavaScript callback enters
+//! the policy surface.
+
+pub enum ChildFailureKind {
+    None,
+    Startup,
+    Runtime,
+}
+
+impl Copy for ChildFailureKind {}
+
+/// Raw structured-child lifecycle facts are epoch-tagged payload variants.
+/// This makes impossible payload combinations unrepresentable and lets Fe
+/// reject stale readiness, failure, and timer delivery.
+pub enum ChildLifecycleEvent {
+    SpawnRequested,
+    Ready(u32),
+    Failed(u32, ChildFailureKind, u64),
+    BackoffElapsed(u32),
+    ParentCancelled,
+}
+
+impl Copy for ChildLifecycleEvent {}
+
+/// One nominal phase replaces several independent booleans, so invalid states
+/// such as active-and-cancelled or starting-and-in-backoff cannot be built.
+pub enum ChildSupervisionPhase {
+    Idle,
+    Starting,
+    Active,
+    Backoff,
+    Terminal,
+    Cancelled,
+}
+
+impl Copy for ChildSupervisionPhase {}
+
+/// State retained by the parent Fe scope.
+pub struct ChildSupervisionState {
+    pub epoch: u32,
+    pub restarts_in_window: u32,
+    pub window_started_ms: u64,
+    pub phase: ChildSupervisionPhase,
+    pub last_failure: ChildFailureKind,
+}
+
+impl Copy for ChildSupervisionState {}
+
+impl ChildSupervisionState {
+    pub fn initial() -> Self {
+        Self {
+            epoch: 0,
+            restarts_in_window: 0,
+            window_started_ms: 0,
+            phase: ChildSupervisionPhase::Idle,
+            last_failure: ChildFailureKind::None,
+        }
+    }
+}
+
+/// Mechanism command selected by Fe. A platform handler may realize these
+/// commands, but it may not choose a different command or retry on its own.
+pub enum ChildSupervisionAction {
+    NoAction,
+    Spawn,
+    RestartAfter,
+    Close,
+    Fail,
+}
+
+impl Copy for ChildSupervisionAction {}
+
+pub struct ChildSupervisionStep {
+    pub state: ChildSupervisionState,
+    pub action: ChildSupervisionAction,
+    pub delay_ms: u64,
+}
+
+impl Copy for ChildSupervisionStep {}
+
+pub struct RestartWindowBudget {
+    pub max_restarts: u32,
+    pub window_ms: u64,
+    pub backoff_ms: u64,
+}
+
+impl Copy for RestartWindowBudget {}
+
+impl RestartWindowBudget {
+    pub fn bounded(max_restarts: u32, window_ms: u64, backoff_ms: u64) -> Self {
+        Self {
+            max_restarts: max_restarts,
+            window_ms: if window_ms == 0 { 1 } else { window_ms },
+            backoff_ms: backoff_ms,
+        }
+    }
+}
+
+/// A supervision policy is a pure Fe reducer. Effect handlers consume the
+/// returned action after the state has been committed by the owning scope.
+pub trait ChildSupervisionPolicy {
+    fn decide(
+        self,
+        event: own ChildLifecycleEvent,
+        state: own ChildSupervisionState,
+    ) -> ChildSupervisionStep
+}
+
+pub struct RestartWindow {
+    pub budget: RestartWindowBudget,
+}
+
+impl Copy for RestartWindow {}
+
+impl RestartWindow {
+    pub fn bounded(max_restarts: u32, window_ms: u64, backoff_ms: u64) -> Self {
+        Self {
+            budget: RestartWindowBudget::bounded(
+                max_restarts: max_restarts,
+                window_ms: window_ms,
+                backoff_ms: backoff_ms,
+            ),
+        }
+    }
+}
+
+fn within_window(now_ms: u64, started_ms: u64, window_ms: u64) -> bool {
+    now_ms >= started_ms && now_ms - started_ms < window_ms
+}
+
+impl ChildSupervisionPolicy for RestartWindow {
+    fn decide(
+        self,
+        event: own ChildLifecycleEvent,
+        state: own ChildSupervisionState,
+    ) -> ChildSupervisionStep {
+        let mut epoch = state.epoch
+        let mut restarts = state.restarts_in_window
+        let mut window_started = state.window_started_ms
+        let mut phase = state.phase
+        let mut last_failure = state.last_failure
+        let mut action = ChildSupervisionAction::NoAction
+        let mut delay_ms: u64 = 0
+
+        match phase {
+            ChildSupervisionPhase::Terminal => {}
+            ChildSupervisionPhase::Cancelled => {}
+            _ => {
+                match event {
+                    ChildLifecycleEvent::SpawnRequested => {
+                        match phase {
+                            ChildSupervisionPhase::Idle => {
+                                phase = ChildSupervisionPhase::Starting
+                                action = ChildSupervisionAction::Spawn
+                            }
+                            _ => {}
+                        }
+                    }
+                    ChildLifecycleEvent::Ready(observed_epoch) => {
+                        match phase {
+                            ChildSupervisionPhase::Starting => {
+                                if observed_epoch == epoch {
+                                    phase = ChildSupervisionPhase::Active
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    ChildLifecycleEvent::Failed(observed_epoch, failure, now_ms) => {
+                        let current_child = match phase {
+                            ChildSupervisionPhase::Starting => true,
+                            ChildSupervisionPhase::Active => true,
+                            _ => false,
+                        }
+                        if current_child && observed_epoch == epoch {
+                            last_failure = failure
+                            if restarts == 0 || !within_window(
+                                now_ms: now_ms,
+                                started_ms: window_started,
+                                window_ms: self.budget.window_ms,
+                            ) {
+                                restarts = 0
+                                window_started = now_ms
+                            }
+                            if restarts < self.budget.max_restarts && epoch < 4294967295 {
+                                restarts = restarts + 1
+                                epoch = epoch + 1
+                                phase = ChildSupervisionPhase::Backoff
+                                action = ChildSupervisionAction::RestartAfter
+                                delay_ms = self.budget.backoff_ms
+                            } else {
+                                phase = ChildSupervisionPhase::Terminal
+                                action = ChildSupervisionAction::Fail
+                            }
+                        }
+                    }
+                    ChildLifecycleEvent::BackoffElapsed(observed_epoch) => {
+                        match phase {
+                            ChildSupervisionPhase::Backoff => {
+                                if observed_epoch == epoch {
+                                    phase = ChildSupervisionPhase::Starting
+                                    action = ChildSupervisionAction::Spawn
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    ChildLifecycleEvent::ParentCancelled => {
+                        phase = ChildSupervisionPhase::Cancelled
+                        action = ChildSupervisionAction::Close
+                    }
+                }
+            }
+        }
+
+        ChildSupervisionStep {
+            state: ChildSupervisionState {
+                epoch: epoch,
+                restarts_in_window: restarts,
+                window_started_ms: window_started,
+                phase: phase,
+                last_failure: last_failure,
+            },
+            action: action,
+            delay_ms: delay_ms,
+        }
+    }
+}

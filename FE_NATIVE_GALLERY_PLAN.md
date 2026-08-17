@@ -823,8 +823,12 @@ done; do not derive a second master checklist from its historical ledger.
   real timer plus receive success/failure and both cancellation paths under
   Bun. A separate mechanics gate covers invalid delivery, timer cleanup when a
   Fe invocation traps, and non-consuming rejection of malformed posts.
-  MessagePort/EventSource attachment, Worker/spawn placement, structured child
-  scopes, and canonical task-package discovery remain open.
+  MessagePort/EventSource attachment and canonical task-package discovery are
+  landed. Worker mechanics are now policy-free, and ordinary `std::runtime` Fe
+  data plus a pure reducer own bounded restart/backoff decisions with an
+  independent compiled-Fe semantic gate. Typed Worker/spawn placement, wiring
+  those decisions into an owning Fe scope, and recursive linked child frames
+  remain open.
 - A cross-runtime honesty pass closed a semantic mismatch in that first
   realization. `TaskOutcome::Failure(E)` is now consistently an operation
   result rather than an automatic task failure: the target-neutral executor,
@@ -2456,9 +2460,14 @@ order:
    landed:** shared lifecycle facts, generated standards operations, and
    retry/fail/degrade selection use the same Fe-owned
    native/Wasm/runtime/browser rail.
-8. Add Worker/spawn placement, rich compiler-derived port payloads, structured
-   supervision, and then use the completed control/reactive spine for shared
-   interaction, GPU messages, and the future proof queue.
+8. **In progress:** the fixed Module Worker boundary now owns only explicit
+   spawn/restart/close and port mechanics. `std::runtime` owns bounded restart,
+   backoff, exhaustion, epoch, and parent-cancellation policy in ordinary Fe,
+   with independent Bun and compiled-Fe Wasmtime gates. Next, expose lifecycle
+   facts and mechanical commands through typed effects, retain policy state in
+   the owning Fe scope, then add rich compiler-derived port payloads. Use that
+   completed control/reactive spine for shared interaction, GPU messages, and
+   the future proof queue.
 
 Only then resume broad package cosmetics. Promote and split libraries when a
 shared abstraction has at least two real consumers and independent evidence;

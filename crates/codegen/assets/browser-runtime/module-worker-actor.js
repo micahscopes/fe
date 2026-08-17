@@ -3,7 +3,6 @@ import { createMessagePortActorTransport } from "./message-port-actor.js";
 import { actorEnvelope } from "./actor-coordinator.js";
 
 const INIT_TIMEOUT = 10_000;
-const MAX_TIMER_DELAY = 2_147_483_647;
 const runtimeError = (code, message) => {
   const error = new Error(`${code}: ${message}`);
   error.name = "ModuleWorkerActorError";
@@ -11,45 +10,26 @@ const runtimeError = (code, message) => {
   return error;
 };
 
-const supervisionPolicy = (value) => {
-  if (value === undefined) {
-    return Object.freeze({
-      maxRestarts: 0, windowMs: 1, backoffMs: 0, observe() {},
-      now: Date.now, schedule: setTimeout, cancel: clearTimeout, configured: false,
-    });
-  }
-  if (!value || typeof value !== "object") {
-    throw new TypeError("supervision must be an object");
+export async function createModuleWorkerActor(options) {
+  if (!options || typeof options !== "object" || Array.isArray(options)) {
+    throw new TypeError("module Worker actor options must be an object");
   }
   const {
-    maxRestarts, windowMs, backoffMs, observe = () => {},
-    now = Date.now, schedule = setTimeout, cancel = clearTimeout,
-  } = value;
-  if (!Number.isSafeInteger(maxRestarts) || maxRestarts < 0) {
-    throw new TypeError("supervision.maxRestarts must be a non-negative safe integer");
+    workerUrl, init = {}, adapter,
+    requestSchema: suppliedRequestSchema,
+    resultSchema: suppliedResultSchema,
+    maxPending = 32, initTimeoutMs = INIT_TIMEOUT,
+    createAuxiliaryPorts = () => ({ message: {}, transfer: [], close() {} }),
+    WorkerCtor = Worker, MessageChannelCtor = MessageChannel,
+    ...unknown
+  } = options;
+  if (Object.keys(unknown).length !== 0) {
+    throw new TypeError(
+      `module Worker actor received unsupported options: ${Object.keys(unknown).sort().join(", ")}`,
+    );
   }
-  if (!Number.isSafeInteger(windowMs) || windowMs < 1) {
-    throw new TypeError("supervision.windowMs must be a positive safe integer");
-  }
-  if (!Number.isSafeInteger(backoffMs) || backoffMs < 0 || backoffMs > MAX_TIMER_DELAY) {
-    throw new TypeError("supervision.backoffMs must be a bounded non-negative safe integer");
-  }
-  if (typeof observe !== "function" || typeof now !== "function"
-      || typeof schedule !== "function" || typeof cancel !== "function") {
-    throw new TypeError("supervision hooks must be functions");
-  }
-  return Object.freeze({
-    maxRestarts, windowMs, backoffMs, observe, now, schedule, cancel, configured: true,
-  });
-};
-
-export async function createModuleWorkerActor({
-  workerUrl, init = {}, adapter, requestSchema, resultSchema,
-  maxPending = 32, initTimeoutMs = INIT_TIMEOUT,
-  supervision,
-  createAuxiliaryPorts = () => ({ message: {}, transfer: [], close() {} }),
-  WorkerCtor = Worker, MessageChannelCtor = MessageChannel,
-}) {
+  let requestSchema = suppliedRequestSchema;
+  let resultSchema = suppliedResultSchema;
   if (adapter !== undefined) {
     if (!adapter?.requestSchema || !adapter?.resultSchema
         || typeof adapter.transferRequest !== "function") {
@@ -62,24 +42,15 @@ export async function createModuleWorkerActor({
   if (!Number.isSafeInteger(initTimeoutMs) || initTimeoutMs < 1) {
     throw new TypeError("initTimeoutMs must be a positive safe integer");
   }
-  const policy = supervisionPolicy(supervision);
   let epoch = 0;
   let active;
   let closed = false;
-  let terminal;
+  let failure;
   let transition = Promise.resolve();
   // Manual restart calls reserve replacement ownership synchronously so a
-  // same-turn crash of the retiring worker cannot also launch automatic
-  // recovery. Automatic recovery must never count itself here: a replacement
-  // can fail at the ready boundary and still needs another bounded attempt.
+  // same-turn crash of the retiring worker cannot publish a competing failed
+  // lifecycle. JavaScript never decides whether another restart should occur.
   let queuedManualRestarts = 0;
-  let pendingDelay;
-  const attempts = [];
-  const emit = (type, fields = {}) => {
-    const event = Object.freeze({ type, epoch, ...fields });
-    const observe = policy.observe;
-    try { observe(event); } catch { /* observation cannot affect supervision */ }
-  };
   const retire = (instance, reason) => {
     if (!instance || instance.retired) return;
     instance.retired = true;
@@ -162,95 +133,20 @@ export async function createModuleWorkerActor({
       throw runtimeError("FE_ACTOR_CLOSED", "module worker actor is closed");
     }
     candidate.onCrash = () => {
-      if (candidate.retired || active !== candidate || closed || terminal) return;
+      if (candidate.retired || active !== candidate || closed) return;
       candidate.transport.fail("FE_ACTOR_WORKER_RUNTIME");
       retire(candidate, "module worker crashed");
-      emit("failure", { classification: "runtime", code: "FE_ACTOR_WORKER_RUNTIME" });
-      // An already-queued explicit restart owns the replacement. Starting a
-      // second recovery here would construct two workers for one epoch.
+      // An already-queued explicit restart owns the replacement lifecycle.
       if (queuedManualRestarts > 0) return;
-      transition = recover("runtime");
+      failure = runtimeError("FE_ACTOR_WORKER_RUNTIME", "module worker crashed");
+      transition = Promise.reject(failure);
       transition.catch(() => {});
     };
     worker.addEventListener("error", candidate.onCrash);
     active = candidate;
-    emit("ready");
   };
 
-  const waitBackoff = () => {
-    if (policy.backoffMs === 0) return Promise.resolve();
-    return new Promise((resolve, reject) => {
-      const schedule = policy.schedule;
-      const timer = schedule(() => {
-        if (pendingDelay?.timer !== timer) return;
-        pendingDelay = undefined;
-        resolve();
-      }, policy.backoffMs);
-      pendingDelay = { timer, reject };
-    });
-  };
-  const nextRestart = () => {
-    const nowFn = policy.now;
-    const now = nowFn();
-    if (!Number.isFinite(now)) throw new TypeError("supervision.now must return a finite number");
-    while (attempts.length > 0 && now - attempts[0] >= policy.windowMs) attempts.shift();
-    if (attempts.length >= policy.maxRestarts) return null;
-    attempts.push(now);
-    return attempts.length;
-  };
-  const recover = async (classification) => {
-    let failureClass = classification;
-    while (!closed) {
-      const attempt = nextRestart();
-      if (attempt === null) {
-        terminal = runtimeError(
-          "FE_ACTOR_WORKER_TERMINAL",
-          "module worker restart policy exhausted",
-        );
-        emit("terminal", {
-          classification: failureClass,
-          code: terminal.code,
-          attempts: attempts.length,
-        });
-        throw terminal;
-      }
-      if (epoch === Number.MAX_SAFE_INTEGER) {
-        terminal = runtimeError("FE_ACTOR_WORKER_TERMINAL", "module worker epoch exhausted");
-        emit("terminal", {
-          classification: failureClass, code: terminal.code, attempts: attempts.length,
-        });
-        throw terminal;
-      }
-      epoch += 1;
-      emit("backoff", { classification: failureClass, attempt, delayMs: policy.backoffMs });
-      await waitBackoff();
-      if (closed) throw runtimeError("FE_ACTOR_CLOSED", "module worker actor is closed");
-      emit("restart", { classification: failureClass, attempt });
-      try {
-        await start();
-        return epoch;
-      } catch (error) {
-        if (closed) throw runtimeError("FE_ACTOR_CLOSED", "module worker actor is closed");
-        failureClass = "startup";
-        emit("failure", {
-          classification: "startup",
-          code: error?.code ?? "FE_ACTOR_WORKER_INIT",
-        });
-      }
-    }
-    throw runtimeError("FE_ACTOR_CLOSED", "module worker actor is closed");
-  };
-
-  try {
-    await start();
-  } catch (error) {
-    emit("failure", {
-      classification: "startup", code: error?.code ?? "FE_ACTOR_WORKER_INIT",
-    });
-    if (!policy.configured) throw error;
-    transition = recover("startup");
-    await transition;
-  }
+  await start();
 
   const awaitTransition = (signal) => {
     if (signal?.aborted) {
@@ -277,22 +173,21 @@ export async function createModuleWorkerActor({
       // race on the worker this operation is replacing.
       queuedManualRestarts -= 1;
       if (closed) throw runtimeError("FE_ACTOR_CLOSED", "module worker actor is closed");
-      if (terminal) throw terminal;
       retire(active, "restarting module worker");
       if (epoch === Number.MAX_SAFE_INTEGER) {
-        throw runtimeError("FE_ACTOR_WORKER_TERMINAL", "module worker epoch exhausted");
+        failure = runtimeError("FE_ACTOR_WORKER_TERMINAL", "module worker epoch exhausted");
+        throw failure;
       }
       epoch += 1;
-      emit("restart", { classification: "manual", attempt: 0 });
+      failure = undefined;
       try {
         await start();
         return epoch;
       } catch (error) {
-        emit("failure", {
-          classification: "startup", code: error?.code ?? "FE_ACTOR_WORKER_INIT",
-        });
-        if (!policy.configured) throw error;
-        return recover("startup");
+        failure = error?.name === "ModuleWorkerActorError"
+          ? error
+          : runtimeError("FE_ACTOR_WORKER_INIT", "module worker initialization failed");
+        throw failure;
       }
     });
     transition = operation;
@@ -303,37 +198,28 @@ export async function createModuleWorkerActor({
     async ready(options = {}) {
       await awaitTransition(options.signal);
       if (closed) throw runtimeError("FE_ACTOR_CLOSED", "module worker actor is closed");
-      if (terminal) throw terminal;
+      if (failure) throw failure;
       return epoch;
     },
     async request(envelope, options = {}) {
       await awaitTransition(options.signal);
       if (closed) throw runtimeError("FE_ACTOR_CLOSED", "module worker actor is closed");
-      if (terminal) throw terminal;
+      if (failure) throw failure;
+      if (!active) throw runtimeError("FE_ACTOR_WORKER_RUNTIME", "module worker is unavailable");
       return active.endpoint.request(envelope, options);
     },
     restart,
     close() {
       if (closed) return;
       closed = true;
-      if (pendingDelay) {
-        const { timer, reject } = pendingDelay;
-        pendingDelay = undefined;
-        const cancel = policy.cancel;
-        cancel(timer);
-        reject(runtimeError("FE_ACTOR_CLOSED", "module worker actor is closed"));
-      }
       retire(active, "module worker actor is closed");
-      emit("close");
     },
     epoch: () => epoch,
     pendingCount: () => active?.endpoint.pendingCount() ?? 0,
     status: () => Object.freeze({
-      state: closed ? "closed" : terminal ? "terminal"
-        : active ? "ready" : pendingDelay ? "backoff" : "starting",
+      state: closed ? "closed" : failure ? "failed" : active ? "ready" : "starting",
       epoch,
-      restartsInWindow: attempts.length,
-      terminalCode: terminal?.code ?? null,
+      failureCode: failure?.code ?? null,
     }),
   });
 }

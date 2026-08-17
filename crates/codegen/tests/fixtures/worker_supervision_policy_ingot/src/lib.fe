@@ -1,0 +1,57 @@
+use std::{
+    ChildFailureKind, ChildLifecycleEvent, ChildSupervisionPhase,
+    ChildSupervisionPolicy, ChildSupervisionState, ChildSupervisionStep,
+    RestartWindow,
+}
+
+enum GateLifecycleKind {
+    SpawnRequested,
+    Ready,
+    Failed,
+    BackoffElapsed,
+    ParentCancelled,
+}
+
+/// Flat executable gate around the ordinary nominal Fe policy. The scalar
+/// boundary exists only for the independent Wasmtime oracle; application code
+/// uses the payload variants and records directly.
+pub fn supervise(
+    kind: GateLifecycleKind,
+    failure: ChildFailureKind,
+    observed_epoch: u32,
+    now_ms: u64,
+    epoch: u32,
+    restarts_in_window: u32,
+    window_started_ms: u64,
+    phase: ChildSupervisionPhase,
+    last_failure: ChildFailureKind,
+    max_restarts: u32,
+    window_ms: u64,
+    backoff_ms: u64,
+) -> ChildSupervisionStep {
+    let event = match kind {
+        GateLifecycleKind::SpawnRequested => ChildLifecycleEvent::SpawnRequested,
+        GateLifecycleKind::Ready => ChildLifecycleEvent::Ready(observed_epoch),
+        GateLifecycleKind::Failed => {
+            ChildLifecycleEvent::Failed(observed_epoch, failure, now_ms)
+        }
+        GateLifecycleKind::BackoffElapsed => {
+            ChildLifecycleEvent::BackoffElapsed(observed_epoch)
+        }
+        GateLifecycleKind::ParentCancelled => ChildLifecycleEvent::ParentCancelled,
+    }
+    RestartWindow::bounded(
+        max_restarts: max_restarts,
+        window_ms: window_ms,
+        backoff_ms: backoff_ms,
+    ).decide(
+        event: event,
+        state: ChildSupervisionState {
+            epoch: epoch,
+            restarts_in_window: restarts_in_window,
+            window_started_ms: window_started_ms,
+            phase: phase,
+            last_failure: last_failure,
+        },
+    )
+}

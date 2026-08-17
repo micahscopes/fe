@@ -156,9 +156,16 @@ Legend:
   JavaScript mirrors Fe field order or success-lane widths.
 - [ ] Attach opaque ports through Fe-owned spawn/Worker placement, then derive
   rich canonical message payloads from Fe types.
-- [ ] Add structured child scopes, admission, supervision, and restart/backoff
-  policy. Recursive resumable SCCs must remain explicitly refused until linked
-  affine frames are sound.
+- [~] Add structured child scopes, admission, supervision, and restart/backoff
+  policy. The fixed Module Worker runtime no longer owns clocks, retry windows,
+  backoff, or automatic recovery. Ordinary `std::runtime` Fe types and the
+  pure `RestartWindow` reducer now own epoch advancement, rolling-window
+  admission, restart/backoff selection, exhaustion, and parent cancellation.
+  Independent Bun mechanics and compiled-Fe Wasmtime semantic gates pass.
+  Remaining: route lifecycle facts and spawn/restart/close commands through
+  typed effects, retain the reducer state in the owning Fe scope, and compose
+  nested child scopes. Recursive resumable SCCs must remain explicitly refused
+  until linked affine frames are sound.
 
 ## C. GPU pass graphs and perturbation
 
@@ -559,8 +566,8 @@ fallback. The semantic receipts are:
 5. Lower the BabyBear leaf prover and recursive merges through Fe Conal/CTFE
    WebGPU schedules, then run the complete progressive proof/verify/tamper page
    through Chrome.
-6. Add Worker/port placement and supervision on the now-complete typed fetch
-   and runtime-control spine.
+6. Wire the landed Fe supervision reducer to Worker/port placement through the
+   typed runtime-control spine, then derive rich canonical port payloads.
 7. Delete the runtime manifest and finish the legacy disposition.
 8. Run the exact G5 command once at the final DONE gate.
 

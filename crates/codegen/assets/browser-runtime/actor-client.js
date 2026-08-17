@@ -11,8 +11,11 @@ export async function createCanonicalBrowserActor({
 }) {
   if (Object.hasOwn(actorOptions, "adapter")
       || Object.hasOwn(actorOptions, "createAuxiliaryPorts")
-      || Object.hasOwn(actorOptions, "init")) {
-    throw new TypeError("generated actor composition owns adapter, init, and auxiliary ports");
+      || Object.hasOwn(actorOptions, "init")
+      || Object.hasOwn(actorOptions, "supervision")) {
+    throw new TypeError(
+      "generated actor composition owns adapter, init, and auxiliary ports; supervision is Fe policy",
+    );
   }
   const adapter = compileActorAdapter();
   const hasMainThreadGpu = Object.values(adapter.intents).some((intent) =>
