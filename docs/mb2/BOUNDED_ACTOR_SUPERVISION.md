@@ -66,6 +66,8 @@ its `Worker` behaviors, and emits a zero-import canonical child; applications
 provide no child ID, URL, manifest, or behavior-name table. The adapter maps
 each Fe-selected epoch to exactly one initial construction or successor restart
 and exposes abortable runtime-failure observation. Multiple children in one
-parent, rich message values, DEC migration, and nested child scopes remain
-later compiler-derived layers. JavaScript must not recreate supervision policy
-around the mechanical operations in the meantime.
+parent now share one generated completion rail, and recursively scalar record
+variants cross their type-derived mailboxes. Descriptor-bearing variant
+messages, DEC migration, and nested child scopes remain later compiler-derived
+layers. JavaScript must not recreate supervision policy around the mechanical
+operations in the meantime.

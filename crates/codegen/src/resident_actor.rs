@@ -319,10 +319,13 @@ fn canonical_mailbox_scalar_value(ty: &CanonicalType) -> bool {
         CanonicalType::Record(fields) => fields
             .iter()
             .all(|field| canonical_mailbox_scalar_value(&field.ty)),
-        CanonicalType::Variant(_)
-        | CanonicalType::Bytes
-        | CanonicalType::String
-        | CanonicalType::List { .. } => false,
+        CanonicalType::Variant(variants) => variants.iter().all(|variant| {
+            variant
+                .fields
+                .iter()
+                .all(|field| canonical_mailbox_scalar_value(&field.ty))
+        }),
+        CanonicalType::Bytes | CanonicalType::String | CanonicalType::List { .. } => false,
     }
 }
 
@@ -430,7 +433,7 @@ fn validate_actor_mailbox_requests(
             || !canonical_mailbox_scalar_value(&response_value)
         {
             return Err(ResidentActorError::Contract(
-                "typed child mailbox currently requires owned scalar records; borrowed descriptors and payload variants need the canonical post-return memory bridge"
+                "typed child mailbox currently requires owned scalar value trees; bytes, strings, and lists need the canonical post-return memory bridge"
                     .to_owned(),
             ));
         }

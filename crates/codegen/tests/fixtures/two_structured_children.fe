@@ -8,8 +8,23 @@ use std::host::Resumable
 use std::runtime::{BrowserActorMailbox, ChildScopeExit, supervise_browser_child}
 use std::wasm::WasmBackend
 
-pub struct ScaleRequest { pub value: u32 }
-pub struct ScaleResponse { pub value: u32 }
+pub enum ScaleMode {
+    Double,
+    Multiply { factor: u32 },
+}
+
+pub enum ScaleCommand {
+    Ignore,
+    Apply { value: u32, mode: ScaleMode },
+}
+
+pub enum ScaleResult {
+    Rejected { code: u32, detail: u32 },
+    Scaled { value: u32 },
+}
+
+pub struct ScaleRequest { pub command: ScaleCommand }
+pub struct ScaleResponse { pub result: ScaleResult }
 pub struct OffsetRequest { pub value: u32 }
 pub struct OffsetResponse { pub value: u32 }
 pub struct ParentEvent { pub value: u32 }
@@ -18,7 +33,19 @@ pub struct ParentProjection { pub value: u32 }
 
 actor ScaleChild {
     fn scale(request: ScaleRequest) -> ScaleResponse uses (Worker) {
-        ScaleResponse { value: request.value * 2 }
+        match request.command {
+            ScaleCommand::Ignore => ScaleResponse {
+                result: ScaleResult::Rejected { code: 1, detail: 99 },
+            }
+            ScaleCommand::Apply { value, mode } => match mode {
+                ScaleMode::Double => ScaleResponse {
+                    result: ScaleResult::Scaled { value: value * 2 },
+                }
+                ScaleMode::Multiply { factor } => ScaleResponse {
+                    result: ScaleResult::Scaled { value: value * factor },
+                }
+            }
+        }
     }
 }
 
@@ -98,8 +125,16 @@ actor Parent {
             ActorMailbox<WasmBackend, ScaleChild> = BrowserActorMailbox<ScaleChild> {},
             Suspend<WasmBackend, u32> = Resumable {},
         ) {
-            match request_scale(ScaleRequest { value: self.value }) {
-                TaskOutcome::Success(response,) => response.value
+            match request_scale(ScaleRequest {
+                command: ScaleCommand::Apply {
+                    value: self.value,
+                    mode: ScaleMode::Double,
+                },
+            }) {
+                TaskOutcome::Success(response,) => match response.result {
+                    ScaleResult::Scaled { value } => value
+                    ScaleResult::Rejected { code, detail: _ } => 700 + code
+                }
                 TaskOutcome::Failure(error,) => 100 + error
                 TaskOutcome::Cancelled => 200
             }

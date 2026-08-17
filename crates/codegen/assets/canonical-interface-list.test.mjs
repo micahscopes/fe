@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   compileCanonicalActorAdapter,
+  compileCanonicalActorMailbox,
   compileCanonicalInterfaceManifest,
 } from "./canonical-interface.js";
 
@@ -243,6 +244,71 @@ test("nested transfer rejects incompatible typed aliases of one owned buffer", (
       nested: { tag: "some", bytes: new Uint8Array(buffer) },
     }, { lane: "update" }),
     /aliases a buffer through incompatible canonical transfer layouts/,
+  );
+});
+
+test("actor mailboxes derive nested scalar variants with canonical inactive lanes", () => {
+  const u32 = { align: 4, kind: "u32", size: 4 };
+  const mode = {
+    align: 4,
+    kind: "variant",
+    size: 8,
+    tag_offset: 0,
+    variants: [
+      { fields: [], name: "plain", tag: 0 },
+      { fields: [{ layout: u32, name: "factor", offset: 4 }], name: "weighted", tag: 1 },
+    ],
+  };
+  const command = {
+    align: 4,
+    kind: "variant",
+    size: 16,
+    tag_offset: 0,
+    variants: [
+      { fields: [], name: "none", tag: 0 },
+      {
+        fields: [
+          { layout: u32, name: "value", offset: 4 },
+          { layout: mode, name: "mode", offset: 8 },
+        ],
+        name: "apply",
+        tag: 1,
+      },
+    ],
+  };
+  const source = manifest(command, command);
+  const mailbox = compileCanonicalActorMailbox(source).update;
+  assert.equal(mailbox.requestWidth, 4);
+  assert.equal(mailbox.responseWidth, 4);
+  assert.deepEqual(
+    mailbox.liftRequest([1, 7, 1, 3]),
+    { tag: "apply", value: 7, mode: { tag: "weighted", factor: 3 } },
+  );
+  assert.deepEqual(
+    mailbox.liftRequest([1, 7, 0, 0]),
+    { tag: "apply", value: 7, mode: { tag: "plain" } },
+  );
+  assert.deepEqual(mailbox.liftRequest([0, 0, 0, 0]), { tag: "none" });
+  assert.throws(
+    () => mailbox.liftRequest([0, 9, 0, 0]),
+    /inactive lane is not canonical zero/,
+  );
+  assert.throws(
+    () => mailbox.liftRequest([1, 7, 0, 4]),
+    /inactive lane is not canonical zero/,
+  );
+  assert.deepEqual(
+    mailbox.lowerResponse({
+      tag: "apply",
+      value: 11,
+      mode: { tag: "weighted", factor: 5 },
+    }),
+    [1, 11, 1, 5],
+  );
+  assert.deepEqual(mailbox.lowerResponse({ tag: "none" }), [0, 0, 0, 0]);
+  assert.throws(
+    () => mailbox.lowerResponse({ tag: "none", value: 1 }),
+    /unexpected or missing fields/,
   );
 });
 

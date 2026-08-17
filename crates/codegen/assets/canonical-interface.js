@@ -593,6 +593,14 @@ function mailboxScalarWidth(layout, path) {
       (width, field) => width + mailboxScalarWidth(field.layout, `${path}.${field.name}`),
       0,
     );
+    case "variant": return 1 + layout.variants.reduce(
+      (width, variant) => width + variant.fields.reduce(
+        (variantWidth, field) => variantWidth
+          + mailboxScalarWidth(field.layout, `${path}.${variant.name}.${field.name}`),
+        0,
+      ),
+      0,
+    );
     default:
       throw new TypeError(
         `${path} is not an owned scalar mailbox value; canonical memory transport is required`,
@@ -606,6 +614,26 @@ function liftMailboxScalar(layout, carriers, state, path) {
       field.name,
       liftMailboxScalar(field.layout, carriers, state, `${path}.${field.name}`),
     ]));
+  }
+  if (layout.kind === "variant") {
+    if (state.index >= carriers.length) throw new TypeError(`${path}.tag has no Wasm carrier`);
+    const rawTag = carriers[state.index++];
+    if (!Number.isInteger(rawTag) || rawTag < 0 || rawTag >= layout.variants.length) {
+      throw new TypeError(`${path}.tag is not a known variant`);
+    }
+    const active = layout.variants[rawTag];
+    const value = { tag: active.name };
+    for (const variant of layout.variants) {
+      for (const field of variant.fields) {
+        const fieldPath = `${path}.${variant.name}.${field.name}`;
+        if (variant.tag === rawTag) {
+          value[field.name] = liftMailboxScalar(field.layout, carriers, state, fieldPath);
+        } else {
+          consumeMailboxZeros(field.layout, carriers, state, fieldPath);
+        }
+      }
+    }
+    return value;
   }
   if (state.index >= carriers.length) {
     throw new TypeError(`${path} has no Wasm carrier`);
@@ -641,11 +669,79 @@ function liftMailboxScalar(layout, carriers, state, path) {
   }
 }
 
+function consumeMailboxZeros(layout, carriers, state, path) {
+  if (layout.kind === "record") {
+    for (const field of layout.fields) {
+      consumeMailboxZeros(field.layout, carriers, state, `${path}.${field.name}`);
+    }
+    return;
+  }
+  if (layout.kind === "variant") {
+    if (state.index >= carriers.length) throw new TypeError(`${path}.tag has no Wasm carrier`);
+    const tag = carriers[state.index++];
+    if (tag !== 0) throw new TypeError(`${path}.tag inactive lane is not canonical zero`);
+    for (const variant of layout.variants) {
+      for (const field of variant.fields) {
+        consumeMailboxZeros(
+          field.layout,
+          carriers,
+          state,
+          `${path}.${variant.name}.${field.name}`,
+        );
+      }
+    }
+    return;
+  }
+  const value = liftMailboxScalar(layout, carriers, state, path);
+  if (value !== false && value !== 0 && value !== 0n) {
+    throw new TypeError(`${path} inactive lane is not canonical zero`);
+  }
+  if (typeof value === "number" && Object.is(value, -0)) {
+    throw new TypeError(`${path} inactive lane is not canonical positive zero`);
+  }
+}
+
+function appendMailboxZeros(layout, output) {
+  if (layout.kind === "record") {
+    for (const field of layout.fields) appendMailboxZeros(field.layout, output);
+    return;
+  }
+  if (layout.kind === "variant") {
+    output.push(0);
+    for (const variant of layout.variants) {
+      for (const field of variant.fields) appendMailboxZeros(field.layout, output);
+    }
+    return;
+  }
+  output.push(layout.kind === "i64" || layout.kind === "u64" ? 0n : 0);
+}
+
 function lowerMailboxScalar(layout, value, output, path) {
   if (layout.kind === "record") {
     exactKeys(value, layout.fields.map((field) => field.name), path);
     for (const field of layout.fields) {
       lowerMailboxScalar(field.layout, value[field.name], output, `${path}.${field.name}`);
+    }
+    return;
+  }
+  if (layout.kind === "variant") {
+    const active = layout.variants.find((variant) => variant.name === value?.tag);
+    if (!active) throw new TypeError(`${path}.tag is not a known variant`);
+    exactKeys(value, ["tag", ...active.fields.map((field) => field.name)], path);
+    output.push(active.tag);
+    for (const variant of layout.variants) {
+      for (const field of variant.fields) {
+        if (variant.tag === active.tag) {
+          lowerMailboxScalar(
+            field.layout,
+            value[field.name],
+            output,
+            `${path}.${variant.name}.${field.name}`,
+          );
+        } else {
+          appendMailboxZeros(field.layout, output);
+        }
+      }
     }
     return;
   }

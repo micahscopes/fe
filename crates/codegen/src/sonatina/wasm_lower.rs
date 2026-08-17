@@ -384,6 +384,391 @@ fn zero_immediate(ty: Type) -> Option<Immediate> {
     }
 }
 
+/// A recursively scalar canonical value, viewed from its wasm32 memory layout.
+///
+/// Canonical variants are tagged unions in memory, but Fe payload enums use a
+/// value ABI of `tag + every variant payload lane`. Keeping that distinction in
+/// one compiler-owned plan lets request lowering load only the active union
+/// member and fill inactive value lanes with canonical zeros. Response lowering
+/// performs the inverse operation and stores only the active union member.
+#[derive(Clone, Debug)]
+enum CanonicalScalarValuePlan {
+    Scalar {
+        offset: u32,
+        ty: Type,
+    },
+    Record(Vec<CanonicalScalarValuePlan>),
+    Variant {
+        tag_offset: u32,
+        variants: Vec<Vec<CanonicalScalarValuePlan>>,
+    },
+}
+
+impl CanonicalScalarValuePlan {
+    fn append_flat_types(&self, output: &mut Vec<Type>) {
+        match self {
+            Self::Scalar { ty, .. } => output.push(*ty),
+            Self::Record(fields) => {
+                for field in fields {
+                    field.append_flat_types(output);
+                }
+            }
+            Self::Variant { variants, .. } => {
+                output.push(Type::I32);
+                for variant in variants {
+                    for field in variant {
+                        field.append_flat_types(output);
+                    }
+                }
+            }
+        }
+    }
+
+    fn flat_width(&self) -> usize {
+        match self {
+            Self::Scalar { .. } => 1,
+            Self::Record(fields) => fields.iter().map(Self::flat_width).sum(),
+            Self::Variant { variants, .. } => {
+                1 + variants
+                    .iter()
+                    .flatten()
+                    .map(Self::flat_width)
+                    .sum::<usize>()
+            }
+        }
+    }
+}
+
+fn canonical_layout_contains_variant(layout: &crate::CanonicalLayout) -> bool {
+    match &layout.shape {
+        crate::CanonicalShape::Record { fields } => fields
+            .iter()
+            .any(|field| canonical_layout_contains_variant(&field.layout)),
+        crate::CanonicalShape::Variant { .. } => true,
+        crate::CanonicalShape::Bool
+        | crate::CanonicalShape::U8
+        | crate::CanonicalShape::I32
+        | crate::CanonicalShape::U32
+        | crate::CanonicalShape::I64
+        | crate::CanonicalShape::U64
+        | crate::CanonicalShape::F32
+        | crate::CanonicalShape::Bytes { .. }
+        | crate::CanonicalShape::String { .. }
+        | crate::CanonicalShape::List { .. } => false,
+    }
+}
+
+fn canonical_scalar_value_plan(
+    layout: &crate::CanonicalLayout,
+    base: u32,
+    path: &str,
+) -> Result<CanonicalScalarValuePlan, LowerError> {
+    use crate::CanonicalShape;
+    let scalar = |ty| CanonicalScalarValuePlan::Scalar { offset: base, ty };
+    Ok(match &layout.shape {
+        CanonicalShape::Bool => scalar(Type::I1),
+        CanonicalShape::U8 => scalar(Type::I8),
+        CanonicalShape::I32 | CanonicalShape::U32 => scalar(Type::I32),
+        CanonicalShape::I64 | CanonicalShape::U64 => scalar(Type::I64),
+        CanonicalShape::F32 => scalar(Type::F32),
+        CanonicalShape::Record { fields } => {
+            let mut plans = Vec::with_capacity(fields.len());
+            for field in fields {
+                let offset = base.checked_add(field.offset).ok_or_else(|| {
+                    LowerError::Unsupported(format!(
+                        "canonical scalar record offset overflow at `{path}.{}`",
+                        field.name
+                    ))
+                })?;
+                plans.push(canonical_scalar_value_plan(
+                    &field.layout,
+                    offset,
+                    &format!("{path}.{}", field.name),
+                )?);
+            }
+            CanonicalScalarValuePlan::Record(plans)
+        }
+        CanonicalShape::Variant {
+            tag_offset,
+            variants,
+        } => {
+            let tag_offset = base.checked_add(*tag_offset).ok_or_else(|| {
+                LowerError::Unsupported(format!(
+                    "canonical scalar variant tag offset overflow at `{path}`"
+                ))
+            })?;
+            let mut plans = Vec::with_capacity(variants.len());
+            for (expected_tag, variant) in variants.iter().enumerate() {
+                if variant.tag != expected_tag as u32 {
+                    return Err(LowerError::Unsupported(format!(
+                        "canonical scalar variant `{path}` has non-contiguous tag {}",
+                        variant.tag
+                    )));
+                }
+                let mut fields = Vec::with_capacity(variant.fields.len());
+                for field in &variant.fields {
+                    let offset = base.checked_add(field.offset).ok_or_else(|| {
+                        LowerError::Unsupported(format!(
+                            "canonical scalar variant offset overflow at `{path}.{}.{}`",
+                            variant.name, field.name
+                        ))
+                    })?;
+                    fields.push(canonical_scalar_value_plan(
+                        &field.layout,
+                        offset,
+                        &format!("{path}.{}.{}", variant.name, field.name),
+                    )?);
+                }
+                plans.push(fields);
+            }
+            if plans.is_empty() {
+                return Err(LowerError::Unsupported(format!(
+                    "canonical scalar variant `{path}` has no cases"
+                )));
+            }
+            CanonicalScalarValuePlan::Variant {
+                tag_offset,
+                variants: plans,
+            }
+        }
+        CanonicalShape::Bytes { .. }
+        | CanonicalShape::String { .. }
+        | CanonicalShape::List { .. } => {
+            return Err(LowerError::Unsupported(format!(
+                "canonical scalar variant tree `{path}` contains a memory descriptor; bytes, strings, and lists require the variant post-return bridge"
+            )));
+        }
+    })
+}
+
+fn canonical_offset_address(
+    fb: &mut FunctionBuilder<InstInserter>,
+    is: &NativeInstSet,
+    base: ValueId,
+    offset: u32,
+) -> ValueId {
+    if offset == 0 {
+        base
+    } else {
+        let offset = fb.make_imm_value(Immediate::I32(offset as i32));
+        fb.insert_inst(Add::new(is, base, offset), Type::I32)
+    }
+}
+
+fn append_canonical_zero_values(
+    fb: &mut FunctionBuilder<InstInserter>,
+    plan: &CanonicalScalarValuePlan,
+    output: &mut Vec<ValueId>,
+) -> Result<(), LowerError> {
+    let mut types = Vec::new();
+    plan.append_flat_types(&mut types);
+    for ty in types {
+        let immediate = zero_immediate(ty).ok_or_else(|| {
+            LowerError::Internal(format!("canonical scalar variant has no zero for `{ty:?}`"))
+        })?;
+        output.push(fb.make_imm_value(immediate));
+    }
+    Ok(())
+}
+
+fn load_canonical_scalar_value(
+    fb: &mut FunctionBuilder<InstInserter>,
+    is: &NativeInstSet,
+    base: ValueId,
+    plan: &CanonicalScalarValuePlan,
+) -> Result<Vec<ValueId>, LowerError> {
+    match plan {
+        CanonicalScalarValuePlan::Scalar { offset, ty } => {
+            let address = canonical_offset_address(fb, is, base, *offset);
+            Ok(vec![fb.insert_inst(Mload::new(is, address, *ty), *ty)])
+        }
+        CanonicalScalarValuePlan::Record(fields) => {
+            let mut values = Vec::new();
+            for field in fields {
+                values.extend(load_canonical_scalar_value(fb, is, base, field)?);
+            }
+            Ok(values)
+        }
+        CanonicalScalarValuePlan::Variant {
+            tag_offset,
+            variants,
+        } => {
+            let tag_address = canonical_offset_address(fb, is, base, *tag_offset);
+            let tag = fb.insert_inst(Mload::new(is, tag_address, Type::I32), Type::I32);
+            let merge = fb.append_block();
+            let invalid = fb.append_block();
+            let mut incoming = Vec::<(BlockId, Vec<ValueId>)>::with_capacity(variants.len());
+
+            for active_index in 0..variants.len() {
+                let active_block = fb.append_block();
+                let next = if active_index + 1 == variants.len() {
+                    invalid
+                } else {
+                    fb.append_block()
+                };
+                let expected = fb.make_imm_value(Immediate::I32(active_index as i32));
+                let matches = fb.insert_inst(CmpEq::new(is, tag, expected), Type::I1);
+                fb.insert_inst_no_result(Br::new(is, matches, active_block, next));
+
+                fb.switch_to_block(active_block);
+                let mut values = vec![tag];
+                for (variant_index, fields) in variants.iter().enumerate() {
+                    for field in fields {
+                        if variant_index == active_index {
+                            values.extend(load_canonical_scalar_value(fb, is, base, field)?);
+                        } else {
+                            append_canonical_zero_values(fb, field, &mut values)?;
+                        }
+                    }
+                }
+                let predecessor = fb.current_block().ok_or_else(|| {
+                    LowerError::Internal(
+                        "canonical scalar variant lost its active block".to_owned(),
+                    )
+                })?;
+                fb.insert_inst_no_result(Jump::new(is, merge));
+                incoming.push((predecessor, values));
+                fb.switch_to_block(next);
+            }
+
+            fb.insert_inst_no_result(Unreachable::new(is));
+            fb.switch_to_block(merge);
+            let mut types = Vec::new();
+            plan.append_flat_types(&mut types);
+            let mut values = Vec::with_capacity(types.len());
+            for (lane, ty) in types.into_iter().enumerate() {
+                let incoming = incoming
+                    .iter()
+                    .map(|(block, values)| (values[lane], *block))
+                    .collect();
+                values.push(fb.insert_inst(Phi::new(is, incoming), ty));
+            }
+            Ok(values)
+        }
+    }
+}
+
+fn store_canonical_scalar_value(
+    fb: &mut FunctionBuilder<InstInserter>,
+    is: &NativeInstSet,
+    base: ValueId,
+    plan: &CanonicalScalarValuePlan,
+    values: &[ValueId],
+    cursor: &mut usize,
+) -> Result<(), LowerError> {
+    match plan {
+        CanonicalScalarValuePlan::Scalar { offset, ty } => {
+            let value = values.get(*cursor).copied().ok_or_else(|| {
+                LowerError::Internal(
+                    "canonical scalar response has fewer lanes than its plan".to_owned(),
+                )
+            })?;
+            *cursor += 1;
+            let address = canonical_offset_address(fb, is, base, *offset);
+            fb.insert_inst_no_result(Mstore::new(is, address, value, *ty));
+        }
+        CanonicalScalarValuePlan::Record(fields) => {
+            for field in fields {
+                store_canonical_scalar_value(fb, is, base, field, values, cursor)?;
+            }
+        }
+        CanonicalScalarValuePlan::Variant {
+            tag_offset,
+            variants,
+        } => {
+            let tag = values.get(*cursor).copied().ok_or_else(|| {
+                LowerError::Internal("canonical scalar response has no variant tag lane".to_owned())
+            })?;
+            *cursor += 1;
+            let mut ranges = Vec::with_capacity(variants.len());
+            for fields in variants {
+                let start = *cursor;
+                for field in fields {
+                    *cursor = (*cursor).checked_add(field.flat_width()).ok_or_else(|| {
+                        LowerError::Internal(
+                            "canonical scalar response lane count overflow".to_owned(),
+                        )
+                    })?;
+                }
+                ranges.push((start, *cursor));
+            }
+
+            let merge = fb.append_block();
+            let invalid = fb.append_block();
+            for (active_index, fields) in variants.iter().enumerate() {
+                let active_block = fb.append_block();
+                let next = if active_index + 1 == variants.len() {
+                    invalid
+                } else {
+                    fb.append_block()
+                };
+                let expected = fb.make_imm_value(Immediate::I32(active_index as i32));
+                let matches = fb.insert_inst(CmpEq::new(is, tag, expected), Type::I1);
+                fb.insert_inst_no_result(Br::new(is, matches, active_block, next));
+
+                fb.switch_to_block(active_block);
+                let tag_address = canonical_offset_address(fb, is, base, *tag_offset);
+                fb.insert_inst_no_result(Mstore::new(is, tag_address, tag, Type::I32));
+                let mut active_cursor = ranges[active_index].0;
+                for field in fields {
+                    store_canonical_scalar_value(fb, is, base, field, values, &mut active_cursor)?;
+                }
+                if active_cursor != ranges[active_index].1 {
+                    return Err(LowerError::Internal(
+                        "canonical scalar response variant width drifted".to_owned(),
+                    ));
+                }
+                fb.insert_inst_no_result(Jump::new(is, merge));
+                fb.switch_to_block(next);
+            }
+            fb.insert_inst_no_result(Unreachable::new(is));
+            fb.switch_to_block(merge);
+        }
+    }
+    Ok(())
+}
+
+fn zero_canonical_memory(
+    fb: &mut FunctionBuilder<InstInserter>,
+    is: &NativeInstSet,
+    base: ValueId,
+    byte_len: u32,
+) -> Result<(), LowerError> {
+    let byte_len = i32::try_from(byte_len).map_err(|_| {
+        LowerError::Unsupported(
+            "canonical variant response exceeds the Wasm i32 memory bound".to_owned(),
+        )
+    })?;
+    let entry = fb.current_block().ok_or_else(|| {
+        LowerError::Internal("canonical response zeroing has no entry block".to_owned())
+    })?;
+    let header = fb.append_block();
+    let body = fb.append_block();
+    let done = fb.append_block();
+    fb.insert_inst_no_result(Jump::new(is, header));
+
+    fb.switch_to_block(header);
+    let zero = fb.make_imm_value(Immediate::I32(0));
+    let index = fb.insert_inst(Phi::new(is, vec![(zero, entry)]), Type::I32);
+    let limit = fb.make_imm_value(Immediate::I32(byte_len));
+    let more = fb.insert_inst(Lt::new(is, index, limit), Type::I1);
+    fb.insert_inst_no_result(Br::new(is, more, body, done));
+
+    fb.switch_to_block(body);
+    let address = fb.insert_inst(Add::new(is, base, index), Type::I32);
+    let zero_byte = fb.make_imm_value(Immediate::I8(0));
+    fb.insert_inst_no_result(Mstore::new(is, address, zero_byte, Type::I8));
+    let one = fb.make_imm_value(Immediate::I32(1));
+    let next = fb.insert_inst(Add::new(is, index, one), Type::I32);
+    let back = fb.current_block().ok_or_else(|| {
+        LowerError::Internal("canonical response zeroing lost its loop body".to_owned())
+    })?;
+    fb.append_phi_arg(index, next, back);
+    fb.insert_inst_no_result(Jump::new(is, header));
+    fb.switch_to_block(done);
+    Ok(())
+}
+
 fn all_ones_immediate(ty: Type) -> Option<Immediate> {
     match ty {
         Type::I8 => Some(Immediate::I8(-1)),
@@ -5112,15 +5497,47 @@ where
             Ok(())
         }
 
+        let has_variant = canonical_layout_contains_variant(&lane.request)
+            || canonical_layout_contains_variant(&lane.response);
+        let (request_plan, response_plan) = if has_variant {
+            (
+                Some(canonical_scalar_value_plan(
+                    &lane.request,
+                    0,
+                    "canonical_request",
+                )?),
+                Some(canonical_scalar_value_plan(
+                    &lane.response,
+                    0,
+                    "canonical_response",
+                )?),
+            )
+        } else {
+            (None, None)
+        };
         let mut request = Vec::new();
         let mut response = Vec::new();
         let mut request_descriptors = Vec::new();
         let mut response_descriptors = Vec::new();
-        flatten(&lane.request, 0, &mut request, &mut request_descriptors)?;
-        flatten(&lane.response, 0, &mut response, &mut response_descriptors)?;
+        if !has_variant {
+            flatten(&lane.request, 0, &mut request, &mut request_descriptors)?;
+            flatten(&lane.response, 0, &mut response, &mut response_descriptors)?;
+        }
         // Input descriptors remain borrowed views into caller-owned memory.
         let _ = request_descriptors;
-        if request.is_empty() || response.is_empty() {
+        let mut request_tys = Vec::new();
+        let mut response_tys = Vec::new();
+        if let Some(plan) = &request_plan {
+            plan.append_flat_types(&mut request_tys);
+        } else {
+            request_tys.extend(request.iter().map(|(_, ty)| *ty));
+        }
+        if let Some(plan) = &response_plan {
+            plan.append_flat_types(&mut response_tys);
+        } else {
+            response_tys.extend(response.iter().map(|(_, ty)| *ty));
+        }
+        if request_tys.is_empty() || response_tys.is_empty() {
             return Err(LowerError::Unsupported(
                 "canonical wrapper records must contain scalar leaves".to_owned(),
             ));
@@ -5139,8 +5556,6 @@ where
                 candidates.len()
             )));
         };
-        let request_tys = request.iter().map(|(_, ty)| *ty).collect::<Vec<_>>();
-        let response_tys = response.iter().map(|(_, ty)| *ty).collect::<Vec<_>>();
         let signature_matches = self.builder.sig(*callee, |signature| {
             signature.args() == request_tys && signature.ret_tys() == response_tys
         });
@@ -5171,17 +5586,16 @@ where
         fb.switch_to_block(entry);
         let request_ptr = fb.args()[0];
         let mut args = smallvec1::SmallVec::<[ValueId; 8]>::new();
-        for (offset, ty) in request {
-            let addr = if offset == 0 {
-                request_ptr
-            } else {
-                let offset = fb.make_imm_value(Immediate::I32(offset as i32));
-                fb.insert_inst(Add::new(is, request_ptr, offset), Type::I32)
-            };
-            args.push(fb.insert_inst(Mload::new(is, addr, ty), ty));
+        if let Some(plan) = &request_plan {
+            args.extend(load_canonical_scalar_value(&mut fb, is, request_ptr, plan)?);
+        } else {
+            for (offset, ty) in &request {
+                let addr = canonical_offset_address(&mut fb, is, request_ptr, *offset);
+                args.push(fb.insert_inst(Mload::new(is, addr, *ty), *ty));
+            }
         }
         let results = fb.insert_call_results(*callee, args);
-        if results.len() != response.len() {
+        if results.len() != response_tys.len() {
             return Err(LowerError::Internal(
                 "canonical wrapper call result arity changed after signature check".to_owned(),
             ));
@@ -5211,6 +5625,12 @@ where
             let mask = fb.make_imm_value(Immediate::I32(-(lane.response.align as i32)));
             fb.insert_inst(And::new(is, biased, mask), Type::I32)
         };
+        if response_plan.is_some() {
+            // The canonical tagged-union contract makes inactive storage
+            // deterministic. Arena reset reuses bytes, so zero the complete
+            // response record before storing the validated active payload.
+            zero_canonical_memory(&mut fb, is, response_ptr, lane.response.size)?;
+        }
         let mut copied_pointers = HashMap::new();
         for (pointer_offset, length_offset, stride, max, alignment) in response_descriptors {
             let pointer_index = response
@@ -5313,15 +5733,20 @@ where
             fb.switch_to_block(copy_done);
             copied_pointers.insert(pointer_offset, destination);
         }
-        for ((offset, ty), value) in response.into_iter().zip(results) {
-            let value = copied_pointers.get(&offset).copied().unwrap_or(value);
-            let addr = if offset == 0 {
-                response_ptr
-            } else {
-                let offset = fb.make_imm_value(Immediate::I32(offset as i32));
-                fb.insert_inst(Add::new(is, response_ptr, offset), Type::I32)
-            };
-            fb.insert_inst_no_result(Mstore::new(is, addr, value, ty));
+        if let Some(plan) = &response_plan {
+            let mut cursor = 0;
+            store_canonical_scalar_value(&mut fb, is, response_ptr, plan, &results, &mut cursor)?;
+            if cursor != results.len() {
+                return Err(LowerError::Internal(
+                    "canonical scalar response left unconsumed value lanes".to_owned(),
+                ));
+            }
+        } else {
+            for ((offset, ty), value) in response.into_iter().zip(results) {
+                let value = copied_pointers.get(&offset).copied().unwrap_or(value);
+                let addr = canonical_offset_address(&mut fb, is, response_ptr, offset);
+                fb.insert_inst_no_result(Mstore::new(is, addr, value, ty));
+            }
         }
         fb.insert_return(response_ptr);
         fb.seal_all();

@@ -296,9 +296,11 @@ impl CanonicalInterfaceManifest {
             if declaration.intent.execution == CanonicalExecution::Wasm
                 && (contains_variant(&declaration.request)
                     || contains_variant(&declaration.response))
+                && (!canonical_wasm_scalar_value(&declaration.request)
+                    || !canonical_wasm_scalar_value(&declaration.response))
             {
                 return Err(error(format!(
-                    "canonical Wasm lane `{}` cannot use variants until enum runtime classes are lowered by the wasm32 backend",
+                    "canonical Wasm lane `{}` cannot mix variants with bytes, strings, or lists until the wasm32 variant post-return bridge is lowered",
                     declaration.name
                 )));
             }
@@ -1217,6 +1219,28 @@ fn contains_variant(ty: &CanonicalType) -> bool {
     }
 }
 
+fn canonical_wasm_scalar_value(ty: &CanonicalType) -> bool {
+    match ty {
+        CanonicalType::Bool
+        | CanonicalType::U8
+        | CanonicalType::I32
+        | CanonicalType::U32
+        | CanonicalType::I64
+        | CanonicalType::U64
+        | CanonicalType::F32 => true,
+        CanonicalType::Record(fields) => fields
+            .iter()
+            .all(|field| canonical_wasm_scalar_value(&field.ty)),
+        CanonicalType::Variant(variants) => variants.iter().all(|variant| {
+            variant
+                .fields
+                .iter()
+                .all(|field| canonical_wasm_scalar_value(&field.ty))
+        }),
+        CanonicalType::Bytes | CanonicalType::String | CanonicalType::List { .. } => false,
+    }
+}
+
 fn align_up(value: u32, align: u32, path: &str) -> Result<u32, CanonicalInterfaceError> {
     debug_assert!(align.is_power_of_two());
     value
@@ -1608,7 +1632,7 @@ pub fn update(request: Request) -> Response { Response { accepted: true } }
     }
 
     #[test]
-    fn variants_have_a_pinned_tagged_union_layout_and_wasm_fails_closed() {
+    fn variants_have_a_pinned_tagged_union_layout_and_only_scalar_wasm_values_cross() {
         let message = CanonicalType::Variant(vec![
             CanonicalVariant {
                 name: "none".to_owned(),
@@ -1661,16 +1685,54 @@ pub fn update(request: Request) -> Response { Response { accepted: true } }
             [("code", 4), ("sequence", 8), ("payload", 16)]
         );
 
-        let error = CanonicalInterfaceManifest::build(vec![CanonicalLaneDecl {
+        let scalar_message = CanonicalType::Variant(vec![
+            CanonicalVariant {
+                name: "none".to_owned(),
+                fields: vec![],
+            },
+            CanonicalVariant {
+                name: "data".to_owned(),
+                fields: vec![
+                    CanonicalField::new("code", CanonicalType::U8),
+                    CanonicalField::new(
+                        "mode",
+                        CanonicalType::Variant(vec![
+                            CanonicalVariant {
+                                name: "plain".to_owned(),
+                                fields: vec![],
+                            },
+                            CanonicalVariant {
+                                name: "weighted".to_owned(),
+                                fields: vec![CanonicalField::new("factor", CanonicalType::U32)],
+                            },
+                        ]),
+                    ),
+                ],
+            },
+        ]);
+        let wasm = CanonicalInterfaceManifest::build(vec![CanonicalLaneDecl {
             name: "deliver".to_owned(),
             export: Some("fe_cabi_deliver".to_owned()),
+            request: scalar_message.clone(),
+            response: scalar_message,
+            intent: CanonicalLaneIntent::default(),
+        }])
+        .unwrap();
+        assert!(matches!(
+            wasm.lanes[0].request.shape,
+            CanonicalShape::Variant { .. }
+        ));
+
+        let error = CanonicalInterfaceManifest::build(vec![CanonicalLaneDecl {
+            name: "deliver_rich".to_owned(),
+            export: Some("fe_cabi_deliver_rich".to_owned()),
             request: message,
             response: CanonicalType::U32,
             intent: CanonicalLaneIntent::default(),
         }])
         .unwrap_err()
         .to_string();
-        assert!(error.contains("enum runtime classes"), "{error}");
+        assert!(error.contains("variant post-return bridge"), "{error}");
     }
 
     #[test]

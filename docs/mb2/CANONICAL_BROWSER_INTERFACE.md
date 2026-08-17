@@ -22,8 +22,11 @@ The remaining boundary is deliberately narrower than the Component Model.
 Versions 1–2 established fixed-layout records, scalar leaves, owned bytes, and
 UTF-8 strings. Version 3 added the bounded host-effect variant family below.
 Version 4 adds the exact nominal bounded-list transport described below.
-Unbounded and nested lists, Wasm enum values, resources, futures, streams, and
-shared-memory zero-copy remain later work.
+Recursively scalar record variants now also cross Wasm lanes. Variants
+containing bytes, strings, or lists remain schema values only until the
+post-return memory bridge can preserve their ownership. Unbounded and nested
+lists, resources, futures, streams, and shared-memory zero-copy remain later
+work.
 
 ## Protocol
 
@@ -73,8 +76,7 @@ discriminated object:
 | { readonly tag: "data"; code: number; payload: Uint8Array }
 ```
 
-The wasm32 wire envelope is pinned even though Wasm lanes cannot consume it
-yet:
+The wasm32 wire envelope is pinned:
 
 - a little-endian `u32` tag at offset 0;
 - tags are dense declaration-order indices starting at zero;
@@ -92,13 +94,25 @@ and actor transfer is zero-copy only for an owned full-span `Uint8Array`.
 Strings remain copied UTF-8 values. The one-call arena still resets in
 `finally`; every decoded descriptor is copied before reset.
 
-The current wasm32 lowering represents an enum parameter as an enum runtime
-class, while its function ABI lowering supports scalars and selected scalar
-newtypes only. Flattening a union envelope in the wrapper would therefore not
-match the selected Fe function signature. Version 3 rejects variants on Wasm
-lanes with this explicit reason. Tagged variants are currently usable for
-compiler-derived actor/host-effect schemas; completing Wasm support requires
-enum runtime-class lowering, not another JavaScript convention.
+Fe payload enums and canonical memory deliberately have different physical
+forms. Canonical memory is the tagged union above. The Fe Wasm value ABI is a
+tag followed by every variant payload lane in declaration order. The generated
+wrapper is the only bridge between them:
+
+- request lowering validates the memory tag, loads only the active union
+  member, and supplies canonical zero values for every inactive Fe payload
+  lane;
+- response lowering validates the Fe tag, zeros the complete reusable response
+  record, and stores only the active payload into the union region;
+- the compiler-derived parent mailbox codec uses the same value-lane order and
+  rejects nonzero inactive lanes rather than letting JavaScript infer enum
+  meaning; and
+- nested scalar variants and records recurse through the same plan.
+
+This path admits only recursively scalar trees. A lane that combines any
+variant with bytes, strings, or lists fails closed with an explicit
+post-return-bridge diagnostic. Host-effect schemas may still use those rich
+variants because their values do not cross a Wasm function boundary.
 
 Version: `4`
 
@@ -123,13 +137,64 @@ Milestone 1 supports:
 
 - booleans and fixed-width integer/f32 scalars;
 - nested fixed-layout records;
+- unit and named-record variants whose complete Wasm value tree is scalar;
 - byte strings represented by `{ ptr: u32, len: u32 }`;
 - UTF-8 strings represented by the same physical descriptor and distinct
   nominal interface metadata;
 - bounded `BrowserList<u32, MAX>` and `BrowserList<f32, MAX>` descriptors.
 
-Unbounded or nested lists, Wasm options/enums, resources, futures, and streams
-are not part of version 4.
+Unbounded or nested lists, descriptor-bearing Wasm variants, resources,
+futures, and streams are not part of version 4.
+
+## Actor selection and generated identities
+
+The actor interface has separate semantic and ABI naming layers. Keeping them
+separate prevents a browser adapter from becoming an application router.
+
+1. An authored behavior has an ordinary Fe source name, such as `scale` or
+   `receive`.
+2. Nominal values in its `uses` row select execution roles. For example,
+   `Worker`, `ResidentTransition`, `InitialState`, `ProjectState`, and
+   `ScopedTask` are compiler-recognized through their type metadata, not their
+   source spelling.
+3. Actor lowering derives `C: Handles<M, R>` for a self-less behavior on child
+   `C` taking request `M` and returning response `R`. `ActorMailbox<B, C>` can
+   therefore select the edge from the nominal child and message types without
+   a numeric operation ID or behavior-name table.
+4. A structured-child transport name such as `request_<hash>` is a private,
+   compiler-generated identity over `(C, M, R)`. Its child export is
+   `fe_cabi_request_<hash>`. Child lifecycle imports similarly use
+   `spawn_<hash>`, `failure_<hash>`, and `close_<hash>` derived from `C`.
+5. Resident roles are published behind fixed protocol exports such as
+   `fe_actor_initialize_v1`, `fe_actor_transition_v1`, and
+   `fe_actor_project_v1`. Their authored behavior names do not reach the host.
+6. Direct public canonical lanes currently retain the authored Fe behavior
+   name as their friendly lane label and use `fe_cabi_<name>` for a Wasm
+   implementation. Selection into that set still comes from nominal placement,
+   execution, or capability markers rather than a name scan.
+
+The type hash is a rebuild-together package identity, not a durable public ABI.
+Renaming a nominal type may change it. The compiler generates and collision
+checks the parent import, child lane, publication path, and fixed adapter in one
+closed package, so application JavaScript never interprets the hash.
+
+Generated module functions such as `createInterfaceCaller`,
+`compileActorMailbox`, and `createActorAdapter` are fixed transport mechanics.
+They consume compiler-derived lanes and layouts; they are not application
+operations and accept no caller-authored routing table.
+
+Two render compatibility paths remain spelling-sensitive and should not be
+mistaken for the general actor model. The projected const behavior is currently
+named `view`, and legacy `UpdateSurface` uses the reserved `dx`, `dy`, `dzoom`,
+`mx`, and `my` argument vocabulary. Typed `SurfaceTransition` already replaces
+the latter with one nominal event record. A future projection role should
+remove the remaining `view` name convention.
+
+Singleton role-selected behaviors and typed mailbox endpoints do not
+semantically require a public operation name. A future authoring surface may
+therefore permit an omitted behavior name while retaining a compiler-owned
+source identity for diagnostics, stack traces, and explicit intra-Fe calls.
+That refinement does not require changing the type-directed transport model.
 
 ## Arena and lifetime
 
@@ -178,8 +243,10 @@ CanonicalInterfaceManifest
 ```
 
 The compiler derives field names, types, and layouts from each selected entry's
-semantic signature and runtime layout. Lane/export names are explicit inputs;
-callers do not restate record schemas.
+semantic signature and runtime layout. Direct lanes use their selected source
+entry as a friendly label. Structured-child lane and export identities derive
+from the nominal child/request/response edge. Callers do not restate record
+schemas or child routes.
 
 Bundle manifests embed:
 
@@ -239,6 +306,10 @@ protocol-v3 envelopes remain the transport framing.
   collisions, manifest round-trips, and emitted-signature mismatch.
 - JavaScript tests cover Unicode/non-BMP text, invalid UTF-8, exact fields,
   reset on success/error, and output storage that does not alias Wasm memory.
+- A real parent actor sends a nested scalar request variant through its
+  type-derived mailbox to a separately compiled child, receives a scalar result
+  variant, resumes its Fe continuation, and checks semantic state plus inactive
+  response-union scrubbing after arena reuse.
 - A MessageChannel integration test builds a lane solely from the generated
   manifest and proves that the standalone response buffer transfers and detaches
   in the sender while Wasm memory is never put in a transfer list.
@@ -248,7 +319,7 @@ protocol-v3 envelopes remain the transport framing.
 - general allocation/free and concurrent outstanding borrows;
 - affine/linear ownership and resource destructors;
 - shared-memory zero-copy;
-- options, general or nested lists, and recursive values;
+- descriptor-bearing variants, general or nested lists, and recursive values;
 - async, futures, streams, and cancellation;
 - generated supervision, placement, and backpressure policy;
 - WebGPU resource ownership;

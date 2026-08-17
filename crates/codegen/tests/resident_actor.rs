@@ -1153,18 +1153,44 @@ import {{
   createMaterializedTaskRegistry,
   createStructuredWorkerMailboxes,
 }} from "./tasks.js";
-import {{ createInterfaceCaller as createCaller0 }} from "./children/{key0}/interface.js";
-import {{ createInterfaceCaller as createCaller1 }} from "./children/{key1}/interface.js";
+import {{
+  canonicalInterfaceManifest as manifest0,
+  createInterfaceCaller as createCaller0,
+}} from "./children/{key0}/interface.js";
+import {{
+  canonicalInterfaceManifest as manifest1,
+  createInterfaceCaller as createCaller1,
+}} from "./children/{key1}/interface.js";
 
 const parentBytes = await Bun.file({parent_wasm:?}).arrayBuffer();
 const child0Bytes = await Bun.file(new URL("./children/{key0}/child.wasm", import.meta.url)).arrayBuffer();
 const child1Bytes = await Bun.file(new URL("./children/{key1}/child.wasm", import.meta.url)).arrayBuffer();
 const child0 = await WebAssembly.instantiate(child0Bytes, {{}});
 const child1 = await WebAssembly.instantiate(child1Bytes, {{}});
+const children = [child0.instance, child1.instance];
+const manifests = [manifest0, manifest1];
 const callers = [
   createCaller0(child0.instance.exports),
   createCaller1(child1.instance.exports),
 ];
+const scaleExports = children[{scale_index}].exports;
+const scaleLane = manifests[{scale_index}].lanes[0];
+const resultField = scaleLane.response.fields.find(field => field.name === "result");
+const rejected = resultField?.layout?.variants?.find(variant => variant.name === "rejected");
+const detail = rejected?.fields?.find(field => field.name === "detail");
+if (!detail) throw new Error("nested response variant layout was not derived");
+scaleExports.fe_cabi_reset();
+const primedRequest = scaleExports.fe_cabi_alloc(
+  scaleLane.request.size,
+  scaleLane.request.align,
+);
+const rawResponse = primedRequest + scaleLane.request.size;
+const responsePointer = (
+  rawResponse + scaleLane.response.align - 1
+) & -scaleLane.response.align;
+const inactiveDetail = responsePointer + resultField.offset + detail.offset;
+new DataView(scaleExports.memory.buffer).setUint32(inactiveDetail, 0xdeadbeef, true);
+scaleExports.fe_cabi_reset();
 const lifecycle = [[], []];
 const requests = [];
 const makeScope = (index) => Object.freeze({{
@@ -1180,7 +1206,7 @@ const makeScope = (index) => Object.freeze({{
   close(epoch) {{ lifecycle[index].push(["close", epoch]); }},
   request(lane, payload, signal) {{
     if (signal?.aborted) throw new DOMException("cancelled", "AbortError");
-    requests.push([index, lane, payload.value]);
+    requests.push([index, lane, payload]);
     return callers[index].call(lane, payload);
   }},
 }});
@@ -1214,7 +1240,17 @@ if (calculated.length !== 1 || calculated[0] !== 19) {{
 if (residentValue !== 26) {{
   throw new Error(`two-child resident transition drifted: ${{residentValue}}`);
 }}
-if (requests.length !== 2 || requests[0][2] !== 7 || requests[1][2] !== 14
+if (new DataView(scaleExports.memory.buffer).getUint32(inactiveDetail, true) !== 0) {{
+  throw new Error("canonical response retained inactive union bytes");
+}}
+const scalePayload = requests[0]?.[2];
+const offsetPayload = requests[1]?.[2];
+if (requests.length !== 2
+    || scalePayload?.command?.tag !== "apply"
+    || scalePayload.command.value !== 7
+    || scalePayload.command.mode?.tag !== "double"
+    || Object.keys(scalePayload.command.mode).length !== 1
+    || offsetPayload?.value !== 14
     || requests[0][0] !== {scale_index} || requests[1][0] !== {offset_index}) {{
   throw new Error(`typed child mailbox routing drifted: ${{JSON.stringify(requests)}}`);
 }}

@@ -209,10 +209,30 @@ Legend:
   the correct close for each nominal scope, and finishes with zero live tokens.
   The 44-test fixed browser-runtime suite, ten-test resident-actor suite,
   four-test DEC oracle, and focused HTML publication gate pass.
+  Recursively scalar canonical variants now cross those type-derived child
+  mailboxes without a JavaScript operation schema. Canonical memory remains a
+  tagged union, while the Fe Wasm value ABI remains the declaration-order tag
+  plus every case payload lane. One compiler-owned wrapper validates each
+  active tag, loads only active request fields, supplies exact zero values for
+  inactive Fe lanes, clears reusable response storage, and stores only the
+  active result. The generated parent mailbox codec derives the same lane order
+  from the child interface and rejects noncanonical inactive values. The real
+  two-child gate now sends nested `ScaleCommand` and `ScaleMode` variants,
+  receives a `ScaleResult` variant, preserves the semantic
+  `7 -> 14 -> 19 -> 26` result, proves inactive response-union bytes were
+  scrubbed after arena reuse, and still finishes with zero live tokens.
+  Variants containing bytes, strings, or lists remain fail-closed pending the
+  canonical post-return memory bridge. The 16-test canonical-interface suite,
+  ten-test resident-actor suite, four-test DEC suite, 53-test fixed browser and
+  codec suite, and focused scoped-task publication verifier pass. The canonical
+  interface guide now documents nominal role selection, typed mailbox edges,
+  private generated transport names, fixed resident exports, the remaining
+  spelling-based render compatibility paths, and the possible future omission
+  of semantically unnecessary behavior names.
   Remaining: compose recursive nested scopes, attach opaque ports, derive rich
-  canonical message values, and run the render-owned DEC task path in real
-  Chromium. Recursive resumable SCCs must remain explicitly refused until
-  linked affine frames are sound.
+  descriptor-bearing canonical message values, and run the render-owned DEC
+  task path in real Chromium. Recursive resumable SCCs must remain explicitly
+  refused until linked affine frames are sound.
 
 ## C. GPU pass graphs and perturbation
 
