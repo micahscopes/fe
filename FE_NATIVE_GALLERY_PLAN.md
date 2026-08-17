@@ -2463,7 +2463,7 @@ order:
 8. **In progress:** the fixed Module Worker boundary now owns only explicit
    spawn/restart/close and port mechanics. `std::runtime` owns bounded restart,
    backoff, exhaustion, epoch, and parent-cancellation policy in ordinary Fe.
-   `ChildPlacement<B>` and `supervise_child` now carry that policy through the
+   `ChildPlacement<B, C>` and `supervise_child` now carry that policy through the
    real `Pending`/`Suspend`/`Timer` rail, with independent Bun mechanics,
    compiled-Fe Wasmtime reducer, and compiled-Fe/Bun scope gates. The packaged
    canonical adapter maps Fe epochs onto explicit construction/restart and

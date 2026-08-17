@@ -235,12 +235,14 @@ manifest-driven.
    than implied capabilities of this owning-scope mailbox.
 6. [in progress] Move Worker admission, cancellation, restart/backoff, and
    supervision policy into Fe handlers and structured scopes. Handwritten
-   JavaScript retry/backoff policy is deleted. `ChildPlacement<B>` now names
+   JavaScript retry/backoff policy is deleted. `ChildPlacement<B, C>` now names
    only unit-valued spawn, failure-observation, and close mechanics, while the
    target-neutral `supervise_child` Fe loop combines those operations with the
    existing affine `Pending`/`Suspend` and `Timer` effects. A compiled Fe/Bun
    gate proves exact epoch actions, bounded exhaustion, transport-failure
    distinction, and parent-cancellation close against adversarial host tapes.
+   `C` brands `ChildStarted<C>` and `ChildRuntimeFailure<C>` pending values, so
+   multiple child programs need no shared numeric identity.
    `createCanonicalBrowserWorkerScope` now adapts the canonical Module Worker
    to this capability without adding a timer, budget, or retry loop, and the
    compiler publishes it with the fixed actor runtime. Remaining: publish

@@ -19,8 +19,11 @@ fn compiled_fe_scope_owns_restart_exhaustion_transport_failure_and_cancellation(
     const SOURCE: &str = r#"
 use std::runtime::{ChildFailureKind, ChildScopeExit, supervise_browser_child}
 
+pub struct OracleChild {}
+
 pub fn scope_task() -> u64 {
     let exit = supervise_browser_child(
+        child: OracleChild {},
         max_restarts: 2,
         window_ms: 1000,
         backoff_ms: 0,

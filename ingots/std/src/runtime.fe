@@ -96,9 +96,12 @@ impl Copy for ChildSupervisionStep {}
 /// `failure_begin` completes only when that epoch's child fails. `close` is an
 /// immediate, idempotent release command. None of these operations may choose
 /// whether or when another epoch is started.
-pub trait ChildPlacement<B: Backend> {
-    fn spawn_begin(mut self, _ epoch: u32) -> Pending<B, ()>
-    fn failure_begin(mut self, _ epoch: u32) -> Pending<B, ()>
+pub struct ChildStarted<C> {}
+pub struct ChildRuntimeFailure<C> {}
+
+pub trait ChildPlacement<B: Backend, C> {
+    fn spawn_begin(mut self, _ epoch: u32) -> Pending<B, ChildStarted<C>>
+    fn failure_begin(mut self, _ epoch: u32) -> Pending<B, ChildRuntimeFailure<C>>
     fn close(mut self, _ epoch: u32)
 }
 
@@ -266,11 +269,12 @@ impl ChildSupervisionPolicy for RestartWindow {
 /// exhaustion branch, and parent-cancellation cleanup. The loop is backend
 /// generic and uses the same affine `Pending`/`Suspend` rail as browser events,
 /// fetch, actor sends, and GPU completion.
-pub fn supervise_child<B: Backend, P: ChildSupervisionPolicy + Copy>(
+pub fn supervise_child<B: Backend, C, P: ChildSupervisionPolicy + Copy>(
+    _ child: C,
     _ policy: P,
 ) -> ChildScopeExit
 uses (
-    placement: mut ChildPlacement<B>,
+    placement: mut ChildPlacement<B, C>,
     timer: mut Timer<B>,
     suspend: Suspend<B, u32>,
 )
@@ -287,7 +291,7 @@ uses (
                 match state.phase {
                     ChildSupervisionPhase::Active => {
                         let pending = placement.failure_begin(state.epoch)
-                        let outcome: TaskOutcome<u32, ()> = suspend.suspend(pending)
+                        let outcome: TaskOutcome<u32, ChildRuntimeFailure<C>> = suspend.suspend(pending)
                         match outcome {
                             TaskOutcome::Success(_) => {
                                 event = ChildLifecycleEvent::Failed(
@@ -313,7 +317,7 @@ uses (
             }
             ChildSupervisionAction::Spawn => {
                 let pending = placement.spawn_begin(state.epoch)
-                let outcome: TaskOutcome<u32, ()> = suspend.suspend(pending)
+                let outcome: TaskOutcome<u32, ChildStarted<C>> = suspend.suspend(pending)
                 match outcome {
                     TaskOutcome::Success(_) => {
                         event = ChildLifecycleEvent::Ready(state.epoch)

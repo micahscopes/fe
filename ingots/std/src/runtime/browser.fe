@@ -5,7 +5,14 @@
 
 use core::pending::{Pending, Suspend, Timer}
 use ingot::wasm::WasmBackend
-use super::{ChildPlacement, ChildScopeExit, RestartWindow, supervise_child}
+use super::{
+    ChildPlacement,
+    ChildRuntimeFailure,
+    ChildScopeExit,
+    ChildStarted,
+    RestartWindow,
+    supervise_child,
+}
 use super::super::host::{HostTimer, Resumable}
 use super::raw::{
     close as raw_close,
@@ -13,14 +20,17 @@ use super::raw::{
     spawn_begin as raw_spawn_begin,
 }
 
-pub struct BrowserChildPlacement {}
+pub struct BrowserChildPlacement<C> {}
 
-impl ChildPlacement<WasmBackend> for BrowserChildPlacement {
-    fn spawn_begin(mut self, _ epoch: u32) -> Pending<WasmBackend, ()> {
+impl<C> ChildPlacement<WasmBackend, C> for BrowserChildPlacement<C> {
+    fn spawn_begin(mut self, _ epoch: u32) -> Pending<WasmBackend, ChildStarted<C>> {
         raw_spawn_begin(epoch)
     }
 
-    fn failure_begin(mut self, _ epoch: u32) -> Pending<WasmBackend, ()> {
+    fn failure_begin(
+        mut self,
+        _ epoch: u32,
+    ) -> Pending<WasmBackend, ChildRuntimeFailure<C>> {
         raw_failure_begin(epoch)
     }
 
@@ -31,17 +41,19 @@ impl ChildPlacement<WasmBackend> for BrowserChildPlacement {
 
 /// Select the standard browser handlers while retaining the complete policy in
 /// the target-neutral Fe loop.
-pub fn supervise_browser_child(
+pub fn supervise_browser_child<C>(
+    child: C,
     max_restarts: u32,
     window_ms: u64,
     backoff_ms: u64,
 ) -> ChildScopeExit {
     with (
-        ChildPlacement<WasmBackend> = BrowserChildPlacement {},
+        ChildPlacement<WasmBackend, C> = BrowserChildPlacement<C> {},
         Timer<WasmBackend> = HostTimer {},
         Suspend<WasmBackend, u32> = Resumable {},
     ) {
         supervise_child(
+            child: child,
             policy: RestartWindow::bounded(
                 max_restarts: max_restarts,
                 window_ms: window_ms,

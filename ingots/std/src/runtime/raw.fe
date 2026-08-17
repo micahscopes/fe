@@ -2,10 +2,13 @@
 
 use core::pending::Pending
 use ingot::wasm::WasmBackend
+use super::{ChildRuntimeFailure, ChildStarted}
 
 #[wasm_import(module = "fe:worker-scope")]
 extern {
-    pub unsafe fn spawn_begin(_ epoch: u32) -> Pending<WasmBackend, ()>
-    pub unsafe fn failure_begin(_ epoch: u32) -> Pending<WasmBackend, ()>
+    pub unsafe fn spawn_begin<C>(_ epoch: u32) -> Pending<WasmBackend, ChildStarted<C>>
+    pub unsafe fn failure_begin<C>(
+        _ epoch: u32,
+    ) -> Pending<WasmBackend, ChildRuntimeFailure<C>>
     pub unsafe fn close(_ epoch: u32)
 }

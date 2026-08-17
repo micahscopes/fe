@@ -161,7 +161,7 @@ Legend:
   backoff, or automatic recovery. Ordinary `std::runtime` Fe types and the
   pure `RestartWindow` reducer now own epoch advancement, rolling-window
   admission, restart/backoff selection, exhaustion, and parent cancellation.
-  `ChildPlacement<B>` plus `supervise_child` now run the complete owning scope
+  `ChildPlacement<B, C>` plus `supervise_child` now run the complete owning scope
   through the ordinary `Pending`/`Suspend`/`Timer` rail. Independent Bun
   mechanics, compiled-Fe Wasmtime reducer, and compiled-Fe/Bun structured-scope
   gates pass. The compiler-packaged `createCanonicalBrowserWorkerScope` now
