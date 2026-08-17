@@ -27,7 +27,11 @@
   <h1>fe web · render</h1>
   <script type="module">
     import { mountRenderSurface } from "./fe-render-runtime.js";
-    await mountRenderSurface({ manifestUrl: "./manifest.json", container: document.body });
+    await mountRenderSurface({
+      manifestUrl: "./manifest.json",
+      container: document.body,
+      /* FE_SCOPED_TASK_OPTION */
+    });
   </script>
 </body>
 </html>

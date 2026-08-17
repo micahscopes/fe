@@ -761,7 +761,7 @@ const SHADOW_CSS = `
  */
 export class FeSurfaceElement extends HTMLElement {
   static get observedAttributes() {
-    return ["manifest", "state", "controls", "width", "height"];
+    return ["manifest", "data-fe-scoped-tasks", "state", "controls", "width", "height"];
   }
 
   constructor() {
@@ -777,6 +777,10 @@ export class FeSurfaceElement extends HTMLElement {
     this._controlRows = [];
     this._manifest = null;
     this._actor = null;
+    this._scopedTaskBroker = null;
+    this._scopedTaskMachines = null;
+    this._scopedTaskLifetime = null;
+    this._scopedTasksNeedReboot = false;
     this._surface = null;
     this._control = null; // R3 param gestures: the projected `control` manifest section.
     this._controlKernel = null; // the resolved wasm control export, or null (no gestures).
@@ -914,6 +918,12 @@ export class FeSurfaceElement extends HTMLElement {
   connectedCallback() {
     attachedSurfaces.add(this);
     if (this._booted) {
+      if (this._scopedTasksNeedReboot) {
+        this._scopedTasksNeedReboot = false;
+        this._bootSurface();
+        return;
+      }
+      this._startScopedTasks();
       if (this._fsm === "live") {
         this._wireSuspendObserver();
         this._wireResizeObserver();
@@ -924,6 +934,9 @@ export class FeSurfaceElement extends HTMLElement {
   }
 
   disconnectedCallback() {
+    const hadScopedTasks = this._scopedTaskMachines !== null;
+    this._stopScopedTasks();
+    this._scopedTasksNeedReboot = hadScopedTasks;
     this._suspendObserver?.disconnect();
     this._activationObserver?.disconnect();
     this._resizeObserver?.disconnect();
@@ -938,7 +951,7 @@ export class FeSurfaceElement extends HTMLElement {
       else this.style[name] = /^\d+$/.test(newValue) ? `${newValue}px` : newValue;
       return;
     }
-    if (name === "manifest") {
+    if (name === "manifest" || name === "data-fe-scoped-tasks") {
       if (this.isConnected && (this._booted || this.getAttribute("boot") !== "manual")) {
         this._booted = true;
         this._bootSurface();
@@ -1007,7 +1020,10 @@ export class FeSurfaceElement extends HTMLElement {
       let instance = null;
       if (this._wasmUrl) {
         const wasmBytes = await (await fetchOrThrow(this._wasmUrl, "wasm module")).arrayBuffer();
-        ({ instance } = await WebAssembly.instantiate(wasmBytes, {}));
+        const wasmModule = await WebAssembly.compile(wasmBytes);
+        const scopedTasks = await this._prepareScopedTasks(wasmModule);
+        instance = await WebAssembly.instantiate(wasmModule, scopedTasks?.imports ?? {});
+        this._attachScopedTasks(scopedTasks, instance);
         this._kernel = instance.exports[manifest.source_entry];
         if (!this._graph && typeof this._kernel !== "function") {
           throw new Error(`fe render runtime: wasm export \`${manifest.source_entry}\` not found`);
@@ -1016,6 +1032,8 @@ export class FeSurfaceElement extends HTMLElement {
         await this._bootCanonicalActor(wasmBytes);
       } else if (!this._graph) {
         throw new Error("fe render runtime: bundle has neither a Wasm fallback nor a GPU pass graph");
+      } else if (this.hasAttribute("data-fe-scoped-tasks")) {
+        throw new Error("fe render runtime: scoped Fe tasks require a Wasm parent artifact");
       } else if (manifest.canonical_interface) {
         throw new Error("fe render runtime: canonical browser messages require a Wasm artifact");
       }
@@ -1130,6 +1148,7 @@ export class FeSurfaceElement extends HTMLElement {
             ? surfaceInitialUniforms(this._members, this._surface, DEFAULT_SIZE, DEFAULT_SIZE)
             : undeclaredViewInitialUniforms(this._members))
           : this._surfaceReplyValues(authoredInitial, "surface initializer"));
+      this._startScopedTasks();
 
       if (!this._adoptedCanvas) this._ensureStage();
       // Publish inspectable artifact links as soon as the manifest has been
@@ -2234,6 +2253,10 @@ export class FeSurfaceElement extends HTMLElement {
   }
 
   _teardown() {
+    this._stopScopedTasks();
+    this._scopedTaskBroker = null;
+    this._scopedTaskMachines = null;
+    this._scopedTasksNeedReboot = false;
     this._actor?.close();
     this._actor = null;
     if (this._gestureFrame !== null) cancelAnimationFrame(this._gestureFrame);
@@ -2274,6 +2297,112 @@ export class FeSurfaceElement extends HTMLElement {
     this._activationObserver?.disconnect();
     this._activationObserver = null;
     this._unwireGestures();
+  }
+
+  async _prepareScopedTasks(wasmModule) {
+    const reference = this.getAttribute("data-fe-scoped-tasks");
+    if (!reference) return null;
+    const taskModule = await import(new URL(reference, this.baseURI).href);
+    if (typeof taskModule.createMaterializedTaskRegistry !== "function" ||
+        typeof taskModule.createHostCompletionBroker !== "function") {
+      throw new Error("compiler-published scoped-task package has an invalid fixed interface");
+    }
+    const required = WebAssembly.Module.imports(wasmModule);
+    const needsWorkerScope = required.some(value => value.module === "fe:worker-scope");
+    const needsWorkerMailbox = required.some(value => value.module === "fe:worker-mailbox");
+    const brokerOptions = {};
+    let structuredWorkerScope;
+    if (needsWorkerScope || needsWorkerMailbox) {
+      if (typeof taskModule.createStructuredWorkerScope !== "function") {
+        throw new Error("Worker effects require a compiler-derived structured child package");
+      }
+      structuredWorkerScope = await taskModule.createStructuredWorkerScope();
+      brokerOptions.workerScope = structuredWorkerScope;
+    }
+    const broker = taskModule.createHostCompletionBroker(brokerOptions);
+    let mailboxImports;
+    if (needsWorkerMailbox) {
+      if (typeof taskModule.createStructuredWorkerMailbox !== "function") {
+        throw new Error("fe:worker-mailbox requires a compiler-derived mailbox adapter");
+      }
+      mailboxImports = taskModule.createStructuredWorkerMailbox(
+        structuredWorkerScope,
+        broker.completions,
+      );
+    }
+    const imports = Object.create(null);
+    const merge = additions => {
+      if (!additions) return;
+      for (const [moduleName, values] of Object.entries(additions)) {
+        const target = imports[moduleName] ?? (imports[moduleName] = Object.create(null));
+        for (const [name, value] of Object.entries(values)) {
+          if (Object.hasOwn(target, name) && target[name] !== value) {
+            throw new Error(`conflicting fixed Wasm import: ${moduleName}.${name}`);
+          }
+          target[name] = value;
+        }
+      }
+    };
+    merge(broker.imports);
+    merge(mailboxImports);
+    for (const value of required) {
+      if (!Object.hasOwn(imports, value.module) ||
+          !Object.hasOwn(imports[value.module], value.name)) {
+        throw new Error(`missing Wasm import: ${value.module}.${value.name}`);
+      }
+    }
+    return { taskModule, broker, imports };
+  }
+
+  _attachScopedTasks(scopedTasks, instance) {
+    if (!scopedTasks) return;
+    const registry = scopedTasks.taskModule.createMaterializedTaskRegistry(instance.exports);
+    const machines = Object.values(registry);
+    if (machines.length === 0) {
+      throw new Error("compiler-published scoped-task package contains no task machines");
+    }
+    this._scopedTaskBroker = scopedTasks.broker;
+    this._scopedTaskMachines = machines;
+  }
+
+  _startScopedTasks() {
+    if (!this.isConnected || !this._scopedTaskMachines || this._scopedTaskLifetime) return;
+    const lifetime = new AbortController();
+    this._scopedTaskLifetime = lifetime;
+    try {
+      for (const machine of this._scopedTaskMachines) {
+        const inputWidth = machine.inputWidth ?? 0;
+        if (!Number.isSafeInteger(inputWidth) || inputWidth < 0) {
+          throw new TypeError("scoped Fe task has an invalid compiler-derived input width");
+        }
+        let input = [];
+        if (inputWidth !== 0) {
+          if (inputWidth !== this._uniforms.length) {
+            throw new Error(
+              `scoped Fe task input has ${inputWidth} lanes; surface state has ${this._uniforms.length}`,
+            );
+          }
+          if (typeof machine.liftInput !== "function") {
+            throw new TypeError("scoped Fe task has no compiler-derived input lifter");
+          }
+          input = machine.liftInput(this._uniforms);
+        }
+        this._scopedTaskBroker.run(machine, input, { signal: lifetime.signal }).catch(error => {
+          if (!lifetime.signal.aborted && error?.name !== "AbortError") this._fail(error);
+        });
+      }
+    } catch (error) {
+      lifetime.abort();
+      this._scopedTaskLifetime = null;
+      this._scopedTaskBroker.cancelAll();
+      throw error;
+    }
+  }
+
+  _stopScopedTasks() {
+    this._scopedTaskLifetime?.abort();
+    this._scopedTaskLifetime = null;
+    this._scopedTaskBroker?.cancelAll();
   }
 
   async _bootCanonicalActor(wasm) {
@@ -3074,6 +3203,8 @@ customElements.define("fe-surface", FeSurfaceElement);
  * @param {number} [options.height=width]
  * @param {number[]} [options.initial] - explicit initial uniform vector,
  *   overriding the manifest's declared `surface.params[].init`.
+ * @param {string|URL} [options.scopedTasksUrl] - compiler-published,
+ *   manifest-free scoped-task package entry.
  * @param {{adapter: GPUAdapter, device: GPUDevice}} [options.gpu] - reuse an
  *   already-acquired adapter/device instead of the page-shared singleton.
  * @param {boolean} [options.controls=true] - generate uniform sliders and
@@ -3091,6 +3222,7 @@ export async function mountRenderSurface(options) {
     width: widthOption,
     height: heightOption,
     initial,
+    scopedTasksUrl,
     gpu: gpuOption,
     controls = true,
   } = options;
@@ -3098,6 +3230,12 @@ export async function mountRenderSurface(options) {
   const resolvedManifestUrl = new URL(manifestUrl, document.baseURI);
   const surface = document.createElement("fe-surface");
   surface.setAttribute("manifest", resolvedManifestUrl.href);
+  if (scopedTasksUrl) {
+    surface.setAttribute(
+      "data-fe-scoped-tasks",
+      new URL(scopedTasksUrl, document.baseURI).href,
+    );
+  }
   surface.setAttribute("state", "live"); // historical contract: render immediately.
   surface.setAttribute("controls", controls ? "auto" : "none");
   if (widthOption) surface.setAttribute("width", String(widthOption));

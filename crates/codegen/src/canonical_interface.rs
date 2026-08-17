@@ -23,7 +23,9 @@ use hir::{
 use serde::{Deserialize, Serialize};
 use wasmparser::{CompositeInnerType, ExternalKind, Payload, TypeRef, ValType};
 
-use crate::actor_semantics::{resolve_metadata_attrs, resolve_metadata_trait_inst};
+use crate::actor_semantics::{
+    resolve_metadata_attrs, resolve_metadata_trait_inst, semantic_actors,
+};
 
 pub const CANONICAL_INTERFACE_PROTOCOL: &str = "fe-canonical-browser-interface";
 pub const CANONICAL_INTERFACE_VERSION: u32 = 4;
@@ -436,6 +438,48 @@ pub fn canonical_lane_decls_from_module<'db>(
     candidates
         .into_iter()
         .map(|(name, func)| canonical_lane_decl_from_func(db, func, &name, &name))
+        .collect()
+}
+
+/// Derive the explicitly placed browser-message lanes owned by one semantic
+/// actor. This is the actor-scoped counterpart to
+/// [`canonical_lane_decls_from_module`]: sibling actors may compile into
+/// separate browser artifacts without leaking their behaviors into each
+/// other's public interface.
+pub fn canonical_lane_decls_from_actor<'db>(
+    db: &'db compiler_db::DriverDataBase,
+    top_mod: TopLevelMod<'db>,
+    actor_name: &str,
+) -> Result<Vec<CanonicalLaneDecl>, CanonicalInterfaceError> {
+    let matches = semantic_actors(db, top_mod)
+        .into_iter()
+        .filter(|actor| {
+            actor
+                .state
+                .name(db)
+                .to_opt()
+                .is_some_and(|name| name.data(db) == actor_name)
+        })
+        .collect::<Vec<_>>();
+    let [actor] = matches.as_slice() else {
+        return Err(error(format!(
+            "canonical actor `{actor_name}` resolves to {} semantic actor declarations; exactly one is required",
+            matches.len(),
+        )));
+    };
+    actor
+        .behaviors
+        .iter()
+        .copied()
+        .filter(|behavior| function_has_browser_actor_marker(db, *behavior))
+        .map(|behavior| {
+            let name = behavior
+                .name(db)
+                .to_opt()
+                .map(|name| name.data(db).to_owned())
+                .ok_or_else(|| error("canonical browser-message lane must be named"))?;
+            canonical_lane_decl_from_func(db, behavior, &name, &name)
+        })
         .collect()
 }
 

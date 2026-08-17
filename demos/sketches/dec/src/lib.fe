@@ -16,16 +16,13 @@
 //!     `hodge` (each declares `uses (Worker)`, and the generated router
 //!     refuses to dispatch them anywhere else); its mailbox is the Worker
 //!     message port with the runtime's admission control in front of it.
-//!   - The RENDER PROGRAM: the pipeline that owns the uniform state
-//!     (`ViewRequest`'s cochain values and flags). `submit_view` declares the
-//!     intended main-thread WebGPU capability boundary, but the fixed surface
-//!     host does not connect that capability yet and rejects it explicitly.
-//!     The program's working gallery path is its Fe-projected pass graph. Its
-//!     internal behaviors are the synthesized fullscreen vertex stage and the
-//!     `dec_render` fragment behavior below: the SAME graded operators the
-//!     Worker lanes run, lowered through the render path instead of the wasm
-//!     path. One set of operator definitions, two substrates; typed draw
-//!     submission across the declared lane remains the next orchestration step.
+//!   - The RENDER PROGRAM: the pipeline that owns the uniform cochain state.
+//!     Its scoped Fe tasks supervise a separately compiled `DecOperator`
+//!     Worker and send that child a typed `Cochain0 -> Cochain1` request through
+//!     `ActorMailbox`. Its fragment behavior runs the same graded operators
+//!     through WebGPU. The fixed browser host transports the compiler-derived
+//!     scope and mailbox operations, but owns no DEC lane, child identity,
+//!     routing choice, or restart policy.
 //!
 //! The one piece of tooling this demo forces: GRADE-INDEXED OPERATOR TYPES.
 //! `Form<D>` and `Dual<D>` carry the cochain grade in the type; `d` raises
@@ -55,12 +52,18 @@
 //! `--entry`/`--mode` flags (`DESIGN_ACTOR_CONSTRUCT.md`, slice R-A1).
 
 use core::marker::Copy
-use core::{HostEffect, MainThread, Worker}
+use core::Worker
 use std::webgpu::{
-    Dispatch, FragmentSurface, GpuProgram, LatestPerFrame, ResponsiveBacking,
+    FragmentSurface, GpuProgram, LatestPerFrame, ResponsiveBacking,
     StandardSurfaceRecovery, SurfaceQuality, SurfaceRecovery, SurfaceScheduling,
     SurfaceTransition, WebGpuBackend,
 }
+use std::host::{Pending, Resumable, Suspend, TaskOutcome}
+use std::runtime::{
+    ActorMailbox, BrowserActorMailbox, ChildScopeExit, ScopedTask,
+    supervise_browser_child,
+}
+use std::wasm::WasmBackend
 use std::web::view::{
     ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface,
     SurfaceEvent, SurfaceState,
@@ -566,14 +569,6 @@ pub struct HodgeDiagonal {
     pub star2_face: f32,
 }
 
-pub struct ViewRequest {
-    pub generation: u32,
-    pub c0: f32, pub c1: f32, pub c2: f32, pub c3: f32,
-    pub c4: f32, pub c5: f32, pub c6: f32,
-    pub show_laplacian: f32,
-}
-pub struct ViewResponse { pub submitted: bool }
-
 impl Copy for ProbeRequest {}
 impl Copy for ComplexInfo {}
 impl Copy for Cochain0 {}
@@ -581,8 +576,6 @@ impl Copy for Cochain1 {}
 impl Copy for Cochain2 {}
 impl Copy for HodgeRequest {}
 impl Copy for HodgeDiagonal {}
-impl Copy for ViewRequest {}
-impl Copy for ViewResponse {}
 
 // Wire <-> typed marshalling. This boundary layer is the only place the flat
 // records and the graded types meet.
@@ -722,6 +715,16 @@ actor DecOperator {
     }
 }
 
+fn request_d0(_ request: own Cochain0) -> TaskOutcome<u32, Cochain1>
+    uses (
+        mailbox: mut ActorMailbox<WasmBackend, DecOperator>,
+        suspend: Suspend<WasmBackend, u32>,
+    )
+{
+    let pending: Pending<WasmBackend, Cochain1> = mailbox.ask(request)
+    suspend.suspend(pending)
+}
+
 // ---------------------------------------------------------------------------
 // The render program, named as one unit: the `DecSurface` actor (below the
 // pixel helpers it uses).
@@ -838,19 +841,44 @@ actor DecSurface uses (
         }
     }
 
-    /// The render program's message lane: a main-thread host-effect behavior
-    /// holding the WebGPU dispatch capability. A `ViewRequest` is a draw
-    /// message carrying this actor's uniform state. The generated browser actor
-    /// derives and routes the lane from Fe, but today's fixed surface host
-    /// rejects invocation because its standards WebGPU capability provider is
-    /// not connected yet. It never fabricates the `submitted` result below.
-    ///
-    /// Named `submit_view`, not `view`: `view` is the reserved const surface
-    /// declaration behavior, while this is a runtime draw-submission message.
-    fn submit_view(_request: ViewRequest) -> ViewResponse
-        uses (HostEffect, MainThread, mut Dispatch<WebGpuBackend>)
-    {
-        ViewResponse { submitted: false }
+    /// Own the Worker lifetime in Fe. Browser code supplies only the fixed
+    /// Module Worker mechanics; restart windows, timeout, backoff, cancellation,
+    /// and the nominal child identity all remain in this behavior and its
+    /// target-neutral runtime combinator.
+    fn supervise_operator() -> u32 uses (ScopedTask) {
+        match supervise_browser_child(
+            child: DecOperator {},
+            max_restarts: 2,
+            window_ms: 1000,
+            backoff_ms: 3,
+            startup_timeout_ms: 1000,
+        ) {
+            ChildScopeExit::Cancelled(epoch) => epoch
+            ChildScopeExit::Exhausted(epoch, _) => epoch
+            ChildScopeExit::TransportFailure(epoch, _) => epoch
+            ChildScopeExit::InvariantViolation(epoch, _) => epoch
+        }
+    }
+
+    /// Exercise the operator Worker through a compiler-derived typed mailbox.
+    /// The response receipt is intentionally ordinary Fe computation. The host
+    /// cannot select `d0`, decode DEC fields, or fabricate a success value.
+    fn exercise_operator(self) -> u32 uses (ScopedTask) {
+        with (
+            ActorMailbox<WasmBackend, DecOperator> = BrowserActorMailbox<DecOperator> {},
+            Suspend<WasmBackend, u32> = Resumable {},
+        ) {
+            match request_d0(Cochain0 {
+                v0: self.c0, v1: self.c1, v2: self.c2, v3: self.c3,
+                v4: self.c4, v5: self.c5, v6: self.c6,
+            }) {
+                TaskOutcome::Success(response,) => {
+                    if response.e0 == self.c1 - self.c0 { 1 } else { 2 }
+                }
+                TaskOutcome::Failure(error,) => 100 + error
+                TaskOutcome::Cancelled => 200
+            }
+        }
     }
 
     fn navigate(self, event: own SurfaceEvent) -> DecViewState

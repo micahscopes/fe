@@ -8,6 +8,7 @@
 //! the policy surface.
 
 use core::Backend
+pub use core::actor::{ActorMailbox, Handles, ScopedTask}
 use core::pending::{
     Pending,
     PendingCancellation,

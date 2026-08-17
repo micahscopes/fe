@@ -41,6 +41,9 @@ use crate::actor_semantics::{SemanticActor, nominal_attrs, resolve_metadata_ty, 
 use crate::browser_actor_runtime::{
     BROWSER_ACTOR_RUNTIME_FILES, BROWSER_ACTOR_RUNTIME_PROTOCOL, BROWSER_ACTOR_RUNTIME_VERSION,
 };
+use crate::resident_actor::{
+    StructuredChildActorArtifact, behavior_is_scoped_task, compile_scoped_task_support,
+};
 use crate::sonatina::{
     WasmCompileOptions, compile_runtime_package_spirv_authored_raster,
     compile_runtime_package_spirv_compute_with_resources, compile_runtime_package_spirv_grid,
@@ -48,9 +51,10 @@ use crate::sonatina::{
     compile_runtime_package_wasm_with_options,
 };
 use crate::{
-    CanonicalField, CanonicalInterfaceManifest, CanonicalType, CanonicalVariant,
-    canonical_lane_decl_from_entry, canonical_lane_decls_from_module, canonical_type_from_semantic,
-    emit_canonical_interface_js, verify_canonical_wasm_abi,
+    CanonicalField, CanonicalInterfaceManifest, CanonicalType, CanonicalVariant, WasmTaskAdapter,
+    canonical_lane_decl_from_entry, canonical_lane_decls_from_actor,
+    canonical_lane_decls_from_module, canonical_type_from_semantic, emit_canonical_interface_js,
+    materialize_scoped_task_package, verify_canonical_wasm_abi,
 };
 
 pub const WEB_BUNDLE_PROTOCOL: &str = "fe-web-bundle";
@@ -101,6 +105,7 @@ const TYPED_SURFACE_RECOVERY_EXPORT: &str = "fe_surface_recovery_v1";
 /// the bundle so `--mode render` output is directly openable, not hand-authored.
 const RENDER_INDEX_FILE: &str = "index.html";
 const RENDER_RUNTIME_HTML: &str = include_str!("../assets/render-runtime/index.html");
+const RENDER_SCOPED_TASK_OPTION_MARKER: &str = "/* FE_SCOPED_TASK_OPTION */";
 /// The ONE fixed, versioned, demo-blind render kernel driver (fetch manifest,
 /// drive WebGPU via the binding table, fall back to per-pixel wasm, generate
 /// uniform controls). `RENDER_INDEX_FILE` imports it as a sibling file; the
@@ -1149,6 +1154,97 @@ fn gpu_actor_name_for_entry(
         .name(db)
         .to_opt()
         .map(|name| name.data(db).to_string())
+}
+
+/// Select every actor-scoped task belonging to the GPU actor that owns the
+/// page-facing render entry. A self-receiving task consumes the same complete
+/// non-resource state snapshot as the render transition. Resource-bearing
+/// self tasks stay fail-closed until the Wasm host can preserve opaque GPU
+/// authorities across the task boundary.
+fn render_actor_scoped_task_entries(
+    db: &DriverDataBase,
+    top_mod: TopLevelMod<'_>,
+    source_entry: &str,
+    resource_field_indices: &[u32],
+) -> Result<Vec<String>, WebBundleError> {
+    let Some(actor_name) = gpu_actor_name_for_entry(db, top_mod, source_entry) else {
+        return Ok(Vec::new());
+    };
+    let actors = semantic_actors(db, top_mod);
+    let actor = actors
+        .iter()
+        .find(|actor| {
+            actor
+                .state
+                .name(db)
+                .to_opt()
+                .is_some_and(|name| name.data(db) == &actor_name)
+        })
+        .ok_or_else(|| {
+            WebBundleError::EntryDerivation(format!(
+                "GPU actor `{actor_name}` has no semantic state declaration"
+            ))
+        })?;
+    let state_fields = actor.state.hir_fields(db).data(db);
+    let assumptions = PredicateListId::empty_list(db);
+    let mut entries = Vec::new();
+    for task in actor
+        .behaviors
+        .iter()
+        .copied()
+        .filter(|behavior| behavior_is_scoped_task(db, *behavior))
+    {
+        let name = task
+            .name(db)
+            .to_opt()
+            .map(|name| name.data(db).to_owned())
+            .ok_or_else(|| {
+                WebBundleError::EntryDerivation(format!(
+                    "GPU actor `{actor_name}` has an unnamed scoped task"
+                ))
+            })?;
+        let task_args = task.arg_tys(db);
+        if task_args.is_empty() {
+            entries.push(name);
+            continue;
+        }
+        if !resource_field_indices.is_empty() {
+            return Err(WebBundleError::EntryDerivation(format!(
+                "GPU actor `{actor_name}` scoped task `{name}` receives self while the actor owns GPU resources; opaque resource custody is not yet available to Wasm tasks"
+            )));
+        }
+        if task_args.len() != state_fields.len() {
+            return Err(WebBundleError::EntryDerivation(format!(
+                "GPU actor `{actor_name}` scoped task `{name}` must be self-less or take self as exactly {} flattened actor-state arguments; found {}",
+                state_fields.len(),
+                task_args.len(),
+            )));
+        }
+        for (index, (field, actual)) in state_fields.iter().zip(&task_args).enumerate() {
+            let type_ref = field.type_ref().to_opt().ok_or_else(|| {
+                WebBundleError::EntryDerivation(format!(
+                    "GPU actor `{actor_name}` state field {index} has no resolved type"
+                ))
+            })?;
+            let expected = lower_hir_ty(db, type_ref, actor.state.scope(), assumptions);
+            let expected =
+                canonical_type_from_semantic(db, expected, &format!("render_actor_state.{index}"))
+                    .map_err(|error| WebBundleError::EntryDerivation(error.to_string()))?;
+            let actual = canonical_type_from_semantic(
+                db,
+                *actual.skip_binder(),
+                &format!("render_scoped_task_state.{index}"),
+            )
+            .map_err(|error| WebBundleError::EntryDerivation(error.to_string()))?;
+            if actual != expected {
+                return Err(WebBundleError::EntryDerivation(format!(
+                    "GPU actor `{actor_name}` scoped task `{name}` state argument {index} differs from the actor field: expected {expected:?}, got {actual:?}"
+                )));
+            }
+        }
+        entries.push(name);
+    }
+    Ok(entries)
 }
 
 /// The render entry and mode derived from a module's unique GPU-program actor,
@@ -3732,6 +3828,12 @@ pub struct WebBundle {
     pub manifest: WebBundleManifest,
     pub interface_js: Option<String>,
     pub interface_d_ts: Option<String>,
+    /// Compiler-derived continuation machines owned by the selected render
+    /// actor. They are published as a manifest-free executable package.
+    pub scoped_tasks: Vec<WasmTaskAdapter>,
+    /// One separately compiled nominal child actor, selected from the typed
+    /// mailbox/supervision operations in `scoped_tasks`.
+    pub structured_child: Option<StructuredChildActorArtifact>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4233,6 +4335,8 @@ impl WebBundle {
             manifest,
             interface_js: None,
             interface_d_ts: None,
+            scoped_tasks: Vec::new(),
+            structured_child: None,
         })
     }
 
@@ -4291,6 +4395,8 @@ impl WebBundle {
             &options.source_entry,
         )?;
         let initializer = surface_initializer_contract(db, top_mod, &options.source_entry, &[])?;
+        let scoped_task_entries =
+            render_actor_scoped_task_entries(db, top_mod, &options.source_entry, &[])?;
         // Canonical actor messages and the surface-control transition are two
         // different roles. Explicitly placed/capability-bearing Fe functions
         // form the public message interface; `navigate` remains a private
@@ -4312,7 +4418,10 @@ impl WebBundle {
                 .collect::<Result<Vec<_>, _>>();
             (declarations, entries)
         } else {
-            let declarations = canonical_lane_decls_from_module(db, top_mod);
+            let declarations = match gpu_actor_name_for_entry(db, top_mod, &options.source_entry) {
+                Some(actor_name) => canonical_lane_decls_from_actor(db, top_mod, &actor_name),
+                None => canonical_lane_decls_from_module(db, top_mod),
+            };
             let entries = declarations
                 .as_ref()
                 .map(|declarations| {
@@ -4397,6 +4506,7 @@ impl WebBundle {
         if let Some(initializer) = initializer.as_ref() {
             wasm_entries.push(initializer.source_entry.clone());
         }
+        wasm_entries.extend(scoped_task_entries.iter().cloned());
         let mut seen_wasm_entries = std::collections::BTreeSet::new();
         wasm_entries.retain(|entry| seen_wasm_entries.insert(entry.clone()));
         if wasm_entries.is_empty() {
@@ -4419,6 +4529,13 @@ impl WebBundle {
         )
         .map_err(|error| WebBundleError::Lower(error.to_string()))?;
 
+        let (scoped_tasks, structured_child) = if scoped_task_entries.is_empty() {
+            (Vec::new(), None)
+        } else {
+            compile_scoped_task_support(db, top_mod, wasm_package, scoped_task_entries.len(), true)
+                .map_err(|error| WebBundleError::EntryDerivation(error.to_string()))?
+        };
+
         let mut wasm_options = match canonical_policy {
             WebCanonicalPolicy::Disabled => WasmCompileOptions::default(),
             WebCanonicalPolicy::Optional | WebCanonicalPolicy::Required => canonical_candidate
@@ -4435,6 +4552,9 @@ impl WebBundle {
                 .map(|lanes| WasmCompileOptions::default().with_canonical_lanes(lanes))
                 .unwrap_or_else(|| WasmCompileOptions::default().with_canonical_arena()),
         };
+        if !scoped_tasks.is_empty() {
+            wasm_options = wasm_options.with_canonical_stack_memory(["fe_cabi_post_return"]);
+        }
         if let Some(contract) = typed_transition.as_ref() {
             wasm_options = with_typed_surface_export(
                 wasm_options,
@@ -4580,6 +4700,8 @@ impl WebBundle {
             manifest,
             interface_js,
             interface_d_ts,
+            scoped_tasks,
+            structured_child,
         })
     }
 
@@ -4599,8 +4721,17 @@ impl WebBundle {
             .browser_runtime
             .as_ref()
             .map_or(0, |runtime| runtime.artifacts.len());
+        let scoped_task_package =
+            materialize_scoped_task_package(&self.scoped_tasks, self.structured_child.as_ref())
+                .map_err(|error| WebBundleError::Materialization(error.to_string()))?;
+        let has_scoped_tasks = scoped_task_package.is_some();
+        let scoped_task_file_count = scoped_task_package
+            .as_ref()
+            .map_or(0, |package| package.files.len());
         let mut files = Vec::with_capacity(
-            3 + self.manifest.artifacts.canonical_adapters.len() + runtime_artifact_count,
+            3 + self.manifest.artifacts.canonical_adapters.len()
+                + runtime_artifact_count
+                + scoped_task_file_count,
         );
         let mut paths = std::collections::BTreeSet::new();
         let mut push = |path: &str, bytes: Arc<[u8]>| -> Result<(), WebBundleError> {
@@ -4746,6 +4877,14 @@ impl WebBundle {
                 push(&artifact.path, Arc::from(source.as_bytes()))?;
             }
         }
+        if let Some(package) = scoped_task_package {
+            for file in package.files {
+                push(
+                    &format!("tasks/{}", file.path),
+                    Arc::from(file.bytes.into_boxed_slice()),
+                )?;
+            }
+        }
         push(MANIFEST_FILE, Arc::from(self.manifest_json()?))?;
         // Render bundles ship a compiler-emitted host page so the directory is
         // directly openable (WebGPU shader.wgsl, with a wasm per-pixel fallback),
@@ -4755,7 +4894,14 @@ impl WebBundle {
                 RENDER_RUNTIME_JS_FILE,
                 Arc::from(RENDER_RUNTIME_JS.as_bytes()),
             )?;
-            push(RENDER_INDEX_FILE, Arc::from(RENDER_RUNTIME_HTML.as_bytes()))?;
+            let task_option = if has_scoped_tasks {
+                "scopedTasksUrl: \"./tasks/tasks.js\","
+            } else {
+                ""
+            };
+            let render_index =
+                RENDER_RUNTIME_HTML.replace(RENDER_SCOPED_TASK_OPTION_MARKER, task_option);
+            push(RENDER_INDEX_FILE, Arc::from(render_index.into_bytes()))?;
         }
         Ok(files)
     }

@@ -116,7 +116,10 @@ fn behavior_is_projection(db: &DriverDataBase, behavior: hir::hir_def::Func<'_>)
         .any(|attrs| attrs.is_actor_projection(db))
 }
 
-fn behavior_is_scoped_task(db: &DriverDataBase, behavior: hir::hir_def::Func<'_>) -> bool {
+pub(crate) fn behavior_is_scoped_task(
+    db: &DriverDataBase,
+    behavior: hir::hir_def::Func<'_>,
+) -> bool {
     behavior
         .actor_roles(db)
         .data(db)
@@ -480,6 +483,30 @@ fn compile_structured_child(
         wasm,
         interface,
     }))
+}
+
+/// Validate and materialize the target-neutral runtime support shared by
+/// resident and render actors. The caller owns actor-role selection and the
+/// parent root set; this helper proves that the resulting package's typed
+/// mailbox edges correspond to one actual nominal child actor.
+pub(crate) fn compile_scoped_task_support(
+    db: &DriverDataBase,
+    top_mod: TopLevelMod<'_>,
+    parent_package: mir::RuntimePackage<'_>,
+    expected_tasks: usize,
+    optimize: bool,
+) -> Result<(Vec<WasmTaskAdapter>, Option<StructuredChildActorArtifact>), ResidentActorError> {
+    validate_actor_mailbox_requests(db, top_mod, parent_package)?;
+    let scoped_tasks =
+        materialized_task_adapters(db, &parent_package).map_err(ResidentActorError::Lower)?;
+    if scoped_tasks.len() != expected_tasks {
+        return Err(ResidentActorError::Contract(format!(
+            "actor declares {expected_tasks} scoped task behavior(s), but {} resumable machine(s) were materialized",
+            scoped_tasks.len(),
+        )));
+    }
+    let structured_child = compile_structured_child(db, top_mod, parent_package, optimize)?;
+    Ok((scoped_tasks, structured_child))
 }
 
 fn scalar_layout(
@@ -971,18 +998,13 @@ pub fn compile_resident_actor_with_optimization(
     let package = mir::build_wasm_runtime_package_for_entries(db, top_mod, &entries)
         .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
     validate_actor_sink_events(db, &package, &contract)?;
-    validate_actor_mailbox_requests(db, top_mod, package)?;
-    let scoped_tasks =
-        materialized_task_adapters(db, &package).map_err(ResidentActorError::Lower)?;
-    if scoped_tasks.len() != contract.scoped_task_source_entries.len() {
-        return Err(ResidentActorError::Contract(format!(
-            "actor `{}` declares {} scoped task behavior(s), but {} resumable machine(s) were materialized",
-            contract.actor,
-            contract.scoped_task_source_entries.len(),
-            scoped_tasks.len(),
-        )));
-    }
-    let structured_child = compile_structured_child(db, top_mod, package, optimize)?;
+    let (scoped_tasks, structured_child) = compile_scoped_task_support(
+        db,
+        top_mod,
+        package,
+        contract.scoped_task_source_entries.len(),
+        optimize,
+    )?;
     // A scoped task can receive generated rich host values between Wasm
     // continuation entries. Use the checked LIFO canonical stack for every
     // scoped-task actor so those values have one compiler-owned allocation

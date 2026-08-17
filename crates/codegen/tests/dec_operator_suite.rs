@@ -1,9 +1,9 @@
 //! Acceptance for the DEC operator-suite actor demo (`demos/sketches/dec`).
 //!
 //! Three mechanical gates:
-//!   1. The actor's declared topology reaches the canonical interface: six
-//!      wasm lanes placed in a Worker, one main-thread host-effect lane
-//!      holding the WebGPU dispatch capability, with pinned message layouts.
+//!   1. The operator actor's declared topology reaches a canonical child
+//!      interface: six wasm lanes placed in a Worker, with pinned message
+//!      layouts.
 //!   2. The wasm lanes execute under wasmtime and match a hand-computed
 //!      oracle that shares no code with the Fe derivation: d on basis
 //!      cochains, d compose d exactly zero, the composed Laplacian, and the
@@ -29,16 +29,6 @@ use hir::hir_def::HirIngot;
 use url::Url;
 
 const WASM_LANES: [&str; 6] = ["probe", "d0", "d1", "dd0", "laplace0", "hodge"];
-const ALL_LANES: [&str; 7] = [
-    "probe",
-    "d0",
-    "d1",
-    "dd0",
-    "laplace0",
-    "hodge",
-    "submit_view",
-];
-
 fn ingot_root(relative: &str) -> Url {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
     Url::from_directory_path(path.canonicalize().unwrap()).unwrap()
@@ -219,24 +209,7 @@ fn declared_topology_reaches_the_canonical_interface() {
         );
     }
 
-    // The main-thread host-effect lane holding the WebGPU dispatch capability.
-    // Named `submit_view`, not `view`: `view` is the reserved const
-    // surface-declaration behavior (`const fn view() -> Surface<_>`), not a
-    // runtime lane, so the demo renames the dispatch entry to `submit_view`.
-    let submit_view = manifest
-        .lanes
-        .iter()
-        .find(|lane| lane.name == "submit_view")
-        .unwrap();
-    assert_eq!(submit_view.intent.execution, CanonicalExecution::HostEffect);
-    assert_eq!(submit_view.intent.placement, CanonicalPlacement::MainThread);
-    assert_eq!(submit_view.export, None);
-    assert_eq!(submit_view.intent.capabilities.len(), 1);
-    assert_eq!(
-        submit_view.intent.capabilities[0].capability.as_str(),
-        "webgpu_dispatch"
-    );
-    assert!(submit_view.intent.capabilities[0].mutable);
+    assert_eq!(manifest.lanes.len(), WASM_LANES.len());
 
     // Pinned per-grade wire layouts: distinct nominal shapes per grade is the
     // point of the message design.
@@ -406,75 +379,56 @@ fn web_bundle_carries_the_declared_topology() {
     let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
     assert!(diagnostics.is_empty(), "{diagnostics}");
 
-    // NOTE the honest asymmetry this call records: the seven lanes and their
-    // placements are DECLARED in Fe, but the kernel selection and pipeline
-    // shape still arrive as options here (the CLI's --entry/--mode). Closing
-    // that is the composition design's job, not this demo's.
     let bundle =
         WebBundle::compile(&db, top_mod, WebBuildOptions::render("dec_render", None)).unwrap();
 
-    assert!(bundle.manifest.canonical_status.embedded);
     assert!(!bundle.wgsl.is_empty(), "render leg must emit WGSL");
+    assert!(
+        bundle.manifest.canonical_interface.is_none(),
+        "the render parent must not publish sibling child behaviors as surface lanes"
+    );
+    assert!(bundle.interface_js.is_none());
+    assert_eq!(bundle.scoped_tasks.len(), 2);
 
-    // The typed interface manifest rides in the bundle manifest itself:
-    // placement declared in Fe reaches the artifact a page consumes.
-    let interface = bundle
-        .manifest
-        .canonical_interface
+    let child = bundle
+        .structured_child
         .as_ref()
-        .expect("embedded canonical interface");
-    for name in WASM_LANES {
-        let lane = interface
-            .lanes
-            .iter()
-            .find(|lane| lane.name == name)
-            .unwrap();
-        assert_eq!(lane.intent.placement, CanonicalPlacement::Worker, "{name}");
+        .expect("typed DEC operator child");
+    assert_eq!(child.actor, "DecOperator");
+    assert_eq!(child.interface.lanes.len(), WASM_LANES.len());
+    assert!(child.interface.lanes.iter().all(|lane| {
+        lane.name.starts_with("request_")
+            && lane.intent.execution == CanonicalExecution::Wasm
+            && lane.intent.placement == CanonicalPlacement::Worker
+    }));
+
+    let files = bundle.materialized_files().unwrap();
+    let paths = files.iter().map(|file| file.path()).collect::<Vec<_>>();
+    for expected in [
+        "tasks/tasks.js",
+        "tasks/materialized-task.js",
+        "tasks/host-completion.js",
+        "tasks/child.wasm",
+        "tasks/interface.js",
+        "tasks/runtime/worker-host.js",
+        "tasks/runtime/actor-router.js",
+    ] {
+        assert!(paths.contains(&expected), "missing {expected}: {paths:?}");
     }
-    let adapter_paths: Vec<&str> = bundle
-        .manifest
-        .artifacts
-        .canonical_adapters
+    let index = files
         .iter()
-        .map(|artifact| artifact.path.as_str())
-        .collect();
-    assert!(adapter_paths.contains(&"interface.js"), "{adapter_paths:?}");
+        .find(|file| file.path() == "index.html")
+        .expect("render index");
+    let index = std::str::from_utf8(index.bytes()).unwrap();
     assert!(
-        adapter_paths.contains(&"interface.d.ts"),
-        "{adapter_paths:?}"
+        index.contains("scopedTasksUrl: \"./tasks/tasks.js\""),
+        "standalone render output must connect its compiler-derived task package"
     );
 
-    let runtime = bundle
-        .manifest
-        .browser_runtime
-        .as_ref()
-        .expect("fixed runtime");
-    let runtime_paths: Vec<&str> = runtime
-        .artifacts
-        .iter()
-        .map(|artifact| artifact.path.as_str())
-        .collect();
-    assert!(
-        runtime_paths.contains(&"runtime/worker-host.js"),
-        "{runtime_paths:?}"
-    );
-    assert!(
-        runtime_paths.contains(&"runtime/actor-router.js"),
-        "{runtime_paths:?}"
-    );
-
-    // The generated binding table carries the declared placements and the
-    // capability claim; this is the "JS generated from Fe signatures" seam.
-    let interface_js = bundle.interface_js.as_deref().expect("generated interface");
-    assert!(interface_js.contains("\"placement\":\"worker\""));
-    assert!(interface_js.contains("\"placement\":\"main_thread\""));
-    assert!(interface_js.contains("\"capability\":\"webgpu_dispatch\""));
-    for name in ALL_LANES {
-        assert!(
-            interface_js.contains(&format!("\"name\":\"{name}\"")),
-            "interface.js must carry lane {name}"
-        );
-    }
+    let manifest = String::from_utf8(bundle.manifest_json().unwrap()).unwrap();
+    assert!(!manifest.contains("DecOperator"));
+    assert!(!manifest.contains("tasks.js"));
+    assert!(!manifest.contains("child.wasm"));
 }
 
 #[test]
