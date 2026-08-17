@@ -1,0 +1,8 @@
+[ingot]
+name = "canonical_words_field_oracle_gate"
+version = "0.1.0"
+
+[dependencies]
+core = "../../../../../ingots/core"
+canonical_words = "../../../../../ingots/canonical_words"
+precision = "../../../../../demos/sketches/precision"

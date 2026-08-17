@@ -1,0 +1,259 @@
+//! Reflection-derived canonical word sequences.
+//!
+//! A nominal Fe record is its own schema. The derive provider computes its
+//! exact word count and emits ordered encode/decode folds from reflected fields.
+//! Sources and sinks are interpreters, keeping browser memory, EVM calldata,
+//! native buffers, and GPU storage outside the value vocabulary.
+
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+use core::{BrowserBytes, BrowserPtr, alloc_browser_bytes}
+
+extern {
+    const fn __bitcast<From, To>(_: From) -> To
+}
+
+pub struct WordRead<R> { pub source: R, pub value: u32 }
+impl<R: core::marker::Copy> core::marker::Copy for WordRead<R> {}
+
+pub trait WordSink: core::marker::Copy {
+    fn write(self, _ value: u32) -> Self
+}
+
+/// Invalid leaf encodings poison the source through `reject`; the concrete
+/// source decides how to retain bounds, cursor, and failure state.
+pub trait WordSource: core::marker::Copy {
+    fn read(self) -> WordRead<Self>
+    fn reject(self) -> Self
+}
+
+pub trait CanonicalWords {
+    const WORDS: u32
+    fn encode<W: WordSink>(self, _ writer: W) -> W
+    fn decode<R: WordSource>(mut self, _ reader: R) -> R
+}
+
+/// Browser-linear-memory interpreter for canonical word emission. The writer
+/// owns an exact word budget and fails closed on overflow or incomplete output.
+pub struct BrowserWordWriter {
+    buffer: BrowserBytes,
+    cursor: u32,
+    words: u32,
+    valid: bool,
+}
+impl core::marker::Copy for BrowserWordWriter {}
+
+impl BrowserWordWriter {
+    pub fn allocate(_ words: u32) -> Self {
+        if words > 1073741823 {
+            return Self {
+                buffer: BrowserBytes { ptr: 0, len: 0 },
+                cursor: 0,
+                words: 0,
+                valid: false,
+            }
+        }
+        let allocation = alloc_browser_bytes(words * 4)
+        Self {
+            buffer: BrowserBytes { ptr: allocation.address(), len: words * 4 },
+            cursor: 0,
+            words: words,
+            valid: true,
+        }
+    }
+
+    pub fn finish(self) -> BrowserBytes {
+        if !self.valid || self.cursor != self.words {
+            return BrowserBytes { ptr: self.buffer.ptr, len: 0 }
+        }
+        self.buffer
+    }
+}
+
+impl WordSink for BrowserWordWriter {
+    fn write(self, _ value: u32) -> Self {
+        if !self.valid || self.cursor >= self.words {
+            return Self {
+                buffer: self.buffer,
+                cursor: self.cursor,
+                words: self.words,
+                valid: false,
+            }
+        }
+        let destination: BrowserPtr<u32> =
+            BrowserPtr::from_u32(self.buffer.ptr + self.cursor * 4)
+        destination.write(value)
+        Self {
+            buffer: self.buffer,
+            cursor: self.cursor + 1,
+            words: self.words,
+            valid: true,
+        }
+    }
+}
+
+/// Bounded browser-memory interpreter for canonical decoding. `complete`
+/// rejects truncation, trailing words, non-word byte lengths, and any leaf
+/// codec that called `reject`.
+pub struct BrowserWordReader {
+    buffer: BrowserBytes,
+    cursor: u32,
+    words: u32,
+    valid: bool,
+}
+impl core::marker::Copy for BrowserWordReader {}
+
+impl BrowserWordReader {
+    pub fn new(_ buffer: BrowserBytes) -> Self {
+        let aligned = (buffer.len & 3) == 0
+        Self {
+            buffer: buffer,
+            cursor: 0,
+            words: buffer.len / 4,
+            valid: aligned,
+        }
+    }
+
+    pub fn complete(self) -> bool {
+        self.valid && self.cursor == self.words
+    }
+}
+
+impl WordSource for BrowserWordReader {
+    fn read(self) -> WordRead<Self> {
+        if !self.valid || self.cursor >= self.words {
+            return WordRead {
+                source: Self {
+                    buffer: self.buffer,
+                    cursor: self.cursor,
+                    words: self.words,
+                    valid: false,
+                },
+                value: 0,
+            }
+        }
+        let source: BrowserPtr<u32> =
+            BrowserPtr::from_u32(self.buffer.ptr + self.cursor * 4)
+        WordRead {
+            source: Self {
+                buffer: self.buffer,
+                cursor: self.cursor + 1,
+                words: self.words,
+                valid: true,
+            },
+            value: source.read(),
+        }
+    }
+
+    fn reject(self) -> Self {
+        Self {
+            buffer: self.buffer,
+            cursor: self.cursor,
+            words: self.words,
+            valid: false,
+        }
+    }
+}
+
+pub struct CanonicalWordsProvider {}
+
+impl Derive<CanonicalWords> for CanonicalWordsProvider {
+    const fn derive<T>(ev: own Evidence<CanonicalWords<T>>) -> Evidence<CanonicalWords<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<CanonicalWords<T>>,
+        )
+    {
+        let mut words = builder.int(0)
+        let mut encode = quote(writer) { writer }
+        let mut decode = quote(reader) { reader }
+        for field in reflect.fields() {
+            builder.require<CanonicalWords>(field.ty())
+            words = builder.add(words, builder.trait_const(field.ty(), "WORDS"))
+            encode = quote(writer) { self.${field}.encode(${encode}) }
+            decode = quote(reader) { self.${field}.decode(${decode}) }
+        }
+        builder.emit_const("WORDS", builder.ty<u32>(), words)
+        builder.emit_method(quote {
+            fn encode<W: WordSink>(self, writer: W) -> W { ${encode} }
+        })
+        builder.emit_method(quote {
+            fn decode<R: WordSource>(mut self, reader: R) -> R { ${decode} }
+        })
+        builder.finish()
+        ev
+    }
+}
+
+impl CanonicalWords for u32 {
+    const WORDS: u32 = 1
+
+    fn encode<W: WordSink>(self, _ writer: W) -> W { writer.write(self) }
+
+    fn decode<R: WordSource>(mut self, _ reader: R) -> R {
+        let next = reader.read()
+        self = next.value
+        next.source
+    }
+}
+
+impl CanonicalWords for i32 {
+    const WORDS: u32 = 1
+
+    fn encode<W: WordSink>(self, _ writer: W) -> W {
+        let word: u32 = __bitcast(self)
+        writer.write(word)
+    }
+
+    fn decode<R: WordSource>(mut self, _ reader: R) -> R {
+        let next = reader.read()
+        self = __bitcast(next.value)
+        next.source
+    }
+}
+
+impl CanonicalWords for bool {
+    const WORDS: u32 = 1
+
+    fn encode<W: WordSink>(self, _ writer: W) -> W {
+        writer.write(if self { 1 } else { 0 })
+    }
+
+    fn decode<R: WordSource>(mut self, _ reader: R) -> R {
+        let next = reader.read()
+        if next.value > 1 {
+            self = false
+            return next.source.reject()
+        }
+        self = next.value == 1
+        next.source
+    }
+}
+
+impl<T: CanonicalWords + core::marker::Copy, const N: usize> CanonicalWords for [T; N] {
+    const WORDS: u32 = {
+        let count: u32 = N.downcast_truncate()
+        count * T::WORDS
+    }
+
+    fn encode<W: WordSink>(self, _ writer: W) -> W {
+        if N == 0 { return writer }
+        let mut writer = writer
+        let mut index: usize = 0
+        while index < N {
+            writer = self[index].encode(writer)
+            index = index + 1
+        }
+        writer
+    }
+
+    fn decode<R: WordSource>(mut self, _ reader: R) -> R {
+        if N == 0 { return reader }
+        let mut reader = reader
+        let mut index: usize = 0
+        while index < N {
+            reader = self[index].decode(reader)
+            index = index + 1
+        }
+        reader
+    }
+}

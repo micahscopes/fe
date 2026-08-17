@@ -1,0 +1,6 @@
+[ingot]
+name = "canonical_words"
+version = "0.1.0"
+
+[dependencies]
+core = "../core"

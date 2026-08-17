@@ -84,6 +84,7 @@
 use core::marker::Copy
 use core::num::mul_mod_u256
 use core::ops::{Add, Mul, Neg, Sub}
+use canonical_words::{CanonicalWords, WordSink, WordSource}
 
 // -----------------------------------------------------------------------------
 // Limb storage: a linear, LEAST-SIGNIFICANT-LIMB-FIRST HList (`lead` = limb 0).
@@ -410,6 +411,33 @@ fn modulus_words<const L: usize, M: Modulus<L>>() -> FieldWords<L>
     words
 }
 
+/// Validate a plain radix-word encoding before importing it into a field.
+/// Every limb must be in radix and the represented integer must be strictly
+/// smaller than the branded modulus. This is the canonical decoding boundary
+/// for proof receipts and other adversarial byte transports.
+pub fn plain_words_are_canonical<const L: usize, M: Modulus<L>>(
+    _ words: FieldWords<L>,
+) -> bool
+    where Limbs<L>: Head + ShiftAppend + Copy,
+{
+    let count: u32 = L.downcast_truncate()
+    let modulus = modulus_words<L, M>()
+    let mut i: u32 = 0
+    while i < count {
+        if words[i as usize] >= LIMB_BASE { return false }
+        i = i + 1
+    }
+    i = count
+    while i > 0 {
+        i = i - 1
+        let word = words[i as usize]
+        let modulus_word = modulus[i as usize]
+        if word < modulus_word { return true }
+        if word > modulus_word { return false }
+    }
+    false
+}
+
 fn modulus_minus_two_words<const L: usize, M: Modulus<L>>() -> FieldWords<L>
     where Limbs<L>: Head + ShiftAppend + Copy,
 {
@@ -635,6 +663,27 @@ impl<const L: usize, M> FieldElement<L, M>
     pub fn pow5(self) -> Self {
         let squared = self.square()
         squared.square() * self
+    }
+}
+
+impl<const L: usize, M> CanonicalWords for FieldElement<L, M>
+    where M: MontgomeryModulus<L>, Limbs<L>: Head + ShiftAppend + Copy,
+{
+    const WORDS: u32 = L.downcast_truncate()
+
+    fn encode<W: WordSink>(self, _ writer: W) -> W {
+        self.to_plain_words().encode(writer)
+    }
+
+    fn decode<R: WordSource>(mut self, _ reader: R) -> R {
+        let mut words: FieldWords<L> = [0; L]
+        let reader = words.decode(reader)
+        if !plain_words_are_canonical<L, M>(words) {
+            self = Self::zero()
+            return reader.reject()
+        }
+        self = Self::from_plain_words(words)
+        reader
     }
 }
 

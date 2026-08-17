@@ -1,0 +1,133 @@
+//! Narrow executable gate for const-generic canonical field words.
+
+use canonical_words::{
+    BrowserWordReader,
+    BrowserWordWriter,
+    CanonicalWords,
+    CanonicalWordsProvider,
+    WordSink,
+    WordSource,
+}
+use core::BrowserBytes
+use precision::bn254_fr::Bn254Fr
+use precision::field::FieldElement
+
+type Fr = FieldElement<20, Bn254Fr>
+
+const DERIVED_FIELD_COUNT: usize = 2 * 203 + 5
+
+struct FieldArray<const N: usize> { values: [Fr; N] }
+impl<const N: usize> core::marker::Copy for FieldArray<N> {}
+impl<const N: usize> CanonicalWords for FieldArray<N> {
+    const WORDS: u32 = <[Fr; N] as CanonicalWords>::WORDS
+
+    fn encode<W: WordSink>(self, _ writer: W) -> W {
+        self.values.encode(writer)
+    }
+
+    fn decode<R: WordSource>(mut self, _ reader: R) -> R {
+        self.values.decode(reader)
+    }
+}
+
+struct Envelope { valid: bool, fields: FieldArray<2> }
+impl core::marker::Copy for Envelope {}
+derive CanonicalWords for Envelope using CanonicalWordsProvider
+
+struct SignedEnvelope { negative: i32, positive: i32 }
+impl core::marker::Copy for SignedEnvelope {}
+derive CanonicalWords for SignedEnvelope using CanonicalWordsProvider
+
+struct DerivedRow { values: [Fr; DERIVED_FIELD_COUNT] }
+impl core::marker::Copy for DerivedRow {}
+derive CanonicalWords for DerivedRow using CanonicalWordsProvider
+
+struct DerivedQuartet { rows: [DerivedRow; 4] }
+impl core::marker::Copy for DerivedQuartet {}
+derive CanonicalWords for DerivedQuartet using CanonicalWordsProvider
+
+pub fn canonical_field_word_count() -> u32 { <Fr as CanonicalWords>::WORDS }
+
+pub fn canonical_field_one() -> BrowserBytes {
+    Fr::from_u32(1)
+        .encode(BrowserWordWriter::allocate(<Fr as CanonicalWords>::WORDS))
+        .finish()
+}
+
+pub fn canonical_envelope_word_count() -> u32 { <Envelope as CanonicalWords>::WORDS }
+
+pub fn canonical_envelope() -> BrowserBytes {
+    Envelope {
+        valid: true,
+        fields: FieldArray { values: [Fr::from_u32(1), Fr::from_u32(2)] },
+    }
+        .encode(BrowserWordWriter::allocate(<Envelope as CanonicalWords>::WORDS))
+        .finish()
+}
+
+pub fn canonical_envelope_roundtrip() -> u32 {
+    let encoded = canonical_envelope()
+    let mut decoded = Envelope {
+        valid: false,
+        fields: FieldArray { values: [Fr::zero(), Fr::zero()] },
+    }
+    let reader = decoded.decode(BrowserWordReader::new(encoded))
+    let first = decoded.fields.values[0].to_plain_words()
+    let second = decoded.fields.values[1].to_plain_words()
+    if reader.complete()
+        && decoded.valid
+        && first[0] == 1
+        && second[0] == 2
+    {
+        1
+    } else {
+        0
+    }
+}
+
+pub fn canonical_signed_envelope(_ negative: i32, _ positive: i32) -> BrowserBytes {
+    SignedEnvelope { negative: negative, positive: positive }
+        .encode(BrowserWordWriter::allocate(<SignedEnvelope as CanonicalWords>::WORDS))
+        .finish()
+}
+
+pub fn canonical_signed_envelope_roundtrip(_ negative: i32, _ positive: i32) -> u32 {
+    let encoded = canonical_signed_envelope(negative, positive)
+    let mut decoded = SignedEnvelope { negative: 0, positive: 0 }
+    let reader = decoded.decode(BrowserWordReader::new(encoded))
+    if reader.complete() && decoded.negative == negative && decoded.positive == positive {
+        1
+    } else {
+        0
+    }
+}
+
+pub fn canonical_field_array16() -> BrowserBytes {
+    FieldArray { values: [Fr::from_u32(3); 16] }
+        .encode(BrowserWordWriter::allocate(<FieldArray<16> as CanonicalWords>::WORDS))
+        .finish()
+}
+
+pub fn canonical_empty_field_array() -> BrowserBytes {
+    FieldArray { values: [Fr::zero(); 0] }
+        .encode(BrowserWordWriter::allocate(<FieldArray<0> as CanonicalWords>::WORDS))
+        .finish()
+}
+
+pub fn canonical_derived_field_array() -> BrowserBytes {
+    FieldArray { values: [Fr::from_u32(5); DERIVED_FIELD_COUNT] }
+        .encode(BrowserWordWriter::allocate(
+            <FieldArray<DERIVED_FIELD_COUNT> as CanonicalWords>::WORDS,
+        ))
+        .finish()
+}
+
+pub fn canonical_derived_quartet() -> BrowserBytes {
+    DerivedQuartet {
+        rows: [DerivedRow { values: [Fr::from_u32(7); DERIVED_FIELD_COUNT] }; 4],
+    }
+        .encode(BrowserWordWriter::allocate(
+            <DerivedQuartet as CanonicalWords>::WORDS,
+        ))
+        .finish()
+}
