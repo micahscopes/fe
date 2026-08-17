@@ -1589,21 +1589,21 @@ async function run(element) {
           machines: null,
         };
       }
+      let selectedAdapter;
       let selectedImports;
       if (element.dataset.feAdapter) {
-        const environmentFactory = globalThis.feAdapterEnvironment;
-        if (!environmentFactory) {
-          throw new Error("selected Fe adapter requires globalThis.feAdapterEnvironment");
-        }
-        const environment = typeof environmentFactory === "function"
-          ? await environmentFactory(context)
-          : environmentFactory;
         const adapterModule = await import(new URL(element.dataset.feAdapter, element.baseURI));
-        if (typeof adapterModule.createFeHostAdapter !== "function") {
-          throw new Error("selected Fe adapter exports no createFeHostAdapter");
+        if (typeof adapterModule.createFeBrowserCoreAdapter !== "function") {
+          throw new Error("selected Fe adapter exports no createFeBrowserCoreAdapter");
         }
-        selectedImports =
-          adapterModule.createFeHostAdapter(environment.host, environment.runtime).imports;
+        selectedAdapter = adapterModule.createFeBrowserCoreAdapter(
+          scopedTasks?.broker.completions,
+          globalThis,
+        );
+        if (!selectedAdapter || typeof selectedAdapter.attach !== "function") {
+          throw new Error("selected Fe adapter has no two-phase Wasm attachment");
+        }
+        selectedImports = selectedAdapter.imports;
       }
       const directImports = {};
       mergeImports(directImports, selectedImports);
@@ -1616,6 +1616,7 @@ async function run(element) {
         }
       }
       const instance = await WebAssembly.instantiate(module, imports);
+      selectedAdapter?.attach(instance);
       if (scopedTasks) {
         const registry = scopedTasks.taskModule.createMaterializedTaskRegistry(instance.exports);
         scopedTasks.machines = Object.values(registry);

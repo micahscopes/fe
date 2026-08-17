@@ -433,19 +433,19 @@ export function createHostCompletionBroker(options = {}) {
     }
     if (trace.kind === "generated") {
       let released = false;
-      const release = () => {
+      const release = committed => {
         if (released) {
           throw new TypeError("generated completion allocation was already released");
         }
         released = true;
-        trace.releaseSuccess();
+        trace.releaseSuccess(committed === true);
       };
       let lowered;
       try {
         lowered = trace.lowerSuccess(trace.value);
       } catch (error) {
         try {
-          release();
+          release(false);
         } catch (cleanupError) {
           throw new AggregateError(
             [error, cleanupError],
@@ -459,7 +459,7 @@ export function createHostCompletionBroker(options = {}) {
         if (lowered !== undefined
             && (!Array.isArray(lowered) || lowered.length !== 0)) {
           try {
-            release();
+            release(false);
           } catch (cleanupError) {
             throw new AggregateError(
               [new TypeError("generated unit completion must lower to no lanes"), cleanupError],
@@ -473,7 +473,7 @@ export function createHostCompletionBroker(options = {}) {
         lanes = Array.isArray(lowered) ? lowered : [lowered];
         if (lanes.length !== trace.successWidth) {
           try {
-            release();
+            release(false);
           } catch (cleanupError) {
             throw new AggregateError(
               [new TypeError(
@@ -1043,7 +1043,7 @@ export function createHostCompletionBroker(options = {}) {
             release: lowered.release,
           });
         } catch (error) {
-          if (lowered.release !== undefined) lowered.release();
+          if (lowered.release !== undefined) lowered.release(false);
           throw error;
         }
       }
@@ -1100,7 +1100,7 @@ export function createHostCompletionBroker(options = {}) {
       }
       let releaseError;
       try {
-        delivery.release?.();
+        delivery.release?.(resumeError === undefined);
       } catch (error) {
         releaseError = error;
         discardSince(tokenCheckpoint);

@@ -981,7 +981,7 @@ describe("browser HostTimer/Recv completion broker", () => {
             events.push("lower");
             return [value.sequence, value.value];
           },
-          () => { events.push("release"); },
+          committed => { events.push(`release:${committed}`); },
         ) >>> 0,
       ],
     );
@@ -993,7 +993,7 @@ describe("browser HostTimer/Recv completion broker", () => {
       },
     };
     expect(await broker.run(generated, [])).toEqual([23, 41]);
-    expect(events).toEqual(["invoke", "lower", "resume", "release"]);
+    expect(events).toEqual(["invoke", "lower", "resume", "release:true"]);
     expect(broker.activeCount()).toBe(0);
   });
 
@@ -1031,7 +1031,7 @@ describe("browser HostTimer/Recv completion broker", () => {
           events.push("lower");
           return value.value;
         },
-        () => { events.push("release"); },
+        committed => { events.push(`release:${committed}`); },
       ),
       10_000n,
     );
@@ -1043,7 +1043,7 @@ describe("browser HostTimer/Recv completion broker", () => {
       },
     };
     expect(await broker.run(generated, [])).toEqual([41]);
-    expect(events).toEqual(["lower", "resume", "release"]);
+    expect(events).toEqual(["lower", "resume", "release:true"]);
     expect(broker.activeCount()).toBe(2);
     expect(broker.cancelAll()).toBe(2);
   });
@@ -1060,7 +1060,7 @@ describe("browser HostTimer/Recv completion broker", () => {
           () => Promise.resolve({ value: 41 }),
           1,
           value => value.value,
-          () => { released += 1; },
+          committed => { expect(committed).toBeFalse(); released += 1; },
         ) >>> 0,
       ],
     );

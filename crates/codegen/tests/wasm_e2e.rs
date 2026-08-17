@@ -1276,6 +1276,8 @@ const codec = {{
 }};
 const semanticAdapter = {{ imports: {{ "fe:host": {{
   channel_receive: handle => Promise.resolve(handle + 35),
+}} }}, completions: {{ "fe:host": {{
+  channel_receive: value => ({{ value, commit() {{}}, rollback() {{}} }}),
 }} }} }};
 const transport = createFeCoreWasmTransport(codec, semanticAdapter, broker.completions);
 const imports = {{ "fe:host": {{
@@ -1426,6 +1428,8 @@ const semanticAdapter = {{ imports: {{ "fe:host": {{
     if (handle !== 7) throw new Error(`wrong Channel handle ${{handle}}`);
     return Promise.resolve("hé");
   }},
+}} }}, completions: {{ "fe:host": {{
+  channel_receive: value => ({{ value, commit() {{}}, rollback() {{}} }}),
 }} }} }};
 const transport = createFeCoreWasmTransport(codec, semanticAdapter, broker.completions);
 const imports = {{ "fe:host": {{

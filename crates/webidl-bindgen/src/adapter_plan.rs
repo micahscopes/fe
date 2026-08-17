@@ -620,6 +620,18 @@ pub fn emit_js_canonical_adapter(
         emit_collection_functions(world, collection, &mut output)?;
     }
     output.push_str("  };\n");
+    output.push_str("  const completions = {\n");
+    for resource in &plan.resources {
+        for function in &resource.functions {
+            emit_completion_converter(world, function, &mut output)?;
+        }
+    }
+    for namespace in &plan.namespaces {
+        for function in &namespace.functions {
+            emit_completion_converter(world, function, &mut output)?;
+        }
+    }
+    output.push_str("  };\n");
     if has_async {
         output.push_str(
             "  const settleFuture = (token, promise) => Promise.resolve(promise).then(\n\
@@ -630,6 +642,8 @@ pub fn emit_js_canonical_adapter(
     }
     output.push_str("  return {\n    imports: { ");
     output.push_str(&format!("{:?}: imports", plan.module));
+    output.push_str(" },\n    completions: { ");
+    output.push_str(&format!("{:?}: completions", plan.module));
     output.push_str(" },\n");
     if has_resources {
         output.push_str("    resources: runtime.resources,\n");
@@ -650,17 +664,33 @@ pub fn emit_js_canonical_adapter(
     Ok(output)
 }
 
-/// Emit only operations selected for one generated adapter provider.
+fn emit_completion_converter(
+    world: &World,
+    function: &AdapterFunction,
+    output: &mut String,
+) -> Result<(), BindgenError> {
+    if !function.async_ {
+        return Ok(());
+    }
+    let converted = to_fe(world, &function.result, "value")?;
+    output.push_str(&format!(
+        "    {:?}: function(value) {{ return runtime.resources.capture(() => {converted}); }},\n",
+        function.import_name
+    ));
+    Ok(())
+}
+
+/// Retain only operations selected for one generated adapter provider.
 ///
 /// Synthetic iterator/collection groups are currently emitted atomically
 /// because their helpers share state and ownership invariants. A partial group
 /// fails closed instead of reintroducing omitted operations.
-pub fn emit_js_selected_adapter(
+pub fn slice_adapter_plan(
     world: &World,
     plan: &AdapterPlan,
     provider: &str,
     selection: &AdapterSelectionManifest,
-) -> Result<String, BindgenError> {
+) -> Result<(World, AdapterPlan), BindgenError> {
     if !selection.providers.is_empty() && selection.providers != [provider] {
         return Err(BindgenError::new(
             "adapter selection",
@@ -766,7 +796,18 @@ pub fn emit_js_selected_adapter(
         mixins.retain(|mixin| types.contains(mixin));
         true
     });
-    emit_js_canonical_adapter(&sliced_world, &sliced)
+    Ok((sliced_world, sliced))
+}
+
+/// Emit only semantic operations selected for one generated provider.
+pub fn emit_js_selected_adapter(
+    world: &World,
+    plan: &AdapterPlan,
+    provider: &str,
+    selection: &AdapterSelectionManifest,
+) -> Result<String, BindgenError> {
+    let (sliced_world, sliced_plan) = slice_adapter_plan(world, plan, provider, selection)?;
+    emit_js_canonical_adapter(&sliced_world, &sliced_plan)
 }
 
 fn selected_group<'a>(
@@ -1289,8 +1330,7 @@ fn emit_function(
             }
             let call = format!("{target}[{:?}]({})", function.member_name, args.join(", "));
             if function.async_ {
-                let conversion = to_fe(world, &function.result, "value")?;
-                format!("return Promise.resolve({call}).then(value => {conversion});")
+                format!("return Promise.resolve({call});")
             } else if function.result == TypeRef::Unit {
                 format!("{call};")
             } else {

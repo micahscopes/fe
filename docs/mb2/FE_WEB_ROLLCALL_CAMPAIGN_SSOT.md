@@ -118,19 +118,32 @@ Legend:
   lowers URL-only `fetch`, `Response.text`, and `Response.arrayBuffer` through
   the existing `Pending<WasmBackend, T>` continuation rail, maps byte results
   to canonical `BrowserBytes`, and emits explicit generation-safe disposal for
-  owned Response resources. Direct borrowed guest arguments and scalar or
-  resource results no longer allocate codec scratch memory. Gates:
+  owned Response resources. The precompiler derives the selected adapter from
+  actual imports and publishes one self-contained, content-addressed module
+  containing the fixed runtime, fixed codec, generated semantic adapter, and
+  generated transport. The bootstrap attaches it before import preflight, with
+  no runtime adapter-selection JSON or caller-supplied environment object.
+  Direct borrowed guest arguments and scalar or resource results no longer
+  allocate codec scratch memory. Generated completion conversion now returns
+  an ownership receipt: Response handles become Fe-owned only after the exact
+  continuation returns successfully, while losing races, lowering failures,
+  cancellation, and continuation traps roll them back. Gates:
   `global_fetch_uses_standards_authority_and_owned_response_resources`, the
-  55-test `fe-webidl-bindgen` suite, the 13-test `fe-host-wasm-codec` suite,
-  the eight Bun codec cases, and the three focused generated-WebIDL real-Wasm
-  cases. Remaining work is compiler publication of the selected core adapter,
-  Fe-authored SourceInspector loading and cancellation, then deletion of
-  component opcodes 12 and 13 plus `_loadResource`. This gate does not permit
-  a permanent `fe:web-fetch` import whose JavaScript manually mirrors Fe field
-  order or success-lane widths. SourceInspector must own switch-latest
-  cancellation, HTTP classification, stale-response rejection, and
-  presentation policy in Fe; fixed JavaScript may only realize browser
-  standards mechanics and the generated canonical transport.
+  57-test `fe-webidl-bindgen` suite, the 13-test `fe-host-wasm-codec` suite,
+  the 12-test host-runtime suite, the 34-test completion suite, the 16-test
+  bootstrap suite, the eight Bun codec cases, and the three focused
+  generated-WebIDL real-Wasm cases. Remaining work is Fe-authored
+  SourceInspector loading and cancellation, then deletion of component opcodes
+  12 and 13 plus `_loadResource`. Switch-latest already suppresses stale Fe
+  delivery and rolls back unclaimed authority, but does not yet abort the
+  browser's underlying request. Actual request abort waits for the general
+  WebIDL/host-ABI representation of borrowed resources nested in
+  `RequestInit.signal`; it must not be smuggled into a handwritten fetch case.
+  This gate does not permit a permanent `fe:web-fetch` import whose JavaScript
+  manually mirrors Fe field order or success-lane widths. SourceInspector must
+  own switch-latest cancellation, HTTP classification, stale-response
+  rejection, and presentation policy in Fe; fixed JavaScript may only realize
+  browser standards mechanics and the generated canonical transport.
 - [ ] Attach opaque ports through Fe-owned spawn/Worker placement, then derive
   rich canonical message payloads from Fe types.
 - [ ] Add structured child scopes, admission, supervision, and restart/backoff

@@ -557,17 +557,14 @@ test("bootstrap registers a selected adapter before real Wasm import preflight",
   ]);
   globalThis.fetch = installFetch(wasm);
   let calls = 0;
-  globalThis.feAdapterEnvironment = {
-    host: {
-      log() {
-        calls += 1;
-      },
-    },
-    runtime: {},
-  };
+  globalThis.selectedAdapterLog = () => { calls += 1; };
   const selectedModule = [
-    "export function createFeHostAdapter(host) {",
-    "  return { imports: { env: { log: () => host.log() } } };",
+    "export function createFeBrowserCoreAdapter() {",
+    "  let attached = false;",
+    "  return {",
+    "    imports: { env: { log: () => { if (!attached) throw new Error('adapter was not attached'); globalThis.selectedAdapterLog(); } } },",
+    "    attach() { attached = true; },",
+    "  };",
     "}",
   ].join("\n");
   const script = element();
@@ -578,6 +575,7 @@ test("bootstrap registers a selected adapter before real Wasm import preflight",
   });
   assert.equal(result.value, undefined);
   assert.equal(calls, 1);
+  delete globalThis.selectedAdapterLog;
 });
 
 test("application import providers satisfy preflight outside compiler code", async () => {

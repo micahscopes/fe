@@ -83,6 +83,37 @@ test("resource handles are opaque, consuming, generation-safe, and inventoried",
   assert.deepEqual(runtime.inventory(), { resources: 0, callbacks: 0, futures: 0 });
 });
 
+test("resource conversion capture commits ownership or rolls it back exactly once", () => {
+  const runtime = createFeHostRuntime();
+  let dropped = 0;
+  const committed = runtime.resources.capture(() =>
+    runtime.resources.insert({ name: "committed" }, () => dropped++));
+  assert.equal(runtime.inventory().resources, 1);
+  committed.commit();
+  assert.equal(runtime.resources.borrow(committed.value).name, "committed");
+  assert.throws(() => committed.rollback(), /already finalized/);
+  runtime.resources.drop(committed.value);
+  assert.equal(dropped, 1);
+
+  const rolledBack = runtime.resources.capture(() =>
+    runtime.resources.insert({ name: "rolled-back" }, () => dropped++));
+  assert.equal(runtime.inventory().resources, 1);
+  rolledBack.rollback();
+  assert.equal(runtime.inventory().resources, 0);
+  assert.equal(dropped, 2);
+  assert.throws(() => runtime.resources.borrow(rolledBack.value), /stale resource handle/);
+
+  assert.throws(
+    () => runtime.resources.capture(() => {
+      runtime.resources.insert({ name: "partial" }, () => dropped++);
+      throw new Error("conversion failed");
+    }),
+    /conversion failed/,
+  );
+  assert.equal(runtime.inventory().resources, 0);
+  assert.equal(dropped, 3);
+});
+
 test("callback release during reentrant invocation is deferred safely", () => {
   const runtime = createFeHostRuntime();
   let handle;

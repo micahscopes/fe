@@ -15,7 +15,10 @@ use fe_host_wasm_codec::{
     SerializableCodecPlan,
 };
 
-use crate::{AdapterPlan, BindgenError};
+use crate::{
+    AdapterPlan, AdapterSelectionManifest, BindgenError, HOST_RUNTIME_JS, HOST_WASM_CODEC_JS,
+    World, emit_js_canonical_adapter, slice_adapter_plan,
+};
 
 pub const HOST_WASM_CODEC_CONTRACT: &str = JS_CODEC_CONTRACT;
 pub const GENERATED_COMPLETION_CONTRACT: &str = "fe:generated-completion/v1";
@@ -422,9 +425,36 @@ pub fn emit_js_core_wasm_transport(plan: &TransportPlan) -> String {
     output.push_str(
         "];\n\
          \x20 if (mechanicsBlockers.length) throw new TypeError(`transport blueprint is not executable: ${mechanicsBlockers.join(\"; \")}`);\n\
-         \x20 const session = codec.createSession();\n\
-         \x20 const imports = {\n",
+         \x20 const session = codec.createSession();\n",
     );
+    if has_futures {
+        output.push_str(
+            "  const lowerCompletion = (identity, complete, value, state) => {\n\
+             \x20   const receipt = complete(value);\n\
+             \x20   if (!receipt || typeof receipt !== \"object\" || !Object.hasOwn(receipt, \"value\") || typeof receipt.commit !== \"function\" || typeof receipt.rollback !== \"function\") throw new TypeError(`generated completion ${identity} returned no ownership receipt`);\n\
+             \x20   state.receipt = receipt;\n\
+             \x20   try { return session.lowerResult(identity, receipt.value); }\n\
+             \x20   catch (error) {\n\
+             \x20     state.receipt = undefined;\n\
+             \x20     try { receipt.rollback(); }\n\
+             \x20     catch (rollbackError) { throw new AggregateError([error, rollbackError], `generated completion ${identity} lowering and ownership rollback both failed`); }\n\
+             \x20     throw error;\n\
+             \x20   }\n\
+             \x20 };\n\
+             \x20 const releaseCompletion = (identity, state, committed) => {\n\
+             \x20   const receipt = state.receipt;\n\
+             \x20   state.receipt = undefined;\n\
+             \x20   const errors = [];\n\
+             \x20   try { session.finish(identity); } catch (error) { errors.push(error); }\n\
+             \x20   if (receipt !== undefined) {\n\
+             \x20     try { receipt[committed ? \"commit\" : \"rollback\"](); } catch (error) { errors.push(error); }\n\
+             \x20   }\n\
+             \x20   if (errors.length === 1) throw errors[0];\n\
+             \x20   if (errors.length > 1) throw new AggregateError(errors, `generated completion ${identity} cleanup failed`);\n\
+             \x20 };\n",
+        );
+    }
+    output.push_str("  const imports = {\n");
     for function in &plan.functions {
         if let Some(blocker) = &function.blocker {
             output.push_str(&format!(
@@ -441,16 +471,21 @@ pub fn emit_js_core_wasm_transport(plan: &TransportPlan) -> String {
             output.push_str(&format!(
                 "    {:?}: (...coreArgs) => {{\n\
                  \x20     const args = session.liftArguments({:?}, coreArgs);\n\
+                 \x20     const complete = semanticAdapter.completions?.[{:?}]?.[{:?}];\n\
+                 \x20     if (typeof complete !== \"function\") throw new TypeError(\"generated semantic adapter has no completion converter\");\n\
+                 \x20     const completionState = {{ receipt: undefined }};\n\
                  \x20     return completions.begin(\n\
                  \x20       {:?},\n\
                  \x20       _signal => semanticAdapter.imports[{:?}][{:?}](...args),\n\
                  \x20       {},\n\
-                 \x20       value => session.lowerResult({:?}, value),\n\
-                 \x20       () => session.finish({:?}),\n\
+                 \x20       value => lowerCompletion({:?}, complete, value, completionState),\n\
+                 \x20       committed => releaseCompletion({:?}, completionState, committed),\n\
                  \x20     );\n\
                  \x20   }},\n",
                 function.import_name,
                 function.identity,
+                function.module,
+                function.import_name,
                 function.identity,
                 function.module,
                 function.import_name,
@@ -520,6 +555,64 @@ pub fn emit_js_core_wasm_transport(plan: &TransportPlan) -> String {
     output
 }
 
+/// Emit one self-contained, compiler-selected browser adapter module.
+///
+/// The semantic operations and canonical layouts are derived from the same
+/// sliced plan. Fixed JavaScript contributes only generic resource custody and
+/// canonical-memory mechanics. No runtime manifest or caller-supplied adapter
+/// environment is involved.
+pub fn emit_js_selected_core_adapter(
+    world: &World,
+    plan: &AdapterPlan,
+    provider: &str,
+    selection: &AdapterSelectionManifest,
+) -> Result<String, BindgenError> {
+    let (sliced_world, sliced_plan) = slice_adapter_plan(world, plan, provider, selection)?;
+    let semantic = emit_js_canonical_adapter(&sliced_world, &sliced_plan)?;
+    let transport_plan = build_transport_plan(&sliced_plan)?;
+    let transport = emit_js_core_wasm_transport(&transport_plan);
+    let codec_plans = serde_json::to_string(&transport_plan.codec_plans).map_err(|error| {
+        BindgenError::new(
+            "selected core adapter",
+            format!("cannot serialize compiler-derived codec plans: {error}"),
+        )
+    })?;
+
+    let mut interfaces = String::new();
+    for interface in sliced_world.interfaces.values() {
+        let target = if interface.attributes.global {
+            "globalObject".to_owned()
+        } else {
+            format!("globalObject[{:?}]", interface.name)
+        };
+        interfaces.push_str(&format!("{:?}: {target},", interface.name));
+    }
+    let mut namespaces = String::new();
+    for namespace in sliced_world.namespaces.values() {
+        namespaces.push_str(&format!(
+            "{:?}: globalObject[{:?}],",
+            namespace.name, namespace.name
+        ));
+    }
+
+    Ok(format!(
+        "{HOST_RUNTIME_JS}\n{HOST_WASM_CODEC_JS}\n{semantic}\n{transport}\n\
+         export const FE_HOST_WASM_CODEC_PLANS = Object.freeze({codec_plans});\n\
+         export function createFeBrowserCoreAdapter(completions, globalObject = globalThis) {{\n\
+         \x20 if (!globalObject || (typeof globalObject !== \"object\" && typeof globalObject !== \"function\")) throw new TypeError(\"browser adapter requires a global object\");\n\
+         \x20 const host = Object.freeze({{\n\
+         \x20   interfaces: Object.freeze({{{interfaces}}}),\n\
+         \x20   namespaces: Object.freeze({{{namespaces}}}),\n\
+         \x20 }});\n\
+         \x20 const runtime = createFeHostRuntime();\n\
+         \x20 const semanticAdapter = createFeHostAdapter(host, runtime);\n\
+         \x20 const codec = createFeHostWasmCodec(FE_HOST_WASM_CODEC_PLANS, {{ resources: runtime.resources }});\n\
+         \x20 const transport = createFeCoreWasmTransport(codec, semanticAdapter, completions);\n\
+         \x20 return Object.freeze({{ imports: transport.imports, attach: transport.attach, session: transport.session, runtime }});\n\
+         }}\n"
+    ))
+}
+
 fn requirement_name(requirement: PlanRequirement) -> &'static str {
     match requirement {
         PlanRequirement::Realloc => "realloc",
@@ -534,7 +627,11 @@ fn requirement_name(requirement: PlanRequirement) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{build_adapter_plan, emit_fe_flat_host_imports, parse};
+    use crate::{
+        BROWSER_FETCH_WEBIDL, adapter_operation_metadata, build_adapter_plan,
+        emit_fe_flat_host_imports, parse, select_adapter_operations,
+    };
+    use fe_compiler_protocol::{InterfaceFunction, InterfaceManifest};
 
     const FIXTURE: &str = r#"
         interface Event {};
@@ -544,6 +641,138 @@ mod tests {
             Promise<DOMString> receive();
         };
     "#;
+
+    fn interface(imports: &[(&str, &str)]) -> InterfaceManifest {
+        InterfaceManifest {
+            imports: imports
+                .iter()
+                .map(|(module, name)| InterfaceFunction {
+                    module: (*module).to_owned(),
+                    name: (*name).to_owned(),
+                    signature_complete: false,
+                    params: Vec::new(),
+                    results: Vec::new(),
+                })
+                .collect(),
+            ..InterfaceManifest::default()
+        }
+    }
+
+    #[test]
+    fn fixed_runtime_assets_are_exactly_the_exercised_demo_mirrors() {
+        assert_eq!(
+            HOST_RUNTIME_JS,
+            include_str!("../../../demos/shared/host-runtime.js")
+        );
+        assert_eq!(
+            HOST_WASM_CODEC_JS,
+            include_str!("../../../demos/shared/host-wasm-codec-v1.js")
+        );
+    }
+
+    #[test]
+    fn selected_fetch_adapter_is_self_contained_and_executes_resource_lifetimes() {
+        if std::process::Command::new("bun")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let world = parse(BROWSER_FETCH_WEBIDL).unwrap();
+        let adapter = build_adapter_plan(&world, "browser-fetch", "fe:web-fetch").unwrap();
+        let metadata = adapter_operation_metadata(&adapter, "generated-browser-fetch");
+        let selection = select_adapter_operations(
+            &interface(&[
+                ("fe:web-fetch", "window_fetch"),
+                ("fe:web-fetch", "response_get_status"),
+                ("fe:web-fetch", "response_resource_drop"),
+            ]),
+            &metadata,
+        )
+        .unwrap();
+        let source =
+            emit_js_selected_core_adapter(&world, &adapter, "generated-browser-fetch", &selection)
+                .unwrap();
+        assert!(!source.contains("from \"./"), "{source}");
+        assert!(!source.contains("response_text"), "{source}");
+        assert!(source.contains("createFeBrowserCoreAdapter"));
+        assert!(source.contains("FE_HOST_WASM_CODEC_PLANS"));
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "fe-webidl-selected-fetch-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let adapter_path = directory.join("adapter.mjs");
+        let script_path = directory.join("execute.mjs");
+        std::fs::write(&adapter_path, source).unwrap();
+        let script = format!(
+            r#"
+import {{ createFeBrowserCoreAdapter }} from {adapter_url:?};
+
+let settled;
+let continuationCommitted = true;
+const completions = {{
+  protocol: "fe:generated-completion/v1",
+  begin(identity, invoke, width, lower, release) {{
+    if (identity !== "resource/Window/window_fetch" || width !== 1) throw new Error("wrong completion plan");
+    settled = Promise.resolve().then(() => invoke(new AbortController().signal)).then(value => {{
+      const lowered = lower(value);
+      release(continuationCommitted);
+      return lowered;
+    }});
+    return 41;
+  }},
+}};
+const globalObject = {{
+  fetch(input) {{
+    if (input !== "/source.fe") throw new Error(`wrong URL ${{input}}`);
+    return Promise.resolve({{ status: 206 }});
+  }},
+}};
+const adapter = createFeBrowserCoreAdapter(completions, globalObject);
+const memory = new WebAssembly.Memory({{ initial: 1 }});
+const input = new TextEncoder().encode("/source.fe");
+new Uint8Array(memory.buffer, 96, input.length).set(input);
+adapter.attach({{ exports: {{ memory }} }});
+const imports = adapter.imports["fe:web-fetch"];
+if (imports.window_fetch(96, input.length) !== 41) throw new Error("wrong pending token");
+const response = await settled;
+if (imports.response_get_status(response) !== 206) throw new Error("wrong response status");
+if (adapter.runtime.inventory().resources !== 1) throw new Error("response resource was not retained");
+imports.response_resource_drop(response);
+if (adapter.runtime.inventory().resources !== 0) throw new Error("response resource leaked");
+continuationCommitted = false;
+if (imports.window_fetch(96, input.length) !== 41) throw new Error("wrong rollback token");
+const rolledBack = await settled;
+if (adapter.runtime.inventory().resources !== 0) throw new Error("trapped continuation retained its response");
+let stale = false;
+try {{ imports.response_get_status(rolledBack); }}
+catch (error) {{ stale = error?.code === "stale_handle"; }}
+if (!stale) throw new Error("rolled-back response handle remained usable");
+"#,
+            adapter_url = format!("file://{}", adapter_path.display()),
+        );
+        std::fs::write(&script_path, script).unwrap();
+        let execution = std::process::Command::new("bun")
+            .arg("run")
+            .arg(&script_path)
+            .output()
+            .unwrap();
+        let cleanup = std::fs::remove_dir_all(&directory);
+        assert!(
+            execution.status.success(),
+            "selected fetch adapter failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&execution.stdout),
+            String::from_utf8_lossy(&execution.stderr),
+        );
+        cleanup.unwrap();
+    }
 
     #[test]
     fn global_fetch_uses_standards_authority_and_owned_response_resources() {
@@ -773,7 +1002,8 @@ mod tests {
         let js = emit_js_core_wasm_transport(&plan);
         assert!(js.contains(GENERATED_COMPLETION_CONTRACT), "{js}");
         assert!(js.contains("return completions.begin("), "{js}");
-        assert!(js.contains("value => session.lowerResult("), "{js}");
+        assert!(js.contains("value => lowerCompletion("), "{js}");
+        assert!(js.contains("receipt[committed ? \"commit\" : \"rollback\"]()"));
         assert!(!js.contains("transport blueprint is not executable: generated"));
         assert!(!js.contains("missing canonical realloc export"));
     }
@@ -833,6 +1063,8 @@ const codec = {{
 }};
 const semanticAdapter = {{ imports: {{ "fe:host": {{
   channel_receive: handle => Promise.resolve(handle + 35),
+}} }}, completions: {{ "fe:host": {{
+  channel_receive: value => ({{ value, commit() {{}}, rollback() {{}} }}),
 }} }} }};
 const transport = createFeCoreWasmTransport(codec, semanticAdapter, completions);
 transport.attach({{ exports: {{

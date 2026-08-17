@@ -31,11 +31,25 @@ mod host_abi;
 mod selection;
 mod transport_plan;
 
+/// Fixed, application-agnostic host resource runtime published beside
+/// compiler-selected Web IDL bindings.
+pub const HOST_RUNTIME_JS: &str = include_str!("../assets/browser-runtime/host-runtime.js");
+
+/// Canonical core-Wasm codec whose layouts are supplied exclusively by the
+/// generated transport plan.
+pub const HOST_WASM_CODEC_JS: &str =
+    include_str!("../assets/browser-runtime/host-wasm-codec-v1.js");
+
+/// Smallest standards profile needed by Fe-authored same-page resource
+/// consumers. Policy such as HTTP classification and stale-result rejection
+/// remains outside this Web IDL boundary.
+pub const BROWSER_FETCH_WEBIDL: &str = include_str!("../assets/browser-fetch.webidl");
+
 pub use adapter_plan::{
     AdapterAsyncIterator, AdapterCallback, AdapterCollection, AdapterCollectionKind,
     AdapterFunction, AdapterInvocation, AdapterIterator, AdapterNamespace, AdapterParam,
     AdapterPlan, AdapterResource, build_adapter_plan, emit_js_canonical_adapter,
-    emit_js_selected_adapter,
+    emit_js_selected_adapter, slice_adapter_plan,
 };
 pub use host_abi::{
     AsyncIteratorBackpressure, AsyncIteratorBinding, AsyncIteratorCancellation,
@@ -52,6 +66,7 @@ pub use transport_plan::{
     CallbackTransport, CoreSignature, CoreValueType, FutureTransport,
     GENERATED_COMPLETION_CONTRACT, MemorySurfacePlan, TransportFunction, TransportKind,
     TransportPlan, build_transport_plan, emit_js_core_wasm_transport,
+    emit_js_selected_core_adapter,
 };
 
 /// A linked, deterministic subset of one Web IDL definition graph.

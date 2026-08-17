@@ -1567,8 +1567,13 @@ The lifecycle/value, QCGA interaction, shared DE scene, first general actor
 effects, true producer/consumer composition, rich aggregate payloads, merged
 sources, deterministic time, switch/latest, and bounded sharing described
 above are substantially landed. GPU completion, typed MessagePort observation,
-and Fe-owned shared-device recovery are now landed. The current vertical slice
-is the remaining fetch source. Worker/spawn placement and rich compiler-derived
+and Fe-owned shared-device recovery are now landed. The generated fetch WebIDL,
+canonical transport, ownership receipts, content-addressed adapter publication,
+and two-phase bootstrap attachment are landed. The current vertical slice is
+Fe-authored SourceInspector consumption followed by deletion of legacy resource
+opcodes and `_loadResource`. Standards-faithful underlying request abort still
+requires general borrowed-resource support for `RequestInit.signal`, not a
+handwritten fetch exception. Worker/spawn placement and rich compiler-derived
 port payloads remain their own structured-scope work. Completing fetch closes
 this multiplying control axis before returning to shared interaction and
 GPU/GA generalization.

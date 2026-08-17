@@ -17,8 +17,8 @@ use fe_compiler_protocol::{
     sha256_hex,
 };
 use fe_webidl_bindgen::{
-    AdapterOperationMetadata, AdapterPlan, World as WebIdlWorld, adapter_operation_metadata,
-    emit_js_selected_adapter, select_adapter_operations,
+    AdapterOperationMetadata, AdapterPlan, BROWSER_FETCH_WEBIDL, World as WebIdlWorld,
+    adapter_operation_metadata, emit_js_selected_core_adapter, select_adapter_operations,
 };
 use html5ever::{
     Attribute, LocalName, QualName, ns,
@@ -43,6 +43,7 @@ pub const BOOTSTRAP_META_NAME: &str = "fe-bootstrap";
 /// Fe ownership ledger with no JS/Rust/WGSL/Wasm/generated-manifest inputs.
 pub const ATTRIBUTION_POLICY_META_NAME: &str = "fe-attribution-policy";
 pub const CANONICAL_FE_GALLERY_POLICY: &str = "canonical_fe_gallery";
+const BROWSER_FETCH_PROVIDER: &str = "generated-browser-fetch";
 /// Valueless marker on a rewritten `application/fe+wasm` script: the bootstrap
 /// hands this module to `mountRenderSurface` from the render runtime module
 /// instead of instantiating it and calling its entry with zero arguments.
@@ -1634,6 +1635,33 @@ fn precompile_html_impl(
     )
         -> Result<Option<fe_compiler_facade::PageProjectionResult>, String>,
 ) -> Result<PrecompileOutput, PrecompileError> {
+    let canonical_adapter = if adapter_metadata.is_none() && adapter_plan.is_none() {
+        let world = fe_webidl_bindgen::parse(BROWSER_FETCH_WEBIDL).map_err(|error| {
+            PrecompileError::AdapterSelection {
+                source_url: document_url.to_owned(),
+                detail: error.to_string(),
+            }
+        })?;
+        let plan = fe_webidl_bindgen::build_adapter_plan(&world, "browser-fetch", "fe:web-fetch")
+            .map_err(|error| PrecompileError::AdapterSelection {
+            source_url: document_url.to_owned(),
+            detail: error.to_string(),
+        })?;
+        let metadata = adapter_operation_metadata(&plan, BROWSER_FETCH_PROVIDER);
+        Some((world, plan, metadata))
+    } else {
+        None
+    };
+    let effective_adapter_metadata = adapter_metadata.or_else(|| {
+        canonical_adapter
+            .as_ref()
+            .map(|(_, _, metadata)| metadata.as_slice())
+    });
+    let effective_adapter_plan = adapter_plan.or_else(|| {
+        canonical_adapter
+            .as_ref()
+            .map(|(world, plan, _)| (world, plan, BROWSER_FETCH_PROVIDER))
+    });
     let document_url = Url::parse(document_url)
         .map_err(|error| PrecompileError::InvalidDocumentUrl(error.to_string()))?;
     let dom = html5ever::parse_document(RcDom::default(), Default::default()).one(html);
@@ -1837,37 +1865,50 @@ fn precompile_html_impl(
         let manifest_path = format!("assets/fe-{}.json", &manifest_hash[..16]);
         insert_identical(&mut assets, manifest_path.clone(), manifest_bytes)?;
 
-        let (selection_path, adapter_path) = if let Some(metadata) = adapter_metadata {
+        let (selection_path, adapter_path) = if let Some(metadata) = effective_adapter_metadata {
+            let managed_modules = metadata
+                .iter()
+                .map(|operation| operation.module.as_str())
+                .collect::<BTreeSet<_>>();
+            let mut selected_interface = manifest.interface.clone();
+            selected_interface
+                .imports
+                .retain(|import| managed_modules.contains(import.module.as_str()));
             let selection =
-                select_adapter_operations(&manifest.interface, metadata).map_err(|error| {
+                select_adapter_operations(&selected_interface, metadata).map_err(|error| {
                     PrecompileError::AdapterSelection {
                         source_url: source_url.clone(),
                         detail: error.to_string(),
                     }
                 })?;
-            let bytes = serde_json::to_vec_pretty(&selection)
-                .map_err(|error| PrecompileError::Serialize(error.to_string()))?;
-            let hash = sha256_hex(&bytes);
-            let path = format!("assets/fe-adapter-selection-{}.json", &hash[..16]);
-            insert_identical(&mut assets, path.clone(), bytes)?;
-            let adapter_path = if let Some((world, plan, provider)) = adapter_plan {
-                let source = emit_js_selected_adapter(world, plan, provider, &selection).map_err(
-                    |error| PrecompileError::AdapterSelection {
+            if let Some((world, plan, provider)) = effective_adapter_plan {
+                if selection.operations.is_empty() {
+                    (None, None)
+                } else {
+                    let source = emit_js_selected_core_adapter(world, plan, provider, &selection)
+                        .map_err(|error| PrecompileError::AdapterSelection {
                         source_url: source_url.clone(),
                         detail: error.to_string(),
-                    },
-                )?;
-                let hash = sha256_hex(source.as_bytes());
-                let adapter_path = format!("assets/fe-adapter-{}.js", &hash[..16]);
-                insert_identical(&mut assets, adapter_path.clone(), source.into_bytes())?;
-                Some(published_reference(&base_url, &document_url, &adapter_path))
+                    })?;
+                    let hash = sha256_hex(source.as_bytes());
+                    let adapter_path = format!("assets/fe-adapter-{}.js", &hash[..16]);
+                    insert_identical(&mut assets, adapter_path.clone(), source.into_bytes())?;
+                    (
+                        None,
+                        Some(published_reference(&base_url, &document_url, &adapter_path)),
+                    )
+                }
             } else {
-                None
-            };
-            (
-                Some(published_reference(&base_url, &document_url, &path)),
-                adapter_path,
-            )
+                let bytes = serde_json::to_vec_pretty(&selection)
+                    .map_err(|error| PrecompileError::Serialize(error.to_string()))?;
+                let hash = sha256_hex(&bytes);
+                let path = format!("assets/fe-adapter-selection-{}.json", &hash[..16]);
+                insert_identical(&mut assets, path.clone(), bytes)?;
+                (
+                    Some(published_reference(&base_url, &document_url, &path)),
+                    None,
+                )
+            }
         } else {
             (None, None)
         };
@@ -4626,8 +4667,8 @@ if (output.length !== 1 || output[0] < before || output[0] > after) {{
     fn publishes_byte_identical_executable_adapter_slice() {
         let world = fe_webidl_bindgen::parse(
             r#"interface Console {
-                undefined log(DOMString value);
-                undefined warn(DOMString value);
+                undefined log(unsigned long value);
+                undefined warn(unsigned long value);
             };"#,
         )
         .unwrap();
@@ -4635,7 +4676,11 @@ if (output.length !== 1 || output[0] < before || output[0] > after) {{
         let build = || {
             precompile_html_with_adapter_plan(
                 "https://example.test/index.html",
-                r#"<script type="application/fe">pub fn main() {}</script>"#,
+                r#"<script type="application/fe">
+                    #[host_import(module = "fe:web")]
+                    extern { pub fn console_log(value: u32) }
+                    pub fn main() { console_log(value: 7) }
+                </script>"#,
                 &world,
                 &plan,
                 "generated-web",
@@ -4647,6 +4692,7 @@ if (output.length !== 1 || output[0] < before || output[0] > after) {{
         let second = build();
         assert_eq!(first, second);
         assert!(first.html.contains("data-fe-adapter="));
+        assert!(!first.html.contains("data-fe-adapter-selection="));
         let adapter = first
             .assets
             .iter()
@@ -4656,8 +4702,48 @@ if (output.length !== 1 || output[0] < before || output[0] > after) {{
             .unwrap();
         let adapter = std::str::from_utf8(adapter).unwrap();
         assert!(adapter.contains("createFeHostAdapter"));
-        assert!(!adapter.contains("\"console_log\""));
+        assert!(adapter.contains("createFeBrowserCoreAdapter"));
+        assert!(adapter.contains("FE_HOST_WASM_CODEC_PLANS"));
+        assert!(adapter.contains("\"console_log\""));
         assert!(!adapter.contains("\"console_warn\""));
+        assert!(!adapter.contains("feAdapterEnvironment"));
+    }
+
+    #[test]
+    fn production_lane_publishes_fetch_adapter_without_selection_json() {
+        let output = precompile_html(
+            "https://example.test/index.html",
+            r#"<script type="application/fe">
+                pub struct Response { handle: u32 }
+                #[host_import(module = "fe:web-fetch")]
+                extern { pub fn response_get_status(self_: Response) -> u16 }
+                pub fn main() -> u16 {
+                    response_get_status(self_: Response { handle: 65537 })
+                }
+            </script>"#,
+            |_| panic!("inline source"),
+        )
+        .unwrap();
+        assert!(output.html.contains("data-fe-adapter="));
+        assert!(!output.html.contains("data-fe-adapter-selection="));
+        assert!(
+            output
+                .assets
+                .keys()
+                .all(|path| !path.contains("adapter-selection"))
+        );
+        let adapter = output
+            .assets
+            .iter()
+            .find_map(|(path, bytes)| {
+                (path.contains("/fe-adapter-") && path.ends_with(".js")).then_some(bytes)
+            })
+            .map(|bytes| std::str::from_utf8(bytes).unwrap())
+            .unwrap();
+        assert!(adapter.contains("createFeBrowserCoreAdapter"));
+        assert!(adapter.contains("\"response_get_status\""));
+        assert!(!adapter.contains("\"window_fetch\""));
+        assert!(!adapter.contains("feAdapterEnvironment"));
     }
 
     #[test]
