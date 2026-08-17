@@ -1,0 +1,61 @@
+//! Executable boundary for the Fe-derived BabyBear Poseidon2 oracle.
+
+use poseidon_baby_bear::{parameter_plain, permute16}
+use precision::baby_bear::BabyBear
+
+pub fn derived_parameter(_ index: u32) -> u32 { parameter_plain(index) }
+
+fn permuted(
+    _ a0: u32, _ a1: u32, _ a2: u32, _ a3: u32,
+    _ a4: u32, _ a5: u32, _ a6: u32, _ a7: u32,
+    _ a8: u32, _ a9: u32, _ a10: u32, _ a11: u32,
+    _ a12: u32, _ a13: u32, _ a14: u32, _ a15: u32,
+) -> [BabyBear; 16] {
+    permute16(input: [
+        BabyBear::from_u32(a0), BabyBear::from_u32(a1),
+        BabyBear::from_u32(a2), BabyBear::from_u32(a3),
+        BabyBear::from_u32(a4), BabyBear::from_u32(a5),
+        BabyBear::from_u32(a6), BabyBear::from_u32(a7),
+        BabyBear::from_u32(a8), BabyBear::from_u32(a9),
+        BabyBear::from_u32(a10), BabyBear::from_u32(a11),
+        BabyBear::from_u32(a12), BabyBear::from_u32(a13),
+        BabyBear::from_u32(a14), BabyBear::from_u32(a15),
+    ])
+}
+
+pub fn poseidon2_permute16(
+    _ a0: u32, _ a1: u32, _ a2: u32, _ a3: u32,
+    _ a4: u32, _ a5: u32, _ a6: u32, _ a7: u32,
+    _ a8: u32, _ a9: u32, _ a10: u32, _ a11: u32,
+    _ a12: u32, _ a13: u32, _ a14: u32, _ a15: u32,
+) -> (
+    u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    let output = permuted(
+        a0, a1, a2, a3, a4, a5, a6, a7,
+        a8, a9, a10, a11, a12, a13, a14, a15,
+    )
+    (
+        output[0].to_u32(), output[1].to_u32(),
+        output[2].to_u32(), output[3].to_u32(),
+        output[4].to_u32(), output[5].to_u32(),
+        output[6].to_u32(), output[7].to_u32(),
+        output[8].to_u32(), output[9].to_u32(),
+        output[10].to_u32(), output[11].to_u32(),
+        output[12].to_u32(), output[13].to_u32(),
+        output[14].to_u32(), output[15].to_u32(),
+    )
+}
+
+pub fn poseidon2_permute16_c0(
+    _ a0: u32, _ a1: u32, _ a2: u32, _ a3: u32,
+    _ a4: u32, _ a5: u32, _ a6: u32, _ a7: u32,
+    _ a8: u32, _ a9: u32, _ a10: u32, _ a11: u32,
+    _ a12: u32, _ a13: u32, _ a14: u32, _ a15: u32,
+) -> u32 {
+    permuted(
+        a0, a1, a2, a3, a4, a5, a6, a7,
+        a8, a9, a10, a11, a12, a13, a14, a15,
+    )[0].to_u32()
+}

@@ -1,0 +1,226 @@
+//! Width-16 Poseidon2 over the BabyBear field.
+//!
+//! Round constants are derived in Fe from the shared Hades Grain seed. The
+//! external matrix is the fixed width-16 Poseidon2 block construction, and
+//! the internal matrix is expressed by its small signed powers-of-two
+//! diagonal. No generated constant table is part of the authored source.
+
+use core::num::{IntDowncast, mul_mod_u256}
+use precision::baby_bear::{BabyBear, BABY_BEAR_MODULUS}
+use precision::word_field::montgomery_word_u32
+use poseidon_grain::{field_element, warm}
+
+pub const WIDTH: usize = 16
+pub const FULL_ROUNDS: usize = 8
+pub const HALF_FULL_ROUNDS: usize = 4
+pub const PARTIAL_ROUNDS: usize = 13
+pub const ROUND_CONSTANT_COUNT: usize = FULL_ROUNDS * WIDTH + PARTIAL_ROUNDS
+
+const FIELD_SIZE: u32 = 31
+const MODULUS: u256 = BABY_BEAR_MODULUS as u256
+
+struct Poseidon2Parameters {
+    round_constants: [u32; ROUND_CONSTANT_COUNT],
+}
+impl core::marker::Copy for Poseidon2Parameters {}
+
+const fn field_pow(_ base: u256, _ exponent: u256) -> u256 {
+    let mut base = base
+    let mut exponent = exponent
+    let mut result: u256 = 1
+    while exponent != 0 {
+        if (exponent & 1) == 1 {
+            result = mul_mod_u256(result, base, MODULUS)
+        }
+        base = mul_mod_u256(base, base, MODULUS)
+        exponent = exponent >> 1
+    }
+    result
+}
+
+const fn inverse_power_of_two(_ exponent: u32) -> u256 {
+    field_pow(2, MODULUS - 1 - (exponent as u256))
+}
+
+const fn negate_plain(_ value: u256) -> u256 {
+    if value == 0 { 0 } else { MODULUS - value }
+}
+
+/// The optimized BabyBear width-16 internal diagonal, represented as the
+/// mathematical vector rather than canonical field literals.
+const fn internal_diagonal_plain(_ index: usize) -> u256 {
+    match index {
+        0 => MODULUS - 2,
+        1 => 1,
+        2 => 2,
+        3 => inverse_power_of_two(1),
+        4 => 3,
+        5 => 4,
+        6 => negate_plain(inverse_power_of_two(1)),
+        7 => MODULUS - 3,
+        8 => MODULUS - 4,
+        9 => inverse_power_of_two(8),
+        10 => inverse_power_of_two(2),
+        11 => inverse_power_of_two(3),
+        12 => inverse_power_of_two(27),
+        13 => negate_plain(inverse_power_of_two(8)),
+        14 => negate_plain(inverse_power_of_two(4)),
+        _ => negate_plain(inverse_power_of_two(27)),
+    }
+}
+
+const fn derive_parameters() -> Poseidon2Parameters {
+    let mut grain = warm(
+        FIELD_SIZE,
+        WIDTH.downcast_truncate(),
+        FULL_ROUNDS.downcast_truncate(),
+        PARTIAL_ROUNDS.downcast_truncate(),
+    )
+    let mut round_constants: [u32; ROUND_CONSTANT_COUNT] = [0; ROUND_CONSTANT_COUNT]
+    let mut index: usize = 0
+    while index < ROUND_CONSTANT_COUNT {
+        let next = field_element(grain, FIELD_SIZE, MODULUS)
+        grain = next.0
+        round_constants[index] = montgomery_word_u32(next.1, BABY_BEAR_MODULUS)
+        index = index + 1
+    }
+
+    Poseidon2Parameters {
+        round_constants: round_constants,
+    }
+}
+
+const fn internal_diagonal_montgomery(_ index: usize) -> u32 {
+    montgomery_word_u32(internal_diagonal_plain(index), BABY_BEAR_MODULUS)
+}
+
+#[const_eval_limit = 16000000]
+const PARAMETERS: Poseidon2Parameters = derive_parameters()
+
+#[inline(always)]
+fn sbox7(_ value: BabyBear) -> BabyBear {
+    let square = value * value
+    let fourth = square * square
+    value * square * fourth
+}
+
+#[inline(always)]
+fn mat4(_ state: mut [BabyBear; WIDTH], _ offset: usize) {
+    let x0 = state[offset]
+    let x1 = state[offset + 1]
+    let x2 = state[offset + 2]
+    let x3 = state[offset + 3]
+    let t01 = x0 + x1
+    let t23 = x2 + x3
+    let total = t01 + t23
+    let with1 = total + x1
+    let with3 = total + x3
+    state[offset] = with1 + t01
+    state[offset + 1] = with1 + x2 + x2
+    state[offset + 2] = with3 + t23
+    state[offset + 3] = with3 + x0 + x0
+}
+
+#[inline(always)]
+fn external_linear(_ state: mut [BabyBear; WIDTH]) {
+    mat4(mut state, 0)
+    mat4(mut state, 4)
+    mat4(mut state, 8)
+    mat4(mut state, 12)
+
+    let sum0 = state[0] + state[4] + state[8] + state[12]
+    let sum1 = state[1] + state[5] + state[9] + state[13]
+    let sum2 = state[2] + state[6] + state[10] + state[14]
+    let sum3 = state[3] + state[7] + state[11] + state[15]
+
+    let mut index: usize = 0
+    while index < WIDTH {
+        let sum = match index & 3 {
+            0 => sum0,
+            1 => sum1,
+            2 => sum2,
+            _ => sum3,
+        }
+        state[index] = state[index] + sum
+        index = index + 1
+    }
+}
+
+#[inline(always)]
+fn internal_linear(_ state: mut [BabyBear; WIDTH]) {
+    let mut sum = BabyBear::zero()
+    let mut index: usize = 0
+    while index < WIDTH {
+        sum = sum + state[index]
+        index = index + 1
+    }
+
+    state[0] = sum + state[0] * BabyBear::from_montgomery_word(internal_diagonal_montgomery(0))
+    state[1] = sum + state[1] * BabyBear::from_montgomery_word(internal_diagonal_montgomery(1))
+    state[2] = sum + state[2] * BabyBear::from_montgomery_word(internal_diagonal_montgomery(2))
+    state[3] = sum + state[3] * BabyBear::from_montgomery_word(internal_diagonal_montgomery(3))
+    state[4] = sum + state[4] * BabyBear::from_montgomery_word(internal_diagonal_montgomery(4))
+    state[5] = sum + state[5] * BabyBear::from_montgomery_word(internal_diagonal_montgomery(5))
+    state[6] = sum + state[6] * BabyBear::from_montgomery_word(internal_diagonal_montgomery(6))
+    state[7] = sum + state[7] * BabyBear::from_montgomery_word(internal_diagonal_montgomery(7))
+    state[8] = sum + state[8] * BabyBear::from_montgomery_word(internal_diagonal_montgomery(8))
+    state[9] = sum + state[9] * BabyBear::from_montgomery_word(internal_diagonal_montgomery(9))
+    state[10] = sum + state[10] * BabyBear::from_montgomery_word(internal_diagonal_montgomery(10))
+    state[11] = sum + state[11] * BabyBear::from_montgomery_word(internal_diagonal_montgomery(11))
+    state[12] = sum + state[12] * BabyBear::from_montgomery_word(internal_diagonal_montgomery(12))
+    state[13] = sum + state[13] * BabyBear::from_montgomery_word(internal_diagonal_montgomery(13))
+    state[14] = sum + state[14] * BabyBear::from_montgomery_word(internal_diagonal_montgomery(14))
+    state[15] = sum + state[15] * BabyBear::from_montgomery_word(internal_diagonal_montgomery(15))
+}
+
+/// Apply the canonical Plonky3 width-16 BabyBear Poseidon2 permutation.
+#[inline(always)]
+pub fn permute16(mut input: own [BabyBear; WIDTH]) -> [BabyBear; WIDTH] {
+    let parameters = PARAMETERS
+    external_linear(mut input)
+    let mut constant: usize = 0
+    let mut round: usize = 0
+    while round < HALF_FULL_ROUNDS {
+        let mut lane: usize = 0
+        while lane < WIDTH {
+            let rc = BabyBear::from_montgomery_word(parameters.round_constants[constant])
+            input[lane] = sbox7(input[lane] + rc)
+            constant = constant + 1
+            lane = lane + 1
+        }
+        external_linear(mut input)
+        round = round + 1
+    }
+
+    round = 0
+    while round < PARTIAL_ROUNDS {
+        let rc = BabyBear::from_montgomery_word(parameters.round_constants[constant])
+        input[0] = sbox7(input[0] + rc)
+        constant = constant + 1
+        internal_linear(mut input)
+        round = round + 1
+    }
+
+    round = 0
+    while round < HALF_FULL_ROUNDS {
+        let mut lane: usize = 0
+        while lane < WIDTH {
+            let rc = BabyBear::from_montgomery_word(parameters.round_constants[constant])
+            input[lane] = sbox7(input[lane] + rc)
+            constant = constant + 1
+            lane = lane + 1
+        }
+        external_linear(mut input)
+        round = round + 1
+    }
+    input
+}
+
+/// Expose the Fe-derived constants in canonical form for the independent
+/// parameter gate.
+pub fn parameter_plain(_ index: u32) -> u32 {
+    if index >= ROUND_CONSTANT_COUNT.downcast_truncate() {
+        return 0
+    }
+    BabyBear::from_montgomery_word(PARAMETERS.round_constants[index as usize]).to_u32()
+}

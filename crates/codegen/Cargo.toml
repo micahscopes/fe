@@ -63,6 +63,11 @@ wasmtime = "44.0.1"
 # backend's own `mandelbrot_snapshot_spirv_gpu` test (same wgpu/pollster pins).
 wgpu = { version = "29", features = ["vulkan-portability"] }
 pollster = "0.4.0"
+# Independent canonical Poseidon2 parameters and permutation semantics for the
+# Fe-derived BabyBear exactness gate.
+p3-baby-bear = "0.6.3"
+p3-field = "0.6.3"
+p3-symmetric = "0.6.3"
 # The B2 browser-profile WGSL gate reparses the naga-emitted WGSL with the
 # `wgsl-in` front end and re-validates it with `Capabilities::default()` (the
 # browser-shaped capability set, NO SHADER_INT64 - sonatina itself validates
