@@ -9,6 +9,7 @@ use canonical_words::{
     BrowserWordWriter,
     CanonicalWords,
     CanonicalWordsProvider,
+    encode_canonical_words,
 }
 use core::BrowserBytes
 use mandelbrot_proof_fri::{
@@ -89,7 +90,7 @@ pub fn prove_canonical_receipt_bytes4x16(
         return BrowserBytes { ptr: 0, len: 0 }
     }
     let writer = BrowserWordWriter::allocate(canonical_receipt_word_count4x16())
-    receipt.encode(writer).finish()
+    encode_canonical_words(ref receipt, writer).finish()
 }
 
 pub fn verify_canonical_receipt_bytes4x16(_ bytes: BrowserBytes) -> bool {

@@ -230,7 +230,7 @@ impl<const ROUND: u32> core::marker::Copy for FriLayerDigest<ROUND> {}
 impl<const ROUND: u32> CanonicalWords for FriLayerDigest<ROUND> {
     const WORDS: u32 = <Fr as CanonicalWords>::WORDS
 
-    fn encode<W: canonical_words::WordSink>(self, _ writer: W) -> W {
+    fn encode<W: canonical_words::WordSink>(ref self, _ writer: W) -> W {
         self.value.encode(writer)
     }
 
@@ -261,7 +261,7 @@ impl<const DEPTH: usize> CanonicalWords for CompositionPairPath<DEPTH> {
         + <u32 as CanonicalWords>::WORDS
         + <[Fr; DEPTH] as CanonicalWords>::WORDS * 2
 
-    fn encode<W: canonical_words::WordSink>(self, _ writer: W) -> W {
+    fn encode<W: canonical_words::WordSink>(ref self, _ writer: W) -> W {
         let writer = self.valid.encode(writer)
         let writer = self.index.encode(writer)
         let writer = self.positive_siblings.encode(writer)
@@ -290,7 +290,7 @@ impl<const DEPTH: usize> CanonicalWords for MainLdeQuartetPath<DEPTH> {
         + <u32 as CanonicalWords>::WORDS
         + <[Fr; DEPTH] as CanonicalWords>::WORDS * 4
 
-    fn encode<W: canonical_words::WordSink>(self, _ writer: W) -> W {
+    fn encode<W: canonical_words::WordSink>(ref self, _ writer: W) -> W {
         let writer = self.valid.encode(writer)
         let writer = self.index.encode(writer)
         let writer = self.first_siblings.encode(writer)
@@ -323,7 +323,7 @@ impl<const DEPTH: usize> CanonicalWords for AuxiliaryLdeQuartetPath<DEPTH> {
         + <u32 as CanonicalWords>::WORDS
         + <[Fr; DEPTH] as CanonicalWords>::WORDS * 4
 
-    fn encode<W: canonical_words::WordSink>(self, _ writer: W) -> W {
+    fn encode<W: canonical_words::WordSink>(ref self, _ writer: W) -> W {
         let writer = self.valid.encode(writer)
         let writer = self.index.encode(writer)
         let writer = self.first_siblings.encode(writer)
@@ -354,7 +354,7 @@ impl<const ROUND: u32, const DEPTH: usize> CanonicalWords for FriLayerPairPath<R
         + <u32 as CanonicalWords>::WORDS
         + <[Fr; DEPTH] as CanonicalWords>::WORDS * 2
 
-    fn encode<W: canonical_words::WordSink>(self, _ writer: W) -> W {
+    fn encode<W: canonical_words::WordSink>(ref self, _ writer: W) -> W {
         let writer = self.valid.encode(writer)
         let writer = self.index.encode(writer)
         let writer = self.positive_siblings.encode(writer)

@@ -28,8 +28,18 @@ pub trait WordSource: core::marker::Copy {
 
 pub trait CanonicalWords {
     const WORDS: u32
-    fn encode<W: WordSink>(self, _ writer: W) -> W
+    fn encode<W: WordSink>(ref self, _ writer: W) -> W
     fn decode<R: WordSource>(mut self, _ reader: R) -> R
+}
+
+/// Encode without copying the source value into the call frame. This is the
+/// ordinary entry point for large canonical records; nested derived fields use
+/// the same borrowed receiver recursively.
+pub fn encode_canonical_words<T: CanonicalWords, W: WordSink>(
+    _ value: ref T,
+    _ writer: W,
+) -> W {
+    value.encode(writer)
 }
 
 /// Browser-linear-memory interpreter for canonical word emission. The writer
@@ -164,18 +174,21 @@ impl Derive<CanonicalWords> for CanonicalWordsProvider {
         )
     {
         let mut words = builder.int(0)
-        let mut encode = quote(writer) { writer }
+        let mut encode = builder.arg_ref("writer")
         let mut decode = quote(reader) { reader }
         for field in reflect.fields() {
             builder.require<CanonicalWords>(field.ty())
             words = builder.add(words, builder.trait_const(field.ty(), "WORDS"))
-            encode = quote(writer) { self.${field}.encode(${encode}) }
+            encode = builder.trait_call(
+                field.ty(),
+                "encode",
+                builder.borrow(builder.field_get(builder.self_ref(), field)),
+                encode,
+            )
             decode = quote(reader) { self.${field}.decode(${decode}) }
         }
         builder.emit_const("WORDS", builder.ty<u32>(), words)
-        builder.emit_method(quote {
-            fn encode<W: WordSink>(self, writer: W) -> W { ${encode} }
-        })
+        builder.emit_method("encode", encode)
         builder.emit_method(quote {
             fn decode<R: WordSource>(mut self, reader: R) -> R { ${decode} }
         })
@@ -187,7 +200,7 @@ impl Derive<CanonicalWords> for CanonicalWordsProvider {
 impl CanonicalWords for u32 {
     const WORDS: u32 = 1
 
-    fn encode<W: WordSink>(self, _ writer: W) -> W { writer.write(self) }
+    fn encode<W: WordSink>(ref self, _ writer: W) -> W { writer.write(self) }
 
     fn decode<R: WordSource>(mut self, _ reader: R) -> R {
         let next = reader.read()
@@ -199,7 +212,7 @@ impl CanonicalWords for u32 {
 impl CanonicalWords for i32 {
     const WORDS: u32 = 1
 
-    fn encode<W: WordSink>(self, _ writer: W) -> W {
+    fn encode<W: WordSink>(ref self, _ writer: W) -> W {
         let word: u32 = __bitcast(self)
         writer.write(word)
     }
@@ -214,7 +227,7 @@ impl CanonicalWords for i32 {
 impl CanonicalWords for bool {
     const WORDS: u32 = 1
 
-    fn encode<W: WordSink>(self, _ writer: W) -> W {
+    fn encode<W: WordSink>(ref self, _ writer: W) -> W {
         writer.write(if self { 1 } else { 0 })
     }
 
@@ -235,7 +248,7 @@ impl<T: CanonicalWords + core::marker::Copy, const N: usize> CanonicalWords for 
         count * T::WORDS
     }
 
-    fn encode<W: WordSink>(self, _ writer: W) -> W {
+    fn encode<W: WordSink>(ref self, _ writer: W) -> W {
         if N == 0 { return writer }
         let mut writer = writer
         let mut index: usize = 0

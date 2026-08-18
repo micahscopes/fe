@@ -7,6 +7,7 @@ use canonical_words::{
     CanonicalWordsProvider,
     WordSink,
     WordSource,
+    encode_canonical_words,
 }
 use core::BrowserBytes
 use precision::bn254_fr::Bn254Fr
@@ -21,7 +22,7 @@ impl<const N: usize> core::marker::Copy for FieldArray<N> {}
 impl<const N: usize> CanonicalWords for FieldArray<N> {
     const WORDS: u32 = <[Fr; N] as CanonicalWords>::WORDS
 
-    fn encode<W: WordSink>(self, _ writer: W) -> W {
+    fn encode<W: WordSink>(ref self, _ writer: W) -> W {
         self.values.encode(writer)
     }
 
@@ -49,20 +50,24 @@ derive CanonicalWords for DerivedQuartet using CanonicalWordsProvider
 pub fn canonical_field_word_count() -> u32 { <Fr as CanonicalWords>::WORDS }
 
 pub fn canonical_field_one() -> BrowserBytes {
-    Fr::from_u32(1)
-        .encode(BrowserWordWriter::allocate(<Fr as CanonicalWords>::WORDS))
-        .finish()
+    let value = Fr::from_u32(1)
+    encode_canonical_words(
+        ref value,
+        BrowserWordWriter::allocate(<Fr as CanonicalWords>::WORDS),
+    ).finish()
 }
 
 pub fn canonical_envelope_word_count() -> u32 { <Envelope as CanonicalWords>::WORDS }
 
 pub fn canonical_envelope() -> BrowserBytes {
-    Envelope {
+    let value = Envelope {
         valid: true,
         fields: FieldArray { values: [Fr::from_u32(1), Fr::from_u32(2)] },
     }
-        .encode(BrowserWordWriter::allocate(<Envelope as CanonicalWords>::WORDS))
-        .finish()
+    encode_canonical_words(
+        ref value,
+        BrowserWordWriter::allocate(<Envelope as CanonicalWords>::WORDS),
+    ).finish()
 }
 
 pub fn canonical_envelope_roundtrip() -> u32 {
@@ -86,9 +91,11 @@ pub fn canonical_envelope_roundtrip() -> u32 {
 }
 
 pub fn canonical_signed_envelope(_ negative: i32, _ positive: i32) -> BrowserBytes {
-    SignedEnvelope { negative: negative, positive: positive }
-        .encode(BrowserWordWriter::allocate(<SignedEnvelope as CanonicalWords>::WORDS))
-        .finish()
+    let value = SignedEnvelope { negative: negative, positive: positive }
+    encode_canonical_words(
+        ref value,
+        BrowserWordWriter::allocate(<SignedEnvelope as CanonicalWords>::WORDS),
+    ).finish()
 }
 
 pub fn canonical_signed_envelope_roundtrip(_ negative: i32, _ positive: i32) -> u32 {
@@ -103,31 +110,39 @@ pub fn canonical_signed_envelope_roundtrip(_ negative: i32, _ positive: i32) -> 
 }
 
 pub fn canonical_field_array16() -> BrowserBytes {
-    FieldArray { values: [Fr::from_u32(3); 16] }
-        .encode(BrowserWordWriter::allocate(<FieldArray<16> as CanonicalWords>::WORDS))
-        .finish()
+    let value = FieldArray { values: [Fr::from_u32(3); 16] }
+    encode_canonical_words(
+        ref value,
+        BrowserWordWriter::allocate(<FieldArray<16> as CanonicalWords>::WORDS),
+    ).finish()
 }
 
 pub fn canonical_empty_field_array() -> BrowserBytes {
-    FieldArray { values: [Fr::zero(); 0] }
-        .encode(BrowserWordWriter::allocate(<FieldArray<0> as CanonicalWords>::WORDS))
-        .finish()
+    let value = FieldArray { values: [Fr::zero(); 0] }
+    encode_canonical_words(
+        ref value,
+        BrowserWordWriter::allocate(<FieldArray<0> as CanonicalWords>::WORDS),
+    ).finish()
 }
 
 pub fn canonical_derived_field_array() -> BrowserBytes {
-    FieldArray { values: [Fr::from_u32(5); DERIVED_FIELD_COUNT] }
-        .encode(BrowserWordWriter::allocate(
+    let value = FieldArray { values: [Fr::from_u32(5); DERIVED_FIELD_COUNT] }
+    encode_canonical_words(
+        ref value,
+        BrowserWordWriter::allocate(
             <FieldArray<DERIVED_FIELD_COUNT> as CanonicalWords>::WORDS,
-        ))
-        .finish()
+        ),
+    ).finish()
 }
 
 pub fn canonical_derived_quartet() -> BrowserBytes {
-    DerivedQuartet {
+    let value = DerivedQuartet {
         rows: [DerivedRow { values: [Fr::from_u32(7); DERIVED_FIELD_COUNT] }; 4],
     }
-        .encode(BrowserWordWriter::allocate(
+    encode_canonical_words(
+        ref value,
+        BrowserWordWriter::allocate(
             <DerivedQuartet as CanonicalWords>::WORDS,
-        ))
-        .finish()
+        ),
+    ).finish()
 }

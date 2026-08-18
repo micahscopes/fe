@@ -84,7 +84,7 @@
 use core::marker::Copy
 use core::num::mul_mod_u256
 use core::ops::{Add, Mul, Neg, Sub}
-use canonical_words::{CanonicalWords, WordSink, WordSource}
+use canonical_words::{CanonicalWords, WordSink, WordSource, encode_canonical_words}
 
 // -----------------------------------------------------------------------------
 // Limb storage: a linear, LEAST-SIGNIFICANT-LIMB-FIRST HList (`lead` = limb 0).
@@ -671,8 +671,9 @@ impl<const L: usize, M> CanonicalWords for FieldElement<L, M>
 {
     const WORDS: u32 = L.downcast_truncate()
 
-    fn encode<W: WordSink>(self, _ writer: W) -> W {
-        self.to_plain_words().encode(writer)
+    fn encode<W: WordSink>(ref self, _ writer: W) -> W {
+        let words = self.to_plain_words()
+        encode_canonical_words(ref words, writer)
     }
 
     fn decode<R: WordSource>(mut self, _ reader: R) -> R {
