@@ -1,0 +1,8 @@
+[ingot]
+name = "mandelbrot_baby_bear_encoding_oracle_gate"
+version = "0.1.0"
+
+[dependencies]
+core = "../../../../../ingots/core"
+mandelbrot_proof_baby_bear = "../../../../../demos/capstones/mandelbrot-proof/baby-bear"
+mandelbrot_proof_kernel = "../../../../../demos/capstones/mandelbrot-proof/kernel"

@@ -3,16 +3,19 @@
 use mandelbrot_proof_kernel::{
     AUXILIARY_ROW_BITS,
     ENCODED_PROOF_ROW_WIDTHS,
+    ESCAPES_BY_Q12_PUBLIC_WIDTHS,
+    ESCAPES_BY_Q12_PUBLIC_WORDS,
     EncodedProofRow,
+    EscapesByQ12Public,
     EscapesByQ12,
     EscapeTraceStream,
     MAX_PADDED_TRACE_LENGTH,
     PaddedEscapeAirRow,
-    SignedWord,
     encode_proof_row,
     encode_signed_word,
     encoded_auxiliary_row_bit,
     encoded_proof_row_words,
+    escapes_by_q12_public_words,
     padded_trace_length,
 }
 use poseidon_bn254::{
@@ -38,15 +41,10 @@ use poseidon_merkle::{
 use canonical_words::{CanonicalWords, CanonicalWordsProvider}
 
 const ROW_WORDS: usize = 17
-const PUBLIC_WORDS: usize = 8
+const PUBLIC_WORDS: usize = ESCAPES_BY_Q12_PUBLIC_WORDS
 const TRACE_FRONTIER_LEVELS: usize = 22
 const AUXILIARY_FIELD_BITS: u32 = 253
 const AUXILIARY_FIELDS: usize = 2
-
-/// Widths implied by the public-domain and proof-shape checks: signed Q12
-/// point components, the inclusive 2^20 bound, terminal step, semantic trace
-/// length, and a padded length that may reach 2^21.
-const ESCAPES_BY_Q12_PUBLIC_WIDTHS: [u32; PUBLIC_WORDS] = [1, 14, 1, 13, 21, 21, 21, 22]
 
 /// Pack a four-byte ASCII protocol label without a numeric magic constant.
 const fn protocol_tag(_ label: String<4>) -> u32 {
@@ -171,20 +169,6 @@ impl<const ROUND: u32> PoseidonDomain for MandelbrotFriLayerTranscript<ROUND> {
 impl<const QUERY: u32> PoseidonDomain for MandelbrotFriQuery<QUERY> {
     const TAG: u32 = protocol_round_tag("FQ", QUERY)
 }
-
-/// Public statement already validated by the cheap proof-domain boundary.
-/// Keeping its shape nominal prevents transcript fields from becoming an
-/// untyped positional protocol at Fe call sites.
-pub struct EscapesByQ12Public {
-    pub c_re: SignedWord,
-    pub c_im: SignedWord,
-    pub bound: u32,
-    pub terminal_step: u32,
-    pub trace_length: u32,
-    pub padded_length: u32,
-}
-
-impl core::marker::Copy for EscapesByQ12Public {}
 
 /// Main and auxiliary roots remain nominally distinct even though their
 /// frontier storage shares one field-level implementation below.
@@ -427,16 +411,7 @@ fn packed_row(_ row: own EncodedProofRow) -> [u32; LIMBS] {
 
 fn packed_public(_ public: own EscapesByQ12Public) -> [u32; LIMBS] {
     pack_words<PUBLIC_WORDS>(
-        [
-            public.c_re.sign,
-            public.c_re.magnitude,
-            public.c_im.sign,
-            public.c_im.magnitude,
-            public.bound,
-            public.terminal_step,
-            public.trace_length,
-            public.padded_length,
-        ],
+        escapes_by_q12_public_words(public),
         ESCAPES_BY_Q12_PUBLIC_WIDTHS,
     )
 }

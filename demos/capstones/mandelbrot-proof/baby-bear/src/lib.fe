@@ -1,0 +1,124 @@
+//! BabyBear interpretation of the field-independent Mandelbrot schemas.
+//!
+//! Main rows, public statements, and Fe-derived auxiliary columns all flow
+//! through the same exact-length 30-bit field encoder. Their 210, 114, and
+//! 411 bits occupy 7, 4, and 14 BabyBear payload lanes respectively. The
+//! largest value therefore still fits one typed width-16 Poseidon2 call.
+
+use mandelbrot_proof_kernel::{
+    AUXILIARY_ROW_BITS,
+    ENCODED_PROOF_ROW_WIDTHS,
+    ESCAPES_BY_Q12_PUBLIC_WIDTHS,
+    ESCAPES_BY_Q12_PUBLIC_WORDS,
+    EncodedProofRow,
+    EscapesByQ12Public,
+    derive_ranged_air_row,
+    encoded_proof_row_words,
+    encoded_ranged_auxiliary_row_bit,
+    escapes_by_q12_public_words,
+}
+use poseidon_baby_bear::{PackedCommitment, Poseidon2Domain, commit_packed}
+use precision::baby_bear::{BabyBear, BabyBearModulus}
+use precision::word_field_encoding::{PackedFieldBits, pack_bounded_words}
+
+pub const ROW_FIELDS: usize = 7
+pub const PUBLIC_FIELDS: usize = 4
+pub const AUXILIARY_FIELDS: usize = 14
+
+const fn protocol_tag(_ label: String<4>) -> u32 {
+    let bytes = label.as_bytes()
+    ((bytes[0] as u32) << 24)
+        | ((bytes[1] as u32) << 16)
+        | ((bytes[2] as u32) << 8)
+        | (bytes[3] as u32)
+}
+
+struct MandelbrotRowBabyBearV1 {}
+struct MandelbrotPublicBabyBearV1 {}
+struct MandelbrotAuxiliaryBabyBearV1 {}
+
+impl Poseidon2Domain for MandelbrotRowBabyBearV1 {
+    const TAG: u32 = protocol_tag("BR01")
+}
+
+impl Poseidon2Domain for MandelbrotPublicBabyBearV1 {
+    const TAG: u32 = protocol_tag("BP01")
+}
+
+impl Poseidon2Domain for MandelbrotAuxiliaryBabyBearV1 {
+    const TAG: u32 = protocol_tag("BA01")
+}
+
+pub struct RowDigest { pub valid: bool, pub value: BabyBear }
+impl core::marker::Copy for RowDigest {}
+
+pub struct PublicDigest { pub valid: bool, pub value: BabyBear }
+impl core::marker::Copy for PublicDigest {}
+
+pub struct AuxiliaryDigest { pub valid: bool, pub value: BabyBear }
+impl core::marker::Copy for AuxiliaryDigest {}
+
+pub fn encoded_row_fields(
+    _ row: own EncodedProofRow,
+) -> PackedFieldBits<BabyBearModulus, ROW_FIELDS> {
+    pack_bounded_words<BabyBearModulus, 17, ROW_FIELDS>(
+        encoded_proof_row_words(row),
+        ENCODED_PROOF_ROW_WIDTHS,
+    )
+}
+
+pub fn encoded_public_fields(
+    _ public: own EscapesByQ12Public,
+) -> PackedFieldBits<BabyBearModulus, PUBLIC_FIELDS> {
+    pack_bounded_words<BabyBearModulus, ESCAPES_BY_Q12_PUBLIC_WORDS, PUBLIC_FIELDS>(
+        escapes_by_q12_public_words(public),
+        ESCAPES_BY_Q12_PUBLIC_WIDTHS,
+    )
+}
+
+pub fn encoded_auxiliary_fields(
+    _ row: own EncodedProofRow,
+) -> PackedFieldBits<BabyBearModulus, AUXILIARY_FIELDS> {
+    let main = encoded_row_fields(row)
+    if !main.is_valid() {
+        return PackedFieldBits<BabyBearModulus, AUXILIARY_FIELDS>::empty().require(false)
+    }
+    let ranged = derive_ranged_air_row(row.air)
+    let mut packed = PackedFieldBits<BabyBearModulus, AUXILIARY_FIELDS>::empty()
+    let mut index: usize = 0
+    while index < AUXILIARY_ROW_BITS {
+        packed = packed.append(encoded_ranged_auxiliary_row_bit(ranged, index), 1)
+        index = index + 1
+    }
+    packed
+}
+
+fn row_digest(_ digest: PackedCommitment) -> RowDigest {
+    RowDigest { valid: digest.is_valid(), value: digest.field() }
+}
+
+fn public_digest(_ digest: PackedCommitment) -> PublicDigest {
+    PublicDigest { valid: digest.is_valid(), value: digest.field() }
+}
+
+fn auxiliary_digest(_ digest: PackedCommitment) -> AuxiliaryDigest {
+    AuxiliaryDigest { valid: digest.is_valid(), value: digest.field() }
+}
+
+pub fn row_commitment(_ row: own EncodedProofRow) -> RowDigest {
+    row_digest(commit_packed<MandelbrotRowBabyBearV1, ROW_FIELDS>(
+        encoded_row_fields(row),
+    ))
+}
+
+pub fn public_commitment(_ public: own EscapesByQ12Public) -> PublicDigest {
+    public_digest(commit_packed<MandelbrotPublicBabyBearV1, PUBLIC_FIELDS>(
+        encoded_public_fields(public),
+    ))
+}
+
+pub fn auxiliary_commitment(_ row: own EncodedProofRow) -> AuxiliaryDigest {
+    auxiliary_digest(commit_packed<MandelbrotAuxiliaryBabyBearV1, AUXILIARY_FIELDS>(
+        encoded_auxiliary_fields(row),
+    ))
+}

@@ -1,0 +1,138 @@
+//! Executable boundary for BabyBear Mandelbrot schema exactness.
+
+use mandelbrot_proof_baby_bear::{
+    auxiliary_commitment,
+    encoded_auxiliary_fields,
+    encoded_public_fields,
+    encoded_row_fields,
+    public_commitment,
+    row_commitment,
+}
+use mandelbrot_proof_kernel::{
+    EncodedAirRow,
+    EncodedProofRow,
+    EscapesByQ12Public,
+    SignedWord,
+}
+
+fn row(
+    _ step: u32,
+    _ zr_sign: u32, _ zr: u32,
+    _ zi_sign: u32, _ zi: u32,
+    _ rr: u32, _ ii: u32, _ magnitude: u32,
+    _ q_re_sign: u32, _ q_re: u32, _ r_re: u32,
+    _ q_im_sign: u32, _ q_im: u32, _ r_im: u32,
+    _ air_terminal: u32, _ active: u32, _ terminal: u32,
+) -> EncodedProofRow {
+    EncodedProofRow {
+        active: active,
+        terminal: terminal,
+        air: EncodedAirRow {
+            step: step,
+            zr: SignedWord { sign: zr_sign, magnitude: zr },
+            zi: SignedWord { sign: zi_sign, magnitude: zi },
+            rr: rr,
+            ii: ii,
+            magnitude: magnitude,
+            q_re: SignedWord { sign: q_re_sign, magnitude: q_re },
+            r_re: r_re,
+            q_im: SignedWord { sign: q_im_sign, magnitude: q_im },
+            r_im: r_im,
+            terminal: air_terminal,
+        },
+    }
+}
+
+pub fn encoded_row(
+    _ step: u32,
+    _ zr_sign: u32, _ zr: u32,
+    _ zi_sign: u32, _ zi: u32,
+    _ rr: u32, _ ii: u32, _ magnitude: u32,
+    _ q_re_sign: u32, _ q_re: u32, _ r_re: u32,
+    _ q_im_sign: u32, _ q_im: u32, _ r_im: u32,
+    _ air_terminal: u32, _ active: u32, _ terminal: u32,
+) -> (u32, u32, u32, u32, u32, u32, u32, u32, u32, u32) {
+    let row = row(
+        step,
+        zr_sign, zr,
+        zi_sign, zi,
+        rr, ii, magnitude,
+        q_re_sign, q_re, r_re,
+        q_im_sign, q_im, r_im,
+        air_terminal, active, terminal,
+    )
+    let packed = encoded_row_fields(row)
+    let digest = row_commitment(row)
+    (
+        if packed.is_valid() { 1 } else { 0 },
+        packed.len_bits(),
+        packed.field(0).to_u32(), packed.field(1).to_u32(),
+        packed.field(2).to_u32(), packed.field(3).to_u32(),
+        packed.field(4).to_u32(), packed.field(5).to_u32(),
+        packed.field(6).to_u32(), digest.value.to_u32(),
+    )
+}
+
+pub fn encoded_auxiliary(
+    _ step: u32,
+    _ zr_sign: u32, _ zr: u32,
+    _ zi_sign: u32, _ zi: u32,
+    _ rr: u32, _ ii: u32, _ magnitude: u32,
+    _ q_re_sign: u32, _ q_re: u32, _ r_re: u32,
+    _ q_im_sign: u32, _ q_im: u32, _ r_im: u32,
+    _ air_terminal: u32, _ active: u32, _ terminal: u32,
+) -> (
+    u32, u32,
+    u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32,
+    u32,
+) {
+    let row = row(
+        step,
+        zr_sign, zr,
+        zi_sign, zi,
+        rr, ii, magnitude,
+        q_re_sign, q_re, r_re,
+        q_im_sign, q_im, r_im,
+        air_terminal, active, terminal,
+    )
+    let packed = encoded_auxiliary_fields(row)
+    let digest = auxiliary_commitment(row)
+    (
+        if packed.is_valid() { 1 } else { 0 },
+        packed.len_bits(),
+        packed.field(0).to_u32(), packed.field(1).to_u32(),
+        packed.field(2).to_u32(), packed.field(3).to_u32(),
+        packed.field(4).to_u32(), packed.field(5).to_u32(),
+        packed.field(6).to_u32(), packed.field(7).to_u32(),
+        packed.field(8).to_u32(), packed.field(9).to_u32(),
+        packed.field(10).to_u32(), packed.field(11).to_u32(),
+        packed.field(12).to_u32(), packed.field(13).to_u32(),
+        digest.value.to_u32(),
+    )
+}
+
+pub fn encoded_public(
+    _ c_re_sign: u32, _ c_re: u32,
+    _ c_im_sign: u32, _ c_im: u32,
+    _ bound: u32, _ terminal_step: u32,
+    _ trace_length: u32, _ padded_length: u32,
+) -> (u32, u32, u32, u32, u32, u32, u32) {
+    let public = EscapesByQ12Public {
+        c_re: SignedWord { sign: c_re_sign, magnitude: c_re },
+        c_im: SignedWord { sign: c_im_sign, magnitude: c_im },
+        bound: bound,
+        terminal_step: terminal_step,
+        trace_length: trace_length,
+        padded_length: padded_length,
+    }
+    let packed = encoded_public_fields(public)
+    let digest = public_commitment(public)
+    (
+        if packed.is_valid() { 1 } else { 0 },
+        packed.len_bits(),
+        packed.field(0).to_u32(), packed.field(1).to_u32(),
+        packed.field(2).to_u32(), packed.field(3).to_u32(),
+        digest.value.to_u32(),
+    )
+}

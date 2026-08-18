@@ -99,6 +99,26 @@ pub struct SignedWord { pub sign: u32, pub magnitude: u32 }
 
 impl core::marker::Copy for SignedWord {}
 
+pub const ESCAPES_BY_Q12_PUBLIC_WORDS: usize = 8
+
+/// Audited widths for the field-independent public claim encoding.
+pub const ESCAPES_BY_Q12_PUBLIC_WIDTHS: [u32; ESCAPES_BY_Q12_PUBLIC_WORDS] = [
+    1, 14, 1, 13, 21, 21, 21, 22,
+]
+
+/// Public statement already validated by the cheap proof-domain boundary.
+/// The field-specific transcript layer interprets this one nominal schema.
+pub struct EscapesByQ12Public {
+    pub c_re: SignedWord,
+    pub c_im: SignedWord,
+    pub bound: u32,
+    pub terminal_step: u32,
+    pub trace_length: u32,
+    pub padded_length: u32,
+}
+
+impl core::marker::Copy for EscapesByQ12Public {}
+
 /// The canonical 15-word AIR encoding. Keeping the signed columns nominal
 /// prevents proof consumers from swapping signs and magnitudes accidentally.
 pub struct EncodedAirRow {
@@ -288,6 +308,21 @@ pub fn encoded_proof_row_words(_ row: own EncodedProofRow) -> [u32; 17] {
     ]
 }
 
+pub fn escapes_by_q12_public_words(
+    _ public: own EscapesByQ12Public,
+) -> [u32; ESCAPES_BY_Q12_PUBLIC_WORDS] {
+    [
+        public.c_re.sign,
+        public.c_re.magnitude,
+        public.c_im.sign,
+        public.c_im.magnitude,
+        public.bound,
+        public.terminal_step,
+        public.trace_length,
+        public.padded_length,
+    ]
+}
+
 pub fn derive_bit_range_witness<const N: usize>(
     _ value: u32,
 ) -> BitRangeWitness<N>
@@ -380,9 +415,9 @@ fn serialized_range_bit<const N: usize>(
 /// Canonical semantic auxiliary-row accessor shared by commitment and
 /// composition. The cursor advances through nominal witness widths, so there
 /// is no second author-maintained offset table.
-pub fn encoded_auxiliary_row_bit(_ row: EncodedAirRow, _ index: usize) -> u32 {
+#[inline(always)]
+pub fn encoded_ranged_auxiliary_row_bit(_ ranged: RangedAirRow, _ index: usize) -> u32 {
     if index >= AUXILIARY_ROW_BITS { return 0 }
-    let ranged = derive_ranged_air_row(row)
     let mut cursor = index
     if cursor < 2 * 21 { return serialized_range_bit<21>(ranged.step.witness, cursor) }
     cursor = cursor - 2 * 21
@@ -405,6 +440,10 @@ pub fn encoded_auxiliary_row_bit(_ row: EncodedAirRow, _ index: usize) -> u32 {
     if cursor < 2 * 12 { return serialized_range_bit<12>(ranged.r_im.witness, cursor) }
     cursor = cursor - 2 * 12
     ranged.terminal_high_any.any[cursor]
+}
+
+pub fn encoded_auxiliary_row_bit(_ row: EncodedAirRow, _ index: usize) -> u32 {
+    encoded_ranged_auxiliary_row_bit(derive_ranged_air_row(row), index)
 }
 
 fn air_encoding(_ row: EscapeAirRow) -> [u32; 15] {

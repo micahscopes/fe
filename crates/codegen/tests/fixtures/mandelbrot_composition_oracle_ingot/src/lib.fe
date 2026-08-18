@@ -20,7 +20,6 @@ use mandelbrot_proof_fri::{
     verify_fri_commitment_query4x16,
 }
 use mandelbrot_proof_commitment::{
-    EscapesByQ12Public,
     auxiliary_lde_row_commitment,
     bind_auxiliary_lde,
     bind_auxiliary_trace,
@@ -30,7 +29,7 @@ use mandelbrot_proof_commitment::{
     main_lde_row_commitment,
 }
 use mandelbrot_proof_field_air::main_lde_row_values
-use mandelbrot_proof_kernel::encode_signed_word
+use mandelbrot_proof_kernel::{EscapesByQ12Public, encode_signed_word}
 use mandelbrot_proof_receipt::{
     canonical_receipt_word_count4x16,
     prove_canonical_receipt_bytes4x16,

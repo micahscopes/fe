@@ -19,7 +19,6 @@ use mandelbrot_proof_commitment::{
     AuxiliaryDigest,
     CompositionDigest,
     CompositionPairPath,
-    EscapesByQ12Public,
     FriFoldChallenge,
     FriLayerDigest,
     FriLayerPairPath,
@@ -49,6 +48,7 @@ use mandelbrot_proof_commitment::{
 }
 use mandelbrot_proof_field_air::Fr
 use mandelbrot_proof_kernel::{
+    EscapesByQ12Public,
     MAX_PADDED_TRACE_LENGTH,
     encode_signed_word,
     escape_public_proof_domain_holds_q12,

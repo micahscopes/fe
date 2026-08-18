@@ -80,6 +80,11 @@ impl<M: WordPrime31, const N: usize> PackedFieldBits<M, N> {
 
     pub fn is_valid(self) -> bool { self.valid }
 
+    /// Carry a caller's schema predicate into the fail-closed encoding.
+    pub fn require(self, _ condition: bool) -> Self {
+        if condition { self } else { self.reject() }
+    }
+
     pub fn len_bits(self) -> u32 { self.bit_length }
 
     pub fn field(self, _ index: u32) -> WordField<M> {
