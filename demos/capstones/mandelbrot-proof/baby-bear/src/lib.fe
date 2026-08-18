@@ -10,6 +10,7 @@ use mandelbrot_proof_kernel::{
     ENCODED_PROOF_ROW_WIDTHS,
     ESCAPES_BY_Q12_PUBLIC_WIDTHS,
     ESCAPES_BY_Q12_PUBLIC_WORDS,
+    MAX_PADDED_TRACE_LENGTH,
     EncodedProofRow,
     EscapesByQ12Public,
     derive_ranged_air_row,
@@ -17,13 +18,26 @@ use mandelbrot_proof_kernel::{
     encoded_ranged_auxiliary_row_bit,
     escapes_by_q12_public_words,
 }
-use poseidon_baby_bear::{PackedCommitment, Poseidon2Domain, commit_packed}
+use merkle_core::{
+    TwoToOneHasher,
+    complete_frontier_root,
+    empty_frontier,
+    push_frontier,
+}
+use poseidon_baby_bear::{
+    PackedCommitment,
+    Poseidon2Domain,
+    Poseidon2FieldDomain,
+    commit_packed,
+    compress as poseidon_compress,
+}
 use precision::baby_bear::{BabyBear, BabyBearModulus}
 use precision::word_field_encoding::{PackedFieldBits, pack_bounded_words}
 
 pub const ROW_FIELDS: usize = 7
 pub const PUBLIC_FIELDS: usize = 4
 pub const AUXILIARY_FIELDS: usize = 14
+const TRACE_FRONTIER_LEVELS: usize = 22
 
 const fn protocol_tag(_ label: String<4>) -> u32 {
     let bytes = label.as_bytes()
@@ -36,6 +50,10 @@ const fn protocol_tag(_ label: String<4>) -> u32 {
 struct MandelbrotRowBabyBearV1 {}
 struct MandelbrotPublicBabyBearV1 {}
 struct MandelbrotAuxiliaryBabyBearV1 {}
+struct MandelbrotRowNodeBabyBearV1 {}
+struct MandelbrotAuxiliaryNodeBabyBearV1 {}
+struct MandelbrotStatementBabyBearV1 {}
+struct MandelbrotProofTranscriptBabyBearV1 {}
 
 impl Poseidon2Domain for MandelbrotRowBabyBearV1 {
     const TAG: u32 = protocol_tag("BR01")
@@ -49,6 +67,22 @@ impl Poseidon2Domain for MandelbrotAuxiliaryBabyBearV1 {
     const TAG: u32 = protocol_tag("BA01")
 }
 
+impl Poseidon2FieldDomain for MandelbrotRowNodeBabyBearV1 {
+    const TAG: u32 = protocol_tag("BN01")
+}
+
+impl Poseidon2FieldDomain for MandelbrotAuxiliaryNodeBabyBearV1 {
+    const TAG: u32 = protocol_tag("BX01")
+}
+
+impl Poseidon2FieldDomain for MandelbrotStatementBabyBearV1 {
+    const TAG: u32 = protocol_tag("BS01")
+}
+
+impl Poseidon2FieldDomain for MandelbrotProofTranscriptBabyBearV1 {
+    const TAG: u32 = protocol_tag("BT01")
+}
+
 pub struct RowDigest { pub valid: bool, pub value: BabyBear }
 impl core::marker::Copy for RowDigest {}
 
@@ -57,6 +91,30 @@ impl core::marker::Copy for PublicDigest {}
 
 pub struct AuxiliaryDigest { pub valid: bool, pub value: BabyBear }
 impl core::marker::Copy for AuxiliaryDigest {}
+
+pub struct StatementDigest { pub valid: bool, pub value: BabyBear }
+impl core::marker::Copy for StatementDigest {}
+
+pub struct ProofTranscriptDigest { pub valid: bool, pub value: BabyBear }
+impl core::marker::Copy for ProofTranscriptDigest {}
+
+struct RowNodeHasher {}
+impl TwoToOneHasher<BabyBear> for RowNodeHasher {
+    fn zero() -> BabyBear { BabyBear::zero() }
+    fn equal(_ left: BabyBear, _ right: BabyBear) -> bool { left.equals(right) }
+    fn hash2(_ left: BabyBear, _ right: BabyBear) -> BabyBear {
+        poseidon_compress<MandelbrotRowNodeBabyBearV1>(left, right)
+    }
+}
+
+struct AuxiliaryNodeHasher {}
+impl TwoToOneHasher<BabyBear> for AuxiliaryNodeHasher {
+    fn zero() -> BabyBear { BabyBear::zero() }
+    fn equal(_ left: BabyBear, _ right: BabyBear) -> bool { left.equals(right) }
+    fn hash2(_ left: BabyBear, _ right: BabyBear) -> BabyBear {
+        poseidon_compress<MandelbrotAuxiliaryNodeBabyBearV1>(left, right)
+    }
+}
 
 pub fn encoded_row_fields(
     _ row: own EncodedProofRow,
@@ -121,4 +179,81 @@ pub fn auxiliary_commitment(_ row: own EncodedProofRow) -> AuxiliaryDigest {
     auxiliary_digest(commit_packed<MandelbrotAuxiliaryBabyBearV1, AUXILIARY_FIELDS>(
         encoded_auxiliary_fields(row),
     ))
+}
+
+/// Commit a complete power-of-two main trace through the reusable zk-kit
+/// Merkle shape. Invalid leaf encodings fail closed before entering the tree.
+pub fn trace_root_power_of_two<const N: usize>(
+    _ leaves: own [RowDigest; N],
+) -> RowDigest
+where N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N & (N - 1)) == 0 }
+{
+    let mut frontier = empty_frontier<BabyBear, RowNodeHasher, TRACE_FRONTIER_LEVELS>()
+    let mut index: usize = 0
+    while index < N {
+        if !leaves[index].valid {
+            return RowDigest { valid: false, value: BabyBear::zero() }
+        }
+        frontier = push_frontier<BabyBear, RowNodeHasher, TRACE_FRONTIER_LEVELS>(
+            frontier,
+            leaves[index].value,
+        )
+        index = index + 1
+    }
+    let root = complete_frontier_root<BabyBear, RowNodeHasher, TRACE_FRONTIER_LEVELS>(frontier)
+    RowDigest { valid: root.valid, value: root.value }
+}
+
+/// Commit a complete power-of-two auxiliary trace with its own nominal node
+/// domain while sharing the exact same field-generic tree algorithm.
+pub fn auxiliary_root_power_of_two<const N: usize>(
+    _ leaves: own [AuxiliaryDigest; N],
+) -> AuxiliaryDigest
+where N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N & (N - 1)) == 0 }
+{
+    let mut frontier = empty_frontier<BabyBear, AuxiliaryNodeHasher, TRACE_FRONTIER_LEVELS>()
+    let mut index: usize = 0
+    while index < N {
+        if !leaves[index].valid {
+            return AuxiliaryDigest { valid: false, value: BabyBear::zero() }
+        }
+        frontier = push_frontier<BabyBear, AuxiliaryNodeHasher, TRACE_FRONTIER_LEVELS>(
+            frontier,
+            leaves[index].value,
+        )
+        index = index + 1
+    }
+    let root = complete_frontier_root<BabyBear, AuxiliaryNodeHasher, TRACE_FRONTIER_LEVELS>(frontier)
+    AuxiliaryDigest { valid: root.valid, value: root.value }
+}
+
+/// Bind the public claim and trace root as typed field elements.
+pub fn bind_statement(
+    _ public: own PublicDigest,
+    _ trace: own RowDigest,
+) -> StatementDigest {
+    if !public.valid || !trace.valid {
+        return StatementDigest { valid: false, value: BabyBear::zero() }
+    }
+    StatementDigest {
+        valid: true,
+        value: poseidon_compress<MandelbrotStatementBabyBearV1>(public.value, trace.value),
+    }
+}
+
+/// Bind the auxiliary trace root into the proof transcript.
+pub fn bind_auxiliary_trace(
+    _ statement: own StatementDigest,
+    _ auxiliary: own AuxiliaryDigest,
+) -> ProofTranscriptDigest {
+    if !statement.valid || !auxiliary.valid {
+        return ProofTranscriptDigest { valid: false, value: BabyBear::zero() }
+    }
+    ProofTranscriptDigest {
+        valid: true,
+        value: poseidon_compress<MandelbrotProofTranscriptBabyBearV1>(
+            statement.value,
+            auxiliary.value,
+        ),
+    }
 }

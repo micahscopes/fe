@@ -1,0 +1,462 @@
+//! Field-generic, effect-free Merkle proof shapes.
+//!
+//! This is the portable part of zk-kit.fe's `TwoToOneHasher` design. A
+//! nominal hasher supplies zero, equality, and ordered two-to-one hashing;
+//! the tree algorithms contain no field, permutation, EVM, Wasm, or WebGPU
+//! assumptions. The same little-endian path convention is used throughout:
+//! bit zero of the index chooses the leaf side, then successive bits choose
+//! successive levels.
+
+use core::marker::Copy
+
+/// Pure ordered compression used by binary Merkle constructions.
+pub trait TwoToOneHasher<F: Copy> {
+    fn zero() -> F
+    fn equal(_ left: F, _ right: F) -> bool
+    fn hash2(_ left: F, _ right: F) -> F
+}
+
+pub struct MerkleRoot<F: Copy> { pub valid: bool, pub value: F }
+impl<F: Copy> Copy for MerkleRoot<F> {}
+
+pub struct MerkleFrontier<F: Copy, const LEVELS: usize> {
+    pub valid: bool,
+    pub count: u32,
+    pub nodes: [F; LEVELS],
+}
+impl<F: Copy, const LEVELS: usize> Copy for MerkleFrontier<F, LEVELS> {}
+
+pub struct MerklePairPath<F: Copy, const DEPTH: usize> {
+    pub valid: bool,
+    pub index: u32,
+    pub positive_siblings: [F; DEPTH],
+    pub negative_siblings: [F; DEPTH],
+}
+impl<F: Copy, const DEPTH: usize> Copy for MerklePairPath<F, DEPTH> {}
+
+/// Compact authentication data for one common local position in each quarter
+/// of a power-of-two tree.
+pub struct MerkleQuartetPath<F: Copy, const DEPTH: usize> {
+    pub valid: bool,
+    pub index: u32,
+    pub first_siblings: [F; DEPTH],
+    pub second_siblings: [F; DEPTH],
+    pub third_siblings: [F; DEPTH],
+    pub fourth_siblings: [F; DEPTH],
+}
+impl<F: Copy, const DEPTH: usize> Copy for MerkleQuartetPath<F, DEPTH> {}
+
+fn invalid_root<F: Copy, H: TwoToOneHasher<F>>() -> MerkleRoot<F> {
+    MerkleRoot { valid: false, value: H::zero() }
+}
+
+fn invalid_frontier<F: Copy, H: TwoToOneHasher<F>, const LEVELS: usize>(
+) -> MerkleFrontier<F, LEVELS> {
+    MerkleFrontier {
+        valid: false,
+        count: 0,
+        nodes: [H::zero(); LEVELS],
+    }
+}
+
+fn invalid_pair_path<F: Copy, H: TwoToOneHasher<F>, const DEPTH: usize>(
+) -> MerklePairPath<F, DEPTH> {
+    MerklePairPath {
+        valid: false,
+        index: 0,
+        positive_siblings: [H::zero(); DEPTH],
+        negative_siblings: [H::zero(); DEPTH],
+    }
+}
+
+fn invalid_quartet_path<F: Copy, H: TwoToOneHasher<F>, const DEPTH: usize>(
+) -> MerkleQuartetPath<F, DEPTH> {
+    MerkleQuartetPath {
+        valid: false,
+        index: 0,
+        first_siblings: [H::zero(); DEPTH],
+        second_siblings: [H::zero(); DEPTH],
+        third_siblings: [H::zero(); DEPTH],
+        fourth_siblings: [H::zero(); DEPTH],
+    }
+}
+
+/// Fold a conventional bottom-up sibling path.
+pub fn binary_root<
+    F: Copy,
+    H: TwoToOneHasher<F>,
+    const MAX_DEPTH: usize,
+>(
+    _ leaf: F,
+    _ depth: usize,
+    _ path_index: u32,
+    _ siblings: own [F; MAX_DEPTH],
+) -> MerkleRoot<F> {
+    if depth > MAX_DEPTH || depth >= 32 {
+        return invalid_root<F, H>()
+    }
+    let mut capacity: u32 = 1
+    let mut shape_level: usize = 0
+    while shape_level < depth {
+        capacity = capacity + capacity
+        shape_level = shape_level + 1
+    }
+    if path_index >= capacity {
+        return invalid_root<F, H>()
+    }
+
+    let mut node = leaf
+    let mut index = path_index
+    let mut level: usize = 0
+    while level < depth {
+        let sibling = siblings[level]
+        node = if (index & 1) == 0 {
+            H::hash2(node, sibling)
+        } else {
+            H::hash2(sibling, node)
+        }
+        index = index / 2
+        level = level + 1
+    }
+    MerkleRoot { valid: true, value: node }
+}
+
+pub fn binary_verify<
+    F: Copy,
+    H: TwoToOneHasher<F>,
+    const MAX_DEPTH: usize,
+>(
+    _ expected: F,
+    _ leaf: F,
+    _ depth: usize,
+    _ path_index: u32,
+    _ siblings: own [F; MAX_DEPTH],
+) -> bool {
+    let opened = binary_root<F, H, MAX_DEPTH>(leaf, depth, path_index, siblings)
+    opened.valid && H::equal(opened.value, expected)
+}
+
+/// Empty streaming state for a tree with at most `2^LEVELS` leaves.
+pub fn empty_frontier<
+    F: Copy,
+    H: TwoToOneHasher<F>,
+    const LEVELS: usize,
+>() -> MerkleFrontier<F, LEVELS> {
+    MerkleFrontier {
+        valid: true,
+        count: 0,
+        nodes: [H::zero(); LEVELS],
+    }
+}
+
+/// Push one leaf while retaining only the binary carry frontier.
+pub fn push_frontier<
+    F: Copy,
+    H: TwoToOneHasher<F>,
+    const LEVELS: usize,
+>(
+    _ frontier: own MerkleFrontier<F, LEVELS>,
+    _ leaf: F,
+) -> MerkleFrontier<F, LEVELS> {
+    let mut frontier = frontier
+    if !frontier.valid {
+        return invalid_frontier<F, H, LEVELS>()
+    }
+
+    let mut carry = leaf
+    let mut occupied = frontier.count
+    let mut level: usize = 0
+    while (occupied & 1) == 1 {
+        if level >= LEVELS {
+            return invalid_frontier<F, H, LEVELS>()
+        }
+        carry = H::hash2(frontier.nodes[level], carry)
+        occupied = occupied >> 1
+        level = level + 1
+    }
+    if level >= LEVELS {
+        return invalid_frontier<F, H, LEVELS>()
+    }
+    frontier.nodes[level] = carry
+    frontier.count = frontier.count + 1
+    frontier
+}
+
+/// Accept only a nonempty, complete power-of-two tree.
+pub fn complete_frontier_root<
+    F: Copy,
+    H: TwoToOneHasher<F>,
+    const LEVELS: usize,
+>(
+    _ frontier: own MerkleFrontier<F, LEVELS>,
+) -> MerkleRoot<F> {
+    if !frontier.valid || frontier.count == 0 || (frontier.count & (frontier.count - 1)) != 0 {
+        return invalid_root<F, H>()
+    }
+    let mut count = frontier.count
+    let mut level: usize = 0
+    while count > 1 {
+        count = count >> 1
+        level = level + 1
+    }
+    if level >= LEVELS {
+        return invalid_root<F, H>()
+    }
+    MerkleRoot { valid: true, value: frontier.nodes[level] }
+}
+
+/// Construct compact authentication data for leaves at `index` and
+/// `index + N / 2`.
+pub fn pair_path_from_leaves<
+    F: Copy,
+    H: TwoToOneHasher<F>,
+    const N: usize,
+    const HALF: usize,
+    const DEPTH: usize,
+>(_ leaves: own [F; N], _ index: u32) -> MerklePairPath<F, DEPTH>
+where N > 1, HALF > 0, { HALF + HALF == N }
+{
+    let mut expected_half: usize = 1
+    let mut level: usize = 0
+    while level < DEPTH {
+        expected_half = expected_half + expected_half
+        level = level + 1
+    }
+    let half_u32: u32 = HALF.downcast_truncate()
+    if expected_half != HALF || index >= half_u32 {
+        return invalid_pair_path<F, H, DEPTH>()
+    }
+
+    let mut nodes = leaves
+    let mut positive: usize = index as usize
+    let mut negative: usize = positive + HALF
+    let mut width: usize = N
+    let mut positive_siblings = [H::zero(); DEPTH]
+    let mut negative_siblings = [H::zero(); DEPTH]
+    level = 0
+    while level < DEPTH {
+        positive_siblings[level] = nodes[positive ^ 1]
+        negative_siblings[level] = nodes[negative ^ 1]
+
+        let parent_count = width / 2
+        let mut parent: usize = 0
+        while parent < parent_count {
+            nodes[parent] = H::hash2(nodes[parent + parent], nodes[parent + parent + 1])
+            parent = parent + 1
+        }
+        positive = positive / 2
+        negative = negative / 2
+        width = parent_count
+        level = level + 1
+    }
+    MerklePairPath {
+        valid: width == 2,
+        index: index,
+        positive_siblings: positive_siblings,
+        negative_siblings: negative_siblings,
+    }
+}
+
+pub fn pair_root<
+    F: Copy,
+    H: TwoToOneHasher<F>,
+    const DEPTH: usize,
+>(
+    _ positive_leaf: F,
+    _ negative_leaf: F,
+    _ path: own MerklePairPath<F, DEPTH>,
+) -> MerkleRoot<F> {
+    if !path.valid {
+        return invalid_root<F, H>()
+    }
+    let mut half: u32 = 1
+    let mut shape_level: usize = 0
+    while shape_level < DEPTH {
+        half = half + half
+        shape_level = shape_level + 1
+    }
+    if path.index >= half {
+        return invalid_root<F, H>()
+    }
+
+    let mut positive = positive_leaf
+    let mut negative = negative_leaf
+    let mut index = path.index
+    let mut level: usize = 0
+    while level < DEPTH {
+        if (index & 1) == 0 {
+            positive = H::hash2(positive, path.positive_siblings[level])
+            negative = H::hash2(negative, path.negative_siblings[level])
+        } else {
+            positive = H::hash2(path.positive_siblings[level], positive)
+            negative = H::hash2(path.negative_siblings[level], negative)
+        }
+        index = index / 2
+        level = level + 1
+    }
+    MerkleRoot { valid: true, value: H::hash2(positive, negative) }
+}
+
+pub fn pair_verify<
+    F: Copy,
+    H: TwoToOneHasher<F>,
+    const DEPTH: usize,
+>(
+    _ expected: F,
+    _ positive_leaf: F,
+    _ negative_leaf: F,
+    _ path: own MerklePairPath<F, DEPTH>,
+) -> bool {
+    let opened = pair_root<F, H, DEPTH>(positive_leaf, negative_leaf, path)
+    opened.valid && H::equal(opened.value, expected)
+}
+
+/// Build one compact four-quarter opening.
+pub fn quartet_path_from_leaves<
+    F: Copy,
+    H: TwoToOneHasher<F>,
+    const N: usize,
+    const QUARTER: usize,
+    const DEPTH: usize,
+>(_ leaves: own [F; N], _ index: u32) -> MerkleQuartetPath<F, DEPTH>
+where N > 3, QUARTER > 0, { QUARTER + QUARTER + QUARTER + QUARTER == N }
+{
+    let mut expected_quarter: usize = 1
+    let mut level: usize = 0
+    while level < DEPTH {
+        expected_quarter = expected_quarter + expected_quarter
+        level = level + 1
+    }
+    let quarter_u32: u32 = QUARTER.downcast_truncate()
+    if expected_quarter != QUARTER || index >= quarter_u32 {
+        return invalid_quartet_path<F, H, DEPTH>()
+    }
+
+    let mut nodes = leaves
+    let mut first: usize = index as usize
+    let mut second: usize = first + QUARTER
+    let mut third: usize = second + QUARTER
+    let mut fourth: usize = third + QUARTER
+    let mut width: usize = N
+    let mut first_siblings = [H::zero(); DEPTH]
+    let mut second_siblings = [H::zero(); DEPTH]
+    let mut third_siblings = [H::zero(); DEPTH]
+    let mut fourth_siblings = [H::zero(); DEPTH]
+    level = 0
+    while level < DEPTH {
+        first_siblings[level] = nodes[first ^ 1]
+        second_siblings[level] = nodes[second ^ 1]
+        third_siblings[level] = nodes[third ^ 1]
+        fourth_siblings[level] = nodes[fourth ^ 1]
+
+        let parent_count = width / 2
+        let mut parent: usize = 0
+        while parent < parent_count {
+            nodes[parent] = H::hash2(nodes[parent + parent], nodes[parent + parent + 1])
+            parent = parent + 1
+        }
+        first = first / 2
+        second = second / 2
+        third = third / 2
+        fourth = fourth / 2
+        width = parent_count
+        level = level + 1
+    }
+    MerkleQuartetPath {
+        valid: width == 4,
+        index: index,
+        first_siblings: first_siblings,
+        second_siblings: second_siblings,
+        third_siblings: third_siblings,
+        fourth_siblings: fourth_siblings,
+    }
+}
+
+pub fn quartet_root<
+    F: Copy,
+    H: TwoToOneHasher<F>,
+    const DEPTH: usize,
+>(
+    _ first_leaf: F,
+    _ second_leaf: F,
+    _ third_leaf: F,
+    _ fourth_leaf: F,
+    _ path: own MerkleQuartetPath<F, DEPTH>,
+) -> MerkleRoot<F> {
+    if !path.valid {
+        return invalid_root<F, H>()
+    }
+    let mut quarter: u32 = 1
+    let mut shape_level: usize = 0
+    while shape_level < DEPTH {
+        quarter = quarter + quarter
+        shape_level = shape_level + 1
+    }
+    if path.index >= quarter {
+        return invalid_root<F, H>()
+    }
+
+    let mut first = first_leaf
+    let mut second = second_leaf
+    let mut third = third_leaf
+    let mut fourth = fourth_leaf
+    let mut index = path.index
+    let mut level: usize = 0
+    while level < DEPTH {
+        if (index & 1) == 0 {
+            first = H::hash2(first, path.first_siblings[level])
+            second = H::hash2(second, path.second_siblings[level])
+            third = H::hash2(third, path.third_siblings[level])
+            fourth = H::hash2(fourth, path.fourth_siblings[level])
+        } else {
+            first = H::hash2(path.first_siblings[level], first)
+            second = H::hash2(path.second_siblings[level], second)
+            third = H::hash2(path.third_siblings[level], third)
+            fourth = H::hash2(path.fourth_siblings[level], fourth)
+        }
+        index = index / 2
+        level = level + 1
+    }
+    let left = H::hash2(first, second)
+    let right = H::hash2(third, fourth)
+    MerkleRoot { valid: true, value: H::hash2(left, right) }
+}
+
+pub fn quartet_verify<
+    F: Copy,
+    H: TwoToOneHasher<F>,
+    const DEPTH: usize,
+>(
+    _ expected: F,
+    _ first_leaf: F,
+    _ second_leaf: F,
+    _ third_leaf: F,
+    _ fourth_leaf: F,
+    _ path: own MerkleQuartetPath<F, DEPTH>,
+) -> bool {
+    let opened = quartet_root<F, H, DEPTH>(first_leaf, second_leaf, third_leaf, fourth_leaf, path)
+    opened.valid && H::equal(opened.value, expected)
+}
+
+/// Base case for a two-leaf tree.
+pub fn pair_path_two<F: Copy, H: TwoToOneHasher<F>>(
+    _ index: u32,
+) -> MerklePairPath<F, 0> {
+    MerklePairPath {
+        valid: index == 0,
+        index: index,
+        positive_siblings: [H::zero(); 0],
+        negative_siblings: [H::zero(); 0],
+    }
+}
+
+pub fn pair_verify_two<F: Copy, H: TwoToOneHasher<F>>(
+    _ expected: F,
+    _ positive_leaf: F,
+    _ negative_leaf: F,
+    _ path: own MerklePairPath<F, 0>,
+) -> bool {
+    path.valid
+        && path.index == 0
+        && H::equal(H::hash2(positive_leaf, negative_leaf), expected)
+}

@@ -31,6 +31,14 @@ pub trait Poseidon2Domain {
     const TAG: u32
 }
 
+/// A nominal protocol stage for already-encoded field elements.
+///
+/// This is deliberately distinct from `Poseidon2Domain`: packed bit strings
+/// and field tuples are different schemas even when both fit one permutation.
+pub trait Poseidon2FieldDomain {
+    const TAG: u32
+}
+
 /// Fail-closed result of committing one exact bounded bit string.
 pub struct PackedCommitment { valid: bool, value: BabyBear }
 impl core::marker::Copy for PackedCommitment {}
@@ -255,7 +263,24 @@ pub fn commit_packed<D: Poseidon2Domain, const N: usize>(
         state[index + 2] = packed.field(index.downcast_truncate())
         index = index + 1
     }
-    PackedCommitment { valid: true, value: permute16(state)[0] }
+    PackedCommitment { valid: true, value: permute16(input: state)[0] }
+}
+
+/// Ordered two-to-one compression for already-canonical BabyBear values.
+///
+/// Lane zero carries the nominal field-tuple domain and lane one binds the
+/// arity. Lanes two and three carry the ordered inputs. Tree callers choose a
+/// dedicated node domain rather than reusing a packed-row domain.
+pub fn compress<D: Poseidon2FieldDomain>(_ left: BabyBear, _ right: BabyBear) -> BabyBear {
+    if D::TAG >= BABY_BEAR_MODULUS {
+        return BabyBear::zero()
+    }
+    let mut state: [BabyBear; WIDTH] = [BabyBear::zero(); WIDTH]
+    state[0] = BabyBear::from_u32(D::TAG)
+    state[1] = BabyBear::from_u32(2)
+    state[2] = left
+    state[3] = right
+    permute16(input: state)[0]
 }
 
 /// Expose the Fe-derived constants in canonical form for the independent

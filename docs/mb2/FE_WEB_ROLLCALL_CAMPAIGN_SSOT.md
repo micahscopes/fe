@@ -582,6 +582,17 @@ Legend:
   210 main-row source bits and all 203 auxiliary source bits, checks maximum
   values, and proves range violations fail closed. Commits `034a3ac78`,
   `d3b1f1fbe`, and `6fc7dbea2`; gates `poseidon_baby_bear_oracle.rs` and
+  `mandelbrot_baby_bear_encoding_oracle.rs`. The portable tree layer now
+  preserves zk-kit.fe's `TwoToOneHasher` API and little-endian binary path
+  semantics without fixing the field or execution backend. One effect-free
+  `merkle_core` body supplies ordinary paths, compact half-pair and
+  four-quarter openings, and fail-closed streaming frontiers. Its zero-import
+  Wasm gate independently checks all shapes, mutations, invalid indices,
+  incomplete trees, and frontier overflow. Typed BabyBear Poseidon2
+  interpreters now drive production main and auxiliary trace roots, statement
+  binding, and auxiliary transcript binding through that same core. Their
+  Plonky3 gate checks distinct nominal domains, every leaf bit mutation, and
+  invalid digest propagation. Gates: `merkle_core_oracle.rs` and
   `mandelbrot_baby_bear_encoding_oracle.rs`. The same permutation has also
   lowered to Naga-valid u32-only WGSL with the local Sonatina conditional-loop
   structurizer fixes, but that browser gate is not landed until those commits

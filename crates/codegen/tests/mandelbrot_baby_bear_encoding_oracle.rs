@@ -118,6 +118,23 @@ fn commitment(tag: &[u8; 4], encoding: &[u32]) -> u32 {
     reference_permutation(state)[0]
 }
 
+fn field_compress(tag: &[u8; 4], left: u32, right: u32) -> u32 {
+    let mut state = [0u32; WIDTH];
+    state[0] = u32::from_be_bytes(*tag);
+    state[1] = 2;
+    state[2] = left;
+    state[3] = right;
+    reference_permutation(state)[0]
+}
+
+fn merkle_root4(tag: &[u8; 4], leaves: [u32; 4]) -> u32 {
+    field_compress(
+        tag,
+        field_compress(tag, leaves[0], leaves[1]),
+        field_compress(tag, leaves[2], leaves[3]),
+    )
+}
+
 fn append_range_witness(bits: &mut Vec<u32>, value: u32, width: u32) {
     let mut seen = 0u32;
     for bit in 0..width {
@@ -329,5 +346,118 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
         call(&mut store, &instance, "encoded_public", &invalid_public, 7),
         vec![0; 7],
         "out-of-range public claim must fail closed",
+    );
+
+    let leaves = [17, 23, 41, 1_900_000_007];
+    let expected_trace = merkle_root4(b"BN01", leaves);
+    let expected_auxiliary = merkle_root4(b"BX01", leaves);
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "trace_root4",
+            &[leaves[0], leaves[1], leaves[2], leaves[3], 0],
+            2,
+        ),
+        vec![1, expected_trace],
+        "typed trace tree differs from the Plonky3 Merkle oracle",
+    );
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "auxiliary_root4",
+            &[leaves[0], leaves[1], leaves[2], leaves[3], 0],
+            2,
+        ),
+        vec![1, expected_auxiliary],
+        "typed auxiliary tree differs from the Plonky3 Merkle oracle",
+    );
+    assert_ne!(
+        expected_trace, expected_auxiliary,
+        "nominal trace and auxiliary node domains must remain distinct",
+    );
+
+    for invalid_mask in [1, 2, 4, 8] {
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "trace_root4",
+                &[leaves[0], leaves[1], leaves[2], leaves[3], invalid_mask],
+                2,
+            ),
+            vec![0, 0],
+            "invalid trace leaf {invalid_mask:#x} must fail closed",
+        );
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "auxiliary_root4",
+                &[leaves[0], leaves[1], leaves[2], leaves[3], invalid_mask],
+                2,
+            ),
+            vec![0, 0],
+            "invalid auxiliary leaf {invalid_mask:#x} must fail closed",
+        );
+    }
+
+    for leaf_index in 0..leaves.len() {
+        for bit in 0..30 {
+            let mut mutated = leaves;
+            mutated[leaf_index] ^= 1 << bit;
+            let actual = call(
+                &mut store,
+                &instance,
+                "trace_root4",
+                &[mutated[0], mutated[1], mutated[2], mutated[3], 0],
+                2,
+            );
+            assert_eq!(actual, vec![1, merkle_root4(b"BN01", mutated)]);
+            assert_ne!(
+                actual[1], expected_trace,
+                "trace leaf mutation {leaf_index}:{bit} did not change the root",
+            );
+        }
+    }
+
+    let public_digest = 193;
+    let statement = field_compress(b"BS01", public_digest, expected_trace);
+    let transcript = field_compress(b"BT01", statement, expected_auxiliary);
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "bind_roots",
+            &[public_digest, expected_trace, expected_auxiliary, 0],
+            4,
+        ),
+        vec![1, statement, 1, transcript],
+        "typed statement and auxiliary transcript differ from Plonky3",
+    );
+    for invalid_mask in [1, 2, 7] {
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "bind_roots",
+                &[public_digest, expected_trace, expected_auxiliary, invalid_mask],
+                4,
+            ),
+            vec![0, 0, 0, 0],
+            "invalid typed root mask {invalid_mask:#x} must fail closed",
+        );
+    }
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "bind_roots",
+            &[public_digest, expected_trace, expected_auxiliary, 4],
+            4,
+        ),
+        vec![1, statement, 0, 0],
+        "an invalid auxiliary root must preserve the prior statement but reject the transcript",
     );
 }

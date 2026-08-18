@@ -1,0 +1,130 @@
+//! Executable structural boundary for the field-generic Merkle core.
+
+use merkle_core::{
+    TwoToOneHasher,
+    binary_root,
+    complete_frontier_root,
+    empty_frontier,
+    pair_path_from_leaves,
+    pair_root,
+    pair_verify,
+    push_frontier,
+    quartet_path_from_leaves,
+    quartet_root,
+    quartet_verify,
+}
+
+struct AffineHasher {}
+
+impl TwoToOneHasher<u32> for AffineHasher {
+    fn zero() -> u32 { 0 }
+    fn equal(_ left: u32, _ right: u32) -> bool { left == right }
+    fn hash2(_ left: u32, _ right: u32) -> u32 { left * 17 + right * 31 + 7 }
+}
+
+pub fn binary3(
+    _ leaf: u32,
+    _ depth: usize,
+    _ index: u32,
+    _ sibling0: u32,
+    _ sibling1: u32,
+    _ sibling2: u32,
+) -> (u32, u32) {
+    let root = binary_root<u32, AffineHasher, 3>(
+        leaf,
+        depth,
+        index,
+        [sibling0, sibling1, sibling2],
+    )
+    (if root.valid { 1 } else { 0 }, root.value)
+}
+
+pub fn frontier4(_ a: u32, _ b: u32, _ c: u32, _ d: u32) -> (u32, u32, u32) {
+    let mut frontier = empty_frontier<u32, AffineHasher, 3>()
+    frontier = push_frontier<u32, AffineHasher, 3>(frontier, a)
+    frontier = push_frontier<u32, AffineHasher, 3>(frontier, b)
+    frontier = push_frontier<u32, AffineHasher, 3>(frontier, c)
+    frontier = push_frontier<u32, AffineHasher, 3>(frontier, d)
+    let root = complete_frontier_root<u32, AffineHasher, 3>(frontier)
+    (if frontier.valid { 1 } else { 0 }, frontier.count, root.value)
+}
+
+pub fn incomplete_frontier3(_ a: u32, _ b: u32, _ c: u32) -> u32 {
+    let mut frontier = empty_frontier<u32, AffineHasher, 3>()
+    frontier = push_frontier<u32, AffineHasher, 3>(frontier, a)
+    frontier = push_frontier<u32, AffineHasher, 3>(frontier, b)
+    frontier = push_frontier<u32, AffineHasher, 3>(frontier, c)
+    let root = complete_frontier_root<u32, AffineHasher, 3>(frontier)
+    if root.valid { 1 } else { 0 }
+}
+
+pub fn overflowing_frontier4(_ a: u32, _ b: u32, _ c: u32, _ d: u32) -> u32 {
+    let mut frontier = empty_frontier<u32, AffineHasher, 2>()
+    frontier = push_frontier<u32, AffineHasher, 2>(frontier, a)
+    frontier = push_frontier<u32, AffineHasher, 2>(frontier, b)
+    frontier = push_frontier<u32, AffineHasher, 2>(frontier, c)
+    frontier = push_frontier<u32, AffineHasher, 2>(frontier, d)
+    if frontier.valid { 1 } else { 0 }
+}
+
+pub fn pair8(_ index: u32, _ mutate: u32) -> (u32, u32, u32, u32, u32, u32) {
+    let leaves: [u32; 8] = [3, 5, 7, 11, 13, 17, 19, 23]
+    let path = pair_path_from_leaves<u32, AffineHasher, 8, 4, 2>(leaves, index)
+    let local = if index < 4 { index as usize } else { 0 }
+    let positive = leaves[local]
+    let negative = leaves[local + 4]
+    let opened = pair_root<u32, AffineHasher, 2>(
+        positive,
+        negative + mutate,
+        path,
+    )
+    let expected = pair_root<u32, AffineHasher, 2>(positive, negative, path)
+    (
+        if path.valid { 1 } else { 0 },
+        opened.value,
+        if pair_verify<u32, AffineHasher, 2>(expected.value, positive, negative + mutate, path) {
+            1
+        } else {
+            0
+        },
+        path.positive_siblings[0],
+        path.positive_siblings[1],
+        path.negative_siblings[0],
+    )
+}
+
+pub fn quartet16(_ index: u32, _ mutate: u32) -> (u32, u32, u32, u32, u32, u32) {
+    let leaves: [u32; 16] = [
+        2, 3, 5, 7,
+        11, 13, 17, 19,
+        23, 29, 31, 37,
+        41, 43, 47, 53,
+    ]
+    let path = quartet_path_from_leaves<u32, AffineHasher, 16, 4, 2>(leaves, index)
+    let local = if index < 4 { index as usize } else { 0 }
+    let first = leaves[local]
+    let second = leaves[local + 4]
+    let third = leaves[local + 8]
+    let fourth = leaves[local + 12]
+    let expected = quartet_root<u32, AffineHasher, 2>(first, second, third, fourth, path)
+    let opened = quartet_root<u32, AffineHasher, 2>(first, second, third, fourth + mutate, path)
+    (
+        if path.valid { 1 } else { 0 },
+        opened.value,
+        if quartet_verify<u32, AffineHasher, 2>(
+            expected.value,
+            first,
+            second,
+            third,
+            fourth + mutate,
+            path,
+        ) {
+            1
+        } else {
+            0
+        },
+        path.first_siblings[0],
+        path.second_siblings[0],
+        path.fourth_siblings[1],
+    )
+}
