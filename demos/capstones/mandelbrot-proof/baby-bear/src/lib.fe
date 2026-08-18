@@ -19,6 +19,7 @@ use mandelbrot_proof_kernel::{
     escapes_by_q12_public_words,
 }
 use merkle_core::{
+    MerkleRoot,
     TwoToOneHasher,
     complete_frontier_root,
     empty_frontier,
@@ -30,16 +31,19 @@ use poseidon_baby_bear::{
     Poseidon2Domain,
     Poseidon2FieldDomain,
     bind as poseidon_bind,
+    commit_ext4_fields,
+    commit_fields,
     commit_packed,
     compress as poseidon_compress,
     squeeze_ext4,
 }
-use precision::baby_bear::{BabyBearExt4, BabyBearModulus}
+use precision::baby_bear::{BabyBear, BabyBearExt4, BabyBearModulus}
 use precision::word_field_encoding::{PackedFieldBits, pack_bounded_words}
 
 pub const ROW_FIELDS: usize = 7
 pub const PUBLIC_FIELDS: usize = 4
 pub const AUXILIARY_FIELDS: usize = 14
+pub const MAIN_LDE_ROW_FIELDS: usize = 17
 const TRACE_FRONTIER_LEVELS: usize = 22
 
 const fn protocol_tag(_ label: String<4>) -> u32 {
@@ -56,6 +60,9 @@ struct MandelbrotAuxiliaryBabyBearV1 {}
 struct MandelbrotStatementBabyBearV1 {}
 struct MandelbrotProofTranscriptBabyBearV1 {}
 struct MandelbrotCompositionChallengeBabyBearV1 {}
+struct MandelbrotMainLdeRowBabyBearV1 {}
+struct MandelbrotAuxiliaryLdeRowBabyBearV1 {}
+struct MandelbrotCompositionRowBabyBearV1 {}
 
 impl Poseidon2Domain for MandelbrotRowBabyBearV1 {
     const TAG: u32 = protocol_tag("BR01")
@@ -81,6 +88,18 @@ impl Poseidon2FieldDomain for MandelbrotCompositionChallengeBabyBearV1 {
     const TAG: u32 = protocol_tag("BC01")
 }
 
+impl Poseidon2FieldDomain for MandelbrotMainLdeRowBabyBearV1 {
+    const TAG: u32 = protocol_tag("BL01")
+}
+
+impl Poseidon2FieldDomain for MandelbrotAuxiliaryLdeRowBabyBearV1 {
+    const TAG: u32 = protocol_tag("BY01")
+}
+
+impl Poseidon2FieldDomain for MandelbrotCompositionRowBabyBearV1 {
+    const TAG: u32 = protocol_tag("BC02")
+}
+
 pub struct RowDigest { pub valid: bool, pub value: Poseidon2Digest }
 impl core::marker::Copy for RowDigest {}
 
@@ -99,17 +118,17 @@ impl core::marker::Copy for ProofTranscriptDigest {}
 pub struct CompositionChallenge { pub valid: bool, pub value: BabyBearExt4 }
 impl core::marker::Copy for CompositionChallenge {}
 
-struct RowNodeHasher {}
-impl TwoToOneHasher<Poseidon2Digest> for RowNodeHasher {
-    fn zero() -> Poseidon2Digest { Poseidon2Digest::zero() }
-    fn equal(_ left: Poseidon2Digest, _ right: Poseidon2Digest) -> bool { left.equals(right) }
-    fn hash2(_ left: Poseidon2Digest, _ right: Poseidon2Digest) -> Poseidon2Digest {
-        poseidon_compress(left, right)
-    }
-}
+pub struct MainLdeDigest { pub valid: bool, pub value: Poseidon2Digest }
+impl core::marker::Copy for MainLdeDigest {}
 
-struct AuxiliaryNodeHasher {}
-impl TwoToOneHasher<Poseidon2Digest> for AuxiliaryNodeHasher {
+pub struct AuxiliaryLdeDigest { pub valid: bool, pub value: Poseidon2Digest }
+impl core::marker::Copy for AuxiliaryLdeDigest {}
+
+pub struct CompositionDigest { pub valid: bool, pub value: Poseidon2Digest }
+impl core::marker::Copy for CompositionDigest {}
+
+struct DigestNodeHasher {}
+impl TwoToOneHasher<Poseidon2Digest> for DigestNodeHasher {
     fn zero() -> Poseidon2Digest { Poseidon2Digest::zero() }
     fn equal(_ left: Poseidon2Digest, _ right: Poseidon2Digest) -> bool { left.equals(right) }
     fn hash2(_ left: Poseidon2Digest, _ right: Poseidon2Digest) -> Poseidon2Digest {
@@ -182,6 +201,23 @@ pub fn auxiliary_commitment(_ row: own EncodedProofRow) -> AuxiliaryDigest {
     ))
 }
 
+fn digest_root_power_of_two<const N: usize>(
+    _ leaves: own [Poseidon2Digest; N],
+) -> MerkleRoot<Poseidon2Digest>
+where N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N & (N - 1)) == 0 }
+{
+    let mut frontier = empty_frontier<Poseidon2Digest, DigestNodeHasher, TRACE_FRONTIER_LEVELS>()
+    let mut index: usize = 0
+    while index < N {
+        frontier = push_frontier<Poseidon2Digest, DigestNodeHasher, TRACE_FRONTIER_LEVELS>(
+            frontier,
+            leaves[index],
+        )
+        index = index + 1
+    }
+    complete_frontier_root<Poseidon2Digest, DigestNodeHasher, TRACE_FRONTIER_LEVELS>(frontier)
+}
+
 /// Commit a complete power-of-two main trace through the reusable zk-kit
 /// Merkle shape. Invalid leaf encodings fail closed before entering the tree.
 pub fn trace_root_power_of_two<const N: usize>(
@@ -189,19 +225,16 @@ pub fn trace_root_power_of_two<const N: usize>(
 ) -> RowDigest
 where N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N & (N - 1)) == 0 }
 {
-    let mut frontier = empty_frontier<Poseidon2Digest, RowNodeHasher, TRACE_FRONTIER_LEVELS>()
+    let mut raw = [Poseidon2Digest::zero(); N]
     let mut index: usize = 0
     while index < N {
         if !leaves[index].valid {
             return RowDigest { valid: false, value: Poseidon2Digest::zero() }
         }
-        frontier = push_frontier<Poseidon2Digest, RowNodeHasher, TRACE_FRONTIER_LEVELS>(
-            frontier,
-            leaves[index].value,
-        )
+        raw[index] = leaves[index].value
         index = index + 1
     }
-    let root = complete_frontier_root<Poseidon2Digest, RowNodeHasher, TRACE_FRONTIER_LEVELS>(frontier)
+    let root = digest_root_power_of_two<N>(raw)
     RowDigest { valid: root.valid, value: root.value }
 }
 
@@ -212,19 +245,16 @@ pub fn auxiliary_root_power_of_two<const N: usize>(
 ) -> AuxiliaryDigest
 where N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N & (N - 1)) == 0 }
 {
-    let mut frontier = empty_frontier<Poseidon2Digest, AuxiliaryNodeHasher, TRACE_FRONTIER_LEVELS>()
+    let mut raw = [Poseidon2Digest::zero(); N]
     let mut index: usize = 0
     while index < N {
         if !leaves[index].valid {
             return AuxiliaryDigest { valid: false, value: Poseidon2Digest::zero() }
         }
-        frontier = push_frontier<Poseidon2Digest, AuxiliaryNodeHasher, TRACE_FRONTIER_LEVELS>(
-            frontier,
-            leaves[index].value,
-        )
+        raw[index] = leaves[index].value
         index = index + 1
     }
-    let root = complete_frontier_root<Poseidon2Digest, AuxiliaryNodeHasher, TRACE_FRONTIER_LEVELS>(frontier)
+    let root = digest_root_power_of_two<N>(raw)
     AuxiliaryDigest { valid: root.valid, value: root.value }
 }
 
@@ -273,4 +303,83 @@ pub fn composition_challenge(
             transcript.value,
         ),
     }
+}
+
+pub fn main_lde_row_commitment(
+    _ values: own [BabyBear; MAIN_LDE_ROW_FIELDS],
+) -> MainLdeDigest {
+    MainLdeDigest {
+        valid: true,
+        value: commit_fields<MandelbrotMainLdeRowBabyBearV1, MAIN_LDE_ROW_FIELDS>(values),
+    }
+}
+
+pub fn auxiliary_lde_row_commitment(
+    _ values: own [BabyBear; AUXILIARY_ROW_BITS],
+) -> AuxiliaryLdeDigest {
+    AuxiliaryLdeDigest {
+        valid: true,
+        value: commit_fields<MandelbrotAuxiliaryLdeRowBabyBearV1, AUXILIARY_ROW_BITS>(values),
+    }
+}
+
+pub fn composition_row_commitment(_ value: BabyBearExt4) -> CompositionDigest {
+    CompositionDigest {
+        valid: true,
+        value: commit_ext4_fields<MandelbrotCompositionRowBabyBearV1, 1>([value]),
+    }
+}
+
+pub fn main_lde_root_power_of_two<const N: usize>(
+    _ leaves: own [MainLdeDigest; N],
+) -> MainLdeDigest
+where N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N & (N - 1)) == 0 }
+{
+    let mut raw = [Poseidon2Digest::zero(); N]
+    let mut index: usize = 0
+    while index < N {
+        if !leaves[index].valid {
+            return MainLdeDigest { valid: false, value: Poseidon2Digest::zero() }
+        }
+        raw[index] = leaves[index].value
+        index = index + 1
+    }
+    let root = digest_root_power_of_two<N>(raw)
+    MainLdeDigest { valid: root.valid, value: root.value }
+}
+
+pub fn auxiliary_lde_root_power_of_two<const N: usize>(
+    _ leaves: own [AuxiliaryLdeDigest; N],
+) -> AuxiliaryLdeDigest
+where N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N & (N - 1)) == 0 }
+{
+    let mut raw = [Poseidon2Digest::zero(); N]
+    let mut index: usize = 0
+    while index < N {
+        if !leaves[index].valid {
+            return AuxiliaryLdeDigest { valid: false, value: Poseidon2Digest::zero() }
+        }
+        raw[index] = leaves[index].value
+        index = index + 1
+    }
+    let root = digest_root_power_of_two<N>(raw)
+    AuxiliaryLdeDigest { valid: root.valid, value: root.value }
+}
+
+pub fn composition_root_power_of_two<const N: usize>(
+    _ leaves: own [CompositionDigest; N],
+) -> CompositionDigest
+where N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N & (N - 1)) == 0 }
+{
+    let mut raw = [Poseidon2Digest::zero(); N]
+    let mut index: usize = 0
+    while index < N {
+        if !leaves[index].valid {
+            return CompositionDigest { valid: false, value: Poseidon2Digest::zero() }
+        }
+        raw[index] = leaves[index].value
+        index = index + 1
+    }
+    let root = digest_root_power_of_two<N>(raw)
+    CompositionDigest { valid: root.valid, value: root.value }
 }

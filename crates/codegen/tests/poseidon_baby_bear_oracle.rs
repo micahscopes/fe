@@ -173,6 +173,12 @@ fn protocol_tag(label: &[u8; 4]) -> u32 {
     u32::from_be_bytes(*label)
 }
 
+fn reference_field_commitment(tag: &[u8; 4], fields: &[u32]) -> [u32; 8] {
+    let mut message = vec![u32::from_be_bytes(*tag), fields.len() as u32];
+    message.extend_from_slice(fields);
+    reference_sponge(&message)
+}
+
 #[test]
 fn fe_derived_poseidon2_matches_plonky3_parameters_and_permutations() {
     let bytes = compiled_wasm();
@@ -470,6 +476,45 @@ fn bounded_bits_are_injective_and_commit_with_length_and_domain() {
                 words
             },
             "411-bit typed commitment differs for seed {seed:#x}",
+        );
+    }
+
+    let fields17 = [
+        0, 1, 2, 3, 5, 8, 13, 21, 34,
+        55, 89, 144, 233, 377, 610, 987, 1597,
+    ];
+    assert_eq!(
+        call(&mut store, &instance, "fields17", &fields17, 8),
+        reference_field_commitment(b"BV01", &fields17),
+        "17-field sponge differs from the independent Plonky3 model",
+    );
+    for index in 0..fields17.len() {
+        let mut mutated = fields17;
+        mutated[index] += 1;
+        let actual = call(&mut store, &instance, "fields17", &mutated, 8);
+        assert_eq!(actual, reference_field_commitment(b"BV01", &mutated));
+        assert_ne!(
+            actual,
+            reference_field_commitment(b"BV01", &fields17),
+            "field-vector position {index} was not bound",
+        );
+    }
+
+    let extensions = [1, 2, 3, 4, 101, 103, 107, 109];
+    assert_eq!(
+        call(&mut store, &instance, "extensions2", &extensions, 8),
+        reference_field_commitment(b"BV01", &extensions),
+        "quartic flattening order differs from the independent Plonky3 model",
+    );
+    for index in 0..extensions.len() {
+        let mut mutated = extensions;
+        mutated[index] += 1;
+        let actual = call(&mut store, &instance, "extensions2", &mutated, 8);
+        assert_eq!(actual, reference_field_commitment(b"BV01", &mutated));
+        assert_ne!(
+            actual,
+            reference_field_commitment(b"BV01", &extensions),
+            "extension coefficient {index} was not bound",
         );
     }
 }

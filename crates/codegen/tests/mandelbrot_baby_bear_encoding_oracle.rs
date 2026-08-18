@@ -125,6 +125,12 @@ fn commitment(tag: &[u8; 4], encoding: &[u32]) -> [u32; 8] {
     reference_sponge(&message)
 }
 
+fn reference_field_commitment(tag: &[u8; 4], fields: &[u32]) -> [u32; 8] {
+    let mut message = vec![u32::from_be_bytes(*tag), fields.len() as u32];
+    message.extend_from_slice(fields);
+    reference_sponge(&message)
+}
+
 fn digest_seed(base: u32) -> [u32; 8] {
     core::array::from_fn(|index| base + index as u32)
 }
@@ -523,4 +529,51 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
         vec![0; 5],
         "invalid transcript must not produce an extension challenge",
     );
+
+    let main_lde = [
+        0, 1, 2, 3, 5, 8, 13, 21, 34,
+        55, 89, 144, 233, 377, 610, 987, 1597,
+    ];
+    let baseline_main_lde = reference_field_commitment(b"BL01", &main_lde);
+    assert_eq!(
+        call(&mut store, &instance, "main_lde17", &main_lde, 8),
+        baseline_main_lde,
+        "production main LDE row commitment differs from Plonky3",
+    );
+    for index in 0..main_lde.len() {
+        let mut mutated = main_lde;
+        mutated[index] += 1;
+        let actual = call(&mut store, &instance, "main_lde17", &mutated, 8);
+        assert_eq!(actual, reference_field_commitment(b"BL01", &mutated));
+        assert_ne!(actual, baseline_main_lde, "main LDE field {index} was not bound");
+    }
+
+    for seed in [0, 1, u32::MAX, 0x1357_9bdf] {
+        let auxiliary: Vec<u32> = (0..411u32)
+            .map(|index| ((seed >> (index & 31)) ^ index ^ (index >> 3)) & 0x3fff_ffff)
+            .collect();
+        assert_eq!(
+            call(&mut store, &instance, "auxiliary_lde411", &[seed], 8),
+            reference_field_commitment(b"BY01", &auxiliary),
+            "production 411-field auxiliary LDE row differs for seed {seed:#x}",
+        );
+    }
+
+    let composition = [17, 23, 41, 73];
+    let baseline_composition = reference_field_commitment(b"BC02", &composition);
+    assert_eq!(
+        call(&mut store, &instance, "composition_row4", &composition, 8),
+        baseline_composition,
+        "production quartic composition row differs from Plonky3",
+    );
+    for index in 0..composition.len() {
+        let mut mutated = composition;
+        mutated[index] += 1;
+        let actual = call(&mut store, &instance, "composition_row4", &mutated, 8);
+        assert_eq!(actual, reference_field_commitment(b"BC02", &mutated));
+        assert_ne!(
+            actual, baseline_composition,
+            "composition coefficient {index} was not bound",
+        );
+    }
 }

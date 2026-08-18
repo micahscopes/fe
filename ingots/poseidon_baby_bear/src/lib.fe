@@ -313,6 +313,75 @@ pub fn commit_packed<D: Poseidon2Domain, const N: usize>(
     PackedCommitment { valid: true, value: Poseidon2Digest { values: values } }
 }
 
+/// Commit one fixed-length vector of canonical base-field values. The nominal
+/// domain and compile-time element count prefix the rate-8 sponge message.
+pub fn commit_fields<D: Poseidon2FieldDomain, const N: usize>(
+    _ fields: own [BabyBear; N],
+) -> Poseidon2Digest {
+    if D::TAG >= BABY_BEAR_MODULUS { return Poseidon2Digest::zero() }
+    let mut state: [BabyBear; WIDTH] = [BabyBear::zero(); WIDTH]
+    let mut rate: usize = 0
+    state[rate] = BabyBear::from_u32(D::TAG)
+    rate = rate + 1
+    state[rate] = BabyBear::from_u32(N.downcast_truncate())
+    rate = rate + 1
+    let mut index: usize = 0
+    while index < N {
+        state[rate] = fields[index]
+        rate = rate + 1
+        if rate == SPONGE_RATE {
+            state = permute16(input: state)
+            rate = 0
+        }
+        index = index + 1
+    }
+    if rate != 0 { state = permute16(input: state) }
+    let mut values = [BabyBear::zero(); DIGEST_FIELDS]
+    index = 0
+    while index < DIGEST_FIELDS {
+        values[index] = state[index]
+        index = index + 1
+    }
+    Poseidon2Digest { values: values }
+}
+
+/// Commit a fixed-length vector of quartic extension values by flattening
+/// coefficients in value-major order through the same base-field sponge.
+pub fn commit_ext4_fields<D: Poseidon2FieldDomain, const N: usize>(
+    _ fields: own [BabyBearExt4; N],
+) -> Poseidon2Digest {
+    if D::TAG >= BABY_BEAR_MODULUS { return Poseidon2Digest::zero() }
+    let mut state: [BabyBear; WIDTH] = [BabyBear::zero(); WIDTH]
+    let mut rate: usize = 0
+    let value_count: u32 = N.downcast_truncate()
+    state[rate] = BabyBear::from_u32(D::TAG)
+    rate = rate + 1
+    state[rate] = BabyBear::from_u32(value_count * 4)
+    rate = rate + 1
+    let mut value: usize = 0
+    while value < N {
+        let mut coefficient: usize = 0
+        while coefficient < 4 {
+            state[rate] = fields[value].coefficient(coefficient)
+            rate = rate + 1
+            if rate == SPONGE_RATE {
+                state = permute16(input: state)
+                rate = 0
+            }
+            coefficient = coefficient + 1
+        }
+        value = value + 1
+    }
+    if rate != 0 { state = permute16(input: state) }
+    let mut values = [BabyBear::zero(); DIGEST_FIELDS]
+    let mut index: usize = 0
+    while index < DIGEST_FIELDS {
+        values[index] = state[index]
+        index = index + 1
+    }
+    Poseidon2Digest { values: values }
+}
+
 /// Plonky3-compatible two-to-one digest compression. Concatenating the two
 /// eight-field children fills one width-16 permutation exactly, and the first
 /// eight output lanes form the parent digest.

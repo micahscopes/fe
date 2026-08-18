@@ -603,7 +603,13 @@ Legend:
   challenge from four Poseidon2 output lanes directly into the canonical
   quartic BabyBear extension, with a dedicated nominal domain and no
   base-field soundness shortcut. Plonky3 independently checks all four
-  coefficients and invalid transcripts return no challenge. Gates:
+  coefficients and invalid transcripts return no challenge. One shared
+  fixed-length field-vector absorber now handles both base-field arrays and
+  value-major flattened quartic arrays. The production 17-field main LDE row,
+  411-field auxiliary LDE row, and quartic composition row each have distinct
+  typed domains over that same mechanism, with independent Plonky3 values and
+  position/coefficient mutation checks. Their typed root wrappers reuse the
+  same eight-field Merkle compression. Gates:
   `merkle_core_oracle.rs` and
   `mandelbrot_baby_bear_encoding_oracle.rs`. The same permutation has also
   lowered to Naga-valid u32-only WGSL with the local Sonatina conditional-loop

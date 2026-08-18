@@ -9,10 +9,13 @@ use mandelbrot_proof_baby_bear::{
     bind_auxiliary_trace,
     bind_statement,
     composition_challenge,
+    composition_row_commitment,
     encoded_auxiliary_fields,
     encoded_public_fields,
     encoded_row_fields,
     public_commitment,
+    main_lde_row_commitment,
+    auxiliary_lde_row_commitment,
     row_commitment,
     trace_root_power_of_two,
 }
@@ -23,6 +26,7 @@ use mandelbrot_proof_kernel::{
     SignedWord,
 }
 use poseidon_baby_bear::Poseidon2Digest
+use precision::baby_bear::{BabyBear, BabyBearExt4}
 
 fn digest8(_ base: u32) -> Poseidon2Digest {
     Poseidon2Digest::from_u32s([
@@ -267,5 +271,60 @@ pub fn composition_challenge4(_ transcript: u32, _ valid: u32) -> (u32, u32, u32
         words[1],
         words[2],
         words[3],
+    )
+}
+
+pub fn main_lde17(
+    _ f0: u32, _ f1: u32, _ f2: u32, _ f3: u32,
+    _ f4: u32, _ f5: u32, _ f6: u32, _ f7: u32,
+    _ f8: u32, _ f9: u32, _ f10: u32, _ f11: u32,
+    _ f12: u32, _ f13: u32, _ f14: u32, _ f15: u32,
+    _ f16: u32,
+) -> (u32, u32, u32, u32, u32, u32, u32, u32) {
+    let digest = main_lde_row_commitment([
+        BabyBear::from_u32(f0), BabyBear::from_u32(f1),
+        BabyBear::from_u32(f2), BabyBear::from_u32(f3),
+        BabyBear::from_u32(f4), BabyBear::from_u32(f5),
+        BabyBear::from_u32(f6), BabyBear::from_u32(f7),
+        BabyBear::from_u32(f8), BabyBear::from_u32(f9),
+        BabyBear::from_u32(f10), BabyBear::from_u32(f11),
+        BabyBear::from_u32(f12), BabyBear::from_u32(f13),
+        BabyBear::from_u32(f14), BabyBear::from_u32(f15),
+        BabyBear::from_u32(f16),
+    ]).value
+    (
+        digest.field(0).to_u32(), digest.field(1).to_u32(),
+        digest.field(2).to_u32(), digest.field(3).to_u32(),
+        digest.field(4).to_u32(), digest.field(5).to_u32(),
+        digest.field(6).to_u32(), digest.field(7).to_u32(),
+    )
+}
+
+pub fn auxiliary_lde411(_ seed: u32) -> (u32, u32, u32, u32, u32, u32, u32, u32) {
+    let mut fields = [BabyBear::zero(); mandelbrot_proof_kernel::AUXILIARY_ROW_BITS]
+    let mut index: usize = 0
+    while index < mandelbrot_proof_kernel::AUXILIARY_ROW_BITS {
+        let i: u32 = index.downcast_truncate()
+        fields[index] = BabyBear::from_u32(((seed >> (i & 31)) ^ i ^ (i >> 3)) & 1073741823)
+        index = index + 1
+    }
+    let digest = auxiliary_lde_row_commitment(fields).value
+    (
+        digest.field(0).to_u32(), digest.field(1).to_u32(),
+        digest.field(2).to_u32(), digest.field(3).to_u32(),
+        digest.field(4).to_u32(), digest.field(5).to_u32(),
+        digest.field(6).to_u32(), digest.field(7).to_u32(),
+    )
+}
+
+pub fn composition_row4(
+    _ c0: u32, _ c1: u32, _ c2: u32, _ c3: u32,
+) -> (u32, u32, u32, u32, u32, u32, u32, u32) {
+    let digest = composition_row_commitment(BabyBearExt4::from_u32s([c0, c1, c2, c3])).value
+    (
+        digest.field(0).to_u32(), digest.field(1).to_u32(),
+        digest.field(2).to_u32(), digest.field(3).to_u32(),
+        digest.field(4).to_u32(), digest.field(5).to_u32(),
+        digest.field(6).to_u32(), digest.field(7).to_u32(),
     )
 }

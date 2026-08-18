@@ -1,7 +1,15 @@
 //! Executable boundary for the Fe-derived BabyBear Poseidon2 oracle.
 
-use poseidon_baby_bear::{Poseidon2Domain, commit_packed, parameter_plain, permute16}
-use precision::baby_bear::{BabyBear, BabyBearModulus, BABY_BEAR_MODULUS}
+use poseidon_baby_bear::{
+    Poseidon2Domain,
+    Poseidon2FieldDomain,
+    commit_ext4_fields,
+    commit_fields,
+    commit_packed,
+    parameter_plain,
+    permute16,
+}
+use precision::baby_bear::{BabyBear, BabyBearExt4, BabyBearModulus, BABY_BEAR_MODULUS}
 use precision::word_field_encoding::{PackedFieldBits, pack_bounded_words}
 
 const fn protocol_tag(_ label: String<4>) -> u32 {
@@ -20,6 +28,11 @@ impl Poseidon2Domain for PackingTestDomain {
 struct InvalidPackingTestDomain {}
 impl Poseidon2Domain for InvalidPackingTestDomain {
     const TAG: u32 = BABY_BEAR_MODULUS
+}
+
+struct FieldVectorTestDomain {}
+impl Poseidon2FieldDomain for FieldVectorTestDomain {
+    const TAG: u32 = protocol_tag("BV01")
 }
 
 pub fn derived_parameter(_ index: u32) -> u32 { parameter_plain(index) }
@@ -190,5 +203,47 @@ pub fn packed411_commitment(_ seed: u32) -> (u32, u32, u32, u32, u32, u32, u32, 
         value.field(2).to_u32(), value.field(3).to_u32(),
         value.field(4).to_u32(), value.field(5).to_u32(),
         value.field(6).to_u32(), value.field(7).to_u32(),
+    )
+}
+
+pub fn fields17(
+    _ f0: u32, _ f1: u32, _ f2: u32, _ f3: u32,
+    _ f4: u32, _ f5: u32, _ f6: u32, _ f7: u32,
+    _ f8: u32, _ f9: u32, _ f10: u32, _ f11: u32,
+    _ f12: u32, _ f13: u32, _ f14: u32, _ f15: u32,
+    _ f16: u32,
+) -> (u32, u32, u32, u32, u32, u32, u32, u32) {
+    let digest = commit_fields<FieldVectorTestDomain, 17>([
+        BabyBear::from_u32(f0), BabyBear::from_u32(f1),
+        BabyBear::from_u32(f2), BabyBear::from_u32(f3),
+        BabyBear::from_u32(f4), BabyBear::from_u32(f5),
+        BabyBear::from_u32(f6), BabyBear::from_u32(f7),
+        BabyBear::from_u32(f8), BabyBear::from_u32(f9),
+        BabyBear::from_u32(f10), BabyBear::from_u32(f11),
+        BabyBear::from_u32(f12), BabyBear::from_u32(f13),
+        BabyBear::from_u32(f14), BabyBear::from_u32(f15),
+        BabyBear::from_u32(f16),
+    ])
+    (
+        digest.field(0).to_u32(), digest.field(1).to_u32(),
+        digest.field(2).to_u32(), digest.field(3).to_u32(),
+        digest.field(4).to_u32(), digest.field(5).to_u32(),
+        digest.field(6).to_u32(), digest.field(7).to_u32(),
+    )
+}
+
+pub fn extensions2(
+    _ a0: u32, _ a1: u32, _ a2: u32, _ a3: u32,
+    _ b0: u32, _ b1: u32, _ b2: u32, _ b3: u32,
+) -> (u32, u32, u32, u32, u32, u32, u32, u32) {
+    let digest = commit_ext4_fields<FieldVectorTestDomain, 2>([
+        BabyBearExt4::from_u32s([a0, a1, a2, a3]),
+        BabyBearExt4::from_u32s([b0, b1, b2, b3]),
+    ])
+    (
+        digest.field(0).to_u32(), digest.field(1).to_u32(),
+        digest.field(2).to_u32(), digest.field(3).to_u32(),
+        digest.field(4).to_u32(), digest.field(5).to_u32(),
+        digest.field(6).to_u32(), digest.field(7).to_u32(),
     )
 }
