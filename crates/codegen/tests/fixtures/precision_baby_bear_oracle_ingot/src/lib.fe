@@ -7,6 +7,90 @@ use precision::baby_bear::{
     baby_bear_montgomery_r2,
     baby_bear_two_adic_root_plain,
 }
+use precision::polynomial::{
+    WordRadix2CosetLde,
+    radix2_word_coset_lde,
+    radix2_word_intt,
+    radix2_word_ntt,
+}
+
+fn baby_bear8(
+    _ a0: u32, _ a1: u32, _ a2: u32, _ a3: u32,
+    _ a4: u32, _ a5: u32, _ a6: u32, _ a7: u32,
+) -> [BabyBear; 8] {
+    [
+        BabyBear::from_u32(a0), BabyBear::from_u32(a1),
+        BabyBear::from_u32(a2), BabyBear::from_u32(a3),
+        BabyBear::from_u32(a4), BabyBear::from_u32(a5),
+        BabyBear::from_u32(a6), BabyBear::from_u32(a7),
+    ]
+}
+
+fn words8(_ values: own [BabyBear; 8]) -> (
+    u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    (
+        values[0].to_u32(), values[1].to_u32(),
+        values[2].to_u32(), values[3].to_u32(),
+        values[4].to_u32(), values[5].to_u32(),
+        values[6].to_u32(), values[7].to_u32(),
+    )
+}
+
+pub fn baby_bear_ntt8(
+    _ a0: u32, _ a1: u32, _ a2: u32, _ a3: u32,
+    _ a4: u32, _ a5: u32, _ a6: u32, _ a7: u32,
+) -> (u32, u32, u32, u32, u32, u32, u32, u32) {
+    words8(radix2_word_ntt<8, precision::baby_bear::BabyBearModulus>(
+        baby_bear8(a0, a1, a2, a3, a4, a5, a6, a7),
+    ))
+}
+
+pub fn baby_bear_ntt8_roundtrip(
+    _ a0: u32, _ a1: u32, _ a2: u32, _ a3: u32,
+    _ a4: u32, _ a5: u32, _ a6: u32, _ a7: u32,
+) -> (u32, u32, u32, u32, u32, u32, u32, u32) {
+    words8(radix2_word_intt<8, precision::baby_bear::BabyBearModulus>(
+        radix2_word_ntt<8, precision::baby_bear::BabyBearModulus>(
+            baby_bear8(a0, a1, a2, a3, a4, a5, a6, a7),
+        ),
+    ))
+}
+
+fn lde16_words(
+    _ lde: own WordRadix2CosetLde<16, precision::baby_bear::BabyBearModulus>,
+) -> (
+    u32,
+    u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    (
+        if lde.valid { 1 } else { 0 },
+        lde.evaluations[0].to_u32(), lde.evaluations[1].to_u32(),
+        lde.evaluations[2].to_u32(), lde.evaluations[3].to_u32(),
+        lde.evaluations[4].to_u32(), lde.evaluations[5].to_u32(),
+        lde.evaluations[6].to_u32(), lde.evaluations[7].to_u32(),
+        lde.evaluations[8].to_u32(), lde.evaluations[9].to_u32(),
+        lde.evaluations[10].to_u32(), lde.evaluations[11].to_u32(),
+        lde.evaluations[12].to_u32(), lde.evaluations[13].to_u32(),
+        lde.evaluations[14].to_u32(), lde.evaluations[15].to_u32(),
+    )
+}
+
+pub fn baby_bear_lde8x16(
+    _ a0: u32, _ a1: u32, _ a2: u32, _ a3: u32,
+    _ a4: u32, _ a5: u32, _ a6: u32, _ a7: u32,
+    _ shift: u32,
+) -> (
+    u32,
+    u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    lde16_words(radix2_word_coset_lde<8, 16, precision::baby_bear::BabyBearModulus>(
+        baby_bear8(a0, a1, a2, a3, a4, a5, a6, a7),
+        BabyBear::from_u32(shift),
+    ))
+}
 
 pub fn baby_bear_ext4_add(
     _ a0: u32,

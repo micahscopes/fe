@@ -9,6 +9,7 @@ use super::field::{
     FieldElement, Limbs, ShiftAppend, Head, TwoAdicModulus,
     U32EmbeddingModulus,
 }
+use super::word_field::{WordField, WordTwoAdicPrime}
 use core::marker::Copy
 
 const fn radix2_log_unchecked<const N: usize>() -> u32 {
@@ -27,6 +28,61 @@ pub const fn radix2_log<const N: usize>() -> u32
     radix2_log_unchecked<N>()
 }
 
+/// The arithmetic interpretation required by one radix-2 dependency plan.
+/// Multi-limb proof fields and u32-native word fields implement this boundary;
+/// the transform and LDE algorithms do not name either representation.
+pub trait Radix2Field: Copy {
+    const TWO_ADICITY: u32
+    fn radix2_zero() -> Self
+    fn radix2_is_zero(self) -> bool
+    fn radix2_add(self, _ other: Self) -> Self
+    fn radix2_sub(self, _ other: Self) -> Self
+    fn radix2_mul(self, _ other: Self) -> Self
+    fn radix2_pow(self, _ exponent: u32) -> Self
+    fn radix2_inverse_or_zero(self) -> Self
+    fn radix2_root(_ log_order: u32) -> Self
+}
+
+impl<const L: usize, M> Radix2Field for FieldElement<L, M>
+    where
+        M: TwoAdicModulus<L>,
+        Limbs<L>: Head + ShiftAppend + Copy,
+{
+    const TWO_ADICITY: u32 = M::TWO_ADICITY
+    fn radix2_zero() -> Self { Self::zero() }
+    fn radix2_is_zero(self) -> bool { self.is_zero() }
+    fn radix2_add(self, _ other: Self) -> Self { self + other }
+    fn radix2_sub(self, _ other: Self) -> Self { self - other }
+    fn radix2_mul(self, _ other: Self) -> Self { self * other }
+    fn radix2_pow(self, _ exponent: u32) -> Self { self.pow_u32(exponent) }
+    fn radix2_inverse_or_zero(self) -> Self { self.inverse_or_zero() }
+    fn radix2_root(_ log_order: u32) -> Self { Self::two_adic_root(log_order) }
+}
+
+impl<M: WordTwoAdicPrime> Radix2Field for WordField<M> {
+    const TWO_ADICITY: u32 = M::TWO_ADICITY
+    fn radix2_zero() -> Self { Self::zero() }
+    fn radix2_is_zero(self) -> bool { self.is_zero() }
+    fn radix2_add(self, _ other: Self) -> Self { self + other }
+    fn radix2_sub(self, _ other: Self) -> Self { self - other }
+    fn radix2_mul(self, _ other: Self) -> Self { self * other }
+    fn radix2_pow(self, _ exponent: u32) -> Self { self.pow_u32(exponent) }
+    fn radix2_inverse_or_zero(self) -> Self { self.inverse_or_zero() }
+    fn radix2_root(_ log_order: u32) -> Self { Self::two_adic_root(log_order) }
+}
+
+fn radix2_natural<F: Radix2Field>(_ value: u32) -> F {
+    let mut result = F::radix2_zero()
+    let mut place = F::radix2_root(0)
+    let mut value = value
+    while value != 0 {
+        if (value & 1) == 1 { result = result.radix2_add(place) }
+        place = place.radix2_add(place)
+        value = value >> 1
+    }
+    result
+}
+
 fn reverse_low_bits(_ value: usize, _ width: u32) -> usize {
     let mut source = value
     let mut reversed: usize = 0
@@ -42,17 +98,13 @@ fn reverse_low_bits(_ value: usize, _ width: u32) -> usize {
 /// Cooley-Tukey radix-2 transform. The inverse uses the inverse root and
 /// multiplies by `N^-1`; it is therefore genuine interpolation, not a second
 /// forward transform with reordered output.
-fn transform<const N: usize, const L: usize, M>(
-    _ values: own [FieldElement<L, M>; N],
+fn transform_field<const N: usize, F: Radix2Field>(
+    _ values: own [F; N],
     _ inverse: bool,
-) -> [FieldElement<L, M>; N]
+) -> [F; N]
     where
         N > 0,
         { (N & (N - 1)) == 0 },
-        { radix2_log_unchecked<N>() <= M::TWO_ADICITY },
-        L >= 3,
-        M: TwoAdicModulus<L> + U32EmbeddingModulus<L>,
-        Limbs<L>: Head + ShiftAppend + Copy,
 {
     let log_n = radix2_log<N>()
     let mut values = values
@@ -67,13 +119,13 @@ fn transform<const N: usize, const L: usize, M>(
         index = index + 1
     }
 
-    let mut root = FieldElement<L, M>::two_adic_root(log_n)
-    if inverse { root = root.inverse_or_zero() }
-    let one = FieldElement<L, M>::one()
+    let mut root = F::radix2_root(log_n)
+    if inverse { root = root.radix2_inverse_or_zero() }
+    let one = F::radix2_root(0)
     let mut width: usize = 2
     while width <= N {
         let twiddle_step: u32 = (N / width).downcast_truncate()
-        let stage_root = root.pow_u32(twiddle_step)
+        let stage_root = root.radix2_pow(twiddle_step)
         let half = width >> 1
         let mut block: usize = 0
         while block < N {
@@ -81,10 +133,10 @@ fn transform<const N: usize, const L: usize, M>(
             let mut offset: usize = 0
             while offset < half {
                 let even = values[block + offset]
-                let odd = values[block + offset + half] * twiddle
-                values[block + offset] = even + odd
-                values[block + offset + half] = even - odd
-                twiddle = twiddle * stage_root
+                let odd = values[block + offset + half].radix2_mul(twiddle)
+                values[block + offset] = even.radix2_add(odd)
+                values[block + offset + half] = even.radix2_sub(odd)
+                twiddle = twiddle.radix2_mul(stage_root)
                 offset = offset + 1
             }
             block = block + width
@@ -93,11 +145,11 @@ fn transform<const N: usize, const L: usize, M>(
     }
 
     if inverse {
-        let scale = FieldElement<L, M>::from_u32(N.downcast_truncate())
-            .inverse_or_zero()
+        let scale = radix2_natural<F>(N.downcast_truncate())
+            .radix2_inverse_or_zero()
         let mut i: usize = 0
         while i < N {
-            values[i] = values[i] * scale
+            values[i] = values[i].radix2_mul(scale)
             i = i + 1
         }
     }
@@ -115,7 +167,7 @@ pub fn radix2_ntt<const N: usize, const L: usize, M>(
         M: TwoAdicModulus<L> + U32EmbeddingModulus<L>,
         Limbs<L>: Head + ShiftAppend + Copy,
 {
-    transform<N, L, M>(coefficients, false)
+    transform_field<N, FieldElement<L, M>>(coefficients, false)
 }
 
 pub fn radix2_intt<const N: usize, const L: usize, M>(
@@ -129,7 +181,72 @@ pub fn radix2_intt<const N: usize, const L: usize, M>(
         M: TwoAdicModulus<L> + U32EmbeddingModulus<L>,
         Limbs<L>: Head + ShiftAppend + Copy,
 {
-    transform<N, L, M>(evaluations, true)
+    transform_field<N, FieldElement<L, M>>(evaluations, true)
+}
+
+/// The same radix-2 transform interpreted through one u32-native word field.
+pub fn radix2_word_ntt<const N: usize, M: WordTwoAdicPrime>(
+    _ coefficients: own [WordField<M>; N],
+) -> [WordField<M>; N]
+    where
+        N > 0,
+        { (N & (N - 1)) == 0 },
+        { radix2_log_unchecked<N>() <= M::TWO_ADICITY },
+{
+    transform_field<N, WordField<M>>(coefficients, false)
+}
+
+pub fn radix2_word_intt<const N: usize, M: WordTwoAdicPrime>(
+    _ evaluations: own [WordField<M>; N],
+) -> [WordField<M>; N]
+    where
+        N > 0,
+        { (N & (N - 1)) == 0 },
+        { radix2_log_unchecked<N>() <= M::TWO_ADICITY },
+{
+    transform_field<N, WordField<M>>(evaluations, true)
+}
+
+struct FieldCosetLde<const N: usize, F> {
+    valid: bool,
+    evaluations: [F; N],
+}
+
+impl<const N: usize, F: Copy> Copy for FieldCosetLde<N, F> {}
+
+fn radix2_field_coset_lde<const N: usize, const OUT: usize, F: Radix2Field>(
+    _ base_evaluations: own [F; N],
+    _ shift: F,
+) -> FieldCosetLde<OUT, F>
+    where
+        N > 0,
+        { (N & (N - 1)) == 0 },
+        OUT > 0,
+        OUT > N,
+        { (OUT & (OUT - 1)) == 0 },
+        { (OUT % N) == 0 },
+{
+    let zero = F::radix2_zero()
+    let one = F::radix2_root(0)
+    if shift.radix2_is_zero()
+        || shift.radix2_pow(OUT.downcast_truncate()).radix2_sub(one).radix2_is_zero()
+    {
+        return FieldCosetLde { valid: false, evaluations: [zero; OUT] }
+    }
+
+    let coefficients = transform_field<N, F>(base_evaluations, true)
+    let mut shifted_coefficients: [F; OUT] = [zero; OUT]
+    let mut shift_power = one
+    let mut index: usize = 0
+    while index < N {
+        shifted_coefficients[index] = coefficients[index].radix2_mul(shift_power)
+        shift_power = shift_power.radix2_mul(shift)
+        index = index + 1
+    }
+    FieldCosetLde {
+        valid: true,
+        evaluations: transform_field<OUT, F>(shifted_coefficients, false),
+    }
 }
 
 /// A low-degree extension plus the proof that its evaluation coset is
@@ -164,23 +281,44 @@ pub fn radix2_coset_lde<
         M: TwoAdicModulus<L> + U32EmbeddingModulus<L>,
         Limbs<L>: Head + ShiftAppend + Copy,
 {
-    let zero = FieldElement<L, M>::zero()
-    let one = FieldElement<L, M>::one()
-    if shift.is_zero() || (shift.pow_u32(OUT.downcast_truncate()) - one).is_zero() {
-        return Radix2CosetLde { valid: false, evaluations: [zero; OUT] }
-    }
-
-    let coefficients = radix2_intt<N, L, M>(base_evaluations)
-    let mut shifted_coefficients: [FieldElement<L, M>; OUT] = [zero; OUT]
-    let mut shift_power = one
-    let mut index: usize = 0
-    while index < N {
-        shifted_coefficients[index] = coefficients[index] * shift_power
-        shift_power = shift_power * shift
-        index = index + 1
-    }
+    let lde = radix2_field_coset_lde<N, OUT, FieldElement<L, M>>(
+        base_evaluations,
+        shift,
+    )
     Radix2CosetLde {
-        valid: true,
-        evaluations: radix2_ntt<OUT, L, M>(shifted_coefficients),
+        valid: lde.valid,
+        evaluations: lde.evaluations,
     }
+}
+
+pub struct WordRadix2CosetLde<const N: usize, M> {
+    pub valid: bool,
+    pub evaluations: [WordField<M>; N],
+}
+
+impl<const N: usize, M> Copy for WordRadix2CosetLde<N, M> {}
+
+pub fn radix2_word_coset_lde<
+    const N: usize,
+    const OUT: usize,
+    M: WordTwoAdicPrime,
+>(
+    _ base_evaluations: own [WordField<M>; N],
+    _ shift: WordField<M>,
+) -> WordRadix2CosetLde<OUT, M>
+    where
+        N > 0,
+        { (N & (N - 1)) == 0 },
+        { radix2_log_unchecked<N>() <= M::TWO_ADICITY },
+        OUT > 0,
+        OUT > N,
+        { (OUT & (OUT - 1)) == 0 },
+        { radix2_log_unchecked<OUT>() <= M::TWO_ADICITY },
+        { (OUT % N) == 0 },
+{
+    let lde = radix2_field_coset_lde<N, OUT, WordField<M>>(
+        base_evaluations,
+        shift,
+    )
+    WordRadix2CosetLde { valid: lde.valid, evaluations: lde.evaluations }
 }

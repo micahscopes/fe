@@ -11,6 +11,7 @@ use fe_codegen::{BackendKind, OptLevel, layout_for};
 use hir::hir_def::HirIngot;
 use num_bigint::BigUint;
 use std::path::Path;
+use std::sync::OnceLock;
 use url::Url;
 use wasmtime::Val;
 
@@ -119,6 +120,11 @@ fn compile_wasm() -> Vec<u8> {
     bytes
 }
 
+fn compiled_wasm() -> &'static [u8] {
+    static WASM: OnceLock<Vec<u8>> = OnceLock::new();
+    WASM.get_or_init(compile_wasm)
+}
+
 fn call(
     store: &mut wasmtime::Store<()>,
     instance: &wasmtime::Instance,
@@ -160,6 +166,57 @@ fn pow_mod(mut base: u64, mut exponent: u32) -> u32 {
     result as u32
 }
 
+fn direct_ntt(values: &[u32], inverse: bool) -> Vec<u32> {
+    assert!(values.len().is_power_of_two());
+    let log_n = values.len().ilog2();
+    let maximal_root = pow_mod(31, 15);
+    let mut root = pow_mod(u64::from(maximal_root), 1 << (TWO_ADICITY - log_n));
+    if inverse {
+        root = pow_mod(u64::from(root), MODULUS - 2);
+    }
+    let modulus = u64::from(MODULUS);
+    let mut output = vec![0u32; values.len()];
+    for (index, slot) in output.iter_mut().enumerate() {
+        let point = pow_mod(u64::from(root), index as u32);
+        let mut power = 1u64;
+        let mut sum = 0u64;
+        for value in values {
+            sum = (sum + u64::from(*value % MODULUS) * power) % modulus;
+            power = power * u64::from(point) % modulus;
+        }
+        *slot = sum as u32;
+    }
+    if inverse {
+        let scale = pow_mod(values.len() as u64, MODULUS - 2);
+        for value in &mut output {
+            *value = (u64::from(*value) * u64::from(scale) % modulus) as u32;
+        }
+    }
+    output
+}
+
+fn direct_coset_lde(values: &[u32], output_len: usize, shift: u32) -> Vec<u32> {
+    let coefficients = direct_ntt(values, true);
+    let log_n = output_len.ilog2();
+    let maximal_root = pow_mod(31, 15);
+    let root = pow_mod(u64::from(maximal_root), 1 << (TWO_ADICITY - log_n));
+    let modulus = u64::from(MODULUS);
+    (0..output_len)
+        .map(|index| {
+            let point = u64::from(shift % MODULUS)
+                * u64::from(pow_mod(u64::from(root), index as u32))
+                % modulus;
+            let mut power = 1u64;
+            let mut sum = 0u64;
+            for coefficient in &coefficients {
+                sum = (sum + u64::from(*coefficient) * power) % modulus;
+                power = power * point % modulus;
+            }
+            sum as u32
+        })
+        .collect()
+}
+
 fn inverse_mod_2_32(odd: u32) -> u32 {
     let modulus = 1i128 << 32;
     let mut old_r = i128::from(odd);
@@ -176,7 +233,7 @@ fn inverse_mod_2_32(odd: u32) -> u32 {
 
 #[test]
 fn baby_bear_word_field_matches_independent_u64_oracle() {
-    let bytes = compile_wasm();
+    let bytes = compiled_wasm();
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, bytes).expect("BabyBear module should load");
     assert!(
@@ -358,7 +415,7 @@ fn baby_bear_multiply_lowers_to_browser_u32_spirv() {
 
 #[test]
 fn baby_bear_quartic_extension_matches_independent_polynomial_oracle() {
-    let bytes = compile_wasm();
+    let bytes = compiled_wasm();
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, bytes).expect("BabyBear module should load");
     assert!(
@@ -426,6 +483,76 @@ fn baby_bear_quartic_extension_matches_independent_polynomial_oracle() {
                 "extension power mismatch for {value:?}^{exponent}",
             );
         }
+    }
+}
+
+#[test]
+fn shared_radix2_plan_matches_direct_baby_bear_dft_and_lde() {
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, compiled_wasm())
+        .expect("BabyBear polynomial module should load");
+    assert!(
+        module.imports().next().is_none(),
+        "BabyBear NTT and LDE gate must remain zero-import",
+    );
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("BabyBear polynomial module should instantiate");
+
+    let vectors = [
+        [0; 8],
+        [1, 2, 3, 4, 5, 6, 7, 8],
+        [
+            MODULUS - 1,
+            MODULUS - 2,
+            17,
+            123_456_789,
+            998_244_353,
+            1_000_000_007,
+            u32::MAX,
+            0x8000_0000,
+        ],
+    ];
+
+    for values in vectors {
+        assert_eq!(
+            call(&mut store, &instance, "baby_bear_ntt8", &values, 8),
+            direct_ntt(&values, false),
+            "shared radix-2 plan differs from direct DFT for {values:?}",
+        );
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "baby_bear_ntt8_roundtrip",
+                &values,
+                8,
+            ),
+            values.map(|value| value % MODULUS),
+            "shared INTT(NTT) changed {values:?}",
+        );
+
+        for shift in [7, 123_456_789] {
+            let mut expected = vec![1];
+            expected.extend(direct_coset_lde(&values, 16, shift));
+            let mut arguments = values.to_vec();
+            arguments.push(shift);
+            assert_eq!(
+                call(&mut store, &instance, "baby_bear_lde8x16", &arguments, 17,),
+                expected,
+                "shared BabyBear LDE differs at shift {shift} for {values:?}",
+            );
+        }
+    }
+
+    for shift in [0, 1] {
+        let mut arguments = vectors[1].to_vec();
+        arguments.push(shift);
+        assert_eq!(
+            call(&mut store, &instance, "baby_bear_lde8x16", &arguments, 17,),
+            vec![0; 17],
+            "zero or subgroup shift {shift} must fail closed",
+        );
     }
 }
 
