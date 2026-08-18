@@ -1,0 +1,378 @@
+//! Field-generic interpretation of the bounded Mandelbrot AIR.
+//!
+//! A column view supplies main and auxiliary values in an arbitrary radix-2
+//! field. One constraint fold then serves BN254, BabyBear's quartic challenge
+//! field, scalar Wasm, and the eventual WebGPU schedule. The authored AIR has
+//! no field-specific column IDs, challenge tables, or backend branch.
+
+use core::marker::Copy
+use mandelbrot_proof_kernel::AUXILIARY_ROW_BITS
+use precision::polynomial::Radix2Field
+
+/// A source of the canonical 17 main and 411 auxiliary columns.
+///
+/// Prover views may interpolate directly from semantic trace rows. Verifier
+/// views may read authenticated LDE rows. Both are interpreted by the same
+/// constraint function below.
+pub trait AirColumnView<F: Radix2Field>: Copy {
+    fn main(ref self, _ column: usize) -> F
+    fn auxiliary(ref self, _ column: usize) -> F
+}
+
+pub struct SignedAirValue<F: Radix2Field> {
+    pub sign: F,
+    pub magnitude: F,
+    pub value: F,
+}
+impl<F: Radix2Field> Copy for SignedAirValue<F> {}
+
+pub struct ConstraintNumerators<F: Radix2Field> {
+    pub all_rows: F,
+    pub pair_rows: F,
+    pub first_row: F,
+    pub last_row: F,
+}
+impl<F: Radix2Field> Copy for ConstraintNumerators<F> {}
+
+struct AirRow<F: Radix2Field> {
+    active: F,
+    terminal: F,
+    step: F,
+    zr: SignedAirValue<F>,
+    zi: SignedAirValue<F>,
+    rr: F,
+    ii: F,
+    magnitude: F,
+    q_re: SignedAirValue<F>,
+    r_re: F,
+    q_im: SignedAirValue<F>,
+    r_im: F,
+    air_terminal: F,
+}
+impl<F: Radix2Field> Copy for AirRow<F> {}
+
+fn zero<F: Radix2Field>() -> F { F::radix2_zero() }
+fn one<F: Radix2Field>() -> F { F::radix2_root(0) }
+fn add<F: Radix2Field>(_ left: F, _ right: F) -> F { left.radix2_add(right) }
+fn sub<F: Radix2Field>(_ left: F, _ right: F) -> F { left.radix2_sub(right) }
+fn mul<F: Radix2Field>(_ left: F, _ right: F) -> F { left.radix2_mul(right) }
+
+fn natural<F: Radix2Field>(_ value: u32) -> F {
+    let mut result = zero<F>()
+    let mut place = one<F>()
+    let mut value = value
+    while value != 0 {
+        if (value & 1) == 1 { result = add(result, place) }
+        place = add(place, place)
+        value = value >> 1
+    }
+    result
+}
+
+pub fn signed_air_value<F: Radix2Field>(
+    _ sign: F,
+    _ magnitude: F,
+) -> SignedAirValue<F> {
+    let value = sub(magnitude, mul(mul(sign, magnitude), natural<F>(2)))
+    SignedAirValue<F> { sign: sign, magnitude: magnitude, value: value }
+}
+
+fn bit_residual<F: Radix2Field>(_ word: F) -> F {
+    mul(word, sub(word, one<F>()))
+}
+
+fn row_from_view<F: Radix2Field, V: AirColumnView<F>>(_ view: ref V) -> AirRow<F> {
+    AirRow<F> {
+        active: view.main(15),
+        terminal: view.main(16),
+        step: view.main(0),
+        zr: signed_air_value<F>(view.main(1), view.main(2)),
+        zi: signed_air_value<F>(view.main(3), view.main(4)),
+        rr: view.main(5),
+        ii: view.main(6),
+        magnitude: view.main(7),
+        q_re: signed_air_value<F>(view.main(8), view.main(9)),
+        r_re: view.main(10),
+        q_im: signed_air_value<F>(view.main(11), view.main(12)),
+        r_im: view.main(13),
+        air_terminal: view.main(14),
+    }
+}
+
+fn air_words<F: Radix2Field>(_ row: AirRow<F>) -> [F; 15] {
+    [
+        row.step,
+        row.zr.sign,
+        row.zr.magnitude,
+        row.zi.sign,
+        row.zi.magnitude,
+        row.rr,
+        row.ii,
+        row.magnitude,
+        row.q_re.sign,
+        row.q_re.magnitude,
+        row.r_re,
+        row.q_im.sign,
+        row.q_im.magnitude,
+        row.r_im,
+        row.air_terminal,
+    ]
+}
+
+fn local_residuals<F: Radix2Field>(_ row: AirRow<F>) -> [F; 9] {
+    let scale = natural<F>(4096)
+    [
+        bit_residual(row.zr.sign),
+        bit_residual(row.zi.sign),
+        bit_residual(row.q_re.sign),
+        bit_residual(row.q_im.sign),
+        sub(row.rr, mul(row.zr.value, row.zr.value)),
+        sub(row.ii, mul(row.zi.value, row.zi.value)),
+        sub(sub(row.magnitude, row.rr), row.ii),
+        sub(sub(sub(row.rr, row.ii), mul(scale, row.q_re.value)), row.r_re),
+        sub(
+            sub(mul(natural<F>(2), mul(row.zr.value, row.zi.value)), mul(scale, row.q_im.value)),
+            row.r_im,
+        ),
+    ]
+}
+
+fn row_state_residuals<F: Radix2Field>(_ row: AirRow<F>) -> [F; 5] {
+    let one = one<F>()
+    [
+        bit_residual(row.active),
+        bit_residual(row.terminal),
+        bit_residual(row.air_terminal),
+        sub(row.terminal, mul(row.active, row.air_terminal)),
+        mul(sub(one, row.active), sub(row.air_terminal, one)),
+    ]
+}
+
+fn transition_residuals<F: Radix2Field>(
+    _ c_re: SignedAirValue<F>,
+    _ c_im: SignedAirValue<F>,
+    _ row: AirRow<F>,
+    _ next: AirRow<F>,
+) -> [F; 9] {
+    [
+        bit_residual(c_re.sign),
+        bit_residual(c_im.sign),
+        bit_residual(row.q_re.sign),
+        bit_residual(row.q_im.sign),
+        bit_residual(next.zr.sign),
+        bit_residual(next.zi.sign),
+        sub(sub(next.step, row.step), one<F>()),
+        sub(sub(next.zr.value, row.q_re.value), c_re.value),
+        sub(sub(next.zi.value, row.q_im.value), c_im.value),
+    ]
+}
+
+struct ConstraintFold<F: Radix2Field> { challenge: F, power: F, value: F }
+impl<F: Radix2Field> Copy for ConstraintFold<F> {}
+
+impl<F: Radix2Field> ConstraintFold<F> {
+    fn new(_ challenge: F) -> Self {
+        Self { challenge: challenge, power: one<F>(), value: zero<F>() }
+    }
+
+    fn absorb(mut self, _ residual: F) -> Self {
+        self.value = add(self.value, mul(self.power, residual))
+        self.power = mul(self.power, self.challenge)
+        self
+    }
+
+    fn next_family(mut self) -> Self {
+        self.value = zero<F>()
+        self
+    }
+}
+
+fn absorb_residuals<F: Radix2Field, const N: usize>(
+    _ fold: own ConstraintFold<F>,
+    _ residuals: [F; N],
+) -> ConstraintFold<F> {
+    let mut fold = fold
+    let mut index: usize = 0
+    while index < N {
+        fold = fold.absorb(residuals[index])
+        index = index + 1
+    }
+    fold
+}
+
+fn absorb_range_columns<F: Radix2Field, const N: usize, V: AirColumnView<F>>(
+    _ fold: own ConstraintFold<F>,
+    _ value: F,
+    _ view: ref V,
+    _ start: usize,
+) -> ConstraintFold<F> {
+    let mut fold = fold
+    let mut reconstructed = zero<F>()
+    let mut weight = one<F>()
+    let mut previous_any = zero<F>()
+    let mut index: usize = 0
+    while index < N {
+        let bit = view.auxiliary(start + index)
+        let any = view.auxiliary(start + N + index)
+        fold = fold.absorb(bit_residual(bit))
+        fold = fold.absorb(bit_residual(any))
+        fold = fold.absorb(add(sub(sub(any, previous_any), bit), mul(previous_any, bit)))
+        reconstructed = add(reconstructed, mul(bit, weight))
+        weight = add(weight, weight)
+        previous_any = any
+        index = index + 1
+    }
+    fold.absorb(sub(value, reconstructed))
+}
+
+fn absorb_signed_range_columns<
+    F: Radix2Field,
+    const N: usize,
+    V: AirColumnView<F>,
+>(
+    _ fold: own ConstraintFold<F>,
+    _ sign: F,
+    _ magnitude: F,
+    _ view: ref V,
+    _ start: usize,
+) -> ConstraintFold<F> {
+    let mut fold = fold.absorb(bit_residual(sign))
+    fold = absorb_range_columns<F, N, V>(fold, magnitude, view, start)
+    let nonzero = view.auxiliary(start + 2 * N - 1)
+    fold.absorb(mul(sign, sub(one<F>(), nonzero)))
+}
+
+fn absorb_terminal_range_columns<F: Radix2Field, V: AirColumnView<F>>(
+    _ fold: own ConstraintFold<F>,
+    _ magnitude: F,
+    _ terminal: F,
+    _ view: ref V,
+    _ magnitude_start: usize,
+    _ terminal_start: usize,
+) -> ConstraintFold<F> {
+    let mut fold = absorb_range_columns<F, 31, V>(fold, magnitude, view, magnitude_start)
+    fold = fold.absorb(bit_residual(terminal))
+    let mut previous = zero<F>()
+    let mut index: usize = 0
+    while index < 5 {
+        let bit = view.auxiliary(magnitude_start + index + 26)
+        let any = view.auxiliary(terminal_start + index)
+        fold = fold.absorb(bit_residual(any))
+        fold = fold.absorb(add(sub(sub(any, previous), bit), mul(previous, bit)))
+        previous = any
+        index = index + 1
+    }
+    fold.absorb(sub(terminal, previous))
+}
+
+/// Fold all 708 constraints with consecutive powers of one transcript-derived
+/// challenge. The four outputs remain separate because their zerofiers differ.
+pub fn constraint_numerators<
+    F: Radix2Field,
+    Row: AirColumnView<F>,
+    Next: AirColumnView<F>,
+>(
+    _ challenge: F,
+    _ c_re: SignedAirValue<F>,
+    _ c_im: SignedAirValue<F>,
+    _ row_view: ref Row,
+    _ next_view: ref Next,
+) -> ConstraintNumerators<F> {
+    let row = row_from_view<F, Row>(row_view)
+    let next = row_from_view<F, Next>(next_view)
+    let one = one<F>()
+    let continue_selector = mul(row.active, sub(one, row.terminal))
+    let freeze_selector = add(row.terminal, sub(one, row.active))
+
+    let mut fold = ConstraintFold<F>::new(challenge)
+    fold = absorb_residuals<F, 9>(fold, local_residuals(row))
+    fold = absorb_residuals<F, 5>(fold, row_state_residuals(row))
+    let mut cursor: usize = 0
+    fold = absorb_range_columns<F, 21, Row>(fold, row.step, row_view, cursor)
+    cursor = cursor + 2 * 21
+    fold = absorb_signed_range_columns<F, 15, Row>(
+        fold, row.zr.sign, row.zr.magnitude, row_view, cursor,
+    )
+    cursor = cursor + 2 * 15
+    fold = absorb_signed_range_columns<F, 15, Row>(
+        fold, row.zi.sign, row.zi.magnitude, row_view, cursor,
+    )
+    cursor = cursor + 2 * 15
+    fold = absorb_range_columns<F, 30, Row>(fold, row.rr, row_view, cursor)
+    cursor = cursor + 2 * 30
+    fold = absorb_range_columns<F, 30, Row>(fold, row.ii, row_view, cursor)
+    cursor = cursor + 2 * 30
+    let magnitude_start = cursor
+    cursor = cursor + 2 * 31
+    fold = absorb_signed_range_columns<F, 18, Row>(
+        fold, row.q_re.sign, row.q_re.magnitude, row_view, cursor,
+    )
+    cursor = cursor + 2 * 18
+    fold = absorb_range_columns<F, 12, Row>(fold, row.r_re, row_view, cursor)
+    cursor = cursor + 2 * 12
+    fold = absorb_signed_range_columns<F, 19, Row>(
+        fold, row.q_im.sign, row.q_im.magnitude, row_view, cursor,
+    )
+    cursor = cursor + 2 * 19
+    fold = absorb_range_columns<F, 12, Row>(fold, row.r_im, row_view, cursor)
+    cursor = cursor + 2 * 12
+    if cursor + 5 != AUXILIARY_ROW_BITS {
+        return ConstraintNumerators<F> {
+            all_rows: zero<F>(),
+            pair_rows: zero<F>(),
+            first_row: zero<F>(),
+            last_row: zero<F>(),
+        }
+    }
+    fold = absorb_terminal_range_columns<F, Row>(
+        fold,
+        row.magnitude,
+        row.air_terminal,
+        row_view,
+        magnitude_start,
+        cursor,
+    )
+    let all_rows = fold.value
+
+    fold = fold.next_family()
+    fold = absorb_residuals<F, 5>(fold, row_state_residuals(row))
+    fold = absorb_residuals<F, 5>(fold, row_state_residuals(next))
+    fold = fold.absorb(mul(continue_selector, sub(next.active, one)))
+    fold = fold.absorb(mul(freeze_selector, next.active))
+    fold = fold.absorb(mul(freeze_selector, next.terminal))
+    let row_words = air_words(row)
+    let next_words = air_words(next)
+    let mut column: usize = 0
+    while column < 15 {
+        fold = fold.absorb(mul(freeze_selector, sub(next_words[column], row_words[column])))
+        column = column + 1
+    }
+    let transition = transition_residuals(c_re, c_im, row, next)
+    column = 0
+    while column < 9 {
+        fold = fold.absorb(mul(continue_selector, transition[column]))
+        column = column + 1
+    }
+    let pair_rows = fold.value
+
+    fold = fold.next_family()
+    fold = absorb_residuals<F, 5>(fold, row_state_residuals(row))
+    fold = fold.absorb(sub(row.active, one))
+    fold = fold.absorb(row.terminal)
+    fold = fold.absorb(row.step)
+    fold = fold.absorb(row.zr.sign)
+    fold = fold.absorb(row.zr.magnitude)
+    fold = fold.absorb(row.zi.sign)
+    fold = fold.absorb(row.zi.magnitude)
+    let first_row = fold.value
+
+    fold = fold.next_family()
+    fold = absorb_residuals<F, 5>(fold, row_state_residuals(row))
+    fold = fold.absorb(mul(row.active, sub(one, row.terminal)))
+    ConstraintNumerators<F> {
+        all_rows: all_rows,
+        pair_rows: pair_rows,
+        first_row: first_row,
+        last_row: fold.value,
+    }
+}

@@ -13,6 +13,12 @@ use precision::bn254_fr::Bn254Fr
 use precision::field::FieldElement
 use precision::polynomial::radix2_intt
 use canonical_words::{CanonicalWords, CanonicalWordsProvider}
+use mandelbrot_proof_air_core::{
+    AirColumnView,
+    ConstraintNumerators,
+    constraint_numerators,
+    signed_air_value,
+}
 pub use mandelbrot_proof_kernel::{
     AUXILIARY_ROW_BITS,
     BitRangeWitness,
@@ -334,47 +340,7 @@ fn residual_mask<const N: usize>(_ residuals: [Fr; N]) -> u32 {
     mask
 }
 
-pub struct MandelbrotConstraintNumerators {
-    pub all_rows: Fr,
-    pub pair_rows: Fr,
-    pub first_row: Fr,
-    pub last_row: Fr,
-}
-
-impl core::marker::Copy for MandelbrotConstraintNumerators {}
-
-struct ConstraintFold { challenge: Fr, power: Fr, value: Fr }
-impl core::marker::Copy for ConstraintFold {}
-
-impl ConstraintFold {
-    fn new(_ challenge: Fr) -> Self {
-        Self { challenge: challenge, power: Fr::one(), value: Fr::zero() }
-    }
-
-    fn absorb(mut self, _ residual: Fr) -> Self {
-        self.value = self.value + self.power * residual
-        self.power = self.power * self.challenge
-        self
-    }
-
-    fn next_family(mut self) -> Self {
-        self.value = Fr::zero()
-        self
-    }
-}
-
-fn absorb_residuals<const N: usize>(
-    _ fold: own ConstraintFold,
-    _ residuals: [Fr; N],
-) -> ConstraintFold {
-    let mut fold = fold
-    let mut index: usize = 0
-    while index < N {
-        fold = fold.absorb(residuals[index])
-        index = index + 1
-    }
-    fold
-}
+pub type MandelbrotConstraintNumerators = ConstraintNumerators<Fr>
 
 fn extend_column_point4(_ values: own [Fr; 4], _ point: Fr) -> Fr {
     let coefficients = radix2_intt<4, 20, Bn254Fr>(values)
@@ -410,23 +376,16 @@ fn signed_field_point(_ sign: Fr, _ magnitude: Fr) -> SignedField {
     SignedField { sign: sign, magnitude: magnitude, value: signed_value(sign, magnitude) }
 }
 
-/// A constraint column source. The derived trace-point and authenticated
-/// opening implementations below feed one shared AIR evaluator.
-trait AirColumnView: core::marker::Copy {
-    fn main(self, _ column: usize) -> Fr
-    fn auxiliary(self, _ column: usize) -> Fr
-}
-
 struct TracePoint4 { rows: [EncodedProofRow; 4], point: Fr }
 
 impl core::marker::Copy for TracePoint4 {}
 
-impl AirColumnView for TracePoint4 {
-    fn main(self, _ column: usize) -> Fr {
+impl AirColumnView<Fr> for TracePoint4 {
+    fn main(ref self, _ column: usize) -> Fr {
         main_column_point4(self.rows, column, self.point)
     }
 
-    fn auxiliary(self, _ column: usize) -> Fr {
+    fn auxiliary(ref self, _ column: usize) -> Fr {
         auxiliary_column_point4(self.rows, column, self.point)
     }
 }
@@ -438,36 +397,16 @@ fn main_lde_row_value(_ row: MainLdeRow, _ column: usize) -> Fr {
     main_lde_row_values(row)[column]
 }
 
-impl AirColumnView for AirLdeRow {
-    fn main(self, _ column: usize) -> Fr {
+impl AirColumnView<Fr> for AirLdeRow {
+    fn main(ref self, _ column: usize) -> Fr {
         main_lde_row_value(self.main, column)
     }
 
-    fn auxiliary(self, _ column: usize) -> Fr {
+    fn auxiliary(ref self, _ column: usize) -> Fr {
         if column >= AUXILIARY_ROW_BITS {
             return Fr::zero()
         }
         self.auxiliary.values[column]
-    }
-}
-
-fn main_lde_row_from_view<V: AirColumnView>(_ view: V) -> MainLdeRow {
-    MainLdeRow {
-        active: view.main(15),
-        terminal: view.main(16),
-        air: AirFieldRow {
-            step: view.main(0),
-            zr: signed_field_point(view.main(1), view.main(2)),
-            zi: signed_field_point(view.main(3), view.main(4)),
-            rr: view.main(5),
-            ii: view.main(6),
-            magnitude: view.main(7),
-            q_re: signed_field_point(view.main(8), view.main(9)),
-            r_re: view.main(10),
-            q_im: signed_field_point(view.main(11), view.main(12)),
-            r_im: view.main(13),
-            terminal: view.main(14),
-        },
     }
 }
 
@@ -528,199 +467,6 @@ pub fn air_lde_row4_first_mismatch(
     0
 }
 
-/// Stream one interpolated bit range into the challenge-power fold. Keeping
-/// the canonical rows and cursor compact avoids a giant field-valued witness
-/// aggregate at the Wasm boundary.
-fn absorb_range_columns<const N: usize, V: AirColumnView>(
-    _ fold: own ConstraintFold,
-    _ value: Fr,
-    _ view: V,
-    _ start: usize,
-) -> ConstraintFold {
-    let mut fold = fold
-    let mut reconstructed = Fr::zero()
-    let mut weight = Fr::one()
-    let mut previous_any = Fr::zero()
-    let mut index: usize = 0
-    while index < N {
-        let bit = view.auxiliary(start + index)
-        let any = view.auxiliary(start + N + index)
-        fold = fold.absorb(bit_residual(bit))
-        fold = fold.absorb(bit_residual(any))
-        fold = fold.absorb(any - previous_any - bit + previous_any * bit)
-        reconstructed = reconstructed + bit * weight
-        weight = weight + weight
-        previous_any = any
-        index = index + 1
-    }
-    fold.absorb(value - reconstructed)
-}
-
-fn absorb_signed_range_columns<const N: usize, V: AirColumnView>(
-    _ fold: own ConstraintFold,
-    _ sign: Fr,
-    _ magnitude: Fr,
-    _ view: V,
-    _ start: usize,
-) -> ConstraintFold {
-    let mut fold = fold.absorb(bit_residual(sign))
-    fold = absorb_range_columns<N, V>(fold, magnitude, view, start)
-    let nonzero = view.auxiliary(start + 2 * N - 1)
-    fold.absorb(sign * (Fr::one() - nonzero))
-}
-
-fn absorb_terminal_range_columns<V: AirColumnView>(
-    _ fold: own ConstraintFold,
-    _ magnitude: Fr,
-    _ terminal: Fr,
-    _ view: V,
-    _ magnitude_start: usize,
-    _ terminal_start: usize,
-) -> ConstraintFold {
-    let mut fold = absorb_range_columns<31, V>(fold, magnitude, view, magnitude_start)
-    fold = fold.absorb(bit_residual(terminal))
-    let mut previous = Fr::zero()
-    let mut index: usize = 0
-    while index < 5 {
-        let bit = view.auxiliary(magnitude_start + index + 26)
-        let any = view.auxiliary(terminal_start + index)
-        fold = fold.absorb(bit_residual(any))
-        fold = fold.absorb(any - previous - bit + previous * bit)
-        previous = any
-        index = index + 1
-    }
-    fold.absorb(terminal - previous)
-}
-
-/// Fold every AIR constraint with consecutive powers of one transcript-derived
-/// challenge. The four outputs remain separate because each constraint family
-/// has a different zerofier in the composition polynomial.
-fn mandelbrot_constraint_numerators_from_views<Row: AirColumnView, Next: AirColumnView>(
-    _ challenge: Fr,
-    _ c_re: SignedField,
-    _ c_im: SignedField,
-    _ row_view: Row,
-    _ next_view: Next,
-) -> MandelbrotConstraintNumerators {
-    let row = main_lde_row_from_view<Row>(row_view)
-    let next = main_lde_row_from_view<Next>(next_view)
-    let one = Fr::one()
-    let continue_selector = row.active * (one - row.terminal)
-    let freeze_selector = row.terminal + (one - row.active)
-
-    let mut fold = ConstraintFold::new(challenge)
-    fold = absorb_residuals<9>(fold, local_residuals(row.air))
-    fold = absorb_residuals<5>(fold, row_state_residuals(row))
-    let mut cursor: usize = 0
-    fold = absorb_range_columns<21, Row>(fold, row.air.step, row_view, cursor)
-    cursor = cursor + 2 * 21
-    fold = absorb_signed_range_columns<15, Row>(
-        fold,
-        row.air.zr.sign,
-        row.air.zr.magnitude,
-        row_view,
-        cursor,
-    )
-    cursor = cursor + 2 * 15
-    fold = absorb_signed_range_columns<15, Row>(
-        fold,
-        row.air.zi.sign,
-        row.air.zi.magnitude,
-        row_view,
-        cursor,
-    )
-    cursor = cursor + 2 * 15
-    fold = absorb_range_columns<30, Row>(fold, row.air.rr, row_view, cursor)
-    cursor = cursor + 2 * 30
-    fold = absorb_range_columns<30, Row>(fold, row.air.ii, row_view, cursor)
-    cursor = cursor + 2 * 30
-    let magnitude_start = cursor
-    cursor = cursor + 2 * 31
-    fold = absorb_signed_range_columns<18, Row>(
-        fold,
-        row.air.q_re.sign,
-        row.air.q_re.magnitude,
-        row_view,
-        cursor,
-    )
-    cursor = cursor + 2 * 18
-    fold = absorb_range_columns<12, Row>(fold, row.air.r_re, row_view, cursor)
-    cursor = cursor + 2 * 12
-    fold = absorb_signed_range_columns<19, Row>(
-        fold,
-        row.air.q_im.sign,
-        row.air.q_im.magnitude,
-        row_view,
-        cursor,
-    )
-    cursor = cursor + 2 * 19
-    fold = absorb_range_columns<12, Row>(fold, row.air.r_im, row_view, cursor)
-    cursor = cursor + 2 * 12
-    if cursor + 5 != AUXILIARY_ROW_BITS {
-        return MandelbrotConstraintNumerators {
-            all_rows: Fr::zero(),
-            pair_rows: Fr::zero(),
-            first_row: Fr::zero(),
-            last_row: Fr::zero(),
-        }
-    }
-    fold = absorb_terminal_range_columns<Row>(
-        fold,
-        row.air.magnitude,
-        row.air.terminal,
-        row_view,
-        magnitude_start,
-        cursor,
-    )
-    let all_rows = fold.value
-
-    fold = fold.next_family()
-    let row_state = row_state_residuals(row)
-    let next_state = row_state_residuals(next)
-    fold = absorb_residuals<5>(fold, row_state)
-    fold = absorb_residuals<5>(fold, next_state)
-    fold = fold.absorb(continue_selector * (next.active - one))
-    fold = fold.absorb(freeze_selector * next.active)
-    fold = fold.absorb(freeze_selector * next.terminal)
-    let row_words = air_words(row.air)
-    let next_words = air_words(next.air)
-    let mut column: usize = 0
-    while column < 15 {
-        fold = fold.absorb(freeze_selector * (next_words[column] - row_words[column]))
-        column = column + 1
-    }
-    let transition = transition_residuals(c_re, c_im, row.air, next.air)
-    column = 0
-    while column < 9 {
-        fold = fold.absorb(continue_selector * transition[column])
-        column = column + 1
-    }
-    let pair_rows = fold.value
-
-    fold = fold.next_family()
-    let first_state = row_state_residuals(row)
-    fold = absorb_residuals<5>(fold, first_state)
-    fold = fold.absorb(row.active - one)
-    fold = fold.absorb(row.terminal)
-    fold = fold.absorb(row.air.step)
-    fold = fold.absorb(row.air.zr.sign)
-    fold = fold.absorb(row.air.zr.magnitude)
-    fold = fold.absorb(row.air.zi.sign)
-    fold = fold.absorb(row.air.zi.magnitude)
-    let first_row = fold.value
-
-    fold = fold.next_family()
-    let last_state = row_state_residuals(row)
-    fold = absorb_residuals<5>(fold, last_state)
-    fold = fold.absorb(row.active * (one - row.terminal))
-    MandelbrotConstraintNumerators {
-        all_rows: all_rows,
-        pair_rows: pair_rows,
-        first_row: first_row,
-        last_row: fold.value,
-    }
-}
-
 /// Prover-side evaluation directly from the four canonical Fe rows.
 pub fn mandelbrot_constraint_numerators_trace4(
     _ challenge: Fr,
@@ -730,12 +476,14 @@ pub fn mandelbrot_constraint_numerators_trace4(
     _ point: Fr,
     _ next_point: Fr,
 ) -> MandelbrotConstraintNumerators {
-    mandelbrot_constraint_numerators_from_views<TracePoint4, TracePoint4>(
+    let row_view = TracePoint4 { rows: rows, point: point }
+    let next_view = TracePoint4 { rows: rows, point: next_point }
+    constraint_numerators<Fr, TracePoint4, TracePoint4>(
         challenge,
-        c_re,
-        c_im,
-        TracePoint4 { rows: rows, point: point },
-        TracePoint4 { rows: rows, point: next_point },
+        signed_air_value<Fr>(c_re.sign, c_re.magnitude),
+        signed_air_value<Fr>(c_im.sign, c_im.magnitude),
+        ref row_view,
+        ref next_view,
     )
 }
 
@@ -745,13 +493,13 @@ pub fn mandelbrot_constraint_numerators_opened(
     _ challenge: Fr,
     _ c_re: SignedField,
     _ c_im: SignedField,
-    _ row: AirLdeRow,
-    _ next: AirLdeRow,
+    _ row: ref AirLdeRow,
+    _ next: ref AirLdeRow,
 ) -> MandelbrotConstraintNumerators {
-    mandelbrot_constraint_numerators_from_views<AirLdeRow, AirLdeRow>(
+    constraint_numerators<Fr, AirLdeRow, AirLdeRow>(
         challenge,
-        c_re,
-        c_im,
+        signed_air_value<Fr>(c_re.sign, c_re.magnitude),
+        signed_air_value<Fr>(c_im.sign, c_im.magnitude),
         row,
         next,
     )

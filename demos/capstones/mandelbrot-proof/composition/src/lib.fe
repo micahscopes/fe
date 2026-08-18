@@ -200,8 +200,8 @@ pub fn evaluate_composition_opened4x16(
     _ c_im_q12: i32,
     _ challenge: Fr,
     _ evaluation: usize,
-    _ row: AirLdeRow,
-    _ next: AirLdeRow,
+    _ row: ref AirLdeRow,
+    _ next: ref AirLdeRow,
 ) -> CompositionPoint {
     let point = lde_point4x16(evaluation)
     if !point.valid {
@@ -283,7 +283,13 @@ pub fn opened_numerator_parity_mask4x16(
     let mut next = ZERO_AIR_LDE_ROW
     write_air_lde_row4(trace.rows, point.value, mut row)
     write_air_lde_row4(trace.rows, next_point.value, mut next)
-    let opened = mandelbrot_constraint_numerators_opened(challenge, c_re, c_im, row, next)
+    let opened = mandelbrot_constraint_numerators_opened(
+        challenge,
+        c_re,
+        c_im,
+        ref row,
+        ref next,
+    )
     let mut mask: u32 = 0
     if !(direct.all_rows - opened.all_rows).is_zero() { mask = mask | 1 }
     if !(direct.pair_rows - opened.pair_rows).is_zero() { mask = mask | 2 }
@@ -393,7 +399,7 @@ pub fn verify_air_lde_quartet4x16(
     _ c_im_q12: i32,
     _ challenge: Fr,
     _ query_index: u32,
-    _ opening: AirLdeQuartetOpening4x16,
+    _ opening: ref AirLdeQuartetOpening4x16,
     _ main_root: MainLdeDigest,
     _ auxiliary_root: AuxiliaryLdeDigest,
     _ positive_composition: Fr,
@@ -447,16 +453,16 @@ pub fn verify_air_lde_quartet4x16(
         c_im_q12,
         challenge,
         query_index as usize,
-        opening.rows[positive_quarter],
-        opening.rows[positive_next_quarter],
+        ref opening.rows[positive_quarter],
+        ref opening.rows[positive_next_quarter],
     )
     let negative = evaluate_composition_opened4x16(
         c_re_q12,
         c_im_q12,
         challenge,
         (query_index + 8) as usize,
-        opening.rows[negative_quarter],
-        opening.rows[negative_next_quarter],
+        ref opening.rows[negative_quarter],
+        ref opening.rows[negative_next_quarter],
     )
     positive.valid
         && negative.valid

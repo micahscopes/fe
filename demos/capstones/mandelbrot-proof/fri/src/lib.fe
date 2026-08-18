@@ -694,7 +694,7 @@ pub fn verify_fri_commitment_query4x16(
         c_im_q12,
         composition.value,
         query_index,
-        proof.air_lde,
+        ref proof.air_lde,
         proof.main_lde_root,
         proof.auxiliary_lde_root,
         proof.composition.positive,

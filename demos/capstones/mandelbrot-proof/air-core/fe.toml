@@ -1,10 +1,8 @@
 [ingot]
-name = "mandelbrot_proof_field_air"
+name = "mandelbrot_proof_air_core"
 version = "0.1.0"
 
 [dependencies]
 core = "../../../../ingots/core"
-canonical_words = "../../../../ingots/canonical_words"
-mandelbrot_proof_air_core = "../air-core"
 mandelbrot_proof_kernel = "../kernel"
 precision = "../../../sketches/precision"

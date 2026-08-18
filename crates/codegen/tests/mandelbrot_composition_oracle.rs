@@ -1606,6 +1606,14 @@ fn composition_and_complete_fri_chain_match_independent_bigint_oracle() {
         );
     }
 
+    // The full default gate below intentionally takes roughly half an hour in
+    // this sandbox. This opt-in edit-loop slice still executes every coset
+    // point through the independent composition and opened-row parity checks.
+    // CI and ordinary invocations retain the complete receipt path.
+    if std::env::var_os("MB2_COMPOSITION_AIR_ONLY").is_some() {
+        return;
+    }
+
     let complete = call_byte_words(
         &mut store,
         &instance,
