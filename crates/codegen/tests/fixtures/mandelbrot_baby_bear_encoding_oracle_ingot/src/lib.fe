@@ -12,6 +12,8 @@ use mandelbrot_proof_baby_bear::{
     PublicDigest,
     RowDigest,
     auxiliary_commitment,
+    auxiliary_lde_quartet_path_power_of_two,
+    auxiliary_lde_root_power_of_two,
     auxiliary_root_power_of_two,
     bind_auxiliary_trace,
     bind_auxiliary_lde,
@@ -27,6 +29,8 @@ use mandelbrot_proof_baby_bear::{
     fold_fri_evaluations,
     public_commitment,
     main_lde_row_commitment,
+    main_lde_quartet_path_power_of_two,
+    main_lde_root_power_of_two,
     fri_fold_challenge,
     fri_layer_row_commitment,
     fri_query_challenge,
@@ -37,6 +41,8 @@ use mandelbrot_proof_baby_bear::{
     row_commitment,
     trace_root_power_of_two,
     verify_fri_commitment_query16,
+    verify_auxiliary_lde_quartet_path,
+    verify_main_lde_quartet_path,
 }
 use mandelbrot_proof_kernel::{
     EncodedAirRow,
@@ -524,6 +530,76 @@ pub fn fri_query16_mutation(
     } else {
         0
     }
+}
+
+pub fn air_lde_quartet16(
+    _ seed: u32,
+    _ index: u32,
+    _ mutation: u32,
+) -> (u32, u32, u32, u32, u32, u32) {
+    let mut main_leaves = [MainLdeDigest {
+        valid: true,
+        value: Poseidon2Digest::zero(),
+    }; 16]
+    let mut auxiliary_leaves = [AuxiliaryLdeDigest {
+        valid: true,
+        value: Poseidon2Digest::zero(),
+    }; 16]
+    let mut cursor: usize = 0
+    while cursor < 16 {
+        let cursor_u32: u32 = cursor.downcast_truncate()
+        let offset: u32 = cursor_u32 * 16
+        main_leaves[cursor].value = digest8(seed + offset)
+        auxiliary_leaves[cursor].value = digest8(seed + 512 + offset)
+        cursor = cursor + 1
+    }
+    let mut main_root = main_lde_root_power_of_two<16>(main_leaves)
+    let auxiliary_root = auxiliary_lde_root_power_of_two<16>(auxiliary_leaves)
+    let mut main_path = main_lde_quartet_path_power_of_two<16, 4, 2>(main_leaves, index)
+    let mut auxiliary_path = auxiliary_lde_quartet_path_power_of_two<16, 4, 2>(
+        auxiliary_leaves,
+        index,
+    )
+    let local: usize = if index < 4 { index as usize } else { 0 }
+    let mut first_main = main_leaves[local]
+    let first_auxiliary = auxiliary_leaves[local]
+    if mutation == 1 {
+        first_main.value = digest8(seed + 4096)
+    } else if mutation == 2 {
+        main_path.first_siblings[0] = digest8(seed + 4112)
+    } else if mutation == 3 {
+        auxiliary_path.index = auxiliary_path.index ^ 1
+    } else if mutation == 4 {
+        main_root.value = digest8(seed + 4128)
+    } else if mutation == 5 {
+        first_main.valid = false
+    } else if mutation == 6 {
+        main_path.valid = false
+    }
+    let main_valid = verify_main_lde_quartet_path<2>(
+        first_main,
+        main_leaves[local + 4],
+        main_leaves[local + 8],
+        main_leaves[local + 12],
+        main_path,
+        main_root,
+    )
+    let auxiliary_valid = verify_auxiliary_lde_quartet_path<2>(
+        first_auxiliary,
+        auxiliary_leaves[local + 4],
+        auxiliary_leaves[local + 8],
+        auxiliary_leaves[local + 12],
+        auxiliary_path,
+        auxiliary_root,
+    )
+    (
+        if main_path.valid { 1 } else { 0 },
+        if auxiliary_path.valid { 1 } else { 0 },
+        main_root.value.field(0).to_u32(),
+        auxiliary_root.value.field(0).to_u32(),
+        if main_valid { 1 } else { 0 },
+        if auxiliary_valid { 1 } else { 0 },
+    )
 }
 
 pub fn main_lde17(

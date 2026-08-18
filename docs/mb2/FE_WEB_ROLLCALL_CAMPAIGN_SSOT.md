@@ -642,9 +642,15 @@ Legend:
   validity, and the external AIR transcript. Compiler commit `e794781d1`
   preserves addressable shape for zero-length const-generic arrays without
   inventing payload lanes, with both MIR-shape and executed Wasm regressions.
-  The authenticated FRI opening is real, but production AIR quartet openings,
-  multiple query sampling, the BabyBear receipt codec, and end-to-end proof
-  verification remain pending.
+  Typed main and auxiliary BabyBear LDE quartet adapters now reuse the same
+  field-generic `merkle_core` four-quarter algorithm. Their executable gate
+  independently reconstructs both 16-leaf Plonky3 roots, checks every legal
+  quarter position, rejects an out-of-quarter index, and rejects changed
+  leaves, siblings, roots, validity, and path indices. This lands the compact
+  authentication shape, not the AIR claim: production BabyBear LDE row
+  derivation and constraint recomputation still need to be connected to those
+  paths and the FRI query receipt. Multiple query sampling, the BabyBear
+  receipt codec, and end-to-end proof verification also remain pending.
   The same permutation has also
   lowered to Naga-valid u32-only WGSL with the local Sonatina conditional-loop
   structurizer fixes, but that browser gate is not landed until those commits

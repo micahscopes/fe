@@ -748,6 +748,54 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
         "invalid transcript must not produce an extension challenge",
     );
 
+    for seed in [0, 257, 65_537] {
+        let main_leaves = (0..16u32)
+            .map(|index| digest_seed(seed + index * 16))
+            .collect();
+        let auxiliary_leaves = (0..16u32)
+            .map(|index| digest_seed(seed + 512 + index * 16))
+            .collect();
+        let main_root = digest_merkle_root(main_leaves);
+        let auxiliary_root = digest_merkle_root(auxiliary_leaves);
+        for index in 0..4 {
+            assert_eq!(
+                call(
+                    &mut store,
+                    &instance,
+                    "air_lde_quartet16",
+                    &[seed, index, 0],
+                    6,
+                ),
+                vec![1, 1, main_root[0], auxiliary_root[0], 1, 1],
+                "typed AIR quartet opening differs from the independent tree at seed {seed} index {index}",
+            );
+            for mutation in 1..=6 {
+                let actual = call(
+                    &mut store,
+                    &instance,
+                    "air_lde_quartet16",
+                    &[seed, index, mutation],
+                    6,
+                );
+                let expected_main = u32::from(mutation == 3);
+                let expected_auxiliary = u32::from(mutation != 3);
+                assert_eq!(
+                    actual[4], expected_main,
+                    "main AIR quartet mutation {mutation} had the wrong result",
+                );
+                assert_eq!(
+                    actual[5], expected_auxiliary,
+                    "auxiliary AIR quartet mutation {mutation} had the wrong result",
+                );
+            }
+        }
+        assert_eq!(
+            call(&mut store, &instance, "air_lde_quartet16", &[seed, 4, 0], 6,),
+            vec![0, 0, main_root[0], auxiliary_root[0], 0, 0],
+            "out-of-quarter AIR opening indices must fail closed",
+        );
+    }
+
     let main_lde = [
         0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597,
     ];

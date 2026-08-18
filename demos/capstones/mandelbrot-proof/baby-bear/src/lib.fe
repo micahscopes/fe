@@ -20,6 +20,7 @@ use mandelbrot_proof_kernel::{
 }
 use merkle_core::{
     MerklePairPath,
+    MerkleQuartetPath,
     MerkleRoot,
     TwoToOneHasher,
     complete_frontier_root,
@@ -27,6 +28,8 @@ use merkle_core::{
     pair_path_from_leaves,
     pair_verify,
     push_frontier,
+    quartet_path_from_leaves,
+    quartet_verify,
 }
 use poseidon_baby_bear::{
     PackedCommitment,
@@ -246,6 +249,26 @@ pub struct CompositionPairPath<const DEPTH: usize> {
     pub negative_siblings: [Poseidon2Digest; DEPTH],
 }
 impl<const DEPTH: usize> core::marker::Copy for CompositionPairPath<DEPTH> {}
+
+/// A role-branded authentication path for one common local position in each
+/// quarter of an AIR LDE tree. `Role` is compile-time-only: it distinguishes
+/// main and auxiliary paths without duplicating their runtime representation
+/// or the field-generic `merkle_core` interpreter.
+pub struct LdeQuartetPath<Role, const DEPTH: usize> {
+    pub valid: bool,
+    pub index: u32,
+    pub first_siblings: [Poseidon2Digest; DEPTH],
+    pub second_siblings: [Poseidon2Digest; DEPTH],
+    pub third_siblings: [Poseidon2Digest; DEPTH],
+    pub fourth_siblings: [Poseidon2Digest; DEPTH],
+}
+impl<Role, const DEPTH: usize> core::marker::Copy for LdeQuartetPath<Role, DEPTH> {}
+
+pub struct MainLdeTreeRole {}
+pub struct AuxiliaryLdeTreeRole {}
+pub type MainLdeQuartetPath<const DEPTH: usize> = LdeQuartetPath<MainLdeTreeRole, DEPTH>
+pub type AuxiliaryLdeQuartetPath<const DEPTH: usize> =
+    LdeQuartetPath<AuxiliaryLdeTreeRole, DEPTH>
 
 pub struct FriLayerPairPath<const ROUND: u32, const DEPTH: usize> {
     pub valid: bool,
@@ -525,6 +548,155 @@ where N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N & (N - 1)) == 0 }
     }
     let root = digest_root_power_of_two<N>(raw)
     AuxiliaryLdeDigest { valid: root.valid, value: root.value }
+}
+
+fn invalid_lde_quartet_path<Role, const DEPTH: usize>() -> LdeQuartetPath<Role, DEPTH> {
+    LdeQuartetPath<Role, DEPTH> {
+        valid: false,
+        index: 0,
+        first_siblings: [Poseidon2Digest::zero(); DEPTH],
+        second_siblings: [Poseidon2Digest::zero(); DEPTH],
+        third_siblings: [Poseidon2Digest::zero(); DEPTH],
+        fourth_siblings: [Poseidon2Digest::zero(); DEPTH],
+    }
+}
+
+pub fn main_lde_quartet_path_power_of_two<
+    const N: usize,
+    const QUARTER: usize,
+    const DEPTH: usize,
+>(
+    _ leaves: own [MainLdeDigest; N],
+    _ index: u32,
+) -> MainLdeQuartetPath<DEPTH>
+where
+    N > 3,
+    N <= MAX_PADDED_TRACE_LENGTH,
+    QUARTER > 0,
+    { QUARTER + QUARTER + QUARTER + QUARTER == N },
+{
+    let mut raw = [Poseidon2Digest::zero(); N]
+    let mut cursor: usize = 0
+    while cursor < N {
+        if !leaves[cursor].valid {
+            return invalid_lde_quartet_path<MainLdeTreeRole, DEPTH>()
+        }
+        raw[cursor] = leaves[cursor].value
+        cursor = cursor + 1
+    }
+    let path = quartet_path_from_leaves<
+        Poseidon2Digest,
+        DigestNodeHasher,
+        N,
+        QUARTER,
+        DEPTH,
+    >(raw, index)
+    LdeQuartetPath<MainLdeTreeRole, DEPTH> {
+        valid: path.valid,
+        index: path.index,
+        first_siblings: path.first_siblings,
+        second_siblings: path.second_siblings,
+        third_siblings: path.third_siblings,
+        fourth_siblings: path.fourth_siblings,
+    }
+}
+
+pub fn auxiliary_lde_quartet_path_power_of_two<
+    const N: usize,
+    const QUARTER: usize,
+    const DEPTH: usize,
+>(
+    _ leaves: own [AuxiliaryLdeDigest; N],
+    _ index: u32,
+) -> AuxiliaryLdeQuartetPath<DEPTH>
+where
+    N > 3,
+    N <= MAX_PADDED_TRACE_LENGTH,
+    QUARTER > 0,
+    { QUARTER + QUARTER + QUARTER + QUARTER == N },
+{
+    let mut raw = [Poseidon2Digest::zero(); N]
+    let mut cursor: usize = 0
+    while cursor < N {
+        if !leaves[cursor].valid {
+            return invalid_lde_quartet_path<AuxiliaryLdeTreeRole, DEPTH>()
+        }
+        raw[cursor] = leaves[cursor].value
+        cursor = cursor + 1
+    }
+    let path = quartet_path_from_leaves<
+        Poseidon2Digest,
+        DigestNodeHasher,
+        N,
+        QUARTER,
+        DEPTH,
+    >(raw, index)
+    LdeQuartetPath<AuxiliaryLdeTreeRole, DEPTH> {
+        valid: path.valid,
+        index: path.index,
+        first_siblings: path.first_siblings,
+        second_siblings: path.second_siblings,
+        third_siblings: path.third_siblings,
+        fourth_siblings: path.fourth_siblings,
+    }
+}
+
+pub fn verify_main_lde_quartet_path<const DEPTH: usize>(
+    _ first: own MainLdeDigest,
+    _ second: own MainLdeDigest,
+    _ third: own MainLdeDigest,
+    _ fourth: own MainLdeDigest,
+    _ path: own MainLdeQuartetPath<DEPTH>,
+    _ root: own MainLdeDigest,
+) -> bool {
+    if !first.valid || !second.valid || !third.valid || !fourth.valid
+        || !path.valid || !root.valid {
+        return false
+    }
+    quartet_verify<Poseidon2Digest, DigestNodeHasher, DEPTH>(
+        root.value,
+        first.value,
+        second.value,
+        third.value,
+        fourth.value,
+        MerkleQuartetPath<Poseidon2Digest, DEPTH> {
+            valid: path.valid,
+            index: path.index,
+            first_siblings: path.first_siblings,
+            second_siblings: path.second_siblings,
+            third_siblings: path.third_siblings,
+            fourth_siblings: path.fourth_siblings,
+        },
+    )
+}
+
+pub fn verify_auxiliary_lde_quartet_path<const DEPTH: usize>(
+    _ first: own AuxiliaryLdeDigest,
+    _ second: own AuxiliaryLdeDigest,
+    _ third: own AuxiliaryLdeDigest,
+    _ fourth: own AuxiliaryLdeDigest,
+    _ path: own AuxiliaryLdeQuartetPath<DEPTH>,
+    _ root: own AuxiliaryLdeDigest,
+) -> bool {
+    if !first.valid || !second.valid || !third.valid || !fourth.valid
+        || !path.valid || !root.valid {
+        return false
+    }
+    quartet_verify<Poseidon2Digest, DigestNodeHasher, DEPTH>(
+        root.value,
+        first.value,
+        second.value,
+        third.value,
+        fourth.value,
+        MerkleQuartetPath<Poseidon2Digest, DEPTH> {
+            valid: path.valid,
+            index: path.index,
+            first_siblings: path.first_siblings,
+            second_siblings: path.second_siblings,
+            third_siblings: path.third_siblings,
+            fourth_siblings: path.fourth_siblings,
+        },
+    )
 }
 
 pub fn composition_root_power_of_two<const N: usize>(
