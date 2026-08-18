@@ -117,9 +117,9 @@ impl<const DEPTH: usize> CanonicalWords for CompositionQueryPair<DEPTH> {
         + <CompositionPairPath<DEPTH> as CanonicalWords>::WORDS
 
     fn encode<W: canonical_words::WordSink>(ref self, _ writer: W) -> W {
-        let writer = self.positive.encode(writer)
-        let writer = self.negative.encode(writer)
-        self.path.encode(writer)
+        let writer = canonical_words::encode_canonical_words(ref self.positive, writer)
+        let writer = canonical_words::encode_canonical_words(ref self.negative, writer)
+        canonical_words::encode_canonical_words(ref self.path, writer)
     }
 
     fn decode<R: canonical_words::WordSource>(mut self, _ reader: R) -> R {
@@ -140,9 +140,9 @@ impl<const ROUND: u32, const DEPTH: usize> CanonicalWords for FriQueryPair<ROUND
         + <FriLayerPairPath<ROUND, DEPTH> as CanonicalWords>::WORDS
 
     fn encode<W: canonical_words::WordSink>(ref self, _ writer: W) -> W {
-        let writer = self.positive.encode(writer)
-        let writer = self.negative.encode(writer)
-        self.path.encode(writer)
+        let writer = canonical_words::encode_canonical_words(ref self.positive, writer)
+        let writer = canonical_words::encode_canonical_words(ref self.negative, writer)
+        canonical_words::encode_canonical_words(ref self.path, writer)
     }
 
     fn decode<R: canonical_words::WordSource>(mut self, _ reader: R) -> R {
