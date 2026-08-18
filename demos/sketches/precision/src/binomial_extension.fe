@@ -43,6 +43,11 @@ impl<M: WordBinomialExtension4> BinomialExtension4<M> {
         }
     }
 
+    /// Construct directly from canonical base-field coefficient values.
+    pub fn from_coefficients(_ values: own [WordField<M>; 4]) -> Self {
+        Self { coefficients: values }
+    }
+
     pub fn from_u32s(_ values: [u32; 4]) -> Self {
         Self {
             coefficients: [

@@ -8,6 +8,7 @@ use mandelbrot_proof_baby_bear::{
     auxiliary_root_power_of_two,
     bind_auxiliary_trace,
     bind_statement,
+    composition_challenge,
     encoded_auxiliary_fields,
     encoded_public_fields,
     encoded_row_fields,
@@ -205,5 +206,22 @@ pub fn bind_roots(
         statement.value.to_u32(),
         if transcript.valid { 1 } else { 0 },
         transcript.value.to_u32(),
+    )
+}
+
+pub fn composition_challenge4(_ transcript: u32, _ valid: u32) -> (u32, u32, u32, u32, u32) {
+    let challenge = composition_challenge(
+        mandelbrot_proof_baby_bear::ProofTranscriptDigest {
+            valid: valid == 1,
+            value: BabyBear::from_u32(transcript),
+        },
+    )
+    let words = challenge.value.to_u32s()
+    (
+        if challenge.valid { 1 } else { 0 },
+        words[0],
+        words[1],
+        words[2],
+        words[3],
     )
 }

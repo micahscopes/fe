@@ -6,7 +6,7 @@
 //! diagonal. No generated constant table is part of the authored source.
 
 use core::num::{IntDowncast, mul_mod_u256}
-use precision::baby_bear::{BabyBear, BABY_BEAR_MODULUS}
+use precision::baby_bear::{BabyBear, BabyBearExt4, BABY_BEAR_MODULUS}
 use precision::word_field::montgomery_word_u32
 use precision::word_field_encoding::PackedFieldBits
 use poseidon_grain::{field_element, warm}
@@ -281,6 +281,27 @@ pub fn compress<D: Poseidon2FieldDomain>(_ left: BabyBear, _ right: BabyBear) ->
     state[2] = left
     state[3] = right
     permute16(input: state)[0]
+}
+
+/// Squeeze one quartic challenge from an ordered typed field pair.
+///
+/// This uses the same framed permutation input as `compress`, then interprets
+/// the first four output lanes as coefficients in the canonical BabyBear
+/// extension `F[X] / (X^4 - 11)`.
+pub fn squeeze_ext4<D: Poseidon2FieldDomain>(
+    _ left: BabyBear,
+    _ right: BabyBear,
+) -> BabyBearExt4 {
+    if D::TAG >= BABY_BEAR_MODULUS {
+        return BabyBearExt4::zero()
+    }
+    let mut state: [BabyBear; WIDTH] = [BabyBear::zero(); WIDTH]
+    state[0] = BabyBear::from_u32(D::TAG)
+    state[1] = BabyBear::from_u32(2)
+    state[2] = left
+    state[3] = right
+    let output = permute16(input: state)
+    BabyBearExt4::from_coefficients([output[0], output[1], output[2], output[3]])
 }
 
 /// Expose the Fe-derived constants in canonical form for the independent

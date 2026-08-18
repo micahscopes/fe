@@ -592,7 +592,12 @@ Legend:
   interpreters now drive production main and auxiliary trace roots, statement
   binding, and auxiliary transcript binding through that same core. Their
   Plonky3 gate checks distinct nominal domains, every leaf bit mutation, and
-  invalid digest propagation. Gates: `merkle_core_oracle.rs` and
+  invalid digest propagation. The transcript now squeezes its composition
+  challenge from four Poseidon2 output lanes directly into the canonical
+  quartic BabyBear extension, with a dedicated nominal domain and no
+  base-field soundness shortcut. Plonky3 independently checks all four
+  coefficients and invalid transcripts return no challenge. Gates:
+  `merkle_core_oracle.rs` and
   `mandelbrot_baby_bear_encoding_oracle.rs`. The same permutation has also
   lowered to Naga-valid u32-only WGSL with the local Sonatina conditional-loop
   structurizer fixes, but that browser gate is not landed until those commits

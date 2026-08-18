@@ -460,4 +460,34 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
         vec![1, statement, 0, 0],
         "an invalid auxiliary root must preserve the prior statement but reject the transcript",
     );
+
+    let mut challenge_state = [0u32; WIDTH];
+    challenge_state[0] = u32::from_be_bytes(*b"BC01");
+    challenge_state[1] = 2;
+    challenge_state[2] = transcript;
+    let expected_challenge = reference_permutation(challenge_state);
+    let mut expected_words = vec![1];
+    expected_words.extend_from_slice(&expected_challenge[..4]);
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "composition_challenge4",
+            &[transcript, 1],
+            5,
+        ),
+        expected_words,
+        "quartic composition challenge differs from Plonky3",
+    );
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "composition_challenge4",
+            &[transcript, 0],
+            5,
+        ),
+        vec![0; 5],
+        "invalid transcript must not produce an extension challenge",
+    );
 }

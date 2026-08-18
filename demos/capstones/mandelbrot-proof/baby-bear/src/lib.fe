@@ -30,8 +30,9 @@ use poseidon_baby_bear::{
     Poseidon2FieldDomain,
     commit_packed,
     compress as poseidon_compress,
+    squeeze_ext4,
 }
-use precision::baby_bear::{BabyBear, BabyBearModulus}
+use precision::baby_bear::{BabyBear, BabyBearExt4, BabyBearModulus}
 use precision::word_field_encoding::{PackedFieldBits, pack_bounded_words}
 
 pub const ROW_FIELDS: usize = 7
@@ -54,6 +55,7 @@ struct MandelbrotRowNodeBabyBearV1 {}
 struct MandelbrotAuxiliaryNodeBabyBearV1 {}
 struct MandelbrotStatementBabyBearV1 {}
 struct MandelbrotProofTranscriptBabyBearV1 {}
+struct MandelbrotCompositionChallengeBabyBearV1 {}
 
 impl Poseidon2Domain for MandelbrotRowBabyBearV1 {
     const TAG: u32 = protocol_tag("BR01")
@@ -83,6 +85,10 @@ impl Poseidon2FieldDomain for MandelbrotProofTranscriptBabyBearV1 {
     const TAG: u32 = protocol_tag("BT01")
 }
 
+impl Poseidon2FieldDomain for MandelbrotCompositionChallengeBabyBearV1 {
+    const TAG: u32 = protocol_tag("BC01")
+}
+
 pub struct RowDigest { pub valid: bool, pub value: BabyBear }
 impl core::marker::Copy for RowDigest {}
 
@@ -97,6 +103,9 @@ impl core::marker::Copy for StatementDigest {}
 
 pub struct ProofTranscriptDigest { pub valid: bool, pub value: BabyBear }
 impl core::marker::Copy for ProofTranscriptDigest {}
+
+pub struct CompositionChallenge { pub valid: bool, pub value: BabyBearExt4 }
+impl core::marker::Copy for CompositionChallenge {}
 
 struct RowNodeHasher {}
 impl TwoToOneHasher<BabyBear> for RowNodeHasher {
@@ -254,6 +263,23 @@ pub fn bind_auxiliary_trace(
         value: poseidon_compress<MandelbrotProofTranscriptBabyBearV1>(
             statement.value,
             auxiliary.value,
+        ),
+    }
+}
+
+/// Derive a soundness challenge in the quartic extension field rather than
+/// silently treating the u32-native base field as the challenge field.
+pub fn composition_challenge(
+    _ transcript: own ProofTranscriptDigest,
+) -> CompositionChallenge {
+    if !transcript.valid {
+        return CompositionChallenge { valid: false, value: BabyBearExt4::zero() }
+    }
+    CompositionChallenge {
+        valid: true,
+        value: squeeze_ext4<MandelbrotCompositionChallengeBabyBearV1>(
+            transcript.value,
+            BabyBear::zero(),
         ),
     }
 }
