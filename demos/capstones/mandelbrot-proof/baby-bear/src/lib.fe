@@ -3,7 +3,7 @@
 //! Main rows, public statements, and Fe-derived auxiliary columns all flow
 //! through the same exact-length 30-bit field encoder. Their 210, 114, and
 //! 411 bits occupy 7, 4, and 14 BabyBear payload lanes respectively. The
-//! largest value therefore still fits one typed width-16 Poseidon2 call.
+//! largest value is absorbed by one typed, fixed-length Poseidon2 sponge.
 
 use mandelbrot_proof_kernel::{
     AUXILIARY_ROW_BITS,
@@ -26,13 +26,15 @@ use merkle_core::{
 }
 use poseidon_baby_bear::{
     PackedCommitment,
+    Poseidon2Digest,
     Poseidon2Domain,
     Poseidon2FieldDomain,
+    bind as poseidon_bind,
     commit_packed,
     compress as poseidon_compress,
     squeeze_ext4,
 }
-use precision::baby_bear::{BabyBear, BabyBearExt4, BabyBearModulus}
+use precision::baby_bear::{BabyBearExt4, BabyBearModulus}
 use precision::word_field_encoding::{PackedFieldBits, pack_bounded_words}
 
 pub const ROW_FIELDS: usize = 7
@@ -51,8 +53,6 @@ const fn protocol_tag(_ label: String<4>) -> u32 {
 struct MandelbrotRowBabyBearV1 {}
 struct MandelbrotPublicBabyBearV1 {}
 struct MandelbrotAuxiliaryBabyBearV1 {}
-struct MandelbrotRowNodeBabyBearV1 {}
-struct MandelbrotAuxiliaryNodeBabyBearV1 {}
 struct MandelbrotStatementBabyBearV1 {}
 struct MandelbrotProofTranscriptBabyBearV1 {}
 struct MandelbrotCompositionChallengeBabyBearV1 {}
@@ -69,14 +69,6 @@ impl Poseidon2Domain for MandelbrotAuxiliaryBabyBearV1 {
     const TAG: u32 = protocol_tag("BA01")
 }
 
-impl Poseidon2FieldDomain for MandelbrotRowNodeBabyBearV1 {
-    const TAG: u32 = protocol_tag("BN01")
-}
-
-impl Poseidon2FieldDomain for MandelbrotAuxiliaryNodeBabyBearV1 {
-    const TAG: u32 = protocol_tag("BX01")
-}
-
 impl Poseidon2FieldDomain for MandelbrotStatementBabyBearV1 {
     const TAG: u32 = protocol_tag("BS01")
 }
@@ -89,39 +81,39 @@ impl Poseidon2FieldDomain for MandelbrotCompositionChallengeBabyBearV1 {
     const TAG: u32 = protocol_tag("BC01")
 }
 
-pub struct RowDigest { pub valid: bool, pub value: BabyBear }
+pub struct RowDigest { pub valid: bool, pub value: Poseidon2Digest }
 impl core::marker::Copy for RowDigest {}
 
-pub struct PublicDigest { pub valid: bool, pub value: BabyBear }
+pub struct PublicDigest { pub valid: bool, pub value: Poseidon2Digest }
 impl core::marker::Copy for PublicDigest {}
 
-pub struct AuxiliaryDigest { pub valid: bool, pub value: BabyBear }
+pub struct AuxiliaryDigest { pub valid: bool, pub value: Poseidon2Digest }
 impl core::marker::Copy for AuxiliaryDigest {}
 
-pub struct StatementDigest { pub valid: bool, pub value: BabyBear }
+pub struct StatementDigest { pub valid: bool, pub value: Poseidon2Digest }
 impl core::marker::Copy for StatementDigest {}
 
-pub struct ProofTranscriptDigest { pub valid: bool, pub value: BabyBear }
+pub struct ProofTranscriptDigest { pub valid: bool, pub value: Poseidon2Digest }
 impl core::marker::Copy for ProofTranscriptDigest {}
 
 pub struct CompositionChallenge { pub valid: bool, pub value: BabyBearExt4 }
 impl core::marker::Copy for CompositionChallenge {}
 
 struct RowNodeHasher {}
-impl TwoToOneHasher<BabyBear> for RowNodeHasher {
-    fn zero() -> BabyBear { BabyBear::zero() }
-    fn equal(_ left: BabyBear, _ right: BabyBear) -> bool { left.equals(right) }
-    fn hash2(_ left: BabyBear, _ right: BabyBear) -> BabyBear {
-        poseidon_compress<MandelbrotRowNodeBabyBearV1>(left, right)
+impl TwoToOneHasher<Poseidon2Digest> for RowNodeHasher {
+    fn zero() -> Poseidon2Digest { Poseidon2Digest::zero() }
+    fn equal(_ left: Poseidon2Digest, _ right: Poseidon2Digest) -> bool { left.equals(right) }
+    fn hash2(_ left: Poseidon2Digest, _ right: Poseidon2Digest) -> Poseidon2Digest {
+        poseidon_compress(left, right)
     }
 }
 
 struct AuxiliaryNodeHasher {}
-impl TwoToOneHasher<BabyBear> for AuxiliaryNodeHasher {
-    fn zero() -> BabyBear { BabyBear::zero() }
-    fn equal(_ left: BabyBear, _ right: BabyBear) -> bool { left.equals(right) }
-    fn hash2(_ left: BabyBear, _ right: BabyBear) -> BabyBear {
-        poseidon_compress<MandelbrotAuxiliaryNodeBabyBearV1>(left, right)
+impl TwoToOneHasher<Poseidon2Digest> for AuxiliaryNodeHasher {
+    fn zero() -> Poseidon2Digest { Poseidon2Digest::zero() }
+    fn equal(_ left: Poseidon2Digest, _ right: Poseidon2Digest) -> bool { left.equals(right) }
+    fn hash2(_ left: Poseidon2Digest, _ right: Poseidon2Digest) -> Poseidon2Digest {
+        poseidon_compress(left, right)
     }
 }
 
@@ -161,15 +153,15 @@ pub fn encoded_auxiliary_fields(
 }
 
 fn row_digest(_ digest: PackedCommitment) -> RowDigest {
-    RowDigest { valid: digest.is_valid(), value: digest.field() }
+    RowDigest { valid: digest.is_valid(), value: digest.digest() }
 }
 
 fn public_digest(_ digest: PackedCommitment) -> PublicDigest {
-    PublicDigest { valid: digest.is_valid(), value: digest.field() }
+    PublicDigest { valid: digest.is_valid(), value: digest.digest() }
 }
 
 fn auxiliary_digest(_ digest: PackedCommitment) -> AuxiliaryDigest {
-    AuxiliaryDigest { valid: digest.is_valid(), value: digest.field() }
+    AuxiliaryDigest { valid: digest.is_valid(), value: digest.digest() }
 }
 
 pub fn row_commitment(_ row: own EncodedProofRow) -> RowDigest {
@@ -197,42 +189,42 @@ pub fn trace_root_power_of_two<const N: usize>(
 ) -> RowDigest
 where N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N & (N - 1)) == 0 }
 {
-    let mut frontier = empty_frontier<BabyBear, RowNodeHasher, TRACE_FRONTIER_LEVELS>()
+    let mut frontier = empty_frontier<Poseidon2Digest, RowNodeHasher, TRACE_FRONTIER_LEVELS>()
     let mut index: usize = 0
     while index < N {
         if !leaves[index].valid {
-            return RowDigest { valid: false, value: BabyBear::zero() }
+            return RowDigest { valid: false, value: Poseidon2Digest::zero() }
         }
-        frontier = push_frontier<BabyBear, RowNodeHasher, TRACE_FRONTIER_LEVELS>(
+        frontier = push_frontier<Poseidon2Digest, RowNodeHasher, TRACE_FRONTIER_LEVELS>(
             frontier,
             leaves[index].value,
         )
         index = index + 1
     }
-    let root = complete_frontier_root<BabyBear, RowNodeHasher, TRACE_FRONTIER_LEVELS>(frontier)
+    let root = complete_frontier_root<Poseidon2Digest, RowNodeHasher, TRACE_FRONTIER_LEVELS>(frontier)
     RowDigest { valid: root.valid, value: root.value }
 }
 
-/// Commit a complete power-of-two auxiliary trace with its own nominal node
-/// domain while sharing the exact same field-generic tree algorithm.
+/// Commit a complete power-of-two auxiliary trace while sharing the exact
+/// same field-generic tree algorithm.
 pub fn auxiliary_root_power_of_two<const N: usize>(
     _ leaves: own [AuxiliaryDigest; N],
 ) -> AuxiliaryDigest
 where N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N & (N - 1)) == 0 }
 {
-    let mut frontier = empty_frontier<BabyBear, AuxiliaryNodeHasher, TRACE_FRONTIER_LEVELS>()
+    let mut frontier = empty_frontier<Poseidon2Digest, AuxiliaryNodeHasher, TRACE_FRONTIER_LEVELS>()
     let mut index: usize = 0
     while index < N {
         if !leaves[index].valid {
-            return AuxiliaryDigest { valid: false, value: BabyBear::zero() }
+            return AuxiliaryDigest { valid: false, value: Poseidon2Digest::zero() }
         }
-        frontier = push_frontier<BabyBear, AuxiliaryNodeHasher, TRACE_FRONTIER_LEVELS>(
+        frontier = push_frontier<Poseidon2Digest, AuxiliaryNodeHasher, TRACE_FRONTIER_LEVELS>(
             frontier,
             leaves[index].value,
         )
         index = index + 1
     }
-    let root = complete_frontier_root<BabyBear, AuxiliaryNodeHasher, TRACE_FRONTIER_LEVELS>(frontier)
+    let root = complete_frontier_root<Poseidon2Digest, AuxiliaryNodeHasher, TRACE_FRONTIER_LEVELS>(frontier)
     AuxiliaryDigest { valid: root.valid, value: root.value }
 }
 
@@ -242,11 +234,11 @@ pub fn bind_statement(
     _ trace: own RowDigest,
 ) -> StatementDigest {
     if !public.valid || !trace.valid {
-        return StatementDigest { valid: false, value: BabyBear::zero() }
+        return StatementDigest { valid: false, value: Poseidon2Digest::zero() }
     }
     StatementDigest {
         valid: true,
-        value: poseidon_compress<MandelbrotStatementBabyBearV1>(public.value, trace.value),
+        value: poseidon_bind<MandelbrotStatementBabyBearV1>(public.value, trace.value),
     }
 }
 
@@ -256,11 +248,11 @@ pub fn bind_auxiliary_trace(
     _ auxiliary: own AuxiliaryDigest,
 ) -> ProofTranscriptDigest {
     if !statement.valid || !auxiliary.valid {
-        return ProofTranscriptDigest { valid: false, value: BabyBear::zero() }
+        return ProofTranscriptDigest { valid: false, value: Poseidon2Digest::zero() }
     }
     ProofTranscriptDigest {
         valid: true,
-        value: poseidon_compress<MandelbrotProofTranscriptBabyBearV1>(
+        value: poseidon_bind<MandelbrotProofTranscriptBabyBearV1>(
             statement.value,
             auxiliary.value,
         ),
@@ -279,7 +271,6 @@ pub fn composition_challenge(
         valid: true,
         value: squeeze_ext4<MandelbrotCompositionChallengeBabyBearV1>(
             transcript.value,
-            BabyBear::zero(),
         ),
     }
 }

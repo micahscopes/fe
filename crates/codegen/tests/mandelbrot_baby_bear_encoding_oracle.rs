@@ -110,29 +110,50 @@ fn reference_permutation(input: [u32; WIDTH]) -> [u32; WIDTH] {
     state.map(|value| value.as_canonical_u32())
 }
 
-fn commitment(tag: &[u8; 4], encoding: &[u32]) -> u32 {
+fn reference_sponge(message: &[u32]) -> [u32; 8] {
     let mut state = [0u32; WIDTH];
-    state[0] = u32::from_be_bytes(*tag);
-    state[1] = encoding[0];
-    state[2..1 + encoding.len()].copy_from_slice(&encoding[1..]);
-    reference_permutation(state)[0]
+    for block in message.chunks(8) {
+        state[..block.len()].copy_from_slice(block);
+        state = reference_permutation(state);
+    }
+    state[..8].try_into().unwrap()
 }
 
-fn field_compress(tag: &[u8; 4], left: u32, right: u32) -> u32 {
-    let mut state = [0u32; WIDTH];
-    state[0] = u32::from_be_bytes(*tag);
-    state[1] = 2;
-    state[2] = left;
-    state[3] = right;
-    reference_permutation(state)[0]
+fn commitment(tag: &[u8; 4], encoding: &[u32]) -> [u32; 8] {
+    let mut message = vec![u32::from_be_bytes(*tag), encoding[0]];
+    message.extend_from_slice(&encoding[1..]);
+    reference_sponge(&message)
 }
 
-fn merkle_root4(tag: &[u8; 4], leaves: [u32; 4]) -> u32 {
-    field_compress(
-        tag,
-        field_compress(tag, leaves[0], leaves[1]),
-        field_compress(tag, leaves[2], leaves[3]),
+fn digest_seed(base: u32) -> [u32; 8] {
+    core::array::from_fn(|index| base + index as u32)
+}
+
+fn digest_compress(left: [u32; 8], right: [u32; 8]) -> [u32; 8] {
+    let mut state = [0u32; WIDTH];
+    state[..8].copy_from_slice(&left);
+    state[8..].copy_from_slice(&right);
+    reference_permutation(state)[..8].try_into().unwrap()
+}
+
+fn merkle_root4(leaves: [u32; 4]) -> [u32; 8] {
+    digest_compress(
+        digest_compress(digest_seed(leaves[0]), digest_seed(leaves[1])),
+        digest_compress(digest_seed(leaves[2]), digest_seed(leaves[3])),
     )
+}
+
+fn bind_digest(tag: &[u8; 4], left: [u32; 8], right: [u32; 8]) -> [u32; 8] {
+    let mut message = vec![u32::from_be_bytes(*tag), 16];
+    message.extend(left);
+    message.extend(right);
+    reference_sponge(&message)
+}
+
+fn squeeze_challenge(tag: &[u8; 4], digest: [u32; 8]) -> [u32; 4] {
+    let mut message = vec![u32::from_be_bytes(*tag), 8];
+    message.extend(digest);
+    reference_sponge(&message)[..4].try_into().unwrap()
 }
 
 fn append_range_witness(bits: &mut Vec<u32>, value: u32, width: u32) {
@@ -171,7 +192,7 @@ fn expected_row(row: &[u32; 17]) -> Option<Vec<u32>> {
     let packed = reference_pack(row, &ROW_WIDTHS, 7)?;
     let mut result = vec![1];
     result.extend_from_slice(&packed);
-    result.push(commitment(b"BR01", &packed));
+    result.extend(commitment(b"BR01", &packed));
     Some(result)
 }
 
@@ -181,7 +202,7 @@ fn expected_auxiliary(row: &[u32; 17]) -> Option<Vec<u32>> {
     let packed = reference_pack(&bits, &vec![1; bits.len()], 14)?;
     let mut result = vec![1];
     result.extend_from_slice(&packed);
-    result.push(commitment(b"BA01", &packed));
+    result.extend(commitment(b"BA01", &packed));
     Some(result)
 }
 
@@ -242,12 +263,12 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
 
     for row in rows {
         assert_eq!(
-            call(&mut store, &instance, "encoded_row", &row, 10),
+            call(&mut store, &instance, "encoded_row", &row, 17),
             expected_row(&row).unwrap(),
             "main row encoding differs for {row:?}",
         );
         assert_eq!(
-            call(&mut store, &instance, "encoded_auxiliary", &row, 17),
+            call(&mut store, &instance, "encoded_auxiliary", &row, 24),
             expected_auxiliary(&row).unwrap(),
             "auxiliary row encoding differs for {row:?}",
         );
@@ -265,7 +286,7 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
                 "row bit {word}:{bit} was not injective"
             );
             assert_eq!(
-                call(&mut store, &instance, "encoded_row", &mutated, 10),
+                call(&mut store, &instance, "encoded_row", &mutated, 17),
                 expected,
                 "row bit {word}:{bit} moved in the Fe encoding",
             );
@@ -294,7 +315,7 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
                 "auxiliary bit {word}:{bit} was lost"
             );
             assert_eq!(
-                call(&mut store, &instance, "encoded_auxiliary", &mutated, 17),
+                call(&mut store, &instance, "encoded_auxiliary", &mutated, 24),
                 expected,
                 "auxiliary bit {word}:{bit} moved in the Fe encoding",
             );
@@ -304,13 +325,13 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
     let mut invalid_row = baseline;
     invalid_row[0] = 1 << 21;
     assert_eq!(
-        call(&mut store, &instance, "encoded_row", &invalid_row, 10),
-        vec![0; 10],
+        call(&mut store, &instance, "encoded_row", &invalid_row, 17),
+        vec![0; 17],
         "out-of-range main row must fail closed",
     );
     assert_eq!(
-        call(&mut store, &instance, "encoded_auxiliary", &invalid_row, 17),
-        vec![0; 17],
+        call(&mut store, &instance, "encoded_auxiliary", &invalid_row, 24),
+        vec![0; 24],
         "out-of-range auxiliary source must fail closed",
     );
 
@@ -332,9 +353,9 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
         let packed = reference_pack(&public, &PUBLIC_WIDTHS, 4).unwrap();
         let mut expected = vec![1];
         expected.extend_from_slice(&packed);
-        expected.push(commitment(b"BP01", &packed));
+        expected.extend(commitment(b"BP01", &packed));
         assert_eq!(
-            call(&mut store, &instance, "encoded_public", &public, 7),
+            call(&mut store, &instance, "encoded_public", &public, 14),
             expected,
             "public encoding differs for {public:?}",
         );
@@ -343,23 +364,26 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
     let mut invalid_public = public_cases[2];
     invalid_public[1] = 1 << 14;
     assert_eq!(
-        call(&mut store, &instance, "encoded_public", &invalid_public, 7),
-        vec![0; 7],
+        call(&mut store, &instance, "encoded_public", &invalid_public, 14),
+        vec![0; 14],
         "out-of-range public claim must fail closed",
     );
 
     let leaves = [17, 23, 41, 1_900_000_007];
-    let expected_trace = merkle_root4(b"BN01", leaves);
-    let expected_auxiliary = merkle_root4(b"BX01", leaves);
+    let expected_root = merkle_root4(leaves);
     assert_eq!(
         call(
             &mut store,
             &instance,
             "trace_root4",
             &[leaves[0], leaves[1], leaves[2], leaves[3], 0],
-            2,
+            9,
         ),
-        vec![1, expected_trace],
+        {
+            let mut words = vec![1];
+            words.extend(expected_root);
+            words
+        },
         "typed trace tree differs from the Plonky3 Merkle oracle",
     );
     assert_eq!(
@@ -368,16 +392,15 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
             &instance,
             "auxiliary_root4",
             &[leaves[0], leaves[1], leaves[2], leaves[3], 0],
-            2,
+            9,
         ),
-        vec![1, expected_auxiliary],
+        {
+            let mut words = vec![1];
+            words.extend(expected_root);
+            words
+        },
         "typed auxiliary tree differs from the Plonky3 Merkle oracle",
     );
-    assert_ne!(
-        expected_trace, expected_auxiliary,
-        "nominal trace and auxiliary node domains must remain distinct",
-    );
-
     for invalid_mask in [1, 2, 4, 8] {
         assert_eq!(
             call(
@@ -385,9 +408,9 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
                 &instance,
                 "trace_root4",
                 &[leaves[0], leaves[1], leaves[2], leaves[3], invalid_mask],
-                2,
+                9,
             ),
-            vec![0, 0],
+            vec![0; 9],
             "invalid trace leaf {invalid_mask:#x} must fail closed",
         );
         assert_eq!(
@@ -396,9 +419,9 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
                 &instance,
                 "auxiliary_root4",
                 &[leaves[0], leaves[1], leaves[2], leaves[3], invalid_mask],
-                2,
+                9,
             ),
-            vec![0, 0],
+            vec![0; 9],
             "invalid auxiliary leaf {invalid_mask:#x} must fail closed",
         );
     }
@@ -412,28 +435,36 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
                 &instance,
                 "trace_root4",
                 &[mutated[0], mutated[1], mutated[2], mutated[3], 0],
-                2,
+                9,
             );
-            assert_eq!(actual, vec![1, merkle_root4(b"BN01", mutated)]);
+            let mut expected = vec![1];
+            expected.extend(merkle_root4(mutated));
+            assert_eq!(actual, expected);
             assert_ne!(
-                actual[1], expected_trace,
+                actual[1..], expected_root,
                 "trace leaf mutation {leaf_index}:{bit} did not change the root",
             );
         }
     }
 
-    let public_digest = 193;
-    let statement = field_compress(b"BS01", public_digest, expected_trace);
-    let transcript = field_compress(b"BT01", statement, expected_auxiliary);
+    let public_seed = 193;
+    let trace_seed = 223;
+    let auxiliary_seed = 257;
+    let statement = bind_digest(b"BS01", digest_seed(public_seed), digest_seed(trace_seed));
+    let transcript = bind_digest(b"BT01", statement, digest_seed(auxiliary_seed));
+    let mut expected_bound = vec![1];
+    expected_bound.extend(statement);
+    expected_bound.push(1);
+    expected_bound.extend(transcript);
     assert_eq!(
         call(
             &mut store,
             &instance,
             "bind_roots",
-            &[public_digest, expected_trace, expected_auxiliary, 0],
-            4,
+            &[public_seed, trace_seed, auxiliary_seed, 0],
+            18,
         ),
-        vec![1, statement, 1, transcript],
+        expected_bound,
         "typed statement and auxiliary transcript differ from Plonky3",
     );
     for invalid_mask in [1, 2, 7] {
@@ -442,10 +473,10 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
                 &mut store,
                 &instance,
                 "bind_roots",
-                &[public_digest, expected_trace, expected_auxiliary, invalid_mask],
-                4,
+                &[public_seed, trace_seed, auxiliary_seed, invalid_mask],
+                18,
             ),
-            vec![0, 0, 0, 0],
+            vec![0; 18],
             "invalid typed root mask {invalid_mask:#x} must fail closed",
         );
     }
@@ -454,26 +485,28 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
             &mut store,
             &instance,
             "bind_roots",
-            &[public_digest, expected_trace, expected_auxiliary, 4],
-            4,
+            &[public_seed, trace_seed, auxiliary_seed, 4],
+            18,
         ),
-        vec![1, statement, 0, 0],
+        {
+            let mut words = vec![1];
+            words.extend(statement);
+            words.extend([0; 9]);
+            words
+        },
         "an invalid auxiliary root must preserve the prior statement but reject the transcript",
     );
 
-    let mut challenge_state = [0u32; WIDTH];
-    challenge_state[0] = u32::from_be_bytes(*b"BC01");
-    challenge_state[1] = 2;
-    challenge_state[2] = transcript;
-    let expected_challenge = reference_permutation(challenge_state);
+    let transcript_seed = 311;
+    let expected_challenge = squeeze_challenge(b"BC01", digest_seed(transcript_seed));
     let mut expected_words = vec![1];
-    expected_words.extend_from_slice(&expected_challenge[..4]);
+    expected_words.extend_from_slice(&expected_challenge);
     assert_eq!(
         call(
             &mut store,
             &instance,
             "composition_challenge4",
-            &[transcript, 1],
+            &[transcript_seed, 1],
             5,
         ),
         expected_words,
@@ -484,7 +517,7 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
             &mut store,
             &instance,
             "composition_challenge4",
-            &[transcript, 0],
+            &[transcript_seed, 0],
             5,
         ),
         vec![0; 5],

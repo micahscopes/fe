@@ -16,7 +16,8 @@ pub const FULL_ROUNDS: usize = 8
 pub const HALF_FULL_ROUNDS: usize = 4
 pub const PARTIAL_ROUNDS: usize = 13
 pub const ROUND_CONSTANT_COUNT: usize = FULL_ROUNDS * WIDTH + PARTIAL_ROUNDS
-pub const PACKED_COMMITMENT_FIELDS: usize = WIDTH - 2
+pub const DIGEST_FIELDS: usize = 8
+pub const SPONGE_RATE: usize = 8
 
 const FIELD_SIZE: u32 = 31
 const MODULUS: u256 = BABY_BEAR_MODULUS as u256
@@ -26,28 +27,60 @@ struct Poseidon2Parameters {
 }
 impl core::marker::Copy for Poseidon2Parameters {}
 
-/// A nominal protocol stage selects the first capacity lane at checking time.
+/// A nominal packed-message schema supplies the first sponge element.
 pub trait Poseidon2Domain {
     const TAG: u32
 }
 
-/// A nominal protocol stage for already-encoded field elements.
+/// A nominal protocol stage for digest binding and challenge squeezing.
 ///
 /// This is deliberately distinct from `Poseidon2Domain`: packed bit strings
-/// and field tuples are different schemas even when both fit one permutation.
+/// and transcript digests are different schemas.
 pub trait Poseidon2FieldDomain {
     const TAG: u32
 }
 
+/// Plonky3-shaped 248-bit digest represented by eight BabyBear elements.
+pub struct Poseidon2Digest { values: [BabyBear; DIGEST_FIELDS] }
+impl core::marker::Copy for Poseidon2Digest {}
+
+impl Poseidon2Digest {
+    pub fn zero() -> Self { Self { values: [BabyBear::zero(); DIGEST_FIELDS] } }
+
+    pub fn from_u32s(_ values: own [u32; DIGEST_FIELDS]) -> Self {
+        let mut digest = Self::zero()
+        let mut index: usize = 0
+        while index < DIGEST_FIELDS {
+            digest.values[index] = BabyBear::from_u32(values[index])
+            index = index + 1
+        }
+        digest
+    }
+
+    pub fn field(self, _ index: u32) -> BabyBear {
+        if index >= DIGEST_FIELDS.downcast_truncate() { return BabyBear::zero() }
+        self.values[index as usize]
+    }
+
+    pub fn equals(self, _ other: Self) -> bool {
+        let mut index: usize = 0
+        while index < DIGEST_FIELDS {
+            if !self.values[index].equals(other.values[index]) { return false }
+            index = index + 1
+        }
+        true
+    }
+}
+
 /// Fail-closed result of committing one exact bounded bit string.
-pub struct PackedCommitment { valid: bool, value: BabyBear }
+pub struct PackedCommitment { valid: bool, value: Poseidon2Digest }
 impl core::marker::Copy for PackedCommitment {}
 
 impl PackedCommitment {
     pub fn is_valid(self) -> bool { self.valid }
 
-    pub fn field(self) -> BabyBear {
-        if !self.valid { return BabyBear::zero() }
+    pub fn digest(self) -> Poseidon2Digest {
+        if !self.valid { return Poseidon2Digest::zero() }
         self.value
     }
 }
@@ -244,64 +277,128 @@ pub fn permute16(mut input: own [BabyBear; WIDTH]) -> [BabyBear; WIDTH] {
     input
 }
 
-/// Commit an injectively encoded bit string in one typed Poseidon2 call.
-///
-/// Lane zero is the type-selected domain, lane one is the exact bit length,
-/// and the remaining fourteen lanes are 30-bit canonical payloads. Invalid
-/// encodings and noncanonical domain tags fail closed before permutation.
+/// Commit an injectively encoded bit string with a rate-8, capacity-8
+/// fixed-length Poseidon2 sponge. The message begins with the type-selected
+/// domain and exact bit length, followed by 30-bit canonical payloads. Invalid
+/// encodings and noncanonical domain tags fail closed before absorption.
 pub fn commit_packed<D: Poseidon2Domain, const N: usize>(
     _ packed: own PackedFieldBits<precision::baby_bear::BabyBearModulus, N>,
 ) -> PackedCommitment {
-    if !packed.is_valid() || N > PACKED_COMMITMENT_FIELDS || D::TAG >= BABY_BEAR_MODULUS {
-        return PackedCommitment { valid: false, value: BabyBear::zero() }
+    if !packed.is_valid() || D::TAG >= BABY_BEAR_MODULUS {
+        return PackedCommitment { valid: false, value: Poseidon2Digest::zero() }
     }
     let mut state: [BabyBear; WIDTH] = [BabyBear::zero(); WIDTH]
-    state[0] = BabyBear::from_u32(D::TAG)
-    state[1] = BabyBear::from_u32(packed.len_bits())
+    let mut rate: usize = 0
+    state[rate] = BabyBear::from_u32(D::TAG)
+    rate = rate + 1
+    state[rate] = BabyBear::from_u32(packed.len_bits())
+    rate = rate + 1
     let mut index: usize = 0
     while index < N {
-        state[index + 2] = packed.field(index.downcast_truncate())
+        state[rate] = packed.field(index.downcast_truncate())
+        rate = rate + 1
+        if rate == SPONGE_RATE {
+            state = permute16(input: state)
+            rate = 0
+        }
         index = index + 1
     }
-    PackedCommitment { valid: true, value: permute16(input: state)[0] }
+    if rate != 0 { state = permute16(input: state) }
+    let mut values = [BabyBear::zero(); DIGEST_FIELDS]
+    index = 0
+    while index < DIGEST_FIELDS {
+        values[index] = state[index]
+        index = index + 1
+    }
+    PackedCommitment { valid: true, value: Poseidon2Digest { values: values } }
 }
 
-/// Ordered two-to-one compression for already-canonical BabyBear values.
-///
-/// Lane zero carries the nominal field-tuple domain and lane one binds the
-/// arity. Lanes two and three carry the ordered inputs. Tree callers choose a
-/// dedicated node domain rather than reusing a packed-row domain.
-pub fn compress<D: Poseidon2FieldDomain>(_ left: BabyBear, _ right: BabyBear) -> BabyBear {
-    if D::TAG >= BABY_BEAR_MODULUS {
-        return BabyBear::zero()
-    }
+/// Plonky3-compatible two-to-one digest compression. Concatenating the two
+/// eight-field children fills one width-16 permutation exactly, and the first
+/// eight output lanes form the parent digest.
+pub fn compress(_ left: Poseidon2Digest, _ right: Poseidon2Digest) -> Poseidon2Digest {
     let mut state: [BabyBear; WIDTH] = [BabyBear::zero(); WIDTH]
-    state[0] = BabyBear::from_u32(D::TAG)
-    state[1] = BabyBear::from_u32(2)
-    state[2] = left
-    state[3] = right
-    permute16(input: state)[0]
-}
-
-/// Squeeze one quartic challenge from an ordered typed field pair.
-///
-/// This uses the same framed permutation input as `compress`, then interprets
-/// the first four output lanes as coefficients in the canonical BabyBear
-/// extension `F[X] / (X^4 - 11)`.
-pub fn squeeze_ext4<D: Poseidon2FieldDomain>(
-    _ left: BabyBear,
-    _ right: BabyBear,
-) -> BabyBearExt4 {
-    if D::TAG >= BABY_BEAR_MODULUS {
-        return BabyBearExt4::zero()
+    let mut index: usize = 0
+    while index < DIGEST_FIELDS {
+        state[index] = left.values[index]
+        state[index + DIGEST_FIELDS] = right.values[index]
+        index = index + 1
     }
-    let mut state: [BabyBear; WIDTH] = [BabyBear::zero(); WIDTH]
-    state[0] = BabyBear::from_u32(D::TAG)
-    state[1] = BabyBear::from_u32(2)
-    state[2] = left
-    state[3] = right
     let output = permute16(input: state)
-    BabyBearExt4::from_coefficients([output[0], output[1], output[2], output[3]])
+    let mut values = [BabyBear::zero(); DIGEST_FIELDS]
+    index = 0
+    while index < DIGEST_FIELDS {
+        values[index] = output[index]
+        index = index + 1
+    }
+    Poseidon2Digest { values: values }
+}
+
+/// Bind two full digests under a nominal transcript domain with the same
+/// rate-8 fixed-length sponge used for leaves.
+pub fn bind<D: Poseidon2FieldDomain>(
+    _ left: Poseidon2Digest,
+    _ right: Poseidon2Digest,
+) -> Poseidon2Digest {
+    if D::TAG >= BABY_BEAR_MODULUS {
+        return Poseidon2Digest::zero()
+    }
+    let mut state: [BabyBear; WIDTH] = [BabyBear::zero(); WIDTH]
+    let mut rate: usize = 0
+    let digest_fields: u32 = DIGEST_FIELDS.downcast_truncate()
+    state[rate] = BabyBear::from_u32(D::TAG)
+    rate = rate + 1
+    state[rate] = BabyBear::from_u32(digest_fields + digest_fields)
+    rate = rate + 1
+    let mut index: usize = 0
+    while index < DIGEST_FIELDS {
+        state[rate] = left.values[index]
+        rate = rate + 1
+        if rate == SPONGE_RATE {
+            state = permute16(input: state)
+            rate = 0
+        }
+        index = index + 1
+    }
+    index = 0
+    while index < DIGEST_FIELDS {
+        state[rate] = right.values[index]
+        rate = rate + 1
+        if rate == SPONGE_RATE {
+            state = permute16(input: state)
+            rate = 0
+        }
+        index = index + 1
+    }
+    if rate != 0 { state = permute16(input: state) }
+    let mut values = [BabyBear::zero(); DIGEST_FIELDS]
+    index = 0
+    while index < DIGEST_FIELDS {
+        values[index] = state[index]
+        index = index + 1
+    }
+    Poseidon2Digest { values: values }
+}
+
+/// Squeeze one quartic challenge from a full transcript digest.
+pub fn squeeze_ext4<D: Poseidon2FieldDomain>(_ digest: Poseidon2Digest) -> BabyBearExt4 {
+    if D::TAG >= BABY_BEAR_MODULUS { return BabyBearExt4::zero() }
+    let mut state: [BabyBear; WIDTH] = [BabyBear::zero(); WIDTH]
+    state[0] = BabyBear::from_u32(D::TAG)
+    state[1] = BabyBear::from_u32(DIGEST_FIELDS.downcast_truncate())
+    let mut index: usize = 0
+    let mut rate: usize = 2
+    while index < DIGEST_FIELDS {
+        state[rate] = digest.values[index]
+        rate = rate + 1
+        if rate == SPONGE_RATE {
+            state = permute16(input: state)
+            rate = 0
+        }
+        index = index + 1
+    }
+    if rate != 0 { state = permute16(input: state) }
+    BabyBearExt4::from_coefficients([state[0], state[1], state[2], state[3]])
 }
 
 /// Expose the Fe-derived constants in canonical form for the independent

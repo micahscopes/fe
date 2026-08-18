@@ -22,7 +22,14 @@ use mandelbrot_proof_kernel::{
     EscapesByQ12Public,
     SignedWord,
 }
-use precision::baby_bear::BabyBear
+use poseidon_baby_bear::Poseidon2Digest
+
+fn digest8(_ base: u32) -> Poseidon2Digest {
+    Poseidon2Digest::from_u32s([
+        base, base + 1, base + 2, base + 3,
+        base + 4, base + 5, base + 6, base + 7,
+    ])
+}
 
 fn row(
     _ step: u32,
@@ -60,7 +67,10 @@ pub fn encoded_row(
     _ q_re_sign: u32, _ q_re: u32, _ r_re: u32,
     _ q_im_sign: u32, _ q_im: u32, _ r_im: u32,
     _ air_terminal: u32, _ active: u32, _ terminal: u32,
-) -> (u32, u32, u32, u32, u32, u32, u32, u32, u32, u32) {
+) -> (
+    u32, u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32,
+) {
     let row = row(
         step,
         zr_sign, zr,
@@ -78,7 +88,11 @@ pub fn encoded_row(
         packed.field(0).to_u32(), packed.field(1).to_u32(),
         packed.field(2).to_u32(), packed.field(3).to_u32(),
         packed.field(4).to_u32(), packed.field(5).to_u32(),
-        packed.field(6).to_u32(), digest.value.to_u32(),
+        packed.field(6).to_u32(),
+        digest.value.field(0).to_u32(), digest.value.field(1).to_u32(),
+        digest.value.field(2).to_u32(), digest.value.field(3).to_u32(),
+        digest.value.field(4).to_u32(), digest.value.field(5).to_u32(),
+        digest.value.field(6).to_u32(), digest.value.field(7).to_u32(),
     )
 }
 
@@ -94,7 +108,7 @@ pub fn encoded_auxiliary(
     u32, u32,
     u32, u32, u32, u32, u32, u32, u32,
     u32, u32, u32, u32, u32, u32, u32,
-    u32,
+    u32, u32, u32, u32, u32, u32, u32, u32,
 ) {
     let row = row(
         step,
@@ -117,7 +131,10 @@ pub fn encoded_auxiliary(
         packed.field(8).to_u32(), packed.field(9).to_u32(),
         packed.field(10).to_u32(), packed.field(11).to_u32(),
         packed.field(12).to_u32(), packed.field(13).to_u32(),
-        digest.value.to_u32(),
+        digest.value.field(0).to_u32(), digest.value.field(1).to_u32(),
+        digest.value.field(2).to_u32(), digest.value.field(3).to_u32(),
+        digest.value.field(4).to_u32(), digest.value.field(5).to_u32(),
+        digest.value.field(6).to_u32(), digest.value.field(7).to_u32(),
     )
 }
 
@@ -126,7 +143,10 @@ pub fn encoded_public(
     _ c_im_sign: u32, _ c_im: u32,
     _ bound: u32, _ terminal_step: u32,
     _ trace_length: u32, _ padded_length: u32,
-) -> (u32, u32, u32, u32, u32, u32, u32) {
+) -> (
+    u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32,
+) {
     let public = EscapesByQ12Public {
         c_re: SignedWord { sign: c_re_sign, magnitude: c_re },
         c_im: SignedWord { sign: c_im_sign, magnitude: c_im },
@@ -142,7 +162,10 @@ pub fn encoded_public(
         packed.len_bits(),
         packed.field(0).to_u32(), packed.field(1).to_u32(),
         packed.field(2).to_u32(), packed.field(3).to_u32(),
-        digest.value.to_u32(),
+        digest.value.field(0).to_u32(), digest.value.field(1).to_u32(),
+        digest.value.field(2).to_u32(), digest.value.field(3).to_u32(),
+        digest.value.field(4).to_u32(), digest.value.field(5).to_u32(),
+        digest.value.field(6).to_u32(), digest.value.field(7).to_u32(),
     )
 }
 
@@ -152,14 +175,20 @@ pub fn trace_root4(
     _ leaf2: u32,
     _ leaf3: u32,
     _ invalid_mask: u32,
-) -> (u32, u32) {
+) -> (u32, u32, u32, u32, u32, u32, u32, u32, u32) {
     let root = trace_root_power_of_two<4>([
-        RowDigest { valid: (invalid_mask & 1) == 0, value: BabyBear::from_u32(leaf0) },
-        RowDigest { valid: (invalid_mask & 2) == 0, value: BabyBear::from_u32(leaf1) },
-        RowDigest { valid: (invalid_mask & 4) == 0, value: BabyBear::from_u32(leaf2) },
-        RowDigest { valid: (invalid_mask & 8) == 0, value: BabyBear::from_u32(leaf3) },
+        RowDigest { valid: (invalid_mask & 1) == 0, value: digest8(leaf0) },
+        RowDigest { valid: (invalid_mask & 2) == 0, value: digest8(leaf1) },
+        RowDigest { valid: (invalid_mask & 4) == 0, value: digest8(leaf2) },
+        RowDigest { valid: (invalid_mask & 8) == 0, value: digest8(leaf3) },
     ])
-    (if root.valid { 1 } else { 0 }, root.value.to_u32())
+    (
+        if root.valid { 1 } else { 0 },
+        root.value.field(0).to_u32(), root.value.field(1).to_u32(),
+        root.value.field(2).to_u32(), root.value.field(3).to_u32(),
+        root.value.field(4).to_u32(), root.value.field(5).to_u32(),
+        root.value.field(6).to_u32(), root.value.field(7).to_u32(),
+    )
 }
 
 pub fn auxiliary_root4(
@@ -168,14 +197,20 @@ pub fn auxiliary_root4(
     _ leaf2: u32,
     _ leaf3: u32,
     _ invalid_mask: u32,
-) -> (u32, u32) {
+) -> (u32, u32, u32, u32, u32, u32, u32, u32, u32) {
     let root = auxiliary_root_power_of_two<4>([
-        AuxiliaryDigest { valid: (invalid_mask & 1) == 0, value: BabyBear::from_u32(leaf0) },
-        AuxiliaryDigest { valid: (invalid_mask & 2) == 0, value: BabyBear::from_u32(leaf1) },
-        AuxiliaryDigest { valid: (invalid_mask & 4) == 0, value: BabyBear::from_u32(leaf2) },
-        AuxiliaryDigest { valid: (invalid_mask & 8) == 0, value: BabyBear::from_u32(leaf3) },
+        AuxiliaryDigest { valid: (invalid_mask & 1) == 0, value: digest8(leaf0) },
+        AuxiliaryDigest { valid: (invalid_mask & 2) == 0, value: digest8(leaf1) },
+        AuxiliaryDigest { valid: (invalid_mask & 4) == 0, value: digest8(leaf2) },
+        AuxiliaryDigest { valid: (invalid_mask & 8) == 0, value: digest8(leaf3) },
     ])
-    (if root.valid { 1 } else { 0 }, root.value.to_u32())
+    (
+        if root.valid { 1 } else { 0 },
+        root.value.field(0).to_u32(), root.value.field(1).to_u32(),
+        root.value.field(2).to_u32(), root.value.field(3).to_u32(),
+        root.value.field(4).to_u32(), root.value.field(5).to_u32(),
+        root.value.field(6).to_u32(), root.value.field(7).to_u32(),
+    )
 }
 
 pub fn bind_roots(
@@ -183,29 +218,38 @@ pub fn bind_roots(
     _ trace: u32,
     _ auxiliary: u32,
     _ invalid_mask: u32,
-) -> (u32, u32, u32, u32) {
+) -> (
+    u32, u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32, u32,
+) {
     let statement = bind_statement(
         PublicDigest {
             valid: (invalid_mask & 1) == 0,
-            value: BabyBear::from_u32(public),
+            value: digest8(public),
         },
         RowDigest {
             valid: (invalid_mask & 2) == 0,
-            value: BabyBear::from_u32(trace),
+            value: digest8(trace),
         },
     )
     let transcript = bind_auxiliary_trace(
         statement,
         AuxiliaryDigest {
             valid: (invalid_mask & 4) == 0,
-            value: BabyBear::from_u32(auxiliary),
+            value: digest8(auxiliary),
         },
     )
     (
         if statement.valid { 1 } else { 0 },
-        statement.value.to_u32(),
+        statement.value.field(0).to_u32(), statement.value.field(1).to_u32(),
+        statement.value.field(2).to_u32(), statement.value.field(3).to_u32(),
+        statement.value.field(4).to_u32(), statement.value.field(5).to_u32(),
+        statement.value.field(6).to_u32(), statement.value.field(7).to_u32(),
         if transcript.valid { 1 } else { 0 },
-        transcript.value.to_u32(),
+        transcript.value.field(0).to_u32(), transcript.value.field(1).to_u32(),
+        transcript.value.field(2).to_u32(), transcript.value.field(3).to_u32(),
+        transcript.value.field(4).to_u32(), transcript.value.field(5).to_u32(),
+        transcript.value.field(6).to_u32(), transcript.value.field(7).to_u32(),
     )
 }
 
@@ -213,7 +257,7 @@ pub fn composition_challenge4(_ transcript: u32, _ valid: u32) -> (u32, u32, u32
     let challenge = composition_challenge(
         mandelbrot_proof_baby_bear::ProofTranscriptDigest {
             valid: valid == 1,
-            value: BabyBear::from_u32(transcript),
+            value: digest8(transcript),
         },
     )
     let words = challenge.value.to_u32s()

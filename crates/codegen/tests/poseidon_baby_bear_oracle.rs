@@ -148,13 +148,19 @@ fn reference_pack(values: &[u32], widths: &[u32], field_count: usize) -> Option<
     Some(ReferencePacking { bit_length, fields })
 }
 
-fn reference_packed_commitment(domain: u32, packed: &ReferencePacking) -> u32 {
-    assert!(packed.fields.len() <= WIDTH - 2);
+fn reference_sponge(message: &[u32]) -> [u32; 8] {
     let mut state = [0u32; WIDTH];
-    state[0] = domain;
-    state[1] = packed.bit_length;
-    state[2..2 + packed.fields.len()].copy_from_slice(&packed.fields);
-    reference_permutation(state)[0]
+    for block in message.chunks(8) {
+        state[..block.len()].copy_from_slice(block);
+        state = reference_permutation(state);
+    }
+    state[..8].try_into().unwrap()
+}
+
+fn reference_packed_commitment(domain: u32, packed: &ReferencePacking) -> [u32; 8] {
+    let mut message = vec![domain, packed.bit_length];
+    message.extend_from_slice(&packed.fields);
+    reference_sponge(&message)
 }
 
 fn packing_arguments(values: [u32; 4], widths: [u32; 4]) -> [u32; 8] {
@@ -282,11 +288,12 @@ fn bounded_bits_are_injective_and_commit_with_length_and_domain() {
             "directed packing differs for values={values:?}, widths={widths:?}",
         );
         assert_eq!(
-            call(&mut store, &instance, "packed4_commitment", &arguments, 2,),
-            vec![
-                1,
-                reference_packed_commitment(protocol_tag(b"BP01"), &expected),
-            ],
+            call(&mut store, &instance, "packed4_commitment", &arguments, 9,),
+            {
+                let mut words = vec![1];
+                words.extend(reference_packed_commitment(protocol_tag(b"BP01"), &expected));
+                words
+            },
             "typed commitment differs for values={values:?}, widths={widths:?}",
         );
 
@@ -428,14 +435,14 @@ fn bounded_bits_are_injective_and_commit_with_length_and_domain() {
         &instance,
         "packed4_commitment",
         &packing_arguments([1, 0, 0, 0], [1, 0, 0, 0]),
-        2,
+        9,
     );
     let long_digest = call(
         &mut store,
         &instance,
         "packed4_commitment",
         &packing_arguments([1, 0, 0, 0], [1, 1, 0, 0]),
-        2,
+        9,
     );
     assert_ne!(
         short_digest, long_digest,
@@ -456,11 +463,12 @@ fn bounded_bits_are_injective_and_commit_with_length_and_domain() {
             "411-bit maximum single-permutation payload differs for seed {seed:#x}",
         );
         assert_eq!(
-            call(&mut store, &instance, "packed411_commitment", &[seed], 2,),
-            vec![
-                1,
-                reference_packed_commitment(protocol_tag(b"BP01"), &expected),
-            ],
+            call(&mut store, &instance, "packed411_commitment", &[seed], 9,),
+            {
+                let mut words = vec![1];
+                words.extend(reference_packed_commitment(protocol_tag(b"BP01"), &expected));
+                words
+            },
             "411-bit typed commitment differs for seed {seed:#x}",
         );
     }

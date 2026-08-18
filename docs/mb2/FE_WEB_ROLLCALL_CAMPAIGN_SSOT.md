@@ -571,9 +571,15 @@ Legend:
   constants and five complete permutations against Plonky3. A reusable
   `word_field_encoding` interpreter injectively packs exact-length bounded bit
   strings into 30-bit field payloads, rejects undersized moduli, invalid
-  widths, range violations, and output overflow, and commits up to fourteen
-  payloads in one typed Poseidon2 call whose first two lanes bind the nominal
-  domain and exact bit length. The independent bigint/Plonky3 gate covers 128
+  widths, range violations, and output overflow. A security review caught and
+  removed the initial one-field, 31-bit digest checkpoint before composition
+  or FRI could depend on it. Production commitments now use Plonky3's
+  width-16 shape: a rate-8, capacity-8 fixed-length sponge absorbs the nominal
+  domain, exact bit length, and payload, then returns an eight-field digest.
+  Merkle nodes concatenate two eight-field children into one permutation,
+  matching `TruncatedPermutation<_, 2, 8, 16>` and giving roughly 124-bit
+  collision security rather than the toy checkpoint's 31 bits. The
+  independent bigint/Plonky3 gate covers 128
   randomized schemas, every bit of its directed mutation case, trailing-zero
   length ambiguity, and the complete 411-bit capacity. The production
   Mandelbrot row, public claim, and Fe-derived auxiliary schema now interpret
@@ -591,7 +597,8 @@ Legend:
   incomplete trees, and frontier overflow. Typed BabyBear Poseidon2
   interpreters now drive production main and auxiliary trace roots, statement
   binding, and auxiliary transcript binding through that same core. Their
-  Plonky3 gate checks distinct nominal domains, every leaf bit mutation, and
+  Plonky3 gate checks full eight-field roots, distinct nominal transcript
+  domains, every leaf bit mutation, and
   invalid digest propagation. The transcript now squeezes its composition
   challenge from four Poseidon2 output lanes directly into the canonical
   quartic BabyBear extension, with a dedicated nominal domain and no
