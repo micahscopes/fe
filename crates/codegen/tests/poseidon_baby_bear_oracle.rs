@@ -297,7 +297,10 @@ fn bounded_bits_are_injective_and_commit_with_length_and_domain() {
             call(&mut store, &instance, "packed4_commitment", &arguments, 9,),
             {
                 let mut words = vec![1];
-                words.extend(reference_packed_commitment(protocol_tag(b"BP01"), &expected));
+                words.extend(reference_packed_commitment(
+                    protocol_tag(b"BP01"),
+                    &expected,
+                ));
                 words
             },
             "typed commitment differs for values={values:?}, widths={widths:?}",
@@ -472,7 +475,10 @@ fn bounded_bits_are_injective_and_commit_with_length_and_domain() {
             call(&mut store, &instance, "packed411_commitment", &[seed], 9,),
             {
                 let mut words = vec![1];
-                words.extend(reference_packed_commitment(protocol_tag(b"BP01"), &expected));
+                words.extend(reference_packed_commitment(
+                    protocol_tag(b"BP01"),
+                    &expected,
+                ));
                 words
             },
             "411-bit typed commitment differs for seed {seed:#x}",
@@ -480,8 +486,7 @@ fn bounded_bits_are_injective_and_commit_with_length_and_domain() {
     }
 
     let fields17 = [
-        0, 1, 2, 3, 5, 8, 13, 21, 34,
-        55, 89, 144, 233, 377, 610, 987, 1597,
+        0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597,
     ];
     assert_eq!(
         call(&mut store, &instance, "fields17", &fields17, 8),

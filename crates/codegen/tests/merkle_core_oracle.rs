@@ -9,8 +9,8 @@ use url::Url;
 use wasmtime::Val;
 
 fn fixture_url() -> Url {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/merkle_core_oracle_ingot");
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/merkle_core_oracle_ingot");
     Url::from_directory_path(path.canonicalize().unwrap()).unwrap()
 }
 
@@ -118,7 +118,14 @@ fn generic_merkle_shapes_execute_and_fail_closed() {
                 &mut store,
                 &instance,
                 "binary3",
-                &[leaf, depth as u32, index, siblings[0], siblings[1], siblings[2]],
+                &[
+                    leaf,
+                    depth as u32,
+                    index,
+                    siblings[0],
+                    siblings[1],
+                    siblings[2]
+                ],
                 2,
             ),
             vec![1, binary_root(leaf, depth, index, &siblings)],
