@@ -629,6 +629,22 @@ Legend:
   and carries nominal round-indexed roots and transcripts. The independent
   Plonky3 gate reconstructs every layer root, final evaluation, and final
   transcript, and mutates the input codeword, starting transcript, and shift.
+  Fiat-Shamir query sampling and compact authenticated openings are now
+  landed for that exact 16-to-1 chain. The final typed FRI transcript squeezes
+  an `FQ01` BabyBear challenge and derives an index in the eight-point half
+  domain. The receipt retains only the queried `x` and `-x` composition pair,
+  the corresponding pair at each folded layer, compact generic `merkle_core`
+  sibling paths, the typed roots, and the final evaluation. The Fe verifier
+  reconstructs every transcript and challenge, authenticates every retained
+  pair, checks all four folds, and binds the final row directly to its root.
+  The independent Plonky3 gate checks exact query indices and rejects changed
+  indices, composition and FRI values, sibling paths, roots, final values,
+  validity, and the external AIR transcript. Compiler commit `e794781d1`
+  preserves addressable shape for zero-length const-generic arrays without
+  inventing payload lanes, with both MIR-shape and executed Wasm regressions.
+  The authenticated FRI opening is real, but production AIR quartet openings,
+  multiple query sampling, the BabyBear receipt codec, and end-to-end proof
+  verification remain pending.
   The same permutation has also
   lowered to Naga-valid u32-only WGSL with the local Sonatina conditional-loop
   structurizer fixes, but that browser gate is not landed until those commits

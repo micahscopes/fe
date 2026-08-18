@@ -303,8 +303,16 @@ fn reference_fri_chain16(
     transcript_seed: u32,
     shift: u32,
 ) -> Option<ReferenceFriChain16> {
+    reference_fri_chain16_from_digest(seed, digest_seed(transcript_seed), shift)
+}
+
+fn reference_fri_chain16_from_digest(
+    seed: u32,
+    starting_transcript: [u32; 8],
+    shift: u32,
+) -> Option<ReferenceFriChain16> {
     let mut evaluations = fri_pattern::<16>(seed).to_vec();
-    let mut transcript = digest_seed(transcript_seed);
+    let mut transcript = starting_transcript;
     let mut shift = shift % MODULUS;
     if shift == 0 {
         return None;
@@ -333,6 +341,18 @@ fn reference_fri_chain16(
         final_evaluation: evaluations[0],
         final_transcript: transcript,
     })
+}
+
+fn expected_fri_query16_index(seed: u32, air_transcript_seed: u32, shift: u32) -> Option<u32> {
+    let composition_leaves = fri_pattern::<16>(seed)
+        .iter()
+        .map(|value| reference_field_commitment(b"BC02", &value.0))
+        .collect();
+    let composition_root = digest_merkle_root(composition_leaves);
+    let composition_transcript =
+        bind_digest(b"BC03", digest_seed(air_transcript_seed), composition_root);
+    let chain = reference_fri_chain16_from_digest(seed, composition_transcript, shift)?;
+    Some(squeeze_challenge(b"FQ01", chain.final_transcript)[0] & 7)
 }
 
 fn expected_fri_chain16_component(
@@ -934,6 +954,68 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
             call(&mut store, &instance, "fri_chain16_component", &mutation, 7,),
             baseline_chain,
             "FRI codeword, transcript, and shift mutations must change the chain",
+        );
+    }
+
+    for transcript_seed in [0, 439, 1_900_000_007] {
+        let sample = squeeze_challenge(b"FQ01", digest_seed(transcript_seed))[0];
+        assert_eq!(
+            call(&mut store, &instance, "fri_query1", &[transcript_seed], 3,),
+            vec![1, sample, sample & 7],
+            "typed FRI query sampling differs from Plonky3",
+        );
+    }
+
+    for (seed, air_transcript_seed, shift) in [(97, 431, 7), (0, 433, 123_456_789)] {
+        let query_index = expected_fri_query16_index(seed, air_transcript_seed, shift).unwrap();
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "fri_query16_status",
+                &[seed, air_transcript_seed, shift],
+                3,
+            ),
+            vec![1, 1, query_index],
+            "authenticated FRI opening must verify at the transcript-derived index",
+        );
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "fri_query16_mutation",
+                &[seed, air_transcript_seed, shift, 0],
+                1,
+            ),
+            vec![1],
+            "unmodified authenticated FRI opening must verify",
+        );
+        for mutation in 1..=9 {
+            assert_eq!(
+                call(
+                    &mut store,
+                    &instance,
+                    "fri_query16_mutation",
+                    &[seed, air_transcript_seed, shift, mutation],
+                    1,
+                ),
+                vec![0],
+                "authenticated FRI opening mutation {mutation} must be rejected",
+            );
+        }
+    }
+
+    for invalid_shift in [0, MODULUS] {
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "fri_query16_status",
+                &[97, 431, invalid_shift],
+                3,
+            ),
+            vec![0, 0, 0],
+            "query opening must reject a zero coset shift",
         );
     }
 }

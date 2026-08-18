@@ -19,10 +19,13 @@ use mandelbrot_proof_kernel::{
     escapes_by_q12_public_words,
 }
 use merkle_core::{
+    MerklePairPath,
     MerkleRoot,
     TwoToOneHasher,
     complete_frontier_root,
     empty_frontier,
+    pair_path_from_leaves,
+    pair_verify,
     push_frontier,
 }
 use poseidon_baby_bear::{
@@ -80,6 +83,7 @@ struct MandelbrotCompositionTranscriptBabyBearV1 {}
 struct MandelbrotFriFoldBabyBear<const ROUND: u32> {}
 struct MandelbrotFriLayerRowBabyBear<const ROUND: u32> {}
 struct MandelbrotFriLayerTranscriptBabyBear<const ROUND: u32> {}
+struct MandelbrotFriQueryBabyBear<const QUERY: u32> {}
 
 impl Poseidon2Domain for MandelbrotRowBabyBearV1 {
     const TAG: u32 = protocol_tag("BR01")
@@ -141,6 +145,10 @@ impl<const ROUND: u32> Poseidon2FieldDomain for MandelbrotFriLayerTranscriptBaby
     const TAG: u32 = protocol_round_tag("FT", ROUND)
 }
 
+impl<const QUERY: u32> Poseidon2FieldDomain for MandelbrotFriQueryBabyBear<QUERY> {
+    const TAG: u32 = protocol_round_tag("FQ", QUERY)
+}
+
 pub struct RowDigest { pub valid: bool, pub value: Poseidon2Digest }
 impl core::marker::Copy for RowDigest {}
 
@@ -179,6 +187,12 @@ impl core::marker::Copy for CompositionTranscriptDigest {}
 
 pub struct FriFoldChallenge<const ROUND: u32> { pub valid: bool, pub value: BabyBearExt4 }
 impl<const ROUND: u32> core::marker::Copy for FriFoldChallenge<ROUND> {}
+
+pub struct FriQueryChallenge<const QUERY: u32> { pub valid: bool, pub value: BabyBear }
+impl<const QUERY: u32> core::marker::Copy for FriQueryChallenge<QUERY> {}
+
+pub struct FriQueryIndex<const QUERY: u32> { pub valid: bool, pub value: u32 }
+impl<const QUERY: u32> core::marker::Copy for FriQueryIndex<QUERY> {}
 
 pub struct FriLayerDigest<const ROUND: u32> { pub valid: bool, pub value: Poseidon2Digest }
 impl<const ROUND: u32> core::marker::Copy for FriLayerDigest<ROUND> {}
@@ -224,6 +238,55 @@ pub struct FriProofComplete16 {
     pub final_round: FriFinalRound<4>,
 }
 impl core::marker::Copy for FriProofComplete16 {}
+
+pub struct CompositionPairPath<const DEPTH: usize> {
+    pub valid: bool,
+    pub index: u32,
+    pub positive_siblings: [Poseidon2Digest; DEPTH],
+    pub negative_siblings: [Poseidon2Digest; DEPTH],
+}
+impl<const DEPTH: usize> core::marker::Copy for CompositionPairPath<DEPTH> {}
+
+pub struct FriLayerPairPath<const ROUND: u32, const DEPTH: usize> {
+    pub valid: bool,
+    pub index: u32,
+    pub positive_siblings: [Poseidon2Digest; DEPTH],
+    pub negative_siblings: [Poseidon2Digest; DEPTH],
+}
+impl<const ROUND: u32, const DEPTH: usize> core::marker::Copy for FriLayerPairPath<ROUND, DEPTH> {}
+
+pub struct CompositionQueryPair<const DEPTH: usize> {
+    pub positive: BabyBearExt4,
+    pub negative: BabyBearExt4,
+    pub path: CompositionPairPath<DEPTH>,
+}
+impl<const DEPTH: usize> core::marker::Copy for CompositionQueryPair<DEPTH> {}
+
+pub struct FriQueryPair<const ROUND: u32, const DEPTH: usize> {
+    pub positive: BabyBearExt4,
+    pub negative: BabyBearExt4,
+    pub path: FriLayerPairPath<ROUND, DEPTH>,
+}
+impl<const ROUND: u32, const DEPTH: usize> core::marker::Copy for FriQueryPair<ROUND, DEPTH> {}
+
+/// One authenticated transcript-selected query through a 16-to-1 FRI chain.
+/// The earlier AIR layer supplies `AirLdeTranscriptDigest`; this receipt does
+/// not retain the full composition or folded codewords.
+pub struct FriCommitmentQuery16 {
+    pub valid: bool,
+    pub composition_root: CompositionDigest,
+    pub first_root: FriLayerDigest<1>,
+    pub second_root: FriLayerDigest<2>,
+    pub third_root: FriLayerDigest<3>,
+    pub final_root: FriLayerDigest<4>,
+    pub query_index: u32,
+    pub composition: CompositionQueryPair<3>,
+    pub first: FriQueryPair<1, 2>,
+    pub second: FriQueryPair<2, 1>,
+    pub third: FriQueryPair<3, 0>,
+    pub final_evaluation: BabyBearExt4,
+}
+impl core::marker::Copy for FriCommitmentQuery16 {}
 
 struct DigestNodeHasher {}
 impl TwoToOneHasher<Poseidon2Digest> for DigestNodeHasher {
@@ -482,6 +545,61 @@ where N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N & (N - 1)) == 0 }
     CompositionDigest { valid: root.valid, value: root.value }
 }
 
+pub fn composition_pair_path_power_of_two<
+    const N: usize,
+    const HALF: usize,
+    const DEPTH: usize,
+>(
+    _ evaluations: own [BabyBearExt4; N],
+    _ index: u32,
+) -> CompositionPairPath<DEPTH>
+where
+    N > 1,
+    N <= MAX_PADDED_TRACE_LENGTH,
+    HALF > 0,
+    { HALF + HALF == N },
+{
+    let mut leaves = [Poseidon2Digest::zero(); N]
+    let mut cursor: usize = 0
+    while cursor < N {
+        leaves[cursor] = composition_row_commitment(evaluations[cursor]).value
+        cursor = cursor + 1
+    }
+    let raw = pair_path_from_leaves<
+        Poseidon2Digest,
+        DigestNodeHasher,
+        N,
+        HALF,
+        DEPTH,
+    >(leaves, index)
+    CompositionPairPath<DEPTH> {
+        valid: raw.valid,
+        index: raw.index,
+        positive_siblings: raw.positive_siblings,
+        negative_siblings: raw.negative_siblings,
+    }
+}
+
+pub fn verify_composition_pair_path<const DEPTH: usize>(
+    _ positive: BabyBearExt4,
+    _ negative: BabyBearExt4,
+    _ path: own CompositionPairPath<DEPTH>,
+    _ root: own CompositionDigest,
+) -> bool {
+    if !root.valid || !path.valid { return false }
+    pair_verify<Poseidon2Digest, DigestNodeHasher, DEPTH>(
+        root.value,
+        composition_row_commitment(positive).value,
+        composition_row_commitment(negative).value,
+        MerklePairPath<Poseidon2Digest, DEPTH> {
+            valid: path.valid,
+            index: path.index,
+            positive_siblings: path.positive_siblings,
+            negative_siblings: path.negative_siblings,
+        },
+    )
+}
+
 pub fn bind_main_lde(
     _ transcript: own ProofTranscriptDigest,
     _ main: own MainLdeDigest,
@@ -556,6 +674,37 @@ where { PREVIOUS > 0 }, { ROUND == PREVIOUS + 1 }, { ROUND < 100 }
     }
 }
 
+pub fn fri_query_challenge<const ROUND: u32, const QUERY: u32>(
+    _ transcript: own FriLayerTranscriptDigest<ROUND>,
+) -> FriQueryChallenge<QUERY>
+where { ROUND > 0 }, { ROUND < 100 }, { QUERY > 0 }, { QUERY < 100 }
+{
+    if !transcript.valid {
+        return FriQueryChallenge<QUERY> { valid: false, value: BabyBear::zero() }
+    }
+    FriQueryChallenge<QUERY> {
+        valid: true,
+        value: squeeze_ext4<MandelbrotFriQueryBabyBear<QUERY>>(
+            transcript.value,
+        ).coefficient(0),
+    }
+}
+
+pub fn fri_query_index_power_of_two<const QUERY: u32, const HALF: usize>(
+    _ challenge: own FriQueryChallenge<QUERY>,
+) -> FriQueryIndex<QUERY>
+where { QUERY > 0 }, { QUERY < 100 }, HALF > 0, { (HALF & (HALF - 1)) == 0 }, { HALF <= 134217728 }
+{
+    if !challenge.valid {
+        return FriQueryIndex<QUERY> { valid: false, value: 0 }
+    }
+    let half: u32 = HALF.downcast_truncate()
+    FriQueryIndex<QUERY> {
+        valid: true,
+        value: challenge.value.to_u32() & (half - 1),
+    }
+}
+
 pub fn fri_layer_row_commitment<const ROUND: u32>(
     _ value: BabyBearExt4,
 ) -> FriLayerDigest<ROUND>
@@ -583,6 +732,66 @@ where { ROUND > 0 }, { ROUND < 100 }, N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N 
     }
     let root = digest_root_power_of_two<N>(raw)
     FriLayerDigest<ROUND> { valid: root.valid, value: root.value }
+}
+
+pub fn fri_layer_pair_path_power_of_two<
+    const ROUND: u32,
+    const N: usize,
+    const HALF: usize,
+    const DEPTH: usize,
+>(
+    _ evaluations: own [BabyBearExt4; N],
+    _ index: u32,
+) -> FriLayerPairPath<ROUND, DEPTH>
+where
+    { ROUND > 0 },
+    { ROUND < 100 },
+    N > 1,
+    N <= MAX_PADDED_TRACE_LENGTH,
+    HALF > 0,
+    { HALF + HALF == N },
+{
+    let mut leaves = [Poseidon2Digest::zero(); N]
+    let mut cursor: usize = 0
+    while cursor < N {
+        leaves[cursor] = fri_layer_row_commitment<ROUND>(evaluations[cursor]).value
+        cursor = cursor + 1
+    }
+    let raw = pair_path_from_leaves<
+        Poseidon2Digest,
+        DigestNodeHasher,
+        N,
+        HALF,
+        DEPTH,
+    >(leaves, index)
+    FriLayerPairPath<ROUND, DEPTH> {
+        valid: raw.valid,
+        index: raw.index,
+        positive_siblings: raw.positive_siblings,
+        negative_siblings: raw.negative_siblings,
+    }
+}
+
+pub fn verify_fri_layer_pair_path<const ROUND: u32, const DEPTH: usize>(
+    _ positive: BabyBearExt4,
+    _ negative: BabyBearExt4,
+    _ path: own FriLayerPairPath<ROUND, DEPTH>,
+    _ root: own FriLayerDigest<ROUND>,
+) -> bool
+where { ROUND > 0 }, { ROUND < 100 }
+{
+    if !root.valid || !path.valid { return false }
+    pair_verify<Poseidon2Digest, DigestNodeHasher, DEPTH>(
+        root.value,
+        fri_layer_row_commitment<ROUND>(positive).value,
+        fri_layer_row_commitment<ROUND>(negative).value,
+        MerklePairPath<Poseidon2Digest, DEPTH> {
+            valid: path.valid,
+            index: path.index,
+            positive_siblings: path.positive_siblings,
+            negative_siblings: path.negative_siblings,
+        },
+    )
 }
 
 pub fn bind_first_fri_layer(
@@ -692,6 +901,52 @@ fn invalid_fri_complete16() -> FriProofComplete16 {
         second: invalid_fri_round<2, 4, 3>(),
         third: invalid_fri_round<3, 2, 4>(),
         final_round: invalid_fri_final<4>(),
+    }
+}
+
+fn invalid_composition_query_pair<const DEPTH: usize>() -> CompositionQueryPair<DEPTH> {
+    CompositionQueryPair<DEPTH> {
+        positive: BabyBearExt4::zero(),
+        negative: BabyBearExt4::zero(),
+        path: CompositionPairPath<DEPTH> {
+            valid: false,
+            index: 0,
+            positive_siblings: [Poseidon2Digest::zero(); DEPTH],
+            negative_siblings: [Poseidon2Digest::zero(); DEPTH],
+        },
+    }
+}
+
+fn invalid_fri_query_pair<const ROUND: u32, const DEPTH: usize>() -> FriQueryPair<
+    ROUND,
+    DEPTH,
+> {
+    FriQueryPair<ROUND, DEPTH> {
+        positive: BabyBearExt4::zero(),
+        negative: BabyBearExt4::zero(),
+        path: FriLayerPairPath<ROUND, DEPTH> {
+            valid: false,
+            index: 0,
+            positive_siblings: [Poseidon2Digest::zero(); DEPTH],
+            negative_siblings: [Poseidon2Digest::zero(); DEPTH],
+        },
+    }
+}
+
+fn invalid_fri_query16() -> FriCommitmentQuery16 {
+    FriCommitmentQuery16 {
+        valid: false,
+        composition_root: CompositionDigest { valid: false, value: Poseidon2Digest::zero() },
+        first_root: FriLayerDigest<1> { valid: false, value: Poseidon2Digest::zero() },
+        second_root: FriLayerDigest<2> { valid: false, value: Poseidon2Digest::zero() },
+        third_root: FriLayerDigest<3> { valid: false, value: Poseidon2Digest::zero() },
+        final_root: FriLayerDigest<4> { valid: false, value: Poseidon2Digest::zero() },
+        query_index: 0,
+        composition: invalid_composition_query_pair<3>(),
+        first: invalid_fri_query_pair<1, 2>(),
+        second: invalid_fri_query_pair<2, 1>(),
+        third: invalid_fri_query_pair<3, 0>(),
+        final_evaluation: BabyBearExt4::zero(),
     }
 }
 
@@ -864,4 +1119,246 @@ pub fn fold_all_fri16(
         third: third,
         final_round: final_round,
     }
+}
+
+pub fn open_fri_commitment_query16(
+    _ evaluations: own [BabyBearExt4; 16],
+    _ air_transcript: own AirLdeTranscriptDigest,
+    _ shift: BabyBear,
+) -> FriCommitmentQuery16 {
+    if !air_transcript.valid || shift.is_zero() {
+        return invalid_fri_query16()
+    }
+
+    let mut composition_leaves = [CompositionDigest {
+        valid: false,
+        value: Poseidon2Digest::zero(),
+    }; 16]
+    let mut cursor: usize = 0
+    while cursor < 16 {
+        composition_leaves[cursor] = composition_row_commitment(evaluations[cursor])
+        cursor = cursor + 1
+    }
+    let composition_root = composition_root_power_of_two<16>(composition_leaves)
+    let composition_transcript = bind_composition(air_transcript, composition_root)
+    let complete = fold_all_fri16(evaluations, composition_transcript, shift)
+    if !composition_root.valid || !composition_transcript.valid || !complete.valid {
+        return invalid_fri_query16()
+    }
+
+    let query_challenge = fri_query_challenge<4, 1>(complete.final_round.transcript)
+    let query = fri_query_index_power_of_two<1, 8>(query_challenge)
+    if !query.valid { return invalid_fri_query16() }
+    let first_index = query.value & 3
+    let second_index = first_index & 1
+
+    let composition_path = composition_pair_path_power_of_two<16, 8, 3>(
+        evaluations,
+        query.value,
+    )
+    let first_path = fri_layer_pair_path_power_of_two<1, 8, 4, 2>(
+        complete.first.evaluations,
+        first_index,
+    )
+    let second_path = fri_layer_pair_path_power_of_two<2, 4, 2, 1>(
+        complete.second.evaluations,
+        second_index,
+    )
+    let third_path = fri_layer_pair_path_power_of_two<3, 2, 1, 0>(
+        complete.third.evaluations,
+        0,
+    )
+    if !composition_path.valid
+        || !first_path.valid
+        || !second_path.valid
+        || !third_path.valid {
+        return invalid_fri_query16()
+    }
+
+    let composition_index: usize = query.value as usize
+    let first_position: usize = first_index as usize
+    let second_position: usize = second_index as usize
+    FriCommitmentQuery16 {
+        valid: true,
+        composition_root: composition_root,
+        first_root: complete.first.root,
+        second_root: complete.second.root,
+        third_root: complete.third.root,
+        final_root: complete.final_round.root,
+        query_index: query.value,
+        composition: CompositionQueryPair<3> {
+            positive: evaluations[composition_index],
+            negative: evaluations[composition_index + 8],
+            path: composition_path,
+        },
+        first: FriQueryPair<1, 2> {
+            positive: complete.first.evaluations[first_position],
+            negative: complete.first.evaluations[first_position + 4],
+            path: first_path,
+        },
+        second: FriQueryPair<2, 1> {
+            positive: complete.second.evaluations[second_position],
+            negative: complete.second.evaluations[second_position + 2],
+            path: second_path,
+        },
+        third: FriQueryPair<3, 0> {
+            positive: complete.third.evaluations[0],
+            negative: complete.third.evaluations[1],
+            path: third_path,
+        },
+        final_evaluation: complete.final_round.evaluation,
+    }
+}
+
+fn fold_fri_pair_at<const N: usize>(
+    _ positive: BabyBearExt4,
+    _ negative: BabyBearExt4,
+    _ challenge: BabyBearExt4,
+    _ shift: BabyBear,
+    _ index: u32,
+) -> FriFoldEvaluations<1>
+where N > 0, N > 1, { (N & (N - 1)) == 0 }
+{
+    let point = shift * BabyBear::two_adic_root(radix2_log<N>()).pow_u32(index)
+    fold_fri_evaluations<2, 1>([positive, negative], challenge, point)
+}
+
+pub fn verify_fri_commitment_query16(
+    _ air_transcript: own AirLdeTranscriptDigest,
+    _ shift: BabyBear,
+    _ proof: own FriCommitmentQuery16,
+) -> bool {
+    if !air_transcript.valid
+        || shift.is_zero()
+        || !proof.valid
+        || !proof.composition_root.valid
+        || !proof.first_root.valid
+        || !proof.second_root.valid
+        || !proof.third_root.valid
+        || !proof.final_root.valid {
+        return false
+    }
+
+    let composition_transcript = bind_composition(air_transcript, proof.composition_root)
+    let first_challenge = fri_fold_challenge(composition_transcript)
+    let first_transcript = bind_first_fri_layer(composition_transcript, proof.first_root)
+    let second_challenge = next_fri_fold_challenge<1, 2>(first_transcript)
+    let second_transcript = bind_next_fri_layer<1, 2>(first_transcript, proof.second_root)
+    let third_challenge = next_fri_fold_challenge<2, 3>(second_transcript)
+    let third_transcript = bind_next_fri_layer<2, 3>(second_transcript, proof.third_root)
+    let fourth_challenge = next_fri_fold_challenge<3, 4>(third_transcript)
+    let fourth_transcript = bind_next_fri_layer<3, 4>(third_transcript, proof.final_root)
+    let query_challenge = fri_query_challenge<4, 1>(fourth_transcript)
+    let query = fri_query_index_power_of_two<1, 8>(query_challenge)
+    if !composition_transcript.valid
+        || !first_challenge.valid
+        || !first_transcript.valid
+        || !second_challenge.valid
+        || !second_transcript.valid
+        || !third_challenge.valid
+        || !third_transcript.valid
+        || !fourth_challenge.valid
+        || !fourth_transcript.valid
+        || !query.valid {
+        return false
+    }
+    let first_index = query.value & 3
+    let second_index = first_index & 1
+    if proof.query_index != query.value
+        || proof.composition.path.index != query.value
+        || proof.first.path.index != first_index
+        || proof.second.path.index != second_index
+        || proof.third.path.index != 0 {
+        return false
+    }
+
+    if !verify_composition_pair_path<3>(
+            proof.composition.positive,
+            proof.composition.negative,
+            proof.composition.path,
+            proof.composition_root,
+        )
+        || !verify_fri_layer_pair_path<1, 2>(
+            proof.first.positive,
+            proof.first.negative,
+            proof.first.path,
+            proof.first_root,
+        )
+        || !verify_fri_layer_pair_path<2, 1>(
+            proof.second.positive,
+            proof.second.negative,
+            proof.second.path,
+            proof.second_root,
+        )
+        || !verify_fri_layer_pair_path<3, 0>(
+            proof.third.positive,
+            proof.third.negative,
+            proof.third.path,
+            proof.third_root,
+        ) {
+        return false
+    }
+    let final_commitment = fri_layer_row_commitment<4>(proof.final_evaluation)
+    if !final_commitment.value.equals(proof.final_root.value) {
+        return false
+    }
+
+    let first_fold = fold_fri_pair_at<16>(
+        proof.composition.positive,
+        proof.composition.negative,
+        first_challenge.value,
+        shift,
+        query.value,
+    )
+    let expected_first = if query.value < 4 {
+        proof.first.positive
+    } else {
+        proof.first.negative
+    }
+    if !first_fold.valid || !first_fold.evaluations[0].equals(expected_first) {
+        return false
+    }
+
+    let shift2 = shift.square()
+    let second_fold = fold_fri_pair_at<8>(
+        proof.first.positive,
+        proof.first.negative,
+        second_challenge.value,
+        shift2,
+        first_index,
+    )
+    let expected_second = if first_index < 2 {
+        proof.second.positive
+    } else {
+        proof.second.negative
+    }
+    if !second_fold.valid || !second_fold.evaluations[0].equals(expected_second) {
+        return false
+    }
+
+    let shift3 = shift2.square()
+    let third_fold = fold_fri_pair_at<4>(
+        proof.second.positive,
+        proof.second.negative,
+        third_challenge.value,
+        shift3,
+        second_index,
+    )
+    let expected_third = if second_index == 0 {
+        proof.third.positive
+    } else {
+        proof.third.negative
+    }
+    if !third_fold.valid || !third_fold.evaluations[0].equals(expected_third) {
+        return false
+    }
+
+    let final_fold = fold_fri_pair_at<2>(
+        proof.third.positive,
+        proof.third.negative,
+        fourth_challenge.value,
+        shift3.square(),
+        0,
+    )
+    final_fold.valid && final_fold.evaluations[0].equals(proof.final_evaluation)
 }
