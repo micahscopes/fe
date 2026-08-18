@@ -10,6 +10,7 @@ use super::field::{
     U32EmbeddingModulus,
 }
 use super::word_field::{WordField, WordTwoAdicPrime}
+use super::binomial_extension::{BinomialExtension4, WordBinomialExtension4}
 use core::marker::Copy
 
 const fn radix2_log_unchecked<const N: usize>() -> u32 {
@@ -69,6 +70,20 @@ impl<M: WordTwoAdicPrime> Radix2Field for WordField<M> {
     fn radix2_pow(self, _ exponent: u32) -> Self { self.pow_u32(exponent) }
     fn radix2_inverse_or_zero(self) -> Self { self.inverse_or_zero() }
     fn radix2_root(_ log_order: u32) -> Self { Self::two_adic_root(log_order) }
+}
+
+impl<M: WordTwoAdicPrime + WordBinomialExtension4> Radix2Field for BinomialExtension4<M> {
+    const TWO_ADICITY: u32 = M::TWO_ADICITY
+    fn radix2_zero() -> Self { Self::zero() }
+    fn radix2_is_zero(self) -> bool { self.is_zero() }
+    fn radix2_add(self, _ other: Self) -> Self { self + other }
+    fn radix2_sub(self, _ other: Self) -> Self { self - other }
+    fn radix2_mul(self, _ other: Self) -> Self { self * other }
+    fn radix2_pow(self, _ exponent: u32) -> Self { self.pow_u32(exponent) }
+    fn radix2_inverse_or_zero(self) -> Self { self.inverse_or_zero() }
+    fn radix2_root(_ log_order: u32) -> Self {
+        Self::from_base(WordField<M>::two_adic_root(log_order))
+    }
 }
 
 fn radix2_natural<F: Radix2Field>(_ value: u32) -> F {
@@ -207,6 +222,36 @@ pub fn radix2_word_intt<const N: usize, M: WordTwoAdicPrime>(
     transform_field<N, WordField<M>>(evaluations, true)
 }
 
+/// The same dependency plan interpreted over a quartic challenge field. Its
+/// roots of unity are canonical base-field roots embedded as constants.
+pub fn radix2_ext4_ntt<
+    const N: usize,
+    M: WordTwoAdicPrime + WordBinomialExtension4,
+>(
+    _ coefficients: own [BinomialExtension4<M>; N],
+) -> [BinomialExtension4<M>; N]
+    where
+        N > 0,
+        { (N & (N - 1)) == 0 },
+        { radix2_log_unchecked<N>() <= M::TWO_ADICITY },
+{
+    transform_field<N, BinomialExtension4<M>>(coefficients, false)
+}
+
+pub fn radix2_ext4_intt<
+    const N: usize,
+    M: WordTwoAdicPrime + WordBinomialExtension4,
+>(
+    _ evaluations: own [BinomialExtension4<M>; N],
+) -> [BinomialExtension4<M>; N]
+    where
+        N > 0,
+        { (N & (N - 1)) == 0 },
+        { radix2_log_unchecked<N>() <= M::TWO_ADICITY },
+{
+    transform_field<N, BinomialExtension4<M>>(evaluations, true)
+}
+
 struct FieldCosetLde<const N: usize, F> {
     valid: bool,
     evaluations: [F; N],
@@ -298,6 +343,13 @@ pub struct WordRadix2CosetLde<const N: usize, M> {
 
 impl<const N: usize, M> Copy for WordRadix2CosetLde<N, M> {}
 
+pub struct Ext4Radix2CosetLde<const N: usize, M> {
+    pub valid: bool,
+    pub evaluations: [BinomialExtension4<M>; N],
+}
+
+impl<const N: usize, M> Copy for Ext4Radix2CosetLde<N, M> {}
+
 pub fn radix2_word_coset_lde<
     const N: usize,
     const OUT: usize,
@@ -321,4 +373,29 @@ pub fn radix2_word_coset_lde<
         shift,
     )
     WordRadix2CosetLde { valid: lde.valid, evaluations: lde.evaluations }
+}
+
+pub fn radix2_ext4_coset_lde<
+    const N: usize,
+    const OUT: usize,
+    M: WordTwoAdicPrime + WordBinomialExtension4,
+>(
+    _ base_evaluations: own [BinomialExtension4<M>; N],
+    _ shift: BinomialExtension4<M>,
+) -> Ext4Radix2CosetLde<OUT, M>
+    where
+        N > 0,
+        { (N & (N - 1)) == 0 },
+        { radix2_log_unchecked<N>() <= M::TWO_ADICITY },
+        OUT > 0,
+        OUT > N,
+        { (OUT & (OUT - 1)) == 0 },
+        { radix2_log_unchecked<OUT>() <= M::TWO_ADICITY },
+        { (OUT % N) == 0 },
+{
+    let lde = radix2_field_coset_lde<N, OUT, BinomialExtension4<M>>(
+        base_evaluations,
+        shift,
+    )
+    Ext4Radix2CosetLde { valid: lde.valid, evaluations: lde.evaluations }
 }

@@ -217,6 +217,17 @@ fn direct_coset_lde(values: &[u32], output_len: usize, shift: u32) -> Vec<u32> {
         .collect()
 }
 
+fn ext4_pattern_component(seed: u32, component: usize) -> Vec<u32> {
+    (0..8u32)
+        .map(|index| match component {
+            0 => seed + index,
+            1 => seed + 17 + index,
+            2 => seed + 37 + index + index,
+            _ => seed + 71 + index + index + index,
+        })
+        .collect()
+}
+
 fn inverse_mod_2_32(odd: u32) -> u32 {
     let modulus = 1i128 << 32;
     let mut old_r = i128::from(odd);
@@ -552,6 +563,52 @@ fn shared_radix2_plan_matches_direct_baby_bear_dft_and_lde() {
             call(&mut store, &instance, "baby_bear_lde8x16", &arguments, 17,),
             vec![0; 17],
             "zero or subgroup shift {shift} must fail closed",
+        );
+    }
+
+    for seed in [0, 97] {
+        for component in 0..4 {
+            let values = ext4_pattern_component(seed, component);
+            assert_eq!(
+                call(
+                    &mut store,
+                    &instance,
+                    "baby_bear_ext4_ntt8_component",
+                    &[seed, component as u32],
+                    8,
+                ),
+                direct_ntt(&values, false),
+                "quartic radix plan differs for seed {seed}, component {component}",
+            );
+            for shift in [7, 123_456_789] {
+                let mut expected = vec![1];
+                expected.extend(direct_coset_lde(&values, 16, shift));
+                assert_eq!(
+                    call(
+                        &mut store,
+                        &instance,
+                        "baby_bear_ext4_lde8x16_component",
+                        &[seed, component as u32, shift],
+                        17,
+                    ),
+                    expected,
+                    "quartic LDE differs for seed {seed}, component {component}, shift {shift}",
+                );
+            }
+        }
+    }
+
+    for shift in [0, 1] {
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "baby_bear_ext4_lde8x16_component",
+                &[97, 2, shift],
+                17,
+            ),
+            vec![0; 17],
+            "quartic zero or subgroup shift {shift} must fail closed",
         );
     }
 }

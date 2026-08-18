@@ -9,9 +9,27 @@ use precision::baby_bear::{
 }
 use precision::polynomial::{
     WordRadix2CosetLde,
+    radix2_ext4_coset_lde,
+    radix2_ext4_ntt,
     radix2_word_coset_lde,
     radix2_word_intt,
     radix2_word_ntt,
+}
+
+fn ext4_pattern8(_ seed: u32) -> [BabyBearExt4; 8] {
+    let mut values = [BabyBearExt4::zero(); 8]
+    let mut index: usize = 0
+    while index < 8 {
+        let i: u32 = index.downcast_truncate()
+        values[index] = BabyBearExt4::from_u32s([
+            seed + i,
+            seed + 17 + i,
+            seed + 37 + i + i,
+            seed + 71 + i + i + i,
+        ])
+        index = index + 1
+    }
+    values
 }
 
 fn baby_bear8(
@@ -90,6 +108,61 @@ pub fn baby_bear_lde8x16(
         baby_bear8(a0, a1, a2, a3, a4, a5, a6, a7),
         BabyBear::from_u32(shift),
     ))
+}
+
+pub fn baby_bear_ext4_ntt8_component(
+    _ seed: u32,
+    _ component: u32,
+) -> (u32, u32, u32, u32, u32, u32, u32, u32) {
+    if component >= 4 { return (0, 0, 0, 0, 0, 0, 0, 0) }
+    let values = radix2_ext4_ntt<8, precision::baby_bear::BabyBearModulus>(
+        ext4_pattern8(seed),
+    )
+    let c: usize = component as usize
+    (
+        values[0].coefficient(c).to_u32(), values[1].coefficient(c).to_u32(),
+        values[2].coefficient(c).to_u32(), values[3].coefficient(c).to_u32(),
+        values[4].coefficient(c).to_u32(), values[5].coefficient(c).to_u32(),
+        values[6].coefficient(c).to_u32(), values[7].coefficient(c).to_u32(),
+    )
+}
+
+pub fn baby_bear_ext4_lde8x16_component(
+    _ seed: u32,
+    _ component: u32,
+    _ shift: u32,
+) -> (
+    u32,
+    u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    if component >= 4 {
+        return (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    }
+    let lde = radix2_ext4_coset_lde<8, 16, precision::baby_bear::BabyBearModulus>(
+        ext4_pattern8(seed),
+        BabyBearExt4::from_base(BabyBear::from_u32(shift)),
+    )
+    let c: usize = component as usize
+    (
+        if lde.valid { 1 } else { 0 },
+        lde.evaluations[0].coefficient(c).to_u32(),
+        lde.evaluations[1].coefficient(c).to_u32(),
+        lde.evaluations[2].coefficient(c).to_u32(),
+        lde.evaluations[3].coefficient(c).to_u32(),
+        lde.evaluations[4].coefficient(c).to_u32(),
+        lde.evaluations[5].coefficient(c).to_u32(),
+        lde.evaluations[6].coefficient(c).to_u32(),
+        lde.evaluations[7].coefficient(c).to_u32(),
+        lde.evaluations[8].coefficient(c).to_u32(),
+        lde.evaluations[9].coefficient(c).to_u32(),
+        lde.evaluations[10].coefficient(c).to_u32(),
+        lde.evaluations[11].coefficient(c).to_u32(),
+        lde.evaluations[12].coefficient(c).to_u32(),
+        lde.evaluations[13].coefficient(c).to_u32(),
+        lde.evaluations[14].coefficient(c).to_u32(),
+        lde.evaluations[15].coefficient(c).to_u32(),
+    )
 }
 
 pub fn baby_bear_ext4_add(
