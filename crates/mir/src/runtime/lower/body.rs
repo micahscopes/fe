@@ -5439,8 +5439,8 @@ impl<'emitter, 'db> RuntimeArgLowerer<'emitter, 'db> {
                 };
                 self.apply_use_plan(value, use_plan.clone(), self.semantic_local_ty(*local))
             }
-            (RuntimeArgSource::Placeholder(semantic_ty), use_plan) => {
-                let value = self.lower_placeholder(*semantic_ty, selected.class.clone());
+            (RuntimeArgSource::Placeholder { semantic_ty, class }, use_plan) => {
+                let value = self.lower_placeholder(*semantic_ty, class.clone());
                 self.apply_use_plan(value, use_plan.clone(), *semantic_ty)
             }
         }

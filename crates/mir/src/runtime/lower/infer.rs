@@ -6,7 +6,10 @@ use hir::{
     analysis::{
         semantic::{
             SLocalId, SemanticLocalKind,
-            borrowck::{NLocalOrigin, NSLocal, NormalizedBindingLowering, NormalizedSemanticBody},
+            borrowck::{
+                NExpr, NLocalOrigin, NSLocal, NSStmtKind, NormalizedBindingLowering,
+                NormalizedSemanticBody,
+            },
         },
         ty::{
             trait_resolution::PredicateListId, ty_check::LocalBinding, ty_def::CapabilityKind,
@@ -56,6 +59,49 @@ pub(super) struct LocalStateInferer<'a, 'db> {
     carriers: Vec<RuntimeCarrier<'db>>,
     class_cache: InferClassCache<'db>,
     pending_dependents: Vec<AssignmentId>,
+}
+
+fn defining_source_class<'db>(
+    env: BodyEnv<'_, 'db>,
+    carriers: &[RuntimeCarrier<'db>],
+    destination: SLocalId,
+) -> Option<RuntimeClass<'db>> {
+    let mut pending = vec![destination];
+    let mut seen = vec![false; env.body().locals.len()];
+    while let Some(current) = pending.pop() {
+        if std::mem::replace(&mut seen[current.index()], true) {
+            continue;
+        }
+        for assignment_id in env.assignment_ids() {
+            let assignment = env.assignment(assignment_id)?;
+            if assignment.dst != current {
+                continue;
+            }
+            let statement = &env.body().blocks[assignment.block_idx].stmts[assignment.stmt_idx];
+            let NSStmtKind::Assign { expr, .. } = &statement.kind else {
+                continue;
+            };
+            if let NExpr::Use(source) = expr {
+                if let Some(class) = carrier_value_class(source.local, carriers) {
+                    return Some(class);
+                }
+                pending.push(source.local);
+                continue;
+            }
+            let mut lookup_return_class = |key| runtime_return_class(env.db(), key);
+            if let Some(class) = env.expr_direct_class(
+                carriers,
+                assignment.block_idx,
+                assignment.stmt_idx,
+                expr,
+                None,
+                &mut lookup_return_class,
+            ) {
+                return Some(class);
+            }
+        }
+    }
+    None
 }
 
 impl<'a, 'db> LocalStateInferer<'a, 'db> {
@@ -161,6 +207,40 @@ impl<'a, 'db> LocalStateInferer<'a, 'db> {
         for (idx, local) in cx.env.body().locals.iter().enumerate() {
             let local_id = SLocalId::from_u32(idx as u32);
             let mut carrier = carriers[idx].clone();
+            if matches!(carrier, RuntimeCarrier::Erased)
+                && local.facts.root_demand.needs_projectable_owned_storage()
+            {
+                let source_class = cx
+                    .env
+                    .source_locals(local_id)
+                    .iter()
+                    .find_map(|source| carrier_value_class(*source, &carriers))
+                    .or_else(|| defining_source_class(cx.env, &carriers, local_id))
+                    .or_else(|| {
+                        top_level_class_for_ty_in_context(
+                            cx.env.db(),
+                            local.ty,
+                            AddressSpaceKind::Memory,
+                            cx.env.scope(),
+                            cx.env.assumptions(),
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        stored_class_for_ty_in_context(
+                            cx.env.db(),
+                            local.ty,
+                            cx.env.scope(),
+                            cx.env.assumptions(),
+                        )
+                    });
+                carrier = desired_runtime_value_carrier(
+                    cx.env.db(),
+                    local,
+                    source_class,
+                    cx.env.scope(),
+                    cx.env.assumptions(),
+                );
+            }
             let root = if !local.facts.root_demand.needs_runtime_root() {
                 RuntimeLocalRoot::None
             } else if let Some(unrooted_carrier) = local_lowers_as_unrooted_read_value(
@@ -313,6 +393,12 @@ pub(crate) fn desired_runtime_value_carrier<'db>(
     {
         return RuntimeCarrier::Value(transport_class);
     }
+    if let RuntimeClass::AggregateValue { layout } = &class
+        && matches!(local.facts.interface, SemanticLocalKind::DirectValue)
+        && local.facts.root_demand.needs_projectable_owned_storage()
+    {
+        return RuntimeCarrier::Value(RuntimeClass::object_ref(*layout));
+    }
     if runtime_class_has_zero_sized_payload(db, &class) {
         return RuntimeCarrier::Erased;
     }
@@ -331,15 +417,7 @@ pub(crate) fn desired_runtime_value_carrier<'db>(
     {
         return RuntimeCarrier::Value(transport_class);
     }
-    match class {
-        RuntimeClass::AggregateValue { layout }
-            if matches!(local.facts.interface, SemanticLocalKind::DirectValue)
-                && local.facts.root_demand.needs_projectable_owned_storage() =>
-        {
-            RuntimeCarrier::Value(RuntimeClass::object_ref(layout))
-        }
-        class => RuntimeCarrier::Value(class),
-    }
+    RuntimeCarrier::Value(class)
 }
 
 fn runtime_class_has_zero_sized_payload<'db>(

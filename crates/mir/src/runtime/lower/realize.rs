@@ -38,7 +38,10 @@ pub(super) enum RuntimeArgSource<'db> {
     },
     SemanticPlaceAddress(SLocalId, TyId<'db>),
     AggregateFromRuntimeSource(SLocalId),
-    Placeholder(TyId<'db>),
+    Placeholder {
+        semantic_ty: TyId<'db>,
+        class: RuntimeClass<'db>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -360,10 +363,24 @@ impl<'db> SelectedRuntimeArg<'db> {
 
     pub(super) fn placeholder(semantic_ty: TyId<'db>, class: RuntimeClass<'db>) -> Self {
         Self {
-            class,
-            source: RuntimeArgSource::Placeholder(semantic_ty),
+            class: class.clone(),
+            source: RuntimeArgSource::Placeholder { semantic_ty, class },
             use_plan: RuntimeValueUsePlan::UseValue,
         }
+    }
+
+    pub(super) fn materialized_placeholder(
+        semantic_ty: TyId<'db>,
+        source_class: RuntimeClass<'db>,
+        materialization: RuntimeValueMaterialization<'db>,
+    ) -> Self {
+        Self::materialize(
+            RuntimeArgSource::Placeholder {
+                semantic_ty,
+                class: source_class,
+            },
+            materialization,
+        )
     }
 
     pub(super) fn place_addr(

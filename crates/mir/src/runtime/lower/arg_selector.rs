@@ -9,7 +9,7 @@ use hir::analysis::{
 use hir::hir_def::{Expr, Partial};
 
 use crate::runtime::{
-    AddressSpaceKind, RefKind, RuntimeBoundarySpec, RuntimeCarrier, RuntimeClass,
+    AddressSpaceKind, RefKind, RefView, RuntimeBoundarySpec, RuntimeCarrier, RuntimeClass,
 };
 
 use super::{
@@ -224,6 +224,20 @@ impl<'a, 'carriers, 'roots, 'cache, 'db> RuntimeArgSelector<'a, 'carriers, 'root
             return Some(SelectedRuntimeArg::placeholder(
                 self.env.body().locals.get(local.index())?.ty,
                 target.clone(),
+            ));
+        }
+        if let RuntimeClass::Ref {
+            pointee,
+            kind: RefKind::Object,
+            view: RefView::Whole,
+        } = target
+            && pointee.span_words(self.env.db()) == 0
+            && let Some(layout) = pointee.aggregate_layout()
+        {
+            return Some(SelectedRuntimeArg::materialized_placeholder(
+                self.env.body().locals.get(local.index())?.ty,
+                pointee.as_ref().clone(),
+                RuntimeValueMaterialization::ObjectRef(layout),
             ));
         }
         if matches!(target, RuntimeClass::AggregateValue { .. })
@@ -546,7 +560,9 @@ impl<'a, 'carriers, 'roots, 'cache, 'db> RuntimeArgSelector<'a, 'carriers, 'root
             // Load that local object, rather than its historical source place.
             return Some(selected);
         }
-        Some(SelectedRuntimeArg::aggregate_from_runtime_source(local, class))
+        Some(SelectedRuntimeArg::aggregate_from_runtime_source(
+            local, class,
+        ))
     }
 
     fn select_boundary_compatible_value(
@@ -878,10 +894,8 @@ impl<'a, 'carriers, 'roots, 'cache, 'db> RuntimeArgSelector<'a, 'carriers, 'root
             .body()
             .locals
             .get(local.index())
-            .is_some_and(|local| {
-                matches!(local.facts.interface, SemanticLocalKind::DirectValue)
-            }) && carrier_value_class(local, self.carriers)
-            .is_some_and(|class| !class.is_transport())
+            .is_some_and(|local| matches!(local.facts.interface, SemanticLocalKind::DirectValue))
+            && carrier_value_class(local, self.carriers).is_some_and(|class| !class.is_transport())
     }
 
     fn select_place_effect_arg(

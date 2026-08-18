@@ -4160,7 +4160,7 @@ uses (slot: Slot<u256>)
             | RuntimeArgSource::RuntimeValue(_)
             | RuntimeArgSource::HandleLikeValue(_)
             | RuntimeArgSource::AggregateFromRuntimeSource(_)
-            | RuntimeArgSource::Placeholder(_) => return None,
+            | RuntimeArgSource::Placeholder { .. } => return None,
         };
         matches!(carriers.get(local.index()), Some(RuntimeCarrier::Erased))
             .then_some(local)

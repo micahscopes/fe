@@ -115,6 +115,37 @@ impl<const N: usize> Fold for [u32; N] {
 pub fn empty_fold() -> u32 { [0; 0].fold() }
 "#;
 
+const ZERO_LENGTH_GENERIC_MUTATION_SOURCE: &str = r#"
+struct Word { value: u32 }
+impl Copy for Word {}
+
+trait Combine<T: Copy> {
+    fn zero() -> T
+    fn combine(left: T, right: T) -> T
+}
+
+struct WordCombiner {}
+
+impl Combine<Word> for WordCombiner {
+    fn zero() -> Word { Word { value: 0 } }
+    fn combine(left: Word, right: Word) -> Word {
+        Word { value: left.value + right.value }
+    }
+}
+
+fn update<F: Copy, H: Combine<F>, const N: usize>(values: own [F; N]) -> u32 {
+    let mut nodes = values
+    let mut cursor: usize = 0
+    while cursor < N {
+        nodes[cursor] = H::combine(left: nodes[cursor], right: H::zero())
+        cursor = cursor + 1
+    }
+    0
+}
+
+pub fn empty_update() -> u32 { update<Word, WordCombiner, 0>(values: []) }
+"#;
+
 const VALUE_PARAMETER_COPY_SOURCE: &str = r#"
 fn replace_first(_ input: own [u32; 4], _ replacement: u32) -> [u32; 4] {
     let mut output = input
@@ -351,6 +382,22 @@ fn zero_length_generic_array_keeps_shape_without_transport_lanes() {
 }
 
 #[test]
+fn zero_length_generic_mutation_keeps_addressable_shape_without_payload() {
+    let bytes = compile(
+        ZERO_LENGTH_GENERIC_MUTATION_SOURCE,
+        "wasm_zero_length_generic_array_mutation",
+    );
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, bytes).unwrap();
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+    let update = instance
+        .get_typed_func::<(), i32>(&mut store, "empty_update")
+        .expect("empty_update export");
+    assert_eq!(update.call(&mut store, ()).unwrap(), 0);
+}
+
+#[test]
 fn copied_value_parameter_materializes_all_aggregate_leaves() {
     let bytes = compile(
         VALUE_PARAMETER_COPY_SOURCE,
@@ -385,7 +432,10 @@ fn nested_mutable_array_borrows_preserve_one_backing_object() {
     let update = instance
         .get_typed_func::<(i32, i32, i32, i32), (i32, i32, i32, i32)>(&mut store, "update")
         .expect("update export");
-    assert_eq!(update.call(&mut store, (3, 5, 7, 11)).unwrap(), (3, 6, 8, 11));
+    assert_eq!(
+        update.call(&mut store, (3, 5, 7, 11)).unwrap(),
+        (3, 6, 8, 11)
+    );
 }
 
 #[test]

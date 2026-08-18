@@ -1081,6 +1081,95 @@ fn entry() -> u32 {
 }
 
 #[test]
+fn zero_length_generic_mutable_array_copy_keeps_projectable_storage() {
+    with_runtime_package!(
+        "zero_length_generic_mutable_array_copy_keeps_projectable_storage.fe",
+        r#"struct Word { value: u32 }
+impl Copy for Word {}
+
+trait Combine<T: Copy> {
+    fn zero() -> T
+    fn combine(left: T, right: T) -> T
+}
+
+struct WordCombiner {}
+
+impl Combine<Word> for WordCombiner {
+    fn zero() -> Word { Word { value: 0 } }
+    fn combine(left: Word, right: Word) -> Word {
+        Word { value: left.value + right.value }
+    }
+}
+
+fn update<F: Copy, H: Combine<F>, const N: usize>(
+    values: own [F; N],
+) -> u32 {
+    let mut nodes = values
+    let mut cursor: usize = 0
+    while cursor < N {
+        nodes[cursor] = H::combine(left: nodes[cursor], right: H::zero())
+        cursor = cursor + 1
+    }
+    0
+}
+
+fn entry() -> u32 {
+    update<Word, WordCombiner, 0>(values: [])
+}
+"#,
+        |db, package| {
+            let body = runtime_body_for_symbol(&db, package, "update");
+            let (rooted_copy, root_class) = body
+                .locals
+                .iter()
+                .enumerate()
+                .find_map(|(index, local)| {
+                    if !matches!(
+                        local.root,
+                        RuntimeLocalRoot::Slot(_) | RuntimeLocalRoot::Ref(_)
+                    ) {
+                        return None;
+                    }
+                    let RuntimeCarrier::Value(RuntimeClass::Ref {
+                        pointee,
+                        kind: RefKind::Object,
+                        ..
+                    }) = &local.carrier
+                    else {
+                        return None;
+                    };
+                    (pointee.span_words(&db) == 0
+                        && local
+                            .semantic_ty
+                            .pretty_print(&db)
+                            .to_string()
+                            .starts_with('['))
+                    .then(|| (RLocalId::from_u32(index as u32), pointee))
+                })
+                .expect("zero-length generic mutable array copy should retain projectable storage");
+
+            assert_eq!(
+                root_class.span_words(&db),
+                0,
+                "the projectable empty array should add no payload words"
+            );
+
+            assert!(
+                runtime_body_stmts(&body).any(|stmt| {
+                    matches!(
+                        stmt,
+                        RStmt::Store { dst, .. } | RStmt::CopyInto { dst, .. }
+                            if matches!(dst.root, PlaceRoot::Slot(root) | PlaceRoot::Ref(root) if root == rooted_copy)
+                                && matches!(dst.path.as_ref(), [PlaceElem::Index(_)])
+                    )
+                }),
+                "dynamic mutation should store through the copied array root:\n{body:#?}"
+            );
+        }
+    );
+}
+
+#[test]
 fn generic_record_array_fold_keeps_dynamic_receiver_storage() {
     with_runtime_package!(
         "generic_record_array_fold_keeps_dynamic_receiver_storage.fe",
