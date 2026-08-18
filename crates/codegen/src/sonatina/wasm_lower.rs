@@ -7899,6 +7899,41 @@ where
                 let imm = immediate_for_const_scalar(constant, ty)?;
                 Ok(self.fb.make_imm_value(imm))
             }
+            RExpr::Placeholder {
+                class:
+                    class @ RuntimeClass::Ref {
+                        pointee,
+                        kind:
+                            RefKind::Provider {
+                                space: AddressSpaceKind::Memory,
+                                ..
+                            },
+                        view: RefView::Whole,
+                    },
+            } if pointee.aggregate_layout().is_some_and(|layout| {
+                mir::layout_size_bytes(self.module.db, layout, crate::WASM_LAYOUT) == 0
+            }) =>
+            {
+                let dst_class = self.body.value_class(dst).ok_or_else(|| {
+                    LowerError::Internal(format!(
+                        "zero-sized borrow placeholder destination {dst:?} has no class"
+                    ))
+                })?;
+                if !class.shares_runtime_rep_with(self.module.db, dst_class) {
+                    return Err(LowerError::Internal(format!(
+                        "zero-sized borrow placeholder class {class:?} does not match \
+                         destination {dst_class:?}"
+                    )));
+                }
+                let ty = self.local_ty(dst)?;
+                let immediate = zero_immediate(ty).ok_or_else(|| {
+                    LowerError::Unsupported(format!(
+                        "wasm target: zero-sized borrow placeholder has unsupported carrier \
+                         type {ty:?}"
+                    ))
+                })?;
+                Ok(self.fb.make_imm_value(immediate))
+            }
             RExpr::Binary { op, lhs, rhs } => self.lower_binary(*op, *lhs, *rhs, dst),
             RExpr::Unary { op, value } => self.lower_unary(*op, *value),
             RExpr::Cast { value, to } => {

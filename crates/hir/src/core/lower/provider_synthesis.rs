@@ -455,6 +455,10 @@ impl<'a, 'db> ReplayCtxt<'a, 'db> {
                 let value = self.replay_expr(body, *value);
                 body.push_expr(Expr::Un(value, crate::hir_def::UnOp::Minus))
             }
+            GenExpr::Borrow(value) => {
+                let value = self.replay_expr(body, *value);
+                body.push_expr(Expr::Un(value, crate::hir_def::UnOp::Ref))
+            }
             GenExpr::SelfRef => body.path_expr(PathId::from_ident(db, IdentId::make_self(db))),
             GenExpr::ArgRef(name) => body.ident_expr(*name),
             GenExpr::FieldGet(base, field) => {

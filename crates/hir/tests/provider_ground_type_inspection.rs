@@ -1,4 +1,6 @@
-use fe_hir::test_db::HirAnalysisTestDb;
+use fe_hir::{
+    analysis::semantic::collect_semantic_borrow_diagnostic_vouchers, test_db::HirAnalysisTestDb,
+};
 
 #[test]
 fn reflected_const_candidate_can_narrow_into_an_exact_i32_term() {
@@ -797,6 +799,98 @@ fn use_generated(value: Target, sink: Sink) -> u32 {
     );
     let (top_mod, _) = db.top_mod(file);
     db.assert_no_diags(top_mod);
+}
+
+#[test]
+fn provider_builder_borrow_constructs_explicit_ref_arguments() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_builder_borrow.fe".into(),
+        r#"
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+
+trait Sink: core::marker::Copy { fn write(self, _ value: i32) -> Self }
+trait Encode { fn encode<W: Sink>(ref self, _ writer: W) -> W }
+
+impl Encode for i32 {
+    fn encode<W: Sink>(ref self, _ writer: W) -> W { writer.write(self) }
+}
+
+struct Provider {}
+impl Derive<Encode> for Provider {
+    const fn derive<T>(ev: own Evidence<Encode<T>>) -> Evidence<Encode<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<Encode<T>>)
+    {
+        let mut body = builder.arg_ref("writer")
+        for field in reflect.fields() {
+            builder.require<Encode>(field.ty())
+            body = builder.trait_call(
+                field.ty(),
+                "encode",
+                builder.borrow(builder.field_get(builder.self_ref(), field)),
+                body,
+            )
+        }
+        builder.emit_method("encode", body)
+        builder.finish()
+        ev
+    }
+}
+
+struct Pair { left: i32, right: i32 }
+derive Encode for Pair using Provider
+
+struct Last { value: i32 }
+impl core::marker::Copy for Last {}
+impl Sink for Last {
+    fn write(self, _ value: i32) -> Self { Self { value: value } }
+}
+
+fn use_generated(value: Pair) -> i32 {
+    encode_value(ref value, Last { value: 0 }).value
+}
+
+fn encode_value<T: Encode, W: Sink>(_ value: ref T, _ writer: W) -> W {
+    value.encode(writer)
+}
+
+fn copy_borrowed_bool(_ value: ref bool) -> bool { value }
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+    let semantic_diags = collect_semantic_borrow_diagnostic_vouchers(&db, top_mod);
+    assert!(semantic_diags.is_empty());
+}
+
+#[test]
+fn provider_builder_borrow_rejects_non_expression_values() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_builder_borrow_reject.fe".into(),
+        r#"
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+trait Compute { fn run(self) -> u32 }
+struct Provider {}
+impl Derive<Compute> for Provider {
+    const fn derive<T>(ev: own Evidence<Compute<T>>) -> Evidence<Compute<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<Compute<T>>)
+    {
+        builder.emit_method("run", builder.borrow(builder.ty<u32>()))
+        builder.finish()
+        ev
+    }
+}
+struct Target {}
+derive Compute for Target using Provider
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let rendered = fe_hir::test_db::format_diagnostics(&db, &db.run_on_top_mod(top_mod));
+    assert!(
+        rendered.contains("this construct is not supported in derive provider bodies"),
+        "non-expression borrow inputs must fail closed:\n{rendered}"
+    );
 }
 
 #[test]

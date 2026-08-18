@@ -42,6 +42,7 @@ use crate::{
     runtime::lower::type_info::{
         RuntimeTypeEnv, provider_class_for_target_in_env, top_level_class_for_ty_in_env,
     },
+    runtime::pretty::format_runtime_verify_failure,
     runtime::root_effects::{
         EntryEffectContext, entry_effect_arg_plans, target_root_provider_materialization,
     },
@@ -59,7 +60,7 @@ use crate::{
         RuntimeSyntheticSpec, ScalarClass, ScalarRepr, ScalarRole, TargetRootProviderBinding,
         TargetRootProviderMaterialization,
     },
-    verify::verify_runtime_package,
+    verify::{VerifyError, verify_runtime_package},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
@@ -94,6 +95,25 @@ pub enum LowerError {
     /// transitive callee graph, so an unresolvable call reached only through
     /// return-class inference on a callee is caught before that panics too).
     UnresolvedTraitSelection(String),
+}
+
+fn invalid_runtime_package_error<'db>(
+    db: &'db dyn MirDb,
+    package: RuntimePackage<'db>,
+    error: VerifyError<'db>,
+) -> LowerError {
+    let detail = match &error {
+        VerifyError::InvalidFunctionBody(symbol, failure) => package
+            .functions(db)
+            .iter()
+            .find(|function| function.symbol(db) == *symbol)
+            .map(|function| {
+                format_runtime_verify_failure(db, &function.instance(db).body(db), failure)
+            }),
+        _ => None,
+    };
+    let detail = detail.map_or_else(String::new, |detail| format!("\n{detail}"));
+    LowerError::Unsupported(format!("invalid runtime package: {error:?}{detail}"))
 }
 
 impl std::fmt::Display for LowerError {
@@ -451,7 +471,7 @@ pub fn build_runtime_package<'db>(
         FxHashSet::default(),
     )?;
     verify_runtime_package(db, package)
-        .map_err(|err| LowerError::Unsupported(format!("invalid runtime package: {err:?}")))?;
+        .map_err(|error| invalid_runtime_package_error(db, package, error))?;
     Ok(package)
 }
 
@@ -750,7 +770,7 @@ fn build_wasm_runtime_package_impl<'db>(
         public_export_funcs,
     )?;
     verify_runtime_package(db, package)
-        .map_err(|err| LowerError::Unsupported(format!("invalid runtime package: {err:?}")))?;
+        .map_err(|error| invalid_runtime_package_error(db, package, error))?;
     Ok(package)
 }
 
@@ -1002,7 +1022,7 @@ pub fn build_test_runtime_package<'db>(
         FxHashSet::default(),
     )?;
     verify_runtime_package(db, package)
-        .map_err(|err| LowerError::Unsupported(format!("invalid runtime package: {err:?}")))?;
+        .map_err(|error| invalid_runtime_package_error(db, package, error))?;
     Ok(package)
 }
 
@@ -1033,7 +1053,7 @@ fn build_contract_package<'db>(
         FxHashSet::default(),
     )?;
     verify_runtime_package(db, package)
-        .map_err(|err| LowerError::Unsupported(format!("invalid runtime package: {err:?}")))?;
+        .map_err(|error| invalid_runtime_package_error(db, package, error))?;
     Ok(package)
 }
 

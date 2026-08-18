@@ -107,6 +107,7 @@ const RECOGNIZED_BUILDER_OPS: &[&str] = &[
     "mul",
     "share",
     "neg",
+    "borrow",
     "eq",
     "lt",
     "gt",
@@ -193,7 +194,7 @@ const _: () = {
     // multiplication, negation, and explicit expression sharing builders then
     // extend the audited codegen subset (39 → 45). A domain-neutral float
     // literal builder extends that same generated-expression subset (45 → 46).
-    assert!(RECOGNIZED_BUILDER_OPS.len() == 46);
+    assert!(RECOGNIZED_BUILDER_OPS.len() == 47);
     // TD5c: was 7, then 4, now 0; ALL reflection reads — non-iterating (onto the
     // typed read-only handles `ReflectHandle`/`FieldHandle`/`VariantHandle`) AND
     // the `fields`/`variants` iterables (now ordinary method calls returning a
@@ -297,6 +298,8 @@ pub(super) enum GenExpr<'db> {
     Share(GenExprId),
     /// `-value`
     Neg(GenExprId),
+    /// `ref value`
+    Borrow(GenExprId),
     /// The generated method's `self` value.
     SelfRef,
     /// A reference to a generated method parameter by name.
@@ -3480,6 +3483,10 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 let value = self.gen_expr_arg(value.expr)?;
                 Ok(self.push_expr(GenExpr::Neg(value)))
             }
+            ("borrow", [value]) => {
+                let value = self.gen_expr_arg(value.expr)?;
+                Ok(self.push_expr(GenExpr::Borrow(value)))
+            }
             ("or", [lhs, rhs]) => {
                 let lhs = self.gen_expr_arg(lhs.expr)?;
                 let rhs = self.gen_expr_arg(rhs.expr)?;
@@ -3926,7 +3933,9 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 | GenExpr::ArgRef(_)
                 | GenExpr::TraitConst { .. }
                 | GenExpr::QualifiedConst { .. } => {}
-                GenExpr::Neg(value) | GenExpr::Share(value) => stack.push(*value),
+                GenExpr::Neg(value) | GenExpr::Borrow(value) | GenExpr::Share(value) => {
+                    stack.push(*value)
+                }
                 GenExpr::And(lhs, rhs)
                 | GenExpr::Or(lhs, rhs)
                 | GenExpr::Add(lhs, rhs)
@@ -4505,7 +4514,7 @@ mod freeze_guard {
         // Pin the count too, so a same-size swap is still flagged for review.
         assert_eq!(
             RECOGNIZED_BUILDER_OPS.len(),
-            46,
+            47,
             "FREEZE (TD5.0): the builder command surface changed size; update the count \
              and docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md as part of a TD5 rung. \
              (TD5c moved `same_ty`/`same_field` — mis-shelved `builder.*`-spelled identity \
@@ -4515,7 +4524,8 @@ mod freeze_guard {
              `emit_method(name, body)`, 43 → 39. Domain-neutral integer literals and \
              subtract/multiply/negate/share construction add five audited operations, 39 → 44; \
              configured provider-type reflection adds one, 44 → 45; domain-neutral float \
-             literal construction adds one, 45 → 46.)"
+             literal construction adds one, 45 → 46; explicit borrow construction adds one, \
+             46 → 47.)"
         );
     }
 
@@ -4585,8 +4595,8 @@ mod freeze_guard {
 
     #[test]
     fn total_recognized_method_surface_is_pinned() {
-        // The full named method surface the freeze pins: 45 builder ops + 0
-        // reflection reads = 45 distinct literals. TD5c first moved the three
+        // The full named method surface the freeze pins: 47 builder ops + 0
+        // reflection reads = 47 distinct literals. TD5c first moved the three
         // `reflect.*` scalar reads onto `ReflectHandle` (54 → 51), then moved
         // the `field.*`/`variant.*` reads onto `FieldHandle`/`VariantHandle`
         // (RECOGNIZED_REFLECT_OPS → 0) and `same_ty`/`same_field` onto
@@ -4599,7 +4609,7 @@ mod freeze_guard {
         // `builder.*` is the executor's only named surface.
         let total = RECOGNIZED_BUILDER_OPS.len() + RECOGNIZED_REFLECT_OPS.len();
         assert_eq!(
-            total, 45,
+            total, 47,
             "FREEZE (TD5.0): the recognized command surface changed size. A new op requires \
              a TD5 category decision — see docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md."
         );

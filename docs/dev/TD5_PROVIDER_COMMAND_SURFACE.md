@@ -45,7 +45,7 @@ Generated expressions:
 - literals and logic: `bool`, `int`, `float`, `and`, `or`
 - integer arithmetic: `add`, `sub`, `mul`, `neg`
 - comparisons: `eq`, `lt`, `gt`
-- references and access: `self_ref`, `arg_ref`, `field_get`
+- references and access: `self_ref`, `arg_ref`, `field_get`, `borrow`
 - calls and constants: `call`, `trait_call`, `trait_const`, `static_call`
 - aggregates: `tuple_expr`, `with_elem`, `struct_init`, `variant_init`,
   `with_field`
@@ -61,7 +61,7 @@ Generated types:
 - `ty`, `target_ty`, `provider_ty`, `self_ty`, `str_ty`, `tuple_ty`, `with_elem_ty`,
   `trait_assoc_ty`
 
-The canonical inventory currently contains 46 operations. Reflection reads are
+The canonical inventory currently contains 47 operations. Reflection reads are
 not string-dispatched `ImplBuilder` commands; typed handle vocabularies own
 them, so the bespoke reflection-operation inventory is empty.
 
@@ -149,6 +149,15 @@ occurrence. Its input is deliberately restricted to pure root-scope leaves
 arithmetic/logic/comparison builders and nested shares. Calls, aggregates,
 matches, quote blocks, and arm/local binders fail closed; branch-local sharing
 continues to use an ordinary quote-local `let`.
+
+## Explicit borrowing
+
+`builder.borrow(expr)` preserves one explicit `ref` expression in generated
+HIR. It is the domain-neutral counterpart of Fe's required borrow syntax for
+arguments and receivers, and it is checked by ordinary semantic analysis after
+provider replay. The provider executor accepts only an existing generated
+expression handle. Type handles, reflection handles, strings, and other
+compile-time values fail closed instead of being coerced into expressions.
 
 ## Floating generated literals
 

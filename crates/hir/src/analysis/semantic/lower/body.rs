@@ -993,7 +993,20 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
             .typed_body
             .semantic_expr_lowering(expr)
             .unwrap_or_else(|| {
-                panic!("semantic lowering missing for call-like expression {expr:?}")
+                panic!(
+                    "semantic lowering missing for call-like expression: owner={:?} \
+                     owner_name={:?} expr={expr:?} span={:?} data={:?} ty={} body={}",
+                    self.template_owner,
+                    match self.template_owner {
+                        BodyOwner::Func(func) =>
+                            func.name(self.db).to_opt().map(|ident| ident.data(self.db)),
+                        _ => None,
+                    },
+                    expr.span(self.body),
+                    self.body.exprs(self.db)[expr],
+                    ty.pretty_print(self.db),
+                    self.body.pretty_print(self.db),
+                )
             });
         match lowering {
             SemanticExprLowering::Call { callable } => {

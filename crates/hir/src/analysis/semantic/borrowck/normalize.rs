@@ -841,7 +841,17 @@ impl<'db> NormalizeCtxt<'db> {
         let Some(crate::analysis::semantic::SemOrigin::Expr(_)) = Some(origin) else {
             return Ok(None);
         };
-        let Some(place) = self.local_read_place(operand.value, false, origin)? else {
+        // `UseValue` denotes a value read even when its source local is the
+        // carrier for a `ref` or `mut` parameter. Projected reads already take
+        // this path through `project_local_place`; direct scalar reads need the
+        // same carrier dereference instead of forwarding the reference itself.
+        // Ordinary view parameters must retain their existing forward path.
+        let allow_carrier = self
+            .locals
+            .get(operand.value.index())
+            .and_then(|local| local.as_ref())
+            .is_some_and(|local| local.ty.as_borrow(self.db).is_some());
+        let Some(place) = self.local_read_place(operand.value, allow_carrier, origin)? else {
             return Ok(None);
         };
         let mode = self.read_mode_for_place(origin, ty, &place);
