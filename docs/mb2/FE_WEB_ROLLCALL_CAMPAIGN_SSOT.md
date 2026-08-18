@@ -646,11 +646,24 @@ Legend:
   field-generic `merkle_core` four-quarter algorithm. Their executable gate
   independently reconstructs both 16-leaf Plonky3 roots, checks every legal
   quarter position, rejects an out-of-quarter index, and rejects changed
-  leaves, siblings, roots, validity, and path indices. This lands the compact
-  authentication shape, not the AIR claim: production BabyBear LDE row
-  derivation and constraint recomputation still need to be connected to those
-  paths and the FRI query receipt. Multiple query sampling, the BabyBear
-  receipt codec, and end-to-end proof verification also remain pending.
+  leaves, siblings, roots, validity, and path indices. Commit `239b3cf39`
+  now factors the exact 708-constraint Mandelbrot fold behind one
+  `AirColumnView<F>` and `ConstraintNumerators<F>` interpretation over the
+  shared `Radix2Field` boundary. BN254 trace interpolation and authenticated
+  openings both consume that field-neutral body, with no backend branch or
+  numeric column-ID API. Commits `20ac9e47d`, `39fa0177f`, and `25df3cbe5`
+  add the general FCO borrow constructor and recursively borrowed canonical
+  receipt encoding rather than a proof-local copying shim. The complete
+  independent BN254 bigint composition, authenticated FRI, canonical receipt,
+  and mutation gate passed 1/1 in 2,205.48 seconds. An opt-in AIR-only edit
+  slice retains all coset-point independent parity checks, while the complete
+  receipt remains the default authoritative gate. This lands the compact
+  authentication shape and field-neutral AIR engine, not yet their BabyBear
+  composition: production BabyBear LDE row derivation and an
+  `AirColumnView<BabyBearExt4>` over authenticated quartet rows must now bind
+  the recomputed positive and negative composition values into the FRI query.
+  Multiple query sampling, the BabyBear receipt codec, and end-to-end proof
+  verification also remain pending.
   The same permutation has also
   lowered to Naga-valid u32-only WGSL with the local Sonatina conditional-loop
   structurizer fixes, but that browser gate is not landed until those commits
