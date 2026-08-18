@@ -447,7 +447,8 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
             expected.extend(merkle_root4(mutated));
             assert_eq!(actual, expected);
             assert_ne!(
-                actual[1..], expected_root,
+                actual[1..],
+                expected_root,
                 "trace leaf mutation {leaf_index}:{bit} did not change the root",
             );
         }
@@ -531,8 +532,7 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
     );
 
     let main_lde = [
-        0, 1, 2, 3, 5, 8, 13, 21, 34,
-        55, 89, 144, 233, 377, 610, 987, 1597,
+        0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597,
     ];
     let baseline_main_lde = reference_field_commitment(b"BL01", &main_lde);
     assert_eq!(
@@ -545,7 +545,10 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
         mutated[index] += 1;
         let actual = call(&mut store, &instance, "main_lde17", &mutated, 8);
         assert_eq!(actual, reference_field_commitment(b"BL01", &mutated));
-        assert_ne!(actual, baseline_main_lde, "main LDE field {index} was not bound");
+        assert_ne!(
+            actual, baseline_main_lde,
+            "main LDE field {index} was not bound"
+        );
     }
 
     for seed in [0, 1, u32::MAX, 0x1357_9bdf] {
@@ -576,4 +579,70 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
             "composition coefficient {index} was not bound",
         );
     }
+
+    let proof_seed = 401;
+    let main_seed = 409;
+    let auxiliary_seed = 419;
+    let main_transcript = bind_digest(b"BL02", digest_seed(proof_seed), digest_seed(main_seed));
+    let air_transcript = bind_digest(b"BY02", main_transcript, digest_seed(auxiliary_seed));
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "air_transcript",
+            &[proof_seed, main_seed, auxiliary_seed],
+            8,
+        ),
+        air_transcript,
+        "main and auxiliary LDE transcript order differs from Plonky3",
+    );
+
+    let air_seed = 431;
+    let composition_seed = 433;
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "composition_transcript",
+            &[air_seed, composition_seed],
+            8,
+        ),
+        bind_digest(
+            b"BC03",
+            digest_seed(air_seed),
+            digest_seed(composition_seed)
+        ),
+        "composition transcript binding differs from Plonky3",
+    );
+
+    let fri_transcript_seed = 439;
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "fri_challenge1",
+            &[fri_transcript_seed],
+            4,
+        ),
+        squeeze_challenge(b"FC01", digest_seed(fri_transcript_seed)),
+        "FRI round-one challenge differs from Plonky3",
+    );
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "fri_challenge2",
+            &[fri_transcript_seed],
+            4,
+        ),
+        squeeze_challenge(b"FC02", digest_seed(fri_transcript_seed)),
+        "FRI round-two challenge differs from Plonky3",
+    );
+
+    let fri_row = [443, 449, 457, 461];
+    assert_eq!(
+        call(&mut store, &instance, "fri_row1", &fri_row, 8),
+        reference_field_commitment(b"FR01", &fri_row),
+        "FRI quartic row commitment differs from Plonky3",
+    );
 }

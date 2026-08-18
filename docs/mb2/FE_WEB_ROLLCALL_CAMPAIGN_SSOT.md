@@ -609,7 +609,13 @@ Legend:
   411-field auxiliary LDE row, and quartic composition row each have distinct
   typed domains over that same mechanism, with independent Plonky3 values and
   position/coefficient mutation checks. Their typed root wrappers reuse the
-  same eight-field Merkle compression. Gates:
+  same eight-field Merkle compression. The transcript order is now enforced
+  by nominal Fe types: proof transcript, main LDE root, auxiliary LDE root,
+  quartic composition challenge, composition root, then round-indexed FRI
+  challenge and layer stages. FRI domain tags are derived from the const
+  round (`FC01`, `FC02`, `FR01`, and so on), not passed as numeric runtime
+  IDs. The independent chain gate checks the ordered bindings, first and
+  second round challenge coefficients, and a quartic FRI row. Gates:
   `merkle_core_oracle.rs` and
   `mandelbrot_baby_bear_encoding_oracle.rs`. The same permutation has also
   lowered to Naga-valid u32-only WGSL with the local Sonatina conditional-loop

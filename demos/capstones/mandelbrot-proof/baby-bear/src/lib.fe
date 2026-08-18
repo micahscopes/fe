@@ -54,6 +54,16 @@ const fn protocol_tag(_ label: String<4>) -> u32 {
         | (bytes[3] as u32)
 }
 
+const fn protocol_round_tag(_ prefix: String<2>, _ round: u32) -> u32 {
+    let bytes = prefix.as_bytes()
+    let tens = round / 10
+    let ones = round - tens * 10
+    ((bytes[0] as u32) << 24)
+        | ((bytes[1] as u32) << 16)
+        | ((48 + tens) << 8)
+        | (48 + ones)
+}
+
 struct MandelbrotRowBabyBearV1 {}
 struct MandelbrotPublicBabyBearV1 {}
 struct MandelbrotAuxiliaryBabyBearV1 {}
@@ -63,6 +73,12 @@ struct MandelbrotCompositionChallengeBabyBearV1 {}
 struct MandelbrotMainLdeRowBabyBearV1 {}
 struct MandelbrotAuxiliaryLdeRowBabyBearV1 {}
 struct MandelbrotCompositionRowBabyBearV1 {}
+struct MandelbrotMainLdeTranscriptBabyBearV1 {}
+struct MandelbrotAuxiliaryLdeTranscriptBabyBearV1 {}
+struct MandelbrotCompositionTranscriptBabyBearV1 {}
+struct MandelbrotFriFoldBabyBear<const ROUND: u32> {}
+struct MandelbrotFriLayerRowBabyBear<const ROUND: u32> {}
+struct MandelbrotFriLayerTranscriptBabyBear<const ROUND: u32> {}
 
 impl Poseidon2Domain for MandelbrotRowBabyBearV1 {
     const TAG: u32 = protocol_tag("BR01")
@@ -100,6 +116,30 @@ impl Poseidon2FieldDomain for MandelbrotCompositionRowBabyBearV1 {
     const TAG: u32 = protocol_tag("BC02")
 }
 
+impl Poseidon2FieldDomain for MandelbrotMainLdeTranscriptBabyBearV1 {
+    const TAG: u32 = protocol_tag("BL02")
+}
+
+impl Poseidon2FieldDomain for MandelbrotAuxiliaryLdeTranscriptBabyBearV1 {
+    const TAG: u32 = protocol_tag("BY02")
+}
+
+impl Poseidon2FieldDomain for MandelbrotCompositionTranscriptBabyBearV1 {
+    const TAG: u32 = protocol_tag("BC03")
+}
+
+impl<const ROUND: u32> Poseidon2FieldDomain for MandelbrotFriFoldBabyBear<ROUND> {
+    const TAG: u32 = protocol_round_tag("FC", ROUND)
+}
+
+impl<const ROUND: u32> Poseidon2FieldDomain for MandelbrotFriLayerRowBabyBear<ROUND> {
+    const TAG: u32 = protocol_round_tag("FR", ROUND)
+}
+
+impl<const ROUND: u32> Poseidon2FieldDomain for MandelbrotFriLayerTranscriptBabyBear<ROUND> {
+    const TAG: u32 = protocol_round_tag("FT", ROUND)
+}
+
 pub struct RowDigest { pub valid: bool, pub value: Poseidon2Digest }
 impl core::marker::Copy for RowDigest {}
 
@@ -126,6 +166,27 @@ impl core::marker::Copy for AuxiliaryLdeDigest {}
 
 pub struct CompositionDigest { pub valid: bool, pub value: Poseidon2Digest }
 impl core::marker::Copy for CompositionDigest {}
+
+pub struct MainLdeTranscriptDigest { pub valid: bool, pub value: Poseidon2Digest }
+impl core::marker::Copy for MainLdeTranscriptDigest {}
+
+pub struct AirLdeTranscriptDigest { pub valid: bool, pub value: Poseidon2Digest }
+impl core::marker::Copy for AirLdeTranscriptDigest {}
+
+pub struct CompositionTranscriptDigest { pub valid: bool, pub value: Poseidon2Digest }
+impl core::marker::Copy for CompositionTranscriptDigest {}
+
+pub struct FriFoldChallenge<const ROUND: u32> { pub valid: bool, pub value: BabyBearExt4 }
+impl<const ROUND: u32> core::marker::Copy for FriFoldChallenge<ROUND> {}
+
+pub struct FriLayerDigest<const ROUND: u32> { pub valid: bool, pub value: Poseidon2Digest }
+impl<const ROUND: u32> core::marker::Copy for FriLayerDigest<ROUND> {}
+
+pub struct FriLayerTranscriptDigest<const ROUND: u32> {
+    pub valid: bool,
+    pub value: Poseidon2Digest,
+}
+impl<const ROUND: u32> core::marker::Copy for FriLayerTranscriptDigest<ROUND> {}
 
 struct DigestNodeHasher {}
 impl TwoToOneHasher<Poseidon2Digest> for DigestNodeHasher {
@@ -292,7 +353,7 @@ pub fn bind_auxiliary_trace(
 /// Derive a soundness challenge in the quartic extension field rather than
 /// silently treating the u32-native base field as the challenge field.
 pub fn composition_challenge(
-    _ transcript: own ProofTranscriptDigest,
+    _ transcript: own AirLdeTranscriptDigest,
 ) -> CompositionChallenge {
     if !transcript.valid {
         return CompositionChallenge { valid: false, value: BabyBearExt4::zero() }
@@ -382,4 +443,141 @@ where N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N & (N - 1)) == 0 }
     }
     let root = digest_root_power_of_two<N>(raw)
     CompositionDigest { valid: root.valid, value: root.value }
+}
+
+pub fn bind_main_lde(
+    _ transcript: own ProofTranscriptDigest,
+    _ main: own MainLdeDigest,
+) -> MainLdeTranscriptDigest {
+    if !transcript.valid || !main.valid {
+        return MainLdeTranscriptDigest { valid: false, value: Poseidon2Digest::zero() }
+    }
+    MainLdeTranscriptDigest {
+        valid: true,
+        value: poseidon_bind<MandelbrotMainLdeTranscriptBabyBearV1>(
+            transcript.value,
+            main.value,
+        ),
+    }
+}
+
+pub fn bind_auxiliary_lde(
+    _ transcript: own MainLdeTranscriptDigest,
+    _ auxiliary: own AuxiliaryLdeDigest,
+) -> AirLdeTranscriptDigest {
+    if !transcript.valid || !auxiliary.valid {
+        return AirLdeTranscriptDigest { valid: false, value: Poseidon2Digest::zero() }
+    }
+    AirLdeTranscriptDigest {
+        valid: true,
+        value: poseidon_bind<MandelbrotAuxiliaryLdeTranscriptBabyBearV1>(
+            transcript.value,
+            auxiliary.value,
+        ),
+    }
+}
+
+pub fn bind_composition(
+    _ transcript: own AirLdeTranscriptDigest,
+    _ composition: own CompositionDigest,
+) -> CompositionTranscriptDigest {
+    if !transcript.valid || !composition.valid {
+        return CompositionTranscriptDigest { valid: false, value: Poseidon2Digest::zero() }
+    }
+    CompositionTranscriptDigest {
+        valid: true,
+        value: poseidon_bind<MandelbrotCompositionTranscriptBabyBearV1>(
+            transcript.value,
+            composition.value,
+        ),
+    }
+}
+
+pub fn fri_fold_challenge(
+    _ transcript: own CompositionTranscriptDigest,
+) -> FriFoldChallenge<1> {
+    if !transcript.valid {
+        return FriFoldChallenge<1> { valid: false, value: BabyBearExt4::zero() }
+    }
+    FriFoldChallenge<1> {
+        valid: true,
+        value: squeeze_ext4<MandelbrotFriFoldBabyBear<1>>(transcript.value),
+    }
+}
+
+pub fn next_fri_fold_challenge<const PREVIOUS: u32, const ROUND: u32>(
+    _ transcript: own FriLayerTranscriptDigest<PREVIOUS>,
+) -> FriFoldChallenge<ROUND>
+where { PREVIOUS > 0 }, { ROUND == PREVIOUS + 1 }, { ROUND < 100 }
+{
+    if !transcript.valid {
+        return FriFoldChallenge<ROUND> { valid: false, value: BabyBearExt4::zero() }
+    }
+    FriFoldChallenge<ROUND> {
+        valid: true,
+        value: squeeze_ext4<MandelbrotFriFoldBabyBear<ROUND>>(transcript.value),
+    }
+}
+
+pub fn fri_layer_row_commitment<const ROUND: u32>(
+    _ value: BabyBearExt4,
+) -> FriLayerDigest<ROUND>
+where { ROUND > 0 }, { ROUND < 100 }
+{
+    FriLayerDigest<ROUND> {
+        valid: true,
+        value: commit_ext4_fields<MandelbrotFriLayerRowBabyBear<ROUND>, 1>([value]),
+    }
+}
+
+pub fn fri_layer_root_power_of_two<const ROUND: u32, const N: usize>(
+    _ leaves: own [FriLayerDigest<ROUND>; N],
+) -> FriLayerDigest<ROUND>
+where { ROUND > 0 }, { ROUND < 100 }, N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N & (N - 1)) == 0 }
+{
+    let mut raw = [Poseidon2Digest::zero(); N]
+    let mut index: usize = 0
+    while index < N {
+        if !leaves[index].valid {
+            return FriLayerDigest<ROUND> { valid: false, value: Poseidon2Digest::zero() }
+        }
+        raw[index] = leaves[index].value
+        index = index + 1
+    }
+    let root = digest_root_power_of_two<N>(raw)
+    FriLayerDigest<ROUND> { valid: root.valid, value: root.value }
+}
+
+pub fn bind_first_fri_layer(
+    _ transcript: own CompositionTranscriptDigest,
+    _ layer: own FriLayerDigest<1>,
+) -> FriLayerTranscriptDigest<1> {
+    if !transcript.valid || !layer.valid {
+        return FriLayerTranscriptDigest<1> { valid: false, value: Poseidon2Digest::zero() }
+    }
+    FriLayerTranscriptDigest<1> {
+        valid: true,
+        value: poseidon_bind<MandelbrotFriLayerTranscriptBabyBear<1>>(
+            transcript.value,
+            layer.value,
+        ),
+    }
+}
+
+pub fn bind_next_fri_layer<const PREVIOUS: u32, const ROUND: u32>(
+    _ transcript: own FriLayerTranscriptDigest<PREVIOUS>,
+    _ layer: own FriLayerDigest<ROUND>,
+) -> FriLayerTranscriptDigest<ROUND>
+where { PREVIOUS > 0 }, { ROUND == PREVIOUS + 1 }, { ROUND < 100 }
+{
+    if !transcript.valid || !layer.valid {
+        return FriLayerTranscriptDigest<ROUND> { valid: false, value: Poseidon2Digest::zero() }
+    }
+    FriLayerTranscriptDigest<ROUND> {
+        valid: true,
+        value: poseidon_bind<MandelbrotFriLayerTranscriptBabyBear<ROUND>>(
+            transcript.value,
+            layer.value,
+        ),
+    }
 }

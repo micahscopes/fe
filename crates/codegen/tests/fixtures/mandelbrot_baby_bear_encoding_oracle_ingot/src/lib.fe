@@ -1,12 +1,22 @@
 //! Executable boundary for BabyBear Mandelbrot schema exactness.
 
 use mandelbrot_proof_baby_bear::{
+    AirLdeTranscriptDigest,
     AuxiliaryDigest,
+    AuxiliaryLdeDigest,
+    CompositionDigest,
+    CompositionTranscriptDigest,
+    FriLayerTranscriptDigest,
+    MainLdeDigest,
+    ProofTranscriptDigest,
     PublicDigest,
     RowDigest,
     auxiliary_commitment,
     auxiliary_root_power_of_two,
     bind_auxiliary_trace,
+    bind_auxiliary_lde,
+    bind_composition,
+    bind_main_lde,
     bind_statement,
     composition_challenge,
     composition_row_commitment,
@@ -15,6 +25,9 @@ use mandelbrot_proof_baby_bear::{
     encoded_row_fields,
     public_commitment,
     main_lde_row_commitment,
+    fri_fold_challenge,
+    fri_layer_row_commitment,
+    next_fri_fold_challenge,
     auxiliary_lde_row_commitment,
     row_commitment,
     trace_root_power_of_two,
@@ -259,7 +272,7 @@ pub fn bind_roots(
 
 pub fn composition_challenge4(_ transcript: u32, _ valid: u32) -> (u32, u32, u32, u32, u32) {
     let challenge = composition_challenge(
-        mandelbrot_proof_baby_bear::ProofTranscriptDigest {
+        AirLdeTranscriptDigest {
             valid: valid == 1,
             value: digest8(transcript),
         },
@@ -271,6 +284,69 @@ pub fn composition_challenge4(_ transcript: u32, _ valid: u32) -> (u32, u32, u32
         words[1],
         words[2],
         words[3],
+    )
+}
+
+pub fn air_transcript(
+    _ proof: u32,
+    _ main: u32,
+    _ auxiliary: u32,
+) -> (u32, u32, u32, u32, u32, u32, u32, u32) {
+    let main_transcript = bind_main_lde(
+        ProofTranscriptDigest { valid: true, value: digest8(proof) },
+        MainLdeDigest { valid: true, value: digest8(main) },
+    )
+    let air = bind_auxiliary_lde(
+        main_transcript,
+        AuxiliaryLdeDigest { valid: true, value: digest8(auxiliary) },
+    ).value
+    (
+        air.field(0).to_u32(), air.field(1).to_u32(),
+        air.field(2).to_u32(), air.field(3).to_u32(),
+        air.field(4).to_u32(), air.field(5).to_u32(),
+        air.field(6).to_u32(), air.field(7).to_u32(),
+    )
+}
+
+pub fn composition_transcript(
+    _ air: u32,
+    _ composition: u32,
+) -> (u32, u32, u32, u32, u32, u32, u32, u32) {
+    let digest = bind_composition(
+        AirLdeTranscriptDigest { valid: true, value: digest8(air) },
+        CompositionDigest { valid: true, value: digest8(composition) },
+    ).value
+    (
+        digest.field(0).to_u32(), digest.field(1).to_u32(),
+        digest.field(2).to_u32(), digest.field(3).to_u32(),
+        digest.field(4).to_u32(), digest.field(5).to_u32(),
+        digest.field(6).to_u32(), digest.field(7).to_u32(),
+    )
+}
+
+pub fn fri_challenge1(_ transcript: u32) -> (u32, u32, u32, u32) {
+    let words = fri_fold_challenge(
+        CompositionTranscriptDigest { valid: true, value: digest8(transcript) },
+    ).value.to_u32s()
+    (words[0], words[1], words[2], words[3])
+}
+
+pub fn fri_challenge2(_ transcript: u32) -> (u32, u32, u32, u32) {
+    let words = next_fri_fold_challenge<1, 2>(
+        FriLayerTranscriptDigest<1> { valid: true, value: digest8(transcript) },
+    ).value.to_u32s()
+    (words[0], words[1], words[2], words[3])
+}
+
+pub fn fri_row1(
+    _ c0: u32, _ c1: u32, _ c2: u32, _ c3: u32,
+) -> (u32, u32, u32, u32, u32, u32, u32, u32) {
+    let digest = fri_layer_row_commitment<1>(BabyBearExt4::from_u32s([c0, c1, c2, c3])).value
+    (
+        digest.field(0).to_u32(), digest.field(1).to_u32(),
+        digest.field(2).to_u32(), digest.field(3).to_u32(),
+        digest.field(4).to_u32(), digest.field(5).to_u32(),
+        digest.field(6).to_u32(), digest.field(7).to_u32(),
     )
 }
 
