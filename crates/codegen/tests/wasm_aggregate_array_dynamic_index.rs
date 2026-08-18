@@ -160,6 +160,92 @@ pub fn update(
 }
 "#;
 
+const GENERIC_COPY_SNAPSHOT_SOURCE: &str = r#"
+struct Cell { word: u32 }
+
+impl Copy for Cell {}
+
+trait CellValue: Copy {
+    fn value(self) -> u32
+    fn plus(self, _ other: Self) -> Self
+    fn minus(self, _ other: Self) -> Self
+}
+
+impl CellValue for Cell {
+    fn value(self) -> u32 { self.word }
+    fn plus(self, _ other: Self) -> Self { Cell { word: self.word + other.word } }
+    fn minus(self, _ other: Self) -> Self { Cell { word: self.word - other.word } }
+}
+
+fn replace_after_snapshot<T: CellValue>(
+    _ input: own [T; 2],
+    _ index: usize,
+    _ replacement: T,
+) -> T {
+    let mut values = input
+    let snapshot = values[index]
+    values[index] = replacement
+    snapshot
+}
+
+pub fn snapshot_word(_ index: u32, _ replacement: u32) -> u32 {
+    replace_after_snapshot<Cell>(
+        [Cell { word: 7 }, Cell { word: 11 }],
+        index as usize,
+        Cell { word: replacement },
+    ).value()
+}
+
+fn generic_butterfly<T: CellValue>(_ input: own [T; 2]) -> [T; 2] {
+    let mut values = input
+    let even = values[0]
+    let odd = values[1]
+    values[0] = even.plus(odd)
+    values[1] = even.minus(odd)
+    values
+}
+
+pub fn butterfly_words() -> (u32, u32) {
+    let result = generic_butterfly<Cell>([Cell { word: 20 }, Cell { word: 3 }])
+    (result[0].value(), result[1].value())
+}
+
+struct WideCell { words: [u32; 2] }
+
+impl Copy for WideCell {}
+
+trait WideCellValue: Copy {
+    fn plus(self, _ other: Self) -> Self
+    fn minus(self, _ other: Self) -> Self
+}
+
+impl WideCellValue for WideCell {
+    fn plus(self, _ other: Self) -> Self {
+        WideCell { words: [self.words[0] + other.words[0], 0] }
+    }
+    fn minus(self, _ other: Self) -> Self {
+        WideCell { words: [self.words[0] - other.words[0], 0] }
+    }
+}
+
+fn generic_wide_butterfly<T: WideCellValue>(_ input: own [T; 2]) -> [T; 2] {
+    let mut values = input
+    let even = values[0]
+    let odd = values[1]
+    values[0] = even.plus(odd)
+    values[1] = even.minus(odd)
+    values
+}
+
+pub fn wide_butterfly_words() -> (u32, u32) {
+    let result = generic_wide_butterfly<WideCell>([
+        WideCell { words: [20, 0] },
+        WideCell { words: [3, 0] },
+    ])
+    (result[0].words[0], result[1].words[0])
+}
+"#;
+
 fn compile(source: &str, name: &str) -> Vec<u8> {
     let mut db = DriverDataBase::default();
     let url = Url::parse(&format!("file:///{name}.fe")).unwrap();
@@ -300,6 +386,31 @@ fn nested_mutable_array_borrows_preserve_one_backing_object() {
         .get_typed_func::<(i32, i32, i32, i32), (i32, i32, i32, i32)>(&mut store, "update")
         .expect("update export");
     assert_eq!(update.call(&mut store, (3, 5, 7, 11)).unwrap(), (3, 6, 8, 11));
+}
+
+#[test]
+fn generic_copy_array_element_is_a_value_snapshot() {
+    let bytes = compile(
+        GENERIC_COPY_SNAPSHOT_SOURCE,
+        "wasm_generic_copy_array_element_snapshot",
+    );
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, bytes).unwrap();
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+    let snapshot = instance
+        .get_typed_func::<(i32, i32), i32>(&mut store, "snapshot_word")
+        .expect("snapshot_word export");
+    assert_eq!(snapshot.call(&mut store, (0, 29)).unwrap(), 7);
+    assert_eq!(snapshot.call(&mut store, (1, 31)).unwrap(), 11);
+    let butterfly = instance
+        .get_typed_func::<(), (i32, i32)>(&mut store, "butterfly_words")
+        .expect("butterfly_words export");
+    assert_eq!(butterfly.call(&mut store, ()).unwrap(), (23, 17));
+    let wide_butterfly = instance
+        .get_typed_func::<(), (i32, i32)>(&mut store, "wide_butterfly_words")
+        .expect("wide_butterfly_words export");
+    assert_eq!(wide_butterfly.call(&mut store, ()).unwrap(), (23, 17));
 }
 
 fn assert_pick_executes_and_traps(bytes: Vec<u8>) {

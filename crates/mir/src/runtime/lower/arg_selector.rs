@@ -294,8 +294,13 @@ impl<'a, 'carriers, 'roots, 'cache, 'db> RuntimeArgSelector<'a, 'carriers, 'root
                     // A read view over an array-containing value must retain
                     // target-layout storage for dynamic indexing. Scalar-only
                     // records remain ordinary compact value products.
-                    self.select_free_boundary_compatible_value(local, borrow)
-                        .or_else(|| self.select_materializable_semantic_value(arg, borrow))
+                    if self.has_direct_value_snapshot(local) {
+                        self.select_materializable_semantic_value(arg, borrow)
+                            .or_else(|| self.select_free_boundary_compatible_value(local, borrow))
+                    } else {
+                        self.select_free_boundary_compatible_value(local, borrow)
+                            .or_else(|| self.select_materializable_semantic_value(arg, borrow))
+                    }
                 } else {
                     let existing = self.select_free_boundary_compatible_value(local, borrow);
                     if existing.as_ref().is_some_and(|selected| {
@@ -519,15 +524,29 @@ impl<'a, 'carriers, 'roots, 'cache, 'db> RuntimeArgSelector<'a, 'carriers, 'root
         &mut self,
         local: SLocalId,
     ) -> Option<SelectedRuntimeArg<'db>> {
-        self.env
-            .actual_aggregate_class_for_source(self.carriers, local)
-            .map(|class| {
-                if class.span_words(self.env.db()) == 0 {
-                    SelectedRuntimeArg::placeholder(self.env.body().locals[local.index()].ty, class)
-                } else {
-                    SelectedRuntimeArg::aggregate_from_runtime_source(local, class)
-                }
-            })
+        if let Some(class @ RuntimeClass::AggregateValue { .. }) =
+            carrier_value_class(local, self.carriers)
+        {
+            // A direct aggregate carrier is the value snapshot established by
+            // the local's defining read. Its snapshot source records lineage,
+            // not a live alias that may be reloaded after the source changes.
+            return Some(SelectedRuntimeArg::local_value(local, class));
+        }
+        let class = self
+            .env
+            .actual_aggregate_class_for_source(self.carriers, local)?;
+        if class.span_words(self.env.db()) == 0 {
+            return Some(SelectedRuntimeArg::placeholder(
+                self.env.body().locals[local.index()].ty,
+                class,
+            ));
+        }
+        if let Some(selected) = self.select_direct_value_materialization(local, &class) {
+            // Array-containing snapshots use an addressable object carrier.
+            // Load that local object, rather than its historical source place.
+            return Some(selected);
+        }
+        Some(SelectedRuntimeArg::aggregate_from_runtime_source(local, class))
     }
 
     fn select_boundary_compatible_value(
@@ -830,6 +849,12 @@ impl<'a, 'carriers, 'roots, 'cache, 'db> RuntimeArgSelector<'a, 'carriers, 'root
         boundary: &RuntimeBoundarySpec<'db>,
     ) -> Option<SelectedRuntimeArg<'db>> {
         let materialization = RuntimeValueMaterialization::for_boundary(boundary)?;
+        if self.has_direct_value_snapshot(arg.local) {
+            return Some(SelectedRuntimeArg::materialized_semantic_operand(
+                arg,
+                materialization,
+            ));
+        }
         let selected = match self.sources().semantic_place_value_source(arg.local) {
             Some(SemanticPlaceValueSource::PlaceValue { place, semantic_ty }) => {
                 SelectedRuntimeArg::materialized_place(place, semantic_ty, materialization)
@@ -846,6 +871,17 @@ impl<'a, 'carriers, 'roots, 'cache, 'db> RuntimeArgSelector<'a, 'carriers, 'root
             None => SelectedRuntimeArg::materialized_semantic_operand(arg, materialization),
         };
         Some(selected)
+    }
+
+    fn has_direct_value_snapshot(&self, local: SLocalId) -> bool {
+        self.env
+            .body()
+            .locals
+            .get(local.index())
+            .is_some_and(|local| {
+                matches!(local.facts.interface, SemanticLocalKind::DirectValue)
+            }) && carrier_value_class(local, self.carriers)
+            .is_some_and(|class| !class.is_transport())
     }
 
     fn select_place_effect_arg(
