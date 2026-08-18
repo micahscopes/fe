@@ -617,7 +617,13 @@ Legend:
   IDs. The independent chain gate checks the ordered bindings, first and
   second round challenge coefficients, and a quartic FRI row. Gates:
   `merkle_core_oracle.rs` and
-  `mandelbrot_baby_bear_encoding_oracle.rs`. The same permutation has also
+  `mandelbrot_baby_bear_encoding_oracle.rs`. The first production BabyBear FRI
+  binary fold now operates directly in the quartic challenge field. It pairs
+  evaluations at `x` and `-x`, derives the base-field root from the domain
+  size, and returns evaluations at `x^2`. Its zero-import gate independently
+  reconstructs extension multiplication, subgroup roots, point inverses, and
+  all four output coefficients, mutates the evaluation seed, challenge, and
+  shift, and rejects zero coset shifts. The same permutation has also
   lowered to Naga-valid u32-only WGSL with the local Sonatina conditional-loop
   structurizer fixes, but that browser gate is not landed until those commits
   are published and the Fe dependency pin advances. The complete protocol
@@ -646,7 +652,12 @@ Legend:
   and u32-only browser SPIR-V. The gate exposed a general semantic defect in
   which generic `Copy` values could be reloaded from mutable source lineage;
   `6cc7f996a` fixes compact and array-containing snapshots and adds executable
-  regressions rather than reordering the butterfly around the bug.
+  regressions rather than reordering the butterfly around the bug. Commit
+  `c5cdca47e` now interprets that exact radix-2 plan over the quartic BabyBear
+  challenge field as well. The direct oracle checks every coefficient of NTT
+  and coset LDE outputs at multiple seeds and shifts, plus invalid cosets. FRI
+  can therefore consume one shared Fe transform body instead of introducing
+  a field-specific transform fork.
   The scheduling step must now consolidate that arithmetic plan with the two
   existing, independently gated Conal strands:
   `ntt_schedule.fe` derives the `RBin<Pair, k>` stage tree and

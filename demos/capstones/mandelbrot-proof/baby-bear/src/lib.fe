@@ -39,6 +39,7 @@ use poseidon_baby_bear::{
 }
 use precision::baby_bear::{BabyBear, BabyBearExt4, BabyBearModulus}
 use precision::word_field_encoding::{PackedFieldBits, pack_bounded_words}
+use precision::polynomial::radix2_log
 
 pub const ROW_FIELDS: usize = 7
 pub const PUBLIC_FIELDS: usize = 4
@@ -187,6 +188,12 @@ pub struct FriLayerTranscriptDigest<const ROUND: u32> {
     pub value: Poseidon2Digest,
 }
 impl<const ROUND: u32> core::marker::Copy for FriLayerTranscriptDigest<ROUND> {}
+
+pub struct FriFoldEvaluations<const N: usize> {
+    pub valid: bool,
+    pub evaluations: [BabyBearExt4; N],
+}
+impl<const N: usize> core::marker::Copy for FriFoldEvaluations<N> {}
 
 struct DigestNodeHasher {}
 impl TwoToOneHasher<Poseidon2Digest> for DigestNodeHasher {
@@ -580,4 +587,38 @@ where { PREVIOUS > 0 }, { ROUND == PREVIOUS + 1 }, { ROUND < 100 }
             layer.value,
         ),
     }
+}
+
+/// One reusable FRI binary fold over the quartic BabyBear challenge field.
+/// Evaluations at `x` and `-x` become one evaluation at `x^2`.
+pub fn fold_fri_evaluations<const N: usize, const OUT: usize>(
+    _ evaluations: own [BabyBearExt4; N],
+    _ challenge: BabyBearExt4,
+    _ shift: BabyBear,
+) -> FriFoldEvaluations<OUT>
+where N > 0, N > 1, { (N & (N - 1)) == 0 }, OUT > 0, { OUT + OUT == N }
+{
+    if shift.is_zero() {
+        return FriFoldEvaluations<OUT> {
+            valid: false,
+            evaluations: [BabyBearExt4::zero(); OUT],
+        }
+    }
+    let inverse_two = BabyBearExt4::from_base(BabyBear::from_u32(2)).inverse_or_zero()
+    let root = BabyBear::two_adic_root(radix2_log<N>())
+    let mut point = shift
+    let mut folded = [BabyBearExt4::zero(); OUT]
+    let mut index: usize = 0
+    while index < OUT {
+        let positive = evaluations[index]
+        let negative = evaluations[index + OUT]
+        let even = (positive + negative) * inverse_two
+        let odd = (positive - negative)
+            * inverse_two
+            * BabyBearExt4::from_base(point.inverse_or_zero())
+        folded[index] = even + challenge * odd
+        point = point * root
+        index = index + 1
+    }
+    FriFoldEvaluations<OUT> { valid: true, evaluations: folded }
 }

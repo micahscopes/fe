@@ -19,6 +19,49 @@ use wasmtime::Val;
 const ROW_WIDTHS: [u32; 17] = [21, 1, 15, 1, 15, 30, 30, 31, 1, 18, 12, 1, 19, 12, 1, 1, 1];
 const PUBLIC_WIDTHS: [u32; 8] = [1, 14, 1, 13, 21, 21, 21, 22];
 const WIDTH: usize = 16;
+const MODULUS: u32 = 2_013_265_921;
+const TWO_ADICITY: u32 = 27;
+const EXT_NONRESIDUE: u32 = 11;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Ext4([u32; 4]);
+
+impl Ext4 {
+    fn from_base(value: u32) -> Self {
+        Self([value % MODULUS, 0, 0, 0])
+    }
+
+    fn add(self, other: Self) -> Self {
+        Self(core::array::from_fn(|index| {
+            ((u64::from(self.0[index]) + u64::from(other.0[index])) % u64::from(MODULUS)) as u32
+        }))
+    }
+
+    fn sub(self, other: Self) -> Self {
+        Self(core::array::from_fn(|index| {
+            ((u64::from(self.0[index]) + u64::from(MODULUS) - u64::from(other.0[index]))
+                % u64::from(MODULUS)) as u32
+        }))
+    }
+
+    /// Independent schoolbook convolution in F[X]/(X^4 - 11).
+    fn mul(self, other: Self) -> Self {
+        let modulus = u64::from(MODULUS);
+        let mut output = [0u64; 4];
+        for left in 0..4 {
+            for right in 0..4 {
+                let mut term = u64::from(self.0[left]) * u64::from(other.0[right]) % modulus;
+                let mut degree = left + right;
+                if degree >= 4 {
+                    degree -= 4;
+                    term = term * u64::from(EXT_NONRESIDUE) % modulus;
+                }
+                output[degree] = (output[degree] + term) % modulus;
+            }
+        }
+        Self(output.map(|word| word as u32))
+    }
+}
 
 fn fixture_url() -> Url {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -160,6 +203,65 @@ fn squeeze_challenge(tag: &[u8; 4], digest: [u32; 8]) -> [u32; 4] {
     let mut message = vec![u32::from_be_bytes(*tag), 8];
     message.extend(digest);
     reference_sponge(&message)[..4].try_into().unwrap()
+}
+
+fn base_pow(mut base: u64, mut exponent: u32) -> u32 {
+    let modulus = u64::from(MODULUS);
+    base %= modulus;
+    let mut result = 1u64;
+    while exponent != 0 {
+        if exponent & 1 == 1 {
+            result = result * base % modulus;
+        }
+        base = base * base % modulus;
+        exponent >>= 1;
+    }
+    result as u32
+}
+
+fn fri_pattern8(seed: u32) -> [Ext4; 8] {
+    core::array::from_fn(|index| {
+        let i = index as u32;
+        Ext4([
+            (seed + i) % MODULUS,
+            (seed + 17 + i) % MODULUS,
+            (seed + 37 + i + i) % MODULUS,
+            (seed + 71 + i + i + i) % MODULUS,
+        ])
+    })
+}
+
+fn reference_fri_fold8(seed: u32, beta: Ext4, shift: u32) -> Option<[Ext4; 4]> {
+    let shift = shift % MODULUS;
+    if shift == 0 {
+        return None;
+    }
+    let values = fri_pattern8(seed);
+    let inverse_two = base_pow(2, MODULUS - 2);
+    let maximal_root = base_pow(31, 15);
+    let root = base_pow(u64::from(maximal_root), 1 << (TWO_ADICITY - 8usize.ilog2()));
+    let mut point = shift;
+    Some(core::array::from_fn(|index| {
+        let positive = values[index];
+        let negative = values[index + 4];
+        let even = positive.add(negative).mul(Ext4::from_base(inverse_two));
+        let point_inverse = base_pow(u64::from(point), MODULUS - 2);
+        let odd = positive
+            .sub(negative)
+            .mul(Ext4::from_base(inverse_two))
+            .mul(Ext4::from_base(point_inverse));
+        point = (u64::from(point) * u64::from(root) % u64::from(MODULUS)) as u32;
+        even.add(beta.mul(odd))
+    }))
+}
+
+fn flattened_fri_fold(seed: u32, beta: Ext4, shift: u32) -> Vec<u32> {
+    let Some(folded) = reference_fri_fold8(seed, beta, shift) else {
+        return vec![0; 17];
+    };
+    let mut words = vec![1];
+    words.extend(folded.into_iter().flat_map(|value| value.0));
+    words
 }
 
 fn append_range_witness(bits: &mut Vec<u32>, value: u32, width: u32) {
@@ -645,4 +747,53 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
         reference_field_commitment(b"FR01", &fri_row),
         "FRI quartic row commitment differs from Plonky3",
     );
+
+    for seed in [0, 97] {
+        for beta in [Ext4([1, 2, 3, 4]), Ext4([17, 23, 41, 73])] {
+            for shift in [7, 123_456_789] {
+                let mut arguments = vec![seed];
+                arguments.extend(beta.0);
+                arguments.push(shift);
+                assert_eq!(
+                    call(&mut store, &instance, "fri_fold8x4", &arguments, 17),
+                    flattened_fri_fold(seed, beta, shift),
+                    "quartic FRI fold differs for seed {seed}, beta {beta:?}, shift {shift}",
+                );
+            }
+        }
+    }
+
+    for invalid_shift in [0, MODULUS] {
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "fri_fold8x4",
+                &[97, 17, 23, 41, 73, invalid_shift],
+                17,
+            ),
+            vec![0; 17],
+            "zero FRI coset shift must fail closed",
+        );
+    }
+
+    let baseline_fold = call(
+        &mut store,
+        &instance,
+        "fri_fold8x4",
+        &[97, 17, 23, 41, 73, 7],
+        17,
+    );
+    for mutation in [
+        [98, 17, 23, 41, 73, 7],
+        [97, 16, 23, 41, 73, 7],
+        [97, 17, 23, 41, 72, 7],
+        [97, 17, 23, 41, 73, 8],
+    ] {
+        assert_ne!(
+            call(&mut store, &instance, "fri_fold8x4", &mutation, 17),
+            baseline_fold,
+            "FRI seed, challenge, and shift mutations must change the fold",
+        );
+    }
 }
