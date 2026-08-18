@@ -2,7 +2,7 @@
 
 Status: authoritative campaign burn-down
 
-Updated: 2026-08-17
+Updated: 2026-08-18
 
 Goal spine: write the math, get the kernel, keep the proof.
 
@@ -600,17 +600,27 @@ Legend:
   boundary failures. The browser should progressively schedule leaf chunks and
   binary merges through the same Fe task, cancellation, and backpressure spine
   used by rendering.
-- [ ] Interpret the BabyBear proof dependency plan through the Conal/CTFE
+- [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
-  This begins by consolidating two existing, independently gated NTT strands:
+  The first arithmetic-plan consolidation is landed at `ba2ded864`: one
+  `Radix2Field` interpretation boundary now drives the same forward NTT,
+  inverse interpolation, and disjoint-coset LDE dependency plan for both the
+  multi-limb BN254 field and u32-native BabyBear. The independent direct
+  bigint BN254 DFT/LDE gate remains 3/3 green, while the new zero-import
+  BabyBear gate checks direct u64 DFT/LDE values, round trips, invalid cosets,
+  and u32-only browser SPIR-V. The gate exposed a general semantic defect in
+  which generic `Copy` values could be reloaded from mutable source lineage;
+  `6cc7f996a` fixes compact and array-containing snapshots and adds executable
+  regressions rather than reordering the butterfly around the bug.
+  The scheduling step must now consolidate that arithmetic plan with the two
+  existing, independently gated Conal strands:
   `ntt_schedule.fe` derives the `RBin<Pair, k>` stage tree and
   `BarrierReq<k>` from one type-level depth, while `ntt_par_exec.fe` executes
   the corresponding explicit fork/barrier schedule under revm and checks it
-  against the sequential transform. The production field-generic
-  `precision::polynomial::radix2_ntt` is not yet an interpretation of that
-  derived schedule, and no workgroup/shared-memory WebGPU implementation has
-  executed. The work is consolidation plus a new backend interpreter, not a
-  fresh Conal NTT design.
+  against the sequential transform. The production arithmetic plan is not yet
+  an interpretation of that `RBin` schedule, and no workgroup/shared-memory
+  proof transform has executed. The remaining work is a backend interpreter
+  and placement policy over the shared plan, not a fresh NTT implementation.
 - [ ] Build and run the complete recursive proof experience in the canonical
   gallery after the BabyBear prover exists. The Fe-authored component lets a
   user select a high-precision Mandelbrot point and iteration bound, schedules
