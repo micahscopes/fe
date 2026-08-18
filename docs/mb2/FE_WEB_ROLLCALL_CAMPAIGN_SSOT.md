@@ -565,8 +565,28 @@ Legend:
   `Index(Constant)`: distinct affine element moves are now accepted while a
   repeated move of the same element still fails. Gates:
   `precision_baby_bear_oracle.rs`, `semantic_borrowck.rs`, and the three
-  `arr_const_index_*` UI fixtures. BabyBear Poseidon, injective packing, and
-  the complete protocol retarget remain pending.
+  `arr_const_index_*` UI fixtures. The canonical Plonky3 width-16 Poseidon2
+  permutation is now derived in Fe from the shared Grain construction, with
+  no authored round-constant table. Its zero-import Wasm gate checks all 141
+  constants and five complete permutations against Plonky3. A reusable
+  `word_field_encoding` interpreter injectively packs exact-length bounded bit
+  strings into 30-bit field payloads, rejects undersized moduli, invalid
+  widths, range violations, and output overflow, and commits up to fourteen
+  payloads in one typed Poseidon2 call whose first two lanes bind the nominal
+  domain and exact bit length. The independent bigint/Plonky3 gate covers 128
+  randomized schemas, every bit of its directed mutation case, trailing-zero
+  length ambiguity, and the complete 411-bit capacity. The production
+  Mandelbrot row, public claim, and Fe-derived auxiliary schema now interpret
+  through that same utility as 7, 4, and 14 BabyBear fields. A distinct
+  zero-import gate independently reconstructs all three encodings, mutates all
+  210 main-row source bits and all 203 auxiliary source bits, checks maximum
+  values, and proves range violations fail closed. Commits `034a3ac78`,
+  `d3b1f1fbe`, and `6fc7dbea2`; gates `poseidon_baby_bear_oracle.rs` and
+  `mandelbrot_baby_bear_encoding_oracle.rs`. The same permutation has also
+  lowered to Naga-valid u32-only WGSL with the local Sonatina conditional-loop
+  structurizer fixes, but that browser gate is not landed until those commits
+  are published and the Fe dependency pin advances. The complete protocol
+  retarget remains pending.
 - [ ] Make the production claim a chunked recursive high-precision recurrence,
   not one monolithic fixed-Q12 trace. BabyBear is the proof field, not the
   numeric precision ceiling: derive each signed fixed-point coordinate from a
@@ -591,11 +611,15 @@ Legend:
   derived schedule, and no workgroup/shared-memory WebGPU implementation has
   executed. The work is consolidation plus a new backend interpreter, not a
   fresh Conal NTT design.
-- [ ] Run the complete published browser page through Chrome after the
-  BabyBear prover exists: acquire WebGPU, generate the proof, transport its
-  typed receipt, verify it through revm-Wasm, reject a mutated receipt, and
-  capture console and device-loss failures. Shader compilation alone cannot
-  satisfy this gate.
+- [ ] Build and run the complete recursive proof experience in the canonical
+  gallery after the BabyBear prover exists. The Fe-authored component lets a
+  user select a high-precision Mandelbrot point and iteration bound, schedules
+  leaf chunks progressively on WebGPU, recursively merges adjacent certified
+  intervals, presents the typed receipt plus proof-size and timing evidence,
+  and verifies it in-browser through Fe. The Chrome gate must exercise point
+  selection, successful generation and verification, cancellation and
+  backpressure, deliberate receipt mutation rejection, and console and
+  device-loss recovery. Shader compilation alone cannot satisfy this gate.
 - [x] Define a typed proof encoding and prove malformed-proof and mutation
   rejection in zero-import Fe Wasm against the independent bigint model.
   Browser/native parity for the eventual BabyBear protocol remains part of the
