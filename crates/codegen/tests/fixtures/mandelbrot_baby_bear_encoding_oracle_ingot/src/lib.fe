@@ -23,6 +23,7 @@ use mandelbrot_proof_baby_bear::{
     encoded_auxiliary_fields,
     encoded_public_fields,
     encoded_row_fields,
+    fold_all_fri16,
     fold_fri_evaluations,
     public_commitment,
     main_lde_row_commitment,
@@ -53,6 +54,22 @@ fn fri_pattern8(_ seed: u32) -> [BabyBearExt4; 8] {
     let mut values = [BabyBearExt4::zero(); 8]
     let mut index: usize = 0
     while index < 8 {
+        let i: u32 = index.downcast_truncate()
+        values[index] = BabyBearExt4::from_u32s([
+            seed + i,
+            seed + 17 + i,
+            seed + 37 + i + i,
+            seed + 71 + i + i + i,
+        ])
+        index = index + 1
+    }
+    values
+}
+
+fn fri_pattern16(_ seed: u32) -> [BabyBearExt4; 16] {
+    let mut values = [BabyBearExt4::zero(); 16]
+    let mut index: usize = 0
+    while index < 16 {
         let i: u32 = index.downcast_truncate()
         values[index] = BabyBearExt4::from_u32s([
             seed + i,
@@ -393,6 +410,31 @@ pub fn fri_fold8x4(
         f1[0], f1[1], f1[2], f1[3],
         f2[0], f2[1], f2[2], f2[3],
         f3[0], f3[1], f3[2], f3[3],
+    )
+}
+
+pub fn fri_chain16_component(
+    _ seed: u32,
+    _ transcript: u32,
+    _ shift: u32,
+    _ component: u32,
+) -> (u32, u32, u32, u32, u32, u32, u32) {
+    if component >= 8 { return (0, 0, 0, 0, 0, 0, 0) }
+    let proof = fold_all_fri16(
+        fri_pattern16(seed),
+        CompositionTranscriptDigest { valid: true, value: digest8(transcript) },
+        BabyBear::from_u32(shift),
+    )
+    let c: usize = component as usize
+    let final_words = proof.final_round.evaluation.to_u32s()
+    (
+        if proof.valid { 1 } else { 0 },
+        proof.first.root.value.field(component).to_u32(),
+        proof.second.root.value.field(component).to_u32(),
+        proof.third.root.value.field(component).to_u32(),
+        proof.final_round.root.value.field(component).to_u32(),
+        if component < 4 { final_words[c] } else { 0 },
+        proof.final_round.transcript.value.field(component).to_u32(),
     )
 }
 

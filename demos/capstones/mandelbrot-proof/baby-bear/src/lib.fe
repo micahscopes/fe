@@ -195,6 +195,36 @@ pub struct FriFoldEvaluations<const N: usize> {
 }
 impl<const N: usize> core::marker::Copy for FriFoldEvaluations<N> {}
 
+pub struct FriRound<const ROUND: u32, const N: usize, const NEXT: u32> {
+    pub valid: bool,
+    pub evaluations: [BabyBearExt4; N],
+    pub root: FriLayerDigest<ROUND>,
+    pub transcript: FriLayerTranscriptDigest<ROUND>,
+    pub next_challenge: FriFoldChallenge<NEXT>,
+}
+impl<const ROUND: u32, const N: usize, const NEXT: u32> core::marker::Copy for FriRound<
+    ROUND,
+    N,
+    NEXT,
+> {}
+
+pub struct FriFinalRound<const ROUND: u32> {
+    pub valid: bool,
+    pub evaluation: BabyBearExt4,
+    pub root: FriLayerDigest<ROUND>,
+    pub transcript: FriLayerTranscriptDigest<ROUND>,
+}
+impl<const ROUND: u32> core::marker::Copy for FriFinalRound<ROUND> {}
+
+pub struct FriProofComplete16 {
+    pub valid: bool,
+    pub first: FriRound<1, 8, 2>,
+    pub second: FriRound<2, 4, 3>,
+    pub third: FriRound<3, 2, 4>,
+    pub final_round: FriFinalRound<4>,
+}
+impl core::marker::Copy for FriProofComplete16 {}
+
 struct DigestNodeHasher {}
 impl TwoToOneHasher<Poseidon2Digest> for DigestNodeHasher {
     fn zero() -> Poseidon2Digest { Poseidon2Digest::zero() }
@@ -621,4 +651,217 @@ where N > 0, N > 1, { (N & (N - 1)) == 0 }, OUT > 0, { OUT + OUT == N }
         index = index + 1
     }
     FriFoldEvaluations<OUT> { valid: true, evaluations: folded }
+}
+
+fn invalid_fri_round<const ROUND: u32, const N: usize, const NEXT: u32>() -> FriRound<
+    ROUND,
+    N,
+    NEXT,
+> {
+    FriRound<ROUND, N, NEXT> {
+        valid: false,
+        evaluations: [BabyBearExt4::zero(); N],
+        root: FriLayerDigest<ROUND> { valid: false, value: Poseidon2Digest::zero() },
+        transcript: FriLayerTranscriptDigest<ROUND> {
+            valid: false,
+            value: Poseidon2Digest::zero(),
+        },
+        next_challenge: FriFoldChallenge<NEXT> {
+            valid: false,
+            value: BabyBearExt4::zero(),
+        },
+    }
+}
+
+fn invalid_fri_final<const ROUND: u32>() -> FriFinalRound<ROUND> {
+    FriFinalRound<ROUND> {
+        valid: false,
+        evaluation: BabyBearExt4::zero(),
+        root: FriLayerDigest<ROUND> { valid: false, value: Poseidon2Digest::zero() },
+        transcript: FriLayerTranscriptDigest<ROUND> {
+            valid: false,
+            value: Poseidon2Digest::zero(),
+        },
+    }
+}
+
+fn invalid_fri_complete16() -> FriProofComplete16 {
+    FriProofComplete16 {
+        valid: false,
+        first: invalid_fri_round<1, 8, 2>(),
+        second: invalid_fri_round<2, 4, 3>(),
+        third: invalid_fri_round<3, 2, 4>(),
+        final_round: invalid_fri_final<4>(),
+    }
+}
+
+fn commit_fri_layer<const ROUND: u32, const N: usize>(
+    _ evaluations: own [BabyBearExt4; N],
+) -> FriLayerDigest<ROUND>
+where
+    { ROUND > 0 },
+    { ROUND < 100 },
+    N > 0,
+    N <= MAX_PADDED_TRACE_LENGTH,
+    { (N & (N - 1)) == 0 },
+{
+    let mut leaves = [FriLayerDigest<ROUND> {
+        valid: false,
+        value: Poseidon2Digest::zero(),
+    }; N]
+    let mut index: usize = 0
+    while index < N {
+        leaves[index] = fri_layer_row_commitment<ROUND>(evaluations[index])
+        index = index + 1
+    }
+    fri_layer_root_power_of_two<ROUND, N>(leaves)
+}
+
+pub fn fold_first_fri_round16(
+    _ evaluations: own [BabyBearExt4; 16],
+    _ transcript: own CompositionTranscriptDigest,
+    _ shift: BabyBear,
+) -> FriRound<1, 8, 2> {
+    let challenge = fri_fold_challenge(transcript)
+    if !challenge.valid {
+        return invalid_fri_round<1, 8, 2>()
+    }
+    let folded = fold_fri_evaluations<16, 8>(evaluations, challenge.value, shift)
+    if !folded.valid {
+        return invalid_fri_round<1, 8, 2>()
+    }
+    let root = commit_fri_layer<1, 8>(folded.evaluations)
+    let next_transcript = bind_first_fri_layer(transcript, root)
+    let next_challenge = next_fri_fold_challenge<1, 2>(next_transcript)
+    if !root.valid || !next_transcript.valid || !next_challenge.valid {
+        return invalid_fri_round<1, 8, 2>()
+    }
+    FriRound<1, 8, 2> {
+        valid: true,
+        evaluations: folded.evaluations,
+        root: root,
+        transcript: next_transcript,
+        next_challenge: next_challenge,
+    }
+}
+
+pub fn fold_next_fri_round<
+    const PREVIOUS: u32,
+    const ROUND: u32,
+    const N: usize,
+    const OUT: usize,
+    const NEXT: u32,
+>(
+    _ evaluations: own [BabyBearExt4; N],
+    _ transcript: own FriLayerTranscriptDigest<PREVIOUS>,
+    _ challenge: own FriFoldChallenge<ROUND>,
+    _ shift: BabyBear,
+) -> FriRound<ROUND, OUT, NEXT>
+where
+    { PREVIOUS > 0 },
+    { ROUND == PREVIOUS + 1 },
+    { ROUND < 100 },
+    { NEXT == ROUND + 1 },
+    { NEXT < 100 },
+    N > 0,
+    N > 1,
+    { (N & (N - 1)) == 0 },
+    OUT > 0,
+    OUT <= MAX_PADDED_TRACE_LENGTH,
+    { (OUT & (OUT - 1)) == 0 },
+    { OUT + OUT == N },
+{
+    if !transcript.valid || !challenge.valid {
+        return invalid_fri_round<ROUND, OUT, NEXT>()
+    }
+    let folded = fold_fri_evaluations<N, OUT>(evaluations, challenge.value, shift)
+    if !folded.valid {
+        return invalid_fri_round<ROUND, OUT, NEXT>()
+    }
+    let root = commit_fri_layer<ROUND, OUT>(folded.evaluations)
+    let next_transcript = bind_next_fri_layer<PREVIOUS, ROUND>(transcript, root)
+    let next_challenge = next_fri_fold_challenge<ROUND, NEXT>(next_transcript)
+    if !root.valid || !next_transcript.valid || !next_challenge.valid {
+        return invalid_fri_round<ROUND, OUT, NEXT>()
+    }
+    FriRound<ROUND, OUT, NEXT> {
+        valid: true,
+        evaluations: folded.evaluations,
+        root: root,
+        transcript: next_transcript,
+        next_challenge: next_challenge,
+    }
+}
+
+pub fn fold_final_fri_round<const PREVIOUS: u32, const ROUND: u32>(
+    _ evaluations: own [BabyBearExt4; 2],
+    _ transcript: own FriLayerTranscriptDigest<PREVIOUS>,
+    _ challenge: own FriFoldChallenge<ROUND>,
+    _ shift: BabyBear,
+) -> FriFinalRound<ROUND>
+where { PREVIOUS > 0 }, { ROUND == PREVIOUS + 1 }, { ROUND < 100 }
+{
+    if !transcript.valid || !challenge.valid {
+        return invalid_fri_final<ROUND>()
+    }
+    let folded = fold_fri_evaluations<2, 1>(evaluations, challenge.value, shift)
+    if !folded.valid {
+        return invalid_fri_final<ROUND>()
+    }
+    let root = fri_layer_row_commitment<ROUND>(folded.evaluations[0])
+    let next_transcript = bind_next_fri_layer<PREVIOUS, ROUND>(transcript, root)
+    if !root.valid || !next_transcript.valid {
+        return invalid_fri_final<ROUND>()
+    }
+    FriFinalRound<ROUND> {
+        valid: true,
+        evaluation: folded.evaluations[0],
+        root: root,
+        transcript: next_transcript,
+    }
+}
+
+/// Materialize an authenticated 16-to-1 FRI chain. Every next challenge is
+/// squeezed only after the preceding folded layer has been committed.
+pub fn fold_all_fri16(
+    _ evaluations: own [BabyBearExt4; 16],
+    _ transcript: own CompositionTranscriptDigest,
+    _ shift: BabyBear,
+) -> FriProofComplete16 {
+    let first = fold_first_fri_round16(evaluations, transcript, shift)
+    if !first.valid { return invalid_fri_complete16() }
+
+    let shift2 = shift.square()
+    let second = fold_next_fri_round<1, 2, 8, 4, 3>(
+        first.evaluations,
+        first.transcript,
+        first.next_challenge,
+        shift2,
+    )
+    if !second.valid { return invalid_fri_complete16() }
+
+    let shift3 = shift2.square()
+    let third = fold_next_fri_round<2, 3, 4, 2, 4>(
+        second.evaluations,
+        second.transcript,
+        second.next_challenge,
+        shift3,
+    )
+    if !third.valid { return invalid_fri_complete16() }
+
+    let final_round = fold_final_fri_round<3, 4>(
+        third.evaluations,
+        third.transcript,
+        third.next_challenge,
+        shift3.square(),
+    )
+    if !final_round.valid { return invalid_fri_complete16() }
+
+    FriProofComplete16 {
+        valid: true,
+        first: first,
+        second: second,
+        third: third,
+        final_round: final_round,
+    }
 }

@@ -623,7 +623,13 @@ Legend:
   size, and returns evaluations at `x^2`. Its zero-import gate independently
   reconstructs extension multiplication, subgroup roots, point inverses, and
   all four output coefficients, mutates the evaluation seed, challenge, and
-  shift, and rejects zero coset shifts. The same permutation has also
+  shift, and rejects zero coset shifts. That fold now drives a complete typed
+  16-to-8-to-4-to-2-to-1 commitment chain. Each round commits its folded
+  quartic codeword before deriving the next challenge, squares the coset shift,
+  and carries nominal round-indexed roots and transcripts. The independent
+  Plonky3 gate reconstructs every layer root, final evaluation, and final
+  transcript, and mutates the input codeword, starting transcript, and shift.
+  The same permutation has also
   lowered to Naga-valid u32-only WGSL with the local Sonatina conditional-loop
   structurizer fixes, but that browser gate is not landed until those commits
   are published and the Fe dependency pin advances. The complete protocol

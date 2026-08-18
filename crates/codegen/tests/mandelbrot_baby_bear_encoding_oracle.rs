@@ -219,7 +219,7 @@ fn base_pow(mut base: u64, mut exponent: u32) -> u32 {
     result as u32
 }
 
-fn fri_pattern8(seed: u32) -> [Ext4; 8] {
+fn fri_pattern<const N: usize>(seed: u32) -> [Ext4; N] {
     core::array::from_fn(|index| {
         let i = index as u32;
         Ext4([
@@ -231,37 +231,132 @@ fn fri_pattern8(seed: u32) -> [Ext4; 8] {
     })
 }
 
-fn reference_fri_fold8(seed: u32, beta: Ext4, shift: u32) -> Option<[Ext4; 4]> {
+fn reference_fri_fold(values: &[Ext4], beta: Ext4, shift: u32) -> Option<Vec<Ext4>> {
+    assert!(values.len() > 1 && values.len().is_power_of_two());
     let shift = shift % MODULUS;
     if shift == 0 {
         return None;
     }
-    let values = fri_pattern8(seed);
     let inverse_two = base_pow(2, MODULUS - 2);
     let maximal_root = base_pow(31, 15);
-    let root = base_pow(u64::from(maximal_root), 1 << (TWO_ADICITY - 8usize.ilog2()));
+    let root = base_pow(
+        u64::from(maximal_root),
+        1 << (TWO_ADICITY - values.len().ilog2()),
+    );
     let mut point = shift;
-    Some(core::array::from_fn(|index| {
-        let positive = values[index];
-        let negative = values[index + 4];
-        let even = positive.add(negative).mul(Ext4::from_base(inverse_two));
-        let point_inverse = base_pow(u64::from(point), MODULUS - 2);
-        let odd = positive
-            .sub(negative)
-            .mul(Ext4::from_base(inverse_two))
-            .mul(Ext4::from_base(point_inverse));
-        point = (u64::from(point) * u64::from(root) % u64::from(MODULUS)) as u32;
-        even.add(beta.mul(odd))
-    }))
+    Some(
+        (0..values.len() / 2)
+            .map(|index| {
+                let positive = values[index];
+                let negative = values[index + values.len() / 2];
+                let even = positive.add(negative).mul(Ext4::from_base(inverse_two));
+                let point_inverse = base_pow(u64::from(point), MODULUS - 2);
+                let odd = positive
+                    .sub(negative)
+                    .mul(Ext4::from_base(inverse_two))
+                    .mul(Ext4::from_base(point_inverse));
+                point = (u64::from(point) * u64::from(root) % u64::from(MODULUS)) as u32;
+                even.add(beta.mul(odd))
+            })
+            .collect(),
+    )
 }
 
 fn flattened_fri_fold(seed: u32, beta: Ext4, shift: u32) -> Vec<u32> {
-    let Some(folded) = reference_fri_fold8(seed, beta, shift) else {
+    let values = fri_pattern::<8>(seed);
+    let Some(folded) = reference_fri_fold(&values, beta, shift) else {
         return vec![0; 17];
     };
     let mut words = vec![1];
     words.extend(folded.into_iter().flat_map(|value| value.0));
     words
+}
+
+fn round_tag(prefix: &[u8; 2], round: u32) -> [u8; 4] {
+    [
+        prefix[0],
+        prefix[1],
+        b'0' + (round / 10) as u8,
+        b'0' + (round % 10) as u8,
+    ]
+}
+
+fn digest_merkle_root(mut leaves: Vec<[u32; 8]>) -> [u32; 8] {
+    assert!(!leaves.is_empty() && leaves.len().is_power_of_two());
+    while leaves.len() > 1 {
+        leaves = leaves
+            .chunks_exact(2)
+            .map(|pair| digest_compress(pair[0], pair[1]))
+            .collect();
+    }
+    leaves[0]
+}
+
+struct ReferenceFriChain16 {
+    roots: [[u32; 8]; 4],
+    final_evaluation: Ext4,
+    final_transcript: [u32; 8],
+}
+
+fn reference_fri_chain16(
+    seed: u32,
+    transcript_seed: u32,
+    shift: u32,
+) -> Option<ReferenceFriChain16> {
+    let mut evaluations = fri_pattern::<16>(seed).to_vec();
+    let mut transcript = digest_seed(transcript_seed);
+    let mut shift = shift % MODULUS;
+    if shift == 0 {
+        return None;
+    }
+    let mut roots = [[0u32; 8]; 4];
+
+    for round in 1..=4 {
+        let challenge = Ext4(squeeze_challenge(&round_tag(b"FC", round), transcript));
+        evaluations = reference_fri_fold(&evaluations, challenge, shift)?;
+        let row_tag = round_tag(b"FR", round);
+        let leaves = evaluations
+            .iter()
+            .map(|value| reference_field_commitment(&row_tag, &value.0))
+            .collect();
+        roots[(round - 1) as usize] = digest_merkle_root(leaves);
+        transcript = bind_digest(
+            &round_tag(b"FT", round),
+            transcript,
+            roots[(round - 1) as usize],
+        );
+        shift = (u64::from(shift) * u64::from(shift) % u64::from(MODULUS)) as u32;
+    }
+
+    Some(ReferenceFriChain16 {
+        roots,
+        final_evaluation: evaluations[0],
+        final_transcript: transcript,
+    })
+}
+
+fn expected_fri_chain16_component(
+    seed: u32,
+    transcript_seed: u32,
+    shift: u32,
+    component: usize,
+) -> Vec<u32> {
+    let Some(chain) = reference_fri_chain16(seed, transcript_seed, shift) else {
+        return vec![0; 7];
+    };
+    vec![
+        1,
+        chain.roots[0][component],
+        chain.roots[1][component],
+        chain.roots[2][component],
+        chain.roots[3][component],
+        if component < 4 {
+            chain.final_evaluation.0[component]
+        } else {
+            0
+        },
+        chain.final_transcript[component],
+    ]
 }
 
 fn append_range_witness(bits: &mut Vec<u32>, value: u32, width: u32) {
@@ -794,6 +889,51 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
             call(&mut store, &instance, "fri_fold8x4", &mutation, 17),
             baseline_fold,
             "FRI seed, challenge, and shift mutations must change the fold",
+        );
+    }
+
+    for (seed, transcript_seed, shift) in [(97, 439, 7), (0, 401, 123_456_789)] {
+        for component in 0..8 {
+            assert_eq!(
+                call(
+                    &mut store,
+                    &instance,
+                    "fri_chain16_component",
+                    &[seed, transcript_seed, shift, component as u32],
+                    7,
+                ),
+                expected_fri_chain16_component(seed, transcript_seed, shift, component),
+                "authenticated FRI chain differs at component {component}",
+            );
+        }
+    }
+
+    for invalid_shift in [0, MODULUS] {
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "fri_chain16_component",
+                &[97, 439, invalid_shift, 0],
+                7,
+            ),
+            vec![0; 7],
+            "complete FRI chain must reject a zero coset shift",
+        );
+    }
+
+    let baseline_chain = call(
+        &mut store,
+        &instance,
+        "fri_chain16_component",
+        &[97, 439, 7, 0],
+        7,
+    );
+    for mutation in [[98, 439, 7, 0], [97, 438, 7, 0], [97, 439, 8, 0]] {
+        assert_ne!(
+            call(&mut store, &instance, "fri_chain16_component", &mutation, 7,),
+            baseline_chain,
+            "FRI codeword, transcript, and shift mutations must change the chain",
         );
     }
 }
