@@ -1,6 +1,8 @@
 //! Executable boundary for BabyBear Mandelbrot schema exactness.
 
 use mandelbrot_proof_baby_bear::{
+    Checkpoint4AirLdeOpening,
+    AirLdeRow,
     AirLdeTranscriptDigest,
     AuxiliaryDigest,
     AuxiliaryLdeDigest,
@@ -25,6 +27,7 @@ use mandelbrot_proof_baby_bear::{
     encoded_auxiliary_fields,
     encoded_public_fields,
     encoded_row_fields,
+    evaluate_composition_opened,
     fold_all_fri16,
     fold_fri_evaluations,
     public_commitment,
@@ -43,6 +46,7 @@ use mandelbrot_proof_baby_bear::{
     verify_fri_commitment_query16,
     verify_auxiliary_lde_quartet_path,
     verify_main_lde_quartet_path,
+    verify_checkpoint4_air_lde_composition_query,
 }
 use mandelbrot_proof_kernel::{
     EncodedAirRow,
@@ -52,6 +56,27 @@ use mandelbrot_proof_kernel::{
 }
 use poseidon_baby_bear::Poseidon2Digest
 use precision::baby_bear::{BabyBear, BabyBearExt4}
+
+fn geometry_words(_ geometry: mandelbrot_proof_air_core::Radix2QueryGeometry) -> (
+    u32, u32, u32, u32, u32, u32,
+) {
+    (
+        if geometry.valid { 1 } else { 0 },
+        geometry.evaluation,
+        geometry.next_evaluation,
+        geometry.negative_evaluation,
+        geometry.negative_next_evaluation,
+        geometry.local_index,
+    )
+}
+
+pub fn query_geometry4x16(_ query_index: u32) -> (u32, u32, u32, u32, u32, u32) {
+    geometry_words(mandelbrot_proof_air_core::radix2_query_geometry<4, 16>(query_index))
+}
+
+pub fn query_geometry8x64(_ query_index: u32) -> (u32, u32, u32, u32, u32, u32) {
+    geometry_words(mandelbrot_proof_air_core::radix2_query_geometry<8, 64>(query_index))
+}
 
 fn digest8(_ base: u32) -> Poseidon2Digest {
     Poseidon2Digest::from_u32s([
@@ -530,6 +555,165 @@ pub fn fri_query16_mutation(
     } else {
         0
     }
+}
+
+fn write_air_lde_row(_ seed: u32, _ evaluation: u32, _ row: mut AirLdeRow) {
+    let mut column: usize = 0
+    while column < mandelbrot_proof_baby_bear::MAIN_LDE_ROW_FIELDS {
+        let column_u32: u32 = column.downcast_truncate()
+        row.main[column] = BabyBear::from_u32(
+            (seed + evaluation * 1009 + column_u32 * 37) % 1900000007,
+        )
+        column = column + 1
+    }
+    column = 0
+    while column < mandelbrot_proof_kernel::AUXILIARY_ROW_BITS {
+        let column_u32: u32 = column.downcast_truncate()
+        row.auxiliary[column] = BabyBear::from_u32(
+            (seed + 700001 + evaluation * 4001 + column_u32 * 53) % 1900000007,
+        )
+        column = column + 1
+    }
+}
+
+/// Exercise the production seam from authenticated BabyBear LDE rows through
+/// the shared AIR and into one FRI composition pair. The eight returned field
+/// words let the Rust gate independently reconstruct both composition values;
+/// the first lane records verifier acceptance after a selected mutation.
+pub fn air_composition_query16(
+    _ seed: u32,
+    _ query_index: u32,
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ beta0: u32,
+    _ beta1: u32,
+    _ beta2: u32,
+    _ beta3: u32,
+    _ shift: u32,
+    _ mutation: u32,
+) -> (u32, u32, u32, u32, u32, u32, u32, u32, u32) {
+    if query_index >= 8 {
+        return (0, 0, 0, 0, 0, 0, 0, 0, 0)
+    }
+    let mut rows = [mandelbrot_proof_baby_bear::ZERO_AIR_LDE_ROW; 16]
+    let mut main_leaves = [MainLdeDigest {
+        valid: false,
+        value: Poseidon2Digest::zero(),
+    }; 16]
+    let mut auxiliary_leaves = [AuxiliaryLdeDigest {
+        valid: false,
+        value: Poseidon2Digest::zero(),
+    }; 16]
+    let mut evaluation: usize = 0
+    while evaluation < 16 {
+        let evaluation_u32: u32 = evaluation.downcast_truncate()
+        write_air_lde_row(seed, evaluation_u32, mut rows[evaluation])
+        main_leaves[evaluation] = main_lde_row_commitment(rows[evaluation].main)
+        auxiliary_leaves[evaluation] = auxiliary_lde_row_commitment(
+            rows[evaluation].auxiliary,
+        )
+        evaluation = evaluation + 1
+    }
+    let mut main_root = main_lde_root_power_of_two<16>(main_leaves)
+    let auxiliary_root = auxiliary_lde_root_power_of_two<16>(auxiliary_leaves)
+    let local_index = query_index & 3
+    let local: usize = local_index as usize
+    let main_path = main_lde_quartet_path_power_of_two<16, 4, 2>(
+        main_leaves,
+        local_index,
+    )
+    let auxiliary_path = auxiliary_lde_quartet_path_power_of_two<16, 4, 2>(
+        auxiliary_leaves,
+        local_index,
+    )
+    let mut opening = Checkpoint4AirLdeOpening<2> {
+        valid: main_path.valid && auxiliary_path.valid,
+        rows: [mandelbrot_proof_baby_bear::ZERO_AIR_LDE_ROW; 4],
+        main_path: main_path,
+        auxiliary_path: auxiliary_path,
+    }
+    opening.rows[0] = rows[local]
+    opening.rows[1] = rows[local + 4]
+    opening.rows[2] = rows[local + 8]
+    opening.rows[3] = rows[local + 12]
+
+    let mut challenge = mandelbrot_proof_baby_bear::CompositionChallenge {
+        valid: true,
+        value: BabyBearExt4::from_u32s([beta0, beta1, beta2, beta3]),
+    }
+    let shift = BabyBear::from_u32(shift)
+    let positive_quarter: usize = if query_index < 4 { 0 } else { 1 }
+    let positive_next_quarter = (positive_quarter + 1) & 3
+    let negative_quarter = (positive_quarter + 2) & 3
+    let negative_next_quarter = (positive_quarter + 3) & 3
+    let positive = evaluate_composition_opened<4, 16>(
+        c_re_q12,
+        c_im_q12,
+        challenge,
+        shift,
+        query_index,
+        ref opening.rows[positive_quarter],
+        ref opening.rows[positive_next_quarter],
+    )
+    let negative = evaluate_composition_opened<4, 16>(
+        c_re_q12,
+        c_im_q12,
+        challenge,
+        shift,
+        query_index + 8,
+        ref opening.rows[negative_quarter],
+        ref opening.rows[negative_next_quarter],
+    )
+    if !positive.valid || !negative.valid {
+        return (0, 0, 0, 0, 0, 0, 0, 0, 0)
+    }
+
+    if mutation == 1 {
+        opening.rows[0].main[0] = opening.rows[0].main[0] + BabyBear::one()
+    } else if mutation == 2 {
+        opening.rows[0].auxiliary[0] = opening.rows[0].auxiliary[0] + BabyBear::one()
+    } else if mutation == 3 {
+        opening.main_path.first_siblings[0] = digest8(seed + 1700000)
+    } else if mutation == 4 {
+        opening.auxiliary_path.index = opening.auxiliary_path.index ^ 1
+    } else if mutation == 5 {
+        main_root.value = digest8(seed + 1800000)
+    } else if mutation == 6 {
+        challenge.value = challenge.value + BabyBearExt4::one()
+    } else if mutation == 7 {
+        opening.valid = false
+    }
+    let positive_opening = if mutation == 8 {
+        positive.value + BabyBearExt4::one()
+    } else {
+        positive.value
+    }
+    let negative_opening = if mutation == 9 {
+        negative.value + BabyBearExt4::one()
+    } else {
+        negative.value
+    }
+    let verifier_shift = if mutation == 10 { shift + BabyBear::one() } else { shift }
+    let verifier_query = if mutation == 11 { query_index ^ 1 } else { query_index }
+    let accepted = verify_checkpoint4_air_lde_composition_query<16, 4, 2>(
+        c_re_q12,
+        c_im_q12,
+        challenge,
+        verifier_shift,
+        verifier_query,
+        ref opening,
+        main_root,
+        auxiliary_root,
+        positive_opening,
+        negative_opening,
+    )
+    let positive_words = positive.value.to_u32s()
+    let negative_words = negative.value.to_u32s()
+    (
+        if accepted { 1 } else { 0 },
+        positive_words[0], positive_words[1], positive_words[2], positive_words[3],
+        negative_words[0], negative_words[1], negative_words[2], negative_words[3],
+    )
 }
 
 pub fn air_lde_quartet16(

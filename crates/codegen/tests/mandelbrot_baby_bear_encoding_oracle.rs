@@ -27,6 +27,14 @@ const EXT_NONRESIDUE: u32 = 11;
 struct Ext4([u32; 4]);
 
 impl Ext4 {
+    fn zero() -> Self {
+        Self([0; 4])
+    }
+
+    fn one() -> Self {
+        Self::from_base(1)
+    }
+
     fn from_base(value: u32) -> Self {
         Self([value % MODULUS, 0, 0, 0])
     }
@@ -217,6 +225,321 @@ fn base_pow(mut base: u64, mut exponent: u32) -> u32 {
         exponent >>= 1;
     }
     result as u32
+}
+
+fn base_sub(left: u32, right: u32) -> u32 {
+    ((u64::from(left) + u64::from(MODULUS) - u64::from(right)) % u64::from(MODULUS)) as u32
+}
+
+fn base_mul(left: u32, right: u32) -> u32 {
+    (u64::from(left) * u64::from(right) % u64::from(MODULUS)) as u32
+}
+
+#[derive(Clone, Copy)]
+struct ExtFold {
+    challenge: Ext4,
+    power: Ext4,
+    value: Ext4,
+}
+
+impl ExtFold {
+    fn new(challenge: Ext4) -> Self {
+        Self {
+            challenge,
+            power: Ext4::one(),
+            value: Ext4::zero(),
+        }
+    }
+
+    fn absorb(&mut self, residual: Ext4) {
+        self.value = self.value.add(self.power.mul(residual));
+        self.power = self.power.mul(self.challenge);
+    }
+
+    fn next_family(&mut self) {
+        self.value = Ext4::zero();
+    }
+}
+
+fn ext_bit_residual(value: Ext4) -> Ext4 {
+    value.mul(value.sub(Ext4::one()))
+}
+
+fn ext_signed_value(sign: Ext4, magnitude: Ext4) -> Ext4 {
+    magnitude.sub(sign.mul(magnitude).mul(Ext4::from_base(2)))
+}
+
+fn patterned_main(seed: u32, evaluation: u32) -> [Ext4; 17] {
+    core::array::from_fn(|column| {
+        Ext4::from_base((seed + evaluation * 1009 + column as u32 * 37) % 1_900_000_007)
+    })
+}
+
+fn patterned_auxiliary(seed: u32, evaluation: u32) -> [Ext4; 411] {
+    core::array::from_fn(|column| {
+        Ext4::from_base((seed + 700_001 + evaluation * 4001 + column as u32 * 53) % 1_900_000_007)
+    })
+}
+
+fn absorb_ext_residuals<const N: usize>(fold: &mut ExtFold, residuals: [Ext4; N]) {
+    for residual in residuals {
+        fold.absorb(residual);
+    }
+}
+
+fn ext_local_residuals(row: &[Ext4; 17]) -> [Ext4; 9] {
+    let zr = ext_signed_value(row[1], row[2]);
+    let zi = ext_signed_value(row[3], row[4]);
+    let q_re = ext_signed_value(row[8], row[9]);
+    let q_im = ext_signed_value(row[11], row[12]);
+    [
+        ext_bit_residual(row[1]),
+        ext_bit_residual(row[3]),
+        ext_bit_residual(row[8]),
+        ext_bit_residual(row[11]),
+        row[5].sub(zr.mul(zr)),
+        row[6].sub(zi.mul(zi)),
+        row[7].sub(row[5]).sub(row[6]),
+        row[5]
+            .sub(row[6])
+            .sub(Ext4::from_base(4096).mul(q_re))
+            .sub(row[10]),
+        Ext4::from_base(2)
+            .mul(zr)
+            .mul(zi)
+            .sub(Ext4::from_base(4096).mul(q_im))
+            .sub(row[13]),
+    ]
+}
+
+fn ext_row_state_residuals(row: &[Ext4; 17]) -> [Ext4; 5] {
+    [
+        ext_bit_residual(row[15]),
+        ext_bit_residual(row[16]),
+        ext_bit_residual(row[14]),
+        row[16].sub(row[15].mul(row[14])),
+        Ext4::one().sub(row[15]).mul(row[14].sub(Ext4::one())),
+    ]
+}
+
+fn ext_transition_residuals(
+    c_re: (Ext4, Ext4, Ext4),
+    c_im: (Ext4, Ext4, Ext4),
+    row: &[Ext4; 17],
+    next: &[Ext4; 17],
+) -> [Ext4; 9] {
+    [
+        ext_bit_residual(c_re.0),
+        ext_bit_residual(c_im.0),
+        ext_bit_residual(row[8]),
+        ext_bit_residual(row[11]),
+        ext_bit_residual(next[1]),
+        ext_bit_residual(next[3]),
+        next[0].sub(row[0]).sub(Ext4::one()),
+        ext_signed_value(next[1], next[2])
+            .sub(ext_signed_value(row[8], row[9]))
+            .sub(c_re.2),
+        ext_signed_value(next[3], next[4])
+            .sub(ext_signed_value(row[11], row[12]))
+            .sub(c_im.2),
+    ]
+}
+
+fn absorb_ext_range(
+    fold: &mut ExtFold,
+    value: Ext4,
+    auxiliary: &[Ext4; 411],
+    start: usize,
+    width: usize,
+) {
+    let mut reconstructed = Ext4::zero();
+    let mut weight = Ext4::one();
+    let mut previous_any = Ext4::zero();
+    for index in 0..width {
+        let bit = auxiliary[start + index];
+        let any = auxiliary[start + width + index];
+        fold.absorb(ext_bit_residual(bit));
+        fold.absorb(ext_bit_residual(any));
+        fold.absorb(any.sub(previous_any).sub(bit).add(previous_any.mul(bit)));
+        reconstructed = reconstructed.add(bit.mul(weight));
+        weight = weight.add(weight);
+        previous_any = any;
+    }
+    fold.absorb(value.sub(reconstructed));
+}
+
+fn absorb_ext_signed_range(
+    fold: &mut ExtFold,
+    sign: Ext4,
+    magnitude: Ext4,
+    auxiliary: &[Ext4; 411],
+    start: usize,
+    width: usize,
+) {
+    fold.absorb(ext_bit_residual(sign));
+    absorb_ext_range(fold, magnitude, auxiliary, start, width);
+    let nonzero = auxiliary[start + 2 * width - 1];
+    fold.absorb(sign.mul(Ext4::one().sub(nonzero)));
+}
+
+fn absorb_ext_terminal_range(
+    fold: &mut ExtFold,
+    row: &[Ext4; 17],
+    auxiliary: &[Ext4; 411],
+    magnitude_start: usize,
+    terminal_start: usize,
+) {
+    absorb_ext_range(fold, row[7], auxiliary, magnitude_start, 31);
+    fold.absorb(ext_bit_residual(row[14]));
+    let mut previous = Ext4::zero();
+    for index in 0..5 {
+        let bit = auxiliary[magnitude_start + 26 + index];
+        let any = auxiliary[terminal_start + index];
+        fold.absorb(ext_bit_residual(any));
+        fold.absorb(any.sub(previous).sub(bit).add(previous.mul(bit)));
+        previous = any;
+    }
+    fold.absorb(row[14].sub(previous));
+}
+
+fn ext_signed_i32(value: i32) -> (Ext4, Ext4, Ext4) {
+    let sign = Ext4::from_base(u32::from(value < 0));
+    let magnitude = Ext4::from_base(value.unsigned_abs());
+    (sign, magnitude, ext_signed_value(sign, magnitude))
+}
+
+fn reference_constraint_numerators(
+    challenge: Ext4,
+    c_re_q12: i32,
+    c_im_q12: i32,
+    row: &[Ext4; 17],
+    next: &[Ext4; 17],
+    auxiliary: &[Ext4; 411],
+) -> [Ext4; 4] {
+    let c_re = ext_signed_i32(c_re_q12);
+    let c_im = ext_signed_i32(c_im_q12);
+    let continue_selector = row[15].mul(Ext4::one().sub(row[16]));
+    let freeze_selector = row[16].add(Ext4::one().sub(row[15]));
+    let mut fold = ExtFold::new(challenge);
+    absorb_ext_residuals(&mut fold, ext_local_residuals(row));
+    absorb_ext_residuals(&mut fold, ext_row_state_residuals(row));
+
+    let mut cursor = 0usize;
+    absorb_ext_range(&mut fold, row[0], auxiliary, cursor, 21);
+    cursor += 2 * 21;
+    absorb_ext_signed_range(&mut fold, row[1], row[2], auxiliary, cursor, 15);
+    cursor += 2 * 15;
+    absorb_ext_signed_range(&mut fold, row[3], row[4], auxiliary, cursor, 15);
+    cursor += 2 * 15;
+    absorb_ext_range(&mut fold, row[5], auxiliary, cursor, 30);
+    cursor += 2 * 30;
+    absorb_ext_range(&mut fold, row[6], auxiliary, cursor, 30);
+    cursor += 2 * 30;
+    let magnitude_start = cursor;
+    cursor += 2 * 31;
+    absorb_ext_signed_range(&mut fold, row[8], row[9], auxiliary, cursor, 18);
+    cursor += 2 * 18;
+    absorb_ext_range(&mut fold, row[10], auxiliary, cursor, 12);
+    cursor += 2 * 12;
+    absorb_ext_signed_range(&mut fold, row[11], row[12], auxiliary, cursor, 19);
+    cursor += 2 * 19;
+    absorb_ext_range(&mut fold, row[13], auxiliary, cursor, 12);
+    cursor += 2 * 12;
+    assert_eq!(cursor + 5, 411);
+    absorb_ext_terminal_range(&mut fold, row, auxiliary, magnitude_start, cursor);
+    let all_rows = fold.value;
+
+    fold.next_family();
+    absorb_ext_residuals(&mut fold, ext_row_state_residuals(row));
+    absorb_ext_residuals(&mut fold, ext_row_state_residuals(next));
+    fold.absorb(continue_selector.mul(next[15].sub(Ext4::one())));
+    fold.absorb(freeze_selector.mul(next[15]));
+    fold.absorb(freeze_selector.mul(next[16]));
+    for column in 0..15 {
+        fold.absorb(freeze_selector.mul(next[column].sub(row[column])));
+    }
+    for residual in ext_transition_residuals(c_re, c_im, row, next) {
+        fold.absorb(continue_selector.mul(residual));
+    }
+    let pair_rows = fold.value;
+
+    fold.next_family();
+    absorb_ext_residuals(&mut fold, ext_row_state_residuals(row));
+    fold.absorb(row[15].sub(Ext4::one()));
+    fold.absorb(row[16]);
+    fold.absorb(row[0]);
+    fold.absorb(row[1]);
+    fold.absorb(row[2]);
+    fold.absorb(row[3]);
+    fold.absorb(row[4]);
+    let first_row = fold.value;
+
+    fold.next_family();
+    absorb_ext_residuals(&mut fold, ext_row_state_residuals(row));
+    fold.absorb(row[15].mul(Ext4::one().sub(row[16])));
+    [all_rows, pair_rows, first_row, fold.value]
+}
+
+fn reference_air_composition(
+    seed: u32,
+    evaluation: u32,
+    c_re_q12: i32,
+    c_im_q12: i32,
+    challenge: Ext4,
+    shift: u32,
+) -> Option<Ext4> {
+    const TRACE: u32 = 4;
+    const LDE: u32 = 16;
+    let shift = shift % MODULUS;
+    if evaluation >= LDE || shift == 0 || base_pow(u64::from(shift), LDE) == 1 {
+        return None;
+    }
+    let maximal_root = base_pow(31, 15);
+    let lde_root = base_pow(u64::from(maximal_root), 1 << (TWO_ADICITY - LDE.ilog2()));
+    let trace_root = base_pow(u64::from(maximal_root), 1 << (TWO_ADICITY - TRACE.ilog2()));
+    let point = base_mul(shift, base_pow(u64::from(lde_root), evaluation));
+    let next_evaluation = (evaluation + LDE / TRACE) % LDE;
+    let row = patterned_main(seed, evaluation);
+    let next = patterned_main(seed, next_evaluation);
+    let auxiliary = patterned_auxiliary(seed, evaluation);
+    let numerators =
+        reference_constraint_numerators(challenge, c_re_q12, c_im_q12, &row, &next, &auxiliary);
+
+    let one = 1u32;
+    let last_trace_point = base_pow(u64::from(trace_root), MODULUS - 2);
+    let trace_zerofier = base_sub(base_pow(u64::from(point), TRACE), one);
+    let first_zerofier = base_sub(point, one);
+    let last_zerofier = base_sub(point, last_trace_point);
+    if trace_zerofier == 0 || first_zerofier == 0 || last_zerofier == 0 {
+        return None;
+    }
+    let trace_inverse = base_pow(u64::from(trace_zerofier), MODULUS - 2);
+    let first_inverse = base_pow(u64::from(first_zerofier), MODULUS - 2);
+    let last_inverse = base_pow(u64::from(last_zerofier), MODULUS - 2);
+    Some(
+        numerators[0]
+            .mul(Ext4::from_base(trace_inverse))
+            .add(numerators[1].mul(Ext4::from_base(base_mul(last_zerofier, trace_inverse))))
+            .add(numerators[2].mul(Ext4::from_base(first_inverse)))
+            .add(numerators[3].mul(Ext4::from_base(last_inverse))),
+    )
+}
+
+fn reference_query_geometry(trace: u32, lde: u32, query_index: u32) -> Vec<u32> {
+    let half = lde / 2;
+    let stride = lde / trace;
+    if query_index >= half {
+        return vec![0; 6];
+    }
+    let negative = query_index + half;
+    vec![
+        1,
+        query_index,
+        (query_index + stride) % lde,
+        negative,
+        (negative + stride) % lde,
+        query_index % stride,
+    ]
 }
 
 fn fri_pattern<const N: usize>(seed: u32) -> [Ext4; N] {
@@ -441,6 +764,33 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
     let mut store = wasmtime::Store::new(&engine, ());
     let instance = wasmtime::Instance::new(&mut store, &module, &[])
         .expect("encoding module should instantiate");
+
+    for query_index in [0, 3, 4, 7, 8] {
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "query_geometry4x16",
+                &[query_index],
+                6,
+            ),
+            reference_query_geometry(4, 16, query_index),
+            "derived 4x16 query geometry differs at index {query_index}",
+        );
+    }
+    for query_index in [0, 7, 8, 17, 31, 32] {
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "query_geometry8x64",
+                &[query_index],
+                6,
+            ),
+            reference_query_geometry(8, 64, query_index),
+            "derived 8x64 query geometry differs at index {query_index}",
+        );
+    }
 
     let rows = [
         [0; 17],
@@ -795,6 +1145,104 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
             "out-of-quarter AIR opening indices must fail closed",
         );
     }
+
+    let air_seed = 97;
+    let c_re_q12 = -4801i32;
+    let c_im_q12 = 1777i32;
+    let air_challenge = Ext4([17, 23, 41, 73]);
+    let air_shift = 7u32;
+    for query_index in [0, 3, 4, 7] {
+        let positive = reference_air_composition(
+            air_seed,
+            query_index,
+            c_re_q12,
+            c_im_q12,
+            air_challenge,
+            air_shift,
+        )
+        .expect("checkpoint positive composition point");
+        let negative = reference_air_composition(
+            air_seed,
+            query_index + 8,
+            c_re_q12,
+            c_im_q12,
+            air_challenge,
+            air_shift,
+        )
+        .expect("checkpoint negative composition point");
+        let mut expected = vec![1];
+        expected.extend(positive.0);
+        expected.extend(negative.0);
+        let arguments = [
+            air_seed,
+            query_index,
+            c_re_q12 as u32,
+            c_im_q12 as u32,
+            air_challenge.0[0],
+            air_challenge.0[1],
+            air_challenge.0[2],
+            air_challenge.0[3],
+            air_shift,
+            0,
+        ];
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "air_composition_query16",
+                &arguments,
+                9,
+            ),
+            expected,
+            "BabyBear AIR composition differs from the independent extension-field model at query {query_index}",
+        );
+    }
+    for mutation in 1..=11 {
+        let actual = call(
+            &mut store,
+            &instance,
+            "air_composition_query16",
+            &[
+                air_seed,
+                5,
+                c_re_q12 as u32,
+                c_im_q12 as u32,
+                air_challenge.0[0],
+                air_challenge.0[1],
+                air_challenge.0[2],
+                air_challenge.0[3],
+                air_shift,
+                mutation,
+            ],
+            9,
+        );
+        assert_eq!(
+            actual[0], 0,
+            "authenticated BabyBear AIR mutation {mutation} must fail closed",
+        );
+    }
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "air_composition_query16",
+            &[
+                air_seed,
+                8,
+                c_re_q12 as u32,
+                c_im_q12 as u32,
+                air_challenge.0[0],
+                air_challenge.0[1],
+                air_challenge.0[2],
+                air_challenge.0[3],
+                air_shift,
+                0,
+            ],
+            9,
+        ),
+        vec![0; 9],
+        "out-of-domain BabyBear AIR queries must fail closed",
+    );
 
     let main_lde = [
         0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597,

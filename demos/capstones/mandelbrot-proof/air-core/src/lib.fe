@@ -7,7 +7,7 @@
 
 use core::marker::Copy
 use mandelbrot_proof_kernel::AUXILIARY_ROW_BITS
-use precision::polynomial::Radix2Field
+use precision::polynomial::{Radix2Field, radix2_log}
 
 /// A source of the canonical 17 main and 411 auxiliary columns.
 ///
@@ -34,6 +34,25 @@ pub struct ConstraintNumerators<F: Radix2Field> {
 }
 impl<F: Radix2Field> Copy for ConstraintNumerators<F> {}
 
+pub struct CompositionValue<F: Radix2Field> {
+    pub valid: bool,
+    pub value: F,
+}
+impl<F: Radix2Field> Copy for CompositionValue<F> {}
+
+/// Runtime positions derived from one compile-time radix-two STARK domain.
+/// The query itself is transcript-selected, while trace size, LDE size, row
+/// stride, and negation offset specialize away through const generics.
+pub struct Radix2QueryGeometry {
+    pub valid: bool,
+    pub evaluation: u32,
+    pub next_evaluation: u32,
+    pub negative_evaluation: u32,
+    pub negative_next_evaluation: u32,
+    pub local_index: u32,
+}
+impl Copy for Radix2QueryGeometry {}
+
 struct AirRow<F: Radix2Field> {
     active: F,
     terminal: F,
@@ -56,6 +75,21 @@ fn one<F: Radix2Field>() -> F { F::radix2_root(0) }
 fn add<F: Radix2Field>(_ left: F, _ right: F) -> F { left.radix2_add(right) }
 fn sub<F: Radix2Field>(_ left: F, _ right: F) -> F { left.radix2_sub(right) }
 fn mul<F: Radix2Field>(_ left: F, _ right: F) -> F { left.radix2_mul(right) }
+
+fn invalid_composition_value<F: Radix2Field>() -> CompositionValue<F> {
+    CompositionValue<F> { valid: false, value: zero<F>() }
+}
+
+fn invalid_query_geometry() -> Radix2QueryGeometry {
+    Radix2QueryGeometry {
+        valid: false,
+        evaluation: 0,
+        next_evaluation: 0,
+        negative_evaluation: 0,
+        negative_next_evaluation: 0,
+        local_index: 0,
+    }
+}
 
 fn natural<F: Radix2Field>(_ value: u32) -> F {
     let mut result = zero<F>()
@@ -374,5 +408,73 @@ pub fn constraint_numerators<
         pair_rows: pair_rows,
         first_row: first_row,
         last_row: fold.value,
+    }
+}
+
+/// Divide the four AIR numerator families by their trace-domain zerofiers.
+///
+/// The trace size is a type-level parameter so the same denotation serves the
+/// four-row protocol checkpoint and later recursive leaf chunks. A backend may
+/// schedule its field operations differently, but it does not receive a
+/// second composition formula.
+pub fn composition_value<F: Radix2Field, const N: usize>(
+    _ point: F,
+    _ numerators: ConstraintNumerators<F>,
+) -> CompositionValue<F>
+where N > 1, { (N & (N - 1)) == 0 },
+{
+    let one = one<F>()
+    let last_trace_point = F::radix2_root(radix2_log<N>()).radix2_inverse_or_zero()
+    let trace_zerofier = sub(point.radix2_pow(N.downcast_truncate()), one)
+    let first_zerofier = sub(point, one)
+    let last_zerofier = sub(point, last_trace_point)
+    if trace_zerofier.radix2_is_zero()
+        || first_zerofier.radix2_is_zero()
+        || last_zerofier.radix2_is_zero() {
+        return invalid_composition_value<F>()
+    }
+    let trace_inverse = trace_zerofier.radix2_inverse_or_zero()
+    CompositionValue<F> {
+        valid: true,
+        value: add(
+            add(
+                mul(numerators.all_rows, trace_inverse),
+                mul(mul(numerators.pair_rows, last_zerofier), trace_inverse),
+            ),
+            add(
+                mul(numerators.first_row, first_zerofier.radix2_inverse_or_zero()),
+                mul(numerators.last_row, last_zerofier.radix2_inverse_or_zero()),
+            ),
+        ),
+    }
+}
+
+/// Derive the four LDE positions needed to check one transition constraint at
+/// transcript-selected `x` and `-x`.
+pub fn radix2_query_geometry<const TRACE: usize, const LDE: usize>(
+    _ query_index: u32,
+) -> Radix2QueryGeometry
+where
+    TRACE > 1,
+    LDE > TRACE,
+    { (TRACE & (TRACE - 1)) == 0 },
+    { (LDE & (LDE - 1)) == 0 },
+    { (LDE % TRACE) == 0 },
+{
+    let lde: u32 = LDE.downcast_truncate()
+    let half: u32 = (LDE / 2).downcast_truncate()
+    let stride: u32 = (LDE / TRACE).downcast_truncate()
+    if query_index >= half {
+        return invalid_query_geometry()
+    }
+    let next = (query_index + stride) % lde
+    let negative = query_index + half
+    Radix2QueryGeometry {
+        valid: true,
+        evaluation: query_index,
+        next_evaluation: next,
+        negative_evaluation: negative,
+        negative_next_evaluation: (negative + stride) % lde,
+        local_index: query_index % stride,
     }
 }

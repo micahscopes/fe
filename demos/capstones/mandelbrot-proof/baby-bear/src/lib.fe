@@ -14,9 +14,18 @@ use mandelbrot_proof_kernel::{
     EncodedProofRow,
     EscapesByQ12Public,
     derive_ranged_air_row,
+    encode_signed_word,
     encoded_proof_row_words,
     encoded_ranged_auxiliary_row_bit,
     escapes_by_q12_public_words,
+}
+use mandelbrot_proof_air_core::{
+    AirColumnView,
+    CompositionValue,
+    composition_value,
+    constraint_numerators,
+    radix2_query_geometry,
+    signed_air_value,
 }
 use merkle_core::{
     MerklePairPath,
@@ -269,6 +278,41 @@ pub struct AuxiliaryLdeTreeRole {}
 pub type MainLdeQuartetPath<const DEPTH: usize> = LdeQuartetPath<MainLdeTreeRole, DEPTH>
 pub type AuxiliaryLdeQuartetPath<const DEPTH: usize> =
     LdeQuartetPath<AuxiliaryLdeTreeRole, DEPTH>
+
+/// One authenticated verifier row. Main and auxiliary values remain in the
+/// u32-native base field; the shared AIR view embeds them into the quartic
+/// challenge field only while recomputing the composition value.
+pub struct AirLdeRow {
+    pub main: [BabyBear; MAIN_LDE_ROW_FIELDS],
+    pub auxiliary: [BabyBear; AUXILIARY_ROW_BITS],
+}
+impl core::marker::Copy for AirLdeRow {}
+
+impl AirColumnView<BabyBearExt4> for AirLdeRow {
+    fn main(ref self, _ column: usize) -> BabyBearExt4 {
+        BabyBearExt4::from_base(self.main[column])
+    }
+
+    fn auxiliary(ref self, _ column: usize) -> BabyBearExt4 {
+        BabyBearExt4::from_base(self.auxiliary[column])
+    }
+}
+
+/// The four-row trace checkpoint opens one common local position in every LDE
+/// quarter. `radix2_query_geometry<4, LDE>` derives which quarters represent
+/// current, next, negative, and negative-next rows for a transcript query.
+pub struct Checkpoint4AirLdeOpening<const DEPTH: usize> {
+    pub valid: bool,
+    pub rows: [AirLdeRow; 4],
+    pub main_path: MainLdeQuartetPath<DEPTH>,
+    pub auxiliary_path: AuxiliaryLdeQuartetPath<DEPTH>,
+}
+impl<const DEPTH: usize> core::marker::Copy for Checkpoint4AirLdeOpening<DEPTH> {}
+
+pub const ZERO_AIR_LDE_ROW: AirLdeRow = AirLdeRow {
+    main: [BabyBear::zero(); MAIN_LDE_ROW_FIELDS],
+    auxiliary: [BabyBear::zero(); AUXILIARY_ROW_BITS],
+}
 
 pub struct FriLayerPairPath<const ROUND: u32, const DEPTH: usize> {
     pub valid: bool,
@@ -697,6 +741,158 @@ pub fn verify_auxiliary_lde_quartet_path<const DEPTH: usize>(
             fourth_siblings: path.fourth_siblings,
         },
     )
+}
+
+fn lde_point<const LDE: usize>(
+    _ evaluation: u32,
+    _ shift: BabyBear,
+) -> CompositionValue<BabyBear>
+where LDE > 1, { (LDE & (LDE - 1)) == 0 },
+{
+    let one = BabyBear::one()
+    let lde: u32 = LDE.downcast_truncate()
+    if evaluation >= lde || shift.is_zero() || (shift.pow_u32(lde) - one).is_zero() {
+        return CompositionValue<BabyBear> { valid: false, value: BabyBear::zero() }
+    }
+    CompositionValue<BabyBear> {
+        valid: true,
+        value: shift * BabyBear::two_adic_root(radix2_log<LDE>()).pow_u32(evaluation),
+    }
+}
+
+/// Recompute one BabyBear composition value from authenticated current and
+/// next LDE rows. The base-field opening is embedded into the quartic field at
+/// the shared AIR boundary; no BabyBear-specific constraint body exists.
+pub fn evaluate_composition_opened<const TRACE: usize, const LDE: usize>(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ challenge: CompositionChallenge,
+    _ shift: BabyBear,
+    _ evaluation: u32,
+    _ row: ref AirLdeRow,
+    _ next: ref AirLdeRow,
+) -> CompositionValue<BabyBearExt4>
+where
+    TRACE > 1,
+    LDE > TRACE,
+    { (TRACE & (TRACE - 1)) == 0 },
+    { (LDE & (LDE - 1)) == 0 },
+    { (LDE % TRACE) == 0 },
+{
+    let point = lde_point<LDE>(evaluation, shift)
+    if !challenge.valid || !point.valid {
+        return CompositionValue<BabyBearExt4> {
+            valid: false,
+            value: BabyBearExt4::zero(),
+        }
+    }
+    let c_re = encode_signed_word(c_re_q12)
+    let c_im = encode_signed_word(c_im_q12)
+    let numerators = constraint_numerators<BabyBearExt4, AirLdeRow, AirLdeRow>(
+        challenge.value,
+        signed_air_value<BabyBearExt4>(
+            BabyBearExt4::from_base(BabyBear::from_u32(c_re.sign)),
+            BabyBearExt4::from_base(BabyBear::from_u32(c_re.magnitude)),
+        ),
+        signed_air_value<BabyBearExt4>(
+            BabyBearExt4::from_base(BabyBear::from_u32(c_im.sign)),
+            BabyBearExt4::from_base(BabyBear::from_u32(c_im.magnitude)),
+        ),
+        row,
+        next,
+    )
+    composition_value<BabyBearExt4, TRACE>(BabyBearExt4::from_base(point.value), numerators)
+}
+
+/// Authenticate the four base-field LDE rows selected by one FRI query, then
+/// bind shared-AIR recomputation at `x` and `-x` to the opened composition
+/// pair. This is the verifier seam between the typed LDE quartet and FRI
+/// receipt; it retains neither complete tree nor complete codeword.
+pub fn verify_checkpoint4_air_lde_composition_query<
+    const LDE: usize,
+    const QUARTER: usize,
+    const DEPTH: usize,
+>(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ challenge: CompositionChallenge,
+    _ shift: BabyBear,
+    _ query_index: u32,
+    _ opening: ref Checkpoint4AirLdeOpening<DEPTH>,
+    _ main_root: MainLdeDigest,
+    _ auxiliary_root: AuxiliaryLdeDigest,
+    _ positive_composition: BabyBearExt4,
+    _ negative_composition: BabyBearExt4,
+) -> bool
+where
+    LDE > 4,
+    QUARTER > 0,
+    { (LDE & (LDE - 1)) == 0 },
+    { QUARTER + QUARTER + QUARTER + QUARTER == LDE },
+{
+    let geometry = radix2_query_geometry<4, LDE>(query_index)
+    if !challenge.valid || !opening.valid || !geometry.valid {
+        return false
+    }
+    if opening.main_path.index != geometry.local_index
+        || opening.auxiliary_path.index != geometry.local_index {
+        return false
+    }
+
+    let first_main = main_lde_row_commitment(opening.rows[0].main)
+    let second_main = main_lde_row_commitment(opening.rows[1].main)
+    let third_main = main_lde_row_commitment(opening.rows[2].main)
+    let fourth_main = main_lde_row_commitment(opening.rows[3].main)
+    let first_auxiliary = auxiliary_lde_row_commitment(opening.rows[0].auxiliary)
+    let second_auxiliary = auxiliary_lde_row_commitment(opening.rows[1].auxiliary)
+    let third_auxiliary = auxiliary_lde_row_commitment(opening.rows[2].auxiliary)
+    let fourth_auxiliary = auxiliary_lde_row_commitment(opening.rows[3].auxiliary)
+    if !verify_main_lde_quartet_path<DEPTH>(
+            first_main,
+            second_main,
+            third_main,
+            fourth_main,
+            opening.main_path,
+            main_root,
+        )
+        || !verify_auxiliary_lde_quartet_path<DEPTH>(
+            first_auxiliary,
+            second_auxiliary,
+            third_auxiliary,
+            fourth_auxiliary,
+            opening.auxiliary_path,
+            auxiliary_root,
+        ) {
+        return false
+    }
+
+    let quarter: u32 = QUARTER.downcast_truncate()
+    let positive_quarter: usize = (geometry.evaluation / quarter) as usize
+    let positive_next_quarter: usize = (geometry.next_evaluation / quarter) as usize
+    let negative_quarter: usize = (geometry.negative_evaluation / quarter) as usize
+    let negative_next_quarter: usize = (geometry.negative_next_evaluation / quarter) as usize
+    let positive = evaluate_composition_opened<4, LDE>(
+        c_re_q12,
+        c_im_q12,
+        challenge,
+        shift,
+        geometry.evaluation,
+        ref opening.rows[positive_quarter],
+        ref opening.rows[positive_next_quarter],
+    )
+    let negative = evaluate_composition_opened<4, LDE>(
+        c_re_q12,
+        c_im_q12,
+        challenge,
+        shift,
+        geometry.negative_evaluation,
+        ref opening.rows[negative_quarter],
+        ref opening.rows[negative_next_quarter],
+    )
+    positive.valid
+        && negative.valid
+        && (positive.value - positive_composition).is_zero()
+        && (negative.value - negative_composition).is_zero()
 }
 
 pub fn composition_root_power_of_two<const N: usize>(
