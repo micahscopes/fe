@@ -1556,6 +1556,22 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
             expected_plan,
             "structural FRI query-plan sampling differs from Plonky3",
         );
+        for (export, half) in [
+            ("fri_query_plan4_pairs16", 8),
+            ("fri_query_plan4_pairs8", 4),
+        ] {
+            let mut expected_pairs = vec![1, 8];
+            for &query in &expected_plan[1..] {
+                let local = query & (half - 1);
+                expected_pairs.push(local);
+                expected_pairs.push(local + half);
+            }
+            assert_eq!(
+                call(&mut store, &instance, export, &[transcript_seed], 10),
+                expected_pairs,
+                "query-plan pair projection differs for {export}",
+            );
+        }
     }
 
     for requests in [[0, 1, 2, 3], [0, 4, 8, 12], [12, 0, 4, 8], [3, 3, 3, 3]] {

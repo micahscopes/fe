@@ -227,6 +227,16 @@ pub struct FriQueryIndicesSample<const QUERY: u32, Tail> {
 impl<const QUERY: u32, Tail: core::marker::Copy> core::marker::Copy
     for FriQueryIndicesSample<QUERY, Tail> {}
 
+/// Fixed-capacity pair-leaf requests derived from a typed query sample list.
+/// Duplicates are retained here and normalized once by `MerkleMultiPath`.
+pub struct FriQueryLeafRequests<const MAX_REQUESTS: usize> {
+    pub valid: bool,
+    pub count: u32,
+    pub indices: [u32; MAX_REQUESTS],
+}
+impl<const MAX_REQUESTS: usize> core::marker::Copy
+    for FriQueryLeafRequests<MAX_REQUESTS> {}
+
 /// Derive the value carrier for a field-neutral query plan.
 pub trait BabyBearFriQueryPlanShape {
     type Samples
@@ -366,6 +376,96 @@ where
 pub type CheckpointFriQueryPlan4 = FriQueryPlan<1, 4>
 pub type CheckpointFriQuerySamples4 =
     <CheckpointFriQueryPlan4 as BabyBearFriQueryPlanShape>::Samples
+
+/// Interpret typed query samples into the two leaves needed at one binary FRI
+/// layer. Applying the same plan at successively smaller `HALF` values derives
+/// every round's local pair positions without mutating the original samples.
+pub trait BabyBearFriPairRequests<
+    const HALF: usize,
+    const MAX_REQUESTS: usize,
+    Samples,
+>: BabyBearFriQueryPlanShape {
+    fn fri_pair_requests(_ samples: Samples) -> FriQueryLeafRequests<MAX_REQUESTS>
+}
+
+impl<
+    const HALF: usize,
+    const MAX_REQUESTS: usize,
+    const NEXT_QUERY: u32,
+> BabyBearFriPairRequests<HALF, MAX_REQUESTS, FriQueryIndicesDone<NEXT_QUERY>>
+    for FriQueryPlanDone<NEXT_QUERY>
+where
+    HALF > 0,
+    { (HALF & (HALF - 1)) == 0 },
+{
+    fn fri_pair_requests(
+        _ samples: FriQueryIndicesDone<NEXT_QUERY>,
+    ) -> FriQueryLeafRequests<MAX_REQUESTS> {
+        FriQueryLeafRequests {
+            valid: true,
+            count: 0,
+            indices: [0; MAX_REQUESTS],
+        }
+    }
+}
+
+impl<
+    const HALF: usize,
+    const MAX_REQUESTS: usize,
+    const QUERY: u32,
+    Tail,
+    TailSamples,
+> BabyBearFriPairRequests<
+    HALF,
+    MAX_REQUESTS,
+    FriQueryIndicesSample<QUERY, TailSamples>,
+> for FriQueryPlanSample<QUERY, Tail>
+where
+    HALF > 0,
+    { (HALF & (HALF - 1)) == 0 },
+    Tail: BabyBearFriPairRequests<HALF, MAX_REQUESTS, TailSamples>,
+    TailSamples: core::marker::Copy,
+{
+    fn fri_pair_requests(
+        _ samples: FriQueryIndicesSample<QUERY, TailSamples>,
+    ) -> FriQueryLeafRequests<MAX_REQUESTS> {
+        if !samples.current.valid {
+            return FriQueryLeafRequests {
+                valid: false,
+                count: 0,
+                indices: [0; MAX_REQUESTS],
+            }
+        }
+        let tail = <Tail as BabyBearFriPairRequests<
+            HALF,
+            MAX_REQUESTS,
+            TailSamples,
+        >>::fri_pair_requests(samples.tail)
+        let tail_count: usize = tail.count as usize
+        if !tail.valid || tail_count + 2 > MAX_REQUESTS {
+            return FriQueryLeafRequests {
+                valid: false,
+                count: 0,
+                indices: [0; MAX_REQUESTS],
+            }
+        }
+        let half: u32 = HALF.downcast_truncate()
+        let local = samples.current.value & (half - 1)
+        let mut indices = [0; MAX_REQUESTS]
+        indices[0] = local
+        indices[1] = local + half
+        let mut cursor: usize = 0
+        while cursor < tail_count {
+            indices[cursor + 2] = tail.indices[cursor]
+            cursor = cursor + 1
+        }
+        FriQueryLeafRequests {
+            valid: true,
+            count: tail.count + 2,
+            indices: indices,
+        }
+    }
+}
 
 pub struct FriLayerDigest<const ROUND: u32> { pub valid: bool, pub value: Poseidon2Digest }
 impl<const ROUND: u32> core::marker::Copy for FriLayerDigest<ROUND> {}

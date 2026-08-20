@@ -3,6 +3,7 @@
 use mandelbrot_proof_baby_bear::{
     Checkpoint4AirLdeOpening,
     BabyBearFriQueryPlan,
+    BabyBearFriPairRequests,
     AirLdeRow,
     AirLdeTranscriptDigest,
     AuxiliaryDigest,
@@ -550,6 +551,47 @@ pub fn fri_query_plan4(_ transcript: u32) -> (u32, u32, u32, u32, u32) {
         sampled.1.tail.tail.current.value,
         sampled.1.tail.tail.tail.current.value,
     )
+}
+
+fn fri_query_plan4_pair_requests<const HALF: usize>(
+    _ transcript: u32,
+) -> (u32, u32, u32, u32, u32, u32, u32, u32, u32, u32)
+where HALF > 0, { (HALF & (HALF - 1)) == 0 }
+{
+    let sampled = <mandelbrot_proof_air_core::FriQueryPlan<1, 4>
+        as BabyBearFriQueryPlan<
+            4,
+            8,
+            mandelbrot_proof_baby_bear::CheckpointFriQuerySamples4,
+        >>::sample_fri_queries(
+        FriLayerTranscriptDigest<4> { valid: true, value: digest8(transcript) },
+    )
+    let requests = <mandelbrot_proof_air_core::FriQueryPlan<1, 4>
+        as BabyBearFriPairRequests<
+            HALF,
+            8,
+            mandelbrot_proof_baby_bear::CheckpointFriQuerySamples4,
+        >>::fri_pair_requests(sampled.1)
+    (
+        if sampled.0 && requests.valid { 1 } else { 0 },
+        requests.count,
+        requests.indices[0], requests.indices[1],
+        requests.indices[2], requests.indices[3],
+        requests.indices[4], requests.indices[5],
+        requests.indices[6], requests.indices[7],
+    )
+}
+
+pub fn fri_query_plan4_pairs16(
+    _ transcript: u32,
+) -> (u32, u32, u32, u32, u32, u32, u32, u32, u32, u32) {
+    fri_query_plan4_pair_requests<8>(transcript)
+}
+
+pub fn fri_query_plan4_pairs8(
+    _ transcript: u32,
+) -> (u32, u32, u32, u32, u32, u32, u32, u32, u32, u32) {
+    fri_query_plan4_pair_requests<4>(transcript)
 }
 
 pub fn composition_multipath16_status(
