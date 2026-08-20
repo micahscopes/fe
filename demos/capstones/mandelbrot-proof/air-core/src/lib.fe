@@ -152,6 +152,82 @@ pub recursive type fn FriScheduleSteps<
 pub type FriSchedule<const FIRST_ROUND: u32, const INPUT_LOG: usize> =
     FriScheduleSteps<FIRST_ROUND, INPUT_LOG, INPUT_LOG>
 
+/// Terminal of the field-neutral Fiat-Shamir query plan. `NEXT_QUERY` is the
+/// first unused domain identity after the plan.
+pub struct FriQueryPlanDone<const NEXT_QUERY: u32> {}
+impl<const NEXT_QUERY: u32> Copy for FriQueryPlanDone<NEXT_QUERY> {}
+
+/// One independently domain-separated query followed by the remaining plan.
+/// Runtime interpreters may sample indices, derive sparse opening masks, or
+/// schedule verifier work without maintaining a second query-number list.
+pub struct FriQueryPlanSample<const QUERY: u32, Tail> {}
+impl<const QUERY: u32, Tail: Copy> Copy for FriQueryPlanSample<QUERY, Tail> {}
+
+const fn fri_query_plan_query(
+    _ first_query: u32,
+    _ total: usize,
+    _ remaining: usize,
+) -> u32 {
+    first_query + (total - remaining).downcast_truncate()
+}
+
+const fn fri_query_plan_next(_ first_query: u32, _ total: usize) -> u32 {
+    first_query + total.downcast_truncate()
+}
+
+/// Derive a nominal query identity for each sample in a Fiat-Shamir plan.
+pub recursive type fn FriQueryPlanSteps<
+    const FIRST_QUERY: u32,
+    const TOTAL: usize,
+    const REMAINING: usize,
+>() -> (*) {
+    match REMAINING {
+        0 => FriQueryPlanDone<{fri_query_plan_next(FIRST_QUERY, TOTAL)}>
+        _ => FriQueryPlanSample<
+            {fri_query_plan_query(FIRST_QUERY, TOTAL, REMAINING)},
+            FriQueryPlanSteps<FIRST_QUERY, TOTAL, {REMAINING - 1}>,
+        >
+    }
+}
+
+pub type FriQueryPlan<const FIRST_QUERY: u32, const COUNT: usize> =
+    FriQueryPlanSteps<FIRST_QUERY, COUNT, COUNT>
+
+pub struct FriQueryPlanMetadata {
+    pub samples: u32,
+    pub first_query: u32,
+    pub next_query: u32,
+}
+impl Copy for FriQueryPlanMetadata {}
+
+/// Structural metadata interpreter used by exactness gates and diagnostics.
+pub trait FriQueryPlanShape {
+    const fn fri_query_plan_metadata() -> FriQueryPlanMetadata
+}
+
+impl<const NEXT_QUERY: u32> FriQueryPlanShape for FriQueryPlanDone<NEXT_QUERY> {
+    const fn fri_query_plan_metadata() -> FriQueryPlanMetadata {
+        FriQueryPlanMetadata {
+            samples: 0,
+            first_query: NEXT_QUERY,
+            next_query: NEXT_QUERY,
+        }
+    }
+}
+
+impl<const QUERY: u32, Tail: FriQueryPlanShape> FriQueryPlanShape
+    for FriQueryPlanSample<QUERY, Tail>
+{
+    const fn fri_query_plan_metadata() -> FriQueryPlanMetadata {
+        let tail = <Tail as FriQueryPlanShape>::fri_query_plan_metadata()
+        FriQueryPlanMetadata {
+            samples: tail.samples + 1,
+            first_query: QUERY,
+            next_query: tail.next_query,
+        }
+    }
+}
+
 /// Runtime evidence produced by structurally interpreting `FriSchedule`.
 /// Counts are per query and per side where stated. Roots and field/domain tags
 /// remain pinned protocol choices; all geometry here is compiler-derived.

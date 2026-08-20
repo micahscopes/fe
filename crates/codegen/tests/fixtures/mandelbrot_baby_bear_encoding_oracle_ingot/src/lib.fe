@@ -80,6 +80,21 @@ pub fn fri_schedule64_metadata() -> (u32, u32, u32, u32, u32, u32, u32) {
     schedule_words<mandelbrot_proof_air_core::FriSchedule<3, 6>>()
 }
 
+fn query_plan_words<S: mandelbrot_proof_air_core::FriQueryPlanShape>() -> (
+    u32, u32, u32,
+) {
+    let metadata = <S as mandelbrot_proof_air_core::FriQueryPlanShape>::fri_query_plan_metadata()
+    (metadata.samples, metadata.first_query, metadata.next_query)
+}
+
+pub fn fri_query_plan4_metadata() -> (u32, u32, u32) {
+    query_plan_words<mandelbrot_proof_air_core::FriQueryPlan<1, 4>>()
+}
+
+pub fn fri_query_plan7_metadata() -> (u32, u32, u32) {
+    query_plan_words<mandelbrot_proof_air_core::FriQueryPlan<3, 7>>()
+}
+
 fn geometry_words(_ geometry: mandelbrot_proof_air_core::Radix2QueryGeometry) -> (
     u32, u32, u32, u32, u32, u32,
 ) {

@@ -776,6 +776,10 @@ fn reference_fri_schedule(first_round: u32, input_log: u32) -> Vec<u32> {
     ]
 }
 
+fn reference_fri_query_plan(first_query: u32, samples: u32) -> Vec<u32> {
+    vec![samples, first_query, first_query + samples]
+}
+
 #[test]
 fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
     let bytes = compile_wasm();
@@ -798,6 +802,16 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
         call(&mut store, &instance, "fri_schedule64_metadata", &[], 7),
         reference_fri_schedule(3, 6),
         "Fe-derived 64-point FRI schedule differs from the independent recurrence",
+    );
+    assert_eq!(
+        call(&mut store, &instance, "fri_query_plan4_metadata", &[], 3),
+        reference_fri_query_plan(1, 4),
+        "Fe-derived four-sample query plan differs from the independent recurrence",
+    );
+    assert_eq!(
+        call(&mut store, &instance, "fri_query_plan7_metadata", &[], 3),
+        reference_fri_query_plan(3, 7),
+        "Fe-derived seven-sample query plan differs from the independent recurrence",
     );
 
     for query_index in [0, 3, 4, 7, 8] {
