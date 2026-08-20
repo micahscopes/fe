@@ -46,6 +46,28 @@ pub struct MerkleQuartetPath<F: Copy, const DEPTH: usize> {
 }
 impl<F: Copy, const DEPTH: usize> Copy for MerkleQuartetPath<F, DEPTH> {}
 
+/// Canonical authentication frontier for a sorted set of distinct leaves.
+/// Indices are encoded in ascending order. Siblings are encoded bottom-up and
+/// left-to-right, but only when the sibling node is not already derivable from
+/// another opened leaf. Fixed capacities keep the carrier backend-portable;
+/// unused slots must remain canonical zeroes.
+pub struct MerkleMultiPath<
+    F: Copy,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+> {
+    pub valid: bool,
+    pub leaf_count: u32,
+    pub leaf_indices: [u32; MAX_LEAVES],
+    pub sibling_count: u32,
+    pub siblings: [F; MAX_SIBLINGS],
+}
+impl<
+    F: Copy,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+> Copy for MerkleMultiPath<F, MAX_LEAVES, MAX_SIBLINGS> {}
+
 fn invalid_root<F: Copy, H: TwoToOneHasher<F>>() -> MerkleRoot<F> {
     MerkleRoot { valid: false, value: H::zero() }
 }
@@ -78,6 +100,21 @@ fn invalid_quartet_path<F: Copy, H: TwoToOneHasher<F>, const DEPTH: usize>(
         second_siblings: [H::zero(); DEPTH],
         third_siblings: [H::zero(); DEPTH],
         fourth_siblings: [H::zero(); DEPTH],
+    }
+}
+
+fn invalid_multi_path<
+    F: Copy,
+    H: TwoToOneHasher<F>,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>() -> MerkleMultiPath<F, MAX_LEAVES, MAX_SIBLINGS> {
+    MerkleMultiPath {
+        valid: false,
+        leaf_count: 0,
+        leaf_indices: [0; MAX_LEAVES],
+        sibling_count: 0,
+        siblings: [H::zero(); MAX_SIBLINGS],
     }
 }
 
@@ -459,4 +496,224 @@ pub fn pair_verify_two<F: Copy, H: TwoToOneHasher<F>>(
     path.valid
         && path.index == 0
         && H::equal(H::hash2(positive_leaf, negative_leaf), expected)
+}
+
+/// Build a canonical sparse multipath from arbitrary requested leaf indices.
+/// Duplicate and unsorted requests are normalized into one ascending leaf set.
+pub fn multi_path_from_leaves<
+    F: Copy,
+    H: TwoToOneHasher<F>,
+    const N: usize,
+    const REQUESTS: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ leaves: own [F; N],
+    _ requested: own [u32; REQUESTS],
+) -> MerkleMultiPath<F, MAX_LEAVES, MAX_SIBLINGS>
+where
+    N > 1,
+    N <= 2147483648,
+    { (N & (N - 1)) == 0 },
+    REQUESTS > 0,
+    MAX_LEAVES > 0,
+{
+    let width_u32: u32 = N.downcast_truncate()
+    let mut indices = [0; MAX_LEAVES]
+    let mut count: usize = 0
+    let mut request: usize = 0
+    while request < REQUESTS {
+        let index = requested[request]
+        if index >= width_u32 {
+            return invalid_multi_path<F, H, MAX_LEAVES, MAX_SIBLINGS>()
+        }
+
+        let mut position: usize = 0
+        while position < count && indices[position] < index {
+            position = position + 1
+        }
+        if position == count || indices[position] != index {
+            if count >= MAX_LEAVES {
+                return invalid_multi_path<F, H, MAX_LEAVES, MAX_SIBLINGS>()
+            }
+            let mut cursor = count
+            while cursor > position {
+                indices[cursor] = indices[cursor - 1]
+                cursor = cursor - 1
+            }
+            indices[position] = index
+            count = count + 1
+        }
+        request = request + 1
+    }
+    if count == 0 {
+        return invalid_multi_path<F, H, MAX_LEAVES, MAX_SIBLINGS>()
+    }
+
+    let leaf_indices = indices
+    let mut nodes = leaves
+    let mut siblings = [H::zero(); MAX_SIBLINGS]
+    let mut sibling_count: usize = 0
+    let mut active_count = count
+    let mut width: usize = N
+    while width > 1 {
+        let mut next_indices = [0; MAX_LEAVES]
+        let mut next_count: usize = 0
+        let mut cursor: usize = 0
+        while cursor < active_count {
+            let index = indices[cursor]
+            let paired = (index & 1) == 0
+                && cursor + 1 < active_count
+                && indices[cursor + 1] == index + 1
+            if paired {
+                cursor = cursor + 2
+            } else {
+                if sibling_count >= MAX_SIBLINGS {
+                    return invalid_multi_path<F, H, MAX_LEAVES, MAX_SIBLINGS>()
+                }
+                siblings[sibling_count] = nodes[(index ^ 1) as usize]
+                sibling_count = sibling_count + 1
+                cursor = cursor + 1
+            }
+            next_indices[next_count] = index / 2
+            next_count = next_count + 1
+        }
+
+        let parent_count = width / 2
+        let mut parent: usize = 0
+        while parent < parent_count {
+            nodes[parent] = H::hash2(nodes[parent + parent], nodes[parent + parent + 1])
+            parent = parent + 1
+        }
+        indices = next_indices
+        active_count = next_count
+        width = parent_count
+    }
+    if active_count != 1 || indices[0] != 0 {
+        return invalid_multi_path<F, H, MAX_LEAVES, MAX_SIBLINGS>()
+    }
+
+    MerkleMultiPath {
+        valid: true,
+        leaf_count: count.downcast_truncate(),
+        leaf_indices: leaf_indices,
+        sibling_count: sibling_count.downcast_truncate(),
+        siblings: siblings,
+    }
+}
+
+/// Reconstruct a root from canonical sparse leaves and their deduplicated
+/// multipath. `opened_leaves` follows `path.leaf_indices` exactly.
+pub fn multi_root<
+    F: Copy,
+    H: TwoToOneHasher<F>,
+    const N: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ opened_leaves: own [F; MAX_LEAVES],
+    _ path: own MerkleMultiPath<F, MAX_LEAVES, MAX_SIBLINGS>,
+) -> MerkleRoot<F>
+where
+    N > 1,
+    N <= 2147483648,
+    { (N & (N - 1)) == 0 },
+    MAX_LEAVES > 0,
+{
+    let leaf_count: usize = path.leaf_count as usize
+    let sibling_count: usize = path.sibling_count as usize
+    if !path.valid || leaf_count == 0 || leaf_count > MAX_LEAVES
+        || sibling_count > MAX_SIBLINGS {
+        return invalid_root<F, H>()
+    }
+    let width_u32: u32 = N.downcast_truncate()
+    let mut cursor: usize = 0
+    while cursor < leaf_count {
+        if path.leaf_indices[cursor] >= width_u32
+            || (cursor > 0 && path.leaf_indices[cursor - 1] >= path.leaf_indices[cursor]) {
+            return invalid_root<F, H>()
+        }
+        cursor = cursor + 1
+    }
+    while cursor < MAX_LEAVES {
+        if path.leaf_indices[cursor] != 0 || !H::equal(opened_leaves[cursor], H::zero()) {
+            return invalid_root<F, H>()
+        }
+        cursor = cursor + 1
+    }
+    cursor = sibling_count
+    while cursor < MAX_SIBLINGS {
+        if !H::equal(path.siblings[cursor], H::zero()) {
+            return invalid_root<F, H>()
+        }
+        cursor = cursor + 1
+    }
+
+    let mut indices = path.leaf_indices
+    let mut nodes = opened_leaves
+    let mut active_count = leaf_count
+    let mut used_siblings: usize = 0
+    let mut width: usize = N
+    while width > 1 {
+        let mut next_indices = [0; MAX_LEAVES]
+        let mut next_nodes = [H::zero(); MAX_LEAVES]
+        let mut next_count: usize = 0
+        cursor = 0
+        while cursor < active_count {
+            let index = indices[cursor]
+            let paired = (index & 1) == 0
+                && cursor + 1 < active_count
+                && indices[cursor + 1] == index + 1
+            let parent = if paired {
+                let value = H::hash2(nodes[cursor], nodes[cursor + 1])
+                cursor = cursor + 2
+                value
+            } else {
+                if used_siblings >= sibling_count {
+                    return invalid_root<F, H>()
+                }
+                let sibling = path.siblings[used_siblings]
+                used_siblings = used_siblings + 1
+                let value = if (index & 1) == 0 {
+                    H::hash2(nodes[cursor], sibling)
+                } else {
+                    H::hash2(sibling, nodes[cursor])
+                }
+                cursor = cursor + 1
+                value
+            }
+            next_indices[next_count] = index / 2
+            next_nodes[next_count] = parent
+            next_count = next_count + 1
+        }
+        indices = next_indices
+        nodes = next_nodes
+        active_count = next_count
+        width = width / 2
+    }
+    if active_count != 1 || indices[0] != 0 || used_siblings != sibling_count {
+        return invalid_root<F, H>()
+    }
+    MerkleRoot { valid: true, value: nodes[0] }
+}
+
+pub fn multi_verify<
+    F: Copy,
+    H: TwoToOneHasher<F>,
+    const N: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ expected: F,
+    _ opened_leaves: own [F; MAX_LEAVES],
+    _ path: own MerkleMultiPath<F, MAX_LEAVES, MAX_SIBLINGS>,
+) -> bool
+where
+    N > 1,
+    N <= 2147483648,
+    { (N & (N - 1)) == 0 },
+    MAX_LEAVES > 0,
+{
+    let opened = multi_root<F, H, N, MAX_LEAVES, MAX_SIBLINGS>(opened_leaves, path)
+    opened.valid && H::equal(opened.value, expected)
 }

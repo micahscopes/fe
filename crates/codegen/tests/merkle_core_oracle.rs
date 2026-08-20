@@ -94,6 +94,39 @@ fn full_root(mut leaves: Vec<u32>) -> u32 {
     leaves[0]
 }
 
+fn reference_multipath(leaves: &[u32], requests: &[u32]) -> (Vec<u32>, Vec<u32>) {
+    let mut indices = requests.to_vec();
+    indices.sort_unstable();
+    indices.dedup();
+    assert!(!indices.is_empty());
+    assert!(indices.iter().all(|&index| index < leaves.len() as u32));
+    let leaf_indices = indices.clone();
+    let mut nodes = leaves.to_vec();
+    let mut siblings = Vec::new();
+    while nodes.len() > 1 {
+        let mut next_indices = Vec::new();
+        let mut cursor = 0;
+        while cursor < indices.len() {
+            let index = indices[cursor];
+            let paired =
+                index & 1 == 0 && cursor + 1 < indices.len() && indices[cursor + 1] == index + 1;
+            if paired {
+                cursor += 2;
+            } else {
+                siblings.push(nodes[(index ^ 1) as usize]);
+                cursor += 1;
+            }
+            next_indices.push(index / 2);
+        }
+        nodes = nodes
+            .chunks_exact(2)
+            .map(|pair| hash2(pair[0], pair[1]))
+            .collect();
+        indices = next_indices;
+    }
+    (leaf_indices, siblings)
+}
+
 #[test]
 fn generic_merkle_shapes_execute_and_fail_closed() {
     let bytes = compile_wasm();
@@ -193,4 +226,65 @@ fn generic_merkle_shapes_execute_and_fail_closed() {
         0,
         "quartet local index must remain inside one quarter",
     );
+
+    let multipath_leaves = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53];
+    let multipath_root = full_root(multipath_leaves.to_vec());
+    for requests in [
+        [0, 1, 2, 3],
+        [0, 4, 8, 12],
+        [12, 0, 4, 8],
+        [3, 3, 3, 3],
+        [15, 0, 15, 0],
+    ] {
+        let (indices, siblings) = reference_multipath(&multipath_leaves, &requests);
+        let actual = call(
+            &mut store,
+            &instance,
+            "multipath16",
+            &[requests[0], requests[1], requests[2], requests[3], 0],
+            17,
+        );
+        assert_eq!(actual[0], 1, "valid multipath requests must open");
+        assert_eq!(actual[1], indices.len() as u32);
+        assert_eq!(actual[2], siblings.len() as u32);
+        assert_eq!(actual[3], multipath_root);
+        assert_eq!(actual[4], 1, "canonical multipath must verify");
+        let mut expected_indices = vec![0; 4];
+        expected_indices[..indices.len()].copy_from_slice(&indices);
+        assert_eq!(&actual[5..9], expected_indices);
+        let mut expected_siblings = vec![0; 8];
+        expected_siblings[..siblings.len()].copy_from_slice(&siblings);
+        assert_eq!(&actual[9..17], expected_siblings);
+    }
+    assert_eq!(
+        call(&mut store, &instance, "multipath16", &[0, 4, 8, 16, 0], 17)[0],
+        0,
+        "out-of-domain multipath requests must fail closed",
+    );
+    for mutation in 1..=4 {
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "multipath16",
+                &[0, 4, 8, 12, mutation],
+                17,
+            )[4],
+            0,
+            "multipath mutation {mutation} must be rejected",
+        );
+    }
+    for mutation in 5..=8 {
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "multipath16",
+                &[3, 3, 3, 3, mutation],
+                17,
+            )[4],
+            0,
+            "noncanonical multipath mutation {mutation} must be rejected",
+        );
+    }
 }

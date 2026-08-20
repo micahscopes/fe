@@ -5,6 +5,9 @@ use merkle_core::{
     binary_root,
     complete_frontier_root,
     empty_frontier,
+    multi_path_from_leaves,
+    multi_root,
+    multi_verify,
     pair_path_from_leaves,
     pair_root,
     pair_verify,
@@ -126,5 +129,74 @@ pub fn quartet16(_ index: u32, _ mutate: u32) -> (u32, u32, u32, u32, u32, u32) 
         path.first_siblings[0],
         path.second_siblings[0],
         path.fourth_siblings[1],
+    )
+}
+
+pub fn multipath16(
+    _ query0: u32,
+    _ query1: u32,
+    _ query2: u32,
+    _ query3: u32,
+    _ mutate: u32,
+) -> (
+    u32, u32, u32, u32, u32,
+    u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    let leaves: [u32; 16] = [
+        2, 3, 5, 7,
+        11, 13, 17, 19,
+        23, 29, 31, 37,
+        41, 43, 47, 53,
+    ]
+    let clean_path = multi_path_from_leaves<
+        u32,
+        AffineHasher,
+        16,
+        4,
+        4,
+        8,
+    >(leaves, [query0, query1, query2, query3])
+    let mut opened = [0; 4]
+    let mut cursor: usize = 0
+    while cursor < (clean_path.leaf_count as usize) && cursor < 4 {
+        opened[cursor] = leaves[clean_path.leaf_indices[cursor] as usize]
+        cursor = cursor + 1
+    }
+    let expected = multi_root<u32, AffineHasher, 16, 4, 8>(opened, clean_path)
+    let mut path = clean_path
+    match mutate {
+        1 => opened[0] = opened[0] + 1,
+        2 => path.siblings[0] = path.siblings[0] + 1,
+        3 => path.leaf_indices[0] = path.leaf_indices[0] ^ 1,
+        4 => path.sibling_count = path.sibling_count + 1,
+        5 => path.siblings[path.sibling_count as usize] = 1,
+        6 => path.leaf_indices[path.leaf_count as usize] = 1,
+        7 => opened[path.leaf_count as usize] = 1,
+        8 => path.valid = false,
+        _ => {}
+    }
+    (
+        if clean_path.valid { 1 } else { 0 },
+        clean_path.leaf_count,
+        clean_path.sibling_count,
+        expected.value,
+        if multi_verify<u32, AffineHasher, 16, 4, 8>(expected.value, opened, path) {
+            1
+        } else {
+            0
+        },
+        clean_path.leaf_indices[0],
+        clean_path.leaf_indices[1],
+        clean_path.leaf_indices[2],
+        clean_path.leaf_indices[3],
+        clean_path.siblings[0],
+        clean_path.siblings[1],
+        clean_path.siblings[2],
+        clean_path.siblings[3],
+        clean_path.siblings[4],
+        clean_path.siblings[5],
+        clean_path.siblings[6],
+        clean_path.siblings[7],
     )
 }
