@@ -810,6 +810,36 @@ fn forward<const N: u256>(w: Wrap<N>) -> u256 where N >= 50 {
     );
 }
 
+// An impl's const predicates are assumptions inside every method body in that
+// impl, just as its trait predicates already are. A method may therefore call a
+// predicate-gated generic helper using the impl's symbolic const parameters.
+#[test]
+fn impl_const_predicate_is_available_inside_method_body() {
+    assert_compiles(
+        "impl_const_predicate_body_assumption",
+        r#"
+fn fold_half<const INPUT: usize, const OUTPUT: usize>()
+where { OUTPUT + OUTPUT == INPUT }
+{
+}
+
+trait Execute {
+    fn run()
+}
+
+struct Fold<const INPUT: usize, const OUTPUT: usize> {}
+
+impl<const INPUT: usize, const OUTPUT: usize> Execute for Fold<INPUT, OUTPUT>
+where { OUTPUT + OUTPUT == INPUT }
+{
+    fn run() {
+        fold_half<INPUT, OUTPUT>()
+    }
+}
+"#,
+    );
+}
+
 #[test]
 fn wf_const_predicate_symbolic_generic_not_refuted() {
     // A symbolic application `Bounded<A, B>` under a matching assumption is the

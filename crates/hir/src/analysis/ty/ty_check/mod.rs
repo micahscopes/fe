@@ -1742,22 +1742,33 @@ impl<'db> TyChecker<'db> {
         ConstPredicateOutcome::Discharged
     }
 
-    /// The caller's own `where`-clause const predicates, each lowered to a
-    /// normalized term paired with the predicate body it came from — the
-    /// assumptions a symbolic obligation may discharge against, and the origin
-    /// recorded as the discharge premise. Predicates outside the term fragment
-    /// are skipped (their formation is diagnosed elsewhere).
+    /// The caller's in-scope `where`-clause const predicates, each lowered to a
+    /// normalized term paired with the predicate body it came from: predicates
+    /// on the enclosing trait/impl/nominal item first, then predicates written
+    /// directly on the function. These are the assumptions a symbolic
+    /// obligation may discharge against, and the origin recorded as the
+    /// discharge premise. Predicates outside the term fragment are skipped
+    /// (their formation is diagnosed elsewhere).
     fn const_predicate_assumptions(&self) -> Vec<(TermId<'db>, Body<'db>)> {
         let db = self.db;
         let BodyOwner::Func(func) = self.env.owner() else {
             return Vec::new();
         };
         let assumptions = self.env.assumptions();
-        WhereClauseOwner::from(func)
-            .where_clause(db)
-            .const_predicates(db)
-            .iter()
-            .filter_map(|&predicate| {
+        let mut predicates = Vec::new();
+        if let Some(parent) = func.scope().parent_item(db)
+            && let Some(owner) = WhereClauseOwner::from_item_opt(parent)
+        {
+            predicates.extend_from_slice(owner.where_clause(db).const_predicates(db));
+        }
+        predicates.extend_from_slice(
+            WhereClauseOwner::from(func)
+                .where_clause(db)
+                .const_predicates(db),
+        );
+        predicates
+            .into_iter()
+            .filter_map(|predicate| {
                 lower_hir_to_term(db, predicate, predicate.expr(db), assumptions)
                     .ok()
                     .map(|term| (normalize_term(db, term), predicate))
