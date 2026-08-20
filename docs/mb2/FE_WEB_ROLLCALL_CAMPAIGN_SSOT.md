@@ -674,9 +674,10 @@ Legend:
   production function signatures. Commit `e9691826f` adds the field-neutral
   recursive `FriSchedule<FIRST_ROUND, INPUT_LOG>` protocol description. Each
   normalized node carries its derived round, input logarithm, output width,
-  and tail. One structural metadata interpreter executes at both 16 and 64
-  points and independently matches round count, terminal round, retained
-  evaluations, pair openings, and Merkle sibling depth. Compiler commit
+  compact pair width, Merkle sibling depth, and tail. One structural metadata
+  interpreter executes at both 16 and 64 points and independently matches
+  round count, terminal round, retained evaluations, pair openings, and Merkle
+  sibling depth. Compiler commit
   `ad0678f23` makes explicit-return checking normalize both sides before
   unification, closing the language seam where a ground recursive type
   function used as an associated-type receiver normalized in only one
@@ -696,14 +697,26 @@ Legend:
   `fold_checkpoint_fri16` gate remains zero-import Wasm, matches every
   independent Plonky3 layer oracle, rejects mutations, and passed 1/1 in 97.98
   seconds after the traversal replacement. The complete 41-test const
-  predicate suite also passes. Production BabyBear LDE row generation from
-  the canonical trace, multiple query sampling, the canonical BabyBear receipt
-  codec, and end-to-end verification remain pending. The explicitly named
-  `Checkpoint4AirLdeOpening` is still a four-row test checkpoint, and
-  `FriCommitmentQuery16` still enumerates the compact query layers manually.
-  That query carrier must become a structural interpretation of `FriSchedule`,
-  including a CTFE-derived sparse Merkle multiproof topology, before the GPU
-  and recursive paths can make those shapes costly to change.
+  predicate suite also passes. Commit `ab1e39966` interprets the same schedule
+  into the compact query carrier: every nonterminal node contains its typed
+  root, authenticated pair, derived sibling depth, and recursive tail; the
+  one-evaluation terminal contains only its root and evaluation. Commit
+  `a877cf113` interprets the complete codeword carrier into that compact
+  receipt, samples Fiat-Shamir only at the structurally discovered terminal,
+  and derives every pair position and path from the schedule's pair width and
+  depth. Commit `5b93b90cf` removes the last manual verifier walk. One
+  interpreter reconstructs the terminal transcript and query through the
+  typed root chain; another authenticates each pair, replays its fold, checks
+  the selected child, advances the transcript, and terminates at the one-row
+  commitment. The zero-import independent Plonky3 gate passed 1/1 in 148.36
+  seconds and rejects changes to the query index, composition and folded
+  values, path indices and siblings, final evaluation, intermediate root,
+  validity, and external AIR transcript. No 16-to-8-to-4-to-2-to-1 layer list
+  remains in the carrier, opener, or verifier. Production BabyBear LDE row
+  generation from the canonical trace, multiple Fiat-Shamir queries with a
+  CTFE-derived deduplicated sparse Merkle multiproof, the canonical BabyBear
+  receipt codec, and end-to-end verification remain pending. The explicitly
+  named `Checkpoint4AirLdeOpening` is still a four-row test checkpoint.
   The same permutation has also
   lowered to Naga-valid u32-only WGSL with the local Sonatina conditional-loop
   structurizer fixes, but that browser gate is not landed until those commits
