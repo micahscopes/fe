@@ -24,7 +24,9 @@ use mandelbrot_proof_baby_bear::{
     bind_main_lde,
     bind_statement,
     composition_challenge,
+    composition_multi_opening_power_of_two,
     composition_row_commitment,
+    composition_root_power_of_two,
     encoded_auxiliary_fields,
     encoded_public_fields,
     encoded_row_fields,
@@ -37,6 +39,8 @@ use mandelbrot_proof_baby_bear::{
     main_lde_root_power_of_two,
     fri_fold_challenge,
     fri_layer_row_commitment,
+    fri_layer_multi_opening_power_of_two,
+    fri_layer_root_power_of_two,
     fri_query_challenge,
     fri_query_index_power_of_two,
     next_fri_fold_challenge,
@@ -45,6 +49,8 @@ use mandelbrot_proof_baby_bear::{
     row_commitment,
     trace_root_power_of_two,
     verify_fri_commitment_query16,
+    verify_composition_multi_opening,
+    verify_fri_layer_multi_opening,
     verify_auxiliary_lde_quartet_path,
     verify_main_lde_quartet_path,
     verify_checkpoint4_air_lde_composition_query,
@@ -543,6 +549,81 @@ pub fn fri_query_plan4(_ transcript: u32) -> (u32, u32, u32, u32, u32) {
         sampled.1.tail.current.value,
         sampled.1.tail.tail.current.value,
         sampled.1.tail.tail.tail.current.value,
+    )
+}
+
+pub fn composition_multipath16_status(
+    _ seed: u32,
+    _ query0: u32,
+    _ query1: u32,
+    _ query2: u32,
+    _ query3: u32,
+    _ mutate: u32,
+) -> (u32, u32, u32, u32) {
+    let evaluations = fri_pattern16(seed)
+    let mut leaves = [CompositionDigest { valid: false, value: Poseidon2Digest::zero() }; 16]
+    let mut cursor: usize = 0
+    while cursor < 16 {
+        leaves[cursor] = composition_row_commitment(evaluations[cursor])
+        cursor = cursor + 1
+    }
+    let root = composition_root_power_of_two<16>(leaves)
+    let mut opening = composition_multi_opening_power_of_two<16, 4, 4, 8>(
+        evaluations,
+        [query0, query1, query2, query3],
+    )
+    match mutate {
+        1 => opening.values[0] = opening.values[0] + BabyBearExt4::from_base(BabyBear::one()),
+        2 => opening.path.siblings[0] = digest8(991),
+        3 => opening.path.leaf_indices[0] = opening.path.leaf_indices[0] ^ 1,
+        4 => opening.path.sibling_count = opening.path.sibling_count + 1,
+        5 => opening.valid = false,
+        _ => {}
+    }
+    (
+        if opening.path.valid { 1 } else { 0 },
+        opening.path.leaf_count,
+        opening.path.sibling_count,
+        if verify_composition_multi_opening<16, 4, 8>(opening, root) { 1 } else { 0 },
+    )
+}
+
+pub fn fri_layer_multipath16_status(
+    _ seed: u32,
+    _ query0: u32,
+    _ query1: u32,
+    _ query2: u32,
+    _ query3: u32,
+    _ mutate: u32,
+) -> (u32, u32, u32, u32) {
+    let evaluations = fri_pattern16(seed)
+    let mut leaves = [mandelbrot_proof_baby_bear::FriLayerDigest<1> {
+        valid: false,
+        value: Poseidon2Digest::zero(),
+    }; 16]
+    let mut cursor: usize = 0
+    while cursor < 16 {
+        leaves[cursor] = fri_layer_row_commitment<1>(evaluations[cursor])
+        cursor = cursor + 1
+    }
+    let root = fri_layer_root_power_of_two<1, 16>(leaves)
+    let mut opening = fri_layer_multi_opening_power_of_two<1, 16, 4, 4, 8>(
+        evaluations,
+        [query0, query1, query2, query3],
+    )
+    match mutate {
+        1 => opening.values[0] = opening.values[0] + BabyBearExt4::from_base(BabyBear::one()),
+        2 => opening.path.siblings[0] = digest8(997),
+        3 => opening.path.leaf_indices[0] = opening.path.leaf_indices[0] ^ 1,
+        4 => opening.path.sibling_count = opening.path.sibling_count + 1,
+        5 => opening.valid = false,
+        _ => {}
+    }
+    (
+        if opening.path.valid { 1 } else { 0 },
+        opening.path.leaf_count,
+        opening.path.sibling_count,
+        if verify_fri_layer_multi_opening<1, 16, 4, 8>(opening, root) { 1 } else { 0 },
     )
 }
 

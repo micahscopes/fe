@@ -780,6 +780,35 @@ fn reference_fri_query_plan(first_query: u32, samples: u32) -> Vec<u32> {
     vec![samples, first_query, first_query + samples]
 }
 
+fn reference_multipath_sibling_count(width: u32, requests: &[u32]) -> usize {
+    let mut indices = requests.to_vec();
+    indices.sort_unstable();
+    indices.dedup();
+    assert!(!indices.is_empty());
+    assert!(indices.iter().all(|&index| index < width));
+    let mut siblings = 0;
+    let mut width = width;
+    while width > 1 {
+        let mut next = Vec::new();
+        let mut cursor = 0;
+        while cursor < indices.len() {
+            let index = indices[cursor];
+            let paired =
+                index & 1 == 0 && cursor + 1 < indices.len() && indices[cursor + 1] == index + 1;
+            if paired {
+                cursor += 2;
+            } else {
+                siblings += 1;
+                cursor += 1;
+            }
+            next.push(index / 2);
+        }
+        indices = next;
+        width /= 2;
+    }
+    siblings
+}
+
 #[test]
 fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
     let bytes = compile_wasm();
@@ -1527,6 +1556,53 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
             expected_plan,
             "structural FRI query-plan sampling differs from Plonky3",
         );
+    }
+
+    for requests in [[0, 1, 2, 3], [0, 4, 8, 12], [12, 0, 4, 8], [3, 3, 3, 3]] {
+        let sibling_count = reference_multipath_sibling_count(16, &requests);
+        let unique = requests
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        for export in [
+            "composition_multipath16_status",
+            "fri_layer_multipath16_status",
+        ] {
+            assert_eq!(
+                call(
+                    &mut store,
+                    &instance,
+                    export,
+                    &[97, requests[0], requests[1], requests[2], requests[3], 0],
+                    4,
+                ),
+                vec![1, unique as u32, sibling_count as u32, 1],
+                "typed BabyBear multipath wrapper differs for {export} and {requests:?}",
+            );
+        }
+    }
+    for export in [
+        "composition_multipath16_status",
+        "fri_layer_multipath16_status",
+    ] {
+        assert_eq!(
+            call(&mut store, &instance, export, &[97, 0, 4, 8, 16, 0], 4,)[0],
+            0,
+            "typed BabyBear multipath must reject an out-of-domain request",
+        );
+        for mutation in 1..=5 {
+            assert_eq!(
+                call(
+                    &mut store,
+                    &instance,
+                    export,
+                    &[97, 0, 4, 8, 12, mutation],
+                    4,
+                )[3],
+                0,
+                "typed BabyBear multipath mutation {mutation} must be rejected by {export}",
+            );
+        }
     }
 
     for (seed, air_transcript_seed, shift) in [(97, 431, 7), (0, 433, 123_456_789)] {
