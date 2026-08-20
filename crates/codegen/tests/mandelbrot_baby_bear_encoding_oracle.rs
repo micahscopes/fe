@@ -1621,6 +1621,56 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
         }
     }
 
+    for transcript_seed in [0, 439, 1_900_000_007] {
+        let queries = (1..=4)
+            .map(|query| {
+                squeeze_challenge(&round_tag(b"FQ", query), digest_seed(transcript_seed))[0] & 7
+            })
+            .collect::<Vec<_>>();
+        let composition_requests = queries
+            .iter()
+            .flat_map(|&query| [query, query + 8])
+            .collect::<Vec<_>>();
+        let fri_requests = queries
+            .iter()
+            .flat_map(|&query| {
+                let local = query & 3;
+                [local, local + 4]
+            })
+            .collect::<Vec<_>>();
+        let composition_unique = composition_requests
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        let fri_unique = fri_requests
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "planned_multipath_status",
+                &[97, transcript_seed],
+                9,
+            ),
+            vec![
+                1,
+                composition_unique as u32,
+                reference_multipath_sibling_count(16, &composition_requests) as u32,
+                1,
+                fri_unique as u32,
+                reference_multipath_sibling_count(8, &fri_requests) as u32,
+                1,
+                1,
+                1,
+            ],
+            "typed query plan must drive both sparse commitment openings",
+        );
+    }
+
     for (seed, air_transcript_seed, shift) in [(97, 431, 7), (0, 433, 123_456_789)] {
         let query_index = expected_fri_query16_index(seed, air_transcript_seed, shift).unwrap();
         assert_eq!(

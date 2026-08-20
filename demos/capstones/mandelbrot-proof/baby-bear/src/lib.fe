@@ -2023,6 +2023,47 @@ where
     >(root.value, leaves, opening.path)
 }
 
+/// Compose the query-plan and Merkle interpreters without exposing an
+/// intermediate host-authored index list.
+pub fn composition_multi_query_opening_power_of_two<
+    Plan,
+    Samples: core::marker::Copy,
+    const N: usize,
+    const HALF: usize,
+    const REQUESTS: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ evaluations: own [BabyBearExt4; N],
+    _ samples: Samples,
+) -> CompositionMultiOpening<MAX_LEAVES, MAX_SIBLINGS>
+where
+    Plan: BabyBearFriPairRequests<HALF, REQUESTS, Samples>,
+    N > 1,
+    N <= MAX_PADDED_TRACE_LENGTH,
+    N <= 2147483648,
+    { (N & (N - 1)) == 0 },
+    HALF > 0,
+    { HALF + HALF == N },
+    REQUESTS > 0,
+    MAX_LEAVES > 0,
+{
+    let requests = <Plan as BabyBearFriPairRequests<
+        HALF,
+        REQUESTS,
+        Samples,
+    >>::fri_pair_requests(samples)
+    if !requests.valid || requests.count != REQUESTS.downcast_truncate() {
+        return invalid_composition_multi_opening<MAX_LEAVES, MAX_SIBLINGS>()
+    }
+    composition_multi_opening_power_of_two<
+        N,
+        REQUESTS,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >(evaluations, requests.indices)
+}
+
 pub fn bind_main_lde(
     _ transcript: own ProofTranscriptDigest,
     _ main: own MainLdeDigest,
@@ -2313,6 +2354,49 @@ where
         MAX_LEAVES,
         MAX_SIBLINGS,
     >(root.value, leaves, opening.path)
+}
+
+pub fn fri_layer_multi_query_opening_power_of_two<
+    Plan,
+    Samples: core::marker::Copy,
+    const ROUND: u32,
+    const N: usize,
+    const HALF: usize,
+    const REQUESTS: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ evaluations: own [BabyBearExt4; N],
+    _ samples: Samples,
+) -> FriLayerMultiOpening<ROUND, MAX_LEAVES, MAX_SIBLINGS>
+where
+    Plan: BabyBearFriPairRequests<HALF, REQUESTS, Samples>,
+    { ROUND > 0 },
+    { ROUND < 100 },
+    N > 1,
+    N <= MAX_PADDED_TRACE_LENGTH,
+    N <= 2147483648,
+    { (N & (N - 1)) == 0 },
+    HALF > 0,
+    { HALF + HALF == N },
+    REQUESTS > 0,
+    MAX_LEAVES > 0,
+{
+    let requests = <Plan as BabyBearFriPairRequests<
+        HALF,
+        REQUESTS,
+        Samples,
+    >>::fri_pair_requests(samples)
+    if !requests.valid || requests.count != REQUESTS.downcast_truncate() {
+        return invalid_fri_layer_multi_opening<ROUND, MAX_LEAVES, MAX_SIBLINGS>()
+    }
+    fri_layer_multi_opening_power_of_two<
+        ROUND,
+        N,
+        REQUESTS,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >(evaluations, requests.indices)
 }
 
 pub fn bind_first_fri_layer(
