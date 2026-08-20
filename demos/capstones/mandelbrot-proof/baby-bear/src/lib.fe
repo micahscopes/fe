@@ -22,6 +22,9 @@ use mandelbrot_proof_kernel::{
 use mandelbrot_proof_air_core::{
     AirColumnView,
     CompositionValue,
+    FriSchedule,
+    FriScheduleDone,
+    FriScheduleFold,
     composition_value,
     constraint_numerators,
     radix2_query_geometry,
@@ -242,14 +245,86 @@ pub struct FriFinalRound<const ROUND: u32> {
 }
 impl<const ROUND: u32> core::marker::Copy for FriFinalRound<ROUND> {}
 
-pub struct FriProofComplete16 {
+/// One committed output layer in a schedule-derived FRI proof. Every fold has
+/// the same carrier shape, including the final one-element layer.
+pub struct FriCommittedLayer<const ROUND: u32, const N: usize> {
     pub valid: bool,
-    pub first: FriRound<1, 8, 2>,
-    pub second: FriRound<2, 4, 3>,
-    pub third: FriRound<3, 2, 4>,
-    pub final_round: FriFinalRound<4>,
+    pub evaluations: [BabyBearExt4; N],
+    pub root: FriLayerDigest<ROUND>,
+    pub transcript: FriLayerTranscriptDigest<ROUND>,
 }
-impl core::marker::Copy for FriProofComplete16 {}
+impl<const ROUND: u32, const N: usize> core::marker::Copy for FriCommittedLayer<ROUND, N> {}
+
+/// The value-level terminal corresponding to `FriScheduleDone`.
+pub struct FriProofEnd<const NEXT_ROUND: u32> {}
+impl<const NEXT_ROUND: u32> core::marker::Copy for FriProofEnd<NEXT_ROUND> {}
+
+/// One value-level fold corresponding to `FriScheduleFold`. `Tail` is the
+/// recursively interpreted remainder of the same field-neutral schedule.
+pub struct FriProofFold<const ROUND: u32, const N: usize, Tail> {
+    pub valid: bool,
+    pub layer: FriCommittedLayer<ROUND, N>,
+    pub tail: Tail,
+}
+impl<const ROUND: u32, const N: usize, Tail: core::marker::Copy> core::marker::Copy
+    for FriProofFold<ROUND, N, Tail> {}
+
+/// Interpret the field-neutral schedule into BabyBear proof storage. The same
+/// two implementations derive both the nested carrier type and its fail-closed
+/// value for every radix-two domain.
+pub trait BabyBearFriProofShape {
+    type Proof
+    fn invalid_fri_proof() -> Self::Proof
+}
+
+impl<const NEXT_ROUND: u32> BabyBearFriProofShape for FriScheduleDone<NEXT_ROUND> {
+    type Proof = FriProofEnd<NEXT_ROUND>
+
+    fn invalid_fri_proof() -> FriProofEnd<NEXT_ROUND> {
+        FriProofEnd<NEXT_ROUND> {}
+    }
+}
+
+impl<
+    const ROUND: u32,
+    const INPUT_LOG: usize,
+    const OUTPUT: usize,
+    Tail: BabyBearFriProofShape,
+> BabyBearFriProofShape for FriScheduleFold<ROUND, INPUT_LOG, OUTPUT, Tail> {
+    type Proof = FriProofFold<
+        ROUND,
+        OUTPUT,
+        <Tail as BabyBearFriProofShape>::Proof,
+    >
+
+    fn invalid_fri_proof() -> Self::Proof {
+        FriProofFold<
+            ROUND,
+            OUTPUT,
+            <Tail as BabyBearFriProofShape>::Proof,
+        > {
+            valid: false,
+            layer: FriCommittedLayer<ROUND, OUTPUT> {
+                valid: false,
+                evaluations: [BabyBearExt4::zero(); OUTPUT],
+                root: FriLayerDigest<ROUND> {
+                    valid: false,
+                    value: Poseidon2Digest::zero(),
+                },
+                transcript: FriLayerTranscriptDigest<ROUND> {
+                    valid: false,
+                    value: Poseidon2Digest::zero(),
+                },
+            },
+            tail: <Tail as BabyBearFriProofShape>::invalid_fri_proof(),
+        }
+    }
+}
+
+/// The existing 16-point complete-codeword gate is an explicit protocol
+/// checkpoint. Its nested storage is nevertheless derived from `FriSchedule`.
+pub type CheckpointFriProof16 =
+    <FriSchedule<1, 4> as BabyBearFriProofShape>::Proof
 
 pub struct CompositionPairPath<const DEPTH: usize> {
     pub valid: bool,
@@ -1262,14 +1337,8 @@ fn invalid_fri_final<const ROUND: u32>() -> FriFinalRound<ROUND> {
     }
 }
 
-fn invalid_fri_complete16() -> FriProofComplete16 {
-    FriProofComplete16 {
-        valid: false,
-        first: invalid_fri_round<1, 8, 2>(),
-        second: invalid_fri_round<2, 4, 3>(),
-        third: invalid_fri_round<3, 2, 4>(),
-        final_round: invalid_fri_final<4>(),
-    }
+fn invalid_checkpoint_fri16() -> CheckpointFriProof16 {
+    <FriSchedule<1, 4> as BabyBearFriProofShape>::invalid_fri_proof()
 }
 
 fn invalid_composition_query_pair<const DEPTH: usize>() -> CompositionQueryPair<DEPTH> {
@@ -1444,15 +1513,17 @@ where { PREVIOUS > 0 }, { ROUND == PREVIOUS + 1 }, { ROUND < 100 }
     }
 }
 
-/// Materialize an authenticated 16-to-1 FRI chain. Every next challenge is
-/// squeezed only after the preceding folded layer has been committed.
-pub fn fold_all_fri16(
+/// Materialize the current authenticated 16-to-1 checkpoint in the
+/// schedule-derived carrier. Every next challenge is squeezed only after the
+/// preceding folded layer has been committed. A following interpreter slice
+/// will derive this term-level traversal from the same schedule as well.
+pub fn fold_checkpoint_fri16(
     _ evaluations: own [BabyBearExt4; 16],
     _ transcript: own CompositionTranscriptDigest,
     _ shift: BabyBear,
-) -> FriProofComplete16 {
+) -> CheckpointFriProof16 {
     let first = fold_first_fri_round16(evaluations, transcript, shift)
-    if !first.valid { return invalid_fri_complete16() }
+    if !first.valid { return invalid_checkpoint_fri16() }
 
     let shift2 = shift.square()
     let second = fold_next_fri_round<1, 2, 8, 4, 3>(
@@ -1461,7 +1532,7 @@ pub fn fold_all_fri16(
         first.next_challenge,
         shift2,
     )
-    if !second.valid { return invalid_fri_complete16() }
+    if !second.valid { return invalid_checkpoint_fri16() }
 
     let shift3 = shift2.square()
     let third = fold_next_fri_round<2, 3, 4, 2, 4>(
@@ -1470,7 +1541,7 @@ pub fn fold_all_fri16(
         second.next_challenge,
         shift3,
     )
-    if !third.valid { return invalid_fri_complete16() }
+    if !third.valid { return invalid_checkpoint_fri16() }
 
     let final_round = fold_final_fri_round<3, 4>(
         third.evaluations,
@@ -1478,14 +1549,44 @@ pub fn fold_all_fri16(
         third.next_challenge,
         shift3.square(),
     )
-    if !final_round.valid { return invalid_fri_complete16() }
+    if !final_round.valid { return invalid_checkpoint_fri16() }
 
-    FriProofComplete16 {
+    FriProofFold {
         valid: true,
-        first: first,
-        second: second,
-        third: third,
-        final_round: final_round,
+        layer: FriCommittedLayer {
+            valid: first.valid,
+            evaluations: first.evaluations,
+            root: first.root,
+            transcript: first.transcript,
+        },
+        tail: FriProofFold {
+            valid: true,
+            layer: FriCommittedLayer {
+                valid: second.valid,
+                evaluations: second.evaluations,
+                root: second.root,
+                transcript: second.transcript,
+            },
+            tail: FriProofFold {
+                valid: true,
+                layer: FriCommittedLayer {
+                    valid: third.valid,
+                    evaluations: third.evaluations,
+                    root: third.root,
+                    transcript: third.transcript,
+                },
+                tail: FriProofFold {
+                    valid: true,
+                    layer: FriCommittedLayer {
+                        valid: final_round.valid,
+                        evaluations: [final_round.evaluation],
+                        root: final_round.root,
+                        transcript: final_round.transcript,
+                    },
+                    tail: FriProofEnd {},
+                },
+            },
+        },
     }
 }
 
@@ -1509,12 +1610,16 @@ pub fn open_fri_commitment_query16(
     }
     let composition_root = composition_root_power_of_two<16>(composition_leaves)
     let composition_transcript = bind_composition(air_transcript, composition_root)
-    let complete = fold_all_fri16(evaluations, composition_transcript, shift)
+    let complete = fold_checkpoint_fri16(evaluations, composition_transcript, shift)
     if !composition_root.valid || !composition_transcript.valid || !complete.valid {
         return invalid_fri_query16()
     }
+    let first_layer = complete.layer
+    let second_layer = complete.tail.layer
+    let third_layer = complete.tail.tail.layer
+    let final_layer = complete.tail.tail.tail.layer
 
-    let query_challenge = fri_query_challenge<4, 1>(complete.final_round.transcript)
+    let query_challenge = fri_query_challenge<4, 1>(final_layer.transcript)
     let query = fri_query_index_power_of_two<1, 8>(query_challenge)
     if !query.valid { return invalid_fri_query16() }
     let first_index = query.value & 3
@@ -1525,15 +1630,15 @@ pub fn open_fri_commitment_query16(
         query.value,
     )
     let first_path = fri_layer_pair_path_power_of_two<1, 8, 4, 2>(
-        complete.first.evaluations,
+        first_layer.evaluations,
         first_index,
     )
     let second_path = fri_layer_pair_path_power_of_two<2, 4, 2, 1>(
-        complete.second.evaluations,
+        second_layer.evaluations,
         second_index,
     )
     let third_path = fri_layer_pair_path_power_of_two<3, 2, 1, 0>(
-        complete.third.evaluations,
+        third_layer.evaluations,
         0,
     )
     if !composition_path.valid
@@ -1549,10 +1654,10 @@ pub fn open_fri_commitment_query16(
     FriCommitmentQuery16 {
         valid: true,
         composition_root: composition_root,
-        first_root: complete.first.root,
-        second_root: complete.second.root,
-        third_root: complete.third.root,
-        final_root: complete.final_round.root,
+        first_root: first_layer.root,
+        second_root: second_layer.root,
+        third_root: third_layer.root,
+        final_root: final_layer.root,
         query_index: query.value,
         composition: CompositionQueryPair<3> {
             positive: evaluations[composition_index],
@@ -1560,21 +1665,21 @@ pub fn open_fri_commitment_query16(
             path: composition_path,
         },
         first: FriQueryPair<1, 2> {
-            positive: complete.first.evaluations[first_position],
-            negative: complete.first.evaluations[first_position + 4],
+            positive: first_layer.evaluations[first_position],
+            negative: first_layer.evaluations[first_position + 4],
             path: first_path,
         },
         second: FriQueryPair<2, 1> {
-            positive: complete.second.evaluations[second_position],
-            negative: complete.second.evaluations[second_position + 2],
+            positive: second_layer.evaluations[second_position],
+            negative: second_layer.evaluations[second_position + 2],
             path: second_path,
         },
         third: FriQueryPair<3, 0> {
-            positive: complete.third.evaluations[0],
-            negative: complete.third.evaluations[1],
+            positive: third_layer.evaluations[0],
+            negative: third_layer.evaluations[1],
             path: third_path,
         },
-        final_evaluation: complete.final_round.evaluation,
+        final_evaluation: final_layer.evaluations[0],
     }
 }
 

@@ -28,7 +28,7 @@ use mandelbrot_proof_baby_bear::{
     encoded_public_fields,
     encoded_row_fields,
     evaluate_composition_opened,
-    fold_all_fri16,
+    fold_checkpoint_fri16,
     fold_fri_evaluations,
     public_commitment,
     main_lde_row_commitment,
@@ -478,21 +478,25 @@ pub fn fri_chain16_component(
     _ component: u32,
 ) -> (u32, u32, u32, u32, u32, u32, u32) {
     if component >= 8 { return (0, 0, 0, 0, 0, 0, 0) }
-    let proof = fold_all_fri16(
+    let proof = fold_checkpoint_fri16(
         fri_pattern16(seed),
         CompositionTranscriptDigest { valid: true, value: digest8(transcript) },
         BabyBear::from_u32(shift),
     )
     let c: usize = component as usize
-    let final_words = proof.final_round.evaluation.to_u32s()
+    let first = proof.layer
+    let second = proof.tail.layer
+    let third = proof.tail.tail.layer
+    let final_layer = proof.tail.tail.tail.layer
+    let final_words = final_layer.evaluations[0].to_u32s()
     (
         if proof.valid { 1 } else { 0 },
-        proof.first.root.value.field(component).to_u32(),
-        proof.second.root.value.field(component).to_u32(),
-        proof.third.root.value.field(component).to_u32(),
-        proof.final_round.root.value.field(component).to_u32(),
+        first.root.value.field(component).to_u32(),
+        second.root.value.field(component).to_u32(),
+        third.root.value.field(component).to_u32(),
+        final_layer.root.value.field(component).to_u32(),
         if component < 4 { final_words[c] } else { 0 },
-        proof.final_round.transcript.value.field(component).to_u32(),
+        final_layer.transcript.value.field(component).to_u32(),
     )
 }
 
