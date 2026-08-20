@@ -712,10 +712,26 @@ Legend:
   seconds and rejects changes to the query index, composition and folded
   values, path indices and siblings, final evaluation, intermediate root,
   validity, and external AIR transcript. No 16-to-8-to-4-to-2-to-1 layer list
-  remains in the carrier, opener, or verifier. Production BabyBear LDE row
-  generation from the canonical trace, multiple Fiat-Shamir queries with a
-  CTFE-derived deduplicated sparse Merkle multiproof, the canonical BabyBear
-  receipt codec, and end-to-end verification remain pending. The explicitly
+  remains in the carrier, opener, or verifier. Commits `9f608fe52` and
+  `9979f0700` add a field-neutral recursive `FriQueryPlan` and its BabyBear
+  interpreter. FQ01 through FQn are independently domain-separated and
+  sampled by one structural implementation rather than an authored call
+  sequence. Commit `9ba8a581e` extends the field-generic, effect-free
+  `merkle_core` with a canonical sparse multipath: requested indices are
+  sorted and deduplicated, sibling nodes are emitted bottom-up and
+  left-to-right only when they cannot be reconstructed, and nonzero unused
+  capacity is rejected. Its independent affine-hash Wasm oracle passed 1/1 in
+  0.99 seconds, including eight malformed-proof cases. Commit `d69a06aa6`
+  supplies separately domain-checked composition and round-typed BabyBear FRI
+  wrappers. Commits `43680a832` and `abf1c8259` then interpret the same query
+  plan into each layer's positive and negative leaf requests and feed those
+  requests directly into the sparse opener. The zero-import Plonky3 gate
+  independently recomputes the actual FQ samples, unique-leaf sets, and
+  sibling counts, and passed 1/1 in 205.35 seconds. A complete shared
+  multi-query FRI carrier and fold verifier, sparse main and auxiliary AIR LDE
+  openings, a canonical variable-length BabyBear receipt codec, and
+  end-to-end verification remain pending. Production BabyBear LDE row
+  generation from the canonical trace also remains pending. The explicitly
   named `Checkpoint4AirLdeOpening` is still a four-row test checkpoint.
   The same permutation has also
   lowered to Naga-valid u32-only WGSL with the local Sonatina conditional-loop
