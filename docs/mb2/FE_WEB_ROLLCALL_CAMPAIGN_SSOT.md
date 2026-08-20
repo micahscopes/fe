@@ -2,7 +2,7 @@
 
 Status: authoritative campaign burn-down
 
-Updated: 2026-08-18
+Updated: 2026-08-20
 
 Goal spine: write the math, get the kernel, keep the proof.
 
@@ -682,18 +682,28 @@ Legend:
   function used as an associated-type receiver normalized in only one
   direction. Commit `d0a2b83b5` then interprets the shared schedule into the
   nested BabyBear complete-codeword carrier and its recursively derived
-  fail-closed value. The renamed `fold_checkpoint_fri16` gate remains
-  zero-import Wasm, matches every independent Plonky3 layer oracle, and passed
-  1/1 in 48.53 seconds after the carrier replacement. Production BabyBear LDE
-  row generation from the canonical trace, multiple query sampling, the
-  canonical BabyBear receipt codec, and end-to-end verification remain
-  pending. The explicitly named `Checkpoint4AirLdeOpening` is still a
-  four-row test checkpoint. The valid 16-point fold traversal is still
-  term-level staged explicitly, and `FriCommitmentQuery16` still enumerates
-  the compact query layers manually. Both must become structural
-  interpretations of `FriSchedule`, including a CTFE-derived sparse Merkle
-  multiproof topology, before the GPU and recursive paths can make those
-  shapes costly to change.
+  fail-closed value. Compiler commit `3976b30ac` makes an enclosing impl's
+  symbolic const predicates available as exact assumptions inside its method
+  bodies. This closes the language seam that otherwise forced the schedule
+  interpreter either to repeat node predicates on a trait method that cannot
+  name them or to bypass checked crypto helpers. Commit `6c0317c95` uses that
+  machinery to interpret the valid fold traversal from the same
+  `FriSchedule<1, 4>` that derives its carrier. `BabyBearFriFirst` handles the
+  one composition-transcript boundary, `BabyBearFriTail` recursively commits
+  each output layer before deriving the next challenge, and
+  `FriScheduleDone` stops without an unused terminal squeeze. This deletes the
+  manual 16-to-8-to-4-to-2-to-1 round types and staging functions. The renamed
+  `fold_checkpoint_fri16` gate remains zero-import Wasm, matches every
+  independent Plonky3 layer oracle, rejects mutations, and passed 1/1 in 97.98
+  seconds after the traversal replacement. The complete 41-test const
+  predicate suite also passes. Production BabyBear LDE row generation from
+  the canonical trace, multiple query sampling, the canonical BabyBear receipt
+  codec, and end-to-end verification remain pending. The explicitly named
+  `Checkpoint4AirLdeOpening` is still a four-row test checkpoint, and
+  `FriCommitmentQuery16` still enumerates the compact query layers manually.
+  That query carrier must become a structural interpretation of `FriSchedule`,
+  including a CTFE-derived sparse Merkle multiproof topology, before the GPU
+  and recursive paths can make those shapes costly to change.
   The same permutation has also
   lowered to Naga-valid u32-only WGSL with the local Sonatina conditional-loop
   structurizer fixes, but that browser gate is not landed until those commits
