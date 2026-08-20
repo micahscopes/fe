@@ -224,27 +224,6 @@ pub struct FriFoldEvaluations<const N: usize> {
 }
 impl<const N: usize> core::marker::Copy for FriFoldEvaluations<N> {}
 
-pub struct FriRound<const ROUND: u32, const N: usize, const NEXT: u32> {
-    pub valid: bool,
-    pub evaluations: [BabyBearExt4; N],
-    pub root: FriLayerDigest<ROUND>,
-    pub transcript: FriLayerTranscriptDigest<ROUND>,
-    pub next_challenge: FriFoldChallenge<NEXT>,
-}
-impl<const ROUND: u32, const N: usize, const NEXT: u32> core::marker::Copy for FriRound<
-    ROUND,
-    N,
-    NEXT,
-> {}
-
-pub struct FriFinalRound<const ROUND: u32> {
-    pub valid: bool,
-    pub evaluation: BabyBearExt4,
-    pub root: FriLayerDigest<ROUND>,
-    pub transcript: FriLayerTranscriptDigest<ROUND>,
-}
-impl<const ROUND: u32> core::marker::Copy for FriFinalRound<ROUND> {}
-
 /// One committed output layer in a schedule-derived FRI proof. Every fold has
 /// the same carrier shape, including the final one-element layer.
 pub struct FriCommittedLayer<const ROUND: u32, const N: usize> {
@@ -269,62 +248,295 @@ pub struct FriProofFold<const ROUND: u32, const N: usize, Tail> {
 impl<const ROUND: u32, const N: usize, Tail: core::marker::Copy> core::marker::Copy
     for FriProofFold<ROUND, N, Tail> {}
 
-/// Interpret the field-neutral schedule into BabyBear proof storage. The same
-/// two implementations derive both the nested carrier type and its fail-closed
-/// value for every radix-two domain.
-pub trait BabyBearFriProofShape {
+/// Continue a FRI fold after the previous layer has been committed. The
+/// schedule tail decides whether to derive another challenge and fold, or stop
+/// immediately at `FriScheduleDone`, so the final layer never performs an
+/// unused transcript squeeze.
+pub trait BabyBearFriTail<const PREVIOUS: u32, const INPUT: usize> {
     type Proof
-    fn invalid_fri_proof() -> Self::Proof
+    fn invalid_fri_tail() -> Self::Proof
+    fn fold_fri_tail(
+        _ evaluations: own [BabyBearExt4; INPUT],
+        _ transcript: own FriLayerTranscriptDigest<PREVIOUS>,
+        _ shift: BabyBear,
+    ) -> (bool, Self::Proof)
 }
 
-impl<const NEXT_ROUND: u32> BabyBearFriProofShape for FriScheduleDone<NEXT_ROUND> {
+impl<
+    const PREVIOUS: u32,
+    const INPUT: usize,
+    const NEXT_ROUND: u32,
+> BabyBearFriTail<PREVIOUS, INPUT> for FriScheduleDone<NEXT_ROUND>
+where { NEXT_ROUND == PREVIOUS + 1 }, { INPUT == 1 }
+{
     type Proof = FriProofEnd<NEXT_ROUND>
 
-    fn invalid_fri_proof() -> FriProofEnd<NEXT_ROUND> {
+    fn invalid_fri_tail() -> FriProofEnd<NEXT_ROUND> {
         FriProofEnd<NEXT_ROUND> {}
+    }
+
+    fn fold_fri_tail(
+        _ evaluations: own [BabyBearExt4; INPUT],
+        _ transcript: own FriLayerTranscriptDigest<PREVIOUS>,
+        _ shift: BabyBear,
+    ) -> (bool, FriProofEnd<NEXT_ROUND>) {
+        if !transcript.valid || shift.is_zero() {
+            return (false, <Self as BabyBearFriTail<PREVIOUS, INPUT>>::invalid_fri_tail())
+        }
+        (true, FriProofEnd<NEXT_ROUND> {})
     }
 }
 
 impl<
+    const PREVIOUS: u32,
+    const INPUT: usize,
     const ROUND: u32,
     const INPUT_LOG: usize,
     const OUTPUT: usize,
-    Tail: BabyBearFriProofShape,
-> BabyBearFriProofShape for FriScheduleFold<ROUND, INPUT_LOG, OUTPUT, Tail> {
+    Tail: BabyBearFriTail<ROUND, OUTPUT>,
+> BabyBearFriTail<PREVIOUS, INPUT> for FriScheduleFold<ROUND, INPUT_LOG, OUTPUT, Tail>
+where
+    { PREVIOUS > 0 },
+    { ROUND == PREVIOUS + 1 },
+    { ROUND > 0 },
+    { ROUND < 100 },
+    INPUT > 0,
+    INPUT > 1,
+    { (INPUT & (INPUT - 1)) == 0 },
+    { OUTPUT + OUTPUT == INPUT },
+    { INPUT == OUTPUT + OUTPUT },
+    OUTPUT > 0,
+    OUTPUT <= MAX_PADDED_TRACE_LENGTH,
+    { (OUTPUT & (OUTPUT - 1)) == 0 },
+{
     type Proof = FriProofFold<
         ROUND,
         OUTPUT,
-        <Tail as BabyBearFriProofShape>::Proof,
+        <Tail as BabyBearFriTail<ROUND, OUTPUT>>::Proof,
     >
 
-    fn invalid_fri_proof() -> Self::Proof {
+    fn invalid_fri_tail() -> FriProofFold<
+        ROUND,
+        OUTPUT,
+        <Tail as BabyBearFriTail<ROUND, OUTPUT>>::Proof,
+    > {
         FriProofFold<
             ROUND,
             OUTPUT,
-            <Tail as BabyBearFriProofShape>::Proof,
+            <Tail as BabyBearFriTail<ROUND, OUTPUT>>::Proof,
         > {
             valid: false,
-            layer: FriCommittedLayer<ROUND, OUTPUT> {
+            layer: FriCommittedLayer {
                 valid: false,
                 evaluations: [BabyBearExt4::zero(); OUTPUT],
-                root: FriLayerDigest<ROUND> {
+                root: FriLayerDigest {
                     valid: false,
                     value: Poseidon2Digest::zero(),
                 },
-                transcript: FriLayerTranscriptDigest<ROUND> {
+                transcript: FriLayerTranscriptDigest {
                     valid: false,
                     value: Poseidon2Digest::zero(),
                 },
             },
-            tail: <Tail as BabyBearFriProofShape>::invalid_fri_proof(),
+            tail: <Tail as BabyBearFriTail<ROUND, OUTPUT>>::invalid_fri_tail(),
         }
     }
+
+    fn fold_fri_tail(
+        _ evaluations: own [BabyBearExt4; INPUT],
+        _ transcript: own FriLayerTranscriptDigest<PREVIOUS>,
+        _ shift: BabyBear,
+    ) -> (
+        bool,
+        FriProofFold<
+            ROUND,
+            OUTPUT,
+            <Tail as BabyBearFriTail<ROUND, OUTPUT>>::Proof,
+        >,
+    ) {
+        let challenge = next_fri_fold_challenge<PREVIOUS, ROUND>(transcript)
+        if !challenge.valid || shift.is_zero() {
+            return (false, <Self as BabyBearFriTail<PREVIOUS, INPUT>>::invalid_fri_tail())
+        }
+        let folded = fold_fri_evaluations<INPUT, OUTPUT>(
+            evaluations,
+            challenge.value,
+            shift,
+        )
+        if !folded.valid {
+            return (false, <Self as BabyBearFriTail<PREVIOUS, INPUT>>::invalid_fri_tail())
+        }
+        let root = commit_fri_layer<ROUND, OUTPUT>(folded.evaluations)
+        let next_transcript = bind_next_fri_layer<PREVIOUS, ROUND>(transcript, root)
+        if !root.valid || !next_transcript.valid {
+            return (false, <Self as BabyBearFriTail<PREVIOUS, INPUT>>::invalid_fri_tail())
+        }
+        let tail = <Tail as BabyBearFriTail<ROUND, OUTPUT>>::fold_fri_tail(
+            folded.evaluations,
+            next_transcript,
+            shift.square(),
+        )
+        if !tail.0 {
+            return (false, <Self as BabyBearFriTail<PREVIOUS, INPUT>>::invalid_fri_tail())
+        }
+        (
+            true,
+            FriProofFold<
+                ROUND,
+                OUTPUT,
+                <Tail as BabyBearFriTail<ROUND, OUTPUT>>::Proof,
+            > {
+                valid: true,
+                layer: FriCommittedLayer {
+                    valid: true,
+                    evaluations: folded.evaluations,
+                    root: root,
+                    transcript: next_transcript,
+                },
+                tail: tail.1,
+            },
+        )
+    }
+}
+
+/// Interpret the first schedule node from the AIR composition transcript. All
+/// later nodes use `BabyBearFriTail`, so this is the only protocol-specific
+/// distinction between the initial FRI challenge and subsequent challenges.
+pub trait BabyBearFriFirst<const INPUT: usize> {
+    type Proof
+    fn invalid_fri_first() -> Self::Proof
+    fn fold_fri_first(
+        _ evaluations: own [BabyBearExt4; INPUT],
+        _ transcript: own CompositionTranscriptDigest,
+        _ shift: BabyBear,
+    ) -> (bool, Self::Proof)
+}
+
+impl<
+    const INPUT: usize,
+    const INPUT_LOG: usize,
+    const OUTPUT: usize,
+    Tail: BabyBearFriTail<1, OUTPUT>,
+> BabyBearFriFirst<INPUT> for FriScheduleFold<1, INPUT_LOG, OUTPUT, Tail>
+where
+    INPUT > 0,
+    INPUT > 1,
+    { (INPUT & (INPUT - 1)) == 0 },
+    { OUTPUT + OUTPUT == INPUT },
+    { INPUT == OUTPUT + OUTPUT },
+    OUTPUT > 0,
+    OUTPUT <= MAX_PADDED_TRACE_LENGTH,
+    { (OUTPUT & (OUTPUT - 1)) == 0 },
+{
+    type Proof = FriProofFold<
+        1,
+        OUTPUT,
+        <Tail as BabyBearFriTail<1, OUTPUT>>::Proof,
+    >
+
+    fn invalid_fri_first() -> FriProofFold<
+        1,
+        OUTPUT,
+        <Tail as BabyBearFriTail<1, OUTPUT>>::Proof,
+    > {
+        FriProofFold<
+            1,
+            OUTPUT,
+            <Tail as BabyBearFriTail<1, OUTPUT>>::Proof,
+        > {
+            valid: false,
+            layer: FriCommittedLayer {
+                valid: false,
+                evaluations: [BabyBearExt4::zero(); OUTPUT],
+                root: FriLayerDigest {
+                    valid: false,
+                    value: Poseidon2Digest::zero(),
+                },
+                transcript: FriLayerTranscriptDigest {
+                    valid: false,
+                    value: Poseidon2Digest::zero(),
+                },
+            },
+            tail: <Tail as BabyBearFriTail<1, OUTPUT>>::invalid_fri_tail(),
+        }
+    }
+
+    fn fold_fri_first(
+        _ evaluations: own [BabyBearExt4; INPUT],
+        _ transcript: own CompositionTranscriptDigest,
+        _ shift: BabyBear,
+    ) -> (
+        bool,
+        FriProofFold<
+            1,
+            OUTPUT,
+            <Tail as BabyBearFriTail<1, OUTPUT>>::Proof,
+        >,
+    ) {
+        let challenge = fri_fold_challenge(transcript)
+        if !challenge.valid || shift.is_zero() {
+            return (false, <Self as BabyBearFriFirst<INPUT>>::invalid_fri_first())
+        }
+        let folded = fold_fri_evaluations<INPUT, OUTPUT>(
+            evaluations,
+            challenge.value,
+            shift,
+        )
+        if !folded.valid {
+            return (false, <Self as BabyBearFriFirst<INPUT>>::invalid_fri_first())
+        }
+        let root = commit_fri_layer<1, OUTPUT>(folded.evaluations)
+        let next_transcript = bind_first_fri_layer(transcript, root)
+        if !root.valid || !next_transcript.valid {
+            return (false, <Self as BabyBearFriFirst<INPUT>>::invalid_fri_first())
+        }
+        let tail = <Tail as BabyBearFriTail<1, OUTPUT>>::fold_fri_tail(
+            folded.evaluations,
+            next_transcript,
+            shift.square(),
+        )
+        if !tail.0 {
+            return (false, <Self as BabyBearFriFirst<INPUT>>::invalid_fri_first())
+        }
+        (
+            true,
+            FriProofFold<
+                1,
+                OUTPUT,
+                <Tail as BabyBearFriTail<1, OUTPUT>>::Proof,
+            > {
+                valid: true,
+                layer: FriCommittedLayer {
+                    valid: true,
+                    evaluations: folded.evaluations,
+                    root: root,
+                    transcript: next_transcript,
+                },
+                tail: tail.1,
+            },
+        )
+    }
+}
+
+pub fn fold_fri_schedule<
+    const INPUT: usize,
+    S: BabyBearFriFirst<INPUT>,
+>(
+    _ evaluations: own [BabyBearExt4; INPUT],
+    _ transcript: own CompositionTranscriptDigest,
+    _ shift: BabyBear,
+) -> <S as BabyBearFriFirst<INPUT>>::Proof {
+    <S as BabyBearFriFirst<INPUT>>::fold_fri_first(
+        evaluations,
+        transcript,
+        shift,
+    ).1
 }
 
 /// The existing 16-point complete-codeword gate is an explicit protocol
 /// checkpoint. Its nested storage is nevertheless derived from `FriSchedule`.
 pub type CheckpointFriProof16 =
-    <FriSchedule<1, 4> as BabyBearFriProofShape>::Proof
+    <FriSchedule<1, 4> as BabyBearFriFirst<16>>::Proof
 
 pub struct CompositionPairPath<const DEPTH: usize> {
     pub valid: bool,
@@ -1305,42 +1517,6 @@ where N > 0, N > 1, { (N & (N - 1)) == 0 }, OUT > 0, { OUT + OUT == N }
     FriFoldEvaluations<OUT> { valid: true, evaluations: folded }
 }
 
-fn invalid_fri_round<const ROUND: u32, const N: usize, const NEXT: u32>() -> FriRound<
-    ROUND,
-    N,
-    NEXT,
-> {
-    FriRound<ROUND, N, NEXT> {
-        valid: false,
-        evaluations: [BabyBearExt4::zero(); N],
-        root: FriLayerDigest<ROUND> { valid: false, value: Poseidon2Digest::zero() },
-        transcript: FriLayerTranscriptDigest<ROUND> {
-            valid: false,
-            value: Poseidon2Digest::zero(),
-        },
-        next_challenge: FriFoldChallenge<NEXT> {
-            valid: false,
-            value: BabyBearExt4::zero(),
-        },
-    }
-}
-
-fn invalid_fri_final<const ROUND: u32>() -> FriFinalRound<ROUND> {
-    FriFinalRound<ROUND> {
-        valid: false,
-        evaluation: BabyBearExt4::zero(),
-        root: FriLayerDigest<ROUND> { valid: false, value: Poseidon2Digest::zero() },
-        transcript: FriLayerTranscriptDigest<ROUND> {
-            valid: false,
-            value: Poseidon2Digest::zero(),
-        },
-    }
-}
-
-fn invalid_checkpoint_fri16() -> CheckpointFriProof16 {
-    <FriSchedule<1, 4> as BabyBearFriProofShape>::invalid_fri_proof()
-}
-
 fn invalid_composition_query_pair<const DEPTH: usize>() -> CompositionQueryPair<DEPTH> {
     CompositionQueryPair<DEPTH> {
         positive: BabyBearExt4::zero(),
@@ -1409,185 +1585,16 @@ where
     fri_layer_root_power_of_two<ROUND, N>(leaves)
 }
 
-pub fn fold_first_fri_round16(
-    _ evaluations: own [BabyBearExt4; 16],
-    _ transcript: own CompositionTranscriptDigest,
-    _ shift: BabyBear,
-) -> FriRound<1, 8, 2> {
-    let challenge = fri_fold_challenge(transcript)
-    if !challenge.valid {
-        return invalid_fri_round<1, 8, 2>()
-    }
-    let folded = fold_fri_evaluations<16, 8>(evaluations, challenge.value, shift)
-    if !folded.valid {
-        return invalid_fri_round<1, 8, 2>()
-    }
-    let root = commit_fri_layer<1, 8>(folded.evaluations)
-    let next_transcript = bind_first_fri_layer(transcript, root)
-    let next_challenge = next_fri_fold_challenge<1, 2>(next_transcript)
-    if !root.valid || !next_transcript.valid || !next_challenge.valid {
-        return invalid_fri_round<1, 8, 2>()
-    }
-    FriRound<1, 8, 2> {
-        valid: true,
-        evaluations: folded.evaluations,
-        root: root,
-        transcript: next_transcript,
-        next_challenge: next_challenge,
-    }
-}
-
-pub fn fold_next_fri_round<
-    const PREVIOUS: u32,
-    const ROUND: u32,
-    const N: usize,
-    const OUT: usize,
-    const NEXT: u32,
->(
-    _ evaluations: own [BabyBearExt4; N],
-    _ transcript: own FriLayerTranscriptDigest<PREVIOUS>,
-    _ challenge: own FriFoldChallenge<ROUND>,
-    _ shift: BabyBear,
-) -> FriRound<ROUND, OUT, NEXT>
-where
-    { PREVIOUS > 0 },
-    { ROUND == PREVIOUS + 1 },
-    { ROUND < 100 },
-    { NEXT == ROUND + 1 },
-    { NEXT < 100 },
-    N > 0,
-    N > 1,
-    { (N & (N - 1)) == 0 },
-    OUT > 0,
-    OUT <= MAX_PADDED_TRACE_LENGTH,
-    { (OUT & (OUT - 1)) == 0 },
-    { OUT + OUT == N },
-{
-    if !transcript.valid || !challenge.valid {
-        return invalid_fri_round<ROUND, OUT, NEXT>()
-    }
-    let folded = fold_fri_evaluations<N, OUT>(evaluations, challenge.value, shift)
-    if !folded.valid {
-        return invalid_fri_round<ROUND, OUT, NEXT>()
-    }
-    let root = commit_fri_layer<ROUND, OUT>(folded.evaluations)
-    let next_transcript = bind_next_fri_layer<PREVIOUS, ROUND>(transcript, root)
-    let next_challenge = next_fri_fold_challenge<ROUND, NEXT>(next_transcript)
-    if !root.valid || !next_transcript.valid || !next_challenge.valid {
-        return invalid_fri_round<ROUND, OUT, NEXT>()
-    }
-    FriRound<ROUND, OUT, NEXT> {
-        valid: true,
-        evaluations: folded.evaluations,
-        root: root,
-        transcript: next_transcript,
-        next_challenge: next_challenge,
-    }
-}
-
-pub fn fold_final_fri_round<const PREVIOUS: u32, const ROUND: u32>(
-    _ evaluations: own [BabyBearExt4; 2],
-    _ transcript: own FriLayerTranscriptDigest<PREVIOUS>,
-    _ challenge: own FriFoldChallenge<ROUND>,
-    _ shift: BabyBear,
-) -> FriFinalRound<ROUND>
-where { PREVIOUS > 0 }, { ROUND == PREVIOUS + 1 }, { ROUND < 100 }
-{
-    if !transcript.valid || !challenge.valid {
-        return invalid_fri_final<ROUND>()
-    }
-    let folded = fold_fri_evaluations<2, 1>(evaluations, challenge.value, shift)
-    if !folded.valid {
-        return invalid_fri_final<ROUND>()
-    }
-    let root = fri_layer_row_commitment<ROUND>(folded.evaluations[0])
-    let next_transcript = bind_next_fri_layer<PREVIOUS, ROUND>(transcript, root)
-    if !root.valid || !next_transcript.valid {
-        return invalid_fri_final<ROUND>()
-    }
-    FriFinalRound<ROUND> {
-        valid: true,
-        evaluation: folded.evaluations[0],
-        root: root,
-        transcript: next_transcript,
-    }
-}
-
 /// Materialize the current authenticated 16-to-1 checkpoint in the
 /// schedule-derived carrier. Every next challenge is squeezed only after the
-/// preceding folded layer has been committed. A following interpreter slice
-/// will derive this term-level traversal from the same schedule as well.
+/// preceding folded layer has been committed. Both its type and term-level
+/// traversal are interpretations of `FriSchedule<1, 4>`.
 pub fn fold_checkpoint_fri16(
     _ evaluations: own [BabyBearExt4; 16],
     _ transcript: own CompositionTranscriptDigest,
     _ shift: BabyBear,
 ) -> CheckpointFriProof16 {
-    let first = fold_first_fri_round16(evaluations, transcript, shift)
-    if !first.valid { return invalid_checkpoint_fri16() }
-
-    let shift2 = shift.square()
-    let second = fold_next_fri_round<1, 2, 8, 4, 3>(
-        first.evaluations,
-        first.transcript,
-        first.next_challenge,
-        shift2,
-    )
-    if !second.valid { return invalid_checkpoint_fri16() }
-
-    let shift3 = shift2.square()
-    let third = fold_next_fri_round<2, 3, 4, 2, 4>(
-        second.evaluations,
-        second.transcript,
-        second.next_challenge,
-        shift3,
-    )
-    if !third.valid { return invalid_checkpoint_fri16() }
-
-    let final_round = fold_final_fri_round<3, 4>(
-        third.evaluations,
-        third.transcript,
-        third.next_challenge,
-        shift3.square(),
-    )
-    if !final_round.valid { return invalid_checkpoint_fri16() }
-
-    FriProofFold {
-        valid: true,
-        layer: FriCommittedLayer {
-            valid: first.valid,
-            evaluations: first.evaluations,
-            root: first.root,
-            transcript: first.transcript,
-        },
-        tail: FriProofFold {
-            valid: true,
-            layer: FriCommittedLayer {
-                valid: second.valid,
-                evaluations: second.evaluations,
-                root: second.root,
-                transcript: second.transcript,
-            },
-            tail: FriProofFold {
-                valid: true,
-                layer: FriCommittedLayer {
-                    valid: third.valid,
-                    evaluations: third.evaluations,
-                    root: third.root,
-                    transcript: third.transcript,
-                },
-                tail: FriProofFold {
-                    valid: true,
-                    layer: FriCommittedLayer {
-                        valid: final_round.valid,
-                        evaluations: [final_round.evaluation],
-                        root: final_round.root,
-                        transcript: final_round.transcript,
-                    },
-                    tail: FriProofEnd {},
-                },
-            },
-        },
-    }
+    fold_fri_schedule<16, FriSchedule<1, 4>>(evaluations, transcript, shift)
 }
 
 pub fn open_fri_commitment_query16(
