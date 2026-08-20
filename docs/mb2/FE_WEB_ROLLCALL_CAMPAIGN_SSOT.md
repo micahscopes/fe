@@ -671,14 +671,29 @@ Legend:
   at both 4-by-16 and 8-by-64 sizes, and rejects eleven mutations plus an
   out-of-domain query. The final gate passed 1/1 in 49.47 seconds. Fixed
   4-by-16 values now occur only at checkpoint instantiations, not in reusable
-  production function signatures. Production BabyBear LDE row generation
-  from the canonical trace, multiple query sampling, the canonical BabyBear
-  receipt codec, and end-to-end verification remain pending. The explicitly
-  named `Checkpoint4AirLdeOpening` and current manually enumerated 16-to-1 FRI
-  receipt are test checkpoints, not the recursive production API. Their
-  replacement must be derived from one FCO/CTFE protocol description,
-  including the sparse Merkle multiproof topology, before the GPU and
-  recursive paths can make those shapes costly to change.
+  production function signatures. Commit `e9691826f` adds the field-neutral
+  recursive `FriSchedule<FIRST_ROUND, INPUT_LOG>` protocol description. Each
+  normalized node carries its derived round, input logarithm, output width,
+  and tail. One structural metadata interpreter executes at both 16 and 64
+  points and independently matches round count, terminal round, retained
+  evaluations, pair openings, and Merkle sibling depth. Compiler commit
+  `ad0678f23` makes explicit-return checking normalize both sides before
+  unification, closing the language seam where a ground recursive type
+  function used as an associated-type receiver normalized in only one
+  direction. Commit `d0a2b83b5` then interprets the shared schedule into the
+  nested BabyBear complete-codeword carrier and its recursively derived
+  fail-closed value. The renamed `fold_checkpoint_fri16` gate remains
+  zero-import Wasm, matches every independent Plonky3 layer oracle, and passed
+  1/1 in 48.53 seconds after the carrier replacement. Production BabyBear LDE
+  row generation from the canonical trace, multiple query sampling, the
+  canonical BabyBear receipt codec, and end-to-end verification remain
+  pending. The explicitly named `Checkpoint4AirLdeOpening` is still a
+  four-row test checkpoint. The valid 16-point fold traversal is still
+  term-level staged explicitly, and `FriCommitmentQuery16` still enumerates
+  the compact query layers manually. Both must become structural
+  interpretations of `FriSchedule`, including a CTFE-derived sparse Merkle
+  multiproof topology, before the GPU and recursive paths can make those
+  shapes costly to change.
   The same permutation has also
   lowered to Naga-valid u32-only WGSL with the local Sonatina conditional-loop
   structurizer fixes, but that browser gate is not landed until those commits
