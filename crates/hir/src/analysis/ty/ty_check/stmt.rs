@@ -444,23 +444,36 @@ impl<'db> TyChecker<'db> {
             returned_ty = coerced;
         }
 
+        // Explicit returns must use the same symmetric normalization boundary as
+        // ordinary expression unification. In particular, the declared return
+        // type can be an associated projection whose receiver is a ground
+        // recursive type-function application. Normalizing only the returned
+        // expression makes definitional equality depend on which side carries
+        // the projection.
+        let returned_for_unify = returned_ty.fold_with(self.db, &mut self.table);
+        let expected_for_unify = self.expected.fold_with(self.db, &mut self.table);
+        let returned_for_unify = self.normalize_ty(returned_for_unify);
+        let expected_for_unify = self.normalize_ty(expected_for_unify);
         let ret_ty_ok = !had_child_err
-            && !returned_ty.has_invalid(self.db)
-            && self.table.unify(returned_ty, self.expected).is_ok();
+            && !returned_for_unify.has_invalid(self.db)
+            && self
+                .table
+                .unify(returned_for_unify, expected_for_unify)
+                .is_ok();
 
-        if !had_child_err && !returned_ty.has_invalid(self.db) && !ret_ty_ok {
+        if !had_child_err && !returned_for_unify.has_invalid(self.db) && !ret_ty_ok {
             let func = self.env.func();
             let span = stmt.span(self.env.body());
             let diag = BodyDiag::ReturnedTypeMismatch {
                 primary: span.into(),
-                actual: returned_ty,
-                expected: self.expected,
+                actual: returned_for_unify,
+                expected: expected_for_unify,
                 func,
             };
 
             self.push_diag(diag);
         } else if ret_ty_ok && let Some(expr) = returned_expr {
-            self.record_implicit_move_for_owned_expr(expr, self.expected);
+            self.record_implicit_move_for_owned_expr(expr, expected_for_unify);
         }
 
         if ret_ty_ok

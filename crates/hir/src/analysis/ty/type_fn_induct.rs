@@ -2326,4 +2326,73 @@ impl<V> Backend for WrapV<V> {
             "the caller param must NOT be captured (the latent A3 erratum)"
         );
     }
+
+    /// A ground recursive type-function result can itself be the receiver of a
+    /// plain associated-type projection. This is the value-carrier pattern used
+    /// by compile-time protocol schedules: normalize the receiver first, select
+    /// the structural impl, then recursively normalize its projected tail.
+    #[test]
+    fn associated_projection_normalizes_ground_typefn_receiver() {
+        use crate::analysis::ty::normalize::normalize_ty;
+        use crate::analysis::ty::trait_resolution::PredicateListId;
+        use crate::hir_def::IdentId;
+
+        const FIXTURE: &str = r#"
+struct Done {}
+struct Step<T> {}
+
+recursive type fn Chain<const N: usize>() -> (*) {
+    match N {
+        0 => Done
+        _ => Step<Chain<{N - 1}>>
+    }
+}
+
+struct End {}
+struct Node<T> {}
+
+trait Shape { type Out }
+impl Shape for Done { type Out = End }
+impl<T: Shape> Shape for Step<T> { type Out = Node<T::Out> }
+"#;
+
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            Utf8PathBuf::from("assoc_projection_typefn_receiver.fe"),
+            FIXTURE,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        let chain = find_tf(&db, top_mod, "Chain");
+        let shape = find_trait(&db, top_mod, "Shape");
+        let step = adt_ty(&db, top_mod, "Step");
+        let done = adt_ty(&db, top_mod, "Done");
+        let node = adt_ty(&db, top_mod, "Node");
+        let end = adt_ty(&db, top_mod, "End");
+        let chain2 = TyId::foldl(
+            &db,
+            TyId::type_fn(&db, chain),
+            &[usize_subject(&db, 2)],
+        );
+        let inst = TraitInstId::new_simple(&db, shape, vec![chain2]);
+        let projection = TyId::assoc_ty(&db, inst, IdentId::new(&db, "Out".to_string()));
+        let expected = TyId::foldl(
+            &db,
+            node,
+            &[TyId::foldl(&db, node, &[end])],
+        );
+        let normal = normalize_ty(
+            &db,
+            projection,
+            top_mod.scope(),
+            PredicateListId::empty_list(&db),
+        );
+
+        assert_eq!(
+            normal,
+            expected,
+            "Chain<2>::Out must normalize to Node<Node<End>>, got {}",
+            normal.pretty_print(&db),
+        );
+        assert_ne!(normal, TyId::foldl(&db, step, &[done]));
+    }
 }

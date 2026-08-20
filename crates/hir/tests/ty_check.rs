@@ -107,6 +107,52 @@ trait Backend {
     );
 }
 
+#[test]
+fn explicit_return_normalizes_ground_typefn_receiver_projection() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "explicit_return_normalizes_ground_typefn_receiver_projection.fe".into(),
+        r#"
+struct Done {}
+struct Step<T> {}
+
+recursive type fn Chain<const N: usize>() -> (*) {
+    match N {
+        0 => Done
+        _ => Step<Chain<{N - 1}>>
+    }
+}
+
+struct End {}
+struct Node<T> { value: T }
+
+trait Shape { type Out }
+impl Shape for Done { type Out = End }
+impl<T: Shape> Shape for Step<T> { type Out = Node<T::Out> }
+
+type Derived = <Chain<2> as Shape>::Out
+
+fn convert(_ value: Node<Node<End>>) -> Derived {
+    return value
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+    let convert = top_mod
+        .all_funcs(&db)
+        .iter()
+        .copied()
+        .find(|func| {
+            func.name(&db)
+                .to_opt()
+                .is_some_and(|name| name.data(&db) == "convert")
+        })
+        .expect("missing `convert` function");
+    let (diags, _) = check_func_body(&db, convert).clone();
+    assert!(diags.is_empty(), "{diags:?}");
+}
+
 /// A2b.1 core contract: an impl-side GAT param used in the RHS resolves to a
 /// rigid `TyParam` with the PINNED representation (steering-06 sec 1.1): LOCAL
 /// index 0 and `owner == ScopeId::ImplTraitType(imp, assoc_idx)` (the
