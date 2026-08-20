@@ -22,6 +22,9 @@ use mandelbrot_proof_kernel::{
 use mandelbrot_proof_air_core::{
     AirColumnView,
     CompositionValue,
+    FriQueryPlan,
+    FriQueryPlanDone,
+    FriQueryPlanSample,
     FriSchedule,
     FriScheduleDone,
     FriScheduleFold,
@@ -208,6 +211,158 @@ impl<const QUERY: u32> core::marker::Copy for FriQueryChallenge<QUERY> {}
 
 pub struct FriQueryIndex<const QUERY: u32> { pub valid: bool, pub value: u32 }
 impl<const QUERY: u32> core::marker::Copy for FriQueryIndex<QUERY> {}
+
+/// Value-level terminal produced by interpreting `FriQueryPlanDone`.
+pub struct FriQueryIndicesDone<const NEXT_QUERY: u32> {}
+impl<const NEXT_QUERY: u32> core::marker::Copy for FriQueryIndicesDone<NEXT_QUERY> {}
+
+/// One typed sampled index followed by the remaining query-plan result.
+pub struct FriQueryIndicesSample<const QUERY: u32, Tail> {
+    pub current: FriQueryIndex<QUERY>,
+    pub tail: Tail,
+}
+impl<const QUERY: u32, Tail: core::marker::Copy> core::marker::Copy
+    for FriQueryIndicesSample<QUERY, Tail> {}
+
+/// Derive the value carrier for a field-neutral query plan.
+pub trait BabyBearFriQueryPlanShape {
+    type Samples
+}
+
+impl<const NEXT_QUERY: u32> BabyBearFriQueryPlanShape for FriQueryPlanDone<NEXT_QUERY> {
+    type Samples = FriQueryIndicesDone<NEXT_QUERY>
+}
+
+impl<const QUERY: u32, Tail: BabyBearFriQueryPlanShape> BabyBearFriQueryPlanShape
+    for FriQueryPlanSample<QUERY, Tail>
+{
+    type Samples = FriQueryIndicesSample<
+        QUERY,
+        <Tail as BabyBearFriQueryPlanShape>::Samples,
+    >
+}
+
+/// Interpret the field-neutral query plan into independently domain-separated
+/// BabyBear indices. `Samples` is an ordinary type parameter because Fe does
+/// not yet normalize an associated result in every generic method comparison.
+/// The plan, not handwritten call sites, still owns the complete query list.
+pub trait BabyBearFriQueryPlan<const ROUND: u32, const HALF: usize, Samples>:
+    BabyBearFriQueryPlanShape
+{
+    fn invalid_fri_query_samples() -> Samples
+    fn sample_fri_queries(
+        _ transcript: FriLayerTranscriptDigest<ROUND>,
+    ) -> (bool, Samples)
+}
+
+impl<
+    const ROUND: u32,
+    const HALF: usize,
+    const NEXT_QUERY: u32,
+> BabyBearFriQueryPlan<ROUND, HALF, FriQueryIndicesDone<NEXT_QUERY>>
+    for FriQueryPlanDone<NEXT_QUERY>
+where
+    { ROUND > 0 },
+    { ROUND < 100 },
+    HALF > 0,
+    { (HALF & (HALF - 1)) == 0 },
+    { HALF <= 134217728 },
+{
+    fn invalid_fri_query_samples() -> FriQueryIndicesDone<NEXT_QUERY> {
+        FriQueryIndicesDone<NEXT_QUERY> {}
+    }
+
+    fn sample_fri_queries(
+        _ transcript: FriLayerTranscriptDigest<ROUND>,
+    ) -> (bool, FriQueryIndicesDone<NEXT_QUERY>) {
+        (transcript.valid, FriQueryIndicesDone<NEXT_QUERY> {})
+    }
+}
+
+impl<
+    const ROUND: u32,
+    const HALF: usize,
+    const QUERY: u32,
+    Tail,
+    TailSamples,
+> BabyBearFriQueryPlan<
+    ROUND,
+    HALF,
+    FriQueryIndicesSample<QUERY, TailSamples>,
+> for FriQueryPlanSample<QUERY, Tail>
+where
+    { ROUND > 0 },
+    { ROUND < 100 },
+    { QUERY > 0 },
+    { QUERY < 100 },
+    HALF > 0,
+    { (HALF & (HALF - 1)) == 0 },
+    { HALF <= 134217728 },
+    Tail: BabyBearFriQueryPlan<ROUND, HALF, TailSamples>,
+    TailSamples: core::marker::Copy,
+{
+    fn invalid_fri_query_samples() -> FriQueryIndicesSample<QUERY, TailSamples> {
+        FriQueryIndicesSample {
+            current: FriQueryIndex<QUERY> { valid: false, value: 0 },
+            tail: <Tail as BabyBearFriQueryPlan<
+                ROUND,
+                HALF,
+                TailSamples,
+            >>::invalid_fri_query_samples(),
+        }
+    }
+
+    fn sample_fri_queries(
+        _ transcript: FriLayerTranscriptDigest<ROUND>,
+    ) -> (
+        bool,
+        FriQueryIndicesSample<QUERY, TailSamples>,
+    ) {
+        if !transcript.valid {
+            return (
+                false,
+                FriQueryIndicesSample {
+                    current: FriQueryIndex<QUERY> { valid: false, value: 0 },
+                    tail: <Tail as BabyBearFriQueryPlan<
+                        ROUND,
+                        HALF,
+                        TailSamples,
+                    >>::invalid_fri_query_samples(),
+                },
+            )
+        }
+        let current = fri_query_index_power_of_two<QUERY, HALF>(
+            fri_query_challenge<ROUND, QUERY>(transcript),
+        )
+        let tail = <Tail as BabyBearFriQueryPlan<ROUND, HALF, TailSamples>>::sample_fri_queries(
+            transcript,
+        )
+        if !current.valid || !tail.0 {
+            return (
+                false,
+                FriQueryIndicesSample {
+                    current: FriQueryIndex<QUERY> { valid: false, value: 0 },
+                    tail: <Tail as BabyBearFriQueryPlan<
+                        ROUND,
+                        HALF,
+                        TailSamples,
+                    >>::invalid_fri_query_samples(),
+                },
+            )
+        }
+        (
+            true,
+            FriQueryIndicesSample {
+                current: current,
+                tail: tail.1,
+            },
+        )
+    }
+}
+
+pub type CheckpointFriQueryPlan4 = FriQueryPlan<1, 4>
+pub type CheckpointFriQuerySamples4 =
+    <CheckpointFriQueryPlan4 as BabyBearFriQueryPlanShape>::Samples
 
 pub struct FriLayerDigest<const ROUND: u32> { pub valid: bool, pub value: Poseidon2Digest }
 impl<const ROUND: u32> core::marker::Copy for FriLayerDigest<ROUND> {}

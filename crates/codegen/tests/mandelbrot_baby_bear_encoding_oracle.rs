@@ -1509,6 +1509,24 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
             vec![1, sample, sample & 7],
             "typed FRI query sampling differs from Plonky3",
         );
+        let expected_queries = (1..=4)
+            .map(|query| {
+                squeeze_challenge(&round_tag(b"FQ", query), digest_seed(transcript_seed))[0] & 7
+            })
+            .collect::<Vec<_>>();
+        let mut expected_plan = vec![1];
+        expected_plan.extend(expected_queries);
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "fri_query_plan4",
+                &[transcript_seed],
+                5,
+            ),
+            expected_plan,
+            "structural FRI query-plan sampling differs from Plonky3",
+        );
     }
 
     for (seed, air_transcript_seed, shift) in [(97, 431, 7), (0, 433, 123_456_789)] {
