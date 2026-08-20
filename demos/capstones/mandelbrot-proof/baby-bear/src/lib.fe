@@ -293,12 +293,14 @@ impl<
     const ROUND: u32,
     const INPUT_LOG: usize,
     const OUTPUT: usize,
+    const PAIR_WIDTH: usize,
     const PAIR_DEPTH: usize,
     Tail: BabyBearFriTail<ROUND, OUTPUT>,
 > BabyBearFriTail<PREVIOUS, INPUT> for FriScheduleFold<
     ROUND,
     INPUT_LOG,
     OUTPUT,
+    PAIR_WIDTH,
     PAIR_DEPTH,
     Tail,
 >
@@ -423,9 +425,17 @@ impl<
     const INPUT: usize,
     const INPUT_LOG: usize,
     const OUTPUT: usize,
+    const PAIR_WIDTH: usize,
     const PAIR_DEPTH: usize,
     Tail: BabyBearFriTail<1, OUTPUT>,
-> BabyBearFriFirst<INPUT> for FriScheduleFold<1, INPUT_LOG, OUTPUT, PAIR_DEPTH, Tail>
+> BabyBearFriFirst<INPUT> for FriScheduleFold<
+    1,
+    INPUT_LOG,
+    OUTPUT,
+    PAIR_WIDTH,
+    PAIR_DEPTH,
+    Tail,
+>
 where
     INPUT > 0,
     INPUT > 1,
@@ -664,12 +674,14 @@ impl<
     const ROUND: u32,
     const INPUT_LOG: usize,
     const OUTPUT: usize,
+    const PAIR_WIDTH: usize,
     const PAIR_DEPTH: usize,
     const NEXT_ROUND: u32,
 > BabyBearFriQueryShape for FriScheduleFold<
     ROUND,
     INPUT_LOG,
     OUTPUT,
+    PAIR_WIDTH,
     PAIR_DEPTH,
     FriScheduleDone<NEXT_ROUND>,
 >
@@ -678,6 +690,7 @@ where
     { NEXT_ROUND == ROUND + 1 },
     { INPUT_LOG == 1 },
     { OUTPUT == 1 },
+    { PAIR_WIDTH == 0 },
     { PAIR_DEPTH == 0 },
 {
     type Query = FriQueryEnd<ROUND>
@@ -695,21 +708,25 @@ impl<
     const ROUND: u32,
     const INPUT_LOG: usize,
     const OUTPUT: usize,
+    const PAIR_WIDTH: usize,
     const PAIR_DEPTH: usize,
     const NEXT_ROUND: u32,
     const NEXT_INPUT_LOG: usize,
     const NEXT_OUTPUT: usize,
+    const NEXT_PAIR_WIDTH: usize,
     const NEXT_PAIR_DEPTH: usize,
     Rest,
 > BabyBearFriQueryShape for FriScheduleFold<
     ROUND,
     INPUT_LOG,
     OUTPUT,
+    PAIR_WIDTH,
     PAIR_DEPTH,
     FriScheduleFold<
         NEXT_ROUND,
         NEXT_INPUT_LOG,
         NEXT_OUTPUT,
+        NEXT_PAIR_WIDTH,
         NEXT_PAIR_DEPTH,
         Rest,
     >,
@@ -718,12 +735,19 @@ where
     { ROUND > 0 },
     { INPUT_LOG > 1 },
     { OUTPUT > 1 },
+    { PAIR_WIDTH + PAIR_WIDTH == OUTPUT },
     { PAIR_DEPTH + 2 == INPUT_LOG },
     { NEXT_ROUND == ROUND + 1 },
     { NEXT_INPUT_LOG + 1 == INPUT_LOG },
     { NEXT_OUTPUT + NEXT_OUTPUT == OUTPUT },
-    FriScheduleFold<NEXT_ROUND, NEXT_INPUT_LOG, NEXT_OUTPUT, NEXT_PAIR_DEPTH, Rest>:
-        BabyBearFriQueryShape,
+    FriScheduleFold<
+        NEXT_ROUND,
+        NEXT_INPUT_LOG,
+        NEXT_OUTPUT,
+        NEXT_PAIR_WIDTH,
+        NEXT_PAIR_DEPTH,
+        Rest,
+    >: BabyBearFriQueryShape,
 {
     type Query = FriQueryFold<
         ROUND,
@@ -732,6 +756,7 @@ where
             NEXT_ROUND,
             NEXT_INPUT_LOG,
             NEXT_OUTPUT,
+            NEXT_PAIR_WIDTH,
             NEXT_PAIR_DEPTH,
             Rest,
         >
@@ -745,6 +770,7 @@ where
             NEXT_ROUND,
             NEXT_INPUT_LOG,
             NEXT_OUTPUT,
+            NEXT_PAIR_WIDTH,
             NEXT_PAIR_DEPTH,
             Rest,
         >
@@ -758,11 +784,217 @@ where
                 NEXT_ROUND,
                 NEXT_INPUT_LOG,
                 NEXT_OUTPUT,
+                NEXT_PAIR_WIDTH,
                 NEXT_PAIR_DEPTH,
                 Rest,
             >
                 as BabyBearFriQueryShape>::invalid_fri_query(),
         }
+    }
+}
+
+/// Open a transcript-selected compact query from a complete codeword proof.
+/// `Complete` and `Query` are two interpretations of the same schedule. The
+/// terminal implementation samples Fiat-Shamir from the final typed
+/// transcript; every recursive implementation opens one schedule-derived pair
+/// and delegates to its tail.
+pub trait BabyBearFriQueryLayers<const QUERY_HALF: usize, Complete>: BabyBearFriQueryShape {
+    fn sample_fri_query(_ complete: Complete) -> FriQueryIndex<1>
+    fn open_fri_query_layers(
+        _ complete: own Complete,
+        _ index: u32,
+    ) -> (bool, <Self as BabyBearFriQueryShape>::Query)
+}
+
+impl<
+    const QUERY_HALF: usize,
+    const ROUND: u32,
+    const INPUT_LOG: usize,
+    const OUTPUT: usize,
+    const PAIR_WIDTH: usize,
+    const PAIR_DEPTH: usize,
+    const NEXT_ROUND: u32,
+> BabyBearFriQueryLayers<QUERY_HALF, FriProofFold<ROUND, OUTPUT, FriProofEnd<NEXT_ROUND>>>
+    for FriScheduleFold<
+    ROUND,
+    INPUT_LOG,
+    OUTPUT,
+    PAIR_WIDTH,
+    PAIR_DEPTH,
+    FriScheduleDone<NEXT_ROUND>,
+>
+where
+    { ROUND > 0 },
+    { ROUND < 100 },
+    { NEXT_ROUND == ROUND + 1 },
+    { INPUT_LOG == 1 },
+    { OUTPUT == 1 },
+    { PAIR_WIDTH == 0 },
+    { PAIR_DEPTH == 0 },
+    QUERY_HALF > 0,
+    { (QUERY_HALF & (QUERY_HALF - 1)) == 0 },
+    { QUERY_HALF <= 134217728 },
+{
+    fn sample_fri_query(
+        _ complete: FriProofFold<ROUND, OUTPUT, FriProofEnd<NEXT_ROUND>>,
+    ) -> FriQueryIndex<1> {
+        let challenge = fri_query_challenge<ROUND, 1>(complete.layer.transcript)
+        fri_query_index_power_of_two<1, QUERY_HALF>(challenge)
+    }
+
+    fn open_fri_query_layers(
+        _ complete: own FriProofFold<ROUND, OUTPUT, FriProofEnd<NEXT_ROUND>>,
+        _ index: u32,
+    ) -> (bool, FriQueryEnd<ROUND>) {
+        if !complete.valid
+            || !complete.layer.valid
+            || !complete.layer.root.valid
+            || !complete.layer.transcript.valid
+            || index != 0 {
+            return (false, <Self as BabyBearFriQueryShape>::invalid_fri_query())
+        }
+        (
+            true,
+            FriQueryEnd {
+                valid: true,
+                root: complete.layer.root,
+                evaluation: complete.layer.evaluations[0],
+            },
+        )
+    }
+}
+
+impl<
+    const QUERY_HALF: usize,
+    const ROUND: u32,
+    const INPUT_LOG: usize,
+    const OUTPUT: usize,
+    const PAIR_WIDTH: usize,
+    const PAIR_DEPTH: usize,
+    const NEXT_ROUND: u32,
+    const NEXT_INPUT_LOG: usize,
+    const NEXT_OUTPUT: usize,
+    const NEXT_PAIR_WIDTH: usize,
+    const NEXT_PAIR_DEPTH: usize,
+    Rest,
+    TailComplete,
+> BabyBearFriQueryLayers<
+    QUERY_HALF,
+    FriProofFold<ROUND, OUTPUT, TailComplete>,
+> for FriScheduleFold<
+    ROUND,
+    INPUT_LOG,
+    OUTPUT,
+    PAIR_WIDTH,
+    PAIR_DEPTH,
+    FriScheduleFold<
+        NEXT_ROUND,
+        NEXT_INPUT_LOG,
+        NEXT_OUTPUT,
+        NEXT_PAIR_WIDTH,
+        NEXT_PAIR_DEPTH,
+        Rest,
+    >,
+>
+where
+    { ROUND > 0 },
+    { ROUND < 100 },
+    { INPUT_LOG > 1 },
+    OUTPUT > 1,
+    OUTPUT <= MAX_PADDED_TRACE_LENGTH,
+    PAIR_WIDTH > 0,
+    { PAIR_WIDTH + PAIR_WIDTH == OUTPUT },
+    { PAIR_DEPTH + 2 == INPUT_LOG },
+    { NEXT_ROUND == ROUND + 1 },
+    { NEXT_INPUT_LOG + 1 == INPUT_LOG },
+    { NEXT_OUTPUT + NEXT_OUTPUT == OUTPUT },
+    FriScheduleFold<
+        NEXT_ROUND,
+        NEXT_INPUT_LOG,
+        NEXT_OUTPUT,
+        NEXT_PAIR_WIDTH,
+        NEXT_PAIR_DEPTH,
+        Rest,
+    >: BabyBearFriQueryLayers<QUERY_HALF, TailComplete>,
+{
+    fn sample_fri_query(
+        _ complete: FriProofFold<ROUND, OUTPUT, TailComplete>,
+    ) -> FriQueryIndex<1> {
+        <FriScheduleFold<
+            NEXT_ROUND,
+            NEXT_INPUT_LOG,
+            NEXT_OUTPUT,
+            NEXT_PAIR_WIDTH,
+            NEXT_PAIR_DEPTH,
+            Rest,
+        > as BabyBearFriQueryLayers<QUERY_HALF, TailComplete>>::sample_fri_query(complete.tail)
+    }
+
+    fn open_fri_query_layers(
+        _ complete: own FriProofFold<ROUND, OUTPUT, TailComplete>,
+        _ index: u32,
+    ) -> (
+        bool,
+        FriQueryFold<
+            ROUND,
+            PAIR_DEPTH,
+            <FriScheduleFold<
+                NEXT_ROUND,
+                NEXT_INPUT_LOG,
+                NEXT_OUTPUT,
+                NEXT_PAIR_WIDTH,
+                NEXT_PAIR_DEPTH,
+                Rest,
+            > as BabyBearFriQueryShape>::Query,
+        >,
+    ) {
+        let half: u32 = PAIR_WIDTH.downcast_truncate()
+        let output: u32 = OUTPUT.downcast_truncate()
+        if !complete.valid
+            || !complete.layer.valid
+            || !complete.layer.root.valid
+            || !complete.layer.transcript.valid
+            || index >= output {
+            return (false, <Self as BabyBearFriQueryShape>::invalid_fri_query())
+        }
+        let pair_index = index & (half - 1)
+        let path = fri_layer_pair_path_power_of_two<
+            ROUND,
+            OUTPUT,
+            PAIR_WIDTH,
+            PAIR_DEPTH,
+        >(complete.layer.evaluations, pair_index)
+        if !path.valid {
+            return (false, <Self as BabyBearFriQueryShape>::invalid_fri_query())
+        }
+        let position: usize = pair_index as usize
+        let tail = <FriScheduleFold<
+            NEXT_ROUND,
+            NEXT_INPUT_LOG,
+            NEXT_OUTPUT,
+            NEXT_PAIR_WIDTH,
+            NEXT_PAIR_DEPTH,
+            Rest,
+        > as BabyBearFriQueryLayers<QUERY_HALF, TailComplete>>::open_fri_query_layers(
+            complete.tail,
+            pair_index,
+        )
+        if !tail.0 {
+            return (false, <Self as BabyBearFriQueryShape>::invalid_fri_query())
+        }
+        (
+            true,
+            FriQueryFold {
+                valid: true,
+                root: complete.layer.root,
+                pair: FriQueryPair {
+                    positive: complete.layer.evaluations[position],
+                    negative: complete.layer.evaluations[position + PAIR_WIDTH],
+                    path: path,
+                },
+                tail: tail.1,
+            },
+        )
     }
 }
 
@@ -1760,43 +1992,24 @@ pub fn open_fri_commitment_query16(
     if !composition_root.valid || !composition_transcript.valid || !complete.valid {
         return invalid_fri_query16()
     }
-    let first_layer = complete.layer
-    let second_layer = complete.tail.layer
-    let third_layer = complete.tail.tail.layer
-    let final_layer = complete.tail.tail.tail.layer
-
-    let query_challenge = fri_query_challenge<4, 1>(final_layer.transcript)
-    let query = fri_query_index_power_of_two<1, 8>(query_challenge)
+    let query = <FriSchedule<1, 4>
+        as BabyBearFriQueryLayers<8, CheckpointFriProof16>>::sample_fri_query(complete)
     if !query.valid { return invalid_fri_query16() }
-    let first_index = query.value & 3
-    let second_index = first_index & 1
 
     let composition_path = composition_pair_path_power_of_two<16, 8, 3>(
         evaluations,
         query.value,
     )
-    let first_path = fri_layer_pair_path_power_of_two<1, 8, 4, 2>(
-        first_layer.evaluations,
-        first_index,
+    let layers = <FriSchedule<1, 4>
+        as BabyBearFriQueryLayers<8, CheckpointFriProof16>>::open_fri_query_layers(
+        complete,
+        query.value,
     )
-    let second_path = fri_layer_pair_path_power_of_two<2, 4, 2, 1>(
-        second_layer.evaluations,
-        second_index,
-    )
-    let third_path = fri_layer_pair_path_power_of_two<3, 2, 1, 0>(
-        third_layer.evaluations,
-        0,
-    )
-    if !composition_path.valid
-        || !first_path.valid
-        || !second_path.valid
-        || !third_path.valid {
+    if !composition_path.valid || !layers.0 {
         return invalid_fri_query16()
     }
 
     let composition_index: usize = query.value as usize
-    let first_position: usize = first_index as usize
-    let second_position: usize = second_index as usize
     FriCommitmentQuery16 {
         valid: true,
         composition_root: composition_root,
@@ -1806,38 +2019,7 @@ pub fn open_fri_commitment_query16(
             negative: evaluations[composition_index + 8],
             path: composition_path,
         },
-        layers: FriQueryFold {
-            valid: true,
-            root: first_layer.root,
-            pair: FriQueryPair {
-                positive: first_layer.evaluations[first_position],
-                negative: first_layer.evaluations[first_position + 4],
-                path: first_path,
-            },
-            tail: FriQueryFold {
-                valid: true,
-                root: second_layer.root,
-                pair: FriQueryPair {
-                    positive: second_layer.evaluations[second_position],
-                    negative: second_layer.evaluations[second_position + 2],
-                    path: second_path,
-                },
-                tail: FriQueryFold {
-                    valid: true,
-                    root: third_layer.root,
-                    pair: FriQueryPair {
-                        positive: third_layer.evaluations[0],
-                        negative: third_layer.evaluations[1],
-                        path: third_path,
-                    },
-                    tail: FriQueryEnd {
-                        valid: true,
-                        root: final_layer.root,
-                        evaluation: final_layer.evaluations[0],
-                    },
-                },
-            },
-        },
+        layers: layers.1,
     }
 }
 
