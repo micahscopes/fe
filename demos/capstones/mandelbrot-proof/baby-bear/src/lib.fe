@@ -1015,10 +1015,10 @@ const fn fri_composition_query_depth(_ input_log: usize) -> usize {
     if input_log == 0 { 0 } else { input_log - 1 }
 }
 
-pub type FriCommitmentQuery16 = FriCommitmentQuery<
-    {fri_composition_query_depth(4)},
-    <FriSchedule<1, 4> as BabyBearFriQueryShape>::Query,
->
+pub type CheckpointFriQueryLayers16 =
+    <FriSchedule<1, 4> as BabyBearFriQueryShape>::Query
+pub type FriCommitmentQuery16 =
+    FriCommitmentQuery<{fri_composition_query_depth(4)}, CheckpointFriQueryLayers16>
 
 struct DigestNodeHasher {}
 impl TwoToOneHasher<Poseidon2Digest> for DigestNodeHasher {
@@ -2036,150 +2036,532 @@ where N > 0, N > 1, { (N & (N - 1)) == 0 }
     fold_fri_evaluations<2, 1>([positive, negative], challenge, point)
 }
 
+/// Verify and replay every layer after the first FRI commitment. The query
+/// carrier type is supplied explicitly so method arguments remain ordinary
+/// types while the schedule still selects the only valid implementation.
+pub trait BabyBearFriQueryVerifyTail<
+    const PREVIOUS: u32,
+    const INPUT: usize,
+    const QUERY_HALF: usize,
+    Layers,
+> {
+    fn sample_fri_query_tail(
+        _ transcript: own FriLayerTranscriptDigest<PREVIOUS>,
+        _ layers: Layers,
+    ) -> FriQueryIndex<1>
+    fn verify_fri_query_tail(
+        _ positive: BabyBearExt4,
+        _ negative: BabyBearExt4,
+        _ index: u32,
+        _ transcript: own FriLayerTranscriptDigest<PREVIOUS>,
+        _ shift: BabyBear,
+        _ layers: own Layers,
+    ) -> bool
+}
+
+impl<
+    const PREVIOUS: u32,
+    const INPUT: usize,
+    const QUERY_HALF: usize,
+    const ROUND: u32,
+    const INPUT_LOG: usize,
+    const OUTPUT: usize,
+    const PAIR_WIDTH: usize,
+    const PAIR_DEPTH: usize,
+    const NEXT_ROUND: u32,
+> BabyBearFriQueryVerifyTail<PREVIOUS, INPUT, QUERY_HALF, FriQueryEnd<ROUND>>
+    for FriScheduleFold<
+    ROUND,
+    INPUT_LOG,
+    OUTPUT,
+    PAIR_WIDTH,
+    PAIR_DEPTH,
+    FriScheduleDone<NEXT_ROUND>,
+>
+where
+    { PREVIOUS > 0 },
+    { ROUND == PREVIOUS + 1 },
+    { ROUND < 100 },
+    INPUT > 0,
+    INPUT > 1,
+    { (INPUT & (INPUT - 1)) == 0 },
+    { OUTPUT + OUTPUT == INPUT },
+    { INPUT_LOG == 1 },
+    { OUTPUT == 1 },
+    { PAIR_WIDTH == 0 },
+    { PAIR_DEPTH == 0 },
+    { NEXT_ROUND == ROUND + 1 },
+    QUERY_HALF > 0,
+    { (QUERY_HALF & (QUERY_HALF - 1)) == 0 },
+    { QUERY_HALF <= 134217728 },
+{
+    fn sample_fri_query_tail(
+        _ transcript: own FriLayerTranscriptDigest<PREVIOUS>,
+        _ layers: FriQueryEnd<ROUND>,
+    ) -> FriQueryIndex<1> {
+        if !layers.valid || !layers.root.valid {
+            return FriQueryIndex<1> { valid: false, value: 0 }
+        }
+        let next_transcript = bind_next_fri_layer<PREVIOUS, ROUND>(transcript, layers.root)
+        let challenge = fri_query_challenge<ROUND, 1>(next_transcript)
+        fri_query_index_power_of_two<1, QUERY_HALF>(challenge)
+    }
+
+    fn verify_fri_query_tail(
+        _ positive: BabyBearExt4,
+        _ negative: BabyBearExt4,
+        _ index: u32,
+        _ transcript: own FriLayerTranscriptDigest<PREVIOUS>,
+        _ shift: BabyBear,
+        _ layers: own FriQueryEnd<ROUND>,
+    ) -> bool {
+        if !transcript.valid
+            || shift.is_zero()
+            || !layers.valid
+            || !layers.root.valid
+            || index != 0 {
+            return false
+        }
+        let challenge = next_fri_fold_challenge<PREVIOUS, ROUND>(transcript)
+        let folded = fold_fri_pair_at<INPUT>(positive, negative, challenge.value, shift, index)
+        let commitment = fri_layer_row_commitment<ROUND>(layers.evaluation)
+        let next_transcript = bind_next_fri_layer<PREVIOUS, ROUND>(transcript, layers.root)
+        challenge.valid
+            && folded.valid
+            && commitment.valid
+            && next_transcript.valid
+            && folded.evaluations[0].equals(layers.evaluation)
+            && commitment.value.equals(layers.root.value)
+    }
+}
+
+impl<
+    const PREVIOUS: u32,
+    const INPUT: usize,
+    const QUERY_HALF: usize,
+    const ROUND: u32,
+    const INPUT_LOG: usize,
+    const OUTPUT: usize,
+    const PAIR_WIDTH: usize,
+    const PAIR_DEPTH: usize,
+    const NEXT_ROUND: u32,
+    const NEXT_INPUT_LOG: usize,
+    const NEXT_OUTPUT: usize,
+    const NEXT_PAIR_WIDTH: usize,
+    const NEXT_PAIR_DEPTH: usize,
+    Rest,
+    TailLayers,
+> BabyBearFriQueryVerifyTail<
+    PREVIOUS,
+    INPUT,
+    QUERY_HALF,
+    FriQueryFold<ROUND, PAIR_DEPTH, TailLayers>,
+> for FriScheduleFold<
+    ROUND,
+    INPUT_LOG,
+    OUTPUT,
+    PAIR_WIDTH,
+    PAIR_DEPTH,
+    FriScheduleFold<
+        NEXT_ROUND,
+        NEXT_INPUT_LOG,
+        NEXT_OUTPUT,
+        NEXT_PAIR_WIDTH,
+        NEXT_PAIR_DEPTH,
+        Rest,
+    >,
+>
+where
+    { PREVIOUS > 0 },
+    { ROUND == PREVIOUS + 1 },
+    { ROUND < 100 },
+    INPUT > 0,
+    INPUT > 1,
+    { (INPUT & (INPUT - 1)) == 0 },
+    { OUTPUT + OUTPUT == INPUT },
+    { INPUT_LOG > 1 },
+    OUTPUT > 1,
+    PAIR_WIDTH > 0,
+    { PAIR_WIDTH + PAIR_WIDTH == OUTPUT },
+    { PAIR_DEPTH + 2 == INPUT_LOG },
+    { NEXT_ROUND == ROUND + 1 },
+    { NEXT_INPUT_LOG + 1 == INPUT_LOG },
+    { NEXT_OUTPUT + NEXT_OUTPUT == OUTPUT },
+    FriScheduleFold<
+        NEXT_ROUND,
+        NEXT_INPUT_LOG,
+        NEXT_OUTPUT,
+        NEXT_PAIR_WIDTH,
+        NEXT_PAIR_DEPTH,
+        Rest,
+    >: BabyBearFriQueryVerifyTail<ROUND, OUTPUT, QUERY_HALF, TailLayers>,
+{
+    fn sample_fri_query_tail(
+        _ transcript: own FriLayerTranscriptDigest<PREVIOUS>,
+        _ layers: FriQueryFold<ROUND, PAIR_DEPTH, TailLayers>,
+    ) -> FriQueryIndex<1> {
+        if !layers.valid || !layers.root.valid {
+            return FriQueryIndex<1> { valid: false, value: 0 }
+        }
+        let next_transcript = bind_next_fri_layer<PREVIOUS, ROUND>(transcript, layers.root)
+        <FriScheduleFold<
+            NEXT_ROUND,
+            NEXT_INPUT_LOG,
+            NEXT_OUTPUT,
+            NEXT_PAIR_WIDTH,
+            NEXT_PAIR_DEPTH,
+            Rest,
+        > as BabyBearFriQueryVerifyTail<
+            ROUND,
+            OUTPUT,
+            QUERY_HALF,
+            TailLayers,
+        >>::sample_fri_query_tail(next_transcript, layers.tail)
+    }
+
+    fn verify_fri_query_tail(
+        _ positive: BabyBearExt4,
+        _ negative: BabyBearExt4,
+        _ index: u32,
+        _ transcript: own FriLayerTranscriptDigest<PREVIOUS>,
+        _ shift: BabyBear,
+        _ layers: own FriQueryFold<ROUND, PAIR_DEPTH, TailLayers>,
+    ) -> bool {
+        let output: u32 = OUTPUT.downcast_truncate()
+        let pair_width: u32 = PAIR_WIDTH.downcast_truncate()
+        if !transcript.valid
+            || shift.is_zero()
+            || !layers.valid
+            || !layers.root.valid
+            || index >= output {
+            return false
+        }
+        let pair_index = index & (pair_width - 1)
+        if layers.pair.path.index != pair_index
+            || !verify_fri_layer_pair_path<ROUND, PAIR_DEPTH>(
+                layers.pair.positive,
+                layers.pair.negative,
+                layers.pair.path,
+                layers.root,
+            ) {
+            return false
+        }
+        let challenge = next_fri_fold_challenge<PREVIOUS, ROUND>(transcript)
+        let folded = fold_fri_pair_at<INPUT>(positive, negative, challenge.value, shift, index)
+        let expected = if index < pair_width {
+            layers.pair.positive
+        } else {
+            layers.pair.negative
+        }
+        let next_transcript = bind_next_fri_layer<PREVIOUS, ROUND>(transcript, layers.root)
+        if !challenge.valid
+            || !folded.valid
+            || !next_transcript.valid
+            || !folded.evaluations[0].equals(expected) {
+            return false
+        }
+        <FriScheduleFold<
+            NEXT_ROUND,
+            NEXT_INPUT_LOG,
+            NEXT_OUTPUT,
+            NEXT_PAIR_WIDTH,
+            NEXT_PAIR_DEPTH,
+            Rest,
+        > as BabyBearFriQueryVerifyTail<
+            ROUND,
+            OUTPUT,
+            QUERY_HALF,
+            TailLayers,
+        >>::verify_fri_query_tail(
+            layers.pair.positive,
+            layers.pair.negative,
+            pair_index,
+            next_transcript,
+            shift.square(),
+            layers.tail,
+        )
+    }
+}
+
+/// Verify the first schedule node against the composition pair, then delegate
+/// the remaining round chain to `BabyBearFriQueryVerifyTail`.
+pub trait BabyBearFriQueryVerifyFirst<
+    const INPUT: usize,
+    const QUERY_HALF: usize,
+    const COMPOSITION_DEPTH: usize,
+    Layers,
+> {
+    fn sample_fri_query_from_composition(
+        _ transcript: own CompositionTranscriptDigest,
+        _ layers: Layers,
+    ) -> FriQueryIndex<1>
+    fn verify_fri_query_from_composition(
+        _ composition: own CompositionQueryPair<COMPOSITION_DEPTH>,
+        _ index: u32,
+        _ transcript: own CompositionTranscriptDigest,
+        _ shift: BabyBear,
+        _ layers: own Layers,
+    ) -> bool
+}
+
+impl<
+    const INPUT: usize,
+    const QUERY_HALF: usize,
+    const COMPOSITION_DEPTH: usize,
+    const OUTPUT: usize,
+    const PAIR_WIDTH: usize,
+    const PAIR_DEPTH: usize,
+    const NEXT_ROUND: u32,
+> BabyBearFriQueryVerifyFirst<INPUT, QUERY_HALF, COMPOSITION_DEPTH, FriQueryEnd<1>>
+    for FriScheduleFold<1, 1, OUTPUT, PAIR_WIDTH, PAIR_DEPTH, FriScheduleDone<NEXT_ROUND>>
+where
+    INPUT > 0,
+    INPUT > 1,
+    { (INPUT & (INPUT - 1)) == 0 },
+    { OUTPUT + OUTPUT == INPUT },
+    { OUTPUT == 1 },
+    { PAIR_WIDTH == 0 },
+    { PAIR_DEPTH == 0 },
+    { NEXT_ROUND == 2 },
+    QUERY_HALF > 0,
+    { (QUERY_HALF & (QUERY_HALF - 1)) == 0 },
+    { QUERY_HALF <= 134217728 },
+{
+    fn sample_fri_query_from_composition(
+        _ transcript: own CompositionTranscriptDigest,
+        _ layers: FriQueryEnd<1>,
+    ) -> FriQueryIndex<1> {
+        if !layers.valid || !layers.root.valid {
+            return FriQueryIndex<1> { valid: false, value: 0 }
+        }
+        let first_transcript = bind_first_fri_layer(transcript, layers.root)
+        let challenge = fri_query_challenge<1, 1>(first_transcript)
+        fri_query_index_power_of_two<1, QUERY_HALF>(challenge)
+    }
+
+    fn verify_fri_query_from_composition(
+        _ composition: own CompositionQueryPair<COMPOSITION_DEPTH>,
+        _ index: u32,
+        _ transcript: own CompositionTranscriptDigest,
+        _ shift: BabyBear,
+        _ layers: own FriQueryEnd<1>,
+    ) -> bool {
+        if !transcript.valid
+            || shift.is_zero()
+            || !layers.valid
+            || !layers.root.valid
+            || index != 0 {
+            return false
+        }
+        let challenge = fri_fold_challenge(transcript)
+        let folded = fold_fri_pair_at<INPUT>(
+            composition.positive,
+            composition.negative,
+            challenge.value,
+            shift,
+            index,
+        )
+        let commitment = fri_layer_row_commitment<1>(layers.evaluation)
+        let first_transcript = bind_first_fri_layer(transcript, layers.root)
+        challenge.valid
+            && folded.valid
+            && commitment.valid
+            && first_transcript.valid
+            && folded.evaluations[0].equals(layers.evaluation)
+            && commitment.value.equals(layers.root.value)
+    }
+}
+
+impl<
+    const INPUT: usize,
+    const QUERY_HALF: usize,
+    const COMPOSITION_DEPTH: usize,
+    const INPUT_LOG: usize,
+    const OUTPUT: usize,
+    const PAIR_WIDTH: usize,
+    const PAIR_DEPTH: usize,
+    const NEXT_ROUND: u32,
+    const NEXT_INPUT_LOG: usize,
+    const NEXT_OUTPUT: usize,
+    const NEXT_PAIR_WIDTH: usize,
+    const NEXT_PAIR_DEPTH: usize,
+    Rest,
+    TailLayers,
+> BabyBearFriQueryVerifyFirst<
+    INPUT,
+    QUERY_HALF,
+    COMPOSITION_DEPTH,
+    FriQueryFold<1, PAIR_DEPTH, TailLayers>,
+> for FriScheduleFold<
+    1,
+    INPUT_LOG,
+    OUTPUT,
+    PAIR_WIDTH,
+    PAIR_DEPTH,
+    FriScheduleFold<
+        NEXT_ROUND,
+        NEXT_INPUT_LOG,
+        NEXT_OUTPUT,
+        NEXT_PAIR_WIDTH,
+        NEXT_PAIR_DEPTH,
+        Rest,
+    >,
+>
+where
+    INPUT > 0,
+    INPUT > 1,
+    { (INPUT & (INPUT - 1)) == 0 },
+    { OUTPUT + OUTPUT == INPUT },
+    { INPUT_LOG > 1 },
+    OUTPUT > 1,
+    PAIR_WIDTH > 0,
+    { PAIR_WIDTH + PAIR_WIDTH == OUTPUT },
+    { PAIR_DEPTH + 2 == INPUT_LOG },
+    { NEXT_ROUND == 2 },
+    { NEXT_INPUT_LOG + 1 == INPUT_LOG },
+    { NEXT_OUTPUT + NEXT_OUTPUT == OUTPUT },
+    FriScheduleFold<
+        NEXT_ROUND,
+        NEXT_INPUT_LOG,
+        NEXT_OUTPUT,
+        NEXT_PAIR_WIDTH,
+        NEXT_PAIR_DEPTH,
+        Rest,
+    >: BabyBearFriQueryVerifyTail<1, OUTPUT, QUERY_HALF, TailLayers>,
+{
+    fn sample_fri_query_from_composition(
+        _ transcript: own CompositionTranscriptDigest,
+        _ layers: FriQueryFold<1, PAIR_DEPTH, TailLayers>,
+    ) -> FriQueryIndex<1> {
+        if !layers.valid || !layers.root.valid {
+            return FriQueryIndex<1> { valid: false, value: 0 }
+        }
+        let first_transcript = bind_first_fri_layer(transcript, layers.root)
+        <FriScheduleFold<
+            NEXT_ROUND,
+            NEXT_INPUT_LOG,
+            NEXT_OUTPUT,
+            NEXT_PAIR_WIDTH,
+            NEXT_PAIR_DEPTH,
+            Rest,
+        > as BabyBearFriQueryVerifyTail<
+            1,
+            OUTPUT,
+            QUERY_HALF,
+            TailLayers,
+        >>::sample_fri_query_tail(first_transcript, layers.tail)
+    }
+
+    fn verify_fri_query_from_composition(
+        _ composition: own CompositionQueryPair<COMPOSITION_DEPTH>,
+        _ index: u32,
+        _ transcript: own CompositionTranscriptDigest,
+        _ shift: BabyBear,
+        _ layers: own FriQueryFold<1, PAIR_DEPTH, TailLayers>,
+    ) -> bool {
+        let output: u32 = OUTPUT.downcast_truncate()
+        let pair_width: u32 = PAIR_WIDTH.downcast_truncate()
+        if !transcript.valid
+            || shift.is_zero()
+            || !layers.valid
+            || !layers.root.valid
+            || index >= output {
+            return false
+        }
+        let pair_index = index & (pair_width - 1)
+        if layers.pair.path.index != pair_index
+            || !verify_fri_layer_pair_path<1, PAIR_DEPTH>(
+                layers.pair.positive,
+                layers.pair.negative,
+                layers.pair.path,
+                layers.root,
+            ) {
+            return false
+        }
+        let challenge = fri_fold_challenge(transcript)
+        let folded = fold_fri_pair_at<INPUT>(
+            composition.positive,
+            composition.negative,
+            challenge.value,
+            shift,
+            index,
+        )
+        let expected = if index < pair_width {
+            layers.pair.positive
+        } else {
+            layers.pair.negative
+        }
+        let first_transcript = bind_first_fri_layer(transcript, layers.root)
+        if !challenge.valid
+            || !folded.valid
+            || !first_transcript.valid
+            || !folded.evaluations[0].equals(expected) {
+            return false
+        }
+        <FriScheduleFold<
+            NEXT_ROUND,
+            NEXT_INPUT_LOG,
+            NEXT_OUTPUT,
+            NEXT_PAIR_WIDTH,
+            NEXT_PAIR_DEPTH,
+            Rest,
+        > as BabyBearFriQueryVerifyTail<
+            1,
+            OUTPUT,
+            QUERY_HALF,
+            TailLayers,
+        >>::verify_fri_query_tail(
+            layers.pair.positive,
+            layers.pair.negative,
+            pair_index,
+            first_transcript,
+            shift.square(),
+            layers.tail,
+        )
+    }
+}
+
 pub fn verify_fri_commitment_query16(
     _ air_transcript: own AirLdeTranscriptDigest,
     _ shift: BabyBear,
     _ proof: own FriCommitmentQuery16,
 ) -> bool {
-    let first = proof.layers
-    let second = first.tail
-    let third = second.tail
-    let final_layer = third.tail
     if !air_transcript.valid
         || shift.is_zero()
         || !proof.valid
-        || !proof.composition_root.valid
-        || !first.valid
-        || !first.root.valid
-        || !second.valid
-        || !second.root.valid
-        || !third.valid
-        || !third.root.valid
-        || !final_layer.valid
-        || !final_layer.root.valid {
+        || !proof.composition_root.valid {
         return false
     }
 
     let composition_transcript = bind_composition(air_transcript, proof.composition_root)
-    let first_challenge = fri_fold_challenge(composition_transcript)
-    let first_transcript = bind_first_fri_layer(composition_transcript, first.root)
-    let second_challenge = next_fri_fold_challenge<1, 2>(first_transcript)
-    let second_transcript = bind_next_fri_layer<1, 2>(first_transcript, second.root)
-    let third_challenge = next_fri_fold_challenge<2, 3>(second_transcript)
-    let third_transcript = bind_next_fri_layer<2, 3>(second_transcript, third.root)
-    let fourth_challenge = next_fri_fold_challenge<3, 4>(third_transcript)
-    let fourth_transcript = bind_next_fri_layer<3, 4>(third_transcript, final_layer.root)
-    let query_challenge = fri_query_challenge<4, 1>(fourth_transcript)
-    let query = fri_query_index_power_of_two<1, 8>(query_challenge)
+    let query = <FriSchedule<1, 4> as BabyBearFriQueryVerifyFirst<
+        16,
+        8,
+        3,
+        CheckpointFriQueryLayers16,
+    >>::sample_fri_query_from_composition(composition_transcript, proof.layers)
     if !composition_transcript.valid
-        || !first_challenge.valid
-        || !first_transcript.valid
-        || !second_challenge.valid
-        || !second_transcript.valid
-        || !third_challenge.valid
-        || !third_transcript.valid
-        || !fourth_challenge.valid
-        || !fourth_transcript.valid
-        || !query.valid {
-        return false
-    }
-    let first_index = query.value & 3
-    let second_index = first_index & 1
-    if proof.query_index != query.value
+        || !query.valid
+        || proof.query_index != query.value
         || proof.composition.path.index != query.value
-        || first.pair.path.index != first_index
-        || second.pair.path.index != second_index
-        || third.pair.path.index != 0 {
-        return false
-    }
-
-    if !verify_composition_pair_path<3>(
+        || !verify_composition_pair_path<3>(
             proof.composition.positive,
             proof.composition.negative,
             proof.composition.path,
             proof.composition_root,
-        )
-        || !verify_fri_layer_pair_path<1, 2>(
-            first.pair.positive,
-            first.pair.negative,
-            first.pair.path,
-            first.root,
-        )
-        || !verify_fri_layer_pair_path<2, 1>(
-            second.pair.positive,
-            second.pair.negative,
-            second.pair.path,
-            second.root,
-        )
-        || !verify_fri_layer_pair_path<3, 0>(
-            third.pair.positive,
-            third.pair.negative,
-            third.pair.path,
-            third.root,
         ) {
         return false
     }
-    let final_commitment = fri_layer_row_commitment<4>(final_layer.evaluation)
-    if !final_commitment.value.equals(final_layer.root.value) {
-        return false
-    }
-
-    let first_fold = fold_fri_pair_at<16>(
-        proof.composition.positive,
-        proof.composition.negative,
-        first_challenge.value,
-        shift,
+    <FriSchedule<1, 4> as BabyBearFriQueryVerifyFirst<
+        16,
+        8,
+        3,
+        CheckpointFriQueryLayers16,
+    >>::verify_fri_query_from_composition(
+        proof.composition,
         query.value,
+        composition_transcript,
+        shift,
+        proof.layers,
     )
-    let expected_first = if query.value < 4 {
-        first.pair.positive
-    } else {
-        first.pair.negative
-    }
-    if !first_fold.valid || !first_fold.evaluations[0].equals(expected_first) {
-        return false
-    }
-
-    let shift2 = shift.square()
-    let second_fold = fold_fri_pair_at<8>(
-        first.pair.positive,
-        first.pair.negative,
-        second_challenge.value,
-        shift2,
-        first_index,
-    )
-    let expected_second = if first_index < 2 {
-        second.pair.positive
-    } else {
-        second.pair.negative
-    }
-    if !second_fold.valid || !second_fold.evaluations[0].equals(expected_second) {
-        return false
-    }
-
-    let shift3 = shift2.square()
-    let third_fold = fold_fri_pair_at<4>(
-        second.pair.positive,
-        second.pair.negative,
-        third_challenge.value,
-        shift3,
-        second_index,
-    )
-    let expected_third = if second_index == 0 {
-        third.pair.positive
-    } else {
-        third.pair.negative
-    }
-    if !third_fold.valid || !third_fold.evaluations[0].equals(expected_third) {
-        return false
-    }
-
-    let final_fold = fold_fri_pair_at<2>(
-        third.pair.positive,
-        third.pair.negative,
-        fourth_challenge.value,
-        shift3.square(),
-        0,
-    )
-    final_fold.valid && final_fold.evaluations[0].equals(final_layer.evaluation)
 }
