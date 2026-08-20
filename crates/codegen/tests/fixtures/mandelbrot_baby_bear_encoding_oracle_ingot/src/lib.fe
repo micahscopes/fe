@@ -57,6 +57,29 @@ use mandelbrot_proof_kernel::{
 use poseidon_baby_bear::Poseidon2Digest
 use precision::baby_bear::{BabyBear, BabyBearExt4}
 
+fn schedule_words<S: mandelbrot_proof_air_core::FriScheduleShape>() -> (
+    u32, u32, u32, u32, u32, u32, u32,
+) {
+    let metadata = <S as mandelbrot_proof_air_core::FriScheduleShape>::fri_schedule_metadata()
+    (
+        metadata.rounds,
+        metadata.first_round,
+        metadata.next_round,
+        metadata.input_log,
+        metadata.folded_evaluations,
+        metadata.layer_pair_openings,
+        metadata.layer_path_siblings_per_side,
+    )
+}
+
+pub fn fri_schedule16_metadata() -> (u32, u32, u32, u32, u32, u32, u32) {
+    schedule_words<mandelbrot_proof_air_core::FriSchedule<1, 4>>()
+}
+
+pub fn fri_schedule64_metadata() -> (u32, u32, u32, u32, u32, u32, u32) {
+    schedule_words<mandelbrot_proof_air_core::FriSchedule<3, 6>>()
+}
+
 fn geometry_words(_ geometry: mandelbrot_proof_air_core::Radix2QueryGeometry) -> (
     u32, u32, u32, u32, u32, u32,
 ) {

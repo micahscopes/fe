@@ -53,6 +53,140 @@ pub struct Radix2QueryGeometry {
 }
 impl Copy for Radix2QueryGeometry {}
 
+/// The terminal of a compile-time FRI fold schedule. `NEXT_ROUND` is the first
+/// round number after the schedule, so a schedule starting at round one with
+/// four folds terminates at `FriScheduleDone<5>`.
+pub struct FriScheduleDone<const NEXT_ROUND: usize> {}
+impl<const NEXT_ROUND: usize> Copy for FriScheduleDone<NEXT_ROUND> {}
+
+/// One binary fold in a compile-time FRI schedule. `INPUT_LOG` describes the
+/// codeword before this fold; its committed output therefore has
+/// `2^(INPUT_LOG - 1)` evaluations. `Tail` is derived, not selected manually.
+pub struct FriScheduleFold<const ROUND: usize, const INPUT_LOG: usize, Tail> {}
+impl<const ROUND: usize, const INPUT_LOG: usize, Tail> Copy for FriScheduleFold<
+    ROUND,
+    INPUT_LOG,
+    Tail,
+> {}
+
+/// Derive the complete binary FRI fold schedule from the initial round and the
+/// logarithm of the input domain. This is the protocol-shape source of truth:
+///
+///   FriSchedule<1, 4>
+///     = Fold<1, 4, Fold<2, 3, Fold<3, 2, Fold<4, 1, Done<5>>>>>
+///
+/// Later interpreters attach field values, commitments, authenticated query
+/// pairs, scalar execution, or a WebGPU placement to this same structure.
+const fn fri_schedule_next_round(
+    _ first_round: usize,
+    _ total_log: usize,
+) -> usize {
+    first_round + total_log
+}
+
+const fn fri_schedule_round(
+    _ first_round: usize,
+    _ total_log: usize,
+    _ remaining_log: usize,
+) -> usize {
+    first_round + total_log - remaining_log
+}
+
+pub recursive type fn FriScheduleSteps<
+    const FIRST_ROUND: usize,
+    const TOTAL_LOG: usize,
+    const REMAINING_LOG: usize,
+>() -> (*) {
+    match REMAINING_LOG {
+        0 => FriScheduleDone<{
+            fri_schedule_next_round(FIRST_ROUND, TOTAL_LOG)
+        }>
+        _ => FriScheduleFold<
+            {fri_schedule_round(FIRST_ROUND, TOTAL_LOG, REMAINING_LOG)},
+            REMAINING_LOG,
+            FriScheduleSteps<FIRST_ROUND, TOTAL_LOG, {REMAINING_LOG - 1}>,
+        >
+    }
+}
+
+pub type FriSchedule<const FIRST_ROUND: usize, const INPUT_LOG: usize> =
+    FriScheduleSteps<FIRST_ROUND, INPUT_LOG, INPUT_LOG>
+
+/// Runtime evidence produced by structurally interpreting `FriSchedule`.
+/// Counts are per query and per side where stated. Roots and field/domain tags
+/// remain pinned protocol choices; all geometry here is compiler-derived.
+pub struct FriScheduleMetadata {
+    pub rounds: u32,
+    pub first_round: u32,
+    pub next_round: u32,
+    pub input_log: u32,
+    pub folded_evaluations: u32,
+    pub layer_pair_openings: u32,
+    pub layer_path_siblings_per_side: u32,
+}
+impl Copy for FriScheduleMetadata {}
+
+const fn fri_schedule_power_of_two(_ log: usize) -> u32 {
+    let mut value: u32 = 1
+    let mut cursor: usize = 0
+    while cursor < log {
+        value = value << 1
+        cursor = cursor + 1
+    }
+    value
+}
+
+/// A structural interpretation of the field-neutral FRI schedule. Implemented
+/// once for the two schedule constructors, so changing the input domain changes
+/// the result by type normalization rather than by editing a round list.
+pub trait FriScheduleShape {
+    const fn fri_schedule_metadata() -> FriScheduleMetadata
+}
+
+impl<const NEXT_ROUND: usize> FriScheduleShape for FriScheduleDone<NEXT_ROUND> {
+    const fn fri_schedule_metadata() -> FriScheduleMetadata {
+        FriScheduleMetadata {
+            rounds: 0,
+            first_round: NEXT_ROUND.downcast_truncate(),
+            next_round: NEXT_ROUND.downcast_truncate(),
+            input_log: 0,
+            folded_evaluations: 0,
+            layer_pair_openings: 0,
+            layer_path_siblings_per_side: 0,
+        }
+    }
+}
+
+impl<
+    const ROUND: usize,
+    const INPUT_LOG: usize,
+    Tail: FriScheduleShape,
+> FriScheduleShape for FriScheduleFold<ROUND, INPUT_LOG, Tail> {
+    const fn fri_schedule_metadata() -> FriScheduleMetadata {
+        let tail = <Tail as FriScheduleShape>::fri_schedule_metadata()
+        let has_pair: u32 = if INPUT_LOG > 1 { 1 } else { 0 }
+        let path_depth: u32 = if INPUT_LOG > 1 {
+            (INPUT_LOG - 2).downcast_truncate()
+        } else {
+            0
+        }
+        FriScheduleMetadata {
+            rounds: tail.rounds + 1,
+            first_round: ROUND.downcast_truncate(),
+            next_round: tail.next_round,
+            input_log: INPUT_LOG.downcast_truncate(),
+            folded_evaluations: tail.folded_evaluations
+                + if INPUT_LOG > 0 {
+                    fri_schedule_power_of_two(INPUT_LOG - 1)
+                } else {
+                    0
+                },
+            layer_pair_openings: tail.layer_pair_openings + has_pair,
+            layer_path_siblings_per_side: tail.layer_path_siblings_per_side + path_depth,
+        }
+    }
+}
+
 struct AirRow<F: Radix2Field> {
     active: F,
     terminal: F,

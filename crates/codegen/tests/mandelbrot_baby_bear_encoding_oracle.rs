@@ -752,6 +752,30 @@ fn expected_auxiliary(row: &[u32; 17]) -> Option<Vec<u32>> {
     Some(result)
 }
 
+fn reference_fri_schedule(first_round: u32, input_log: u32) -> Vec<u32> {
+    let mut folded_evaluations = 0u32;
+    let mut layer_pair_openings = 0u32;
+    let mut layer_path_siblings_per_side = 0u32;
+    let mut remaining_log = input_log;
+    while remaining_log != 0 {
+        folded_evaluations += 1 << (remaining_log - 1);
+        if remaining_log > 1 {
+            layer_pair_openings += 1;
+            layer_path_siblings_per_side += remaining_log - 2;
+        }
+        remaining_log -= 1;
+    }
+    vec![
+        input_log,
+        first_round,
+        first_round + input_log,
+        input_log,
+        folded_evaluations,
+        layer_pair_openings,
+        layer_path_siblings_per_side,
+    ]
+}
+
 #[test]
 fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
     let bytes = compile_wasm();
@@ -764,6 +788,17 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
     let mut store = wasmtime::Store::new(&engine, ());
     let instance = wasmtime::Instance::new(&mut store, &module, &[])
         .expect("encoding module should instantiate");
+
+    assert_eq!(
+        call(&mut store, &instance, "fri_schedule16_metadata", &[], 7),
+        reference_fri_schedule(1, 4),
+        "Fe-derived 16-point FRI schedule differs from the independent recurrence",
+    );
+    assert_eq!(
+        call(&mut store, &instance, "fri_schedule64_metadata", &[], 7),
+        reference_fri_schedule(3, 6),
+        "Fe-derived 64-point FRI schedule differs from the independent recurrence",
+    );
 
     for query_index in [0, 3, 4, 7, 8] {
         assert_eq!(
