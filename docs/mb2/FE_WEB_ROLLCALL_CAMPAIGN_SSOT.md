@@ -657,13 +657,28 @@ Legend:
   independent BN254 bigint composition, authenticated FRI, canonical receipt,
   and mutation gate passed 1/1 in 2,205.48 seconds. An opt-in AIR-only edit
   slice retains all coset-point independent parity checks, while the complete
-  receipt remains the default authoritative gate. This lands the compact
-  authentication shape and field-neutral AIR engine, not yet their BabyBear
-  composition: production BabyBear LDE row derivation and an
-  `AirColumnView<BabyBearExt4>` over authenticated quartet rows must now bind
-  the recomputed positive and negative composition values into the FRI query.
-  Multiple query sampling, the BabyBear receipt codec, and end-to-end proof
-  verification also remain pending.
+  receipt remains the default authoritative gate. Commit `04533f5cf` now
+  interprets the same 708 constraints over `BabyBearExt4` through an
+  `AirColumnView<BabyBearExt4>` backed by authenticated base-field main and
+  auxiliary rows. `composition_value<F, TRACE>` derives every trace-domain
+  zerofier from its field and compile-time trace size, while
+  `radix2_query_geometry<TRACE, LDE>` derives the next-row stride, negative
+  offset, and local query position from one transcript-selected index. The
+  checkpoint verifier authenticates the four required LDE rows and binds its
+  independently recomputed positive and negative AIR composition values to
+  the opened FRI pair. Its zero-import Wasm gate reconstructs the quartic
+  arithmetic and every constraint family independently, executes the geometry
+  at both 4-by-16 and 8-by-64 sizes, and rejects eleven mutations plus an
+  out-of-domain query. The final gate passed 1/1 in 49.47 seconds. Fixed
+  4-by-16 values now occur only at checkpoint instantiations, not in reusable
+  production function signatures. Production BabyBear LDE row generation
+  from the canonical trace, multiple query sampling, the canonical BabyBear
+  receipt codec, and end-to-end verification remain pending. The explicitly
+  named `Checkpoint4AirLdeOpening` and current manually enumerated 16-to-1 FRI
+  receipt are test checkpoints, not the recursive production API. Their
+  replacement must be derived from one FCO/CTFE protocol description,
+  including the sparse Merkle multiproof topology, before the GPU and
+  recursive paths can make those shapes costly to change.
   The same permutation has also
   lowered to Naga-valid u32-only WGSL with the local Sonatina conditional-loop
   structurizer fixes, but that browser gate is not landed until those commits
