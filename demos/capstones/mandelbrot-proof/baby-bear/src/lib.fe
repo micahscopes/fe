@@ -293,8 +293,15 @@ impl<
     const ROUND: u32,
     const INPUT_LOG: usize,
     const OUTPUT: usize,
+    const PAIR_DEPTH: usize,
     Tail: BabyBearFriTail<ROUND, OUTPUT>,
-> BabyBearFriTail<PREVIOUS, INPUT> for FriScheduleFold<ROUND, INPUT_LOG, OUTPUT, Tail>
+> BabyBearFriTail<PREVIOUS, INPUT> for FriScheduleFold<
+    ROUND,
+    INPUT_LOG,
+    OUTPUT,
+    PAIR_DEPTH,
+    Tail,
+>
 where
     { PREVIOUS > 0 },
     { ROUND == PREVIOUS + 1 },
@@ -416,8 +423,9 @@ impl<
     const INPUT: usize,
     const INPUT_LOG: usize,
     const OUTPUT: usize,
+    const PAIR_DEPTH: usize,
     Tail: BabyBearFriTail<1, OUTPUT>,
-> BabyBearFriFirst<INPUT> for FriScheduleFold<1, INPUT_LOG, OUTPUT, Tail>
+> BabyBearFriFirst<INPUT> for FriScheduleFold<1, INPUT_LOG, OUTPUT, PAIR_DEPTH, Tail>
 where
     INPUT > 0,
     INPUT > 1,
@@ -623,24 +631,162 @@ pub struct FriQueryPair<const ROUND: u32, const DEPTH: usize> {
 }
 impl<const ROUND: u32, const DEPTH: usize> core::marker::Copy for FriQueryPair<ROUND, DEPTH> {}
 
+/// One compact authenticated pair for a nonterminal schedule layer. `Tail`
+/// carries the query interpretation of the remaining schedule.
+pub struct FriQueryFold<const ROUND: u32, const DEPTH: usize, Tail> {
+    pub valid: bool,
+    pub root: FriLayerDigest<ROUND>,
+    pub pair: FriQueryPair<ROUND, DEPTH>,
+    pub tail: Tail,
+}
+impl<const ROUND: u32, const DEPTH: usize, Tail: core::marker::Copy> core::marker::Copy
+    for FriQueryFold<ROUND, DEPTH, Tail> {}
+
+/// The one-evaluation terminal layer needs no authentication siblings: its row
+/// commitment is the layer root.
+pub struct FriQueryEnd<const ROUND: u32> {
+    pub valid: bool,
+    pub root: FriLayerDigest<ROUND>,
+    pub evaluation: BabyBearExt4,
+}
+impl<const ROUND: u32> core::marker::Copy for FriQueryEnd<ROUND> {}
+
+/// Interpret a field-neutral FRI schedule into its compact authenticated query
+/// carrier. The schedule tail distinguishes a pair-opening node from the
+/// one-evaluation terminal, so no runtime round tag or manually enumerated
+/// layer list is needed.
+pub trait BabyBearFriQueryShape {
+    type Query
+    fn invalid_fri_query() -> Self::Query
+}
+
+impl<
+    const ROUND: u32,
+    const INPUT_LOG: usize,
+    const OUTPUT: usize,
+    const PAIR_DEPTH: usize,
+    const NEXT_ROUND: u32,
+> BabyBearFriQueryShape for FriScheduleFold<
+    ROUND,
+    INPUT_LOG,
+    OUTPUT,
+    PAIR_DEPTH,
+    FriScheduleDone<NEXT_ROUND>,
+>
+where
+    { ROUND > 0 },
+    { NEXT_ROUND == ROUND + 1 },
+    { INPUT_LOG == 1 },
+    { OUTPUT == 1 },
+    { PAIR_DEPTH == 0 },
+{
+    type Query = FriQueryEnd<ROUND>
+
+    fn invalid_fri_query() -> FriQueryEnd<ROUND> {
+        FriQueryEnd {
+            valid: false,
+            root: FriLayerDigest { valid: false, value: Poseidon2Digest::zero() },
+            evaluation: BabyBearExt4::zero(),
+        }
+    }
+}
+
+impl<
+    const ROUND: u32,
+    const INPUT_LOG: usize,
+    const OUTPUT: usize,
+    const PAIR_DEPTH: usize,
+    const NEXT_ROUND: u32,
+    const NEXT_INPUT_LOG: usize,
+    const NEXT_OUTPUT: usize,
+    const NEXT_PAIR_DEPTH: usize,
+    Rest,
+> BabyBearFriQueryShape for FriScheduleFold<
+    ROUND,
+    INPUT_LOG,
+    OUTPUT,
+    PAIR_DEPTH,
+    FriScheduleFold<
+        NEXT_ROUND,
+        NEXT_INPUT_LOG,
+        NEXT_OUTPUT,
+        NEXT_PAIR_DEPTH,
+        Rest,
+    >,
+>
+where
+    { ROUND > 0 },
+    { INPUT_LOG > 1 },
+    { OUTPUT > 1 },
+    { PAIR_DEPTH + 2 == INPUT_LOG },
+    { NEXT_ROUND == ROUND + 1 },
+    { NEXT_INPUT_LOG + 1 == INPUT_LOG },
+    { NEXT_OUTPUT + NEXT_OUTPUT == OUTPUT },
+    FriScheduleFold<NEXT_ROUND, NEXT_INPUT_LOG, NEXT_OUTPUT, NEXT_PAIR_DEPTH, Rest>:
+        BabyBearFriQueryShape,
+{
+    type Query = FriQueryFold<
+        ROUND,
+        PAIR_DEPTH,
+        <FriScheduleFold<
+            NEXT_ROUND,
+            NEXT_INPUT_LOG,
+            NEXT_OUTPUT,
+            NEXT_PAIR_DEPTH,
+            Rest,
+        >
+            as BabyBearFriQueryShape>::Query,
+    >
+
+    fn invalid_fri_query() -> FriQueryFold<
+        ROUND,
+        PAIR_DEPTH,
+        <FriScheduleFold<
+            NEXT_ROUND,
+            NEXT_INPUT_LOG,
+            NEXT_OUTPUT,
+            NEXT_PAIR_DEPTH,
+            Rest,
+        >
+            as BabyBearFriQueryShape>::Query,
+    > {
+        FriQueryFold {
+            valid: false,
+            root: FriLayerDigest { valid: false, value: Poseidon2Digest::zero() },
+            pair: invalid_fri_query_pair<ROUND, PAIR_DEPTH>(),
+            tail: <FriScheduleFold<
+                NEXT_ROUND,
+                NEXT_INPUT_LOG,
+                NEXT_OUTPUT,
+                NEXT_PAIR_DEPTH,
+                Rest,
+            >
+                as BabyBearFriQueryShape>::invalid_fri_query(),
+        }
+    }
+}
+
 /// One authenticated transcript-selected query through a 16-to-1 FRI chain.
 /// The earlier AIR layer supplies `AirLdeTranscriptDigest`; this receipt does
 /// not retain the full composition or folded codewords.
-pub struct FriCommitmentQuery16 {
+pub struct FriCommitmentQuery<const COMPOSITION_DEPTH: usize, Layers> {
     pub valid: bool,
     pub composition_root: CompositionDigest,
-    pub first_root: FriLayerDigest<1>,
-    pub second_root: FriLayerDigest<2>,
-    pub third_root: FriLayerDigest<3>,
-    pub final_root: FriLayerDigest<4>,
     pub query_index: u32,
-    pub composition: CompositionQueryPair<3>,
-    pub first: FriQueryPair<1, 2>,
-    pub second: FriQueryPair<2, 1>,
-    pub third: FriQueryPair<3, 0>,
-    pub final_evaluation: BabyBearExt4,
+    pub composition: CompositionQueryPair<COMPOSITION_DEPTH>,
+    pub layers: Layers,
 }
-impl core::marker::Copy for FriCommitmentQuery16 {}
+impl<const COMPOSITION_DEPTH: usize, Layers: core::marker::Copy> core::marker::Copy
+    for FriCommitmentQuery<COMPOSITION_DEPTH, Layers> {}
+
+const fn fri_composition_query_depth(_ input_log: usize) -> usize {
+    if input_log == 0 { 0 } else { input_log - 1 }
+}
+
+pub type FriCommitmentQuery16 = FriCommitmentQuery<
+    {fri_composition_query_depth(4)},
+    <FriSchedule<1, 4> as BabyBearFriQueryShape>::Query,
+>
 
 struct DigestNodeHasher {}
 impl TwoToOneHasher<Poseidon2Digest> for DigestNodeHasher {
@@ -1550,16 +1696,9 @@ fn invalid_fri_query16() -> FriCommitmentQuery16 {
     FriCommitmentQuery16 {
         valid: false,
         composition_root: CompositionDigest { valid: false, value: Poseidon2Digest::zero() },
-        first_root: FriLayerDigest<1> { valid: false, value: Poseidon2Digest::zero() },
-        second_root: FriLayerDigest<2> { valid: false, value: Poseidon2Digest::zero() },
-        third_root: FriLayerDigest<3> { valid: false, value: Poseidon2Digest::zero() },
-        final_root: FriLayerDigest<4> { valid: false, value: Poseidon2Digest::zero() },
         query_index: 0,
         composition: invalid_composition_query_pair<3>(),
-        first: invalid_fri_query_pair<1, 2>(),
-        second: invalid_fri_query_pair<2, 1>(),
-        third: invalid_fri_query_pair<3, 0>(),
-        final_evaluation: BabyBearExt4::zero(),
+        layers: <FriSchedule<1, 4> as BabyBearFriQueryShape>::invalid_fri_query(),
     }
 }
 
@@ -1661,32 +1800,44 @@ pub fn open_fri_commitment_query16(
     FriCommitmentQuery16 {
         valid: true,
         composition_root: composition_root,
-        first_root: first_layer.root,
-        second_root: second_layer.root,
-        third_root: third_layer.root,
-        final_root: final_layer.root,
         query_index: query.value,
         composition: CompositionQueryPair<3> {
             positive: evaluations[composition_index],
             negative: evaluations[composition_index + 8],
             path: composition_path,
         },
-        first: FriQueryPair<1, 2> {
-            positive: first_layer.evaluations[first_position],
-            negative: first_layer.evaluations[first_position + 4],
-            path: first_path,
+        layers: FriQueryFold {
+            valid: true,
+            root: first_layer.root,
+            pair: FriQueryPair {
+                positive: first_layer.evaluations[first_position],
+                negative: first_layer.evaluations[first_position + 4],
+                path: first_path,
+            },
+            tail: FriQueryFold {
+                valid: true,
+                root: second_layer.root,
+                pair: FriQueryPair {
+                    positive: second_layer.evaluations[second_position],
+                    negative: second_layer.evaluations[second_position + 2],
+                    path: second_path,
+                },
+                tail: FriQueryFold {
+                    valid: true,
+                    root: third_layer.root,
+                    pair: FriQueryPair {
+                        positive: third_layer.evaluations[0],
+                        negative: third_layer.evaluations[1],
+                        path: third_path,
+                    },
+                    tail: FriQueryEnd {
+                        valid: true,
+                        root: final_layer.root,
+                        evaluation: final_layer.evaluations[0],
+                    },
+                },
+            },
         },
-        second: FriQueryPair<2, 1> {
-            positive: second_layer.evaluations[second_position],
-            negative: second_layer.evaluations[second_position + 2],
-            path: second_path,
-        },
-        third: FriQueryPair<3, 0> {
-            positive: third_layer.evaluations[0],
-            negative: third_layer.evaluations[1],
-            path: third_path,
-        },
-        final_evaluation: final_layer.evaluations[0],
     }
 }
 
@@ -1708,26 +1859,34 @@ pub fn verify_fri_commitment_query16(
     _ shift: BabyBear,
     _ proof: own FriCommitmentQuery16,
 ) -> bool {
+    let first = proof.layers
+    let second = first.tail
+    let third = second.tail
+    let final_layer = third.tail
     if !air_transcript.valid
         || shift.is_zero()
         || !proof.valid
         || !proof.composition_root.valid
-        || !proof.first_root.valid
-        || !proof.second_root.valid
-        || !proof.third_root.valid
-        || !proof.final_root.valid {
+        || !first.valid
+        || !first.root.valid
+        || !second.valid
+        || !second.root.valid
+        || !third.valid
+        || !third.root.valid
+        || !final_layer.valid
+        || !final_layer.root.valid {
         return false
     }
 
     let composition_transcript = bind_composition(air_transcript, proof.composition_root)
     let first_challenge = fri_fold_challenge(composition_transcript)
-    let first_transcript = bind_first_fri_layer(composition_transcript, proof.first_root)
+    let first_transcript = bind_first_fri_layer(composition_transcript, first.root)
     let second_challenge = next_fri_fold_challenge<1, 2>(first_transcript)
-    let second_transcript = bind_next_fri_layer<1, 2>(first_transcript, proof.second_root)
+    let second_transcript = bind_next_fri_layer<1, 2>(first_transcript, second.root)
     let third_challenge = next_fri_fold_challenge<2, 3>(second_transcript)
-    let third_transcript = bind_next_fri_layer<2, 3>(second_transcript, proof.third_root)
+    let third_transcript = bind_next_fri_layer<2, 3>(second_transcript, third.root)
     let fourth_challenge = next_fri_fold_challenge<3, 4>(third_transcript)
-    let fourth_transcript = bind_next_fri_layer<3, 4>(third_transcript, proof.final_root)
+    let fourth_transcript = bind_next_fri_layer<3, 4>(third_transcript, final_layer.root)
     let query_challenge = fri_query_challenge<4, 1>(fourth_transcript)
     let query = fri_query_index_power_of_two<1, 8>(query_challenge)
     if !composition_transcript.valid
@@ -1746,9 +1905,9 @@ pub fn verify_fri_commitment_query16(
     let second_index = first_index & 1
     if proof.query_index != query.value
         || proof.composition.path.index != query.value
-        || proof.first.path.index != first_index
-        || proof.second.path.index != second_index
-        || proof.third.path.index != 0 {
+        || first.pair.path.index != first_index
+        || second.pair.path.index != second_index
+        || third.pair.path.index != 0 {
         return false
     }
 
@@ -1759,27 +1918,27 @@ pub fn verify_fri_commitment_query16(
             proof.composition_root,
         )
         || !verify_fri_layer_pair_path<1, 2>(
-            proof.first.positive,
-            proof.first.negative,
-            proof.first.path,
-            proof.first_root,
+            first.pair.positive,
+            first.pair.negative,
+            first.pair.path,
+            first.root,
         )
         || !verify_fri_layer_pair_path<2, 1>(
-            proof.second.positive,
-            proof.second.negative,
-            proof.second.path,
-            proof.second_root,
+            second.pair.positive,
+            second.pair.negative,
+            second.pair.path,
+            second.root,
         )
         || !verify_fri_layer_pair_path<3, 0>(
-            proof.third.positive,
-            proof.third.negative,
-            proof.third.path,
-            proof.third_root,
+            third.pair.positive,
+            third.pair.negative,
+            third.pair.path,
+            third.root,
         ) {
         return false
     }
-    let final_commitment = fri_layer_row_commitment<4>(proof.final_evaluation)
-    if !final_commitment.value.equals(proof.final_root.value) {
+    let final_commitment = fri_layer_row_commitment<4>(final_layer.evaluation)
+    if !final_commitment.value.equals(final_layer.root.value) {
         return false
     }
 
@@ -1791,9 +1950,9 @@ pub fn verify_fri_commitment_query16(
         query.value,
     )
     let expected_first = if query.value < 4 {
-        proof.first.positive
+        first.pair.positive
     } else {
-        proof.first.negative
+        first.pair.negative
     }
     if !first_fold.valid || !first_fold.evaluations[0].equals(expected_first) {
         return false
@@ -1801,16 +1960,16 @@ pub fn verify_fri_commitment_query16(
 
     let shift2 = shift.square()
     let second_fold = fold_fri_pair_at<8>(
-        proof.first.positive,
-        proof.first.negative,
+        first.pair.positive,
+        first.pair.negative,
         second_challenge.value,
         shift2,
         first_index,
     )
     let expected_second = if first_index < 2 {
-        proof.second.positive
+        second.pair.positive
     } else {
-        proof.second.negative
+        second.pair.negative
     }
     if !second_fold.valid || !second_fold.evaluations[0].equals(expected_second) {
         return false
@@ -1818,27 +1977,27 @@ pub fn verify_fri_commitment_query16(
 
     let shift3 = shift2.square()
     let third_fold = fold_fri_pair_at<4>(
-        proof.second.positive,
-        proof.second.negative,
+        second.pair.positive,
+        second.pair.negative,
         third_challenge.value,
         shift3,
         second_index,
     )
     let expected_third = if second_index == 0 {
-        proof.third.positive
+        third.pair.positive
     } else {
-        proof.third.negative
+        third.pair.negative
     }
     if !third_fold.valid || !third_fold.evaluations[0].equals(expected_third) {
         return false
     }
 
     let final_fold = fold_fri_pair_at<2>(
-        proof.third.positive,
-        proof.third.negative,
+        third.pair.positive,
+        third.pair.negative,
         fourth_challenge.value,
         shift3.square(),
         0,
     )
-    final_fold.valid && final_fold.evaluations[0].equals(proof.final_evaluation)
+    final_fold.valid && final_fold.evaluations[0].equals(final_layer.evaluation)
 }

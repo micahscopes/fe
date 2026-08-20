@@ -61,18 +61,28 @@ impl<const NEXT_ROUND: u32> Copy for FriScheduleDone<NEXT_ROUND> {}
 
 /// One binary fold in a compile-time FRI schedule. `INPUT_LOG` describes the
 /// codeword before this fold; its committed output therefore has
-/// `2^(INPUT_LOG - 1)` evaluations. `Tail` is derived, not selected manually.
+/// `2^(INPUT_LOG - 1)` evaluations. `PAIR_DEPTH` is the number of Merkle
+/// siblings per side in the compact opening of that output layer. `Tail` is
+/// derived, not selected manually.
 pub struct FriScheduleFold<
     const ROUND: u32,
     const INPUT_LOG: usize,
     const OUTPUT: usize,
+    const PAIR_DEPTH: usize,
     Tail,
 > {}
-impl<const ROUND: u32, const INPUT_LOG: usize, const OUTPUT: usize, Tail> Copy
+impl<
+    const ROUND: u32,
+    const INPUT_LOG: usize,
+    const OUTPUT: usize,
+    const PAIR_DEPTH: usize,
+    Tail,
+> Copy
     for FriScheduleFold<
     ROUND,
     INPUT_LOG,
     OUTPUT,
+    PAIR_DEPTH,
     Tail,
 > {}
 
@@ -80,8 +90,8 @@ impl<const ROUND: u32, const INPUT_LOG: usize, const OUTPUT: usize, Tail> Copy
 /// logarithm of the input domain. This is the protocol-shape source of truth:
 ///
 ///   FriSchedule<1, 4>
-///     = Fold<1, 4, 8, Fold<2, 3, 4, Fold<3, 2, 2,
-///         Fold<4, 1, 1, Done<5>>>>>
+///     = Fold<1, 4, 8, 2, Fold<2, 3, 4, 1, Fold<3, 2, 2, 0,
+///         Fold<4, 1, 1, 0, Done<5>>>>>
 ///
 /// Later interpreters attach field values, commitments, authenticated query
 /// pairs, scalar execution, or a WebGPU placement to this same structure.
@@ -108,6 +118,10 @@ const fn fri_schedule_output_width(_ input_log: usize) -> usize {
     }
 }
 
+const fn fri_schedule_pair_depth(_ input_log: usize) -> usize {
+    if input_log > 1 { input_log - 2 } else { 0 }
+}
+
 pub recursive type fn FriScheduleSteps<
     const FIRST_ROUND: u32,
     const TOTAL_LOG: usize,
@@ -121,6 +135,7 @@ pub recursive type fn FriScheduleSteps<
             {fri_schedule_round(FIRST_ROUND, TOTAL_LOG, REMAINING_LOG)},
             REMAINING_LOG,
             {fri_schedule_output_width(REMAINING_LOG)},
+            {fri_schedule_pair_depth(REMAINING_LOG)},
             FriScheduleSteps<FIRST_ROUND, TOTAL_LOG, {REMAINING_LOG - 1}>,
         >
     }
@@ -168,16 +183,12 @@ impl<
     const ROUND: u32,
     const INPUT_LOG: usize,
     const OUTPUT: usize,
+    const PAIR_DEPTH: usize,
     Tail: FriScheduleShape,
-> FriScheduleShape for FriScheduleFold<ROUND, INPUT_LOG, OUTPUT, Tail> {
+> FriScheduleShape for FriScheduleFold<ROUND, INPUT_LOG, OUTPUT, PAIR_DEPTH, Tail> {
     const fn fri_schedule_metadata() -> FriScheduleMetadata {
         let tail = <Tail as FriScheduleShape>::fri_schedule_metadata()
         let has_pair: u32 = if INPUT_LOG > 1 { 1 } else { 0 }
-        let path_depth: u32 = if INPUT_LOG > 1 {
-            (INPUT_LOG - 2).downcast_truncate()
-        } else {
-            0
-        }
         FriScheduleMetadata {
             rounds: tail.rounds + 1,
             first_round: ROUND,
@@ -185,7 +196,8 @@ impl<
             input_log: INPUT_LOG.downcast_truncate(),
             folded_evaluations: tail.folded_evaluations + OUTPUT.downcast_truncate(),
             layer_pair_openings: tail.layer_pair_openings + has_pair,
-            layer_path_siblings_per_side: tail.layer_path_siblings_per_side + path_depth,
+            layer_path_siblings_per_side: tail.layer_path_siblings_per_side
+                + PAIR_DEPTH.downcast_truncate(),
         }
     }
 }
