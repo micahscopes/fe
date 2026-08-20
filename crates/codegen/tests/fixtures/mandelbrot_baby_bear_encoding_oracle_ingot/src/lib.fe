@@ -48,6 +48,7 @@ use mandelbrot_proof_baby_bear::{
     fri_query_index_power_of_two,
     next_fri_fold_challenge,
     open_fri_commitment_query16,
+    open_fri_multi_commitment_query16,
     auxiliary_lde_row_commitment,
     row_commitment,
     trace_root_power_of_two,
@@ -739,6 +740,78 @@ pub fn planned_multipath_status(
         if verify_fri_layer_multi_opening<1, 8, 8, 16>(fri, fri_root) { 1 } else { 0 },
         if composition.valid { 1 } else { 0 },
         if fri.valid { 1 } else { 0 },
+    )
+}
+
+fn pack_fri_multi_indices(_ indices: [u32; 8]) -> u32 {
+    let mut packed: u32 = 0
+    let mut cursor: usize = 0
+    while cursor < 8 {
+        let cursor_u32: u32 = cursor.downcast_truncate()
+        let shift: u32 = cursor_u32 * 4
+        packed = packed | ((indices[cursor] & 15) << shift)
+        cursor = cursor + 1
+    }
+    packed
+}
+
+pub fn fri_multi_query16_status(
+    _ seed: u32,
+    _ air_transcript: u32,
+    _ shift: u32,
+) -> (
+    u32,
+    u32, u32, u32,
+    u32, u32, u32,
+    u32, u32, u32,
+    u32, u32, u32,
+    u32,
+    u32, u32, u32, u32,
+) {
+    let air = AirLdeTranscriptDigest {
+        valid: true,
+        value: digest8(air_transcript),
+    }
+    let proof = open_fri_multi_commitment_query16(
+        fri_pattern16(seed),
+        air,
+        BabyBear::from_u32(shift),
+    )
+    let first = proof.layers
+    let second = first.tail
+    let third = second.tail
+    let terminal = third.tail
+    (
+        if proof.valid { 1 } else { 0 },
+        proof.composition.path.leaf_count,
+        proof.composition.path.sibling_count,
+        if verify_composition_multi_opening<16, 8, 24>(
+            proof.composition,
+            proof.composition_root,
+        ) { 1 } else { 0 },
+        first.opening.path.leaf_count,
+        first.opening.path.sibling_count,
+        if first.valid && verify_fri_layer_multi_opening<1, 8, 8, 16>(
+            first.opening,
+            first.root,
+        ) { 1 } else { 0 },
+        second.opening.path.leaf_count,
+        second.opening.path.sibling_count,
+        if second.valid && verify_fri_layer_multi_opening<2, 4, 8, 8>(
+            second.opening,
+            second.root,
+        ) { 1 } else { 0 },
+        third.opening.path.leaf_count,
+        third.opening.path.sibling_count,
+        if third.valid && verify_fri_layer_multi_opening<3, 2, 8, 0>(
+            third.opening,
+            third.root,
+        ) { 1 } else { 0 },
+        if terminal.valid && terminal.root.valid { 1 } else { 0 },
+        pack_fri_multi_indices(proof.composition.path.leaf_indices),
+        pack_fri_multi_indices(first.opening.path.leaf_indices),
+        pack_fri_multi_indices(second.opening.path.leaf_indices),
+        pack_fri_multi_indices(third.opening.path.leaf_indices),
     )
 }
 

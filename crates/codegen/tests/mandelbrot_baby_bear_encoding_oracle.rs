@@ -6,10 +6,10 @@
 
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::{BackendKind, OptLevel, layout_for};
+use fe_codegen::{layout_for, BackendKind, OptLevel};
 use hir::hir_def::HirIngot;
 use num_bigint::BigUint;
-use p3_baby_bear::{BabyBear, default_babybear_poseidon2_16};
+use p3_baby_bear::{default_babybear_poseidon2_16, BabyBear};
 use p3_field::{PrimeCharacteristicRing, PrimeField32};
 use p3_symmetric::Permutation;
 use std::path::Path;
@@ -807,6 +807,26 @@ fn reference_multipath_sibling_count(width: u32, requests: &[u32]) -> usize {
         width /= 2;
     }
     siblings
+}
+
+fn reference_pair_requests(queries: &[u32], half: u32) -> Vec<u32> {
+    queries
+        .iter()
+        .flat_map(|&query| {
+            let local = query & (half - 1);
+            [local, local + half]
+        })
+        .collect()
+}
+
+fn packed_canonical_indices8(requests: &[u32]) -> u32 {
+    let mut indices = requests.to_vec();
+    indices.sort_unstable();
+    indices.dedup();
+    indices
+        .iter()
+        .enumerate()
+        .fold(0, |packed, (slot, &index)| packed | (index << (slot * 4)))
 }
 
 #[test]
@@ -1668,6 +1688,72 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
                 1,
             ],
             "typed query plan must drive both sparse commitment openings",
+        );
+    }
+
+    for (seed, air_transcript_seed, shift) in [(97, 431, 7), (0, 433, 123_456_789)] {
+        let composition_leaves = fri_pattern::<16>(seed)
+            .iter()
+            .map(|value| reference_field_commitment(b"BC02", &value.0))
+            .collect();
+        let composition_root = digest_merkle_root(composition_leaves);
+        let composition_transcript =
+            bind_digest(b"BC03", digest_seed(air_transcript_seed), composition_root);
+        let chain = reference_fri_chain16_from_digest(seed, composition_transcript, shift)
+            .expect("nonzero shift must produce the reference FRI chain");
+        let queries = (1..=4)
+            .map(|query| squeeze_challenge(&round_tag(b"FQ", query), chain.final_transcript)[0] & 7)
+            .collect::<Vec<_>>();
+        let layer_requests = [
+            reference_pair_requests(&queries, 8),
+            reference_pair_requests(&queries, 4),
+            reference_pair_requests(&queries, 2),
+            reference_pair_requests(&queries, 1),
+        ];
+        let layer_widths = [16, 8, 4, 2];
+        let mut expected_status = vec![1];
+        for (width, requests) in layer_widths.into_iter().zip(&layer_requests) {
+            let unique = requests
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len();
+            expected_status.extend([
+                unique as u32,
+                reference_multipath_sibling_count(width, requests) as u32,
+                1,
+            ]);
+        }
+        expected_status.push(1);
+        expected_status.extend(
+            layer_requests
+                .iter()
+                .map(|requests| packed_canonical_indices8(requests)),
+        );
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "fri_multi_query16_status",
+                &[seed, air_transcript_seed, shift],
+                18,
+            ),
+            expected_status,
+            "schedule-derived shared FRI carrier must authenticate each layer exactly once",
+        );
+    }
+
+    for invalid_shift in [0, MODULUS] {
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "fri_multi_query16_status",
+                &[97, 431, invalid_shift],
+                18,
+            ),
+            vec![0; 18],
+            "shared FRI carrier must reject a zero coset shift",
         );
     }
 

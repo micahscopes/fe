@@ -947,6 +947,502 @@ pub struct FriQueryEnd<const ROUND: u32> {
 }
 impl<const ROUND: u32> core::marker::Copy for FriQueryEnd<ROUND> {}
 
+const fn fri_multi_sibling_capacity(
+    _ pair_depth: usize,
+    _ query_count: usize,
+) -> usize {
+    (query_count + query_count) * pair_depth
+}
+
+/// One shared sparse opening for all transcript queries at a nonterminal FRI
+/// layer. Its capacities are derived from the schedule and query count.
+pub struct FriMultiQueryFold<
+    const ROUND: u32,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+    Tail,
+> {
+    pub valid: bool,
+    pub root: FriLayerDigest<ROUND>,
+    pub opening: FriLayerMultiOpening<ROUND, MAX_LEAVES, MAX_SIBLINGS>,
+    pub tail: Tail,
+}
+impl<
+    const ROUND: u32,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+    Tail: core::marker::Copy,
+> core::marker::Copy for FriMultiQueryFold<ROUND, MAX_LEAVES, MAX_SIBLINGS, Tail> {}
+
+/// The one-evaluation terminal is shared by every query and needs no path.
+pub struct FriMultiQueryEnd<const ROUND: u32> {
+    pub valid: bool,
+    pub root: FriLayerDigest<ROUND>,
+    pub evaluation: BabyBearExt4,
+}
+impl<const ROUND: u32> core::marker::Copy for FriMultiQueryEnd<ROUND> {}
+
+/// Derive a shared multi-query receipt carrier from the field-neutral fold
+/// schedule and a protocol-selected query count.
+pub trait BabyBearFriMultiQueryShape<const QUERY_COUNT: usize> {
+    type Query
+}
+
+impl<
+    const QUERY_COUNT: usize,
+    const ROUND: u32,
+    const INPUT_LOG: usize,
+    const OUTPUT: usize,
+    const PAIR_WIDTH: usize,
+    const PAIR_DEPTH: usize,
+    const NEXT_ROUND: u32,
+> BabyBearFriMultiQueryShape<QUERY_COUNT> for FriScheduleFold<
+    ROUND,
+    INPUT_LOG,
+    OUTPUT,
+    PAIR_WIDTH,
+    PAIR_DEPTH,
+    FriScheduleDone<NEXT_ROUND>,
+>
+where
+    QUERY_COUNT > 0,
+    { ROUND > 0 },
+    { NEXT_ROUND == ROUND + 1 },
+    { INPUT_LOG == 1 },
+    { OUTPUT == 1 },
+    { PAIR_WIDTH == 0 },
+    { PAIR_DEPTH == 0 },
+{
+    type Query = FriMultiQueryEnd<ROUND>
+}
+
+impl<
+    const QUERY_COUNT: usize,
+    const ROUND: u32,
+    const INPUT_LOG: usize,
+    const OUTPUT: usize,
+    const PAIR_WIDTH: usize,
+    const PAIR_DEPTH: usize,
+    const NEXT_ROUND: u32,
+    const NEXT_INPUT_LOG: usize,
+    const NEXT_OUTPUT: usize,
+    const NEXT_PAIR_WIDTH: usize,
+    const NEXT_PAIR_DEPTH: usize,
+    Rest,
+> BabyBearFriMultiQueryShape<QUERY_COUNT> for FriScheduleFold<
+    ROUND,
+    INPUT_LOG,
+    OUTPUT,
+    PAIR_WIDTH,
+    PAIR_DEPTH,
+    FriScheduleFold<
+        NEXT_ROUND,
+        NEXT_INPUT_LOG,
+        NEXT_OUTPUT,
+        NEXT_PAIR_WIDTH,
+        NEXT_PAIR_DEPTH,
+        Rest,
+    >,
+>
+where
+    QUERY_COUNT > 0,
+    { ROUND > 0 },
+    { INPUT_LOG > 1 },
+    { OUTPUT > 1 },
+    { PAIR_WIDTH + PAIR_WIDTH == OUTPUT },
+    { PAIR_DEPTH + 2 == INPUT_LOG },
+    { NEXT_ROUND == ROUND + 1 },
+    { NEXT_INPUT_LOG + 1 == INPUT_LOG },
+    { NEXT_OUTPUT + NEXT_OUTPUT == OUTPUT },
+    FriScheduleFold<
+        NEXT_ROUND,
+        NEXT_INPUT_LOG,
+        NEXT_OUTPUT,
+        NEXT_PAIR_WIDTH,
+        NEXT_PAIR_DEPTH,
+        Rest,
+    >: BabyBearFriMultiQueryShape<QUERY_COUNT>,
+{
+    type Query = FriMultiQueryFold<
+        ROUND,
+        {QUERY_COUNT + QUERY_COUNT},
+        {fri_multi_sibling_capacity(PAIR_DEPTH, QUERY_COUNT)},
+        <FriScheduleFold<
+            NEXT_ROUND,
+            NEXT_INPUT_LOG,
+            NEXT_OUTPUT,
+            NEXT_PAIR_WIDTH,
+            NEXT_PAIR_DEPTH,
+            Rest,
+        > as BabyBearFriMultiQueryShape<QUERY_COUNT>>::Query,
+    >
+}
+
+/// Open one shared multipath per committed layer from a complete FRI proof.
+/// Sampling occurs only at the structurally discovered terminal transcript.
+pub trait BabyBearFriMultiQueryLayers<
+    const QUERY_COUNT: usize,
+    const QUERY_HALF: usize,
+    const REQUESTS: usize,
+    Plan,
+    Samples,
+    Complete,
+    Layers,
+> {
+    fn invalid_fri_multi_query_layers() -> Layers
+    fn sample_fri_multi_queries(_ complete: Complete) -> (bool, Samples)
+    fn open_fri_multi_query_layers(
+        _ complete: own Complete,
+        _ samples: Samples,
+    ) -> (bool, Layers)
+}
+
+impl<
+    const QUERY_COUNT: usize,
+    const QUERY_HALF: usize,
+    const REQUESTS: usize,
+    Plan,
+    Samples: core::marker::Copy,
+    const ROUND: u32,
+    const INPUT_LOG: usize,
+    const OUTPUT: usize,
+    const PAIR_WIDTH: usize,
+    const PAIR_DEPTH: usize,
+    const NEXT_ROUND: u32,
+> BabyBearFriMultiQueryLayers<
+    QUERY_COUNT,
+    QUERY_HALF,
+    REQUESTS,
+    Plan,
+    Samples,
+    FriProofFold<ROUND, OUTPUT, FriProofEnd<NEXT_ROUND>>,
+    FriMultiQueryEnd<ROUND>,
+> for FriScheduleFold<
+    ROUND,
+    INPUT_LOG,
+    OUTPUT,
+    PAIR_WIDTH,
+    PAIR_DEPTH,
+    FriScheduleDone<NEXT_ROUND>,
+>
+where
+    QUERY_COUNT > 0,
+    { QUERY_COUNT + QUERY_COUNT > 0 },
+    REQUESTS > 0,
+    { REQUESTS == QUERY_COUNT + QUERY_COUNT },
+    { ROUND > 0 },
+    { ROUND < 100 },
+    { NEXT_ROUND == ROUND + 1 },
+    { INPUT_LOG == 1 },
+    { OUTPUT == 1 },
+    { PAIR_WIDTH == 0 },
+    { PAIR_DEPTH == 0 },
+    QUERY_HALF > 0,
+    { (QUERY_HALF & (QUERY_HALF - 1)) == 0 },
+    { QUERY_HALF <= 134217728 },
+    Plan: BabyBearFriQueryPlan<ROUND, QUERY_HALF, Samples>,
+{
+    fn invalid_fri_multi_query_layers() -> FriMultiQueryEnd<ROUND> {
+        FriMultiQueryEnd {
+            valid: false,
+            root: FriLayerDigest { valid: false, value: Poseidon2Digest::zero() },
+            evaluation: BabyBearExt4::zero(),
+        }
+    }
+
+    fn sample_fri_multi_queries(
+        _ complete: FriProofFold<ROUND, OUTPUT, FriProofEnd<NEXT_ROUND>>,
+    ) -> (bool, Samples) {
+        if !complete.valid || !complete.layer.valid || !complete.layer.transcript.valid {
+            return (
+                false,
+                <Plan as BabyBearFriQueryPlan<
+                    ROUND,
+                    QUERY_HALF,
+                    Samples,
+                >>::invalid_fri_query_samples(),
+            )
+        }
+        <Plan as BabyBearFriQueryPlan<ROUND, QUERY_HALF, Samples>>::sample_fri_queries(
+            complete.layer.transcript,
+        )
+    }
+
+    fn open_fri_multi_query_layers(
+        _ complete: own FriProofFold<ROUND, OUTPUT, FriProofEnd<NEXT_ROUND>>,
+        _ samples: Samples,
+    ) -> (bool, FriMultiQueryEnd<ROUND>) {
+        if !complete.valid || !complete.layer.valid || !complete.layer.root.valid {
+            return (
+                false,
+                <Self as BabyBearFriMultiQueryLayers<
+                    QUERY_COUNT,
+                    QUERY_HALF,
+                    REQUESTS,
+                    Plan,
+                    Samples,
+                    FriProofFold<ROUND, OUTPUT, FriProofEnd<NEXT_ROUND>>,
+                    FriMultiQueryEnd<ROUND>,
+                >>::invalid_fri_multi_query_layers(),
+            )
+        }
+        (
+            true,
+            FriMultiQueryEnd {
+                valid: true,
+                root: complete.layer.root,
+                evaluation: complete.layer.evaluations[0],
+            },
+        )
+    }
+}
+
+impl<
+    const QUERY_COUNT: usize,
+    const QUERY_HALF: usize,
+    const REQUESTS: usize,
+    Plan,
+    Samples: core::marker::Copy,
+    const ROUND: u32,
+    const INPUT_LOG: usize,
+    const OUTPUT: usize,
+    const PAIR_WIDTH: usize,
+    const PAIR_DEPTH: usize,
+    const NEXT_ROUND: u32,
+    const NEXT_INPUT_LOG: usize,
+    const NEXT_OUTPUT: usize,
+    const NEXT_PAIR_WIDTH: usize,
+    const NEXT_PAIR_DEPTH: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+    Rest,
+    TailComplete,
+    TailLayers: core::marker::Copy,
+> BabyBearFriMultiQueryLayers<
+    QUERY_COUNT,
+    QUERY_HALF,
+    REQUESTS,
+    Plan,
+    Samples,
+    FriProofFold<ROUND, OUTPUT, TailComplete>,
+    FriMultiQueryFold<
+        ROUND,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+        TailLayers,
+    >,
+> for FriScheduleFold<
+    ROUND,
+    INPUT_LOG,
+    OUTPUT,
+    PAIR_WIDTH,
+    PAIR_DEPTH,
+    FriScheduleFold<
+        NEXT_ROUND,
+        NEXT_INPUT_LOG,
+        NEXT_OUTPUT,
+        NEXT_PAIR_WIDTH,
+        NEXT_PAIR_DEPTH,
+        Rest,
+    >,
+>
+where
+    QUERY_COUNT > 0,
+    { QUERY_COUNT + QUERY_COUNT > 0 },
+    { MAX_LEAVES == QUERY_COUNT + QUERY_COUNT },
+    { MAX_SIBLINGS == fri_multi_sibling_capacity(PAIR_DEPTH, QUERY_COUNT) },
+    MAX_LEAVES > 0,
+    REQUESTS > 0,
+    { REQUESTS == QUERY_COUNT + QUERY_COUNT },
+    { ROUND > 0 },
+    { ROUND < 100 },
+    { INPUT_LOG > 1 },
+    OUTPUT > 1,
+    OUTPUT <= MAX_PADDED_TRACE_LENGTH,
+    OUTPUT <= 2147483648,
+    { (OUTPUT & (OUTPUT - 1)) == 0 },
+    PAIR_WIDTH > 0,
+    { PAIR_WIDTH + PAIR_WIDTH == OUTPUT },
+    { PAIR_DEPTH + 2 == INPUT_LOG },
+    { NEXT_ROUND == ROUND + 1 },
+    { NEXT_INPUT_LOG + 1 == INPUT_LOG },
+    { NEXT_OUTPUT + NEXT_OUTPUT == OUTPUT },
+    Plan: BabyBearFriPairRequests<PAIR_WIDTH, REQUESTS, Samples>,
+    FriScheduleFold<
+        NEXT_ROUND,
+        NEXT_INPUT_LOG,
+        NEXT_OUTPUT,
+        NEXT_PAIR_WIDTH,
+        NEXT_PAIR_DEPTH,
+        Rest,
+    >: BabyBearFriMultiQueryLayers<
+        QUERY_COUNT,
+        QUERY_HALF,
+        REQUESTS,
+        Plan,
+        Samples,
+        TailComplete,
+        TailLayers,
+    >,
+{
+    fn invalid_fri_multi_query_layers() -> FriMultiQueryFold<
+        ROUND,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+        TailLayers,
+    > {
+        FriMultiQueryFold {
+            valid: false,
+            root: FriLayerDigest { valid: false, value: Poseidon2Digest::zero() },
+            opening: invalid_fri_layer_multi_opening<
+                ROUND,
+                MAX_LEAVES,
+                MAX_SIBLINGS,
+            >(),
+            tail: <FriScheduleFold<
+                NEXT_ROUND,
+                NEXT_INPUT_LOG,
+                NEXT_OUTPUT,
+                NEXT_PAIR_WIDTH,
+                NEXT_PAIR_DEPTH,
+                Rest,
+            > as BabyBearFriMultiQueryLayers<
+                QUERY_COUNT,
+                QUERY_HALF,
+                REQUESTS,
+                Plan,
+                Samples,
+                TailComplete,
+                TailLayers,
+            >>::invalid_fri_multi_query_layers(),
+        }
+    }
+
+    fn sample_fri_multi_queries(
+        _ complete: FriProofFold<ROUND, OUTPUT, TailComplete>,
+    ) -> (bool, Samples) {
+        <FriScheduleFold<
+            NEXT_ROUND,
+            NEXT_INPUT_LOG,
+            NEXT_OUTPUT,
+            NEXT_PAIR_WIDTH,
+            NEXT_PAIR_DEPTH,
+            Rest,
+        > as BabyBearFriMultiQueryLayers<
+            QUERY_COUNT,
+            QUERY_HALF,
+            REQUESTS,
+            Plan,
+            Samples,
+            TailComplete,
+            TailLayers,
+        >>::sample_fri_multi_queries(complete.tail)
+    }
+
+    fn open_fri_multi_query_layers(
+        _ complete: own FriProofFold<ROUND, OUTPUT, TailComplete>,
+        _ samples: Samples,
+    ) -> (
+        bool,
+        FriMultiQueryFold<
+            ROUND,
+            MAX_LEAVES,
+            MAX_SIBLINGS,
+            TailLayers,
+        >,
+    ) {
+        if !complete.valid || !complete.layer.valid || !complete.layer.root.valid {
+            return (
+                false,
+                <Self as BabyBearFriMultiQueryLayers<
+                    QUERY_COUNT,
+                    QUERY_HALF,
+                    REQUESTS,
+                    Plan,
+                    Samples,
+                    FriProofFold<ROUND, OUTPUT, TailComplete>,
+                    FriMultiQueryFold<
+                        ROUND,
+                        MAX_LEAVES,
+                        MAX_SIBLINGS,
+                        TailLayers,
+                    >,
+                >>::invalid_fri_multi_query_layers(),
+            )
+        }
+        let requests = <Plan as BabyBearFriPairRequests<
+            PAIR_WIDTH,
+            REQUESTS,
+            Samples,
+        >>::fri_pair_requests(samples)
+        if !requests.valid || requests.count != REQUESTS.downcast_truncate() {
+            return (
+                false,
+                <Self as BabyBearFriMultiQueryLayers<
+                    QUERY_COUNT,
+                    QUERY_HALF,
+                    REQUESTS,
+                    Plan,
+                    Samples,
+                    FriProofFold<ROUND, OUTPUT, TailComplete>,
+                    FriMultiQueryFold<ROUND, MAX_LEAVES, MAX_SIBLINGS, TailLayers>,
+                >>::invalid_fri_multi_query_layers(),
+            )
+        }
+        let opening = fri_layer_multi_opening_power_of_two<
+            ROUND,
+            OUTPUT,
+            REQUESTS,
+            MAX_LEAVES,
+            MAX_SIBLINGS,
+        >(complete.layer.evaluations, requests.indices)
+        let tail = <FriScheduleFold<
+            NEXT_ROUND,
+            NEXT_INPUT_LOG,
+            NEXT_OUTPUT,
+            NEXT_PAIR_WIDTH,
+            NEXT_PAIR_DEPTH,
+            Rest,
+        > as BabyBearFriMultiQueryLayers<
+            QUERY_COUNT,
+            QUERY_HALF,
+            REQUESTS,
+            Plan,
+            Samples,
+            TailComplete,
+            TailLayers,
+        >>::open_fri_multi_query_layers(complete.tail, samples)
+        if !opening.valid || !tail.0 {
+            return (
+                false,
+                <Self as BabyBearFriMultiQueryLayers<
+                    QUERY_COUNT,
+                    QUERY_HALF,
+                    REQUESTS,
+                    Plan,
+                    Samples,
+                    FriProofFold<ROUND, OUTPUT, TailComplete>,
+                    FriMultiQueryFold<
+                        ROUND,
+                        MAX_LEAVES,
+                        MAX_SIBLINGS,
+                        TailLayers,
+                    >,
+                >>::invalid_fri_multi_query_layers(),
+            )
+        }
+        (
+            true,
+            FriMultiQueryFold {
+                valid: true,
+                root: complete.layer.root,
+                opening: opening,
+                tail: tail.1,
+            },
+        )
+    }
+}
+
 /// Interpret a field-neutral FRI schedule into its compact authenticated query
 /// carrier. The schedule tail distinguishes a pair-opening node from the
 /// one-evaluation terminal, so no runtime round tag or manually enumerated
@@ -1305,6 +1801,40 @@ pub type CheckpointFriQueryLayers16 =
     <FriSchedule<1, 4> as BabyBearFriQueryShape>::Query
 pub type FriCommitmentQuery16 =
     FriCommitmentQuery<{fri_composition_query_depth(4)}, CheckpointFriQueryLayers16>
+
+/// One composition multipath and one shared multipath for each nonterminal
+/// FRI layer. The nested FRI carrier is derived from `FriSchedule`; no round
+/// list or query-number list is duplicated in the receipt schema.
+pub struct FriMultiCommitmentQuery<
+    const COMPOSITION_MAX_LEAVES: usize,
+    const COMPOSITION_MAX_SIBLINGS: usize,
+    Layers,
+> {
+    pub valid: bool,
+    pub composition_root: CompositionDigest,
+    pub composition: CompositionMultiOpening<
+        COMPOSITION_MAX_LEAVES,
+        COMPOSITION_MAX_SIBLINGS,
+    >,
+    pub layers: Layers,
+}
+impl<
+    const COMPOSITION_MAX_LEAVES: usize,
+    const COMPOSITION_MAX_SIBLINGS: usize,
+    Layers: core::marker::Copy,
+> core::marker::Copy for FriMultiCommitmentQuery<
+    COMPOSITION_MAX_LEAVES,
+    COMPOSITION_MAX_SIBLINGS,
+    Layers,
+> {}
+
+pub type CheckpointFriMultiQueryLayers16 =
+    <FriSchedule<1, 4> as BabyBearFriMultiQueryShape<4>>::Query
+pub type FriMultiCommitmentQuery16 = FriMultiCommitmentQuery<
+    {4 + 4},
+    {fri_multi_sibling_capacity(fri_composition_query_depth(4), 4)},
+    CheckpointFriMultiQueryLayers16,
+>
 
 struct DigestNodeHasher {}
 impl TwoToOneHasher<Poseidon2Digest> for DigestNodeHasher {
@@ -2506,6 +3036,29 @@ fn invalid_fri_query16() -> FriCommitmentQuery16 {
     }
 }
 
+fn invalid_fri_multi_query16() -> FriMultiCommitmentQuery16 {
+    FriMultiCommitmentQuery16 {
+        valid: false,
+        composition_root: CompositionDigest {
+            valid: false,
+            value: Poseidon2Digest::zero(),
+        },
+        composition: invalid_composition_multi_opening<
+            {4 + 4},
+            {fri_multi_sibling_capacity(fri_composition_query_depth(4), 4)},
+        >(),
+        layers: <FriSchedule<1, 4> as BabyBearFriMultiQueryLayers<
+            4,
+            8,
+            8,
+            CheckpointFriQueryPlan4,
+            CheckpointFriQuerySamples4,
+            CheckpointFriProof16,
+            CheckpointFriMultiQueryLayers16,
+        >>::invalid_fri_multi_query_layers(),
+    }
+}
+
 fn commit_fri_layer<const ROUND: u32, const N: usize>(
     _ evaluations: own [BabyBearExt4; N],
 ) -> FriLayerDigest<ROUND>
@@ -2538,6 +3091,74 @@ pub fn fold_checkpoint_fri16(
     _ shift: BabyBear,
 ) -> CheckpointFriProof16 {
     fold_fri_schedule<16, FriSchedule<1, 4>>(evaluations, transcript, shift)
+}
+
+/// Open four transcript-derived queries with one canonical sparse Merkle path
+/// per commitment layer. Both recursive layer traversal and query sampling are
+/// interpretations of the field-neutral schedule and query plan.
+pub fn open_fri_multi_commitment_query16(
+    _ evaluations: own [BabyBearExt4; 16],
+    _ air_transcript: own AirLdeTranscriptDigest,
+    _ shift: BabyBear,
+) -> FriMultiCommitmentQuery16 {
+    if !air_transcript.valid || shift.is_zero() {
+        return invalid_fri_multi_query16()
+    }
+
+    let mut composition_leaves = [CompositionDigest {
+        valid: false,
+        value: Poseidon2Digest::zero(),
+    }; 16]
+    let mut cursor: usize = 0
+    while cursor < 16 {
+        composition_leaves[cursor] = composition_row_commitment(evaluations[cursor])
+        cursor = cursor + 1
+    }
+    let composition_root = composition_root_power_of_two<16>(composition_leaves)
+    let composition_transcript = bind_composition(air_transcript, composition_root)
+    let complete = fold_checkpoint_fri16(evaluations, composition_transcript, shift)
+    if !composition_root.valid || !composition_transcript.valid || !complete.valid {
+        return invalid_fri_multi_query16()
+    }
+
+    let sampled = <FriSchedule<1, 4> as BabyBearFriMultiQueryLayers<
+        4,
+        8,
+        8,
+        CheckpointFriQueryPlan4,
+        CheckpointFriQuerySamples4,
+        CheckpointFriProof16,
+        CheckpointFriMultiQueryLayers16,
+    >>::sample_fri_multi_queries(complete)
+    if !sampled.0 { return invalid_fri_multi_query16() }
+
+    let composition = composition_multi_query_opening_power_of_two<
+        CheckpointFriQueryPlan4,
+        CheckpointFriQuerySamples4,
+        16,
+        8,
+        8,
+        {4 + 4},
+        {fri_multi_sibling_capacity(fri_composition_query_depth(4), 4)},
+    >(evaluations, sampled.1)
+    let layers = <FriSchedule<1, 4> as BabyBearFriMultiQueryLayers<
+        4,
+        8,
+        8,
+        CheckpointFriQueryPlan4,
+        CheckpointFriQuerySamples4,
+        CheckpointFriProof16,
+        CheckpointFriMultiQueryLayers16,
+    >>::open_fri_multi_query_layers(complete, sampled.1)
+    if !composition.valid || !layers.0 {
+        return invalid_fri_multi_query16()
+    }
+    FriMultiCommitmentQuery16 {
+        valid: true,
+        composition_root: composition_root,
+        composition: composition,
+        layers: layers.1,
+    }
 }
 
 pub fn open_fri_commitment_query16(
