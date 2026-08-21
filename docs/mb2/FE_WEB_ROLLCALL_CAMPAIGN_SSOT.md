@@ -1246,13 +1246,28 @@ Legend:
   273.67 seconds. The executed checkpoint remains the honest four-row to
   sixteen-point placement gate; full 4,096-row placement is reserved for the
   production GPU schedule.
+  A transcript-order audit then found that the raw `SL03` root could not safely
+  remain the production interaction seed: without a proof linking that raw
+  tree to the separately committed LDE, a prover could choose the seed before
+  fixing the codeword checked by FRI. Commit `c9f7e9e8c` corrects that boundary
+  before it ossifies. Base evaluation and LDE placement are now independently
+  callable, every `LD01` base-LDE leaf absorbs limb count, trace size, LDE
+  size, position, and all 41 reflection-derived fields, and the typed Merkle
+  root is fixed before any interaction witness exists. Production beta and
+  gamma values then squeeze from that root under eight distinct `*02` domains;
+  the earlier `*01` derivation remains explicitly a semantic-checkpoint tool.
+  The independent Plonky3 gate reconstructs the `LD01` root, proves a directed
+  base-field mutation changes it, checks all 32 quartic challenge coefficients
+  for both clean and mutated roots, and rejects invalid roots and mutation
+  selectors. The focused zero-import gate passes 1/1 in 275.53 seconds.
   `SL03` and `SI01` now authenticate the exact base and interaction witness
   traces, and their typed LDE/composition seam is now gated, but they are not
   yet a succinct leaf proof. The production layer must next commit the full
-  base, interaction, and composition codewords, bind them into the typed
-  transcript, then reuse the existing multi-query, FRI, and canonical receipt
-  interpreters. Only that authenticated AIR/FRI receipt may replace semantic
-  replay in the recursive parent carrier.
+  interaction and composition codewords using the corrected base-LDE-derived
+  challenges, bind all three roots into the typed transcript, then reuse the
+  existing multi-query, FRI, and canonical receipt interpreters. Only that
+  authenticated AIR/FRI receipt may replace semantic replay in the recursive
+  parent carrier.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
   The first arithmetic-plan consolidation is landed at `ba2ded864`: one
