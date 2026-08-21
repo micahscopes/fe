@@ -831,6 +831,25 @@ Legend:
   contract, not yet a succinct recursive proof: fixed-size typed boundary
   digests, multi-limb AIR constraints, BabyBear leaf receipts, and parent proof
   verification remain open.
+  Commits `ad20370d7` and `e12032a13` close the fixed-size digest boundary.
+  `poseidon_baby_bear::commit_canonical` is a reusable `WordSink`
+  interpretation that streams any reflection-derived `CanonicalWords` record
+  directly into the typed field sponge. It binds the nominal domain and
+  schema-derived word count, rejects non-field words and codec count failures,
+  and materializes no second protocol array or host buffer. Its independent
+  Plonky3 gate passes 2/2 at unoptimized Wasm. The gate also caught an
+  initially over-wide `usize` cursor at the Wasm ABI; the actual bounded cursor
+  is now `u32`, rather than hiding the mismatch behind optimization.
+  The separate `mandelbrot_proof_recursive_baby_bear` ingot derives
+  precision-branded statement and boundary digests from the canonical raw
+  carriers. Its 31-word `RecursiveCommittedInterval<L>` exposes only typed
+  endpoint digests, iteration bounds, and a leaf count to parent proofs.
+  Parent merges reject changed statement or shared-boundary digests, invalid
+  children, non-adjacent iterations, and count overflow. The recursive bigint
+  oracle now also compares every digest lane against independent Plonky3 and
+  passes 1/1. The remaining leaf and parent proof receipts must authenticate
+  these carriers; the semantic leaf adapter still replays its interval and is
+  deliberately not presented as succinct.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
   The first arithmetic-plan consolidation is landed at `ba2ded864`: one
