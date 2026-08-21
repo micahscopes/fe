@@ -1200,6 +1200,66 @@ pub fn sparse_boundary_row_from_witness<F: Radix2Field, const L: usize>(
     }
 }
 
+/// Interpret one generated task into the canonical six-column sparse row.
+/// This is the shared scalar source for commitments, LDE construction, and
+/// future GPU placement interpreters. Padding rows are derived from the same
+/// task plan and are canonical zeroes, so callers never maintain a parallel
+/// phase table or witness-layout switch.
+pub fn sparse_transition_row_from_witness<F: Radix2Field, const L: usize>(
+    _ index: u32,
+    _ point: ComplexFixed<L>,
+    _ current: ComplexFixed<L>,
+    _ next: ComplexFixed<L>,
+    _ witness: FixedMandelbrotTransitionWitness<L>,
+) -> SparseTaskRow<F> {
+    let task = sparse_transition_task_at<L>(index)
+    match task {
+        SparseTransitionTask::RadixBit(_, _, _) => {
+            sparse_radix_row_from_witness<F, L>(task, point, current, next, witness)
+        }
+        SparseTransitionTask::RadixLimb(_, _) => {
+            sparse_radix_row_from_witness<F, L>(task, point, current, next, witness)
+        }
+        SparseTransitionTask::RadixFinish(_) => {
+            sparse_radix_row_from_witness<F, L>(task, point, current, next, witness)
+        }
+        SparseTransitionTask::CarryBit(_, _, _, _) => {
+            sparse_carry_row_from_witness<F, L>(task, witness)
+        }
+        SparseTransitionTask::CarryFinish(_, _) => {
+            sparse_carry_row_from_witness<F, L>(task, witness)
+        }
+        SparseTransitionTask::ProductTerm(_, _, _) => {
+            sparse_product_row_from_witness<F, L>(task, current, witness)
+        }
+        SparseTransitionTask::ProductCoefficient(_, _) => {
+            sparse_product_row_from_witness<F, L>(task, current, witness)
+        }
+        SparseTransitionTask::ProductRound(_, _) => {
+            sparse_round_row_from_witness<F, L>(task, current, witness)
+        }
+        SparseTransitionTask::ProductFinish(_) => {
+            sparse_round_row_from_witness<F, L>(task, current, witness)
+        }
+        SparseTransitionTask::LinearLimb(_, _, _) => {
+            sparse_linear_row_from_witness<F, L>(task, point, witness)
+        }
+        SparseTransitionTask::LinearFinish(_) => {
+            sparse_linear_row_from_witness<F, L>(task, point, witness)
+        }
+        SparseTransitionTask::BoundarySign(_) => {
+            sparse_boundary_row_from_witness<F, L>(task, next, witness)
+        }
+        SparseTransitionTask::BoundaryLimb(_, _) => {
+            sparse_boundary_row_from_witness<F, L>(task, next, witness)
+        }
+        SparseTransitionTask::TransitionFinish => {
+            sparse_boundary_row_from_witness<F, L>(task, next, witness)
+        }
+        SparseTransitionTask::Invalid => empty_sparse_row<F>(),
+    }
+}
+
 fn zero<F: Radix2Field>() -> F { F::radix2_zero() }
 fn one<F: Radix2Field>() -> F { F::radix2_root(0) }
 fn add<F: Radix2Field>(_ left: F, _ right: F) -> F { left.radix2_add(right) }
