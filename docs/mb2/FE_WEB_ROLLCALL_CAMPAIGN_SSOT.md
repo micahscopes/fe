@@ -952,6 +952,23 @@ Legend:
   used-lane mutation, including both sides of the value-to-slack handoff.
   Focused nextest passes 1/1 in 40.20 seconds. Convolution term reduction is
   now the next sparse equivalence gate.
+  Commit `99e1d6256` adds the convolution reduction without severing it from
+  those earlier phases. Seventy-two L4 product rows reduce each generated
+  triangular term sequence, close every coefficient with its incoming carry,
+  radix digit, and outgoing carry, and prove both initial and terminal zero
+  state. `SparseCopyAddress` is nominal and hierarchical. A Fe-derived copy
+  bus assigns a distinct challenge power to every range digit and product
+  carry, derives source multiplicities from the product DAG, and equates those
+  producers with all term and coefficient reads. It therefore introduces no
+  application-maintained address table. The independent integer model matches
+  every product row exactly, while the zero-import Wasm audit checks 315 local,
+  adjacency, terminal, and copy-balance relations under three challenges.
+  Mutations in all six row lanes fail. A coordinated two-row mutation that
+  preserves the convolution equations and adjacency is rejected by the copy
+  bus alone, preventing a locally consistent trace from substituting distant
+  source values. Focused nextest passes 1/1 in 37.73 seconds. Product rounding,
+  product signs, and linear ripples remain before full sparse and wide
+  transition equivalence can be claimed.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
   The first arithmetic-plan consolidation is landed at `ba2ded864`: one
