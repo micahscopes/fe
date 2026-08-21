@@ -198,6 +198,16 @@ pub struct SparseTaskRow<F: Radix2Field> {
 }
 impl<F: Radix2Field> core::marker::Copy for SparseTaskRow<F> {}
 
+/// Nominal addresses for values copied between distant sparse phases. The
+/// field key is derived from this type, so application code never maintains a
+/// numeric column or memory-address table.
+pub enum SparseCopyAddress {
+    RangeDigit(RangeNode, u32),
+    ProductCarry(ProductNode, u32),
+    Invalid,
+}
+impl core::marker::Copy for SparseCopyAddress {}
+
 pub const fn sparse_range_node_count() -> u32 { 31 }
 pub const fn sparse_product_node_count() -> u32 { 3 }
 pub const fn sparse_linear_node_count() -> u32 { 4 }
@@ -211,6 +221,11 @@ pub const fn sparse_radix_task_count<const L: usize>() -> u32 {
 pub const fn sparse_carry_task_count<const L: usize>() -> u32 {
     let limbs: u32 = L.downcast_truncate()
     sparse_product_node_count() * limbs * 2 * 37
+}
+
+pub const fn sparse_product_task_count<const L: usize>() -> u32 {
+    let limbs: u32 = L.downcast_truncate()
+    sparse_product_node_count() * (limbs * limbs + limbs + limbs)
 }
 
 pub const fn sparse_transition_task_count<const L: usize>() -> u32 {
@@ -755,6 +770,130 @@ pub fn sparse_carry_row_from_witness<F: Radix2Field, const L: usize>(
     }
 }
 
+fn product_left_value<const L: usize>(
+    _ node: ProductNode,
+    _ current: ComplexFixed<L>,
+) -> Fixed<L> {
+    match node {
+        ProductNode::Xx => current.real,
+        ProductNode::Yy => current.imaginary,
+        ProductNode::Xy => current.real,
+        ProductNode::Invalid => current.real,
+    }
+}
+
+fn product_right_value<const L: usize>(
+    _ node: ProductNode,
+    _ current: ComplexFixed<L>,
+) -> Fixed<L> {
+    match node {
+        ProductNode::Xx => current.real,
+        ProductNode::Yy => current.imaginary,
+        ProductNode::Xy => current.imaginary,
+        ProductNode::Invalid => current.real,
+    }
+}
+
+fn fixed_product_digit<const L: usize>(
+    _ product: FixedProductWitness<L>,
+    _ coefficient: u32,
+) -> u32 {
+    let limbs: u32 = L.downcast_truncate()
+    if coefficient < limbs {
+        product.low_digits[coefficient as usize]
+    } else {
+        product.high_digits[(coefficient - limbs) as usize]
+    }
+}
+
+fn product_term_accumulator_before<const L: usize>(
+    _ left: Fixed<L>,
+    _ right: Fixed<L>,
+    _ coefficient: u32,
+    _ term: u32,
+) -> u32 {
+    let mut accumulator: u32 = 0
+    let mut index: u32 = 0
+    while index < term {
+        let left_index = convolution_left_index<L>(coefficient, index)
+        let right_index = convolution_right_index<L>(coefficient, index)
+        accumulator = accumulator
+            + left.limbs[left_index as usize] * right.limbs[right_index as usize]
+        index = index + 1
+    }
+    accumulator
+}
+
+/// One convolution term or coefficient close in the shared six-column row.
+/// Term products form an explicit reduction scan. The coefficient close
+/// applies the incoming carry, emits the normalized digit and outgoing carry,
+/// resets the reduction accumulator, and forwards the carry to the next
+/// coefficient.
+pub fn sparse_product_row_from_witness<F: Radix2Field, const L: usize>(
+    _ task: SparseTransitionTask,
+    _ current: ComplexFixed<L>,
+    _ witness: FixedMandelbrotTransitionWitness<L>,
+) -> SparseTaskRow<F> {
+    match task {
+        SparseTransitionTask::ProductTerm(node, coefficient, term) => {
+            let left = product_left_value(node, current)
+            let right = product_right_value(node, current)
+            let left_index = convolution_left_index<L>(coefficient, term)
+            let right_index = convolution_right_index<L>(coefficient, term)
+            let left_digit = left.limbs[left_index as usize]
+            let right_digit = right.limbs[right_index as usize]
+            let before = product_term_accumulator_before(
+                left,
+                right,
+                coefficient,
+                term,
+            )
+            let carry_in = if coefficient == 0 {
+                0
+            } else {
+                fixed_product_carry(
+                    product_node_witness(node, witness),
+                    coefficient - 1,
+                )
+            }
+            SparseTaskRow {
+                value: natural<F>(left_digit),
+                auxiliary: natural<F>(right_digit),
+                accumulator_before: natural<F>(before),
+                accumulator_after: natural<F>(before + left_digit * right_digit),
+                state_before: natural<F>(carry_in),
+                state_after: natural<F>(carry_in),
+            }
+        }
+        SparseTransitionTask::ProductCoefficient(node, coefficient) => {
+            let product = product_node_witness(node, witness)
+            let left = product_left_value(node, current)
+            let right = product_right_value(node, current)
+            let terms = convolution_term_count<L>(coefficient)
+            let carry_in = if coefficient == 0 {
+                0
+            } else {
+                fixed_product_carry(product, coefficient - 1)
+            }
+            let carry_out = fixed_product_carry(product, coefficient)
+            SparseTaskRow {
+                value: natural<F>(fixed_product_digit(product, coefficient)),
+                auxiliary: natural<F>(carry_out),
+                accumulator_before: natural<F>(product_term_accumulator_before(
+                    left,
+                    right,
+                    coefficient,
+                    terms,
+                )),
+                accumulator_after: zero<F>(),
+                state_before: natural<F>(carry_in),
+                state_after: natural<F>(carry_out),
+            }
+        }
+        _ => empty_sparse_row<F>(),
+    }
+}
+
 fn zero<F: Radix2Field>() -> F { F::radix2_zero() }
 fn one<F: Radix2Field>() -> F { F::radix2_root(0) }
 fn add<F: Radix2Field>(_ left: F, _ right: F) -> F { left.radix2_add(right) }
@@ -1115,6 +1254,263 @@ pub fn sparse_carry_link_residuals<F: Radix2Field>(
             sub(next.accumulator_before, current.accumulator_after),
             sub(next.state_before, current.state_after),
         ),
+    }
+}
+
+fn absorb_sparse_product_row<F: Radix2Field>(
+    _ fold: own ConstraintFold<F>,
+    _ task: SparseTransitionTask,
+    _ row: SparseTaskRow<F>,
+) -> ConstraintFold<F> {
+    let mut fold = fold
+    match task {
+        SparseTransitionTask::ProductTerm(_node, _coefficient, _term) => {
+            fold = fold.absorb(sub(
+                row.accumulator_after,
+                add(
+                    row.accumulator_before,
+                    mul(row.value, row.auxiliary),
+                ),
+            ))
+            fold.absorb(sub(row.state_after, row.state_before))
+        }
+        SparseTransitionTask::ProductCoefficient(_node, _coefficient) => {
+            fold = fold.absorb(sub(
+                sub(
+                    add(row.accumulator_before, row.state_before),
+                    row.value,
+                ),
+                mul(natural<F>(8192), row.auxiliary),
+            ))
+            fold = fold.absorb(row.accumulator_after)
+            fold.absorb(sub(row.state_after, row.auxiliary))
+        }
+        _ => fold.absorb(one<F>()),
+    }
+}
+
+pub fn evaluate_sparse_product_row<F: Radix2Field>(
+    _ challenge: F,
+    _ task: SparseTransitionTask,
+    _ row: SparseTaskRow<F>,
+) -> FixedAirConstraintEvaluation<F> {
+    let fold = absorb_sparse_product_row(
+        ConstraintFold<F>::new(challenge),
+        task,
+        row,
+    )
+    FixedAirConstraintEvaluation {
+        valid: match task {
+            SparseTransitionTask::ProductTerm(_, _, _) => true,
+            SparseTransitionTask::ProductCoefficient(_, _) => true,
+            _ => false,
+        },
+        constraints: fold.constraints,
+        folded: fold.value,
+    }
+}
+
+pub fn sparse_product_initial_residuals<F: Radix2Field>(
+    _ row: SparseTaskRow<F>,
+) -> (F, F) {
+    (row.accumulator_before, row.state_before)
+}
+
+pub fn sparse_product_link_residuals<F: Radix2Field>(
+    _ current: SparseTaskRow<F>,
+    _ next: SparseTaskRow<F>,
+) -> (F, F) {
+    (
+        sub(next.accumulator_before, current.accumulator_after),
+        sub(next.state_before, current.state_after),
+    )
+}
+
+pub fn sparse_product_terminal_residuals<F: Radix2Field>(
+    _ row: SparseTaskRow<F>,
+) -> (F, F) {
+    (row.accumulator_after, row.state_after)
+}
+
+fn product_node_rank(_ node: ProductNode) -> u32 {
+    match node {
+        ProductNode::Xx => 0,
+        ProductNode::Yy => 1,
+        ProductNode::Xy => 2,
+        ProductNode::Invalid => 99,
+    }
+}
+
+fn product_copy_range_rank(_ node: RangeNode) -> u32 {
+    match node {
+        RangeNode::CurrentReal => 0,
+        RangeNode::CurrentImaginary => 1,
+        RangeNode::ProductLow(product) => 2 + 2 * product_node_rank(product),
+        RangeNode::ProductHigh(product) => 3 + 2 * product_node_rank(product),
+        _ => 99,
+    }
+}
+
+fn product_copy_key<F: Radix2Field, const L: usize>(
+    _ challenge: F,
+    _ address: SparseCopyAddress,
+) -> F {
+    let limbs: u32 = L.downcast_truncate()
+    let rank = match address {
+        SparseCopyAddress::RangeDigit(node, limb) => {
+            product_copy_range_rank(node) * limbs + limb
+        }
+        SparseCopyAddress::ProductCarry(product, coefficient) => {
+            8 * limbs + product_node_rank(product) * limbs * 2 + coefficient
+        }
+        SparseCopyAddress::Invalid => return zero<F>(),
+    }
+    let mut key = one<F>()
+    let mut exponent: u32 = 0
+    while exponent < rank + 1 {
+        key = mul(key, challenge)
+        exponent = exponent + 1
+    }
+    key
+}
+
+fn product_input_range(_ product: ProductNode, _ left: bool) -> RangeNode {
+    match product {
+        ProductNode::Xx => RangeNode::CurrentReal,
+        ProductNode::Yy => RangeNode::CurrentImaginary,
+        ProductNode::Xy => {
+            if left { RangeNode::CurrentReal } else { RangeNode::CurrentImaginary }
+        }
+        ProductNode::Invalid => RangeNode::Invalid,
+    }
+}
+
+fn product_digit_range<const L: usize>(
+    _ product: ProductNode,
+    _ coefficient: u32,
+) -> (RangeNode, u32) {
+    let limbs: u32 = L.downcast_truncate()
+    if coefficient < limbs {
+        (RangeNode::ProductLow(product), coefficient)
+    } else {
+        (RangeNode::ProductHigh(product), coefficient - limbs)
+    }
+}
+
+/// Producer side of the convolution copy bus. Multiplicities are derived from
+/// the nominal product DAG: each coordinate digit is read by one square twice
+/// and the mixed product once; each normalized digit is read once; each carry
+/// is read as an output and, except for the last carry, as the next input.
+pub fn sparse_product_copy_source<F: Radix2Field, const L: usize>(
+    _ challenge: F,
+    _ task: SparseTransitionTask,
+    _ row: SparseTaskRow<F>,
+) -> F {
+    match task {
+        SparseTransitionTask::RadixLimb(node, limb) => {
+            let limbs: u32 = L.downcast_truncate()
+            let multiplicity = match node {
+                RangeNode::CurrentReal => 3 * limbs,
+                RangeNode::CurrentImaginary => 3 * limbs,
+                RangeNode::ProductLow(_) => 1,
+                RangeNode::ProductHigh(_) => 1,
+                _ => 0,
+            }
+            mul(
+                mul(
+                    product_copy_key<F, L>(
+                        challenge,
+                        SparseCopyAddress::RangeDigit(node, limb),
+                    ),
+                    row.value,
+                ),
+                natural<F>(multiplicity),
+            )
+        }
+        SparseTransitionTask::CarryFinish(product, coefficient) => {
+            let limbs: u32 = L.downcast_truncate()
+            let multiplicity = if coefficient + 1 < limbs + limbs { 2 } else { 1 }
+            mul(
+                mul(
+                    product_copy_key<F, L>(
+                        challenge,
+                        SparseCopyAddress::ProductCarry(product, coefficient),
+                    ),
+                    row.value,
+                ),
+                natural<F>(multiplicity),
+            )
+        }
+        _ => zero<F>(),
+    }
+}
+
+pub fn sparse_product_copy_consumer<F: Radix2Field, const L: usize>(
+    _ challenge: F,
+    _ task: SparseTransitionTask,
+    _ row: SparseTaskRow<F>,
+) -> F {
+    match task {
+        SparseTransitionTask::ProductTerm(product, coefficient, term) => {
+            let left_index = convolution_left_index<L>(coefficient, term)
+            let right_index = convolution_right_index<L>(coefficient, term)
+            add(
+                mul(
+                    product_copy_key<F, L>(
+                        challenge,
+                        SparseCopyAddress::RangeDigit(
+                            product_input_range(product, true),
+                            left_index,
+                        ),
+                    ),
+                    row.value,
+                ),
+                mul(
+                    product_copy_key<F, L>(
+                        challenge,
+                        SparseCopyAddress::RangeDigit(
+                            product_input_range(product, false),
+                            right_index,
+                        ),
+                    ),
+                    row.auxiliary,
+                ),
+            )
+        }
+        SparseTransitionTask::ProductCoefficient(product, coefficient) => {
+            let digit = product_digit_range<L>(product, coefficient)
+            let mut contribution = mul(
+                product_copy_key<F, L>(
+                    challenge,
+                    SparseCopyAddress::RangeDigit(digit.0, digit.1),
+                ),
+                row.value,
+            )
+            contribution = add(
+                contribution,
+                mul(
+                    product_copy_key<F, L>(
+                        challenge,
+                        SparseCopyAddress::ProductCarry(product, coefficient),
+                    ),
+                    row.auxiliary,
+                ),
+            )
+            if coefficient > 0 {
+                contribution = add(
+                    contribution,
+                    mul(
+                        product_copy_key<F, L>(
+                            challenge,
+                            SparseCopyAddress::ProductCarry(product, coefficient - 1),
+                        ),
+                        row.state_before,
+                    ),
+                )
+            }
+            contribution
+        }
+        _ => zero<F>(),
     }
 }
 

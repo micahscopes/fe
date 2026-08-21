@@ -65,12 +65,20 @@ use mandelbrot_proof_fixed_air_core::{
     SparseTaskRow,
     SparseTransitionTask,
     evaluate_sparse_carry_row,
+    evaluate_sparse_product_row,
     evaluate_sparse_radix_row,
     evaluate_transition_witness_constraints,
     sparse_carry_initial_residuals,
     sparse_carry_link_residuals,
     sparse_carry_row_from_witness,
     sparse_carry_task_count,
+    sparse_product_copy_consumer,
+    sparse_product_copy_source,
+    sparse_product_initial_residuals,
+    sparse_product_link_residuals,
+    sparse_product_row_from_witness,
+    sparse_product_task_count,
+    sparse_product_terminal_residuals,
     sparse_radix_initial_residuals,
     sparse_radix_link_residuals,
     sparse_radix_row_from_witness,
@@ -498,6 +506,134 @@ pub fn fixed_transition4_sparse_carry_audit(
         previous_task = task
         index = index + 1
     }
+    (failures, constraints, rows)
+}
+
+fn sparse_product4_row(
+    _ current: ComplexFixed<4>,
+    _ witness: TransitionWitness4,
+    _ local_index: u32,
+) -> SparseTaskRow<BabyBear> {
+    let index = sparse_radix_task_count<4>()
+        + sparse_carry_task_count<4>()
+        + local_index
+    sparse_product_row_from_witness<BabyBear, 4>(
+        sparse_transition_task_at<4>(index),
+        current,
+        witness,
+    )
+}
+
+pub fn fixed_transition4_sparse_product_row(
+    _ prn: u32, _ pr0: u32, _ pr1: u32, _ pr2: u32, _ pr3: u32,
+    _ pin: u32, _ pi0: u32, _ pi1: u32, _ pi2: u32, _ pi3: u32,
+    _ crn: u32, _ cr0: u32, _ cr1: u32, _ cr2: u32, _ cr3: u32,
+    _ cin: u32, _ ci0: u32, _ ci1: u32, _ ci2: u32, _ ci3: u32,
+    _ index: u32,
+) -> (u32, u32, u32, u32, u32, u32) {
+    let (_point, current, witness) = transition4(
+        prn, [pr0, pr1, pr2, pr3], pin, [pi0, pi1, pi2, pi3],
+        crn, [cr0, cr1, cr2, cr3], cin, [ci0, ci1, ci2, ci3],
+    )
+    let row = sparse_product4_row(current, witness, index)
+    (
+        row.value.to_u32(),
+        row.auxiliary.to_u32(),
+        row.accumulator_before.to_u32(),
+        row.accumulator_after.to_u32(),
+        row.state_before.to_u32(),
+        row.state_after.to_u32(),
+    )
+}
+
+pub fn fixed_transition4_sparse_product_audit(
+    _ prn: u32, _ pr0: u32, _ pr1: u32, _ pr2: u32, _ pr3: u32,
+    _ pin: u32, _ pi0: u32, _ pi1: u32, _ pi2: u32, _ pi3: u32,
+    _ crn: u32, _ cr0: u32, _ cr1: u32, _ cr2: u32, _ cr3: u32,
+    _ cin: u32, _ ci0: u32, _ ci1: u32, _ ci2: u32, _ ci3: u32,
+    _ challenge: u32,
+    _ mutation_index: u32,
+    _ mutation_lane: u32,
+) -> (u32, u32, u32) {
+    let (point, current, witness) = transition4(
+        prn, [pr0, pr1, pr2, pr3], pin, [pi0, pi1, pi2, pi3],
+        crn, [cr0, cr1, cr2, cr3], cin, [ci0, ci1, ci2, ci3],
+    )
+    let next = fixed_mandelbrot_transition_output(witness)
+    let challenge = BabyBear::from_u32(challenge)
+    let rows = sparse_product_task_count<4>()
+    let product_offset = sparse_radix_task_count<4>() + sparse_carry_task_count<4>()
+    let mut failures: u32 = 0
+    let mut constraints: u32 = 0
+    let mut source = BabyBear::from_u32(0)
+    let mut consumer = BabyBear::from_u32(0)
+
+    let mut source_index: u32 = 0
+    while source_index < sparse_radix_task_count<4>() {
+        let task = sparse_transition_task_at<4>(source_index)
+        let row = sparse_radix4_row(point, current, next, witness, source_index)
+        source = source.radix2_add(
+            sparse_product_copy_source<BabyBear, 4>(challenge, task, row),
+        )
+        source_index = source_index + 1
+    }
+    source_index = 0
+    while source_index < sparse_carry_task_count<4>() {
+        let task = sparse_transition_task_at<4>(
+            sparse_radix_task_count<4>() + source_index,
+        )
+        let row = sparse_carry4_row(witness, source_index)
+        source = source.radix2_add(
+            sparse_product_copy_source<BabyBear, 4>(challenge, task, row),
+        )
+        source_index = source_index + 1
+    }
+
+    let mut previous = sparse_product4_row(current, witness, 0)
+    let mut index: u32 = 0
+    while index < rows {
+        let task = sparse_transition_task_at<4>(product_offset + index)
+        let mut row = sparse_product4_row(current, witness, index)
+        if mutation_lane == 7 && mutation_index == 0 && index == 0 {
+            let delta = BabyBear::from_u32(1)
+            row.auxiliary = row.auxiliary.radix2_add(delta)
+            row.accumulator_after = row.accumulator_after.radix2_add(row.value)
+        } else {
+            if mutation_lane == 7 && mutation_index == 0 && index == 1 {
+                let first = sparse_product4_row(current, witness, 0)
+                row.accumulator_before = row.accumulator_before.radix2_add(first.value)
+                row.value = row.value.radix2_add(first.value)
+            } else {
+                if index == mutation_index {
+                    row = mutate_sparse_row(row, mutation_lane)
+                }
+            }
+        }
+        let evaluated = evaluate_sparse_product_row(challenge, task, row)
+        constraints = constraints + evaluated.constraints
+        if !evaluated.valid || evaluated.folded.to_u32() != 0 {
+            failures = failures + 1
+        }
+        let links = if index == 0 {
+            sparse_product_initial_residuals(row)
+        } else {
+            sparse_product_link_residuals(previous, row)
+        }
+        constraints = constraints + 2
+        if links.0.to_u32() != 0 { failures = failures + 1 }
+        if links.1.to_u32() != 0 { failures = failures + 1 }
+        consumer = consumer.radix2_add(
+            sparse_product_copy_consumer<BabyBear, 4>(challenge, task, row),
+        )
+        previous = row
+        index = index + 1
+    }
+    let terminal = sparse_product_terminal_residuals(previous)
+    constraints = constraints + 2
+    if terminal.0.to_u32() != 0 { failures = failures + 1 }
+    if terminal.1.to_u32() != 0 { failures = failures + 1 }
+    constraints = constraints + 1
+    if source.to_u32() != consumer.to_u32() { failures = failures + 1 }
     (failures, constraints, rows)
 }
 

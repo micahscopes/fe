@@ -637,6 +637,68 @@ fn expected_sparse_carry_rows(current: &ComplexFx) -> Vec<[u32; 6]> {
     rows
 }
 
+fn expected_sparse_product_rows(current: &ComplexFx) -> Vec<[u32; 6]> {
+    let product_inputs = [
+        (&current.real, &current.real),
+        (&current.imaginary, &current.imaginary),
+        (&current.real, &current.imaginary),
+    ];
+    let mut rows = Vec::new();
+    for (left, right) in product_inputs {
+        let left_digits = limbs(left);
+        let right_digits = limbs(right);
+        let witness = expected_product_witness_words(left, right);
+        let mut digits = Vec::with_capacity(LIMBS * 2);
+        digits.extend(witness[1..1 + LIMBS].iter().copied());
+        digits.extend(witness[1 + 2 * LIMBS..1 + 3 * LIMBS].iter().copied());
+        let mut carries = Vec::with_capacity(LIMBS * 2);
+        carries.extend(witness[1 + LIMBS..1 + 2 * LIMBS].iter().copied());
+        carries.extend(witness[1 + 3 * LIMBS..1 + 4 * LIMBS].iter().copied());
+        for coefficient in 0..LIMBS * 2 {
+            let carry_in = if coefficient == 0 {
+                0
+            } else {
+                carries[coefficient - 1]
+            };
+            let first_left = coefficient.saturating_sub(LIMBS - 1);
+            let terms = if coefficient < LIMBS {
+                coefficient + 1
+            } else if coefficient < 2 * LIMBS - 1 {
+                2 * LIMBS - 1 - coefficient
+            } else {
+                0
+            };
+            let mut accumulator = 0u32;
+            for term in 0..terms {
+                let left_index = first_left + term;
+                let right_index = coefficient - left_index;
+                let left_digit = left_digits[left_index];
+                let right_digit = right_digits[right_index];
+                let before = accumulator;
+                accumulator += left_digit * right_digit;
+                rows.push([
+                    left_digit,
+                    right_digit,
+                    before,
+                    accumulator,
+                    carry_in,
+                    carry_in,
+                ]);
+            }
+            rows.push([
+                digits[coefficient],
+                carries[coefficient],
+                accumulator,
+                0,
+                carry_in,
+                carries[coefficient],
+            ]);
+        }
+    }
+    assert_eq!(rows.len(), 3 * (LIMBS * LIMBS + 2 * LIMBS));
+    rows
+}
+
 fn complex_words(value: &ComplexFx) -> Vec<u32> {
     let mut words = fixed_words(&value.real);
     words.extend(fixed_words(&value.imaginary));
@@ -1516,6 +1578,81 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                 );
                 assert_eq!(audited[1], expected_carry_constraints);
                 assert_eq!(audited[2], expected_carry_rows.len() as u32);
+            }
+
+            let expected_product_rows = expected_sparse_product_rows(current);
+            for (index, expected) in expected_product_rows.iter().enumerate() {
+                let mut row_arguments = arguments.clone();
+                row_arguments.push(index as u32);
+                assert_eq!(
+                    call(
+                        &mut store,
+                        &instance,
+                        "fixed_transition4_sparse_product_row",
+                        &row_arguments,
+                        6,
+                    ),
+                    *expected,
+                    "independently reconstructed sparse product row {index}",
+                );
+            }
+            let product_limb_count = LIMBS as u32;
+            let expected_product_constraints =
+                12 * product_limb_count * product_limb_count + 30 * product_limb_count + 3;
+            for challenge in [3u32, 7, 31] {
+                let mut audit_arguments = arguments.clone();
+                audit_arguments.extend([challenge, u32::MAX, 0]);
+                assert_eq!(
+                    call(
+                        &mut store,
+                        &instance,
+                        "fixed_transition4_sparse_product_audit",
+                        &audit_arguments,
+                        3,
+                    ),
+                    [
+                        0,
+                        expected_product_constraints,
+                        expected_product_rows.len() as u32,
+                    ],
+                    "clean sparse product and copy-bus audit, challenge {challenge}",
+                );
+            }
+            for lane in 1u32..=6 {
+                let mut audit_arguments = arguments.clone();
+                audit_arguments.extend([7, 0, lane]);
+                let audited = call(
+                    &mut store,
+                    &instance,
+                    "fixed_transition4_sparse_product_audit",
+                    &audit_arguments,
+                    3,
+                );
+                assert_ne!(
+                    audited[0], 0,
+                    "sparse product first-row lane {lane} mutation must fail",
+                );
+                assert_eq!(audited[1], expected_product_constraints);
+                assert_eq!(audited[2], expected_product_rows.len() as u32);
+            }
+            for challenge in [3u32, 7, 31] {
+                let mut audit_arguments = arguments.clone();
+                audit_arguments.extend([challenge, 0, 7]);
+                assert_eq!(
+                    call(
+                        &mut store,
+                        &instance,
+                        "fixed_transition4_sparse_product_audit",
+                        &audit_arguments,
+                        3,
+                    ),
+                    [
+                        1,
+                        expected_product_constraints,
+                        expected_product_rows.len() as u32,
+                    ],
+                    "the copy bus alone must reject a locally valid coordinated mutation",
+                );
             }
         }
         for challenge in [3u32, 7, 31] {
