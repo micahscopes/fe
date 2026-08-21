@@ -1144,8 +1144,24 @@ Legend:
   rounding mutations reject; the coordinated mutation fails exactly once at
   the terminal balance. The complete gate evaluates 45,057 rounding
   interaction constraints and passes 1/1 in 101.44 seconds.
+  Commit `49b048194` adds the eight-port linear interpretation. It binds
+  left/right inputs, sum and directed-difference intermediates, selected
+  outputs, signs, nonzero flags, terminal borrows, and the derived same-sign
+  and select-right controls. The address formulas follow the four-node linear
+  DAG with constant-degree field polynomials, including the even-node reuse of
+  `RealDifference` and `DoubleXy` outputs by their downstream additions. The
+  log-derivative model also corrects a weakness in the legacy scalar audit:
+  each central range-checked intermediate digit is now counted once for its
+  arithmetic production and once for its later selection use, rather than
+  relying on an aggregate power-sum cancellation. The independent Rust model
+  reconstructs this nominal graph directly from semantic task kinds and
+  matches all eight Fe inverse columns under three challenge pairs. Its source,
+  consumer, inverse, accumulator, and coordinated locally valid mutations all
+  reject, with the coordinated mutation failing only at the terminal balance.
+  The complete gate evaluates 69,633 linear interaction constraints and passes
+  1/1 in 112.73 seconds.
   This root authenticates the exact control and witness base trace but is not
-  yet a succinct leaf proof. Linear and boundary copies still need the same
+  yet a succinct leaf proof. The final boundary copies still need the same
   committed interaction treatment, followed by quartic transcript challenges
   and batch inversion. The interaction columns must then enter the existing
   BabyBear LDE, composition, multi-query, FRI, and canonical receipt
@@ -1236,9 +1252,9 @@ fallback. The semantic receipts are:
 ## Immediate burn-down order
 
 1. Run the external real-GPU handoff above before beginning the proof GPU port.
-2. Finish the authenticated BabyBear sparse AIR: extend the landed product and
-   rounding interactions to linear and boundary copies, derive quartic
-   challenges with batch inversion, then feed control, witness, and
+2. Finish the authenticated BabyBear sparse AIR: extend the landed product,
+   rounding, and linear interactions to the final boundary copies, derive
+   quartic challenges with batch inversion, then feed control, witness, and
    interactions through the existing LDE, composition, multi-query, FRI, and
    canonical receipt layers.
 3. Lower the BabyBear leaf prover and recursive merges through Fe Conal/CTFE
