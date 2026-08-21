@@ -1,0 +1,251 @@
+//! Field-neutral semantics for chunked, high-precision Mandelbrot proofs.
+//!
+//! BabyBear will prove and commit these values, but it does not define their
+//! numeric precision. Every coordinate is the canonical array boundary for
+//! `precision::fixed::Fixed<L>`, so increasing `L` increases the authored
+//! recurrence precision without changing the recursive interval algebra.
+
+use canonical_words::{CanonicalWords, CanonicalWordsProvider}
+use precision::field::{
+    Head,
+    Limbs,
+    Mac,
+    Select,
+    ShiftAppend,
+    SubBorrow,
+    Zero,
+}
+use precision::fixed::{Carry, Fixed, OrLower, Top, TruncRows}
+
+pub const MAX_RECURSIVE_CLAIM_BOUND: u32 = 1073741824
+
+pub struct ComplexFixed<const L: usize> {
+    pub real: Fixed<L>,
+    pub imaginary: Fixed<L>,
+}
+impl<const L: usize> core::marker::Copy for ComplexFixed<L> {}
+derive CanonicalWords for ComplexFixed<L> using CanonicalWordsProvider
+
+/// One immutable public statement shared by every leaf and parent proof.
+pub struct HighPrecisionEscapeClaim<const L: usize> {
+    pub point: ComplexFixed<L>,
+    pub bound: u32,
+}
+impl<const L: usize> core::marker::Copy for HighPrecisionEscapeClaim<L> {}
+derive CanonicalWords for HighPrecisionEscapeClaim<L> using CanonicalWordsProvider
+
+/// `z` is exactly `z_iteration` in `z_(n+1) = z_n^2 + c`. Escape status is
+/// derived from this state, never supplied as an unconstrained hint.
+pub struct OrbitBoundary<const L: usize> {
+    pub iteration: u32,
+    pub z: ComplexFixed<L>,
+    pub escaped: bool,
+}
+impl<const L: usize> core::marker::Copy for OrbitBoundary<L> {}
+derive CanonicalWords for OrbitBoundary<L> using CanonicalWordsProvider
+
+pub struct OrbitInterval<const L: usize> {
+    pub claim: HighPrecisionEscapeClaim<L>,
+    pub start: OrbitBoundary<L>,
+    pub end: OrbitBoundary<L>,
+}
+impl<const L: usize> core::marker::Copy for OrbitInterval<L> {}
+derive CanonicalWords for OrbitInterval<L> using CanonicalWordsProvider
+
+/// Semantic stand-in for the eventual proof-carrying interval. A leaf obtains
+/// `valid` only by replaying the exact Fe recurrence. A parent obtains it only
+/// from two valid children with the same statement and an identical shared
+/// boundary. The proof interpreter will constrain these same predicates.
+pub struct RecursiveOrbitAccumulator<const L: usize> {
+    pub valid: bool,
+    pub leaves: u32,
+    pub interval: OrbitInterval<L>,
+}
+impl<const L: usize> core::marker::Copy for RecursiveOrbitAccumulator<L> {}
+derive CanonicalWords for RecursiveOrbitAccumulator<L> using CanonicalWordsProvider
+
+fn fixed_kernel_ready<const L: usize>() -> bool { L >= 2 }
+
+fn complex_is_canonical<const L: usize>(_ value: ComplexFixed<L>) -> bool {
+    value.real.is_canonical() && value.imaginary.is_canonical()
+}
+
+pub fn complex_equals<const L: usize>(
+    _ left: ComplexFixed<L>,
+    _ right: ComplexFixed<L>,
+) -> bool {
+    left.real.equals(right.real) && left.imaginary.equals(right.imaginary)
+}
+
+pub fn claim_equals<const L: usize>(
+    _ left: HighPrecisionEscapeClaim<L>,
+    _ right: HighPrecisionEscapeClaim<L>,
+) -> bool {
+    left.bound == right.bound && complex_equals(left.point, right.point)
+}
+
+pub fn boundary_equals<const L: usize>(
+    _ left: OrbitBoundary<L>,
+    _ right: OrbitBoundary<L>,
+) -> bool {
+    left.iteration == right.iteration
+        && left.escaped == right.escaped
+        && complex_equals(left.z, right.z)
+}
+
+pub fn claim_is_valid<const L: usize>(_ claim: HighPrecisionEscapeClaim<L>) -> bool {
+    fixed_kernel_ready<L>()
+        && claim.bound > 0
+        && claim.bound <= MAX_RECURSIVE_CLAIM_BOUND
+        && complex_is_canonical(claim.point)
+        && claim.point.real.absolute_at_most_whole(4)
+        && claim.point.imaginary.absolute_at_most_whole(4)
+}
+
+pub fn complex_has_escaped<const L: usize>(_ z: ComplexFixed<L>) -> bool
+    where Limbs<L>: TruncRows<Limbs<L>> + Mac + ShiftAppend + Head + Carry
+                  + Zero + SubBorrow + Select + Top + OrLower
+                  + core::marker::Copy,
+{
+    if !complex_is_canonical(z) { return false }
+    z.real.square().plus(z.imaginary.square()).absolute_greater_than_whole(4)
+}
+
+pub fn boundary_is_valid<const L: usize>(
+    _ claim: HighPrecisionEscapeClaim<L>,
+    _ boundary: OrbitBoundary<L>,
+) -> bool
+    where Limbs<L>: TruncRows<Limbs<L>> + Mac + ShiftAppend + Head + Carry
+                  + Zero + SubBorrow + Select + Top + OrLower
+                  + core::marker::Copy,
+{
+    claim_is_valid(claim)
+        && boundary.iteration <= claim.bound
+        && complex_is_canonical(boundary.z)
+        && boundary.escaped == complex_has_escaped(boundary.z)
+}
+
+pub fn initial_boundary<const L: usize>() -> OrbitBoundary<L> {
+    OrbitBoundary {
+        iteration: 0,
+        z: ComplexFixed { real: Fixed::zero(), imaginary: Fixed::zero() },
+        escaped: false,
+    }
+}
+
+fn advance_boundary<const L: usize>(
+    _ claim: HighPrecisionEscapeClaim<L>,
+    _ boundary: OrbitBoundary<L>,
+) -> OrbitBoundary<L>
+    where Limbs<L>: TruncRows<Limbs<L>> + Mac + ShiftAppend + Head + Carry
+                  + Zero + SubBorrow + Select + Top + OrLower
+                  + core::marker::Copy,
+{
+    let xx = boundary.z.real.square()
+    let yy = boundary.z.imaginary.square()
+    let xy = boundary.z.real.multiply(boundary.z.imaginary)
+    let next = ComplexFixed {
+        real: xx.subtract(yy).plus(claim.point.real),
+        imaginary: xy.plus(xy).plus(claim.point.imaginary),
+    }
+    OrbitBoundary {
+        iteration: boundary.iteration + 1,
+        z: next,
+        escaped: complex_has_escaped(next),
+    }
+}
+
+pub fn evaluate_chunk<const L: usize>(
+    _ claim: HighPrecisionEscapeClaim<L>,
+    _ start: OrbitBoundary<L>,
+    _ requested_steps: u32,
+) -> RecursiveOrbitAccumulator<L>
+    where Limbs<L>: TruncRows<Limbs<L>> + Mac + ShiftAppend + Head + Carry
+                  + Zero + SubBorrow + Select + Top + OrLower
+                  + core::marker::Copy,
+{
+    let seed = OrbitInterval { claim: claim, start: start, end: start }
+    if requested_steps == 0
+        || !boundary_is_valid(claim, start)
+        || start.escaped
+    {
+        return RecursiveOrbitAccumulator { valid: false, leaves: 0, interval: seed }
+    }
+    if requested_steps > claim.bound - start.iteration {
+        return RecursiveOrbitAccumulator { valid: false, leaves: 0, interval: seed }
+    }
+
+    let mut end = start
+    let mut performed: u32 = 0
+    while performed < requested_steps && !end.escaped {
+        end = advance_boundary(claim, end)
+        performed = performed + 1
+    }
+    RecursiveOrbitAccumulator {
+        valid: performed > 0,
+        leaves: 1,
+        interval: OrbitInterval { claim: claim, start: start, end: end },
+    }
+}
+
+/// Independently replay one proposed leaf. This is the field-neutral semantic
+/// oracle. The succinct BabyBear verifier will check an authenticated proof of
+/// this relation instead of executing this loop.
+pub fn certify_leaf<const L: usize>(
+    _ interval: OrbitInterval<L>,
+) -> RecursiveOrbitAccumulator<L>
+    where Limbs<L>: TruncRows<Limbs<L>> + Mac + ShiftAppend + Head + Carry
+                  + Zero + SubBorrow + Select + Top + OrLower
+                  + core::marker::Copy,
+{
+    if interval.end.iteration <= interval.start.iteration {
+        return RecursiveOrbitAccumulator { valid: false, leaves: 0, interval: interval }
+    }
+    let steps = interval.end.iteration - interval.start.iteration
+    let expected = evaluate_chunk(interval.claim, interval.start, steps)
+    let valid = expected.valid && boundary_equals(expected.interval.end, interval.end)
+    RecursiveOrbitAccumulator {
+        valid: valid,
+        leaves: if valid { 1 } else { 0 },
+        interval: interval,
+    }
+}
+
+fn interval_shape_is_valid<const L: usize>(_ interval: OrbitInterval<L>) -> bool {
+    claim_is_valid(interval.claim)
+        && interval.start.iteration < interval.end.iteration
+        && interval.end.iteration <= interval.claim.bound
+        && complex_is_canonical(interval.start.z)
+        && complex_is_canonical(interval.end.z)
+}
+
+pub fn merge_adjacent<const L: usize>(
+    _ left: RecursiveOrbitAccumulator<L>,
+    _ right: RecursiveOrbitAccumulator<L>,
+) -> RecursiveOrbitAccumulator<L> {
+    let merged = OrbitInterval {
+        claim: left.interval.claim,
+        start: left.interval.start,
+        end: right.interval.end,
+    }
+    let mut valid = left.valid
+        && right.valid
+        && left.leaves > 0
+        && right.leaves > 0
+        && interval_shape_is_valid(left.interval)
+        && interval_shape_is_valid(right.interval)
+        && claim_equals(left.interval.claim, right.interval.claim)
+        && boundary_equals(left.interval.end, right.interval.start)
+    if left.leaves > MAX_RECURSIVE_CLAIM_BOUND
+        || right.leaves > MAX_RECURSIVE_CLAIM_BOUND
+    {
+        valid = false
+    } else if left.leaves > MAX_RECURSIVE_CLAIM_BOUND - right.leaves {
+        valid = false
+    }
+    RecursiveOrbitAccumulator {
+        valid: valid,
+        leaves: if valid { left.leaves + right.leaves } else { 0 },
+        interval: merged,
+    }
+}

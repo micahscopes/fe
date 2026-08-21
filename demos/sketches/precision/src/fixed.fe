@@ -43,6 +43,7 @@
 //! GPU.
 
 use core::marker::Copy
+use canonical_words::{CanonicalWords, WordSink, WordSource, encode_canonical_words}
 use super::field::{Limbs, LimbLast, LimbMore, Mac, ShiftAppend, SubBorrow, Select, Zero, Head, LIMB_BITS, LIMB_BASE}
 
 // Float intrinsics (compiler-recognized by name, same set fmath declares);
@@ -54,6 +55,153 @@ extern {
     fn __i32_from_f32(_: f32) -> i32
     fn __f32_from_i32(_: i32) -> f32
     const fn __bitcast<From, To>(_: From) -> To
+}
+
+// -----------------------------------------------------------------------------
+// Nominal, array-backed boundary value.
+// -----------------------------------------------------------------------------
+
+/// Canonical public form of the signed fixed-point value used by the numeric
+/// kernel below. The arithmetic implementation keeps its recursive
+/// `Limbs<L>` shape, while proof, browser, and storage boundaries get an
+/// indexable const-generic vector. Both forms carry the same LSB-first 13-bit
+/// digits and are converted in Fe.
+pub struct Fixed<const L: usize> {
+    pub negative: bool,
+    pub limbs: [u32; L],
+}
+
+impl<const L: usize> Copy for Fixed<L> {}
+
+fn fixed_limbs_are_zero<const L: usize>(_ limbs: [u32; L]) -> bool {
+    let mut index: usize = 0
+    while index < L {
+        if limbs[index] != 0 { return false }
+        index = index + 1
+    }
+    true
+}
+
+fn fixed_limbs_are_canonical<const L: usize>(_ limbs: [u32; L]) -> bool {
+    let mut index: usize = 0
+    while index < L {
+        if limbs[index] >= LIMB_BASE { return false }
+        index = index + 1
+    }
+    true
+}
+
+fn fixed_magnitude_from_words<const L: usize>(_ words: [u32; L]) -> Limbs<L>
+    where Limbs<L>: ShiftAppend + Zero + Copy,
+{
+    let mut magnitude: Limbs<L> = <Limbs<L> as Zero>::zero()
+    let mut index: usize = 0
+    while index < L {
+        magnitude = <Limbs<L> as ShiftAppend>::shift_append(
+            t: magnitude,
+            v: words[index],
+        )
+        index = index + 1
+    }
+    magnitude
+}
+
+fn fixed_magnitude_to_words<const L: usize>(_ magnitude: Limbs<L>) -> [u32; L]
+    where Limbs<L>: Head + ShiftAppend + Copy,
+{
+    let mut words: [u32; L] = [0; L]
+    let mut remaining = magnitude
+    let mut index: usize = 0
+    while index < L {
+        words[index] = remaining.head()
+        remaining = <Limbs<L> as ShiftAppend>::shift_append(t: remaining, v: 0)
+        index = index + 1
+    }
+    words
+}
+
+fn fixed_from_parts<const L: usize>(_ sign: u32, _ magnitude: Limbs<L>) -> Fixed<L>
+    where Limbs<L>: Head + ShiftAppend + Copy,
+{
+    let limbs = fixed_magnitude_to_words<L>(magnitude)
+    Fixed {
+        negative: sign == 1 && !fixed_limbs_are_zero(limbs),
+        limbs: limbs,
+    }
+}
+
+impl<const L: usize> Fixed<L> {
+    pub const fn zero() -> Self {
+        Self { negative: false, limbs: [0; L] }
+    }
+
+    /// A fixed value is canonical only when it has at least one fractional
+    /// limb, every digit is in radix 2^13, and zero has the unique positive
+    /// sign. `L >= 2` is therefore enforced at the value boundary rather than
+    /// repeated as a caller convention.
+    pub fn is_canonical(self) -> bool {
+        if L < 2 || !fixed_limbs_are_canonical(self.limbs) { return false }
+        !self.negative || !fixed_limbs_are_zero(self.limbs)
+    }
+
+    pub fn equals(self, _ other: Self) -> bool {
+        if self.negative != other.negative { return false }
+        let mut index: usize = 0
+        while index < L {
+            if self.limbs[index] != other.limbs[index] { return false }
+            index = index + 1
+        }
+        true
+    }
+
+    pub fn absolute_at_most_whole(self, _ whole: u32) -> bool {
+        if !self.is_canonical() { return false }
+        let top = self.limbs[L - 1]
+        if top < whole { return true }
+        if top > whole { return false }
+        let mut index: usize = 0
+        while index + 1 < L {
+            if self.limbs[index] != 0 { return false }
+            index = index + 1
+        }
+        true
+    }
+
+    pub fn absolute_greater_than_whole(self, _ whole: u32) -> bool {
+        if !self.is_canonical() { return false }
+        let top = self.limbs[L - 1]
+        if top > whole { return true }
+        if top < whole { return false }
+        let mut index: usize = 0
+        while index + 1 < L {
+            if self.limbs[index] != 0 { return true }
+            index = index + 1
+        }
+        false
+    }
+}
+
+/// The wire form is the nominal schema itself: one canonical boolean followed
+/// by exactly `L` plain 13-bit digits. Backend storage or Montgomery words
+/// never leak into this representation.
+impl<const L: usize> CanonicalWords for Fixed<L> {
+    const WORDS: u32 = 1 + L.downcast_truncate()
+
+    fn encode<W: WordSink>(ref self, _ writer: W) -> W {
+        if !self.is_canonical() { return writer.reject() }
+        let writer: W = encode_canonical_words(ref self.negative, writer)
+        encode_canonical_words(ref self.limbs, writer)
+    }
+
+    fn decode<R: WordSource>(mut self, _ reader: R) -> R {
+        let reader = self.negative.decode(reader)
+        let reader = self.limbs.decode(reader)
+        if !self.is_canonical() {
+            self = Self::zero()
+            return reader.reject()
+        }
+        reader
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -244,6 +392,59 @@ pub fn sqr<const L: usize>(_ sign: u32, _ a: Limbs<L>) -> (u32, Limbs<L>)
     where Limbs<L>: TruncRows<Limbs<L>> + Mac + ShiftAppend + Head + Carry + Zero + Copy,
 {
     mul<L>(sign, a, sign, a)
+}
+
+/// Ergonomic arithmetic on the nominal boundary form. These methods are thin
+/// Fe interpretations of the one shared limb kernel, not a second numeric
+/// implementation. They also normalize signed zero at every result boundary.
+impl<const L: usize> Fixed<L>
+    where Limbs<L>: TruncRows<Limbs<L>> + Mac + ShiftAppend + Head + Carry
+                  + Zero + SubBorrow + Select + Top + OrLower + Copy,
+{
+    pub fn plus(self, _ other: Self) -> Self {
+        let left = fixed_magnitude_from_words<L>(self.limbs)
+        let right = fixed_magnitude_from_words<L>(other.limbs)
+        let (sign, magnitude) = add<Limbs<L>>(
+            if self.negative { 1 } else { 0 },
+            left,
+            if other.negative { 1 } else { 0 },
+            right,
+        )
+        fixed_from_parts<L>(sign, magnitude)
+    }
+
+    pub fn subtract(self, _ other: Self) -> Self {
+        let left = fixed_magnitude_from_words<L>(self.limbs)
+        let right = fixed_magnitude_from_words<L>(other.limbs)
+        let (sign, magnitude) = sub<Limbs<L>>(
+            if self.negative { 1 } else { 0 },
+            left,
+            if other.negative { 1 } else { 0 },
+            right,
+        )
+        fixed_from_parts<L>(sign, magnitude)
+    }
+
+    pub fn multiply(self, _ other: Self) -> Self {
+        let left = fixed_magnitude_from_words<L>(self.limbs)
+        let right = fixed_magnitude_from_words<L>(other.limbs)
+        let (sign, magnitude) = mul<L>(
+            if self.negative { 1 } else { 0 },
+            left,
+            if other.negative { 1 } else { 0 },
+            right,
+        )
+        fixed_from_parts<L>(sign, magnitude)
+    }
+
+    pub fn square(self) -> Self {
+        let value = fixed_magnitude_from_words<L>(self.limbs)
+        let (sign, magnitude) = sqr<L>(
+            if self.negative { 1 } else { 0 },
+            value,
+        )
+        fixed_from_parts<L>(sign, magnitude)
+    }
 }
 
 // -----------------------------------------------------------------------------

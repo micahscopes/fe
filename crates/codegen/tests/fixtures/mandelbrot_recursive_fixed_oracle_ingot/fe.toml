@@ -1,0 +1,9 @@
+[ingot]
+name = "mandelbrot_recursive_fixed_oracle_ingot"
+version = "0.1.0"
+
+[dependencies]
+canonical_words = "../../../../../ingots/canonical_words"
+core = "../../../../../ingots/core"
+mandelbrot_proof_recursive = "../../../../../demos/capstones/mandelbrot-proof/recursive"
+precision = "../../../../../demos/sketches/precision"

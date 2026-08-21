@@ -1,0 +1,133 @@
+//! Thin zero-import Wasm boundary for the recursive fixed-point oracle.
+
+use canonical_words::{
+    BrowserWordReader,
+    BrowserWordWriter,
+    CanonicalWords,
+    encode_canonical_words,
+}
+use core::BrowserBytes
+use mandelbrot_proof_recursive::{
+    ComplexFixed,
+    HighPrecisionEscapeClaim,
+    OrbitInterval,
+    RecursiveOrbitAccumulator,
+    certify_leaf,
+    evaluate_chunk,
+    initial_boundary,
+    merge_adjacent,
+}
+use precision::fixed::Fixed
+
+type Accumulator4 = RecursiveOrbitAccumulator<4>
+
+fn fixed4(_ negative: u32, _ limbs: [u32; 4]) -> Fixed<4> {
+    Fixed { negative: negative == 1, limbs: limbs }
+}
+
+fn claim4(
+    _ real_negative: u32,
+    _ real: [u32; 4],
+    _ imaginary_negative: u32,
+    _ imaginary: [u32; 4],
+    _ bound: u32,
+) -> HighPrecisionEscapeClaim<4> {
+    HighPrecisionEscapeClaim {
+        point: ComplexFixed {
+            real: fixed4(real_negative, real),
+            imaginary: fixed4(imaginary_negative, imaginary),
+        },
+        bound: bound,
+    }
+}
+
+fn encode_accumulator4(_ accumulator: Accumulator4) -> BrowserBytes {
+    let writer = BrowserWordWriter::allocate(<Accumulator4 as CanonicalWords>::WORDS)
+    encode_canonical_words(ref accumulator, writer).finish()
+}
+
+fn empty_accumulator4() -> Accumulator4 {
+    let claim = claim4(0, [0; 4], 0, [0; 4], 1)
+    let boundary = initial_boundary<4>()
+    RecursiveOrbitAccumulator {
+        valid: false,
+        leaves: 0,
+        interval: OrbitInterval { claim: claim, start: boundary, end: boundary },
+    }
+}
+
+pub fn recursive_chunk4_encoded(
+    _ real_negative: u32,
+    _ r0: u32,
+    _ r1: u32,
+    _ r2: u32,
+    _ r3: u32,
+    _ imaginary_negative: u32,
+    _ i0: u32,
+    _ i1: u32,
+    _ i2: u32,
+    _ i3: u32,
+    _ bound: u32,
+    _ requested_steps: u32,
+) -> BrowserBytes {
+    let claim = claim4(
+        real_negative,
+        [r0, r1, r2, r3],
+        imaginary_negative,
+        [i0, i1, i2, i3],
+        bound,
+    )
+    encode_accumulator4(evaluate_chunk(claim, initial_boundary<4>(), requested_steps))
+}
+
+/// Mutation modes exercise only parent topology:
+/// 0 valid, 1 shared boundary mismatch, 2 statement mismatch,
+/// 3 invalid child, 4 non-adjacent iteration.
+pub fn recursive_merge4_encoded(
+    _ real_negative: u32,
+    _ r0: u32,
+    _ r1: u32,
+    _ r2: u32,
+    _ r3: u32,
+    _ imaginary_negative: u32,
+    _ i0: u32,
+    _ i1: u32,
+    _ i2: u32,
+    _ i3: u32,
+    _ bound: u32,
+    _ left_steps: u32,
+    _ right_steps: u32,
+    _ mutation: u32,
+) -> BrowserBytes {
+    let claim = claim4(
+        real_negative,
+        [r0, r1, r2, r3],
+        imaginary_negative,
+        [i0, i1, i2, i3],
+        bound,
+    )
+    let left = evaluate_chunk(claim, initial_boundary<4>(), left_steps)
+    let mut right_claim = claim
+    let mut right_start = left.interval.end
+    if mutation == 1 {
+        right_start.z.real.limbs[0] = right_start.z.real.limbs[0] + 1
+    }
+    if mutation == 2 && right_claim.bound > 1 {
+        right_claim.bound = right_claim.bound - 1
+    }
+    if mutation == 4 {
+        right_start.iteration = right_start.iteration + 1
+    }
+    let mut right = evaluate_chunk(right_claim, right_start, right_steps)
+    if mutation == 3 { right.valid = false }
+    encode_accumulator4(merge_adjacent(left, right))
+}
+
+pub fn recursive_accumulator4_decode_at(_ ptr: u32, _ len: u32) -> (u32, u32) {
+    let mut accumulator = empty_accumulator4()
+    let reader = BrowserWordReader::new(BrowserBytes { ptr: ptr, len: len })
+    let reader = accumulator.decode(reader)
+    if !reader.complete() { return (0, 0) }
+    let replay = certify_leaf(accumulator.interval)
+    (1, if accumulator.valid && accumulator.leaves == 1 && replay.valid { 1 } else { 0 })
+}
