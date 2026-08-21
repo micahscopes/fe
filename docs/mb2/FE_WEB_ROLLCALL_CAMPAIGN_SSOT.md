@@ -2,7 +2,7 @@
 
 Status: authoritative campaign burn-down
 
-Updated: 2026-08-20
+Updated: 2026-08-21
 
 Goal spine: write the math, get the kernel, keep the proof.
 
@@ -773,10 +773,29 @@ Legend:
   performs a direct inverse DFT and polynomial evaluation rather than replaying
   Fe's butterfly schedule, and computes both roots with Plonky3 Poseidon2. It
   passed 1/1 in 157.08 seconds and rejects non-escaping claims and a zero coset
-  shift. A canonical variable-length BabyBear receipt codec remains pending.
-  The explicitly named
-  checkpoint remains a four-row, 16-point toy protocol and is not yet a
-  succinct production proof. The same permutation has also
+  shift. Commits `5ffa02d5c`, `b3f0123b0`, and `c34720fc2` close the canonical
+  BabyBear receipt boundary without a host codec. `ImplBuilder.borrow_mut`
+  lets FCO providers synthesize explicitly qualified mutable field decoders,
+  with positive replay, negative fail-closed, and frozen command-surface
+  gates. Generic canonical codecs now cover u32-native prime fields, quartic
+  extensions, Poseidon2 digests, and counted sparse Merkle multipaths. The
+  proof carrier consolidates composition and round-branded FRI openings into
+  one role-branded `LdeMultiOpening`, derives nested stream codecs from the Fe
+  record and recursive schedule types, and emits only counted leaf, sibling,
+  and value prefixes. The optimized zero-import Wasm gate parses the public
+  carrier topology independently, proves that no unused capacity slots enter
+  the wire receipt, roundtrips through Fe decode and verification, and rejects
+  truncation, trailing data, noncanonical booleans, the BabyBear modulus,
+  over-capacity counts, and authenticated value mutation. It passed 1/1 in
+  467.98 seconds. The same run peaked near 10 GB RSS, so whole-receipt
+  generated-function lowering is now a measured compile-cost risk. It also
+  exposed an outstanding backend bug for an uninitialized local first written
+  through a `mut` call: semantic checking accepts it, but Sonatina SSA lowering
+  treats the local as undefined. The receipt currently begins from an explicit
+  Fe canonical-empty value, not a host workaround. Fixing the general backend
+  path and reducing derived decoder compile cost remain compiler work.
+  The explicitly named checkpoint remains a four-row, 16-point toy protocol
+  and is not yet a succinct production proof. The same permutation has also
   lowered to Naga-valid u32-only WGSL with the local Sonatina conditional-loop
   structurizer fixes, but that browser gate is not landed until those commits
   are published and the Fe dependency pin advances. The complete protocol
