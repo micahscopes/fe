@@ -565,9 +565,11 @@ pub fn pair_verify_two<F: Copy, H: TwoToOneHasher<F>>(
         && H::equal(H::hash2(positive_leaf, negative_leaf), expected)
 }
 
-/// Build a canonical sparse multipath from arbitrary requested leaf indices.
-/// Duplicate and unsorted requests are normalized into one ascending leaf set.
-pub fn multi_path_from_leaves<
+/// Build a complete root and canonical sparse multipath in one tree
+/// traversal. Duplicate and unsorted requests are normalized into one
+/// ascending leaf set. Caller-owned outputs avoid an aggregate return at the
+/// Wasm and GPU boundary.
+pub fn write_multi_path_and_root_from_leaves<
     F: Copy,
     H: TwoToOneHasher<F>,
     const N: usize,
@@ -575,9 +577,11 @@ pub fn multi_path_from_leaves<
     const MAX_LEAVES: usize,
     const MAX_SIBLINGS: usize,
 >(
-    _ leaves: own [F; N],
+    _ leaves: ref [F; N],
     _ requested: own [u32; REQUESTS],
-) -> MerkleMultiPath<F, MAX_LEAVES, MAX_SIBLINGS>
+    _ path: mut MerkleMultiPath<F, MAX_LEAVES, MAX_SIBLINGS>,
+    _ root: mut MerkleRoot<F>,
+) -> bool
 where
     N > 1,
     N <= 2147483648,
@@ -585,6 +589,8 @@ where
     REQUESTS > 0,
     MAX_LEAVES > 0,
 {
+    path = invalid_multi_path<F, H, MAX_LEAVES, MAX_SIBLINGS>()
+    root = invalid_root<F, H>()
     let width_u32: u32 = N.downcast_truncate()
     let mut indices = [0; MAX_LEAVES]
     let mut count: usize = 0
@@ -592,7 +598,7 @@ where
     while request < REQUESTS {
         let index = requested[request]
         if index >= width_u32 {
-            return invalid_multi_path<F, H, MAX_LEAVES, MAX_SIBLINGS>()
+            return false
         }
 
         let mut position: usize = 0
@@ -601,7 +607,7 @@ where
         }
         if position == count || indices[position] != index {
             if count >= MAX_LEAVES {
-                return invalid_multi_path<F, H, MAX_LEAVES, MAX_SIBLINGS>()
+                return false
             }
             let mut cursor = count
             while cursor > position {
@@ -613,12 +619,15 @@ where
         }
         request = request + 1
     }
-    if count == 0 {
-        return invalid_multi_path<F, H, MAX_LEAVES, MAX_SIBLINGS>()
-    }
+    if count == 0 { return false }
 
     let leaf_indices = indices
-    let mut nodes = leaves
+    let mut nodes = [H::zero(); N]
+    let mut leaf_index: usize = 0
+    while leaf_index < N {
+        nodes[leaf_index] = leaves[leaf_index]
+        leaf_index = leaf_index + 1
+    }
     let mut siblings = [H::zero(); MAX_SIBLINGS]
     let mut sibling_count: usize = 0
     let mut active_count = count
@@ -636,7 +645,7 @@ where
                 cursor = cursor + 2
             } else {
                 if sibling_count >= MAX_SIBLINGS {
-                    return invalid_multi_path<F, H, MAX_LEAVES, MAX_SIBLINGS>()
+                    return false
                 }
                 siblings[sibling_count] = nodes[(index ^ 1) as usize]
                 sibling_count = sibling_count + 1
@@ -656,17 +665,49 @@ where
         active_count = next_count
         width = parent_count
     }
-    if active_count != 1 || indices[0] != 0 {
-        return invalid_multi_path<F, H, MAX_LEAVES, MAX_SIBLINGS>()
-    }
+    if active_count != 1 || indices[0] != 0 { return false }
 
-    MerkleMultiPath {
+    path = MerkleMultiPath {
         valid: true,
         leaf_count: count.downcast_truncate(),
         leaf_indices: leaf_indices,
         sibling_count: sibling_count.downcast_truncate(),
         siblings: siblings,
     }
+    root = MerkleRoot { valid: true, value: nodes[0] }
+    true
+}
+
+/// Compatibility projection for callers that need only the sparse path.
+pub fn multi_path_from_leaves<
+    F: Copy,
+    H: TwoToOneHasher<F>,
+    const N: usize,
+    const REQUESTS: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ leaves: own [F; N],
+    _ requested: own [u32; REQUESTS],
+) -> MerkleMultiPath<F, MAX_LEAVES, MAX_SIBLINGS>
+where
+    N > 1,
+    N <= 2147483648,
+    { (N & (N - 1)) == 0 },
+    REQUESTS > 0,
+    MAX_LEAVES > 0,
+{
+    let mut path = invalid_multi_path<F, H, MAX_LEAVES, MAX_SIBLINGS>()
+    let mut root = invalid_root<F, H>()
+    write_multi_path_and_root_from_leaves<
+        F,
+        H,
+        N,
+        REQUESTS,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >(ref leaves, requested, mut path, mut root)
+    path
 }
 
 /// Reconstruct a root from canonical sparse leaves and their deduplicated
