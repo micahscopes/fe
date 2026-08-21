@@ -728,8 +728,24 @@ Legend:
   requests directly into the sparse opener. The zero-import Plonky3 gate
   independently recomputes the actual FQ samples, unique-leaf sets, and
   sibling counts, and passed 1/1 in 205.35 seconds. A complete shared
-  multi-query FRI carrier and fold verifier, sparse main and auxiliary AIR LDE
-  openings, a canonical variable-length BabyBear receipt codec, and
+  multi-query FRI carrier and fold verifier are now landed. Commit
+  `59e67aba2` interprets `FriSchedule<1, 4>` and the four-sample query plan into
+  one composition multipath, one shared multipath for every nonterminal FRI
+  layer, and the one-evaluation terminal. Capacities, round brands, layer
+  widths, and sibling bounds remain derived from the schedule and query count;
+  there is no second layer list or FQ call sequence. Commit `fc5c766f9` adds a
+  two-pass verifier. Its authentication interpretation checks each Merkle
+  multipath exactly once while reconstructing the typed transcript and fold
+  challenges. A second query-plan interpretation lowers the typed samples to
+  one fixed buffer, then an ordinary Fe loop reuses a single
+  schedule-specialized fold checker for all four queries. This reduced focused
+  Fe analysis from more than 9 minutes 55 seconds to 35.6 seconds without
+  moving protocol work into the host. The optimized zero-import Wasm gate
+  independently derives the FQ samples, canonical leaf sets, sibling counts,
+  roots, and terminal value, then rejects mutations at the composition, each
+  of the three sparse FRI layers, terminal, external transcript, and coset
+  shift boundaries. It passed 1/1 in 568.12 seconds. Sparse main and auxiliary
+  AIR LDE openings, a canonical variable-length BabyBear receipt codec, and
   end-to-end verification remain pending. Production BabyBear LDE row
   generation from the canonical trace also remains pending. The explicitly
   named `Checkpoint4AirLdeOpening` is still a four-row test checkpoint.
