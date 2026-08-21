@@ -294,15 +294,19 @@ pub struct SparseCopyChallenges<F: Radix2Field> {
 }
 impl<F: Radix2Field> core::marker::Copy for SparseCopyChallenges<F> {}
 
-/// Extension-trace columns for the product copy interaction. One prefix
-/// accumulator and two inverse ports are sufficient after scan adjacency
-/// removes the redundant carry-in copy from the older scalar audit.
-pub struct SparseProductInteractionRow<F: Radix2Field> {
+/// Extension-trace columns for a fixed-width copy interaction. The port count
+/// is part of the type, so each semantic bus can select its required width
+/// while sharing one constraint and prover interpretation.
+pub struct SparseCopyInteractionRow<F, const PORTS: usize> {
     pub accumulator: F,
-    pub inverse_first: F,
-    pub inverse_second: F,
+    pub inverses: [F; PORTS],
 }
-impl<F: Radix2Field> core::marker::Copy for SparseProductInteractionRow<F> {}
+impl<F: Radix2Field, const PORTS: usize> core::marker::Copy
+    for SparseCopyInteractionRow<F, PORTS> {}
+
+/// Two product ports remain sufficient after scan adjacency removes the
+/// redundant carry-in copy from the older scalar audit.
+pub type SparseProductInteractionRow<F> = SparseCopyInteractionRow<F, 2>
 
 /// A folded local interaction evaluation plus the accumulator delta produced
 /// by the same constrained ports.
@@ -4874,16 +4878,58 @@ fn absorb_sparse_copy_port<F: Radix2Field>(
     fold.absorb(mul(sub(one<F>(), port.selector), inverse))
 }
 
-fn sparse_product_interaction_delta<F: Radix2Field, const L: usize>(
+fn sparse_copy_interaction_inverses<
+    F: Radix2Field,
+    const PORTS: usize,
+>(
+    _ challenges: SparseCopyChallenges<F>,
+    _ ports: [SparseCopyPort<F>; PORTS],
+) -> [F; PORTS] {
+    let mut inverses = [zero<F>(); PORTS]
+    let mut index: usize = 0
+    while index < PORTS {
+        inverses[index] = sparse_copy_port_inverse(challenges, ports[index])
+        index = index + 1
+    }
+    inverses
+}
+
+fn sparse_copy_interaction_delta<F: Radix2Field, const PORTS: usize>(
+    _ ports: [SparseCopyPort<F>; PORTS],
+    _ inverses: [F; PORTS],
+) -> F {
+    let mut delta = zero<F>()
+    let mut index: usize = 0
+    while index < PORTS {
+        delta = add(delta, mul(ports[index].coefficient, inverses[index]))
+        index = index + 1
+    }
+    delta
+}
+
+fn absorb_sparse_copy_interaction<F: Radix2Field, const PORTS: usize>(
+    _ fold: own ConstraintFold<F>,
+    _ challenges: SparseCopyChallenges<F>,
+    _ ports: [SparseCopyPort<F>; PORTS],
+    _ inverses: [F; PORTS],
+) -> ConstraintFold<F> {
+    let mut fold = fold
+    let mut index: usize = 0
+    while index < PORTS {
+        fold = absorb_sparse_copy_port(
+            fold, challenges, ports[index], inverses[index],
+        )
+        index = index + 1
+    }
+    fold
+}
+
+fn sparse_product_interaction_ports<F: Radix2Field, const L: usize>(
     _ control: SparseControlRow<F>,
     _ row: SparseTaskRow<F>,
-    _ interaction: SparseProductInteractionRow<F>,
-) -> F {
+) -> [SparseCopyPort<F>; 2] {
     let ports = sparse_product_copy_ports<F, L>(control, row)
-    add(
-        mul(ports.0.coefficient, interaction.inverse_first),
-        mul(ports.1.coefficient, interaction.inverse_second),
-    )
+    [ports.0, ports.1]
 }
 
 /// Derive one product interaction witness row from the committed base row and
@@ -4895,11 +4941,10 @@ pub fn sparse_product_interaction_row<F: Radix2Field, const L: usize>(
     _ row: SparseTaskRow<F>,
     _ accumulator: F,
 ) -> SparseProductInteractionRow<F> {
-    let ports = sparse_product_copy_ports<F, L>(control, row)
-    SparseProductInteractionRow {
+    let ports = sparse_product_interaction_ports<F, L>(control, row)
+    SparseCopyInteractionRow {
         accumulator: accumulator,
-        inverse_first: sparse_copy_port_inverse(challenges, ports.0),
-        inverse_second: sparse_copy_port_inverse(challenges, ports.1),
+        inverses: sparse_copy_interaction_inverses<F, 2>(challenges, ports),
     }
 }
 
@@ -4913,19 +4958,18 @@ pub fn evaluate_sparse_product_interaction_row<
     _ row: SparseTaskRow<F>,
     _ interaction: SparseProductInteractionRow<F>,
 ) -> SparseInteractionEvaluation<F> {
-    let ports = sparse_product_copy_ports<F, L>(control, row)
-    let mut fold = ConstraintFold<F>::new(challenge)
-    fold = absorb_sparse_copy_port(
-        fold, challenges, ports.0, interaction.inverse_first,
-    )
-    fold = absorb_sparse_copy_port(
-        fold, challenges, ports.1, interaction.inverse_second,
+    let ports = sparse_product_interaction_ports<F, L>(control, row)
+    let fold = absorb_sparse_copy_interaction<F, 2>(
+        ConstraintFold<F>::new(challenge),
+        challenges,
+        ports,
+        interaction.inverses,
     )
     SparseInteractionEvaluation {
         valid: true,
         constraints: fold.constraints,
         folded: fold.value,
-        delta: sparse_product_interaction_delta<F, L>(control, row, interaction),
+        delta: sparse_copy_interaction_delta<F, 2>(ports, interaction.inverses),
     }
 }
 
@@ -4951,10 +4995,11 @@ pub fn evaluate_sparse_product_interaction_link<
     _ current_interaction: SparseProductInteractionRow<F>,
     _ next_interaction: SparseProductInteractionRow<F>,
 ) -> FixedAirConstraintEvaluation<F> {
-    let delta = sparse_product_interaction_delta<F, L>(
-        current_control,
-        current,
-        current_interaction,
+    let ports = sparse_product_interaction_ports<F, L>(
+        current_control, current,
+    )
+    let delta = sparse_copy_interaction_delta<F, 2>(
+        ports, current_interaction.inverses,
     )
     let fold = ConstraintFold<F>::new(challenge).absorb(sub(
         next_interaction.accumulator,
@@ -4976,7 +5021,10 @@ pub fn evaluate_sparse_product_interaction_terminal<
     _ row: SparseTaskRow<F>,
     _ interaction: SparseProductInteractionRow<F>,
 ) -> FixedAirConstraintEvaluation<F> {
-    let delta = sparse_product_interaction_delta<F, L>(control, row, interaction)
+    let ports = sparse_product_interaction_ports<F, L>(control, row)
+    let delta = sparse_copy_interaction_delta<F, 2>(
+        ports, interaction.inverses,
+    )
     let fold = ConstraintFold<F>::new(challenge).absorb(add(
         interaction.accumulator,
         delta,

@@ -1205,10 +1205,10 @@ fn mutate_product_interaction(
 ) {
     let one = BabyBear::one()
     if mutation == 3 && index == 127 {
-        interaction.inverse_first = interaction.inverse_first + one
+        interaction.inverses[0] = interaction.inverses[0] + one
     }
     if mutation == 4 && index == product_offset {
-        interaction.inverse_second = interaction.inverse_second + one
+        interaction.inverses[1] = interaction.inverses[1] + one
     }
     if mutation == 5 && index == 251 {
         interaction.accumulator = interaction.accumulator + one
@@ -1326,9 +1326,9 @@ pub fn fixed_transition4_sparse_product_interaction_audit(
         }
         receipt = receipt + receipt_power * interaction.accumulator
         receipt_power = receipt_power * receipt_challenge
-        receipt = receipt + receipt_power * interaction.inverse_first
+        receipt = receipt + receipt_power * interaction.inverses[0]
         receipt_power = receipt_power * receipt_challenge
-        receipt = receipt + receipt_power * interaction.inverse_second
+        receipt = receipt + receipt_power * interaction.inverses[1]
         receipt_power = receipt_power * receipt_challenge
         accumulator = interaction.accumulator + local.delta
         previous_control = control
