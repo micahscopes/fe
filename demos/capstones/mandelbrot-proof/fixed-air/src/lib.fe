@@ -95,6 +95,7 @@ pub struct FixedProductWitness<const L: usize> {
     pub high_digits: [u32; L],
     pub high_carries: [u32; L],
     pub round_up: bool,
+    pub round_carries: [u32; L],
     pub round_overflow: bool,
     pub output: Fixed<L>,
 }
@@ -185,6 +186,7 @@ fn empty_product_witness<const L: usize>() -> FixedProductWitness<L> {
         high_digits: [0; L],
         high_carries: [0; L],
         round_up: false,
+        round_carries: [0; L],
         round_overflow: false,
         output: Fixed::zero(),
     }
@@ -633,6 +635,7 @@ pub fn derive_fixed_product_witness<const L: usize>(
 
     let round_up = low_digits[L - 2] >= FIXED_ROUND_HALF
     let mut round_carry: u32 = if round_up { 1 } else { 0 }
+    let mut round_carries = [0; L]
     let mut output_limbs = [0; L]
     let mut index: usize = 0
     while index < L {
@@ -644,6 +647,7 @@ pub fn derive_fixed_product_witness<const L: usize>(
         let total = retained + round_carry
         output_limbs[index] = total & FIXED_LIMB_MASK
         round_carry = total >> FIXED_LIMB_BITS
+        round_carries[index] = round_carry
         index = index + 1
     }
     let negative = left.negative != right.negative
@@ -655,6 +659,7 @@ pub fn derive_fixed_product_witness<const L: usize>(
         high_digits: high_digits,
         high_carries: high_carries,
         round_up: round_up,
+        round_carries: round_carries,
         round_overflow: round_carry == 1,
         output: Fixed { negative: negative, limbs: output_limbs },
     }
@@ -728,8 +733,9 @@ pub fn fixed_product_witness_holds<const L: usize>(
     while index < limbs {
         let output = witness.output.limbs[index as usize]
         let total = retained_product_digit(witness, index) + round_carry
-        if total != output + LIMB_BASE * (total >> FIXED_LIMB_BITS) { return false }
-        round_carry = total >> FIXED_LIMB_BITS
+        let carry_out = witness.round_carries[index as usize]
+        if carry_out > 1 || total != output + LIMB_BASE * carry_out { return false }
+        round_carry = carry_out
         index = index + 1
     }
     if witness.round_overflow != (round_carry == 1) { return false }
@@ -1264,16 +1270,12 @@ pub fn rounding_residual<F: Radix2Field, const L: usize>(
 ) -> F {
     let limbs: u32 = L.downcast_truncate()
     if output_index >= limbs { return F::radix2_zero() }
-    let mut carry_in: u32 = if witness.round_up { 1 } else { 0 }
-    let mut previous: u32 = 0
-    while previous < output_index {
-        carry_in = (
-            retained_product_digit(witness, previous) + carry_in
-        ) >> FIXED_LIMB_BITS
-        previous = previous + 1
+    let carry_in = if output_index == 0 {
+        if witness.round_up { 1 } else { 0 }
+    } else {
+        witness.round_carries[(output_index - 1) as usize]
     }
-    let total = retained_product_digit(witness, output_index) + carry_in
-    let carry_out = total >> FIXED_LIMB_BITS
+    let carry_out = witness.round_carries[output_index as usize]
     field_natural<F>(retained_product_digit(witness, output_index))
         .radix2_add(field_natural<F>(carry_in))
         .radix2_sub(field_natural<F>(witness.output.limbs[output_index as usize]))

@@ -17,7 +17,7 @@ const LIMB_BITS: usize = 13;
 const LIMB_BASE: u32 = 8192;
 const ACCUMULATOR_WORDS: usize = 37;
 const COMMITTED_ACCUMULATOR_WORDS: usize = 31;
-const PRODUCT_WITNESS_WORDS: usize = 24;
+const PRODUCT_WITNESS_WORDS: usize = 28;
 const LINEAR_WITNESS_WORDS: usize = 33;
 const RANGE_WITNESS_WORDS: usize = LIMBS * LIMB_BITS * 2 + 1;
 const TRANSITION_WITNESS_WORDS: usize = 1 + 3 * PRODUCT_WITNESS_WORDS + 4 * LINEAR_WITNESS_WORDS;
@@ -207,12 +207,14 @@ fn expected_product_witness_words(left: &Fx, right: &Fx) -> Vec<u32> {
 
     let round_up = digits[LIMBS - 2] >= LIMB_BASE / 2;
     let mut round_carry = round_up as u32;
+    let mut round_carries = [0u32; LIMBS];
     let mut output_limbs = [0u32; LIMBS];
     for index in 0..LIMBS {
         let retained = digits[LIMBS - 1 + index];
         let total = retained + round_carry;
         output_limbs[index] = total % LIMB_BASE;
         round_carry = total / LIMB_BASE;
+        round_carries[index] = round_carry;
     }
     let expected_output = multiply(left, right);
     assert_eq!(output_limbs, limbs(&expected_output));
@@ -222,7 +224,9 @@ fn expected_product_witness_words(left: &Fx, right: &Fx) -> Vec<u32> {
     words.extend(&carries[..LIMBS]);
     words.extend(&digits[LIMBS..]);
     words.extend(&carries[LIMBS..]);
-    words.extend([round_up as u32, (round_carry == 1) as u32]);
+    words.push(round_up as u32);
+    words.extend(round_carries);
+    words.push((round_carry == 1) as u32);
     words.extend(fixed_words(&expected_output));
     assert_eq!(words.len(), PRODUCT_WITNESS_WORDS);
     words
@@ -806,12 +810,12 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                 &instance,
                 "fixed_product4_residuals",
                 &arguments,
-                14,
+                18,
             ),
-            [0; 14],
+            [0; 18],
             "BabyBear AIR residual case {case}",
         );
-        for mutation in 0..=7 {
+        for mutation in 0..=8 {
             let mut mutated_arguments = arguments.clone();
             mutated_arguments.push(mutation);
             assert_eq!(
@@ -826,12 +830,14 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                 "fixed product mutation {mutation}, case {case}",
             );
         }
-        for mutation in [1u32, 2, 3, 4, 7] {
+        for mutation in [1u32, 2, 3, 4, 7, 8] {
             let mut mutated_arguments = arguments.clone();
             mutated_arguments.push(mutation);
             let expected = match mutation {
                 2 => BABY_BEAR_MODULUS - LIMB_BASE,
                 3 if expected_witness[17] == 0 => 1,
+                8 if expected_witness[18] == 0 => BABY_BEAR_MODULUS - LIMB_BASE,
+                8 => LIMB_BASE,
                 _ => BABY_BEAR_MODULUS - 1,
             };
             assert_eq!(

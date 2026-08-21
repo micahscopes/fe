@@ -773,6 +773,7 @@ pub fn fixed_product4_mutation_holds(
     if mutation == 5 { witness.output.negative = !witness.output.negative }
     if mutation == 6 { left.limbs[0] = 8192 }
     if mutation == 7 { witness.high_digits[3] = witness.high_digits[3] + 1 }
+    if mutation == 8 { witness.round_carries[0] = 1 - witness.round_carries[0] }
     if fixed_product_witness_holds(left, right, witness) { 1 } else { 0 }
 }
 
@@ -789,7 +790,8 @@ pub fn fixed_product4_residuals(
     _ r3: u32,
 ) -> (
     u32, u32, u32, u32, u32, u32, u32, u32,
-    u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32,
 ) {
     let (left, right, witness) = product4(
         left_negative,
@@ -812,6 +814,10 @@ pub fn fixed_product4_residuals(
         rounding_residual<BabyBear, 4>(witness, 3).to_u32(),
         boolean_residual<BabyBear>(if witness.round_up { 1 } else { 0 }).to_u32(),
         boolean_residual<BabyBear>(if witness.round_overflow { 1 } else { 0 }).to_u32(),
+        boolean_residual<BabyBear>(witness.round_carries[0]).to_u32(),
+        boolean_residual<BabyBear>(witness.round_carries[1]).to_u32(),
+        boolean_residual<BabyBear>(witness.round_carries[2]).to_u32(),
+        boolean_residual<BabyBear>(witness.round_carries[3]).to_u32(),
     )
 }
 
@@ -848,6 +854,10 @@ pub fn fixed_product4_mutated_residual(
     }
     if mutation == 4 {
         witness.output.limbs[0] = witness.output.limbs[0] + 1
+        return rounding_residual<BabyBear, 4>(witness, 0).to_u32()
+    }
+    if mutation == 8 {
+        witness.round_carries[0] = 1 - witness.round_carries[0]
         return rounding_residual<BabyBear, 4>(witness, 0).to_u32()
     }
     witness.high_digits[3] = witness.high_digits[3] + 1
