@@ -155,16 +155,15 @@ fn reverse_low_bits(_ value: usize, _ width: u32) -> usize {
 /// Cooley-Tukey radix-2 transform. The inverse uses the inverse root and
 /// multiplies by `N^-1`; it is therefore genuine interpolation, not a second
 /// forward transform with reordered output.
-fn transform_field<const N: usize, F: Radix2Field>(
-    _ values: own [F; N],
+fn transform_field_in_place<const N: usize, F: Radix2Field>(
+    _ values: mut [F; N],
     _ inverse: bool,
-) -> [F; N]
+)
     where
         N > 0,
         { (N & (N - 1)) == 0 },
 {
     let log_n = radix2_log<N>()
-    let mut values = values
     let mut index: usize = 0
     while index < N {
         let reversed = reverse_low_bits(index, log_n)
@@ -210,7 +209,44 @@ fn transform_field<const N: usize, F: Radix2Field>(
             i = i + 1
         }
     }
+}
+
+fn transform_field<const N: usize, F: Radix2Field>(
+    _ values: own [F; N],
+    _ inverse: bool,
+) -> [F; N]
+    where
+        N > 0,
+        { (N & (N - 1)) == 0 },
+{
+    let mut values = values
+    transform_field_in_place<N, F>(mut values, inverse)
     values
+}
+
+/// Interpret the shared radix-2 dependency plan in caller-owned storage.
+/// This is the placement-friendly form used by large scalar, packed, and GPU
+/// schedules; the value-returning APIs below remain convenience wrappers.
+pub fn radix2_ntt_in_place<const N: usize, F: Radix2Field>(
+    _ values: mut [F; N],
+)
+    where
+        N > 0,
+        { (N & (N - 1)) == 0 },
+        { radix2_log_unchecked<N>() <= F::TWO_ADICITY },
+{
+    transform_field_in_place<N, F>(mut values, false)
+}
+
+pub fn radix2_intt_in_place<const N: usize, F: Radix2Field>(
+    _ values: mut [F; N],
+)
+    where
+        N > 0,
+        { (N & (N - 1)) == 0 },
+        { radix2_log_unchecked<N>() <= F::TWO_ADICITY },
+{
+    transform_field_in_place<N, F>(mut values, true)
 }
 
 pub fn radix2_ntt<const N: usize, const L: usize, M>(
@@ -301,6 +337,52 @@ struct FieldCosetLde<const N: usize, F> {
 
 impl<const N: usize, F: Copy> Copy for FieldCosetLde<N, F> {}
 
+pub fn write_radix2_coset_lde<
+    const N: usize,
+    const OUT: usize,
+    F: Radix2Field,
+>(
+    _ base_evaluations: ref [F; N],
+    _ shift: F,
+    _ evaluations: mut [F; OUT],
+) -> bool
+    where
+        N > 0,
+        { (N & (N - 1)) == 0 },
+        { radix2_log_unchecked<N>() <= F::TWO_ADICITY },
+        OUT > 0,
+        OUT > N,
+        { (OUT & (OUT - 1)) == 0 },
+        { radix2_log_unchecked<OUT>() <= F::TWO_ADICITY },
+        { (OUT % N) == 0 },
+{
+    let zero = F::radix2_zero()
+    let one = F::radix2_root(0)
+    evaluations = [zero; OUT]
+    if shift.radix2_is_zero()
+        || shift.radix2_pow(OUT.downcast_truncate()).radix2_sub(one).radix2_is_zero()
+    {
+        return false
+    }
+
+    let mut coefficients = [zero; N]
+    let mut index: usize = 0
+    while index < N {
+        coefficients[index] = base_evaluations[index]
+        index = index + 1
+    }
+    radix2_intt_in_place<N, F>(mut coefficients)
+    let mut shift_power = one
+    index = 0
+    while index < N {
+        evaluations[index] = coefficients[index].radix2_mul(shift_power)
+        shift_power = shift_power.radix2_mul(shift)
+        index = index + 1
+    }
+    radix2_ntt_in_place<OUT, F>(mut evaluations)
+    true
+}
+
 fn radix2_field_coset_lde<const N: usize, const OUT: usize, F: Radix2Field>(
     _ base_evaluations: own [F; N],
     _ shift: F,
@@ -308,31 +390,22 @@ fn radix2_field_coset_lde<const N: usize, const OUT: usize, F: Radix2Field>(
     where
         N > 0,
         { (N & (N - 1)) == 0 },
+        { radix2_log_unchecked<N>() <= F::TWO_ADICITY },
         OUT > 0,
         OUT > N,
         { (OUT & (OUT - 1)) == 0 },
+        { radix2_log_unchecked<OUT>() <= F::TWO_ADICITY },
         { (OUT % N) == 0 },
 {
-    let zero = F::radix2_zero()
-    let one = F::radix2_root(0)
-    if shift.radix2_is_zero()
-        || shift.radix2_pow(OUT.downcast_truncate()).radix2_sub(one).radix2_is_zero()
-    {
-        return FieldCosetLde { valid: false, evaluations: [zero; OUT] }
-    }
-
-    let coefficients = transform_field<N, F>(base_evaluations, true)
-    let mut shifted_coefficients: [F; OUT] = [zero; OUT]
-    let mut shift_power = one
-    let mut index: usize = 0
-    while index < N {
-        shifted_coefficients[index] = coefficients[index].radix2_mul(shift_power)
-        shift_power = shift_power.radix2_mul(shift)
-        index = index + 1
-    }
+    let mut evaluations = [F::radix2_zero(); OUT]
+    let valid = write_radix2_coset_lde<N, OUT, F>(
+        ref base_evaluations,
+        shift,
+        mut evaluations,
+    )
     FieldCosetLde {
-        valid: true,
-        evaluations: transform_field<OUT, F>(shifted_coefficients, false),
+        valid: valid,
+        evaluations: evaluations,
     }
 }
 
