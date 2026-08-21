@@ -1349,6 +1349,166 @@ fn expected_round_interaction_receipt(
     receipt
 }
 
+fn linear_digit_address(rank: u32, limb: u32) -> u32 {
+    rank * LIMBS as u32 + limb
+}
+
+fn linear_sign_address(rank: u32) -> u32 {
+    31 * LIMBS as u32 + rank
+}
+
+fn linear_nonzero_address(rank: u32) -> u32 {
+    31 * LIMBS as u32 + 31 + rank
+}
+
+fn linear_borrow_address(node: u32, right: bool) -> u32 {
+    31 * LIMBS as u32 + 62 + 2 * node + u32::from(right)
+}
+
+fn linear_same_address(node: u32) -> u32 {
+    31 * LIMBS as u32 + 70 + node
+}
+
+fn linear_select_address(node: u32) -> u32 {
+    31 * LIMBS as u32 + 74 + node
+}
+
+fn linear_left_range_rank(node: u32) -> u32 {
+    [8, 18, 14, 26][node as usize]
+}
+
+fn linear_right_range_rank(node: u32) -> u32 {
+    [11, 0, 14, 1][node as usize]
+}
+
+fn expected_linear_interaction_ports(
+    task: [u32; 5],
+    row: [u32; 6],
+    beta: u32,
+    gamma: u32,
+) -> ([u32; 8], u32) {
+    let [kind, first, second, third, _fourth] = task;
+    let limbs = LIMBS as u32;
+    let mut ports: [Option<(u32, u32, i32)>; 8] = [None; 8];
+    match kind {
+        1 => {
+            let multiplicity = match first {
+                0 | 1 => 3,
+                8 | 11 => 3,
+                14 => 6,
+                15 | 16 | 17 | 19 | 20 | 21 | 23 | 24 | 25 | 27 | 28 | 29 => 2,
+                18 | 26 => 4,
+                22 | 30 => 1,
+                _ => 0,
+            };
+            if multiplicity != 0 {
+                ports[0] = Some((linear_digit_address(first, second), row[0], multiplicity));
+            }
+        }
+        2 => {
+            let sign_multiplicity = match first {
+                0 | 1 | 8 | 11 | 22 | 30 => 1,
+                14 | 18 | 26 => 2,
+                _ => 0,
+            };
+            if sign_multiplicity != 0 {
+                ports[1] = Some((linear_sign_address(first), row[1], sign_multiplicity));
+            }
+            if matches!(first, 18 | 22 | 26 | 30) {
+                ports[2] = Some((linear_nonzero_address(first), row[0], 1));
+            }
+        }
+        9 => {
+            let node = first;
+            let left = linear_left_range_rank(node);
+            let right = linear_right_range_rank(node);
+            let sum = 15 + 4 * node;
+            match second {
+                0 | 1 | 2 => {
+                    ports[0] = Some((linear_digit_address(left, third), row[0], -1));
+                    ports[1] = Some((linear_digit_address(right, third), row[1], -1));
+                    ports[2] = Some((linear_digit_address(sum + second, third), row[4], -1));
+                    if second == 1 && third + 1 == limbs {
+                        ports[3] = Some((linear_borrow_address(node, false), row[3], 1));
+                    }
+                    if second == 2 && third + 1 == limbs {
+                        ports[4] = Some((linear_borrow_address(node, true), row[3], 1));
+                    }
+                }
+                3 => {
+                    ports[0] = Some((linear_digit_address(sum, third), row[0], -1));
+                    ports[1] = Some((linear_digit_address(sum + 1, third), row[1], -1));
+                    ports[2] = Some((linear_digit_address(sum + 2, third), row[2], -1));
+                    ports[3] = Some((linear_digit_address(sum + 3, third), row[3], -1));
+                    ports[4] = Some((linear_same_address(node), row[4], -1));
+                    ports[5] = Some((linear_select_address(node), row[5], -1));
+                }
+                _ => unreachable!("invalid linear role"),
+            }
+        }
+        10 => {
+            let node = first;
+            let left = linear_left_range_rank(node);
+            let right = linear_right_range_rank(node);
+            let output = 18 + 4 * node;
+            ports[0] = Some((linear_sign_address(left), row[0], -1));
+            ports[1] = Some((linear_sign_address(right), row[1], -1));
+            ports[2] = Some((linear_borrow_address(node, false), row[2], -1));
+            ports[3] = Some((linear_borrow_address(node, true), row[3], -1));
+            ports[4] = Some((linear_nonzero_address(output), row[4], -1));
+            ports[5] = Some((linear_sign_address(output), row[5], -1));
+            let effective_right = row[1] ^ u32::from(node == 0);
+            let same = u32::from(row[0] == effective_right);
+            ports[6] = Some((linear_same_address(node), same, limbs as i32));
+            ports[7] = Some((linear_select_address(node), row[2], limbs as i32));
+        }
+        _ => {}
+    }
+
+    let mut inverses = [0; 8];
+    let mut delta = 0;
+    for (index, port) in ports.into_iter().enumerate() {
+        if let Some((address, value, coefficient)) = port {
+            let inverse = product_copy_compressed_inverse(address, value, beta, gamma);
+            inverses[index] = inverse;
+            let coefficient = if coefficient < 0 {
+                BABY_BEAR_MODULUS - coefficient.unsigned_abs()
+            } else {
+                coefficient as u32
+            };
+            delta = bb_add(delta, bb_mul(coefficient, inverse));
+        }
+    }
+    (inverses, delta)
+}
+
+fn expected_linear_interaction_receipt(
+    point: &ComplexFx,
+    current: &ComplexFx,
+    beta: u32,
+    gamma: u32,
+    receipt_challenge: u32,
+) -> u32 {
+    let mut tasks = expected_sparse_transition_tasks(LIMBS as u32);
+    tasks.resize(4_096, [14, 0, 0, 0, 0]);
+    let rows = expected_sparse_rows(point, current);
+    let mut accumulator = 0;
+    let mut receipt = 0;
+    let mut power = 1;
+    for (task, row) in tasks.into_iter().zip(rows) {
+        let (inverses, delta) = expected_linear_interaction_ports(task, row, beta, gamma);
+        receipt = bb_add(receipt, bb_mul(power, accumulator));
+        power = bb_mul(power, receipt_challenge);
+        for inverse in inverses {
+            receipt = bb_add(receipt, bb_mul(power, inverse));
+            power = bb_mul(power, receipt_challenge);
+        }
+        accumulator = bb_add(accumulator, delta);
+    }
+    assert_eq!(accumulator, 0, "independent linear interaction must close");
+    receipt
+}
+
 fn expected_sparse_trace_root(point: &ComplexFx, current: &ComplexFx) -> [u32; 8] {
     let rows = expected_sparse_rows(point, current);
     let task_count = 2_821;
@@ -2625,6 +2785,30 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                     ],
                     "selector-only rounding interaction challenges ({beta}, {gamma})",
                 );
+                let mut linear_arguments = arguments.clone();
+                linear_arguments.extend([beta, gamma, fold_challenge, receipt_challenge, 0]);
+                assert_eq!(
+                    call(
+                        &mut store,
+                        &instance,
+                        "fixed_transition4_sparse_linear_interaction_audit",
+                        &linear_arguments,
+                        4,
+                    ),
+                    [
+                        0,
+                        69_633,
+                        4_096,
+                        expected_linear_interaction_receipt(
+                            point,
+                            current,
+                            beta,
+                            gamma,
+                            receipt_challenge,
+                        ),
+                    ],
+                    "selector-only linear interaction challenges ({beta}, {gamma})",
+                );
             }
             for mutation in 1u32..=6 {
                 let mut interaction_arguments = arguments.clone();
@@ -2672,6 +2856,30 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                     );
                 }
                 assert_eq!(audit[1], 45_057);
+                assert_eq!(audit[2], 4_096);
+            }
+            for mutation in 1u32..=6 {
+                let mut interaction_arguments = arguments.clone();
+                interaction_arguments.extend([17, 29, 7, 31, mutation]);
+                let audit = call(
+                    &mut store,
+                    &instance,
+                    "fixed_transition4_sparse_linear_interaction_audit",
+                    &interaction_arguments,
+                    4,
+                );
+                if mutation == 6 {
+                    assert_eq!(
+                        audit[0], 1,
+                        "the locally valid linear mutation must fail only at the interaction terminal",
+                    );
+                } else {
+                    assert!(
+                        audit[0] > 0,
+                        "linear interaction mutation {mutation} must fail",
+                    );
+                }
+                assert_eq!(audit[1], 69_633);
                 assert_eq!(audit[2], 4_096);
             }
 

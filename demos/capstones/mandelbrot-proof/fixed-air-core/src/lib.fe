@@ -312,6 +312,10 @@ pub type SparseProductInteractionRow<F> = SparseCopyInteractionRow<F, 2>
 /// sign, output nonzero, and the two input signs.
 pub type SparseRoundInteractionRow<F> = SparseCopyInteractionRow<F, 5>
 
+/// Linear rows need six consumer ports plus two simultaneously derived
+/// control values on each finish row.
+pub type SparseLinearInteractionRow<F> = SparseCopyInteractionRow<F, 8>
+
 /// A folded local interaction evaluation plus the accumulator delta produced
 /// by the same constrained ports.
 pub struct SparseInteractionEvaluation<F: Radix2Field> {
@@ -5377,6 +5381,548 @@ where L > 1,
         control, next_control, row,
     )
     let delta = sparse_copy_interaction_delta<F, 5>(
+        ports, interaction.inverses,
+    )
+    let fold = ConstraintFold<F>::new(challenge).absorb(add(
+        interaction.accumulator,
+        delta,
+    ))
+    FixedAirConstraintEvaluation {
+        valid: true,
+        constraints: fold.constraints,
+        folded: fold.value,
+    }
+}
+
+fn sparse_linear_point_coordinate<F: Radix2Field>(
+    _ control: SparseControlRow<F>,
+) -> F {
+    let major = control.major
+    let roots = mul(
+        mul(sub(major, natural<F>(2)), sub(major, natural<F>(3))),
+        mul(sub(major, natural<F>(4)), sub(major, natural<F>(5))),
+    )
+    mul(
+        control.range_roles.coordinate,
+        mul(
+            roots,
+            mul(
+                add(mul(natural<F>(4), major), one<F>()),
+                natural<F>(120).radix2_inverse_or_zero(),
+            ),
+        ),
+    )
+}
+
+fn sparse_linear_product_xy<F: Radix2Field>(
+    _ control: SparseControlRow<F>,
+) -> F {
+    let product = mul(
+        sub(control.major, natural<F>(8)),
+        natural<F>(3).radix2_inverse_or_zero(),
+    )
+    mul(
+        mul(product, sub(product, one<F>())),
+        natural<F>(2).radix2_inverse_or_zero(),
+    )
+}
+
+fn sparse_linear_even_node<F: Radix2Field>(_ node: F) -> F {
+    let product = mul(
+        mul(sub(node, one<F>()), sub(node, natural<F>(3))),
+        sub(mul(natural<F>(2), node), one<F>()),
+    )
+    sub(
+        zero<F>(),
+        mul(product, natural<F>(3).radix2_inverse_or_zero()),
+    )
+}
+
+fn sparse_linear_output_node<F: Radix2Field>(
+    _ control: SparseControlRow<F>,
+) -> F {
+    mul(
+        sub(control.major, natural<F>(18)),
+        natural<F>(4).radix2_inverse_or_zero(),
+    )
+}
+
+fn sparse_linear_left_range_rank<F: Radix2Field>(_ node: F) -> F {
+    let even = sparse_linear_even_node(node)
+    add(
+        mul(even, add(natural<F>(8), mul(natural<F>(3), node))),
+        mul(
+            sub(one<F>(), even),
+            add(natural<F>(14), mul(natural<F>(4), node)),
+        ),
+    )
+}
+
+fn sparse_linear_right_range_rank<F: Radix2Field>(_ node: F) -> F {
+    let even = sparse_linear_even_node(node)
+    add(
+        mul(
+            even,
+            add(
+                natural<F>(11),
+                mul(
+                    mul(natural<F>(3), node),
+                    natural<F>(2).radix2_inverse_or_zero(),
+                ),
+            ),
+        ),
+        mul(
+            sub(one<F>(), even),
+            mul(
+                sub(node, one<F>()),
+                natural<F>(2).radix2_inverse_or_zero(),
+            ),
+        ),
+    )
+}
+
+fn sparse_linear_digit_address<F: Radix2Field, const L: usize>(
+    _ rank: F,
+    _ limb: F,
+) -> F {
+    add(mul(rank, natural<F>(L.downcast_truncate())), limb)
+}
+
+fn sparse_linear_sign_address<F: Radix2Field, const L: usize>(
+    _ rank: F,
+) -> F {
+    add(natural<F>(31 * L.downcast_truncate()), rank)
+}
+
+fn sparse_linear_nonzero_address<F: Radix2Field, const L: usize>(
+    _ rank: F,
+) -> F {
+    add(
+        natural<F>(31 * L.downcast_truncate() + 31),
+        rank,
+    )
+}
+
+fn sparse_linear_borrow_address<F: Radix2Field, const L: usize>(
+    _ node: F,
+    _ right: F,
+) -> F {
+    add(
+        natural<F>(31 * L.downcast_truncate() + 62),
+        add(mul(natural<F>(2), node), right),
+    )
+}
+
+fn sparse_linear_same_address<F: Radix2Field, const L: usize>(
+    _ node: F,
+) -> F {
+    add(natural<F>(31 * L.downcast_truncate() + 70), node)
+}
+
+fn sparse_linear_select_address<F: Radix2Field, const L: usize>(
+    _ node: F,
+) -> F {
+    add(natural<F>(31 * L.downcast_truncate() + 74), node)
+}
+
+fn sparse_linear_interaction_ports<F: Radix2Field, const L: usize>(
+    _ control: SparseControlRow<F>,
+    _ next_control: SparseControlRow<F>,
+    _ row: SparseTaskRow<F>,
+) -> [SparseCopyPort<F>; 8]
+where L > 1,
+{
+    let selectors = control.selectors
+    let roles = control.range_roles
+    let linear_roles = control.linear_roles
+    let next_linear_roles = next_control.linear_roles
+    let zero = zero<F>()
+    let one = one<F>()
+    let limb_count = natural<F>(L.downcast_truncate())
+
+    let point = sparse_linear_point_coordinate(control)
+    let product = roles.product_output
+    let product_xy = sparse_linear_product_xy(control)
+    let intermediate = add(
+        add(roles.linear_sum, roles.linear_left_difference),
+        roles.linear_right_difference,
+    )
+    let output = roles.linear_output
+    let output_even = sparse_linear_even_node(
+        sparse_linear_output_node(control),
+    )
+    let digit_source_kind = add(
+        add(point, product), add(intermediate, output),
+    )
+    let digit_source = mul(selectors.radix_limb, digit_source_kind)
+    let digit_source_coefficient = mul(
+        selectors.radix_limb,
+        add(
+            add(
+                mul(natural<F>(3), point),
+                mul(
+                    natural<F>(3),
+                    mul(product, add(one, product_xy)),
+                ),
+            ),
+            add(
+                mul(natural<F>(2), intermediate),
+                mul(output, add(one, mul(natural<F>(3), output_even))),
+            ),
+        ),
+    )
+    let sign_source_kind = add(add(point, product), output)
+    let sign_source = mul(selectors.radix_finish, sign_source_kind)
+    let sign_source_coefficient = mul(
+        selectors.radix_finish,
+        add(
+            point,
+            add(
+                mul(product, add(one, product_xy)),
+                mul(output, add(one, output_even)),
+            ),
+        ),
+    )
+    let nonzero_source = mul(selectors.radix_finish, output)
+
+    let left_borrow_source = mul(
+        mul(selectors.linear_limb, linear_roles.left_difference),
+        next_linear_roles.right_difference,
+    )
+    let right_borrow_source = mul(
+        mul(selectors.linear_limb, linear_roles.right_difference),
+        next_linear_roles.select,
+    )
+
+    let limb_nonselect = mul(
+        selectors.linear_limb,
+        add(
+            add(linear_roles.sum, linear_roles.left_difference),
+            linear_roles.right_difference,
+        ),
+    )
+    let limb_select = mul(selectors.linear_limb, linear_roles.select)
+    let finish = selectors.linear_finish
+    let node = control.major
+    let left_rank = sparse_linear_left_range_rank(node)
+    let right_rank = sparse_linear_right_range_rank(node)
+    let sum_rank = add(natural<F>(15), mul(natural<F>(4), node))
+    let left_difference_rank = add(sum_rank, one)
+    let right_difference_rank = add(sum_rank, natural<F>(2))
+    let output_rank = add(sum_rank, natural<F>(3))
+    let nonselect_rank = add(
+        sum_rank,
+        add(linear_roles.left_difference, mul(natural<F>(2), linear_roles.right_difference)),
+    )
+
+    let source_digit_address = sparse_linear_digit_address<F, L>(
+        control.major, control.minor,
+    )
+    let first_port = SparseCopyPort {
+        selector: add(
+            digit_source,
+            add(add(limb_nonselect, limb_select), finish),
+        ),
+        coefficient: sub(
+            digit_source_coefficient,
+            add(add(limb_nonselect, limb_select), finish),
+        ),
+        address: add(
+            mul(digit_source, source_digit_address),
+            add(
+                mul(
+                    limb_nonselect,
+                    sparse_linear_digit_address<F, L>(left_rank, control.step),
+                ),
+                add(
+                    mul(
+                        limb_select,
+                        sparse_linear_digit_address<F, L>(sum_rank, control.step),
+                    ),
+                    mul(finish, sparse_linear_sign_address<F, L>(left_rank)),
+                ),
+            ),
+        ),
+        value: row.value,
+    }
+
+    let second_port = SparseCopyPort {
+        selector: add(
+            sign_source,
+            add(add(limb_nonselect, limb_select), finish),
+        ),
+        coefficient: sub(
+            sign_source_coefficient,
+            add(add(limb_nonselect, limb_select), finish),
+        ),
+        address: add(
+            mul(
+                sign_source,
+                sparse_linear_sign_address<F, L>(control.major),
+            ),
+            add(
+                mul(
+                    limb_nonselect,
+                    sparse_linear_digit_address<F, L>(right_rank, control.step),
+                ),
+                add(
+                    mul(
+                        limb_select,
+                        sparse_linear_digit_address<F, L>(
+                            left_difference_rank, control.step,
+                        ),
+                    ),
+                    mul(finish, sparse_linear_sign_address<F, L>(right_rank)),
+                ),
+            ),
+        ),
+        value: row.auxiliary,
+    }
+
+    let third_consumers = add(add(limb_nonselect, limb_select), finish)
+    let third_port = SparseCopyPort {
+        selector: add(nonzero_source, third_consumers),
+        coefficient: sub(nonzero_source, third_consumers),
+        address: add(
+            mul(
+                nonzero_source,
+                sparse_linear_nonzero_address<F, L>(control.major),
+            ),
+            add(
+                mul(
+                    limb_nonselect,
+                    sparse_linear_digit_address<F, L>(
+                        nonselect_rank, control.step,
+                    ),
+                ),
+                add(
+                    mul(
+                        limb_select,
+                        sparse_linear_digit_address<F, L>(
+                            right_difference_rank, control.step,
+                        ),
+                    ),
+                    mul(
+                        finish,
+                        sparse_linear_borrow_address<F, L>(node, zero),
+                    ),
+                ),
+            ),
+        ),
+        value: add(
+            mul(nonzero_source, row.value),
+            add(
+                mul(limb_nonselect, row.state_before),
+                mul(add(limb_select, finish), row.accumulator_before),
+            ),
+        ),
+    }
+
+    let fourth_consumers = add(limb_select, finish)
+    let fourth_port = SparseCopyPort {
+        selector: add(left_borrow_source, fourth_consumers),
+        coefficient: sub(left_borrow_source, fourth_consumers),
+        address: add(
+            mul(
+                left_borrow_source,
+                sparse_linear_borrow_address<F, L>(node, zero),
+            ),
+            add(
+                mul(
+                    limb_select,
+                    sparse_linear_digit_address<F, L>(output_rank, control.step),
+                ),
+                mul(
+                    finish,
+                    sparse_linear_borrow_address<F, L>(node, one),
+                ),
+            ),
+        ),
+        value: row.accumulator_after,
+    }
+
+    let fifth_consumers = add(limb_select, finish)
+    let fifth_port = SparseCopyPort {
+        selector: add(right_borrow_source, fifth_consumers),
+        coefficient: sub(right_borrow_source, fifth_consumers),
+        address: add(
+            mul(
+                right_borrow_source,
+                sparse_linear_borrow_address<F, L>(node, one),
+            ),
+            add(
+                mul(
+                    limb_select,
+                    sparse_linear_same_address<F, L>(node),
+                ),
+                mul(
+                    finish,
+                    sparse_linear_nonzero_address<F, L>(output_rank),
+                ),
+            ),
+        ),
+        value: add(
+            mul(right_borrow_source, row.accumulator_after),
+            mul(fifth_consumers, row.state_before),
+        ),
+    }
+
+    let sixth_consumers = add(limb_select, finish)
+    let sixth_port = SparseCopyPort {
+        selector: sixth_consumers,
+        coefficient: sub(zero, sixth_consumers),
+        address: add(
+            mul(
+                limb_select,
+                sparse_linear_select_address<F, L>(node),
+            ),
+            mul(
+                finish,
+                sparse_linear_sign_address<F, L>(output_rank),
+            ),
+        ),
+        value: row.state_after,
+    }
+
+    let effective_right = sub(
+        add(row.auxiliary, control.flag),
+        mul(natural<F>(2), mul(row.auxiliary, control.flag)),
+    )
+    let different = sub(
+        add(row.value, effective_right),
+        mul(natural<F>(2), mul(row.value, effective_right)),
+    )
+    let same = sub(one, different)
+    let seventh_port = SparseCopyPort {
+        selector: finish,
+        coefficient: mul(limb_count, finish),
+        address: mul(finish, sparse_linear_same_address<F, L>(node)),
+        value: mul(finish, same),
+    }
+    let eighth_port = SparseCopyPort {
+        selector: finish,
+        coefficient: mul(limb_count, finish),
+        address: mul(finish, sparse_linear_select_address<F, L>(node)),
+        value: mul(finish, row.accumulator_before),
+    }
+    [
+        first_port,
+        second_port,
+        third_port,
+        fourth_port,
+        fifth_port,
+        sixth_port,
+        seventh_port,
+        eighth_port,
+    ]
+}
+
+pub fn sparse_linear_interaction_row<F: Radix2Field, const L: usize>(
+    _ challenges: SparseCopyChallenges<F>,
+    _ control: SparseControlRow<F>,
+    _ next_control: SparseControlRow<F>,
+    _ row: SparseTaskRow<F>,
+    _ accumulator: F,
+) -> SparseLinearInteractionRow<F>
+where L > 1,
+{
+    let ports = sparse_linear_interaction_ports<F, L>(
+        control, next_control, row,
+    )
+    SparseCopyInteractionRow {
+        accumulator: accumulator,
+        inverses: sparse_copy_interaction_inverses<F, 8>(challenges, ports),
+    }
+}
+
+pub fn evaluate_sparse_linear_interaction_row<
+    F: Radix2Field,
+    const L: usize,
+>(
+    _ challenge: F,
+    _ challenges: SparseCopyChallenges<F>,
+    _ control: SparseControlRow<F>,
+    _ next_control: SparseControlRow<F>,
+    _ row: SparseTaskRow<F>,
+    _ interaction: SparseLinearInteractionRow<F>,
+) -> SparseInteractionEvaluation<F>
+where L > 1,
+{
+    let ports = sparse_linear_interaction_ports<F, L>(
+        control, next_control, row,
+    )
+    let fold = absorb_sparse_copy_interaction<F, 8>(
+        ConstraintFold<F>::new(challenge),
+        challenges,
+        ports,
+        interaction.inverses,
+    )
+    SparseInteractionEvaluation {
+        valid: true,
+        constraints: fold.constraints,
+        folded: fold.value,
+        delta: sparse_copy_interaction_delta<F, 8>(ports, interaction.inverses),
+    }
+}
+
+pub fn evaluate_sparse_linear_interaction_initial<F: Radix2Field>(
+    _ challenge: F,
+    _ interaction: SparseLinearInteractionRow<F>,
+) -> FixedAirConstraintEvaluation<F> {
+    let fold = ConstraintFold<F>::new(challenge).absorb(interaction.accumulator)
+    FixedAirConstraintEvaluation {
+        valid: true,
+        constraints: fold.constraints,
+        folded: fold.value,
+    }
+}
+
+pub fn evaluate_sparse_linear_interaction_link<
+    F: Radix2Field,
+    const L: usize,
+>(
+    _ challenge: F,
+    _ current_control: SparseControlRow<F>,
+    _ next_control: SparseControlRow<F>,
+    _ current: SparseTaskRow<F>,
+    _ current_interaction: SparseLinearInteractionRow<F>,
+    _ next_interaction: SparseLinearInteractionRow<F>,
+) -> FixedAirConstraintEvaluation<F>
+where L > 1,
+{
+    let ports = sparse_linear_interaction_ports<F, L>(
+        current_control, next_control, current,
+    )
+    let delta = sparse_copy_interaction_delta<F, 8>(
+        ports, current_interaction.inverses,
+    )
+    let fold = ConstraintFold<F>::new(challenge).absorb(sub(
+        next_interaction.accumulator,
+        add(current_interaction.accumulator, delta),
+    ))
+    FixedAirConstraintEvaluation {
+        valid: true,
+        constraints: fold.constraints,
+        folded: fold.value,
+    }
+}
+
+pub fn evaluate_sparse_linear_interaction_terminal<
+    F: Radix2Field,
+    const L: usize,
+>(
+    _ challenge: F,
+    _ control: SparseControlRow<F>,
+    _ next_control: SparseControlRow<F>,
+    _ row: SparseTaskRow<F>,
+    _ interaction: SparseLinearInteractionRow<F>,
+) -> FixedAirConstraintEvaluation<F>
+where L > 1,
+{
+    let ports = sparse_linear_interaction_ports<F, L>(
+        control, next_control, row,
+    )
+    let delta = sparse_copy_interaction_delta<F, 8>(
         ports, interaction.inverses,
     )
     let fold = ConstraintFold<F>::new(challenge).absorb(add(
