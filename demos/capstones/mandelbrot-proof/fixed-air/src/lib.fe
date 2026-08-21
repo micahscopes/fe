@@ -1,0 +1,364 @@
+//! Limb-count-derived witness and AIR relations for `Fixed<L>` multiplication.
+//!
+//! One sparse convolution schedule supplies the scalar witness, exact integer
+//! verifier, arbitrary-field constraint residuals, and later WebGPU placement.
+//! No precision tier owns a handwritten coefficient table.
+
+use canonical_words::{CanonicalWords, CanonicalWordsProvider}
+use precision::field::LIMB_BASE
+use precision::fixed::Fixed
+use precision::polynomial::Radix2Field
+
+pub const FIXED_LIMB_BITS: u32 = 13
+pub const FIXED_LIMB_MASK: u32 = LIMB_BASE - 1
+pub const FIXED_ROUND_HALF: u32 = LIMB_BASE / 2
+
+/// Conservative coefficient bound:
+///
+/// `term_sum + carry < L * (B - 1)^2 + L * (B - 1)
+///                   = L * (B - 1) * B`.
+///
+/// Keeping this value below the proof modulus makes each carry equation an
+/// ordinary field equality with no hidden modular wrap.
+pub const fn max_convolution_limbs_below(_ modulus: u32) -> u32 {
+    if modulus <= 1 { return 0 }
+    (modulus - 1) / (FIXED_LIMB_MASK * LIMB_BASE)
+}
+
+pub const fn convolution_is_safe_below<const L: usize>(_ modulus: u32) -> bool {
+    let limbs: u32 = L.downcast_truncate()
+    L >= 2 && limbs <= max_convolution_limbs_below(modulus)
+}
+
+/// Number of nonzero schoolbook terms contributing to coefficient `k` of two
+/// `L`-limb inputs. Coefficients `0 .. 2L-2` form the familiar triangle;
+/// coefficient `2L-1` has zero terms and drains the last carry.
+pub const fn convolution_term_count<const L: usize>(_ coefficient: u32) -> u32 {
+    let limbs: u32 = L.downcast_truncate()
+    if limbs == 0 || coefficient >= limbs + limbs - 1 { return 0 }
+    if coefficient < limbs {
+        coefficient + 1
+    } else {
+        limbs + limbs - 1 - coefficient
+    }
+}
+
+pub const fn convolution_left_index<const L: usize>(
+    _ coefficient: u32,
+    _ term: u32,
+) -> u32 {
+    let limbs: u32 = L.downcast_truncate()
+    let count = convolution_term_count<L>(coefficient)
+    if term >= count { return 0 }
+    let first = if coefficient < limbs {
+        0
+    } else {
+        coefficient - (limbs - 1)
+    }
+    first + term
+}
+
+pub const fn convolution_right_index<const L: usize>(
+    _ coefficient: u32,
+    _ term: u32,
+) -> u32 {
+    if term >= convolution_term_count<L>(coefficient) { return 0 }
+    coefficient - convolution_left_index<L>(coefficient, term)
+}
+
+pub fn convolution_term_sum<const L: usize>(
+    _ left: [u32; L],
+    _ right: [u32; L],
+    _ coefficient: u32,
+) -> u32 {
+    let count = convolution_term_count<L>(coefficient)
+    let mut sum: u32 = 0
+    let mut term: u32 = 0
+    while term < count {
+        let left_index = convolution_left_index<L>(coefficient, term)
+        let right_index = convolution_right_index<L>(coefficient, term)
+        sum = sum + left[left_index as usize] * right[right_index as usize]
+        term = term + 1
+    }
+    sum
+}
+
+/// Two `L`-row stages avoid a `2 * L` type expression while retaining every
+/// normalized product digit and carry. `low[k]` is coefficient `k`;
+/// `high[k]` is coefficient `L + k`. The final high digit is fixed-point
+/// overflow and is intentionally not part of the wrapped `L`-limb output.
+pub struct FixedProductWitness<const L: usize> {
+    pub valid: bool,
+    pub low_digits: [u32; L],
+    pub low_carries: [u32; L],
+    pub high_digits: [u32; L],
+    pub high_carries: [u32; L],
+    pub round_up: bool,
+    pub round_overflow: bool,
+    pub output: Fixed<L>,
+}
+impl<const L: usize> core::marker::Copy for FixedProductWitness<L> {}
+derive CanonicalWords for FixedProductWitness<L> using CanonicalWordsProvider
+
+fn empty_product_witness<const L: usize>() -> FixedProductWitness<L> {
+    FixedProductWitness {
+        valid: false,
+        low_digits: [0; L],
+        low_carries: [0; L],
+        high_digits: [0; L],
+        high_carries: [0; L],
+        round_up: false,
+        round_overflow: false,
+        output: Fixed::zero(),
+    }
+}
+
+fn words_are_zero<const L: usize>(_ words: [u32; L]) -> bool {
+    let mut index: usize = 0
+    while index < L {
+        if words[index] != 0 { return false }
+        index = index + 1
+    }
+    true
+}
+
+fn inputs_are_u32_safe<const L: usize>(_ left: Fixed<L>, _ right: Fixed<L>) -> bool {
+    let limbs: u32 = L.downcast_truncate()
+    left.is_canonical()
+        && right.is_canonical()
+        && limbs <= max_convolution_limbs_below(4294967295)
+}
+
+pub fn derive_fixed_product_witness<const L: usize>(
+    _ left: Fixed<L>,
+    _ right: Fixed<L>,
+) -> FixedProductWitness<L> {
+    if !inputs_are_u32_safe(left, right) { return empty_product_witness<L>() }
+    let limbs: u32 = L.downcast_truncate()
+    let mut low_digits = [0; L]
+    let mut low_carries = [0; L]
+    let mut high_digits = [0; L]
+    let mut high_carries = [0; L]
+    let mut carry: u32 = 0
+    let mut coefficient: u32 = 0
+    while coefficient < limbs + limbs {
+        let total = convolution_term_sum<L>(left.limbs, right.limbs, coefficient) + carry
+        let digit = total & FIXED_LIMB_MASK
+        carry = total >> FIXED_LIMB_BITS
+        if coefficient < limbs {
+            low_digits[coefficient as usize] = digit
+            low_carries[coefficient as usize] = carry
+        } else {
+            let high_index = coefficient - limbs
+            high_digits[high_index as usize] = digit
+            high_carries[high_index as usize] = carry
+        }
+        coefficient = coefficient + 1
+    }
+
+    let round_up = low_digits[L - 2] >= FIXED_ROUND_HALF
+    let mut round_carry: u32 = if round_up { 1 } else { 0 }
+    let mut output_limbs = [0; L]
+    let mut index: usize = 0
+    while index < L {
+        let retained = if index == 0 {
+            low_digits[L - 1]
+        } else {
+            high_digits[index - 1]
+        }
+        let total = retained + round_carry
+        output_limbs[index] = total & FIXED_LIMB_MASK
+        round_carry = total >> FIXED_LIMB_BITS
+        index = index + 1
+    }
+    let negative = left.negative != right.negative
+        && !words_are_zero(output_limbs)
+    FixedProductWitness {
+        valid: true,
+        low_digits: low_digits,
+        low_carries: low_carries,
+        high_digits: high_digits,
+        high_carries: high_carries,
+        round_up: round_up,
+        round_overflow: round_carry == 1,
+        output: Fixed { negative: negative, limbs: output_limbs },
+    }
+}
+
+fn witness_digit<const L: usize>(
+    _ witness: FixedProductWitness<L>,
+    _ coefficient: u32,
+) -> u32 {
+    let limbs: u32 = L.downcast_truncate()
+    if coefficient < limbs {
+        witness.low_digits[coefficient as usize]
+    } else {
+        witness.high_digits[(coefficient - limbs) as usize]
+    }
+}
+
+fn witness_carry<const L: usize>(
+    _ witness: FixedProductWitness<L>,
+    _ coefficient: u32,
+) -> u32 {
+    let limbs: u32 = L.downcast_truncate()
+    if coefficient < limbs {
+        witness.low_carries[coefficient as usize]
+    } else {
+        witness.high_carries[(coefficient - limbs) as usize]
+    }
+}
+
+fn retained_product_digit<const L: usize>(
+    _ witness: FixedProductWitness<L>,
+    _ output_index: u32,
+) -> u32 {
+    if output_index == 0 {
+        witness.low_digits[L - 1]
+    } else {
+        witness.high_digits[(output_index - 1) as usize]
+    }
+}
+
+/// Exact integer verifier for the AIR relations. It checks range, sparse
+/// convolution, carry propagation, guard rounding, wrapped output, and unique
+/// sign-zero normalization without calling the witness generator.
+pub fn fixed_product_witness_holds<const L: usize>(
+    _ left: Fixed<L>,
+    _ right: Fixed<L>,
+    _ witness: FixedProductWitness<L>,
+) -> bool {
+    if !witness.valid || !inputs_are_u32_safe(left, right) || !witness.output.is_canonical() {
+        return false
+    }
+    let limbs: u32 = L.downcast_truncate()
+    let carry_bound = limbs * FIXED_LIMB_MASK
+    let mut coefficient: u32 = 0
+    let mut carry_in: u32 = 0
+    while coefficient < limbs + limbs {
+        let digit = witness_digit(witness, coefficient)
+        let carry_out = witness_carry(witness, coefficient)
+        if digit >= LIMB_BASE || carry_out > carry_bound { return false }
+        let term_sum = convolution_term_sum<L>(left.limbs, right.limbs, coefficient)
+        if term_sum + carry_in != digit + LIMB_BASE * carry_out { return false }
+        carry_in = carry_out
+        coefficient = coefficient + 1
+    }
+    if carry_in != 0 { return false }
+
+    let expected_round = witness.low_digits[L - 2] >= FIXED_ROUND_HALF
+    if witness.round_up != expected_round { return false }
+    let mut round_carry: u32 = if witness.round_up { 1 } else { 0 }
+    let mut index: u32 = 0
+    while index < limbs {
+        let output = witness.output.limbs[index as usize]
+        let total = retained_product_digit(witness, index) + round_carry
+        if total != output + LIMB_BASE * (total >> FIXED_LIMB_BITS) { return false }
+        round_carry = total >> FIXED_LIMB_BITS
+        index = index + 1
+    }
+    if witness.round_overflow != (round_carry == 1) { return false }
+    let expected_negative = left.negative != right.negative
+        && !words_are_zero(witness.output.limbs)
+    witness.output.negative == expected_negative
+}
+
+fn field_natural<F: Radix2Field>(_ value: u32) -> F {
+    let mut value = value
+    let mut result = F::radix2_zero()
+    let mut place = F::radix2_root(0)
+    while value != 0 {
+        if (value & 1) == 1 { result = result.radix2_add(place) }
+        place = place.radix2_add(place)
+        value = value >> 1
+    }
+    result
+}
+
+/// One coefficient carry equation interpreted in any proof field:
+///
+/// `sum(a_i * b_j) + carry_in - digit - B * carry_out = 0`.
+pub fn convolution_residual<F: Radix2Field, const L: usize>(
+    _ left: Fixed<L>,
+    _ right: Fixed<L>,
+    _ witness: FixedProductWitness<L>,
+    _ coefficient: u32,
+) -> F {
+    let limbs: u32 = L.downcast_truncate()
+    if coefficient >= limbs + limbs { return F::radix2_zero() }
+    let count = convolution_term_count<L>(coefficient)
+    let mut sum = F::radix2_zero()
+    let mut term: u32 = 0
+    while term < count {
+        let left_index = convolution_left_index<L>(coefficient, term)
+        let right_index = convolution_right_index<L>(coefficient, term)
+        sum = sum.radix2_add(
+            field_natural<F>(left.limbs[left_index as usize]).radix2_mul(
+                field_natural<F>(right.limbs[right_index as usize]),
+            ),
+        )
+        term = term + 1
+    }
+    let carry_in = if coefficient == 0 {
+        0
+    } else {
+        witness_carry(witness, coefficient - 1)
+    }
+    sum.radix2_add(field_natural<F>(carry_in))
+        .radix2_sub(field_natural<F>(witness_digit(witness, coefficient)))
+        .radix2_sub(
+            field_natural<F>(LIMB_BASE).radix2_mul(
+                field_natural<F>(witness_carry(witness, coefficient)),
+            ),
+        )
+}
+
+/// One rounding ripple equation over the retained fixed-point window.
+pub fn rounding_residual<F: Radix2Field, const L: usize>(
+    _ witness: FixedProductWitness<L>,
+    _ output_index: u32,
+) -> F {
+    let limbs: u32 = L.downcast_truncate()
+    if output_index >= limbs { return F::radix2_zero() }
+    let mut carry_in: u32 = if witness.round_up { 1 } else { 0 }
+    let mut previous: u32 = 0
+    while previous < output_index {
+        carry_in = (
+            retained_product_digit(witness, previous) + carry_in
+        ) >> FIXED_LIMB_BITS
+        previous = previous + 1
+    }
+    let total = retained_product_digit(witness, output_index) + carry_in
+    let carry_out = total >> FIXED_LIMB_BITS
+    field_natural<F>(retained_product_digit(witness, output_index))
+        .radix2_add(field_natural<F>(carry_in))
+        .radix2_sub(field_natural<F>(witness.output.limbs[output_index as usize]))
+        .radix2_sub(
+            field_natural<F>(LIMB_BASE).radix2_mul(field_natural<F>(carry_out)),
+        )
+}
+
+pub fn boolean_residual<F: Radix2Field>(_ value: u32) -> F {
+    let field = field_natural<F>(value)
+    field.radix2_mul(field.radix2_sub(field_natural<F>(1)))
+}
+
+pub fn bit_reconstruction_residual<
+    F: Radix2Field,
+    const N: usize,
+>(
+    _ value: u32,
+    _ bits: [u32; N],
+) -> F {
+    let mut reconstructed = F::radix2_zero()
+    let mut place = F::radix2_root(0)
+    let mut index: usize = 0
+    while index < N {
+        reconstructed = reconstructed.radix2_add(
+            field_natural<F>(bits[index]).radix2_mul(place),
+        )
+        place = place.radix2_add(place)
+        index = index + 1
+    }
+    field_natural<F>(value).radix2_sub(reconstructed)
+}

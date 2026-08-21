@@ -1,0 +1,8 @@
+[ingot]
+name = "mandelbrot_proof_fixed_air"
+version = "0.1.0"
+
+[dependencies]
+canonical_words = "../../../../ingots/canonical_words"
+core = "../../../../ingots/core"
+precision = "../../../sketches/precision"

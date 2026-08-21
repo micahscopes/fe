@@ -12,6 +12,18 @@ use mandelbrot_proof_recursive_baby_bear::{
     commit_recursive_semantic_leaf,
     merge_recursive_committed_intervals,
 }
+use mandelbrot_proof_fixed_air::{
+    FixedProductWitness,
+    boolean_residual,
+    convolution_left_index,
+    convolution_residual,
+    convolution_right_index,
+    convolution_term_count,
+    derive_fixed_product_witness,
+    fixed_product_witness_holds,
+    max_convolution_limbs_below,
+    rounding_residual,
+}
 use mandelbrot_proof_recursive::{
     ComplexFixed,
     HighPrecisionEscapeClaim,
@@ -22,10 +34,12 @@ use mandelbrot_proof_recursive::{
     initial_boundary,
     merge_adjacent,
 }
+use precision::baby_bear::{BabyBear, BABY_BEAR_MODULUS}
 use precision::fixed::Fixed
 
 type Accumulator4 = RecursiveOrbitAccumulator<4>
 type CommittedAccumulator4 = RecursiveCommittedInterval<4>
+type ProductWitness4 = FixedProductWitness<4>
 
 fn fixed4(_ negative: u32, _ limbs: [u32; 4]) -> Fixed<4> {
     Fixed { negative: negative == 1, limbs: limbs }
@@ -57,6 +71,166 @@ fn encode_committed_accumulator4(_ accumulator: CommittedAccumulator4) -> Browse
         <CommittedAccumulator4 as CanonicalWords>::WORDS,
     )
     encode_canonical_words(ref accumulator, writer).finish()
+}
+
+fn product4(
+    _ left_negative: u32,
+    _ left: [u32; 4],
+    _ right_negative: u32,
+    _ right: [u32; 4],
+) -> (Fixed<4>, Fixed<4>, ProductWitness4) {
+    let left = fixed4(left_negative, left)
+    let right = fixed4(right_negative, right)
+    (left, right, derive_fixed_product_witness(left, right))
+}
+
+pub fn fixed_product4_encoded(
+    _ left_negative: u32,
+    _ l0: u32,
+    _ l1: u32,
+    _ l2: u32,
+    _ l3: u32,
+    _ right_negative: u32,
+    _ r0: u32,
+    _ r1: u32,
+    _ r2: u32,
+    _ r3: u32,
+) -> BrowserBytes {
+    let (_left, _right, witness) = product4(
+        left_negative,
+        [l0, l1, l2, l3],
+        right_negative,
+        [r0, r1, r2, r3],
+    )
+    let writer = BrowserWordWriter::allocate(<ProductWitness4 as CanonicalWords>::WORDS)
+    encode_canonical_words(ref witness, writer).finish()
+}
+
+pub fn fixed_product4_mutation_holds(
+    _ left_negative: u32,
+    _ l0: u32,
+    _ l1: u32,
+    _ l2: u32,
+    _ l3: u32,
+    _ right_negative: u32,
+    _ r0: u32,
+    _ r1: u32,
+    _ r2: u32,
+    _ r3: u32,
+    _ mutation: u32,
+) -> u32 {
+    let (mut left, right, mut witness) = product4(
+        left_negative,
+        [l0, l1, l2, l3],
+        right_negative,
+        [r0, r1, r2, r3],
+    )
+    if mutation == 1 { witness.low_digits[0] = witness.low_digits[0] + 1 }
+    if mutation == 2 { witness.low_carries[0] = witness.low_carries[0] + 1 }
+    if mutation == 3 { witness.round_up = !witness.round_up }
+    if mutation == 4 { witness.output.limbs[0] = witness.output.limbs[0] + 1 }
+    if mutation == 5 { witness.output.negative = !witness.output.negative }
+    if mutation == 6 { left.limbs[0] = 8192 }
+    if mutation == 7 { witness.high_digits[3] = witness.high_digits[3] + 1 }
+    if fixed_product_witness_holds(left, right, witness) { 1 } else { 0 }
+}
+
+pub fn fixed_product4_residuals(
+    _ left_negative: u32,
+    _ l0: u32,
+    _ l1: u32,
+    _ l2: u32,
+    _ l3: u32,
+    _ right_negative: u32,
+    _ r0: u32,
+    _ r1: u32,
+    _ r2: u32,
+    _ r3: u32,
+) -> (
+    u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32,
+) {
+    let (left, right, witness) = product4(
+        left_negative,
+        [l0, l1, l2, l3],
+        right_negative,
+        [r0, r1, r2, r3],
+    )
+    (
+        convolution_residual<BabyBear, 4>(left, right, witness, 0).to_u32(),
+        convolution_residual<BabyBear, 4>(left, right, witness, 1).to_u32(),
+        convolution_residual<BabyBear, 4>(left, right, witness, 2).to_u32(),
+        convolution_residual<BabyBear, 4>(left, right, witness, 3).to_u32(),
+        convolution_residual<BabyBear, 4>(left, right, witness, 4).to_u32(),
+        convolution_residual<BabyBear, 4>(left, right, witness, 5).to_u32(),
+        convolution_residual<BabyBear, 4>(left, right, witness, 6).to_u32(),
+        convolution_residual<BabyBear, 4>(left, right, witness, 7).to_u32(),
+        rounding_residual<BabyBear, 4>(witness, 0).to_u32(),
+        rounding_residual<BabyBear, 4>(witness, 1).to_u32(),
+        rounding_residual<BabyBear, 4>(witness, 2).to_u32(),
+        rounding_residual<BabyBear, 4>(witness, 3).to_u32(),
+        boolean_residual<BabyBear>(if witness.round_up { 1 } else { 0 }).to_u32(),
+        boolean_residual<BabyBear>(if witness.round_overflow { 1 } else { 0 }).to_u32(),
+    )
+}
+
+pub fn fixed_product4_mutated_residual(
+    _ left_negative: u32,
+    _ l0: u32,
+    _ l1: u32,
+    _ l2: u32,
+    _ l3: u32,
+    _ right_negative: u32,
+    _ r0: u32,
+    _ r1: u32,
+    _ r2: u32,
+    _ r3: u32,
+    _ mutation: u32,
+) -> u32 {
+    let (left, right, mut witness) = product4(
+        left_negative,
+        [l0, l1, l2, l3],
+        right_negative,
+        [r0, r1, r2, r3],
+    )
+    if mutation == 1 {
+        witness.low_digits[0] = witness.low_digits[0] + 1
+        return convolution_residual<BabyBear, 4>(left, right, witness, 0).to_u32()
+    }
+    if mutation == 2 {
+        witness.low_carries[0] = witness.low_carries[0] + 1
+        return convolution_residual<BabyBear, 4>(left, right, witness, 0).to_u32()
+    }
+    if mutation == 3 {
+        witness.round_up = !witness.round_up
+        return rounding_residual<BabyBear, 4>(witness, 0).to_u32()
+    }
+    if mutation == 4 {
+        witness.output.limbs[0] = witness.output.limbs[0] + 1
+        return rounding_residual<BabyBear, 4>(witness, 0).to_u32()
+    }
+    witness.high_digits[3] = witness.high_digits[3] + 1
+    convolution_residual<BabyBear, 4>(left, right, witness, 7).to_u32()
+}
+
+pub fn convolution_schedule4(_ coefficient: u32, _ term: u32) -> (u32, u32, u32) {
+    (
+        convolution_term_count<4>(coefficient),
+        convolution_left_index<4>(coefficient, term),
+        convolution_right_index<4>(coefficient, term),
+    )
+}
+
+pub fn convolution_schedule8(_ coefficient: u32, _ term: u32) -> (u32, u32, u32) {
+    (
+        convolution_term_count<8>(coefficient),
+        convolution_left_index<8>(coefficient, term),
+        convolution_right_index<8>(coefficient, term),
+    )
+}
+
+pub fn baby_bear_safe_convolution_limbs() -> u32 {
+    max_convolution_limbs_below(BABY_BEAR_MODULUS)
 }
 
 fn empty_accumulator4() -> Accumulator4 {

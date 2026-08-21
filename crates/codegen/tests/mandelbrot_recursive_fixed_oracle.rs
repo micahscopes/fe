@@ -17,7 +17,9 @@ const LIMB_BITS: usize = 13;
 const LIMB_BASE: u32 = 8192;
 const ACCUMULATOR_WORDS: usize = 37;
 const COMMITTED_ACCUMULATOR_WORDS: usize = 31;
+const PRODUCT_WITNESS_WORDS: usize = 24;
 const POSEIDON_WIDTH: usize = 16;
+const BABY_BEAR_MODULUS: u32 = 2_013_265_921;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Fx {
@@ -155,6 +157,57 @@ fn limbs(value: &Fx) -> [u32; LIMBS] {
 fn fixed_words(value: &Fx) -> Vec<u32> {
     let mut words = vec![value.negative as u32];
     words.extend(limbs(value));
+    words
+}
+
+fn fixed_arguments(left: &Fx, right: &Fx) -> Vec<u32> {
+    let mut arguments = fixed_words(left);
+    arguments.extend(fixed_words(right));
+    arguments
+}
+
+fn expected_product_witness_words(left: &Fx, right: &Fx) -> Vec<u32> {
+    let left_limbs = limbs(left);
+    let right_limbs = limbs(right);
+    let mut digits = [0u32; LIMBS * 2];
+    let mut carries = [0u32; LIMBS * 2];
+    let mut carry = 0u64;
+    for coefficient in 0..LIMBS * 2 {
+        let mut total = carry;
+        for left_index in 0..LIMBS {
+            if coefficient >= left_index {
+                let right_index = coefficient - left_index;
+                if right_index < LIMBS {
+                    total += left_limbs[left_index] as u64 * right_limbs[right_index] as u64;
+                }
+            }
+        }
+        digits[coefficient] = (total % LIMB_BASE as u64) as u32;
+        carry = total / LIMB_BASE as u64;
+        carries[coefficient] = carry as u32;
+    }
+    assert_eq!(carry, 0);
+
+    let round_up = digits[LIMBS - 2] >= LIMB_BASE / 2;
+    let mut round_carry = round_up as u32;
+    let mut output_limbs = [0u32; LIMBS];
+    for index in 0..LIMBS {
+        let retained = digits[LIMBS - 1 + index];
+        let total = retained + round_carry;
+        output_limbs[index] = total % LIMB_BASE;
+        round_carry = total / LIMB_BASE;
+    }
+    let expected_output = multiply(left, right);
+    assert_eq!(output_limbs, limbs(&expected_output));
+
+    let mut words = vec![1];
+    words.extend(&digits[..LIMBS]);
+    words.extend(&carries[..LIMBS]);
+    words.extend(&digits[LIMBS..]);
+    words.extend(&carries[LIMBS..]);
+    words.extend([round_up as u32, (round_carry == 1) as u32]);
+    words.extend(fixed_words(&expected_output));
+    assert_eq!(words.len(), PRODUCT_WITNESS_WORDS);
     words
 }
 
@@ -355,6 +408,164 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
     let memory = instance
         .get_memory(&mut store, "memory")
         .expect("oracle fixture should export linear memory");
+
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "baby_bear_safe_convolution_limbs",
+            &[],
+            1,
+        ),
+        [30],
+        "BabyBear-safe convolution width must be derived from the modulus",
+    );
+    for limb_count in [4usize, 8] {
+        let function = if limb_count == 4 {
+            "convolution_schedule4"
+        } else {
+            "convolution_schedule8"
+        };
+        for coefficient in 0..limb_count * 2 {
+            let count = if coefficient >= limb_count * 2 - 1 {
+                0
+            } else if coefficient < limb_count {
+                coefficient + 1
+            } else {
+                limb_count * 2 - 1 - coefficient
+            };
+            for term in 0..=count {
+                let first = if coefficient < limb_count {
+                    0
+                } else {
+                    coefficient - (limb_count - 1)
+                };
+                let expected = if term < count {
+                    [
+                        count as u32,
+                        (first + term) as u32,
+                        (coefficient - first - term) as u32,
+                    ]
+                } else {
+                    [count as u32, 0, 0]
+                };
+                assert_eq!(
+                    call(
+                        &mut store,
+                        &instance,
+                        function,
+                        &[coefficient as u32, term as u32],
+                        3,
+                    ),
+                    expected,
+                    "sparse convolution schedule L={limb_count}, k={coefficient}, t={term}",
+                );
+            }
+        }
+    }
+
+    let mut product_cases = vec![
+        (zero(), zero()),
+        (fixed(false, 1, 1), fixed(false, 1, 1)),
+        (fixed(true, 3, 4), fixed(false, 7, 8)),
+        (
+            Fx {
+                negative: false,
+                magnitude: radix_modulus() - BigUint::from(1u32),
+            },
+            Fx {
+                negative: true,
+                magnitude: radix_modulus() - BigUint::from(1u32),
+            },
+        ),
+    ];
+    let mut product_seed = 0xa5c3_1f27u32;
+    for _ in 0..24 {
+        let mut next_magnitude = || {
+            let mut value = BigUint::from(0u32);
+            for limb_index in 0..LIMBS {
+                product_seed = product_seed
+                    .wrapping_mul(1_664_525)
+                    .wrapping_add(1_013_904_223);
+                value += BigUint::from(product_seed & (LIMB_BASE - 1)) << (LIMB_BITS * limb_index);
+            }
+            value
+        };
+        let left_magnitude = next_magnitude();
+        let right_magnitude = next_magnitude();
+        product_cases.push((
+            Fx {
+                negative: (product_seed & 1) == 1 && left_magnitude != BigUint::from(0u32),
+                magnitude: left_magnitude,
+            },
+            Fx {
+                negative: (product_seed & 2) == 2 && right_magnitude != BigUint::from(0u32),
+                magnitude: right_magnitude,
+            },
+        ));
+    }
+
+    for (case, (left, right)) in product_cases.iter().enumerate() {
+        let arguments = fixed_arguments(left, right);
+        let (_, _, actual) = encoded(
+            &mut store,
+            &instance,
+            memory,
+            "fixed_product4_encoded",
+            &arguments,
+        );
+        let expected_witness = expected_product_witness_words(left, right);
+        assert_eq!(
+            actual, expected_witness,
+            "fixed product witness case {case}",
+        );
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "fixed_product4_residuals",
+                &arguments,
+                14,
+            ),
+            [0; 14],
+            "BabyBear AIR residual case {case}",
+        );
+        for mutation in 0..=7 {
+            let mut mutated_arguments = arguments.clone();
+            mutated_arguments.push(mutation);
+            assert_eq!(
+                call(
+                    &mut store,
+                    &instance,
+                    "fixed_product4_mutation_holds",
+                    &mutated_arguments,
+                    1,
+                ),
+                [(mutation == 0) as u32],
+                "fixed product mutation {mutation}, case {case}",
+            );
+        }
+        for mutation in [1u32, 2, 3, 4, 7] {
+            let mut mutated_arguments = arguments.clone();
+            mutated_arguments.push(mutation);
+            let expected = match mutation {
+                2 => BABY_BEAR_MODULUS - LIMB_BASE,
+                3 if expected_witness[17] == 0 => 1,
+                _ => BABY_BEAR_MODULUS - 1,
+            };
+            assert_eq!(
+                call(
+                    &mut store,
+                    &instance,
+                    "fixed_product4_mutated_residual",
+                    &mutated_arguments,
+                    1,
+                ),
+                [expected],
+                "mutated BabyBear residual {mutation}, case {case}",
+            );
+        }
+    }
 
     let directed = [
         (
