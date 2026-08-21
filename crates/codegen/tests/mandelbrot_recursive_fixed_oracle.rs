@@ -1212,6 +1212,143 @@ fn expected_product_interaction_receipt(
     receipt
 }
 
+fn round_range_rank(range: u32) -> Option<u32> {
+    match range {
+        2 => Some(0),
+        3 => Some(1),
+        6..=14 => Some(range - 4),
+        _ => None,
+    }
+}
+
+fn round_digit_address(rank: u32, limb: u32) -> u32 {
+    rank * LIMBS as u32 + limb
+}
+
+fn round_bit_address(rank: u32, limb: u32, bit: u32) -> u32 {
+    let limbs = LIMBS as u32;
+    11 * limbs + rank * limbs * 13 + limb * 13 + bit
+}
+
+fn round_sign_address(rank: u32) -> u32 {
+    let limbs = LIMBS as u32;
+    11 * limbs + 11 * limbs * 13 + rank
+}
+
+fn round_nonzero_address(rank: u32) -> u32 {
+    round_sign_address(rank) + 11
+}
+
+fn expected_round_interaction_ports(
+    task: [u32; 5],
+    row: [u32; 6],
+    beta: u32,
+    gamma: u32,
+) -> ([u32; 5], u32) {
+    let [kind, first, second, third, _fourth] = task;
+    let limbs = LIMBS as u32;
+    let mut ports: [Option<(u32, u32, i32)>; 5] = [None; 5];
+    match kind {
+        0 => {
+            if matches!(first, 6 | 9 | 12) && second + 2 == limbs && third == 12 {
+                let rank = round_range_rank(first).unwrap();
+                ports[0] = Some((round_bit_address(rank, second, third), row[0], 1));
+            }
+        }
+        1 => {
+            let retained_low = matches!(first, 6 | 9 | 12) && second + 1 == limbs;
+            let retained_high = matches!(first, 7 | 10 | 13) && second + 1 < limbs;
+            if retained_low || retained_high {
+                let rank = round_range_rank(first).unwrap();
+                ports[0] = Some((round_digit_address(rank, second), row[0], 1));
+            }
+            if matches!(first, 8 | 11 | 14) {
+                let rank = round_range_rank(first).unwrap();
+                ports[1] = Some((round_digit_address(rank, second), row[0], 1));
+            }
+        }
+        2 => {
+            if matches!(first, 2 | 3) {
+                let rank = round_range_rank(first).unwrap();
+                ports[3] = Some((round_sign_address(rank), row[1], 3));
+            }
+            if matches!(first, 8 | 11 | 14) {
+                let rank = round_range_rank(first).unwrap();
+                ports[1] = Some((round_sign_address(rank), row[1], 1));
+                ports[2] = Some((round_nonzero_address(rank), row[0], 1));
+            }
+        }
+        7 => {
+            let low_rank = 2 + 3 * first;
+            let output_rank = low_rank + 2;
+            ports[0] = Some((
+                round_digit_address(low_rank, limbs - 1 + second),
+                row[0],
+                -1,
+            ));
+            ports[1] = Some((round_digit_address(output_rank, second), row[1], -1));
+        }
+        8 => {
+            let low_rank = 2 + 3 * first;
+            let output_rank = low_rank + 2;
+            let left_rank = [0, 1, 0][first as usize];
+            let right_rank = [0, 1, 1][first as usize];
+            ports[0] = Some((round_bit_address(low_rank, limbs - 2, 12), row[4], -1));
+            ports[1] = Some((round_sign_address(output_rank), row[0], -1));
+            ports[2] = Some((round_nonzero_address(output_rank), row[1], -1));
+            ports[3] = Some((round_sign_address(left_rank), row[3], -1));
+            ports[4] = Some((round_sign_address(right_rank), row[5], -1));
+        }
+        _ => {}
+    }
+
+    let mut inverses = [0; 5];
+    let mut delta = 0;
+    for (index, port) in ports.into_iter().enumerate() {
+        if let Some((address, value, coefficient)) = port {
+            let inverse = product_copy_compressed_inverse(address, value, beta, gamma);
+            inverses[index] = inverse;
+            let coefficient = if coefficient < 0 {
+                BABY_BEAR_MODULUS - coefficient.unsigned_abs()
+            } else {
+                coefficient as u32
+            };
+            delta = bb_add(delta, bb_mul(coefficient, inverse));
+        }
+    }
+    (inverses, delta)
+}
+
+fn expected_round_interaction_receipt(
+    point: &ComplexFx,
+    current: &ComplexFx,
+    beta: u32,
+    gamma: u32,
+    receipt_challenge: u32,
+) -> u32 {
+    let mut tasks = expected_sparse_transition_tasks(LIMBS as u32);
+    tasks.resize(4_096, [14, 0, 0, 0, 0]);
+    let rows = expected_sparse_rows(point, current);
+    let mut accumulator = 0;
+    let mut receipt = 0;
+    let mut power = 1;
+    for (task, row) in tasks.into_iter().zip(rows) {
+        let (inverses, delta) = expected_round_interaction_ports(task, row, beta, gamma);
+        receipt = bb_add(receipt, bb_mul(power, accumulator));
+        power = bb_mul(power, receipt_challenge);
+        for inverse in inverses {
+            receipt = bb_add(receipt, bb_mul(power, inverse));
+            power = bb_mul(power, receipt_challenge);
+        }
+        accumulator = bb_add(accumulator, delta);
+    }
+    assert_eq!(
+        accumulator, 0,
+        "independent rounding interaction must close"
+    );
+    receipt
+}
+
 fn expected_sparse_trace_root(point: &ComplexFx, current: &ComplexFx) -> [u32; 8] {
     let rows = expected_sparse_rows(point, current);
     let task_count = 2_821;
@@ -2464,6 +2601,30 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                     ],
                     "selector-only product interaction challenges ({beta}, {gamma})",
                 );
+                let mut round_arguments = arguments.clone();
+                round_arguments.extend([beta, gamma, fold_challenge, receipt_challenge, 0]);
+                assert_eq!(
+                    call(
+                        &mut store,
+                        &instance,
+                        "fixed_transition4_sparse_round_interaction_audit",
+                        &round_arguments,
+                        4,
+                    ),
+                    [
+                        0,
+                        45_057,
+                        4_096,
+                        expected_round_interaction_receipt(
+                            point,
+                            current,
+                            beta,
+                            gamma,
+                            receipt_challenge,
+                        ),
+                    ],
+                    "selector-only rounding interaction challenges ({beta}, {gamma})",
+                );
             }
             for mutation in 1u32..=6 {
                 let mut interaction_arguments = arguments.clone();
@@ -2487,6 +2648,30 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                     );
                 }
                 assert_eq!(audit[1], 20_481);
+                assert_eq!(audit[2], 4_096);
+            }
+            for mutation in 1u32..=6 {
+                let mut interaction_arguments = arguments.clone();
+                interaction_arguments.extend([17, 29, 7, 31, mutation]);
+                let audit = call(
+                    &mut store,
+                    &instance,
+                    "fixed_transition4_sparse_round_interaction_audit",
+                    &interaction_arguments,
+                    4,
+                );
+                if mutation == 6 {
+                    assert_eq!(
+                        audit[0], 1,
+                        "the locally valid rounding mutation must fail only at the interaction terminal",
+                    );
+                } else {
+                    assert!(
+                        audit[0] > 0,
+                        "rounding interaction mutation {mutation} must fail",
+                    );
+                }
+                assert_eq!(audit[1], 45_057);
                 assert_eq!(audit[2], 4_096);
             }
 
