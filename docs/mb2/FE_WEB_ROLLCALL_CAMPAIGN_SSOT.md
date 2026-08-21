@@ -1180,13 +1180,19 @@ Legend:
   suffix products. The complete independent receipts and mutations remain
   byte-identical and pass 1/1 in 117.45 seconds. The same const-generic utility
   can later batch larger row tiles in scalar, packed, or WebGPU schedules.
+  Commit `f719d5181` moves interaction challenge derivation to the production
+  transcript boundary. The authenticated `SL03` root is squeezed under eight
+  independent Poseidon2 domains: beta and gamma for each of product, rounding,
+  linear, and boundary. Every challenge is a full quartic BabyBear element.
+  The independent Plonky3 oracle matches all 32 base-field coefficients, and
+  an invalid root fails closed to a false validity bit plus 32 zero words. The
+  complete gate passes 1/1 in 121.93 seconds.
   This root authenticates the exact control and witness base trace but is not
-  yet a succinct leaf proof. The base-field audit challenges must now become
-  transcript-derived quartic challenges with batch inversion. Those
-  interaction columns must then enter the existing BabyBear LDE, composition,
-  multi-query, FRI, and canonical receipt
-  interpreters. Only that authenticated AIR/FRI receipt may replace semantic
-  replay in the recursive parent carrier.
+  yet a succinct leaf proof. Quartic interaction traces must now be generated
+  from those challenges, committed, and carried into the existing BabyBear
+  LDE, composition, multi-query, FRI, and canonical receipt interpreters. Only
+  that authenticated AIR/FRI receipt may replace semantic replay in the
+  recursive parent carrier.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
   The first arithmetic-plan consolidation is landed at `ba2ded864`: one
@@ -1272,10 +1278,10 @@ fallback. The semantic receipts are:
 ## Immediate burn-down order
 
 1. Run the external real-GPU handoff above before beginning the proof GPU port.
-2. Finish the authenticated BabyBear sparse AIR: derive quartic interaction
-   challenges with batch inversion, then feed control, witness, and
-   interactions through the existing LDE, composition, multi-query, FRI, and
-   canonical receipt layers.
+2. Finish the authenticated BabyBear sparse AIR: generate and commit the
+   quartic interaction traces, then feed control, witness, and interactions
+   through the existing LDE, composition, multi-query, FRI, and canonical
+   receipt layers.
 3. Lower the BabyBear leaf prover and recursive merges through Fe Conal/CTFE
    WebGPU schedules, then run the complete progressive proof/verify/tamper page
    through Chrome.
