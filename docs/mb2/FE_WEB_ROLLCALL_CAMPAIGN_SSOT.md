@@ -1204,6 +1204,29 @@ Legend:
   mutation, and fails closed on an invalid base commitment with the canonical
   zero root. The complete two-test recursive fixed-point binary passes 2/2
   with zero skips in 234.23 seconds.
+  Commit `deb6d8314` gives the shared radix-2 arithmetic plan caller-owned
+  forward NTT, inverse NTT, and disjoint-coset LDE interpretations. The
+  value-returning APIs remain convenience wrappers over that same body. The
+  existing direct-u64 BabyBear DFT/LDE oracle now enters through the writer,
+  retains invalid-coset rejection, and passes 1/1 in 5.20 seconds.
+  Commit `db1f8fac8` adds the nominal 41-field `SparseBaseAirRow`, exposes the
+  84-field quartic interaction row as a caller-owned tile interpretation with
+  explicit starting accumulators, and composes those pieces into a full-table
+  writer with a small typed root digest. This is a placement boundary, not a
+  numeric column table: FCO derives canonical field order from the same Fe
+  records used by the commitments. An attempted function returning both full
+  4,096-row tables honestly failed Sonatina's instruction-result index, so the
+  large tables remain caller-owned. Executing both initialized tables in the
+  scalar checkpoint remained CPU-bound beyond 14 minutes, so it is not used as
+  the ordinary semantic gate. Instead, one zero-import O2 checkpoint executes
+  four exact caller-owned base and interaction rows plus their ending
+  accumulators, then continues through the complete 4,096-row `SL03` and
+  `SI01` roots without allocating the full tables. Its independent model
+  matches all 564 canonical words, including exact-root acceptance, a directed
+  coefficient mutation, and invalid-root zeroing. It passes 1/1 in 81.17
+  seconds. The full-table writer Fe-checks, but its practical execution remains
+  part of the production LDE and WebGPU placement gate, not a scalar-Wasm
+  performance claim.
   `SL03` and `SI01` now authenticate the exact base and interaction witness
   traces, but they are not yet a succinct leaf proof. Both traces must now be
   carried through the existing BabyBear LDE, composition, multi-query, FRI,
