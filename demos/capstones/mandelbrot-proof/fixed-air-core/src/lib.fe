@@ -21,7 +21,7 @@ use mandelbrot_proof_fixed_air::{
 }
 use mandelbrot_proof_recursive::ComplexFixed
 use precision::fixed::Fixed
-use precision::polynomial::Radix2Field
+use precision::polynomial::{Radix2Field, batch_inverse_or_zero}
 
 pub struct AirRadixLimbRange<F: Radix2Field> {
     pub bits: [F; 13],
@@ -4868,14 +4868,6 @@ fn sparse_copy_port_compressed<F: Radix2Field>(
     )
 }
 
-fn sparse_copy_port_inverse<F: Radix2Field>(
-    _ challenges: SparseCopyChallenges<F>,
-    _ port: SparseCopyPort<F>,
-) -> F {
-    if port.selector.radix2_is_zero() { return zero<F>() }
-    sparse_copy_port_compressed(challenges, port).radix2_inverse_or_zero()
-}
-
 fn absorb_sparse_copy_port<F: Radix2Field>(
     _ fold: own ConstraintFold<F>,
     _ challenges: SparseCopyChallenges<F>,
@@ -4896,13 +4888,17 @@ fn sparse_copy_interaction_inverses<
     _ challenges: SparseCopyChallenges<F>,
     _ ports: [SparseCopyPort<F>; PORTS],
 ) -> [F; PORTS] {
-    let mut inverses = [zero<F>(); PORTS]
+    let mut denominators = [zero<F>(); PORTS]
     let mut index: usize = 0
     while index < PORTS {
-        inverses[index] = sparse_copy_port_inverse(challenges, ports[index])
+        if !ports[index].selector.radix2_is_zero() {
+            denominators[index] = sparse_copy_port_compressed(
+                challenges, ports[index],
+            )
+        }
         index = index + 1
     }
-    inverses
+    batch_inverse_or_zero<F, PORTS>(denominators)
 }
 
 fn sparse_copy_interaction_delta<F: Radix2Field, const PORTS: usize>(

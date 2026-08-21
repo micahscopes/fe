@@ -44,6 +44,37 @@ pub trait Radix2Field: Copy {
     fn radix2_root(_ log_order: u32) -> Self
 }
 
+/// Invert every nonzero entry with one field inversion. Zero entries remain
+/// zero, which lets sparse interaction provers batch active and inactive ports
+/// without a sentinel representation.
+pub fn batch_inverse_or_zero<F: Radix2Field, const N: usize>(
+    _ values: [F; N],
+) -> [F; N] {
+    let mut prefixes = [F::radix2_zero(); N]
+    let mut product = F::radix2_root(0)
+    let mut index: usize = 0
+    while index < N {
+        prefixes[index] = product
+        if !values[index].radix2_is_zero() {
+            product = product.radix2_mul(values[index])
+        }
+        index = index + 1
+    }
+
+    let mut inverse_product = product.radix2_inverse_or_zero()
+    let mut inverses = [F::radix2_zero(); N]
+    let mut remaining: usize = N
+    while remaining > 0 {
+        let current = remaining - 1
+        if !values[current].radix2_is_zero() {
+            inverses[current] = inverse_product.radix2_mul(prefixes[current])
+            inverse_product = inverse_product.radix2_mul(values[current])
+        }
+        remaining = current
+    }
+    inverses
+}
+
 impl<const L: usize, M> Radix2Field for FieldElement<L, M>
     where
         M: TwoAdicModulus<L>,
