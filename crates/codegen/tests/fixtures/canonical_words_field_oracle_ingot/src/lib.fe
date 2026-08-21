@@ -3,10 +3,17 @@
 use canonical_words::{
     BrowserWordReader,
     BrowserWordWriter,
+    CanonicalWordStream,
+    CanonicalWordStreamProvider,
     CanonicalWords,
     CanonicalWordsProvider,
     WordSink,
     WordSource,
+    canonical_prefix_word_count,
+    canonical_word_stream_count,
+    decode_canonical_prefix,
+    encode_canonical_prefix,
+    encode_canonical_word_stream,
     encode_canonical_words,
 }
 use core::BrowserBytes
@@ -46,6 +53,35 @@ derive CanonicalWords for DerivedRow using CanonicalWordsProvider
 struct DerivedQuartet { rows: [DerivedRow; 4] }
 impl core::marker::Copy for DerivedQuartet {}
 derive CanonicalWords for DerivedQuartet using CanonicalWordsProvider
+
+struct CountedWords4 { count: u32, values: [u32; 4] }
+impl core::marker::Copy for CountedWords4 {}
+impl CanonicalWordStream for CountedWords4 {
+    fn word_count(ref self) -> u32 {
+        <u32 as CanonicalWords>::WORDS
+            + canonical_prefix_word_count(ref self.values, self.count)
+    }
+
+    fn encode_stream<W: WordSink>(ref self, _ writer: W) -> W {
+        let writer = self.count.encode_stream(writer)
+        encode_canonical_prefix(ref self.values, self.count, writer)
+    }
+
+    fn decode_stream<R: WordSource>(mut self, _ reader: R) -> R {
+        let reader = self.count.decode_stream(reader)
+        decode_canonical_prefix(mut self.values, self.count, reader)
+    }
+}
+
+struct StreamEnvelope { header: u32, body: CountedWords4, footer: bool }
+impl core::marker::Copy for StreamEnvelope {}
+derive CanonicalWordStream for StreamEnvelope using CanonicalWordStreamProvider
+
+const EMPTY_STREAM_ENVELOPE: StreamEnvelope = StreamEnvelope {
+    header: 0,
+    body: CountedWords4 { count: 0, values: [0; 4] },
+    footer: false,
+}
 
 pub fn canonical_field_word_count() -> u32 { <Fr as CanonicalWords>::WORDS }
 
@@ -145,4 +181,39 @@ pub fn canonical_derived_quartet() -> BrowserBytes {
             <DerivedQuartet as CanonicalWords>::WORDS,
         ),
     ).finish()
+}
+
+pub fn canonical_stream_envelope(_ count: u32) -> BrowserBytes {
+    let value = StreamEnvelope {
+        header: 7,
+        body: CountedWords4 { count: count, values: [11, 22, 33, 44] },
+        footer: true,
+    }
+    encode_canonical_word_stream(
+        ref value,
+        BrowserWordWriter::allocate(canonical_word_stream_count(ref value)),
+    ).finish()
+}
+
+pub fn canonical_stream_envelope_roundtrip(_ count: u32) -> u32 {
+    let encoded = canonical_stream_envelope(count)
+    if encoded.len == 0 { return 0 }
+    let mut decoded = EMPTY_STREAM_ENVELOPE
+    let reader = decoded.decode_stream(BrowserWordReader::new(encoded))
+    if !reader.complete()
+        || decoded.header != 7
+        || !decoded.footer
+        || decoded.body.count != count
+    {
+        return 0
+    }
+    let mut index: usize = 0
+    while index < count as usize {
+        let ordinal: u32 = index.downcast_truncate()
+        if decoded.body.values[index] != (ordinal + 1) * 11 {
+            return 0
+        }
+        index = index + 1
+    }
+    1
 }

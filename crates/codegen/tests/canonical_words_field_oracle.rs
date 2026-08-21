@@ -1,6 +1,6 @@
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::{BackendKind, OptLevel, layout_for};
+use fe_codegen::{layout_for, BackendKind, OptLevel};
 use hir::hir_def::HirIngot;
 use std::path::Path;
 use url::Url;
@@ -176,4 +176,33 @@ fn const_generic_field_codec_runs_on_wasm() {
         assert_eq!(field[0], 7);
         assert!(field[1..].iter().all(|word| *word == 0));
     }
+
+    let stream = instance
+        .get_typed_func::<i32, (i32, i32)>(&mut store, "canonical_stream_envelope")
+        .expect("canonical stream encoding export");
+    let stream_roundtrip = instance
+        .get_typed_func::<i32, i32>(&mut store, "canonical_stream_envelope_roundtrip")
+        .expect("canonical stream roundtrip export");
+    for count in 0..=4 {
+        let (pointer, length) = stream
+            .call(&mut store, count)
+            .expect("canonical stream encoding runs");
+        assert_eq!(length, (count + 3) * 4);
+        let mut bytes = vec![0u8; length as usize];
+        memory.read(&store, pointer as usize, &mut bytes).unwrap();
+        let words = bytes
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        let mut expected = vec![7, count as u32];
+        expected.extend([11, 22, 33, 44].into_iter().take(count as usize));
+        expected.push(1);
+        assert_eq!(words, expected);
+        assert_eq!(stream_roundtrip.call(&mut store, count).unwrap(), 1);
+    }
+    let (_, invalid_length) = stream
+        .call(&mut store, 5)
+        .expect("over-capacity stream encoding fails closed");
+    assert_eq!(invalid_length, 0);
+    assert_eq!(stream_roundtrip.call(&mut store, 5).unwrap(), 0);
 }

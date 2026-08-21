@@ -17,6 +17,7 @@ impl<R: core::marker::Copy> core::marker::Copy for WordRead<R> {}
 
 pub trait WordSink: core::marker::Copy {
     fn write(self, _ value: u32) -> Self
+    fn reject(self) -> Self
 }
 
 /// Invalid leaf encodings poison the source through `reject`; the concrete
@@ -32,6 +33,16 @@ pub trait CanonicalWords {
     fn decode<R: WordSource>(mut self, _ reader: R) -> R
 }
 
+/// Canonical word sequences whose exact size is carried by the value. Fixed
+/// codecs lift into this interface automatically. Sparse proof carriers can
+/// instead encode only their counted prefixes while retaining fixed-capacity
+/// in-memory storage for Wasm, native, EVM, and WebGPU backends.
+pub trait CanonicalWordStream {
+    fn word_count(ref self) -> u32
+    fn encode_stream<W: WordSink>(ref self, _ writer: W) -> W
+    fn decode_stream<R: WordSource>(mut self, _ reader: R) -> R
+}
+
 /// Encode without copying the source value into the call frame. This is the
 /// ordinary entry point for large canonical records; nested derived fields use
 /// the same borrowed receiver recursively.
@@ -40,6 +51,77 @@ pub fn encode_canonical_words<T: CanonicalWords, W: WordSink>(
     _ writer: W,
 ) -> W {
     value.encode(writer)
+}
+
+pub fn canonical_word_stream_count<T: CanonicalWordStream>(_ value: ref T) -> u32 {
+    value.word_count()
+}
+
+pub fn encode_canonical_word_stream<T: CanonicalWordStream, W: WordSink>(
+    _ value: ref T,
+    _ writer: W,
+) -> W {
+    value.encode_stream(writer)
+}
+
+/// Count one checked prefix without assuming that each element has a fixed
+/// width. An out-of-capacity count is invalid and therefore has no encoding.
+pub fn canonical_prefix_word_count<
+    T: CanonicalWordStream + core::marker::Copy,
+    const N: usize,
+>(
+    _ values: ref [T; N],
+    _ count: u32,
+) -> u32 {
+    if count > N.downcast_truncate() { return 0 }
+    let mut words: u32 = 0
+    let mut index: usize = 0
+    while index < count as usize {
+        words = words + values[index].word_count()
+        index = index + 1
+    }
+    words
+}
+
+pub fn encode_canonical_prefix<
+    T: CanonicalWordStream + core::marker::Copy,
+    W: WordSink,
+    const N: usize,
+>(
+    _ values: ref [T; N],
+    _ count: u32,
+    _ writer: W,
+) -> W {
+    if count > N.downcast_truncate() { return writer.reject() }
+    let mut writer = writer
+    let mut index: usize = 0
+    while index < count as usize {
+        writer = values[index].encode_stream(writer)
+        index = index + 1
+    }
+    writer
+}
+
+/// Decode into a caller-supplied canonical-empty carrier. Slots beyond
+/// `count` are intentionally untouched, so the enclosing verifier can retain
+/// its ordinary zero-unused-capacity invariant.
+pub fn decode_canonical_prefix<
+    T: CanonicalWordStream + core::marker::Copy,
+    R: WordSource,
+    const N: usize,
+>(
+    _ values: mut [T; N],
+    _ count: u32,
+    _ reader: R,
+) -> R {
+    if count > N.downcast_truncate() { return reader.reject() }
+    let mut reader = reader
+    let mut index: usize = 0
+    while index < count as usize {
+        reader = values[index].decode_stream(reader)
+        index = index + 1
+    }
+    reader
 }
 
 /// Browser-linear-memory interpreter for canonical word emission. The writer
@@ -97,6 +179,15 @@ impl WordSink for BrowserWordWriter {
             cursor: self.cursor + 1,
             words: self.words,
             valid: true,
+        }
+    }
+
+    fn reject(self) -> Self {
+        Self {
+            buffer: self.buffer,
+            cursor: self.cursor,
+            words: self.words,
+            valid: false,
         }
     }
 }
@@ -194,6 +285,63 @@ impl Derive<CanonicalWords> for CanonicalWordsProvider {
         })
         builder.finish()
         ev
+    }
+}
+
+/// Reflection derives the variable-size interpretation with the same field
+/// order as the nominal Fe record. Every field chooses its own fixed or sparse
+/// interpreter through ordinary trait selection.
+pub struct CanonicalWordStreamProvider {}
+
+impl Derive<CanonicalWordStream> for CanonicalWordStreamProvider {
+    const fn derive<T>(ev: own Evidence<CanonicalWordStream<T>>)
+        -> Evidence<CanonicalWordStream<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<CanonicalWordStream<T>>,
+        )
+    {
+        let mut words = builder.int(0)
+        let mut encode = builder.arg_ref("writer")
+        let mut decode = quote(reader) { reader }
+        for field in reflect.fields() {
+            builder.require<CanonicalWordStream>(field.ty())
+            let field_value = builder.field_get(builder.self_ref(), field)
+            words = builder.add(
+                words,
+                builder.trait_call(
+                    field.ty(),
+                    "word_count",
+                    builder.borrow(field_value),
+                ),
+            )
+            encode = builder.trait_call(
+                field.ty(),
+                "encode_stream",
+                builder.borrow(builder.field_get(builder.self_ref(), field)),
+                encode,
+            )
+            decode = quote(reader) { self.${field}.decode_stream(${decode}) }
+        }
+        builder.emit_method("word_count", words)
+        builder.emit_method("encode_stream", encode)
+        builder.emit_method(quote {
+            fn decode_stream<R: WordSource>(mut self, reader: R) -> R { ${decode} }
+        })
+        builder.finish()
+        ev
+    }
+}
+
+impl<T: CanonicalWords> CanonicalWordStream for T {
+    fn word_count(ref self) -> u32 { T::WORDS }
+
+    fn encode_stream<W: WordSink>(ref self, _ writer: W) -> W {
+        self.encode(writer)
+    }
+
+    fn decode_stream<R: WordSource>(mut self, _ reader: R) -> R {
+        self.decode(reader)
     }
 }
 
