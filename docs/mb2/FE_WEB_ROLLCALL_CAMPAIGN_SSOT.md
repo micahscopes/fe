@@ -891,6 +891,25 @@ Legend:
   focused nextest passes 1/1 in 54.92 seconds. Instantiating the typed range
   relations across every transition intermediate and interpreting the same
   plan over arbitrary field-valued opening rows remain the next leaf-AIR gate.
+  Commits `f4236566b` and `a3d653c9b` close that scalar polynomial
+  interpretation gate. Rounding carry-outs are now explicit boolean witness
+  columns, so no residual recomputes them through a host integer shift. The
+  separate `mandelbrot_proof_fixed_air_core` ingot mirrors the recurrence as
+  nested field-valued `AirProduct`, `AirLinear`, and `AirMandelbrotTransition`
+  records and folds 6,185 L4 constraints using field operations only. The
+  count is derived from `L`, range width, and operation structure. Three fold
+  challenges over 19 directed and randomized transitions are zero, while
+  changed convolution digits, carries, rounding carries, signed borrows,
+  boundary limbs, and noncanonical inputs are nonzero. The zero-import Wasm
+  gate passes 1/1 in 31.26 seconds. Its first adapter attempted to return the
+  complete field row as one flattened aggregate and correctly failed Wasm
+  validation with an out-of-bounds return size. The executable adapter now
+  streams smaller typed subrecords into the same fold, retaining the typed
+  authoring schema without placing a 4,000-field value on a backend ABI.
+  This establishes the exact relation oracle, not the production trace
+  placement. A narrow sparse multi-row schedule must now interpret the same
+  convolution and range plan so a leaf proof does not commit thousands of
+  columns per transition.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
   The first arithmetic-plan consolidation is landed at `ba2ded864`: one
