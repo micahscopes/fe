@@ -1,0 +1,216 @@
+//! Independent executable boundary for sparse BabyBear AIR LDE openings.
+
+use mandelbrot_proof_baby_bear::{
+    BabyBearFriQueryPlan,
+    AuxiliaryLdeMultiOpening,
+    AuxiliaryLdeDigest,
+    CheckpointFriQueryPlan4,
+    CheckpointFriQuerySamples4,
+    FriLayerTranscriptDigest,
+    LdeMultiOpening,
+    MAIN_LDE_ROW_FIELDS,
+    MainLdeMultiOpening,
+    MainLdeDigest,
+    auxiliary_lde_root_power_of_two,
+    auxiliary_lde_row_commitment,
+    main_lde_root_power_of_two,
+    main_lde_row_commitment,
+    verify_auxiliary_lde_multi_opening,
+    verify_main_lde_multi_opening,
+    write_auxiliary_lde_multi_query_opening_power_of_two,
+    write_main_lde_multi_query_opening_power_of_two,
+}
+use mandelbrot_proof_kernel::AUXILIARY_ROW_BITS
+use merkle_core::MerkleMultiPath
+use poseidon_baby_bear::Poseidon2Digest
+use precision::baby_bear::BabyBear
+
+const TRACE: usize = 4
+const LDE: usize = 16
+const REQUESTS: usize = 16
+const MAX_LEAVES: usize = 16
+const MAX_SIBLINGS: usize = 64
+
+fn digest8(_ base: u32) -> Poseidon2Digest {
+    Poseidon2Digest::from_u32s([
+        base, base + 1, base + 2, base + 3,
+        base + 4, base + 5, base + 6, base + 7,
+    ])
+}
+
+fn pack_indices(_ indices: [u32; MAX_LEAVES], _ offset: usize) -> u32 {
+    let mut packed: u32 = 0
+    let mut cursor: usize = 0
+    while cursor < 8 {
+        let cursor_u32: u32 = cursor.downcast_truncate()
+        let shift: u32 = cursor_u32 * 4
+        packed = packed | ((indices[offset + cursor] & 15) << shift)
+        cursor = cursor + 1
+    }
+    packed
+}
+
+/// Return canonical path metadata and both roots. The row requests come only
+/// from the typed Fiat-Shamir query plan and radix-2 AIR geometry.
+pub fn air_lde_multipath16_status(
+    _ seed: u32,
+    _ transcript: u32,
+    _ mutation: u32,
+) -> (
+    u32,
+    u32, u32, u32, u32,
+    u32, u32, u32, u32,
+    u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    let mut main_rows = [[BabyBear::zero(); MAIN_LDE_ROW_FIELDS]; LDE]
+    let mut auxiliary_rows = [[BabyBear::zero(); AUXILIARY_ROW_BITS]; LDE]
+    let mut main_leaves = [MainLdeDigest {
+        valid: false,
+        value: Poseidon2Digest::zero(),
+    }; LDE]
+    let mut auxiliary_leaves = [AuxiliaryLdeDigest {
+        valid: false,
+        value: Poseidon2Digest::zero(),
+    }; LDE]
+
+    let mut evaluation: usize = 0
+    while evaluation < LDE {
+        let evaluation_u32: u32 = evaluation.downcast_truncate()
+        let mut column: usize = 0
+        while column < MAIN_LDE_ROW_FIELDS {
+            let column_u32: u32 = column.downcast_truncate()
+            main_rows[evaluation][column] = BabyBear::from_u32(
+                (seed + evaluation_u32 * 1009 + column_u32 * 37) % 1900000007,
+            )
+            column = column + 1
+        }
+        column = 0
+        while column < AUXILIARY_ROW_BITS {
+            let column_u32: u32 = column.downcast_truncate()
+            auxiliary_rows[evaluation][column] = BabyBear::from_u32(
+                (seed + 700001 + evaluation_u32 * 4001 + column_u32 * 53)
+                    % 1900000007,
+            )
+            column = column + 1
+        }
+        main_leaves[evaluation] = main_lde_row_commitment(main_rows[evaluation])
+        auxiliary_leaves[evaluation] = auxiliary_lde_row_commitment(
+            auxiliary_rows[evaluation],
+        )
+        evaluation = evaluation + 1
+    }
+
+    let main_root = main_lde_root_power_of_two<LDE>(main_leaves)
+    let auxiliary_root = auxiliary_lde_root_power_of_two<LDE>(auxiliary_leaves)
+    let sampled = <CheckpointFriQueryPlan4 as BabyBearFriQueryPlan<
+        4,
+        8,
+        CheckpointFriQuerySamples4,
+    >>::sample_fri_queries(
+        FriLayerTranscriptDigest<4> { valid: true, value: digest8(transcript) },
+    )
+    let mut main: MainLdeMultiOpening<MAX_LEAVES, MAX_SIBLINGS> = LdeMultiOpening {
+        valid: false,
+        values: [[BabyBear::zero(); MAIN_LDE_ROW_FIELDS]; MAX_LEAVES],
+        path: MerkleMultiPath {
+            valid: false,
+            leaf_count: 0,
+            leaf_indices: [0; MAX_LEAVES],
+            sibling_count: 0,
+            siblings: [Poseidon2Digest::zero(); MAX_SIBLINGS],
+        },
+    }
+    let mut auxiliary: AuxiliaryLdeMultiOpening<MAX_LEAVES, MAX_SIBLINGS> =
+        LdeMultiOpening {
+            valid: false,
+            values: [[BabyBear::zero(); AUXILIARY_ROW_BITS]; MAX_LEAVES],
+            path: MerkleMultiPath {
+                valid: false,
+                leaf_count: 0,
+                leaf_indices: [0; MAX_LEAVES],
+                sibling_count: 0,
+                siblings: [Poseidon2Digest::zero(); MAX_SIBLINGS],
+            },
+        }
+    let _ = write_main_lde_multi_query_opening_power_of_two<
+        CheckpointFriQueryPlan4,
+        CheckpointFriQuerySamples4,
+        TRACE,
+        LDE,
+        REQUESTS,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >(ref main_rows, sampled.1, mut main)
+    let _ = write_auxiliary_lde_multi_query_opening_power_of_two<
+        CheckpointFriQueryPlan4,
+        CheckpointFriQuerySamples4,
+        TRACE,
+        LDE,
+        REQUESTS,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >(ref auxiliary_rows, sampled.1, mut auxiliary)
+
+    if mutation == 1 {
+        main.values[0][0] = main.values[0][0] + BabyBear::one()
+    } else if mutation == 2 {
+        main.path.siblings[0] = digest8(991)
+    } else if mutation == 3 {
+        main.path.leaf_indices[0] = LDE.downcast_truncate()
+    } else if mutation == 4 {
+        auxiliary.values[0][0] = auxiliary.values[0][0] + BabyBear::one()
+    } else if mutation == 5 {
+        auxiliary.path.siblings[0] = digest8(997)
+    } else if mutation == 6 {
+        auxiliary.path.leaf_indices[0] = LDE.downcast_truncate()
+    }
+
+    let main_low = pack_indices(main.path.leaf_indices, 0)
+    let main_high = pack_indices(main.path.leaf_indices, 8)
+    let auxiliary_low = pack_indices(auxiliary.path.leaf_indices, 0)
+    let auxiliary_high = pack_indices(auxiliary.path.leaf_indices, 8)
+    let main_verified = verify_main_lde_multi_opening<
+        LDE,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >(ref main, main_root)
+    let auxiliary_verified = verify_auxiliary_lde_multi_opening<
+        LDE,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >(ref auxiliary, auxiliary_root)
+
+    (
+        if sampled.0 { 1 } else { 0 },
+        if main.valid { 1 } else { 0 },
+        main.path.leaf_count,
+        main.path.sibling_count,
+        if main_verified { 1 } else { 0 },
+        if auxiliary.valid { 1 } else { 0 },
+        auxiliary.path.leaf_count,
+        auxiliary.path.sibling_count,
+        if auxiliary_verified { 1 } else { 0 },
+        main_low,
+        main_high,
+        auxiliary_low,
+        auxiliary_high,
+        main_root.value.field(0).to_u32(),
+        main_root.value.field(1).to_u32(),
+        main_root.value.field(2).to_u32(),
+        main_root.value.field(3).to_u32(),
+        main_root.value.field(4).to_u32(),
+        main_root.value.field(5).to_u32(),
+        main_root.value.field(6).to_u32(),
+        main_root.value.field(7).to_u32(),
+        auxiliary_root.value.field(0).to_u32(),
+        auxiliary_root.value.field(1).to_u32(),
+        auxiliary_root.value.field(2).to_u32(),
+        auxiliary_root.value.field(3).to_u32(),
+        auxiliary_root.value.field(4).to_u32(),
+        auxiliary_root.value.field(5).to_u32(),
+        auxiliary_root.value.field(6).to_u32(),
+        auxiliary_root.value.field(7).to_u32(),
+    )
+}

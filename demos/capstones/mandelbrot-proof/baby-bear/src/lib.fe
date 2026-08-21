@@ -237,6 +237,16 @@ pub struct FriQueryLeafRequests<const MAX_REQUESTS: usize> {
 impl<const MAX_REQUESTS: usize> core::marker::Copy
     for FriQueryLeafRequests<MAX_REQUESTS> {}
 
+/// Four AIR LDE row positions per typed Fiat-Shamir sample. Duplicates remain
+/// explicit until the canonical sparse Merkle opener normalizes them.
+pub struct AirLdeLeafRequests<const MAX_REQUESTS: usize> {
+    pub valid: bool,
+    pub count: u32,
+    pub indices: [u32; MAX_REQUESTS],
+}
+impl<const MAX_REQUESTS: usize> core::marker::Copy
+    for AirLdeLeafRequests<MAX_REQUESTS> {}
+
 /// Derive the value carrier for a field-neutral query plan.
 pub trait BabyBearFriQueryPlanShape {
     type Samples
@@ -462,6 +472,102 @@ where
         FriQueryLeafRequests {
             valid: true,
             count: tail.count + 2,
+            indices: indices,
+        }
+    }
+}
+
+/// Interpret each typed Fiat-Shamir sample into the current, next, negative,
+/// and negative-next AIR LDE positions required by the shared constraint body.
+pub trait BabyBearAirLdeRequests<
+    const TRACE: usize,
+    const LDE: usize,
+    const MAX_REQUESTS: usize,
+    Samples,
+>: BabyBearFriQueryPlanShape {
+    fn air_lde_requests(_ samples: Samples) -> AirLdeLeafRequests<MAX_REQUESTS>
+}
+
+impl<
+    const TRACE: usize,
+    const LDE: usize,
+    const MAX_REQUESTS: usize,
+    const NEXT_QUERY: u32,
+> BabyBearAirLdeRequests<
+    TRACE,
+    LDE,
+    MAX_REQUESTS,
+    FriQueryIndicesDone<NEXT_QUERY>,
+> for FriQueryPlanDone<NEXT_QUERY>
+where
+    TRACE > 1,
+    LDE > 1,
+    LDE > TRACE,
+    { (TRACE & (TRACE - 1)) == 0 },
+    { (LDE & (LDE - 1)) == 0 },
+    { (LDE % TRACE) == 0 },
+{
+    fn air_lde_requests(
+        _ samples: FriQueryIndicesDone<NEXT_QUERY>,
+    ) -> AirLdeLeafRequests<MAX_REQUESTS> {
+        AirLdeLeafRequests { valid: true, count: 0, indices: [0; MAX_REQUESTS] }
+    }
+}
+
+impl<
+    const TRACE: usize,
+    const LDE: usize,
+    const MAX_REQUESTS: usize,
+    const QUERY: u32,
+    Tail,
+    TailSamples: core::marker::Copy,
+> BabyBearAirLdeRequests<
+    TRACE,
+    LDE,
+    MAX_REQUESTS,
+    FriQueryIndicesSample<QUERY, TailSamples>,
+> for FriQueryPlanSample<QUERY, Tail>
+where
+    TRACE > 1,
+    LDE > 1,
+    LDE > TRACE,
+    { (TRACE & (TRACE - 1)) == 0 },
+    { (LDE & (LDE - 1)) == 0 },
+    { (LDE % TRACE) == 0 },
+    Tail: BabyBearAirLdeRequests<TRACE, LDE, MAX_REQUESTS, TailSamples>,
+{
+    fn air_lde_requests(
+        _ samples: FriQueryIndicesSample<QUERY, TailSamples>,
+    ) -> AirLdeLeafRequests<MAX_REQUESTS> {
+        let geometry = radix2_query_geometry<TRACE, LDE>(samples.current.value)
+        let tail = <Tail as BabyBearAirLdeRequests<
+            TRACE,
+            LDE,
+            MAX_REQUESTS,
+            TailSamples,
+        >>::air_lde_requests(samples.tail)
+        let tail_count: usize = tail.count as usize
+        if !samples.current.valid || !geometry.valid || !tail.valid
+            || tail_count + 4 > MAX_REQUESTS {
+            return AirLdeLeafRequests {
+                valid: false,
+                count: 0,
+                indices: [0; MAX_REQUESTS],
+            }
+        }
+        let mut indices = [0; MAX_REQUESTS]
+        indices[0] = geometry.evaluation
+        indices[1] = geometry.next_evaluation
+        indices[2] = geometry.negative_evaluation
+        indices[3] = geometry.negative_next_evaluation
+        let mut cursor: usize = 0
+        while cursor < tail_count {
+            indices[cursor + 4] = tail.indices[cursor]
+            cursor = cursor + 1
+        }
+        AirLdeLeafRequests {
+            valid: true,
+            count: tail.count + 4,
             indices: indices,
         }
     }
@@ -841,6 +947,43 @@ pub struct AuxiliaryLdeTreeRole {}
 pub type MainLdeQuartetPath<const DEPTH: usize> = LdeQuartetPath<MainLdeTreeRole, DEPTH>
 pub type AuxiliaryLdeQuartetPath<const DEPTH: usize> =
     LdeQuartetPath<AuxiliaryLdeTreeRole, DEPTH>
+
+/// Canonical sparse opening for one role-branded base-field LDE tree.
+pub struct LdeMultiOpening<
+    Role,
+    Value,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+> {
+    pub valid: bool,
+    pub values: [Value; MAX_LEAVES],
+    pub path: MerkleMultiPath<Poseidon2Digest, MAX_LEAVES, MAX_SIBLINGS>,
+}
+impl<
+    Role,
+    Value: core::marker::Copy,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+> core::marker::Copy for LdeMultiOpening<Role, Value, MAX_LEAVES, MAX_SIBLINGS> {}
+
+pub type MainLdeMultiOpening<
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+> = LdeMultiOpening<
+    MainLdeTreeRole,
+    [BabyBear; MAIN_LDE_ROW_FIELDS],
+    MAX_LEAVES,
+    MAX_SIBLINGS,
+>
+pub type AuxiliaryLdeMultiOpening<
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+> = LdeMultiOpening<
+    AuxiliaryLdeTreeRole,
+    [BabyBear; AUXILIARY_ROW_BITS],
+    MAX_LEAVES,
+    MAX_SIBLINGS,
+>
 
 /// One authenticated verifier row. Main and auxiliary values remain in the
 /// u32-native base field; the shared AIR view embeds them into the quartic
@@ -2501,6 +2644,288 @@ where N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N & (N - 1)) == 0 }
     }
     let root = digest_root_power_of_two<N>(raw)
     AuxiliaryLdeDigest { valid: root.valid, value: root.value }
+}
+
+fn reset_main_lde_multi_opening<
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(_ opening: mut MainLdeMultiOpening<MAX_LEAVES, MAX_SIBLINGS>) {
+    opening.valid = false
+    opening.values = [[BabyBear::zero(); MAIN_LDE_ROW_FIELDS]; MAX_LEAVES]
+    opening.path = invalid_digest_multi_path<MAX_LEAVES, MAX_SIBLINGS>()
+}
+
+fn reset_auxiliary_lde_multi_opening<
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(_ opening: mut AuxiliaryLdeMultiOpening<MAX_LEAVES, MAX_SIBLINGS>) {
+    opening.valid = false
+    opening.values = [[BabyBear::zero(); AUXILIARY_ROW_BITS]; MAX_LEAVES]
+    opening.path = invalid_digest_multi_path<MAX_LEAVES, MAX_SIBLINGS>()
+}
+
+/// Populate a sparse opening in place so large AIR row carriers remain behind
+/// a Fe reference instead of flattening into a backend function result.
+pub fn write_main_lde_multi_opening_power_of_two<
+    const N: usize,
+    const REQUESTS: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ rows: ref [[BabyBear; MAIN_LDE_ROW_FIELDS]; N],
+    _ requested: own [u32; REQUESTS],
+    _ opening: mut MainLdeMultiOpening<MAX_LEAVES, MAX_SIBLINGS>,
+) -> bool
+where
+    N > 1,
+    N <= MAX_PADDED_TRACE_LENGTH,
+    N <= 2147483648,
+    { (N & (N - 1)) == 0 },
+    REQUESTS > 0,
+    MAX_LEAVES > 0,
+{
+    reset_main_lde_multi_opening<MAX_LEAVES, MAX_SIBLINGS>(mut opening)
+    let mut leaves = [Poseidon2Digest::zero(); N]
+    let mut cursor: usize = 0
+    while cursor < N {
+        leaves[cursor] = main_lde_row_commitment(rows[cursor]).value
+        cursor = cursor + 1
+    }
+    let path = multi_path_from_leaves<
+        Poseidon2Digest,
+        DigestNodeHasher,
+        N,
+        REQUESTS,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >(leaves, requested)
+    if !path.valid {
+        return false
+    }
+    opening.path = path
+    cursor = 0
+    while cursor < (path.leaf_count as usize) {
+        opening.values[cursor] = rows[path.leaf_indices[cursor] as usize]
+        cursor = cursor + 1
+    }
+    opening.valid = true
+    true
+}
+
+pub fn write_auxiliary_lde_multi_opening_power_of_two<
+    const N: usize,
+    const REQUESTS: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ rows: ref [[BabyBear; AUXILIARY_ROW_BITS]; N],
+    _ requested: own [u32; REQUESTS],
+    _ opening: mut AuxiliaryLdeMultiOpening<MAX_LEAVES, MAX_SIBLINGS>,
+) -> bool
+where
+    N > 1,
+    N <= MAX_PADDED_TRACE_LENGTH,
+    N <= 2147483648,
+    { (N & (N - 1)) == 0 },
+    REQUESTS > 0,
+    MAX_LEAVES > 0,
+{
+    reset_auxiliary_lde_multi_opening<MAX_LEAVES, MAX_SIBLINGS>(mut opening)
+    let mut leaves = [Poseidon2Digest::zero(); N]
+    let mut cursor: usize = 0
+    while cursor < N {
+        leaves[cursor] = auxiliary_lde_row_commitment(rows[cursor]).value
+        cursor = cursor + 1
+    }
+    let path = multi_path_from_leaves<
+        Poseidon2Digest,
+        DigestNodeHasher,
+        N,
+        REQUESTS,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >(leaves, requested)
+    if !path.valid {
+        return false
+    }
+    opening.path = path
+    cursor = 0
+    while cursor < (path.leaf_count as usize) {
+        opening.values[cursor] = rows[path.leaf_indices[cursor] as usize]
+        cursor = cursor + 1
+    }
+    opening.valid = true
+    true
+}
+
+pub fn write_main_lde_multi_query_opening_power_of_two<
+    Plan,
+    Samples: core::marker::Copy,
+    const TRACE: usize,
+    const LDE: usize,
+    const REQUESTS: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ rows: ref [[BabyBear; MAIN_LDE_ROW_FIELDS]; LDE],
+    _ samples: Samples,
+    _ opening: mut MainLdeMultiOpening<MAX_LEAVES, MAX_SIBLINGS>,
+) -> bool
+where
+    TRACE > 1,
+    LDE > 1,
+    LDE > TRACE,
+    LDE <= MAX_PADDED_TRACE_LENGTH,
+    LDE <= 2147483648,
+    { (TRACE & (TRACE - 1)) == 0 },
+    { (LDE & (LDE - 1)) == 0 },
+    { (LDE % TRACE) == 0 },
+    REQUESTS > 0,
+    MAX_LEAVES > 0,
+    Plan: BabyBearAirLdeRequests<TRACE, LDE, REQUESTS, Samples>,
+{
+    let requests = <Plan as BabyBearAirLdeRequests<
+        TRACE,
+        LDE,
+        REQUESTS,
+        Samples,
+    >>::air_lde_requests(samples)
+    if !requests.valid || requests.count != REQUESTS.downcast_truncate() {
+        reset_main_lde_multi_opening<MAX_LEAVES, MAX_SIBLINGS>(mut opening)
+        return false
+    }
+    write_main_lde_multi_opening_power_of_two<
+        LDE,
+        REQUESTS,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >(ref rows, requests.indices, mut opening)
+}
+
+pub fn write_auxiliary_lde_multi_query_opening_power_of_two<
+    Plan,
+    Samples: core::marker::Copy,
+    const TRACE: usize,
+    const LDE: usize,
+    const REQUESTS: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ rows: ref [[BabyBear; AUXILIARY_ROW_BITS]; LDE],
+    _ samples: Samples,
+    _ opening: mut AuxiliaryLdeMultiOpening<MAX_LEAVES, MAX_SIBLINGS>,
+) -> bool
+where
+    TRACE > 1,
+    LDE > 1,
+    LDE > TRACE,
+    LDE <= MAX_PADDED_TRACE_LENGTH,
+    LDE <= 2147483648,
+    { (TRACE & (TRACE - 1)) == 0 },
+    { (LDE & (LDE - 1)) == 0 },
+    { (LDE % TRACE) == 0 },
+    REQUESTS > 0,
+    MAX_LEAVES > 0,
+    Plan: BabyBearAirLdeRequests<TRACE, LDE, REQUESTS, Samples>,
+{
+    let requests = <Plan as BabyBearAirLdeRequests<
+        TRACE,
+        LDE,
+        REQUESTS,
+        Samples,
+    >>::air_lde_requests(samples)
+    if !requests.valid || requests.count != REQUESTS.downcast_truncate() {
+        reset_auxiliary_lde_multi_opening<MAX_LEAVES, MAX_SIBLINGS>(mut opening)
+        return false
+    }
+    write_auxiliary_lde_multi_opening_power_of_two<
+        LDE,
+        REQUESTS,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >(ref rows, requests.indices, mut opening)
+}
+
+pub fn verify_main_lde_multi_opening<
+    const N: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ opening: ref MainLdeMultiOpening<MAX_LEAVES, MAX_SIBLINGS>,
+    _ root: own MainLdeDigest,
+) -> bool
+where
+    N > 1,
+    N <= MAX_PADDED_TRACE_LENGTH,
+    N <= 2147483648,
+    { (N & (N - 1)) == 0 },
+    MAX_LEAVES > 0,
+{
+    if !opening.valid || !root.valid { return false }
+    let count: usize = opening.path.leaf_count as usize
+    if count == 0 || count > MAX_LEAVES { return false }
+    let mut leaves = [Poseidon2Digest::zero(); MAX_LEAVES]
+    let mut cursor: usize = 0
+    while cursor < count {
+        leaves[cursor] = main_lde_row_commitment(opening.values[cursor]).value
+        cursor = cursor + 1
+    }
+    while cursor < MAX_LEAVES {
+        let mut column: usize = 0
+        while column < MAIN_LDE_ROW_FIELDS {
+            if !opening.values[cursor][column].is_zero() { return false }
+            column = column + 1
+        }
+        cursor = cursor + 1
+    }
+    multi_verify<
+        Poseidon2Digest,
+        DigestNodeHasher,
+        N,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >(root.value, leaves, opening.path)
+}
+
+pub fn verify_auxiliary_lde_multi_opening<
+    const N: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ opening: ref AuxiliaryLdeMultiOpening<MAX_LEAVES, MAX_SIBLINGS>,
+    _ root: own AuxiliaryLdeDigest,
+) -> bool
+where
+    N > 1,
+    N <= MAX_PADDED_TRACE_LENGTH,
+    N <= 2147483648,
+    { (N & (N - 1)) == 0 },
+    MAX_LEAVES > 0,
+{
+    if !opening.valid || !root.valid { return false }
+    let count: usize = opening.path.leaf_count as usize
+    if count == 0 || count > MAX_LEAVES { return false }
+    let mut leaves = [Poseidon2Digest::zero(); MAX_LEAVES]
+    let mut cursor: usize = 0
+    while cursor < count {
+        leaves[cursor] = auxiliary_lde_row_commitment(opening.values[cursor]).value
+        cursor = cursor + 1
+    }
+    while cursor < MAX_LEAVES {
+        let mut column: usize = 0
+        while column < AUXILIARY_ROW_BITS {
+            if !opening.values[cursor][column].is_zero() { return false }
+            column = column + 1
+        }
+        cursor = cursor + 1
+    }
+    multi_verify<
+        Poseidon2Digest,
+        DigestNodeHasher,
+        N,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >(root.value, leaves, opening.path)
 }
 
 fn invalid_lde_quartet_path<Role, const DEPTH: usize>() -> LdeQuartetPath<Role, DEPTH> {
