@@ -1271,6 +1271,77 @@ fn expected_sparse_air_composition(point: Ext4, numerators: [Ext4; 4]) -> Ext4 {
         .add(numerators[3].mul(last_zerofier.inverse()))
 }
 
+fn expected_sparse_public_positions() -> Vec<u32> {
+    let tasks = expected_sparse_transition_tasks(LIMBS as u32);
+    let mut positions = Vec::with_capacity(6 * (LIMBS + 1));
+    for coordinate in 0..6u32 {
+        for limb in 0..LIMBS as u32 {
+            positions.push(
+                tasks
+                    .iter()
+                    .position(|task| task[0] == 1 && task[1] == coordinate && task[2] == limb)
+                    .expect("every public limb must occur in the independent task plan")
+                    as u32,
+            );
+        }
+        positions.push(
+            tasks
+                .iter()
+                .position(|task| task[0] == 2 && task[1] == coordinate)
+                .expect("every public sign must occur in the independent task plan")
+                as u32,
+        );
+    }
+    positions
+}
+
+fn expected_sparse_public_composition(
+    point: &ComplexFx,
+    current: &ComplexFx,
+    next: &ComplexFx,
+    evaluation_point: Ext4,
+    opened_value: Ext4,
+    opened_auxiliary: Ext4,
+    fold: Ext4,
+    mix: Ext4,
+) -> Ext4 {
+    let public = [
+        &point.real,
+        &point.imaginary,
+        &current.real,
+        &current.imaginary,
+        &next.real,
+        &next.imaginary,
+    ];
+    let positions = expected_sparse_public_positions();
+    let trace_root = bb_two_adic_root(12);
+    let mut result = Ext4::ZERO;
+    let mut power = Ext4::from_base(1);
+    for (coordinate, value) in public.into_iter().enumerate() {
+        for (limb, expected) in limbs(value).into_iter().enumerate() {
+            let row = positions[coordinate * (LIMBS + 1) + limb];
+            let denominator = evaluation_point.sub(Ext4::from_base(bb_pow(trace_root, row)));
+            assert_ne!(denominator, Ext4::ZERO, "public limb inverse pole");
+            result = result.add(
+                power
+                    .mul(opened_value.sub(Ext4::from_base(expected)))
+                    .mul(denominator.inverse()),
+            );
+            power = power.mul(fold);
+        }
+        let sign_row = positions[coordinate * (LIMBS + 1) + LIMBS];
+        let denominator = evaluation_point.sub(Ext4::from_base(bb_pow(trace_root, sign_row)));
+        assert_ne!(denominator, Ext4::ZERO, "public sign inverse pole");
+        result = result.add(
+            power
+                .mul(opened_auxiliary.sub(Ext4::from_base(value.negative as u32)))
+                .mul(denominator.inverse()),
+        );
+        power = power.mul(fold);
+    }
+    result.mul(mix)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ExpectedCopyPort {
     address: u32,
@@ -2355,6 +2426,35 @@ fn compile_sparse_auth_fixture() -> Vec<u8> {
         .into_bytecode()
         .expect("Wasm backend should emit sparse trace authentication bytes");
     wasmparser::validate(&bytes).expect("sparse trace authentication Wasm should validate");
+    bytes
+}
+
+fn compile_sparse_public_binding_fixture() -> Vec<u8> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/mandelbrot_sparse_public_binding_oracle_ingot");
+    let url = Url::from_directory_path(path.canonicalize().unwrap()).unwrap();
+    let mut db = DriverDataBase::default();
+    assert!(
+        !driver::init_ingot(&mut db, &url),
+        "sparse public binding fixture initialization diagnostics",
+    );
+    let ingot = db
+        .workspace()
+        .containing_ingot(&db, url)
+        .expect("sparse public binding fixture ingot");
+    let top_mod = ingot.root_mod(&db);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "unexpected sparse public binding diagnostics:\n{diagnostics}",
+    );
+    let bytes = BackendKind::Wasm
+        .create()
+        .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O2)
+        .expect("sparse public binding fixture should compile to Wasm")
+        .into_bytecode()
+        .expect("Wasm backend should emit sparse public binding bytes");
+    wasmparser::validate(&bytes).expect("sparse public binding Wasm should validate");
     bytes
 }
 
@@ -4215,6 +4315,108 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
             2,
         ),
         [0, 0],
+    );
+}
+
+#[test]
+fn sparse_public_composition_lowers_and_executes() {
+    let bytes = compile_sparse_public_binding_fixture();
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &bytes)
+        .expect("sparse public-composition Wasm module should load");
+    assert_eq!(
+        module.imports().count(),
+        0,
+        "public fixture must stay zero-import"
+    );
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("sparse public-composition fixture should instantiate");
+    let point = ComplexFx {
+        real: fixed(true, 3, 4),
+        imaginary: fixed(false, 1, 8),
+    };
+    let current = ComplexFx {
+        real: fixed(false, 1, 2),
+        imaginary: fixed(true, 1, 4),
+    };
+    let output = call(
+        &mut store,
+        &instance,
+        "fixed_transition4_sparse_public_composition",
+        &transition_arguments(&point, &current),
+        56,
+    );
+    assert_eq!(output[0], 1, "public composition must execute");
+    assert_eq!(output[1], 0, "statement mismatch must fail closed");
+
+    let claim = Claim {
+        point: point.clone(),
+        bound: 8,
+    };
+    let start = Boundary {
+        iteration: 3,
+        z: current.clone(),
+        escaped: escaped(&current),
+    };
+    let end = advance(&claim, &start);
+    let statement = expected_committed_words(&claim, &start, &end, 1);
+    let base = [11, 13, 17, 19, 23, 29, 31, 37];
+    let interaction = [41, 43, 47, 53, 59, 61, 67, 71];
+    let transcript = expected_sparse_air_lde_transcript(&statement, base, interaction);
+    assert_eq!(
+        output[2..10],
+        transcript,
+        "public constraints must derive from the independently reconstructed AIR transcript",
+    );
+    let fold = Ext4::from_words(&reference_poseidon_digest(b"PC01", &transcript)[..4]);
+    let mix = Ext4::from_words(&reference_poseidon_digest(b"PM01", &transcript)[..4]);
+    assert_ne!(fold, Ext4::ZERO, "PC01 must not erase later constraints");
+    assert_ne!(mix, Ext4::ZERO, "PM01 must not erase public composition");
+    assert_eq!(Ext4::from_words(&output[10..14]), fold);
+    assert_eq!(Ext4::from_words(&output[14..18]), mix);
+    assert_eq!(
+        output[18..48],
+        expected_sparse_public_positions(),
+        "Fe public positions must match the independently enumerated sparse task plan",
+    );
+
+    let evaluation_point = Ext4([73, 79, 83, 89]);
+    let opened_value = Ext4([97, 101, 103, 107]);
+    let opened_auxiliary = Ext4([109, 113, 127, 131]);
+    let expected = expected_sparse_public_composition(
+        &point,
+        &current,
+        &end.z,
+        evaluation_point,
+        opened_value,
+        opened_auxiliary,
+        fold,
+        mix,
+    );
+    assert_eq!(
+        Ext4::from_words(&output[48..52]),
+        expected,
+        "public rational composition must match the independent field model",
+    );
+    let expected_mutation = expected_sparse_public_composition(
+        &point,
+        &current,
+        &end.z,
+        evaluation_point,
+        opened_value.add(Ext4::from_base(1)),
+        opened_auxiliary,
+        fold,
+        mix,
+    );
+    assert_eq!(
+        Ext4::from_words(&output[52..56]),
+        expected_mutation,
+        "an opened value mutation must follow the same public quotient",
+    );
+    assert_ne!(
+        expected_mutation, expected,
+        "an opened value mutation must change the public contribution",
     );
 }
 

@@ -118,18 +118,24 @@ pub fn commit_recursive_boundary<const L: usize>(
     }
 }
 
-/// Semantic leaf adapter used by the current exactness oracle. The production
-/// leaf prover will replace the replay with an authenticated AIR receipt while
-/// preserving this committed interval boundary exactly.
-pub fn commit_recursive_semantic_leaf<const L: usize>(
+/// Commit the public carrier for one proof-backed recurrence step. This checks
+/// canonical public shape and escape flags but deliberately does not replay the
+/// transition: the sparse AIR receipt is responsible for that relation.
+pub fn commit_recursive_leaf_statement<const L: usize>(
     _ interval: OrbitInterval<L>,
 ) -> RecursiveCommittedInterval<L>
     where Limbs<L>: TruncRows<Limbs<L>> + Mac + ShiftAppend + Head + Carry
                   + Zero + SubBorrow + Select + Top + OrLower
                   + core::marker::Copy,
 {
-    let certified: RecursiveOrbitAccumulator<L> = certify_leaf(interval)
-    if !certified.valid { return invalid_recursive_committed_interval<L>() }
+    if !boundary_is_valid(interval.claim, interval.start)
+        || !boundary_is_valid(interval.claim, interval.end)
+        || interval.start.escaped
+        || interval.start.iteration >= interval.end.iteration
+        || interval.end.iteration - interval.start.iteration != 1
+    {
+        return invalid_recursive_committed_interval<L>()
+    }
     let statement = commit_recursive_statement(ref interval.claim)
     let start = commit_recursive_boundary(interval.claim, interval.start)
     let end = commit_recursive_boundary(interval.claim, interval.end)
@@ -143,6 +149,21 @@ pub fn commit_recursive_semantic_leaf<const L: usize>(
         start: start,
         end: end,
     }
+}
+
+/// Semantic leaf adapter used by the independent exactness oracle. The
+/// production leaf prover replaces this replay with an authenticated sparse
+/// AIR receipt while preserving the exact public carrier above.
+pub fn commit_recursive_semantic_leaf<const L: usize>(
+    _ interval: OrbitInterval<L>,
+) -> RecursiveCommittedInterval<L>
+    where Limbs<L>: TruncRows<Limbs<L>> + Mac + ShiftAppend + Head + Carry
+                  + Zero + SubBorrow + Select + Top + OrLower
+                  + core::marker::Copy,
+{
+    let certified: RecursiveOrbitAccumulator<L> = certify_leaf(interval)
+    if !certified.valid { return invalid_recursive_committed_interval<L>() }
+    commit_recursive_leaf_statement(interval)
 }
 
 pub fn merge_recursive_committed_intervals<const L: usize>(

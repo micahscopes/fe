@@ -1,0 +1,13 @@
+[ingot]
+name = "mandelbrot_sparse_public_binding_oracle_ingot"
+version = "0.1.0"
+
+[dependencies]
+core = "../../../../../ingots/core"
+mandelbrot_proof_fixed_air = "../../../../../demos/capstones/mandelbrot-proof/fixed-air"
+mandelbrot_proof_fixed_air_core = "../../../../../demos/capstones/mandelbrot-proof/fixed-air-core"
+mandelbrot_proof_fixed_air_baby_bear = "../../../../../demos/capstones/mandelbrot-proof/fixed-air-baby-bear"
+mandelbrot_proof_recursive = "../../../../../demos/capstones/mandelbrot-proof/recursive"
+mandelbrot_proof_recursive_baby_bear = "../../../../../demos/capstones/mandelbrot-proof/recursive-baby-bear"
+poseidon_baby_bear = "../../../../../ingots/poseidon_baby_bear"
+precision = "../../../../../demos/sketches/precision"

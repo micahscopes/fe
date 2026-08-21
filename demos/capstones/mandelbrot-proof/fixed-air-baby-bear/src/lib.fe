@@ -42,6 +42,7 @@ use mandelbrot_proof_fixed_air_core::{
     SparseLinearInteractionRow,
     SparseLinearRoleSelectors,
     SparseProductInteractionRow,
+    SparsePublicCoordinate,
     SparseRangeRoleSelectors,
     SparseRoundInteractionRow,
     SparseTaskRow,
@@ -69,6 +70,12 @@ use mandelbrot_proof_fixed_air_core::{
     evaluate_sparse_round_interaction_row,
     evaluate_sparse_round_interaction_terminal,
     sparse_control_row_at,
+    sparse_public_constraint_count,
+    sparse_public_coordinate_at,
+    sparse_public_coordinate_count,
+    sparse_public_limb_trace_row,
+    sparse_public_positions_follow_task_plan,
+    sparse_public_sign_trace_row,
     sparse_transition_row_from_witness,
     sparse_transition_task_count,
     sparse_transition_trace_length,
@@ -77,8 +84,11 @@ use mandelbrot_proof_fixed_air_core::{
     write_sparse_product_interaction_row,
     write_sparse_round_interaction_row,
 }
-use mandelbrot_proof_recursive::ComplexFixed
-use mandelbrot_proof_recursive_baby_bear::RecursiveCommittedInterval
+use mandelbrot_proof_recursive::{ComplexFixed, OrbitInterval}
+use mandelbrot_proof_recursive_baby_bear::{
+    RecursiveCommittedInterval,
+    commit_recursive_leaf_statement,
+}
 use merkle_core::{
     MerkleMultiPath,
     MerkleRoot,
@@ -98,6 +108,8 @@ use poseidon_baby_bear::{
     squeeze_ext4,
 }
 use precision::baby_bear::{BabyBear, BabyBearExt4}
+use precision::field::{Head, Limbs, Mac, Select, ShiftAppend, SubBorrow, Zero}
+use precision::fixed::{Carry, Fixed, OrLower, Top, TruncRows}
 use precision::polynomial::{
     AirCompositionValue,
     AirConstraintNumerators,
@@ -188,6 +200,14 @@ impl Poseidon2FieldDomain for MandelbrotSparseAirRootsBabyBearV1 {
 struct MandelbrotSparseAirTranscriptBabyBearV1 {}
 impl Poseidon2FieldDomain for MandelbrotSparseAirTranscriptBabyBearV1 {
     const TAG: u32 = protocol_tag("AT02")
+}
+struct MandelbrotSparsePublicConstraintBabyBearV1 {}
+impl Poseidon2FieldDomain for MandelbrotSparsePublicConstraintBabyBearV1 {
+    const TAG: u32 = protocol_tag("PC01")
+}
+struct MandelbrotSparsePublicMixBabyBearV1 {}
+impl Poseidon2FieldDomain for MandelbrotSparsePublicMixBabyBearV1 {
+    const TAG: u32 = protocol_tag("PM01")
 }
 struct MandelbrotSparseLdeProductBetaBabyBearV1 {}
 impl Poseidon2FieldDomain for MandelbrotSparseLdeProductBetaBabyBearV1 {
@@ -518,6 +538,17 @@ pub struct SparseCompositionAirCodeword<const N: usize> {
 }
 impl<const N: usize> core::marker::Copy for SparseCompositionAirCodeword<N> {}
 
+/// Independent Fiat-Shamir lanes for fixed-position public constraints. The
+/// fold challenge separates public values from the internal AIR fold, while
+/// the mix challenge prevents cancellation between their rational composition
+/// and the ordinary four-family quotient.
+pub struct SparsePublicConstraintChallenges {
+    pub valid: bool,
+    pub fold: BabyBearExt4,
+    pub mix: BabyBearExt4,
+}
+impl core::marker::Copy for SparsePublicConstraintChallenges {}
+
 /// A composition root branded by the exact statement and pair of sparse LDE
 /// roots from which its codeword was generated.
 pub struct SparseCompositionLdeDigest<
@@ -636,6 +667,17 @@ pub fn sparse_opened_air_row(
         valid: base_reader.complete() && interaction_reader.complete(),
         base: base,
         interaction: interaction,
+    }
+}
+
+/// Semantic zero constructor for focused composition interpreters. Callers
+/// can set named fields directly without depending on the generated canonical
+/// column positions used by committed codewords.
+pub fn zero_sparse_opened_air_row() -> SparseOpenedAirRow {
+    SparseOpenedAirRow {
+        valid: true,
+        base: zero_sparse_base_air_row_field<BabyBearExt4>(),
+        interaction: zero_sparse_interaction_trace_row_field<BabyBearExt4>(),
     }
 }
 
@@ -1431,6 +1473,226 @@ pub fn bind_sparse_air_lde_transcript<
     }
 }
 
+fn recursive_committed_interval_equals<const L: usize>(
+    _ left: RecursiveCommittedInterval<L>,
+    _ right: RecursiveCommittedInterval<L>,
+) -> bool {
+    left.valid == right.valid
+        && left.leaves == right.leaves
+        && left.statement.valid == right.statement.valid
+        && left.statement.value.equals(right.statement.value)
+        && left.start_iteration == right.start_iteration
+        && left.end_iteration == right.end_iteration
+        && left.start.valid == right.start.valid
+        && left.start.value.equals(right.start.value)
+        && left.end.valid == right.end.valid
+        && left.end.value.equals(right.end.value)
+}
+
+fn sparse_public_fixed_at<const L: usize>(
+    _ interval: OrbitInterval<L>,
+    _ coordinate: SparsePublicCoordinate,
+) -> Fixed<L> {
+    match coordinate {
+        SparsePublicCoordinate::PointReal => interval.claim.point.real,
+        SparsePublicCoordinate::PointImaginary => interval.claim.point.imaginary,
+        SparsePublicCoordinate::CurrentReal => interval.start.z.real,
+        SparsePublicCoordinate::CurrentImaginary => interval.start.z.imaginary,
+        SparsePublicCoordinate::NextReal => interval.end.z.real,
+        SparsePublicCoordinate::NextImaginary => interval.end.z.imaginary,
+        SparsePublicCoordinate::Invalid => Fixed::zero(),
+    }
+}
+
+/// Derive public-constraint folding and mixing challenges from the same bound
+/// AIR transcript used by the ordinary composition challenge. Both values are
+/// required to be nonzero because zero would erase later public constraints or
+/// the entire public contribution.
+pub fn sparse_public_constraint_challenges<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>(
+    _ air: SparseAirLdeTranscriptDigest<L, TRACE, LDE>,
+) -> SparsePublicConstraintChallenges {
+    if !air.valid || !air.transcript.valid {
+        return SparsePublicConstraintChallenges {
+            valid: false,
+            fold: BabyBearExt4::zero(),
+            mix: BabyBearExt4::zero(),
+        }
+    }
+    let fold = squeeze_ext4<MandelbrotSparsePublicConstraintBabyBearV1>(
+        air.transcript.value,
+    )
+    let mix = squeeze_ext4<MandelbrotSparsePublicMixBabyBearV1>(
+        air.transcript.value,
+    )
+    SparsePublicConstraintChallenges {
+        valid: !fold.is_zero() && !mix.is_zero(),
+        fold: fold,
+        mix: mix,
+    }
+}
+
+fn sparse_public_inputs_match_air<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>(
+    _ air: SparseAirLdeTranscriptDigest<L, TRACE, LDE>,
+    _ interval: OrbitInterval<L>,
+) -> bool
+where
+    Limbs<L>: TruncRows<Limbs<L>> + Mac + ShiftAppend + Head + Carry
+              + Zero + SubBorrow + Select + Top + OrLower
+              + core::marker::Copy,
+{
+    let rebound = bind_sparse_air_lde_transcript(
+        air.statement,
+        air.base,
+        air.interaction,
+    )
+    let statement = commit_recursive_leaf_statement(interval)
+    air.valid
+        && air.transcript.valid
+        && rebound.valid
+        && rebound.transcript.valid
+        && air.transcript.value.equals(rebound.transcript.value)
+        && recursive_committed_interval_equals(air.statement, rebound.statement)
+        && recursive_committed_interval_equals(statement, air.statement)
+}
+
+fn sparse_public_composition_at<
+    const L: usize,
+    const TRACE: usize,
+>(
+    _ interval: OrbitInterval<L>,
+    _ challenges: SparsePublicConstraintChallenges,
+    _ point: BabyBearExt4,
+    _ row: ref SparseOpenedAirRow,
+) -> AirCompositionValue<BabyBearExt4>
+where
+    L > 1,
+    TRACE > 0,
+    TRACE > 1,
+    { (TRACE & (TRACE - 1)) == 0 },
+    { radix2_field_domain_supported<TRACE, BabyBear>() },
+{
+    let zero: BabyBearExt4 = BabyBearExt4::zero()
+    let trace_length: u32 = TRACE.downcast_truncate()
+    let limb_count: u32 = L.downcast_truncate()
+    if !challenges.valid
+        || !row.valid
+        || trace_length != sparse_transition_trace_length<L>()
+        || !sparse_public_positions_follow_task_plan<L>()
+        || point.pow_u32(trace_length).equals(BabyBearExt4::one())
+    {
+        return AirCompositionValue { valid: false, value: zero }
+    }
+    let trace_root: BabyBear = BabyBear::two_adic_root(radix2_log<TRACE>())
+    let mut folded: BabyBearExt4 = zero
+    let mut power: BabyBearExt4 = BabyBearExt4::one()
+    let mut absorbed: u32 = 0
+    let mut coordinate_index: u32 = 0
+    while coordinate_index < sparse_public_coordinate_count() {
+        let coordinate: SparsePublicCoordinate =
+            sparse_public_coordinate_at(coordinate_index)
+        let public_value: Fixed<L> = sparse_public_fixed_at(interval, coordinate)
+        let mut limb: u32 = 0
+        while limb < limb_count {
+            let trace_row: u32 = sparse_public_limb_trace_row<L>(coordinate, limb)
+            if trace_row >= trace_length {
+                return AirCompositionValue { valid: false, value: zero }
+            }
+            let trace_point: BabyBearExt4 = BabyBearExt4::from_base(
+                trace_root.pow_u32(trace_row),
+            )
+            let denominator: BabyBearExt4 = point - trace_point
+            if denominator.is_zero() {
+                return AirCompositionValue { valid: false, value: zero }
+            }
+            let expected: BabyBearExt4 = BabyBearExt4::from_base(
+                BabyBear::from_u32(public_value.limbs[limb as usize]),
+            )
+            folded = folded
+                + power
+                    * (row.base.witness.value - expected)
+                    * denominator.inverse_or_zero()
+            power = power * challenges.fold
+            absorbed = absorbed + 1
+            limb = limb + 1
+        }
+        let sign_row: u32 = sparse_public_sign_trace_row<L>(coordinate)
+        if sign_row >= trace_length {
+            return AirCompositionValue { valid: false, value: zero }
+        }
+        let sign_point: BabyBearExt4 = BabyBearExt4::from_base(
+            trace_root.pow_u32(sign_row),
+        )
+        let sign_denominator: BabyBearExt4 = point - sign_point
+        if sign_denominator.is_zero() {
+            return AirCompositionValue { valid: false, value: zero }
+        }
+        let expected_sign_base: BabyBear = if public_value.negative {
+            BabyBear::one()
+        } else {
+            BabyBear::zero()
+        }
+        let expected_sign: BabyBearExt4 =
+            BabyBearExt4::from_base(expected_sign_base)
+        folded = folded
+            + power
+                * (row.base.witness.auxiliary - expected_sign)
+                * sign_denominator.inverse_or_zero()
+        power = power * challenges.fold
+        absorbed = absorbed + 1
+        coordinate_index = coordinate_index + 1
+    }
+    AirCompositionValue {
+        valid: absorbed == sparse_public_constraint_count<L>(),
+        value: folded * challenges.mix,
+    }
+}
+
+/// Evaluate the fixed-position public-input contribution at one authenticated
+/// LDE opening. The raw interval is recommitted and compared with the exact
+/// transcript statement before any rational constraint is accepted.
+pub fn evaluate_sparse_public_composition_opened<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>(
+    _ air: SparseAirLdeTranscriptDigest<L, TRACE, LDE>,
+    _ interval: OrbitInterval<L>,
+    _ point: BabyBearExt4,
+    _ row: ref SparseOpenedAirRow,
+) -> AirCompositionValue<BabyBearExt4>
+where
+    L > 1,
+    TRACE > 1,
+    { (TRACE & (TRACE - 1)) == 0 },
+    { radix2_field_domain_supported<TRACE, BabyBear>() },
+    LDE > TRACE,
+    { (LDE & (LDE - 1)) == 0 },
+    Limbs<L>: TruncRows<Limbs<L>> + Mac + ShiftAppend + Head + Carry
+              + Zero + SubBorrow + Select + Top + OrLower
+              + core::marker::Copy,
+{
+    if !sparse_public_inputs_match_air(air, interval) {
+        return AirCompositionValue {
+            valid: false,
+            value: BabyBearExt4::zero(),
+        }
+    }
+    sparse_public_composition_at<L, TRACE>(
+        interval,
+        sparse_public_constraint_challenges(air),
+        point,
+        row,
+    )
+}
+
 /// Evaluate the sparse constraint numerators using only interaction challenges
 /// derived from this exact base-LDE root. This keeps the semantic audit entry
 /// point from accepting a raw checkpoint challenge set.
@@ -1463,10 +1725,10 @@ where L > 1, TRACE > 0, LDE > TRACE,
     )
 }
 
-/// Produce the full sparse composition codeword from the exact committed
-/// inputs. Roots and all Fiat-Shamir values are recomputed internally, so a
-/// caller cannot pair one codeword with challenges from another commitment.
-pub fn write_sparse_composition_air_codeword<
+/// Produce the internal sparse-AIR quotient from the exact committed inputs.
+/// Public fixed-position constraints are deliberately added only by the
+/// production wrapper below.
+fn write_sparse_internal_composition_air_codeword<
     const L: usize,
     const TRACE: usize,
     const LDE: usize,
@@ -1546,6 +1808,131 @@ where
     }
     output.valid = true
     transcript
+}
+
+/// Small placement checkpoint for independent scalar oracles. This evaluates
+/// the complete internal AIR but intentionally omits fixed-position public
+/// constraints because its four-row trace cannot contain the generated sparse
+/// transition plan. It must never be accepted as a recursive leaf receipt.
+pub fn write_sparse_composition_checkpoint_air_codeword<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>(
+    _ statement: RecursiveCommittedInterval<L>,
+    _ base_codeword: ref SparseBaseAirLdeCodeword<LDE>,
+    _ interaction_codeword: ref SparseInteractionAirLdeCodeword<LDE>,
+    _ shift: BabyBear,
+    _ output: mut SparseCompositionAirCodeword<LDE>,
+) -> SparseAirLdeTranscriptDigest<L, TRACE, LDE>
+where
+    L > 1,
+    TRACE > 0,
+    TRACE > 1,
+    { (TRACE & (TRACE - 1)) == 0 },
+    { radix2_field_domain_supported<TRACE, BabyBear>() },
+    LDE > 0,
+    LDE > 1,
+    LDE > TRACE,
+    LDE <= MAX_SPARSE_LDE_LENGTH,
+    LDE <= 2147483648,
+    { (LDE & (LDE - 1)) == 0 },
+    { radix2_field_domain_supported<LDE, BabyBear>() },
+    { (LDE % TRACE) == 0 },
+{
+    write_sparse_internal_composition_air_codeword<L, TRACE, LDE>(
+        statement,
+        base_codeword,
+        interaction_codeword,
+        shift,
+        mut output,
+    )
+}
+
+/// Production sparse composition. The raw public interval is committed into
+/// the transcript and every fixed-point limb and sign is constrained at the
+/// semantic row derived by the sparse task plan. The internal AIR and public
+/// rational terms then share one BC02 codeword and one FRI path.
+pub fn write_sparse_composition_air_codeword<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>(
+    _ interval: OrbitInterval<L>,
+    _ base_codeword: ref SparseBaseAirLdeCodeword<LDE>,
+    _ interaction_codeword: ref SparseInteractionAirLdeCodeword<LDE>,
+    _ shift: BabyBear,
+    _ output: mut SparseCompositionAirCodeword<LDE>,
+) -> SparseAirLdeTranscriptDigest<L, TRACE, LDE>
+where
+    L > 1,
+    TRACE > 0,
+    TRACE > 1,
+    { (TRACE & (TRACE - 1)) == 0 },
+    { radix2_field_domain_supported<TRACE, BabyBear>() },
+    LDE > 0,
+    LDE > 1,
+    LDE > TRACE,
+    LDE <= MAX_SPARSE_LDE_LENGTH,
+    LDE <= 2147483648,
+    { (LDE & (LDE - 1)) == 0 },
+    { radix2_field_domain_supported<LDE, BabyBear>() },
+    { (LDE % TRACE) == 0 },
+    Limbs<L>: TruncRows<Limbs<L>> + Mac + ShiftAppend + Head + Carry
+              + Zero + SubBorrow + Select + Top + OrLower
+              + core::marker::Copy,
+{
+    let statement = commit_recursive_leaf_statement(interval)
+    let air = write_sparse_internal_composition_air_codeword<L, TRACE, LDE>(
+        statement,
+        base_codeword,
+        interaction_codeword,
+        shift,
+        mut output,
+    )
+    let challenges = sparse_public_constraint_challenges(air)
+    let trace_length: u32 = TRACE.downcast_truncate()
+    if !sparse_public_inputs_match_air(air, interval)
+        || !challenges.valid
+        || trace_length != sparse_transition_trace_length<L>()
+        || !sparse_public_positions_follow_task_plan<L>()
+    {
+        output.valid = false
+        return invalid_sparse_air_lde_transcript(
+            statement,
+            air.base,
+            air.interaction,
+        )
+    }
+    let root = BabyBear::two_adic_root(radix2_log<LDE>())
+    let mut index: usize = 0
+    while index < LDE {
+        let row = sparse_opened_air_row(
+            base_codeword.values[index],
+            interaction_codeword.values[index],
+        )
+        let point = BabyBearExt4::from_base(
+            shift * root.pow_u32(index.downcast_truncate()),
+        )
+        let public = sparse_public_composition_at<L, TRACE>(
+            interval,
+            challenges,
+            point,
+            ref row,
+        )
+        if !public.valid {
+            output.valid = false
+            return invalid_sparse_air_lde_transcript(
+                statement,
+                air.base,
+                air.interaction,
+            )
+        }
+        output.values[index] = output.values[index] + public.value
+        index = index + 1
+    }
+    output.valid = true
+    air
 }
 
 pub fn sparse_composition_lde_root_power_of_two<

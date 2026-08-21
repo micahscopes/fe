@@ -1,0 +1,205 @@
+//! Focused zero-import boundary for sparse public-input composition.
+
+use mandelbrot_proof_fixed_air::{
+    FixedMandelbrotTransitionWitness,
+    derive_fixed_mandelbrot_transition_witness,
+    fixed_mandelbrot_transition_output,
+}
+use mandelbrot_proof_fixed_air_baby_bear::{
+    SparseBaseLdeDigest,
+    SparseInteractionLdeDigest,
+    SparsePublicConstraintChallenges,
+    bind_sparse_air_lde_transcript,
+    evaluate_sparse_public_composition_opened,
+    sparse_public_constraint_challenges,
+    zero_sparse_opened_air_row,
+}
+use mandelbrot_proof_fixed_air_core::{
+    sparse_public_coordinate_at,
+    sparse_public_coordinate_count,
+    sparse_public_limb_trace_row,
+    sparse_public_positions_follow_task_plan,
+    sparse_public_sign_trace_row,
+}
+use mandelbrot_proof_recursive::{
+    ComplexFixed,
+    HighPrecisionEscapeClaim,
+    OrbitBoundary,
+    OrbitInterval,
+    complex_has_escaped,
+}
+use mandelbrot_proof_recursive_baby_bear::commit_recursive_leaf_statement
+use poseidon_baby_bear::Poseidon2Digest
+use precision::baby_bear::{BabyBear, BabyBearExt4}
+use precision::fixed::Fixed
+
+type TransitionWitness4 = FixedMandelbrotTransitionWitness<4>
+
+fn fixed4(_ negative: u32, _ limbs: [u32; 4]) -> Fixed<4> {
+    Fixed { negative: negative == 1, limbs: limbs }
+}
+
+fn complex4(
+    _ real_negative: u32,
+    _ real: [u32; 4],
+    _ imaginary_negative: u32,
+    _ imaginary: [u32; 4],
+) -> ComplexFixed<4> {
+    ComplexFixed {
+        real: fixed4(real_negative, real),
+        imaginary: fixed4(imaginary_negative, imaginary),
+    }
+}
+
+fn transition4(
+    _ point_real_negative: u32,
+    _ point_real: [u32; 4],
+    _ point_imaginary_negative: u32,
+    _ point_imaginary: [u32; 4],
+    _ current_real_negative: u32,
+    _ current_real: [u32; 4],
+    _ current_imaginary_negative: u32,
+    _ current_imaginary: [u32; 4],
+) -> (ComplexFixed<4>, ComplexFixed<4>, TransitionWitness4) {
+    let point = complex4(
+        point_real_negative,
+        point_real,
+        point_imaginary_negative,
+        point_imaginary,
+    )
+    let current = complex4(
+        current_real_negative,
+        current_real,
+        current_imaginary_negative,
+        current_imaginary,
+    )
+    (point, current, derive_fixed_mandelbrot_transition_witness(point, current))
+}
+
+fn recursive_leaf_interval4(
+    _ point: ComplexFixed<4>,
+    _ current: ComplexFixed<4>,
+    _ next: ComplexFixed<4>,
+    _ bound: u32,
+) -> OrbitInterval<4> {
+    let claim = HighPrecisionEscapeClaim { point: point, bound: bound }
+    OrbitInterval {
+        claim: claim,
+        start: OrbitBoundary {
+            iteration: 3,
+            z: current,
+            escaped: complex_has_escaped(current),
+        },
+        end: OrbitBoundary {
+            iteration: 4,
+            z: next,
+            escaped: complex_has_escaped(next),
+        },
+    }
+}
+
+/// Evaluate one production public-input quotient without allocating the full
+/// 4,096-row trace or 8,192-point LDE. Synthetic typed roots isolate the
+/// transcript, row-position, and rational-constraint semantics under test.
+pub fn fixed_transition4_sparse_public_composition(
+    _ prn: u32, _ pr0: u32, _ pr1: u32, _ pr2: u32, _ pr3: u32,
+    _ pin: u32, _ pi0: u32, _ pi1: u32, _ pi2: u32, _ pi3: u32,
+    _ crn: u32, _ cr0: u32, _ cr1: u32, _ cr2: u32, _ cr3: u32,
+    _ cin: u32, _ ci0: u32, _ ci1: u32, _ ci2: u32, _ ci3: u32,
+) -> [u32; 56] {
+    let (point, current, witness) = transition4(
+        prn, [pr0, pr1, pr2, pr3], pin, [pi0, pi1, pi2, pi3],
+        crn, [cr0, cr1, cr2, cr3], cin, [ci0, ci1, ci2, ci3],
+    )
+    let next = fixed_mandelbrot_transition_output(witness)
+    let interval = recursive_leaf_interval4(point, current, next, 8)
+    let statement = commit_recursive_leaf_statement(interval)
+    let base = SparseBaseLdeDigest {
+        valid: true,
+        value: Poseidon2Digest::from_u32s([
+            11, 13, 17, 19, 23, 29, 31, 37,
+        ]),
+    }
+    let interaction = SparseInteractionLdeDigest {
+        valid: true,
+        base: base,
+        value: Poseidon2Digest::from_u32s([
+            41, 43, 47, 53, 59, 61, 67, 71,
+        ]),
+    }
+    let air = bind_sparse_air_lde_transcript(statement, base, interaction)
+    let challenges: SparsePublicConstraintChallenges =
+        sparse_public_constraint_challenges(air)
+    let evaluation_point = BabyBearExt4::from_u32s([73, 79, 83, 89])
+    let mut opened = zero_sparse_opened_air_row()
+    opened.base.witness.value = BabyBearExt4::from_u32s([97, 101, 103, 107])
+    opened.base.witness.auxiliary = BabyBearExt4::from_u32s([109, 113, 127, 131])
+    let clean = evaluate_sparse_public_composition_opened<4, 4096, 8192>(
+        air,
+        interval,
+        evaluation_point,
+        ref opened,
+    )
+    let mut mutated = opened
+    mutated.base.witness.value = mutated.base.witness.value + BabyBearExt4::one()
+    let changed = evaluate_sparse_public_composition_opened<4, 4096, 8192>(
+        air,
+        interval,
+        evaluation_point,
+        ref mutated,
+    )
+    let mismatched = evaluate_sparse_public_composition_opened<4, 4096, 8192>(
+        air,
+        recursive_leaf_interval4(point, current, next, 9),
+        evaluation_point,
+        ref opened,
+    )
+
+    let mut output = [0; 56]
+    output[0] = if air.valid
+        && challenges.valid
+        && sparse_public_positions_follow_task_plan<4>()
+        && clean.valid
+        && changed.valid {
+        1
+    } else {
+        0
+    }
+    output[1] = if mismatched.valid { 1 } else { 0 }
+    let mut field: usize = 0
+    while field < 8 {
+        output[2 + field] = air.transcript.value
+            .field(field.downcast_truncate()).to_u32()
+        field = field + 1
+    }
+    let fold = challenges.fold.to_u32s()
+    let mix = challenges.mix.to_u32s()
+    field = 0
+    while field < 4 {
+        output[10 + field] = fold[field]
+        output[14 + field] = mix[field]
+        field = field + 1
+    }
+    let mut coordinate_index: u32 = 0
+    while coordinate_index < sparse_public_coordinate_count() {
+        let coordinate = sparse_public_coordinate_at(coordinate_index)
+        let mut limb: u32 = 0
+        while limb < 4 {
+            output[18 + (coordinate_index * 5 + limb) as usize] =
+                sparse_public_limb_trace_row<4>(coordinate, limb)
+            limb = limb + 1
+        }
+        output[18 + (coordinate_index * 5 + 4) as usize] =
+            sparse_public_sign_trace_row<4>(coordinate)
+        coordinate_index = coordinate_index + 1
+    }
+    let clean_words = clean.value.to_u32s()
+    let changed_words = changed.value.to_u32s()
+    field = 0
+    while field < 4 {
+        output[48 + field] = clean_words[field]
+        output[52 + field] = changed_words[field]
+        field = field + 1
+    }
+    output
+}

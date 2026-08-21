@@ -60,7 +60,7 @@ use mandelbrot_proof_fixed_air_baby_bear::{
     write_sparse_interaction_air_rows,
     write_sparse_interaction_air_evaluation_trace,
     write_sparse_interaction_air_lde,
-    write_sparse_composition_air_codeword,
+    write_sparse_composition_checkpoint_air_codeword,
     write_sparse_lde_interaction_air_rows,
     write_sparse_trace_authentication_power_of_two,
     zero_sparse_base_air_row,
@@ -555,12 +555,12 @@ pub fn fixed_transition4_sparse_interaction_lde_root(
     output
 }
 
-fn recursive_leaf_statement4(
+fn recursive_leaf_interval4(
     _ point: ComplexFixed<4>,
     _ current: ComplexFixed<4>,
     _ next: ComplexFixed<4>,
     _ bound: u32,
-) -> RecursiveCommittedInterval<4> {
+) -> OrbitInterval<4> {
     let claim = HighPrecisionEscapeClaim { point: point, bound: bound }
     let start = OrbitBoundary {
         iteration: 3,
@@ -572,11 +572,22 @@ fn recursive_leaf_statement4(
         z: next,
         escaped: complex_has_escaped(next),
     }
-    commit_recursive_semantic_leaf(OrbitInterval {
+    OrbitInterval {
         claim: claim,
         start: start,
         end: end,
-    })
+    }
+}
+
+fn recursive_leaf_statement4(
+    _ point: ComplexFixed<4>,
+    _ current: ComplexFixed<4>,
+    _ next: ComplexFixed<4>,
+    _ bound: u32,
+) -> RecursiveCommittedInterval<4> {
+    commit_recursive_semantic_leaf(
+        recursive_leaf_interval4(point, current, next, bound),
+    )
 }
 
 /// Build the production sparse composition transcript and codeword. Mutation
@@ -634,7 +645,7 @@ pub fn fixed_transition4_sparse_production_composition_encoded(
         valid: false,
         values: [BabyBearExt4::zero(); 16],
     }
-    let air = write_sparse_composition_air_codeword<4, 4, 16>(
+    let air = write_sparse_composition_checkpoint_air_codeword<4, 4, 16>(
         statement,
         ref base_lde,
         ref interaction_lde,

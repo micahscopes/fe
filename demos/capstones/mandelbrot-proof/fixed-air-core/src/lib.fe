@@ -172,6 +172,21 @@ pub enum RangeNode {
 }
 impl core::marker::Copy for RangeNode {}
 
+/// Public recurrence values whose exact fixed-point digits must be bound to
+/// the sparse trace. This semantic index is shared by commitment, composition,
+/// and scheduling interpreters, so none of them maintain a parallel numeric
+/// row table.
+pub enum SparsePublicCoordinate {
+    PointReal,
+    PointImaginary,
+    CurrentReal,
+    CurrentImaginary,
+    NextReal,
+    NextImaginary,
+    Invalid,
+}
+impl core::marker::Copy for SparsePublicCoordinate {}
+
 /// One generated unit in the sparse transition trace. Each variant is a
 /// semantic phase, and its payload is enough for scalar, packed, subgroup, or
 /// workgroup interpreters to choose placement without changing the relation.
@@ -362,6 +377,96 @@ impl core::marker::Copy for SparseCopyAddress {}
 pub const fn sparse_range_node_count() -> u32 { 31 }
 pub const fn sparse_product_node_count() -> u32 { 3 }
 pub const fn sparse_linear_node_count() -> u32 { 4 }
+pub const fn sparse_public_coordinate_count() -> u32 { 6 }
+
+pub fn sparse_public_coordinate_at(_ index: u32) -> SparsePublicCoordinate {
+    match index {
+        0 => SparsePublicCoordinate::PointReal,
+        1 => SparsePublicCoordinate::PointImaginary,
+        2 => SparsePublicCoordinate::CurrentReal,
+        3 => SparsePublicCoordinate::CurrentImaginary,
+        4 => SparsePublicCoordinate::NextReal,
+        5 => SparsePublicCoordinate::NextImaginary,
+        _ => SparsePublicCoordinate::Invalid,
+    }
+}
+
+fn sparse_public_coordinate_rank(_ coordinate: SparsePublicCoordinate) -> u32 {
+    match coordinate {
+        SparsePublicCoordinate::PointReal => 0,
+        SparsePublicCoordinate::PointImaginary => 1,
+        SparsePublicCoordinate::CurrentReal => 2,
+        SparsePublicCoordinate::CurrentImaginary => 3,
+        SparsePublicCoordinate::NextReal => 4,
+        SparsePublicCoordinate::NextImaginary => 5,
+        SparsePublicCoordinate::Invalid => sparse_public_coordinate_count(),
+    }
+}
+
+fn sparse_public_range_matches(
+    _ coordinate: SparsePublicCoordinate,
+    _ node: RangeNode,
+) -> bool {
+    match coordinate {
+        SparsePublicCoordinate::PointReal => match node {
+            RangeNode::PointReal => true,
+            _ => false,
+        },
+        SparsePublicCoordinate::PointImaginary => match node {
+            RangeNode::PointImaginary => true,
+            _ => false,
+        },
+        SparsePublicCoordinate::CurrentReal => match node {
+            RangeNode::CurrentReal => true,
+            _ => false,
+        },
+        SparsePublicCoordinate::CurrentImaginary => match node {
+            RangeNode::CurrentImaginary => true,
+            _ => false,
+        },
+        SparsePublicCoordinate::NextReal => match node {
+            RangeNode::NextReal => true,
+            _ => false,
+        },
+        SparsePublicCoordinate::NextImaginary => match node {
+            RangeNode::NextImaginary => true,
+            _ => false,
+        },
+        SparsePublicCoordinate::Invalid => false,
+    }
+}
+
+/// Row containing one canonical 13-bit limb of a public coordinate. The
+/// formula is the radix prefix of `sparse_transition_task_at`, expressed once
+/// beside that plan rather than copied into a proof consumer.
+pub fn sparse_public_limb_trace_row<const L: usize>(
+    _ coordinate: SparsePublicCoordinate,
+    _ limb: u32,
+) -> u32 {
+    let limbs: u32 = L.downcast_truncate()
+    let rank = sparse_public_coordinate_rank(coordinate)
+    if L < 2 || rank >= sparse_public_coordinate_count() || limb >= limbs {
+        return sparse_transition_task_count<L>()
+    }
+    rank * (limbs * 14 + 1) + limb * 14 + 13
+}
+
+/// Row containing the canonical sign of a public coordinate.
+pub fn sparse_public_sign_trace_row<const L: usize>(
+    _ coordinate: SparsePublicCoordinate,
+) -> u32 {
+    let limbs: u32 = L.downcast_truncate()
+    let rank = sparse_public_coordinate_rank(coordinate)
+    if L < 2 || rank >= sparse_public_coordinate_count() {
+        return sparse_transition_task_count<L>()
+    }
+    rank * (limbs * 14 + 1) + limbs * 14
+}
+
+pub fn sparse_public_constraint_count<const L: usize>() -> u32 {
+    let limbs: u32 = L.downcast_truncate()
+    sparse_public_coordinate_count() * (limbs + 1)
+}
 
 pub const fn sparse_radix_task_count<const L: usize>() -> u32 {
     let limbs: u32 = L.downcast_truncate()
@@ -632,6 +737,43 @@ pub fn sparse_transition_task_at<const L: usize>(
         )
     }
     SparseTransitionTask::TransitionFinish
+}
+
+/// Executable coherence check between the public-position API and the exact
+/// generated sparse task plan. A task-plan refactor therefore fails closed
+/// until the semantic position interpreter is updated with it.
+pub fn sparse_public_positions_follow_task_plan<const L: usize>() -> bool {
+    if L < 2 { return false }
+    let limbs: u32 = L.downcast_truncate()
+    let mut coordinate_index: u32 = 0
+    while coordinate_index < sparse_public_coordinate_count() {
+        let coordinate = sparse_public_coordinate_at(coordinate_index)
+        let mut limb: u32 = 0
+        while limb < limbs {
+            let row = sparse_public_limb_trace_row<L>(coordinate, limb)
+            match sparse_transition_task_at<L>(row) {
+                SparseTransitionTask::RadixLimb(node, task_limb) => {
+                    if task_limb != limb
+                        || !sparse_public_range_matches(coordinate, node) {
+                        return false
+                    }
+                }
+                _ => return false,
+            }
+            limb = limb + 1
+        }
+        let sign_row = sparse_public_sign_trace_row<L>(coordinate)
+        match sparse_transition_task_at<L>(sign_row) {
+            SparseTransitionTask::RadixFinish(node) => {
+                if !sparse_public_range_matches(coordinate, node) {
+                    return false
+                }
+            }
+            _ => return false,
+        }
+        coordinate_index = coordinate_index + 1
+    }
+    true
 }
 
 fn range_node_digits<const L: usize>(
