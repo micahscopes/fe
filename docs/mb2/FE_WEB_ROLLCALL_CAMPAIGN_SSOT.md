@@ -1012,6 +1012,20 @@ Legend:
   Every wide relation family now has an executable narrow sparse projection.
   The remaining equivalence gate must apply one shared directed mutation set
   to both interpretations before this AIR slice is attached to Merkle and FRI.
+  Commit `1c165affa` closes that equivalence gate at the intended zero-set
+  boundary. Six shared directed mutations cover a convolution digit, product
+  carry, rounding carry, signed borrow, claimed next-boundary limb, and an
+  out-of-range public-point limb. For each of three challenges, both the wide
+  6,185-constraint interpreter and the corresponding sparse phase reject the
+  same semantic mutation. This is not a misleading byte or fold equality
+  claim: the sparse projection deliberately adds scan adjacency and typed copy
+  buses while removing redundant wide aliases. Together with exact row
+  reconstruction and copy-only coordinated mutations for every phase, the
+  gate establishes equivalent accepted arithmetic statements. Focused nextest
+  passes 1/1 in 84.69 seconds. The multi-limb arithmetic and wide-to-sparse AIR
+  equivalence item is complete. The next item is to commit the sparse rows as
+  authenticated BabyBear leaf openings and bind recursive parent receipts to
+  those leaf proofs rather than replaying a semantic interval.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
   The first arithmetic-plan consolidation is landed at `ba2ded864`: one
