@@ -54,10 +54,10 @@ const fn protocol_tag(_ label: String<4>) -> u32 {
         | (bytes[3] as u32)
 }
 
-struct MandelbrotSparseTraceLeafBabyBearV2 {}
+struct MandelbrotSparseTraceLeafBabyBearV3 {}
 
-impl Poseidon2FieldDomain for MandelbrotSparseTraceLeafBabyBearV2 {
-    const TAG: u32 = protocol_tag("SL02")
+impl Poseidon2FieldDomain for MandelbrotSparseTraceLeafBabyBearV3 {
+    const TAG: u32 = protocol_tag("SL03")
 }
 
 pub struct SparseTraceTaskSelectors {
@@ -105,10 +105,19 @@ impl core::marker::Copy for SparseTraceRangeRoles {}
 derive Eq for SparseTraceRangeRoles
 derive CanonicalWords for SparseTraceRangeRoles using CanonicalWordsProvider
 
+pub struct SparseTraceLimbPositions {
+    pub penultimate: BabyBear,
+    pub last: BabyBear,
+}
+impl core::marker::Copy for SparseTraceLimbPositions {}
+derive Eq for SparseTraceLimbPositions
+derive CanonicalWords for SparseTraceLimbPositions using CanonicalWordsProvider
+
 pub struct SparseTraceControl {
     pub selectors: SparseTraceTaskSelectors,
     pub linear_roles: SparseTraceLinearRoles,
     pub range_roles: SparseTraceRangeRoles,
+    pub limb_positions: SparseTraceLimbPositions,
     pub major: BabyBear,
     pub minor: BabyBear,
     pub step: BabyBear,
@@ -285,6 +294,10 @@ fn zero_sparse_trace_control() -> SparseTraceControl {
             linear_right_difference: BabyBear::zero(),
             linear_output: BabyBear::zero(),
         },
+        limb_positions: SparseTraceLimbPositions {
+            penultimate: BabyBear::zero(),
+            last: BabyBear::zero(),
+        },
         major: BabyBear::zero(),
         minor: BabyBear::zero(),
         step: BabyBear::zero(),
@@ -329,6 +342,10 @@ fn sparse_trace_control_at<const L: usize>(_ index: u32) -> SparseTraceControl {
             linear_left_difference: control.range_roles.linear_left_difference,
             linear_right_difference: control.range_roles.linear_right_difference,
             linear_output: control.range_roles.linear_output,
+        },
+        limb_positions: SparseTraceLimbPositions {
+            penultimate: control.limb_positions.penultimate,
+            last: control.limb_positions.last,
         },
         major: control.major,
         minor: control.minor,
@@ -431,7 +448,7 @@ pub fn sparse_trace_leaf_commitment<const L: usize>(
     _ leaf: SparseTraceLeaf<L>,
 ) -> Poseidon2Digest {
     commit_canonical<
-        MandelbrotSparseTraceLeafBabyBearV2,
+        MandelbrotSparseTraceLeafBabyBearV3,
         SparseTraceLeaf<L>,
     >(ref leaf).digest()
 }

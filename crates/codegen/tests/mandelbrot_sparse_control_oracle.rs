@@ -9,7 +9,7 @@ use url::Url;
 use wasmtime::Val;
 
 const LIMBS: u32 = 4;
-const CONTROL_LANES: usize = 33;
+const CONTROL_LANES: usize = 35;
 
 fn control_row(
     kind: usize,
@@ -34,18 +34,22 @@ fn control_row(
             row[23 + ((major - 15) % 4) as usize] = 1;
         }
     }
-    row[27] = major;
-    row[28] = minor;
-    row[29] = step;
-    row[30] = if kind <= 2 {
+    if kind == 0 || kind == 1 {
+        row[27] = u32::from(minor + 2 == LIMBS);
+        row[28] = u32::from(minor + 1 == LIMBS);
+    }
+    row[29] = major;
+    row[30] = minor;
+    row[31] = step;
+    row[32] = if kind <= 2 {
         u32::from(row[19] == 1 || row[22] == 1 || row[26] == 1)
     } else if kind == 9 || kind == 10 {
         u32::from(major == 0)
     } else {
         flag
     };
-    row[31] = width;
-    row[32] = weight;
+    row[33] = width;
+    row[34] = weight;
     row
 }
 
@@ -237,22 +241,22 @@ fn sparse_control_air_is_index_free_and_rejects_schedule_mutations() {
     let mutations = [
         (0usize, 0u32),
         (first_by_kind[1], 1),
-        (first_by_kind[2], 27),
-        (first_by_kind[3], 30),
+        (first_by_kind[2], 29),
         (first_by_kind[3], 32),
-        (first_by_kind[4], 28),
-        (first_by_kind[5], 29),
+        (first_by_kind[3], 34),
+        (first_by_kind[4], 30),
         (first_by_kind[5], 31),
-        (first_by_kind[6], 30),
-        (first_by_kind[7], 28),
-        (first_by_kind[8], 27),
+        (first_by_kind[5], 33),
+        (first_by_kind[6], 32),
+        (first_by_kind[7], 30),
+        (first_by_kind[8], 29),
         (first_by_kind[9], 15),
         (first_by_kind[9], 16),
-        (first_by_kind[9], 29),
-        (first_by_kind[9], 30),
-        (first_by_kind[10], 27),
-        (first_by_kind[11], 27),
-        (first_by_kind[12], 28),
+        (first_by_kind[9], 31),
+        (first_by_kind[9], 32),
+        (first_by_kind[10], 29),
+        (first_by_kind[11], 29),
+        (first_by_kind[12], 30),
         (first_by_kind[13], 13),
         (first_by_kind[14], 14),
         (rows.iter().position(|row| row[19] == 1).unwrap(), 19),
@@ -263,7 +267,9 @@ fn sparse_control_air_is_index_free_and_rejects_schedule_mutations() {
         (rows.iter().position(|row| row[24] == 1).unwrap(), 24),
         (rows.iter().position(|row| row[25] == 1).unwrap(), 25),
         (rows.iter().position(|row| row[26] == 1).unwrap(), 26),
-        (rows.len() - 1, 32),
+        (rows.iter().position(|row| row[27] == 1).unwrap(), 27),
+        (rows.iter().position(|row| row[28] == 1).unwrap(), 28),
+        (rows.len() - 1, 34),
     ];
     for challenge in [7u32, 17, 31] {
         let baseline = call(
@@ -279,7 +285,7 @@ fn sparse_control_air_is_index_free_and_rejects_schedule_mutations() {
         );
         assert_eq!(baseline[2], rows.len() as u32);
         assert_eq!(
-            baseline[1], 1_109_798,
+            baseline[1], 1_167_135,
             "every local, adjacency, and boundary constraint must be evaluated",
         );
         for (index, lane) in mutations {

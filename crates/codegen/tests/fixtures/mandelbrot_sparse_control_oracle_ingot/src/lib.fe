@@ -25,7 +25,7 @@ pub fn sparse_control4_row(
     u32, u32, u32, u32, u32,
     u32, u32, u32, u32, u32,
     u32, u32, u32, u32, u32,
-    u32, u32, u32,
+    u32, u32, u32, u32, u32,
 ) {
     let row = control4(index)
     let selectors = row.selectors
@@ -59,6 +59,8 @@ pub fn sparse_control4_row(
         range.linear_left_difference.to_u32(),
         range.linear_right_difference.to_u32(),
         range.linear_output.to_u32(),
+        row.limb_positions.penultimate.to_u32(),
+        row.limb_positions.last.to_u32(),
         row.major.to_u32(),
         row.minor.to_u32(),
         row.step.to_u32(),
@@ -163,12 +165,19 @@ fn mutate_control4(
         row.range_roles.linear_output =
             row.range_roles.linear_output.radix2_add(one)
     }
-    if lane == 27 { row.major = row.major.radix2_add(one) }
-    if lane == 28 { row.minor = row.minor.radix2_add(one) }
-    if lane == 29 { row.step = row.step.radix2_add(one) }
-    if lane == 30 { row.flag = row.flag.radix2_add(one) }
-    if lane == 31 { row.width = row.width.radix2_add(one) }
-    if lane == 32 { row.weight = row.weight.radix2_add(one) }
+    if lane == 27 {
+        row.limb_positions.penultimate =
+            row.limb_positions.penultimate.radix2_add(one)
+    }
+    if lane == 28 {
+        row.limb_positions.last = row.limb_positions.last.radix2_add(one)
+    }
+    if lane == 29 { row.major = row.major.radix2_add(one) }
+    if lane == 30 { row.minor = row.minor.radix2_add(one) }
+    if lane == 31 { row.step = row.step.radix2_add(one) }
+    if lane == 32 { row.flag = row.flag.radix2_add(one) }
+    if lane == 33 { row.width = row.width.radix2_add(one) }
+    if lane == 34 { row.weight = row.weight.radix2_add(one) }
     row
 }
 
@@ -194,7 +203,7 @@ pub fn sparse_control4_audit(
             failures = failures + 1
         }
         if index == 0 {
-            let initial = evaluate_sparse_control_initial(challenge, row)
+            let initial = evaluate_sparse_control_initial<BabyBear, 4>(challenge, row)
             constraints = constraints + initial.constraints
             if !initial.valid || initial.folded.to_u32() != 0 {
                 failures = failures + 1

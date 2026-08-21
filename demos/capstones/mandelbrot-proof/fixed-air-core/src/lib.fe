@@ -256,6 +256,15 @@ pub struct SparseRangeRoleSelectors<F: Radix2Field> {
 }
 impl<F: Radix2Field> core::marker::Copy for SparseRangeRoleSelectors<F> {}
 
+/// Low-degree position selectors for the two radix limbs that define the
+/// fixed-point rounding boundary. They replace an equality interpolation whose
+/// degree would otherwise grow with `L`.
+pub struct SparseLimbPositionSelectors<F: Radix2Field> {
+    pub penultimate: F,
+    pub last: F,
+}
+impl<F: Radix2Field> core::marker::Copy for SparseLimbPositionSelectors<F> {}
+
 /// Polynomial control state paired with one sparse witness row.
 ///
 /// `major`, `minor`, and `step` are semantic counters whose meaning is chosen
@@ -266,6 +275,7 @@ pub struct SparseControlRow<F: Radix2Field> {
     pub selectors: SparseControlSelectors<F>,
     pub linear_roles: SparseLinearRoleSelectors<F>,
     pub range_roles: SparseRangeRoleSelectors<F>,
+    pub limb_positions: SparseLimbPositionSelectors<F>,
     pub major: F,
     pub minor: F,
     pub step: F,
@@ -2516,6 +2526,14 @@ fn empty_sparse_range_role_selectors<F: Radix2Field>(
     }
 }
 
+fn empty_sparse_limb_position_selectors<F: Radix2Field>(
+) -> SparseLimbPositionSelectors<F> {
+    SparseLimbPositionSelectors {
+        penultimate: zero<F>(),
+        last: zero<F>(),
+    }
+}
+
 fn sparse_range_roles_from_node<F: Radix2Field>(
     _ node: RangeNode,
 ) -> SparseRangeRoleSelectors<F> {
@@ -2552,6 +2570,7 @@ pub fn sparse_control_row_from_task<F: Radix2Field, const L: usize>(
     let mut selectors = empty_sparse_control_selectors<F>()
     let mut linear_roles = empty_sparse_linear_role_selectors<F>()
     let mut range_roles = empty_sparse_range_role_selectors<F>()
+    let mut limb_positions = empty_sparse_limb_position_selectors<F>()
     let mut major = zero<F>()
     let mut minor = zero<F>()
     let mut step = zero<F>()
@@ -2568,6 +2587,8 @@ pub fn sparse_control_row_from_task<F: Radix2Field, const L: usize>(
             step = natural<F>(bit)
             flag = boolean<F>(range_node_is_signed(node))
             weight = natural<F>(1 << bit)
+            limb_positions.penultimate = boolean<F>(limb + 2 == limbs)
+            limb_positions.last = boolean<F>(limb + 1 == limbs)
         }
         SparseTransitionTask::RadixLimb(node, limb) => {
             selectors.radix_limb = one<F>()
@@ -2575,6 +2596,8 @@ pub fn sparse_control_row_from_task<F: Radix2Field, const L: usize>(
             major = natural<F>(range_node_rank(node))
             minor = natural<F>(limb)
             flag = boolean<F>(range_node_is_signed(node))
+            limb_positions.penultimate = boolean<F>(limb + 2 == limbs)
+            limb_positions.last = boolean<F>(limb + 1 == limbs)
         }
         SparseTransitionTask::RadixFinish(node) => {
             selectors.radix_finish = one<F>()
@@ -2662,6 +2685,7 @@ pub fn sparse_control_row_from_task<F: Radix2Field, const L: usize>(
         selectors: selectors,
         linear_roles: linear_roles,
         range_roles: range_roles,
+        limb_positions: limb_positions,
         major: major,
         minor: minor,
         step: step,
@@ -2764,6 +2788,20 @@ fn absorb_sparse_control_local<F: Radix2Field>(
     fold = fold.absorb(mul(radix_used, sub(row.flag, range_signed)))
     fold = fold.absorb(bit_residual(row.flag))
 
+    let positions = row.limb_positions
+    fold = fold.absorb(bit_residual(positions.penultimate))
+    fold = fold.absorb(bit_residual(positions.last))
+    fold = fold.absorb(mul(positions.penultimate, positions.last))
+    let limb_position_used = add(selectors.radix_bit, selectors.radix_limb)
+    fold = fold.absorb(mul(
+        sub(one<F>(), limb_position_used),
+        positions.penultimate,
+    ))
+    fold = fold.absorb(mul(
+        sub(one<F>(), limb_position_used),
+        positions.last,
+    ))
+
     let major_unused = add(selectors.transition_finish, selectors.padding)
     fold = fold.absorb(mul(major_unused, row.major))
 
@@ -2843,7 +2881,9 @@ fn absorb_sparse_control_link<F: Radix2Field, const L: usize>(
     _ fold: own ConstraintFold<F>,
     _ current: SparseControlRow<F>,
     _ next: SparseControlRow<F>,
-) -> ConstraintFold<F> {
+) -> ConstraintFold<F>
+where L > 1,
+{
     let current_selectors = current.selectors
     let next_selectors = next.selectors
     let zero = zero<F>()
@@ -3142,6 +3182,44 @@ fn absorb_sparse_control_link<F: Radix2Field, const L: usize>(
         ),
         sub(current.major, natural<F>(14)),
     ))
+
+    let current_positions = current.limb_positions
+    let next_positions = next.limb_positions
+    let penultimate_limb = sub(limbs, two)
+    fold = fold.absorb(mul(
+        current_positions.penultimate,
+        sub(current.minor, penultimate_limb),
+    ))
+    fold = fold.absorb(mul(
+        current_positions.last,
+        sub(current.minor, last_limb),
+    ))
+    let same_limb_position = add(radix_bit_to_bit, radix_bit_to_limb)
+    fold = fold.absorb(mul(
+        same_limb_position,
+        sub(next_positions.penultimate, current_positions.penultimate),
+    ))
+    fold = fold.absorb(mul(
+        same_limb_position,
+        sub(next_positions.last, current_positions.last),
+    ))
+    fold = fold.absorb(mul(
+        radix_limb_to_bit,
+        sub(next_positions.last, current_positions.penultimate),
+    ))
+    fold = fold.absorb(mul(radix_limb_to_bit, current_positions.last))
+    fold = fold.absorb(mul(
+        radix_limb_to_finish,
+        sub(current_positions.last, one),
+    ))
+    fold = fold.absorb(mul(
+        radix_finish_to_bit,
+        sub(
+            next_positions.penultimate,
+            boolean<F>(L == 2),
+        ),
+    ))
+    fold = fold.absorb(mul(radix_finish_to_bit, next_positions.last))
 
     let carry_reset = sub(next.flag, current.flag)
     fold = fold.absorb(mul(carry_bit_to_bit, bit_residual(carry_reset)))
@@ -3487,7 +3565,9 @@ pub fn evaluate_sparse_control_link<F: Radix2Field, const L: usize>(
     _ challenge: F,
     _ current: SparseControlRow<F>,
     _ next: SparseControlRow<F>,
-) -> FixedAirConstraintEvaluation<F> {
+) -> FixedAirConstraintEvaluation<F>
+where L > 1,
+{
     let fold = absorb_sparse_control_link<F, L>(
         ConstraintFold<F>::new(challenge),
         current,
@@ -3500,10 +3580,12 @@ pub fn evaluate_sparse_control_link<F: Radix2Field, const L: usize>(
     }
 }
 
-pub fn evaluate_sparse_control_initial<F: Radix2Field>(
+pub fn evaluate_sparse_control_initial<F: Radix2Field, const L: usize>(
     _ challenge: F,
     _ row: SparseControlRow<F>,
-) -> FixedAirConstraintEvaluation<F> {
+) -> FixedAirConstraintEvaluation<F>
+where L > 1,
+{
     let mut fold = ConstraintFold<F>::new(challenge)
     fold = fold.absorb(sub(row.selectors.radix_bit, one<F>()))
     fold = fold.absorb(row.major)
@@ -3513,6 +3595,11 @@ pub fn evaluate_sparse_control_initial<F: Radix2Field>(
     fold = fold.absorb(row.width)
     fold = fold.absorb(sub(row.weight, one<F>()))
     fold = fold.absorb(sub(row.range_roles.coordinate, one<F>()))
+    fold = fold.absorb(sub(
+        row.limb_positions.penultimate,
+        boolean<F>(L == 2),
+    ))
+    fold = fold.absorb(row.limb_positions.last)
     FixedAirConstraintEvaluation {
         valid: true,
         constraints: fold.constraints,

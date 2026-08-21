@@ -102,39 +102,39 @@ fn expected_sparse_transition_tasks(limbs: u32) -> Vec<[u32; 5]> {
     tasks
 }
 
-fn expected_sparse_control_fields(task: [u32; 5]) -> [u32; 33] {
+fn expected_sparse_control_fields(task: [u32; 5]) -> [u32; 35] {
     let [kind, first, second, third, fourth] = task;
-    let mut fields = [0u32; 33];
+    let mut fields = [0u32; 35];
     fields[kind as usize] = 1;
     match kind {
         0 => {
-            fields[27] = first;
-            fields[28] = second;
-            fields[29] = third;
-            fields[32] = 1 << third;
+            fields[29] = first;
+            fields[30] = second;
+            fields[31] = third;
+            fields[34] = 1 << third;
         }
         1 => {
-            fields[27] = first;
-            fields[28] = second;
+            fields[29] = first;
+            fields[30] = second;
         }
-        2 => fields[27] = first,
+        2 => fields[29] = first,
         3 => {
-            fields[27] = first;
-            fields[28] = second;
-            fields[29] = fourth;
-            fields[30] = third;
-            fields[32] = 1 << fourth;
+            fields[29] = first;
+            fields[30] = second;
+            fields[31] = fourth;
+            fields[32] = third;
+            fields[34] = 1 << fourth;
         }
         4 => {
-            fields[27] = first;
-            fields[28] = second;
+            fields[29] = first;
+            fields[30] = second;
         }
         5 => {
-            fields[27] = first;
-            fields[28] = second;
-            fields[29] = third;
-            fields[30] = u32::from(second >= LIMBS as u32);
-            fields[31] = if second < LIMBS as u32 {
+            fields[29] = first;
+            fields[30] = second;
+            fields[31] = third;
+            fields[32] = u32::from(second >= LIMBS as u32);
+            fields[33] = if second < LIMBS as u32 {
                 second + 1
             } else if second < 2 * LIMBS as u32 - 1 {
                 2 * LIMBS as u32 - 1 - second
@@ -143,10 +143,10 @@ fn expected_sparse_control_fields(task: [u32; 5]) -> [u32; 33] {
             };
         }
         6 => {
-            fields[27] = first;
-            fields[28] = second;
-            fields[30] = u32::from(second >= LIMBS as u32);
-            fields[31] = if second < LIMBS as u32 {
+            fields[29] = first;
+            fields[30] = second;
+            fields[32] = u32::from(second >= LIMBS as u32);
+            fields[33] = if second < LIMBS as u32 {
                 second + 1
             } else if second < 2 * LIMBS as u32 - 1 {
                 2 * LIMBS as u32 - 1 - second
@@ -155,25 +155,25 @@ fn expected_sparse_control_fields(task: [u32; 5]) -> [u32; 33] {
             };
         }
         7 => {
-            fields[27] = first;
-            fields[28] = second;
+            fields[29] = first;
+            fields[30] = second;
         }
-        8 => fields[27] = first,
+        8 => fields[29] = first,
         9 => {
             fields[15 + second as usize] = 1;
-            fields[27] = first;
-            fields[28] = second;
-            fields[29] = third;
-            fields[30] = u32::from(first == 0);
+            fields[29] = first;
+            fields[30] = second;
+            fields[31] = third;
+            fields[32] = u32::from(first == 0);
         }
         10 => {
-            fields[27] = first;
-            fields[30] = u32::from(first == 0);
+            fields[29] = first;
+            fields[32] = u32::from(first == 0);
         }
-        11 => fields[27] = first,
+        11 => fields[29] = first,
         12 => {
-            fields[27] = first;
-            fields[28] = second;
+            fields[29] = first;
+            fields[30] = second;
         }
         13 | 14 => {}
         _ => panic!("unknown sparse control task kind {kind}"),
@@ -186,13 +186,17 @@ fn expected_sparse_control_fields(task: [u32; 5]) -> [u32; 33] {
         } else {
             fields[23 + ((first - 15) % 4) as usize] = 1;
         }
-        fields[30] = u32::from(fields[19] == 1 || fields[22] == 1 || fields[26] == 1);
+        fields[32] = u32::from(fields[19] == 1 || fields[22] == 1 || fields[26] == 1);
+    }
+    if kind == 0 || kind == 1 {
+        fields[27] = u32::from(second + 2 == LIMBS as u32);
+        fields[28] = u32::from(second + 1 == LIMBS as u32);
     }
     fields
 }
 
-fn expected_sparse_control_rows() -> Vec<[u32; 33]> {
-    let mut rows: Vec<[u32; 33]> = expected_sparse_transition_tasks(LIMBS as u32)
+fn expected_sparse_control_rows() -> Vec<[u32; 35]> {
+    let mut rows: Vec<[u32; 35]> = expected_sparse_transition_tasks(LIMBS as u32)
         .into_iter()
         .map(expected_sparse_control_fields)
         .collect();
@@ -1225,7 +1229,7 @@ fn expected_sparse_trace_root(point: &ComplexFx, current: &ComplexFx) -> [u32; 8
             ];
             fields.extend(controls[index]);
             fields.extend(row);
-            reference_poseidon_digest(b"SL02", &fields)
+            reference_poseidon_digest(b"SL03", &fields)
         })
         .collect();
     reference_merkle_root(leaves)
@@ -2592,8 +2596,10 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                 first_leaf + 20,
                 first_leaf + 24,
                 first_leaf + 32,
-                first_leaf + 35,
-                first_leaf + 38,
+                first_leaf + 33,
+                first_leaf + 34,
+                first_leaf + 37,
+                first_leaf + 40,
             ] {
                 let original = opening_words[mutation_index];
                 let mutated = if mutation_index == 0 || mutation_index == 10 {
