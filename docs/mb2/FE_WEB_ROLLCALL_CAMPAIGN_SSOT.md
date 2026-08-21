@@ -969,6 +969,20 @@ Legend:
   source values. Focused nextest passes 1/1 in 37.73 seconds. Product rounding,
   product signs, and linear ripples remain before full sparse and wide
   transition equivalence can be claimed.
+  Commit `2125f88e6` closes product rounding and sign normalization in the
+  sparse projection. Each product's `L` rounding rows now stay adjacent to its
+  finish row. The ripple constrains guard carry-in, retained digit, output
+  digit, and boolean carry-out, while the finish constrains the final carry and
+  `left_sign XOR right_sign`, masked by output nonzero for canonical zero. A
+  second typed copy bus binds the retained window, output digits, guard bit,
+  input signs, output sign, and output nonzero to their independently range-
+  constrained rows. Redundant wide-carrier aliases such as `round_overflow`
+  are projected out rather than copied into the sparse trace. The independent
+  model matches all 15 L4 rows. Fe Wasm checks 85 local, group-boundary,
+  adjacency, and copy-balance relations under three challenges, rejects every
+  row-lane mutation, and rejects a locally valid retained/output substitution
+  through the copy bus alone. Focused nextest passes 1/1 in 42.17 seconds.
+  The next gate is the four signed linear ripples plus their copy bus.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
   The first arithmetic-plan consolidation is landed at `ba2ded864`: one
