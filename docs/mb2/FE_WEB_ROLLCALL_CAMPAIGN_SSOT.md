@@ -910,6 +910,20 @@ Legend:
   placement. A narrow sparse multi-row schedule must now interpret the same
   convolution and range plan so a leaf proof does not commit thousands of
   columns per transition.
+  Commit `79c8e9977` derives that alternative placement plan from the same
+  nominal DAG. `SparseTransitionTask` has typed radix, carry, product, linear,
+  and boundary variants whose payloads name `ProductNode`, `LinearNode`,
+  `RangeNode`, and `CoordinateNode`; application code does not maintain a
+  phase-ID or 31-column table. The plan contains `3*L*L + 671*L + 41`
+  microtasks. Independent Rust enumeration matches every one of the 2,773 L4
+  task signatures, including triangular convolution ranks and the first
+  invalid padding row. The derived radix-two placements are 4,096 rows at L4,
+  8,192 at L8, and 16,384 at L20. Focused nextest passes 1/1 in 34.89 seconds.
+  The wide field fold and sparse task plan are now two interpretations of one
+  relation, not competing arithmetic implementations. The next gate must give
+  sparse rows their narrow accumulator payload and adjacency constraints, then
+  compare their folded denotation to the already gated wide interpreter before
+  attaching Merkle, FRI, or WebGPU machinery.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
   The first arithmetic-plan consolidation is landed at `ba2ded864`: one
