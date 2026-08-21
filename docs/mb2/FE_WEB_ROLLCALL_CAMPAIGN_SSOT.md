@@ -1260,14 +1260,26 @@ Legend:
   base-field mutation changes it, checks all 32 quartic challenge coefficients
   for both clean and mutated roots, and rejects invalid roots and mutation
   selectors. The focused zero-import gate passes 1/1 in 275.53 seconds.
+  Commit `192a0950f` completes the corrected interaction side. Production
+  challenges now cross the API in a shape-branded wrapper whose payload is
+  private, so downstream code cannot repackage raw-checkpoint challenges as
+  base-LDE-derived values. The same row-local four-bus interpretation then
+  generates caller-owned interaction tiles, a split 84-column LDE writer
+  places them independently, and each `LD02` leaf absorbs its proof shape,
+  position, exact `LD01` root, and every interaction field. The typed
+  interaction root retains that base-root dependency. The independent model
+  derives the production `*02` challenges, reconstructs the first four
+  interaction rows and every inverse from semantic copy ports, applies a
+  direct u64 LDE to all 84 columns, and matches both clean and mutated Plonky3
+  roots. It also rejects an unknown mutation selector. The focused zero-import
+  gate passes 1/1 in 389.36 seconds.
   `SL03` and `SI01` now authenticate the exact base and interaction witness
   traces, and their typed LDE/composition seam is now gated, but they are not
   yet a succinct leaf proof. The production layer must next commit the full
-  interaction and composition codewords using the corrected base-LDE-derived
-  challenges, bind all three roots into the typed transcript, then reuse the
-  existing multi-query, FRI, and canonical receipt interpreters. Only that
-  authenticated AIR/FRI receipt may replace semantic replay in the recursive
-  parent carrier.
+  composition codeword, bind all three production roots into the typed
+  transcript, then reuse the existing multi-query, FRI, and canonical receipt
+  interpreters. Only that authenticated AIR/FRI receipt may replace semantic
+  replay in the recursive parent carrier.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
   The first arithmetic-plan consolidation is landed at `ba2ded864`: one
