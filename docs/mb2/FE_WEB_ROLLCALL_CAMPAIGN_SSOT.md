@@ -1273,12 +1273,32 @@ Legend:
   direct u64 LDE to all 84 columns, and matches both clean and mutated Plonky3
   roots. It also rejects an unknown mutation selector. The focused zero-import
   gate passes 1/1 in 389.36 seconds.
-  `SL03` and `SI01` now authenticate the exact base and interaction witness
-  traces, and their typed LDE/composition seam is now gated, but they are not
-  yet a succinct leaf proof. The production layer must next commit the full
-  composition codeword, bind all three production roots into the typed
-  transcript, then reuse the existing multi-query, FRI, and canonical receipt
-  interpreters. Only that authenticated AIR/FRI receipt may replace semantic
+  Commit `1aff766be` closes the production composition seam without creating a
+  second FRI protocol. The compact and sparse provers now share the extracted
+  `mandelbrot_proof_baby_bear_transcript` ingot for the canonical `BC01`
+  quartic challenge, `BC02` composition leaves, and `BC03` post-composition
+  binding; the established compact prover re-exports the same API. The sparse
+  transcript commits the exact one-step `RecursiveCommittedInterval<L>` under
+  `AS01`, binds the exact `LD01` and dependency-carrying `LD02` roots under
+  `AT01`, then binds the statement and roots under `AT02`. Its caller-owned
+  codeword writer recomputes both roots and all interaction challenges
+  internally before evaluating every composition point, so callers cannot
+  pair a codeword with roots or challenges from another commitment. A typed
+  composition digest retains the complete statement and LDE dependency chain.
+  The independent gate reconstructs the recursive statement commitment,
+  `LD01`, `LD02`, nested transcript, all four `BC01` coefficients, every one of
+  the 16 four-zerofier quotients, and the `BC02` Plonky3 Merkle root. Separate
+  base-field, interaction-field, and valid-statement mutations change exactly
+  the expected upstream roots and every downstream transcript artifact; an
+  unknown mutation fails closed. The focused zero-import Wasm gate passes 1/1
+  in 558.10 seconds.
+  `SL03` and `SI01` remain exact semantic checkpoints rather than production
+  proof roots. `LD01`, `LD02`, and the shared `BC02` composition root now cover
+  the full production codewords, but this is not yet a succinct recursive leaf
+  proof. The next layer must add authenticated fixed-position openings that
+  equate the named recursive statement and boundary digests with the committed
+  sparse columns, then reuse the existing multi-query, FRI, and canonical
+  receipt interpreters. Only that complete AIR/FRI receipt may replace semantic
   replay in the recursive parent carrier.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
@@ -1365,9 +1385,10 @@ fallback. The semantic receipts are:
 ## Immediate burn-down order
 
 1. Run the external real-GPU handoff above before beginning the proof GPU port.
-2. Finish the authenticated BabyBear sparse AIR: feed the committed `SL03`
-   control/witness trace and `SI01` quartic interaction trace through the
-   existing LDE, composition, multi-query, FRI, and canonical receipt layers.
+2. Finish the authenticated BabyBear sparse AIR: add fixed-position public
+   boundary openings over `LD01`, bind them to the recursive leaf statement,
+   then feed the existing `LD01`/`LD02`/`BC02` commitments through multi-query,
+   FRI, and the canonical receipt layers.
 3. Lower the BabyBear leaf prover and recursive merges through Fe Conal/CTFE
    WebGPU schedules, then run the complete progressive proof/verify/tamper page
    through Chrome.
