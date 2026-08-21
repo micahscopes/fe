@@ -20,6 +20,7 @@ const COMMITTED_ACCUMULATOR_WORDS: usize = 31;
 const PRODUCT_WITNESS_WORDS: usize = 24;
 const LINEAR_WITNESS_WORDS: usize = 33;
 const RANGE_WITNESS_WORDS: usize = LIMBS * LIMB_BITS * 2 + 1;
+const TRANSITION_WITNESS_WORDS: usize = 1 + 3 * PRODUCT_WITNESS_WORDS + 4 * LINEAR_WITNESS_WORDS;
 const POSEIDON_WIDTH: usize = 16;
 const BABY_BEAR_MODULUS: u32 = 2_013_265_921;
 
@@ -67,6 +68,19 @@ fn fixed(negative: bool, numerator: u32, denominator: u32) -> Fx {
     let magnitude = scale() * BigUint::from(numerator) / BigUint::from(denominator);
     Fx {
         negative: negative && magnitude != BigUint::from(0u32),
+        magnitude,
+    }
+}
+
+fn seeded_fixed(seed: &mut u32) -> Fx {
+    let mut magnitude = BigUint::from(0u32);
+    for limb_index in 0..LIMBS {
+        *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        magnitude += BigUint::from(*seed & (LIMB_BASE - 1)) << (LIMB_BITS * limb_index);
+    }
+    *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+    Fx {
+        negative: (*seed & 1) == 1 && magnitude != BigUint::from(0u32),
         magnitude,
     }
 }
@@ -320,9 +334,64 @@ fn expected_range_witness_words(value: &Fx) -> Vec<u32> {
     words
 }
 
+fn expected_transition_witness_words(point: &ComplexFx, current: &ComplexFx) -> Vec<u32> {
+    let xx = multiply(&current.real, &current.real);
+    let yy = multiply(&current.imaginary, &current.imaginary);
+    let xy = multiply(&current.real, &current.imaginary);
+    let real_difference = subtract(&xx, &yy);
+    let next_real = add(&real_difference, &point.real);
+    let double_xy = add(&xy, &xy);
+    let next_imaginary = add(&double_xy, &point.imaginary);
+
+    let mut words = vec![1];
+    words.extend(expected_product_witness_words(&current.real, &current.real));
+    words.extend(expected_product_witness_words(
+        &current.imaginary,
+        &current.imaginary,
+    ));
+    words.extend(expected_product_witness_words(
+        &current.real,
+        &current.imaginary,
+    ));
+    words.extend(expected_linear_witness_words(&xx, &yy, true));
+    words.extend(expected_linear_witness_words(
+        &real_difference,
+        &point.real,
+        false,
+    ));
+    words.extend(expected_linear_witness_words(&xy, &xy, false));
+    words.extend(expected_linear_witness_words(
+        &double_xy,
+        &point.imaginary,
+        false,
+    ));
+    assert_eq!(words.len(), TRANSITION_WITNESS_WORDS);
+
+    let expected_next = advance(
+        &Claim {
+            point: point.clone(),
+            bound: 1,
+        },
+        &Boundary {
+            iteration: 0,
+            z: current.clone(),
+            escaped: escaped(current),
+        },
+    );
+    assert_eq!(expected_next.z.real, next_real);
+    assert_eq!(expected_next.z.imaginary, next_imaginary);
+    words
+}
+
 fn complex_words(value: &ComplexFx) -> Vec<u32> {
     let mut words = fixed_words(&value.real);
     words.extend(fixed_words(&value.imaginary));
+    words
+}
+
+fn transition_arguments(point: &ComplexFx, current: &ComplexFx) -> Vec<u32> {
+    let mut words = complex_words(point);
+    words.extend(complex_words(current));
     words
 }
 
@@ -902,6 +971,97 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                 )[0],
                 0,
                 "mutated range residual {mutation}, case {case}",
+            );
+        }
+    }
+
+    let mut transition_cases = vec![
+        (
+            ComplexFx {
+                real: zero(),
+                imaginary: zero(),
+            },
+            ComplexFx {
+                real: zero(),
+                imaginary: zero(),
+            },
+        ),
+        (
+            ComplexFx {
+                real: fixed(true, 3, 4),
+                imaginary: fixed(false, 1, 8),
+            },
+            ComplexFx {
+                real: fixed(false, 5, 4),
+                imaginary: fixed(true, 3, 8),
+            },
+        ),
+        (
+            ComplexFx {
+                real: fixed(false, 1, 1),
+                imaginary: fixed(false, 1, 1),
+            },
+            ComplexFx {
+                real: fixed(true, 3, 2),
+                imaginary: fixed(true, 3, 2),
+            },
+        ),
+    ];
+    let mut transition_seed = 0x9e37_79b9u32;
+    for _ in 0..16 {
+        transition_cases.push((
+            ComplexFx {
+                real: seeded_fixed(&mut transition_seed),
+                imaginary: seeded_fixed(&mut transition_seed),
+            },
+            ComplexFx {
+                real: seeded_fixed(&mut transition_seed),
+                imaginary: seeded_fixed(&mut transition_seed),
+            },
+        ));
+    }
+    for (case, (point, current)) in transition_cases.iter().enumerate() {
+        let arguments = transition_arguments(point, current);
+        let (_, _, actual) = encoded(
+            &mut store,
+            &instance,
+            memory,
+            "fixed_transition4_encoded",
+            &arguments,
+        );
+        assert_eq!(
+            actual,
+            expected_transition_witness_words(point, current),
+            "fixed Mandelbrot transition witness case {case}",
+        );
+        for mutation in 0..=10u32 {
+            let mut mutation_arguments = arguments.clone();
+            mutation_arguments.push(mutation);
+            assert_eq!(
+                call(
+                    &mut store,
+                    &instance,
+                    "fixed_transition4_mutation_holds",
+                    &mutation_arguments,
+                    1,
+                ),
+                [(mutation == 0) as u32],
+                "transition mutation {mutation}, case {case}",
+            );
+        }
+        for mutation in [1u32, 2] {
+            let mut mutation_arguments = arguments.clone();
+            mutation_arguments.push(mutation);
+            assert_ne!(
+                call(
+                    &mut store,
+                    &instance,
+                    "fixed_transition4_mutated_output_residual",
+                    &mutation_arguments,
+                    1,
+                )[0],
+                0,
+                "transition output residual mutation {mutation}, case {case}",
             );
         }
     }

@@ -5,6 +5,7 @@
 //! No precision tier owns a handwritten coefficient table.
 
 use canonical_words::{CanonicalWords, CanonicalWordsProvider}
+use mandelbrot_proof_recursive::ComplexFixed
 use precision::field::LIMB_BASE
 use precision::fixed::Fixed
 use precision::polynomial::Radix2Field
@@ -142,6 +143,22 @@ pub struct RadixRangeWitness<const L: usize> {
 impl<const L: usize> core::marker::Copy for RadixRangeWitness<L> {}
 derive CanonicalWords for RadixRangeWitness<L> using CanonicalWordsProvider
 
+/// One exact `z_(n+1) = z_n^2 + c` dependency DAG. The record stores only
+/// arithmetic witnesses; edges are passed directly from each typed output to
+/// the next relation, so there are no copied intermediate columns to reconcile.
+pub struct FixedMandelbrotTransitionWitness<const L: usize> {
+    pub valid: bool,
+    pub xx: FixedProductWitness<L>,
+    pub yy: FixedProductWitness<L>,
+    pub xy: FixedProductWitness<L>,
+    pub real_difference: FixedLinearWitness<L>,
+    pub next_real: FixedLinearWitness<L>,
+    pub double_xy: FixedLinearWitness<L>,
+    pub next_imaginary: FixedLinearWitness<L>,
+}
+impl<const L: usize> core::marker::Copy for FixedMandelbrotTransitionWitness<L> {}
+derive CanonicalWords for FixedMandelbrotTransitionWitness<L> using CanonicalWordsProvider
+
 fn empty_product_witness<const L: usize>() -> FixedProductWitness<L> {
     FixedProductWitness {
         valid: false,
@@ -182,6 +199,19 @@ fn empty_linear_witness<const L: usize>() -> FixedLinearWitness<L> {
 
 fn empty_radix_limb_range_witness() -> RadixLimbRangeWitness {
     RadixLimbRangeWitness { bits: [0; 13], nonzero_prefix: [0; 13] }
+}
+
+fn empty_transition_witness<const L: usize>() -> FixedMandelbrotTransitionWitness<L> {
+    FixedMandelbrotTransitionWitness {
+        valid: false,
+        xx: empty_product_witness<L>(),
+        yy: empty_product_witness<L>(),
+        xy: empty_product_witness<L>(),
+        real_difference: empty_linear_witness<L>(),
+        next_real: empty_linear_witness<L>(),
+        double_xy: empty_linear_witness<L>(),
+        next_imaginary: empty_linear_witness<L>(),
+    }
 }
 
 pub fn derive_radix_range_witness<const L: usize>(
@@ -579,6 +609,101 @@ pub fn fixed_product_witness_holds<const L: usize>(
     witness.output.negative == expected_negative
 }
 
+pub fn derive_fixed_mandelbrot_transition_witness<const L: usize>(
+    _ point: ComplexFixed<L>,
+    _ current: ComplexFixed<L>,
+) -> FixedMandelbrotTransitionWitness<L> {
+    if !point.real.is_canonical()
+        || !point.imaginary.is_canonical()
+        || !current.real.is_canonical()
+        || !current.imaginary.is_canonical()
+    {
+        return empty_transition_witness<L>()
+    }
+    let xx = derive_fixed_product_witness(current.real, current.real)
+    let yy = derive_fixed_product_witness(current.imaginary, current.imaginary)
+    let xy = derive_fixed_product_witness(current.real, current.imaginary)
+    let real_difference = derive_fixed_difference_witness(xx.output, yy.output)
+    let next_real = derive_fixed_sum_witness(real_difference.output, point.real)
+    let double_xy = derive_fixed_sum_witness(xy.output, xy.output)
+    let next_imaginary = derive_fixed_sum_witness(double_xy.output, point.imaginary)
+    FixedMandelbrotTransitionWitness {
+        valid: xx.valid
+            && yy.valid
+            && xy.valid
+            && real_difference.valid
+            && next_real.valid
+            && double_xy.valid
+            && next_imaginary.valid,
+        xx: xx,
+        yy: yy,
+        xy: xy,
+        real_difference: real_difference,
+        next_real: next_real,
+        double_xy: double_xy,
+        next_imaginary: next_imaginary,
+    }
+}
+
+pub fn fixed_mandelbrot_transition_output<const L: usize>(
+    _ witness: FixedMandelbrotTransitionWitness<L>,
+) -> ComplexFixed<L> {
+    ComplexFixed {
+        real: witness.next_real.output,
+        imaginary: witness.next_imaginary.output,
+    }
+}
+
+/// Exact integer verifier for the composed recurrence. Every intermediate is
+/// consumed directly from the preceding witness, and the proposed next
+/// boundary must equal the final two typed outputs.
+pub fn fixed_mandelbrot_transition_witness_holds<const L: usize>(
+    _ point: ComplexFixed<L>,
+    _ current: ComplexFixed<L>,
+    _ next: ComplexFixed<L>,
+    _ witness: FixedMandelbrotTransitionWitness<L>,
+) -> bool {
+    if !witness.valid
+        || !point.real.is_canonical()
+        || !point.imaginary.is_canonical()
+        || !current.real.is_canonical()
+        || !current.imaginary.is_canonical()
+        || !next.real.is_canonical()
+        || !next.imaginary.is_canonical()
+    {
+        return false
+    }
+    fixed_product_witness_holds(current.real, current.real, witness.xx)
+        && fixed_product_witness_holds(current.imaginary, current.imaginary, witness.yy)
+        && fixed_product_witness_holds(current.real, current.imaginary, witness.xy)
+        && fixed_linear_witness_holds(
+            witness.xx.output,
+            witness.yy.output,
+            true,
+            witness.real_difference,
+        )
+        && fixed_linear_witness_holds(
+            witness.real_difference.output,
+            point.real,
+            false,
+            witness.next_real,
+        )
+        && fixed_linear_witness_holds(
+            witness.xy.output,
+            witness.xy.output,
+            false,
+            witness.double_xy,
+        )
+        && fixed_linear_witness_holds(
+            witness.double_xy.output,
+            point.imaginary,
+            false,
+            witness.next_imaginary,
+        )
+        && witness.next_real.output.equals(next.real)
+        && witness.next_imaginary.output.equals(next.imaginary)
+}
+
 fn field_natural<F: Radix2Field>(_ value: u32) -> F {
     let mut value = value
     let mut result = F::radix2_zero()
@@ -593,6 +718,52 @@ fn field_natural<F: Radix2Field>(_ value: u32) -> F {
 
 fn field_boolean<F: Radix2Field>(_ value: bool) -> F {
     field_natural<F>(if value { 1 } else { 0 })
+}
+
+pub fn transition_output_limb_residual<
+    F: Radix2Field,
+    const L: usize,
+>(
+    _ witness: FixedMandelbrotTransitionWitness<L>,
+    _ next: ComplexFixed<L>,
+    _ coordinate: u32,
+    _ limb_index: u32,
+) -> F {
+    let limbs: u32 = L.downcast_truncate()
+    if coordinate > 1 || limb_index >= limbs { return F::radix2_zero() }
+    let witness_limb = if coordinate == 0 {
+        witness.next_real.output.limbs[limb_index as usize]
+    } else {
+        witness.next_imaginary.output.limbs[limb_index as usize]
+    }
+    let next_limb = if coordinate == 0 {
+        next.real.limbs[limb_index as usize]
+    } else {
+        next.imaginary.limbs[limb_index as usize]
+    }
+    field_natural<F>(witness_limb).radix2_sub(field_natural<F>(next_limb))
+}
+
+pub fn transition_output_sign_residual<
+    F: Radix2Field,
+    const L: usize,
+>(
+    _ witness: FixedMandelbrotTransitionWitness<L>,
+    _ next: ComplexFixed<L>,
+    _ coordinate: u32,
+) -> F {
+    if coordinate > 1 { return F::radix2_zero() }
+    let witness_sign = if coordinate == 0 {
+        witness.next_real.output.negative
+    } else {
+        witness.next_imaginary.output.negative
+    }
+    let next_sign = if coordinate == 0 {
+        next.real.negative
+    } else {
+        next.imaginary.negative
+    }
+    field_boolean<F>(witness_sign).radix2_sub(field_boolean<F>(next_sign))
 }
 
 pub fn radix_bit_boolean_residual<F: Radix2Field, const L: usize>(

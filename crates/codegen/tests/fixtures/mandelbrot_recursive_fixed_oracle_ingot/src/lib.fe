@@ -14,6 +14,7 @@ use mandelbrot_proof_recursive_baby_bear::{
 }
 use mandelbrot_proof_fixed_air::{
     FixedLinearWitness,
+    FixedMandelbrotTransitionWitness,
     FixedProductWitness,
     RadixRangeWitness,
     boolean_residual,
@@ -23,9 +24,12 @@ use mandelbrot_proof_fixed_air::{
     convolution_term_count,
     derive_fixed_product_witness,
     derive_fixed_difference_witness,
+    derive_fixed_mandelbrot_transition_witness,
     derive_fixed_sum_witness,
     derive_radix_range_witness,
     fixed_linear_witness_holds,
+    fixed_mandelbrot_transition_output,
+    fixed_mandelbrot_transition_witness_holds,
     fixed_product_witness_holds,
     fixed_range_witness_holds,
     fixed_sign_zero_residual,
@@ -44,6 +48,8 @@ use mandelbrot_proof_fixed_air::{
     radix_prefix_boolean_residual,
     radix_prefix_residual,
     rounding_residual,
+    transition_output_limb_residual,
+    transition_output_sign_residual,
 }
 use mandelbrot_proof_recursive::{
     ComplexFixed,
@@ -64,6 +70,7 @@ type CommittedAccumulator4 = RecursiveCommittedInterval<4>
 type ProductWitness4 = FixedProductWitness<4>
 type LinearWitness4 = FixedLinearWitness<4>
 type RangeWitness4 = RadixRangeWitness<4>
+type TransitionWitness4 = FixedMandelbrotTransitionWitness<4>
 
 fn fixed4(_ negative: u32, _ limbs: [u32; 4]) -> Fixed<4> {
     Fixed { negative: negative == 1, limbs: limbs }
@@ -82,6 +89,18 @@ fn claim4(
             imaginary: fixed4(imaginary_negative, imaginary),
         },
         bound: bound,
+    }
+}
+
+fn complex4(
+    _ real_negative: u32,
+    _ real: [u32; 4],
+    _ imaginary_negative: u32,
+    _ imaginary: [u32; 4],
+) -> ComplexFixed<4> {
+    ComplexFixed {
+        real: fixed4(real_negative, real),
+        imaginary: fixed4(imaginary_negative, imaginary),
     }
 }
 
@@ -123,6 +142,104 @@ fn linear4(
         derive_fixed_sum_witness(left, right)
     }
     (left, right, witness)
+}
+
+fn transition4(
+    _ point_real_negative: u32,
+    _ point_real: [u32; 4],
+    _ point_imaginary_negative: u32,
+    _ point_imaginary: [u32; 4],
+    _ current_real_negative: u32,
+    _ current_real: [u32; 4],
+    _ current_imaginary_negative: u32,
+    _ current_imaginary: [u32; 4],
+) -> (ComplexFixed<4>, ComplexFixed<4>, TransitionWitness4) {
+    let point = complex4(
+        point_real_negative,
+        point_real,
+        point_imaginary_negative,
+        point_imaginary,
+    )
+    let current = complex4(
+        current_real_negative,
+        current_real,
+        current_imaginary_negative,
+        current_imaginary,
+    )
+    (point, current, derive_fixed_mandelbrot_transition_witness(point, current))
+}
+
+pub fn fixed_transition4_encoded(
+    _ prn: u32, _ pr0: u32, _ pr1: u32, _ pr2: u32, _ pr3: u32,
+    _ pin: u32, _ pi0: u32, _ pi1: u32, _ pi2: u32, _ pi3: u32,
+    _ crn: u32, _ cr0: u32, _ cr1: u32, _ cr2: u32, _ cr3: u32,
+    _ cin: u32, _ ci0: u32, _ ci1: u32, _ ci2: u32, _ ci3: u32,
+) -> BrowserBytes {
+    let (_point, _current, witness) = transition4(
+        prn, [pr0, pr1, pr2, pr3], pin, [pi0, pi1, pi2, pi3],
+        crn, [cr0, cr1, cr2, cr3], cin, [ci0, ci1, ci2, ci3],
+    )
+    let writer = BrowserWordWriter::allocate(<TransitionWitness4 as CanonicalWords>::WORDS)
+    encode_canonical_words(ref witness, writer).finish()
+}
+
+pub fn fixed_transition4_mutation_holds(
+    _ prn: u32, _ pr0: u32, _ pr1: u32, _ pr2: u32, _ pr3: u32,
+    _ pin: u32, _ pi0: u32, _ pi1: u32, _ pi2: u32, _ pi3: u32,
+    _ crn: u32, _ cr0: u32, _ cr1: u32, _ cr2: u32, _ cr3: u32,
+    _ cin: u32, _ ci0: u32, _ ci1: u32, _ ci2: u32, _ ci3: u32,
+    _ mutation: u32,
+) -> u32 {
+    let (point, mut current, mut witness) = transition4(
+        prn, [pr0, pr1, pr2, pr3], pin, [pi0, pi1, pi2, pi3],
+        crn, [cr0, cr1, cr2, cr3], cin, [ci0, ci1, ci2, ci3],
+    )
+    let mut next = fixed_mandelbrot_transition_output(witness)
+    if mutation == 1 { witness.xx.low_digits[0] = witness.xx.low_digits[0] + 1 }
+    if mutation == 2 { witness.yy.low_digits[0] = witness.yy.low_digits[0] + 1 }
+    if mutation == 3 { witness.xy.low_digits[0] = witness.xy.low_digits[0] + 1 }
+    if mutation == 4 {
+        witness.real_difference.left_difference_digits[0] =
+            witness.real_difference.left_difference_digits[0] + 1
+    }
+    if mutation == 5 { witness.next_real.sum_digits[0] = witness.next_real.sum_digits[0] + 1 }
+    if mutation == 6 { witness.double_xy.sum_digits[0] = witness.double_xy.sum_digits[0] + 1 }
+    if mutation == 7 {
+        witness.next_imaginary.sum_digits[0] = witness.next_imaginary.sum_digits[0] + 1
+    }
+    if mutation == 8 { current.real.limbs[0] = LIMB_BASE }
+    if mutation == 9 { next.real.limbs[0] = next.real.limbs[0] + 1 }
+    if mutation == 10 { next.imaginary.negative = !next.imaginary.negative }
+    if fixed_mandelbrot_transition_witness_holds(point, current, next, witness) {
+        1
+    } else {
+        0
+    }
+}
+
+pub fn fixed_transition4_mutated_output_residual(
+    _ prn: u32, _ pr0: u32, _ pr1: u32, _ pr2: u32, _ pr3: u32,
+    _ pin: u32, _ pi0: u32, _ pi1: u32, _ pi2: u32, _ pi3: u32,
+    _ crn: u32, _ cr0: u32, _ cr1: u32, _ cr2: u32, _ cr3: u32,
+    _ cin: u32, _ ci0: u32, _ ci1: u32, _ ci2: u32, _ ci3: u32,
+    _ mutation: u32,
+) -> u32 {
+    let (_point, _current, witness) = transition4(
+        prn, [pr0, pr1, pr2, pr3], pin, [pi0, pi1, pi2, pi3],
+        crn, [cr0, cr1, cr2, cr3], cin, [ci0, ci1, ci2, ci3],
+    )
+    let mut next = fixed_mandelbrot_transition_output(witness)
+    if mutation == 1 {
+        next.real.limbs[0] = next.real.limbs[0] + 1
+        return transition_output_limb_residual<BabyBear, 4>(
+            witness,
+            next,
+            0,
+            0,
+        ).to_u32()
+    }
+    next.imaginary.negative = !next.imaginary.negative
+    transition_output_sign_residual<BabyBear, 4>(witness, next, 1).to_u32()
 }
 
 pub fn fixed_linear4_encoded(
