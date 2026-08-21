@@ -744,12 +744,31 @@ Legend:
   independently derives the FQ samples, canonical leaf sets, sibling counts,
   roots, and terminal value, then rejects mutations at the composition, each
   of the three sparse FRI layers, terminal, external transcript, and coset
-  shift boundaries. It passed 1/1 in 568.12 seconds. Sparse main and auxiliary
-  AIR LDE openings, a canonical variable-length BabyBear receipt codec, and
-  end-to-end verification remain pending. Production BabyBear LDE row
-  generation from the canonical trace also remains pending. The explicitly
-  named `Checkpoint4AirLdeOpening` is still a four-row test checkpoint.
-  The same permutation has also
+  shift boundaries. It passed 1/1 in 568.12 seconds. Commit `e0ae2416e` now
+  interprets those same typed FQ samples through
+  `radix2_query_geometry<TRACE, LDE>` into current, next, negative, and
+  negative-next row requests, then opens one canonical shared multipath in
+  each separately branded main and auxiliary base-field tree. The large row
+  arrays are borrowed with `ref`, openings are populated with `mut`, and
+  verifiers borrow the completed records. This avoids backend-invalid Wasm
+  signatures with thousands of flattened parameters or results without
+  moving storage into a host shim. Its zero-import Plonky3 gate independently
+  reconstructs both roots, the actual FQ row set, canonical leaf ordering,
+  and sibling counts, and rejects value, sibling, and index mutations in both
+  trees. The focused opener-only gate passed 1/1 in 27.18 seconds. Commit
+  `1e16febd1` then adds the generic `BabyBearAirFriReceipt` carrier and the
+  concrete `Checkpoint4BabyBearReceipt16` interpretation. Its verifier
+  authenticates each AIR tree and each FRI layer once, reconstructs the typed
+  query buffer from the terminal transcript, recomputes every selected
+  composition pair through the shared 708-constraint AIR, and replays every
+  FRI fold. The combined zero-import Wasm seam gate builds the receipt in Fe,
+  accepts the clean value, and rejects mutations to main rows, auxiliary rows,
+  composition values, the main root, pre-LDE transcript, coset shift, and
+  claimed coordinate. It passed 1/1 in 147.31 seconds. A canonical
+  variable-length BabyBear receipt codec and production BabyBear LDE row
+  generation from the canonical trace remain pending. The explicitly named
+  checkpoint remains a four-row, 16-point toy protocol and is not yet a
+  succinct production proof. The same permutation has also
   lowered to Naga-valid u32-only WGSL with the local Sonatina conditional-loop
   structurizer fixes, but that browser gate is not landed until those commits
   are published and the Fe dependency pin advances. The complete protocol
