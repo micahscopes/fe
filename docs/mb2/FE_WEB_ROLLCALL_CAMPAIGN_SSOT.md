@@ -1160,11 +1160,24 @@ Legend:
   reject, with the coordinated mutation failing only at the terminal balance.
   The complete gate evaluates 69,633 linear interaction constraints and passes
   1/1 in 112.73 seconds.
+  Commit `0e1a2ebff` closes the final base-copy family with a two-port boundary
+  interpretation. Only the claimed `NextReal` and `NextImaginary` ranges and
+  their computed `LinearOutput(NextReal)` and
+  `LinearOutput(NextImaginary)` counterparts enter this namespace. The Fe AIR
+  selects those four radix sources with constant-degree control polynomials,
+  then binds each computed/claimed sign or limb pair without enum dispatch or
+  row indices. The independent semantic model matches both inverse columns
+  under three challenge pairs. Source, consumer, inverse, accumulator, and a
+  locally valid equal-sign flip all reject; the equal-sign flip fails exactly
+  once at the terminal balance. The complete gate evaluates 20,481 boundary
+  interaction constraints and passes 1/1 in 119.57 seconds. Product, rounding,
+  linear, and boundary nominal copy families are now all represented by the
+  shared const-generic log-derivative relation.
   This root authenticates the exact control and witness base trace but is not
-  yet a succinct leaf proof. The final boundary copies still need the same
-  committed interaction treatment, followed by quartic transcript challenges
-  and batch inversion. The interaction columns must then enter the existing
-  BabyBear LDE, composition, multi-query, FRI, and canonical receipt
+  yet a succinct leaf proof. The base-field audit challenges must now become
+  transcript-derived quartic challenges with batch inversion. Those
+  interaction columns must then enter the existing BabyBear LDE, composition,
+  multi-query, FRI, and canonical receipt
   interpreters. Only that authenticated AIR/FRI receipt may replace semantic
   replay in the recursive parent carrier.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
@@ -1252,9 +1265,8 @@ fallback. The semantic receipts are:
 ## Immediate burn-down order
 
 1. Run the external real-GPU handoff above before beginning the proof GPU port.
-2. Finish the authenticated BabyBear sparse AIR: extend the landed product,
-   rounding, and linear interactions to the final boundary copies, derive
-   quartic challenges with batch inversion, then feed control, witness, and
+2. Finish the authenticated BabyBear sparse AIR: derive quartic interaction
+   challenges with batch inversion, then feed control, witness, and
    interactions through the existing LDE, composition, multi-query, FRI, and
    canonical receipt layers.
 3. Lower the BabyBear leaf prover and recursive merges through Fe Conal/CTFE
