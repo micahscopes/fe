@@ -18,6 +18,7 @@ const LIMB_BASE: u32 = 8192;
 const ACCUMULATOR_WORDS: usize = 37;
 const COMMITTED_ACCUMULATOR_WORDS: usize = 31;
 const PRODUCT_WITNESS_WORDS: usize = 24;
+const LINEAR_WITNESS_WORDS: usize = 33;
 const POSEIDON_WIDTH: usize = 16;
 const BABY_BEAR_MODULUS: u32 = 2_013_265_921;
 
@@ -208,6 +209,94 @@ fn expected_product_witness_words(left: &Fx, right: &Fx) -> Vec<u32> {
     words.extend([round_up as u32, (round_carry == 1) as u32]);
     words.extend(fixed_words(&expected_output));
     assert_eq!(words.len(), PRODUCT_WITNESS_WORDS);
+    words
+}
+
+fn expected_linear_witness_words(left: &Fx, right: &Fx, subtract_right: bool) -> Vec<u32> {
+    let left_limbs = limbs(left);
+    let right_limbs = limbs(right);
+    let effective_right_negative = right.negative ^ subtract_right;
+    let same_sign = left.negative == effective_right_negative;
+    let mut sum_digits = [0u32; LIMBS];
+    let mut sum_carries = [0u32; LIMBS];
+    let mut left_difference_digits = [0u32; LIMBS];
+    let mut left_borrows = [0u32; LIMBS];
+    let mut right_difference_digits = [0u32; LIMBS];
+    let mut right_borrows = [0u32; LIMBS];
+    let mut sum_carry = 0u32;
+    let mut left_borrow = 0u32;
+    let mut right_borrow = 0u32;
+    for index in 0..LIMBS {
+        let sum = left_limbs[index] + right_limbs[index] + sum_carry;
+        sum_digits[index] = sum % LIMB_BASE;
+        sum_carry = sum / LIMB_BASE;
+        sum_carries[index] = sum_carry;
+
+        let right_subtrahend = right_limbs[index] + left_borrow;
+        if left_limbs[index] >= right_subtrahend {
+            left_difference_digits[index] = left_limbs[index] - right_subtrahend;
+            left_borrow = 0;
+        } else {
+            left_difference_digits[index] = left_limbs[index] + LIMB_BASE - right_subtrahend;
+            left_borrow = 1;
+        }
+        left_borrows[index] = left_borrow;
+
+        let left_subtrahend = left_limbs[index] + right_borrow;
+        if right_limbs[index] >= left_subtrahend {
+            right_difference_digits[index] = right_limbs[index] - left_subtrahend;
+            right_borrow = 0;
+        } else {
+            right_difference_digits[index] = right_limbs[index] + LIMB_BASE - left_subtrahend;
+            right_borrow = 1;
+        }
+        right_borrows[index] = right_borrow;
+    }
+    let select_right = left_borrow == 1;
+    let output_limbs = if same_sign {
+        sum_digits
+    } else if select_right {
+        right_difference_digits
+    } else {
+        left_difference_digits
+    };
+    let output_nonzero = output_limbs.iter().any(|limb| *limb != 0);
+    let selected_negative = if same_sign {
+        left.negative
+    } else if select_right {
+        effective_right_negative
+    } else {
+        left.negative
+    };
+    let mut output_magnitude = BigUint::from(0u32);
+    for (index, limb) in output_limbs.iter().enumerate() {
+        output_magnitude += BigUint::from(*limb) << (LIMB_BITS * index);
+    }
+    let output = Fx {
+        negative: selected_negative && output_nonzero,
+        magnitude: output_magnitude,
+    };
+    let expected_output = if subtract_right {
+        subtract(left, right)
+    } else {
+        add(left, right)
+    };
+    assert_eq!(output, expected_output);
+
+    let mut words = vec![
+        1,
+        same_sign as u32,
+        select_right as u32,
+        output_nonzero as u32,
+    ];
+    words.extend(sum_digits);
+    words.extend(sum_carries);
+    words.extend(left_difference_digits);
+    words.extend(left_borrows);
+    words.extend(right_difference_digits);
+    words.extend(right_borrows);
+    words.extend(fixed_words(&output));
+    assert_eq!(words.len(), LINEAR_WITNESS_WORDS);
     words
 }
 
@@ -564,6 +653,113 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                 [expected],
                 "mutated BabyBear residual {mutation}, case {case}",
             );
+        }
+    }
+
+    let mut linear_cases = product_cases.clone();
+    linear_cases.extend([
+        (fixed(false, 3, 2), fixed(false, 3, 2)),
+        (fixed(true, 3, 2), fixed(true, 3, 2)),
+        (fixed(false, 1, 8), fixed(true, 7, 8)),
+        (zero(), fixed(true, 1, 1)),
+        (fixed(false, 1, 1), zero()),
+    ]);
+    for (case, (left, right)) in linear_cases.iter().enumerate() {
+        for subtract_right in [false, true] {
+            let mut arguments = fixed_arguments(left, right);
+            arguments.push(subtract_right as u32);
+            let (_, _, actual) = encoded(
+                &mut store,
+                &instance,
+                memory,
+                "fixed_linear4_encoded",
+                &arguments,
+            );
+            assert_eq!(
+                actual,
+                expected_linear_witness_words(left, right, subtract_right),
+                "fixed linear witness case {case}, subtract={subtract_right}",
+            );
+
+            for relation in 0..=3u32 {
+                for index in 0..LIMBS as u32 {
+                    let mut residual_arguments = arguments.clone();
+                    residual_arguments.extend([relation, index]);
+                    assert_eq!(
+                        call(
+                            &mut store,
+                            &instance,
+                            "fixed_linear4_residual",
+                            &residual_arguments,
+                            1,
+                        ),
+                        [0],
+                        "linear relation {relation}, limb {index}, case {case}, subtract={subtract_right}",
+                    );
+                }
+            }
+            for relation in 4..=9u32 {
+                let mut residual_arguments = arguments.clone();
+                residual_arguments.extend([relation, 0]);
+                assert_eq!(
+                    call(
+                        &mut store,
+                        &instance,
+                        "fixed_linear4_residual",
+                        &residual_arguments,
+                        1,
+                    ),
+                    [0],
+                    "linear scalar relation {relation}, case {case}, subtract={subtract_right}",
+                );
+            }
+            for relation in 10..=12u32 {
+                for index in 0..LIMBS as u32 {
+                    let mut residual_arguments = arguments.clone();
+                    residual_arguments.extend([relation, index]);
+                    assert_eq!(
+                        call(
+                            &mut store,
+                            &instance,
+                            "fixed_linear4_residual",
+                            &residual_arguments,
+                            1,
+                        ),
+                        [0],
+                        "linear bit relation {relation}, limb {index}, case {case}, subtract={subtract_right}",
+                    );
+                }
+            }
+            for mutation in 0..=12u32 {
+                let mut mutation_arguments = arguments.clone();
+                mutation_arguments.push(mutation);
+                assert_eq!(
+                    call(
+                        &mut store,
+                        &instance,
+                        "fixed_linear4_mutation_holds",
+                        &mutation_arguments,
+                        1,
+                    ),
+                    [(mutation == 0) as u32],
+                    "linear mutation {mutation}, case {case}, subtract={subtract_right}",
+                );
+            }
+            for mutation in [1u32, 2, 3, 4, 5, 6, 7, 8, 10, 11] {
+                let mut mutation_arguments = arguments.clone();
+                mutation_arguments.push(mutation);
+                let residual = call(
+                    &mut store,
+                    &instance,
+                    "fixed_linear4_mutated_residual",
+                    &mutation_arguments,
+                    1,
+                )[0];
+                assert_ne!(
+                    residual, 0,
+                    "mutated linear residual {mutation}, case {case}, subtract={subtract_right}",
+                );
+            }
         }
     }
 

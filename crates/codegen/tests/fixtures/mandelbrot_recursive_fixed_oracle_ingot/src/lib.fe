@@ -13,6 +13,7 @@ use mandelbrot_proof_recursive_baby_bear::{
     merge_recursive_committed_intervals,
 }
 use mandelbrot_proof_fixed_air::{
+    FixedLinearWitness,
     FixedProductWitness,
     boolean_residual,
     convolution_left_index,
@@ -20,7 +21,17 @@ use mandelbrot_proof_fixed_air::{
     convolution_right_index,
     convolution_term_count,
     derive_fixed_product_witness,
+    derive_fixed_difference_witness,
+    derive_fixed_sum_witness,
+    fixed_linear_witness_holds,
     fixed_product_witness_holds,
+    linear_addition_residual,
+    linear_comparison_residual,
+    linear_left_difference_residual,
+    linear_output_selection_residual,
+    linear_output_sign_residual,
+    linear_right_difference_residual,
+    linear_same_sign_residual,
     max_convolution_limbs_below,
     rounding_residual,
 }
@@ -40,6 +51,7 @@ use precision::fixed::Fixed
 type Accumulator4 = RecursiveOrbitAccumulator<4>
 type CommittedAccumulator4 = RecursiveCommittedInterval<4>
 type ProductWitness4 = FixedProductWitness<4>
+type LinearWitness4 = FixedLinearWitness<4>
 
 fn fixed4(_ negative: u32, _ limbs: [u32; 4]) -> Fixed<4> {
     Fixed { negative: negative == 1, limbs: limbs }
@@ -82,6 +94,234 @@ fn product4(
     let left = fixed4(left_negative, left)
     let right = fixed4(right_negative, right)
     (left, right, derive_fixed_product_witness(left, right))
+}
+
+fn linear4(
+    _ left_negative: u32,
+    _ left: [u32; 4],
+    _ right_negative: u32,
+    _ right: [u32; 4],
+    _ subtract_right: u32,
+) -> (Fixed<4>, Fixed<4>, LinearWitness4) {
+    let left = fixed4(left_negative, left)
+    let right = fixed4(right_negative, right)
+    let witness = if subtract_right == 1 {
+        derive_fixed_difference_witness(left, right)
+    } else {
+        derive_fixed_sum_witness(left, right)
+    }
+    (left, right, witness)
+}
+
+pub fn fixed_linear4_encoded(
+    _ left_negative: u32,
+    _ l0: u32,
+    _ l1: u32,
+    _ l2: u32,
+    _ l3: u32,
+    _ right_negative: u32,
+    _ r0: u32,
+    _ r1: u32,
+    _ r2: u32,
+    _ r3: u32,
+    _ subtract_right: u32,
+) -> BrowserBytes {
+    let (_left, _right, witness) = linear4(
+        left_negative,
+        [l0, l1, l2, l3],
+        right_negative,
+        [r0, r1, r2, r3],
+        subtract_right,
+    )
+    let writer = BrowserWordWriter::allocate(<LinearWitness4 as CanonicalWords>::WORDS)
+    encode_canonical_words(ref witness, writer).finish()
+}
+
+pub fn fixed_linear4_mutation_holds(
+    _ left_negative: u32,
+    _ l0: u32,
+    _ l1: u32,
+    _ l2: u32,
+    _ l3: u32,
+    _ right_negative: u32,
+    _ r0: u32,
+    _ r1: u32,
+    _ r2: u32,
+    _ r3: u32,
+    _ subtract_right: u32,
+    _ mutation: u32,
+) -> u32 {
+    let (mut left, right, mut witness) = linear4(
+        left_negative,
+        [l0, l1, l2, l3],
+        right_negative,
+        [r0, r1, r2, r3],
+        subtract_right,
+    )
+    if mutation == 1 { witness.sum_digits[0] = witness.sum_digits[0] + 1 }
+    if mutation == 2 { witness.sum_carries[0] = 1 - witness.sum_carries[0] }
+    if mutation == 3 {
+        witness.left_difference_digits[0] = witness.left_difference_digits[0] + 1
+    }
+    if mutation == 4 { witness.left_borrows[0] = 1 - witness.left_borrows[0] }
+    if mutation == 5 {
+        witness.right_difference_digits[0] = witness.right_difference_digits[0] + 1
+    }
+    if mutation == 6 { witness.right_borrows[0] = 1 - witness.right_borrows[0] }
+    if mutation == 7 { witness.same_sign = !witness.same_sign }
+    if mutation == 8 { witness.select_right = !witness.select_right }
+    if mutation == 9 { witness.output_nonzero = !witness.output_nonzero }
+    if mutation == 10 { witness.output.limbs[0] = witness.output.limbs[0] + 1 }
+    if mutation == 11 { witness.output.negative = !witness.output.negative }
+    if mutation == 12 { left.limbs[0] = 8192 }
+    if fixed_linear_witness_holds(
+        left,
+        right,
+        subtract_right == 1,
+        witness,
+    ) { 1 } else { 0 }
+}
+
+pub fn fixed_linear4_residual(
+    _ left_negative: u32,
+    _ l0: u32,
+    _ l1: u32,
+    _ l2: u32,
+    _ l3: u32,
+    _ right_negative: u32,
+    _ r0: u32,
+    _ r1: u32,
+    _ r2: u32,
+    _ r3: u32,
+    _ subtract_right: u32,
+    _ relation: u32,
+    _ index: u32,
+) -> u32 {
+    let (left, right, witness) = linear4(
+        left_negative,
+        [l0, l1, l2, l3],
+        right_negative,
+        [r0, r1, r2, r3],
+        subtract_right,
+    )
+    if relation == 0 {
+        return linear_addition_residual<BabyBear, 4>(left, right, witness, index).to_u32()
+    }
+    if relation == 1 {
+        return linear_left_difference_residual<BabyBear, 4>(left, right, witness, index).to_u32()
+    }
+    if relation == 2 {
+        return linear_right_difference_residual<BabyBear, 4>(left, right, witness, index).to_u32()
+    }
+    if relation == 3 {
+        return linear_output_selection_residual<BabyBear, 4>(witness, index).to_u32()
+    }
+    if relation == 4 {
+        return linear_same_sign_residual<BabyBear, 4>(
+            left,
+            right,
+            subtract_right == 1,
+            witness,
+        ).to_u32()
+    }
+    if relation == 5 {
+        return linear_comparison_residual<BabyBear, 4>(witness).to_u32()
+    }
+    if relation == 6 {
+        return linear_output_sign_residual<BabyBear, 4>(
+            left,
+            right,
+            subtract_right == 1,
+            witness,
+        ).to_u32()
+    }
+    if relation == 7 {
+        return boolean_residual<BabyBear>(if witness.same_sign { 1 } else { 0 }).to_u32()
+    }
+    if relation == 8 {
+        return boolean_residual<BabyBear>(if witness.select_right { 1 } else { 0 }).to_u32()
+    }
+    if relation == 9 {
+        return boolean_residual<BabyBear>(if witness.output_nonzero { 1 } else { 0 }).to_u32()
+    }
+    if relation == 10 {
+        return boolean_residual<BabyBear>(witness.sum_carries[index as usize]).to_u32()
+    }
+    if relation == 11 {
+        return boolean_residual<BabyBear>(witness.left_borrows[index as usize]).to_u32()
+    }
+    boolean_residual<BabyBear>(witness.right_borrows[index as usize]).to_u32()
+}
+
+pub fn fixed_linear4_mutated_residual(
+    _ left_negative: u32,
+    _ l0: u32,
+    _ l1: u32,
+    _ l2: u32,
+    _ l3: u32,
+    _ right_negative: u32,
+    _ r0: u32,
+    _ r1: u32,
+    _ r2: u32,
+    _ r3: u32,
+    _ subtract_right: u32,
+    _ mutation: u32,
+) -> u32 {
+    let (left, right, mut witness) = linear4(
+        left_negative,
+        [l0, l1, l2, l3],
+        right_negative,
+        [r0, r1, r2, r3],
+        subtract_right,
+    )
+    if mutation == 1 {
+        witness.sum_digits[0] = witness.sum_digits[0] + 1
+        return linear_addition_residual<BabyBear, 4>(left, right, witness, 0).to_u32()
+    }
+    if mutation == 2 {
+        witness.sum_carries[0] = 1 - witness.sum_carries[0]
+        return linear_addition_residual<BabyBear, 4>(left, right, witness, 0).to_u32()
+    }
+    if mutation == 3 {
+        witness.left_difference_digits[0] = witness.left_difference_digits[0] + 1
+        return linear_left_difference_residual<BabyBear, 4>(left, right, witness, 0).to_u32()
+    }
+    if mutation == 4 {
+        witness.left_borrows[0] = 1 - witness.left_borrows[0]
+        return linear_left_difference_residual<BabyBear, 4>(left, right, witness, 0).to_u32()
+    }
+    if mutation == 5 {
+        witness.right_difference_digits[0] = witness.right_difference_digits[0] + 1
+        return linear_right_difference_residual<BabyBear, 4>(left, right, witness, 0).to_u32()
+    }
+    if mutation == 6 {
+        witness.right_borrows[0] = 1 - witness.right_borrows[0]
+        return linear_right_difference_residual<BabyBear, 4>(left, right, witness, 0).to_u32()
+    }
+    if mutation == 7 {
+        witness.same_sign = !witness.same_sign
+        return linear_same_sign_residual<BabyBear, 4>(
+            left,
+            right,
+            subtract_right == 1,
+            witness,
+        ).to_u32()
+    }
+    if mutation == 8 {
+        witness.select_right = !witness.select_right
+        return linear_comparison_residual<BabyBear, 4>(witness).to_u32()
+    }
+    if mutation == 10 {
+        witness.output.limbs[0] = witness.output.limbs[0] + 1
+        return linear_output_selection_residual<BabyBear, 4>(witness, 0).to_u32()
+    }
+    witness.output.negative = !witness.output.negative
+    linear_output_sign_residual<BabyBear, 4>(
+        left,
+        right,
+        subtract_right == 1,
+        witness,
+    ).to_u32()
 }
 
 pub fn fixed_product4_encoded(

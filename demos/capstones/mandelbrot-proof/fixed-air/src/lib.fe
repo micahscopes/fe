@@ -100,6 +100,28 @@ pub struct FixedProductWitness<const L: usize> {
 impl<const L: usize> core::marker::Copy for FixedProductWitness<L> {}
 derive CanonicalWords for FixedProductWitness<L> using CanonicalWordsProvider
 
+/// Exact sign-magnitude addition witness. All three magnitude paths are
+/// retained: addition, `left - right`, and `right - left`. The final borrow of
+/// the first subtraction therefore derives the comparison selector instead of
+/// trusting a branch result supplied by the prover. `subtract_right` is a
+/// relation parameter, not a witness field, so this same carrier proves both
+/// addition and subtraction without making the requested operation mutable.
+pub struct FixedLinearWitness<const L: usize> {
+    pub valid: bool,
+    pub same_sign: bool,
+    pub select_right: bool,
+    pub output_nonzero: bool,
+    pub sum_digits: [u32; L],
+    pub sum_carries: [u32; L],
+    pub left_difference_digits: [u32; L],
+    pub left_borrows: [u32; L],
+    pub right_difference_digits: [u32; L],
+    pub right_borrows: [u32; L],
+    pub output: Fixed<L>,
+}
+impl<const L: usize> core::marker::Copy for FixedLinearWitness<L> {}
+derive CanonicalWords for FixedLinearWitness<L> using CanonicalWordsProvider
+
 fn empty_product_witness<const L: usize>() -> FixedProductWitness<L> {
     FixedProductWitness {
         valid: false,
@@ -120,6 +142,215 @@ fn words_are_zero<const L: usize>(_ words: [u32; L]) -> bool {
         index = index + 1
     }
     true
+}
+
+fn empty_linear_witness<const L: usize>() -> FixedLinearWitness<L> {
+    FixedLinearWitness {
+        valid: false,
+        same_sign: false,
+        select_right: false,
+        output_nonzero: false,
+        sum_digits: [0; L],
+        sum_carries: [0; L],
+        left_difference_digits: [0; L],
+        left_borrows: [0; L],
+        right_difference_digits: [0; L],
+        right_borrows: [0; L],
+        output: Fixed::zero(),
+    }
+}
+
+fn derive_fixed_linear_witness<const L: usize>(
+    _ left: Fixed<L>,
+    _ right: Fixed<L>,
+    _ subtract_right: bool,
+) -> FixedLinearWitness<L> {
+    if !left.is_canonical() || !right.is_canonical() {
+        return empty_linear_witness<L>()
+    }
+    let effective_right_negative = if subtract_right {
+        !right.negative
+    } else {
+        right.negative
+    }
+    let same_sign = left.negative == effective_right_negative
+    let mut sum_digits = [0; L]
+    let mut sum_carries = [0; L]
+    let mut left_difference_digits = [0; L]
+    let mut left_borrows = [0; L]
+    let mut right_difference_digits = [0; L]
+    let mut right_borrows = [0; L]
+    let mut sum_carry: u32 = 0
+    let mut left_borrow: u32 = 0
+    let mut right_borrow: u32 = 0
+    let mut index: usize = 0
+    while index < L {
+        let sum = left.limbs[index] + right.limbs[index] + sum_carry
+        sum_digits[index] = sum & FIXED_LIMB_MASK
+        sum_carry = sum >> FIXED_LIMB_BITS
+        sum_carries[index] = sum_carry
+
+        let right_subtrahend = right.limbs[index] + left_borrow
+        if left.limbs[index] >= right_subtrahend {
+            left_difference_digits[index] = left.limbs[index] - right_subtrahend
+            left_borrow = 0
+        } else {
+            left_difference_digits[index] = left.limbs[index] + LIMB_BASE - right_subtrahend
+            left_borrow = 1
+        }
+        left_borrows[index] = left_borrow
+
+        let left_subtrahend = left.limbs[index] + right_borrow
+        if right.limbs[index] >= left_subtrahend {
+            right_difference_digits[index] = right.limbs[index] - left_subtrahend
+            right_borrow = 0
+        } else {
+            right_difference_digits[index] = right.limbs[index] + LIMB_BASE - left_subtrahend
+            right_borrow = 1
+        }
+        right_borrows[index] = right_borrow
+        index = index + 1
+    }
+
+    let select_right = left_borrow == 1
+    let output_limbs = if same_sign {
+        sum_digits
+    } else {
+        if select_right { right_difference_digits } else { left_difference_digits }
+    }
+    let output_nonzero = !words_are_zero(output_limbs)
+    let selected_negative = if same_sign {
+        left.negative
+    } else {
+        if select_right { effective_right_negative } else { left.negative }
+    }
+    FixedLinearWitness {
+        valid: true,
+        same_sign: same_sign,
+        select_right: select_right,
+        output_nonzero: output_nonzero,
+        sum_digits: sum_digits,
+        sum_carries: sum_carries,
+        left_difference_digits: left_difference_digits,
+        left_borrows: left_borrows,
+        right_difference_digits: right_difference_digits,
+        right_borrows: right_borrows,
+        output: Fixed {
+            negative: selected_negative && output_nonzero,
+            limbs: output_limbs,
+        },
+    }
+}
+
+pub fn derive_fixed_sum_witness<const L: usize>(
+    _ left: Fixed<L>,
+    _ right: Fixed<L>,
+) -> FixedLinearWitness<L> {
+    derive_fixed_linear_witness(left, right, false)
+}
+
+pub fn derive_fixed_difference_witness<const L: usize>(
+    _ left: Fixed<L>,
+    _ right: Fixed<L>,
+) -> FixedLinearWitness<L> {
+    derive_fixed_linear_witness(left, right, true)
+}
+
+/// Exact integer verifier for signed add/sub. It checks the addition ripple,
+/// both subtraction ripples, borrow-derived comparison, operation selection,
+/// and unique sign-zero output without calling the witness generator.
+pub fn fixed_linear_witness_holds<const L: usize>(
+    _ left: Fixed<L>,
+    _ right: Fixed<L>,
+    _ subtract_right: bool,
+    _ witness: FixedLinearWitness<L>,
+) -> bool {
+    if !witness.valid
+        || !left.is_canonical()
+        || !right.is_canonical()
+        || !witness.output.is_canonical()
+    {
+        return false
+    }
+    let effective_right_negative = if subtract_right {
+        !right.negative
+    } else {
+        right.negative
+    }
+    if witness.same_sign != (left.negative == effective_right_negative) {
+        return false
+    }
+    let mut sum_carry: u32 = 0
+    let mut left_borrow: u32 = 0
+    let mut right_borrow: u32 = 0
+    let mut index: usize = 0
+    while index < L {
+        let sum_digit = witness.sum_digits[index]
+        let sum_carry_out = witness.sum_carries[index]
+        let left_digit = witness.left_difference_digits[index]
+        let left_borrow_out = witness.left_borrows[index]
+        let right_digit = witness.right_difference_digits[index]
+        let right_borrow_out = witness.right_borrows[index]
+        if sum_digit >= LIMB_BASE
+            || left_digit >= LIMB_BASE
+            || right_digit >= LIMB_BASE
+            || sum_carry_out > 1
+            || left_borrow_out > 1
+            || right_borrow_out > 1
+        {
+            return false
+        }
+        if left.limbs[index] + right.limbs[index] + sum_carry
+            != sum_digit + LIMB_BASE * sum_carry_out
+        {
+            return false
+        }
+        if left.limbs[index] + LIMB_BASE * left_borrow_out
+            != right.limbs[index] + left_borrow + left_digit
+        {
+            return false
+        }
+        if right.limbs[index] + LIMB_BASE * right_borrow_out
+            != left.limbs[index] + right_borrow + right_digit
+        {
+            return false
+        }
+        sum_carry = sum_carry_out
+        left_borrow = left_borrow_out
+        right_borrow = right_borrow_out
+        index = index + 1
+    }
+    if witness.select_right != (left_borrow == 1) { return false }
+    if witness.select_right {
+        if right_borrow != 0 { return false }
+    } else {
+        if left_borrow != 0 { return false }
+    }
+
+    let expected_limbs = if witness.same_sign {
+        witness.sum_digits
+    } else {
+        if witness.select_right {
+            witness.right_difference_digits
+        } else {
+            witness.left_difference_digits
+        }
+    }
+    let mut output_index: usize = 0
+    while output_index < L {
+        if witness.output.limbs[output_index] != expected_limbs[output_index] {
+            return false
+        }
+        output_index = output_index + 1
+    }
+    let output_nonzero = !words_are_zero(expected_limbs)
+    if witness.output_nonzero != output_nonzero { return false }
+    let selected_negative = if witness.same_sign {
+        left.negative
+    } else {
+        if witness.select_right { effective_right_negative } else { left.negative }
+    }
+    witness.output.negative == (selected_negative && output_nonzero)
 }
 
 fn inputs_are_u32_safe<const L: usize>(_ left: Fixed<L>, _ right: Fixed<L>) -> bool {
@@ -273,6 +504,174 @@ fn field_natural<F: Radix2Field>(_ value: u32) -> F {
         value = value >> 1
     }
     result
+}
+
+fn field_boolean<F: Radix2Field>(_ value: bool) -> F {
+    field_natural<F>(if value { 1 } else { 0 })
+}
+
+pub fn linear_addition_residual<F: Radix2Field, const L: usize>(
+    _ left: Fixed<L>,
+    _ right: Fixed<L>,
+    _ witness: FixedLinearWitness<L>,
+    _ index: u32,
+) -> F {
+    let limbs: u32 = L.downcast_truncate()
+    if index >= limbs { return F::radix2_zero() }
+    let carry_in = if index == 0 {
+        0
+    } else {
+        witness.sum_carries[(index - 1) as usize]
+    }
+    field_natural<F>(left.limbs[index as usize])
+        .radix2_add(field_natural<F>(right.limbs[index as usize]))
+        .radix2_add(field_natural<F>(carry_in))
+        .radix2_sub(field_natural<F>(witness.sum_digits[index as usize]))
+        .radix2_sub(
+            field_natural<F>(LIMB_BASE).radix2_mul(
+                field_natural<F>(witness.sum_carries[index as usize]),
+            ),
+        )
+}
+
+pub fn linear_left_difference_residual<
+    F: Radix2Field,
+    const L: usize,
+>(
+    _ left: Fixed<L>,
+    _ right: Fixed<L>,
+    _ witness: FixedLinearWitness<L>,
+    _ index: u32,
+) -> F {
+    let limbs: u32 = L.downcast_truncate()
+    if index >= limbs { return F::radix2_zero() }
+    let borrow_in = if index == 0 {
+        0
+    } else {
+        witness.left_borrows[(index - 1) as usize]
+    }
+    field_natural<F>(left.limbs[index as usize])
+        .radix2_add(
+            field_natural<F>(LIMB_BASE).radix2_mul(
+                field_natural<F>(witness.left_borrows[index as usize]),
+            ),
+        )
+        .radix2_sub(field_natural<F>(right.limbs[index as usize]))
+        .radix2_sub(field_natural<F>(borrow_in))
+        .radix2_sub(
+            field_natural<F>(witness.left_difference_digits[index as usize]),
+        )
+}
+
+pub fn linear_right_difference_residual<
+    F: Radix2Field,
+    const L: usize,
+>(
+    _ left: Fixed<L>,
+    _ right: Fixed<L>,
+    _ witness: FixedLinearWitness<L>,
+    _ index: u32,
+) -> F {
+    let limbs: u32 = L.downcast_truncate()
+    if index >= limbs { return F::radix2_zero() }
+    let borrow_in = if index == 0 {
+        0
+    } else {
+        witness.right_borrows[(index - 1) as usize]
+    }
+    field_natural<F>(right.limbs[index as usize])
+        .radix2_add(
+            field_natural<F>(LIMB_BASE).radix2_mul(
+                field_natural<F>(witness.right_borrows[index as usize]),
+            ),
+        )
+        .radix2_sub(field_natural<F>(left.limbs[index as usize]))
+        .radix2_sub(field_natural<F>(borrow_in))
+        .radix2_sub(
+            field_natural<F>(witness.right_difference_digits[index as usize]),
+        )
+}
+
+pub fn linear_output_selection_residual<
+    F: Radix2Field,
+    const L: usize,
+>(
+    _ witness: FixedLinearWitness<L>,
+    _ index: u32,
+) -> F {
+    let limbs: u32 = L.downcast_truncate()
+    if index >= limbs { return F::radix2_zero() }
+    let same = field_boolean<F>(witness.same_sign)
+    let opposite = field_natural<F>(1).radix2_sub(same)
+    let select = field_boolean<F>(witness.select_right)
+    let select_left = field_natural<F>(1).radix2_sub(select)
+    let difference = select_left.radix2_mul(
+        field_natural<F>(witness.left_difference_digits[index as usize]),
+    ).radix2_add(
+        select.radix2_mul(
+            field_natural<F>(witness.right_difference_digits[index as usize]),
+        ),
+    )
+    let selected = same.radix2_mul(
+        field_natural<F>(witness.sum_digits[index as usize]),
+    ).radix2_add(opposite.radix2_mul(difference))
+    field_natural<F>(witness.output.limbs[index as usize]).radix2_sub(selected)
+}
+
+pub fn linear_same_sign_residual<F: Radix2Field, const L: usize>(
+    _ left: Fixed<L>,
+    _ right: Fixed<L>,
+    _ subtract_right: bool,
+    _ witness: FixedLinearWitness<L>,
+) -> F {
+    let left_sign = field_boolean<F>(left.negative)
+    let right_sign = field_boolean<F>(right.negative)
+    let subtract = field_boolean<F>(subtract_right)
+    let two = field_natural<F>(2)
+    let effective_right = right_sign.radix2_add(subtract).radix2_sub(
+        two.radix2_mul(right_sign.radix2_mul(subtract)),
+    )
+    let different = left_sign.radix2_add(effective_right).radix2_sub(
+        two.radix2_mul(left_sign.radix2_mul(effective_right)),
+    )
+    field_boolean<F>(witness.same_sign).radix2_sub(
+        field_natural<F>(1).radix2_sub(different),
+    )
+}
+
+pub fn linear_comparison_residual<F: Radix2Field, const L: usize>(
+    _ witness: FixedLinearWitness<L>,
+) -> F {
+    field_boolean<F>(witness.select_right).radix2_sub(
+        field_natural<F>(witness.left_borrows[L - 1]),
+    )
+}
+
+pub fn linear_output_sign_residual<F: Radix2Field, const L: usize>(
+    _ left: Fixed<L>,
+    _ right: Fixed<L>,
+    _ subtract_right: bool,
+    _ witness: FixedLinearWitness<L>,
+) -> F {
+    let one = field_natural<F>(1)
+    let two = field_natural<F>(2)
+    let left_sign = field_boolean<F>(left.negative)
+    let right_sign = field_boolean<F>(right.negative)
+    let subtract = field_boolean<F>(subtract_right)
+    let effective_right = right_sign.radix2_add(subtract).radix2_sub(
+        two.radix2_mul(right_sign.radix2_mul(subtract)),
+    )
+    let same = field_boolean<F>(witness.same_sign)
+    let opposite = one.radix2_sub(same)
+    let select = field_boolean<F>(witness.select_right)
+    let selected_difference_sign = one.radix2_sub(select).radix2_mul(left_sign)
+        .radix2_add(select.radix2_mul(effective_right))
+    let selected_sign = same.radix2_mul(left_sign).radix2_add(
+        opposite.radix2_mul(selected_difference_sign),
+    )
+    field_boolean<F>(witness.output.negative).radix2_sub(
+        selected_sign.radix2_mul(field_boolean<F>(witness.output_nonzero)),
+    )
 }
 
 /// One coefficient carry equation interpreted in any proof field:
