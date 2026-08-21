@@ -1000,6 +1000,18 @@ Legend:
   alone to reject a locally valid input/output substitution. Focused nextest
   passes 1/1 in 49.26 seconds. Only final transition boundary equality and a
   combined sparse-versus-wide directed mutation gate remain in this AIR slice.
+  Commit `d70304511` closes the final transition boundary. Two sign rows and
+  `2*L` limb rows equate the computed `next_real` and `next_imaginary` outputs
+  with the claimed next boundary, and a finish row constrains transition
+  validity plus zeroed unused lanes. A typed copy bus binds both sides to their
+  range rows, so repeating an equal but unrelated pair cannot satisfy the
+  relation. The independent model matches all 11 L4 rows. Fe Wasm checks 61
+  local and copy-balance relations under three challenges, rejects every lane
+  mutation, and uses the copy bus alone to reject a coordinated equal-pair
+  substitution. The complete focused gate now passes 1/1 in 67.39 seconds.
+  Every wide relation family now has an executable narrow sparse projection.
+  The remaining equivalence gate must apply one shared directed mutation set
+  to both interpretations before this AIR slice is attached to Merkle and FRI.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
   The first arithmetic-plan consolidation is landed at `ba2ded864`: one
