@@ -1,0 +1,9 @@
+[ingot]
+name = "mandelbrot_proof_fixed_air_core"
+version = "0.1.0"
+
+[dependencies]
+core = "../../../../ingots/core"
+mandelbrot_proof_fixed_air = "../fixed-air"
+mandelbrot_proof_recursive = "../recursive"
+precision = "../../../sketches/precision"

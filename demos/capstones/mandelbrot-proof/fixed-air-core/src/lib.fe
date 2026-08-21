@@ -1,0 +1,771 @@
+//! Pure field interpretation of the high-precision Mandelbrot recurrence DAG.
+//!
+//! The scalar witness generator and authenticated opening views both target
+//! these typed records. Constraint code therefore contains no flat column IDs
+//! and no host integer operations.
+
+use mandelbrot_proof_fixed_air::{
+    BoundedU18Witness,
+    FixedLinearWitness,
+    FixedMandelbrotTransitionWitness,
+    FixedProductCarryRangeWitness,
+    FixedProductWitness,
+    RadixRangeWitness,
+    convolution_is_safe_below,
+    convolution_left_index,
+    convolution_right_index,
+    convolution_term_count,
+    derive_fixed_product_carry_range_witness,
+    derive_radix_range_witness,
+    product_carry_bound,
+}
+use mandelbrot_proof_recursive::ComplexFixed
+use precision::fixed::Fixed
+use precision::polynomial::Radix2Field
+
+pub struct AirRadixLimbRange<F: Radix2Field> {
+    pub bits: [F; 13],
+    pub nonzero_prefix: [F; 13],
+}
+impl<F: Radix2Field> core::marker::Copy for AirRadixLimbRange<F> {}
+
+pub struct AirRadixRange<F: Radix2Field, const L: usize> {
+    pub limbs: [AirRadixLimbRange<F>; L],
+    pub nonzero: F,
+}
+impl<F: Radix2Field, const L: usize> core::marker::Copy for AirRadixRange<F, L> {}
+
+pub struct AirRangedDigits<F: Radix2Field, const L: usize> {
+    pub digits: [F; L],
+    pub range: AirRadixRange<F, L>,
+}
+impl<F: Radix2Field, const L: usize> core::marker::Copy for AirRangedDigits<F, L> {}
+
+pub struct AirRangedFixed<F: Radix2Field, const L: usize> {
+    pub negative: F,
+    pub magnitude: AirRangedDigits<F, L>,
+}
+impl<F: Radix2Field, const L: usize> core::marker::Copy for AirRangedFixed<F, L> {}
+
+pub struct AirBoundedU18<F: Radix2Field> {
+    pub bits: [F; 18],
+    pub slack_bits: [F; 18],
+}
+impl<F: Radix2Field> core::marker::Copy for AirBoundedU18<F> {}
+
+pub struct AirProductCarryRange<F: Radix2Field, const L: usize> {
+    pub low: [AirBoundedU18<F>; L],
+    pub high: [AirBoundedU18<F>; L],
+}
+impl<F: Radix2Field, const L: usize> core::marker::Copy
+    for AirProductCarryRange<F, L> {}
+
+pub struct AirProduct<F: Radix2Field, const L: usize> {
+    pub valid: F,
+    pub low: AirRangedDigits<F, L>,
+    pub low_carries: [F; L],
+    pub high: AirRangedDigits<F, L>,
+    pub high_carries: [F; L],
+    pub round_up: F,
+    pub round_carries: [F; L],
+    pub round_overflow: F,
+    pub output: AirRangedFixed<F, L>,
+    pub carry_range: AirProductCarryRange<F, L>,
+}
+impl<F: Radix2Field, const L: usize> core::marker::Copy for AirProduct<F, L> {}
+
+pub struct AirLinear<F: Radix2Field, const L: usize> {
+    pub valid: F,
+    pub same_sign: F,
+    pub select_right: F,
+    pub output_nonzero: F,
+    pub sum: AirRangedDigits<F, L>,
+    pub sum_carries: [F; L],
+    pub left_difference: AirRangedDigits<F, L>,
+    pub left_borrows: [F; L],
+    pub right_difference: AirRangedDigits<F, L>,
+    pub right_borrows: [F; L],
+    pub output: AirRangedFixed<F, L>,
+}
+impl<F: Radix2Field, const L: usize> core::marker::Copy for AirLinear<F, L> {}
+
+pub struct AirComplex<F: Radix2Field, const L: usize> {
+    pub real: AirRangedFixed<F, L>,
+    pub imaginary: AirRangedFixed<F, L>,
+}
+impl<F: Radix2Field, const L: usize> core::marker::Copy for AirComplex<F, L> {}
+
+pub struct AirMandelbrotTransition<F: Radix2Field, const L: usize> {
+    pub valid: F,
+    pub point: AirComplex<F, L>,
+    pub current: AirComplex<F, L>,
+    pub next: AirComplex<F, L>,
+    pub xx: AirProduct<F, L>,
+    pub yy: AirProduct<F, L>,
+    pub xy: AirProduct<F, L>,
+    pub real_difference: AirLinear<F, L>,
+    pub next_real: AirLinear<F, L>,
+    pub double_xy: AirLinear<F, L>,
+    pub next_imaginary: AirLinear<F, L>,
+}
+impl<F: Radix2Field, const L: usize> core::marker::Copy
+    for AirMandelbrotTransition<F, L> {}
+
+pub struct FixedAirConstraintEvaluation<F: Radix2Field> {
+    pub valid: bool,
+    pub constraints: u32,
+    pub folded: F,
+}
+impl<F: Radix2Field> core::marker::Copy for FixedAirConstraintEvaluation<F> {}
+
+fn zero<F: Radix2Field>() -> F { F::radix2_zero() }
+fn one<F: Radix2Field>() -> F { F::radix2_root(0) }
+fn add<F: Radix2Field>(_ left: F, _ right: F) -> F { left.radix2_add(right) }
+fn sub<F: Radix2Field>(_ left: F, _ right: F) -> F { left.radix2_sub(right) }
+fn mul<F: Radix2Field>(_ left: F, _ right: F) -> F { left.radix2_mul(right) }
+
+fn natural<F: Radix2Field>(_ value: u32) -> F {
+    let mut value = value
+    let mut result = zero<F>()
+    let mut place = one<F>()
+    while value != 0 {
+        if (value & 1) == 1 { result = add(result, place) }
+        place = add(place, place)
+        value = value >> 1
+    }
+    result
+}
+
+fn boolean<F: Radix2Field>(_ value: bool) -> F {
+    natural<F>(if value { 1 } else { 0 })
+}
+
+fn field_words<F: Radix2Field, const N: usize>(_ words: [u32; N]) -> [F; N] {
+    let mut output = [zero<F>(); N]
+    let mut index: usize = 0
+    while index < N {
+        output[index] = natural<F>(words[index])
+        index = index + 1
+    }
+    output
+}
+
+fn air_radix_range<F: Radix2Field, const L: usize>(
+    _ witness: RadixRangeWitness<L>,
+) -> AirRadixRange<F, L> {
+    let empty = AirRadixLimbRange {
+        bits: [zero<F>(); 13],
+        nonzero_prefix: [zero<F>(); 13],
+    }
+    let mut limbs = [empty; L]
+    let mut index: usize = 0
+    while index < L {
+        limbs[index] = AirRadixLimbRange {
+            bits: field_words<F, 13>(witness.limbs[index].bits),
+            nonzero_prefix: field_words<F, 13>(witness.limbs[index].nonzero_prefix),
+        }
+        index = index + 1
+    }
+    AirRadixRange { limbs: limbs, nonzero: boolean<F>(witness.nonzero) }
+}
+
+fn air_ranged_digits<F: Radix2Field, const L: usize>(
+    _ digits: [u32; L],
+) -> AirRangedDigits<F, L> {
+    AirRangedDigits {
+        digits: field_words<F, L>(digits),
+        range: air_radix_range<F, L>(derive_radix_range_witness(digits)),
+    }
+}
+
+fn air_ranged_fixed<F: Radix2Field, const L: usize>(
+    _ value: Fixed<L>,
+) -> AirRangedFixed<F, L> {
+    AirRangedFixed {
+        negative: boolean<F>(value.negative),
+        magnitude: air_ranged_digits<F, L>(value.limbs),
+    }
+}
+
+fn air_bounded_u18<F: Radix2Field>(
+    _ witness: BoundedU18Witness,
+) -> AirBoundedU18<F> {
+    AirBoundedU18 {
+        bits: field_words<F, 18>(witness.bits),
+        slack_bits: field_words<F, 18>(witness.slack_bits),
+    }
+}
+
+fn air_carry_range<F: Radix2Field, const L: usize>(
+    _ witness: FixedProductCarryRangeWitness<L>,
+) -> AirProductCarryRange<F, L> {
+    let empty = AirBoundedU18 {
+        bits: [zero<F>(); 18],
+        slack_bits: [zero<F>(); 18],
+    }
+    let mut low = [empty; L]
+    let mut high = [empty; L]
+    let mut index: usize = 0
+    while index < L {
+        low[index] = air_bounded_u18<F>(witness.low[index])
+        high[index] = air_bounded_u18<F>(witness.high[index])
+        index = index + 1
+    }
+    AirProductCarryRange { low: low, high: high }
+}
+
+fn air_product<F: Radix2Field, const L: usize>(
+    _ witness: FixedProductWitness<L>,
+) -> AirProduct<F, L> {
+    AirProduct {
+        valid: boolean<F>(witness.valid),
+        low: air_ranged_digits<F, L>(witness.low_digits),
+        low_carries: field_words<F, L>(witness.low_carries),
+        high: air_ranged_digits<F, L>(witness.high_digits),
+        high_carries: field_words<F, L>(witness.high_carries),
+        round_up: boolean<F>(witness.round_up),
+        round_carries: field_words<F, L>(witness.round_carries),
+        round_overflow: boolean<F>(witness.round_overflow),
+        output: air_ranged_fixed<F, L>(witness.output),
+        carry_range: air_carry_range<F, L>(
+            derive_fixed_product_carry_range_witness(witness),
+        ),
+    }
+}
+
+fn air_linear<F: Radix2Field, const L: usize>(
+    _ witness: FixedLinearWitness<L>,
+) -> AirLinear<F, L> {
+    AirLinear {
+        valid: boolean<F>(witness.valid),
+        same_sign: boolean<F>(witness.same_sign),
+        select_right: boolean<F>(witness.select_right),
+        output_nonzero: boolean<F>(witness.output_nonzero),
+        sum: air_ranged_digits<F, L>(witness.sum_digits),
+        sum_carries: field_words<F, L>(witness.sum_carries),
+        left_difference: air_ranged_digits<F, L>(witness.left_difference_digits),
+        left_borrows: field_words<F, L>(witness.left_borrows),
+        right_difference: air_ranged_digits<F, L>(witness.right_difference_digits),
+        right_borrows: field_words<F, L>(witness.right_borrows),
+        output: air_ranged_fixed<F, L>(witness.output),
+    }
+}
+
+fn air_complex<F: Radix2Field, const L: usize>(
+    _ value: ComplexFixed<L>,
+) -> AirComplex<F, L> {
+    AirComplex {
+        real: air_ranged_fixed<F, L>(value.real),
+        imaginary: air_ranged_fixed<F, L>(value.imaginary),
+    }
+}
+
+pub fn transition_air_from_witness<F: Radix2Field, const L: usize>(
+    _ point: ComplexFixed<L>,
+    _ current: ComplexFixed<L>,
+    _ next: ComplexFixed<L>,
+    _ witness: FixedMandelbrotTransitionWitness<L>,
+) -> AirMandelbrotTransition<F, L> {
+    AirMandelbrotTransition {
+        valid: boolean<F>(witness.valid),
+        point: air_complex<F, L>(point),
+        current: air_complex<F, L>(current),
+        next: air_complex<F, L>(next),
+        xx: air_product<F, L>(witness.xx),
+        yy: air_product<F, L>(witness.yy),
+        xy: air_product<F, L>(witness.xy),
+        real_difference: air_linear<F, L>(witness.real_difference),
+        next_real: air_linear<F, L>(witness.next_real),
+        double_xy: air_linear<F, L>(witness.double_xy),
+        next_imaginary: air_linear<F, L>(witness.next_imaginary),
+    }
+}
+
+struct ConstraintFold<F: Radix2Field> {
+    challenge: F,
+    power: F,
+    value: F,
+    constraints: u32,
+}
+impl<F: Radix2Field> core::marker::Copy for ConstraintFold<F> {}
+
+impl<F: Radix2Field> ConstraintFold<F> {
+    fn new(_ challenge: F) -> Self {
+        Self {
+            challenge: challenge,
+            power: one<F>(),
+            value: zero<F>(),
+            constraints: 0,
+        }
+    }
+
+    fn absorb(mut self, _ residual: F) -> Self {
+        self.value = add(self.value, mul(self.power, residual))
+        self.power = mul(self.power, self.challenge)
+        self.constraints = self.constraints + 1
+        self
+    }
+}
+
+fn bit_residual<F: Radix2Field>(_ value: F) -> F {
+    mul(value, sub(value, one<F>()))
+}
+
+fn absorb_radix_range<F: Radix2Field, const L: usize>(
+    _ fold: own ConstraintFold<F>,
+    _ value: AirRangedDigits<F, L>,
+) -> ConstraintFold<F> {
+    let mut fold = fold
+    let mut previous = zero<F>()
+    let mut limb_index: usize = 0
+    while limb_index < L {
+        let mut reconstructed = zero<F>()
+        let mut place = one<F>()
+        let mut bit_index: usize = 0
+        while bit_index < 13 {
+            let bit = value.range.limbs[limb_index].bits[bit_index]
+            let prefix = value.range.limbs[limb_index].nonzero_prefix[bit_index]
+            fold = fold.absorb(bit_residual(bit))
+            fold = fold.absorb(bit_residual(prefix))
+            fold = fold.absorb(sub(prefix, sub(add(previous, bit), mul(previous, bit))))
+            reconstructed = add(reconstructed, mul(bit, place))
+            place = add(place, place)
+            previous = prefix
+            bit_index = bit_index + 1
+        }
+        fold = fold.absorb(sub(value.digits[limb_index], reconstructed))
+        limb_index = limb_index + 1
+    }
+    fold = fold.absorb(bit_residual(value.range.nonzero))
+    fold.absorb(sub(value.range.nonzero, previous))
+}
+
+fn absorb_ranged_fixed<F: Radix2Field, const L: usize>(
+    _ fold: own ConstraintFold<F>,
+    _ value: AirRangedFixed<F, L>,
+) -> ConstraintFold<F> {
+    let mut fold = fold.absorb(bit_residual(value.negative))
+    fold = absorb_radix_range<F, L>(fold, value.magnitude)
+    fold.absorb(mul(value.negative, sub(one<F>(), value.magnitude.range.nonzero)))
+}
+
+fn bits18<F: Radix2Field>(_ bits: [F; 18]) -> F {
+    let mut value = zero<F>()
+    let mut place = one<F>()
+    let mut index: usize = 0
+    while index < 18 {
+        value = add(value, mul(bits[index], place))
+        place = add(place, place)
+        index = index + 1
+    }
+    value
+}
+
+fn absorb_bounded_u18<F: Radix2Field>(
+    _ fold: own ConstraintFold<F>,
+    _ value: F,
+    _ bound: F,
+    _ witness: AirBoundedU18<F>,
+) -> ConstraintFold<F> {
+    let mut fold = fold
+    let mut index: usize = 0
+    while index < 18 {
+        fold = fold.absorb(bit_residual(witness.bits[index]))
+        fold = fold.absorb(bit_residual(witness.slack_bits[index]))
+        index = index + 1
+    }
+    let reconstructed = bits18(witness.bits)
+    let slack = bits18(witness.slack_bits)
+    fold = fold.absorb(sub(value, reconstructed))
+    fold.absorb(sub(add(reconstructed, slack), bound))
+}
+
+fn product_digit<F: Radix2Field, const L: usize>(
+    _ product: AirProduct<F, L>,
+    _ coefficient: u32,
+) -> F {
+    let limbs: u32 = L.downcast_truncate()
+    if coefficient < limbs {
+        product.low.digits[coefficient as usize]
+    } else {
+        product.high.digits[(coefficient - limbs) as usize]
+    }
+}
+
+fn product_carry<F: Radix2Field, const L: usize>(
+    _ product: AirProduct<F, L>,
+    _ coefficient: u32,
+) -> F {
+    let limbs: u32 = L.downcast_truncate()
+    if coefficient < limbs {
+        product.low_carries[coefficient as usize]
+    } else {
+        product.high_carries[(coefficient - limbs) as usize]
+    }
+}
+
+fn product_carry_range<F: Radix2Field, const L: usize>(
+    _ product: AirProduct<F, L>,
+    _ coefficient: u32,
+) -> AirBoundedU18<F> {
+    let limbs: u32 = L.downcast_truncate()
+    if coefficient < limbs {
+        product.carry_range.low[coefficient as usize]
+    } else {
+        product.carry_range.high[(coefficient - limbs) as usize]
+    }
+}
+
+fn retained_product_digit<F: Radix2Field, const L: usize>(
+    _ product: AirProduct<F, L>,
+    _ output_index: u32,
+) -> F {
+    if output_index == 0 {
+        product.low.digits[L - 1]
+    } else {
+        product.high.digits[(output_index - 1) as usize]
+    }
+}
+
+fn absorb_product<F: Radix2Field, const L: usize>(
+    _ fold: own ConstraintFold<F>,
+    _ left: AirRangedFixed<F, L>,
+    _ right: AirRangedFixed<F, L>,
+    _ product: AirProduct<F, L>,
+) -> ConstraintFold<F> {
+    let mut fold = fold.absorb(sub(product.valid, one<F>()))
+    fold = absorb_radix_range<F, L>(fold, product.low)
+    fold = absorb_radix_range<F, L>(fold, product.high)
+    fold = absorb_ranged_fixed<F, L>(fold, product.output)
+    let limbs: u32 = L.downcast_truncate()
+    let carry_bound = natural<F>(product_carry_bound<L>())
+    let radix = natural<F>(8192)
+    let mut coefficient: u32 = 0
+    while coefficient < limbs + limbs {
+        let carry_in = if coefficient == 0 {
+            zero<F>()
+        } else {
+            product_carry(product, coefficient - 1)
+        }
+        let carry_out = product_carry(product, coefficient)
+        fold = absorb_bounded_u18(
+            fold,
+            carry_out,
+            carry_bound,
+            product_carry_range(product, coefficient),
+        )
+        let count = convolution_term_count<L>(coefficient)
+        let mut sum = carry_in
+        let mut term: u32 = 0
+        while term < count {
+            let left_index = convolution_left_index<L>(coefficient, term)
+            let right_index = convolution_right_index<L>(coefficient, term)
+            sum = add(sum, mul(
+                left.magnitude.digits[left_index as usize],
+                right.magnitude.digits[right_index as usize],
+            ))
+            term = term + 1
+        }
+        fold = fold.absorb(sub(
+            sub(sum, product_digit(product, coefficient)),
+            mul(radix, carry_out),
+        ))
+        coefficient = coefficient + 1
+    }
+
+    fold = fold.absorb(bit_residual(product.round_up))
+    fold = fold.absorb(sub(product.round_up, product.low.range.limbs[L - 2].bits[12]))
+    let mut output_index: u32 = 0
+    while output_index < limbs {
+        let carry_in = if output_index == 0 {
+            product.round_up
+        } else {
+            product.round_carries[(output_index - 1) as usize]
+        }
+        let carry_out = product.round_carries[output_index as usize]
+        fold = fold.absorb(bit_residual(carry_out))
+        fold = fold.absorb(sub(
+            sub(
+                add(retained_product_digit(product, output_index), carry_in),
+                product.output.magnitude.digits[output_index as usize],
+            ),
+            mul(radix, carry_out),
+        ))
+        output_index = output_index + 1
+    }
+    fold = fold.absorb(bit_residual(product.round_overflow))
+    fold = fold.absorb(sub(product.round_overflow, product.round_carries[L - 1]))
+    let sign_xor = sub(
+        add(left.negative, right.negative),
+        mul(natural<F>(2), mul(left.negative, right.negative)),
+    )
+    fold.absorb(sub(
+        product.output.negative,
+        mul(sign_xor, product.output.magnitude.range.nonzero),
+    ))
+}
+
+fn absorb_linear<F: Radix2Field, const L: usize>(
+    _ fold: own ConstraintFold<F>,
+    _ left: AirRangedFixed<F, L>,
+    _ right: AirRangedFixed<F, L>,
+    _ subtract_right: bool,
+    _ linear: AirLinear<F, L>,
+) -> ConstraintFold<F> {
+    let mut fold = fold.absorb(sub(linear.valid, one<F>()))
+    fold = fold.absorb(bit_residual(linear.same_sign))
+    fold = fold.absorb(bit_residual(linear.select_right))
+    fold = fold.absorb(bit_residual(linear.output_nonzero))
+    fold = absorb_radix_range<F, L>(fold, linear.sum)
+    fold = absorb_radix_range<F, L>(fold, linear.left_difference)
+    fold = absorb_radix_range<F, L>(fold, linear.right_difference)
+    fold = absorb_ranged_fixed<F, L>(fold, linear.output)
+    let radix = natural<F>(8192)
+    let limbs: u32 = L.downcast_truncate()
+    let mut index: u32 = 0
+    while index < limbs {
+        let sum_carry_in = if index == 0 {
+            zero<F>()
+        } else {
+            linear.sum_carries[(index - 1) as usize]
+        }
+        let left_borrow_in = if index == 0 {
+            zero<F>()
+        } else {
+            linear.left_borrows[(index - 1) as usize]
+        }
+        let right_borrow_in = if index == 0 {
+            zero<F>()
+        } else {
+            linear.right_borrows[(index - 1) as usize]
+        }
+        let sum_carry_out = linear.sum_carries[index as usize]
+        let left_borrow_out = linear.left_borrows[index as usize]
+        let right_borrow_out = linear.right_borrows[index as usize]
+        fold = fold.absorb(bit_residual(sum_carry_out))
+        fold = fold.absorb(bit_residual(left_borrow_out))
+        fold = fold.absorb(bit_residual(right_borrow_out))
+        fold = fold.absorb(sub(
+            sub(
+                add(
+                    add(left.magnitude.digits[index as usize], right.magnitude.digits[index as usize]),
+                    sum_carry_in,
+                ),
+                linear.sum.digits[index as usize],
+            ),
+            mul(radix, sum_carry_out),
+        ))
+        fold = fold.absorb(sub(
+            sub(
+                add(left.magnitude.digits[index as usize], mul(radix, left_borrow_out)),
+                right.magnitude.digits[index as usize],
+            ),
+            add(left_borrow_in, linear.left_difference.digits[index as usize]),
+        ))
+        fold = fold.absorb(sub(
+            sub(
+                add(right.magnitude.digits[index as usize], mul(radix, right_borrow_out)),
+                left.magnitude.digits[index as usize],
+            ),
+            add(right_borrow_in, linear.right_difference.digits[index as usize]),
+        ))
+        let selected_difference = add(
+            mul(sub(one<F>(), linear.select_right), linear.left_difference.digits[index as usize]),
+            mul(linear.select_right, linear.right_difference.digits[index as usize]),
+        )
+        let selected = add(
+            mul(linear.same_sign, linear.sum.digits[index as usize]),
+            mul(sub(one<F>(), linear.same_sign), selected_difference),
+        )
+        fold = fold.absorb(sub(linear.output.magnitude.digits[index as usize], selected))
+        index = index + 1
+    }
+
+    let subtract = boolean<F>(subtract_right)
+    let two = natural<F>(2)
+    let effective_right_sign = sub(
+        add(right.negative, subtract),
+        mul(two, mul(right.negative, subtract)),
+    )
+    let different = sub(
+        add(left.negative, effective_right_sign),
+        mul(two, mul(left.negative, effective_right_sign)),
+    )
+    fold = fold.absorb(sub(linear.same_sign, sub(one<F>(), different)))
+    fold = fold.absorb(sub(linear.select_right, linear.left_borrows[L - 1]))
+    fold = fold.absorb(add(
+        mul(sub(one<F>(), linear.select_right), linear.left_borrows[L - 1]),
+        mul(linear.select_right, linear.right_borrows[L - 1]),
+    ))
+    fold = fold.absorb(sub(linear.output_nonzero, linear.output.magnitude.range.nonzero))
+    let selected_difference_sign = add(
+        mul(sub(one<F>(), linear.select_right), left.negative),
+        mul(linear.select_right, effective_right_sign),
+    )
+    let selected_sign = add(
+        mul(linear.same_sign, left.negative),
+        mul(sub(one<F>(), linear.same_sign), selected_difference_sign),
+    )
+    fold.absorb(sub(
+        linear.output.negative,
+        mul(selected_sign, linear.output_nonzero),
+    ))
+}
+
+fn absorb_fixed_equality<F: Radix2Field, const L: usize>(
+    _ fold: own ConstraintFold<F>,
+    _ left: AirRangedFixed<F, L>,
+    _ right: AirRangedFixed<F, L>,
+) -> ConstraintFold<F> {
+    let mut fold = fold.absorb(sub(left.negative, right.negative))
+    let mut index: usize = 0
+    while index < L {
+        fold = fold.absorb(sub(left.magnitude.digits[index], right.magnitude.digits[index]))
+        index = index + 1
+    }
+    fold
+}
+
+pub fn evaluate_transition_constraints<F: Radix2Field, const L: usize>(
+    _ challenge: F,
+    _ base_modulus: u32,
+    _ air: AirMandelbrotTransition<F, L>,
+) -> FixedAirConstraintEvaluation<F> {
+    if !convolution_is_safe_below<L>(base_modulus)
+        || product_carry_bound<L>() >= 262144
+    {
+        return FixedAirConstraintEvaluation {
+            valid: false,
+            constraints: 0,
+            folded: zero<F>(),
+        }
+    }
+    let mut fold = ConstraintFold<F>::new(challenge)
+    fold = fold.absorb(sub(air.valid, one<F>()))
+    fold = absorb_ranged_fixed<F, L>(fold, air.point.real)
+    fold = absorb_ranged_fixed<F, L>(fold, air.point.imaginary)
+    fold = absorb_ranged_fixed<F, L>(fold, air.current.real)
+    fold = absorb_ranged_fixed<F, L>(fold, air.current.imaginary)
+    fold = absorb_ranged_fixed<F, L>(fold, air.next.real)
+    fold = absorb_ranged_fixed<F, L>(fold, air.next.imaginary)
+    fold = absorb_product<F, L>(fold, air.current.real, air.current.real, air.xx)
+    fold = absorb_product<F, L>(fold, air.current.imaginary, air.current.imaginary, air.yy)
+    fold = absorb_product<F, L>(fold, air.current.real, air.current.imaginary, air.xy)
+    fold = absorb_linear<F, L>(
+        fold,
+        air.xx.output,
+        air.yy.output,
+        true,
+        air.real_difference,
+    )
+    fold = absorb_linear<F, L>(
+        fold,
+        air.real_difference.output,
+        air.point.real,
+        false,
+        air.next_real,
+    )
+    fold = absorb_linear<F, L>(
+        fold,
+        air.xy.output,
+        air.xy.output,
+        false,
+        air.double_xy,
+    )
+    fold = absorb_linear<F, L>(
+        fold,
+        air.double_xy.output,
+        air.point.imaginary,
+        false,
+        air.next_imaginary,
+    )
+    fold = absorb_fixed_equality<F, L>(fold, air.next_real.output, air.next.real)
+    fold = absorb_fixed_equality<F, L>(fold, air.next_imaginary.output, air.next.imaginary)
+    FixedAirConstraintEvaluation {
+        valid: true,
+        constraints: fold.constraints,
+        folded: fold.value,
+    }
+}
+
+/// Scalar-witness adapter for the pure field interpreter. It deliberately
+/// streams typed subrecords into the fold instead of returning or passing one
+/// fully flattened transition aggregate across a backend ABI boundary.
+pub fn evaluate_transition_witness_constraints<
+    F: Radix2Field,
+    const L: usize,
+>(
+    _ challenge: F,
+    _ base_modulus: u32,
+    _ point_value: ComplexFixed<L>,
+    _ current_value: ComplexFixed<L>,
+    _ next_value: ComplexFixed<L>,
+    _ witness: FixedMandelbrotTransitionWitness<L>,
+) -> FixedAirConstraintEvaluation<F> {
+    if !convolution_is_safe_below<L>(base_modulus)
+        || product_carry_bound<L>() >= 262144
+    {
+        return FixedAirConstraintEvaluation {
+            valid: false,
+            constraints: 0,
+            folded: zero<F>(),
+        }
+    }
+    let point = air_complex<F, L>(point_value)
+    let current = air_complex<F, L>(current_value)
+    let next = air_complex<F, L>(next_value)
+    let xx = air_product<F, L>(witness.xx)
+    let yy = air_product<F, L>(witness.yy)
+    let xy = air_product<F, L>(witness.xy)
+    let real_difference = air_linear<F, L>(witness.real_difference)
+    let next_real = air_linear<F, L>(witness.next_real)
+    let double_xy = air_linear<F, L>(witness.double_xy)
+    let next_imaginary = air_linear<F, L>(witness.next_imaginary)
+
+    let mut fold = ConstraintFold<F>::new(challenge)
+    fold = fold.absorb(sub(boolean<F>(witness.valid), one<F>()))
+    fold = absorb_ranged_fixed<F, L>(fold, point.real)
+    fold = absorb_ranged_fixed<F, L>(fold, point.imaginary)
+    fold = absorb_ranged_fixed<F, L>(fold, current.real)
+    fold = absorb_ranged_fixed<F, L>(fold, current.imaginary)
+    fold = absorb_ranged_fixed<F, L>(fold, next.real)
+    fold = absorb_ranged_fixed<F, L>(fold, next.imaginary)
+    fold = absorb_product<F, L>(fold, current.real, current.real, xx)
+    fold = absorb_product<F, L>(fold, current.imaginary, current.imaginary, yy)
+    fold = absorb_product<F, L>(fold, current.real, current.imaginary, xy)
+    fold = absorb_linear<F, L>(
+        fold,
+        xx.output,
+        yy.output,
+        true,
+        real_difference,
+    )
+    fold = absorb_linear<F, L>(
+        fold,
+        real_difference.output,
+        point.real,
+        false,
+        next_real,
+    )
+    fold = absorb_linear<F, L>(
+        fold,
+        xy.output,
+        xy.output,
+        false,
+        double_xy,
+    )
+    fold = absorb_linear<F, L>(
+        fold,
+        double_xy.output,
+        point.imaginary,
+        false,
+        next_imaginary,
+    )
+    fold = absorb_fixed_equality<F, L>(fold, next_real.output, next.real)
+    fold = absorb_fixed_equality<F, L>(fold, next_imaginary.output, next.imaginary)
+    FixedAirConstraintEvaluation {
+        valid: true,
+        constraints: fold.constraints,
+        folded: fold.value,
+    }
+}

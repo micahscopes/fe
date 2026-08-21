@@ -25,6 +25,22 @@ const PRODUCT_CARRY_RANGE_WORDS: usize = LIMBS * 2 * 18 * 2;
 const POSEIDON_WIDTH: usize = 16;
 const BABY_BEAR_MODULUS: u32 = 2_013_265_921;
 
+fn expected_fixed_air_constraint_count(limbs: u32) -> u32 {
+    let radix_range = 40 * limbs + 2;
+    let ranged_fixed = radix_range + 2;
+    let bounded_carry = 38;
+    let product = 1
+        + 2 * radix_range
+        + ranged_fixed
+        + 2 * limbs * (bounded_carry + 1)
+        + 2
+        + 2 * limbs
+        + 2
+        + 1;
+    let linear = 4 + 3 * radix_range + ranged_fixed + 7 * limbs + 5;
+    1 + 6 * ranged_fixed + 3 * product + 4 * linear + 2 * (limbs + 1)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Fx {
     negative: bool,
@@ -1142,6 +1158,54 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
             actual,
             expected_transition_witness_words(point, current),
             "fixed Mandelbrot transition witness case {case}",
+        );
+        for challenge in [3u32, 7, 31] {
+            let mut clean_arguments = arguments.clone();
+            clean_arguments.extend([challenge, 0]);
+            assert_eq!(
+                call(
+                    &mut store,
+                    &instance,
+                    "fixed_transition4_constraint_fold",
+                    &clean_arguments,
+                    3,
+                ),
+                [1, expected_fixed_air_constraint_count(LIMBS as u32), 0],
+                "pure field transition constraints, case {case}, challenge {challenge}",
+            );
+            for mutation in 1..=6u32 {
+                let mut mutation_arguments = arguments.clone();
+                mutation_arguments.extend([challenge, mutation]);
+                let evaluated = call(
+                    &mut store,
+                    &instance,
+                    "fixed_transition4_constraint_fold",
+                    &mutation_arguments,
+                    3,
+                );
+                assert_eq!(evaluated[0], 1);
+                assert_eq!(
+                    evaluated[1],
+                    expected_fixed_air_constraint_count(LIMBS as u32),
+                );
+                assert_ne!(
+                    evaluated[2], 0,
+                    "field transition mutation {mutation}, case {case}, challenge {challenge}",
+                );
+            }
+        }
+        let mut unsafe_width_arguments = arguments.clone();
+        unsafe_width_arguments.extend([7, 7]);
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "fixed_transition4_constraint_fold",
+                &unsafe_width_arguments,
+                3,
+            ),
+            [0, 0, 0],
+            "unsafe field width must fail closed, case {case}",
         );
         for mutation in 0..=10u32 {
             let mut mutation_arguments = arguments.clone();

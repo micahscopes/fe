@@ -57,6 +57,9 @@ use mandelbrot_proof_fixed_air::{
     transition_output_limb_residual,
     transition_output_sign_residual,
 }
+use mandelbrot_proof_fixed_air_core::{
+    evaluate_transition_witness_constraints,
+}
 use mandelbrot_proof_recursive::{
     ComplexFixed,
     HighPrecisionEscapeClaim,
@@ -247,6 +250,45 @@ pub fn fixed_transition4_mutated_output_residual(
     }
     next.imaginary.negative = !next.imaginary.negative
     transition_output_sign_residual<BabyBear, 4>(witness, next, 1).to_u32()
+}
+
+pub fn fixed_transition4_constraint_fold(
+    _ prn: u32, _ pr0: u32, _ pr1: u32, _ pr2: u32, _ pr3: u32,
+    _ pin: u32, _ pi0: u32, _ pi1: u32, _ pi2: u32, _ pi3: u32,
+    _ crn: u32, _ cr0: u32, _ cr1: u32, _ cr2: u32, _ cr3: u32,
+    _ cin: u32, _ ci0: u32, _ ci1: u32, _ ci2: u32, _ ci3: u32,
+    _ challenge: u32,
+    _ mutation: u32,
+) -> (u32, u32, u32) {
+    let (mut point, current, mut witness) = transition4(
+        prn, [pr0, pr1, pr2, pr3], pin, [pi0, pi1, pi2, pi3],
+        crn, [cr0, cr1, cr2, cr3], cin, [ci0, ci1, ci2, ci3],
+    )
+    let next = fixed_mandelbrot_transition_output(witness)
+    if mutation == 1 { witness.xx.low_digits[0] = witness.xx.low_digits[0] + 1 }
+    if mutation == 2 { witness.xx.low_carries[0] = witness.xx.low_carries[0] + 1 }
+    if mutation == 3 { witness.xx.round_carries[0] = 1 - witness.xx.round_carries[0] }
+    if mutation == 4 {
+        witness.real_difference.left_borrows[0] =
+            1 - witness.real_difference.left_borrows[0]
+    }
+    let mut proposed_next = next
+    if mutation == 5 { proposed_next.real.limbs[0] = proposed_next.real.limbs[0] + 1 }
+    if mutation == 6 { point.real.limbs[0] = point.real.limbs[0] + LIMB_BASE }
+    let modulus = if mutation == 7 { 1 } else { BABY_BEAR_MODULUS }
+    let evaluated = evaluate_transition_witness_constraints<BabyBear, 4>(
+        BabyBear::from_u32(challenge),
+        modulus,
+        point,
+        current,
+        proposed_next,
+        witness,
+    )
+    (
+        if evaluated.valid { 1 } else { 0 },
+        evaluated.constraints,
+        evaluated.folded.to_u32(),
+    )
 }
 
 pub fn fixed_linear4_encoded(
