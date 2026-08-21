@@ -118,6 +118,307 @@ pub struct FixedAirConstraintEvaluation<F: Radix2Field> {
 }
 impl<F: Radix2Field> core::marker::Copy for FixedAirConstraintEvaluation<F> {}
 
+pub enum ProductNode {
+    Xx,
+    Yy,
+    Xy,
+    Invalid,
+}
+impl core::marker::Copy for ProductNode {}
+
+pub enum LinearNode {
+    RealDifference,
+    NextReal,
+    DoubleXy,
+    NextImaginary,
+    Invalid,
+}
+impl core::marker::Copy for LinearNode {}
+
+pub enum CoordinateNode {
+    Real,
+    Imaginary,
+    Invalid,
+}
+impl core::marker::Copy for CoordinateNode {}
+
+/// Nominal radix vectors in the recurrence DAG. Product and linear payloads
+/// keep the plan hierarchical, avoiding a manually numbered 31-vector table.
+pub enum RangeNode {
+    PointReal,
+    PointImaginary,
+    CurrentReal,
+    CurrentImaginary,
+    NextReal,
+    NextImaginary,
+    ProductLow(ProductNode),
+    ProductHigh(ProductNode),
+    ProductOutput(ProductNode),
+    LinearSum(LinearNode),
+    LinearLeftDifference(LinearNode),
+    LinearRightDifference(LinearNode),
+    LinearOutput(LinearNode),
+    Invalid,
+}
+impl core::marker::Copy for RangeNode {}
+
+/// One generated unit in the sparse transition trace. Each variant is a
+/// semantic phase, and its payload is enough for scalar, packed, subgroup, or
+/// workgroup interpreters to choose placement without changing the relation.
+pub enum SparseTransitionTask {
+    RadixBit(RangeNode, u32, u32),
+    RadixLimb(RangeNode, u32),
+    RadixFinish(RangeNode),
+    CarryBit(ProductNode, u32, bool, u32),
+    CarryFinish(ProductNode, u32),
+    ProductTerm(ProductNode, u32, u32),
+    ProductCoefficient(ProductNode, u32),
+    ProductRound(ProductNode, u32),
+    ProductFinish(ProductNode),
+    LinearLimb(LinearNode, u32),
+    LinearFinish(LinearNode),
+    BoundarySign(CoordinateNode),
+    BoundaryLimb(CoordinateNode, u32),
+    TransitionFinish,
+    Invalid,
+}
+impl core::marker::Copy for SparseTransitionTask {}
+
+pub const fn sparse_range_node_count() -> u32 { 31 }
+pub const fn sparse_product_node_count() -> u32 { 3 }
+pub const fn sparse_linear_node_count() -> u32 { 4 }
+
+pub const fn sparse_transition_task_count<const L: usize>() -> u32 {
+    let limbs: u32 = L.downcast_truncate()
+    3 * limbs * limbs + 671 * limbs + 41
+}
+
+pub const fn sparse_transition_trace_length<const L: usize>() -> u32 {
+    let tasks = sparse_transition_task_count<L>()
+    let mut length: u32 = 1
+    while length < tasks { length = length + length }
+    length
+}
+
+pub const fn sparse_transition_trace_log<const L: usize>() -> u32 {
+    let target = sparse_transition_trace_length<L>()
+    let mut length: u32 = 1
+    let mut log: u32 = 0
+    while length < target {
+        length = length + length
+        log = log + 1
+    }
+    log
+}
+
+fn product_node_at(_ index: u32) -> ProductNode {
+    match index {
+        0 => ProductNode::Xx,
+        1 => ProductNode::Yy,
+        2 => ProductNode::Xy,
+        _ => ProductNode::Invalid,
+    }
+}
+
+fn linear_node_at(_ index: u32) -> LinearNode {
+    match index {
+        0 => LinearNode::RealDifference,
+        1 => LinearNode::NextReal,
+        2 => LinearNode::DoubleXy,
+        3 => LinearNode::NextImaginary,
+        _ => LinearNode::Invalid,
+    }
+}
+
+fn coordinate_node_at(_ index: u32) -> CoordinateNode {
+    match index {
+        0 => CoordinateNode::Real,
+        1 => CoordinateNode::Imaginary,
+        _ => CoordinateNode::Invalid,
+    }
+}
+
+fn range_node_at(_ index: u32) -> RangeNode {
+    match index {
+        0 => RangeNode::PointReal,
+        1 => RangeNode::PointImaginary,
+        2 => RangeNode::CurrentReal,
+        3 => RangeNode::CurrentImaginary,
+        4 => RangeNode::NextReal,
+        5 => RangeNode::NextImaginary,
+        _ => {
+            if index < 15 {
+                let local = index - 6
+                let product = product_node_at(local / 3)
+                match local - (local / 3) * 3 {
+                    0 => RangeNode::ProductLow(product),
+                    1 => RangeNode::ProductHigh(product),
+                    _ => RangeNode::ProductOutput(product),
+                }
+            } else {
+                if index < 31 {
+                    let local = index - 15
+                    let linear = linear_node_at(local / 4)
+                    match local - (local / 4) * 4 {
+                        0 => RangeNode::LinearSum(linear),
+                        1 => RangeNode::LinearLeftDifference(linear),
+                        2 => RangeNode::LinearRightDifference(linear),
+                        _ => RangeNode::LinearOutput(linear),
+                    }
+                } else {
+                    RangeNode::Invalid
+                }
+            }
+        }
+    }
+}
+
+fn sparse_product_term_at<const L: usize>(
+    _ product: ProductNode,
+    _ rank: u32,
+) -> SparseTransitionTask {
+    let limbs: u32 = L.downcast_truncate()
+    if rank >= limbs * limbs { return SparseTransitionTask::Invalid }
+    let mut coefficient: u32 = 0
+    let mut remaining = rank
+    while coefficient < limbs + limbs - 1 {
+        let count = convolution_term_count<L>(coefficient)
+        if remaining < count {
+            return SparseTransitionTask::ProductTerm(
+                product,
+                coefficient,
+                remaining,
+            )
+        }
+        remaining = remaining - count
+        coefficient = coefficient + 1
+    }
+    SparseTransitionTask::Invalid
+}
+
+pub fn sparse_transition_task_at<const L: usize>(
+    _ index: u32,
+) -> SparseTransitionTask {
+    if L < 2 || index >= sparse_transition_task_count<L>() {
+        return SparseTransitionTask::Invalid
+    }
+    let limbs: u32 = L.downcast_truncate()
+    let ranges = sparse_range_node_count()
+    let products = sparse_product_node_count()
+    let linears = sparse_linear_node_count()
+    let mut remaining = index
+
+    let radix_bits = ranges * limbs * 13
+    if remaining < radix_bits {
+        let per_range = limbs * 13
+        let range_index = remaining / per_range
+        let local = remaining - range_index * per_range
+        return SparseTransitionTask::RadixBit(
+            range_node_at(range_index),
+            local / 13,
+            local - (local / 13) * 13,
+        )
+    }
+    remaining = remaining - radix_bits
+
+    let radix_limbs = ranges * limbs
+    if remaining < radix_limbs {
+        return SparseTransitionTask::RadixLimb(
+            range_node_at(remaining / limbs),
+            remaining - (remaining / limbs) * limbs,
+        )
+    }
+    remaining = remaining - radix_limbs
+    if remaining < ranges {
+        return SparseTransitionTask::RadixFinish(range_node_at(remaining))
+    }
+    remaining = remaining - ranges
+
+    let carry_bits = products * limbs * 2 * 36
+    if remaining < carry_bits {
+        let per_product = limbs * 2 * 36
+        let product_index = remaining / per_product
+        let local = remaining - product_index * per_product
+        let coefficient = local / 36
+        let within = local - coefficient * 36
+        return SparseTransitionTask::CarryBit(
+            product_node_at(product_index),
+            coefficient,
+            within >= 18,
+            if within >= 18 { within - 18 } else { within },
+        )
+    }
+    remaining = remaining - carry_bits
+
+    let carry_finishes = products * limbs * 2
+    if remaining < carry_finishes {
+        let per_product = limbs * 2
+        return SparseTransitionTask::CarryFinish(
+            product_node_at(remaining / per_product),
+            remaining - (remaining / per_product) * per_product,
+        )
+    }
+    remaining = remaining - carry_finishes
+
+    let product_terms = products * limbs * limbs
+    if remaining < product_terms {
+        let per_product = limbs * limbs
+        return sparse_product_term_at<L>(
+            product_node_at(remaining / per_product),
+            remaining - (remaining / per_product) * per_product,
+        )
+    }
+    remaining = remaining - product_terms
+
+    let product_coefficients = products * limbs * 2
+    if remaining < product_coefficients {
+        let per_product = limbs * 2
+        return SparseTransitionTask::ProductCoefficient(
+            product_node_at(remaining / per_product),
+            remaining - (remaining / per_product) * per_product,
+        )
+    }
+    remaining = remaining - product_coefficients
+
+    let product_rounds = products * limbs
+    if remaining < product_rounds {
+        return SparseTransitionTask::ProductRound(
+            product_node_at(remaining / limbs),
+            remaining - (remaining / limbs) * limbs,
+        )
+    }
+    remaining = remaining - product_rounds
+    if remaining < products {
+        return SparseTransitionTask::ProductFinish(product_node_at(remaining))
+    }
+    remaining = remaining - products
+
+    let linear_limbs = linears * limbs
+    if remaining < linear_limbs {
+        return SparseTransitionTask::LinearLimb(
+            linear_node_at(remaining / limbs),
+            remaining - (remaining / limbs) * limbs,
+        )
+    }
+    remaining = remaining - linear_limbs
+    if remaining < linears {
+        return SparseTransitionTask::LinearFinish(linear_node_at(remaining))
+    }
+    remaining = remaining - linears
+
+    if remaining < 2 {
+        return SparseTransitionTask::BoundarySign(coordinate_node_at(remaining))
+    }
+    remaining = remaining - 2
+    if remaining < 2 * limbs {
+        return SparseTransitionTask::BoundaryLimb(
+            coordinate_node_at(remaining / limbs),
+            remaining - (remaining / limbs) * limbs,
+        )
+    }
+    SparseTransitionTask::TransitionFinish
+}
+
 fn zero<F: Radix2Field>() -> F { F::radix2_zero() }
 fn one<F: Radix2Field>() -> F { F::radix2_root(0) }
 fn add<F: Radix2Field>(_ left: F, _ right: F) -> F { left.radix2_add(right) }

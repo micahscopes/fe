@@ -58,7 +58,16 @@ use mandelbrot_proof_fixed_air::{
     transition_output_sign_residual,
 }
 use mandelbrot_proof_fixed_air_core::{
+    CoordinateNode,
+    LinearNode,
+    ProductNode,
+    RangeNode,
+    SparseTransitionTask,
     evaluate_transition_witness_constraints,
+    sparse_transition_task_at,
+    sparse_transition_task_count,
+    sparse_transition_trace_length,
+    sparse_transition_trace_log,
 }
 use mandelbrot_proof_recursive::{
     ComplexFixed,
@@ -177,6 +186,124 @@ fn transition4(
         current_imaginary,
     )
     (point, current, derive_fixed_mandelbrot_transition_witness(point, current))
+}
+
+fn product_node_code(_ node: ProductNode) -> u32 {
+    match node {
+        ProductNode::Xx => 0,
+        ProductNode::Yy => 1,
+        ProductNode::Xy => 2,
+        ProductNode::Invalid => 99,
+    }
+}
+
+fn linear_node_code(_ node: LinearNode) -> u32 {
+    match node {
+        LinearNode::RealDifference => 0,
+        LinearNode::NextReal => 1,
+        LinearNode::DoubleXy => 2,
+        LinearNode::NextImaginary => 3,
+        LinearNode::Invalid => 99,
+    }
+}
+
+fn coordinate_node_code(_ node: CoordinateNode) -> u32 {
+    match node {
+        CoordinateNode::Real => 0,
+        CoordinateNode::Imaginary => 1,
+        CoordinateNode::Invalid => 99,
+    }
+}
+
+fn range_node_code(_ node: RangeNode) -> u32 {
+    match node {
+        RangeNode::PointReal => 0,
+        RangeNode::PointImaginary => 1,
+        RangeNode::CurrentReal => 2,
+        RangeNode::CurrentImaginary => 3,
+        RangeNode::NextReal => 4,
+        RangeNode::NextImaginary => 5,
+        RangeNode::ProductLow(product) => 6 + 3 * product_node_code(product),
+        RangeNode::ProductHigh(product) => 7 + 3 * product_node_code(product),
+        RangeNode::ProductOutput(product) => 8 + 3 * product_node_code(product),
+        RangeNode::LinearSum(linear) => 15 + 4 * linear_node_code(linear),
+        RangeNode::LinearLeftDifference(linear) => 16 + 4 * linear_node_code(linear),
+        RangeNode::LinearRightDifference(linear) => 17 + 4 * linear_node_code(linear),
+        RangeNode::LinearOutput(linear) => 18 + 4 * linear_node_code(linear),
+        RangeNode::Invalid => 99,
+    }
+}
+
+pub fn sparse_transition4_metadata() -> (u32, u32, u32) {
+    (
+        sparse_transition_task_count<4>(),
+        sparse_transition_trace_length<4>(),
+        sparse_transition_trace_log<4>(),
+    )
+}
+
+pub fn sparse_transition8_metadata() -> (u32, u32, u32) {
+    (
+        sparse_transition_task_count<8>(),
+        sparse_transition_trace_length<8>(),
+        sparse_transition_trace_log<8>(),
+    )
+}
+
+pub fn sparse_transition20_metadata() -> (u32, u32, u32) {
+    (
+        sparse_transition_task_count<20>(),
+        sparse_transition_trace_length<20>(),
+        sparse_transition_trace_log<20>(),
+    )
+}
+
+pub fn sparse_transition4_task_signature(
+    _ index: u32,
+) -> (u32, u32, u32, u32, u32) {
+    match sparse_transition_task_at<4>(index) {
+        SparseTransitionTask::RadixBit(node, limb, bit) => {
+            (0, range_node_code(node), limb, bit, 0)
+        }
+        SparseTransitionTask::RadixLimb(node, limb) => {
+            (1, range_node_code(node), limb, 0, 0)
+        }
+        SparseTransitionTask::RadixFinish(node) => {
+            (2, range_node_code(node), 0, 0, 0)
+        }
+        SparseTransitionTask::CarryBit(product, coefficient, slack, bit) => {
+            (3, product_node_code(product), coefficient, if slack { 1 } else { 0 }, bit)
+        }
+        SparseTransitionTask::CarryFinish(product, coefficient) => {
+            (4, product_node_code(product), coefficient, 0, 0)
+        }
+        SparseTransitionTask::ProductTerm(product, coefficient, term) => {
+            (5, product_node_code(product), coefficient, term, 0)
+        }
+        SparseTransitionTask::ProductCoefficient(product, coefficient) => {
+            (6, product_node_code(product), coefficient, 0, 0)
+        }
+        SparseTransitionTask::ProductRound(product, limb) => {
+            (7, product_node_code(product), limb, 0, 0)
+        }
+        SparseTransitionTask::ProductFinish(product) => {
+            (8, product_node_code(product), 0, 0, 0)
+        }
+        SparseTransitionTask::LinearLimb(linear, limb) => {
+            (9, linear_node_code(linear), limb, 0, 0)
+        }
+        SparseTransitionTask::LinearFinish(linear) => {
+            (10, linear_node_code(linear), 0, 0, 0)
+        }
+        SparseTransitionTask::BoundarySign(coordinate) => {
+            (11, coordinate_node_code(coordinate), 0, 0, 0)
+        }
+        SparseTransitionTask::BoundaryLimb(coordinate, limb) => {
+            (12, coordinate_node_code(coordinate), limb, 0, 0)
+        }
+        SparseTransitionTask::TransitionFinish => (13, 0, 0, 0, 0),
+        SparseTransitionTask::Invalid => (14, 0, 0, 0, 0),
+    }
 }
 
 pub fn fixed_transition4_encoded(

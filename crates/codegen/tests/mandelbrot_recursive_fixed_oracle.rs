@@ -41,6 +41,83 @@ fn expected_fixed_air_constraint_count(limbs: u32) -> u32 {
     1 + 6 * ranged_fixed + 3 * product + 4 * linear + 2 * (limbs + 1)
 }
 
+fn expected_sparse_transition_tasks(limbs: u32) -> Vec<[u32; 5]> {
+    let mut tasks = Vec::new();
+    for range in 0..31u32 {
+        for limb in 0..limbs {
+            for bit in 0..13u32 {
+                tasks.push([0, range, limb, bit, 0]);
+            }
+        }
+    }
+    for range in 0..31u32 {
+        for limb in 0..limbs {
+            tasks.push([1, range, limb, 0, 0]);
+        }
+    }
+    for range in 0..31u32 {
+        tasks.push([2, range, 0, 0, 0]);
+    }
+    for product in 0..3u32 {
+        for coefficient in 0..2 * limbs {
+            for slack in 0..2u32 {
+                for bit in 0..18u32 {
+                    tasks.push([3, product, coefficient, slack, bit]);
+                }
+            }
+        }
+    }
+    for product in 0..3u32 {
+        for coefficient in 0..2 * limbs {
+            tasks.push([4, product, coefficient, 0, 0]);
+        }
+    }
+    for product in 0..3u32 {
+        for coefficient in 0..2 * limbs - 1 {
+            let count = if coefficient < limbs {
+                coefficient + 1
+            } else {
+                2 * limbs - 1 - coefficient
+            };
+            for term in 0..count {
+                tasks.push([5, product, coefficient, term, 0]);
+            }
+        }
+    }
+    for product in 0..3u32 {
+        for coefficient in 0..2 * limbs {
+            tasks.push([6, product, coefficient, 0, 0]);
+        }
+    }
+    for product in 0..3u32 {
+        for limb in 0..limbs {
+            tasks.push([7, product, limb, 0, 0]);
+        }
+    }
+    for product in 0..3u32 {
+        tasks.push([8, product, 0, 0, 0]);
+    }
+    for linear in 0..4u32 {
+        for limb in 0..limbs {
+            tasks.push([9, linear, limb, 0, 0]);
+        }
+    }
+    for linear in 0..4u32 {
+        tasks.push([10, linear, 0, 0, 0]);
+    }
+    for coordinate in 0..2u32 {
+        tasks.push([11, coordinate, 0, 0, 0]);
+    }
+    for coordinate in 0..2u32 {
+        for limb in 0..limbs {
+            tasks.push([12, coordinate, limb, 0, 0]);
+        }
+    }
+    tasks.push([13, 0, 0, 0, 0]);
+    assert_eq!(tasks.len() as u32, 3 * limbs * limbs + 671 * limbs + 41,);
+    tasks
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Fx {
     negative: bool,
@@ -633,6 +710,45 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
     let memory = instance
         .get_memory(&mut store, "memory")
         .expect("oracle fixture should export linear memory");
+
+    for (function, limbs) in [
+        ("sparse_transition4_metadata", 4u32),
+        ("sparse_transition8_metadata", 8u32),
+        ("sparse_transition20_metadata", 20u32),
+    ] {
+        let tasks = 3 * limbs * limbs + 671 * limbs + 41;
+        let trace_length = tasks.next_power_of_two();
+        assert_eq!(
+            call(&mut store, &instance, function, &[], 3),
+            [tasks, trace_length, trace_length.ilog2()],
+            "sparse transition metadata L={limbs}",
+        );
+    }
+    let sparse_tasks = expected_sparse_transition_tasks(4);
+    for (index, expected) in sparse_tasks.iter().enumerate() {
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "sparse_transition4_task_signature",
+                &[index as u32],
+                5,
+            ),
+            *expected,
+            "sparse transition task {index}",
+        );
+    }
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "sparse_transition4_task_signature",
+            &[sparse_tasks.len() as u32],
+            5,
+        ),
+        [14, 0, 0, 0, 0],
+        "the first padding row must be explicitly invalid",
+    );
 
     assert_eq!(
         call(
