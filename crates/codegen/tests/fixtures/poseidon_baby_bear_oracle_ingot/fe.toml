@@ -3,6 +3,7 @@ name = "poseidon_baby_bear_oracle_ingot"
 version = "0.1.0"
 
 [dependencies]
+canonical_words = "../../../../../ingots/canonical_words"
 core = "../../../../../ingots/core"
 poseidon_baby_bear = "../../../../../ingots/poseidon_baby_bear"
 precision = "../../../../../demos/sketches/precision"

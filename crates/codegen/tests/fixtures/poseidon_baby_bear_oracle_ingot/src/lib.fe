@@ -1,8 +1,10 @@
 //! Executable boundary for the Fe-derived BabyBear Poseidon2 oracle.
 
+use canonical_words::{CanonicalWords, CanonicalWordsProvider}
 use poseidon_baby_bear::{
     Poseidon2Domain,
     Poseidon2FieldDomain,
+    commit_canonical,
     commit_ext4_fields,
     commit_fields,
     commit_packed,
@@ -33,6 +35,39 @@ impl Poseidon2Domain for InvalidPackingTestDomain {
 struct FieldVectorTestDomain {}
 impl Poseidon2FieldDomain for FieldVectorTestDomain {
     const TAG: u32 = protocol_tag("BV01")
+}
+
+struct CanonicalMessage {
+    enabled: bool,
+    sequence: u32,
+    values: [u32; 5],
+}
+impl core::marker::Copy for CanonicalMessage {}
+derive CanonicalWords for CanonicalMessage using CanonicalWordsProvider
+
+pub fn canonical7_commitment(
+    _ enabled: u32,
+    _ sequence: u32,
+    _ v0: u32,
+    _ v1: u32,
+    _ v2: u32,
+    _ v3: u32,
+    _ v4: u32,
+) -> (u32, u32, u32, u32, u32, u32, u32, u32, u32) {
+    let message = CanonicalMessage {
+        enabled: enabled == 1,
+        sequence: sequence,
+        values: [v0, v1, v2, v3, v4],
+    }
+    let commitment = commit_canonical<FieldVectorTestDomain, CanonicalMessage>(ref message)
+    let digest = commitment.digest()
+    (
+        if commitment.is_valid() { 1 } else { 0 },
+        digest.field(0).to_u32(), digest.field(1).to_u32(),
+        digest.field(2).to_u32(), digest.field(3).to_u32(),
+        digest.field(4).to_u32(), digest.field(5).to_u32(),
+        digest.field(6).to_u32(), digest.field(7).to_u32(),
+    )
 }
 
 pub fn derived_parameter(_ index: u32) -> u32 { parameter_plain(index) }

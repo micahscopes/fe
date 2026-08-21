@@ -22,6 +22,7 @@ use wasmtime::Val;
 
 const WIDTH: usize = 16;
 const ROUND_CONSTANT_COUNT: usize = 8 * WIDTH + 13;
+const BABY_BEAR_MODULUS: u32 = 2_013_265_921;
 
 fn fixture_url() -> Url {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -522,4 +523,45 @@ fn bounded_bits_are_injective_and_commit_with_length_and_domain() {
             "extension coefficient {index} was not bound",
         );
     }
+
+    for arguments in [
+        [0, 0, 0, 0, 0, 0, 0],
+        [1, 7, 11, 13, 17, 19, 23],
+        [1, 1_000_000_000, 8191, 4096, 31, 1, 0],
+    ] {
+        let fields = [
+            (arguments[0] == 1) as u32,
+            arguments[1],
+            arguments[2],
+            arguments[3],
+            arguments[4],
+            arguments[5],
+            arguments[6],
+        ];
+        let mut expected = vec![1];
+        expected.extend(reference_field_commitment(b"BV01", &fields));
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "canonical7_commitment",
+                &arguments,
+                9,
+            ),
+            expected,
+            "canonical record commitment must equal the direct field sponge",
+        );
+    }
+
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "canonical7_commitment",
+            &[1, BABY_BEAR_MODULUS, 1, 2, 3, 4, 5],
+            9,
+        ),
+        vec![0; 9],
+        "a canonical word outside BabyBear must fail closed",
+    );
 }

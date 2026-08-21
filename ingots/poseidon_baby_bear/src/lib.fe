@@ -98,6 +98,135 @@ impl PackedCommitment {
     }
 }
 
+/// Canonical word codecs can stream directly into the field sponge. This is
+/// the common bridge from a nominal Fe record to a typed Poseidon2 commitment:
+/// the record remains its own schema, while this sink supplies only the hash
+/// interpretation. It rejects non-field words, codec underflow or overflow,
+/// and invalid values reported by the codec.
+struct CanonicalFieldWriter {
+    s0: BabyBear,
+    s1: BabyBear,
+    s2: BabyBear,
+    s3: BabyBear,
+    s4: BabyBear,
+    s5: BabyBear,
+    s6: BabyBear,
+    s7: BabyBear,
+    s8: BabyBear,
+    s9: BabyBear,
+    s10: BabyBear,
+    s11: BabyBear,
+    s12: BabyBear,
+    s13: BabyBear,
+    s14: BabyBear,
+    s15: BabyBear,
+    rate: u32,
+    expected: u32,
+    written: u32,
+    valid: bool,
+}
+impl core::marker::Copy for CanonicalFieldWriter {}
+
+impl CanonicalFieldWriter {
+    fn state(self) -> [BabyBear; WIDTH] {
+        [
+            self.s0, self.s1, self.s2, self.s3,
+            self.s4, self.s5, self.s6, self.s7,
+            self.s8, self.s9, self.s10, self.s11,
+            self.s12, self.s13, self.s14, self.s15,
+        ]
+    }
+
+    fn with_state(
+        self,
+        _ state: [BabyBear; WIDTH],
+        _ rate: u32,
+        _ written: u32,
+        _ valid: bool,
+    ) -> Self {
+        Self {
+            s0: state[0], s1: state[1], s2: state[2], s3: state[3],
+            s4: state[4], s5: state[5], s6: state[6], s7: state[7],
+            s8: state[8], s9: state[9], s10: state[10], s11: state[11],
+            s12: state[12], s13: state[13], s14: state[14], s15: state[15],
+            rate: rate,
+            expected: self.expected,
+            written: written,
+            valid: valid,
+        }
+    }
+
+    fn new(_ tag: u32, _ expected: u32) -> Self {
+        let zero = BabyBear::zero()
+        Self {
+            s0: BabyBear::from_u32(tag),
+            s1: BabyBear::from_u32(expected),
+            s2: zero, s3: zero, s4: zero, s5: zero,
+            s6: zero, s7: zero, s8: zero, s9: zero,
+            s10: zero, s11: zero, s12: zero, s13: zero,
+            s14: zero, s15: zero,
+            rate: 2,
+            expected: expected,
+            written: 0,
+            valid: true,
+        }
+    }
+}
+
+impl WordSink for CanonicalFieldWriter {
+    fn write(self, _ value: u32) -> Self {
+        if !self.valid || self.written >= self.expected || value >= BABY_BEAR_MODULUS {
+            return self.reject()
+        }
+        let mut state = self.state()
+        let mut rate = self.rate
+        state[rate as usize] = BabyBear::from_u32(value)
+        rate = rate + 1
+        if rate == SPONGE_RATE.downcast_truncate() {
+            state = permute16(input: state)
+            rate = 0
+        }
+        self.with_state(state, rate, self.written + 1, true)
+    }
+
+    fn reject(self) -> Self {
+        self.with_state(self.state(), self.rate, self.written, false)
+    }
+}
+
+impl CanonicalFieldWriter {
+    fn finish(self) -> PackedCommitment {
+        if !self.valid || self.written != self.expected {
+            return PackedCommitment { valid: false, value: Poseidon2Digest::zero() }
+        }
+        let state = if self.rate == 0 {
+            self.state()
+        } else {
+            permute16(input: self.state())
+        }
+        let mut values = [BabyBear::zero(); DIGEST_FIELDS]
+        let mut index: usize = 0
+        while index < DIGEST_FIELDS {
+            values[index] = state[index]
+            index = index + 1
+        }
+        PackedCommitment { valid: true, value: Poseidon2Digest { values: values } }
+    }
+}
+
+/// Commit the exact canonical word stream of one Fe value. The nominal domain
+/// and the schema-derived word count prefix the message, matching
+/// `commit_fields` without materializing a second `[BabyBear; N]` buffer.
+pub fn commit_canonical<D: Poseidon2FieldDomain, T: CanonicalWords>(
+    _ value: ref T,
+) -> PackedCommitment {
+    if D::TAG >= BABY_BEAR_MODULUS || T::WORDS >= BABY_BEAR_MODULUS {
+        return PackedCommitment { valid: false, value: Poseidon2Digest::zero() }
+    }
+    let writer = CanonicalFieldWriter::new(D::TAG, T::WORDS)
+    encode_canonical_words(value, writer).finish()
+}
+
 const fn field_pow(_ base: u256, _ exponent: u256) -> u256 {
     let mut base = base
     let mut exponent = exponent
