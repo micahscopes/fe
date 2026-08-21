@@ -207,6 +207,46 @@ pub struct SparseTaskRow<F: Radix2Field> {
 }
 impl<F: Radix2Field> core::marker::Copy for SparseTaskRow<F> {}
 
+/// Algebraic task-kind columns for the sparse transition schedule. These are
+/// committed field values, not host enum tags. Keeping each role named lets
+/// the same control trace be evaluated at base rows and at LDE points without
+/// consulting a row index or dispatching through `SparseTransitionTask`.
+pub struct SparseControlSelectors<F: Radix2Field> {
+    pub radix_bit: F,
+    pub radix_limb: F,
+    pub radix_finish: F,
+    pub carry_bit: F,
+    pub carry_finish: F,
+    pub product_term: F,
+    pub product_coefficient: F,
+    pub product_round: F,
+    pub product_finish: F,
+    pub linear_limb: F,
+    pub linear_finish: F,
+    pub boundary_sign: F,
+    pub boundary_limb: F,
+    pub transition_finish: F,
+    pub padding: F,
+}
+impl<F: Radix2Field> core::marker::Copy for SparseControlSelectors<F> {}
+
+/// Polynomial control state paired with one sparse witness row.
+///
+/// `major`, `minor`, and `step` are semantic counters whose meaning is chosen
+/// by the named selector. `flag` distinguishes carry slack bits and the
+/// descending half of a convolution. `width` is the number of convolution
+/// terms for the active coefficient. `weight` is the radix bit weight.
+pub struct SparseControlRow<F: Radix2Field> {
+    pub selectors: SparseControlSelectors<F>,
+    pub major: F,
+    pub minor: F,
+    pub step: F,
+    pub flag: F,
+    pub width: F,
+    pub weight: F,
+}
+impl<F: Radix2Field> core::marker::Copy for SparseControlRow<F> {}
+
 /// Nominal addresses for values copied between distant sparse phases. The
 /// field key is derived from this type, so application code never maintains a
 /// numeric column or memory-address table.
@@ -2354,6 +2394,785 @@ fn range_node_rank(_ node: RangeNode) -> u32 {
         RangeNode::LinearRightDifference(linear) => 17 + 4 * linear_node_rank(linear),
         RangeNode::LinearOutput(linear) => 18 + 4 * linear_node_rank(linear),
         RangeNode::Invalid => 99,
+    }
+}
+
+fn coordinate_node_rank(_ node: CoordinateNode) -> u32 {
+    match node {
+        CoordinateNode::Real => 0,
+        CoordinateNode::Imaginary => 1,
+        CoordinateNode::Invalid => 99,
+    }
+}
+
+fn linear_limb_role_rank(_ role: LinearLimbRole) -> u32 {
+    match role {
+        LinearLimbRole::Sum => 0,
+        LinearLimbRole::LeftDifference => 1,
+        LinearLimbRole::RightDifference => 2,
+        LinearLimbRole::Select => 3,
+        LinearLimbRole::Invalid => 99,
+    }
+}
+
+fn empty_sparse_control_selectors<F: Radix2Field>() -> SparseControlSelectors<F> {
+    SparseControlSelectors {
+        radix_bit: zero<F>(),
+        radix_limb: zero<F>(),
+        radix_finish: zero<F>(),
+        carry_bit: zero<F>(),
+        carry_finish: zero<F>(),
+        product_term: zero<F>(),
+        product_coefficient: zero<F>(),
+        product_round: zero<F>(),
+        product_finish: zero<F>(),
+        linear_limb: zero<F>(),
+        linear_finish: zero<F>(),
+        boundary_sign: zero<F>(),
+        boundary_limb: zero<F>(),
+        transition_finish: zero<F>(),
+        padding: zero<F>(),
+    }
+}
+
+/// Interpret one generated base task as field-valued control columns. Enum
+/// dispatch occurs only while constructing the base trace. AIR evaluation uses
+/// `SparseControlRow` directly, including at off-domain LDE points.
+pub fn sparse_control_row_from_task<F: Radix2Field, const L: usize>(
+    _ task: SparseTransitionTask,
+) -> SparseControlRow<F> {
+    let mut selectors = empty_sparse_control_selectors<F>()
+    let mut major = zero<F>()
+    let mut minor = zero<F>()
+    let mut step = zero<F>()
+    let mut flag = zero<F>()
+    let mut width = zero<F>()
+    let mut weight = zero<F>()
+    let limbs: u32 = L.downcast_truncate()
+    match task {
+        SparseTransitionTask::RadixBit(node, limb, bit) => {
+            selectors.radix_bit = one<F>()
+            major = natural<F>(range_node_rank(node))
+            minor = natural<F>(limb)
+            step = natural<F>(bit)
+            weight = natural<F>(1 << bit)
+        }
+        SparseTransitionTask::RadixLimb(node, limb) => {
+            selectors.radix_limb = one<F>()
+            major = natural<F>(range_node_rank(node))
+            minor = natural<F>(limb)
+        }
+        SparseTransitionTask::RadixFinish(node) => {
+            selectors.radix_finish = one<F>()
+            major = natural<F>(range_node_rank(node))
+        }
+        SparseTransitionTask::CarryBit(node, coefficient, slack, bit) => {
+            selectors.carry_bit = one<F>()
+            major = natural<F>(product_node_rank(node))
+            minor = natural<F>(coefficient)
+            step = natural<F>(bit)
+            flag = boolean<F>(slack)
+            weight = natural<F>(1 << bit)
+        }
+        SparseTransitionTask::CarryFinish(node, coefficient) => {
+            selectors.carry_finish = one<F>()
+            major = natural<F>(product_node_rank(node))
+            minor = natural<F>(coefficient)
+        }
+        SparseTransitionTask::ProductTerm(node, coefficient, term) => {
+            selectors.product_term = one<F>()
+            major = natural<F>(product_node_rank(node))
+            minor = natural<F>(coefficient)
+            step = natural<F>(term)
+            flag = boolean<F>(coefficient >= limbs)
+            width = natural<F>(convolution_term_count<L>(coefficient))
+        }
+        SparseTransitionTask::ProductCoefficient(node, coefficient) => {
+            selectors.product_coefficient = one<F>()
+            major = natural<F>(product_node_rank(node))
+            minor = natural<F>(coefficient)
+            flag = boolean<F>(coefficient >= limbs)
+            width = natural<F>(convolution_term_count<L>(coefficient))
+        }
+        SparseTransitionTask::ProductRound(node, output_index) => {
+            selectors.product_round = one<F>()
+            major = natural<F>(product_node_rank(node))
+            minor = natural<F>(output_index)
+        }
+        SparseTransitionTask::ProductFinish(node) => {
+            selectors.product_finish = one<F>()
+            major = natural<F>(product_node_rank(node))
+        }
+        SparseTransitionTask::LinearLimb(node, role, limb) => {
+            selectors.linear_limb = one<F>()
+            major = natural<F>(linear_node_rank(node))
+            minor = natural<F>(linear_limb_role_rank(role))
+            step = natural<F>(limb)
+        }
+        SparseTransitionTask::LinearFinish(node) => {
+            selectors.linear_finish = one<F>()
+            major = natural<F>(linear_node_rank(node))
+        }
+        SparseTransitionTask::BoundarySign(coordinate) => {
+            selectors.boundary_sign = one<F>()
+            major = natural<F>(coordinate_node_rank(coordinate))
+        }
+        SparseTransitionTask::BoundaryLimb(coordinate, limb) => {
+            selectors.boundary_limb = one<F>()
+            major = natural<F>(coordinate_node_rank(coordinate))
+            minor = natural<F>(limb)
+        }
+        SparseTransitionTask::TransitionFinish => {
+            selectors.transition_finish = one<F>()
+        }
+        SparseTransitionTask::Invalid => {
+            selectors.padding = one<F>()
+        }
+    }
+    SparseControlRow {
+        selectors: selectors,
+        major: major,
+        minor: minor,
+        step: step,
+        flag: flag,
+        width: width,
+        weight: weight,
+    }
+}
+
+pub fn sparse_control_row_at<F: Radix2Field, const L: usize>(
+    _ index: u32,
+) -> SparseControlRow<F> {
+    sparse_control_row_from_task<F, L>(sparse_transition_task_at<L>(index))
+}
+
+fn sparse_selector_sum<F: Radix2Field>(
+    _ selectors: SparseControlSelectors<F>,
+) -> F {
+    let mut total = selectors.radix_bit
+    total = add(total, selectors.radix_limb)
+    total = add(total, selectors.radix_finish)
+    total = add(total, selectors.carry_bit)
+    total = add(total, selectors.carry_finish)
+    total = add(total, selectors.product_term)
+    total = add(total, selectors.product_coefficient)
+    total = add(total, selectors.product_round)
+    total = add(total, selectors.product_finish)
+    total = add(total, selectors.linear_limb)
+    total = add(total, selectors.linear_finish)
+    total = add(total, selectors.boundary_sign)
+    total = add(total, selectors.boundary_limb)
+    total = add(total, selectors.transition_finish)
+    add(total, selectors.padding)
+}
+
+fn absorb_sparse_selector_bits<F: Radix2Field>(
+    _ fold: own ConstraintFold<F>,
+    _ selectors: SparseControlSelectors<F>,
+) -> ConstraintFold<F> {
+    let mut fold = fold.absorb(bit_residual(selectors.radix_bit))
+    fold = fold.absorb(bit_residual(selectors.radix_limb))
+    fold = fold.absorb(bit_residual(selectors.radix_finish))
+    fold = fold.absorb(bit_residual(selectors.carry_bit))
+    fold = fold.absorb(bit_residual(selectors.carry_finish))
+    fold = fold.absorb(bit_residual(selectors.product_term))
+    fold = fold.absorb(bit_residual(selectors.product_coefficient))
+    fold = fold.absorb(bit_residual(selectors.product_round))
+    fold = fold.absorb(bit_residual(selectors.product_finish))
+    fold = fold.absorb(bit_residual(selectors.linear_limb))
+    fold = fold.absorb(bit_residual(selectors.linear_finish))
+    fold = fold.absorb(bit_residual(selectors.boundary_sign))
+    fold = fold.absorb(bit_residual(selectors.boundary_limb))
+    fold = fold.absorb(bit_residual(selectors.transition_finish))
+    fold.absorb(bit_residual(selectors.padding))
+}
+
+fn absorb_sparse_control_local<F: Radix2Field>(
+    _ fold: own ConstraintFold<F>,
+    _ row: SparseControlRow<F>,
+) -> ConstraintFold<F> {
+    let selectors = row.selectors
+    let mut fold = absorb_sparse_selector_bits(fold, selectors)
+    fold = fold.absorb(sub(sparse_selector_sum(selectors), one<F>()))
+    fold = fold.absorb(bit_residual(row.flag))
+
+    let major_unused = add(selectors.transition_finish, selectors.padding)
+    fold = fold.absorb(mul(major_unused, row.major))
+
+    let mut minor_used = selectors.radix_bit
+    minor_used = add(minor_used, selectors.radix_limb)
+    minor_used = add(minor_used, selectors.carry_bit)
+    minor_used = add(minor_used, selectors.carry_finish)
+    minor_used = add(minor_used, selectors.product_term)
+    minor_used = add(minor_used, selectors.product_coefficient)
+    minor_used = add(minor_used, selectors.product_round)
+    minor_used = add(minor_used, selectors.linear_limb)
+    minor_used = add(minor_used, selectors.boundary_limb)
+    fold = fold.absorb(mul(sub(one<F>(), minor_used), row.minor))
+
+    let mut step_used = selectors.radix_bit
+    step_used = add(step_used, selectors.carry_bit)
+    step_used = add(step_used, selectors.product_term)
+    step_used = add(step_used, selectors.linear_limb)
+    fold = fold.absorb(mul(sub(one<F>(), step_used), row.step))
+
+    let flag_used = add(
+        selectors.carry_bit,
+        add(selectors.product_term, selectors.product_coefficient),
+    )
+    fold = fold.absorb(mul(sub(one<F>(), flag_used), row.flag))
+
+    let width_used = add(selectors.product_term, selectors.product_coefficient)
+    fold = fold.absorb(mul(sub(one<F>(), width_used), row.width))
+
+    let weight_used = add(selectors.radix_bit, selectors.carry_bit)
+    fold.absorb(mul(sub(one<F>(), weight_used), row.weight))
+}
+
+/// Polynomial local constraints for a sparse control row. No row index, enum,
+/// or host integer enters this evaluator.
+pub fn evaluate_sparse_control_row<F: Radix2Field>(
+    _ challenge: F,
+    _ row: SparseControlRow<F>,
+) -> FixedAirConstraintEvaluation<F> {
+    let fold = absorb_sparse_control_local(ConstraintFold<F>::new(challenge), row)
+    FixedAirConstraintEvaluation {
+        valid: true,
+        constraints: fold.constraints,
+        folded: fold.value,
+    }
+}
+
+fn absorb_sparse_control_edge<F: Radix2Field>(
+    _ fold: own ConstraintFold<F>,
+    _ gate: F,
+    _ next: SparseControlRow<F>,
+    _ major: F,
+    _ minor: F,
+    _ step: F,
+    _ flag: F,
+    _ width: F,
+    _ weight: F,
+) -> ConstraintFold<F> {
+    let mut fold = fold.absorb(mul(gate, sub(next.major, major)))
+    fold = fold.absorb(mul(gate, sub(next.minor, minor)))
+    fold = fold.absorb(mul(gate, sub(next.step, step)))
+    fold = fold.absorb(mul(gate, sub(next.flag, flag)))
+    fold = fold.absorb(mul(gate, sub(next.width, width)))
+    fold.absorb(mul(gate, sub(next.weight, weight)))
+}
+
+fn absorb_sparse_control_link<F: Radix2Field, const L: usize>(
+    _ fold: own ConstraintFold<F>,
+    _ current: SparseControlRow<F>,
+    _ next: SparseControlRow<F>,
+) -> ConstraintFold<F> {
+    let current_selectors = current.selectors
+    let next_selectors = next.selectors
+    let zero = zero<F>()
+    let one = one<F>()
+    let two = natural<F>(2)
+    let limbs = natural<F>(L.downcast_truncate())
+    let last_limb = sub(limbs, one)
+    let last_coefficient = sub(mul(two, limbs), one)
+
+    let radix_bit_to_bit = mul(
+        current_selectors.radix_bit,
+        next_selectors.radix_bit,
+    )
+    let radix_bit_to_limb = mul(
+        current_selectors.radix_bit,
+        next_selectors.radix_limb,
+    )
+    let radix_limb_to_bit = mul(
+        current_selectors.radix_limb,
+        next_selectors.radix_bit,
+    )
+    let radix_limb_to_finish = mul(
+        current_selectors.radix_limb,
+        next_selectors.radix_finish,
+    )
+    let radix_finish_to_bit = mul(
+        current_selectors.radix_finish,
+        next_selectors.radix_bit,
+    )
+    let radix_finish_to_carry = mul(
+        current_selectors.radix_finish,
+        next_selectors.carry_bit,
+    )
+    let carry_bit_to_bit = mul(
+        current_selectors.carry_bit,
+        next_selectors.carry_bit,
+    )
+    let carry_bit_to_finish = mul(
+        current_selectors.carry_bit,
+        next_selectors.carry_finish,
+    )
+    let carry_finish_to_bit = mul(
+        current_selectors.carry_finish,
+        next_selectors.carry_bit,
+    )
+    let carry_finish_to_product = mul(
+        current_selectors.carry_finish,
+        next_selectors.product_term,
+    )
+    let product_term_to_term = mul(
+        current_selectors.product_term,
+        next_selectors.product_term,
+    )
+    let product_term_to_coefficient = mul(
+        current_selectors.product_term,
+        next_selectors.product_coefficient,
+    )
+    let product_coefficient_to_term = mul(
+        current_selectors.product_coefficient,
+        next_selectors.product_term,
+    )
+    let product_coefficient_to_coefficient = mul(
+        current_selectors.product_coefficient,
+        next_selectors.product_coefficient,
+    )
+    let product_coefficient_to_round = mul(
+        current_selectors.product_coefficient,
+        next_selectors.product_round,
+    )
+    let product_round_to_round = mul(
+        current_selectors.product_round,
+        next_selectors.product_round,
+    )
+    let product_round_to_finish = mul(
+        current_selectors.product_round,
+        next_selectors.product_finish,
+    )
+    let product_finish_to_round = mul(
+        current_selectors.product_finish,
+        next_selectors.product_round,
+    )
+    let product_finish_to_linear = mul(
+        current_selectors.product_finish,
+        next_selectors.linear_limb,
+    )
+    let linear_limb_to_limb = mul(
+        current_selectors.linear_limb,
+        next_selectors.linear_limb,
+    )
+    let linear_limb_to_finish = mul(
+        current_selectors.linear_limb,
+        next_selectors.linear_finish,
+    )
+    let linear_finish_to_limb = mul(
+        current_selectors.linear_finish,
+        next_selectors.linear_limb,
+    )
+    let linear_finish_to_boundary = mul(
+        current_selectors.linear_finish,
+        next_selectors.boundary_sign,
+    )
+    let boundary_sign_to_limb = mul(
+        current_selectors.boundary_sign,
+        next_selectors.boundary_limb,
+    )
+    let boundary_limb_to_limb = mul(
+        current_selectors.boundary_limb,
+        next_selectors.boundary_limb,
+    )
+    let boundary_limb_to_sign = mul(
+        current_selectors.boundary_limb,
+        next_selectors.boundary_sign,
+    )
+    let boundary_limb_to_finish = mul(
+        current_selectors.boundary_limb,
+        next_selectors.transition_finish,
+    )
+    let finish_to_padding = mul(
+        current_selectors.transition_finish,
+        next_selectors.padding,
+    )
+    let padding_to_padding = mul(
+        current_selectors.padding,
+        next_selectors.padding,
+    )
+
+    let mut allowed = radix_bit_to_bit
+    allowed = add(allowed, radix_bit_to_limb)
+    allowed = add(allowed, radix_limb_to_bit)
+    allowed = add(allowed, radix_limb_to_finish)
+    allowed = add(allowed, radix_finish_to_bit)
+    allowed = add(allowed, radix_finish_to_carry)
+    allowed = add(allowed, carry_bit_to_bit)
+    allowed = add(allowed, carry_bit_to_finish)
+    allowed = add(allowed, carry_finish_to_bit)
+    allowed = add(allowed, carry_finish_to_product)
+    allowed = add(allowed, product_term_to_term)
+    allowed = add(allowed, product_term_to_coefficient)
+    allowed = add(allowed, product_coefficient_to_term)
+    allowed = add(allowed, product_coefficient_to_coefficient)
+    allowed = add(allowed, product_coefficient_to_round)
+    allowed = add(allowed, product_round_to_round)
+    allowed = add(allowed, product_round_to_finish)
+    allowed = add(allowed, product_finish_to_round)
+    allowed = add(allowed, product_finish_to_linear)
+    allowed = add(allowed, linear_limb_to_limb)
+    allowed = add(allowed, linear_limb_to_finish)
+    allowed = add(allowed, linear_finish_to_limb)
+    allowed = add(allowed, linear_finish_to_boundary)
+    allowed = add(allowed, boundary_sign_to_limb)
+    allowed = add(allowed, boundary_limb_to_limb)
+    allowed = add(allowed, boundary_limb_to_sign)
+    allowed = add(allowed, boundary_limb_to_finish)
+    allowed = add(allowed, finish_to_padding)
+    allowed = add(allowed, padding_to_padding)
+    let mut fold = fold.absorb(sub(allowed, one))
+
+    fold = absorb_sparse_control_edge(
+        fold, radix_bit_to_bit, next,
+        current.major, current.minor, add(current.step, one),
+        zero, zero, mul(two, current.weight),
+    )
+    fold = absorb_sparse_control_edge(
+        fold, radix_bit_to_limb, next,
+        current.major, current.minor, zero, zero, zero, zero,
+    )
+    fold = fold.absorb(mul(
+        radix_bit_to_limb,
+        sub(current.step, natural<F>(12)),
+    ))
+    fold = absorb_sparse_control_edge(
+        fold, radix_limb_to_bit, next,
+        current.major, add(current.minor, one), zero, zero, zero, one,
+    )
+    fold = absorb_sparse_control_edge(
+        fold, radix_limb_to_finish, next,
+        current.major, zero, zero, zero, zero, zero,
+    )
+    fold = fold.absorb(mul(
+        radix_limb_to_finish,
+        sub(current.minor, last_limb),
+    ))
+    fold = absorb_sparse_control_edge(
+        fold, radix_finish_to_bit, next,
+        add(current.major, one), zero, zero, zero, zero, one,
+    )
+    fold = absorb_sparse_control_edge(
+        fold, radix_finish_to_carry, next,
+        zero, zero, zero, zero, zero, one,
+    )
+    fold = fold.absorb(mul(
+        radix_finish_to_carry,
+        sub(current.major, natural<F>(30)),
+    ))
+
+    let carry_reset = sub(next.flag, current.flag)
+    fold = fold.absorb(mul(carry_bit_to_bit, bit_residual(carry_reset)))
+    fold = fold.absorb(mul(
+        carry_bit_to_bit,
+        mul(current.flag, sub(one, next.flag)),
+    ))
+    fold = fold.absorb(mul(
+        carry_bit_to_bit,
+        mul(carry_reset, sub(current.step, natural<F>(17))),
+    ))
+    fold = absorb_sparse_control_edge(
+        fold, carry_bit_to_bit, next,
+        current.major,
+        current.minor,
+        mul(sub(one, carry_reset), add(current.step, one)),
+        next.flag,
+        zero,
+        add(
+            mul(sub(one, carry_reset), mul(two, current.weight)),
+            carry_reset,
+        ),
+    )
+    fold = absorb_sparse_control_edge(
+        fold, carry_bit_to_finish, next,
+        current.major, current.minor, zero, zero, zero, zero,
+    )
+    fold = fold.absorb(mul(carry_bit_to_finish, sub(current.flag, one)))
+    fold = fold.absorb(mul(
+        carry_bit_to_finish,
+        sub(current.step, natural<F>(17)),
+    ))
+
+    let carry_product_delta = sub(next.major, current.major)
+    fold = fold.absorb(mul(
+        carry_finish_to_bit,
+        bit_residual(carry_product_delta),
+    ))
+    fold = absorb_sparse_control_edge(
+        fold, carry_finish_to_bit, next,
+        add(current.major, carry_product_delta),
+        mul(sub(one, carry_product_delta), add(current.minor, one)),
+        zero, zero, zero, one,
+    )
+    fold = fold.absorb(mul(
+        carry_finish_to_bit,
+        mul(carry_product_delta, sub(current.minor, last_coefficient)),
+    ))
+    fold = absorb_sparse_control_edge(
+        fold, carry_finish_to_product, next,
+        zero, zero, zero, zero, one, zero,
+    )
+    fold = fold.absorb(mul(
+        carry_finish_to_product,
+        sub(current.major, natural<F>(2)),
+    ))
+    fold = fold.absorb(mul(
+        carry_finish_to_product,
+        sub(current.minor, last_coefficient),
+    ))
+
+    fold = absorb_sparse_control_edge(
+        fold, product_term_to_term, next,
+        current.major, current.minor, add(current.step, one),
+        current.flag, current.width, zero,
+    )
+    fold = absorb_sparse_control_edge(
+        fold, product_term_to_coefficient, next,
+        current.major, current.minor, zero,
+        current.flag, current.width, zero,
+    )
+    fold = fold.absorb(mul(
+        product_term_to_coefficient,
+        sub(add(current.step, one), current.width),
+    ))
+
+    let next_product_delta = sub(next.major, current.major)
+    let same_product = sub(one, next_product_delta)
+    let descending_rise = sub(next.flag, current.flag)
+    fold = fold.absorb(mul(
+        product_coefficient_to_term,
+        bit_residual(next_product_delta),
+    ))
+    fold = fold.absorb(mul(
+        product_coefficient_to_term,
+        mul(same_product, mul(current.flag, sub(one, next.flag))),
+    ))
+    fold = fold.absorb(mul(
+        product_coefficient_to_term,
+        mul(
+            same_product,
+            mul(descending_rise, sub(current.minor, last_limb)),
+        ),
+    ))
+    fold = absorb_sparse_control_edge(
+        fold, product_coefficient_to_term, next,
+        add(current.major, next_product_delta),
+        mul(same_product, add(current.minor, one)),
+        zero,
+        mul(same_product, next.flag),
+        add(
+            mul(
+                same_product,
+                sub(add(current.width, one), mul(two, next.flag)),
+            ),
+            next_product_delta,
+        ),
+        zero,
+    )
+    fold = fold.absorb(mul(
+        product_coefficient_to_term,
+        mul(next_product_delta, sub(current.minor, last_coefficient)),
+    ))
+    fold = fold.absorb(mul(
+        product_coefficient_to_term,
+        mul(next_product_delta, current.width),
+    ))
+
+    fold = absorb_sparse_control_edge(
+        fold, product_coefficient_to_coefficient, next,
+        current.major, add(current.minor, one), zero, one, zero, zero,
+    )
+    fold = fold.absorb(mul(
+        product_coefficient_to_coefficient,
+        sub(current.minor, sub(last_coefficient, one)),
+    ))
+    fold = fold.absorb(mul(
+        product_coefficient_to_coefficient,
+        sub(current.flag, one),
+    ))
+    fold = fold.absorb(mul(
+        product_coefficient_to_coefficient,
+        sub(current.width, one),
+    ))
+
+    fold = absorb_sparse_control_edge(
+        fold, product_coefficient_to_round, next,
+        zero, zero, zero, zero, zero, zero,
+    )
+    fold = fold.absorb(mul(
+        product_coefficient_to_round,
+        sub(current.major, natural<F>(2)),
+    ))
+    fold = fold.absorb(mul(
+        product_coefficient_to_round,
+        sub(current.minor, last_coefficient),
+    ))
+    fold = fold.absorb(mul(
+        product_coefficient_to_round,
+        sub(current.flag, one),
+    ))
+    fold = fold.absorb(mul(product_coefficient_to_round, current.width))
+
+    fold = absorb_sparse_control_edge(
+        fold, product_round_to_round, next,
+        current.major, add(current.minor, one), zero, zero, zero, zero,
+    )
+    fold = absorb_sparse_control_edge(
+        fold, product_round_to_finish, next,
+        current.major, zero, zero, zero, zero, zero,
+    )
+    fold = fold.absorb(mul(
+        product_round_to_finish,
+        sub(current.minor, last_limb),
+    ))
+    fold = absorb_sparse_control_edge(
+        fold, product_finish_to_round, next,
+        add(current.major, one), zero, zero, zero, zero, zero,
+    )
+    fold = absorb_sparse_control_edge(
+        fold, product_finish_to_linear, next,
+        zero, zero, zero, zero, zero, zero,
+    )
+    fold = fold.absorb(mul(
+        product_finish_to_linear,
+        sub(current.major, natural<F>(2)),
+    ))
+
+    let linear_role_delta = sub(next.minor, current.minor)
+    fold = fold.absorb(mul(
+        linear_limb_to_limb,
+        bit_residual(linear_role_delta),
+    ))
+    fold = absorb_sparse_control_edge(
+        fold, linear_limb_to_limb, next,
+        current.major,
+        add(current.minor, linear_role_delta),
+        mul(sub(one, linear_role_delta), add(current.step, one)),
+        zero, zero, zero,
+    )
+    fold = fold.absorb(mul(
+        linear_limb_to_limb,
+        mul(linear_role_delta, sub(current.step, last_limb)),
+    ))
+    fold = absorb_sparse_control_edge(
+        fold, linear_limb_to_finish, next,
+        current.major, zero, zero, zero, zero, zero,
+    )
+    fold = fold.absorb(mul(
+        linear_limb_to_finish,
+        sub(current.minor, natural<F>(3)),
+    ))
+    fold = fold.absorb(mul(
+        linear_limb_to_finish,
+        sub(current.step, last_limb),
+    ))
+    fold = absorb_sparse_control_edge(
+        fold, linear_finish_to_limb, next,
+        add(current.major, one), zero, zero, zero, zero, zero,
+    )
+    fold = absorb_sparse_control_edge(
+        fold, linear_finish_to_boundary, next,
+        zero, zero, zero, zero, zero, zero,
+    )
+    fold = fold.absorb(mul(
+        linear_finish_to_boundary,
+        sub(current.major, natural<F>(3)),
+    ))
+
+    fold = absorb_sparse_control_edge(
+        fold, boundary_sign_to_limb, next,
+        current.major, zero, zero, zero, zero, zero,
+    )
+    fold = absorb_sparse_control_edge(
+        fold, boundary_limb_to_limb, next,
+        current.major, add(current.minor, one), zero, zero, zero, zero,
+    )
+    fold = absorb_sparse_control_edge(
+        fold, boundary_limb_to_sign, next,
+        add(current.major, one), zero, zero, zero, zero, zero,
+    )
+    fold = fold.absorb(mul(
+        boundary_limb_to_sign,
+        sub(current.minor, last_limb),
+    ))
+    fold = absorb_sparse_control_edge(
+        fold, boundary_limb_to_finish, next,
+        zero, zero, zero, zero, zero, zero,
+    )
+    fold = fold.absorb(mul(
+        boundary_limb_to_finish,
+        sub(current.major, one),
+    ))
+    fold = fold.absorb(mul(
+        boundary_limb_to_finish,
+        sub(current.minor, last_limb),
+    ))
+    fold = absorb_sparse_control_edge(
+        fold, finish_to_padding, next,
+        zero, zero, zero, zero, zero, zero,
+    )
+    absorb_sparse_control_edge(
+        fold, padding_to_padding, next,
+        zero, zero, zero, zero, zero, zero,
+    )
+}
+
+/// Constrain one adjacent pair in the deterministic sparse schedule. Every
+/// residual is polynomial in committed field columns, so the same relation is
+/// meaningful after low-degree extension.
+pub fn evaluate_sparse_control_link<F: Radix2Field, const L: usize>(
+    _ challenge: F,
+    _ current: SparseControlRow<F>,
+    _ next: SparseControlRow<F>,
+) -> FixedAirConstraintEvaluation<F> {
+    let fold = absorb_sparse_control_link<F, L>(
+        ConstraintFold<F>::new(challenge),
+        current,
+        next,
+    )
+    FixedAirConstraintEvaluation {
+        valid: true,
+        constraints: fold.constraints,
+        folded: fold.value,
+    }
+}
+
+pub fn evaluate_sparse_control_initial<F: Radix2Field>(
+    _ challenge: F,
+    _ row: SparseControlRow<F>,
+) -> FixedAirConstraintEvaluation<F> {
+    let mut fold = ConstraintFold<F>::new(challenge)
+    fold = fold.absorb(sub(row.selectors.radix_bit, one<F>()))
+    fold = fold.absorb(row.major)
+    fold = fold.absorb(row.minor)
+    fold = fold.absorb(row.step)
+    fold = fold.absorb(row.flag)
+    fold = fold.absorb(row.width)
+    fold = fold.absorb(sub(row.weight, one<F>()))
+    FixedAirConstraintEvaluation {
+        valid: true,
+        constraints: fold.constraints,
+        folded: fold.value,
+    }
+}
+
+pub fn evaluate_sparse_control_terminal<F: Radix2Field>(
+    _ challenge: F,
+    _ row: SparseControlRow<F>,
+) -> FixedAirConstraintEvaluation<F> {
+    let mut fold = ConstraintFold<F>::new(challenge)
+    fold = fold.absorb(sub(row.selectors.padding, one<F>()))
+    fold = fold.absorb(row.major)
+    fold = fold.absorb(row.minor)
+    fold = fold.absorb(row.step)
+    fold = fold.absorb(row.flag)
+    fold = fold.absorb(row.width)
+    fold = fold.absorb(row.weight)
+    FixedAirConstraintEvaluation {
+        valid: true,
+        constraints: fold.constraints,
+        folded: fold.value,
     }
 }
 

@@ -1,0 +1,163 @@
+//! Thin zero-import Wasm boundary for the sparse control AIR oracle.
+
+use mandelbrot_proof_fixed_air_core::{
+    SparseControlRow,
+    evaluate_sparse_control_initial,
+    evaluate_sparse_control_link,
+    evaluate_sparse_control_row,
+    evaluate_sparse_control_terminal,
+    sparse_control_row_at,
+    sparse_transition_trace_length,
+}
+use precision::baby_bear::BabyBear
+use precision::polynomial::Radix2Field
+
+fn control4(_ index: u32) -> SparseControlRow<BabyBear> {
+    sparse_control_row_at<BabyBear, 4>(index)
+}
+
+pub fn sparse_control4_row(
+    _ index: u32,
+) -> (
+    u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32,
+) {
+    let row = control4(index)
+    let selectors = row.selectors
+    (
+        selectors.radix_bit.to_u32(),
+        selectors.radix_limb.to_u32(),
+        selectors.radix_finish.to_u32(),
+        selectors.carry_bit.to_u32(),
+        selectors.carry_finish.to_u32(),
+        selectors.product_term.to_u32(),
+        selectors.product_coefficient.to_u32(),
+        selectors.product_round.to_u32(),
+        selectors.product_finish.to_u32(),
+        selectors.linear_limb.to_u32(),
+        selectors.linear_finish.to_u32(),
+        selectors.boundary_sign.to_u32(),
+        selectors.boundary_limb.to_u32(),
+        selectors.transition_finish.to_u32(),
+        selectors.padding.to_u32(),
+        row.major.to_u32(),
+        row.minor.to_u32(),
+        row.step.to_u32(),
+        row.flag.to_u32(),
+        row.width.to_u32(),
+        row.weight.to_u32(),
+    )
+}
+
+fn mutate_control4(
+    _ row: SparseControlRow<BabyBear>,
+    _ lane: u32,
+) -> SparseControlRow<BabyBear> {
+    let mut row = row
+    let one = BabyBear::from_u32(1)
+    if lane == 0 {
+        row.selectors.radix_bit = row.selectors.radix_bit.radix2_add(one)
+    }
+    if lane == 1 {
+        row.selectors.radix_limb = row.selectors.radix_limb.radix2_add(one)
+    }
+    if lane == 2 {
+        row.selectors.radix_finish = row.selectors.radix_finish.radix2_add(one)
+    }
+    if lane == 3 {
+        row.selectors.carry_bit = row.selectors.carry_bit.radix2_add(one)
+    }
+    if lane == 4 {
+        row.selectors.carry_finish = row.selectors.carry_finish.radix2_add(one)
+    }
+    if lane == 5 {
+        row.selectors.product_term = row.selectors.product_term.radix2_add(one)
+    }
+    if lane == 6 {
+        row.selectors.product_coefficient =
+            row.selectors.product_coefficient.radix2_add(one)
+    }
+    if lane == 7 {
+        row.selectors.product_round = row.selectors.product_round.radix2_add(one)
+    }
+    if lane == 8 {
+        row.selectors.product_finish = row.selectors.product_finish.radix2_add(one)
+    }
+    if lane == 9 {
+        row.selectors.linear_limb = row.selectors.linear_limb.radix2_add(one)
+    }
+    if lane == 10 {
+        row.selectors.linear_finish = row.selectors.linear_finish.radix2_add(one)
+    }
+    if lane == 11 {
+        row.selectors.boundary_sign = row.selectors.boundary_sign.radix2_add(one)
+    }
+    if lane == 12 {
+        row.selectors.boundary_limb = row.selectors.boundary_limb.radix2_add(one)
+    }
+    if lane == 13 {
+        row.selectors.transition_finish =
+            row.selectors.transition_finish.radix2_add(one)
+    }
+    if lane == 14 {
+        row.selectors.padding = row.selectors.padding.radix2_add(one)
+    }
+    if lane == 15 { row.major = row.major.radix2_add(one) }
+    if lane == 16 { row.minor = row.minor.radix2_add(one) }
+    if lane == 17 { row.step = row.step.radix2_add(one) }
+    if lane == 18 { row.flag = row.flag.radix2_add(one) }
+    if lane == 19 { row.width = row.width.radix2_add(one) }
+    if lane == 20 { row.weight = row.weight.radix2_add(one) }
+    row
+}
+
+pub fn sparse_control4_audit(
+    _ challenge: u32,
+    _ mutation_index: u32,
+    _ mutation_lane: u32,
+) -> (u32, u32, u32) {
+    let challenge = BabyBear::from_u32(challenge)
+    let rows = sparse_transition_trace_length<4>()
+    let mut failures: u32 = 0
+    let mut constraints: u32 = 0
+    let mut previous = control4(0)
+    let mut index: u32 = 0
+    while index < rows {
+        let mut row = control4(index)
+        if index == mutation_index {
+            row = mutate_control4(row, mutation_lane)
+        }
+        let local = evaluate_sparse_control_row(challenge, row)
+        constraints = constraints + local.constraints
+        if !local.valid || local.folded.to_u32() != 0 {
+            failures = failures + 1
+        }
+        if index == 0 {
+            let initial = evaluate_sparse_control_initial(challenge, row)
+            constraints = constraints + initial.constraints
+            if !initial.valid || initial.folded.to_u32() != 0 {
+                failures = failures + 1
+            }
+        } else {
+            let link = evaluate_sparse_control_link<BabyBear, 4>(
+                challenge,
+                previous,
+                row,
+            )
+            constraints = constraints + link.constraints
+            if !link.valid || link.folded.to_u32() != 0 {
+                failures = failures + 1
+            }
+        }
+        previous = row
+        index = index + 1
+    }
+    let terminal = evaluate_sparse_control_terminal(challenge, previous)
+    constraints = constraints + terminal.constraints
+    if !terminal.valid || terminal.folded.to_u32() != 0 {
+        failures = failures + 1
+    }
+    (failures, constraints, rows)
+}

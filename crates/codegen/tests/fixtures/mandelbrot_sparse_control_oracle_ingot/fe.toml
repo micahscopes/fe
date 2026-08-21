@@ -1,0 +1,7 @@
+[ingot]
+name = "mandelbrot_sparse_control_oracle_ingot"
+version = "0.1.0"
+
+[dependencies]
+mandelbrot_proof_fixed_air_core = "../../../../../demos/capstones/mandelbrot-proof/fixed-air-core"
+precision = "../../../../../demos/sketches/precision"
