@@ -764,9 +764,17 @@ Legend:
   FRI fold. The combined zero-import Wasm seam gate builds the receipt in Fe,
   accepts the clean value, and rejects mutations to main rows, auxiliary rows,
   composition values, the main root, pre-LDE transcript, coset shift, and
-  claimed coordinate. It passed 1/1 in 147.31 seconds. A canonical
-  variable-length BabyBear receipt codec and production BabyBear LDE row
-  generation from the canonical trace remain pending. The explicitly named
+  claimed coordinate. It passed 1/1 in 147.31 seconds. Commit `c05b4cb37`
+  closes the production LDE input seam. A typed `EscapesByQ12` claim is now
+  interpreted into its exact canonical four-row trace, then the shared
+  field-generic radix-2 coset LDE derives all 17 main and 411 auxiliary
+  columns. The Fe path commits every generated row without accepting a host
+  witness. Its zero-import Wasm gate independently reconstructs the trace,
+  performs a direct inverse DFT and polynomial evaluation rather than replaying
+  Fe's butterfly schedule, and computes both roots with Plonky3 Poseidon2. It
+  passed 1/1 in 157.08 seconds and rejects non-escaping claims and a zero coset
+  shift. A canonical variable-length BabyBear receipt codec remains pending.
+  The explicitly named
   checkpoint remains a four-row, 16-point toy protocol and is not yet a
   succinct production proof. The same permutation has also
   lowered to Naga-valid u32-only WGSL with the local Sonatina conditional-loop
