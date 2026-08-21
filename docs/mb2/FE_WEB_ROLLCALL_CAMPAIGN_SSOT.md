@@ -1063,15 +1063,34 @@ Legend:
   counters, flags, widths, weights, phase boundaries, and padding all fail.
   The dedicated gate passes 1/1 in 13.20 seconds, and the complete recursive
   fixed-point regression remains green at 1/1 in 148.06 seconds.
+  Commit `fc2d1b4d3` closes the task-selection seam in the arithmetic AIR.
+  Four named linear-role selectors avoid cubic role interpolation, and eight
+  named range-role selectors distinguish coordinates, product low/high/output,
+  and linear sum/differences/output without a 31-way numeric lookup. The range
+  roles constrain the exact signed-node pattern, so unsigned sign lanes remain
+  canonical zero rather than weakening into don't-care witnesses. The complete
+  control row is now 33 readable field columns: 15 task selectors, four linear
+  roles, eight range roles, and six semantic payloads. Its latest independent
+  zero-import audit reconstructs all 4,096 rows and evaluates 1,109,798
+  constraints under three challenges, rejecting mutations across every task,
+  role, payload, handoff, and padding family. It passes 1/1 in 24.32 seconds.
+  `evaluate_sparse_arithmetic_row` and its adjacency interpreter consume only
+  current/next control and six-lane witness rows. Radix weights, carry reset,
+  convolution and rounding scans, linear roles and subtraction mode, boundary
+  equality, transition finish, and canonical padding are all polynomially
+  selected. No task enum or row index enters either production-facing
+  evaluator. The complete selector-only L4 audit evaluates 413,678 arithmetic
+  constraints under three challenges and rejects directed mutations in every
+  semantic family. The older enum-based phase oracles remain independent
+  compatibility checks. The full recursive fixed-point gate passes 1/1 in
+  97.91 seconds.
   This root authenticates the exact base trace but is not yet a succinct leaf
   proof. The constrained control trace must now be committed beside the six
-  witness lanes, and the task-specific arithmetic evaluators must replace enum
-  matches with polynomial selector gating at LDE points. The four random-power
-  copy balances also need committed interaction accumulators with zero
-  boundary constraints. Those columns must then enter the existing BabyBear
-  LDE, composition, multi-query, FRI, and canonical receipt interpreters. Only
-  that authenticated AIR/FRI receipt may replace semantic replay in the
-  recursive parent carrier.
+  witness lanes. The four random-power copy balances also need committed
+  interaction accumulators with zero boundary constraints. Those columns must
+  then enter the existing BabyBear LDE, composition, multi-query, FRI, and
+  canonical receipt interpreters. Only that authenticated AIR/FRI receipt may
+  replace semantic replay in the recursive parent carrier.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
   The first arithmetic-plan consolidation is landed at `ba2ded864`: one
