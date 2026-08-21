@@ -18,6 +18,9 @@ use mandelbrot_proof_fixed_air::{
 use mandelbrot_proof_fixed_air_baby_bear::{
     SparseBaseAirRow,
     SparseBaseAirFields,
+    SparseBaseAirEvaluationTrace,
+    SparseBaseAirLdeCodeword,
+    SparseBaseLdeDigest,
     SparseAirEvaluationTrace,
     SparseAirLdeCodeword,
     SparseInteractionAccumulators,
@@ -32,15 +35,19 @@ use mandelbrot_proof_fixed_air_baby_bear::{
     evaluate_sparse_composition_opened,
     sparse_base_air_row_from_witness,
     sparse_base_air_fields,
+    sparse_base_lde_root_power_of_two,
     sparse_constraint_numerators_opened,
     sparse_interaction_air_fields,
     sparse_interaction_challenges,
+    sparse_lde_interaction_challenges,
     sparse_interaction_trace_root_power_of_two,
     sparse_opened_air_row,
     sparse_trace_root_power_of_two,
     verify_sparse_trace_authentication,
     write_sparse_air_evaluation_trace,
     write_sparse_air_lde,
+    write_sparse_base_air_evaluation_trace,
+    write_sparse_base_air_lde,
     write_sparse_interaction_air_rows,
     write_sparse_trace_authentication_power_of_two,
     zero_sparse_base_air_row,
@@ -181,7 +188,12 @@ pub fn sparse_interaction_challenges4(
         valid: valid == 1,
         value: Poseidon2Digest::from_u32s([r0, r1, r2, r3, r4, r5, r6, r7]),
     }
-    let challenges = sparse_interaction_challenges(root)
+    interaction_challenge_words(sparse_interaction_challenges(root))
+}
+
+fn interaction_challenge_words(
+    _ challenges: mandelbrot_proof_fixed_air_baby_bear::SparseInteractionChallenges,
+) -> [u32; 33] {
     let values = [
         challenges.product.beta,
         challenges.product.gamma,
@@ -205,6 +217,20 @@ pub fn sparse_interaction_challenges4(
         value = value + 1
     }
     words
+}
+
+pub fn sparse_lde_interaction_challenges4(
+    _ valid: u32,
+    _ r0: u32, _ r1: u32, _ r2: u32, _ r3: u32,
+    _ r4: u32, _ r5: u32, _ r6: u32, _ r7: u32,
+) -> [u32; 33] {
+    let root: SparseBaseLdeDigest<4, 4, 16> = SparseBaseLdeDigest {
+        valid: valid == 1,
+        value: Poseidon2Digest::from_u32s([
+            r0, r1, r2, r3, r4, r5, r6, r7,
+        ]),
+    }
+    interaction_challenge_words(sparse_lde_interaction_challenges(root))
 }
 
 fn write_sparse_air_rows4(
@@ -323,6 +349,66 @@ pub fn fixed_transition4_sparse_air_lde_encoded(
         BrowserWordWriter::allocate(words),
     )
     encode_canonical_word_stream(ref rejection, writer).finish()
+}
+
+/// Commit the independently placeable base LDE before constructing any
+/// interaction witness. A directed field mutation provides a root-level
+/// binding gate without involving the later interaction codeword.
+pub fn fixed_transition4_sparse_base_lde_root(
+    _ prn: u32, _ pr0: u32, _ pr1: u32, _ pr2: u32, _ pr3: u32,
+    _ pin: u32, _ pi0: u32, _ pi1: u32, _ pi2: u32, _ pi3: u32,
+    _ crn: u32, _ cr0: u32, _ cr1: u32, _ cr2: u32, _ cr3: u32,
+    _ cin: u32, _ ci0: u32, _ ci1: u32, _ ci2: u32, _ ci3: u32,
+    _ mutation: u32,
+) -> [u32; 9] {
+    if mutation > 1 { return [0; 9] }
+    let (point, current, witness) = transition4(
+        prn, [pr0, pr1, pr2, pr3], pin, [pi0, pi1, pi2, pi3],
+        crn, [cr0, cr1, cr2, cr3], cin, [ci0, ci1, ci2, ci3],
+    )
+    let next = fixed_mandelbrot_transition_output(witness)
+    let mut rows = [zero_sparse_base_air_row(); 4]
+    let mut index: usize = 0
+    while index < 4 {
+        rows[index] = sparse_base_air_row_from_witness<4>(
+            index.downcast_truncate(), point, current, next, witness,
+        )
+        index = index + 1
+    }
+    let mut evaluations: SparseBaseAirEvaluationTrace<4> =
+        SparseBaseAirEvaluationTrace {
+            valid: false,
+            values: [[BabyBear::zero(); SPARSE_BASE_AIR_FIELDS]; 4],
+        }
+    if !write_sparse_base_air_evaluation_trace<4>(
+        ref rows,
+        mut evaluations,
+    ) {
+        return [0; 9]
+    }
+    let mut lde: SparseBaseAirLdeCodeword<16> = SparseBaseAirLdeCodeword {
+        valid: false,
+        values: [[BabyBear::zero(); SPARSE_BASE_AIR_FIELDS]; 16],
+    }
+    if !write_sparse_base_air_lde<4, 16>(
+        ref evaluations,
+        BabyBear::from_u32(7),
+        mut lde,
+    ) {
+        return [0; 9]
+    }
+    if mutation == 1 {
+        lde.values[0][35] = lde.values[0][35] + BabyBear::one()
+    }
+    let root = sparse_base_lde_root_power_of_two<4, 4, 16>(ref lde)
+    let mut output = [0; 9]
+    output[0] = if root.valid { 1 } else { 0 }
+    index = 0
+    while index < 8 {
+        output[1 + index] = root.value.field(index.downcast_truncate()).to_u32()
+        index = index + 1
+    }
+    output
 }
 
 /// Exercise typed LDE-row reconstruction and the complete sparse composition

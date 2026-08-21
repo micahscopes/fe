@@ -1876,14 +1876,30 @@ fn expected_sparse_trace_root(point: &ComplexFx, current: &ComplexFx) -> [u32; 8
     reference_merkle_root(leaves)
 }
 
-fn expected_sparse_interaction_challenges(root: [u32; 8]) -> Vec<u32> {
+fn expected_interaction_challenges_for_domains(root: [u32; 8], domains: [&[u8; 4]; 8]) -> Vec<u32> {
     let mut words = vec![1];
-    for tag in [
-        b"PB01", b"PG01", b"RB01", b"RG01", b"LB01", b"LG01", b"BB01", b"BG01",
-    ] {
+    for tag in domains {
         words.extend(&reference_poseidon_digest(tag, &root)[..4]);
     }
     words
+}
+
+fn expected_sparse_interaction_challenges(root: [u32; 8]) -> Vec<u32> {
+    expected_interaction_challenges_for_domains(
+        root,
+        [
+            b"PB01", b"PG01", b"RB01", b"RG01", b"LB01", b"LG01", b"BB01", b"BG01",
+        ],
+    )
+}
+
+fn expected_sparse_lde_interaction_challenges(root: [u32; 8]) -> Vec<u32> {
+    expected_interaction_challenges_for_domains(
+        root,
+        [
+            b"PB02", b"PG02", b"RB02", b"RG02", b"LB02", b"LG02", b"BB02", b"BG02",
+        ],
+    )
 }
 
 fn expected_sparse_interaction_challenge_values(root: [u32; 8]) -> [Ext4; 8] {
@@ -2103,6 +2119,25 @@ fn expected_sparse_air_lde_words(prefix: &[u32]) -> Vec<u32> {
     words.extend(interaction);
     assert_eq!(words.len(), 2_001, "sparse LDE schema must stay nominal");
     words
+}
+
+fn expected_sparse_base_lde_root(lde: &[u32], mutate: bool) -> [u32; 8] {
+    const BASE_FIELDS: usize = 41;
+    const LDE: usize = 16;
+    assert!(lde.len() >= 1 + LDE * BASE_FIELDS);
+    assert_eq!(lde[0], 1, "base LDE must be valid before commitment");
+    let mut leaves = Vec::with_capacity(LDE);
+    for index in 0..LDE {
+        let mut fields = vec![LIMBS as u32, 4, LDE as u32, index as u32];
+        let start = 1 + index * BASE_FIELDS;
+        let mut row = lde[start..start + BASE_FIELDS].to_vec();
+        if mutate && index == 0 {
+            row[35] = bb_add(row[35], 1);
+        }
+        fields.extend(row);
+        leaves.push(reference_poseidon_digest(b"LD01", &fields));
+    }
+    reference_merkle_root(leaves)
 }
 
 fn expected_committed_words(
@@ -4108,6 +4143,70 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
             "sparse LDE word {index} must match the independent oracle",
         );
     }
+
+    let mut production_roots = Vec::new();
+    for mutation in 0u32..=1 {
+        let mut root_arguments = arguments[..20].to_vec();
+        root_arguments.push(mutation);
+        let actual = call(
+            &mut store,
+            &instance,
+            "fixed_transition4_sparse_base_lde_root",
+            &root_arguments,
+            9,
+        );
+        assert_eq!(actual[0], 1, "base LDE root must be valid");
+        let expected_root = expected_sparse_base_lde_root(&expected_lde, mutation == 1);
+        assert_eq!(
+            actual[1..],
+            expected_root,
+            "base LDE root mutation {mutation} must match independent Plonky3",
+        );
+        let mut challenge_arguments = vec![1];
+        challenge_arguments.extend(expected_root);
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "sparse_lde_interaction_challenges4",
+                &challenge_arguments,
+                33,
+            ),
+            expected_sparse_lde_interaction_challenges(expected_root),
+            "production interaction challenges must follow the committed base LDE",
+        );
+        production_roots.push(expected_root);
+    }
+    assert_ne!(
+        production_roots[0], production_roots[1],
+        "a base LDE mutation must alter the production challenge seed",
+    );
+    let mut invalid_root_arguments = vec![0];
+    invalid_root_arguments.extend(production_roots[0]);
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "sparse_lde_interaction_challenges4",
+            &invalid_root_arguments,
+            33,
+        ),
+        vec![0; 33],
+        "invalid base LDE roots must not yield production challenges",
+    );
+    let mut invalid_mutation_arguments = arguments[..20].to_vec();
+    invalid_mutation_arguments.push(2);
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "fixed_transition4_sparse_base_lde_root",
+            &invalid_mutation_arguments,
+            9,
+        ),
+        [0; 9],
+        "unknown base LDE mutations must fail closed",
+    );
 
     const BASE_FIELDS: usize = 41;
     const INTERACTION_FIELDS: usize = 84;
