@@ -1317,14 +1317,41 @@ Legend:
   seconds. The full 4,096-row production writer Fe-checks but has not been
   executed as a scalar full-codeword claim; that placement belongs to the
   pending WebGPU schedule.
+  The authenticated sparse LDE carrier is now implemented and independently
+  gated. One role-branded `MerkleMultiOpening` representation in the narrow
+  `merkle_receipt` ingot supplies canonical counted values plus the established
+  `MerkleMultiPath`; arithmetic-only `merkle_core` consumers do not inherit the
+  generated receipt codec. `LD01` and `LD02` writers use the exact shared leaf
+  constructors used by their root commitments, normalize unsorted duplicate
+  requests through `merkle_core`, require the reconstructed root to equal the
+  transcript-bound root, and retain only requested evaluations. Verifiers
+  reject nonzero unused capacity and reconstruct the dependency-bound `LD02`
+  leaves from the exact retained `LD01` root. A typed row adapter recovers one
+  `SparseOpenedAirRow` only when both authenticated paths contain the same
+  index. The zero-import Fe/Wasm gate matches independent Plonky3 `LD01` and
+  `LD02` roots and selected LDE values, then rejects ten value, sibling, index,
+  unused-capacity, dependency-root, and missing-row mutations. It passes 1/1
+  in 838.33 seconds. A separate small carrier-codec gate proves canonical
+  roundtrip, semantic authentication, truncation and trailing-data rejection,
+  and authenticated value-mutation rejection in 2.80 seconds.
+  A fresh uncached rerun also exposed that the older all-in-one toy receipt
+  fixture now emits a single Wasm function larger than wasmparser's 7,654,321
+  byte limit. Removing the new carrier from that fixture's dependency graph
+  leaves the same failure and byte offset, so this is a pre-existing
+  whole-receipt generated-decoder cost, not an `LD01`/`LD02` semantic
+  regression. The validator limit was not weakened. Production receipt
+  encoding must use staged canonical decoders rather than one monolithic
+  generated function.
   `SL03` and `SI01` remain exact semantic checkpoints rather than production
   proof roots. `LD01`, `LD02`, and the shared `BC02` composition root now cover
   the production codewords, including the fixed-position public relation, but
   this is not yet a succinct recursive leaf proof. The next layer must carry
-  the required `LD01` public positions through authenticated multi-query
-  openings, then reuse the existing FRI and canonical receipt interpreters.
-  Only that complete AIR/FRI receipt may replace semantic replay in the
-  recursive parent carrier.
+  transcript-selected `LD01` and `LD02` evaluations through the existing
+  multi-query geometry, recompute the fixed-position public relation at those
+  points, and bind it to authenticated `BC02` values plus the existing FRI
+  folds. Staged canonical receipt decoding must then replace the oversized toy
+  decoder. Only that complete AIR/FRI receipt may replace semantic replay in
+  the recursive parent carrier.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
   The first arithmetic-plan consolidation is landed at `ba2ded864`: one
@@ -1410,10 +1437,10 @@ fallback. The semantic receipts are:
 ## Immediate burn-down order
 
 1. Run the external real-GPU handoff above before beginning the proof GPU port.
-2. Finish the authenticated BabyBear sparse AIR: carry the task-derived public
-   boundary positions through authenticated `LD01` multi-openings, then feed
-   the existing public-bound `LD01`/`LD02`/`BC02` relation through multi-query,
-   FRI, and the canonical receipt layers.
+2. Finish the authenticated BabyBear sparse AIR receipt: feed the now-gated
+   `LD01`/`LD02` openings and public-bound `BC02` relation through the existing
+   multi-query and FRI layers, then encode them through staged canonical
+   receipt decoders.
 3. Lower the BabyBear leaf prover and recursive merges through Fe Conal/CTFE
    WebGPU schedules, then run the complete progressive proof/verify/tamper page
    through Chrome.
