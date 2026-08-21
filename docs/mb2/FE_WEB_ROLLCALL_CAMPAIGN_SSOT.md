@@ -1227,11 +1227,32 @@ Legend:
   seconds. The full-table writer Fe-checks, but its practical execution remains
   part of the production LDE and WebGPU placement gate, not a scalar-Wasm
   performance claim.
+  Commit `d9120e986` carries those nominal rows through the next two protocol
+  seams without introducing a 125-column index map. The generic fixed-AIR
+  control, witness, and four interaction records now derive their canonical
+  word traversal directly, and the BabyBear commitment layer aliases those
+  exact records instead of maintaining field-for-field copies. One generic
+  column interpreter places the reflection-derived 41 base and 84 interaction
+  columns through the shared caller-owned radix-2 LDE. The inverse interpreter
+  reconstructs typed quartic opened rows from authenticated base-field lanes.
+  All local, pair, initial, and terminal constraint evaluators feed a shared
+  four-family numerator record, whose zerofier quotient now lives beside
+  `Radix2Field` rather than in a Mandelbrot-specific backend. The zero-import
+  Wasm gate independently reconstructs every LDE field with a direct u64 DFT,
+  checks current and next typed-row geometry, applies the quartic quotient
+  independently at four evaluation points under two challenges, rejects two
+  invalid requests, and proves directed base and interaction mutations alter
+  both the relevant numerator family and final composition. It passes 1/1 in
+  273.67 seconds. The executed checkpoint remains the honest four-row to
+  sixteen-point placement gate; full 4,096-row placement is reserved for the
+  production GPU schedule.
   `SL03` and `SI01` now authenticate the exact base and interaction witness
-  traces, but they are not yet a succinct leaf proof. Both traces must now be
-  carried through the existing BabyBear LDE, composition, multi-query, FRI,
-  and canonical receipt interpreters. Only that authenticated AIR/FRI receipt
-  may replace semantic replay in the recursive parent carrier.
+  traces, and their typed LDE/composition seam is now gated, but they are not
+  yet a succinct leaf proof. The production layer must next commit the full
+  base, interaction, and composition codewords, bind them into the typed
+  transcript, then reuse the existing multi-query, FRI, and canonical receipt
+  interpreters. Only that authenticated AIR/FRI receipt may replace semantic
+  replay in the recursive parent carrier.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
   The first arithmetic-plan consolidation is landed at `ba2ded864`: one
