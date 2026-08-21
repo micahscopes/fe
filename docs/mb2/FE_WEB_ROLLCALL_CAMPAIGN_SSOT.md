@@ -1047,13 +1047,31 @@ Legend:
   length, and out-of-range request. It passes 1/1 in 66.20 seconds; the older
   independent BabyBear LDE multipath regression remains green at 1/1 in
   545.02 seconds.
+  Commit `cfdea6d36` closes the deterministic sparse-control relation. Fifteen
+  named `SparseControlSelectors<F>` columns identify semantic task kinds
+  without a numeric phase ID. Six field-valued payload columns carry the
+  generated node, limb, bit or term counters, carry/convolution flag,
+  convolution width, and radix weight. One field-neutral AIR constrains every
+  selector to be boolean and one-hot, zeros unused payloads, fixes the initial
+  and terminal rows, and admits only the exact radix, carry, convolution,
+  rounding, linear, boundary, finish, and padding transitions. Its evaluator
+  takes only current and next field rows. It does not consult a row index or
+  dispatch through `SparseTransitionTask`, so it remains meaningful on LDE
+  evaluations. The independent Rust oracle reconstructs all 4,096 L4 control
+  rows, while zero-import Fe Wasm evaluates 954,172 local, adjacency, and
+  boundary constraints under three challenges. Mutations to selectors,
+  counters, flags, widths, weights, phase boundaries, and padding all fail.
+  The dedicated gate passes 1/1 in 13.20 seconds, and the complete recursive
+  fixed-point regression remains green at 1/1 in 148.06 seconds.
   This root authenticates the exact base trace but is not yet a succinct leaf
-  proof. The task schedule still needs polynomial fixed-selector or constrained
-  control columns at LDE points, and the four random-power copy balances need
-  committed interaction accumulators with zero boundary constraints. Those
-  columns must then enter the existing BabyBear LDE, composition, multi-query,
-  FRI, and canonical receipt interpreters. Only that authenticated AIR/FRI
-  receipt may replace semantic replay in the recursive parent carrier.
+  proof. The constrained control trace must now be committed beside the six
+  witness lanes, and the task-specific arithmetic evaluators must replace enum
+  matches with polynomial selector gating at LDE points. The four random-power
+  copy balances also need committed interaction accumulators with zero
+  boundary constraints. Those columns must then enter the existing BabyBear
+  LDE, composition, multi-query, FRI, and canonical receipt interpreters. Only
+  that authenticated AIR/FRI receipt may replace semantic replay in the
+  recursive parent carrier.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
   The first arithmetic-plan consolidation is landed at `ba2ded864`: one
