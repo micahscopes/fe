@@ -2077,6 +2077,9 @@ pub enum TrackedItemVariant<'db> {
     Expansion,
     FuncBody,
     NamelessBody,
+    /// Synthetic one-path body forwarding a const generic parameter into a
+    /// provider-derived impl self type.
+    DeriveConstArg(u32),
     /// Anonymous `bool`-expected const body of a bare const-expression
     /// predicate in a `where` clause, indexed by its position among the
     /// clause's const predicates.
@@ -2142,6 +2145,7 @@ impl<'db> TrackedItemVariant<'db> {
             Self::Expansion => "Expansion".into(),
             Self::FuncBody => "FuncBody".into(),
             Self::NamelessBody => "NamelessBody".into(),
+            Self::DeriveConstArg(idx) => format!("DeriveConstArg({idx})"),
             Self::WhereConstPredicate(idx) => format!("WhereConstPredicate({idx})"),
             Self::StaticAssertCondition => "StaticAssertCondition".into(),
             Self::StaticAssertComparisonLhs => "StaticAssertComparisonLhs".into(),

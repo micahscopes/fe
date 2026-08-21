@@ -32,6 +32,7 @@ use salsa::Accumulator as _;
 use super::{
     FileLowerCtxt,
     attr::{AttrForm, AttrRule, AttrTarget, has_named_attr, named_attr_specs, validate_attr_rules},
+    body::BodyCtxt,
     hir_builder::HirBuilder,
     provider::{
         self, FieldName, ProviderSelection, ReflectedField, ReflectedVariant, ReflectedVariantKind,
@@ -43,12 +44,13 @@ use super::{
 use crate::{
     HirDb,
     hir_def::{
-        Enum, GenericArg, GenericArgListId, GenericParam, GenericParamListId, IdentId, ItemKind,
-        Partial, PathId, PathKind, Struct, TopLevelMod, TraitRefId, TypeGenericArg,
-        TypeGenericParam, TypeId, TypeKind, VariantKind, Visibility, WhereClauseId, WherePredicate,
+        BodyKind, ConstGenericArg, ConstGenericArgValue, Enum, Expr, GenericArg, GenericArgListId,
+        GenericParam, GenericParamListId, IdentId, ItemKind, Partial, PathId, PathKind, Struct,
+        TopLevelMod, TrackedItemVariant, TraitRefId, TypeGenericArg, TypeGenericParam, TypeId,
+        TypeKind, VariantKind, Visibility, WhereClauseId, WherePredicate,
         scope_graph::{ScopeGraph, ScopeId},
     },
-    span::DeriveDesugared,
+    span::{DeriveDesugared, HirOrigin},
 };
 
 /// The targets on which a `#[default]` attribute is meaningful. Used both
@@ -80,9 +82,6 @@ pub struct DeriveSecondarySpan {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DeriveErrorKind {
-    /// `#[derive(..)]` on an item with const generic parameters is not yet
-    /// supported (type generic parameters are).
-    ConstGeneric { item_kind: &'static str },
     /// The derive argument has no canonical core provider. `available`
     /// lists the traits the visible core providers can derive.
     UnknownTrait {
@@ -327,38 +326,41 @@ pub(super) struct DeriveGenerics<'db> {
     pub(super) impl_params: GenericParamListId<'db>,
     /// The item's own where-clause predicates, copied onto each impl.
     pub(super) inherited_preds: Vec<WherePredicate<'db>>,
-    /// Each type param as a path type (`A`, `B`, ..). A provider `require`
-    /// whose type mentions one of these (a generic-param requirement) becomes a
-    /// real where-predicate on the impl; a fully-concrete requirement does not
-    /// (it is a concrete obligation discharged at the generated body's use
-    /// site). See [`super::provider_synthesis::requirement_where_clause`].
-    pub(super) param_tys: Vec<TypeId<'db>>,
+    /// Every type or const parameter name. A provider `require` whose type
+    /// mentions one of these becomes a real where-predicate on the impl; a
+    /// fully-concrete requirement does not. See
+    /// [`super::provider_synthesis::requirement_where_clause`].
+    pub(super) param_names: Vec<IdentId<'db>>,
     /// `<A, B>` argument list applied to the item's name in the impl self
     /// type; `GenericArgListId::none` for non-generic items.
     pub(super) self_ty_args: GenericArgListId<'db>,
 }
 
 /// Builds the [`DeriveGenerics`] for an item with the given generic params
-/// and where clause. Returns `None` (skipping impl generation) when the item
-/// has const generic params — reported with a precise diagnostic — or when a
-/// param name is missing due to a parser error (reported elsewhere).
+/// and where clause. Type and const parameters are both forwarded into the
+/// generated impl. Const arguments use a synthetic one-path body so ordinary
+/// type lowering resolves them against the generated impl's parameter scope.
+/// Returns `None` only when a parameter name is missing due to a parser error.
 fn derive_generics<'db>(
     ctxt: &mut FileLowerCtxt<'db>,
-    item_name: &Option<String>,
-    item_kind: &'static str,
+    parent: ScopeId<'db>,
+    parent_vis: Visibility,
+    _item_name: &Option<String>,
+    _item_kind: &'static str,
     generic_params: GenericParamListId<'db>,
     where_clause: WhereClauseId<'db>,
-    generic_params_range: impl FnOnce() -> parser::TextRange,
+    _generic_params_range: impl FnOnce() -> parser::TextRange,
 ) -> Option<DeriveGenerics<'db>> {
     let db = ctxt.db();
 
     let mut impl_params = Vec::new();
-    let mut param_tys = Vec::new();
+    let mut param_names = Vec::new();
     let mut args = Vec::new();
     for param in generic_params.data(db) {
         match param {
             GenericParam::Type(ty_param) => {
                 let name = ty_param.name.to_opt()?;
+                param_names.push(name);
                 let ty = TypeId::new(
                     db,
                     TypeKind::Path(Partial::Present(PathId::from_ident(db, name))),
@@ -368,19 +370,31 @@ fn derive_generics<'db>(
                     bounds: ty_param.bounds.clone(),
                     default_ty: None,
                 }));
-                param_tys.push(ty);
                 args.push(GenericArg::Type(TypeGenericArg {
                     ty: Partial::Present(ty),
                 }));
             }
-            GenericParam::Const(_) => {
-                accumulate_error(
-                    ctxt,
-                    item_name,
-                    DeriveErrorKind::ConstGeneric { item_kind },
-                    generic_params_range(),
+            GenericParam::Const(const_param) => {
+                let name = const_param.name.to_opt()?;
+                param_names.push(name);
+                impl_params.push(GenericParam::Const(crate::hir_def::ConstGenericParam {
+                    name: const_param.name,
+                    ty: const_param.ty,
+                    default: None,
+                }));
+                let index = args.len() as u32;
+                ctxt.enter_shim_scope(parent, parent_vis);
+                let id = ctxt.joined_id(TrackedItemVariant::DeriveConstArg(index));
+                let mut body_ctxt = BodyCtxt::new(ctxt, id);
+                let expr = body_ctxt.push_expr(
+                    Expr::Path(Partial::Present(PathId::from_ident(db, name))),
+                    HirOrigin::None,
                 );
-                return None;
+                let body = body_ctxt.build(None, expr, BodyKind::Anonymous);
+                ctxt.leave_shim_scope();
+                args.push(GenericArg::Const(ConstGenericArg {
+                    value: ConstGenericArgValue::Expr(Partial::Present(body)),
+                }));
             }
         }
     }
@@ -394,7 +408,7 @@ fn derive_generics<'db>(
     Some(DeriveGenerics {
         impl_params: GenericParamListId::new(db, impl_params),
         inherited_preds: where_clause.data(db).clone(),
-        param_tys,
+        param_names,
         self_ty_args,
     })
 }
@@ -492,6 +506,8 @@ fn lower_struct_derives_inner<'db>(
 
     let Some(generics) = derive_generics(
         ctxt,
+        parent,
+        parent_vis,
         &item_name,
         "struct",
         struct_.generic_params(db),
@@ -649,6 +665,8 @@ pub(super) fn lower_enum_derives<'db>(
 
     let Some(generics) = derive_generics(
         ctxt,
+        parent,
+        parent_vis,
         &item_name,
         "enum",
         enum_.generic_params(db),

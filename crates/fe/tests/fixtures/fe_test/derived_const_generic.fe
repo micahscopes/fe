@@ -1,0 +1,65 @@
+// Provider derives must forward const parameters into ordinary generated
+// impls, including when one derived trait feeds a blanket implementation used
+// by a second derived trait.
+
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+
+trait Leaf {
+    fn value(ref self) -> u32
+}
+
+struct LeafProvider {}
+impl Derive<Leaf> for LeafProvider {
+    const fn derive<T>(ev: own Evidence<Leaf<T>>) -> Evidence<Leaf<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<Leaf<T>>)
+    {
+        let mut value = builder.int(0)
+        for field in reflect.fields() {
+            value = builder.field_get(builder.self_ref(), field)
+        }
+        builder.emit_method("value", value)
+        builder.finish()
+        ev
+    }
+}
+
+trait Lifted {
+    fn lifted(ref self) -> u32
+}
+
+impl<T: Leaf> Lifted for T {
+    fn lifted(ref self) -> u32 { self.value() }
+}
+
+trait EnvelopeValue {
+    fn envelope_value(ref self) -> u32
+}
+
+struct EnvelopeProvider {}
+impl Derive<EnvelopeValue> for EnvelopeProvider {
+    const fn derive<T>(ev: own Evidence<EnvelopeValue<T>>)
+        -> Evidence<EnvelopeValue<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<EnvelopeValue<T>>)
+    {
+        let mut value = builder.int(0)
+        for field in reflect.fields() {
+            builder.require<Lifted>(field.ty())
+            value = builder.call(builder.field_get(builder.self_ref(), field), "lifted")
+        }
+        builder.emit_method("envelope_value", value)
+        builder.finish()
+        ev
+    }
+}
+
+struct RoundValue<const ROUND: u32> { value: u32 }
+derive Leaf for RoundValue<ROUND> using LeafProvider
+
+struct Envelope<const ROUND: u32> { round: RoundValue<ROUND> }
+derive EnvelopeValue for Envelope<ROUND> using EnvelopeProvider
+
+#[test]
+fn const_generic_derive_composes_through_blanket_impl() {
+    let value = Envelope<7> { round: RoundValue<7> { value: 41 } }
+    assert!(value.envelope_value() == 41)
+}

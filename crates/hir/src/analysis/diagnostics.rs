@@ -657,17 +657,6 @@ impl DiagnosticVoucher for crate::DeriveError {
         let item_name = self.item_name.as_deref().unwrap_or("<unknown>");
 
         let (code, message, label, notes) = match &self.kind {
-            DeriveErrorKind::ConstGeneric { item_kind } => (
-                1,
-                format!(
-                    "`#[derive(..)]` on {item_kind}s with const generic parameters is not yet supported"
-                ),
-                format!("`{item_name}` has const generic parameters"),
-                vec![
-                    "remove the const generic parameters or implement the trait manually"
-                        .to_string(),
-                ],
-            ),
             DeriveErrorKind::UnknownTrait { name, available } => (
                 2,
                 format!("cannot derive `{name}`"),

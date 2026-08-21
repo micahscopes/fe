@@ -31,10 +31,11 @@ use super::{
 use crate::{
     HirDb,
     hir_def::{
-        ArithBinOp, AssocConstDef, AssocTyDef, BinOp, CompBinOp, Expr, ExprId, Field, FieldIndex,
-        FuncModifiers, FuncParam, FuncParamName, GenericArg, IdentId, IntegerId, LitKind,
-        LogicalBinOp, MatchArm, Partial, PathId, PathKind, RecordPatField, TraitRefId, TupleTypeId,
-        TypeBound, TypeId, TypeKind, Visibility, WhereClauseId, WherePredicate,
+        ArithBinOp, AssocConstDef, AssocTyDef, BinOp, CompBinOp, ConstGenericArgValue, Expr,
+        ExprId, Field, FieldIndex, FuncModifiers, FuncParam, FuncParamName, GenericArg, IdentId,
+        IntegerId, LitKind, LogicalBinOp, MatchArm, Partial, PathId, PathKind, RecordPatField,
+        TraitRefId, TupleTypeId, TypeBound, TypeId, TypeKind, Visibility, WhereClauseId,
+        WherePredicate,
     },
     span::DeriveDesugared,
 };
@@ -215,11 +216,7 @@ fn requirement_where_clause<'db>(
     generics: &super::derive::DeriveGenerics<'db>,
     output: &ProviderOutput<'db>,
 ) -> WhereClauseId<'db> {
-    let param_names: Vec<IdentId<'db>> = generics
-        .param_tys
-        .iter()
-        .filter_map(|param_ty| ty_as_bare_ident(db, *param_ty))
-        .collect();
+    let param_names = &generics.param_names;
 
     let mut preds = generics.inherited_preds.clone();
     let mut seen: Vec<(TypeId<'db>, PathId<'db>)> = Vec::new();
@@ -234,7 +231,7 @@ fn requirement_where_clause<'db>(
         // Concrete requirements are discharged at the generated body's use site,
         // not as a predicate (see the doc comment): only generic-param
         // requirements become where-predicates.
-        if !ty_mentions_param(db, *ty, &param_names) {
+        if !ty_mentions_param(db, *ty, param_names) {
             continue;
         }
         if seen.contains(&(*ty, *trait_path)) {
@@ -253,14 +250,6 @@ fn requirement_where_clause<'db>(
     WhereClauseId::new(db, preds, vec![])
 }
 
-/// The identifier of `ty` when it is a bare single-segment path type.
-fn ty_as_bare_ident<'db>(db: &'db dyn HirDb, ty: TypeId<'db>) -> Option<IdentId<'db>> {
-    match ty.data(db) {
-        TypeKind::Path(path) => path.to_opt()?.as_ident(db),
-        _ => None,
-    }
-}
-
 /// Whether `ty` syntactically mentions any of the target's generic parameter
 /// names — i.e. whether the requirement is generic (vs fully concrete).
 fn ty_mentions_param<'db>(db: &'db dyn HirDb, ty: TypeId<'db>, params: &[IdentId<'db>]) -> bool {
@@ -274,9 +263,11 @@ fn ty_mentions_param<'db>(db: &'db dyn HirDb, ty: TypeId<'db>, params: &[IdentId
         TypeKind::Ptr(inner) | TypeKind::Mode(_, inner) => inner
             .to_opt()
             .is_some_and(|inner| ty_mentions_param(db, inner, params)),
-        TypeKind::Array(elem, _len) => elem
-            .to_opt()
-            .is_some_and(|elem| ty_mentions_param(db, elem, params)),
+        TypeKind::Array(elem, len) => {
+            elem.to_opt()
+                .is_some_and(|elem| ty_mentions_param(db, elem, params))
+                || const_body_mentions_param(db, *len, params)
+        }
         TypeKind::Tuple(tuple) => tuple.data(db).iter().any(|elem| {
             elem.to_opt()
                 .is_some_and(|elem| ty_mentions_param(db, elem, params))
@@ -306,19 +297,50 @@ fn path_mentions_param<'db>(
     while let Some(p) = cursor {
         if let PathKind::Ident { generic_args, .. } = p.kind(db) {
             for arg in generic_args.data(db) {
-                if let GenericArg::Type(type_arg) = arg
-                    && type_arg
-                        .ty
-                        .to_opt()
-                        .is_some_and(|ty| ty_mentions_param(db, ty, params))
-                {
-                    return true;
+                match arg {
+                    GenericArg::Type(type_arg)
+                        if type_arg
+                            .ty
+                            .to_opt()
+                            .is_some_and(|ty| ty_mentions_param(db, ty, params)) =>
+                    {
+                        return true;
+                    }
+                    GenericArg::Const(const_arg)
+                        if matches!(
+                            const_arg.value,
+                            ConstGenericArgValue::Expr(body)
+                                if const_body_mentions_param(db, body, params)
+                        ) =>
+                    {
+                        return true;
+                    }
+                    _ => {}
                 }
             }
         }
         cursor = p.parent(db);
     }
     false
+}
+
+/// Const expressions remain ordinary HIR bodies. Scanning their path nodes is
+/// enough to distinguish a generic requirement from a concrete one, including
+/// expressions such as `{N + 1}` and nested const-generic applications.
+fn const_body_mentions_param<'db>(
+    db: &'db dyn HirDb,
+    body: Partial<crate::hir_def::Body<'db>>,
+    params: &[IdentId<'db>],
+) -> bool {
+    let Some(body) = body.to_opt() else {
+        return false;
+    };
+    body.exprs(db).values().any(|expr| {
+        let Partial::Present(Expr::Path(Partial::Present(path))) = expr else {
+            return false;
+        };
+        path_mentions_param(db, *path, params)
+    })
 }
 
 /// Shared replay context for one generated method body.
