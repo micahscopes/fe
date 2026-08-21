@@ -59,12 +59,14 @@ use mandelbrot_proof_fixed_air::{
 }
 use mandelbrot_proof_fixed_air_core::{
     CoordinateNode,
+    LinearLimbRole,
     LinearNode,
     ProductNode,
     RangeNode,
     SparseTaskRow,
     SparseTransitionTask,
     evaluate_sparse_carry_row,
+    evaluate_sparse_linear_row,
     evaluate_sparse_product_row,
     evaluate_sparse_radix_row,
     evaluate_sparse_round_row,
@@ -90,6 +92,12 @@ use mandelbrot_proof_fixed_air_core::{
     sparse_round_link_residuals,
     sparse_round_row_from_witness,
     sparse_round_task_count,
+    sparse_linear_copy_consumer,
+    sparse_linear_copy_source,
+    sparse_linear_initial_residual,
+    sparse_linear_link_residual,
+    sparse_linear_row_from_witness,
+    sparse_linear_task_count,
     sparse_transition_task_at,
     sparse_transition_task_count,
     sparse_transition_trace_length,
@@ -234,11 +242,31 @@ fn linear_node_code(_ node: LinearNode) -> u32 {
     }
 }
 
+fn linear4_node(_ index: u32) -> LinearNode {
+    match index {
+        0 => LinearNode::RealDifference,
+        1 => LinearNode::NextReal,
+        2 => LinearNode::DoubleXy,
+        3 => LinearNode::NextImaginary,
+        _ => LinearNode::Invalid,
+    }
+}
+
 fn coordinate_node_code(_ node: CoordinateNode) -> u32 {
     match node {
         CoordinateNode::Real => 0,
         CoordinateNode::Imaginary => 1,
         CoordinateNode::Invalid => 99,
+    }
+}
+
+fn linear_limb_role_code(_ role: LinearLimbRole) -> u32 {
+    match role {
+        LinearLimbRole::Sum => 0,
+        LinearLimbRole::LeftDifference => 1,
+        LinearLimbRole::RightDifference => 2,
+        LinearLimbRole::Select => 3,
+        LinearLimbRole::Invalid => 99,
     }
 }
 
@@ -316,8 +344,8 @@ pub fn sparse_transition4_task_signature(
         SparseTransitionTask::ProductFinish(product) => {
             (8, product_node_code(product), 0, 0, 0)
         }
-        SparseTransitionTask::LinearLimb(linear, limb) => {
-            (9, linear_node_code(linear), limb, 0, 0)
+        SparseTransitionTask::LinearLimb(linear, role, limb) => {
+            (9, linear_node_code(linear), linear_limb_role_code(role), limb, 0)
         }
         SparseTransitionTask::LinearFinish(linear) => {
             (10, linear_node_code(linear), 0, 0, 0)
@@ -757,6 +785,165 @@ pub fn fixed_transition4_sparse_round_audit(
     }
     constraints = constraints + 1
     if source.to_u32() != consumer.to_u32() { failures = failures + 1 }
+    (failures, constraints, rows)
+}
+
+fn sparse_linear4_row(
+    _ point: ComplexFixed<4>,
+    _ witness: TransitionWitness4,
+    _ local_index: u32,
+) -> SparseTaskRow<BabyBear> {
+    let index = sparse_radix_task_count<4>()
+        + sparse_carry_task_count<4>()
+        + sparse_product_task_count<4>()
+        + sparse_round_task_count<4>()
+        + local_index
+    sparse_linear_row_from_witness<BabyBear, 4>(
+        sparse_transition_task_at<4>(index),
+        point,
+        witness,
+    )
+}
+
+pub fn fixed_transition4_sparse_linear_row(
+    _ prn: u32, _ pr0: u32, _ pr1: u32, _ pr2: u32, _ pr3: u32,
+    _ pin: u32, _ pi0: u32, _ pi1: u32, _ pi2: u32, _ pi3: u32,
+    _ crn: u32, _ cr0: u32, _ cr1: u32, _ cr2: u32, _ cr3: u32,
+    _ cin: u32, _ ci0: u32, _ ci1: u32, _ ci2: u32, _ ci3: u32,
+    _ index: u32,
+) -> (u32, u32, u32, u32, u32, u32) {
+    let (point, _current, witness) = transition4(
+        prn, [pr0, pr1, pr2, pr3], pin, [pi0, pi1, pi2, pi3],
+        crn, [cr0, cr1, cr2, cr3], cin, [ci0, ci1, ci2, ci3],
+    )
+    let row = sparse_linear4_row(point, witness, index)
+    (
+        row.value.to_u32(),
+        row.auxiliary.to_u32(),
+        row.accumulator_before.to_u32(),
+        row.accumulator_after.to_u32(),
+        row.state_before.to_u32(),
+        row.state_after.to_u32(),
+    )
+}
+
+pub fn fixed_transition4_sparse_linear_audit(
+    _ prn: u32, _ pr0: u32, _ pr1: u32, _ pr2: u32, _ pr3: u32,
+    _ pin: u32, _ pi0: u32, _ pi1: u32, _ pi2: u32, _ pi3: u32,
+    _ crn: u32, _ cr0: u32, _ cr1: u32, _ cr2: u32, _ cr3: u32,
+    _ cin: u32, _ ci0: u32, _ ci1: u32, _ ci2: u32, _ ci3: u32,
+    _ challenge: u32,
+    _ mutation_index: u32,
+    _ mutation_lane: u32,
+) -> (u32, u32, u32) {
+    let (point, current, witness) = transition4(
+        prn, [pr0, pr1, pr2, pr3], pin, [pi0, pi1, pi2, pi3],
+        crn, [cr0, cr1, cr2, cr3], cin, [ci0, ci1, ci2, ci3],
+    )
+    let next = fixed_mandelbrot_transition_output(witness)
+    let challenge = BabyBear::from_u32(challenge)
+    let rows = sparse_linear_task_count<4>()
+    let linear_offset = sparse_radix_task_count<4>()
+        + sparse_carry_task_count<4>()
+        + sparse_product_task_count<4>()
+        + sparse_round_task_count<4>()
+    let mut failures: u32 = 0
+    let mut constraints: u32 = 0
+    let mut previous = sparse_linear4_row(point, witness, 0)
+    let mut index: u32 = 0
+    while index < rows {
+        let task = sparse_transition_task_at<4>(linear_offset + index)
+        let mut row = sparse_linear4_row(point, witness, index)
+        if mutation_lane == 7 && mutation_index == 0 && index == 0 {
+            let delta = BabyBear::from_u32(1)
+            row.value = row.value.radix2_add(delta)
+            row.state_before = row.state_before.radix2_add(delta)
+        } else {
+            if index == mutation_index {
+                row = mutate_sparse_row(row, mutation_lane)
+            }
+        }
+        let evaluated = evaluate_sparse_linear_row(challenge, task, row)
+        constraints = constraints + evaluated.constraints
+        if !evaluated.valid || evaluated.folded.to_u32() != 0 {
+            failures = failures + 1
+        }
+        let linear_link = match task {
+            SparseTransitionTask::LinearLimb(
+                _node,
+                LinearLimbRole::Sum,
+                limb,
+            ) => (true, limb),
+            SparseTransitionTask::LinearLimb(
+                _node,
+                LinearLimbRole::LeftDifference,
+                limb,
+            ) => (true, limb),
+            SparseTransitionTask::LinearLimb(
+                _node,
+                LinearLimbRole::RightDifference,
+                limb,
+            ) => (true, limb),
+            _ => (false, 0),
+        }
+        if linear_link.0 {
+            constraints = constraints + 1
+            let residual = if linear_link.1 == 0 {
+                sparse_linear_initial_residual(row)
+            } else {
+                sparse_linear_link_residual(previous, row)
+            }
+            if residual.to_u32() != 0 { failures = failures + 1 }
+        }
+        previous = row
+        index = index + 1
+    }
+
+    let mut target_index: u32 = 0
+    while target_index < 4 {
+        let target = linear4_node(target_index)
+        let mut source = BabyBear::from_u32(0)
+        let mut consumer = BabyBear::from_u32(0)
+        let mut source_index: u32 = 0
+        while source_index < sparse_radix_task_count<4>() {
+            let task = sparse_transition_task_at<4>(source_index)
+            let row = sparse_radix4_row(point, current, next, witness, source_index)
+            source = source.radix2_add(
+                sparse_linear_copy_source<BabyBear, 4>(
+                    challenge, target, task, row,
+                ),
+            )
+            source_index = source_index + 1
+        }
+        source_index = 0
+        while source_index < rows {
+            let task = sparse_transition_task_at<4>(linear_offset + source_index)
+            let mut row = sparse_linear4_row(point, witness, source_index)
+            if mutation_lane == 7 && mutation_index == 0 && source_index == 0 {
+                let delta = BabyBear::from_u32(1)
+                row.value = row.value.radix2_add(delta)
+                row.state_before = row.state_before.radix2_add(delta)
+            } else {
+                if source_index == mutation_index {
+                    row = mutate_sparse_row(row, mutation_lane)
+                }
+            }
+            source = source.radix2_add(
+                sparse_linear_copy_source<BabyBear, 4>(
+                    challenge, target, task, row,
+                ),
+            )
+            consumer = consumer.radix2_add(
+                sparse_linear_copy_consumer<BabyBear, 4>(
+                    challenge, target, task, row,
+                ),
+            )
+            source_index = source_index + 1
+        }
+        constraints = constraints + 1
+        if source.to_u32() != consumer.to_u32() { failures = failures + 1 }
+        target_index = target_index + 1
+    }
     (failures, constraints, rows)
 }
 

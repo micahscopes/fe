@@ -142,6 +142,15 @@ pub enum CoordinateNode {
 }
 impl core::marker::Copy for CoordinateNode {}
 
+pub enum LinearLimbRole {
+    Sum,
+    LeftDifference,
+    RightDifference,
+    Select,
+    Invalid,
+}
+impl core::marker::Copy for LinearLimbRole {}
+
 /// Nominal radix vectors in the recurrence DAG. Product and linear payloads
 /// keep the plan hierarchical, avoiding a manually numbered 31-vector table.
 pub enum RangeNode {
@@ -175,7 +184,7 @@ pub enum SparseTransitionTask {
     ProductCoefficient(ProductNode, u32),
     ProductRound(ProductNode, u32),
     ProductFinish(ProductNode),
-    LinearLimb(LinearNode, u32),
+    LinearLimb(LinearNode, LinearLimbRole, u32),
     LinearFinish(LinearNode),
     BoundarySign(CoordinateNode),
     BoundaryLimb(CoordinateNode, u32),
@@ -207,6 +216,9 @@ pub enum SparseCopyAddress {
     RangeSign(RangeNode),
     RangeNonzero(RangeNode),
     ProductCarry(ProductNode, u32),
+    LinearBorrow(LinearNode, bool),
+    LinearSameSign(LinearNode),
+    LinearSelectRight(LinearNode),
     Invalid,
 }
 impl core::marker::Copy for SparseCopyAddress {}
@@ -236,9 +248,14 @@ pub const fn sparse_round_task_count<const L: usize>() -> u32 {
     sparse_product_node_count() * (limbs + 1)
 }
 
+pub const fn sparse_linear_task_count<const L: usize>() -> u32 {
+    let limbs: u32 = L.downcast_truncate()
+    sparse_linear_node_count() * (limbs * 4 + 1)
+}
+
 pub const fn sparse_transition_task_count<const L: usize>() -> u32 {
     let limbs: u32 = L.downcast_truncate()
-    3 * limbs * limbs + 671 * limbs + 41
+    3 * limbs * limbs + 683 * limbs + 41
 }
 
 pub const fn sparse_transition_trace_length<const L: usize>() -> u32 {
@@ -283,6 +300,16 @@ fn coordinate_node_at(_ index: u32) -> CoordinateNode {
         0 => CoordinateNode::Real,
         1 => CoordinateNode::Imaginary,
         _ => CoordinateNode::Invalid,
+    }
+}
+
+fn linear_limb_role_at(_ index: u32) -> LinearLimbRole {
+    match index {
+        0 => LinearLimbRole::Sum,
+        1 => LinearLimbRole::LeftDifference,
+        2 => LinearLimbRole::RightDifference,
+        3 => LinearLimbRole::Select,
+        _ => LinearLimbRole::Invalid,
     }
 }
 
@@ -433,15 +460,16 @@ pub fn sparse_transition_task_at<const L: usize>(
     }
     remaining = remaining - product_round_rows
 
-    let linear_rows = linears * (limbs + 1)
+    let linear_rows = linears * (limbs * 4 + 1)
     if remaining < linear_rows {
-        let per_linear = limbs + 1
+        let per_linear = limbs * 4 + 1
         let linear_index = remaining / per_linear
         let local = remaining - linear_index * per_linear
-        if local < limbs {
+        if local < limbs * 4 {
             return SparseTransitionTask::LinearLimb(
                 linear_node_at(linear_index),
-                local,
+                linear_limb_role_at(local / limbs),
+                local - (local / limbs) * limbs,
             )
         }
         return SparseTransitionTask::LinearFinish(linear_node_at(linear_index))
@@ -963,6 +991,140 @@ pub fn sparse_round_row_from_witness<F: Radix2Field, const L: usize>(
                 accumulator_after: boolean<F>(left.negative),
                 state_before: boolean<F>(product.round_up),
                 state_after: boolean<F>(right.negative),
+            }
+        }
+        _ => empty_sparse_row<F>(),
+    }
+}
+
+fn linear_node_witness<const L: usize>(
+    _ node: LinearNode,
+    _ witness: FixedMandelbrotTransitionWitness<L>,
+) -> FixedLinearWitness<L> {
+    match node {
+        LinearNode::RealDifference => witness.real_difference,
+        LinearNode::NextReal => witness.next_real,
+        LinearNode::DoubleXy => witness.double_xy,
+        LinearNode::NextImaginary => witness.next_imaginary,
+        LinearNode::Invalid => witness.real_difference,
+    }
+}
+
+fn linear_left_value<const L: usize>(
+    _ node: LinearNode,
+    _ witness: FixedMandelbrotTransitionWitness<L>,
+) -> Fixed<L> {
+    match node {
+        LinearNode::RealDifference => witness.xx.output,
+        LinearNode::NextReal => witness.real_difference.output,
+        LinearNode::DoubleXy => witness.xy.output,
+        LinearNode::NextImaginary => witness.double_xy.output,
+        LinearNode::Invalid => witness.xx.output,
+    }
+}
+
+fn linear_right_value<const L: usize>(
+    _ node: LinearNode,
+    _ point: ComplexFixed<L>,
+    _ witness: FixedMandelbrotTransitionWitness<L>,
+) -> Fixed<L> {
+    match node {
+        LinearNode::RealDifference => witness.yy.output,
+        LinearNode::NextReal => point.real,
+        LinearNode::DoubleXy => witness.xy.output,
+        LinearNode::NextImaginary => point.imaginary,
+        LinearNode::Invalid => witness.yy.output,
+    }
+}
+
+fn linear_subtracts_right(_ node: LinearNode) -> bool {
+    match node {
+        LinearNode::RealDifference => true,
+        _ => false,
+    }
+}
+
+/// Four role-specific rows keep each signed linear limb narrow. Carry and
+/// borrow roles form independent adjacency chains; selection consumes their
+/// range-constrained digits through the linear copy bus.
+pub fn sparse_linear_row_from_witness<F: Radix2Field, const L: usize>(
+    _ task: SparseTransitionTask,
+    _ point: ComplexFixed<L>,
+    _ witness: FixedMandelbrotTransitionWitness<L>,
+) -> SparseTaskRow<F> {
+    match task {
+        SparseTransitionTask::LinearLimb(node, role, limb) => {
+            let linear = linear_node_witness(node, witness)
+            let left = linear_left_value(node, witness)
+            let right = linear_right_value(node, point, witness)
+            match role {
+                LinearLimbRole::Sum => SparseTaskRow {
+                    value: natural<F>(left.limbs[limb as usize]),
+                    auxiliary: natural<F>(right.limbs[limb as usize]),
+                    accumulator_before: natural<F>(if limb == 0 {
+                        0
+                    } else {
+                        linear.sum_carries[(limb - 1) as usize]
+                    }),
+                    accumulator_after: natural<F>(linear.sum_carries[limb as usize]),
+                    state_before: natural<F>(linear.sum_digits[limb as usize]),
+                    state_after: zero<F>(),
+                },
+                LinearLimbRole::LeftDifference => SparseTaskRow {
+                    value: natural<F>(left.limbs[limb as usize]),
+                    auxiliary: natural<F>(right.limbs[limb as usize]),
+                    accumulator_before: natural<F>(if limb == 0 {
+                        0
+                    } else {
+                        linear.left_borrows[(limb - 1) as usize]
+                    }),
+                    accumulator_after: natural<F>(linear.left_borrows[limb as usize]),
+                    state_before: natural<F>(
+                        linear.left_difference_digits[limb as usize],
+                    ),
+                    state_after: zero<F>(),
+                },
+                LinearLimbRole::RightDifference => SparseTaskRow {
+                    value: natural<F>(left.limbs[limb as usize]),
+                    auxiliary: natural<F>(right.limbs[limb as usize]),
+                    accumulator_before: natural<F>(if limb == 0 {
+                        0
+                    } else {
+                        linear.right_borrows[(limb - 1) as usize]
+                    }),
+                    accumulator_after: natural<F>(linear.right_borrows[limb as usize]),
+                    state_before: natural<F>(
+                        linear.right_difference_digits[limb as usize],
+                    ),
+                    state_after: zero<F>(),
+                },
+                LinearLimbRole::Select => SparseTaskRow {
+                    value: natural<F>(linear.sum_digits[limb as usize]),
+                    auxiliary: natural<F>(
+                        linear.left_difference_digits[limb as usize],
+                    ),
+                    accumulator_before: natural<F>(
+                        linear.right_difference_digits[limb as usize],
+                    ),
+                    accumulator_after: natural<F>(linear.output.limbs[limb as usize]),
+                    state_before: boolean<F>(linear.same_sign),
+                    state_after: boolean<F>(linear.select_right),
+                },
+                LinearLimbRole::Invalid => empty_sparse_row<F>(),
+            }
+        }
+        SparseTransitionTask::LinearFinish(node) => {
+            let linear = linear_node_witness(node, witness)
+            let left = linear_left_value(node, witness)
+            let right = linear_right_value(node, point, witness)
+            let output_range = derive_radix_range_witness(linear.output.limbs)
+            SparseTaskRow {
+                value: boolean<F>(left.negative),
+                auxiliary: boolean<F>(right.negative),
+                accumulator_before: natural<F>(linear.left_borrows[L - 1]),
+                accumulator_after: natural<F>(linear.right_borrows[L - 1]),
+                state_before: boolean<F>(output_range.nonzero),
+                state_after: boolean<F>(linear.output.negative),
             }
         }
         _ => empty_sparse_row<F>(),
@@ -1892,6 +2054,541 @@ pub fn sparse_round_copy_consumer<F: Radix2Field, const L: usize>(
                     row.state_after,
                 ),
             )
+        }
+        _ => zero<F>(),
+    }
+}
+
+fn absorb_sparse_linear_row<F: Radix2Field>(
+    _ fold: own ConstraintFold<F>,
+    _ task: SparseTransitionTask,
+    _ row: SparseTaskRow<F>,
+) -> ConstraintFold<F> {
+    let mut fold = fold
+    match task {
+        SparseTransitionTask::LinearLimb(_node, role, _limb) => {
+            match role {
+                LinearLimbRole::Sum => {
+                    fold = fold.absorb(bit_residual(row.accumulator_after))
+                    fold = fold.absorb(sub(
+                        sub(
+                            add(
+                                add(row.value, row.auxiliary),
+                                row.accumulator_before,
+                            ),
+                            row.state_before,
+                        ),
+                        mul(natural<F>(8192), row.accumulator_after),
+                    ))
+                    fold.absorb(row.state_after)
+                }
+                LinearLimbRole::LeftDifference => {
+                    fold = fold.absorb(bit_residual(row.accumulator_after))
+                    fold = fold.absorb(sub(
+                        sub(
+                            add(
+                                row.value,
+                                mul(natural<F>(8192), row.accumulator_after),
+                            ),
+                            row.auxiliary,
+                        ),
+                        add(row.accumulator_before, row.state_before),
+                    ))
+                    fold.absorb(row.state_after)
+                }
+                LinearLimbRole::RightDifference => {
+                    fold = fold.absorb(bit_residual(row.accumulator_after))
+                    fold = fold.absorb(sub(
+                        sub(
+                            add(
+                                row.auxiliary,
+                                mul(natural<F>(8192), row.accumulator_after),
+                            ),
+                            row.value,
+                        ),
+                        add(row.accumulator_before, row.state_before),
+                    ))
+                    fold.absorb(row.state_after)
+                }
+                LinearLimbRole::Select => {
+                    fold = fold.absorb(bit_residual(row.state_before))
+                    fold = fold.absorb(bit_residual(row.state_after))
+                    let difference = add(
+                        mul(sub(one<F>(), row.state_after), row.auxiliary),
+                        mul(row.state_after, row.accumulator_before),
+                    )
+                    let selected = add(
+                        mul(row.state_before, row.value),
+                        mul(sub(one<F>(), row.state_before), difference),
+                    )
+                    fold.absorb(sub(row.accumulator_after, selected))
+                }
+                LinearLimbRole::Invalid => fold.absorb(one<F>()),
+            }
+        }
+        SparseTransitionTask::LinearFinish(node) => {
+            fold = fold.absorb(bit_residual(row.value))
+            fold = fold.absorb(bit_residual(row.auxiliary))
+            fold = fold.absorb(bit_residual(row.accumulator_before))
+            fold = fold.absorb(bit_residual(row.accumulator_after))
+            fold = fold.absorb(bit_residual(row.state_before))
+            fold = fold.absorb(bit_residual(row.state_after))
+            let subtract = boolean<F>(linear_subtracts_right(node))
+            let effective_right = sub(
+                add(row.auxiliary, subtract),
+                mul(natural<F>(2), mul(row.auxiliary, subtract)),
+            )
+            let different = sub(
+                add(row.value, effective_right),
+                mul(natural<F>(2), mul(row.value, effective_right)),
+            )
+            let same = sub(one<F>(), different)
+            let select = row.accumulator_before
+            fold = fold.absorb(add(
+                mul(sub(one<F>(), select), row.accumulator_before),
+                mul(select, row.accumulator_after),
+            ))
+            let selected_difference_sign = add(
+                mul(sub(one<F>(), select), row.value),
+                mul(select, effective_right),
+            )
+            let selected_sign = add(
+                mul(same, row.value),
+                mul(sub(one<F>(), same), selected_difference_sign),
+            )
+            fold.absorb(sub(
+                row.state_after,
+                mul(selected_sign, row.state_before),
+            ))
+        }
+        _ => fold.absorb(one<F>()),
+    }
+}
+
+pub fn evaluate_sparse_linear_row<F: Radix2Field>(
+    _ challenge: F,
+    _ task: SparseTransitionTask,
+    _ row: SparseTaskRow<F>,
+) -> FixedAirConstraintEvaluation<F> {
+    let fold = absorb_sparse_linear_row(
+        ConstraintFold<F>::new(challenge),
+        task,
+        row,
+    )
+    FixedAirConstraintEvaluation {
+        valid: match task {
+            SparseTransitionTask::LinearLimb(_, _, _) => true,
+            SparseTransitionTask::LinearFinish(_) => true,
+            _ => false,
+        },
+        constraints: fold.constraints,
+        folded: fold.value,
+    }
+}
+
+pub fn sparse_linear_initial_residual<F: Radix2Field>(
+    _ row: SparseTaskRow<F>,
+) -> F {
+    row.accumulator_before
+}
+
+pub fn sparse_linear_link_residual<F: Radix2Field>(
+    _ current: SparseTaskRow<F>,
+    _ next: SparseTaskRow<F>,
+) -> F {
+    sub(next.accumulator_before, current.accumulator_after)
+}
+
+fn linear_node_rank(_ node: LinearNode) -> u32 {
+    match node {
+        LinearNode::RealDifference => 0,
+        LinearNode::NextReal => 1,
+        LinearNode::DoubleXy => 2,
+        LinearNode::NextImaginary => 3,
+        LinearNode::Invalid => 99,
+    }
+}
+
+fn range_node_rank(_ node: RangeNode) -> u32 {
+    match node {
+        RangeNode::PointReal => 0,
+        RangeNode::PointImaginary => 1,
+        RangeNode::CurrentReal => 2,
+        RangeNode::CurrentImaginary => 3,
+        RangeNode::NextReal => 4,
+        RangeNode::NextImaginary => 5,
+        RangeNode::ProductLow(product) => 6 + 3 * product_node_rank(product),
+        RangeNode::ProductHigh(product) => 7 + 3 * product_node_rank(product),
+        RangeNode::ProductOutput(product) => 8 + 3 * product_node_rank(product),
+        RangeNode::LinearSum(linear) => 15 + 4 * linear_node_rank(linear),
+        RangeNode::LinearLeftDifference(linear) => 16 + 4 * linear_node_rank(linear),
+        RangeNode::LinearRightDifference(linear) => 17 + 4 * linear_node_rank(linear),
+        RangeNode::LinearOutput(linear) => 18 + 4 * linear_node_rank(linear),
+        RangeNode::Invalid => 99,
+    }
+}
+
+fn linear_copy_key<F: Radix2Field, const L: usize>(
+    _ challenge: F,
+    _ address: SparseCopyAddress,
+) -> F {
+    let limbs: u32 = L.downcast_truncate()
+    let digit_addresses = sparse_range_node_count() * limbs
+    let rank = match address {
+        SparseCopyAddress::RangeDigit(node, limb) => {
+            range_node_rank(node) * limbs + limb
+        }
+        SparseCopyAddress::RangeSign(node) => {
+            digit_addresses + range_node_rank(node)
+        }
+        SparseCopyAddress::RangeNonzero(node) => {
+            digit_addresses + sparse_range_node_count() + range_node_rank(node)
+        }
+        SparseCopyAddress::LinearBorrow(linear, right) => {
+            digit_addresses + 2 * sparse_range_node_count()
+                + 2 * linear_node_rank(linear)
+                + if right { 1 } else { 0 }
+        }
+        SparseCopyAddress::LinearSameSign(linear) => {
+            digit_addresses + 2 * sparse_range_node_count()
+                + 2 * sparse_linear_node_count()
+                + linear_node_rank(linear)
+        }
+        SparseCopyAddress::LinearSelectRight(linear) => {
+            digit_addresses + 2 * sparse_range_node_count()
+                + 3 * sparse_linear_node_count()
+                + linear_node_rank(linear)
+        }
+        _ => return zero<F>(),
+    }
+    let mut key = one<F>()
+    let mut exponent: u32 = 0
+    while exponent < rank + 1 {
+        key = mul(key, challenge)
+        exponent = exponent + 1
+    }
+    key
+}
+
+fn linear_left_range(_ linear: LinearNode) -> RangeNode {
+    match linear {
+        LinearNode::RealDifference => RangeNode::ProductOutput(ProductNode::Xx),
+        LinearNode::NextReal => RangeNode::LinearOutput(LinearNode::RealDifference),
+        LinearNode::DoubleXy => RangeNode::ProductOutput(ProductNode::Xy),
+        LinearNode::NextImaginary => RangeNode::LinearOutput(LinearNode::DoubleXy),
+        LinearNode::Invalid => RangeNode::Invalid,
+    }
+}
+
+fn linear_right_range(_ linear: LinearNode) -> RangeNode {
+    match linear {
+        LinearNode::RealDifference => RangeNode::ProductOutput(ProductNode::Yy),
+        LinearNode::NextReal => RangeNode::PointReal,
+        LinearNode::DoubleXy => RangeNode::ProductOutput(ProductNode::Xy),
+        LinearNode::NextImaginary => RangeNode::PointImaginary,
+        LinearNode::Invalid => RangeNode::Invalid,
+    }
+}
+
+fn range_node_same(_ left: RangeNode, _ right: RangeNode) -> bool {
+    range_node_rank(left) == range_node_rank(right)
+}
+
+fn linear_copy_range_contribution<F: Radix2Field, const L: usize>(
+    _ challenge: F,
+    _ address: RangeNode,
+    _ limb: u32,
+    _ value: F,
+    _ candidate: RangeNode,
+    _ multiplicity: u32,
+) -> F {
+    if range_node_same(address, candidate) {
+        mul(
+            mul(
+                linear_copy_key<F, L>(
+                    challenge,
+                    SparseCopyAddress::RangeDigit(address, limb),
+                ),
+                value,
+            ),
+            natural<F>(multiplicity),
+        )
+    } else {
+        zero<F>()
+    }
+}
+
+pub fn sparse_linear_copy_source<F: Radix2Field, const L: usize>(
+    _ challenge: F,
+    _ target: LinearNode,
+    _ task: SparseTransitionTask,
+    _ row: SparseTaskRow<F>,
+) -> F {
+    match task {
+        SparseTransitionTask::RadixLimb(node, limb) => {
+            let mut contribution = linear_copy_range_contribution<F, L>(
+                challenge, node, limb, row.value, linear_left_range(target), 3,
+            )
+            contribution = add(contribution, linear_copy_range_contribution<F, L>(
+                challenge, node, limb, row.value, linear_right_range(target), 3,
+            ))
+            contribution = add(contribution, linear_copy_range_contribution<F, L>(
+                challenge, node, limb, row.value, RangeNode::LinearSum(target), 1,
+            ))
+            contribution = add(contribution, linear_copy_range_contribution<F, L>(
+                challenge, node, limb, row.value,
+                RangeNode::LinearLeftDifference(target), 1,
+            ))
+            contribution = add(contribution, linear_copy_range_contribution<F, L>(
+                challenge, node, limb, row.value,
+                RangeNode::LinearRightDifference(target), 1,
+            ))
+            add(contribution, linear_copy_range_contribution<F, L>(
+                challenge, node, limb, row.value, RangeNode::LinearOutput(target), 1,
+            ))
+        }
+        SparseTransitionTask::RadixFinish(node) => {
+            let mut contribution = zero<F>()
+            if range_node_same(node, linear_left_range(target)) {
+                contribution = add(contribution, mul(
+                    linear_copy_key<F, L>(challenge, SparseCopyAddress::RangeSign(node)),
+                    row.auxiliary,
+                ))
+            }
+            if range_node_same(node, linear_right_range(target)) {
+                contribution = add(contribution, mul(
+                    linear_copy_key<F, L>(challenge, SparseCopyAddress::RangeSign(node)),
+                    row.auxiliary,
+                ))
+            }
+            if range_node_same(node, RangeNode::LinearOutput(target)) {
+                contribution = add(contribution, mul(
+                    linear_copy_key<F, L>(challenge, SparseCopyAddress::RangeSign(node)),
+                    row.auxiliary,
+                ))
+                contribution = add(contribution, mul(
+                    linear_copy_key<F, L>(challenge, SparseCopyAddress::RangeNonzero(node)),
+                    row.value,
+                ))
+            }
+            contribution
+        }
+        SparseTransitionTask::LinearLimb(node, role, limb) => {
+            let limbs: u32 = L.downcast_truncate()
+            if linear_node_rank(node) != linear_node_rank(target)
+                || limb + 1 != limbs
+            {
+                return zero<F>()
+            }
+            match role {
+                LinearLimbRole::LeftDifference => mul(
+                    linear_copy_key<F, L>(
+                        challenge,
+                        SparseCopyAddress::LinearBorrow(target, false),
+                    ),
+                    row.accumulator_after,
+                ),
+                LinearLimbRole::RightDifference => mul(
+                    linear_copy_key<F, L>(
+                        challenge,
+                        SparseCopyAddress::LinearBorrow(target, true),
+                    ),
+                    row.accumulator_after,
+                ),
+                _ => zero<F>(),
+            }
+        }
+        SparseTransitionTask::LinearFinish(node) => {
+            if linear_node_rank(node) != linear_node_rank(target) {
+                return zero<F>()
+            }
+            let subtract = boolean<F>(linear_subtracts_right(node))
+            let effective_right = sub(
+                add(row.auxiliary, subtract),
+                mul(natural<F>(2), mul(row.auxiliary, subtract)),
+            )
+            let different = sub(
+                add(row.value, effective_right),
+                mul(natural<F>(2), mul(row.value, effective_right)),
+            )
+            let same = sub(one<F>(), different)
+            let limbs: u32 = L.downcast_truncate()
+            add(
+                mul(
+                    mul(
+                        linear_copy_key<F, L>(
+                            challenge,
+                            SparseCopyAddress::LinearSameSign(target),
+                        ),
+                        same,
+                    ),
+                    natural<F>(limbs),
+                ),
+                mul(
+                    mul(
+                        linear_copy_key<F, L>(
+                            challenge,
+                            SparseCopyAddress::LinearSelectRight(target),
+                        ),
+                        row.accumulator_before,
+                    ),
+                    natural<F>(limbs),
+                ),
+            )
+        }
+        _ => zero<F>(),
+    }
+}
+
+fn linear_copy_read<F: Radix2Field, const L: usize>(
+    _ challenge: F,
+    _ range: RangeNode,
+    _ limb: u32,
+    _ value: F,
+) -> F {
+    mul(
+        linear_copy_key<F, L>(
+            challenge,
+            SparseCopyAddress::RangeDigit(range, limb),
+        ),
+        value,
+    )
+}
+
+pub fn sparse_linear_copy_consumer<F: Radix2Field, const L: usize>(
+    _ challenge: F,
+    _ target: LinearNode,
+    _ task: SparseTransitionTask,
+    _ row: SparseTaskRow<F>,
+) -> F {
+    match task {
+        SparseTransitionTask::LinearLimb(node, role, limb) => {
+            if linear_node_rank(node) != linear_node_rank(target) {
+                return zero<F>()
+            }
+            match role {
+                LinearLimbRole::Sum => add(
+                    add(
+                        linear_copy_read<F, L>(
+                            challenge, linear_left_range(target), limb, row.value,
+                        ),
+                        linear_copy_read<F, L>(
+                            challenge, linear_right_range(target), limb, row.auxiliary,
+                        ),
+                    ),
+                    linear_copy_read<F, L>(
+                        challenge, RangeNode::LinearSum(target), limb, row.state_before,
+                    ),
+                ),
+                LinearLimbRole::LeftDifference => add(
+                    add(
+                        linear_copy_read<F, L>(
+                            challenge, linear_left_range(target), limb, row.value,
+                        ),
+                        linear_copy_read<F, L>(
+                            challenge, linear_right_range(target), limb, row.auxiliary,
+                        ),
+                    ),
+                    linear_copy_read<F, L>(
+                        challenge, RangeNode::LinearLeftDifference(target), limb,
+                        row.state_before,
+                    ),
+                ),
+                LinearLimbRole::RightDifference => add(
+                    add(
+                        linear_copy_read<F, L>(
+                            challenge, linear_left_range(target), limb, row.value,
+                        ),
+                        linear_copy_read<F, L>(
+                            challenge, linear_right_range(target), limb, row.auxiliary,
+                        ),
+                    ),
+                    linear_copy_read<F, L>(
+                        challenge, RangeNode::LinearRightDifference(target), limb,
+                        row.state_before,
+                    ),
+                ),
+                LinearLimbRole::Select => {
+                    let mut contribution = linear_copy_read<F, L>(
+                        challenge, RangeNode::LinearSum(target), limb, row.value,
+                    )
+                    contribution = add(contribution, linear_copy_read<F, L>(
+                        challenge, RangeNode::LinearLeftDifference(target), limb,
+                        row.auxiliary,
+                    ))
+                    contribution = add(contribution, linear_copy_read<F, L>(
+                        challenge, RangeNode::LinearRightDifference(target), limb,
+                        row.accumulator_before,
+                    ))
+                    contribution = add(contribution, linear_copy_read<F, L>(
+                        challenge, RangeNode::LinearOutput(target), limb,
+                        row.accumulator_after,
+                    ))
+                    contribution = add(contribution, mul(
+                        linear_copy_key<F, L>(
+                            challenge,
+                            SparseCopyAddress::LinearSameSign(target),
+                        ),
+                        row.state_before,
+                    ))
+                    add(contribution, mul(
+                        linear_copy_key<F, L>(
+                            challenge,
+                            SparseCopyAddress::LinearSelectRight(target),
+                        ),
+                        row.state_after,
+                    ))
+                }
+                LinearLimbRole::Invalid => zero<F>(),
+            }
+        }
+        SparseTransitionTask::LinearFinish(node) => {
+            if linear_node_rank(node) != linear_node_rank(target) {
+                return zero<F>()
+            }
+            let output = RangeNode::LinearOutput(target)
+            let mut contribution = mul(
+                linear_copy_key<F, L>(
+                    challenge,
+                    SparseCopyAddress::RangeSign(linear_left_range(target)),
+                ),
+                row.value,
+            )
+            contribution = add(contribution, mul(
+                linear_copy_key<F, L>(
+                    challenge,
+                    SparseCopyAddress::RangeSign(linear_right_range(target)),
+                ),
+                row.auxiliary,
+            ))
+            contribution = add(contribution, mul(
+                linear_copy_key<F, L>(
+                    challenge,
+                    SparseCopyAddress::LinearBorrow(target, false),
+                ),
+                row.accumulator_before,
+            ))
+            contribution = add(contribution, mul(
+                linear_copy_key<F, L>(
+                    challenge,
+                    SparseCopyAddress::LinearBorrow(target, true),
+                ),
+                row.accumulator_after,
+            ))
+            contribution = add(contribution, mul(
+                linear_copy_key<F, L>(
+                    challenge,
+                    SparseCopyAddress::RangeNonzero(output),
+                ),
+                row.state_before,
+            ))
+            add(contribution, mul(
+                linear_copy_key<F, L>(
+                    challenge,
+                    SparseCopyAddress::RangeSign(output),
+                ),
+                row.state_after,
+            ))
         }
         _ => zero<F>(),
     }

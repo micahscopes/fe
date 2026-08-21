@@ -84,8 +84,10 @@ fn expected_sparse_transition_tasks(limbs: u32) -> Vec<[u32; 5]> {
         tasks.push([8, product, 0, 0, 0]);
     }
     for linear in 0..4u32 {
-        for limb in 0..limbs {
-            tasks.push([9, linear, limb, 0, 0]);
+        for role in 0..4u32 {
+            for limb in 0..limbs {
+                tasks.push([9, linear, role, limb, 0]);
+            }
         }
         tasks.push([10, linear, 0, 0, 0]);
     }
@@ -96,7 +98,7 @@ fn expected_sparse_transition_tasks(limbs: u32) -> Vec<[u32; 5]> {
         }
     }
     tasks.push([13, 0, 0, 0, 0]);
-    assert_eq!(tasks.len() as u32, 3 * limbs * limbs + 671 * limbs + 41,);
+    assert_eq!(tasks.len() as u32, 3 * limbs * limbs + 683 * limbs + 41,);
     tasks
 }
 
@@ -745,6 +747,91 @@ fn expected_sparse_round_rows(current: &ComplexFx) -> Vec<[u32; 6]> {
     rows
 }
 
+fn expected_sparse_linear_rows(point: &ComplexFx, current: &ComplexFx) -> Vec<[u32; 6]> {
+    let xx = multiply(&current.real, &current.real);
+    let yy = multiply(&current.imaginary, &current.imaginary);
+    let xy = multiply(&current.real, &current.imaginary);
+    let real_difference = subtract(&xx, &yy);
+    let double_xy = add(&xy, &xy);
+    let inputs = [
+        (&xx, &yy, true),
+        (&real_difference, &point.real, false),
+        (&xy, &xy, false),
+        (&double_xy, &point.imaginary, false),
+    ];
+    let mut rows = Vec::new();
+    for (left, right, subtract_right) in inputs {
+        let left_digits = limbs(left);
+        let right_digits = limbs(right);
+        let witness = expected_linear_witness_words(left, right, subtract_right);
+        let same_sign = witness[1];
+        let select_right = witness[2];
+        let output_nonzero = witness[3];
+        let sum = &witness[4..4 + LIMBS];
+        let sum_carries = &witness[4 + LIMBS..4 + 2 * LIMBS];
+        let left_difference = &witness[4 + 2 * LIMBS..4 + 3 * LIMBS];
+        let left_borrows = &witness[4 + 3 * LIMBS..4 + 4 * LIMBS];
+        let right_difference = &witness[4 + 4 * LIMBS..4 + 5 * LIMBS];
+        let right_borrows = &witness[4 + 5 * LIMBS..4 + 6 * LIMBS];
+        let output_negative = witness[4 + 6 * LIMBS];
+        let output = &witness[5 + 6 * LIMBS..5 + 7 * LIMBS];
+        for limb in 0..LIMBS {
+            rows.push([
+                left_digits[limb],
+                right_digits[limb],
+                if limb == 0 { 0 } else { sum_carries[limb - 1] },
+                sum_carries[limb],
+                sum[limb],
+                0,
+            ]);
+        }
+        for limb in 0..LIMBS {
+            rows.push([
+                left_digits[limb],
+                right_digits[limb],
+                if limb == 0 { 0 } else { left_borrows[limb - 1] },
+                left_borrows[limb],
+                left_difference[limb],
+                0,
+            ]);
+        }
+        for limb in 0..LIMBS {
+            rows.push([
+                left_digits[limb],
+                right_digits[limb],
+                if limb == 0 {
+                    0
+                } else {
+                    right_borrows[limb - 1]
+                },
+                right_borrows[limb],
+                right_difference[limb],
+                0,
+            ]);
+        }
+        for limb in 0..LIMBS {
+            rows.push([
+                sum[limb],
+                left_difference[limb],
+                right_difference[limb],
+                output[limb],
+                same_sign,
+                select_right,
+            ]);
+        }
+        rows.push([
+            left.negative as u32,
+            right.negative as u32,
+            left_borrows[LIMBS - 1],
+            right_borrows[LIMBS - 1],
+            output_nonzero,
+            output_negative,
+        ]);
+    }
+    assert_eq!(rows.len(), 4 * (4 * LIMBS + 1));
+    rows
+}
+
 fn complex_words(value: &ComplexFx) -> Vec<u32> {
     let mut words = fixed_words(&value.real);
     words.extend(fixed_words(&value.imaginary));
@@ -954,7 +1041,7 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
         ("sparse_transition8_metadata", 8u32),
         ("sparse_transition20_metadata", 20u32),
     ] {
-        let tasks = 3 * limbs * limbs + 671 * limbs + 41;
+        let tasks = 3 * limbs * limbs + 683 * limbs + 41;
         let trace_length = tasks.next_power_of_two();
         assert_eq!(
             call(&mut store, &instance, function, &[], 3),
@@ -1771,6 +1858,79 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                         expected_round_rows.len() as u32,
                     ],
                     "the rounding copy bus alone must reject a locally valid mutation",
+                );
+            }
+
+            let expected_linear_rows = expected_sparse_linear_rows(point, current);
+            for (index, expected) in expected_linear_rows.iter().enumerate() {
+                let mut row_arguments = arguments.clone();
+                row_arguments.push(index as u32);
+                assert_eq!(
+                    call(
+                        &mut store,
+                        &instance,
+                        "fixed_transition4_sparse_linear_row",
+                        &row_arguments,
+                        6,
+                    ),
+                    *expected,
+                    "independently reconstructed sparse linear row {index}",
+                );
+            }
+            let expected_linear_constraints = 60 * LIMBS as u32 + 36;
+            for challenge in [3u32, 7, 31] {
+                let mut audit_arguments = arguments.clone();
+                audit_arguments.extend([challenge, u32::MAX, 0]);
+                assert_eq!(
+                    call(
+                        &mut store,
+                        &instance,
+                        "fixed_transition4_sparse_linear_audit",
+                        &audit_arguments,
+                        3,
+                    ),
+                    [
+                        0,
+                        expected_linear_constraints,
+                        expected_linear_rows.len() as u32,
+                    ],
+                    "clean sparse linear and copy-bus audit, challenge {challenge}",
+                );
+            }
+            for lane in 1u32..=6 {
+                let mut audit_arguments = arguments.clone();
+                audit_arguments.extend([7, 0, lane]);
+                let audited = call(
+                    &mut store,
+                    &instance,
+                    "fixed_transition4_sparse_linear_audit",
+                    &audit_arguments,
+                    3,
+                );
+                assert_ne!(
+                    audited[0], 0,
+                    "sparse linear first-row lane {lane} mutation must fail",
+                );
+                assert_eq!(audited[1], expected_linear_constraints);
+                assert_eq!(audited[2], expected_linear_rows.len() as u32);
+            }
+            for challenge in [3u32, 7, 31] {
+                let mut audit_arguments = arguments.clone();
+                audit_arguments.extend([challenge, 0, 7]);
+                assert_eq!(
+                    call(
+                        &mut store,
+                        &instance,
+                        "fixed_transition4_sparse_linear_audit",
+                        &audit_arguments,
+                        3,
+                    ),
+                    [
+                        1,
+                        expected_linear_constraints,
+                        expected_linear_rows.len() as u32,
+                    ],
+                    "the linear copy bus alone must reject a locally valid mutation",
                 );
             }
         }
