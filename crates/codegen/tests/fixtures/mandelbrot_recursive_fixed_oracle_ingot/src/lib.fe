@@ -62,8 +62,14 @@ use mandelbrot_proof_fixed_air_core::{
     LinearNode,
     ProductNode,
     RangeNode,
+    SparseTaskRow,
     SparseTransitionTask,
+    evaluate_sparse_radix_row,
     evaluate_transition_witness_constraints,
+    sparse_radix_initial_residuals,
+    sparse_radix_link_residuals,
+    sparse_radix_row_from_witness,
+    sparse_radix_task_count,
     sparse_transition_task_at,
     sparse_transition_task_count,
     sparse_transition_trace_length,
@@ -82,6 +88,7 @@ use mandelbrot_proof_recursive::{
 use precision::baby_bear::{BabyBear, BABY_BEAR_MODULUS}
 use precision::field::LIMB_BASE
 use precision::fixed::Fixed
+use precision::polynomial::Radix2Field
 
 type Accumulator4 = RecursiveOrbitAccumulator<4>
 type CommittedAccumulator4 = RecursiveCommittedInterval<4>
@@ -304,6 +311,109 @@ pub fn sparse_transition4_task_signature(
         SparseTransitionTask::TransitionFinish => (13, 0, 0, 0, 0),
         SparseTransitionTask::Invalid => (14, 0, 0, 0, 0),
     }
+}
+
+fn sparse_radix4_row(
+    _ point: ComplexFixed<4>,
+    _ current: ComplexFixed<4>,
+    _ next: ComplexFixed<4>,
+    _ witness: TransitionWitness4,
+    _ index: u32,
+) -> SparseTaskRow<BabyBear> {
+    sparse_radix_row_from_witness<BabyBear, 4>(
+        sparse_transition_task_at<4>(index),
+        point,
+        current,
+        next,
+        witness,
+    )
+}
+
+fn mutate_sparse_row(
+    _ row: SparseTaskRow<BabyBear>,
+    _ lane: u32,
+) -> SparseTaskRow<BabyBear> {
+    let mut row = row
+    let delta = BabyBear::from_u32(1)
+    if lane == 1 { row.value = row.value.radix2_add(delta) }
+    if lane == 2 { row.auxiliary = row.auxiliary.radix2_add(delta) }
+    if lane == 3 {
+        row.accumulator_before = row.accumulator_before.radix2_add(delta)
+    }
+    if lane == 4 {
+        row.accumulator_after = row.accumulator_after.radix2_add(delta)
+    }
+    if lane == 5 { row.state_before = row.state_before.radix2_add(delta) }
+    if lane == 6 { row.state_after = row.state_after.radix2_add(delta) }
+    row
+}
+
+pub fn fixed_transition4_sparse_radix_row(
+    _ prn: u32, _ pr0: u32, _ pr1: u32, _ pr2: u32, _ pr3: u32,
+    _ pin: u32, _ pi0: u32, _ pi1: u32, _ pi2: u32, _ pi3: u32,
+    _ crn: u32, _ cr0: u32, _ cr1: u32, _ cr2: u32, _ cr3: u32,
+    _ cin: u32, _ ci0: u32, _ ci1: u32, _ ci2: u32, _ ci3: u32,
+    _ index: u32,
+) -> (u32, u32, u32, u32, u32, u32) {
+    let (point, current, witness) = transition4(
+        prn, [pr0, pr1, pr2, pr3], pin, [pi0, pi1, pi2, pi3],
+        crn, [cr0, cr1, cr2, cr3], cin, [ci0, ci1, ci2, ci3],
+    )
+    let next = fixed_mandelbrot_transition_output(witness)
+    let row = sparse_radix4_row(point, current, next, witness, index)
+    (
+        row.value.to_u32(),
+        row.auxiliary.to_u32(),
+        row.accumulator_before.to_u32(),
+        row.accumulator_after.to_u32(),
+        row.state_before.to_u32(),
+        row.state_after.to_u32(),
+    )
+}
+
+pub fn fixed_transition4_sparse_radix_audit(
+    _ prn: u32, _ pr0: u32, _ pr1: u32, _ pr2: u32, _ pr3: u32,
+    _ pin: u32, _ pi0: u32, _ pi1: u32, _ pi2: u32, _ pi3: u32,
+    _ crn: u32, _ cr0: u32, _ cr1: u32, _ cr2: u32, _ cr3: u32,
+    _ cin: u32, _ ci0: u32, _ ci1: u32, _ ci2: u32, _ ci3: u32,
+    _ challenge: u32,
+    _ mutation_index: u32,
+    _ mutation_lane: u32,
+) -> (u32, u32, u32) {
+    let (point, current, witness) = transition4(
+        prn, [pr0, pr1, pr2, pr3], pin, [pi0, pi1, pi2, pi3],
+        crn, [cr0, cr1, cr2, cr3], cin, [ci0, ci1, ci2, ci3],
+    )
+    let next = fixed_mandelbrot_transition_output(witness)
+    let challenge = BabyBear::from_u32(challenge)
+    let rows = sparse_radix_task_count<4>()
+    let mut failures: u32 = 0
+    let mut constraints: u32 = 0
+    let mut previous = sparse_radix4_row(point, current, next, witness, 0)
+    let mut index: u32 = 0
+    while index < rows {
+        let task = sparse_transition_task_at<4>(index)
+        let mut row = sparse_radix4_row(point, current, next, witness, index)
+        if index == mutation_index {
+            row = mutate_sparse_row(row, mutation_lane)
+        }
+        let evaluated = evaluate_sparse_radix_row(challenge, task, row)
+        constraints = constraints + evaluated.constraints
+        if !evaluated.valid || evaluated.folded.to_u32() != 0 {
+            failures = failures + 1
+        }
+        let links = if index == 0 {
+            sparse_radix_initial_residuals(row)
+        } else {
+            sparse_radix_link_residuals(previous, row)
+        }
+        constraints = constraints + 2
+        if links.0.to_u32() != 0 { failures = failures + 1 }
+        if links.1.to_u32() != 0 { failures = failures + 1 }
+        previous = row
+        index = index + 1
+    }
+    (failures, constraints, rows)
 }
 
 pub fn fixed_transition4_encoded(

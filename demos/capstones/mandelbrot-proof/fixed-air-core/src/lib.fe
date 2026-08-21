@@ -184,9 +184,29 @@ pub enum SparseTransitionTask {
 }
 impl core::marker::Copy for SparseTransitionTask {}
 
+/// Uniform witness columns used by the sparse interpreters. A task gives the
+/// columns their local meaning. The two accumulator pairs are deliberately
+/// generic so the same trace shape can host radix reconstruction, carry bit
+/// reconstruction, convolution reduction, and linear ripples.
+pub struct SparseTaskRow<F: Radix2Field> {
+    pub value: F,
+    pub auxiliary: F,
+    pub accumulator_before: F,
+    pub accumulator_after: F,
+    pub state_before: F,
+    pub state_after: F,
+}
+impl<F: Radix2Field> core::marker::Copy for SparseTaskRow<F> {}
+
 pub const fn sparse_range_node_count() -> u32 { 31 }
 pub const fn sparse_product_node_count() -> u32 { 3 }
 pub const fn sparse_linear_node_count() -> u32 { 4 }
+
+pub const fn sparse_radix_task_count<const L: usize>() -> u32 {
+    let limbs: u32 = L.downcast_truncate()
+    let ranges = sparse_range_node_count()
+    ranges * (limbs * 14 + 1)
+}
 
 pub const fn sparse_transition_task_count<const L: usize>() -> u32 {
     let limbs: u32 = L.downcast_truncate()
@@ -415,6 +435,223 @@ pub fn sparse_transition_task_at<const L: usize>(
     SparseTransitionTask::TransitionFinish
 }
 
+fn range_node_digits<const L: usize>(
+    _ node: RangeNode,
+    _ point: ComplexFixed<L>,
+    _ current: ComplexFixed<L>,
+    _ next: ComplexFixed<L>,
+    _ witness: FixedMandelbrotTransitionWitness<L>,
+) -> [u32; L] {
+    match node {
+        RangeNode::PointReal => point.real.limbs,
+        RangeNode::PointImaginary => point.imaginary.limbs,
+        RangeNode::CurrentReal => current.real.limbs,
+        RangeNode::CurrentImaginary => current.imaginary.limbs,
+        RangeNode::NextReal => next.real.limbs,
+        RangeNode::NextImaginary => next.imaginary.limbs,
+        RangeNode::ProductLow(ProductNode::Xx) => witness.xx.low_digits,
+        RangeNode::ProductHigh(ProductNode::Xx) => witness.xx.high_digits,
+        RangeNode::ProductOutput(ProductNode::Xx) => witness.xx.output.limbs,
+        RangeNode::ProductLow(ProductNode::Yy) => witness.yy.low_digits,
+        RangeNode::ProductHigh(ProductNode::Yy) => witness.yy.high_digits,
+        RangeNode::ProductOutput(ProductNode::Yy) => witness.yy.output.limbs,
+        RangeNode::ProductLow(ProductNode::Xy) => witness.xy.low_digits,
+        RangeNode::ProductHigh(ProductNode::Xy) => witness.xy.high_digits,
+        RangeNode::ProductOutput(ProductNode::Xy) => witness.xy.output.limbs,
+        RangeNode::LinearSum(LinearNode::RealDifference) => {
+            witness.real_difference.sum_digits
+        }
+        RangeNode::LinearLeftDifference(LinearNode::RealDifference) => {
+            witness.real_difference.left_difference_digits
+        }
+        RangeNode::LinearRightDifference(LinearNode::RealDifference) => {
+            witness.real_difference.right_difference_digits
+        }
+        RangeNode::LinearOutput(LinearNode::RealDifference) => {
+            witness.real_difference.output.limbs
+        }
+        RangeNode::LinearSum(LinearNode::NextReal) => witness.next_real.sum_digits,
+        RangeNode::LinearLeftDifference(LinearNode::NextReal) => {
+            witness.next_real.left_difference_digits
+        }
+        RangeNode::LinearRightDifference(LinearNode::NextReal) => {
+            witness.next_real.right_difference_digits
+        }
+        RangeNode::LinearOutput(LinearNode::NextReal) => witness.next_real.output.limbs,
+        RangeNode::LinearSum(LinearNode::DoubleXy) => witness.double_xy.sum_digits,
+        RangeNode::LinearLeftDifference(LinearNode::DoubleXy) => {
+            witness.double_xy.left_difference_digits
+        }
+        RangeNode::LinearRightDifference(LinearNode::DoubleXy) => {
+            witness.double_xy.right_difference_digits
+        }
+        RangeNode::LinearOutput(LinearNode::DoubleXy) => witness.double_xy.output.limbs,
+        RangeNode::LinearSum(LinearNode::NextImaginary) => {
+            witness.next_imaginary.sum_digits
+        }
+        RangeNode::LinearLeftDifference(LinearNode::NextImaginary) => {
+            witness.next_imaginary.left_difference_digits
+        }
+        RangeNode::LinearRightDifference(LinearNode::NextImaginary) => {
+            witness.next_imaginary.right_difference_digits
+        }
+        RangeNode::LinearOutput(LinearNode::NextImaginary) => {
+            witness.next_imaginary.output.limbs
+        }
+        _ => [0; L],
+    }
+}
+
+fn range_node_is_signed(_ node: RangeNode) -> bool {
+    match node {
+        RangeNode::PointReal => true,
+        RangeNode::PointImaginary => true,
+        RangeNode::CurrentReal => true,
+        RangeNode::CurrentImaginary => true,
+        RangeNode::NextReal => true,
+        RangeNode::NextImaginary => true,
+        RangeNode::ProductOutput(_) => true,
+        RangeNode::LinearOutput(_) => true,
+        _ => false,
+    }
+}
+
+fn range_node_negative<const L: usize>(
+    _ node: RangeNode,
+    _ point: ComplexFixed<L>,
+    _ current: ComplexFixed<L>,
+    _ next: ComplexFixed<L>,
+    _ witness: FixedMandelbrotTransitionWitness<L>,
+) -> bool {
+    match node {
+        RangeNode::PointReal => point.real.negative,
+        RangeNode::PointImaginary => point.imaginary.negative,
+        RangeNode::CurrentReal => current.real.negative,
+        RangeNode::CurrentImaginary => current.imaginary.negative,
+        RangeNode::NextReal => next.real.negative,
+        RangeNode::NextImaginary => next.imaginary.negative,
+        RangeNode::ProductOutput(ProductNode::Xx) => witness.xx.output.negative,
+        RangeNode::ProductOutput(ProductNode::Yy) => witness.yy.output.negative,
+        RangeNode::ProductOutput(ProductNode::Xy) => witness.xy.output.negative,
+        RangeNode::LinearOutput(LinearNode::RealDifference) => {
+            witness.real_difference.output.negative
+        }
+        RangeNode::LinearOutput(LinearNode::NextReal) => {
+            witness.next_real.output.negative
+        }
+        RangeNode::LinearOutput(LinearNode::DoubleXy) => {
+            witness.double_xy.output.negative
+        }
+        RangeNode::LinearOutput(LinearNode::NextImaginary) => {
+            witness.next_imaginary.output.negative
+        }
+        _ => false,
+    }
+}
+
+fn radix_prefix_before<const L: usize>(
+    _ range: RadixRangeWitness<L>,
+    _ limb: u32,
+    _ bit: u32,
+) -> u32 {
+    if bit > 0 {
+        range.limbs[limb as usize].nonzero_prefix[(bit - 1) as usize]
+    } else {
+        if limb > 0 {
+            range.limbs[(limb - 1) as usize].nonzero_prefix[12]
+        } else {
+            0
+        }
+    }
+}
+
+fn radix_reconstruction_before<const L: usize>(
+    _ range: RadixRangeWitness<L>,
+    _ limb: u32,
+    _ bit: u32,
+) -> u32 {
+    let mut reconstructed: u32 = 0
+    let mut index: u32 = 0
+    let mut place: u32 = 1
+    while index < bit {
+        reconstructed = reconstructed
+            + range.limbs[limb as usize].bits[index as usize] * place
+        place = place + place
+        index = index + 1
+    }
+    reconstructed
+}
+
+fn empty_sparse_row<F: Radix2Field>() -> SparseTaskRow<F> {
+    SparseTaskRow {
+        value: zero<F>(),
+        auxiliary: zero<F>(),
+        accumulator_before: zero<F>(),
+        accumulator_after: zero<F>(),
+        state_before: zero<F>(),
+        state_after: zero<F>(),
+    }
+}
+
+/// Derive one narrow radix row from the exact transition witness. Only six
+/// field columns cross this interpretation boundary, regardless of precision.
+pub fn sparse_radix_row_from_witness<F: Radix2Field, const L: usize>(
+    _ task: SparseTransitionTask,
+    _ point: ComplexFixed<L>,
+    _ current: ComplexFixed<L>,
+    _ next: ComplexFixed<L>,
+    _ witness: FixedMandelbrotTransitionWitness<L>,
+) -> SparseTaskRow<F> {
+    match task {
+        SparseTransitionTask::RadixBit(node, limb, bit) => {
+            let digits = range_node_digits(node, point, current, next, witness)
+            let range = derive_radix_range_witness(digits)
+            let before = radix_reconstruction_before(range, limb, bit)
+            let value = range.limbs[limb as usize].bits[bit as usize]
+            SparseTaskRow {
+                value: natural<F>(value),
+                auxiliary: zero<F>(),
+                accumulator_before: natural<F>(before),
+                accumulator_after: natural<F>(before + value * (1 << bit)),
+                state_before: natural<F>(radix_prefix_before(range, limb, bit)),
+                state_after: natural<F>(
+                    range.limbs[limb as usize].nonzero_prefix[bit as usize],
+                ),
+            }
+        }
+        SparseTransitionTask::RadixLimb(node, limb) => {
+            let digits = range_node_digits(node, point, current, next, witness)
+            let range = derive_radix_range_witness(digits)
+            let prefix = range.limbs[limb as usize].nonzero_prefix[12]
+            SparseTaskRow {
+                value: natural<F>(digits[limb as usize]),
+                auxiliary: zero<F>(),
+                accumulator_before: natural<F>(
+                    radix_reconstruction_before(range, limb, 13),
+                ),
+                accumulator_after: zero<F>(),
+                state_before: natural<F>(prefix),
+                state_after: natural<F>(prefix),
+            }
+        }
+        SparseTransitionTask::RadixFinish(node) => {
+            let digits = range_node_digits(node, point, current, next, witness)
+            let range = derive_radix_range_witness(digits)
+            SparseTaskRow {
+                value: boolean<F>(range.nonzero),
+                auxiliary: boolean<F>(
+                    range_node_negative(node, point, current, next, witness),
+                ),
+                accumulator_before: zero<F>(),
+                accumulator_after: zero<F>(),
+                state_before: natural<F>(range.limbs[L - 1].nonzero_prefix[12]),
+                state_after: zero<F>(),
+            }
+        }
+        _ => empty_sparse_row<F>(),
+    }
+}
+
 fn zero<F: Radix2Field>() -> F { F::radix2_zero() }
 fn one<F: Radix2Field>() -> F { F::radix2_root(0) }
 fn add<F: Radix2Field>(_ left: F, _ right: F) -> F { left.radix2_add(right) }
@@ -606,6 +843,96 @@ impl<F: Radix2Field> ConstraintFold<F> {
 
 fn bit_residual<F: Radix2Field>(_ value: F) -> F {
     mul(value, sub(value, one<F>()))
+}
+
+fn absorb_sparse_radix_row<F: Radix2Field>(
+    _ fold: own ConstraintFold<F>,
+    _ task: SparseTransitionTask,
+    _ row: SparseTaskRow<F>,
+) -> ConstraintFold<F> {
+    let mut fold = fold
+    match task {
+        SparseTransitionTask::RadixBit(_node, _limb, bit) => {
+            fold = fold.absorb(bit_residual(row.value))
+            fold = fold.absorb(bit_residual(row.state_after))
+            fold = fold.absorb(sub(
+                row.state_after,
+                sub(
+                    add(row.state_before, row.value),
+                    mul(row.state_before, row.value),
+                ),
+            ))
+            fold.absorb(sub(
+                row.accumulator_after,
+                add(
+                    row.accumulator_before,
+                    mul(row.value, natural<F>(1 << bit)),
+                ),
+            ))
+        }
+        SparseTransitionTask::RadixLimb(_node, _limb) => {
+            fold = fold.absorb(sub(row.value, row.accumulator_before))
+            fold = fold.absorb(row.accumulator_after)
+            fold.absorb(sub(row.state_after, row.state_before))
+        }
+        SparseTransitionTask::RadixFinish(node) => {
+            fold = fold.absorb(bit_residual(row.value))
+            fold = fold.absorb(sub(row.value, row.state_before))
+            fold = fold.absorb(row.accumulator_before)
+            fold = fold.absorb(row.accumulator_after)
+            fold = fold.absorb(row.state_after)
+            if range_node_is_signed(node) {
+                fold = fold.absorb(bit_residual(row.auxiliary))
+                fold.absorb(mul(row.auxiliary, sub(one<F>(), row.value)))
+            } else {
+                fold.absorb(row.auxiliary)
+            }
+        }
+        _ => fold.absorb(one<F>()),
+    }
+}
+
+/// Local constraints for one radix task. Row adjacency is deliberately a
+/// separate relation so scalar and parallel interpreters can choose their own
+/// scan implementation without changing row semantics.
+pub fn evaluate_sparse_radix_row<F: Radix2Field>(
+    _ challenge: F,
+    _ task: SparseTransitionTask,
+    _ row: SparseTaskRow<F>,
+) -> FixedAirConstraintEvaluation<F> {
+    let fold = absorb_sparse_radix_row(
+        ConstraintFold<F>::new(challenge),
+        task,
+        row,
+    )
+    FixedAirConstraintEvaluation {
+        valid: match task {
+            SparseTransitionTask::RadixBit(_, _, _) => true,
+            SparseTransitionTask::RadixLimb(_, _) => true,
+            SparseTransitionTask::RadixFinish(_) => true,
+            _ => false,
+        },
+        constraints: fold.constraints,
+        folded: fold.value,
+    }
+}
+
+/// The initial row and every adjacent pair use the same two accumulator
+/// columns. The first row links to the all-zero virtual predecessor.
+pub fn sparse_radix_initial_residuals<F: Radix2Field>(
+    _ row: SparseTaskRow<F>,
+) -> (F, F) {
+    (row.accumulator_before, row.state_before)
+}
+
+pub fn sparse_radix_link_residuals<F: Radix2Field>(
+    _ current: SparseTaskRow<F>,
+    _ next: SparseTaskRow<F>,
+) -> (F, F) {
+    (
+        sub(next.accumulator_before, current.accumulator_after),
+        sub(next.state_before, current.state_after),
+    )
 }
 
 fn absorb_radix_range<F: Radix2Field, const L: usize>(

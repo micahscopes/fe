@@ -2,10 +2,10 @@
 
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::{BackendKind, OptLevel, layout_for};
+use fe_codegen::{layout_for, BackendKind, OptLevel};
 use hir::hir_def::HirIngot;
 use num_bigint::BigUint;
-use p3_baby_bear::{BabyBear as P3BabyBear, default_babybear_poseidon2_16};
+use p3_baby_bear::{default_babybear_poseidon2_16, BabyBear as P3BabyBear};
 use p3_field::{PrimeCharacteristicRing, PrimeField32};
 use p3_symmetric::Permutation;
 use std::path::Path;
@@ -489,6 +489,115 @@ fn expected_transition_witness_words(point: &ComplexFx, current: &ComplexFx) -> 
     assert_eq!(expected_next.z.real, next_real);
     assert_eq!(expected_next.z.imaginary, next_imaginary);
     words
+}
+
+#[derive(Clone, Debug)]
+struct ExpectedSparseRange {
+    negative: Option<bool>,
+    digits: [u32; LIMBS],
+}
+
+fn words4(words: &[u32]) -> [u32; LIMBS] {
+    words
+        .try_into()
+        .expect("a sparse radix range must contain four limbs")
+}
+
+fn signed_range(value: &Fx) -> ExpectedSparseRange {
+    ExpectedSparseRange {
+        negative: Some(value.negative),
+        digits: limbs(value),
+    }
+}
+
+fn product_ranges(left: &Fx, right: &Fx) -> [ExpectedSparseRange; 3] {
+    let words = expected_product_witness_words(left, right);
+    let output = multiply(left, right);
+    [
+        ExpectedSparseRange {
+            negative: None,
+            digits: words4(&words[1..1 + LIMBS]),
+        },
+        ExpectedSparseRange {
+            negative: None,
+            digits: words4(&words[1 + 2 * LIMBS..1 + 3 * LIMBS]),
+        },
+        signed_range(&output),
+    ]
+}
+
+fn linear_ranges(left: &Fx, right: &Fx, subtract_right: bool) -> [ExpectedSparseRange; 4] {
+    let words = expected_linear_witness_words(left, right, subtract_right);
+    let output = if subtract_right {
+        subtract(left, right)
+    } else {
+        add(left, right)
+    };
+    [
+        ExpectedSparseRange {
+            negative: None,
+            digits: words4(&words[4..4 + LIMBS]),
+        },
+        ExpectedSparseRange {
+            negative: None,
+            digits: words4(&words[4 + 2 * LIMBS..4 + 3 * LIMBS]),
+        },
+        ExpectedSparseRange {
+            negative: None,
+            digits: words4(&words[4 + 4 * LIMBS..4 + 5 * LIMBS]),
+        },
+        signed_range(&output),
+    ]
+}
+
+fn expected_sparse_ranges(point: &ComplexFx, current: &ComplexFx) -> Vec<ExpectedSparseRange> {
+    let xx = multiply(&current.real, &current.real);
+    let yy = multiply(&current.imaginary, &current.imaginary);
+    let xy = multiply(&current.real, &current.imaginary);
+    let real_difference = subtract(&xx, &yy);
+    let next_real = add(&real_difference, &point.real);
+    let double_xy = add(&xy, &xy);
+    let next_imaginary = add(&double_xy, &point.imaginary);
+
+    let mut ranges = vec![
+        signed_range(&point.real),
+        signed_range(&point.imaginary),
+        signed_range(&current.real),
+        signed_range(&current.imaginary),
+        signed_range(&next_real),
+        signed_range(&next_imaginary),
+    ];
+    ranges.extend(product_ranges(&current.real, &current.real));
+    ranges.extend(product_ranges(&current.imaginary, &current.imaginary));
+    ranges.extend(product_ranges(&current.real, &current.imaginary));
+    ranges.extend(linear_ranges(&xx, &yy, true));
+    ranges.extend(linear_ranges(&real_difference, &point.real, false));
+    ranges.extend(linear_ranges(&xy, &xy, false));
+    ranges.extend(linear_ranges(&double_xy, &point.imaginary, false));
+    assert_eq!(ranges.len(), 31);
+    ranges
+}
+
+fn expected_sparse_radix_rows(point: &ComplexFx, current: &ComplexFx) -> Vec<[u32; 6]> {
+    let mut rows = Vec::new();
+    for range in expected_sparse_ranges(point, current) {
+        let mut seen = 0u32;
+        for digit in range.digits {
+            let mut reconstructed = 0u32;
+            for bit_index in 0..LIMB_BITS {
+                let bit = (digit >> bit_index) & 1;
+                let before = reconstructed;
+                let state_before = seen;
+                reconstructed += bit << bit_index;
+                seen |= bit;
+                rows.push([bit, 0, before, reconstructed, state_before, seen]);
+            }
+            rows.push([digit, 0, reconstructed, 0, seen, seen]);
+        }
+        rows.push([seen, range.negative.unwrap_or(false) as u32, 0, 0, seen, 0]);
+    }
+    assert_eq!(rows.len(), 31 * (LIMBS * 14 + 1));
+    rows
 }
 
 fn complex_words(value: &ComplexFx) -> Vec<u32> {
@@ -1259,6 +1368,65 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
             expected_transition_witness_words(point, current),
             "fixed Mandelbrot transition witness case {case}",
         );
+        if case == 0 {
+            let expected_rows = expected_sparse_radix_rows(point, current);
+            for (index, expected) in expected_rows.iter().enumerate() {
+                let mut row_arguments = arguments.clone();
+                row_arguments.push(index as u32);
+                assert_eq!(
+                    call(
+                        &mut store,
+                        &instance,
+                        "fixed_transition4_sparse_radix_row",
+                        &row_arguments,
+                        6,
+                    ),
+                    *expected,
+                    "independently reconstructed sparse radix row {index}",
+                );
+            }
+            let expected_constraints = 2_573 * LIMBS as u32 + 261;
+            for challenge in [3u32, 7, 31] {
+                let mut audit_arguments = arguments.clone();
+                audit_arguments.extend([challenge, u32::MAX, 0]);
+                assert_eq!(
+                    call(
+                        &mut store,
+                        &instance,
+                        "fixed_transition4_sparse_radix_audit",
+                        &audit_arguments,
+                        3,
+                    ),
+                    [0, expected_constraints, expected_rows.len() as u32],
+                    "clean sparse radix audit, challenge {challenge}",
+                );
+            }
+            let first_unsigned_finish = 6 * (LIMBS as u32 * 14 + 1) + LIMBS as u32 * 14;
+            for (row, lane) in [
+                (0u32, 1u32),
+                (0, 3),
+                (0, 4),
+                (0, 5),
+                (0, 6),
+                (first_unsigned_finish, 2),
+            ] {
+                let mut audit_arguments = arguments.clone();
+                audit_arguments.extend([7, row, lane]);
+                let audited = call(
+                    &mut store,
+                    &instance,
+                    "fixed_transition4_sparse_radix_audit",
+                    &audit_arguments,
+                    3,
+                );
+                assert_ne!(
+                    audited[0], 0,
+                    "sparse radix row {row} lane {lane} mutation must fail",
+                );
+                assert_eq!(audited[1], expected_constraints);
+                assert_eq!(audited[2], expected_rows.len() as u32);
+            }
+        }
         for challenge in [3u32, 7, 31] {
             let mut clean_arguments = arguments.clone();
             clean_arguments.extend([challenge, 0]);
