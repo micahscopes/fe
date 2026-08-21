@@ -15,6 +15,7 @@ use mandelbrot_proof_recursive_baby_bear::{
 use mandelbrot_proof_fixed_air::{
     FixedLinearWitness,
     FixedProductWitness,
+    RadixRangeWitness,
     boolean_residual,
     convolution_left_index,
     convolution_residual,
@@ -23,16 +24,25 @@ use mandelbrot_proof_fixed_air::{
     derive_fixed_product_witness,
     derive_fixed_difference_witness,
     derive_fixed_sum_witness,
+    derive_radix_range_witness,
     fixed_linear_witness_holds,
     fixed_product_witness_holds,
+    fixed_range_witness_holds,
+    fixed_sign_zero_residual,
     linear_addition_residual,
     linear_comparison_residual,
     linear_left_difference_residual,
     linear_output_selection_residual,
     linear_output_sign_residual,
+    linear_output_nonzero_residual,
     linear_right_difference_residual,
     linear_same_sign_residual,
     max_convolution_limbs_below,
+    radix_bit_boolean_residual,
+    radix_limb_reconstruction_residual,
+    radix_nonzero_residual,
+    radix_prefix_boolean_residual,
+    radix_prefix_residual,
     rounding_residual,
 }
 use mandelbrot_proof_recursive::{
@@ -46,12 +56,14 @@ use mandelbrot_proof_recursive::{
     merge_adjacent,
 }
 use precision::baby_bear::{BabyBear, BABY_BEAR_MODULUS}
+use precision::field::LIMB_BASE
 use precision::fixed::Fixed
 
 type Accumulator4 = RecursiveOrbitAccumulator<4>
 type CommittedAccumulator4 = RecursiveCommittedInterval<4>
 type ProductWitness4 = FixedProductWitness<4>
 type LinearWitness4 = FixedLinearWitness<4>
+type RangeWitness4 = RadixRangeWitness<4>
 
 fn fixed4(_ negative: u32, _ limbs: [u32; 4]) -> Fixed<4> {
     Fixed { negative: negative == 1, limbs: limbs }
@@ -250,7 +262,11 @@ pub fn fixed_linear4_residual(
     if relation == 11 {
         return boolean_residual<BabyBear>(witness.left_borrows[index as usize]).to_u32()
     }
-    boolean_residual<BabyBear>(witness.right_borrows[index as usize]).to_u32()
+    if relation == 12 {
+        return boolean_residual<BabyBear>(witness.right_borrows[index as usize]).to_u32()
+    }
+    let range = derive_radix_range_witness(witness.output.limbs)
+    linear_output_nonzero_residual<BabyBear, 4>(witness, range).to_u32()
 }
 
 pub fn fixed_linear4_mutated_residual(
@@ -322,6 +338,130 @@ pub fn fixed_linear4_mutated_residual(
         subtract_right == 1,
         witness,
     ).to_u32()
+}
+
+pub fn fixed_range4_encoded(
+    _ negative: u32,
+    _ l0: u32,
+    _ l1: u32,
+    _ l2: u32,
+    _ l3: u32,
+) -> BrowserBytes {
+    let value = fixed4(negative, [l0, l1, l2, l3])
+    let witness = derive_radix_range_witness(value.limbs)
+    let writer = BrowserWordWriter::allocate(<RangeWitness4 as CanonicalWords>::WORDS)
+    encode_canonical_words(ref witness, writer).finish()
+}
+
+pub fn fixed_range4_mutation_holds(
+    _ negative: u32,
+    _ l0: u32,
+    _ l1: u32,
+    _ l2: u32,
+    _ l3: u32,
+    _ mutation: u32,
+) -> u32 {
+    let mut value = fixed4(negative, [l0, l1, l2, l3])
+    let mut witness = derive_radix_range_witness(value.limbs)
+    if mutation == 1 { witness.limbs[0].bits[0] = 1 - witness.limbs[0].bits[0] }
+    if mutation == 2 {
+        witness.limbs[0].nonzero_prefix[0] = 1 - witness.limbs[0].nonzero_prefix[0]
+    }
+    if mutation == 3 { witness.nonzero = !witness.nonzero }
+    if mutation == 4 { value.limbs[0] = value.limbs[0] + LIMB_BASE }
+    if mutation == 5 {
+        value = fixed4(1, [0; 4])
+        witness = derive_radix_range_witness(value.limbs)
+    }
+    if fixed_range_witness_holds(value, witness) { 1 } else { 0 }
+}
+
+pub fn fixed_range4_residual(
+    _ negative: u32,
+    _ l0: u32,
+    _ l1: u32,
+    _ l2: u32,
+    _ l3: u32,
+    _ relation: u32,
+    _ limb_index: u32,
+    _ bit_index: u32,
+) -> u32 {
+    let value = fixed4(negative, [l0, l1, l2, l3])
+    let witness = derive_radix_range_witness(value.limbs)
+    if relation == 0 {
+        return radix_bit_boolean_residual<BabyBear, 4>(
+            witness,
+            limb_index,
+            bit_index,
+        ).to_u32()
+    }
+    if relation == 1 {
+        return radix_prefix_boolean_residual<BabyBear, 4>(
+            witness,
+            limb_index,
+            bit_index,
+        ).to_u32()
+    }
+    if relation == 2 {
+        return radix_limb_reconstruction_residual<BabyBear, 4>(
+            value.limbs,
+            witness,
+            limb_index,
+        ).to_u32()
+    }
+    if relation == 3 {
+        return radix_prefix_residual<BabyBear, 4>(
+            witness,
+            limb_index,
+            bit_index,
+        ).to_u32()
+    }
+    if relation == 4 {
+        return radix_nonzero_residual<BabyBear, 4>(witness).to_u32()
+    }
+    if relation == 5 {
+        return fixed_sign_zero_residual<BabyBear, 4>(value, witness).to_u32()
+    }
+    boolean_residual<BabyBear>(if witness.nonzero { 1 } else { 0 }).to_u32()
+}
+
+pub fn fixed_range4_mutated_residual(
+    _ negative: u32,
+    _ l0: u32,
+    _ l1: u32,
+    _ l2: u32,
+    _ l3: u32,
+    _ mutation: u32,
+) -> u32 {
+    let mut value = fixed4(negative, [l0, l1, l2, l3])
+    let mut witness = derive_radix_range_witness(value.limbs)
+    if mutation == 1 {
+        witness.limbs[0].bits[0] = 1 - witness.limbs[0].bits[0]
+        return radix_limb_reconstruction_residual<BabyBear, 4>(
+            value.limbs,
+            witness,
+            0,
+        ).to_u32()
+    }
+    if mutation == 2 {
+        witness.limbs[0].nonzero_prefix[0] = 1 - witness.limbs[0].nonzero_prefix[0]
+        return radix_prefix_residual<BabyBear, 4>(witness, 0, 0).to_u32()
+    }
+    if mutation == 3 {
+        witness.nonzero = !witness.nonzero
+        return radix_nonzero_residual<BabyBear, 4>(witness).to_u32()
+    }
+    if mutation == 4 {
+        value.limbs[0] = value.limbs[0] + LIMB_BASE
+        return radix_limb_reconstruction_residual<BabyBear, 4>(
+            value.limbs,
+            witness,
+            0,
+        ).to_u32()
+    }
+    value = fixed4(1, [0; 4])
+    witness = derive_radix_range_witness(value.limbs)
+    fixed_sign_zero_residual<BabyBear, 4>(value, witness).to_u32()
 }
 
 pub fn fixed_product4_encoded(

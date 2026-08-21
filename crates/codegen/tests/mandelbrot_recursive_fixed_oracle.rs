@@ -19,6 +19,7 @@ const ACCUMULATOR_WORDS: usize = 37;
 const COMMITTED_ACCUMULATOR_WORDS: usize = 31;
 const PRODUCT_WITNESS_WORDS: usize = 24;
 const LINEAR_WITNESS_WORDS: usize = 33;
+const RANGE_WITNESS_WORDS: usize = LIMBS * LIMB_BITS * 2 + 1;
 const POSEIDON_WIDTH: usize = 16;
 const BABY_BEAR_MODULUS: u32 = 2_013_265_921;
 
@@ -297,6 +298,25 @@ fn expected_linear_witness_words(left: &Fx, right: &Fx, subtract_right: bool) ->
     words.extend(right_borrows);
     words.extend(fixed_words(&output));
     assert_eq!(words.len(), LINEAR_WITNESS_WORDS);
+    words
+}
+
+fn expected_range_witness_words(value: &Fx) -> Vec<u32> {
+    let value_limbs = limbs(value);
+    let mut seen = false;
+    let mut words = Vec::with_capacity(RANGE_WITNESS_WORDS);
+    for limb in value_limbs {
+        let bits: [u32; LIMB_BITS] = std::array::from_fn(|bit_index| (limb >> bit_index) & 1);
+        let mut prefixes = [0u32; LIMB_BITS];
+        for (bit_index, bit) in bits.iter().enumerate() {
+            seen |= *bit == 1;
+            prefixes[bit_index] = seen as u32;
+        }
+        words.extend(bits);
+        words.extend(prefixes);
+    }
+    words.push(seen as u32);
+    assert_eq!(words.len(), RANGE_WITNESS_WORDS);
     words
 }
 
@@ -713,6 +733,19 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                     "linear scalar relation {relation}, case {case}, subtract={subtract_right}",
                 );
             }
+            let mut nonzero_arguments = arguments.clone();
+            nonzero_arguments.extend([13, 0]);
+            assert_eq!(
+                call(
+                    &mut store,
+                    &instance,
+                    "fixed_linear4_residual",
+                    &nonzero_arguments,
+                    1,
+                ),
+                [0],
+                "linear output nonzero relation, case {case}, subtract={subtract_right}",
+            );
             for relation in 10..=12u32 {
                 for index in 0..LIMBS as u32 {
                     let mut residual_arguments = arguments.clone();
@@ -760,6 +793,116 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                     "mutated linear residual {mutation}, case {case}, subtract={subtract_right}",
                 );
             }
+        }
+    }
+
+    let range_cases = [
+        zero(),
+        fixed(false, 1, 1),
+        fixed(true, 1, 1),
+        fixed(false, 1, 8),
+        fixed(true, 7, 8),
+        Fx {
+            negative: false,
+            magnitude: radix_modulus() - BigUint::from(1u32),
+        },
+        Fx {
+            negative: true,
+            magnitude: radix_modulus() - BigUint::from(1u32),
+        },
+    ];
+    for (case, value) in range_cases.iter().enumerate() {
+        let arguments = fixed_words(value);
+        let (_, _, actual) = encoded(
+            &mut store,
+            &instance,
+            memory,
+            "fixed_range4_encoded",
+            &arguments,
+        );
+        assert_eq!(
+            actual,
+            expected_range_witness_words(value),
+            "radix range witness case {case}",
+        );
+        for relation in [0u32, 1, 3] {
+            for limb_index in 0..LIMBS as u32 {
+                for bit_index in 0..LIMB_BITS as u32 {
+                    let mut residual_arguments = arguments.clone();
+                    residual_arguments.extend([relation, limb_index, bit_index]);
+                    assert_eq!(
+                        call(
+                            &mut store,
+                            &instance,
+                            "fixed_range4_residual",
+                            &residual_arguments,
+                            1,
+                        ),
+                        [0],
+                        "range relation {relation}, limb {limb_index}, bit {bit_index}, case {case}",
+                    );
+                }
+            }
+        }
+        for limb_index in 0..LIMBS as u32 {
+            let mut residual_arguments = arguments.clone();
+            residual_arguments.extend([2, limb_index, 0]);
+            assert_eq!(
+                call(
+                    &mut store,
+                    &instance,
+                    "fixed_range4_residual",
+                    &residual_arguments,
+                    1,
+                ),
+                [0],
+                "range reconstruction limb {limb_index}, case {case}",
+            );
+        }
+        for relation in 4..=6u32 {
+            let mut residual_arguments = arguments.clone();
+            residual_arguments.extend([relation, 0, 0]);
+            assert_eq!(
+                call(
+                    &mut store,
+                    &instance,
+                    "fixed_range4_residual",
+                    &residual_arguments,
+                    1,
+                ),
+                [0],
+                "range scalar relation {relation}, case {case}",
+            );
+        }
+        for mutation in 0..=5u32 {
+            let mut mutation_arguments = arguments.clone();
+            mutation_arguments.push(mutation);
+            assert_eq!(
+                call(
+                    &mut store,
+                    &instance,
+                    "fixed_range4_mutation_holds",
+                    &mutation_arguments,
+                    1,
+                ),
+                [(mutation == 0) as u32],
+                "range mutation {mutation}, case {case}",
+            );
+        }
+        for mutation in 1..=5u32 {
+            let mut mutation_arguments = arguments.clone();
+            mutation_arguments.push(mutation);
+            assert_ne!(
+                call(
+                    &mut store,
+                    &instance,
+                    "fixed_range4_mutated_residual",
+                    &mutation_arguments,
+                    1,
+                )[0],
+                0,
+                "mutated range residual {mutation}, case {case}",
+            );
         }
     }
 

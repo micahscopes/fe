@@ -122,6 +122,26 @@ pub struct FixedLinearWitness<const L: usize> {
 impl<const L: usize> core::marker::Copy for FixedLinearWitness<L> {}
 derive CanonicalWords for FixedLinearWitness<L> using CanonicalWordsProvider
 
+/// Bit and running-OR witness for one radix-2^13 limb. The prefix turns the
+/// global nonzero predicate into degree-two local relations instead of one
+/// high-degree product over every bit.
+pub struct RadixLimbRangeWitness {
+    pub bits: [u32; 13],
+    pub nonzero_prefix: [u32; 13],
+}
+impl core::marker::Copy for RadixLimbRangeWitness {}
+derive CanonicalWords for RadixLimbRangeWitness using CanonicalWordsProvider
+
+/// Reusable range carrier for any `L` radix digits. It is intentionally not
+/// tied to `Fixed<L>` so product digits, sums, differences, and boundary limbs
+/// all use the same generated relation shape.
+pub struct RadixRangeWitness<const L: usize> {
+    pub limbs: [RadixLimbRangeWitness; L],
+    pub nonzero: bool,
+}
+impl<const L: usize> core::marker::Copy for RadixRangeWitness<L> {}
+derive CanonicalWords for RadixRangeWitness<L> using CanonicalWordsProvider
+
 fn empty_product_witness<const L: usize>() -> FixedProductWitness<L> {
     FixedProductWitness {
         valid: false,
@@ -158,6 +178,71 @@ fn empty_linear_witness<const L: usize>() -> FixedLinearWitness<L> {
         right_borrows: [0; L],
         output: Fixed::zero(),
     }
+}
+
+fn empty_radix_limb_range_witness() -> RadixLimbRangeWitness {
+    RadixLimbRangeWitness { bits: [0; 13], nonzero_prefix: [0; 13] }
+}
+
+pub fn derive_radix_range_witness<const L: usize>(
+    _ digits: [u32; L],
+) -> RadixRangeWitness<L> {
+    let mut limbs = [empty_radix_limb_range_witness(); L]
+    let mut seen = false
+    let mut limb_index: usize = 0
+    while limb_index < L {
+        let mut bits = [0; 13]
+        let mut nonzero_prefix = [0; 13]
+        let mut bit_index: usize = 0
+        while bit_index < 13 {
+            let bit = (digits[limb_index] >> bit_index.downcast_truncate()) & 1
+            bits[bit_index] = bit
+            if bit == 1 { seen = true }
+            nonzero_prefix[bit_index] = if seen { 1 } else { 0 }
+            bit_index = bit_index + 1
+        }
+        limbs[limb_index] = RadixLimbRangeWitness {
+            bits: bits,
+            nonzero_prefix: nonzero_prefix,
+        }
+        limb_index = limb_index + 1
+    }
+    RadixRangeWitness { limbs: limbs, nonzero: seen }
+}
+
+pub fn radix_range_witness_holds<const L: usize>(
+    _ digits: [u32; L],
+    _ witness: RadixRangeWitness<L>,
+) -> bool {
+    let mut seen: u32 = 0
+    let mut limb_index: usize = 0
+    while limb_index < L {
+        let mut reconstructed: u32 = 0
+        let mut place: u32 = 1
+        let mut bit_index: usize = 0
+        while bit_index < 13 {
+            let bit = witness.limbs[limb_index].bits[bit_index]
+            let prefix = witness.limbs[limb_index].nonzero_prefix[bit_index]
+            if bit > 1 || prefix > 1 { return false }
+            reconstructed = reconstructed + bit * place
+            seen = seen + bit - seen * bit
+            if prefix != seen { return false }
+            place = place + place
+            bit_index = bit_index + 1
+        }
+        if digits[limb_index] != reconstructed { return false }
+        limb_index = limb_index + 1
+    }
+    witness.nonzero == (seen == 1)
+}
+
+pub fn fixed_range_witness_holds<const L: usize>(
+    _ value: Fixed<L>,
+    _ witness: RadixRangeWitness<L>,
+) -> bool {
+    L >= 2
+        && radix_range_witness_holds(value.limbs, witness)
+        && (!value.negative || witness.nonzero)
 }
 
 fn derive_fixed_linear_witness<const L: usize>(
@@ -508,6 +593,109 @@ fn field_natural<F: Radix2Field>(_ value: u32) -> F {
 
 fn field_boolean<F: Radix2Field>(_ value: bool) -> F {
     field_natural<F>(if value { 1 } else { 0 })
+}
+
+pub fn radix_bit_boolean_residual<F: Radix2Field, const L: usize>(
+    _ witness: RadixRangeWitness<L>,
+    _ limb_index: u32,
+    _ bit_index: u32,
+) -> F {
+    let limbs: u32 = L.downcast_truncate()
+    if limb_index >= limbs || bit_index >= 13 { return F::radix2_zero() }
+    boolean_residual<F>(witness.limbs[limb_index as usize].bits[bit_index as usize])
+}
+
+pub fn radix_prefix_boolean_residual<F: Radix2Field, const L: usize>(
+    _ witness: RadixRangeWitness<L>,
+    _ limb_index: u32,
+    _ bit_index: u32,
+) -> F {
+    let limbs: u32 = L.downcast_truncate()
+    if limb_index >= limbs || bit_index >= 13 { return F::radix2_zero() }
+    boolean_residual<F>(
+        witness.limbs[limb_index as usize].nonzero_prefix[bit_index as usize],
+    )
+}
+
+pub fn radix_limb_reconstruction_residual<
+    F: Radix2Field,
+    const L: usize,
+>(
+    _ digits: [u32; L],
+    _ witness: RadixRangeWitness<L>,
+    _ limb_index: u32,
+) -> F {
+    let limbs: u32 = L.downcast_truncate()
+    if limb_index >= limbs { return F::radix2_zero() }
+    let mut reconstructed = F::radix2_zero()
+    let mut place = F::radix2_root(0)
+    let mut bit_index: usize = 0
+    while bit_index < 13 {
+        reconstructed = reconstructed.radix2_add(
+            field_natural<F>(witness.limbs[limb_index as usize].bits[bit_index])
+                .radix2_mul(place),
+        )
+        place = place.radix2_add(place)
+        bit_index = bit_index + 1
+    }
+    field_natural<F>(digits[limb_index as usize]).radix2_sub(reconstructed)
+}
+
+pub fn radix_prefix_residual<F: Radix2Field, const L: usize>(
+    _ witness: RadixRangeWitness<L>,
+    _ limb_index: u32,
+    _ bit_index: u32,
+) -> F {
+    let limbs: u32 = L.downcast_truncate()
+    if limb_index >= limbs || bit_index >= 13 { return F::radix2_zero() }
+    let previous = if bit_index > 0 {
+        witness.limbs[limb_index as usize]
+            .nonzero_prefix[(bit_index - 1) as usize]
+    } else {
+        if limb_index > 0 {
+            witness.limbs[(limb_index - 1) as usize].nonzero_prefix[12]
+        } else {
+            0
+        }
+    }
+    let bit = witness.limbs[limb_index as usize].bits[bit_index as usize]
+    let expected = field_natural<F>(previous)
+        .radix2_add(field_natural<F>(bit))
+        .radix2_sub(
+            field_natural<F>(previous).radix2_mul(field_natural<F>(bit)),
+        )
+    field_natural<F>(
+        witness.limbs[limb_index as usize].nonzero_prefix[bit_index as usize],
+    ).radix2_sub(expected)
+}
+
+pub fn radix_nonzero_residual<F: Radix2Field, const L: usize>(
+    _ witness: RadixRangeWitness<L>,
+) -> F {
+    if L == 0 {
+        return field_boolean<F>(witness.nonzero)
+    }
+    field_boolean<F>(witness.nonzero).radix2_sub(
+        field_natural<F>(witness.limbs[L - 1].nonzero_prefix[12]),
+    )
+}
+
+pub fn fixed_sign_zero_residual<F: Radix2Field, const L: usize>(
+    _ value: Fixed<L>,
+    _ witness: RadixRangeWitness<L>,
+) -> F {
+    field_boolean<F>(value.negative).radix2_mul(
+        field_natural<F>(1).radix2_sub(field_boolean<F>(witness.nonzero)),
+    )
+}
+
+pub fn linear_output_nonzero_residual<F: Radix2Field, const L: usize>(
+    _ linear: FixedLinearWitness<L>,
+    _ range: RadixRangeWitness<L>,
+) -> F {
+    field_boolean<F>(linear.output_nonzero).radix2_sub(
+        field_boolean<F>(range.nonzero),
+    )
 }
 
 pub fn linear_addition_residual<F: Radix2Field, const L: usize>(
