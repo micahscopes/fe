@@ -12,7 +12,10 @@ use mandelbrot_proof_kernel::{
     ESCAPES_BY_Q12_PUBLIC_WORDS,
     MAX_PADDED_TRACE_LENGTH,
     EncodedProofRow,
+    EscapesByQ12,
     EscapesByQ12Public,
+    encoded_auxiliary_row_bit,
+    encoded_proof_trace_exact,
     derive_ranged_air_row,
     encode_signed_word,
     encoded_proof_row_words,
@@ -63,7 +66,7 @@ use poseidon_baby_bear::{
 }
 use precision::baby_bear::{BabyBear, BabyBearExt4, BabyBearModulus}
 use precision::word_field_encoding::{PackedFieldBits, pack_bounded_words}
-use precision::polynomial::radix2_log
+use precision::polynomial::{radix2_log, radix2_word_coset_lde}
 
 pub const ROW_FIELDS: usize = 7
 pub const PUBLIC_FIELDS: usize = 4
@@ -994,6 +997,23 @@ pub struct AirLdeRow {
 }
 impl core::marker::Copy for AirLdeRow {}
 
+/// Prover-side base-field codewords derived from one canonical trace. Keeping
+/// main and auxiliary columns separate preserves their commitment domains and
+/// lets sparse receipt openers borrow either matrix directly.
+pub struct BabyBearAirLdeCodeword<const N: usize> {
+    pub valid: bool,
+    pub main: [[BabyBear; MAIN_LDE_ROW_FIELDS]; N],
+    pub auxiliary: [[BabyBear; AUXILIARY_ROW_BITS]; N],
+}
+impl<const N: usize> core::marker::Copy for BabyBearAirLdeCodeword<N> {}
+
+pub const EMPTY_CHECKPOINT4_AIR_LDE_CODEWORD16: BabyBearAirLdeCodeword<16> =
+    BabyBearAirLdeCodeword {
+        valid: false,
+        main: [[BabyBear::zero(); MAIN_LDE_ROW_FIELDS]; 16],
+        auxiliary: [[BabyBear::zero(); AUXILIARY_ROW_BITS]; 16],
+    }
+
 impl AirColumnView<BabyBearExt4> for AirLdeRow {
     fn main(ref self, _ column: usize) -> BabyBearExt4 {
         BabyBearExt4::from_base(self.main[column])
@@ -1018,6 +1038,76 @@ impl<const DEPTH: usize> core::marker::Copy for Checkpoint4AirLdeOpening<DEPTH> 
 pub const ZERO_AIR_LDE_ROW: AirLdeRow = AirLdeRow {
     main: [BabyBear::zero(); MAIN_LDE_ROW_FIELDS],
     auxiliary: [BabyBear::zero(); AUXILIARY_ROW_BITS],
+}
+
+/// Interpret the shared radix-2 LDE plan once per canonical AIR column. The
+/// transform, twiddle derivation, and coset validation remain field-generic;
+/// this function only supplies the checkpoint's nominal column vocabulary.
+pub fn write_checkpoint4_air_lde_codeword16(
+    _ rows: ref [EncodedProofRow; 4],
+    _ shift: BabyBear,
+    _ output: mut BabyBearAirLdeCodeword<16>,
+) -> bool {
+    output.valid = false
+    output.main = [[BabyBear::zero(); MAIN_LDE_ROW_FIELDS]; 16]
+    output.auxiliary = [[BabyBear::zero(); AUXILIARY_ROW_BITS]; 16]
+
+    let mut column: usize = 0
+    while column < MAIN_LDE_ROW_FIELDS {
+        let mut base = [BabyBear::zero(); 4]
+        let mut row: usize = 0
+        while row < 4 {
+            base[row] = BabyBear::from_u32(encoded_proof_row_words(rows[row])[column])
+            row = row + 1
+        }
+        let extended = radix2_word_coset_lde<4, 16, BabyBearModulus>(base, shift)
+        if !extended.valid { return false }
+        let mut evaluation: usize = 0
+        while evaluation < 16 {
+            output.main[evaluation][column] = extended.evaluations[evaluation]
+            evaluation = evaluation + 1
+        }
+        column = column + 1
+    }
+
+    column = 0
+    while column < AUXILIARY_ROW_BITS {
+        let mut base = [BabyBear::zero(); 4]
+        let mut row: usize = 0
+        while row < 4 {
+            base[row] = BabyBear::from_u32(
+                encoded_auxiliary_row_bit(rows[row].air, column),
+            )
+            row = row + 1
+        }
+        let extended = radix2_word_coset_lde<4, 16, BabyBearModulus>(base, shift)
+        if !extended.valid { return false }
+        let mut evaluation: usize = 0
+        while evaluation < 16 {
+            output.auxiliary[evaluation][column] = extended.evaluations[evaluation]
+            evaluation = evaluation + 1
+        }
+        column = column + 1
+    }
+    output.valid = true
+    true
+}
+
+/// Production checkpoint entry: the LDE consumes only the typed Mandelbrot
+/// claim. No host-authored witness row can cross this boundary.
+pub fn write_checkpoint4_air_lde_from_claim16(
+    _ claim: EscapesByQ12,
+    _ shift: BabyBear,
+    _ output: mut BabyBearAirLdeCodeword<16>,
+) -> bool {
+    let trace = encoded_proof_trace_exact<4>(claim)
+    if !trace.valid {
+        output.valid = false
+        output.main = [[BabyBear::zero(); MAIN_LDE_ROW_FIELDS]; 16]
+        output.auxiliary = [[BabyBear::zero(); AUXILIARY_ROW_BITS]; 16]
+        return false
+    }
+    write_checkpoint4_air_lde_codeword16(ref trace.rows, shift, mut output)
 }
 
 pub struct FriLayerPairPath<const ROUND: u32, const DEPTH: usize> {

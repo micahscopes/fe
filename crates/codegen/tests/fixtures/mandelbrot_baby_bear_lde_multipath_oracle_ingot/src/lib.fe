@@ -11,6 +11,7 @@ use mandelbrot_proof_baby_bear::{
     Checkpoint4BabyBearReceipt16,
     FriLayerTranscriptDigest,
     LdeMultiOpening,
+    EMPTY_CHECKPOINT4_AIR_LDE_CODEWORD16,
     MAIN_LDE_ROW_FIELDS,
     MainLdeMultiOpening,
     MainLdeDigest,
@@ -28,10 +29,11 @@ use mandelbrot_proof_baby_bear::{
     verify_auxiliary_lde_multi_opening,
     verify_main_lde_multi_opening,
     verify_checkpoint4_baby_bear_receipt16,
+    write_checkpoint4_air_lde_from_claim16,
     write_auxiliary_lde_multi_query_opening_power_of_two,
     write_main_lde_multi_query_opening_power_of_two,
 }
-use mandelbrot_proof_kernel::AUXILIARY_ROW_BITS
+use mandelbrot_proof_kernel::{AUXILIARY_ROW_BITS, EscapesByQ12}
 use merkle_core::MerkleMultiPath
 use poseidon_baby_bear::Poseidon2Digest
 use precision::baby_bear::{BabyBear, BabyBearExt4}
@@ -59,6 +61,67 @@ fn pack_indices(_ indices: [u32; MAX_LEAVES], _ offset: usize) -> u32 {
         cursor = cursor + 1
     }
     packed
+}
+
+/// Commit the complete production LDE derived from the canonical typed claim.
+/// Returning both roots binds every one of the 428 extended columns without a
+/// scalar host witness boundary.
+pub fn canonical_air_lde16_roots(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ bound: u32,
+    _ shift_word: u32,
+) -> (
+    u32,
+    u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    let mut codeword = EMPTY_CHECKPOINT4_AIR_LDE_CODEWORD16
+    let valid = write_checkpoint4_air_lde_from_claim16(
+        EscapesByQ12::new(c_re_q12, c_im_q12, bound),
+        BabyBear::from_u32(shift_word),
+        mut codeword,
+    )
+    if !valid || !codeword.valid {
+        return (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    }
+    let mut main_leaves = [MainLdeDigest {
+        valid: false,
+        value: Poseidon2Digest::zero(),
+    }; LDE]
+    let mut auxiliary_leaves = [AuxiliaryLdeDigest {
+        valid: false,
+        value: Poseidon2Digest::zero(),
+    }; LDE]
+    let mut evaluation: usize = 0
+    while evaluation < LDE {
+        main_leaves[evaluation] = main_lde_row_commitment(codeword.main[evaluation])
+        auxiliary_leaves[evaluation] = auxiliary_lde_row_commitment(
+            codeword.auxiliary[evaluation],
+        )
+        evaluation = evaluation + 1
+    }
+    let main_root = main_lde_root_power_of_two<LDE>(main_leaves)
+    let auxiliary_root = auxiliary_lde_root_power_of_two<LDE>(auxiliary_leaves)
+    (
+        if main_root.valid && auxiliary_root.valid { 1 } else { 0 },
+        main_root.value.field(0).to_u32(),
+        main_root.value.field(1).to_u32(),
+        main_root.value.field(2).to_u32(),
+        main_root.value.field(3).to_u32(),
+        main_root.value.field(4).to_u32(),
+        main_root.value.field(5).to_u32(),
+        main_root.value.field(6).to_u32(),
+        main_root.value.field(7).to_u32(),
+        auxiliary_root.value.field(0).to_u32(),
+        auxiliary_root.value.field(1).to_u32(),
+        auxiliary_root.value.field(2).to_u32(),
+        auxiliary_root.value.field(3).to_u32(),
+        auxiliary_root.value.field(4).to_u32(),
+        auxiliary_root.value.field(5).to_u32(),
+        auxiliary_root.value.field(6).to_u32(),
+        auxiliary_root.value.field(7).to_u32(),
+    )
 }
 
 /// Return canonical path metadata and both roots. The row requests come only

@@ -16,6 +16,38 @@ const WIDTH: usize = 16;
 const LDE: u32 = 16;
 const MAIN_FIELDS: u32 = 17;
 const AUXILIARY_FIELDS: u32 = 411;
+const MODULUS: u32 = 2_013_265_921;
+const TWO_ADICITY: u32 = 27;
+const SCALE: i64 = 4096;
+const ESCAPE_MAGNITUDE: i64 = 1 << 26;
+
+#[derive(Clone)]
+struct SignedWord {
+    sign: u32,
+    magnitude: u32,
+}
+
+#[derive(Clone)]
+struct AirRow {
+    step: u32,
+    zr: SignedWord,
+    zi: SignedWord,
+    rr: u32,
+    ii: u32,
+    magnitude: u32,
+    q_re: SignedWord,
+    r_re: u32,
+    q_im: SignedWord,
+    r_im: u32,
+    terminal: u32,
+}
+
+#[derive(Clone)]
+struct ProofRow {
+    active: u32,
+    terminal: u32,
+    air: AirRow,
+}
 
 fn fixture_url() -> Url {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -193,6 +225,210 @@ fn packed_indices(indices: &[u32], offset: usize) -> u32 {
     })
 }
 
+fn base_pow(mut base: u64, mut exponent: u32) -> u32 {
+    let modulus = u64::from(MODULUS);
+    base %= modulus;
+    let mut result = 1u64;
+    while exponent != 0 {
+        if exponent & 1 == 1 {
+            result = result * base % modulus;
+        }
+        base = base * base % modulus;
+        exponent >>= 1;
+    }
+    result as u32
+}
+
+fn base_add(left: u32, right: u32) -> u32 {
+    ((u64::from(left) + u64::from(right)) % u64::from(MODULUS)) as u32
+}
+
+fn base_mul(left: u32, right: u32) -> u32 {
+    (u64::from(left) * u64::from(right) % u64::from(MODULUS)) as u32
+}
+
+fn subgroup_root(log_order: u32) -> u32 {
+    let maximal_root = base_pow(31, 15);
+    base_pow(maximal_root.into(), 1 << (TWO_ADICITY - log_order))
+}
+
+fn signed(value: i64) -> SignedWord {
+    SignedWord {
+        sign: u32::from(value < 0),
+        magnitude: value.unsigned_abs() as u32,
+    }
+}
+
+fn air_row(step: u32, zr: i64, zi: i64) -> AirRow {
+    let rr = zr * zr;
+    let ii = zi * zi;
+    let magnitude = rr + ii;
+    let real_numerator = rr - ii;
+    let imaginary_numerator = 2 * zr * zi;
+    AirRow {
+        step,
+        zr: signed(zr),
+        zi: signed(zi),
+        rr: rr as u32,
+        ii: ii as u32,
+        magnitude: magnitude as u32,
+        q_re: signed(real_numerator.div_euclid(SCALE)),
+        r_re: real_numerator.rem_euclid(SCALE) as u32,
+        q_im: signed(imaginary_numerator.div_euclid(SCALE)),
+        r_im: imaginary_numerator.rem_euclid(SCALE) as u32,
+        terminal: u32::from(magnitude >= ESCAPE_MAGNITUDE),
+    }
+}
+
+fn trace4(c_re: i64, c_im: i64, bound: u32) -> Option<[ProofRow; 4]> {
+    if !(-8192..4096).contains(&c_re) || !(-6144..6144).contains(&c_im) || bound > 1_048_576 {
+        return None;
+    }
+    let mut zr = 0i64;
+    let mut zi = 0i64;
+    let mut rows = Vec::new();
+    for step in 0..=bound {
+        let air = air_row(step, zr, zi);
+        let terminal = air.terminal;
+        rows.push(ProofRow {
+            active: 1,
+            terminal,
+            air: air.clone(),
+        });
+        if terminal == 1 {
+            break;
+        }
+        let next_zr = (zr * zr - zi * zi).div_euclid(SCALE) + c_re;
+        let next_zi = (2 * zr * zi).div_euclid(SCALE) + c_im;
+        zr = next_zr;
+        zi = next_zi;
+    }
+    if rows.last().is_none_or(|row| row.terminal == 0) || rows.len().next_power_of_two() != 4 {
+        return None;
+    }
+    let terminal = rows.last().unwrap().air.clone();
+    while rows.len() < 4 {
+        rows.push(ProofRow {
+            active: 0,
+            terminal: 0,
+            air: terminal.clone(),
+        });
+    }
+    rows.try_into().ok()
+}
+
+fn commitment_words(row: &ProofRow) -> [u32; 17] {
+    [
+        row.air.step,
+        row.air.zr.sign,
+        row.air.zr.magnitude,
+        row.air.zi.sign,
+        row.air.zi.magnitude,
+        row.air.rr,
+        row.air.ii,
+        row.air.magnitude,
+        row.air.q_re.sign,
+        row.air.q_re.magnitude,
+        row.air.r_re,
+        row.air.q_im.sign,
+        row.air.q_im.magnitude,
+        row.air.r_im,
+        row.air.terminal,
+        row.active,
+        row.terminal,
+    ]
+}
+
+fn append_range_witness(bits: &mut Vec<u32>, value: u32, width: usize) {
+    let decomposition = (0..width).map(|bit| (value >> bit) & 1).collect::<Vec<_>>();
+    bits.extend(decomposition.iter().copied());
+    let mut seen = 0u32;
+    bits.extend(decomposition.into_iter().map(|bit| {
+        seen |= bit;
+        seen
+    }));
+}
+
+fn auxiliary_bits(row: &ProofRow) -> Vec<u32> {
+    let mut bits = Vec::with_capacity(AUXILIARY_FIELDS as usize);
+    append_range_witness(&mut bits, row.air.step, 21);
+    append_range_witness(&mut bits, row.air.zr.magnitude, 15);
+    append_range_witness(&mut bits, row.air.zi.magnitude, 15);
+    append_range_witness(&mut bits, row.air.rr, 30);
+    append_range_witness(&mut bits, row.air.ii, 30);
+    append_range_witness(&mut bits, row.air.magnitude, 31);
+    append_range_witness(&mut bits, row.air.q_re.magnitude, 18);
+    append_range_witness(&mut bits, row.air.r_re, 12);
+    append_range_witness(&mut bits, row.air.q_im.magnitude, 19);
+    append_range_witness(&mut bits, row.air.r_im, 12);
+    let mut seen = 0u32;
+    bits.extend((26..31).map(|bit| {
+        seen |= (row.air.magnitude >> bit) & 1;
+        seen
+    }));
+    assert_eq!(bits.len(), AUXILIARY_FIELDS as usize);
+    bits
+}
+
+/// Direct inverse DFT and polynomial evaluation. This deliberately does not
+/// replay Fe's radix-2 butterfly implementation.
+fn baby_bear_lde_column(values: [u32; 4], shift: u32) -> [u32; 16] {
+    let root4 = subgroup_root(2);
+    let inverse_root4 = base_pow(root4.into(), MODULUS - 2);
+    let inverse_four = base_pow(4, MODULUS - 2);
+    let coefficients: [u32; 4] = core::array::from_fn(|coefficient| {
+        let sum = values.iter().enumerate().fold(0, |sum, (sample, value)| {
+            let twiddle = base_pow(inverse_root4.into(), (sample * coefficient) as u32);
+            base_add(sum, base_mul(*value, twiddle))
+        });
+        base_mul(sum, inverse_four)
+    });
+    let root16 = subgroup_root(4);
+    core::array::from_fn(|evaluation| {
+        let point = base_mul(shift, base_pow(root16.into(), evaluation as u32));
+        coefficients.iter().rev().fold(0, |value, coefficient| {
+            base_add(base_mul(value, point), *coefficient)
+        })
+    })
+}
+
+fn expected_canonical_lde_roots(c_re: i64, c_im: i64, bound: u32, shift: u32) -> Vec<u32> {
+    let rows = trace4(c_re, c_im, bound).expect("canonical four-row escape trace");
+    let words: [[u32; 17]; 4] = core::array::from_fn(|row| commitment_words(&rows[row]));
+    let auxiliary: [Vec<u32>; 4] = core::array::from_fn(|row| auxiliary_bits(&rows[row]));
+    let mut main_rows = vec![vec![0; MAIN_FIELDS as usize]; LDE as usize];
+    for column in 0..MAIN_FIELDS as usize {
+        let extended = baby_bear_lde_column(core::array::from_fn(|row| words[row][column]), shift);
+        for evaluation in 0..LDE as usize {
+            main_rows[evaluation][column] = extended[evaluation];
+        }
+    }
+    let mut auxiliary_rows = vec![vec![0; AUXILIARY_FIELDS as usize]; LDE as usize];
+    for column in 0..AUXILIARY_FIELDS as usize {
+        let extended =
+            baby_bear_lde_column(core::array::from_fn(|row| auxiliary[row][column]), shift);
+        for evaluation in 0..LDE as usize {
+            auxiliary_rows[evaluation][column] = extended[evaluation];
+        }
+    }
+    let main_root = digest_merkle_root(
+        main_rows
+            .iter()
+            .map(|row| reference_field_commitment(b"BL01", row))
+            .collect(),
+    );
+    let auxiliary_root = digest_merkle_root(
+        auxiliary_rows
+            .iter()
+            .map(|row| reference_field_commitment(b"BY01", row))
+            .collect(),
+    );
+    let mut expected = vec![1];
+    expected.extend(main_root);
+    expected.extend(auxiliary_root);
+    expected
+}
+
 fn main_row(seed: u32, evaluation: u32) -> Vec<u32> {
     (0..MAIN_FIELDS)
         .map(|column| (seed + evaluation * 1009 + column * 37) % 1_900_000_007)
@@ -254,6 +490,40 @@ fn sparse_air_lde_openings_match_independent_roots_and_fail_closed() {
     let mut store = wasmtime::Store::new(&engine, ());
     let instance = wasmtime::Instance::new(&mut store, &module, &[])
         .expect("sparse BabyBear AIR LDE module should instantiate");
+
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "canonical_air_lde16_roots",
+            &[3072, 0, 16, 7],
+            17,
+        ),
+        expected_canonical_lde_roots(3072, 0, 16, 7),
+        "production BabyBear LDE must match an independent direct DFT oracle",
+    );
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "canonical_air_lde16_roots",
+            &[0, 0, 16, 7],
+            17,
+        ),
+        vec![0; 17],
+        "a non-escaping claim must not produce a canonical LDE",
+    );
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "canonical_air_lde16_roots",
+            &[3072, 0, 16, 0],
+            17,
+        ),
+        vec![0; 17],
+        "the zero coset shift must fail closed",
+    );
 
     for (seed, transcript) in [(97, 431), (0, 433)] {
         assert_eq!(
