@@ -1098,6 +1098,56 @@ fn bb_inverse(value: u32) -> u32 {
     bb_pow(value, BABY_BEAR_MODULUS - 2)
 }
 
+fn bb_two_adic_root(log_order: u32) -> u32 {
+    assert!(log_order <= 27);
+    bb_pow(bb_pow(31, 15), 1 << (27 - log_order))
+}
+
+fn direct_baby_bear_ntt(values: &[u32], inverse: bool) -> Vec<u32> {
+    assert!(values.len().is_power_of_two());
+    let log_n = values.len().ilog2();
+    let mut root = bb_two_adic_root(log_n);
+    if inverse {
+        root = bb_inverse(root);
+    }
+    let mut output = vec![0; values.len()];
+    for (index, slot) in output.iter_mut().enumerate() {
+        let point = bb_pow(root, index as u32);
+        let mut power = 1;
+        let mut sum = 0;
+        for value in values {
+            sum = bb_add(sum, bb_mul(*value, power));
+            power = bb_mul(power, point);
+        }
+        *slot = sum;
+    }
+    if inverse {
+        let scale = bb_inverse(values.len() as u32);
+        for value in &mut output {
+            *value = bb_mul(*value, scale);
+        }
+    }
+    output
+}
+
+fn direct_baby_bear_coset_lde(values: &[u32], output_len: usize, shift: u32) -> Vec<u32> {
+    let coefficients = direct_baby_bear_ntt(values, true);
+    let log_n = output_len.ilog2();
+    let root = bb_two_adic_root(log_n);
+    (0..output_len)
+        .map(|index| {
+            let point = bb_mul(shift, bb_pow(root, index as u32));
+            let mut power = 1;
+            let mut sum = 0;
+            for coefficient in &coefficients {
+                sum = bb_add(sum, bb_mul(*coefficient, power));
+                power = bb_mul(power, point);
+            }
+            sum
+        })
+        .collect()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Ext4([u32; 4]);
 
@@ -1105,7 +1155,11 @@ impl Ext4 {
     const ZERO: Self = Self([0; 4]);
 
     fn from_words(words: &[u32]) -> Self {
-        Self(words.try_into().expect("quartic value must have four coefficients"))
+        Self(
+            words
+                .try_into()
+                .expect("quartic value must have four coefficients"),
+        )
     }
 
     fn from_base(value: u32) -> Self {
@@ -1113,7 +1167,15 @@ impl Ext4 {
     }
 
     fn add(self, other: Self) -> Self {
-        Self(std::array::from_fn(|index| bb_add(self.0[index], other.0[index])))
+        Self(std::array::from_fn(|index| {
+            bb_add(self.0[index], other.0[index])
+        }))
+    }
+
+    fn sub(self, other: Self) -> Self {
+        Self(std::array::from_fn(|index| {
+            bb_sub(self.0[index], other.0[index])
+        }))
     }
 
     fn scale(self, scalar: u32) -> Self {
@@ -1129,7 +1191,10 @@ impl Ext4 {
                 bb_mul(a[0], b[0]),
                 bb_mul(
                     nonresidue,
-                    bb_add(bb_add(bb_mul(a[1], b[3]), bb_mul(a[2], b[2])), bb_mul(a[3], b[1])),
+                    bb_add(
+                        bb_add(bb_mul(a[1], b[3]), bb_mul(a[2], b[2])),
+                        bb_mul(a[3], b[1]),
+                    ),
                 ),
             ),
             bb_add(
@@ -1137,7 +1202,10 @@ impl Ext4 {
                 bb_mul(nonresidue, bb_add(bb_mul(a[2], b[3]), bb_mul(a[3], b[2]))),
             ),
             bb_add(
-                bb_add(bb_add(bb_mul(a[0], b[2]), bb_mul(a[1], b[1])), bb_mul(a[2], b[0])),
+                bb_add(
+                    bb_add(bb_mul(a[0], b[2]), bb_mul(a[1], b[1])),
+                    bb_mul(a[2], b[0]),
+                ),
                 bb_mul(nonresidue, bb_mul(a[3], b[3])),
             ),
             bb_add(
@@ -1171,6 +1239,36 @@ impl Ext4 {
         let odd1 = bb_add(bb_mul(a1, inverse1), bb_mul(a3, inverse0));
         Self([even0, bb_sub(0, odd0), even1, bb_sub(0, odd1)])
     }
+
+    fn pow(self, mut exponent: u32) -> Self {
+        let mut base = self;
+        let mut result = Self::from_base(1);
+        while exponent != 0 {
+            if exponent & 1 == 1 {
+                result = result.mul(base);
+            }
+            base = base.mul(base);
+            exponent >>= 1;
+        }
+        result
+    }
+}
+
+fn expected_sparse_air_composition(point: Ext4, numerators: [Ext4; 4]) -> Ext4 {
+    let one = Ext4::from_base(1);
+    let last_trace_point = Ext4::from_base(bb_two_adic_root(2)).inverse();
+    let trace_zerofier = point.pow(4).sub(one);
+    let first_zerofier = point.sub(one);
+    let last_zerofier = point.sub(last_trace_point);
+    assert_ne!(trace_zerofier, Ext4::ZERO);
+    assert_ne!(first_zerofier, Ext4::ZERO);
+    assert_ne!(last_zerofier, Ext4::ZERO);
+    let trace_inverse = trace_zerofier.inverse();
+    numerators[0]
+        .mul(trace_inverse)
+        .add(numerators[1].mul(last_zerofier).mul(trace_inverse))
+        .add(numerators[2].mul(first_zerofier.inverse()))
+        .add(numerators[3].mul(last_zerofier.inverse()))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1246,10 +1344,7 @@ fn product_copy_compressed_inverse(address: u32, value: u32, beta: u32, gamma: u
     bb_inverse(bb_add(gamma, bb_add(address, bb_mul(beta, value))))
 }
 
-fn expected_product_copy_ports(
-    task: [u32; 5],
-    row: [u32; 6],
-) -> [Option<ExpectedCopyPort>; 2] {
+fn expected_product_copy_ports(task: [u32; 5], row: [u32; 6]) -> [Option<ExpectedCopyPort>; 2] {
     let [kind, first, second, third, _fourth] = task;
     let limbs = LIMBS as u32;
     let mut ports = [None; 2];
@@ -1381,10 +1476,7 @@ fn round_nonzero_address(rank: u32) -> u32 {
     round_sign_address(rank) + 11
 }
 
-fn expected_round_copy_ports(
-    task: [u32; 5],
-    row: [u32; 6],
-) -> [Option<ExpectedCopyPort>; 5] {
+fn expected_round_copy_ports(task: [u32; 5], row: [u32; 6]) -> [Option<ExpectedCopyPort>; 5] {
     let [kind, first, second, third, _fourth] = task;
     let limbs = LIMBS as u32;
     let mut ports: [Option<ExpectedCopyPort>; 5] = [None; 5];
@@ -1463,19 +1555,28 @@ fn expected_round_copy_ports(
             let right_rank = [0, 1, 1][first as usize];
             ports[0] = Some(ExpectedCopyPort {
                 address: round_bit_address(low_rank, limbs - 2, 12),
-                value: row[4], coefficient: -1,
+                value: row[4],
+                coefficient: -1,
             });
             ports[1] = Some(ExpectedCopyPort {
-                address: round_sign_address(output_rank), value: row[0], coefficient: -1,
+                address: round_sign_address(output_rank),
+                value: row[0],
+                coefficient: -1,
             });
             ports[2] = Some(ExpectedCopyPort {
-                address: round_nonzero_address(output_rank), value: row[1], coefficient: -1,
+                address: round_nonzero_address(output_rank),
+                value: row[1],
+                coefficient: -1,
             });
             ports[3] = Some(ExpectedCopyPort {
-                address: round_sign_address(left_rank), value: row[3], coefficient: -1,
+                address: round_sign_address(left_rank),
+                value: row[3],
+                coefficient: -1,
             });
             ports[4] = Some(ExpectedCopyPort {
-                address: round_sign_address(right_rank), value: row[5], coefficient: -1,
+                address: round_sign_address(right_rank),
+                value: row[5],
+                coefficient: -1,
             });
         }
         _ => {}
@@ -1555,10 +1656,7 @@ fn linear_right_range_rank(node: u32) -> u32 {
     [11, 0, 14, 1][node as usize]
 }
 
-fn expected_linear_copy_ports(
-    task: [u32; 5],
-    row: [u32; 6],
-) -> [Option<ExpectedCopyPort>; 8] {
+fn expected_linear_copy_ports(task: [u32; 5], row: [u32; 6]) -> [Option<ExpectedCopyPort>; 8] {
     let [kind, first, second, third, _fourth] = task;
     let limbs = LIMBS as u32;
     let mut ports: [Option<(u32, u32, i32)>; 8] = [None; 8];
@@ -1682,10 +1780,7 @@ fn expected_linear_interaction_receipt(
     receipt
 }
 
-fn expected_boundary_copy_ports(
-    task: [u32; 5],
-    row: [u32; 6],
-) -> [Option<ExpectedCopyPort>; 2] {
+fn expected_boundary_copy_ports(task: [u32; 5], row: [u32; 6]) -> [Option<ExpectedCopyPort>; 2] {
     let [kind, first, second, _third, _fourth] = task;
     let mut ports: [Option<(u32, u32, i32)>; 2] = [None; 2];
     match kind {
@@ -1814,16 +1909,8 @@ fn expected_sparse_interaction_root(
     current: &ComplexFx,
     base_root: [u32; 8],
 ) -> [u32; 8] {
-    let [
-        product_beta,
-        product_gamma,
-        round_beta,
-        round_gamma,
-        linear_beta,
-        linear_gamma,
-        boundary_beta,
-        boundary_gamma,
-    ] = expected_sparse_interaction_challenge_values(base_root);
+    let [product_beta, product_gamma, round_beta, round_gamma, linear_beta, linear_gamma, boundary_beta, boundary_gamma] =
+        expected_sparse_interaction_challenge_values(base_root);
 
     let mut tasks = expected_sparse_transition_tasks(LIMBS as u32);
     tasks.resize(4_096, [14, 0, 0, 0, 0]);
@@ -1881,7 +1968,11 @@ fn expected_sparse_interaction_root(
         for inverse in boundary_inverses {
             extend_ext4_words(&mut fields, inverse);
         }
-        assert_eq!(fields.len(), 97, "interaction leaf schema must stay nominal");
+        assert_eq!(
+            fields.len(),
+            97,
+            "interaction leaf schema must stay nominal"
+        );
         leaves.push(reference_poseidon_digest(b"SI01", &fields));
 
         product_accumulator = product_accumulator.add(product_delta);
@@ -1904,16 +1995,8 @@ fn expected_sparse_air_prefix_words(
     let controls = expected_sparse_control_rows();
     let rows = expected_sparse_rows(point, current);
     let tasks = expected_sparse_transition_tasks(LIMBS as u32);
-    let [
-        product_beta,
-        product_gamma,
-        round_beta,
-        round_gamma,
-        linear_beta,
-        linear_gamma,
-        boundary_beta,
-        boundary_gamma,
-    ] = expected_sparse_interaction_challenge_values(base_root);
+    let [product_beta, product_gamma, round_beta, round_gamma, linear_beta, linear_gamma, boundary_beta, boundary_gamma] =
+        expected_sparse_interaction_challenge_values(base_root);
 
     let mut words = vec![1, 1];
     words.extend(base_root);
@@ -1981,6 +2064,44 @@ fn expected_sparse_air_prefix_words(
         extend_ext4_words(&mut words, accumulator);
     }
     assert_eq!(words.len(), 526, "sparse prefix schema must stay nominal");
+    words
+}
+
+fn expected_sparse_air_lde_words(prefix: &[u32]) -> Vec<u32> {
+    assert_eq!(prefix.len(), 526, "sparse prefix input must stay nominal");
+    const BASE_FIELDS: usize = 41;
+    const INTERACTION_FIELDS: usize = 84;
+    const TRACE: usize = 4;
+    const LDE: usize = 16;
+    const BASE_START: usize = 10;
+    const INTERACTION_START: usize = BASE_START + TRACE * BASE_FIELDS;
+
+    let mut base = vec![0; LDE * BASE_FIELDS];
+    for column in 0..BASE_FIELDS {
+        let source = (0..TRACE)
+            .map(|row| prefix[BASE_START + row * BASE_FIELDS + column])
+            .collect::<Vec<_>>();
+        let extended = direct_baby_bear_coset_lde(&source, LDE, 7);
+        for row in 0..LDE {
+            base[row * BASE_FIELDS + column] = extended[row];
+        }
+    }
+
+    let mut interaction = vec![0; LDE * INTERACTION_FIELDS];
+    for column in 0..INTERACTION_FIELDS {
+        let source = (0..TRACE)
+            .map(|row| prefix[INTERACTION_START + row * INTERACTION_FIELDS + column])
+            .collect::<Vec<_>>();
+        let extended = direct_baby_bear_coset_lde(&source, LDE, 7);
+        for row in 0..LDE {
+            interaction[row * INTERACTION_FIELDS + column] = extended[row];
+        }
+    }
+
+    let mut words = vec![1];
+    words.extend(base);
+    words.extend(interaction);
+    assert_eq!(words.len(), 2_001, "sparse LDE schema must stay nominal");
     words
 }
 
@@ -3927,9 +4048,13 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
 fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
     let bytes = compile_sparse_auth_fixture();
     let engine = wasmtime::Engine::default();
-    let module = wasmtime::Module::new(&engine, &bytes)
-        .expect("sparse interaction Wasm module should load");
-    assert_eq!(module.imports().count(), 0, "interaction fixture must stay zero-import");
+    let module =
+        wasmtime::Module::new(&engine, &bytes).expect("sparse interaction Wasm module should load");
+    assert_eq!(
+        module.imports().count(),
+        0,
+        "interaction fixture must stay zero-import"
+    );
     let mut store = wasmtime::Store::new(&engine, ());
     let instance = wasmtime::Instance::new(&mut store, &module, &[])
         .expect("interaction fixture should instantiate");
@@ -3952,6 +4077,13 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
     let mut arguments = transition_arguments(&point, &current);
     arguments.extend(expected_interaction_root);
     arguments.extend(mutated_interaction_root);
+    let (_, _, lde_words) = encoded(
+        &mut store,
+        &instance,
+        memory,
+        "fixed_transition4_sparse_air_lde_encoded",
+        &arguments[..20],
+    );
     let (_, _, words) = encoded(
         &mut store,
         &instance,
@@ -3959,13 +4091,124 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
         "fixed_transition4_sparse_air_checkpoint_encoded",
         &arguments,
     );
-    let mut expected = expected_sparse_air_prefix_words(
-        &point,
-        &current,
-        expected_base_root,
-    );
+    let mut expected = expected_sparse_air_prefix_words(&point, &current, expected_base_root);
     let first_base_fields = expected[10..51].to_vec();
     let first_interaction_fields = expected[174..258].to_vec();
+    let mut expected_lde = expected_sparse_air_lde_words(&expected);
+    expected_lde.extend([1, 0]);
+    assert_eq!(
+        expected_lde.len(),
+        2_003,
+        "sparse LDE schema must stay nominal"
+    );
+    assert_eq!(lde_words.len(), expected_lde.len(), "sparse LDE length");
+    for (index, (actual, wanted)) in lde_words.iter().zip(&expected_lde).enumerate() {
+        assert_eq!(
+            actual, wanted,
+            "sparse LDE word {index} must match the independent oracle",
+        );
+    }
+
+    const BASE_FIELDS: usize = 41;
+    const INTERACTION_FIELDS: usize = 84;
+    const LDE: usize = 16;
+    const BASE_START: usize = 1;
+    const INTERACTION_START: usize = BASE_START + LDE * BASE_FIELDS;
+    for challenge in [[3u32, 5, 7, 11], [17, 29, 43, 61]] {
+        for evaluation in [0u32, 3, 9, 15] {
+            let mut results = Vec::new();
+            for mutation in 0u32..=2 {
+                let mut composition_arguments = arguments[..20].to_vec();
+                composition_arguments.extend(challenge);
+                composition_arguments.extend([evaluation, mutation]);
+                let actual = call(
+                    &mut store,
+                    &instance,
+                    "fixed_transition4_sparse_air_composition",
+                    &composition_arguments,
+                    39,
+                );
+                assert_eq!(actual[0], 1, "opened row must decode");
+                assert_eq!(actual[1], 1, "next opened row must decode");
+                assert_eq!(actual[18], 1, "composition quotient must be defined");
+
+                let numerators = std::array::from_fn(|family| {
+                    Ext4::from_words(&actual[2 + family * 4..6 + family * 4])
+                });
+                let composition = Ext4::from_words(&actual[19..23]);
+                let evaluation_point =
+                    Ext4::from_base(bb_mul(7, bb_pow(bb_two_adic_root(4), evaluation)));
+                assert_eq!(
+                    composition,
+                    expected_sparse_air_composition(evaluation_point, numerators),
+                    "four-family quotient, evaluation {evaluation}, mutation {mutation}",
+                );
+
+                let row = evaluation as usize;
+                let next_row = ((evaluation + 4) & 15) as usize;
+                let mut expected_value = expected_lde[BASE_START + row * BASE_FIELDS + 35];
+                if mutation == 1 {
+                    expected_value = bb_add(expected_value, 1);
+                }
+                assert_eq!(
+                    Ext4::from_words(&actual[23..27]),
+                    Ext4::from_base(expected_value),
+                    "typed base-row reconstruction, evaluation {evaluation}, mutation {mutation}",
+                );
+
+                let interaction = INTERACTION_START + row * INTERACTION_FIELDS;
+                let mut expected_product =
+                    Ext4::from_words(&expected_lde[interaction..interaction + 4]);
+                if mutation == 2 {
+                    expected_product.0[0] = bb_add(expected_product.0[0], 1);
+                }
+                assert_eq!(
+                    Ext4::from_words(&actual[27..31]),
+                    expected_product,
+                    "typed interaction-row reconstruction, evaluation {evaluation}, mutation {mutation}",
+                );
+                assert_eq!(
+                    Ext4::from_words(&actual[31..35]),
+                    Ext4::from_base(expected_lde[BASE_START + next_row * BASE_FIELDS + 35]),
+                    "next base-row geometry, evaluation {evaluation}",
+                );
+                let next_interaction = INTERACTION_START + next_row * INTERACTION_FIELDS;
+                assert_eq!(
+                    Ext4::from_words(&actual[35..39]),
+                    Ext4::from_words(&expected_lde[next_interaction..next_interaction + 4],),
+                    "next interaction-row geometry, evaluation {evaluation}",
+                );
+                results.push((numerators, composition));
+            }
+            for mutation in 1..=2 {
+                assert_ne!(
+                    results[mutation].0,
+                    results[0].0,
+                    "mutation {mutation} must alter a constraint numerator at evaluation {evaluation}",
+                );
+                assert_ne!(
+                    results[mutation].1, results[0].1,
+                    "mutation {mutation} must alter the composition at evaluation {evaluation}",
+                );
+            }
+        }
+    }
+    for (evaluation, mutation) in [(16, 0), (0, 3)] {
+        let mut invalid_arguments = arguments[..20].to_vec();
+        invalid_arguments.extend([3, 5, 7, 11, evaluation, mutation]);
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "fixed_transition4_sparse_air_composition",
+                &invalid_arguments,
+                39,
+            ),
+            [0; 39],
+            "invalid sparse composition request must fail closed",
+        );
+    }
+
     expected.push(1);
     expected.extend(first_base_fields);
     expected.push(1);
@@ -3978,9 +4221,16 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
     expected.extend([0, 0]);
     expected.extend(expected_base_root);
     expected.extend([0; 8]);
-    assert_eq!(expected.len(), 691, "sparse checkpoint schema must stay nominal");
     assert_eq!(
-        words, expected,
-        "caller-owned rows, accumulators, roots, and mutation decisions must match the independent oracle",
+        expected.len(),
+        691,
+        "sparse checkpoint schema must stay nominal"
     );
+    assert_eq!(words.len(), expected.len(), "sparse checkpoint length");
+    for (index, (actual, wanted)) in words.iter().zip(&expected).enumerate() {
+        assert_eq!(
+            actual, wanted,
+            "sparse checkpoint word {index} must match the independent oracle",
+        );
+    }
 }

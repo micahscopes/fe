@@ -18,20 +18,29 @@ use mandelbrot_proof_fixed_air::{
 use mandelbrot_proof_fixed_air_baby_bear::{
     SparseBaseAirRow,
     SparseBaseAirFields,
+    SparseAirEvaluationTrace,
+    SparseAirLdeCodeword,
     SparseInteractionAccumulators,
     SparseInteractionAirFields,
     SparseInteractionTraceDigest,
     SparseInteractionTraceRow,
     SparseTraceDigest,
     SparseTraceAuthentication,
+    SPARSE_BASE_AIR_FIELDS,
+    SPARSE_INTERACTION_AIR_FIELDS,
     empty_sparse_trace_authentication,
+    evaluate_sparse_composition_opened,
     sparse_base_air_row_from_witness,
     sparse_base_air_fields,
+    sparse_constraint_numerators_opened,
     sparse_interaction_air_fields,
     sparse_interaction_challenges,
     sparse_interaction_trace_root_power_of_two,
+    sparse_opened_air_row,
     sparse_trace_root_power_of_two,
     verify_sparse_trace_authentication,
+    write_sparse_air_evaluation_trace,
+    write_sparse_air_lde,
     write_sparse_interaction_air_rows,
     write_sparse_trace_authentication_power_of_two,
     zero_sparse_base_air_row,
@@ -40,6 +49,7 @@ use mandelbrot_proof_fixed_air_baby_bear::{
 }
 use mandelbrot_proof_recursive::ComplexFixed
 use poseidon_baby_bear::Poseidon2Digest
+use precision::baby_bear::{BabyBear, BabyBearExt4}
 use precision::fixed::Fixed
 
 type TransitionWitness4 = FixedMandelbrotTransitionWitness<4>
@@ -48,8 +58,8 @@ type SparseTraceAuthentication4 = SparseTraceAuthentication<4, 4, 48>
 struct SparseAirPrefix4 {
     pub valid: bool,
     pub base: SparseTraceDigest<4>,
-    pub base_rows: [SparseBaseAirRow; 4],
-    pub interaction_rows: [SparseInteractionTraceRow; 4],
+    pub base_rows: [SparseBaseAirRow<BabyBear>; 4],
+    pub interaction_rows: [SparseInteractionTraceRow<BabyBearExt4>; 4],
     pub accumulators: SparseInteractionAccumulators,
 }
 impl core::marker::Copy for SparseAirPrefix4 {}
@@ -66,6 +76,13 @@ struct SparseAirCheckpoint4 {
 }
 impl core::marker::Copy for SparseAirCheckpoint4 {}
 derive CanonicalWords for SparseAirCheckpoint4 using CanonicalWordsProvider
+
+struct RejectedCosetShift {
+    pub shift: BabyBear,
+    pub accepted: bool,
+}
+impl core::marker::Copy for RejectedCosetShift {}
+derive CanonicalWords for RejectedCosetShift using CanonicalWordsProvider
 
 fn fixed4(_ negative: u32, _ limbs: [u32; 4]) -> Fixed<4> {
     Fixed { negative: negative == 1, limbs: limbs }
@@ -190,6 +207,245 @@ pub fn sparse_interaction_challenges4(
     words
 }
 
+fn write_sparse_air_rows4(
+    _ point: ComplexFixed<4>,
+    _ current: ComplexFixed<4>,
+    _ next: ComplexFixed<4>,
+    _ witness: TransitionWitness4,
+    _ base: SparseTraceDigest<4>,
+    _ base_rows: mut [SparseBaseAirRow<BabyBear>; 4],
+    _ interaction_rows: mut [SparseInteractionTraceRow<BabyBearExt4>; 4],
+    _ accumulators: mut SparseInteractionAccumulators,
+) -> bool {
+    let mut index: usize = 0
+    while index < 4 {
+        base_rows[index] = sparse_base_air_row_from_witness<4>(
+            index.downcast_truncate(), point, current, next, witness,
+        )
+        index = index + 1
+    }
+    write_sparse_interaction_air_rows<4, 4>(
+        point,
+        current,
+        next,
+        witness,
+        base,
+        0,
+        mut accumulators,
+        mut interaction_rows,
+    )
+}
+
+fn write_sparse_air_evaluation_trace4(
+    _ point: ComplexFixed<4>,
+    _ current: ComplexFixed<4>,
+    _ next: ComplexFixed<4>,
+    _ witness: TransitionWitness4,
+    _ base: SparseTraceDigest<4>,
+    _ evaluations: mut SparseAirEvaluationTrace<4>,
+) -> bool {
+    let mut base_rows = [zero_sparse_base_air_row(); 4]
+    let mut interaction_rows = [zero_sparse_interaction_trace_row(); 4]
+    let mut accumulators = zero_sparse_interaction_accumulators()
+    write_sparse_air_rows4(
+        point,
+        current,
+        next,
+        witness,
+        base,
+        mut base_rows,
+        mut interaction_rows,
+        mut accumulators,
+    ) && write_sparse_air_evaluation_trace<4>(
+        ref base_rows,
+        ref interaction_rows,
+        mut evaluations,
+    )
+}
+
+pub fn fixed_transition4_sparse_air_lde_encoded(
+    _ prn: u32, _ pr0: u32, _ pr1: u32, _ pr2: u32, _ pr3: u32,
+    _ pin: u32, _ pi0: u32, _ pi1: u32, _ pi2: u32, _ pi3: u32,
+    _ crn: u32, _ cr0: u32, _ cr1: u32, _ cr2: u32, _ cr3: u32,
+    _ cin: u32, _ ci0: u32, _ ci1: u32, _ ci2: u32, _ ci3: u32,
+) -> BrowserBytes {
+    let (point, current, witness) = transition4(
+        prn, [pr0, pr1, pr2, pr3], pin, [pi0, pi1, pi2, pi3],
+        crn, [cr0, cr1, cr2, cr3], cin, [ci0, ci1, ci2, ci3],
+    )
+    let next = fixed_mandelbrot_transition_output(witness)
+    let base = sparse_trace_root_power_of_two<4, 4096>(
+        point, current, next, witness,
+    )
+    if !base.valid { return BrowserBytes { ptr: 0, len: 0 } }
+
+    let mut evaluations: SparseAirEvaluationTrace<4> = SparseAirEvaluationTrace {
+        valid: false,
+        base: [[BabyBear::zero(); SPARSE_BASE_AIR_FIELDS]; 4],
+        interaction: [[BabyBear::zero(); SPARSE_INTERACTION_AIR_FIELDS]; 4],
+    }
+    let evaluations_valid = write_sparse_air_evaluation_trace4(
+        point,
+        current,
+        next,
+        witness,
+        base,
+        mut evaluations,
+    )
+    let mut lde: SparseAirLdeCodeword<16> = SparseAirLdeCodeword {
+        valid: false,
+        base: [[BabyBear::zero(); SPARSE_BASE_AIR_FIELDS]; 16],
+        interaction: [[BabyBear::zero(); SPARSE_INTERACTION_AIR_FIELDS]; 16],
+    }
+    // Exercise rejection before the successful placement so the large
+    // codeword never needs a second snapshot merely for this negative gate.
+    // The successful writer overwrites every field before setting `valid`.
+    let accepts_invalid_shift = write_sparse_air_lde<4, 16>(
+        ref evaluations,
+        BabyBear::one(),
+        mut lde,
+    )
+    if evaluations_valid {
+        write_sparse_air_lde<4, 16>(
+            ref evaluations,
+            BabyBear::from_u32(7),
+            mut lde,
+        )
+    }
+    let rejection = RejectedCosetShift {
+        shift: BabyBear::one(),
+        accepted: accepts_invalid_shift,
+    }
+    let words = canonical_word_stream_count(ref lde)
+        + canonical_word_stream_count(ref rejection)
+    let writer = encode_canonical_word_stream(
+        ref lde,
+        BrowserWordWriter::allocate(words),
+    )
+    encode_canonical_word_stream(ref rejection, writer).finish()
+}
+
+/// Exercise typed LDE-row reconstruction and the complete sparse composition
+/// fold. The returned numerators let the Rust gate apply the four zerofiers
+/// independently instead of treating a final-byte match as proof.
+pub fn fixed_transition4_sparse_air_composition(
+    _ prn: u32, _ pr0: u32, _ pr1: u32, _ pr2: u32, _ pr3: u32,
+    _ pin: u32, _ pi0: u32, _ pi1: u32, _ pi2: u32, _ pi3: u32,
+    _ crn: u32, _ cr0: u32, _ cr1: u32, _ cr2: u32, _ cr3: u32,
+    _ cin: u32, _ ci0: u32, _ ci1: u32, _ ci2: u32, _ ci3: u32,
+    _ challenge0: u32, _ challenge1: u32,
+    _ challenge2: u32, _ challenge3: u32,
+    _ evaluation: u32,
+    _ mutation: u32,
+) -> [u32; 39] {
+    if evaluation >= 16 || mutation > 2 { return [0; 39] }
+    let (point, current, witness) = transition4(
+        prn, [pr0, pr1, pr2, pr3], pin, [pi0, pi1, pi2, pi3],
+        crn, [cr0, cr1, cr2, cr3], cin, [ci0, ci1, ci2, ci3],
+    )
+    let next = fixed_mandelbrot_transition_output(witness)
+    let base = sparse_trace_root_power_of_two<4, 4096>(
+        point, current, next, witness,
+    )
+    if !base.valid { return [0; 39] }
+
+    let mut evaluations: SparseAirEvaluationTrace<4> = SparseAirEvaluationTrace {
+        valid: false,
+        base: [[BabyBear::zero(); SPARSE_BASE_AIR_FIELDS]; 4],
+        interaction: [[BabyBear::zero(); SPARSE_INTERACTION_AIR_FIELDS]; 4],
+    }
+    if !write_sparse_air_evaluation_trace4(
+        point, current, next, witness, base, mut evaluations,
+    ) {
+        return [0; 39]
+    }
+    let mut lde: SparseAirLdeCodeword<16> = SparseAirLdeCodeword {
+        valid: false,
+        base: [[BabyBear::zero(); SPARSE_BASE_AIR_FIELDS]; 16],
+        interaction: [[BabyBear::zero(); SPARSE_INTERACTION_AIR_FIELDS]; 16],
+    }
+    if !write_sparse_air_lde<4, 16>(
+        ref evaluations,
+        BabyBear::from_u32(7),
+        mut lde,
+    ) {
+        return [0; 39]
+    }
+
+    let index: usize = evaluation as usize
+    if mutation == 1 {
+        lde.base[index][35] = lde.base[index][35] + BabyBear::one()
+    } else if mutation == 2 {
+        lde.interaction[index][0] = lde.interaction[index][0] + BabyBear::one()
+    }
+    let next_index: usize = ((evaluation + 4) & 15) as usize
+    let opened = sparse_opened_air_row(
+        lde.base[index],
+        lde.interaction[index],
+    )
+    let next_opened = sparse_opened_air_row(
+        lde.base[next_index],
+        lde.interaction[next_index],
+    )
+    let challenge = BabyBearExt4::from_u32s([
+        challenge0, challenge1, challenge2, challenge3,
+    ])
+    let interaction_challenges = sparse_interaction_challenges(base)
+    let numerators = sparse_constraint_numerators_opened<4>(
+        challenge,
+        interaction_challenges,
+        ref opened,
+        ref next_opened,
+    )
+    let root = BabyBear::two_adic_root(4)
+    let evaluation_point = BabyBearExt4::from_base(
+        BabyBear::from_u32(7) * root.pow_u32(evaluation),
+    )
+    let composition = evaluate_sparse_composition_opened<4, 4>(
+        evaluation_point,
+        challenge,
+        interaction_challenges,
+        ref opened,
+        ref next_opened,
+    )
+
+    let values = [
+        numerators.all_rows,
+        numerators.pair_rows,
+        numerators.first_row,
+        numerators.last_row,
+    ]
+    let mut output = [0; 39]
+    output[0] = if opened.valid { 1 } else { 0 }
+    output[1] = if next_opened.valid { 1 } else { 0 }
+    let mut value: usize = 0
+    while value < 4 {
+        let words = values[value].to_u32s()
+        let mut coefficient: usize = 0
+        while coefficient < 4 {
+            output[2 + value * 4 + coefficient] = words[coefficient]
+            coefficient = coefficient + 1
+        }
+        value = value + 1
+    }
+    output[18] = if composition.valid { 1 } else { 0 }
+    let composition_words = composition.value.to_u32s()
+    let opened_value = opened.base.witness.value.to_u32s()
+    let opened_product = opened.interaction.product.accumulator.to_u32s()
+    let next_value = next_opened.base.witness.value.to_u32s()
+    let next_product = next_opened.interaction.product.accumulator.to_u32s()
+    let mut coefficient: usize = 0
+    while coefficient < 4 {
+        output[19 + coefficient] = composition_words[coefficient]
+        output[23 + coefficient] = opened_value[coefficient]
+        output[27 + coefficient] = opened_product[coefficient]
+        output[31 + coefficient] = next_value[coefficient]
+        output[35 + coefficient] = next_product[coefficient]
+        coefficient = coefficient + 1
+    }
+    output
+}
+
 pub fn fixed_transition4_sparse_air_checkpoint_encoded(
     _ prn: u32, _ pr0: u32, _ pr1: u32, _ pr2: u32, _ pr3: u32,
     _ pin: u32, _ pi0: u32, _ pi1: u32, _ pi2: u32, _ pi3: u32,
@@ -211,24 +467,17 @@ pub fn fixed_transition4_sparse_air_checkpoint_encoded(
     if !base.valid { return BrowserBytes { ptr: 0, len: 0 } }
 
     let mut base_rows = [zero_sparse_base_air_row(); 4]
-    let mut index: usize = 0
-    while index < 4 {
-        base_rows[index] = sparse_base_air_row_from_witness<4>(
-            index.downcast_truncate(), point, current, next, witness,
-        )
-        index = index + 1
-    }
     let mut interaction_rows = [zero_sparse_interaction_trace_row(); 4]
     let mut accumulators = zero_sparse_interaction_accumulators()
-    let valid = write_sparse_interaction_air_rows<4, 4>(
+    let valid = write_sparse_air_rows4(
         point,
         current,
         next,
         witness,
         base,
-        0,
-        mut accumulators,
+        mut base_rows,
         mut interaction_rows,
+        mut accumulators,
     )
     let prefix = SparseAirPrefix4 {
         valid: valid,

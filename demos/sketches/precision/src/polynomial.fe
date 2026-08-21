@@ -44,6 +44,79 @@ pub trait Radix2Field: Copy {
     fn radix2_root(_ log_order: u32) -> Self
 }
 
+/// Numerators grouped by the four zerofiers shared by transition AIRs.
+/// Constraint systems produce this field-neutral record; scalar, packed, and
+/// GPU interpreters all apply the same quotient formula below.
+pub struct AirConstraintNumerators<F: Radix2Field> {
+    pub all_rows: F,
+    pub pair_rows: F,
+    pub first_row: F,
+    pub last_row: F,
+}
+impl<F: Radix2Field> Copy for AirConstraintNumerators<F> {}
+
+pub struct AirCompositionValue<F: Radix2Field> {
+    pub valid: bool,
+    pub value: F,
+}
+impl<F: Radix2Field> Copy for AirCompositionValue<F> {}
+
+/// Divide four constraint families by the trace, transition, initial, and
+/// terminal zerofiers. The trace size remains a type-level fact, so backends
+/// may change placement without receiving a second composition formula.
+pub fn air_composition_value<F: Radix2Field, const N: usize>(
+    _ point: F,
+    _ numerators: AirConstraintNumerators<F>,
+) -> AirCompositionValue<F>
+where
+    N > 0,
+    N > 1,
+    { (N & (N - 1)) == 0 },
+{
+    let one = F::radix2_root(0)
+    let last_trace_point = F::radix2_root(radix2_log<N>())
+        .radix2_inverse_or_zero()
+    let trace_zerofier = point.radix2_pow(N.downcast_truncate())
+        .radix2_sub(one)
+    let first_zerofier = point.radix2_sub(one)
+    let last_zerofier = point.radix2_sub(last_trace_point)
+    if trace_zerofier.radix2_is_zero()
+        || first_zerofier.radix2_is_zero()
+        || last_zerofier.radix2_is_zero() {
+        return AirCompositionValue {
+            valid: false,
+            value: F::radix2_zero(),
+        }
+    }
+    let trace_inverse = trace_zerofier.radix2_inverse_or_zero()
+    AirCompositionValue {
+        valid: true,
+        value: numerators.all_rows.radix2_mul(trace_inverse).radix2_add(
+            numerators.pair_rows
+                .radix2_mul(last_zerofier)
+                .radix2_mul(trace_inverse),
+        ).radix2_add(
+            numerators.first_row
+                .radix2_mul(first_zerofier.radix2_inverse_or_zero()),
+        ).radix2_add(
+            numerators.last_row
+                .radix2_mul(last_zerofier.radix2_inverse_or_zero()),
+        ),
+    }
+}
+
+/// One shared compile-time admissibility predicate for every interpretation
+/// of a radix-2 field plan. Outer schedulers can carry this exact proof without
+/// copying a field's two-adicity or the transform's shape rules.
+pub const fn radix2_field_domain_supported<
+    const N: usize,
+    F: Radix2Field,
+>() -> bool {
+    N > 0
+        && (N & (N - 1)) == 0
+        && radix2_log_unchecked<N>() <= F::TWO_ADICITY
+}
+
 /// Invert every nonzero entry with one field inversion. Zero entries remain
 /// zero, which lets sparse interaction provers batch active and inactive ports
 /// without a sentinel representation.
@@ -233,7 +306,7 @@ pub fn radix2_ntt_in_place<const N: usize, F: Radix2Field>(
     where
         N > 0,
         { (N & (N - 1)) == 0 },
-        { radix2_log_unchecked<N>() <= F::TWO_ADICITY },
+        { radix2_field_domain_supported<N, F>() },
 {
     transform_field_in_place<N, F>(mut values, false)
 }
@@ -244,7 +317,7 @@ pub fn radix2_intt_in_place<const N: usize, F: Radix2Field>(
     where
         N > 0,
         { (N & (N - 1)) == 0 },
-        { radix2_log_unchecked<N>() <= F::TWO_ADICITY },
+        { radix2_field_domain_supported<N, F>() },
 {
     transform_field_in_place<N, F>(mut values, true)
 }
@@ -349,11 +422,11 @@ pub fn write_radix2_coset_lde<
     where
         N > 0,
         { (N & (N - 1)) == 0 },
-        { radix2_log_unchecked<N>() <= F::TWO_ADICITY },
+        { radix2_field_domain_supported<N, F>() },
         OUT > 0,
         OUT > N,
         { (OUT & (OUT - 1)) == 0 },
-        { radix2_log_unchecked<OUT>() <= F::TWO_ADICITY },
+        { radix2_field_domain_supported<OUT, F>() },
         { (OUT % N) == 0 },
 {
     let zero = F::radix2_zero()
@@ -390,11 +463,11 @@ fn radix2_field_coset_lde<const N: usize, const OUT: usize, F: Radix2Field>(
     where
         N > 0,
         { (N & (N - 1)) == 0 },
-        { radix2_log_unchecked<N>() <= F::TWO_ADICITY },
+        { radix2_field_domain_supported<N, F>() },
         OUT > 0,
         OUT > N,
         { (OUT & (OUT - 1)) == 0 },
-        { radix2_log_unchecked<OUT>() <= F::TWO_ADICITY },
+        { radix2_field_domain_supported<OUT, F>() },
         { (OUT % N) == 0 },
 {
     let mut evaluations = [F::radix2_zero(); OUT]

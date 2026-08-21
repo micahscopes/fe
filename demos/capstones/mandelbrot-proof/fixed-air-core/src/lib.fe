@@ -4,6 +4,7 @@
 //! these typed records. Constraint code therefore contains no flat column IDs
 //! and no host integer operations.
 
+use canonical_words::{CanonicalWords, CanonicalWordsProvider}
 use mandelbrot_proof_fixed_air::{
     BoundedU18Witness,
     FixedLinearWitness,
@@ -206,6 +207,7 @@ pub struct SparseTaskRow<F: Radix2Field> {
     pub state_after: F,
 }
 impl<F: Radix2Field> core::marker::Copy for SparseTaskRow<F> {}
+derive CanonicalWords for SparseTaskRow<F> using CanonicalWordsProvider
 
 /// Algebraic task-kind columns for the sparse transition schedule. These are
 /// committed field values, not host enum tags. Keeping each role named lets
@@ -229,6 +231,8 @@ pub struct SparseControlSelectors<F: Radix2Field> {
     pub padding: F,
 }
 impl<F: Radix2Field> core::marker::Copy for SparseControlSelectors<F> {}
+derive Eq for SparseControlSelectors<F>
+derive CanonicalWords for SparseControlSelectors<F> using CanonicalWordsProvider
 
 /// Low-degree role selectors for the four signed linear limb relations.
 /// Keeping these columns explicit avoids a cubic interpolation in the role
@@ -240,6 +244,8 @@ pub struct SparseLinearRoleSelectors<F: Radix2Field> {
     pub select: F,
 }
 impl<F: Radix2Field> core::marker::Copy for SparseLinearRoleSelectors<F> {}
+derive Eq for SparseLinearRoleSelectors<F>
+derive CanonicalWords for SparseLinearRoleSelectors<F> using CanonicalWordsProvider
 
 /// Semantic range roles shared by radix constraints and copy interactions.
 /// These named low-degree columns replace both a 31-way numeric lookup and a
@@ -255,6 +261,8 @@ pub struct SparseRangeRoleSelectors<F: Radix2Field> {
     pub linear_output: F,
 }
 impl<F: Radix2Field> core::marker::Copy for SparseRangeRoleSelectors<F> {}
+derive Eq for SparseRangeRoleSelectors<F>
+derive CanonicalWords for SparseRangeRoleSelectors<F> using CanonicalWordsProvider
 
 /// Low-degree position selectors for the two radix limbs that define the
 /// fixed-point rounding boundary. They replace an equality interpolation whose
@@ -264,6 +272,8 @@ pub struct SparseLimbPositionSelectors<F: Radix2Field> {
     pub last: F,
 }
 impl<F: Radix2Field> core::marker::Copy for SparseLimbPositionSelectors<F> {}
+derive Eq for SparseLimbPositionSelectors<F>
+derive CanonicalWords for SparseLimbPositionSelectors<F> using CanonicalWordsProvider
 
 /// Polynomial control state paired with one sparse witness row.
 ///
@@ -284,6 +294,8 @@ pub struct SparseControlRow<F: Radix2Field> {
     pub weight: F,
 }
 impl<F: Radix2Field> core::marker::Copy for SparseControlRow<F> {}
+derive Eq for SparseControlRow<F>
+derive CanonicalWords for SparseControlRow<F> using CanonicalWordsProvider
 
 /// Transcript challenges for one log-derivative copy interaction. `beta`
 /// compresses the copied value with its nominal address, while `gamma` moves
@@ -303,6 +315,7 @@ pub struct SparseCopyInteractionRow<F, const PORTS: usize> {
 }
 impl<F: Radix2Field, const PORTS: usize> core::marker::Copy
     for SparseCopyInteractionRow<F, PORTS> {}
+derive CanonicalWords for SparseCopyInteractionRow<F, PORTS> using CanonicalWordsProvider
 
 /// Two product ports remain sufficient after scan adjacency removes the
 /// redundant carry-in copy from the older scalar audit.

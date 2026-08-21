@@ -3,6 +3,7 @@ name = "mandelbrot_proof_fixed_air_core"
 version = "0.1.0"
 
 [dependencies]
+canonical_words = "../../../../ingots/canonical_words"
 core = "../../../../ingots/core"
 mandelbrot_proof_fixed_air = "../fixed-air"
 mandelbrot_proof_recursive = "../recursive"

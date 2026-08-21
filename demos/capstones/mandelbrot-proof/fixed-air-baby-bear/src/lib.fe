@@ -11,6 +11,7 @@ use canonical_words::{
     CanonicalWordStreamProvider,
     CanonicalWords,
     CanonicalWordsProvider,
+    WordRead,
     WordSink,
     WordSource,
     canonical_prefix_word_count,
@@ -20,12 +21,42 @@ use canonical_words::{
 }
 use mandelbrot_proof_fixed_air::FixedMandelbrotTransitionWitness
 use mandelbrot_proof_fixed_air_core::{
+    FixedAirConstraintEvaluation,
+    SparseBoundaryInteractionRow,
+    SparseControlRow,
+    SparseControlSelectors,
     SparseCopyChallenges,
     SparseCopyInteractionRow,
+    SparseLimbPositionSelectors,
+    SparseLinearInteractionRow,
+    SparseLinearRoleSelectors,
+    SparseProductInteractionRow,
+    SparseRangeRoleSelectors,
+    SparseRoundInteractionRow,
+    SparseTaskRow,
+    evaluate_sparse_arithmetic_initial,
+    evaluate_sparse_arithmetic_link,
+    evaluate_sparse_arithmetic_row,
+    evaluate_sparse_boundary_interaction_initial,
+    evaluate_sparse_boundary_interaction_link,
     evaluate_sparse_boundary_interaction_row,
+    evaluate_sparse_boundary_interaction_terminal,
+    evaluate_sparse_control_initial,
+    evaluate_sparse_control_link,
+    evaluate_sparse_control_row,
+    evaluate_sparse_control_terminal,
+    evaluate_sparse_linear_interaction_initial,
+    evaluate_sparse_linear_interaction_link,
     evaluate_sparse_linear_interaction_row,
+    evaluate_sparse_linear_interaction_terminal,
+    evaluate_sparse_product_interaction_initial,
+    evaluate_sparse_product_interaction_link,
     evaluate_sparse_product_interaction_row,
+    evaluate_sparse_product_interaction_terminal,
+    evaluate_sparse_round_interaction_initial,
+    evaluate_sparse_round_interaction_link,
     evaluate_sparse_round_interaction_row,
+    evaluate_sparse_round_interaction_terminal,
     sparse_control_row_at,
     sparse_transition_row_from_witness,
     sparse_transition_task_count,
@@ -54,6 +85,14 @@ use poseidon_baby_bear::{
     squeeze_ext4,
 }
 use precision::baby_bear::{BabyBear, BabyBearExt4}
+use precision::polynomial::{
+    AirCompositionValue,
+    AirConstraintNumerators,
+    Radix2Field,
+    air_composition_value,
+    radix2_field_domain_supported,
+    write_radix2_coset_lde,
+}
 use core::ops::Eq
 
 const SPARSE_TRACE_FRONTIER_LEVELS: usize = 23
@@ -112,98 +151,26 @@ impl Poseidon2FieldDomain for MandelbrotSparseBoundaryGammaBabyBearV1 {
     const TAG: u32 = protocol_tag("BG01")
 }
 
-pub struct SparseTraceTaskSelectors {
-    pub radix_bit: BabyBear,
-    pub radix_limb: BabyBear,
-    pub radix_finish: BabyBear,
-    pub carry_bit: BabyBear,
-    pub carry_finish: BabyBear,
-    pub product_term: BabyBear,
-    pub product_coefficient: BabyBear,
-    pub product_round: BabyBear,
-    pub product_finish: BabyBear,
-    pub linear_limb: BabyBear,
-    pub linear_finish: BabyBear,
-    pub boundary_sign: BabyBear,
-    pub boundary_limb: BabyBear,
-    pub transition_finish: BabyBear,
-    pub padding: BabyBear,
-}
-impl core::marker::Copy for SparseTraceTaskSelectors {}
-derive Eq for SparseTraceTaskSelectors
-derive CanonicalWords for SparseTraceTaskSelectors using CanonicalWordsProvider
-
-pub struct SparseTraceLinearRoles {
-    pub sum: BabyBear,
-    pub left_difference: BabyBear,
-    pub right_difference: BabyBear,
-    pub select: BabyBear,
-}
-impl core::marker::Copy for SparseTraceLinearRoles {}
-derive Eq for SparseTraceLinearRoles
-derive CanonicalWords for SparseTraceLinearRoles using CanonicalWordsProvider
-
-pub struct SparseTraceRangeRoles {
-    pub coordinate: BabyBear,
-    pub product_low: BabyBear,
-    pub product_high: BabyBear,
-    pub product_output: BabyBear,
-    pub linear_sum: BabyBear,
-    pub linear_left_difference: BabyBear,
-    pub linear_right_difference: BabyBear,
-    pub linear_output: BabyBear,
-}
-impl core::marker::Copy for SparseTraceRangeRoles {}
-derive Eq for SparseTraceRangeRoles
-derive CanonicalWords for SparseTraceRangeRoles using CanonicalWordsProvider
-
-pub struct SparseTraceLimbPositions {
-    pub penultimate: BabyBear,
-    pub last: BabyBear,
-}
-impl core::marker::Copy for SparseTraceLimbPositions {}
-derive Eq for SparseTraceLimbPositions
-derive CanonicalWords for SparseTraceLimbPositions using CanonicalWordsProvider
-
-pub struct SparseTraceControl {
-    pub selectors: SparseTraceTaskSelectors,
-    pub linear_roles: SparseTraceLinearRoles,
-    pub range_roles: SparseTraceRangeRoles,
-    pub limb_positions: SparseTraceLimbPositions,
-    pub major: BabyBear,
-    pub minor: BabyBear,
-    pub step: BabyBear,
-    pub flag: BabyBear,
-    pub width: BabyBear,
-    pub weight: BabyBear,
-}
-impl core::marker::Copy for SparseTraceControl {}
-derive Eq for SparseTraceControl
-derive CanonicalWords for SparseTraceControl using CanonicalWordsProvider
-
-/// One nominal committed base-trace leaf. Protocol metadata is carried in
-/// every leaf so a path cannot be replayed across limb counts or trace shapes.
-/// The six witness lanes retain the readable structure of `SparseTaskRow`.
-pub struct SparseTraceRow {
-    pub value: BabyBear,
-    pub auxiliary: BabyBear,
-    pub accumulator_before: BabyBear,
-    pub accumulator_after: BabyBear,
-    pub state_before: BabyBear,
-    pub state_after: BabyBear,
-}
-impl core::marker::Copy for SparseTraceRow {}
-derive CanonicalWords for SparseTraceRow using CanonicalWordsProvider
+/// The authenticated trace reuses the exact generic records consumed by the
+/// AIR. These aliases keep the public commitment vocabulary readable without
+/// introducing a second set of field declarations or conversion code.
+pub type SparseTraceTaskSelectors = SparseControlSelectors<BabyBear>
+pub type SparseTraceLinearRoles = SparseLinearRoleSelectors<BabyBear>
+pub type SparseTraceRangeRoles = SparseRangeRoleSelectors<BabyBear>
+pub type SparseTraceLimbPositions = SparseLimbPositionSelectors<BabyBear>
+pub type SparseTraceControl = SparseControlRow<BabyBear>
+pub type SparseTraceRow = SparseTaskRow<BabyBear>
 
 /// The exact polynomial base-row schema. Reflection derives its canonical
 /// field order from the same nominal control and witness records committed by
 /// `SparseTraceLeaf`, so LDE consumers need no parallel column-number table.
-pub struct SparseBaseAirRow {
-    pub control: SparseTraceControl,
-    pub witness: SparseTraceRow,
+pub struct SparseBaseAirRow<F: Radix2Field> {
+    pub control: SparseControlRow<F>,
+    pub witness: SparseTaskRow<F>,
 }
-impl core::marker::Copy for SparseBaseAirRow {}
-derive CanonicalWords for SparseBaseAirRow using CanonicalWordsProvider
+impl<F: Radix2Field> core::marker::Copy
+    for SparseBaseAirRow<F> {}
+derive CanonicalWords for SparseBaseAirRow<F> using CanonicalWordsProvider
 
 pub struct SparseTraceLeaf<const L: usize> {
     pub limb_count: BabyBear,
@@ -211,8 +178,8 @@ pub struct SparseTraceLeaf<const L: usize> {
     pub trace_length: BabyBear,
     pub index: BabyBear,
     pub active: BabyBear,
-    pub control: SparseTraceControl,
-    pub row: SparseTraceRow,
+    pub control: SparseControlRow<BabyBear>,
+    pub row: SparseTaskRow<BabyBear>,
 }
 impl<const L: usize> core::marker::Copy for SparseTraceLeaf<L> {}
 derive CanonicalWords for SparseTraceLeaf<L> using CanonicalWordsProvider
@@ -240,26 +207,23 @@ impl core::marker::Copy for SparseInteractionChallenges {}
 /// All four copy buses evaluated over the quartic challenge field. These are
 /// prover witness columns, not precomputed constants: the same typed Fe port
 /// descriptions used by the AIR generate every inverse and accumulator.
-pub struct SparseInteractionTraceRow {
-    pub product_accumulator: BabyBearExt4,
-    pub product_inverses: [BabyBearExt4; 2],
-    pub round_accumulator: BabyBearExt4,
-    pub round_inverses: [BabyBearExt4; 5],
-    pub linear_accumulator: BabyBearExt4,
-    pub linear_inverses: [BabyBearExt4; 8],
-    pub boundary_accumulator: BabyBearExt4,
-    pub boundary_inverses: [BabyBearExt4; 2],
+pub struct SparseInteractionTraceRow<F: Radix2Field> {
+    pub product: SparseProductInteractionRow<F>,
+    pub round: SparseRoundInteractionRow<F>,
+    pub linear: SparseLinearInteractionRow<F>,
+    pub boundary: SparseBoundaryInteractionRow<F>,
 }
-impl core::marker::Copy for SparseInteractionTraceRow {}
-derive CanonicalWords for SparseInteractionTraceRow using CanonicalWordsProvider
+impl<F: Radix2Field> core::marker::Copy
+    for SparseInteractionTraceRow<F> {}
+derive CanonicalWords for SparseInteractionTraceRow<F> using CanonicalWordsProvider
 
 /// Polynomial column counts are derived from the nominal row codecs. They are
 /// public so LDE, commitment, query, and verifier carriers can share the exact
 /// schema without copying numeric column declarations.
 pub const SPARSE_BASE_AIR_FIELDS: usize =
-    <SparseBaseAirRow as CanonicalWords>::WORDS as usize
+    <SparseBaseAirRow<BabyBear> as CanonicalWords>::WORDS as usize
 pub const SPARSE_INTERACTION_AIR_FIELDS: usize =
-    <SparseInteractionTraceRow as CanonicalWords>::WORDS as usize
+    <SparseInteractionTraceRow<BabyBearExt4> as CanonicalWords>::WORDS as usize
 
 pub struct SparseBaseAirFields {
     pub valid: bool,
@@ -275,9 +239,11 @@ pub struct SparseInteractionAirFields {
 impl core::marker::Copy for SparseInteractionAirFields {}
 derive CanonicalWords for SparseInteractionAirFields using CanonicalWordsProvider
 
-pub fn sparse_base_air_fields(_ row: ref SparseBaseAirRow) -> SparseBaseAirFields {
+pub fn sparse_base_air_fields(
+    _ row: ref SparseBaseAirRow<BabyBear>,
+) -> SparseBaseAirFields {
     let encoded = encode_canonical_word_array<
-        SparseBaseAirRow,
+        SparseBaseAirRow<BabyBear>,
         SPARSE_BASE_AIR_FIELDS,
     >(row)
     let mut values = [BabyBear::zero(); SPARSE_BASE_AIR_FIELDS]
@@ -291,10 +257,10 @@ pub fn sparse_base_air_fields(_ row: ref SparseBaseAirRow) -> SparseBaseAirField
 }
 
 pub fn sparse_interaction_air_fields(
-    _ row: ref SparseInteractionTraceRow,
+    _ row: ref SparseInteractionTraceRow<BabyBearExt4>,
 ) -> SparseInteractionAirFields {
     let encoded = encode_canonical_word_array<
-        SparseInteractionTraceRow,
+        SparseInteractionTraceRow<BabyBearExt4>,
         SPARSE_INTERACTION_AIR_FIELDS,
     >(row)
     let mut values = [BabyBear::zero(); SPARSE_INTERACTION_AIR_FIELDS]
@@ -307,6 +273,551 @@ pub fn sparse_interaction_air_fields(
         index = index + 1
     }
     SparseInteractionAirFields { valid: true, values: values }
+}
+
+/// Row-major base-field evaluations on the original trace subgroup. The
+/// numeric widths are derived from the nominal Fe rows above; this carrier is
+/// only a placement for the generated schema.
+pub struct SparseAirEvaluationTrace<const N: usize> {
+    pub valid: bool,
+    pub base: [[BabyBear; SPARSE_BASE_AIR_FIELDS]; N],
+    pub interaction: [[BabyBear; SPARSE_INTERACTION_AIR_FIELDS]; N],
+}
+impl<const N: usize> core::marker::Copy for SparseAirEvaluationTrace<N> {}
+derive CanonicalWords for SparseAirEvaluationTrace<N> using CanonicalWordsProvider
+
+/// Row-major disjoint-coset evaluations consumed by commitments, composition,
+/// and authenticated query openings.
+pub struct SparseAirLdeCodeword<const N: usize> {
+    pub valid: bool,
+    pub base: [[BabyBear; SPARSE_BASE_AIR_FIELDS]; N],
+    pub interaction: [[BabyBear; SPARSE_INTERACTION_AIR_FIELDS]; N],
+}
+impl<const N: usize> core::marker::Copy for SparseAirLdeCodeword<N> {}
+derive CanonicalWords for SparseAirLdeCodeword<N> using CanonicalWordsProvider
+
+/// Typed extension-field view of one pair of base-field LDE rows. The view is
+/// reconstructed through the same reflection-derived codecs that define the
+/// committed column order. No column number or parallel field list appears at
+/// the verifier boundary.
+pub struct SparseOpenedAirRow {
+    pub valid: bool,
+    pub base: SparseBaseAirRow<BabyBearExt4>,
+    pub interaction: SparseInteractionTraceRow<BabyBearExt4>,
+}
+impl core::marker::Copy for SparseOpenedAirRow {}
+
+/// A field-native canonical reader over one authenticated BabyBear row.
+/// `embedded` expands every base-field column to `(value, 0, 0, 0)` while
+/// `extension` preserves the four coefficient columns already present in the
+/// interaction trace. The generic codecs provide all record traversal.
+struct SparseLdeWordReader<const N: usize> {
+    values: [BabyBear; N],
+    cursor: u32,
+    coefficients: u32,
+    valid: bool,
+}
+impl<const N: usize> core::marker::Copy for SparseLdeWordReader<N> {}
+
+impl<const N: usize> SparseLdeWordReader<N> {
+    fn embedded(_ values: [BabyBear; N]) -> Self {
+        Self { values: values, cursor: 0, coefficients: 4, valid: true }
+    }
+
+    fn extension(_ values: [BabyBear; N]) -> Self {
+        Self { values: values, cursor: 0, coefficients: 1, valid: true }
+    }
+
+    fn complete(self) -> bool {
+        let fields: u32 = N.downcast_truncate()
+        self.valid
+            && self.cursor == fields * self.coefficients
+    }
+}
+
+impl<const N: usize> WordSource for SparseLdeWordReader<N> {
+    fn read(self) -> WordRead<Self> {
+        let fields: u32 = N.downcast_truncate()
+        let words = fields * self.coefficients
+        if !self.valid
+            || (self.coefficients != 1 && self.coefficients != 4)
+            || self.cursor >= words {
+            return WordRead {
+                source: Self {
+                    values: self.values,
+                    cursor: self.cursor,
+                    coefficients: self.coefficients,
+                    valid: false,
+                },
+                value: 0,
+            }
+        }
+        let field = self.cursor / self.coefficients
+        let coefficient = self.cursor - field * self.coefficients
+        WordRead {
+            source: Self {
+                values: self.values,
+                cursor: self.cursor + 1,
+                coefficients: self.coefficients,
+                valid: true,
+            },
+            value: if coefficient == 0 {
+                self.values[field as usize].to_u32()
+            } else {
+                0
+            },
+        }
+    }
+
+    fn reject(self) -> Self {
+        Self {
+            values: self.values,
+            cursor: self.cursor,
+            coefficients: self.coefficients,
+            valid: false,
+        }
+    }
+}
+
+pub fn sparse_opened_air_row(
+    _ base_fields: [BabyBear; SPARSE_BASE_AIR_FIELDS],
+    _ interaction_fields: [BabyBear; SPARSE_INTERACTION_AIR_FIELDS],
+) -> SparseOpenedAirRow {
+    let mut base = zero_sparse_base_air_row_field<BabyBearExt4>()
+    let base_reader = base.decode(
+        SparseLdeWordReader<SPARSE_BASE_AIR_FIELDS>::embedded(base_fields),
+    )
+    let mut interaction = zero_sparse_interaction_trace_row_field<BabyBearExt4>()
+    let interaction_reader = interaction.decode(
+        SparseLdeWordReader<SPARSE_INTERACTION_AIR_FIELDS>::extension(
+            interaction_fields,
+        ),
+    )
+    SparseOpenedAirRow {
+        valid: base_reader.complete() && interaction_reader.complete(),
+        base: base,
+        interaction: interaction,
+    }
+}
+
+enum SparseConstraintFamily {
+    AllRows,
+    PairRows,
+    FirstRow,
+    LastRow,
+}
+impl core::marker::Copy for SparseConstraintFamily {}
+
+/// Consecutive composition powers continue across zerofier families, matching
+/// the established AIR composition convention while allowing each generic
+/// fixed-air evaluator to retain its own readable constraint fold.
+struct SparseCompositionFold {
+    valid: bool,
+    challenge: BabyBearExt4,
+    power: BabyBearExt4,
+    all_rows: BabyBearExt4,
+    pair_rows: BabyBearExt4,
+    first_row: BabyBearExt4,
+    last_row: BabyBearExt4,
+}
+impl core::marker::Copy for SparseCompositionFold {}
+
+impl SparseCompositionFold {
+    fn new(_ challenge: BabyBearExt4) -> Self {
+        Self {
+            valid: true,
+            challenge: challenge,
+            power: BabyBearExt4::one(),
+            all_rows: BabyBearExt4::zero(),
+            pair_rows: BabyBearExt4::zero(),
+            first_row: BabyBearExt4::zero(),
+            last_row: BabyBearExt4::zero(),
+        }
+    }
+
+    fn absorb(
+        mut self,
+        _ family: SparseConstraintFamily,
+        _ valid: bool,
+        _ constraints: u32,
+        _ value: BabyBearExt4,
+    ) -> Self {
+        self.valid = self.valid && valid
+        let contribution = self.power * value
+        match family {
+            SparseConstraintFamily::AllRows => {
+                self.all_rows = self.all_rows + contribution
+            }
+            SparseConstraintFamily::PairRows => {
+                self.pair_rows = self.pair_rows + contribution
+            }
+            SparseConstraintFamily::FirstRow => {
+                self.first_row = self.first_row + contribution
+            }
+            SparseConstraintFamily::LastRow => {
+                self.last_row = self.last_row + contribution
+            }
+        }
+        self.power = self.power * self.challenge.pow_u32(constraints)
+        self
+    }
+
+    fn absorb_fixed(
+        self,
+        _ family: SparseConstraintFamily,
+        _ evaluation: FixedAirConstraintEvaluation<BabyBearExt4>,
+    ) -> Self {
+        self.absorb(
+            family,
+            evaluation.valid,
+            evaluation.constraints,
+            evaluation.folded,
+        )
+    }
+
+    fn numerators(self) -> AirConstraintNumerators<BabyBearExt4> {
+        if !self.valid {
+            return AirConstraintNumerators {
+                all_rows: BabyBearExt4::zero(),
+                pair_rows: BabyBearExt4::zero(),
+                first_row: BabyBearExt4::zero(),
+                last_row: BabyBearExt4::zero(),
+            }
+        }
+        AirConstraintNumerators {
+            all_rows: self.all_rows,
+            pair_rows: self.pair_rows,
+            first_row: self.first_row,
+            last_row: self.last_row,
+        }
+    }
+}
+
+pub fn sparse_constraint_numerators_opened<const L: usize>(
+    _ challenge: BabyBearExt4,
+    _ interaction_challenges: SparseInteractionChallenges,
+    _ row: ref SparseOpenedAirRow,
+    _ next: ref SparseOpenedAirRow,
+) -> AirConstraintNumerators<BabyBearExt4>
+where L > 1,
+{
+    let control = row.base.control
+    let next_control = next.base.control
+    let witness = row.base.witness
+    let next_witness = next.base.witness
+    let interaction = row.interaction
+    let next_interaction = next.interaction
+    let mut fold = SparseCompositionFold::new(challenge)
+
+    fold = fold.absorb_fixed(
+        SparseConstraintFamily::AllRows,
+        evaluate_sparse_control_row(challenge, control),
+    )
+    fold = fold.absorb_fixed(
+        SparseConstraintFamily::AllRows,
+        evaluate_sparse_arithmetic_row<BabyBearExt4, L>(
+            challenge, control, witness,
+        ),
+    )
+    let product = evaluate_sparse_product_interaction_row<BabyBearExt4, L>(
+        challenge,
+        interaction_challenges.product,
+        control,
+        witness,
+        interaction.product,
+    )
+    fold = fold.absorb(
+        SparseConstraintFamily::AllRows,
+        product.valid,
+        product.constraints,
+        product.folded,
+    )
+    let round = evaluate_sparse_round_interaction_row<BabyBearExt4, L>(
+        challenge,
+        interaction_challenges.round,
+        control,
+        next_control,
+        witness,
+        interaction.round,
+    )
+    fold = fold.absorb(
+        SparseConstraintFamily::AllRows,
+        round.valid,
+        round.constraints,
+        round.folded,
+    )
+    let linear = evaluate_sparse_linear_interaction_row<BabyBearExt4, L>(
+        challenge,
+        interaction_challenges.linear,
+        control,
+        next_control,
+        witness,
+        interaction.linear,
+    )
+    fold = fold.absorb(
+        SparseConstraintFamily::AllRows,
+        linear.valid,
+        linear.constraints,
+        linear.folded,
+    )
+    let boundary = evaluate_sparse_boundary_interaction_row<BabyBearExt4, L>(
+        challenge,
+        interaction_challenges.boundary,
+        control,
+        witness,
+        interaction.boundary,
+    )
+    fold = fold.absorb(
+        SparseConstraintFamily::AllRows,
+        boundary.valid,
+        boundary.constraints,
+        boundary.folded,
+    )
+
+    fold = fold.absorb_fixed(
+        SparseConstraintFamily::PairRows,
+        evaluate_sparse_control_link<BabyBearExt4, L>(
+            challenge, control, next_control,
+        ),
+    )
+    fold = fold.absorb_fixed(
+        SparseConstraintFamily::PairRows,
+        evaluate_sparse_arithmetic_link(
+            challenge, control, witness, next_control, next_witness,
+        ),
+    )
+    fold = fold.absorb_fixed(
+        SparseConstraintFamily::PairRows,
+        evaluate_sparse_product_interaction_link<BabyBearExt4, L>(
+            challenge,
+            control,
+            witness,
+            interaction.product,
+            next_interaction.product,
+        ),
+    )
+    fold = fold.absorb_fixed(
+        SparseConstraintFamily::PairRows,
+        evaluate_sparse_round_interaction_link<BabyBearExt4, L>(
+            challenge,
+            control,
+            next_control,
+            witness,
+            interaction.round,
+            next_interaction.round,
+        ),
+    )
+    fold = fold.absorb_fixed(
+        SparseConstraintFamily::PairRows,
+        evaluate_sparse_linear_interaction_link<BabyBearExt4, L>(
+            challenge,
+            control,
+            next_control,
+            witness,
+            interaction.linear,
+            next_interaction.linear,
+        ),
+    )
+    fold = fold.absorb_fixed(
+        SparseConstraintFamily::PairRows,
+        evaluate_sparse_boundary_interaction_link<BabyBearExt4, L>(
+            challenge,
+            control,
+            witness,
+            interaction.boundary,
+            next_interaction.boundary,
+        ),
+    )
+
+    fold = fold.absorb_fixed(
+        SparseConstraintFamily::FirstRow,
+        evaluate_sparse_control_initial<BabyBearExt4, L>(challenge, control),
+    )
+    fold = fold.absorb_fixed(
+        SparseConstraintFamily::FirstRow,
+        evaluate_sparse_arithmetic_initial(challenge, witness),
+    )
+    fold = fold.absorb_fixed(
+        SparseConstraintFamily::FirstRow,
+        evaluate_sparse_product_interaction_initial(
+            challenge, interaction.product,
+        ),
+    )
+    fold = fold.absorb_fixed(
+        SparseConstraintFamily::FirstRow,
+        evaluate_sparse_round_interaction_initial(
+            challenge, interaction.round,
+        ),
+    )
+    fold = fold.absorb_fixed(
+        SparseConstraintFamily::FirstRow,
+        evaluate_sparse_linear_interaction_initial(
+            challenge, interaction.linear,
+        ),
+    )
+    fold = fold.absorb_fixed(
+        SparseConstraintFamily::FirstRow,
+        evaluate_sparse_boundary_interaction_initial(
+            challenge, interaction.boundary,
+        ),
+    )
+
+    fold = fold.absorb_fixed(
+        SparseConstraintFamily::LastRow,
+        evaluate_sparse_control_terminal(challenge, control),
+    )
+    fold = fold.absorb_fixed(
+        SparseConstraintFamily::LastRow,
+        evaluate_sparse_product_interaction_terminal<BabyBearExt4, L>(
+            challenge, control, witness, interaction.product,
+        ),
+    )
+    fold = fold.absorb_fixed(
+        SparseConstraintFamily::LastRow,
+        evaluate_sparse_round_interaction_terminal<BabyBearExt4, L>(
+            challenge, control, next_control, witness, interaction.round,
+        ),
+    )
+    fold = fold.absorb_fixed(
+        SparseConstraintFamily::LastRow,
+        evaluate_sparse_linear_interaction_terminal<BabyBearExt4, L>(
+            challenge, control, next_control, witness, interaction.linear,
+        ),
+    )
+    fold = fold.absorb_fixed(
+        SparseConstraintFamily::LastRow,
+        evaluate_sparse_boundary_interaction_terminal<BabyBearExt4, L>(
+            challenge, control, witness, interaction.boundary,
+        ),
+    )
+    fold.numerators()
+}
+
+/// Evaluate the complete sparse high-precision AIR composition at one opened
+/// LDE point. All record traversal is derived from the nominal Fe types, and
+/// all constraint arithmetic remains in the shared field-generic AIR core.
+pub fn evaluate_sparse_composition_opened<
+    const L: usize,
+    const TRACE: usize,
+>(
+    _ point: BabyBearExt4,
+    _ challenge: BabyBearExt4,
+    _ interaction_challenges: SparseInteractionChallenges,
+    _ row: ref SparseOpenedAirRow,
+    _ next: ref SparseOpenedAirRow,
+) -> AirCompositionValue<BabyBearExt4>
+where
+    L > 1,
+    TRACE > 0,
+    TRACE > 1,
+    { (TRACE & (TRACE - 1)) == 0 },
+{
+    if !interaction_challenges.valid || !row.valid || !next.valid {
+        return AirCompositionValue {
+            valid: false,
+            value: BabyBearExt4::zero(),
+        }
+    }
+    air_composition_value<BabyBearExt4, TRACE>(
+        point,
+        sparse_constraint_numerators_opened<L>(
+            challenge, interaction_challenges, row, next,
+        ),
+    )
+}
+
+pub fn write_sparse_air_evaluation_trace<const N: usize>(
+    _ base_rows: ref [SparseBaseAirRow<BabyBear>; N],
+    _ interaction_rows: ref [SparseInteractionTraceRow<BabyBearExt4>; N],
+    _ output: mut SparseAirEvaluationTrace<N>,
+) -> bool
+where N > 0,
+{
+    output.valid = false
+    let mut row: usize = 0
+    while row < N {
+        let base = sparse_base_air_fields(ref base_rows[row])
+        let interaction = sparse_interaction_air_fields(ref interaction_rows[row])
+        if !base.valid || !interaction.valid { return false }
+        output.base[row] = base.values
+        output.interaction[row] = interaction.values
+        row = row + 1
+    }
+    output.valid = true
+    true
+}
+
+/// Interpret the same field-generic radix-2 plan once per FCO-derived column.
+/// There is no authored column identifier or copied semantic field table.
+pub fn write_sparse_air_lde<
+    const TRACE: usize,
+    const LDE: usize,
+>(
+    _ trace: ref SparseAirEvaluationTrace<TRACE>,
+    _ shift: BabyBear,
+    _ output: mut SparseAirLdeCodeword<LDE>,
+) -> bool
+where
+    TRACE > 0,
+    { (TRACE & (TRACE - 1)) == 0 },
+    { radix2_field_domain_supported<TRACE, BabyBear>() },
+    LDE > 0,
+    LDE > TRACE,
+    { (LDE & (LDE - 1)) == 0 },
+    { radix2_field_domain_supported<LDE, BabyBear>() },
+    { (LDE % TRACE) == 0 },
+{
+    output.valid = false
+    if !trace.valid { return false }
+    let zero = BabyBear::zero()
+    let mut source = [zero; TRACE]
+    let mut extended = [zero; LDE]
+
+    let mut column: usize = 0
+    while column < SPARSE_BASE_AIR_FIELDS {
+        let mut row: usize = 0
+        while row < TRACE {
+            source[row] = trace.base[row][column]
+            row = row + 1
+        }
+        if !write_radix2_coset_lde<TRACE, LDE, BabyBear>(
+            ref source,
+            shift,
+            mut extended,
+        ) {
+            return false
+        }
+        row = 0
+        while row < LDE {
+            output.base[row][column] = extended[row]
+            row = row + 1
+        }
+        column = column + 1
+    }
+
+    column = 0
+    while column < SPARSE_INTERACTION_AIR_FIELDS {
+        let mut row: usize = 0
+        while row < TRACE {
+            source[row] = trace.interaction[row][column]
+            row = row + 1
+        }
+        if !write_radix2_coset_lde<TRACE, LDE, BabyBear>(
+            ref source,
+            shift,
+            mut extended,
+        ) {
+            return false
+        }
+        row = 0
+        while row < LDE {
+            output.interaction[row][column] = extended[row]
+            row = row + 1
+        }
+        column = column + 1
+    }
+    output.valid = true
+    true
 }
 
 /// Sequential state of the four log-derivative copy buses.
@@ -328,18 +839,9 @@ pub struct SparseInteractionScratch {
 }
 impl core::marker::Copy for SparseInteractionScratch {}
 
-pub fn zero_sparse_interaction_trace_row() -> SparseInteractionTraceRow {
-    let zero = BabyBearExt4::zero()
-    SparseInteractionTraceRow {
-        product_accumulator: zero,
-        product_inverses: [zero; 2],
-        round_accumulator: zero,
-        round_inverses: [zero; 5],
-        linear_accumulator: zero,
-        linear_inverses: [zero; 8],
-        boundary_accumulator: zero,
-        boundary_inverses: [zero; 2],
-    }
+pub fn zero_sparse_interaction_trace_row()
+    -> SparseInteractionTraceRow<BabyBearExt4> {
+    zero_sparse_interaction_trace_row_field<BabyBearExt4>()
 }
 
 pub fn zero_sparse_interaction_accumulators() -> SparseInteractionAccumulators {
@@ -384,7 +886,7 @@ pub struct SparseInteractionTraceLeaf<const L: usize> {
     pub index: BabyBear,
     pub active: BabyBear,
     pub base_root: Poseidon2Digest,
-    pub row: SparseInteractionTraceRow,
+    pub row: SparseInteractionTraceRow<BabyBearExt4>,
 }
 impl<const L: usize> core::marker::Copy for SparseInteractionTraceLeaf<L> {}
 derive CanonicalWords for SparseInteractionTraceLeaf<L> using CanonicalWordsProvider
@@ -476,7 +978,7 @@ pub fn write_sparse_interaction_air_row<const L: usize>(
     _ position: u32,
     _ accumulators: mut SparseInteractionAccumulators,
     _ scratch: mut SparseInteractionScratch,
-    _ interaction: mut SparseInteractionTraceRow,
+    _ interaction: mut SparseInteractionTraceRow<BabyBearExt4>,
 ) -> bool
 where L > 1,
 {
@@ -560,14 +1062,10 @@ where L > 1,
     }
 
     interaction = SparseInteractionTraceRow {
-        product_accumulator: scratch.product.accumulator,
-        product_inverses: scratch.product.inverses,
-        round_accumulator: scratch.round.accumulator,
-        round_inverses: scratch.round.inverses,
-        linear_accumulator: scratch.linear.accumulator,
-        linear_inverses: scratch.linear.inverses,
-        boundary_accumulator: scratch.boundary.accumulator,
-        boundary_inverses: scratch.boundary.inverses,
+        product: scratch.product,
+        round: scratch.round,
+        linear: scratch.linear,
+        boundary: scratch.boundary,
     }
     accumulators.product = accumulators.product + product_evaluation.delta
     accumulators.round = accumulators.round + round_evaluation.delta
@@ -591,7 +1089,7 @@ pub fn write_sparse_interaction_air_rows<
     _ base: SparseTraceDigest<L>,
     _ start: u32,
     _ accumulators: mut SparseInteractionAccumulators,
-    _ rows: mut [SparseInteractionTraceRow; N],
+    _ rows: mut [SparseInteractionTraceRow<BabyBearExt4>; N],
 ) -> bool
 where
     L > 1,
@@ -642,7 +1140,7 @@ fn write_sparse_interaction_trace_step<const L: usize>(
     _ position: u32,
     _ accumulators: mut SparseInteractionAccumulators,
     _ scratch: mut SparseInteractionScratch,
-    _ interaction: mut SparseInteractionTraceRow,
+    _ interaction: mut SparseInteractionTraceRow<BabyBearExt4>,
     _ commitment: mut Poseidon2Digest,
 ) -> bool
 where L > 1,
@@ -771,8 +1269,8 @@ pub fn write_sparse_air_trace_power_of_two<
     _ current: ComplexFixed<L>,
     _ next: ComplexFixed<L>,
     _ witness: FixedMandelbrotTransitionWitness<L>,
-    _ base_rows: mut [SparseBaseAirRow; N],
-    _ interaction_rows: mut [SparseInteractionTraceRow; N],
+    _ base_rows: mut [SparseBaseAirRow<BabyBear>; N],
+    _ interaction_rows: mut [SparseInteractionTraceRow<BabyBearExt4>; N],
     _ output: mut SparseAirTraceDigest<L>,
 ) -> bool
 where
@@ -964,119 +1462,111 @@ impl TwoToOneHasher<Poseidon2Digest> for SparseDigestHasher {
     }
 }
 
-fn zero_sparse_trace_row() -> SparseTraceRow {
-    SparseTraceRow {
-        value: BabyBear::zero(),
-        auxiliary: BabyBear::zero(),
-        accumulator_before: BabyBear::zero(),
-        accumulator_after: BabyBear::zero(),
-        state_before: BabyBear::zero(),
-        state_after: BabyBear::zero(),
+fn zero_sparse_trace_row_field<F: Radix2Field>() -> SparseTaskRow<F> {
+    let zero = F::radix2_zero()
+    SparseTaskRow {
+        value: zero,
+        auxiliary: zero,
+        accumulator_before: zero,
+        accumulator_after: zero,
+        state_before: zero,
+        state_after: zero,
     }
+}
+
+fn zero_sparse_trace_control_field<F: Radix2Field>() -> SparseControlRow<F> {
+    let zero = F::radix2_zero()
+    SparseControlRow {
+        selectors: SparseControlSelectors {
+            radix_bit: zero,
+            radix_limb: zero,
+            radix_finish: zero,
+            carry_bit: zero,
+            carry_finish: zero,
+            product_term: zero,
+            product_coefficient: zero,
+            product_round: zero,
+            product_finish: zero,
+            linear_limb: zero,
+            linear_finish: zero,
+            boundary_sign: zero,
+            boundary_limb: zero,
+            transition_finish: zero,
+            padding: zero,
+        },
+        linear_roles: SparseLinearRoleSelectors {
+            sum: zero,
+            left_difference: zero,
+            right_difference: zero,
+            select: zero,
+        },
+        range_roles: SparseRangeRoleSelectors {
+            coordinate: zero,
+            product_low: zero,
+            product_high: zero,
+            product_output: zero,
+            linear_sum: zero,
+            linear_left_difference: zero,
+            linear_right_difference: zero,
+            linear_output: zero,
+        },
+        limb_positions: SparseLimbPositionSelectors {
+            penultimate: zero,
+            last: zero,
+        },
+        major: zero,
+        minor: zero,
+        step: zero,
+        flag: zero,
+        width: zero,
+        weight: zero,
+    }
+}
+
+fn zero_sparse_base_air_row_field<F: Radix2Field>() -> SparseBaseAirRow<F> {
+    SparseBaseAirRow {
+        control: zero_sparse_trace_control_field<F>(),
+        witness: zero_sparse_trace_row_field<F>(),
+    }
+}
+
+fn zero_sparse_interaction_trace_row_field<F: Radix2Field>()
+    -> SparseInteractionTraceRow<F> {
+    let zero = F::radix2_zero()
+    SparseInteractionTraceRow {
+        product: SparseCopyInteractionRow {
+            accumulator: zero,
+            inverses: [zero; 2],
+        },
+        round: SparseCopyInteractionRow {
+            accumulator: zero,
+            inverses: [zero; 5],
+        },
+        linear: SparseCopyInteractionRow {
+            accumulator: zero,
+            inverses: [zero; 8],
+        },
+        boundary: SparseCopyInteractionRow {
+            accumulator: zero,
+            inverses: [zero; 2],
+        },
+    }
+}
+
+fn zero_sparse_trace_row() -> SparseTraceRow {
+    zero_sparse_trace_row_field<BabyBear>()
 }
 
 fn zero_sparse_trace_control() -> SparseTraceControl {
-    SparseTraceControl {
-        selectors: SparseTraceTaskSelectors {
-            radix_bit: BabyBear::zero(),
-            radix_limb: BabyBear::zero(),
-            radix_finish: BabyBear::zero(),
-            carry_bit: BabyBear::zero(),
-            carry_finish: BabyBear::zero(),
-            product_term: BabyBear::zero(),
-            product_coefficient: BabyBear::zero(),
-            product_round: BabyBear::zero(),
-            product_finish: BabyBear::zero(),
-            linear_limb: BabyBear::zero(),
-            linear_finish: BabyBear::zero(),
-            boundary_sign: BabyBear::zero(),
-            boundary_limb: BabyBear::zero(),
-            transition_finish: BabyBear::zero(),
-            padding: BabyBear::zero(),
-        },
-        linear_roles: SparseTraceLinearRoles {
-            sum: BabyBear::zero(),
-            left_difference: BabyBear::zero(),
-            right_difference: BabyBear::zero(),
-            select: BabyBear::zero(),
-        },
-        range_roles: SparseTraceRangeRoles {
-            coordinate: BabyBear::zero(),
-            product_low: BabyBear::zero(),
-            product_high: BabyBear::zero(),
-            product_output: BabyBear::zero(),
-            linear_sum: BabyBear::zero(),
-            linear_left_difference: BabyBear::zero(),
-            linear_right_difference: BabyBear::zero(),
-            linear_output: BabyBear::zero(),
-        },
-        limb_positions: SparseTraceLimbPositions {
-            penultimate: BabyBear::zero(),
-            last: BabyBear::zero(),
-        },
-        major: BabyBear::zero(),
-        minor: BabyBear::zero(),
-        step: BabyBear::zero(),
-        flag: BabyBear::zero(),
-        width: BabyBear::zero(),
-        weight: BabyBear::zero(),
-    }
+    zero_sparse_trace_control_field<BabyBear>()
 }
 
-pub fn zero_sparse_base_air_row() -> SparseBaseAirRow {
-    SparseBaseAirRow {
-        control: zero_sparse_trace_control(),
-        witness: zero_sparse_trace_row(),
-    }
+pub fn zero_sparse_base_air_row() -> SparseBaseAirRow<BabyBear> {
+    zero_sparse_base_air_row_field<BabyBear>()
 }
 
 fn sparse_trace_control_at<const L: usize>(_ index: u32) -> SparseTraceControl {
-    let control = sparse_control_row_at<BabyBear, L>(index)
-    SparseTraceControl {
-        selectors: SparseTraceTaskSelectors {
-            radix_bit: control.selectors.radix_bit,
-            radix_limb: control.selectors.radix_limb,
-            radix_finish: control.selectors.radix_finish,
-            carry_bit: control.selectors.carry_bit,
-            carry_finish: control.selectors.carry_finish,
-            product_term: control.selectors.product_term,
-            product_coefficient: control.selectors.product_coefficient,
-            product_round: control.selectors.product_round,
-            product_finish: control.selectors.product_finish,
-            linear_limb: control.selectors.linear_limb,
-            linear_finish: control.selectors.linear_finish,
-            boundary_sign: control.selectors.boundary_sign,
-            boundary_limb: control.selectors.boundary_limb,
-            transition_finish: control.selectors.transition_finish,
-            padding: control.selectors.padding,
-        },
-        linear_roles: SparseTraceLinearRoles {
-            sum: control.linear_roles.sum,
-            left_difference: control.linear_roles.left_difference,
-            right_difference: control.linear_roles.right_difference,
-            select: control.linear_roles.select,
-        },
-        range_roles: SparseTraceRangeRoles {
-            coordinate: control.range_roles.coordinate,
-            product_low: control.range_roles.product_low,
-            product_high: control.range_roles.product_high,
-            product_output: control.range_roles.product_output,
-            linear_sum: control.range_roles.linear_sum,
-            linear_left_difference: control.range_roles.linear_left_difference,
-            linear_right_difference: control.range_roles.linear_right_difference,
-            linear_output: control.range_roles.linear_output,
-        },
-        limb_positions: SparseTraceLimbPositions {
-            penultimate: control.limb_positions.penultimate,
-            last: control.limb_positions.last,
-        },
-        major: control.major,
-        minor: control.minor,
-        step: control.step,
-        flag: control.flag,
-        width: control.width,
-        weight: control.weight,
-    }
+    sparse_control_row_at<BabyBear, L>(index)
 }
 
 pub fn zero_sparse_trace_leaf<const L: usize>() -> SparseTraceLeaf<L> {
@@ -1165,14 +1655,7 @@ pub fn sparse_trace_leaf_from_witness<const L: usize>(
         index: BabyBear::from_u32(index),
         active: BabyBear::from_u32(if index < tasks { 1 } else { 0 }),
         control: sparse_trace_control_at<L>(index),
-        row: SparseTraceRow {
-            value: row.value,
-            auxiliary: row.auxiliary,
-            accumulator_before: row.accumulator_before,
-            accumulator_after: row.accumulator_after,
-            state_before: row.state_before,
-            state_after: row.state_after,
-        },
+        row: row,
     }
 }
 
@@ -1182,7 +1665,7 @@ pub fn sparse_base_air_row_from_witness<const L: usize>(
     _ current: ComplexFixed<L>,
     _ next: ComplexFixed<L>,
     _ witness: FixedMandelbrotTransitionWitness<L>,
-) -> SparseBaseAirRow {
+) -> SparseBaseAirRow<BabyBear> {
     let leaf = sparse_trace_leaf_from_witness<L>(
         index, point, current, next, witness,
     )
