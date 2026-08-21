@@ -7,6 +7,7 @@ use canonical_words::{
     CanonicalWords,
     CanonicalWordsProvider,
     canonical_word_stream_count,
+    encode_canonical_word_array,
     encode_canonical_word_stream,
 }
 use core::BrowserBytes
@@ -25,6 +26,9 @@ use mandelbrot_proof_fixed_air_baby_bear::{
     SparseAirLdeCodeword,
     SparseInteractionAccumulators,
     SparseInteractionAirFields,
+    SparseInteractionAirEvaluationTrace,
+    SparseInteractionAirLdeCodeword,
+    SparseLdeInteractionChallenges,
     SparseInteractionTraceDigest,
     SparseInteractionTraceRow,
     SparseTraceDigest,
@@ -39,6 +43,7 @@ use mandelbrot_proof_fixed_air_baby_bear::{
     sparse_constraint_numerators_opened,
     sparse_interaction_air_fields,
     sparse_interaction_challenges,
+    sparse_interaction_lde_root_power_of_two,
     sparse_lde_interaction_challenges,
     sparse_interaction_trace_root_power_of_two,
     sparse_opened_air_row,
@@ -49,6 +54,9 @@ use mandelbrot_proof_fixed_air_baby_bear::{
     write_sparse_base_air_evaluation_trace,
     write_sparse_base_air_lde,
     write_sparse_interaction_air_rows,
+    write_sparse_interaction_air_evaluation_trace,
+    write_sparse_interaction_air_lde,
+    write_sparse_lde_interaction_air_rows,
     write_sparse_trace_authentication_power_of_two,
     zero_sparse_base_air_row,
     zero_sparse_interaction_accumulators,
@@ -230,7 +238,12 @@ pub fn sparse_lde_interaction_challenges4(
             r0, r1, r2, r3, r4, r5, r6, r7,
         ]),
     }
-    interaction_challenge_words(sparse_lde_interaction_challenges(root))
+    let challenges = sparse_lde_interaction_challenges(root)
+    let encoded = encode_canonical_word_array<
+        SparseLdeInteractionChallenges<4, 4, 16>,
+        33,
+    >(ref challenges)
+    if encoded.valid { encoded.words } else { [0; 33] }
 }
 
 fn write_sparse_air_rows4(
@@ -351,6 +364,34 @@ pub fn fixed_transition4_sparse_air_lde_encoded(
     encode_canonical_word_stream(ref rejection, writer).finish()
 }
 
+fn write_sparse_base_lde4(
+    _ point: ComplexFixed<4>,
+    _ current: ComplexFixed<4>,
+    _ next: ComplexFixed<4>,
+    _ witness: TransitionWitness4,
+    _ output: mut SparseBaseAirLdeCodeword<16>,
+) -> bool {
+    let mut rows = [zero_sparse_base_air_row(); 4]
+    let mut index: usize = 0
+    while index < 4 {
+        rows[index] = sparse_base_air_row_from_witness<4>(
+            index.downcast_truncate(), point, current, next, witness,
+        )
+        index = index + 1
+    }
+    let mut evaluations: SparseBaseAirEvaluationTrace<4> =
+        SparseBaseAirEvaluationTrace {
+            valid: false,
+            values: [[BabyBear::zero(); SPARSE_BASE_AIR_FIELDS]; 4],
+        }
+    write_sparse_base_air_evaluation_trace<4>(ref rows, mut evaluations)
+        && write_sparse_base_air_lde<4, 16>(
+            ref evaluations,
+            BabyBear::from_u32(7),
+            mut output,
+        )
+}
+
 /// Commit the independently placeable base LDE before constructing any
 /// interaction witness. A directed field mutation provides a root-level
 /// binding gate without involving the later interaction codeword.
@@ -367,34 +408,11 @@ pub fn fixed_transition4_sparse_base_lde_root(
         crn, [cr0, cr1, cr2, cr3], cin, [ci0, ci1, ci2, ci3],
     )
     let next = fixed_mandelbrot_transition_output(witness)
-    let mut rows = [zero_sparse_base_air_row(); 4]
-    let mut index: usize = 0
-    while index < 4 {
-        rows[index] = sparse_base_air_row_from_witness<4>(
-            index.downcast_truncate(), point, current, next, witness,
-        )
-        index = index + 1
-    }
-    let mut evaluations: SparseBaseAirEvaluationTrace<4> =
-        SparseBaseAirEvaluationTrace {
-            valid: false,
-            values: [[BabyBear::zero(); SPARSE_BASE_AIR_FIELDS]; 4],
-        }
-    if !write_sparse_base_air_evaluation_trace<4>(
-        ref rows,
-        mut evaluations,
-    ) {
-        return [0; 9]
-    }
     let mut lde: SparseBaseAirLdeCodeword<16> = SparseBaseAirLdeCodeword {
         valid: false,
         values: [[BabyBear::zero(); SPARSE_BASE_AIR_FIELDS]; 16],
     }
-    if !write_sparse_base_air_lde<4, 16>(
-        ref evaluations,
-        BabyBear::from_u32(7),
-        mut lde,
-    ) {
+    if !write_sparse_base_lde4(point, current, next, witness, mut lde) {
         return [0; 9]
     }
     if mutation == 1 {
@@ -403,9 +421,92 @@ pub fn fixed_transition4_sparse_base_lde_root(
     let root = sparse_base_lde_root_power_of_two<4, 4, 16>(ref lde)
     let mut output = [0; 9]
     output[0] = if root.valid { 1 } else { 0 }
-    index = 0
+    let mut index: usize = 0
     while index < 8 {
         output[1 + index] = root.value.field(index.downcast_truncate()).to_u32()
+        index = index + 1
+    }
+    output
+}
+
+/// Generate the interaction prefix only after the base LDE root has fixed its
+/// branded quartic challenges, then commit the independently extended rows.
+pub fn fixed_transition4_sparse_interaction_lde_root(
+    _ prn: u32, _ pr0: u32, _ pr1: u32, _ pr2: u32, _ pr3: u32,
+    _ pin: u32, _ pi0: u32, _ pi1: u32, _ pi2: u32, _ pi3: u32,
+    _ crn: u32, _ cr0: u32, _ cr1: u32, _ cr2: u32, _ cr3: u32,
+    _ cin: u32, _ ci0: u32, _ ci1: u32, _ ci2: u32, _ ci3: u32,
+    _ mutation: u32,
+) -> [u32; 17] {
+    if mutation > 1 { return [0; 17] }
+    let (point, current, witness) = transition4(
+        prn, [pr0, pr1, pr2, pr3], pin, [pi0, pi1, pi2, pi3],
+        crn, [cr0, cr1, cr2, cr3], cin, [ci0, ci1, ci2, ci3],
+    )
+    let next = fixed_mandelbrot_transition_output(witness)
+    let mut base_lde: SparseBaseAirLdeCodeword<16> = SparseBaseAirLdeCodeword {
+        valid: false,
+        values: [[BabyBear::zero(); SPARSE_BASE_AIR_FIELDS]; 16],
+    }
+    if !write_sparse_base_lde4(
+        point, current, next, witness, mut base_lde,
+    ) {
+        return [0; 17]
+    }
+    let base = sparse_base_lde_root_power_of_two<4, 4, 16>(ref base_lde)
+    let challenges = sparse_lde_interaction_challenges(base)
+    let mut rows = [zero_sparse_interaction_trace_row(); 4]
+    let mut accumulators = zero_sparse_interaction_accumulators()
+    if !write_sparse_lde_interaction_air_rows<4, 4, 16, 4>(
+        point,
+        current,
+        next,
+        witness,
+        challenges,
+        0,
+        mut accumulators,
+        mut rows,
+    ) {
+        return [0; 17]
+    }
+    let mut evaluations: SparseInteractionAirEvaluationTrace<4> =
+        SparseInteractionAirEvaluationTrace {
+            valid: false,
+            values: [[BabyBear::zero(); SPARSE_INTERACTION_AIR_FIELDS]; 4],
+        }
+    if !write_sparse_interaction_air_evaluation_trace<4>(
+        ref rows,
+        mut evaluations,
+    ) {
+        return [0; 17]
+    }
+    let mut lde: SparseInteractionAirLdeCodeword<16> =
+        SparseInteractionAirLdeCodeword {
+            valid: false,
+            values: [[BabyBear::zero(); SPARSE_INTERACTION_AIR_FIELDS]; 16],
+        }
+    if !write_sparse_interaction_air_lde<4, 16>(
+        ref evaluations,
+        BabyBear::from_u32(7),
+        mut lde,
+    ) {
+        return [0; 17]
+    }
+    if mutation == 1 {
+        lde.values[0][0] = lde.values[0][0] + BabyBear::one()
+    }
+    let interaction = sparse_interaction_lde_root_power_of_two<4, 4, 16>(
+        base,
+        ref lde,
+    )
+    let mut output = [0; 17]
+    output[0] = if interaction.valid { 1 } else { 0 }
+    let mut index: usize = 0
+    while index < 8 {
+        output[1 + index] = interaction.base.value
+            .field(index.downcast_truncate()).to_u32()
+        output[9 + index] = interaction.value
+            .field(index.downcast_truncate()).to_u32()
         index = index + 1
     }
     output

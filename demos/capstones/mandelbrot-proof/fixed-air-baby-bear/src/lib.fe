@@ -3,10 +3,10 @@
 //! This layer commits the exact base rows, canonical padding, and quartic copy
 //! interactions emitted by `mandelbrot_proof_fixed_air_core`. Its production
 //! transcript begins by committing the base LDE, then derives interaction
-//! challenges from that typed root. It deliberately does not call the current
-//! result an AIR or FRI receipt: interaction LDE commitment, composition,
-//! queries, and FRI still have to bind these columns before sparse
-//! authentication becomes a proof.
+//! challenges from that typed root before committing the interaction LDE. It
+//! deliberately does not call the current result an AIR or FRI receipt:
+//! composition, queries, and FRI still have to bind these columns before
+//! sparse authentication becomes a proof.
 
 use canonical_words::{
     CanonicalWordStream,
@@ -161,6 +161,10 @@ struct MandelbrotSparseBaseLdeLeafBabyBearV1 {}
 impl Poseidon2FieldDomain for MandelbrotSparseBaseLdeLeafBabyBearV1 {
     const TAG: u32 = protocol_tag("LD01")
 }
+struct MandelbrotSparseInteractionLdeLeafBabyBearV1 {}
+impl Poseidon2FieldDomain for MandelbrotSparseInteractionLdeLeafBabyBearV1 {
+    const TAG: u32 = protocol_tag("LD02")
+}
 struct MandelbrotSparseLdeProductBetaBabyBearV1 {}
 impl Poseidon2FieldDomain for MandelbrotSparseLdeProductBetaBabyBearV1 {
     const TAG: u32 = protocol_tag("PB02")
@@ -246,6 +250,24 @@ pub struct SparseInteractionChallenges {
     pub boundary: SparseCopyChallenges<BabyBearExt4>,
 }
 impl core::marker::Copy for SparseInteractionChallenges {}
+derive CanonicalWords for SparseInteractionChallenges using CanonicalWordsProvider
+
+/// Source-branded production challenges. Its payload is private so code
+/// outside this ingot cannot repackage raw-checkpoint challenges as though
+/// they followed the base-LDE commitment.
+pub struct SparseLdeInteractionChallenges<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+> {
+    value: SparseInteractionChallenges,
+}
+impl<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+> core::marker::Copy for SparseLdeInteractionChallenges<L, TRACE, LDE> {}
+derive CanonicalWords for SparseLdeInteractionChallenges<L, TRACE, LDE> using CanonicalWordsProvider
 
 /// All four copy buses evaluated over the quartic challenge field. These are
 /// prover witness columns, not precomputed constants: the same typed Fe port
@@ -390,6 +412,57 @@ impl<
     const LDE: usize,
 > core::marker::Copy for SparseBaseLdeDigest<L, TRACE, LDE> {}
 derive CanonicalWords for SparseBaseLdeDigest<L, TRACE, LDE> using CanonicalWordsProvider
+
+/// Interaction placement exists only after the source-branded challenge set
+/// has been derived from `SparseBaseLdeDigest`.
+pub struct SparseInteractionAirEvaluationTrace<const N: usize> {
+    pub valid: bool,
+    pub values: [[BabyBear; SPARSE_INTERACTION_AIR_FIELDS]; N],
+}
+impl<const N: usize> core::marker::Copy
+    for SparseInteractionAirEvaluationTrace<N> {}
+
+pub struct SparseInteractionAirLdeCodeword<const N: usize> {
+    pub valid: bool,
+    pub values: [[BabyBear; SPARSE_INTERACTION_AIR_FIELDS]; N],
+}
+impl<const N: usize> core::marker::Copy
+    for SparseInteractionAirLdeCodeword<N> {}
+
+pub struct SparseInteractionLdeLeaf<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+> {
+    pub limb_count: BabyBear,
+    pub trace_length: BabyBear,
+    pub lde_length: BabyBear,
+    pub index: BabyBear,
+    pub base_lde_root: Poseidon2Digest,
+    pub values: [BabyBear; SPARSE_INTERACTION_AIR_FIELDS],
+}
+impl<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+> core::marker::Copy for SparseInteractionLdeLeaf<L, TRACE, LDE> {}
+derive CanonicalWords for SparseInteractionLdeLeaf<L, TRACE, LDE> using CanonicalWordsProvider
+
+pub struct SparseInteractionLdeDigest<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+> {
+    pub valid: bool,
+    pub base: SparseBaseLdeDigest<L, TRACE, LDE>,
+    pub value: Poseidon2Digest,
+}
+impl<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+> core::marker::Copy for SparseInteractionLdeDigest<L, TRACE, LDE> {}
+derive CanonicalWords for SparseInteractionLdeDigest<L, TRACE, LDE> using CanonicalWordsProvider
 
 /// Typed extension-field view of one pair of base-field LDE rows. The view is
 /// reconstructed through the same reflection-derived codecs that define the
@@ -1061,6 +1134,158 @@ where
     true
 }
 
+pub fn write_sparse_interaction_air_evaluation_trace<const N: usize>(
+    _ rows: ref [SparseInteractionTraceRow<BabyBearExt4>; N],
+    _ output: mut SparseInteractionAirEvaluationTrace<N>,
+) -> bool
+where N > 0,
+{
+    output.valid = false
+    let mut row: usize = 0
+    while row < N {
+        let fields = sparse_interaction_air_fields(ref rows[row])
+        if !fields.valid { return false }
+        output.values[row] = fields.values
+        row = row + 1
+    }
+    output.valid = true
+    true
+}
+
+pub fn write_sparse_interaction_air_lde<
+    const TRACE: usize,
+    const LDE: usize,
+>(
+    _ trace: ref SparseInteractionAirEvaluationTrace<TRACE>,
+    _ shift: BabyBear,
+    _ output: mut SparseInteractionAirLdeCodeword<LDE>,
+) -> bool
+where
+    TRACE > 0,
+    { (TRACE & (TRACE - 1)) == 0 },
+    { radix2_field_domain_supported<TRACE, BabyBear>() },
+    LDE > 0,
+    LDE > TRACE,
+    { (LDE & (LDE - 1)) == 0 },
+    { radix2_field_domain_supported<LDE, BabyBear>() },
+    { (LDE % TRACE) == 0 },
+{
+    output.valid = false
+    if !trace.valid { return false }
+    let zero = BabyBear::zero()
+    let mut source = [zero; TRACE]
+    let mut extended = [zero; LDE]
+    let mut column: usize = 0
+    while column < SPARSE_INTERACTION_AIR_FIELDS {
+        let mut row: usize = 0
+        while row < TRACE {
+            source[row] = trace.values[row][column]
+            row = row + 1
+        }
+        if !write_radix2_coset_lde<TRACE, LDE, BabyBear>(
+            ref source,
+            shift,
+            mut extended,
+        ) {
+            return false
+        }
+        row = 0
+        while row < LDE {
+            output.values[row][column] = extended[row]
+            row = row + 1
+        }
+        column = column + 1
+    }
+    output.valid = true
+    true
+}
+
+pub fn sparse_interaction_lde_leaf_commitment<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>(
+    _ leaf: SparseInteractionLdeLeaf<L, TRACE, LDE>,
+) -> Poseidon2Digest {
+    commit_canonical<
+        MandelbrotSparseInteractionLdeLeafBabyBearV1,
+        SparseInteractionLdeLeaf<L, TRACE, LDE>,
+    >(ref leaf).digest()
+}
+
+fn invalid_sparse_interaction_lde_digest<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>(
+    _ base: SparseBaseLdeDigest<L, TRACE, LDE>,
+) -> SparseInteractionLdeDigest<L, TRACE, LDE> {
+    SparseInteractionLdeDigest {
+        valid: false,
+        base: base,
+        value: Poseidon2Digest::zero(),
+    }
+}
+
+pub fn sparse_interaction_lde_root_power_of_two<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>(
+    _ base: SparseBaseLdeDigest<L, TRACE, LDE>,
+    _ codeword: ref SparseInteractionAirLdeCodeword<LDE>,
+) -> SparseInteractionLdeDigest<L, TRACE, LDE>
+where
+    L > 1,
+    TRACE > 0,
+    { (TRACE & (TRACE - 1)) == 0 },
+    LDE > 1,
+    LDE > TRACE,
+    LDE <= MAX_SPARSE_LDE_LENGTH,
+    LDE <= 2147483648,
+    { (LDE & (LDE - 1)) == 0 },
+    { (LDE % TRACE) == 0 },
+{
+    if !base.valid || !codeword.valid {
+        return invalid_sparse_interaction_lde_digest(base)
+    }
+    let mut frontier = empty_frontier<
+        Poseidon2Digest,
+        SparseDigestHasher,
+        SPARSE_LDE_FRONTIER_LEVELS,
+    >()
+    let limb_count = BabyBear::from_u32(L.downcast_truncate())
+    let trace_length = BabyBear::from_u32(TRACE.downcast_truncate())
+    let lde_length = BabyBear::from_u32(LDE.downcast_truncate())
+    let mut index: usize = 0
+    while index < LDE {
+        let leaf = SparseInteractionLdeLeaf<L, TRACE, LDE> {
+            limb_count: limb_count,
+            trace_length: trace_length,
+            lde_length: lde_length,
+            index: BabyBear::from_u32(index.downcast_truncate()),
+            base_lde_root: base.value,
+            values: codeword.values[index],
+        }
+        frontier = push_frontier<
+            Poseidon2Digest,
+            SparseDigestHasher,
+            SPARSE_LDE_FRONTIER_LEVELS,
+        >(frontier, sparse_interaction_lde_leaf_commitment(leaf))
+        index = index + 1
+    }
+    let root = complete_frontier_root<
+        Poseidon2Digest,
+        SparseDigestHasher,
+        SPARSE_LDE_FRONTIER_LEVELS,
+    >(frontier)
+    SparseInteractionLdeDigest {
+        valid: root.valid,
+        base: base,
+        value: root.value,
+    }
+}
+
 /// Sequential state of the four log-derivative copy buses.
 pub struct SparseInteractionAccumulators {
     pub product: BabyBearExt4,
@@ -1196,51 +1421,55 @@ pub fn sparse_lde_interaction_challenges<
     const LDE: usize,
 >(
     _ root: SparseBaseLdeDigest<L, TRACE, LDE>,
-) -> SparseInteractionChallenges {
+) -> SparseLdeInteractionChallenges<L, TRACE, LDE> {
     if !root.valid {
         let zero = BabyBearExt4::zero()
         let challenges = SparseCopyChallenges { beta: zero, gamma: zero }
-        return SparseInteractionChallenges {
-            valid: false,
-            product: challenges,
-            round: challenges,
-            linear: challenges,
-            boundary: challenges,
+        return SparseLdeInteractionChallenges {
+            value: SparseInteractionChallenges {
+                valid: false,
+                product: challenges,
+                round: challenges,
+                linear: challenges,
+                boundary: challenges,
+            },
         }
     }
-    SparseInteractionChallenges {
-        valid: true,
-        product: SparseCopyChallenges {
-            beta: squeeze_ext4<MandelbrotSparseLdeProductBetaBabyBearV1>(
-                root.value,
-            ),
-            gamma: squeeze_ext4<MandelbrotSparseLdeProductGammaBabyBearV1>(
-                root.value,
-            ),
-        },
-        round: SparseCopyChallenges {
-            beta: squeeze_ext4<MandelbrotSparseLdeRoundBetaBabyBearV1>(
-                root.value,
-            ),
-            gamma: squeeze_ext4<MandelbrotSparseLdeRoundGammaBabyBearV1>(
-                root.value,
-            ),
-        },
-        linear: SparseCopyChallenges {
-            beta: squeeze_ext4<MandelbrotSparseLdeLinearBetaBabyBearV1>(
-                root.value,
-            ),
-            gamma: squeeze_ext4<MandelbrotSparseLdeLinearGammaBabyBearV1>(
-                root.value,
-            ),
-        },
-        boundary: SparseCopyChallenges {
-            beta: squeeze_ext4<MandelbrotSparseLdeBoundaryBetaBabyBearV1>(
-                root.value,
-            ),
-            gamma: squeeze_ext4<MandelbrotSparseLdeBoundaryGammaBabyBearV1>(
-                root.value,
-            ),
+    SparseLdeInteractionChallenges {
+        value: SparseInteractionChallenges {
+            valid: true,
+            product: SparseCopyChallenges {
+                beta: squeeze_ext4<MandelbrotSparseLdeProductBetaBabyBearV1>(
+                    root.value,
+                ),
+                gamma: squeeze_ext4<MandelbrotSparseLdeProductGammaBabyBearV1>(
+                    root.value,
+                ),
+            },
+            round: SparseCopyChallenges {
+                beta: squeeze_ext4<MandelbrotSparseLdeRoundBetaBabyBearV1>(
+                    root.value,
+                ),
+                gamma: squeeze_ext4<MandelbrotSparseLdeRoundGammaBabyBearV1>(
+                    root.value,
+                ),
+            },
+            linear: SparseCopyChallenges {
+                beta: squeeze_ext4<MandelbrotSparseLdeLinearBetaBabyBearV1>(
+                    root.value,
+                ),
+                gamma: squeeze_ext4<MandelbrotSparseLdeLinearGammaBabyBearV1>(
+                    root.value,
+                ),
+            },
+            boundary: SparseCopyChallenges {
+                beta: squeeze_ext4<MandelbrotSparseLdeBoundaryBetaBabyBearV1>(
+                    root.value,
+                ),
+                gamma: squeeze_ext4<MandelbrotSparseLdeBoundaryGammaBabyBearV1>(
+                    root.value,
+                ),
+            },
         },
     }
 }
@@ -1373,11 +1602,7 @@ where L > 1,
     true
 }
 
-/// Place a contiguous interaction-trace tile in caller-owned storage. The
-/// starting accumulators are explicit so scalar, packed, workgroup, and
-/// recursive chunk interpreters can use the same row dependency plan without
-/// inventing a second interaction kernel.
-pub fn write_sparse_interaction_air_rows<
+fn write_sparse_interaction_air_rows_with_challenges<
     const L: usize,
     const N: usize,
 >(
@@ -1385,7 +1610,7 @@ pub fn write_sparse_interaction_air_rows<
     _ current: ComplexFixed<L>,
     _ next: ComplexFixed<L>,
     _ witness: FixedMandelbrotTransitionWitness<L>,
-    _ base: SparseTraceDigest<L>,
+    _ challenges: SparseInteractionChallenges,
     _ start: u32,
     _ accumulators: mut SparseInteractionAccumulators,
     _ rows: mut [SparseInteractionTraceRow<BabyBearExt4>; N],
@@ -1397,13 +1622,11 @@ where
 {
     let trace_length = sparse_transition_trace_length<L>()
     let count: u32 = N.downcast_truncate()
-    if !base.valid
+    if !challenges.valid
         || start > trace_length
         || count > trace_length - start {
         return false
     }
-    let challenges = sparse_interaction_challenges(base)
-    if !challenges.valid { return false }
     let mut scratch = zero_sparse_interaction_scratch()
     let mut interaction = zero_sparse_interaction_trace_row()
     let mut index: usize = 0
@@ -1425,6 +1648,75 @@ where
         index = index + 1
     }
     true
+}
+
+/// Place a semantic-checkpoint interaction tile derived from the raw `SL03`
+/// root. Production proof code must use the LDE-branded entry below.
+pub fn write_sparse_interaction_air_rows<
+    const L: usize,
+    const N: usize,
+>(
+    _ point: ComplexFixed<L>,
+    _ current: ComplexFixed<L>,
+    _ next: ComplexFixed<L>,
+    _ witness: FixedMandelbrotTransitionWitness<L>,
+    _ base: SparseTraceDigest<L>,
+    _ start: u32,
+    _ accumulators: mut SparseInteractionAccumulators,
+    _ rows: mut [SparseInteractionTraceRow<BabyBearExt4>; N],
+) -> bool
+where
+    L > 1,
+    N > 0,
+    N <= MAX_SPARSE_TRACE_LENGTH,
+{
+    write_sparse_interaction_air_rows_with_challenges<L, N>(
+        point,
+        current,
+        next,
+        witness,
+        sparse_interaction_challenges(base),
+        start,
+        mut accumulators,
+        mut rows,
+    )
+}
+
+/// Place a production interaction tile. The private payload of `challenges`
+/// proves that its eight quartic values were derived after the branded base
+/// LDE commitment, not repackaged from a raw semantic checkpoint.
+pub fn write_sparse_lde_interaction_air_rows<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const N: usize,
+>(
+    _ point: ComplexFixed<L>,
+    _ current: ComplexFixed<L>,
+    _ next: ComplexFixed<L>,
+    _ witness: FixedMandelbrotTransitionWitness<L>,
+    _ challenges: SparseLdeInteractionChallenges<L, TRACE, LDE>,
+    _ start: u32,
+    _ accumulators: mut SparseInteractionAccumulators,
+    _ rows: mut [SparseInteractionTraceRow<BabyBearExt4>; N],
+) -> bool
+where
+    L > 1,
+    TRACE > 0,
+    LDE > TRACE,
+    N > 0,
+    N <= MAX_SPARSE_TRACE_LENGTH,
+{
+    write_sparse_interaction_air_rows_with_challenges<L, N>(
+        point,
+        current,
+        next,
+        witness,
+        challenges.value,
+        start,
+        mut accumulators,
+        mut rows,
+    )
 }
 
 fn write_sparse_interaction_trace_step<const L: usize>(

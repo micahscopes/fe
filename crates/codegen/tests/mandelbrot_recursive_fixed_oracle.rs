@@ -2140,6 +2140,120 @@ fn expected_sparse_base_lde_root(lde: &[u32], mutate: bool) -> [u32; 8] {
     reference_merkle_root(leaves)
 }
 
+fn expected_sparse_production_interaction_prefix(
+    point: &ComplexFx,
+    current: &ComplexFx,
+    base_lde_root: [u32; 8],
+) -> Vec<u32> {
+    let words = expected_sparse_lde_interaction_challenges(base_lde_root);
+    let challenges = [
+        Ext4::from_words(&words[1..5]),
+        Ext4::from_words(&words[5..9]),
+        Ext4::from_words(&words[9..13]),
+        Ext4::from_words(&words[13..17]),
+        Ext4::from_words(&words[17..21]),
+        Ext4::from_words(&words[21..25]),
+        Ext4::from_words(&words[25..29]),
+        Ext4::from_words(&words[29..33]),
+    ];
+    let tasks = expected_sparse_transition_tasks(LIMBS as u32);
+    let rows = expected_sparse_rows(point, current);
+    let mut product_accumulator = Ext4::ZERO;
+    let mut round_accumulator = Ext4::ZERO;
+    let mut linear_accumulator = Ext4::ZERO;
+    let mut boundary_accumulator = Ext4::ZERO;
+    let mut fields = Vec::with_capacity(4 * 84);
+    for index in 0..4 {
+        let task = tasks[index];
+        let row = rows[index];
+        let (product_inverses, product_delta) = expected_ext4_interaction_row(
+            expected_product_copy_ports(task, row),
+            challenges[0],
+            challenges[1],
+        );
+        let (round_inverses, round_delta) = expected_ext4_interaction_row(
+            expected_round_copy_ports(task, row),
+            challenges[2],
+            challenges[3],
+        );
+        let (linear_inverses, linear_delta) = expected_ext4_interaction_row(
+            expected_linear_copy_ports(task, row),
+            challenges[4],
+            challenges[5],
+        );
+        let (boundary_inverses, boundary_delta) = expected_ext4_interaction_row(
+            expected_boundary_copy_ports(task, row),
+            challenges[6],
+            challenges[7],
+        );
+
+        extend_ext4_words(&mut fields, product_accumulator);
+        for inverse in product_inverses {
+            extend_ext4_words(&mut fields, inverse);
+        }
+        extend_ext4_words(&mut fields, round_accumulator);
+        for inverse in round_inverses {
+            extend_ext4_words(&mut fields, inverse);
+        }
+        extend_ext4_words(&mut fields, linear_accumulator);
+        for inverse in linear_inverses {
+            extend_ext4_words(&mut fields, inverse);
+        }
+        extend_ext4_words(&mut fields, boundary_accumulator);
+        for inverse in boundary_inverses {
+            extend_ext4_words(&mut fields, inverse);
+        }
+
+        product_accumulator = product_accumulator.add(product_delta);
+        round_accumulator = round_accumulator.add(round_delta);
+        linear_accumulator = linear_accumulator.add(linear_delta);
+        boundary_accumulator = boundary_accumulator.add(boundary_delta);
+    }
+    assert_eq!(fields.len(), 4 * 84);
+    fields
+}
+
+fn expected_sparse_interaction_lde(prefix: &[u32]) -> Vec<u32> {
+    const FIELDS: usize = 84;
+    const TRACE: usize = 4;
+    const LDE: usize = 16;
+    assert_eq!(prefix.len(), TRACE * FIELDS);
+    let mut output = vec![0; LDE * FIELDS];
+    for column in 0..FIELDS {
+        let source = (0..TRACE)
+            .map(|row| prefix[row * FIELDS + column])
+            .collect::<Vec<_>>();
+        let extended = direct_baby_bear_coset_lde(&source, LDE, 7);
+        for row in 0..LDE {
+            output[row * FIELDS + column] = extended[row];
+        }
+    }
+    output
+}
+
+fn expected_sparse_interaction_lde_root(
+    lde: &[u32],
+    base_lde_root: [u32; 8],
+    mutate: bool,
+) -> [u32; 8] {
+    const FIELDS: usize = 84;
+    const LDE: usize = 16;
+    assert_eq!(lde.len(), LDE * FIELDS);
+    let mut leaves = Vec::with_capacity(LDE);
+    for index in 0..LDE {
+        let mut fields = vec![LIMBS as u32, 4, LDE as u32, index as u32];
+        fields.extend(base_lde_root);
+        let start = index * FIELDS;
+        let mut row = lde[start..start + FIELDS].to_vec();
+        if mutate && index == 0 {
+            row[0] = bb_add(row[0], 1);
+        }
+        fields.extend(row);
+        leaves.push(reference_poseidon_digest(b"LD02", &fields));
+    }
+    reference_merkle_root(leaves)
+}
+
 fn expected_committed_words(
     claim: &Claim,
     start: &Boundary,
@@ -4206,6 +4320,57 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
         ),
         [0; 9],
         "unknown base LDE mutations must fail closed",
+    );
+
+    let production_interaction_prefix =
+        expected_sparse_production_interaction_prefix(&point, &current, production_roots[0]);
+    let production_interaction_lde =
+        expected_sparse_interaction_lde(&production_interaction_prefix);
+    let mut production_interaction_roots = Vec::new();
+    for mutation in 0u32..=1 {
+        let mut root_arguments = arguments[..20].to_vec();
+        root_arguments.push(mutation);
+        let actual = call(
+            &mut store,
+            &instance,
+            "fixed_transition4_sparse_interaction_lde_root",
+            &root_arguments,
+            17,
+        );
+        assert_eq!(actual[0], 1, "interaction LDE root must be valid");
+        assert_eq!(
+            actual[1..9],
+            production_roots[0],
+            "interaction root must retain its exact base LDE dependency",
+        );
+        let expected_root = expected_sparse_interaction_lde_root(
+            &production_interaction_lde,
+            production_roots[0],
+            mutation == 1,
+        );
+        assert_eq!(
+            actual[9..17],
+            expected_root,
+            "interaction LDE root mutation {mutation} must match independent Plonky3",
+        );
+        production_interaction_roots.push(expected_root);
+    }
+    assert_ne!(
+        production_interaction_roots[0], production_interaction_roots[1],
+        "an interaction LDE mutation must alter its typed root",
+    );
+    let mut invalid_interaction_arguments = arguments[..20].to_vec();
+    invalid_interaction_arguments.push(2);
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "fixed_transition4_sparse_interaction_lde_root",
+            &invalid_interaction_arguments,
+            17,
+        ),
+        [0; 17],
+        "unknown interaction LDE mutations must fail closed",
     );
 
     const BASE_FIELDS: usize = 41;

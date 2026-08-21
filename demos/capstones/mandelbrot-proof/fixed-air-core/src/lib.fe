@@ -305,6 +305,7 @@ pub struct SparseCopyChallenges<F: Radix2Field> {
     pub gamma: F,
 }
 impl<F: Radix2Field> core::marker::Copy for SparseCopyChallenges<F> {}
+derive CanonicalWords for SparseCopyChallenges<F> using CanonicalWordsProvider
 
 /// Extension-trace columns for a fixed-width copy interaction. The port count
 /// is part of the type, so each semantic bus can select its required width
