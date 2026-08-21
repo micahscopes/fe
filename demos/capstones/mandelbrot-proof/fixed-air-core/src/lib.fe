@@ -208,6 +208,11 @@ pub const fn sparse_radix_task_count<const L: usize>() -> u32 {
     ranges * (limbs * 14 + 1)
 }
 
+pub const fn sparse_carry_task_count<const L: usize>() -> u32 {
+    let limbs: u32 = L.downcast_truncate()
+    sparse_product_node_count() * limbs * 2 * 37
+}
+
 pub const fn sparse_transition_task_count<const L: usize>() -> u32 {
     let limbs: u32 = L.downcast_truncate()
     3 * limbs * limbs + 671 * limbs + 41
@@ -652,6 +657,104 @@ pub fn sparse_radix_row_from_witness<F: Radix2Field, const L: usize>(
     }
 }
 
+fn product_node_witness<const L: usize>(
+    _ node: ProductNode,
+    _ witness: FixedMandelbrotTransitionWitness<L>,
+) -> FixedProductWitness<L> {
+    match node {
+        ProductNode::Xx => witness.xx,
+        ProductNode::Yy => witness.yy,
+        ProductNode::Xy => witness.xy,
+        ProductNode::Invalid => witness.xx,
+    }
+}
+
+fn fixed_product_carry<const L: usize>(
+    _ product: FixedProductWitness<L>,
+    _ coefficient: u32,
+) -> u32 {
+    let limbs: u32 = L.downcast_truncate()
+    if coefficient < limbs {
+        product.low_carries[coefficient as usize]
+    } else {
+        product.high_carries[(coefficient - limbs) as usize]
+    }
+}
+
+fn fixed_product_bounded_carry<const L: usize>(
+    _ range: FixedProductCarryRangeWitness<L>,
+    _ coefficient: u32,
+) -> BoundedU18Witness {
+    let limbs: u32 = L.downcast_truncate()
+    if coefficient < limbs {
+        range.low[coefficient as usize]
+    } else {
+        range.high[(coefficient - limbs) as usize]
+    }
+}
+
+fn bits18_reconstruction_before(_ bits: [u32; 18], _ bit: u32) -> u32 {
+    let mut reconstructed: u32 = 0
+    let mut index: u32 = 0
+    let mut place: u32 = 1
+    while index < bit {
+        reconstructed = reconstructed + bits[index as usize] * place
+        place = place + place
+        index = index + 1
+    }
+    reconstructed
+}
+
+/// Interpret one bounded product-carry task through the same six-column row.
+/// The value-bit scan occupies the first accumulator. The slack scan resets
+/// that accumulator and retains the reconstructed carry in the second pair.
+pub fn sparse_carry_row_from_witness<F: Radix2Field, const L: usize>(
+    _ task: SparseTransitionTask,
+    _ witness: FixedMandelbrotTransitionWitness<L>,
+) -> SparseTaskRow<F> {
+    match task {
+        SparseTransitionTask::CarryBit(node, coefficient, slack, bit) => {
+            let product = product_node_witness(node, witness)
+            let range = derive_fixed_product_carry_range_witness(product)
+            let bounded = fixed_product_bounded_carry(range, coefficient)
+            let bits = if slack { bounded.slack_bits } else { bounded.bits }
+            let before = bits18_reconstruction_before(bits, bit)
+            let value = bits[bit as usize]
+            let retained = if slack {
+                fixed_product_carry(product, coefficient)
+            } else {
+                0
+            }
+            SparseTaskRow {
+                value: natural<F>(value),
+                auxiliary: zero<F>(),
+                accumulator_before: natural<F>(before),
+                accumulator_after: natural<F>(before + value * (1 << bit)),
+                state_before: natural<F>(retained),
+                state_after: natural<F>(retained),
+            }
+        }
+        SparseTransitionTask::CarryFinish(node, coefficient) => {
+            let product = product_node_witness(node, witness)
+            let range = derive_fixed_product_carry_range_witness(product)
+            let bounded = fixed_product_bounded_carry(range, coefficient)
+            SparseTaskRow {
+                value: natural<F>(fixed_product_carry(product, coefficient)),
+                auxiliary: zero<F>(),
+                accumulator_before: natural<F>(
+                    bits18_reconstruction_before(bounded.slack_bits, 18),
+                ),
+                accumulator_after: zero<F>(),
+                state_before: natural<F>(
+                    bits18_reconstruction_before(bounded.bits, 18),
+                ),
+                state_after: zero<F>(),
+            }
+        }
+        _ => empty_sparse_row<F>(),
+    }
+}
+
 fn zero<F: Radix2Field>() -> F { F::radix2_zero() }
 fn one<F: Radix2Field>() -> F { F::radix2_root(0) }
 fn add<F: Radix2Field>(_ left: F, _ right: F) -> F { left.radix2_add(right) }
@@ -933,6 +1036,86 @@ pub fn sparse_radix_link_residuals<F: Radix2Field>(
         sub(next.accumulator_before, current.accumulator_after),
         sub(next.state_before, current.state_after),
     )
+}
+
+fn absorb_sparse_carry_row<F: Radix2Field, const L: usize>(
+    _ fold: own ConstraintFold<F>,
+    _ task: SparseTransitionTask,
+    _ row: SparseTaskRow<F>,
+) -> ConstraintFold<F> {
+    let mut fold = fold
+    match task {
+        SparseTransitionTask::CarryBit(_node, _coefficient, _slack, bit) => {
+            fold = fold.absorb(bit_residual(row.value))
+            fold = fold.absorb(sub(
+                row.accumulator_after,
+                add(
+                    row.accumulator_before,
+                    mul(row.value, natural<F>(1 << bit)),
+                ),
+            ))
+            fold.absorb(sub(row.state_after, row.state_before))
+        }
+        SparseTransitionTask::CarryFinish(_node, _coefficient) => {
+            fold = fold.absorb(sub(row.value, row.state_before))
+            fold = fold.absorb(sub(
+                add(row.state_before, row.accumulator_before),
+                natural<F>(product_carry_bound<L>()),
+            ))
+            fold = fold.absorb(row.auxiliary)
+            fold = fold.absorb(row.accumulator_after)
+            fold.absorb(row.state_after)
+        }
+        _ => fold.absorb(one<F>()),
+    }
+}
+
+pub fn evaluate_sparse_carry_row<F: Radix2Field, const L: usize>(
+    _ challenge: F,
+    _ task: SparseTransitionTask,
+    _ row: SparseTaskRow<F>,
+) -> FixedAirConstraintEvaluation<F> {
+    let fold = absorb_sparse_carry_row<F, L>(
+        ConstraintFold<F>::new(challenge),
+        task,
+        row,
+    )
+    FixedAirConstraintEvaluation {
+        valid: match task {
+            SparseTransitionTask::CarryBit(_, _, _, _) => true,
+            SparseTransitionTask::CarryFinish(_, _) => true,
+            _ => false,
+        },
+        constraints: fold.constraints,
+        folded: fold.value,
+    }
+}
+
+pub fn sparse_carry_initial_residuals<F: Radix2Field>(
+    _ row: SparseTaskRow<F>,
+) -> (F, F) {
+    (row.accumulator_before, row.state_before)
+}
+
+/// Link carry rows while handling the one intentional scan handoff. The first
+/// slack bit resets the active reconstruction and retains the completed carry
+/// reconstruction in the state accumulator.
+pub fn sparse_carry_link_residuals<F: Radix2Field>(
+    _ current_task: SparseTransitionTask,
+    _ current: SparseTaskRow<F>,
+    _ next_task: SparseTransitionTask,
+    _ next: SparseTaskRow<F>,
+) -> (F, F) {
+    match next_task {
+        SparseTransitionTask::CarryBit(_node, _coefficient, true, 0) => (
+            next.accumulator_before,
+            sub(next.state_before, current.accumulator_after),
+        ),
+        _ => (
+            sub(next.accumulator_before, current.accumulator_after),
+            sub(next.state_before, current.state_after),
+        ),
+    }
 }
 
 fn absorb_radix_range<F: Radix2Field, const L: usize>(

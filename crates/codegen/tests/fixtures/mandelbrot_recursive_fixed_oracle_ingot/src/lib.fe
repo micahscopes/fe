@@ -64,8 +64,13 @@ use mandelbrot_proof_fixed_air_core::{
     RangeNode,
     SparseTaskRow,
     SparseTransitionTask,
+    evaluate_sparse_carry_row,
     evaluate_sparse_radix_row,
     evaluate_transition_witness_constraints,
+    sparse_carry_initial_residuals,
+    sparse_carry_link_residuals,
+    sparse_carry_row_from_witness,
+    sparse_carry_task_count,
     sparse_radix_initial_residuals,
     sparse_radix_link_residuals,
     sparse_radix_row_from_witness,
@@ -411,6 +416,86 @@ pub fn fixed_transition4_sparse_radix_audit(
         if links.0.to_u32() != 0 { failures = failures + 1 }
         if links.1.to_u32() != 0 { failures = failures + 1 }
         previous = row
+        index = index + 1
+    }
+    (failures, constraints, rows)
+}
+
+fn sparse_carry4_row(
+    _ witness: TransitionWitness4,
+    _ local_index: u32,
+) -> SparseTaskRow<BabyBear> {
+    let index = sparse_radix_task_count<4>() + local_index
+    sparse_carry_row_from_witness<BabyBear, 4>(
+        sparse_transition_task_at<4>(index),
+        witness,
+    )
+}
+
+pub fn fixed_transition4_sparse_carry_row(
+    _ prn: u32, _ pr0: u32, _ pr1: u32, _ pr2: u32, _ pr3: u32,
+    _ pin: u32, _ pi0: u32, _ pi1: u32, _ pi2: u32, _ pi3: u32,
+    _ crn: u32, _ cr0: u32, _ cr1: u32, _ cr2: u32, _ cr3: u32,
+    _ cin: u32, _ ci0: u32, _ ci1: u32, _ ci2: u32, _ ci3: u32,
+    _ index: u32,
+) -> (u32, u32, u32, u32, u32, u32) {
+    let (_point, _current, witness) = transition4(
+        prn, [pr0, pr1, pr2, pr3], pin, [pi0, pi1, pi2, pi3],
+        crn, [cr0, cr1, cr2, cr3], cin, [ci0, ci1, ci2, ci3],
+    )
+    let row = sparse_carry4_row(witness, index)
+    (
+        row.value.to_u32(),
+        row.auxiliary.to_u32(),
+        row.accumulator_before.to_u32(),
+        row.accumulator_after.to_u32(),
+        row.state_before.to_u32(),
+        row.state_after.to_u32(),
+    )
+}
+
+pub fn fixed_transition4_sparse_carry_audit(
+    _ prn: u32, _ pr0: u32, _ pr1: u32, _ pr2: u32, _ pr3: u32,
+    _ pin: u32, _ pi0: u32, _ pi1: u32, _ pi2: u32, _ pi3: u32,
+    _ crn: u32, _ cr0: u32, _ cr1: u32, _ cr2: u32, _ cr3: u32,
+    _ cin: u32, _ ci0: u32, _ ci1: u32, _ ci2: u32, _ ci3: u32,
+    _ challenge: u32,
+    _ mutation_index: u32,
+    _ mutation_lane: u32,
+) -> (u32, u32, u32) {
+    let (_point, _current, witness) = transition4(
+        prn, [pr0, pr1, pr2, pr3], pin, [pi0, pi1, pi2, pi3],
+        crn, [cr0, cr1, cr2, cr3], cin, [ci0, ci1, ci2, ci3],
+    )
+    let challenge = BabyBear::from_u32(challenge)
+    let rows = sparse_carry_task_count<4>()
+    let offset = sparse_radix_task_count<4>()
+    let mut failures: u32 = 0
+    let mut constraints: u32 = 0
+    let mut previous = sparse_carry4_row(witness, 0)
+    let mut previous_task = sparse_transition_task_at<4>(offset)
+    let mut index: u32 = 0
+    while index < rows {
+        let task = sparse_transition_task_at<4>(offset + index)
+        let mut row = sparse_carry4_row(witness, index)
+        if index == mutation_index {
+            row = mutate_sparse_row(row, mutation_lane)
+        }
+        let evaluated = evaluate_sparse_carry_row<BabyBear, 4>(challenge, task, row)
+        constraints = constraints + evaluated.constraints
+        if !evaluated.valid || evaluated.folded.to_u32() != 0 {
+            failures = failures + 1
+        }
+        let links = if index == 0 {
+            sparse_carry_initial_residuals(row)
+        } else {
+            sparse_carry_link_residuals(previous_task, previous, task, row)
+        }
+        constraints = constraints + 2
+        if links.0.to_u32() != 0 { failures = failures + 1 }
+        if links.1.to_u32() != 0 { failures = failures + 1 }
+        previous = row
+        previous_task = task
         index = index + 1
     }
     (failures, constraints, rows)

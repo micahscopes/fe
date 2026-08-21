@@ -600,6 +600,43 @@ fn expected_sparse_radix_rows(point: &ComplexFx, current: &ComplexFx) -> Vec<[u3
     rows
 }
 
+fn expected_sparse_carry_rows(current: &ComplexFx) -> Vec<[u32; 6]> {
+    let products = [
+        expected_product_witness_words(&current.real, &current.real),
+        expected_product_witness_words(&current.imaginary, &current.imaginary),
+        expected_product_witness_words(&current.real, &current.imaginary),
+    ];
+    let bound = LIMBS as u32 * (LIMB_BASE - 1);
+    let mut rows = Vec::new();
+    for product in products {
+        let mut carries: Vec<u32> = Vec::with_capacity(LIMBS * 2);
+        carries.extend(product[1 + LIMBS..1 + 2 * LIMBS].iter().copied());
+        carries.extend(product[1 + 3 * LIMBS..1 + 4 * LIMBS].iter().copied());
+        for carry in carries {
+            let mut reconstructed = 0u32;
+            for bit_index in 0..18u32 {
+                let bit = (carry >> bit_index) & 1u32;
+                let before = reconstructed;
+                reconstructed += bit << bit_index;
+                rows.push([bit, 0, before, reconstructed, 0, 0]);
+            }
+            assert_eq!(reconstructed, carry);
+            let slack = bound - carry;
+            reconstructed = 0;
+            for bit_index in 0..18u32 {
+                let bit = (slack >> bit_index) & 1u32;
+                let before = reconstructed;
+                reconstructed += bit << bit_index;
+                rows.push([bit, 0, before, reconstructed, carry, carry]);
+            }
+            assert_eq!(reconstructed, slack);
+            rows.push([carry, 0, slack, 0, carry, 0]);
+        }
+    }
+    assert_eq!(rows.len(), 3 * LIMBS * 2 * 37);
+    rows
+}
+
 fn complex_words(value: &ComplexFx) -> Vec<u32> {
     let mut words = fixed_words(&value.real);
     words.extend(fixed_words(&value.imaginary));
@@ -1425,6 +1462,60 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                 );
                 assert_eq!(audited[1], expected_constraints);
                 assert_eq!(audited[2], expected_rows.len() as u32);
+            }
+
+            let expected_carry_rows = expected_sparse_carry_rows(current);
+            for (index, expected) in expected_carry_rows.iter().enumerate() {
+                let mut row_arguments = arguments.clone();
+                row_arguments.push(index as u32);
+                assert_eq!(
+                    call(
+                        &mut store,
+                        &instance,
+                        "fixed_transition4_sparse_carry_row",
+                        &row_arguments,
+                        6,
+                    ),
+                    *expected,
+                    "independently reconstructed sparse carry row {index}",
+                );
+            }
+            let expected_carry_constraints = 1_122 * LIMBS as u32;
+            for challenge in [3u32, 7, 31] {
+                let mut audit_arguments = arguments.clone();
+                audit_arguments.extend([challenge, u32::MAX, 0]);
+                assert_eq!(
+                    call(
+                        &mut store,
+                        &instance,
+                        "fixed_transition4_sparse_carry_audit",
+                        &audit_arguments,
+                        3,
+                    ),
+                    [
+                        0,
+                        expected_carry_constraints,
+                        expected_carry_rows.len() as u32,
+                    ],
+                    "clean sparse carry audit, challenge {challenge}",
+                );
+            }
+            for (row, lane) in [(0u32, 1u32), (0, 3), (0, 4), (0, 5), (0, 6), (36, 2)] {
+                let mut audit_arguments = arguments.clone();
+                audit_arguments.extend([7, row, lane]);
+                let audited = call(
+                    &mut store,
+                    &instance,
+                    "fixed_transition4_sparse_carry_audit",
+                    &audit_arguments,
+                    3,
+                );
+                assert_ne!(
+                    audited[0], 0,
+                    "sparse carry row {row} lane {lane} mutation must fail",
+                );
+                assert_eq!(audited[1], expected_carry_constraints);
+                assert_eq!(audited[2], expected_carry_rows.len() as u32);
             }
         }
         for challenge in [3u32, 7, 31] {
