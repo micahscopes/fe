@@ -48,14 +48,8 @@ fn expected_sparse_transition_tasks(limbs: u32) -> Vec<[u32; 5]> {
             for bit in 0..13u32 {
                 tasks.push([0, range, limb, bit, 0]);
             }
-        }
-    }
-    for range in 0..31u32 {
-        for limb in 0..limbs {
             tasks.push([1, range, limb, 0, 0]);
         }
-    }
-    for range in 0..31u32 {
         tasks.push([2, range, 0, 0, 0]);
     }
     for product in 0..3u32 {
@@ -65,27 +59,21 @@ fn expected_sparse_transition_tasks(limbs: u32) -> Vec<[u32; 5]> {
                     tasks.push([3, product, coefficient, slack, bit]);
                 }
             }
-        }
-    }
-    for product in 0..3u32 {
-        for coefficient in 0..2 * limbs {
             tasks.push([4, product, coefficient, 0, 0]);
         }
     }
     for product in 0..3u32 {
-        for coefficient in 0..2 * limbs - 1 {
+        for coefficient in 0..2 * limbs {
             let count = if coefficient < limbs {
                 coefficient + 1
-            } else {
+            } else if coefficient < 2 * limbs - 1 {
                 2 * limbs - 1 - coefficient
+            } else {
+                0
             };
             for term in 0..count {
                 tasks.push([5, product, coefficient, term, 0]);
             }
-        }
-    }
-    for product in 0..3u32 {
-        for coefficient in 0..2 * limbs {
             tasks.push([6, product, coefficient, 0, 0]);
         }
     }
@@ -101,14 +89,10 @@ fn expected_sparse_transition_tasks(limbs: u32) -> Vec<[u32; 5]> {
         for limb in 0..limbs {
             tasks.push([9, linear, limb, 0, 0]);
         }
-    }
-    for linear in 0..4u32 {
         tasks.push([10, linear, 0, 0, 0]);
     }
     for coordinate in 0..2u32 {
         tasks.push([11, coordinate, 0, 0, 0]);
-    }
-    for coordinate in 0..2u32 {
         for limb in 0..limbs {
             tasks.push([12, coordinate, limb, 0, 0]);
         }

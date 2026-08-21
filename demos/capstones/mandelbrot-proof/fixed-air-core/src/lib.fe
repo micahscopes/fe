@@ -273,24 +273,30 @@ fn range_node_at(_ index: u32) -> RangeNode {
     }
 }
 
-fn sparse_product_term_at<const L: usize>(
+/// Interleave every convolution coefficient with the terms that reduce into
+/// it. This makes the accumulator at the end of one term row directly
+/// available to the coefficient row, without a lookup into a distant phase.
+fn sparse_product_work_at<const L: usize>(
     _ product: ProductNode,
     _ rank: u32,
 ) -> SparseTransitionTask {
     let limbs: u32 = L.downcast_truncate()
-    if rank >= limbs * limbs { return SparseTransitionTask::Invalid }
     let mut coefficient: u32 = 0
     let mut remaining = rank
-    while coefficient < limbs + limbs - 1 {
-        let count = convolution_term_count<L>(coefficient)
-        if remaining < count {
+    while coefficient < limbs + limbs {
+        let terms = convolution_term_count<L>(coefficient)
+        if remaining < terms {
             return SparseTransitionTask::ProductTerm(
                 product,
                 coefficient,
                 remaining,
             )
         }
-        remaining = remaining - count
+        remaining = remaining - terms
+        if remaining == 0 {
+            return SparseTransitionTask::ProductCoefficient(product, coefficient)
+        }
+        remaining = remaining - 1
         coefficient = coefficient + 1
     }
     SparseTransitionTask::Invalid
@@ -308,77 +314,61 @@ pub fn sparse_transition_task_at<const L: usize>(
     let linears = sparse_linear_node_count()
     let mut remaining = index
 
-    let radix_bits = ranges * limbs * 13
-    if remaining < radix_bits {
-        let per_range = limbs * 13
+    let radix_rows = ranges * (limbs * 14 + 1)
+    if remaining < radix_rows {
+        let per_range = limbs * 14 + 1
         let range_index = remaining / per_range
         let local = remaining - range_index * per_range
-        return SparseTransitionTask::RadixBit(
-            range_node_at(range_index),
-            local / 13,
-            local - (local / 13) * 13,
-        )
+        if local < limbs * 14 {
+            let limb = local / 14
+            let within = local - limb * 14
+            if within < 13 {
+                return SparseTransitionTask::RadixBit(
+                    range_node_at(range_index),
+                    limb,
+                    within,
+                )
+            }
+            return SparseTransitionTask::RadixLimb(
+                range_node_at(range_index),
+                limb,
+            )
+        }
+        return SparseTransitionTask::RadixFinish(range_node_at(range_index))
     }
-    remaining = remaining - radix_bits
+    remaining = remaining - radix_rows
 
-    let radix_limbs = ranges * limbs
-    if remaining < radix_limbs {
-        return SparseTransitionTask::RadixLimb(
-            range_node_at(remaining / limbs),
-            remaining - (remaining / limbs) * limbs,
-        )
-    }
-    remaining = remaining - radix_limbs
-    if remaining < ranges {
-        return SparseTransitionTask::RadixFinish(range_node_at(remaining))
-    }
-    remaining = remaining - ranges
-
-    let carry_bits = products * limbs * 2 * 36
-    if remaining < carry_bits {
-        let per_product = limbs * 2 * 36
+    let carry_rows = products * limbs * 2 * 37
+    if remaining < carry_rows {
+        let per_product = limbs * 2 * 37
         let product_index = remaining / per_product
         let local = remaining - product_index * per_product
-        let coefficient = local / 36
-        let within = local - coefficient * 36
-        return SparseTransitionTask::CarryBit(
+        let coefficient = local / 37
+        let within = local - coefficient * 37
+        if within < 36 {
+            return SparseTransitionTask::CarryBit(
+                product_node_at(product_index),
+                coefficient,
+                within >= 18,
+                if within >= 18 { within - 18 } else { within },
+            )
+        }
+        return SparseTransitionTask::CarryFinish(
             product_node_at(product_index),
             coefficient,
-            within >= 18,
-            if within >= 18 { within - 18 } else { within },
         )
     }
-    remaining = remaining - carry_bits
+    remaining = remaining - carry_rows
 
-    let carry_finishes = products * limbs * 2
-    if remaining < carry_finishes {
-        let per_product = limbs * 2
-        return SparseTransitionTask::CarryFinish(
+    let product_rows = products * (limbs * limbs + limbs + limbs)
+    if remaining < product_rows {
+        let per_product = limbs * limbs + limbs + limbs
+        return sparse_product_work_at<L>(
             product_node_at(remaining / per_product),
             remaining - (remaining / per_product) * per_product,
         )
     }
-    remaining = remaining - carry_finishes
-
-    let product_terms = products * limbs * limbs
-    if remaining < product_terms {
-        let per_product = limbs * limbs
-        return sparse_product_term_at<L>(
-            product_node_at(remaining / per_product),
-            remaining - (remaining / per_product) * per_product,
-        )
-    }
-    remaining = remaining - product_terms
-
-    let product_coefficients = products * limbs * 2
-    if remaining < product_coefficients {
-        let per_product = limbs * 2
-        return SparseTransitionTask::ProductCoefficient(
-            product_node_at(remaining / per_product),
-            remaining - (remaining / per_product) * per_product,
-        )
-    }
-    remaining = remaining - product_coefficients
+    remaining = remaining - product_rows
 
     let product_rounds = products * limbs
     if remaining < product_rounds {
@@ -393,27 +383,33 @@ pub fn sparse_transition_task_at<const L: usize>(
     }
     remaining = remaining - products
 
-    let linear_limbs = linears * limbs
-    if remaining < linear_limbs {
-        return SparseTransitionTask::LinearLimb(
-            linear_node_at(remaining / limbs),
-            remaining - (remaining / limbs) * limbs,
-        )
+    let linear_rows = linears * (limbs + 1)
+    if remaining < linear_rows {
+        let per_linear = limbs + 1
+        let linear_index = remaining / per_linear
+        let local = remaining - linear_index * per_linear
+        if local < limbs {
+            return SparseTransitionTask::LinearLimb(
+                linear_node_at(linear_index),
+                local,
+            )
+        }
+        return SparseTransitionTask::LinearFinish(linear_node_at(linear_index))
     }
-    remaining = remaining - linear_limbs
-    if remaining < linears {
-        return SparseTransitionTask::LinearFinish(linear_node_at(remaining))
-    }
-    remaining = remaining - linears
+    remaining = remaining - linear_rows
 
-    if remaining < 2 {
-        return SparseTransitionTask::BoundarySign(coordinate_node_at(remaining))
-    }
-    remaining = remaining - 2
-    if remaining < 2 * limbs {
+    if remaining < 2 * (limbs + 1) {
+        let per_coordinate = limbs + 1
+        let coordinate_index = remaining / per_coordinate
+        let local = remaining - coordinate_index * per_coordinate
+        if local == 0 {
+            return SparseTransitionTask::BoundarySign(
+                coordinate_node_at(coordinate_index),
+            )
+        }
         return SparseTransitionTask::BoundaryLimb(
-            coordinate_node_at(remaining / limbs),
-            remaining - (remaining / limbs) * limbs,
+            coordinate_node_at(coordinate_index),
+            local - 1,
         )
     }
     SparseTransitionTask::TransitionFinish
