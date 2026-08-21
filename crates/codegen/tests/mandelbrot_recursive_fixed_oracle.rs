@@ -1509,6 +1509,83 @@ fn expected_linear_interaction_receipt(
     receipt
 }
 
+fn expected_boundary_interaction_ports(
+    task: [u32; 5],
+    row: [u32; 6],
+    beta: u32,
+    gamma: u32,
+) -> ([u32; 2], u32) {
+    let [kind, first, second, _third, _fourth] = task;
+    let mut ports: [Option<(u32, u32, i32)>; 2] = [None; 2];
+    match kind {
+        1 if matches!(first, 4 | 5 | 22 | 30) => {
+            ports[0] = Some((linear_digit_address(first, second), row[0], 1));
+        }
+        2 if matches!(first, 4 | 5 | 22 | 30) => {
+            ports[0] = Some((linear_sign_address(first), row[1], 1));
+        }
+        11 => {
+            let computed = 22 + 8 * first;
+            let claimed = 4 + first;
+            ports[0] = Some((linear_sign_address(computed), row[0], -1));
+            ports[1] = Some((linear_sign_address(claimed), row[1], -1));
+        }
+        12 => {
+            let computed = 22 + 8 * first;
+            let claimed = 4 + first;
+            ports[0] = Some((linear_digit_address(computed, second), row[0], -1));
+            ports[1] = Some((linear_digit_address(claimed, second), row[1], -1));
+        }
+        _ => {}
+    }
+
+    let mut inverses = [0; 2];
+    let mut delta = 0;
+    for (index, port) in ports.into_iter().enumerate() {
+        if let Some((address, value, coefficient)) = port {
+            let inverse = product_copy_compressed_inverse(address, value, beta, gamma);
+            inverses[index] = inverse;
+            let coefficient = if coefficient < 0 {
+                BABY_BEAR_MODULUS - coefficient.unsigned_abs()
+            } else {
+                coefficient as u32
+            };
+            delta = bb_add(delta, bb_mul(coefficient, inverse));
+        }
+    }
+    (inverses, delta)
+}
+
+fn expected_boundary_interaction_receipt(
+    point: &ComplexFx,
+    current: &ComplexFx,
+    beta: u32,
+    gamma: u32,
+    receipt_challenge: u32,
+) -> u32 {
+    let mut tasks = expected_sparse_transition_tasks(LIMBS as u32);
+    tasks.resize(4_096, [14, 0, 0, 0, 0]);
+    let rows = expected_sparse_rows(point, current);
+    let mut accumulator = 0;
+    let mut receipt = 0;
+    let mut power = 1;
+    for (task, row) in tasks.into_iter().zip(rows) {
+        let (inverses, delta) = expected_boundary_interaction_ports(task, row, beta, gamma);
+        receipt = bb_add(receipt, bb_mul(power, accumulator));
+        power = bb_mul(power, receipt_challenge);
+        for inverse in inverses {
+            receipt = bb_add(receipt, bb_mul(power, inverse));
+            power = bb_mul(power, receipt_challenge);
+        }
+        accumulator = bb_add(accumulator, delta);
+    }
+    assert_eq!(
+        accumulator, 0,
+        "independent boundary interaction must close"
+    );
+    receipt
+}
+
 fn expected_sparse_trace_root(point: &ComplexFx, current: &ComplexFx) -> [u32; 8] {
     let rows = expected_sparse_rows(point, current);
     let task_count = 2_821;
@@ -2809,6 +2886,30 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                     ],
                     "selector-only linear interaction challenges ({beta}, {gamma})",
                 );
+                let mut boundary_arguments = arguments.clone();
+                boundary_arguments.extend([beta, gamma, fold_challenge, receipt_challenge, 0]);
+                assert_eq!(
+                    call(
+                        &mut store,
+                        &instance,
+                        "fixed_transition4_sparse_boundary_interaction_audit",
+                        &boundary_arguments,
+                        4,
+                    ),
+                    [
+                        0,
+                        20_481,
+                        4_096,
+                        expected_boundary_interaction_receipt(
+                            point,
+                            current,
+                            beta,
+                            gamma,
+                            receipt_challenge,
+                        ),
+                    ],
+                    "selector-only boundary interaction challenges ({beta}, {gamma})",
+                );
             }
             for mutation in 1u32..=6 {
                 let mut interaction_arguments = arguments.clone();
@@ -2880,6 +2981,30 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                     );
                 }
                 assert_eq!(audit[1], 69_633);
+                assert_eq!(audit[2], 4_096);
+            }
+            for mutation in 1u32..=6 {
+                let mut interaction_arguments = arguments.clone();
+                interaction_arguments.extend([17, 29, 7, 31, mutation]);
+                let audit = call(
+                    &mut store,
+                    &instance,
+                    "fixed_transition4_sparse_boundary_interaction_audit",
+                    &interaction_arguments,
+                    4,
+                );
+                if mutation == 6 {
+                    assert_eq!(
+                        audit[0], 1,
+                        "the locally valid boundary mutation must fail only at the interaction terminal",
+                    );
+                } else {
+                    assert!(
+                        audit[0] > 0,
+                        "boundary interaction mutation {mutation} must fail",
+                    );
+                }
+                assert_eq!(audit[1], 20_481);
                 assert_eq!(audit[2], 4_096);
             }
 

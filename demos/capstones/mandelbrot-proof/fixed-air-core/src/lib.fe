@@ -316,6 +316,9 @@ pub type SparseRoundInteractionRow<F> = SparseCopyInteractionRow<F, 5>
 /// control values on each finish row.
 pub type SparseLinearInteractionRow<F> = SparseCopyInteractionRow<F, 8>
 
+/// Each boundary row compares one computed value with one claimed value.
+pub type SparseBoundaryInteractionRow<F> = SparseCopyInteractionRow<F, 2>
+
 /// A folded local interaction evaluation plus the accumulator delta produced
 /// by the same constrained ports.
 pub struct SparseInteractionEvaluation<F: Radix2Field> {
@@ -5923,6 +5926,205 @@ where L > 1,
         control, next_control, row,
     )
     let delta = sparse_copy_interaction_delta<F, 8>(
+        ports, interaction.inverses,
+    )
+    let fold = ConstraintFold<F>::new(challenge).absorb(add(
+        interaction.accumulator,
+        delta,
+    ))
+    FixedAirConstraintEvaluation {
+        valid: true,
+        constraints: fold.constraints,
+        folded: fold.value,
+    }
+}
+
+fn sparse_boundary_next_coordinate<F: Radix2Field>(
+    _ control: SparseControlRow<F>,
+) -> F {
+    let major = control.major
+    let roots = mul(
+        mul(major, sub(major, one<F>())),
+        mul(sub(major, natural<F>(2)), sub(major, natural<F>(3))),
+    )
+    mul(
+        control.range_roles.coordinate,
+        mul(
+            roots,
+            mul(
+                sub(natural<F>(21), mul(natural<F>(4), major)),
+                natural<F>(120).radix2_inverse_or_zero(),
+            ),
+        ),
+    )
+}
+
+fn sparse_boundary_interaction_ports<F: Radix2Field, const L: usize>(
+    _ control: SparseControlRow<F>,
+    _ row: SparseTaskRow<F>,
+) -> [SparseCopyPort<F>; 2] {
+    let selectors = control.selectors
+    let roles = control.range_roles
+    let computed = mul(
+        roles.linear_output,
+        sub(
+            one<F>(),
+            sparse_linear_even_node(sparse_linear_output_node(control)),
+        ),
+    )
+    let claimed = sparse_boundary_next_coordinate(control)
+    let source_kind = add(computed, claimed)
+    let digit_source = mul(selectors.radix_limb, source_kind)
+    let sign_source = mul(selectors.radix_finish, source_kind)
+    let limb_consumer = selectors.boundary_limb
+    let sign_consumer = selectors.boundary_sign
+    let consumers = add(limb_consumer, sign_consumer)
+    let computed_rank = add(
+        natural<F>(22), mul(natural<F>(8), control.major),
+    )
+    let claimed_rank = add(natural<F>(4), control.major)
+    let first_port = SparseCopyPort {
+        selector: add(add(digit_source, sign_source), consumers),
+        coefficient: sub(add(digit_source, sign_source), consumers),
+        address: add(
+            add(
+                mul(
+                    digit_source,
+                    sparse_linear_digit_address<F, L>(
+                        control.major, control.minor,
+                    ),
+                ),
+                mul(
+                    sign_source,
+                    sparse_linear_sign_address<F, L>(control.major),
+                ),
+            ),
+            add(
+                mul(
+                    limb_consumer,
+                    sparse_linear_digit_address<F, L>(
+                        computed_rank, control.minor,
+                    ),
+                ),
+                mul(
+                    sign_consumer,
+                    sparse_linear_sign_address<F, L>(computed_rank),
+                ),
+            ),
+        ),
+        value: add(
+            mul(sign_source, row.auxiliary),
+            mul(add(digit_source, consumers), row.value),
+        ),
+    }
+    let second_port = SparseCopyPort {
+        selector: consumers,
+        coefficient: sub(zero<F>(), consumers),
+        address: add(
+            mul(
+                limb_consumer,
+                sparse_linear_digit_address<F, L>(
+                    claimed_rank, control.minor,
+                ),
+            ),
+            mul(
+                sign_consumer,
+                sparse_linear_sign_address<F, L>(claimed_rank),
+            ),
+        ),
+        value: mul(consumers, row.auxiliary),
+    }
+    [first_port, second_port]
+}
+
+pub fn sparse_boundary_interaction_row<F: Radix2Field, const L: usize>(
+    _ challenges: SparseCopyChallenges<F>,
+    _ control: SparseControlRow<F>,
+    _ row: SparseTaskRow<F>,
+    _ accumulator: F,
+) -> SparseBoundaryInteractionRow<F> {
+    let ports = sparse_boundary_interaction_ports<F, L>(control, row)
+    SparseCopyInteractionRow {
+        accumulator: accumulator,
+        inverses: sparse_copy_interaction_inverses<F, 2>(challenges, ports),
+    }
+}
+
+pub fn evaluate_sparse_boundary_interaction_row<
+    F: Radix2Field,
+    const L: usize,
+>(
+    _ challenge: F,
+    _ challenges: SparseCopyChallenges<F>,
+    _ control: SparseControlRow<F>,
+    _ row: SparseTaskRow<F>,
+    _ interaction: SparseBoundaryInteractionRow<F>,
+) -> SparseInteractionEvaluation<F> {
+    let ports = sparse_boundary_interaction_ports<F, L>(control, row)
+    let fold = absorb_sparse_copy_interaction<F, 2>(
+        ConstraintFold<F>::new(challenge),
+        challenges,
+        ports,
+        interaction.inverses,
+    )
+    SparseInteractionEvaluation {
+        valid: true,
+        constraints: fold.constraints,
+        folded: fold.value,
+        delta: sparse_copy_interaction_delta<F, 2>(ports, interaction.inverses),
+    }
+}
+
+pub fn evaluate_sparse_boundary_interaction_initial<F: Radix2Field>(
+    _ challenge: F,
+    _ interaction: SparseBoundaryInteractionRow<F>,
+) -> FixedAirConstraintEvaluation<F> {
+    let fold = ConstraintFold<F>::new(challenge).absorb(interaction.accumulator)
+    FixedAirConstraintEvaluation {
+        valid: true,
+        constraints: fold.constraints,
+        folded: fold.value,
+    }
+}
+
+pub fn evaluate_sparse_boundary_interaction_link<
+    F: Radix2Field,
+    const L: usize,
+>(
+    _ challenge: F,
+    _ current_control: SparseControlRow<F>,
+    _ current: SparseTaskRow<F>,
+    _ current_interaction: SparseBoundaryInteractionRow<F>,
+    _ next_interaction: SparseBoundaryInteractionRow<F>,
+) -> FixedAirConstraintEvaluation<F> {
+    let ports = sparse_boundary_interaction_ports<F, L>(
+        current_control, current,
+    )
+    let delta = sparse_copy_interaction_delta<F, 2>(
+        ports, current_interaction.inverses,
+    )
+    let fold = ConstraintFold<F>::new(challenge).absorb(sub(
+        next_interaction.accumulator,
+        add(current_interaction.accumulator, delta),
+    ))
+    FixedAirConstraintEvaluation {
+        valid: true,
+        constraints: fold.constraints,
+        folded: fold.value,
+    }
+}
+
+pub fn evaluate_sparse_boundary_interaction_terminal<
+    F: Radix2Field,
+    const L: usize,
+>(
+    _ challenge: F,
+    _ control: SparseControlRow<F>,
+    _ row: SparseTaskRow<F>,
+    _ interaction: SparseBoundaryInteractionRow<F>,
+) -> FixedAirConstraintEvaluation<F> {
+    let ports = sparse_boundary_interaction_ports<F, L>(control, row)
+    let delta = sparse_copy_interaction_delta<F, 2>(
         ports, interaction.inverses,
     )
     let fold = ConstraintFold<F>::new(challenge).absorb(add(
