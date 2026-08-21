@@ -882,7 +882,15 @@ Legend:
   trace interpreter must apply the reusable range carrier to every selected
   intermediate, constrain the wider product-carry bound, and authenticate the
   resulting rows in a BabyBear leaf receipt before a recursive parent may rely
-  on the transition.
+  on the transition. Commit `962f8b4c5` closes the wider product-carry bound.
+  Each carry has an 18-bit value decomposition plus an 18-bit slack
+  decomposition satisfying `carry + slack = L * (B - 1)`. Together with the
+  modulus-derived `L <= 30` condition, this keeps both sides of every
+  convolution equation below BabyBear's modulus. The independent gate checks
+  all eight L4 carries and rejects changed carries, value bits, and slack bits;
+  focused nextest passes 1/1 in 54.92 seconds. Instantiating the typed range
+  relations across every transition intermediate and interpreting the same
+  plan over arbitrary field-valued opening rows remain the next leaf-AIR gate.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
   The first arithmetic-plan consolidation is landed at `ba2ded864`: one
