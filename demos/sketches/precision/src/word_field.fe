@@ -10,6 +10,7 @@
 use core::marker::Copy
 use core::num::mul_mod_u256
 use core::ops::{Add, Mul, Neg, Sub}
+use canonical_words::{CanonicalWords, WordSink, WordSource}
 
 const HALF_BITS: u32 = 16
 const HALF_BASE: u32 = 65536
@@ -186,6 +187,26 @@ impl<M: WordPrime31> WordField<M> {
 
     pub fn inverse_or_zero(self) -> Self {
         self.pow_u32(M::modulus() - 2)
+    }
+}
+
+/// Canonical wire values are ordinary field representatives, never the
+/// backend-oriented Montgomery word held at runtime.
+impl<M: WordPrime31> CanonicalWords for WordField<M> {
+    const WORDS: u32 = 1
+
+    fn encode<W: WordSink>(ref self, _ writer: W) -> W {
+        writer.write(self.to_u32())
+    }
+
+    fn decode<R: WordSource>(mut self, _ reader: R) -> R {
+        let next = reader.read()
+        if next.value >= M::modulus() {
+            self = Self::zero()
+            return next.source.reject()
+        }
+        self = Self::from_u32(next.value)
+        next.source
     }
 }
 

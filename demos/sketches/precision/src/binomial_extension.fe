@@ -7,6 +7,7 @@
 
 use core::marker::Copy
 use core::ops::{Add, Mul, Neg, Sub}
+use canonical_words::{CanonicalWords, WordSink, WordSource, encode_canonical_words}
 use super::word_field::{WordField, WordPrime31}
 
 pub trait WordBinomialExtension4: WordPrime31 {
@@ -123,6 +124,18 @@ impl<M: WordBinomialExtension4> BinomialExtension4<M> {
         let odd0 = a1 * inverse0 + w * a3 * inverse1
         let odd1 = a1 * inverse1 + a3 * inverse0
         Self { coefficients: [even0, -odd0, even1, -odd1] }
+    }
+}
+
+impl<M: WordBinomialExtension4> CanonicalWords for BinomialExtension4<M> {
+    const WORDS: u32 = <[WordField<M>; 4] as CanonicalWords>::WORDS
+
+    fn encode<W: WordSink>(ref self, _ writer: W) -> W {
+        encode_canonical_words(ref self.coefficients, writer)
+    }
+
+    fn decode<R: WordSource>(mut self, _ reader: R) -> R {
+        self.coefficients.decode(reader)
     }
 }
 

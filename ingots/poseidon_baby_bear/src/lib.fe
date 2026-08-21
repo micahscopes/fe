@@ -6,6 +6,7 @@
 //! diagonal. No generated constant table is part of the authored source.
 
 use core::num::{IntDowncast, mul_mod_u256}
+use canonical_words::{CanonicalWords, WordSink, WordSource, encode_canonical_words}
 use precision::baby_bear::{BabyBear, BabyBearExt4, BABY_BEAR_MODULUS}
 use precision::word_field::montgomery_word_u32
 use precision::word_field_encoding::PackedFieldBits
@@ -43,6 +44,18 @@ pub trait Poseidon2FieldDomain {
 /// Plonky3-shaped 248-bit digest represented by eight BabyBear elements.
 pub struct Poseidon2Digest { values: [BabyBear; DIGEST_FIELDS] }
 impl core::marker::Copy for Poseidon2Digest {}
+
+impl CanonicalWords for Poseidon2Digest {
+    const WORDS: u32 = <[BabyBear; DIGEST_FIELDS] as CanonicalWords>::WORDS
+
+    fn encode<W: WordSink>(ref self, _ writer: W) -> W {
+        encode_canonical_words(ref self.values, writer)
+    }
+
+    fn decode<R: WordSource>(mut self, _ reader: R) -> R {
+        self.values.decode(reader)
+    }
+}
 
 impl Poseidon2Digest {
     pub fn zero() -> Self { Self { values: [BabyBear::zero(); DIGEST_FIELDS] } }

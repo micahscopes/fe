@@ -266,7 +266,7 @@ impl Derive<CanonicalWords> for CanonicalWordsProvider {
     {
         let mut words = builder.int(0)
         let mut encode = builder.arg_ref("writer")
-        let mut decode = quote(reader) { reader }
+        let mut decode = builder.arg_ref("reader")
         for field in reflect.fields() {
             builder.require<CanonicalWords>(field.ty())
             words = builder.add(words, builder.trait_const(field.ty(), "WORDS"))
@@ -276,13 +276,16 @@ impl Derive<CanonicalWords> for CanonicalWordsProvider {
                 builder.borrow(builder.field_get(builder.self_ref(), field)),
                 encode,
             )
-            decode = quote(reader) { self.${field}.decode(${decode}) }
+            decode = builder.trait_call(
+                field.ty(),
+                "decode",
+                builder.borrow_mut(builder.field_get(builder.self_ref(), field)),
+                decode,
+            )
         }
         builder.emit_const("WORDS", builder.ty<u32>(), words)
         builder.emit_method("encode", encode)
-        builder.emit_method(quote {
-            fn decode<R: WordSource>(mut self, reader: R) -> R { ${decode} }
-        })
+        builder.emit_method("decode", decode)
         builder.finish()
         ev
     }
@@ -303,7 +306,7 @@ impl Derive<CanonicalWordStream> for CanonicalWordStreamProvider {
     {
         let mut words = builder.int(0)
         let mut encode = builder.arg_ref("writer")
-        let mut decode = quote(reader) { reader }
+        let mut decode = builder.arg_ref("reader")
         for field in reflect.fields() {
             builder.require<CanonicalWordStream>(field.ty())
             let field_value = builder.field_get(builder.self_ref(), field)
@@ -321,13 +324,16 @@ impl Derive<CanonicalWordStream> for CanonicalWordStreamProvider {
                 builder.borrow(builder.field_get(builder.self_ref(), field)),
                 encode,
             )
-            decode = quote(reader) { self.${field}.decode_stream(${decode}) }
+            decode = builder.trait_call(
+                field.ty(),
+                "decode_stream",
+                builder.borrow_mut(builder.field_get(builder.self_ref(), field)),
+                decode,
+            )
         }
         builder.emit_method("word_count", words)
         builder.emit_method("encode_stream", encode)
-        builder.emit_method(quote {
-            fn decode_stream<R: WordSource>(mut self, reader: R) -> R { ${decode} }
-        })
+        builder.emit_method("decode_stream", decode)
         builder.finish()
         ev
     }

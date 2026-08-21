@@ -8,6 +8,14 @@
 //! successive levels.
 
 use core::marker::Copy
+use canonical_words::{
+    CanonicalWordStream,
+    WordSink,
+    WordSource,
+    canonical_prefix_word_count,
+    decode_canonical_prefix,
+    encode_canonical_prefix,
+}
 
 /// Pure ordered compression used by binary Merkle constructions.
 pub trait TwoToOneHasher<F: Copy> {
@@ -67,6 +75,65 @@ impl<
     const MAX_LEAVES: usize,
     const MAX_SIBLINGS: usize,
 > Copy for MerkleMultiPath<F, MAX_LEAVES, MAX_SIBLINGS> {}
+
+/// Variable canonical encoding for sparse authentication frontiers. Capacity
+/// remains a compile-time storage fact; only the sorted leaves and siblings
+/// identified by the two checked counts enter the receipt.
+impl<
+    F: Copy + CanonicalWordStream,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+> CanonicalWordStream for MerkleMultiPath<F, MAX_LEAVES, MAX_SIBLINGS> {
+    fn word_count(ref self) -> u32 {
+        if self.leaf_count > MAX_LEAVES.downcast_truncate()
+            || self.sibling_count > MAX_SIBLINGS.downcast_truncate()
+        {
+            return 0
+        }
+        self.valid.word_count()
+            + self.leaf_count.word_count()
+            + canonical_prefix_word_count(ref self.leaf_indices, self.leaf_count)
+            + self.sibling_count.word_count()
+            + canonical_prefix_word_count(ref self.siblings, self.sibling_count)
+    }
+
+    fn encode_stream<W: WordSink>(ref self, _ writer: W) -> W {
+        if self.leaf_count > MAX_LEAVES.downcast_truncate()
+            || self.sibling_count > MAX_SIBLINGS.downcast_truncate()
+        {
+            return writer.reject()
+        }
+        let writer = self.valid.encode_stream(writer)
+        let writer = self.leaf_count.encode_stream(writer)
+        let writer = encode_canonical_prefix(
+            ref self.leaf_indices,
+            self.leaf_count,
+            writer,
+        )
+        let writer = self.sibling_count.encode_stream(writer)
+        encode_canonical_prefix(ref self.siblings, self.sibling_count, writer)
+    }
+
+    fn decode_stream<R: WordSource>(mut self, _ reader: R) -> R {
+        let reader = self.valid.decode_stream(reader)
+        let reader = self.leaf_count.decode_stream(reader)
+        if self.leaf_count > MAX_LEAVES.downcast_truncate() {
+            self.valid = false
+            return reader.reject()
+        }
+        let reader = decode_canonical_prefix(
+            mut self.leaf_indices,
+            self.leaf_count,
+            reader,
+        )
+        let reader = self.sibling_count.decode_stream(reader)
+        if self.sibling_count > MAX_SIBLINGS.downcast_truncate() {
+            self.valid = false
+            return reader.reject()
+        }
+        decode_canonical_prefix(mut self.siblings, self.sibling_count, reader)
+    }
+}
 
 fn invalid_root<F: Copy, H: TwoToOneHasher<F>>() -> MerkleRoot<F> {
     MerkleRoot { valid: false, value: H::zero() }

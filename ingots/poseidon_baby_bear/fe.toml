@@ -3,6 +3,7 @@ name = "poseidon_baby_bear"
 version = "0.1.0"
 
 [dependencies]
+canonical_words = "../canonical_words"
 core = { path = "../core" }
 precision = "../../demos/sketches/precision"
 poseidon_grain = "../poseidon_grain"
