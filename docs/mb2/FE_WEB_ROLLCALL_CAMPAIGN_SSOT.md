@@ -813,6 +813,24 @@ Legend:
   boundary failures. The browser should progressively schedule leaf chunks and
   binary merges through the same Fe task, cancellation, and backpressure spine
   used by rendering.
+  The field-neutral semantic boundary is now landed at `5eb714b91`. The
+  canonical `precision::fixed::Fixed<L>` value stores one sign and an
+  LSB-first `[u32; L]` of bounded 13-bit limbs, normalizes signed zero, and
+  converts in Fe to the existing recursive limb arithmetic. Generic
+  `HighPrecisionEscapeClaim<L>`, `OrbitBoundary<L>`, `OrbitInterval<L>`, and
+  `RecursiveOrbitAccumulator<L>` records define exact post-step orbit chunks.
+  Leaf certification replays `z_(n+1) = z_n^2 + c`; parent merging requires
+  valid children, matching claims, identical shared boundaries, ordered
+  intervals, and overflow-safe leaf counts. Their canonical codecs are
+  reflection-derived from the nominal records. The zero-import Wasm gate
+  `mandelbrot_recursive_fixed_oracle.rs` compares all 37 carrier words against
+  an independent bigint model over directed and randomized inputs, and rejects
+  malformed limbs, signed zero, invalid booleans, truncation, trailing words,
+  changed endpoints, statement mismatch, invalid children, and discontinuous
+  boundaries. Focused nextest passes 1/1. This is the recursive semantic
+  contract, not yet a succinct recursive proof: fixed-size typed boundary
+  digests, multi-limb AIR constraints, BabyBear leaf receipts, and parent proof
+  verification remain open.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
   The first arithmetic-plan consolidation is landed at `ba2ded864`: one
