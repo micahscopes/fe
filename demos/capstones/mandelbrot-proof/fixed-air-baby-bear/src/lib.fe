@@ -3,10 +3,12 @@
 //! This layer commits the exact base rows, canonical padding, and quartic copy
 //! interactions emitted by `mandelbrot_proof_fixed_air_core`. Its production
 //! transcript begins by committing the base LDE, then derives interaction
-//! challenges from that typed root before committing the interaction LDE. It
-//! deliberately does not call the current result an AIR or FRI receipt:
-//! composition, queries, and FRI still have to bind these columns before
-//! sparse authentication becomes a proof.
+//! challenges from that typed root before committing the interaction LDE.
+//! The recursive leaf statement and both roots then derive one composition
+//! challenge and codeword through the shared BabyBear proof vocabulary. It
+//! deliberately does not call the current result a complete FRI receipt:
+//! authenticated public-boundary openings, queries, and FRI still have to bind
+//! these columns before sparse authentication becomes a recursive proof.
 
 use canonical_words::{
     CanonicalWordStream,
@@ -22,6 +24,13 @@ use canonical_words::{
     encode_canonical_word_array,
 }
 use mandelbrot_proof_fixed_air::FixedMandelbrotTransitionWitness
+use mandelbrot_proof_baby_bear_transcript::{
+    AirLdeTranscriptDigest,
+    CompositionChallenge,
+    CompositionDigest,
+    composition_challenge,
+    composition_row_commitment,
+}
 use mandelbrot_proof_fixed_air_core::{
     FixedAirConstraintEvaluation,
     SparseBoundaryInteractionRow,
@@ -69,6 +78,7 @@ use mandelbrot_proof_fixed_air_core::{
     write_sparse_round_interaction_row,
 }
 use mandelbrot_proof_recursive::ComplexFixed
+use mandelbrot_proof_recursive_baby_bear::RecursiveCommittedInterval
 use merkle_core::{
     MerkleMultiPath,
     MerkleRoot,
@@ -82,6 +92,7 @@ use merkle_core::{
 use poseidon_baby_bear::{
     Poseidon2Digest,
     Poseidon2FieldDomain,
+    bind as poseidon_bind,
     commit_canonical,
     compress as poseidon_compress,
     squeeze_ext4,
@@ -93,6 +104,7 @@ use precision::polynomial::{
     Radix2Field,
     air_composition_value,
     radix2_field_domain_supported,
+    radix2_log,
     write_radix2_coset_lde,
 }
 use core::ops::Eq
@@ -164,6 +176,18 @@ impl Poseidon2FieldDomain for MandelbrotSparseBaseLdeLeafBabyBearV1 {
 struct MandelbrotSparseInteractionLdeLeafBabyBearV1 {}
 impl Poseidon2FieldDomain for MandelbrotSparseInteractionLdeLeafBabyBearV1 {
     const TAG: u32 = protocol_tag("LD02")
+}
+struct MandelbrotSparseLeafStatementBabyBearV1 {}
+impl Poseidon2FieldDomain for MandelbrotSparseLeafStatementBabyBearV1 {
+    const TAG: u32 = protocol_tag("AS01")
+}
+struct MandelbrotSparseAirRootsBabyBearV1 {}
+impl Poseidon2FieldDomain for MandelbrotSparseAirRootsBabyBearV1 {
+    const TAG: u32 = protocol_tag("AT01")
+}
+struct MandelbrotSparseAirTranscriptBabyBearV1 {}
+impl Poseidon2FieldDomain for MandelbrotSparseAirTranscriptBabyBearV1 {
+    const TAG: u32 = protocol_tag("AT02")
 }
 struct MandelbrotSparseLdeProductBetaBabyBearV1 {}
 impl Poseidon2FieldDomain for MandelbrotSparseLdeProductBetaBabyBearV1 {
@@ -463,6 +487,53 @@ impl<
     const LDE: usize,
 > core::marker::Copy for SparseInteractionLdeDigest<L, TRACE, LDE> {}
 derive CanonicalWords for SparseInteractionLdeDigest<L, TRACE, LDE> using CanonicalWordsProvider
+
+/// Recursive-leaf statement plus the exact production LDE roots it challenges.
+/// The nested generic transcript is the established BabyBear input consumed by
+/// composition and FRI, while this wrapper retains enough nominal evidence to
+/// prevent swapping either sparse commitment at the application boundary.
+pub struct SparseAirLdeTranscriptDigest<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+> {
+    pub valid: bool,
+    pub statement: RecursiveCommittedInterval<L>,
+    pub base: SparseBaseLdeDigest<L, TRACE, LDE>,
+    pub interaction: SparseInteractionLdeDigest<L, TRACE, LDE>,
+    pub transcript: AirLdeTranscriptDigest,
+}
+impl<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+> core::marker::Copy for SparseAirLdeTranscriptDigest<L, TRACE, LDE> {}
+
+/// One full quartic composition codeword. The values use the same canonical
+/// BabyBear composition commitment and FRI interpreters as the smaller proof
+/// protocol; only their sparse-AIR producer is new.
+pub struct SparseCompositionAirCodeword<const N: usize> {
+    pub valid: bool,
+    pub values: [BabyBearExt4; N],
+}
+impl<const N: usize> core::marker::Copy for SparseCompositionAirCodeword<N> {}
+
+/// A composition root branded by the exact statement and pair of sparse LDE
+/// roots from which its codeword was generated.
+pub struct SparseCompositionLdeDigest<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+> {
+    pub valid: bool,
+    pub air: SparseAirLdeTranscriptDigest<L, TRACE, LDE>,
+    pub value: CompositionDigest,
+}
+impl<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+> core::marker::Copy for SparseCompositionLdeDigest<L, TRACE, LDE> {}
 
 /// Typed extension-field view of one pair of base-field LDE rows. The view is
 /// reconstructed through the same reflection-derived codecs that define the
@@ -1283,6 +1354,264 @@ where
         valid: root.valid,
         base: base,
         value: root.value,
+    }
+}
+
+fn invalid_sparse_air_lde_transcript<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>(
+    _ statement: RecursiveCommittedInterval<L>,
+    _ base: SparseBaseLdeDigest<L, TRACE, LDE>,
+    _ interaction: SparseInteractionLdeDigest<L, TRACE, LDE>,
+) -> SparseAirLdeTranscriptDigest<L, TRACE, LDE> {
+    SparseAirLdeTranscriptDigest {
+        valid: false,
+        statement: statement,
+        base: base,
+        interaction: interaction,
+        transcript: AirLdeTranscriptDigest {
+            valid: false,
+            value: Poseidon2Digest::zero(),
+        },
+    }
+}
+
+/// Bind the exact one-step recursive statement and both production LDE roots
+/// into the shared BabyBear AIR transcript. The interaction root must retain
+/// this exact base root; matching only its shape is insufficient.
+pub fn bind_sparse_air_lde_transcript<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>(
+    _ statement: RecursiveCommittedInterval<L>,
+    _ base: SparseBaseLdeDigest<L, TRACE, LDE>,
+    _ interaction: SparseInteractionLdeDigest<L, TRACE, LDE>,
+) -> SparseAirLdeTranscriptDigest<L, TRACE, LDE> {
+    let statement_valid = statement.valid
+        && statement.leaves == 1
+        && statement.statement.valid
+        && statement.start.valid
+        && statement.end.valid
+        && statement.start_iteration < statement.end_iteration
+        && statement.end_iteration - statement.start_iteration == 1
+    let roots_valid = base.valid
+        && interaction.valid
+        && interaction.base.valid
+        && interaction.base.value.equals(base.value)
+    if !statement_valid || !roots_valid {
+        return invalid_sparse_air_lde_transcript(statement, base, interaction)
+    }
+    let statement_commitment = commit_canonical<
+        MandelbrotSparseLeafStatementBabyBearV1,
+        RecursiveCommittedInterval<L>,
+    >(ref statement)
+    if !statement_commitment.is_valid() {
+        return invalid_sparse_air_lde_transcript(statement, base, interaction)
+    }
+    let roots = poseidon_bind<MandelbrotSparseAirRootsBabyBearV1>(
+        base.value,
+        interaction.value,
+    )
+    let transcript = AirLdeTranscriptDigest {
+        valid: true,
+        value: poseidon_bind<MandelbrotSparseAirTranscriptBabyBearV1>(
+            statement_commitment.digest(),
+            roots,
+        ),
+    }
+    SparseAirLdeTranscriptDigest {
+        valid: true,
+        statement: statement,
+        base: base,
+        interaction: interaction,
+        transcript: transcript,
+    }
+}
+
+/// Evaluate the sparse constraint numerators using only interaction challenges
+/// derived from this exact base-LDE root. This keeps the semantic audit entry
+/// point from accepting a raw checkpoint challenge set.
+pub fn sparse_lde_constraint_numerators_opened<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>(
+    _ challenge: BabyBearExt4,
+    _ base: SparseBaseLdeDigest<L, TRACE, LDE>,
+    _ row: ref SparseOpenedAirRow,
+    _ next: ref SparseOpenedAirRow,
+) -> AirConstraintNumerators<BabyBearExt4>
+where L > 1, TRACE > 0, LDE > TRACE,
+{
+    let zero = BabyBearExt4::zero()
+    if !base.valid {
+        return AirConstraintNumerators {
+            all_rows: zero,
+            pair_rows: zero,
+            first_row: zero,
+            last_row: zero,
+        }
+    }
+    sparse_constraint_numerators_opened<L>(
+        challenge,
+        sparse_lde_interaction_challenges(base).value,
+        row,
+        next,
+    )
+}
+
+/// Produce the full sparse composition codeword from the exact committed
+/// inputs. Roots and all Fiat-Shamir values are recomputed internally, so a
+/// caller cannot pair one codeword with challenges from another commitment.
+pub fn write_sparse_composition_air_codeword<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>(
+    _ statement: RecursiveCommittedInterval<L>,
+    _ base_codeword: ref SparseBaseAirLdeCodeword<LDE>,
+    _ interaction_codeword: ref SparseInteractionAirLdeCodeword<LDE>,
+    _ shift: BabyBear,
+    _ output: mut SparseCompositionAirCodeword<LDE>,
+) -> SparseAirLdeTranscriptDigest<L, TRACE, LDE>
+where
+    L > 1,
+    TRACE > 0,
+    TRACE > 1,
+    { (TRACE & (TRACE - 1)) == 0 },
+    { radix2_field_domain_supported<TRACE, BabyBear>() },
+    LDE > 0,
+    LDE > 1,
+    LDE > TRACE,
+    LDE <= MAX_SPARSE_LDE_LENGTH,
+    LDE <= 2147483648,
+    { (LDE & (LDE - 1)) == 0 },
+    { radix2_field_domain_supported<LDE, BabyBear>() },
+    { (LDE % TRACE) == 0 },
+{
+    output.valid = false
+    let base = sparse_base_lde_root_power_of_two<L, TRACE, LDE>(base_codeword)
+    let interaction = sparse_interaction_lde_root_power_of_two<L, TRACE, LDE>(
+        base,
+        interaction_codeword,
+    )
+    let transcript = bind_sparse_air_lde_transcript(
+        statement,
+        base,
+        interaction,
+    )
+    if !transcript.valid
+        || shift.is_zero()
+        || shift.pow_u32(TRACE.downcast_truncate()).equals(BabyBear::one())
+    {
+        return invalid_sparse_air_lde_transcript(statement, base, interaction)
+    }
+    let challenge: CompositionChallenge = composition_challenge(transcript.transcript)
+    if !challenge.valid {
+        return invalid_sparse_air_lde_transcript(statement, base, interaction)
+    }
+    let interaction_challenges = sparse_lde_interaction_challenges(base).value
+    let root = BabyBear::two_adic_root(radix2_log<LDE>())
+    let stride: usize = LDE / TRACE
+    let mut index: usize = 0
+    while index < LDE {
+        let mut next_index = index + stride
+        if next_index >= LDE { next_index = next_index - LDE }
+        let row = sparse_opened_air_row(
+            base_codeword.values[index],
+            interaction_codeword.values[index],
+        )
+        let next = sparse_opened_air_row(
+            base_codeword.values[next_index],
+            interaction_codeword.values[next_index],
+        )
+        let point = BabyBearExt4::from_base(
+            shift * root.pow_u32(index.downcast_truncate()),
+        )
+        let value = evaluate_sparse_composition_opened<L, TRACE>(
+            point,
+            challenge.value,
+            interaction_challenges,
+            ref row,
+            ref next,
+        )
+        if !value.valid {
+            return invalid_sparse_air_lde_transcript(statement, base, interaction)
+        }
+        output.values[index] = value.value
+        index = index + 1
+    }
+    output.valid = true
+    transcript
+}
+
+pub fn sparse_composition_lde_root_power_of_two<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>(
+    _ air: SparseAirLdeTranscriptDigest<L, TRACE, LDE>,
+    _ codeword: ref SparseCompositionAirCodeword<LDE>,
+) -> SparseCompositionLdeDigest<L, TRACE, LDE>
+where
+    L > 1,
+    TRACE > 0,
+    TRACE > 1,
+    LDE > 0,
+    LDE > 1,
+    LDE > TRACE,
+    LDE <= MAX_SPARSE_LDE_LENGTH,
+    { (LDE & (LDE - 1)) == 0 },
+{
+    let invalid = CompositionDigest {
+        valid: false,
+        value: Poseidon2Digest::zero(),
+    }
+    if !air.valid || !codeword.valid {
+        return SparseCompositionLdeDigest {
+            valid: false,
+            air: air,
+            value: invalid,
+        }
+    }
+    let mut frontier = empty_frontier<
+        Poseidon2Digest,
+        SparseDigestHasher,
+        SPARSE_LDE_FRONTIER_LEVELS,
+    >()
+    let mut index: usize = 0
+    while index < LDE {
+        let leaf = composition_row_commitment(codeword.values[index])
+        if !leaf.valid {
+            return SparseCompositionLdeDigest {
+                valid: false,
+                air: air,
+                value: invalid,
+            }
+        }
+        frontier = push_frontier<
+            Poseidon2Digest,
+            SparseDigestHasher,
+            SPARSE_LDE_FRONTIER_LEVELS,
+        >(frontier, leaf.value)
+        index = index + 1
+    }
+    let committed = complete_frontier_root<
+        Poseidon2Digest,
+        SparseDigestHasher,
+        SPARSE_LDE_FRONTIER_LEVELS,
+    >(frontier)
+    let root = CompositionDigest {
+        valid: committed.valid,
+        value: committed.value,
+    }
+    SparseCompositionLdeDigest {
+        valid: root.valid,
+        air: air,
+        value: root,
     }
 }
 

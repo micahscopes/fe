@@ -21,6 +21,15 @@ use canonical_words::{
     encode_canonical_word_stream,
 }
 use core::BrowserBytes
+pub use mandelbrot_proof_baby_bear_transcript::{
+    AirLdeTranscriptDigest,
+    CompositionChallenge,
+    CompositionDigest,
+    CompositionTranscriptDigest,
+    bind_composition,
+    composition_challenge,
+    composition_row_commitment,
+}
 use mandelbrot_proof_kernel::{
     AUXILIARY_ROW_BITS,
     ENCODED_PROOF_ROW_WIDTHS,
@@ -113,13 +122,10 @@ struct MandelbrotPublicBabyBearV1 {}
 struct MandelbrotAuxiliaryBabyBearV1 {}
 struct MandelbrotStatementBabyBearV1 {}
 struct MandelbrotProofTranscriptBabyBearV1 {}
-struct MandelbrotCompositionChallengeBabyBearV1 {}
 struct MandelbrotMainLdeRowBabyBearV1 {}
 struct MandelbrotAuxiliaryLdeRowBabyBearV1 {}
-struct MandelbrotCompositionRowBabyBearV1 {}
 struct MandelbrotMainLdeTranscriptBabyBearV1 {}
 struct MandelbrotAuxiliaryLdeTranscriptBabyBearV1 {}
-struct MandelbrotCompositionTranscriptBabyBearV1 {}
 struct MandelbrotFriFoldBabyBear<const ROUND: u32> {}
 struct MandelbrotFriLayerRowBabyBear<const ROUND: u32> {}
 struct MandelbrotFriLayerTranscriptBabyBear<const ROUND: u32> {}
@@ -145,10 +151,6 @@ impl Poseidon2FieldDomain for MandelbrotProofTranscriptBabyBearV1 {
     const TAG: u32 = protocol_tag("BT01")
 }
 
-impl Poseidon2FieldDomain for MandelbrotCompositionChallengeBabyBearV1 {
-    const TAG: u32 = protocol_tag("BC01")
-}
-
 impl Poseidon2FieldDomain for MandelbrotMainLdeRowBabyBearV1 {
     const TAG: u32 = protocol_tag("BL01")
 }
@@ -157,20 +159,12 @@ impl Poseidon2FieldDomain for MandelbrotAuxiliaryLdeRowBabyBearV1 {
     const TAG: u32 = protocol_tag("BY01")
 }
 
-impl Poseidon2FieldDomain for MandelbrotCompositionRowBabyBearV1 {
-    const TAG: u32 = protocol_tag("BC02")
-}
-
 impl Poseidon2FieldDomain for MandelbrotMainLdeTranscriptBabyBearV1 {
     const TAG: u32 = protocol_tag("BL02")
 }
 
 impl Poseidon2FieldDomain for MandelbrotAuxiliaryLdeTranscriptBabyBearV1 {
     const TAG: u32 = protocol_tag("BY02")
-}
-
-impl Poseidon2FieldDomain for MandelbrotCompositionTranscriptBabyBearV1 {
-    const TAG: u32 = protocol_tag("BC03")
 }
 
 impl<const ROUND: u32> Poseidon2FieldDomain for MandelbrotFriFoldBabyBear<ROUND> {
@@ -204,9 +198,6 @@ impl core::marker::Copy for StatementDigest {}
 pub struct ProofTranscriptDigest { pub valid: bool, pub value: Poseidon2Digest }
 impl core::marker::Copy for ProofTranscriptDigest {}
 
-pub struct CompositionChallenge { pub valid: bool, pub value: BabyBearExt4 }
-impl core::marker::Copy for CompositionChallenge {}
-
 pub struct MainLdeDigest { pub valid: bool, pub value: Poseidon2Digest }
 impl core::marker::Copy for MainLdeDigest {}
 derive CanonicalWords for MainLdeDigest using CanonicalWordsProvider
@@ -215,18 +206,8 @@ pub struct AuxiliaryLdeDigest { pub valid: bool, pub value: Poseidon2Digest }
 impl core::marker::Copy for AuxiliaryLdeDigest {}
 derive CanonicalWords for AuxiliaryLdeDigest using CanonicalWordsProvider
 
-pub struct CompositionDigest { pub valid: bool, pub value: Poseidon2Digest }
-impl core::marker::Copy for CompositionDigest {}
-derive CanonicalWords for CompositionDigest using CanonicalWordsProvider
-
 pub struct MainLdeTranscriptDigest { pub valid: bool, pub value: Poseidon2Digest }
 impl core::marker::Copy for MainLdeTranscriptDigest {}
-
-pub struct AirLdeTranscriptDigest { pub valid: bool, pub value: Poseidon2Digest }
-impl core::marker::Copy for AirLdeTranscriptDigest {}
-
-pub struct CompositionTranscriptDigest { pub valid: bool, pub value: Poseidon2Digest }
-impl core::marker::Copy for CompositionTranscriptDigest {}
 
 pub struct FriFoldChallenge<const ROUND: u32> { pub valid: bool, pub value: BabyBearExt4 }
 impl<const ROUND: u32> core::marker::Copy for FriFoldChallenge<ROUND> {}
@@ -2822,22 +2803,6 @@ pub fn bind_auxiliary_trace(
     }
 }
 
-/// Derive a soundness challenge in the quartic extension field rather than
-/// silently treating the u32-native base field as the challenge field.
-pub fn composition_challenge(
-    _ transcript: own AirLdeTranscriptDigest,
-) -> CompositionChallenge {
-    if !transcript.valid {
-        return CompositionChallenge { valid: false, value: BabyBearExt4::zero() }
-    }
-    CompositionChallenge {
-        valid: true,
-        value: squeeze_ext4<MandelbrotCompositionChallengeBabyBearV1>(
-            transcript.value,
-        ),
-    }
-}
-
 pub fn main_lde_row_commitment(
     _ values: own [BabyBear; MAIN_LDE_ROW_FIELDS],
 ) -> MainLdeDigest {
@@ -2853,13 +2818,6 @@ pub fn auxiliary_lde_row_commitment(
     AuxiliaryLdeDigest {
         valid: true,
         value: commit_fields<MandelbrotAuxiliaryLdeRowBabyBearV1, AUXILIARY_ROW_BITS>(values),
-    }
-}
-
-pub fn composition_row_commitment(_ value: BabyBearExt4) -> CompositionDigest {
-    CompositionDigest {
-        valid: true,
-        value: commit_ext4_fields<MandelbrotCompositionRowBabyBearV1, 1>([value]),
     }
 }
 
@@ -3847,22 +3805,6 @@ pub fn bind_auxiliary_lde(
         value: poseidon_bind<MandelbrotAuxiliaryLdeTranscriptBabyBearV1>(
             transcript.value,
             auxiliary.value,
-        ),
-    }
-}
-
-pub fn bind_composition(
-    _ transcript: own AirLdeTranscriptDigest,
-    _ composition: own CompositionDigest,
-) -> CompositionTranscriptDigest {
-    if !transcript.valid || !composition.valid {
-        return CompositionTranscriptDigest { valid: false, value: Poseidon2Digest::zero() }
-    }
-    CompositionTranscriptDigest {
-        valid: true,
-        value: poseidon_bind<MandelbrotCompositionTranscriptBabyBearV1>(
-            transcript.value,
-            composition.value,
         ),
     }
 }

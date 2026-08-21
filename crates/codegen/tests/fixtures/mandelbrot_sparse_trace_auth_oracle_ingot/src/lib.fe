@@ -28,9 +28,11 @@ use mandelbrot_proof_fixed_air_baby_bear::{
     SparseInteractionAirFields,
     SparseInteractionAirEvaluationTrace,
     SparseInteractionAirLdeCodeword,
+    SparseInteractionLdeDigest,
     SparseLdeInteractionChallenges,
     SparseInteractionTraceDigest,
     SparseInteractionTraceRow,
+    SparseCompositionAirCodeword,
     SparseTraceDigest,
     SparseTraceAuthentication,
     SPARSE_BASE_AIR_FIELDS,
@@ -44,6 +46,8 @@ use mandelbrot_proof_fixed_air_baby_bear::{
     sparse_interaction_air_fields,
     sparse_interaction_challenges,
     sparse_interaction_lde_root_power_of_two,
+    sparse_composition_lde_root_power_of_two,
+    sparse_lde_constraint_numerators_opened,
     sparse_lde_interaction_challenges,
     sparse_interaction_trace_root_power_of_two,
     sparse_opened_air_row,
@@ -56,13 +60,25 @@ use mandelbrot_proof_fixed_air_baby_bear::{
     write_sparse_interaction_air_rows,
     write_sparse_interaction_air_evaluation_trace,
     write_sparse_interaction_air_lde,
+    write_sparse_composition_air_codeword,
     write_sparse_lde_interaction_air_rows,
     write_sparse_trace_authentication_power_of_two,
     zero_sparse_base_air_row,
     zero_sparse_interaction_accumulators,
     zero_sparse_interaction_trace_row,
 }
-use mandelbrot_proof_recursive::ComplexFixed
+use mandelbrot_proof_baby_bear_transcript::{CompositionDigest, composition_challenge}
+use mandelbrot_proof_recursive::{
+    ComplexFixed,
+    HighPrecisionEscapeClaim,
+    OrbitBoundary,
+    OrbitInterval,
+    complex_has_escaped,
+}
+use mandelbrot_proof_recursive_baby_bear::{
+    RecursiveCommittedInterval,
+    commit_recursive_semantic_leaf,
+}
 use poseidon_baby_bear::Poseidon2Digest
 use precision::baby_bear::{BabyBear, BabyBearExt4}
 use precision::fixed::Fixed
@@ -98,6 +114,23 @@ struct RejectedCosetShift {
 }
 impl core::marker::Copy for RejectedCosetShift {}
 derive CanonicalWords for RejectedCosetShift using CanonicalWordsProvider
+
+/// Complete production-composition audit carrier. The four numerator families
+/// remain visible at every LDE point so the Rust gate can apply all zerofiers
+/// independently before it trusts the committed composition root.
+struct SparseProductionComposition4 {
+    pub valid: bool,
+    pub statement: RecursiveCommittedInterval<4>,
+    pub base: SparseBaseLdeDigest<4, 4, 16>,
+    pub interaction: SparseInteractionLdeDigest<4, 4, 16>,
+    pub transcript: Poseidon2Digest,
+    pub challenge: BabyBearExt4,
+    pub numerators: [[BabyBearExt4; 4]; 16],
+    pub composition: [BabyBearExt4; 16],
+    pub root: CompositionDigest,
+}
+impl core::marker::Copy for SparseProductionComposition4 {}
+derive CanonicalWords for SparseProductionComposition4 using CanonicalWordsProvider
 
 fn fixed4(_ negative: u32, _ limbs: [u32; 4]) -> Fixed<4> {
     Fixed { negative: negative == 1, limbs: limbs }
@@ -389,7 +422,45 @@ fn write_sparse_base_lde4(
             ref evaluations,
             BabyBear::from_u32(7),
             mut output,
-        )
+    )
+}
+
+fn write_sparse_interaction_lde4(
+    _ point: ComplexFixed<4>,
+    _ current: ComplexFixed<4>,
+    _ next: ComplexFixed<4>,
+    _ witness: TransitionWitness4,
+    _ base: SparseBaseLdeDigest<4, 4, 16>,
+    _ output: mut SparseInteractionAirLdeCodeword<16>,
+) -> bool {
+    let challenges = sparse_lde_interaction_challenges(base)
+    let mut rows = [zero_sparse_interaction_trace_row(); 4]
+    let mut accumulators = zero_sparse_interaction_accumulators()
+    if !write_sparse_lde_interaction_air_rows<4, 4, 16, 4>(
+        point,
+        current,
+        next,
+        witness,
+        challenges,
+        0,
+        mut accumulators,
+        mut rows,
+    ) {
+        return false
+    }
+    let mut evaluations: SparseInteractionAirEvaluationTrace<4> =
+        SparseInteractionAirEvaluationTrace {
+            valid: false,
+            values: [[BabyBear::zero(); SPARSE_INTERACTION_AIR_FIELDS]; 4],
+        }
+    write_sparse_interaction_air_evaluation_trace<4>(
+        ref rows,
+        mut evaluations,
+    ) && write_sparse_interaction_air_lde<4, 16>(
+        ref evaluations,
+        BabyBear::from_u32(7),
+        mut output,
+    )
 }
 
 /// Commit the independently placeable base LDE before constructing any
@@ -454,41 +525,13 @@ pub fn fixed_transition4_sparse_interaction_lde_root(
         return [0; 17]
     }
     let base = sparse_base_lde_root_power_of_two<4, 4, 16>(ref base_lde)
-    let challenges = sparse_lde_interaction_challenges(base)
-    let mut rows = [zero_sparse_interaction_trace_row(); 4]
-    let mut accumulators = zero_sparse_interaction_accumulators()
-    if !write_sparse_lde_interaction_air_rows<4, 4, 16, 4>(
-        point,
-        current,
-        next,
-        witness,
-        challenges,
-        0,
-        mut accumulators,
-        mut rows,
-    ) {
-        return [0; 17]
-    }
-    let mut evaluations: SparseInteractionAirEvaluationTrace<4> =
-        SparseInteractionAirEvaluationTrace {
-            valid: false,
-            values: [[BabyBear::zero(); SPARSE_INTERACTION_AIR_FIELDS]; 4],
-        }
-    if !write_sparse_interaction_air_evaluation_trace<4>(
-        ref rows,
-        mut evaluations,
-    ) {
-        return [0; 17]
-    }
     let mut lde: SparseInteractionAirLdeCodeword<16> =
         SparseInteractionAirLdeCodeword {
             valid: false,
             values: [[BabyBear::zero(); SPARSE_INTERACTION_AIR_FIELDS]; 16],
         }
-    if !write_sparse_interaction_air_lde<4, 16>(
-        ref evaluations,
-        BabyBear::from_u32(7),
-        mut lde,
+    if !write_sparse_interaction_lde4(
+        point, current, next, witness, base, mut lde,
     ) {
         return [0; 17]
     }
@@ -510,6 +553,145 @@ pub fn fixed_transition4_sparse_interaction_lde_root(
         index = index + 1
     }
     output
+}
+
+fn recursive_leaf_statement4(
+    _ point: ComplexFixed<4>,
+    _ current: ComplexFixed<4>,
+    _ next: ComplexFixed<4>,
+    _ bound: u32,
+) -> RecursiveCommittedInterval<4> {
+    let claim = HighPrecisionEscapeClaim { point: point, bound: bound }
+    let start = OrbitBoundary {
+        iteration: 3,
+        z: current,
+        escaped: complex_has_escaped(current),
+    }
+    let end = OrbitBoundary {
+        iteration: 4,
+        z: next,
+        escaped: complex_has_escaped(next),
+    }
+    commit_recursive_semantic_leaf(OrbitInterval {
+        claim: claim,
+        start: start,
+        end: end,
+    })
+}
+
+/// Build the production sparse composition transcript and codeword. Mutation
+/// one changes a committed base field before interaction challenges exist;
+/// mutation two changes an interaction LDE field; mutation three changes the
+/// otherwise valid recursive statement while preserving the witness columns.
+pub fn fixed_transition4_sparse_production_composition_encoded(
+    _ prn: u32, _ pr0: u32, _ pr1: u32, _ pr2: u32, _ pr3: u32,
+    _ pin: u32, _ pi0: u32, _ pi1: u32, _ pi2: u32, _ pi3: u32,
+    _ crn: u32, _ cr0: u32, _ cr1: u32, _ cr2: u32, _ cr3: u32,
+    _ cin: u32, _ ci0: u32, _ ci1: u32, _ ci2: u32, _ ci3: u32,
+    _ mutation: u32,
+) -> BrowserBytes {
+    if mutation > 3 { return BrowserBytes { ptr: 0, len: 0 } }
+    let (point, current, witness) = transition4(
+        prn, [pr0, pr1, pr2, pr3], pin, [pi0, pi1, pi2, pi3],
+        crn, [cr0, cr1, cr2, cr3], cin, [ci0, ci1, ci2, ci3],
+    )
+    let next = fixed_mandelbrot_transition_output(witness)
+    let mut base_lde: SparseBaseAirLdeCodeword<16> = SparseBaseAirLdeCodeword {
+        valid: false,
+        values: [[BabyBear::zero(); SPARSE_BASE_AIR_FIELDS]; 16],
+    }
+    if !write_sparse_base_lde4(
+        point, current, next, witness, mut base_lde,
+    ) {
+        return BrowserBytes { ptr: 0, len: 0 }
+    }
+    if mutation == 1 {
+        base_lde.values[0][35] = base_lde.values[0][35] + BabyBear::one()
+    }
+    let base = sparse_base_lde_root_power_of_two<4, 4, 16>(ref base_lde)
+    let mut interaction_lde: SparseInteractionAirLdeCodeword<16> =
+        SparseInteractionAirLdeCodeword {
+            valid: false,
+            values: [[BabyBear::zero(); SPARSE_INTERACTION_AIR_FIELDS]; 16],
+        }
+    if !write_sparse_interaction_lde4(
+        point, current, next, witness, base, mut interaction_lde,
+    ) {
+        return BrowserBytes { ptr: 0, len: 0 }
+    }
+    if mutation == 2 {
+        interaction_lde.values[0][0] =
+            interaction_lde.values[0][0] + BabyBear::one()
+    }
+
+    let statement = recursive_leaf_statement4(
+        point,
+        current,
+        next,
+        if mutation == 3 { 9 } else { 8 },
+    )
+    let mut codeword = SparseCompositionAirCodeword {
+        valid: false,
+        values: [BabyBearExt4::zero(); 16],
+    }
+    let air = write_sparse_composition_air_codeword<4, 4, 16>(
+        statement,
+        ref base_lde,
+        ref interaction_lde,
+        BabyBear::from_u32(7),
+        mut codeword,
+    )
+    let root = sparse_composition_lde_root_power_of_two<4, 4, 16>(
+        air,
+        ref codeword,
+    )
+    let challenge = composition_challenge(air.transcript)
+    if !air.valid || !root.valid || !challenge.valid {
+        return BrowserBytes { ptr: 0, len: 0 }
+    }
+
+    let mut numerators = [[BabyBearExt4::zero(); 4]; 16]
+    let mut index: usize = 0
+    while index < 16 {
+        let next_index: usize = (index + 4) & 15
+        let row = sparse_opened_air_row(
+            base_lde.values[index],
+            interaction_lde.values[index],
+        )
+        let next_row = sparse_opened_air_row(
+            base_lde.values[next_index],
+            interaction_lde.values[next_index],
+        )
+        let values = sparse_lde_constraint_numerators_opened<4, 4, 16>(
+            challenge.value,
+            air.base,
+            ref row,
+            ref next_row,
+        )
+        numerators[index] = [
+            values.all_rows,
+            values.pair_rows,
+            values.first_row,
+            values.last_row,
+        ]
+        index = index + 1
+    }
+    let audit = SparseProductionComposition4 {
+        valid: true,
+        statement: statement,
+        base: air.base,
+        interaction: air.interaction,
+        transcript: air.transcript.value,
+        challenge: challenge.value,
+        numerators: numerators,
+        composition: codeword.values,
+        root: root.value,
+    }
+    let words = canonical_word_stream_count(ref audit)
+    encode_canonical_word_stream(
+        ref audit,
+        BrowserWordWriter::allocate(words),
+    ).finish()
 }
 
 /// Exercise typed LDE-row reconstruction and the complete sparse composition

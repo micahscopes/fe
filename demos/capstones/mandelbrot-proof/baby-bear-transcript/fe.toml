@@ -1,13 +1,9 @@
 [ingot]
-name = "mandelbrot_proof_baby_bear"
+name = "mandelbrot_proof_baby_bear_transcript"
 version = "0.1.0"
 
 [dependencies]
 canonical_words = "../../../../ingots/canonical_words"
 core = "../../../../ingots/core"
-mandelbrot_proof_air_core = "../air-core"
-mandelbrot_proof_baby_bear_transcript = "../baby-bear-transcript"
-mandelbrot_proof_kernel = "../kernel"
-merkle_core = "../../../../ingots/merkle_core"
 poseidon_baby_bear = "../../../../ingots/poseidon_baby_bear"
 precision = "../../../sketches/precision"

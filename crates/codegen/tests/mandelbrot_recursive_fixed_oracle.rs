@@ -2254,6 +2254,31 @@ fn expected_sparse_interaction_lde_root(
     reference_merkle_root(leaves)
 }
 
+fn reference_digest_bind(tag: &[u8; 4], left: [u32; 8], right: [u32; 8]) -> [u32; 8] {
+    let mut fields = Vec::with_capacity(16);
+    fields.extend(left);
+    fields.extend(right);
+    reference_poseidon_digest(tag, &fields)
+}
+
+fn expected_sparse_air_lde_transcript(
+    statement_words: &[u32],
+    base: [u32; 8],
+    interaction: [u32; 8],
+) -> [u32; 8] {
+    let statement = reference_poseidon_digest(b"AS01", statement_words);
+    let roots = reference_digest_bind(b"AT01", base, interaction);
+    reference_digest_bind(b"AT02", statement, roots)
+}
+
+fn expected_sparse_composition_root(values: &[Ext4]) -> [u32; 8] {
+    let leaves = values
+        .iter()
+        .map(|value| reference_poseidon_digest(b"BC02", &value.0))
+        .collect();
+    reference_merkle_root(leaves)
+}
+
 fn expected_committed_words(
     claim: &Claim,
     start: &Boundary,
@@ -4371,6 +4396,162 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
         ),
         [0; 17],
         "unknown interaction LDE mutations must fail closed",
+    );
+
+    let mut production_compositions = Vec::new();
+    for mutation in 0u32..=3 {
+        let mut composition_arguments = arguments[..20].to_vec();
+        composition_arguments.push(mutation);
+        let (_, _, actual) = encoded(
+            &mut store,
+            &instance,
+            memory,
+            "fixed_transition4_sparse_production_composition_encoded",
+            &composition_arguments,
+        );
+        assert_eq!(actual.len(), 400, "production composition carrier width");
+        assert_eq!(actual[0], 1, "production composition must be valid");
+
+        let claim = Claim {
+            point: point.clone(),
+            bound: if mutation == 3 { 9 } else { 8 },
+        };
+        let start = Boundary {
+            iteration: 3,
+            z: current.clone(),
+            escaped: escaped(&current),
+        };
+        let end = advance(&claim, &start);
+        let statement_words = expected_committed_words(&claim, &start, &end, 1);
+        assert_eq!(
+            actual[1..32],
+            statement_words,
+            "recursive leaf statement mutation {mutation}",
+        );
+
+        let base_root = expected_sparse_base_lde_root(&expected_lde, mutation == 1);
+        assert_eq!(actual[32], 1, "typed base root validity");
+        assert_eq!(
+            actual[33..41],
+            base_root,
+            "typed base root mutation {mutation}"
+        );
+        let interaction_prefix =
+            expected_sparse_production_interaction_prefix(&point, &current, base_root);
+        let interaction_lde = expected_sparse_interaction_lde(&interaction_prefix);
+        let interaction_root =
+            expected_sparse_interaction_lde_root(&interaction_lde, base_root, mutation == 2);
+        assert_eq!(actual[41], 1, "typed interaction root validity");
+        assert_eq!(actual[42], 1, "nested base root validity");
+        assert_eq!(
+            actual[43..51],
+            base_root,
+            "interaction root must retain its exact base dependency",
+        );
+        assert_eq!(
+            actual[51..59],
+            interaction_root,
+            "typed interaction root mutation {mutation}",
+        );
+
+        let transcript =
+            expected_sparse_air_lde_transcript(&statement_words, base_root, interaction_root);
+        assert_eq!(
+            actual[59..67],
+            transcript,
+            "AIR transcript mutation {mutation}"
+        );
+        let challenge = Ext4::from_words(&reference_poseidon_digest(b"BC01", &transcript)[..4]);
+        assert_eq!(
+            Ext4::from_words(&actual[67..71]),
+            challenge,
+            "composition challenge mutation {mutation}",
+        );
+
+        let mut composition_values = Vec::with_capacity(16);
+        for evaluation in 0..16usize {
+            let numerator_start = 71 + evaluation * 16;
+            let numerators = std::array::from_fn(|family| {
+                let start = numerator_start + family * 4;
+                Ext4::from_words(&actual[start..start + 4])
+            });
+            let value_start = 327 + evaluation * 4;
+            let value = Ext4::from_words(&actual[value_start..value_start + 4]);
+            let point = Ext4::from_base(bb_mul(7, bb_pow(bb_two_adic_root(4), evaluation as u32)));
+            assert_eq!(
+                value,
+                expected_sparse_air_composition(point, numerators),
+                "production composition quotient, mutation {mutation}, evaluation {evaluation}",
+            );
+            composition_values.push(value);
+        }
+        let composition_root = expected_sparse_composition_root(&composition_values);
+        assert_eq!(actual[391], 1, "composition root validity");
+        assert_eq!(
+            actual[392..400],
+            composition_root,
+            "composition root mutation {mutation} must match independent Plonky3",
+        );
+        production_compositions.push((
+            base_root,
+            interaction_root,
+            transcript,
+            challenge,
+            composition_values,
+            composition_root,
+        ));
+    }
+    assert_ne!(
+        production_compositions[1].0, production_compositions[0].0,
+        "base mutation must change LD01",
+    );
+    assert_eq!(
+        production_compositions[2].0, production_compositions[0].0,
+        "interaction mutation must preserve LD01",
+    );
+    assert_ne!(
+        production_compositions[2].1, production_compositions[0].1,
+        "interaction mutation must change LD02",
+    );
+    assert_eq!(
+        production_compositions[3].0, production_compositions[0].0,
+        "statement mutation must preserve LD01",
+    );
+    assert_eq!(
+        production_compositions[3].1, production_compositions[0].1,
+        "statement mutation must preserve LD02",
+    );
+    for mutation in 1..=3 {
+        assert_ne!(
+            production_compositions[mutation].2, production_compositions[0].2,
+            "mutation {mutation} must change the AIR transcript",
+        );
+        assert_ne!(
+            production_compositions[mutation].3, production_compositions[0].3,
+            "mutation {mutation} must change the composition challenge",
+        );
+        assert_ne!(
+            production_compositions[mutation].4, production_compositions[0].4,
+            "mutation {mutation} must change the composition codeword",
+        );
+        assert_ne!(
+            production_compositions[mutation].5, production_compositions[0].5,
+            "mutation {mutation} must change the composition root",
+        );
+    }
+    let mut invalid_production_arguments = arguments[..20].to_vec();
+    invalid_production_arguments.push(4);
+    let (_, invalid_length, invalid_words) = encoded(
+        &mut store,
+        &instance,
+        memory,
+        "fixed_transition4_sparse_production_composition_encoded",
+        &invalid_production_arguments,
+    );
+    assert_eq!(invalid_length, 0, "unknown production mutation length");
+    assert!(
+        invalid_words.is_empty(),
+        "unknown production mutation payload"
     );
 
     const BASE_FIELDS: usize = 41;

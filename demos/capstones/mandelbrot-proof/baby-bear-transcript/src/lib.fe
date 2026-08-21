@@ -1,0 +1,95 @@
+//! Shared BabyBear composition transcript for Mandelbrot proof interpreters.
+//!
+//! Sparse high-precision AIRs and compact checkpoint AIRs enter through the
+//! same typed transcript, challenge, leaf commitment, and post-composition
+//! binding. FRI therefore consumes one protocol vocabulary rather than a
+//! proof-specific copy of these operations.
+
+use canonical_words::{CanonicalWords, CanonicalWordsProvider}
+use poseidon_baby_bear::{
+    Poseidon2Digest,
+    Poseidon2FieldDomain,
+    bind as poseidon_bind,
+    commit_ext4_fields,
+    squeeze_ext4,
+}
+use precision::baby_bear::BabyBearExt4
+
+const fn protocol_tag(_ label: String<4>) -> u32 {
+    let bytes = label.as_bytes()
+    ((bytes[0] as u32) << 24)
+        | ((bytes[1] as u32) << 16)
+        | ((bytes[2] as u32) << 8)
+        | (bytes[3] as u32)
+}
+
+struct MandelbrotCompositionChallengeBabyBearV1 {}
+struct MandelbrotCompositionRowBabyBearV1 {}
+struct MandelbrotCompositionTranscriptBabyBearV1 {}
+
+impl Poseidon2FieldDomain for MandelbrotCompositionChallengeBabyBearV1 {
+    const TAG: u32 = protocol_tag("BC01")
+}
+
+impl Poseidon2FieldDomain for MandelbrotCompositionRowBabyBearV1 {
+    const TAG: u32 = protocol_tag("BC02")
+}
+
+impl Poseidon2FieldDomain for MandelbrotCompositionTranscriptBabyBearV1 {
+    const TAG: u32 = protocol_tag("BC03")
+}
+
+pub struct AirLdeTranscriptDigest { pub valid: bool, pub value: Poseidon2Digest }
+impl core::marker::Copy for AirLdeTranscriptDigest {}
+
+pub struct CompositionChallenge { pub valid: bool, pub value: BabyBearExt4 }
+impl core::marker::Copy for CompositionChallenge {}
+
+pub struct CompositionDigest { pub valid: bool, pub value: Poseidon2Digest }
+impl core::marker::Copy for CompositionDigest {}
+derive CanonicalWords for CompositionDigest using CanonicalWordsProvider
+
+pub struct CompositionTranscriptDigest { pub valid: bool, pub value: Poseidon2Digest }
+impl core::marker::Copy for CompositionTranscriptDigest {}
+
+/// Derive a quartic challenge from any AIR interpreter that has committed all
+/// of its pre-composition codewords into this transcript type.
+pub fn composition_challenge(
+    _ transcript: own AirLdeTranscriptDigest,
+) -> CompositionChallenge {
+    if !transcript.valid {
+        return CompositionChallenge { valid: false, value: BabyBearExt4::zero() }
+    }
+    CompositionChallenge {
+        valid: true,
+        value: squeeze_ext4<MandelbrotCompositionChallengeBabyBearV1>(
+            transcript.value,
+        ),
+    }
+}
+
+pub fn composition_row_commitment(_ value: BabyBearExt4) -> CompositionDigest {
+    CompositionDigest {
+        valid: true,
+        value: commit_ext4_fields<MandelbrotCompositionRowBabyBearV1, 1>([value]),
+    }
+}
+
+pub fn bind_composition(
+    _ transcript: own AirLdeTranscriptDigest,
+    _ composition: own CompositionDigest,
+) -> CompositionTranscriptDigest {
+    if !transcript.valid || !composition.valid {
+        return CompositionTranscriptDigest {
+            valid: false,
+            value: Poseidon2Digest::zero(),
+        }
+    }
+    CompositionTranscriptDigest {
+        valid: true,
+        value: poseidon_bind<MandelbrotCompositionTranscriptBabyBearV1>(
+            transcript.value,
+            composition.value,
+        ),
+    }
+}
