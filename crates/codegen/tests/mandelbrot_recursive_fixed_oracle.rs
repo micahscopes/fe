@@ -1791,6 +1791,20 @@ fn expected_sparse_interaction_challenges(root: [u32; 8]) -> Vec<u32> {
     words
 }
 
+fn expected_sparse_interaction_challenge_values(root: [u32; 8]) -> [Ext4; 8] {
+    let words = expected_sparse_interaction_challenges(root);
+    [
+        Ext4::from_words(&words[1..5]),
+        Ext4::from_words(&words[5..9]),
+        Ext4::from_words(&words[9..13]),
+        Ext4::from_words(&words[13..17]),
+        Ext4::from_words(&words[17..21]),
+        Ext4::from_words(&words[21..25]),
+        Ext4::from_words(&words[25..29]),
+        Ext4::from_words(&words[29..33]),
+    ]
+}
+
 fn extend_ext4_words(destination: &mut Vec<u32>, value: Ext4) {
     destination.extend(value.0);
 }
@@ -1800,15 +1814,16 @@ fn expected_sparse_interaction_root(
     current: &ComplexFx,
     base_root: [u32; 8],
 ) -> [u32; 8] {
-    let challenge_words = expected_sparse_interaction_challenges(base_root);
-    let product_beta = Ext4::from_words(&challenge_words[1..5]);
-    let product_gamma = Ext4::from_words(&challenge_words[5..9]);
-    let round_beta = Ext4::from_words(&challenge_words[9..13]);
-    let round_gamma = Ext4::from_words(&challenge_words[13..17]);
-    let linear_beta = Ext4::from_words(&challenge_words[17..21]);
-    let linear_gamma = Ext4::from_words(&challenge_words[21..25]);
-    let boundary_beta = Ext4::from_words(&challenge_words[25..29]);
-    let boundary_gamma = Ext4::from_words(&challenge_words[29..33]);
+    let [
+        product_beta,
+        product_gamma,
+        round_beta,
+        round_gamma,
+        linear_beta,
+        linear_gamma,
+        boundary_beta,
+        boundary_gamma,
+    ] = expected_sparse_interaction_challenge_values(base_root);
 
     let mut tasks = expected_sparse_transition_tasks(LIMBS as u32);
     tasks.resize(4_096, [14, 0, 0, 0, 0]);
@@ -1879,6 +1894,94 @@ fn expected_sparse_interaction_root(
     assert_eq!(linear_accumulator, Ext4::ZERO, "linear bus must close");
     assert_eq!(boundary_accumulator, Ext4::ZERO, "boundary bus must close");
     reference_merkle_root(leaves)
+}
+
+fn expected_sparse_air_prefix_words(
+    point: &ComplexFx,
+    current: &ComplexFx,
+    base_root: [u32; 8],
+) -> Vec<u32> {
+    let controls = expected_sparse_control_rows();
+    let rows = expected_sparse_rows(point, current);
+    let tasks = expected_sparse_transition_tasks(LIMBS as u32);
+    let [
+        product_beta,
+        product_gamma,
+        round_beta,
+        round_gamma,
+        linear_beta,
+        linear_gamma,
+        boundary_beta,
+        boundary_gamma,
+    ] = expected_sparse_interaction_challenge_values(base_root);
+
+    let mut words = vec![1, 1];
+    words.extend(base_root);
+    for index in 0..4 {
+        words.extend(controls[index]);
+        words.extend(rows[index]);
+    }
+
+    let mut product_accumulator = Ext4::ZERO;
+    let mut round_accumulator = Ext4::ZERO;
+    let mut linear_accumulator = Ext4::ZERO;
+    let mut boundary_accumulator = Ext4::ZERO;
+    for index in 0..4 {
+        let task = tasks[index];
+        let row = rows[index];
+        let (product_inverses, product_delta) = expected_ext4_interaction_row(
+            expected_product_copy_ports(task, row),
+            product_beta,
+            product_gamma,
+        );
+        let (round_inverses, round_delta) = expected_ext4_interaction_row(
+            expected_round_copy_ports(task, row),
+            round_beta,
+            round_gamma,
+        );
+        let (linear_inverses, linear_delta) = expected_ext4_interaction_row(
+            expected_linear_copy_ports(task, row),
+            linear_beta,
+            linear_gamma,
+        );
+        let (boundary_inverses, boundary_delta) = expected_ext4_interaction_row(
+            expected_boundary_copy_ports(task, row),
+            boundary_beta,
+            boundary_gamma,
+        );
+
+        extend_ext4_words(&mut words, product_accumulator);
+        for inverse in product_inverses {
+            extend_ext4_words(&mut words, inverse);
+        }
+        extend_ext4_words(&mut words, round_accumulator);
+        for inverse in round_inverses {
+            extend_ext4_words(&mut words, inverse);
+        }
+        extend_ext4_words(&mut words, linear_accumulator);
+        for inverse in linear_inverses {
+            extend_ext4_words(&mut words, inverse);
+        }
+        extend_ext4_words(&mut words, boundary_accumulator);
+        for inverse in boundary_inverses {
+            extend_ext4_words(&mut words, inverse);
+        }
+
+        product_accumulator = product_accumulator.add(product_delta);
+        round_accumulator = round_accumulator.add(round_delta);
+        linear_accumulator = linear_accumulator.add(linear_delta);
+        boundary_accumulator = boundary_accumulator.add(boundary_delta);
+    }
+    for accumulator in [
+        product_accumulator,
+        round_accumulator,
+        linear_accumulator,
+        boundary_accumulator,
+    ] {
+        extend_ext4_words(&mut words, accumulator);
+    }
+    assert_eq!(words.len(), 526, "sparse prefix schema must stay nominal");
+    words
 }
 
 fn expected_committed_words(
@@ -3830,6 +3933,9 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
     let mut store = wasmtime::Store::new(&engine, ());
     let instance = wasmtime::Instance::new(&mut store, &module, &[])
         .expect("interaction fixture should instantiate");
+    let memory = instance
+        .get_memory(&mut store, "memory")
+        .expect("interaction fixture should export linear memory");
     let point = ComplexFx {
         real: fixed(true, 3, 4),
         imaginary: fixed(false, 1, 8),
@@ -3846,33 +3952,29 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
     let mut arguments = transition_arguments(&point, &current);
     arguments.extend(expected_interaction_root);
     arguments.extend(mutated_interaction_root);
-    let words = call(
+    let (_, _, words) = encoded(
         &mut store,
         &instance,
-        "fixed_transition4_sparse_interaction_root",
+        memory,
+        "fixed_transition4_sparse_air_checkpoint_encoded",
         &arguments,
-        28,
     );
-    assert_eq!(words[0], 1, "interaction trace must be valid");
-    assert_eq!(words[1], 1, "Fe must accept the independent interaction root");
-    assert_eq!(
-        words[2], 0,
-        "Fe must reject a directed interaction-root coefficient mutation",
-    );
-    assert_eq!(words[3], 0, "an invalid base commitment must fail closed");
-    assert_eq!(
-        words[4..12],
+    let mut expected = expected_sparse_air_prefix_words(
+        &point,
+        &current,
         expected_base_root,
-        "interaction trace must retain its exact base commitment",
     );
+    expected.push(1);
+    expected.push(1);
+    expected.extend(expected_base_root);
+    expected.extend(expected_interaction_root);
+    expected.extend([1, 0]);
+    expected.extend([0, 0]);
+    expected.extend(expected_base_root);
+    expected.extend([0; 8]);
+    assert_eq!(expected.len(), 564, "sparse checkpoint schema must stay nominal");
     assert_eq!(
-        words[12..20],
-        expected_interaction_root,
-        "Fe interaction root must match the independent quartic port reconstruction",
-    );
-    assert_eq!(
-        words[20..28],
-        [0; 8],
-        "an invalid base commitment must return the canonical zero root",
+        words, expected,
+        "caller-owned rows, accumulators, roots, and mutation decisions must match the independent oracle",
     );
 }

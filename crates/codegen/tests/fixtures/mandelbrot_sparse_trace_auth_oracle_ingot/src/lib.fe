@@ -4,6 +4,8 @@ use canonical_words::{
     BrowserWordReader,
     BrowserWordWriter,
     CanonicalWordStream,
+    CanonicalWords,
+    CanonicalWordsProvider,
     canonical_word_stream_count,
     encode_canonical_word_stream,
 }
@@ -14,14 +16,23 @@ use mandelbrot_proof_fixed_air::{
     fixed_mandelbrot_transition_output,
 }
 use mandelbrot_proof_fixed_air_baby_bear::{
+    SparseBaseAirRow,
+    SparseInteractionAccumulators,
+    SparseInteractionTraceDigest,
+    SparseInteractionTraceRow,
     SparseTraceDigest,
     SparseTraceAuthentication,
     empty_sparse_trace_authentication,
+    sparse_base_air_row_from_witness,
     sparse_interaction_challenges,
     sparse_interaction_trace_root_power_of_two,
     sparse_trace_root_power_of_two,
     verify_sparse_trace_authentication,
+    write_sparse_interaction_air_rows,
     write_sparse_trace_authentication_power_of_two,
+    zero_sparse_base_air_row,
+    zero_sparse_interaction_accumulators,
+    zero_sparse_interaction_trace_row,
 }
 use mandelbrot_proof_recursive::ComplexFixed
 use poseidon_baby_bear::Poseidon2Digest
@@ -29,6 +40,26 @@ use precision::fixed::Fixed
 
 type TransitionWitness4 = FixedMandelbrotTransitionWitness<4>
 type SparseTraceAuthentication4 = SparseTraceAuthentication<4, 4, 48>
+
+struct SparseAirPrefix4 {
+    pub valid: bool,
+    pub base: SparseTraceDigest<4>,
+    pub base_rows: [SparseBaseAirRow; 4],
+    pub interaction_rows: [SparseInteractionTraceRow; 4],
+    pub accumulators: SparseInteractionAccumulators,
+}
+impl core::marker::Copy for SparseAirPrefix4 {}
+derive CanonicalWords for SparseAirPrefix4 using CanonicalWordsProvider
+
+struct SparseAirCheckpoint4 {
+    pub prefix: SparseAirPrefix4,
+    pub interaction: SparseInteractionTraceDigest<4>,
+    pub accepts_candidate_a: bool,
+    pub accepts_candidate_b: bool,
+    pub invalid: SparseInteractionTraceDigest<4>,
+}
+impl core::marker::Copy for SparseAirCheckpoint4 {}
+derive CanonicalWords for SparseAirCheckpoint4 using CanonicalWordsProvider
 
 fn fixed4(_ negative: u32, _ limbs: [u32; 4]) -> Fixed<4> {
     Fixed { negative: negative == 1, limbs: limbs }
@@ -153,7 +184,7 @@ pub fn sparse_interaction_challenges4(
     words
 }
 
-pub fn fixed_transition4_sparse_interaction_root(
+pub fn fixed_transition4_sparse_air_checkpoint_encoded(
     _ prn: u32, _ pr0: u32, _ pr1: u32, _ pr2: u32, _ pr3: u32,
     _ pin: u32, _ pi0: u32, _ pi1: u32, _ pi2: u32, _ pi3: u32,
     _ crn: u32, _ cr0: u32, _ cr1: u32, _ cr2: u32, _ cr3: u32,
@@ -162,7 +193,7 @@ pub fn fixed_transition4_sparse_interaction_root(
     _ a4: u32, _ a5: u32, _ a6: u32, _ a7: u32,
     _ b0: u32, _ b1: u32, _ b2: u32, _ b3: u32,
     _ b4: u32, _ b5: u32, _ b6: u32, _ b7: u32,
-) -> [u32; 28] {
+) -> BrowserBytes {
     let (point, current, witness) = transition4(
         prn, [pr0, pr1, pr2, pr3], pin, [pi0, pi1, pi2, pi3],
         crn, [cr0, cr1, cr2, cr3], cin, [ci0, ci1, ci2, ci3],
@@ -171,6 +202,35 @@ pub fn fixed_transition4_sparse_interaction_root(
     let base = sparse_trace_root_power_of_two<4, 4096>(
         point, current, next, witness,
     )
+    if !base.valid { return BrowserBytes { ptr: 0, len: 0 } }
+
+    let mut base_rows = [zero_sparse_base_air_row(); 4]
+    let mut index: usize = 0
+    while index < 4 {
+        base_rows[index] = sparse_base_air_row_from_witness<4>(
+            index.downcast_truncate(), point, current, next, witness,
+        )
+        index = index + 1
+    }
+    let mut interaction_rows = [zero_sparse_interaction_trace_row(); 4]
+    let mut accumulators = zero_sparse_interaction_accumulators()
+    let valid = write_sparse_interaction_air_rows<4, 4>(
+        point,
+        current,
+        next,
+        witness,
+        base,
+        0,
+        mut accumulators,
+        mut interaction_rows,
+    )
+    let prefix = SparseAirPrefix4 {
+        valid: valid,
+        base: base,
+        base_rows: base_rows,
+        interaction_rows: interaction_rows,
+        accumulators: accumulators,
+    }
     let interaction = sparse_interaction_trace_root_power_of_two<4, 4096>(
         point, current, next, witness, base,
     )
@@ -187,17 +247,16 @@ pub fn fixed_transition4_sparse_interaction_root(
     let candidate_b = Poseidon2Digest::from_u32s([
         b0, b1, b2, b3, b4, b5, b6, b7,
     ])
-    let mut words = [0; 28]
-    words[0] = if interaction.valid { 1 } else { 0 }
-    words[1] = if interaction.value.equals(candidate_a) { 1 } else { 0 }
-    words[2] = if interaction.value.equals(candidate_b) { 1 } else { 0 }
-    words[3] = if invalid.valid { 1 } else { 0 }
-    let mut index: usize = 0
-    while index < 8 {
-        words[4 + index] = base.value.field(index.downcast_truncate()).to_u32()
-        words[12 + index] = interaction.value.field(index.downcast_truncate()).to_u32()
-        words[20 + index] = invalid.value.field(index.downcast_truncate()).to_u32()
-        index = index + 1
+    let checkpoint = SparseAirCheckpoint4 {
+        prefix: prefix,
+        interaction: interaction,
+        accepts_candidate_a: interaction.value.equals(candidate_a),
+        accepts_candidate_b: interaction.value.equals(candidate_b),
+        invalid: invalid,
     }
-    words
+    let words = canonical_word_stream_count(ref checkpoint)
+    encode_canonical_word_stream(
+        ref checkpoint,
+        BrowserWordWriter::allocate(words),
+    ).finish()
 }

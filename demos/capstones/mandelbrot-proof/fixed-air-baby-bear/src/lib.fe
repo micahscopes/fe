@@ -194,6 +194,16 @@ pub struct SparseTraceRow {
 impl core::marker::Copy for SparseTraceRow {}
 derive CanonicalWords for SparseTraceRow using CanonicalWordsProvider
 
+/// The exact polynomial base-row schema. Reflection derives its canonical
+/// field order from the same nominal control and witness records committed by
+/// `SparseTraceLeaf`, so LDE consumers need no parallel column-number table.
+pub struct SparseBaseAirRow {
+    pub control: SparseTraceControl,
+    pub witness: SparseTraceRow,
+}
+impl core::marker::Copy for SparseBaseAirRow {}
+derive CanonicalWords for SparseBaseAirRow using CanonicalWordsProvider
+
 pub struct SparseTraceLeaf<const L: usize> {
     pub limb_count: BabyBear,
     pub task_count: BabyBear,
@@ -242,6 +252,71 @@ pub struct SparseInteractionTraceRow {
 impl core::marker::Copy for SparseInteractionTraceRow {}
 derive CanonicalWords for SparseInteractionTraceRow using CanonicalWordsProvider
 
+/// Sequential state of the four log-derivative copy buses.
+pub struct SparseInteractionAccumulators {
+    pub product: BabyBearExt4,
+    pub round: BabyBearExt4,
+    pub linear: BabyBearExt4,
+    pub boundary: BabyBearExt4,
+}
+impl core::marker::Copy for SparseInteractionAccumulators {}
+derive CanonicalWords for SparseInteractionAccumulators using CanonicalWordsProvider
+
+/// Reusable row-local inverse storage for one interaction-plan placement.
+pub struct SparseInteractionScratch {
+    pub product: SparseCopyInteractionRow<BabyBearExt4, 2>,
+    pub round: SparseCopyInteractionRow<BabyBearExt4, 5>,
+    pub linear: SparseCopyInteractionRow<BabyBearExt4, 8>,
+    pub boundary: SparseCopyInteractionRow<BabyBearExt4, 2>,
+}
+impl core::marker::Copy for SparseInteractionScratch {}
+
+pub fn zero_sparse_interaction_trace_row() -> SparseInteractionTraceRow {
+    let zero = BabyBearExt4::zero()
+    SparseInteractionTraceRow {
+        product_accumulator: zero,
+        product_inverses: [zero; 2],
+        round_accumulator: zero,
+        round_inverses: [zero; 5],
+        linear_accumulator: zero,
+        linear_inverses: [zero; 8],
+        boundary_accumulator: zero,
+        boundary_inverses: [zero; 2],
+    }
+}
+
+pub fn zero_sparse_interaction_accumulators() -> SparseInteractionAccumulators {
+    let zero = BabyBearExt4::zero()
+    SparseInteractionAccumulators {
+        product: zero,
+        round: zero,
+        linear: zero,
+        boundary: zero,
+    }
+}
+
+pub fn zero_sparse_interaction_scratch() -> SparseInteractionScratch {
+    let zero = BabyBearExt4::zero()
+    SparseInteractionScratch {
+        product: SparseCopyInteractionRow {
+            accumulator: zero,
+            inverses: [zero; 2],
+        },
+        round: SparseCopyInteractionRow {
+            accumulator: zero,
+            inverses: [zero; 5],
+        },
+        linear: SparseCopyInteractionRow {
+            accumulator: zero,
+            inverses: [zero; 8],
+        },
+        boundary: SparseCopyInteractionRow {
+            accumulator: zero,
+            inverses: [zero; 2],
+        },
+    }
+}
+
 /// One nominal interaction-trace leaf. The base root is absorbed in every
 /// leaf, making the transcript dependency explicit and preventing an
 /// interaction path from being replayed against a different base trace.
@@ -266,6 +341,16 @@ pub struct SparseInteractionTraceDigest<const L: usize> {
 }
 impl<const L: usize> core::marker::Copy for SparseInteractionTraceDigest<L> {}
 derive CanonicalWords for SparseInteractionTraceDigest<L> using CanonicalWordsProvider
+
+/// Roots emitted while materializing base and interaction evaluations on the
+/// original trace subgroup. The potentially large row tables stay in
+/// caller-owned arrays and never cross a function boundary as one aggregate.
+pub struct SparseAirTraceDigest<const L: usize> {
+    pub valid: bool,
+    pub base: SparseTraceDigest<L>,
+    pub interaction: SparseInteractionTraceDigest<L>,
+}
+impl<const L: usize> core::marker::Copy for SparseAirTraceDigest<L> {}
 
 pub fn sparse_interaction_challenges<const L: usize>(
     _ root: SparseTraceDigest<L>,
@@ -324,26 +409,17 @@ fn invalid_sparse_interaction_trace_digest<const L: usize>(
 /// Interpret one row of the interaction dependency plan into caller-owned
 /// state. Keeping this boundary row-local lets scalar Wasm reclaim all
 /// temporary quartic values after the step, while packed and GPU placements
-/// can interpret the same control, port, and commitment expressions.
-fn write_sparse_interaction_trace_step<const L: usize>(
+/// can interpret the same control and port expressions.
+pub fn write_sparse_interaction_air_row<const L: usize>(
     _ point: ComplexFixed<L>,
     _ current: ComplexFixed<L>,
     _ next: ComplexFixed<L>,
     _ witness: FixedMandelbrotTransitionWitness<L>,
     _ challenges: SparseInteractionChallenges,
-    _ base_root: Poseidon2Digest,
-    _ tasks: u32,
-    _ trace_length: u32,
     _ position: u32,
-    _ product_accumulator: mut BabyBearExt4,
-    _ round_accumulator: mut BabyBearExt4,
-    _ linear_accumulator: mut BabyBearExt4,
-    _ boundary_accumulator: mut BabyBearExt4,
-    _ product: mut SparseCopyInteractionRow<BabyBearExt4, 2>,
-    _ round: mut SparseCopyInteractionRow<BabyBearExt4, 5>,
-    _ linear: mut SparseCopyInteractionRow<BabyBearExt4, 8>,
-    _ boundary: mut SparseCopyInteractionRow<BabyBearExt4, 2>,
-    _ commitment: mut Poseidon2Digest,
+    _ accumulators: mut SparseInteractionAccumulators,
+    _ scratch: mut SparseInteractionScratch,
+    _ interaction: mut SparseInteractionTraceRow,
 ) -> bool
 where L > 1,
 {
@@ -361,38 +437,38 @@ where L > 1,
         challenges.product,
         control,
         row,
-        product_accumulator,
-        mut product,
+        accumulators.product,
+        mut scratch.product,
     )
     write_sparse_round_interaction_row<BabyBearExt4, L>(
         challenges.round,
         control,
         next_control,
         row,
-        round_accumulator,
-        mut round,
+        accumulators.round,
+        mut scratch.round,
     )
     write_sparse_linear_interaction_row<BabyBearExt4, L>(
         challenges.linear,
         control,
         next_control,
         row,
-        linear_accumulator,
-        mut linear,
+        accumulators.linear,
+        mut scratch.linear,
     )
     write_sparse_boundary_interaction_row<BabyBearExt4, L>(
         challenges.boundary,
         control,
         row,
-        boundary_accumulator,
-        mut boundary,
+        accumulators.boundary,
+        mut scratch.boundary,
     )
 
     let local_challenge = BabyBearExt4::one()
     let product_evaluation = evaluate_sparse_product_interaction_row<
         BabyBearExt4,
         L,
-    >(local_challenge, challenges.product, control, row, product)
+    >(local_challenge, challenges.product, control, row, scratch.product)
     let round_evaluation = evaluate_sparse_round_interaction_row<
         BabyBearExt4,
         L,
@@ -402,7 +478,7 @@ where L > 1,
         control,
         next_control,
         row,
-        round,
+        scratch.round,
     )
     let linear_evaluation = evaluate_sparse_linear_interaction_row<
         BabyBearExt4,
@@ -413,12 +489,12 @@ where L > 1,
         control,
         next_control,
         row,
-        linear,
+        scratch.linear,
     )
     let boundary_evaluation = evaluate_sparse_boundary_interaction_row<
         BabyBearExt4,
         L,
-    >(local_challenge, challenges.boundary, control, row, boundary)
+    >(local_challenge, challenges.boundary, control, row, scratch.boundary)
     if !product_evaluation.valid || !product_evaluation.folded.is_zero()
         || !round_evaluation.valid || !round_evaluation.folded.is_zero()
         || !linear_evaluation.valid || !linear_evaluation.folded.is_zero()
@@ -426,15 +502,106 @@ where L > 1,
         return false
     }
 
-    let interaction = SparseInteractionTraceRow {
-        product_accumulator: product.accumulator,
-        product_inverses: product.inverses,
-        round_accumulator: round.accumulator,
-        round_inverses: round.inverses,
-        linear_accumulator: linear.accumulator,
-        linear_inverses: linear.inverses,
-        boundary_accumulator: boundary.accumulator,
-        boundary_inverses: boundary.inverses,
+    interaction = SparseInteractionTraceRow {
+        product_accumulator: scratch.product.accumulator,
+        product_inverses: scratch.product.inverses,
+        round_accumulator: scratch.round.accumulator,
+        round_inverses: scratch.round.inverses,
+        linear_accumulator: scratch.linear.accumulator,
+        linear_inverses: scratch.linear.inverses,
+        boundary_accumulator: scratch.boundary.accumulator,
+        boundary_inverses: scratch.boundary.inverses,
+    }
+    accumulators.product = accumulators.product + product_evaluation.delta
+    accumulators.round = accumulators.round + round_evaluation.delta
+    accumulators.linear = accumulators.linear + linear_evaluation.delta
+    accumulators.boundary = accumulators.boundary + boundary_evaluation.delta
+    true
+}
+
+/// Place a contiguous interaction-trace tile in caller-owned storage. The
+/// starting accumulators are explicit so scalar, packed, workgroup, and
+/// recursive chunk interpreters can use the same row dependency plan without
+/// inventing a second interaction kernel.
+pub fn write_sparse_interaction_air_rows<
+    const L: usize,
+    const N: usize,
+>(
+    _ point: ComplexFixed<L>,
+    _ current: ComplexFixed<L>,
+    _ next: ComplexFixed<L>,
+    _ witness: FixedMandelbrotTransitionWitness<L>,
+    _ base: SparseTraceDigest<L>,
+    _ start: u32,
+    _ accumulators: mut SparseInteractionAccumulators,
+    _ rows: mut [SparseInteractionTraceRow; N],
+) -> bool
+where
+    L > 1,
+    N > 0,
+    N <= MAX_SPARSE_TRACE_LENGTH,
+{
+    let trace_length = sparse_transition_trace_length<L>()
+    let count: u32 = N.downcast_truncate()
+    if !base.valid
+        || start > trace_length
+        || count > trace_length - start {
+        return false
+    }
+    let challenges = sparse_interaction_challenges(base)
+    if !challenges.valid { return false }
+    let mut scratch = zero_sparse_interaction_scratch()
+    let mut interaction = zero_sparse_interaction_trace_row()
+    let mut index: usize = 0
+    while index < N {
+        if !write_sparse_interaction_air_row<L>(
+            point,
+            current,
+            next,
+            witness,
+            challenges,
+            start + index.downcast_truncate(),
+            mut accumulators,
+            mut scratch,
+            mut interaction,
+        ) {
+            return false
+        }
+        rows[index] = interaction
+        index = index + 1
+    }
+    true
+}
+
+fn write_sparse_interaction_trace_step<const L: usize>(
+    _ point: ComplexFixed<L>,
+    _ current: ComplexFixed<L>,
+    _ next: ComplexFixed<L>,
+    _ witness: FixedMandelbrotTransitionWitness<L>,
+    _ challenges: SparseInteractionChallenges,
+    _ base_root: Poseidon2Digest,
+    _ tasks: u32,
+    _ trace_length: u32,
+    _ position: u32,
+    _ accumulators: mut SparseInteractionAccumulators,
+    _ scratch: mut SparseInteractionScratch,
+    _ interaction: mut SparseInteractionTraceRow,
+    _ commitment: mut Poseidon2Digest,
+) -> bool
+where L > 1,
+{
+    if !write_sparse_interaction_air_row<L>(
+        point,
+        current,
+        next,
+        witness,
+        challenges,
+        position,
+        mut accumulators,
+        mut scratch,
+        mut interaction,
+    ) {
+        return false
     }
     let leaf = SparseInteractionTraceLeaf<L> {
         limb_count: BabyBear::from_u32(L.downcast_truncate()),
@@ -446,10 +613,6 @@ where L > 1,
         row: interaction,
     }
     commitment = sparse_interaction_trace_leaf_commitment(leaf)
-    product_accumulator = product_accumulator + product_evaluation.delta
-    round_accumulator = round_accumulator + round_evaluation.delta
-    linear_accumulator = linear_accumulator + linear_evaluation.delta
-    boundary_accumulator = boundary_accumulator + boundary_evaluation.delta
     true
 }
 
@@ -487,28 +650,10 @@ where
         SparseDigestHasher,
         SPARSE_TRACE_FRONTIER_LEVELS,
     >()
-    let mut product_accumulator = BabyBearExt4::zero()
-    let mut round_accumulator = BabyBearExt4::zero()
-    let mut linear_accumulator = BabyBearExt4::zero()
-    let mut boundary_accumulator = BabyBearExt4::zero()
+    let mut accumulators = zero_sparse_interaction_accumulators()
     let tasks = sparse_transition_task_count<L>()
-    let zero = BabyBearExt4::zero()
-    let mut product = SparseCopyInteractionRow {
-        accumulator: zero,
-        inverses: [zero; 2],
-    }
-    let mut round = SparseCopyInteractionRow {
-        accumulator: zero,
-        inverses: [zero; 5],
-    }
-    let mut linear = SparseCopyInteractionRow {
-        accumulator: zero,
-        inverses: [zero; 8],
-    }
-    let mut boundary = SparseCopyInteractionRow {
-        accumulator: zero,
-        inverses: [zero; 2],
-    }
+    let mut scratch = zero_sparse_interaction_scratch()
+    let mut interaction = zero_sparse_interaction_trace_row()
     let mut commitment = Poseidon2Digest::zero()
 
     let mut index: usize = 0
@@ -524,14 +669,9 @@ where
             tasks,
             trace_length,
             position,
-            mut product_accumulator,
-            mut round_accumulator,
-            mut linear_accumulator,
-            mut boundary_accumulator,
-            mut product,
-            mut round,
-            mut linear,
-            mut boundary,
+            mut accumulators,
+            mut scratch,
+            mut interaction,
             mut commitment,
         ) {
             return invalid_sparse_interaction_trace_digest(base)
@@ -544,10 +684,10 @@ where
         index = index + 1
     }
 
-    if !product_accumulator.is_zero()
-        || !round_accumulator.is_zero()
-        || !linear_accumulator.is_zero()
-        || !boundary_accumulator.is_zero() {
+    if !accumulators.product.is_zero()
+        || !accumulators.round.is_zero()
+        || !accumulators.linear.is_zero()
+        || !accumulators.boundary.is_zero() {
         return invalid_sparse_interaction_trace_digest(base)
     }
     let root = complete_frontier_root<
@@ -560,6 +700,126 @@ where
         base: base,
         value: root.value,
     }
+}
+
+/// Materialize both authenticated trace tables in caller-owned storage. The
+/// base pass must precede the interaction pass because its `SL03` root is the
+/// Fiat-Shamir source for every quartic copy challenge. No host witness or
+/// column-number vocabulary enters this boundary.
+pub fn write_sparse_air_trace_power_of_two<
+    const L: usize,
+    const N: usize,
+>(
+    _ point: ComplexFixed<L>,
+    _ current: ComplexFixed<L>,
+    _ next: ComplexFixed<L>,
+    _ witness: FixedMandelbrotTransitionWitness<L>,
+    _ base_rows: mut [SparseBaseAirRow; N],
+    _ interaction_rows: mut [SparseInteractionTraceRow; N],
+    _ output: mut SparseAirTraceDigest<L>,
+) -> bool
+where
+    L > 1,
+    N > 0,
+    N > 1,
+    N <= MAX_SPARSE_TRACE_LENGTH,
+    N <= 2147483648,
+    { (N & (N - 1)) == 0 },
+{
+    output = empty_sparse_air_trace_digest<L>()
+    let trace_length: u32 = N.downcast_truncate()
+    if trace_length != sparse_transition_trace_length<L>() { return false }
+    let tasks = sparse_transition_task_count<L>()
+
+    let mut base_frontier = empty_frontier<
+        Poseidon2Digest,
+        SparseDigestHasher,
+        SPARSE_TRACE_FRONTIER_LEVELS,
+    >()
+    let mut index: usize = 0
+    while index < N {
+        let position: u32 = index.downcast_truncate()
+        let leaf = sparse_trace_leaf_from_witness<L>(
+            position, point, current, next, witness,
+        )
+        base_rows[index] = SparseBaseAirRow {
+            control: leaf.control,
+            witness: leaf.row,
+        }
+        base_frontier = push_frontier<
+            Poseidon2Digest,
+            SparseDigestHasher,
+            SPARSE_TRACE_FRONTIER_LEVELS,
+        >(base_frontier, sparse_trace_leaf_commitment(leaf))
+        index = index + 1
+    }
+    let base_root = complete_frontier_root<
+        Poseidon2Digest,
+        SparseDigestHasher,
+        SPARSE_TRACE_FRONTIER_LEVELS,
+    >(base_frontier)
+    if !base_root.valid { return false }
+    let base = SparseTraceDigest<L> {
+        valid: true,
+        value: base_root.value,
+    }
+    let mut interaction_frontier = empty_frontier<
+        Poseidon2Digest,
+        SparseDigestHasher,
+        SPARSE_TRACE_FRONTIER_LEVELS,
+    >()
+    let mut accumulators = zero_sparse_interaction_accumulators()
+    if !write_sparse_interaction_air_rows<L, N>(
+        point,
+        current,
+        next,
+        witness,
+        base,
+        0,
+        mut accumulators,
+        mut interaction_rows,
+    ) {
+        return false
+    }
+    index = 0
+    while index < N {
+        let position: u32 = index.downcast_truncate()
+        let leaf = SparseInteractionTraceLeaf<L> {
+            limb_count: BabyBear::from_u32(L.downcast_truncate()),
+            task_count: BabyBear::from_u32(tasks),
+            trace_length: BabyBear::from_u32(trace_length),
+            index: BabyBear::from_u32(position),
+            active: BabyBear::from_u32(if position < tasks { 1 } else { 0 }),
+            base_root: base.value,
+            row: interaction_rows[index],
+        }
+        interaction_frontier = push_frontier<
+            Poseidon2Digest,
+            SparseDigestHasher,
+            SPARSE_TRACE_FRONTIER_LEVELS,
+        >(interaction_frontier, sparse_interaction_trace_leaf_commitment(leaf))
+        index = index + 1
+    }
+    if !accumulators.product.is_zero()
+        || !accumulators.round.is_zero()
+        || !accumulators.linear.is_zero()
+        || !accumulators.boundary.is_zero() {
+        return false
+    }
+    let interaction_root = complete_frontier_root<
+        Poseidon2Digest,
+        SparseDigestHasher,
+        SPARSE_TRACE_FRONTIER_LEVELS,
+    >(interaction_frontier)
+    if !interaction_root.valid { return false }
+    output.base = base
+    output.interaction = SparseInteractionTraceDigest {
+        valid: true,
+        base: base,
+        value: interaction_root.value,
+    }
+    output.valid = true
+    true
 }
 
 /// Canonical variable-size opening for sorted, deduplicated sparse leaves.
@@ -706,6 +966,13 @@ fn zero_sparse_trace_control() -> SparseTraceControl {
     }
 }
 
+pub fn zero_sparse_base_air_row() -> SparseBaseAirRow {
+    SparseBaseAirRow {
+        control: zero_sparse_trace_control(),
+        witness: zero_sparse_trace_row(),
+    }
+}
+
 fn sparse_trace_control_at<const L: usize>(_ index: u32) -> SparseTraceControl {
     let control = sparse_control_row_at<BabyBear, L>(index)
     SparseTraceControl {
@@ -808,6 +1075,15 @@ fn invalid_sparse_trace_digest<const L: usize>() -> SparseTraceDigest<L> {
     SparseTraceDigest { valid: false, value: Poseidon2Digest::zero() }
 }
 
+pub fn empty_sparse_air_trace_digest<const L: usize>() -> SparseAirTraceDigest<L> {
+    let base = invalid_sparse_trace_digest<L>()
+    SparseAirTraceDigest {
+        valid: false,
+        base: base,
+        interaction: invalid_sparse_interaction_trace_digest(base),
+    }
+}
+
 pub fn sparse_trace_leaf_from_witness<const L: usize>(
     _ index: u32,
     _ point: ComplexFixed<L>,
@@ -841,6 +1117,19 @@ pub fn sparse_trace_leaf_from_witness<const L: usize>(
             state_after: row.state_after,
         },
     }
+}
+
+pub fn sparse_base_air_row_from_witness<const L: usize>(
+    _ index: u32,
+    _ point: ComplexFixed<L>,
+    _ current: ComplexFixed<L>,
+    _ next: ComplexFixed<L>,
+    _ witness: FixedMandelbrotTransitionWitness<L>,
+) -> SparseBaseAirRow {
+    let leaf = sparse_trace_leaf_from_witness<L>(
+        index, point, current, next, witness,
+    )
+    SparseBaseAirRow { control: leaf.control, witness: leaf.row }
 }
 
 pub fn sparse_trace_leaf_commitment<const L: usize>(
