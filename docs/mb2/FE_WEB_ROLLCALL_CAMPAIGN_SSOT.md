@@ -943,6 +943,15 @@ Legend:
   bounded gate is to interpret carry-bit reconstruction in the same row
   carrier, then add convolution term reduction and require both sparse and
   wide interpreters to accept and reject the same directed mutation set.
+  Commit `64905d933` completes that bounded-carry slice. The same six columns
+  now reconstruct each product carry from 18 boolean bits, reset the active
+  scan, retain the completed carry while reconstructing its 18-bit slack, and
+  close with `carry + slack = L * (B - 1)`. The independent integer oracle
+  matches all 888 L4 rows exactly. The zero-import Fe Wasm audit checks 4,488
+  local and adjacency constraints under three challenges and rejects every
+  used-lane mutation, including both sides of the value-to-slack handoff.
+  Focused nextest passes 1/1 in 40.20 seconds. Convolution term reduction is
+  now the next sparse equivalence gate.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
   The first arithmetic-plan consolidation is landed at `ba2ded864`: one
