@@ -933,6 +933,55 @@ fn reference_poseidon_digest(tag: &[u8; 4], fields: &[u32]) -> [u32; 8] {
     state[..8].try_into().unwrap()
 }
 
+fn reference_digest_compress(left: [u32; 8], right: [u32; 8]) -> [u32; 8] {
+    let mut state = [0u32; POSEIDON_WIDTH];
+    state[..8].copy_from_slice(&left);
+    state[8..].copy_from_slice(&right);
+    reference_poseidon_permutation(state)[..8]
+        .try_into()
+        .unwrap()
+}
+
+fn reference_merkle_root(mut leaves: Vec<[u32; 8]>) -> [u32; 8] {
+    assert!(!leaves.is_empty());
+    assert!(leaves.len().is_power_of_two());
+    while leaves.len() > 1 {
+        leaves = leaves
+            .chunks_exact(2)
+            .map(|pair| reference_digest_compress(pair[0], pair[1]))
+            .collect();
+    }
+    leaves[0]
+}
+
+fn expected_sparse_trace_root(point: &ComplexFx, current: &ComplexFx) -> [u32; 8] {
+    let mut rows = expected_sparse_radix_rows(point, current);
+    rows.extend(expected_sparse_carry_rows(current));
+    rows.extend(expected_sparse_product_rows(current));
+    rows.extend(expected_sparse_round_rows(current));
+    rows.extend(expected_sparse_linear_rows(point, current));
+    rows.extend(expected_sparse_boundary_rows(point, current));
+    let task_count = rows.len() as u32;
+    assert_eq!(task_count, 2_821);
+    rows.resize(4_096, [0; 6]);
+    let leaves = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let mut fields = vec![
+                LIMBS as u32,
+                task_count,
+                4_096,
+                index as u32,
+                u32::from(index < task_count as usize),
+            ];
+            fields.extend(row);
+            reference_poseidon_digest(b"SL01", &fields)
+        })
+        .collect();
+    reference_merkle_root(leaves)
+}
+
 fn expected_committed_words(
     claim: &Claim,
     start: &Boundary,
@@ -980,6 +1029,35 @@ fn compile_fixture() -> Vec<u8> {
         .into_bytecode()
         .expect("Wasm backend should emit bytes");
     wasmparser::validate(&bytes).expect("recursive fixed oracle Wasm should validate");
+    bytes
+}
+
+fn compile_sparse_auth_fixture() -> Vec<u8> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/mandelbrot_sparse_trace_auth_oracle_ingot");
+    let url = Url::from_directory_path(path.canonicalize().unwrap()).unwrap();
+    let mut db = DriverDataBase::default();
+    assert!(
+        !driver::init_ingot(&mut db, &url),
+        "sparse trace authentication fixture initialization diagnostics",
+    );
+    let ingot = db
+        .workspace()
+        .containing_ingot(&db, url)
+        .expect("sparse trace authentication fixture ingot");
+    let top_mod = ingot.root_mod(&db);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "unexpected sparse trace authentication diagnostics:\n{diagnostics}",
+    );
+    let bytes = BackendKind::Wasm
+        .create()
+        .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O2)
+        .expect("sparse trace authentication fixture should compile to Wasm")
+        .into_bytecode()
+        .expect("Wasm backend should emit sparse trace authentication bytes");
+    wasmparser::validate(&bytes).expect("sparse trace authentication Wasm should validate");
     bytes
 }
 
@@ -2075,6 +2153,131 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                     );
                 }
             }
+        }
+        if case == 1 {
+            let auth_bytes = compile_sparse_auth_fixture();
+            let auth_engine = wasmtime::Engine::default();
+            let auth_module = wasmtime::Module::new(&auth_engine, &auth_bytes)
+                .expect("sparse trace authentication Wasm module should load");
+            assert_eq!(
+                auth_module.imports().count(),
+                0,
+                "sparse trace authentication fixture must stay zero-import",
+            );
+            let mut auth_store = wasmtime::Store::new(&auth_engine, ());
+            let auth_instance = wasmtime::Instance::new(&mut auth_store, &auth_module, &[])
+                .expect("sparse trace authentication fixture should instantiate");
+            let auth_memory = auth_instance
+                .get_memory(&mut auth_store, "memory")
+                .expect("sparse trace authentication fixture should export linear memory");
+
+            let requests = [0u32, 2_820, 2_821, 4_095];
+            let mut opening_arguments = arguments.clone();
+            opening_arguments.extend(requests);
+            let (pointer, length, opening_words) = encoded(
+                &mut auth_store,
+                &auth_instance,
+                auth_memory,
+                "fixed_transition4_sparse_trace_authentication_encoded",
+                &opening_arguments,
+            );
+            assert!(length > 0, "sparse opening must encode");
+            assert_eq!(opening_words[0], 1, "authentication must be valid");
+            assert_eq!(opening_words[1], 1, "sparse trace root must be valid");
+            assert_eq!(
+                opening_words[2..10],
+                expected_sparse_trace_root(point, current),
+                "Fe sparse trace root must match independent Plonky3 reconstruction",
+            );
+            assert_eq!(opening_words[10], 1, "opening must be valid");
+            assert_eq!(opening_words[11], 1, "multipath must be valid");
+            assert_eq!(opening_words[12], requests.len() as u32);
+
+            let verify_arguments = vec![pointer, length];
+            assert_eq!(
+                call(
+                    &mut auth_store,
+                    &auth_instance,
+                    "fixed_transition4_sparse_trace_authentication_verify_at",
+                    &verify_arguments,
+                    1,
+                ),
+                [1],
+                "canonical sparse opening must authenticate",
+            );
+
+            let leaf_count = opening_words[12] as usize;
+            let sibling_count_index = 13 + leaf_count;
+            let sibling_count = opening_words[sibling_count_index] as usize;
+            let first_sibling = sibling_count_index + 1;
+            let first_leaf = first_sibling + sibling_count * 8;
+            for mutation_index in [
+                0usize,
+                2,
+                10,
+                13,
+                first_sibling,
+                first_leaf,
+                first_leaf + 4,
+                first_leaf + 5,
+            ] {
+                let original = opening_words[mutation_index];
+                let mutated = if mutation_index == 0 || mutation_index == 10 {
+                    2
+                } else {
+                    (original + 1) % BABY_BEAR_MODULUS
+                };
+                write_word(
+                    &mut auth_store,
+                    auth_memory,
+                    pointer,
+                    mutation_index,
+                    mutated,
+                );
+                assert_eq!(
+                    call(
+                        &mut auth_store,
+                        &auth_instance,
+                        "fixed_transition4_sparse_trace_authentication_verify_at",
+                        &verify_arguments,
+                        1,
+                    ),
+                    [0],
+                    "opening mutation at word {mutation_index} must fail",
+                );
+                write_word(
+                    &mut auth_store,
+                    auth_memory,
+                    pointer,
+                    mutation_index,
+                    original,
+                );
+            }
+
+            let mut truncated_arguments = verify_arguments.clone();
+            truncated_arguments[1] = length - 4;
+            assert_eq!(
+                call(
+                    &mut auth_store,
+                    &auth_instance,
+                    "fixed_transition4_sparse_trace_authentication_verify_at",
+                    &truncated_arguments,
+                    1,
+                ),
+                [0],
+                "truncated sparse opening must fail",
+            );
+
+            let mut invalid_request_arguments = arguments.clone();
+            invalid_request_arguments.extend([0, 1, 2, 4_096]);
+            let invalid = call(
+                &mut auth_store,
+                &auth_instance,
+                "fixed_transition4_sparse_trace_authentication_encoded",
+                &invalid_request_arguments,
+                2,
+            );
+            assert_eq!(invalid[1], 0, "out-of-range opening request must fail");
         }
         for challenge in [3u32, 7, 31] {
             let mut clean_arguments = arguments.clone();

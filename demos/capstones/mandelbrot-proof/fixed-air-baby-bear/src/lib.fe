@@ -1,0 +1,563 @@
+//! BabyBear authentication for the generated high-precision sparse AIR trace.
+//!
+//! This layer commits the exact base-trace rows and canonical padding emitted
+//! by `mandelbrot_proof_fixed_air_core`. It deliberately does not call the
+//! result an AIR or FRI receipt: selectors, interaction columns, LDE, and FRI
+//! still have to be attached before sparse authentication becomes a proof.
+
+use canonical_words::{
+    CanonicalWordStream,
+    CanonicalWordStreamProvider,
+    CanonicalWords,
+    CanonicalWordsProvider,
+    WordSink,
+    WordSource,
+    canonical_prefix_word_count,
+    decode_canonical_prefix,
+    encode_canonical_prefix,
+}
+use mandelbrot_proof_fixed_air::FixedMandelbrotTransitionWitness
+use mandelbrot_proof_fixed_air_core::{
+    sparse_transition_row_from_witness,
+    sparse_transition_task_count,
+    sparse_transition_trace_length,
+}
+use mandelbrot_proof_recursive::ComplexFixed
+use merkle_core::{
+    MerkleMultiPath,
+    MerkleRoot,
+    TwoToOneHasher,
+    complete_frontier_root,
+    empty_frontier,
+    multi_verify,
+    push_frontier,
+    write_multi_path_and_root_from_leaves,
+}
+use poseidon_baby_bear::{
+    Poseidon2Digest,
+    Poseidon2FieldDomain,
+    commit_fields,
+    compress as poseidon_compress,
+}
+use precision::baby_bear::BabyBear
+
+pub const SPARSE_TRACE_LEAF_FIELDS: usize = 11
+const SPARSE_TRACE_FRONTIER_LEVELS: usize = 23
+const MAX_SPARSE_TRACE_LENGTH: usize = 4194304
+
+const fn protocol_tag(_ label: String<4>) -> u32 {
+    let bytes = label.as_bytes()
+    ((bytes[0] as u32) << 24)
+        | ((bytes[1] as u32) << 16)
+        | ((bytes[2] as u32) << 8)
+        | (bytes[3] as u32)
+}
+
+struct MandelbrotSparseTraceLeafBabyBearV1 {}
+
+impl Poseidon2FieldDomain for MandelbrotSparseTraceLeafBabyBearV1 {
+    const TAG: u32 = protocol_tag("SL01")
+}
+
+/// One nominal committed base-trace leaf. Protocol metadata is carried in
+/// every leaf so a path cannot be replayed across limb counts or trace shapes.
+/// The six witness lanes retain the readable structure of `SparseTaskRow`.
+pub struct SparseTraceRow {
+    pub value: BabyBear,
+    pub auxiliary: BabyBear,
+    pub accumulator_before: BabyBear,
+    pub accumulator_after: BabyBear,
+    pub state_before: BabyBear,
+    pub state_after: BabyBear,
+}
+impl core::marker::Copy for SparseTraceRow {}
+derive CanonicalWords for SparseTraceRow using CanonicalWordsProvider
+
+pub struct SparseTraceLeaf<const L: usize> {
+    pub limb_count: BabyBear,
+    pub task_count: BabyBear,
+    pub trace_length: BabyBear,
+    pub index: BabyBear,
+    pub active: BabyBear,
+    pub row: SparseTraceRow,
+}
+impl<const L: usize> core::marker::Copy for SparseTraceLeaf<L> {}
+derive CanonicalWords for SparseTraceLeaf<L> using CanonicalWordsProvider
+
+/// Limb-branded root for one complete power-of-two sparse base trace.
+pub struct SparseTraceDigest<const L: usize> {
+    pub valid: bool,
+    pub value: Poseidon2Digest,
+}
+impl<const L: usize> core::marker::Copy for SparseTraceDigest<L> {}
+derive CanonicalWords for SparseTraceDigest<L> using CanonicalWordsProvider
+
+/// Canonical variable-size opening for sorted, deduplicated sparse leaves.
+pub struct SparseTraceMultiOpening<
+    const L: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+> {
+    pub valid: bool,
+    pub leaves: [SparseTraceLeaf<L>; MAX_LEAVES],
+    pub path: MerkleMultiPath<Poseidon2Digest, MAX_LEAVES, MAX_SIBLINGS>,
+}
+impl<
+    const L: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+> core::marker::Copy for SparseTraceMultiOpening<L, MAX_LEAVES, MAX_SIBLINGS> {}
+
+impl<
+    const L: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+> CanonicalWordStream for SparseTraceMultiOpening<L, MAX_LEAVES, MAX_SIBLINGS> {
+    fn word_count(ref self) -> u32 {
+        if self.path.leaf_count > MAX_LEAVES.downcast_truncate() { return 0 }
+        self.valid.word_count()
+            + self.path.word_count()
+            + canonical_prefix_word_count(ref self.leaves, self.path.leaf_count)
+    }
+
+    fn encode_stream<W: WordSink>(ref self, _ writer: W) -> W {
+        if self.path.leaf_count > MAX_LEAVES.downcast_truncate() {
+            return writer.reject()
+        }
+        let writer = self.valid.encode_stream(writer)
+        let writer = self.path.encode_stream(writer)
+        encode_canonical_prefix(ref self.leaves, self.path.leaf_count, writer)
+    }
+
+    fn decode_stream<R: WordSource>(mut self, _ reader: R) -> R {
+        let reader = self.valid.decode_stream(reader)
+        let reader = self.path.decode_stream(reader)
+        if self.path.leaf_count > MAX_LEAVES.downcast_truncate() {
+            self.valid = false
+            return reader.reject()
+        }
+        decode_canonical_prefix(mut self.leaves, self.path.leaf_count, reader)
+    }
+}
+
+/// One complete base-trace authentication carrier. The root and sparse path
+/// are produced by the same Merkle traversal, eliminating duplicate hashing
+/// in scalar interpreters while leaving room for a retained GPU tree later.
+pub struct SparseTraceAuthentication<
+    const L: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+> {
+    pub valid: bool,
+    pub root: SparseTraceDigest<L>,
+    pub opening: SparseTraceMultiOpening<L, MAX_LEAVES, MAX_SIBLINGS>,
+}
+impl<
+    const L: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+> core::marker::Copy for SparseTraceAuthentication<L, MAX_LEAVES, MAX_SIBLINGS> {}
+derive CanonicalWordStream for SparseTraceAuthentication<
+    L,
+    MAX_LEAVES,
+    MAX_SIBLINGS,
+> using CanonicalWordStreamProvider
+
+struct SparseDigestHasher {}
+
+impl TwoToOneHasher<Poseidon2Digest> for SparseDigestHasher {
+    fn zero() -> Poseidon2Digest { Poseidon2Digest::zero() }
+
+    fn equal(_ left: Poseidon2Digest, _ right: Poseidon2Digest) -> bool {
+        left.equals(right)
+    }
+
+    fn hash2(_ left: Poseidon2Digest, _ right: Poseidon2Digest) -> Poseidon2Digest {
+        poseidon_compress(left, right)
+    }
+}
+
+fn zero_sparse_trace_row() -> SparseTraceRow {
+    SparseTraceRow {
+        value: BabyBear::zero(),
+        auxiliary: BabyBear::zero(),
+        accumulator_before: BabyBear::zero(),
+        accumulator_after: BabyBear::zero(),
+        state_before: BabyBear::zero(),
+        state_after: BabyBear::zero(),
+    }
+}
+
+pub fn zero_sparse_trace_leaf<const L: usize>() -> SparseTraceLeaf<L> {
+    SparseTraceLeaf {
+        limb_count: BabyBear::zero(),
+        task_count: BabyBear::zero(),
+        trace_length: BabyBear::zero(),
+        index: BabyBear::zero(),
+        active: BabyBear::zero(),
+        row: zero_sparse_trace_row(),
+    }
+}
+
+fn invalid_sparse_multi_path<
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>() -> MerkleMultiPath<Poseidon2Digest, MAX_LEAVES, MAX_SIBLINGS> {
+    MerkleMultiPath {
+        valid: false,
+        leaf_count: 0,
+        leaf_indices: [0; MAX_LEAVES],
+        sibling_count: 0,
+        siblings: [Poseidon2Digest::zero(); MAX_SIBLINGS],
+    }
+}
+
+pub fn empty_sparse_trace_multi_opening<
+    const L: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>() -> SparseTraceMultiOpening<L, MAX_LEAVES, MAX_SIBLINGS> {
+    SparseTraceMultiOpening {
+        valid: false,
+        leaves: [zero_sparse_trace_leaf<L>(); MAX_LEAVES],
+        path: invalid_sparse_multi_path<MAX_LEAVES, MAX_SIBLINGS>(),
+    }
+}
+
+pub fn empty_sparse_trace_authentication<
+    const L: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>() -> SparseTraceAuthentication<L, MAX_LEAVES, MAX_SIBLINGS> {
+    SparseTraceAuthentication {
+        valid: false,
+        root: invalid_sparse_trace_digest<L>(),
+        opening: empty_sparse_trace_multi_opening<L, MAX_LEAVES, MAX_SIBLINGS>(),
+    }
+}
+
+fn invalid_sparse_trace_digest<const L: usize>() -> SparseTraceDigest<L> {
+    SparseTraceDigest { valid: false, value: Poseidon2Digest::zero() }
+}
+
+fn sparse_trace_leaf_fields<const L: usize>(
+    _ leaf: SparseTraceLeaf<L>,
+) -> [BabyBear; SPARSE_TRACE_LEAF_FIELDS] {
+    [
+        leaf.limb_count,
+        leaf.task_count,
+        leaf.trace_length,
+        leaf.index,
+        leaf.active,
+        leaf.row.value,
+        leaf.row.auxiliary,
+        leaf.row.accumulator_before,
+        leaf.row.accumulator_after,
+        leaf.row.state_before,
+        leaf.row.state_after,
+    ]
+}
+
+pub fn sparse_trace_leaf_from_witness<const L: usize>(
+    _ index: u32,
+    _ point: ComplexFixed<L>,
+    _ current: ComplexFixed<L>,
+    _ next: ComplexFixed<L>,
+    _ witness: FixedMandelbrotTransitionWitness<L>,
+) -> SparseTraceLeaf<L> {
+    let tasks = sparse_transition_task_count<L>()
+    let trace = sparse_transition_trace_length<L>()
+    if L < 2 || index >= trace { return zero_sparse_trace_leaf<L>() }
+    let row = sparse_transition_row_from_witness<BabyBear, L>(
+        index,
+        point,
+        current,
+        next,
+        witness,
+    )
+    SparseTraceLeaf {
+        limb_count: BabyBear::from_u32(L.downcast_truncate()),
+        task_count: BabyBear::from_u32(tasks),
+        trace_length: BabyBear::from_u32(trace),
+        index: BabyBear::from_u32(index),
+        active: BabyBear::from_u32(if index < tasks { 1 } else { 0 }),
+        row: SparseTraceRow {
+            value: row.value,
+            auxiliary: row.auxiliary,
+            accumulator_before: row.accumulator_before,
+            accumulator_after: row.accumulator_after,
+            state_before: row.state_before,
+            state_after: row.state_after,
+        },
+    }
+}
+
+pub fn sparse_trace_leaf_commitment<const L: usize>(
+    _ leaf: SparseTraceLeaf<L>,
+) -> Poseidon2Digest {
+    commit_fields<
+        MandelbrotSparseTraceLeafBabyBearV1,
+        SPARSE_TRACE_LEAF_FIELDS,
+    >(sparse_trace_leaf_fields(leaf))
+}
+
+fn sparse_trace_row_is_zero(_ row: SparseTraceRow) -> bool {
+    row.value.is_zero()
+        && row.auxiliary.is_zero()
+        && row.accumulator_before.is_zero()
+        && row.accumulator_after.is_zero()
+        && row.state_before.is_zero()
+        && row.state_after.is_zero()
+}
+
+pub fn sparse_trace_leaf_is_canonical<const L: usize>(
+    _ position: u32,
+    _ leaf: SparseTraceLeaf<L>,
+) -> bool {
+    let tasks = sparse_transition_task_count<L>()
+    let trace = sparse_transition_trace_length<L>()
+    if L < 2 || position >= trace
+        || leaf.limb_count.to_u32() != L.downcast_truncate()
+        || leaf.task_count.to_u32() != tasks
+        || leaf.trace_length.to_u32() != trace
+        || leaf.index.to_u32() != position {
+        return false
+    }
+    let expected_active = position < tasks
+    if leaf.active.to_u32() != if expected_active { 1 } else { 0 } {
+        return false
+    }
+    expected_active || sparse_trace_row_is_zero(leaf.row)
+}
+
+pub fn sparse_trace_root_power_of_two<
+    const L: usize,
+    const N: usize,
+>(
+    _ point: ComplexFixed<L>,
+    _ current: ComplexFixed<L>,
+    _ next: ComplexFixed<L>,
+    _ witness: FixedMandelbrotTransitionWitness<L>,
+) -> SparseTraceDigest<L>
+where
+    L > 1,
+    N > 1,
+    N <= MAX_SPARSE_TRACE_LENGTH,
+    N <= 2147483648,
+    { (N & (N - 1)) == 0 },
+{
+    let trace_length: u32 = N.downcast_truncate()
+    if trace_length != sparse_transition_trace_length<L>() {
+        return invalid_sparse_trace_digest<L>()
+    }
+    let mut frontier = empty_frontier<
+        Poseidon2Digest,
+        SparseDigestHasher,
+        SPARSE_TRACE_FRONTIER_LEVELS,
+    >()
+    let mut index: usize = 0
+    while index < N {
+        let leaf = sparse_trace_leaf_from_witness<L>(
+            index.downcast_truncate(),
+            point,
+            current,
+            next,
+            witness,
+        )
+        frontier = push_frontier<
+            Poseidon2Digest,
+            SparseDigestHasher,
+            SPARSE_TRACE_FRONTIER_LEVELS,
+        >(frontier, sparse_trace_leaf_commitment(leaf))
+        index = index + 1
+    }
+    let root = complete_frontier_root<
+        Poseidon2Digest,
+        SparseDigestHasher,
+        SPARSE_TRACE_FRONTIER_LEVELS,
+    >(frontier)
+    SparseTraceDigest { valid: root.valid, value: root.value }
+}
+
+fn reset_sparse_trace_authentication<
+    const L: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ authentication: mut SparseTraceAuthentication<L, MAX_LEAVES, MAX_SIBLINGS>,
+) {
+    authentication = empty_sparse_trace_authentication<
+        L,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >()
+}
+
+/// Authenticate requested base rows with the shared zk-kit-derived sparse
+/// Merkle carrier. Request normalization is owned by `merkle_core`, while Fe
+/// regenerates each opened nominal leaf from the same transition witness.
+pub fn write_sparse_trace_authentication_power_of_two<
+    const L: usize,
+    const N: usize,
+    const REQUESTS: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ point: ComplexFixed<L>,
+    _ current: ComplexFixed<L>,
+    _ next: ComplexFixed<L>,
+    _ witness: FixedMandelbrotTransitionWitness<L>,
+    _ requested: own [u32; REQUESTS],
+    _ authentication: mut SparseTraceAuthentication<
+        L,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >,
+) -> bool
+where
+    L > 1,
+    N > 1,
+    N <= MAX_SPARSE_TRACE_LENGTH,
+    N <= 2147483648,
+    { (N & (N - 1)) == 0 },
+    REQUESTS > 0,
+    MAX_LEAVES > 0,
+{
+    reset_sparse_trace_authentication(mut authentication)
+    let trace_length: u32 = N.downcast_truncate()
+    if trace_length != sparse_transition_trace_length<L>() {
+        return false
+    }
+    let mut commitments = [Poseidon2Digest::zero(); N]
+    let mut index: usize = 0
+    while index < N {
+        let leaf = sparse_trace_leaf_from_witness<L>(
+            index.downcast_truncate(),
+            point,
+            current,
+            next,
+            witness,
+        )
+        commitments[index] = sparse_trace_leaf_commitment(leaf)
+        index = index + 1
+    }
+    let mut path = invalid_sparse_multi_path<MAX_LEAVES, MAX_SIBLINGS>()
+    let mut root = MerkleRoot {
+        valid: false,
+        value: Poseidon2Digest::zero(),
+    }
+    if !write_multi_path_and_root_from_leaves<
+        Poseidon2Digest,
+        SparseDigestHasher,
+        N,
+        REQUESTS,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >(ref commitments, requested, mut path, mut root) {
+        return false
+    }
+    authentication.root = SparseTraceDigest {
+        valid: root.valid,
+        value: root.value,
+    }
+    authentication.opening.path = path
+    index = 0
+    while index < path.leaf_count as usize {
+        authentication.opening.leaves[index] = sparse_trace_leaf_from_witness<L>(
+            path.leaf_indices[index],
+            point,
+            current,
+            next,
+            witness,
+        )
+        index = index + 1
+    }
+    authentication.opening.valid = true
+    authentication.valid = true
+    true
+}
+
+pub fn verify_sparse_trace_multi_opening<
+    const L: usize,
+    const N: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ opening: ref SparseTraceMultiOpening<L, MAX_LEAVES, MAX_SIBLINGS>,
+    _ root: SparseTraceDigest<L>,
+) -> bool
+where
+    L > 1,
+    N > 1,
+    N <= MAX_SPARSE_TRACE_LENGTH,
+    N <= 2147483648,
+    { (N & (N - 1)) == 0 },
+    MAX_LEAVES > 0,
+{
+    let trace_length: u32 = N.downcast_truncate()
+    if !opening.valid || !root.valid
+        || trace_length != sparse_transition_trace_length<L>() {
+        return false
+    }
+    let count: usize = opening.path.leaf_count as usize
+    if count == 0 || count > MAX_LEAVES { return false }
+    let mut commitments = [Poseidon2Digest::zero(); MAX_LEAVES]
+    let mut index: usize = 0
+    while index < count {
+        if !sparse_trace_leaf_is_canonical<L>(
+            opening.path.leaf_indices[index],
+            opening.leaves[index],
+        ) {
+            return false
+        }
+        commitments[index] = sparse_trace_leaf_commitment(opening.leaves[index])
+        index = index + 1
+    }
+    while index < MAX_LEAVES {
+        let leaf = opening.leaves[index]
+        if !leaf.limb_count.is_zero()
+            || !leaf.task_count.is_zero()
+            || !leaf.trace_length.is_zero()
+            || !leaf.index.is_zero()
+            || !leaf.active.is_zero()
+            || !sparse_trace_row_is_zero(leaf.row) {
+            return false
+        }
+        index = index + 1
+    }
+    multi_verify<
+        Poseidon2Digest,
+        SparseDigestHasher,
+        N,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >(root.value, commitments, opening.path)
+}
+
+pub fn verify_sparse_trace_authentication<
+    const L: usize,
+    const N: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ authentication: ref SparseTraceAuthentication<
+        L,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >,
+) -> bool
+where
+    L > 1,
+    N > 1,
+    N <= MAX_SPARSE_TRACE_LENGTH,
+    N <= 2147483648,
+    { (N & (N - 1)) == 0 },
+    MAX_LEAVES > 0,
+{
+    authentication.valid && verify_sparse_trace_multi_opening<
+        L,
+        N,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >(ref authentication.opening, authentication.root)
+}

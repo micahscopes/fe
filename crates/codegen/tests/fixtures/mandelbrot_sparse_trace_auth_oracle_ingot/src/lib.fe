@@ -1,0 +1,114 @@
+//! Thin zero-import Wasm boundary for sparse trace authentication.
+
+use canonical_words::{
+    BrowserWordReader,
+    BrowserWordWriter,
+    CanonicalWordStream,
+    canonical_word_stream_count,
+    encode_canonical_word_stream,
+}
+use core::BrowserBytes
+use mandelbrot_proof_fixed_air::{
+    FixedMandelbrotTransitionWitness,
+    derive_fixed_mandelbrot_transition_witness,
+    fixed_mandelbrot_transition_output,
+}
+use mandelbrot_proof_fixed_air_baby_bear::{
+    SparseTraceAuthentication,
+    empty_sparse_trace_authentication,
+    verify_sparse_trace_authentication,
+    write_sparse_trace_authentication_power_of_two,
+}
+use mandelbrot_proof_recursive::ComplexFixed
+use precision::fixed::Fixed
+
+type TransitionWitness4 = FixedMandelbrotTransitionWitness<4>
+type SparseTraceAuthentication4 = SparseTraceAuthentication<4, 4, 48>
+
+fn fixed4(_ negative: u32, _ limbs: [u32; 4]) -> Fixed<4> {
+    Fixed { negative: negative == 1, limbs: limbs }
+}
+
+fn complex4(
+    _ real_negative: u32,
+    _ real: [u32; 4],
+    _ imaginary_negative: u32,
+    _ imaginary: [u32; 4],
+) -> ComplexFixed<4> {
+    ComplexFixed {
+        real: fixed4(real_negative, real),
+        imaginary: fixed4(imaginary_negative, imaginary),
+    }
+}
+
+fn transition4(
+    _ point_real_negative: u32,
+    _ point_real: [u32; 4],
+    _ point_imaginary_negative: u32,
+    _ point_imaginary: [u32; 4],
+    _ current_real_negative: u32,
+    _ current_real: [u32; 4],
+    _ current_imaginary_negative: u32,
+    _ current_imaginary: [u32; 4],
+) -> (ComplexFixed<4>, ComplexFixed<4>, TransitionWitness4) {
+    let point = complex4(
+        point_real_negative,
+        point_real,
+        point_imaginary_negative,
+        point_imaginary,
+    )
+    let current = complex4(
+        current_real_negative,
+        current_real,
+        current_imaginary_negative,
+        current_imaginary,
+    )
+    (point, current, derive_fixed_mandelbrot_transition_witness(point, current))
+}
+
+pub fn fixed_transition4_sparse_trace_authentication_encoded(
+    _ prn: u32, _ pr0: u32, _ pr1: u32, _ pr2: u32, _ pr3: u32,
+    _ pin: u32, _ pi0: u32, _ pi1: u32, _ pi2: u32, _ pi3: u32,
+    _ crn: u32, _ cr0: u32, _ cr1: u32, _ cr2: u32, _ cr3: u32,
+    _ cin: u32, _ ci0: u32, _ ci1: u32, _ ci2: u32, _ ci3: u32,
+    _ q0: u32, _ q1: u32, _ q2: u32, _ q3: u32,
+) -> BrowserBytes {
+    let (point, current, witness) = transition4(
+        prn, [pr0, pr1, pr2, pr3], pin, [pi0, pi1, pi2, pi3],
+        crn, [cr0, cr1, cr2, cr3], cin, [ci0, ci1, ci2, ci3],
+    )
+    let next = fixed_mandelbrot_transition_output(witness)
+    let mut authentication = empty_sparse_trace_authentication<4, 4, 48>()
+    if !write_sparse_trace_authentication_power_of_two<4, 4096, 4, 4, 48>(
+        point,
+        current,
+        next,
+        witness,
+        [q0, q1, q2, q3],
+        mut authentication,
+    ) {
+        return BrowserBytes { ptr: 0, len: 0 }
+    }
+    let words = canonical_word_stream_count(ref authentication)
+    encode_canonical_word_stream(
+        ref authentication,
+        BrowserWordWriter::allocate(words),
+    ).finish()
+}
+
+pub fn fixed_transition4_sparse_trace_authentication_verify_at(
+    _ ptr: u32,
+    _ len: u32,
+) -> u32 {
+    let mut authentication: SparseTraceAuthentication4 =
+        empty_sparse_trace_authentication<4, 4, 48>()
+    let reader = authentication.decode_stream(BrowserWordReader::new(
+        BrowserBytes { ptr: ptr, len: len },
+    ))
+    if !reader.complete() { return 0 }
+    if verify_sparse_trace_authentication<4, 4096, 4, 48>(ref authentication) {
+        1
+    } else {
+        0
+    }
+}

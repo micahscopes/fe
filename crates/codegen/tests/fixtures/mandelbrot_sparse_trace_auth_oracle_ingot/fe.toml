@@ -1,0 +1,11 @@
+[ingot]
+name = "mandelbrot_sparse_trace_auth_oracle_ingot"
+version = "0.1.0"
+
+[dependencies]
+canonical_words = "../../../../../ingots/canonical_words"
+core = "../../../../../ingots/core"
+mandelbrot_proof_fixed_air = "../../../../../demos/capstones/mandelbrot-proof/fixed-air"
+mandelbrot_proof_fixed_air_baby_bear = "../../../../../demos/capstones/mandelbrot-proof/fixed-air-baby-bear"
+mandelbrot_proof_recursive = "../../../../../demos/capstones/mandelbrot-proof/recursive"
+precision = "../../../../../demos/sketches/precision"
