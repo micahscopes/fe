@@ -924,6 +924,25 @@ Legend:
   sparse rows their narrow accumulator payload and adjacency constraints, then
   compare their folded denotation to the already gated wide interpreter before
   attaching Merkle, FRI, or WebGPU machinery.
+  Commits `409b75d33` and `e8a44c12c` establish the first executable sparse
+  subtrace. The task generator now places each close row directly after the
+  rows it reduces: radix bits precede their limb close, carry bits precede
+  their carry close, product terms precede their coefficient close, and
+  boundary limbs stay with their coordinate. Task counts and power-of-two
+  domains are unchanged. `SparseTaskRow<F>` is a uniform six-field carrier
+  whose two accumulator pairs are independent of limb count. Its radix
+  interpretation proves bit and prefix booleans, the running OR recurrence,
+  incremental digit reconstruction, limb close and reset, global nonzero,
+  signed-zero normalization, and every adjacent accumulator link. An
+  independent Rust integer model reconstructs all 1,767 L4 radix rows across
+  the 31 semantic range nodes exactly, while the zero-import Fe Wasm audit
+  checks 10,553 local and adjacency constraints under three challenges and
+  rejects mutations in every semantically used row lane. Focused nextest
+  passes 1/1 in 32.69 seconds. This is zero-set equivalence for the complete
+  range family, not yet equality of the full sparse and wide folds. The next
+  bounded gate is to interpret carry-bit reconstruction in the same row
+  carrier, then add convolution term reduction and require both sparse and
+  wide interpreters to accept and reject the same directed mutation set.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
   The first arithmetic-plan consolidation is landed at `ba2ded864`: one
