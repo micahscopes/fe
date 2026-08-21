@@ -982,6 +982,104 @@ pub struct FriMultiQueryEnd<const ROUND: u32> {
 }
 impl<const ROUND: u32> core::marker::Copy for FriMultiQueryEnd<ROUND> {}
 
+/// Authenticated values expose one common lookup vocabulary to the fold
+/// checker. Merkle verification remains a separate once-per-layer pass.
+pub trait Ext4SparseOpening: core::marker::Copy {
+    fn sparse_value(ref self, _ index: u32) -> CompositionValue<BabyBearExt4>
+}
+
+impl<
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+> Ext4SparseOpening for CompositionMultiOpening<MAX_LEAVES, MAX_SIBLINGS> {
+    fn sparse_value(ref self, _ index: u32) -> CompositionValue<BabyBearExt4> {
+        if !self.valid || !self.path.valid {
+            return CompositionValue { valid: false, value: BabyBearExt4::zero() }
+        }
+        let count: usize = self.path.leaf_count as usize
+        if count > MAX_LEAVES {
+            return CompositionValue { valid: false, value: BabyBearExt4::zero() }
+        }
+        let mut cursor: usize = 0
+        while cursor < count {
+            if self.path.leaf_indices[cursor] == index {
+                return CompositionValue { valid: true, value: self.values[cursor] }
+            }
+            cursor = cursor + 1
+        }
+        CompositionValue { valid: false, value: BabyBearExt4::zero() }
+    }
+}
+
+impl<
+    const ROUND: u32,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+> Ext4SparseOpening for FriLayerMultiOpening<ROUND, MAX_LEAVES, MAX_SIBLINGS> {
+    fn sparse_value(ref self, _ index: u32) -> CompositionValue<BabyBearExt4> {
+        if !self.valid || !self.path.valid {
+            return CompositionValue { valid: false, value: BabyBearExt4::zero() }
+        }
+        let count: usize = self.path.leaf_count as usize
+        if count > MAX_LEAVES {
+            return CompositionValue { valid: false, value: BabyBearExt4::zero() }
+        }
+        let mut cursor: usize = 0
+        while cursor < count {
+            if self.path.leaf_indices[cursor] == index {
+                return CompositionValue { valid: true, value: self.values[cursor] }
+            }
+            cursor = cursor + 1
+        }
+        CompositionValue { valid: false, value: BabyBearExt4::zero() }
+    }
+}
+
+/// Challenge carrier derived from the same FRI schedule as the proof and
+/// shared opening carriers.
+pub struct FriMultiChallengeFold<const ROUND: u32, Tail> {
+    pub valid: bool,
+    pub challenge: FriFoldChallenge<ROUND>,
+    pub tail: Tail,
+}
+impl<const ROUND: u32, Tail: core::marker::Copy> core::marker::Copy
+    for FriMultiChallengeFold<ROUND, Tail> {}
+
+pub struct FriMultiChallengeDone<const NEXT_ROUND: u32> {
+    pub valid: bool,
+}
+impl<const NEXT_ROUND: u32> core::marker::Copy for FriMultiChallengeDone<NEXT_ROUND> {}
+
+pub trait BabyBearFriMultiChallengeShape {
+    type Challenges
+}
+
+impl<const NEXT_ROUND: u32> BabyBearFriMultiChallengeShape
+    for FriScheduleDone<NEXT_ROUND> {
+    type Challenges = FriMultiChallengeDone<NEXT_ROUND>
+}
+
+impl<
+    const ROUND: u32,
+    const INPUT_LOG: usize,
+    const OUTPUT: usize,
+    const PAIR_WIDTH: usize,
+    const PAIR_DEPTH: usize,
+    Tail: BabyBearFriMultiChallengeShape,
+> BabyBearFriMultiChallengeShape for FriScheduleFold<
+    ROUND,
+    INPUT_LOG,
+    OUTPUT,
+    PAIR_WIDTH,
+    PAIR_DEPTH,
+    Tail,
+> {
+    type Challenges = FriMultiChallengeFold<
+        ROUND,
+        <Tail as BabyBearFriMultiChallengeShape>::Challenges,
+    >
+}
+
 /// Derive a shared multi-query receipt carrier from the field-neutral fold
 /// schedule and a protocol-selected query count.
 pub trait BabyBearFriMultiQueryShape<const QUERY_COUNT: usize> {
@@ -1443,6 +1541,334 @@ where
     }
 }
 
+/// Authenticate every committed tail layer once, reconstruct the transcript,
+/// and sample the query plan only after the terminal root has been bound.
+pub trait BabyBearFriMultiAuthenticateTail<
+    const PREVIOUS: u32,
+    const QUERY_HALF: usize,
+    Plan,
+    Samples,
+    Layers,
+    Challenges,
+> {
+    fn authenticate_fri_multi_tail(
+        _ transcript: FriLayerTranscriptDigest<PREVIOUS>,
+        _ layers: Layers,
+    ) -> (bool, Samples, Challenges)
+}
+
+impl<
+    const PREVIOUS: u32,
+    const QUERY_HALF: usize,
+    Plan,
+    Samples: core::marker::Copy,
+    const ROUND: u32,
+    const INPUT_LOG: usize,
+    const OUTPUT: usize,
+    const PAIR_WIDTH: usize,
+    const PAIR_DEPTH: usize,
+    const NEXT_ROUND: u32,
+> BabyBearFriMultiAuthenticateTail<
+    PREVIOUS,
+    QUERY_HALF,
+    Plan,
+    Samples,
+    FriMultiQueryEnd<ROUND>,
+    FriMultiChallengeFold<ROUND, FriMultiChallengeDone<NEXT_ROUND>>,
+> for FriScheduleFold<
+    ROUND,
+    INPUT_LOG,
+    OUTPUT,
+    PAIR_WIDTH,
+    PAIR_DEPTH,
+    FriScheduleDone<NEXT_ROUND>,
+>
+where
+    { PREVIOUS > 0 },
+    { ROUND == PREVIOUS + 1 },
+    { ROUND > 0 },
+    { ROUND < 100 },
+    { NEXT_ROUND == ROUND + 1 },
+    { INPUT_LOG == 1 },
+    { OUTPUT == 1 },
+    { PAIR_WIDTH == 0 },
+    { PAIR_DEPTH == 0 },
+    QUERY_HALF > 0,
+    { (QUERY_HALF & (QUERY_HALF - 1)) == 0 },
+    { QUERY_HALF <= 134217728 },
+    Plan: BabyBearFriQueryPlan<ROUND, QUERY_HALF, Samples>,
+{
+    fn authenticate_fri_multi_tail(
+        _ transcript: FriLayerTranscriptDigest<PREVIOUS>,
+        _ layers: FriMultiQueryEnd<ROUND>,
+    ) -> (
+        bool,
+        Samples,
+        FriMultiChallengeFold<ROUND, FriMultiChallengeDone<NEXT_ROUND>>,
+    ) {
+        let challenge = next_fri_fold_challenge<PREVIOUS, ROUND>(transcript)
+        let leaf = fri_layer_row_commitment<ROUND>(layers.evaluation)
+        let final_transcript = bind_next_fri_layer<PREVIOUS, ROUND>(transcript, layers.root)
+        let sampled = <Plan as BabyBearFriQueryPlan<
+            ROUND,
+            QUERY_HALF,
+            Samples,
+        >>::sample_fri_queries(final_transcript)
+        let valid = layers.valid && layers.root.valid && challenge.valid
+            && leaf.valid && leaf.value.equals(layers.root.value)
+            && final_transcript.valid && sampled.0
+        (
+            valid,
+            sampled.1,
+            FriMultiChallengeFold {
+                valid: valid,
+                challenge: challenge,
+                tail: FriMultiChallengeDone { valid: valid },
+            },
+        )
+    }
+}
+
+impl<
+    const PREVIOUS: u32,
+    const QUERY_HALF: usize,
+    Plan,
+    Samples: core::marker::Copy,
+    const ROUND: u32,
+    const INPUT_LOG: usize,
+    const OUTPUT: usize,
+    const PAIR_WIDTH: usize,
+    const PAIR_DEPTH: usize,
+    const NEXT_ROUND: u32,
+    const NEXT_INPUT_LOG: usize,
+    const NEXT_OUTPUT: usize,
+    const NEXT_PAIR_WIDTH: usize,
+    const NEXT_PAIR_DEPTH: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+    Rest,
+    TailLayers: core::marker::Copy,
+    TailChallenges: core::marker::Copy,
+> BabyBearFriMultiAuthenticateTail<
+    PREVIOUS,
+    QUERY_HALF,
+    Plan,
+    Samples,
+    FriMultiQueryFold<ROUND, MAX_LEAVES, MAX_SIBLINGS, TailLayers>,
+    FriMultiChallengeFold<ROUND, TailChallenges>,
+> for FriScheduleFold<
+    ROUND,
+    INPUT_LOG,
+    OUTPUT,
+    PAIR_WIDTH,
+    PAIR_DEPTH,
+    FriScheduleFold<
+        NEXT_ROUND,
+        NEXT_INPUT_LOG,
+        NEXT_OUTPUT,
+        NEXT_PAIR_WIDTH,
+        NEXT_PAIR_DEPTH,
+        Rest,
+    >,
+>
+where
+    { PREVIOUS > 0 },
+    { ROUND == PREVIOUS + 1 },
+    { ROUND > 0 },
+    { ROUND < 100 },
+    { INPUT_LOG > 1 },
+    OUTPUT > 1,
+    OUTPUT <= MAX_PADDED_TRACE_LENGTH,
+    OUTPUT <= 2147483648,
+    { (OUTPUT & (OUTPUT - 1)) == 0 },
+    MAX_LEAVES > 0,
+    { NEXT_ROUND == ROUND + 1 },
+    { NEXT_INPUT_LOG + 1 == INPUT_LOG },
+    { NEXT_OUTPUT + NEXT_OUTPUT == OUTPUT },
+    FriScheduleFold<
+        NEXT_ROUND,
+        NEXT_INPUT_LOG,
+        NEXT_OUTPUT,
+        NEXT_PAIR_WIDTH,
+        NEXT_PAIR_DEPTH,
+        Rest,
+    >: BabyBearFriMultiAuthenticateTail<
+        ROUND,
+        QUERY_HALF,
+        Plan,
+        Samples,
+        TailLayers,
+        TailChallenges,
+    >,
+{
+    fn authenticate_fri_multi_tail(
+        _ transcript: FriLayerTranscriptDigest<PREVIOUS>,
+        _ layers: FriMultiQueryFold<ROUND, MAX_LEAVES, MAX_SIBLINGS, TailLayers>,
+    ) -> (
+        bool,
+        Samples,
+        FriMultiChallengeFold<ROUND, TailChallenges>,
+    ) {
+        let challenge = next_fri_fold_challenge<PREVIOUS, ROUND>(transcript)
+        let authenticated = verify_fri_layer_multi_opening<
+            ROUND,
+            OUTPUT,
+            MAX_LEAVES,
+            MAX_SIBLINGS,
+        >(layers.opening, layers.root)
+        let next_transcript = bind_next_fri_layer<PREVIOUS, ROUND>(transcript, layers.root)
+        let tail = <FriScheduleFold<
+            NEXT_ROUND,
+            NEXT_INPUT_LOG,
+            NEXT_OUTPUT,
+            NEXT_PAIR_WIDTH,
+            NEXT_PAIR_DEPTH,
+            Rest,
+        > as BabyBearFriMultiAuthenticateTail<
+            ROUND,
+            QUERY_HALF,
+            Plan,
+            Samples,
+            TailLayers,
+            TailChallenges,
+        >>::authenticate_fri_multi_tail(next_transcript, layers.tail)
+        let valid = layers.valid && challenge.valid && authenticated
+            && next_transcript.valid && tail.0
+        (
+            valid,
+            tail.1,
+            FriMultiChallengeFold {
+                valid: valid,
+                challenge: challenge,
+                tail: tail.2,
+            },
+        )
+    }
+}
+
+pub trait BabyBearFriMultiAuthenticateFirst<
+    const QUERY_HALF: usize,
+    Plan,
+    Samples,
+    Layers,
+    Challenges,
+> {
+    fn authenticate_fri_multi_first(
+        _ transcript: CompositionTranscriptDigest,
+        _ layers: Layers,
+    ) -> (bool, Samples, Challenges)
+}
+
+impl<
+    const QUERY_HALF: usize,
+    Plan,
+    Samples: core::marker::Copy,
+    const INPUT_LOG: usize,
+    const OUTPUT: usize,
+    const PAIR_WIDTH: usize,
+    const PAIR_DEPTH: usize,
+    const NEXT_ROUND: u32,
+    const NEXT_INPUT_LOG: usize,
+    const NEXT_OUTPUT: usize,
+    const NEXT_PAIR_WIDTH: usize,
+    const NEXT_PAIR_DEPTH: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+    Rest,
+    TailLayers: core::marker::Copy,
+    TailChallenges: core::marker::Copy,
+> BabyBearFriMultiAuthenticateFirst<
+    QUERY_HALF,
+    Plan,
+    Samples,
+    FriMultiQueryFold<1, MAX_LEAVES, MAX_SIBLINGS, TailLayers>,
+    FriMultiChallengeFold<1, TailChallenges>,
+> for FriScheduleFold<
+    1,
+    INPUT_LOG,
+    OUTPUT,
+    PAIR_WIDTH,
+    PAIR_DEPTH,
+    FriScheduleFold<
+        NEXT_ROUND,
+        NEXT_INPUT_LOG,
+        NEXT_OUTPUT,
+        NEXT_PAIR_WIDTH,
+        NEXT_PAIR_DEPTH,
+        Rest,
+    >,
+>
+where
+    { INPUT_LOG > 1 },
+    OUTPUT > 1,
+    OUTPUT <= MAX_PADDED_TRACE_LENGTH,
+    OUTPUT <= 2147483648,
+    { (OUTPUT & (OUTPUT - 1)) == 0 },
+    MAX_LEAVES > 0,
+    { NEXT_ROUND == 2 },
+    { NEXT_INPUT_LOG + 1 == INPUT_LOG },
+    { NEXT_OUTPUT + NEXT_OUTPUT == OUTPUT },
+    FriScheduleFold<
+        NEXT_ROUND,
+        NEXT_INPUT_LOG,
+        NEXT_OUTPUT,
+        NEXT_PAIR_WIDTH,
+        NEXT_PAIR_DEPTH,
+        Rest,
+    >: BabyBearFriMultiAuthenticateTail<
+        1,
+        QUERY_HALF,
+        Plan,
+        Samples,
+        TailLayers,
+        TailChallenges,
+    >,
+{
+    fn authenticate_fri_multi_first(
+        _ transcript: CompositionTranscriptDigest,
+        _ layers: FriMultiQueryFold<1, MAX_LEAVES, MAX_SIBLINGS, TailLayers>,
+    ) -> (
+        bool,
+        Samples,
+        FriMultiChallengeFold<1, TailChallenges>,
+    ) {
+        let challenge = fri_fold_challenge(transcript)
+        let authenticated = verify_fri_layer_multi_opening<
+            1,
+            OUTPUT,
+            MAX_LEAVES,
+            MAX_SIBLINGS,
+        >(layers.opening, layers.root)
+        let next_transcript = bind_first_fri_layer(transcript, layers.root)
+        let tail = <FriScheduleFold<
+            NEXT_ROUND,
+            NEXT_INPUT_LOG,
+            NEXT_OUTPUT,
+            NEXT_PAIR_WIDTH,
+            NEXT_PAIR_DEPTH,
+            Rest,
+        > as BabyBearFriMultiAuthenticateTail<
+            1,
+            QUERY_HALF,
+            Plan,
+            Samples,
+            TailLayers,
+            TailChallenges,
+        >>::authenticate_fri_multi_tail(next_transcript, layers.tail)
+        let valid = layers.valid && challenge.valid && authenticated
+            && next_transcript.valid && tail.0
+        (
+            valid,
+            tail.1,
+            FriMultiChallengeFold {
+                valid: valid,
+                challenge: challenge,
+                tail: tail.2,
+            },
+        )
+    }
+}
+
 /// Interpret a field-neutral FRI schedule into its compact authenticated query
 /// carrier. The schedule tail distinguishes a pair-opening node from the
 /// one-evaluation terminal, so no runtime round tag or manually enumerated
@@ -1830,6 +2256,8 @@ impl<
 
 pub type CheckpointFriMultiQueryLayers16 =
     <FriSchedule<1, 4> as BabyBearFriMultiQueryShape<4>>::Query
+pub type CheckpointFriMultiChallenges16 =
+    <FriSchedule<1, 4> as BabyBearFriMultiChallengeShape>::Challenges
 pub type FriMultiCommitmentQuery16 = FriMultiCommitmentQuery<
     {4 + 4},
     {fri_multi_sibling_capacity(fri_composition_query_depth(4), 4)},
@@ -3229,6 +3657,266 @@ where N > 0, N > 1, { (N & (N - 1)) == 0 }
     fold_fri_evaluations<2, 1>([positive, negative], challenge, point)
 }
 
+/// Check one sampled query across every FRI fold using only lookups into
+/// already-authenticated sparse openings.
+pub trait BabyBearFriMultiFoldCheck<
+    const INPUT: usize,
+    Input,
+    Layers,
+    Challenges,
+> {
+    fn verify_fri_multi_fold(
+        _ input: Input,
+        _ layers: Layers,
+        _ challenges: Challenges,
+        _ query: u32,
+        _ shift: BabyBear,
+    ) -> bool
+}
+
+impl<
+    const INPUT: usize,
+    Input: Ext4SparseOpening,
+    const ROUND: u32,
+    const INPUT_LOG: usize,
+    const OUTPUT: usize,
+    const PAIR_WIDTH: usize,
+    const PAIR_DEPTH: usize,
+    const NEXT_ROUND: u32,
+> BabyBearFriMultiFoldCheck<
+    INPUT,
+    Input,
+    FriMultiQueryEnd<ROUND>,
+    FriMultiChallengeFold<ROUND, FriMultiChallengeDone<NEXT_ROUND>>,
+> for FriScheduleFold<
+    ROUND,
+    INPUT_LOG,
+    OUTPUT,
+    PAIR_WIDTH,
+    PAIR_DEPTH,
+    FriScheduleDone<NEXT_ROUND>,
+>
+where
+    INPUT > 0,
+    INPUT > 1,
+    { (INPUT & (INPUT - 1)) == 0 },
+    { OUTPUT + OUTPUT == INPUT },
+    { ROUND > 0 },
+    { ROUND < 100 },
+    { NEXT_ROUND == ROUND + 1 },
+    { INPUT_LOG == 1 },
+    { OUTPUT == 1 },
+    { PAIR_WIDTH == 0 },
+    { PAIR_DEPTH == 0 },
+{
+    fn verify_fri_multi_fold(
+        _ input: Input,
+        _ layers: FriMultiQueryEnd<ROUND>,
+        _ challenges: FriMultiChallengeFold<ROUND, FriMultiChallengeDone<NEXT_ROUND>>,
+        _ query: u32,
+        _ shift: BabyBear,
+    ) -> bool {
+        let output: u32 = OUTPUT.downcast_truncate()
+        let index = query & (output - 1)
+        let positive = input.sparse_value(index)
+        let negative = input.sparse_value(index + output)
+        if shift.is_zero() || !positive.valid || !negative.valid
+            || !layers.valid || !challenges.valid || !challenges.challenge.valid
+            || !challenges.tail.valid {
+            return false
+        }
+        let folded = fold_fri_pair_at<INPUT>(
+            positive.value,
+            negative.value,
+            challenges.challenge.value,
+            shift,
+            index,
+        )
+        folded.valid && folded.evaluations[0].equals(layers.evaluation)
+    }
+}
+
+impl<
+    const INPUT: usize,
+    Input: Ext4SparseOpening,
+    const ROUND: u32,
+    const INPUT_LOG: usize,
+    const OUTPUT: usize,
+    const PAIR_WIDTH: usize,
+    const PAIR_DEPTH: usize,
+    const NEXT_ROUND: u32,
+    const NEXT_INPUT_LOG: usize,
+    const NEXT_OUTPUT: usize,
+    const NEXT_PAIR_WIDTH: usize,
+    const NEXT_PAIR_DEPTH: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+    Rest,
+    TailLayers: core::marker::Copy,
+    TailChallenges: core::marker::Copy,
+> BabyBearFriMultiFoldCheck<
+    INPUT,
+    Input,
+    FriMultiQueryFold<ROUND, MAX_LEAVES, MAX_SIBLINGS, TailLayers>,
+    FriMultiChallengeFold<ROUND, TailChallenges>,
+> for FriScheduleFold<
+    ROUND,
+    INPUT_LOG,
+    OUTPUT,
+    PAIR_WIDTH,
+    PAIR_DEPTH,
+    FriScheduleFold<
+        NEXT_ROUND,
+        NEXT_INPUT_LOG,
+        NEXT_OUTPUT,
+        NEXT_PAIR_WIDTH,
+        NEXT_PAIR_DEPTH,
+        Rest,
+    >,
+>
+where
+    INPUT > 0,
+    INPUT > 1,
+    { (INPUT & (INPUT - 1)) == 0 },
+    { OUTPUT + OUTPUT == INPUT },
+    { ROUND > 0 },
+    { ROUND < 100 },
+    { INPUT_LOG > 1 },
+    OUTPUT > 1,
+    { (OUTPUT & (OUTPUT - 1)) == 0 },
+    { PAIR_WIDTH + PAIR_WIDTH == OUTPUT },
+    { PAIR_DEPTH + 2 == INPUT_LOG },
+    { NEXT_ROUND == ROUND + 1 },
+    { NEXT_INPUT_LOG + 1 == INPUT_LOG },
+    { NEXT_OUTPUT + NEXT_OUTPUT == OUTPUT },
+    FriScheduleFold<
+        NEXT_ROUND,
+        NEXT_INPUT_LOG,
+        NEXT_OUTPUT,
+        NEXT_PAIR_WIDTH,
+        NEXT_PAIR_DEPTH,
+        Rest,
+    >: BabyBearFriMultiFoldCheck<
+        OUTPUT,
+        FriLayerMultiOpening<ROUND, MAX_LEAVES, MAX_SIBLINGS>,
+        TailLayers,
+        TailChallenges,
+    >,
+{
+    fn verify_fri_multi_fold(
+        _ input: Input,
+        _ layers: FriMultiQueryFold<ROUND, MAX_LEAVES, MAX_SIBLINGS, TailLayers>,
+        _ challenges: FriMultiChallengeFold<ROUND, TailChallenges>,
+        _ query: u32,
+        _ shift: BabyBear,
+    ) -> bool {
+        let output: u32 = OUTPUT.downcast_truncate()
+        let index = query & (output - 1)
+        let positive = input.sparse_value(index)
+        let negative = input.sparse_value(index + output)
+        let actual = layers.opening.sparse_value(index)
+        if shift.is_zero() || !positive.valid || !negative.valid || !actual.valid
+            || !layers.valid || !challenges.valid || !challenges.challenge.valid {
+            return false
+        }
+        let folded = fold_fri_pair_at<INPUT>(
+            positive.value,
+            negative.value,
+            challenges.challenge.value,
+            shift,
+            index,
+        )
+        if !folded.valid || !folded.evaluations[0].equals(actual.value) {
+            return false
+        }
+        <FriScheduleFold<
+            NEXT_ROUND,
+            NEXT_INPUT_LOG,
+            NEXT_OUTPUT,
+            NEXT_PAIR_WIDTH,
+            NEXT_PAIR_DEPTH,
+            Rest,
+        > as BabyBearFriMultiFoldCheck<
+            OUTPUT,
+            FriLayerMultiOpening<ROUND, MAX_LEAVES, MAX_SIBLINGS>,
+            TailLayers,
+            TailChallenges,
+        >>::verify_fri_multi_fold(
+            layers.opening,
+            layers.tail,
+            challenges.tail,
+            query,
+            shift.square(),
+        )
+    }
+}
+
+/// Runtime buffer produced by interpreting the typed query plan once. The
+/// subsequent loop reuses one schedule-specialized fold checker for every
+/// query instead of specializing the complete fold chain per plan node.
+pub struct FriQueryBuffer<const MAX_QUERIES: usize> {
+    pub valid: bool,
+    pub count: u32,
+    pub indices: [u32; MAX_QUERIES],
+}
+impl<const MAX_QUERIES: usize> core::marker::Copy for FriQueryBuffer<MAX_QUERIES> {}
+
+pub trait BabyBearFriQueryBuffer<
+    const MAX_QUERIES: usize,
+    Samples,
+> {
+    fn fri_query_buffer(_ samples: Samples) -> FriQueryBuffer<MAX_QUERIES>
+}
+
+impl<
+    const MAX_QUERIES: usize,
+    const NEXT_QUERY: u32,
+> BabyBearFriQueryBuffer<MAX_QUERIES, FriQueryIndicesDone<NEXT_QUERY>>
+    for FriQueryPlanDone<NEXT_QUERY> {
+    fn fri_query_buffer(
+        _ samples: FriQueryIndicesDone<NEXT_QUERY>,
+    ) -> FriQueryBuffer<MAX_QUERIES> {
+        FriQueryBuffer { valid: true, count: 0, indices: [0; MAX_QUERIES] }
+    }
+}
+
+impl<
+    const MAX_QUERIES: usize,
+    const QUERY: u32,
+    Tail,
+    TailSamples: core::marker::Copy,
+> BabyBearFriQueryBuffer<
+    MAX_QUERIES,
+    FriQueryIndicesSample<QUERY, TailSamples>,
+> for FriQueryPlanSample<QUERY, Tail>
+where Tail: BabyBearFriQueryBuffer<MAX_QUERIES, TailSamples>
+{
+    fn fri_query_buffer(
+        _ samples: FriQueryIndicesSample<QUERY, TailSamples>,
+    ) -> FriQueryBuffer<MAX_QUERIES> {
+        let tail = <Tail as BabyBearFriQueryBuffer<
+            MAX_QUERIES,
+            TailSamples,
+        >>::fri_query_buffer(samples.tail)
+        let tail_count: usize = tail.count as usize
+        if !samples.current.valid || !tail.valid || tail_count + 1 > MAX_QUERIES {
+            return FriQueryBuffer { valid: false, count: 0, indices: [0; MAX_QUERIES] }
+        }
+        let mut indices = [0; MAX_QUERIES]
+        indices[0] = samples.current.value
+        let mut cursor: usize = 0
+        while cursor < tail_count {
+            indices[cursor + 1] = tail.indices[cursor]
+            cursor = cursor + 1
+        }
+        FriQueryBuffer {
+            valid: true,
+            count: tail.count + 1,
+            indices: indices,
+        }
+    }
+}
+
 /// Verify and replay every layer after the first FRI commitment. The query
 /// carrier type is supplied explicitly so method arguments remain ordinary
 /// types while the schedule still selects the only valid implementation.
@@ -3757,4 +4445,54 @@ pub fn verify_fri_commitment_query16(
         shift,
         proof.layers,
     )
+}
+
+/// Verify four Fiat-Shamir queries while authenticating each committed layer
+/// once. The fold schedule and query plan are the only round and query lists.
+pub fn verify_fri_multi_commitment_query16(
+    _ air_transcript: own AirLdeTranscriptDigest,
+    _ shift: BabyBear,
+    _ proof: own FriMultiCommitmentQuery16,
+) -> bool {
+    if !air_transcript.valid || shift.is_zero() || !proof.valid
+        || !proof.composition_root.valid
+        || !verify_composition_multi_opening<16, 8, 24>(
+            proof.composition,
+            proof.composition_root,
+        ) {
+        return false
+    }
+    let composition_transcript = bind_composition(air_transcript, proof.composition_root)
+    let authenticated = <FriSchedule<1, 4> as BabyBearFriMultiAuthenticateFirst<
+        8,
+        CheckpointFriQueryPlan4,
+        CheckpointFriQuerySamples4,
+        CheckpointFriMultiQueryLayers16,
+        CheckpointFriMultiChallenges16,
+    >>::authenticate_fri_multi_first(composition_transcript, proof.layers)
+    if !composition_transcript.valid || !authenticated.0 { return false }
+    let queries = <CheckpointFriQueryPlan4 as BabyBearFriQueryBuffer<
+        4,
+        CheckpointFriQuerySamples4,
+    >>::fri_query_buffer(authenticated.1)
+    if !queries.valid || queries.count != 4 { return false }
+    let mut cursor: usize = 0
+    while cursor < 4 {
+        if !<FriSchedule<1, 4> as BabyBearFriMultiFoldCheck<
+            16,
+            CompositionMultiOpening<8, 24>,
+            CheckpointFriMultiQueryLayers16,
+            CheckpointFriMultiChallenges16,
+        >>::verify_fri_multi_fold(
+            proof.composition,
+            proof.layers,
+            authenticated.2,
+            queries.indices[cursor],
+            shift,
+        ) {
+            return false
+        }
+        cursor = cursor + 1
+    }
+    true
 }

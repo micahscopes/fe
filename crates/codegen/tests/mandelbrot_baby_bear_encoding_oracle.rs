@@ -96,7 +96,7 @@ fn compile_wasm() -> Vec<u8> {
     );
     let bytes = BackendKind::Wasm
         .create()
-        .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
+        .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O2)
         .expect("BabyBear Mandelbrot encoding fixture should compile to Wasm")
         .into_bytecode()
         .expect("Wasm backend should emit bytes");
@@ -1730,16 +1730,34 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
                 .iter()
                 .map(|requests| packed_canonical_indices8(requests)),
         );
+        expected_status.push(1);
         assert_eq!(
             call(
                 &mut store,
                 &instance,
                 "fri_multi_query16_status",
                 &[seed, air_transcript_seed, shift],
-                18,
+                19,
             ),
             expected_status,
             "schedule-derived shared FRI carrier must authenticate each layer exactly once",
+        );
+    }
+
+    for mutation in 1..=7 {
+        let mut mutation_store = wasmtime::Store::new(&engine, ());
+        let mutation_instance = wasmtime::Instance::new(&mut mutation_store, &module, &[])
+            .expect("mutation gate module should instantiate");
+        assert_eq!(
+            call(
+                &mut mutation_store,
+                &mutation_instance,
+                "fri_multi_query16_mutation",
+                &[97, 431, 7, mutation],
+                1,
+            ),
+            vec![0],
+            "shared FRI verifier mutation {mutation} must fail closed",
         );
     }
 
@@ -1750,9 +1768,9 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
                 &instance,
                 "fri_multi_query16_status",
                 &[97, 431, invalid_shift],
-                18,
+                19,
             ),
-            vec![0; 18],
+            vec![0; 19],
             "shared FRI carrier must reject a zero coset shift",
         );
     }

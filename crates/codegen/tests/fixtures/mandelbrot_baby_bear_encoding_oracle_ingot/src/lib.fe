@@ -53,6 +53,7 @@ use mandelbrot_proof_baby_bear::{
     row_commitment,
     trace_root_power_of_two,
     verify_fri_commitment_query16,
+    verify_fri_multi_commitment_query16,
     verify_composition_multi_opening,
     verify_fri_layer_multi_opening,
     verify_auxiliary_lde_quartet_path,
@@ -767,6 +768,7 @@ pub fn fri_multi_query16_status(
     u32, u32, u32,
     u32,
     u32, u32, u32, u32,
+    u32,
 ) {
     let air = AirLdeTranscriptDigest {
         valid: true,
@@ -785,34 +787,65 @@ pub fn fri_multi_query16_status(
         if proof.valid { 1 } else { 0 },
         proof.composition.path.leaf_count,
         proof.composition.path.sibling_count,
-        if verify_composition_multi_opening<16, 8, 24>(
-            proof.composition,
-            proof.composition_root,
-        ) { 1 } else { 0 },
+        if proof.composition.valid && proof.composition.path.valid { 1 } else { 0 },
         first.opening.path.leaf_count,
         first.opening.path.sibling_count,
-        if first.valid && verify_fri_layer_multi_opening<1, 8, 8, 16>(
-            first.opening,
-            first.root,
-        ) { 1 } else { 0 },
+        if first.valid && first.opening.valid && first.opening.path.valid { 1 } else { 0 },
         second.opening.path.leaf_count,
         second.opening.path.sibling_count,
-        if second.valid && verify_fri_layer_multi_opening<2, 4, 8, 8>(
-            second.opening,
-            second.root,
-        ) { 1 } else { 0 },
+        if second.valid && second.opening.valid && second.opening.path.valid { 1 } else { 0 },
         third.opening.path.leaf_count,
         third.opening.path.sibling_count,
-        if third.valid && verify_fri_layer_multi_opening<3, 2, 8, 0>(
-            third.opening,
-            third.root,
-        ) { 1 } else { 0 },
+        if third.valid && third.opening.valid && third.opening.path.valid { 1 } else { 0 },
         if terminal.valid && terminal.root.valid { 1 } else { 0 },
         pack_fri_multi_indices(proof.composition.path.leaf_indices),
         pack_fri_multi_indices(first.opening.path.leaf_indices),
         pack_fri_multi_indices(second.opening.path.leaf_indices),
         pack_fri_multi_indices(third.opening.path.leaf_indices),
+        if verify_fri_multi_commitment_query16(
+            air,
+            BabyBear::from_u32(shift),
+            proof,
+        ) { 1 } else { 0 },
     )
+}
+
+pub fn fri_multi_query16_mutation(
+    _ seed: u32,
+    _ air_transcript: u32,
+    _ shift: u32,
+    _ mutation: u32,
+) -> u32 {
+    let air = AirLdeTranscriptDigest {
+        valid: true,
+        value: digest8(air_transcript),
+    }
+    let mut proof = open_fri_multi_commitment_query16(
+        fri_pattern16(seed),
+        air,
+        BabyBear::from_u32(shift),
+    )
+    match mutation {
+        1 => proof.composition.values[0] = proof.composition.values[0] + BabyBearExt4::one(),
+        2 => proof.layers.opening.values[0] = proof.layers.opening.values[0]
+            + BabyBearExt4::one(),
+        3 => proof.layers.tail.opening.path.siblings[0] = digest8(983),
+        4 => proof.layers.tail.tail.opening.path.leaf_indices[0]
+            = proof.layers.tail.tail.opening.path.leaf_indices[0] ^ 1,
+        5 => proof.layers.tail.tail.tail.evaluation
+            = proof.layers.tail.tail.tail.evaluation + BabyBearExt4::one(),
+        _ => {}
+    }
+    let verifier_air = AirLdeTranscriptDigest {
+        valid: true,
+        value: digest8(if mutation == 6 { air_transcript + 1 } else { air_transcript }),
+    }
+    let verifier_shift = BabyBear::from_u32(if mutation == 7 { shift + 1 } else { shift })
+    if verify_fri_multi_commitment_query16(verifier_air, verifier_shift, proof) {
+        1
+    } else {
+        0
+    }
 }
 
 pub fn fri_query16_status(
