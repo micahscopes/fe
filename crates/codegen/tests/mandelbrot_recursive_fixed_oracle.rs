@@ -3964,6 +3964,12 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
         &current,
         expected_base_root,
     );
+    let first_base_fields = expected[10..51].to_vec();
+    let first_interaction_fields = expected[174..258].to_vec();
+    expected.push(1);
+    expected.extend(first_base_fields);
+    expected.push(1);
+    expected.extend(first_interaction_fields);
     expected.push(1);
     expected.push(1);
     expected.extend(expected_base_root);
@@ -3972,7 +3978,7 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
     expected.extend([0, 0]);
     expected.extend(expected_base_root);
     expected.extend([0; 8]);
-    assert_eq!(expected.len(), 564, "sparse checkpoint schema must stay nominal");
+    assert_eq!(expected.len(), 691, "sparse checkpoint schema must stay nominal");
     assert_eq!(
         words, expected,
         "caller-owned rows, accumulators, roots, and mutation decisions must match the independent oracle",

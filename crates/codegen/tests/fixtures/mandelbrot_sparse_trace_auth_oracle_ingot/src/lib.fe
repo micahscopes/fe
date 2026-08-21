@@ -17,13 +17,17 @@ use mandelbrot_proof_fixed_air::{
 }
 use mandelbrot_proof_fixed_air_baby_bear::{
     SparseBaseAirRow,
+    SparseBaseAirFields,
     SparseInteractionAccumulators,
+    SparseInteractionAirFields,
     SparseInteractionTraceDigest,
     SparseInteractionTraceRow,
     SparseTraceDigest,
     SparseTraceAuthentication,
     empty_sparse_trace_authentication,
     sparse_base_air_row_from_witness,
+    sparse_base_air_fields,
+    sparse_interaction_air_fields,
     sparse_interaction_challenges,
     sparse_interaction_trace_root_power_of_two,
     sparse_trace_root_power_of_two,
@@ -53,6 +57,8 @@ derive CanonicalWords for SparseAirPrefix4 using CanonicalWordsProvider
 
 struct SparseAirCheckpoint4 {
     pub prefix: SparseAirPrefix4,
+    pub base_fields: SparseBaseAirFields,
+    pub interaction_fields: SparseInteractionAirFields,
     pub interaction: SparseInteractionTraceDigest<4>,
     pub accepts_candidate_a: bool,
     pub accepts_candidate_b: bool,
@@ -249,6 +255,8 @@ pub fn fixed_transition4_sparse_air_checkpoint_encoded(
     ])
     let checkpoint = SparseAirCheckpoint4 {
         prefix: prefix,
+        base_fields: sparse_base_air_fields(ref base_rows[0]),
+        interaction_fields: sparse_interaction_air_fields(ref interaction_rows[0]),
         interaction: interaction,
         accepts_candidate_a: interaction.value.equals(candidate_a),
         accepts_candidate_b: interaction.value.equals(candidate_b),

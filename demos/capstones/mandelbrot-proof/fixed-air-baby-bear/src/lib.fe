@@ -16,6 +16,7 @@ use canonical_words::{
     canonical_prefix_word_count,
     decode_canonical_prefix,
     encode_canonical_prefix,
+    encode_canonical_word_array,
 }
 use mandelbrot_proof_fixed_air::FixedMandelbrotTransitionWitness
 use mandelbrot_proof_fixed_air_core::{
@@ -251,6 +252,62 @@ pub struct SparseInteractionTraceRow {
 }
 impl core::marker::Copy for SparseInteractionTraceRow {}
 derive CanonicalWords for SparseInteractionTraceRow using CanonicalWordsProvider
+
+/// Polynomial column counts are derived from the nominal row codecs. They are
+/// public so LDE, commitment, query, and verifier carriers can share the exact
+/// schema without copying numeric column declarations.
+pub const SPARSE_BASE_AIR_FIELDS: usize =
+    <SparseBaseAirRow as CanonicalWords>::WORDS as usize
+pub const SPARSE_INTERACTION_AIR_FIELDS: usize =
+    <SparseInteractionTraceRow as CanonicalWords>::WORDS as usize
+
+pub struct SparseBaseAirFields {
+    pub valid: bool,
+    pub values: [BabyBear; SPARSE_BASE_AIR_FIELDS],
+}
+impl core::marker::Copy for SparseBaseAirFields {}
+derive CanonicalWords for SparseBaseAirFields using CanonicalWordsProvider
+
+pub struct SparseInteractionAirFields {
+    pub valid: bool,
+    pub values: [BabyBear; SPARSE_INTERACTION_AIR_FIELDS],
+}
+impl core::marker::Copy for SparseInteractionAirFields {}
+derive CanonicalWords for SparseInteractionAirFields using CanonicalWordsProvider
+
+pub fn sparse_base_air_fields(_ row: ref SparseBaseAirRow) -> SparseBaseAirFields {
+    let encoded = encode_canonical_word_array<
+        SparseBaseAirRow,
+        SPARSE_BASE_AIR_FIELDS,
+    >(row)
+    let mut values = [BabyBear::zero(); SPARSE_BASE_AIR_FIELDS]
+    if !encoded.valid { return SparseBaseAirFields { valid: false, values: values } }
+    let mut index: usize = 0
+    while index < SPARSE_BASE_AIR_FIELDS {
+        values[index] = BabyBear::from_u32(encoded.words[index])
+        index = index + 1
+    }
+    SparseBaseAirFields { valid: true, values: values }
+}
+
+pub fn sparse_interaction_air_fields(
+    _ row: ref SparseInteractionTraceRow,
+) -> SparseInteractionAirFields {
+    let encoded = encode_canonical_word_array<
+        SparseInteractionTraceRow,
+        SPARSE_INTERACTION_AIR_FIELDS,
+    >(row)
+    let mut values = [BabyBear::zero(); SPARSE_INTERACTION_AIR_FIELDS]
+    if !encoded.valid {
+        return SparseInteractionAirFields { valid: false, values: values }
+    }
+    let mut index: usize = 0
+    while index < SPARSE_INTERACTION_AIR_FIELDS {
+        values[index] = BabyBear::from_u32(encoded.words[index])
+        index = index + 1
+    }
+    SparseInteractionAirFields { valid: true, values: values }
+}
 
 /// Sequential state of the four log-derivative copy buses.
 pub struct SparseInteractionAccumulators {
