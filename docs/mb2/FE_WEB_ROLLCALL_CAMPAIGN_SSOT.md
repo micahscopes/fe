@@ -1084,13 +1084,25 @@ Legend:
   semantic family. The older enum-based phase oracles remain independent
   compatibility checks. The full recursive fixed-point gate passes 1/1 in
   97.91 seconds.
-  This root authenticates the exact base trace but is not yet a succinct leaf
-  proof. The constrained control trace must now be committed beside the six
-  witness lanes. The four random-power copy balances also need committed
-  interaction accumulators with zero boundary constraints. Those columns must
-  then enter the existing BabyBear LDE, composition, multi-query, FRI, and
-  canonical receipt interpreters. Only that authenticated AIR/FRI receipt may
-  replace semantic replay in the recursive parent carrier.
+  Commit `5bf69746b` upgrades each sparse leaf to the nominal `SL02` protocol
+  and authenticates its exact 33-column control row beside the six witness
+  lanes. Both leaf hashing and structural control equality are now derived in
+  Fe from the record shape: `CanonicalWords` streams the typed leaf directly
+  into Poseidon2, while the Fe-authored `Eq` derive provider generates the
+  nested comparison. There is no manually maintained 44-field Fe table.
+  Generic `WordField<M>` now supplies core `Eq`, so the same structural route
+  remains available to other word-field records. The independent Rust oracle
+  still spells out a separate field layout, reconstructs all 4,096 `SL02`
+  leaves with Plonky3 Poseidon2, and matches the complete Fe root. Directed
+  mutations now cover task selector, linear role, range role, semantic
+  payload, flag, witness lane, metadata, path, and root fields. The full gate
+  passes 1/1 in 139.83 seconds.
+  This root authenticates the exact control and witness base trace but is not
+  yet a succinct leaf proof. The four random-power copy balances still need
+  committed interaction accumulators with zero boundary constraints. Those
+  columns must then enter the existing BabyBear LDE, composition, multi-query,
+  FRI, and canonical receipt interpreters. Only that authenticated AIR/FRI
+  receipt may replace semantic replay in the recursive parent carrier.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
   The first arithmetic-plan consolidation is landed at `ba2ded864`: one
@@ -1176,9 +1188,9 @@ fallback. The semantic receipts are:
 ## Immediate burn-down order
 
 1. Run the external real-GPU handoff above before beginning the proof GPU port.
-2. Retarget the protocol to BabyBear with independent exactness gates, then
-   derive the multi-limb chunk and recursive-accumulator statement. Do not port
-   BN254 Fr to WGSL.
+2. Finish the authenticated BabyBear sparse AIR: commit copy-bus interaction
+   accumulators, then feed control, witness, and interactions through the
+   existing LDE, composition, multi-query, FRI, and canonical receipt layers.
 3. Lower the BabyBear leaf prover and recursive merges through Fe Conal/CTFE
    WebGPU schedules, then run the complete progressive proof/verify/tamper page
    through Chrome.
