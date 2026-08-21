@@ -21,6 +21,7 @@ const PRODUCT_WITNESS_WORDS: usize = 24;
 const LINEAR_WITNESS_WORDS: usize = 33;
 const RANGE_WITNESS_WORDS: usize = LIMBS * LIMB_BITS * 2 + 1;
 const TRANSITION_WITNESS_WORDS: usize = 1 + 3 * PRODUCT_WITNESS_WORDS + 4 * LINEAR_WITNESS_WORDS;
+const PRODUCT_CARRY_RANGE_WORDS: usize = LIMBS * 2 * 18 * 2;
 const POSEIDON_WIDTH: usize = 16;
 const BABY_BEAR_MODULUS: u32 = 2_013_265_921;
 
@@ -224,6 +225,32 @@ fn expected_product_witness_words(left: &Fx, right: &Fx) -> Vec<u32> {
     words.extend([round_up as u32, (round_carry == 1) as u32]);
     words.extend(fixed_words(&expected_output));
     assert_eq!(words.len(), PRODUCT_WITNESS_WORDS);
+    words
+}
+
+fn expected_bounded_u18_words(value: u32, bound: u32) -> Vec<u32> {
+    assert!(value <= bound);
+    assert!(bound < (1 << 18));
+    let mut words = Vec::with_capacity(36);
+    words.extend((0..18).map(|bit| (value >> bit) & 1));
+    let slack = bound - value;
+    words.extend((0..18).map(|bit| (slack >> bit) & 1));
+    words
+}
+
+fn expected_product_carry_range_words(left: &Fx, right: &Fx) -> Vec<u32> {
+    let product = expected_product_witness_words(left, right);
+    let bound = LIMBS as u32 * (LIMB_BASE - 1);
+    let low_carries = &product[1 + LIMBS..1 + 2 * LIMBS];
+    let high_carries = &product[1 + 3 * LIMBS..1 + 4 * LIMBS];
+    let mut words = Vec::with_capacity(PRODUCT_CARRY_RANGE_WORDS);
+    for carry in low_carries {
+        words.extend(expected_bounded_u18_words(*carry, bound));
+    }
+    for carry in high_carries {
+        words.extend(expected_bounded_u18_words(*carry, bound));
+    }
+    assert_eq!(words.len(), PRODUCT_CARRY_RANGE_WORDS);
     words
 }
 
@@ -697,6 +724,82 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
             actual, expected_witness,
             "fixed product witness case {case}",
         );
+        let (_, _, actual_carry_range) = encoded(
+            &mut store,
+            &instance,
+            memory,
+            "fixed_product_carry_range4_encoded",
+            &arguments,
+        );
+        assert_eq!(
+            actual_carry_range,
+            expected_product_carry_range_words(left, right),
+            "fixed product carry range case {case}",
+        );
+        for coefficient in 0..(LIMBS * 2) as u32 {
+            for relation in [0u32, 1] {
+                for bit_index in 0..18u32 {
+                    let mut residual_arguments = arguments.clone();
+                    residual_arguments.extend([relation, coefficient, bit_index]);
+                    assert_eq!(
+                        call(
+                            &mut store,
+                            &instance,
+                            "fixed_product_carry_range4_residual",
+                            &residual_arguments,
+                            1,
+                        ),
+                        [0],
+                        "carry bit relation {relation}, coefficient {coefficient}, bit {bit_index}, case {case}",
+                    );
+                }
+            }
+            for relation in [2u32, 3] {
+                let mut residual_arguments = arguments.clone();
+                residual_arguments.extend([relation, coefficient, 0]);
+                assert_eq!(
+                    call(
+                        &mut store,
+                        &instance,
+                        "fixed_product_carry_range4_residual",
+                        &residual_arguments,
+                        1,
+                    ),
+                    [0],
+                    "carry scalar relation {relation}, coefficient {coefficient}, case {case}",
+                );
+            }
+        }
+        for mutation in 0..=3u32 {
+            let mut mutation_arguments = arguments.clone();
+            mutation_arguments.push(mutation);
+            assert_eq!(
+                call(
+                    &mut store,
+                    &instance,
+                    "fixed_product_carry_range4_mutation_holds",
+                    &mutation_arguments,
+                    1,
+                ),
+                [(mutation == 0) as u32],
+                "carry range mutation {mutation}, case {case}",
+            );
+        }
+        for mutation in 1..=3u32 {
+            let mut mutation_arguments = arguments.clone();
+            mutation_arguments.push(mutation);
+            assert_ne!(
+                call(
+                    &mut store,
+                    &instance,
+                    "fixed_product_carry_range4_mutated_residual",
+                    &mutation_arguments,
+                    1,
+                )[0],
+                0,
+                "mutated carry range residual {mutation}, case {case}",
+            );
+        }
         assert_eq!(
             call(
                 &mut store,

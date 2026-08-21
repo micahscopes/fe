@@ -15,6 +15,7 @@ use mandelbrot_proof_recursive_baby_bear::{
 use mandelbrot_proof_fixed_air::{
     FixedLinearWitness,
     FixedMandelbrotTransitionWitness,
+    FixedProductCarryRangeWitness,
     FixedProductWitness,
     RadixRangeWitness,
     boolean_residual,
@@ -23,6 +24,7 @@ use mandelbrot_proof_fixed_air::{
     convolution_right_index,
     convolution_term_count,
     derive_fixed_product_witness,
+    derive_fixed_product_carry_range_witness,
     derive_fixed_difference_witness,
     derive_fixed_mandelbrot_transition_witness,
     derive_fixed_sum_witness,
@@ -31,6 +33,7 @@ use mandelbrot_proof_fixed_air::{
     fixed_mandelbrot_transition_output,
     fixed_mandelbrot_transition_witness_holds,
     fixed_product_witness_holds,
+    fixed_product_carry_range_witness_holds,
     fixed_range_witness_holds,
     fixed_sign_zero_residual,
     linear_addition_residual,
@@ -42,6 +45,9 @@ use mandelbrot_proof_fixed_air::{
     linear_right_difference_residual,
     linear_same_sign_residual,
     max_convolution_limbs_below,
+    product_carry_bit_residual,
+    product_carry_bound_residual,
+    product_carry_value_residual,
     radix_bit_boolean_residual,
     radix_limb_reconstruction_residual,
     radix_nonzero_residual,
@@ -71,6 +77,7 @@ type ProductWitness4 = FixedProductWitness<4>
 type LinearWitness4 = FixedLinearWitness<4>
 type RangeWitness4 = RadixRangeWitness<4>
 type TransitionWitness4 = FixedMandelbrotTransitionWitness<4>
+type ProductCarryRangeWitness4 = FixedProductCarryRangeWitness<4>
 
 fn fixed4(_ negative: u32, _ limbs: [u32; 4]) -> Fixed<4> {
     Fixed { negative: negative == 1, limbs: limbs }
@@ -601,6 +608,143 @@ pub fn fixed_product4_encoded(
     )
     let writer = BrowserWordWriter::allocate(<ProductWitness4 as CanonicalWords>::WORDS)
     encode_canonical_words(ref witness, writer).finish()
+}
+
+pub fn fixed_product_carry_range4_encoded(
+    _ left_negative: u32,
+    _ l0: u32,
+    _ l1: u32,
+    _ l2: u32,
+    _ l3: u32,
+    _ right_negative: u32,
+    _ r0: u32,
+    _ r1: u32,
+    _ r2: u32,
+    _ r3: u32,
+) -> BrowserBytes {
+    let (_left, _right, product) = product4(
+        left_negative,
+        [l0, l1, l2, l3],
+        right_negative,
+        [r0, r1, r2, r3],
+    )
+    let witness = derive_fixed_product_carry_range_witness(product)
+    let writer = BrowserWordWriter::allocate(
+        <ProductCarryRangeWitness4 as CanonicalWords>::WORDS,
+    )
+    encode_canonical_words(ref witness, writer).finish()
+}
+
+pub fn fixed_product_carry_range4_mutation_holds(
+    _ left_negative: u32,
+    _ l0: u32,
+    _ l1: u32,
+    _ l2: u32,
+    _ l3: u32,
+    _ right_negative: u32,
+    _ r0: u32,
+    _ r1: u32,
+    _ r2: u32,
+    _ r3: u32,
+    _ mutation: u32,
+) -> u32 {
+    let (_left, _right, mut product) = product4(
+        left_negative,
+        [l0, l1, l2, l3],
+        right_negative,
+        [r0, r1, r2, r3],
+    )
+    let mut witness = derive_fixed_product_carry_range_witness(product)
+    if mutation == 1 { product.low_carries[0] = product.low_carries[0] + 1 }
+    if mutation == 2 { witness.low[0].bits[0] = 1 - witness.low[0].bits[0] }
+    if mutation == 3 {
+        witness.low[0].slack_bits[0] = 1 - witness.low[0].slack_bits[0]
+    }
+    if fixed_product_carry_range_witness_holds(
+        product,
+        BABY_BEAR_MODULUS,
+        witness,
+    ) { 1 } else { 0 }
+}
+
+pub fn fixed_product_carry_range4_residual(
+    _ left_negative: u32,
+    _ l0: u32,
+    _ l1: u32,
+    _ l2: u32,
+    _ l3: u32,
+    _ right_negative: u32,
+    _ r0: u32,
+    _ r1: u32,
+    _ r2: u32,
+    _ r3: u32,
+    _ relation: u32,
+    _ coefficient: u32,
+    _ bit_index: u32,
+) -> u32 {
+    let (_left, _right, product) = product4(
+        left_negative,
+        [l0, l1, l2, l3],
+        right_negative,
+        [r0, r1, r2, r3],
+    )
+    let witness = derive_fixed_product_carry_range_witness(product)
+    if relation == 0 {
+        return product_carry_bit_residual<BabyBear, 4>(
+            witness,
+            coefficient,
+            false,
+            bit_index,
+        ).to_u32()
+    }
+    if relation == 1 {
+        return product_carry_bit_residual<BabyBear, 4>(
+            witness,
+            coefficient,
+            true,
+            bit_index,
+        ).to_u32()
+    }
+    if relation == 2 {
+        return product_carry_value_residual<BabyBear, 4>(
+            product,
+            witness,
+            coefficient,
+        ).to_u32()
+    }
+    product_carry_bound_residual<BabyBear, 4>(witness, coefficient).to_u32()
+}
+
+pub fn fixed_product_carry_range4_mutated_residual(
+    _ left_negative: u32,
+    _ l0: u32,
+    _ l1: u32,
+    _ l2: u32,
+    _ l3: u32,
+    _ right_negative: u32,
+    _ r0: u32,
+    _ r1: u32,
+    _ r2: u32,
+    _ r3: u32,
+    _ mutation: u32,
+) -> u32 {
+    let (_left, _right, mut product) = product4(
+        left_negative,
+        [l0, l1, l2, l3],
+        right_negative,
+        [r0, r1, r2, r3],
+    )
+    let mut witness = derive_fixed_product_carry_range_witness(product)
+    if mutation == 1 {
+        product.low_carries[0] = product.low_carries[0] + 1
+        return product_carry_value_residual<BabyBear, 4>(product, witness, 0).to_u32()
+    }
+    if mutation == 2 {
+        witness.low[0].bits[0] = 1 - witness.low[0].bits[0]
+        return product_carry_value_residual<BabyBear, 4>(product, witness, 0).to_u32()
+    }
+    witness.low[0].slack_bits[0] = 1 - witness.low[0].slack_bits[0]
+    product_carry_bound_residual<BabyBear, 4>(witness, 0).to_u32()
 }
 
 pub fn fixed_product4_mutation_holds(

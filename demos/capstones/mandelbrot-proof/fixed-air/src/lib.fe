@@ -143,6 +143,24 @@ pub struct RadixRangeWitness<const L: usize> {
 impl<const L: usize> core::marker::Copy for RadixRangeWitness<L> {}
 derive CanonicalWords for RadixRangeWitness<L> using CanonicalWordsProvider
 
+/// An 18-bit value and an 18-bit slack. The equations
+/// `value = bits` and `value + slack = bound` prove `value <= bound` without a
+/// comparison opcode. Eighteen bits cover every carry at the derived
+/// BabyBear-safe maximum of 30 radix-2^13 limbs.
+pub struct BoundedU18Witness {
+    pub bits: [u32; 18],
+    pub slack_bits: [u32; 18],
+}
+impl core::marker::Copy for BoundedU18Witness {}
+derive CanonicalWords for BoundedU18Witness using CanonicalWordsProvider
+
+pub struct FixedProductCarryRangeWitness<const L: usize> {
+    pub low: [BoundedU18Witness; L],
+    pub high: [BoundedU18Witness; L],
+}
+impl<const L: usize> core::marker::Copy for FixedProductCarryRangeWitness<L> {}
+derive CanonicalWords for FixedProductCarryRangeWitness<L> using CanonicalWordsProvider
+
 /// One exact `z_(n+1) = z_n^2 + c` dependency DAG. The record stores only
 /// arithmetic witnesses; edges are passed directly from each typed output to
 /// the next relation, so there are no copied intermediate columns to reconcile.
@@ -199,6 +217,117 @@ fn empty_linear_witness<const L: usize>() -> FixedLinearWitness<L> {
 
 fn empty_radix_limb_range_witness() -> RadixLimbRangeWitness {
     RadixLimbRangeWitness { bits: [0; 13], nonzero_prefix: [0; 13] }
+}
+
+fn empty_bounded_u18_witness() -> BoundedU18Witness {
+    BoundedU18Witness { bits: [0; 18], slack_bits: [0; 18] }
+}
+
+fn u18_bits(_ value: u32) -> [u32; 18] {
+    let mut bits = [0; 18]
+    let mut index: usize = 0
+    while index < 18 {
+        bits[index] = (value >> index.downcast_truncate()) & 1
+        index = index + 1
+    }
+    bits
+}
+
+pub fn derive_bounded_u18_witness(
+    _ value: u32,
+    _ bound: u32,
+) -> BoundedU18Witness {
+    if value > bound || bound >= 262144 { return empty_bounded_u18_witness() }
+    BoundedU18Witness {
+        bits: u18_bits(value),
+        slack_bits: u18_bits(bound - value),
+    }
+}
+
+fn bits18_value(_ bits: [u32; 18]) -> (bool, u32) {
+    let mut valid = true
+    let mut value: u32 = 0
+    let mut place: u32 = 1
+    let mut index: usize = 0
+    while index < 18 {
+        if bits[index] > 1 { valid = false }
+        value = value + bits[index] * place
+        place = place + place
+        index = index + 1
+    }
+    (valid, value)
+}
+
+pub fn bounded_u18_witness_holds(
+    _ value: u32,
+    _ bound: u32,
+    _ witness: BoundedU18Witness,
+) -> bool {
+    if bound >= 262144 { return false }
+    let (value_valid, reconstructed) = bits18_value(witness.bits)
+    let (slack_valid, slack) = bits18_value(witness.slack_bits)
+    value_valid
+        && slack_valid
+        && reconstructed == value
+        && reconstructed + slack == bound
+}
+
+pub const fn product_carry_bound<const L: usize>() -> u32 {
+    let limbs: u32 = L.downcast_truncate()
+    limbs * FIXED_LIMB_MASK
+}
+
+fn product_carry_range_at<const L: usize>(
+    _ witness: FixedProductCarryRangeWitness<L>,
+    _ coefficient: u32,
+) -> BoundedU18Witness {
+    let limbs: u32 = L.downcast_truncate()
+    if coefficient < limbs {
+        witness.low[coefficient as usize]
+    } else {
+        witness.high[(coefficient - limbs) as usize]
+    }
+}
+
+pub fn derive_fixed_product_carry_range_witness<const L: usize>(
+    _ product: FixedProductWitness<L>,
+) -> FixedProductCarryRangeWitness<L> {
+    let mut low = [empty_bounded_u18_witness(); L]
+    let mut high = [empty_bounded_u18_witness(); L]
+    let bound = product_carry_bound<L>()
+    let mut index: usize = 0
+    while index < L {
+        low[index] = derive_bounded_u18_witness(product.low_carries[index], bound)
+        high[index] = derive_bounded_u18_witness(product.high_carries[index], bound)
+        index = index + 1
+    }
+    FixedProductCarryRangeWitness { low: low, high: high }
+}
+
+pub fn fixed_product_carry_range_witness_holds<const L: usize>(
+    _ product: FixedProductWitness<L>,
+    _ modulus: u32,
+    _ witness: FixedProductCarryRangeWitness<L>,
+) -> bool {
+    if !convolution_is_safe_below<L>(modulus)
+        || product_carry_bound<L>() >= 262144
+    {
+        return false
+    }
+    let limbs: u32 = L.downcast_truncate()
+    let bound = product_carry_bound<L>()
+    let mut coefficient: u32 = 0
+    while coefficient < limbs + limbs {
+        if !bounded_u18_witness_holds(
+            witness_carry(product, coefficient),
+            bound,
+            product_carry_range_at(witness, coefficient),
+        ) {
+            return false
+        }
+        coefficient = coefficient + 1
+    }
+    true
 }
 
 fn empty_transition_witness<const L: usize>() -> FixedMandelbrotTransitionWitness<L> {
@@ -718,6 +847,63 @@ fn field_natural<F: Radix2Field>(_ value: u32) -> F {
 
 fn field_boolean<F: Radix2Field>(_ value: bool) -> F {
     field_natural<F>(if value { 1 } else { 0 })
+}
+
+fn field_bits18<F: Radix2Field>(_ bits: [u32; 18]) -> F {
+    let mut reconstructed = F::radix2_zero()
+    let mut place = F::radix2_root(0)
+    let mut index: usize = 0
+    while index < 18 {
+        reconstructed = reconstructed.radix2_add(
+            field_natural<F>(bits[index]).radix2_mul(place),
+        )
+        place = place.radix2_add(place)
+        index = index + 1
+    }
+    reconstructed
+}
+
+pub fn product_carry_bit_residual<F: Radix2Field, const L: usize>(
+    _ witness: FixedProductCarryRangeWitness<L>,
+    _ coefficient: u32,
+    _ slack: bool,
+    _ bit_index: u32,
+) -> F {
+    let limbs: u32 = L.downcast_truncate()
+    if coefficient >= limbs + limbs || bit_index >= 18 {
+        return F::radix2_zero()
+    }
+    let bounded = product_carry_range_at(witness, coefficient)
+    let bit = if slack {
+        bounded.slack_bits[bit_index as usize]
+    } else {
+        bounded.bits[bit_index as usize]
+    }
+    boolean_residual<F>(bit)
+}
+
+pub fn product_carry_value_residual<F: Radix2Field, const L: usize>(
+    _ product: FixedProductWitness<L>,
+    _ witness: FixedProductCarryRangeWitness<L>,
+    _ coefficient: u32,
+) -> F {
+    let limbs: u32 = L.downcast_truncate()
+    if coefficient >= limbs + limbs { return F::radix2_zero() }
+    field_natural<F>(witness_carry(product, coefficient)).radix2_sub(
+        field_bits18<F>(product_carry_range_at(witness, coefficient).bits),
+    )
+}
+
+pub fn product_carry_bound_residual<F: Radix2Field, const L: usize>(
+    _ witness: FixedProductCarryRangeWitness<L>,
+    _ coefficient: u32,
+) -> F {
+    let limbs: u32 = L.downcast_truncate()
+    if coefficient >= limbs + limbs { return F::radix2_zero() }
+    let bounded = product_carry_range_at(witness, coefficient)
+    field_bits18<F>(bounded.bits)
+        .radix2_add(field_bits18<F>(bounded.slack_bits))
+        .radix2_sub(field_natural<F>(product_carry_bound<L>()))
 }
 
 pub fn transition_output_limb_residual<
