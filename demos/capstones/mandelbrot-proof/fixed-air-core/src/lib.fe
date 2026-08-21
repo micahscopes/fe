@@ -253,6 +253,11 @@ pub const fn sparse_linear_task_count<const L: usize>() -> u32 {
     sparse_linear_node_count() * (limbs * 4 + 1)
 }
 
+pub const fn sparse_boundary_task_count<const L: usize>() -> u32 {
+    let limbs: u32 = L.downcast_truncate()
+    2 * (limbs + 1) + 1
+}
+
 pub const fn sparse_transition_task_count<const L: usize>() -> u32 {
     let limbs: u32 = L.downcast_truncate()
     3 * limbs * limbs + 683 * limbs + 41
@@ -1127,6 +1132,70 @@ pub fn sparse_linear_row_from_witness<F: Radix2Field, const L: usize>(
                 state_after: boolean<F>(linear.output.negative),
             }
         }
+        _ => empty_sparse_row<F>(),
+    }
+}
+
+fn boundary_computed<const L: usize>(
+    _ coordinate: CoordinateNode,
+    _ witness: FixedMandelbrotTransitionWitness<L>,
+) -> Fixed<L> {
+    match coordinate {
+        CoordinateNode::Real => witness.next_real.output,
+        CoordinateNode::Imaginary => witness.next_imaginary.output,
+        CoordinateNode::Invalid => witness.next_real.output,
+    }
+}
+
+fn boundary_claimed<const L: usize>(
+    _ coordinate: CoordinateNode,
+    _ next: ComplexFixed<L>,
+) -> Fixed<L> {
+    match coordinate {
+        CoordinateNode::Real => next.real,
+        CoordinateNode::Imaginary => next.imaginary,
+        CoordinateNode::Invalid => next.real,
+    }
+}
+
+pub fn sparse_boundary_row_from_witness<F: Radix2Field, const L: usize>(
+    _ task: SparseTransitionTask,
+    _ next: ComplexFixed<L>,
+    _ witness: FixedMandelbrotTransitionWitness<L>,
+) -> SparseTaskRow<F> {
+    match task {
+        SparseTransitionTask::BoundarySign(coordinate) => {
+            let computed = boundary_computed(coordinate, witness)
+            let claimed = boundary_claimed(coordinate, next)
+            SparseTaskRow {
+                value: boolean<F>(computed.negative),
+                auxiliary: boolean<F>(claimed.negative),
+                accumulator_before: zero<F>(),
+                accumulator_after: zero<F>(),
+                state_before: zero<F>(),
+                state_after: zero<F>(),
+            }
+        }
+        SparseTransitionTask::BoundaryLimb(coordinate, limb) => {
+            let computed = boundary_computed(coordinate, witness)
+            let claimed = boundary_claimed(coordinate, next)
+            SparseTaskRow {
+                value: natural<F>(computed.limbs[limb as usize]),
+                auxiliary: natural<F>(claimed.limbs[limb as usize]),
+                accumulator_before: zero<F>(),
+                accumulator_after: zero<F>(),
+                state_before: zero<F>(),
+                state_after: zero<F>(),
+            }
+        }
+        SparseTransitionTask::TransitionFinish => SparseTaskRow {
+            value: boolean<F>(witness.valid),
+            auxiliary: zero<F>(),
+            accumulator_before: zero<F>(),
+            accumulator_after: zero<F>(),
+            state_before: zero<F>(),
+            state_after: zero<F>(),
+        },
         _ => empty_sparse_row<F>(),
     }
 }
@@ -2590,6 +2659,235 @@ pub fn sparse_linear_copy_consumer<F: Radix2Field, const L: usize>(
                 row.state_after,
             ))
         }
+        _ => zero<F>(),
+    }
+}
+
+fn absorb_sparse_boundary_row<F: Radix2Field>(
+    _ fold: own ConstraintFold<F>,
+    _ task: SparseTransitionTask,
+    _ row: SparseTaskRow<F>,
+) -> ConstraintFold<F> {
+    let mut fold = fold
+    match task {
+        SparseTransitionTask::BoundarySign(_coordinate) => {
+            fold = fold.absorb(bit_residual(row.value))
+            fold = fold.absorb(bit_residual(row.auxiliary))
+            fold = fold.absorb(sub(row.value, row.auxiliary))
+            fold = fold.absorb(row.accumulator_before)
+            fold = fold.absorb(row.accumulator_after)
+            fold = fold.absorb(row.state_before)
+            fold.absorb(row.state_after)
+        }
+        SparseTransitionTask::BoundaryLimb(_coordinate, _limb) => {
+            fold = fold.absorb(sub(row.value, row.auxiliary))
+            fold = fold.absorb(row.accumulator_before)
+            fold = fold.absorb(row.accumulator_after)
+            fold = fold.absorb(row.state_before)
+            fold.absorb(row.state_after)
+        }
+        SparseTransitionTask::TransitionFinish => {
+            fold = fold.absorb(sub(row.value, one<F>()))
+            fold = fold.absorb(row.auxiliary)
+            fold = fold.absorb(row.accumulator_before)
+            fold = fold.absorb(row.accumulator_after)
+            fold = fold.absorb(row.state_before)
+            fold.absorb(row.state_after)
+        }
+        _ => fold.absorb(one<F>()),
+    }
+}
+
+pub fn evaluate_sparse_boundary_row<F: Radix2Field>(
+    _ challenge: F,
+    _ task: SparseTransitionTask,
+    _ row: SparseTaskRow<F>,
+) -> FixedAirConstraintEvaluation<F> {
+    let fold = absorb_sparse_boundary_row(
+        ConstraintFold<F>::new(challenge),
+        task,
+        row,
+    )
+    FixedAirConstraintEvaluation {
+        valid: match task {
+            SparseTransitionTask::BoundarySign(_) => true,
+            SparseTransitionTask::BoundaryLimb(_, _) => true,
+            SparseTransitionTask::TransitionFinish => true,
+            _ => false,
+        },
+        constraints: fold.constraints,
+        folded: fold.value,
+    }
+}
+
+fn boundary_computed_range(_ coordinate: CoordinateNode) -> RangeNode {
+    match coordinate {
+        CoordinateNode::Real => RangeNode::LinearOutput(LinearNode::NextReal),
+        CoordinateNode::Imaginary => {
+            RangeNode::LinearOutput(LinearNode::NextImaginary)
+        }
+        CoordinateNode::Invalid => RangeNode::Invalid,
+    }
+}
+
+fn boundary_claimed_range(_ coordinate: CoordinateNode) -> RangeNode {
+    match coordinate {
+        CoordinateNode::Real => RangeNode::NextReal,
+        CoordinateNode::Imaginary => RangeNode::NextImaginary,
+        CoordinateNode::Invalid => RangeNode::Invalid,
+    }
+}
+
+fn boundary_copy_key<F: Radix2Field, const L: usize>(
+    _ challenge: F,
+    _ address: SparseCopyAddress,
+) -> F {
+    let limbs: u32 = L.downcast_truncate()
+    let digit_addresses = sparse_range_node_count() * limbs
+    let rank = match address {
+        SparseCopyAddress::RangeDigit(node, limb) => {
+            range_node_rank(node) * limbs + limb
+        }
+        SparseCopyAddress::RangeSign(node) => {
+            digit_addresses + range_node_rank(node)
+        }
+        _ => return zero<F>(),
+    }
+    let mut key = one<F>()
+    let mut exponent: u32 = 0
+    while exponent < rank + 1 {
+        key = mul(key, challenge)
+        exponent = exponent + 1
+    }
+    key
+}
+
+fn boundary_source_for_range<F: Radix2Field, const L: usize>(
+    _ challenge: F,
+    _ node: RangeNode,
+    _ limb: u32,
+    _ value: F,
+    _ candidate: RangeNode,
+) -> F {
+    if range_node_same(node, candidate) {
+        mul(
+            boundary_copy_key<F, L>(
+                challenge,
+                SparseCopyAddress::RangeDigit(node, limb),
+            ),
+            value,
+        )
+    } else {
+        zero<F>()
+    }
+}
+
+pub fn sparse_boundary_copy_source<F: Radix2Field, const L: usize>(
+    _ challenge: F,
+    _ task: SparseTransitionTask,
+    _ row: SparseTaskRow<F>,
+) -> F {
+    match task {
+        SparseTransitionTask::RadixLimb(node, limb) => {
+            let mut contribution = zero<F>()
+            let mut coordinate: u32 = 0
+            while coordinate < 2 {
+                let coordinate_node = coordinate_node_at(coordinate)
+                contribution = add(
+                    contribution,
+                    boundary_source_for_range<F, L>(
+                        challenge,
+                        node,
+                        limb,
+                        row.value,
+                        boundary_computed_range(coordinate_node),
+                    ),
+                )
+                contribution = add(
+                    contribution,
+                    boundary_source_for_range<F, L>(
+                        challenge,
+                        node,
+                        limb,
+                        row.value,
+                        boundary_claimed_range(coordinate_node),
+                    ),
+                )
+                coordinate = coordinate + 1
+            }
+            contribution
+        }
+        SparseTransitionTask::RadixFinish(node) => {
+            let mut contribution = zero<F>()
+            let mut coordinate: u32 = 0
+            while coordinate < 2 {
+                let coordinate_node = coordinate_node_at(coordinate)
+                let computed = boundary_computed_range(coordinate_node)
+                let claimed = boundary_claimed_range(coordinate_node)
+                if range_node_same(node, computed) || range_node_same(node, claimed) {
+                    contribution = add(
+                        contribution,
+                        mul(
+                            boundary_copy_key<F, L>(
+                                challenge,
+                                SparseCopyAddress::RangeSign(node),
+                            ),
+                            row.auxiliary,
+                        ),
+                    )
+                }
+                coordinate = coordinate + 1
+            }
+            contribution
+        }
+        _ => zero<F>(),
+    }
+}
+
+pub fn sparse_boundary_copy_consumer<F: Radix2Field, const L: usize>(
+    _ challenge: F,
+    _ task: SparseTransitionTask,
+    _ row: SparseTaskRow<F>,
+) -> F {
+    match task {
+        SparseTransitionTask::BoundarySign(coordinate) => add(
+            mul(
+                boundary_copy_key<F, L>(
+                    challenge,
+                    SparseCopyAddress::RangeSign(boundary_computed_range(coordinate)),
+                ),
+                row.value,
+            ),
+            mul(
+                boundary_copy_key<F, L>(
+                    challenge,
+                    SparseCopyAddress::RangeSign(boundary_claimed_range(coordinate)),
+                ),
+                row.auxiliary,
+            ),
+        ),
+        SparseTransitionTask::BoundaryLimb(coordinate, limb) => add(
+            mul(
+                boundary_copy_key<F, L>(
+                    challenge,
+                    SparseCopyAddress::RangeDigit(
+                        boundary_computed_range(coordinate),
+                        limb,
+                    ),
+                ),
+                row.value,
+            ),
+            mul(
+                boundary_copy_key<F, L>(
+                    challenge,
+                    SparseCopyAddress::RangeDigit(
+                        boundary_claimed_range(coordinate),
+                        limb,
+                    ),
+                ),
+                row.auxiliary,
+            ),
+        ),
         _ => zero<F>(),
     }
 }

@@ -832,6 +832,38 @@ fn expected_sparse_linear_rows(point: &ComplexFx, current: &ComplexFx) -> Vec<[u
     rows
 }
 
+fn expected_sparse_boundary_rows(point: &ComplexFx, current: &ComplexFx) -> Vec<[u32; 6]> {
+    let next = advance(
+        &Claim {
+            point: point.clone(),
+            bound: 1,
+        },
+        &Boundary {
+            iteration: 0,
+            z: current.clone(),
+            escaped: escaped(current),
+        },
+    )
+    .z;
+    let mut rows = Vec::new();
+    for coordinate in [&next.real, &next.imaginary] {
+        rows.push([
+            coordinate.negative as u32,
+            coordinate.negative as u32,
+            0,
+            0,
+            0,
+            0,
+        ]);
+        for digit in limbs(coordinate) {
+            rows.push([digit, digit, 0, 0, 0, 0]);
+        }
+    }
+    rows.push([1, 0, 0, 0, 0, 0]);
+    assert_eq!(rows.len(), 2 * (LIMBS + 1) + 1);
+    rows
+}
+
 fn complex_words(value: &ComplexFx) -> Vec<u32> {
     let mut words = fixed_words(&value.real);
     words.extend(fixed_words(&value.imaginary));
@@ -1931,6 +1963,79 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                         expected_linear_rows.len() as u32,
                     ],
                     "the linear copy bus alone must reject a locally valid mutation",
+                );
+            }
+
+            let expected_boundary_rows = expected_sparse_boundary_rows(point, current);
+            for (index, expected) in expected_boundary_rows.iter().enumerate() {
+                let mut row_arguments = arguments.clone();
+                row_arguments.push(index as u32);
+                assert_eq!(
+                    call(
+                        &mut store,
+                        &instance,
+                        "fixed_transition4_sparse_boundary_row",
+                        &row_arguments,
+                        6,
+                    ),
+                    *expected,
+                    "independently reconstructed sparse boundary row {index}",
+                );
+            }
+            let expected_boundary_constraints = 10 * LIMBS as u32 + 21;
+            for challenge in [3u32, 7, 31] {
+                let mut audit_arguments = arguments.clone();
+                audit_arguments.extend([challenge, u32::MAX, 0]);
+                assert_eq!(
+                    call(
+                        &mut store,
+                        &instance,
+                        "fixed_transition4_sparse_boundary_audit",
+                        &audit_arguments,
+                        3,
+                    ),
+                    [
+                        0,
+                        expected_boundary_constraints,
+                        expected_boundary_rows.len() as u32,
+                    ],
+                    "clean sparse boundary and copy-bus audit, challenge {challenge}",
+                );
+            }
+            for lane in 1u32..=6 {
+                let mut audit_arguments = arguments.clone();
+                audit_arguments.extend([7, 0, lane]);
+                let audited = call(
+                    &mut store,
+                    &instance,
+                    "fixed_transition4_sparse_boundary_audit",
+                    &audit_arguments,
+                    3,
+                );
+                assert_ne!(
+                    audited[0], 0,
+                    "sparse boundary first-row lane {lane} mutation must fail",
+                );
+                assert_eq!(audited[1], expected_boundary_constraints);
+                assert_eq!(audited[2], expected_boundary_rows.len() as u32);
+            }
+            for challenge in [3u32, 7, 31] {
+                let mut audit_arguments = arguments.clone();
+                audit_arguments.extend([challenge, 1, 7]);
+                assert_eq!(
+                    call(
+                        &mut store,
+                        &instance,
+                        "fixed_transition4_sparse_boundary_audit",
+                        &audit_arguments,
+                        3,
+                    ),
+                    [
+                        1,
+                        expected_boundary_constraints,
+                        expected_boundary_rows.len() as u32,
+                    ],
+                    "the boundary copy bus alone must reject a locally valid mutation",
                 );
             }
         }
