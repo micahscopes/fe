@@ -894,6 +894,82 @@ derive Compute for Target using Provider
 }
 
 #[test]
+fn provider_builder_borrow_mut_constructs_explicit_mut_arguments() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_builder_borrow_mut.fe".into(),
+        r#"
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+
+trait Clear { fn clear(mut self) }
+
+impl Clear for i32 {
+    fn clear(mut self) { self = 0 }
+}
+
+struct Provider {}
+impl Derive<Clear> for Provider {
+    const fn derive<T>(ev: own Evidence<Clear<T>>) -> Evidence<Clear<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<Clear<T>>)
+    {
+        let field = reflect.fields().at(0)
+        builder.require<Clear>(field.ty())
+        builder.emit_method(
+            "clear",
+            builder.trait_call(
+                field.ty(),
+                "clear",
+                builder.borrow_mut(builder.field_get(builder.self_ref(), field)),
+            ),
+        )
+        builder.finish()
+        ev
+    }
+}
+
+struct Target { value: i32 }
+derive Clear for Target using Provider
+
+fn use_generated(value: mut Target) { value.clear() }
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+    let semantic_diags = collect_semantic_borrow_diagnostic_vouchers(&db, top_mod);
+    assert!(semantic_diags.is_empty());
+}
+
+#[test]
+fn provider_builder_borrow_mut_rejects_non_expression_values() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_builder_borrow_mut_reject.fe".into(),
+        r#"
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+trait Compute { fn run(self) -> u32 }
+struct Provider {}
+impl Derive<Compute> for Provider {
+    const fn derive<T>(ev: own Evidence<Compute<T>>) -> Evidence<Compute<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<Compute<T>>)
+    {
+        builder.emit_method("run", builder.borrow_mut(builder.ty<u32>()))
+        builder.finish()
+        ev
+    }
+}
+struct Target {}
+derive Compute for Target using Provider
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let rendered = fe_hir::test_db::format_diagnostics(&db, &db.run_on_top_mod(top_mod));
+    assert!(
+        rendered.contains("this construct is not supported in derive provider bodies"),
+        "non-expression mutable borrow inputs must fail closed:\n{rendered}"
+    );
+}
+
+#[test]
 fn provider_natural_range_and_integer_codegen_share_the_quote_dag() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
