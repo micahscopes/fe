@@ -914,8 +914,9 @@ Legend:
   nominal DAG. `SparseTransitionTask` has typed radix, carry, product, linear,
   and boundary variants whose payloads name `ProductNode`, `LinearNode`,
   `RangeNode`, and `CoordinateNode`; application code does not maintain a
-  phase-ID or 31-column table. The plan contains `3*L*L + 671*L + 41`
-  microtasks. Independent Rust enumeration matches every one of the 2,773 L4
+  phase-ID or 31-column table. The plan contains `3*L*L + 683*L + 41`
+  microtasks after the linear-role refinement recorded below. Independent Rust
+  enumeration matches every one of the 2,821 L4
   task signatures, including triangular convolution ranks and the first
   invalid padding row. The derived radix-two placements are 4,096 rows at L4,
   8,192 at L8, and 16,384 at L20. Focused nextest passes 1/1 in 34.89 seconds.
@@ -983,6 +984,22 @@ Legend:
   row-lane mutation, and rejects a locally valid retained/output substitution
   through the copy bus alone. Focused nextest passes 1/1 in 42.17 seconds.
   The next gate is the four signed linear ripples plus their copy bus.
+  Commit `0710f2e75` completes those four signed linear nodes. The former
+  overloaded `LinearLimb` task is now a nominal role family for sum, both
+  directed differences, and output selection. This adds 12 rows per limb but
+  keeps every arithmetic row at six fields and leaves the L4, L8, and L20
+  domains at 4,096, 8,192, and 16,384 rows. Independent enumeration now checks
+  2,821, 5,697, and 14,901 semantic tasks. The four L4 nodes occupy 68 rows and
+  constrain all carry and borrow chains, magnitude comparison from the final
+  borrow, signed addition/subtraction selection, output nonzero, and canonical
+  output sign. Four per-node typed copy buses bind every repeated input,
+  intermediate, selector, final borrow, and output back to the range rows or
+  its unique arithmetic producer. The independent model matches every row;
+  zero-import Fe Wasm checks 276 local, adjacency, and copy-balance relations
+  under three challenges, rejects every lane mutation, and uses the copy bus
+  alone to reject a locally valid input/output substitution. Focused nextest
+  passes 1/1 in 49.26 seconds. Only final transition boundary equality and a
+  combined sparse-versus-wide directed mutation gate remain in this AIR slice.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
   The first arithmetic-plan consolidation is landed at `ba2ded864`: one
