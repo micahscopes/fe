@@ -800,7 +800,7 @@ Legend:
   structurizer fixes, but that browser gate is not landed until those commits
   are published and the Fe dependency pin advances. The complete protocol
   retarget remains pending.
-- [ ] Make the production claim a chunked recursive high-precision recurrence,
+- [~] Make the production claim a chunked recursive high-precision recurrence,
   not one monolithic fixed-Q12 trace. BabyBear is the proof field, not the
   numeric precision ceiling: derive each signed fixed-point coordinate from a
   const-generic vector of bounded base-field limbs, initially reusing the
@@ -1026,6 +1026,34 @@ Legend:
   equivalence item is complete. The next item is to commit the sparse rows as
   authenticated BabyBear leaf openings and bind recursive parent receipts to
   those leaf proofs rather than replaying a semantic interval.
+  Commits `451f35a27`, `2a8924d3c`, and `f09d1d14a` close the base-trace
+  authentication slice without overstating it as a STARK. One
+  `sparse_transition_row_from_witness` interpreter now derives every active
+  six-column row and canonical zero padding from `SparseTransitionTask`; all
+  existing independent phase oracles execute through that shared entry. The
+  reusable `merkle_core` API can now borrow a large leaf matrix and emit a root
+  plus normalized sparse path in one traversal. This avoids both duplicate
+  hashing and a 32,768-lane Wasm signature, a failure the L4 consumer exposed
+  when `[Poseidon2Digest; 4096]` was initially passed by value. The separate
+  `mandelbrot_proof_fixed_air_baby_bear` ingot commits a nominal leaf containing
+  limb count, semantic task count, power-of-two trace length, row index,
+  active flag, and the six readable witness lanes under the `SL01` Poseidon2
+  domain. Its limb-branded root, canonical variable-length multipath, and
+  authentication verifier reuse the shared Poseidon2, canonical-word, and
+  zk-kit-derived Merkle interpreters. An independent Rust model reconstructs
+  all 4,096 leaf messages, applies Plonky3 Poseidon2, and matches the complete
+  Fe root. The gate accepts active and padded openings and rejects mutations
+  to the root, path index, sibling, metadata, active flag, row value, codec
+  length, and out-of-range request. It passes 1/1 in 66.20 seconds; the older
+  independent BabyBear LDE multipath regression remains green at 1/1 in
+  545.02 seconds.
+  This root authenticates the exact base trace but is not yet a succinct leaf
+  proof. The task schedule still needs polynomial fixed-selector or constrained
+  control columns at LDE points, and the four random-power copy balances need
+  committed interaction accumulators with zero boundary constraints. Those
+  columns must then enter the existing BabyBear LDE, composition, multi-query,
+  FRI, and canonical receipt interpreters. Only that authenticated AIR/FRI
+  receipt may replace semantic replay in the recursive parent carrier.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
   The first arithmetic-plan consolidation is landed at `ba2ded864`: one
