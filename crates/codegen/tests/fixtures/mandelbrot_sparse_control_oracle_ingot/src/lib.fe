@@ -22,10 +22,15 @@ pub fn sparse_control4_row(
     u32, u32, u32, u32, u32,
     u32, u32, u32, u32, u32,
     u32, u32, u32, u32, u32,
-    u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32,
+    u32, u32, u32,
 ) {
     let row = control4(index)
     let selectors = row.selectors
+    let roles = row.linear_roles
+    let range = row.range_roles
     (
         selectors.radix_bit.to_u32(),
         selectors.radix_limb.to_u32(),
@@ -42,6 +47,18 @@ pub fn sparse_control4_row(
         selectors.boundary_limb.to_u32(),
         selectors.transition_finish.to_u32(),
         selectors.padding.to_u32(),
+        roles.sum.to_u32(),
+        roles.left_difference.to_u32(),
+        roles.right_difference.to_u32(),
+        roles.select.to_u32(),
+        range.coordinate.to_u32(),
+        range.product_low.to_u32(),
+        range.product_high.to_u32(),
+        range.product_output.to_u32(),
+        range.linear_sum.to_u32(),
+        range.linear_left_difference.to_u32(),
+        range.linear_right_difference.to_u32(),
+        range.linear_output.to_u32(),
         row.major.to_u32(),
         row.minor.to_u32(),
         row.step.to_u32(),
@@ -104,12 +121,54 @@ fn mutate_control4(
     if lane == 14 {
         row.selectors.padding = row.selectors.padding.radix2_add(one)
     }
-    if lane == 15 { row.major = row.major.radix2_add(one) }
-    if lane == 16 { row.minor = row.minor.radix2_add(one) }
-    if lane == 17 { row.step = row.step.radix2_add(one) }
-    if lane == 18 { row.flag = row.flag.radix2_add(one) }
-    if lane == 19 { row.width = row.width.radix2_add(one) }
-    if lane == 20 { row.weight = row.weight.radix2_add(one) }
+    if lane == 15 {
+        row.linear_roles.sum = row.linear_roles.sum.radix2_add(one)
+    }
+    if lane == 16 {
+        row.linear_roles.left_difference =
+            row.linear_roles.left_difference.radix2_add(one)
+    }
+    if lane == 17 {
+        row.linear_roles.right_difference =
+            row.linear_roles.right_difference.radix2_add(one)
+    }
+    if lane == 18 {
+        row.linear_roles.select = row.linear_roles.select.radix2_add(one)
+    }
+    if lane == 19 {
+        row.range_roles.coordinate = row.range_roles.coordinate.radix2_add(one)
+    }
+    if lane == 20 {
+        row.range_roles.product_low = row.range_roles.product_low.radix2_add(one)
+    }
+    if lane == 21 {
+        row.range_roles.product_high = row.range_roles.product_high.radix2_add(one)
+    }
+    if lane == 22 {
+        row.range_roles.product_output =
+            row.range_roles.product_output.radix2_add(one)
+    }
+    if lane == 23 {
+        row.range_roles.linear_sum = row.range_roles.linear_sum.radix2_add(one)
+    }
+    if lane == 24 {
+        row.range_roles.linear_left_difference =
+            row.range_roles.linear_left_difference.radix2_add(one)
+    }
+    if lane == 25 {
+        row.range_roles.linear_right_difference =
+            row.range_roles.linear_right_difference.radix2_add(one)
+    }
+    if lane == 26 {
+        row.range_roles.linear_output =
+            row.range_roles.linear_output.radix2_add(one)
+    }
+    if lane == 27 { row.major = row.major.radix2_add(one) }
+    if lane == 28 { row.minor = row.minor.radix2_add(one) }
+    if lane == 29 { row.step = row.step.radix2_add(one) }
+    if lane == 30 { row.flag = row.flag.radix2_add(one) }
+    if lane == 31 { row.width = row.width.radix2_add(one) }
+    if lane == 32 { row.weight = row.weight.radix2_add(one) }
     row
 }
 

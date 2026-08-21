@@ -2117,6 +2117,71 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                 );
             }
 
+            let first_sparse_kind = |kind: u32| {
+                sparse_tasks
+                    .iter()
+                    .position(|task| task[0] == kind)
+                    .expect("every active sparse arithmetic kind must occur")
+            };
+            let first_linear_role = |role: u32| {
+                sparse_tasks
+                    .iter()
+                    .position(|task| task[0] == 9 && task[2] == role)
+                    .expect("every sparse linear role must occur")
+            };
+            let arithmetic_mutations = [
+                (first_sparse_kind(0), 1u32),
+                (first_sparse_kind(1), 1),
+                (first_sparse_kind(2), 2),
+                (first_sparse_kind(3), 1),
+                (first_sparse_kind(4), 1),
+                (first_sparse_kind(5), 4),
+                (first_sparse_kind(6), 2),
+                (first_sparse_kind(7), 4),
+                (first_sparse_kind(8), 1),
+                (first_linear_role(0), 4),
+                (first_linear_role(1), 4),
+                (first_linear_role(2), 4),
+                (first_linear_role(3), 4),
+                (first_sparse_kind(10), 6),
+                (first_sparse_kind(11), 1),
+                (first_sparse_kind(12), 1),
+                (first_sparse_kind(13), 1),
+                (sparse_tasks.len(), 1),
+            ];
+            for challenge in [3u32, 7, 31] {
+                let mut baseline_arguments = arguments.clone();
+                baseline_arguments.extend([challenge, u32::MAX, 0]);
+                assert_eq!(
+                    call(
+                        &mut store,
+                        &instance,
+                        "fixed_transition4_sparse_arithmetic_audit",
+                        &baseline_arguments,
+                        3,
+                    ),
+                    [0, 413_678, 4096],
+                    "index-free sparse arithmetic baseline, challenge {challenge}",
+                );
+                for (row, lane) in arithmetic_mutations {
+                    let mut audit_arguments = arguments.clone();
+                    audit_arguments.extend([challenge, row as u32, lane]);
+                    let audit = call(
+                        &mut store,
+                        &instance,
+                        "fixed_transition4_sparse_arithmetic_audit",
+                        &audit_arguments,
+                        3,
+                    );
+                    assert!(
+                        audit[0] > 0,
+                        "index-free sparse arithmetic mutation at row {row}, lane {lane}, challenge {challenge}",
+                    );
+                    assert_eq!(audit[1], 413_678);
+                    assert_eq!(audit[2], 4096);
+                }
+            }
+
             let shared_mutations = [
                 (1u32, "fixed_transition4_sparse_product_audit", 1u32, 1u32),
                 (2, "fixed_transition4_sparse_product_audit", 1, 2),
