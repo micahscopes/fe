@@ -850,6 +850,21 @@ Legend:
   passes 1/1. The remaining leaf and parent proof receipts must authenticate
   these carriers; the semantic leaf adapter still replays its interval and is
   deliberately not presented as succinct.
+  Commit `92d779ecc` begins the exact multi-limb AIR at the unsigned magnitude
+  boundary. One limb-count-derived sparse convolution schedule supplies the
+  scalar witness, integer relation verifier, arbitrary-`Radix2Field` residuals,
+  and eventual placement plan. It derives BabyBear's safe 13-bit convolution
+  width as 30 limbs from the modulus and coefficient bound, rather than baking
+  a precision tier. The witness retains every normalized product digit and
+  carry in two `L`-sized stages, then constrains guard-bit rounding, its carry
+  ripple, wrapped output, overflow, and unique sign-zero normalization. The
+  zero-import Wasm gate compares directed and randomized `Fixed<4>` products
+  against an independent `BigUint` schoolbook model, checks generated L4 and
+  L8 schedules term by term, and requires exact nonzero BabyBear residuals for
+  mutated digits, carries, rounding, high digits, and outputs. Focused nextest
+  passes 1/1. This is not yet the complete Mandelbrot transition AIR: signed
+  add/sub selection, range-bit auxiliary columns, and composition of `x*x`,
+  `y*y`, and `x*y` into `z*z + c` remain open.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
   The first arithmetic-plan consolidation is landed at `ba2ded864`: one
