@@ -18,6 +18,8 @@ use mandelbrot_proof_fixed_air_baby_bear::{
     SparseTraceAuthentication,
     empty_sparse_trace_authentication,
     sparse_interaction_challenges,
+    sparse_interaction_trace_root_power_of_two,
+    sparse_trace_root_power_of_two,
     verify_sparse_trace_authentication,
     write_sparse_trace_authentication_power_of_two,
 }
@@ -147,6 +149,55 @@ pub fn sparse_interaction_challenges4(
             coefficient = coefficient + 1
         }
         value = value + 1
+    }
+    words
+}
+
+pub fn fixed_transition4_sparse_interaction_root(
+    _ prn: u32, _ pr0: u32, _ pr1: u32, _ pr2: u32, _ pr3: u32,
+    _ pin: u32, _ pi0: u32, _ pi1: u32, _ pi2: u32, _ pi3: u32,
+    _ crn: u32, _ cr0: u32, _ cr1: u32, _ cr2: u32, _ cr3: u32,
+    _ cin: u32, _ ci0: u32, _ ci1: u32, _ ci2: u32, _ ci3: u32,
+    _ a0: u32, _ a1: u32, _ a2: u32, _ a3: u32,
+    _ a4: u32, _ a5: u32, _ a6: u32, _ a7: u32,
+    _ b0: u32, _ b1: u32, _ b2: u32, _ b3: u32,
+    _ b4: u32, _ b5: u32, _ b6: u32, _ b7: u32,
+) -> [u32; 28] {
+    let (point, current, witness) = transition4(
+        prn, [pr0, pr1, pr2, pr3], pin, [pi0, pi1, pi2, pi3],
+        crn, [cr0, cr1, cr2, cr3], cin, [ci0, ci1, ci2, ci3],
+    )
+    let next = fixed_mandelbrot_transition_output(witness)
+    let base = sparse_trace_root_power_of_two<4, 4096>(
+        point, current, next, witness,
+    )
+    let interaction = sparse_interaction_trace_root_power_of_two<4, 4096>(
+        point, current, next, witness, base,
+    )
+    let invalid = sparse_interaction_trace_root_power_of_two<4, 4096>(
+        point,
+        current,
+        next,
+        witness,
+        SparseTraceDigest<4> { valid: false, value: base.value },
+    )
+    let candidate_a = Poseidon2Digest::from_u32s([
+        a0, a1, a2, a3, a4, a5, a6, a7,
+    ])
+    let candidate_b = Poseidon2Digest::from_u32s([
+        b0, b1, b2, b3, b4, b5, b6, b7,
+    ])
+    let mut words = [0; 28]
+    words[0] = if interaction.valid { 1 } else { 0 }
+    words[1] = if interaction.value.equals(candidate_a) { 1 } else { 0 }
+    words[2] = if interaction.value.equals(candidate_b) { 1 } else { 0 }
+    words[3] = if invalid.valid { 1 } else { 0 }
+    let mut index: usize = 0
+    while index < 8 {
+        words[4 + index] = base.value.field(index.downcast_truncate()).to_u32()
+        words[12 + index] = interaction.value.field(index.downcast_truncate()).to_u32()
+        words[20 + index] = invalid.value.field(index.downcast_truncate()).to_u32()
+        index = index + 1
     }
     words
 }

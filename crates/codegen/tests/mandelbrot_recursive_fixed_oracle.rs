@@ -1098,6 +1098,140 @@ fn bb_inverse(value: u32) -> u32 {
     bb_pow(value, BABY_BEAR_MODULUS - 2)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Ext4([u32; 4]);
+
+impl Ext4 {
+    const ZERO: Self = Self([0; 4]);
+
+    fn from_words(words: &[u32]) -> Self {
+        Self(words.try_into().expect("quartic value must have four coefficients"))
+    }
+
+    fn from_base(value: u32) -> Self {
+        Self([value, 0, 0, 0])
+    }
+
+    fn add(self, other: Self) -> Self {
+        Self(std::array::from_fn(|index| bb_add(self.0[index], other.0[index])))
+    }
+
+    fn scale(self, scalar: u32) -> Self {
+        Self(self.0.map(|coefficient| bb_mul(coefficient, scalar)))
+    }
+
+    fn mul(self, other: Self) -> Self {
+        let a = self.0;
+        let b = other.0;
+        let nonresidue = 11;
+        Self([
+            bb_add(
+                bb_mul(a[0], b[0]),
+                bb_mul(
+                    nonresidue,
+                    bb_add(bb_add(bb_mul(a[1], b[3]), bb_mul(a[2], b[2])), bb_mul(a[3], b[1])),
+                ),
+            ),
+            bb_add(
+                bb_add(bb_mul(a[0], b[1]), bb_mul(a[1], b[0])),
+                bb_mul(nonresidue, bb_add(bb_mul(a[2], b[3]), bb_mul(a[3], b[2]))),
+            ),
+            bb_add(
+                bb_add(bb_add(bb_mul(a[0], b[2]), bb_mul(a[1], b[1])), bb_mul(a[2], b[0])),
+                bb_mul(nonresidue, bb_mul(a[3], b[3])),
+            ),
+            bb_add(
+                bb_add(bb_mul(a[0], b[3]), bb_mul(a[1], b[2])),
+                bb_add(bb_mul(a[2], b[1]), bb_mul(a[3], b[0])),
+            ),
+        ])
+    }
+
+    fn inverse(self) -> Self {
+        let [a0, a1, a2, a3] = self.0;
+        let w = 11;
+        let two = 2;
+        let norm0 = bb_sub(
+            bb_add(bb_mul(a0, a0), bb_mul(w, bb_mul(a2, a2))),
+            bb_mul(bb_mul(two, w), bb_mul(a1, a3)),
+        );
+        let norm1 = bb_sub(
+            bb_sub(bb_mul(two, bb_mul(a0, a2)), bb_mul(a1, a1)),
+            bb_mul(w, bb_mul(a3, a3)),
+        );
+        let norm_inverse = bb_inverse(bb_sub(
+            bb_mul(norm0, norm0),
+            bb_mul(w, bb_mul(norm1, norm1)),
+        ));
+        let inverse0 = bb_mul(norm0, norm_inverse);
+        let inverse1 = bb_sub(0, bb_mul(norm1, norm_inverse));
+        let even0 = bb_add(bb_mul(a0, inverse0), bb_mul(w, bb_mul(a2, inverse1)));
+        let even1 = bb_add(bb_mul(a0, inverse1), bb_mul(a2, inverse0));
+        let odd0 = bb_add(bb_mul(a1, inverse0), bb_mul(w, bb_mul(a3, inverse1)));
+        let odd1 = bb_add(bb_mul(a1, inverse1), bb_mul(a3, inverse0));
+        Self([even0, bb_sub(0, odd0), even1, bb_sub(0, odd1)])
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ExpectedCopyPort {
+    address: u32,
+    value: u32,
+    coefficient: i32,
+}
+
+fn expected_base_interaction_row<const PORTS: usize>(
+    ports: [Option<ExpectedCopyPort>; PORTS],
+    beta: u32,
+    gamma: u32,
+) -> ([u32; PORTS], u32) {
+    let mut inverses = [0; PORTS];
+    let mut delta = 0;
+    for (index, port) in ports.into_iter().enumerate() {
+        if let Some(port) = port {
+            let inverse = product_copy_compressed_inverse(port.address, port.value, beta, gamma);
+            inverses[index] = inverse;
+            let coefficient = if port.coefficient < 0 {
+                BABY_BEAR_MODULUS - port.coefficient.unsigned_abs()
+            } else {
+                port.coefficient as u32
+            };
+            delta = bb_add(delta, bb_mul(coefficient, inverse));
+        }
+    }
+    (inverses, delta)
+}
+
+fn expected_ext4_interaction_row<const PORTS: usize>(
+    ports: [Option<ExpectedCopyPort>; PORTS],
+    beta: Ext4,
+    gamma: Ext4,
+) -> ([Ext4; PORTS], Ext4) {
+    let mut inverses = [Ext4::ZERO; PORTS];
+    let mut delta = Ext4::ZERO;
+    for (index, port) in ports.into_iter().enumerate() {
+        if let Some(port) = port {
+            let compressed = gamma
+                .add(Ext4::from_base(port.address))
+                .add(beta.scale(port.value));
+            let inverse = compressed.inverse();
+            assert_eq!(
+                compressed.mul(inverse),
+                Ext4::from_base(1),
+                "quartic copy inverse must be exact",
+            );
+            inverses[index] = inverse;
+            let coefficient = if port.coefficient < 0 {
+                BABY_BEAR_MODULUS - port.coefficient.unsigned_abs()
+            } else {
+                port.coefficient as u32
+            };
+            delta = delta.add(inverse.scale(coefficient));
+        }
+    }
+    (inverses, delta)
+}
+
 fn product_range_rank(range: u32) -> Option<u32> {
     match range {
         2 => Some(0),
@@ -1112,31 +1246,34 @@ fn product_copy_compressed_inverse(address: u32, value: u32, beta: u32, gamma: u
     bb_inverse(bb_add(gamma, bb_add(address, bb_mul(beta, value))))
 }
 
-fn expected_product_interaction_ports(
+fn expected_product_copy_ports(
     task: [u32; 5],
     row: [u32; 6],
-    beta: u32,
-    gamma: u32,
-) -> (u32, u32, u32) {
+) -> [Option<ExpectedCopyPort>; 2] {
     let [kind, first, second, third, _fourth] = task;
     let limbs = LIMBS as u32;
-    let mut first_port: Option<(u32, u32, bool)> = None;
-    let mut first_multiplicity = 0;
-    let mut second_port: Option<(u32, u32)> = None;
+    let mut ports = [None; 2];
     match kind {
         1 => {
             if let Some(rank) = product_range_rank(first) {
-                first_port = Some((rank * limbs + second, row[0], true));
-                first_multiplicity = if first == 2 || first == 3 {
+                let multiplicity = if first == 2 || first == 3 {
                     3 * limbs
                 } else {
                     1
                 };
+                ports[0] = Some(ExpectedCopyPort {
+                    address: rank * limbs + second,
+                    value: row[0],
+                    coefficient: multiplicity as i32,
+                });
             }
         }
         4 => {
-            first_port = Some((8 * limbs + first * 2 * limbs + second, row[0], true));
-            first_multiplicity = 1;
+            ports[0] = Some(ExpectedCopyPort {
+                address: 8 * limbs + first * 2 * limbs + second,
+                value: row[0],
+                coefficient: 1,
+            });
         }
         5 => {
             let left_rank = [0, 1, 0][first as usize];
@@ -1147,41 +1284,46 @@ fn expected_product_interaction_ports(
                 second - (limbs - 1) + third
             };
             let right_index = second - left_index;
-            first_port = Some((left_rank * limbs + left_index, row[0], false));
-            first_multiplicity = 1;
-            second_port = Some((right_rank * limbs + right_index, row[1]));
+            ports[0] = Some(ExpectedCopyPort {
+                address: left_rank * limbs + left_index,
+                value: row[0],
+                coefficient: -1,
+            });
+            ports[1] = Some(ExpectedCopyPort {
+                address: right_rank * limbs + right_index,
+                value: row[1],
+                coefficient: -1,
+            });
         }
         6 => {
             let high = u32::from(second >= limbs);
             let digit_rank = 2 + 2 * first + high;
             let digit_limb = second - high * limbs;
-            first_port = Some((digit_rank * limbs + digit_limb, row[0], false));
-            first_multiplicity = 1;
-            second_port = Some((8 * limbs + first * 2 * limbs + second, row[1]));
+            ports[0] = Some(ExpectedCopyPort {
+                address: digit_rank * limbs + digit_limb,
+                value: row[0],
+                coefficient: -1,
+            });
+            ports[1] = Some(ExpectedCopyPort {
+                address: 8 * limbs + first * 2 * limbs + second,
+                value: row[1],
+                coefficient: -1,
+            });
         }
         _ => {}
     }
-    let mut delta = 0;
-    let inverse_first = if let Some((address, value, source)) = first_port {
-        let inverse = product_copy_compressed_inverse(address, value, beta, gamma);
-        let contribution = bb_mul(first_multiplicity, inverse);
-        delta = if source {
-            bb_add(delta, contribution)
-        } else {
-            bb_sub(delta, contribution)
-        };
-        inverse
-    } else {
-        0
-    };
-    let inverse_second = if let Some((address, value)) = second_port {
-        let inverse = product_copy_compressed_inverse(address, value, beta, gamma);
-        delta = bb_sub(delta, inverse);
-        inverse
-    } else {
-        0
-    };
-    (inverse_first, inverse_second, delta)
+    ports
+}
+
+fn expected_product_interaction_ports(
+    task: [u32; 5],
+    row: [u32; 6],
+    beta: u32,
+    gamma: u32,
+) -> (u32, u32, u32) {
+    let (inverses, delta) =
+        expected_base_interaction_row(expected_product_copy_ports(task, row), beta, gamma);
+    (inverses[0], inverses[1], delta)
 }
 
 fn expected_product_interaction_receipt(
@@ -1239,20 +1381,22 @@ fn round_nonzero_address(rank: u32) -> u32 {
     round_sign_address(rank) + 11
 }
 
-fn expected_round_interaction_ports(
+fn expected_round_copy_ports(
     task: [u32; 5],
     row: [u32; 6],
-    beta: u32,
-    gamma: u32,
-) -> ([u32; 5], u32) {
+) -> [Option<ExpectedCopyPort>; 5] {
     let [kind, first, second, third, _fourth] = task;
     let limbs = LIMBS as u32;
-    let mut ports: [Option<(u32, u32, i32)>; 5] = [None; 5];
+    let mut ports: [Option<ExpectedCopyPort>; 5] = [None; 5];
     match kind {
         0 => {
             if matches!(first, 6 | 9 | 12) && second + 2 == limbs && third == 12 {
                 let rank = round_range_rank(first).unwrap();
-                ports[0] = Some((round_bit_address(rank, second, third), row[0], 1));
+                ports[0] = Some(ExpectedCopyPort {
+                    address: round_bit_address(rank, second, third),
+                    value: row[0],
+                    coefficient: 1,
+                });
             }
         }
         1 => {
@@ -1260,63 +1404,93 @@ fn expected_round_interaction_ports(
             let retained_high = matches!(first, 7 | 10 | 13) && second + 1 < limbs;
             if retained_low || retained_high {
                 let rank = round_range_rank(first).unwrap();
-                ports[0] = Some((round_digit_address(rank, second), row[0], 1));
+                ports[0] = Some(ExpectedCopyPort {
+                    address: round_digit_address(rank, second),
+                    value: row[0],
+                    coefficient: 1,
+                });
             }
             if matches!(first, 8 | 11 | 14) {
                 let rank = round_range_rank(first).unwrap();
-                ports[1] = Some((round_digit_address(rank, second), row[0], 1));
+                ports[1] = Some(ExpectedCopyPort {
+                    address: round_digit_address(rank, second),
+                    value: row[0],
+                    coefficient: 1,
+                });
             }
         }
         2 => {
             if matches!(first, 2 | 3) {
                 let rank = round_range_rank(first).unwrap();
-                ports[3] = Some((round_sign_address(rank), row[1], 3));
+                ports[3] = Some(ExpectedCopyPort {
+                    address: round_sign_address(rank),
+                    value: row[1],
+                    coefficient: 3,
+                });
             }
             if matches!(first, 8 | 11 | 14) {
                 let rank = round_range_rank(first).unwrap();
-                ports[1] = Some((round_sign_address(rank), row[1], 1));
-                ports[2] = Some((round_nonzero_address(rank), row[0], 1));
+                ports[1] = Some(ExpectedCopyPort {
+                    address: round_sign_address(rank),
+                    value: row[1],
+                    coefficient: 1,
+                });
+                ports[2] = Some(ExpectedCopyPort {
+                    address: round_nonzero_address(rank),
+                    value: row[0],
+                    coefficient: 1,
+                });
             }
         }
         7 => {
             let low_rank = 2 + 3 * first;
             let output_rank = low_rank + 2;
-            ports[0] = Some((
-                round_digit_address(low_rank, limbs - 1 + second),
-                row[0],
-                -1,
-            ));
-            ports[1] = Some((round_digit_address(output_rank, second), row[1], -1));
+            ports[0] = Some(ExpectedCopyPort {
+                address: round_digit_address(low_rank, limbs - 1 + second),
+                value: row[0],
+                coefficient: -1,
+            });
+            ports[1] = Some(ExpectedCopyPort {
+                address: round_digit_address(output_rank, second),
+                value: row[1],
+                coefficient: -1,
+            });
         }
         8 => {
             let low_rank = 2 + 3 * first;
             let output_rank = low_rank + 2;
             let left_rank = [0, 1, 0][first as usize];
             let right_rank = [0, 1, 1][first as usize];
-            ports[0] = Some((round_bit_address(low_rank, limbs - 2, 12), row[4], -1));
-            ports[1] = Some((round_sign_address(output_rank), row[0], -1));
-            ports[2] = Some((round_nonzero_address(output_rank), row[1], -1));
-            ports[3] = Some((round_sign_address(left_rank), row[3], -1));
-            ports[4] = Some((round_sign_address(right_rank), row[5], -1));
+            ports[0] = Some(ExpectedCopyPort {
+                address: round_bit_address(low_rank, limbs - 2, 12),
+                value: row[4], coefficient: -1,
+            });
+            ports[1] = Some(ExpectedCopyPort {
+                address: round_sign_address(output_rank), value: row[0], coefficient: -1,
+            });
+            ports[2] = Some(ExpectedCopyPort {
+                address: round_nonzero_address(output_rank), value: row[1], coefficient: -1,
+            });
+            ports[3] = Some(ExpectedCopyPort {
+                address: round_sign_address(left_rank), value: row[3], coefficient: -1,
+            });
+            ports[4] = Some(ExpectedCopyPort {
+                address: round_sign_address(right_rank), value: row[5], coefficient: -1,
+            });
         }
         _ => {}
     }
 
-    let mut inverses = [0; 5];
-    let mut delta = 0;
-    for (index, port) in ports.into_iter().enumerate() {
-        if let Some((address, value, coefficient)) = port {
-            let inverse = product_copy_compressed_inverse(address, value, beta, gamma);
-            inverses[index] = inverse;
-            let coefficient = if coefficient < 0 {
-                BABY_BEAR_MODULUS - coefficient.unsigned_abs()
-            } else {
-                coefficient as u32
-            };
-            delta = bb_add(delta, bb_mul(coefficient, inverse));
-        }
-    }
-    (inverses, delta)
+    ports
+}
+
+fn expected_round_interaction_ports(
+    task: [u32; 5],
+    row: [u32; 6],
+    beta: u32,
+    gamma: u32,
+) -> ([u32; 5], u32) {
+    expected_base_interaction_row(expected_round_copy_ports(task, row), beta, gamma)
 }
 
 fn expected_round_interaction_receipt(
@@ -1381,12 +1555,10 @@ fn linear_right_range_rank(node: u32) -> u32 {
     [11, 0, 14, 1][node as usize]
 }
 
-fn expected_linear_interaction_ports(
+fn expected_linear_copy_ports(
     task: [u32; 5],
     row: [u32; 6],
-    beta: u32,
-    gamma: u32,
-) -> ([u32; 8], u32) {
+) -> [Option<ExpectedCopyPort>; 8] {
     let [kind, first, second, third, _fourth] = task;
     let limbs = LIMBS as u32;
     let mut ports: [Option<(u32, u32, i32)>; 8] = [None; 8];
@@ -1465,21 +1637,22 @@ fn expected_linear_interaction_ports(
         _ => {}
     }
 
-    let mut inverses = [0; 8];
-    let mut delta = 0;
-    for (index, port) in ports.into_iter().enumerate() {
-        if let Some((address, value, coefficient)) = port {
-            let inverse = product_copy_compressed_inverse(address, value, beta, gamma);
-            inverses[index] = inverse;
-            let coefficient = if coefficient < 0 {
-                BABY_BEAR_MODULUS - coefficient.unsigned_abs()
-            } else {
-                coefficient as u32
-            };
-            delta = bb_add(delta, bb_mul(coefficient, inverse));
-        }
-    }
-    (inverses, delta)
+    ports.map(|port| {
+        port.map(|(address, value, coefficient)| ExpectedCopyPort {
+            address,
+            value,
+            coefficient,
+        })
+    })
+}
+
+fn expected_linear_interaction_ports(
+    task: [u32; 5],
+    row: [u32; 6],
+    beta: u32,
+    gamma: u32,
+) -> ([u32; 8], u32) {
+    expected_base_interaction_row(expected_linear_copy_ports(task, row), beta, gamma)
 }
 
 fn expected_linear_interaction_receipt(
@@ -1509,12 +1682,10 @@ fn expected_linear_interaction_receipt(
     receipt
 }
 
-fn expected_boundary_interaction_ports(
+fn expected_boundary_copy_ports(
     task: [u32; 5],
     row: [u32; 6],
-    beta: u32,
-    gamma: u32,
-) -> ([u32; 2], u32) {
+) -> [Option<ExpectedCopyPort>; 2] {
     let [kind, first, second, _third, _fourth] = task;
     let mut ports: [Option<(u32, u32, i32)>; 2] = [None; 2];
     match kind {
@@ -1539,21 +1710,22 @@ fn expected_boundary_interaction_ports(
         _ => {}
     }
 
-    let mut inverses = [0; 2];
-    let mut delta = 0;
-    for (index, port) in ports.into_iter().enumerate() {
-        if let Some((address, value, coefficient)) = port {
-            let inverse = product_copy_compressed_inverse(address, value, beta, gamma);
-            inverses[index] = inverse;
-            let coefficient = if coefficient < 0 {
-                BABY_BEAR_MODULUS - coefficient.unsigned_abs()
-            } else {
-                coefficient as u32
-            };
-            delta = bb_add(delta, bb_mul(coefficient, inverse));
-        }
-    }
-    (inverses, delta)
+    ports.map(|port| {
+        port.map(|(address, value, coefficient)| ExpectedCopyPort {
+            address,
+            value,
+            coefficient,
+        })
+    })
+}
+
+fn expected_boundary_interaction_ports(
+    task: [u32; 5],
+    row: [u32; 6],
+    beta: u32,
+    gamma: u32,
+) -> ([u32; 2], u32) {
+    expected_base_interaction_row(expected_boundary_copy_ports(task, row), beta, gamma)
 }
 
 fn expected_boundary_interaction_receipt(
@@ -1617,6 +1789,96 @@ fn expected_sparse_interaction_challenges(root: [u32; 8]) -> Vec<u32> {
         words.extend(&reference_poseidon_digest(tag, &root)[..4]);
     }
     words
+}
+
+fn extend_ext4_words(destination: &mut Vec<u32>, value: Ext4) {
+    destination.extend(value.0);
+}
+
+fn expected_sparse_interaction_root(
+    point: &ComplexFx,
+    current: &ComplexFx,
+    base_root: [u32; 8],
+) -> [u32; 8] {
+    let challenge_words = expected_sparse_interaction_challenges(base_root);
+    let product_beta = Ext4::from_words(&challenge_words[1..5]);
+    let product_gamma = Ext4::from_words(&challenge_words[5..9]);
+    let round_beta = Ext4::from_words(&challenge_words[9..13]);
+    let round_gamma = Ext4::from_words(&challenge_words[13..17]);
+    let linear_beta = Ext4::from_words(&challenge_words[17..21]);
+    let linear_gamma = Ext4::from_words(&challenge_words[21..25]);
+    let boundary_beta = Ext4::from_words(&challenge_words[25..29]);
+    let boundary_gamma = Ext4::from_words(&challenge_words[29..33]);
+
+    let mut tasks = expected_sparse_transition_tasks(LIMBS as u32);
+    tasks.resize(4_096, [14, 0, 0, 0, 0]);
+    let rows = expected_sparse_rows(point, current);
+    let task_count = 2_821;
+    let mut product_accumulator = Ext4::ZERO;
+    let mut round_accumulator = Ext4::ZERO;
+    let mut linear_accumulator = Ext4::ZERO;
+    let mut boundary_accumulator = Ext4::ZERO;
+    let mut leaves = Vec::with_capacity(4_096);
+
+    for (index, (task, row)) in tasks.into_iter().zip(rows).enumerate() {
+        let (product_inverses, product_delta) = expected_ext4_interaction_row(
+            expected_product_copy_ports(task, row),
+            product_beta,
+            product_gamma,
+        );
+        let (round_inverses, round_delta) = expected_ext4_interaction_row(
+            expected_round_copy_ports(task, row),
+            round_beta,
+            round_gamma,
+        );
+        let (linear_inverses, linear_delta) = expected_ext4_interaction_row(
+            expected_linear_copy_ports(task, row),
+            linear_beta,
+            linear_gamma,
+        );
+        let (boundary_inverses, boundary_delta) = expected_ext4_interaction_row(
+            expected_boundary_copy_ports(task, row),
+            boundary_beta,
+            boundary_gamma,
+        );
+
+        let mut fields = vec![
+            LIMBS as u32,
+            task_count,
+            4_096,
+            index as u32,
+            u32::from(index < task_count as usize),
+        ];
+        fields.extend(base_root);
+        extend_ext4_words(&mut fields, product_accumulator);
+        for inverse in product_inverses {
+            extend_ext4_words(&mut fields, inverse);
+        }
+        extend_ext4_words(&mut fields, round_accumulator);
+        for inverse in round_inverses {
+            extend_ext4_words(&mut fields, inverse);
+        }
+        extend_ext4_words(&mut fields, linear_accumulator);
+        for inverse in linear_inverses {
+            extend_ext4_words(&mut fields, inverse);
+        }
+        extend_ext4_words(&mut fields, boundary_accumulator);
+        for inverse in boundary_inverses {
+            extend_ext4_words(&mut fields, inverse);
+        }
+        assert_eq!(fields.len(), 97, "interaction leaf schema must stay nominal");
+        leaves.push(reference_poseidon_digest(b"SI01", &fields));
+
+        product_accumulator = product_accumulator.add(product_delta);
+        round_accumulator = round_accumulator.add(round_delta);
+        linear_accumulator = linear_accumulator.add(linear_delta);
+        boundary_accumulator = boundary_accumulator.add(boundary_delta);
+    }
+    assert_eq!(product_accumulator, Ext4::ZERO, "product bus must close");
+    assert_eq!(round_accumulator, Ext4::ZERO, "round bus must close");
+    assert_eq!(linear_accumulator, Ext4::ZERO, "linear bus must close");
+    assert_eq!(boundary_accumulator, Ext4::ZERO, "boundary bus must close");
+    reference_merkle_root(leaves)
 }
 
 fn expected_committed_words(
@@ -3555,5 +3817,62 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
             2,
         ),
         [0, 0],
+    );
+}
+
+#[test]
+fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
+    let bytes = compile_sparse_auth_fixture();
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &bytes)
+        .expect("sparse interaction Wasm module should load");
+    assert_eq!(module.imports().count(), 0, "interaction fixture must stay zero-import");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("interaction fixture should instantiate");
+    let point = ComplexFx {
+        real: fixed(true, 3, 4),
+        imaginary: fixed(false, 1, 8),
+    };
+    let current = ComplexFx {
+        real: fixed(false, 5, 4),
+        imaginary: fixed(true, 3, 8),
+    };
+    let expected_base_root = expected_sparse_trace_root(&point, &current);
+    let expected_interaction_root =
+        expected_sparse_interaction_root(&point, &current, expected_base_root);
+    let mut mutated_interaction_root = expected_interaction_root;
+    mutated_interaction_root[3] = bb_add(mutated_interaction_root[3], 1);
+    let mut arguments = transition_arguments(&point, &current);
+    arguments.extend(expected_interaction_root);
+    arguments.extend(mutated_interaction_root);
+    let words = call(
+        &mut store,
+        &instance,
+        "fixed_transition4_sparse_interaction_root",
+        &arguments,
+        28,
+    );
+    assert_eq!(words[0], 1, "interaction trace must be valid");
+    assert_eq!(words[1], 1, "Fe must accept the independent interaction root");
+    assert_eq!(
+        words[2], 0,
+        "Fe must reject a directed interaction-root coefficient mutation",
+    );
+    assert_eq!(words[3], 0, "an invalid base commitment must fail closed");
+    assert_eq!(
+        words[4..12],
+        expected_base_root,
+        "interaction trace must retain its exact base commitment",
+    );
+    assert_eq!(
+        words[12..20],
+        expected_interaction_root,
+        "Fe interaction root must match the independent quartic port reconstruction",
+    );
+    assert_eq!(
+        words[20..28],
+        [0; 8],
+        "an invalid base commitment must return the canonical zero root",
     );
 }

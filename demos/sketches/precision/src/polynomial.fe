@@ -47,9 +47,10 @@ pub trait Radix2Field: Copy {
 /// Invert every nonzero entry with one field inversion. Zero entries remain
 /// zero, which lets sparse interaction provers batch active and inactive ports
 /// without a sentinel representation.
-pub fn batch_inverse_or_zero<F: Radix2Field, const N: usize>(
-    _ values: [F; N],
-) -> [F; N] {
+pub fn write_batch_inverse_or_zero<F: Radix2Field, const N: usize>(
+    _ values: ref [F; N],
+    _ inverses: mut [F; N],
+) {
     let mut prefixes = [F::radix2_zero(); N]
     let mut product = F::radix2_root(0)
     let mut index: usize = 0
@@ -62,7 +63,7 @@ pub fn batch_inverse_or_zero<F: Radix2Field, const N: usize>(
     }
 
     let mut inverse_product = product.radix2_inverse_or_zero()
-    let mut inverses = [F::radix2_zero(); N]
+    inverses = [F::radix2_zero(); N]
     let mut remaining: usize = N
     while remaining > 0 {
         let current = remaining - 1
@@ -72,6 +73,16 @@ pub fn batch_inverse_or_zero<F: Radix2Field, const N: usize>(
         }
         remaining = current
     }
+}
+
+/// Value-returning convenience interpretation of the same batch-inversion
+/// plan. Placement-sensitive targets can use `write_batch_inverse_or_zero` to
+/// reuse caller-owned storage without changing the arithmetic.
+pub fn batch_inverse_or_zero<F: Radix2Field, const N: usize>(
+    _ values: [F; N],
+) -> [F; N] {
+    let mut inverses = [F::radix2_zero(); N]
+    write_batch_inverse_or_zero<F, N>(ref values, mut inverses)
     inverses
 }
 
