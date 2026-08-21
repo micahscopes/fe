@@ -862,9 +862,27 @@ Legend:
   against an independent `BigUint` schoolbook model, checks generated L4 and
   L8 schedules term by term, and requires exact nonzero BabyBear residuals for
   mutated digits, carries, rounding, high digits, and outputs. Focused nextest
-  passes 1/1. This is not yet the complete Mandelbrot transition AIR: signed
-  add/sub selection, range-bit auxiliary columns, and composition of `x*x`,
-  `y*y`, and `x*y` into `z*z + c` remain open.
+  passes 1/1.
+  Commits `3968077ed`, `78256ed78`, and `8085a4936` extend that relation into
+  an exact signed recurrence DAG. `FixedLinearWitness<L>` retains the addition
+  ripple plus both directed subtraction ripples, derives magnitude comparison
+  from the final borrow, and constrains signed selection and unique zero for
+  both addition and subtraction. One reusable `RadixRangeWitness<L>` derives
+  all 13 bits of every radix digit and a running OR prefix, giving local
+  degree-two bit, reconstruction, nonzero, and sign-zero relations without a
+  precision-specific table. `FixedMandelbrotTransitionWitness<L>` then passes
+  the typed outputs of `x*x`, `y*y`, and `x*y` directly into four signed linear
+  relations for `z*z + c`; it introduces no copied intermediate columns. The
+  expanded zero-import Wasm gate independently reconstructs the 33-word
+  linear, 105-word range, and 205-word transition carriers. It checks 19
+  directed and randomized transitions against bigint arithmetic and rejects
+  mutations in every arithmetic stage, range bit and prefix, signed-zero
+  state, or final boundary coordinate. Focused nextest passes 1/1 in 22.85
+  seconds after compilation. This is still not a succinct leaf proof. The
+  trace interpreter must apply the reusable range carrier to every selected
+  intermediate, constrain the wider product-carry bound, and authenticate the
+  resulting rows in a BabyBear leaf receipt before a recursive parent may rely
+  on the transition.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
   The first arithmetic-plan consolidation is landed at `ba2ded864`: one
