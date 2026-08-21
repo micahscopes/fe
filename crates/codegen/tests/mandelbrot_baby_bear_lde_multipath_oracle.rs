@@ -269,6 +269,18 @@ fn sparse_air_lde_openings_match_independent_roots_and_fail_closed() {
         );
     }
 
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "air_fri_receipt16_mutations",
+            &[97, 431, (-3072i32) as u32, 1024, 7],
+            8,
+        ),
+        vec![1, 0, 0, 0, 0, 0, 0, 0],
+        "canonical sparse AIR and FRI receipt must accept once and bind every boundary",
+    );
+
     for mutation in 1..=6 {
         let actual = call(
             &mut store,

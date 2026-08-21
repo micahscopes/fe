@@ -2,28 +2,39 @@
 
 use mandelbrot_proof_baby_bear::{
     BabyBearFriQueryPlan,
+    BabyBearAirFriReceipt,
+    AirLdeRow,
     AuxiliaryLdeMultiOpening,
     AuxiliaryLdeDigest,
     CheckpointFriQueryPlan4,
     CheckpointFriQuerySamples4,
+    Checkpoint4BabyBearReceipt16,
     FriLayerTranscriptDigest,
     LdeMultiOpening,
     MAIN_LDE_ROW_FIELDS,
     MainLdeMultiOpening,
     MainLdeDigest,
+    ProofTranscriptDigest,
+    authenticate_fri_multi_commitment_query16,
     auxiliary_lde_root_power_of_two,
     auxiliary_lde_row_commitment,
+    bind_auxiliary_lde,
+    bind_main_lde,
+    composition_challenge,
+    evaluate_composition_opened,
     main_lde_root_power_of_two,
     main_lde_row_commitment,
+    open_fri_multi_commitment_query16,
     verify_auxiliary_lde_multi_opening,
     verify_main_lde_multi_opening,
+    verify_checkpoint4_baby_bear_receipt16,
     write_auxiliary_lde_multi_query_opening_power_of_two,
     write_main_lde_multi_query_opening_power_of_two,
 }
 use mandelbrot_proof_kernel::AUXILIARY_ROW_BITS
 use merkle_core::MerkleMultiPath
 use poseidon_baby_bear::Poseidon2Digest
-use precision::baby_bear::BabyBear
+use precision::baby_bear::{BabyBear, BabyBearExt4}
 
 const TRACE: usize = 4
 const LDE: usize = 16
@@ -212,5 +223,227 @@ pub fn air_lde_multipath16_status(
         auxiliary_root.value.field(5).to_u32(),
         auxiliary_root.value.field(6).to_u32(),
         auxiliary_root.value.field(7).to_u32(),
+    )
+}
+
+/// Build one complete toy checkpoint in Fe and exercise every authenticated
+/// boundary through the canonical borrowed receipt verifier.
+pub fn air_fri_receipt16_mutations(
+    _ seed: u32,
+    _ proof_transcript_seed: u32,
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ shift_word: u32,
+) -> (u32, u32, u32, u32, u32, u32, u32, u32) {
+    let mut main_rows = [[BabyBear::zero(); MAIN_LDE_ROW_FIELDS]; LDE]
+    let mut auxiliary_rows = [[BabyBear::zero(); AUXILIARY_ROW_BITS]; LDE]
+    let mut main_leaves = [MainLdeDigest {
+        valid: false,
+        value: Poseidon2Digest::zero(),
+    }; LDE]
+    let mut auxiliary_leaves = [AuxiliaryLdeDigest {
+        valid: false,
+        value: Poseidon2Digest::zero(),
+    }; LDE]
+    let mut evaluation: usize = 0
+    while evaluation < LDE {
+        let evaluation_u32: u32 = evaluation.downcast_truncate()
+        let mut column: usize = 0
+        while column < MAIN_LDE_ROW_FIELDS {
+            let column_u32: u32 = column.downcast_truncate()
+            main_rows[evaluation][column] = BabyBear::from_u32(
+                (seed + evaluation_u32 * 1009 + column_u32 * 37) % 1900000007,
+            )
+            column = column + 1
+        }
+        column = 0
+        while column < AUXILIARY_ROW_BITS {
+            let column_u32: u32 = column.downcast_truncate()
+            auxiliary_rows[evaluation][column] = BabyBear::from_u32(
+                (seed + 700001 + evaluation_u32 * 4001 + column_u32 * 53)
+                    % 1900000007,
+            )
+            column = column + 1
+        }
+        main_leaves[evaluation] = main_lde_row_commitment(main_rows[evaluation])
+        auxiliary_leaves[evaluation] = auxiliary_lde_row_commitment(
+            auxiliary_rows[evaluation],
+        )
+        evaluation = evaluation + 1
+    }
+
+    let main_root = main_lde_root_power_of_two<LDE>(main_leaves)
+    let auxiliary_root = auxiliary_lde_root_power_of_two<LDE>(auxiliary_leaves)
+    let proof_transcript = ProofTranscriptDigest {
+        valid: true,
+        value: digest8(proof_transcript_seed),
+    }
+    let main_transcript = bind_main_lde(proof_transcript, main_root)
+    let air_transcript = bind_auxiliary_lde(main_transcript, auxiliary_root)
+    let challenge = composition_challenge(air_transcript)
+    let shift = BabyBear::from_u32(shift_word)
+    if !main_root.valid || !auxiliary_root.valid || !air_transcript.valid
+        || !challenge.valid || shift.is_zero() {
+        return (0, 0, 0, 0, 0, 0, 0, 0)
+    }
+
+    let mut evaluations = [BabyBearExt4::zero(); LDE]
+    evaluation = 0
+    while evaluation < LDE {
+        let next: usize = (evaluation + TRACE) & (LDE - 1)
+        let row = AirLdeRow {
+            main: main_rows[evaluation],
+            auxiliary: auxiliary_rows[evaluation],
+        }
+        let next_row = AirLdeRow {
+            main: main_rows[next],
+            auxiliary: auxiliary_rows[next],
+        }
+        let value = evaluate_composition_opened<TRACE, LDE>(
+            c_re_q12,
+            c_im_q12,
+            challenge,
+            shift,
+            evaluation.downcast_truncate(),
+            ref row,
+            ref next_row,
+        )
+        if !value.valid { return (0, 0, 0, 0, 0, 0, 0, 0) }
+        evaluations[evaluation] = value.value
+        evaluation = evaluation + 1
+    }
+
+    let fri = open_fri_multi_commitment_query16(
+        evaluations,
+        air_transcript,
+        shift,
+    )
+    let authenticated = authenticate_fri_multi_commitment_query16(
+        air_transcript,
+        ref fri,
+    )
+    if !fri.valid || !authenticated.valid {
+        return (0, 0, 0, 0, 0, 0, 0, 0)
+    }
+
+    let mut main: MainLdeMultiOpening<MAX_LEAVES, MAX_SIBLINGS> = LdeMultiOpening {
+        valid: false,
+        values: [[BabyBear::zero(); MAIN_LDE_ROW_FIELDS]; MAX_LEAVES],
+        path: MerkleMultiPath {
+            valid: false,
+            leaf_count: 0,
+            leaf_indices: [0; MAX_LEAVES],
+            sibling_count: 0,
+            siblings: [Poseidon2Digest::zero(); MAX_SIBLINGS],
+        },
+    }
+    let mut auxiliary: AuxiliaryLdeMultiOpening<MAX_LEAVES, MAX_SIBLINGS> =
+        LdeMultiOpening {
+            valid: false,
+            values: [[BabyBear::zero(); AUXILIARY_ROW_BITS]; MAX_LEAVES],
+            path: MerkleMultiPath {
+                valid: false,
+                leaf_count: 0,
+                leaf_indices: [0; MAX_LEAVES],
+                sibling_count: 0,
+                siblings: [Poseidon2Digest::zero(); MAX_SIBLINGS],
+            },
+        }
+    let main_opened = write_main_lde_multi_query_opening_power_of_two<
+        CheckpointFriQueryPlan4,
+        CheckpointFriQuerySamples4,
+        TRACE,
+        LDE,
+        REQUESTS,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >(ref main_rows, authenticated.samples, mut main)
+    let auxiliary_opened = write_auxiliary_lde_multi_query_opening_power_of_two<
+        CheckpointFriQueryPlan4,
+        CheckpointFriQuerySamples4,
+        TRACE,
+        LDE,
+        REQUESTS,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >(ref auxiliary_rows, authenticated.samples, mut auxiliary)
+    if !main_opened || !auxiliary_opened {
+        return (0, 0, 0, 0, 0, 0, 0, 0)
+    }
+
+    let mut receipt: Checkpoint4BabyBearReceipt16 = BabyBearAirFriReceipt {
+        valid: true,
+        main_root: main_root,
+        auxiliary_root: auxiliary_root,
+        main: main,
+        auxiliary: auxiliary,
+        fri: fri,
+    }
+    let clean = verify_checkpoint4_baby_bear_receipt16(
+        c_re_q12,
+        c_im_q12,
+        proof_transcript,
+        shift,
+        ref receipt,
+    )
+
+    let saved_main = receipt.main.values[0][0]
+    receipt.main.values[0][0] = saved_main + BabyBear::one()
+    let changed_main = verify_checkpoint4_baby_bear_receipt16(
+        c_re_q12, c_im_q12, proof_transcript, shift, ref receipt,
+    )
+    receipt.main.values[0][0] = saved_main
+
+    let saved_auxiliary = receipt.auxiliary.values[0][0]
+    receipt.auxiliary.values[0][0] = saved_auxiliary + BabyBear::one()
+    let changed_auxiliary = verify_checkpoint4_baby_bear_receipt16(
+        c_re_q12, c_im_q12, proof_transcript, shift, ref receipt,
+    )
+    receipt.auxiliary.values[0][0] = saved_auxiliary
+
+    let saved_composition = receipt.fri.composition.values[0]
+    receipt.fri.composition.values[0] = saved_composition + BabyBearExt4::one()
+    let changed_composition = verify_checkpoint4_baby_bear_receipt16(
+        c_re_q12, c_im_q12, proof_transcript, shift, ref receipt,
+    )
+    receipt.fri.composition.values[0] = saved_composition
+
+    let saved_root = receipt.main_root.value
+    receipt.main_root.value = digest8(991)
+    let changed_root = verify_checkpoint4_baby_bear_receipt16(
+        c_re_q12, c_im_q12, proof_transcript, shift, ref receipt,
+    )
+    receipt.main_root.value = saved_root
+
+    let changed_transcript = verify_checkpoint4_baby_bear_receipt16(
+        c_re_q12,
+        c_im_q12,
+        ProofTranscriptDigest { valid: true, value: digest8(proof_transcript_seed + 1) },
+        shift,
+        ref receipt,
+    )
+    let changed_shift = verify_checkpoint4_baby_bear_receipt16(
+        c_re_q12,
+        c_im_q12,
+        proof_transcript,
+        BabyBear::from_u32(shift_word + 1),
+        ref receipt,
+    )
+    let changed_claim = verify_checkpoint4_baby_bear_receipt16(
+        c_re_q12 + 1,
+        c_im_q12,
+        proof_transcript,
+        shift,
+        ref receipt,
+    )
+    (
+        if clean { 1 } else { 0 },
+        if changed_main { 1 } else { 0 },
+        if changed_auxiliary { 1 } else { 0 },
+        if changed_composition { 1 } else { 0 },
+        if changed_root { 1 } else { 0 },
+        if changed_transcript { 1 } else { 0 },
+        if changed_shift { 1 } else { 0 },
+        if changed_claim { 1 } else { 0 },
     )
 }

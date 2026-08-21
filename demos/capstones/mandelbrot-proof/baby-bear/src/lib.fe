@@ -1097,6 +1097,14 @@ const fn fri_multi_sibling_capacity(
     (query_count + query_count) * pair_depth
 }
 
+const fn air_lde_request_capacity(_ query_count: usize) -> usize {
+    query_count * 4
+}
+
+const fn air_lde_sibling_capacity(_ query_count: usize) -> usize {
+    air_lde_request_capacity(query_count) * 4
+}
+
 /// One shared sparse opening for all transcript queries at a nonterminal FRI
 /// layer. Its capacities are derived from the schedule and query count.
 pub struct FriMultiQueryFold<
@@ -2407,6 +2415,33 @@ pub type FriMultiCommitmentQuery16 = FriMultiCommitmentQuery<
     CheckpointFriMultiQueryLayers16,
 >
 
+/// Canonical four-row checkpoint receipt. Main and auxiliary codewords stay
+/// in separately branded base-field trees, while the composition and every
+/// FRI layer use the schedule-derived shared multi-query carrier.
+pub struct BabyBearAirFriReceipt<
+    const AIR_MAX_LEAVES: usize,
+    const AIR_MAX_SIBLINGS: usize,
+    Fri,
+> {
+    pub valid: bool,
+    pub main_root: MainLdeDigest,
+    pub auxiliary_root: AuxiliaryLdeDigest,
+    pub main: MainLdeMultiOpening<AIR_MAX_LEAVES, AIR_MAX_SIBLINGS>,
+    pub auxiliary: AuxiliaryLdeMultiOpening<AIR_MAX_LEAVES, AIR_MAX_SIBLINGS>,
+    pub fri: Fri,
+}
+impl<
+    const AIR_MAX_LEAVES: usize,
+    const AIR_MAX_SIBLINGS: usize,
+    Fri: core::marker::Copy,
+> core::marker::Copy for BabyBearAirFriReceipt<AIR_MAX_LEAVES, AIR_MAX_SIBLINGS, Fri> {}
+
+pub type Checkpoint4BabyBearReceipt16 = BabyBearAirFriReceipt<
+    {air_lde_request_capacity(4)},
+    {air_lde_sibling_capacity(4)},
+    FriMultiCommitmentQuery16,
+>
+
 struct DigestNodeHasher {}
 impl TwoToOneHasher<Poseidon2Digest> for DigestNodeHasher {
     fn zero() -> Poseidon2Digest { Poseidon2Digest::zero() }
@@ -2926,6 +2961,125 @@ where
         MAX_LEAVES,
         MAX_SIBLINGS,
     >(root.value, leaves, opening.path)
+}
+
+fn sparse_air_lde_row<
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ main: ref MainLdeMultiOpening<MAX_LEAVES, MAX_SIBLINGS>,
+    _ auxiliary: ref AuxiliaryLdeMultiOpening<MAX_LEAVES, MAX_SIBLINGS>,
+    _ index: u32,
+) -> (bool, AirLdeRow)
+where MAX_LEAVES > 0
+{
+    if !main.valid || !main.path.valid || !auxiliary.valid || !auxiliary.path.valid {
+        return (false, ZERO_AIR_LDE_ROW)
+    }
+    let main_count: usize = main.path.leaf_count as usize
+    let auxiliary_count: usize = auxiliary.path.leaf_count as usize
+    if main_count == 0 || main_count > MAX_LEAVES
+        || auxiliary_count == 0 || auxiliary_count > MAX_LEAVES {
+        return (false, ZERO_AIR_LDE_ROW)
+    }
+    let mut main_position: usize = MAX_LEAVES
+    let mut cursor: usize = 0
+    while cursor < main_count {
+        if main.path.leaf_indices[cursor] == index { main_position = cursor }
+        cursor = cursor + 1
+    }
+    let mut auxiliary_position: usize = MAX_LEAVES
+    cursor = 0
+    while cursor < auxiliary_count {
+        if auxiliary.path.leaf_indices[cursor] == index { auxiliary_position = cursor }
+        cursor = cursor + 1
+    }
+    if main_position == MAX_LEAVES || auxiliary_position == MAX_LEAVES {
+        return (false, ZERO_AIR_LDE_ROW)
+    }
+    (
+        true,
+        AirLdeRow {
+            main: main.values[main_position],
+            auxiliary: auxiliary.values[auxiliary_position],
+        },
+    )
+}
+
+/// Recompute every transcript-selected AIR composition pair from the shared
+/// sparse main and auxiliary openings. Authentication is deliberately kept in
+/// the outer verifier so each Merkle path is checked exactly once.
+fn verify_checkpoint4_sparse_air_compositions16(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ challenge: CompositionChallenge,
+    _ shift: BabyBear,
+    _ queries: FriQueryBuffer<4>,
+    _ receipt: ref Checkpoint4BabyBearReceipt16,
+) -> bool {
+    if !challenge.valid || shift.is_zero() || !queries.valid || queries.count != 4 {
+        return false
+    }
+    let mut cursor: usize = 0
+    while cursor < 4 {
+        let geometry = radix2_query_geometry<4, 16>(queries.indices[cursor])
+        if !geometry.valid { return false }
+        let current = sparse_air_lde_row(
+            ref receipt.main,
+            ref receipt.auxiliary,
+            geometry.evaluation,
+        )
+        let next = sparse_air_lde_row(
+            ref receipt.main,
+            ref receipt.auxiliary,
+            geometry.next_evaluation,
+        )
+        let negative = sparse_air_lde_row(
+            ref receipt.main,
+            ref receipt.auxiliary,
+            geometry.negative_evaluation,
+        )
+        let negative_next = sparse_air_lde_row(
+            ref receipt.main,
+            ref receipt.auxiliary,
+            geometry.negative_next_evaluation,
+        )
+        if !current.0 || !next.0 || !negative.0 || !negative_next.0 {
+            return false
+        }
+        let positive_value = evaluate_composition_opened<4, 16>(
+            c_re_q12,
+            c_im_q12,
+            challenge,
+            shift,
+            geometry.evaluation,
+            ref current.1,
+            ref next.1,
+        )
+        let negative_value = evaluate_composition_opened<4, 16>(
+            c_re_q12,
+            c_im_q12,
+            challenge,
+            shift,
+            geometry.negative_evaluation,
+            ref negative.1,
+            ref negative_next.1,
+        )
+        let opened_positive = receipt.fri.composition.sparse_value(
+            geometry.evaluation,
+        )
+        let opened_negative = receipt.fri.composition.sparse_value(
+            geometry.negative_evaluation,
+        )
+        if !positive_value.valid || !negative_value.valid
+            || !opened_positive.valid || !opened_negative.valid
+            || !positive_value.value.equals(opened_positive.value)
+            || !negative_value.value.equals(opened_negative.value) {
+            return false
+        }
+        cursor = cursor + 1
+    }
+    true
 }
 
 fn invalid_lde_quartet_path<Role, const DEPTH: usize>() -> LdeQuartetPath<Role, DEPTH> {
@@ -4342,6 +4496,78 @@ where Tail: BabyBearFriQueryBuffer<MAX_QUERIES, TailSamples>
     }
 }
 
+/// Result of the once-per-layer authentication pass for the concrete toy
+/// checkpoint. Samples remain typed by `FriQueryPlan`; the fixed buffer is
+/// only the runtime loop interpretation of that same plan.
+pub struct CheckpointFriMultiAuthentication16 {
+    pub valid: bool,
+    pub samples: CheckpointFriQuerySamples4,
+    pub queries: FriQueryBuffer<4>,
+    pub challenges: CheckpointFriMultiChallenges16,
+}
+impl core::marker::Copy for CheckpointFriMultiAuthentication16 {}
+
+pub fn authenticate_fri_multi_commitment_query16(
+    _ air_transcript: AirLdeTranscriptDigest,
+    _ proof: ref FriMultiCommitmentQuery16,
+) -> CheckpointFriMultiAuthentication16 {
+    let composition_authenticated = air_transcript.valid && proof.valid
+        && proof.composition_root.valid
+        && verify_composition_multi_opening<16, 8, 24>(
+            proof.composition,
+            proof.composition_root,
+        )
+    let composition_transcript = bind_composition(
+        air_transcript,
+        proof.composition_root,
+    )
+    let authenticated = <FriSchedule<1, 4> as BabyBearFriMultiAuthenticateFirst<
+        8,
+        CheckpointFriQueryPlan4,
+        CheckpointFriQuerySamples4,
+        CheckpointFriMultiQueryLayers16,
+        CheckpointFriMultiChallenges16,
+    >>::authenticate_fri_multi_first(composition_transcript, proof.layers)
+    let queries = <CheckpointFriQueryPlan4 as BabyBearFriQueryBuffer<
+        4,
+        CheckpointFriQuerySamples4,
+    >>::fri_query_buffer(authenticated.1)
+    CheckpointFriMultiAuthentication16 {
+        valid: composition_authenticated && composition_transcript.valid
+            && authenticated.0 && queries.valid && queries.count == 4,
+        samples: authenticated.1,
+        queries: queries,
+        challenges: authenticated.2,
+    }
+}
+
+fn verify_authenticated_fri_multi_folds16(
+    _ shift: BabyBear,
+    _ proof: ref FriMultiCommitmentQuery16,
+    _ authenticated: CheckpointFriMultiAuthentication16,
+) -> bool {
+    if shift.is_zero() || !authenticated.valid { return false }
+    let mut cursor: usize = 0
+    while cursor < 4 {
+        if !<FriSchedule<1, 4> as BabyBearFriMultiFoldCheck<
+            16,
+            CompositionMultiOpening<8, 24>,
+            CheckpointFriMultiQueryLayers16,
+            CheckpointFriMultiChallenges16,
+        >>::verify_fri_multi_fold(
+            proof.composition,
+            proof.layers,
+            authenticated.challenges,
+            authenticated.queries.indices[cursor],
+            shift,
+        ) {
+            return false
+        }
+        cursor = cursor + 1
+    }
+    true
+}
+
 /// Verify and replay every layer after the first FRI commitment. The query
 /// carrier type is supplied explicitly so method arguments remain ordinary
 /// types while the schedule still selects the only valid implementation.
@@ -4879,45 +5105,61 @@ pub fn verify_fri_multi_commitment_query16(
     _ shift: BabyBear,
     _ proof: own FriMultiCommitmentQuery16,
 ) -> bool {
-    if !air_transcript.valid || shift.is_zero() || !proof.valid
-        || !proof.composition_root.valid
-        || !verify_composition_multi_opening<16, 8, 24>(
-            proof.composition,
-            proof.composition_root,
-        ) {
+    let authenticated = authenticate_fri_multi_commitment_query16(
+        air_transcript,
+        ref proof,
+    )
+    verify_authenticated_fri_multi_folds16(shift, ref proof, authenticated)
+}
+
+/// Authenticate both sparse AIR trees, recompute every selected composition
+/// pair through the shared 708-constraint body, then verify the
+/// schedule-derived FRI carrier. The large receipt crosses no function
+/// boundary by value, which keeps its Fe-authored representation
+/// backend-portable.
+pub fn verify_checkpoint4_baby_bear_receipt16(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ proof_transcript: ProofTranscriptDigest,
+    _ shift: BabyBear,
+    _ receipt: ref Checkpoint4BabyBearReceipt16,
+) -> bool {
+    if !receipt.valid || shift.is_zero() || !proof_transcript.valid
+        || !receipt.main_root.valid || !receipt.auxiliary_root.valid
+        || !verify_main_lde_multi_opening<
+            16,
+            {air_lde_request_capacity(4)},
+            {air_lde_sibling_capacity(4)},
+        >(ref receipt.main, receipt.main_root)
+        || !verify_auxiliary_lde_multi_opening<
+            16,
+            {air_lde_request_capacity(4)},
+            {air_lde_sibling_capacity(4)},
+        >(ref receipt.auxiliary, receipt.auxiliary_root) {
         return false
     }
-    let composition_transcript = bind_composition(air_transcript, proof.composition_root)
-    let authenticated = <FriSchedule<1, 4> as BabyBearFriMultiAuthenticateFirst<
-        8,
-        CheckpointFriQueryPlan4,
-        CheckpointFriQuerySamples4,
-        CheckpointFriMultiQueryLayers16,
-        CheckpointFriMultiChallenges16,
-    >>::authenticate_fri_multi_first(composition_transcript, proof.layers)
-    if !composition_transcript.valid || !authenticated.0 { return false }
-    let queries = <CheckpointFriQueryPlan4 as BabyBearFriQueryBuffer<
-        4,
-        CheckpointFriQuerySamples4,
-    >>::fri_query_buffer(authenticated.1)
-    if !queries.valid || queries.count != 4 { return false }
-    let mut cursor: usize = 0
-    while cursor < 4 {
-        if !<FriSchedule<1, 4> as BabyBearFriMultiFoldCheck<
-            16,
-            CompositionMultiOpening<8, 24>,
-            CheckpointFriMultiQueryLayers16,
-            CheckpointFriMultiChallenges16,
-        >>::verify_fri_multi_fold(
-            proof.composition,
-            proof.layers,
-            authenticated.2,
-            queries.indices[cursor],
+    let main_transcript = bind_main_lde(proof_transcript, receipt.main_root)
+    let air_transcript = bind_auxiliary_lde(
+        main_transcript,
+        receipt.auxiliary_root,
+    )
+    let authenticated = authenticate_fri_multi_commitment_query16(
+        air_transcript,
+        ref receipt.fri,
+    )
+    let challenge = composition_challenge(air_transcript)
+    authenticated.valid && challenge.valid
+        && verify_checkpoint4_sparse_air_compositions16(
+            c_re_q12,
+            c_im_q12,
+            challenge,
             shift,
-        ) {
-            return false
-        }
-        cursor = cursor + 1
-    }
-    true
+            authenticated.queries,
+            ref receipt,
+        )
+        && verify_authenticated_fri_multi_folds16(
+            shift,
+            ref receipt.fri,
+            authenticated,
+        )
 }
