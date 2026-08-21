@@ -1097,12 +1097,33 @@ Legend:
   mutations now cover task selector, linear role, range role, semantic
   payload, flag, witness lane, metadata, path, and root fields. The full gate
   passes 1/1 in 139.83 seconds.
+  Commit `2f2105011` closes the first committed-copy relation at the AIR level.
+  The product bus is no longer a scalar `challenge^address` total that would
+  require a host integer address at an LDE point. A generic Fe
+  log-derivative interaction instead compresses each nominal `(address,
+  value)` pair with `beta` and `gamma`, constrains two inverse ports per row,
+  and advances one prefix accumulator from zero back to zero. Address formulas
+  consume only the constrained selectors, roles, and semantic counters. Scan
+  adjacency lets the new relation remove the older redundant carry-in copy:
+  each range-checked carry is bound once to its coefficient output, while the
+  arithmetic AIR already propagates it to the next coefficient. An independent
+  Rust model reconstructs the conceptual copy multiset from task semantics and
+  matches a field receipt over every accumulator and inverse in all 4,096
+  rows under three challenge pairs. Source, consumer, inverse, and accumulator
+  mutations fail. The established coordinated mutation that preserves the
+  local product scan fails exactly once at the interaction terminal, proving
+  the new relation is not duplicate arithmetic. The full focused gate passes
+  1/1 in 93.53 seconds. This exhaustive gate currently uses the BabyBear base
+  field for speed. The production transcript must derive quartic-extension
+  compression challenges and use the same field-generic relation, with batch
+  inversion before the interaction trace is committed.
   This root authenticates the exact control and witness base trace but is not
-  yet a succinct leaf proof. The four random-power copy balances still need
-  committed interaction accumulators with zero boundary constraints. Those
-  columns must then enter the existing BabyBear LDE, composition, multi-query,
-  FRI, and canonical receipt interpreters. Only that authenticated AIR/FRI
-  receipt may replace semantic replay in the recursive parent carrier.
+  yet a succinct leaf proof. Rounding, linear, and boundary copies still need
+  the same committed interaction treatment, followed by quartic transcript
+  challenges and batch inversion. The interaction columns must then enter the
+  existing BabyBear LDE, composition, multi-query, FRI, and canonical receipt
+  interpreters. Only that authenticated AIR/FRI receipt may replace semantic
+  replay in the recursive parent carrier.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
   The first arithmetic-plan consolidation is landed at `ba2ded864`: one
