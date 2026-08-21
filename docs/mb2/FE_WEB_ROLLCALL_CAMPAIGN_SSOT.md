@@ -1187,12 +1187,28 @@ Legend:
   The independent Plonky3 oracle matches all 32 base-field coefficients, and
   an invalid root fails closed to a false validity bit plus 32 zero words. The
   complete gate passes 1/1 in 121.93 seconds.
-  This root authenticates the exact control and witness base trace but is not
-  yet a succinct leaf proof. Quartic interaction traces must now be generated
-  from those challenges, committed, and carried into the existing BabyBear
-  LDE, composition, multi-query, FRI, and canonical receipt interpreters. Only
-  that authenticated AIR/FRI receipt may replace semantic replay in the
-  recursive parent carrier.
+  Commit `f7e09f527` generates and commits the complete quartic interaction
+  trace. Every `SI01` leaf has one FCO-derived 97-field schema containing exact
+  trace metadata, the `SL03` base root, and the product, rounding, linear, and
+  boundary accumulators plus inverse ports. One row-local Fe interpretation
+  boundary derives control and witness rows, evaluates all four buses, checks
+  their local relations, hashes the nominal leaf, and updates caller-owned
+  accumulators. The reusable batch-inversion plan now also has a caller-owned
+  placement interpretation. Together these let scalar Wasm reclaim quartic
+  temporaries after every row without increasing memory or moving arithmetic,
+  scheduling, or commitment work into Rust or JavaScript. The independent
+  Rust model reconstructs all 4,096 semantic rows and every port, implements
+  the quartic extension separately, checks every inverse and all four terminal
+  balances, applies Plonky3 Poseidon2, and matches the Fe root. The optimized
+  gate accepts that independently derived root, rejects a one-coefficient
+  mutation, and fails closed on an invalid base commitment with the canonical
+  zero root. The complete two-test recursive fixed-point binary passes 2/2
+  with zero skips in 234.23 seconds.
+  `SL03` and `SI01` now authenticate the exact base and interaction witness
+  traces, but they are not yet a succinct leaf proof. Both traces must now be
+  carried through the existing BabyBear LDE, composition, multi-query, FRI,
+  and canonical receipt interpreters. Only that authenticated AIR/FRI receipt
+  may replace semantic replay in the recursive parent carrier.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
   The first arithmetic-plan consolidation is landed at `ba2ded864`: one
@@ -1278,10 +1294,9 @@ fallback. The semantic receipts are:
 ## Immediate burn-down order
 
 1. Run the external real-GPU handoff above before beginning the proof GPU port.
-2. Finish the authenticated BabyBear sparse AIR: generate and commit the
-   quartic interaction traces, then feed control, witness, and interactions
-   through the existing LDE, composition, multi-query, FRI, and canonical
-   receipt layers.
+2. Finish the authenticated BabyBear sparse AIR: feed the committed `SL03`
+   control/witness trace and `SI01` quartic interaction trace through the
+   existing LDE, composition, multi-query, FRI, and canonical receipt layers.
 3. Lower the BabyBear leaf prover and recursive merges through Fe Conal/CTFE
    WebGPU schedules, then run the complete progressive proof/verify/tamper page
    through Chrome.
