@@ -203,6 +203,9 @@ impl<F: Radix2Field> core::marker::Copy for SparseTaskRow<F> {}
 /// numeric column or memory-address table.
 pub enum SparseCopyAddress {
     RangeDigit(RangeNode, u32),
+    RangeBit(RangeNode, u32, u32),
+    RangeSign(RangeNode),
+    RangeNonzero(RangeNode),
     ProductCarry(ProductNode, u32),
     Invalid,
 }
@@ -226,6 +229,11 @@ pub const fn sparse_carry_task_count<const L: usize>() -> u32 {
 pub const fn sparse_product_task_count<const L: usize>() -> u32 {
     let limbs: u32 = L.downcast_truncate()
     sparse_product_node_count() * (limbs * limbs + limbs + limbs)
+}
+
+pub const fn sparse_round_task_count<const L: usize>() -> u32 {
+    let limbs: u32 = L.downcast_truncate()
+    sparse_product_node_count() * (limbs + 1)
 }
 
 pub const fn sparse_transition_task_count<const L: usize>() -> u32 {
@@ -410,18 +418,20 @@ pub fn sparse_transition_task_at<const L: usize>(
     }
     remaining = remaining - product_rows
 
-    let product_rounds = products * limbs
-    if remaining < product_rounds {
-        return SparseTransitionTask::ProductRound(
-            product_node_at(remaining / limbs),
-            remaining - (remaining / limbs) * limbs,
-        )
+    let product_round_rows = products * (limbs + 1)
+    if remaining < product_round_rows {
+        let per_product = limbs + 1
+        let product_index = remaining / per_product
+        let local = remaining - product_index * per_product
+        if local < limbs {
+            return SparseTransitionTask::ProductRound(
+                product_node_at(product_index),
+                local,
+            )
+        }
+        return SparseTransitionTask::ProductFinish(product_node_at(product_index))
     }
-    remaining = remaining - product_rounds
-    if remaining < products {
-        return SparseTransitionTask::ProductFinish(product_node_at(remaining))
-    }
-    remaining = remaining - products
+    remaining = remaining - product_round_rows
 
     let linear_rows = linears * (limbs + 1)
     if remaining < linear_rows {
@@ -532,6 +542,13 @@ fn range_node_is_signed(_ node: RangeNode) -> bool {
         RangeNode::NextImaginary => true,
         RangeNode::ProductOutput(_) => true,
         RangeNode::LinearOutput(_) => true,
+        _ => false,
+    }
+}
+
+fn range_node_is_product_output(_ node: RangeNode) -> bool {
+    match node {
+        RangeNode::ProductOutput(_) => true,
         _ => false,
     }
 }
@@ -888,6 +905,64 @@ pub fn sparse_product_row_from_witness<F: Radix2Field, const L: usize>(
                 accumulator_after: zero<F>(),
                 state_before: natural<F>(carry_in),
                 state_after: natural<F>(carry_out),
+            }
+        }
+        _ => empty_sparse_row<F>(),
+    }
+}
+
+fn fixed_product_retained_digit<const L: usize>(
+    _ product: FixedProductWitness<L>,
+    _ output_index: u32,
+) -> u32 {
+    if output_index == 0 {
+        product.low_digits[L - 1]
+    } else {
+        product.high_digits[(output_index - 1) as usize]
+    }
+}
+
+/// The rounding ripple reuses the arithmetic row. Its state pair retains the
+/// guard-bit decision across all limbs. The finish row then reuses the six
+/// fields for the final carry and four sign inputs; product groups reset
+/// explicitly instead of linking those semantic fields into the next group.
+pub fn sparse_round_row_from_witness<F: Radix2Field, const L: usize>(
+    _ task: SparseTransitionTask,
+    _ current: ComplexFixed<L>,
+    _ witness: FixedMandelbrotTransitionWitness<L>,
+) -> SparseTaskRow<F> {
+    match task {
+        SparseTransitionTask::ProductRound(node, output_index) => {
+            let product = product_node_witness(node, witness)
+            let round_up = if product.round_up { 1 } else { 0 }
+            let carry_in = if output_index == 0 {
+                round_up
+            } else {
+                product.round_carries[(output_index - 1) as usize]
+            }
+            SparseTaskRow {
+                value: natural<F>(fixed_product_retained_digit(product, output_index)),
+                auxiliary: natural<F>(product.output.limbs[output_index as usize]),
+                accumulator_before: natural<F>(carry_in),
+                accumulator_after: natural<F>(
+                    product.round_carries[output_index as usize],
+                ),
+                state_before: natural<F>(round_up),
+                state_after: natural<F>(round_up),
+            }
+        }
+        SparseTransitionTask::ProductFinish(node) => {
+            let product = product_node_witness(node, witness)
+            let left = product_left_value(node, current)
+            let right = product_right_value(node, current)
+            let output_range = derive_radix_range_witness(product.output.limbs)
+            SparseTaskRow {
+                value: boolean<F>(product.output.negative),
+                auxiliary: boolean<F>(output_range.nonzero),
+                accumulator_before: natural<F>(product.round_carries[L - 1]),
+                accumulator_after: boolean<F>(left.negative),
+                state_before: boolean<F>(product.round_up),
+                state_after: boolean<F>(right.negative),
             }
         }
         _ => empty_sparse_row<F>(),
@@ -1363,7 +1438,7 @@ fn product_copy_key<F: Radix2Field, const L: usize>(
         SparseCopyAddress::ProductCarry(product, coefficient) => {
             8 * limbs + product_node_rank(product) * limbs * 2 + coefficient
         }
-        SparseCopyAddress::Invalid => return zero<F>(),
+        _ => return zero<F>(),
     }
     let mut key = one<F>()
     let mut exponent: u32 = 0
@@ -1509,6 +1584,314 @@ pub fn sparse_product_copy_consumer<F: Radix2Field, const L: usize>(
                 )
             }
             contribution
+        }
+        _ => zero<F>(),
+    }
+}
+
+fn absorb_sparse_round_row<F: Radix2Field>(
+    _ fold: own ConstraintFold<F>,
+    _ task: SparseTransitionTask,
+    _ row: SparseTaskRow<F>,
+) -> ConstraintFold<F> {
+    let mut fold = fold
+    match task {
+        SparseTransitionTask::ProductRound(_node, _output_index) => {
+            fold = fold.absorb(bit_residual(row.accumulator_after))
+            fold = fold.absorb(sub(
+                sub(
+                    add(row.value, row.accumulator_before),
+                    row.auxiliary,
+                ),
+                mul(natural<F>(8192), row.accumulator_after),
+            ))
+            fold.absorb(sub(row.state_after, row.state_before))
+        }
+        SparseTransitionTask::ProductFinish(_node) => {
+            fold = fold.absorb(bit_residual(row.value))
+            fold = fold.absorb(bit_residual(row.auxiliary))
+            fold = fold.absorb(bit_residual(row.accumulator_before))
+            fold = fold.absorb(bit_residual(row.accumulator_after))
+            fold = fold.absorb(bit_residual(row.state_before))
+            fold = fold.absorb(bit_residual(row.state_after))
+            let sign_xor = sub(
+                add(row.accumulator_after, row.state_after),
+                mul(
+                    natural<F>(2),
+                    mul(row.accumulator_after, row.state_after),
+                ),
+            )
+            fold.absorb(sub(row.value, mul(sign_xor, row.auxiliary)))
+        }
+        _ => fold.absorb(one<F>()),
+    }
+}
+
+pub fn evaluate_sparse_round_row<F: Radix2Field>(
+    _ challenge: F,
+    _ task: SparseTransitionTask,
+    _ row: SparseTaskRow<F>,
+) -> FixedAirConstraintEvaluation<F> {
+    let fold = absorb_sparse_round_row(
+        ConstraintFold<F>::new(challenge),
+        task,
+        row,
+    )
+    FixedAirConstraintEvaluation {
+        valid: match task {
+            SparseTransitionTask::ProductRound(_, _) => true,
+            SparseTransitionTask::ProductFinish(_) => true,
+            _ => false,
+        },
+        constraints: fold.constraints,
+        folded: fold.value,
+    }
+}
+
+pub fn sparse_round_initial_residual<F: Radix2Field>(
+    _ row: SparseTaskRow<F>,
+) -> F {
+    sub(row.accumulator_before, row.state_before)
+}
+
+pub fn sparse_round_link_residuals<F: Radix2Field>(
+    _ current: SparseTaskRow<F>,
+    _ next: SparseTaskRow<F>,
+) -> (F, F) {
+    (
+        sub(next.accumulator_before, current.accumulator_after),
+        sub(next.state_before, current.state_after),
+    )
+}
+
+fn round_copy_range_rank(_ node: RangeNode) -> u32 {
+    match node {
+        RangeNode::CurrentReal => 0,
+        RangeNode::CurrentImaginary => 1,
+        RangeNode::ProductLow(product) => 2 + 3 * product_node_rank(product),
+        RangeNode::ProductHigh(product) => 3 + 3 * product_node_rank(product),
+        RangeNode::ProductOutput(product) => 4 + 3 * product_node_rank(product),
+        _ => 99,
+    }
+}
+
+fn round_copy_key<F: Radix2Field, const L: usize>(
+    _ challenge: F,
+    _ address: SparseCopyAddress,
+) -> F {
+    let limbs: u32 = L.downcast_truncate()
+    let ranges: u32 = 11
+    let digit_addresses = ranges * limbs
+    let bit_addresses = ranges * limbs * 13
+    let rank = match address {
+        SparseCopyAddress::RangeDigit(node, limb) => {
+            round_copy_range_rank(node) * limbs + limb
+        }
+        SparseCopyAddress::RangeBit(node, limb, bit) => {
+            digit_addresses
+                + round_copy_range_rank(node) * limbs * 13
+                + limb * 13
+                + bit
+        }
+        SparseCopyAddress::RangeSign(node) => {
+            digit_addresses + bit_addresses + round_copy_range_rank(node)
+        }
+        SparseCopyAddress::RangeNonzero(node) => {
+            digit_addresses + bit_addresses + ranges + round_copy_range_rank(node)
+        }
+        _ => return zero<F>(),
+    }
+    let mut key = one<F>()
+    let mut exponent: u32 = 0
+    while exponent < rank + 1 {
+        key = mul(key, challenge)
+        exponent = exponent + 1
+    }
+    key
+}
+
+fn round_retained_range<const L: usize>(
+    _ product: ProductNode,
+    _ output_index: u32,
+) -> (RangeNode, u32) {
+    let limbs: u32 = L.downcast_truncate()
+    if output_index == 0 {
+        (RangeNode::ProductLow(product), limbs - 1)
+    } else {
+        (RangeNode::ProductHigh(product), output_index - 1)
+    }
+}
+
+/// Source side of the rounding copy bus. Only the retained window, output
+/// digits, one guard bit, and sign/nonzero values participate, so every
+/// multiplicity follows directly from the nominal task variants.
+pub fn sparse_round_copy_source<F: Radix2Field, const L: usize>(
+    _ challenge: F,
+    _ task: SparseTransitionTask,
+    _ row: SparseTaskRow<F>,
+) -> F {
+    match task {
+        SparseTransitionTask::RadixBit(
+            RangeNode::ProductLow(product),
+            limb,
+            bit,
+        ) => {
+            let limbs: u32 = L.downcast_truncate()
+            if limb == limbs - 2 && bit == 12 {
+                mul(
+                    round_copy_key<F, L>(
+                        challenge,
+                        SparseCopyAddress::RangeBit(
+                            RangeNode::ProductLow(product),
+                            limb,
+                            bit,
+                        ),
+                    ),
+                    row.value,
+                )
+            } else {
+                zero<F>()
+            }
+        }
+        SparseTransitionTask::RadixLimb(node, limb) => {
+            let limbs: u32 = L.downcast_truncate()
+            let used = match node {
+                RangeNode::ProductLow(_) => limb + 1 == limbs,
+                RangeNode::ProductHigh(_) => limb + 1 < limbs,
+                RangeNode::ProductOutput(_) => true,
+                _ => false,
+            }
+            if used {
+                mul(
+                    round_copy_key<F, L>(
+                        challenge,
+                        SparseCopyAddress::RangeDigit(node, limb),
+                    ),
+                    row.value,
+                )
+            } else {
+                zero<F>()
+            }
+        }
+        SparseTransitionTask::RadixFinish(node) => {
+            let sign_multiplicity = match node {
+                RangeNode::CurrentReal => 3,
+                RangeNode::CurrentImaginary => 3,
+                RangeNode::ProductOutput(_) => 1,
+                _ => 0,
+            }
+            let mut contribution = mul(
+                mul(
+                    round_copy_key<F, L>(
+                        challenge,
+                        SparseCopyAddress::RangeSign(node),
+                    ),
+                    row.auxiliary,
+                ),
+                natural<F>(sign_multiplicity),
+            )
+            if range_node_is_product_output(node) {
+                contribution = add(
+                    contribution,
+                    mul(
+                        round_copy_key<F, L>(
+                            challenge,
+                            SparseCopyAddress::RangeNonzero(node),
+                        ),
+                        row.value,
+                    ),
+                )
+            }
+            contribution
+        }
+        _ => zero<F>(),
+    }
+}
+
+pub fn sparse_round_copy_consumer<F: Radix2Field, const L: usize>(
+    _ challenge: F,
+    _ task: SparseTransitionTask,
+    _ row: SparseTaskRow<F>,
+) -> F {
+    match task {
+        SparseTransitionTask::ProductRound(product, output_index) => {
+            let retained = round_retained_range<L>(product, output_index)
+            add(
+                mul(
+                    round_copy_key<F, L>(
+                        challenge,
+                        SparseCopyAddress::RangeDigit(retained.0, retained.1),
+                    ),
+                    row.value,
+                ),
+                mul(
+                    round_copy_key<F, L>(
+                        challenge,
+                        SparseCopyAddress::RangeDigit(
+                            RangeNode::ProductOutput(product),
+                            output_index,
+                        ),
+                    ),
+                    row.auxiliary,
+                ),
+            )
+        }
+        SparseTransitionTask::ProductFinish(product) => {
+            let left = product_input_range(product, true)
+            let right = product_input_range(product, false)
+            let output = RangeNode::ProductOutput(product)
+            let limbs: u32 = L.downcast_truncate()
+            let mut contribution = mul(
+                round_copy_key<F, L>(
+                    challenge,
+                    SparseCopyAddress::RangeBit(
+                        RangeNode::ProductLow(product),
+                        limbs - 2,
+                        12,
+                    ),
+                ),
+                row.state_before,
+            )
+            contribution = add(
+                contribution,
+                mul(
+                    round_copy_key<F, L>(
+                        challenge,
+                        SparseCopyAddress::RangeSign(output),
+                    ),
+                    row.value,
+                ),
+            )
+            contribution = add(
+                contribution,
+                mul(
+                    round_copy_key<F, L>(
+                        challenge,
+                        SparseCopyAddress::RangeNonzero(output),
+                    ),
+                    row.auxiliary,
+                ),
+            )
+            contribution = add(
+                contribution,
+                mul(
+                    round_copy_key<F, L>(
+                        challenge,
+                        SparseCopyAddress::RangeSign(left),
+                    ),
+                    row.accumulator_after,
+                ),
+            )
+            add(
+                contribution,
+                mul(
+                    round_copy_key<F, L>(
+                        challenge,
+                        SparseCopyAddress::RangeSign(right),
+                    ),
+                    row.state_after,
+                ),
+            )
         }
         _ => zero<F>(),
     }
