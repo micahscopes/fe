@@ -1173,6 +1173,13 @@ Legend:
   interaction constraints and passes 1/1 in 119.57 seconds. Product, rounding,
   linear, and boundary nominal copy families are now all represented by the
   shared const-generic log-derivative relation.
+  Commit `28c5d6a89` replaces per-port witness inversion with the reusable
+  zero-tolerant `batch_inverse_or_zero<F, N>` field interpreter. Each typed
+  interaction row now performs at most one inversion regardless of its port
+  width; inactive zero lanes stay zero and active denominators share prefix and
+  suffix products. The complete independent receipts and mutations remain
+  byte-identical and pass 1/1 in 117.45 seconds. The same const-generic utility
+  can later batch larger row tiles in scalar, packed, or WebGPU schedules.
   This root authenticates the exact control and witness base trace but is not
   yet a succinct leaf proof. The base-field audit challenges must now become
   transcript-derived quartic challenges with batch inversion. Those
