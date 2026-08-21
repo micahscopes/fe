@@ -13,6 +13,7 @@ use canonical_words::{
     canonical_word_stream_count,
     decode_canonical_prefix,
     encode_canonical_prefix,
+    encode_canonical_word_array,
     encode_canonical_word_stream,
     encode_canonical_words,
 }
@@ -124,6 +125,34 @@ pub fn canonical_envelope_roundtrip() -> u32 {
     } else {
         0
     }
+}
+
+pub fn canonical_envelope_word_array() -> BrowserBytes {
+    let value = Envelope {
+        valid: true,
+        fields: FieldArray { values: [Fr::from_u32(1), Fr::from_u32(2)] },
+    }
+    let encoded = encode_canonical_word_array<Envelope, 41>(ref value)
+    if !encoded.valid { return BrowserBytes { ptr: 0, len: 0 } }
+    encode_canonical_words(
+        ref encoded.words,
+        BrowserWordWriter::allocate(41),
+    ).finish()
+}
+
+pub fn canonical_envelope_word_array_widths() -> [u32; 3] {
+    let value = Envelope {
+        valid: true,
+        fields: FieldArray { values: [Fr::from_u32(1), Fr::from_u32(2)] },
+    }
+    let narrow = encode_canonical_word_array<Envelope, 40>(ref value)
+    let exact = encode_canonical_word_array<Envelope, 41>(ref value)
+    let wide = encode_canonical_word_array<Envelope, 42>(ref value)
+    [
+        if narrow.valid { 1 } else { 0 },
+        if exact.valid { 1 } else { 0 },
+        if wide.valid { 1 } else { 0 },
+    ]
 }
 
 pub fn canonical_signed_envelope(_ negative: i32, _ positive: i32) -> BrowserBytes {

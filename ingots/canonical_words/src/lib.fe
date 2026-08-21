@@ -53,6 +53,64 @@ pub fn encode_canonical_words<T: CanonicalWords, W: WordSink>(
     value.encode(writer)
 }
 
+/// Fixed-capacity, target-neutral result of interpreting a nominal canonical
+/// schema into caller-owned words. A width mismatch fails closed and returns
+/// an all-zero payload, so callers never need a parallel field-count table.
+pub struct CanonicalWordArray<const N: usize> {
+    pub valid: bool,
+    pub words: [u32; N],
+}
+impl<const N: usize> core::marker::Copy for CanonicalWordArray<N> {}
+
+struct ArrayWordWriter<const N: usize> {
+    words: [u32; N],
+    cursor: u32,
+    valid: bool,
+}
+impl<const N: usize> core::marker::Copy for ArrayWordWriter<N> {}
+
+impl<const N: usize> ArrayWordWriter<N> {
+    fn new() -> Self { Self { words: [0; N], cursor: 0, valid: true } }
+
+    fn finish(self) -> CanonicalWordArray<N> {
+        if !self.valid || self.cursor != N.downcast_truncate() {
+            return CanonicalWordArray { valid: false, words: [0; N] }
+        }
+        CanonicalWordArray { valid: true, words: self.words }
+    }
+}
+
+impl<const N: usize> WordSink for ArrayWordWriter<N> {
+    fn write(self, _ value: u32) -> Self {
+        if !self.valid || self.cursor >= N.downcast_truncate() {
+            return Self {
+                words: self.words,
+                cursor: self.cursor,
+                valid: false,
+            }
+        }
+        let mut words = self.words
+        words[self.cursor as usize] = value
+        Self { words: words, cursor: self.cursor + 1, valid: true }
+    }
+
+    fn reject(self) -> Self {
+        Self { words: self.words, cursor: self.cursor, valid: false }
+    }
+}
+
+/// Execute a reflection-derived fixed codec into an exact ordinary array.
+/// `N` is checked by the sink itself, including zero-width schemas, rather
+/// than being trusted as an authored protocol constant.
+pub fn encode_canonical_word_array<
+    T: CanonicalWords,
+    const N: usize,
+>(
+    _ value: ref T,
+) -> CanonicalWordArray<N> {
+    encode_canonical_words(ref value, ArrayWordWriter<N>::new()).finish()
+}
+
 pub fn canonical_word_stream_count<T: CanonicalWordStream>(_ value: ref T) -> u32 {
     value.word_count()
 }

@@ -81,6 +81,36 @@ fn const_generic_field_codec_runs_on_wasm() {
     assert_eq!(words[21], 2);
     assert!(words[22..].iter().all(|word| *word == 0));
 
+    let envelope_array = instance
+        .get_typed_func::<(), (i32, i32)>(&mut store, "canonical_envelope_word_array")
+        .expect("envelope array encoding export");
+    let (array_pointer, array_length) = envelope_array
+        .call(&mut store, ())
+        .expect("envelope array encoding runs");
+    assert_eq!(array_length, length);
+    let mut array_bytes = vec![0u8; array_length as usize];
+    memory
+        .read(&store, array_pointer as usize, &mut array_bytes)
+        .unwrap();
+    let array_words = array_bytes
+        .chunks_exact(4)
+        .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+        .collect::<Vec<_>>();
+    assert_eq!(array_words, words);
+
+    let envelope_array_widths = instance
+        .get_typed_func::<(), (i32, i32, i32)>(
+            &mut store,
+            "canonical_envelope_word_array_widths",
+        )
+        .expect("envelope array width audit export");
+    assert_eq!(
+        envelope_array_widths
+            .call(&mut store, ())
+            .expect("envelope array width audit runs"),
+        (0, 1, 0),
+    );
+
     let roundtrip = instance
         .get_typed_func::<(), i32>(&mut store, "canonical_envelope_roundtrip")
         .expect("envelope roundtrip export");
