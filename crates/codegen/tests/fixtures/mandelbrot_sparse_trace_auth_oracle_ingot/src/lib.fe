@@ -14,12 +14,15 @@ use mandelbrot_proof_fixed_air::{
     fixed_mandelbrot_transition_output,
 }
 use mandelbrot_proof_fixed_air_baby_bear::{
+    SparseTraceDigest,
     SparseTraceAuthentication,
     empty_sparse_trace_authentication,
+    sparse_interaction_challenges,
     verify_sparse_trace_authentication,
     write_sparse_trace_authentication_power_of_two,
 }
 use mandelbrot_proof_recursive::ComplexFixed
+use poseidon_baby_bear::Poseidon2Digest
 use precision::fixed::Fixed
 
 type TransitionWitness4 = FixedMandelbrotTransitionWitness<4>
@@ -111,4 +114,39 @@ pub fn fixed_transition4_sparse_trace_authentication_verify_at(
     } else {
         0
     }
+}
+
+pub fn sparse_interaction_challenges4(
+    _ valid: u32,
+    _ r0: u32, _ r1: u32, _ r2: u32, _ r3: u32,
+    _ r4: u32, _ r5: u32, _ r6: u32, _ r7: u32,
+) -> [u32; 33] {
+    let root = SparseTraceDigest<4> {
+        valid: valid == 1,
+        value: Poseidon2Digest::from_u32s([r0, r1, r2, r3, r4, r5, r6, r7]),
+    }
+    let challenges = sparse_interaction_challenges(root)
+    let values = [
+        challenges.product.beta,
+        challenges.product.gamma,
+        challenges.round.beta,
+        challenges.round.gamma,
+        challenges.linear.beta,
+        challenges.linear.gamma,
+        challenges.boundary.beta,
+        challenges.boundary.gamma,
+    ]
+    let mut words = [0; 33]
+    words[0] = if challenges.valid { 1 } else { 0 }
+    let mut value: usize = 0
+    while value < 8 {
+        let coefficients = values[value].to_u32s()
+        let mut coefficient: usize = 0
+        while coefficient < 4 {
+            words[1 + value * 4 + coefficient] = coefficients[coefficient]
+            coefficient = coefficient + 1
+        }
+        value = value + 1
+    }
+    words
 }

@@ -18,6 +18,7 @@ use canonical_words::{
 }
 use mandelbrot_proof_fixed_air::FixedMandelbrotTransitionWitness
 use mandelbrot_proof_fixed_air_core::{
+    SparseCopyChallenges,
     sparse_control_row_at,
     sparse_transition_row_from_witness,
     sparse_transition_task_count,
@@ -39,8 +40,9 @@ use poseidon_baby_bear::{
     Poseidon2FieldDomain,
     commit_canonical,
     compress as poseidon_compress,
+    squeeze_ext4,
 }
-use precision::baby_bear::BabyBear
+use precision::baby_bear::{BabyBear, BabyBearExt4}
 use core::ops::Eq
 
 const SPARSE_TRACE_FRONTIER_LEVELS: usize = 23
@@ -58,6 +60,39 @@ struct MandelbrotSparseTraceLeafBabyBearV3 {}
 
 impl Poseidon2FieldDomain for MandelbrotSparseTraceLeafBabyBearV3 {
     const TAG: u32 = protocol_tag("SL03")
+}
+
+struct MandelbrotSparseProductBetaBabyBearV1 {}
+impl Poseidon2FieldDomain for MandelbrotSparseProductBetaBabyBearV1 {
+    const TAG: u32 = protocol_tag("PB01")
+}
+struct MandelbrotSparseProductGammaBabyBearV1 {}
+impl Poseidon2FieldDomain for MandelbrotSparseProductGammaBabyBearV1 {
+    const TAG: u32 = protocol_tag("PG01")
+}
+struct MandelbrotSparseRoundBetaBabyBearV1 {}
+impl Poseidon2FieldDomain for MandelbrotSparseRoundBetaBabyBearV1 {
+    const TAG: u32 = protocol_tag("RB01")
+}
+struct MandelbrotSparseRoundGammaBabyBearV1 {}
+impl Poseidon2FieldDomain for MandelbrotSparseRoundGammaBabyBearV1 {
+    const TAG: u32 = protocol_tag("RG01")
+}
+struct MandelbrotSparseLinearBetaBabyBearV1 {}
+impl Poseidon2FieldDomain for MandelbrotSparseLinearBetaBabyBearV1 {
+    const TAG: u32 = protocol_tag("LB01")
+}
+struct MandelbrotSparseLinearGammaBabyBearV1 {}
+impl Poseidon2FieldDomain for MandelbrotSparseLinearGammaBabyBearV1 {
+    const TAG: u32 = protocol_tag("LG01")
+}
+struct MandelbrotSparseBoundaryBetaBabyBearV1 {}
+impl Poseidon2FieldDomain for MandelbrotSparseBoundaryBetaBabyBearV1 {
+    const TAG: u32 = protocol_tag("BB01")
+}
+struct MandelbrotSparseBoundaryGammaBabyBearV1 {}
+impl Poseidon2FieldDomain for MandelbrotSparseBoundaryGammaBabyBearV1 {
+    const TAG: u32 = protocol_tag("BG01")
 }
 
 pub struct SparseTraceTaskSelectors {
@@ -162,6 +197,53 @@ pub struct SparseTraceDigest<const L: usize> {
 }
 impl<const L: usize> core::marker::Copy for SparseTraceDigest<L> {}
 derive CanonicalWords for SparseTraceDigest<L> using CanonicalWordsProvider
+
+/// Fiat-Shamir challenges for all committed sparse copy interactions. Every
+/// bus and role has an independent domain, and every value lives in the
+/// quartic BabyBear challenge field.
+pub struct SparseInteractionChallenges {
+    pub valid: bool,
+    pub product: SparseCopyChallenges<BabyBearExt4>,
+    pub round: SparseCopyChallenges<BabyBearExt4>,
+    pub linear: SparseCopyChallenges<BabyBearExt4>,
+    pub boundary: SparseCopyChallenges<BabyBearExt4>,
+}
+impl core::marker::Copy for SparseInteractionChallenges {}
+
+pub fn sparse_interaction_challenges<const L: usize>(
+    _ root: SparseTraceDigest<L>,
+) -> SparseInteractionChallenges {
+    if !root.valid {
+        let zero = BabyBearExt4::zero()
+        let challenges = SparseCopyChallenges { beta: zero, gamma: zero }
+        return SparseInteractionChallenges {
+            valid: false,
+            product: challenges,
+            round: challenges,
+            linear: challenges,
+            boundary: challenges,
+        }
+    }
+    SparseInteractionChallenges {
+        valid: true,
+        product: SparseCopyChallenges {
+            beta: squeeze_ext4<MandelbrotSparseProductBetaBabyBearV1>(root.value),
+            gamma: squeeze_ext4<MandelbrotSparseProductGammaBabyBearV1>(root.value),
+        },
+        round: SparseCopyChallenges {
+            beta: squeeze_ext4<MandelbrotSparseRoundBetaBabyBearV1>(root.value),
+            gamma: squeeze_ext4<MandelbrotSparseRoundGammaBabyBearV1>(root.value),
+        },
+        linear: SparseCopyChallenges {
+            beta: squeeze_ext4<MandelbrotSparseLinearBetaBabyBearV1>(root.value),
+            gamma: squeeze_ext4<MandelbrotSparseLinearGammaBabyBearV1>(root.value),
+        },
+        boundary: SparseCopyChallenges {
+            beta: squeeze_ext4<MandelbrotSparseBoundaryBetaBabyBearV1>(root.value),
+            gamma: squeeze_ext4<MandelbrotSparseBoundaryGammaBabyBearV1>(root.value),
+        },
+    }
+}
 
 /// Canonical variable-size opening for sorted, deduplicated sparse leaves.
 pub struct SparseTraceMultiOpening<

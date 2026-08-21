@@ -1609,6 +1609,16 @@ fn expected_sparse_trace_root(point: &ComplexFx, current: &ComplexFx) -> [u32; 8
     reference_merkle_root(leaves)
 }
 
+fn expected_sparse_interaction_challenges(root: [u32; 8]) -> Vec<u32> {
+    let mut words = vec![1];
+    for tag in [
+        b"PB01", b"PG01", b"RB01", b"RG01", b"LB01", b"LG01", b"BB01", b"BG01",
+    ] {
+        words.extend(&reference_poseidon_digest(tag, &root)[..4]);
+    }
+    words
+}
+
 fn expected_committed_words(
     claim: &Claim,
     start: &Boundary,
@@ -3075,14 +3085,43 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
             assert!(length > 0, "sparse opening must encode");
             assert_eq!(opening_words[0], 1, "authentication must be valid");
             assert_eq!(opening_words[1], 1, "sparse trace root must be valid");
+            let expected_root = expected_sparse_trace_root(point, current);
             assert_eq!(
                 opening_words[2..10],
-                expected_sparse_trace_root(point, current),
+                expected_root,
                 "Fe sparse trace root must match independent Plonky3 reconstruction",
             );
             assert_eq!(opening_words[10], 1, "opening must be valid");
             assert_eq!(opening_words[11], 1, "multipath must be valid");
             assert_eq!(opening_words[12], requests.len() as u32);
+
+            let mut challenge_arguments = vec![1];
+            challenge_arguments.extend(expected_root);
+            let challenge_words = call(
+                &mut auth_store,
+                &auth_instance,
+                "sparse_interaction_challenges4",
+                &challenge_arguments,
+                33,
+            );
+            assert_eq!(
+                challenge_words,
+                expected_sparse_interaction_challenges(expected_root),
+                "all interaction challenges must be transcript-derived quartic values",
+            );
+            let mut invalid_challenge_arguments = vec![0];
+            invalid_challenge_arguments.extend(expected_root);
+            assert_eq!(
+                call(
+                    &mut auth_store,
+                    &auth_instance,
+                    "sparse_interaction_challenges4",
+                    &invalid_challenge_arguments,
+                    33,
+                ),
+                vec![0; 33],
+                "invalid trace roots must fail closed before challenge derivation",
+            );
 
             let verify_arguments = vec![pointer, length];
             assert_eq!(
