@@ -1052,7 +1052,7 @@ fn reference_merkle_root(mut leaves: Vec<[u32; 8]>) -> [u32; 8] {
     leaves[0]
 }
 
-fn expected_sparse_trace_root(point: &ComplexFx, current: &ComplexFx) -> [u32; 8] {
+fn expected_sparse_rows(point: &ComplexFx, current: &ComplexFx) -> Vec<[u32; 6]> {
     let mut rows = expected_sparse_radix_rows(point, current);
     rows.extend(expected_sparse_carry_rows(current));
     rows.extend(expected_sparse_product_rows(current));
@@ -1062,6 +1062,155 @@ fn expected_sparse_trace_root(point: &ComplexFx, current: &ComplexFx) -> [u32; 8
     let task_count = rows.len() as u32;
     assert_eq!(task_count, 2_821);
     rows.resize(4_096, [0; 6]);
+    rows
+}
+
+fn bb_add(left: u32, right: u32) -> u32 {
+    ((left as u64 + right as u64) % BABY_BEAR_MODULUS as u64) as u32
+}
+
+fn bb_sub(left: u32, right: u32) -> u32 {
+    ((left as u64 + BABY_BEAR_MODULUS as u64 - right as u64) % BABY_BEAR_MODULUS as u64) as u32
+}
+
+fn bb_mul(left: u32, right: u32) -> u32 {
+    (left as u64 * right as u64 % BABY_BEAR_MODULUS as u64) as u32
+}
+
+fn bb_pow(mut base: u32, mut exponent: u32) -> u32 {
+    let mut result = 1;
+    while exponent != 0 {
+        if exponent & 1 == 1 {
+            result = bb_mul(result, base);
+        }
+        base = bb_mul(base, base);
+        exponent >>= 1;
+    }
+    result
+}
+
+fn bb_inverse(value: u32) -> u32 {
+    assert_ne!(value, 0, "copy compression challenge hit an inverse pole");
+    bb_pow(value, BABY_BEAR_MODULUS - 2)
+}
+
+fn product_range_rank(range: u32) -> Option<u32> {
+    match range {
+        2 => Some(0),
+        3 => Some(1),
+        6 | 9 | 12 => Some(2 + 2 * ((range - 6) / 3)),
+        7 | 10 | 13 => Some(3 + 2 * ((range - 7) / 3)),
+        _ => None,
+    }
+}
+
+fn product_copy_compressed_inverse(address: u32, value: u32, beta: u32, gamma: u32) -> u32 {
+    bb_inverse(bb_add(gamma, bb_add(address, bb_mul(beta, value))))
+}
+
+fn expected_product_interaction_ports(
+    task: [u32; 5],
+    row: [u32; 6],
+    beta: u32,
+    gamma: u32,
+) -> (u32, u32, u32) {
+    let [kind, first, second, third, _fourth] = task;
+    let limbs = LIMBS as u32;
+    let mut first_port: Option<(u32, u32, bool)> = None;
+    let mut first_multiplicity = 0;
+    let mut second_port: Option<(u32, u32)> = None;
+    match kind {
+        1 => {
+            if let Some(rank) = product_range_rank(first) {
+                first_port = Some((rank * limbs + second, row[0], true));
+                first_multiplicity = if first == 2 || first == 3 {
+                    3 * limbs
+                } else {
+                    1
+                };
+            }
+        }
+        4 => {
+            first_port = Some((8 * limbs + first * 2 * limbs + second, row[0], true));
+            first_multiplicity = 1;
+        }
+        5 => {
+            let left_rank = [0, 1, 0][first as usize];
+            let right_rank = [0, 1, 1][first as usize];
+            let left_index = if second < limbs {
+                third
+            } else {
+                second - (limbs - 1) + third
+            };
+            let right_index = second - left_index;
+            first_port = Some((left_rank * limbs + left_index, row[0], false));
+            first_multiplicity = 1;
+            second_port = Some((right_rank * limbs + right_index, row[1]));
+        }
+        6 => {
+            let high = u32::from(second >= limbs);
+            let digit_rank = 2 + 2 * first + high;
+            let digit_limb = second - high * limbs;
+            first_port = Some((digit_rank * limbs + digit_limb, row[0], false));
+            first_multiplicity = 1;
+            second_port = Some((8 * limbs + first * 2 * limbs + second, row[1]));
+        }
+        _ => {}
+    }
+    let mut delta = 0;
+    let inverse_first = if let Some((address, value, source)) = first_port {
+        let inverse = product_copy_compressed_inverse(address, value, beta, gamma);
+        let contribution = bb_mul(first_multiplicity, inverse);
+        delta = if source {
+            bb_add(delta, contribution)
+        } else {
+            bb_sub(delta, contribution)
+        };
+        inverse
+    } else {
+        0
+    };
+    let inverse_second = if let Some((address, value)) = second_port {
+        let inverse = product_copy_compressed_inverse(address, value, beta, gamma);
+        delta = bb_sub(delta, inverse);
+        inverse
+    } else {
+        0
+    };
+    (inverse_first, inverse_second, delta)
+}
+
+fn expected_product_interaction_receipt(
+    point: &ComplexFx,
+    current: &ComplexFx,
+    beta: u32,
+    gamma: u32,
+    receipt_challenge: u32,
+) -> u32 {
+    let mut tasks = expected_sparse_transition_tasks(LIMBS as u32);
+    tasks.resize(4_096, [14, 0, 0, 0, 0]);
+    let rows = expected_sparse_rows(point, current);
+    let mut accumulator = 0;
+    let mut receipt = 0;
+    let mut power = 1;
+    for (task, row) in tasks.into_iter().zip(rows) {
+        let (inverse_first, inverse_second, delta) =
+            expected_product_interaction_ports(task, row, beta, gamma);
+        receipt = bb_add(receipt, bb_mul(power, accumulator));
+        power = bb_mul(power, receipt_challenge);
+        receipt = bb_add(receipt, bb_mul(power, inverse_first));
+        power = bb_mul(power, receipt_challenge);
+        receipt = bb_add(receipt, bb_mul(power, inverse_second));
+        power = bb_mul(power, receipt_challenge);
+        accumulator = bb_add(accumulator, delta);
+    }
+    assert_eq!(accumulator, 0, "independent product interaction must close");
+    receipt
+}
+
+fn expected_sparse_trace_root(point: &ComplexFx, current: &ComplexFx) -> [u32; 8] {
+    let rows = expected_sparse_rows(point, current);
+    let task_count = 2_821;
     let controls = expected_sparse_control_rows();
     let leaves = rows
         .iter()
@@ -2280,6 +2429,61 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                     assert_eq!(audit[1], 413_678);
                     assert_eq!(audit[2], 4096);
                 }
+            }
+
+            for (beta, gamma, fold_challenge, receipt_challenge) in [
+                (17u32, 29u32, 7u32, 31u32),
+                (41, 73, 19, 37),
+                (101, 211, 43, 61),
+            ] {
+                let mut interaction_arguments = arguments.clone();
+                interaction_arguments.extend([beta, gamma, fold_challenge, receipt_challenge, 0]);
+                assert_eq!(
+                    call(
+                        &mut store,
+                        &instance,
+                        "fixed_transition4_sparse_product_interaction_audit",
+                        &interaction_arguments,
+                        4,
+                    ),
+                    [
+                        0,
+                        20_481,
+                        4_096,
+                        expected_product_interaction_receipt(
+                            point,
+                            current,
+                            beta,
+                            gamma,
+                            receipt_challenge,
+                        ),
+                    ],
+                    "selector-only product interaction challenges ({beta}, {gamma})",
+                );
+            }
+            for mutation in 1u32..=6 {
+                let mut interaction_arguments = arguments.clone();
+                interaction_arguments.extend([17, 29, 7, 31, mutation]);
+                let audit = call(
+                    &mut store,
+                    &instance,
+                    "fixed_transition4_sparse_product_interaction_audit",
+                    &interaction_arguments,
+                    4,
+                );
+                if mutation == 6 {
+                    assert_eq!(
+                        audit[0], 1,
+                        "the locally valid coordinated mutation must fail only at the interaction terminal",
+                    );
+                } else {
+                    assert!(
+                        audit[0] > 0,
+                        "product interaction mutation {mutation} must fail",
+                    );
+                }
+                assert_eq!(audit[1], 20_481);
+                assert_eq!(audit[2], 4_096);
             }
 
             let shared_mutations = [

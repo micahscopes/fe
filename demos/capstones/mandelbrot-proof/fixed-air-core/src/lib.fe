@@ -275,6 +275,35 @@ pub struct SparseControlRow<F: Radix2Field> {
 }
 impl<F: Radix2Field> core::marker::Copy for SparseControlRow<F> {}
 
+/// Transcript challenges for one log-derivative copy interaction. `beta`
+/// compresses the copied value with its nominal address, while `gamma` moves
+/// the inverse pole away from the committed tuples.
+pub struct SparseCopyChallenges<F: Radix2Field> {
+    pub beta: F,
+    pub gamma: F,
+}
+impl<F: Radix2Field> core::marker::Copy for SparseCopyChallenges<F> {}
+
+/// Extension-trace columns for the product copy interaction. One prefix
+/// accumulator and two inverse ports are sufficient after scan adjacency
+/// removes the redundant carry-in copy from the older scalar audit.
+pub struct SparseProductInteractionRow<F: Radix2Field> {
+    pub accumulator: F,
+    pub inverse_first: F,
+    pub inverse_second: F,
+}
+impl<F: Radix2Field> core::marker::Copy for SparseProductInteractionRow<F> {}
+
+/// A folded local interaction evaluation plus the accumulator delta produced
+/// by the same constrained ports.
+pub struct SparseInteractionEvaluation<F: Radix2Field> {
+    pub valid: bool,
+    pub constraints: u32,
+    pub folded: F,
+    pub delta: F,
+}
+impl<F: Radix2Field> core::marker::Copy for SparseInteractionEvaluation<F> {}
+
 /// Nominal addresses for values copied between distant sparse phases. The
 /// field key is derived from this type, so application code never maintains a
 /// numeric column or memory-address table.
@@ -4546,6 +4575,325 @@ pub fn evaluate_sparse_arithmetic_initial<F: Radix2Field>(
     let mut fold = ConstraintFold<F>::new(challenge)
     fold = fold.absorb(row.accumulator_before)
     fold = fold.absorb(row.state_before)
+    FixedAirConstraintEvaluation {
+        valid: true,
+        constraints: fold.constraints,
+        folded: fold.value,
+    }
+}
+
+struct SparseCopyPort<F: Radix2Field> {
+    selector: F,
+    coefficient: F,
+    address: F,
+    value: F,
+}
+impl<F: Radix2Field> core::marker::Copy for SparseCopyPort<F> {}
+
+fn sparse_product_current_coordinate<F: Radix2Field>(
+    _ control: SparseControlRow<F>,
+) -> F {
+    let major = control.major
+    let numerator = mul(
+        mul(major, sub(major, one<F>())),
+        mul(
+            sub(major, natural<F>(4)),
+            sub(major, natural<F>(5)),
+        ),
+    )
+    mul(
+        control.range_roles.coordinate,
+        mul(numerator, natural<F>(12).radix2_inverse_or_zero()),
+    )
+}
+
+fn sparse_product_range_address<F: Radix2Field, const L: usize>(
+    _ control: SparseControlRow<F>,
+) -> F {
+    let roles = control.range_roles
+    let current = sparse_product_current_coordinate(control)
+    let product = add(roles.product_low, roles.product_high)
+    let product_node = mul(
+        sub(
+            sub(control.major, natural<F>(6)),
+            roles.product_high,
+        ),
+        natural<F>(3).radix2_inverse_or_zero(),
+    )
+    let current_rank = sub(control.major, natural<F>(2))
+    let product_rank = add(
+        natural<F>(2),
+        add(mul(natural<F>(2), product_node), roles.product_high),
+    )
+    let rank = add(mul(current, current_rank), mul(product, product_rank))
+    add(
+        mul(rank, natural<F>(L.downcast_truncate())),
+        control.minor,
+    )
+}
+
+fn sparse_product_carry_address<F: Radix2Field, const L: usize>(
+    _ product: F,
+    _ coefficient: F,
+) -> F {
+    let limbs = natural<F>(L.downcast_truncate())
+    add(
+        add(mul(natural<F>(8), limbs), mul(mul(natural<F>(2), limbs), product)),
+        coefficient,
+    )
+}
+
+fn sparse_product_left_rank<F: Radix2Field>(_ product: F) -> F {
+    mul(product, sub(natural<F>(2), product))
+}
+
+fn sparse_product_right_rank<F: Radix2Field>(_ product: F) -> F {
+    mul(
+        mul(product, sub(natural<F>(3), product)),
+        natural<F>(2).radix2_inverse_or_zero(),
+    )
+}
+
+fn sparse_product_term_left_index<F: Radix2Field, const L: usize>(
+    _ control: SparseControlRow<F>,
+) -> F {
+    let limbs: u32 = L.downcast_truncate()
+    add(
+        control.step,
+        mul(
+            control.flag,
+            sub(control.minor, natural<F>(limbs - 1)),
+        ),
+    )
+}
+
+fn sparse_product_copy_ports<F: Radix2Field, const L: usize>(
+    _ control: SparseControlRow<F>,
+    _ row: SparseTaskRow<F>,
+) -> (SparseCopyPort<F>, SparseCopyPort<F>) {
+    let selectors = control.selectors
+    let roles = control.range_roles
+    let limbs = natural<F>(L.downcast_truncate())
+    let current = sparse_product_current_coordinate(control)
+    let product_range = add(roles.product_low, roles.product_high)
+    let source_range_selector = mul(
+        selectors.radix_limb,
+        add(current, product_range),
+    )
+    let source_range_coefficient = mul(
+        selectors.radix_limb,
+        add(mul(current, mul(natural<F>(3), limbs)), product_range),
+    )
+    let carry_source_selector = selectors.carry_finish
+    let source_selector = add(source_range_selector, carry_source_selector)
+    let source_address = add(
+        mul(source_range_selector, sparse_product_range_address<F, L>(control)),
+        mul(
+            carry_source_selector,
+            sparse_product_carry_address<F, L>(control.major, control.minor),
+        ),
+    )
+
+    let left_index = sparse_product_term_left_index<F, L>(control)
+    let right_index = sub(control.minor, left_index)
+    let term_left_address = add(
+        mul(sparse_product_left_rank(control.major), limbs),
+        left_index,
+    )
+    let term_right_address = add(
+        mul(sparse_product_right_rank(control.major), limbs),
+        right_index,
+    )
+    let coefficient_digit_rank = add(
+        natural<F>(2),
+        add(mul(natural<F>(2), control.major), control.flag),
+    )
+    let coefficient_digit_address = add(
+        mul(coefficient_digit_rank, limbs),
+        sub(control.minor, mul(control.flag, limbs)),
+    )
+    let coefficient_carry_address = sparse_product_carry_address<F, L>(
+        control.major,
+        control.minor,
+    )
+
+    let first_selector = add(
+        source_selector,
+        add(selectors.product_term, selectors.product_coefficient),
+    )
+    let first_address = add(
+        source_address,
+        add(
+            mul(selectors.product_term, term_left_address),
+            mul(selectors.product_coefficient, coefficient_digit_address),
+        ),
+    )
+    let first_coefficient = sub(
+        add(source_range_coefficient, carry_source_selector),
+        add(selectors.product_term, selectors.product_coefficient),
+    )
+    let second_selector = add(
+        selectors.product_term,
+        selectors.product_coefficient,
+    )
+    let second_address = add(
+        mul(selectors.product_term, term_right_address),
+        mul(selectors.product_coefficient, coefficient_carry_address),
+    )
+    (
+        SparseCopyPort {
+            selector: first_selector,
+            coefficient: first_coefficient,
+            address: first_address,
+            value: row.value,
+        },
+        SparseCopyPort {
+            selector: second_selector,
+            coefficient: sub(zero<F>(), second_selector),
+            address: second_address,
+            value: row.auxiliary,
+        },
+    )
+}
+
+fn sparse_copy_port_compressed<F: Radix2Field>(
+    _ challenges: SparseCopyChallenges<F>,
+    _ port: SparseCopyPort<F>,
+) -> F {
+    add(
+        challenges.gamma,
+        add(port.address, mul(challenges.beta, port.value)),
+    )
+}
+
+fn sparse_copy_port_inverse<F: Radix2Field>(
+    _ challenges: SparseCopyChallenges<F>,
+    _ port: SparseCopyPort<F>,
+) -> F {
+    if port.selector.radix2_is_zero() { return zero<F>() }
+    sparse_copy_port_compressed(challenges, port).radix2_inverse_or_zero()
+}
+
+fn absorb_sparse_copy_port<F: Radix2Field>(
+    _ fold: own ConstraintFold<F>,
+    _ challenges: SparseCopyChallenges<F>,
+    _ port: SparseCopyPort<F>,
+    _ inverse: F,
+) -> ConstraintFold<F> {
+    let fold = fold.absorb(mul(
+        port.selector,
+        sub(mul(sparse_copy_port_compressed(challenges, port), inverse), one<F>()),
+    ))
+    fold.absorb(mul(sub(one<F>(), port.selector), inverse))
+}
+
+fn sparse_product_interaction_delta<F: Radix2Field, const L: usize>(
+    _ control: SparseControlRow<F>,
+    _ row: SparseTaskRow<F>,
+    _ interaction: SparseProductInteractionRow<F>,
+) -> F {
+    let ports = sparse_product_copy_ports<F, L>(control, row)
+    add(
+        mul(ports.0.coefficient, interaction.inverse_first),
+        mul(ports.1.coefficient, interaction.inverse_second),
+    )
+}
+
+/// Derive one product interaction witness row from the committed base row and
+/// the current prefix accumulator. This is the prover interpretation of the
+/// same two ports constrained below.
+pub fn sparse_product_interaction_row<F: Radix2Field, const L: usize>(
+    _ challenges: SparseCopyChallenges<F>,
+    _ control: SparseControlRow<F>,
+    _ row: SparseTaskRow<F>,
+    _ accumulator: F,
+) -> SparseProductInteractionRow<F> {
+    let ports = sparse_product_copy_ports<F, L>(control, row)
+    SparseProductInteractionRow {
+        accumulator: accumulator,
+        inverse_first: sparse_copy_port_inverse(challenges, ports.0),
+        inverse_second: sparse_copy_port_inverse(challenges, ports.1),
+    }
+}
+
+pub fn evaluate_sparse_product_interaction_row<
+    F: Radix2Field,
+    const L: usize,
+>(
+    _ challenge: F,
+    _ challenges: SparseCopyChallenges<F>,
+    _ control: SparseControlRow<F>,
+    _ row: SparseTaskRow<F>,
+    _ interaction: SparseProductInteractionRow<F>,
+) -> SparseInteractionEvaluation<F> {
+    let ports = sparse_product_copy_ports<F, L>(control, row)
+    let mut fold = ConstraintFold<F>::new(challenge)
+    fold = absorb_sparse_copy_port(
+        fold, challenges, ports.0, interaction.inverse_first,
+    )
+    fold = absorb_sparse_copy_port(
+        fold, challenges, ports.1, interaction.inverse_second,
+    )
+    SparseInteractionEvaluation {
+        valid: true,
+        constraints: fold.constraints,
+        folded: fold.value,
+        delta: sparse_product_interaction_delta<F, L>(control, row, interaction),
+    }
+}
+
+pub fn evaluate_sparse_product_interaction_initial<F: Radix2Field>(
+    _ challenge: F,
+    _ interaction: SparseProductInteractionRow<F>,
+) -> FixedAirConstraintEvaluation<F> {
+    let fold = ConstraintFold<F>::new(challenge).absorb(interaction.accumulator)
+    FixedAirConstraintEvaluation {
+        valid: true,
+        constraints: fold.constraints,
+        folded: fold.value,
+    }
+}
+
+pub fn evaluate_sparse_product_interaction_link<
+    F: Radix2Field,
+    const L: usize,
+>(
+    _ challenge: F,
+    _ current_control: SparseControlRow<F>,
+    _ current: SparseTaskRow<F>,
+    _ current_interaction: SparseProductInteractionRow<F>,
+    _ next_interaction: SparseProductInteractionRow<F>,
+) -> FixedAirConstraintEvaluation<F> {
+    let delta = sparse_product_interaction_delta<F, L>(
+        current_control,
+        current,
+        current_interaction,
+    )
+    let fold = ConstraintFold<F>::new(challenge).absorb(sub(
+        next_interaction.accumulator,
+        add(current_interaction.accumulator, delta),
+    ))
+    FixedAirConstraintEvaluation {
+        valid: true,
+        constraints: fold.constraints,
+        folded: fold.value,
+    }
+}
+
+pub fn evaluate_sparse_product_interaction_terminal<
+    F: Radix2Field,
+    const L: usize,
+>(
+    _ challenge: F,
+    _ control: SparseControlRow<F>,
+    _ row: SparseTaskRow<F>,
+    _ interaction: SparseProductInteractionRow<F>,
+) -> FixedAirConstraintEvaluation<F> {
+    let delta = sparse_product_interaction_delta<F, L>(control, row, interaction)
+    let fold = ConstraintFold<F>::new(challenge).absorb(add(
+        interaction.accumulator,
+        delta,
+    ))
     FixedAirConstraintEvaluation {
         valid: true,
         constraints: fold.constraints,

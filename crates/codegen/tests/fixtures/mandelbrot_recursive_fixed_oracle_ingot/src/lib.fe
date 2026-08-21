@@ -65,6 +65,8 @@ use mandelbrot_proof_fixed_air_core::{
     RangeNode,
     SparseTaskRow,
     SparseTransitionTask,
+    SparseCopyChallenges,
+    SparseProductInteractionRow,
     evaluate_sparse_carry_row,
     evaluate_sparse_arithmetic_initial,
     evaluate_sparse_arithmetic_link,
@@ -72,6 +74,10 @@ use mandelbrot_proof_fixed_air_core::{
     evaluate_sparse_boundary_row,
     evaluate_sparse_linear_row,
     evaluate_sparse_product_row,
+    evaluate_sparse_product_interaction_initial,
+    evaluate_sparse_product_interaction_link,
+    evaluate_sparse_product_interaction_row,
+    evaluate_sparse_product_interaction_terminal,
     evaluate_sparse_radix_row,
     evaluate_sparse_round_row,
     evaluate_transition_witness_constraints,
@@ -85,6 +91,7 @@ use mandelbrot_proof_fixed_air_core::{
     sparse_boundary_task_count,
     sparse_product_copy_consumer,
     sparse_product_copy_source,
+    sparse_product_interaction_row,
     sparse_product_initial_residuals,
     sparse_product_link_residuals,
     sparse_product_row_from_witness,
@@ -1188,6 +1195,158 @@ pub fn fixed_transition4_sparse_arithmetic_audit(
         index = index + 1
     }
     (failures, constraints, rows)
+}
+
+fn mutate_product_interaction(
+    _ interaction: mut SparseProductInteractionRow<BabyBear>,
+    _ mutation: u32,
+    _ index: u32,
+    _ product_offset: u32,
+) {
+    let one = BabyBear::one()
+    if mutation == 3 && index == 127 {
+        interaction.inverse_first = interaction.inverse_first + one
+    }
+    if mutation == 4 && index == product_offset {
+        interaction.inverse_second = interaction.inverse_second + one
+    }
+    if mutation == 5 && index == 251 {
+        interaction.accumulator = interaction.accumulator + one
+    }
+}
+
+/// Complete base-field product interaction audit. The production transcript
+/// uses the same generic relation over the quartic extension; this base-field
+/// entry keeps the exhaustive 4,096-row mutation gate inexpensive.
+pub fn fixed_transition4_sparse_product_interaction_audit(
+    _ prn: u32, _ pr0: u32, _ pr1: u32, _ pr2: u32, _ pr3: u32,
+    _ pin: u32, _ pi0: u32, _ pi1: u32, _ pi2: u32, _ pi3: u32,
+    _ crn: u32, _ cr0: u32, _ cr1: u32, _ cr2: u32, _ cr3: u32,
+    _ cin: u32, _ ci0: u32, _ ci1: u32, _ ci2: u32, _ ci3: u32,
+    _ beta: u32,
+    _ gamma: u32,
+    _ fold_challenge: u32,
+    _ receipt_challenge: u32,
+    _ mutation: u32,
+) -> (u32, u32, u32, u32) {
+    let (point, current, witness) = transition4(
+        prn, [pr0, pr1, pr2, pr3], pin, [pi0, pi1, pi2, pi3],
+        crn, [cr0, cr1, cr2, cr3], cin, [ci0, ci1, ci2, ci3],
+    )
+    let next = fixed_mandelbrot_transition_output(witness)
+    let challenges = SparseCopyChallenges {
+        beta: BabyBear::from_u32(beta),
+        gamma: BabyBear::from_u32(gamma),
+    }
+    let fold_challenge = BabyBear::from_u32(fold_challenge)
+    let receipt_challenge = BabyBear::from_u32(receipt_challenge)
+    let rows = sparse_transition_trace_length<4>()
+    let product_offset = sparse_radix_task_count<4>() + sparse_carry_task_count<4>()
+    let mut failures: u32 = 0
+    let mut constraints: u32 = 0
+    let mut accumulator = BabyBear::zero()
+    let mut receipt = BabyBear::zero()
+    let mut receipt_power = BabyBear::one()
+    let mut previous_control = sparse_control_row_at<BabyBear, 4>(0)
+    let mut previous_row = sparse_transition_row_from_witness<BabyBear, 4>(
+        0, point, current, next, witness,
+    )
+    let mut previous_interaction = sparse_product_interaction_row<BabyBear, 4>(
+        challenges,
+        previous_control,
+        previous_row,
+        accumulator,
+    )
+    let mut index: u32 = 0
+    while index < rows {
+        let control = sparse_control_row_at<BabyBear, 4>(index)
+        let mut row = sparse_transition_row_from_witness<BabyBear, 4>(
+            index, point, current, next, witness,
+        )
+        if mutation == 1 && index == 127 {
+            row.value = row.value + BabyBear::one()
+        }
+        if mutation == 2 && index == product_offset {
+            row.auxiliary = row.auxiliary + BabyBear::one()
+        }
+        if mutation == 6 && index == product_offset {
+            row.auxiliary = row.auxiliary + BabyBear::one()
+            row.accumulator_after = row.accumulator_after + row.value
+        }
+        if mutation == 6 && index == product_offset + 1 {
+            let first = sparse_transition_row_from_witness<BabyBear, 4>(
+                product_offset,
+                point,
+                current,
+                next,
+                witness,
+            )
+            row.accumulator_before = row.accumulator_before + first.value
+            row.value = row.value + first.value
+        }
+        let mut interaction = sparse_product_interaction_row<BabyBear, 4>(
+            challenges,
+            control,
+            row,
+            accumulator,
+        )
+        mutate_product_interaction(mut interaction, mutation, index, product_offset)
+        let local = evaluate_sparse_product_interaction_row<BabyBear, 4>(
+            fold_challenge,
+            challenges,
+            control,
+            row,
+            interaction,
+        )
+        constraints = constraints + local.constraints
+        if !local.valid || local.folded.to_u32() != 0 {
+            failures = failures + 1
+        }
+        if index == 0 {
+            let initial = evaluate_sparse_product_interaction_initial(
+                fold_challenge,
+                interaction,
+            )
+            constraints = constraints + initial.constraints
+            if !initial.valid || initial.folded.to_u32() != 0 {
+                failures = failures + 1
+            }
+        } else {
+            let link = evaluate_sparse_product_interaction_link<BabyBear, 4>(
+                fold_challenge,
+                previous_control,
+                previous_row,
+                previous_interaction,
+                interaction,
+            )
+            constraints = constraints + link.constraints
+            if !link.valid || link.folded.to_u32() != 0 {
+                failures = failures + 1
+            }
+        }
+        receipt = receipt + receipt_power * interaction.accumulator
+        receipt_power = receipt_power * receipt_challenge
+        receipt = receipt + receipt_power * interaction.inverse_first
+        receipt_power = receipt_power * receipt_challenge
+        receipt = receipt + receipt_power * interaction.inverse_second
+        receipt_power = receipt_power * receipt_challenge
+        accumulator = interaction.accumulator + local.delta
+        previous_control = control
+        previous_row = row
+        previous_interaction = interaction
+        index = index + 1
+    }
+    let terminal = evaluate_sparse_product_interaction_terminal<BabyBear, 4>(
+        fold_challenge,
+        previous_control,
+        previous_row,
+        previous_interaction,
+    )
+    constraints = constraints + terminal.constraints
+    if !terminal.valid || terminal.folded.to_u32() != 0 {
+        failures = failures + 1
+    }
+    (failures, constraints, rows, receipt.to_u32())
 }
 
 pub fn fixed_transition4_encoded(
