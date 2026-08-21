@@ -2,12 +2,13 @@
 
 use mandelbrot_proof_baby_bear::{
     BabyBearFriQueryPlan,
-    BabyBearAirFriReceipt,
     AirLdeRow,
     AuxiliaryLdeMultiOpening,
     AuxiliaryLdeDigest,
     CheckpointFriQueryPlan4,
     CheckpointFriQuerySamples4,
+    AirMultiOpenings,
+    BabyBearAirFriReceipt,
     Checkpoint4BabyBearReceipt16,
     FriLayerTranscriptDigest,
     LdeMultiOpening,
@@ -22,6 +23,9 @@ use mandelbrot_proof_baby_bear::{
     bind_auxiliary_lde,
     bind_main_lde,
     composition_challenge,
+    decode_checkpoint4_baby_bear_receipt16,
+    empty_checkpoint4_baby_bear_receipt16,
+    encode_checkpoint4_baby_bear_receipt16,
     evaluate_composition_opened,
     main_lde_root_power_of_two,
     main_lde_row_commitment,
@@ -33,6 +37,7 @@ use mandelbrot_proof_baby_bear::{
     write_auxiliary_lde_multi_query_opening_power_of_two,
     write_main_lde_multi_query_opening_power_of_two,
 }
+use core::BrowserBytes
 use mandelbrot_proof_kernel::{AUXILIARY_ROW_BITS, EscapesByQ12}
 use merkle_core::MerkleMultiPath
 use poseidon_baby_bear::Poseidon2Digest
@@ -289,15 +294,15 @@ pub fn air_lde_multipath16_status(
     )
 }
 
-/// Build one complete toy checkpoint in Fe and exercise every authenticated
-/// boundary through the canonical borrowed receipt verifier.
-pub fn air_fri_receipt16_mutations(
+/// Build one complete toy checkpoint directly into caller-owned storage.
+fn write_air_fri_receipt16(
     _ seed: u32,
     _ proof_transcript_seed: u32,
     _ c_re_q12: i32,
     _ c_im_q12: i32,
     _ shift_word: u32,
-) -> (u32, u32, u32, u32, u32, u32, u32, u32) {
+    _ receipt: mut Checkpoint4BabyBearReceipt16,
+) -> bool {
     let mut main_rows = [[BabyBear::zero(); MAIN_LDE_ROW_FIELDS]; LDE]
     let mut auxiliary_rows = [[BabyBear::zero(); AUXILIARY_ROW_BITS]; LDE]
     let mut main_leaves = [MainLdeDigest {
@@ -347,7 +352,7 @@ pub fn air_fri_receipt16_mutations(
     let shift = BabyBear::from_u32(shift_word)
     if !main_root.valid || !auxiliary_root.valid || !air_transcript.valid
         || !challenge.valid || shift.is_zero() {
-        return (0, 0, 0, 0, 0, 0, 0, 0)
+        return false
     }
 
     let mut evaluations = [BabyBearExt4::zero(); LDE]
@@ -371,7 +376,7 @@ pub fn air_fri_receipt16_mutations(
             ref row,
             ref next_row,
         )
-        if !value.valid { return (0, 0, 0, 0, 0, 0, 0, 0) }
+        if !value.valid { return false }
         evaluations[evaluation] = value.value
         evaluation = evaluation + 1
     }
@@ -386,7 +391,7 @@ pub fn air_fri_receipt16_mutations(
         ref fri,
     )
     if !fri.valid || !authenticated.valid {
-        return (0, 0, 0, 0, 0, 0, 0, 0)
+        return false
     }
 
     let mut main: MainLdeMultiOpening<MAX_LEAVES, MAX_SIBLINGS> = LdeMultiOpening {
@@ -431,17 +436,99 @@ pub fn air_fri_receipt16_mutations(
         MAX_SIBLINGS,
     >(ref auxiliary_rows, authenticated.samples, mut auxiliary)
     if !main_opened || !auxiliary_opened {
-        return (0, 0, 0, 0, 0, 0, 0, 0)
+        return false
     }
 
-    let mut receipt: Checkpoint4BabyBearReceipt16 = BabyBearAirFriReceipt {
+    receipt = BabyBearAirFriReceipt {
         valid: true,
         main_root: main_root,
         auxiliary_root: auxiliary_root,
-        main: main,
-        auxiliary: auxiliary,
+        air: AirMultiOpenings {
+            main: main,
+            auxiliary: auxiliary,
+        },
         fri: fri,
     }
+    true
+}
+
+/// Emit the canonical variable-length receipt bytes produced by the Fe codec.
+pub fn air_fri_receipt16_encoded(
+    _ seed: u32,
+    _ proof_transcript_seed: u32,
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ shift_word: u32,
+) -> BrowserBytes {
+    let mut receipt = empty_checkpoint4_baby_bear_receipt16()
+    if !write_air_fri_receipt16(
+        seed,
+        proof_transcript_seed,
+        c_re_q12,
+        c_im_q12,
+        shift_word,
+        mut receipt,
+    ) {
+        return BrowserBytes { ptr: 0, len: 0 }
+    }
+    encode_checkpoint4_baby_bear_receipt16(ref receipt)
+}
+
+/// Decode caller-selected bytes and independently run the borrowed receipt
+/// verifier. Keeping this boundary in Fe lets the Rust gate mutate bytes only
+/// as an oracle, without becoming a codec or protocol implementation.
+pub fn air_fri_receipt16_decode_at(
+    _ ptr: u32,
+    _ len: u32,
+    _ proof_transcript_seed: u32,
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ shift_word: u32,
+) -> (u32, u32) {
+    let mut receipt = empty_checkpoint4_baby_bear_receipt16()
+    let decoded = decode_checkpoint4_baby_bear_receipt16(
+        BrowserBytes { ptr: ptr, len: len },
+        mut receipt,
+    )
+    if !decoded { return (0, 0) }
+    let verified = verify_checkpoint4_baby_bear_receipt16(
+        c_re_q12,
+        c_im_q12,
+        ProofTranscriptDigest {
+            valid: true,
+            value: digest8(proof_transcript_seed),
+        },
+        BabyBear::from_u32(shift_word),
+        ref receipt,
+    )
+    (1, if verified { 1 } else { 0 })
+}
+
+/// Exercise every authenticated boundary through the canonical borrowed
+/// receipt verifier.
+pub fn air_fri_receipt16_mutations(
+    _ seed: u32,
+    _ proof_transcript_seed: u32,
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ shift_word: u32,
+) -> (u32, u32, u32, u32, u32, u32, u32, u32) {
+    let mut receipt = empty_checkpoint4_baby_bear_receipt16()
+    if !write_air_fri_receipt16(
+        seed,
+        proof_transcript_seed,
+        c_re_q12,
+        c_im_q12,
+        shift_word,
+        mut receipt,
+    ) {
+        return (0, 0, 0, 0, 0, 0, 0, 0)
+    }
+    let proof_transcript = ProofTranscriptDigest {
+        valid: true,
+        value: digest8(proof_transcript_seed),
+    }
+    let shift = BabyBear::from_u32(shift_word)
     let clean = verify_checkpoint4_baby_bear_receipt16(
         c_re_q12,
         c_im_q12,
@@ -450,19 +537,19 @@ pub fn air_fri_receipt16_mutations(
         ref receipt,
     )
 
-    let saved_main = receipt.main.values[0][0]
-    receipt.main.values[0][0] = saved_main + BabyBear::one()
+    let saved_main = receipt.air.main.values[0][0]
+    receipt.air.main.values[0][0] = saved_main + BabyBear::one()
     let changed_main = verify_checkpoint4_baby_bear_receipt16(
         c_re_q12, c_im_q12, proof_transcript, shift, ref receipt,
     )
-    receipt.main.values[0][0] = saved_main
+    receipt.air.main.values[0][0] = saved_main
 
-    let saved_auxiliary = receipt.auxiliary.values[0][0]
-    receipt.auxiliary.values[0][0] = saved_auxiliary + BabyBear::one()
+    let saved_auxiliary = receipt.air.auxiliary.values[0][0]
+    receipt.air.auxiliary.values[0][0] = saved_auxiliary + BabyBear::one()
     let changed_auxiliary = verify_checkpoint4_baby_bear_receipt16(
         c_re_q12, c_im_q12, proof_transcript, shift, ref receipt,
     )
-    receipt.auxiliary.values[0][0] = saved_auxiliary
+    receipt.air.auxiliary.values[0][0] = saved_auxiliary
 
     let saved_composition = receipt.fri.composition.values[0]
     receipt.fri.composition.values[0] = saved_composition + BabyBearExt4::one()

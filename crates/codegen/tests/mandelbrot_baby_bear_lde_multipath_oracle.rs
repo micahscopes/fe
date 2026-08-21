@@ -2,9 +2,9 @@
 
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::{layout_for, BackendKind, OptLevel};
+use fe_codegen::{BackendKind, OptLevel, layout_for};
 use hir::hir_def::HirIngot;
-use p3_baby_bear::{default_babybear_poseidon2_16, BabyBear};
+use p3_baby_bear::{BabyBear, default_babybear_poseidon2_16};
 use p3_field::{PrimeCharacteristicRing, PrimeField32};
 use p3_symmetric::Permutation;
 use std::collections::BTreeSet;
@@ -107,6 +107,35 @@ fn call(
             other => panic!("`{name}` returned non-u32 lane {other:?}"),
         })
         .collect()
+}
+
+fn read_memory_words(
+    store: &wasmtime::Store<()>,
+    memory: wasmtime::Memory,
+    pointer: u32,
+    length: u32,
+) -> Vec<u32> {
+    assert_eq!(length & 3, 0, "canonical byte length must be word-aligned");
+    let mut bytes = vec![0u8; length as usize];
+    memory
+        .read(store, pointer as usize, &mut bytes)
+        .expect("canonical receipt bytes must be readable");
+    bytes
+        .chunks_exact(4)
+        .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+        .collect()
+}
+
+fn write_memory_word(
+    store: &mut wasmtime::Store<()>,
+    memory: wasmtime::Memory,
+    pointer: u32,
+    index: usize,
+    value: u32,
+) {
+    memory
+        .write(store, pointer as usize + index * 4, &value.to_le_bytes())
+        .expect("receipt mutation must stay inside Wasm memory");
 }
 
 fn reference_permutation(input: [u32; WIDTH]) -> [u32; WIDTH] {
@@ -216,6 +245,96 @@ fn multipath_sibling_count(width: u32, requests: &[u32]) -> usize {
         level_width /= 2;
     }
     siblings
+}
+
+fn skip_canonical_opening(
+    words: &[u32],
+    cursor: &mut usize,
+    value_width: usize,
+    max_leaves: usize,
+    max_siblings: usize,
+) -> usize {
+    assert!(*cursor + 4 <= words.len(), "opening header must be present");
+    assert!(words[*cursor] <= 1, "opening validity must be canonical");
+    *cursor += 1;
+    assert!(words[*cursor] <= 1, "path validity must be canonical");
+    *cursor += 1;
+    let leaf_count = words[*cursor] as usize;
+    assert!(
+        leaf_count <= max_leaves,
+        "leaf count must fit its Fe carrier"
+    );
+    *cursor += 1;
+    assert!(
+        *cursor + leaf_count < words.len(),
+        "leaf prefix must be present"
+    );
+    *cursor += leaf_count;
+    let sibling_count = words[*cursor] as usize;
+    assert!(
+        sibling_count <= max_siblings,
+        "sibling count must fit its Fe carrier",
+    );
+    *cursor += 1;
+    let sibling_words = sibling_count * 8;
+    assert!(
+        *cursor + sibling_words <= words.len(),
+        "digest sibling prefix must be present",
+    );
+    *cursor += sibling_words;
+    let value_start = *cursor;
+    let value_words = leaf_count * value_width;
+    assert!(
+        *cursor + value_words <= words.len(),
+        "opened value prefix must be present",
+    );
+    *cursor += value_words;
+    value_start
+}
+
+/// Parse only the public, Fe-authored carrier topology. This deliberately does
+/// not decode field or protocol values. Reaching the exact end proves that no
+/// fixed-capacity tail slots leaked into the wire receipt.
+fn canonical_receipt_main_value_offset(words: &[u32]) -> usize {
+    assert!(words.len() >= 19, "receipt roots must be present");
+    assert!(words[0] <= 1 && words[1] <= 1 && words[10] <= 1);
+    let mut cursor = 19;
+    let main_value = skip_canonical_opening(words, &mut cursor, 17, 16, 64);
+    skip_canonical_opening(words, &mut cursor, 411, 16, 64);
+
+    assert!(
+        cursor + 10 <= words.len(),
+        "FRI commitment header must be present"
+    );
+    cursor += 10;
+    skip_canonical_opening(words, &mut cursor, 4, 8, 24);
+
+    for (max_siblings, committed_width) in [(16, 8), (8, 4), (0, 2)] {
+        assert!(
+            cursor + 10 <= words.len(),
+            "FRI layer header must be present"
+        );
+        cursor += 10;
+        let before = cursor;
+        skip_canonical_opening(words, &mut cursor, 4, 8, max_siblings);
+        let leaf_count = words[before + 2] as usize;
+        assert!(
+            leaf_count <= committed_width,
+            "a FRI opening cannot exceed its committed layer",
+        );
+    }
+
+    assert!(
+        cursor + 14 <= words.len(),
+        "terminal FRI value must be present"
+    );
+    cursor += 14;
+    assert_eq!(
+        cursor,
+        words.len(),
+        "canonical receipt must omit every unused capacity slot",
+    );
+    main_value
 }
 
 fn packed_indices(indices: &[u32], offset: usize) -> u32 {
@@ -549,6 +668,140 @@ fn sparse_air_lde_openings_match_independent_roots_and_fail_closed() {
         ),
         vec![1, 0, 0, 0, 0, 0, 0, 0],
         "canonical sparse AIR and FRI receipt must accept once and bind every boundary",
+    );
+
+    let receipt_arguments = [97, 431, (-3072i32) as u32, 1024, 7];
+    let encoded = call(
+        &mut store,
+        &instance,
+        "air_fri_receipt16_encoded",
+        &receipt_arguments,
+        2,
+    );
+    let pointer = encoded[0];
+    let length = encoded[1];
+    assert!(length > 0, "Fe must emit a nonempty canonical receipt");
+    let memory = instance
+        .get_memory(&mut store, "memory")
+        .expect("receipt codec must export Wasm memory");
+    let words = read_memory_words(&store, memory, pointer, length);
+    assert!(
+        words.iter().all(|word| *word < MODULUS),
+        "every encoded BabyBear representative must be canonical",
+    );
+    let main_value_offset = canonical_receipt_main_value_offset(&words);
+
+    let decode_arguments =
+        |byte_length: u32| [pointer, byte_length, 431, (-3072i32) as u32, 1024, 7];
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "air_fri_receipt16_decode_at",
+            &decode_arguments(length),
+            2,
+        ),
+        vec![1, 1],
+        "Fe canonical decode must roundtrip into the borrowed verifier",
+    );
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "air_fri_receipt16_decode_at",
+            &decode_arguments(length - 4),
+            2,
+        ),
+        vec![0, 0],
+        "truncated canonical receipts must fail closed",
+    );
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "air_fri_receipt16_decode_at",
+            &decode_arguments(length + 4),
+            2,
+        ),
+        vec![0, 0],
+        "trailing canonical words must fail closed",
+    );
+
+    write_memory_word(&mut store, memory, pointer, 0, 2);
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "air_fri_receipt16_decode_at",
+            &decode_arguments(length),
+            2,
+        ),
+        vec![0, 0],
+        "non-canonical booleans must fail during Fe decoding",
+    );
+    write_memory_word(&mut store, memory, pointer, 0, words[0]);
+
+    write_memory_word(&mut store, memory, pointer, 2, MODULUS);
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "air_fri_receipt16_decode_at",
+            &decode_arguments(length),
+            2,
+        ),
+        vec![0, 0],
+        "non-canonical BabyBear representatives must fail during Fe decoding",
+    );
+    write_memory_word(&mut store, memory, pointer, 2, words[2]);
+
+    assert_eq!(
+        words[21] as usize,
+        canonical_indices(&query_requests(431)).len()
+    );
+    write_memory_word(&mut store, memory, pointer, 21, 17);
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "air_fri_receipt16_decode_at",
+            &decode_arguments(length),
+            2,
+        ),
+        vec![0, 0],
+        "over-capacity sparse counts must fail during Fe decoding",
+    );
+    write_memory_word(&mut store, memory, pointer, 21, words[21]);
+
+    let changed_value = if words[main_value_offset] + 1 == MODULUS {
+        0
+    } else {
+        words[main_value_offset] + 1
+    };
+    write_memory_word(
+        &mut store,
+        memory,
+        pointer,
+        main_value_offset,
+        changed_value,
+    );
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "air_fri_receipt16_decode_at",
+            &decode_arguments(length),
+            2,
+        ),
+        vec![1, 0],
+        "canonical value mutations must decode but fail receipt verification",
+    );
+    write_memory_word(
+        &mut store,
+        memory,
+        pointer,
+        main_value_offset,
+        words[main_value_offset],
     );
 
     for mutation in 1..=6 {

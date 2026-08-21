@@ -5,6 +5,22 @@
 //! 411 bits occupy 7, 4, and 14 BabyBear payload lanes respectively. The
 //! largest value is absorbed by one typed, fixed-length Poseidon2 sponge.
 
+use canonical_words::{
+    BrowserWordReader,
+    BrowserWordWriter,
+    CanonicalWordStream,
+    CanonicalWordStreamProvider,
+    CanonicalWords,
+    CanonicalWordsProvider,
+    WordSink,
+    WordSource,
+    canonical_prefix_word_count,
+    canonical_word_stream_count,
+    decode_canonical_prefix,
+    encode_canonical_prefix,
+    encode_canonical_word_stream,
+}
+use core::BrowserBytes
 use mandelbrot_proof_kernel::{
     AUXILIARY_ROW_BITS,
     ENCODED_PROOF_ROW_WIDTHS,
@@ -193,12 +209,15 @@ impl core::marker::Copy for CompositionChallenge {}
 
 pub struct MainLdeDigest { pub valid: bool, pub value: Poseidon2Digest }
 impl core::marker::Copy for MainLdeDigest {}
+derive CanonicalWords for MainLdeDigest using CanonicalWordsProvider
 
 pub struct AuxiliaryLdeDigest { pub valid: bool, pub value: Poseidon2Digest }
 impl core::marker::Copy for AuxiliaryLdeDigest {}
+derive CanonicalWords for AuxiliaryLdeDigest using CanonicalWordsProvider
 
 pub struct CompositionDigest { pub valid: bool, pub value: Poseidon2Digest }
 impl core::marker::Copy for CompositionDigest {}
+derive CanonicalWords for CompositionDigest using CanonicalWordsProvider
 
 pub struct MainLdeTranscriptDigest { pub valid: bool, pub value: Poseidon2Digest }
 impl core::marker::Copy for MainLdeTranscriptDigest {}
@@ -578,6 +597,7 @@ where
 
 pub struct FriLayerDigest<const ROUND: u32> { pub valid: bool, pub value: Poseidon2Digest }
 impl<const ROUND: u32> core::marker::Copy for FriLayerDigest<ROUND> {}
+derive CanonicalWords for FriLayerDigest<ROUND> using CanonicalWordsProvider
 
 pub struct FriLayerTranscriptDigest<const ROUND: u32> {
     pub valid: bool,
@@ -969,6 +989,47 @@ impl<
     const MAX_SIBLINGS: usize,
 > core::marker::Copy for LdeMultiOpening<Role, Value, MAX_LEAVES, MAX_SIBLINGS> {}
 
+/// Every sparse tree role shares one canonical variable-size carrier. The
+/// path is encoded first so decoding learns the leaf count before consuming
+/// the matching value prefix. `Role` remains compile-time-only.
+impl<
+    Role,
+    Value: core::marker::Copy + CanonicalWordStream,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+> CanonicalWordStream for LdeMultiOpening<
+    Role,
+    Value,
+    MAX_LEAVES,
+    MAX_SIBLINGS,
+> {
+    fn word_count(ref self) -> u32 {
+        if self.path.leaf_count > MAX_LEAVES.downcast_truncate() { return 0 }
+        self.valid.word_count()
+            + self.path.word_count()
+            + canonical_prefix_word_count(ref self.values, self.path.leaf_count)
+    }
+
+    fn encode_stream<W: WordSink>(ref self, _ writer: W) -> W {
+        if self.path.leaf_count > MAX_LEAVES.downcast_truncate() {
+            return writer.reject()
+        }
+        let writer = self.valid.encode_stream(writer)
+        let writer = self.path.encode_stream(writer)
+        encode_canonical_prefix(ref self.values, self.path.leaf_count, writer)
+    }
+
+    fn decode_stream<R: WordSource>(mut self, _ reader: R) -> R {
+        let reader = self.valid.decode_stream(reader)
+        let reader = self.path.decode_stream(reader)
+        if self.path.leaf_count > MAX_LEAVES.downcast_truncate() {
+            self.valid = false
+            return reader.reject()
+        }
+        decode_canonical_prefix(mut self.values, self.path.leaf_count, reader)
+    }
+}
+
 pub type MainLdeMultiOpening<
     const MAX_LEAVES: usize,
     const MAX_SIBLINGS: usize,
@@ -1125,17 +1186,18 @@ pub struct CompositionQueryPair<const DEPTH: usize> {
 }
 impl<const DEPTH: usize> core::marker::Copy for CompositionQueryPair<DEPTH> {}
 
+pub struct CompositionTreeRole {}
+
 /// Canonical sparse opening of several composition-codeword leaves.
-pub struct CompositionMultiOpening<
+pub type CompositionMultiOpening<
     const MAX_LEAVES: usize,
     const MAX_SIBLINGS: usize,
-> {
-    pub valid: bool,
-    pub values: [BabyBearExt4; MAX_LEAVES],
-    pub path: MerkleMultiPath<Poseidon2Digest, MAX_LEAVES, MAX_SIBLINGS>,
-}
-impl<const MAX_LEAVES: usize, const MAX_SIBLINGS: usize> core::marker::Copy
-    for CompositionMultiOpening<MAX_LEAVES, MAX_SIBLINGS> {}
+> = LdeMultiOpening<
+    CompositionTreeRole,
+    BabyBearExt4,
+    MAX_LEAVES,
+    MAX_SIBLINGS,
+>
 
 pub struct FriQueryPair<const ROUND: u32, const DEPTH: usize> {
     pub positive: BabyBearExt4,
@@ -1144,21 +1206,19 @@ pub struct FriQueryPair<const ROUND: u32, const DEPTH: usize> {
 }
 impl<const ROUND: u32, const DEPTH: usize> core::marker::Copy for FriQueryPair<ROUND, DEPTH> {}
 
+pub struct FriLayerTreeRole<const ROUND: u32> {}
+
 /// Canonical sparse opening of several leaves in one typed FRI layer.
-pub struct FriLayerMultiOpening<
+pub type FriLayerMultiOpening<
     const ROUND: u32,
     const MAX_LEAVES: usize,
     const MAX_SIBLINGS: usize,
-> {
-    pub valid: bool,
-    pub values: [BabyBearExt4; MAX_LEAVES],
-    pub path: MerkleMultiPath<Poseidon2Digest, MAX_LEAVES, MAX_SIBLINGS>,
-}
-impl<
-    const ROUND: u32,
-    const MAX_LEAVES: usize,
-    const MAX_SIBLINGS: usize,
-> core::marker::Copy for FriLayerMultiOpening<ROUND, MAX_LEAVES, MAX_SIBLINGS> {}
+> = LdeMultiOpening<
+    FriLayerTreeRole<ROUND>,
+    BabyBearExt4,
+    MAX_LEAVES,
+    MAX_SIBLINGS,
+>
 
 /// One compact authenticated pair for a nonterminal schedule layer. `Tail`
 /// carries the query interpretation of the remaining schedule.
@@ -1214,6 +1274,12 @@ impl<
     const MAX_SIBLINGS: usize,
     Tail: core::marker::Copy,
 > core::marker::Copy for FriMultiQueryFold<ROUND, MAX_LEAVES, MAX_SIBLINGS, Tail> {}
+derive CanonicalWordStream for FriMultiQueryFold<
+    ROUND,
+    MAX_LEAVES,
+    MAX_SIBLINGS,
+    Tail,
+> using CanonicalWordStreamProvider
 
 /// The one-evaluation terminal is shared by every query and needs no path.
 pub struct FriMultiQueryEnd<const ROUND: u32> {
@@ -1222,6 +1288,7 @@ pub struct FriMultiQueryEnd<const ROUND: u32> {
     pub evaluation: BabyBearExt4,
 }
 impl<const ROUND: u32> core::marker::Copy for FriMultiQueryEnd<ROUND> {}
+derive CanonicalWords for FriMultiQueryEnd<ROUND> using CanonicalWordsProvider
 
 /// Authenticated values expose one common lookup vocabulary to the fold
 /// checker. Merkle verification remains a separate once-per-layer pass.
@@ -2494,6 +2561,11 @@ impl<
     COMPOSITION_MAX_SIBLINGS,
     Layers,
 > {}
+derive CanonicalWordStream for FriMultiCommitmentQuery<
+    COMPOSITION_MAX_LEAVES,
+    COMPOSITION_MAX_SIBLINGS,
+    Layers,
+> using CanonicalWordStreamProvider
 
 pub type CheckpointFriMultiQueryLayers16 =
     <FriSchedule<1, 4> as BabyBearFriMultiQueryShape<4>>::Query
@@ -2505,9 +2577,56 @@ pub type FriMultiCommitmentQuery16 = FriMultiCommitmentQuery<
     CheckpointFriMultiQueryLayers16,
 >
 
-/// Canonical four-row checkpoint receipt. Main and auxiliary codewords stay
+pub struct AirMultiOpenings<
+    MainRole,
+    AuxiliaryRole,
+    const AIR_MAX_LEAVES: usize,
+    const AIR_MAX_SIBLINGS: usize,
+> {
+    pub main: LdeMultiOpening<
+        MainRole,
+        [BabyBear; MAIN_LDE_ROW_FIELDS],
+        AIR_MAX_LEAVES,
+        AIR_MAX_SIBLINGS,
+    >,
+    pub auxiliary: LdeMultiOpening<
+        AuxiliaryRole,
+        [BabyBear; AUXILIARY_ROW_BITS],
+        AIR_MAX_LEAVES,
+        AIR_MAX_SIBLINGS,
+    >,
+}
+impl<
+    MainRole,
+    AuxiliaryRole,
+    const AIR_MAX_LEAVES: usize,
+    const AIR_MAX_SIBLINGS: usize,
+> core::marker::Copy for AirMultiOpenings<
+    MainRole,
+    AuxiliaryRole,
+    AIR_MAX_LEAVES,
+    AIR_MAX_SIBLINGS,
+> {}
+derive CanonicalWordStream for AirMultiOpenings<
+    MainRole,
+    AuxiliaryRole,
+    AIR_MAX_LEAVES,
+    AIR_MAX_SIBLINGS,
+> using CanonicalWordStreamProvider
+
+pub type BabyBearAirMultiOpenings<
+    const AIR_MAX_LEAVES: usize,
+    const AIR_MAX_SIBLINGS: usize,
+> = AirMultiOpenings<
+    MainLdeTreeRole,
+    AuxiliaryLdeTreeRole,
+    AIR_MAX_LEAVES,
+    AIR_MAX_SIBLINGS,
+>
+
+/// A canonical BabyBear AIR and FRI receipt. Main and auxiliary codewords stay
 /// in separately branded base-field trees, while the composition and every
-/// FRI layer use the schedule-derived shared multi-query carrier.
+/// FRI layer use schedule-derived shared multi-query carriers.
 pub struct BabyBearAirFriReceipt<
     const AIR_MAX_LEAVES: usize,
     const AIR_MAX_SIBLINGS: usize,
@@ -2516,8 +2635,12 @@ pub struct BabyBearAirFriReceipt<
     pub valid: bool,
     pub main_root: MainLdeDigest,
     pub auxiliary_root: AuxiliaryLdeDigest,
-    pub main: MainLdeMultiOpening<AIR_MAX_LEAVES, AIR_MAX_SIBLINGS>,
-    pub auxiliary: AuxiliaryLdeMultiOpening<AIR_MAX_LEAVES, AIR_MAX_SIBLINGS>,
+    pub air: AirMultiOpenings<
+        MainLdeTreeRole,
+        AuxiliaryLdeTreeRole,
+        AIR_MAX_LEAVES,
+        AIR_MAX_SIBLINGS,
+    >,
     pub fri: Fri,
 }
 impl<
@@ -2525,6 +2648,11 @@ impl<
     const AIR_MAX_SIBLINGS: usize,
     Fri: core::marker::Copy,
 > core::marker::Copy for BabyBearAirFriReceipt<AIR_MAX_LEAVES, AIR_MAX_SIBLINGS, Fri> {}
+derive CanonicalWordStream for BabyBearAirFriReceipt<
+    AIR_MAX_LEAVES,
+    AIR_MAX_SIBLINGS,
+    Fri,
+> using CanonicalWordStreamProvider
 
 pub type Checkpoint4BabyBearReceipt16 = BabyBearAirFriReceipt<
     {air_lde_request_capacity(4)},
@@ -3115,23 +3243,23 @@ fn verify_checkpoint4_sparse_air_compositions16(
         let geometry = radix2_query_geometry<4, 16>(queries.indices[cursor])
         if !geometry.valid { return false }
         let current = sparse_air_lde_row(
-            ref receipt.main,
-            ref receipt.auxiliary,
+            ref receipt.air.main,
+            ref receipt.air.auxiliary,
             geometry.evaluation,
         )
         let next = sparse_air_lde_row(
-            ref receipt.main,
-            ref receipt.auxiliary,
+            ref receipt.air.main,
+            ref receipt.air.auxiliary,
             geometry.next_evaluation,
         )
         let negative = sparse_air_lde_row(
-            ref receipt.main,
-            ref receipt.auxiliary,
+            ref receipt.air.main,
+            ref receipt.air.auxiliary,
             geometry.negative_evaluation,
         )
         let negative_next = sparse_air_lde_row(
-            ref receipt.main,
-            ref receipt.auxiliary,
+            ref receipt.air.main,
+            ref receipt.air.auxiliary,
             geometry.negative_next_evaluation,
         )
         if !current.0 || !next.0 || !negative.0 || !negative_next.0 {
@@ -3563,7 +3691,7 @@ fn invalid_composition_multi_opening<
     const MAX_LEAVES: usize,
     const MAX_SIBLINGS: usize,
 >() -> CompositionMultiOpening<MAX_LEAVES, MAX_SIBLINGS> {
-    CompositionMultiOpening {
+    LdeMultiOpening {
         valid: false,
         values: [BabyBearExt4::zero(); MAX_LEAVES],
         path: invalid_digest_multi_path<MAX_LEAVES, MAX_SIBLINGS>(),
@@ -3610,7 +3738,7 @@ where
         values[cursor] = evaluations[path.leaf_indices[cursor] as usize]
         cursor = cursor + 1
     }
-    CompositionMultiOpening { valid: true, values: values, path: path }
+    LdeMultiOpening { valid: true, values: values, path: path }
 }
 
 pub fn verify_composition_multi_opening<
@@ -3890,7 +4018,7 @@ fn invalid_fri_layer_multi_opening<
     const MAX_LEAVES: usize,
     const MAX_SIBLINGS: usize,
 >() -> FriLayerMultiOpening<ROUND, MAX_LEAVES, MAX_SIBLINGS> {
-    FriLayerMultiOpening {
+    LdeMultiOpening {
         valid: false,
         values: [BabyBearExt4::zero(); MAX_LEAVES],
         path: invalid_digest_multi_path<MAX_LEAVES, MAX_SIBLINGS>(),
@@ -3940,7 +4068,7 @@ where
         values[cursor] = evaluations[path.leaf_indices[cursor] as usize]
         cursor = cursor + 1
     }
-    FriLayerMultiOpening { valid: true, values: values, path: path }
+    LdeMultiOpening { valid: true, values: values, path: path }
 }
 
 pub fn verify_fri_layer_multi_opening<
@@ -4154,6 +4282,76 @@ fn invalid_fri_multi_query16() -> FriMultiCommitmentQuery16 {
             CheckpointFriMultiQueryLayers16,
         >>::invalid_fri_multi_query_layers(),
     }
+}
+
+/// Construct the canonical empty value required before bounded decoding.
+pub fn empty_checkpoint4_baby_bear_receipt16() -> Checkpoint4BabyBearReceipt16 {
+    BabyBearAirFriReceipt {
+        valid: false,
+        main_root: MainLdeDigest {
+            valid: false,
+            value: Poseidon2Digest::zero(),
+        },
+        auxiliary_root: AuxiliaryLdeDigest {
+            valid: false,
+            value: Poseidon2Digest::zero(),
+        },
+        air: AirMultiOpenings {
+            main: LdeMultiOpening {
+                valid: false,
+                values: [[BabyBear::zero(); MAIN_LDE_ROW_FIELDS];
+                    {air_lde_request_capacity(4)}],
+                path: invalid_digest_multi_path<
+                    {air_lde_request_capacity(4)},
+                    {air_lde_sibling_capacity(4)},
+                >(),
+            },
+            auxiliary: LdeMultiOpening {
+                valid: false,
+                values: [[BabyBear::zero(); AUXILIARY_ROW_BITS];
+                    {air_lde_request_capacity(4)}],
+                path: invalid_digest_multi_path<
+                    {air_lde_request_capacity(4)},
+                    {air_lde_sibling_capacity(4)},
+                >(),
+            },
+        },
+        fri: invalid_fri_multi_query16(),
+    }
+}
+
+/// Reset a caller-owned checkpoint carrier without exposing its storage
+/// layout to the browser host.
+pub fn clear_checkpoint4_baby_bear_receipt16(
+    _ receipt: mut Checkpoint4BabyBearReceipt16,
+) {
+    receipt = empty_checkpoint4_baby_bear_receipt16()
+}
+
+/// Encode only the counted sparse prefixes of one checkpoint receipt into
+/// browser linear memory. The schema and field order come from Fe types and
+/// their FCO-derived canonical stream implementations.
+pub fn encode_checkpoint4_baby_bear_receipt16(
+    _ receipt: ref Checkpoint4BabyBearReceipt16,
+) -> BrowserBytes {
+    let words = canonical_word_stream_count(receipt)
+    if words == 0 { return BrowserBytes { ptr: 0, len: 0 } }
+    encode_canonical_word_stream(
+        receipt,
+        BrowserWordWriter::allocate(words),
+    ).finish()
+}
+
+/// Decode a canonical checkpoint receipt from browser linear memory. The
+/// bounded reader rejects truncation, trailing data, invalid booleans,
+/// over-capacity sparse counts, and non-canonical field representatives.
+pub fn decode_checkpoint4_baby_bear_receipt16(
+    _ bytes: BrowserBytes,
+    _ receipt: mut Checkpoint4BabyBearReceipt16,
+) -> bool {
+    clear_checkpoint4_baby_bear_receipt16(mut receipt)
+    let reader = receipt.decode_stream(BrowserWordReader::new(bytes))
+    reader.complete()
 }
 
 fn commit_fri_layer<const ROUND: u32, const N: usize>(
@@ -5220,12 +5418,12 @@ pub fn verify_checkpoint4_baby_bear_receipt16(
             16,
             {air_lde_request_capacity(4)},
             {air_lde_sibling_capacity(4)},
-        >(ref receipt.main, receipt.main_root)
+        >(ref receipt.air.main, receipt.main_root)
         || !verify_auxiliary_lde_multi_opening<
             16,
             {air_lde_request_capacity(4)},
             {air_lde_sibling_capacity(4)},
-        >(ref receipt.auxiliary, receipt.auxiliary_root) {
+        >(ref receipt.air.auxiliary, receipt.auxiliary_root) {
         return false
     }
     let main_transcript = bind_main_lde(proof_transcript, receipt.main_root)
