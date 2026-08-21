@@ -1128,11 +1128,27 @@ Legend:
   three-challenge mutation gate evaluates 1,167,135 constraints and passes
   1/1 in 26.97 seconds. The complete recursive receipt, root reconstruction,
   and authentication mutation gate passes 1/1 in 94.80 seconds.
+  Commits `3b42093d6` and `ca4ad8d96` extend the same committed interaction
+  machinery through fixed-point rounding. One const-generic
+  `SparseCopyInteractionRow<F, PORTS>` now carries the prefix accumulator and
+  a type-level fixed array of inverse ports; product is its two-port
+  interpretation and rounding is its five-port interpretation. The retained
+  low/high window is expressed as one contiguous address interval, so output
+  index `i` selects low limb `L - 1` followed by high limb `i - 1` through a
+  linear address formula rather than an `i == 0` interpolation. Selector-only
+  Fe ports bind that window, every rounded output digit, the guard bit, output
+  sign and nonzero flag, and both input signs. The independent Rust model
+  reconstructs the conceptual multiset directly from semantic task kinds and
+  matches all five Fe inverse columns across 4,096 rows under three challenge
+  pairs. Source, consumer, inverse, accumulator, and coordinated locally valid
+  rounding mutations reject; the coordinated mutation fails exactly once at
+  the terminal balance. The complete gate evaluates 45,057 rounding
+  interaction constraints and passes 1/1 in 101.44 seconds.
   This root authenticates the exact control and witness base trace but is not
-  yet a succinct leaf proof. Rounding, linear, and boundary copies still need
-  the same committed interaction treatment, followed by quartic transcript
-  challenges and batch inversion. The interaction columns must then enter the
-  existing BabyBear LDE, composition, multi-query, FRI, and canonical receipt
+  yet a succinct leaf proof. Linear and boundary copies still need the same
+  committed interaction treatment, followed by quartic transcript challenges
+  and batch inversion. The interaction columns must then enter the existing
+  BabyBear LDE, composition, multi-query, FRI, and canonical receipt
   interpreters. Only that authenticated AIR/FRI receipt may replace semantic
   replay in the recursive parent carrier.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
@@ -1220,8 +1236,8 @@ fallback. The semantic receipts are:
 ## Immediate burn-down order
 
 1. Run the external real-GPU handoff above before beginning the proof GPU port.
-2. Finish the authenticated BabyBear sparse AIR: extend the landed product
-   copy interaction to rounding, linear, and boundary copies, derive quartic
+2. Finish the authenticated BabyBear sparse AIR: extend the landed product and
+   rounding interactions to linear and boundary copies, derive quartic
    challenges with batch inversion, then feed control, witness, and
    interactions through the existing LDE, composition, multi-query, FRI, and
    canonical receipt layers.
