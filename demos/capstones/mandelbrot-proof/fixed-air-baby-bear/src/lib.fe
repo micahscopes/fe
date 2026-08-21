@@ -18,6 +18,7 @@ use canonical_words::{
 }
 use mandelbrot_proof_fixed_air::FixedMandelbrotTransitionWitness
 use mandelbrot_proof_fixed_air_core::{
+    sparse_control_row_at,
     sparse_transition_row_from_witness,
     sparse_transition_task_count,
     sparse_transition_trace_length,
@@ -36,12 +37,12 @@ use merkle_core::{
 use poseidon_baby_bear::{
     Poseidon2Digest,
     Poseidon2FieldDomain,
-    commit_fields,
+    commit_canonical,
     compress as poseidon_compress,
 }
 use precision::baby_bear::BabyBear
+use core::ops::Eq
 
-pub const SPARSE_TRACE_LEAF_FIELDS: usize = 11
 const SPARSE_TRACE_FRONTIER_LEVELS: usize = 23
 const MAX_SPARSE_TRACE_LENGTH: usize = 4194304
 
@@ -53,11 +54,71 @@ const fn protocol_tag(_ label: String<4>) -> u32 {
         | (bytes[3] as u32)
 }
 
-struct MandelbrotSparseTraceLeafBabyBearV1 {}
+struct MandelbrotSparseTraceLeafBabyBearV2 {}
 
-impl Poseidon2FieldDomain for MandelbrotSparseTraceLeafBabyBearV1 {
-    const TAG: u32 = protocol_tag("SL01")
+impl Poseidon2FieldDomain for MandelbrotSparseTraceLeafBabyBearV2 {
+    const TAG: u32 = protocol_tag("SL02")
 }
+
+pub struct SparseTraceTaskSelectors {
+    pub radix_bit: BabyBear,
+    pub radix_limb: BabyBear,
+    pub radix_finish: BabyBear,
+    pub carry_bit: BabyBear,
+    pub carry_finish: BabyBear,
+    pub product_term: BabyBear,
+    pub product_coefficient: BabyBear,
+    pub product_round: BabyBear,
+    pub product_finish: BabyBear,
+    pub linear_limb: BabyBear,
+    pub linear_finish: BabyBear,
+    pub boundary_sign: BabyBear,
+    pub boundary_limb: BabyBear,
+    pub transition_finish: BabyBear,
+    pub padding: BabyBear,
+}
+impl core::marker::Copy for SparseTraceTaskSelectors {}
+derive Eq for SparseTraceTaskSelectors
+derive CanonicalWords for SparseTraceTaskSelectors using CanonicalWordsProvider
+
+pub struct SparseTraceLinearRoles {
+    pub sum: BabyBear,
+    pub left_difference: BabyBear,
+    pub right_difference: BabyBear,
+    pub select: BabyBear,
+}
+impl core::marker::Copy for SparseTraceLinearRoles {}
+derive Eq for SparseTraceLinearRoles
+derive CanonicalWords for SparseTraceLinearRoles using CanonicalWordsProvider
+
+pub struct SparseTraceRangeRoles {
+    pub coordinate: BabyBear,
+    pub product_low: BabyBear,
+    pub product_high: BabyBear,
+    pub product_output: BabyBear,
+    pub linear_sum: BabyBear,
+    pub linear_left_difference: BabyBear,
+    pub linear_right_difference: BabyBear,
+    pub linear_output: BabyBear,
+}
+impl core::marker::Copy for SparseTraceRangeRoles {}
+derive Eq for SparseTraceRangeRoles
+derive CanonicalWords for SparseTraceRangeRoles using CanonicalWordsProvider
+
+pub struct SparseTraceControl {
+    pub selectors: SparseTraceTaskSelectors,
+    pub linear_roles: SparseTraceLinearRoles,
+    pub range_roles: SparseTraceRangeRoles,
+    pub major: BabyBear,
+    pub minor: BabyBear,
+    pub step: BabyBear,
+    pub flag: BabyBear,
+    pub width: BabyBear,
+    pub weight: BabyBear,
+}
+impl core::marker::Copy for SparseTraceControl {}
+derive Eq for SparseTraceControl
+derive CanonicalWords for SparseTraceControl using CanonicalWordsProvider
 
 /// One nominal committed base-trace leaf. Protocol metadata is carried in
 /// every leaf so a path cannot be replayed across limb counts or trace shapes.
@@ -79,6 +140,7 @@ pub struct SparseTraceLeaf<const L: usize> {
     pub trace_length: BabyBear,
     pub index: BabyBear,
     pub active: BabyBear,
+    pub control: SparseTraceControl,
     pub row: SparseTraceRow,
 }
 impl<const L: usize> core::marker::Copy for SparseTraceLeaf<L> {}
@@ -188,6 +250,95 @@ fn zero_sparse_trace_row() -> SparseTraceRow {
     }
 }
 
+fn zero_sparse_trace_control() -> SparseTraceControl {
+    SparseTraceControl {
+        selectors: SparseTraceTaskSelectors {
+            radix_bit: BabyBear::zero(),
+            radix_limb: BabyBear::zero(),
+            radix_finish: BabyBear::zero(),
+            carry_bit: BabyBear::zero(),
+            carry_finish: BabyBear::zero(),
+            product_term: BabyBear::zero(),
+            product_coefficient: BabyBear::zero(),
+            product_round: BabyBear::zero(),
+            product_finish: BabyBear::zero(),
+            linear_limb: BabyBear::zero(),
+            linear_finish: BabyBear::zero(),
+            boundary_sign: BabyBear::zero(),
+            boundary_limb: BabyBear::zero(),
+            transition_finish: BabyBear::zero(),
+            padding: BabyBear::zero(),
+        },
+        linear_roles: SparseTraceLinearRoles {
+            sum: BabyBear::zero(),
+            left_difference: BabyBear::zero(),
+            right_difference: BabyBear::zero(),
+            select: BabyBear::zero(),
+        },
+        range_roles: SparseTraceRangeRoles {
+            coordinate: BabyBear::zero(),
+            product_low: BabyBear::zero(),
+            product_high: BabyBear::zero(),
+            product_output: BabyBear::zero(),
+            linear_sum: BabyBear::zero(),
+            linear_left_difference: BabyBear::zero(),
+            linear_right_difference: BabyBear::zero(),
+            linear_output: BabyBear::zero(),
+        },
+        major: BabyBear::zero(),
+        minor: BabyBear::zero(),
+        step: BabyBear::zero(),
+        flag: BabyBear::zero(),
+        width: BabyBear::zero(),
+        weight: BabyBear::zero(),
+    }
+}
+
+fn sparse_trace_control_at<const L: usize>(_ index: u32) -> SparseTraceControl {
+    let control = sparse_control_row_at<BabyBear, L>(index)
+    SparseTraceControl {
+        selectors: SparseTraceTaskSelectors {
+            radix_bit: control.selectors.radix_bit,
+            radix_limb: control.selectors.radix_limb,
+            radix_finish: control.selectors.radix_finish,
+            carry_bit: control.selectors.carry_bit,
+            carry_finish: control.selectors.carry_finish,
+            product_term: control.selectors.product_term,
+            product_coefficient: control.selectors.product_coefficient,
+            product_round: control.selectors.product_round,
+            product_finish: control.selectors.product_finish,
+            linear_limb: control.selectors.linear_limb,
+            linear_finish: control.selectors.linear_finish,
+            boundary_sign: control.selectors.boundary_sign,
+            boundary_limb: control.selectors.boundary_limb,
+            transition_finish: control.selectors.transition_finish,
+            padding: control.selectors.padding,
+        },
+        linear_roles: SparseTraceLinearRoles {
+            sum: control.linear_roles.sum,
+            left_difference: control.linear_roles.left_difference,
+            right_difference: control.linear_roles.right_difference,
+            select: control.linear_roles.select,
+        },
+        range_roles: SparseTraceRangeRoles {
+            coordinate: control.range_roles.coordinate,
+            product_low: control.range_roles.product_low,
+            product_high: control.range_roles.product_high,
+            product_output: control.range_roles.product_output,
+            linear_sum: control.range_roles.linear_sum,
+            linear_left_difference: control.range_roles.linear_left_difference,
+            linear_right_difference: control.range_roles.linear_right_difference,
+            linear_output: control.range_roles.linear_output,
+        },
+        major: control.major,
+        minor: control.minor,
+        step: control.step,
+        flag: control.flag,
+        width: control.width,
+        weight: control.weight,
+    }
+}
+
 pub fn zero_sparse_trace_leaf<const L: usize>() -> SparseTraceLeaf<L> {
     SparseTraceLeaf {
         limb_count: BabyBear::zero(),
@@ -195,6 +346,7 @@ pub fn zero_sparse_trace_leaf<const L: usize>() -> SparseTraceLeaf<L> {
         trace_length: BabyBear::zero(),
         index: BabyBear::zero(),
         active: BabyBear::zero(),
+        control: zero_sparse_trace_control(),
         row: zero_sparse_trace_row(),
     }
 }
@@ -240,24 +392,6 @@ fn invalid_sparse_trace_digest<const L: usize>() -> SparseTraceDigest<L> {
     SparseTraceDigest { valid: false, value: Poseidon2Digest::zero() }
 }
 
-fn sparse_trace_leaf_fields<const L: usize>(
-    _ leaf: SparseTraceLeaf<L>,
-) -> [BabyBear; SPARSE_TRACE_LEAF_FIELDS] {
-    [
-        leaf.limb_count,
-        leaf.task_count,
-        leaf.trace_length,
-        leaf.index,
-        leaf.active,
-        leaf.row.value,
-        leaf.row.auxiliary,
-        leaf.row.accumulator_before,
-        leaf.row.accumulator_after,
-        leaf.row.state_before,
-        leaf.row.state_after,
-    ]
-}
-
 pub fn sparse_trace_leaf_from_witness<const L: usize>(
     _ index: u32,
     _ point: ComplexFixed<L>,
@@ -281,6 +415,7 @@ pub fn sparse_trace_leaf_from_witness<const L: usize>(
         trace_length: BabyBear::from_u32(trace),
         index: BabyBear::from_u32(index),
         active: BabyBear::from_u32(if index < tasks { 1 } else { 0 }),
+        control: sparse_trace_control_at<L>(index),
         row: SparseTraceRow {
             value: row.value,
             auxiliary: row.auxiliary,
@@ -295,10 +430,10 @@ pub fn sparse_trace_leaf_from_witness<const L: usize>(
 pub fn sparse_trace_leaf_commitment<const L: usize>(
     _ leaf: SparseTraceLeaf<L>,
 ) -> Poseidon2Digest {
-    commit_fields<
-        MandelbrotSparseTraceLeafBabyBearV1,
-        SPARSE_TRACE_LEAF_FIELDS,
-    >(sparse_trace_leaf_fields(leaf))
+    commit_canonical<
+        MandelbrotSparseTraceLeafBabyBearV2,
+        SparseTraceLeaf<L>,
+    >(ref leaf).digest()
 }
 
 fn sparse_trace_row_is_zero(_ row: SparseTraceRow) -> bool {
@@ -308,6 +443,13 @@ fn sparse_trace_row_is_zero(_ row: SparseTraceRow) -> bool {
         && row.accumulator_after.is_zero()
         && row.state_before.is_zero()
         && row.state_after.is_zero()
+}
+
+fn sparse_trace_control_is_canonical<const L: usize>(
+    _ position: u32,
+    _ control: SparseTraceControl,
+) -> bool {
+    control.eq(sparse_trace_control_at<L>(position))
 }
 
 pub fn sparse_trace_leaf_is_canonical<const L: usize>(
@@ -320,7 +462,8 @@ pub fn sparse_trace_leaf_is_canonical<const L: usize>(
         || leaf.limb_count.to_u32() != L.downcast_truncate()
         || leaf.task_count.to_u32() != tasks
         || leaf.trace_length.to_u32() != trace
-        || leaf.index.to_u32() != position {
+        || leaf.index.to_u32() != position
+        || !sparse_trace_control_is_canonical<L>(position, leaf.control) {
         return false
     }
     let expected_active = position < tasks

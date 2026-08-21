@@ -9,7 +9,7 @@
 
 use core::marker::Copy
 use core::num::mul_mod_u256
-use core::ops::{Add, Mul, Neg, Sub}
+use core::ops::{Add, Eq, Mul, Neg, Sub}
 use canonical_words::{CanonicalWords, WordSink, WordSource}
 
 const HALF_BITS: u32 = 16
@@ -149,6 +149,10 @@ pub const fn montgomery_word_u32(_ plain: u256, _ modulus: u32) -> u32 {
 /// One-word Montgomery field element branded by its modulus type.
 pub struct WordField<M> { value: u32 }
 impl<M> Copy for WordField<M> {}
+
+impl<M> Eq for WordField<M> {
+    fn eq(self, _ other: Self) -> bool { self.value == other.value }
+}
 
 impl<M: WordPrime31> WordField<M> {
     pub const fn zero() -> Self { Self { value: 0 } }

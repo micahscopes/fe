@@ -102,6 +102,104 @@ fn expected_sparse_transition_tasks(limbs: u32) -> Vec<[u32; 5]> {
     tasks
 }
 
+fn expected_sparse_control_fields(task: [u32; 5]) -> [u32; 33] {
+    let [kind, first, second, third, fourth] = task;
+    let mut fields = [0u32; 33];
+    fields[kind as usize] = 1;
+    match kind {
+        0 => {
+            fields[27] = first;
+            fields[28] = second;
+            fields[29] = third;
+            fields[32] = 1 << third;
+        }
+        1 => {
+            fields[27] = first;
+            fields[28] = second;
+        }
+        2 => fields[27] = first,
+        3 => {
+            fields[27] = first;
+            fields[28] = second;
+            fields[29] = fourth;
+            fields[30] = third;
+            fields[32] = 1 << fourth;
+        }
+        4 => {
+            fields[27] = first;
+            fields[28] = second;
+        }
+        5 => {
+            fields[27] = first;
+            fields[28] = second;
+            fields[29] = third;
+            fields[30] = u32::from(second >= LIMBS as u32);
+            fields[31] = if second < LIMBS as u32 {
+                second + 1
+            } else if second < 2 * LIMBS as u32 - 1 {
+                2 * LIMBS as u32 - 1 - second
+            } else {
+                0
+            };
+        }
+        6 => {
+            fields[27] = first;
+            fields[28] = second;
+            fields[30] = u32::from(second >= LIMBS as u32);
+            fields[31] = if second < LIMBS as u32 {
+                second + 1
+            } else if second < 2 * LIMBS as u32 - 1 {
+                2 * LIMBS as u32 - 1 - second
+            } else {
+                0
+            };
+        }
+        7 => {
+            fields[27] = first;
+            fields[28] = second;
+        }
+        8 => fields[27] = first,
+        9 => {
+            fields[15 + second as usize] = 1;
+            fields[27] = first;
+            fields[28] = second;
+            fields[29] = third;
+            fields[30] = u32::from(first == 0);
+        }
+        10 => {
+            fields[27] = first;
+            fields[30] = u32::from(first == 0);
+        }
+        11 => fields[27] = first,
+        12 => {
+            fields[27] = first;
+            fields[28] = second;
+        }
+        13 | 14 => {}
+        _ => panic!("unknown sparse control task kind {kind}"),
+    }
+    if kind <= 2 {
+        if first < 6 {
+            fields[19] = 1;
+        } else if first < 15 {
+            fields[20 + ((first - 6) % 3) as usize] = 1;
+        } else {
+            fields[23 + ((first - 15) % 4) as usize] = 1;
+        }
+        fields[30] = u32::from(fields[19] == 1 || fields[22] == 1 || fields[26] == 1);
+    }
+    fields
+}
+
+fn expected_sparse_control_rows() -> Vec<[u32; 33]> {
+    let mut rows: Vec<[u32; 33]> = expected_sparse_transition_tasks(LIMBS as u32)
+        .into_iter()
+        .map(expected_sparse_control_fields)
+        .collect();
+    rows.resize(4_096, expected_sparse_control_fields([14, 0, 0, 0, 0]));
+    rows
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Fx {
     negative: bool,
@@ -964,6 +1062,7 @@ fn expected_sparse_trace_root(point: &ComplexFx, current: &ComplexFx) -> [u32; 8
     let task_count = rows.len() as u32;
     assert_eq!(task_count, 2_821);
     rows.resize(4_096, [0; 6]);
+    let controls = expected_sparse_control_rows();
     let leaves = rows
         .iter()
         .enumerate()
@@ -975,8 +1074,9 @@ fn expected_sparse_trace_root(point: &ComplexFx, current: &ComplexFx) -> [u32; 8
                 index as u32,
                 u32::from(index < task_count as usize),
             ];
+            fields.extend(controls[index]);
             fields.extend(row);
-            reference_poseidon_digest(b"SL01", &fields)
+            reference_poseidon_digest(b"SL02", &fields)
         })
         .collect();
     reference_merkle_root(leaves)
@@ -2285,6 +2385,11 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                 first_leaf,
                 first_leaf + 4,
                 first_leaf + 5,
+                first_leaf + 20,
+                first_leaf + 24,
+                first_leaf + 32,
+                first_leaf + 35,
+                first_leaf + 38,
             ] {
                 let original = opening_words[mutation_index];
                 let mutated = if mutation_index == 0 || mutation_index == 10 {
