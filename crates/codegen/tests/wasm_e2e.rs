@@ -164,6 +164,10 @@ impl MaterializedTaskMachine for WasmtimeTwoSiteMachine {
 
 /// Compile Fe source to wasm bytes through the wasm backend.
 fn compile_to_wasm(name: &str, source: &str) -> Vec<u8> {
+    compile_to_wasm_at(name, source, OptLevel::O0)
+}
+
+fn compile_to_wasm_at(name: &str, source: &str, opt_level: OptLevel) -> Vec<u8> {
     let mut db = DriverDataBase::default();
     let url = Url::parse(&format!("file:///{name}")).expect("test URL should parse");
     db.workspace()
@@ -173,7 +177,7 @@ fn compile_to_wasm(name: &str, source: &str) -> Vec<u8> {
 
     let output = BackendKind::Wasm
         .create()
-        .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
+        .compile(&db, top_mod, layout_for(BackendKind::Wasm), opt_level)
         .unwrap_or_else(|err| panic!("wasm compilation of `{name}` failed: {err}"));
     let bytes = output
         .into_bytecode()
@@ -6839,6 +6843,100 @@ pub fn probe() -> u32 {
         7,
         "the caller must observe the callee's write through the mutable borrow",
     );
+}
+
+/// A read-only borrow of a const-initialized large aggregate must reuse the
+/// caller's addressable representation. Lowering must not try to take the
+/// address of the reference carrier itself.
+#[test]
+fn ref_borrow_of_large_const_initialized_aggregate_reads_on_wasm() {
+    let source = r#"
+struct Large { values: [u32; 1001] }
+
+impl core::marker::Copy for Large {}
+
+const EMPTY: Large = Large { values: [0; 1001] }
+
+fn read_first(_ input: ref Large) -> u32 {
+    input.values[0]
+}
+
+pub fn probe() -> u32 {
+    let input = EMPTY
+    read_first(ref input)
+}
+"#;
+    let wasm = compile_to_wasm("wasm_large_ref_borrow_read.fe", source);
+    let (mut store, instance) = instantiate(&wasm);
+    let probe = instance
+        .get_typed_func::<(), i32>(&mut store, "probe")
+        .expect("`probe` export should exist");
+    assert_eq!(
+        probe
+            .call(&mut store, ())
+            .expect("large read-only borrow should execute"),
+        0,
+    );
+}
+
+/// Discarding a callee's ordinary return value must not discard writes made
+/// through a mutable aggregate borrow.
+#[test]
+fn discarded_return_preserves_large_mut_borrow_writes_on_wasm() {
+    let source = r#"
+struct Large { values: [u32; 1001] }
+
+impl core::marker::Copy for Large {}
+
+const EMPTY: Large = Large { values: [0; 1001] }
+
+fn write_first(_ output: mut Large) -> bool {
+    output.values[0] = 7
+    true
+}
+
+pub fn probe() -> u32 {
+    let mut output = EMPTY
+    write_first(mut output)
+    output.values[0]
+}
+"#;
+    let wasm = compile_to_wasm("wasm_discarded_return_mut_borrow.fe", source);
+    let (mut store, instance) = instantiate(&wasm);
+    let probe = instance
+        .get_typed_func::<(), i32>(&mut store, "probe")
+        .expect("`probe` export should exist");
+    assert_eq!(
+        probe
+            .call(&mut store, ())
+            .expect("discarded return must preserve callee writes"),
+        7,
+    );
+}
+
+#[test]
+fn ref_borrow_of_scalar_call_result_reads_on_wasm() {
+    let source = r#"
+#[inline(never)]
+fn choose(_ value: bool) -> bool { value }
+
+#[inline(never)]
+fn read(_ value: ref bool) -> u32 {
+    if value { 1 } else { 0 }
+}
+
+pub fn probe(_ value: bool) -> u32 {
+    let selected = choose(value)
+    read(ref selected)
+}
+"#;
+    let wasm = compile_to_wasm_at("wasm_scalar_call_result_ref.fe", source, OptLevel::O2);
+    let (mut store, instance) = instantiate(&wasm);
+    let probe = instance
+        .get_typed_func::<i32, i32>(&mut store, "probe")
+        .expect("`probe` export should exist");
+    assert_eq!(probe.call(&mut store, 0).unwrap(), 0);
+    assert_eq!(probe.call(&mut store, 1).unwrap(), 1);
 }
 
 /// A private fixed-array parameter is flattened at the call boundary and

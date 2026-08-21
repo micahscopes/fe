@@ -912,24 +912,30 @@ fn reify_inline_const_aggregates<'db>(db: &'db DriverDataBase, body: &mut Runtim
         Some(())
     }
 
-    fn projected_ref_root(place: &RuntimePlace<'_>) -> Option<RLocalId> {
-        if place.path.is_empty() {
-            return None;
-        }
+    fn ref_root(place: &RuntimePlace<'_>) -> Option<RLocalId> {
         match place.root {
             PlaceRoot::Ref(root) => Some(root),
             PlaceRoot::Slot(_) | PlaceRoot::Ptr { .. } | PlaceRoot::Provider(_) => None,
         }
     }
 
+    fn projected_ref_root(place: &RuntimePlace<'_>) -> Option<RLocalId> {
+        (!place.path.is_empty()).then(|| ref_root(place)).flatten()
+    }
+
     fn projected_roots_in_expr(expr: &RExpr<'_>, roots: &mut HashSet<RLocalId>) {
-        let place = match expr {
-            RExpr::MaterializePlaceToObject { place }
-            | RExpr::AddrOf { place }
-            | RExpr::Load { place } => place,
-            _ => return,
+        let root = match expr {
+            // Address formation needs storage even for the whole value. Once a
+            // const handle is reified as scalar leaves, `addr_of *value` must
+            // target the private materialized copy rather than the now-value
+            // carrier.
+            RExpr::MaterializePlaceToObject { place } | RExpr::AddrOf { place } => ref_root(place),
+            // A whole-value load can remain an ordinary aggregate value copy.
+            // Only projections require addressable target-layout storage.
+            RExpr::Load { place } => projected_ref_root(place),
+            _ => None,
         };
-        if let Some(root) = projected_ref_root(place) {
+        if let Some(root) = root {
             roots.insert(root);
         }
     }
@@ -946,11 +952,24 @@ fn reify_inline_const_aggregates<'db>(db: &'db DriverDataBase, body: &mut Runtim
         }
     }
 
+    fn rewrite_addressed_place(
+        place: &mut RuntimePlace<'_>,
+        addressable: &FxHashMap<RLocalId, RLocalId>,
+    ) {
+        let Some(root) = ref_root(place) else {
+            return;
+        };
+        if let Some(object) = addressable.get(&root) {
+            place.root = PlaceRoot::Ref(*object);
+        }
+    }
+
     fn rewrite_projected_expr(expr: &mut RExpr<'_>, addressable: &FxHashMap<RLocalId, RLocalId>) {
         match expr {
-            RExpr::MaterializePlaceToObject { place }
-            | RExpr::AddrOf { place }
-            | RExpr::Load { place } => rewrite_projected_place(place, addressable),
+            RExpr::MaterializePlaceToObject { place } | RExpr::AddrOf { place } => {
+                rewrite_addressed_place(place, addressable)
+            }
+            RExpr::Load { place } => rewrite_projected_place(place, addressable),
             _ => {}
         }
     }
@@ -6302,6 +6321,11 @@ where
                 if !self.scoped_arena_place_is_local(body, place, false) {
                     return Err("address of a nonlocal place is observed");
                 }
+                analysis.allocates |= matches!(
+                    place.root,
+                    PlaceRoot::Slot(local)
+                        if matches!(body.value_class(local), Some(RuntimeClass::Scalar(_)))
+                );
             }
         }
         Ok(())
@@ -6720,6 +6744,37 @@ fn scalar_ty_r1<'db>(scalar: &ScalarClass<'db>) -> Result<Type, LowerError> {
     }
 }
 
+/// Scalar MIR slots normally stay in SSA. A source-level borrow needs a stable
+/// target address instead, so identify exactly the scalar slots consumed by an
+/// `AddrOf` expression before local declarations are chosen. This is a closed
+/// syntactic property of the prepared body: references cannot be formed by any
+/// other runtime expression.
+fn address_taken_scalar_slots(body: &RuntimeBody<'_>) -> HashSet<RLocalId> {
+    let mut slots = HashSet::new();
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            let RStmt::Assign {
+                expr:
+                    RExpr::AddrOf {
+                        place:
+                            RuntimePlace {
+                                root: PlaceRoot::Slot(local),
+                                ..
+                            },
+                    },
+                ..
+            } = stmt
+            else {
+                continue;
+            };
+            if matches!(body.value_class(*local), Some(RuntimeClass::Scalar(_))) {
+                slots.insert(*local);
+            }
+        }
+    }
+    slots
+}
+
 struct PortableFunctionLowerer<'ctx, 'db, 'a, I>
 where
     I: Isa<InstSet = NativeInstSet>,
@@ -6743,6 +6798,10 @@ where
     /// independent arena copy so dynamic indexing observes normal Fe value
     /// semantics without aliasing the caller's storage.
     materialized_param_slots: HashSet<RLocalId>,
+    /// Scalar Slots remain SSA-promoted unless their address is actually taken.
+    /// Each member here carries an aligned canonical-arena pointer in `vars`;
+    /// whole-slot reads and writes use target-typed memory operations.
+    materialized_scalar_slots: HashSet<RLocalId>,
     /// Only host-visible entries need dynamic closed-enum validation. Private
     /// Fe-to-Fe calls are already typed and avoid the extra branch entirely.
     validate_enum_params: bool,
@@ -6783,6 +6842,7 @@ where
         let mut vars = FxHashMap::default();
         let mut tuple_vars: FxHashMap<RLocalId, Vec<Variable>> = FxHashMap::default();
         let mut materialized_param_slots = HashSet::new();
+        let materialized_scalar_slots = address_taken_scalar_slots(&body);
         for (idx, local) in body.locals.iter().enumerate() {
             if let RuntimeCarrier::Value(class) = &local.carrier {
                 let local_id = RLocalId::from_u32(idx as u32);
@@ -6799,7 +6859,11 @@ where
                     // projected/aggregate slots and aliasing operations remain
                     // fail-closed in expression/statement lowering.
                     if matches!(class, RuntimeClass::Scalar(_)) {
-                        let ty = module.ty_for_class(class)?;
+                        let ty = if materialized_scalar_slots.contains(&local_id) {
+                            Type::I32
+                        } else {
+                            module.ty_for_class(class)?
+                        };
                         vars.insert(local_id, fb.declare_var(ty));
                     } else if body
                         .signature
@@ -6851,6 +6915,7 @@ where
             vars,
             tuple_vars,
             materialized_param_slots,
+            materialized_scalar_slots,
             validate_enum_params,
             trap_block: None,
             scoped_arena,
@@ -6877,6 +6942,20 @@ where
             let checkpoint = self.fb.insert_inst(MemCheckpoint::new(is), checkpoint_ty);
             self.arena_checkpoint = Some(checkpoint);
         }
+        let mut scalar_slots = self
+            .materialized_scalar_slots
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        scalar_slots.sort_by_key(|local| local.as_u32());
+        for local in scalar_slots {
+            let pointer = self.lower_alloc_target_storage(
+                crate::WASM_LAYOUT.word_size_bytes,
+                "address-taken scalar slot",
+            )?;
+            let var = self.var_for(local)?;
+            self.fb.def_var(var, pointer);
+        }
         let params = self.body.signature.params.clone();
         let arg_values: Vec<ValueId> = self.fb.args().to_vec();
         let mut wasm_arg_idx = 0usize;
@@ -6885,7 +6964,22 @@ where
                 .validate_enum_params
                 .then(|| self.module.flat_leaf_enum_bounds(&param.class))
                 .flatten();
-            if self.materialized_param_slots.contains(&param.local) {
+            if self.materialized_scalar_slots.contains(&param.local) {
+                let arg = arg_values[wasm_arg_idx];
+                if let Some(limit) = enum_bounds
+                    .as_ref()
+                    .and_then(|bounds| bounds.first())
+                    .copied()
+                    .flatten()
+                {
+                    self.validate_enum_tag(arg, limit);
+                }
+                let pointer = self.local_value(param.local)?;
+                let ty = self.materialized_scalar_slot_ty(param.local)?;
+                self.fb
+                    .insert_inst_no_result(Mstore::new(self.inst_set(), pointer, arg, ty));
+                wasm_arg_idx += 1;
+            } else if self.materialized_param_slots.contains(&param.local) {
                 let RuntimeClass::AggregateValue { layout } = &param.class else {
                     return Err(LowerError::Internal(format!(
                         "materialized parameter slot {:?} is not an aggregate",
@@ -7006,6 +7100,25 @@ where
                         ))),
                     };
                 }
+                if self.materialized_scalar_slots.contains(dst) {
+                    let value = self.lower_expr(expr, *dst).map_err(|error| match error {
+                        LowerError::Unsupported(message) => LowerError::Unsupported(format!(
+                            "{message}; while lowering address-taken scalar assignment destination {dst:?}, expression {expr:?}",
+                        )),
+                        other => other,
+                    })?;
+                    let ty = self.materialized_scalar_slot_ty(*dst)?;
+                    let actual = self.fb.type_of(value);
+                    if actual != ty {
+                        return Err(LowerError::Internal(format!(
+                            "wasm address-taken scalar assignment type mismatch for {dst:?}: lowered `{expr:?}` as {actual:?}, destination requires {ty:?}"
+                        )));
+                    }
+                    let pointer = self.local_value(*dst)?;
+                    self.fb
+                        .insert_inst_no_result(Mstore::new(self.inst_set(), pointer, value, ty));
+                    return Ok(());
+                }
                 // R2.1: a scalar-tuple destination is produced element-wise (one
                 // SSA def per element word), not as a single value, so it takes a
                 // dedicated arm rather than the single-`ValueId` `lower_expr` path.
@@ -7047,8 +7160,15 @@ where
                     return Err(unsupported_place(dst));
                 }
                 let value = self.local_value(*src)?;
-                let var = self.var_for(local)?;
-                self.fb.def_var(var, value);
+                if self.materialized_scalar_slots.contains(&local) {
+                    let pointer = self.local_value(local)?;
+                    let ty = self.materialized_scalar_slot_ty(local)?;
+                    self.fb
+                        .insert_inst_no_result(Mstore::new(self.inst_set(), pointer, value, ty));
+                } else {
+                    let var = self.var_for(local)?;
+                    self.fb.def_var(var, value);
+                }
                 Ok(())
             }
             RStmt::Store { dst, src } => {
@@ -7359,6 +7479,11 @@ where
             let mut values = Vec::with_capacity(shape.leaf_count());
             self.load_materialized_leaves(pointer, &class, &shape, &mut values)?;
             return Ok(values);
+        }
+        if self.materialized_scalar_slots.contains(&local) {
+            let pointer = self.local_value(local)?;
+            let ty = self.materialized_scalar_slot_ty(local)?;
+            return Ok(vec![self.load_memory_scalar(pointer, ty)]);
         }
         Ok(vec![self.local_value(local)?])
     }
@@ -8347,15 +8472,26 @@ where
     /// use). A loop that reaches this each iteration grows the arena and never
     /// frees; `fe_cabi_reset` between top-level calls reclaims it.
     fn lower_alloc_object(&mut self, layout: LayoutId<'db>) -> Result<ValueId, LowerError> {
-        let is = self.inst_set();
         let size = mir::layout_size_bytes(self.module.db, layout, crate::WASM_LAYOUT);
-        let size = i32::try_from(size).map_err(|_| {
-            LowerError::Unsupported(format!(
-                "wasm target: AllocObject size {size} bytes for `{layout:?}` exceeds i32"
-            ))
-        })?;
+        self.lower_alloc_target_storage(size, &format!("AllocObject `{layout:?}`"))
+    }
+
+    fn lower_alloc_target_storage(
+        &mut self,
+        size: usize,
+        description: &str,
+    ) -> Result<ValueId, LowerError> {
+        let is = self.inst_set();
         const ALIGN: i32 = 8;
-        let alloc_size = self.fb.make_imm_value(Immediate::I32(size + (ALIGN - 1)));
+        let alloc_size = size
+            .checked_add((ALIGN - 1) as usize)
+            .and_then(|size| i32::try_from(size).ok())
+            .ok_or_else(|| {
+                LowerError::Unsupported(format!(
+                    "wasm target: {description} size {size} bytes exceeds i32"
+                ))
+            })?;
+        let alloc_size = self.fb.make_imm_value(Immediate::I32(alloc_size));
         let raw = self
             .fb
             .insert_inst(MemAllocDynamic::new(is, alloc_size), Type::I32);
@@ -9122,7 +9258,8 @@ where
                 (value, class, true)
             }
             mir::ResolvedPlaceRootKind::Slot { local, class }
-                if self.materialized_param_slots.contains(&local) =>
+                if self.materialized_param_slots.contains(&local)
+                    || self.materialized_scalar_slots.contains(&local) =>
             {
                 (local, class, true)
             }
@@ -10228,13 +10365,23 @@ where
         let class = self.body.value_class(local).cloned().ok_or_else(|| {
             LowerError::Internal(format!("local {local:?} carries no value class"))
         })?;
-        if self.module.is_memory_lowerable_object_ref(&class)
+        if self.materialized_scalar_slots.contains(&local)
+            || self.module.is_memory_lowerable_object_ref(&class)
             || self.module.object_value_layout(&class).is_some()
         {
             Ok(Type::I32)
         } else {
             self.module.ty_for_class(&class)
         }
+    }
+
+    fn materialized_scalar_slot_ty(&self, local: RLocalId) -> Result<Type, LowerError> {
+        let Some(RuntimeClass::Scalar(class)) = self.body.value_class(local) else {
+            return Err(LowerError::Internal(format!(
+                "materialized scalar slot {local:?} has no scalar class"
+            )));
+        };
+        scalar_ty_r1(class)
     }
 
     fn block_for(&self, block: RBlockId) -> Result<BlockId, LowerError> {
