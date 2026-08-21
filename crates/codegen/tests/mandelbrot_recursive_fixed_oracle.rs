@@ -2325,6 +2325,45 @@ fn expected_sparse_interaction_lde_root(
     reference_merkle_root(leaves)
 }
 
+fn reference_sparse_multipath_sibling_count(width: u32, requests: &[u32]) -> usize {
+    let mut indices = requests.to_vec();
+    indices.sort_unstable();
+    indices.dedup();
+    assert!(!indices.is_empty());
+    assert!(indices.iter().all(|&index| index < width));
+    let mut siblings = 0usize;
+    let mut width = width;
+    while width > 1 {
+        let mut next = Vec::new();
+        let mut cursor = 0usize;
+        while cursor < indices.len() {
+            let index = indices[cursor];
+            let paired =
+                index & 1 == 0 && cursor + 1 < indices.len() && indices[cursor + 1] == index + 1;
+            cursor += if paired { 2 } else { 1 };
+            if !paired {
+                siblings += 1;
+            }
+            next.push(index / 2);
+        }
+        indices = next;
+        width /= 2;
+    }
+    siblings
+}
+
+fn pack_sparse_multipath_indices(indices: &[u32]) -> u32 {
+    indices
+        .iter()
+        .copied()
+        .chain(std::iter::repeat(0))
+        .take(8)
+        .enumerate()
+        .fold(0, |packed, (index, value)| {
+            packed | ((value & 15) << (index * 4))
+        })
+}
+
 fn reference_digest_bind(tag: &[u8; 4], left: [u32; 8], right: [u32; 8]) -> [u32; 8] {
     let mut fields = Vec::with_capacity(16);
     fields.extend(left);
@@ -4880,4 +4919,127 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
             "sparse checkpoint word {index} must match the independent oracle",
         );
     }
+}
+
+#[test]
+fn sparse_lde_multipaths_authenticate_production_codewords() {
+    const BASE_FIELDS: usize = 41;
+    const INTERACTION_FIELDS: usize = 84;
+    let bytes = compile_sparse_auth_fixture();
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &bytes)
+        .expect("sparse LDE multipath Wasm module should load");
+    assert_eq!(
+        module.imports().count(),
+        0,
+        "sparse LDE multipath fixture must stay zero-import",
+    );
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("sparse LDE multipath fixture should instantiate");
+
+    let point = ComplexFx {
+        real: fixed(true, 3, 4),
+        imaginary: fixed(false, 1, 8),
+    };
+    let current = ComplexFx {
+        real: fixed(false, 5, 4),
+        imaginary: fixed(true, 3, 8),
+    };
+    let arguments = transition_arguments(&point, &current);
+    let trace_root = expected_sparse_trace_root(&point, &current);
+    let prefix = expected_sparse_air_prefix_words(&point, &current, trace_root);
+    let lde = expected_sparse_air_lde_words(&prefix);
+    let base_root = expected_sparse_base_lde_root(&lde, false);
+    let interaction_prefix =
+        expected_sparse_production_interaction_prefix(&point, &current, base_root);
+    let interaction_lde = expected_sparse_interaction_lde(&interaction_prefix);
+    let interaction_root = expected_sparse_interaction_lde_root(&interaction_lde, base_root, false);
+    let requests = [12, 0, 4, 8, 3, 3];
+    let canonical_indices = [0, 3, 4, 8, 12];
+    let sibling_count = reference_sparse_multipath_sibling_count(16, &requests);
+
+    let mut clean_arguments = arguments.clone();
+    clean_arguments.push(0);
+    let clean = call(
+        &mut store,
+        &instance,
+        "fixed_transition4_sparse_lde_multipath_status",
+        &clean_arguments,
+        42,
+    );
+    assert_eq!(clean[0..3], [1, 1, 1], "both openings must be written");
+    assert_eq!(clean[3], canonical_indices.len() as u32);
+    assert_eq!(clean[4], sibling_count as u32);
+    assert_eq!(clean[5], 1, "LD01 opening must authenticate");
+    assert_eq!(clean[6], 1, "LD02 opening must be valid");
+    assert_eq!(clean[7], canonical_indices.len() as u32);
+    assert_eq!(clean[8], sibling_count as u32);
+    assert_eq!(clean[9], 1, "LD02 opening must authenticate");
+    assert_eq!(
+        clean[10], 1,
+        "matching paths must reconstruct a typed AIR row"
+    );
+    assert_eq!(clean[11], 1, "clean authenticated row must be accepted");
+    assert_eq!(
+        clean[12],
+        pack_sparse_multipath_indices(&canonical_indices),
+        "LD01 requests must normalize to one canonical index sequence",
+    );
+    assert_eq!(clean[13], clean[12], "LD01 and LD02 geometry must agree");
+    assert_eq!(clean[14..22], base_root, "LD01 root must match Plonky3");
+    assert_eq!(
+        clean[22..30],
+        base_root,
+        "LD02 must retain the exact LD01 dependency",
+    );
+    assert_eq!(
+        clean[30..38],
+        interaction_root,
+        "LD02 root must match Plonky3"
+    );
+    assert_eq!(
+        clean[38],
+        lde[1 + 4 * BASE_FIELDS],
+        "opened LD01 value must be the requested LDE row",
+    );
+    assert_eq!(
+        clean[39],
+        interaction_lde[4 * INTERACTION_FIELDS],
+        "opened LD02 value must be the requested LDE row",
+    );
+    assert_eq!(
+        clean[40..42],
+        [1, 1],
+        "unused value capacity must stay zero"
+    );
+
+    for mutation in 1..=10 {
+        let mut mutated_arguments = arguments.clone();
+        mutated_arguments.push(mutation);
+        let mutated = call(
+            &mut store,
+            &instance,
+            "fixed_transition4_sparse_lde_multipath_status",
+            &mutated_arguments,
+            42,
+        );
+        assert_eq!(
+            mutated[11], 0,
+            "sparse LDE multipath mutation {mutation} must fail closed",
+        );
+    }
+    let mut invalid_arguments = arguments;
+    invalid_arguments.push(11);
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "fixed_transition4_sparse_lde_multipath_status",
+            &invalid_arguments,
+            42,
+        ),
+        [0; 42],
+        "unknown sparse LDE multipath mutations must fail closed",
+    );
 }

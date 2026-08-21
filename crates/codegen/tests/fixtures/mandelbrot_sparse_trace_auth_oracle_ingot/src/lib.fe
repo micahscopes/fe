@@ -37,6 +37,8 @@ use mandelbrot_proof_fixed_air_baby_bear::{
     SparseTraceAuthentication,
     SPARSE_BASE_AIR_FIELDS,
     SPARSE_INTERACTION_AIR_FIELDS,
+    empty_sparse_base_lde_multi_opening,
+    empty_sparse_interaction_lde_multi_opening,
     empty_sparse_trace_authentication,
     evaluate_sparse_composition_opened,
     sparse_base_air_row_from_witness,
@@ -51,8 +53,11 @@ use mandelbrot_proof_fixed_air_baby_bear::{
     sparse_lde_interaction_challenges,
     sparse_interaction_trace_root_power_of_two,
     sparse_opened_air_row,
+    sparse_lde_opened_air_row,
     sparse_trace_root_power_of_two,
     verify_sparse_trace_authentication,
+    verify_sparse_base_lde_multi_opening,
+    verify_sparse_interaction_lde_multi_opening,
     write_sparse_air_evaluation_trace,
     write_sparse_air_lde,
     write_sparse_base_air_evaluation_trace,
@@ -60,6 +65,8 @@ use mandelbrot_proof_fixed_air_baby_bear::{
     write_sparse_interaction_air_rows,
     write_sparse_interaction_air_evaluation_trace,
     write_sparse_interaction_air_lde,
+    write_sparse_base_lde_multi_opening_power_of_two,
+    write_sparse_interaction_lde_multi_opening_power_of_two,
     write_sparse_composition_checkpoint_air_codeword,
     write_sparse_lde_interaction_air_rows,
     write_sparse_trace_authentication_power_of_two,
@@ -896,4 +903,153 @@ pub fn fixed_transition4_sparse_air_checkpoint_encoded(
         ref checkpoint,
         BrowserWordWriter::allocate(words),
     ).finish()
+}
+
+fn pack_sparse_lde_indices(_ indices: [u32; 8]) -> u32 {
+    let mut packed: u32 = 0
+    let mut index: usize = 0
+    while index < 8 {
+        let index_u32: u32 = index.downcast_truncate()
+        let shift: u32 = index_u32 * 4
+        packed = packed | ((indices[index] & 15) << shift)
+        index = index + 1
+    }
+    packed
+}
+
+/// Authenticate selected `LD01` and dependency-bound `LD02` evaluations from
+/// the exact codewords used by the sparse composition checkpoint. The request
+/// list is deliberately unsorted and contains a duplicate so this boundary
+/// also gates canonical request normalization in `merkle_core`.
+pub fn fixed_transition4_sparse_lde_multipath_status(
+    _ prn: u32, _ pr0: u32, _ pr1: u32, _ pr2: u32, _ pr3: u32,
+    _ pin: u32, _ pi0: u32, _ pi1: u32, _ pi2: u32, _ pi3: u32,
+    _ crn: u32, _ cr0: u32, _ cr1: u32, _ cr2: u32, _ cr3: u32,
+    _ cin: u32, _ ci0: u32, _ ci1: u32, _ ci2: u32, _ ci3: u32,
+    _ mutation: u32,
+) -> [u32; 42] {
+    if mutation > 10 { return [0; 42] }
+    let (point, current, witness) = transition4(
+        prn, [pr0, pr1, pr2, pr3], pin, [pi0, pi1, pi2, pi3],
+        crn, [cr0, cr1, cr2, cr3], cin, [ci0, ci1, ci2, ci3],
+    )
+    let next = fixed_mandelbrot_transition_output(witness)
+    let mut base_lde: SparseBaseAirLdeCodeword<16> = SparseBaseAirLdeCodeword {
+        valid: false,
+        values: [[BabyBear::zero(); SPARSE_BASE_AIR_FIELDS]; 16],
+    }
+    if !write_sparse_base_lde4(point, current, next, witness, mut base_lde) {
+        return [0; 42]
+    }
+    let base_root = sparse_base_lde_root_power_of_two<4, 4, 16>(ref base_lde)
+    let mut interaction_lde: SparseInteractionAirLdeCodeword<16> =
+        SparseInteractionAirLdeCodeword {
+            valid: false,
+            values: [[BabyBear::zero(); SPARSE_INTERACTION_AIR_FIELDS]; 16],
+        }
+    if !write_sparse_interaction_lde4(
+        point, current, next, witness, base_root, mut interaction_lde,
+    ) {
+        return [0; 42]
+    }
+    let mut interaction_root = sparse_interaction_lde_root_power_of_two<4, 4, 16>(
+        base_root,
+        ref interaction_lde,
+    )
+
+    let mut base_opening = empty_sparse_base_lde_multi_opening<4, 4, 16, 8, 64>()
+    let mut interaction_opening =
+        empty_sparse_interaction_lde_multi_opening<4, 4, 16, 8, 64>()
+    let base_written = write_sparse_base_lde_multi_opening_power_of_two<
+        4, 4, 16, 6, 8, 64,
+    >(
+        ref base_lde,
+        base_root,
+        [12, 0, 4, 8, 3, 3],
+        mut base_opening,
+    )
+    let interaction_written = write_sparse_interaction_lde_multi_opening_power_of_two<
+        4, 4, 16, 6, 8, 64,
+    >(
+        ref interaction_lde,
+        interaction_root,
+        [12, 0, 4, 8, 3, 3],
+        mut interaction_opening,
+    )
+    if !base_written || !interaction_written { return [0; 42] }
+
+    let base_unused: usize = base_opening.path.leaf_count as usize
+    let interaction_unused: usize = interaction_opening.path.leaf_count as usize
+    if mutation == 1 {
+        base_opening.values[0][0] = base_opening.values[0][0] + BabyBear::one()
+    } else if mutation == 2 {
+        base_opening.path.siblings[0] = Poseidon2Digest::from_u32s(
+            [991, 992, 993, 994, 995, 996, 997, 998],
+        )
+    } else if mutation == 3 {
+        base_opening.path.leaf_indices[0] = 16
+    } else if mutation == 4 {
+        base_opening.values[base_unused][0] = BabyBear::one()
+    } else if mutation == 5 {
+        interaction_opening.values[0][0] =
+            interaction_opening.values[0][0] + BabyBear::one()
+    } else if mutation == 6 {
+        interaction_opening.path.siblings[0] = Poseidon2Digest::from_u32s(
+            [881, 882, 883, 884, 885, 886, 887, 888],
+        )
+    } else if mutation == 7 {
+        interaction_opening.path.leaf_indices[0] = 16
+    } else if mutation == 8 {
+        interaction_opening.values[interaction_unused][0] = BabyBear::one()
+    } else if mutation == 9 {
+        interaction_root.base.value = Poseidon2Digest::from_u32s(
+            [771, 772, 773, 774, 775, 776, 777, 778],
+        )
+    }
+
+    let base_verified = verify_sparse_base_lde_multi_opening<4, 4, 16, 8, 64>(
+        ref base_opening,
+        base_root,
+    )
+    let interaction_verified =
+        verify_sparse_interaction_lde_multi_opening<4, 4, 16, 8, 64>(
+            ref interaction_opening,
+            interaction_root,
+        )
+    let selected: u32 = if mutation == 10 { 7 } else { 4 }
+    let opened = sparse_lde_opened_air_row<4, 4, 16, 8, 64>(
+        ref base_opening,
+        ref interaction_opening,
+        selected,
+    )
+
+    let mut output = [0; 42]
+    output[0] = if base_written { 1 } else { 0 }
+    output[1] = if interaction_written { 1 } else { 0 }
+    output[2] = if base_opening.valid { 1 } else { 0 }
+    output[3] = base_opening.path.leaf_count
+    output[4] = base_opening.path.sibling_count
+    output[5] = if base_verified { 1 } else { 0 }
+    output[6] = if interaction_opening.valid { 1 } else { 0 }
+    output[7] = interaction_opening.path.leaf_count
+    output[8] = interaction_opening.path.sibling_count
+    output[9] = if interaction_verified { 1 } else { 0 }
+    output[10] = if opened.0 { 1 } else { 0 }
+    output[11] = if base_verified && interaction_verified && opened.0 { 1 } else { 0 }
+    output[12] = pack_sparse_lde_indices(base_opening.path.leaf_indices)
+    output[13] = pack_sparse_lde_indices(interaction_opening.path.leaf_indices)
+    let mut index: usize = 0
+    while index < 8 {
+        output[14 + index] = base_root.value.field(index.downcast_truncate()).to_u32()
+        output[22 + index] = interaction_root.base.value
+            .field(index.downcast_truncate()).to_u32()
+        output[30 + index] = interaction_root.value
+            .field(index.downcast_truncate()).to_u32()
+        index = index + 1
+    }
+    output[38] = base_opening.values[2][0].to_u32()
+    output[39] = interaction_opening.values[2][0].to_u32()
+    output[40] = if base_opening.values[5][0].is_zero() { 1 } else { 0 }
+    output[41] = if interaction_opening.values[5][0].is_zero() { 1 } else { 0 }
+    output
 }

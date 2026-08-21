@@ -3411,7 +3411,7 @@ fn lde_point<const LDE: usize>(
     _ evaluation: u32,
     _ shift: BabyBear,
 ) -> CompositionValue<BabyBear>
-where LDE > 1, { (LDE & (LDE - 1)) == 0 },
+where LDE > 0, LDE > 1, { (LDE & (LDE - 1)) == 0 },
 {
     let one = BabyBear::one()
     let lde: u32 = LDE.downcast_truncate()
@@ -3438,6 +3438,8 @@ pub fn evaluate_composition_opened<const TRACE: usize, const LDE: usize>(
 ) -> CompositionValue<BabyBearExt4>
 where
     TRACE > 1,
+    LDE > 0,
+    LDE > 1,
     LDE > TRACE,
     { (TRACE & (TRACE - 1)) == 0 },
     { (LDE & (LDE - 1)) == 0 },
@@ -3473,6 +3475,7 @@ where
 /// pair. This is the verifier seam between the typed LDE quartet and FRI
 /// receipt; it retains neither complete tree nor complete codeword.
 pub fn verify_checkpoint4_air_lde_composition_query<
+    const TRACE: usize,
     const LDE: usize,
     const QUARTER: usize,
     const DEPTH: usize,
@@ -3489,12 +3492,18 @@ pub fn verify_checkpoint4_air_lde_composition_query<
     _ negative_composition: BabyBearExt4,
 ) -> bool
 where
-    LDE > 4,
+    TRACE > 1,
+    LDE > 0,
+    LDE > 1,
+    LDE > TRACE,
     QUARTER > 0,
+    { (TRACE & (TRACE - 1)) == 0 },
     { (LDE & (LDE - 1)) == 0 },
+    { (LDE % TRACE) == 0 },
+    { TRACE == 4 },
     { QUARTER + QUARTER + QUARTER + QUARTER == LDE },
 {
-    let geometry = radix2_query_geometry<4, LDE>(query_index)
+    let geometry = radix2_query_geometry<TRACE, LDE>(query_index)
     if !challenge.valid || !opening.valid || !geometry.valid {
         return false
     }
@@ -3535,7 +3544,7 @@ where
     let positive_next_quarter: usize = (geometry.next_evaluation / quarter) as usize
     let negative_quarter: usize = (geometry.negative_evaluation / quarter) as usize
     let negative_next_quarter: usize = (geometry.negative_next_evaluation / quarter) as usize
-    let positive = evaluate_composition_opened<4, LDE>(
+    let positive = evaluate_composition_opened<TRACE, LDE>(
         c_re_q12,
         c_im_q12,
         challenge,
@@ -3544,7 +3553,7 @@ where
         ref opening.rows[positive_quarter],
         ref opening.rows[positive_next_quarter],
     )
-    let negative = evaluate_composition_opened<4, LDE>(
+    let negative = evaluate_composition_opened<TRACE, LDE>(
         c_re_q12,
         c_im_q12,
         challenge,

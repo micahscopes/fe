@@ -2,7 +2,7 @@
 
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::{BackendKind, OptLevel, layout_for};
+use fe_codegen::{layout_for, BackendKind, OptLevel};
 use hir::hir_def::HirIngot;
 use std::path::Path;
 use url::Url;
@@ -139,6 +139,9 @@ fn generic_merkle_shapes_execute_and_fail_closed() {
     let mut store = wasmtime::Store::new(&engine, ());
     let instance = wasmtime::Instance::new(&mut store, &module, &[])
         .expect("generic Merkle module should instantiate");
+    let memory = instance
+        .get_memory(&mut store, "memory")
+        .expect("generic Merkle fixture should export memory");
 
     let binary_cases = [
         (7, 0, 0, [11, 13, 17]),
@@ -287,4 +290,79 @@ fn generic_merkle_shapes_execute_and_fail_closed() {
             "noncanonical multipath mutation {mutation} must be rejected",
         );
     }
+
+    let encoded = call(&mut store, &instance, "multipath_receipt16_encoded", &[], 2);
+    let pointer = encoded[0];
+    let length = encoded[1];
+    let (indices, siblings) = reference_multipath(&multipath_leaves, &[12, 0, 4, 8]);
+    let mut expected = vec![1, 1, 1, 4, siblings.len() as u32, 1];
+    expected.extend(
+        indices
+            .iter()
+            .map(|&index| multipath_leaves[index as usize]),
+    );
+    expected.extend(indices.iter());
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "multipath_receipt16_decode_at",
+            &[pointer, length],
+            14,
+        ),
+        expected,
+        "canonical role-branded receipt must roundtrip and authenticate",
+    );
+
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "multipath_receipt16_decode_at",
+            &[pointer, length - 4],
+            14,
+        )[0],
+        0,
+        "truncated receipt must fail canonical completion",
+    );
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "multipath_receipt16_decode_at",
+            &[pointer, length + 4],
+            14,
+        )[0],
+        0,
+        "trailing receipt data must fail canonical completion",
+    );
+
+    let first_value_word = 8 + siblings.len();
+    let mut word = [0u8; 4];
+    memory
+        .read(&store, pointer as usize + first_value_word * 4, &mut word)
+        .expect("receipt value must be readable");
+    let original = u32::from_le_bytes(word);
+    memory
+        .write(
+            &mut store,
+            pointer as usize + first_value_word * 4,
+            &(original + 1).to_le_bytes(),
+        )
+        .expect("receipt value mutation must be writable");
+    let mutated = call(
+        &mut store,
+        &instance,
+        "multipath_receipt16_decode_at",
+        &[pointer, length],
+        14,
+    );
+    assert_eq!(
+        mutated[0], 1,
+        "field mutation remains canonically decodable"
+    );
+    assert_eq!(
+        mutated[5], 0,
+        "authenticated value mutation must be rejected"
+    );
 }

@@ -1,0 +1,79 @@
+//! Canonical, role-branded carriers for sparse Merkle openings.
+//!
+//! This receipt layer is deliberately separate from `merkle_core`. Merkle
+//! reduction and verification stay cheap to import in arithmetic kernels,
+//! while applications that encode proof receipts opt into the generated
+//! bounded-prefix codec.
+
+use canonical_words::{
+    CanonicalWordStream,
+    WordSink,
+    WordSource,
+    canonical_prefix_word_count,
+    decode_canonical_prefix,
+    encode_canonical_prefix,
+}
+use core::marker::Copy
+use merkle_core::MerkleMultiPath
+
+/// Role-branded values authenticated by one canonical sparse Merkle path.
+/// `Role` has no runtime representation and prevents values from different
+/// leaf domains or schemas from sharing a carrier type.
+pub struct MerkleMultiOpening<
+    Role,
+    Value,
+    F: Copy,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+> {
+    pub valid: bool,
+    pub values: [Value; MAX_LEAVES],
+    pub path: MerkleMultiPath<F, MAX_LEAVES, MAX_SIBLINGS>,
+}
+impl<
+    Role,
+    Value: Copy,
+    F: Copy,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+> Copy for MerkleMultiOpening<Role, Value, F, MAX_LEAVES, MAX_SIBLINGS> {}
+
+impl<
+    Role,
+    Value: Copy + CanonicalWordStream,
+    F: Copy + CanonicalWordStream,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+> CanonicalWordStream for MerkleMultiOpening<
+    Role,
+    Value,
+    F,
+    MAX_LEAVES,
+    MAX_SIBLINGS,
+> {
+    fn word_count(ref self) -> u32 {
+        if self.path.leaf_count > MAX_LEAVES.downcast_truncate() { return 0 }
+        self.valid.word_count()
+            + self.path.word_count()
+            + canonical_prefix_word_count(ref self.values, self.path.leaf_count)
+    }
+
+    fn encode_stream<W: WordSink>(ref self, _ writer: W) -> W {
+        if self.path.leaf_count > MAX_LEAVES.downcast_truncate() {
+            return writer.reject()
+        }
+        let writer = self.valid.encode_stream(writer)
+        let writer = self.path.encode_stream(writer)
+        encode_canonical_prefix(ref self.values, self.path.leaf_count, writer)
+    }
+
+    fn decode_stream<R: WordSource>(mut self, _ reader: R) -> R {
+        let reader = self.valid.decode_stream(reader)
+        let reader = self.path.decode_stream(reader)
+        if self.path.leaf_count > MAX_LEAVES.downcast_truncate() {
+            self.valid = false
+            return reader.reject()
+        }
+        decode_canonical_prefix(mut self.values, self.path.leaf_count, reader)
+    }
+}

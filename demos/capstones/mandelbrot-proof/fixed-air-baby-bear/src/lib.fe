@@ -18,9 +18,6 @@ use canonical_words::{
     WordRead,
     WordSink,
     WordSource,
-    canonical_prefix_word_count,
-    decode_canonical_prefix,
-    encode_canonical_prefix,
     encode_canonical_word_array,
 }
 use mandelbrot_proof_fixed_air::FixedMandelbrotTransitionWitness
@@ -99,6 +96,7 @@ use merkle_core::{
     push_frontier,
     write_multi_path_and_root_from_leaves,
 }
+use merkle_receipt::MerkleMultiOpening
 use poseidon_baby_bear::{
     Poseidon2Digest,
     Poseidon2FieldDomain,
@@ -576,6 +574,45 @@ pub struct SparseOpenedAirRow {
     pub interaction: SparseInteractionTraceRow<BabyBearExt4>,
 }
 impl core::marker::Copy for SparseOpenedAirRow {}
+
+pub struct SparseBaseLdeTreeRole<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+> {}
+pub struct SparseInteractionLdeTreeRole<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+> {}
+
+pub type SparseBaseLdeMultiOpening<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+> = MerkleMultiOpening<
+    SparseBaseLdeTreeRole<L, TRACE, LDE>,
+    [BabyBear; SPARSE_BASE_AIR_FIELDS],
+    Poseidon2Digest,
+    MAX_LEAVES,
+    MAX_SIBLINGS,
+>
+
+pub type SparseInteractionLdeMultiOpening<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+> = MerkleMultiOpening<
+    SparseInteractionLdeTreeRole<L, TRACE, LDE>,
+    [BabyBear; SPARSE_INTERACTION_AIR_FIELDS],
+    Poseidon2Digest,
+    MAX_LEAVES,
+    MAX_SIBLINGS,
+>
 
 /// A field-native canonical reader over one authenticated BabyBear row.
 /// `embedded` expands every base-field column to `(value, 0, 0, 0)` while
@@ -1110,6 +1147,23 @@ pub fn sparse_base_lde_leaf_commitment<
     >(ref leaf).digest()
 }
 
+fn sparse_base_lde_leaf_at<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>(
+    _ index: u32,
+    _ values: [BabyBear; SPARSE_BASE_AIR_FIELDS],
+) -> SparseBaseLdeLeaf<L, TRACE, LDE> {
+    SparseBaseLdeLeaf {
+        limb_count: BabyBear::from_u32(L.downcast_truncate()),
+        trace_length: BabyBear::from_u32(TRACE.downcast_truncate()),
+        lde_length: BabyBear::from_u32(LDE.downcast_truncate()),
+        index: BabyBear::from_u32(index),
+        values: values,
+    }
+}
+
 fn invalid_sparse_base_lde_digest<
     const L: usize,
     const TRACE: usize,
@@ -1147,18 +1201,12 @@ where
         SparseDigestHasher,
         SPARSE_LDE_FRONTIER_LEVELS,
     >()
-    let limb_count = BabyBear::from_u32(L.downcast_truncate())
-    let trace_length = BabyBear::from_u32(TRACE.downcast_truncate())
-    let lde_length = BabyBear::from_u32(LDE.downcast_truncate())
     let mut index: usize = 0
     while index < LDE {
-        let leaf = SparseBaseLdeLeaf<L, TRACE, LDE> {
-            limb_count: limb_count,
-            trace_length: trace_length,
-            lde_length: lde_length,
-            index: BabyBear::from_u32(index.downcast_truncate()),
-            values: codeword.values[index],
-        }
+        let leaf = sparse_base_lde_leaf_at<L, TRACE, LDE>(
+            index.downcast_truncate(),
+            codeword.values[index],
+        )
         frontier = push_frontier<
             Poseidon2Digest,
             SparseDigestHasher,
@@ -1326,6 +1374,25 @@ pub fn sparse_interaction_lde_leaf_commitment<
     >(ref leaf).digest()
 }
 
+fn sparse_interaction_lde_leaf_at<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>(
+    _ base: SparseBaseLdeDigest<L, TRACE, LDE>,
+    _ index: u32,
+    _ values: [BabyBear; SPARSE_INTERACTION_AIR_FIELDS],
+) -> SparseInteractionLdeLeaf<L, TRACE, LDE> {
+    SparseInteractionLdeLeaf {
+        limb_count: BabyBear::from_u32(L.downcast_truncate()),
+        trace_length: BabyBear::from_u32(TRACE.downcast_truncate()),
+        lde_length: BabyBear::from_u32(LDE.downcast_truncate()),
+        index: BabyBear::from_u32(index),
+        base_lde_root: base.value,
+        values: values,
+    }
+}
+
 fn invalid_sparse_interaction_lde_digest<
     const L: usize,
     const TRACE: usize,
@@ -1367,19 +1434,13 @@ where
         SparseDigestHasher,
         SPARSE_LDE_FRONTIER_LEVELS,
     >()
-    let limb_count = BabyBear::from_u32(L.downcast_truncate())
-    let trace_length = BabyBear::from_u32(TRACE.downcast_truncate())
-    let lde_length = BabyBear::from_u32(LDE.downcast_truncate())
     let mut index: usize = 0
     while index < LDE {
-        let leaf = SparseInteractionLdeLeaf<L, TRACE, LDE> {
-            limb_count: limb_count,
-            trace_length: trace_length,
-            lde_length: lde_length,
-            index: BabyBear::from_u32(index.downcast_truncate()),
-            base_lde_root: base.value,
-            values: codeword.values[index],
-        }
+        let leaf = sparse_interaction_lde_leaf_at<L, TRACE, LDE>(
+            base,
+            index.downcast_truncate(),
+            codeword.values[index],
+        )
         frontier = push_frontier<
             Poseidon2Digest,
             SparseDigestHasher,
@@ -1670,6 +1731,7 @@ pub fn evaluate_sparse_public_composition_opened<
 ) -> AirCompositionValue<BabyBearExt4>
 where
     L > 1,
+    TRACE > 0,
     TRACE > 1,
     { (TRACE & (TRACE - 1)) == 0 },
     { radix2_field_domain_supported<TRACE, BabyBear>() },
@@ -1691,6 +1753,55 @@ where
         point,
         row,
     )
+}
+
+/// Recompute the exact production composition at one opened LDE point. This
+/// is the verifier counterpart of `write_sparse_composition_air_codeword`:
+/// the internal sparse AIR and the public fixed-position relation use the
+/// same transcript and are added before comparison with an opened BC02 value.
+pub fn evaluate_sparse_bound_composition_opened<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>(
+    _ air: SparseAirLdeTranscriptDigest<L, TRACE, LDE>,
+    _ interval: OrbitInterval<L>,
+    _ point: BabyBearExt4,
+    _ row: ref SparseOpenedAirRow,
+    _ next: ref SparseOpenedAirRow,
+) -> AirCompositionValue<BabyBearExt4>
+where
+    L > 1,
+    TRACE > 0,
+    TRACE > 1,
+    { (TRACE & (TRACE - 1)) == 0 },
+    { radix2_field_domain_supported<TRACE, BabyBear>() },
+    LDE > 1,
+    LDE > TRACE,
+    { (LDE & (LDE - 1)) == 0 },
+    Limbs<L>: TruncRows<Limbs<L>> + Mac + ShiftAppend + Head + Carry
+              + Zero + SubBorrow + Select + Top + OrLower
+              + core::marker::Copy,
+{
+    let challenge = composition_challenge(air.transcript)
+    let interactions = sparse_lde_interaction_challenges(air.base)
+    let internal = evaluate_sparse_composition_opened<L, TRACE>(
+        point,
+        challenge.value,
+        interactions.value,
+        row,
+        next,
+    )
+    let public = evaluate_sparse_public_composition_opened<L, TRACE, LDE>(
+        air,
+        interval,
+        point,
+        row,
+    )
+    AirCompositionValue {
+        valid: challenge.valid && internal.valid && public.valid,
+        value: internal.value + public.value,
+    }
 }
 
 /// Evaluate the sparse constraint numerators using only interaction challenges
@@ -2419,6 +2530,7 @@ pub fn write_sparse_lde_interaction_air_rows<
 where
     L > 1,
     TRACE > 0,
+    LDE > 1,
     LDE > TRACE,
     N > 0,
     N <= MAX_SPARSE_TRACE_LENGTH,
@@ -2684,53 +2796,20 @@ where
     true
 }
 
+pub struct SparseTraceTreeRole<const L: usize> {}
+
 /// Canonical variable-size opening for sorted, deduplicated sparse leaves.
-pub struct SparseTraceMultiOpening<
+pub type SparseTraceMultiOpening<
     const L: usize,
     const MAX_LEAVES: usize,
     const MAX_SIBLINGS: usize,
-> {
-    pub valid: bool,
-    pub leaves: [SparseTraceLeaf<L>; MAX_LEAVES],
-    pub path: MerkleMultiPath<Poseidon2Digest, MAX_LEAVES, MAX_SIBLINGS>,
-}
-impl<
-    const L: usize,
-    const MAX_LEAVES: usize,
-    const MAX_SIBLINGS: usize,
-> core::marker::Copy for SparseTraceMultiOpening<L, MAX_LEAVES, MAX_SIBLINGS> {}
-
-impl<
-    const L: usize,
-    const MAX_LEAVES: usize,
-    const MAX_SIBLINGS: usize,
-> CanonicalWordStream for SparseTraceMultiOpening<L, MAX_LEAVES, MAX_SIBLINGS> {
-    fn word_count(ref self) -> u32 {
-        if self.path.leaf_count > MAX_LEAVES.downcast_truncate() { return 0 }
-        self.valid.word_count()
-            + self.path.word_count()
-            + canonical_prefix_word_count(ref self.leaves, self.path.leaf_count)
-    }
-
-    fn encode_stream<W: WordSink>(ref self, _ writer: W) -> W {
-        if self.path.leaf_count > MAX_LEAVES.downcast_truncate() {
-            return writer.reject()
-        }
-        let writer = self.valid.encode_stream(writer)
-        let writer = self.path.encode_stream(writer)
-        encode_canonical_prefix(ref self.leaves, self.path.leaf_count, writer)
-    }
-
-    fn decode_stream<R: WordSource>(mut self, _ reader: R) -> R {
-        let reader = self.valid.decode_stream(reader)
-        let reader = self.path.decode_stream(reader)
-        if self.path.leaf_count > MAX_LEAVES.downcast_truncate() {
-            self.valid = false
-            return reader.reject()
-        }
-        decode_canonical_prefix(mut self.leaves, self.path.leaf_count, reader)
-    }
-}
+> = MerkleMultiOpening<
+    SparseTraceTreeRole<L>,
+    SparseTraceLeaf<L>,
+    Poseidon2Digest,
+    MAX_LEAVES,
+    MAX_SIBLINGS,
+>
 
 /// One complete base-trace authentication carrier. The root and sparse path
 /// are produced by the same Merkle traversal, eliminating duplicate hashing
@@ -2906,9 +2985,9 @@ pub fn empty_sparse_trace_multi_opening<
     const MAX_LEAVES: usize,
     const MAX_SIBLINGS: usize,
 >() -> SparseTraceMultiOpening<L, MAX_LEAVES, MAX_SIBLINGS> {
-    SparseTraceMultiOpening {
+    MerkleMultiOpening {
         valid: false,
-        leaves: [zero_sparse_trace_leaf<L>(); MAX_LEAVES],
+        values: [zero_sparse_trace_leaf<L>(); MAX_LEAVES],
         path: invalid_sparse_multi_path<MAX_LEAVES, MAX_SIBLINGS>(),
     }
 }
@@ -3158,7 +3237,7 @@ where
     authentication.opening.path = path
     index = 0
     while index < path.leaf_count as usize {
-        authentication.opening.leaves[index] = sparse_trace_leaf_from_witness<L>(
+        authentication.opening.values[index] = sparse_trace_leaf_from_witness<L>(
             path.leaf_indices[index],
             point,
             current,
@@ -3201,15 +3280,15 @@ where
     while index < count {
         if !sparse_trace_leaf_is_canonical<L>(
             opening.path.leaf_indices[index],
-            opening.leaves[index],
+            opening.values[index],
         ) {
             return false
         }
-        commitments[index] = sparse_trace_leaf_commitment(opening.leaves[index])
+        commitments[index] = sparse_trace_leaf_commitment(opening.values[index])
         index = index + 1
     }
     while index < MAX_LEAVES {
-        let leaf = opening.leaves[index]
+        let leaf = opening.values[index]
         if !leaf.limb_count.is_zero()
             || !leaf.task_count.is_zero()
             || !leaf.trace_length.is_zero()
@@ -3255,4 +3334,433 @@ where
         MAX_LEAVES,
         MAX_SIBLINGS,
     >(ref authentication.opening, authentication.root)
+}
+
+pub fn empty_sparse_base_lde_multi_opening<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>() -> SparseBaseLdeMultiOpening<
+    L,
+    TRACE,
+    LDE,
+    MAX_LEAVES,
+    MAX_SIBLINGS,
+> {
+    MerkleMultiOpening {
+        valid: false,
+        values: [[BabyBear::zero(); SPARSE_BASE_AIR_FIELDS]; MAX_LEAVES],
+        path: invalid_sparse_multi_path<MAX_LEAVES, MAX_SIBLINGS>(),
+    }
+}
+
+pub fn empty_sparse_interaction_lde_multi_opening<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>() -> SparseInteractionLdeMultiOpening<
+    L,
+    TRACE,
+    LDE,
+    MAX_LEAVES,
+    MAX_SIBLINGS,
+> {
+    MerkleMultiOpening {
+        valid: false,
+        values: [[BabyBear::zero(); SPARSE_INTERACTION_AIR_FIELDS]; MAX_LEAVES],
+        path: invalid_sparse_multi_path<MAX_LEAVES, MAX_SIBLINGS>(),
+    }
+}
+
+fn reset_sparse_base_lde_multi_opening<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ opening: mut SparseBaseLdeMultiOpening<
+        L,
+        TRACE,
+        LDE,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >,
+) {
+    opening = empty_sparse_base_lde_multi_opening<
+        L,
+        TRACE,
+        LDE,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >()
+}
+
+fn reset_sparse_interaction_lde_multi_opening<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ opening: mut SparseInteractionLdeMultiOpening<
+        L,
+        TRACE,
+        LDE,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >,
+) {
+    opening = empty_sparse_interaction_lde_multi_opening<
+        L,
+        TRACE,
+        LDE,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >()
+}
+
+/// Open requested `LD01` rows and require the reconstructed root to equal the
+/// exact root already bound into the AIR transcript. Request normalization and
+/// path generation remain the shared `merkle_core` interpretation.
+pub fn write_sparse_base_lde_multi_opening_power_of_two<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const REQUESTS: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ codeword: ref SparseBaseAirLdeCodeword<LDE>,
+    _ expected: SparseBaseLdeDigest<L, TRACE, LDE>,
+    _ requested: own [u32; REQUESTS],
+    _ opening: mut SparseBaseLdeMultiOpening<
+        L,
+        TRACE,
+        LDE,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >,
+) -> bool
+where
+    L > 1,
+    TRACE > 0,
+    TRACE > 1,
+    { (TRACE & (TRACE - 1)) == 0 },
+    LDE > 1,
+    LDE > TRACE,
+    LDE <= MAX_SPARSE_LDE_LENGTH,
+    LDE <= 2147483648,
+    { (LDE & (LDE - 1)) == 0 },
+    { (LDE % TRACE) == 0 },
+    REQUESTS > 0,
+    MAX_LEAVES > 0,
+{
+    reset_sparse_base_lde_multi_opening(mut opening)
+    if !codeword.valid || !expected.valid { return false }
+    let mut commitments = [Poseidon2Digest::zero(); LDE]
+    let mut index: usize = 0
+    while index < LDE {
+        commitments[index] = sparse_base_lde_leaf_commitment(
+            sparse_base_lde_leaf_at<L, TRACE, LDE>(
+                index.downcast_truncate(),
+                codeword.values[index],
+            ),
+        )
+        index = index + 1
+    }
+    let mut path = invalid_sparse_multi_path<MAX_LEAVES, MAX_SIBLINGS>()
+    let mut root = MerkleRoot {
+        valid: false,
+        value: Poseidon2Digest::zero(),
+    }
+    if !write_multi_path_and_root_from_leaves<
+        Poseidon2Digest,
+        SparseDigestHasher,
+        LDE,
+        REQUESTS,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >(ref commitments, requested, mut path, mut root)
+        || !root.valid
+        || !root.value.equals(expected.value)
+    {
+        return false
+    }
+    opening.path = path
+    index = 0
+    while index < path.leaf_count as usize {
+        opening.values[index] = codeword.values[path.leaf_indices[index] as usize]
+        index = index + 1
+    }
+    opening.valid = true
+    true
+}
+
+/// Open requested `LD02` rows under the exact base root retained by the
+/// interaction digest. This prevents an interaction row from being moved
+/// across independently committed base codewords.
+pub fn write_sparse_interaction_lde_multi_opening_power_of_two<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const REQUESTS: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ codeword: ref SparseInteractionAirLdeCodeword<LDE>,
+    _ expected: SparseInteractionLdeDigest<L, TRACE, LDE>,
+    _ requested: own [u32; REQUESTS],
+    _ opening: mut SparseInteractionLdeMultiOpening<
+        L,
+        TRACE,
+        LDE,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >,
+) -> bool
+where
+    L > 1,
+    TRACE > 0,
+    TRACE > 1,
+    { (TRACE & (TRACE - 1)) == 0 },
+    LDE > 1,
+    LDE > TRACE,
+    LDE <= MAX_SPARSE_LDE_LENGTH,
+    LDE <= 2147483648,
+    { (LDE & (LDE - 1)) == 0 },
+    { (LDE % TRACE) == 0 },
+    REQUESTS > 0,
+    MAX_LEAVES > 0,
+{
+    reset_sparse_interaction_lde_multi_opening(mut opening)
+    if !codeword.valid || !expected.valid || !expected.base.valid {
+        return false
+    }
+    let mut commitments = [Poseidon2Digest::zero(); LDE]
+    let mut index: usize = 0
+    while index < LDE {
+        commitments[index] = sparse_interaction_lde_leaf_commitment(
+            sparse_interaction_lde_leaf_at<L, TRACE, LDE>(
+                expected.base,
+                index.downcast_truncate(),
+                codeword.values[index],
+            ),
+        )
+        index = index + 1
+    }
+    let mut path = invalid_sparse_multi_path<MAX_LEAVES, MAX_SIBLINGS>()
+    let mut root = MerkleRoot {
+        valid: false,
+        value: Poseidon2Digest::zero(),
+    }
+    if !write_multi_path_and_root_from_leaves<
+        Poseidon2Digest,
+        SparseDigestHasher,
+        LDE,
+        REQUESTS,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >(ref commitments, requested, mut path, mut root)
+        || !root.valid
+        || !root.value.equals(expected.value)
+    {
+        return false
+    }
+    opening.path = path
+    index = 0
+    while index < path.leaf_count as usize {
+        opening.values[index] = codeword.values[path.leaf_indices[index] as usize]
+        index = index + 1
+    }
+    opening.valid = true
+    true
+}
+
+pub fn verify_sparse_base_lde_multi_opening<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ opening: ref SparseBaseLdeMultiOpening<
+        L,
+        TRACE,
+        LDE,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >,
+    _ root: SparseBaseLdeDigest<L, TRACE, LDE>,
+) -> bool
+where
+    L > 1,
+    TRACE > 0,
+    TRACE > 1,
+    { (TRACE & (TRACE - 1)) == 0 },
+    LDE > 1,
+    LDE > TRACE,
+    LDE <= MAX_SPARSE_LDE_LENGTH,
+    LDE <= 2147483648,
+    { (LDE & (LDE - 1)) == 0 },
+    { (LDE % TRACE) == 0 },
+    MAX_LEAVES > 0,
+{
+    if !opening.valid || !opening.path.valid || !root.valid { return false }
+    let count: usize = opening.path.leaf_count as usize
+    if count == 0 || count > MAX_LEAVES { return false }
+    let mut commitments = [Poseidon2Digest::zero(); MAX_LEAVES]
+    let mut index: usize = 0
+    while index < count {
+        commitments[index] = sparse_base_lde_leaf_commitment(
+            sparse_base_lde_leaf_at<L, TRACE, LDE>(
+                opening.path.leaf_indices[index],
+                opening.values[index],
+            ),
+        )
+        index = index + 1
+    }
+    while index < MAX_LEAVES {
+        let mut field: usize = 0
+        while field < SPARSE_BASE_AIR_FIELDS {
+            if !opening.values[index][field].is_zero() { return false }
+            field = field + 1
+        }
+        index = index + 1
+    }
+    multi_verify<
+        Poseidon2Digest,
+        SparseDigestHasher,
+        LDE,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >(root.value, commitments, opening.path)
+}
+
+pub fn verify_sparse_interaction_lde_multi_opening<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ opening: ref SparseInteractionLdeMultiOpening<
+        L,
+        TRACE,
+        LDE,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >,
+    _ root: SparseInteractionLdeDigest<L, TRACE, LDE>,
+) -> bool
+where
+    L > 1,
+    TRACE > 0,
+    TRACE > 1,
+    { (TRACE & (TRACE - 1)) == 0 },
+    LDE > 1,
+    LDE > TRACE,
+    LDE <= MAX_SPARSE_LDE_LENGTH,
+    LDE <= 2147483648,
+    { (LDE & (LDE - 1)) == 0 },
+    { (LDE % TRACE) == 0 },
+    MAX_LEAVES > 0,
+{
+    if !opening.valid || !opening.path.valid || !root.valid || !root.base.valid {
+        return false
+    }
+    let count: usize = opening.path.leaf_count as usize
+    if count == 0 || count > MAX_LEAVES { return false }
+    let mut commitments = [Poseidon2Digest::zero(); MAX_LEAVES]
+    let mut index: usize = 0
+    while index < count {
+        commitments[index] = sparse_interaction_lde_leaf_commitment(
+            sparse_interaction_lde_leaf_at<L, TRACE, LDE>(
+                root.base,
+                opening.path.leaf_indices[index],
+                opening.values[index],
+            ),
+        )
+        index = index + 1
+    }
+    while index < MAX_LEAVES {
+        let mut field: usize = 0
+        while field < SPARSE_INTERACTION_AIR_FIELDS {
+            if !opening.values[index][field].is_zero() { return false }
+            field = field + 1
+        }
+        index = index + 1
+    }
+    multi_verify<
+        Poseidon2Digest,
+        SparseDigestHasher,
+        LDE,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >(root.value, commitments, opening.path)
+}
+
+fn sparse_multi_path_position<
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ path: ref MerkleMultiPath<Poseidon2Digest, MAX_LEAVES, MAX_SIBLINGS>,
+    _ index: u32,
+) -> usize {
+    if !path.valid || path.leaf_count == 0
+        || path.leaf_count > MAX_LEAVES.downcast_truncate() {
+        return MAX_LEAVES
+    }
+    let mut cursor: usize = 0
+    while cursor < path.leaf_count as usize {
+        if path.leaf_indices[cursor] == index { return cursor }
+        cursor = cursor + 1
+    }
+    MAX_LEAVES
+}
+
+/// Recover one typed AIR row from a pair of already authenticated `LD01` and
+/// `LD02` multipaths. Both paths must contain the same requested evaluation.
+pub fn sparse_lde_opened_air_row<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ base: ref SparseBaseLdeMultiOpening<
+        L,
+        TRACE,
+        LDE,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >,
+    _ interaction: ref SparseInteractionLdeMultiOpening<
+        L,
+        TRACE,
+        LDE,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >,
+    _ index: u32,
+) -> (bool, SparseOpenedAirRow)
+where MAX_LEAVES > 0,
+{
+    if !base.valid || !interaction.valid {
+        return (false, zero_sparse_opened_air_row())
+    }
+    let base_position = sparse_multi_path_position(ref base.path, index)
+    let interaction_position = sparse_multi_path_position(ref interaction.path, index)
+    if base_position == MAX_LEAVES || interaction_position == MAX_LEAVES {
+        return (false, zero_sparse_opened_air_row())
+    }
+    let row = sparse_opened_air_row(
+        base.values[base_position],
+        interaction.values[interaction_position],
+    )
+    (row.valid, row)
 }

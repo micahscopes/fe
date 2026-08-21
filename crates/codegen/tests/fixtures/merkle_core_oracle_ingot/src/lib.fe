@@ -1,6 +1,16 @@
-//! Executable structural boundary for the field-generic Merkle core.
+//! Executable structural boundary for field-generic Merkle proofs and receipts.
+
+use canonical_words::{
+    BrowserWordReader,
+    BrowserWordWriter,
+    CanonicalWordStream,
+    canonical_word_stream_count,
+    encode_canonical_word_stream,
+}
+use core::BrowserBytes
 
 use merkle_core::{
+    MerkleMultiPath,
     TwoToOneHasher,
     binary_root,
     complete_frontier_root,
@@ -16,8 +26,10 @@ use merkle_core::{
     quartet_root,
     quartet_verify,
 }
+use merkle_receipt::MerkleMultiOpening
 
 struct AffineHasher {}
+struct AffineReceiptRole {}
 
 impl TwoToOneHasher<u32> for AffineHasher {
     fn zero() -> u32 { 0 }
@@ -199,4 +211,93 @@ pub fn multipath16(
         clean_path.siblings[6],
         clean_path.siblings[7],
     )
+}
+
+fn empty_affine_receipt() -> MerkleMultiOpening<AffineReceiptRole, u32, u32, 4, 8> {
+    MerkleMultiOpening {
+        valid: false,
+        values: [0; 4],
+        path: MerkleMultiPath {
+            valid: false,
+            leaf_count: 0,
+            leaf_indices: [0; 4],
+            sibling_count: 0,
+            siblings: [0; 8],
+        },
+    }
+}
+
+pub fn multipath_receipt16_encoded() -> BrowserBytes {
+    let leaves: [u32; 16] = [
+        2, 3, 5, 7,
+        11, 13, 17, 19,
+        23, 29, 31, 37,
+        41, 43, 47, 53,
+    ]
+    let path = multi_path_from_leaves<
+        u32,
+        AffineHasher,
+        16,
+        4,
+        4,
+        8,
+    >(leaves, [12, 0, 4, 8])
+    let mut values = [0; 4]
+    let mut index: usize = 0
+    while index < path.leaf_count as usize {
+        values[index] = leaves[path.leaf_indices[index] as usize]
+        index = index + 1
+    }
+    let receipt: MerkleMultiOpening<AffineReceiptRole, u32, u32, 4, 8> =
+        MerkleMultiOpening { valid: true, values: values, path: path }
+    encode_canonical_word_stream(
+        ref receipt,
+        BrowserWordWriter::allocate(canonical_word_stream_count(ref receipt)),
+    ).finish()
+}
+
+pub fn multipath_receipt16_decode_at(_ ptr: u32, _ len: u32) -> [u32; 14] {
+    let leaves: [u32; 16] = [
+        2, 3, 5, 7,
+        11, 13, 17, 19,
+        23, 29, 31, 37,
+        41, 43, 47, 53,
+    ]
+    let clean_path = multi_path_from_leaves<
+        u32,
+        AffineHasher,
+        16,
+        4,
+        4,
+        8,
+    >(leaves, [12, 0, 4, 8])
+    let mut clean_values = [0; 4]
+    let mut index: usize = 0
+    while index < clean_path.leaf_count as usize {
+        clean_values[index] = leaves[clean_path.leaf_indices[index] as usize]
+        index = index + 1
+    }
+    let expected = multi_root<u32, AffineHasher, 16, 4, 8>(clean_values, clean_path)
+    let mut receipt = empty_affine_receipt()
+    let reader = receipt.decode_stream(BrowserWordReader::new(
+        BrowserBytes { ptr: ptr, len: len },
+    ))
+    let verified = reader.complete()
+        && receipt.valid
+        && multi_verify<u32, AffineHasher, 16, 4, 8>(
+            expected.value,
+            receipt.values,
+            receipt.path,
+        )
+    [
+        if reader.complete() { 1 } else { 0 },
+        if receipt.valid { 1 } else { 0 },
+        if receipt.path.valid { 1 } else { 0 },
+        receipt.path.leaf_count,
+        receipt.path.sibling_count,
+        if verified { 1 } else { 0 },
+        receipt.values[0], receipt.values[1], receipt.values[2], receipt.values[3],
+        receipt.path.leaf_indices[0], receipt.path.leaf_indices[1],
+        receipt.path.leaf_indices[2], receipt.path.leaf_indices[3],
+    ]
 }

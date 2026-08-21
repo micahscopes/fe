@@ -1059,7 +1059,7 @@ pub fn air_composition_query16(
     }
     let verifier_shift = if mutation == 10 { shift + BabyBear::one() } else { shift }
     let verifier_query = if mutation == 11 { query_index ^ 1 } else { query_index }
-    let accepted = verify_checkpoint4_air_lde_composition_query<16, 4, 2>(
+    let accepted = verify_checkpoint4_air_lde_composition_query<4, 16, 4, 2>(
         c_re_q12,
         c_im_q12,
         challenge,
