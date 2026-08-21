@@ -1,0 +1,183 @@
+//! BabyBear commitments for the field-neutral recursive Mandelbrot carrier.
+//!
+//! This ingot depends on the recursive semantics, not the checkpoint Q12 AIR.
+//! It therefore keeps high-precision chunk commitments independently usable
+//! while the production multi-limb AIR is derived.
+
+use canonical_words::{CanonicalWords, CanonicalWordsProvider}
+use mandelbrot_proof_recursive::{
+    HighPrecisionEscapeClaim,
+    MAX_RECURSIVE_CLAIM_BOUND,
+    OrbitBoundary,
+    OrbitInterval,
+    RecursiveOrbitAccumulator,
+    boundary_is_valid,
+    certify_leaf,
+}
+use poseidon_baby_bear::{
+    Poseidon2Digest,
+    Poseidon2FieldDomain,
+    commit_canonical,
+}
+use precision::field::{Head, Limbs, Mac, Select, ShiftAppend, SubBorrow, Zero}
+use precision::fixed::{Carry, OrLower, Top, TruncRows}
+
+const fn protocol_tag(_ label: String<4>) -> u32 {
+    let bytes = label.as_bytes()
+    ((bytes[0] as u32) << 24)
+        | ((bytes[1] as u32) << 16)
+        | ((bytes[2] as u32) << 8)
+        | (bytes[3] as u32)
+}
+
+struct MandelbrotRecursiveStatementBabyBearV1 {}
+struct MandelbrotRecursiveBoundaryBabyBearV1 {}
+
+impl Poseidon2FieldDomain for MandelbrotRecursiveStatementBabyBearV1 {
+    const TAG: u32 = protocol_tag("RS01")
+}
+
+impl Poseidon2FieldDomain for MandelbrotRecursiveBoundaryBabyBearV1 {
+    const TAG: u32 = protocol_tag("RB01")
+}
+
+/// Precision-branded recursive digests. `L` has no runtime representation,
+/// but prevents a boundary committed at one fixed-point resolution from being
+/// substituted into a proof at another resolution.
+pub struct RecursiveStatementDigest<const L: usize> {
+    pub valid: bool,
+    pub value: Poseidon2Digest,
+}
+impl<const L: usize> core::marker::Copy for RecursiveStatementDigest<L> {}
+derive CanonicalWords for RecursiveStatementDigest<L> using CanonicalWordsProvider
+
+pub struct RecursiveBoundaryDigest<const L: usize> {
+    pub valid: bool,
+    pub value: Poseidon2Digest,
+}
+impl<const L: usize> core::marker::Copy for RecursiveBoundaryDigest<L> {}
+derive CanonicalWords for RecursiveBoundaryDigest<L> using CanonicalWordsProvider
+
+/// The recursive parent sees fixed-size typed digests and interval metadata,
+/// never the interior multi-limb orbit states of either child.
+pub struct RecursiveCommittedInterval<const L: usize> {
+    pub valid: bool,
+    pub leaves: u32,
+    pub statement: RecursiveStatementDigest<L>,
+    pub start_iteration: u32,
+    pub end_iteration: u32,
+    pub start: RecursiveBoundaryDigest<L>,
+    pub end: RecursiveBoundaryDigest<L>,
+}
+impl<const L: usize> core::marker::Copy for RecursiveCommittedInterval<L> {}
+derive CanonicalWords for RecursiveCommittedInterval<L> using CanonicalWordsProvider
+
+fn invalid_recursive_committed_interval<const L: usize>() -> RecursiveCommittedInterval<L> {
+    RecursiveCommittedInterval {
+        valid: false,
+        leaves: 0,
+        statement: RecursiveStatementDigest { valid: false, value: Poseidon2Digest::zero() },
+        start_iteration: 0,
+        end_iteration: 0,
+        start: RecursiveBoundaryDigest { valid: false, value: Poseidon2Digest::zero() },
+        end: RecursiveBoundaryDigest { valid: false, value: Poseidon2Digest::zero() },
+    }
+}
+
+pub fn commit_recursive_statement<const L: usize>(
+    _ claim: ref HighPrecisionEscapeClaim<L>,
+) -> RecursiveStatementDigest<L> {
+    let commitment = commit_canonical<
+        MandelbrotRecursiveStatementBabyBearV1,
+        HighPrecisionEscapeClaim<L>,
+    >(claim)
+    RecursiveStatementDigest {
+        valid: commitment.is_valid(),
+        value: commitment.digest(),
+    }
+}
+
+pub fn commit_recursive_boundary<const L: usize>(
+    _ claim: HighPrecisionEscapeClaim<L>,
+    _ boundary: OrbitBoundary<L>,
+) -> RecursiveBoundaryDigest<L>
+    where Limbs<L>: TruncRows<Limbs<L>> + Mac + ShiftAppend + Head + Carry
+                  + Zero + SubBorrow + Select + Top + OrLower
+                  + core::marker::Copy,
+{
+    if !boundary_is_valid(claim, boundary) {
+        return RecursiveBoundaryDigest { valid: false, value: Poseidon2Digest::zero() }
+    }
+    let commitment = commit_canonical<
+        MandelbrotRecursiveBoundaryBabyBearV1,
+        OrbitBoundary<L>,
+    >(ref boundary)
+    RecursiveBoundaryDigest {
+        valid: commitment.is_valid(),
+        value: commitment.digest(),
+    }
+}
+
+/// Semantic leaf adapter used by the current exactness oracle. The production
+/// leaf prover will replace the replay with an authenticated AIR receipt while
+/// preserving this committed interval boundary exactly.
+pub fn commit_recursive_semantic_leaf<const L: usize>(
+    _ interval: OrbitInterval<L>,
+) -> RecursiveCommittedInterval<L>
+    where Limbs<L>: TruncRows<Limbs<L>> + Mac + ShiftAppend + Head + Carry
+                  + Zero + SubBorrow + Select + Top + OrLower
+                  + core::marker::Copy,
+{
+    let certified: RecursiveOrbitAccumulator<L> = certify_leaf(interval)
+    if !certified.valid { return invalid_recursive_committed_interval<L>() }
+    let statement = commit_recursive_statement(ref interval.claim)
+    let start = commit_recursive_boundary(interval.claim, interval.start)
+    let end = commit_recursive_boundary(interval.claim, interval.end)
+    let valid = statement.valid && start.valid && end.valid
+    RecursiveCommittedInterval {
+        valid: valid,
+        leaves: if valid { 1 } else { 0 },
+        statement: statement,
+        start_iteration: interval.start.iteration,
+        end_iteration: interval.end.iteration,
+        start: start,
+        end: end,
+    }
+}
+
+pub fn merge_recursive_committed_intervals<const L: usize>(
+    _ left: RecursiveCommittedInterval<L>,
+    _ right: RecursiveCommittedInterval<L>,
+) -> RecursiveCommittedInterval<L> {
+    let mut valid = left.valid
+        && right.valid
+        && left.statement.valid
+        && right.statement.valid
+        && left.start.valid
+        && left.end.valid
+        && right.start.valid
+        && right.end.valid
+        && left.leaves > 0
+        && right.leaves > 0
+        && left.start_iteration < left.end_iteration
+        && left.end_iteration == right.start_iteration
+        && right.start_iteration < right.end_iteration
+        && left.statement.value.equals(right.statement.value)
+        && left.end.value.equals(right.start.value)
+    if left.leaves > MAX_RECURSIVE_CLAIM_BOUND
+        || right.leaves > MAX_RECURSIVE_CLAIM_BOUND
+    {
+        valid = false
+    } else if left.leaves > MAX_RECURSIVE_CLAIM_BOUND - right.leaves {
+        valid = false
+    }
+    RecursiveCommittedInterval {
+        valid: valid,
+        leaves: if valid { left.leaves + right.leaves } else { 0 },
+        statement: left.statement,
+        start_iteration: left.start_iteration,
+        end_iteration: right.end_iteration,
+        start: left.start,
+        end: right.end,
+    }
+}

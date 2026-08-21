@@ -5,6 +5,9 @@ use driver::DriverDataBase;
 use fe_codegen::{BackendKind, OptLevel, layout_for};
 use hir::hir_def::HirIngot;
 use num_bigint::BigUint;
+use p3_baby_bear::{BabyBear as P3BabyBear, default_babybear_poseidon2_16};
+use p3_field::{PrimeCharacteristicRing, PrimeField32};
+use p3_symmetric::Permutation;
 use std::path::Path;
 use url::Url;
 use wasmtime::Val;
@@ -13,6 +16,8 @@ const LIMBS: usize = 4;
 const LIMB_BITS: usize = 13;
 const LIMB_BASE: u32 = 8192;
 const ACCUMULATOR_WORDS: usize = 37;
+const COMMITTED_ACCUMULATOR_WORDS: usize = 31;
+const POSEIDON_WIDTH: usize = 16;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Fx {
@@ -199,6 +204,44 @@ fn expected_leaf_words(claim: &Claim, end: &Boundary) -> Vec<u32> {
     expected_accumulator_words(claim, &start, end, 1)
 }
 
+fn reference_poseidon_permutation(input: [u32; POSEIDON_WIDTH]) -> [u32; POSEIDON_WIDTH] {
+    let mut state = input.map(P3BabyBear::from_u32);
+    default_babybear_poseidon2_16().permute_mut(&mut state);
+    state.map(|value| value.as_canonical_u32())
+}
+
+fn reference_poseidon_digest(tag: &[u8; 4], fields: &[u32]) -> [u32; 8] {
+    let mut message = vec![u32::from_be_bytes(*tag), fields.len() as u32];
+    message.extend_from_slice(fields);
+    let mut state = [0u32; POSEIDON_WIDTH];
+    for block in message.chunks(8) {
+        state[..block.len()].copy_from_slice(block);
+        state = reference_poseidon_permutation(state);
+    }
+    state[..8].try_into().unwrap()
+}
+
+fn expected_committed_words(
+    claim: &Claim,
+    start: &Boundary,
+    end: &Boundary,
+    leaves: u32,
+) -> Vec<u32> {
+    let mut statement_fields = complex_words(&claim.point);
+    statement_fields.push(claim.bound);
+    let statement = reference_poseidon_digest(b"RS01", &statement_fields);
+    let start_digest = reference_poseidon_digest(b"RB01", &boundary_words(start));
+    let end_digest = reference_poseidon_digest(b"RB01", &boundary_words(end));
+    let mut words = vec![1, leaves, 1];
+    words.extend(statement);
+    words.extend([start.iteration, end.iteration, 1]);
+    words.extend(start_digest);
+    words.push(1);
+    words.extend(end_digest);
+    assert_eq!(words.len(), COMMITTED_ACCUMULATOR_WORDS);
+    words
+}
+
 fn compile_fixture() -> Vec<u8> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/mandelbrot_recursive_fixed_oracle_ingot");
@@ -261,7 +304,7 @@ fn read_words(
     pointer: u32,
     length: u32,
 ) -> Vec<u32> {
-    assert_eq!(length as usize, ACCUMULATOR_WORDS * 4);
+    assert_eq!(length & 3, 0, "encoded carrier must be word-aligned");
     let mut bytes = vec![0u8; length as usize];
     memory
         .read(store, pointer as usize, &mut bytes)
@@ -368,6 +411,23 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
             &arguments,
         );
         assert_eq!(actual, expected_leaf_words(claim, &end));
+
+        let (_, _, committed) = encoded(
+            &mut store,
+            &instance,
+            memory,
+            "recursive_committed_leaf4_encoded",
+            &arguments,
+        );
+        let start = Boundary {
+            iteration: 0,
+            z: ComplexFx {
+                real: zero(),
+                imaginary: zero(),
+            },
+            escaped: false,
+        };
+        assert_eq!(committed, expected_committed_words(claim, &start, &end, 1),);
     }
 
     let mut seed = 0x4d42_3255u32;
@@ -441,6 +501,36 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
             assert_eq!(
                 words,
                 expected_accumulator_words(&merge_claim, &start, &end, 2),
+            );
+        }
+    }
+
+    for mutation in 0..=5 {
+        let mut arguments = claim_args(&merge_claim);
+        arguments.extend([4, 5, mutation]);
+        let (_, _, words) = encoded(
+            &mut store,
+            &instance,
+            memory,
+            "recursive_committed_merge4_encoded",
+            &arguments,
+        );
+        assert_eq!(words.len(), COMMITTED_ACCUMULATOR_WORDS);
+        assert_eq!(words[0], (mutation == 0) as u32, "mutation {mutation}");
+        assert_eq!(words[1], if mutation == 0 { 2 } else { 0 });
+        if mutation == 0 {
+            let start = Boundary {
+                iteration: 0,
+                z: ComplexFx {
+                    real: zero(),
+                    imaginary: zero(),
+                },
+                escaped: false,
+            };
+            let end = evaluate(&merge_claim, 9);
+            assert_eq!(
+                words,
+                expected_committed_words(&merge_claim, &start, &end, 2),
             );
         }
     }

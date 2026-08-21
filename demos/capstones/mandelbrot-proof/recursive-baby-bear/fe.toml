@@ -1,0 +1,10 @@
+[ingot]
+name = "mandelbrot_proof_recursive_baby_bear"
+version = "0.1.0"
+
+[dependencies]
+canonical_words = "../../../../ingots/canonical_words"
+core = "../../../../ingots/core"
+mandelbrot_proof_recursive = "../recursive"
+poseidon_baby_bear = "../../../../ingots/poseidon_baby_bear"
+precision = "../../../sketches/precision"

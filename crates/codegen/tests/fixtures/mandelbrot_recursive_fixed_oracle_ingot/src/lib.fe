@@ -7,6 +7,11 @@ use canonical_words::{
     encode_canonical_words,
 }
 use core::BrowserBytes
+use mandelbrot_proof_recursive_baby_bear::{
+    RecursiveCommittedInterval,
+    commit_recursive_semantic_leaf,
+    merge_recursive_committed_intervals,
+}
 use mandelbrot_proof_recursive::{
     ComplexFixed,
     HighPrecisionEscapeClaim,
@@ -20,6 +25,7 @@ use mandelbrot_proof_recursive::{
 use precision::fixed::Fixed
 
 type Accumulator4 = RecursiveOrbitAccumulator<4>
+type CommittedAccumulator4 = RecursiveCommittedInterval<4>
 
 fn fixed4(_ negative: u32, _ limbs: [u32; 4]) -> Fixed<4> {
     Fixed { negative: negative == 1, limbs: limbs }
@@ -43,6 +49,13 @@ fn claim4(
 
 fn encode_accumulator4(_ accumulator: Accumulator4) -> BrowserBytes {
     let writer = BrowserWordWriter::allocate(<Accumulator4 as CanonicalWords>::WORDS)
+    encode_canonical_words(ref accumulator, writer).finish()
+}
+
+fn encode_committed_accumulator4(_ accumulator: CommittedAccumulator4) -> BrowserBytes {
+    let writer = BrowserWordWriter::allocate(
+        <CommittedAccumulator4 as CanonicalWords>::WORDS,
+    )
     encode_canonical_words(ref accumulator, writer).finish()
 }
 
@@ -121,6 +134,73 @@ pub fn recursive_merge4_encoded(
     let mut right = evaluate_chunk(right_claim, right_start, right_steps)
     if mutation == 3 { right.valid = false }
     encode_accumulator4(merge_adjacent(left, right))
+}
+
+pub fn recursive_committed_leaf4_encoded(
+    _ real_negative: u32,
+    _ r0: u32,
+    _ r1: u32,
+    _ r2: u32,
+    _ r3: u32,
+    _ imaginary_negative: u32,
+    _ i0: u32,
+    _ i1: u32,
+    _ i2: u32,
+    _ i3: u32,
+    _ bound: u32,
+    _ requested_steps: u32,
+) -> BrowserBytes {
+    let claim = claim4(
+        real_negative,
+        [r0, r1, r2, r3],
+        imaginary_negative,
+        [i0, i1, i2, i3],
+        bound,
+    )
+    let evaluated = evaluate_chunk(claim, initial_boundary<4>(), requested_steps)
+    encode_committed_accumulator4(commit_recursive_semantic_leaf(evaluated.interval))
+}
+
+/// Mutation modes exercise the fixed-size committed parent boundary:
+/// 0 valid, 1 shared-boundary digest, 2 statement digest, 3 invalid child,
+/// 4 non-adjacent iteration, 5 overflowing leaf count.
+pub fn recursive_committed_merge4_encoded(
+    _ real_negative: u32,
+    _ r0: u32,
+    _ r1: u32,
+    _ r2: u32,
+    _ r3: u32,
+    _ imaginary_negative: u32,
+    _ i0: u32,
+    _ i1: u32,
+    _ i2: u32,
+    _ i3: u32,
+    _ bound: u32,
+    _ left_steps: u32,
+    _ right_steps: u32,
+    _ mutation: u32,
+) -> BrowserBytes {
+    let claim = claim4(
+        real_negative,
+        [r0, r1, r2, r3],
+        imaginary_negative,
+        [i0, i1, i2, i3],
+        bound,
+    )
+    let left_raw = evaluate_chunk(claim, initial_boundary<4>(), left_steps)
+    let right_raw = evaluate_chunk(claim, left_raw.interval.end, right_steps)
+    let left = commit_recursive_semantic_leaf(left_raw.interval)
+    let mut right = commit_recursive_semantic_leaf(right_raw.interval)
+    if mutation == 1 {
+        right.start.value = poseidon_baby_bear::Poseidon2Digest::zero()
+    }
+    if mutation == 2 {
+        right.statement.value = poseidon_baby_bear::Poseidon2Digest::zero()
+    }
+    if mutation == 3 { right.valid = false }
+    if mutation == 4 { right.start_iteration = right.start_iteration + 1 }
+    if mutation == 5 { right.leaves = mandelbrot_proof_recursive::MAX_RECURSIVE_CLAIM_BOUND }
+    encode_committed_accumulator4(merge_recursive_committed_intervals(left, right))
 }
 
 pub fn recursive_accumulator4_decode_at(_ ptr: u32, _ len: u32) -> (u32, u32) {
