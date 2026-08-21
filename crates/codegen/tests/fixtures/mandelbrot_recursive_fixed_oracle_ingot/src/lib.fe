@@ -447,8 +447,12 @@ pub fn fixed_transition4_sparse_radix_audit(
     while index < rows {
         let task = sparse_transition_task_at<4>(index)
         let mut row = sparse_radix4_row(point, current, next, witness, index)
-        if index == mutation_index {
-            row = mutate_sparse_row(row, mutation_lane)
+        if mutation_lane == 8 && index == mutation_index {
+            row.value = row.value.radix2_add(BabyBear::from_u32(LIMB_BASE))
+        } else {
+            if index == mutation_index {
+                row = mutate_sparse_row(row, mutation_lane)
+            }
         }
         let evaluated = evaluate_sparse_radix_row(challenge, task, row)
         constraints = constraints + evaluated.constraints

@@ -2038,6 +2038,43 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                     "the boundary copy bus alone must reject a locally valid mutation",
                 );
             }
+
+            let shared_mutations = [
+                (1u32, "fixed_transition4_sparse_product_audit", 1u32, 1u32),
+                (2, "fixed_transition4_sparse_product_audit", 1, 2),
+                (3, "fixed_transition4_sparse_round_audit", 0, 4),
+                (4, "fixed_transition4_sparse_linear_audit", LIMBS as u32, 4),
+                (5, "fixed_transition4_sparse_boundary_audit", 1, 2),
+                (6, "fixed_transition4_sparse_radix_audit", 13, 8),
+            ];
+            for challenge in [3u32, 7, 31] {
+                for (mutation, sparse_function, sparse_row, sparse_lane) in
+                    shared_mutations.iter().copied()
+                {
+                    let mut wide_arguments = arguments.clone();
+                    wide_arguments.extend([challenge, mutation]);
+                    let wide = call(
+                        &mut store,
+                        &instance,
+                        "fixed_transition4_constraint_fold",
+                        &wide_arguments,
+                        3,
+                    );
+                    assert_eq!(wide[0], 1);
+                    assert_ne!(
+                        wide[2], 0,
+                        "wide mutation {mutation}, challenge {challenge}",
+                    );
+
+                    let mut sparse_arguments = arguments.clone();
+                    sparse_arguments.extend([challenge, sparse_row, sparse_lane]);
+                    let sparse = call(&mut store, &instance, sparse_function, &sparse_arguments, 3);
+                    assert_ne!(
+                        sparse[0], 0,
+                        "sparse mutation {mutation}, challenge {challenge}",
+                    );
+                }
+            }
         }
         for challenge in [3u32, 7, 31] {
             let mut clean_arguments = arguments.clone();
