@@ -1292,14 +1292,39 @@ Legend:
   the expected upstream roots and every downstream transcript artifact; an
   unknown mutation fails closed. The focused zero-import Wasm gate passes 1/1
   in 558.10 seconds.
+  Commit `9bc0be73a` binds the named recursive leaf statement to the sparse AIR
+  without replaying the transition at the public boundary. One semantic
+  `SparsePublicCoordinate` interpretation derives the six point, current, and
+  next coordinate positions directly from the generated transition task plan.
+  For each coordinate, all `L` fixed-point limbs and its sign become
+  fixed-position rational constraints. An executable coherence check resolves
+  every derived position back through the task plan, so a layout refactor
+  cannot silently preserve a stale numeric row table. Distinct `PC01` and
+  `PM01` quartic challenges fold the public constraints and mix them into the
+  existing `BC02` composition codeword. The production writer requires the
+  exact sparse trace length, recommits the raw one-step interval, rebinds the
+  `AT02` transcript, and adds the public contribution to every composition
+  point. The four-row scalar placement writer is now explicitly named as a
+  checkpoint and cannot be mistaken for a receipt-valid production writer.
+  A focused zero-import Wasm gate instantiates the real `L = 4`, `TRACE =
+  4096`, `LDE = 8192` public quotient at one extension-field point. Its
+  independent Rust model enumerates the semantic task list to recover all 30
+  positions, reconstructs both transcript challenges, and matches the complete
+  quartic rational composition. It rejects a different valid interval
+  statement and proves a changed opened value changes the public contribution.
+  The focused gate passes 1/1 in 52.21 seconds. The established independent
+  4-by-16 composition, root, and mutation gate remains green at 1/1 in 976.01
+  seconds. The full 4,096-row production writer Fe-checks but has not been
+  executed as a scalar full-codeword claim; that placement belongs to the
+  pending WebGPU schedule.
   `SL03` and `SI01` remain exact semantic checkpoints rather than production
   proof roots. `LD01`, `LD02`, and the shared `BC02` composition root now cover
-  the full production codewords, but this is not yet a succinct recursive leaf
-  proof. The next layer must add authenticated fixed-position openings that
-  equate the named recursive statement and boundary digests with the committed
-  sparse columns, then reuse the existing multi-query, FRI, and canonical
-  receipt interpreters. Only that complete AIR/FRI receipt may replace semantic
-  replay in the recursive parent carrier.
+  the production codewords, including the fixed-position public relation, but
+  this is not yet a succinct recursive leaf proof. The next layer must carry
+  the required `LD01` public positions through authenticated multi-query
+  openings, then reuse the existing FRI and canonical receipt interpreters.
+  Only that complete AIR/FRI receipt may replace semantic replay in the
+  recursive parent carrier.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
   The first arithmetic-plan consolidation is landed at `ba2ded864`: one
@@ -1385,9 +1410,9 @@ fallback. The semantic receipts are:
 ## Immediate burn-down order
 
 1. Run the external real-GPU handoff above before beginning the proof GPU port.
-2. Finish the authenticated BabyBear sparse AIR: add fixed-position public
-   boundary openings over `LD01`, bind them to the recursive leaf statement,
-   then feed the existing `LD01`/`LD02`/`BC02` commitments through multi-query,
+2. Finish the authenticated BabyBear sparse AIR: carry the task-derived public
+   boundary positions through authenticated `LD01` multi-openings, then feed
+   the existing public-bound `LD01`/`LD02`/`BC02` relation through multi-query,
    FRI, and the canonical receipt layers.
 3. Lower the BabyBear leaf prover and recursive merges through Fe Conal/CTFE
    WebGPU schedules, then run the complete progressive proof/verify/tamper page
