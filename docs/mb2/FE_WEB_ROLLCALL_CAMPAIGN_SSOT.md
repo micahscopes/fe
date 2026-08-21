@@ -1117,6 +1117,17 @@ Legend:
   field for speed. The production transcript must derive quartic-extension
   compression challenges and use the same field-generic relation, with batch
   inversion before the interaction trace is committed.
+  Commit `c40dccaa9` adds two reusable low-degree limb-position selectors for
+  the fixed-point rounding boundary. `penultimate` and `last` are generated
+  from the limb-count-generic task plan, constrained as boolean and mutually
+  exclusive, propagated through radix bit and limb rows, and forced at the
+  exact `L - 2` and `L - 1` transitions. This avoids an equality
+  interpolation whose degree would grow with the limb count. The authenticated
+  control row is now 35 field columns and the sparse leaf domain is `SL03`.
+  The independent Rust control model covers both new columns. Its exhaustive
+  three-challenge mutation gate evaluates 1,167,135 constraints and passes
+  1/1 in 26.97 seconds. The complete recursive receipt, root reconstruction,
+  and authentication mutation gate passes 1/1 in 94.80 seconds.
   This root authenticates the exact control and witness base trace but is not
   yet a succinct leaf proof. Rounding, linear, and boundary copies still need
   the same committed interaction treatment, followed by quartic transcript
@@ -1209,9 +1220,11 @@ fallback. The semantic receipts are:
 ## Immediate burn-down order
 
 1. Run the external real-GPU handoff above before beginning the proof GPU port.
-2. Finish the authenticated BabyBear sparse AIR: commit copy-bus interaction
-   accumulators, then feed control, witness, and interactions through the
-   existing LDE, composition, multi-query, FRI, and canonical receipt layers.
+2. Finish the authenticated BabyBear sparse AIR: extend the landed product
+   copy interaction to rounding, linear, and boundary copies, derive quartic
+   challenges with batch inversion, then feed control, witness, and
+   interactions through the existing LDE, composition, multi-query, FRI, and
+   canonical receipt layers.
 3. Lower the BabyBear leaf prover and recursive merges through Fe Conal/CTFE
    WebGPU schedules, then run the complete progressive proof/verify/tamper page
    through Chrome.
