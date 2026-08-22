@@ -286,18 +286,39 @@ impl<'a, 'db> BorrowCanonCx<'a, 'db> {
                         });
                     }
                 }
-                if !resolved
-                    && let Some(NormalizedBindingLowering::CarrierLocal { root, provider, .. }) =
-                        self.body.local(local).map(|local| &local.lowering)
+                if out.is_empty()
+                    && let Some(source) = self
+                        .body
+                        .local(local)
+                        .and_then(|local| local.snapshot_source_place())
                 {
-                    if let Some(provider) = provider {
+                    // A place-carrier produced by aggregate pattern
+                    // projection retains the exact source projection in its
+                    // normalized facts. Its initialization loan may be present
+                    // before that carrier's targets have entered the dataflow
+                    // state, so chase the normalized source rather than
+                    // treating an empty target set as an unrooted place.
+                    for target in self.canonicalize_place(state, source, origin)? {
                         out.insert(CanonPlace {
-                            root: BorrowRoot::Provider(provider.clone()),
-                            proj: suffix.clone(),
+                            root: target.root,
+                            proj: target.proj.concat(&suffix),
                         });
-                    } else if let Some(root) = root.and_then(|root| self.root_to_borrow_root(root))
-                    {
-                        out.insert(CanonPlace { root, proj: suffix });
+                    }
+                }
+                if out.is_empty() && !resolved {
+                    // Aggregate pattern projections may lower through an
+                    // addressable owned-value carrier even though they are not
+                    // borrow locals and therefore have no loan in `state`.
+                    // Canonicalize that value's established backing place, then
+                    // append the dereference suffix. Restricting this fallback
+                    // to `CarrierLocal` loses tuple fields materialized as
+                    // `ValueLocal` snapshots and produces an internal error on
+                    // an ordinary read such as `terminal <= 1`.
+                    for target in self.canonicalize_value_base(state, local) {
+                        out.insert(CanonPlace {
+                            root: target.root,
+                            proj: target.proj.concat(&suffix),
+                        });
                     }
                 }
                 if out.is_empty() {

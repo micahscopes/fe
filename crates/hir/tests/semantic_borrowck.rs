@@ -31,6 +31,23 @@ fn borrow_diags(src: &str) -> String {
     )
 }
 
+#[test]
+fn large_tuple_pattern_value_fields_canonicalize_through_owned_carriers() {
+    let diags = borrow_diags(
+        r#"
+type Words = (
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+)
+
+fn terminal_is_canonical(_ words: Words) -> bool {
+    let (_, _, _, _, _, _, _, _, _, _, terminal) = words
+    terminal <= 1
+}
+"#,
+    );
+    assert!(diags.is_empty(), "unexpected diagnostics:\n{diags}");
+}
+
 fn contract_init_instance<'db>(
     db: &'db HirAnalysisTestDb,
     top_mod: fe_hir::hir_def::TopLevelMod<'db>,
