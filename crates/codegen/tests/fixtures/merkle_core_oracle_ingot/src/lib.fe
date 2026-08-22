@@ -16,6 +16,7 @@ use merkle_core::{
     complete_frontier_root,
     empty_frontier,
     multi_path_from_leaves,
+    multi_path_matches_requests,
     multi_root,
     multi_verify,
     pair_path_from_leaves,
@@ -211,6 +212,36 @@ pub fn multipath16(
         clean_path.siblings[6],
         clean_path.siblings[7],
     )
+}
+
+pub fn multipath16_matches(
+    _ query0: u32,
+    _ query1: u32,
+    _ query2: u32,
+    _ query3: u32,
+    _ request0: u32,
+    _ request1: u32,
+    _ request2: u32,
+    _ request3: u32,
+) -> u32 {
+    let leaves: [u32; 16] = [
+        2, 3, 5, 7,
+        11, 13, 17, 19,
+        23, 29, 31, 37,
+        41, 43, 47, 53,
+    ]
+    let path = multi_path_from_leaves<
+        u32,
+        AffineHasher,
+        16,
+        4,
+        4,
+        8,
+    >(leaves, [query0, query1, query2, query3])
+    if multi_path_matches_requests<u32, 16, 4, 4, 8>(
+        ref path,
+        [request0, request1, request2, request3],
+    ) { 1 } else { 0 }
 }
 
 fn empty_affine_receipt() -> MerkleMultiOpening<AffineReceiptRole, u32, u32, 4, 8> {

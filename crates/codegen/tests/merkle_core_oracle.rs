@@ -264,6 +264,27 @@ fn generic_merkle_shapes_execute_and_fail_closed() {
         0,
         "out-of-domain multipath requests must fail closed",
     );
+    for (opened, requested, expected) in [
+        ([12, 0, 4, 8], [8, 4, 0, 12], 1),
+        ([3, 3, 3, 3], [3, 3, 3, 3], 1),
+        ([0, 4, 8, 12], [0, 4, 8, 8], 0),
+        ([3, 3, 3, 3], [3, 4, 3, 3], 0),
+        ([0, 4, 8, 12], [0, 4, 8, 16], 0),
+    ] {
+        let mut arguments = opened.to_vec();
+        arguments.extend(requested);
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "multipath16_matches",
+                &arguments,
+                1,
+            ),
+            vec![expected],
+            "multipath request-set canonicality differs",
+        );
+    }
     for mutation in 1..=4 {
         assert_eq!(
             call(
