@@ -1343,15 +1343,27 @@ Legend:
   encoding must use staged canonical decoders rather than one monolithic
   generated function.
   `SL03` and `SI01` remain exact semantic checkpoints rather than production
-  proof roots. `LD01`, `LD02`, and the shared `BC02` composition root now cover
-  the production codewords, including the fixed-position public relation, but
-  this is not yet a succinct recursive leaf proof. The next layer must carry
-  transcript-selected `LD01` and `LD02` evaluations through the existing
-  multi-query geometry, recompute the fixed-position public relation at those
-  points, and bind it to authenticated `BC02` values plus the existing FRI
-  folds. Staged canonical receipt decoding must then replace the oversized toy
-  decoder. Only that complete AIR/FRI receipt may replace semantic replay in
-  the recursive parent carrier.
+  proof roots. `LD01`, `LD02`, and the shared `BC02` composition root cover the
+  production codewords, including the fixed-position public relation.
+  Commits `e3108816e` and `1e39c20d0` derive the production four-query carrier
+  and every capacity from `FriSchedule<1, 13>` rather than maintaining a second
+  receipt-shape table. Commit `8b7d2a41c` adds an independently executed
+  request-set predicate that rejects missing, extra, out-of-domain, and
+  noncanonical unused leaves. Commit `fce3a5d7e` applies that predicate to
+  every schedule-derived FRI multipath. Commit `29916442a` assembles the
+  production sparse receipt entirely in Fe: it binds the interval statement,
+  `LD01`, `LD02`, and `BC02` roots; folds the complete FRI schedule; samples
+  queries only after the terminal transcript; opens the exact AIR,
+  composition, and FRI request sets; recomputes the positive and negative
+  public-bound `BC02` values from authenticated sparse rows; and verifies all
+  four schedule-derived fold chains.
+  The exact compiler gate for the real `L = 4`, `TRACE = 4096`, `LDE = 8192`
+  specialization passes. This is not yet an independently executed complete
+  receipt gate, a succinct recursive leaf proof, or browser proof evidence.
+  The next gate must construct one canonical production receipt, accept it,
+  reject targeted transcript, opening, and fold mutations against independent
+  models, and feed it through staged canonical decoding. Only that executed
+  AIR/FRI receipt may replace semantic replay in the recursive parent carrier.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
   The first arithmetic-plan consolidation is landed at `ba2ded864`: one
@@ -1479,10 +1491,11 @@ fallback. The semantic receipts are:
    `mandelbrot_proof_gpu` clean and tampered Chromium modes now pass on AMD
    Radeon 780M through RADV after the private-heap fix. The four standalone
    hardware test binaries in the runbook remain to be executed without skips.
-2. Finish the authenticated BabyBear sparse AIR receipt: feed the now-gated
-   `LD01`/`LD02` openings and public-bound `BC02` relation through the existing
-   multi-query and FRI layers, then encode them through staged canonical
-   receipt decoders.
+2. Execute and independently gate the assembled BabyBear sparse AIR receipt,
+   then encode it through staged canonical receipt decoders. The production
+   Fe specialization now carries `LD01`/`LD02`, public-bound `BC02`, exact
+   transcript requests, and the complete FRI fold chain, but type-checking is
+   not acceptance evidence.
 3. Lower the BabyBear leaf prover and recursive merges through Fe Conal/CTFE
    WebGPU schedules, then run the complete progressive proof/verify/tamper page
    through Chrome.
