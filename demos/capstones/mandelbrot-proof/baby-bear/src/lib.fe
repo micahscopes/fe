@@ -70,6 +70,7 @@ use merkle_core::{
     complete_frontier_root,
     empty_frontier,
     multi_path_from_leaves,
+    multi_path_matches_requests,
     multi_verify,
     pair_path_from_leaves,
     pair_verify,
@@ -1966,6 +1967,7 @@ where
     { ROUND > 0 },
     { ROUND < 100 },
     { INPUT_LOG > 1 },
+    OUTPUT > 0,
     OUTPUT > 1,
     OUTPUT <= MAX_PADDED_TRACE_LENGTH,
     OUTPUT <= 2147483648,
@@ -1974,6 +1976,7 @@ where
     { NEXT_ROUND == ROUND + 1 },
     { NEXT_INPUT_LOG + 1 == INPUT_LOG },
     { NEXT_OUTPUT + NEXT_OUTPUT == OUTPUT },
+    Plan: BabyBearFriPairRequests<PAIR_WIDTH, MAX_LEAVES, Samples>,
     FriScheduleFold<
         NEXT_ROUND,
         NEXT_INPUT_LOG,
@@ -2021,8 +2024,22 @@ where
             TailLayers,
             TailChallenges,
         >>::authenticate_fri_multi_tail(next_transcript, layers.tail)
+        let requests = <Plan as BabyBearFriPairRequests<
+            PAIR_WIDTH,
+            MAX_LEAVES,
+            Samples,
+        >>::fri_pair_requests(tail.1)
+        let exact = requests.valid
+            && requests.count == MAX_LEAVES.downcast_truncate()
+            && multi_path_matches_requests<
+                Poseidon2Digest,
+                OUTPUT,
+                MAX_LEAVES,
+                MAX_LEAVES,
+                MAX_SIBLINGS,
+            >(ref layers.opening.path, requests.indices)
         let valid = layers.valid && challenge.valid && authenticated
-            && next_transcript.valid && tail.0
+            && next_transcript.valid && tail.0 && exact
         (
             valid,
             tail.1,
@@ -2089,6 +2106,7 @@ impl<
 >
 where
     { INPUT_LOG > 1 },
+    OUTPUT > 0,
     OUTPUT > 1,
     OUTPUT <= MAX_PADDED_TRACE_LENGTH,
     OUTPUT <= 2147483648,
@@ -2097,6 +2115,7 @@ where
     { NEXT_ROUND == 2 },
     { NEXT_INPUT_LOG + 1 == INPUT_LOG },
     { NEXT_OUTPUT + NEXT_OUTPUT == OUTPUT },
+    Plan: BabyBearFriPairRequests<PAIR_WIDTH, MAX_LEAVES, Samples>,
     FriScheduleFold<
         NEXT_ROUND,
         NEXT_INPUT_LOG,
@@ -2144,8 +2163,22 @@ where
             TailLayers,
             TailChallenges,
         >>::authenticate_fri_multi_tail(next_transcript, layers.tail)
+        let requests = <Plan as BabyBearFriPairRequests<
+            PAIR_WIDTH,
+            MAX_LEAVES,
+            Samples,
+        >>::fri_pair_requests(tail.1)
+        let exact = requests.valid
+            && requests.count == MAX_LEAVES.downcast_truncate()
+            && multi_path_matches_requests<
+                Poseidon2Digest,
+                OUTPUT,
+                MAX_LEAVES,
+                MAX_LEAVES,
+                MAX_SIBLINGS,
+            >(ref layers.opening.path, requests.indices)
         let valid = layers.valid && challenge.valid && authenticated
-            && next_transcript.valid && tail.0
+            && next_transcript.valid && tail.0 && exact
         (
             valid,
             tail.1,
