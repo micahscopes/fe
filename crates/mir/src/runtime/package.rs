@@ -63,6 +63,28 @@ use crate::{
     verify::{VerifyError, verify_runtime_package},
 };
 
+fn wasm_runtime_package_trace(message: impl FnOnce() -> String) {
+    if std::env::var_os("FE_WASM_LOWER_TRACE").is_some() {
+        eprintln!("[fe wasm runtime package] {}", message());
+    }
+}
+
+fn wasm_runtime_package_detail(message: impl FnOnce() -> String) {
+    if std::env::var_os("FE_WASM_LOWER_TRACE_DETAIL").is_some() {
+        eprintln!("[fe wasm runtime package] {}", message());
+    }
+}
+
+fn runtime_instance_trace_label<'db>(db: &'db dyn MirDb, instance: RuntimeInstance<'db>) -> String {
+    match instance.key(db).source(db) {
+        RuntimeInstanceSource::Semantic(semantic) => match semantic.key(db).owner(db) {
+            BodyOwner::Func(func) => func_display_name(db, func),
+            owner => format!("{owner:?}"),
+        },
+        RuntimeInstanceSource::Synthetic(synthetic) => format!("{:?}", synthetic.spec(db)),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
 pub enum LowerError {
     Unsupported(String),
@@ -243,14 +265,36 @@ impl<'db> RuntimeGraphBuilder<'db> {
     }
 
     fn build(mut self) -> Result<RuntimeGraph<'db>, LowerError> {
+        let mut discovered = 0_usize;
         while let Some(instance) = self.queue.pop() {
             self.queued.remove(&instance);
             if self.nodes.contains_key(&instance) {
                 continue;
             }
 
+            discovered += 1;
+            wasm_runtime_package_detail(|| {
+                format!(
+                    "runtime graph instance {discovered}, pending={}, label={}",
+                    self.queue.len(),
+                    runtime_instance_trace_label(self.db, instance),
+                )
+            });
+            if discovered % 500 == 0 {
+                wasm_runtime_package_trace(|| {
+                    format!(
+                        "runtime graph progress, instances={discovered}, pending={}, current={}",
+                        self.queue.len(),
+                        runtime_instance_trace_label(self.db, instance),
+                    )
+                });
+            }
+
             if let Some(semantic) = instance.key(self.db).semantic(self.db) {
                 ensure_semantic_instance_is_smir_lowerable(self.db, semantic)?;
+                wasm_runtime_package_detail(|| {
+                    format!("preflight trait calls for runtime graph instance {discovered}")
+                });
                 check_reachable_runtime_trait_calls_resolvable(
                     self.db,
                     semantic.key(self.db),
@@ -258,6 +302,9 @@ impl<'db> RuntimeGraphBuilder<'db> {
                 )
                 .map_err(|err| wrap_runtime_lowering_error(self.db, instance, err))?;
             }
+            wasm_runtime_package_detail(|| {
+                format!("lower runtime body for graph instance {discovered}")
+            });
             let lowered = runtime_instance_lowered_body(self.db, instance)
                 .map_err(|err| wrap_runtime_lowering_error(self.db, instance, err))?;
             let direct_callees = lowered
@@ -267,6 +314,14 @@ impl<'db> RuntimeGraphBuilder<'db> {
                 .collect::<Vec<_>>();
             let referenced_const_regions = lowered.referenced_const_regions(self.db);
             let referenced_code_regions = lowered.referenced_code_regions(self.db);
+            wasm_runtime_package_detail(|| {
+                format!(
+                    "runtime graph instance {discovered} ready, callees={}, const_regions={}, code_regions={}",
+                    direct_callees.len(),
+                    referenced_const_regions.len(),
+                    referenced_code_regions.len(),
+                )
+            });
             for callee in direct_callees.iter().copied() {
                 self.enqueue(callee);
             }
@@ -286,6 +341,14 @@ impl<'db> RuntimeGraphBuilder<'db> {
         self.object_specs.extend(self.discovered_contract_specs);
         self.code_region_roots
             .sort_by_key(|(region, _)| code_region_symbol(self.db, *region));
+        wasm_runtime_package_trace(|| {
+            format!(
+                "runtime graph complete, instances={}, objects={}, code_regions={}",
+                self.nodes.len(),
+                self.object_specs.len(),
+                self.code_region_roots.len(),
+            )
+        });
         Ok(RuntimeGraph {
             nodes: self.nodes,
             public_roots: self.public_roots,
@@ -570,6 +633,13 @@ fn build_wasm_runtime_package_impl<'db>(
     requested_entries: Option<&[String]>,
     internal_funcs: &[Func<'db>],
 ) -> Result<RuntimePackage<'db>, LowerError> {
+    wasm_runtime_package_trace(|| {
+        format!(
+            "begin package construction, requested_entries={}, internal_roots={}",
+            requested_entries.map_or(0, <[String]>::len),
+            internal_funcs.len(),
+        )
+    });
     // Contracts fail closed on wasm: no silent EVM-shaped behavior.
     if !top_mod.all_contracts(db).is_empty()
         || !discover_manual_contract_roots(db, top_mod)?.is_empty()
@@ -592,6 +662,7 @@ fn build_wasm_runtime_package_impl<'db>(
             .map(|name| name.data(db).to_string())
             .unwrap_or_default()
     });
+    wasm_runtime_package_trace(|| format!("collected {} top-level functions", funcs.len()));
 
     let mut entry_funcs = Vec::new();
     let mut rejections = Vec::new();
@@ -602,6 +673,13 @@ fn build_wasm_runtime_package_impl<'db>(
             RuntimeRootCandidate::Rejected(rejection) => rejections.push(rejection),
         }
     }
+    wasm_runtime_package_trace(|| {
+        format!(
+            "classified Wasm roots, eligible={}, rejected={}",
+            entry_funcs.len(),
+            rejections.len(),
+        )
+    });
     if let Some(entry_names) = requested_entries {
         let mut selected = Vec::with_capacity(entry_names.len());
         for entry_name in entry_names {
@@ -677,7 +755,19 @@ fn build_wasm_runtime_package_impl<'db>(
     // callee uses the caller's) and collide its export symbol, mangling both.
     // The reachability is an additive read-only pre-pass over the candidates'
     // semantic call graph; no existing function is touched.
+    wasm_runtime_package_trace(|| {
+        format!(
+            "begin entry-root reachability prepass, candidates={}",
+            entry_funcs.len(),
+        )
+    });
     let reachable_as_callee = wasm_candidates_reachable_as_callee(db, top_mod, &entry_funcs)?;
+    wasm_runtime_package_trace(|| {
+        format!(
+            "entry-root reachability prepass complete, callee_candidates={}",
+            reachable_as_callee.len(),
+        )
+    });
     let seed_funcs = entry_funcs
         .iter()
         .copied()
@@ -753,10 +843,12 @@ fn build_wasm_runtime_package_impl<'db>(
         ));
     }
     let entry = main_root.unwrap_or(package_roots[0]);
+    wasm_runtime_package_trace(|| format!("materialized {} package roots", package_roots.len()));
     // Export eligibility is the SOURCE's `pub` declaration, not root-seeding.
     // `seed_funcs` deliberately excludes callee-reachable candidates; they still
     // belong to the module's public surface and must keep their wasm export.
     let public_export_funcs = entry_funcs.iter().copied().collect::<FxHashSet<_>>();
+    wasm_runtime_package_trace(|| "begin runtime graph and package assembly".to_owned());
     let package = build_non_contract_package(
         db,
         top_mod,
@@ -769,8 +861,16 @@ fn build_wasm_runtime_package_impl<'db>(
         Some("main"),
         public_export_funcs,
     )?;
+    wasm_runtime_package_trace(|| {
+        format!(
+            "runtime graph and package assembly complete, functions={}",
+            package.functions(db).len(),
+        )
+    });
+    wasm_runtime_package_trace(|| "begin runtime package verification".to_owned());
     verify_runtime_package(db, package)
         .map_err(|error| invalid_runtime_package_error(db, package, error))?;
+    wasm_runtime_package_trace(|| "runtime package verification complete".to_owned());
     Ok(package)
 }
 
@@ -830,6 +930,12 @@ fn wasm_candidates_reachable_as_callee<'db>(
             }
         }
     }
+    wasm_runtime_package_trace(|| {
+        format!(
+            "entry-root reachability visited {} semantic instances",
+            visited.len(),
+        )
+    });
     Ok(reachable_as_callee)
 }
 
@@ -1489,14 +1595,25 @@ fn build_sectioned_package<'db>(
         .iter()
         .map(|(name, _)| name.clone())
         .collect::<FxHashSet<_>>();
+    wasm_runtime_package_trace(|| {
+        format!(
+            "build runtime graph, roots={}, objects={}",
+            roots.len(),
+            object_specs.len(),
+        )
+    });
     let mut graph =
         RuntimeGraphBuilder::new(db, roots, object_specs, public_export_funcs).build()?;
+    wasm_runtime_package_trace(|| "collect runtime functions".to_owned());
     let functions = collect_runtime_functions(db, &graph);
+    wasm_runtime_package_trace(|| format!("collected {} runtime functions", functions.len()));
     let functions_by_instance = functions
         .iter()
         .map(|function| (function.instance(db), *function))
         .collect::<FxHashMap<_, _>>();
+    wasm_runtime_package_trace(|| "collect constant regions".to_owned());
     let const_regions = collect_const_regions(db, &graph);
+    wasm_runtime_package_trace(|| format!("collected {} constant regions", const_regions.len()));
     let mut reachable_cache = FxHashMap::default();
 
     let mut objects = std::mem::take(&mut graph.object_specs)

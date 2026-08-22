@@ -31,7 +31,7 @@
 //! projection and typed loads/stores. Place forms outside those admitted,
 //! layout-derived cases continue to fail closed.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use compiler_db::DriverDataBase;
 use hir::projection::IndexSource;
@@ -85,6 +85,18 @@ use super::LowerError;
 use super::lower_runtime::{
     assign_sonatina_function_symbols, bytes_to_i256, linkage_for_runtime, scalar_ty,
 };
+
+fn wasm_lower_trace(message: impl FnOnce() -> String) {
+    if std::env::var_os("FE_WASM_LOWER_TRACE").is_some() {
+        eprintln!("[fe wasm lowering] {}", message());
+    }
+}
+
+fn wasm_lower_trace_detail(message: impl FnOnce() -> String) {
+    if std::env::var_os("FE_WASM_LOWER_TRACE_DETAIL").is_some() {
+        eprintln!("[fe wasm lowering] {}", message());
+    }
+}
 
 /// The Wasm32 ISA the wasm lowering targets (little-endian, 32-bit pointers,
 /// portable `NativeInstSet` vocabulary).
@@ -210,6 +222,12 @@ fn compile_runtime_package_wasm_inner(
     validate_host_enum_params: bool,
     enable_scoped_arena: bool,
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
+    wasm_lower_trace(|| {
+        format!(
+            "begin runtime package, functions={}",
+            package.functions(db).len(),
+        )
+    });
     // Reject unsupported indirect host results before constructing any
     // Sonatina signatures. A local wrapper may itself return the authored enum
     // and appear before the import in package order, so gating inside
@@ -294,8 +312,11 @@ fn compile_runtime_package_wasm_inner(
         validate_host_enum_params,
         enable_scoped_arena,
     )?;
+    wasm_lower_trace(|| "prepared portable runtime bodies".to_owned());
     lowerer.declare_functions()?;
+    wasm_lower_trace(|| "declared portable runtime functions".to_owned());
     lowerer.lower_bodies()?;
+    wasm_lower_trace(|| "lowered portable runtime function bodies".to_owned());
     for lane in canonical_lanes {
         lowerer.synthesize_canonical_lane(lane)?;
     }
@@ -314,6 +335,7 @@ fn compile_runtime_package_wasm_inner(
         lowerer.synthesize_resident_policy(policy, policy_index)?;
     }
     let import_modules = lowerer.import_modules();
+    wasm_lower_trace(|| "finished portable Sonatina module".to_owned());
     Ok((lowerer.finish(), import_modules))
 }
 
@@ -3548,14 +3570,19 @@ where
         validate_host_enum_params: bool,
         enable_scoped_arena: bool,
     ) -> Result<Self, LowerError> {
+        wasm_lower_trace(|| "prepare inline value bodies".to_owned());
         let mut prepared_bodies = prepare_inline_value_bodies(db, package).bodies;
+        wasm_lower_trace(|| format!("prepared {} inline value bodies", prepared_bodies.len()));
         for (instance, body) in &mut prepared_bodies {
             normalize_portable_body(db, *instance, body);
         }
+        wasm_lower_trace(|| "normalized portable bodies".to_owned());
         reify_residual_call_arguments(db, package, &mut prepared_bodies);
+        wasm_lower_trace(|| "reified residual call arguments".to_owned());
         for body in prepared_bodies.values_mut() {
             fold_fresh_materialize_load_roundtrips(db, body);
         }
+        wasm_lower_trace(|| "folded materialize-load roundtrips".to_owned());
         let mut func_symbols = assign_sonatina_function_symbols(db, package);
         for function in package.functions(db) {
             let instance = function.instance(db);
@@ -3637,8 +3664,16 @@ where
             arena_owned_locals: FxHashMap::default(),
         };
         if enable_scoped_arena {
+            wasm_lower_trace(|| "derive typed arena provenance".to_owned());
             lowerer.arena_owned_locals = lowerer.derive_arena_owned_locals();
+            wasm_lower_trace(|| "derive scoped arena bodies".to_owned());
             lowerer.scoped_arena_bodies = lowerer.derive_scoped_arena_bodies();
+            wasm_lower_trace(|| {
+                format!(
+                    "derived scoped arena bodies, scoped={}",
+                    lowerer.scoped_arena_bodies.len(),
+                )
+            });
         }
         Ok(lowerer)
     }
@@ -3970,10 +4005,19 @@ where
     }
 
     fn lower_bodies(&mut self) -> Result<(), LowerError> {
-        for function in self.package.functions(self.db) {
+        let functions = self.package.functions(self.db);
+        let total = functions.len();
+        for (index, function) in functions.into_iter().enumerate() {
             let instance = function.instance(self.db);
             if gpu_intrinsic(self.db, instance).is_some() {
                 continue;
+            }
+            let symbol = self.function_symbol(instance);
+            wasm_lower_trace_detail(|| format!("lower function {}/{total}: {symbol}", index + 1));
+            if (index + 1) % 500 == 0 || index + 1 == total {
+                wasm_lower_trace(|| {
+                    format!("lower function progress, completed={}/{total}", index + 1)
+                });
             }
             let body = self
                 .prepared_bodies
@@ -3986,7 +4030,6 @@ where
             let func_ref = *self.func_map.get(&instance).ok_or_else(|| {
                 LowerError::Internal("wasm function lowered before it was declared".to_string())
             })?;
-            let symbol = self.function_symbol(instance);
             let validate_enum_params = self.validate_host_enum_params
                 && function.linkage(self.db) == RuntimeLinkage::Internal
                 && !self.wrapped_lane_names.contains(&symbol);
@@ -6097,14 +6140,6 @@ where
         ))
     }
 
-    fn private_runtime_instance(&self, instance: RuntimeInstance<'db>) -> bool {
-        self.package
-            .functions(self.db)
-            .into_iter()
-            .find(|function| function.instance(self.db) == instance)
-            .is_some_and(|function| function.linkage(self.db) == RuntimeLinkage::Private)
-    }
-
     fn arena_address_param(class: &RuntimeClass<'db>) -> bool {
         match class {
             RuntimeClass::RawAddr {
@@ -6124,140 +6159,138 @@ where
         }
     }
 
-    fn arena_owned_place(
+    fn arena_owned_place_source(
         body: &RuntimeBody<'db>,
         place: &RuntimePlace<'db>,
-        owned: &HashSet<RLocalId>,
-    ) -> bool {
+    ) -> Option<RLocalId> {
         match place.root {
-            PlaceRoot::Slot(local) | PlaceRoot::Ref(local) => owned.contains(&local),
+            PlaceRoot::Slot(local) | PlaceRoot::Ref(local) => Some(local),
             PlaceRoot::Provider(binding) => body
                 .provider_bindings
                 .get(binding.as_u32() as usize)
-                .is_some_and(|binding| owned.contains(&binding.value)),
+                .map(|binding| binding.value),
             PlaceRoot::Ptr {
                 addr,
                 space: AddressSpaceKind::Memory,
                 ..
-            } => owned.contains(&addr),
-            PlaceRoot::Ptr { .. } => false,
-        }
-    }
-
-    fn body_arena_owned_locals(
-        &self,
-        body: &RuntimeBody<'db>,
-        safe_params: &HashSet<RLocalId>,
-    ) -> HashSet<RLocalId> {
-        let mut owned = safe_params.clone();
-        loop {
-            let mut changed = false;
-            for block in &body.blocks {
-                for stmt in &block.stmts {
-                    let RStmt::Assign { dst, expr } = stmt else {
-                        continue;
-                    };
-                    let derives_arena_address = match expr {
-                        RExpr::AllocObject { .. }
-                        | RExpr::MaterializeToObject { .. }
-                        | RExpr::MaterializePlaceToObject { .. } => true,
-                        RExpr::Use(source)
-                        | RExpr::ProviderToRaw { value: source }
-                        | RExpr::RetagRef { value: source }
-                        | RExpr::WordToRawAddr { value: source, .. }
-                        | RExpr::ProviderFromRaw { raw: source, .. } => owned.contains(source),
-                        RExpr::AddrOf { place } => Self::arena_owned_place(body, place, &owned),
-                        _ => false,
-                    };
-                    if derives_arena_address && owned.insert(*dst) {
-                        changed = true;
-                    }
-                }
-            }
-            if !changed {
-                return owned;
-            }
+            } => Some(addr),
+            PlaceRoot::Ptr { .. } => None,
         }
     }
 
     /// Prove canonical-arena address provenance across private calls. A raw
     /// memory parameter is admitted only when the function is not exported and
     /// every materialized call site supplies an address descended from
-    /// `AllocObject` or another target-layout materialization. The least fixed
-    /// point propagates that fact through private helper chains. A public
-    /// parameter, an integer-to-pointer conversion, or one forged call site
-    /// prevents the parameter from entering the proven set.
+    /// `AllocObject` or another target-layout materialization. A worklist
+    /// propagates that least fixed point through local copy edges and private
+    /// helper calls. A public parameter, an unproven integer-to-pointer
+    /// conversion, or one forged call site prevents the parameter from entering
+    /// the proven set.
     fn derive_arena_owned_locals(&self) -> FxHashMap<RuntimeInstance<'db>, HashSet<RLocalId>> {
-        let mut safe_params = self
+        type LocalKey<'db> = (RuntimeInstance<'db>, RLocalId);
+
+        let private_instances = self
+            .package
+            .functions(self.db)
+            .into_iter()
+            .filter(|function| function.linkage(self.db) == RuntimeLinkage::Private)
+            .map(|function| function.instance(self.db))
+            .collect::<HashSet<_>>();
+        let mut owned = self
             .prepared_bodies
             .keys()
             .copied()
             .map(|instance| (instance, HashSet::new()))
             .collect::<FxHashMap<_, _>>();
+        let mut seeds = Vec::<LocalKey<'db>>::new();
+        let mut local_dependents = FxHashMap::<LocalKey<'db>, Vec<LocalKey<'db>>>::default();
+        let mut call_dependents = FxHashMap::<LocalKey<'db>, Vec<LocalKey<'db>>>::default();
+        let mut call_requirements = FxHashMap::<LocalKey<'db>, usize>::default();
 
-        loop {
-            let owned = self
-                .prepared_bodies
-                .iter()
-                .map(|(instance, body)| {
-                    let params = safe_params.get(instance).cloned().unwrap_or_default();
-                    (*instance, self.body_arena_owned_locals(body, &params))
-                })
-                .collect::<FxHashMap<_, _>>();
-            let mut observed =
-                FxHashMap::<(RuntimeInstance<'db>, RLocalId), (bool, bool)>::default();
-            for (caller, body) in &self.prepared_bodies {
-                let caller_owned = owned.get(caller).cloned().unwrap_or_default();
-                for block in &body.blocks {
-                    for stmt in &block.stmts {
-                        let RStmt::Assign {
-                            expr: RExpr::Call { callee, args },
-                            ..
-                        } = stmt
-                        else {
-                            continue;
-                        };
-                        let Some(callee_body) = self.prepared_bodies.get(callee) else {
-                            continue;
-                        };
-                        for (argument, parameter) in args.iter().zip(&callee_body.signature.params)
-                        {
-                            if !Self::arena_address_param(&parameter.class) {
-                                continue;
-                            }
-                            let status = observed
-                                .entry((*callee, parameter.local))
-                                .or_insert((false, true));
-                            status.0 = true;
-                            status.1 &= caller_owned.contains(argument);
+        for (instance, body) in &self.prepared_bodies {
+            for block in &body.blocks {
+                for stmt in &block.stmts {
+                    let RStmt::Assign { dst, expr } = stmt else {
+                        continue;
+                    };
+                    let destination = (*instance, *dst);
+                    match expr {
+                        RExpr::AllocObject { .. }
+                        | RExpr::MaterializeToObject { .. }
+                        | RExpr::MaterializePlaceToObject { .. } => seeds.push(destination),
+                        RExpr::Use(source)
+                        | RExpr::ProviderToRaw { value: source }
+                        | RExpr::RetagRef { value: source }
+                        | RExpr::WordToRawAddr { value: source, .. }
+                        | RExpr::ProviderFromRaw { raw: source, .. } => {
+                            local_dependents
+                                .entry((*instance, *source))
+                                .or_default()
+                                .push(destination);
                         }
+                        RExpr::AddrOf { place } => {
+                            if let Some(source) = Self::arena_owned_place_source(body, place) {
+                                local_dependents
+                                    .entry((*instance, source))
+                                    .or_default()
+                                    .push(destination);
+                            }
+                        }
+                        _ => {}
+                    }
+
+                    let RExpr::Call { callee, args } = expr else {
+                        continue;
+                    };
+                    if !private_instances.contains(callee) {
+                        continue;
+                    }
+                    let Some(callee_body) = self.prepared_bodies.get(callee) else {
+                        continue;
+                    };
+                    for (argument, parameter) in args.iter().zip(&callee_body.signature.params) {
+                        if !Self::arena_address_param(&parameter.class) {
+                            continue;
+                        }
+                        let parameter = (*callee, parameter.local);
+                        *call_requirements.entry(parameter).or_default() += 1;
+                        call_dependents
+                            .entry((*instance, *argument))
+                            .or_default()
+                            .push(parameter);
                     }
                 }
             }
+        }
 
-            let mut next = self
-                .prepared_bodies
-                .keys()
-                .copied()
-                .map(|instance| (instance, HashSet::new()))
-                .collect::<FxHashMap<_, _>>();
-            for ((instance, parameter), (seen, all_owned)) in observed {
-                if seen && all_owned && self.private_runtime_instance(instance) {
-                    next.entry(instance).or_default().insert(parameter);
+        let mut queue = VecDeque::<LocalKey<'db>>::new();
+        for (instance, local) in seeds {
+            if owned.entry(instance).or_default().insert(local) {
+                queue.push_back((instance, local));
+            }
+        }
+        let mut satisfied_requirements = FxHashMap::<LocalKey<'db>, usize>::default();
+        while let Some(source) = queue.pop_front() {
+            if let Some(dependents) = local_dependents.get(&source) {
+                for &(instance, local) in dependents {
+                    if owned.entry(instance).or_default().insert(local) {
+                        queue.push_back((instance, local));
+                    }
                 }
             }
-            if next == safe_params {
-                return self
-                    .prepared_bodies
-                    .iter()
-                    .map(|(instance, body)| {
-                        let params = next.get(instance).cloned().unwrap_or_default();
-                        (*instance, self.body_arena_owned_locals(body, &params))
-                    })
-                    .collect();
+            if let Some(parameters) = call_dependents.get(&source) {
+                for &parameter in parameters {
+                    let satisfied = satisfied_requirements.entry(parameter).or_default();
+                    *satisfied += 1;
+                    if *satisfied == call_requirements[&parameter]
+                        && owned.entry(parameter.0).or_default().insert(parameter.1)
+                    {
+                        queue.push_back(parameter);
+                    }
+                }
             }
-            safe_params = next;
         }
+        owned
     }
 
     fn arena_owned_local(&self, body: &RuntimeBody<'db>, local: RLocalId) -> bool {

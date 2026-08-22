@@ -234,9 +234,22 @@ impl Backend for WasmBackend {
         use sonatina_codegen::isa::wasm::WasmBackend as SonatinaWasmBackend;
         use sonatina_codegen::optim::Pipeline;
 
+        let trace = std::env::var_os("FE_WASM_LOWER_TRACE").is_some();
+        if trace {
+            eprintln!("[fe wasm backend] build runtime package");
+        }
         let package = mir::build_wasm_runtime_package(db, top_mod)?;
+        if trace {
+            eprintln!(
+                "[fe wasm backend] runtime package ready, functions={}",
+                package.functions(db).len(),
+            );
+        }
         let (mut module, import_modules) =
             crate::sonatina::compile_runtime_package_wasm(db, &package)?;
+        if trace {
+            eprintln!("[fe wasm backend] portable Sonatina module ready");
+        }
         // Sonatina's `Pipeline` is ISA-independent (the EVM-specific one is
         // `EvmPipeline`), and `EvmCompile::optimize` runs it with no target
         // check. Until now the wasm path ran zero passes, which left recursive
@@ -248,6 +261,9 @@ impl Backend for WasmBackend {
             OptLevel::O0 => {}
             OptLevel::Os => Pipeline::size().run(&mut module),
             OptLevel::O1 | OptLevel::O2 => Pipeline::speed().run(&mut module),
+        }
+        if trace {
+            eprintln!("[fe wasm backend] Sonatina optimization complete");
         }
         // Change 5: enable the canonical arena only when the module actually
         // allocates dynamically (a function-local aggregate's `AllocObject`, a
@@ -271,6 +287,12 @@ impl Backend for WasmBackend {
                     .join("; ")
             ))
         })?;
+        if trace {
+            eprintln!(
+                "[fe wasm backend] Wasm artifact ready, bytes={}",
+                artifact.bytes.len(),
+            );
+        }
         Ok(BackendOutput::Bytecode(artifact.bytes))
     }
 }
