@@ -1055,6 +1055,41 @@ impl<'db> RmirEmitter<'db> {
                     return;
                 }
                 let actual = self.value_class(value).cloned();
+                if actual.is_none() {
+                    let zst_initializer = match &dst_class {
+                        RuntimeClass::AggregateValue { layout }
+                            if self.layout_is_runtime_zst(*layout) =>
+                        {
+                            Some(RExpr::AggregateMake {
+                                layout: *layout,
+                                fields: Box::default(),
+                            })
+                        }
+                        RuntimeClass::Ref {
+                            pointee,
+                            kind: RefKind::Object,
+                            view: RefView::Whole,
+                        } => match **pointee {
+                            RuntimeClass::AggregateValue { layout }
+                                if self.layout_is_runtime_zst(layout) =>
+                            {
+                                Some(RExpr::AllocObject { layout })
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some(expr) = zst_initializer {
+                        // A zero-sized provider value can still require a
+                        // concrete aggregate or addressable object when an
+                        // abstract effect crosses a runtime call boundary. Its
+                        // constructor has no runtime result, so materialize the
+                        // empty representation demanded by inference instead
+                        // of coercing the erased `()` result.
+                        self.push_stmt(bb, RStmt::Assign { dst, expr });
+                        return;
+                    }
+                }
                 let value = if self.value_class(value) == Some(&dst_class) {
                     value
                 } else if actual.as_ref().is_some_and(|actual| {
@@ -4290,11 +4325,20 @@ impl<'db> RmirEmitter<'db> {
             .value_class(src)
             .cloned()
             .unwrap_or_else(|| {
+                let owner = self
+                    .key
+                    .semantic(self.db)
+                    .map(|semantic| semantic.key(self.db).owner(self.db));
+                let owner_name = match owner {
+                    Some(BodyOwner::Func(func)) => func
+                        .name(self.db)
+                        .to_opt()
+                        .map(|name| name.data(self.db).to_string())
+                        .unwrap_or_else(|| "<anonymous>".to_string()),
+                    _ => "<non-function>".to_string(),
+                };
                 panic!(
-                    "cannot coerce erased value {src:?} to {target:?}; owner={:?}; src_ty={}; locals={:?}",
-                    self.key
-                        .semantic(self.db)
-                        .map(|semantic| semantic.key(self.db).owner(self.db)),
+                    "cannot coerce erased value {src:?} to {target:?}; owner={owner:?}; owner_name={owner_name}; src_ty={}; locals={:?}",
                     self.locals[src.index()].semantic_ty.pretty_print(self.db),
                     self.locals,
                 )
@@ -5740,6 +5784,61 @@ pub fn f32_helpers(x: i32) -> i32 {
         assert!(
             package.is_ok(),
             "poseidon_mock should lower through range consts with runtime-zst fields: {package:#?}"
+        );
+    }
+
+    #[test]
+    fn call_constructed_zst_can_back_mutable_effect_object() {
+        let source = r#"
+trait Source {
+    fn read(mut self) -> u32
+}
+
+struct Empty {}
+
+impl Empty {
+    fn new() -> Self { Self {} }
+}
+
+impl Source for Empty {
+    fn read(mut self) -> u32 { 42 }
+}
+
+fn pull() -> u32 uses (source: mut Source) {
+    source.read()
+}
+
+pub fn run() -> u32 {
+    with (Source = Empty::new()) { pull() }
+}
+"#;
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///call_constructed_zst_mutable_effect.fe").unwrap();
+        db.workspace()
+            .touch(&mut db, url.clone(), Some(source.to_string()));
+        let file = db.workspace().get(&db, &url).expect("file should load");
+        let package = build_wasm_runtime_package(&db, db.top_mod(file))
+            .expect("a call-constructed ZST should back an abstract mutable effect");
+        let run = package
+            .functions(&db)
+            .iter()
+            .copied()
+            .find(|function| function.symbol(&db).contains("run"))
+            .expect("missing run runtime function");
+        assert!(
+            run.instance(&db)
+                .body(&db)
+                .blocks
+                .iter()
+                .flat_map(|block| &block.stmts)
+                .any(|stmt| matches!(
+                    stmt,
+                    RStmt::Assign {
+                        expr: RExpr::AllocObject { .. },
+                        ..
+                    }
+                )),
+            "the erased ZST constructor must materialize its inferred effect object"
         );
     }
 }
