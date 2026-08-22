@@ -613,6 +613,21 @@ fn caller() {
     }
 
     #[test]
+    fn gpu_intrinsic_sentinel_body_does_not_poison_caller_exit_behavior() {
+        assert_runtime_exit_behavior(
+            r#"
+use std::webgpu::StorageBuffer
+
+fn reads(buffer: StorageBuffer<u32, 4>) -> bool {
+    buffer.load(index: 0) == 1
+}
+"#,
+            "gpu_intrinsic_sentinel_body_does_not_poison_caller_exit_behavior",
+            &[("reads", RuntimeExitBehavior::MayReturn)],
+        );
+    }
+
+    #[test]
     fn panic_wrappers_are_known_never_returning() {
         assert_runtime_exit_behavior(
             r#"

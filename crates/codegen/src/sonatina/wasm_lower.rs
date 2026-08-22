@@ -10240,6 +10240,13 @@ where
                 self.rewind_scoped_arena();
                 self.fb.insert_inst_no_result(Return::new_unit(is));
             }
+            RTerminator::TerminalCall { callee, .. } => {
+                return Err(LowerError::Unsupported(format!(
+                    "wasm target (R1) does not support terminal call to `{}`; the callee is \
+                     never-returning and needs an explicit portable lowering",
+                    self.module.function_symbol(*callee),
+                )));
+            }
             RTerminator::Trap => {
                 self.fb.insert_inst_no_result(Unreachable::new(is));
             }

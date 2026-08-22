@@ -790,6 +790,13 @@ impl<'db> SemanticInstance<'db> {
         cycle_initial=known_never_returns_cycle_initial
     )]
     pub fn known_never_returns(self, db: &'db dyn HirAnalysisDb) -> bool {
+        // GPU intrinsics carry portable semantics supplied by the backend.
+        // Their Fe bodies deliberately trap so an unlowered execution fails
+        // closed, but that sentinel body must not make callers appear
+        // never-returning during runtime control-flow classification.
+        if self.is_attributed_gpu_intrinsic(db) {
+            return false;
+        }
         if self.is_intrinsically_never_returning(db) {
             return true;
         }
@@ -864,6 +871,15 @@ impl<'db> SemanticInstance<'db> {
 }
 
 impl<'db> SemanticInstance<'db> {
+    fn is_attributed_gpu_intrinsic(self, db: &'db dyn HirAnalysisDb) -> bool {
+        let BodyOwner::Func(func) = self.key(db).owner(db) else {
+            return false;
+        };
+        func.scope()
+            .attrs(db)
+            .is_some_and(|attrs| attrs.gpu_intrinsic(db).is_some())
+    }
+
     fn normalization_scope(self, db: &'db dyn HirAnalysisDb) -> ScopeId<'db> {
         self.key(db).owner(db).scope()
     }
