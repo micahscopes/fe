@@ -31,7 +31,9 @@ actor InvocationReceipt uses (Program<WebGpuBackend>) {
             + invocation.workgroups.y * 200000
             + invocation.workgroups.z * 400000
             + invocation.local_index * 1000000
-        self.receipts.store(index: slot, value: receipt)
+        let mut staged: [u32; 1] = [0; 1]
+        staged[0] = receipt
+        self.receipts.store(index: slot, value: staged[0])
     }
 
     fn paint(self, px: i32, py: i32) -> i32 uses (Pixel) {

@@ -105,6 +105,7 @@ pub fn compile_runtime_package_spirv_compute_with_resources(
         db,
         package,
         workgroup_size,
+        [1, 1, 1],
         resources,
         &[],
     )
@@ -117,6 +118,7 @@ pub fn compile_runtime_package_spirv_compute_with_interface(
     db: &DriverDataBase,
     package: &RuntimePackage<'_>,
     workgroup_size: [u32; 3],
+    dispatch_grid: [u32; 3],
     resources: &[SpirvExternalResource],
     builtin_arguments: &[SpirvBuiltinArgument],
 ) -> Result<SpirvArtifact, LowerError> {
@@ -124,11 +126,10 @@ pub fn compile_runtime_package_spirv_compute_with_interface(
     inline_spirv_calls(&mut module);
     ensure_spirv_entry_call_free(&module)?;
 
-    let mut backend = SpirvBackend::new().with_compute().with_workgroup_size(
-        workgroup_size[0],
-        workgroup_size[1],
-        workgroup_size[2],
-    );
+    let mut backend = SpirvBackend::new()
+        .with_compute()
+        .with_workgroup_size(workgroup_size[0], workgroup_size[1], workgroup_size[2])
+        .with_dispatch_grid(dispatch_grid[0], dispatch_grid[1], dispatch_grid[2]);
     for resource in resources {
         backend = backend.with_external_resource(resource.clone());
     }

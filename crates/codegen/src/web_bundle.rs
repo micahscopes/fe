@@ -4199,6 +4199,7 @@ impl WebBundle {
                             db,
                             &package,
                             workgroup_size,
+                            dispatch,
                             &external,
                             &builtin_arguments,
                         ),

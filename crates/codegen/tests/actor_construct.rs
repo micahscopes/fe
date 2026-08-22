@@ -577,6 +577,15 @@ fn nominal_compute_invocation_maps_to_physical_builtins_without_parameter_storag
             .all(|binding| binding.role != fe_codegen::WebBindingRole::Input),
         "compute invocation must not synthesize host-populated scalar input storage"
     );
+    let trap = pass
+        .layout
+        .bindings
+        .iter()
+        .find(|binding| binding.name == "trap")
+        .expect("checked resource indexing requires a trap channel");
+    assert_eq!(trap.role, fe_codegen::WebBindingRole::Output);
+    assert_eq!(trap.stride, 4);
+    assert_eq!(trap.span, 16 * 4);
     assert_eq!(
         pass.layout
             .builtin_inputs
