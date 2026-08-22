@@ -9007,10 +9007,10 @@ where
         let RuntimeClass::AggregateValue { .. } = resolved.result_class.clone() else {
             return Ok(None);
         };
-        // Dynamic indexing is sound only when the root names storage owned by
-        // this function: a local object or the arena copy made for a flattened
-        // aggregate parameter. Other memory references retain the prior
-        // constant-projection envelope and cannot widen a host region.
+        // Dynamic indexing requires a typed aggregate extent. Local objects,
+        // materialized parameters, and raw providers that retain a concrete
+        // target layout all carry that authority. Untyped raw addresses retain
+        // the prior constant-projection envelope.
         let (addr_local, mut current_class, allow_dynamic_index) = match resolved.root_kind {
             mir::ResolvedPlaceRootKind::Ref { value, class }
                 if matches!(
@@ -9056,6 +9056,21 @@ where
             {
                 (local, class, true)
             }
+            mir::ResolvedPlaceRootKind::Provider {
+                value,
+                provider_class:
+                    RuntimeClass::RawAddr {
+                        space: AddressSpaceKind::Memory,
+                        target,
+                    },
+                class,
+                ..
+            } => (value, class, target.is_some()),
+            mir::ResolvedPlaceRootKind::Ptr {
+                addr,
+                space: AddressSpaceKind::Memory,
+                class,
+            } => (addr, class, true),
             _ => return Ok(None),
         };
         let mut addr = self.local_value(addr_local)?;
@@ -9164,14 +9179,13 @@ where
     }
 
     /// Resolve a Wasm linear-memory scalar place behind a memory address: a
-    /// memory `RawAddr` / memory-provider root (struct fields only) or a
-    /// function-local object-ref root (struct fields AND array element indexes,
-    /// Change 3). Addresses are i32 byte offsets on wasm32, not Sonatina compound
+    /// memory `RawAddr` / memory-provider root or a function-local object-ref
+    /// root. Addresses are i32 byte offsets on wasm32, not Sonatina compound
     /// pointers, so field/index arithmetic uses ordinary i32 Add/Mul rather than
     /// `Gep`. Offsets and array strides come exclusively from MIR's target-layout
     /// SSOT. A dynamic array index emits an `idx < len` bounds check that traps
-    /// (`Unreachable`) on failure. Variants, dereferences, and dynamic indexes on
-    /// host-region roots remain fail-closed.
+    /// (`Unreachable`) on failure. Untyped raw regions, variants, and
+    /// dereferences remain fail-closed.
     fn raw_memory_scalar_place(
         &mut self,
         place: &RuntimePlace<'db>,
@@ -9182,11 +9196,9 @@ where
         let RuntimeClass::Scalar(scalar) = resolved.result_class.clone() else {
             return Ok(None);
         };
-        // `allow_index` is true only for the function-local object-ref root
-        // (Change 3a): its i32 pointer supports element addressing. The
-        // host-region roots (RawAddr / Provider-RawAddr / Ptr) stay restricted to
-        // Field-only paths in slice 1 (don't widen the host region to dynamic
-        // index yet).
+        // `allow_index` requires a target-derived aggregate extent. This is
+        // carried by object refs, materialized parameters, and typed raw
+        // providers. A raw address with no target layout stays field-only.
         let (addr_local, mut current_class, allow_index) = match resolved.root_kind {
             mir::ResolvedPlaceRootKind::Ref { value, class }
                 if matches!(
@@ -9268,16 +9280,16 @@ where
                 provider_class:
                     RuntimeClass::RawAddr {
                         space: AddressSpaceKind::Memory,
-                        ..
+                        target,
                     },
                 class,
                 ..
-            } => (value, class, false),
+            } => (value, class, target.is_some()),
             mir::ResolvedPlaceRootKind::Ptr {
                 addr,
                 space: AddressSpaceKind::Memory,
                 class,
-            } => (addr, class, false),
+            } => (addr, class, true),
             _ => return Ok(None),
         };
         // The base pointer is materialized up front so a dynamic index can flush
@@ -9385,7 +9397,7 @@ where
                 other => {
                     return Err(LowerError::Unsupported(format!(
                         "wasm memory scalar place projection `{other:?}` is not supported; \
-                         only struct fields and (object-ref) array indexes have \
+                         only struct fields and typed array indexes have \
                          target-layout byte-offset lowering"
                     )));
                 }

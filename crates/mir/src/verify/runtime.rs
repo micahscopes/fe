@@ -371,10 +371,24 @@ fn verify_assign<'db>(
         }
         RExpr::AddrOf { place } => {
             let expected = resolve_runtime_place_address_class(db, program, body, place)?;
-            if dst_class.as_ref() != Some(&expected) {
-                return Err(VerifyError::InvalidExprClass(dst));
+            if dst_class.as_ref() == Some(&expected) {
+                Some(expected)
+            } else {
+                match (&expected, &dst_class) {
+                    (
+                        RuntimeClass::Ref {
+                            pointee,
+                            kind: crate::runtime::RefKind::Object | crate::runtime::RefKind::Const,
+                            view: crate::runtime::RefView::Whole,
+                        },
+                        Some(RuntimeClass::RawAddr {
+                            space: crate::runtime::AddressSpaceKind::Memory,
+                            target: Some(target),
+                        }),
+                    ) if pointee.aggregate_layout() == Some(*target) => dst_class.clone(),
+                    _ => return Err(VerifyError::InvalidExprClass(dst)),
+                }
             }
-            Some(expected)
         }
         RExpr::Load { place } => Some(project_place(db, program, body, place)?),
         RExpr::AggregateExtract { value, index } => {

@@ -17,6 +17,9 @@ fn classifies_core_and_std_runtime_builtins() {
 
     let alloc = resolve_lib_func_path(&db, func.scope(), "std::evm::mem::alloc")
         .expect("failed to resolve std::evm::mem::alloc");
+    let typed_browser_alloc =
+        resolve_lib_func_path(&db, func.scope(), "core::browser::alloc_browser_object")
+            .expect("failed to resolve core::browser::alloc_browser_object");
     let mload = resolve_lib_func_path(&db, func.scope(), "std::evm::ops::mload")
         .expect("failed to resolve std::evm::ops::mload");
     let panic = resolve_lib_func_path(&db, func.scope(), "core::panic")
@@ -30,6 +33,10 @@ fn classifies_core_and_std_runtime_builtins() {
 
     assert_eq!(
         runtime_builtin_func_kind(&db, alloc),
+        Some(RuntimeBuiltinFuncKind::Malloc)
+    );
+    assert_eq!(
+        runtime_builtin_func_kind(&db, typed_browser_alloc),
         Some(RuntimeBuiltinFuncKind::Malloc)
     );
     assert_eq!(

@@ -3104,6 +3104,27 @@ impl<'db> RmirEmitter<'db> {
             };
             return Some(self.lower_panic_with_value(bb, *value));
         }
+        if kind == RuntimeBuiltinFuncKind::Malloc && args.is_empty() {
+            let ret_ty = semantic_return_ty(self.db, semantic);
+            let ret_class = self.top_level_class_for_ty(ret_ty, AddressSpaceKind::Memory)?;
+            let RuntimeClass::RawAddr {
+                space: AddressSpaceKind::Memory,
+                target: Some(layout),
+            } = ret_class
+            else {
+                return None;
+            };
+            let ret_class = RuntimeClass::object_ref(layout);
+            let ret = self.alloc_runtime_temp(ret_ty, RuntimeCarrier::Value(ret_class));
+            self.push_stmt(
+                bb,
+                RStmt::Assign {
+                    dst: ret,
+                    expr: RExpr::AllocObject { layout },
+                },
+            );
+            return Some(ret);
+        }
         let lowered = self.lower_extern_builtin(func, &args)?;
         let ret_ty = semantic_return_ty(self.db, semantic);
         let _ = effect_args;

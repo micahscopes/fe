@@ -49,6 +49,12 @@ pub struct BrowserPtr<T> {
 /// Allocate browser linear memory and return a wasm32-native pointer.
 extern {
     pub fn alloc_browser_bytes(_ size: u32) -> BrowserPtr<u8>
+
+    /// Allocate one uninitialized typed object in the current browser arena
+    /// epoch. The compiler derives its exact target layout from `T`; callers
+    /// must initialize the object before reading it and must not retain the
+    /// pointer across `fe_cabi_reset`.
+    pub fn alloc_browser_object<T>() -> BrowserPtr<T>
 }
 
 /// Allocated bytes returned from Fe through the canonical browser ABI.
