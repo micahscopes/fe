@@ -523,6 +523,118 @@ impl Poseidon2State {
     }
 }
 
+/// Serializable checkpoint for the fixed-length field sponge.
+///
+/// GPU pass graphs can carry this value between bounded stages instead of
+/// forcing every permutation into one browser shader. The lanes are the exact
+/// Montgomery words used by `commit_fields`; staging changes placement only,
+/// not the permutation, transcript prefix, or digest.
+pub struct Poseidon2FieldSponge {
+    lanes: [u32; WIDTH],
+    rate: u32,
+    expected: u32,
+    written: u32,
+    valid: bool,
+}
+
+impl core::marker::Copy for Poseidon2FieldSponge {}
+
+impl Poseidon2FieldSponge {
+    pub fn begin<D: Poseidon2FieldDomain>(_ expected: u32) -> Self {
+        let mut lanes = [0; WIDTH]
+        let valid = D::TAG < BABY_BEAR_MODULUS && expected < BABY_BEAR_MODULUS
+        if valid {
+            lanes[0] = BabyBear::from_u32(D::TAG).to_montgomery_word()
+            lanes[1] = BabyBear::from_u32(expected).to_montgomery_word()
+        }
+        Self { lanes: lanes, rate: 2, expected: expected, written: 0, valid: valid }
+    }
+
+    /// Restore a checkpoint from its exact field words. This is intended for
+    /// compiler-derived storage resources between Fe-authored GPU passes.
+    pub fn restore(
+        _ lanes: own [u32; WIDTH],
+        _ rate: u32,
+        _ expected: u32,
+        _ written: u32,
+    ) -> Self {
+        let count_valid = expected < BABY_BEAR_MODULUS && written <= expected
+        let expected_rate = if count_valid {
+            (written + 2) % SPONGE_RATE.downcast_truncate()
+        } else {
+            SPONGE_RATE.downcast_truncate()
+        }
+        let mut valid = count_valid
+            && rate < SPONGE_RATE.downcast_truncate()
+            && rate == expected_rate
+        let mut lane: usize = 0
+        while lane < WIDTH {
+            if lanes[lane] >= BABY_BEAR_MODULUS {
+                valid = false
+            }
+            lane = lane + 1
+        }
+        Self { lanes: lanes, rate: rate, expected: expected, written: written, valid: valid }
+    }
+    pub fn is_valid(self) -> bool {
+        self.valid
+    }
+    pub fn lane_word(self, _ lane: u32) -> u32 {
+        if lane >= WIDTH.downcast_truncate() {
+            return 0
+        }
+        self.lanes[lane as usize]
+    }
+
+    /// Absorb one bounded stage of the exact fixed-length message.
+    pub fn absorb<const N: usize>(mut self, _ fields: own [BabyBear; N])
+    where N <= 2147483648
+    {
+        let field_count = fields.len()
+        let count: u32 = field_count.downcast_truncate()
+        if !self.valid
+            || self.written > self.expected
+            || count > self.expected - self.written
+            || self.rate >= SPONGE_RATE.downcast_truncate() {
+            self.valid = false
+            return
+        }
+        let parameters = PARAMETERS
+        let mut state = Poseidon2State { lanes: self.lanes }
+        let mut rate: usize = self.rate as usize
+        let mut index: usize = 0
+        while index < field_count {
+            state.set_field(rate, fields[index])
+            rate = rate + 1
+            if rate == SPONGE_RATE {
+                state.permute(ref parameters)
+                rate = 0
+            }
+            index = index + 1
+        }
+        self.lanes = state.lanes
+        self.rate = rate.downcast_truncate()
+        self.written = self.written + count
+    }
+    pub fn finish(self) -> PackedCommitment {
+        if !self.valid || self.written != self.expected {
+            return PackedCommitment { valid: false, value: Poseidon2Digest::zero() }
+        }
+        let parameters = PARAMETERS
+        let mut state = Poseidon2State { lanes: self.lanes }
+        if self.rate != 0 {
+            state.permute(ref parameters)
+        }
+        let mut values = [BabyBear::zero(); DIGEST_FIELDS]
+        let mut index: usize = 0
+        while index < DIGEST_FIELDS {
+            values[index] = state.field(index)
+            index = index + 1
+        }
+        PackedCommitment { valid: true, value: Poseidon2Digest { values: values } }
+    }
+}
+
 #[inline(always)]
 fn permute16_with_parameters(
     mut input: own [BabyBear; WIDTH],
