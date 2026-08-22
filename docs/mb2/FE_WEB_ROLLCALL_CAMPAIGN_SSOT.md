@@ -1360,6 +1360,11 @@ Legend:
   The exact compiler gate for the real `L = 4`, `TRACE = 4096`, `LDE = 8192`
   specialization passes. This is not yet an independently executed complete
   receipt gate, a succinct recursive leaf proof, or browser proof evidence.
+  Its current four-query plan freezes and tests protocol structure only. It
+  does not claim a target security level. Before recursive proving, an audited
+  Fe policy must derive the query count and related capacities from explicit
+  soundness parameters, with an independent calculation gate; four must not
+  survive merely as a convenient checkpoint constant.
   The next gate must construct one canonical production receipt, accept it,
   reject targeted transcript, opening, and fold mutations against independent
   models, and feed it through staged canonical decoding. Only that executed
