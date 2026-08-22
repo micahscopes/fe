@@ -1,0 +1,10 @@
+[ingot]
+name = "mandelbrot_proof_gpu"
+version = "0.1.0"
+
+[dependencies]
+core = { path = "../../../ingots/core" }
+fmath = { path = "../fmath" }
+mandelbrot_proof_kernel = { path = "../../capstones/mandelbrot-proof/kernel" }
+poseidon_baby_bear = { path = "../../../ingots/poseidon_baby_bear" }
+precision = { path = "../precision" }

@@ -1,0 +1,276 @@
+//! First browser-executed BabyBear proof placement checkpoint.
+//!
+//! The compute pass derives a four-row Q12 Mandelbrot witness through the
+//! production proof kernel, interprets the shared generic radix-2 plan as four
+//! 4-to-16 BabyBear coset LDEs, and commits the resulting 64 field values with
+//! the production Poseidon2 sponge. A Fe-authored mutation mode changes one LDE
+//! value after the clean root is fixed and requires the second commitment to
+//! differ. The fragment pass visualizes the retained codeword and status words.
+//!
+//! This is deliberately labeled a scalar placement checkpoint. It executes as
+//! one real WebGPU invocation today. It is not yet the Conal workgroup
+//! interpreter, an authenticated FRI receipt, or a recursive proof.
+
+use std::webgpu::{
+    ComputeSurface as Prove,
+    FixedDispatch as Once,
+    FragmentSurface as Display,
+    GpuProgram as Program,
+    ResponsiveBacking,
+    StandardSurfaceRecovery,
+    StorageBuffer as ProofTape,
+    SurfaceQuality,
+    SurfaceRecovery,
+    Workgroup as Threads,
+    WebGpuBackend,
+}
+use std::web::view::{Extent, Param, Surface}
+use fmath::{from_i32, to_i32}
+use mandelbrot_proof_kernel::{EscapeAirWordStream, EscapesByQ12}
+use poseidon_baby_bear::{commit_fields, Poseidon2Digest, Poseidon2FieldDomain}
+use precision::baby_bear::BabyBear
+use precision::polynomial::write_radix2_coset_lde
+
+const TRACE: usize = 4
+const LDE: usize = 16
+const COLUMN_COUNT: usize = 4
+const LDE_WORDS: usize = COLUMN_COUNT * LDE
+const DIGEST_FIELDS: usize = 8
+const LDE_START: u32 = 16
+const CLEAN_ROOT: u32 = 80
+const OBSERVED_ROOT: u32 = 88
+const TRACE_VALID: u32 = 96
+const STEP_LDE_VALID: u32 = 97
+const MAGNITUDE_LDE_VALID: u32 = 98
+const ACTIVE_LDE_VALID: u32 = 99
+const TERMINAL_LDE_VALID: u32 = 100
+const ROOTS_EQUAL: u32 = 101
+const MODE_CORRECT: u32 = 102
+const TRACE_COLOR: u32 = 103
+const LDE_COLOR: u32 = 104
+const ROOT_COLOR: u32 = 105
+const MODE_COLOR: u32 = 106
+const PROOF_WORDS: usize = 107
+
+struct MandelbrotGpuLdeV1 {}
+impl Poseidon2FieldDomain for MandelbrotGpuLdeV1 {
+    const TAG: u32 = 1296516172
+}
+
+struct ProofParams { tamper: Param, res: Param }
+
+const fn proof_params() -> ProofParams {
+    ProofParams { tamper: Param::range(min: 0.0, max: 1.0, init: 0.0), res: Param::extent_x() }
+}
+
+fn store_lde_column(_ tape: ProofTape<u32, PROOF_WORDS>, _ column: [BabyBear; LDE], _ offset: u32) {
+    let mut index: usize = 0
+    while index < LDE {
+        tape.store(
+            index: offset + index.downcast_truncate(),
+            value: column[index].to_u32(),
+        )
+        index = index + 1
+    }
+}
+
+fn extend_column<const BASE: usize, const OUTPUT: usize>(
+    _ tape: ProofTape<u32, PROOF_WORDS>,
+) -> bool {
+    let zero = BabyBear::zero()
+    let mut base = [zero; TRACE]
+    let mut row: usize = 0
+    while row < TRACE {
+        base[row] = BabyBear::from_u32(tape.load(index: (BASE + row).downcast_truncate()))
+        row = row + 1
+    }
+
+    let mut extended = [zero; LDE]
+    let ok = write_radix2_coset_lde<TRACE, LDE, BabyBear>(
+        ref base,
+        BabyBear::from_u32(7),
+        mut extended,
+    )
+    store_lde_column(tape, extended, OUTPUT.downcast_truncate())
+    ok
+}
+
+fn packed_rgba(_ red: u32, _ green: u32, _ blue: u32) -> i32 {
+    (4278190080 | (blue << 16) | (green << 8) | red).downcast_truncate()
+}
+
+fn status_word(_ ok: bool, _ tampered: bool) -> u32 {
+    if !ok {
+        packed_rgba(236, 92, 112).downcast_truncate()
+    } else {
+        if tampered {
+            packed_rgba(255, 176, 222).downcast_truncate()
+        } else {
+            packed_rgba(87, 117, 226).downcast_truncate()
+        }
+    }
+}
+
+actor MandelbrotProofGpuCheckpoint uses (
+    Program<WebGpuBackend>, SurfaceQuality<ResponsiveBacking>,
+    SurfaceRecovery<StandardSurfaceRecovery>,
+) {
+    proof: ProofTape<u32, PROOF_WORDS>,
+    tamper: f32,
+    res: f32,
+
+    const fn view() -> Surface<ProofParams> {
+        Surface {
+            extent: Extent::square(512),
+            params: proof_params(),
+        }
+    }
+
+    fn derive_witness(self) uses (Prove<Threads<1, 1, 1>, Once<1, 1, 1>>) {
+        // c = 0.75 + 0i escapes on row three, giving an exact four-row
+        // power-of-two trace. This first fixed-size GPU checkpoint spells out
+        // the four stream positions so the call-free SPIR-V legality pass can
+        // inline the production recurrence. No witness row enters from the
+        // host and no recurrence is duplicated here.
+        let claim = EscapesByQ12::new(3072, 0, 4)
+        let mut stream = EscapeAirWordStream::new(claim)
+
+        let row0 = stream.current_proof_row()
+        self.proof.store(index: 0, value: row0.air.step)
+        self.proof.store(index: 4, value: row0.air.magnitude)
+        self.proof.store(index: 8, value: row0.active)
+        self.proof.store(index: 12, value: row0.terminal)
+
+        stream.advance()
+        let row1 = stream.current_proof_row()
+        self.proof.store(index: 1, value: row1.air.step)
+        self.proof.store(index: 5, value: row1.air.magnitude)
+        self.proof.store(index: 9, value: row1.active)
+        self.proof.store(index: 13, value: row1.terminal)
+
+        stream.advance()
+        let row2 = stream.current_proof_row()
+        self.proof.store(index: 2, value: row2.air.step)
+        self.proof.store(index: 6, value: row2.air.magnitude)
+        self.proof.store(index: 10, value: row2.active)
+        self.proof.store(index: 14, value: row2.terminal)
+
+        stream.advance()
+        let row3 = stream.current_proof_row()
+        self.proof.store(index: 3, value: row3.air.step)
+        self.proof.store(index: 7, value: row3.air.magnitude)
+        self.proof.store(index: 11, value: row3.active)
+        self.proof.store(index: 15, value: row3.terminal)
+
+        let trace_valid = stream.is_valid()
+            && stream.is_terminal()
+        self.proof.store(index: TRACE_VALID, value: if trace_valid { 1 } else { 0 })
+    }
+
+    fn extend_step(self) uses (Prove<Threads<1, 1, 1>, Once<1, 1, 1>>) {
+        let ok = extend_column<0, 16>(self.proof)
+        self.proof.store(index: STEP_LDE_VALID, value: if ok { 1 } else { 0 })
+    }
+
+    fn extend_magnitude(self) uses (Prove<Threads<1, 1, 1>, Once<1, 1, 1>>) {
+        let ok = extend_column<4, 32>(self.proof)
+        self.proof.store(index: MAGNITUDE_LDE_VALID, value: if ok { 1 } else { 0 })
+    }
+
+    fn extend_active(self) uses (Prove<Threads<1, 1, 1>, Once<1, 1, 1>>) {
+        let ok = extend_column<8, 48>(self.proof)
+        self.proof.store(index: ACTIVE_LDE_VALID, value: if ok { 1 } else { 0 })
+    }
+
+    fn extend_terminal(self) uses (Prove<Threads<1, 1, 1>, Once<1, 1, 1>>) {
+        let ok = extend_column<12, 64>(self.proof)
+        self.proof.store(index: TERMINAL_LDE_VALID, value: if ok { 1 } else { 0 })
+    }
+
+    fn commit_leaf(self) uses (Prove<Threads<1, 1, 1>, Once<1, 1, 1>>) {
+        let zero = BabyBear::zero()
+        let mut fields = [zero; LDE_WORDS]
+        let mut index: usize = 0
+        while index < LDE_WORDS {
+            fields[index] = BabyBear::from_u32(self.proof.load(
+                index: LDE_START + index.downcast_truncate(),
+            ))
+            index = index + 1
+        }
+        let clean_root = commit_fields<MandelbrotGpuLdeV1, LDE_WORDS>(fields)
+        let tampered = self.tamper >= 0.5
+        if tampered {
+            fields[17] = fields[17] + BabyBear::one()
+        }
+        let observed_root = commit_fields<MandelbrotGpuLdeV1, LDE_WORDS>(fields)
+        let roots_equal = clean_root.equals(observed_root)
+        let trace_valid = stored_flag(self.proof, TRACE_VALID)
+        let lde_valid = all_lde_columns_valid(self.proof)
+        let root_nonzero = !clean_root.equals(Poseidon2Digest::zero())
+        let mode_correct = trace_valid && lde_valid && (
+            if tampered { !roots_equal } else { roots_equal }
+        )
+
+        index = 0
+        while index < DIGEST_FIELDS {
+            self.proof.store(
+                index: CLEAN_ROOT + index.downcast_truncate(),
+                value: clean_root.field(index.downcast_truncate()).to_u32(),
+            )
+            self.proof.store(
+                index: OBSERVED_ROOT + index.downcast_truncate(),
+                value: observed_root.field(index.downcast_truncate()).to_u32(),
+            )
+            index = index + 1
+        }
+        self.proof.store(index: ROOTS_EQUAL, value: if roots_equal { 1 } else { 0 })
+        self.proof.store(index: MODE_CORRECT, value: if mode_correct { 1 } else { 0 })
+        self.proof.store(index: TRACE_COLOR, value: status_word(trace_valid, false))
+        self.proof.store(index: LDE_COLOR, value: status_word(lde_valid, false))
+        self.proof.store(index: ROOT_COLOR, value: status_word(root_nonzero, false))
+        self.proof.store(index: MODE_COLOR, value: status_word(mode_correct, tampered))
+    }
+
+    fn display(self, px: i32, py: i32) -> i32 uses (Display) {
+        let u = from_i32(px) / self.res
+        let v = from_i32(py) / self.res
+        let tampered = self.tamper >= 0.5
+
+        if v < 0.18 {
+            let color_index = if u < 0.25 {
+                TRACE_COLOR
+            } else {
+                if u < 0.5 {
+                    LDE_COLOR
+                } else {
+                    if u < 0.75 { ROOT_COLOR } else { MODE_COLOR }
+                }
+            }
+            return self.proof.load(index: color_index).downcast_truncate()
+        }
+        if v > 0.82 {
+            return self.proof.load(index: MODE_COLOR).downcast_truncate()
+        }
+
+        let sample_i = to_i32(u * 64.0).downcast_unchecked()
+        let sample = self.proof.load(index: LDE_START + sample_i)
+        let red = 54 + (sample & 127)
+        let green = 42 + ((sample >> 8) & 95)
+        let blue = 96 + ((sample >> 16) & 127)
+        let stripe = if u + v > 1.0 { 18 } else { 0 }
+        let reject_glow = if tampered { 26 } else { 0 }
+        packed_rgba(red + reject_glow, green + stripe, blue)
+    }
+}
+
+fn all_lde_columns_valid(_ tape: ProofTape<u32, PROOF_WORDS>) -> bool {
+    stored_flag(tape, STEP_LDE_VALID)
+        && stored_flag(tape, MAGNITUDE_LDE_VALID)
+        && stored_flag(tape, ACTIVE_LDE_VALID)
+        && stored_flag(tape, TERMINAL_LDE_VALID)
+}
+
+fn stored_flag(_ tape: ProofTape<u32, PROOF_WORDS>, _ index: u32) -> bool {
+    let word: i32 = tape.load(index: index).downcast_truncate()
+    word == 1
+}

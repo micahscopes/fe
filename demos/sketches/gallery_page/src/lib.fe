@@ -235,6 +235,12 @@ actor GalleryPage {
                 program: t2("sketches/", "perturbational_mandelbrot"),
             )
             .render_tile(
+                title: t("Mandelbrot proof GPU"),
+                description: t2("Fe witness → LDE → ", "Poseidon checkpoint"),
+                source: t2("sketches/mandelbrot_proof_gpu/", "src/lib.fe"),
+                program: t("sketches/mandelbrot_proof_gpu"),
+            )
+            .render_tile(
                 title: t("dec"),
                 description: t("discrete exterior calculus"),
                 source: t("sketches/dec/src/lib.fe"),

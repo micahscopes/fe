@@ -18,7 +18,7 @@
 //!   - every `demos/sketches/*/src/lib.fe` that declares an `actor ... uses
 //!     (GpuProgram<WebGpuBackend>)` (known_color, rollcall_pipeline, cga3d,
 //!     qcga, qcga_pencil, qcga_pencil_de, desargues, raymarch, mandelbrot,
-//!     plasma, gradient, dec): entry/mode are
+//!     mandelbrot_proof_gpu, plasma, gradient, dec): entry/mode are
 //!     DERIVED from the actor declaration, never hardcoded here, exactly as
 //!     `fe web build` does with `--entry`/`--mode` omitted;
 //!   - `demos/sketches/fmath`, a math-intrinsics library ingot with no
@@ -1367,6 +1367,55 @@ fn known_color_pass_graph_compiles() {
     assert_typed_surface_recovery(&bundle);
     assert_eq!(bundle.manifest.resources.len(), 1);
     assert_eq!(bundle.manifest.passes.len(), 2);
+}
+
+#[test]
+fn mandelbrot_proof_gpu_checkpoint_compiles_from_shared_fe_math() {
+    let bundle = compile_actor_ingot("demos/sketches/mandelbrot_proof_gpu");
+    wasmparser::validate(&bundle.wasm).expect("proof checkpoint Wasm should be valid");
+    assert_typed_surface_quality(&bundle);
+    assert_typed_surface_recovery(&bundle);
+    assert_initial_param(&bundle, "tamper", 0.0);
+    assert_eq!(bundle.manifest.resources.len(), 1);
+    assert_eq!(bundle.manifest.resources[0].name, "proof");
+    assert_eq!(bundle.manifest.passes.len(), 7);
+    assert_eq!(
+        bundle
+            .manifest
+            .passes
+            .iter()
+            .map(|pass| pass.source_entry.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "derive_witness",
+            "extend_step",
+            "extend_magnitude",
+            "extend_active",
+            "extend_terminal",
+            "commit_leaf",
+            "display",
+        ]
+    );
+    for shader in &bundle.pass_wgsl {
+        assert_browser_wgsl(&shader.source);
+    }
+    let commit = &bundle.pass_wgsl[5].source;
+    assert!(
+        commit.contains("2013265921"),
+        "commit pass must contain the BabyBear modulus"
+    );
+
+    let authored = include_str!("../../../demos/sketches/mandelbrot_proof_gpu/src/lib.fe");
+    for shared_surface in [
+        "EscapeAirWordStream",
+        "write_radix2_coset_lde",
+        "commit_fields",
+    ] {
+        assert!(
+            authored.contains(shared_surface),
+            "browser checkpoint must consume the shared Fe `{shared_surface}` surface"
+        );
+    }
 }
 
 #[test]
