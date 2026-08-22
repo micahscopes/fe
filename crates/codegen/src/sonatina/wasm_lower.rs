@@ -3008,7 +3008,10 @@ fn collect_builtin_uses(builtin: &RuntimeBuiltin<'_>, used: &mut FxHashMap<RLoca
 /// region. Until a disjoint address partition exists, that mix fails closed.
 /// Functions that only allocate, or only touch host memory, are unaffected
 /// (object-ref array element accesses use `Ref`-rooted places, never `Ptr`).
-fn check_host_region_arena_disjoint(body: &RuntimeBody<'_>) -> Result<(), LowerError> {
+fn check_host_region_arena_disjoint(
+    body: &RuntimeBody<'_>,
+    arena_owned: &HashSet<RLocalId>,
+) -> Result<(), LowerError> {
     let allocates_array = body.blocks.iter().any(|block| {
         block.stmts.iter().any(|stmt| {
             matches!(
@@ -3024,6 +3027,9 @@ fn check_host_region_arena_disjoint(body: &RuntimeBody<'_>) -> Result<(), LowerE
         return Ok(());
     }
     let host_region_param = body.signature.params.iter().any(|param| {
+        if arena_owned.contains(&param.local) {
+            return false;
+        }
         matches!(
             param.class,
             RuntimeClass::RawAddr {
@@ -3032,10 +3038,12 @@ fn check_host_region_arena_disjoint(body: &RuntimeBody<'_>) -> Result<(), LowerE
             }
         )
     });
-    let host_region_place = body
-        .blocks
-        .iter()
-        .any(|block| block.stmts.iter().any(stmt_uses_host_memory_pointer));
+    let host_region_place = body.blocks.iter().any(|block| {
+        block
+            .stmts
+            .iter()
+            .any(|stmt| stmt_uses_host_memory_pointer(stmt, arena_owned))
+    });
     if host_region_param || host_region_place {
         return Err(LowerError::Unsupported(
             "wasm target: a function that allocates a local array cannot also use a direct \
@@ -3051,7 +3059,7 @@ fn check_host_region_arena_disjoint(body: &RuntimeBody<'_>) -> Result<(), LowerE
 /// Whether a statement dereferences a raw host memory address (`Ptr{Memory}`
 /// place root). Object-ref array accesses use `Ref`-rooted places, so this never
 /// flags an arena allocation's own element reads/writes.
-fn stmt_uses_host_memory_pointer(stmt: &RStmt<'_>) -> bool {
+fn stmt_uses_host_memory_pointer(stmt: &RStmt<'_>, arena_owned: &HashSet<RLocalId>) -> bool {
     fn is_host_memory_ptr(place: &RuntimePlace<'_>) -> bool {
         matches!(
             place.root,
@@ -3061,12 +3069,19 @@ fn stmt_uses_host_memory_pointer(stmt: &RStmt<'_>) -> bool {
             }
         )
     }
+    let is_unowned_host_memory_ptr = |place: &RuntimePlace<'_>| {
+        is_host_memory_ptr(place)
+            && !matches!(
+                place.root,
+                PlaceRoot::Ptr { addr, .. } if arena_owned.contains(&addr)
+            )
+    };
     match stmt {
-        RStmt::Store { dst, .. } | RStmt::CopyInto { dst, .. } => is_host_memory_ptr(dst),
+        RStmt::Store { dst, .. } | RStmt::CopyInto { dst, .. } => is_unowned_host_memory_ptr(dst),
         RStmt::Assign { expr, .. } => match expr {
             RExpr::Load { place }
             | RExpr::AddrOf { place }
-            | RExpr::MaterializePlaceToObject { place } => is_host_memory_ptr(place),
+            | RExpr::MaterializePlaceToObject { place } => is_unowned_host_memory_ptr(place),
             _ => false,
         },
         _ => false,
@@ -3485,6 +3500,11 @@ where
     /// Only the Wasm lowering enables these scopes. Shader and native paths do
     /// not emit arena-control instructions their backends cannot realize.
     scoped_arena_bodies: HashSet<RuntimeInstance<'db>>,
+    /// Per-body address provenance for canonical-arena objects. Parameters
+    /// enter this set only when every internal call site supplies a value
+    /// derived from an arena allocation. Public/raw entry parameters are never
+    /// trusted merely because their flattened Wasm carrier is `i32`.
+    arena_owned_locals: FxHashMap<RuntimeInstance<'db>, HashSet<RLocalId>>,
 }
 
 struct PreparedResumableContinuation<'db> {
@@ -3614,8 +3634,10 @@ where
             wrapped_lane_names,
             validate_host_enum_params,
             scoped_arena_bodies: HashSet::new(),
+            arena_owned_locals: FxHashMap::default(),
         };
         if enable_scoped_arena {
+            lowerer.arena_owned_locals = lowerer.derive_arena_owned_locals();
             lowerer.scoped_arena_bodies = lowerer.derive_scoped_arena_bodies();
         }
         Ok(lowerer)
@@ -6075,6 +6097,175 @@ where
         ))
     }
 
+    fn private_runtime_instance(&self, instance: RuntimeInstance<'db>) -> bool {
+        self.package
+            .functions(self.db)
+            .into_iter()
+            .find(|function| function.instance(self.db) == instance)
+            .is_some_and(|function| function.linkage(self.db) == RuntimeLinkage::Private)
+    }
+
+    fn arena_address_param(class: &RuntimeClass<'db>) -> bool {
+        match class {
+            RuntimeClass::RawAddr {
+                space: AddressSpaceKind::Memory,
+                target: Some(_),
+            } => true,
+            RuntimeClass::Ref {
+                pointee,
+                kind:
+                    RefKind::Provider {
+                        space: AddressSpaceKind::Memory,
+                        ..
+                    },
+                view: RefView::Whole,
+            } => matches!(**pointee, RuntimeClass::AggregateValue { .. }),
+            _ => false,
+        }
+    }
+
+    fn arena_owned_place(
+        body: &RuntimeBody<'db>,
+        place: &RuntimePlace<'db>,
+        owned: &HashSet<RLocalId>,
+    ) -> bool {
+        match place.root {
+            PlaceRoot::Slot(local) | PlaceRoot::Ref(local) => owned.contains(&local),
+            PlaceRoot::Provider(binding) => body
+                .provider_bindings
+                .get(binding.as_u32() as usize)
+                .is_some_and(|binding| owned.contains(&binding.value)),
+            PlaceRoot::Ptr {
+                addr,
+                space: AddressSpaceKind::Memory,
+                ..
+            } => owned.contains(&addr),
+            PlaceRoot::Ptr { .. } => false,
+        }
+    }
+
+    fn body_arena_owned_locals(
+        &self,
+        body: &RuntimeBody<'db>,
+        safe_params: &HashSet<RLocalId>,
+    ) -> HashSet<RLocalId> {
+        let mut owned = safe_params.clone();
+        loop {
+            let mut changed = false;
+            for block in &body.blocks {
+                for stmt in &block.stmts {
+                    let RStmt::Assign { dst, expr } = stmt else {
+                        continue;
+                    };
+                    let derives_arena_address = match expr {
+                        RExpr::AllocObject { .. }
+                        | RExpr::MaterializeToObject { .. }
+                        | RExpr::MaterializePlaceToObject { .. } => true,
+                        RExpr::Use(source)
+                        | RExpr::ProviderToRaw { value: source }
+                        | RExpr::RetagRef { value: source }
+                        | RExpr::WordToRawAddr { value: source, .. }
+                        | RExpr::ProviderFromRaw { raw: source, .. } => owned.contains(source),
+                        RExpr::AddrOf { place } => Self::arena_owned_place(body, place, &owned),
+                        _ => false,
+                    };
+                    if derives_arena_address && owned.insert(*dst) {
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                return owned;
+            }
+        }
+    }
+
+    /// Prove canonical-arena address provenance across private calls. A raw
+    /// memory parameter is admitted only when the function is not exported and
+    /// every materialized call site supplies an address descended from
+    /// `AllocObject` or another target-layout materialization. The least fixed
+    /// point propagates that fact through private helper chains. A public
+    /// parameter, an integer-to-pointer conversion, or one forged call site
+    /// prevents the parameter from entering the proven set.
+    fn derive_arena_owned_locals(&self) -> FxHashMap<RuntimeInstance<'db>, HashSet<RLocalId>> {
+        let mut safe_params = self
+            .prepared_bodies
+            .keys()
+            .copied()
+            .map(|instance| (instance, HashSet::new()))
+            .collect::<FxHashMap<_, _>>();
+
+        loop {
+            let owned = self
+                .prepared_bodies
+                .iter()
+                .map(|(instance, body)| {
+                    let params = safe_params.get(instance).cloned().unwrap_or_default();
+                    (*instance, self.body_arena_owned_locals(body, &params))
+                })
+                .collect::<FxHashMap<_, _>>();
+            let mut observed =
+                FxHashMap::<(RuntimeInstance<'db>, RLocalId), (bool, bool)>::default();
+            for (caller, body) in &self.prepared_bodies {
+                let caller_owned = owned.get(caller).cloned().unwrap_or_default();
+                for block in &body.blocks {
+                    for stmt in &block.stmts {
+                        let RStmt::Assign {
+                            expr: RExpr::Call { callee, args },
+                            ..
+                        } = stmt
+                        else {
+                            continue;
+                        };
+                        let Some(callee_body) = self.prepared_bodies.get(callee) else {
+                            continue;
+                        };
+                        for (argument, parameter) in args.iter().zip(&callee_body.signature.params)
+                        {
+                            if !Self::arena_address_param(&parameter.class) {
+                                continue;
+                            }
+                            let status = observed
+                                .entry((*callee, parameter.local))
+                                .or_insert((false, true));
+                            status.0 = true;
+                            status.1 &= caller_owned.contains(argument);
+                        }
+                    }
+                }
+            }
+
+            let mut next = self
+                .prepared_bodies
+                .keys()
+                .copied()
+                .map(|instance| (instance, HashSet::new()))
+                .collect::<FxHashMap<_, _>>();
+            for ((instance, parameter), (seen, all_owned)) in observed {
+                if seen && all_owned && self.private_runtime_instance(instance) {
+                    next.entry(instance).or_default().insert(parameter);
+                }
+            }
+            if next == safe_params {
+                return self
+                    .prepared_bodies
+                    .iter()
+                    .map(|(instance, body)| {
+                        let params = next.get(instance).cloned().unwrap_or_default();
+                        (*instance, self.body_arena_owned_locals(body, &params))
+                    })
+                    .collect();
+            }
+            safe_params = next;
+        }
+    }
+
+    fn arena_owned_local(&self, body: &RuntimeBody<'db>, local: RLocalId) -> bool {
+        self.arena_owned_locals
+            .get(&body.owner)
+            .is_some_and(|owned| owned.contains(&local))
+    }
+
     /// Derive the closed set of ordinary Fe functions whose arena-backed
     /// temporaries cannot cross a function boundary. The analysis starts from
     /// a strict local allowlist, then removes every body that calls outside the
@@ -6133,7 +6324,8 @@ where
         if body.signature.params.iter().any(|param| {
             body.local(param.local).is_none_or(|local| {
                 semantic_gpu_resource(self.db, local.semantic_ty)
-                    || !self.scoped_arena_param_is_admissible(&param.class)
+                    || (!self.scoped_arena_param_is_admissible(&param.class)
+                        && !self.arena_owned_local(body, param.local))
             })
         }) {
             return Err("inadmissible parameter boundary");
@@ -6262,11 +6454,13 @@ where
                         .iter()
                         .zip(&callee_body.signature.params)
                         .any(|(arg, param)| {
-                            !self.scoped_arena_param_is_admissible(&param.class)
+                            (!self.scoped_arena_param_is_admissible(&param.class)
+                                && !self.arena_owned_local(callee_body, param.local))
                                 || (body
                                     .value_class(*arg)
                                     .is_some_and(|class| class.contains_transport(self.db))
-                                    && !self.scoped_arena_borrowed_ref(body, *arg))
+                                    && !self.scoped_arena_borrowed_ref(body, *arg)
+                                    && !self.arena_owned_local(body, *arg))
                         })
                     || callee_body.signature.ret.as_ref().is_some_and(|class| {
                         class.contains_transport(self.db) || self.flat_shape(class).is_none()
@@ -6404,7 +6598,16 @@ where
                 self.scoped_arena_writable_ref(body, local)
                     || (!write && self.scoped_arena_read_ref_is_local(body, local))
             }
-            PlaceRoot::Provider(_) | PlaceRoot::Ptr { .. } => false,
+            PlaceRoot::Provider(binding) => body
+                .provider_bindings
+                .get(binding.as_u32() as usize)
+                .is_some_and(|binding| self.arena_owned_local(body, binding.value)),
+            PlaceRoot::Ptr {
+                addr,
+                space: AddressSpaceKind::Memory,
+                ..
+            } => self.arena_owned_local(body, addr),
+            PlaceRoot::Ptr { .. } => false,
         }
     }
 
@@ -6928,7 +7131,13 @@ where
     }
 
     fn lower(mut self) -> Result<(), LowerError> {
-        check_host_region_arena_disjoint(&self.body)?;
+        let arena_owned = self
+            .module
+            .arena_owned_locals
+            .get(&self.body.owner)
+            .cloned()
+            .unwrap_or_default();
+        check_host_region_arena_disjoint(&self.body, &arena_owned)?;
         let is = self.inst_set();
 
         // Prologue: bind incoming argument values to their parameter locals,
