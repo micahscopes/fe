@@ -1389,6 +1389,25 @@ Legend:
   the release compiler and canonical gallery cold build are green: 13 render
   bundles, three component projections, and 92 assets. The browser card is a
   placement and commitment checkpoint, not yet a recursive succinct proof.
+  Hardware Chromium then exposed a second general backend defect: every
+  invocation materialized the full 8,192-word private-heap capacity even when
+  static allocation analysis required only a small prefix. The 32-lane
+  commitment kernel therefore requested roughly 1 MiB of private heap per
+  workgroup and crashed Chromium's GPU process during pipeline compilation.
+  Sonatina commit `03bff3d6` retains the same fail-closed capacity ceiling but
+  emits only the statically required heap. Fe commit `85339db39` rejects a
+  capacity-sized heap in the proof compile gate. The commitment kernel now
+  uses 135 words per lane; the other proof passes use 42, 54, 179, and 178
+  words. On AMD Radeon 780M through RADV, Chromium compiled the 149,767-byte
+  commitment pipeline in 15.94 seconds with zero WGSL diagnostics and no
+  device loss. The cold canonical gallery then loaded all 13 render surfaces
+  in sequence. Clean mode rendered all four validity bands as exact RGBA
+  `[87, 117, 226, 255]`; mutation mode retained trace, LDE, and nonzero-root
+  validity while changing only the expected commitment verdict to exact RGBA
+  `[255, 176, 222, 255]`. This is real hardware execution evidence for the
+  placement checkpoint only. It does not satisfy authenticated FRI,
+  recursion, interactive point selection, Wasm receipt verification, or the
+  revm-in-Wasm verifier gate.
   The scheduling step must now consolidate that arithmetic plan with the two
   existing, independently gated Conal strands:
   `ntt_schedule.fe` derives the `RBin<Pair, k>` stage tree and
@@ -1456,9 +1475,10 @@ fallback. The semantic receipts are:
 
 ## Immediate burn-down order
 
-1. Run the external real-GPU handoff above and execute the new
-   `mandelbrot_proof_gpu` clean and tampered modes in Chromium. The proof GPU
-   port has begun, but real hardware remains its acceptance gate.
+1. Finish the external real-GPU handoff above. The
+   `mandelbrot_proof_gpu` clean and tampered Chromium modes now pass on AMD
+   Radeon 780M through RADV after the private-heap fix. The four standalone
+   hardware test binaries in the runbook remain to be executed without skips.
 2. Finish the authenticated BabyBear sparse AIR receipt: feed the now-gated
    `LD01`/`LD02` openings and public-bound `BC02` relation through the existing
    multi-query and FRI layers, then encode them through staged canonical
