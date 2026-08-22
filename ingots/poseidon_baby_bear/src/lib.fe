@@ -23,9 +23,7 @@ pub const SPONGE_RATE: usize = 8
 const FIELD_SIZE: u32 = 31
 const MODULUS: u256 = BABY_BEAR_MODULUS as u256
 
-struct Poseidon2Parameters {
-    round_constants: [u32; ROUND_CONSTANT_COUNT],
-}
+struct Poseidon2Parameters { round_constants: [u32; ROUND_CONSTANT_COUNT] }
 impl core::marker::Copy for Poseidon2Parameters {}
 
 /// A nominal packed-message schema supplies the first sponge element.
@@ -58,8 +56,9 @@ impl CanonicalWords for Poseidon2Digest {
 }
 
 impl Poseidon2Digest {
-    pub fn zero() -> Self { Self { values: [BabyBear::zero(); DIGEST_FIELDS] } }
-
+    pub fn zero() -> Self {
+        Self { values: [BabyBear::zero(); DIGEST_FIELDS] }
+    }
     pub fn from_u32s(_ values: own [u32; DIGEST_FIELDS]) -> Self {
         let mut digest = Self::zero()
         let mut index: usize = 0
@@ -69,16 +68,18 @@ impl Poseidon2Digest {
         }
         digest
     }
-
-    pub fn field(self, _ index: u32) -> BabyBear {
-        if index >= DIGEST_FIELDS.downcast_truncate() { return BabyBear::zero() }
+    pub fn field(ref self, _ index: u32) -> BabyBear {
+        if index >= DIGEST_FIELDS.downcast_truncate() {
+            return BabyBear::zero()
+        }
         self.values[index as usize]
     }
-
     pub fn equals(self, _ other: Self) -> bool {
         let mut index: usize = 0
         while index < DIGEST_FIELDS {
-            if !self.values[index].equals(other.values[index]) { return false }
+            if !self.values[index].equals(other.values[index]) {
+                return false
+            }
             index = index + 1
         }
         true
@@ -90,10 +91,13 @@ pub struct PackedCommitment { valid: bool, value: Poseidon2Digest }
 impl core::marker::Copy for PackedCommitment {}
 
 impl PackedCommitment {
-    pub fn is_valid(self) -> bool { self.valid }
-
+    pub fn is_valid(self) -> bool {
+        self.valid
+    }
     pub fn digest(self) -> Poseidon2Digest {
-        if !self.valid { return Poseidon2Digest::zero() }
+        if !self.valid {
+            return Poseidon2Digest::zero()
+        }
         self.value
     }
 }
@@ -130,10 +134,22 @@ impl core::marker::Copy for CanonicalFieldWriter {}
 impl CanonicalFieldWriter {
     fn state(self) -> [BabyBear; WIDTH] {
         [
-            self.s0, self.s1, self.s2, self.s3,
-            self.s4, self.s5, self.s6, self.s7,
-            self.s8, self.s9, self.s10, self.s11,
-            self.s12, self.s13, self.s14, self.s15,
+            self.s0,
+            self.s1,
+            self.s2,
+            self.s3,
+            self.s4,
+            self.s5,
+            self.s6,
+            self.s7,
+            self.s8,
+            self.s9,
+            self.s10,
+            self.s11,
+            self.s12,
+            self.s13,
+            self.s14,
+            self.s15,
         ]
     }
 
@@ -145,10 +161,22 @@ impl CanonicalFieldWriter {
         _ valid: bool,
     ) -> Self {
         Self {
-            s0: state[0], s1: state[1], s2: state[2], s3: state[3],
-            s4: state[4], s5: state[5], s6: state[6], s7: state[7],
-            s8: state[8], s9: state[9], s10: state[10], s11: state[11],
-            s12: state[12], s13: state[13], s14: state[14], s15: state[15],
+            s0: state[0],
+            s1: state[1],
+            s2: state[2],
+            s3: state[3],
+            s4: state[4],
+            s5: state[5],
+            s6: state[6],
+            s7: state[7],
+            s8: state[8],
+            s9: state[9],
+            s10: state[10],
+            s11: state[11],
+            s12: state[12],
+            s13: state[13],
+            s14: state[14],
+            s15: state[15],
             rate: rate,
             expected: self.expected,
             written: written,
@@ -161,10 +189,20 @@ impl CanonicalFieldWriter {
         Self {
             s0: BabyBear::from_u32(tag),
             s1: BabyBear::from_u32(expected),
-            s2: zero, s3: zero, s4: zero, s5: zero,
-            s6: zero, s7: zero, s8: zero, s9: zero,
-            s10: zero, s11: zero, s12: zero, s13: zero,
-            s14: zero, s15: zero,
+            s2: zero,
+            s3: zero,
+            s4: zero,
+            s5: zero,
+            s6: zero,
+            s7: zero,
+            s8: zero,
+            s9: zero,
+            s10: zero,
+            s11: zero,
+            s12: zero,
+            s13: zero,
+            s14: zero,
+            s15: zero,
             rate: 2,
             expected: expected,
             written: 0,
@@ -288,9 +326,7 @@ const fn derive_parameters() -> Poseidon2Parameters {
         index = index + 1
     }
 
-    Poseidon2Parameters {
-        round_constants: round_constants,
-    }
+    Poseidon2Parameters { round_constants: round_constants }
 }
 
 const fn internal_diagonal_montgomery(_ index: usize) -> u32 {
@@ -307,116 +343,211 @@ fn sbox7(_ value: BabyBear) -> BabyBear {
     value * square * fourth
 }
 
-#[inline(always)]
-fn mat4(_ state: mut [BabyBear; WIDTH], _ offset: usize) {
-    let x0 = state[offset]
-    let x1 = state[offset + 1]
-    let x2 = state[offset + 2]
-    let x3 = state[offset + 3]
-    let t01 = x0 + x1
-    let t23 = x2 + x3
-    let total = t01 + t23
-    let with1 = total + x1
-    let with3 = total + x3
-    state[offset] = with1 + t01
-    state[offset + 1] = with1 + x2 + x2
-    state[offset + 2] = with3 + t23
-    state[offset + 3] = with3 + x0 + x0
-}
+/// Width-16 permutation state in canonical Montgomery words.
+///
+/// Keeping the long-lived state in its portable u32 representation lets the
+/// GPU interpreter allocate it once around a sponge, then mutate it across
+/// every round. The branded BabyBear API remains the only arithmetic surface.
+struct Poseidon2State { lanes: [u32; WIDTH] }
 
-#[inline(always)]
-fn external_linear(_ state: mut [BabyBear; WIDTH]) {
-    mat4(mut state, 0)
-    mat4(mut state, 4)
-    mat4(mut state, 8)
-    mat4(mut state, 12)
+impl Poseidon2State {
+    const fn zero() -> Self {
+        Self { lanes: [0; WIDTH] }
+    }
 
-    let sum0 = state[0] + state[4] + state[8] + state[12]
-    let sum1 = state[1] + state[5] + state[9] + state[13]
-    let sum2 = state[2] + state[6] + state[10] + state[14]
-    let sum3 = state[3] + state[7] + state[11] + state[15]
+    #[inline(always)]
+    fn field(self, _ lane: usize) -> BabyBear {
+        BabyBear::from_montgomery_word(self.lanes[lane])
+    }
 
-    let mut index: usize = 0
-    while index < WIDTH {
-        let sum = match index & 3 {
-            0 => sum0,
-            1 => sum1,
-            2 => sum2,
-            _ => sum3,
+    #[inline(always)]
+    fn set_field(mut self, _ lane: usize, _ value: BabyBear) {
+        self.lanes[lane] = value.to_montgomery_word()
+    }
+
+    #[inline(always)]
+    fn mat4(mut self, _ offset: usize) {
+        let x0 = self.field(offset)
+        let x1 = self.field(offset + 1)
+        let x2 = self.field(offset + 2)
+        let x3 = self.field(offset + 3)
+        let t01 = x0 + x1
+        let t23 = x2 + x3
+        let total = t01 + t23
+        let with1 = total + x1
+        let with3 = total + x3
+        self.set_field(offset, with1 + t01)
+        self.set_field(offset + 1, with1 + x2 + x2)
+        self.set_field(offset + 2, with3 + t23)
+        self.set_field(offset + 3, with3 + x0 + x0)
+    }
+
+    #[inline(always)]
+    fn external_linear(mut self) {
+        self.mat4(0)
+        self.mat4(4)
+        self.mat4(8)
+        self.mat4(12)
+
+        let sum0 = self.field(0) + self.field(4) + self.field(8) + self.field(12)
+        let sum1 = self.field(1) + self.field(5) + self.field(9) + self.field(13)
+        let sum2 = self.field(2) + self.field(6) + self.field(10) + self.field(14)
+        let sum3 = self.field(3) + self.field(7) + self.field(11) + self.field(15)
+
+        let mut index: usize = 0
+        while index < WIDTH {
+            let sum = match index & 3 {
+                0 => sum0,
+                1 => sum1,
+                2 => sum2,
+                _ => sum3,
+            }
+            self.set_field(index, self.field(index) + sum)
+            index = index + 1
         }
-        state[index] = state[index] + sum
-        index = index + 1
+    }
+
+    #[inline(always)]
+    fn internal_linear(mut self) {
+        let mut sum = BabyBear::zero()
+        let mut index: usize = 0
+        while index < WIDTH {
+            sum = sum + self.field(index)
+            index = index + 1
+        }
+
+        self.set_field(
+            0,
+            sum + self.field(0) * BabyBear::from_montgomery_word(internal_diagonal_montgomery(0)),
+        )
+        self.set_field(
+            1,
+            sum + self.field(1) * BabyBear::from_montgomery_word(internal_diagonal_montgomery(1)),
+        )
+        self.set_field(
+            2,
+            sum + self.field(2) * BabyBear::from_montgomery_word(internal_diagonal_montgomery(2)),
+        )
+        self.set_field(
+            3,
+            sum + self.field(3) * BabyBear::from_montgomery_word(internal_diagonal_montgomery(3)),
+        )
+        self.set_field(
+            4,
+            sum + self.field(4) * BabyBear::from_montgomery_word(internal_diagonal_montgomery(4)),
+        )
+        self.set_field(
+            5,
+            sum + self.field(5) * BabyBear::from_montgomery_word(internal_diagonal_montgomery(5)),
+        )
+        self.set_field(
+            6,
+            sum + self.field(6) * BabyBear::from_montgomery_word(internal_diagonal_montgomery(6)),
+        )
+        self.set_field(
+            7,
+            sum + self.field(7) * BabyBear::from_montgomery_word(internal_diagonal_montgomery(7)),
+        )
+        self.set_field(
+            8,
+            sum + self.field(8) * BabyBear::from_montgomery_word(internal_diagonal_montgomery(8)),
+        )
+        self.set_field(
+            9,
+            sum + self.field(9) * BabyBear::from_montgomery_word(internal_diagonal_montgomery(9)),
+        )
+        self.set_field(
+            10,
+            sum + self.field(10) * BabyBear::from_montgomery_word(internal_diagonal_montgomery(10)),
+        )
+        self.set_field(
+            11,
+            sum + self.field(11) * BabyBear::from_montgomery_word(internal_diagonal_montgomery(11)),
+        )
+        self.set_field(
+            12,
+            sum + self.field(12) * BabyBear::from_montgomery_word(internal_diagonal_montgomery(12)),
+        )
+        self.set_field(
+            13,
+            sum + self.field(13) * BabyBear::from_montgomery_word(internal_diagonal_montgomery(13)),
+        )
+        self.set_field(
+            14,
+            sum + self.field(14) * BabyBear::from_montgomery_word(internal_diagonal_montgomery(14)),
+        )
+        self.set_field(
+            15,
+            sum + self.field(15) * BabyBear::from_montgomery_word(internal_diagonal_montgomery(15)),
+        )
+    }
+
+    #[inline(always)]
+    fn permute(mut self, _ parameters: ref Poseidon2Parameters) {
+        self.external_linear()
+        let mut constant: usize = 0
+        let mut round: usize = 0
+        while round < HALF_FULL_ROUNDS {
+            let mut lane: usize = 0
+            while lane < WIDTH {
+                let rc = BabyBear::from_montgomery_word(parameters.round_constants[constant])
+                self.set_field(lane, sbox7(self.field(lane) + rc))
+                constant = constant + 1
+                lane = lane + 1
+            }
+            self.external_linear()
+            round = round + 1
+        }
+
+        round = 0
+        while round < PARTIAL_ROUNDS {
+            let rc = BabyBear::from_montgomery_word(parameters.round_constants[constant])
+            self.set_field(0, sbox7(self.field(0) + rc))
+            constant = constant + 1
+            self.internal_linear()
+            round = round + 1
+        }
+
+        round = 0
+        while round < HALF_FULL_ROUNDS {
+            let mut lane: usize = 0
+            while lane < WIDTH {
+                let rc = BabyBear::from_montgomery_word(parameters.round_constants[constant])
+                self.set_field(lane, sbox7(self.field(lane) + rc))
+                constant = constant + 1
+                lane = lane + 1
+            }
+            self.external_linear()
+            round = round + 1
+        }
     }
 }
 
 #[inline(always)]
-fn internal_linear(_ state: mut [BabyBear; WIDTH]) {
-    let mut sum = BabyBear::zero()
-    let mut index: usize = 0
-    while index < WIDTH {
-        sum = sum + state[index]
-        index = index + 1
+fn permute16_with_parameters(
+    mut input: own [BabyBear; WIDTH],
+    _ parameters: ref Poseidon2Parameters,
+) -> [BabyBear; WIDTH] {
+    let mut state = Poseidon2State::zero()
+    let mut lane: usize = 0
+    while lane < WIDTH {
+        state.set_field(lane, input[lane])
+        lane = lane + 1
     }
-
-    state[0] = sum + state[0] * BabyBear::from_montgomery_word(internal_diagonal_montgomery(0))
-    state[1] = sum + state[1] * BabyBear::from_montgomery_word(internal_diagonal_montgomery(1))
-    state[2] = sum + state[2] * BabyBear::from_montgomery_word(internal_diagonal_montgomery(2))
-    state[3] = sum + state[3] * BabyBear::from_montgomery_word(internal_diagonal_montgomery(3))
-    state[4] = sum + state[4] * BabyBear::from_montgomery_word(internal_diagonal_montgomery(4))
-    state[5] = sum + state[5] * BabyBear::from_montgomery_word(internal_diagonal_montgomery(5))
-    state[6] = sum + state[6] * BabyBear::from_montgomery_word(internal_diagonal_montgomery(6))
-    state[7] = sum + state[7] * BabyBear::from_montgomery_word(internal_diagonal_montgomery(7))
-    state[8] = sum + state[8] * BabyBear::from_montgomery_word(internal_diagonal_montgomery(8))
-    state[9] = sum + state[9] * BabyBear::from_montgomery_word(internal_diagonal_montgomery(9))
-    state[10] = sum + state[10] * BabyBear::from_montgomery_word(internal_diagonal_montgomery(10))
-    state[11] = sum + state[11] * BabyBear::from_montgomery_word(internal_diagonal_montgomery(11))
-    state[12] = sum + state[12] * BabyBear::from_montgomery_word(internal_diagonal_montgomery(12))
-    state[13] = sum + state[13] * BabyBear::from_montgomery_word(internal_diagonal_montgomery(13))
-    state[14] = sum + state[14] * BabyBear::from_montgomery_word(internal_diagonal_montgomery(14))
-    state[15] = sum + state[15] * BabyBear::from_montgomery_word(internal_diagonal_montgomery(15))
+    state.permute(ref parameters)
+    let mut output = [BabyBear::zero(); WIDTH]
+    lane = 0
+    while lane < WIDTH {
+        output[lane] = state.field(lane)
+        lane = lane + 1
+    }
+    output
 }
 
 /// Apply the canonical Plonky3 width-16 BabyBear Poseidon2 permutation.
-#[inline(always)]
 pub fn permute16(mut input: own [BabyBear; WIDTH]) -> [BabyBear; WIDTH] {
     let parameters = PARAMETERS
-    external_linear(mut input)
-    let mut constant: usize = 0
-    let mut round: usize = 0
-    while round < HALF_FULL_ROUNDS {
-        let mut lane: usize = 0
-        while lane < WIDTH {
-            let rc = BabyBear::from_montgomery_word(parameters.round_constants[constant])
-            input[lane] = sbox7(input[lane] + rc)
-            constant = constant + 1
-            lane = lane + 1
-        }
-        external_linear(mut input)
-        round = round + 1
-    }
-
-    round = 0
-    while round < PARTIAL_ROUNDS {
-        let rc = BabyBear::from_montgomery_word(parameters.round_constants[constant])
-        input[0] = sbox7(input[0] + rc)
-        constant = constant + 1
-        internal_linear(mut input)
-        round = round + 1
-    }
-
-    round = 0
-    while round < HALF_FULL_ROUNDS {
-        let mut lane: usize = 0
-        while lane < WIDTH {
-            let rc = BabyBear::from_montgomery_word(parameters.round_constants[constant])
-            input[lane] = sbox7(input[lane] + rc)
-            constant = constant + 1
-            lane = lane + 1
-        }
-        external_linear(mut input)
-        round = round + 1
-    }
-    input
+    permute16_with_parameters(input: input, parameters: ref parameters)
 }
 
 /// Commit an injectively encoded bit string with a rate-8, capacity-8
@@ -445,7 +576,9 @@ pub fn commit_packed<D: Poseidon2Domain, const N: usize>(
         }
         index = index + 1
     }
-    if rate != 0 { state = permute16(input: state) }
+    if rate != 0 {
+        state = permute16(input: state)
+    }
     let mut values = [BabyBear::zero(); DIGEST_FIELDS]
     index = 0
     while index < DIGEST_FIELDS {
@@ -460,28 +593,33 @@ pub fn commit_packed<D: Poseidon2Domain, const N: usize>(
 pub fn commit_fields<D: Poseidon2FieldDomain, const N: usize>(
     _ fields: own [BabyBear; N],
 ) -> Poseidon2Digest {
-    if D::TAG >= BABY_BEAR_MODULUS { return Poseidon2Digest::zero() }
-    let mut state: [BabyBear; WIDTH] = [BabyBear::zero(); WIDTH]
+    if D::TAG >= BABY_BEAR_MODULUS {
+        return Poseidon2Digest::zero()
+    }
+    let parameters = PARAMETERS
+    let mut state = Poseidon2State::zero()
     let mut rate: usize = 0
-    state[rate] = BabyBear::from_u32(D::TAG)
+    state.set_field(rate, BabyBear::from_u32(D::TAG))
     rate = rate + 1
-    state[rate] = BabyBear::from_u32(N.downcast_truncate())
+    state.set_field(rate, BabyBear::from_u32(N.downcast_truncate()))
     rate = rate + 1
     let mut index: usize = 0
     while index < N {
-        state[rate] = fields[index]
+        state.set_field(rate, fields[index])
         rate = rate + 1
         if rate == SPONGE_RATE {
-            state = permute16(input: state)
+            state.permute(ref parameters)
             rate = 0
         }
         index = index + 1
     }
-    if rate != 0 { state = permute16(input: state) }
+    if rate != 0 {
+        state.permute(ref parameters)
+    }
     let mut values = [BabyBear::zero(); DIGEST_FIELDS]
     index = 0
     while index < DIGEST_FIELDS {
-        values[index] = state[index]
+        values[index] = state.field(index)
         index = index + 1
     }
     Poseidon2Digest { values: values }
@@ -492,7 +630,9 @@ pub fn commit_fields<D: Poseidon2FieldDomain, const N: usize>(
 pub fn commit_ext4_fields<D: Poseidon2FieldDomain, const N: usize>(
     _ fields: own [BabyBearExt4; N],
 ) -> Poseidon2Digest {
-    if D::TAG >= BABY_BEAR_MODULUS { return Poseidon2Digest::zero() }
+    if D::TAG >= BABY_BEAR_MODULUS {
+        return Poseidon2Digest::zero()
+    }
     let mut state: [BabyBear; WIDTH] = [BabyBear::zero(); WIDTH]
     let mut rate: usize = 0
     let value_count: u32 = N.downcast_truncate()
@@ -514,7 +654,9 @@ pub fn commit_ext4_fields<D: Poseidon2FieldDomain, const N: usize>(
         }
         value = value + 1
     }
-    if rate != 0 { state = permute16(input: state) }
+    if rate != 0 {
+        state = permute16(input: state)
+    }
     let mut values = [BabyBear::zero(); DIGEST_FIELDS]
     let mut index: usize = 0
     while index < DIGEST_FIELDS {
@@ -581,7 +723,9 @@ pub fn bind<D: Poseidon2FieldDomain>(
         }
         index = index + 1
     }
-    if rate != 0 { state = permute16(input: state) }
+    if rate != 0 {
+        state = permute16(input: state)
+    }
     let mut values = [BabyBear::zero(); DIGEST_FIELDS]
     index = 0
     while index < DIGEST_FIELDS {
@@ -593,7 +737,9 @@ pub fn bind<D: Poseidon2FieldDomain>(
 
 /// Squeeze one quartic challenge from a full transcript digest.
 pub fn squeeze_ext4<D: Poseidon2FieldDomain>(_ digest: Poseidon2Digest) -> BabyBearExt4 {
-    if D::TAG >= BABY_BEAR_MODULUS { return BabyBearExt4::zero() }
+    if D::TAG >= BABY_BEAR_MODULUS {
+        return BabyBearExt4::zero()
+    }
     let mut state: [BabyBear; WIDTH] = [BabyBear::zero(); WIDTH]
     state[0] = BabyBear::from_u32(D::TAG)
     state[1] = BabyBear::from_u32(DIGEST_FIELDS.downcast_truncate())
@@ -608,7 +754,9 @@ pub fn squeeze_ext4<D: Poseidon2FieldDomain>(_ digest: Poseidon2Digest) -> BabyB
         }
         index = index + 1
     }
-    if rate != 0 { state = permute16(input: state) }
+    if rate != 0 {
+        state = permute16(input: state)
+    }
     BabyBearExt4::from_coefficients([state[0], state[1], state[2], state[3]])
 }
 
