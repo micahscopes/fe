@@ -616,7 +616,7 @@ pub fn stream_statement_q12(_ c_re_q12: i32, _ c_im_q12: i32, _ bound: u32) -> S
         if !stream.can_advance() {
             return invalid_streamed_commitment()
         }
-        stream = stream.advance()
+        stream.advance()
     }
 
     let terminal_air = stream.current_air_row()
@@ -726,9 +726,7 @@ pub fn main_lde_row_commitment(_ values: ref [Fr; ROW_WORDS]) -> MainLdeDigest {
     MainLdeDigest { value: field_row_commitment<MandelbrotMainLdeRowV1, ROW_WORDS>(values) }
 }
 
-pub fn auxiliary_lde_row_commitment(
-    _ values: ref [Fr; AUXILIARY_ROW_BITS],
-) -> AuxiliaryLdeDigest {
+pub fn auxiliary_lde_row_commitment(_ values: ref [Fr; AUXILIARY_ROW_BITS]) -> AuxiliaryLdeDigest {
     AuxiliaryLdeDigest {
         value: field_row_commitment<MandelbrotAuxiliaryLdeRowV1, AUXILIARY_ROW_BITS>(values),
     }

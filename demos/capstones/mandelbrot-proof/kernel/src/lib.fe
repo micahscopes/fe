@@ -103,7 +103,14 @@ pub const ESCAPES_BY_Q12_PUBLIC_WORDS: usize = 8
 
 /// Audited widths for the field-independent public claim encoding.
 pub const ESCAPES_BY_Q12_PUBLIC_WIDTHS: [u32; ESCAPES_BY_Q12_PUBLIC_WORDS] = [
-    1, 14, 1, 13, 21, 21, 21, 22,
+    1,
+    14,
+    1,
+    13,
+    21,
+    21,
+    21,
+    22,
 ]
 
 /// Public statement already validated by the cheap proof-domain boundary.
@@ -139,20 +146,13 @@ impl core::marker::Copy for EncodedAirRow {}
 
 /// One canonical padded trace row. `terminal` is the unique proof marker,
 /// while `air.terminal` records the escape predicate on repeated padding.
-pub struct EncodedProofRow {
-    pub active: u32,
-    pub terminal: u32,
-    pub air: EncodedAirRow,
-}
+pub struct EncodedProofRow { pub active: u32, pub terminal: u32, pub air: EncodedAirRow }
 
 impl core::marker::Copy for EncodedProofRow {}
 
 /// Low-degree range witness. `bits` reconstruct the value, while `any` is the
 /// inclusive prefix OR used by canonical-zero and threshold constraints.
-pub struct BitRangeWitness<const N: usize> {
-    pub bits: [u32; N],
-    pub any: [u32; N],
-}
+pub struct BitRangeWitness<const N: usize> { pub bits: [u32; N], pub any: [u32; N] }
 
 impl<const N: usize> core::marker::Copy for BitRangeWitness<N> {}
 
@@ -160,17 +160,11 @@ pub struct OrWitness<const N: usize> { pub any: [u32; N] }
 
 impl<const N: usize> core::marker::Copy for OrWitness<N> {}
 
-pub struct RangedUnsigned<const N: usize> {
-    pub value: u32,
-    pub witness: BitRangeWitness<N>,
-}
+pub struct RangedUnsigned<const N: usize> { pub value: u32, pub witness: BitRangeWitness<N> }
 
 impl<const N: usize> core::marker::Copy for RangedUnsigned<N> {}
 
-pub struct RangedSigned<const N: usize> {
-    pub value: SignedWord,
-    pub witness: BitRangeWitness<N>,
-}
+pub struct RangedSigned<const N: usize> { pub value: SignedWord, pub witness: BitRangeWitness<N> }
 
 impl<const N: usize> core::marker::Copy for RangedSigned<N> {}
 
@@ -201,14 +195,18 @@ pub const AUXILIARY_ROW_BITS: usize = 2 * AUXILIARY_RANGE_BITS + 5
 /// so every range-valid row has an injective representation in BN254 Fr.
 pub const ENCODED_PROOF_ROW_WIDTHS: [u32; 17] = [
     21,
-    1, 15,
-    1, 15,
+    1,
+    15,
+    1,
+    15,
     30,
     30,
     31,
-    1, 18,
+    1,
+    18,
     12,
-    1, 19,
+    1,
+    19,
     12,
     1,
     1,
@@ -218,10 +216,7 @@ pub const ENCODED_PROOF_ROW_WIDTHS: [u32; 17] = [
 /// Stateful one-pass traversal of the canonical orbit. The current expanded
 /// AIR row is retained, so advancing reuses its exact Q12 quotients rather
 /// than recomputing or restating the transition in a proof consumer.
-pub struct EscapeTraceStream {
-    claim: EscapesByQ12,
-    current: EscapeAirRow,
-}
+pub struct EscapeTraceStream { claim: EscapesByQ12, current: EscapeAirRow }
 
 impl core::marker::Copy for EscapeTraceStream {}
 
@@ -239,9 +234,16 @@ impl<const N: usize> core::marker::Copy for EncodedProofTrace<N> {}
 
 /// Scalar oracle boundary for one flattened AIR row. The proof model remains
 /// nominal; this tuple only keeps Wasm gate wrappers concise.
-pub type EscapeAirWords = (
-    u32, i32, i32, i32, i32, i32, i32, i32, i32, i32, u32,
-)
+pub type EscapeAirWords = (u32, i32, i32, i32, i32, i32, i32, i32, i32, i32, u32)
+
+/// Canonical numeric traversal for proof backends. Boolean trace facts are
+/// retained as their audited `u32` field words, so GPU and field consumers do
+/// not need to round-trip through a target's in-memory `bool` representation.
+/// The ordinary typed stream and this word stream share `derived_air_words`,
+/// which remains the single authored Q12 recurrence.
+pub struct EscapeAirWordStream { claim: EscapesByQ12, current: EscapeAirWords }
+
+impl core::marker::Copy for EscapeAirWordStream {}
 
 fn square(_ value: i32) -> i32 {
     value * value
@@ -258,26 +260,42 @@ fn signed_magnitude(_ value: i32) -> SignedMagnitude32 {
 
 pub fn encode_signed_word(_ value: i32) -> SignedWord {
     let signed = signed_magnitude(value)
-    SignedWord {
-        sign: if signed.negative { 1 } else { 0 },
-        magnitude: signed.magnitude,
+    SignedWord { sign: if signed.negative { 1 } else { 0 }, magnitude: signed.magnitude }
+}
+
+fn encode_air_words(_ words: EscapeAirWords) -> EncodedAirRow {
+    let (step, zr, zi, rr, ii, magnitude, q_re, r_re, q_im, r_im, terminal) = words
+    EncodedAirRow {
+        step: step,
+        zr: encode_signed_word(zr),
+        zi: encode_signed_word(zi),
+        rr: rr.downcast_unchecked(),
+        ii: ii.downcast_unchecked(),
+        magnitude: magnitude.downcast_unchecked(),
+        q_re: encode_signed_word(q_re),
+        r_re: r_re.downcast_unchecked(),
+        q_im: encode_signed_word(q_im),
+        r_im: r_im.downcast_unchecked(),
+        terminal: terminal,
     }
 }
 
 pub fn encode_air_row(_ row: EscapeAirRow) -> EncodedAirRow {
-    EncodedAirRow {
-        step: row.semantic.step,
-        zr: encode_signed_word(row.semantic.z.re),
-        zi: encode_signed_word(row.semantic.z.im),
-        rr: row.rr.downcast_unchecked(),
-        ii: row.ii.downcast_unchecked(),
-        magnitude: row.semantic.magnitude_squared_q24.downcast_unchecked(),
-        q_re: encode_signed_word(row.real_shift.quotient),
-        r_re: row.real_shift.remainder.downcast_unchecked(),
-        q_im: encode_signed_word(row.imaginary_shift.quotient),
-        r_im: row.imaginary_shift.remainder.downcast_unchecked(),
-        terminal: if row.semantic.terminal { 1 } else { 0 },
-    }
+    encode_air_words(
+        (
+            row.semantic.step,
+            row.semantic.z.re,
+            row.semantic.z.im,
+            row.rr,
+            row.ii,
+            row.semantic.magnitude_squared_q24,
+            row.real_shift.quotient,
+            row.real_shift.remainder,
+            row.imaginary_shift.quotient,
+            row.imaginary_shift.remainder,
+            if row.semantic.terminal { 1 } else { 0 },
+        ),
+    )
 }
 
 pub fn encode_proof_row(_ row: PaddedEscapeAirRow) -> EncodedProofRow {
@@ -293,14 +311,18 @@ pub fn encode_proof_row(_ row: PaddedEscapeAirRow) -> EncodedProofRow {
 pub fn encoded_proof_row_words(_ row: own EncodedProofRow) -> [u32; 17] {
     [
         row.air.step,
-        row.air.zr.sign, row.air.zr.magnitude,
-        row.air.zi.sign, row.air.zi.magnitude,
+        row.air.zr.sign,
+        row.air.zr.magnitude,
+        row.air.zi.sign,
+        row.air.zi.magnitude,
         row.air.rr,
         row.air.ii,
         row.air.magnitude,
-        row.air.q_re.sign, row.air.q_re.magnitude,
+        row.air.q_re.sign,
+        row.air.q_re.magnitude,
         row.air.r_re,
-        row.air.q_im.sign, row.air.q_im.magnitude,
+        row.air.q_im.sign,
+        row.air.q_im.magnitude,
         row.air.r_im,
         row.air.terminal,
         row.active,
@@ -323,10 +345,8 @@ pub fn escapes_by_q12_public_words(
     ]
 }
 
-pub fn derive_bit_range_witness<const N: usize>(
-    _ value: u32,
-) -> BitRangeWitness<N>
-    where N <= 32,
+pub fn derive_bit_range_witness<const N: usize>(_ value: u32) -> BitRangeWitness<N>
+where N <= 32
 {
     let mut bits: [u32; N] = [0; N]
     let mut any: [u32; N] = [0; N]
@@ -360,56 +380,33 @@ fn derive_terminal_high_any(_ magnitude: BitRangeWitness<31>) -> OrWitness<5> {
 pub fn derive_ranged_air_row(_ row: EncodedAirRow) -> RangedAirRow {
     let magnitude = derive_bit_range_witness<31>(row.magnitude)
     RangedAirRow {
-        step: RangedUnsigned {
-            value: row.step,
-            witness: derive_bit_range_witness<21>(row.step),
-        },
-        zr: RangedSigned {
-            value: row.zr,
-            witness: derive_bit_range_witness<15>(row.zr.magnitude),
-        },
-        zi: RangedSigned {
-            value: row.zi,
-            witness: derive_bit_range_witness<15>(row.zi.magnitude),
-        },
-        rr: RangedUnsigned {
-            value: row.rr,
-            witness: derive_bit_range_witness<30>(row.rr),
-        },
-        ii: RangedUnsigned {
-            value: row.ii,
-            witness: derive_bit_range_witness<30>(row.ii),
-        },
-        magnitude: RangedUnsigned {
-            value: row.magnitude,
-            witness: magnitude,
-        },
+        step: RangedUnsigned { value: row.step, witness: derive_bit_range_witness<21>(row.step) },
+        zr: RangedSigned { value: row.zr, witness: derive_bit_range_witness<15>(row.zr.magnitude) },
+        zi: RangedSigned { value: row.zi, witness: derive_bit_range_witness<15>(row.zi.magnitude) },
+        rr: RangedUnsigned { value: row.rr, witness: derive_bit_range_witness<30>(row.rr) },
+        ii: RangedUnsigned { value: row.ii, witness: derive_bit_range_witness<30>(row.ii) },
+        magnitude: RangedUnsigned { value: row.magnitude, witness: magnitude },
         q_re: RangedSigned {
             value: row.q_re,
             witness: derive_bit_range_witness<18>(row.q_re.magnitude),
         },
-        r_re: RangedUnsigned {
-            value: row.r_re,
-            witness: derive_bit_range_witness<12>(row.r_re),
-        },
+        r_re: RangedUnsigned { value: row.r_re, witness: derive_bit_range_witness<12>(row.r_re) },
         q_im: RangedSigned {
             value: row.q_im,
             witness: derive_bit_range_witness<19>(row.q_im.magnitude),
         },
-        r_im: RangedUnsigned {
-            value: row.r_im,
-            witness: derive_bit_range_witness<12>(row.r_im),
-        },
+        r_im: RangedUnsigned { value: row.r_im, witness: derive_bit_range_witness<12>(row.r_im) },
         terminal: row.terminal,
         terminal_high_any: derive_terminal_high_any(magnitude),
     }
 }
 
-fn serialized_range_bit<const N: usize>(
-    _ witness: BitRangeWitness<N>,
-    _ index: usize,
-) -> u32 {
-    if index < N { witness.bits[index] } else { witness.any[index - N] }
+fn serialized_range_bit<const N: usize>(_ witness: BitRangeWitness<N>, _ index: usize) -> u32 {
+    if index < N {
+        witness.bits[index]
+    } else {
+        witness.any[index - N]
+    }
 }
 
 /// Canonical semantic auxiliary-row accessor shared by commitment and
@@ -417,27 +414,49 @@ fn serialized_range_bit<const N: usize>(
 /// is no second author-maintained offset table.
 #[inline(always)]
 pub fn encoded_ranged_auxiliary_row_bit(_ ranged: RangedAirRow, _ index: usize) -> u32 {
-    if index >= AUXILIARY_ROW_BITS { return 0 }
+    if index >= AUXILIARY_ROW_BITS {
+        return 0
+    }
     let mut cursor = index
-    if cursor < 2 * 21 { return serialized_range_bit<21>(ranged.step.witness, cursor) }
+    if cursor < 2 * 21 {
+        return serialized_range_bit<21>(ranged.step.witness, cursor)
+    }
     cursor = cursor - 2 * 21
-    if cursor < 2 * 15 { return serialized_range_bit<15>(ranged.zr.witness, cursor) }
+    if cursor < 2 * 15 {
+        return serialized_range_bit<15>(ranged.zr.witness, cursor)
+    }
     cursor = cursor - 2 * 15
-    if cursor < 2 * 15 { return serialized_range_bit<15>(ranged.zi.witness, cursor) }
+    if cursor < 2 * 15 {
+        return serialized_range_bit<15>(ranged.zi.witness, cursor)
+    }
     cursor = cursor - 2 * 15
-    if cursor < 2 * 30 { return serialized_range_bit<30>(ranged.rr.witness, cursor) }
+    if cursor < 2 * 30 {
+        return serialized_range_bit<30>(ranged.rr.witness, cursor)
+    }
     cursor = cursor - 2 * 30
-    if cursor < 2 * 30 { return serialized_range_bit<30>(ranged.ii.witness, cursor) }
+    if cursor < 2 * 30 {
+        return serialized_range_bit<30>(ranged.ii.witness, cursor)
+    }
     cursor = cursor - 2 * 30
-    if cursor < 2 * 31 { return serialized_range_bit<31>(ranged.magnitude.witness, cursor) }
+    if cursor < 2 * 31 {
+        return serialized_range_bit<31>(ranged.magnitude.witness, cursor)
+    }
     cursor = cursor - 2 * 31
-    if cursor < 2 * 18 { return serialized_range_bit<18>(ranged.q_re.witness, cursor) }
+    if cursor < 2 * 18 {
+        return serialized_range_bit<18>(ranged.q_re.witness, cursor)
+    }
     cursor = cursor - 2 * 18
-    if cursor < 2 * 12 { return serialized_range_bit<12>(ranged.r_re.witness, cursor) }
+    if cursor < 2 * 12 {
+        return serialized_range_bit<12>(ranged.r_re.witness, cursor)
+    }
     cursor = cursor - 2 * 12
-    if cursor < 2 * 19 { return serialized_range_bit<19>(ranged.q_im.witness, cursor) }
+    if cursor < 2 * 19 {
+        return serialized_range_bit<19>(ranged.q_im.witness, cursor)
+    }
     cursor = cursor - 2 * 19
-    if cursor < 2 * 12 { return serialized_range_bit<12>(ranged.r_im.witness, cursor) }
+    if cursor < 2 * 12 {
+        return serialized_range_bit<12>(ranged.r_im.witness, cursor)
+    }
     cursor = cursor - 2 * 12
     ranged.terminal_high_any.any[cursor]
 }
@@ -450,14 +469,18 @@ fn air_encoding(_ row: EscapeAirRow) -> [u32; 15] {
     let encoded = encode_air_row(row)
     [
         encoded.step,
-        encoded.zr.sign, encoded.zr.magnitude,
-        encoded.zi.sign, encoded.zi.magnitude,
+        encoded.zr.sign,
+        encoded.zr.magnitude,
+        encoded.zi.sign,
+        encoded.zi.magnitude,
         encoded.rr,
         encoded.ii,
         encoded.magnitude,
-        encoded.q_re.sign, encoded.q_re.magnitude,
+        encoded.q_re.sign,
+        encoded.q_re.magnitude,
         encoded.r_re,
-        encoded.q_im.sign, encoded.q_im.magnitude,
+        encoded.q_im.sign,
+        encoded.q_im.magnitude,
         encoded.r_im,
         encoded.terminal,
     ]
@@ -465,7 +488,9 @@ fn air_encoding(_ row: EscapeAirRow) -> [u32; 15] {
 
 pub fn padded_trace_length(_ value: u32) -> u32 {
     let mut result: u32 = 1
-    while result < value { result = result * 2 }
+    while result < value {
+        result = result * 2
+    }
     result
 }
 
@@ -475,7 +500,9 @@ fn public_proof_domain_holds(
     _ trace_length: u32,
     _ padded_length: u32,
 ) -> bool {
-    if !claim.is_valid() || terminal_step > claim.bound { return false }
+    if !claim.is_valid() || terminal_step > claim.bound {
+        return false
+    }
     let expected_trace_length = terminal_step + 1
     trace_length == expected_trace_length
         && padded_length == padded_trace_length(expected_trace_length)
@@ -515,7 +542,9 @@ fn coordinates_are_arithmetic_safe(_ row: EscapeAirRow) -> bool {
 }
 
 fn air_row_holds(_ row: EscapeAirRow) -> bool {
-    if !coordinates_are_arithmetic_safe(row) { return false }
+    if !coordinates_are_arithmetic_safe(row) {
+        return false
+    }
     let remainders_are_canonical = row.real_shift.remainder >= 0
         && row.real_shift.remainder < Q12_SCALE
         && row.imaginary_shift.remainder >= 0
@@ -530,11 +559,7 @@ fn air_row_holds(_ row: EscapeAirRow) -> bool {
             == (row.semantic.magnitude_squared_q24 >= ESCAPE_RADIUS_SQUARED_Q24)
 }
 
-fn air_transition_holds(
-    _ claim: EscapesByQ12,
-    _ row: EscapeAirRow,
-    _ next: EscapeAirRow,
-) -> bool {
+fn air_transition_holds(_ claim: EscapesByQ12, _ row: EscapeAirRow, _ next: EscapeAirRow) -> bool {
     claim.is_valid()
         && row.semantic.step < claim.bound
         && !row.semantic.terminal
@@ -609,8 +634,12 @@ fn air_rows_equal(_ left: EscapeAirRow, _ right: EscapeAirRow) -> bool {
 }
 
 fn padded_air_row_holds(_ row: PaddedEscapeAirRow) -> bool {
-    if !row.valid || !air_row_holds(row.air) { return false }
-    if row.terminal && !row.active { return false }
+    if !row.valid || !air_row_holds(row.air) {
+        return false
+    }
+    if row.terminal && !row.active {
+        return false
+    }
     if row.active {
         row.terminal == row.air.semantic.terminal
     } else {
@@ -651,40 +680,81 @@ fn padded_air_last_row_holds(_ row: PaddedEscapeAirRow) -> bool {
     padded_air_row_holds(row) && (row.terminal || !row.active)
 }
 
-fn air_row(_ step: u32, _ z: ComplexQ12) -> EscapeAirRow {
+fn derived_air_words(_ step: u32, _ z: ComplexQ12) -> EscapeAirWords {
     let rr = square(z.re)
     let ii = square(z.im)
     let magnitude_squared_q24 = rr + ii
-    EscapeAirRow {
-        semantic: EscapeTraceRow {
-            step: step,
-            z: z,
-            magnitude_squared_q24: magnitude_squared_q24,
-            terminal: magnitude_squared_q24 >= ESCAPE_RADIUS_SQUARED_Q24,
+    let real_shift = decompose_q12(rr - ii)
+    let imaginary_shift = decompose_q12((z.re * 2) * z.im)
+    (
+        step,
+        z.re,
+        z.im,
+        rr,
+        ii,
+        magnitude_squared_q24,
+        real_shift.quotient,
+        real_shift.remainder,
+        imaginary_shift.quotient,
+        imaginary_shift.remainder,
+        if magnitude_squared_q24 >= ESCAPE_RADIUS_SQUARED_Q24 {
+            1
+        } else {
+            0
         },
-        rr: rr,
-        ii: ii,
-        real_shift: decompose_q12(rr - ii),
-        imaginary_shift: decompose_q12((z.re * 2) * z.im),
+    )
+}
+
+fn air_row(_ step: u32, _ z: ComplexQ12) -> EscapeAirRow {
+    air_row_from_words(derived_air_words(step, z))
+}
+
+impl EscapeAirWordStream {
+    pub fn new(_ claim: EscapesByQ12) -> Self {
+        Self { claim: claim, current: derived_air_words(0, ComplexQ12 { re: 0, im: 0 }) }
+    }
+    pub fn is_valid(self) -> bool {
+        self.claim.is_valid()
+    }
+    pub fn current_proof_row(self) -> EncodedProofRow {
+        let terminal = self.current.10
+        let valid: u32 = if self.is_valid() { 1 } else { 0 }
+        EncodedProofRow {
+            active: valid,
+            terminal: valid * terminal,
+            air: encode_air_words(self.current),
+        }
+    }
+    pub fn is_terminal(self) -> bool {
+        self.current.10 == 1
+    }
+    pub fn can_advance(self) -> bool {
+        self.is_valid() && self.current.10 == 0 && self.current.0 < self.claim.bound
+    }
+
+    #[inline(always)]
+    pub fn advance(mut self) {
+        if !self.can_advance() {
+            return
+        }
+        let z = ComplexQ12 {
+            re: self.current.6 + self.claim.c.re,
+            im: self.current.8 + self.claim.c.im,
+        }
+        self.current = derived_air_words(self.current.0 + 1, z)
     }
 }
 
 impl EscapeTraceStream {
     pub fn new(_ claim: EscapesByQ12) -> Self {
-        Self {
-            claim: claim,
-            current: air_row(0, ComplexQ12 { re: 0, im: 0 }),
-        }
+        Self { claim: claim, current: air_row(0, ComplexQ12 { re: 0, im: 0 }) }
     }
-
     pub fn is_valid(self) -> bool {
         self.claim.is_valid()
     }
-
     pub fn current_air_row(self) -> EscapeAirRow {
         self.current
     }
-
     pub fn current_proof_row(self) -> PaddedEscapeAirRow {
         PaddedEscapeAirRow {
             valid: self.is_valid(),
@@ -693,39 +763,33 @@ impl EscapeTraceStream {
             air: self.current,
         }
     }
-
     pub fn can_advance(self) -> bool {
         self.is_valid()
             && !self.current.semantic.terminal
             && self.current.semantic.step < self.claim.bound
     }
 
-    pub fn advance(mut self) -> Self {
-        if !self.can_advance() { return self }
+    #[inline(always)]
+    pub fn advance(mut self) {
+        if !self.can_advance() {
+            return
+        }
         let z = ComplexQ12 {
             re: self.current.real_shift.quotient + self.claim.c.re,
             im: self.current.imaginary_shift.quotient + self.claim.c.im,
         }
         self.current = air_row(self.current.semantic.step + 1, z)
-        self
     }
 }
 
-pub fn encoded_proof_trace_exact<const N: usize>(
-    _ claim: EscapesByQ12,
-) -> EncodedProofTrace<N>
-    where N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N & (N - 1)) == 0 },
+pub fn encoded_proof_trace_exact<const N: usize>(_ claim: EscapesByQ12) -> EncodedProofTrace<N>
+where N > 0, N <= MAX_PADDED_TRACE_LENGTH, { (N & (N - 1)) == 0 }
 {
     let mut stream = EscapeTraceStream::new(claim)
     let seed = encode_proof_row(stream.current_proof_row())
     let mut rows: [EncodedProofRow; N] = [seed; N]
     if !stream.is_valid() {
-        return EncodedProofTrace {
-            valid: false,
-            terminal_step: 0,
-            trace_length: 0,
-            rows: rows,
-        }
+        return EncodedProofTrace { valid: false, terminal_step: 0, trace_length: 0, rows: rows }
     }
 
     let mut index: usize = 0
@@ -734,14 +798,9 @@ pub fn encoded_proof_trace_exact<const N: usize>(
         rows[index] = encode_proof_row(current)
         if current.terminal { break }
         if index + 1 >= N || !stream.can_advance() {
-            return EncodedProofTrace {
-                valid: false,
-                terminal_step: 0,
-                trace_length: 0,
-                rows: rows,
-            }
+            return EncodedProofTrace { valid: false, terminal_step: 0, trace_length: 0, rows: rows }
         }
-        stream = stream.advance()
+        stream.advance()
         index = index + 1
     }
 
@@ -749,19 +808,11 @@ pub fn encoded_proof_trace_exact<const N: usize>(
     let terminal_index: u32 = index.downcast_truncate()
     let trace_length: u32 = terminal_index + 1
     if padded_trace_length(trace_length) != N.downcast_truncate() {
-        return EncodedProofTrace {
-            valid: false,
-            terminal_step: 0,
-            trace_length: 0,
-            rows: rows,
-        }
+        return EncodedProofTrace { valid: false, terminal_step: 0, trace_length: 0, rows: rows }
     }
-    let padding = encode_proof_row(PaddedEscapeAirRow {
-        valid: true,
-        active: false,
-        terminal: false,
-        air: terminal_air,
-    })
+    let padding = encode_proof_row(
+        PaddedEscapeAirRow { valid: true, active: false, terminal: false, air: terminal_air },
+    )
     index = index + 1
     while index < N {
         rows[index] = padding
@@ -811,16 +862,12 @@ impl EscapesByQ12 {
             if !stream.can_advance() {
                 return EscapeWitness { valid_claim: true, escaped: false, row: row }
             }
-            stream = stream.advance()
+            stream.advance()
         }
 
         // The loop returns at the least terminal row or the inclusive bound.
         // Keep a total fallback explicit for backends that do not infer that.
-        EscapeWitness {
-            valid_claim: false,
-            escaped: false,
-            row: stream.current_air_row().semantic,
-        }
+        EscapeWitness { valid_claim: false, escaped: false, row: stream.current_air_row().semantic }
     }
 
     /// Produce one row of the same witness sequence. Requests after the first
@@ -829,7 +876,7 @@ impl EscapesByQ12 {
     pub fn row_at(self, _ target: u32) -> EscapeTraceRow {
         let mut stream = EscapeTraceStream::new(self)
         while stream.current_air_row().semantic.step < target && stream.can_advance() {
-            stream = stream.advance()
+            stream.advance()
         }
         stream.current_air_row().semantic
     }
@@ -840,7 +887,7 @@ impl EscapesByQ12 {
     pub fn air_row_at(self, _ target: u32) -> EscapeAirRow {
         let mut stream = EscapeTraceStream::new(self)
         while stream.current_air_row().semantic.step < target && stream.can_advance() {
-            stream = stream.advance()
+            stream.advance()
         }
         stream.current_air_row()
     }
@@ -962,37 +1009,54 @@ pub fn escape_air_row_q12(_ c_re_q12: i32, _ c_im_q12: i32, _ target: u32) -> (
 /// as `(negative, magnitude)` and zero always has `negative = 0`. The order is
 /// `(step, zr_sign, zr_mag, zi_sign, zi_mag, rr, ii, magnitude, q_re_sign,
 /// q_re_mag, r_re, q_im_sign, q_im_mag, r_im, terminal)`.
-pub fn escape_air_row_encoding_q12(
-    _ c_re_q12: i32,
-    _ c_im_q12: i32,
-    _ target: u32,
-) -> (
-    u32, u32, u32, u32, u32, u32, u32, u32,
-    u32, u32, u32, u32, u32, u32, u32,
+pub fn escape_air_row_encoding_q12(_ c_re_q12: i32, _ c_im_q12: i32, _ target: u32) -> (
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
 ) {
     let row = EscapesByQ12::new(c_re_q12, c_im_q12, target).air_row_at(target)
     let words = air_encoding(row)
     (
-        words[0], words[1], words[2], words[3], words[4],
-        words[5], words[6], words[7], words[8], words[9],
-        words[10], words[11], words[12], words[13], words[14],
+        words[0],
+        words[1],
+        words[2],
+        words[3],
+        words[4],
+        words[5],
+        words[6],
+        words[7],
+        words[8],
+        words[9],
+        words[10],
+        words[11],
+        words[12],
+        words[13],
+        words[14],
     )
 }
 
 /// Proof trace shape ordered as
 /// `(valid, terminal_step, semantic_length, padded_length)`.
-pub fn escape_proof_shape_q12(
-    _ c_re_q12: i32,
-    _ c_im_q12: i32,
-    _ bound: u32,
-) -> (u32, u32, u32, u32) {
+pub fn escape_proof_shape_q12(_ c_re_q12: i32, _ c_im_q12: i32, _ bound: u32) -> (
+    u32,
+    u32,
+    u32,
+    u32,
+) {
     let shape = EscapesByQ12::new(c_re_q12, c_im_q12, bound).proof_shape()
-    (
-        if shape.valid { 1 } else { 0 },
-        shape.terminal_step,
-        shape.trace_length,
-        shape.padded_length,
-    )
+    (if shape.valid { 1 } else { 0 }, shape.terminal_step, shape.trace_length, shape.padded_length)
 }
 
 /// Cheap verifier boundary for public claim and trace-domain metadata. This
@@ -1008,19 +1072,30 @@ pub fn escape_public_proof_domain_holds_q12(
     _ padded_length: u32,
 ) -> u32 {
     let claim = EscapesByQ12::new(c_re_q12, c_im_q12, bound)
-    if public_proof_domain_holds(claim, terminal_step, trace_length, padded_length) { 1 } else { 0 }
+    if public_proof_domain_holds(claim, terminal_step, trace_length, padded_length) {
+        1
+    } else {
+        0
+    }
 }
 
 /// Padded row projection ordered as `(valid, active, terminal)` followed by
 /// the 11 integer AIR columns.
-pub fn escape_proof_row_q12(
-    _ c_re_q12: i32,
-    _ c_im_q12: i32,
-    _ bound: u32,
-    _ target: u32,
-) -> (
-    u32, u32, u32, u32, i32, i32, i32,
-    i32, i32, i32, i32, i32, i32, u32,
+pub fn escape_proof_row_q12(_ c_re_q12: i32, _ c_im_q12: i32, _ bound: u32, _ target: u32) -> (
+    u32,
+    u32,
+    u32,
+    u32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    u32,
 ) {
     let row = EscapesByQ12::new(c_re_q12, c_im_q12, bound).proof_row_at(target)
     (
@@ -1049,17 +1124,26 @@ pub fn escape_proof_row_encoding_q12(
     _ c_im_q12: i32,
     _ bound: u32,
     _ target: u32,
-) -> (
-    u32, u32, u32, u32, u32, u32, u32, u32, u32,
-    u32, u32, u32, u32, u32, u32, u32, u32, u32,
-) {
+) -> (u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32) {
     let row = EscapesByQ12::new(c_re_q12, c_im_q12, bound).proof_row_at(target)
     let words = air_encoding(row.air)
     (
         if row.valid { 1 } else { 0 },
-        words[0], words[1], words[2], words[3], words[4],
-        words[5], words[6], words[7], words[8], words[9],
-        words[10], words[11], words[12], words[13], words[14],
+        words[0],
+        words[1],
+        words[2],
+        words[3],
+        words[4],
+        words[5],
+        words[6],
+        words[7],
+        words[8],
+        words[9],
+        words[10],
+        words[11],
+        words[12],
+        words[13],
+        words[14],
         if row.active { 1 } else { 0 },
         if row.terminal { 1 } else { 0 },
     )
@@ -1110,9 +1194,7 @@ pub fn escape_air_residuals_q12(
         && row.real_shift.remainder < Q12_SCALE
         && row.imaginary_shift.remainder >= 0
         && row.imaginary_shift.remainder < Q12_SCALE
-    let nonnegative_derived = row.rr >= 0
-        && row.ii >= 0
-        && row.semantic.magnitude_squared_q24 >= 0
+    let nonnegative_derived = row.rr >= 0 && row.ii >= 0 && row.semantic.magnitude_squared_q24 >= 0
     let canonical_terminal = terminal <= 1
         && row.semantic.terminal
             == (row.semantic.magnitude_squared_q24 >= ESCAPE_RADIUS_SQUARED_Q24)
@@ -1159,7 +1241,9 @@ pub fn escape_air_pair_holds_q12(
     _ next_r_im: i32,
     _ next_terminal: u32,
 ) -> u32 {
-    if row_terminal > 1 || next_terminal > 1 { return 0 }
+    if row_terminal > 1 || next_terminal > 1 {
+        return 0
+    }
     let claim = EscapesByQ12::new(c_re_q12, c_im_q12, bound)
     let row = projected_air_row(
         step: row_step,
@@ -1187,7 +1271,11 @@ pub fn escape_air_pair_holds_q12(
         r_im: next_r_im,
         terminal: next_terminal == 1,
     )
-    if air_transition_holds(claim, row, next) { 1 } else { 0 }
+    if air_transition_holds(claim, row, next) {
+        1
+    } else {
+        0
+    }
 }
 
 /// Verify one pair in the active/terminal/padding state machine. The flattened
@@ -1210,8 +1298,7 @@ pub fn escape_padded_air_pair_holds_q12(
         || next_active > 1
         || next_terminal > 1
         || !air_words_have_canonical_terminal(row_words)
-        || !air_words_have_canonical_terminal(next_words)
-    {
+        || !air_words_have_canonical_terminal(next_words) {
         return 0
     }
     let row = PaddedEscapeAirRow {
@@ -1227,7 +1314,11 @@ pub fn escape_padded_air_pair_holds_q12(
         air: air_row_from_words(next_words),
     }
     let claim = EscapesByQ12::new(c_re_q12, c_im_q12, bound)
-    if padded_air_transition_holds(claim, row, next) { 1 } else { 0 }
+    if padded_air_transition_holds(claim, row, next) {
+        1
+    } else {
+        0
+    }
 }
 
 /// Constrain the first padded row to the canonical active `z_0 = 0` boundary.
@@ -1239,10 +1330,7 @@ pub fn escape_padded_air_first_holds_q12(
     _ terminal: u32,
     _ words: EscapeAirWords,
 ) -> u32 {
-    if active > 1
-        || terminal > 1
-        || !air_words_have_canonical_terminal(words)
-    {
+    if active > 1 || terminal > 1 || !air_words_have_canonical_terminal(words) {
         return 0
     }
     let row = PaddedEscapeAirRow {
@@ -1252,7 +1340,11 @@ pub fn escape_padded_air_first_holds_q12(
         air: air_row_from_words(words),
     }
     let claim = EscapesByQ12::new(c_re_q12, c_im_q12, bound)
-    if padded_air_first_row_holds(claim, row) { 1 } else { 0 }
+    if padded_air_first_row_holds(claim, row) {
+        1
+    } else {
+        0
+    }
 }
 
 /// Constrain the final padded-domain row to be either the active terminal row
@@ -1263,10 +1355,7 @@ pub fn escape_padded_air_last_holds_q12(
     _ terminal: u32,
     _ words: EscapeAirWords,
 ) -> u32 {
-    if active > 1
-        || terminal > 1
-        || !air_words_have_canonical_terminal(words)
-    {
+    if active > 1 || terminal > 1 || !air_words_have_canonical_terminal(words) {
         return 0
     }
     let row = PaddedEscapeAirRow {
