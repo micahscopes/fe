@@ -276,3 +276,149 @@ pub fn forged(_ workspace_address: u32, _ payload_address: u32) {
         "unexpected fail-closed diagnostic: {error}",
     );
 }
+
+#[test]
+fn typed_provider_reborrows_preserve_arena_provenance() {
+    let wasm = compile_to_wasm(
+        r#"
+use core::{BrowserPtr, alloc_browser_object}
+
+struct Input {
+    valid: bool,
+    values: [u32; 8],
+}
+
+struct Output {
+    valid: bool,
+    values: [u32; 8],
+}
+
+fn transform(_ input: ref Input, _ output: mut Output) -> bool {
+    output.valid = false
+    if !input.valid { return false }
+    let mut scratch = [0; 8]
+    let mut index: usize = 0
+    while index < 8 {
+        scratch[index] = input.values[index] + 1
+        output.values[index] = scratch[index]
+        index = index + 1
+    }
+    output.valid = true
+    true
+}
+
+fn prepare(_ seed: u32) uses (input: mut Input) {
+    input.valid = true
+    let mut index: usize = 0
+    while index < 8 {
+        input.values[index] = seed + index.downcast_truncate()
+        index = index + 1
+    }
+}
+
+fn forward() -> bool uses (input: Input, output: mut Output) {
+    transform(ref input, mut output)
+}
+
+fn read_last() -> u32 uses (output: Output) {
+    if !output.valid { return 0 }
+    output.values[7]
+}
+
+pub fn run(_ seed: u32) -> u32 {
+    let input: BrowserPtr<Input> = alloc_browser_object<Input>()
+    let output: BrowserPtr<Output> = alloc_browser_object<Output>()
+    with (input) { prepare(seed) }
+    if !with (input, output) { forward() } { return 0 }
+    with (output) { read_last() }
+}
+"#,
+    );
+    wasmparser::validate(&wasm).expect("provider reborrow fixture emitted invalid Wasm");
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, wasm).unwrap();
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+    let run = instance
+        .get_typed_func::<i32, i32>(&mut store, "run")
+        .unwrap();
+    assert_eq!(run.call(&mut store, 10).unwrap(), 18);
+}
+
+#[test]
+fn typed_pointer_fields_preserve_arena_provenance_across_actor_stages() {
+    let wasm = compile_to_wasm(
+        r#"
+use core::{BrowserPtr, alloc_browser_object}
+
+struct Payload {
+    valid: bool,
+    value: u32,
+}
+
+struct Workspace {
+    valid: bool,
+    input: BrowserPtr<Payload>,
+    output: BrowserPtr<Payload>,
+}
+
+fn initialize_workspace(
+    _ input: BrowserPtr<Payload>,
+    _ output: BrowserPtr<Payload>,
+)
+    uses (workspace: mut Workspace)
+{
+    workspace.valid = false
+    workspace.input = input
+    workspace.output = output
+    workspace.valid = true
+}
+
+fn initialize_payload(_ value: u32) uses (payload: mut Payload) {
+    payload.valid = true
+    payload.value = value
+}
+
+fn transform() -> bool uses (input: Payload, output: mut Payload) {
+    output.valid = false
+    if !input.valid { return false }
+    let mut scratch = [0; 8]
+    scratch[7] = input.value + 1
+    output.value = scratch[7]
+    output.valid = true
+    true
+}
+
+fn run_stage() -> bool uses (workspace: Workspace) {
+    if !workspace.valid { return false }
+    let input = workspace.input
+    let output = workspace.output
+    with (input, output) { transform() }
+}
+
+fn read() -> u32 uses (payload: Payload) {
+    if !payload.valid { return 0 }
+    payload.value
+}
+
+pub fn run(_ value: u32) -> u32 {
+    let input: BrowserPtr<Payload> = alloc_browser_object<Payload>()
+    let output: BrowserPtr<Payload> = alloc_browser_object<Payload>()
+    let workspace: BrowserPtr<Workspace> = alloc_browser_object<Workspace>()
+    with (input) { initialize_payload(value) }
+    with (workspace) { initialize_workspace(input, output) }
+    if !with (workspace) { run_stage() } { return 0 }
+    with (output) { read() }
+}
+"#,
+    );
+    wasmparser::validate(&wasm).expect("actor workspace pointer fixture emitted invalid Wasm");
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, wasm).unwrap();
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+    let run = instance
+        .get_typed_func::<i32, i32>(&mut store, "run")
+        .unwrap();
+    assert_eq!(run.call(&mut store, 41).unwrap(), 42);
+}

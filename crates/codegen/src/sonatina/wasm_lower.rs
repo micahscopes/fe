@@ -3577,6 +3577,12 @@ struct ScopedArenaAnalysis<'db> {
     callees: HashSet<RuntimeInstance<'db>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ArenaPointerFieldKey<'db> {
+    root_layout: LayoutId<'db>,
+    fields: Box<[u16]>,
+}
+
 #[derive(Clone, Copy, Debug)]
 enum GpuResourceElementType {
     U32,
@@ -6230,14 +6236,72 @@ where
         }
     }
 
+    /// Identify a typed memory-pointer field and the local carrying its root
+    /// object. The key is structural across function bodies, so an initializer
+    /// actor and a later stage actor agree on the same workspace field without
+    /// relying on source names. Dynamic indexes, dereferences, opaque pointers,
+    /// and non-memory transports stay outside this proof.
+    fn arena_pointer_field(
+        &self,
+        body: &RuntimeBody<'db>,
+        place: &RuntimePlace<'db>,
+    ) -> Option<(ArenaPointerFieldKey<'db>, RLocalId)> {
+        let program = self.db as &dyn mir::MirDb;
+        let resolved = mir::resolve_runtime_place(self.db, &program, body, place).ok()?;
+        if !matches!(
+            resolved.result_class,
+            RuntimeClass::RawAddr {
+                space: AddressSpaceKind::Memory,
+                target: Some(_),
+            }
+        ) {
+            return None;
+        }
+        let root_layout = match &resolved.root_kind {
+            mir::ResolvedPlaceRootKind::Slot { class, .. }
+            | mir::ResolvedPlaceRootKind::Ref { class, .. }
+            | mir::ResolvedPlaceRootKind::Provider { class, .. }
+            | mir::ResolvedPlaceRootKind::Ptr { class, .. } => {
+                let RuntimeClass::AggregateValue { layout } = class else {
+                    return None;
+                };
+                *layout
+            }
+        };
+        let fields = resolved
+            .path
+            .iter()
+            .map(|element| match element {
+                mir::ResolvedPlaceElem::Field { field, .. } => Some(field.0),
+                mir::ResolvedPlaceElem::Index { .. }
+                | mir::ResolvedPlaceElem::VariantField { .. }
+                | mir::ResolvedPlaceElem::Deref { .. } => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        if fields.is_empty() {
+            return None;
+        }
+        let root = Self::arena_owned_place_source(body, place)?;
+        Some((
+            ArenaPointerFieldKey {
+                root_layout,
+                fields: fields.into_boxed_slice(),
+            },
+            root,
+        ))
+    }
+
     /// Prove canonical-arena address provenance across private calls. A raw
     /// memory parameter is admitted only when the function is not exported and
     /// every materialized call site supplies an address descended from
     /// `AllocObject` or another target-layout materialization. A worklist
-    /// propagates that least fixed point through local copy edges and private
-    /// helper calls. A public parameter, an unproven integer-to-pointer
-    /// conversion, or one forged call site prevents the parameter from entering
-    /// the proven set.
+    /// propagates that least fixed point through local copy edges, private
+    /// helper calls, and typed pointer fields in arena-owned actor workspaces. A
+    /// field load is admitted only when every store to the same structural field
+    /// in the closed package has both an arena-owned root and arena-owned source.
+    /// A public parameter, an unproven integer-to-pointer conversion, one forged
+    /// call site, or one forged field store prevents the value from entering the
+    /// proven set.
     fn derive_arena_owned_locals(&self) -> FxHashMap<RuntimeInstance<'db>, HashSet<RLocalId>> {
         type LocalKey<'db> = (RuntimeInstance<'db>, RLocalId);
 
@@ -6258,10 +6322,22 @@ where
         let mut local_dependents = FxHashMap::<LocalKey<'db>, Vec<LocalKey<'db>>>::default();
         let mut call_dependents = FxHashMap::<LocalKey<'db>, Vec<LocalKey<'db>>>::default();
         let mut call_requirements = FxHashMap::<LocalKey<'db>, usize>::default();
+        let mut field_stores =
+            FxHashMap::<ArenaPointerFieldKey<'db>, Vec<(LocalKey<'db>, LocalKey<'db>)>>::default();
+        let mut field_loads =
+            Vec::<(ArenaPointerFieldKey<'db>, LocalKey<'db>, LocalKey<'db>)>::new();
 
         for (instance, body) in &self.prepared_bodies {
             for block in &body.blocks {
                 for stmt in &block.stmts {
+                    if let RStmt::Store { dst, src } | RStmt::CopyInto { dst, src } = stmt
+                        && let Some((field, root)) = self.arena_pointer_field(body, dst)
+                    {
+                        field_stores
+                            .entry(field)
+                            .or_default()
+                            .push(((*instance, root), (*instance, *src)));
+                    }
                     let RStmt::Assign { dst, expr } = stmt else {
                         continue;
                     };
@@ -6286,6 +6362,11 @@ where
                                     .entry((*instance, source))
                                     .or_default()
                                     .push(destination);
+                            }
+                        }
+                        RExpr::Load { place } => {
+                            if let Some((field, root)) = self.arena_pointer_field(body, place) {
+                                field_loads.push((field, (*instance, root), destination));
                             }
                         }
                         _ => {}
@@ -6322,24 +6403,65 @@ where
             }
         }
         let mut satisfied_requirements = FxHashMap::<LocalKey<'db>, usize>::default();
-        while let Some(source) = queue.pop_front() {
-            if let Some(dependents) = local_dependents.get(&source) {
-                for &(instance, local) in dependents {
-                    if owned.entry(instance).or_default().insert(local) {
-                        queue.push_back((instance, local));
+        let mut owned_fields = HashSet::<ArenaPointerFieldKey<'db>>::new();
+        loop {
+            while let Some(source) = queue.pop_front() {
+                if let Some(dependents) = local_dependents.get(&source) {
+                    for &(instance, local) in dependents {
+                        if owned.entry(instance).or_default().insert(local) {
+                            queue.push_back((instance, local));
+                        }
+                    }
+                }
+                if let Some(parameters) = call_dependents.get(&source) {
+                    for &parameter in parameters {
+                        let satisfied = satisfied_requirements.entry(parameter).or_default();
+                        *satisfied += 1;
+                        if *satisfied == call_requirements[&parameter]
+                            && owned.entry(parameter.0).or_default().insert(parameter.1)
+                        {
+                            queue.push_back(parameter);
+                        }
                     }
                 }
             }
-            if let Some(parameters) = call_dependents.get(&source) {
-                for &parameter in parameters {
-                    let satisfied = satisfied_requirements.entry(parameter).or_default();
-                    *satisfied += 1;
-                    if *satisfied == call_requirements[&parameter]
-                        && owned.entry(parameter.0).or_default().insert(parameter.1)
-                    {
-                        queue.push_back(parameter);
-                    }
+
+            let mut changed = false;
+            for (field, stores) in &field_stores {
+                if owned_fields.contains(field)
+                    || !stores.iter().all(|(root, source)| {
+                        owned
+                            .get(&root.0)
+                            .is_some_and(|locals| locals.contains(&root.1))
+                            && owned
+                                .get(&source.0)
+                                .is_some_and(|locals| locals.contains(&source.1))
+                    })
+                {
+                    continue;
                 }
+                owned_fields.insert(field.clone());
+                changed = true;
+            }
+            for (field, root, destination) in &field_loads {
+                if !owned_fields.contains(field)
+                    || !owned
+                        .get(&root.0)
+                        .is_some_and(|locals| locals.contains(&root.1))
+                {
+                    continue;
+                }
+                if owned
+                    .entry(destination.0)
+                    .or_default()
+                    .insert(destination.1)
+                {
+                    queue.push_back(*destination);
+                    changed = true;
+                }
+            }
+            if queue.is_empty() && !changed {
+                break;
             }
         }
         owned
