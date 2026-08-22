@@ -33,8 +33,8 @@ use hir::hir_def::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sonatina_codegen::isa::spirv::{
-    Access, LayoutMode, Role, SpirvBuiltinSource, SpirvExternalResource, SpirvLayout,
-    SpirvResourceElement, SpirvResourceField, SpirvScalarKind, WordKind,
+    Access, LayoutMode, Role, SpirvBuiltinArgument, SpirvBuiltinSource, SpirvExternalResource,
+    SpirvLayout, SpirvResourceElement, SpirvResourceField, SpirvScalarKind, WordKind,
 };
 
 use crate::actor_semantics::{SemanticActor, nominal_attrs, resolve_metadata_ty, semantic_actors};
@@ -46,7 +46,7 @@ use crate::resident_actor::{
 };
 use crate::sonatina::{
     WasmCompileOptions, compile_runtime_package_spirv_authored_raster,
-    compile_runtime_package_spirv_compute_with_resources, compile_runtime_package_spirv_grid,
+    compile_runtime_package_spirv_compute_with_interface, compile_runtime_package_spirv_grid,
     compile_runtime_package_spirv_render, compile_runtime_package_spirv_render_with_resources,
     compile_runtime_package_wasm_with_options,
 };
@@ -445,6 +445,7 @@ pub enum WebActorStageKind {
     Compute {
         workgroup_size: [u32; 3],
         dispatch: [u32; 3],
+        invocation_context: bool,
     },
     /// Authored vertex behavior. The payload tree is derived from the role's
     /// nominal `V` and retained only as compiler state; it is not serialized
@@ -624,6 +625,94 @@ fn compute_stage_shape(
         ));
     }
     Ok((workgroup_size, dispatch))
+}
+
+fn compute_invocation_context(
+    db: &DriverDataBase,
+    behavior: hir::hir_def::Func<'_>,
+) -> Result<bool, WebBundleError> {
+    let args = behavior.arg_tys(db);
+    let marked = args
+        .iter()
+        .enumerate()
+        .filter_map(|(index, ty)| {
+            nominal_attrs(db, *ty.skip_binder())
+                .is_some_and(|attrs| attrs.is_gpu_compute_invocation(db))
+                .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let context_index = match marked.as_slice() {
+        [] => return Ok(false),
+        [index] => *index,
+        _ => {
+            return Err(WebBundleError::EntryDerivation(
+                "compute behavior may take at most one `#[gpu_compute_invocation]` context"
+                    .to_owned(),
+            ));
+        }
+    };
+    if context_index != 0 {
+        return Err(WebBundleError::EntryDerivation(
+            "`#[gpu_compute_invocation]` context must be the compute behavior's first argument"
+                .to_owned(),
+        ));
+    }
+
+    let context = *args[context_index].skip_binder();
+    let context = context.as_view(db).unwrap_or(context);
+    let fields = context.field_types(db);
+    let [global, local, workgroup, workgroups, local_index] = fields.as_slice() else {
+        return Err(WebBundleError::EntryDerivation(
+            "`#[gpu_compute_invocation]` must contain four three-axis records followed by one `u32` local index"
+                .to_owned(),
+        ));
+    };
+    for axis in [global, local, workgroup, workgroups] {
+        let axis = axis.as_view(db).unwrap_or(*axis);
+        let components = axis.field_types(db);
+        if components.len() != 3
+            || components
+                .into_iter()
+                .any(|component| !is_primitive(db, component, PrimTy::U32))
+        {
+            return Err(WebBundleError::EntryDerivation(
+                "each `#[gpu_compute_invocation]` axis record must contain exactly three `u32` fields"
+                    .to_owned(),
+            ));
+        }
+    }
+    if !is_primitive(db, *local_index, PrimTy::U32) {
+        return Err(WebBundleError::EntryDerivation(
+            "`#[gpu_compute_invocation]` local index must be exactly `u32`".to_owned(),
+        ));
+    }
+    Ok(true)
+}
+
+fn compute_invocation_builtin_arguments() -> Vec<SpirvBuiltinArgument> {
+    use SpirvBuiltinSource as Source;
+    [
+        Source::GlobalInvocationIdX,
+        Source::GlobalInvocationIdY,
+        Source::GlobalInvocationIdZ,
+        Source::LocalInvocationIdX,
+        Source::LocalInvocationIdY,
+        Source::LocalInvocationIdZ,
+        Source::WorkgroupIdX,
+        Source::WorkgroupIdY,
+        Source::WorkgroupIdZ,
+        Source::NumWorkgroupsX,
+        Source::NumWorkgroupsY,
+        Source::NumWorkgroupsZ,
+        Source::LocalInvocationIndex,
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(arg_index, source)| SpirvBuiltinArgument {
+        arg_index: arg_index as u32,
+        source,
+    })
+    .collect()
 }
 
 fn role_payload_ty<'db>(
@@ -982,10 +1071,12 @@ pub fn actor_gpu_program(
             }
             GpuStage::Compute => {
                 let (workgroup_size, dispatch) = compute_stage_shape(db, *behavior, role_path)?;
+                let invocation_context = compute_invocation_context(db, *behavior)?;
                 (
                     WebActorStageKind::Compute {
                         workgroup_size,
                         dispatch,
+                        invocation_context,
                     },
                     None,
                 )
@@ -3575,6 +3666,17 @@ pub enum WebScalarKind {
 pub enum WebBuiltinSource {
     GlobalInvocationIdX,
     GlobalInvocationIdY,
+    GlobalInvocationIdZ,
+    LocalInvocationIdX,
+    LocalInvocationIdY,
+    LocalInvocationIdZ,
+    WorkgroupIdX,
+    WorkgroupIdY,
+    WorkgroupIdZ,
+    NumWorkgroupsX,
+    NumWorkgroupsY,
+    NumWorkgroupsZ,
+    LocalInvocationIndex,
     FragmentPositionX,
     FragmentPositionY,
     VertexIndex,
@@ -3863,6 +3965,7 @@ fn stage_external_resources(
     package: &mir::RuntimePackage<'_>,
     resources: &[WebResource],
     access: Access,
+    leading_context_leaves: Option<u32>,
 ) -> Result<Vec<SpirvExternalResource>, WebBundleError> {
     let root = package.primary_object(db).ok_or_else(|| {
         WebBundleError::Lower("GPU stage runtime package has no primary object".to_owned())
@@ -3871,6 +3974,9 @@ fn stage_external_resources(
         WebBundleError::Lower("GPU stage runtime package has no root section".to_owned())
     })?;
     let body = section.entry.instance(db).body(db);
+    let context_offset = leading_context_leaves
+        .map(|leaves| leaves.saturating_sub(1))
+        .unwrap_or(0);
     let arg_indices = body
         .signature
         .params
@@ -3880,7 +3986,7 @@ fn stage_external_resources(
             let ty = body.local(param.local)?.semantic_ty;
             nominal_attrs(db, ty)
                 .is_some_and(|attrs| attrs.gpu_resource(db) == Some(GpuResource::Storage))
-                .then_some(index as u32)
+                .then_some(index as u32 + context_offset)
         })
         .collect::<Vec<_>>();
     if arg_indices.len() != resources.len() {
@@ -4074,15 +4180,27 @@ impl WebBundle {
                 WebActorStageKind::Compute {
                     workgroup_size,
                     dispatch,
+                    invocation_context,
                 } => {
-                    let external =
-                        stage_external_resources(db, &package, &resources, Access::ReadWrite)?;
+                    let builtin_arguments = invocation_context
+                        .then(compute_invocation_builtin_arguments)
+                        .unwrap_or_default();
+                    let context_leaves = (!builtin_arguments.is_empty())
+                        .then_some(u32::try_from(builtin_arguments.len()).unwrap());
+                    let external = stage_external_resources(
+                        db,
+                        &package,
+                        &resources,
+                        Access::ReadWrite,
+                        context_leaves,
+                    )?;
                     (
-                        compile_runtime_package_spirv_compute_with_resources(
+                        compile_runtime_package_spirv_compute_with_interface(
                             db,
                             &package,
                             workgroup_size,
                             &external,
+                            &builtin_arguments,
                         ),
                         Some(dispatch),
                         "compute",
@@ -4090,7 +4208,7 @@ impl WebBundle {
                 }
                 WebActorStageKind::Fragment => {
                     let external =
-                        stage_external_resources(db, &package, &resources, Access::Read)?;
+                        stage_external_resources(db, &package, &resources, Access::Read, None)?;
                     (
                         compile_runtime_package_spirv_render_with_resources(
                             db, &package, &external,
@@ -5257,6 +5375,27 @@ impl WebLayout {
                         }
                         SpirvBuiltinSource::GlobalInvocationIdY => {
                             WebBuiltinSource::GlobalInvocationIdY
+                        }
+                        SpirvBuiltinSource::GlobalInvocationIdZ => {
+                            WebBuiltinSource::GlobalInvocationIdZ
+                        }
+                        SpirvBuiltinSource::LocalInvocationIdX => {
+                            WebBuiltinSource::LocalInvocationIdX
+                        }
+                        SpirvBuiltinSource::LocalInvocationIdY => {
+                            WebBuiltinSource::LocalInvocationIdY
+                        }
+                        SpirvBuiltinSource::LocalInvocationIdZ => {
+                            WebBuiltinSource::LocalInvocationIdZ
+                        }
+                        SpirvBuiltinSource::WorkgroupIdX => WebBuiltinSource::WorkgroupIdX,
+                        SpirvBuiltinSource::WorkgroupIdY => WebBuiltinSource::WorkgroupIdY,
+                        SpirvBuiltinSource::WorkgroupIdZ => WebBuiltinSource::WorkgroupIdZ,
+                        SpirvBuiltinSource::NumWorkgroupsX => WebBuiltinSource::NumWorkgroupsX,
+                        SpirvBuiltinSource::NumWorkgroupsY => WebBuiltinSource::NumWorkgroupsY,
+                        SpirvBuiltinSource::NumWorkgroupsZ => WebBuiltinSource::NumWorkgroupsZ,
+                        SpirvBuiltinSource::LocalInvocationIndex => {
+                            WebBuiltinSource::LocalInvocationIndex
                         }
                         SpirvBuiltinSource::FragmentPositionX => {
                             WebBuiltinSource::FragmentPositionX

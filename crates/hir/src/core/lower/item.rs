@@ -246,6 +246,11 @@ fn validate_struct_attrs<'db>(
             ),
             AttrRule::supported("gpu_vertex_output", BARE_FORM, "`#[gpu_vertex_output]`"),
             AttrRule::supported("gpu_clip_position", BARE_FORM, "`#[gpu_clip_position]`"),
+            AttrRule::supported(
+                "gpu_compute_invocation",
+                BARE_FORM,
+                "`#[gpu_compute_invocation]`",
+            ),
             AttrRule::supported("gpu_resource", GPU_IDENT_FORM, "`#[gpu_resource(storage)]`"),
             AttrRule::supported(
                 "gpu_control",

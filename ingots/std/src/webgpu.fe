@@ -116,6 +116,30 @@ pub struct ComputeSurface<W, D> {}
 #[gpu_workgroup]
 pub struct Workgroup<const X: usize, const Y: usize, const Z: usize> {}
 
+/// One three-dimensional index in WebGPU's portable compute invocation model.
+pub struct InvocationId {
+    pub x: u32,
+    pub y: u32,
+    pub z: u32,
+}
+
+impl Copy for InvocationId {}
+
+/// Complete context of one compute invocation. The compiler maps this nominal
+/// Fe value directly onto WebGPU builtins, with no host-populated parameter
+/// buffer. Its nested shape keeps related axes together while still flattening
+/// to the target's exact scalar interface.
+#[gpu_compute_invocation]
+pub struct ComputeInvocation {
+    pub global: InvocationId,
+    pub local: InvocationId,
+    pub workgroup: InvocationId,
+    pub workgroups: InvocationId,
+    pub local_index: u32,
+}
+
+impl Copy for ComputeInvocation {}
+
 /// A fixed dispatch grid executed once whenever the pass graph runs.
 #[gpu_dispatch(fixed)]
 pub struct FixedDispatch<const X: usize, const Y: usize, const Z: usize> {}

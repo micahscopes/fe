@@ -582,6 +582,13 @@ impl<'db> AttrListId<'db> {
         self.has_marker_attr(db, "gpu_workgroup")
     }
 
+    /// Marks the standard nominal record carrying the complete portable
+    /// compute-invocation context. Consumers validate its complete nested
+    /// scalar shape before mapping its leaves to physical shader builtins.
+    pub fn is_gpu_compute_invocation(self, db: &'db dyn HirDb) -> bool {
+        self.has_marker_attr(db, "gpu_compute_invocation")
+    }
+
     /// Marks the standard Fe record transported by the fixed browser surface
     /// event ABI. Consumers still verify its complete semantic field shape;
     /// the marker supplies nominal intent, never a name-based guess.

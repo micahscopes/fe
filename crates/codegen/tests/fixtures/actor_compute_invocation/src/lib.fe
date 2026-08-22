@@ -1,0 +1,40 @@
+use std::webgpu::{
+    ComputeInvocation,
+    ComputeSurface as Kernel,
+    FixedDispatch as Grid,
+    FragmentSurface as Pixel,
+    GpuProgram as Program,
+    StorageBuffer as Shared,
+    Workgroup as Threads,
+    WebGpuBackend,
+}
+
+const WIDTH: u32 = 4
+
+actor InvocationReceipt uses (Program<WebGpuBackend>) {
+    receipts: Shared<u32, 16>,
+
+    fn stamp(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<2, 2, 1>, Grid<2, 2, 1>>)
+    {
+        let slot = invocation.global.y * WIDTH + invocation.global.x
+        let receipt = invocation.global.x
+            + invocation.global.y * 10
+            + invocation.global.z * 100
+            + invocation.local.x * 1000
+            + invocation.local.y * 2000
+            + invocation.local.z * 4000
+            + invocation.workgroup.x * 10000
+            + invocation.workgroup.y * 20000
+            + invocation.workgroup.z * 40000
+            + invocation.workgroups.x * 100000
+            + invocation.workgroups.y * 200000
+            + invocation.workgroups.z * 400000
+            + invocation.local_index * 1000000
+        self.receipts.store(index: slot, value: receipt)
+    }
+
+    fn paint(self, px: i32, py: i32) -> i32 uses (Pixel) {
+        self.receipts.load(index: 0).downcast_truncate()
+    }
+}

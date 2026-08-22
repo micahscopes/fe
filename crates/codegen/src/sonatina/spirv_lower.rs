@@ -18,7 +18,9 @@ use compiler_db::DriverDataBase;
 use hir::hir_def::TopLevelMod;
 use mir::{RuntimePackage, build_wasm_runtime_package_for_entry};
 use sonatina_codegen::Backend as _;
-use sonatina_codegen::isa::spirv::{SpirvArtifact, SpirvBackend, SpirvExternalResource};
+use sonatina_codegen::isa::spirv::{
+    SpirvArtifact, SpirvBackend, SpirvBuiltinArgument, SpirvExternalResource,
+};
 use sonatina_codegen::optim::{Pass, Pipeline, Step, inliner::InlinerConfig};
 
 use crate::sonatina::{LowerError, wasm_lower::compile_runtime_package_shader_ir};
@@ -99,6 +101,25 @@ pub fn compile_runtime_package_spirv_compute_with_resources(
     workgroup_size: [u32; 3],
     resources: &[SpirvExternalResource],
 ) -> Result<SpirvArtifact, LowerError> {
+    compile_runtime_package_spirv_compute_with_interface(
+        db,
+        package,
+        workgroup_size,
+        resources,
+        &[],
+    )
+}
+
+/// Lower an explicit compute stage whose complete interface was derived from
+/// Fe types. Builtin arguments are source parameters supplied directly by the
+/// physical shader invocation context rather than a host-populated buffer.
+pub fn compile_runtime_package_spirv_compute_with_interface(
+    db: &DriverDataBase,
+    package: &RuntimePackage<'_>,
+    workgroup_size: [u32; 3],
+    resources: &[SpirvExternalResource],
+    builtin_arguments: &[SpirvBuiltinArgument],
+) -> Result<SpirvArtifact, LowerError> {
     let (mut module, _import_modules) = compile_runtime_package_shader_ir(db, package)?;
     inline_spirv_calls(&mut module);
     ensure_spirv_entry_call_free(&module)?;
@@ -110,6 +131,9 @@ pub fn compile_runtime_package_spirv_compute_with_resources(
     );
     for resource in resources {
         backend = backend.with_external_resource(resource.clone());
+    }
+    for argument in builtin_arguments {
+        backend = backend.with_builtin_argument(*argument);
     }
     backend.compile_module(&module).map_err(|errors| {
         LowerError::Spirv(

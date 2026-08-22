@@ -21,7 +21,7 @@ use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
     CanonicalType, WasmCompileOptions, WebActorResourceElement, WebActorStageKind, WebBuildOptions,
-    WebBundle, WebBundleMode, actor_gpu_program, actor_web_entry,
+    WebBuiltinSource, WebBundle, WebBundleMode, actor_gpu_program, actor_web_entry,
     compile_runtime_package_spirv_compute_with_resources,
     compile_runtime_package_spirv_render_with_resources, compile_runtime_package_wasm_with_options,
     resolve_web_entry,
@@ -404,6 +404,7 @@ fn attributed_aliases_derive_compute_resource_and_fragment_plan() {
         WebActorStageKind::Compute {
             workgroup_size: [1, 1, 1],
             dispatch: [1, 1, 1],
+            invocation_context: false,
         }
     );
     assert_eq!(program.stages[1].source_entry, "paint");
@@ -534,6 +535,100 @@ fn attributed_actor_builds_a_materialized_v6_pass_graph() {
     assert!(paths.contains(&"passes/000-compute.wgsl".to_owned()));
     assert!(paths.contains(&"passes/001-fragment.wgsl".to_owned()));
     assert!(!paths.contains(&"module.wasm".to_owned()));
+}
+
+#[test]
+fn nominal_compute_invocation_maps_to_physical_builtins_without_parameter_storage() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_compute_invocation");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "compute invocation fixture diagnostics:\n{diagnostics}"
+    );
+
+    let program = actor_gpu_program(&db, top_mod)
+        .expect("compute invocation derivation")
+        .expect("GPU actor");
+    assert_eq!(
+        program.stages[0].kind,
+        WebActorStageKind::Compute {
+            workgroup_size: [2, 2, 1],
+            dispatch: [2, 2, 1],
+            invocation_context: true,
+        }
+    );
+
+    let bundle = WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render("paint", Some("compute-invocation.fe".to_owned())),
+    )
+    .expect("typed compute invocation pass graph");
+    let pass = &bundle.manifest.passes[0];
+    assert_eq!(pass.dispatch, Some([2, 2, 1]));
+    assert_eq!(pass.layout.workgroup_size, [2, 2, 1]);
+    assert!(
+        pass.layout
+            .bindings
+            .iter()
+            .all(|binding| binding.role != fe_codegen::WebBindingRole::Input),
+        "compute invocation must not synthesize host-populated scalar input storage"
+    );
+    assert_eq!(
+        pass.layout
+            .builtin_inputs
+            .iter()
+            .map(|input| input.source)
+            .collect::<Vec<_>>(),
+        vec![
+            WebBuiltinSource::GlobalInvocationIdX,
+            WebBuiltinSource::GlobalInvocationIdY,
+            WebBuiltinSource::GlobalInvocationIdZ,
+            WebBuiltinSource::LocalInvocationIdX,
+            WebBuiltinSource::LocalInvocationIdY,
+            WebBuiltinSource::LocalInvocationIdZ,
+            WebBuiltinSource::WorkgroupIdX,
+            WebBuiltinSource::WorkgroupIdY,
+            WebBuiltinSource::WorkgroupIdZ,
+            WebBuiltinSource::NumWorkgroupsX,
+            WebBuiltinSource::NumWorkgroupsY,
+            WebBuiltinSource::NumWorkgroupsZ,
+            WebBuiltinSource::LocalInvocationIndex,
+        ]
+    );
+    let wgsl = &bundle.pass_wgsl[0].source;
+    for builtin in [
+        "@builtin(global_invocation_id)",
+        "@builtin(local_invocation_id)",
+        "@builtin(workgroup_id)",
+        "@builtin(num_workgroups)",
+        "@builtin(local_invocation_index)",
+    ] {
+        assert!(wgsl.contains(builtin), "missing {builtin}:\n{wgsl}");
+    }
+}
+
+#[test]
+fn compute_invocation_context_must_be_the_first_behavior_argument() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_compute_invocation_misplaced");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "misplaced compute invocation fixture diagnostics:\n{diagnostics}"
+    );
+    let error = actor_gpu_program(&db, top_mod).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("must be the compute behavior's first argument"),
+        "unexpected diagnostic: {error}"
+    );
 }
 
 #[test]

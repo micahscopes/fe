@@ -1,0 +1,24 @@
+use std::webgpu::{
+    ComputeInvocation,
+    ComputeSurface as Kernel,
+    FixedDispatch as Once,
+    FragmentSurface as Pixel,
+    GpuProgram as Program,
+    StorageBuffer as Shared,
+    Workgroup as Threads,
+    WebGpuBackend,
+}
+
+actor MisplacedInvocation uses (Program<WebGpuBackend>) {
+    receipt: Shared<u32, 1>,
+
+    fn stamp(self, salt: u32, invocation: ComputeInvocation)
+        uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>)
+    {
+        self.receipt.store(index: 0, value: salt + invocation.global.x)
+    }
+
+    fn paint(self, px: i32, py: i32) -> i32 uses (Pixel) {
+        self.receipt.load(index: 0).downcast_truncate()
+    }
+}
