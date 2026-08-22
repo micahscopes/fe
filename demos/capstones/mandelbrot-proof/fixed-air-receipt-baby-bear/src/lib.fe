@@ -18,11 +18,13 @@ use mandelbrot_proof_baby_bear::{
     BabyBearFriQueryBuffer,
     BabyBearFriQueryPlanShape,
     CompositionMultiOpening,
+    CompositionDigest,
     Ext4SparseOpening,
     FriMultiCommitmentQuery,
     FriQueryBuffer,
     bind_composition,
     composition_multi_query_opening_power_of_two,
+    empty_composition_multi_opening,
     fold_fri_schedule,
     fri_multi_sibling_capacity,
     verify_composition_multi_opening,
@@ -42,6 +44,8 @@ use mandelbrot_proof_fixed_air_baby_bear::{
     sparse_base_lde_root_power_of_two,
     sparse_composition_lde_root_power_of_two,
     sparse_interaction_lde_root_power_of_two,
+    empty_sparse_base_lde_multi_opening,
+    empty_sparse_interaction_lde_multi_opening,
     verify_sparse_base_lde_multi_opening,
     verify_sparse_interaction_lde_multi_opening,
     write_sparse_base_lde_multi_opening_power_of_two,
@@ -112,6 +116,8 @@ pub const PRODUCTION_LIMBS: usize = 4
 pub const PRODUCTION_TRACE_LENGTH: usize = 4096
 pub const PRODUCTION_LDE_LENGTH: usize = 8192
 pub const PRODUCTION_LDE_LOG: usize = 13
+/// Protocol-shape checkpoint only. A later audited soundness policy must
+/// derive the security-bearing query count before recursive proving.
 pub const PRODUCTION_QUERY_COUNT: usize = 4
 pub const PRODUCTION_AIR_MAX_LEAVES: usize = PRODUCTION_QUERY_COUNT * 4
 pub const PRODUCTION_AIR_MAX_SIBLINGS: usize =
@@ -148,6 +154,61 @@ pub type ProductionSparseBabyBearReceipt = SparseBabyBearAirFriReceipt<
     {PRODUCTION_AIR_MAX_SIBLINGS},
     ProductionSparseFriQuery,
 >
+
+/// Construct the canonical empty production carrier. Browser and native
+/// decoders start from this value, so storage shape remains derived from Fe
+/// types rather than repeated in host scaffolding.
+pub fn empty_production_sparse_baby_bear_receipt()
+    -> ProductionSparseBabyBearReceipt {
+    let base_root = SparseBaseLdeDigest {
+        valid: false,
+        value: Poseidon2Digest::zero(),
+    }
+    SparseBabyBearAirFriReceipt {
+        valid: false,
+        base_root: base_root,
+        interaction_root: SparseInteractionLdeDigest {
+            valid: false,
+            base: base_root,
+            value: Poseidon2Digest::zero(),
+        },
+        base: empty_sparse_base_lde_multi_opening<
+            {PRODUCTION_LIMBS},
+            {PRODUCTION_TRACE_LENGTH},
+            {PRODUCTION_LDE_LENGTH},
+            {PRODUCTION_AIR_MAX_LEAVES},
+            {PRODUCTION_AIR_MAX_SIBLINGS},
+        >(),
+        interaction: empty_sparse_interaction_lde_multi_opening<
+            {PRODUCTION_LIMBS},
+            {PRODUCTION_TRACE_LENGTH},
+            {PRODUCTION_LDE_LENGTH},
+            {PRODUCTION_AIR_MAX_LEAVES},
+            {PRODUCTION_AIR_MAX_SIBLINGS},
+        >(),
+        fri: FriMultiCommitmentQuery {
+            valid: false,
+            composition_root: CompositionDigest {
+                valid: false,
+                value: Poseidon2Digest::zero(),
+            },
+            composition: empty_composition_multi_opening<
+                {PRODUCTION_COMPOSITION_MAX_LEAVES},
+                {PRODUCTION_COMPOSITION_MAX_SIBLINGS},
+            >(),
+            layers: <ProductionSparseFriSchedule
+                as BabyBearFriMultiQueryLayers<
+                    {PRODUCTION_QUERY_COUNT},
+                    {PRODUCTION_LDE_LENGTH / 2},
+                    {PRODUCTION_COMPOSITION_MAX_LEAVES},
+                    ProductionSparseFriQueryPlan,
+                    ProductionSparseFriQuerySamples,
+                    ProductionSparseFriProof,
+                    ProductionSparseFriLayers,
+                >>::invalid_fri_multi_query_layers(),
+        },
+    }
+}
 
 pub struct ProductionSparseFriAuthentication {
     pub valid: bool,

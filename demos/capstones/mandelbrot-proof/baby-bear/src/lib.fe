@@ -3689,7 +3689,9 @@ fn invalid_digest_multi_path<
     }
 }
 
-fn invalid_composition_multi_opening<
+/// Construct the canonical empty composition opening required before bounded
+/// decoding or caller-owned proof materialization.
+pub fn empty_composition_multi_opening<
     const MAX_LEAVES: usize,
     const MAX_SIBLINGS: usize,
 >() -> CompositionMultiOpening<MAX_LEAVES, MAX_SIBLINGS> {
@@ -3732,7 +3734,7 @@ where
         MAX_SIBLINGS,
     >(leaves, requested)
     if !path.valid {
-        return invalid_composition_multi_opening<MAX_LEAVES, MAX_SIBLINGS>()
+        return empty_composition_multi_opening<MAX_LEAVES, MAX_SIBLINGS>()
     }
     let mut values = [BabyBearExt4::zero(); MAX_LEAVES]
     cursor = 0
@@ -3811,7 +3813,7 @@ where
         Samples,
     >>::fri_pair_requests(samples)
     if !requests.valid || requests.count != REQUESTS.downcast_truncate() {
-        return invalid_composition_multi_opening<MAX_LEAVES, MAX_SIBLINGS>()
+        return empty_composition_multi_opening<MAX_LEAVES, MAX_SIBLINGS>()
     }
     composition_multi_opening_power_of_two<
         N,
@@ -4254,7 +4256,7 @@ fn invalid_fri_multi_query16() -> FriMultiCommitmentQuery16 {
             valid: false,
             value: Poseidon2Digest::zero(),
         },
-        composition: invalid_composition_multi_opening<
+        composition: empty_composition_multi_opening<
             {4 + 4},
             {fri_multi_sibling_capacity(fri_composition_query_depth(4), 4)},
         >(),
