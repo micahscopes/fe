@@ -144,6 +144,19 @@ impl Copy for ComputeInvocation {}
 #[gpu_dispatch(fixed)]
 pub struct FixedDispatch<const X: usize, const Y: usize, const Z: usize> {}
 
+/// A fixed dispatch grid executed `N` times in strict queue order through one
+/// compiled pipeline. Storage written by one dispatch is visible to the next.
+/// This is the type-driven placement for bounded iterative kernels such as
+/// cryptographic rounds. The fixed host submits the derived count but owns no
+/// application cursor, branch, or protocol decision.
+#[gpu_dispatch(repeated)]
+pub struct RepeatedDispatch<
+    const X: usize,
+    const Y: usize,
+    const Z: usize,
+    const N: usize,
+> {}
+
 /// One non-indexed triangle-list draw. Vertex/index-buffer variants can join
 /// this policy family without changing the stage role or browser ABI.
 #[gpu_draw(triangle_list)]

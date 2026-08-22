@@ -404,6 +404,7 @@ fn attributed_aliases_derive_compute_resource_and_fragment_plan() {
         WebActorStageKind::Compute {
             workgroup_size: [1, 1, 1],
             dispatch: [1, 1, 1],
+            repeat: 1,
             invocation_context: false,
         }
     );
@@ -557,6 +558,7 @@ fn nominal_compute_invocation_maps_to_physical_builtins_without_parameter_storag
         WebActorStageKind::Compute {
             workgroup_size: [2, 2, 1],
             dispatch: [2, 2, 1],
+            repeat: 1,
             invocation_context: true,
         }
     );
@@ -618,6 +620,50 @@ fn nominal_compute_invocation_maps_to_physical_builtins_without_parameter_storag
     ] {
         assert!(wgsl.contains(builtin), "missing {builtin}:\n{wgsl}");
     }
+}
+
+#[test]
+fn repeated_dispatch_is_derived_from_its_nominal_fe_policy() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_repeated_dispatch");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "repeated dispatch fixture diagnostics:\n{diagnostics}"
+    );
+
+    let program = actor_gpu_program(&db, top_mod)
+        .expect("repeated dispatch derivation")
+        .expect("GPU actor");
+    assert_eq!(
+        program.stages[0].kind,
+        WebActorStageKind::Compute {
+            workgroup_size: [1, 1, 1],
+            dispatch: [1, 1, 1],
+            repeat: 4,
+            invocation_context: false,
+        }
+    );
+
+    let bundle = WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render("paint", Some("repeated-dispatch.fe".to_owned())),
+    )
+    .expect("repeated dispatch pass graph");
+    let pass = &bundle.manifest.passes[0];
+    assert_eq!(pass.source_entry, "advance");
+    assert_eq!(pass.dispatch, Some([1, 1, 1]));
+    assert_eq!(pass.repeat, 4);
+
+    let encoded = serde_json::to_value(&bundle.manifest).expect("manifest JSON");
+    assert_eq!(encoded["passes"][0]["repeat"], 4);
+    assert!(
+        encoded["passes"][1].get("repeat").is_none(),
+        "ordinary single-execution passes keep the additive field absent"
+    );
 }
 
 #[test]

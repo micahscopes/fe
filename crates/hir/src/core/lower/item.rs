@@ -299,7 +299,11 @@ fn validate_struct_attrs<'db>(
                 "`#[web_surface_recovery_step]`",
             ),
             AttrRule::supported("gpu_workgroup", BARE_FORM, "`#[gpu_workgroup]`"),
-            AttrRule::supported("gpu_dispatch", GPU_IDENT_FORM, "`#[gpu_dispatch(fixed)]`"),
+            AttrRule::supported(
+                "gpu_dispatch",
+                GPU_IDENT_FORM,
+                "`#[gpu_dispatch(fixed)]` or `#[gpu_dispatch(repeated)]`",
+            ),
             AttrRule::supported("gpu_draw", GPU_IDENT_FORM, "`#[gpu_draw(triangle_list)]`"),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),
             AttrRule::unsupported("host_import", HOST_IMPORT_TARGETS),

@@ -1,0 +1,22 @@
+use std::webgpu::{
+    ComputeSurface as Kernel,
+    FragmentSurface as Pixel,
+    GpuProgram as Program,
+    RepeatedDispatch as Repeat,
+    StorageBuffer as Shared,
+    Workgroup as Threads,
+    WebGpuBackend,
+}
+
+actor RepeatedReceipt uses (Program<WebGpuBackend>) {
+    receipt: Shared<u32, 1>,
+
+    fn advance(self) uses (Kernel<Threads<1, 1, 1>, Repeat<1, 1, 1, 4>>) {
+        let previous = self.receipt.load(index: 0)
+        self.receipt.store(index: 0, value: previous + 1)
+    }
+
+    fn paint(self, px: i32, py: i32) -> i32 uses (Pixel) {
+        self.receipt.load(index: 0).downcast_truncate()
+    }
+}

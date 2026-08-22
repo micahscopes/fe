@@ -11,11 +11,18 @@ use std::webgpu::{
 
 const WIDTH: u32 = 4
 
+trait InvocationExtent { const X: usize }
+struct PairExtent {}
+impl InvocationExtent for PairExtent { const X: usize = 2 }
+
+const TILE_X: usize = <PairExtent as InvocationExtent>::X
+const GRID_X: usize = <PairExtent as InvocationExtent>::X
+
 actor InvocationReceipt uses (Program<WebGpuBackend>) {
     receipts: Shared<u32, 16>,
 
     fn stamp(self, invocation: ComputeInvocation)
-        uses (Kernel<Threads<2, 2, 1>, Grid<2, 2, 1>>)
+        uses (Kernel<Threads<TILE_X, 2, 1>, Grid<GRID_X, 2, 1>>)
     {
         let slot = invocation.global.y * WIDTH + invocation.global.x
         let receipt = invocation.global.x

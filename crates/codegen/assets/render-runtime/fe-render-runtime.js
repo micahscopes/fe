@@ -1619,7 +1619,13 @@ export class FeSurfaceElement extends HTMLElement {
           if (record.bindGroup) compute.setBindGroup(0, record.bindGroup);
           const dispatch = record.pass.dispatch;
           if (!dispatch) throw new Error("fe render runtime: compute pass has no fixed dispatch");
-          compute.dispatchWorkgroups(dispatch[0], dispatch[1], dispatch[2]);
+          const repeat = record.pass.repeat ?? 1;
+          if (!Number.isSafeInteger(repeat) || repeat < 1 || repeat > 65535) {
+            throw new Error("fe render runtime: invalid compiler-derived compute repeat count");
+          }
+          for (let iteration = 0; iteration < repeat; iteration += 1) {
+            compute.dispatchWorkgroups(dispatch[0], dispatch[1], dispatch[2]);
+          }
           compute.end();
         } else {
           texture ??= context.getCurrentTexture();

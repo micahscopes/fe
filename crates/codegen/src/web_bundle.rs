@@ -28,7 +28,7 @@ use hir::analysis::{
 };
 use hir::hir_def::{
     FieldParent, Func, GenericArg, GpuControl, GpuDispatch, GpuDraw, GpuResource, GpuStage,
-    HirIngot, LitKind, Partial, PathId, TopLevelMod, TypeKind, Visibility,
+    HirIngot, Partial, PathId, TopLevelMod, TypeKind, Visibility,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -445,6 +445,7 @@ pub enum WebActorStageKind {
     Compute {
         workgroup_size: [u32; 3],
         dispatch: [u32; 3],
+        repeat: u32,
         invocation_context: bool,
     },
     /// Authored vertex behavior. The payload tree is derived from the role's
@@ -516,32 +517,6 @@ fn behavior_stage_role<'db>(
         })
 }
 
-fn literal_u32(db: &DriverDataBase, body: hir::hir_def::Body<'_>) -> Option<u32> {
-    let expr = body.exprs(db).get(body.expr(db))?.clone().to_opt()?;
-    let hir::hir_def::Expr::Lit(LitKind::Int(value)) = expr else {
-        return None;
-    };
-    u32::try_from(value.data(db).clone()).ok()
-}
-
-fn path_const_triplet(db: &DriverDataBase, path: PathId<'_>) -> Option<[u32; 3]> {
-    let args = path.generic_args(db).data(db);
-    let [
-        GenericArg::Const(x),
-        GenericArg::Const(y),
-        GenericArg::Const(z),
-    ] = args.as_slice()
-    else {
-        return None;
-    };
-    let value = |arg: &hir::hir_def::ConstGenericArg<'_>| match arg.value {
-        hir::hir_def::ConstGenericArgValue::Expr(Partial::Present(body)) => literal_u32(db, body),
-        hir::hir_def::ConstGenericArgValue::Expr(Partial::Absent)
-        | hir::hir_def::ConstGenericArgValue::Hole => None,
-    };
-    Some([value(x)?, value(y)?, value(z)?])
-}
-
 fn nested_type_path_db<'db>(db: &'db DriverDataBase, arg: &GenericArg<'db>) -> Option<PathId<'db>> {
     let GenericArg::Type(arg) = arg else {
         return None;
@@ -556,7 +531,7 @@ fn compute_stage_shape(
     db: &DriverDataBase,
     behavior: hir::hir_def::Func<'_>,
     role_path: PathId<'_>,
-) -> Result<([u32; 3], [u32; 3]), WebBundleError> {
+) -> Result<([u32; 3], [u32; 3], u32), WebBundleError> {
     let args = role_path.generic_args(db).data(db);
     let [workgroup_arg, dispatch_arg] = args.as_slice() else {
         return Err(WebBundleError::EntryDerivation(
@@ -573,15 +548,13 @@ fn compute_stage_shape(
             "compute-stage dispatch argument must be a nominal type".to_owned(),
         )
     })?;
-    let workgroup_attrs = nominal_attrs(
-        db,
+    let workgroup_ty =
         resolve_metadata_ty(db, workgroup_path, behavior.scope()).ok_or_else(|| {
             WebBundleError::EntryDerivation(
                 "compute-stage workgroup type did not resolve".to_owned(),
             )
-        })?,
-    )
-    .ok_or_else(|| {
+        })?;
+    let workgroup_attrs = nominal_attrs(db, workgroup_ty).ok_or_else(|| {
         WebBundleError::EntryDerivation(
             "compute-stage workgroup argument is not an attributed nominal type".to_owned(),
         )
@@ -591,40 +564,57 @@ fn compute_stage_shape(
             "compute-stage workgroup type lacks `#[gpu_workgroup]`".to_owned(),
         ));
     }
-    let dispatch_attrs = nominal_attrs(
-        db,
+    let dispatch_ty =
         resolve_metadata_ty(db, dispatch_path, behavior.scope()).ok_or_else(|| {
             WebBundleError::EntryDerivation(
                 "compute-stage dispatch type did not resolve".to_owned(),
             )
-        })?,
-    )
-    .ok_or_else(|| {
+        })?;
+    let dispatch_attrs = nominal_attrs(db, dispatch_ty).ok_or_else(|| {
         WebBundleError::EntryDerivation(
             "compute-stage dispatch argument is not an attributed nominal type".to_owned(),
         )
     })?;
-    if dispatch_attrs.gpu_dispatch(db) != Some(GpuDispatch::Fixed) {
-        return Err(WebBundleError::EntryDerivation(
-            "compute-stage dispatch type must carry `#[gpu_dispatch(fixed)]`".to_owned(),
-        ));
-    }
-    let workgroup_size = path_const_triplet(db, workgroup_path).ok_or_else(|| {
+    let dispatch_policy = dispatch_attrs.gpu_dispatch(db).ok_or_else(|| {
         WebBundleError::EntryDerivation(
-            "GPU workgroup dimensions must be three concrete u32-sized literals".to_owned(),
+            "compute-stage dispatch type must carry `#[gpu_dispatch(fixed)]` or `#[gpu_dispatch(repeated)]`"
+                .to_owned(),
         )
     })?;
-    let dispatch = path_const_triplet(db, dispatch_path).ok_or_else(|| {
+    let workgroup_size = semantic_const_triplet(db, workgroup_ty).ok_or_else(|| {
         WebBundleError::EntryDerivation(
-            "fixed dispatch dimensions must be three concrete u32-sized literals".to_owned(),
+            "GPU workgroup dimensions must be three concrete u32-sized constants".to_owned(),
         )
     })?;
-    if workgroup_size.contains(&0) || dispatch.contains(&0) {
+    let dispatch = semantic_const_triplet(db, dispatch_ty).ok_or_else(|| {
+        WebBundleError::EntryDerivation(
+            "fixed dispatch dimensions must be three concrete u32-sized constants".to_owned(),
+        )
+    })?;
+    let repeat = match dispatch_policy {
+        GpuDispatch::Fixed => 1,
+        GpuDispatch::Repeated => dispatch_ty
+            .generic_args(db)
+            .get(3)
+            .and_then(|count| semantic_const_u32(db, *count))
+            .ok_or_else(|| {
+                WebBundleError::EntryDerivation(
+                    "repeated dispatch requires a fourth concrete u32-sized repeat count"
+                        .to_owned(),
+                )
+            })?,
+    };
+    if workgroup_size.contains(&0) || dispatch.contains(&0) || repeat == 0 {
         return Err(WebBundleError::EntryDerivation(
-            "GPU workgroup and fixed dispatch dimensions must be nonzero".to_owned(),
+            "GPU workgroup, fixed dispatch dimensions, and repeat count must be nonzero".to_owned(),
         ));
     }
-    Ok((workgroup_size, dispatch))
+    if repeat > 65_535 {
+        return Err(WebBundleError::EntryDerivation(
+            "repeated dispatch count exceeds the portable 65535-command envelope".to_owned(),
+        ));
+    }
+    Ok((workgroup_size, dispatch, repeat))
 }
 
 fn compute_invocation_context(
@@ -904,6 +894,17 @@ fn semantic_const_u32(db: &DriverDataBase, ty: TyId<'_>) -> Option<u32> {
     u32::try_from(value.data(db).clone()).ok()
 }
 
+fn semantic_const_triplet(db: &DriverDataBase, ty: TyId<'_>) -> Option<[u32; 3]> {
+    let [x, y, z, ..] = ty.generic_args(db) else {
+        return None;
+    };
+    Some([
+        semantic_const_u32(db, *x)?,
+        semantic_const_u32(db, *y)?,
+        semantic_const_u32(db, *z)?,
+    ])
+}
+
 fn resource_element(
     db: &DriverDataBase,
     ty: TyId<'_>,
@@ -1070,12 +1071,14 @@ pub fn actor_gpu_program(
                 (kind, Some(payload))
             }
             GpuStage::Compute => {
-                let (workgroup_size, dispatch) = compute_stage_shape(db, *behavior, role_path)?;
+                let (workgroup_size, dispatch, repeat) =
+                    compute_stage_shape(db, *behavior, role_path)?;
                 let invocation_context = compute_invocation_context(db, *behavior)?;
                 (
                     WebActorStageKind::Compute {
                         workgroup_size,
                         dispatch,
+                        repeat,
                         invocation_context,
                     },
                     None,
@@ -3730,12 +3733,25 @@ pub struct WebPass {
     pub shader_bytes: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatch: Option<[u32; 3]>,
+    /// Number of strictly ordered submissions of one compiled compute stage.
+    /// This is derived from an Fe dispatch-policy type. A legacy or ordinary
+    /// fixed pass decodes as one.
+    #[serde(default = "one_u32", skip_serializing_if = "is_one_u32")]
+    pub repeat: u32,
     /// Compiler-derived non-indexed draw count. This transitional transport is
     /// consumed by the fixed host; the source of truth is the Fe draw-policy
     /// type (`TriangleList<N>`), never page JavaScript.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draw_vertices: Option<u32>,
     pub layout: WebLayout,
+}
+
+const fn one_u32() -> u32 {
+    1
+}
+
+fn is_one_u32(value: &u32) -> bool {
+    *value == 1
 }
 
 // The manifest carries floating-point param ranges/inits in its `surface`
@@ -4159,6 +4175,7 @@ impl WebBundle {
                     shader: path.clone(),
                     shader_bytes: shader.len() as u64,
                     dispatch: None,
+                    repeat: 1,
                     draw_vertices: Some(*vertex_count),
                     layout: layout.clone(),
                 });
@@ -4176,10 +4193,11 @@ impl WebBundle {
             let package =
                 mir::build_wasm_runtime_package_for_entry(db, top_mod, &stage.source_entry)
                     .map_err(|error| WebBundleError::Lower(error.to_string()))?;
-            let (artifact, dispatch, kind) = match stage.kind {
+            let (artifact, dispatch, repeat, kind) = match stage.kind {
                 WebActorStageKind::Compute {
                     workgroup_size,
                     dispatch,
+                    repeat,
                     invocation_context,
                 } => {
                     let builtin_arguments = invocation_context
@@ -4204,6 +4222,7 @@ impl WebBundle {
                             &builtin_arguments,
                         ),
                         Some(dispatch),
+                        repeat,
                         "compute",
                     )
                 }
@@ -4215,6 +4234,7 @@ impl WebBundle {
                             db, &package, &external,
                         ),
                         None,
+                        1,
                         "fragment",
                     )
                 }
@@ -4241,6 +4261,7 @@ impl WebBundle {
                 shader: path.clone(),
                 shader_bytes: shader.len() as u64,
                 dispatch,
+                repeat,
                 draw_vertices: None,
                 layout: layout.clone(),
             });
@@ -4776,6 +4797,7 @@ impl WebBundle {
             shader: WGSL_FILE.to_owned(),
             shader_bytes: wgsl.len() as u64,
             dispatch: None,
+            repeat: 1,
             draw_vertices: None,
             layout: layout.clone(),
         }];
