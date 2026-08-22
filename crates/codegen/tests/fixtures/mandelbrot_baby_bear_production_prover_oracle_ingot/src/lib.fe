@@ -4,7 +4,10 @@
 //! No host-authored trace, commitment, challenge, or receipt enters this gate.
 
 use core::BrowserBytes
-use mandelbrot_proof_fixed_air_prover_baby_bear::prove_production_sparse_interval
+use mandelbrot_proof_fixed_air_prover_baby_bear::{
+    production_zero_base_lde_checkpoint,
+    prove_production_sparse_interval,
+}
 use mandelbrot_proof_fixed_air_receipt_baby_bear::{
     decode_production_sparse_baby_bear_receipt,
     empty_production_sparse_baby_bear_receipt,
@@ -47,6 +50,10 @@ pub fn production_zero_interval_receipt() -> BrowserBytes {
         production_zero_interval(),
         BabyBear::from_u32(7),
     )
+}
+
+pub fn production_base_lde_checkpoint() -> bool {
+    production_zero_base_lde_checkpoint()
 }
 
 /// Verify browser-owned canonical bytes without reusing prover residency.

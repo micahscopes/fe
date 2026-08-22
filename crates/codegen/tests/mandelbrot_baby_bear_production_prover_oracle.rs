@@ -43,6 +43,26 @@ fn compile_gate(entry: &str) -> Vec<u8> {
 }
 
 #[test]
+fn production_base_lde_executes_in_its_arena_owned_workspace() {
+    let wasm = compile_gate("production_base_lde_checkpoint");
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, wasm).expect("base LDE Wasm module should load");
+    assert!(module.imports().next().is_none());
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("base LDE Wasm should instantiate");
+    let checkpoint = instance
+        .get_typed_func::<(), i32>(&mut store, "production_base_lde_checkpoint")
+        .expect("production base LDE checkpoint export");
+    assert_ne!(
+        checkpoint
+            .call(&mut store, ())
+            .expect("production base LDE checkpoint should execute"),
+        0,
+    );
+}
+
+#[test]
 fn production_prover_executes_and_its_canonical_receipt_verifies() {
     let prover_wasm = compile_gate("production_zero_interval_receipt");
     eprintln!("production prover gate: instantiate zero-import Wasm");

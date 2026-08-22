@@ -40,7 +40,6 @@ use mandelbrot_proof_fixed_air_receipt_baby_bear::{
     PRODUCTION_LIMBS,
     PRODUCTION_TRACE_LENGTH,
     ProductionSparseBabyBearReceipt,
-    clear_production_sparse_baby_bear_receipt,
     encode_production_sparse_baby_bear_receipt,
     write_production_sparse_baby_bear_receipt,
 }
@@ -180,42 +179,6 @@ fn invalidate_production_sparse_prover()
     workspace.valid = false
 }
 
-fn clear_production_base_evaluations()
-    uses (evaluations: mut ProductionBaseEvaluations)
-{
-    evaluations.valid = false
-}
-
-fn clear_production_base_codeword()
-    uses (codeword: mut ProductionBaseCodeword)
-{
-    codeword.valid = false
-}
-
-fn clear_production_interaction_evaluations()
-    uses (evaluations: mut ProductionInteractionEvaluations)
-{
-    evaluations.valid = false
-}
-
-fn clear_production_interaction_codeword()
-    uses (codeword: mut ProductionInteractionCodeword)
-{
-    codeword.valid = false
-}
-
-fn clear_production_composition_codeword()
-    uses (codeword: mut ProductionCompositionCodeword)
-{
-    codeword.valid = false
-}
-
-fn clear_production_receipt()
-    uses (receipt: mut ProductionSparseBabyBearReceipt)
-{
-    clear_production_sparse_baby_bear_receipt(mut receipt)
-}
-
 fn write_production_sparse_base_evaluations(
     _ interval: OrbitInterval<{PRODUCTION_LIMBS}>,
 ) -> bool
@@ -261,6 +224,36 @@ fn write_production_sparse_base_codeword(_ shift: BabyBear) -> bool
         shift,
         mut codeword,
     )
+}
+
+fn write_zero_production_sparse_base_evaluations()
+    uses (evaluations: mut ProductionBaseEvaluations)
+{
+    evaluations.valid = false
+    let zero = BabyBear::zero()
+    let mut row: usize = 0
+    while row < PRODUCTION_TRACE_LENGTH {
+        let mut column: usize = 0
+        while column < SPARSE_BASE_AIR_FIELDS {
+            evaluations.values[row][column] = zero
+            column = column + 1
+        }
+        row = row + 1
+    }
+    evaluations.valid = true
+}
+
+/// Execute the production-size base LDE in isolation. This is an exact stage
+/// checkpoint for the scalar interpreter and a bounded compiler/backend gate
+/// for arena-owned provider reborrows, independent of receipt and FRI work.
+pub fn production_zero_base_lde_checkpoint() -> bool {
+    let evaluations = alloc_browser_object<ProductionBaseEvaluations>()
+    let codeword = alloc_browser_object<ProductionBaseCodeword>()
+    if evaluations.address() == 0 || codeword.address() == 0 { return false }
+    with (evaluations) { write_zero_production_sparse_base_evaluations() }
+    with (evaluations, codeword) {
+        write_production_sparse_base_codeword(BabyBear::from_u32(7))
+    }
 }
 
 fn write_production_sparse_base_stage() -> bool
@@ -521,14 +514,10 @@ pub fn prove_production_sparse_interval(
         || receipt.address() == 0 {
         return BrowserBytes { ptr: 0, len: 0 }
     }
-    with (base_evaluations) { clear_production_base_evaluations() }
-    with (base) { clear_production_base_codeword() }
-    with (interaction_evaluations) {
-        clear_production_interaction_evaluations()
-    }
-    with (interaction) { clear_production_interaction_codeword() }
-    with (composition) { clear_production_composition_codeword() }
-    with (receipt) { clear_production_receipt() }
+    // Every stage writer marks its destination invalid before work, initializes
+    // every readable field before success, and no failed destination is ever
+    // observed. Keep these arena objects uninitialized until their owning Fe
+    // stage writes them instead of constructing a second giant empty proof.
     if !with (workspace) {
         initialize_production_sparse_prover(
             interval,
