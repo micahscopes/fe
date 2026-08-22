@@ -22,6 +22,10 @@ use sonatina_codegen::isa::spirv::{
     SpirvArtifact, SpirvBackend, SpirvBuiltinArgument, SpirvExternalResource,
 };
 use sonatina_codegen::optim::{Pass, Pipeline, Step, inliner::InlinerConfig};
+use sonatina_codegen::{domtree::DomTree, loop_analysis::LoopTree};
+use sonatina_ir::{
+    InstDowncast, cfg::ControlFlowGraph, inst::data::MemAllocDynamic, ir_writer::FuncWriter,
+};
 
 use crate::sonatina::{LowerError, wasm_lower::compile_runtime_package_shader_ir};
 
@@ -77,6 +81,7 @@ pub fn compile_runtime_package_spirv_with_workgroup(
     let (mut module, _import_modules) = compile_runtime_package_shader_ir(db, package)?;
     inline_spirv_calls(&mut module);
     ensure_spirv_entry_call_free(&module)?;
+    ensure_spirv_entry_has_no_loop_allocation(&module)?;
 
     SpirvBackend::new()
         .with_workgroup_size(workgroup_size[0], workgroup_size[1], workgroup_size[2])
@@ -125,6 +130,7 @@ pub fn compile_runtime_package_spirv_compute_with_interface(
     let (mut module, _import_modules) = compile_runtime_package_shader_ir(db, package)?;
     inline_spirv_calls(&mut module);
     ensure_spirv_entry_call_free(&module)?;
+    ensure_spirv_entry_has_no_loop_allocation(&module)?;
 
     let mut backend = SpirvBackend::new()
         .with_compute()
@@ -411,6 +417,66 @@ fn ensure_spirv_entry_call_free(module: &sonatina_ir::Module) -> Result<(), Lowe
     match residual {
         Some(callee) => Err(LowerError::Spirv(format!(
             "SPIR-V entry `{entry_name}` is not call-free after bounded inlining; residual call to {callee}"
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// Report the exact entry block when portable aggregate materialization would
+/// allocate inside a shader loop. Sonatina deliberately rejects that shape
+/// because its private heap has a compile-time capacity. Keeping the check at
+/// this driver boundary adds the Fe entry and lowered block to the diagnostic,
+/// instead of losing both in the backend's module-level error.
+fn ensure_spirv_entry_has_no_loop_allocation(
+    module: &sonatina_ir::Module,
+) -> Result<(), LowerError> {
+    let Some(&entry) = module.funcs().first() else {
+        return Err(LowerError::Spirv(
+            "SPIR-V module has no entry function".to_owned(),
+        ));
+    };
+    let entry_name = module
+        .ctx
+        .get_sig(entry)
+        .map(|signature| signature.name().to_owned())
+        .unwrap_or_else(|| format!("{entry:?}"));
+    let allocation = module.func_store.view(entry, |function| {
+        let mut cfg = ControlFlowGraph::default();
+        cfg.compute(function);
+        let mut domtree = DomTree::new();
+        domtree.compute(&cfg);
+        let mut loops = LoopTree::new();
+        loops.compute(&cfg, &domtree);
+        let inst_set = function.inst_set();
+        function.layout.iter_block().find_map(|block| {
+            if loops.loop_of_block(block).is_none() {
+                return None;
+            }
+            let contains_allocation = function.layout.iter_inst(block).any(|inst| {
+                <&MemAllocDynamic as InstDowncast>::downcast(inst_set, function.dfg.inst(inst))
+                    .is_some()
+            });
+            contains_allocation.then(|| {
+                let function_ir = FuncWriter::new(entry, function).dump_string();
+                let marker = format!("    {block}:");
+                let block_ir = function_ir
+                    .find(&marker)
+                    .map(|start| {
+                        let tail = &function_ir[start..];
+                        let end = tail[marker.len()..]
+                            .find("\n    block")
+                            .map(|offset| marker.len() + offset)
+                            .unwrap_or(tail.len());
+                        tail[..end].trim_end().to_owned()
+                    })
+                    .unwrap_or_else(|| "<lowered block unavailable>".to_owned());
+                (block, block_ir)
+            })
+        })
+    });
+    match allocation {
+        Some((block, instructions)) => Err(LowerError::Spirv(format!(
+            "SPIR-V entry `{entry_name}` contains MemAllocDynamic inside loop block {block:?}; lowered block:\n{instructions}"
         ))),
         None => Ok(()),
     }
