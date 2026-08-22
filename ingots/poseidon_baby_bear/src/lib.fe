@@ -19,9 +19,12 @@ pub const PARTIAL_ROUNDS: usize = 13
 pub const ROUND_CONSTANT_COUNT: usize = FULL_ROUNDS * WIDTH + PARTIAL_ROUNDS
 pub const DIGEST_FIELDS: usize = 8
 pub const SPONGE_RATE: usize = 8
+pub const PERMUTATION_PHASES: u32 = 21
 
 const FIELD_SIZE: u32 = 31
 const MODULUS: u256 = BABY_BEAR_MODULUS as u256
+const INVALID_WORD: u32 = 0
+const VALID_WORD: u32 = 1
 
 struct Poseidon2Parameters { round_constants: [u32; ROUND_CONSTANT_COUNT] }
 impl core::marker::Copy for Poseidon2Parameters {}
@@ -87,15 +90,15 @@ impl Poseidon2Digest {
 }
 
 /// Fail-closed result of committing one exact bounded bit string.
-pub struct PackedCommitment { valid: bool, value: Poseidon2Digest }
+pub struct PackedCommitment { valid: u32, value: Poseidon2Digest }
 impl core::marker::Copy for PackedCommitment {}
 
 impl PackedCommitment {
     pub fn is_valid(self) -> bool {
-        self.valid
+        self.valid == VALID_WORD
     }
     pub fn digest(self) -> Poseidon2Digest {
-        if !self.valid {
+        if self.valid != VALID_WORD {
             return Poseidon2Digest::zero()
         }
         self.value
@@ -127,7 +130,7 @@ struct CanonicalFieldWriter {
     rate: u32,
     expected: u32,
     written: u32,
-    valid: bool,
+    valid: u32,
 }
 impl core::marker::Copy for CanonicalFieldWriter {}
 
@@ -158,7 +161,7 @@ impl CanonicalFieldWriter {
         _ state: [BabyBear; WIDTH],
         _ rate: u32,
         _ written: u32,
-        _ valid: bool,
+        _ valid: u32,
     ) -> Self {
         Self {
             s0: state[0],
@@ -206,14 +209,17 @@ impl CanonicalFieldWriter {
             rate: 2,
             expected: expected,
             written: 0,
-            valid: true,
+            valid: VALID_WORD,
         }
     }
 }
 
 impl WordSink for CanonicalFieldWriter {
     fn write(self, _ value: u32) -> Self {
-        if !self.valid || self.written >= self.expected || value >= BABY_BEAR_MODULUS {
+        if self.valid != VALID_WORD
+            || self.written >= self.expected
+            || value >= BABY_BEAR_MODULUS
+        {
             return self.reject()
         }
         let mut state = self.state()
@@ -224,18 +230,18 @@ impl WordSink for CanonicalFieldWriter {
             state = permute16(input: state)
             rate = 0
         }
-        self.with_state(state, rate, self.written + 1, true)
+        self.with_state(state, rate, self.written + 1, VALID_WORD)
     }
 
     fn reject(self) -> Self {
-        self.with_state(self.state(), self.rate, self.written, false)
+        self.with_state(self.state(), self.rate, self.written, INVALID_WORD)
     }
 }
 
 impl CanonicalFieldWriter {
     fn finish(self) -> PackedCommitment {
-        if !self.valid || self.written != self.expected {
-            return PackedCommitment { valid: false, value: Poseidon2Digest::zero() }
+        if self.valid != VALID_WORD || self.written != self.expected {
+            return PackedCommitment { valid: INVALID_WORD, value: Poseidon2Digest::zero() }
         }
         let state = if self.rate == 0 {
             self.state()
@@ -248,7 +254,7 @@ impl CanonicalFieldWriter {
             values[index] = state[index]
             index = index + 1
         }
-        PackedCommitment { valid: true, value: Poseidon2Digest { values: values } }
+        PackedCommitment { valid: VALID_WORD, value: Poseidon2Digest { values: values } }
     }
 }
 
@@ -259,7 +265,7 @@ pub fn commit_canonical<D: Poseidon2FieldDomain, T: CanonicalWords>(
     _ value: ref T,
 ) -> PackedCommitment {
     if D::TAG >= BABY_BEAR_MODULUS || T::WORDS >= BABY_BEAR_MODULUS {
-        return PackedCommitment { valid: false, value: Poseidon2Digest::zero() }
+        return PackedCommitment { valid: INVALID_WORD, value: Poseidon2Digest::zero() }
     }
     let writer = CanonicalFieldWriter::new(D::TAG, T::WORDS)
     encode_canonical_words(value, writer).finish()
@@ -523,6 +529,267 @@ impl Poseidon2State {
     }
 }
 
+/// Serializable, phase-checked interpretation of one Poseidon2 permutation.
+///
+/// The one-shot sponge and this staged form execute the same derived constants
+/// and round bodies. The staged form exposes only the protocol's three lawful
+/// regions: first full rounds, partial rounds, and final full rounds. GPU pass
+/// graphs can therefore place bounded pieces without copying a permutation or
+/// inventing an application-specific round protocol.
+pub struct Poseidon2FieldPermutation {
+    lanes: [u32; WIDTH],
+    expected: u32,
+    written: u32,
+    phase: u32,
+    valid: u32,
+}
+
+impl core::marker::Copy for Poseidon2FieldPermutation {}
+
+impl Poseidon2FieldPermutation {
+    /// Restore the exact portable words carried between GPU passes.
+    #[inline(always)]
+    pub fn restore(
+        _ lanes: own [u32; WIDTH],
+        _ expected: u32,
+        _ written: u32,
+        _ phase: u32,
+    ) -> Self {
+        let mut valid = VALID_WORD
+        if expected >= BABY_BEAR_MODULUS { valid = INVALID_WORD }
+        if written > expected { valid = INVALID_WORD }
+        if phase > PERMUTATION_PHASES { valid = INVALID_WORD }
+        let mut lane: usize = 0
+        while lane < WIDTH {
+            if lanes[lane] >= BABY_BEAR_MODULUS { valid = INVALID_WORD }
+            lane = lane + 1
+        }
+        Self {
+            lanes: lanes,
+            expected: expected,
+            written: written,
+            phase: phase,
+            valid: valid,
+        }
+    }
+
+    #[inline(always)]
+    pub fn is_valid(self) -> bool { self.valid == VALID_WORD }
+
+    #[inline(always)]
+    pub fn lane_word(ref self, _ lane: u32) -> u32 {
+        if lane >= WIDTH.downcast_truncate() { return 0 }
+        self.lanes[lane as usize]
+    }
+
+    #[inline(always)]
+    pub fn phase(self) -> u32 { self.phase }
+
+    /// Interpret a consecutive piece of the first four full rounds.
+    /// `start = 0` also applies Poseidon2's initial external linear layer.
+    #[inline(always)]
+    pub fn first_full_rounds(mut self, _ start: u32, _ count: u32) {
+        if start + count > HALF_FULL_ROUNDS.downcast_truncate() {
+            self.valid = INVALID_WORD
+            return
+        }
+        if self.valid != VALID_WORD || self.phase != start {
+            self.valid = INVALID_WORD
+            return
+        }
+        let parameters = PARAMETERS
+        let mut state = Poseidon2State { lanes: self.lanes }
+        if start == 0 { state.external_linear() }
+        let mut round: u32 = 0
+        while round < count {
+            let mut lane: usize = 0
+            let mut constant: usize = (start + round) as usize * WIDTH
+            while lane < WIDTH {
+                let rc = BabyBear::from_montgomery_word(parameters.round_constants[constant])
+                state.set_field(lane, sbox7(state.field(lane) + rc))
+                constant = constant + 1
+                lane = lane + 1
+            }
+            state.external_linear()
+            round = round + 1
+        }
+        self.lanes = state.lanes
+        self.phase = start + count
+    }
+
+    /// Interpret a consecutive piece of the thirteen partial rounds.
+    #[inline(always)]
+    pub fn partial_rounds(mut self, _ start: u32, _ count: u32) {
+        if start + count > PARTIAL_ROUNDS.downcast_truncate() {
+            self.valid = INVALID_WORD
+            return
+        }
+        let partial_base: u32 = HALF_FULL_ROUNDS.downcast_truncate()
+        let expected_phase: u32 = partial_base + start
+        if self.valid != VALID_WORD || self.phase != expected_phase {
+            self.valid = INVALID_WORD
+            return
+        }
+        let parameters = PARAMETERS
+        let mut state = Poseidon2State { lanes: self.lanes }
+        let mut round: u32 = 0
+        while round < count {
+            let constant: usize = HALF_FULL_ROUNDS * WIDTH + (start + round) as usize
+            let rc = BabyBear::from_montgomery_word(parameters.round_constants[constant])
+            state.set_field(0, sbox7(state.field(0) + rc))
+            state.internal_linear()
+            round = round + 1
+        }
+        self.lanes = state.lanes
+        self.phase = partial_base + start + count
+    }
+
+    /// Interpret a consecutive piece of the final four full rounds.
+    #[inline(always)]
+    pub fn final_full_rounds(mut self, _ start: u32, _ count: u32) {
+        if start + count > HALF_FULL_ROUNDS.downcast_truncate() {
+            self.valid = INVALID_WORD
+            return
+        }
+        let final_base: u32 = (HALF_FULL_ROUNDS + PARTIAL_ROUNDS).downcast_truncate()
+        let expected_phase: u32 = final_base + start
+        if self.valid != VALID_WORD || self.phase != expected_phase {
+            self.valid = INVALID_WORD
+            return
+        }
+        let parameters = PARAMETERS
+        let mut state = Poseidon2State { lanes: self.lanes }
+        let mut round: u32 = 0
+        while round < count {
+            let mut lane: usize = 0
+            let mut constant: usize = HALF_FULL_ROUNDS * WIDTH
+                + PARTIAL_ROUNDS + (start + round) as usize * WIDTH
+            while lane < WIDTH {
+                let rc = BabyBear::from_montgomery_word(parameters.round_constants[constant])
+                state.set_field(lane, sbox7(state.field(lane) + rc))
+                constant = constant + 1
+                lane = lane + 1
+            }
+            state.external_linear()
+            round = round + 1
+        }
+        self.lanes = state.lanes
+        self.phase = final_base + start + count
+    }
+
+    /// Return to the ordinary sponge only after all 21 phases completed.
+    #[inline(always)]
+    pub fn complete(self) -> Poseidon2FieldSponge {
+        let mut valid = self.valid
+        if self.phase != PERMUTATION_PHASES { valid = INVALID_WORD }
+        Poseidon2FieldSponge {
+            lanes: self.lanes,
+            rate: 0,
+            expected: self.expected,
+            written: self.written,
+            valid: valid,
+        }
+    }
+}
+
+/// Statically place a consecutive piece of the first full-round region.
+///
+/// Unlike the dynamic checkpoint interpreter, this entry keeps round indices
+/// in compile-time `usize` space. That is the portable shader interpretation:
+/// no host-width integer conversion reaches WGSL, while the checkpoint phase
+/// still proves that dispatches execute in protocol order.
+#[inline(always)]
+pub fn place_first_full_rounds<const START: usize, const N: usize>(
+    _ permutation: mut Poseidon2FieldPermutation,
+)
+where START <= 4, N <= 4, { START + N <= 4 }
+{
+    if permutation.valid != VALID_WORD
+        || permutation.phase != START.downcast_truncate() {
+        permutation.valid = INVALID_WORD
+        return
+    }
+    let parameters = PARAMETERS
+    let mut state = Poseidon2State { lanes: permutation.lanes }
+    if START == 0 { state.external_linear() }
+    let mut constant: usize = START * WIDTH
+    let mut round: usize = 0
+    while round < N {
+        let mut lane: usize = 0
+        while lane < WIDTH {
+            let rc = BabyBear::from_montgomery_word(parameters.round_constants[constant])
+            state.set_field(lane, sbox7(state.field(lane) + rc))
+            constant = constant + 1
+            lane = lane + 1
+        }
+        state.external_linear()
+        round = round + 1
+    }
+    permutation.lanes = state.lanes
+    permutation.phase = (START + N).downcast_truncate()
+}
+
+/// Statically place a consecutive piece of the partial-round region.
+#[inline(always)]
+pub fn place_partial_rounds<const START: usize, const N: usize>(
+    _ permutation: mut Poseidon2FieldPermutation,
+)
+where START <= 13, N <= 13, { START + N <= 13 }
+{
+    let partial_base: u32 = HALF_FULL_ROUNDS.downcast_truncate()
+    if permutation.valid != VALID_WORD
+        || permutation.phase != partial_base + START.downcast_truncate() {
+        permutation.valid = INVALID_WORD
+        return
+    }
+    let parameters = PARAMETERS
+    let mut state = Poseidon2State { lanes: permutation.lanes }
+    let mut constant: usize = HALF_FULL_ROUNDS * WIDTH + START
+    let mut round: usize = 0
+    while round < N {
+        let rc = BabyBear::from_montgomery_word(parameters.round_constants[constant])
+        state.set_field(0, sbox7(state.field(0) + rc))
+        constant = constant + 1
+        state.internal_linear()
+        round = round + 1
+    }
+    permutation.lanes = state.lanes
+    permutation.phase = partial_base + (START + N).downcast_truncate()
+}
+
+/// Statically place a consecutive piece of the final full-round region.
+#[inline(always)]
+pub fn place_final_full_rounds<const START: usize, const N: usize>(
+    _ permutation: mut Poseidon2FieldPermutation,
+)
+where START <= 4, N <= 4, { START + N <= 4 }
+{
+    let final_base: u32 = (HALF_FULL_ROUNDS + PARTIAL_ROUNDS).downcast_truncate()
+    if permutation.valid != VALID_WORD
+        || permutation.phase != final_base + START.downcast_truncate() {
+        permutation.valid = INVALID_WORD
+        return
+    }
+    let parameters = PARAMETERS
+    let mut state = Poseidon2State { lanes: permutation.lanes }
+    let mut constant: usize = HALF_FULL_ROUNDS * WIDTH
+        + PARTIAL_ROUNDS + START * WIDTH
+    let mut round: usize = 0
+    while round < N {
+        let mut lane: usize = 0
+        while lane < WIDTH {
+            let rc = BabyBear::from_montgomery_word(parameters.round_constants[constant])
+            state.set_field(lane, sbox7(state.field(lane) + rc))
+            constant = constant + 1
+            lane = lane + 1
+        }
+        state.external_linear()
+        round = round + 1
+    }
+    permutation.lanes = state.lanes
+    permutation.phase = final_base + (START + N).downcast_truncate()
+}
+
 /// Serializable checkpoint for the fixed-length field sponge.
 ///
 /// GPU pass graphs can carry this value between bounded stages instead of
@@ -534,69 +801,168 @@ pub struct Poseidon2FieldSponge {
     rate: u32,
     expected: u32,
     written: u32,
-    valid: bool,
+    valid: u32,
 }
 
 impl core::marker::Copy for Poseidon2FieldSponge {}
 
 impl Poseidon2FieldSponge {
+    #[inline(always)]
     pub fn begin<D: Poseidon2FieldDomain>(_ expected: u32) -> Self {
         let mut lanes = [0; WIDTH]
-        let valid = D::TAG < BABY_BEAR_MODULUS && expected < BABY_BEAR_MODULUS
-        if valid {
-            lanes[0] = BabyBear::from_u32(D::TAG).to_montgomery_word()
-            lanes[1] = BabyBear::from_u32(expected).to_montgomery_word()
+        if D::TAG >= BABY_BEAR_MODULUS {
+            return Self {
+                lanes: lanes, rate: 2, expected: expected, written: 0,
+                valid: INVALID_WORD,
+            }
         }
-        Self { lanes: lanes, rate: 2, expected: expected, written: 0, valid: valid }
+        if expected >= BABY_BEAR_MODULUS {
+            return Self {
+                lanes: lanes, rate: 2, expected: expected, written: 0,
+                valid: INVALID_WORD,
+            }
+        }
+        lanes[0] = BabyBear::from_u32(D::TAG).to_montgomery_word()
+        lanes[1] = BabyBear::from_u32(expected).to_montgomery_word()
+        Self {
+            lanes: lanes,
+            rate: 2,
+            expected: expected,
+            written: 0,
+            valid: VALID_WORD,
+        }
     }
 
     /// Restore a checkpoint from its exact field words. This is intended for
     /// compiler-derived storage resources between Fe-authored GPU passes.
+    #[inline(always)]
     pub fn restore(
         _ lanes: own [u32; WIDTH],
         _ rate: u32,
         _ expected: u32,
         _ written: u32,
     ) -> Self {
-        let count_valid = expected < BABY_BEAR_MODULUS && written <= expected
-        let expected_rate = if count_valid {
-            (written + 2) % SPONGE_RATE.downcast_truncate()
-        } else {
-            SPONGE_RATE.downcast_truncate()
+        let mut expected_rate: u32 = SPONGE_RATE.downcast_truncate()
+        if expected < BABY_BEAR_MODULUS {
+            if written <= expected {
+                expected_rate = (written + 2) % SPONGE_RATE.downcast_truncate()
+            }
         }
-        let mut valid = count_valid
-            && rate < SPONGE_RATE.downcast_truncate()
-            && rate == expected_rate
+        let mut valid_word = INVALID_WORD
+        if rate < SPONGE_RATE.downcast_truncate() {
+            if rate == expected_rate { valid_word = VALID_WORD }
+        }
         let mut lane: usize = 0
         while lane < WIDTH {
             if lanes[lane] >= BABY_BEAR_MODULUS {
-                valid = false
+                valid_word = INVALID_WORD
             }
             lane = lane + 1
         }
-        Self { lanes: lanes, rate: rate, expected: expected, written: written, valid: valid }
+        Self {
+            lanes: lanes,
+            rate: rate,
+            expected: expected,
+            written: written,
+            valid: valid_word,
+        }
     }
+    #[inline(always)]
     pub fn is_valid(self) -> bool {
-        self.valid
+        self.valid == VALID_WORD
     }
-    pub fn lane_word(self, _ lane: u32) -> u32 {
+    #[inline(always)]
+    pub fn lane_word(ref self, _ lane: u32) -> u32 {
         if lane >= WIDTH.downcast_truncate() {
             return 0
         }
         self.lanes[lane as usize]
     }
 
+    /// Fill the remainder of one rate block without running its permutation.
+    /// The returned phase checkpoint must be completed before absorption can
+    /// continue. This is the scheduling interpretation of the same block that
+    /// `absorb` evaluates in one call.
+    #[inline(always)]
+    pub fn begin_permutation<const N: usize>(
+        self,
+        _ fields: ref [BabyBear; N],
+    ) -> Poseidon2FieldPermutation
+        where N <= 8
+    {
+        let field_count = fields.len()
+        let count: u32 = field_count.downcast_truncate()
+        let mut valid = self.valid
+        if self.written > self.expected { valid = INVALID_WORD }
+        if count > self.expected - self.written { valid = INVALID_WORD }
+        if self.rate >= SPONGE_RATE.downcast_truncate() { valid = INVALID_WORD }
+        if self.rate + count != SPONGE_RATE.downcast_truncate() {
+            valid = INVALID_WORD
+        }
+        if valid != VALID_WORD {
+            return Poseidon2FieldPermutation {
+                lanes: self.lanes,
+                expected: self.expected,
+                written: self.written,
+                phase: 0,
+                valid: INVALID_WORD,
+            }
+        }
+        let mut state = Poseidon2State { lanes: self.lanes }
+        let mut rate: usize = self.rate as usize
+        let mut index: usize = 0
+        while index < field_count {
+            state.set_field(rate, fields[index])
+            rate = rate + 1
+            index = index + 1
+        }
+        Poseidon2FieldPermutation {
+            lanes: state.lanes,
+            expected: self.expected,
+            written: self.written + count,
+            phase: 0,
+            valid: VALID_WORD,
+        }
+    }
+
+    /// Begin the final permutation for a complete message whose last block is
+    /// only partially occupied. Unwritten rate lanes retain canonical zero.
+    #[inline(always)]
+    pub fn begin_finish_permutation(self) -> Poseidon2FieldPermutation {
+        let mut valid = self.valid
+        if self.written != self.expected { valid = INVALID_WORD }
+        if self.rate == 0 { valid = INVALID_WORD }
+        if self.rate >= SPONGE_RATE.downcast_truncate() { valid = INVALID_WORD }
+        Poseidon2FieldPermutation {
+            lanes: self.lanes,
+            expected: self.expected,
+            written: self.written,
+            phase: 0,
+            valid: valid,
+        }
+    }
+
     /// Absorb one bounded stage of the exact fixed-length message.
-    pub fn absorb<const N: usize>(mut self, _ fields: own [BabyBear; N])
+    #[inline(always)]
+    pub fn absorb<const N: usize>(mut self, _ fields: ref [BabyBear; N])
     where N <= 2147483648
     {
         let field_count = fields.len()
         let count: u32 = field_count.downcast_truncate()
-        if !self.valid
-            || self.written > self.expected
-            || count > self.expected - self.written
-            || self.rate >= SPONGE_RATE.downcast_truncate() {
-            self.valid = false
+        if self.valid != VALID_WORD {
+            self.valid = INVALID_WORD
+            return
+        }
+        if self.written > self.expected {
+            self.valid = INVALID_WORD
+            return
+        }
+        if count > self.expected - self.written {
+            self.valid = INVALID_WORD
+            return
+        }
+        if self.rate >= SPONGE_RATE.downcast_truncate() {
+            self.valid = INVALID_WORD
             return
         }
         let parameters = PARAMETERS
@@ -616,9 +982,13 @@ impl Poseidon2FieldSponge {
         self.rate = rate.downcast_truncate()
         self.written = self.written + count
     }
+    #[inline(always)]
     pub fn finish(self) -> PackedCommitment {
-        if !self.valid || self.written != self.expected {
-            return PackedCommitment { valid: false, value: Poseidon2Digest::zero() }
+        if self.valid != VALID_WORD {
+            return PackedCommitment { valid: INVALID_WORD, value: Poseidon2Digest::zero() }
+        }
+        if self.written != self.expected {
+            return PackedCommitment { valid: INVALID_WORD, value: Poseidon2Digest::zero() }
         }
         let parameters = PARAMETERS
         let mut state = Poseidon2State { lanes: self.lanes }
@@ -631,7 +1001,7 @@ impl Poseidon2FieldSponge {
             values[index] = state.field(index)
             index = index + 1
         }
-        PackedCommitment { valid: true, value: Poseidon2Digest { values: values } }
+        PackedCommitment { valid: VALID_WORD, value: Poseidon2Digest { values: values } }
     }
 }
 
@@ -670,7 +1040,7 @@ pub fn commit_packed<D: Poseidon2Domain, const N: usize>(
     _ packed: own PackedFieldBits<precision::baby_bear::BabyBearModulus, N>,
 ) -> PackedCommitment {
     if !packed.is_valid() || D::TAG >= BABY_BEAR_MODULUS {
-        return PackedCommitment { valid: false, value: Poseidon2Digest::zero() }
+        return PackedCommitment { valid: INVALID_WORD, value: Poseidon2Digest::zero() }
     }
     let mut state: [BabyBear; WIDTH] = [BabyBear::zero(); WIDTH]
     let mut rate: usize = 0
@@ -697,7 +1067,7 @@ pub fn commit_packed<D: Poseidon2Domain, const N: usize>(
         values[index] = state[index]
         index = index + 1
     }
-    PackedCommitment { valid: true, value: Poseidon2Digest { values: values } }
+    PackedCommitment { valid: VALID_WORD, value: Poseidon2Digest { values: values } }
 }
 
 /// Commit one fixed-length vector of canonical base-field values. The nominal
