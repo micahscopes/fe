@@ -1,0 +1,105 @@
+//! Authenticated BabyBear receipt schema for the production sparse fixed AIR.
+//!
+//! This join layer depends on both the high-precision sparse AIR and the
+//! field-generic BabyBear FRI interpreter. Neither lower layer depends on the
+//! other, so the protocol stays acyclic and no browser host owns proof shape.
+
+use canonical_words::{CanonicalWordStream, CanonicalWordStreamProvider}
+use mandelbrot_proof_air_core::FriSchedule
+use mandelbrot_proof_baby_bear::{
+    BabyBearFriMultiQueryShape,
+    FriMultiCommitmentQuery,
+    fri_multi_sibling_capacity,
+}
+use mandelbrot_proof_fixed_air_baby_bear::{
+    SparseBaseLdeDigest,
+    SparseBaseLdeMultiOpening,
+    SparseInteractionLdeDigest,
+    SparseInteractionLdeMultiOpening,
+}
+
+/// One canonical sparse AIR and FRI receipt. The base and interaction roots
+/// retain their limb, trace, and LDE brands. The nested FRI carrier is an
+/// interpretation of `FriSchedule`, not a handwritten round list.
+pub struct SparseBabyBearAirFriReceipt<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const AIR_MAX_LEAVES: usize,
+    const AIR_MAX_SIBLINGS: usize,
+    Fri,
+> {
+    pub valid: bool,
+    pub base_root: SparseBaseLdeDigest<L, TRACE, LDE>,
+    pub interaction_root: SparseInteractionLdeDigest<L, TRACE, LDE>,
+    pub base: SparseBaseLdeMultiOpening<
+        L,
+        TRACE,
+        LDE,
+        AIR_MAX_LEAVES,
+        AIR_MAX_SIBLINGS,
+    >,
+    pub interaction: SparseInteractionLdeMultiOpening<
+        L,
+        TRACE,
+        LDE,
+        AIR_MAX_LEAVES,
+        AIR_MAX_SIBLINGS,
+    >,
+    pub fri: Fri,
+}
+impl<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const AIR_MAX_LEAVES: usize,
+    const AIR_MAX_SIBLINGS: usize,
+    Fri: core::marker::Copy,
+> core::marker::Copy for SparseBabyBearAirFriReceipt<
+    L,
+    TRACE,
+    LDE,
+    AIR_MAX_LEAVES,
+    AIR_MAX_SIBLINGS,
+    Fri,
+> {}
+derive CanonicalWordStream for SparseBabyBearAirFriReceipt<
+    L,
+    TRACE,
+    LDE,
+    AIR_MAX_LEAVES,
+    AIR_MAX_SIBLINGS,
+    Fri,
+> using CanonicalWordStreamProvider
+
+pub const PRODUCTION_LIMBS: usize = 4
+pub const PRODUCTION_TRACE_LENGTH: usize = 4096
+pub const PRODUCTION_LDE_LENGTH: usize = 8192
+pub const PRODUCTION_LDE_LOG: usize = 13
+pub const PRODUCTION_QUERY_COUNT: usize = 4
+pub const PRODUCTION_AIR_MAX_LEAVES: usize = PRODUCTION_QUERY_COUNT * 4
+pub const PRODUCTION_AIR_MAX_SIBLINGS: usize =
+    PRODUCTION_AIR_MAX_LEAVES * PRODUCTION_LDE_LOG
+pub const PRODUCTION_COMPOSITION_MAX_LEAVES: usize =
+    PRODUCTION_QUERY_COUNT * 2
+pub const PRODUCTION_COMPOSITION_MAX_SIBLINGS: usize =
+    fri_multi_sibling_capacity(PRODUCTION_LDE_LOG - 1, PRODUCTION_QUERY_COUNT)
+
+pub type ProductionSparseFriSchedule = FriSchedule<1, {PRODUCTION_LDE_LOG}>
+pub type ProductionSparseFriLayers =
+    <ProductionSparseFriSchedule as BabyBearFriMultiQueryShape<
+        {PRODUCTION_QUERY_COUNT},
+    >>::Query
+pub type ProductionSparseFriQuery = FriMultiCommitmentQuery<
+    {PRODUCTION_COMPOSITION_MAX_LEAVES},
+    {PRODUCTION_COMPOSITION_MAX_SIBLINGS},
+    ProductionSparseFriLayers,
+>
+pub type ProductionSparseBabyBearReceipt = SparseBabyBearAirFriReceipt<
+    {PRODUCTION_LIMBS},
+    {PRODUCTION_TRACE_LENGTH},
+    {PRODUCTION_LDE_LENGTH},
+    {PRODUCTION_AIR_MAX_LEAVES},
+    {PRODUCTION_AIR_MAX_SIBLINGS},
+    ProductionSparseFriQuery,
+>

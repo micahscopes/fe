@@ -1,0 +1,10 @@
+[ingot]
+name = "mandelbrot_proof_fixed_air_receipt_baby_bear"
+version = "0.1.0"
+
+[dependencies]
+canonical_words = "../../../../ingots/canonical_words"
+core = "../../../../ingots/core"
+mandelbrot_proof_air_core = "../air-core"
+mandelbrot_proof_baby_bear = "../baby-bear"
+mandelbrot_proof_fixed_air_baby_bear = "../fixed-air-baby-bear"
