@@ -32,6 +32,7 @@
 //! layout-derived cases continue to fail closed.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::time::Instant;
 
 use compiler_db::DriverDataBase;
 use hir::projection::IndexSource;
@@ -4069,17 +4070,33 @@ where
                 && function.linkage(self.db) == RuntimeLinkage::Internal
                 && !self.wrapped_lane_names.contains(&symbol);
             let scoped_arena = self.scoped_arena_bodies.contains(&instance);
-            PortableFunctionLowerer::new(self, body, func_ref, validate_enum_params, scoped_arena)?
-                .lower()
-                .map_err(|error| match error {
-                    LowerError::Unsupported(message) => LowerError::Unsupported(format!(
-                        "{message}; while lowering Wasm function `{symbol}`"
-                    )),
-                    LowerError::Internal(message) => LowerError::Internal(format!(
-                        "{message}; while lowering Wasm function `{symbol}`"
-                    )),
-                    other => other,
-                })?;
+            let started = Instant::now();
+            let lowered = PortableFunctionLowerer::new(
+                self,
+                body,
+                func_ref,
+                validate_enum_params,
+                scoped_arena,
+            )?
+            .lower();
+            let elapsed = started.elapsed();
+            if elapsed.as_secs() >= 1 {
+                wasm_lower_trace(|| {
+                    format!(
+                        "slow function lowering, symbol={symbol}, elapsed_ms={}",
+                        elapsed.as_millis()
+                    )
+                });
+            }
+            lowered.map_err(|error| match error {
+                LowerError::Unsupported(message) => LowerError::Unsupported(format!(
+                    "{message}; while lowering Wasm function `{symbol}`"
+                )),
+                LowerError::Internal(message) => LowerError::Internal(format!(
+                    "{message}; while lowering Wasm function `{symbol}`"
+                )),
+                other => other,
+            })?;
         }
         for index in 0..self.resumable_continuations.len() {
             let symbol = self.resumable_continuations[index].symbol.clone();
@@ -7451,6 +7468,12 @@ where
             RStmt::Store { dst, src } => {
                 if let Some((addr, ty)) = self.raw_memory_scalar_place(dst)? {
                     let value = self.local_value(*src)?;
+                    let actual = self.fb.type_of(value);
+                    if actual != ty {
+                        return Err(LowerError::Internal(format!(
+                            "wasm memory store type mismatch for `{dst:?}`: source {src:?} has {actual:?}, destination requires {ty:?}"
+                        )));
+                    }
                     self.fb
                         .insert_inst_no_result(Mstore::new(self.inst_set(), addr, value, ty));
                     return Ok(());
@@ -9470,8 +9493,24 @@ where
         let program = self.module.db as &dyn mir::MirDb;
         let resolved = mir::resolve_runtime_place(self.module.db, &program, &self.body, place)
             .map_err(|error| LowerError::Internal(format!("invalid runtime place: {error:?}")))?;
-        let RuntimeClass::Scalar(scalar) = resolved.result_class.clone() else {
-            return Ok(None);
+        let scalar = match resolved.result_class.clone() {
+            RuntimeClass::Scalar(scalar) => Some(scalar),
+            RuntimeClass::AggregateValue { layout } => {
+                let Some(scalar) = self.module.single_scalar_field(layout) else {
+                    return Ok(None);
+                };
+                Some(scalar)
+            }
+            // `BrowserPtr<T>` fields are classified as typed memory addresses,
+            // not ordinary scalar newtypes. They still occupy exactly one i32
+            // word in the authoritative Wasm layout. Their arena provenance is
+            // checked after resolving the root below, before either a load or a
+            // store can expose that word.
+            RuntimeClass::RawAddr {
+                space: AddressSpaceKind::Memory,
+                ..
+            } => None,
+            RuntimeClass::Ref { .. } | RuntimeClass::RawAddr { .. } => return Ok(None),
         };
         // `allow_index` requires a target-derived aggregate extent. This is
         // carried by object refs, materialized parameters, and typed raw
@@ -9569,6 +9608,9 @@ where
             } => (addr, class, true),
             _ => return Ok(None),
         };
+        if scalar.is_none() && !self.module.arena_owned_local(&self.body, addr_local) {
+            return Ok(None);
+        }
         // The base pointer is materialized up front so a dynamic index can flush
         // the pending constant offset onto it mid-walk. A field-only path emits
         // no instructions in the loop, so this stays byte-identical to the prior
@@ -9682,10 +9724,13 @@ where
         }
         let addr = self.offset_addr(addr, byte_offset)?;
         let semantic_place_ty = semantic_place_result_ty(self.module.db, &self.body, place);
-        let ty = if semantic_place_ty.is_some_and(|ty| is_usize_semantic_ty(self.module.db, ty)) {
+        let ty = if scalar.is_none() {
+            Type::I32
+        } else if semantic_place_ty.is_some_and(|ty| is_usize_semantic_ty(self.module.db, ty)) {
             Type::I32
         } else {
-            scalar_ty_r1(&scalar).map_err(|error| match error {
+            let scalar = scalar.as_ref().expect("scalar result checked above");
+            scalar_ty_r1(scalar).map_err(|error| match error {
                 LowerError::Unsupported(message) => LowerError::Unsupported(format!(
                     "{message}; while lowering memory place {place:?} with result class {scalar:?}"
                 )),

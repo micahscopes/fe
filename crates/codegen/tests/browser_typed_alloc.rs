@@ -47,6 +47,11 @@ struct Payload {
     marker: u32,
 }
 
+struct Workspace {
+    marker: u32,
+    payload: BrowserPtr<Payload>,
+}
+
 fn initialize(_ seed: u32)
     uses (payload: mut Payload)
 {
@@ -76,6 +81,20 @@ fn value_at(_ index: usize) -> u32
     payload.values[index]
 }
 
+fn initialize_workspace(_ payload: BrowserPtr<Payload>)
+    uses (workspace: mut Workspace)
+{
+    workspace.marker = 77
+    workspace.payload = payload
+}
+
+fn workspace_payload_address() -> u32
+    uses (workspace: Workspace)
+{
+    if workspace.marker != 77 { return 0 }
+    workspace.payload.address()
+}
+
 pub fn two_objects(_ left_seed: u32, _ right_seed: u32) -> u32 {
     let left: BrowserPtr<Payload> = alloc_browser_object<Payload>()
     let right: BrowserPtr<Payload> = alloc_browser_object<Payload>()
@@ -91,6 +110,14 @@ pub fn read_index(_ seed: u32, _ raw_index: u32) -> u32 {
     with (payload) { initialize(seed) }
     let index: usize = raw_index as usize
     with (payload) { value_at(index) }
+}
+
+pub fn nested_typed_pointer_field() -> u32 {
+    let payload: BrowserPtr<Payload> = alloc_browser_object<Payload>()
+    let workspace: BrowserPtr<Workspace> = alloc_browser_object<Workspace>()
+    with (workspace) { initialize_workspace(payload) }
+    let stored = with (workspace) { workspace_payload_address() }
+    if stored == payload.address() { 1 } else { 0 }
 }
 "#,
     );
@@ -110,10 +137,14 @@ pub fn read_index(_ seed: u32, _ raw_index: u32) -> u32 {
     let read_index = instance
         .get_typed_func::<(i32, i32), i32>(&mut store, "read_index")
         .unwrap();
+    let nested_pointer = instance
+        .get_typed_func::<(), i32>(&mut store, "nested_typed_pointer_field")
+        .unwrap();
 
     // checksum(seed) = (seed + 100) + sum(seed .. seed + 7)
     assert_eq!(run.call(&mut store, (10, 30)).unwrap(), 218_398);
     assert_eq!(read_index.call(&mut store, (10, 7)).unwrap(), 17);
+    assert_eq!(nested_pointer.call(&mut store, ()).unwrap(), 1);
     assert!(
         read_index.call(&mut store, (10, 8)).is_err(),
         "typed dynamic indexes must trap at the derived array bound"
@@ -213,6 +244,35 @@ pub fn forged(_ address: u32, _ seed: u32) {
         error.contains(
             "a function that allocates a local array cannot also use a direct host memory region"
         ),
+        "unexpected fail-closed diagnostic: {error}",
+    );
+}
+
+#[test]
+fn typed_pointer_fields_require_arena_owned_storage() {
+    let error = compile_to_wasm_err(
+        r#"
+use core::BrowserPtr
+
+struct Payload { marker: u32 }
+struct Workspace { payload: BrowserPtr<Payload> }
+
+fn store_payload(_ payload: BrowserPtr<Payload>)
+    uses (workspace: mut Workspace)
+{
+    workspace.payload = payload
+}
+
+pub fn forged(_ workspace_address: u32, _ payload_address: u32) {
+    let workspace: BrowserPtr<Workspace> = BrowserPtr::from_u32(workspace_address)
+    let payload: BrowserPtr<Payload> = BrowserPtr::from_u32(payload_address)
+    with (workspace) { store_payload(payload) }
+}
+"#,
+    );
+    assert!(
+        error.contains("statement `Store")
+            && error.contains("while lowering Wasm function `store_payload`"),
         "unexpected fail-closed diagnostic: {error}",
     );
 }
