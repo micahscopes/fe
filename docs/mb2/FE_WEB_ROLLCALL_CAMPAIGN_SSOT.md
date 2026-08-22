@@ -1406,6 +1406,36 @@ Legend:
   CTFE-derived plans, preserve every independent bigint and mutation oracle,
   and show a material reduction in specialization count, package size, peak
   memory, and compile latency before recursion is layered on top.
+  Commits `ac3d009ea` and `af2439257` bound whole-package analysis to the
+  selected entry graph and cache every base inline body. A fresh exact split
+  prover run then completed semantic preflight for 19,525 specializations,
+  assembled 10,793 functions and 103 constant regions, and completed inline
+  preparation within one 30-second polling interval. It reached portable Wasm
+  lowering after 2,642.14 seconds instead of stalling in inline preparation.
+  The remaining cost is concentrated in the expanded production schedule:
+  `fold_fri_first` took 332.35 seconds,
+  `open_fri_multi_query_layers__gd7ee` took 322.59 seconds,
+  `write_production_sparse_baby_bear_receipt` took 162.75 seconds, and the
+  other FRI/query specializations contributed additional tens of seconds.
+  This is direct evidence for a flat CTFE-derived FRI/query/receipt plan with
+  scalar, Wasm, and WebGPU interpreters, while retaining the recursive branded
+  carrier as the specification oracle.
+  That run passed the earlier provider-reborrow seam and then failed closed
+  when an arena-owned pointer stored in the Fe prover workspace was loaded by
+  a later actor stage. Commits `fa5f29053` and `359ba8438` add field-sensitive
+  typed arena provenance across a closed runtime package. A field is trusted
+  only when every store to that exact nominal-layout field has an arena-owned
+  root and source; opaque, dynamically indexed, public-forged, and mixed-origin
+  paths remain rejected. Focused positive, reborrow, staged-actor, and forged
+  address gates pass 6/6, and the Wasm-lowering unit suite passes 12/12.
+  Commit `fe3d93eaf` adds a bounded exact production-stage checkpoint rather
+  than a reduced surrogate. It allocates the real 4,096-row base evaluation
+  and 8,192-row codeword objects, initializes them in Fe, executes the shared
+  production LDE at coset shift 7, lowers 66 Fe functions to a 305,035-byte
+  zero-import Wasm module, and executes successfully. The complete split
+  receipt gate still needs a post-fix run through canonical decode, semantic
+  verification, and targeted mutation rejection before it counts as a
+  production proof.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
   The first arithmetic-plan consolidation is landed at `ba2ded864`: one
