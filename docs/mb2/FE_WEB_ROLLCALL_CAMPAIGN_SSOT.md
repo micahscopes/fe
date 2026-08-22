@@ -1372,6 +1372,16 @@ Legend:
   Fe policy must derive the query count and related capacities from explicit
   soundness parameters, with an independent calculation gate; four must not
   survive merely as a convenient checkpoint constant.
+  Commit `9e3214661` adds the staged production canonical boundary. A generic
+  `decode_canonical_words` dual complements the existing fixed-width encoder,
+  while the receipt splits header, sparse AIR openings, and FRI into explicit
+  Fe-owned codec stages without changing the FCO-derived field order. Browser
+  and native hosts receive only `BrowserBytes`; they own no receipt field table
+  or decode sequence. The zero-import Wasm gate roundtrips the canonical empty
+  production carrier and rejects an invalid boolean, truncation, and trailing
+  data, resetting every failure to the Fe-derived empty value. It passes 1/1
+  in 124.48 seconds. This proves the bounded staged codec and malformed-input
+  floor, not acceptance of a semantically valid production proof.
   The next gate must construct one canonical production receipt, accept it,
   reject targeted transcript, opening, and fold mutations against independent
   models, and feed it through staged canonical decoding. Only that executed
