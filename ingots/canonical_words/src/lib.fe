@@ -53,6 +53,16 @@ pub fn encode_canonical_words<T: CanonicalWords, W: WordSink>(
     value.encode(writer)
 }
 
+/// Decode one fixed-width canonical value through a generic boundary. This is
+/// the decoder dual of `encode_canonical_words` and keeps callers from relying
+/// on concrete imported-trait method lowering.
+pub fn decode_canonical_words<T: CanonicalWords, R: WordSource>(
+    _ value: mut T,
+    _ reader: R,
+) -> R {
+    value.decode(reader)
+}
+
 /// Fixed-capacity, target-neutral result of interpreting a nominal canonical
 /// schema into caller-owned words. A width mismatch fails closed and returns
 /// an all-zero payload, so callers never need a parallel field-count table.

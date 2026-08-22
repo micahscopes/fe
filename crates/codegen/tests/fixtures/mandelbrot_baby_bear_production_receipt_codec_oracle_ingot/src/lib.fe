@@ -1,0 +1,56 @@
+//! Executable boundary for the staged production BabyBear receipt codec.
+
+use canonical_words::canonical_word_stream_count
+use core::{BrowserBytes, BrowserPtr}
+use mandelbrot_proof_fixed_air_receipt_baby_bear::{
+    decode_production_sparse_baby_bear_receipt,
+    empty_production_sparse_baby_bear_receipt,
+    encode_production_sparse_baby_bear_receipt,
+}
+
+fn browser_bytes_equal(_ left: BrowserBytes, _ right: BrowserBytes) -> bool {
+    if left.len != right.len || (left.len & 3) != 0 { return false }
+    let mut offset: u32 = 0
+    while offset < left.len {
+        let left_word: BrowserPtr<u32> = BrowserPtr::from_u32(left.ptr + offset)
+        let right_word: BrowserPtr<u32> = BrowserPtr::from_u32(right.ptr + offset)
+        if left_word.read() != right_word.read() { return false }
+        offset = offset + 4
+    }
+    true
+}
+
+/// Mode zero roundtrips the canonical empty carrier. Mode one corrupts its
+/// leading boolean, mode two truncates one word, and mode three exposes one
+/// trailing word. All malformed modes must reset the destination and reject.
+pub fn production_sparse_receipt_codec_status(_ mode: u32) -> [u32; 4] {
+    if mode > 3 { return [0, 0, 0, 0] }
+    let source = empty_production_sparse_baby_bear_receipt()
+    let encoded = encode_production_sparse_baby_bear_receipt(ref source)
+    if encoded.len == 0 { return [0, 0, 0, 0] }
+
+    let mut input = encoded
+    if mode == 1 {
+        let first: BrowserPtr<u32> = BrowserPtr::from_u32(input.ptr)
+        first.write(2)
+    } else if mode == 2 {
+        input.len = input.len - 4
+    } else if mode == 3 {
+        input.len = input.len + 4
+    }
+
+    let mut decoded = empty_production_sparse_baby_bear_receipt()
+    let accepted = decode_production_sparse_baby_bear_receipt(
+        input,
+        mut decoded,
+    )
+    let expected = encode_production_sparse_baby_bear_receipt(ref source)
+    let reencoded = encode_production_sparse_baby_bear_receipt(ref decoded)
+    let count = canonical_word_stream_count(ref decoded)
+    [
+        if accepted { 1 } else { 0 },
+        if browser_bytes_equal(expected, reencoded) { 1 } else { 0 },
+        expected.len,
+        count * 4,
+    ]
+}

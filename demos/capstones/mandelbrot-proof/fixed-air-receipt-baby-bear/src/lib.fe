@@ -4,7 +4,16 @@
 //! field-generic BabyBear FRI interpreter. Neither lower layer depends on the
 //! other, so the protocol stays acyclic and no browser host owns proof shape.
 
-use canonical_words::{CanonicalWordStream, CanonicalWordStreamProvider}
+use canonical_words::{
+    BrowserWordReader,
+    BrowserWordWriter,
+    CanonicalWordStream,
+    CanonicalWordStreamProvider,
+    canonical_word_stream_count,
+    decode_canonical_words,
+    encode_canonical_words,
+}
+use core::BrowserBytes
 use mandelbrot_proof_air_core::{FriQueryPlan, FriSchedule, radix2_query_geometry}
 use mandelbrot_proof_baby_bear::{
     BabyBearAirLdeRequests,
@@ -208,6 +217,95 @@ pub fn empty_production_sparse_baby_bear_receipt()
                 >>::invalid_fri_multi_query_layers(),
         },
     }
+}
+
+/// Reset caller-owned production storage without exposing its nested receipt
+/// layout to a browser or native host.
+pub fn clear_production_sparse_baby_bear_receipt(
+    _ receipt: mut ProductionSparseBabyBearReceipt,
+) {
+    receipt = empty_production_sparse_baby_bear_receipt()
+}
+
+fn encode_production_sparse_receipt_header(
+    _ receipt: ref ProductionSparseBabyBearReceipt,
+    _ writer: BrowserWordWriter,
+) -> BrowserWordWriter {
+    let writer = encode_canonical_words(ref receipt.valid, writer)
+    let writer = encode_canonical_words(ref receipt.base_root, writer)
+    encode_canonical_words(ref receipt.interaction_root, writer)
+}
+
+fn encode_production_sparse_receipt_air(
+    _ receipt: ref ProductionSparseBabyBearReceipt,
+    _ writer: BrowserWordWriter,
+) -> BrowserWordWriter {
+    let writer = receipt.base.encode_stream(writer)
+    receipt.interaction.encode_stream(writer)
+}
+
+fn encode_production_sparse_receipt_fri(
+    _ receipt: ref ProductionSparseBabyBearReceipt,
+    _ writer: BrowserWordWriter,
+) -> BrowserWordWriter {
+    receipt.fri.encode_stream(writer)
+}
+
+/// Encode one production receipt through explicit Fe-owned stages. The byte
+/// order is still the FCO-derived canonical stream; staging prevents a single
+/// generated browser function from absorbing the complete nested decoder.
+pub fn encode_production_sparse_baby_bear_receipt(
+    _ receipt: ref ProductionSparseBabyBearReceipt,
+) -> BrowserBytes {
+    let words = canonical_word_stream_count(receipt)
+    if words == 0 { return BrowserBytes { ptr: 0, len: 0 } }
+    let writer = BrowserWordWriter::allocate(words)
+    let writer = encode_production_sparse_receipt_header(receipt, writer)
+    let writer = encode_production_sparse_receipt_air(receipt, writer)
+    encode_production_sparse_receipt_fri(receipt, writer).finish()
+}
+
+fn decode_production_sparse_receipt_header(
+    _ receipt: mut ProductionSparseBabyBearReceipt,
+    _ reader: BrowserWordReader,
+) -> BrowserWordReader {
+    let reader = decode_canonical_words(mut receipt.valid, reader)
+    let reader = decode_canonical_words(mut receipt.base_root, reader)
+    decode_canonical_words(mut receipt.interaction_root, reader)
+}
+
+fn decode_production_sparse_receipt_air(
+    _ receipt: mut ProductionSparseBabyBearReceipt,
+    _ reader: BrowserWordReader,
+) -> BrowserWordReader {
+    let reader = receipt.base.decode_stream(reader)
+    receipt.interaction.decode_stream(reader)
+}
+
+fn decode_production_sparse_receipt_fri(
+    _ receipt: mut ProductionSparseBabyBearReceipt,
+    _ reader: BrowserWordReader,
+) -> BrowserWordReader {
+    receipt.fri.decode_stream(reader)
+}
+
+/// Decode a bounded canonical receipt through explicit Fe stages. Truncation,
+/// trailing words, invalid booleans or fields, excessive sparse counts, and
+/// noncanonical unused capacity fail closed and reset the caller-owned value.
+pub fn decode_production_sparse_baby_bear_receipt(
+    _ bytes: BrowserBytes,
+    _ receipt: mut ProductionSparseBabyBearReceipt,
+) -> bool {
+    clear_production_sparse_baby_bear_receipt(mut receipt)
+    let reader = BrowserWordReader::new(bytes)
+    let reader = decode_production_sparse_receipt_header(mut receipt, reader)
+    let reader = decode_production_sparse_receipt_air(mut receipt, reader)
+    let reader = decode_production_sparse_receipt_fri(mut receipt, reader)
+    if !reader.complete() {
+        clear_production_sparse_baby_bear_receipt(mut receipt)
+        return false
+    }
+    true
 }
 
 pub struct ProductionSparseFriAuthentication {
