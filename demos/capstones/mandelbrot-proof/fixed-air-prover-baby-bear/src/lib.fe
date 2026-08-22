@@ -1,10 +1,10 @@
 //! Fe-owned staged workspace for the production sparse BabyBear leaf prover.
 //!
-//! Inside one canonical arena epoch, the browser sees only an opaque wasm32
-//! address. Fe owns its typed interval, stage order, codewords, receipt, and
-//! verification policy. The scalar stage bodies are the reference interpreter
-//! that the Conal/CTFE WebGPU placement must preserve, not a host-side
-//! alternative prover.
+//! Inside one canonical arena epoch, Fe retains typed pointers to its interval,
+//! stage order, codewords, receipt, and verification policy. Only the final
+//! canonical receipt bytes cross the browser boundary. The scalar stage bodies
+//! are the reference interpreter that the Conal/CTFE WebGPU placement must
+//! preserve, not a host-side alternative prover.
 
 use core::{BrowserBytes, BrowserPtr, alloc_browser_object}
 use mandelbrot_proof_fixed_air::{
@@ -42,7 +42,6 @@ use mandelbrot_proof_fixed_air_receipt_baby_bear::{
     ProductionSparseBabyBearReceipt,
     clear_production_sparse_baby_bear_receipt,
     encode_production_sparse_baby_bear_receipt,
-    verify_production_sparse_baby_bear_receipt,
     write_production_sparse_baby_bear_receipt,
 }
 use mandelbrot_proof_recursive::{OrbitInterval, certify_leaf, complex_equals}
@@ -217,65 +216,6 @@ fn clear_production_receipt()
     clear_production_sparse_baby_bear_receipt(mut receipt)
 }
 
-/// Allocate one opaque Fe-owned prover workspace in browser linear memory.
-/// The handle is valid only until `fe_cabi_reset`. A zero address means the
-/// typed input was invalid.
-pub fn allocate_production_sparse_prover(
-    _ interval: OrbitInterval<{PRODUCTION_LIMBS}>,
-    _ shift: BabyBear,
-) -> u32 {
-    if shift.is_zero()
-        || sparse_transition_trace_length<{PRODUCTION_LIMBS}>()
-            != PRODUCTION_TRACE_LENGTH.downcast_truncate()
-        || !production_leaf_input_is_valid(interval) {
-        return 0
-    }
-    let workspace: BrowserPtr<ProductionSparseProverWorkspace> =
-        alloc_browser_object<ProductionSparseProverWorkspace>()
-    let base_evaluations: BrowserPtr<ProductionBaseEvaluations> =
-        alloc_browser_object<ProductionBaseEvaluations>()
-    let base: BrowserPtr<ProductionBaseCodeword> =
-        alloc_browser_object<ProductionBaseCodeword>()
-    let interaction_evaluations: BrowserPtr<ProductionInteractionEvaluations> =
-        alloc_browser_object<ProductionInteractionEvaluations>()
-    let interaction: BrowserPtr<ProductionInteractionCodeword> =
-        alloc_browser_object<ProductionInteractionCodeword>()
-    let composition: BrowserPtr<ProductionCompositionCodeword> =
-        alloc_browser_object<ProductionCompositionCodeword>()
-    let receipt: BrowserPtr<ProductionSparseBabyBearReceipt> =
-        alloc_browser_object<ProductionSparseBabyBearReceipt>()
-    if base_evaluations.address() == 0
-        || base.address() == 0
-        || interaction_evaluations.address() == 0
-        || interaction.address() == 0
-        || composition.address() == 0
-        || receipt.address() == 0 {
-        return 0
-    }
-    with (base_evaluations) { clear_production_base_evaluations() }
-    with (base) { clear_production_base_codeword() }
-    with (interaction_evaluations) {
-        clear_production_interaction_evaluations()
-    }
-    with (interaction) { clear_production_interaction_codeword() }
-    with (composition) { clear_production_composition_codeword() }
-    with (receipt) { clear_production_receipt() }
-    let initialized = with (workspace) {
-        initialize_production_sparse_prover(
-            interval,
-            shift,
-            base_evaluations,
-            base,
-            interaction_evaluations,
-            interaction,
-            composition,
-            receipt,
-        )
-    }
-    if !initialized { return 0 }
-    workspace.address()
-}
-
 fn write_production_sparse_base_evaluations(
     _ interval: OrbitInterval<{PRODUCTION_LIMBS}>,
 ) -> bool
@@ -341,13 +281,6 @@ fn write_production_sparse_base_stage() -> bool
     }
     workspace.stage = ProductionSparseProverStage::BaseLde
     true
-}
-
-pub fn production_sparse_prover_base_stage(_ handle: u32) -> bool {
-    if handle == 0 { return false }
-    let workspace: BrowserPtr<ProductionSparseProverWorkspace> =
-        BrowserPtr::from_u32(handle)
-    with (workspace) { write_production_sparse_base_stage() }
 }
 
 fn production_sparse_base_root() -> ProductionBaseDigest
@@ -447,13 +380,6 @@ fn write_production_sparse_interaction_stage() -> bool
     true
 }
 
-pub fn production_sparse_prover_interaction_stage(_ handle: u32) -> bool {
-    if handle == 0 { return false }
-    let workspace: BrowserPtr<ProductionSparseProverWorkspace> =
-        BrowserPtr::from_u32(handle)
-    with (workspace) { write_production_sparse_interaction_stage() }
-}
-
 fn write_production_sparse_composition(
     _ interval: OrbitInterval<{PRODUCTION_LIMBS}>,
     _ shift: BabyBear,
@@ -499,14 +425,7 @@ fn write_production_sparse_composition_stage() -> bool
     true
 }
 
-pub fn production_sparse_prover_composition_stage(_ handle: u32) -> bool {
-    if handle == 0 { return false }
-    let workspace: BrowserPtr<ProductionSparseProverWorkspace> =
-        BrowserPtr::from_u32(handle)
-    with (workspace) { write_production_sparse_composition_stage() }
-}
-
-fn write_and_verify_production_sparse_receipt(
+fn write_production_sparse_receipt(
     _ interval: OrbitInterval<{PRODUCTION_LIMBS}>,
     _ shift: BabyBear,
 ) -> bool
@@ -517,21 +436,14 @@ fn write_and_verify_production_sparse_receipt(
         receipt: mut ProductionSparseBabyBearReceipt,
     )
 {
-    if !write_production_sparse_baby_bear_receipt(
+    write_production_sparse_baby_bear_receipt(
         interval,
         ref base,
         ref interaction,
         ref composition,
         shift,
         mut receipt,
-    ) || !verify_production_sparse_baby_bear_receipt(
-        interval,
-        shift,
-        ref receipt,
-    ) {
-        return false
-    }
-    true
+    )
 }
 
 fn write_production_sparse_receipt_stage() -> bool
@@ -545,46 +457,13 @@ fn write_production_sparse_receipt_stage() -> bool
     let composition = workspace.composition
     let receipt = workspace.receipt
     if !with (base, interaction, composition, receipt) {
-        write_and_verify_production_sparse_receipt(interval, shift)
+        write_production_sparse_receipt(interval, shift)
     } {
         invalidate_production_sparse_prover()
         return false
     }
     workspace.stage = ProductionSparseProverStage::Receipt
     true
-}
-
-pub fn production_sparse_prover_receipt_stage(_ handle: u32) -> bool {
-    if handle == 0 { return false }
-    let workspace: BrowserPtr<ProductionSparseProverWorkspace> =
-        BrowserPtr::from_u32(handle)
-    with (workspace) { write_production_sparse_receipt_stage() }
-}
-
-fn production_sparse_receipt_is_valid(
-    _ interval: OrbitInterval<{PRODUCTION_LIMBS}>,
-    _ shift: BabyBear,
-) -> bool
-    uses (receipt: ProductionSparseBabyBearReceipt)
-{
-    verify_production_sparse_baby_bear_receipt(interval, shift, ref receipt)
-}
-
-fn production_sparse_prover_verify() -> bool
-    uses (workspace: ProductionSparseProverWorkspace)
-{
-    if !workspace.valid || !stage_is_receipt(workspace.stage) { return false }
-    let receipt = workspace.receipt
-    with (receipt) {
-        production_sparse_receipt_is_valid(workspace.interval, workspace.shift)
-    }
-}
-
-pub fn verify_production_sparse_prover(_ handle: u32) -> bool {
-    if handle == 0 { return false }
-    let workspace: BrowserPtr<ProductionSparseProverWorkspace> =
-        BrowserPtr::from_u32(handle)
-    with (workspace) { production_sparse_prover_verify() }
 }
 
 fn encode_production_sparse_receipt() -> BrowserBytes
@@ -603,29 +482,69 @@ fn production_sparse_prover_receipt_bytes() -> BrowserBytes
     with (receipt) { encode_production_sparse_receipt() }
 }
 
-pub fn encode_production_sparse_prover_receipt(_ handle: u32) -> BrowserBytes {
-    if handle == 0 { return BrowserBytes { ptr: 0, len: 0 } }
-    let workspace: BrowserPtr<ProductionSparseProverWorkspace> =
-        BrowserPtr::from_u32(handle)
-    with (workspace) { production_sparse_prover_receipt_bytes() }
-}
-
 /// Execute the scalar reference interpretation inside one canonical arena
 /// epoch. Each phase remains separately named and stage-checked so the future
 /// Conal/CTFE WebGPU interpreter can place the same dependency graph without
-/// duplicating proof semantics.
+/// duplicating proof semantics. Verification is deliberately a separate public
+/// boundary over the encoded receipt, just as it will be in the browser and
+/// EVM interpreters.
 pub fn prove_production_sparse_interval(
     _ interval: OrbitInterval<{PRODUCTION_LIMBS}>,
     _ shift: BabyBear,
 ) -> BrowserBytes {
-    let handle = allocate_production_sparse_prover(interval, shift)
-    if handle == 0
-        || !production_sparse_prover_base_stage(handle)
-        || !production_sparse_prover_interaction_stage(handle)
-        || !production_sparse_prover_composition_stage(handle)
-        || !production_sparse_prover_receipt_stage(handle)
-        || !verify_production_sparse_prover(handle) {
+    if shift.is_zero()
+        || sparse_transition_trace_length<{PRODUCTION_LIMBS}>()
+            != PRODUCTION_TRACE_LENGTH.downcast_truncate()
+        || !production_leaf_input_is_valid(interval) {
         return BrowserBytes { ptr: 0, len: 0 }
     }
-    encode_production_sparse_prover_receipt(handle)
+    let workspace: BrowserPtr<ProductionSparseProverWorkspace> =
+        alloc_browser_object<ProductionSparseProverWorkspace>()
+    let base_evaluations: BrowserPtr<ProductionBaseEvaluations> =
+        alloc_browser_object<ProductionBaseEvaluations>()
+    let base: BrowserPtr<ProductionBaseCodeword> =
+        alloc_browser_object<ProductionBaseCodeword>()
+    let interaction_evaluations: BrowserPtr<ProductionInteractionEvaluations> =
+        alloc_browser_object<ProductionInteractionEvaluations>()
+    let interaction: BrowserPtr<ProductionInteractionCodeword> =
+        alloc_browser_object<ProductionInteractionCodeword>()
+    let composition: BrowserPtr<ProductionCompositionCodeword> =
+        alloc_browser_object<ProductionCompositionCodeword>()
+    let receipt: BrowserPtr<ProductionSparseBabyBearReceipt> =
+        alloc_browser_object<ProductionSparseBabyBearReceipt>()
+    if workspace.address() == 0
+        || base_evaluations.address() == 0
+        || base.address() == 0
+        || interaction_evaluations.address() == 0
+        || interaction.address() == 0
+        || composition.address() == 0
+        || receipt.address() == 0 {
+        return BrowserBytes { ptr: 0, len: 0 }
+    }
+    with (base_evaluations) { clear_production_base_evaluations() }
+    with (base) { clear_production_base_codeword() }
+    with (interaction_evaluations) {
+        clear_production_interaction_evaluations()
+    }
+    with (interaction) { clear_production_interaction_codeword() }
+    with (composition) { clear_production_composition_codeword() }
+    with (receipt) { clear_production_receipt() }
+    if !with (workspace) {
+        initialize_production_sparse_prover(
+            interval,
+            shift,
+            base_evaluations,
+            base,
+            interaction_evaluations,
+            interaction,
+            composition,
+            receipt,
+        )
+    } || !with (workspace) { write_production_sparse_base_stage() }
+        || !with (workspace) { write_production_sparse_interaction_stage() }
+        || !with (workspace) { write_production_sparse_composition_stage() }
+        || !with (workspace) { write_production_sparse_receipt_stage() } {
+        return BrowserBytes { ptr: 0, len: 0 }
+    }
+    with (workspace) { production_sparse_prover_receipt_bytes() }
 }

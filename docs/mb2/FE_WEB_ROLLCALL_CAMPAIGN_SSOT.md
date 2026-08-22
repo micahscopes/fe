@@ -1386,6 +1386,26 @@ Legend:
   reject targeted transcript, opening, and fold mutations against independent
   models, and feed it through staged canonical decoding. Only that executed
   AIR/FRI receipt may replace semantic replay in the recursive parent carrier.
+  The production boundary is now split into separate prover and verifier
+  artifacts. The prover writes canonical receipt bytes without invoking the
+  verifier internally; the exact Rust gate copies only those bytes into a
+  fresh zero-import Fe/Wasm verifier instance, then requires acceptance and a
+  targeted mutation rejection. The prover ingot Fe-checks, and the split gate
+  builds with `--no-run`, but its first exact execution exposed a compile-cost
+  blocker before Wasm emission. The measured prover-only preflight visited
+  19,589 semantic specializations, assembled 10,857 runtime functions and 103
+  constant regions, and held about 9.7 GiB RSS. It was stopped after roughly
+  52 minutes while preparing inline value bodies, without a semantic or
+  lowering error. This is materially smaller than the earlier combined
+  prover/verifier attempt near 14.8 GiB, so the split is retained, but it is
+  not acceptance evidence. Opt-in phase timing identified repeated expanded
+  normalization in `prove_production_sparse_interval`, the receipt writer and
+  encoder layers, `clear_production_receipt`, and the specialized FRI fold and
+  query helpers. The next production-proof slice must express the receipt
+  codec and FRI/prover dependency work as compact Fe interpreters over
+  CTFE-derived plans, preserve every independent bigint and mutation oracle,
+  and show a material reduction in specialization count, package size, peak
+  memory, and compile latency before recursion is layered on top.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
   The first arithmetic-plan consolidation is landed at `ba2ded864`: one
@@ -1517,7 +1537,10 @@ fallback. The semantic receipts are:
    then encode it through staged canonical receipt decoders. The production
    Fe specialization now carries `LD01`/`LD02`, public-bound `BC02`, exact
    transcript requests, and the complete FRI fold chain, but type-checking is
-   not acceptance evidence.
+   not acceptance evidence. First contract its measured 19,589-specialization,
+   10,857-function prover package into compact Fe interpreters over
+   CTFE-derived receipt and FRI plans; the separate canonical-byte verifier
+   boundary remains the exact acceptance target.
 3. Lower the BabyBear leaf prover and recursive merges through Fe Conal/CTFE
    WebGPU schedules, then run the complete progressive proof/verify/tamper page
    through Chrome.

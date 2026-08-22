@@ -1,0 +1,63 @@
+//! Executable boundary for the production sparse BabyBear prover.
+//!
+//! The fixture constructs its witness by evaluating the exact Fe recurrence.
+//! No host-authored trace, commitment, challenge, or receipt enters this gate.
+
+use core::BrowserBytes
+use mandelbrot_proof_fixed_air_prover_baby_bear::prove_production_sparse_interval
+use mandelbrot_proof_fixed_air_receipt_baby_bear::{
+    decode_production_sparse_baby_bear_receipt,
+    empty_production_sparse_baby_bear_receipt,
+    verify_production_sparse_baby_bear_receipt,
+}
+use mandelbrot_proof_recursive::{
+    ComplexFixed,
+    HighPrecisionEscapeClaim,
+    OrbitInterval,
+    evaluate_chunk,
+    initial_boundary,
+}
+use precision::baby_bear::BabyBear
+use precision::fixed::Fixed
+
+fn production_zero_interval() -> OrbitInterval<4> {
+    let claim: HighPrecisionEscapeClaim<4> = HighPrecisionEscapeClaim {
+        point: ComplexFixed {
+            real: Fixed::zero(),
+            imaginary: Fixed::zero(),
+        },
+        bound: 8,
+    }
+    let evaluated = evaluate_chunk(claim, initial_boundary<4>(), 1)
+    if !evaluated.valid || evaluated.leaves != 1 {
+        return OrbitInterval {
+            claim: claim,
+            start: initial_boundary<4>(),
+            end: initial_boundary<4>(),
+        }
+    }
+    evaluated.interval
+}
+
+/// Prove the single exact transition `z_0 = 0` to `z_1 = 0` for `c = 0`.
+/// The nonzero shift is the same independently exercised coset representative
+/// used by the BabyBear LDE and sparse-authentication gates.
+pub fn production_zero_interval_receipt() -> BrowserBytes {
+    prove_production_sparse_interval(
+        production_zero_interval(),
+        BabyBear::from_u32(7),
+    )
+}
+
+/// Verify browser-owned canonical bytes without reusing prover residency.
+pub fn verify_production_zero_interval_receipt(_ bytes: BrowserBytes) -> bool {
+    let mut receipt = empty_production_sparse_baby_bear_receipt()
+    if !decode_production_sparse_baby_bear_receipt(bytes, mut receipt) {
+        return false
+    }
+    verify_production_sparse_baby_bear_receipt(
+        production_zero_interval(),
+        BabyBear::from_u32(7),
+        ref receipt,
+    )
+}
