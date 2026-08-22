@@ -1397,6 +1397,10 @@ fn mandelbrot_proof_gpu_checkpoint_compiles_from_shared_fe_math() {
     );
     for shader in &bundle.pass_wgsl {
         assert_browser_wgsl(&shader.source);
+        assert!(
+            !shader.source.contains("array<u32, 8192>"),
+            "the SPIR-V private-heap capacity must not be materialized per invocation"
+        );
     }
     let (largest_index, largest_shader) = bundle
         .pass_wgsl
