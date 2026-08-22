@@ -2,7 +2,7 @@
 
 Status: authoritative campaign burn-down
 
-Updated: 2026-08-21
+Updated: 2026-08-22
 
 Goal spine: write the math, get the kernel, keep the proof.
 
@@ -1369,6 +1369,26 @@ Legend:
   and coset LDE outputs at multiple seeds and shifts, plus invalid cosets. FRI
   can therefore consume one shared Fe transform body instead of introducing
   a field-specific transform fork.
+  The first browser placement checkpoint is now landed in
+  `mandelbrot_proof_gpu`. Commits `78b73c0b9`, `7915e22c5`, and `6173d0b3d`
+  derive typed compute invocation and repeated dispatch from Fe actor passes.
+  Commit `1b894cf17` interprets the four-column LDE and Poseidon2 commitment
+  schedule as six Fe-authored GPU passes, including 396 fixed repeated
+  commitment steps over 32 lanes. The proof actor derives the canonical 141
+  Poseidon2 parameters once on the GPU from an 80-bit Grain state represented
+  by three `u32` words, then stores their Montgomery forms in the typed proof
+  tape. There is no application constant table or host-side parameter shim.
+  The runtime parameter stream and permutation match every independent
+  Plonky3 value. Exact LDE and repeated-dispatch execution gates pass on
+  llvmpipe, the actor compilation gate passes, and the largest commitment
+  shader contracted from 213 KiB to 150 KiB. The complete graph reached
+  pipeline compilation on llvmpipe but did not finish within eight minutes,
+  so that attempt was stopped and is not execution evidence.
+  Sonatina commit `c6659dd1` supplies the structured shared-control-flow fix
+  required by the generated proof shaders. With that local backend revision,
+  the release compiler and canonical gallery cold build are green: 13 render
+  bundles, three component projections, and 92 assets. The browser card is a
+  placement and commitment checkpoint, not yet a recursive succinct proof.
   The scheduling step must now consolidate that arithmetic plan with the two
   existing, independently gated Conal strands:
   `ntt_schedule.fe` derives the `RBin<Pair, k>` stage tree and
@@ -1436,7 +1456,9 @@ fallback. The semantic receipts are:
 
 ## Immediate burn-down order
 
-1. Run the external real-GPU handoff above before beginning the proof GPU port.
+1. Run the external real-GPU handoff above and execute the new
+   `mandelbrot_proof_gpu` clean and tampered modes in Chromium. The proof GPU
+   port has begun, but real hardware remains its acceptance gate.
 2. Finish the authenticated BabyBear sparse AIR receipt: feed the now-gated
    `LD01`/`LD02` openings and public-bound `BC02` relation through the existing
    multi-query and FRI layers, then encode them through staged canonical
