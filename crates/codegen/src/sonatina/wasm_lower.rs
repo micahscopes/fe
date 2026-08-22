@@ -861,6 +861,8 @@ struct PreparedInlineBodies<'db> {
     bodies: FxHashMap<RuntimeInstance<'db>, RuntimeBody<'db>>,
     #[cfg(test)]
     residuals: FxHashMap<RuntimeInstance<'db>, (usize, usize)>,
+    #[cfg(test)]
+    unspecialized_preparations: usize,
 }
 
 /// Materialize const-backed aggregate handles in the backend's private body
@@ -1209,22 +1211,44 @@ fn prepare_inline_value_bodies<'db>(
         instance: RuntimeInstance<'db>,
         arg_shape: mir::RuntimeArgShapeKey,
         visiting: &mut HashSet<(RuntimeInstance<'db>, mir::RuntimeArgShapeKey)>,
-        done: &mut FxHashMap<(RuntimeInstance<'db>, mir::RuntimeArgShapeKey), RuntimeBody<'db>>,
+        base_done: &mut FxHashMap<RuntimeInstance<'db>, RuntimeBody<'db>>,
+        specialized_done: &mut FxHashMap<
+            (RuntimeInstance<'db>, mir::RuntimeArgShapeKey),
+            RuntimeBody<'db>,
+        >,
         specialization_work: &mut usize,
         #[cfg(test)] residual_stmt_counts: &mut FxHashMap<RuntimeInstance<'db>, (usize, usize)>,
+        #[cfg(test)] unspecialized_preparations: &mut usize,
     ) -> RuntimeBody<'db> {
         let cache_key = (instance, arg_shape);
-        if let Some(body) = done.get(&cache_key) {
+        let specialized = cache_key.1.has_known_facts();
+        if specialized {
+            if let Some(body) = specialized_done.get(&cache_key) {
+                return body.clone();
+            }
+        } else if let Some(body) = base_done.get(&instance) {
             return body.clone();
         }
         // Once the bounded amount of shape-specific work is exhausted, fail
-        // closed to the unspecialized body instead of repeatedly traversing new
-        // shapes.
-        if cache_key.1.has_known_facts() {
+        // closed to the already prepared base body instead of repeatedly
+        // traversing new shapes. Base bodies have their own unbounded
+        // one-per-instance cache; the limit applies only to additional
+        // shape-specialized variants.
+        if specialized {
             if *specialization_work >= INLINE_SPECIALIZATION_CACHE_LIMIT {
-                return instance.body(db);
+                if let Some(body) = base_done.get(&instance) {
+                    return body.clone();
+                }
+                let mut body = instance.body(db);
+                reify_inline_const_aggregates(db, &mut body);
+                return body;
             }
             *specialization_work += 1;
+        } else {
+            #[cfg(test)]
+            {
+                *unspecialized_preparations += 1;
+            }
         }
         let mut body = instance.body(db);
         reify_inline_const_aggregates(db, &mut body);
@@ -1260,10 +1284,13 @@ fn prepare_inline_value_bodies<'db>(
                     *callee,
                     callee_shape,
                     visiting,
-                    done,
+                    base_done,
+                    specialized_done,
                     specialization_work,
                     #[cfg(test)]
                     residual_stmt_counts,
+                    #[cfg(test)]
+                    unspecialized_preparations,
                 );
                 if let Some(RuntimeClass::AggregateValue { layout }) =
                     callee_body.signature.ret.clone()
@@ -1308,40 +1335,48 @@ fn prepare_inline_value_bodies<'db>(
             block.stmts = stmts;
         }
         visiting.remove(&cache_key);
-        if done.len() < INLINE_SPECIALIZATION_CACHE_LIMIT {
-            done.insert(cache_key, body.clone());
+        if specialized {
+            specialized_done.insert(cache_key, body.clone());
+        } else {
+            base_done.insert(instance, body.clone());
         }
         body
     }
 
     let mut visiting = HashSet::new();
-    let mut done = FxHashMap::default();
-    let mut roots = FxHashMap::default();
+    let mut base_done = FxHashMap::default();
+    let mut specialized_done = FxHashMap::default();
     let mut specialization_work = 0usize;
     #[cfg(test)]
     let mut residual_stmt_counts = FxHashMap::default();
+    #[cfg(test)]
+    let mut unspecialized_preparations = 0;
     for function in package.functions(db) {
         let instance = function.instance(db);
         let params = instance.body(db).signature.params.len();
         let shape =
             mir::RuntimeArgShapeKey(vec![mir::RuntimeArgFact::Unknown; params].into_boxed_slice());
-        let body = visit(
+        visit(
             db,
             package,
             instance,
             shape,
             &mut visiting,
-            &mut done,
+            &mut base_done,
+            &mut specialized_done,
             &mut specialization_work,
             #[cfg(test)]
             &mut residual_stmt_counts,
+            #[cfg(test)]
+            &mut unspecialized_preparations,
         );
-        roots.insert(instance, body);
     }
     PreparedInlineBodies {
-        bodies: roots,
+        bodies: base_done,
         #[cfg(test)]
         residuals: residual_stmt_counts,
+        #[cfg(test)]
+        unspecialized_preparations,
     }
 }
 
@@ -10886,6 +10921,43 @@ pub fn lane(request: own Request) -> u32 {
             (before, after),
             (102, 6),
             "authored nested MvT5 structural residual changed"
+        );
+    }
+
+    #[test]
+    fn inline_preparation_caches_every_unspecialized_body_past_shape_limit() {
+        let mut source = String::from("fn layer0(_ value: i32) -> i32 { value + 1 }\n");
+        for index in 1..320 {
+            source.push_str(&format!(
+                "fn layer{index}(_ value: i32) -> i32 {{ layer{}(value) }}\n",
+                index - 1,
+            ));
+        }
+        source.push_str("pub fn run(_ value: i32) -> i32 { layer319(value) }\n");
+
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///inline_base_cache_over_shape_limit.fe").unwrap();
+        db.workspace().touch(&mut db, url.clone(), Some(source));
+        let file = db.workspace().get(&db, &url).unwrap();
+        let top_mod = db.top_mod(file);
+        let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+        assert!(
+            diagnostics.is_empty(),
+            "unexpected diagnostics:\n{diagnostics}"
+        );
+        let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "run")
+            .expect("long helper chain should lower to Runtime MIR");
+        let function_count = package.functions(&db).len();
+        assert!(
+            function_count > INLINE_SPECIALIZATION_CACHE_LIMIT,
+            "fixture must cross the shape-specialization cache limit"
+        );
+
+        let prepared = prepare_inline_value_bodies(&db, &package);
+        assert_eq!(prepared.bodies.len(), function_count);
+        assert_eq!(
+            prepared.unspecialized_preparations, function_count,
+            "an unspecialized Runtime MIR body must be prepared exactly once"
         );
     }
 
