@@ -14,6 +14,20 @@ pub use bitpack
 pub struct Grain80 { state: u128, outputs: u32, available: u32 }
 impl core::marker::Copy for Grain80 {}
 
+/// GPU-portable view of the canonical 80-bit Grain state.
+///
+/// The three words hold bits 0..31, 32..63, and 64..79. Runtime generation
+/// uses only u32 operations, while `warm_word` derives this initial state from
+/// the canonical u128 CTFE construction above.
+pub struct Grain80Word {
+    low: u32,
+    middle: u32,
+    high: u32,
+    outputs: u32,
+    available: u32,
+}
+impl core::marker::Copy for Grain80Word {}
+
 const fn append_seed_bits(_ seed: u128, _ value: u128, _ width: u32) -> u128 {
     (seed << (width as u128)) | value
 }
@@ -81,6 +95,77 @@ pub const fn warm(
     grain.outputs = 0
     grain.available = 0
     grain
+}
+
+/// Construct the canonical warmed state as three GPU-native words.
+pub const fn warm_word(
+    _ field_size: u32,
+    _ width: u32,
+    _ full_rounds: u32,
+    _ partial_rounds: u32,
+) -> Grain80Word {
+    let grain = warm(field_size, width, full_rounds, partial_rounds)
+    Grain80Word {
+        low: grain.state.downcast_truncate(),
+        middle: (grain.state >> 32).downcast_truncate(),
+        high: (grain.state >> 64).downcast_truncate(),
+        outputs: 0,
+        available: 0,
+    }
+}
+
+impl Grain80Word {
+    /// Advance one canonical 18-bit LFSR block using only u32 operations.
+    #[inline(always)]
+    fn advance(mut self) {
+        let low = self.low
+        let middle = self.middle
+        let high = self.high
+        let mask: u32 = 262143
+        let tap0 = low
+        let tap13 = (low >> 13) | (middle << 19)
+        let tap23 = (low >> 23) | (middle << 9)
+        let tap38 = middle >> 6
+        let tap51 = (middle >> 19) | (high << 13)
+        let tap62 = (middle >> 30) | (high << 2)
+        let bits = (tap62 ^ tap51 ^ tap38 ^ tap23 ^ tap13 ^ tap0) & mask
+        let admitted = self_shrink_9(bits)
+        self.low = (low >> 18) | (middle << 14)
+        self.middle = (middle >> 18) | (high << 14) | (bits << 30)
+        self.high = bits >> 2
+        self.outputs = admitted.0
+        self.available = admitted.1
+    }
+
+    /// Read one big-endian self-shrunk string with at most 31 bits.
+    pub fn random_bits(mut self, _ count: u32) -> u32 {
+        let mut value: u32 = 0
+        let mut consumed: u32 = 0
+        while consumed < count {
+            if self.available == 0 {
+                self.advance()
+            }
+            let remaining = count - consumed
+            let take = if self.available < remaining { self.available } else { remaining }
+            let after = self.available - take
+            let mask = (1 << take) - 1
+            let batch = (self.outputs >> after) & mask
+            value = (value << take) | batch
+            self.outputs = self.outputs & ((1 << after) - 1)
+            self.available = after
+            consumed = consumed + take
+        }
+        value
+    }
+
+    /// Sample a canonical element of a prime below 2^31.
+    pub fn field_element(mut self, _ field_size: u32, _ modulus: u32) -> u32 {
+        let mut value = modulus
+        while value >= modulus {
+            value = self.random_bits(field_size)
+        }
+        value
+    }
 }
 
 /// Read one big-endian self-shrunk bit string.

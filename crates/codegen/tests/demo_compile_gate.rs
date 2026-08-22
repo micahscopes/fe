@@ -1378,7 +1378,7 @@ fn mandelbrot_proof_gpu_checkpoint_compiles_from_shared_fe_math() {
     assert_initial_param(&bundle, "tamper", 0.0);
     assert_eq!(bundle.manifest.resources.len(), 1);
     assert_eq!(bundle.manifest.resources[0].name, "proof");
-    assert_eq!(bundle.manifest.passes.len(), 7);
+    assert_eq!(bundle.manifest.passes.len(), 6);
     assert_eq!(
         bundle
             .manifest
@@ -1388,32 +1388,81 @@ fn mandelbrot_proof_gpu_checkpoint_compiles_from_shared_fe_math() {
             .collect::<Vec<_>>(),
         [
             "derive_witness",
-            "extend_step",
-            "extend_magnitude",
-            "extend_active",
-            "extend_terminal",
-            "commit_leaf",
+            "extend_columns",
+            "initialize_commitments",
+            "advance_commitment_rounds",
+            "finalize_commitments",
             "display",
         ]
     );
     for shader in &bundle.pass_wgsl {
         assert_browser_wgsl(&shader.source);
     }
-    let commit = &bundle.pass_wgsl[5].source;
+    let (largest_index, largest_shader) = bundle
+        .pass_wgsl
+        .iter()
+        .enumerate()
+        .map(|(index, shader)| (index, shader.source.len()))
+        .max_by_key(|(_, bytes)| *bytes)
+        .expect("proof checkpoint pass graph");
+    let shader_sizes = bundle
+        .manifest
+        .passes
+        .iter()
+        .zip(&bundle.pass_wgsl)
+        .map(|(pass, shader)| (pass.source_entry.as_str(), shader.source.len()))
+        .collect::<Vec<_>>();
+    eprintln!("proof checkpoint shader sizes: {shader_sizes:?}");
     assert!(
-        commit.contains("2013265921"),
-        "commit pass must contain the BabyBear modulus"
+        largest_shader < 160 * 1024,
+        "proof checkpoint reintroduced a browser-risk megashader in `{}`: \
+         {largest_shader} bytes; all pass sizes: {shader_sizes:?}",
+        bundle.manifest.passes[largest_index].source_entry,
+    );
+    assert!(
+        bundle.pass_wgsl[3].source.contains("2013265921"),
+        "the bounded commitment-round kernel must contain the BabyBear modulus"
     );
 
     let authored = include_str!("../../../demos/sketches/mandelbrot_proof_gpu/src/lib.fe");
     for shared_surface in [
         "EscapeAirWordStream",
+        "ContiguousRadix2Columns",
+        "RBin<Pair, 2>",
         "write_radix2_coset_lde",
-        "commit_fields",
+        "RepeatedDispatch as Repeat",
+        "Poseidon2WorkgroupSchedule",
+        "Poseidon2ParameterStream",
+        "poseidon2_workgroup_lane_with_round_constant",
+        "Poseidon2FieldSponge",
     ] {
         assert!(
             authored.contains(shared_surface),
             "browser checkpoint must consume the shared Fe `{shared_surface}` surface"
+        );
+    }
+    assert_eq!(bundle.manifest.passes[1].layout.workgroup_size, [4, 1, 1]);
+    assert_eq!(bundle.manifest.passes[1].dispatch, Some([1, 1, 1]));
+    let lde_trap = bundle.manifest.passes[1]
+        .layout
+        .bindings
+        .iter()
+        .find(|binding| binding.name == "trap")
+        .expect("parallel LDE pass uses checked private arrays");
+    assert_eq!(lde_trap.span, 4 * 4);
+    let commitment = &bundle.manifest.passes[3];
+    assert_eq!(commitment.layout.workgroup_size, [32, 1, 1]);
+    assert_eq!(commitment.dispatch, Some([1, 1, 1]));
+    assert_eq!(commitment.repeat, 396);
+    for manual in [
+        "fn extend_step",
+        "fn extend_magnitude",
+        "fn extend_active",
+        "fn extend_terminal",
+    ] {
+        assert!(
+            !authored.contains(manual),
+            "parallel LDE schedule regressed to manual pass `{manual}`"
         );
     }
 }

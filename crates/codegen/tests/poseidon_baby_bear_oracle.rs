@@ -205,6 +205,17 @@ fn fe_derived_poseidon2_matches_plonky3_parameters_and_permutations() {
             vec![expected],
             "round constant {index} differs from Plonky3",
         );
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "runtime_derived_parameter",
+                &[index as u32],
+                1,
+            ),
+            vec![expected],
+            "GPU-native round constant {index} differs from Plonky3",
+        );
     }
 
     let mut sequential = [0u32; WIDTH];
@@ -259,6 +270,17 @@ fn fe_derived_poseidon2_matches_plonky3_parameters_and_permutations() {
             call(&mut store, &instance, "poseidon2_permute16", &input, WIDTH,),
             expected,
             "Fe Poseidon2 differs from Plonky3 for {input:?}",
+        );
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "poseidon2_workgroup_permute16",
+                &input,
+                WIDTH,
+            ),
+            expected,
+            "Fe workgroup schedule differs from Plonky3 for {input:?}",
         );
     }
 }
@@ -503,6 +525,21 @@ fn bounded_bits_are_injective_and_commit_with_length_and_domain() {
         },
         "checkpointed field sponge differs from the independent Plonky3 model",
     );
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "fields17_round_stepped",
+            &fields17,
+            9,
+        ),
+        {
+            let mut expected = vec![1];
+            expected.extend(reference_field_commitment(b"BV01", &fields17));
+            expected
+        },
+        "one-round field sponge differs from the independent Plonky3 model",
+    );
     for index in 0..fields17.len() {
         let mut mutated = fields17;
         mutated[index] += 1;
@@ -517,6 +554,10 @@ fn bounded_bits_are_injective_and_commit_with_length_and_domain() {
         let mut staged_expected = vec![1];
         staged_expected.extend(reference_field_commitment(b"BV01", &mutated));
         assert_eq!(staged, staged_expected);
+        assert_eq!(
+            call(&mut store, &instance, "fields17_round_stepped", &mutated, 9,),
+            staged_expected,
+        );
     }
 
     let extensions = [1, 2, 3, 4, 101, 103, 107, 109];

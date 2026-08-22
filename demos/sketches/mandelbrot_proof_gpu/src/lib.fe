@@ -3,20 +3,28 @@
 //! The compute pass derives a four-row Q12 Mandelbrot witness through the
 //! production proof kernel, interprets the shared generic radix-2 plan as four
 //! 4-to-16 BabyBear coset LDEs, and commits the resulting 64 field values with
-//! the production Poseidon2 sponge. A Fe-authored mutation mode changes one LDE
+//! the production Poseidon2 sponge. Two commitments by sixteen field lanes
+//! advance through one bounded workgroup kernel. Its Fe dispatch type
+//! derives the exact ordered repetition count, so browser WebGPU implementations
+//! never receive one crash-shaped megashader. A Fe-authored mutation mode changes one LDE
 //! value after the clean root is fixed and requires the second commitment to
 //! differ. The fragment pass visualizes the retained codeword and status words.
 //!
-//! This is deliberately labeled a scalar placement checkpoint. It executes as
-//! one real WebGPU invocation today. It is not yet the Conal workgroup
-//! interpreter, an authenticated FRI receipt, or a recursive proof.
+//! This is a mixed placement checkpoint. The four independent LDE columns use
+//! the first balanced workgroup-map interpretation of a Conal schedule type.
+//! The paired commitment states are a second workgroup-map interpretation.
+//! Witness generation and final comparison remain scalar passes. This is not
+//! yet a shared-memory butterfly interpreter, an authenticated FRI receipt, or
+//! a recursive proof.
 
 use std::webgpu::{
+    ComputeInvocation,
     ComputeSurface as Prove,
     FixedDispatch as Once,
     FragmentSurface as Display,
     GpuProgram as Program,
     ResponsiveBacking,
+    RepeatedDispatch as Repeat,
     StandardSurfaceRecovery,
     StorageBuffer as ProofTape,
     SurfaceQuality,
@@ -24,12 +32,29 @@ use std::webgpu::{
     Workgroup as Threads,
     WebGpuBackend,
 }
+use std::conal::{BalancedBinarySchedule, Pair, RBin}
 use std::web::view::{Extent, Param, Surface}
 use fmath::{from_i32, to_i32}
 use mandelbrot_proof_kernel::{EscapeAirWordStream, EscapesByQ12}
-use poseidon_baby_bear::{commit_fields, Poseidon2Digest, Poseidon2FieldDomain}
-use precision::baby_bear::BabyBear
-use precision::polynomial::write_radix2_coset_lde
+use poseidon_baby_bear::{
+    ROUND_CONSTANT_COUNT,
+    SPONGE_RATE,
+    WIDTH as POSEIDON_LANES,
+    Poseidon2Digest,
+    Poseidon2FieldDomain,
+    Poseidon2FieldPermutation,
+    Poseidon2FieldSponge,
+    Poseidon2ParameterStream,
+    Poseidon2WorkgroupPlan,
+    Poseidon2WorkgroupSchedule,
+    poseidon2_workgroup_destination,
+    poseidon2_round_constant_index,
+    poseidon2_workgroup_lane_with_round_constant,
+}
+use precision::baby_bear::{BabyBear, BABY_BEAR_MODULUS}
+use precision::polynomial::{
+    ContiguousRadix2Columns, Radix2ColumnPlan, write_radix2_coset_lde,
+}
 
 const TRACE: usize = 4
 const LDE: usize = 16
@@ -50,7 +75,56 @@ const TRACE_COLOR: u32 = 103
 const LDE_COLOR: u32 = 104
 const ROOT_COLOR: u32 = 105
 const MODE_COLOR: u32 = 106
-const PROOF_WORDS: usize = 107
+const CLEAN_COMMIT_STATE: u32 = 107
+const COMMIT_STATE_WORDS: usize = 80
+const COMMIT_PRIMARY: u32 = 0
+const COMMIT_SECONDARY: u32 = 16
+const COMMIT_CURSOR: u32 = 32
+const COMMIT_BLOCK: u32 = 48
+const COMMIT_VALID: u32 = 64
+const OBSERVED_COMMIT_STATE: u32 = CLEAN_COMMIT_STATE + COMMIT_STATE_WORDS.downcast_truncate()
+const PARAMETER_START: u32 = 267
+const PROOF_WORDS: usize = 267 + ROUND_CONSTANT_COUNT
+
+type ProofLdeDependencies = RBin<Pair, 2>
+type ProofLdePlan = ContiguousRadix2Columns<ProofLdeDependencies, TRACE, LDE>
+const LDE_TASKS: usize = <ProofLdePlan as Radix2ColumnPlan>::TASKS
+static_assert(LDE_TASKS == COLUMN_COUNT)
+
+type CommitmentDependencies = RBin<Pair, 1>
+const COMMITMENT_LANES: usize =
+    <CommitmentDependencies as BalancedBinarySchedule>::LEAVES
+const COMMITMENT_FIELD_LANES: usize =
+    <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::LANES
+const COMMITMENT_WORKGROUP_LANES: usize =
+    COMMITMENT_LANES * COMMITMENT_FIELD_LANES
+const COMMITMENT_MESSAGE_FIELDS: usize = LDE_WORDS + 2
+const COMMITMENT_PERMUTATIONS: usize =
+    (COMMITMENT_MESSAGE_FIELDS + SPONGE_RATE - 1) / SPONGE_RATE
+const COMMITMENT_STEPS_PER_PERMUTATION: usize =
+    <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::STEPS
+const COMMITMENT_SCHEDULE_STEPS: usize =
+    COMMITMENT_PERMUTATIONS * COMMITMENT_STEPS_PER_PERMUTATION
+const FIRST_BLOCK_FIELDS: usize = SPONGE_RATE - 2
+const COMPLETE_DATA_BLOCKS: usize = (LDE_WORDS - FIRST_BLOCK_FIELDS) / SPONGE_RATE
+const FINAL_FULL_BLOCK: usize = COMPLETE_DATA_BLOCKS
+const FINAL_PARTIAL_BLOCK: usize = COMMITMENT_PERMUTATIONS - 1
+const DONE_BLOCK: usize = COMMITMENT_PERMUTATIONS
+const TAMPER_LDE_FIELD: usize = 17
+const TAMPER_PRECEDING_BLOCK: usize =
+    (TAMPER_LDE_FIELD - FIRST_BLOCK_FIELDS) / SPONGE_RATE
+const TAMPER_NEXT_BLOCK_FIELD: usize =
+    (TAMPER_LDE_FIELD - FIRST_BLOCK_FIELDS) % SPONGE_RATE
+static_assert(COMMITMENT_LANES == 2)
+static_assert(COMMITMENT_FIELD_LANES == 16)
+static_assert(COMMITMENT_WORKGROUP_LANES == 32)
+static_assert(COMMITMENT_PERMUTATIONS == 9)
+static_assert(COMMITMENT_STEPS_PER_PERMUTATION == 44)
+static_assert(COMMITMENT_SCHEDULE_STEPS == 396)
+static_assert(FIRST_BLOCK_FIELDS == 6)
+static_assert(SPONGE_RATE == 8)
+static_assert(TAMPER_PRECEDING_BLOCK == 1)
+static_assert(TAMPER_NEXT_BLOCK_FIELD == 3)
 
 struct MandelbrotGpuLdeV1 {}
 impl Poseidon2FieldDomain for MandelbrotGpuLdeV1 {
@@ -63,6 +137,7 @@ const fn proof_params() -> ProofParams {
     ProofParams { tamper: Param::range(min: 0.0, max: 1.0, init: 0.0), res: Param::extent_x() }
 }
 
+#[inline(always)]
 fn store_lde_column(_ tape: ProofTape<u32, PROOF_WORDS>, _ column: [BabyBear; LDE], _ offset: u32) {
     let mut index: usize = 0
     while index < LDE {
@@ -74,14 +149,19 @@ fn store_lde_column(_ tape: ProofTape<u32, PROOF_WORDS>, _ column: [BabyBear; LD
     }
 }
 
-fn extend_column<const BASE: usize, const OUTPUT: usize>(
+#[inline(always)]
+fn extend_column(
     _ tape: ProofTape<u32, PROOF_WORDS>,
+    _ base_offset: u32,
+    _ output_offset: u32,
 ) -> bool {
     let zero = BabyBear::zero()
     let mut base = [zero; TRACE]
     let mut row: usize = 0
     while row < TRACE {
-        base[row] = BabyBear::from_u32(tape.load(index: (BASE + row).downcast_truncate()))
+        base[row] = BabyBear::from_u32(tape.load(
+            index: base_offset + row.downcast_truncate(),
+        ))
         row = row + 1
     }
 
@@ -91,7 +171,7 @@ fn extend_column<const BASE: usize, const OUTPUT: usize>(
         BabyBear::from_u32(7),
         mut extended,
     )
-    store_lde_column(tape, extended, OUTPUT.downcast_truncate())
+    store_lde_column(tape, extended, output_offset)
     ok
 }
 
@@ -109,6 +189,105 @@ fn status_word(_ ok: bool, _ tampered: bool) -> u32 {
             packed_rgba(87, 117, 226).downcast_truncate()
         }
     }
+}
+
+#[inline(always)]
+fn load_lde_fields<const N: usize>(
+    _ tape: ProofTape<u32, PROOF_WORDS>,
+    _ start: u32,
+) -> [BabyBear; N]
+    where N <= 2147483648
+{
+    let zero = BabyBear::zero()
+    let mut fields = [zero; N]
+    let count = fields.len()
+    let mut index: usize = 0
+    while index < count {
+        fields[index] = BabyBear::from_u32(tape.load(
+            index: LDE_START + start + index.downcast_truncate(),
+        ))
+        index = index + 1
+    }
+    fields
+}
+
+#[inline(always)]
+fn load_commitment_buffer(
+    _ tape: ProofTape<u32, PROOF_WORDS>,
+    _ state_offset: u32,
+    _ buffer_offset: u32,
+) -> [u32; POSEIDON_LANES] {
+    let mut lanes = [0; 16]
+    let mut lane: usize = 0
+    while lane < POSEIDON_LANES {
+        lanes[lane] = tape.load(
+            index: state_offset + buffer_offset + lane.downcast_truncate(),
+        )
+        lane = lane + 1
+    }
+    lanes
+}
+
+#[inline(always)]
+fn store_initial_commitment(
+    _ tape: ProofTape<u32, PROOF_WORDS>,
+    _ offset: u32,
+    _ permutation: ref Poseidon2FieldPermutation,
+) {
+    let mut lane: usize = 0
+    while lane < POSEIDON_LANES {
+        let lane_word: u32 = lane.downcast_truncate()
+        tape.store(
+            index: offset + COMMIT_PRIMARY + lane_word,
+            value: permutation.lane_word(lane: lane_word),
+        )
+        tape.store(index: offset + COMMIT_SECONDARY + lane_word, value: 0)
+        tape.store(index: offset + COMMIT_CURSOR + lane_word, value: 0)
+        tape.store(index: offset + COMMIT_BLOCK + lane_word, value: 0)
+        tape.store(
+            index: offset + COMMIT_VALID + lane_word,
+            value: if permutation.is_valid() { 1 } else { 0 },
+        )
+        lane = lane + 1
+    }
+}
+
+#[inline(always)]
+fn commitment_state_valid(
+    _ tape: ProofTape<u32, PROOF_WORDS>,
+    _ offset: u32,
+) -> bool {
+    let mut lane: usize = 0
+    while lane < POSEIDON_LANES {
+        let lane_word: u32 = lane.downcast_truncate()
+        if tape.load(index: offset + COMMIT_CURSOR + lane_word) != 0 {
+            return false
+        }
+        if tape.load(index: offset + COMMIT_BLOCK + lane_word)
+            != DONE_BLOCK.downcast_truncate()
+        {
+            return false
+        }
+        if tape.load(index: offset + COMMIT_VALID + lane_word) != 1 {
+            return false
+        }
+        lane = lane + 1
+    }
+    true
+}
+
+#[inline(always)]
+fn load_digest(
+    _ tape: ProofTape<u32, PROOF_WORDS>,
+    _ offset: u32,
+) -> Poseidon2Digest {
+    let mut words = [0; DIGEST_FIELDS]
+    let mut field: usize = 0
+    while field < DIGEST_FIELDS {
+        words[field] = tape.load(index: offset + field.downcast_truncate())
+        field = field + 1
+    }
+    Poseidon2Digest::from_u32s(words)
 }
 
 actor MandelbrotProofGpuCheckpoint uses (
@@ -165,64 +344,220 @@ actor MandelbrotProofGpuCheckpoint uses (
         let trace_valid = stream.is_valid()
             && stream.is_terminal()
         self.proof.store(index: TRACE_VALID, value: if trace_valid { 1 } else { 0 })
-    }
 
-    fn extend_step(self) uses (Prove<Threads<1, 1, 1>, Once<1, 1, 1>>) {
-        let ok = extend_column<0, 16>(self.proof)
-        self.proof.store(index: STEP_LDE_VALID, value: if ok { 1 } else { 0 })
-    }
-
-    fn extend_magnitude(self) uses (Prove<Threads<1, 1, 1>, Once<1, 1, 1>>) {
-        let ok = extend_column<4, 32>(self.proof)
-        self.proof.store(index: MAGNITUDE_LDE_VALID, value: if ok { 1 } else { 0 })
-    }
-
-    fn extend_active(self) uses (Prove<Threads<1, 1, 1>, Once<1, 1, 1>>) {
-        let ok = extend_column<8, 48>(self.proof)
-        self.proof.store(index: ACTIVE_LDE_VALID, value: if ok { 1 } else { 0 })
-    }
-
-    fn extend_terminal(self) uses (Prove<Threads<1, 1, 1>, Once<1, 1, 1>>) {
-        let ok = extend_column<12, 64>(self.proof)
-        self.proof.store(index: TERMINAL_LDE_VALID, value: if ok { 1 } else { 0 })
-    }
-
-    fn commit_leaf(self) uses (Prove<Threads<1, 1, 1>, Once<1, 1, 1>>) {
-        let zero = BabyBear::zero()
-        let mut fields = [zero; LDE_WORDS]
-        let mut index: usize = 0
-        while index < LDE_WORDS {
-            fields[index] = BabyBear::from_u32(self.proof.load(
-                index: LDE_START + index.downcast_truncate(),
-            ))
-            index = index + 1
+        // Derive the canonical Grain parameter stream once on the GPU. The
+        // repeated proof schedule reads this typed storage region, so no round
+        // invocation materializes the full CTFE aggregate in its shader.
+        let mut parameters = Poseidon2ParameterStream::begin()
+        let mut parameter: usize = 0
+        while parameter < ROUND_CONSTANT_COUNT {
+            self.proof.store(
+                index: PARAMETER_START + parameter.downcast_truncate(),
+                value: parameters.next(),
+            )
+            parameter = parameter + 1
         }
-        let clean_root = commit_fields<MandelbrotGpuLdeV1, LDE_WORDS>(fields)
+    }
+
+    fn extend_columns(self, invocation: ComputeInvocation)
+        uses (Prove<Threads<LDE_TASKS, 1, 1>, Once<1, 1, 1>>)
+    {
+        let task = <ProofLdePlan as Radix2ColumnPlan>::task(invocation.local.x)
+        let ok = extend_column(
+            tape: self.proof,
+            base_offset: task.input_offset,
+            output_offset: LDE_START + task.output_offset,
+        )
+        self.proof.store(
+            index: STEP_LDE_VALID + task.index,
+            value: if ok { 1 } else { 0 },
+        )
+    }
+
+    fn initialize_commitments(self) uses (Prove<Threads<1, 1, 1>, Once<1, 1, 1>>) {
+        // The static assertions above tie these concrete array types to the
+        // sponge-derived rate while Fe const-alias generic arguments mature.
+        let fields = load_lde_fields<6>(tape: self.proof, start: 0)
+        let sponge = Poseidon2FieldSponge::begin<MandelbrotGpuLdeV1>(
+            expected: LDE_WORDS.downcast_truncate(),
+        )
+        let permutation = sponge.begin_permutation<6>(fields: ref fields)
+        store_initial_commitment(
+            tape: self.proof,
+            offset: CLEAN_COMMIT_STATE,
+            permutation: ref permutation,
+        )
+        store_initial_commitment(
+            tape: self.proof,
+            offset: OBSERVED_COMMIT_STATE,
+            permutation: ref permutation,
+        )
+    }
+
+    fn advance_commitment_rounds(self, invocation: ComputeInvocation)
+        uses (
+            Prove<
+                Threads<COMMITMENT_WORKGROUP_LANES, 1, 1>,
+                Repeat<1, 1, 1, COMMITMENT_SCHEDULE_STEPS>,
+            >
+        )
+    {
+        let poseidon_lanes: u32 = POSEIDON_LANES.downcast_truncate()
+        let commitment_lane = invocation.local.x / poseidon_lanes
+        let field_lane = invocation.local.x % poseidon_lanes
+        let observed = commitment_lane == 1
+        let state_offset = if observed {
+            OBSERVED_COMMIT_STATE
+        } else {
+            CLEAN_COMMIT_STATE
+        }
+        let cursor_offset = state_offset + COMMIT_CURSOR + field_lane
+        let block_offset = state_offset + COMMIT_BLOCK + field_lane
+        let valid_offset = state_offset + COMMIT_VALID + field_lane
+        let cursor = self.proof.load(index: cursor_offset)
+        let block = self.proof.load(index: block_offset)
+        let mut valid = self.proof.load(index: valid_offset)
+        let primary = load_commitment_buffer(
+            tape: self.proof,
+            state_offset: state_offset,
+            buffer_offset: COMMIT_PRIMARY,
+        )
+        let secondary = load_commitment_buffer(
+            tape: self.proof,
+            state_offset: state_offset,
+            buffer_offset: COMMIT_SECONDARY,
+        )
+        let mut checked: usize = 0
+        while checked < POSEIDON_LANES {
+            if primary[checked] >= BABY_BEAR_MODULUS { valid = 0 }
+            if secondary[checked] >= BABY_BEAR_MODULUS { valid = 0 }
+            checked = checked + 1
+        }
+
+        let transition =
+            <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::TRANSITION
+        if cursor < transition {
+            let destination = poseidon2_workgroup_destination(cursor)
+            let output_offset = if destination == 0 {
+                COMMIT_PRIMARY
+            } else {
+                COMMIT_SECONDARY
+            }
+            let mut round_constant: u32 = 0
+            if cursor != 0 && ((cursor - 1) & 1) == 0 {
+                let phase = (cursor - 1) / 2
+                let index = poseidon2_round_constant_index(phase, field_lane)
+                round_constant = self.proof.load(index: PARAMETER_START + index)
+            }
+            let value = if valid == 1 {
+                poseidon2_workgroup_lane_with_round_constant(
+                    ref primary,
+                    ref secondary,
+                    cursor,
+                    field_lane,
+                    round_constant,
+                )
+            } else {
+                0
+            }
+            self.proof.store(
+                index: state_offset + output_offset + field_lane,
+                value: value,
+            )
+            self.proof.store(index: cursor_offset, value: cursor + 1)
+            self.proof.store(index: block_offset, value: block)
+            self.proof.store(index: valid_offset, value: valid)
+        } else if cursor == transition && block < FINAL_FULL_BLOCK.downcast_truncate() {
+            let first_block_fields: u32 = FIRST_BLOCK_FIELDS.downcast_truncate()
+            let sponge_rate: u32 = SPONGE_RATE.downcast_truncate()
+            let start = first_block_fields + block * sponge_rate
+            let mut value = secondary[field_lane as usize]
+            if field_lane < sponge_rate {
+                value = BabyBear::from_u32(self.proof.load(
+                    index: LDE_START + start + field_lane,
+                )).to_montgomery_word()
+            }
+            if observed && self.tamper >= 0.5
+                && block == TAMPER_PRECEDING_BLOCK.downcast_truncate()
+                && field_lane == TAMPER_NEXT_BLOCK_FIELD.downcast_truncate()
+            {
+                value = (BabyBear::from_montgomery_word(value) + BabyBear::one())
+                    .to_montgomery_word()
+            }
+            self.proof.store(
+                index: state_offset + COMMIT_PRIMARY + field_lane,
+                value: if valid == 1 { value } else { 0 },
+            )
+            self.proof.store(index: cursor_offset, value: 0)
+            self.proof.store(index: block_offset, value: block + 1)
+            self.proof.store(index: valid_offset, value: valid)
+        } else if cursor == transition && block == FINAL_FULL_BLOCK.downcast_truncate() {
+            let mut value = secondary[field_lane as usize]
+            if field_lane < 2 {
+                value = BabyBear::from_u32(self.proof.load(
+                    index: LDE_START + (LDE_WORDS - 2).downcast_truncate() + field_lane,
+                )).to_montgomery_word()
+            }
+            self.proof.store(
+                index: state_offset + COMMIT_PRIMARY + field_lane,
+                value: if valid == 1 { value } else { 0 },
+            )
+            self.proof.store(index: cursor_offset, value: 0)
+            self.proof.store(
+                index: block_offset,
+                value: FINAL_PARTIAL_BLOCK.downcast_truncate(),
+            )
+            self.proof.store(index: valid_offset, value: valid)
+        } else if cursor == transition && block == FINAL_PARTIAL_BLOCK.downcast_truncate() {
+            if field_lane < DIGEST_FIELDS.downcast_truncate() {
+                self.proof.store(
+                    index: (if observed { OBSERVED_ROOT } else { CLEAN_ROOT }) + field_lane,
+                    value: BabyBear::from_montgomery_word(
+                        secondary[field_lane as usize]
+                    ).to_u32(),
+                )
+            }
+            self.proof.store(
+                index: state_offset + COMMIT_PRIMARY + field_lane,
+                value: secondary[field_lane as usize],
+            )
+            self.proof.store(index: cursor_offset, value: 0)
+            self.proof.store(
+                index: block_offset,
+                value: if valid == 1 {
+                    DONE_BLOCK.downcast_truncate()
+                } else {
+                    0
+                },
+            )
+            self.proof.store(index: valid_offset, value: valid)
+        } else {
+            self.proof.store(index: cursor_offset, value: 0)
+            self.proof.store(index: block_offset, value: 0)
+            self.proof.store(index: valid_offset, value: 0)
+        }
+    }
+
+    fn finalize_commitments(self) uses (Prove<Threads<1, 1, 1>, Once<1, 1, 1>>) {
+        let clean_root = load_digest(tape: self.proof, offset: CLEAN_ROOT)
+        let observed_root = load_digest(tape: self.proof, offset: OBSERVED_ROOT)
         let tampered = self.tamper >= 0.5
-        if tampered {
-            fields[17] = fields[17] + BabyBear::one()
-        }
-        let observed_root = commit_fields<MandelbrotGpuLdeV1, LDE_WORDS>(fields)
         let roots_equal = clean_root.equals(observed_root)
         let trace_valid = stored_flag(self.proof, TRACE_VALID)
         let lde_valid = all_lde_columns_valid(self.proof)
-        let root_nonzero = !clean_root.equals(Poseidon2Digest::zero())
-        let mode_correct = trace_valid && lde_valid && (
+        let commitments_valid = commitment_state_valid(
+            tape: self.proof,
+            offset: CLEAN_COMMIT_STATE,
+        ) && commitment_state_valid(
+            tape: self.proof,
+            offset: OBSERVED_COMMIT_STATE,
+        )
+        let root_nonzero = commitments_valid
+            && !clean_root.equals(Poseidon2Digest::zero())
+        let mode_correct = trace_valid && lde_valid && commitments_valid && (
             if tampered { !roots_equal } else { roots_equal }
         )
 
-        index = 0
-        while index < DIGEST_FIELDS {
-            self.proof.store(
-                index: CLEAN_ROOT + index.downcast_truncate(),
-                value: clean_root.field(index.downcast_truncate()).to_u32(),
-            )
-            self.proof.store(
-                index: OBSERVED_ROOT + index.downcast_truncate(),
-                value: observed_root.field(index.downcast_truncate()).to_u32(),
-            )
-            index = index + 1
-        }
         self.proof.store(index: ROOTS_EQUAL, value: if roots_equal { 1 } else { 0 })
         self.proof.store(index: MODE_CORRECT, value: if mode_correct { 1 } else { 0 })
         self.proof.store(index: TRACE_COLOR, value: status_word(trace_valid, false))

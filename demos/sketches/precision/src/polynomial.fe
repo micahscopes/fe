@@ -12,6 +12,7 @@ use super::field::{
 use super::word_field::{WordField, WordTwoAdicPrime}
 use super::binomial_extension::{BinomialExtension4, WordBinomialExtension4}
 use core::marker::Copy
+use std::conal::BalancedBinarySchedule
 
 const fn radix2_log_unchecked<const N: usize>() -> u32 {
     let mut remaining: usize = N
@@ -42,6 +43,51 @@ pub trait Radix2Field: Copy {
     fn radix2_pow(self, _ exponent: u32) -> Self
     fn radix2_inverse_or_zero(self) -> Self
     fn radix2_root(_ log_order: u32) -> Self
+}
+
+/// One independent column transform in a balanced radix-2 placement plan.
+/// Offsets are relative to the caller's base trace and LDE regions, keeping
+/// storage ownership outside the arithmetic library.
+pub struct Radix2ColumnTask {
+    pub index: u32,
+    pub input_offset: u32,
+    pub output_offset: u32,
+}
+
+impl Copy for Radix2ColumnTask {}
+
+/// A placement-neutral batch of equal-shaped radix-2 column transforms.
+/// `Dependencies` is the schedule tree and therefore owns the task count.
+pub trait Radix2ColumnPlan {
+    type Dependencies: BalancedBinarySchedule
+    const TASKS: usize
+    fn task(_ index: u32) -> Radix2ColumnTask
+}
+
+/// Interpret every leaf of `S` as one contiguous input column and one
+/// contiguous output column. Scalar, packed, and WebGPU placements consume the
+/// same offsets; only their assignment of tasks to execution lanes differs.
+pub struct ContiguousRadix2Columns<
+    S: BalancedBinarySchedule,
+    const INPUT_ROWS: usize,
+    const OUTPUT_ROWS: usize,
+> {}
+
+impl<
+    S: BalancedBinarySchedule,
+    const INPUT_ROWS: usize,
+    const OUTPUT_ROWS: usize,
+> Radix2ColumnPlan for ContiguousRadix2Columns<S, INPUT_ROWS, OUTPUT_ROWS> {
+    type Dependencies = S
+    const TASKS: usize = S::LEAVES
+
+    fn task(_ index: u32) -> Radix2ColumnTask {
+        Radix2ColumnTask {
+            index: index,
+            input_offset: index * INPUT_ROWS.downcast_truncate(),
+            output_offset: index * OUTPUT_ROWS.downcast_truncate(),
+        }
+    }
 }
 
 /// Numerators grouped by the four zerofiers shared by transition AIRs.

@@ -6,6 +6,8 @@ use poseidon_baby_bear::{
     Poseidon2FieldDomain,
     Poseidon2FieldPermutation,
     Poseidon2FieldSponge,
+    Poseidon2WorkgroupPlan,
+    Poseidon2WorkgroupSchedule,
     commit_canonical,
     commit_ext4_fields,
     commit_fields,
@@ -15,6 +17,9 @@ use poseidon_baby_bear::{
     place_first_full_rounds,
     place_partial_rounds,
     permute16,
+    poseidon2_workgroup_destination,
+    poseidon2_workgroup_lane,
+    runtime_parameter_plain,
 }
 use precision::baby_bear::{BabyBear, BabyBearExt4, BabyBearModulus, BABY_BEAR_MODULUS}
 use precision::word_field_encoding::{PackedFieldBits, pack_bounded_words}
@@ -77,6 +82,10 @@ pub fn canonical7_commitment(
 
 pub fn derived_parameter(_ index: u32) -> u32 { parameter_plain(index) }
 
+pub fn runtime_derived_parameter(_ index: u32) -> u32 {
+    runtime_parameter_plain(index)
+}
+
 fn permuted(
     _ a0: u32, _ a1: u32, _ a2: u32, _ a3: u32,
     _ a4: u32, _ a5: u32, _ a6: u32, _ a7: u32,
@@ -105,6 +114,80 @@ pub fn poseidon2_permute16(
     u32, u32, u32, u32, u32, u32, u32, u32,
 ) {
     let output = permuted(
+        a0, a1, a2, a3, a4, a5, a6, a7,
+        a8, a9, a10, a11, a12, a13, a14, a15,
+    )
+    (
+        output[0].to_u32(), output[1].to_u32(),
+        output[2].to_u32(), output[3].to_u32(),
+        output[4].to_u32(), output[5].to_u32(),
+        output[6].to_u32(), output[7].to_u32(),
+        output[8].to_u32(), output[9].to_u32(),
+        output[10].to_u32(), output[11].to_u32(),
+        output[12].to_u32(), output[13].to_u32(),
+        output[14].to_u32(), output[15].to_u32(),
+    )
+}
+
+fn workgroup_permuted(
+    _ a0: u32, _ a1: u32, _ a2: u32, _ a3: u32,
+    _ a4: u32, _ a5: u32, _ a6: u32, _ a7: u32,
+    _ a8: u32, _ a9: u32, _ a10: u32, _ a11: u32,
+    _ a12: u32, _ a13: u32, _ a14: u32, _ a15: u32,
+) -> [BabyBear; 16] {
+    let inputs = [
+        a0, a1, a2, a3, a4, a5, a6, a7,
+        a8, a9, a10, a11, a12, a13, a14, a15,
+    ]
+    let mut primary = [0; 16]
+    let mut secondary = [0; 16]
+    let mut lane: usize = 0
+    while lane < 16 {
+        primary[lane] = BabyBear::from_u32(inputs[lane]).to_montgomery_word()
+        lane = lane + 1
+    }
+
+    let transition = <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::TRANSITION
+    let mut step: u32 = 0
+    while step < transition {
+        let destination = poseidon2_workgroup_destination(step)
+        let mut field_lane: u32 = 0
+        while field_lane < 16 {
+            let value = poseidon2_workgroup_lane(
+                ref primary,
+                ref secondary,
+                step,
+                field_lane,
+            )
+            if destination == 0 {
+                primary[field_lane as usize] = value
+            } else {
+                secondary[field_lane as usize] = value
+            }
+            field_lane = field_lane + 1
+        }
+        step = step + 1
+    }
+
+    let mut output = [BabyBear::zero(); 16]
+    lane = 0
+    while lane < 16 {
+        output[lane] = BabyBear::from_montgomery_word(secondary[lane])
+        lane = lane + 1
+    }
+    output
+}
+
+pub fn poseidon2_workgroup_permute16(
+    _ a0: u32, _ a1: u32, _ a2: u32, _ a3: u32,
+    _ a4: u32, _ a5: u32, _ a6: u32, _ a7: u32,
+    _ a8: u32, _ a9: u32, _ a10: u32, _ a11: u32,
+    _ a12: u32, _ a13: u32, _ a14: u32, _ a15: u32,
+) -> (
+    u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    let output = workgroup_permuted(
         a0, a1, a2, a3, a4, a5, a6, a7,
         a8, a9, a10, a11, a12, a13, a14, a15,
     )
@@ -330,6 +413,16 @@ fn execute_fields17_permutation(
     scheduled.complete()
 }
 
+fn execute_fields17_round_steps(
+    _ permutation: own Poseidon2FieldPermutation,
+) -> Poseidon2FieldSponge {
+    let mut scheduled = permutation
+    while scheduled.phase() < 21 {
+        scheduled.advance_round()
+    }
+    scheduled.complete()
+}
+
 /// The same field commitment as `fields17`, checkpointed through plain words
 /// between sponge blocks and every bounded permutation region.
 pub fn fields17_staged(
@@ -365,6 +458,51 @@ pub fn fields17_staged(
     sponge = restore_fields17_sponge(sponge, rate: 3, written: 17)
     let final_permutation = sponge.begin_finish_permutation()
     sponge = execute_fields17_permutation(final_permutation, written: 17)
+    let commitment = sponge.finish()
+    let digest = commitment.digest()
+    (
+        if commitment.is_valid() { 1 } else { 0 },
+        digest.field(0).to_u32(), digest.field(1).to_u32(),
+        digest.field(2).to_u32(), digest.field(3).to_u32(),
+        digest.field(4).to_u32(), digest.field(5).to_u32(),
+        digest.field(6).to_u32(), digest.field(7).to_u32(),
+    )
+}
+
+/// The same commitment interpreted through the one-round scheduling kernel.
+pub fn fields17_round_stepped(
+    _ f0: u32, _ f1: u32, _ f2: u32, _ f3: u32,
+    _ f4: u32, _ f5: u32, _ f6: u32, _ f7: u32,
+    _ f8: u32, _ f9: u32, _ f10: u32, _ f11: u32,
+    _ f12: u32, _ f13: u32, _ f14: u32, _ f15: u32,
+    _ f16: u32,
+) -> (u32, u32, u32, u32, u32, u32, u32, u32, u32) {
+    let mut sponge = Poseidon2FieldSponge::begin<FieldVectorTestDomain>(expected: 17)
+    let first = [
+        BabyBear::from_u32(f0), BabyBear::from_u32(f1),
+        BabyBear::from_u32(f2), BabyBear::from_u32(f3),
+        BabyBear::from_u32(f4), BabyBear::from_u32(f5),
+    ]
+    let first_permutation = sponge.begin_permutation<6>(fields: ref first)
+    sponge = execute_fields17_round_steps(first_permutation)
+    sponge = restore_fields17_sponge(sponge, rate: 0, written: 6)
+    let middle = [
+        BabyBear::from_u32(f6), BabyBear::from_u32(f7),
+        BabyBear::from_u32(f8), BabyBear::from_u32(f9),
+        BabyBear::from_u32(f10), BabyBear::from_u32(f11),
+        BabyBear::from_u32(f12), BabyBear::from_u32(f13),
+    ]
+    let middle_permutation = sponge.begin_permutation<8>(fields: ref middle)
+    sponge = execute_fields17_round_steps(middle_permutation)
+    sponge = restore_fields17_sponge(sponge, rate: 0, written: 14)
+    let last = [
+        BabyBear::from_u32(f14), BabyBear::from_u32(f15),
+        BabyBear::from_u32(f16),
+    ]
+    sponge.absorb<3>(fields: ref last)
+    sponge = restore_fields17_sponge(sponge, rate: 3, written: 17)
+    let final_permutation = sponge.begin_finish_permutation()
+    sponge = execute_fields17_round_steps(final_permutation)
     let commitment = sponge.finish()
     let digest = commitment.digest()
     (

@@ -10,7 +10,9 @@ use canonical_words::{CanonicalWords, WordSink, WordSource, encode_canonical_wor
 use precision::baby_bear::{BabyBear, BabyBearExt4, BABY_BEAR_MODULUS}
 use precision::word_field::montgomery_word_u32
 use precision::word_field_encoding::PackedFieldBits
-use poseidon_grain::{field_element, warm}
+use poseidon_grain::{
+    Grain80Word, field_element, warm, warm_word,
+}
 
 pub const WIDTH: usize = 16
 pub const FULL_ROUNDS: usize = 8
@@ -19,7 +21,8 @@ pub const PARTIAL_ROUNDS: usize = 13
 pub const ROUND_CONSTANT_COUNT: usize = FULL_ROUNDS * WIDTH + PARTIAL_ROUNDS
 pub const DIGEST_FIELDS: usize = 8
 pub const SPONGE_RATE: usize = 8
-pub const PERMUTATION_PHASES: u32 = 21
+pub const PERMUTATION_PHASES: u32 =
+    (FULL_ROUNDS + PARTIAL_ROUNDS).downcast_truncate()
 
 const FIELD_SIZE: u32 = 31
 const MODULUS: u256 = BABY_BEAR_MODULUS as u256
@@ -342,6 +345,29 @@ const fn internal_diagonal_montgomery(_ index: usize) -> u32 {
 #[const_eval_limit = 16000000]
 const PARAMETERS: Poseidon2Parameters = derive_parameters()
 
+const WARM_WORD_GRAIN: Grain80Word = warm_word(
+    FIELD_SIZE,
+    WIDTH.downcast_truncate(),
+    FULL_ROUNDS.downcast_truncate(),
+    PARTIAL_ROUNDS.downcast_truncate(),
+)
+
+/// Stateful GPU-native interpreter of the same canonical parameter stream.
+///
+/// This is intended for one initialization pass. It derives each constant
+/// once with u32 operations, after which proof kernels can read a typed storage
+/// resource instead of materializing the full CTFE aggregate per invocation.
+pub struct Poseidon2ParameterStream { grain: Grain80Word }
+
+impl Poseidon2ParameterStream {
+    pub fn begin() -> Self { Self { grain: WARM_WORD_GRAIN } }
+
+    pub fn next(mut self) -> u32 {
+        let plain = self.grain.field_element(FIELD_SIZE, BABY_BEAR_MODULUS)
+        BabyBear::from_u32(plain).to_montgomery_word()
+    }
+}
+
 #[inline(always)]
 fn sbox7(_ value: BabyBear) -> BabyBear {
     let square = value * value
@@ -585,6 +611,69 @@ impl Poseidon2FieldPermutation {
     #[inline(always)]
     pub fn phase(self) -> u32 { self.phase }
 
+    /// Advance exactly one phase-selected Poseidon2 round.
+    ///
+    /// This is the reusable GPU scheduling kernel. A repeated-dispatch policy
+    /// may invoke it once per queue-ordered submission while the serialized
+    /// checkpoint owns the phase cursor. The three protocol regions and their
+    /// constants remain derived here, rather than in an application shader or
+    /// host loop.
+    #[inline(always)]
+    pub fn advance_round(mut self) {
+        if self.valid != VALID_WORD || self.phase >= PERMUTATION_PHASES {
+            self.valid = INVALID_WORD
+            return
+        }
+
+        let parameters = PARAMETERS
+        let width: u32 = WIDTH.downcast_truncate()
+        let mut state = Poseidon2State { lanes: self.lanes }
+        if self.phase < HALF_FULL_ROUNDS.downcast_truncate() {
+            if self.phase == 0 { state.external_linear() }
+            let mut lane: u32 = 0
+            let mut constant: u32 = self.phase * width
+            while lane < width {
+                let rc = BabyBear::from_montgomery_word(
+                    parameters.round_constants[constant as usize]
+                )
+                let lane_index: usize = lane as usize
+                state.set_field(lane_index, sbox7(state.field(lane_index) + rc))
+                constant = constant + 1
+                lane = lane + 1
+            }
+            state.external_linear()
+        } else if self.phase < (HALF_FULL_ROUNDS + PARTIAL_ROUNDS).downcast_truncate() {
+            let first_partial: u32 = (HALF_FULL_ROUNDS * WIDTH).downcast_truncate()
+            let constant: u32 = first_partial
+                + self.phase - HALF_FULL_ROUNDS.downcast_truncate()
+            let rc = BabyBear::from_montgomery_word(
+                parameters.round_constants[constant as usize]
+            )
+            state.set_field(0, sbox7(state.field(0) + rc))
+            state.internal_linear()
+        } else {
+            let first_final: u32 = (HALF_FULL_ROUNDS * WIDTH + PARTIAL_ROUNDS)
+                .downcast_truncate()
+            let final_base: u32 =
+                (HALF_FULL_ROUNDS + PARTIAL_ROUNDS).downcast_truncate()
+            let final_round: u32 = self.phase - final_base
+            let mut lane: u32 = 0
+            let mut constant: u32 = first_final + final_round * width
+            while lane < width {
+                let rc = BabyBear::from_montgomery_word(
+                    parameters.round_constants[constant as usize]
+                )
+                let lane_index: usize = lane as usize
+                state.set_field(lane_index, sbox7(state.field(lane_index) + rc))
+                constant = constant + 1
+                lane = lane + 1
+            }
+            state.external_linear()
+        }
+        self.lanes = state.lanes
+        self.phase = self.phase + 1
+    }
+
     /// Interpret a consecutive piece of the first four full rounds.
     /// `start = 0` also applies Poseidon2's initial external linear layer.
     #[inline(always)]
@@ -788,6 +877,226 @@ where START <= 4, N <= 4, { START + N <= 4 }
     }
     permutation.lanes = state.lanes
     permutation.phase = final_base + (START + N).downcast_truncate()
+}
+
+/// Shape of a workgroup interpretation of one width-16 permutation.
+pub trait Poseidon2WorkgroupPlan {
+    const LANES: usize
+    const STEPS: usize
+    const TRANSITION: u32
+}
+
+/// Two storage buffers let every field lane advance without an in-dispatch
+/// read/write race. Step zero is the initial external linear layer. Each round
+/// then contributes one nonlinear map and one linear map. The final transition
+/// is left to the sponge consumer so it can absorb the next typed message block.
+pub struct Poseidon2WorkgroupSchedule {}
+impl Poseidon2WorkgroupPlan for Poseidon2WorkgroupSchedule {
+    const LANES: usize = WIDTH
+    const STEPS: usize = 2 + 2 * (FULL_ROUNDS + PARTIAL_ROUNDS)
+    const TRANSITION: u32 = (Self::STEPS - 1).downcast_truncate()
+}
+
+#[inline(always)]
+fn mat4_lane(
+    _ lanes: ref [u32; WIDTH],
+    _ offset: u32,
+    _ component: u32,
+) -> BabyBear {
+    let x0 = BabyBear::from_montgomery_word(lanes[offset as usize])
+    let x1 = BabyBear::from_montgomery_word(lanes[(offset + 1) as usize])
+    let x2 = BabyBear::from_montgomery_word(lanes[(offset + 2) as usize])
+    let x3 = BabyBear::from_montgomery_word(lanes[(offset + 3) as usize])
+    let t01 = x0 + x1
+    let t23 = x2 + x3
+    let total = t01 + t23
+    let with1 = total + x1
+    let with3 = total + x3
+    match component {
+        0 => with1 + t01,
+        1 => with1 + x2 + x2,
+        2 => with3 + t23,
+        _ => with3 + x0 + x0,
+    }
+}
+
+#[inline(always)]
+fn external_linear_lane(_ lanes: ref [u32; WIDTH], _ lane: u32) -> BabyBear {
+    let component = lane & 3
+    let own_value = mat4_lane(lanes, (lane >> 2) << 2, component)
+    let sum = mat4_lane(lanes, 0, component)
+        + mat4_lane(lanes, 4, component)
+        + mat4_lane(lanes, 8, component)
+        + mat4_lane(lanes, 12, component)
+    own_value + sum
+}
+
+#[inline(always)]
+fn internal_diagonal_lane(_ lane: u32) -> BabyBear {
+    let word = match lane {
+        0 => internal_diagonal_montgomery(0),
+        1 => internal_diagonal_montgomery(1),
+        2 => internal_diagonal_montgomery(2),
+        3 => internal_diagonal_montgomery(3),
+        4 => internal_diagonal_montgomery(4),
+        5 => internal_diagonal_montgomery(5),
+        6 => internal_diagonal_montgomery(6),
+        7 => internal_diagonal_montgomery(7),
+        8 => internal_diagonal_montgomery(8),
+        9 => internal_diagonal_montgomery(9),
+        10 => internal_diagonal_montgomery(10),
+        11 => internal_diagonal_montgomery(11),
+        12 => internal_diagonal_montgomery(12),
+        13 => internal_diagonal_montgomery(13),
+        14 => internal_diagonal_montgomery(14),
+        _ => internal_diagonal_montgomery(15),
+    }
+    BabyBear::from_montgomery_word(word)
+}
+
+#[inline(always)]
+fn internal_linear_lane(_ lanes: ref [u32; WIDTH], _ lane: u32) -> BabyBear {
+    let mut sum = BabyBear::zero()
+    let mut index: usize = 0
+    while index < WIDTH {
+        sum = sum + BabyBear::from_montgomery_word(lanes[index])
+        index = index + 1
+    }
+    let value = BabyBear::from_montgomery_word(lanes[lane as usize])
+    sum + value * internal_diagonal_lane(lane)
+}
+
+#[inline(always)]
+fn round_constant_index(_ phase: u32, _ lane: u32) -> u32 {
+    let width: u32 = WIDTH.downcast_truncate()
+    let first_partial: u32 = (HALF_FULL_ROUNDS * WIDTH).downcast_truncate()
+    let first_final: u32 = (HALF_FULL_ROUNDS * WIDTH + PARTIAL_ROUNDS)
+        .downcast_truncate()
+    if phase < HALF_FULL_ROUNDS.downcast_truncate() {
+        phase * width + lane
+    } else if phase < (HALF_FULL_ROUNDS + PARTIAL_ROUNDS).downcast_truncate() {
+        first_partial + phase - HALF_FULL_ROUNDS.downcast_truncate()
+    } else {
+        first_final
+            + (phase - (HALF_FULL_ROUNDS + PARTIAL_ROUNDS).downcast_truncate()) * width
+            + lane
+    }
+}
+
+#[inline(always)]
+fn nonlinear_lane(
+    _ lanes: ref [u32; WIDTH],
+    _ phase: u32,
+    _ lane: u32,
+) -> BabyBear {
+    let index = round_constant_index(phase, lane)
+    nonlinear_lane_with_constant(
+        lanes,
+        phase,
+        lane,
+        PARAMETERS.round_constants[index as usize],
+    )
+}
+
+#[inline(always)]
+fn nonlinear_lane_with_constant(
+    _ lanes: ref [u32; WIDTH],
+    _ phase: u32,
+    _ lane: u32,
+    _ round_constant: u32,
+) -> BabyBear {
+    let value = BabyBear::from_montgomery_word(lanes[lane as usize])
+    let partial = (phase >= HALF_FULL_ROUNDS.downcast_truncate())
+        & (phase < (HALF_FULL_ROUNDS + PARTIAL_ROUNDS).downcast_truncate())
+    let rc = BabyBear::from_montgomery_word(round_constant)
+    let transformed = sbox7(value + rc)
+    if partial && lane != 0 {
+        value
+    } else {
+        transformed
+    }
+}
+
+/// Evaluate one field lane of one workgroup schedule step.
+///
+/// Even schedule boundaries always read one complete buffer and write the
+/// other. Queue ordering between repeated dispatches supplies the global
+/// barrier, while the computation and round cursor remain authored in Fe.
+#[inline(always)]
+pub fn poseidon2_workgroup_lane(
+    _ primary: ref [u32; WIDTH],
+    _ secondary: ref [u32; WIDTH],
+    _ step: u32,
+    _ lane: u32,
+) -> u32 {
+    let transition = <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::TRANSITION
+    if lane >= WIDTH.downcast_truncate() || step >= transition {
+        return 0
+    }
+    let value = if step == 0 {
+        external_linear_lane(primary, lane)
+    } else {
+        let phase = (step - 1) / 2
+        if ((step - 1) & 1) == 0 {
+            nonlinear_lane(secondary, phase, lane)
+        } else if (phase >= HALF_FULL_ROUNDS.downcast_truncate())
+            & (phase < (HALF_FULL_ROUNDS + PARTIAL_ROUNDS).downcast_truncate())
+        {
+            internal_linear_lane(primary, lane)
+        } else {
+            external_linear_lane(primary, lane)
+        }
+    }
+    value.to_montgomery_word()
+}
+
+/// Evaluate one scheduled field lane with a constant supplied by a preceding
+/// Fe parameter-generation pass. Linear steps ignore `round_constant`.
+#[inline(always)]
+pub fn poseidon2_workgroup_lane_with_round_constant(
+    _ primary: ref [u32; WIDTH],
+    _ secondary: ref [u32; WIDTH],
+    _ step: u32,
+    _ lane: u32,
+    _ round_constant: u32,
+) -> u32 {
+    let transition = <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::TRANSITION
+    if lane >= WIDTH.downcast_truncate() || step >= transition {
+        return 0
+    }
+    let value = if step == 0 {
+        external_linear_lane(primary, lane)
+    } else {
+        let phase = (step - 1) / 2
+        if ((step - 1) & 1) == 0 {
+            nonlinear_lane_with_constant(
+                secondary,
+                phase,
+                lane,
+                round_constant,
+            )
+        } else if (phase >= HALF_FULL_ROUNDS.downcast_truncate())
+            & (phase < (HALF_FULL_ROUNDS + PARTIAL_ROUNDS).downcast_truncate())
+        {
+            internal_linear_lane(primary, lane)
+        } else {
+            external_linear_lane(primary, lane)
+        }
+    }
+    value.to_montgomery_word()
+}
+
+/// Round-constant position selected by a nonlinear phase and field lane.
+#[inline(always)]
+pub fn poseidon2_round_constant_index(_ phase: u32, _ lane: u32) -> u32 {
+    round_constant_index(phase, lane)
+}
+
+/// The destination selected by `poseidon2_workgroup_lane`: zero is primary,
+/// one is secondary.
+#[inline(always)]
+pub fn poseidon2_workgroup_destination(_ step: u32) -> u32 {
+    if step != 0 && ((step - 1) & 1) == 0 { 0 } else { 1 }
 }
 
 /// Serializable checkpoint for the fixed-length field sponge.
@@ -1249,4 +1558,21 @@ pub fn parameter_plain(_ index: u32) -> u32 {
         return 0
     }
     BabyBear::from_montgomery_word(PARAMETERS.round_constants[index as usize]).to_u32()
+}
+
+/// Independently execute the GPU-native stream through one indexed constant.
+/// This intentionally favors a tiny oracle surface over random-access speed;
+/// production initialization carries `Poseidon2ParameterStream` forward once.
+pub fn runtime_parameter_plain(_ index: u32) -> u32 {
+    if index >= ROUND_CONSTANT_COUNT.downcast_truncate() {
+        return 0
+    }
+    let mut stream = Poseidon2ParameterStream::begin()
+    let mut word: u32 = 0
+    let mut current: u32 = 0
+    while current <= index {
+        word = stream.next()
+        current = current + 1
+    }
+    BabyBear::from_montgomery_word(word).to_u32()
 }

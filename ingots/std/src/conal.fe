@@ -62,6 +62,25 @@ pub struct Par {}
 pub struct Pair {}
 pub struct Comp<A, B> {}
 
+/// A balanced binary schedule exposes its exact leaf count and dependency
+/// depth without a second numeric placement table. `RBin<Pair, N>` normalizes
+/// through these two implementations, so WebGPU and scalar interpreters can
+/// derive their parallel envelope from the schedule type itself.
+pub trait BalancedBinarySchedule {
+    const LEAVES: usize
+    const DEPTH: usize
+}
+
+impl BalancedBinarySchedule for Par {
+    const LEAVES: usize = 1
+    const DEPTH: usize = 0
+}
+
+impl<S: BalancedBinarySchedule> BalancedBinarySchedule for Comp<S, Pair> {
+    const LEAVES: usize = S::LEAVES * 2
+    const DEPTH: usize = S::DEPTH + 1
+}
+
 /// The canonical balanced-binary schedule builder (mb2 A9.3), now LIBRARY-RESIDENT
 /// (moved out of the fixtures once the tree-sitter ingot grammar learned the
 /// `recursive type fn` surface). Recursion is on the const depth `N` (the count of
