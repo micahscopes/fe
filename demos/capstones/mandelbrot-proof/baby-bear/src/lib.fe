@@ -1221,18 +1221,18 @@ pub struct FriQueryEnd<const ROUND: u32> {
 }
 impl<const ROUND: u32> core::marker::Copy for FriQueryEnd<ROUND> {}
 
-const fn fri_multi_sibling_capacity(
+pub const fn fri_multi_sibling_capacity(
     _ pair_depth: usize,
     _ query_count: usize,
 ) -> usize {
     (query_count + query_count) * pair_depth
 }
 
-const fn air_lde_request_capacity(_ query_count: usize) -> usize {
+pub const fn air_lde_request_capacity(_ query_count: usize) -> usize {
     query_count * 4
 }
 
-const fn air_lde_sibling_capacity(_ query_count: usize) -> usize {
+pub const fn air_lde_sibling_capacity(_ query_count: usize) -> usize {
     air_lde_request_capacity(query_count) * 4
 }
 
@@ -1477,7 +1477,7 @@ pub trait BabyBearFriMultiQueryLayers<
     Layers,
 > {
     fn invalid_fri_multi_query_layers() -> Layers
-    fn sample_fri_multi_queries(_ complete: Complete) -> (bool, Samples)
+    fn sample_fri_multi_queries(_ complete: ref Complete) -> (bool, Samples)
     fn open_fri_multi_query_layers(
         _ complete: own Complete,
         _ samples: Samples,
@@ -1538,7 +1538,7 @@ where
     }
 
     fn sample_fri_multi_queries(
-        _ complete: FriProofFold<ROUND, OUTPUT, FriProofEnd<NEXT_ROUND>>,
+        _ complete: ref FriProofFold<ROUND, OUTPUT, FriProofEnd<NEXT_ROUND>>,
     ) -> (bool, Samples) {
         if !complete.valid || !complete.layer.valid || !complete.layer.transcript.valid {
             return (
@@ -1706,7 +1706,7 @@ where
     }
 
     fn sample_fri_multi_queries(
-        _ complete: FriProofFold<ROUND, OUTPUT, TailComplete>,
+        _ complete: ref FriProofFold<ROUND, OUTPUT, TailComplete>,
     ) -> (bool, Samples) {
         <FriScheduleFold<
             NEXT_ROUND,
@@ -1723,7 +1723,7 @@ where
             Samples,
             TailComplete,
             TailLayers,
-        >>::sample_fri_multi_queries(complete.tail)
+        >>::sample_fri_multi_queries(ref complete.tail)
     }
 
     fn open_fri_multi_query_layers(
@@ -3437,6 +3437,7 @@ pub fn evaluate_composition_opened<const TRACE: usize, const LDE: usize>(
     _ next: ref AirLdeRow,
 ) -> CompositionValue<BabyBearExt4>
 where
+    TRACE > 0,
     TRACE > 1,
     LDE > 0,
     LDE > 1,
@@ -3492,6 +3493,7 @@ pub fn verify_checkpoint4_air_lde_composition_query<
     _ negative_composition: BabyBearExt4,
 ) -> bool
 where
+    TRACE > 0,
     TRACE > 1,
     LDE > 0,
     LDE > 1,
@@ -4375,7 +4377,7 @@ pub fn open_fri_multi_commitment_query16(
         CheckpointFriQuerySamples4,
         CheckpointFriProof16,
         CheckpointFriMultiQueryLayers16,
-    >>::sample_fri_multi_queries(complete)
+    >>::sample_fri_multi_queries(ref complete)
     if !sampled.0 { return invalid_fri_multi_query16() }
 
     let composition = composition_multi_query_opening_power_of_two<
