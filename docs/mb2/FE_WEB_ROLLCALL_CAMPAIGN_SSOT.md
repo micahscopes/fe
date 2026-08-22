@@ -1350,8 +1350,15 @@ Legend:
   receipt-shape table. Commit `8b7d2a41c` adds an independently executed
   request-set predicate that rejects missing, extra, out-of-domain, and
   noncanonical unused leaves. Commit `fce3a5d7e` applies that predicate to
-  every schedule-derived FRI multipath. Commit `29916442a` assembles the
-  production sparse receipt entirely in Fe: it binds the interval statement,
+  every schedule-derived FRI multipath. The authoritative zero-import
+  Fe/Wasm plus independent Plonky3/BigInt integration gate passes 1/1 after
+  that hardening, rejecting its established receipt, transcript, opening,
+  path, root, terminal, and coset-shift mutations. This run took 2,606.02
+  seconds and peaked near 7.2 GiB RSS. The semantic result is green, while the
+  whole-ingot compilation cost requires a decomposed gate and compiler-cost
+  follow-up rather than normalization as an acceptable edit loop. Commit
+  `29916442a` assembles the production sparse receipt entirely in Fe: it binds
+  the interval statement,
   `LD01`, `LD02`, and `BC02` roots; folds the complete FRI schedule; samples
   queries only after the terminal transcript; opens the exact AIR,
   composition, and FRI request sets; recomputes the positive and negative
