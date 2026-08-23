@@ -452,6 +452,29 @@ pub fn run() -> u32 {
 }
 
 #[test]
+fn oversized_repeated_local_aggregates_use_compact_arena_storage() {
+    let wasm = compile_to_wasm(
+        r#"
+pub fn run() -> u32 {
+    let mut values = [7; 1001]
+    values[0] = 11
+    values[1000] = 42
+    values[0] * 1000 + values[500] * 10 + values[1000]
+}
+"#,
+    );
+    wasmparser::validate(&wasm).expect("oversized local aggregate emitted invalid Wasm");
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, wasm).unwrap();
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+    let run = instance
+        .get_typed_func::<(), i32>(&mut store, "run")
+        .unwrap();
+    assert_eq!(run.call(&mut store, ()).unwrap(), 11_112);
+}
+
+#[test]
 fn indirect_value_copies_use_a_call_local_arena_in_an_unscoped_caller() {
     let wasm = compile_to_wasm(
         r#"

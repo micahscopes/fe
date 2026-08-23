@@ -4,6 +4,7 @@ version = "0.1.0"
 
 [dependencies]
 core = "../../../../../ingots/core"
+mandelbrot_proof_baby_bear = "../../../../../demos/capstones/mandelbrot-proof/baby-bear"
 mandelbrot_proof_fixed_air_prover_baby_bear = "../../../../../demos/capstones/mandelbrot-proof/fixed-air-prover-baby-bear"
 mandelbrot_proof_fixed_air_receipt_baby_bear = "../../../../../demos/capstones/mandelbrot-proof/fixed-air-receipt-baby-bear"
 mandelbrot_proof_recursive = "../../../../../demos/capstones/mandelbrot-proof/recursive"

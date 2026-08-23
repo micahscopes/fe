@@ -4,11 +4,17 @@
 //! No host-authored trace, commitment, challenge, or receipt enters this gate.
 
 use core::BrowserBytes
+use mandelbrot_proof_baby_bear::{
+    composition_multi_opening_power_of_two,
+}
 use mandelbrot_proof_fixed_air_prover_baby_bear::{
     production_zero_base_lde_checkpoint,
     prove_production_sparse_interval,
 }
 use mandelbrot_proof_fixed_air_receipt_baby_bear::{
+    PRODUCTION_COMPOSITION_MAX_LEAVES,
+    PRODUCTION_COMPOSITION_MAX_SIBLINGS,
+    PRODUCTION_LDE_LENGTH,
     decode_production_sparse_baby_bear_receipt,
     empty_production_sparse_baby_bear_receipt,
     verify_production_sparse_baby_bear_receipt,
@@ -20,7 +26,7 @@ use mandelbrot_proof_recursive::{
     evaluate_chunk,
     initial_boundary,
 }
-use precision::baby_bear::BabyBear
+use precision::baby_bear::{BabyBear, BabyBearExt4}
 use precision::fixed::Fixed
 
 fn production_zero_interval() -> OrbitInterval<4> {
@@ -54,6 +60,20 @@ pub fn production_zero_interval_receipt() -> BrowserBytes {
 
 pub fn production_base_lde_checkpoint() -> bool {
     production_zero_base_lde_checkpoint()
+}
+
+/// Isolate the production-size composition Merkle opening. In particular this
+/// exercises the compiler-derived compact schedule for the repeated digest
+/// leaf array without pulling the complete prover into a focused regression.
+pub fn production_composition_opening_checkpoint() -> bool {
+    let evaluations = [BabyBearExt4::zero(); PRODUCTION_LDE_LENGTH]
+    let requested: [u32; PRODUCTION_COMPOSITION_MAX_LEAVES] = [0, 1, 2, 3, 4, 5, 6, 7]
+    composition_multi_opening_power_of_two<
+        {PRODUCTION_LDE_LENGTH},
+        {PRODUCTION_COMPOSITION_MAX_LEAVES},
+        {PRODUCTION_COMPOSITION_MAX_LEAVES},
+        {PRODUCTION_COMPOSITION_MAX_SIBLINGS},
+    >(evaluations, requested).valid
 }
 
 /// Verify browser-owned canonical bytes without reusing prover residency.

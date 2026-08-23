@@ -105,6 +105,12 @@ fn wasm_lower_trace_detail(message: impl FnOnce() -> String) {
 /// receive that internal representation.
 const MAX_WASM_FUNCTION_PARAMS: usize = 1000;
 const MAX_WASM_FUNCTION_RETURNS: usize = 1000;
+/// Keep one generated Fe aggregate from consuming the browser validator's
+/// finite local budget. Values above the same validated arity boundary used by
+/// private calls are represented by one compiler-owned arena pointer. Their
+/// MIR class remains `AggregateValue`, so this is a backend representation
+/// choice rather than an authored reference or an ABI change.
+const MAX_WASM_FLATTENED_LOCAL_AGGREGATE: usize = 1000;
 
 /// The Wasm32 ISA the wasm lowering targets (little-endian, 32-bit pointers,
 /// portable `NativeInstSet` vocabulary).
@@ -3564,6 +3570,10 @@ where
     /// arena pointer. The caller's enclosing arena lifetime owns that fresh
     /// value; host-visible results never use this internal representation.
     indirect_aggregate_returns: HashSet<RuntimeInstance<'db>>,
+    /// Per-body aggregate values represented by one canonical-arena pointer.
+    /// This includes selected private parameters/results and oversized local
+    /// products whose flattened SSA form would exhaust Wasm's local budget.
+    address_carried_aggregate_values: FxHashMap<RuntimeInstance<'db>, HashSet<RLocalId>>,
     /// Compiler-derived continuation segments. Their symbols and typed bodies
     /// come exclusively from the MIR suspension machine; no manifest or host
     /// entry table participates in declaration or lowering.
@@ -3722,6 +3732,7 @@ where
             resource_type_cache: FxHashMap::default(),
             indirect_aggregate_params: FxHashMap::default(),
             indirect_aggregate_returns: HashSet::new(),
+            address_carried_aggregate_values: FxHashMap::default(),
             resumable_continuations,
             wrapped_lane_names,
             validate_host_enum_params,
@@ -3732,6 +3743,8 @@ where
         let (indirect_params, indirect_returns) = lowerer.derive_indirect_aggregate_abi()?;
         lowerer.indirect_aggregate_params = indirect_params;
         lowerer.indirect_aggregate_returns = indirect_returns;
+        lowerer.address_carried_aggregate_values =
+            lowerer.derive_address_carried_aggregate_values();
         if enable_scoped_arena {
             wasm_lower_trace(|| "derive typed arena provenance".to_owned());
             lowerer.arena_owned_locals = lowerer.derive_arena_owned_locals();
@@ -3902,17 +3915,62 @@ where
         Ok((selected, indirect_returns))
     }
 
-    /// Track aggregate locals whose value is already resident in an arena
-    /// object because it is an indirect parameter or the result of an indirect
-    /// private call. Plain `Use` bindings propagate that representation through
-    /// the prepared body. Other aggregate producers retain the flattened value
-    /// representation until an indirect boundary materializes them.
-    fn derive_indirect_aggregate_values(
+    /// Derive every aggregate local represented by one arena pointer. Private
+    /// indirect parameters/results seed the set, as do memory-lowerable local
+    /// products above the validated flattening boundary. Plain `Use` bindings
+    /// propagate the representation to a fixed point. This keeps the choice
+    /// structural and type-driven, with no proof- or function-name exceptions.
+    fn derive_address_carried_aggregate_values(
+        &self,
+    ) -> FxHashMap<RuntimeInstance<'db>, HashSet<RLocalId>> {
+        let mut derived = FxHashMap::default();
+        let mut total = 0usize;
+        for (instance, body) in &self.prepared_bodies {
+            let indirect_params = self
+                .indirect_aggregate_params
+                .get(instance)
+                .cloned()
+                .unwrap_or_default();
+            let values = self.derive_body_address_carried_aggregate_values(body, &indirect_params);
+            total += values.len();
+            if !values.is_empty() {
+                derived.insert(*instance, values);
+            }
+        }
+        wasm_lower_trace(|| {
+            format!(
+                "derived address-carried aggregate values, bodies={}, values={total}",
+                derived.len(),
+            )
+        });
+        derived
+    }
+
+    fn derive_body_address_carried_aggregate_values(
         &self,
         body: &RuntimeBody<'db>,
         indirect_params: &HashSet<RLocalId>,
     ) -> HashSet<RLocalId> {
         let mut values = indirect_params.clone();
+        for (index, local) in body.locals.iter().enumerate() {
+            if !matches!(local.root, RuntimeLocalRoot::None) {
+                continue;
+            }
+            let Some(class) = local.carrier.value_class() else {
+                continue;
+            };
+            if !matches!(class, RuntimeClass::AggregateValue { .. })
+                || !self.aggregate_is_memory_lowerable(class)
+            {
+                continue;
+            }
+            let Some(shape) = self.flat_shape(class) else {
+                continue;
+            };
+            if shape.leaf_count() > MAX_WASM_FLATTENED_LOCAL_AGGREGATE {
+                values.insert(RLocalId::from_u32(index as u32));
+            }
+        }
         loop {
             let mut changed = false;
             for block in &body.blocks {
@@ -6561,6 +6619,10 @@ where
         let mut field_loads =
             Vec::<(ArenaPointerFieldKey<'db>, LocalKey<'db>, LocalKey<'db>)>::new();
 
+        for (instance, locals) in &self.address_carried_aggregate_values {
+            seeds.extend(locals.iter().map(|local| (*instance, *local)));
+        }
+
         for (instance, body) in &self.prepared_bodies {
             for block in &body.blocks {
                 for stmt in &block.stmts {
@@ -6920,7 +6982,11 @@ where
         for block in &body.blocks {
             for stmt in &block.stmts {
                 match stmt {
-                    RStmt::Assign { dst: _, expr } => {
+                    RStmt::Assign { dst, expr } => {
+                        analysis.allocates |= self
+                            .address_carried_aggregate_values
+                            .get(&body.owner)
+                            .is_some_and(|locals| locals.contains(dst));
                         self.analyze_scoped_arena_expr(body, expr, &mut analysis)?;
                     }
                     RStmt::EnumAssertVariant { .. } => {}
@@ -7581,9 +7647,9 @@ where
     /// pointer. The caller supplied a fresh deep copy, so this remains an owned
     /// Fe value even though its internal Wasm ABI is indirect.
     indirect_aggregate_params: HashSet<RLocalId>,
-    /// The indirect parameters plus aggregate call-result locals and their
+    /// Indirect parameters/results plus oversized local aggregates and their
     /// direct `Use` bindings. Every member carries one arena pointer in `vars`.
-    indirect_aggregate_values: HashSet<RLocalId>,
+    address_carried_aggregate_values: HashSet<RLocalId>,
     /// Whether this function transfers its aggregate result to its caller as
     /// one arena pointer rather than flattened Wasm results.
     indirect_aggregate_return: bool,
@@ -7619,8 +7685,11 @@ where
         indirect_aggregate_params: HashSet<RLocalId>,
         indirect_aggregate_return: bool,
     ) -> Result<Self, LowerError> {
-        let indirect_aggregate_values =
-            module.derive_indirect_aggregate_values(&body, &indirect_aggregate_params);
+        let address_carried_aggregate_values = module
+            .address_carried_aggregate_values
+            .get(&body.owner)
+            .cloned()
+            .unwrap_or_default();
         let mut fb = module.builder.func_builder::<InstInserter>(func_ref);
         let prologue_block = fb.append_block();
         let block_map = body.blocks.iter().map(|_| fb.append_block()).collect();
@@ -7644,7 +7713,7 @@ where
                     vars.insert(local_id, fb.declare_var(ty));
                     continue;
                 }
-                if indirect_aggregate_values.contains(&local_id) {
+                if address_carried_aggregate_values.contains(&local_id) {
                     if !matches!(class, RuntimeClass::AggregateValue { .. })
                         || !module.aggregate_is_memory_lowerable(class)
                     {
@@ -7720,7 +7789,7 @@ where
             tuple_vars,
             materialized_param_slots,
             indirect_aggregate_params,
-            indirect_aggregate_values,
+            address_carried_aggregate_values,
             indirect_aggregate_return,
             materialized_scalar_slots,
             validate_enum_params,
@@ -7941,6 +8010,25 @@ where
                     let pointer = self.local_value(*dst)?;
                     self.fb
                         .insert_inst_no_result(Mstore::new(self.inst_set(), pointer, value, ty));
+                    return Ok(());
+                }
+                if self.address_carried_aggregate_values.contains(dst) {
+                    let value = self
+                        .lower_address_carried_aggregate_assign(*dst, expr)
+                        .map_err(|error| match error {
+                            LowerError::Unsupported(message) => LowerError::Unsupported(format!(
+                                "{message}; while lowering address-carried aggregate assignment destination {dst:?}, expression {expr:?}",
+                            )),
+                            other => other,
+                        })?;
+                    let var = self.var_for(*dst)?;
+                    if self.fb.type_of(value) != Type::I32 {
+                        return Err(LowerError::Internal(format!(
+                            "address-carried aggregate assignment {dst:?} produced {:?}, expected i32",
+                            self.fb.type_of(value),
+                        )));
+                    }
+                    self.fb.def_var(var, value);
                     return Ok(());
                 }
                 // R2.1: a scalar-tuple destination is produced element-wise (one
@@ -8373,7 +8461,309 @@ where
 
     fn is_address_carried_aggregate_value(&self, local: RLocalId) -> bool {
         self.materialized_param_slots.contains(&local)
-            || self.indirect_aggregate_values.contains(&local)
+            || self.address_carried_aggregate_values.contains(&local)
+    }
+
+    fn lower_address_carried_aggregate_assign(
+        &mut self,
+        dst: RLocalId,
+        expr: &RExpr<'db>,
+    ) -> Result<ValueId, LowerError> {
+        match expr {
+            RExpr::AggregateMake { layout, fields } => {
+                self.lower_aggregate_make_to_object(dst, *layout, fields)
+            }
+            RExpr::Load { place } => {
+                let Some((source, source_class)) = self.raw_memory_aggregate_place(place)? else {
+                    return Err(LowerError::Unsupported(format!(
+                        "wasm target: address-carried aggregate load requires a memory-backed place: {place:?}"
+                    )));
+                };
+                let destination_class = self.body.value_class(dst).ok_or_else(|| {
+                    LowerError::Internal(format!(
+                        "address-carried aggregate destination {dst:?} has no class"
+                    ))
+                })?;
+                if !source_class.shares_runtime_rep_with(self.module.db, destination_class) {
+                    return Err(LowerError::Unsupported(
+                        "address-carried aggregate load has incompatible layouts".to_owned(),
+                    ));
+                }
+                let RuntimeClass::AggregateValue { layout } = destination_class else {
+                    return Err(LowerError::Internal(
+                        "address-carried aggregate destination lost its layout".to_owned(),
+                    ));
+                };
+                self.lower_deep_object_copy(source, *layout)
+            }
+            RExpr::AggregateExtract { value, index } => {
+                if !self.is_address_carried_aggregate_value(*value) {
+                    return Err(LowerError::Unsupported(format!(
+                        "wasm target: oversized aggregate projection source {value:?} is not address-carried"
+                    )));
+                }
+                let source_class = self.body.value_class(*value).cloned().ok_or_else(|| {
+                    LowerError::Internal(format!("aggregate source {value:?} has no class"))
+                })?;
+                let RuntimeClass::AggregateValue {
+                    layout: source_layout,
+                } = source_class
+                else {
+                    return Err(LowerError::Internal(
+                        "address-carried aggregate projection source lost its layout".to_owned(),
+                    ));
+                };
+                let field_class = self
+                    .module
+                    .product_element_class(source_layout, *index as usize)
+                    .ok_or_else(|| {
+                        LowerError::Unsupported(format!(
+                            "wasm target: aggregate projection index {index} is out of bounds"
+                        ))
+                    })?;
+                let destination_class = self.body.value_class(dst).cloned().ok_or_else(|| {
+                    LowerError::Internal(format!(
+                        "aggregate projection destination {dst:?} has no class"
+                    ))
+                })?;
+                if !field_class.shares_runtime_rep_with(self.module.db, &destination_class) {
+                    return Err(LowerError::Unsupported(
+                        "address-carried aggregate projection has incompatible layouts".to_owned(),
+                    ));
+                }
+                let source = self.local_value(*value)?;
+                let projected = match source_layout.data(self.module.db) {
+                    Layout::Struct(_) => {
+                        let offset = mir::struct_field_offset_bytes(
+                            self.module.db,
+                            source_layout,
+                            hir::analysis::semantic::FieldIndex(*index as u16),
+                            crate::WASM_LAYOUT,
+                        );
+                        self.offset_addr(source, offset)?
+                    }
+                    Layout::Array(_) => {
+                        let stride = mir::array_elem_size_bytes(
+                            self.module.db,
+                            source_layout,
+                            crate::WASM_LAYOUT,
+                        );
+                        let offset = (*index as usize).checked_mul(stride).ok_or_else(|| {
+                            LowerError::Unsupported(
+                                "wasm aggregate projection offset overflow".to_owned(),
+                            )
+                        })?;
+                        self.offset_addr(source, offset)?
+                    }
+                    Layout::Enum(_) => {
+                        return Err(LowerError::Unsupported(
+                            "wasm target: payload-enum address-carried projection is not implemented"
+                                .to_owned(),
+                        ));
+                    }
+                };
+                let RuntimeClass::AggregateValue { layout } = destination_class else {
+                    return Err(LowerError::Internal(
+                        "address-carried aggregate projection destination lost its layout"
+                            .to_owned(),
+                    ));
+                };
+                self.lower_deep_object_copy(projected, layout)
+            }
+            // Indirect calls and ordinary by-value copies already lower to one
+            // independently-owned arena pointer in the scalar expression lane.
+            RExpr::Call { .. } | RExpr::Use(_) => self.lower_expr(expr, dst),
+            other => Err(LowerError::Unsupported(format!(
+                "wasm target: oversized aggregate producer `{other:?}` is not memory-lowered"
+            ))),
+        }
+    }
+
+    fn lower_aggregate_make_to_object(
+        &mut self,
+        dst: RLocalId,
+        layout: LayoutId<'db>,
+        fields: &[RLocalId],
+    ) -> Result<ValueId, LowerError> {
+        let destination_class = self.body.value_class(dst).ok_or_else(|| {
+            LowerError::Internal(format!("aggregate destination {dst:?} has no class"))
+        })?;
+        let RuntimeClass::AggregateValue {
+            layout: destination_layout,
+        } = destination_class
+        else {
+            return Err(LowerError::Internal(
+                "address-carried aggregate make destination is not an aggregate".to_owned(),
+            ));
+        };
+        if *destination_layout != layout {
+            return Err(LowerError::Internal(
+                "address-carried aggregate make changed layouts".to_owned(),
+            ));
+        }
+        let destination = self.lower_alloc_object(layout)?;
+        match layout.data(self.module.db) {
+            Layout::Struct(struct_layout) => {
+                if fields.len() != struct_layout.fields.len() {
+                    return Err(LowerError::Internal(
+                        "address-carried struct make field count changed".to_owned(),
+                    ));
+                }
+                for (index, (field, expected)) in
+                    fields.iter().zip(struct_layout.fields.iter()).enumerate()
+                {
+                    let offset = mir::struct_field_offset_bytes(
+                        self.module.db,
+                        layout,
+                        hir::analysis::semantic::FieldIndex(index as u16),
+                        crate::WASM_LAYOUT,
+                    );
+                    let address = self.offset_addr(destination, offset)?;
+                    self.lower_store_local_at(address, *field, expected)?;
+                }
+            }
+            Layout::Array(array_layout) => {
+                let len = usize::try_from(array_layout.len).map_err(|_| {
+                    LowerError::Unsupported("wasm array length exceeds usize".to_owned())
+                })?;
+                if fields.len() != len {
+                    return Err(LowerError::Internal(
+                        "address-carried array make element count changed".to_owned(),
+                    ));
+                }
+                let stride = mir::array_elem_size_bytes(self.module.db, layout, crate::WASM_LAYOUT);
+                if let Some(first) = fields.first().copied()
+                    && fields.iter().all(|field| *field == first)
+                {
+                    self.lower_repeated_array_store(
+                        destination,
+                        first,
+                        &array_layout.elem,
+                        len,
+                        stride,
+                    )?;
+                } else {
+                    for (index, field) in fields.iter().enumerate() {
+                        let offset = index.checked_mul(stride).ok_or_else(|| {
+                            LowerError::Unsupported(
+                                "wasm aggregate array offset overflow".to_owned(),
+                            )
+                        })?;
+                        let address = self.offset_addr(destination, offset)?;
+                        self.lower_store_local_at(address, *field, &array_layout.elem)?;
+                    }
+                }
+            }
+            Layout::Enum(_) => {
+                return Err(LowerError::Unsupported(
+                    "wasm target: oversized payload-enum construction is not implemented"
+                        .to_owned(),
+                ));
+            }
+        }
+        Ok(destination)
+    }
+
+    fn lower_repeated_array_store(
+        &mut self,
+        destination: ValueId,
+        value: RLocalId,
+        class: &RuntimeClass<'db>,
+        len: usize,
+        stride: usize,
+    ) -> Result<(), LowerError> {
+        if len == 0 {
+            return Ok(());
+        }
+        let len = i32::try_from(len)
+            .map_err(|_| LowerError::Unsupported("wasm array length exceeds i32".to_owned()))?;
+        let stride = i32::try_from(stride)
+            .map_err(|_| LowerError::Unsupported("wasm array stride exceeds i32".to_owned()))?;
+        let is = self.inst_set();
+        let entry = self.fb.current_block().ok_or_else(|| {
+            LowerError::Internal("repeated aggregate make has no current block".to_owned())
+        })?;
+        let header = self.fb.append_block();
+        let body = self.fb.append_block();
+        let done = self.fb.append_block();
+        self.fb.insert_inst_no_result(Jump::new(is, header));
+
+        self.fb.switch_to_block(header);
+        let zero = self.fb.make_imm_value(Immediate::I32(0));
+        let index = self
+            .fb
+            .insert_inst(Phi::new(is, vec![(zero, entry)]), Type::I32);
+        let end = self.fb.make_imm_value(Immediate::I32(len));
+        let more = self.fb.insert_inst(Lt::new(is, index, end), Type::I1);
+        self.fb.insert_inst_no_result(Br::new(is, more, body, done));
+
+        self.fb.switch_to_block(body);
+        let stride = self.fb.make_imm_value(Immediate::I32(stride));
+        let offset = self.fb.insert_inst(Mul::new(is, index, stride), Type::I32);
+        let address = self
+            .fb
+            .insert_inst(Add::new(is, destination, offset), Type::I32);
+        self.lower_store_local_at(address, value, class)?;
+        let one = self.fb.make_imm_value(Immediate::I32(1));
+        let next = self.fb.insert_inst(Add::new(is, index, one), Type::I32);
+        let back = self.fb.current_block().ok_or_else(|| {
+            LowerError::Internal("repeated aggregate make body has no block".to_owned())
+        })?;
+        self.fb.append_phi_arg(index, next, back);
+        self.fb.insert_inst_no_result(Jump::new(is, header));
+        self.fb.switch_to_block(done);
+        Ok(())
+    }
+
+    fn lower_store_local_at(
+        &mut self,
+        destination: ValueId,
+        source: RLocalId,
+        expected: &RuntimeClass<'db>,
+    ) -> Result<(), LowerError> {
+        let actual = self.body.value_class(source).cloned().ok_or_else(|| {
+            LowerError::Internal(format!("aggregate field {source:?} has no class"))
+        })?;
+        if !actual.shares_runtime_rep_with(self.module.db, expected) {
+            return Err(LowerError::Unsupported(format!(
+                "aggregate field {source:?} has an incompatible runtime representation"
+            )));
+        }
+        match expected {
+            RuntimeClass::Scalar(scalar) => {
+                let value = self.local_value(source)?;
+                let ty = scalar_ty_r1(scalar)?;
+                self.fb
+                    .insert_inst_no_result(Mstore::new(self.inst_set(), destination, value, ty));
+                Ok(())
+            }
+            RuntimeClass::AggregateValue { layout } => {
+                if self.is_address_carried_aggregate_value(source) {
+                    let source = self.local_value(source)?;
+                    return self.lower_copy_object_bytes_into(source, destination, *layout);
+                }
+                let shape = self.local_flat_shape(source)?;
+                let leaves = self.local_flat_values(source)?;
+                if leaves.len() != shape.leaf_count() {
+                    return Err(LowerError::Internal(
+                        "aggregate field leaf count changed while materializing".to_owned(),
+                    ));
+                }
+                let mut cursor = 0;
+                self.store_materialized_leaves(destination, &actual, &leaves, &mut cursor)?;
+                if cursor != leaves.len() {
+                    return Err(LowerError::Internal(
+                        "aggregate field materialization did not consume every leaf".to_owned(),
+                    ));
+                }
+                Ok(())
+            }
+            RuntimeClass::Ref { .. } | RuntimeClass::RawAddr { .. } => {
+                Err(LowerError::Unsupported(
+                    "wasm target: address-carried aggregate contains a transport field".to_owned(),
+                ))
+            }
+        }
     }
 
     /// Snapshot a local's leaves in DFS declaration order before callers write
@@ -9432,6 +9822,16 @@ where
         layout: LayoutId<'db>,
     ) -> Result<ValueId, LowerError> {
         let destination = self.lower_alloc_object(layout)?;
+        self.lower_copy_object_bytes_into(source, destination, layout)?;
+        Ok(destination)
+    }
+
+    fn lower_copy_object_bytes_into(
+        &mut self,
+        source: ValueId,
+        destination: ValueId,
+        layout: LayoutId<'db>,
+    ) -> Result<(), LowerError> {
         let byte_len = mir::layout_size_bytes(self.module.db, layout, crate::WASM_LAYOUT);
         let byte_len = i32::try_from(byte_len).map_err(|_| {
             LowerError::Unsupported(format!("wasm aggregate copy size {byte_len} exceeds i32"))
@@ -9474,7 +9874,7 @@ where
         self.fb.append_phi_arg(index, next, copy_back);
         self.fb.insert_inst_no_result(Jump::new(is, copy_header));
         self.fb.switch_to_block(copy_done);
-        Ok(destination)
+        Ok(())
     }
 
     fn store_materialized_leaves(
