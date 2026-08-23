@@ -513,6 +513,38 @@ pub fn run() -> BrowserBytes {
 }
 
 #[test]
+fn nested_indirect_value_calls_preserve_fe_copy_semantics() {
+    let wasm = compile_to_wasm(
+        r#"
+fn inner(mut values: own [u32; 1001]) -> u32 {
+    values[0] = 99
+    values[0] + values[1000]
+}
+
+fn outer(values: own [u32; 1001]) -> u32 {
+    inner(values: values) * 1000 + values[0]
+}
+
+pub fn run() -> u32 {
+    let mut values = [0; 1001]
+    values[0] = 1
+    values[1000] = 42
+    outer(values: values) * 1000 + values[0]
+}
+"#,
+    );
+    wasmparser::validate(&wasm).expect("nested indirect aggregate ABI emitted invalid Wasm");
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, wasm).unwrap();
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+    let run = instance
+        .get_typed_func::<(), i32>(&mut store, "run")
+        .unwrap();
+    assert_eq!(run.call(&mut store, ()).unwrap(), 141_001_001);
+}
+
+#[test]
 fn oversized_public_value_parameters_fail_before_wasm_emission() {
     let error = compile_to_wasm_err(
         r#"

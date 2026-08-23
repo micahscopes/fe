@@ -3574,6 +3574,11 @@ where
     /// Only the Wasm lowering enables these scopes. Shader and native paths do
     /// not emit arena-control instructions their backends cannot realize.
     scoped_arena_bodies: HashSet<RuntimeInstance<'db>>,
+    /// Private bodies proven not to let an arena-backed value or reference
+    /// escape. Unlike whole-function reclamation, this proof follows only call
+    /// edges that actually carry an arena address, so unrelated scalar helpers
+    /// cannot invalidate an otherwise safe private ABI boundary.
+    indirect_aggregate_safe_bodies: HashSet<RuntimeInstance<'db>>,
     /// Per-body address provenance for canonical-arena objects. Parameters
     /// enter this set only when every internal call site supplies a value
     /// derived from an arena allocation. Public/raw entry parameters are never
@@ -3721,6 +3726,7 @@ where
             wrapped_lane_names,
             validate_host_enum_params,
             scoped_arena_bodies: HashSet::new(),
+            indirect_aggregate_safe_bodies: HashSet::new(),
             arena_owned_locals: FxHashMap::default(),
         };
         let (indirect_params, indirect_returns) = lowerer.derive_indirect_aggregate_abi()?;
@@ -3729,6 +3735,8 @@ where
         if enable_scoped_arena {
             wasm_lower_trace(|| "derive typed arena provenance".to_owned());
             lowerer.arena_owned_locals = lowerer.derive_arena_owned_locals();
+            lowerer.indirect_aggregate_safe_bodies =
+                lowerer.derive_indirect_aggregate_safe_bodies();
             wasm_lower_trace(|| "derive scoped arena bodies".to_owned());
             lowerer.scoped_arena_bodies = lowerer.derive_scoped_arena_bodies();
             wasm_lower_trace(|| {
@@ -6699,6 +6707,98 @@ where
             .is_some_and(|owned| owned.contains(&local))
     }
 
+    /// Prove the private ABI boundary independently from whole-function arena
+    /// reclamation. The local allowlist rejects raw conversion, host effects,
+    /// nonlocal stores, and reference returns. Its fixed point follows only
+    /// calls that receive an arena-backed value or reference. Calls made solely
+    /// from flattened scalar lanes cannot observe the internal pointer and do
+    /// not affect this escape proof.
+    fn derive_indirect_aggregate_safe_bodies(&self) -> HashSet<RuntimeInstance<'db>> {
+        let resumable_owners = self
+            .resumable_continuations
+            .iter()
+            .map(|continuation| continuation.body.owner)
+            .collect::<HashSet<_>>();
+        let mut dependencies =
+            FxHashMap::<RuntimeInstance<'db>, HashSet<RuntimeInstance<'db>>>::default();
+        let mut safe = HashSet::new();
+        for (instance, body) in &self.prepared_bodies {
+            if resumable_owners.contains(instance) || self.analyze_scoped_arena_body(body).is_err()
+            {
+                continue;
+            }
+            safe.insert(*instance);
+            let mut forwarded = HashSet::new();
+            for block in &body.blocks {
+                for stmt in &block.stmts {
+                    let RStmt::Assign {
+                        expr: RExpr::Call { callee, args },
+                        ..
+                    } = stmt
+                    else {
+                        continue;
+                    };
+                    let Some(callee_body) = self.prepared_bodies.get(callee) else {
+                        continue;
+                    };
+                    let indirect_params = self
+                        .indirect_aggregate_params
+                        .get(callee)
+                        .cloned()
+                        .unwrap_or_default();
+                    let carries_arena_address = args
+                        .iter()
+                        .zip(&callee_body.signature.params)
+                        .any(|(argument, parameter)| {
+                            indirect_params.contains(&parameter.local)
+                                || body.value_class(*argument).is_some_and(|source| {
+                                    (source.contains_transport(self.db)
+                                        && parameter.class.contains_transport(self.db))
+                                        || matches!(
+                                            &parameter.class,
+                                            RuntimeClass::Ref {
+                                                pointee,
+                                                kind: RefKind::Const,
+                                                view: RefView::Whole,
+                                            } if matches!(source, RuntimeClass::AggregateValue { .. })
+                                                && source.shares_runtime_rep_with(self.db, pointee)
+                                                && self.aggregate_is_memory_lowerable(source)
+                                        )
+                                })
+                        });
+                    if carries_arena_address {
+                        forwarded.insert(*callee);
+                    }
+                }
+            }
+            dependencies.insert(*instance, forwarded);
+        }
+        loop {
+            let rejected = safe
+                .iter()
+                .copied()
+                .filter(|instance| {
+                    dependencies
+                        .get(instance)
+                        .is_some_and(|callees| callees.iter().any(|callee| !safe.contains(callee)))
+                })
+                .collect::<Vec<_>>();
+            if rejected.is_empty() {
+                break;
+            }
+            for instance in rejected {
+                safe.remove(&instance);
+            }
+        }
+        wasm_lower_trace(|| {
+            format!(
+                "derived indirect aggregate escape-safe bodies, safe={}",
+                safe.len(),
+            )
+        });
+        safe
+    }
+
     /// Derive the closed set of ordinary Fe functions whose arena-backed
     /// temporaries cannot cross a function boundary. The analysis starts from
     /// a strict local allowlist, then removes every body that calls outside the
@@ -8156,7 +8256,9 @@ where
                     && self.module.aggregate_is_memory_lowerable(&source)
             );
             if materialize_indirect_value {
-                if !self.scoped_arena && !self.module.scoped_arena_bodies.contains(&callee) {
+                if !self.scoped_arena
+                    && !self.module.indirect_aggregate_safe_bodies.contains(&callee)
+                {
                     return Err(LowerError::Internal(format!(
                         "call to `{}` requires an indirect aggregate value copy, but the callee failed the arena escape proof",
                         self.module.function_symbol(callee),
@@ -8185,9 +8287,22 @@ where
                         self.module.function_symbol(callee),
                     )));
                 }
-                values.push(self.lower_materialize_to_object(*arg)?);
+                let argument = if self.is_address_carried_aggregate_value(*arg) {
+                    let RuntimeClass::AggregateValue { layout } = source else {
+                        return Err(LowerError::Internal(format!(
+                            "indirect aggregate argument {arg:?} lost its value layout",
+                        )));
+                    };
+                    let source = self.local_value(*arg)?;
+                    self.lower_deep_object_copy(source, layout)?
+                } else {
+                    self.lower_materialize_to_object(*arg)?
+                };
+                values.push(argument);
             } else if materialize_read_borrow {
-                if !self.scoped_arena && !self.module.scoped_arena_bodies.contains(&callee) {
+                if !self.scoped_arena
+                    && !self.module.indirect_aggregate_safe_bodies.contains(&callee)
+                {
                     return Err(LowerError::Internal(format!(
                         "call to `{}` requires a scoped aggregate borrow, but the callee failed the arena escape proof",
                         self.module.function_symbol(callee),
