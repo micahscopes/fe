@@ -6718,10 +6718,24 @@ where
             .prepared_bodies
             .iter()
             .filter(|(instance, _)| !resumable_owners.contains(instance))
-            .filter_map(|(instance, body)| {
-                self.analyze_scoped_arena_body(body)
-                    .ok()
-                    .map(|analysis| (*instance, analysis))
+            .filter_map(|(instance, body)| match self.analyze_scoped_arena_body(body) {
+                Ok(analysis) => Some((*instance, analysis)),
+                Err(reason) => {
+                    if self.indirect_aggregate_returns.contains(instance)
+                        || self
+                            .indirect_aggregate_params
+                            .get(instance)
+                            .is_some_and(|params| !params.is_empty())
+                    {
+                        wasm_lower_trace_detail(|| {
+                            format!(
+                                "reject indirect ABI body from scoped arena, symbol={}, reason={reason}",
+                                self.function_symbol(*instance),
+                            )
+                        });
+                    }
+                    None
+                }
             })
             .collect::<FxHashMap<_, _>>();
         let mut safe = analyses.keys().copied().collect::<HashSet<_>>();
@@ -6740,6 +6754,26 @@ where
                 break;
             }
             for instance in rejected {
+                if self.indirect_aggregate_returns.contains(&instance)
+                    || self
+                        .indirect_aggregate_params
+                        .get(&instance)
+                        .is_some_and(|params| !params.is_empty())
+                {
+                    let mut missing = analyses[&instance]
+                        .callees
+                        .iter()
+                        .filter(|callee| !safe.contains(callee))
+                        .map(|callee| self.function_symbol(*callee))
+                        .collect::<Vec<_>>();
+                    missing.sort();
+                    wasm_lower_trace_detail(|| {
+                        format!(
+                            "reject indirect ABI body from scoped arena fixed point, symbol={}, callees={missing:?}",
+                            self.function_symbol(instance),
+                        )
+                    });
+                }
                 safe.remove(&instance);
             }
         }
@@ -7930,9 +7964,10 @@ where
             *self.module.func_map.get(&callee).ok_or_else(|| {
                 LowerError::Internal("wasm call target was not declared".to_string())
             })?;
-        let arg_vals = self.checked_call_arg_values(callee, callee_ref, args)?;
+        let (arg_vals, call_checkpoint) = self.checked_call_arg_values(callee, callee_ref, args)?;
         self.fb
             .insert_inst_no_result(Call::new(is, callee_ref, arg_vals.into_iter().collect()));
+        self.rewind_call_arena(call_checkpoint);
         Ok(())
     }
 
@@ -8059,14 +8094,18 @@ where
     /// the caller's prepared lanes agree exactly. Most value arguments flatten
     /// in DFS declaration order. A private read-only aggregate parameter keeps
     /// one pointer instead: the caller materializes an independent arena copy,
-    /// and the scoped escape proof guarantees its lifetime. Any missed boundary
-    /// adaptation fails here before an invalid Wasm call reaches the emitter.
+    /// and the callee's escape proof guarantees its lifetime. A caller admitted
+    /// by the whole-function proof reclaims that copy at its ordinary return.
+    /// Otherwise a direct-result call receives a local checkpoint that is
+    /// rewound immediately after its scalar results have been captured. Any
+    /// missed boundary adaptation fails before an invalid Wasm call reaches the
+    /// emitter.
     fn checked_call_arg_values(
         &mut self,
         callee: RuntimeInstance<'db>,
         callee_ref: FuncRef,
         args: &[RLocalId],
-    ) -> Result<Vec<ValueId>, LowerError> {
+    ) -> Result<(Vec<ValueId>, Option<ValueId>), LowerError> {
         let params = self
             .module
             .prepared_bodies
@@ -8100,6 +8139,7 @@ where
             .signature
             .params
             .clone();
+        let mut call_checkpoint = None;
         for ((arg, param), prepared_param) in args.iter().zip(&params).zip(&callee_params) {
             let source = self.body.value_class(*arg).cloned().ok_or_else(|| {
                 LowerError::Internal(format!("call argument {arg:?} has no runtime class"))
@@ -8116,11 +8156,24 @@ where
                     && self.module.aggregate_is_memory_lowerable(&source)
             );
             if materialize_indirect_value {
-                if !self.scoped_arena {
+                if !self.scoped_arena && !self.module.scoped_arena_bodies.contains(&callee) {
                     return Err(LowerError::Internal(format!(
-                        "call to `{}` requires an indirect aggregate value copy, but its caller failed the arena escape proof",
+                        "call to `{}` requires an indirect aggregate value copy, but the callee failed the arena escape proof",
                         self.module.function_symbol(callee),
                     )));
+                }
+                if !self.scoped_arena && call_checkpoint.is_none() {
+                    if self.module.indirect_aggregate_returns.contains(&callee) {
+                        return Err(LowerError::Internal(format!(
+                            "call to `{}` combines an indirect aggregate argument and result without an enclosing arena lifetime",
+                            self.module.function_symbol(callee),
+                        )));
+                    }
+                    let checkpoint_ty = self.fb.ptr_type(Type::I8);
+                    call_checkpoint = Some(
+                        self.fb
+                            .insert_inst(MemCheckpoint::new(self.inst_set()), checkpoint_ty),
+                    );
                 }
                 if !matches!(param, RuntimeClass::AggregateValue { .. })
                     || !source.shares_runtime_rep_with(self.module.db, param)
@@ -8133,11 +8186,24 @@ where
                 }
                 values.push(self.lower_materialize_to_object(*arg)?);
             } else if materialize_read_borrow {
-                if !self.scoped_arena {
+                if !self.scoped_arena && !self.module.scoped_arena_bodies.contains(&callee) {
                     return Err(LowerError::Internal(format!(
-                        "call to `{}` requires a scoped aggregate borrow, but its caller failed the arena escape proof",
+                        "call to `{}` requires a scoped aggregate borrow, but the callee failed the arena escape proof",
                         self.module.function_symbol(callee),
                     )));
+                }
+                if !self.scoped_arena && call_checkpoint.is_none() {
+                    if self.module.indirect_aggregate_returns.contains(&callee) {
+                        return Err(LowerError::Internal(format!(
+                            "call to `{}` combines a materialized aggregate borrow and indirect result without an enclosing arena lifetime",
+                            self.module.function_symbol(callee),
+                        )));
+                    }
+                    let checkpoint_ty = self.fb.ptr_type(Type::I8);
+                    call_checkpoint = Some(
+                        self.fb
+                            .insert_inst(MemCheckpoint::new(self.inst_set()), checkpoint_ty),
+                    );
                 }
                 values.push(self.lower_materialize_to_object(*arg)?);
             } else {
@@ -8176,7 +8242,7 @@ where
                 )));
             }
         }
-        Ok(values)
+        Ok((values, call_checkpoint))
     }
 
     fn local_flat_shape(&self, local: RLocalId) -> Result<FlatShape, LowerError> {
@@ -8684,10 +8750,12 @@ where
                 let callee_ref = *self.module.func_map.get(callee).ok_or_else(|| {
                     LowerError::Internal("wasm call target was not declared".to_string())
                 })?;
-                let arg_vals = self.checked_call_arg_values(*callee, callee_ref, args)?;
+                let (arg_vals, call_checkpoint) =
+                    self.checked_call_arg_values(*callee, callee_ref, args)?;
                 let results = self
                     .fb
                     .insert_call_results(callee_ref, arg_vals.into_iter().collect());
+                self.rewind_call_arena(call_checkpoint);
                 let dst_vars = self.tuple_vars.get(&dst).cloned().ok_or_else(|| {
                     LowerError::Internal(format!(
                         "aggregate call destination {dst:?} has no flattened variables"
@@ -10914,11 +10982,13 @@ where
                 }
             }
         };
-        let arg_vals = self.checked_call_arg_values(callee, callee_ref, args)?;
-        Ok(self.fb.insert_inst(
+        let (arg_vals, call_checkpoint) = self.checked_call_arg_values(callee, callee_ref, args)?;
+        let result = self.fb.insert_inst(
             Call::new(is, callee_ref, arg_vals.into_iter().collect()),
             ret_ty,
-        ))
+        );
+        self.rewind_call_arena(call_checkpoint);
+        Ok(result)
     }
 
     fn lower_terminator(&mut self, terminator: &RTerminator<'db>) -> Result<(), LowerError> {
@@ -11064,6 +11134,13 @@ where
 
     fn rewind_scoped_arena(&mut self) {
         if let Some(checkpoint) = self.arena_checkpoint {
+            self.fb
+                .insert_inst_no_result(MemRewind::new(self.inst_set(), checkpoint));
+        }
+    }
+
+    fn rewind_call_arena(&mut self, checkpoint: Option<ValueId>) {
+        if let Some(checkpoint) = checkpoint {
             self.fb
                 .insert_inst_no_result(MemRewind::new(self.inst_set(), checkpoint));
         }
