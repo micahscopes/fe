@@ -1495,19 +1495,33 @@ Legend:
   branch, and f32 regression passes 1/1, and the focused lowering unit slice
   passes 12/12.
   This is an honest protocol blocker, not a reason to enlarge the domain or
-  weaken the policy. The high degree is concentrated in the sparse
-  copy-address product DAG. The next slice must derive quadratic auxiliary
-  columns and constraints from one reusable Fe CTFE/FCO expression plan, then
-  interpret that same plan for witness generation, scalar/Wasm evaluation,
-  degree analysis, and later WebGPU scheduling. Existing semantic and mutation
-  oracles remain the truth while old and lowered evaluators overlap. Only once
-  the derived composition bound fits may the security profile be committed
-  into the transcript. The assembled regression receipt still carries four
-  queries. The compact 114-query range must subsequently drive real sampling,
-  openings, authentication paths, and FRI folds. The direct-domain policy is
-  still explicitly conjectured rather than a DEEP-ALI soundness claim. The
-  Sonatina companions also need a published revision and normal Fe dependency
-  pin before this gate is reproducible without the local path patch.
+  weaken the policy. Commit `aca9e388d` adds a reusable Fe-authored quadratic
+  arithmetic plan with witness and constraint interpreters. Commit
+  `6dcd20a70` uses it for the production product copy-address DAG and lowers the
+  shared copy-bus inverse identity to an equivalent quadratic relation on the
+  already-constrained boolean selector. The same 17-node product plan now
+  drives witness generation and constraint evaluation. Its zero-import Wasm
+  oracle rejects every committed node mutation under three independent fold
+  challenges. A second independent Rust oracle reconstructs every product row
+  and clean product, round, linear, and boundary receipt, rejects inverse
+  mutations, and confirms that coordinated mutations survive only until the
+  terminal equality check.
+
+  The exact production shape is now 468 constraints with family degrees
+  `[13, 8, 1, 8]`, maximum expression degree 13, and composition-degree bound
+  49,139. This is a genuine first reduction from degree 19 and bound 73,709,
+  but it still does not fit the 4,096-row trace-degree domain. Existing
+  semantic and mutation oracles remain the truth. The next slice must add
+  component degree introspection, identify the remaining degree-13 all-row
+  arithmetic and control expressions, and lower those through the same
+  reusable quadratic plan machinery. Only once the derived composition bound
+  fits may the security profile be committed into the transcript. The
+  assembled regression receipt still carries four queries. The compact
+  114-query range must subsequently drive real sampling, openings,
+  authentication paths, and FRI folds. The direct-domain policy is still
+  explicitly conjectured rather than a DEEP-ALI soundness claim. The Sonatina
+  companions also need a published revision and normal Fe dependency pin
+  before this gate is reproducible without the local path patch.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
   The first arithmetic-plan consolidation is landed at `ba2ded864`: one
@@ -1635,17 +1649,18 @@ fallback. The semantic receipts are:
    `mandelbrot_proof_gpu` clean and tampered Chromium modes now pass on AMD
    Radeon 780M through RADV after the private-heap fix. The four standalone
    hardware test binaries in the runbook remain to be executed without skips.
-2. Lower the degree-19 sparse copy-address expression DAG into CTFE/FCO-derived
-   quadratic auxiliary columns and constraints. Require the same plan to drive
-   witness generation, constraint evaluation, degree analysis, and later GPU
-   schedules, with independent old/new semantic and mutation gates. Once the
-   derived composition bound fits the trace domain, bind every policy parameter
-   into the production transcript, make the compact 114-query range drive
-   sampling, openings, authentication paths, and FRI folds, add assembled
-   canonical mutations, and pin the required Sonatina revision. Preserve the
-   four-query receipt as a regression fixture, then execute a separate
-   security-sized receipt rather than silently changing the checkpoint's
-   meaning.
+2. Continue the quadratic reduction after the first production slice reduced
+   maximum degree from 19 to 13 and composition bound from 73,709 to 49,139.
+   Add component degree introspection, then lower the remaining degree-13
+   all-row expressions through the same Fe-authored plan. Keep the plan shared
+   by witness generation, constraint evaluation, degree analysis, and later GPU
+   schedules, with independent semantic and mutation gates. Once the derived
+   composition bound fits the trace domain, bind every policy parameter into
+   the production transcript, make the compact 114-query range drive sampling,
+   openings, authentication paths, and FRI folds, add assembled canonical
+   mutations, and pin the required Sonatina revision. Preserve the four-query
+   receipt as a regression fixture, then execute a separate security-sized
+   receipt rather than silently changing the checkpoint's meaning.
 3. Lower the BabyBear leaf prover and recursive merges through Fe Conal/CTFE
    WebGPU schedules, then run the complete progressive proof/verify/tamper page
    through Chrome.
