@@ -8163,17 +8163,18 @@ where
                     )));
                 }
                 if !self.scoped_arena && call_checkpoint.is_none() {
-                    if self.module.indirect_aggregate_returns.contains(&callee) {
-                        return Err(LowerError::Internal(format!(
-                            "call to `{}` combines an indirect aggregate argument and result without an enclosing arena lifetime",
-                            self.module.function_symbol(callee),
-                        )));
+                    // An indirect result is allocated after the same would-be
+                    // checkpoint and must remain live in the caller. Keep both
+                    // the by-value argument copy and result in the enclosing
+                    // arena lifetime; their MIR carrier remains AggregateValue,
+                    // so no Fe reference capability is created or exposed.
+                    if !self.module.indirect_aggregate_returns.contains(&callee) {
+                        let checkpoint_ty = self.fb.ptr_type(Type::I8);
+                        call_checkpoint = Some(
+                            self.fb
+                                .insert_inst(MemCheckpoint::new(self.inst_set()), checkpoint_ty),
+                        );
                     }
-                    let checkpoint_ty = self.fb.ptr_type(Type::I8);
-                    call_checkpoint = Some(
-                        self.fb
-                            .insert_inst(MemCheckpoint::new(self.inst_set()), checkpoint_ty),
-                    );
                 }
                 if !matches!(param, RuntimeClass::AggregateValue { .. })
                     || !source.shares_runtime_rep_with(self.module.db, param)
@@ -8193,17 +8194,16 @@ where
                     )));
                 }
                 if !self.scoped_arena && call_checkpoint.is_none() {
-                    if self.module.indirect_aggregate_returns.contains(&callee) {
-                        return Err(LowerError::Internal(format!(
-                            "call to `{}` combines a materialized aggregate borrow and indirect result without an enclosing arena lifetime",
-                            self.module.function_symbol(callee),
-                        )));
+                    // See the indirect-value arm above. The returned aggregate
+                    // owns the enclosing lifetime, so the borrowed materialized
+                    // input cannot be reclaimed at this call boundary.
+                    if !self.module.indirect_aggregate_returns.contains(&callee) {
+                        let checkpoint_ty = self.fb.ptr_type(Type::I8);
+                        call_checkpoint = Some(
+                            self.fb
+                                .insert_inst(MemCheckpoint::new(self.inst_set()), checkpoint_ty),
+                        );
                     }
-                    let checkpoint_ty = self.fb.ptr_type(Type::I8);
-                    call_checkpoint = Some(
-                        self.fb
-                            .insert_inst(MemCheckpoint::new(self.inst_set()), checkpoint_ty),
-                    );
                 }
                 values.push(self.lower_materialize_to_object(*arg)?);
             } else {

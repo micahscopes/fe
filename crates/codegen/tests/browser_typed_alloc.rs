@@ -482,6 +482,37 @@ pub fn run() -> BrowserBytes {
 }
 
 #[test]
+fn indirect_results_extend_argument_copies_to_the_enclosing_arena() {
+    let wasm = compile_to_wasm(
+        r#"
+use core::BrowserBytes
+
+fn changed(mut values: own [u32; 1001]) -> [u32; 1001] {
+    values[0] = 99
+    values
+}
+
+pub fn run() -> BrowserBytes {
+    let mut values = [0; 1001]
+    values[0] = 1
+    values[1000] = 42
+    let result = changed(values: values)
+    BrowserBytes { ptr: values[0], len: result[0] + result[1000] }
+}
+"#,
+    );
+    wasmparser::validate(&wasm).expect("enclosing aggregate arena emitted invalid Wasm");
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, wasm).unwrap();
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+    let run = instance
+        .get_typed_func::<(), (i32, i32)>(&mut store, "run")
+        .unwrap();
+    assert_eq!(run.call(&mut store, ()).unwrap(), (1, 141));
+}
+
+#[test]
 fn oversized_public_value_parameters_fail_before_wasm_emission() {
     let error = compile_to_wasm_err(
         r#"
