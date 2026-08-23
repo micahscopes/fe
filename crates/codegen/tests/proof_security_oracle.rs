@@ -64,11 +64,12 @@ fn call_words(
     store: &mut wasmtime::Store<()>,
     instance: &wasmtime::Instance,
     name: &str,
+    result_count: usize,
 ) -> Vec<u32> {
     let function = instance
         .get_func(&mut *store, name)
         .unwrap_or_else(|| panic!("missing `{name}` export"));
-    let mut results = vec![Val::I32(0); 10];
+    let mut results = vec![Val::I32(0); result_count];
     function
         .call(&mut *store, &[], &mut results)
         .unwrap_or_else(|error| panic!("`{name}` should execute: {error:?}"));
@@ -121,9 +122,9 @@ fn logarithms_bracket_independent_f64_values() {
 #[test]
 fn recursive_union_budget_changes_the_derived_query_plan_and_fails_closed() {
     let (mut store, instance) = instance();
-    let leaf = call_words(&mut store, &instance, "leaf_policy100");
-    let recursive = call_words(&mut store, &instance, "recursive_policy100x1024");
-    let over_budget = call_words(&mut store, &instance, "recursive_policy100x2048");
+    let leaf = call_words(&mut store, &instance, "leaf_policy100", 10);
+    let recursive = call_words(&mut store, &instance, "recursive_policy100x1024", 10);
+    let over_budget = call_words(&mut store, &instance, "recursive_policy100x2048", 10);
 
     let per_query = random_words_bits_per_query();
     assert_eq!(leaf[0], 1);
@@ -140,6 +141,12 @@ fn recursive_union_budget_changes_the_derived_query_plan_and_fails_closed() {
     assert_eq!(recursive[1], (110.0 / per_query).ceil() as u32);
     assert_eq!(recursive[1], 114);
     assert!(recursive[9] >= 100 * 65_536);
+
+    assert_eq!(
+        call_words(&mut store, &instance, "recursive_security_query_plan", 6,),
+        vec![1, 114, 1, 115, 114, 0],
+        "the Fe-derived policy must instantiate the FCO query plan directly",
+    );
 
     assert_eq!(over_budget[0], 0);
     assert_eq!(over_budget[1], (111.0 / per_query).ceil() as u32);

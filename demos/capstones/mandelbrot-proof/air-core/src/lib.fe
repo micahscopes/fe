@@ -193,6 +193,21 @@ pub recursive type fn FriQueryPlanSteps<
 pub type FriQueryPlan<const FIRST_QUERY: u32, const COUNT: usize> =
     FriQueryPlanSteps<FIRST_QUERY, COUNT, COUNT>
 
+/// Compact denotation of a consecutive Fiat-Shamir query range.
+///
+/// Small proofs may use `FriQueryPlan` when a nominal type per sample is
+/// useful. Security-sized plans should interpret this range directly so
+/// compile time does not scale with a deeply nested query type. Both forms
+/// denote the same sequence of query identities.
+pub struct FriQueryRangePlan<
+    const FIRST_QUERY: u32,
+    const COUNT: usize,
+> {}
+impl<
+    const FIRST_QUERY: u32,
+    const COUNT: usize,
+> Copy for FriQueryRangePlan<FIRST_QUERY, COUNT> {}
+
 pub struct FriQueryPlanMetadata {
     pub samples: u32,
     pub first_query: u32,
@@ -226,6 +241,30 @@ impl<const QUERY: u32, Tail: FriQueryPlanShape> FriQueryPlanShape
             next_query: tail.next_query,
         }
     }
+}
+
+impl<
+    const FIRST_QUERY: u32,
+    const COUNT: usize,
+> FriQueryPlanShape for FriQueryRangePlan<FIRST_QUERY, COUNT> {
+    const fn fri_query_plan_metadata() -> FriQueryPlanMetadata {
+        FriQueryPlanMetadata {
+            samples: COUNT.downcast_truncate(),
+            first_query: FIRST_QUERY,
+            next_query: fri_query_plan_next(FIRST_QUERY, COUNT),
+        }
+    }
+}
+
+/// Resolve one identity from a compact query range. An out-of-range offset
+/// returns zero, which is not a valid production query identity.
+pub const fn fri_query_range_identity(
+    _ first_query: u32,
+    _ count: usize,
+    _ offset: usize,
+) -> u32 {
+    if offset >= count { return 0 }
+    first_query + offset.downcast_truncate()
 }
 
 /// Runtime evidence produced by structurally interpreting `FriSchedule`.

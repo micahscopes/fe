@@ -238,10 +238,13 @@ pub const fn derive_conjectured_direct_fri_policy(
         0
     }
     let query_count_u64 = ceil_div(uncovered_query_target, per_query)
-    if query_count_u64 == 0 || query_count_u64 >= (base_modulus as u64) {
+    if query_count_u64 == 0 || query_count_u64 > 4294967295 {
         return invalid_direct_fri_policy()
     }
     let query_count: u32 = query_count_u64.downcast_truncate()
+    if query_count >= base_modulus {
+        return invalid_direct_fri_policy()
+    }
     let query_bits = per_query * query_count_u64 + query_pow
 
     let air_penalty = security_ceil_log2(max_air_constraints as u64)
