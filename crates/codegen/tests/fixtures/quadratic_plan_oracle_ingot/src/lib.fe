@@ -1,0 +1,108 @@
+use precision::baby_bear::BabyBear
+use precision::polynomial::Radix2Field
+use quadratic_plan::{
+    QuadraticConstraintInterpreter,
+    QuadraticPlanInterpreter,
+    QuadraticWitnessInterpreter,
+}
+
+struct TinyPlan<I: QuadraticPlanInterpreter<BabyBear>> {
+    interpreter: I,
+    output: BabyBear,
+}
+impl<I: QuadraticPlanInterpreter<BabyBear>> core::marker::Copy for TinyPlan<I> {}
+
+/// One authored arithmetic plan shared by witness and constraint execution.
+/// Its final value has degree four in the three input columns.
+fn tiny_plan<I: QuadraticPlanInterpreter<BabyBear>>(
+    _ interpreter: I,
+    _ a: BabyBear,
+    _ b: BabyBear,
+    _ c: BabyBear,
+) -> TinyPlan<I> {
+    let ab = interpreter.multiply(a, b)
+    let bc = ab.interpreter.multiply(b, c)
+    let output = bc.interpreter.multiply(ab.value + c, bc.value)
+    TinyPlan { interpreter: output.interpreter, output: output.value }
+}
+
+/// Returns validity, all residuals, all committed nodes, and the interpreted
+/// output. A mutation changes one committed node after witness generation.
+pub fn quadratic_plan_audit(
+    _ a: u32,
+    _ b: u32,
+    _ c: u32,
+    _ mutation: u32,
+) -> (u32, u32, u32, u32, u32, u32, u32, u32) {
+    let a = BabyBear::from_u32(a)
+    let b = BabyBear::from_u32(b)
+    let c = BabyBear::from_u32(c)
+    let witnessed = tiny_plan(
+        QuadraticWitnessInterpreter<BabyBear, 3>::new(),
+        a,
+        b,
+        c,
+    )
+    let mut witness = witnessed.interpreter.finish()
+    if mutation > 0 && mutation <= 3 {
+        let index = (mutation - 1) as usize
+        witness.nodes[index] = witness.nodes[index] + BabyBear::one()
+    }
+    let constrained = tiny_plan(
+        QuadraticConstraintInterpreter<BabyBear, 3>::new(witness),
+        a,
+        b,
+        c,
+    )
+    let residuals = constrained.interpreter.finish()
+    (
+        if residuals.valid { 1 } else { 0 },
+        residuals.values[0].to_u32(),
+        residuals.values[1].to_u32(),
+        residuals.values[2].to_u32(),
+        witness.nodes[0].to_u32(),
+        witness.nodes[1].to_u32(),
+        witness.nodes[2].to_u32(),
+        constrained.output.to_u32(),
+    )
+}
+
+pub fn quadratic_plan_under_capacity(_ a: u32, _ b: u32, _ c: u32) -> u32 {
+    let a = BabyBear::from_u32(a)
+    let b = BabyBear::from_u32(b)
+    let c = BabyBear::from_u32(c)
+    let witnessed = tiny_plan(
+        QuadraticWitnessInterpreter<BabyBear, 2>::new(),
+        a,
+        b,
+        c,
+    )
+    let witness = witnessed.interpreter.finish()
+    let constrained = tiny_plan(
+        QuadraticConstraintInterpreter<BabyBear, 2>::new(witness),
+        a,
+        b,
+        c,
+    )
+    if constrained.interpreter.finish().valid { 1 } else { 0 }
+}
+
+pub fn quadratic_plan_over_capacity(_ a: u32, _ b: u32, _ c: u32) -> u32 {
+    let a = BabyBear::from_u32(a)
+    let b = BabyBear::from_u32(b)
+    let c = BabyBear::from_u32(c)
+    let witnessed = tiny_plan(
+        QuadraticWitnessInterpreter<BabyBear, 4>::new(),
+        a,
+        b,
+        c,
+    )
+    let witness = witnessed.interpreter.finish()
+    let constrained = tiny_plan(
+        QuadraticConstraintInterpreter<BabyBear, 4>::new(witness),
+        a,
+        b,
+        c,
+    )
+    if constrained.interpreter.finish().valid { 1 } else { 0 }
+}

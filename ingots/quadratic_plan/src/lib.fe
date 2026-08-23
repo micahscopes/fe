@@ -1,0 +1,152 @@
+//! One arithmetic dependency plan interpreted as witnesses or constraints.
+//!
+//! A consumer authors its straight-line additions and multiplication calls
+//! once. `QuadraticWitnessInterpreter` evaluates each multiplication and stores
+//! its node. `QuadraticConstraintInterpreter` reads those committed nodes and
+//! emits `node - left * right` residuals. Every emitted relation is therefore
+//! quadratic even when the denoted expression has high algebraic degree.
+//!
+//! The fixed node capacity is checked by both interpreters. It is placement,
+//! not a second expression description: adding or removing a multiplication
+//! from the authored plan makes an old capacity fail closed.
+
+use canonical_words::{CanonicalWords, CanonicalWordsProvider}
+use precision::polynomial::Radix2Field
+
+pub struct QuadraticPlanWitness<F: Radix2Field, const N: usize> {
+    pub nodes: [F; N],
+}
+impl<F: Radix2Field, const N: usize> core::marker::Copy
+    for QuadraticPlanWitness<F, N> {}
+derive CanonicalWords for QuadraticPlanWitness<F, N> using CanonicalWordsProvider
+
+pub struct QuadraticPlanResiduals<F: Radix2Field, const N: usize> {
+    pub valid: bool,
+    pub values: [F; N],
+}
+impl<F: Radix2Field, const N: usize> core::marker::Copy
+    for QuadraticPlanResiduals<F, N> {}
+
+pub struct QuadraticPlanStep<I: core::marker::Copy, F: Radix2Field> {
+    pub interpreter: I,
+    pub value: F,
+}
+impl<I: core::marker::Copy, F: Radix2Field> core::marker::Copy
+    for QuadraticPlanStep<I, F> {}
+
+/// One interpretation of an authored multiplication node. Additions and
+/// constant scaling remain ordinary field operations in the shared plan.
+pub trait QuadraticPlanInterpreter<F: Radix2Field>: core::marker::Copy {
+    fn multiply(self, _ left: F, _ right: F) -> QuadraticPlanStep<Self, F>
+}
+
+pub struct QuadraticWitnessInterpreter<F: Radix2Field, const N: usize> {
+    nodes: [F; N],
+    cursor: u32,
+    valid: bool,
+}
+impl<F: Radix2Field, const N: usize> core::marker::Copy
+    for QuadraticWitnessInterpreter<F, N> {}
+
+impl<F: Radix2Field, const N: usize> QuadraticWitnessInterpreter<F, N> {
+    pub fn new() -> Self {
+        Self { nodes: [F::radix2_zero(); N], cursor: 0, valid: true }
+    }
+
+    pub fn finish(self) -> QuadraticPlanWitness<F, N> {
+        let valid = self.valid && self.cursor == N.downcast_truncate()
+        QuadraticPlanWitness {
+            nodes: if valid { self.nodes } else { [F::radix2_zero(); N] },
+        }
+    }
+}
+
+impl<F: Radix2Field, const N: usize> QuadraticPlanInterpreter<F>
+    for QuadraticWitnessInterpreter<F, N> {
+    fn multiply(self, _ left: F, _ right: F) -> QuadraticPlanStep<Self, F> {
+        let value = left.radix2_mul(right)
+        if !self.valid || self.cursor >= N.downcast_truncate() {
+            return QuadraticPlanStep {
+                interpreter: Self {
+                    nodes: self.nodes,
+                    cursor: self.cursor,
+                    valid: false,
+                },
+                value: F::radix2_zero(),
+            }
+        }
+        let mut nodes = self.nodes
+        nodes[self.cursor as usize] = value
+        QuadraticPlanStep {
+            interpreter: Self {
+                nodes: nodes,
+                cursor: self.cursor + 1,
+                valid: true,
+            },
+            value: value,
+        }
+    }
+}
+
+pub struct QuadraticConstraintInterpreter<F: Radix2Field, const N: usize> {
+    witness: QuadraticPlanWitness<F, N>,
+    residuals: [F; N],
+    cursor: u32,
+    valid: bool,
+}
+impl<F: Radix2Field, const N: usize> core::marker::Copy
+    for QuadraticConstraintInterpreter<F, N> {}
+
+impl<F: Radix2Field, const N: usize> QuadraticConstraintInterpreter<F, N> {
+    pub fn new(_ witness: QuadraticPlanWitness<F, N>) -> Self {
+        Self {
+            witness: witness,
+            residuals: [F::radix2_zero(); N],
+            cursor: 0,
+            valid: true,
+        }
+    }
+
+    pub fn finish(self) -> QuadraticPlanResiduals<F, N> {
+        let valid = self.valid && self.cursor == N.downcast_truncate()
+        QuadraticPlanResiduals {
+            valid: valid,
+            values: if valid {
+                self.residuals
+            } else {
+                [F::radix2_zero(); N]
+            },
+        }
+    }
+}
+
+impl<F: Radix2Field, const N: usize> QuadraticPlanInterpreter<F>
+    for QuadraticConstraintInterpreter<F, N> {
+    fn multiply(self, _ left: F, _ right: F) -> QuadraticPlanStep<Self, F> {
+        if !self.valid || self.cursor >= N.downcast_truncate() {
+            return QuadraticPlanStep {
+                interpreter: Self {
+                    witness: self.witness,
+                    residuals: self.residuals,
+                    cursor: self.cursor,
+                    valid: false,
+                },
+                value: F::radix2_zero(),
+            }
+        }
+        let value = self.witness.nodes[self.cursor as usize]
+        let mut residuals = self.residuals
+        residuals[self.cursor as usize] = value.radix2_sub(
+            left.radix2_mul(right),
+        )
+        QuadraticPlanStep {
+            interpreter: Self {
+                witness: self.witness,
+                residuals: residuals,
+                cursor: self.cursor + 1,
+                valid: true,
+            },
+            value: value,
+        }
+    }
+}

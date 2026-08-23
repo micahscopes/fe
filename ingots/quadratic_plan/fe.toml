@@ -1,0 +1,8 @@
+[ingot]
+name = "quadratic_plan"
+version = "0.1.0"
+
+[dependencies]
+canonical_words = "../canonical_words"
+core = "../core"
+precision = "../../demos/sketches/precision"

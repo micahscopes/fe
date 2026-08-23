@@ -1,0 +1,138 @@
+//! Independent execution gate for Fe-authored quadratic arithmetic plans.
+
+use common::InputDb;
+use driver::DriverDataBase;
+use fe_codegen::{BackendKind, OptLevel, layout_for};
+use hir::hir_def::HirIngot;
+use std::path::Path;
+use url::Url;
+use wasmtime::Val;
+
+const BABY_BEAR_MODULUS: u64 = 2_013_265_921;
+
+fn bb_add(left: u32, right: u32) -> u32 {
+    ((left as u64 + right as u64) % BABY_BEAR_MODULUS) as u32
+}
+
+fn bb_mul(left: u32, right: u32) -> u32 {
+    (left as u64 * right as u64 % BABY_BEAR_MODULUS) as u32
+}
+
+fn fixture_url() -> Url {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/quadratic_plan_oracle_ingot");
+    Url::from_directory_path(path.canonicalize().unwrap()).unwrap()
+}
+
+fn compile_wasm() -> Vec<u8> {
+    let url = fixture_url();
+    let mut db = DriverDataBase::default();
+    assert!(
+        !driver::init_ingot(&mut db, &url),
+        "quadratic plan fixture initialization diagnostics",
+    );
+    let ingot = db
+        .workspace()
+        .containing_ingot(&db, url)
+        .expect("quadratic plan fixture ingot");
+    let top_mod = ingot.root_mod(&db);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "unexpected quadratic plan diagnostics:\n{diagnostics}",
+    );
+    let bytes = BackendKind::Wasm
+        .create()
+        .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
+        .expect("quadratic plan fixture should compile to Wasm")
+        .into_bytecode()
+        .expect("Wasm backend should emit bytes");
+    wasmparser::validate(&bytes).expect("quadratic plan Wasm should validate");
+    bytes
+}
+
+fn call_words(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    name: &str,
+    arguments: &[u32],
+    result_count: usize,
+) -> Vec<u32> {
+    let function = instance
+        .get_func(&mut *store, name)
+        .unwrap_or_else(|| panic!("missing `{name}` export"));
+    let params: Vec<Val> = arguments
+        .iter()
+        .map(|value| Val::I32(*value as i32))
+        .collect();
+    let mut results = vec![Val::I32(0); result_count];
+    function
+        .call(&mut *store, &params, &mut results)
+        .unwrap_or_else(|error| panic!("`{name}` should execute: {error:?}"));
+    results
+        .into_iter()
+        .map(|value| match value {
+            Val::I32(word) => word as u32,
+            other => panic!("`{name}` returned non-u32 lane {other:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn shared_plan_matches_independent_field_math_and_rejects_every_node_mutation() {
+    let engine = wasmtime::Engine::default();
+    let module =
+        wasmtime::Module::new(&engine, compile_wasm()).expect("quadratic plan module should load");
+    assert_eq!(module.imports().len(), 0, "fixture must remain zero-import");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("quadratic plan module should instantiate");
+
+    for [a, b, c] in [
+        [3u32, 5, 7],
+        [BABY_BEAR_MODULUS as u32 - 1, 19, 23],
+        [0, 29, 31],
+        [0x1234_5678, 0x3456_789a, 0x5678_9abc],
+    ] {
+        let a = (a as u64 % BABY_BEAR_MODULUS) as u32;
+        let b = (b as u64 % BABY_BEAR_MODULUS) as u32;
+        let c = (c as u64 % BABY_BEAR_MODULUS) as u32;
+        let ab = bb_mul(a, b);
+        let bc = bb_mul(b, c);
+        let output = bb_mul(bb_add(ab, c), bc);
+        let clean = call_words(
+            &mut store,
+            &instance,
+            "quadratic_plan_audit",
+            &[a, b, c, 0],
+            8,
+        );
+        assert_eq!(clean, [1, 0, 0, 0, ab, bc, output, output]);
+
+        for mutation in 1..=3 {
+            let mutated = call_words(
+                &mut store,
+                &instance,
+                "quadratic_plan_audit",
+                &[a, b, c, mutation],
+                8,
+            );
+            assert_eq!(mutated[0], 1, "mutation {mutation} executes the full plan");
+            assert!(
+                mutated[1..4].iter().any(|residual| *residual != 0),
+                "committed node mutation {mutation} must violate a quadratic residual",
+            );
+        }
+
+        for function in [
+            "quadratic_plan_under_capacity",
+            "quadratic_plan_over_capacity",
+        ] {
+            assert_eq!(
+                call_words(&mut store, &instance, function, &[a, b, c], 1),
+                [0],
+                "{function} must fail closed",
+            );
+        }
+    }
+}
