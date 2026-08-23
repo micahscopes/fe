@@ -726,6 +726,18 @@ enum SparseConstraintFamily {
 }
 impl core::marker::Copy for SparseConstraintFamily {}
 
+/// Structural count produced by the exact sparse composition fold.
+/// Evaluators and security-policy gates therefore observe one authored
+/// constraint sequence rather than maintaining a copied count table.
+pub struct SparseAirConstraintShape {
+    pub all_rows: u32,
+    pub pair_rows: u32,
+    pub first_row: u32,
+    pub last_row: u32,
+    pub total: u32,
+}
+impl core::marker::Copy for SparseAirConstraintShape {}
+
 /// Consecutive composition powers continue across zerofier families, matching
 /// the established AIR composition convention while allowing each generic
 /// fixed-air evaluator to retain its own readable constraint fold.
@@ -737,6 +749,10 @@ struct SparseCompositionFold {
     pair_rows: BabyBearExt4,
     first_row: BabyBearExt4,
     last_row: BabyBearExt4,
+    all_rows_constraints: u32,
+    pair_rows_constraints: u32,
+    first_row_constraints: u32,
+    last_row_constraints: u32,
 }
 impl core::marker::Copy for SparseCompositionFold {}
 
@@ -750,6 +766,10 @@ impl SparseCompositionFold {
             pair_rows: BabyBearExt4::zero(),
             first_row: BabyBearExt4::zero(),
             last_row: BabyBearExt4::zero(),
+            all_rows_constraints: 0,
+            pair_rows_constraints: 0,
+            first_row_constraints: 0,
+            last_row_constraints: 0,
         }
     }
 
@@ -765,15 +785,19 @@ impl SparseCompositionFold {
         match family {
             SparseConstraintFamily::AllRows => {
                 self.all_rows = self.all_rows + contribution
+                self.all_rows_constraints = self.all_rows_constraints + constraints
             }
             SparseConstraintFamily::PairRows => {
                 self.pair_rows = self.pair_rows + contribution
+                self.pair_rows_constraints = self.pair_rows_constraints + constraints
             }
             SparseConstraintFamily::FirstRow => {
                 self.first_row = self.first_row + contribution
+                self.first_row_constraints = self.first_row_constraints + constraints
             }
             SparseConstraintFamily::LastRow => {
                 self.last_row = self.last_row + contribution
+                self.last_row_constraints = self.last_row_constraints + constraints
             }
         }
         self.power = self.power * self.challenge.pow_u32(constraints)
@@ -809,14 +833,27 @@ impl SparseCompositionFold {
             last_row: self.last_row,
         }
     }
+
+    fn shape(self) -> SparseAirConstraintShape {
+        SparseAirConstraintShape {
+            all_rows: self.all_rows_constraints,
+            pair_rows: self.pair_rows_constraints,
+            first_row: self.first_row_constraints,
+            last_row: self.last_row_constraints,
+            total: self.all_rows_constraints
+                + self.pair_rows_constraints
+                + self.first_row_constraints
+                + self.last_row_constraints,
+        }
+    }
 }
 
-pub fn sparse_constraint_numerators_opened<const L: usize>(
+fn sparse_composition_fold_opened<const L: usize>(
     _ challenge: BabyBearExt4,
     _ interaction_challenges: SparseInteractionChallenges,
     _ row: ref SparseOpenedAirRow,
     _ next: ref SparseOpenedAirRow,
-) -> AirConstraintNumerators<BabyBearExt4>
+) -> SparseCompositionFold
 where L > 1,
 {
     let control = row.base.control
@@ -1008,7 +1045,43 @@ where L > 1,
             challenge, control, witness, interaction.boundary,
         ),
     )
-    fold.numerators()
+    fold
+}
+
+pub fn sparse_constraint_numerators_opened<const L: usize>(
+    _ challenge: BabyBearExt4,
+    _ interaction_challenges: SparseInteractionChallenges,
+    _ row: ref SparseOpenedAirRow,
+    _ next: ref SparseOpenedAirRow,
+) -> AirConstraintNumerators<BabyBearExt4>
+where L > 1,
+{
+    sparse_composition_fold_opened<L>(
+        challenge,
+        interaction_challenges,
+        row,
+        next,
+    ).numerators()
+}
+
+/// Interpret the exact composition fold as structural constraint counts.
+/// Zero-valued rows are sufficient because every evaluator reports its
+/// polynomial count independently of witness values.
+pub fn sparse_constraint_shape<const L: usize>() -> SparseAirConstraintShape
+where L > 1,
+{
+    let row = zero_sparse_opened_air_row()
+    let root: SparseTraceDigest<L> = SparseTraceDigest {
+        valid: false,
+        value: Poseidon2Digest::zero(),
+    }
+    let challenges = sparse_interaction_challenges(root)
+    sparse_composition_fold_opened<L>(
+        BabyBearExt4::one(),
+        challenges,
+        ref row,
+        ref row,
+    ).shape()
 }
 
 /// Evaluate the complete sparse high-precision AIR composition at one opened

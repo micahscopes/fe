@@ -1,0 +1,7 @@
+[ingot]
+name = "mandelbrot_sparse_air_shape_oracle_ingot"
+version = "0.1.0"
+
+[dependencies]
+core = "../../../../../ingots/core"
+mandelbrot_proof_fixed_air_baby_bear = "../../../../../demos/capstones/mandelbrot-proof/fixed-air-baby-bear"

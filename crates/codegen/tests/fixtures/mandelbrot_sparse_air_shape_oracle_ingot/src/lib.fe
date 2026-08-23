@@ -1,0 +1,14 @@
+//! Executable boundary for the structurally derived sparse AIR shape.
+
+use mandelbrot_proof_fixed_air_baby_bear::sparse_constraint_shape
+
+pub fn sparse_air_shape_l4() -> (u32, u32, u32, u32, u32) {
+    let shape = sparse_constraint_shape<4>()
+    (
+        shape.all_rows,
+        shape.pair_rows,
+        shape.first_row,
+        shape.last_row,
+        shape.total,
+    )
+}
