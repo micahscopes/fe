@@ -1433,9 +1433,31 @@ Legend:
   and 8,192-row codeword objects, initializes them in Fe, executes the shared
   production LDE at coset shift 7, lowers 66 Fe functions to a 305,035-byte
   zero-import Wasm module, and executes successfully. The complete split
-  receipt gate still needs a post-fix run through canonical decode, semantic
-  verification, and targeted mutation rejection before it counts as a
-  production proof.
+  receipt gate now also executes. Commit `002fc25c1` represents structurally
+  oversized local aggregates by one compiler-owned arena address while
+  retaining their Fe `AggregateValue` semantics and by-value deep copies. The
+  focused 8,192-leaf composition opening dropped from 65,549 emitted Wasm
+  locals to 816 and still passed its semantic authentication check. Across the
+  complete prover the highest measured local count is now 8,205. Local
+  Sonatina companions `1fb9968e` and `512f76aa` remove the unrelated 16 MiB
+  generated-memory ceiling and add opt-in emitted-body pressure diagnostics.
+  The exact split gate then passed 1/1 in 1,204.33 seconds: the zero-import
+  prover retained all 19,525 semantic specializations and 10,793 runtime
+  functions, emitted 13,905,487 Wasm bytes, executed, and returned a 29,672-byte
+  canonical receipt. A separately compiled zero-import verifier retained
+  14,720 specializations and 7,859 runtime functions, decoded those copied
+  bytes, accepted the receipt, and rejected a mutated canonical header. The
+  prover arena ended near 23 MiB, establishing that the prior allocator trap
+  was the hard module cap rather than runaway proof allocation.
+  This closes the executed production sparse receipt and canonical transport
+  boundary for the current one-transition `L = 4` checkpoint. It is not yet a
+  succinct recursive proof or a security claim. Targeted transcript, opening,
+  path, and fold mutations still rely on the established layer-specific
+  independent bigint gates; they must be added at this assembled canonical
+  boundary. The four-query checkpoint must still be replaced by an audited Fe
+  policy derived from explicit soundness parameters. The Sonatina companions
+  also need a published revision and normal Fe dependency pin before this gate
+  is reproducible without the local path patch.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
   The first arithmetic-plan consolidation is landed at `ba2ded864`: one
@@ -1563,14 +1585,11 @@ fallback. The semantic receipts are:
    `mandelbrot_proof_gpu` clean and tampered Chromium modes now pass on AMD
    Radeon 780M through RADV after the private-heap fix. The four standalone
    hardware test binaries in the runbook remain to be executed without skips.
-2. Execute and independently gate the assembled BabyBear sparse AIR receipt,
-   then encode it through staged canonical receipt decoders. The production
-   Fe specialization now carries `LD01`/`LD02`, public-bound `BC02`, exact
-   transcript requests, and the complete FRI fold chain, but type-checking is
-   not acceptance evidence. First contract its measured 19,589-specialization,
-   10,857-function prover package into compact Fe interpreters over
-   CTFE-derived receipt and FRI plans; the separate canonical-byte verifier
-   boundary remains the exact acceptance target.
+2. Derive the production query count and capacities from an audited Fe
+   soundness policy, add assembled canonical transcript/opening/path/fold
+   mutations, and pin the required Sonatina revision. Then contract the
+   measured flat receipt and FRI work into compact interpreters over one exact
+   CTFE-derived dependency plan without changing the now-executed receipt.
 3. Lower the BabyBear leaf prover and recursive merges through Fe Conal/CTFE
    WebGPU schedules, then run the complete progressive proof/verify/tamper page
    through Chrome.
