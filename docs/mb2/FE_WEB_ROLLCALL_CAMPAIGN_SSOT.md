@@ -1454,10 +1454,33 @@ Legend:
   succinct recursive proof or a security claim. Targeted transcript, opening,
   path, and fold mutations still rely on the established layer-specific
   independent bigint gates; they must be added at this assembled canonical
-  boundary. The four-query checkpoint must still be replaced by an audited Fe
-  policy derived from explicit soundness parameters. The Sonatina companions
-  also need a published revision and normal Fe dependency pin before this gate
-  is reproducible without the local path patch.
+  boundary. Commits `a3b42c545`, `135daa0ff`, and `4a0e3240d` now derive the
+  first explicit production query policy in Fe. The conservative Q16
+  direct-domain policy selects 103 queries for a conjectured 100-bit leaf and
+  114 queries when reserving a union-bound budget for at most 1,024 composed
+  proofs. It fails closed for 2,048 proofs under the present commitment phase.
+  The query transcript uses one nominal `FQ02` domain plus a canonical indexed
+  field element, independently checked against Plonky3 at indices 0, 1, 99,
+  100, 114, 65,537, and `p - 1`. This removes the former decimal-tag and
+  99-query ceiling. A compact `FriQueryRangePlan<1, 114>` carries the selected
+  plan in O(1) type structure; attempting to normalize the old 114-deep nested
+  plan consumed one CPU for five minutes without completing, so large query
+  plans no longer rely on that representation.
+  Commit `9b47c2b40` also interprets the exact authored sparse composition fold
+  as four zerofier-family constraint counts. Its zero-import Fe/Wasm gate
+  passes 1/1 in 392.53 seconds, requires every family to be nonempty, requires
+  their sum to equal the derived total, and confirms the `L = 4` AIR remains
+  within the policy's conservative 8,192-constraint cap. This is structural
+  count evidence from the production evaluator, not a replacement for the
+  existing independent semantic and mutation oracles. Maximum algebraic
+  degree is not yet derived, the 8,192 cap is still conservative, and the
+  direct-domain policy is explicitly conjectured rather than a DEEP-ALI
+  soundness claim. The assembled receipt still carries four queries. Before
+  increasing it to 114, the compact range must drive real sampling, openings,
+  authentication paths, and FRI folds, and every security-affecting parameter
+  must be bound into the transcript. The Sonatina companions also need a
+  published revision and normal Fe dependency pin before this gate is
+  reproducible without the local path patch.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
   The first arithmetic-plan consolidation is landed at `ba2ded864`: one
@@ -1585,11 +1608,14 @@ fallback. The semantic receipts are:
    `mandelbrot_proof_gpu` clean and tampered Chromium modes now pass on AMD
    Radeon 780M through RADV after the private-heap fix. The four standalone
    hardware test binaries in the runbook remain to be executed without skips.
-2. Derive the production query count and capacities from an audited Fe
-   soundness policy, add assembled canonical transcript/opening/path/fold
-   mutations, and pin the required Sonatina revision. Then contract the
-   measured flat receipt and FRI work into compact interpreters over one exact
-   CTFE-derived dependency plan without changing the now-executed receipt.
+2. Complete the Fe security policy now that its query count, compact range, and
+   exact AIR constraint-count interpreter are landed. Derive maximum algebraic
+   degree, bind every policy parameter into the production transcript, make
+   the compact 114-query range drive sampling, openings, authentication paths,
+   and FRI folds, add assembled canonical mutations, and pin the required
+   Sonatina revision. Preserve the four-query receipt as a regression fixture,
+   then execute a separate security-sized receipt rather than silently
+   changing the checkpoint's meaning.
 3. Lower the BabyBear leaf prover and recursive merges through Fe Conal/CTFE
    WebGPU schedules, then run the complete progressive proof/verify/tamper page
    through Chrome.
