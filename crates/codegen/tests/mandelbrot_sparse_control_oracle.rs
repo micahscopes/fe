@@ -9,7 +9,7 @@ use url::Url;
 use wasmtime::Val;
 
 const LIMBS: u32 = 4;
-const CONTROL_LANES: usize = 35;
+const CONTROL_LANES: usize = 38;
 
 fn control_row(
     kind: usize,
@@ -28,28 +28,29 @@ fn control_row(
     if kind <= 2 {
         if major < 6 {
             row[19] = 1;
+            row[20 + (major / 2) as usize] = 1;
         } else if major < 15 {
-            row[20 + ((major - 6) % 3) as usize] = 1;
+            row[23 + ((major - 6) % 3) as usize] = 1;
         } else {
-            row[23 + ((major - 15) % 4) as usize] = 1;
+            row[26 + ((major - 15) % 4) as usize] = 1;
         }
     }
     if kind == 0 || kind == 1 {
-        row[27] = u32::from(minor + 2 == LIMBS);
-        row[28] = u32::from(minor + 1 == LIMBS);
+        row[30] = u32::from(minor + 2 == LIMBS);
+        row[31] = u32::from(minor + 1 == LIMBS);
     }
-    row[29] = major;
-    row[30] = minor;
-    row[31] = step;
-    row[32] = if kind <= 2 {
-        u32::from(row[19] == 1 || row[22] == 1 || row[26] == 1)
+    row[32] = major;
+    row[33] = minor;
+    row[34] = step;
+    row[35] = if kind <= 2 {
+        u32::from(row[19] == 1 || row[25] == 1 || row[29] == 1)
     } else if kind == 9 || kind == 10 {
         u32::from(major == 0)
     } else {
         flag
     };
-    row[33] = width;
-    row[34] = weight;
+    row[36] = width;
+    row[37] = weight;
     row
 }
 
@@ -241,22 +242,22 @@ fn sparse_control_air_is_index_free_and_rejects_schedule_mutations() {
     let mutations = [
         (0usize, 0u32),
         (first_by_kind[1], 1),
-        (first_by_kind[2], 29),
-        (first_by_kind[3], 32),
-        (first_by_kind[3], 34),
-        (first_by_kind[4], 30),
-        (first_by_kind[5], 31),
-        (first_by_kind[5], 33),
-        (first_by_kind[6], 32),
-        (first_by_kind[7], 30),
-        (first_by_kind[8], 29),
+        (first_by_kind[2], 32),
+        (first_by_kind[3], 35),
+        (first_by_kind[3], 37),
+        (first_by_kind[4], 33),
+        (first_by_kind[5], 34),
+        (first_by_kind[5], 36),
+        (first_by_kind[6], 35),
+        (first_by_kind[7], 33),
+        (first_by_kind[8], 32),
         (first_by_kind[9], 15),
         (first_by_kind[9], 16),
-        (first_by_kind[9], 31),
-        (first_by_kind[9], 32),
-        (first_by_kind[10], 29),
-        (first_by_kind[11], 29),
-        (first_by_kind[12], 30),
+        (first_by_kind[9], 34),
+        (first_by_kind[9], 35),
+        (first_by_kind[10], 32),
+        (first_by_kind[11], 32),
+        (first_by_kind[12], 33),
         (first_by_kind[13], 13),
         (first_by_kind[14], 14),
         (rows.iter().position(|row| row[19] == 1).unwrap(), 19),
@@ -269,7 +270,10 @@ fn sparse_control_air_is_index_free_and_rejects_schedule_mutations() {
         (rows.iter().position(|row| row[26] == 1).unwrap(), 26),
         (rows.iter().position(|row| row[27] == 1).unwrap(), 27),
         (rows.iter().position(|row| row[28] == 1).unwrap(), 28),
-        (rows.len() - 1, 34),
+        (rows.iter().position(|row| row[29] == 1).unwrap(), 29),
+        (rows.iter().position(|row| row[30] == 1).unwrap(), 30),
+        (rows.iter().position(|row| row[31] == 1).unwrap(), 31),
+        (rows.len() - 1, 37),
     ];
     for challenge in [7u32, 17, 31] {
         let baseline = call(
@@ -285,7 +289,7 @@ fn sparse_control_air_is_index_free_and_rejects_schedule_mutations() {
         );
         assert_eq!(baseline[2], rows.len() as u32);
         assert_eq!(
-            baseline[1], 1_167_135,
+            baseline[1], 1_195_807,
             "every local, adjacency, and boundary constraint must be evaluated",
         );
         for (index, lane) in mutations {

@@ -102,39 +102,39 @@ fn expected_sparse_transition_tasks(limbs: u32) -> Vec<[u32; 5]> {
     tasks
 }
 
-fn expected_sparse_control_fields(task: [u32; 5]) -> [u32; 35] {
+fn expected_sparse_control_fields(task: [u32; 5]) -> [u32; 38] {
     let [kind, first, second, third, fourth] = task;
-    let mut fields = [0u32; 35];
+    let mut fields = [0u32; 38];
     fields[kind as usize] = 1;
     match kind {
         0 => {
-            fields[29] = first;
-            fields[30] = second;
-            fields[31] = third;
-            fields[34] = 1 << third;
+            fields[32] = first;
+            fields[33] = second;
+            fields[34] = third;
+            fields[37] = 1 << third;
         }
         1 => {
-            fields[29] = first;
-            fields[30] = second;
+            fields[32] = first;
+            fields[33] = second;
         }
-        2 => fields[29] = first,
+        2 => fields[32] = first,
         3 => {
-            fields[29] = first;
-            fields[30] = second;
-            fields[31] = fourth;
-            fields[32] = third;
-            fields[34] = 1 << fourth;
+            fields[32] = first;
+            fields[33] = second;
+            fields[34] = fourth;
+            fields[35] = third;
+            fields[37] = 1 << fourth;
         }
         4 => {
-            fields[29] = first;
-            fields[30] = second;
+            fields[32] = first;
+            fields[33] = second;
         }
         5 => {
-            fields[29] = first;
-            fields[30] = second;
-            fields[31] = third;
-            fields[32] = u32::from(second >= LIMBS as u32);
-            fields[33] = if second < LIMBS as u32 {
+            fields[32] = first;
+            fields[33] = second;
+            fields[34] = third;
+            fields[35] = u32::from(second >= LIMBS as u32);
+            fields[36] = if second < LIMBS as u32 {
                 second + 1
             } else if second < 2 * LIMBS as u32 - 1 {
                 2 * LIMBS as u32 - 1 - second
@@ -143,10 +143,10 @@ fn expected_sparse_control_fields(task: [u32; 5]) -> [u32; 35] {
             };
         }
         6 => {
-            fields[29] = first;
-            fields[30] = second;
-            fields[32] = u32::from(second >= LIMBS as u32);
-            fields[33] = if second < LIMBS as u32 {
+            fields[32] = first;
+            fields[33] = second;
+            fields[35] = u32::from(second >= LIMBS as u32);
+            fields[36] = if second < LIMBS as u32 {
                 second + 1
             } else if second < 2 * LIMBS as u32 - 1 {
                 2 * LIMBS as u32 - 1 - second
@@ -155,25 +155,25 @@ fn expected_sparse_control_fields(task: [u32; 5]) -> [u32; 35] {
             };
         }
         7 => {
-            fields[29] = first;
-            fields[30] = second;
+            fields[32] = first;
+            fields[33] = second;
         }
-        8 => fields[29] = first,
+        8 => fields[32] = first,
         9 => {
             fields[15 + second as usize] = 1;
-            fields[29] = first;
-            fields[30] = second;
-            fields[31] = third;
-            fields[32] = u32::from(first == 0);
+            fields[32] = first;
+            fields[33] = second;
+            fields[34] = third;
+            fields[35] = u32::from(first == 0);
         }
         10 => {
-            fields[29] = first;
-            fields[32] = u32::from(first == 0);
+            fields[32] = first;
+            fields[35] = u32::from(first == 0);
         }
-        11 => fields[29] = first,
+        11 => fields[32] = first,
         12 => {
-            fields[29] = first;
-            fields[30] = second;
+            fields[32] = first;
+            fields[33] = second;
         }
         13 | 14 => {}
         _ => panic!("unknown sparse control task kind {kind}"),
@@ -181,22 +181,23 @@ fn expected_sparse_control_fields(task: [u32; 5]) -> [u32; 35] {
     if kind <= 2 {
         if first < 6 {
             fields[19] = 1;
+            fields[20 + (first / 2) as usize] = 1;
         } else if first < 15 {
-            fields[20 + ((first - 6) % 3) as usize] = 1;
+            fields[23 + ((first - 6) % 3) as usize] = 1;
         } else {
-            fields[23 + ((first - 15) % 4) as usize] = 1;
+            fields[26 + ((first - 15) % 4) as usize] = 1;
         }
-        fields[32] = u32::from(fields[19] == 1 || fields[22] == 1 || fields[26] == 1);
+        fields[35] = u32::from(fields[19] == 1 || fields[25] == 1 || fields[29] == 1);
     }
     if kind == 0 || kind == 1 {
-        fields[27] = u32::from(second + 2 == LIMBS as u32);
-        fields[28] = u32::from(second + 1 == LIMBS as u32);
+        fields[30] = u32::from(second + 2 == LIMBS as u32);
+        fields[31] = u32::from(second + 1 == LIMBS as u32);
     }
     fields
 }
 
-fn expected_sparse_control_rows() -> Vec<[u32; 35]> {
-    let mut rows: Vec<[u32; 35]> = expected_sparse_transition_tasks(LIMBS as u32)
+fn expected_sparse_control_rows() -> Vec<[u32; 38]> {
+    let mut rows: Vec<[u32; 38]> = expected_sparse_transition_tasks(LIMBS as u32)
         .into_iter()
         .map(expected_sparse_control_fields)
         .collect();
@@ -2166,13 +2167,13 @@ fn expected_sparse_air_prefix_words(
     ] {
         extend_ext4_words(&mut words, accumulator);
     }
-    assert_eq!(words.len(), 526, "sparse prefix schema must stay nominal");
+    assert_eq!(words.len(), 538, "sparse prefix schema must stay nominal");
     words
 }
 
 fn expected_sparse_air_lde_words(prefix: &[u32]) -> Vec<u32> {
-    assert_eq!(prefix.len(), 526, "sparse prefix input must stay nominal");
-    const BASE_FIELDS: usize = 41;
+    assert_eq!(prefix.len(), 538, "sparse prefix input must stay nominal");
+    const BASE_FIELDS: usize = 44;
     const INTERACTION_FIELDS: usize = 84;
     const TRACE: usize = 4;
     const LDE: usize = 16;
@@ -2204,12 +2205,12 @@ fn expected_sparse_air_lde_words(prefix: &[u32]) -> Vec<u32> {
     let mut words = vec![1];
     words.extend(base);
     words.extend(interaction);
-    assert_eq!(words.len(), 2_001, "sparse LDE schema must stay nominal");
+    assert_eq!(words.len(), 2_049, "sparse LDE schema must stay nominal");
     words
 }
 
 fn expected_sparse_base_lde_root(lde: &[u32], mutate: bool) -> [u32; 8] {
-    const BASE_FIELDS: usize = 41;
+    const BASE_FIELDS: usize = 44;
     const LDE: usize = 16;
     assert!(lde.len() >= 1 + LDE * BASE_FIELDS);
     assert_eq!(lde[0], 1, "base LDE must be valid before commitment");
@@ -2219,7 +2220,7 @@ fn expected_sparse_base_lde_root(lde: &[u32], mutate: bool) -> [u32; 8] {
         let start = 1 + index * BASE_FIELDS;
         let mut row = lde[start..start + BASE_FIELDS].to_vec();
         if mutate && index == 0 {
-            row[35] = bb_add(row[35], 1);
+            row[38] = bb_add(row[38], 1);
         }
         fields.extend(row);
         leaves.push(reference_poseidon_digest(b"LD01", &fields));
@@ -4755,13 +4756,13 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
         &arguments,
     );
     let mut expected = expected_sparse_air_prefix_words(&point, &current, expected_base_root);
-    let first_base_fields = expected[10..51].to_vec();
-    let first_interaction_fields = expected[174..258].to_vec();
+    let first_base_fields = expected[10..54].to_vec();
+    let first_interaction_fields = expected[186..270].to_vec();
     let mut expected_lde = expected_sparse_air_lde_words(&expected);
     expected_lde.extend([1, 0]);
     assert_eq!(
         expected_lde.len(),
-        2_003,
+        2_051,
         "sparse LDE schema must stay nominal"
     );
     assert_eq!(lde_words.len(), expected_lde.len(), "sparse LDE length");
@@ -5043,7 +5044,7 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
         "unknown production mutation payload"
     );
 
-    const BASE_FIELDS: usize = 41;
+    const BASE_FIELDS: usize = 44;
     const INTERACTION_FIELDS: usize = 84;
     const LDE: usize = 16;
     const BASE_START: usize = 1;
@@ -5080,7 +5081,7 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
 
                 let row = evaluation as usize;
                 let next_row = ((evaluation + 4) & 15) as usize;
-                let mut expected_value = expected_lde[BASE_START + row * BASE_FIELDS + 35];
+                let mut expected_value = expected_lde[BASE_START + row * BASE_FIELDS + 38];
                 if mutation == 1 {
                     expected_value = bb_add(expected_value, 1);
                 }
@@ -5103,7 +5104,7 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
                 );
                 assert_eq!(
                     Ext4::from_words(&actual[31..35]),
-                    Ext4::from_base(expected_lde[BASE_START + next_row * BASE_FIELDS + 35]),
+                    Ext4::from_base(expected_lde[BASE_START + next_row * BASE_FIELDS + 38]),
                     "next base-row geometry, evaluation {evaluation}",
                 );
                 let next_interaction = INTERACTION_START + next_row * INTERACTION_FIELDS;
@@ -5156,7 +5157,7 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
     expected.extend([0; 8]);
     assert_eq!(
         expected.len(),
-        691,
+        706,
         "sparse checkpoint schema must stay nominal"
     );
     assert_eq!(words.len(), expected.len(), "sparse checkpoint length");
@@ -5170,7 +5171,7 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
 
 #[test]
 fn sparse_lde_multipaths_authenticate_production_codewords() {
-    const BASE_FIELDS: usize = 41;
+    const BASE_FIELDS: usize = 44;
     const INTERACTION_FIELDS: usize = 84;
     let bytes = compile_sparse_auth_fixture();
     let engine = wasmtime::Engine::default();

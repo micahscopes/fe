@@ -270,10 +270,15 @@ derive Eq for SparseLinearRoleSelectors<F>
 derive CanonicalWords for SparseLinearRoleSelectors<F> using CanonicalWordsProvider
 
 /// Semantic range roles shared by radix constraints and copy interactions.
-/// These named low-degree columns replace both a 31-way numeric lookup and a
-/// high-degree interpolation in the flattened range-node counter.
+/// The three coordinate kinds refine the aggregate coordinate role. Their
+/// two-root constraints derive the kind from `major` at degree three, so
+/// consumers can use a named linear column instead of rebuilding a degree-five
+/// or degree-six interpolation in every copy interaction.
 pub struct SparseRangeRoleSelectors<F: Radix2Field> {
     pub coordinate: F,
+    pub point_coordinate: F,
+    pub current_coordinate: F,
+    pub next_coordinate: F,
     pub product_low: F,
     pub product_high: F,
     pub product_output: F,
@@ -2723,6 +2728,9 @@ fn empty_sparse_range_role_selectors<F: Radix2Field>(
 ) -> SparseRangeRoleSelectors<F> {
     SparseRangeRoleSelectors {
         coordinate: zero<F>(),
+        point_coordinate: zero<F>(),
+        current_coordinate: zero<F>(),
+        next_coordinate: zero<F>(),
         product_low: zero<F>(),
         product_high: zero<F>(),
         product_output: zero<F>(),
@@ -2746,12 +2754,30 @@ fn sparse_range_roles_from_node<F: Radix2Field>(
 ) -> SparseRangeRoleSelectors<F> {
     let mut roles = empty_sparse_range_role_selectors<F>()
     match node {
-        RangeNode::PointReal => roles.coordinate = one<F>(),
-        RangeNode::PointImaginary => roles.coordinate = one<F>(),
-        RangeNode::CurrentReal => roles.coordinate = one<F>(),
-        RangeNode::CurrentImaginary => roles.coordinate = one<F>(),
-        RangeNode::NextReal => roles.coordinate = one<F>(),
-        RangeNode::NextImaginary => roles.coordinate = one<F>(),
+        RangeNode::PointReal => {
+            roles.coordinate = one<F>()
+            roles.point_coordinate = one<F>()
+        }
+        RangeNode::PointImaginary => {
+            roles.coordinate = one<F>()
+            roles.point_coordinate = one<F>()
+        }
+        RangeNode::CurrentReal => {
+            roles.coordinate = one<F>()
+            roles.current_coordinate = one<F>()
+        }
+        RangeNode::CurrentImaginary => {
+            roles.coordinate = one<F>()
+            roles.current_coordinate = one<F>()
+        }
+        RangeNode::NextReal => {
+            roles.coordinate = one<F>()
+            roles.next_coordinate = one<F>()
+        }
+        RangeNode::NextImaginary => {
+            roles.coordinate = one<F>()
+            roles.next_coordinate = one<F>()
+        }
         RangeNode::ProductLow(_) => roles.product_low = one<F>(),
         RangeNode::ProductHigh(_) => roles.product_high = one<F>(),
         RangeNode::ProductOutput(_) => roles.product_output = one<F>(),
@@ -2968,6 +2994,32 @@ fn absorb_sparse_control_local<F: Radix2Field>(
     fold = fold.absorb(sub(role_sum, selectors.linear_limb))
     let range_roles = row.range_roles
     fold = fold.absorb(bit_residual(range_roles.coordinate))
+    fold = fold.absorb(bit_residual(range_roles.point_coordinate))
+    fold = fold.absorb(bit_residual(range_roles.current_coordinate))
+    fold = fold.absorb(bit_residual(range_roles.next_coordinate))
+    let coordinate_kind_sum = add(
+        range_roles.point_coordinate,
+        add(range_roles.current_coordinate, range_roles.next_coordinate),
+    )
+    fold = fold.absorb(sub(coordinate_kind_sum, range_roles.coordinate))
+    fold = fold.absorb(mul(
+        range_roles.point_coordinate,
+        mul(row.major, sub(row.major, one<F>())),
+    ))
+    fold = fold.absorb(mul(
+        range_roles.current_coordinate,
+        mul(
+            sub(row.major, natural<F>(2)),
+            sub(row.major, natural<F>(3)),
+        ),
+    ))
+    fold = fold.absorb(mul(
+        range_roles.next_coordinate,
+        mul(
+            sub(row.major, natural<F>(4)),
+            sub(row.major, natural<F>(5)),
+        ),
+    ))
     fold = fold.absorb(bit_residual(range_roles.product_low))
     fold = fold.absorb(bit_residual(range_roles.product_high))
     fold = fold.absorb(bit_residual(range_roles.product_output))
@@ -4896,18 +4948,7 @@ fn zero_sparse_copy_port<F: Radix2Field>() -> SparseCopyPort<F> {
 fn sparse_product_current_coordinate<F: Radix2Field>(
     _ control: SparseControlRow<F>,
 ) -> F {
-    let major = control.major
-    let numerator = mul(
-        mul(major, sub(major, one<F>())),
-        mul(
-            sub(major, natural<F>(4)),
-            sub(major, natural<F>(5)),
-        ),
-    )
-    mul(
-        control.range_roles.coordinate,
-        mul(numerator, natural<F>(12).radix2_inverse_or_zero()),
-    )
+    control.range_roles.current_coordinate
 }
 
 fn sparse_product_range_address<F: Radix2Field, const L: usize>(
@@ -5854,21 +5895,7 @@ where L > 1,
 fn sparse_linear_point_coordinate<F: Radix2Field>(
     _ control: SparseControlRow<F>,
 ) -> F {
-    let major = control.major
-    let roots = mul(
-        mul(sub(major, natural<F>(2)), sub(major, natural<F>(3))),
-        mul(sub(major, natural<F>(4)), sub(major, natural<F>(5))),
-    )
-    mul(
-        control.range_roles.coordinate,
-        mul(
-            roots,
-            mul(
-                add(mul(natural<F>(4), major), one<F>()),
-                natural<F>(120).radix2_inverse_or_zero(),
-            ),
-        ),
-    )
+    control.range_roles.point_coordinate
 }
 
 fn sparse_linear_product_xy<F: Radix2Field>(
@@ -6427,21 +6454,7 @@ where L > 1,
 fn sparse_boundary_next_coordinate<F: Radix2Field>(
     _ control: SparseControlRow<F>,
 ) -> F {
-    let major = control.major
-    let roots = mul(
-        mul(major, sub(major, one<F>())),
-        mul(sub(major, natural<F>(2)), sub(major, natural<F>(3))),
-    )
-    mul(
-        control.range_roles.coordinate,
-        mul(
-            roots,
-            mul(
-                sub(natural<F>(21), mul(natural<F>(4), major)),
-                natural<F>(120).radix2_inverse_or_zero(),
-            ),
-        ),
-    )
+    control.range_roles.next_coordinate
 }
 
 fn write_sparse_boundary_interaction_ports<

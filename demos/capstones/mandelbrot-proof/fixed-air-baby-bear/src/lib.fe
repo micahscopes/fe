@@ -3308,6 +3308,9 @@ fn zero_sparse_trace_control_field<F: Radix2Field>() -> SparseControlRow<F> {
         },
         range_roles: SparseRangeRoleSelectors {
             coordinate: zero,
+            point_coordinate: zero,
+            current_coordinate: zero,
+            next_coordinate: zero,
             product_low: zero,
             product_high: zero,
             product_output: zero,

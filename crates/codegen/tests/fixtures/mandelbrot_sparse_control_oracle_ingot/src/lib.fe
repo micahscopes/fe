@@ -26,6 +26,7 @@ pub fn sparse_control4_row(
     u32, u32, u32, u32, u32,
     u32, u32, u32, u32, u32,
     u32, u32, u32, u32, u32,
+    u32, u32, u32,
 ) {
     let row = control4(index)
     let selectors = row.selectors
@@ -52,6 +53,9 @@ pub fn sparse_control4_row(
         roles.right_difference.to_u32(),
         roles.select.to_u32(),
         range.coordinate.to_u32(),
+        range.point_coordinate.to_u32(),
+        range.current_coordinate.to_u32(),
+        range.next_coordinate.to_u32(),
         range.product_low.to_u32(),
         range.product_high.to_u32(),
         range.product_output.to_u32(),
@@ -141,43 +145,55 @@ fn mutate_control4(
         row.range_roles.coordinate = row.range_roles.coordinate.radix2_add(one)
     }
     if lane == 20 {
-        row.range_roles.product_low = row.range_roles.product_low.radix2_add(one)
+        row.range_roles.point_coordinate =
+            row.range_roles.point_coordinate.radix2_add(one)
     }
     if lane == 21 {
-        row.range_roles.product_high = row.range_roles.product_high.radix2_add(one)
+        row.range_roles.current_coordinate =
+            row.range_roles.current_coordinate.radix2_add(one)
     }
     if lane == 22 {
+        row.range_roles.next_coordinate =
+            row.range_roles.next_coordinate.radix2_add(one)
+    }
+    if lane == 23 {
+        row.range_roles.product_low = row.range_roles.product_low.radix2_add(one)
+    }
+    if lane == 24 {
+        row.range_roles.product_high = row.range_roles.product_high.radix2_add(one)
+    }
+    if lane == 25 {
         row.range_roles.product_output =
             row.range_roles.product_output.radix2_add(one)
     }
-    if lane == 23 {
+    if lane == 26 {
         row.range_roles.linear_sum = row.range_roles.linear_sum.radix2_add(one)
     }
-    if lane == 24 {
+    if lane == 27 {
         row.range_roles.linear_left_difference =
             row.range_roles.linear_left_difference.radix2_add(one)
     }
-    if lane == 25 {
+    if lane == 28 {
         row.range_roles.linear_right_difference =
             row.range_roles.linear_right_difference.radix2_add(one)
     }
-    if lane == 26 {
+    if lane == 29 {
         row.range_roles.linear_output =
             row.range_roles.linear_output.radix2_add(one)
     }
-    if lane == 27 {
+    if lane == 30 {
         row.limb_positions.penultimate =
             row.limb_positions.penultimate.radix2_add(one)
     }
-    if lane == 28 {
+    if lane == 31 {
         row.limb_positions.last = row.limb_positions.last.radix2_add(one)
     }
-    if lane == 29 { row.major = row.major.radix2_add(one) }
-    if lane == 30 { row.minor = row.minor.radix2_add(one) }
-    if lane == 31 { row.step = row.step.radix2_add(one) }
-    if lane == 32 { row.flag = row.flag.radix2_add(one) }
-    if lane == 33 { row.width = row.width.radix2_add(one) }
-    if lane == 34 { row.weight = row.weight.radix2_add(one) }
+    if lane == 32 { row.major = row.major.radix2_add(one) }
+    if lane == 33 { row.minor = row.minor.radix2_add(one) }
+    if lane == 34 { row.step = row.step.radix2_add(one) }
+    if lane == 35 { row.flag = row.flag.radix2_add(one) }
+    if lane == 36 { row.width = row.width.radix2_add(one) }
+    if lane == 37 { row.weight = row.weight.radix2_add(one) }
     row
 }
 

@@ -107,11 +107,18 @@ fn exact_composition_interpreter_derives_the_audited_air_shape() {
     );
 
     let degrees = call_words(&mut store, &instance, "sparse_air_degree_shape_l4", &[], 9);
+    let components = call_words(
+        &mut store,
+        &instance,
+        "sparse_air_all_rows_degree_shape_l4",
+        &[],
+        8,
+    );
     assert_eq!(degrees[0], 1, "the degree interpretation must remain valid");
     assert_eq!(
         &degrees[1..6],
-        &[13, 8, 1, 8, 13],
-        "the first quadratic plan slice must retain its audited degree reduction",
+        &[8, 6, 1, 6, 8],
+        "semantic coordinate roles must retain their audited degree reduction",
     );
     let trace_length = 4_096;
     let reference_composition_degree = [
@@ -124,24 +131,16 @@ fn exact_composition_interpreter_derives_the_audited_air_shape() {
     .max()
     .unwrap();
     assert_eq!(degrees[6], reference_composition_degree);
-    assert_eq!(degrees[6], 49_139);
+    assert_eq!(degrees[6], 28_664);
     assert_eq!(degrees[7], shape[4]);
-    assert_eq!(degrees[7], 468);
+    assert_eq!(degrees[7], 475);
     assert_eq!(
         degrees[8], 0,
-        "the current degree-13 AIR must not be represented as fitting degree 4,096",
-    );
-
-    let components = call_words(
-        &mut store,
-        &instance,
-        "sparse_air_all_rows_degree_shape_l4",
-        &[],
-        8,
+        "the current degree-8 AIR must not be represented as fitting degree 4,096",
     );
     assert_eq!(
         components,
-        [1, 2, 8, 2, 13, 9, 9, 13],
+        [1, 3, 8, 2, 7, 7, 7, 8],
         "component interpretation must retain exact validity and degrees",
     );
     assert_eq!(components[7], degrees[1]);
