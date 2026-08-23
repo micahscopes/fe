@@ -1,0 +1,105 @@
+//! Executable boundary for conservative proof security policy arithmetic.
+
+use proof_security::{
+    DirectFriSecurityPolicy,
+    derive_conjectured_direct_fri_policy,
+    security_ceil_log2,
+    security_floor_log2,
+}
+
+const BABY_BEAR_MODULUS: u32 = 2013265921
+const EXTENSION_DEGREE: u32 = 4
+const TRACE_LENGTH: u32 = 4096
+const LDE_LENGTH: u32 = 8192
+const FOLDING_ARITY: u32 = 2
+const AIR_CONSTRAINT_CAP: u32 = 8192
+const HASH_COLLISION_BITS: u32 = 128
+
+fn policy_words(_ policy: DirectFriSecurityPolicy) -> (
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    (
+        if policy.valid { 1 } else { 0 },
+        policy.query_count,
+        policy.field_bits_q16.downcast_truncate(),
+        policy.bits_per_query_q16.downcast_truncate(),
+        policy.local_target_bits_q16.downcast_truncate(),
+        policy.query_bits_q16.downcast_truncate(),
+        policy.air_bits_q16.downcast_truncate(),
+        policy.commit_bits_q16.downcast_truncate(),
+        policy.local_attained_bits_q16.downcast_truncate(),
+        policy.global_attained_bits_q16.downcast_truncate(),
+    )
+}
+
+fn baby_bear_policy(
+    _ target_bits: u32,
+    _ max_composed_proofs: u32,
+) -> DirectFriSecurityPolicy {
+    derive_conjectured_direct_fri_policy(
+        target_bits,
+        max_composed_proofs,
+        BABY_BEAR_MODULUS,
+        EXTENSION_DEGREE,
+        TRACE_LENGTH,
+        LDE_LENGTH,
+        FOLDING_ARITY,
+        AIR_CONSTRAINT_CAP,
+        HASH_COLLISION_BITS,
+        0,
+        0,
+    )
+}
+
+pub fn leaf_policy100() -> (
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    policy_words(baby_bear_policy(100, 1))
+}
+
+pub fn recursive_policy100x1024() -> (
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    policy_words(baby_bear_policy(100, 1024))
+}
+
+pub fn recursive_policy100x2048() -> (
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    policy_words(baby_bear_policy(100, 2048))
+}
+
+pub fn malformed_policy(_ case: u32) -> u32 {
+    let policy = match case {
+        0 => derive_conjectured_direct_fri_policy(
+            100, 1, BABY_BEAR_MODULUS, EXTENSION_DEGREE,
+            4095, LDE_LENGTH, FOLDING_ARITY, AIR_CONSTRAINT_CAP,
+            HASH_COLLISION_BITS, 0, 0,
+        ),
+        1 => derive_conjectured_direct_fri_policy(
+            100, 1, BABY_BEAR_MODULUS, EXTENSION_DEGREE,
+            TRACE_LENGTH, 6144, FOLDING_ARITY, AIR_CONSTRAINT_CAP,
+            HASH_COLLISION_BITS, 0, 0,
+        ),
+        2 => derive_conjectured_direct_fri_policy(
+            100, 0, BABY_BEAR_MODULUS, EXTENSION_DEGREE,
+            TRACE_LENGTH, LDE_LENGTH, FOLDING_ARITY, AIR_CONSTRAINT_CAP,
+            HASH_COLLISION_BITS, 0, 0,
+        ),
+        3 => derive_conjectured_direct_fri_policy(
+            100, 1, BABY_BEAR_MODULUS, EXTENSION_DEGREE,
+            TRACE_LENGTH, LDE_LENGTH, 1, AIR_CONSTRAINT_CAP,
+            HASH_COLLISION_BITS, 0, 0,
+        ),
+        _ => derive_conjectured_direct_fri_policy(
+            100, 1, BABY_BEAR_MODULUS, EXTENSION_DEGREE,
+            TRACE_LENGTH, LDE_LENGTH, FOLDING_ARITY, 0,
+            HASH_COLLISION_BITS, 0, 0,
+        ),
+    }
+    if policy.valid { 1 } else { 0 }
+}
+
+pub fn logarithm_bracket(_ value: u64) -> (u64, u64) {
+    (security_floor_log2(value), security_ceil_log2(value))
+}

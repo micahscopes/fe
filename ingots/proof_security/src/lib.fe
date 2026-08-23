@@ -1,0 +1,299 @@
+//! Conservative, backend-neutral proof security arithmetic.
+//!
+//! Security quantities are represented as Q16 lower bounds on
+//! `-log2(error)`. Every logarithm used as a positive contribution rounds
+//! down, while every logarithm subtracted from a field-size budget rounds up.
+//! The same functions are therefore suitable for CTFE policy selection,
+//! scalar verification, recursive verification, and GPU schedule planning.
+//!
+//! `derive_conjectured_direct_fri_policy` models the random-words FRI query
+//! estimate described by Plonky3's `p3-security` crate. It deliberately does
+//! not claim DEEP-ALI: the caller supplies a conservative upper bound on the
+//! number of directly queried AIR constraints, and the result records that it
+//! is a direct-domain, conjectured policy. A future DEEP policy should be a
+//! distinct constructor and transcript domain rather than a boolean mode.
+
+pub const SECURITY_FRACTIONAL_BITS: u32 = 16
+pub const SECURITY_ONE_Q16: u64 = 65536
+
+/// `log2(e)` in Q16, rounded down. This is the same conservative constant
+/// independently used by `p3-security::fixed`.
+pub const LOG2_E_Q16: u64 = 94548
+
+pub struct DirectFriSecurityPolicy {
+    pub valid: bool,
+    pub target_bits: u32,
+    pub max_composed_proofs: u32,
+    pub base_modulus: u32,
+    pub extension_degree: u32,
+    pub trace_length: u32,
+    pub lde_length: u32,
+    pub log_blowup: u32,
+    pub folding_arity: u32,
+    pub max_air_constraints: u32,
+    pub hash_collision_bits: u32,
+    pub query_pow_bits: u32,
+    pub commit_pow_bits: u32,
+    pub query_count: u32,
+    pub field_bits_q16: u64,
+    pub bits_per_query_q16: u64,
+    pub local_target_bits_q16: u64,
+    pub query_bits_q16: u64,
+    pub air_bits_q16: u64,
+    pub commit_bits_q16: u64,
+    pub local_attained_bits_q16: u64,
+    pub global_attained_bits_q16: u64,
+}
+impl core::marker::Copy for DirectFriSecurityPolicy {}
+
+pub const fn security_from_bits(_ bits: u32) -> u64 {
+    (bits as u64) << (SECURITY_FRACTIONAL_BITS as u64)
+}
+
+pub const fn security_to_bits(_ value: u64) -> u32 {
+    (value >> (SECURITY_FRACTIONAL_BITS as u64)).downcast_truncate()
+}
+
+const fn is_power_of_two(_ value: u32) -> bool {
+    value != 0 && (value & (value - 1)) == 0
+}
+
+const fn exact_log2(_ value: u32) -> u32 {
+    if !is_power_of_two(value) { return 0 }
+    let mut remaining = value
+    let mut result: u32 = 0
+    while remaining > 1 {
+        remaining = remaining >> 1
+        result = result + 1
+    }
+    result
+}
+
+/// `log2(value)` in Q16, rounded down. Zero is rejected by callers and maps
+/// to zero here so malformed policy inputs fail closed without a CTFE panic.
+pub const fn security_floor_log2(_ value: u64) -> u64 {
+    if value == 0 { return 0 }
+
+    let mut reduced = value
+    let mut integer_part: u32 = 0
+    while reduced >= 2 {
+        reduced = reduced / 2
+        integer_part = integer_part + 1
+    }
+
+    let mut result = (integer_part as u64) << (SECURITY_FRACTIONAL_BITS as u64)
+    // Normalize to Q31. The mantissa remains below 2^32, so its square fits
+    // exactly in u64 and the same body is portable to Wasm and WebGPU-facing
+    // policy interpreters without a u128 lowering dependency.
+    let mut mantissa: u64 = if integer_part >= 31 {
+        value >> ((integer_part - 31) as u64)
+    } else {
+        value << ((31 - integer_part) as u64)
+    }
+    let mut bit: u32 = 0
+    while bit < SECURITY_FRACTIONAL_BITS {
+        mantissa = (mantissa * mantissa) >> (31 as u64)
+        if mantissa >= ((1 as u64) << (32 as u64)) {
+            mantissa = mantissa >> (1 as u64)
+            result = result | ((1 as u64)
+                << ((SECURITY_FRACTIONAL_BITS - 1 - bit) as u64))
+        }
+        bit = bit + 1
+    }
+    result
+}
+
+/// `log2(value)` in Q16, rounded up.
+pub const fn security_ceil_log2(_ value: u64) -> u64 {
+    if value == 0 { return 0 }
+    if (value & (value - 1)) == 0 {
+        return security_floor_log2(value)
+    }
+    security_floor_log2(value) + 1
+}
+
+/// Conservative `log2(modulus^extension_degree)` in Q16. Flooring the base
+/// logarithm before multiplication can only understate the field size.
+pub const fn extension_field_bits_q16(
+    _ base_modulus: u32,
+    _ extension_degree: u32,
+) -> u64 {
+    if base_modulus <= 2 || extension_degree == 0 { return 0 }
+    security_floor_log2(base_modulus as u64) * (extension_degree as u64)
+}
+
+/// Conjectured random-words FRI contribution of one query.
+///
+/// `rho = 2^-log_blowup` and
+/// `eta = log2(e/rho) * rho / log2(field_order)`. Rewriting before fixed-point
+/// evaluation gives
+/// `log_blowup - log2(1 + (log2(e) + log_blowup) / field_bits)`.
+pub const fn conjectured_fri_bits_per_query_q16(
+    _ log_blowup: u32,
+    _ field_bits_q16: u64,
+) -> u64 {
+    if log_blowup == 0 || field_bits_q16 == 0 { return 0 }
+    let uncorrected = security_from_bits(log_blowup)
+    let numerator = field_bits_q16 + LOG2_E_Q16 + uncorrected
+    let correction = security_ceil_log2(numerator) -
+        security_floor_log2(field_bits_q16)
+    if correction >= uncorrected { return 0 }
+    uncorrected - correction
+}
+
+const fn ceil_div(_ numerator: u64, _ denominator: u64) -> u64 {
+    if denominator == 0 { return 0 }
+    let remainder = if numerator % denominator == 0 { 0 } else { 1 }
+    numerator / denominator + remainder
+}
+
+const fn minimum(_ left: u64, _ right: u64) -> u64 {
+    if left < right { left } else { right }
+}
+
+const fn invalid_direct_fri_policy() -> DirectFriSecurityPolicy {
+    DirectFriSecurityPolicy {
+        valid: false,
+        target_bits: 0,
+        max_composed_proofs: 0,
+        base_modulus: 0,
+        extension_degree: 0,
+        trace_length: 0,
+        lde_length: 0,
+        log_blowup: 0,
+        folding_arity: 0,
+        max_air_constraints: 0,
+        hash_collision_bits: 0,
+        query_pow_bits: 0,
+        commit_pow_bits: 0,
+        query_count: 0,
+        field_bits_q16: 0,
+        bits_per_query_q16: 0,
+        local_target_bits_q16: 0,
+        query_bits_q16: 0,
+        air_bits_q16: 0,
+        commit_bits_q16: 0,
+        local_attained_bits_q16: 0,
+        global_attained_bits_q16: 0,
+    }
+}
+
+/// Derive a direct-domain, conjectured FRI policy from first principles.
+///
+/// `max_composed_proofs` is the union-bound budget for every independently
+/// fallible leaf and merge proof accepted by one final recursive claim. The
+/// local target is increased by `ceil(log2(max_composed_proofs))`, so adding
+/// recursion cannot silently preserve an unsafe leaf query count.
+///
+/// `max_air_constraints` is an audited upper bound supplied by the AIR shape
+/// interpreter. This constructor does not infer it from application source.
+/// A policy fails closed when query, AIR composition, FRI commit, hash, or
+/// recursive-union terms cannot meet `target_bits`.
+pub const fn derive_conjectured_direct_fri_policy(
+    _ target_bits: u32,
+    _ max_composed_proofs: u32,
+    _ base_modulus: u32,
+    _ extension_degree: u32,
+    _ trace_length: u32,
+    _ lde_length: u32,
+    _ folding_arity: u32,
+    _ max_air_constraints: u32,
+    _ hash_collision_bits: u32,
+    _ query_pow_bits: u32,
+    _ commit_pow_bits: u32,
+) -> DirectFriSecurityPolicy {
+    if target_bits == 0
+        || max_composed_proofs == 0
+        || base_modulus <= 2
+        || extension_degree == 0
+        || !is_power_of_two(trace_length)
+        || !is_power_of_two(lde_length)
+        || lde_length <= trace_length
+        || lde_length % trace_length != 0
+        || !is_power_of_two(lde_length / trace_length)
+        || !is_power_of_two(folding_arity)
+        || folding_arity <= 1
+        || max_air_constraints == 0
+        || hash_collision_bits == 0 {
+        return invalid_direct_fri_policy()
+    }
+
+    let blowup = lde_length / trace_length
+    let log_blowup = exact_log2(blowup)
+    let field_bits = extension_field_bits_q16(base_modulus, extension_degree)
+    let per_query = conjectured_fri_bits_per_query_q16(
+        log_blowup,
+        field_bits,
+    )
+    if field_bits == 0 || per_query == 0 {
+        return invalid_direct_fri_policy()
+    }
+
+    let union_bits = security_ceil_log2(max_composed_proofs as u64)
+    let local_target = security_from_bits(target_bits) + union_bits
+    let query_pow = security_from_bits(query_pow_bits)
+    let uncovered_query_target = if local_target > query_pow {
+        local_target - query_pow
+    } else {
+        0
+    }
+    let query_count_u64 = ceil_div(uncovered_query_target, per_query)
+    if query_count_u64 == 0 || query_count_u64 >= (base_modulus as u64) {
+        return invalid_direct_fri_policy()
+    }
+    let query_count: u32 = query_count_u64.downcast_truncate()
+    let query_bits = per_query * query_count_u64 + query_pow
+
+    let air_penalty = security_ceil_log2(max_air_constraints as u64)
+    let air_bits = if field_bits > air_penalty {
+        field_bits - air_penalty
+    } else {
+        0
+    }
+
+    let commit_factor = ((folding_arity - 1) as u64)
+        * ((lde_length as u64) + 1)
+    let commit_penalty = security_ceil_log2(commit_factor)
+    let commit_credit = security_from_bits(commit_pow_bits)
+    let commit_bits = if field_bits + commit_credit > commit_penalty {
+        field_bits + commit_credit - commit_penalty
+    } else {
+        0
+    }
+
+    let mut local_attained = minimum(query_bits, air_bits)
+    local_attained = minimum(local_attained, commit_bits)
+    local_attained = minimum(
+        local_attained,
+        security_from_bits(hash_collision_bits),
+    )
+    let global_attained = if local_attained > union_bits {
+        local_attained - union_bits
+    } else {
+        0
+    }
+    DirectFriSecurityPolicy {
+        valid: global_attained >= security_from_bits(target_bits),
+        target_bits: target_bits,
+        max_composed_proofs: max_composed_proofs,
+        base_modulus: base_modulus,
+        extension_degree: extension_degree,
+        trace_length: trace_length,
+        lde_length: lde_length,
+        log_blowup: log_blowup,
+        folding_arity: folding_arity,
+        max_air_constraints: max_air_constraints,
+        hash_collision_bits: hash_collision_bits,
+        query_pow_bits: query_pow_bits,
+        commit_pow_bits: commit_pow_bits,
+        query_count: query_count,
+        field_bits_q16: field_bits,
+        bits_per_query_q16: per_query,
+        local_target_bits_q16: local_target,
+        query_bits_q16: query_bits,
+        air_bits_q16: air_bits,
+        commit_bits_q16: commit_bits,
+        local_attained_bits_q16: local_attained,
+        global_attained_bits_q16: global_attained,
+    }
+}

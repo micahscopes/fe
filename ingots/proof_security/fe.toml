@@ -1,0 +1,6 @@
+[ingot]
+name = "proof_security"
+version = "0.1.0"
+
+[dependencies]
+core = "../core"

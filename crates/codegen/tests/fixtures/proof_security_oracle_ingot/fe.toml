@@ -1,0 +1,7 @@
+[ingot]
+name = "proof_security_oracle_ingot"
+version = "0.1.0"
+
+[dependencies]
+core = "../../../../../ingots/core"
+proof_security = "../../../../../ingots/proof_security"

@@ -1,0 +1,160 @@
+//! Independent oracle for Fe-derived recursive proof security policy.
+
+use common::InputDb;
+use driver::DriverDataBase;
+use fe_codegen::{BackendKind, OptLevel, layout_for};
+use hir::hir_def::HirIngot;
+use std::path::Path;
+use std::sync::OnceLock;
+use url::Url;
+use wasmtime::Val;
+
+const MODULUS: u32 = 2_013_265_921;
+const ONE_Q16: f64 = 65_536.0;
+
+fn fixture_url() -> Url {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/proof_security_oracle_ingot");
+    Url::from_directory_path(path.canonicalize().unwrap()).unwrap()
+}
+
+fn compile_wasm() -> Vec<u8> {
+    let url = fixture_url();
+    let mut db = DriverDataBase::default();
+    assert!(
+        !driver::init_ingot(&mut db, &url),
+        "proof security fixture initialization diagnostics",
+    );
+    let ingot = db
+        .workspace()
+        .containing_ingot(&db, url)
+        .expect("proof security fixture ingot");
+    let top_mod = ingot.root_mod(&db);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "unexpected proof security diagnostics:\n{diagnostics}",
+    );
+    let bytes = BackendKind::Wasm
+        .create()
+        .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
+        .expect("proof security fixture should compile to Wasm")
+        .into_bytecode()
+        .expect("Wasm backend should emit bytes");
+    wasmparser::validate(&bytes).expect("proof security Wasm should validate");
+    bytes
+}
+
+fn compiled_wasm() -> &'static [u8] {
+    static WASM: OnceLock<Vec<u8>> = OnceLock::new();
+    WASM.get_or_init(compile_wasm)
+}
+
+fn instance() -> (wasmtime::Store<()>, wasmtime::Instance) {
+    let engine = wasmtime::Engine::default();
+    let module =
+        wasmtime::Module::new(&engine, compiled_wasm()).expect("proof security module should load");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("proof security module should instantiate");
+    (store, instance)
+}
+
+fn call_words(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    name: &str,
+) -> Vec<u32> {
+    let function = instance
+        .get_func(&mut *store, name)
+        .unwrap_or_else(|| panic!("missing `{name}` export"));
+    let mut results = vec![Val::I32(0); 10];
+    function
+        .call(&mut *store, &[], &mut results)
+        .unwrap_or_else(|error| panic!("`{name}` should execute: {error:?}"));
+    results
+        .into_iter()
+        .map(|value| match value {
+            Val::I32(word) => word as u32,
+            other => panic!("`{name}` returned non-u32 lane {other:?}"),
+        })
+        .collect()
+}
+
+fn random_words_bits_per_query() -> f64 {
+    let field_bits = 4.0 * f64::from(MODULUS).log2();
+    let rho = 0.5;
+    let eta = (core::f64::consts::LOG2_E + 1.0) * rho / field_bits;
+    -(rho + eta).log2()
+}
+
+fn assert_conservative_q16(actual: u32, truth: f64, label: &str) {
+    let actual = f64::from(actual) / ONE_Q16;
+    assert!(
+        actual <= truth + 1e-12,
+        "{label} overstates {truth}: {actual}"
+    );
+    assert!(
+        truth - actual < 5.0 / ONE_Q16,
+        "{label} is unexpectedly loose: truth={truth}, actual={actual}",
+    );
+}
+
+#[test]
+fn logarithms_bracket_independent_f64_values() {
+    let (mut store, instance) = instance();
+    let function = instance
+        .get_typed_func::<i64, (i64, i64)>(&mut store, "logarithm_bracket")
+        .expect("logarithm bracket export");
+    for value in [1_u64, 2, 3, 7, 8, 8193, u32::MAX as u64, 1_u64 << 63] {
+        let (floor, ceil) = function
+            .call(&mut store, value as i64)
+            .expect("Fe logarithm should execute");
+        let truth = (value as f64).log2() * ONE_Q16;
+        assert!((floor as u64) as f64 <= truth + 1e-9);
+        assert!((ceil as u64) as f64 + 1e-9 >= truth);
+        assert!(truth - ((floor as u64) as f64) < 2.0);
+        assert!(((ceil as u64) as f64) - truth < 2.0);
+    }
+}
+
+#[test]
+fn recursive_union_budget_changes_the_derived_query_plan_and_fails_closed() {
+    let (mut store, instance) = instance();
+    let leaf = call_words(&mut store, &instance, "leaf_policy100");
+    let recursive = call_words(&mut store, &instance, "recursive_policy100x1024");
+    let over_budget = call_words(&mut store, &instance, "recursive_policy100x2048");
+
+    let per_query = random_words_bits_per_query();
+    assert_eq!(leaf[0], 1);
+    assert_eq!(leaf[1], (100.0 / per_query).ceil() as u32);
+    assert_eq!(leaf[1], 103);
+    assert_conservative_q16(
+        leaf[2],
+        4.0 * f64::from(MODULUS).log2(),
+        "extension field bits",
+    );
+    assert_conservative_q16(leaf[3], per_query, "FRI bits per query");
+
+    assert_eq!(recursive[0], 1);
+    assert_eq!(recursive[1], (110.0 / per_query).ceil() as u32);
+    assert_eq!(recursive[1], 114);
+    assert!(recursive[9] >= 100 * 65_536);
+
+    assert_eq!(over_budget[0], 0);
+    assert_eq!(over_budget[1], (111.0 / per_query).ceil() as u32);
+    assert!(over_budget[9] < 100 * 65_536);
+
+    let malformed = instance
+        .get_typed_func::<i32, i32>(&mut store, "malformed_policy")
+        .expect("malformed policy export");
+    for case in 0..5 {
+        assert_eq!(
+            malformed
+                .call(&mut store, case)
+                .expect("policy should execute"),
+            0,
+            "malformed policy case {case} must fail closed",
+        );
+    }
+}
