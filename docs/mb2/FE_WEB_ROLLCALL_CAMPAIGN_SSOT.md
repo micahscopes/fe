@@ -2,7 +2,7 @@
 
 Status: authoritative campaign burn-down
 
-Updated: 2026-08-22
+Updated: 2026-08-23
 
 Goal spine: write the math, get the kernel, keep the proof.
 
@@ -1472,15 +1472,42 @@ Legend:
   their sum to equal the derived total, and confirms the `L = 4` AIR remains
   within the policy's conservative 8,192-constraint cap. This is structural
   count evidence from the production evaluator, not a replacement for the
-  existing independent semantic and mutation oracles. Maximum algebraic
-  degree is not yet derived, the 8,192 cap is still conservative, and the
-  direct-domain policy is explicitly conjectured rather than a DEEP-ALI
-  soundness claim. The assembled receipt still carries four queries. Before
-  increasing it to 114, the compact range must drive real sampling, openings,
-  authentication paths, and FRI folds, and every security-affecting parameter
-  must be bound into the transcript. The Sonatina companions also need a
-  published revision and normal Fe dependency pin before this gate is
-  reproducible without the local path patch.
+  existing independent semantic and mutation oracles.
+  Commit `f7aff8f74` now interprets that same evaluator through an
+  `AirPolynomialDegree` semiring. Reflection populates every base and
+  interaction trace column as a degree-one variable, transcript challenges
+  remain degree-zero constants, and the ordinary evaluator sequence derives
+  family-specific expression degrees without a copied field list or
+  constraint body. The interpreter derives maximum expression degree 19 and,
+  after the four family zerofiers, a production composition-degree bound of
+  73,709. An independent Rust quotient calculation from the reported family
+  degrees agrees exactly. That bound does not fit the claimed 4,096-row
+  trace-degree domain. `proof_security` now requires
+  a nonzero composition bound strictly below the trace domain and therefore
+  fails closed instead of treating the present four-query receipt as a
+  low-degree proof. The shape gate passes 1/1 in 82.39 seconds. The focused
+  security gate passes 2/2 in 23.73 seconds, including primary-parameter
+  validation, recomputation of every derived policy lane, mutations, and an
+  exact high-word `u64` canonical-codec round trip. That round trip exposed a
+  general Wasm lowering defect where address-taken scalar Slots were read as
+  their private i32 pointer carriers. Commit `30303a2dc` loads their typed
+  pointees in every value lane; its direct return, arithmetic, call, copy,
+  branch, and f32 regression passes 1/1, and the focused lowering unit slice
+  passes 12/12.
+  This is an honest protocol blocker, not a reason to enlarge the domain or
+  weaken the policy. The high degree is concentrated in the sparse
+  copy-address product DAG. The next slice must derive quadratic auxiliary
+  columns and constraints from one reusable Fe CTFE/FCO expression plan, then
+  interpret that same plan for witness generation, scalar/Wasm evaluation,
+  degree analysis, and later WebGPU scheduling. Existing semantic and mutation
+  oracles remain the truth while old and lowered evaluators overlap. Only once
+  the derived composition bound fits may the security profile be committed
+  into the transcript. The assembled regression receipt still carries four
+  queries. The compact 114-query range must subsequently drive real sampling,
+  openings, authentication paths, and FRI folds. The direct-domain policy is
+  still explicitly conjectured rather than a DEEP-ALI soundness claim. The
+  Sonatina companions also need a published revision and normal Fe dependency
+  pin before this gate is reproducible without the local path patch.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
   The first arithmetic-plan consolidation is landed at `ba2ded864`: one
@@ -1608,14 +1635,17 @@ fallback. The semantic receipts are:
    `mandelbrot_proof_gpu` clean and tampered Chromium modes now pass on AMD
    Radeon 780M through RADV after the private-heap fix. The four standalone
    hardware test binaries in the runbook remain to be executed without skips.
-2. Complete the Fe security policy now that its query count, compact range, and
-   exact AIR constraint-count interpreter are landed. Derive maximum algebraic
-   degree, bind every policy parameter into the production transcript, make
-   the compact 114-query range drive sampling, openings, authentication paths,
-   and FRI folds, add assembled canonical mutations, and pin the required
-   Sonatina revision. Preserve the four-query receipt as a regression fixture,
-   then execute a separate security-sized receipt rather than silently
-   changing the checkpoint's meaning.
+2. Lower the degree-19 sparse copy-address expression DAG into CTFE/FCO-derived
+   quadratic auxiliary columns and constraints. Require the same plan to drive
+   witness generation, constraint evaluation, degree analysis, and later GPU
+   schedules, with independent old/new semantic and mutation gates. Once the
+   derived composition bound fits the trace domain, bind every policy parameter
+   into the production transcript, make the compact 114-query range drive
+   sampling, openings, authentication paths, and FRI folds, add assembled
+   canonical mutations, and pin the required Sonatina revision. Preserve the
+   four-query receipt as a regression fixture, then execute a separate
+   security-sized receipt rather than silently changing the checkpoint's
+   meaning.
 3. Lower the BabyBear leaf prover and recursive merges through Fe Conal/CTFE
    WebGPU schedules, then run the complete progressive proof/verify/tamper page
    through Chrome.
