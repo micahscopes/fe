@@ -1551,6 +1551,41 @@ pub fn squeeze_ext4<D: Poseidon2FieldDomain>(_ digest: Poseidon2Digest) -> BabyB
     BabyBearExt4::from_coefficients([state[0], state[1], state[2], state[3]])
 }
 
+/// Squeeze one quartic challenge while binding an ordinary field index.
+///
+/// The index is part of the sponge message, not folded into the four-byte
+/// nominal domain. Protocols can therefore derive arbitrarily many distinct
+/// challenges without inventing decimal domain tags or imposing a two-digit
+/// ceiling. A noncanonical index fails closed.
+pub fn squeeze_ext4_indexed<D: Poseidon2FieldDomain>(
+    _ digest: Poseidon2Digest,
+    _ index_value: u32,
+) -> BabyBearExt4 {
+    if D::TAG >= BABY_BEAR_MODULUS || index_value >= BABY_BEAR_MODULUS {
+        return BabyBearExt4::zero()
+    }
+    let mut state: [BabyBear; WIDTH] = [BabyBear::zero(); WIDTH]
+    state[0] = BabyBear::from_u32(D::TAG)
+    state[1] = BabyBear::from_u32((DIGEST_FIELDS + 1).downcast_truncate())
+    let mut index: usize = 0
+    let mut rate: usize = 2
+    while index < DIGEST_FIELDS {
+        state[rate] = digest.values[index]
+        rate = rate + 1
+        if rate == SPONGE_RATE {
+            state = permute16(input: state)
+            rate = 0
+        }
+        index = index + 1
+    }
+    state[rate] = BabyBear::from_u32(index_value)
+    rate = rate + 1
+    if rate != 0 {
+        state = permute16(input: state)
+    }
+    BabyBearExt4::from_coefficients([state[0], state[1], state[2], state[3]])
+}
+
 /// Expose the Fe-derived constants in canonical form for the independent
 /// parameter gate.
 pub fn parameter_plain(_ index: u32) -> u32 {

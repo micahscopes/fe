@@ -6,10 +6,10 @@
 
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::{layout_for, BackendKind, OptLevel};
+use fe_codegen::{BackendKind, OptLevel, layout_for};
 use hir::hir_def::HirIngot;
 use num_bigint::BigUint;
-use p3_baby_bear::{default_babybear_poseidon2_16, BabyBear};
+use p3_baby_bear::{BabyBear, default_babybear_poseidon2_16};
 use p3_field::{PrimeCharacteristicRing, PrimeField32};
 use p3_symmetric::Permutation;
 use std::path::Path;
@@ -210,6 +210,13 @@ fn bind_digest(tag: &[u8; 4], left: [u32; 8], right: [u32; 8]) -> [u32; 8] {
 fn squeeze_challenge(tag: &[u8; 4], digest: [u32; 8]) -> [u32; 4] {
     let mut message = vec![u32::from_be_bytes(*tag), 8];
     message.extend(digest);
+    reference_sponge(&message)[..4].try_into().unwrap()
+}
+
+fn squeeze_challenge_indexed(tag: &[u8; 4], digest: [u32; 8], index: u32) -> [u32; 4] {
+    let mut message = vec![u32::from_be_bytes(*tag), 9];
+    message.extend(digest);
+    message.push(index);
     reference_sponge(&message)[..4].try_into().unwrap()
 }
 
@@ -675,7 +682,7 @@ fn expected_fri_query16_index(seed: u32, air_transcript_seed: u32, shift: u32) -
     let composition_transcript =
         bind_digest(b"BC03", digest_seed(air_transcript_seed), composition_root);
     let chain = reference_fri_chain16_from_digest(seed, composition_transcript, shift)?;
-    Some(squeeze_challenge(b"FQ01", chain.final_transcript)[0] & 7)
+    Some(squeeze_challenge_indexed(b"FQ02", chain.final_transcript, 1)[0] & 7)
 }
 
 fn expected_fri_chain16_component(
@@ -1552,7 +1559,7 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
     }
 
     for transcript_seed in [0, 439, 1_900_000_007] {
-        let sample = squeeze_challenge(b"FQ01", digest_seed(transcript_seed))[0];
+        let sample = squeeze_challenge_indexed(b"FQ02", digest_seed(transcript_seed), 1)[0];
         assert_eq!(
             call(&mut store, &instance, "fri_query1", &[transcript_seed], 3,),
             vec![1, sample, sample & 7],
@@ -1560,7 +1567,7 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
         );
         let expected_queries = (1..=4)
             .map(|query| {
-                squeeze_challenge(&round_tag(b"FQ", query), digest_seed(transcript_seed))[0] & 7
+                squeeze_challenge_indexed(b"FQ02", digest_seed(transcript_seed), query)[0] & 7
             })
             .collect::<Vec<_>>();
         let mut expected_plan = vec![1];
@@ -1644,7 +1651,7 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
     for transcript_seed in [0, 439, 1_900_000_007] {
         let queries = (1..=4)
             .map(|query| {
-                squeeze_challenge(&round_tag(b"FQ", query), digest_seed(transcript_seed))[0] & 7
+                squeeze_challenge_indexed(b"FQ02", digest_seed(transcript_seed), query)[0] & 7
             })
             .collect::<Vec<_>>();
         let composition_requests = queries
@@ -1702,7 +1709,7 @@ fn production_mandelbrot_schemas_match_bigint_and_plonky3() {
         let chain = reference_fri_chain16_from_digest(seed, composition_transcript, shift)
             .expect("nonzero shift must produce the reference FRI chain");
         let queries = (1..=4)
-            .map(|query| squeeze_challenge(&round_tag(b"FQ", query), chain.final_transcript)[0] & 7)
+            .map(|query| squeeze_challenge_indexed(b"FQ02", chain.final_transcript, query)[0] & 7)
             .collect::<Vec<_>>();
         let layer_requests = [
             reference_pair_requests(&queries, 8),

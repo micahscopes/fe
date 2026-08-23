@@ -180,6 +180,13 @@ fn reference_field_commitment(tag: &[u8; 4], fields: &[u32]) -> [u32; 8] {
     reference_sponge(&message)
 }
 
+fn reference_indexed_squeeze(tag: &[u8; 4], digest: &[u32; 8], index: u32) -> [u32; 4] {
+    let mut message = vec![u32::from_be_bytes(*tag), 9];
+    message.extend_from_slice(digest);
+    message.push(index);
+    reference_sponge(&message)[..4].try_into().unwrap()
+}
+
 #[test]
 fn fe_derived_poseidon2_matches_plonky3_parameters_and_permutations() {
     let bytes = compiled_wasm();
@@ -617,5 +624,42 @@ fn bounded_bits_are_injective_and_commit_with_length_and_domain() {
         ),
         vec![0; 9],
         "a canonical word outside BabyBear must fail closed",
+    );
+}
+
+#[test]
+fn indexed_squeeze_binds_full_field_indices_without_decimal_domain_tags() {
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, compiled_wasm())
+        .expect("indexed squeeze oracle module should load");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("indexed squeeze oracle module should instantiate");
+    let digest = [3, 5, 8, 13, 21, 34, 55, 89];
+
+    let mut previous = None;
+    for index in [0, 1, 99, 100, 114, 65_537, BABY_BEAR_MODULUS - 1] {
+        let mut arguments = digest.to_vec();
+        arguments.push(index);
+        let actual = call(&mut store, &instance, "indexed_squeeze", &arguments, 4);
+        assert_eq!(actual, reference_indexed_squeeze(b"BI01", &digest, index));
+        if let Some(previous) = previous {
+            assert_ne!(actual, previous, "index {index} did not alter the squeeze");
+        }
+        previous = Some(actual);
+    }
+
+    let mut invalid_arguments = digest.to_vec();
+    invalid_arguments.push(BABY_BEAR_MODULUS);
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "indexed_squeeze",
+            &invalid_arguments,
+            4,
+        ),
+        vec![0; 4],
+        "a noncanonical index must fail closed",
     );
 }

@@ -89,8 +89,14 @@ use poseidon_baby_bear::{
     commit_packed,
     compress as poseidon_compress,
     squeeze_ext4,
+    squeeze_ext4_indexed,
 }
-use precision::baby_bear::{BabyBear, BabyBearExt4, BabyBearModulus}
+use precision::baby_bear::{
+    BABY_BEAR_MODULUS,
+    BabyBear,
+    BabyBearExt4,
+    BabyBearModulus,
+}
 use precision::word_field_encoding::{PackedFieldBits, pack_bounded_words}
 use precision::polynomial::{radix2_log, radix2_word_coset_lde}
 
@@ -130,7 +136,7 @@ struct MandelbrotAuxiliaryLdeTranscriptBabyBearV1 {}
 struct MandelbrotFriFoldBabyBear<const ROUND: u32> {}
 struct MandelbrotFriLayerRowBabyBear<const ROUND: u32> {}
 struct MandelbrotFriLayerTranscriptBabyBear<const ROUND: u32> {}
-struct MandelbrotFriQueryBabyBear<const QUERY: u32> {}
+struct MandelbrotFriQueryBabyBearV2 {}
 
 impl Poseidon2Domain for MandelbrotRowBabyBearV1 {
     const TAG: u32 = protocol_tag("BR01")
@@ -180,8 +186,8 @@ impl<const ROUND: u32> Poseidon2FieldDomain for MandelbrotFriLayerTranscriptBaby
     const TAG: u32 = protocol_round_tag("FT", ROUND)
 }
 
-impl<const QUERY: u32> Poseidon2FieldDomain for MandelbrotFriQueryBabyBear<QUERY> {
-    const TAG: u32 = protocol_round_tag("FQ", QUERY)
+impl Poseidon2FieldDomain for MandelbrotFriQueryBabyBearV2 {
+    const TAG: u32 = protocol_tag("FQ02")
 }
 
 pub struct RowDigest { pub valid: bool, pub value: Poseidon2Digest }
@@ -321,7 +327,7 @@ where
     { ROUND > 0 },
     { ROUND < 100 },
     { QUERY > 0 },
-    { QUERY < 100 },
+    { QUERY < BABY_BEAR_MODULUS },
     HALF > 0,
     { (HALF & (HALF - 1)) == 0 },
     { HALF <= 134217728 },
@@ -3884,15 +3890,16 @@ where { PREVIOUS > 0 }, { ROUND == PREVIOUS + 1 }, { ROUND < 100 }
 pub fn fri_query_challenge<const ROUND: u32, const QUERY: u32>(
     _ transcript: own FriLayerTranscriptDigest<ROUND>,
 ) -> FriQueryChallenge<QUERY>
-where { ROUND > 0 }, { ROUND < 100 }, { QUERY > 0 }, { QUERY < 100 }
+where { ROUND > 0 }, { ROUND < 100 }, { QUERY > 0 }, { QUERY < BABY_BEAR_MODULUS }
 {
     if !transcript.valid {
         return FriQueryChallenge<QUERY> { valid: false, value: BabyBear::zero() }
     }
     FriQueryChallenge<QUERY> {
         valid: true,
-        value: squeeze_ext4<MandelbrotFriQueryBabyBear<QUERY>>(
+        value: squeeze_ext4_indexed<MandelbrotFriQueryBabyBearV2>(
             transcript.value,
+            QUERY,
         ).coefficient(0),
     }
 }
@@ -3900,7 +3907,7 @@ where { ROUND > 0 }, { ROUND < 100 }, { QUERY > 0 }, { QUERY < 100 }
 pub fn fri_query_index_power_of_two<const QUERY: u32, const HALF: usize>(
     _ challenge: own FriQueryChallenge<QUERY>,
 ) -> FriQueryIndex<QUERY>
-where { QUERY > 0 }, { QUERY < 100 }, HALF > 0, { (HALF & (HALF - 1)) == 0 }, { HALF <= 134217728 }
+where { QUERY > 0 }, { QUERY < BABY_BEAR_MODULUS }, HALF > 0, { (HALF & (HALF - 1)) == 0 }, { HALF <= 134217728 }
 {
     if !challenge.valid {
         return FriQueryIndex<QUERY> { valid: false, value: 0 }

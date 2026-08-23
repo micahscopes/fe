@@ -3,6 +3,7 @@
 use canonical_words::{CanonicalWords, CanonicalWordsProvider}
 use poseidon_baby_bear::{
     Poseidon2Domain,
+    Poseidon2Digest,
     Poseidon2FieldDomain,
     Poseidon2FieldPermutation,
     Poseidon2FieldSponge,
@@ -20,6 +21,7 @@ use poseidon_baby_bear::{
     poseidon2_workgroup_destination,
     poseidon2_workgroup_lane,
     runtime_parameter_plain,
+    squeeze_ext4_indexed,
 }
 use precision::baby_bear::{BabyBear, BabyBearExt4, BabyBearModulus, BABY_BEAR_MODULUS}
 use precision::word_field_encoding::{PackedFieldBits, pack_bounded_words}
@@ -45,6 +47,23 @@ impl Poseidon2Domain for InvalidPackingTestDomain {
 struct FieldVectorTestDomain {}
 impl Poseidon2FieldDomain for FieldVectorTestDomain {
     const TAG: u32 = protocol_tag("BV01")
+}
+
+struct IndexedSqueezeTestDomain {}
+impl Poseidon2FieldDomain for IndexedSqueezeTestDomain {
+    const TAG: u32 = protocol_tag("BI01")
+}
+
+pub fn indexed_squeeze(
+    _ d0: u32, _ d1: u32, _ d2: u32, _ d3: u32,
+    _ d4: u32, _ d5: u32, _ d6: u32, _ d7: u32,
+    _ index: u32,
+) -> (u32, u32, u32, u32) {
+    let value = squeeze_ext4_indexed<IndexedSqueezeTestDomain>(
+        Poseidon2Digest::from_u32s([d0, d1, d2, d3, d4, d5, d6, d7]),
+        index,
+    ).to_u32s()
+    (value[0], value[1], value[2], value[3])
 }
 
 struct CanonicalMessage {
