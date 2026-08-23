@@ -2,7 +2,7 @@
 
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::{BackendKind, OptLevel, layout_for};
+use fe_codegen::{layout_for, BackendKind, OptLevel};
 use hir::hir_def::HirIngot;
 use std::path::Path;
 use url::Url;
@@ -131,4 +131,18 @@ fn exact_composition_interpreter_derives_the_audited_air_shape() {
         degrees[8], 0,
         "the current degree-13 AIR must not be represented as fitting degree 4,096",
     );
+
+    let components = call_words(
+        &mut store,
+        &instance,
+        "sparse_air_all_rows_degree_shape_l4",
+        &[],
+        8,
+    );
+    assert_eq!(
+        components,
+        [1, 2, 8, 2, 13, 9, 9, 13],
+        "component interpretation must retain exact validity and degrees",
+    );
+    assert_eq!(components[7], degrees[1]);
 }

@@ -857,6 +857,23 @@ pub struct SparseAirConstraintShape {
 impl core::marker::Copy for SparseAirConstraintShape {}
 derive CanonicalWords for SparseAirConstraintShape using CanonicalWordsProvider
 
+/// Component-level degree interpretation for the six all-row evaluators.
+/// This is derived from the same symbolic rows and exact production evaluator
+/// bodies as `SparseAirConstraintShape`; it is an audit surface for locating
+/// the next quadratic-lowering slice, not a copied degree table.
+pub struct SparseAirAllRowsDegreeShape {
+    pub valid: bool,
+    pub control: u32,
+    pub arithmetic: u32,
+    pub product: u32,
+    pub round: u32,
+    pub linear: u32,
+    pub boundary: u32,
+    pub maximum: u32,
+}
+impl core::marker::Copy for SparseAirAllRowsDegreeShape {}
+derive CanonicalWords for SparseAirAllRowsDegreeShape using CanonicalWordsProvider
+
 /// Consecutive composition powers continue across zerofier families, matching
 /// the established AIR composition convention while allowing each generic
 /// fixed-air evaluator to retain its own readable constraint fold.
@@ -1316,6 +1333,104 @@ where L > 1,
             maximum_degree(all_rows_degree, pair_rows_degree),
             maximum_degree(first_row_degree, last_row_degree),
         ),
+    }
+}
+
+/// Interpret each production all-row evaluator separately. The ordinary
+/// composition fold intentionally retains only the family maximum; this
+/// companion keeps enough provenance to choose and gate the next lowering
+/// target without maintaining a second constraint implementation.
+pub fn sparse_all_rows_degree_shape<const L: usize>()
+    -> SparseAirAllRowsDegreeShape
+where L > 1,
+{
+    let mut base = zero_sparse_base_air_row_field<AirPolynomialDegree>()
+    let base_source = base.decode(AirPolynomialVariableSource::new())
+    let mut interaction =
+        zero_sparse_interaction_trace_row_field<AirPolynomialDegree>()
+    let interaction_source = interaction.decode(
+        AirPolynomialVariableSource::new(),
+    )
+    let challenge = AirPolynomialDegree::constant()
+    let challenges = SparseCopyChallenges {
+        beta: AirPolynomialDegree::constant(),
+        gamma: AirPolynomialDegree::constant(),
+    }
+    let control = evaluate_sparse_control_row(challenge, base.control)
+    let arithmetic = evaluate_sparse_arithmetic_row<AirPolynomialDegree, L>(
+        challenge, base.control, base.witness,
+    )
+    let product = evaluate_sparse_product_interaction_row<
+        AirPolynomialDegree,
+        L,
+    >(
+        challenge,
+        challenges,
+        base.control,
+        base.witness,
+        interaction.product,
+    )
+    let round = evaluate_sparse_round_interaction_row<
+        AirPolynomialDegree,
+        L,
+    >(
+        challenge,
+        challenges,
+        base.control,
+        base.control,
+        base.witness,
+        interaction.round,
+    )
+    let linear = evaluate_sparse_linear_interaction_row<
+        AirPolynomialDegree,
+        L,
+    >(
+        challenge,
+        challenges,
+        base.control,
+        base.control,
+        base.witness,
+        interaction.linear,
+    )
+    let boundary = evaluate_sparse_boundary_interaction_row<
+        AirPolynomialDegree,
+        L,
+    >(
+        challenge,
+        challenges,
+        base.control,
+        base.witness,
+        interaction.boundary,
+    )
+    let maximum = maximum_degree(
+        maximum_degree(control.folded.degree, arithmetic.folded.degree),
+        maximum_degree(
+            maximum_degree(product.folded.degree, round.folded.degree),
+            maximum_degree(linear.folded.degree, boundary.folded.degree),
+        ),
+    )
+    SparseAirAllRowsDegreeShape {
+        valid: base_source.valid
+            && interaction_source.valid
+            && base_source.cursor
+                == <SparseBaseAirRow<AirPolynomialDegree>
+                    as CanonicalWords>::WORDS
+            && interaction_source.cursor
+                == <SparseInteractionTraceRow<AirPolynomialDegree>
+                    as CanonicalWords>::WORDS
+            && control.valid && control.folded.valid
+            && arithmetic.valid && arithmetic.folded.valid
+            && product.valid && product.folded.valid
+            && round.valid && round.folded.valid
+            && linear.valid && linear.folded.valid
+            && boundary.valid && boundary.folded.valid,
+        control: control.folded.degree,
+        arithmetic: arithmetic.folded.degree,
+        product: product.folded.degree,
+        round: round.folded.degree,
+        linear: linear.folded.degree,
+        boundary: boundary.folded.degree,
+        maximum: maximum,
     }
 }
 
