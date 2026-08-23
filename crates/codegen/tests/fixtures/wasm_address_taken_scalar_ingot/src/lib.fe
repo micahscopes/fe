@@ -1,0 +1,53 @@
+//! Executable regression for value reads from locally address-taken scalars.
+
+fn overwrite_u64(_ destination: mut u64, _ value: u64) {
+    destination = value
+}
+
+fn overwrite_bool(_ destination: mut bool, _ value: bool) {
+    destination = value
+}
+
+fn overwrite_f32(_ destination: mut f32, _ value: f32) {
+    destination = value
+}
+
+fn identity_u64(_ value: u64) -> u64 { value }
+
+pub fn address_taken_u64(_ value: u64) -> u64 {
+    let mut slot: u64 = 7
+    overwrite_u64(mut slot, value)
+    slot
+}
+
+pub fn address_taken_u64_arithmetic(_ value: u64) -> u64 {
+    let mut slot: u64 = 7
+    overwrite_u64(mut slot, value)
+    (slot ^ 0x9e3779b97f4a7c15) + 11
+}
+
+pub fn address_taken_u64_call(_ value: u64) -> u64 {
+    let mut slot: u64 = 7
+    overwrite_u64(mut slot, value)
+    identity_u64(slot)
+}
+
+pub fn address_taken_u64_copy(_ value: u64) -> u64 {
+    let mut source: u64 = 7
+    let mut destination: u64 = 13
+    overwrite_u64(mut source, value)
+    overwrite_u64(mut destination, source)
+    destination
+}
+
+pub fn address_taken_bool_branch(_ value: bool) -> u32 {
+    let mut slot: bool = false
+    overwrite_bool(mut slot, value)
+    if slot { 29 } else { 31 }
+}
+
+pub fn address_taken_f32_negate(_ value: f32) -> f32 {
+    let mut slot: f32 = 0.0
+    overwrite_f32(mut slot, value)
+    (-slot)
+}

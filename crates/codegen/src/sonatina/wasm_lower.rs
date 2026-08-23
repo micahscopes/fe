@@ -8071,7 +8071,7 @@ where
                 if !matches!(self.body.value_class(local), Some(RuntimeClass::Scalar(_))) {
                     return Err(unsupported_place(dst));
                 }
-                let value = self.local_value(*src)?;
+                let value = self.local_read_value(*src)?;
                 if self.materialized_scalar_slots.contains(&local) {
                     let pointer = self.local_value(local)?;
                     let ty = self.materialized_scalar_slot_ty(local)?;
@@ -8085,7 +8085,7 @@ where
             }
             RStmt::Store { dst, src } => {
                 if let Some((addr, ty)) = self.raw_memory_scalar_place(dst)? {
-                    let value = self.local_value(*src)?;
+                    let value = self.local_read_value(*src)?;
                     let actual = self.fb.type_of(value);
                     if actual != ty {
                         return Err(LowerError::Internal(format!(
@@ -9290,6 +9290,13 @@ where
     fn lower_expr(&mut self, expr: &RExpr<'db>, dst: RLocalId) -> Result<ValueId, LowerError> {
         match expr {
             RExpr::Use(src) => {
+                // Address-taken scalar slots carry an arena pointer in SSA.
+                // A value-level `Use` observes the pointee, not that internal
+                // pointer. Place formation continues to call `local_value`
+                // directly and therefore retains the address.
+                if self.materialized_scalar_slots.contains(src) {
+                    return self.local_read_value(*src);
+                }
                 // Item 2: a whole-aggregate local behind an object/memory-provider
                 // reference carries its arena POINTER as its SSA value, so a plain
                 // `Use` copies the pointer, not the bytes. This is SAFE when it
@@ -9372,14 +9379,14 @@ where
             RExpr::Binary { op, lhs, rhs } => self.lower_binary(*op, *lhs, *rhs, dst),
             RExpr::Unary { op, value } => self.lower_unary(*op, *value),
             RExpr::Cast { value, to } => {
-                let source_ty = self.local_ty(*value)?;
+                let source_ty = self.local_read_ty(*value)?;
                 let target_ty = scalar_ty_r1(to).map_err(|error| match error {
                     LowerError::Unsupported(message) => LowerError::Unsupported(format!(
                         "{message}; while lowering cast into {dst:?} from {value:?} to {to:?}"
                     )),
                     other => other,
                 })?;
-                let source = self.local_value(*value)?;
+                let source = self.local_read_value(*value)?;
                 if source_ty == target_ty {
                     return Ok(source);
                 }
@@ -9423,8 +9430,8 @@ where
                 }
             }
             RExpr::Bitcast { value, to } => {
-                let source_ty = self.local_ty(*value)?;
-                let value = self.local_value(*value)?;
+                let source_ty = self.local_read_ty(*value)?;
+                let value = self.local_read_value(*value)?;
                 let target_ty = scalar_ty_r1(to).map_err(|error| match error {
                     LowerError::Unsupported(message) => LowerError::Unsupported(format!(
                         "{message}; while lowering bitcast into {dst:?} from {value:?} to {to:?}"
@@ -11180,9 +11187,12 @@ where
         // the RLocalId, not the sonatina ValueId, which is signless). The sonatina
         // ValueIds shadow below for the instruction constructors.
         let (lhs_local, rhs_local) = (lhs, rhs);
-        let (lhs_ty, rhs_ty) = (self.local_ty(lhs_local)?, self.local_ty(rhs_local)?);
-        let lhs = self.local_value(lhs)?;
-        let rhs = self.local_value(rhs)?;
+        let (lhs_ty, rhs_ty) = (
+            self.local_read_ty(lhs_local)?,
+            self.local_read_ty(rhs_local)?,
+        );
+        let lhs = self.local_read_value(lhs)?;
+        let rhs = self.local_read_value(rhs)?;
         if float_operands {
             let is = self.inst_set();
             let BinOp::Comp(comp) = op else {
@@ -11376,7 +11386,7 @@ where
         );
         if is_float {
             let is = self.inst_set();
-            let value = self.local_value(value)?;
+            let value = self.local_read_value(value)?;
             return match op {
                 UnOp::Minus => Ok(self.fb.insert_inst(Fneg::new(is, value), Type::F32)),
                 other => Err(LowerError::Unsupported(format!(
@@ -11385,8 +11395,8 @@ where
             };
         }
         let is = self.inst_set();
-        let logical_ty = self.local_ty(value)?;
-        let value = self.local_value(value)?;
+        let logical_ty = self.local_read_ty(value)?;
+        let value = self.local_read_value(value)?;
         match op {
             // Fe's logical `!` is typed over bool before MIR. Sonatina carries
             // that as i1; Wasm represents it as i32 and translates IsZero to
@@ -11552,7 +11562,7 @@ where
                     self.rewind_scoped_arena();
                     self.fb.insert_return_values(&values);
                 } else {
-                    let value = self.local_value(*value)?;
+                    let value = self.local_read_value(*value)?;
                     self.rewind_scoped_arena();
                     self.fb.insert_inst_no_result(Return::new_single(is, value));
                 }
@@ -11572,7 +11582,7 @@ where
                 then_bb,
                 else_bb,
             } => {
-                let cond = self.local_value(*cond)?;
+                let cond = self.local_read_value(*cond)?;
                 let then_block = self.block_for(*then_bb)?;
                 let else_block = self.block_for(*else_bb)?;
                 self.fb
@@ -11589,7 +11599,7 @@ where
                         "enum-tag match uses a non-enum layout".to_owned(),
                     ));
                 }
-                let actual = self.local_value(*tag)?;
+                let actual = self.local_read_value(*tag)?;
                 let invalid = match default {
                     Some(default) => self.block_for(*default)?,
                     None => self.trap_block(),
@@ -11664,6 +11674,30 @@ where
     fn local_value(&mut self, local: RLocalId) -> Result<ValueId, LowerError> {
         let var = self.var_for(local)?;
         Ok(self.fb.use_var(var))
+    }
+
+    /// Read the semantic scalar value of a local. Most scalar locals carry the
+    /// value directly. An address-taken scalar Slot instead carries one private
+    /// arena pointer so mutable borrows retain identity; value expressions must
+    /// load through that pointer.
+    fn local_read_value(&mut self, local: RLocalId) -> Result<ValueId, LowerError> {
+        if self.materialized_scalar_slots.contains(&local) {
+            let pointer = self.local_value(local)?;
+            let ty = self.materialized_scalar_slot_ty(local)?;
+            return Ok(self.load_memory_scalar(pointer, ty));
+        }
+        self.local_value(local)
+    }
+
+    /// Logical type dual of `local_read_value`. `local_ty` reports i32 for a
+    /// materialized scalar because that is its private pointer carrier, while
+    /// arithmetic and casts require the pointee's semantic scalar type.
+    fn local_read_ty(&self, local: RLocalId) -> Result<Type, LowerError> {
+        if self.materialized_scalar_slots.contains(&local) {
+            self.materialized_scalar_slot_ty(local)
+        } else {
+            self.local_ty(local)
+        }
     }
 
     /// Whether `local` is a memory-lowerable object/memory-provider reference

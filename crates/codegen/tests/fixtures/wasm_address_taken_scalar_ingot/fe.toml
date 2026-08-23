@@ -1,0 +1,6 @@
+[ingot]
+name = "wasm_address_taken_scalar_ingot"
+version = "0.1.0"
+
+[dependencies]
+core = "../../../../../ingots/core"
