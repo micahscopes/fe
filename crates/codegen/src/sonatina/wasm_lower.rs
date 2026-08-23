@@ -3560,6 +3560,10 @@ where
     /// validated core-Wasm arity limit. The caller materializes a fresh arena
     /// copy, preserving Fe value semantics, and the callee receives one i32.
     indirect_aggregate_params: FxHashMap<RuntimeInstance<'db>, HashSet<RLocalId>>,
+    /// Private functions whose oversized aggregate result is transferred as one
+    /// arena pointer. The caller's enclosing arena lifetime owns that fresh
+    /// value; host-visible results never use this internal representation.
+    indirect_aggregate_returns: HashSet<RuntimeInstance<'db>>,
     /// Compiler-derived continuation segments. Their symbols and typed bodies
     /// come exclusively from the MIR suspension machine; no manifest or host
     /// entry table participates in declaration or lowering.
@@ -3712,13 +3716,16 @@ where
             resource_element_cache: FxHashMap::default(),
             resource_type_cache: FxHashMap::default(),
             indirect_aggregate_params: FxHashMap::default(),
+            indirect_aggregate_returns: HashSet::new(),
             resumable_continuations,
             wrapped_lane_names,
             validate_host_enum_params,
             scoped_arena_bodies: HashSet::new(),
             arena_owned_locals: FxHashMap::default(),
         };
-        lowerer.indirect_aggregate_params = lowerer.derive_indirect_aggregate_params()?;
+        let (indirect_params, indirect_returns) = lowerer.derive_indirect_aggregate_abi()?;
+        lowerer.indirect_aggregate_params = indirect_params;
+        lowerer.indirect_aggregate_returns = indirect_returns;
         if enable_scoped_arena {
             wasm_lower_trace(|| "derive typed arena provenance".to_owned());
             lowerer.arena_owned_locals = lowerer.derive_arena_owned_locals();
@@ -3769,10 +3776,17 @@ where
     /// validated parameter limit. The largest savings are selected first. A
     /// public, external, non-memory-lowerable, or still-oversized signature
     /// fails before Sonatina emits an invalid module.
-    fn derive_indirect_aggregate_params(
+    fn derive_indirect_aggregate_abi(
         &self,
-    ) -> Result<FxHashMap<RuntimeInstance<'db>, HashSet<RLocalId>>, LowerError> {
+    ) -> Result<
+        (
+            FxHashMap<RuntimeInstance<'db>, HashSet<RLocalId>>,
+            HashSet<RuntimeInstance<'db>>,
+        ),
+        LowerError,
+    > {
         let mut selected = FxHashMap::default();
+        let mut indirect_returns = HashSet::new();
         for function in self.functions_in_declaration_order() {
             let instance = function.instance(self.db);
             if gpu_intrinsic(self.db, instance).is_some()
@@ -3816,9 +3830,26 @@ where
                     |leaves| leaves.len(),
                 );
             if return_arity > MAX_WASM_FUNCTION_RETURNS {
-                return Err(LowerError::Unsupported(format!(
-                    "Wasm function `{symbol}` returns {return_arity} flattened values, exceeding the validated limit of {MAX_WASM_FUNCTION_RETURNS}; return the aggregate through typed caller-owned storage"
-                )));
+                let return_class = body.signature.ret.as_ref().ok_or_else(|| {
+                    LowerError::Internal(format!(
+                        "Wasm function `{symbol}` has result arity without a result class"
+                    ))
+                })?;
+                if matches!(linkage, Linkage::Private)
+                    && matches!(return_class, RuntimeClass::AggregateValue { .. })
+                    && self.aggregate_is_memory_lowerable(return_class)
+                {
+                    indirect_returns.insert(instance);
+                    wasm_lower_trace(|| {
+                        format!(
+                            "derived private aggregate result ABI, symbol={symbol}, flattened_returns={return_arity}"
+                        )
+                    });
+                } else {
+                    return Err(LowerError::Unsupported(format!(
+                        "Wasm function `{symbol}` returns {return_arity} flattened values, exceeding the validated limit of {MAX_WASM_FUNCTION_RETURNS}; expose typed caller-owned storage or keep the function private"
+                    )));
+                }
             }
             if total <= MAX_WASM_FUNCTION_PARAMS {
                 continue;
@@ -3860,7 +3891,53 @@ where
             });
             selected.insert(instance, function_selected);
         }
-        Ok(selected)
+        Ok((selected, indirect_returns))
+    }
+
+    /// Track aggregate locals whose value is already resident in an arena
+    /// object because it is an indirect parameter or the result of an indirect
+    /// private call. Plain `Use` bindings propagate that representation through
+    /// the prepared body. Other aggregate producers retain the flattened value
+    /// representation until an indirect boundary materializes them.
+    fn derive_indirect_aggregate_values(
+        &self,
+        body: &RuntimeBody<'db>,
+        indirect_params: &HashSet<RLocalId>,
+    ) -> HashSet<RLocalId> {
+        let mut values = indirect_params.clone();
+        loop {
+            let mut changed = false;
+            for block in &body.blocks {
+                for stmt in &block.stmts {
+                    let RStmt::Assign { dst, expr } = stmt else {
+                        continue;
+                    };
+                    let indirect = match expr {
+                        RExpr::Call { callee, .. } => {
+                            self.indirect_aggregate_returns.contains(callee)
+                        }
+                        RExpr::Use(src) => values.contains(src),
+                        _ => false,
+                    };
+                    if !indirect {
+                        continue;
+                    }
+                    let Some(class) = body.value_class(*dst) else {
+                        continue;
+                    };
+                    if matches!(class, RuntimeClass::AggregateValue { .. })
+                        && self.aggregate_is_memory_lowerable(class)
+                        && values.insert(*dst)
+                    {
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        values
     }
 
     /// The symbol -> host-namespace side table for external declarations. Each
@@ -4077,6 +4154,7 @@ where
                 linkage_for_runtime(linkage),
                 &body,
                 &HashSet::new(),
+                false,
             )?;
             let func_ref = self.builder.declare_function(signature).map_err(|err| {
                 LowerError::Internal(format!(
@@ -4114,7 +4192,8 @@ where
             .get(&instance)
             .cloned()
             .unwrap_or_default();
-        self.lower_body_signature(&symbol, linkage, &body, &indirect_params)
+        let indirect_return = self.indirect_aggregate_returns.contains(&instance);
+        self.lower_body_signature(&symbol, linkage, &body, &indirect_params, indirect_return)
     }
 
     fn lower_body_signature(
@@ -4123,6 +4202,7 @@ where
         linkage: Linkage,
         body: &RuntimeBody<'db>,
         indirect_params: &HashSet<RLocalId>,
+        indirect_return: bool,
     ) -> Result<Signature, LowerError> {
         let mut args = Vec::with_capacity(body.signature.params.len());
         for param in &body.signature.params {
@@ -4162,18 +4242,22 @@ where
                 })?);
             }
         }
-        let ret_tys: Vec<Type> = match &body.signature.ret {
-            None => Vec::new(),
-            Some(class) => {
-                if let Some(elem_tys) = self.scalar_tuple_element_tys(class) {
-                    elem_tys
-                } else {
-                    vec![self.ty_for_class(class).map_err(|error| match error {
-                        LowerError::Unsupported(message) => LowerError::Unsupported(format!(
-                            "{message}; while declaring the return of Wasm function `{symbol}`"
-                        )),
-                        other => other,
-                    })?]
+        let ret_tys: Vec<Type> = if indirect_return {
+            vec![Type::I32]
+        } else {
+            match &body.signature.ret {
+                None => Vec::new(),
+                Some(class) => {
+                    if let Some(elem_tys) = self.scalar_tuple_element_tys(class) {
+                        elem_tys
+                    } else {
+                        vec![self.ty_for_class(class).map_err(|error| match error {
+                            LowerError::Unsupported(message) => LowerError::Unsupported(format!(
+                                "{message}; while declaring the return of Wasm function `{symbol}`"
+                            )),
+                            other => other,
+                        })?]
+                    }
                 }
             }
         };
@@ -4215,6 +4299,7 @@ where
                 .get(&instance)
                 .cloned()
                 .unwrap_or_default();
+            let indirect_aggregate_return = self.indirect_aggregate_returns.contains(&instance);
             let started = Instant::now();
             let lowered = PortableFunctionLowerer::new(
                 self,
@@ -4223,6 +4308,7 @@ where
                 validate_enum_params,
                 scoped_arena,
                 indirect_aggregate_params,
+                indirect_aggregate_return,
             )?
             .lower();
             let elapsed = started.elapsed();
@@ -4254,7 +4340,7 @@ where
                         "Wasm continuation `{symbol}` lowered before declaration"
                     ))
                 })?;
-            PortableFunctionLowerer::new(self, body, func_ref, true, false, HashSet::new())?
+            PortableFunctionLowerer::new(self, body, func_ref, true, false, HashSet::new(), false)?
                 .lower()
                 .map_err(|error| match error {
                     LowerError::Unsupported(message) => LowerError::Unsupported(format!(
@@ -6684,12 +6770,17 @@ where
         }
 
         let mut analysis = ScopedArenaAnalysis {
-            allocates: body.signature.params.iter().any(|param| {
-                matches!(
-                    body.local(param.local).map(|local| &local.root),
-                    Some(RuntimeLocalRoot::Slot(_))
-                ) && self.scalar_tuple_element_tys(&param.class).is_some()
-            }),
+            allocates: self.indirect_aggregate_returns.contains(&body.owner)
+                || self
+                    .indirect_aggregate_params
+                    .get(&body.owner)
+                    .is_some_and(|params| !params.is_empty())
+                || body.signature.params.iter().any(|param| {
+                    matches!(
+                        body.local(param.local).map(|local| &local.root),
+                        Some(RuntimeLocalRoot::Slot(_))
+                    ) && self.scalar_tuple_element_tys(&param.class).is_some()
+                }),
             callees: HashSet::new(),
         };
         for block in &body.blocks {
@@ -6815,8 +6906,9 @@ where
                 {
                     return Err("call boundary can carry an escaping reference");
                 }
-                analysis.allocates |=
-                    args.iter()
+                analysis.allocates |= self.indirect_aggregate_returns.contains(callee)
+                    || args
+                        .iter()
                         .zip(&callee_body.signature.params)
                         .any(|(arg, param)| {
                             self.indirect_aggregate_params
@@ -7355,6 +7447,12 @@ where
     /// pointer. The caller supplied a fresh deep copy, so this remains an owned
     /// Fe value even though its internal Wasm ABI is indirect.
     indirect_aggregate_params: HashSet<RLocalId>,
+    /// The indirect parameters plus aggregate call-result locals and their
+    /// direct `Use` bindings. Every member carries one arena pointer in `vars`.
+    indirect_aggregate_values: HashSet<RLocalId>,
+    /// Whether this function transfers its aggregate result to its caller as
+    /// one arena pointer rather than flattened Wasm results.
+    indirect_aggregate_return: bool,
     /// Scalar Slots remain SSA-promoted unless their address is actually taken.
     /// Each member here carries an aligned canonical-arena pointer in `vars`;
     /// whole-slot reads and writes use target-typed memory operations.
@@ -7385,7 +7483,10 @@ where
         validate_enum_params: bool,
         scoped_arena: bool,
         indirect_aggregate_params: HashSet<RLocalId>,
+        indirect_aggregate_return: bool,
     ) -> Result<Self, LowerError> {
+        let indirect_aggregate_values =
+            module.derive_indirect_aggregate_values(&body, &indirect_aggregate_params);
         let mut fb = module.builder.func_builder::<InstInserter>(func_ref);
         let prologue_block = fb.append_block();
         let block_map = body.blocks.iter().map(|_| fb.append_block()).collect();
@@ -7409,7 +7510,7 @@ where
                     vars.insert(local_id, fb.declare_var(ty));
                     continue;
                 }
-                if indirect_aggregate_params.contains(&local_id) {
+                if indirect_aggregate_values.contains(&local_id) {
                     if !matches!(class, RuntimeClass::AggregateValue { .. })
                         || !module.aggregate_is_memory_lowerable(class)
                     {
@@ -7485,6 +7586,8 @@ where
             tuple_vars,
             materialized_param_slots,
             indirect_aggregate_params,
+            indirect_aggregate_values,
+            indirect_aggregate_return,
             materialized_scalar_slots,
             validate_enum_params,
             trap_block: None,
@@ -8087,9 +8190,9 @@ where
         })
     }
 
-    fn is_address_carried_aggregate_param(&self, local: RLocalId) -> bool {
+    fn is_address_carried_aggregate_value(&self, local: RLocalId) -> bool {
         self.materialized_param_slots.contains(&local)
-            || self.indirect_aggregate_params.contains(&local)
+            || self.indirect_aggregate_values.contains(&local)
     }
 
     /// Snapshot a local's leaves in DFS declaration order before callers write
@@ -8098,7 +8201,7 @@ where
         if let Some(vars) = self.tuple_vars.get(&local).cloned() {
             return Ok(vars.iter().map(|var| self.fb.use_var(*var)).collect());
         }
-        if self.is_address_carried_aggregate_param(local) {
+        if self.is_address_carried_aggregate_value(local) {
             let class = self.body.value_class(local).cloned().ok_or_else(|| {
                 LowerError::Internal(format!(
                     "materialized parameter {local:?} has no runtime class"
@@ -8396,7 +8499,7 @@ where
                 let dst_vars = self.tuple_vars.get(&dst).cloned().ok_or_else(|| {
                     LowerError::Internal(format!("R2.1 tuple dst {dst:?} has no element vars"))
                 })?;
-                let values = if self.is_address_carried_aggregate_param(*src) {
+                let values = if self.is_address_carried_aggregate_value(*src) {
                     let pointer = self.local_value(*src)?;
                     let source_class = self.body.value_class(*src).cloned().ok_or_else(|| {
                         LowerError::Internal(format!(
@@ -8627,23 +8730,27 @@ where
                 // latter. Materialize an independent value here: Fe aggregate
                 // copy semantics are deep even though this target represents
                 // addressable aggregates by arena pointers.
-                if self.is_object_ref_local(*src)
+                let copy_indirect_value = self.is_address_carried_aggregate_value(*src);
+                let copy_object_ref = self.is_object_ref_local(*src)
                     && !self.is_fresh_object_binding(*src)
-                    && !self.is_borrow_alias_binding(*src)
-                {
+                    && !self.is_borrow_alias_binding(*src);
+                if copy_indirect_value || copy_object_ref {
                     let class = self.body.value_class(*src).cloned().ok_or_else(|| {
                         LowerError::Internal(format!(
                             "aggregate copy source {src:?} has no runtime class"
                         ))
                     })?;
-                    let layout =
-                        self.module
+                    let layout = match &class {
+                        RuntimeClass::AggregateValue { layout } if copy_indirect_value => *layout,
+                        _ => self
+                            .module
                             .memory_lowerable_ref_layout(&class)
                             .ok_or_else(|| {
                                 LowerError::Internal(format!(
                                     "aggregate copy source {src:?} lost its memory layout"
                                 ))
-                            })?;
+                            })?,
+                    };
                     let source = self.local_value(*src)?;
                     return self.lower_deep_object_copy(source, layout);
                 }
@@ -8780,7 +8887,7 @@ where
             }
             RExpr::AggregateExtract { value, index } => {
                 if self.tuple_vars.contains_key(value)
-                    || self.is_address_carried_aggregate_param(*value)
+                    || self.is_address_carried_aggregate_value(*value)
                 {
                     let source_class = self.body.value_class(*value).ok_or_else(|| {
                         LowerError::Internal(format!("aggregate source {value:?} has no class"))
@@ -9451,7 +9558,7 @@ where
                 "wasm target: materialization source {src:?} has non-scalar memory leaves"
             )));
         }
-        if self.is_address_carried_aggregate_param(src) {
+        if self.is_address_carried_aggregate_value(src) {
             // The prologue has already reconstructed this by-value aggregate
             // parameter in canonical-arena storage so dynamic indexing and
             // mutation can address it. A later `MaterializeToObject` still
@@ -9684,7 +9791,7 @@ where
                 (value, class, true)
             }
             mir::ResolvedPlaceRootKind::Slot { local, class }
-                if self.is_address_carried_aggregate_param(local) =>
+                if self.is_address_carried_aggregate_value(local) =>
             {
                 (local, class, true)
             }
@@ -9918,7 +10025,7 @@ where
                 (value, class, true)
             }
             mir::ResolvedPlaceRootKind::Slot { local, class }
-                if self.is_address_carried_aggregate_param(local)
+                if self.is_address_carried_aggregate_value(local)
                     || self.materialized_scalar_slots.contains(&local) =>
             {
                 (local, class, true)
@@ -10793,14 +10900,18 @@ where
             .signature
             .ret
             .clone();
-        let ret_ty = match ret_class {
-            Some(class) => self.module.ty_for_class(&class)?,
-            None => {
-                return Err(LowerError::Unsupported(
-                    "wasm target (R1) does not support calling a unit-returning function \
+        let ret_ty = if self.module.indirect_aggregate_returns.contains(&callee) {
+            Type::I32
+        } else {
+            match ret_class {
+                Some(class) => self.module.ty_for_class(&class)?,
+                None => {
+                    return Err(LowerError::Unsupported(
+                        "wasm target (R1) does not support calling a unit-returning function \
                      as a value expression"
-                        .to_string(),
-                ));
+                            .to_string(),
+                    ));
+                }
             }
         };
         let arg_vals = self.checked_call_arg_values(callee, callee_ref, args)?;
@@ -10814,6 +10925,31 @@ where
         let is = self.inst_set();
         match terminator {
             RTerminator::Return(Some(value)) => {
+                if self.indirect_aggregate_return {
+                    let class = self.body.value_class(*value).ok_or_else(|| {
+                        LowerError::Internal(format!(
+                            "indirect aggregate return value {value:?} has no runtime class"
+                        ))
+                    })?;
+                    if !matches!(class, RuntimeClass::AggregateValue { .. })
+                        || !self.module.aggregate_is_memory_lowerable(class)
+                    {
+                        return Err(LowerError::Internal(format!(
+                            "indirect aggregate return value {value:?} is not memory-lowerable"
+                        )));
+                    }
+                    let pointer = if self.is_address_carried_aggregate_value(*value) {
+                        self.local_value(*value)?
+                    } else {
+                        self.lower_materialize_to_object(*value)?
+                    };
+                    // Ownership transfers into the caller's enclosing arena
+                    // lifetime. Rewinding here would invalidate the returned
+                    // value; the first non-indirect ancestor reclaims it.
+                    self.fb
+                        .insert_inst_no_result(Return::new_single(is, pointer));
+                    return Ok(());
+                }
                 // R2.1: returning a flattened scalar tuple is a wasm MULTI-VALUE
                 // return of its element words (the host reads the N results).
                 // Addressable by-value parameters retain that public flattened
@@ -11038,7 +11174,8 @@ where
         let class = self.body.value_class(local).cloned().ok_or_else(|| {
             LowerError::Internal(format!("local {local:?} carries no value class"))
         })?;
-        if self.materialized_scalar_slots.contains(&local)
+        if self.is_address_carried_aggregate_value(local)
+            || self.materialized_scalar_slots.contains(&local)
             || self.module.is_memory_lowerable_object_ref(&class)
             || self.module.object_value_layout(&class).is_some()
         {

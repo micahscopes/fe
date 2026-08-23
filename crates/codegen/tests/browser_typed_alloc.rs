@@ -465,3 +465,48 @@ pub fn run(_ values: [u32; 1001]) -> u32 {
         "unexpected oversized public ABI diagnostic: {error}",
     );
 }
+
+#[test]
+fn oversized_private_value_results_transfer_into_the_caller_arena() {
+    let wasm = compile_to_wasm(
+        r#"
+fn giant() -> [u32; 1001] {
+    let mut values = [0; 1001]
+    values[0] = 1
+    values[1000] = 42
+    values
+}
+
+pub fn run() -> u32 {
+    let original = giant()
+    let mut changed = original
+    changed[0] = 99
+    original[0] * 100000 + changed[0] * 100 + original[1000]
+}
+"#,
+    );
+    wasmparser::validate(&wasm).expect("indirect aggregate result ABI emitted invalid Wasm");
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, wasm).unwrap();
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+    let run = instance
+        .get_typed_func::<(), i32>(&mut store, "run")
+        .unwrap();
+    assert_eq!(run.call(&mut store, ()).unwrap(), 109_942);
+}
+
+#[test]
+fn oversized_public_value_results_fail_before_wasm_emission() {
+    let error = compile_to_wasm_err(
+        r#"
+pub fn run() -> [u32; 1001] {
+    [0; 1001]
+}
+"#,
+    );
+    assert!(
+        error.contains("exceeding the validated limit of 1000"),
+        "unexpected oversized public result diagnostic: {error}",
+    );
+}
