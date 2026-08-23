@@ -108,8 +108,11 @@ fn exact_composition_interpreter_derives_the_audited_air_shape() {
 
     let degrees = call_words(&mut store, &instance, "sparse_air_degree_shape_l4", &[], 9);
     assert_eq!(degrees[0], 1, "the degree interpretation must remain valid");
-    assert!(degrees[1..5].iter().all(|degree| *degree > 0));
-    assert_eq!(degrees[5], *degrees[1..5].iter().max().unwrap());
+    assert_eq!(
+        &degrees[1..6],
+        &[13, 8, 1, 8, 13],
+        "the first quadratic plan slice must retain its audited degree reduction",
+    );
     let trace_length = 4_096;
     let reference_composition_degree = [
         quotient_degree_bound(trace_length, degrees[1], trace_length),
@@ -121,9 +124,11 @@ fn exact_composition_interpreter_derives_the_audited_air_shape() {
     .max()
     .unwrap();
     assert_eq!(degrees[6], reference_composition_degree);
+    assert_eq!(degrees[6], 49_139);
     assert_eq!(degrees[7], shape[4]);
+    assert_eq!(degrees[7], 468);
     assert_eq!(
         degrees[8], 0,
-        "the current degree-19 AIR must not be represented as fitting degree 4,096",
+        "the current degree-13 AIR must not be represented as fitting degree 4,096",
     );
 }

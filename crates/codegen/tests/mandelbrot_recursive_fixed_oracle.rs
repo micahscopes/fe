@@ -2,10 +2,10 @@
 
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::{layout_for, BackendKind, OptLevel};
+use fe_codegen::{BackendKind, OptLevel, layout_for};
 use hir::hir_def::HirIngot;
 use num_bigint::BigUint;
-use p3_baby_bear::{default_babybear_poseidon2_16, BabyBear as P3BabyBear};
+use p3_baby_bear::{BabyBear as P3BabyBear, default_babybear_poseidon2_16};
 use p3_field::{PrimeCharacteristicRing, PrimeField32};
 use p3_symmetric::Permutation;
 use std::path::Path;
@@ -1996,8 +1996,16 @@ fn expected_sparse_interaction_root(
     current: &ComplexFx,
     base_root: [u32; 8],
 ) -> [u32; 8] {
-    let [product_beta, product_gamma, round_beta, round_gamma, linear_beta, linear_gamma, boundary_beta, boundary_gamma] =
-        expected_sparse_interaction_challenge_values(base_root);
+    let [
+        product_beta,
+        product_gamma,
+        round_beta,
+        round_gamma,
+        linear_beta,
+        linear_gamma,
+        boundary_beta,
+        boundary_gamma,
+    ] = expected_sparse_interaction_challenge_values(base_root);
 
     let mut tasks = expected_sparse_transition_tasks(LIMBS as u32);
     tasks.resize(4_096, [14, 0, 0, 0, 0]);
@@ -2082,8 +2090,16 @@ fn expected_sparse_air_prefix_words(
     let controls = expected_sparse_control_rows();
     let rows = expected_sparse_rows(point, current);
     let tasks = expected_sparse_transition_tasks(LIMBS as u32);
-    let [product_beta, product_gamma, round_beta, round_gamma, linear_beta, linear_gamma, boundary_beta, boundary_gamma] =
-        expected_sparse_interaction_challenge_values(base_root);
+    let [
+        product_beta,
+        product_gamma,
+        round_beta,
+        round_gamma,
+        linear_beta,
+        linear_gamma,
+        boundary_beta,
+        boundary_gamma,
+    ] = expected_sparse_interaction_challenge_values(base_root);
 
     let mut words = vec![1, 1];
     words.extend(base_root);
@@ -3635,7 +3651,7 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                     ),
                     [
                         0,
-                        20_481,
+                        90_113,
                         4_096,
                         expected_product_interaction_receipt(
                             point,
@@ -3741,8 +3757,40 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                         "product interaction mutation {mutation} must fail",
                     );
                 }
-                assert_eq!(audit[1], 20_481);
+                assert_eq!(audit[1], 90_113);
                 assert_eq!(audit[2], 4_096);
+            }
+            for challenge in [3u32, 7, 31] {
+                let mut baseline_arguments = arguments.clone();
+                baseline_arguments.extend([challenge, u32::MAX]);
+                assert_eq!(
+                    call(
+                        &mut store,
+                        &instance,
+                        "fixed_transition4_sparse_product_plan_node_audit",
+                        &baseline_arguments,
+                        3,
+                    ),
+                    [0, 21, 0],
+                    "clean production product-address plan, challenge {challenge}",
+                );
+                for node in 0u32..17 {
+                    let mut node_arguments = arguments.clone();
+                    node_arguments.extend([challenge, node]);
+                    let audit = call(
+                        &mut store,
+                        &instance,
+                        "fixed_transition4_sparse_product_plan_node_audit",
+                        &node_arguments,
+                        3,
+                    );
+                    assert_eq!(audit[0], 1, "product plan node {node} must fail");
+                    assert_eq!(audit[1], 21);
+                    assert_ne!(
+                        audit[2], 0,
+                        "product plan node {node}, challenge {challenge}",
+                    );
+                }
             }
             for mutation in 1u32..=6 {
                 let mut interaction_arguments = arguments.clone();
@@ -4358,6 +4406,206 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
 }
 
 #[test]
+fn production_copy_buses_match_independent_port_oracles() {
+    let bytes = compile_fixture();
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &bytes).expect("Wasm module should load");
+    assert_eq!(
+        module.imports().count(),
+        0,
+        "fixture must remain zero-import"
+    );
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("zero-import oracle fixture should instantiate");
+    let point = ComplexFx {
+        real: fixed(true, 3, 4),
+        imaginary: fixed(false, 1, 8),
+    };
+    let current = ComplexFx {
+        real: fixed(false, 5, 4),
+        imaginary: fixed(true, 3, 8),
+    };
+    let arguments = transition_arguments(&point, &current);
+    let expected_rows = expected_sparse_product_rows(&current);
+
+    for (index, expected) in expected_rows.iter().enumerate() {
+        let mut row_arguments = arguments.clone();
+        row_arguments.push(index as u32);
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "fixed_transition4_sparse_product_row",
+                &row_arguments,
+                6,
+            ),
+            *expected,
+            "independently reconstructed sparse product row {index}",
+        );
+    }
+
+    let expected_constraints = 12 * LIMBS as u32 * LIMBS as u32 + 30 * LIMBS as u32 + 3;
+    for challenge in [3u32, 7, 31] {
+        let mut audit_arguments = arguments.clone();
+        audit_arguments.extend([challenge, u32::MAX, 0]);
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "fixed_transition4_sparse_product_audit",
+                &audit_arguments,
+                3,
+            ),
+            [0, expected_constraints, expected_rows.len() as u32],
+            "clean sparse product and copy bus, challenge {challenge}",
+        );
+    }
+
+    let (beta, gamma, fold_challenge, receipt_challenge) = (17u32, 29u32, 7u32, 31u32);
+    let mut interaction_arguments = arguments.clone();
+    interaction_arguments.extend([beta, gamma, fold_challenge, receipt_challenge, 0]);
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "fixed_transition4_sparse_product_interaction_audit",
+            &interaction_arguments,
+            4,
+        ),
+        [
+            0,
+            90_113,
+            4_096,
+            expected_product_interaction_receipt(&point, &current, beta, gamma, receipt_challenge,),
+        ],
+        "product interaction must match the independent port oracle",
+    );
+    for mutation in [3u32, 6] {
+        let mut mutated_arguments = arguments.clone();
+        mutated_arguments.extend([beta, gamma, fold_challenge, receipt_challenge, mutation]);
+        let audit = call(
+            &mut store,
+            &instance,
+            "fixed_transition4_sparse_product_interaction_audit",
+            &mutated_arguments,
+            4,
+        );
+        if mutation == 6 {
+            assert_eq!(
+                audit[0], 1,
+                "the coordinated mutation must fail only at the terminal",
+            );
+        } else {
+            assert!(audit[0] > 0, "product interaction mutation {mutation}");
+        }
+        assert_eq!(audit[1], 90_113);
+        assert_eq!(audit[2], 4_096);
+    }
+
+    for (label, function, constraints, expected_receipt) in [
+        (
+            "round",
+            "fixed_transition4_sparse_round_interaction_audit",
+            45_057u32,
+            expected_round_interaction_receipt(&point, &current, beta, gamma, receipt_challenge),
+        ),
+        (
+            "linear",
+            "fixed_transition4_sparse_linear_interaction_audit",
+            69_633,
+            expected_linear_interaction_receipt(&point, &current, beta, gamma, receipt_challenge),
+        ),
+        (
+            "boundary",
+            "fixed_transition4_sparse_boundary_interaction_audit",
+            20_481,
+            expected_boundary_interaction_receipt(&point, &current, beta, gamma, receipt_challenge),
+        ),
+    ] {
+        let mut baseline_arguments = arguments.clone();
+        baseline_arguments.extend([beta, gamma, fold_challenge, receipt_challenge, 0]);
+        assert_eq!(
+            call(&mut store, &instance, function, &baseline_arguments, 4,),
+            [0, constraints, 4_096, expected_receipt],
+            "{label} interaction must match the independent port oracle",
+        );
+        for mutation in [3u32, 6] {
+            let mut mutated_arguments = arguments.clone();
+            mutated_arguments.extend([beta, gamma, fold_challenge, receipt_challenge, mutation]);
+            let audit = call(&mut store, &instance, function, &mutated_arguments, 4);
+            if mutation == 6 {
+                assert_eq!(
+                    audit[0], 1,
+                    "the coordinated {label} mutation must fail only at the terminal",
+                );
+            } else {
+                assert!(audit[0] > 0, "{label} interaction mutation {mutation}");
+            }
+            assert_eq!(audit[1], constraints);
+            assert_eq!(audit[2], 4_096);
+        }
+    }
+}
+
+#[test]
+fn production_product_quadratic_plan_rejects_every_committed_node() {
+    let bytes = compile_fixture();
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &bytes).expect("Wasm module should load");
+    assert_eq!(
+        module.imports().count(),
+        0,
+        "fixture must remain zero-import"
+    );
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("zero-import oracle fixture should instantiate");
+    let point = ComplexFx {
+        real: fixed(true, 3, 4),
+        imaginary: fixed(false, 1, 8),
+    };
+    let current = ComplexFx {
+        real: fixed(false, 5, 4),
+        imaginary: fixed(true, 3, 8),
+    };
+    let arguments = transition_arguments(&point, &current);
+
+    for challenge in [3u32, 7, 31] {
+        let mut baseline_arguments = arguments.clone();
+        baseline_arguments.extend([challenge, u32::MAX]);
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "fixed_transition4_sparse_product_plan_node_audit",
+                &baseline_arguments,
+                3,
+            ),
+            [0, 21, 0],
+            "clean production product-address plan, challenge {challenge}",
+        );
+        for node in 0u32..17 {
+            let mut node_arguments = arguments.clone();
+            node_arguments.extend([challenge, node]);
+            let audit = call(
+                &mut store,
+                &instance,
+                "fixed_transition4_sparse_product_plan_node_audit",
+                &node_arguments,
+                3,
+            );
+            assert_eq!(audit[0], 1, "product plan node {node} must fail");
+            assert_eq!(audit[1], 21);
+            assert_ne!(
+                audit[2], 0,
+                "product plan node {node}, challenge {challenge}",
+            );
+        }
+    }
+}
+
+#[test]
 fn sparse_public_composition_lowers_and_executes() {
     let bytes = compile_sparse_public_binding_fixture();
     let engine = wasmtime::Engine::default();
@@ -4868,8 +5116,7 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
             }
             for mutation in 1..=2 {
                 assert_ne!(
-                    results[mutation].0,
-                    results[0].0,
+                    results[mutation].0, results[0].0,
                     "mutation {mutation} must alter a constraint numerator at evaluation {evaluation}",
                 );
                 assert_ne!(

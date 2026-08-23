@@ -1231,6 +1231,68 @@ fn mutate_product_interaction(
     if mutation == 5 && index == 251 {
         interaction.accumulator = interaction.accumulator + one
     }
+    if mutation >= 7 && mutation <= 23 && index == product_offset {
+        let node = (mutation - 7) as usize
+        interaction.address_plan.nodes[node] =
+            interaction.address_plan.nodes[node] + one
+    }
+}
+
+/// Fast production-plan mutation gate. This evaluates one real product row so
+/// every committed address-plan node is covered without replaying the entire
+/// 4,096-row interaction trace for each mutation.
+pub fn fixed_transition4_sparse_product_plan_node_audit(
+    _ prn: u32, _ pr0: u32, _ pr1: u32, _ pr2: u32, _ pr3: u32,
+    _ pin: u32, _ pi0: u32, _ pi1: u32, _ pi2: u32, _ pi3: u32,
+    _ crn: u32, _ cr0: u32, _ cr1: u32, _ cr2: u32, _ cr3: u32,
+    _ cin: u32, _ ci0: u32, _ ci1: u32, _ ci2: u32, _ ci3: u32,
+    _ fold_challenge: u32,
+    _ node: u32,
+) -> (u32, u32, u32) {
+    let (point, current, witness) = transition4(
+        prn, [pr0, pr1, pr2, pr3], pin, [pi0, pi1, pi2, pi3],
+        crn, [cr0, cr1, cr2, cr3], cin, [ci0, ci1, ci2, ci3],
+    )
+    let next = fixed_mandelbrot_transition_output(witness)
+    let product_offset = sparse_radix_task_count<4>() + sparse_carry_task_count<4>()
+    let control = sparse_control_row_at<BabyBear, 4>(product_offset)
+    let row = sparse_transition_row_from_witness<BabyBear, 4>(
+        product_offset,
+        point,
+        current,
+        next,
+        witness,
+    )
+    let challenges = SparseCopyChallenges {
+        beta: BabyBear::from_u32(17),
+        gamma: BabyBear::from_u32(29),
+    }
+    let mut interaction = sparse_product_interaction_row<BabyBear, 4>(
+        challenges,
+        control,
+        row,
+        BabyBear::zero(),
+    )
+    if node < 17 {
+        mutate_product_interaction(
+            mut interaction,
+            node + 7,
+            product_offset,
+            product_offset,
+        )
+    }
+    let local = evaluate_sparse_product_interaction_row<BabyBear, 4>(
+        BabyBear::from_u32(fold_challenge),
+        challenges,
+        control,
+        row,
+        interaction,
+    )
+    (
+        if local.valid && local.folded.to_u32() == 0 { 0 } else { 1 },
+        local.constraints,
+        local.folded.to_u32(),
+    )
 }
 
 /// Complete base-field product interaction audit. The production transcript

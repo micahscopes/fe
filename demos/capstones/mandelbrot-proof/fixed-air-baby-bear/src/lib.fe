@@ -80,6 +80,7 @@ use mandelbrot_proof_fixed_air_core::{
     write_sparse_linear_interaction_row,
     write_sparse_product_interaction_row,
     write_sparse_round_interaction_row,
+    zero_sparse_product_interaction_row,
 }
 use mandelbrot_proof_recursive::{ComplexFixed, OrbitInterval}
 use mandelbrot_proof_recursive_baby_bear::{
@@ -2432,7 +2433,7 @@ derive CanonicalWords for SparseInteractionAccumulators using CanonicalWordsProv
 
 /// Reusable row-local inverse storage for one interaction-plan placement.
 pub struct SparseInteractionScratch {
-    pub product: SparseCopyInteractionRow<BabyBearExt4, 2>,
+    pub product: SparseProductInteractionRow<BabyBearExt4>,
     pub round: SparseCopyInteractionRow<BabyBearExt4, 5>,
     pub linear: SparseCopyInteractionRow<BabyBearExt4, 8>,
     pub boundary: SparseCopyInteractionRow<BabyBearExt4, 2>,
@@ -2457,10 +2458,7 @@ pub fn zero_sparse_interaction_accumulators() -> SparseInteractionAccumulators {
 pub fn zero_sparse_interaction_scratch() -> SparseInteractionScratch {
     let zero = BabyBearExt4::zero()
     SparseInteractionScratch {
-        product: SparseCopyInteractionRow {
-            accumulator: zero,
-            inverses: [zero; 2],
-        },
+        product: zero_sparse_product_interaction_row<BabyBearExt4>(),
         round: SparseCopyInteractionRow {
             accumulator: zero,
             inverses: [zero; 5],
@@ -3227,10 +3225,7 @@ fn zero_sparse_interaction_trace_row_field<F: Radix2Field>()
     -> SparseInteractionTraceRow<F> {
     let zero = F::radix2_zero()
     SparseInteractionTraceRow {
-        product: SparseCopyInteractionRow {
-            accumulator: zero,
-            inverses: [zero; 2],
-        },
+        product: zero_sparse_product_interaction_row<F>(),
         round: SparseCopyInteractionRow {
             accumulator: zero,
             inverses: [zero; 5],

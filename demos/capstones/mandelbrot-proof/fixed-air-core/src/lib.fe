@@ -23,6 +23,13 @@ use mandelbrot_proof_fixed_air::{
 use mandelbrot_proof_recursive::ComplexFixed
 use precision::fixed::Fixed
 use precision::polynomial::{Radix2Field, write_batch_inverse_or_zero}
+use quadratic_plan::{
+    QuadraticConstraintInterpreter,
+    QuadraticPlanInterpreter,
+    QuadraticPlanResiduals,
+    QuadraticPlanWitness,
+    QuadraticWitnessInterpreter,
+}
 
 pub struct AirRadixLimbRange<F: Radix2Field> {
     pub bits: [F; 13],
@@ -333,9 +340,38 @@ impl<F: Radix2Field, const PORTS: usize> core::marker::Copy
     for SparseCopyInteractionRow<F, PORTS> {}
 derive CanonicalWords for SparseCopyInteractionRow<F, PORTS> using CanonicalWordsProvider
 
+/// The authored product-address plan contains exactly this many multiplication
+/// nodes. Both plan interpreters verify the capacity against the executed
+/// sequence and fail closed if the program changes without its placement.
+pub const SPARSE_PRODUCT_ADDRESS_MULTIPLICATIONS: usize = 17
+
 /// Two product ports remain sufficient after scan adjacency removes the
-/// redundant carry-in copy from the older scalar audit.
-pub type SparseProductInteractionRow<F> = SparseCopyInteractionRow<F, 2>
+/// redundant carry-in copy from the older scalar audit. Their high-degree
+/// address expressions are represented by committed multiplication nodes from
+/// one shared quadratic plan.
+pub struct SparseProductInteractionRow<F: Radix2Field> {
+    pub accumulator: F,
+    pub inverses: [F; 2],
+    pub address_plan: QuadraticPlanWitness<
+        F,
+        SPARSE_PRODUCT_ADDRESS_MULTIPLICATIONS,
+    >,
+}
+impl<F: Radix2Field> core::marker::Copy
+    for SparseProductInteractionRow<F> {}
+derive CanonicalWords for SparseProductInteractionRow<F> using CanonicalWordsProvider
+
+pub fn zero_sparse_product_interaction_row<F: Radix2Field>()
+    -> SparseProductInteractionRow<F> {
+    let zero = F::radix2_zero()
+    SparseProductInteractionRow {
+        accumulator: zero,
+        inverses: [zero; 2],
+        address_plan: QuadraticPlanWitness {
+            nodes: [zero; SPARSE_PRODUCT_ADDRESS_MULTIPLICATIONS],
+        },
+    }
+}
 
 /// Rounding needs at most five simultaneous semantic ports: guard, output
 /// sign, output nonzero, and the two input signs.
@@ -4934,41 +4970,142 @@ fn sparse_product_term_left_index<F: Radix2Field, const L: usize>(
     )
 }
 
-fn sparse_product_copy_ports<F: Radix2Field, const L: usize>(
+struct SparseProductCopyPlan<
+    I: QuadraticPlanInterpreter<F>,
+    F: Radix2Field,
+> {
+    interpreter: I,
+    first: SparseCopyPort<F>,
+    second: SparseCopyPort<F>,
+}
+impl<I: QuadraticPlanInterpreter<F>, F: Radix2Field> core::marker::Copy
+    for SparseProductCopyPlan<I, F> {}
+
+/// One authored product-address dependency plan. Witness generation evaluates
+/// and stores every `multiply` node; constraint evaluation reads those same
+/// nodes and emits one quadratic residual apiece. All remaining arithmetic is
+/// affine in base columns or prior nodes, so the resulting ports are linear
+/// inputs to the generic log-derivative relation.
+fn sparse_product_copy_plan<
+    I: QuadraticPlanInterpreter<F>,
+    F: Radix2Field,
+    const L: usize,
+>(
     _ control: SparseControlRow<F>,
     _ row: SparseTaskRow<F>,
-) -> (SparseCopyPort<F>, SparseCopyPort<F>) {
+    _ interpreter: I,
+) -> SparseProductCopyPlan<I, F> {
+    let mut interpreter = interpreter
     let selectors = control.selectors
     let roles = control.range_roles
-    let limbs = natural<F>(L.downcast_truncate())
-    let current = sparse_product_current_coordinate(control)
+    let limb_count: u32 = L.downcast_truncate()
+    let limbs = natural<F>(limb_count)
+
+    let major01_step = interpreter.multiply(
+        control.major,
+        sub(control.major, one<F>()),
+    )
+    interpreter = major01_step.interpreter
+    let major45_step = interpreter.multiply(
+        sub(control.major, natural<F>(4)),
+        sub(control.major, natural<F>(5)),
+    )
+    interpreter = major45_step.interpreter
+    let current_numerator_step = interpreter.multiply(
+        major01_step.value,
+        major45_step.value,
+    )
+    interpreter = current_numerator_step.interpreter
+    let current_step = interpreter.multiply(
+        roles.coordinate,
+        mul(
+            current_numerator_step.value,
+            natural<F>(12).radix2_inverse_or_zero(),
+        ),
+    )
+    interpreter = current_step.interpreter
+    let current = current_step.value
+
     let product_range = add(roles.product_low, roles.product_high)
-    let source_range_selector = mul(
+    let source_range_selector_step = interpreter.multiply(
         selectors.radix_limb,
         add(current, product_range),
     )
-    let source_range_coefficient = mul(
+    interpreter = source_range_selector_step.interpreter
+    let source_range_selector = source_range_selector_step.value
+    let source_range_coefficient_step = interpreter.multiply(
         selectors.radix_limb,
         add(mul(current, mul(natural<F>(3), limbs)), product_range),
     )
+    interpreter = source_range_coefficient_step.interpreter
+    let source_range_coefficient = source_range_coefficient_step.value
+
+    let product_node = mul(
+        sub(
+            sub(control.major, natural<F>(6)),
+            roles.product_high,
+        ),
+        natural<F>(3).radix2_inverse_or_zero(),
+    )
+    let current_rank = sub(control.major, natural<F>(2))
+    let product_rank = add(
+        natural<F>(2),
+        add(mul(natural<F>(2), product_node), roles.product_high),
+    )
+    let range_current_step = interpreter.multiply(current, current_rank)
+    interpreter = range_current_step.interpreter
+    let range_product_step = interpreter.multiply(product_range, product_rank)
+    interpreter = range_product_step.interpreter
+    let range_rank = add(range_current_step.value, range_product_step.value)
+    let range_address = add(mul(range_rank, limbs), control.minor)
+
     let carry_source_selector = selectors.carry_finish
     let source_selector = add(source_range_selector, carry_source_selector)
+    let source_range_address_step = interpreter.multiply(
+        source_range_selector,
+        range_address,
+    )
+    interpreter = source_range_address_step.interpreter
+    let carry_address = sparse_product_carry_address<F, L>(
+        control.major,
+        control.minor,
+    )
+    let carry_source_address_step = interpreter.multiply(
+        carry_source_selector,
+        carry_address,
+    )
+    interpreter = carry_source_address_step.interpreter
     let source_address = add(
-        mul(source_range_selector, sparse_product_range_address<F, L>(control)),
-        mul(
-            carry_source_selector,
-            sparse_product_carry_address<F, L>(control.major, control.minor),
-        ),
+        source_range_address_step.value,
+        carry_source_address_step.value,
     )
 
-    let left_index = sparse_product_term_left_index<F, L>(control)
-    let right_index = sub(control.minor, left_index)
-    let term_left_address = add(
-        mul(sparse_product_left_rank(control.major), limbs),
-        left_index,
+    let left_index_adjustment_step = interpreter.multiply(
+        control.flag,
+        sub(control.minor, natural<F>(limb_count - 1)),
     )
+    interpreter = left_index_adjustment_step.interpreter
+    let left_index = add(control.step, left_index_adjustment_step.value)
+    let right_index = sub(control.minor, left_index)
+    let left_rank_step = interpreter.multiply(
+        control.major,
+        sub(natural<F>(2), control.major),
+    )
+    interpreter = left_rank_step.interpreter
+    let term_left_address = add(mul(left_rank_step.value, limbs), left_index)
+    let right_rank_step = interpreter.multiply(
+        control.major,
+        sub(natural<F>(3), control.major),
+    )
+    interpreter = right_rank_step.interpreter
     let term_right_address = add(
-        mul(sparse_product_right_rank(control.major), limbs),
+        mul(
+            mul(
+                right_rank_step.value,
+                natural<F>(2).radix2_inverse_or_zero(),
+            ),
+            limbs,
+        ),
         right_index,
     )
     let coefficient_digit_rank = add(
@@ -4988,11 +5125,21 @@ fn sparse_product_copy_ports<F: Radix2Field, const L: usize>(
         source_selector,
         add(selectors.product_term, selectors.product_coefficient),
     )
+    let first_term_address_step = interpreter.multiply(
+        selectors.product_term,
+        term_left_address,
+    )
+    interpreter = first_term_address_step.interpreter
+    let first_coefficient_address_step = interpreter.multiply(
+        selectors.product_coefficient,
+        coefficient_digit_address,
+    )
+    interpreter = first_coefficient_address_step.interpreter
     let first_address = add(
         source_address,
         add(
-            mul(selectors.product_term, term_left_address),
-            mul(selectors.product_coefficient, coefficient_digit_address),
+            first_term_address_step.value,
+            first_coefficient_address_step.value,
         ),
     )
     let first_coefficient = sub(
@@ -5003,24 +5150,35 @@ fn sparse_product_copy_ports<F: Radix2Field, const L: usize>(
         selectors.product_term,
         selectors.product_coefficient,
     )
-    let second_address = add(
-        mul(selectors.product_term, term_right_address),
-        mul(selectors.product_coefficient, coefficient_carry_address),
+    let second_term_address_step = interpreter.multiply(
+        selectors.product_term,
+        term_right_address,
     )
-    (
-        SparseCopyPort {
+    interpreter = second_term_address_step.interpreter
+    let second_coefficient_address_step = interpreter.multiply(
+        selectors.product_coefficient,
+        coefficient_carry_address,
+    )
+    interpreter = second_coefficient_address_step.interpreter
+    let second_address = add(
+        second_term_address_step.value,
+        second_coefficient_address_step.value,
+    )
+    SparseProductCopyPlan {
+        interpreter: interpreter,
+        first: SparseCopyPort {
             selector: first_selector,
             coefficient: first_coefficient,
             address: first_address,
             value: row.value,
         },
-        SparseCopyPort {
+        second: SparseCopyPort {
             selector: second_selector,
             coefficient: sub(zero<F>(), second_selector),
             address: second_address,
             value: row.auxiliary,
         },
-    )
+    }
 }
 
 fn sparse_copy_port_compressed<F: Radix2Field>(
@@ -5039,9 +5197,13 @@ fn absorb_sparse_copy_port<F: Radix2Field>(
     _ port: SparseCopyPort<F>,
     _ inverse: F,
 ) -> ConstraintFold<F> {
-    let fold = fold.absorb(mul(
+    // `compressed * inverse = selector`, paired with the zeroing constraint
+    // below, is equivalent to the former selector-gated inverse relation but
+    // remains quadratic. Selected ports require the true inverse; unselected
+    // ports require zero even if a challenge makes `compressed` vanish.
+    let fold = fold.absorb(sub(
+        mul(sparse_copy_port_compressed(challenges, port), inverse),
         port.selector,
-        sub(mul(sparse_copy_port_compressed(challenges, port), inverse), one<F>()),
     ))
     fold.absorb(mul(sub(one<F>(), port.selector), inverse))
 }
@@ -5113,16 +5275,43 @@ fn absorb_sparse_copy_interaction<F: Radix2Field, const PORTS: usize>(
     fold
 }
 
-fn write_sparse_product_interaction_ports<
-    F: Radix2Field,
-    const L: usize,
->(
+struct SparseProductConstrainedPorts<F: Radix2Field> {
+    valid: bool,
+    ports: [SparseCopyPort<F>; 2],
+    residuals: QuadraticPlanResiduals<
+        F,
+        SPARSE_PRODUCT_ADDRESS_MULTIPLICATIONS,
+    >,
+}
+impl<F: Radix2Field> core::marker::Copy
+    for SparseProductConstrainedPorts<F> {}
+
+fn sparse_product_constrained_ports<F: Radix2Field, const L: usize>(
     _ control: SparseControlRow<F>,
     _ row: SparseTaskRow<F>,
-    _ output: mut [SparseCopyPort<F>; 2],
-) {
-    let ports = sparse_product_copy_ports<F, L>(control, row)
-    output = [ports.0, ports.1]
+    _ witness: QuadraticPlanWitness<
+        F,
+        SPARSE_PRODUCT_ADDRESS_MULTIPLICATIONS,
+    >,
+) -> SparseProductConstrainedPorts<F> {
+    let planned = sparse_product_copy_plan<
+        QuadraticConstraintInterpreter<
+            F,
+            SPARSE_PRODUCT_ADDRESS_MULTIPLICATIONS,
+        >,
+        F,
+        L,
+    >(
+        control,
+        row,
+        QuadraticConstraintInterpreter::new(witness),
+    )
+    let residuals = planned.interpreter.finish()
+    SparseProductConstrainedPorts {
+        valid: residuals.valid,
+        ports: [planned.first, planned.second],
+        residuals: residuals,
+    }
 }
 
 /// Derive one product interaction witness row from the committed base row and
@@ -5134,11 +5323,19 @@ pub fn sparse_product_interaction_row<F: Radix2Field, const L: usize>(
     _ row: SparseTaskRow<F>,
     _ accumulator: F,
 ) -> SparseProductInteractionRow<F> {
-    let mut ports = [zero_sparse_copy_port<F>(); 2]
-    write_sparse_product_interaction_ports<F, L>(control, row, mut ports)
-    SparseCopyInteractionRow {
+    let planned = sparse_product_copy_plan<
+        QuadraticWitnessInterpreter<
+            F,
+            SPARSE_PRODUCT_ADDRESS_MULTIPLICATIONS,
+        >,
+        F,
+        L,
+    >(control, row, QuadraticWitnessInterpreter::new())
+    let ports = [planned.first, planned.second]
+    SparseProductInteractionRow {
         accumulator: accumulator,
         inverses: sparse_copy_interaction_inverses<F, 2>(challenges, ports),
+        address_plan: planned.interpreter.finish(),
     }
 }
 
@@ -5157,9 +5354,17 @@ pub fn write_sparse_product_interaction_row<
     _ accumulator: F,
     _ interaction: mut SparseProductInteractionRow<F>,
 ) {
-    let mut ports = [zero_sparse_copy_port<F>(); 2]
-    write_sparse_product_interaction_ports<F, L>(control, row, mut ports)
+    let planned = sparse_product_copy_plan<
+        QuadraticWitnessInterpreter<
+            F,
+            SPARSE_PRODUCT_ADDRESS_MULTIPLICATIONS,
+        >,
+        F,
+        L,
+    >(control, row, QuadraticWitnessInterpreter::new())
+    let ports = [planned.first, planned.second]
     interaction.accumulator = accumulator
+    interaction.address_plan = planned.interpreter.finish()
     write_sparse_copy_interaction_inverses<F, 2>(
         challenges, ref ports, mut interaction.inverses,
     )
@@ -5175,19 +5380,29 @@ pub fn evaluate_sparse_product_interaction_row<
     _ row: SparseTaskRow<F>,
     _ interaction: SparseProductInteractionRow<F>,
 ) -> SparseInteractionEvaluation<F> {
-    let mut ports = [zero_sparse_copy_port<F>(); 2]
-    write_sparse_product_interaction_ports<F, L>(control, row, mut ports)
+    let constrained = sparse_product_constrained_ports<F, L>(
+        control, row, interaction.address_plan,
+    )
+    let mut fold = ConstraintFold<F>::new(challenge)
+    let mut index: usize = 0
+    while index < SPARSE_PRODUCT_ADDRESS_MULTIPLICATIONS {
+        fold = fold.absorb(constrained.residuals.values[index])
+        index = index + 1
+    }
     let fold = absorb_sparse_copy_interaction<F, 2>(
-        ConstraintFold<F>::new(challenge),
+        fold,
         challenges,
-        ports,
+        constrained.ports,
         interaction.inverses,
     )
     SparseInteractionEvaluation {
-        valid: true,
+        valid: constrained.valid,
         constraints: fold.constraints,
         folded: fold.value,
-        delta: sparse_copy_interaction_delta<F, 2>(ports, interaction.inverses),
+        delta: sparse_copy_interaction_delta<F, 2>(
+            constrained.ports,
+            interaction.inverses,
+        ),
     }
 }
 
@@ -5213,19 +5428,20 @@ pub fn evaluate_sparse_product_interaction_link<
     _ current_interaction: SparseProductInteractionRow<F>,
     _ next_interaction: SparseProductInteractionRow<F>,
 ) -> FixedAirConstraintEvaluation<F> {
-    let mut ports = [zero_sparse_copy_port<F>(); 2]
-    write_sparse_product_interaction_ports<F, L>(
-        current_control, current, mut ports,
+    let constrained = sparse_product_constrained_ports<F, L>(
+        current_control,
+        current,
+        current_interaction.address_plan,
     )
     let delta = sparse_copy_interaction_delta<F, 2>(
-        ports, current_interaction.inverses,
+        constrained.ports, current_interaction.inverses,
     )
     let fold = ConstraintFold<F>::new(challenge).absorb(sub(
         next_interaction.accumulator,
         add(current_interaction.accumulator, delta),
     ))
     FixedAirConstraintEvaluation {
-        valid: true,
+        valid: constrained.valid,
         constraints: fold.constraints,
         folded: fold.value,
     }
@@ -5240,17 +5456,18 @@ pub fn evaluate_sparse_product_interaction_terminal<
     _ row: SparseTaskRow<F>,
     _ interaction: SparseProductInteractionRow<F>,
 ) -> FixedAirConstraintEvaluation<F> {
-    let mut ports = [zero_sparse_copy_port<F>(); 2]
-    write_sparse_product_interaction_ports<F, L>(control, row, mut ports)
+    let constrained = sparse_product_constrained_ports<F, L>(
+        control, row, interaction.address_plan,
+    )
     let delta = sparse_copy_interaction_delta<F, 2>(
-        ports, interaction.inverses,
+        constrained.ports, interaction.inverses,
     )
     let fold = ConstraintFold<F>::new(challenge).absorb(add(
         interaction.accumulator,
         delta,
     ))
     FixedAirConstraintEvaluation {
-        valid: true,
+        valid: constrained.valid,
         constraints: fold.constraints,
         folded: fold.value,
     }
