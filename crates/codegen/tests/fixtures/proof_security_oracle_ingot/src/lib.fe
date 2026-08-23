@@ -1,5 +1,12 @@
 //! Executable boundary for conservative proof security policy arithmetic.
 
+use canonical_words::{
+    BrowserWordReader,
+    BrowserWordWriter,
+    CanonicalWords,
+    decode_canonical_words,
+    encode_canonical_words,
+}
 use mandelbrot_proof_air_core::{
     FriQueryRangePlan,
     FriQueryPlanShape,
@@ -8,6 +15,7 @@ use mandelbrot_proof_air_core::{
 use proof_security::{
     DirectFriSecurityPolicy,
     derive_conjectured_direct_fri_policy,
+    direct_fri_security_policy_is_derived,
     security_ceil_log2,
     security_floor_log2,
 }
@@ -16,6 +24,7 @@ const BABY_BEAR_MODULUS: u32 = 2013265921
 const EXTENSION_DEGREE: u32 = 4
 const TRACE_LENGTH: u32 = 4096
 const LDE_LENGTH: u32 = 8192
+const COMPOSITION_DEGREE_BOUND: u32 = TRACE_LENGTH - 1
 const FOLDING_ARITY: u32 = 2
 const AIR_CONSTRAINT_CAP: u32 = 8192
 const HASH_COLLISION_BITS: u32 = 128
@@ -28,6 +37,7 @@ const RECURSIVE_SECURITY_POLICY: DirectFriSecurityPolicy =
         EXTENSION_DEGREE,
         TRACE_LENGTH,
         LDE_LENGTH,
+        COMPOSITION_DEGREE_BOUND,
         FOLDING_ARITY,
         AIR_CONSTRAINT_CAP,
         HASH_COLLISION_BITS,
@@ -91,6 +101,7 @@ fn baby_bear_policy(
         EXTENSION_DEGREE,
         TRACE_LENGTH,
         LDE_LENGTH,
+        COMPOSITION_DEGREE_BOUND,
         FOLDING_ARITY,
         AIR_CONSTRAINT_CAP,
         HASH_COLLISION_BITS,
@@ -117,31 +128,83 @@ pub fn recursive_policy100x2048() -> (
     policy_words(baby_bear_policy(100, 2048))
 }
 
+pub fn recursive_policy_degree_boundary() -> (u32, u32) {
+    (
+        RECURSIVE_SECURITY_POLICY.composition_degree_bound,
+        RECURSIVE_SECURITY_POLICY.trace_length,
+    )
+}
+
+/// Exercise both halves of the canonical `u64` leaf codec with a value whose
+/// high and low words are both nonzero. This is the primitive needed by the
+/// reflection-derived security-policy schema.
+pub fn canonical_u64_roundtrip(_ value: u64) -> u64 {
+    let bytes = encode_canonical_words(
+        ref value,
+        BrowserWordWriter::allocate(<u64 as CanonicalWords>::WORDS),
+    ).finish()
+    let mut decoded: u64 = 0
+    let reader = decode_canonical_words(
+        mut decoded,
+        BrowserWordReader::new(bytes),
+    )
+    if reader.complete() { decoded } else { 0 as u64 }
+}
+
+/// Verifiers must recompute every derived policy lane. A serialized `valid`
+/// bit therefore cannot bless mutations to either primary or derived data.
+pub fn derived_policy_mutation(_ case: u32) -> u32 {
+    let mut policy = RECURSIVE_SECURITY_POLICY
+    match case {
+        0 => {}
+        1 => { policy.query_count = policy.query_count + 1 }
+        2 => {
+            policy.bits_per_query_q16 = policy.bits_per_query_q16 - 1
+        }
+        3 => {
+            policy.global_attained_bits_q16 =
+                policy.global_attained_bits_q16 + 1
+        }
+        _ => { policy.valid = false }
+    }
+    if direct_fri_security_policy_is_derived(policy) { 1 } else { 0 }
+}
+
 pub fn malformed_policy(_ case: u32) -> u32 {
     let policy = match case {
         0 => derive_conjectured_direct_fri_policy(
             100, 1, BABY_BEAR_MODULUS, EXTENSION_DEGREE,
-            4095, LDE_LENGTH, FOLDING_ARITY, AIR_CONSTRAINT_CAP,
+            4095, LDE_LENGTH, 4094, FOLDING_ARITY, AIR_CONSTRAINT_CAP,
             HASH_COLLISION_BITS, 0, 0,
         ),
         1 => derive_conjectured_direct_fri_policy(
             100, 1, BABY_BEAR_MODULUS, EXTENSION_DEGREE,
-            TRACE_LENGTH, 6144, FOLDING_ARITY, AIR_CONSTRAINT_CAP,
+            TRACE_LENGTH, 6144, COMPOSITION_DEGREE_BOUND,
+            FOLDING_ARITY, AIR_CONSTRAINT_CAP,
             HASH_COLLISION_BITS, 0, 0,
         ),
         2 => derive_conjectured_direct_fri_policy(
             100, 0, BABY_BEAR_MODULUS, EXTENSION_DEGREE,
-            TRACE_LENGTH, LDE_LENGTH, FOLDING_ARITY, AIR_CONSTRAINT_CAP,
+            TRACE_LENGTH, LDE_LENGTH, COMPOSITION_DEGREE_BOUND,
+            FOLDING_ARITY, AIR_CONSTRAINT_CAP,
             HASH_COLLISION_BITS, 0, 0,
         ),
         3 => derive_conjectured_direct_fri_policy(
             100, 1, BABY_BEAR_MODULUS, EXTENSION_DEGREE,
-            TRACE_LENGTH, LDE_LENGTH, 1, AIR_CONSTRAINT_CAP,
+            TRACE_LENGTH, LDE_LENGTH, COMPOSITION_DEGREE_BOUND,
+            1, AIR_CONSTRAINT_CAP,
+            HASH_COLLISION_BITS, 0, 0,
+        ),
+        4 => derive_conjectured_direct_fri_policy(
+            100, 1, BABY_BEAR_MODULUS, EXTENSION_DEGREE,
+            TRACE_LENGTH, LDE_LENGTH, COMPOSITION_DEGREE_BOUND,
+            FOLDING_ARITY, 0,
             HASH_COLLISION_BITS, 0, 0,
         ),
         _ => derive_conjectured_direct_fri_policy(
             100, 1, BABY_BEAR_MODULUS, EXTENSION_DEGREE,
-            TRACE_LENGTH, LDE_LENGTH, FOLDING_ARITY, 0,
+            TRACE_LENGTH, LDE_LENGTH, TRACE_LENGTH,
+            FOLDING_ARITY, AIR_CONSTRAINT_CAP,
             HASH_COLLISION_BITS, 0, 0,
         ),
     }

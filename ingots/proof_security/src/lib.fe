@@ -13,6 +13,9 @@
 //! is a direct-domain, conjectured policy. A future DEEP policy should be a
 //! distinct constructor and transcript domain rather than a boolean mode.
 
+use canonical_words::{CanonicalWords, CanonicalWordsProvider}
+use core::ops::Eq
+
 pub const SECURITY_FRACTIONAL_BITS: u32 = 16
 pub const SECURITY_ONE_Q16: u64 = 65536
 
@@ -28,6 +31,7 @@ pub struct DirectFriSecurityPolicy {
     pub extension_degree: u32,
     pub trace_length: u32,
     pub lde_length: u32,
+    pub composition_degree_bound: u32,
     pub log_blowup: u32,
     pub folding_arity: u32,
     pub max_air_constraints: u32,
@@ -45,6 +49,8 @@ pub struct DirectFriSecurityPolicy {
     pub global_attained_bits_q16: u64,
 }
 impl core::marker::Copy for DirectFriSecurityPolicy {}
+derive Eq for DirectFriSecurityPolicy
+derive CanonicalWords for DirectFriSecurityPolicy using CanonicalWordsProvider
 
 pub const fn security_from_bits(_ bits: u32) -> u64 {
     (bits as u64) << (SECURITY_FRACTIONAL_BITS as u64)
@@ -160,6 +166,7 @@ const fn invalid_direct_fri_policy() -> DirectFriSecurityPolicy {
         extension_degree: 0,
         trace_length: 0,
         lde_length: 0,
+        composition_degree_bound: 0,
         log_blowup: 0,
         folding_arity: 0,
         max_air_constraints: 0,
@@ -187,6 +194,10 @@ const fn invalid_direct_fri_policy() -> DirectFriSecurityPolicy {
 ///
 /// `max_air_constraints` is an audited upper bound supplied by the AIR shape
 /// interpreter. This constructor does not infer it from application source.
+/// `composition_degree_bound` is the interpreter-derived maximum degree after
+/// the AIR's family zerofiers have been divided out. It must fit strictly
+/// below the claimed trace-degree domain; otherwise the selected LDE blowup
+/// does not apply to the committed composition polynomial.
 /// A policy fails closed when query, AIR composition, FRI commit, hash, or
 /// recursive-union terms cannot meet `target_bits`.
 pub const fn derive_conjectured_direct_fri_policy(
@@ -196,6 +207,7 @@ pub const fn derive_conjectured_direct_fri_policy(
     _ extension_degree: u32,
     _ trace_length: u32,
     _ lde_length: u32,
+    _ composition_degree_bound: u32,
     _ folding_arity: u32,
     _ max_air_constraints: u32,
     _ hash_collision_bits: u32,
@@ -209,6 +221,8 @@ pub const fn derive_conjectured_direct_fri_policy(
         || !is_power_of_two(trace_length)
         || !is_power_of_two(lde_length)
         || lde_length <= trace_length
+        || composition_degree_bound == 0
+        || composition_degree_bound >= trace_length
         || lde_length % trace_length != 0
         || !is_power_of_two(lde_length / trace_length)
         || !is_power_of_two(folding_arity)
@@ -283,6 +297,7 @@ pub const fn derive_conjectured_direct_fri_policy(
         extension_degree: extension_degree,
         trace_length: trace_length,
         lde_length: lde_length,
+        composition_degree_bound: composition_degree_bound,
         log_blowup: log_blowup,
         folding_arity: folding_arity,
         max_air_constraints: max_air_constraints,
@@ -299,4 +314,28 @@ pub const fn derive_conjectured_direct_fri_policy(
         local_attained_bits_q16: local_attained,
         global_attained_bits_q16: global_attained,
     }
+}
+
+/// Recompute every derived lane from the policy's primary parameters. This is
+/// the verifier-side dual of CTFE policy selection: serialized or recursively
+/// supplied derived bounds are never trusted merely because `valid` is true.
+pub fn direct_fri_security_policy_is_derived(
+    _ policy: DirectFriSecurityPolicy,
+) -> bool {
+    if !policy.valid { return false }
+    let expected = derive_conjectured_direct_fri_policy(
+        policy.target_bits,
+        policy.max_composed_proofs,
+        policy.base_modulus,
+        policy.extension_degree,
+        policy.trace_length,
+        policy.lde_length,
+        policy.composition_degree_bound,
+        policy.folding_arity,
+        policy.max_air_constraints,
+        policy.hash_collision_bits,
+        policy.query_pow_bits,
+        policy.commit_pow_bits,
+    )
+    expected.eq(policy)
 }

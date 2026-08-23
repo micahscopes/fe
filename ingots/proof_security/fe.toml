@@ -3,4 +3,5 @@ name = "proof_security"
 version = "0.1.0"
 
 [dependencies]
+canonical_words = "../canonical_words"
 core = "../core"

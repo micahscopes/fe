@@ -3,6 +3,7 @@ name = "proof_security_oracle_ingot"
 version = "0.1.0"
 
 [dependencies]
+canonical_words = "../../../../../ingots/canonical_words"
 core = "../../../../../ingots/core"
 mandelbrot_proof_air_core = "../../../../../demos/capstones/mandelbrot-proof/air-core"
 proof_security = "../../../../../ingots/proof_security"

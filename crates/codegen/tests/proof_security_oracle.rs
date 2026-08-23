@@ -141,6 +141,11 @@ fn recursive_union_budget_changes_the_derived_query_plan_and_fails_closed() {
     assert_eq!(recursive[1], (110.0 / per_query).ceil() as u32);
     assert_eq!(recursive[1], 114);
     assert!(recursive[9] >= 100 * 65_536);
+    assert_eq!(
+        call_words(&mut store, &instance, "recursive_policy_degree_boundary", 2,),
+        vec![4_095, 4_096],
+        "the composition degree must fit strictly inside the claimed domain",
+    );
 
     assert_eq!(
         call_words(&mut store, &instance, "recursive_security_query_plan", 6,),
@@ -152,10 +157,35 @@ fn recursive_union_budget_changes_the_derived_query_plan_and_fails_closed() {
     assert_eq!(over_budget[1], (111.0 / per_query).ceil() as u32);
     assert!(over_budget[9] < 100 * 65_536);
 
+    let roundtrip = instance
+        .get_typed_func::<i64, i64>(&mut store, "canonical_u64_roundtrip")
+        .expect("canonical u64 roundtrip export");
+    for value in [1_u64, (1_u64 << 32) | 7, 0x89ab_cdef_0123_4567, u64::MAX] {
+        assert_eq!(
+            roundtrip
+                .call(&mut store, value as i64)
+                .expect("canonical u64 roundtrip should execute") as u64,
+            value,
+        );
+    }
+
+    let derived = instance
+        .get_typed_func::<i32, i32>(&mut store, "derived_policy_mutation")
+        .expect("derived policy mutation export");
+    for (case, expected) in [(0, 1), (1, 0), (2, 0), (3, 0), (4, 0)] {
+        assert_eq!(
+            derived
+                .call(&mut store, case)
+                .expect("policy recomputation should execute"),
+            expected,
+            "derived policy mutation case {case}",
+        );
+    }
+
     let malformed = instance
         .get_typed_func::<i32, i32>(&mut store, "malformed_policy")
         .expect("malformed policy export");
-    for case in 0..5 {
+    for case in 0..6 {
         assert_eq!(
             malformed
                 .call(&mut store, case)

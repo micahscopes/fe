@@ -726,46 +726,164 @@ enum SparseConstraintFamily {
 }
 impl core::marker::Copy for SparseConstraintFamily {}
 
+/// Lightweight interpretation of one AIR expression as a polynomial-degree
+/// upper bound. Trace columns enter as degree-one variables; transcript
+/// challenges and field constants enter at degree zero. Addition preserves
+/// the larger bound and multiplication adds bounds, so the exact authored
+/// constraint body can be interpreted without lowering BabyBear arithmetic.
+/// Inversion is accepted only for constants and otherwise fails closed.
+struct AirPolynomialDegree {
+    valid: bool,
+    degree: u32,
+}
+impl core::marker::Copy for AirPolynomialDegree {}
+
+impl AirPolynomialDegree {
+    fn constant() -> Self { Self { valid: true, degree: 0 } }
+    fn variable() -> Self { Self { valid: true, degree: 1 } }
+    fn invalid() -> Self { Self { valid: false, degree: 0 } }
+
+    fn maximum(self, _ other: Self) -> Self {
+        if !self.valid || !other.valid { return Self::invalid() }
+        Self {
+            valid: true,
+            degree: if self.degree > other.degree {
+                self.degree
+            } else {
+                other.degree
+            },
+        }
+    }
+
+    fn product(self, _ other: Self) -> Self {
+        if !self.valid || !other.valid
+            || self.degree > 2147483647 - other.degree {
+            return Self::invalid()
+        }
+        Self { valid: true, degree: self.degree + other.degree }
+    }
+}
+
+impl Radix2Field for AirPolynomialDegree {
+    const TWO_ADICITY: u32 = 0
+
+    fn radix2_zero() -> Self { Self::constant() }
+    fn radix2_is_zero(self) -> bool { false }
+    fn radix2_add(self, _ other: Self) -> Self { self.maximum(other) }
+    fn radix2_sub(self, _ other: Self) -> Self { self.maximum(other) }
+    fn radix2_mul(self, _ other: Self) -> Self { self.product(other) }
+    fn radix2_pow(self, _ exponent: u32) -> Self {
+        if !self.valid || (exponent != 0 && self.degree > 2147483647 / exponent) {
+            return Self::invalid()
+        }
+        Self { valid: true, degree: self.degree * exponent }
+    }
+    fn radix2_inverse_or_zero(self) -> Self {
+        if self.valid && self.degree == 0 {
+            Self::constant()
+        } else {
+            Self::invalid()
+        }
+    }
+    fn radix2_root(_ log_order: u32) -> Self { Self::constant() }
+}
+
+/// Honest one-word schema used only to let the existing reflection traversal
+/// populate every field of a symbolic row. Bit zero is validity and the upper
+/// 31 bits hold the bounded degree, so encode/decode remains a true roundtrip.
+impl CanonicalWords for AirPolynomialDegree {
+    const WORDS: u32 = 1
+
+    fn encode<W: WordSink>(ref self, _ writer: W) -> W {
+        let word = if self.valid && self.degree <= 2147483647 {
+            (self.degree << 1) | 1
+        } else {
+            0
+        }
+        writer.write(word)
+    }
+
+    fn decode<R: WordSource>(mut self, _ reader: R) -> R {
+        let next = reader.read()
+        self = if (next.value & 1) == 1 {
+            Self { valid: true, degree: next.value >> 1 }
+        } else {
+            Self::invalid()
+        }
+        next.source
+    }
+}
+
+struct AirPolynomialVariableSource {
+    cursor: u32,
+    valid: bool,
+}
+impl core::marker::Copy for AirPolynomialVariableSource {}
+
+impl AirPolynomialVariableSource {
+    fn new() -> Self { Self { cursor: 0, valid: true } }
+}
+
+impl WordSource for AirPolynomialVariableSource {
+    fn read(self) -> WordRead<Self> {
+        WordRead {
+            source: Self { cursor: self.cursor + 1, valid: self.valid },
+            value: 3,
+        }
+    }
+
+    fn reject(self) -> Self {
+        Self { cursor: self.cursor, valid: false }
+    }
+}
+
 /// Structural count produced by the exact sparse composition fold.
 /// Evaluators and security-policy gates therefore observe one authored
 /// constraint sequence rather than maintaining a copied count table.
 pub struct SparseAirConstraintShape {
+    pub valid: bool,
     pub all_rows: u32,
     pub pair_rows: u32,
     pub first_row: u32,
     pub last_row: u32,
     pub total: u32,
+    pub all_rows_degree: u32,
+    pub pair_rows_degree: u32,
+    pub first_row_degree: u32,
+    pub last_row_degree: u32,
+    pub maximum_degree: u32,
 }
 impl core::marker::Copy for SparseAirConstraintShape {}
+derive CanonicalWords for SparseAirConstraintShape using CanonicalWordsProvider
 
 /// Consecutive composition powers continue across zerofier families, matching
 /// the established AIR composition convention while allowing each generic
 /// fixed-air evaluator to retain its own readable constraint fold.
-struct SparseCompositionFold {
+struct SparseCompositionFold<F: Radix2Field> {
     valid: bool,
-    challenge: BabyBearExt4,
-    power: BabyBearExt4,
-    all_rows: BabyBearExt4,
-    pair_rows: BabyBearExt4,
-    first_row: BabyBearExt4,
-    last_row: BabyBearExt4,
+    challenge: F,
+    power: F,
+    all_rows: F,
+    pair_rows: F,
+    first_row: F,
+    last_row: F,
     all_rows_constraints: u32,
     pair_rows_constraints: u32,
     first_row_constraints: u32,
     last_row_constraints: u32,
 }
-impl core::marker::Copy for SparseCompositionFold {}
+impl<F: Radix2Field> core::marker::Copy for SparseCompositionFold<F> {}
 
-impl SparseCompositionFold {
-    fn new(_ challenge: BabyBearExt4) -> Self {
+impl<F: Radix2Field> SparseCompositionFold<F> {
+    fn new(_ challenge: F) -> Self {
         Self {
             valid: true,
             challenge: challenge,
-            power: BabyBearExt4::one(),
-            all_rows: BabyBearExt4::zero(),
-            pair_rows: BabyBearExt4::zero(),
-            first_row: BabyBearExt4::zero(),
-            last_row: BabyBearExt4::zero(),
+            power: F::radix2_root(0),
+            all_rows: F::radix2_zero(),
+            pair_rows: F::radix2_zero(),
+            first_row: F::radix2_zero(),
+            last_row: F::radix2_zero(),
             all_rows_constraints: 0,
             pair_rows_constraints: 0,
             first_row_constraints: 0,
@@ -778,36 +896,36 @@ impl SparseCompositionFold {
         _ family: SparseConstraintFamily,
         _ valid: bool,
         _ constraints: u32,
-        _ value: BabyBearExt4,
+        _ value: F,
     ) -> Self {
         self.valid = self.valid && valid
-        let contribution = self.power * value
+        let contribution = self.power.radix2_mul(value)
         match family {
             SparseConstraintFamily::AllRows => {
-                self.all_rows = self.all_rows + contribution
+                self.all_rows = self.all_rows.radix2_add(contribution)
                 self.all_rows_constraints = self.all_rows_constraints + constraints
             }
             SparseConstraintFamily::PairRows => {
-                self.pair_rows = self.pair_rows + contribution
+                self.pair_rows = self.pair_rows.radix2_add(contribution)
                 self.pair_rows_constraints = self.pair_rows_constraints + constraints
             }
             SparseConstraintFamily::FirstRow => {
-                self.first_row = self.first_row + contribution
+                self.first_row = self.first_row.radix2_add(contribution)
                 self.first_row_constraints = self.first_row_constraints + constraints
             }
             SparseConstraintFamily::LastRow => {
-                self.last_row = self.last_row + contribution
+                self.last_row = self.last_row.radix2_add(contribution)
                 self.last_row_constraints = self.last_row_constraints + constraints
             }
         }
-        self.power = self.power * self.challenge.pow_u32(constraints)
+        self.power = self.power.radix2_mul(self.challenge.radix2_pow(constraints))
         self
     }
 
     fn absorb_fixed(
         self,
         _ family: SparseConstraintFamily,
-        _ evaluation: FixedAirConstraintEvaluation<BabyBearExt4>,
+        _ evaluation: FixedAirConstraintEvaluation<F>,
     ) -> Self {
         self.absorb(
             family,
@@ -817,13 +935,13 @@ impl SparseCompositionFold {
         )
     }
 
-    fn numerators(self) -> AirConstraintNumerators<BabyBearExt4> {
+    fn numerators(self) -> AirConstraintNumerators<F> {
         if !self.valid {
             return AirConstraintNumerators {
-                all_rows: BabyBearExt4::zero(),
-                pair_rows: BabyBearExt4::zero(),
-                first_row: BabyBearExt4::zero(),
-                last_row: BabyBearExt4::zero(),
+                all_rows: F::radix2_zero(),
+                pair_rows: F::radix2_zero(),
+                first_row: F::radix2_zero(),
+                last_row: F::radix2_zero(),
             }
         }
         AirConstraintNumerators {
@@ -834,35 +952,24 @@ impl SparseCompositionFold {
         }
     }
 
-    fn shape(self) -> SparseAirConstraintShape {
-        SparseAirConstraintShape {
-            all_rows: self.all_rows_constraints,
-            pair_rows: self.pair_rows_constraints,
-            first_row: self.first_row_constraints,
-            last_row: self.last_row_constraints,
-            total: self.all_rows_constraints
-                + self.pair_rows_constraints
-                + self.first_row_constraints
-                + self.last_row_constraints,
-        }
-    }
 }
 
-fn sparse_composition_fold_opened<const L: usize>(
-    _ challenge: BabyBearExt4,
-    _ interaction_challenges: SparseInteractionChallenges,
-    _ row: ref SparseOpenedAirRow,
-    _ next: ref SparseOpenedAirRow,
-) -> SparseCompositionFold
+fn sparse_composition_fold_fields<F: Radix2Field, const L: usize>(
+    _ challenge: F,
+    _ product_challenges: SparseCopyChallenges<F>,
+    _ round_challenges: SparseCopyChallenges<F>,
+    _ linear_challenges: SparseCopyChallenges<F>,
+    _ boundary_challenges: SparseCopyChallenges<F>,
+    _ control: SparseControlRow<F>,
+    _ next_control: SparseControlRow<F>,
+    _ witness: SparseTaskRow<F>,
+    _ next_witness: SparseTaskRow<F>,
+    _ interaction: SparseInteractionTraceRow<F>,
+    _ next_interaction: SparseInteractionTraceRow<F>,
+) -> SparseCompositionFold<F>
 where L > 1,
 {
-    let control = row.base.control
-    let next_control = next.base.control
-    let witness = row.base.witness
-    let next_witness = next.base.witness
-    let interaction = row.interaction
-    let next_interaction = next.interaction
-    let mut fold = SparseCompositionFold::new(challenge)
+    let mut fold = SparseCompositionFold<F>::new(challenge)
 
     fold = fold.absorb_fixed(
         SparseConstraintFamily::AllRows,
@@ -870,13 +977,13 @@ where L > 1,
     )
     fold = fold.absorb_fixed(
         SparseConstraintFamily::AllRows,
-        evaluate_sparse_arithmetic_row<BabyBearExt4, L>(
+        evaluate_sparse_arithmetic_row<F, L>(
             challenge, control, witness,
         ),
     )
-    let product = evaluate_sparse_product_interaction_row<BabyBearExt4, L>(
+    let product = evaluate_sparse_product_interaction_row<F, L>(
         challenge,
-        interaction_challenges.product,
+        product_challenges,
         control,
         witness,
         interaction.product,
@@ -887,9 +994,9 @@ where L > 1,
         product.constraints,
         product.folded,
     )
-    let round = evaluate_sparse_round_interaction_row<BabyBearExt4, L>(
+    let round = evaluate_sparse_round_interaction_row<F, L>(
         challenge,
-        interaction_challenges.round,
+        round_challenges,
         control,
         next_control,
         witness,
@@ -901,9 +1008,9 @@ where L > 1,
         round.constraints,
         round.folded,
     )
-    let linear = evaluate_sparse_linear_interaction_row<BabyBearExt4, L>(
+    let linear = evaluate_sparse_linear_interaction_row<F, L>(
         challenge,
-        interaction_challenges.linear,
+        linear_challenges,
         control,
         next_control,
         witness,
@@ -915,9 +1022,9 @@ where L > 1,
         linear.constraints,
         linear.folded,
     )
-    let boundary = evaluate_sparse_boundary_interaction_row<BabyBearExt4, L>(
+    let boundary = evaluate_sparse_boundary_interaction_row<F, L>(
         challenge,
-        interaction_challenges.boundary,
+        boundary_challenges,
         control,
         witness,
         interaction.boundary,
@@ -931,7 +1038,7 @@ where L > 1,
 
     fold = fold.absorb_fixed(
         SparseConstraintFamily::PairRows,
-        evaluate_sparse_control_link<BabyBearExt4, L>(
+        evaluate_sparse_control_link<F, L>(
             challenge, control, next_control,
         ),
     )
@@ -943,7 +1050,7 @@ where L > 1,
     )
     fold = fold.absorb_fixed(
         SparseConstraintFamily::PairRows,
-        evaluate_sparse_product_interaction_link<BabyBearExt4, L>(
+        evaluate_sparse_product_interaction_link<F, L>(
             challenge,
             control,
             witness,
@@ -953,7 +1060,7 @@ where L > 1,
     )
     fold = fold.absorb_fixed(
         SparseConstraintFamily::PairRows,
-        evaluate_sparse_round_interaction_link<BabyBearExt4, L>(
+        evaluate_sparse_round_interaction_link<F, L>(
             challenge,
             control,
             next_control,
@@ -964,7 +1071,7 @@ where L > 1,
     )
     fold = fold.absorb_fixed(
         SparseConstraintFamily::PairRows,
-        evaluate_sparse_linear_interaction_link<BabyBearExt4, L>(
+        evaluate_sparse_linear_interaction_link<F, L>(
             challenge,
             control,
             next_control,
@@ -975,7 +1082,7 @@ where L > 1,
     )
     fold = fold.absorb_fixed(
         SparseConstraintFamily::PairRows,
-        evaluate_sparse_boundary_interaction_link<BabyBearExt4, L>(
+        evaluate_sparse_boundary_interaction_link<F, L>(
             challenge,
             control,
             witness,
@@ -986,7 +1093,7 @@ where L > 1,
 
     fold = fold.absorb_fixed(
         SparseConstraintFamily::FirstRow,
-        evaluate_sparse_control_initial<BabyBearExt4, L>(challenge, control),
+        evaluate_sparse_control_initial<F, L>(challenge, control),
     )
     fold = fold.absorb_fixed(
         SparseConstraintFamily::FirstRow,
@@ -1023,29 +1130,52 @@ where L > 1,
     )
     fold = fold.absorb_fixed(
         SparseConstraintFamily::LastRow,
-        evaluate_sparse_product_interaction_terminal<BabyBearExt4, L>(
+        evaluate_sparse_product_interaction_terminal<F, L>(
             challenge, control, witness, interaction.product,
         ),
     )
     fold = fold.absorb_fixed(
         SparseConstraintFamily::LastRow,
-        evaluate_sparse_round_interaction_terminal<BabyBearExt4, L>(
+        evaluate_sparse_round_interaction_terminal<F, L>(
             challenge, control, next_control, witness, interaction.round,
         ),
     )
     fold = fold.absorb_fixed(
         SparseConstraintFamily::LastRow,
-        evaluate_sparse_linear_interaction_terminal<BabyBearExt4, L>(
+        evaluate_sparse_linear_interaction_terminal<F, L>(
             challenge, control, next_control, witness, interaction.linear,
         ),
     )
     fold = fold.absorb_fixed(
         SparseConstraintFamily::LastRow,
-        evaluate_sparse_boundary_interaction_terminal<BabyBearExt4, L>(
+        evaluate_sparse_boundary_interaction_terminal<F, L>(
             challenge, control, witness, interaction.boundary,
         ),
     )
     fold
+}
+
+fn sparse_composition_fold_opened<const L: usize>(
+    _ challenge: BabyBearExt4,
+    _ interaction_challenges: SparseInteractionChallenges,
+    _ row: ref SparseOpenedAirRow,
+    _ next: ref SparseOpenedAirRow,
+) -> SparseCompositionFold<BabyBearExt4>
+where L > 1,
+{
+    sparse_composition_fold_fields<BabyBearExt4, L>(
+        challenge,
+        interaction_challenges.product,
+        interaction_challenges.round,
+        interaction_challenges.linear,
+        interaction_challenges.boundary,
+        row.base.control,
+        next.base.control,
+        row.base.witness,
+        next.base.witness,
+        row.interaction,
+        next.interaction,
+    )
 }
 
 pub fn sparse_constraint_numerators_opened<const L: usize>(
@@ -1064,24 +1194,128 @@ where L > 1,
     ).numerators()
 }
 
-/// Interpret the exact composition fold as structural constraint counts.
-/// Zero-valued rows are sufficient because every evaluator reports its
-/// polynomial count independently of witness values.
+fn maximum_degree(_ left: u32, _ right: u32) -> u32 {
+    if left > right { left } else { right }
+}
+
+fn quotient_degree_bound(
+    _ trace_length: u32,
+    _ expression_degree: u32,
+    _ zerofier_degree: u32,
+) -> u32 {
+    if trace_length <= 1 || expression_degree == 0 { return 0 }
+    let trace_degree = trace_length - 1
+    if expression_degree > 4294967295 / trace_degree { return 4294967295 }
+    let numerator = expression_degree * trace_degree
+    if numerator > zerofier_degree {
+        numerator - zerofier_degree
+    } else {
+        0
+    }
+}
+
+/// Derive the maximum composition-polynomial degree after applying the four
+/// trace zerofiers. This consumes the family-specific degrees because a
+/// quadratic all-row relation and a quadratic boundary relation have very
+/// different quotient bounds.
+pub fn sparse_composition_degree_bound(
+    _ shape: SparseAirConstraintShape,
+    _ trace_length: u32,
+) -> u32 {
+    if !shape.valid || trace_length <= 1 { return 4294967295 }
+    let all_rows = quotient_degree_bound(
+        trace_length,
+        shape.all_rows_degree,
+        trace_length,
+    )
+    let pair_rows = quotient_degree_bound(
+        trace_length,
+        shape.pair_rows_degree,
+        trace_length - 1,
+    )
+    let first_row = quotient_degree_bound(
+        trace_length,
+        shape.first_row_degree,
+        1,
+    )
+    let last_row = quotient_degree_bound(
+        trace_length,
+        shape.last_row_degree,
+        1,
+    )
+    maximum_degree(
+        maximum_degree(all_rows, pair_rows),
+        maximum_degree(first_row, last_row),
+    )
+}
+
+/// Interpret the exact composition fold as structural counts and polynomial
+/// degrees. Reflection fills every committed base and interaction column with
+/// a degree-one symbolic variable, while challenges remain degree-zero
+/// constants. The evaluator sequence is shared with ordinary BabyBear
+/// execution, so no copied constraint table or field list is involved.
 pub fn sparse_constraint_shape<const L: usize>() -> SparseAirConstraintShape
 where L > 1,
 {
-    let row = zero_sparse_opened_air_row()
-    let root: SparseTraceDigest<L> = SparseTraceDigest {
-        valid: false,
-        value: Poseidon2Digest::zero(),
+    let mut base = zero_sparse_base_air_row_field<AirPolynomialDegree>()
+    let base_source = base.decode(AirPolynomialVariableSource::new())
+    let mut interaction =
+        zero_sparse_interaction_trace_row_field<AirPolynomialDegree>()
+    let interaction_source = interaction.decode(
+        AirPolynomialVariableSource::new(),
+    )
+    let challenges = SparseCopyChallenges {
+        beta: AirPolynomialDegree::constant(),
+        gamma: AirPolynomialDegree::constant(),
     }
-    let challenges = sparse_interaction_challenges(root)
-    sparse_composition_fold_opened<L>(
-        BabyBearExt4::one(),
+    let fold = sparse_composition_fold_fields<AirPolynomialDegree, L>(
+        AirPolynomialDegree::constant(),
         challenges,
-        ref row,
-        ref row,
-    ).shape()
+        challenges,
+        challenges,
+        challenges,
+        base.control,
+        base.control,
+        base.witness,
+        base.witness,
+        interaction,
+        interaction,
+    )
+    let all_rows_degree = fold.all_rows.degree
+    let pair_rows_degree = fold.pair_rows.degree
+    let first_row_degree = fold.first_row.degree
+    let last_row_degree = fold.last_row.degree
+    SparseAirConstraintShape {
+        valid: fold.valid
+            && base_source.valid
+            && interaction_source.valid
+            && base_source.cursor
+                == <SparseBaseAirRow<AirPolynomialDegree>
+                    as CanonicalWords>::WORDS
+            && interaction_source.cursor
+                == <SparseInteractionTraceRow<AirPolynomialDegree>
+                    as CanonicalWords>::WORDS
+            && fold.all_rows.valid
+            && fold.pair_rows.valid
+            && fold.first_row.valid
+            && fold.last_row.valid,
+        all_rows: fold.all_rows_constraints,
+        pair_rows: fold.pair_rows_constraints,
+        first_row: fold.first_row_constraints,
+        last_row: fold.last_row_constraints,
+        total: fold.all_rows_constraints
+            + fold.pair_rows_constraints
+            + fold.first_row_constraints
+            + fold.last_row_constraints,
+        all_rows_degree: all_rows_degree,
+        pair_rows_degree: pair_rows_degree,
+        first_row_degree: first_row_degree,
+        last_row_degree: last_row_degree,
+        maximum_degree: maximum_degree(
+            maximum_degree(all_rows_degree, pair_rows_degree),
+            maximum_degree(first_row_degree, last_row_degree),
+        ),
+    }
 }
 
 /// Evaluate the complete sparse high-precision AIR composition at one opened

@@ -2,12 +2,47 @@
 
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::{layout_for, BackendKind, OptLevel};
+use fe_codegen::{BackendKind, OptLevel, layout_for};
 use hir::hir_def::HirIngot;
 use std::path::Path;
 use url::Url;
+use wasmtime::Val;
 
 const AUDITED_CONSTRAINT_CAP: u32 = 8_192;
+
+fn call_words(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    name: &str,
+    arguments: &[u32],
+    result_count: usize,
+) -> Vec<u32> {
+    let function = instance
+        .get_func(&mut *store, name)
+        .unwrap_or_else(|| panic!("missing `{name}` export"));
+    let params: Vec<Val> = arguments
+        .iter()
+        .map(|value| Val::I32(*value as i32))
+        .collect();
+    let mut results = vec![Val::I32(0); result_count];
+    function
+        .call(&mut *store, &params, &mut results)
+        .unwrap_or_else(|error| panic!("`{name}` should execute: {error:?}"));
+    results
+        .into_iter()
+        .map(|value| match value {
+            Val::I32(word) => word as u32,
+            other => panic!("`{name}` returned non-u32 lane {other:?}"),
+        })
+        .collect()
+}
+
+fn quotient_degree_bound(trace_length: u32, expression_degree: u32, zerofier: u32) -> u32 {
+    expression_degree
+        .checked_mul(trace_length - 1)
+        .expect("production degree arithmetic should remain bounded")
+        .saturating_sub(zerofier)
+}
 
 fn fixture_url() -> Url {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -69,5 +104,26 @@ fn exact_composition_interpreter_derives_the_audited_air_shape() {
     assert!(
         shape[4] <= AUDITED_CONSTRAINT_CAP,
         "the authored AIR exceeds the security policy's audited cap: {shape:?}",
+    );
+
+    let degrees = call_words(&mut store, &instance, "sparse_air_degree_shape_l4", &[], 9);
+    assert_eq!(degrees[0], 1, "the degree interpretation must remain valid");
+    assert!(degrees[1..5].iter().all(|degree| *degree > 0));
+    assert_eq!(degrees[5], *degrees[1..5].iter().max().unwrap());
+    let trace_length = 4_096;
+    let reference_composition_degree = [
+        quotient_degree_bound(trace_length, degrees[1], trace_length),
+        quotient_degree_bound(trace_length, degrees[2], trace_length - 1),
+        quotient_degree_bound(trace_length, degrees[3], 1),
+        quotient_degree_bound(trace_length, degrees[4], 1),
+    ]
+    .into_iter()
+    .max()
+    .unwrap();
+    assert_eq!(degrees[6], reference_composition_degree);
+    assert_eq!(degrees[7], shape[4]);
+    assert_eq!(
+        degrees[8], 0,
+        "the current degree-19 AIR must not be represented as fitting degree 4,096",
     );
 }

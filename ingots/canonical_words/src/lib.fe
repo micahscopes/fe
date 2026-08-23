@@ -431,6 +431,25 @@ impl CanonicalWords for u32 {
     }
 }
 
+/// Canonical little-endian word encoding for backend-neutral counters and
+/// fixed-point policy values. This is a word schema, not a byte serialization:
+/// the surrounding interpreter owns any eventual byte order.
+impl CanonicalWords for u64 {
+    const WORDS: u32 = 2
+
+    fn encode<W: WordSink>(ref self, _ writer: W) -> W {
+        let writer = writer.write(self.downcast_truncate())
+        writer.write((self >> (32 as u64)).downcast_truncate())
+    }
+
+    fn decode<R: WordSource>(mut self, _ reader: R) -> R {
+        let low = reader.read()
+        let high = low.source.read()
+        self = (low.value as u64) | ((high.value as u64) << (32 as u64))
+        high.source
+    }
+}
+
 impl CanonicalWords for i32 {
     const WORDS: u32 = 1
 

@@ -1,6 +1,11 @@
 //! Executable boundary for the structurally derived sparse AIR shape.
 
-use mandelbrot_proof_fixed_air_baby_bear::sparse_constraint_shape
+use mandelbrot_proof_fixed_air_baby_bear::{
+    sparse_composition_degree_bound,
+    sparse_constraint_shape,
+}
+
+const PRODUCTION_TRACE_LENGTH: u32 = 4096
 
 pub fn sparse_air_shape_l4() -> (u32, u32, u32, u32, u32) {
     let shape = sparse_constraint_shape<4>()
@@ -11,4 +16,22 @@ pub fn sparse_air_shape_l4() -> (u32, u32, u32, u32, u32) {
         shape.last_row,
         shape.total,
     )
+}
+
+pub fn sparse_air_degree_shape_l4() -> [u32; 9] {
+    let shape = sparse_constraint_shape<4>()
+    [
+        if shape.valid { 1 } else { 0 },
+        shape.all_rows_degree,
+        shape.pair_rows_degree,
+        shape.first_row_degree,
+        shape.last_row_degree,
+        shape.maximum_degree,
+        sparse_composition_degree_bound(shape, PRODUCTION_TRACE_LENGTH),
+        shape.total,
+        if (sparse_composition_degree_bound(
+            shape,
+            PRODUCTION_TRACE_LENGTH,
+        ) < PRODUCTION_TRACE_LENGTH) { 1 } else { 0 },
+    ]
 }
