@@ -75,6 +75,7 @@ use mandelbrot_proof_fixed_air_core::{
     evaluate_sparse_arithmetic_initial,
     evaluate_sparse_arithmetic_link,
     evaluate_sparse_arithmetic_row,
+    sparse_arithmetic_link_plan_witness,
     sparse_arithmetic_plan_witness,
     evaluate_sparse_boundary_row,
     evaluate_sparse_linear_row,
@@ -1217,6 +1218,12 @@ pub fn fixed_transition4_sparse_arithmetic_audit(
                 previous,
                 control,
                 row,
+                sparse_arithmetic_link_plan_witness(
+                    previous_control,
+                    previous,
+                    control,
+                    row,
+                ),
             )
             constraints = constraints + link.constraints
             if !link.valid || link.folded.to_u32() != 0 {
@@ -1282,6 +1289,74 @@ pub fn fixed_transition4_sparse_arithmetic_plan_audit(
         0
     }
     output[24] = evaluated.constraints
+    output
+}
+
+/// Focused exact-entry gate for the shared 18-node outgoing arithmetic-link
+/// plan. The clean nodes are returned for an independent host reconstruction,
+/// while `mutation` corrupts one committed node before the production pair-row
+/// evaluator runs.
+pub fn fixed_transition4_sparse_arithmetic_link_plan_audit(
+    _ prn: u32, _ pr0: u32, _ pr1: u32, _ pr2: u32, _ pr3: u32,
+    _ pin: u32, _ pi0: u32, _ pi1: u32, _ pi2: u32, _ pi3: u32,
+    _ crn: u32, _ cr0: u32, _ cr1: u32, _ cr2: u32, _ cr3: u32,
+    _ cin: u32, _ ci0: u32, _ ci1: u32, _ ci2: u32, _ ci3: u32,
+    _ index: u32,
+    _ challenge: u32,
+    _ mutation: u32,
+) -> [u32; 20] {
+    let (point, current, witness) = transition4(
+        prn, [pr0, pr1, pr2, pr3], pin, [pi0, pi1, pi2, pi3],
+        crn, [cr0, cr1, cr2, cr3], cin, [ci0, ci1, ci2, ci3],
+    )
+    let next = fixed_mandelbrot_transition_output(witness)
+    let control = sparse_control_row_at<BabyBear, 4>(index)
+    let next_control = sparse_control_row_at<BabyBear, 4>(index + 1)
+    let row = sparse_transition_row_from_witness<BabyBear, 4>(
+        index,
+        point,
+        current,
+        next,
+        witness,
+    )
+    let next_row = sparse_transition_row_from_witness<BabyBear, 4>(
+        index + 1,
+        point,
+        current,
+        next,
+        witness,
+    )
+    let clean = sparse_arithmetic_link_plan_witness(
+        control,
+        row,
+        next_control,
+        next_row,
+    )
+    let mut tested = clean
+    if mutation > 0 && mutation <= 18 {
+        let node = (mutation - 1) as usize
+        tested.nodes[node] = tested.nodes[node] + BabyBear::one()
+    }
+    let evaluated = evaluate_sparse_arithmetic_link(
+        BabyBear::from_u32(challenge),
+        control,
+        row,
+        next_control,
+        next_row,
+        tested,
+    )
+    let mut output = [0; 20]
+    let mut node: usize = 0
+    while node < 18 {
+        output[node] = clean.nodes[node].to_u32()
+        node = node + 1
+    }
+    output[18] = if !evaluated.valid || evaluated.folded.to_u32() != 0 {
+        1
+    } else {
+        0
+    }
+    output[19] = evaluated.constraints
     output
 }
 

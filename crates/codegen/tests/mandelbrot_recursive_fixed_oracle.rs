@@ -1151,6 +1151,60 @@ fn expected_sparse_arithmetic_plan(control: [u32; 38], row: [u32; 6]) -> [u32; 2
     ]
 }
 
+fn expected_sparse_arithmetic_link_plan(
+    control: [u32; 38],
+    row: [u32; 6],
+    next_control: [u32; 38],
+) -> [u32; 18] {
+    let current_radix = bb_add(control[0], bb_add(control[1], control[2]));
+    let next_radix = bb_add(
+        next_control[0],
+        bb_add(next_control[1], next_control[2]),
+    );
+    let radix_link = bb_mul(current_radix, next_radix);
+    let carry_entry = bb_mul(control[2], next_control[3]);
+    let current_carry = bb_add(control[3], control[4]);
+    let next_carry = bb_add(next_control[3], next_control[4]);
+    let carry_link = bb_mul(current_carry, next_carry);
+    let carry_bit_pair = bb_mul(control[3], next_control[3]);
+    let carry_reset = bb_mul(carry_bit_pair, bb_sub(next_control[35], control[35]));
+    let carry_reset_accumulator = bb_mul(carry_reset, row[3]);
+    let carry_reset_state_adjustment = bb_mul(carry_reset, bb_sub(row[3], row[5]));
+    let product_entry = bb_mul(control[4], next_control[5]);
+    let current_product = bb_add(control[5], control[6]);
+    let next_product = bb_add(next_control[5], next_control[6]);
+    let product_link = bb_mul(current_product, next_product);
+    let product_terminal = bb_mul(control[6], next_control[7]);
+    let round_start = bb_mul(bb_add(control[6], control[8]), next_control[7]);
+    let round_link = bb_mul(control[7], bb_add(next_control[7], next_control[8]));
+    let linear_sum_start = bb_mul(bb_add(control[8], control[10]), next_control[15]);
+    let linear_left_start = bb_mul(control[15], next_control[16]);
+    let linear_right_start = bb_mul(control[16], next_control[17]);
+    let linear_sum_link = bb_mul(control[15], next_control[15]);
+    let linear_left_link = bb_mul(control[16], next_control[16]);
+    let linear_right_link = bb_mul(control[17], next_control[17]);
+    [
+        radix_link,
+        carry_entry,
+        carry_link,
+        carry_bit_pair,
+        carry_reset,
+        carry_reset_accumulator,
+        carry_reset_state_adjustment,
+        product_entry,
+        product_link,
+        product_terminal,
+        round_start,
+        round_link,
+        linear_sum_start,
+        linear_left_start,
+        linear_right_start,
+        linear_sum_link,
+        linear_left_link,
+        linear_right_link,
+    ]
+}
+
 fn expected_sparse_boundary_plan(control: [u32; 38], row: [u32; 6]) -> [u32; 14] {
     let output_node = bb_mul(bb_sub(control[32], 18), bb_inverse(4));
     let even_pair = bb_mul(bb_sub(output_node, 1), bb_sub(output_node, 3));
@@ -2523,9 +2577,30 @@ fn expected_sparse_air_prefix_words(
     let mut words = vec![1, 1];
     words.extend(base_root);
     for index in 0..4 {
+        let arithmetic = expected_sparse_arithmetic_plan(
+            controls[index],
+            rows[index],
+        );
         words.extend(controls[index]);
         words.extend(rows[index]);
-        words.extend(expected_sparse_arithmetic_plan(
+        words.extend(arithmetic);
+        words.extend(expected_sparse_arithmetic_link_plan(
+            controls[index],
+            rows[index],
+            controls[index + 1],
+        ));
+        words.extend(expected_sparse_round_plan(
+            controls[index],
+            controls[index + 1],
+            rows[index],
+        ));
+        words.extend(expected_sparse_linear_plan(
+            controls[index],
+            controls[index + 1],
+            rows[index],
+            arithmetic,
+        ));
+        words.extend(expected_sparse_boundary_plan(
             controls[index],
             rows[index],
         ));
@@ -2589,13 +2664,13 @@ fn expected_sparse_air_prefix_words(
     ] {
         extend_ext4_words(&mut words, accumulator);
     }
-    assert_eq!(words.len(), 566, "sparse prefix schema must stay nominal");
+    assert_eq!(words.len(), 1_118, "sparse prefix schema must stay nominal");
     words
 }
 
 fn expected_sparse_air_lde_words(prefix: &[u32]) -> Vec<u32> {
-    assert_eq!(prefix.len(), 566, "sparse prefix input must stay nominal");
-    const BASE_FIELDS: usize = 51;
+    assert_eq!(prefix.len(), 1_118, "sparse prefix input must stay nominal");
+    const BASE_FIELDS: usize = 189;
     const INTERACTION_FIELDS: usize = 84;
     const TRACE: usize = 4;
     const LDE: usize = 16;
@@ -2627,12 +2702,12 @@ fn expected_sparse_air_lde_words(prefix: &[u32]) -> Vec<u32> {
     let mut words = vec![1];
     words.extend(base);
     words.extend(interaction);
-    assert_eq!(words.len(), 2_161, "sparse LDE schema must stay nominal");
+    assert_eq!(words.len(), 4_369, "sparse LDE schema must stay nominal");
     words
 }
 
 fn expected_sparse_base_lde_root(lde: &[u32], mutate: bool) -> [u32; 8] {
-    const BASE_FIELDS: usize = 51;
+    const BASE_FIELDS: usize = 189;
     const LDE: usize = 16;
     assert!(lde.len() >= 1 + LDE * BASE_FIELDS);
     assert_eq!(lde[0], 1, "base LDE must be valid before commitment");
@@ -3085,6 +3160,91 @@ fn production_arithmetic_plan_matches_independent_nodes_and_rejects_mutations() 
             assert_eq!(mutated[23], 1, "plan node {mutation} must fail closed");
             assert_eq!(mutated[24], baseline[24]);
         }
+    }
+}
+
+#[test]
+fn production_arithmetic_link_plan_matches_independent_nodes_and_rejects_mutations() {
+    let entry = "fixed_transition4_sparse_arithmetic_link_plan_audit";
+    let bytes = compile_fixture_entry(entry);
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, bytes)
+        .expect("focused arithmetic-link-plan Wasm module should load");
+    assert_eq!(module.imports().count(), 0, "fixture must remain zero-import");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("focused arithmetic-link-plan fixture should instantiate");
+
+    let point = ComplexFx {
+        real: fixed(true, 3, 4),
+        imaginary: fixed(false, 1, 8),
+    };
+    let current = ComplexFx {
+        real: fixed(false, 5, 4),
+        imaginary: fixed(true, 3, 8),
+    };
+    let controls = expected_sparse_control_rows();
+    let rows = expected_sparse_rows(&point, &current);
+    let mut node_indices = [usize::MAX; 18];
+    let mut semantic_indices = Vec::new();
+    for index in 0..controls.len() - 1 {
+        let expected = expected_sparse_arithmetic_link_plan(
+            controls[index],
+            rows[index],
+            controls[index + 1],
+        );
+        let mut adds_index = false;
+        for (node, value) in expected.into_iter().enumerate() {
+            if value != 0 && node_indices[node] == usize::MAX {
+                node_indices[node] = index;
+                adds_index = true;
+            }
+        }
+        if adds_index {
+            semantic_indices.push(index);
+        }
+    }
+    assert!(
+        node_indices.iter().all(|index| *index != usize::MAX),
+        "every arithmetic-link node must be exercised by the production trace",
+    );
+
+    for index in semantic_indices {
+        let expected = expected_sparse_arithmetic_link_plan(
+            controls[index],
+            rows[index],
+            controls[index + 1],
+        );
+        for challenge in [3u32, 7, 31, 127, 257] {
+            let mut arguments = transition_arguments(&point, &current);
+            arguments.extend([index as u32, challenge, 0]);
+            let baseline = call(&mut store, &instance, entry, &arguments, 20);
+            assert_eq!(&baseline[..18], expected.as_slice());
+            assert_eq!(baseline[18], 0, "the clean arithmetic link must satisfy the AIR");
+            assert_eq!(baseline[19], 38, "twenty link equations plus eighteen plan nodes");
+        }
+    }
+
+    for (node, index) in node_indices.into_iter().enumerate() {
+        let expected = expected_sparse_arithmetic_link_plan(
+            controls[index],
+            rows[index],
+            controls[index + 1],
+        );
+        let mut rejected = false;
+        for challenge in [3u32, 7, 31, 127, 257] {
+            let mut arguments = transition_arguments(&point, &current);
+            arguments.extend([index as u32, challenge, node as u32 + 1]);
+            let mutated = call(&mut store, &instance, entry, &arguments, 20);
+            assert_eq!(&mutated[..18], expected.as_slice());
+            rejected |= mutated[18] == 1;
+            assert_eq!(mutated[19], 38);
+        }
+        assert!(
+            rejected,
+            "arithmetic-link plan node {} must fail under the independent challenge set",
+            node + 1,
+        );
     }
 }
 
@@ -4413,7 +4573,7 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                         &baseline_arguments,
                         3,
                     ),
-                    [0, 507_886, 4096],
+                    [0, 581_596, 4096],
                     "index-free sparse arithmetic baseline, challenge {challenge}",
                 );
                 for (row, lane) in arithmetic_mutations {
@@ -4430,7 +4590,7 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                         audit[0] > 0,
                         "index-free sparse arithmetic mutation at row {row}, lane {lane}, challenge {challenge}",
                     );
-                    assert_eq!(audit[1], 507_886);
+                    assert_eq!(audit[1], 581_596);
                     assert_eq!(audit[2], 4096);
                 }
             }
@@ -5556,13 +5716,13 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
         &arguments,
     );
     let mut expected = expected_sparse_air_prefix_words(&point, &current, expected_base_root);
-    let first_base_fields = expected[10..61].to_vec();
-    let first_interaction_fields = expected[214..298].to_vec();
+    let first_base_fields = expected[10..199].to_vec();
+    let first_interaction_fields = expected[766..850].to_vec();
     let mut expected_lde = expected_sparse_air_lde_words(&expected);
     expected_lde.extend([1, 0]);
     assert_eq!(
         expected_lde.len(),
-        2_163,
+        4_371,
         "sparse LDE schema must stay nominal"
     );
     assert_eq!(lde_words.len(), expected_lde.len(), "sparse LDE length");
@@ -5844,7 +6004,7 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
         "unknown production mutation payload"
     );
 
-    const BASE_FIELDS: usize = 51;
+    const BASE_FIELDS: usize = 189;
     const INTERACTION_FIELDS: usize = 84;
     const LDE: usize = 16;
     const BASE_START: usize = 1;
@@ -5957,7 +6117,7 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
     expected.extend([0; 8]);
     assert_eq!(
         expected.len(),
-        741,
+        1_293,
         "sparse checkpoint schema must stay nominal"
     );
     assert_eq!(words.len(), expected.len(), "sparse checkpoint length");
@@ -5971,7 +6131,7 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
 
 #[test]
 fn sparse_lde_multipaths_authenticate_production_codewords() {
-    const BASE_FIELDS: usize = 51;
+    const BASE_FIELDS: usize = 189;
     const INTERACTION_FIELDS: usize = 84;
     let bytes = compile_sparse_auth_fixture();
     let engine = wasmtime::Engine::default();

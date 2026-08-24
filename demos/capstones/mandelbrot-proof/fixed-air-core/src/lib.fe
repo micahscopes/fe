@@ -355,6 +355,23 @@ pub fn zero_sparse_arithmetic_plan_witness<F: Radix2Field>()
     }
 }
 
+/// Outgoing scan adjacency is one second shared arithmetic DAG. Phase-link
+/// selectors and the carry reset are materialized once, leaving every linked
+/// row residual affine before its planned selector is applied.
+pub const SPARSE_ARITHMETIC_LINK_MULTIPLICATIONS: usize = 18
+
+pub type SparseArithmeticLinkPlanWitness<F> = QuadraticPlanWitness<
+    F,
+    SPARSE_ARITHMETIC_LINK_MULTIPLICATIONS,
+>
+
+pub fn zero_sparse_arithmetic_link_plan_witness<F: Radix2Field>()
+    -> SparseArithmeticLinkPlanWitness<F> {
+    QuadraticPlanWitness {
+        nodes: [zero<F>(); SPARSE_ARITHMETIC_LINK_MULTIPLICATIONS],
+    }
+}
+
 /// Extension-trace columns for a fixed-width copy interaction. The port count
 /// is part of the type, so each semantic bus can select its required width
 /// while sharing one constraint and prover interpretation.
@@ -5080,18 +5097,44 @@ pub fn evaluate_sparse_arithmetic_row<F: Radix2Field, const L: usize>(
 /// selected by the constrained current and next control rows, including carry
 /// value-to-slack reset, product boundaries, rounding resets, and the three
 /// independent signed-linear ripples.
-pub fn evaluate_sparse_arithmetic_link<F: Radix2Field>(
-    _ challenge: F,
+struct SparseArithmeticLinkPlan<
+    I: QuadraticPlanInterpreter<F>,
+    F: Radix2Field,
+> {
+    interpreter: I,
+    radix_link: F,
+    carry_entry: F,
+    carry_link: F,
+    carry_next_accumulator: F,
+    carry_next_state: F,
+    product_entry: F,
+    product_link: F,
+    product_terminal: F,
+    round_start: F,
+    round_link: F,
+    linear_sum_start: F,
+    linear_left_start: F,
+    linear_right_start: F,
+    linear_sum_link: F,
+    linear_left_link: F,
+    linear_right_link: F,
+}
+impl<I: QuadraticPlanInterpreter<F>, F: Radix2Field> core::marker::Copy
+    for SparseArithmeticLinkPlan<I, F> {}
+
+fn sparse_arithmetic_link_plan<
+    I: QuadraticPlanInterpreter<F>,
+    F: Radix2Field,
+>(
     _ current_control: SparseControlRow<F>,
     _ current: SparseTaskRow<F>,
     _ next_control: SparseControlRow<F>,
     _ next: SparseTaskRow<F>,
-) -> FixedAirConstraintEvaluation<F> {
+    _ interpreter: I,
+) -> SparseArithmeticLinkPlan<I, F> {
+    let mut interpreter = interpreter
     let current_selectors = current_control.selectors
     let next_selectors = next_control.selectors
-    let one = one<F>()
-    let mut fold = ConstraintFold<F>::new(challenge)
-
     let current_radix = add(
         current_selectors.radix_bit,
         add(
@@ -5103,24 +5146,14 @@ pub fn evaluate_sparse_arithmetic_link<F: Radix2Field>(
         next_selectors.radix_bit,
         add(next_selectors.radix_limb, next_selectors.radix_finish),
     )
-    let radix_link = mul(current_radix, next_radix)
-    fold = absorb_selected(
-        fold,
-        radix_link,
-        sub(next.accumulator_before, current.accumulator_after),
-    )
-    fold = absorb_selected(
-        fold,
-        radix_link,
-        sub(next.state_before, current.state_after),
-    )
+    let radix_link = interpreter.multiply(current_radix, next_radix)
+    interpreter = radix_link.interpreter
 
-    let carry_entry = mul(
+    let carry_entry = interpreter.multiply(
         current_selectors.radix_finish,
         next_selectors.carry_bit,
     )
-    fold = absorb_selected(fold, carry_entry, next.accumulator_before)
-    fold = absorb_selected(fold, carry_entry, next.state_before)
+    interpreter = carry_entry.interpreter
     let current_carry = add(
         current_selectors.carry_bit,
         current_selectors.carry_finish,
@@ -5129,37 +5162,34 @@ pub fn evaluate_sparse_arithmetic_link<F: Radix2Field>(
         next_selectors.carry_bit,
         next_selectors.carry_finish,
     )
-    let carry_link = mul(current_carry, next_carry)
-    let carry_reset = mul(
-        mul(current_selectors.carry_bit, next_selectors.carry_bit),
+    let carry_link = interpreter.multiply(current_carry, next_carry)
+    interpreter = carry_link.interpreter
+    let carry_bit_pair = interpreter.multiply(
+        current_selectors.carry_bit,
+        next_selectors.carry_bit,
+    )
+    interpreter = carry_bit_pair.interpreter
+    let carry_reset = interpreter.multiply(
+        carry_bit_pair.value,
         sub(next_control.flag, current_control.flag),
     )
-    fold = absorb_selected(
-        fold,
-        carry_link,
-        sub(
-            next.accumulator_before,
-            mul(sub(one, carry_reset), current.accumulator_after),
-        ),
+    interpreter = carry_reset.interpreter
+    let carry_reset_accumulator = interpreter.multiply(
+        carry_reset.value,
+        current.accumulator_after,
     )
-    fold = absorb_selected(
-        fold,
-        carry_link,
-        sub(
-            next.state_before,
-            add(
-                mul(sub(one, carry_reset), current.state_after),
-                mul(carry_reset, current.accumulator_after),
-            ),
-        ),
+    interpreter = carry_reset_accumulator.interpreter
+    let carry_reset_state_adjustment = interpreter.multiply(
+        carry_reset.value,
+        sub(current.accumulator_after, current.state_after),
     )
+    interpreter = carry_reset_state_adjustment.interpreter
 
-    let product_entry = mul(
+    let product_entry = interpreter.multiply(
         current_selectors.carry_finish,
         next_selectors.product_term,
     )
-    fold = absorb_selected(fold, product_entry, next.accumulator_before)
-    fold = absorb_selected(fold, product_entry, next.state_before)
+    interpreter = product_entry.interpreter
     let current_product = add(
         current_selectors.product_term,
         current_selectors.product_coefficient,
@@ -5168,94 +5198,292 @@ pub fn evaluate_sparse_arithmetic_link<F: Radix2Field>(
         next_selectors.product_term,
         next_selectors.product_coefficient,
     )
-    let product_link = mul(current_product, next_product)
-    fold = absorb_selected(
-        fold,
-        product_link,
-        sub(next.accumulator_before, current.accumulator_after),
-    )
-    fold = absorb_selected(
-        fold,
-        product_link,
-        sub(next.state_before, current.state_after),
-    )
-    let product_terminal = mul(
+    let product_link = interpreter.multiply(current_product, next_product)
+    interpreter = product_link.interpreter
+    let product_terminal = interpreter.multiply(
         current_selectors.product_coefficient,
         next_selectors.product_round,
     )
-    fold = absorb_selected(fold, product_terminal, current.state_after)
+    interpreter = product_terminal.interpreter
 
-    let round_start = mul(
+    let round_start = interpreter.multiply(
         add(
             current_selectors.product_coefficient,
             current_selectors.product_finish,
         ),
         next_selectors.product_round,
     )
-    fold = absorb_selected(
-        fold,
-        round_start,
-        sub(next.accumulator_before, next.state_before),
-    )
-    let round_link = mul(
+    interpreter = round_start.interpreter
+    let round_link = interpreter.multiply(
         current_selectors.product_round,
         add(
             next_selectors.product_round,
             next_selectors.product_finish,
         ),
     )
-    fold = absorb_selected(
-        fold,
-        round_link,
-        sub(next.accumulator_before, current.accumulator_after),
-    )
-    fold = absorb_selected(
-        fold,
-        round_link,
-        sub(next.state_before, current.state_after),
-    )
+    interpreter = round_link.interpreter
 
     let current_roles = current_control.linear_roles
     let next_roles = next_control.linear_roles
-    let linear_sum_start = mul(
+    let linear_sum_start = interpreter.multiply(
         add(
             current_selectors.product_finish,
             current_selectors.linear_finish,
         ),
         next_roles.sum,
     )
-    let linear_left_start = mul(current_roles.sum, next_roles.left_difference)
-    let linear_right_start = mul(
+    interpreter = linear_sum_start.interpreter
+    let linear_left_start = interpreter.multiply(
+        current_roles.sum,
+        next_roles.left_difference,
+    )
+    interpreter = linear_left_start.interpreter
+    let linear_right_start = interpreter.multiply(
         current_roles.left_difference,
         next_roles.right_difference,
     )
-    fold = absorb_selected(fold, linear_sum_start, next.accumulator_before)
-    fold = absorb_selected(fold, linear_left_start, next.accumulator_before)
-    fold = absorb_selected(fold, linear_right_start, next.accumulator_before)
+    interpreter = linear_right_start.interpreter
+    let linear_sum_link = interpreter.multiply(
+        current_roles.sum,
+        next_roles.sum,
+    )
+    interpreter = linear_sum_link.interpreter
+    let linear_left_link = interpreter.multiply(
+        current_roles.left_difference,
+        next_roles.left_difference,
+    )
+    interpreter = linear_left_link.interpreter
+    let linear_right_link = interpreter.multiply(
+        current_roles.right_difference,
+        next_roles.right_difference,
+    )
+    interpreter = linear_right_link.interpreter
+
+    SparseArithmeticLinkPlan {
+        interpreter: interpreter,
+        radix_link: radix_link.value,
+        carry_entry: carry_entry.value,
+        carry_link: carry_link.value,
+        carry_next_accumulator: sub(
+            current.accumulator_after,
+            carry_reset_accumulator.value,
+        ),
+        carry_next_state: add(
+            current.state_after,
+            carry_reset_state_adjustment.value,
+        ),
+        product_entry: product_entry.value,
+        product_link: product_link.value,
+        product_terminal: product_terminal.value,
+        round_start: round_start.value,
+        round_link: round_link.value,
+        linear_sum_start: linear_sum_start.value,
+        linear_left_start: linear_left_start.value,
+        linear_right_start: linear_right_start.value,
+        linear_sum_link: linear_sum_link.value,
+        linear_left_link: linear_left_link.value,
+        linear_right_link: linear_right_link.value,
+    }
+}
+
+pub fn sparse_arithmetic_link_plan_witness<F: Radix2Field>(
+    _ current_control: SparseControlRow<F>,
+    _ current: SparseTaskRow<F>,
+    _ next_control: SparseControlRow<F>,
+    _ next: SparseTaskRow<F>,
+) -> SparseArithmeticLinkPlanWitness<F> {
+    sparse_arithmetic_link_plan<
+        QuadraticWitnessInterpreter<
+            F,
+            SPARSE_ARITHMETIC_LINK_MULTIPLICATIONS,
+        >,
+        F,
+    >(
+        current_control,
+        current,
+        next_control,
+        next,
+        QuadraticWitnessInterpreter::new(),
+    ).interpreter.finish()
+}
+
+struct SparseArithmeticConstrainedLinkPlan<F: Radix2Field> {
+    valid: bool,
+    radix_link: F,
+    carry_entry: F,
+    carry_link: F,
+    carry_next_accumulator: F,
+    carry_next_state: F,
+    product_entry: F,
+    product_link: F,
+    product_terminal: F,
+    round_start: F,
+    round_link: F,
+    linear_sum_start: F,
+    linear_left_start: F,
+    linear_right_start: F,
+    linear_sum_link: F,
+    linear_left_link: F,
+    linear_right_link: F,
+    residuals: QuadraticPlanResiduals<
+        F,
+        SPARSE_ARITHMETIC_LINK_MULTIPLICATIONS,
+    >,
+}
+impl<F: Radix2Field> core::marker::Copy
+    for SparseArithmeticConstrainedLinkPlan<F> {}
+
+fn sparse_arithmetic_constrained_link_plan<F: Radix2Field>(
+    _ current_control: SparseControlRow<F>,
+    _ current: SparseTaskRow<F>,
+    _ next_control: SparseControlRow<F>,
+    _ next: SparseTaskRow<F>,
+    _ witness: SparseArithmeticLinkPlanWitness<F>,
+) -> SparseArithmeticConstrainedLinkPlan<F> {
+    let planned = sparse_arithmetic_link_plan<
+        QuadraticConstraintInterpreter<
+            F,
+            SPARSE_ARITHMETIC_LINK_MULTIPLICATIONS,
+        >,
+        F,
+    >(
+        current_control,
+        current,
+        next_control,
+        next,
+        QuadraticConstraintInterpreter::new(witness),
+    )
+    let residuals = planned.interpreter.finish()
+    SparseArithmeticConstrainedLinkPlan {
+        valid: residuals.valid,
+        radix_link: planned.radix_link,
+        carry_entry: planned.carry_entry,
+        carry_link: planned.carry_link,
+        carry_next_accumulator: planned.carry_next_accumulator,
+        carry_next_state: planned.carry_next_state,
+        product_entry: planned.product_entry,
+        product_link: planned.product_link,
+        product_terminal: planned.product_terminal,
+        round_start: planned.round_start,
+        round_link: planned.round_link,
+        linear_sum_start: planned.linear_sum_start,
+        linear_left_start: planned.linear_left_start,
+        linear_right_start: planned.linear_right_start,
+        linear_sum_link: planned.linear_sum_link,
+        linear_left_link: planned.linear_left_link,
+        linear_right_link: planned.linear_right_link,
+        residuals: residuals,
+    }
+}
+
+pub fn evaluate_sparse_arithmetic_link<F: Radix2Field>(
+    _ challenge: F,
+    _ current_control: SparseControlRow<F>,
+    _ current: SparseTaskRow<F>,
+    _ next_control: SparseControlRow<F>,
+    _ next: SparseTaskRow<F>,
+    _ arithmetic_link_plan: SparseArithmeticLinkPlanWitness<F>,
+) -> FixedAirConstraintEvaluation<F> {
+    let mut fold = ConstraintFold<F>::new(challenge)
+    let planned = sparse_arithmetic_constrained_link_plan(
+        current_control,
+        current,
+        next_control,
+        next,
+        arithmetic_link_plan,
+    )
+    let mut plan_index: usize = 0
+    while plan_index < SPARSE_ARITHMETIC_LINK_MULTIPLICATIONS {
+        fold = fold.absorb(planned.residuals.values[plan_index])
+        plan_index = plan_index + 1
+    }
     fold = absorb_selected(
         fold,
-        mul(current_roles.sum, next_roles.sum),
+        planned.radix_link,
         sub(next.accumulator_before, current.accumulator_after),
     )
     fold = absorb_selected(
         fold,
-        mul(
-            current_roles.left_difference,
-            next_roles.left_difference,
-        ),
+        planned.radix_link,
+        sub(next.state_before, current.state_after),
+    )
+    fold = absorb_selected(fold, planned.carry_entry, next.accumulator_before)
+    fold = absorb_selected(fold, planned.carry_entry, next.state_before)
+    fold = absorb_selected(
+        fold,
+        planned.carry_link,
+        sub(next.accumulator_before, planned.carry_next_accumulator),
+    )
+    fold = absorb_selected(
+        fold,
+        planned.carry_link,
+        sub(next.state_before, planned.carry_next_state),
+    )
+    fold = absorb_selected(fold, planned.product_entry, next.accumulator_before)
+    fold = absorb_selected(fold, planned.product_entry, next.state_before)
+    fold = absorb_selected(
+        fold,
+        planned.product_link,
         sub(next.accumulator_before, current.accumulator_after),
     )
     fold = absorb_selected(
         fold,
-        mul(
-            current_roles.right_difference,
-            next_roles.right_difference,
-        ),
+        planned.product_link,
+        sub(next.state_before, current.state_after),
+    )
+    fold = absorb_selected(
+        fold,
+        planned.product_terminal,
+        current.state_after,
+    )
+    fold = absorb_selected(
+        fold,
+        planned.round_start,
+        sub(next.accumulator_before, next.state_before),
+    )
+    fold = absorb_selected(
+        fold,
+        planned.round_link,
+        sub(next.accumulator_before, current.accumulator_after),
+    )
+    fold = absorb_selected(
+        fold,
+        planned.round_link,
+        sub(next.state_before, current.state_after),
+    )
+    fold = absorb_selected(
+        fold,
+        planned.linear_sum_start,
+        next.accumulator_before,
+    )
+    fold = absorb_selected(
+        fold,
+        planned.linear_left_start,
+        next.accumulator_before,
+    )
+    fold = absorb_selected(
+        fold,
+        planned.linear_right_start,
+        next.accumulator_before,
+    )
+    fold = absorb_selected(
+        fold,
+        planned.linear_sum_link,
+        sub(next.accumulator_before, current.accumulator_after),
+    )
+    fold = absorb_selected(
+        fold,
+        planned.linear_left_link,
+        sub(next.accumulator_before, current.accumulator_after),
+    )
+    fold = absorb_selected(
+        fold,
+        planned.linear_right_link,
         sub(next.accumulator_before, current.accumulator_after),
     )
 
     FixedAirConstraintEvaluation {
-        valid: true,
+        valid: planned.valid,
         constraints: fold.constraints,
         folded: fold.value,
     }

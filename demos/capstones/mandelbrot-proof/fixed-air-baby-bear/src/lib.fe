@@ -32,6 +32,7 @@ use mandelbrot_proof_fixed_air_core::{
     FixedAirConstraintEvaluation,
     SparseBoundaryPlanWitness,
     SparseBoundaryInteractionRow,
+    SparseArithmeticLinkPlanWitness,
     SparseArithmeticPlanWitness,
     SparseControlRow,
     SparseControlSelectors,
@@ -72,6 +73,7 @@ use mandelbrot_proof_fixed_air_core::{
     evaluate_sparse_round_interaction_row,
     evaluate_sparse_round_interaction_terminal,
     sparse_control_row_at,
+    sparse_arithmetic_link_plan_witness,
     sparse_arithmetic_plan_witness,
     sparse_boundary_plan_witness,
     sparse_linear_plan_witness,
@@ -92,6 +94,7 @@ use mandelbrot_proof_fixed_air_core::{
     write_sparse_product_interaction_row,
     write_sparse_round_interaction_row,
     write_sparse_round_interaction_ports,
+    zero_sparse_arithmetic_link_plan_witness,
     zero_sparse_arithmetic_plan_witness,
     zero_sparse_boundary_plan_witness,
     zero_sparse_linear_plan_witness,
@@ -275,6 +278,7 @@ pub struct SparseBaseAirRow<F: Radix2Field> {
     pub control: SparseControlRow<F>,
     pub witness: SparseTaskRow<F>,
     pub arithmetic_plan: SparseArithmeticPlanWitness<F>,
+    pub arithmetic_link_plan: SparseArithmeticLinkPlanWitness<F>,
     pub round_plan: SparseRoundPlanWitness<F>,
     pub linear_plan: SparseLinearPlanWitness<F>,
     pub boundary_plan: SparseBoundaryPlanWitness<F>,
@@ -895,6 +899,22 @@ pub struct SparseAirAllRowsDegreeShape {
 impl core::marker::Copy for SparseAirAllRowsDegreeShape {}
 derive CanonicalWords for SparseAirAllRowsDegreeShape using CanonicalWordsProvider
 
+/// Component-level degree interpretation for the six pair-row evaluators.
+/// It separates control-state adjacency from arithmetic and copy-interaction
+/// adjacency while executing the exact production evaluator bodies.
+pub struct SparseAirPairRowsDegreeShape {
+    pub valid: bool,
+    pub control: u32,
+    pub arithmetic: u32,
+    pub product: u32,
+    pub round: u32,
+    pub linear: u32,
+    pub boundary: u32,
+    pub maximum: u32,
+}
+impl core::marker::Copy for SparseAirPairRowsDegreeShape {}
+derive CanonicalWords for SparseAirPairRowsDegreeShape using CanonicalWordsProvider
+
 /// Degree attribution for one exact authored copy-bus port. The report keeps
 /// the port expression, inverse relation, and accumulator contribution
 /// separate so a lowering plan can target the actual peak instead of copying
@@ -1022,6 +1042,7 @@ fn sparse_composition_fold_fields<F: Radix2Field, const L: usize>(
     _ witness: SparseTaskRow<F>,
     _ next_witness: SparseTaskRow<F>,
     _ arithmetic_plan: SparseArithmeticPlanWitness<F>,
+    _ arithmetic_link_plan: SparseArithmeticLinkPlanWitness<F>,
     _ round_plan: SparseRoundPlanWitness<F>,
     _ linear_plan: SparseLinearPlanWitness<F>,
     _ boundary_plan: SparseBoundaryPlanWitness<F>,
@@ -1110,7 +1131,12 @@ where L > 1,
     fold = fold.absorb_fixed(
         SparseConstraintFamily::PairRows,
         evaluate_sparse_arithmetic_link(
-            challenge, control, witness, next_control, next_witness,
+            challenge,
+            control,
+            witness,
+            next_control,
+            next_witness,
+            arithmetic_link_plan,
         ),
     )
     fold = fold.absorb_fixed(
@@ -1258,6 +1284,7 @@ where L > 1,
         row.base.witness,
         next.base.witness,
         row.base.arithmetic_plan,
+        row.base.arithmetic_link_plan,
         row.base.round_plan,
         row.base.linear_plan,
         row.base.boundary_plan,
@@ -1367,6 +1394,7 @@ where L > 1,
         base.witness,
         base.witness,
         base.arithmetic_plan,
+        base.arithmetic_link_plan,
         base.round_plan,
         base.linear_plan,
         base.boundary_plan,
@@ -1499,6 +1527,113 @@ where L > 1,
             && interaction_source.cursor
                 == <SparseInteractionTraceRow<AirPolynomialDegree>
                     as CanonicalWords>::WORDS
+            && control.valid && control.folded.valid
+            && arithmetic.valid && arithmetic.folded.valid
+            && product.valid && product.folded.valid
+            && round.valid && round.folded.valid
+            && linear.valid && linear.folded.valid
+            && boundary.valid && boundary.folded.valid,
+        control: control.folded.degree,
+        arithmetic: arithmetic.folded.degree,
+        product: product.folded.degree,
+        round: round.folded.degree,
+        linear: linear.folded.degree,
+        boundary: boundary.folded.degree,
+        maximum: maximum,
+    }
+}
+
+/// Interpret each production pair-row evaluator separately. The same symbolic
+/// current and next rows are decoded from the reflection-derived schemas, so
+/// this report cannot drift into a parallel transition implementation.
+pub fn sparse_pair_rows_degree_shape<const L: usize>()
+    -> SparseAirPairRowsDegreeShape
+where L > 1,
+{
+    let mut base = zero_sparse_base_air_row_field<AirPolynomialDegree>()
+    let base_source = base.decode(AirPolynomialVariableSource::new())
+    let mut next_base = zero_sparse_base_air_row_field<AirPolynomialDegree>()
+    let next_base_source = next_base.decode(base_source)
+    let mut interaction =
+        zero_sparse_interaction_trace_row_field<AirPolynomialDegree>()
+    let interaction_source = interaction.decode(next_base_source)
+    let mut next_interaction =
+        zero_sparse_interaction_trace_row_field<AirPolynomialDegree>()
+    let next_interaction_source = next_interaction.decode(interaction_source)
+    let challenge = AirPolynomialDegree::constant()
+    let control = evaluate_sparse_control_link<AirPolynomialDegree, L>(
+        challenge,
+        base.control,
+        next_base.control,
+    )
+    let arithmetic = evaluate_sparse_arithmetic_link(
+        challenge,
+        base.control,
+        base.witness,
+        next_base.control,
+        next_base.witness,
+        base.arithmetic_link_plan,
+    )
+    let product = evaluate_sparse_product_interaction_link<
+        AirPolynomialDegree,
+        L,
+    >(
+        challenge,
+        base.control,
+        base.witness,
+        interaction.product,
+        next_interaction.product,
+    )
+    let round = evaluate_sparse_round_interaction_link<
+        AirPolynomialDegree,
+        L,
+    >(
+        challenge,
+        base.control,
+        next_base.control,
+        base.witness,
+        base.round_plan,
+        interaction.round,
+        next_interaction.round,
+    )
+    let linear = evaluate_sparse_linear_interaction_link<
+        AirPolynomialDegree,
+        L,
+    >(
+        challenge,
+        base.control,
+        next_base.control,
+        base.witness,
+        base.arithmetic_plan,
+        base.linear_plan,
+        interaction.linear,
+        next_interaction.linear,
+    )
+    let boundary = evaluate_sparse_boundary_interaction_link<
+        AirPolynomialDegree,
+        L,
+    >(
+        challenge,
+        base.control,
+        base.witness,
+        base.boundary_plan,
+        interaction.boundary,
+        next_interaction.boundary,
+    )
+    let maximum = maximum_degree(
+        maximum_degree(control.folded.degree, arithmetic.folded.degree),
+        maximum_degree(
+            maximum_degree(product.folded.degree, round.folded.degree),
+            maximum_degree(linear.folded.degree, boundary.folded.degree),
+        ),
+    )
+    SparseAirPairRowsDegreeShape {
+        valid: next_interaction_source.valid
+            && next_interaction_source.cursor
+                == <SparseBaseAirRow<AirPolynomialDegree>
+                    as CanonicalWords>::WORDS * 2
+                    + <SparseInteractionTraceRow<AirPolynomialDegree>
+                        as CanonicalWords>::WORDS * 2
             && control.valid && control.folded.valid
             && arithmetic.valid && arithmetic.folded.valid
             && product.valid && product.folded.valid
@@ -3403,10 +3538,23 @@ where
             leaf.control,
             leaf.row,
         )
+        let next_row = sparse_transition_row_from_witness<BabyBear, L>(
+            position + 1,
+            point,
+            current,
+            next,
+            witness,
+        )
         base_rows[index] = SparseBaseAirRow {
             control: leaf.control,
             witness: leaf.row,
             arithmetic_plan: arithmetic_plan,
+            arithmetic_link_plan: sparse_arithmetic_link_plan_witness(
+                leaf.control,
+                leaf.row,
+                next_control,
+                next_row,
+            ),
             round_plan: sparse_round_plan_witness<BabyBear, L>(
                 leaf.control,
                 next_control,
@@ -3620,6 +3768,7 @@ fn zero_sparse_base_air_row_field<F: Radix2Field>() -> SparseBaseAirRow<F> {
         control: zero_sparse_trace_control_field<F>(),
         witness: zero_sparse_trace_row_field<F>(),
         arithmetic_plan: zero_sparse_arithmetic_plan_witness<F>(),
+        arithmetic_link_plan: zero_sparse_arithmetic_link_plan_witness<F>(),
         round_plan: zero_sparse_round_plan_witness<F>(),
         linear_plan: zero_sparse_linear_plan_witness<F>(),
         boundary_plan: zero_sparse_boundary_plan_witness<F>(),
@@ -3769,10 +3918,23 @@ where L > 1,
         leaf.control,
         leaf.row,
     )
+    let next_row = sparse_transition_row_from_witness<BabyBear, L>(
+        index + 1,
+        point,
+        current,
+        next,
+        witness,
+    )
     SparseBaseAirRow {
         control: leaf.control,
         witness: leaf.row,
         arithmetic_plan: arithmetic_plan,
+        arithmetic_link_plan: sparse_arithmetic_link_plan_witness(
+            leaf.control,
+            leaf.row,
+            next_control,
+            next_row,
+        ),
         round_plan: sparse_round_plan_witness<BabyBear, L>(
             leaf.control,
             next_control,
