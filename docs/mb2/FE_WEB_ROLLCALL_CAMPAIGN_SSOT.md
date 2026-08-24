@@ -2,7 +2,7 @@
 
 Status: authoritative campaign burn-down
 
-Updated: 2026-08-23
+Updated: 2026-08-24
 
 Goal spine: write the math, get the kernel, keep the proof.
 
@@ -1615,6 +1615,19 @@ Legend:
   passes in 184.92 seconds. The exact shape gate passes in 630.07 seconds and
   proves the final control all-row component fell from degree 3 to degree 2.
 
+  The control-adjacency increment now expresses the remaining deterministic
+  transition relation through six shared Fe plan families: 23 phase links, six
+  boundary and padding links, 12 range-role links, eight carry links, nine
+  product links, and ten signed-linear links. These 68 named nodes are the one
+  source consumed by witness generation, constraint evaluation, degree
+  interpretation, and the future GPU scheduler. An independent BabyBear model
+  matches every node on all 4,095 production links, rejects each directed node
+  mutation under three fold challenges, and retains the complete canonical and
+  directed schedule-mutation audit. That strengthened zero-import Fe/Wasm gate
+  evaluates 1,486,555 constraints and passes in 1,493.11 seconds. The exact
+  structural interpreter passes in 2,094.65 seconds and proves that control
+  adjacency fell from degree 5 to degree 2.
+
   The widened schema also received a decomposed transport audit instead of an
   impractical monolithic receipt compile. An independent oracle derives the 17
   product-address nodes that were missing from its stale 84-field interaction
@@ -1635,29 +1648,23 @@ Legend:
   optimization pipeline explicitly; Cargo release mode alone does not change
   the default byte-equivalent Fe Wasm lowering.
 
-  The exact production shape is now 623 constraints with family degrees
-  `[2, 5, 1, 1]`, all-row component degrees `[2, 2, 2, 2, 2, 2]`, and
-  pair-row component degrees `[5, 2, 2, 2, 2, 2]`. The maximum expression
-  degree is 5 and the composition-degree bound is 16,380. This is a strict
-  reduction from degree 19 and bound 73,709, but it still does not fit the
-  4,096-row trace-degree domain. The remaining target is explicit: all-row and
-  pair-row expressions must be at most quadratic, while first-row and last-row
-  expressions must be linear. Both boundary families now meet their target.
-  Every all-row evaluator and every non-control pair-row evaluator now meets
-  its target. Only the deterministic control transition remains degree 5. The
-  next reduction is therefore isolated to control adjacency. It will use named
-  shared Fe DAG families for phase edges, range-role transitions, limb and
-  carry geometry, product counters, linear roles, and boundary or padding
-  transitions. A fixed preprocessed control root was rejected for this slice:
-  it would add a verification-key and fixed-column authentication obligation,
-  while a prover-chosen fixed root would be unsound. Direct shared plans keep
-  the authored transition relation, witness, constraints, degree analysis, and
-  future GPU schedule structurally identical.
-  Only once the derived composition bound fits may the security
-  profile be committed into the transcript. The
-  assembled regression receipt still carries four queries. The compact
-  114-query range must subsequently drive real sampling, openings,
-  authentication paths, and FRI folds. The direct-domain policy is still
+  The exact production shape is now 691 constraints with family degrees
+  `[2, 2, 1, 1]`, all-row component degrees `[2, 2, 2, 2, 2, 2]`, and pair-row
+  component degrees `[2, 2, 2, 2, 2, 2]`. The maximum expression degree is 2
+  and the composition-degree bound is 4,095, so the authored AIR now fits the
+  4,096-row target domain. This closes the degree-reduction gate that began at
+  degree 19 and bound 73,709. A fixed preprocessed control root remains
+  deliberately rejected: it would add a verification-key and fixed-column
+  authentication obligation, while a prover-chosen fixed root would be
+  unsound. Direct shared plans keep the authored transition relation, witness,
+  constraints, degree analysis, and future GPU schedule structurally
+  identical.
+
+  Exact codeword, commitment, opening, and assembled receipt revalidation is
+  now the active gate. The assembled regression receipt still carries four
+  queries. The compact 114-query range must subsequently drive real sampling,
+  openings, authentication paths, and FRI folds before a separate
+  security-sized receipt is claimed. The direct-domain policy remains
   explicitly conjectured rather than a DEEP-ALI soundness claim. The Sonatina
   companions also need a published revision and normal Fe dependency pin
   before this gate is reproducible without the local path patch.
@@ -1788,19 +1795,13 @@ fallback. The semantic receipts are:
    `mandelbrot_proof_gpu` clean and tampered Chromium modes now pass on AMD
    Radeon 780M through RADV after the private-heap fix. The four standalone
    hardware test binaries in the runbook remain to be executed without skips.
-2. Continue the quadratic reduction from maximum degree 5 and composition
-   bound 16,380. Every all-row evaluator and every non-control pair-row
-   evaluator is now degree 2, and the last-row terminal is degree 1. Lower the
-   remaining degree-5 control adjacency through compact Fe-authored plans and
-   semantic roles. Keep every plan shared by
-   witness generation, constraint evaluation, degree analysis, and later GPU
-   schedules, with independent semantic and mutation gates. Once the derived
-   composition bound fits the trace domain, bind every policy parameter into
-   the production transcript, make the compact 114-query range drive sampling,
-   openings, authentication paths, and FRI folds, add assembled canonical
-   mutations, and pin the required Sonatina revision. Preserve the four-query
-   receipt as a regression fixture, then execute a separate security-sized
-   receipt rather than silently changing the checkpoint's meaning.
+2. Revalidate the newly fitting `[2, 2, 1, 1]` AIR through exact codewords,
+   commitments, openings, authentication paths, FRI folds, and assembled
+   canonical mutations. Bind every policy parameter into the production
+   transcript and make the compact 114-query range drive real sampling. Pin
+   the required Sonatina revision. Preserve the four-query receipt as a
+   regression fixture, then execute a separate security-sized receipt rather
+   than silently changing the checkpoint's meaning.
 3. Lower the BabyBear leaf prover and recursive merges through Fe Conal/CTFE
    WebGPU schedules, then run the complete progressive proof/verify/tamper page
    through Chrome.
