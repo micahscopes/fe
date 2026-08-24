@@ -151,6 +151,11 @@ fn baby_bear_sub(left: u32, right: u32) -> u32 {
     ((left as u64 + MODULUS - right as u64) % MODULUS) as u32
 }
 
+fn baby_bear_add(left: u32, right: u32) -> u32 {
+    const MODULUS: u64 = 2_013_265_921;
+    ((left as u64 + right as u64) % MODULUS) as u32
+}
+
 fn baby_bear_mul(left: u32, right: u32) -> u32 {
     const MODULUS: u64 = 2_013_265_921;
     (left as u64 * right as u64 % MODULUS) as u32
@@ -163,6 +168,107 @@ fn expected_control_plan(row: [u32; CONTROL_LANES]) -> [u32; 3] {
         baby_bear_mul(baby_bear_sub(major, 2), baby_bear_sub(major, 3)),
         baby_bear_mul(baby_bear_sub(major, 4), baby_bear_sub(major, 5)),
     ]
+}
+
+fn expected_control_link_plan(
+    current: [u32; CONTROL_LANES],
+    next: [u32; CONTROL_LANES],
+) -> [u32; 68] {
+    let one = 1;
+    let mut nodes = [0u32; 68];
+    let phase_pairs = [
+        (0, 0), (0, 1), (1, 0), (1, 2), (2, 0), (2, 3),
+        (3, 3), (3, 4), (4, 3), (4, 5), (5, 5), (5, 6),
+        (6, 5), (6, 6), (6, 7), (7, 7), (7, 8), (8, 7),
+        (8, 9), (9, 9), (9, 10), (10, 9), (10, 11),
+    ];
+    for (index, (left, right)) in phase_pairs.into_iter().enumerate() {
+        nodes[index] = baby_bear_mul(current[left], next[right]);
+    }
+    let boundary_pairs = [
+        (11, 12), (12, 12), (12, 11), (12, 13), (13, 14), (14, 14),
+    ];
+    for (index, (left, right)) in boundary_pairs.into_iter().enumerate() {
+        nodes[23 + index] = baby_bear_mul(current[left], next[right]);
+    }
+
+    nodes[29] = baby_bear_mul(current[19], next[19]);
+    nodes[30] = baby_bear_mul(current[19], next[23]);
+    nodes[31] = baby_bear_mul(current[23], next[24]);
+    nodes[32] = baby_bear_mul(current[24], next[25]);
+    nodes[33] = baby_bear_mul(current[25], next[23]);
+    nodes[34] = baby_bear_mul(current[25], next[26]);
+    nodes[35] = baby_bear_mul(current[26], next[27]);
+    nodes[36] = baby_bear_mul(current[27], next[28]);
+    nodes[37] = baby_bear_mul(current[28], next[29]);
+    nodes[38] = baby_bear_mul(current[29], next[26]);
+    nodes[39] = baby_bear_mul(nodes[4], nodes[30]);
+    nodes[40] = baby_bear_mul(nodes[4], nodes[34]);
+
+    let carry_reset = baby_bear_sub(next[35], current[35]);
+    let carry_delta = baby_bear_sub(next[32], current[32]);
+    nodes[41] = baby_bear_mul(carry_reset, baby_bear_sub(carry_reset, one));
+    nodes[42] = baby_bear_mul(current[35], baby_bear_sub(one, next[35]));
+    nodes[43] = baby_bear_mul(nodes[6], carry_reset);
+    nodes[44] = baby_bear_mul(
+        baby_bear_sub(one, carry_reset),
+        baby_bear_add(current[34], one),
+    );
+    nodes[45] = baby_bear_mul(
+        baby_bear_sub(one, carry_reset),
+        baby_bear_mul(2, current[37]),
+    );
+    nodes[46] = baby_bear_mul(carry_delta, baby_bear_sub(carry_delta, one));
+    nodes[47] = baby_bear_mul(
+        baby_bear_sub(one, carry_delta),
+        baby_bear_add(current[33], one),
+    );
+    nodes[48] = baby_bear_mul(nodes[8], carry_delta);
+
+    let product_delta = baby_bear_sub(next[32], current[32]);
+    let same_product = baby_bear_sub(one, product_delta);
+    let product_rise = baby_bear_sub(next[35], current[35]);
+    nodes[49] = baby_bear_mul(
+        product_delta,
+        baby_bear_sub(product_delta, one),
+    );
+    nodes[50] = baby_bear_mul(same_product, current[35]);
+    nodes[51] = baby_bear_mul(nodes[50], baby_bear_sub(one, next[35]));
+    nodes[52] = baby_bear_mul(same_product, product_rise);
+    nodes[53] = baby_bear_mul(nodes[12], nodes[52]);
+    nodes[54] = baby_bear_mul(
+        same_product,
+        baby_bear_add(current[33], one),
+    );
+    nodes[55] = baby_bear_mul(same_product, next[35]);
+    nodes[56] = baby_bear_mul(
+        same_product,
+        baby_bear_sub(
+            baby_bear_add(current[36], one),
+            baby_bear_mul(2, next[35]),
+        ),
+    );
+    nodes[57] = baby_bear_mul(nodes[12], product_delta);
+
+    let linear_delta = baby_bear_sub(next[33], current[33]);
+    let retained_role = baby_bear_sub(one, linear_delta);
+    nodes[58] = baby_bear_mul(
+        linear_delta,
+        baby_bear_sub(linear_delta, one),
+    );
+    nodes[59] = baby_bear_mul(
+        retained_role,
+        baby_bear_add(current[34], one),
+    );
+    nodes[60] = baby_bear_mul(nodes[19], linear_delta);
+    nodes[61] = baby_bear_mul(retained_role, current[15]);
+    nodes[62] = baby_bear_mul(retained_role, current[16]);
+    nodes[63] = baby_bear_mul(linear_delta, current[15]);
+    nodes[64] = baby_bear_mul(retained_role, current[17]);
+    nodes[65] = baby_bear_mul(linear_delta, current[16]);
+    nodes[66] = baby_bear_mul(retained_role, current[18]);
+    nodes[67] = baby_bear_mul(linear_delta, current[17]);
+    nodes
 }
 
 fn compile_fixture() -> Vec<u8> {
@@ -260,6 +366,19 @@ fn sparse_control_air_is_index_free_and_rejects_schedule_mutations() {
             expected_control_plan(*expected),
             "independently reconstructed local control plan {index}",
         );
+        if index + 1 < rows.len() {
+            assert_eq!(
+                call(
+                    &mut store,
+                    &instance,
+                    "sparse_control4_link_plan",
+                    &[index as u32],
+                    68,
+                ),
+                expected_control_link_plan(*expected, rows[index + 1]),
+                "independently reconstructed control link plan {index}",
+            );
+        }
     }
 
     for challenge in [7u32, 17, 31] {
@@ -274,6 +393,19 @@ fn sparse_control_air_is_index_free_and_rejects_schedule_mutations() {
                 ),
                 [1],
                 "local control plan node {node}, challenge {challenge} must be constrained",
+            );
+        }
+        for node in 0u32..68 {
+            assert_eq!(
+                call(
+                    &mut store,
+                    &instance,
+                    "sparse_control4_link_plan_mutation_rejected",
+                    &[challenge, 0, node],
+                    1,
+                ),
+                [1],
+                "control link plan node {node}, challenge {challenge} must be constrained",
             );
         }
     }
@@ -335,7 +467,7 @@ fn sparse_control_air_is_index_free_and_rejects_schedule_mutations() {
         );
         assert_eq!(baseline[2], rows.len() as u32);
         assert_eq!(
-            baseline[1], 1_208_095,
+            baseline[1], 1_486_555,
             "every local, adjacency, and boundary constraint must be evaluated",
         );
         for (index, lane) in mutations {

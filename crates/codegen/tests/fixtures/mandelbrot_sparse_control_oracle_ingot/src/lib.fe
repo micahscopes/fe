@@ -6,6 +6,7 @@ use mandelbrot_proof_fixed_air_core::{
     evaluate_sparse_control_link,
     evaluate_sparse_control_row,
     evaluate_sparse_control_terminal,
+    sparse_control_link_plan_witness,
     sparse_control_plan_witness,
     sparse_control_row_at,
     sparse_transition_trace_length,
@@ -38,6 +39,88 @@ pub fn sparse_control4_plan_mutation_rejected(
     let evaluated = evaluate_sparse_control_row(
         BabyBear::from_u32(challenge),
         row,
+        plan,
+    )
+    !evaluated.valid || !evaluated.folded.is_zero()
+}
+
+pub fn sparse_control4_link_plan(_ index: u32) -> [u32; 68] {
+    if index >= 4095 { return [0; 68] }
+    let plan = sparse_control_link_plan_witness(
+        control4(index),
+        control4(index + 1),
+    )
+    let mut output = [0; 68]
+    let mut source: usize = 0
+    while source < 23 {
+        output[source] = plan.phase.nodes[source].to_u32()
+        source = source + 1
+    }
+    source = 0
+    while source < 6 {
+        output[23 + source] = plan.boundary.nodes[source].to_u32()
+        source = source + 1
+    }
+    source = 0
+    while source < 12 {
+        output[29 + source] = plan.range.nodes[source].to_u32()
+        source = source + 1
+    }
+    source = 0
+    while source < 8 {
+        output[41 + source] = plan.carry.nodes[source].to_u32()
+        source = source + 1
+    }
+    source = 0
+    while source < 9 {
+        output[49 + source] = plan.product.nodes[source].to_u32()
+        source = source + 1
+    }
+    source = 0
+    while source < 10 {
+        output[58 + source] = plan.linear.nodes[source].to_u32()
+        source = source + 1
+    }
+    output
+}
+
+pub fn sparse_control4_link_plan_mutation_rejected(
+    _ challenge: u32,
+    _ index: u32,
+    _ node: u32,
+) -> bool {
+    if index >= 4095 || node >= 68 { return false }
+    let current = control4(index)
+    let next = control4(index + 1)
+    let mut plan = sparse_control_link_plan_witness(current, next)
+    if node < 23 {
+        plan.phase.nodes[node as usize] =
+            plan.phase.nodes[node as usize] + BabyBear::one()
+    } else if node < 29 {
+        let offset = (node - 23) as usize
+        plan.boundary.nodes[offset] =
+            plan.boundary.nodes[offset] + BabyBear::one()
+    } else if node < 41 {
+        let offset = (node - 29) as usize
+        plan.range.nodes[offset] =
+            plan.range.nodes[offset] + BabyBear::one()
+    } else if node < 49 {
+        let offset = (node - 41) as usize
+        plan.carry.nodes[offset] =
+            plan.carry.nodes[offset] + BabyBear::one()
+    } else if node < 58 {
+        let offset = (node - 49) as usize
+        plan.product.nodes[offset] =
+            plan.product.nodes[offset] + BabyBear::one()
+    } else {
+        let offset = (node - 58) as usize
+        plan.linear.nodes[offset] =
+            plan.linear.nodes[offset] + BabyBear::one()
+    }
+    let evaluated = evaluate_sparse_control_link<BabyBear, 4>(
+        BabyBear::from_u32(challenge),
+        current,
+        next,
         plan,
     )
     !evaluated.valid || !evaluated.folded.is_zero()
@@ -260,6 +343,7 @@ pub fn sparse_control4_audit(
                 challenge,
                 previous,
                 row,
+                sparse_control_link_plan_witness(previous, row),
             )
             constraints = constraints + link.constraints
             if !link.valid || link.folded.to_u32() != 0 {

@@ -34,6 +34,7 @@ use mandelbrot_proof_fixed_air_core::{
     SparseBoundaryInteractionRow,
     SparseArithmeticLinkPlanWitness,
     SparseArithmeticPlanWitness,
+    SparseControlLinkPlanWitness,
     SparseControlPlanWitness,
     SparseControlRow,
     SparseControlSelectors,
@@ -74,6 +75,7 @@ use mandelbrot_proof_fixed_air_core::{
     evaluate_sparse_round_interaction_row,
     evaluate_sparse_round_interaction_terminal,
     sparse_control_row_at,
+    sparse_control_link_plan_witness,
     sparse_control_plan_witness,
     sparse_arithmetic_link_plan_witness,
     sparse_arithmetic_plan_witness,
@@ -99,6 +101,7 @@ use mandelbrot_proof_fixed_air_core::{
     zero_sparse_arithmetic_link_plan_witness,
     zero_sparse_arithmetic_plan_witness,
     zero_sparse_boundary_plan_witness,
+    zero_sparse_control_link_plan_witness,
     zero_sparse_control_plan_witness,
     zero_sparse_linear_plan_witness,
     zero_sparse_round_plan_witness,
@@ -280,6 +283,7 @@ pub type SparseTraceRow = SparseTaskRow<BabyBear>
 pub struct SparseBaseAirRow<F: Radix2Field> {
     pub control: SparseControlRow<F>,
     pub control_plan: SparseControlPlanWitness<F>,
+    pub control_link_plan: SparseControlLinkPlanWitness<F>,
     pub witness: SparseTaskRow<F>,
     pub arithmetic_plan: SparseArithmeticPlanWitness<F>,
     pub arithmetic_link_plan: SparseArithmeticLinkPlanWitness<F>,
@@ -1044,6 +1048,7 @@ fn sparse_composition_fold_fields<F: Radix2Field, const L: usize>(
     _ control: SparseControlRow<F>,
     _ next_control: SparseControlRow<F>,
     _ control_plan: SparseControlPlanWitness<F>,
+    _ control_link_plan: SparseControlLinkPlanWitness<F>,
     _ witness: SparseTaskRow<F>,
     _ next_witness: SparseTaskRow<F>,
     _ arithmetic_plan: SparseArithmeticPlanWitness<F>,
@@ -1130,7 +1135,7 @@ where L > 1,
     fold = fold.absorb_fixed(
         SparseConstraintFamily::PairRows,
         evaluate_sparse_control_link<F, L>(
-            challenge, control, next_control,
+            challenge, control, next_control, control_link_plan,
         ),
     )
     fold = fold.absorb_fixed(
@@ -1287,6 +1292,7 @@ where L > 1,
         row.base.control,
         next.base.control,
         row.base.control_plan,
+        row.base.control_link_plan,
         row.base.witness,
         next.base.witness,
         row.base.arithmetic_plan,
@@ -1398,6 +1404,7 @@ where L > 1,
         base.control,
         base.control,
         base.control_plan,
+        base.control_link_plan,
         base.witness,
         base.witness,
         base.arithmetic_plan,
@@ -1576,6 +1583,7 @@ where L > 1,
         challenge,
         base.control,
         next_base.control,
+        base.control_link_plan,
     )
     let arithmetic = evaluate_sparse_arithmetic_link(
         challenge,
@@ -3559,6 +3567,10 @@ where
         base_rows[index] = SparseBaseAirRow {
             control: leaf.control,
             control_plan: sparse_control_plan_witness(leaf.control),
+            control_link_plan: sparse_control_link_plan_witness(
+                leaf.control,
+                next_control,
+            ),
             witness: leaf.row,
             arithmetic_plan: arithmetic_plan,
             arithmetic_link_plan: sparse_arithmetic_link_plan_witness(
@@ -3779,6 +3791,7 @@ fn zero_sparse_base_air_row_field<F: Radix2Field>() -> SparseBaseAirRow<F> {
     SparseBaseAirRow {
         control: zero_sparse_trace_control_field<F>(),
         control_plan: zero_sparse_control_plan_witness<F>(),
+        control_link_plan: zero_sparse_control_link_plan_witness<F>(),
         witness: zero_sparse_trace_row_field<F>(),
         arithmetic_plan: zero_sparse_arithmetic_plan_witness<F>(),
         arithmetic_link_plan: zero_sparse_arithmetic_link_plan_witness<F>(),
@@ -3941,6 +3954,10 @@ where L > 1,
     SparseBaseAirRow {
         control: leaf.control,
         control_plan: sparse_control_plan_witness(leaf.control),
+        control_link_plan: sparse_control_link_plan_witness(
+            leaf.control,
+            next_control,
+        ),
         witness: leaf.row,
         arithmetic_plan: arithmetic_plan,
         arithmetic_link_plan: sparse_arithmetic_link_plan_witness(

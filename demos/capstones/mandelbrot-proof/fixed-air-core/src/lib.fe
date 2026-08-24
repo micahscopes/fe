@@ -343,6 +343,73 @@ pub fn zero_sparse_control_plan_witness<F: Radix2Field>()
     }
 }
 
+/// Deterministic schedule adjacency is split into semantic plan families so
+/// witness generation, AIR evaluation, degree analysis, and later GPU
+/// placement all consume the same authored dependency chunks. Phase and
+/// boundary plans materialize the allowed selector edges. The remaining plans
+/// materialize only products needed to keep each selected transition residual
+/// affine.
+pub const SPARSE_CONTROL_PHASE_LINK_MULTIPLICATIONS: usize = 23
+pub const SPARSE_CONTROL_BOUNDARY_LINK_MULTIPLICATIONS: usize = 6
+pub const SPARSE_CONTROL_RANGE_LINK_MULTIPLICATIONS: usize = 12
+pub const SPARSE_CONTROL_CARRY_LINK_MULTIPLICATIONS: usize = 8
+pub const SPARSE_CONTROL_PRODUCT_LINK_MULTIPLICATIONS: usize = 9
+pub const SPARSE_CONTROL_LINEAR_LINK_MULTIPLICATIONS: usize = 10
+
+pub struct SparseControlLinkPlanWitness<F: Radix2Field> {
+    pub phase: QuadraticPlanWitness<
+        F,
+        SPARSE_CONTROL_PHASE_LINK_MULTIPLICATIONS,
+    >,
+    pub boundary: QuadraticPlanWitness<
+        F,
+        SPARSE_CONTROL_BOUNDARY_LINK_MULTIPLICATIONS,
+    >,
+    pub range: QuadraticPlanWitness<
+        F,
+        SPARSE_CONTROL_RANGE_LINK_MULTIPLICATIONS,
+    >,
+    pub carry: QuadraticPlanWitness<
+        F,
+        SPARSE_CONTROL_CARRY_LINK_MULTIPLICATIONS,
+    >,
+    pub product: QuadraticPlanWitness<
+        F,
+        SPARSE_CONTROL_PRODUCT_LINK_MULTIPLICATIONS,
+    >,
+    pub linear: QuadraticPlanWitness<
+        F,
+        SPARSE_CONTROL_LINEAR_LINK_MULTIPLICATIONS,
+    >,
+}
+impl<F: Radix2Field> core::marker::Copy
+    for SparseControlLinkPlanWitness<F> {}
+derive CanonicalWords for SparseControlLinkPlanWitness<F> using CanonicalWordsProvider
+
+pub fn zero_sparse_control_link_plan_witness<F: Radix2Field>()
+    -> SparseControlLinkPlanWitness<F> {
+    SparseControlLinkPlanWitness {
+        phase: QuadraticPlanWitness {
+            nodes: [zero<F>(); SPARSE_CONTROL_PHASE_LINK_MULTIPLICATIONS],
+        },
+        boundary: QuadraticPlanWitness {
+            nodes: [zero<F>(); SPARSE_CONTROL_BOUNDARY_LINK_MULTIPLICATIONS],
+        },
+        range: QuadraticPlanWitness {
+            nodes: [zero<F>(); SPARSE_CONTROL_RANGE_LINK_MULTIPLICATIONS],
+        },
+        carry: QuadraticPlanWitness {
+            nodes: [zero<F>(); SPARSE_CONTROL_CARRY_LINK_MULTIPLICATIONS],
+        },
+        product: QuadraticPlanWitness {
+            nodes: [zero<F>(); SPARSE_CONTROL_PRODUCT_LINK_MULTIPLICATIONS],
+        },
+        linear: QuadraticPlanWitness {
+            nodes: [zero<F>(); SPARSE_CONTROL_LINEAR_LINK_MULTIPLICATIONS],
+        },
+    }
+}
+
 /// Transcript challenges for one log-derivative copy interaction. `beta`
 /// compresses the copied value with its nominal address, while `gamma` moves
 /// the inverse pole away from the committed tuples.
@@ -3298,6 +3365,712 @@ pub fn evaluate_sparse_control_row<F: Radix2Field>(
     }
 }
 
+struct SparseControlPhaseLinks<F: Radix2Field> {
+    radix_bit_to_bit: F,
+    radix_bit_to_limb: F,
+    radix_limb_to_bit: F,
+    radix_limb_to_finish: F,
+    radix_finish_to_bit: F,
+    radix_finish_to_carry: F,
+    carry_bit_to_bit: F,
+    carry_bit_to_finish: F,
+    carry_finish_to_bit: F,
+    carry_finish_to_product: F,
+    product_term_to_term: F,
+    product_term_to_coefficient: F,
+    product_coefficient_to_term: F,
+    product_coefficient_to_coefficient: F,
+    product_coefficient_to_round: F,
+    product_round_to_round: F,
+    product_round_to_finish: F,
+    product_finish_to_round: F,
+    product_finish_to_linear: F,
+    linear_limb_to_limb: F,
+    linear_limb_to_finish: F,
+    linear_finish_to_limb: F,
+    linear_finish_to_boundary: F,
+}
+impl<F: Radix2Field> core::marker::Copy for SparseControlPhaseLinks<F> {}
+
+struct SparseControlBoundaryLinks<F: Radix2Field> {
+    boundary_sign_to_limb: F,
+    boundary_limb_to_limb: F,
+    boundary_limb_to_sign: F,
+    boundary_limb_to_finish: F,
+    finish_to_padding: F,
+    padding_to_padding: F,
+}
+impl<F: Radix2Field> core::marker::Copy for SparseControlBoundaryLinks<F> {}
+
+struct SparseControlPhaseLinkPlan<
+    I: QuadraticPlanInterpreter<F>,
+    F: Radix2Field,
+> {
+    interpreter: I,
+    links: SparseControlPhaseLinks<F>,
+}
+impl<I: QuadraticPlanInterpreter<F>, F: Radix2Field> core::marker::Copy
+    for SparseControlPhaseLinkPlan<I, F> {}
+
+fn sparse_control_phase_link_plan<
+    I: QuadraticPlanInterpreter<F>,
+    F: Radix2Field,
+>(
+    _ current: SparseControlRow<F>,
+    _ next: SparseControlRow<F>,
+    _ interpreter: I,
+) -> SparseControlPhaseLinkPlan<I, F> {
+    let current = current.selectors
+    let next = next.selectors
+    let mut interpreter = interpreter
+    let n0 = interpreter.multiply(current.radix_bit, next.radix_bit)
+    interpreter = n0.interpreter
+    let n1 = interpreter.multiply(current.radix_bit, next.radix_limb)
+    interpreter = n1.interpreter
+    let n2 = interpreter.multiply(current.radix_limb, next.radix_bit)
+    interpreter = n2.interpreter
+    let n3 = interpreter.multiply(current.radix_limb, next.radix_finish)
+    interpreter = n3.interpreter
+    let n4 = interpreter.multiply(current.radix_finish, next.radix_bit)
+    interpreter = n4.interpreter
+    let n5 = interpreter.multiply(current.radix_finish, next.carry_bit)
+    interpreter = n5.interpreter
+    let n6 = interpreter.multiply(current.carry_bit, next.carry_bit)
+    interpreter = n6.interpreter
+    let n7 = interpreter.multiply(current.carry_bit, next.carry_finish)
+    interpreter = n7.interpreter
+    let n8 = interpreter.multiply(current.carry_finish, next.carry_bit)
+    interpreter = n8.interpreter
+    let n9 = interpreter.multiply(current.carry_finish, next.product_term)
+    interpreter = n9.interpreter
+    let n10 = interpreter.multiply(current.product_term, next.product_term)
+    interpreter = n10.interpreter
+    let n11 = interpreter.multiply(
+        current.product_term,
+        next.product_coefficient,
+    )
+    interpreter = n11.interpreter
+    let n12 = interpreter.multiply(
+        current.product_coefficient,
+        next.product_term,
+    )
+    interpreter = n12.interpreter
+    let n13 = interpreter.multiply(
+        current.product_coefficient,
+        next.product_coefficient,
+    )
+    interpreter = n13.interpreter
+    let n14 = interpreter.multiply(
+        current.product_coefficient,
+        next.product_round,
+    )
+    interpreter = n14.interpreter
+    let n15 = interpreter.multiply(current.product_round, next.product_round)
+    interpreter = n15.interpreter
+    let n16 = interpreter.multiply(current.product_round, next.product_finish)
+    interpreter = n16.interpreter
+    let n17 = interpreter.multiply(current.product_finish, next.product_round)
+    interpreter = n17.interpreter
+    let n18 = interpreter.multiply(current.product_finish, next.linear_limb)
+    interpreter = n18.interpreter
+    let n19 = interpreter.multiply(current.linear_limb, next.linear_limb)
+    interpreter = n19.interpreter
+    let n20 = interpreter.multiply(current.linear_limb, next.linear_finish)
+    interpreter = n20.interpreter
+    let n21 = interpreter.multiply(current.linear_finish, next.linear_limb)
+    interpreter = n21.interpreter
+    let n22 = interpreter.multiply(current.linear_finish, next.boundary_sign)
+    interpreter = n22.interpreter
+    SparseControlPhaseLinkPlan {
+        interpreter: interpreter,
+        links: SparseControlPhaseLinks {
+            radix_bit_to_bit: n0.value,
+            radix_bit_to_limb: n1.value,
+            radix_limb_to_bit: n2.value,
+            radix_limb_to_finish: n3.value,
+            radix_finish_to_bit: n4.value,
+            radix_finish_to_carry: n5.value,
+            carry_bit_to_bit: n6.value,
+            carry_bit_to_finish: n7.value,
+            carry_finish_to_bit: n8.value,
+            carry_finish_to_product: n9.value,
+            product_term_to_term: n10.value,
+            product_term_to_coefficient: n11.value,
+            product_coefficient_to_term: n12.value,
+            product_coefficient_to_coefficient: n13.value,
+            product_coefficient_to_round: n14.value,
+            product_round_to_round: n15.value,
+            product_round_to_finish: n16.value,
+            product_finish_to_round: n17.value,
+            product_finish_to_linear: n18.value,
+            linear_limb_to_limb: n19.value,
+            linear_limb_to_finish: n20.value,
+            linear_finish_to_limb: n21.value,
+            linear_finish_to_boundary: n22.value,
+        },
+    }
+}
+
+struct SparseControlBoundaryLinkPlan<
+    I: QuadraticPlanInterpreter<F>,
+    F: Radix2Field,
+> {
+    interpreter: I,
+    links: SparseControlBoundaryLinks<F>,
+}
+impl<I: QuadraticPlanInterpreter<F>, F: Radix2Field> core::marker::Copy
+    for SparseControlBoundaryLinkPlan<I, F> {}
+
+fn sparse_control_boundary_link_plan<
+    I: QuadraticPlanInterpreter<F>,
+    F: Radix2Field,
+>(
+    _ current: SparseControlRow<F>,
+    _ next: SparseControlRow<F>,
+    _ interpreter: I,
+) -> SparseControlBoundaryLinkPlan<I, F> {
+    let current = current.selectors
+    let next = next.selectors
+    let mut interpreter = interpreter
+    let n0 = interpreter.multiply(current.boundary_sign, next.boundary_limb)
+    interpreter = n0.interpreter
+    let n1 = interpreter.multiply(current.boundary_limb, next.boundary_limb)
+    interpreter = n1.interpreter
+    let n2 = interpreter.multiply(current.boundary_limb, next.boundary_sign)
+    interpreter = n2.interpreter
+    let n3 = interpreter.multiply(
+        current.boundary_limb,
+        next.transition_finish,
+    )
+    interpreter = n3.interpreter
+    let n4 = interpreter.multiply(current.transition_finish, next.padding)
+    interpreter = n4.interpreter
+    let n5 = interpreter.multiply(current.padding, next.padding)
+    interpreter = n5.interpreter
+    SparseControlBoundaryLinkPlan {
+        interpreter: interpreter,
+        links: SparseControlBoundaryLinks {
+            boundary_sign_to_limb: n0.value,
+            boundary_limb_to_limb: n1.value,
+            boundary_limb_to_sign: n2.value,
+            boundary_limb_to_finish: n3.value,
+            finish_to_padding: n4.value,
+            padding_to_padding: n5.value,
+        },
+    }
+}
+
+struct SparseControlRangeLinks<F: Radix2Field> {
+    next_allowed: F,
+    coordinate_to_product_low: F,
+    product_output_to_linear_sum: F,
+}
+impl<F: Radix2Field> core::marker::Copy for SparseControlRangeLinks<F> {}
+
+struct SparseControlRangeLinkPlan<
+    I: QuadraticPlanInterpreter<F>,
+    F: Radix2Field,
+> {
+    interpreter: I,
+    links: SparseControlRangeLinks<F>,
+}
+impl<I: QuadraticPlanInterpreter<F>, F: Radix2Field> core::marker::Copy
+    for SparseControlRangeLinkPlan<I, F> {}
+
+fn sparse_control_range_link_plan<
+    I: QuadraticPlanInterpreter<F>,
+    F: Radix2Field,
+>(
+    _ current: SparseControlRow<F>,
+    _ next: SparseControlRow<F>,
+    _ phase: SparseControlPhaseLinks<F>,
+    _ interpreter: I,
+) -> SparseControlRangeLinkPlan<I, F> {
+    let current = current.range_roles
+    let next = next.range_roles
+    let mut interpreter = interpreter
+    let n0 = interpreter.multiply(current.coordinate, next.coordinate)
+    interpreter = n0.interpreter
+    let n1 = interpreter.multiply(current.coordinate, next.product_low)
+    interpreter = n1.interpreter
+    let n2 = interpreter.multiply(current.product_low, next.product_high)
+    interpreter = n2.interpreter
+    let n3 = interpreter.multiply(current.product_high, next.product_output)
+    interpreter = n3.interpreter
+    let n4 = interpreter.multiply(current.product_output, next.product_low)
+    interpreter = n4.interpreter
+    let n5 = interpreter.multiply(current.product_output, next.linear_sum)
+    interpreter = n5.interpreter
+    let n6 = interpreter.multiply(
+        current.linear_sum,
+        next.linear_left_difference,
+    )
+    interpreter = n6.interpreter
+    let n7 = interpreter.multiply(
+        current.linear_left_difference,
+        next.linear_right_difference,
+    )
+    interpreter = n7.interpreter
+    let n8 = interpreter.multiply(
+        current.linear_right_difference,
+        next.linear_output,
+    )
+    interpreter = n8.interpreter
+    let n9 = interpreter.multiply(current.linear_output, next.linear_sum)
+    interpreter = n9.interpreter
+    let n10 = interpreter.multiply(phase.radix_finish_to_bit, n1.value)
+    interpreter = n10.interpreter
+    let n11 = interpreter.multiply(phase.radix_finish_to_bit, n5.value)
+    interpreter = n11.interpreter
+    let mut next_allowed = n0.value
+    next_allowed = add(next_allowed, n1.value)
+    next_allowed = add(next_allowed, n2.value)
+    next_allowed = add(next_allowed, n3.value)
+    next_allowed = add(next_allowed, n4.value)
+    next_allowed = add(next_allowed, n5.value)
+    next_allowed = add(next_allowed, n6.value)
+    next_allowed = add(next_allowed, n7.value)
+    next_allowed = add(next_allowed, n8.value)
+    next_allowed = add(next_allowed, n9.value)
+    SparseControlRangeLinkPlan {
+        interpreter: interpreter,
+        links: SparseControlRangeLinks {
+            next_allowed: next_allowed,
+            coordinate_to_product_low: n10.value,
+            product_output_to_linear_sum: n11.value,
+        },
+    }
+}
+
+struct SparseControlCarryLinks<F: Radix2Field> {
+    reset_bit_residual: F,
+    flag_descent: F,
+    selected_reset: F,
+    retained_step: F,
+    retained_weight: F,
+    product_delta_bit_residual: F,
+    retained_minor: F,
+    selected_product_delta: F,
+}
+impl<F: Radix2Field> core::marker::Copy for SparseControlCarryLinks<F> {}
+
+struct SparseControlCarryLinkPlan<
+    I: QuadraticPlanInterpreter<F>,
+    F: Radix2Field,
+> {
+    interpreter: I,
+    links: SparseControlCarryLinks<F>,
+}
+impl<I: QuadraticPlanInterpreter<F>, F: Radix2Field> core::marker::Copy
+    for SparseControlCarryLinkPlan<I, F> {}
+
+fn sparse_control_carry_link_plan<
+    I: QuadraticPlanInterpreter<F>,
+    F: Radix2Field,
+>(
+    _ current: SparseControlRow<F>,
+    _ next: SparseControlRow<F>,
+    _ phase: SparseControlPhaseLinks<F>,
+    _ interpreter: I,
+) -> SparseControlCarryLinkPlan<I, F> {
+    let one = one<F>()
+    let carry_reset = sub(next.flag, current.flag)
+    let product_delta = sub(next.major, current.major)
+    let mut interpreter = interpreter
+    let n0 = interpreter.multiply(carry_reset, sub(carry_reset, one))
+    interpreter = n0.interpreter
+    let n1 = interpreter.multiply(current.flag, sub(one, next.flag))
+    interpreter = n1.interpreter
+    let n2 = interpreter.multiply(phase.carry_bit_to_bit, carry_reset)
+    interpreter = n2.interpreter
+    let n3 = interpreter.multiply(
+        sub(one, carry_reset),
+        add(current.step, one),
+    )
+    interpreter = n3.interpreter
+    let n4 = interpreter.multiply(
+        sub(one, carry_reset),
+        mul(natural<F>(2), current.weight),
+    )
+    interpreter = n4.interpreter
+    let n5 = interpreter.multiply(product_delta, sub(product_delta, one))
+    interpreter = n5.interpreter
+    let n6 = interpreter.multiply(
+        sub(one, product_delta),
+        add(current.minor, one),
+    )
+    interpreter = n6.interpreter
+    let n7 = interpreter.multiply(phase.carry_finish_to_bit, product_delta)
+    interpreter = n7.interpreter
+    SparseControlCarryLinkPlan {
+        interpreter: interpreter,
+        links: SparseControlCarryLinks {
+            reset_bit_residual: n0.value,
+            flag_descent: n1.value,
+            selected_reset: n2.value,
+            retained_step: n3.value,
+            retained_weight: n4.value,
+            product_delta_bit_residual: n5.value,
+            retained_minor: n6.value,
+            selected_product_delta: n7.value,
+        },
+    }
+}
+
+struct SparseControlProductLinks<F: Radix2Field> {
+    delta_bit_residual: F,
+    descending: F,
+    selected_rise: F,
+    retained_minor: F,
+    retained_flag: F,
+    retained_width: F,
+    selected_delta: F,
+}
+impl<F: Radix2Field> core::marker::Copy for SparseControlProductLinks<F> {}
+
+struct SparseControlProductLinkPlan<
+    I: QuadraticPlanInterpreter<F>,
+    F: Radix2Field,
+> {
+    interpreter: I,
+    links: SparseControlProductLinks<F>,
+}
+impl<I: QuadraticPlanInterpreter<F>, F: Radix2Field> core::marker::Copy
+    for SparseControlProductLinkPlan<I, F> {}
+
+fn sparse_control_product_link_plan<
+    I: QuadraticPlanInterpreter<F>,
+    F: Radix2Field,
+>(
+    _ current: SparseControlRow<F>,
+    _ next: SparseControlRow<F>,
+    _ phase: SparseControlPhaseLinks<F>,
+    _ interpreter: I,
+) -> SparseControlProductLinkPlan<I, F> {
+    let one = one<F>()
+    let two = natural<F>(2)
+    let delta = sub(next.major, current.major)
+    let same = sub(one, delta)
+    let rise = sub(next.flag, current.flag)
+    let mut interpreter = interpreter
+    let n0 = interpreter.multiply(delta, sub(delta, one))
+    interpreter = n0.interpreter
+    let n1 = interpreter.multiply(same, current.flag)
+    interpreter = n1.interpreter
+    let n2 = interpreter.multiply(n1.value, sub(one, next.flag))
+    interpreter = n2.interpreter
+    let n3 = interpreter.multiply(same, rise)
+    interpreter = n3.interpreter
+    let n4 = interpreter.multiply(
+        phase.product_coefficient_to_term,
+        n3.value,
+    )
+    interpreter = n4.interpreter
+    let n5 = interpreter.multiply(same, add(current.minor, one))
+    interpreter = n5.interpreter
+    let n6 = interpreter.multiply(same, next.flag)
+    interpreter = n6.interpreter
+    let n7 = interpreter.multiply(
+        same,
+        sub(add(current.width, one), mul(two, next.flag)),
+    )
+    interpreter = n7.interpreter
+    let n8 = interpreter.multiply(phase.product_coefficient_to_term, delta)
+    interpreter = n8.interpreter
+    SparseControlProductLinkPlan {
+        interpreter: interpreter,
+        links: SparseControlProductLinks {
+            delta_bit_residual: n0.value,
+            descending: n2.value,
+            selected_rise: n4.value,
+            retained_minor: n5.value,
+            retained_flag: n6.value,
+            retained_width: n7.value,
+            selected_delta: n8.value,
+        },
+    }
+}
+
+struct SparseControlLinearLinks<F: Radix2Field> {
+    delta_bit_residual: F,
+    retained_step: F,
+    selected_delta: F,
+    next_sum: F,
+    next_left_difference: F,
+    next_right_difference: F,
+    next_select: F,
+}
+impl<F: Radix2Field> core::marker::Copy for SparseControlLinearLinks<F> {}
+
+struct SparseControlLinearLinkPlan<
+    I: QuadraticPlanInterpreter<F>,
+    F: Radix2Field,
+> {
+    interpreter: I,
+    links: SparseControlLinearLinks<F>,
+}
+impl<I: QuadraticPlanInterpreter<F>, F: Radix2Field> core::marker::Copy
+    for SparseControlLinearLinkPlan<I, F> {}
+
+fn sparse_control_linear_link_plan<
+    I: QuadraticPlanInterpreter<F>,
+    F: Radix2Field,
+>(
+    _ current: SparseControlRow<F>,
+    _ next: SparseControlRow<F>,
+    _ phase: SparseControlPhaseLinks<F>,
+    _ interpreter: I,
+) -> SparseControlLinearLinkPlan<I, F> {
+    let one = one<F>()
+    let delta = sub(next.minor, current.minor)
+    let retained = sub(one, delta)
+    let current_roles = current.linear_roles
+    let mut interpreter = interpreter
+    let n0 = interpreter.multiply(delta, sub(delta, one))
+    interpreter = n0.interpreter
+    let n1 = interpreter.multiply(retained, add(current.step, one))
+    interpreter = n1.interpreter
+    let n2 = interpreter.multiply(phase.linear_limb_to_limb, delta)
+    interpreter = n2.interpreter
+    let n3 = interpreter.multiply(retained, current_roles.sum)
+    interpreter = n3.interpreter
+    let n4 = interpreter.multiply(retained, current_roles.left_difference)
+    interpreter = n4.interpreter
+    let n5 = interpreter.multiply(delta, current_roles.sum)
+    interpreter = n5.interpreter
+    let n6 = interpreter.multiply(retained, current_roles.right_difference)
+    interpreter = n6.interpreter
+    let n7 = interpreter.multiply(delta, current_roles.left_difference)
+    interpreter = n7.interpreter
+    let n8 = interpreter.multiply(retained, current_roles.select)
+    interpreter = n8.interpreter
+    let n9 = interpreter.multiply(delta, current_roles.right_difference)
+    interpreter = n9.interpreter
+    SparseControlLinearLinkPlan {
+        interpreter: interpreter,
+        links: SparseControlLinearLinks {
+            delta_bit_residual: n0.value,
+            retained_step: n1.value,
+            selected_delta: n2.value,
+            next_sum: n3.value,
+            next_left_difference: add(n4.value, n5.value),
+            next_right_difference: add(n6.value, n7.value),
+            next_select: add(n8.value, n9.value),
+        },
+    }
+}
+
+pub fn sparse_control_link_plan_witness<F: Radix2Field>(
+    _ current: SparseControlRow<F>,
+    _ next: SparseControlRow<F>,
+) -> SparseControlLinkPlanWitness<F> {
+    let phase = sparse_control_phase_link_plan<
+        QuadraticWitnessInterpreter<
+            F,
+            SPARSE_CONTROL_PHASE_LINK_MULTIPLICATIONS,
+        >,
+        F,
+    >(current, next, QuadraticWitnessInterpreter::new())
+    let boundary = sparse_control_boundary_link_plan<
+        QuadraticWitnessInterpreter<
+            F,
+            SPARSE_CONTROL_BOUNDARY_LINK_MULTIPLICATIONS,
+        >,
+        F,
+    >(current, next, QuadraticWitnessInterpreter::new())
+    let range = sparse_control_range_link_plan<
+        QuadraticWitnessInterpreter<
+            F,
+            SPARSE_CONTROL_RANGE_LINK_MULTIPLICATIONS,
+        >,
+        F,
+    >(current, next, phase.links, QuadraticWitnessInterpreter::new())
+    let carry = sparse_control_carry_link_plan<
+        QuadraticWitnessInterpreter<
+            F,
+            SPARSE_CONTROL_CARRY_LINK_MULTIPLICATIONS,
+        >,
+        F,
+    >(current, next, phase.links, QuadraticWitnessInterpreter::new())
+    let product = sparse_control_product_link_plan<
+        QuadraticWitnessInterpreter<
+            F,
+            SPARSE_CONTROL_PRODUCT_LINK_MULTIPLICATIONS,
+        >,
+        F,
+    >(current, next, phase.links, QuadraticWitnessInterpreter::new())
+    let linear = sparse_control_linear_link_plan<
+        QuadraticWitnessInterpreter<
+            F,
+            SPARSE_CONTROL_LINEAR_LINK_MULTIPLICATIONS,
+        >,
+        F,
+    >(current, next, phase.links, QuadraticWitnessInterpreter::new())
+    SparseControlLinkPlanWitness {
+        phase: phase.interpreter.finish(),
+        boundary: boundary.interpreter.finish(),
+        range: range.interpreter.finish(),
+        carry: carry.interpreter.finish(),
+        product: product.interpreter.finish(),
+        linear: linear.interpreter.finish(),
+    }
+}
+
+struct SparseControlConstrainedLinkPlan<F: Radix2Field> {
+    valid: bool,
+    phase: SparseControlPhaseLinks<F>,
+    boundary: SparseControlBoundaryLinks<F>,
+    range: SparseControlRangeLinks<F>,
+    carry: SparseControlCarryLinks<F>,
+    product: SparseControlProductLinks<F>,
+    linear: SparseControlLinearLinks<F>,
+    phase_residuals: QuadraticPlanResiduals<
+        F,
+        SPARSE_CONTROL_PHASE_LINK_MULTIPLICATIONS,
+    >,
+    boundary_residuals: QuadraticPlanResiduals<
+        F,
+        SPARSE_CONTROL_BOUNDARY_LINK_MULTIPLICATIONS,
+    >,
+    range_residuals: QuadraticPlanResiduals<
+        F,
+        SPARSE_CONTROL_RANGE_LINK_MULTIPLICATIONS,
+    >,
+    carry_residuals: QuadraticPlanResiduals<
+        F,
+        SPARSE_CONTROL_CARRY_LINK_MULTIPLICATIONS,
+    >,
+    product_residuals: QuadraticPlanResiduals<
+        F,
+        SPARSE_CONTROL_PRODUCT_LINK_MULTIPLICATIONS,
+    >,
+    linear_residuals: QuadraticPlanResiduals<
+        F,
+        SPARSE_CONTROL_LINEAR_LINK_MULTIPLICATIONS,
+    >,
+}
+impl<F: Radix2Field> core::marker::Copy
+    for SparseControlConstrainedLinkPlan<F> {}
+
+fn sparse_control_constrained_link_plan<F: Radix2Field>(
+    _ current: SparseControlRow<F>,
+    _ next: SparseControlRow<F>,
+    _ witness: SparseControlLinkPlanWitness<F>,
+) -> SparseControlConstrainedLinkPlan<F> {
+    let phase = sparse_control_phase_link_plan<
+        QuadraticConstraintInterpreter<
+            F,
+            SPARSE_CONTROL_PHASE_LINK_MULTIPLICATIONS,
+        >,
+        F,
+    >(
+        current,
+        next,
+        QuadraticConstraintInterpreter::new(witness.phase),
+    )
+    let boundary = sparse_control_boundary_link_plan<
+        QuadraticConstraintInterpreter<
+            F,
+            SPARSE_CONTROL_BOUNDARY_LINK_MULTIPLICATIONS,
+        >,
+        F,
+    >(
+        current,
+        next,
+        QuadraticConstraintInterpreter::new(witness.boundary),
+    )
+    let range = sparse_control_range_link_plan<
+        QuadraticConstraintInterpreter<
+            F,
+            SPARSE_CONTROL_RANGE_LINK_MULTIPLICATIONS,
+        >,
+        F,
+    >(
+        current,
+        next,
+        phase.links,
+        QuadraticConstraintInterpreter::new(witness.range),
+    )
+    let carry = sparse_control_carry_link_plan<
+        QuadraticConstraintInterpreter<
+            F,
+            SPARSE_CONTROL_CARRY_LINK_MULTIPLICATIONS,
+        >,
+        F,
+    >(
+        current,
+        next,
+        phase.links,
+        QuadraticConstraintInterpreter::new(witness.carry),
+    )
+    let product = sparse_control_product_link_plan<
+        QuadraticConstraintInterpreter<
+            F,
+            SPARSE_CONTROL_PRODUCT_LINK_MULTIPLICATIONS,
+        >,
+        F,
+    >(
+        current,
+        next,
+        phase.links,
+        QuadraticConstraintInterpreter::new(witness.product),
+    )
+    let linear = sparse_control_linear_link_plan<
+        QuadraticConstraintInterpreter<
+            F,
+            SPARSE_CONTROL_LINEAR_LINK_MULTIPLICATIONS,
+        >,
+        F,
+    >(
+        current,
+        next,
+        phase.links,
+        QuadraticConstraintInterpreter::new(witness.linear),
+    )
+    let phase_residuals = phase.interpreter.finish()
+    let boundary_residuals = boundary.interpreter.finish()
+    let range_residuals = range.interpreter.finish()
+    let carry_residuals = carry.interpreter.finish()
+    let product_residuals = product.interpreter.finish()
+    let linear_residuals = linear.interpreter.finish()
+    SparseControlConstrainedLinkPlan {
+        valid: phase_residuals.valid
+            && boundary_residuals.valid
+            && range_residuals.valid
+            && carry_residuals.valid
+            && product_residuals.valid
+            && linear_residuals.valid,
+        phase: phase.links,
+        boundary: boundary.links,
+        range: range.links,
+        carry: carry.links,
+        product: product.links,
+        linear: linear.links,
+        phase_residuals: phase_residuals,
+        boundary_residuals: boundary_residuals,
+        range_residuals: range_residuals,
+        carry_residuals: carry_residuals,
+        product_residuals: product_residuals,
+        linear_residuals: linear_residuals,
+    }
+}
+
+fn absorb_sparse_plan_residuals<
+    F: Radix2Field,
+    const N: usize,
+>(
+    _ fold: own ConstraintFold<F>,
+    _ residuals: QuadraticPlanResiduals<F, N>,
+) -> ConstraintFold<F> {
+    let mut fold = fold
+    let mut index: usize = 0
+    while index < N {
+        fold = fold.absorb(residuals.values[index])
+        index = index + 1
+    }
+    fold
+}
+
 fn absorb_sparse_control_edge<F: Radix2Field>(
     _ fold: own ConstraintFold<F>,
     _ gate: F,
@@ -3321,11 +4094,15 @@ fn absorb_sparse_control_link<F: Radix2Field, const L: usize>(
     _ fold: own ConstraintFold<F>,
     _ current: SparseControlRow<F>,
     _ next: SparseControlRow<F>,
+    _ phase: SparseControlPhaseLinks<F>,
+    _ boundary: SparseControlBoundaryLinks<F>,
+    _ range: SparseControlRangeLinks<F>,
+    _ carry: SparseControlCarryLinks<F>,
+    _ product: SparseControlProductLinks<F>,
+    _ linear: SparseControlLinearLinks<F>,
 ) -> ConstraintFold<F>
 where L > 1,
 {
-    let current_selectors = current.selectors
-    let next_selectors = next.selectors
     let zero = zero<F>()
     let one = one<F>()
     let two = natural<F>(2)
@@ -3333,122 +4110,36 @@ where L > 1,
     let last_limb = sub(limbs, one)
     let last_coefficient = sub(mul(two, limbs), one)
 
-    let radix_bit_to_bit = mul(
-        current_selectors.radix_bit,
-        next_selectors.radix_bit,
-    )
-    let radix_bit_to_limb = mul(
-        current_selectors.radix_bit,
-        next_selectors.radix_limb,
-    )
-    let radix_limb_to_bit = mul(
-        current_selectors.radix_limb,
-        next_selectors.radix_bit,
-    )
-    let radix_limb_to_finish = mul(
-        current_selectors.radix_limb,
-        next_selectors.radix_finish,
-    )
-    let radix_finish_to_bit = mul(
-        current_selectors.radix_finish,
-        next_selectors.radix_bit,
-    )
-    let radix_finish_to_carry = mul(
-        current_selectors.radix_finish,
-        next_selectors.carry_bit,
-    )
-    let carry_bit_to_bit = mul(
-        current_selectors.carry_bit,
-        next_selectors.carry_bit,
-    )
-    let carry_bit_to_finish = mul(
-        current_selectors.carry_bit,
-        next_selectors.carry_finish,
-    )
-    let carry_finish_to_bit = mul(
-        current_selectors.carry_finish,
-        next_selectors.carry_bit,
-    )
-    let carry_finish_to_product = mul(
-        current_selectors.carry_finish,
-        next_selectors.product_term,
-    )
-    let product_term_to_term = mul(
-        current_selectors.product_term,
-        next_selectors.product_term,
-    )
-    let product_term_to_coefficient = mul(
-        current_selectors.product_term,
-        next_selectors.product_coefficient,
-    )
-    let product_coefficient_to_term = mul(
-        current_selectors.product_coefficient,
-        next_selectors.product_term,
-    )
-    let product_coefficient_to_coefficient = mul(
-        current_selectors.product_coefficient,
-        next_selectors.product_coefficient,
-    )
-    let product_coefficient_to_round = mul(
-        current_selectors.product_coefficient,
-        next_selectors.product_round,
-    )
-    let product_round_to_round = mul(
-        current_selectors.product_round,
-        next_selectors.product_round,
-    )
-    let product_round_to_finish = mul(
-        current_selectors.product_round,
-        next_selectors.product_finish,
-    )
-    let product_finish_to_round = mul(
-        current_selectors.product_finish,
-        next_selectors.product_round,
-    )
-    let product_finish_to_linear = mul(
-        current_selectors.product_finish,
-        next_selectors.linear_limb,
-    )
-    let linear_limb_to_limb = mul(
-        current_selectors.linear_limb,
-        next_selectors.linear_limb,
-    )
-    let linear_limb_to_finish = mul(
-        current_selectors.linear_limb,
-        next_selectors.linear_finish,
-    )
-    let linear_finish_to_limb = mul(
-        current_selectors.linear_finish,
-        next_selectors.linear_limb,
-    )
-    let linear_finish_to_boundary = mul(
-        current_selectors.linear_finish,
-        next_selectors.boundary_sign,
-    )
-    let boundary_sign_to_limb = mul(
-        current_selectors.boundary_sign,
-        next_selectors.boundary_limb,
-    )
-    let boundary_limb_to_limb = mul(
-        current_selectors.boundary_limb,
-        next_selectors.boundary_limb,
-    )
-    let boundary_limb_to_sign = mul(
-        current_selectors.boundary_limb,
-        next_selectors.boundary_sign,
-    )
-    let boundary_limb_to_finish = mul(
-        current_selectors.boundary_limb,
-        next_selectors.transition_finish,
-    )
-    let finish_to_padding = mul(
-        current_selectors.transition_finish,
-        next_selectors.padding,
-    )
-    let padding_to_padding = mul(
-        current_selectors.padding,
-        next_selectors.padding,
-    )
+    let radix_bit_to_bit = phase.radix_bit_to_bit
+    let radix_bit_to_limb = phase.radix_bit_to_limb
+    let radix_limb_to_bit = phase.radix_limb_to_bit
+    let radix_limb_to_finish = phase.radix_limb_to_finish
+    let radix_finish_to_bit = phase.radix_finish_to_bit
+    let radix_finish_to_carry = phase.radix_finish_to_carry
+    let carry_bit_to_bit = phase.carry_bit_to_bit
+    let carry_bit_to_finish = phase.carry_bit_to_finish
+    let carry_finish_to_bit = phase.carry_finish_to_bit
+    let carry_finish_to_product = phase.carry_finish_to_product
+    let product_term_to_term = phase.product_term_to_term
+    let product_term_to_coefficient = phase.product_term_to_coefficient
+    let product_coefficient_to_term = phase.product_coefficient_to_term
+    let product_coefficient_to_coefficient =
+        phase.product_coefficient_to_coefficient
+    let product_coefficient_to_round = phase.product_coefficient_to_round
+    let product_round_to_round = phase.product_round_to_round
+    let product_round_to_finish = phase.product_round_to_finish
+    let product_finish_to_round = phase.product_finish_to_round
+    let product_finish_to_linear = phase.product_finish_to_linear
+    let linear_limb_to_limb = phase.linear_limb_to_limb
+    let linear_limb_to_finish = phase.linear_limb_to_finish
+    let linear_finish_to_limb = phase.linear_finish_to_limb
+    let linear_finish_to_boundary = phase.linear_finish_to_boundary
+    let boundary_sign_to_limb = boundary.boundary_sign_to_limb
+    let boundary_limb_to_limb = boundary.boundary_limb_to_limb
+    let boundary_limb_to_sign = boundary.boundary_limb_to_sign
+    let boundary_limb_to_finish = boundary.boundary_limb_to_finish
+    let finish_to_padding = boundary.finish_to_padding
+    let padding_to_padding = boundary.padding_to_padding
 
     let mut allowed = radix_bit_to_bit
     allowed = add(allowed, radix_bit_to_limb)
@@ -3566,60 +4257,16 @@ where L > 1,
         same_range,
         sub(next_range.linear_output, current_range.linear_output),
     ))
-    let mut next_range_allowed = mul(
-        current_range.coordinate,
-        add(next_range.coordinate, next_range.product_low),
-    )
-    next_range_allowed = add(
-        next_range_allowed,
-        mul(current_range.product_low, next_range.product_high),
-    )
-    next_range_allowed = add(
-        next_range_allowed,
-        mul(current_range.product_high, next_range.product_output),
-    )
-    next_range_allowed = add(
-        next_range_allowed,
-        mul(
-            current_range.product_output,
-            add(next_range.product_low, next_range.linear_sum),
-        ),
-    )
-    next_range_allowed = add(
-        next_range_allowed,
-        mul(current_range.linear_sum, next_range.linear_left_difference),
-    )
-    next_range_allowed = add(
-        next_range_allowed,
-        mul(
-            current_range.linear_left_difference,
-            next_range.linear_right_difference,
-        ),
-    )
-    next_range_allowed = add(
-        next_range_allowed,
-        mul(current_range.linear_right_difference, next_range.linear_output),
-    )
-    next_range_allowed = add(
-        next_range_allowed,
-        mul(current_range.linear_output, next_range.linear_sum),
-    )
     fold = fold.absorb(mul(
         radix_finish_to_bit,
-        sub(next_range_allowed, one),
+        sub(range.next_allowed, one),
     ))
     fold = fold.absorb(mul(
-        mul(
-            radix_finish_to_bit,
-            mul(current_range.coordinate, next_range.product_low),
-        ),
+        range.coordinate_to_product_low,
         sub(current.major, natural<F>(5)),
     ))
     fold = fold.absorb(mul(
-        mul(
-            radix_finish_to_bit,
-            mul(current_range.product_output, next_range.linear_sum),
-        ),
+        range.product_output_to_linear_sum,
         sub(current.major, natural<F>(14)),
     ))
 
@@ -3662,26 +4309,23 @@ where L > 1,
     fold = fold.absorb(mul(radix_finish_to_bit, next_positions.last))
 
     let carry_reset = sub(next.flag, current.flag)
-    fold = fold.absorb(mul(carry_bit_to_bit, bit_residual(carry_reset)))
+    fold = fold.absorb(mul(carry_bit_to_bit, carry.reset_bit_residual))
     fold = fold.absorb(mul(
         carry_bit_to_bit,
-        mul(current.flag, sub(one, next.flag)),
+        carry.flag_descent,
     ))
     fold = fold.absorb(mul(
-        carry_bit_to_bit,
-        mul(carry_reset, sub(current.step, natural<F>(17))),
+        carry.selected_reset,
+        sub(current.step, natural<F>(17)),
     ))
     fold = absorb_sparse_control_edge(
         fold, carry_bit_to_bit, next,
         current.major,
         current.minor,
-        mul(sub(one, carry_reset), add(current.step, one)),
+        carry.retained_step,
         next.flag,
         zero,
-        add(
-            mul(sub(one, carry_reset), mul(two, current.weight)),
-            carry_reset,
-        ),
+        add(carry.retained_weight, carry_reset),
     )
     fold = absorb_sparse_control_edge(
         fold, carry_bit_to_finish, next,
@@ -3696,17 +4340,17 @@ where L > 1,
     let carry_product_delta = sub(next.major, current.major)
     fold = fold.absorb(mul(
         carry_finish_to_bit,
-        bit_residual(carry_product_delta),
+        carry.product_delta_bit_residual,
     ))
     fold = absorb_sparse_control_edge(
         fold, carry_finish_to_bit, next,
         add(current.major, carry_product_delta),
-        mul(sub(one, carry_product_delta), add(current.minor, one)),
+        carry.retained_minor,
         zero, zero, zero, one,
     )
     fold = fold.absorb(mul(
-        carry_finish_to_bit,
-        mul(carry_product_delta, sub(current.minor, last_coefficient)),
+        carry.selected_product_delta,
+        sub(current.minor, last_coefficient),
     ))
     fold = absorb_sparse_control_edge(
         fold, carry_finish_to_product, next,
@@ -3737,45 +4381,34 @@ where L > 1,
     ))
 
     let next_product_delta = sub(next.major, current.major)
-    let same_product = sub(one, next_product_delta)
-    let descending_rise = sub(next.flag, current.flag)
     fold = fold.absorb(mul(
         product_coefficient_to_term,
-        bit_residual(next_product_delta),
+        product.delta_bit_residual,
     ))
     fold = fold.absorb(mul(
         product_coefficient_to_term,
-        mul(same_product, mul(current.flag, sub(one, next.flag))),
+        product.descending,
     ))
     fold = fold.absorb(mul(
-        product_coefficient_to_term,
-        mul(
-            same_product,
-            mul(descending_rise, sub(current.minor, last_limb)),
-        ),
+        product.selected_rise,
+        sub(current.minor, last_limb),
     ))
     fold = absorb_sparse_control_edge(
         fold, product_coefficient_to_term, next,
         add(current.major, next_product_delta),
-        mul(same_product, add(current.minor, one)),
+        product.retained_minor,
         zero,
-        mul(same_product, next.flag),
-        add(
-            mul(
-                same_product,
-                sub(add(current.width, one), mul(two, next.flag)),
-            ),
-            next_product_delta,
-        ),
+        product.retained_flag,
+        add(product.retained_width, next_product_delta),
         zero,
     )
     fold = fold.absorb(mul(
-        product_coefficient_to_term,
-        mul(next_product_delta, sub(current.minor, last_coefficient)),
+        product.selected_delta,
+        sub(current.minor, last_coefficient),
     ))
     fold = fold.absorb(mul(
-        product_coefficient_to_term,
-        mul(next_product_delta, current.width),
+        product.selected_delta,
+        current.width,
     ))
 
     fold = absorb_sparse_control_edge(
@@ -3841,18 +4474,18 @@ where L > 1,
     let linear_role_delta = sub(next.minor, current.minor)
     fold = fold.absorb(mul(
         linear_limb_to_limb,
-        bit_residual(linear_role_delta),
+        linear.delta_bit_residual,
     ))
     fold = absorb_sparse_control_edge(
         fold, linear_limb_to_limb, next,
         current.major,
         add(current.minor, linear_role_delta),
-        mul(sub(one, linear_role_delta), add(current.step, one)),
+        linear.retained_step,
         current.flag, zero, zero,
     )
     fold = fold.absorb(mul(
-        linear_limb_to_limb,
-        mul(linear_role_delta, sub(current.step, last_limb)),
+        linear.selected_delta,
+        sub(current.step, last_limb),
     ))
     fold = absorb_sparse_control_edge(
         fold, linear_limb_to_finish, next,
@@ -3879,7 +4512,6 @@ where L > 1,
         sub(current.major, natural<F>(3)),
     ))
 
-    let current_roles = current.linear_roles
     let next_roles = next.linear_roles
     fold = fold.absorb(mul(
         product_finish_to_linear,
@@ -3899,49 +4531,19 @@ where L > 1,
     ))
     fold = fold.absorb(mul(
         linear_limb_to_limb,
-        sub(
-            next_roles.sum,
-            mul(sub(one, linear_role_delta), current_roles.sum),
-        ),
+        sub(next_roles.sum, linear.next_sum),
     ))
     fold = fold.absorb(mul(
         linear_limb_to_limb,
-        sub(
-            next_roles.left_difference,
-            add(
-                mul(
-                    sub(one, linear_role_delta),
-                    current_roles.left_difference,
-                ),
-                mul(linear_role_delta, current_roles.sum),
-            ),
-        ),
+        sub(next_roles.left_difference, linear.next_left_difference),
     ))
     fold = fold.absorb(mul(
         linear_limb_to_limb,
-        sub(
-            next_roles.right_difference,
-            add(
-                mul(
-                    sub(one, linear_role_delta),
-                    current_roles.right_difference,
-                ),
-                mul(linear_role_delta, current_roles.left_difference),
-            ),
-        ),
+        sub(next_roles.right_difference, linear.next_right_difference),
     ))
     fold = fold.absorb(mul(
         linear_limb_to_limb,
-        sub(
-            next_roles.select,
-            add(
-                mul(
-                    sub(one, linear_role_delta),
-                    current_roles.select,
-                ),
-                mul(linear_role_delta, current_roles.right_difference),
-            ),
-        ),
+        sub(next_roles.select, linear.next_select),
     ))
     fold = fold.absorb(mul(
         linear_finish_to_limb,
@@ -4005,16 +4607,31 @@ pub fn evaluate_sparse_control_link<F: Radix2Field, const L: usize>(
     _ challenge: F,
     _ current: SparseControlRow<F>,
     _ next: SparseControlRow<F>,
+    _ plan: SparseControlLinkPlanWitness<F>,
 ) -> FixedAirConstraintEvaluation<F>
 where L > 1,
 {
+    let planned = sparse_control_constrained_link_plan(current, next, plan)
+    let mut fold = ConstraintFold<F>::new(challenge)
+    fold = absorb_sparse_plan_residuals(fold, planned.phase_residuals)
+    fold = absorb_sparse_plan_residuals(fold, planned.boundary_residuals)
+    fold = absorb_sparse_plan_residuals(fold, planned.range_residuals)
+    fold = absorb_sparse_plan_residuals(fold, planned.carry_residuals)
+    fold = absorb_sparse_plan_residuals(fold, planned.product_residuals)
+    fold = absorb_sparse_plan_residuals(fold, planned.linear_residuals)
     let fold = absorb_sparse_control_link<F, L>(
-        ConstraintFold<F>::new(challenge),
+        fold,
         current,
         next,
+        planned.phase,
+        planned.boundary,
+        planned.range,
+        planned.carry,
+        planned.product,
+        planned.linear,
     )
     FixedAirConstraintEvaluation {
-        valid: true,
+        valid: planned.valid,
         constraints: fold.constraints,
         folded: fold.value,
     }
