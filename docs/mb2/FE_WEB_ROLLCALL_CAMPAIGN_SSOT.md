@@ -1535,14 +1535,31 @@ Legend:
   zero-import Wasm with the widened 103-field base row. That exact production
   gate passes in 768.09 seconds.
 
-  The exact production shape is now 534 constraints with family degrees
-  `[7, 6, 1, 6]`, component degrees `[3, 4, 2, 2, 7, 2]`, maximum expression
-  degree 7, and composition-degree bound 24,569. This is a strict reduction
+  Commit `adc203410` interprets all eight signed-linear copy ports through one
+  shared fifty-two-node quadratic plan. Witness generation, row/link/terminal
+  evaluation, direct port inspection, and degree analysis consume that same
+  Fe-authored expression. It reuses the already committed effective-right and
+  different-sign arithmetic nodes rather than deriving a second sign-choice
+  graph. An independent BabyBear reconstruction matches all fifty-two nodes
+  across every semantic signed-linear row class and rejects every single-node
+  mutation under five independent fold challenges. That focused gate passes
+  in 327.92 seconds. The exact shape gate confirms that the linear all-row
+  component fell from degree 7 to degree 2 and that its terminal contribution
+  fell from degree 6 to degree 2. The widened 155-field base row then executes
+  the full production 4,096-row placement and 8,192-row LDE through
+  zero-import 395,467-byte Wasm in 1,019.47 seconds.
+
+  The exact production shape is now 586 constraints with family degrees
+  `[4, 6, 1, 2]`, component degrees `[3, 4, 2, 2, 2, 2]`, maximum expression
+  degree 6, and composition-degree bound 20,475. This is a strict reduction
   from degree 19 and bound 73,709, but it still does not fit the 4,096-row
   trace-degree domain. The remaining target is explicit: all-row and pair-row
   expressions must be at most quadratic, while first-row and last-row
-  expressions must be linear. The linear copy interaction is now the sole
-  degree-7 component; the control row is degree 3 and arithmetic is degree 4.
+  expressions must be linear. The arithmetic adjacency relation is the sole
+  degree-6 family, arithmetic rows remain degree 4, control remains degree 3,
+  and the terminal family must fall from degree 2 to degree 1. The next
+  reductions should linearize the padding-row copy-bus terminal convention,
+  then share explicit plans across arithmetic adjacency/rows and control.
   Only once the derived composition bound fits may the security
   profile be committed into the transcript. The
   assembled regression receipt still carries four queries. The compact
@@ -1606,7 +1623,7 @@ Legend:
   `[255, 176, 222, 255]`. This is real hardware execution evidence for the
   placement checkpoint only. It does not satisfy authenticated FRI,
   recursion, interactive point selection, Wasm receipt verification, or the
-  revm-in-Wasm verifier gate.
+  Mandelbrot verifier executed through the existing revm-in-Wasm rail.
   The scheduling step must now consolidate that arithmetic plan with the two
   existing, independently gated Conal strands:
   `ntt_schedule.fe` derives the `RBin<Pair, k>` stage tree and
@@ -1678,10 +1695,11 @@ fallback. The semantic receipts are:
    `mandelbrot_proof_gpu` clean and tampered Chromium modes now pass on AMD
    Radeon 780M through RADV after the private-heap fix. The four standalone
    hardware test binaries in the runbook remain to be executed without skips.
-2. Continue the quadratic reduction from maximum degree 7 and composition
-   bound 24,569. The boundary and round copy interactions are now degree 2.
-   Lower the linear copy interaction, then the degree-4 arithmetic and
-   degree-3 control expressions, through
+2. Continue the quadratic reduction from maximum degree 6 and composition
+   bound 20,475. The boundary, round, and linear copy interactions are now
+   degree 2. Linearize the last-row copy-bus terminal convention, then lower
+   the degree-6 arithmetic adjacency, degree-4 arithmetic rows, and degree-3
+   control expressions through
    compact Fe-authored plans and semantic roles. Keep every plan shared by
    witness generation, constraint evaluation, degree analysis, and later GPU
    schedules, with independent semantic and mutation gates. Once the derived
