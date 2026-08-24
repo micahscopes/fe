@@ -2250,6 +2250,44 @@ proof accepted by an independently executed Fe verifier, rejects mutated
 claims/proofs, survives capability loss through an explicit policy, and ships
 no application math or schedule in Rust/JavaScript/JSON scaffolding.
 
+#### Pinned GPU scheduling reconnaissance (2026-08-24)
+
+Before deriving the production schedule, source-level review pinned sppark
+`17278d74295392f9813f009300b257a688422b7a`, era-boojum-cuda
+`a5cf97fca81bbd2e6ca52513ae3b8806eb120e31`, ICICLE
+`625532a624e5aaa6e9d31a1c92587f1fcc30dc76`, SP1
+`f66b4bff51d0ccff51d152e0f7f66b2ffedf3529`, and RISC Zero
+`3bbcd44d6459b9ef6ac0df3846dc9215514934e8`. The resulting decisions are:
+
+1. Treat every heavy primitive as a family of equivalent placements, not one
+   GPU kernel. Start with a portable stage-grid schedule, then derive fused
+   workgroup and optional subgroup schedules from the same Fe DAG.
+2. Make work, dependency depth, leaf overlap, liveness/register pressure,
+   communication, barriers, and peak device memory first-class CTFE receipts.
+   SP1's DAG-native AIR analysis and multiple lowerings validate this shape,
+   while its subtraction-sign regression reinforces that schedule bytes are
+   never a semantic oracle.
+3. Keep NTT ordering, batch axis, coset application, twiddle storage, and
+   stages per dispatch in typed schedule policy. Mature CUDA paths fuse roughly
+   seven to twelve stages, but RISC Zero's simpler Metal stage grid establishes
+   the portable WebGPU baseline.
+4. Provide scalar-per-permutation and cooperative-workgroup Poseidon
+   interpreters. Replace the current lane-per-round repeated-dispatch checkpoint
+   only under digest/transcript parity gates.
+5. Derive a Merkle retention policy with an explicit peak-memory receipt.
+   Large browser trees may retain upper levels and recompute omitted lower
+   siblings for sampled queries, as SP1 and ICICLE do, rather than risking
+   device loss by retaining every node.
+6. Keep FRI's commit/challenge/fold round dependency serial while parallelizing
+   all positions within a round and all authenticated query extraction after
+   Fiat-Shamir fixes the indices.
+7. Reuse one balanced-reduction abstraction for Merkle layers and recursive
+   Mandelbrot leaf/merge aggregation, with distinct typed domains and tags.
+
+The detailed source audit and links live in
+`/workspace/scratch/mb2-cuda-proof-scheduling-audit-2026-08-24.md`; this durable
+SSOT carries the architectural decisions and gates.
+
 ### Phase 7: simplify and generalize the Fe demos
 
 #### Geometric-algebra expression compiler
