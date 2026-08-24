@@ -19,8 +19,9 @@ impl<C, K, I, O> Compute<WasmBackend, K, I, O> for BrowserActorCompute<C, K>
     where C: Handles<ComputeRequest<K, I>, O>
 {
     fn compute_begin(mut self, _ input: own I) -> Pending<WasmBackend, O> {
+        let mut mailbox = BrowserActorMailbox<C> {}
         <BrowserActorMailbox<C> as ActorMailbox<WasmBackend, C>>::ask(
-            BrowserActorMailbox<C> {},
+            mut mailbox,
             ComputeRequest { input: input },
         )
     }
@@ -38,8 +39,9 @@ impl<C, V, Claim, Output, Verdict>
         _ claim: own Claim,
         _ output: own Output,
     ) -> Pending<WasmBackend, Verdict> {
+        let mut mailbox = BrowserActorMailbox<C> {}
         <BrowserActorMailbox<C> as ActorMailbox<WasmBackend, C>>::ask(
-            BrowserActorMailbox<C> {},
+            mut mailbox,
             VerifyRequest { claim: claim, output: output },
         )
     }
