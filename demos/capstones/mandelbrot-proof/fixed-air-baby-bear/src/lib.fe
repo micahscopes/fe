@@ -31,6 +31,7 @@ use mandelbrot_proof_baby_bear_transcript::{
 use mandelbrot_proof_fixed_air_core::{
     FixedAirConstraintEvaluation,
     SparseBoundaryInteractionRow,
+    SparseArithmeticPlanWitness,
     SparseControlRow,
     SparseControlSelectors,
     SparseCopyChallenges,
@@ -67,6 +68,7 @@ use mandelbrot_proof_fixed_air_core::{
     evaluate_sparse_round_interaction_row,
     evaluate_sparse_round_interaction_terminal,
     sparse_control_row_at,
+    sparse_arithmetic_plan_witness,
     sparse_public_constraint_count,
     sparse_public_coordinate_at,
     sparse_public_coordinate_count,
@@ -80,6 +82,7 @@ use mandelbrot_proof_fixed_air_core::{
     write_sparse_linear_interaction_row,
     write_sparse_product_interaction_row,
     write_sparse_round_interaction_row,
+    zero_sparse_arithmetic_plan_witness,
     zero_sparse_product_interaction_row,
 }
 use mandelbrot_proof_recursive::{ComplexFixed, OrbitInterval}
@@ -251,12 +254,14 @@ pub type SparseTraceLimbPositions = SparseLimbPositionSelectors<BabyBear>
 pub type SparseTraceControl = SparseControlRow<BabyBear>
 pub type SparseTraceRow = SparseTaskRow<BabyBear>
 
-/// The exact polynomial base-row schema. Reflection derives its canonical
-/// field order from the same nominal control and witness records committed by
-/// `SparseTraceLeaf`, so LDE consumers need no parallel column-number table.
+/// The exact polynomial base-row schema. Control and witness fields are the
+/// nominal records committed by `SparseTraceLeaf`; the derived arithmetic plan
+/// is constrained back to those fields by its shared interpreter. Reflection
+/// gives LDE consumers one field order without a parallel column-number table.
 pub struct SparseBaseAirRow<F: Radix2Field> {
     pub control: SparseControlRow<F>,
     pub witness: SparseTaskRow<F>,
+    pub arithmetic_plan: SparseArithmeticPlanWitness<F>,
 }
 impl<F: Radix2Field> core::marker::Copy
     for SparseBaseAirRow<F> {}
@@ -982,6 +987,7 @@ fn sparse_composition_fold_fields<F: Radix2Field, const L: usize>(
     _ next_control: SparseControlRow<F>,
     _ witness: SparseTaskRow<F>,
     _ next_witness: SparseTaskRow<F>,
+    _ arithmetic_plan: SparseArithmeticPlanWitness<F>,
     _ interaction: SparseInteractionTraceRow<F>,
     _ next_interaction: SparseInteractionTraceRow<F>,
 ) -> SparseCompositionFold<F>
@@ -996,7 +1002,7 @@ where L > 1,
     fold = fold.absorb_fixed(
         SparseConstraintFamily::AllRows,
         evaluate_sparse_arithmetic_row<F, L>(
-            challenge, control, witness,
+            challenge, control, witness, arithmetic_plan,
         ),
     )
     let product = evaluate_sparse_product_interaction_row<F, L>(
@@ -1191,6 +1197,7 @@ where L > 1,
         next.base.control,
         row.base.witness,
         next.base.witness,
+        row.base.arithmetic_plan,
         row.interaction,
         next.interaction,
     )
@@ -1296,6 +1303,7 @@ where L > 1,
         base.control,
         base.witness,
         base.witness,
+        base.arithmetic_plan,
         interaction,
         interaction,
     )
@@ -1358,7 +1366,10 @@ where L > 1,
     }
     let control = evaluate_sparse_control_row(challenge, base.control)
     let arithmetic = evaluate_sparse_arithmetic_row<AirPolynomialDegree, L>(
-        challenge, base.control, base.witness,
+        challenge,
+        base.control,
+        base.witness,
+        base.arithmetic_plan,
     )
     let product = evaluate_sparse_product_interaction_row<
         AirPolynomialDegree,
@@ -3139,6 +3150,10 @@ where
         base_rows[index] = SparseBaseAirRow {
             control: leaf.control,
             witness: leaf.row,
+            arithmetic_plan: sparse_arithmetic_plan_witness(
+                leaf.control,
+                leaf.row,
+            ),
         }
         base_frontier = push_frontier<
             Poseidon2Digest,
@@ -3336,6 +3351,7 @@ fn zero_sparse_base_air_row_field<F: Radix2Field>() -> SparseBaseAirRow<F> {
     SparseBaseAirRow {
         control: zero_sparse_trace_control_field<F>(),
         witness: zero_sparse_trace_row_field<F>(),
+        arithmetic_plan: zero_sparse_arithmetic_plan_witness<F>(),
     }
 }
 
@@ -3475,7 +3491,14 @@ pub fn sparse_base_air_row_from_witness<const L: usize>(
     let leaf = sparse_trace_leaf_from_witness<L>(
         index, point, current, next, witness,
     )
-    SparseBaseAirRow { control: leaf.control, witness: leaf.row }
+    SparseBaseAirRow {
+        control: leaf.control,
+        witness: leaf.row,
+        arithmetic_plan: sparse_arithmetic_plan_witness(
+            leaf.control,
+            leaf.row,
+        ),
+    }
 }
 
 pub fn sparse_trace_leaf_commitment<const L: usize>(

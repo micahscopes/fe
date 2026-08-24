@@ -2,7 +2,10 @@
 
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::{BackendKind, OptLevel, layout_for};
+use fe_codegen::{
+    BackendKind, OptLevel, WasmCompileOptions, compile_runtime_package_wasm_with_options,
+    layout_for,
+};
 use hir::hir_def::HirIngot;
 use num_bigint::BigUint;
 use p3_baby_bear::{BabyBear as P3BabyBear, default_babybear_poseidon2_16};
@@ -1082,6 +1085,35 @@ fn bb_mul(left: u32, right: u32) -> u32 {
     (left as u64 * right as u64 % BABY_BEAR_MODULUS as u64) as u32
 }
 
+fn expected_sparse_arithmetic_plan(control: [u32; 38], row: [u32; 6]) -> [u32; 7] {
+    let two = 2;
+    let right_flag_product = bb_mul(row[1], control[35]);
+    let effective_right = bb_sub(bb_add(row[1], control[35]), bb_mul(two, right_flag_product));
+    let sign_difference_product = bb_mul(row[0], effective_right);
+    let signs_different = bb_sub(
+        bb_add(row[0], effective_right),
+        bb_mul(two, sign_difference_product),
+    );
+    let signs_same = bb_sub(1, signs_different);
+    let select_right = row[2];
+    let left_difference_sign = bb_mul(bb_sub(1, select_right), row[0]);
+    let right_difference_sign = bb_mul(select_right, effective_right);
+    let selected_difference_sign = bb_add(left_difference_sign, right_difference_sign);
+    let same_sign_output = bb_mul(signs_same, row[0]);
+    let different_sign_output = bb_mul(bb_sub(1, signs_same), selected_difference_sign);
+    let selected_sign = bb_add(same_sign_output, different_sign_output);
+    let output_sign = bb_mul(selected_sign, row[4]);
+    [
+        right_flag_product,
+        sign_difference_product,
+        left_difference_sign,
+        right_difference_sign,
+        same_sign_output,
+        different_sign_output,
+        output_sign,
+    ]
+}
+
 fn bb_pow(mut base: u32, mut exponent: u32) -> u32 {
     let mut result = 1;
     while exponent != 0 {
@@ -2107,6 +2139,10 @@ fn expected_sparse_air_prefix_words(
     for index in 0..4 {
         words.extend(controls[index]);
         words.extend(rows[index]);
+        words.extend(expected_sparse_arithmetic_plan(
+            controls[index],
+            rows[index],
+        ));
     }
 
     let mut product_accumulator = Ext4::ZERO;
@@ -2167,13 +2203,13 @@ fn expected_sparse_air_prefix_words(
     ] {
         extend_ext4_words(&mut words, accumulator);
     }
-    assert_eq!(words.len(), 538, "sparse prefix schema must stay nominal");
+    assert_eq!(words.len(), 566, "sparse prefix schema must stay nominal");
     words
 }
 
 fn expected_sparse_air_lde_words(prefix: &[u32]) -> Vec<u32> {
-    assert_eq!(prefix.len(), 538, "sparse prefix input must stay nominal");
-    const BASE_FIELDS: usize = 44;
+    assert_eq!(prefix.len(), 566, "sparse prefix input must stay nominal");
+    const BASE_FIELDS: usize = 51;
     const INTERACTION_FIELDS: usize = 84;
     const TRACE: usize = 4;
     const LDE: usize = 16;
@@ -2205,12 +2241,12 @@ fn expected_sparse_air_lde_words(prefix: &[u32]) -> Vec<u32> {
     let mut words = vec![1];
     words.extend(base);
     words.extend(interaction);
-    assert_eq!(words.len(), 2_049, "sparse LDE schema must stay nominal");
+    assert_eq!(words.len(), 2_161, "sparse LDE schema must stay nominal");
     words
 }
 
 fn expected_sparse_base_lde_root(lde: &[u32], mutate: bool) -> [u32; 8] {
-    const BASE_FIELDS: usize = 44;
+    const BASE_FIELDS: usize = 51;
     const LDE: usize = 16;
     assert!(lde.len() >= 1 + LDE * BASE_FIELDS);
     assert_eq!(lde[0], 1, "base LDE must be valid before commitment");
@@ -2456,6 +2492,35 @@ fn compile_fixture() -> Vec<u8> {
     bytes
 }
 
+fn compile_fixture_entry(entry: &str) -> Vec<u8> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/mandelbrot_recursive_fixed_oracle_ingot");
+    let url = Url::from_directory_path(path.canonicalize().unwrap()).unwrap();
+    let mut db = DriverDataBase::default();
+    assert!(
+        !driver::init_ingot(&mut db, &url),
+        "recursive fixed oracle fixture initialization diagnostics",
+    );
+    let ingot = db
+        .workspace()
+        .containing_ingot(&db, url)
+        .expect("recursive fixed oracle fixture ingot");
+    let top_mod = ingot.root_mod(&db);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "unexpected recursive fixed oracle diagnostics:\n{diagnostics}",
+    );
+    let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, entry)
+        .unwrap_or_else(|error| panic!("recursive fixed entry {entry}: {error}"));
+    let bytes =
+        compile_runtime_package_wasm_with_options(&db, &package, WasmCompileOptions::default())
+            .unwrap_or_else(|error| panic!("recursive fixed entry {entry} Wasm: {error}"))
+            .bytes;
+    wasmparser::validate(&bytes).expect("recursive fixed entry Wasm should validate");
+    bytes
+}
+
 fn compile_sparse_auth_fixture() -> Vec<u8> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/mandelbrot_sparse_trace_auth_oracle_ingot");
@@ -2580,6 +2645,61 @@ fn encoded(
     let result = call(store, instance, function, arguments, 2);
     let words = read_words(store, memory, result[0], result[1]);
     (result[0], result[1], words)
+}
+
+#[test]
+fn production_arithmetic_plan_matches_independent_nodes_and_rejects_mutations() {
+    let entry = "fixed_transition4_sparse_arithmetic_plan_audit";
+    let bytes = compile_fixture_entry(entry);
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, bytes)
+        .expect("focused arithmetic-plan Wasm module should load");
+    assert_eq!(
+        module.imports().count(),
+        0,
+        "fixture must remain zero-import"
+    );
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("focused arithmetic-plan fixture should instantiate");
+
+    let point = ComplexFx {
+        real: fixed(true, 3, 4),
+        imaginary: fixed(false, 1, 8),
+    };
+    let current = ComplexFx {
+        real: fixed(false, 5, 4),
+        imaginary: fixed(true, 3, 8),
+    };
+    let tasks = expected_sparse_transition_tasks(LIMBS as u32);
+    let index = tasks
+        .iter()
+        .position(|task| task[0] == 10)
+        .expect("the production schedule must contain a signed-linear finish row");
+    let controls = expected_sparse_control_rows();
+    let rows = expected_sparse_rows(&point, &current);
+    let expected = expected_sparse_arithmetic_plan(controls[index], rows[index]);
+
+    for challenge in [3u32, 7, 31] {
+        let mut arguments = transition_arguments(&point, &current);
+        arguments.extend([index as u32, challenge, 0]);
+        let baseline = call(&mut store, &instance, entry, &arguments, 9);
+        assert_eq!(&baseline[..7], expected.as_slice());
+        assert_eq!(
+            baseline[7], 0,
+            "the clean arithmetic plan must satisfy the AIR"
+        );
+        assert!(baseline[8] > 0, "the arithmetic plan must emit constraints");
+
+        for mutation in 1..=7u32 {
+            let mut mutated_arguments = transition_arguments(&point, &current);
+            mutated_arguments.extend([index as u32, challenge, mutation]);
+            let mutated = call(&mut store, &instance, entry, &mutated_arguments, 9);
+            assert_eq!(&mutated[..7], expected.as_slice());
+            assert_eq!(mutated[7], 1, "plan node {mutation} must fail closed");
+            assert_eq!(mutated[8], baseline[8]);
+        }
+    }
 }
 
 #[test]
@@ -3601,6 +3721,13 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                 (first_sparse_kind(12), 1),
                 (first_sparse_kind(13), 1),
                 (sparse_tasks.len(), 1),
+                (first_sparse_kind(10), 7),
+                (first_sparse_kind(10), 8),
+                (first_sparse_kind(10), 9),
+                (first_sparse_kind(10), 10),
+                (first_sparse_kind(10), 11),
+                (first_sparse_kind(10), 12),
+                (first_sparse_kind(10), 13),
             ];
             for challenge in [3u32, 7, 31] {
                 let mut baseline_arguments = arguments.clone();
@@ -3613,7 +3740,7 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                         &baseline_arguments,
                         3,
                     ),
-                    [0, 413_678, 4096],
+                    [0, 442_350, 4096],
                     "index-free sparse arithmetic baseline, challenge {challenge}",
                 );
                 for (row, lane) in arithmetic_mutations {
@@ -3630,7 +3757,7 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                         audit[0] > 0,
                         "index-free sparse arithmetic mutation at row {row}, lane {lane}, challenge {challenge}",
                     );
-                    assert_eq!(audit[1], 413_678);
+                    assert_eq!(audit[1], 442_350);
                     assert_eq!(audit[2], 4096);
                 }
             }
@@ -4756,13 +4883,13 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
         &arguments,
     );
     let mut expected = expected_sparse_air_prefix_words(&point, &current, expected_base_root);
-    let first_base_fields = expected[10..54].to_vec();
-    let first_interaction_fields = expected[186..270].to_vec();
+    let first_base_fields = expected[10..61].to_vec();
+    let first_interaction_fields = expected[214..298].to_vec();
     let mut expected_lde = expected_sparse_air_lde_words(&expected);
     expected_lde.extend([1, 0]);
     assert_eq!(
         expected_lde.len(),
-        2_051,
+        2_163,
         "sparse LDE schema must stay nominal"
     );
     assert_eq!(lde_words.len(), expected_lde.len(), "sparse LDE length");
@@ -5044,7 +5171,7 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
         "unknown production mutation payload"
     );
 
-    const BASE_FIELDS: usize = 44;
+    const BASE_FIELDS: usize = 51;
     const INTERACTION_FIELDS: usize = 84;
     const LDE: usize = 16;
     const BASE_START: usize = 1;
@@ -5157,7 +5284,7 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
     expected.extend([0; 8]);
     assert_eq!(
         expected.len(),
-        706,
+        741,
         "sparse checkpoint schema must stay nominal"
     );
     assert_eq!(words.len(), expected.len(), "sparse checkpoint length");
@@ -5171,7 +5298,7 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
 
 #[test]
 fn sparse_lde_multipaths_authenticate_production_codewords() {
-    const BASE_FIELDS: usize = 44;
+    const BASE_FIELDS: usize = 51;
     const INTERACTION_FIELDS: usize = 84;
     let bytes = compile_sparse_auth_fixture();
     let engine = wasmtime::Engine::default();

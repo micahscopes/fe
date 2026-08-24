@@ -334,6 +334,24 @@ pub struct SparseCopyChallenges<F: Radix2Field> {
 impl<F: Radix2Field> core::marker::Copy for SparseCopyChallenges<F> {}
 derive CanonicalWords for SparseCopyChallenges<F> using CanonicalWordsProvider
 
+/// The signed-linear finish row contains one nested boolean-selection DAG.
+/// Seven shared multiplication nodes make every dependency in that DAG affine
+/// before its final row selector is applied. Witness generation and constraint
+/// evaluation interpret the same authored plan below.
+pub const SPARSE_ARITHMETIC_MULTIPLICATIONS: usize = 7
+
+pub type SparseArithmeticPlanWitness<F> = QuadraticPlanWitness<
+    F,
+    SPARSE_ARITHMETIC_MULTIPLICATIONS,
+>
+
+pub fn zero_sparse_arithmetic_plan_witness<F: Radix2Field>()
+    -> SparseArithmeticPlanWitness<F> {
+    QuadraticPlanWitness {
+        nodes: [zero<F>(); SPARSE_ARITHMETIC_MULTIPLICATIONS],
+    }
+}
+
 /// Extension-trace columns for a fixed-width copy interaction. The port count
 /// is part of the type, so each semantic bus can select its required width
 /// while sharing one constraint and prover interpretation.
@@ -4316,6 +4334,138 @@ fn absorb_selected<F: Radix2Field>(
     fold.absorb(mul(selector, residual))
 }
 
+struct SparseArithmeticPlan<
+    I: QuadraticPlanInterpreter<F>,
+    F: Radix2Field,
+> {
+    interpreter: I,
+    linear_finish_sign: F,
+}
+impl<I: QuadraticPlanInterpreter<F>, F: Radix2Field> core::marker::Copy
+    for SparseArithmeticPlan<I, F> {}
+
+/// One dependency description for the nested sign choice on a signed-linear
+/// finish row. Each multiplication is materialized by the witness interpreter
+/// and checked by the constraint interpreter. The affine values between nodes
+/// remain local SSA values and therefore add no committed columns.
+fn sparse_arithmetic_plan<
+    I: QuadraticPlanInterpreter<F>,
+    F: Radix2Field,
+>(
+    _ control: SparseControlRow<F>,
+    _ row: SparseTaskRow<F>,
+    _ interpreter: I,
+) -> SparseArithmeticPlan<I, F> {
+    let mut interpreter = interpreter
+    let one = one<F>()
+    let two = natural<F>(2)
+
+    let right_flag_product = interpreter.multiply(row.auxiliary, control.flag)
+    interpreter = right_flag_product.interpreter
+    let effective_right = sub(
+        add(row.auxiliary, control.flag),
+        mul(two, right_flag_product.value),
+    )
+
+    let sign_difference_product = interpreter.multiply(
+        row.value,
+        effective_right,
+    )
+    interpreter = sign_difference_product.interpreter
+    let signs_different = sub(
+        add(row.value, effective_right),
+        mul(two, sign_difference_product.value),
+    )
+    let signs_same = sub(one, signs_different)
+
+    let select_right = row.accumulator_before
+    let left_difference_sign = interpreter.multiply(
+        sub(one, select_right),
+        row.value,
+    )
+    interpreter = left_difference_sign.interpreter
+    let right_difference_sign = interpreter.multiply(
+        select_right,
+        effective_right,
+    )
+    interpreter = right_difference_sign.interpreter
+    let selected_difference_sign = add(
+        left_difference_sign.value,
+        right_difference_sign.value,
+    )
+
+    let same_sign_output = interpreter.multiply(signs_same, row.value)
+    interpreter = same_sign_output.interpreter
+    let different_sign_output = interpreter.multiply(
+        sub(one, signs_same),
+        selected_difference_sign,
+    )
+    interpreter = different_sign_output.interpreter
+    let selected_sign = add(
+        same_sign_output.value,
+        different_sign_output.value,
+    )
+    let output_sign = interpreter.multiply(selected_sign, row.state_before)
+    interpreter = output_sign.interpreter
+
+    SparseArithmeticPlan {
+        interpreter: interpreter,
+        linear_finish_sign: output_sign.value,
+    }
+}
+
+pub fn sparse_arithmetic_plan_witness<F: Radix2Field>(
+    _ control: SparseControlRow<F>,
+    _ row: SparseTaskRow<F>,
+) -> SparseArithmeticPlanWitness<F> {
+    sparse_arithmetic_plan<
+        QuadraticWitnessInterpreter<
+            F,
+            SPARSE_ARITHMETIC_MULTIPLICATIONS,
+        >,
+        F,
+    >(
+        control,
+        row,
+        QuadraticWitnessInterpreter::new(),
+    ).interpreter.finish()
+}
+
+struct SparseArithmeticConstrainedPlan<F: Radix2Field> {
+    valid: bool,
+    linear_finish_sign: F,
+    residuals: QuadraticPlanResiduals<
+        F,
+        SPARSE_ARITHMETIC_MULTIPLICATIONS,
+    >,
+}
+impl<F: Radix2Field> core::marker::Copy
+    for SparseArithmeticConstrainedPlan<F> {}
+
+fn sparse_arithmetic_constrained_plan<F: Radix2Field>(
+    _ control: SparseControlRow<F>,
+    _ row: SparseTaskRow<F>,
+    _ witness: SparseArithmeticPlanWitness<F>,
+) -> SparseArithmeticConstrainedPlan<F> {
+    let planned = sparse_arithmetic_plan<
+        QuadraticConstraintInterpreter<
+            F,
+            SPARSE_ARITHMETIC_MULTIPLICATIONS,
+        >,
+        F,
+    >(
+        control,
+        row,
+        QuadraticConstraintInterpreter::new(witness),
+    )
+    let residuals = planned.interpreter.finish()
+    SparseArithmeticConstrainedPlan {
+        valid: residuals.valid,
+        linear_finish_sign: planned.linear_finish_sign,
+        residuals: residuals,
+    }
+}
+
 /// Index-free arithmetic interpretation of one sparse row. Task selection,
 /// bit weights, linear roles, and subtraction mode all come from constrained
 /// field columns. The evaluator therefore remains the same polynomial after
@@ -4324,6 +4474,7 @@ pub fn evaluate_sparse_arithmetic_row<F: Radix2Field, const L: usize>(
     _ challenge: F,
     _ control: SparseControlRow<F>,
     _ row: SparseTaskRow<F>,
+    _ arithmetic_plan: SparseArithmeticPlanWitness<F>,
 ) -> FixedAirConstraintEvaluation<F> {
     let selectors = control.selectors
     let roles = control.linear_roles
@@ -4331,6 +4482,16 @@ pub fn evaluate_sparse_arithmetic_row<F: Radix2Field, const L: usize>(
     let one = one<F>()
     let two = natural<F>(2)
     let mut fold = ConstraintFold<F>::new(challenge)
+    let planned = sparse_arithmetic_constrained_plan(
+        control,
+        row,
+        arithmetic_plan,
+    )
+    let mut plan_index: usize = 0
+    while plan_index < SPARSE_ARITHMETIC_MULTIPLICATIONS {
+        fold = fold.absorb(planned.residuals.values[plan_index])
+        plan_index = plan_index + 1
+    }
 
     fold = absorb_selected(fold, selectors.radix_bit, bit_residual(row.value))
     fold = absorb_selected(
@@ -4637,15 +4798,6 @@ pub fn evaluate_sparse_arithmetic_row<F: Radix2Field, const L: usize>(
         selectors.linear_finish,
         bit_residual(row.state_after),
     )
-    let effective_right = sub(
-        add(row.auxiliary, control.flag),
-        mul(two, mul(row.auxiliary, control.flag)),
-    )
-    let signs_different = sub(
-        add(row.value, effective_right),
-        mul(two, mul(row.value, effective_right)),
-    )
-    let signs_same = sub(one, signs_different)
     let select_right = row.accumulator_before
     fold = absorb_selected(
         fold,
@@ -4655,18 +4807,10 @@ pub fn evaluate_sparse_arithmetic_row<F: Radix2Field, const L: usize>(
             mul(select_right, row.accumulator_after),
         ),
     )
-    let selected_difference_sign = add(
-        mul(sub(one, select_right), row.value),
-        mul(select_right, effective_right),
-    )
-    let selected_sign = add(
-        mul(signs_same, row.value),
-        mul(sub(one, signs_same), selected_difference_sign),
-    )
     fold = absorb_selected(
         fold,
         selectors.linear_finish,
-        sub(row.state_after, mul(selected_sign, row.state_before)),
+        sub(row.state_after, planned.linear_finish_sign),
     )
 
     fold = absorb_selected(
@@ -4723,7 +4867,7 @@ pub fn evaluate_sparse_arithmetic_row<F: Radix2Field, const L: usize>(
     fold = absorb_selected(fold, selectors.padding, row.state_after)
 
     FixedAirConstraintEvaluation {
-        valid: true,
+        valid: planned.valid,
         constraints: fold.constraints,
         folded: fold.value,
     }
