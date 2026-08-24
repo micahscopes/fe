@@ -1507,15 +1507,26 @@ Legend:
   mutations, and confirms that coordinated mutations survive only until the
   terminal equality check.
 
-  The exact production shape is now 468 constraints with family degrees
-  `[13, 8, 1, 8]`, maximum expression degree 13, and composition-degree bound
-  49,139. This is a genuine first reduction from degree 19 and bound 73,709,
-  but it still does not fit the 4,096-row trace-degree domain. Existing
-  semantic and mutation oracles remain the truth. The next slice must add
-  component degree introspection, identify the remaining degree-13 all-row
-  arithmetic and control expressions, and lower those through the same
-  reusable quadratic plan machinery. Only once the derived composition bound
-  fits may the security profile be committed into the transcript. The
+  Commit `b4c6f550d` derives component degrees from the exact production
+  evaluators. Commit `9cf134e54` adds three semantic coordinate roles and
+  removes repeated high-degree coordinate interpolation from the product,
+  linear, and boundary copy buses. Commit `25d20d75a` then expresses the nested
+  signed-linear finish choice as one seven-multiplication Fe plan interpreted
+  into witnesses and quadratic residuals. An independent BabyBear
+  reconstruction matches every committed node and rejects all seven node
+  mutations under three fold challenges. The production base-LDE checkpoint
+  executes the widened 51-field row through zero-import Wasm.
+
+  The exact production shape is now 482 constraints with family degrees
+  `[7, 6, 1, 6]`, component degrees `[3, 4, 2, 7, 7, 7]`, maximum expression
+  degree 7, and composition-degree bound 24,569. This is a strict reduction
+  from degree 19 and bound 73,709, but it still does not fit the 4,096-row
+  trace-degree domain. The remaining target is explicit: all-row and pair-row
+  expressions must be at most quadratic, while first-row and last-row
+  expressions must be linear. Round, linear, and boundary copy interactions
+  now share the degree-7 maximum; the control row is degree 3 and arithmetic
+  is degree 4. Only once the derived composition bound fits may the security
+  profile be committed into the transcript. The
   assembled regression receipt still carries four queries. The compact
   114-query range must subsequently drive real sampling, openings,
   authentication paths, and FRI folds. The direct-domain policy is still
@@ -1649,11 +1660,11 @@ fallback. The semantic receipts are:
    `mandelbrot_proof_gpu` clean and tampered Chromium modes now pass on AMD
    Radeon 780M through RADV after the private-heap fix. The four standalone
    hardware test binaries in the runbook remain to be executed without skips.
-2. Continue the quadratic reduction after the first production slice reduced
-   maximum degree from 19 to 13 and composition bound from 73,709 to 49,139.
-   Add component degree introspection, then lower the remaining degree-13
-   all-row expressions through the same Fe-authored plan. Keep the plan shared
-   by witness generation, constraint evaluation, degree analysis, and later GPU
+2. Continue the quadratic reduction from maximum degree 7 and composition
+   bound 24,569. Lower the shared round, linear, and boundary copy interactions,
+   then the degree-4 arithmetic and degree-3 control expressions, through
+   compact Fe-authored plans and semantic roles. Keep every plan shared by
+   witness generation, constraint evaluation, degree analysis, and later GPU
    schedules, with independent semantic and mutation gates. Once the derived
    composition bound fits the trace domain, bind every policy parameter into
    the production transcript, make the compact 114-query range drive sampling,
