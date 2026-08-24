@@ -1615,6 +1615,35 @@ The intended package layers are:
 Specialized schedules and legacy carriers belong in internal or test-support
 layers, not beside reusable application utilities.
 
+The 2026-08-24 gallery, `core`, `std`, and ingot audit refines that map. Its
+full working report is
+`/workspace/scratch/mb2-gallery-idiomatic-fe-vision-audit-2026-08-24.md`.
+Use these destinations instead of treating every useful abstraction as a
+candidate for `std`:
+
+| Destination | Placement rule | Representative candidates |
+| --- | --- | --- |
+| Demo-local | One application owns the policy or there is not yet a stable semantic boundary | Todo storage facade before its second consumer, perturbation reference-orbit facade, scene-specific materials |
+| Focused ingot | The abstraction has a clear domain contract, independent gates, and useful reuse, but is not universal language or platform policy | `parallel_ntt`, ordered proof topology, `canonical_words`, Poseidon/transcript packages, `ga_expr`, `pga2`/`cga3`/`qcga3`, `render_math`, `implicit_render`, `DeepView`, gallery palette |
+| `core` | Target-neutral language semantics or authority shared by all backends | pending/outcome, actor roles, `Compute`/`Verify` effects, structural parallel vocabulary once its laws and ownership are stable |
+| `std` | A reusable interpreter or platform-facing authoring facade over `core` semantics | scoped runtime providers, reactive interpreters, browser actors, components/pages, generated Web standards bindings, WebGPU placement |
+| Compiler/language | Correctness requires compiler-minted identity, recursive type knowledge, retained IR, or backend-wide ABI support | nominal action/task/kernel identity, nested reflection, payload-enum ABI, expression DAG retention, graph liveness/layout, HTML quasiquote lowering |
+
+A focused ingot is a valid long-term home, not merely a waiting room for
+`std`. Promotion requires two authentic consumers, a stable semantic boundary,
+and independent invariants or oracles. Compiler-owned structure must not be
+simulated by a new JSON schema, generated application source, numeric identity,
+or duplicated transport table while waiting for that promotion.
+
+The source inspector is a first-class consumer of this layering. Its target
+view progresses through authored denotation, ingot dependencies, derived
+semantic DAG or ordered topology, lawful placement plan, derived ABI and memory
+layout, and emitted Wasm/WGSL/SPIR-V/EVM artifacts. `fe doc`, typed program and
+artifact identity, and compiler provenance should supply those layers directly.
+There must be no parallel runtime manifest. The current inspector and
+sequential activation policy remain useful Fe components while their raw
+command cell and string path protocol are replaced by those typed identities.
+
 | Utility family | Proven now | Possible-now consolidation | Ideal/compiler-enabled endpoint |
 | --- | --- | --- | --- |
 | Runtime control | Typed `Pending`, `TaskOutcome`, nominal `Suspend`, generated continuation states, resident/scoped actors, typed actor sinks, timer suspension | One `std::runtime` facade; reusable source-to-actor forwarding; explicit scope/supervision policies | ZIO-like typed environment/exit/scope in Fe without a boxed monadic runtime; compiler-derived task handles and exactly-once structured cancellation |
@@ -2312,6 +2341,15 @@ Before deriving the production schedule, source-level review pinned sppark
     can follow arbitrary exact factorizations without restricting production
     domains to the literal bush sizes `2^(2^N)`. Derive algorithm, work/depth,
     fanout/communication, and placement from that tree, not from parallel tables.
+12. For ordered or non-associative proof structures, keep semantic topology
+    separate from placement. CTFE must derive the exact domain-separated Merkle
+    nodes, recursive chunk intervals, transcript typestate, Poseidon round DAG,
+    and AIR expression DAG without rotating or commuting them. Independent
+    siblings may execute together, and a second typed placement tree may choose
+    dispatch cuts, fused workgroups, retention/recomputation, and buffer reuse.
+    Interpret the same fixed dependency graph for evaluation, degree analysis,
+    liveness, memory receipts, Wasm, WebGPU, and EVM. This is the broader
+    compiling-to-categories path when scan/FFT reassociation laws do not apply.
 
 The detailed source audit and links live in
 `/workspace/scratch/mb2-cuda-proof-scheduling-audit-2026-08-24.md`; this durable
@@ -2443,9 +2481,11 @@ SSOT carries the architectural decisions and gates.
    `Verify<Claim, Output, Verdict>` effects. Provide at least two stacks:
    `ScalarFeCompute + DirectFeVerify` for deterministic tests and
    `WebGpuCompute + RevmWasmVerify` for the real browser path. Both stacks use
-   the same `Pending`/`Wait` lifecycle, even when the test provider completes
-   immediately, so switching providers requires no application branch or
-   numeric backend ID. The fixed host transports opaque buffers, raw EVM
+   the same affine `Pending` lifecycle. A resident actor consumes it with
+   non-blocking `Suspend`; only a worker with blocking authority uses `Wait`
+   internally for WebGPU residency. Switching providers requires no
+   application branch or numeric backend ID. The fixed host transports opaque
+   buffers, raw EVM
    runtime/calldata, and browser promise completion only; it contains no kernel,
    verifier, ABI policy, or expected result. Gate real/test equivalence,
    mutated-output rejection, zero application-specific JavaScript, and reuse of

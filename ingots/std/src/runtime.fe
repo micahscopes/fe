@@ -20,6 +20,7 @@ use core::pending::{
 }
 
 pub use browser::{BrowserActorMailbox, BrowserChildPlacement, supervise_browser_child}
+pub use execution::{BrowserActorCompute, BrowserActorVerify}
 
 pub enum ChildFailureKind {
     None,

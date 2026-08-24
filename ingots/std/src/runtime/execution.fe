@@ -1,0 +1,46 @@
+//! Browser providers for the target-neutral computation and verification
+//! effects.
+//!
+//! The fixed browser host already knows how to route a compiler-derived actor
+//! mailbox. These providers adapt that general mechanism to `Compute` and
+//! `Verify`; they introduce no kernel IDs, verifier IDs, lane names, or
+//! application protocol in JavaScript.
+
+use core::actor::{ActorMailbox, Handles}
+use core::execution::{Compute, ComputeRequest, Verify, VerifyRequest}
+use core::pending::Pending
+use ingot::wasm::WasmBackend
+use super::browser::BrowserActorMailbox
+
+/// Select actor `C` as the browser realization of computation brand `K`.
+pub struct BrowserActorCompute<C, K> {}
+
+impl<C, K, I, O> Compute<WasmBackend, K, I, O> for BrowserActorCompute<C, K>
+    where C: Handles<ComputeRequest<K, I>, O>
+{
+    fn compute_begin(mut self, _ input: own I) -> Pending<WasmBackend, O> {
+        <BrowserActorMailbox<C> as ActorMailbox<WasmBackend, C>>::ask(
+            BrowserActorMailbox<C> {},
+            ComputeRequest { input: input },
+        )
+    }
+}
+
+/// Select actor `C` as the browser realization of verifier brand `V`.
+pub struct BrowserActorVerify<C, V> {}
+
+impl<C, V, Claim, Output, Verdict>
+    Verify<WasmBackend, V, Claim, Output, Verdict> for BrowserActorVerify<C, V>
+    where C: Handles<VerifyRequest<V, Claim, Output>, Verdict>
+{
+    fn verify_begin(
+        mut self,
+        _ claim: own Claim,
+        _ output: own Output,
+    ) -> Pending<WasmBackend, Verdict> {
+        <BrowserActorMailbox<C> as ActorMailbox<WasmBackend, C>>::ask(
+            BrowserActorMailbox<C> {},
+            VerifyRequest { claim: claim, output: output },
+        )
+    }
+}

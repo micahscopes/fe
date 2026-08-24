@@ -1,0 +1,92 @@
+//! Backend-generic request effects for computations and verifiers.
+//!
+//! These traits describe an asynchronous request edge, not where the work is
+//! placed. `B` is the backend that delivers completion, while `K` or `V`
+//! brands the authored computation or verifier selected by the provider. A
+//! scalar worker and a WebGPU worker can therefore provide the same
+//! `Compute` obligation without an application-visible backend selector.
+
+use super::backend::Backend
+use super::marker::Copy
+use super::pending::{Pending, Suspend, TaskOutcome}
+
+/// Canonical actor request carrying one computation input. `K` is a phantom
+/// semantic brand: it changes the request type while adding no wire field.
+pub struct ComputeRequest<K, I> {
+    pub input: I,
+}
+
+/// Canonical actor request carrying the claim and computed output to verify.
+/// `V` is a phantom semantic brand and therefore adds no wire field.
+pub struct VerifyRequest<V, C, O> {
+    pub claim: C,
+    pub output: O,
+}
+
+/// The authority to begin one computation branded by `K`.
+///
+/// The result is delivered through the ordinary affine completion rail. A
+/// resident browser actor consumes it with `Suspend`; a worker that is allowed
+/// to block may consume a device-residency token with `Wait` internally.
+pub trait Compute<B: Backend, K, I, O> {
+    fn compute_begin(mut self, _ input: own I) -> Pending<B, O>
+}
+
+/// The authority to begin one verification branded by `V`.
+///
+/// `Verdict` remains an ordinary Fe type. A direct Fe verifier and a Fe EVM
+/// verifier executed by revm-Wasm can provide the same obligation.
+pub trait Verify<B: Backend, V, Claim, Output, Verdict> {
+    fn verify_begin(
+        mut self,
+        _ claim: own Claim,
+        _ output: own Output,
+    ) -> Pending<B, Verdict>
+}
+
+/// A computed output paired with the independent verifier's verdict.
+pub struct Checked<Output, Verdict> {
+    pub output: Output,
+    pub verdict: Verdict,
+}
+
+/// Run the ordinary compute-then-verify workflow over whichever providers are
+/// selected by the surrounding effect scope.
+///
+/// The application contains no placement branch. A test scope may choose a
+/// scalar Fe actor and a direct Fe verifier; a browser scope may choose a
+/// WebGPU actor and a revm-Wasm-backed verifier. Both travel through the same
+/// affine suspension rail.
+pub fn compute_then_verify<
+    B: Backend,
+    K,
+    V,
+    Input,
+    Output: Copy,
+    Claim,
+    Verdict,
+    Error,
+>(
+    _ input: own Input,
+    _ claim: own Claim,
+) -> TaskOutcome<Error, Checked<Output, Verdict>>
+    uses (
+        compute: mut Compute<B, K, Input, Output>,
+        verify: mut Verify<B, V, Claim, Output, Verdict>,
+        suspend: Suspend<B, Error>,
+    )
+{
+    match suspend.suspend(compute.compute_begin(input)) {
+        TaskOutcome::Success(output,) => match suspend.suspend(
+            verify.verify_begin(claim, output),
+        ) {
+            TaskOutcome::Success(verdict,) => TaskOutcome::Success(
+                Checked { output: output, verdict: verdict },
+            )
+            TaskOutcome::Failure(error,) => TaskOutcome::Failure(error)
+            TaskOutcome::Cancelled => TaskOutcome::Cancelled
+        }
+        TaskOutcome::Failure(error,) => TaskOutcome::Failure(error)
+        TaskOutcome::Cancelled => TaskOutcome::Cancelled
+    }
+}
