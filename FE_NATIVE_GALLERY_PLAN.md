@@ -1676,6 +1676,14 @@ parallelize one mutable proof forest, one Wasmtime store, DOM mutation, or
 ordered transcript dependencies. This is a host implementation policy, not a
 second semantic schedule beside the Fe/Conal WebGPU program.
 
+Dual dev/release probes apply to compiler-cost fixtures, not to every complete
+semantic proof oracle. Heavy proof integration targets are hidden behind the
+`expensive-release-oracles` Cargo feature and reject debug compilation. The
+canonical G5 release/all-features command still includes them, while ordinary
+debug builds avoid both their runtime and their compilation cost. Focused
+stage gates remain available for iteration; the complete mutation boundary is
+run deliberately at the release gate.
+
 | Utility family | Proven now | Possible-now consolidation | Ideal/compiler-enabled endpoint |
 | --- | --- | --- | --- |
 | Runtime control | Typed `Pending`, `TaskOutcome`, nominal `Suspend`, generated continuation states, resident/scoped actors, typed actor sinks, timer suspension | One `std::runtime` facade; reusable source-to-actor forwarding; explicit scope/supervision policies | ZIO-like typed environment/exit/scope in Fe without a boxed monadic runtime; compiler-derived task handles and exactly-once structured cancellation |

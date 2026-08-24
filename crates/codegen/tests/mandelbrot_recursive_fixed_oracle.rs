@@ -1,5 +1,11 @@
 //! Independent bigint gate for the field-neutral recursive Mandelbrot carrier.
 
+#[cfg(debug_assertions)]
+compile_error!(
+    "mandelbrot_recursive_fixed_oracle requires Cargo --release; run with \
+     --features expensive-release-oracles"
+);
+
 use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
@@ -1022,39 +1028,69 @@ fn expected_leaf_words(claim: &Claim, end: &Boundary) -> Vec<u32> {
     expected_accumulator_words(claim, &start, end, 1)
 }
 
-fn reference_poseidon_permutation(input: [u32; POSEIDON_WIDTH]) -> [u32; POSEIDON_WIDTH] {
+fn reference_poseidon_permutation_with<P>(
+    permutation: &P,
+    input: [u32; POSEIDON_WIDTH],
+) -> [u32; POSEIDON_WIDTH]
+where
+    P: Permutation<[P3BabyBear; POSEIDON_WIDTH]>,
+{
     let mut state = input.map(P3BabyBear::from_u32);
-    default_babybear_poseidon2_16().permute_mut(&mut state);
+    permutation.permute_mut(&mut state);
     state.map(|value| value.as_canonical_u32())
 }
 
-fn reference_poseidon_digest(tag: &[u8; 4], fields: &[u32]) -> [u32; 8] {
+fn reference_poseidon_digest_with<P>(
+    permutation: &P,
+    tag: &[u8; 4],
+    fields: &[u32],
+) -> [u32; 8]
+where
+    P: Permutation<[P3BabyBear; POSEIDON_WIDTH]>,
+{
     let mut message = vec![u32::from_be_bytes(*tag), fields.len() as u32];
     message.extend_from_slice(fields);
     let mut state = [0u32; POSEIDON_WIDTH];
     for block in message.chunks(8) {
         state[..block.len()].copy_from_slice(block);
-        state = reference_poseidon_permutation(state);
+        state = reference_poseidon_permutation_with(permutation, state);
     }
     state[..8].try_into().unwrap()
 }
 
-fn reference_digest_compress(left: [u32; 8], right: [u32; 8]) -> [u32; 8] {
+fn reference_poseidon_digest(tag: &[u8; 4], fields: &[u32]) -> [u32; 8] {
+    reference_poseidon_digest_with(&default_babybear_poseidon2_16(), tag, fields)
+}
+
+fn reference_digest_compress_with<P>(
+    permutation: &P,
+    left: [u32; 8],
+    right: [u32; 8],
+) -> [u32; 8]
+where
+    P: Permutation<[P3BabyBear; POSEIDON_WIDTH]>,
+{
     let mut state = [0u32; POSEIDON_WIDTH];
     state[..8].copy_from_slice(&left);
     state[8..].copy_from_slice(&right);
-    reference_poseidon_permutation(state)[..8]
+    reference_poseidon_permutation_with(permutation, state)[..8]
         .try_into()
         .unwrap()
 }
 
-fn reference_merkle_root(mut leaves: Vec<[u32; 8]>) -> [u32; 8] {
+fn reference_merkle_root_with<P>(
+    permutation: &P,
+    mut leaves: Vec<[u32; 8]>,
+) -> [u32; 8]
+where
+    P: Permutation<[P3BabyBear; POSEIDON_WIDTH]>,
+{
     assert!(!leaves.is_empty());
     assert!(leaves.len().is_power_of_two());
     while leaves.len() > 1 {
         leaves = leaves
             .chunks_exact(2)
-            .map(|pair| reference_digest_compress(pair[0], pair[1]))
+            .map(|pair| reference_digest_compress_with(permutation, pair[0], pair[1]))
             .collect();
     }
     leaves[0]
@@ -2562,6 +2598,7 @@ fn expected_boundary_interaction_receipt(
 }
 
 fn expected_sparse_trace_root(point: &ComplexFx, current: &ComplexFx) -> [u32; 8] {
+    let permutation = default_babybear_poseidon2_16();
     let rows = expected_sparse_rows(point, current);
     let task_count = 2_821;
     let controls = expected_sparse_control_rows();
@@ -2578,10 +2615,10 @@ fn expected_sparse_trace_root(point: &ComplexFx, current: &ComplexFx) -> [u32; 8
             ];
             fields.extend(controls[index]);
             fields.extend(row);
-            reference_poseidon_digest(b"SL03", &fields)
+            reference_poseidon_digest_with(&permutation, b"SL03", &fields)
         })
         .collect();
-    reference_merkle_root(leaves)
+    reference_merkle_root_with(&permutation, leaves)
 }
 
 fn expected_interaction_challenges_for_domains(root: [u32; 8], domains: [&[u8; 4]; 8]) -> Vec<u32> {
@@ -2628,99 +2665,46 @@ fn extend_ext4_words(destination: &mut Vec<u32>, value: Ext4) {
     destination.extend(value.0);
 }
 
-fn expected_sparse_interaction_root(
-    point: &ComplexFx,
-    current: &ComplexFx,
-    base_root: [u32; 8],
-) -> [u32; 8] {
-    let [
-        product_beta,
-        product_gamma,
-        round_beta,
-        round_gamma,
-        linear_beta,
-        linear_gamma,
-        boundary_beta,
-        boundary_gamma,
-    ] = expected_sparse_interaction_challenge_values(base_root);
-
-    let mut tasks = expected_sparse_transition_tasks(LIMBS as u32);
-    tasks.resize(4_096, [14, 0, 0, 0, 0]);
+fn expected_sparse_base_evaluation_words(point: &ComplexFx, current: &ComplexFx) -> Vec<u32> {
     let controls = expected_sparse_control_rows();
     let rows = expected_sparse_rows(point, current);
-    let task_count = 2_821;
-    let mut product_accumulator = Ext4::ZERO;
-    let mut round_accumulator = Ext4::ZERO;
-    let mut linear_accumulator = Ext4::ZERO;
-    let mut boundary_accumulator = Ext4::ZERO;
-    let mut leaves = Vec::with_capacity(4_096);
-
-    for (index, (task, row)) in tasks.into_iter().zip(rows).enumerate() {
-        let (product_inverses, product_delta) = expected_ext4_interaction_row(
-            expected_product_copy_ports(task, row),
-            product_beta,
-            product_gamma,
+    let mut base_fields = Vec::with_capacity(4 * 260);
+    for index in 0..4 {
+        let arithmetic = expected_sparse_arithmetic_plan(
+            controls[index],
+            rows[index],
         );
-        let (round_inverses, round_delta) = expected_ext4_interaction_row(
-            expected_round_copy_ports(task, row),
-            round_beta,
-            round_gamma,
-        );
-        let (linear_inverses, linear_delta) = expected_ext4_interaction_row(
-            expected_linear_copy_ports(task, row),
-            linear_beta,
-            linear_gamma,
-        );
-        let (boundary_inverses, boundary_delta) = expected_ext4_interaction_row(
-            expected_boundary_copy_ports(task, row),
-            boundary_beta,
-            boundary_gamma,
-        );
-
-        let mut fields = vec![
-            LIMBS as u32,
-            task_count,
-            4_096,
-            index as u32,
-            u32::from(index < task_count as usize),
-        ];
-        fields.extend(base_root);
-        extend_ext4_words(&mut fields, product_accumulator);
-        for inverse in product_inverses {
-            extend_ext4_words(&mut fields, inverse);
-        }
-        for node in expected_sparse_product_address_plan(controls[index]) {
-            extend_ext4_words(&mut fields, Ext4::from_base(node));
-        }
-        extend_ext4_words(&mut fields, round_accumulator);
-        for inverse in round_inverses {
-            extend_ext4_words(&mut fields, inverse);
-        }
-        extend_ext4_words(&mut fields, linear_accumulator);
-        for inverse in linear_inverses {
-            extend_ext4_words(&mut fields, inverse);
-        }
-        extend_ext4_words(&mut fields, boundary_accumulator);
-        for inverse in boundary_inverses {
-            extend_ext4_words(&mut fields, inverse);
-        }
-        assert_eq!(
-            fields.len(),
-            165,
-            "interaction leaf schema must stay nominal"
-        );
-        leaves.push(reference_poseidon_digest(b"SI01", &fields));
-
-        product_accumulator = product_accumulator.add(product_delta);
-        round_accumulator = round_accumulator.add(round_delta);
-        linear_accumulator = linear_accumulator.add(linear_delta);
-        boundary_accumulator = boundary_accumulator.add(boundary_delta);
+        base_fields.extend(controls[index]);
+        base_fields.extend(expected_sparse_control_plan(controls[index]));
+        base_fields.extend(expected_sparse_control_link_plan(
+            controls[index],
+            controls[index + 1],
+        ));
+        base_fields.extend(rows[index]);
+        base_fields.extend(arithmetic);
+        base_fields.extend(expected_sparse_arithmetic_link_plan(
+            controls[index],
+            rows[index],
+            controls[index + 1],
+        ));
+        base_fields.extend(expected_sparse_round_plan(
+            controls[index],
+            controls[index + 1],
+            rows[index],
+        ));
+        base_fields.extend(expected_sparse_linear_plan(
+            controls[index],
+            controls[index + 1],
+            rows[index],
+            arithmetic,
+        ));
+        base_fields.extend(expected_sparse_boundary_plan(
+            controls[index],
+            rows[index],
+        ));
     }
-    assert_eq!(product_accumulator, Ext4::ZERO, "product bus must close");
-    assert_eq!(round_accumulator, Ext4::ZERO, "round bus must close");
-    assert_eq!(linear_accumulator, Ext4::ZERO, "linear bus must close");
-    assert_eq!(boundary_accumulator, Ext4::ZERO, "boundary bus must close");
-    reference_merkle_root(leaves)
+    assert_eq!(base_fields.len(), 4 * 260, "sparse base schema");
+    base_fields
 }
 
 fn expected_sparse_air_prefix_words(
@@ -2744,40 +2728,7 @@ fn expected_sparse_air_prefix_words(
 
     let mut words = vec![1, 1];
     words.extend(base_root);
-    for index in 0..4 {
-        let arithmetic = expected_sparse_arithmetic_plan(
-            controls[index],
-            rows[index],
-        );
-        words.extend(controls[index]);
-        words.extend(expected_sparse_control_plan(controls[index]));
-        words.extend(expected_sparse_control_link_plan(
-            controls[index],
-            controls[index + 1],
-        ));
-        words.extend(rows[index]);
-        words.extend(arithmetic);
-        words.extend(expected_sparse_arithmetic_link_plan(
-            controls[index],
-            rows[index],
-            controls[index + 1],
-        ));
-        words.extend(expected_sparse_round_plan(
-            controls[index],
-            controls[index + 1],
-            rows[index],
-        ));
-        words.extend(expected_sparse_linear_plan(
-            controls[index],
-            controls[index + 1],
-            rows[index],
-            arithmetic,
-        ));
-        words.extend(expected_sparse_boundary_plan(
-            controls[index],
-            rows[index],
-        ));
-    }
+    words.extend(expected_sparse_base_evaluation_words(point, current));
 
     let mut product_accumulator = Ext4::ZERO;
     let mut round_accumulator = Ext4::ZERO;
@@ -2844,6 +2795,25 @@ fn expected_sparse_air_prefix_words(
     words
 }
 
+fn expected_sparse_base_lde_words(point: &ComplexFx, current: &ComplexFx) -> Vec<u32> {
+    const BASE_FIELDS: usize = 260;
+    const TRACE: usize = 4;
+    const LDE: usize = 16;
+    let evaluations = expected_sparse_base_evaluation_words(point, current);
+    let mut words = vec![1];
+    words.resize(1 + LDE * BASE_FIELDS, 0);
+    for column in 0..BASE_FIELDS {
+        let source = (0..TRACE)
+            .map(|row| evaluations[row * BASE_FIELDS + column])
+            .collect::<Vec<_>>();
+        let extended = direct_baby_bear_coset_lde(&source, LDE, 7);
+        for row in 0..LDE {
+            words[1 + row * BASE_FIELDS + column] = extended[row];
+        }
+    }
+    words
+}
+
 fn expected_sparse_air_lde_words(prefix: &[u32]) -> Vec<u32> {
     assert_eq!(prefix.len(), 1_674, "sparse prefix input must stay nominal");
     const BASE_FIELDS: usize = 260;
@@ -2883,6 +2853,7 @@ fn expected_sparse_air_lde_words(prefix: &[u32]) -> Vec<u32> {
 }
 
 fn expected_sparse_base_lde_root(lde: &[u32], mutate: bool) -> [u32; 8] {
+    let permutation = default_babybear_poseidon2_16();
     const BASE_FIELDS: usize = 260;
     const LDE: usize = 16;
     assert!(lde.len() >= 1 + LDE * BASE_FIELDS);
@@ -2893,12 +2864,16 @@ fn expected_sparse_base_lde_root(lde: &[u32], mutate: bool) -> [u32; 8] {
         let start = 1 + index * BASE_FIELDS;
         let mut row = lde[start..start + BASE_FIELDS].to_vec();
         if mutate && index == 0 {
-            row[38] = bb_add(row[38], 1);
+            row[35] = bb_add(row[35], 1);
         }
         fields.extend(row);
-        leaves.push(reference_poseidon_digest(b"LD01", &fields));
+        leaves.push(reference_poseidon_digest_with(
+            &permutation,
+            b"LD01",
+            &fields,
+        ));
     }
-    reference_merkle_root(leaves)
+    reference_merkle_root_with(&permutation, leaves)
 }
 
 fn expected_sparse_production_interaction_prefix(
@@ -3001,6 +2976,7 @@ fn expected_sparse_interaction_lde_root(
     base_lde_root: [u32; 8],
     mutate: bool,
 ) -> [u32; 8] {
+    let permutation = default_babybear_poseidon2_16();
     const FIELDS: usize = 152;
     const LDE: usize = 16;
     assert_eq!(lde.len(), LDE * FIELDS);
@@ -3014,9 +2990,13 @@ fn expected_sparse_interaction_lde_root(
             row[0] = bb_add(row[0], 1);
         }
         fields.extend(row);
-        leaves.push(reference_poseidon_digest(b"LD02", &fields));
+        leaves.push(reference_poseidon_digest_with(
+            &permutation,
+            b"LD02",
+            &fields,
+        ));
     }
-    reference_merkle_root(leaves)
+    reference_merkle_root_with(&permutation, leaves)
 }
 
 fn reference_sparse_multipath_sibling_count(width: u32, requests: &[u32]) -> usize {
@@ -3076,11 +3056,12 @@ fn expected_sparse_air_lde_transcript(
 }
 
 fn expected_sparse_composition_root(values: &[Ext4]) -> [u32; 8] {
+    let permutation = default_babybear_poseidon2_16();
     let leaves = values
         .iter()
-        .map(|value| reference_poseidon_digest(b"BC02", &value.0))
+        .map(|value| reference_poseidon_digest_with(&permutation, b"BC02", &value.0))
         .collect();
-    reference_merkle_root(leaves)
+    reference_merkle_root_with(&permutation, leaves)
 }
 
 fn expected_committed_words(
@@ -3315,6 +3296,26 @@ fn encoded(
     let result = call(store, instance, function, arguments, 2);
     let words = read_words(store, memory, result[0], result[1]);
     (result[0], result[1], words)
+}
+
+fn reset_canonical_arena(store: &mut wasmtime::Store<()>, instance: &wasmtime::Instance) {
+    instance
+        .get_typed_func::<(), ()>(&mut *store, "fe_cabi_reset")
+        .expect("sparse proof fixture should export its canonical arena reset")
+        .call(&mut *store, ())
+        .expect("canonical arena reset should execute");
+}
+
+/// Read and copy one canonical return carrier before the next arena reset.
+fn encoded_resetting(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    memory: wasmtime::Memory,
+    function: &str,
+    arguments: &[u32],
+) -> (u32, u32, Vec<u32>) {
+    reset_canonical_arena(store, instance);
+    encoded(store, instance, memory, function, arguments)
 }
 
 #[test]
@@ -5878,22 +5879,23 @@ fn sparse_public_composition_lowers_and_executes() {
 }
 
 #[test]
-fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
-    let bytes = compile_sparse_auth_fixture();
+fn sparse_production_commitments_match_independent_port_oracle() {
+    let entry = "fixed_transition4_sparse_production_composition_encoded";
+    let bytes = compile_sparse_auth_fixture_entry(entry);
     let engine = wasmtime::Engine::default();
-    let module =
-        wasmtime::Module::new(&engine, &bytes).expect("sparse interaction Wasm module should load");
+    let module = wasmtime::Module::new(&engine, &bytes)
+        .expect("focused production composition Wasm module should load");
     assert_eq!(
         module.imports().count(),
         0,
-        "interaction fixture must stay zero-import"
+        "production composition fixture must stay zero-import"
     );
     let mut store = wasmtime::Store::new(&engine, ());
     let instance = wasmtime::Instance::new(&mut store, &module, &[])
-        .expect("interaction fixture should instantiate");
+        .expect("production composition fixture should instantiate");
     let memory = instance
         .get_memory(&mut store, "memory")
-        .expect("interaction fixture should export linear memory");
+        .expect("production composition fixture should export linear memory");
     let point = ComplexFx {
         real: fixed(true, 3, 4),
         imaginary: fixed(false, 1, 8),
@@ -5902,166 +5904,14 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
         real: fixed(false, 5, 4),
         imaginary: fixed(true, 3, 8),
     };
-    let expected_base_root = expected_sparse_trace_root(&point, &current);
-    let expected_interaction_root =
-        expected_sparse_interaction_root(&point, &current, expected_base_root);
-    let mut mutated_interaction_root = expected_interaction_root;
-    mutated_interaction_root[3] = bb_add(mutated_interaction_root[3], 1);
-    let mut arguments = transition_arguments(&point, &current);
-    arguments.extend(expected_interaction_root);
-    arguments.extend(mutated_interaction_root);
-    let (_, _, lde_words) = encoded(
-        &mut store,
-        &instance,
-        memory,
-        "fixed_transition4_sparse_air_lde_encoded",
-        &arguments[..20],
-    );
-    let (_, _, words) = encoded(
-        &mut store,
-        &instance,
-        memory,
-        "fixed_transition4_sparse_air_checkpoint_encoded",
-        &arguments,
-    );
-    let mut expected = expected_sparse_air_prefix_words(&point, &current, expected_base_root);
-    let first_base_fields = expected[10..270].to_vec();
-    let first_interaction_fields = expected[1050..1202].to_vec();
-    let mut expected_lde = expected_sparse_air_lde_words(&expected);
-    expected_lde.extend([1, 0]);
-    assert_eq!(
-        expected_lde.len(),
-        6_595,
-        "sparse LDE schema must stay nominal"
-    );
-    assert_eq!(lde_words.len(), expected_lde.len(), "sparse LDE length");
-    for (index, (actual, wanted)) in lde_words.iter().zip(&expected_lde).enumerate() {
-        assert_eq!(
-            actual, wanted,
-            "sparse LDE word {index} must match the independent oracle",
-        );
-    }
-
-    let mut production_roots = Vec::new();
-    for mutation in 0u32..=1 {
-        let mut root_arguments = arguments[..20].to_vec();
-        root_arguments.push(mutation);
-        let actual = call(
-            &mut store,
-            &instance,
-            "fixed_transition4_sparse_base_lde_root",
-            &root_arguments,
-            9,
-        );
-        assert_eq!(actual[0], 1, "base LDE root must be valid");
-        let expected_root = expected_sparse_base_lde_root(&expected_lde, mutation == 1);
-        assert_eq!(
-            actual[1..],
-            expected_root,
-            "base LDE root mutation {mutation} must match independent Plonky3",
-        );
-        let mut challenge_arguments = vec![1];
-        challenge_arguments.extend(expected_root);
-        assert_eq!(
-            call(
-                &mut store,
-                &instance,
-                "sparse_lde_interaction_challenges4",
-                &challenge_arguments,
-                33,
-            ),
-            expected_sparse_lde_interaction_challenges(expected_root),
-            "production interaction challenges must follow the committed base LDE",
-        );
-        production_roots.push(expected_root);
-    }
-    assert_ne!(
-        production_roots[0], production_roots[1],
-        "a base LDE mutation must alter the production challenge seed",
-    );
-    let mut invalid_root_arguments = vec![0];
-    invalid_root_arguments.extend(production_roots[0]);
-    assert_eq!(
-        call(
-            &mut store,
-            &instance,
-            "sparse_lde_interaction_challenges4",
-            &invalid_root_arguments,
-            33,
-        ),
-        vec![0; 33],
-        "invalid base LDE roots must not yield production challenges",
-    );
-    let mut invalid_mutation_arguments = arguments[..20].to_vec();
-    invalid_mutation_arguments.push(2);
-    assert_eq!(
-        call(
-            &mut store,
-            &instance,
-            "fixed_transition4_sparse_base_lde_root",
-            &invalid_mutation_arguments,
-            9,
-        ),
-        [0; 9],
-        "unknown base LDE mutations must fail closed",
-    );
-
-    let production_interaction_prefix =
-        expected_sparse_production_interaction_prefix(&point, &current, production_roots[0]);
-    let production_interaction_lde =
-        expected_sparse_interaction_lde(&production_interaction_prefix);
-    let mut production_interaction_roots = Vec::new();
-    for mutation in 0u32..=1 {
-        let mut root_arguments = arguments[..20].to_vec();
-        root_arguments.push(mutation);
-        let actual = call(
-            &mut store,
-            &instance,
-            "fixed_transition4_sparse_interaction_lde_root",
-            &root_arguments,
-            17,
-        );
-        assert_eq!(actual[0], 1, "interaction LDE root must be valid");
-        assert_eq!(
-            actual[1..9],
-            production_roots[0],
-            "interaction root must retain its exact base LDE dependency",
-        );
-        let expected_root = expected_sparse_interaction_lde_root(
-            &production_interaction_lde,
-            production_roots[0],
-            mutation == 1,
-        );
-        assert_eq!(
-            actual[9..17],
-            expected_root,
-            "interaction LDE root mutation {mutation} must match independent Plonky3",
-        );
-        production_interaction_roots.push(expected_root);
-    }
-    assert_ne!(
-        production_interaction_roots[0], production_interaction_roots[1],
-        "an interaction LDE mutation must alter its typed root",
-    );
-    let mut invalid_interaction_arguments = arguments[..20].to_vec();
-    invalid_interaction_arguments.push(2);
-    assert_eq!(
-        call(
-            &mut store,
-            &instance,
-            "fixed_transition4_sparse_interaction_lde_root",
-            &invalid_interaction_arguments,
-            17,
-        ),
-        [0; 17],
-        "unknown interaction LDE mutations must fail closed",
-    );
+    let arguments = transition_arguments(&point, &current);
+    let expected_lde = expected_sparse_base_lde_words(&point, &current);
 
     let mut production_compositions = Vec::new();
     for mutation in 0u32..=3 {
-        let mut composition_arguments = arguments[..20].to_vec();
+        let mut composition_arguments = arguments.clone();
         composition_arguments.push(mutation);
-        let (_, _, actual) = encoded(
+        let (_, _, actual) = encoded_resetting(
             &mut store,
             &instance,
             memory,
@@ -6198,9 +6048,9 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
             "mutation {mutation} must change the composition root",
         );
     }
-    let mut invalid_production_arguments = arguments[..20].to_vec();
+    let mut invalid_production_arguments = arguments.clone();
     invalid_production_arguments.push(4);
-    let (_, invalid_length, invalid_words) = encoded(
+    let (_, invalid_length, invalid_words) = encoded_resetting(
         &mut store,
         &instance,
         memory,
@@ -6212,130 +6062,6 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
         invalid_words.is_empty(),
         "unknown production mutation payload"
     );
-
-    const BASE_FIELDS: usize = 260;
-    const INTERACTION_FIELDS: usize = 152;
-    const LDE: usize = 16;
-    const BASE_START: usize = 1;
-    const INTERACTION_START: usize = BASE_START + LDE * BASE_FIELDS;
-    for challenge in [[3u32, 5, 7, 11], [17, 29, 43, 61]] {
-        for evaluation in [0u32, 3, 9, 15] {
-            let mut results = Vec::new();
-            for mutation in 0u32..=2 {
-                let mut composition_arguments = arguments[..20].to_vec();
-                composition_arguments.extend(challenge);
-                composition_arguments.extend([evaluation, mutation]);
-                let actual = call(
-                    &mut store,
-                    &instance,
-                    "fixed_transition4_sparse_air_composition",
-                    &composition_arguments,
-                    39,
-                );
-                assert_eq!(actual[0], 1, "opened row must decode");
-                assert_eq!(actual[1], 1, "next opened row must decode");
-                assert_eq!(actual[18], 1, "composition quotient must be defined");
-
-                let numerators = std::array::from_fn(|family| {
-                    Ext4::from_words(&actual[2 + family * 4..6 + family * 4])
-                });
-                let composition = Ext4::from_words(&actual[19..23]);
-                let evaluation_point =
-                    Ext4::from_base(bb_mul(7, bb_pow(bb_two_adic_root(4), evaluation)));
-                assert_eq!(
-                    composition,
-                    expected_sparse_air_composition(evaluation_point, numerators),
-                    "four-family quotient, evaluation {evaluation}, mutation {mutation}",
-                );
-
-                let row = evaluation as usize;
-                let next_row = ((evaluation + 4) & 15) as usize;
-                let mut expected_value = expected_lde[BASE_START + row * BASE_FIELDS + 109];
-                if mutation == 1 {
-                    expected_value = bb_add(expected_value, 1);
-                }
-                assert_eq!(
-                    Ext4::from_words(&actual[23..27]),
-                    Ext4::from_base(expected_value),
-                    "typed base-row reconstruction, evaluation {evaluation}, mutation {mutation}",
-                );
-
-                let interaction = INTERACTION_START + row * INTERACTION_FIELDS;
-                let mut expected_product =
-                    Ext4::from_words(&expected_lde[interaction..interaction + 4]);
-                if mutation == 2 {
-                    expected_product.0[0] = bb_add(expected_product.0[0], 1);
-                }
-                assert_eq!(
-                    Ext4::from_words(&actual[27..31]),
-                    expected_product,
-                    "typed interaction-row reconstruction, evaluation {evaluation}, mutation {mutation}",
-                );
-                assert_eq!(
-                    Ext4::from_words(&actual[31..35]),
-                    Ext4::from_base(expected_lde[BASE_START + next_row * BASE_FIELDS + 109]),
-                    "next base-row geometry, evaluation {evaluation}",
-                );
-                let next_interaction = INTERACTION_START + next_row * INTERACTION_FIELDS;
-                assert_eq!(
-                    Ext4::from_words(&actual[35..39]),
-                    Ext4::from_words(&expected_lde[next_interaction..next_interaction + 4],),
-                    "next interaction-row geometry, evaluation {evaluation}",
-                );
-                results.push((numerators, composition));
-            }
-            for mutation in 1..=2 {
-                assert_ne!(
-                    results[mutation].0, results[0].0,
-                    "mutation {mutation} must alter a constraint numerator at evaluation {evaluation}",
-                );
-                assert_ne!(
-                    results[mutation].1, results[0].1,
-                    "mutation {mutation} must alter the composition at evaluation {evaluation}",
-                );
-            }
-        }
-    }
-    for (evaluation, mutation) in [(16, 0), (0, 3)] {
-        let mut invalid_arguments = arguments[..20].to_vec();
-        invalid_arguments.extend([3, 5, 7, 11, evaluation, mutation]);
-        assert_eq!(
-            call(
-                &mut store,
-                &instance,
-                "fixed_transition4_sparse_air_composition",
-                &invalid_arguments,
-                39,
-            ),
-            [0; 39],
-            "invalid sparse composition request must fail closed",
-        );
-    }
-
-    expected.push(1);
-    expected.extend(first_base_fields);
-    expected.push(1);
-    expected.extend(first_interaction_fields);
-    expected.push(1);
-    expected.push(1);
-    expected.extend(expected_base_root);
-    expected.extend(expected_interaction_root);
-    expected.extend([1, 0]);
-    expected.extend([0, 0]);
-    expected.extend(expected_base_root);
-    expected.extend([0; 8]);
-    assert_eq!(
-        expected.len(),
-        1_716,
-        "sparse checkpoint schema must stay nominal"
-    );
-    assert_eq!(words.len(), expected.len(), "sparse checkpoint length");
-    for (index, (actual, wanted)) in words.iter().zip(&expected).enumerate() {
-        assert_eq!(
-            actual, wanted,
-            "sparse checkpoint word {index} must match the independent oracle",
-        );
-    }
 }
 
 #[test]

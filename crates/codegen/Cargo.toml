@@ -42,6 +42,10 @@ native-backend = ["sonatina-codegen/cranelift"]
 # Reviewed overlay capability. This is deliberately off by default because
 # Fe's published Sonatina pin predates typed indirect-call IR/table lowering.
 sonatina-indirect-calls = []
+# Long-running proof gates are selected explicitly and compiled only in the
+# optimized profile. The full release/all-features boundary still includes
+# them, while ordinary debug iteration avoids building their large test target.
+expensive-release-oracles = []
 
 [dev-dependencies]
 # The Schedule32 / QCGA3D demo examples stage a throwaway application ingot
@@ -92,3 +96,8 @@ ethers-core = "2"
 # normal codegen dependency (already built), so re-declaring it here for the
 # integration-test target adds no build cost.
 num-bigint.workspace = true
+
+[[test]]
+name = "mandelbrot_recursive_fixed_oracle"
+path = "tests/mandelbrot_recursive_fixed_oracle.rs"
+required-features = ["expensive-release-oracles"]

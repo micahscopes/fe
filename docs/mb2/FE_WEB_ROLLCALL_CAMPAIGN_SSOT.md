@@ -53,6 +53,11 @@ existing Definition of done, not a second campaign checklist:
   interpreter probes report both the user-facing release path and a bounded
   debug/developer path when appropriate. Ordinary demo edits do not pay the
   current multi-minute debug baseline merely to duplicate a release gate.
+  Heavy semantic proof oracles use a different policy: the
+  `mandelbrot_recursive_fixed_oracle` target is selected only by the
+  `expensive-release-oracles` feature and rejects debug compilation. G5's
+  release/all-features command includes it, while ordinary debug iteration
+  does not compile the target at all.
 - [ ] **G-LAYOUT:** compiler/FCO-derived typed regions replace application
   proof-tape offsets, and an independent decoder checks every region and width.
 - [ ] **G-RECEIPT:** the complete nonrecursive BabyBear receipt accepts cleanly
@@ -1707,13 +1712,29 @@ existing Definition of done, not a second campaign checklist:
   identical.
 
   Exact codeword, commitment, opening, and assembled receipt revalidation is
-  now the active gate. The assembled regression receipt still carries four
-  queries. The compact 114-query range must subsequently drive real sampling,
-  openings, authentication paths, and FRI folds before a separate
-  security-sized receipt is claimed. The direct-domain policy remains
-  explicitly conjectured rather than a DEEP-ALI soundness claim. The Sonatina
-  companions also need a published revision and normal Fe dependency pin
-  before this gate is reproducible without the local path patch.
+  now the active gate. The focused toy `TRACE = 4`, `LDE = 16` production
+  composition gate checks clean output plus base, interaction, and statement
+  mutations against independent Plonky3-derived roots, transcript challenges,
+  all sixteen composition values, and the final root. It passes 1/1 in 117.48
+  seconds. During revalidation it exposed and corrected a stale Rust-oracle
+  mutation at column 38; the Fe production fixture and the independent oracle
+  now both direct their mutation at base-LDE column 35. The separate typed
+  LD01/LD02 multipath gate passes 1/1 in 54.96 seconds, including clean row
+  reconstruction and twelve clean, directed, or unknown mutation outcomes.
+  The former broad test redundantly regenerated a 4,096-leaf legacy trace for
+  each opened row and was stopped after exceeding 6.5 GiB RSS. Its distinct
+  LDE and opening semantics remain in focused gates; the production mutation
+  gate now consumes the one receipt that already carries all sixteen
+  numerators.
+
+  The assembled regression receipt still carries four queries. The compact
+  114-query range must subsequently drive real sampling, openings,
+  authentication paths, and FRI folds before a separate security-sized
+  receipt is claimed. Production `TRACE = 4096`, `LDE = 8192` revalidation also
+  remains open. The direct-domain policy remains explicitly conjectured rather
+  than a DEEP-ALI soundness claim. The Sonatina companions also need a
+  published revision and normal Fe dependency pin before this gate is
+  reproducible without the local path patch.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
   WebGPU scheduler for NTT/LDE, AIR composition, Poseidon/Merkle, and FRI.
   The first arithmetic-plan consolidation is landed at `ba2ded864`: one
@@ -1844,13 +1865,14 @@ fallback. The semantic receipts are:
 2. Finish revalidating the newly fitting `[2, 2, 1, 1]` AIR through
    commitments, openings, authentication paths, FRI folds, and assembled
    canonical mutations. The widened 6,595-word base-LDE carrier and every
-   codeword passed its independent direct-DFT gate at `6a4b9eaec`; that focused
-   execution does not stand in for the remaining downstream gates. Bind every
-   policy parameter into the production transcript and make the compact
-   114-query range drive real sampling. Pin the required Sonatina revision.
-   Preserve the four-query receipt as a regression fixture, then execute a
-   separate security-sized receipt rather than silently changing the
-   checkpoint's meaning.
+   codeword passed its independent direct-DFT gate at `6a4b9eaec`; the focused
+   toy production composition and LD01/LD02 authentication gates are also
+   green. Those executions do not stand in for the remaining production-sized
+   downstream gates. Bind every policy parameter into the production
+   transcript and make the compact 114-query range drive real sampling. Pin
+   the required Sonatina revision. Preserve the four-query receipt as a
+   regression fixture, then execute a separate security-sized receipt rather
+   than silently changing the checkpoint's meaning.
 3. Close G-NTT: derive the scalar factor-tree NTT from one typed structure,
    recover existing independent vectors, then interpret it as a portable
    stage-grid WebGPU schedule and run the real browser gate.
