@@ -180,8 +180,8 @@ fn exact_composition_interpreter_derives_the_audited_air_shape() {
     assert_eq!(degrees[0], 1, "the degree interpretation must remain valid");
     assert_eq!(
         &degrees[1..6],
-        &[4, 6, 1, 2, 6],
-        "the linear copy plan must retain its audited family reduction",
+        &[4, 6, 1, 1, 6],
+        "the padding terminal must retain its audited linear balance",
     );
     let trace_length = 4_096;
     let reference_composition_degree = [

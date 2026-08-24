@@ -3137,6 +3137,46 @@ fn production_linear_plan_matches_independent_nodes_and_rejects_mutations() {
 }
 
 #[test]
+fn production_padding_terminal_is_linear_and_rejects_each_bus_imbalance() {
+    let entry = "fixed_transition4_sparse_padding_terminal_audit";
+    let bytes = compile_fixture_entry(entry);
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, bytes)
+        .expect("focused padding-terminal Wasm module should load");
+    assert_eq!(module.imports().count(), 0, "fixture must remain zero-import");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("focused padding-terminal fixture should instantiate");
+    let point = ComplexFx {
+        real: fixed(true, 3, 4),
+        imaginary: fixed(false, 1, 8),
+    };
+    let current = ComplexFx {
+        real: fixed(false, 5, 4),
+        imaginary: fixed(true, 3, 8),
+    };
+
+    for challenge in [3u32, 7, 31, 127] {
+        let mut clean = transition_arguments(&point, &current);
+        clean.extend([17, 29, challenge, 0]);
+        assert_eq!(
+            call(&mut store, &instance, entry, &clean, 4),
+            [0, 0, 166, 0],
+            "the canonical padding row must have zero local deltas and a balanced terminal",
+        );
+        for mutation in 1..=4u32 {
+            let mut mutated = transition_arguments(&point, &current);
+            mutated.extend([17, 29, challenge, mutation]);
+            assert_eq!(
+                call(&mut store, &instance, entry, &mutated, 4),
+                [0, 1, 166, 0],
+                "terminal bus mutation {mutation} must fail exactly one linear balance",
+            );
+        }
+    }
+}
+
+#[test]
 fn production_round_plan_matches_independent_nodes_and_rejects_mutations() {
     let entry = "fixed_transition4_sparse_round_plan_audit";
     let bytes = compile_fixture_entry(entry);
@@ -4399,7 +4439,7 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                     ),
                     [
                         0,
-                        45_057,
+                        200_705,
                         4_096,
                         expected_round_interaction_receipt(
                             point,
@@ -4423,7 +4463,7 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                     ),
                     [
                         0,
-                        69_633,
+                        282_625,
                         4_096,
                         expected_linear_interaction_receipt(
                             point,
@@ -4447,7 +4487,7 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                     ),
                     [
                         0,
-                        20_481,
+                        77_825,
                         4_096,
                         expected_boundary_interaction_receipt(
                             point,
@@ -4537,7 +4577,7 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                         "rounding interaction mutation {mutation} must fail",
                     );
                 }
-                assert_eq!(audit[1], 45_057);
+                assert_eq!(audit[1], 200_705);
                 assert_eq!(audit[2], 4_096);
             }
             for mutation in 1u32..=6 {
@@ -4561,7 +4601,7 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                         "linear interaction mutation {mutation} must fail",
                     );
                 }
-                assert_eq!(audit[1], 69_633);
+                assert_eq!(audit[1], 282_625);
                 assert_eq!(audit[2], 4_096);
             }
             for mutation in 1u32..=6 {
@@ -4585,7 +4625,7 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                         "boundary interaction mutation {mutation} must fail",
                     );
                 }
-                assert_eq!(audit[1], 20_481);
+                assert_eq!(audit[1], 77_825);
                 assert_eq!(audit[2], 4_096);
             }
 
@@ -5231,19 +5271,19 @@ fn production_copy_buses_match_independent_port_oracles() {
         (
             "round",
             "fixed_transition4_sparse_round_interaction_audit",
-            45_057u32,
+            200_705u32,
             expected_round_interaction_receipt(&point, &current, beta, gamma, receipt_challenge),
         ),
         (
             "linear",
             "fixed_transition4_sparse_linear_interaction_audit",
-            69_633,
+            282_625,
             expected_linear_interaction_receipt(&point, &current, beta, gamma, receipt_challenge),
         ),
         (
             "boundary",
             "fixed_transition4_sparse_boundary_interaction_audit",
-            20_481,
+            77_825,
             expected_boundary_interaction_receipt(&point, &current, beta, gamma, receipt_challenge),
         ),
     ] {

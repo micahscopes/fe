@@ -71,6 +71,7 @@ use mandelbrot_proof_fixed_air_core::{
     SparseLinearInteractionRow,
     SparseBoundaryInteractionRow,
     evaluate_sparse_carry_row,
+    evaluate_sparse_control_terminal,
     evaluate_sparse_arithmetic_initial,
     evaluate_sparse_arithmetic_link,
     evaluate_sparse_arithmetic_row,
@@ -1493,6 +1494,150 @@ pub fn fixed_transition4_sparse_linear_plan_audit(
     }
     output[53] = evaluated.constraints
     output
+}
+
+/// Focused proof that the final trace row is canonical padding, every copy-bus
+/// contribution on it is zero, and the shared linear terminal balance still
+/// rejects an imbalance in each nominal bus.
+pub fn fixed_transition4_sparse_padding_terminal_audit(
+    _ prn: u32, _ pr0: u32, _ pr1: u32, _ pr2: u32, _ pr3: u32,
+    _ pin: u32, _ pi0: u32, _ pi1: u32, _ pi2: u32, _ pi3: u32,
+    _ crn: u32, _ cr0: u32, _ cr1: u32, _ cr2: u32, _ cr3: u32,
+    _ cin: u32, _ ci0: u32, _ ci1: u32, _ ci2: u32, _ ci3: u32,
+    _ beta: u32,
+    _ gamma: u32,
+    _ challenge: u32,
+    _ mutation: u32,
+) -> (u32, u32, u32, u32) {
+    let (point, current, witness) = transition4(
+        prn, [pr0, pr1, pr2, pr3], pin, [pi0, pi1, pi2, pi3],
+        crn, [cr0, cr1, cr2, cr3], cin, [ci0, ci1, ci2, ci3],
+    )
+    let next = fixed_mandelbrot_transition_output(witness)
+    let challenges = SparseCopyChallenges {
+        beta: BabyBear::from_u32(beta),
+        gamma: BabyBear::from_u32(gamma),
+    }
+    let challenge = BabyBear::from_u32(challenge)
+    let position = sparse_transition_trace_length<4>() - 1
+    let control = sparse_control_row_at<BabyBear, 4>(position)
+    let next_control = sparse_control_row_at<BabyBear, 4>(position + 1)
+    let row = sparse_transition_row_from_witness<BabyBear, 4>(
+        position, point, current, next, witness,
+    )
+    let arithmetic_plan = sparse_arithmetic_plan_witness(control, row)
+    let round_plan = sparse_round_plan_witness<BabyBear, 4>(
+        control, next_control, row,
+    )
+    let linear_plan = sparse_linear_plan_witness<BabyBear, 4>(
+        control, next_control, row, arithmetic_plan,
+    )
+    let boundary_plan = sparse_boundary_plan_witness<BabyBear, 4>(control, row)
+    let zero = BabyBear::zero()
+    let one = BabyBear::one()
+    let mut product = sparse_product_interaction_row<BabyBear, 4>(
+        challenges, control, row, zero,
+    )
+    let mut round = sparse_round_interaction_row<BabyBear, 4>(
+        challenges, control, next_control, row, zero,
+    )
+    let mut linear = sparse_linear_interaction_row<BabyBear, 4>(
+        challenges, control, next_control, row, zero,
+    )
+    let mut boundary = sparse_boundary_interaction_row<BabyBear, 4>(
+        challenges, control, row, zero,
+    )
+
+    let product_local = evaluate_sparse_product_interaction_row<BabyBear, 4>(
+        challenge, challenges, control, row, product,
+    )
+    let round_local = evaluate_sparse_round_interaction_row<BabyBear, 4>(
+        challenge, challenges, control, next_control, row, round_plan, round,
+    )
+    let linear_local = evaluate_sparse_linear_interaction_row<BabyBear, 4>(
+        challenge,
+        challenges,
+        control,
+        next_control,
+        row,
+        arithmetic_plan,
+        linear_plan,
+        linear,
+    )
+    let boundary_local = evaluate_sparse_boundary_interaction_row<BabyBear, 4>(
+        challenge, challenges, control, row, boundary_plan, boundary,
+    )
+    let mut local_failures: u32 = 0
+    let mut delta_mask: u32 = 0
+    let mut constraints = product_local.constraints
+        + round_local.constraints
+        + linear_local.constraints
+        + boundary_local.constraints
+    if !product_local.valid || !product_local.folded.is_zero() {
+        local_failures = local_failures + 1
+    }
+    if !round_local.valid || !round_local.folded.is_zero() {
+        local_failures = local_failures + 1
+    }
+    if !linear_local.valid || !linear_local.folded.is_zero() {
+        local_failures = local_failures + 1
+    }
+    if !boundary_local.valid || !boundary_local.folded.is_zero() {
+        local_failures = local_failures + 1
+    }
+    if !product_local.delta.is_zero() { delta_mask = delta_mask | 1 }
+    if !round_local.delta.is_zero() { delta_mask = delta_mask | 2 }
+    if !linear_local.delta.is_zero() { delta_mask = delta_mask | 4 }
+    if !boundary_local.delta.is_zero() { delta_mask = delta_mask | 8 }
+
+    if mutation == 1 { product.accumulator = one }
+    if mutation == 2 { round.accumulator = one }
+    if mutation == 3 { linear.accumulator = one }
+    if mutation == 4 { boundary.accumulator = one }
+    let control_terminal = evaluate_sparse_control_terminal(challenge, control)
+    let product_terminal = evaluate_sparse_product_interaction_terminal<
+        BabyBear, 4,
+    >(challenge, control, row, product)
+    let round_terminal = evaluate_sparse_round_interaction_terminal<
+        BabyBear, 4,
+    >(challenge, control, next_control, row, round_plan, round)
+    let linear_terminal = evaluate_sparse_linear_interaction_terminal<
+        BabyBear, 4,
+    >(
+        challenge,
+        control,
+        next_control,
+        row,
+        arithmetic_plan,
+        linear_plan,
+        linear,
+    )
+    let boundary_terminal = evaluate_sparse_boundary_interaction_terminal<
+        BabyBear, 4,
+    >(challenge, control, row, boundary_plan, boundary)
+    constraints = constraints
+        + control_terminal.constraints
+        + product_terminal.constraints
+        + round_terminal.constraints
+        + linear_terminal.constraints
+        + boundary_terminal.constraints
+    let mut terminal_failures: u32 = 0
+    if !control_terminal.valid || !control_terminal.folded.is_zero() {
+        terminal_failures = terminal_failures + 1
+    }
+    if !product_terminal.valid || !product_terminal.folded.is_zero() {
+        terminal_failures = terminal_failures + 1
+    }
+    if !round_terminal.valid || !round_terminal.folded.is_zero() {
+        terminal_failures = terminal_failures + 1
+    }
+    if !linear_terminal.valid || !linear_terminal.folded.is_zero() {
+        terminal_failures = terminal_failures + 1
+    }
+    if !boundary_terminal.valid || !boundary_terminal.folded.is_zero() {
+        terminal_failures = terminal_failures + 1
+    }
+    (local_failures, terminal_failures, constraints, delta_mask)
 }
 
 fn mutate_product_interaction(

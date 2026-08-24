@@ -5687,6 +5687,24 @@ pub fn evaluate_sparse_product_interaction_link<
     }
 }
 
+/// Close one log-derivative copy bus on the canonical padding row. Pair-row
+/// constraints have already accumulated every preceding row. The independent
+/// control terminal requires this final row to be padding, and the ordinary
+/// all-row control and port constraints therefore force every terminal port
+/// coefficient to zero. Its omitted delta is identically zero, so checking the
+/// stored prefix accumulator is the same balance relation with degree one.
+fn evaluate_sparse_copy_interaction_terminal<F: Radix2Field>(
+    _ challenge: F,
+    _ accumulator: F,
+) -> FixedAirConstraintEvaluation<F> {
+    let fold = ConstraintFold<F>::new(challenge).absorb(accumulator)
+    FixedAirConstraintEvaluation {
+        valid: true,
+        constraints: fold.constraints,
+        folded: fold.value,
+    }
+}
+
 pub fn evaluate_sparse_product_interaction_terminal<
     F: Radix2Field,
     const L: usize,
@@ -5696,21 +5714,10 @@ pub fn evaluate_sparse_product_interaction_terminal<
     _ row: SparseTaskRow<F>,
     _ interaction: SparseProductInteractionRow<F>,
 ) -> FixedAirConstraintEvaluation<F> {
-    let constrained = sparse_product_constrained_ports<F, L>(
-        control, row, interaction.address_plan,
-    )
-    let delta = sparse_copy_interaction_delta<F, 2>(
-        constrained.ports, interaction.inverses,
-    )
-    let fold = ConstraintFold<F>::new(challenge).absorb(add(
+    evaluate_sparse_copy_interaction_terminal(
+        challenge,
         interaction.accumulator,
-        delta,
-    ))
-    FixedAirConstraintEvaluation {
-        valid: constrained.valid,
-        constraints: fold.constraints,
-        folded: fold.value,
-    }
+    )
 }
 
 fn sparse_round_digit_address<F: Radix2Field, const L: usize>(
@@ -6336,21 +6343,10 @@ pub fn evaluate_sparse_round_interaction_terminal<
 ) -> FixedAirConstraintEvaluation<F>
 where L > 1,
 {
-    let constrained = sparse_round_constrained_ports<F, L>(
-        control, next_control, row, plan,
-    )
-    let delta = sparse_copy_interaction_delta<F, 5>(
-        constrained.ports, interaction.inverses,
-    )
-    let fold = ConstraintFold<F>::new(challenge).absorb(add(
+    evaluate_sparse_copy_interaction_terminal(
+        challenge,
         interaction.accumulator,
-        delta,
-    ))
-    FixedAirConstraintEvaluation {
-        valid: constrained.valid,
-        constraints: fold.constraints,
-        folded: fold.value,
-    }
+    )
 }
 
 fn sparse_linear_point_coordinate<F: Radix2Field>(
@@ -7191,25 +7187,10 @@ pub fn evaluate_sparse_linear_interaction_terminal<
 ) -> FixedAirConstraintEvaluation<F>
 where L > 1,
 {
-    let constrained = sparse_linear_constrained_ports<F, L>(
-        control,
-        next_control,
-        row,
-        arithmetic_plan,
-        plan,
-    )
-    let delta = sparse_copy_interaction_delta<F, 8>(
-        constrained.ports, interaction.inverses,
-    )
-    let fold = ConstraintFold<F>::new(challenge).absorb(add(
+    evaluate_sparse_copy_interaction_terminal(
+        challenge,
         interaction.accumulator,
-        delta,
-    ))
-    FixedAirConstraintEvaluation {
-        valid: constrained.valid,
-        constraints: fold.constraints,
-        folded: fold.value,
-    }
+    )
 }
 
 fn sparse_boundary_next_coordinate<F: Radix2Field>(
@@ -7575,21 +7556,10 @@ pub fn evaluate_sparse_boundary_interaction_terminal<
     _ plan: SparseBoundaryPlanWitness<F>,
     _ interaction: SparseBoundaryInteractionRow<F>,
 ) -> FixedAirConstraintEvaluation<F> {
-    let constrained = sparse_boundary_constrained_ports<F, L>(
-        control, row, plan,
-    )
-    let delta = sparse_copy_interaction_delta<F, 2>(
-        constrained.ports, interaction.inverses,
-    )
-    let fold = ConstraintFold<F>::new(challenge).absorb(add(
+    evaluate_sparse_copy_interaction_terminal(
+        challenge,
         interaction.accumulator,
-        delta,
-    ))
-    FixedAirConstraintEvaluation {
-        valid: constrained.valid,
-        constraints: fold.constraints,
-        folded: fold.value,
-    }
+    )
 }
 
 fn boundary_computed_range(_ coordinate: CoordinateNode) -> RangeNode {
