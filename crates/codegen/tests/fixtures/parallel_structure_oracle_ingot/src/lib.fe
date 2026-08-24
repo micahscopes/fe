@@ -1,0 +1,58 @@
+//! Executable structural receipts for exact factor-tree policies.
+
+use parallel_structure::{Bush, Comp, Dif, Dit, FactorTree, Pair}
+
+type Irregular16 = Comp<Pair, Comp<Dit<1>, Dit<2>>>
+
+// These acceptors make the recursive type-function normal forms part of the
+// compilation gate. No runtime receipt can compensate for a wrong normal form.
+fn accept_dit4(
+    _ value: Comp<Comp<Comp<Pair, Pair>, Pair>, Pair>,
+) {}
+
+fn prove_dit4_normal_form(_ value: Dit<4>) { accept_dit4(value) }
+
+fn accept_dif4(
+    _ value: Comp<Pair, Comp<Pair, Comp<Pair, Pair>>>,
+) {}
+
+fn prove_dif4_normal_form(_ value: Dif<4>) { accept_dif4(value) }
+
+fn accept_bush2(_ value: Comp<Comp<Pair, Pair>, Comp<Pair, Pair>>) {}
+
+fn prove_bush2_normal_form(_ value: Bush<2>) { accept_bush2(value) }
+
+fn receipt<S: FactorTree>() -> (
+    u32, u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    let value = S::analysis()
+    (
+        value.points,
+        value.factors,
+        value.butterflies,
+        value.pair_exchanges,
+        value.dependency_depth,
+        value.tree_depth,
+        value.composition_nodes,
+        value.max_fanout,
+        value.live_values,
+    )
+}
+
+pub fn dit4_receipt() -> (u32, u32, u32, u32, u32, u32, u32, u32, u32) {
+    receipt<Dit<4>>()
+}
+
+pub fn dif4_receipt() -> (u32, u32, u32, u32, u32, u32, u32, u32, u32) {
+    receipt<Dif<4>>()
+}
+
+pub fn bush2_receipt() -> (u32, u32, u32, u32, u32, u32, u32, u32, u32) {
+    receipt<Bush<2>>()
+}
+
+pub fn irregular16_receipt() -> (
+    u32, u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    receipt<Irregular16>()
+}

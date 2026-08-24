@@ -1,0 +1,9 @@
+[ingot]
+name = "parallel_ntt_oracle_ingot"
+version = "0.1.0"
+
+[dependencies]
+core = "../../../../../ingots/core"
+parallel_ntt = "../../../../../ingots/parallel_ntt"
+parallel_structure = "../../../../../ingots/parallel_structure"
+precision = "../../../../../demos/sketches/precision"

@@ -1,0 +1,8 @@
+[ingot]
+name = "parallel_ntt"
+version = "0.1.0"
+
+[dependencies]
+core = "../core"
+parallel_structure = "../parallel_structure"
+precision = "../../demos/sketches/precision"

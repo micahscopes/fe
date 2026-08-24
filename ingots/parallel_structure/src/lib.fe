@@ -1,0 +1,155 @@
+//! Exact factor structures for lawful parallel interpretations.
+//!
+//! `Pair` is one radix-two factor and `Comp<Left, Right>` composes two
+//! factorizations without erasing their association. `Dit`, `Dif`, and `Bush`
+//! are recursive type functions that derive named trees from one depth. An
+//! explicitly nested `Comp` remains available for irregular device tilings.
+//!
+//! This package fixes structure, not placement. It contains no buffer, dispatch,
+//! field, or transform implementation. Scalar, WebGPU, and analysis consumers
+//! interpret the same type independently. Reassociation is only sound for a
+//! consumer that proves the required algebraic law.
+
+/// The identity factor. It denotes one value and no radix-two stage.
+pub struct Unit {}
+
+/// One radix-two factor.
+pub struct Pair {}
+
+/// Ordered composition of two factor structures.
+pub struct Comp<Left, Right> {}
+
+/// Left-associated radix-two factorization.
+///
+/// `Dit<4>` normalizes to
+/// `Comp<Comp<Comp<Pair, Pair>, Pair>, Pair>` and denotes sixteen
+/// points. The name records the intended decimation-in-time interpretation;
+/// the factor tree itself does not prescribe storage placement.
+pub recursive type fn Dit<const DEPTH: usize>() -> (*) {
+    match DEPTH {
+        0 => Unit
+        1 => Pair
+        _ => Comp<Dit<{DEPTH - 1}>, Pair>
+    }
+}
+
+/// Right-associated radix-two factorization.
+///
+/// `Dif<4>` denotes the same sixteen-point transform as `Dit<4>`, while
+/// retaining the opposite association for an interpreter that chooses
+/// decimation-in-frequency placement.
+pub recursive type fn Dif<const DEPTH: usize>() -> (*) {
+    match DEPTH {
+        0 => Unit
+        1 => Pair
+        _ => Comp<Pair, Dif<{DEPTH - 1}>>
+    }
+}
+
+/// Composition-balanced radix-two factorization.
+///
+/// `Bush<0>` is one `Pair`, and each successor composes the previous bush with
+/// itself. Consequently `Bush<N>` denotes `2^(2^N)` points. Bush is only a
+/// factorization policy. It does not authorize reassociation for an ordered or
+/// non-associative consumer.
+pub recursive type fn Bush<const DEPTH: usize>() -> (*) {
+    match DEPTH {
+        0 => Pair
+        _ => Comp<Bush<{DEPTH - 1}>, Bush<{DEPTH - 1}>>
+    }
+}
+
+const fn maximum(_ left: usize, _ right: usize) -> usize {
+    if left > right { left } else { right }
+}
+
+/// Placement-neutral facts derived from one factor tree.
+///
+/// `butterflies` counts radix-two butterfly nodes in a full transform:
+/// `points / 2` for every factor. `pair_exchanges` uses the same count because
+/// every butterfly combines exactly one pair. `dependency_depth` is the number
+/// of ordered radix-two stages on each input-to-output path. `tree_depth`
+/// records the association depth, which can differ between DIT, DIF, Bush, and
+/// irregular trees without changing the denoted transform.
+pub struct FactorAnalysis {
+    pub points: u32,
+    pub factors: u32,
+    pub butterflies: u32,
+    pub pair_exchanges: u32,
+    pub dependency_depth: u32,
+    pub tree_depth: u32,
+    pub composition_nodes: u32,
+    pub max_fanout: u32,
+    pub live_values: u32,
+}
+
+impl core::marker::Copy for FactorAnalysis {}
+
+/// Structural analysis shared by scalar and placement interpreters.
+pub trait FactorTree {
+    const POINTS: usize
+    const FACTORS: usize
+    const BUTTERFLIES: usize
+    const PAIR_EXCHANGES: usize
+    const DEPENDENCY_DEPTH: usize
+    const TREE_DEPTH: usize
+    const COMPOSITION_NODES: usize
+    const MAX_FANOUT: usize
+    const LIVE_VALUES: usize
+
+    fn analysis() -> FactorAnalysis {
+        FactorAnalysis {
+            points: Self::POINTS.downcast_truncate(),
+            factors: Self::FACTORS.downcast_truncate(),
+            butterflies: Self::BUTTERFLIES.downcast_truncate(),
+            pair_exchanges: Self::PAIR_EXCHANGES.downcast_truncate(),
+            dependency_depth: Self::DEPENDENCY_DEPTH.downcast_truncate(),
+            tree_depth: Self::TREE_DEPTH.downcast_truncate(),
+            composition_nodes: Self::COMPOSITION_NODES.downcast_truncate(),
+            max_fanout: Self::MAX_FANOUT.downcast_truncate(),
+            live_values: Self::LIVE_VALUES.downcast_truncate(),
+        }
+    }
+}
+
+impl FactorTree for Unit {
+    const POINTS: usize = 1
+    const FACTORS: usize = 0
+    const BUTTERFLIES: usize = 0
+    const PAIR_EXCHANGES: usize = 0
+    const DEPENDENCY_DEPTH: usize = 0
+    const TREE_DEPTH: usize = 0
+    const COMPOSITION_NODES: usize = 0
+    const MAX_FANOUT: usize = 1
+    const LIVE_VALUES: usize = 1
+}
+
+impl FactorTree for Pair {
+    const POINTS: usize = 2
+    const FACTORS: usize = 1
+    const BUTTERFLIES: usize = 1
+    const PAIR_EXCHANGES: usize = 1
+    const DEPENDENCY_DEPTH: usize = 1
+    const TREE_DEPTH: usize = 0
+    const COMPOSITION_NODES: usize = 0
+    const MAX_FANOUT: usize = 2
+    const LIVE_VALUES: usize = 2
+}
+
+impl<Left: FactorTree, Right: FactorTree> FactorTree for Comp<Left, Right> {
+    const POINTS: usize = Left::POINTS * Right::POINTS
+    const FACTORS: usize = Left::FACTORS + Right::FACTORS
+    const BUTTERFLIES: usize =
+        Left::BUTTERFLIES * Right::POINTS
+        + Right::BUTTERFLIES * Left::POINTS
+    const PAIR_EXCHANGES: usize = Self::BUTTERFLIES
+    const DEPENDENCY_DEPTH: usize =
+        Left::DEPENDENCY_DEPTH + Right::DEPENDENCY_DEPTH
+    const TREE_DEPTH: usize =
+        maximum(Left::TREE_DEPTH, Right::TREE_DEPTH) + 1
+    const COMPOSITION_NODES: usize =
+        Left::COMPOSITION_NODES + Right::COMPOSITION_NODES + 1
+    const MAX_FANOUT: usize =
+        maximum(Left::MAX_FANOUT, Right::MAX_FANOUT)
+    const LIVE_VALUES: usize = Self::POINTS
+}

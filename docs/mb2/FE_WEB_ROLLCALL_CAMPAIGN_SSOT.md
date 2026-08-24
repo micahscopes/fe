@@ -2,7 +2,7 @@
 
 Status: authoritative campaign burn-down
 
-Updated: 2026-08-24
+Updated: 2026-08-25
 
 Goal spine: write the math, get the kernel, keep the proof.
 
@@ -57,7 +57,24 @@ existing Definition of done, not a second campaign checklist:
   `mandelbrot_recursive_fixed_oracle` target is selected only by the
   `expensive-release-oracles` feature and rejects debug compilation. G5's
   release/all-features command includes it, while ordinary debug iteration
-  does not compile the target at all.
+  does not compile the target at all. The scalar half of this gate is now
+  implemented in the focused `parallel_structure` and `parallel_ntt` ingots.
+  Recursive Fe type functions derive `Dit`, `Dif`, and composition-balanced
+  `Bush` trees; explicit `Comp` nesting admits irregular factorizations. One
+  `FactorTree` interpretation derives points, factors, butterflies, pair
+  exchanges, dependency depth, association depth, composition nodes, fanout,
+  and live values. One separate scalar interpretation is implemented only for
+  `Unit`, `Pair`, and `Comp`: `Pair` executes one stage and `Comp` recursively
+  sequences its children, so there is no indexed outer stage loop or copied
+  width table. The zero-import `parallel_structure_oracle` pins DIT, DIF, Bush,
+  and irregular normal forms and independently checks their receipts. The
+  zero-import `parallel_ntt_oracle` checks all four 16-point policies, base-field
+  NTT/INTT and coset LDE, and quartic-extension NTT/LDE against direct
+  polynomial evaluation, including the established BabyBear vectors and
+  invalid-coset rejection. Its two release tests complete in 18.15 seconds on
+  this host. This is scalar exactness and structure evidence only. Production
+  call-path migration, the portable stage-grid interpretation, and real browser
+  WebGPU parity remain open, so G-NTT stays partial.
 - [ ] **G-LAYOUT:** compiler/FCO-derived typed regions replace application
   proof-tape offsets, and an independent decoder checks every region and width.
 - [ ] **G-RECEIPT:** the complete nonrecursive BabyBear receipt accepts cleanly

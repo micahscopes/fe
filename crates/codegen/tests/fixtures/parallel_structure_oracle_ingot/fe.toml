@@ -1,0 +1,7 @@
+[ingot]
+name = "parallel_structure_oracle_ingot"
+version = "0.1.0"
+
+[dependencies]
+core = "../../../../../ingots/core"
+parallel_structure = "../../../../../ingots/parallel_structure"

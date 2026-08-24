@@ -1,0 +1,276 @@
+//! Field-generic radix-two transforms derived from one factor tree.
+//!
+//! The scalar interpreter has one implementation per structural constructor:
+//! `Unit`, `Pair`, and `Comp`. A `Pair` executes exactly one butterfly stage;
+//! `Comp` recursively interprets its left and right factors. Consequently the
+//! number and association of stage calls come from the factor type rather than
+//! an indexed outer stage loop. Loops inside one stage enumerate its independent
+//! butterflies and remain placement-neutral.
+//!
+//! This is the scalar interpretation of the shared denotation. A portable
+//! stage-grid WebGPU interpretation must consume the same `FactorTree`, not a
+//! copied list of widths or dispatches.
+
+use parallel_structure::{Comp, FactorTree, Pair, Unit}
+use precision::polynomial::{Radix2Field, radix2_field_domain_supported, radix2_log}
+
+pub use parallel_structure::FactorAnalysis
+
+fn reverse_low_bits(_ value: usize, _ width: u32) -> usize {
+    let mut source = value
+    let mut reversed: usize = 0
+    let mut bit: u32 = 0
+    while bit < width {
+        reversed = (reversed << 1) | (source & 1)
+        source = source >> 1
+        bit = bit + 1
+    }
+    reversed
+}
+
+fn bit_reverse_permute<const N: usize, F: Radix2Field>(
+    _ values: mut [F; N],
+)
+where
+    N > 0,
+    { (N & (N - 1)) == 0 },
+{
+    let log_n = radix2_log<N>()
+    let mut index: usize = 0
+    while index < N {
+        let reversed = reverse_low_bits(index, log_n)
+        if reversed > index {
+            let value = values[index]
+            values[index] = values[reversed]
+            values[reversed] = value
+        }
+        index = index + 1
+    }
+}
+
+fn field_natural<F: Radix2Field>(_ value: u32) -> F {
+    let mut result = F::radix2_zero()
+    let mut place = F::radix2_root(0)
+    let mut value = value
+    while value != 0 {
+        if (value & 1) == 1 { result = result.radix2_add(place) }
+        place = place.radix2_add(place)
+        value = value >> 1
+    }
+    result
+}
+
+fn apply_stage<const N: usize, F: Radix2Field>(
+    _ values: mut [F; N],
+    _ root: F,
+    _ stage: usize,
+) {
+    let width: usize = (1 as usize) << (stage + 1)
+    let half = width >> 1
+    let twiddle_step: u32 = (N / width).downcast_truncate()
+    let stage_root = root.radix2_pow(twiddle_step)
+    let one = F::radix2_root(0)
+    let mut block: usize = 0
+    while block < N {
+        let mut twiddle = one
+        let mut offset: usize = 0
+        while offset < half {
+            let even = values[block + offset]
+            let odd = values[block + offset + half].radix2_mul(twiddle)
+            values[block + offset] = even.radix2_add(odd)
+            values[block + offset + half] = even.radix2_sub(odd)
+            twiddle = twiddle.radix2_mul(stage_root)
+            offset = offset + 1
+        }
+        block = block + width
+    }
+}
+
+/// Scalar interpretation of the factor constructors for one fixed domain.
+/// The returned cursor is the next stage index and makes a malformed custom
+/// interpretation observable at the public boundary.
+pub trait ScalarStages<const N: usize, F: Radix2Field> {
+    fn apply(_ values: mut [F; N], _ root: F, _ stage: usize) -> usize
+}
+
+impl<const N: usize, F: Radix2Field> ScalarStages<N, F> for Unit {
+    fn apply(_ values: mut [F; N], _ root: F, _ stage: usize) -> usize {
+        stage
+    }
+}
+
+impl<const N: usize, F: Radix2Field> ScalarStages<N, F> for Pair {
+    fn apply(_ values: mut [F; N], _ root: F, _ stage: usize) -> usize {
+        apply_stage<N, F>(mut values, root, stage)
+        stage + 1
+    }
+}
+
+impl<
+    const N: usize,
+    F: Radix2Field,
+    Left: ScalarStages<N, F>,
+    Right: ScalarStages<N, F>,
+> ScalarStages<N, F> for Comp<Left, Right> {
+    fn apply(_ values: mut [F; N], _ root: F, _ stage: usize) -> usize {
+        let next = <Left as ScalarStages<N, F>>::apply(mut values, root, stage)
+        <Right as ScalarStages<N, F>>::apply(mut values, root, next)
+    }
+}
+
+fn transform<const N: usize, F: Radix2Field, Plan>(
+    _ values: own [F; N],
+    _ inverse: bool,
+) -> [F; N]
+where
+    N > 0,
+    { (N & (N - 1)) == 0 },
+    { radix2_field_domain_supported<N, F>() },
+    Plan: FactorTree + ScalarStages<N, F>,
+{
+    if Plan::POINTS != N { return [F::radix2_zero(); N] }
+    let mut values = values
+    bit_reverse_permute<N, F>(mut values)
+    let mut root = F::radix2_root(radix2_log<N>())
+    if inverse { root = root.radix2_inverse_or_zero() }
+    let finished = <Plan as ScalarStages<N, F>>::apply(mut values, root, 0)
+    if finished != Plan::FACTORS {
+        return [F::radix2_zero(); N]
+    }
+
+    if inverse {
+        let scale = field_natural<F>(N.downcast_truncate())
+            .radix2_inverse_or_zero()
+        let mut index: usize = 0
+        while index < N {
+            values[index] = values[index].radix2_mul(scale)
+            index = index + 1
+        }
+    }
+    values
+}
+
+/// Scalar forward NTT for a type-derived factorization.
+pub fn scalar_ntt<const N: usize, F: Radix2Field, Plan>(
+    _ coefficients: own [F; N],
+) -> [F; N]
+where
+    N > 0,
+    { (N & (N - 1)) == 0 },
+    { radix2_field_domain_supported<N, F>() },
+    { Plan::POINTS == N },
+    Plan: FactorTree + ScalarStages<N, F>,
+{
+    transform<N, F, Plan>(coefficients, false)
+}
+
+/// Scalar inverse NTT for the same type-derived factorization.
+pub fn scalar_intt<const N: usize, F: Radix2Field, Plan>(
+    _ evaluations: own [F; N],
+) -> [F; N]
+where
+    N > 0,
+    { (N & (N - 1)) == 0 },
+    { radix2_field_domain_supported<N, F>() },
+    { Plan::POINTS == N },
+    Plan: FactorTree + ScalarStages<N, F>,
+{
+    transform<N, F, Plan>(evaluations, true)
+}
+
+/// Coset LDE using independently selected factor trees for interpolation and
+/// extension. Both plans remain part of the type and no runtime policy number
+/// chooses their association.
+pub fn scalar_coset_lde<
+    const N: usize,
+    const OUT: usize,
+    F: Radix2Field,
+    InputPlan,
+    OutputPlan,
+>(
+    _ base_evaluations: ref [F; N],
+    _ shift: F,
+    _ evaluations: mut [F; OUT],
+) -> bool
+where
+    N > 0,
+    { (N & (N - 1)) == 0 },
+    { radix2_field_domain_supported<N, F>() },
+    OUT > 0,
+    OUT > N,
+    { (OUT & (OUT - 1)) == 0 },
+    { radix2_field_domain_supported<OUT, F>() },
+    { (OUT % N) == 0 },
+    { InputPlan::POINTS == N },
+    { OutputPlan::POINTS == OUT },
+    InputPlan: FactorTree + ScalarStages<N, F>,
+    OutputPlan: FactorTree + ScalarStages<OUT, F>,
+{
+    let zero = F::radix2_zero()
+    let one = F::radix2_root(0)
+    evaluations = [zero; OUT]
+    if shift.radix2_is_zero()
+        || shift.radix2_pow(OUT.downcast_truncate())
+            .radix2_sub(one).radix2_is_zero() {
+        return false
+    }
+
+    let mut coefficients = [zero; N]
+    let mut index: usize = 0
+    while index < N {
+        coefficients[index] = base_evaluations[index]
+        index = index + 1
+    }
+    coefficients = transform<N, F, InputPlan>(coefficients, true)
+
+    let mut shifted = [zero; OUT]
+    let mut shift_power = one
+    index = 0
+    while index < N {
+        shifted[index] = coefficients[index].radix2_mul(shift_power)
+        shift_power = shift_power.radix2_mul(shift)
+        index = index + 1
+    }
+    evaluations = transform<OUT, F, OutputPlan>(shifted, false)
+    true
+}
+
+/// Value-level facade matching the provider-shaped authoring surface while
+/// the scalar interpreter remains a pure function.
+pub struct ScalarTransform<Plan> {}
+
+impl<Plan> ScalarTransform<Plan> {
+    pub fn new() -> Self { Self {} }
+
+    pub fn forward<const N: usize, F: Radix2Field>(
+        self,
+        _ values: own [F; N],
+    ) -> [F; N]
+    where
+        N > 0,
+        { (N & (N - 1)) == 0 },
+        { radix2_field_domain_supported<N, F>() },
+        { Plan::POINTS == N },
+        Plan: FactorTree + ScalarStages<N, F>,
+    {
+        scalar_ntt<N, F, Plan>(values)
+    }
+
+    pub fn inverse<const N: usize, F: Radix2Field>(
+        self,
+        _ values: own [F; N],
+    ) -> [F; N]
+    where
+        N > 0,
+        { (N & (N - 1)) == 0 },
+        { radix2_field_domain_supported<N, F>() },
+        { Plan::POINTS == N },
+        Plan: FactorTree + ScalarStages<N, F>,
+    {
+        scalar_intt<N, F, Plan>(values)
+    }
+
+    pub fn analysis(self) -> FactorAnalysis where Plan: FactorTree {
+        Plan::analysis()
+    }
+}

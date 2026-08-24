@@ -1,0 +1,262 @@
+//! Executable BabyBear gate for type-derived scalar NTT factorizations.
+
+use parallel_ntt::{ScalarTransform, scalar_coset_lde, scalar_intt, scalar_ntt}
+use parallel_structure::{Bush, Comp, Dif, Dit, Pair}
+use precision::baby_bear::{BabyBear, BabyBearExt4}
+
+type Irregular16 = Comp<Pair, Comp<Dit<1>, Dit<2>>>
+
+fn values8(
+    _ a0: u32, _ a1: u32, _ a2: u32, _ a3: u32,
+    _ a4: u32, _ a5: u32, _ a6: u32, _ a7: u32,
+) -> [BabyBear; 8] {
+    [
+        BabyBear::from_u32(a0), BabyBear::from_u32(a1),
+        BabyBear::from_u32(a2), BabyBear::from_u32(a3),
+        BabyBear::from_u32(a4), BabyBear::from_u32(a5),
+        BabyBear::from_u32(a6), BabyBear::from_u32(a7),
+    ]
+}
+
+fn values16(
+    _ a0: u32, _ a1: u32, _ a2: u32, _ a3: u32,
+    _ a4: u32, _ a5: u32, _ a6: u32, _ a7: u32,
+    _ a8: u32, _ a9: u32, _ a10: u32, _ a11: u32,
+    _ a12: u32, _ a13: u32, _ a14: u32, _ a15: u32,
+) -> [BabyBear; 16] {
+    [
+        BabyBear::from_u32(a0), BabyBear::from_u32(a1),
+        BabyBear::from_u32(a2), BabyBear::from_u32(a3),
+        BabyBear::from_u32(a4), BabyBear::from_u32(a5),
+        BabyBear::from_u32(a6), BabyBear::from_u32(a7),
+        BabyBear::from_u32(a8), BabyBear::from_u32(a9),
+        BabyBear::from_u32(a10), BabyBear::from_u32(a11),
+        BabyBear::from_u32(a12), BabyBear::from_u32(a13),
+        BabyBear::from_u32(a14), BabyBear::from_u32(a15),
+    ]
+}
+
+fn words16(_ values: own [BabyBear; 16]) -> (
+    u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    (
+        values[0].to_u32(), values[1].to_u32(),
+        values[2].to_u32(), values[3].to_u32(),
+        values[4].to_u32(), values[5].to_u32(),
+        values[6].to_u32(), values[7].to_u32(),
+        values[8].to_u32(), values[9].to_u32(),
+        values[10].to_u32(), values[11].to_u32(),
+        values[12].to_u32(), values[13].to_u32(),
+        values[14].to_u32(), values[15].to_u32(),
+    )
+}
+
+fn words8(_ values: own [BabyBear; 8]) -> (
+    u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    (
+        values[0].to_u32(), values[1].to_u32(),
+        values[2].to_u32(), values[3].to_u32(),
+        values[4].to_u32(), values[5].to_u32(),
+        values[6].to_u32(), values[7].to_u32(),
+    )
+}
+
+fn ext4_pattern8(_ seed: u32) -> [BabyBearExt4; 8] {
+    let mut values = [BabyBearExt4::zero(); 8]
+    let mut index: usize = 0
+    while index < 8 {
+        let i: u32 = index.downcast_truncate()
+        values[index] = BabyBearExt4::from_u32s([
+            seed + i,
+            seed + 17 + i,
+            seed + 37 + i + i,
+            seed + 71 + i + i + i,
+        ])
+        index = index + 1
+    }
+    values
+}
+
+pub fn dit8(
+    _ a0: u32, _ a1: u32, _ a2: u32, _ a3: u32,
+    _ a4: u32, _ a5: u32, _ a6: u32, _ a7: u32,
+) -> (u32, u32, u32, u32, u32, u32, u32, u32) {
+    words8(scalar_ntt<8, BabyBear, Dit<3>>(
+        values8(a0, a1, a2, a3, a4, a5, a6, a7),
+    ))
+}
+
+pub fn dit8_roundtrip(
+    _ a0: u32, _ a1: u32, _ a2: u32, _ a3: u32,
+    _ a4: u32, _ a5: u32, _ a6: u32, _ a7: u32,
+) -> (u32, u32, u32, u32, u32, u32, u32, u32) {
+    let transformed = scalar_ntt<8, BabyBear, Dit<3>>(
+        values8(a0, a1, a2, a3, a4, a5, a6, a7),
+    )
+    words8(scalar_intt<8, BabyBear, Dit<3>>(transformed))
+}
+
+pub fn dit16(
+    _ a0: u32, _ a1: u32, _ a2: u32, _ a3: u32,
+    _ a4: u32, _ a5: u32, _ a6: u32, _ a7: u32,
+    _ a8: u32, _ a9: u32, _ a10: u32, _ a11: u32,
+    _ a12: u32, _ a13: u32, _ a14: u32, _ a15: u32,
+) -> (
+    u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    let values = values16(
+        a0, a1, a2, a3, a4, a5, a6, a7,
+        a8, a9, a10, a11, a12, a13, a14, a15,
+    )
+    let transform = ScalarTransform<Dit<4>>::new()
+    words16(transform.forward(values))
+}
+
+pub fn dif16(
+    _ a0: u32, _ a1: u32, _ a2: u32, _ a3: u32,
+    _ a4: u32, _ a5: u32, _ a6: u32, _ a7: u32,
+    _ a8: u32, _ a9: u32, _ a10: u32, _ a11: u32,
+    _ a12: u32, _ a13: u32, _ a14: u32, _ a15: u32,
+) -> (
+    u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    words16(scalar_ntt<16, BabyBear, Dif<4>>(values16(
+        a0, a1, a2, a3, a4, a5, a6, a7,
+        a8, a9, a10, a11, a12, a13, a14, a15,
+    )))
+}
+
+pub fn bush16(
+    _ a0: u32, _ a1: u32, _ a2: u32, _ a3: u32,
+    _ a4: u32, _ a5: u32, _ a6: u32, _ a7: u32,
+    _ a8: u32, _ a9: u32, _ a10: u32, _ a11: u32,
+    _ a12: u32, _ a13: u32, _ a14: u32, _ a15: u32,
+) -> (
+    u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    words16(scalar_ntt<16, BabyBear, Bush<2>>(values16(
+        a0, a1, a2, a3, a4, a5, a6, a7,
+        a8, a9, a10, a11, a12, a13, a14, a15,
+    )))
+}
+
+pub fn irregular16(
+    _ a0: u32, _ a1: u32, _ a2: u32, _ a3: u32,
+    _ a4: u32, _ a5: u32, _ a6: u32, _ a7: u32,
+    _ a8: u32, _ a9: u32, _ a10: u32, _ a11: u32,
+    _ a12: u32, _ a13: u32, _ a14: u32, _ a15: u32,
+) -> (
+    u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    words16(scalar_ntt<16, BabyBear, Irregular16>(values16(
+        a0, a1, a2, a3, a4, a5, a6, a7,
+        a8, a9, a10, a11, a12, a13, a14, a15,
+    )))
+}
+
+pub fn bush16_roundtrip(
+    _ a0: u32, _ a1: u32, _ a2: u32, _ a3: u32,
+    _ a4: u32, _ a5: u32, _ a6: u32, _ a7: u32,
+    _ a8: u32, _ a9: u32, _ a10: u32, _ a11: u32,
+    _ a12: u32, _ a13: u32, _ a14: u32, _ a15: u32,
+) -> (
+    u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    let transformed = scalar_ntt<16, BabyBear, Bush<2>>(values16(
+        a0, a1, a2, a3, a4, a5, a6, a7,
+        a8, a9, a10, a11, a12, a13, a14, a15,
+    ))
+    words16(scalar_intt<16, BabyBear, Bush<2>>(transformed))
+}
+
+pub fn lde8x16(
+    _ a0: u32, _ a1: u32, _ a2: u32, _ a3: u32,
+    _ a4: u32, _ a5: u32, _ a6: u32, _ a7: u32,
+    _ shift: u32,
+) -> (
+    u32,
+    u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    let base = values8(a0, a1, a2, a3, a4, a5, a6, a7)
+    let mut evaluations = [BabyBear::zero(); 16]
+    let valid = scalar_coset_lde<8, 16, BabyBear, Dit<3>, Bush<2>>(
+        ref base,
+        BabyBear::from_u32(shift),
+        mut evaluations,
+    )
+    (
+        if valid { 1 } else { 0 },
+        evaluations[0].to_u32(), evaluations[1].to_u32(),
+        evaluations[2].to_u32(), evaluations[3].to_u32(),
+        evaluations[4].to_u32(), evaluations[5].to_u32(),
+        evaluations[6].to_u32(), evaluations[7].to_u32(),
+        evaluations[8].to_u32(), evaluations[9].to_u32(),
+        evaluations[10].to_u32(), evaluations[11].to_u32(),
+        evaluations[12].to_u32(), evaluations[13].to_u32(),
+        evaluations[14].to_u32(), evaluations[15].to_u32(),
+    )
+}
+
+pub fn ext4_ntt8_component(
+    _ seed: u32,
+    _ component: u32,
+) -> (u32, u32, u32, u32, u32, u32, u32, u32) {
+    if component >= 4 { return (0, 0, 0, 0, 0, 0, 0, 0) }
+    let values = scalar_ntt<8, BabyBearExt4, Dit<3>>(ext4_pattern8(seed))
+    let c: usize = component as usize
+    (
+        values[0].coefficient(c).to_u32(), values[1].coefficient(c).to_u32(),
+        values[2].coefficient(c).to_u32(), values[3].coefficient(c).to_u32(),
+        values[4].coefficient(c).to_u32(), values[5].coefficient(c).to_u32(),
+        values[6].coefficient(c).to_u32(), values[7].coefficient(c).to_u32(),
+    )
+}
+
+pub fn ext4_lde8x16_component(
+    _ seed: u32,
+    _ component: u32,
+    _ shift: u32,
+) -> (
+    u32,
+    u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    if component >= 4 {
+        return (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    }
+    let base = ext4_pattern8(seed)
+    let mut evaluations = [BabyBearExt4::zero(); 16]
+    let valid = scalar_coset_lde<8, 16, BabyBearExt4, Dit<3>, Bush<2>>(
+        ref base,
+        BabyBearExt4::from_base(BabyBear::from_u32(shift)),
+        mut evaluations,
+    )
+    let c: usize = component as usize
+    (
+        if valid { 1 } else { 0 },
+        evaluations[0].coefficient(c).to_u32(),
+        evaluations[1].coefficient(c).to_u32(),
+        evaluations[2].coefficient(c).to_u32(),
+        evaluations[3].coefficient(c).to_u32(),
+        evaluations[4].coefficient(c).to_u32(),
+        evaluations[5].coefficient(c).to_u32(),
+        evaluations[6].coefficient(c).to_u32(),
+        evaluations[7].coefficient(c).to_u32(),
+        evaluations[8].coefficient(c).to_u32(),
+        evaluations[9].coefficient(c).to_u32(),
+        evaluations[10].coefficient(c).to_u32(),
+        evaluations[11].coefficient(c).to_u32(),
+        evaluations[12].coefficient(c).to_u32(),
+        evaluations[13].coefficient(c).to_u32(),
+        evaluations[14].coefficient(c).to_u32(),
+        evaluations[15].coefficient(c).to_u32(),
+    )
+}
