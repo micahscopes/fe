@@ -1230,9 +1230,10 @@ pub fn fixed_transition4_sparse_arithmetic_audit(
     (failures, constraints, rows)
 }
 
-/// Focused exact-entry gate for the seven-node signed-linear dependency plan.
-/// The clean nodes are returned for an independent host reconstruction, while
-/// `mutation` corrupts one committed node before the production evaluator runs.
+/// Focused exact-entry gate for the shared 23-node row-arithmetic dependency
+/// plan. The clean nodes are returned for an independent host reconstruction,
+/// while `mutation` corrupts one committed node before the production
+/// evaluator runs.
 pub fn fixed_transition4_sparse_arithmetic_plan_audit(
     _ prn: u32, _ pr0: u32, _ pr1: u32, _ pr2: u32, _ pr3: u32,
     _ pin: u32, _ pi0: u32, _ pi1: u32, _ pi2: u32, _ pi3: u32,
@@ -1241,7 +1242,7 @@ pub fn fixed_transition4_sparse_arithmetic_plan_audit(
     _ index: u32,
     _ challenge: u32,
     _ mutation: u32,
-) -> (u32, u32, u32, u32, u32, u32, u32, u32, u32) {
+) -> [u32; 25] {
     let (point, current, witness) = transition4(
         prn, [pr0, pr1, pr2, pr3], pin, [pi0, pi1, pi2, pi3],
         crn, [cr0, cr1, cr2, cr3], cin, [ci0, ci1, ci2, ci3],
@@ -1257,7 +1258,7 @@ pub fn fixed_transition4_sparse_arithmetic_plan_audit(
     )
     let clean = sparse_arithmetic_plan_witness(control, row)
     let mut tested = clean
-    if mutation > 0 && mutation <= 7 {
+    if mutation > 0 && mutation <= 23 {
         let node = (mutation - 1) as usize
         tested.nodes[node] = tested.nodes[node].radix2_add(
             BabyBear::from_u32(1),
@@ -1269,22 +1270,19 @@ pub fn fixed_transition4_sparse_arithmetic_plan_audit(
         row,
         tested,
     )
-    let failed = if !evaluated.valid || evaluated.folded.to_u32() != 0 {
+    let mut output = [0; 25]
+    let mut node: usize = 0
+    while node < 23 {
+        output[node] = clean.nodes[node].to_u32()
+        node = node + 1
+    }
+    output[23] = if !evaluated.valid || evaluated.folded.to_u32() != 0 {
         1
     } else {
         0
     }
-    (
-        clean.nodes[0].to_u32(),
-        clean.nodes[1].to_u32(),
-        clean.nodes[2].to_u32(),
-        clean.nodes[3].to_u32(),
-        clean.nodes[4].to_u32(),
-        clean.nodes[5].to_u32(),
-        clean.nodes[6].to_u32(),
-        failed,
-        evaluated.constraints,
-    )
+    output[24] = evaluated.constraints
+    output
 }
 
 /// Focused exact-entry gate for the public-boundary dependency plan. It

@@ -335,11 +335,13 @@ pub struct SparseCopyChallenges<F: Radix2Field> {
 impl<F: Radix2Field> core::marker::Copy for SparseCopyChallenges<F> {}
 derive CanonicalWords for SparseCopyChallenges<F> using CanonicalWordsProvider
 
-/// The signed-linear finish row contains one nested boolean-selection DAG.
-/// Seven shared multiplication nodes make every dependency in that DAG affine
-/// before its final row selector is applied. Witness generation and constraint
-/// evaluation interpret the same authored plan below.
-pub const SPARSE_ARITHMETIC_MULTIPLICATIONS: usize = 7
+/// One shared row-arithmetic DAG covers bitness, radix reconstruction,
+/// convolution, product-sign selection, signed-linear selection, and the
+/// signed-linear finish. Common products are authored once and reused across
+/// roles, so every selected semantic residual is affine before its row
+/// selector is applied. Witness generation and constraint evaluation interpret
+/// this same plan.
+pub const SPARSE_ARITHMETIC_MULTIPLICATIONS: usize = 23
 
 pub type SparseArithmeticPlanWitness<F> = QuadraticPlanWitness<
     F,
@@ -4391,15 +4393,24 @@ struct SparseArithmeticPlan<
     F: Radix2Field,
 > {
     interpreter: I,
+    bit_products: SparseTaskRow<F>,
+    radix_state_value: F,
+    radix_value_weight: F,
+    radix_finish_auxiliary: F,
+    product_value_auxiliary: F,
+    product_finish_signed_output: F,
+    linear_selected_magnitude: F,
+    linear_finish_balance: F,
     linear_finish_sign: F,
 }
 impl<I: QuadraticPlanInterpreter<F>, F: Radix2Field> core::marker::Copy
     for SparseArithmeticPlan<I, F> {}
 
-/// One dependency description for the nested sign choice on a signed-linear
-/// finish row. Each multiplication is materialized by the witness interpreter
-/// and checked by the constraint interpreter. The affine values between nodes
-/// remain local SSA values and therefore add no committed columns.
+/// One dependency description for every nonlinear row-arithmetic expression.
+/// Each multiplication is materialized by the witness interpreter and checked
+/// by the constraint interpreter. Affine values between nodes remain local SSA
+/// values and therefore add no committed columns. Algebraically identical
+/// products are shared across task roles before either interpreter sees them.
 fn sparse_arithmetic_plan<
     I: QuadraticPlanInterpreter<F>,
     F: Radix2Field,
@@ -4460,8 +4471,112 @@ fn sparse_arithmetic_plan<
     let output_sign = interpreter.multiply(selected_sign, row.state_before)
     interpreter = output_sign.interpreter
 
+    let bit_value = interpreter.multiply(row.value, row.value)
+    interpreter = bit_value.interpreter
+    let bit_auxiliary = interpreter.multiply(row.auxiliary, row.auxiliary)
+    interpreter = bit_auxiliary.interpreter
+    let bit_accumulator_before = interpreter.multiply(
+        row.accumulator_before,
+        row.accumulator_before,
+    )
+    interpreter = bit_accumulator_before.interpreter
+    let bit_accumulator_after = interpreter.multiply(
+        row.accumulator_after,
+        row.accumulator_after,
+    )
+    interpreter = bit_accumulator_after.interpreter
+    let bit_state_before = interpreter.multiply(
+        row.state_before,
+        row.state_before,
+    )
+    interpreter = bit_state_before.interpreter
+    let bit_state_after = interpreter.multiply(
+        row.state_after,
+        row.state_after,
+    )
+    interpreter = bit_state_after.interpreter
+
+    let radix_state_value = interpreter.multiply(
+        row.state_before,
+        row.value,
+    )
+    interpreter = radix_state_value.interpreter
+    let radix_value_weight = interpreter.multiply(row.value, control.weight)
+    interpreter = radix_value_weight.interpreter
+    let radix_flag_value = interpreter.multiply(control.flag, row.value)
+    interpreter = radix_flag_value.interpreter
+    let radix_finish_auxiliary = interpreter.multiply(
+        row.auxiliary,
+        sub(one, radix_flag_value.value),
+    )
+    interpreter = radix_finish_auxiliary.interpreter
+
+    let product_value_auxiliary = interpreter.multiply(
+        row.value,
+        row.auxiliary,
+    )
+    interpreter = product_value_auxiliary.interpreter
+    let product_sign_product = interpreter.multiply(
+        row.accumulator_after,
+        row.state_after,
+    )
+    interpreter = product_sign_product.interpreter
+    let product_sign_xor = sub(
+        add(row.accumulator_after, row.state_after),
+        mul(two, product_sign_product.value),
+    )
+    let product_finish_signed_output = interpreter.multiply(
+        product_sign_xor,
+        row.auxiliary,
+    )
+    interpreter = product_finish_signed_output.interpreter
+
+    let selected_difference_adjustment = interpreter.multiply(
+        row.state_after,
+        sub(row.accumulator_before, row.auxiliary),
+    )
+    interpreter = selected_difference_adjustment.interpreter
+    let selected_difference = add(
+        row.auxiliary,
+        selected_difference_adjustment.value,
+    )
+    let selected_difference_magnitude = interpreter.multiply(
+        sub(one, row.state_before),
+        selected_difference,
+    )
+    interpreter = selected_difference_magnitude.interpreter
+    let linear_selected_magnitude = add(
+        radix_state_value.value,
+        selected_difference_magnitude.value,
+    )
+
+    let selected_right_magnitude = interpreter.multiply(
+        row.accumulator_before,
+        row.accumulator_after,
+    )
+    interpreter = selected_right_magnitude.interpreter
+    let linear_finish_balance = add(
+        sub(row.accumulator_before, bit_accumulator_before.value),
+        selected_right_magnitude.value,
+    )
+
     SparseArithmeticPlan {
         interpreter: interpreter,
+        bit_products: SparseTaskRow {
+            value: bit_value.value,
+            auxiliary: bit_auxiliary.value,
+            accumulator_before: bit_accumulator_before.value,
+            accumulator_after: bit_accumulator_after.value,
+            state_before: bit_state_before.value,
+            state_after: bit_state_after.value,
+        },
+        radix_state_value: radix_state_value.value,
+        radix_value_weight: radix_value_weight.value,
+        radix_finish_auxiliary: radix_finish_auxiliary.value,
+        product_value_auxiliary: product_value_auxiliary.value,
+        product_finish_signed_output: product_finish_signed_output.value,
+        linear_selected_magnitude: linear_selected_magnitude,
+        linear_finish_balance: linear_finish_balance,
         linear_finish_sign: output_sign.value,
     }
 }
@@ -4485,6 +4600,14 @@ pub fn sparse_arithmetic_plan_witness<F: Radix2Field>(
 
 struct SparseArithmeticConstrainedPlan<F: Radix2Field> {
     valid: bool,
+    bit_products: SparseTaskRow<F>,
+    radix_state_value: F,
+    radix_value_weight: F,
+    radix_finish_auxiliary: F,
+    product_value_auxiliary: F,
+    product_finish_signed_output: F,
+    linear_selected_magnitude: F,
+    linear_finish_balance: F,
     linear_finish_sign: F,
     residuals: QuadraticPlanResiduals<
         F,
@@ -4513,6 +4636,14 @@ fn sparse_arithmetic_constrained_plan<F: Radix2Field>(
     let residuals = planned.interpreter.finish()
     SparseArithmeticConstrainedPlan {
         valid: residuals.valid,
+        bit_products: planned.bit_products,
+        radix_state_value: planned.radix_state_value,
+        radix_value_weight: planned.radix_value_weight,
+        radix_finish_auxiliary: planned.radix_finish_auxiliary,
+        product_value_auxiliary: planned.product_value_auxiliary,
+        product_finish_signed_output: planned.product_finish_signed_output,
+        linear_selected_magnitude: planned.linear_selected_magnitude,
+        linear_finish_balance: planned.linear_finish_balance,
         linear_finish_sign: planned.linear_finish_sign,
         residuals: residuals,
     }
@@ -4532,7 +4663,6 @@ pub fn evaluate_sparse_arithmetic_row<F: Radix2Field, const L: usize>(
     let roles = control.linear_roles
     let radix = natural<F>(8192)
     let one = one<F>()
-    let two = natural<F>(2)
     let mut fold = ConstraintFold<F>::new(challenge)
     let planned = sparse_arithmetic_constrained_plan(
         control,
@@ -4545,11 +4675,15 @@ pub fn evaluate_sparse_arithmetic_row<F: Radix2Field, const L: usize>(
         plan_index = plan_index + 1
     }
 
-    fold = absorb_selected(fold, selectors.radix_bit, bit_residual(row.value))
     fold = absorb_selected(
         fold,
         selectors.radix_bit,
-        bit_residual(row.state_after),
+        sub(planned.bit_products.value, row.value),
+    )
+    fold = absorb_selected(
+        fold,
+        selectors.radix_bit,
+        sub(planned.bit_products.state_after, row.state_after),
     )
     fold = absorb_selected(
         fold,
@@ -4558,7 +4692,7 @@ pub fn evaluate_sparse_arithmetic_row<F: Radix2Field, const L: usize>(
             row.state_after,
             sub(
                 add(row.state_before, row.value),
-                mul(row.state_before, row.value),
+                planned.radix_state_value,
             ),
         ),
     )
@@ -4569,7 +4703,7 @@ pub fn evaluate_sparse_arithmetic_row<F: Radix2Field, const L: usize>(
             row.accumulator_after,
             add(
                 row.accumulator_before,
-                mul(row.value, control.weight),
+                planned.radix_value_weight,
             ),
         ),
     )
@@ -4587,7 +4721,7 @@ pub fn evaluate_sparse_arithmetic_row<F: Radix2Field, const L: usize>(
     fold = absorb_selected(
         fold,
         selectors.radix_finish,
-        bit_residual(row.value),
+        sub(planned.bit_products.value, row.value),
     )
     fold = absorb_selected(
         fold,
@@ -4600,18 +4734,19 @@ pub fn evaluate_sparse_arithmetic_row<F: Radix2Field, const L: usize>(
     fold = absorb_selected(
         fold,
         selectors.radix_finish,
-        bit_residual(row.auxiliary),
+        sub(planned.bit_products.auxiliary, row.auxiliary),
     )
     fold = absorb_selected(
         fold,
         selectors.radix_finish,
-        mul(
-            row.auxiliary,
-            sub(one, mul(control.flag, row.value)),
-        ),
+        planned.radix_finish_auxiliary,
     )
 
-    fold = absorb_selected(fold, selectors.carry_bit, bit_residual(row.value))
+    fold = absorb_selected(
+        fold,
+        selectors.carry_bit,
+        sub(planned.bit_products.value, row.value),
+    )
     fold = absorb_selected(
         fold,
         selectors.carry_bit,
@@ -4619,7 +4754,7 @@ pub fn evaluate_sparse_arithmetic_row<F: Radix2Field, const L: usize>(
             row.accumulator_after,
             add(
                 row.accumulator_before,
-                mul(row.value, control.weight),
+                planned.radix_value_weight,
             ),
         ),
     )
@@ -4652,7 +4787,7 @@ pub fn evaluate_sparse_arithmetic_row<F: Radix2Field, const L: usize>(
             row.accumulator_after,
             add(
                 row.accumulator_before,
-                mul(row.value, row.auxiliary),
+                planned.product_value_auxiliary,
             ),
         ),
     )
@@ -4686,7 +4821,10 @@ pub fn evaluate_sparse_arithmetic_row<F: Radix2Field, const L: usize>(
     fold = absorb_selected(
         fold,
         selectors.product_round,
-        bit_residual(row.accumulator_after),
+        sub(
+            planned.bit_products.accumulator_after,
+            row.accumulator_after,
+        ),
     )
     fold = absorb_selected(
         fold,
@@ -4707,47 +4845,52 @@ pub fn evaluate_sparse_arithmetic_row<F: Radix2Field, const L: usize>(
     fold = absorb_selected(
         fold,
         selectors.product_finish,
-        bit_residual(row.value),
+        sub(planned.bit_products.value, row.value),
     )
     fold = absorb_selected(
         fold,
         selectors.product_finish,
-        bit_residual(row.auxiliary),
+        sub(planned.bit_products.auxiliary, row.auxiliary),
     )
     fold = absorb_selected(
         fold,
         selectors.product_finish,
-        bit_residual(row.accumulator_before),
+        sub(
+            planned.bit_products.accumulator_before,
+            row.accumulator_before,
+        ),
     )
     fold = absorb_selected(
         fold,
         selectors.product_finish,
-        bit_residual(row.accumulator_after),
+        sub(
+            planned.bit_products.accumulator_after,
+            row.accumulator_after,
+        ),
     )
     fold = absorb_selected(
         fold,
         selectors.product_finish,
-        bit_residual(row.state_before),
+        sub(planned.bit_products.state_before, row.state_before),
     )
     fold = absorb_selected(
         fold,
         selectors.product_finish,
-        bit_residual(row.state_after),
-    )
-    let product_sign_xor = sub(
-        add(row.accumulator_after, row.state_after),
-        mul(two, mul(row.accumulator_after, row.state_after)),
+        sub(planned.bit_products.state_after, row.state_after),
     )
     fold = absorb_selected(
         fold,
         selectors.product_finish,
-        sub(row.value, mul(product_sign_xor, row.auxiliary)),
+        sub(row.value, planned.product_finish_signed_output),
     )
 
     fold = absorb_selected(
         fold,
         roles.sum,
-        bit_residual(row.accumulator_after),
+        sub(
+            planned.bit_products.accumulator_after,
+            row.accumulator_after,
+        ),
     )
     fold = absorb_selected(
         fold,
@@ -4767,7 +4910,10 @@ pub fn evaluate_sparse_arithmetic_row<F: Radix2Field, const L: usize>(
     fold = absorb_selected(
         fold,
         roles.left_difference,
-        bit_residual(row.accumulator_after),
+        sub(
+            planned.bit_products.accumulator_after,
+            row.accumulator_after,
+        ),
     )
     fold = absorb_selected(
         fold,
@@ -4787,7 +4933,10 @@ pub fn evaluate_sparse_arithmetic_row<F: Radix2Field, const L: usize>(
     fold = absorb_selected(
         fold,
         roles.right_difference,
-        bit_residual(row.accumulator_after),
+        sub(
+            planned.bit_products.accumulator_after,
+            row.accumulator_after,
+        ),
     )
     fold = absorb_selected(
         fold,
@@ -4804,60 +4953,62 @@ pub fn evaluate_sparse_arithmetic_row<F: Radix2Field, const L: usize>(
         ),
     )
     fold = absorb_selected(fold, roles.right_difference, row.state_after)
-    fold = absorb_selected(fold, roles.select, bit_residual(row.state_before))
-    fold = absorb_selected(fold, roles.select, bit_residual(row.state_after))
-    let selected_difference = add(
-        mul(sub(one, row.state_after), row.auxiliary),
-        mul(row.state_after, row.accumulator_before),
-    )
-    let selected_magnitude = add(
-        mul(row.state_before, row.value),
-        mul(sub(one, row.state_before), selected_difference),
+    fold = absorb_selected(
+        fold,
+        roles.select,
+        sub(planned.bit_products.state_before, row.state_before),
     )
     fold = absorb_selected(
         fold,
         roles.select,
-        sub(row.accumulator_after, selected_magnitude),
+        sub(planned.bit_products.state_after, row.state_after),
+    )
+    fold = absorb_selected(
+        fold,
+        roles.select,
+        sub(row.accumulator_after, planned.linear_selected_magnitude),
     )
 
     fold = absorb_selected(
         fold,
         selectors.linear_finish,
-        bit_residual(row.value),
+        sub(planned.bit_products.value, row.value),
     )
     fold = absorb_selected(
         fold,
         selectors.linear_finish,
-        bit_residual(row.auxiliary),
+        sub(planned.bit_products.auxiliary, row.auxiliary),
     )
     fold = absorb_selected(
         fold,
         selectors.linear_finish,
-        bit_residual(row.accumulator_before),
-    )
-    fold = absorb_selected(
-        fold,
-        selectors.linear_finish,
-        bit_residual(row.accumulator_after),
-    )
-    fold = absorb_selected(
-        fold,
-        selectors.linear_finish,
-        bit_residual(row.state_before),
-    )
-    fold = absorb_selected(
-        fold,
-        selectors.linear_finish,
-        bit_residual(row.state_after),
-    )
-    let select_right = row.accumulator_before
-    fold = absorb_selected(
-        fold,
-        selectors.linear_finish,
-        add(
-            mul(sub(one, select_right), row.accumulator_before),
-            mul(select_right, row.accumulator_after),
+        sub(
+            planned.bit_products.accumulator_before,
+            row.accumulator_before,
         ),
+    )
+    fold = absorb_selected(
+        fold,
+        selectors.linear_finish,
+        sub(
+            planned.bit_products.accumulator_after,
+            row.accumulator_after,
+        ),
+    )
+    fold = absorb_selected(
+        fold,
+        selectors.linear_finish,
+        sub(planned.bit_products.state_before, row.state_before),
+    )
+    fold = absorb_selected(
+        fold,
+        selectors.linear_finish,
+        sub(planned.bit_products.state_after, row.state_after),
+    )
+    fold = absorb_selected(
+        fold,
+        selectors.linear_finish,
+        planned.linear_finish_balance,
     )
     fold = absorb_selected(
         fold,
@@ -4868,12 +5019,12 @@ pub fn evaluate_sparse_arithmetic_row<F: Radix2Field, const L: usize>(
     fold = absorb_selected(
         fold,
         selectors.boundary_sign,
-        bit_residual(row.value),
+        sub(planned.bit_products.value, row.value),
     )
     fold = absorb_selected(
         fold,
         selectors.boundary_sign,
-        bit_residual(row.auxiliary),
+        sub(planned.bit_products.auxiliary, row.auxiliary),
     )
     fold = absorb_selected(
         fold,

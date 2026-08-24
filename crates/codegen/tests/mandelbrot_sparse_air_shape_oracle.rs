@@ -146,7 +146,7 @@ fn exact_composition_interpreter_derives_the_audited_air_shape() {
         .expect("Fe field-width derivation should execute");
     assert_eq!(
         (widths.0 as u32, widths.1 as u32),
-        (155, 152),
+        (171, 152),
         "every committed quadratic-plan node must participate in the nominal AIR schema",
     );
     let shape = instance
@@ -180,7 +180,7 @@ fn exact_composition_interpreter_derives_the_audited_air_shape() {
     assert_eq!(degrees[0], 1, "the degree interpretation must remain valid");
     assert_eq!(
         &degrees[1..6],
-        &[4, 6, 1, 1, 6],
+        &[3, 6, 1, 1, 6],
         "the padding terminal must retain its audited linear balance",
     );
     let trace_length = 4_096;
@@ -196,14 +196,14 @@ fn exact_composition_interpreter_derives_the_audited_air_shape() {
     assert_eq!(degrees[6], reference_composition_degree);
     assert_eq!(degrees[6], 20_475);
     assert_eq!(degrees[7], shape[4]);
-    assert_eq!(degrees[7], 586);
+    assert_eq!(degrees[7], 602);
     assert_eq!(
         degrees[8], 0,
         "the current degree-6 AIR must not be represented as fitting degree 4,096",
     );
     assert_eq!(
         components,
-        [1, 3, 4, 2, 2, 2, 2, 4],
+        [1, 3, 2, 2, 2, 2, 2, 3],
         "component interpretation must retain exact validity and degrees",
     );
     assert_eq!(components[7], degrees[1]);

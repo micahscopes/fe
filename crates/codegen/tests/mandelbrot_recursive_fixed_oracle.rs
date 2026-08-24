@@ -1085,7 +1085,7 @@ fn bb_mul(left: u32, right: u32) -> u32 {
     (left as u64 * right as u64 % BABY_BEAR_MODULUS as u64) as u32
 }
 
-fn expected_sparse_arithmetic_plan(control: [u32; 38], row: [u32; 6]) -> [u32; 7] {
+fn expected_sparse_arithmetic_plan(control: [u32; 38], row: [u32; 6]) -> [u32; 23] {
     let two = 2;
     let right_flag_product = bb_mul(row[1], control[35]);
     let effective_right = bb_sub(bb_add(row[1], control[35]), bb_mul(two, right_flag_product));
@@ -1103,6 +1103,27 @@ fn expected_sparse_arithmetic_plan(control: [u32; 38], row: [u32; 6]) -> [u32; 7
     let different_sign_output = bb_mul(bb_sub(1, signs_same), selected_difference_sign);
     let selected_sign = bb_add(same_sign_output, different_sign_output);
     let output_sign = bb_mul(selected_sign, row[4]);
+    let bit_value = bb_mul(row[0], row[0]);
+    let bit_auxiliary = bb_mul(row[1], row[1]);
+    let bit_accumulator_before = bb_mul(row[2], row[2]);
+    let bit_accumulator_after = bb_mul(row[3], row[3]);
+    let bit_state_before = bb_mul(row[4], row[4]);
+    let bit_state_after = bb_mul(row[5], row[5]);
+    let radix_state_value = bb_mul(row[4], row[0]);
+    let radix_value_weight = bb_mul(row[0], control[34]);
+    let radix_flag_value = bb_mul(control[35], row[0]);
+    let radix_finish_auxiliary = bb_mul(row[1], bb_sub(1, radix_flag_value));
+    let product_value_auxiliary = bb_mul(row[0], row[1]);
+    let product_sign_product = bb_mul(row[3], row[5]);
+    let product_sign_xor = bb_sub(
+        bb_add(row[3], row[5]),
+        bb_mul(two, product_sign_product),
+    );
+    let product_finish_signed_output = bb_mul(product_sign_xor, row[1]);
+    let selected_difference_adjustment = bb_mul(row[5], bb_sub(row[2], row[1]));
+    let selected_difference = bb_add(row[1], selected_difference_adjustment);
+    let selected_difference_magnitude = bb_mul(bb_sub(1, row[4]), selected_difference);
+    let selected_right_magnitude = bb_mul(row[2], row[3]);
     [
         right_flag_product,
         sign_difference_product,
@@ -1111,6 +1132,22 @@ fn expected_sparse_arithmetic_plan(control: [u32; 38], row: [u32; 6]) -> [u32; 7
         same_sign_output,
         different_sign_output,
         output_sign,
+        bit_value,
+        bit_auxiliary,
+        bit_accumulator_before,
+        bit_accumulator_after,
+        bit_state_before,
+        bit_state_after,
+        radix_state_value,
+        radix_value_weight,
+        radix_flag_value,
+        radix_finish_auxiliary,
+        product_value_auxiliary,
+        product_sign_product,
+        product_finish_signed_output,
+        selected_difference_adjustment,
+        selected_difference_magnitude,
+        selected_right_magnitude,
     ]
 }
 
@@ -1268,7 +1305,7 @@ fn expected_sparse_linear_plan(
     control: [u32; 38],
     next_control: [u32; 38],
     row: [u32; 6],
-    arithmetic_plan: [u32; 7],
+    arithmetic_plan: [u32; 23],
 ) -> [u32; 52] {
     let limbs = LIMBS as u32;
     let zero = 0;
@@ -3032,21 +3069,21 @@ fn production_arithmetic_plan_matches_independent_nodes_and_rejects_mutations() 
     for challenge in [3u32, 7, 31] {
         let mut arguments = transition_arguments(&point, &current);
         arguments.extend([index as u32, challenge, 0]);
-        let baseline = call(&mut store, &instance, entry, &arguments, 9);
-        assert_eq!(&baseline[..7], expected.as_slice());
+        let baseline = call(&mut store, &instance, entry, &arguments, 25);
+        assert_eq!(&baseline[..23], expected.as_slice());
         assert_eq!(
-            baseline[7], 0,
+            baseline[23], 0,
             "the clean arithmetic plan must satisfy the AIR"
         );
-        assert!(baseline[8] > 0, "the arithmetic plan must emit constraints");
+        assert!(baseline[24] > 0, "the arithmetic plan must emit constraints");
 
-        for mutation in 1..=7u32 {
+        for mutation in 1..=23u32 {
             let mut mutated_arguments = transition_arguments(&point, &current);
             mutated_arguments.extend([index as u32, challenge, mutation]);
-            let mutated = call(&mut store, &instance, entry, &mutated_arguments, 9);
-            assert_eq!(&mutated[..7], expected.as_slice());
-            assert_eq!(mutated[7], 1, "plan node {mutation} must fail closed");
-            assert_eq!(mutated[8], baseline[8]);
+            let mutated = call(&mut store, &instance, entry, &mutated_arguments, 25);
+            assert_eq!(&mutated[..23], expected.as_slice());
+            assert_eq!(mutated[23], 1, "plan node {mutation} must fail closed");
+            assert_eq!(mutated[24], baseline[24]);
         }
     }
 }
@@ -4376,7 +4413,7 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                         &baseline_arguments,
                         3,
                     ),
-                    [0, 442_350, 4096],
+                    [0, 507_886, 4096],
                     "index-free sparse arithmetic baseline, challenge {challenge}",
                 );
                 for (row, lane) in arithmetic_mutations {
@@ -4393,7 +4430,7 @@ fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
                         audit[0] > 0,
                         "index-free sparse arithmetic mutation at row {row}, lane {lane}, challenge {challenge}",
                     );
-                    assert_eq!(audit[1], 442_350);
+                    assert_eq!(audit[1], 507_886);
                     assert_eq!(audit[2], 4096);
                 }
             }
