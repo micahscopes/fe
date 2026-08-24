@@ -146,7 +146,7 @@ fn exact_composition_interpreter_derives_the_audited_air_shape() {
         .expect("Fe field-width derivation should execute");
     assert_eq!(
         (widths.0 as u32, widths.1 as u32),
-        (103, 152),
+        (155, 152),
         "every committed quadratic-plan node must participate in the nominal AIR schema",
     );
     let shape = instance
@@ -180,8 +180,8 @@ fn exact_composition_interpreter_derives_the_audited_air_shape() {
     assert_eq!(degrees[0], 1, "the degree interpretation must remain valid");
     assert_eq!(
         &degrees[1..6],
-        &[7, 6, 1, 6, 7],
-        "the signed-linear arithmetic plan must retain its audited reduction",
+        &[4, 6, 1, 2, 6],
+        "the linear copy plan must retain its audited family reduction",
     );
     let trace_length = 4_096;
     let reference_composition_degree = [
@@ -194,16 +194,16 @@ fn exact_composition_interpreter_derives_the_audited_air_shape() {
     .max()
     .unwrap();
     assert_eq!(degrees[6], reference_composition_degree);
-    assert_eq!(degrees[6], 24_569);
+    assert_eq!(degrees[6], 20_475);
     assert_eq!(degrees[7], shape[4]);
-    assert_eq!(degrees[7], 534);
+    assert_eq!(degrees[7], 586);
     assert_eq!(
         degrees[8], 0,
-        "the current degree-7 AIR must not be represented as fitting degree 4,096",
+        "the current degree-6 AIR must not be represented as fitting degree 4,096",
     );
     assert_eq!(
         components,
-        [1, 3, 4, 2, 2, 7, 2, 7],
+        [1, 3, 4, 2, 2, 2, 2, 4],
         "component interpretation must retain exact validity and degrees",
     );
     assert_eq!(components[7], degrees[1]);
@@ -246,7 +246,7 @@ fn exact_composition_interpreter_derives_the_audited_air_shape() {
             [1, 3, 3, 4, 1, 4, 5, 4, 5],
             [1, 3, 3, 4, 4, 4, 5, 4, 5],
             [1, 2, 2, 3, 1, 3, 4, 3, 4],
-            [1, 1, 1, 2, 4, 4, 5, 2, 5],
+            [1, 1, 1, 2, 2, 2, 3, 2, 3],
             [1, 1, 1, 2, 2, 2, 3, 2, 3],
         ],
         "linear ports must retain their exact production degree attribution",

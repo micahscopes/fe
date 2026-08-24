@@ -1264,6 +1264,205 @@ fn expected_sparse_round_plan(
     ]
 }
 
+fn expected_sparse_linear_plan(
+    control: [u32; 38],
+    next_control: [u32; 38],
+    row: [u32; 6],
+    arithmetic_plan: [u32; 7],
+) -> [u32; 52] {
+    let limbs = LIMBS as u32;
+    let zero = 0;
+    let one = 1;
+    let digit_address = |rank, limb| bb_add(bb_mul(rank, limbs), limb);
+    let sign_address = |rank| bb_add(31 * limbs, rank);
+    let nonzero_address = |rank| bb_add(31 * limbs + 31, rank);
+    let borrow_address = |node, right| {
+        bb_add(31 * limbs + 62, bb_add(bb_mul(2, node), right))
+    };
+    let same_address = |node| bb_add(31 * limbs + 70, node);
+    let select_address = |node| bb_add(31 * limbs + 74, node);
+
+    let point = control[20];
+    let product = control[25];
+    let product_index = bb_mul(bb_sub(control[32], 8), bb_inverse(3));
+    let product_xy_pair = bb_mul(product_index, bb_sub(product_index, one));
+    let product_xy = bb_mul(product_xy_pair, bb_inverse(2));
+    let intermediate = bb_add(bb_add(control[26], control[27]), control[28]);
+    let output_role = control[29];
+    let node = control[32];
+    let node_even_pair = bb_mul(bb_sub(node, one), bb_sub(node, 3));
+    let node_even_product = bb_mul(node_even_pair, bb_sub(bb_mul(2, node), one));
+    let node_even = bb_sub(zero, bb_mul(node_even_product, bb_inverse(3)));
+    let left_even_rank = bb_mul(node_even, bb_add(8, bb_mul(3, node)));
+    let left_odd_rank = bb_mul(bb_sub(one, node_even), bb_add(14, bb_mul(4, node)));
+    let left_rank = bb_add(left_even_rank, left_odd_rank);
+    let right_even_rank = bb_mul(
+        node_even,
+        bb_add(11, bb_mul(bb_mul(3, node), bb_inverse(2))),
+    );
+    let right_odd_rank = bb_mul(
+        bb_sub(one, node_even),
+        bb_mul(bb_sub(node, one), bb_inverse(2)),
+    );
+    let right_rank = bb_add(right_even_rank, right_odd_rank);
+    let output_node = bb_mul(bb_sub(control[32], 18), bb_inverse(4));
+    let output_even_pair = bb_mul(bb_sub(output_node, one), bb_sub(output_node, 3));
+    let output_even_product =
+        bb_mul(output_even_pair, bb_sub(bb_mul(2, output_node), one));
+    let output_even = bb_sub(zero, bb_mul(output_even_product, bb_inverse(3)));
+
+    let digit_source_kind = bb_add(
+        bb_add(point, product),
+        bb_add(intermediate, output_role),
+    );
+    let digit_source = bb_mul(control[1], digit_source_kind);
+    let product_weight = bb_mul(product, bb_add(one, product_xy));
+    let output_digit_weight = bb_mul(output_role, bb_add(one, bb_mul(3, output_even)));
+    let digit_source_coefficient = bb_mul(
+        control[1],
+        bb_add(
+            bb_add(bb_mul(3, point), bb_mul(3, product_weight)),
+            bb_add(bb_mul(2, intermediate), output_digit_weight),
+        ),
+    );
+    let sign_source_kind = bb_add(bb_add(point, product), output_role);
+    let sign_source = bb_mul(control[2], sign_source_kind);
+    let output_sign_weight = bb_mul(output_role, bb_add(one, output_even));
+    let sign_source_coefficient = bb_mul(
+        control[2],
+        bb_add(point, bb_add(product_weight, output_sign_weight)),
+    );
+    let nonzero_source = bb_mul(control[2], output_role);
+    let left_borrow_role = bb_mul(control[9], control[16]);
+    let left_borrow_source = bb_mul(left_borrow_role, next_control[17]);
+    let right_borrow_role = bb_mul(control[9], control[17]);
+    let right_borrow_source = bb_mul(right_borrow_role, next_control[18]);
+    let limb_nonselect = bb_mul(
+        control[9],
+        bb_add(bb_add(control[15], control[16]), control[17]),
+    );
+    let limb_select = bb_mul(control[9], control[18]);
+    let finish = control[10];
+    let sum_rank = bb_add(15, bb_mul(4, node));
+    let left_difference_rank = bb_add(sum_rank, one);
+    let right_difference_rank = bb_add(sum_rank, 2);
+    let output_rank = bb_add(sum_rank, 3);
+    let nonselect_rank = bb_add(
+        sum_rank,
+        bb_add(control[16], bb_mul(2, control[17])),
+    );
+    let source_digit_address = digit_address(control[32], control[33]);
+
+    let first_source_address = bb_mul(digit_source, source_digit_address);
+    let first_nonselect_address =
+        bb_mul(limb_nonselect, digit_address(left_rank, control[34]));
+    let first_select_address =
+        bb_mul(limb_select, digit_address(sum_rank, control[34]));
+    let first_finish_address = bb_mul(finish, sign_address(left_rank));
+    let second_source_address = bb_mul(sign_source, sign_address(control[32]));
+    let second_nonselect_address =
+        bb_mul(limb_nonselect, digit_address(right_rank, control[34]));
+    let second_select_address = bb_mul(
+        limb_select,
+        digit_address(left_difference_rank, control[34]),
+    );
+    let second_finish_address = bb_mul(finish, sign_address(right_rank));
+    let third_source_address = bb_mul(nonzero_source, nonzero_address(control[32]));
+    let third_nonselect_address = bb_mul(
+        limb_nonselect,
+        digit_address(nonselect_rank, control[34]),
+    );
+    let third_select_address = bb_mul(
+        limb_select,
+        digit_address(right_difference_rank, control[34]),
+    );
+    let third_finish_address = bb_mul(finish, borrow_address(node, zero));
+    let third_source_value = bb_mul(nonzero_source, row[0]);
+    let third_nonselect_value = bb_mul(limb_nonselect, row[4]);
+    let third_selected_value = bb_mul(bb_add(limb_select, finish), row[2]);
+    let fourth_source_address =
+        bb_mul(left_borrow_source, borrow_address(node, zero));
+    let fourth_select_address =
+        bb_mul(limb_select, digit_address(output_rank, control[34]));
+    let fourth_finish_address = bb_mul(finish, borrow_address(node, one));
+    let fifth_source_address =
+        bb_mul(right_borrow_source, borrow_address(node, one));
+    let fifth_select_address = bb_mul(limb_select, same_address(node));
+    let fifth_finish_address = bb_mul(finish, nonzero_address(output_rank));
+    let fifth_source_value = bb_mul(right_borrow_source, row[3]);
+    let fifth_consumer_value = bb_mul(bb_add(limb_select, finish), row[4]);
+    let sixth_select_address = bb_mul(limb_select, select_address(node));
+    let sixth_finish_address = bb_mul(finish, sign_address(output_rank));
+    let effective_right = bb_sub(
+        bb_add(row[1], control[35]),
+        bb_mul(2, arithmetic_plan[0]),
+    );
+    let different = bb_sub(
+        bb_add(row[0], effective_right),
+        bb_mul(2, arithmetic_plan[1]),
+    );
+    let same = bb_sub(one, different);
+    let seventh_address = bb_mul(finish, same_address(node));
+    let seventh_value = bb_mul(finish, same);
+    let eighth_address = bb_mul(finish, select_address(node));
+    let eighth_value = bb_mul(finish, row[2]);
+
+    [
+        product_xy_pair,
+        node_even_pair,
+        node_even_product,
+        left_even_rank,
+        left_odd_rank,
+        right_even_rank,
+        right_odd_rank,
+        output_even_pair,
+        output_even_product,
+        digit_source,
+        product_weight,
+        output_digit_weight,
+        digit_source_coefficient,
+        sign_source,
+        output_sign_weight,
+        sign_source_coefficient,
+        nonzero_source,
+        left_borrow_role,
+        left_borrow_source,
+        right_borrow_role,
+        right_borrow_source,
+        limb_nonselect,
+        limb_select,
+        first_source_address,
+        first_nonselect_address,
+        first_select_address,
+        first_finish_address,
+        second_source_address,
+        second_nonselect_address,
+        second_select_address,
+        second_finish_address,
+        third_source_address,
+        third_nonselect_address,
+        third_select_address,
+        third_finish_address,
+        third_source_value,
+        third_nonselect_value,
+        third_selected_value,
+        fourth_source_address,
+        fourth_select_address,
+        fourth_finish_address,
+        fifth_source_address,
+        fifth_select_address,
+        fifth_finish_address,
+        fifth_source_value,
+        fifth_consumer_value,
+        sixth_select_address,
+        sixth_finish_address,
+        seventh_address,
+        seventh_value,
+        eighth_address,
+        eighth_value,
+    ]
+}
+
 fn bb_pow(mut base: u32, mut exponent: u32) -> u32 {
     let mut result = 1;
     while exponent != 0 {
@@ -2848,6 +3047,91 @@ fn production_arithmetic_plan_matches_independent_nodes_and_rejects_mutations() 
             assert_eq!(&mutated[..7], expected.as_slice());
             assert_eq!(mutated[7], 1, "plan node {mutation} must fail closed");
             assert_eq!(mutated[8], baseline[8]);
+        }
+    }
+}
+
+#[test]
+fn production_linear_plan_matches_independent_nodes_and_rejects_mutations() {
+    let entry = "fixed_transition4_sparse_linear_plan_audit";
+    let bytes = compile_fixture_entry(entry);
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, bytes)
+        .expect("focused linear-plan Wasm module should load");
+    assert_eq!(module.imports().count(), 0, "fixture must remain zero-import");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("focused linear-plan fixture should instantiate");
+
+    let point = ComplexFx {
+        real: fixed(true, 3, 4),
+        imaginary: fixed(false, 1, 8),
+    };
+    let current = ComplexFx {
+        real: fixed(false, 5, 4),
+        imaginary: fixed(true, 3, 8),
+    };
+    let tasks = expected_sparse_transition_tasks(LIMBS as u32);
+    let mut semantic_indices = Vec::new();
+    for range in [0u32, 8, 15, 22] {
+        semantic_indices.push(
+            tasks
+                .iter()
+                .position(|task| task[0] == 1 && task[1] == range)
+                .expect("the schedule must contain each signed-linear radix source"),
+        );
+    }
+    for role in 0u32..4 {
+        semantic_indices.push(
+            tasks
+                .iter()
+                .position(|task| task[0] == 9 && task[1] == 0 && task[2] == role)
+                .expect("the schedule must contain each signed-linear limb role"),
+        );
+    }
+    semantic_indices.push(
+        tasks
+            .iter()
+            .position(|task| task[0] == 10 && task[1] == 0)
+            .expect("the schedule must contain a signed-linear finish row"),
+    );
+    let controls = expected_sparse_control_rows();
+    let rows = expected_sparse_rows(&point, &current);
+
+    for index in semantic_indices {
+        let arithmetic = expected_sparse_arithmetic_plan(controls[index], rows[index]);
+        let expected = expected_sparse_linear_plan(
+            controls[index],
+            controls[index + 1],
+            rows[index],
+            arithmetic,
+        );
+        for challenge in [3u32, 7, 31, 127, 257] {
+            let mut arguments = transition_arguments(&point, &current);
+            arguments.extend([index as u32, challenge, 0]);
+            let baseline = call(&mut store, &instance, entry, &arguments, 54);
+            assert_eq!(&baseline[..52], expected.as_slice());
+            assert_eq!(baseline[52], 0, "the clean linear plan must satisfy the AIR");
+            assert_eq!(
+                baseline[53], 68,
+                "sixteen port constraints plus fifty-two plan nodes"
+            );
+        }
+
+        for mutation in 1..=52u32 {
+            let mut rejected = false;
+            for challenge in [3u32, 7, 31, 127, 257] {
+                let mut arguments = transition_arguments(&point, &current);
+                arguments.extend([index as u32, challenge, mutation]);
+                let mutated = call(&mut store, &instance, entry, &arguments, 54);
+                assert_eq!(&mutated[..52], expected.as_slice());
+                rejected |= mutated[52] == 1;
+                assert_eq!(mutated[53], 68);
+            }
+            assert!(
+                rejected,
+                "linear plan node {mutation} must fail under the independent challenge set"
+            );
         }
     }
 }

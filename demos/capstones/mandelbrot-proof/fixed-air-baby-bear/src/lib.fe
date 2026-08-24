@@ -40,6 +40,7 @@ use mandelbrot_proof_fixed_air_core::{
     SparseCopyInteractionRow,
     SparseLimbPositionSelectors,
     SparseLinearInteractionRow,
+    SparseLinearPlanWitness,
     SparseLinearRoleSelectors,
     SparseProductInteractionRow,
     SparsePublicCoordinate,
@@ -73,6 +74,7 @@ use mandelbrot_proof_fixed_air_core::{
     sparse_control_row_at,
     sparse_arithmetic_plan_witness,
     sparse_boundary_plan_witness,
+    sparse_linear_plan_witness,
     sparse_round_plan_witness,
     sparse_public_constraint_count,
     sparse_public_coordinate_at,
@@ -92,6 +94,7 @@ use mandelbrot_proof_fixed_air_core::{
     write_sparse_round_interaction_ports,
     zero_sparse_arithmetic_plan_witness,
     zero_sparse_boundary_plan_witness,
+    zero_sparse_linear_plan_witness,
     zero_sparse_round_plan_witness,
     zero_sparse_product_interaction_row,
 }
@@ -273,6 +276,7 @@ pub struct SparseBaseAirRow<F: Radix2Field> {
     pub witness: SparseTaskRow<F>,
     pub arithmetic_plan: SparseArithmeticPlanWitness<F>,
     pub round_plan: SparseRoundPlanWitness<F>,
+    pub linear_plan: SparseLinearPlanWitness<F>,
     pub boundary_plan: SparseBoundaryPlanWitness<F>,
 }
 impl<F: Radix2Field> core::marker::Copy
@@ -1019,6 +1023,7 @@ fn sparse_composition_fold_fields<F: Radix2Field, const L: usize>(
     _ next_witness: SparseTaskRow<F>,
     _ arithmetic_plan: SparseArithmeticPlanWitness<F>,
     _ round_plan: SparseRoundPlanWitness<F>,
+    _ linear_plan: SparseLinearPlanWitness<F>,
     _ boundary_plan: SparseBoundaryPlanWitness<F>,
     _ interaction: SparseInteractionTraceRow<F>,
     _ next_interaction: SparseInteractionTraceRow<F>,
@@ -1071,6 +1076,8 @@ where L > 1,
         control,
         next_control,
         witness,
+        arithmetic_plan,
+        linear_plan,
         interaction.linear,
     )
     fold = fold.absorb(
@@ -1135,6 +1142,8 @@ where L > 1,
             control,
             next_control,
             witness,
+            arithmetic_plan,
+            linear_plan,
             interaction.linear,
             next_interaction.linear,
         ),
@@ -1208,7 +1217,13 @@ where L > 1,
     fold = fold.absorb_fixed(
         SparseConstraintFamily::LastRow,
         evaluate_sparse_linear_interaction_terminal<F, L>(
-            challenge, control, next_control, witness, interaction.linear,
+            challenge,
+            control,
+            next_control,
+            witness,
+            arithmetic_plan,
+            linear_plan,
+            interaction.linear,
         ),
     )
     fold = fold.absorb_fixed(
@@ -1244,6 +1259,7 @@ where L > 1,
         next.base.witness,
         row.base.arithmetic_plan,
         row.base.round_plan,
+        row.base.linear_plan,
         row.base.boundary_plan,
         row.interaction,
         next.interaction,
@@ -1352,6 +1368,7 @@ where L > 1,
         base.witness,
         base.arithmetic_plan,
         base.round_plan,
+        base.linear_plan,
         base.boundary_plan,
         interaction,
         interaction,
@@ -1451,6 +1468,8 @@ where L > 1,
         base.control,
         base.control,
         base.witness,
+        base.arithmetic_plan,
+        base.linear_plan,
         interaction.linear,
     )
     let boundary = evaluate_sparse_boundary_interaction_row<
@@ -1618,6 +1637,7 @@ where L > 1,
         base.control,
         base.control,
         base.witness,
+        base.arithmetic_plan,
         mut ports,
     )
     sparse_copy_port_degree_shape(
@@ -3020,6 +3040,13 @@ where L > 1,
     )
 
     let local_challenge = BabyBearExt4::one()
+    let local_arithmetic_plan = sparse_arithmetic_plan_witness(control, row)
+    let local_linear_plan = sparse_linear_plan_witness<BabyBearExt4, L>(
+        control,
+        next_control,
+        row,
+        local_arithmetic_plan,
+    )
     let product_evaluation = evaluate_sparse_product_interaction_row<
         BabyBearExt4,
         L,
@@ -3049,6 +3076,8 @@ where L > 1,
         control,
         next_control,
         row,
+        local_arithmetic_plan,
+        local_linear_plan,
         scratch.linear,
     )
     let boundary_evaluation = evaluate_sparse_boundary_interaction_row<
@@ -3369,17 +3398,25 @@ where
         let leaf = sparse_trace_leaf_from_witness<L>(
             position, point, current, next, witness,
         )
+        let next_control = sparse_control_row_at<BabyBear, L>(position + 1)
+        let arithmetic_plan = sparse_arithmetic_plan_witness(
+            leaf.control,
+            leaf.row,
+        )
         base_rows[index] = SparseBaseAirRow {
             control: leaf.control,
             witness: leaf.row,
-            arithmetic_plan: sparse_arithmetic_plan_witness(
-                leaf.control,
-                leaf.row,
-            ),
+            arithmetic_plan: arithmetic_plan,
             round_plan: sparse_round_plan_witness<BabyBear, L>(
                 leaf.control,
-                sparse_control_row_at<BabyBear, L>(position + 1),
+                next_control,
                 leaf.row,
+            ),
+            linear_plan: sparse_linear_plan_witness<BabyBear, L>(
+                leaf.control,
+                next_control,
+                leaf.row,
+                arithmetic_plan,
             ),
             boundary_plan: sparse_boundary_plan_witness<
                 BabyBear,
@@ -3584,6 +3621,7 @@ fn zero_sparse_base_air_row_field<F: Radix2Field>() -> SparseBaseAirRow<F> {
         witness: zero_sparse_trace_row_field<F>(),
         arithmetic_plan: zero_sparse_arithmetic_plan_witness<F>(),
         round_plan: zero_sparse_round_plan_witness<F>(),
+        linear_plan: zero_sparse_linear_plan_witness<F>(),
         boundary_plan: zero_sparse_boundary_plan_witness<F>(),
     }
 }
@@ -3726,17 +3764,25 @@ where L > 1,
     let leaf = sparse_trace_leaf_from_witness<L>(
         index, point, current, next, witness,
     )
+    let next_control = sparse_control_row_at<BabyBear, L>(index + 1)
+    let arithmetic_plan = sparse_arithmetic_plan_witness(
+        leaf.control,
+        leaf.row,
+    )
     SparseBaseAirRow {
         control: leaf.control,
         witness: leaf.row,
-        arithmetic_plan: sparse_arithmetic_plan_witness(
-            leaf.control,
-            leaf.row,
-        ),
+        arithmetic_plan: arithmetic_plan,
         round_plan: sparse_round_plan_witness<BabyBear, L>(
             leaf.control,
-            sparse_control_row_at<BabyBear, L>(index + 1),
+            next_control,
             leaf.row,
+        ),
+        linear_plan: sparse_linear_plan_witness<BabyBear, L>(
+            leaf.control,
+            next_control,
+            leaf.row,
+            arithmetic_plan,
         ),
         boundary_plan: sparse_boundary_plan_witness<BabyBear, L>(
             leaf.control,
