@@ -146,6 +146,25 @@ fn expected_control_rows() -> Vec<[u32; CONTROL_LANES]> {
     rows
 }
 
+fn baby_bear_sub(left: u32, right: u32) -> u32 {
+    const MODULUS: u64 = 2_013_265_921;
+    ((left as u64 + MODULUS - right as u64) % MODULUS) as u32
+}
+
+fn baby_bear_mul(left: u32, right: u32) -> u32 {
+    const MODULUS: u64 = 2_013_265_921;
+    (left as u64 * right as u64 % MODULUS) as u32
+}
+
+fn expected_control_plan(row: [u32; CONTROL_LANES]) -> [u32; 3] {
+    let major = row[32];
+    [
+        baby_bear_mul(major, baby_bear_sub(major, 1)),
+        baby_bear_mul(baby_bear_sub(major, 2), baby_bear_sub(major, 3)),
+        baby_bear_mul(baby_bear_sub(major, 4), baby_bear_sub(major, 5)),
+    ]
+}
+
 fn compile_fixture() -> Vec<u8> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/mandelbrot_sparse_control_oracle_ingot");
@@ -230,6 +249,33 @@ fn sparse_control_air_is_index_free_and_rejects_schedule_mutations() {
             expected,
             "independently reconstructed control row {index}",
         );
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "sparse_control4_plan",
+                &[index as u32],
+                3,
+            ),
+            expected_control_plan(*expected),
+            "independently reconstructed local control plan {index}",
+        );
+    }
+
+    for challenge in [7u32, 17, 31] {
+        for node in 0u32..3 {
+            assert_eq!(
+                call(
+                    &mut store,
+                    &instance,
+                    "sparse_control4_plan_mutation_rejected",
+                    &[challenge, 0, node],
+                    1,
+                ),
+                [1],
+                "local control plan node {node}, challenge {challenge} must be constrained",
+            );
+        }
     }
 
     let first_by_kind: Vec<usize> = (0..15usize)
@@ -289,7 +335,7 @@ fn sparse_control_air_is_index_free_and_rejects_schedule_mutations() {
         );
         assert_eq!(baseline[2], rows.len() as u32);
         assert_eq!(
-            baseline[1], 1_195_807,
+            baseline[1], 1_208_095,
             "every local, adjacency, and boundary constraint must be evaluated",
         );
         for (index, lane) in mutations {

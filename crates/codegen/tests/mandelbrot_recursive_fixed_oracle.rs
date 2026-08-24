@@ -1085,6 +1085,15 @@ fn bb_mul(left: u32, right: u32) -> u32 {
     (left as u64 * right as u64 % BABY_BEAR_MODULUS as u64) as u32
 }
 
+fn expected_sparse_control_plan(control: [u32; 38]) -> [u32; 3] {
+    let major = control[32];
+    [
+        bb_mul(major, bb_sub(major, 1)),
+        bb_mul(bb_sub(major, 2), bb_sub(major, 3)),
+        bb_mul(bb_sub(major, 4), bb_sub(major, 5)),
+    ]
+}
+
 fn expected_sparse_arithmetic_plan(control: [u32; 38], row: [u32; 6]) -> [u32; 23] {
     let two = 2;
     let right_flag_product = bb_mul(row[1], control[35]);
@@ -1954,6 +1963,85 @@ fn expected_product_copy_ports(task: [u32; 5], row: [u32; 6]) -> [Option<Expecte
     ports
 }
 
+fn expected_sparse_product_address_plan(control: [u32; 38]) -> [u32; 17] {
+    let limbs = LIMBS as u32;
+    let radix_limb = control[1];
+    let carry_finish = control[4];
+    let product_term = control[5];
+    let product_coefficient = control[6];
+    let coordinate = control[19];
+    let product_low = control[23];
+    let product_high = control[24];
+    let major = control[32];
+    let minor = control[33];
+    let step = control[34];
+    let flag = control[35];
+
+    let major01 = bb_mul(major, bb_sub(major, 1));
+    let major45 = bb_mul(bb_sub(major, 4), bb_sub(major, 5));
+    let current_numerator = bb_mul(major01, major45);
+    let current = bb_mul(coordinate, bb_mul(current_numerator, bb_inverse(12)));
+    let product_range = bb_add(product_low, product_high);
+    let source_range_selector = bb_mul(radix_limb, bb_add(current, product_range));
+    let source_range_coefficient = bb_mul(
+        radix_limb,
+        bb_add(bb_mul(current, 3 * limbs), product_range),
+    );
+
+    let product_node = bb_mul(
+        bb_sub(bb_sub(major, 6), product_high),
+        bb_inverse(3),
+    );
+    let current_rank = bb_sub(major, 2);
+    let product_rank = bb_add(2, bb_add(bb_mul(2, product_node), product_high));
+    let range_current = bb_mul(current, current_rank);
+    let range_product = bb_mul(product_range, product_rank);
+    let range_rank = bb_add(range_current, range_product);
+    let range_address = bb_add(bb_mul(range_rank, limbs), minor);
+    let carry_address = bb_add(
+        bb_add(bb_mul(8, limbs), bb_mul(bb_mul(2, limbs), major)),
+        minor,
+    );
+    let source_range_address = bb_mul(source_range_selector, range_address);
+    let carry_source_address = bb_mul(carry_finish, carry_address);
+
+    let left_adjustment = bb_mul(flag, bb_sub(minor, limbs - 1));
+    let left_index = bb_add(step, left_adjustment);
+    let right_index = bb_sub(minor, left_index);
+    let left_rank = bb_mul(major, bb_sub(2, major));
+    let term_left_address = bb_add(bb_mul(left_rank, limbs), left_index);
+    let right_rank_pair = bb_mul(major, bb_sub(3, major));
+    let term_right_address = bb_add(
+        bb_mul(bb_mul(right_rank_pair, bb_inverse(2)), limbs),
+        right_index,
+    );
+    let coefficient_digit_rank = bb_add(2, bb_add(bb_mul(2, major), flag));
+    let coefficient_digit_address = bb_add(
+        bb_mul(coefficient_digit_rank, limbs),
+        bb_sub(minor, bb_mul(flag, limbs)),
+    );
+
+    [
+        major01,
+        major45,
+        current_numerator,
+        current,
+        source_range_selector,
+        source_range_coefficient,
+        range_current,
+        range_product,
+        source_range_address,
+        carry_source_address,
+        left_adjustment,
+        left_rank,
+        right_rank_pair,
+        bb_mul(product_term, term_left_address),
+        bb_mul(product_coefficient, coefficient_digit_address),
+        bb_mul(product_term, term_right_address),
+        bb_mul(product_coefficient, carry_address),
+    ]
+}
+
 fn expected_product_interaction_ports(
     task: [u32; 5],
     row: [u32; 6],
@@ -2482,6 +2570,7 @@ fn expected_sparse_interaction_root(
 
     let mut tasks = expected_sparse_transition_tasks(LIMBS as u32);
     tasks.resize(4_096, [14, 0, 0, 0, 0]);
+    let controls = expected_sparse_control_rows();
     let rows = expected_sparse_rows(point, current);
     let task_count = 2_821;
     let mut product_accumulator = Ext4::ZERO;
@@ -2524,6 +2613,9 @@ fn expected_sparse_interaction_root(
         for inverse in product_inverses {
             extend_ext4_words(&mut fields, inverse);
         }
+        for node in expected_sparse_product_address_plan(controls[index]) {
+            extend_ext4_words(&mut fields, Ext4::from_base(node));
+        }
         extend_ext4_words(&mut fields, round_accumulator);
         for inverse in round_inverses {
             extend_ext4_words(&mut fields, inverse);
@@ -2538,7 +2630,7 @@ fn expected_sparse_interaction_root(
         }
         assert_eq!(
             fields.len(),
-            97,
+            165,
             "interaction leaf schema must stay nominal"
         );
         leaves.push(reference_poseidon_digest(b"SI01", &fields));
@@ -2582,6 +2674,7 @@ fn expected_sparse_air_prefix_words(
             rows[index],
         );
         words.extend(controls[index]);
+        words.extend(expected_sparse_control_plan(controls[index]));
         words.extend(rows[index]);
         words.extend(arithmetic);
         words.extend(expected_sparse_arithmetic_link_plan(
@@ -2638,6 +2731,9 @@ fn expected_sparse_air_prefix_words(
         for inverse in product_inverses {
             extend_ext4_words(&mut words, inverse);
         }
+        for node in expected_sparse_product_address_plan(controls[index]) {
+            extend_ext4_words(&mut words, Ext4::from_base(node));
+        }
         extend_ext4_words(&mut words, round_accumulator);
         for inverse in round_inverses {
             extend_ext4_words(&mut words, inverse);
@@ -2664,14 +2760,14 @@ fn expected_sparse_air_prefix_words(
     ] {
         extend_ext4_words(&mut words, accumulator);
     }
-    assert_eq!(words.len(), 1_118, "sparse prefix schema must stay nominal");
+    assert_eq!(words.len(), 1_402, "sparse prefix schema must stay nominal");
     words
 }
 
 fn expected_sparse_air_lde_words(prefix: &[u32]) -> Vec<u32> {
-    assert_eq!(prefix.len(), 1_118, "sparse prefix input must stay nominal");
-    const BASE_FIELDS: usize = 189;
-    const INTERACTION_FIELDS: usize = 84;
+    assert_eq!(prefix.len(), 1_402, "sparse prefix input must stay nominal");
+    const BASE_FIELDS: usize = 192;
+    const INTERACTION_FIELDS: usize = 152;
     const TRACE: usize = 4;
     const LDE: usize = 16;
     const BASE_START: usize = 10;
@@ -2702,12 +2798,12 @@ fn expected_sparse_air_lde_words(prefix: &[u32]) -> Vec<u32> {
     let mut words = vec![1];
     words.extend(base);
     words.extend(interaction);
-    assert_eq!(words.len(), 4_369, "sparse LDE schema must stay nominal");
+    assert_eq!(words.len(), 5_505, "sparse LDE schema must stay nominal");
     words
 }
 
 fn expected_sparse_base_lde_root(lde: &[u32], mutate: bool) -> [u32; 8] {
-    const BASE_FIELDS: usize = 189;
+    const BASE_FIELDS: usize = 192;
     const LDE: usize = 16;
     assert!(lde.len() >= 1 + LDE * BASE_FIELDS);
     assert_eq!(lde[0], 1, "base LDE must be valid before commitment");
@@ -2741,13 +2837,14 @@ fn expected_sparse_production_interaction_prefix(
         Ext4::from_words(&words[25..29]),
         Ext4::from_words(&words[29..33]),
     ];
+    let controls = expected_sparse_control_rows();
     let tasks = expected_sparse_transition_tasks(LIMBS as u32);
     let rows = expected_sparse_rows(point, current);
     let mut product_accumulator = Ext4::ZERO;
     let mut round_accumulator = Ext4::ZERO;
     let mut linear_accumulator = Ext4::ZERO;
     let mut boundary_accumulator = Ext4::ZERO;
-    let mut fields = Vec::with_capacity(4 * 84);
+    let mut fields = Vec::with_capacity(4 * 152);
     for index in 0..4 {
         let task = tasks[index];
         let row = rows[index];
@@ -2776,6 +2873,9 @@ fn expected_sparse_production_interaction_prefix(
         for inverse in product_inverses {
             extend_ext4_words(&mut fields, inverse);
         }
+        for node in expected_sparse_product_address_plan(controls[index]) {
+            extend_ext4_words(&mut fields, Ext4::from_base(node));
+        }
         extend_ext4_words(&mut fields, round_accumulator);
         for inverse in round_inverses {
             extend_ext4_words(&mut fields, inverse);
@@ -2794,12 +2894,12 @@ fn expected_sparse_production_interaction_prefix(
         linear_accumulator = linear_accumulator.add(linear_delta);
         boundary_accumulator = boundary_accumulator.add(boundary_delta);
     }
-    assert_eq!(fields.len(), 4 * 84);
+    assert_eq!(fields.len(), 4 * 152);
     fields
 }
 
 fn expected_sparse_interaction_lde(prefix: &[u32]) -> Vec<u32> {
-    const FIELDS: usize = 84;
+    const FIELDS: usize = 152;
     const TRACE: usize = 4;
     const LDE: usize = 16;
     assert_eq!(prefix.len(), TRACE * FIELDS);
@@ -2821,7 +2921,7 @@ fn expected_sparse_interaction_lde_root(
     base_lde_root: [u32; 8],
     mutate: bool,
 ) -> [u32; 8] {
-    const FIELDS: usize = 84;
+    const FIELDS: usize = 152;
     const LDE: usize = 16;
     assert_eq!(lde.len(), LDE * FIELDS);
     let mut leaves = Vec::with_capacity(LDE);
@@ -3008,6 +3108,35 @@ fn compile_sparse_auth_fixture() -> Vec<u8> {
         .into_bytecode()
         .expect("Wasm backend should emit sparse trace authentication bytes");
     wasmparser::validate(&bytes).expect("sparse trace authentication Wasm should validate");
+    bytes
+}
+
+fn compile_sparse_auth_fixture_entry(entry: &str) -> Vec<u8> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/mandelbrot_sparse_trace_auth_oracle_ingot");
+    let url = Url::from_directory_path(path.canonicalize().unwrap()).unwrap();
+    let mut db = DriverDataBase::default();
+    assert!(
+        !driver::init_ingot(&mut db, &url),
+        "sparse trace authentication fixture initialization diagnostics",
+    );
+    let ingot = db
+        .workspace()
+        .containing_ingot(&db, url)
+        .expect("sparse trace authentication fixture ingot");
+    let top_mod = ingot.root_mod(&db);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "unexpected sparse trace authentication diagnostics:\n{diagnostics}",
+    );
+    let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, entry)
+        .unwrap_or_else(|error| panic!("sparse trace entry {entry}: {error}"));
+    let bytes =
+        compile_runtime_package_wasm_with_options(&db, &package, WasmCompileOptions::default())
+            .unwrap_or_else(|error| panic!("sparse trace entry {entry} Wasm: {error}"))
+            .bytes;
+    wasmparser::validate(&bytes).expect("sparse trace entry Wasm should validate");
     bytes
 }
 
@@ -5716,13 +5845,13 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
         &arguments,
     );
     let mut expected = expected_sparse_air_prefix_words(&point, &current, expected_base_root);
-    let first_base_fields = expected[10..199].to_vec();
-    let first_interaction_fields = expected[766..850].to_vec();
+    let first_base_fields = expected[10..202].to_vec();
+    let first_interaction_fields = expected[778..930].to_vec();
     let mut expected_lde = expected_sparse_air_lde_words(&expected);
     expected_lde.extend([1, 0]);
     assert_eq!(
         expected_lde.len(),
-        4_371,
+        5_507,
         "sparse LDE schema must stay nominal"
     );
     assert_eq!(lde_words.len(), expected_lde.len(), "sparse LDE length");
@@ -6004,8 +6133,8 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
         "unknown production mutation payload"
     );
 
-    const BASE_FIELDS: usize = 189;
-    const INTERACTION_FIELDS: usize = 84;
+    const BASE_FIELDS: usize = 192;
+    const INTERACTION_FIELDS: usize = 152;
     const LDE: usize = 16;
     const BASE_START: usize = 1;
     const INTERACTION_START: usize = BASE_START + LDE * BASE_FIELDS;
@@ -6041,7 +6170,7 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
 
                 let row = evaluation as usize;
                 let next_row = ((evaluation + 4) & 15) as usize;
-                let mut expected_value = expected_lde[BASE_START + row * BASE_FIELDS + 38];
+                let mut expected_value = expected_lde[BASE_START + row * BASE_FIELDS + 41];
                 if mutation == 1 {
                     expected_value = bb_add(expected_value, 1);
                 }
@@ -6064,7 +6193,7 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
                 );
                 assert_eq!(
                     Ext4::from_words(&actual[31..35]),
-                    Ext4::from_base(expected_lde[BASE_START + next_row * BASE_FIELDS + 38]),
+                    Ext4::from_base(expected_lde[BASE_START + next_row * BASE_FIELDS + 41]),
                     "next base-row geometry, evaluation {evaluation}",
                 );
                 let next_interaction = INTERACTION_START + next_row * INTERACTION_FIELDS;
@@ -6117,7 +6246,7 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
     expected.extend([0; 8]);
     assert_eq!(
         expected.len(),
-        1_293,
+        1_648,
         "sparse checkpoint schema must stay nominal"
     );
     assert_eq!(words.len(), expected.len(), "sparse checkpoint length");
@@ -6130,10 +6259,55 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
 }
 
 #[test]
+fn sparse_production_lde_codewords_match_independent_oracle() {
+    let entry = "fixed_transition4_sparse_air_lde_encoded";
+    let bytes = compile_sparse_auth_fixture_entry(entry);
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &bytes)
+        .expect("focused sparse LDE Wasm module should load");
+    assert_eq!(module.imports().count(), 0, "fixture must remain zero-import");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("focused sparse LDE fixture should instantiate");
+    let memory = instance
+        .get_memory(&mut store, "memory")
+        .expect("focused sparse LDE fixture should export linear memory");
+
+    let point = ComplexFx {
+        real: fixed(true, 3, 4),
+        imaginary: fixed(false, 1, 8),
+    };
+    let current = ComplexFx {
+        real: fixed(false, 5, 4),
+        imaginary: fixed(true, 3, 8),
+    };
+    let (_, _, actual) = encoded(
+        &mut store,
+        &instance,
+        memory,
+        entry,
+        &transition_arguments(&point, &current),
+    );
+    let trace_root = expected_sparse_trace_root(&point, &current);
+    let prefix = expected_sparse_air_prefix_words(&point, &current, trace_root);
+    let mut expected = expected_sparse_air_lde_words(&prefix);
+    expected.extend([1, 0]);
+    assert_eq!(actual.len(), expected.len(), "sparse LDE carrier width");
+    for (index, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
+        assert_eq!(
+            actual, expected,
+            "sparse production LDE word {index} must match its independent oracle",
+        );
+    }
+}
+
+#[test]
 fn sparse_lde_multipaths_authenticate_production_codewords() {
-    const BASE_FIELDS: usize = 189;
-    const INTERACTION_FIELDS: usize = 84;
-    let bytes = compile_sparse_auth_fixture();
+    const BASE_FIELDS: usize = 192;
+    const INTERACTION_FIELDS: usize = 152;
+    let bytes = compile_sparse_auth_fixture_entry(
+        "fixed_transition4_sparse_lde_multipath_audit",
+    );
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, &bytes)
         .expect("sparse LDE multipath Wasm module should load");
@@ -6167,14 +6341,12 @@ fn sparse_lde_multipaths_authenticate_production_codewords() {
     let canonical_indices = [0, 3, 4, 8, 12];
     let sibling_count = reference_sparse_multipath_sibling_count(16, &requests);
 
-    let mut clean_arguments = arguments.clone();
-    clean_arguments.push(0);
     let clean = call(
         &mut store,
         &instance,
-        "fixed_transition4_sparse_lde_multipath_status",
-        &clean_arguments,
-        42,
+        "fixed_transition4_sparse_lde_multipath_audit",
+        &arguments,
+        54,
     );
     assert_eq!(clean[0..3], [1, 1, 1], "both openings must be written");
     assert_eq!(clean[3], canonical_indices.len() as u32);
@@ -6222,32 +6394,9 @@ fn sparse_lde_multipaths_authenticate_production_codewords() {
         "unused value capacity must stay zero"
     );
 
-    for mutation in 1..=10 {
-        let mut mutated_arguments = arguments.clone();
-        mutated_arguments.push(mutation);
-        let mutated = call(
-            &mut store,
-            &instance,
-            "fixed_transition4_sparse_lde_multipath_status",
-            &mutated_arguments,
-            42,
-        );
-        assert_eq!(
-            mutated[11], 0,
-            "sparse LDE multipath mutation {mutation} must fail closed",
-        );
-    }
-    let mut invalid_arguments = arguments;
-    invalid_arguments.push(11);
     assert_eq!(
-        call(
-            &mut store,
-            &instance,
-            "fixed_transition4_sparse_lde_multipath_status",
-            &invalid_arguments,
-            42,
-        ),
-        [0; 42],
-        "unknown sparse LDE multipath mutations must fail closed",
+        clean[42..54],
+        [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        "one generated opening must accept cleanly and reject every directed or unknown mutation",
     );
 }

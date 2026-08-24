@@ -325,6 +325,24 @@ impl<F: Radix2Field> core::marker::Copy for SparseControlRow<F> {}
 derive Eq for SparseControlRow<F>
 derive CanonicalWords for SparseControlRow<F> using CanonicalWordsProvider
 
+/// The three nonlinear coordinate-domain checks in one control row share a
+/// tiny dependency DAG. Witness generation and constraint evaluation both
+/// interpret this exact plan, so lowering the cubic checks adds no copied
+/// schedule table or host-authored derived value.
+pub const SPARSE_CONTROL_MULTIPLICATIONS: usize = 3
+
+pub type SparseControlPlanWitness<F> = QuadraticPlanWitness<
+    F,
+    SPARSE_CONTROL_MULTIPLICATIONS,
+>
+
+pub fn zero_sparse_control_plan_witness<F: Radix2Field>()
+    -> SparseControlPlanWitness<F> {
+    QuadraticPlanWitness {
+        nodes: [zero<F>(); SPARSE_CONTROL_MULTIPLICATIONS],
+    }
+}
+
 /// Transcript challenges for one log-derivative copy interaction. `beta`
 /// compresses the copied value with its nominal address, while `gamma` moves
 /// the inverse pole away from the committed tuples.
@@ -3067,6 +3085,7 @@ fn absorb_sparse_selector_bits<F: Radix2Field>(
 fn absorb_sparse_control_local<F: Radix2Field>(
     _ fold: own ConstraintFold<F>,
     _ row: SparseControlRow<F>,
+    _ coordinate_domains: [F; SPARSE_CONTROL_MULTIPLICATIONS],
 ) -> ConstraintFold<F> {
     let selectors = row.selectors
     let mut fold = absorb_sparse_selector_bits(fold, selectors)
@@ -3093,21 +3112,15 @@ fn absorb_sparse_control_local<F: Radix2Field>(
     fold = fold.absorb(sub(coordinate_kind_sum, range_roles.coordinate))
     fold = fold.absorb(mul(
         range_roles.point_coordinate,
-        mul(row.major, sub(row.major, one<F>())),
+        coordinate_domains[0],
     ))
     fold = fold.absorb(mul(
         range_roles.current_coordinate,
-        mul(
-            sub(row.major, natural<F>(2)),
-            sub(row.major, natural<F>(3)),
-        ),
+        coordinate_domains[1],
     ))
     fold = fold.absorb(mul(
         range_roles.next_coordinate,
-        mul(
-            sub(row.major, natural<F>(4)),
-            sub(row.major, natural<F>(5)),
-        ),
+        coordinate_domains[2],
     ))
     fold = fold.absorb(bit_residual(range_roles.product_low))
     fold = fold.absorb(bit_residual(range_roles.product_high))
@@ -3192,15 +3205,94 @@ fn absorb_sparse_control_local<F: Radix2Field>(
     fold.absorb(mul(sub(one<F>(), weight_used), row.weight))
 }
 
+struct SparseControlPlan<
+    I: QuadraticPlanInterpreter<F>,
+    F: Radix2Field,
+> {
+    interpreter: I,
+    coordinate_domains: [F; SPARSE_CONTROL_MULTIPLICATIONS],
+}
+impl<I: QuadraticPlanInterpreter<F>, F: Radix2Field> core::marker::Copy
+    for SparseControlPlan<I, F> {}
+
+/// One dependency description for the coordinate-domain polynomials. The
+/// returned products are selected by the nominal range-role fields only after
+/// they have been materialized, keeping every resulting constraint quadratic.
+fn sparse_control_plan<
+    I: QuadraticPlanInterpreter<F>,
+    F: Radix2Field,
+>(
+    _ row: SparseControlRow<F>,
+    _ interpreter: I,
+) -> SparseControlPlan<I, F> {
+    let mut interpreter = interpreter
+    let point = interpreter.multiply(row.major, sub(row.major, one<F>()))
+    interpreter = point.interpreter
+    let current = interpreter.multiply(
+        sub(row.major, natural<F>(2)),
+        sub(row.major, natural<F>(3)),
+    )
+    interpreter = current.interpreter
+    let next = interpreter.multiply(
+        sub(row.major, natural<F>(4)),
+        sub(row.major, natural<F>(5)),
+    )
+    interpreter = next.interpreter
+    SparseControlPlan {
+        interpreter: interpreter,
+        coordinate_domains: [point.value, current.value, next.value],
+    }
+}
+
+pub fn sparse_control_plan_witness<F: Radix2Field>(
+    _ row: SparseControlRow<F>,
+) -> SparseControlPlanWitness<F> {
+    sparse_control_plan<
+        QuadraticWitnessInterpreter<F, SPARSE_CONTROL_MULTIPLICATIONS>,
+        F,
+    >(row, QuadraticWitnessInterpreter::new()).interpreter.finish()
+}
+
+struct SparseControlConstrainedPlan<F: Radix2Field> {
+    valid: bool,
+    coordinate_domains: [F; SPARSE_CONTROL_MULTIPLICATIONS],
+    residuals: QuadraticPlanResiduals<F, SPARSE_CONTROL_MULTIPLICATIONS>,
+}
+impl<F: Radix2Field> core::marker::Copy for SparseControlConstrainedPlan<F> {}
+
+fn sparse_control_constrained_plan<F: Radix2Field>(
+    _ row: SparseControlRow<F>,
+    _ witness: SparseControlPlanWitness<F>,
+) -> SparseControlConstrainedPlan<F> {
+    let planned = sparse_control_plan<
+        QuadraticConstraintInterpreter<F, SPARSE_CONTROL_MULTIPLICATIONS>,
+        F,
+    >(row, QuadraticConstraintInterpreter::new(witness))
+    let residuals = planned.interpreter.finish()
+    SparseControlConstrainedPlan {
+        valid: residuals.valid,
+        coordinate_domains: planned.coordinate_domains,
+        residuals: residuals,
+    }
+}
+
 /// Polynomial local constraints for a sparse control row. No row index, enum,
 /// or host integer enters this evaluator.
 pub fn evaluate_sparse_control_row<F: Radix2Field>(
     _ challenge: F,
     _ row: SparseControlRow<F>,
+    _ plan: SparseControlPlanWitness<F>,
 ) -> FixedAirConstraintEvaluation<F> {
-    let fold = absorb_sparse_control_local(ConstraintFold<F>::new(challenge), row)
+    let planned = sparse_control_constrained_plan(row, plan)
+    let mut fold = ConstraintFold<F>::new(challenge)
+    let mut plan_index: usize = 0
+    while plan_index < SPARSE_CONTROL_MULTIPLICATIONS {
+        fold = fold.absorb(planned.residuals.values[plan_index])
+        plan_index = plan_index + 1
+    }
+    fold = absorb_sparse_control_local(fold, row, planned.coordinate_domains)
     FixedAirConstraintEvaluation {
-        valid: true,
+        valid: planned.valid,
         constraints: fold.constraints,
         folded: fold.value,
     }

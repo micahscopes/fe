@@ -6,6 +6,7 @@ use mandelbrot_proof_fixed_air_core::{
     evaluate_sparse_control_link,
     evaluate_sparse_control_row,
     evaluate_sparse_control_terminal,
+    sparse_control_plan_witness,
     sparse_control_row_at,
     sparse_transition_trace_length,
 }
@@ -14,6 +15,32 @@ use precision::polynomial::Radix2Field
 
 fn control4(_ index: u32) -> SparseControlRow<BabyBear> {
     sparse_control_row_at<BabyBear, 4>(index)
+}
+
+pub fn sparse_control4_plan(_ index: u32) -> (u32, u32, u32) {
+    let plan = sparse_control_plan_witness(control4(index))
+    (
+        plan.nodes[0].to_u32(),
+        plan.nodes[1].to_u32(),
+        plan.nodes[2].to_u32(),
+    )
+}
+
+pub fn sparse_control4_plan_mutation_rejected(
+    _ challenge: u32,
+    _ index: u32,
+    _ node: u32,
+) -> bool {
+    if node >= 3 { return false }
+    let row = control4(index)
+    let mut plan = sparse_control_plan_witness(row)
+    plan.nodes[node as usize] = plan.nodes[node as usize] + BabyBear::one()
+    let evaluated = evaluate_sparse_control_row(
+        BabyBear::from_u32(challenge),
+        row,
+        plan,
+    )
+    !evaluated.valid || !evaluated.folded.is_zero()
 }
 
 pub fn sparse_control4_row(
@@ -213,7 +240,11 @@ pub fn sparse_control4_audit(
         if index == mutation_index {
             row = mutate_control4(row, mutation_lane)
         }
-        let local = evaluate_sparse_control_row(challenge, row)
+        let local = evaluate_sparse_control_row(
+            challenge,
+            row,
+            sparse_control_plan_witness(row),
+        )
         constraints = constraints + local.constraints
         if !local.valid || local.folded.to_u32() != 0 {
             failures = failures + 1
