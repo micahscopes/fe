@@ -28,6 +28,7 @@ use quadratic_plan::{
     QuadraticPlanInterpreter,
     QuadraticPlanResiduals,
     QuadraticPlanWitness,
+    QuadraticValueInterpreter,
     QuadraticWitnessInterpreter,
 }
 
@@ -406,6 +407,23 @@ pub type SparseLinearInteractionRow<F> = SparseCopyInteractionRow<F, 8>
 
 /// Each boundary row compares one computed value with one claimed value.
 pub type SparseBoundaryInteractionRow<F> = SparseCopyInteractionRow<F, 2>
+
+/// The public-boundary copy ports share one fourteen-node dependency plan.
+/// The direct, witness, and constraint interpretations all consume the same
+/// authored expressions, and an old capacity fails closed after any edit.
+pub const SPARSE_BOUNDARY_PORT_MULTIPLICATIONS: usize = 14
+
+pub type SparseBoundaryPlanWitness<F> = QuadraticPlanWitness<
+    F,
+    SPARSE_BOUNDARY_PORT_MULTIPLICATIONS,
+>
+
+pub fn zero_sparse_boundary_plan_witness<F: Radix2Field>()
+    -> SparseBoundaryPlanWitness<F> {
+    QuadraticPlanWitness {
+        nodes: [zero<F>(); SPARSE_BOUNDARY_PORT_MULTIPLICATIONS],
+    }
+}
 
 /// A folded local interaction evaluation plus the accumulator delta produced
 /// by the same constrained ports.
@@ -6604,6 +6622,160 @@ fn sparse_boundary_next_coordinate<F: Radix2Field>(
     control.range_roles.next_coordinate
 }
 
+struct SparseBoundaryCopyPlan<
+    I: QuadraticPlanInterpreter<F>,
+    F: Radix2Field,
+> {
+    interpreter: I,
+    first: SparseCopyPort<F>,
+    second: SparseCopyPort<F>,
+}
+impl<I: QuadraticPlanInterpreter<F>, F: Radix2Field> core::marker::Copy
+    for SparseBoundaryCopyPlan<I, F> {}
+
+/// One authored dependency plan for both public-boundary ports. Every
+/// non-affine multiplication is named once here. Direct port inspection,
+/// witness generation, and quadratic constraint evaluation differ only in
+/// the interpreter supplied at this boundary.
+fn sparse_boundary_copy_plan<
+    I: QuadraticPlanInterpreter<F>,
+    F: Radix2Field,
+    const L: usize,
+>(
+    _ control: SparseControlRow<F>,
+    _ row: SparseTaskRow<F>,
+    _ interpreter: I,
+) -> SparseBoundaryCopyPlan<I, F> {
+    let mut interpreter = interpreter
+    let selectors = control.selectors
+    let roles = control.range_roles
+    let output_node = sparse_linear_output_node(control)
+    let even_pair = interpreter.multiply(
+        sub(output_node, one<F>()),
+        sub(output_node, natural<F>(3)),
+    )
+    interpreter = even_pair.interpreter
+    let even_product = interpreter.multiply(
+        even_pair.value,
+        sub(mul(natural<F>(2), output_node), one<F>()),
+    )
+    interpreter = even_product.interpreter
+    let even = sub(
+        zero<F>(),
+        mul(
+            even_product.value,
+            natural<F>(3).radix2_inverse_or_zero(),
+        ),
+    )
+    let computed_step = interpreter.multiply(
+        roles.linear_output,
+        sub(one<F>(), even),
+    )
+    interpreter = computed_step.interpreter
+    let computed = computed_step.value
+    let claimed = sparse_boundary_next_coordinate(control)
+    let source_kind = add(computed, claimed)
+    let digit_source_step = interpreter.multiply(
+        selectors.radix_limb,
+        source_kind,
+    )
+    interpreter = digit_source_step.interpreter
+    let digit_source = digit_source_step.value
+    let sign_source_step = interpreter.multiply(
+        selectors.radix_finish,
+        source_kind,
+    )
+    interpreter = sign_source_step.interpreter
+    let sign_source = sign_source_step.value
+    let limb_consumer = selectors.boundary_limb
+    let sign_consumer = selectors.boundary_sign
+    let consumers = add(limb_consumer, sign_consumer)
+    let computed_rank = add(
+        natural<F>(22), mul(natural<F>(8), control.major),
+    )
+    let claimed_rank = add(natural<F>(4), control.major)
+    let digit_source_address = interpreter.multiply(
+        digit_source,
+        sparse_linear_digit_address<F, L>(
+            control.major, control.minor,
+        ),
+    )
+    interpreter = digit_source_address.interpreter
+    let sign_source_address = interpreter.multiply(
+        sign_source,
+        sparse_linear_sign_address<F, L>(control.major),
+    )
+    interpreter = sign_source_address.interpreter
+    let limb_consumer_address = interpreter.multiply(
+        limb_consumer,
+        sparse_linear_digit_address<F, L>(
+            computed_rank, control.minor,
+        ),
+    )
+    interpreter = limb_consumer_address.interpreter
+    let sign_consumer_address = interpreter.multiply(
+        sign_consumer,
+        sparse_linear_sign_address<F, L>(computed_rank),
+    )
+    interpreter = sign_consumer_address.interpreter
+    let sign_source_value = interpreter.multiply(
+        sign_source,
+        row.auxiliary,
+    )
+    interpreter = sign_source_value.interpreter
+    let digit_or_consumer_value = interpreter.multiply(
+        add(digit_source, consumers),
+        row.value,
+    )
+    interpreter = digit_or_consumer_value.interpreter
+    let first_port = SparseCopyPort {
+        selector: add(add(digit_source, sign_source), consumers),
+        coefficient: sub(add(digit_source, sign_source), consumers),
+        address: add(
+            add(
+                digit_source_address.value,
+                sign_source_address.value,
+            ),
+            add(
+                limb_consumer_address.value,
+                sign_consumer_address.value,
+            ),
+        ),
+        value: add(
+            sign_source_value.value,
+            digit_or_consumer_value.value,
+        ),
+    }
+    let claimed_limb_address = interpreter.multiply(
+        limb_consumer,
+        sparse_linear_digit_address<F, L>(
+            claimed_rank, control.minor,
+        ),
+    )
+    interpreter = claimed_limb_address.interpreter
+    let claimed_sign_address = interpreter.multiply(
+        sign_consumer,
+        sparse_linear_sign_address<F, L>(claimed_rank),
+    )
+    interpreter = claimed_sign_address.interpreter
+    let claimed_value = interpreter.multiply(consumers, row.auxiliary)
+    interpreter = claimed_value.interpreter
+    let second_port = SparseCopyPort {
+        selector: consumers,
+        coefficient: sub(zero<F>(), consumers),
+        address: add(
+            claimed_limb_address.value,
+            claimed_sign_address.value,
+        ),
+        value: claimed_value.value,
+    }
+    SparseBoundaryCopyPlan {
+        interpreter: interpreter,
+        first: first_port,
+        second: second_port,
+    }
+}
+
 pub fn write_sparse_boundary_interaction_ports<
     F: Radix2Field,
     const L: usize,
@@ -6612,78 +6784,66 @@ pub fn write_sparse_boundary_interaction_ports<
     _ row: SparseTaskRow<F>,
     _ output: mut [SparseCopyPort<F>; 2],
 ) {
-    let selectors = control.selectors
-    let roles = control.range_roles
-    let computed = mul(
-        roles.linear_output,
-        sub(
-            one<F>(),
-            sparse_linear_even_node(sparse_linear_output_node(control)),
-        ),
+    let planned = sparse_boundary_copy_plan<
+        QuadraticValueInterpreter,
+        F,
+        L,
+    >(control, row, QuadraticValueInterpreter::new())
+    output = [planned.first, planned.second]
+}
+
+pub fn sparse_boundary_plan_witness<F: Radix2Field, const L: usize>(
+    _ control: SparseControlRow<F>,
+    _ row: SparseTaskRow<F>,
+) -> SparseBoundaryPlanWitness<F> {
+    sparse_boundary_copy_plan<
+        QuadraticWitnessInterpreter<
+            F,
+            SPARSE_BOUNDARY_PORT_MULTIPLICATIONS,
+        >,
+        F,
+        L,
+    >(
+        control,
+        row,
+        QuadraticWitnessInterpreter::new(),
+    ).interpreter.finish()
+}
+
+struct SparseBoundaryConstrainedPorts<F: Radix2Field> {
+    valid: bool,
+    ports: [SparseCopyPort<F>; 2],
+    residuals: QuadraticPlanResiduals<
+        F,
+        SPARSE_BOUNDARY_PORT_MULTIPLICATIONS,
+    >,
+}
+impl<F: Radix2Field> core::marker::Copy
+    for SparseBoundaryConstrainedPorts<F> {}
+
+fn sparse_boundary_constrained_ports<F: Radix2Field, const L: usize>(
+    _ control: SparseControlRow<F>,
+    _ row: SparseTaskRow<F>,
+    _ witness: SparseBoundaryPlanWitness<F>,
+) -> SparseBoundaryConstrainedPorts<F> {
+    let planned = sparse_boundary_copy_plan<
+        QuadraticConstraintInterpreter<
+            F,
+            SPARSE_BOUNDARY_PORT_MULTIPLICATIONS,
+        >,
+        F,
+        L,
+    >(
+        control,
+        row,
+        QuadraticConstraintInterpreter::new(witness),
     )
-    let claimed = sparse_boundary_next_coordinate(control)
-    let source_kind = add(computed, claimed)
-    let digit_source = mul(selectors.radix_limb, source_kind)
-    let sign_source = mul(selectors.radix_finish, source_kind)
-    let limb_consumer = selectors.boundary_limb
-    let sign_consumer = selectors.boundary_sign
-    let consumers = add(limb_consumer, sign_consumer)
-    let computed_rank = add(
-        natural<F>(22), mul(natural<F>(8), control.major),
-    )
-    let claimed_rank = add(natural<F>(4), control.major)
-    let first_port = SparseCopyPort {
-        selector: add(add(digit_source, sign_source), consumers),
-        coefficient: sub(add(digit_source, sign_source), consumers),
-        address: add(
-            add(
-                mul(
-                    digit_source,
-                    sparse_linear_digit_address<F, L>(
-                        control.major, control.minor,
-                    ),
-                ),
-                mul(
-                    sign_source,
-                    sparse_linear_sign_address<F, L>(control.major),
-                ),
-            ),
-            add(
-                mul(
-                    limb_consumer,
-                    sparse_linear_digit_address<F, L>(
-                        computed_rank, control.minor,
-                    ),
-                ),
-                mul(
-                    sign_consumer,
-                    sparse_linear_sign_address<F, L>(computed_rank),
-                ),
-            ),
-        ),
-        value: add(
-            mul(sign_source, row.auxiliary),
-            mul(add(digit_source, consumers), row.value),
-        ),
+    let residuals = planned.interpreter.finish()
+    SparseBoundaryConstrainedPorts {
+        valid: residuals.valid,
+        ports: [planned.first, planned.second],
+        residuals: residuals,
     }
-    let second_port = SparseCopyPort {
-        selector: consumers,
-        coefficient: sub(zero<F>(), consumers),
-        address: add(
-            mul(
-                limb_consumer,
-                sparse_linear_digit_address<F, L>(
-                    claimed_rank, control.minor,
-                ),
-            ),
-            mul(
-                sign_consumer,
-                sparse_linear_sign_address<F, L>(claimed_rank),
-            ),
-        ),
-        value: mul(consumers, row.auxiliary),
-    }
-    output = [first_port, second_port]
 }
 
 pub fn sparse_boundary_interaction_row<F: Radix2Field, const L: usize>(
@@ -6692,8 +6852,15 @@ pub fn sparse_boundary_interaction_row<F: Radix2Field, const L: usize>(
     _ row: SparseTaskRow<F>,
     _ accumulator: F,
 ) -> SparseBoundaryInteractionRow<F> {
-    let mut ports = [zero_sparse_copy_port<F>(); 2]
-    write_sparse_boundary_interaction_ports<F, L>(control, row, mut ports)
+    let planned = sparse_boundary_copy_plan<
+        QuadraticWitnessInterpreter<
+            F,
+            SPARSE_BOUNDARY_PORT_MULTIPLICATIONS,
+        >,
+        F,
+        L,
+    >(control, row, QuadraticWitnessInterpreter::new())
+    let ports = [planned.first, planned.second]
     SparseCopyInteractionRow {
         accumulator: accumulator,
         inverses: sparse_copy_interaction_inverses<F, 2>(challenges, ports),
@@ -6710,8 +6877,15 @@ pub fn write_sparse_boundary_interaction_row<
     _ accumulator: F,
     _ interaction: mut SparseBoundaryInteractionRow<F>,
 ) {
-    let mut ports = [zero_sparse_copy_port<F>(); 2]
-    write_sparse_boundary_interaction_ports<F, L>(control, row, mut ports)
+    let planned = sparse_boundary_copy_plan<
+        QuadraticWitnessInterpreter<
+            F,
+            SPARSE_BOUNDARY_PORT_MULTIPLICATIONS,
+        >,
+        F,
+        L,
+    >(control, row, QuadraticWitnessInterpreter::new())
+    let ports = [planned.first, planned.second]
     interaction.accumulator = accumulator
     write_sparse_copy_interaction_inverses<F, 2>(
         challenges, ref ports, mut interaction.inverses,
@@ -6726,21 +6900,32 @@ pub fn evaluate_sparse_boundary_interaction_row<
     _ challenges: SparseCopyChallenges<F>,
     _ control: SparseControlRow<F>,
     _ row: SparseTaskRow<F>,
+    _ plan: SparseBoundaryPlanWitness<F>,
     _ interaction: SparseBoundaryInteractionRow<F>,
 ) -> SparseInteractionEvaluation<F> {
-    let mut ports = [zero_sparse_copy_port<F>(); 2]
-    write_sparse_boundary_interaction_ports<F, L>(control, row, mut ports)
+    let constrained = sparse_boundary_constrained_ports<F, L>(
+        control, row, plan,
+    )
+    let mut fold = ConstraintFold<F>::new(challenge)
+    let mut index: usize = 0
+    while index < SPARSE_BOUNDARY_PORT_MULTIPLICATIONS {
+        fold = fold.absorb(constrained.residuals.values[index])
+        index = index + 1
+    }
     let fold = absorb_sparse_copy_interaction<F, 2>(
-        ConstraintFold<F>::new(challenge),
+        fold,
         challenges,
-        ports,
+        constrained.ports,
         interaction.inverses,
     )
     SparseInteractionEvaluation {
-        valid: true,
+        valid: constrained.valid,
         constraints: fold.constraints,
         folded: fold.value,
-        delta: sparse_copy_interaction_delta<F, 2>(ports, interaction.inverses),
+        delta: sparse_copy_interaction_delta<F, 2>(
+            constrained.ports,
+            interaction.inverses,
+        ),
     }
 }
 
@@ -6763,22 +6948,22 @@ pub fn evaluate_sparse_boundary_interaction_link<
     _ challenge: F,
     _ current_control: SparseControlRow<F>,
     _ current: SparseTaskRow<F>,
+    _ current_plan: SparseBoundaryPlanWitness<F>,
     _ current_interaction: SparseBoundaryInteractionRow<F>,
     _ next_interaction: SparseBoundaryInteractionRow<F>,
 ) -> FixedAirConstraintEvaluation<F> {
-    let mut ports = [zero_sparse_copy_port<F>(); 2]
-    write_sparse_boundary_interaction_ports<F, L>(
-        current_control, current, mut ports,
+    let constrained = sparse_boundary_constrained_ports<F, L>(
+        current_control, current, current_plan,
     )
     let delta = sparse_copy_interaction_delta<F, 2>(
-        ports, current_interaction.inverses,
+        constrained.ports, current_interaction.inverses,
     )
     let fold = ConstraintFold<F>::new(challenge).absorb(sub(
         next_interaction.accumulator,
         add(current_interaction.accumulator, delta),
     ))
     FixedAirConstraintEvaluation {
-        valid: true,
+        valid: constrained.valid,
         constraints: fold.constraints,
         folded: fold.value,
     }
@@ -6791,19 +6976,21 @@ pub fn evaluate_sparse_boundary_interaction_terminal<
     _ challenge: F,
     _ control: SparseControlRow<F>,
     _ row: SparseTaskRow<F>,
+    _ plan: SparseBoundaryPlanWitness<F>,
     _ interaction: SparseBoundaryInteractionRow<F>,
 ) -> FixedAirConstraintEvaluation<F> {
-    let mut ports = [zero_sparse_copy_port<F>(); 2]
-    write_sparse_boundary_interaction_ports<F, L>(control, row, mut ports)
+    let constrained = sparse_boundary_constrained_ports<F, L>(
+        control, row, plan,
+    )
     let delta = sparse_copy_interaction_delta<F, 2>(
-        ports, interaction.inverses,
+        constrained.ports, interaction.inverses,
     )
     let fold = ConstraintFold<F>::new(challenge).absorb(add(
         interaction.accumulator,
         delta,
     ))
     FixedAirConstraintEvaluation {
-        valid: true,
+        valid: constrained.valid,
         constraints: fold.constraints,
         folded: fold.value,
     }

@@ -30,6 +30,7 @@ use mandelbrot_proof_baby_bear_transcript::{
 }
 use mandelbrot_proof_fixed_air_core::{
     FixedAirConstraintEvaluation,
+    SparseBoundaryPlanWitness,
     SparseBoundaryInteractionRow,
     SparseArithmeticPlanWitness,
     SparseControlRow,
@@ -70,6 +71,7 @@ use mandelbrot_proof_fixed_air_core::{
     evaluate_sparse_round_interaction_terminal,
     sparse_control_row_at,
     sparse_arithmetic_plan_witness,
+    sparse_boundary_plan_witness,
     sparse_public_constraint_count,
     sparse_public_coordinate_at,
     sparse_public_coordinate_count,
@@ -87,6 +89,7 @@ use mandelbrot_proof_fixed_air_core::{
     write_sparse_round_interaction_row,
     write_sparse_round_interaction_ports,
     zero_sparse_arithmetic_plan_witness,
+    zero_sparse_boundary_plan_witness,
     zero_sparse_product_interaction_row,
 }
 use mandelbrot_proof_recursive::{ComplexFixed, OrbitInterval}
@@ -266,6 +269,7 @@ pub struct SparseBaseAirRow<F: Radix2Field> {
     pub control: SparseControlRow<F>,
     pub witness: SparseTaskRow<F>,
     pub arithmetic_plan: SparseArithmeticPlanWitness<F>,
+    pub boundary_plan: SparseBoundaryPlanWitness<F>,
 }
 impl<F: Radix2Field> core::marker::Copy
     for SparseBaseAirRow<F> {}
@@ -1010,6 +1014,7 @@ fn sparse_composition_fold_fields<F: Radix2Field, const L: usize>(
     _ witness: SparseTaskRow<F>,
     _ next_witness: SparseTaskRow<F>,
     _ arithmetic_plan: SparseArithmeticPlanWitness<F>,
+    _ boundary_plan: SparseBoundaryPlanWitness<F>,
     _ interaction: SparseInteractionTraceRow<F>,
     _ next_interaction: SparseInteractionTraceRow<F>,
 ) -> SparseCompositionFold<F>
@@ -1073,6 +1078,7 @@ where L > 1,
         boundary_challenges,
         control,
         witness,
+        boundary_plan,
         interaction.boundary,
     )
     fold = fold.absorb(
@@ -1132,6 +1138,7 @@ where L > 1,
             challenge,
             control,
             witness,
+            boundary_plan,
             interaction.boundary,
             next_interaction.boundary,
         ),
@@ -1195,7 +1202,11 @@ where L > 1,
     fold = fold.absorb_fixed(
         SparseConstraintFamily::LastRow,
         evaluate_sparse_boundary_interaction_terminal<F, L>(
-            challenge, control, witness, interaction.boundary,
+            challenge,
+            control,
+            witness,
+            boundary_plan,
+            interaction.boundary,
         ),
     )
     fold
@@ -1220,6 +1231,7 @@ where L > 1,
         row.base.witness,
         next.base.witness,
         row.base.arithmetic_plan,
+        row.base.boundary_plan,
         row.interaction,
         next.interaction,
     )
@@ -1326,6 +1338,7 @@ where L > 1,
         base.witness,
         base.witness,
         base.arithmetic_plan,
+        base.boundary_plan,
         interaction,
         interaction,
     )
@@ -1433,6 +1446,7 @@ where L > 1,
         challenges,
         base.control,
         base.witness,
+        base.boundary_plan,
         interaction.boundary,
     )
     let maximum = maximum_degree(
@@ -3020,7 +3034,14 @@ where L > 1,
     let boundary_evaluation = evaluate_sparse_boundary_interaction_row<
         BabyBearExt4,
         L,
-    >(local_challenge, challenges.boundary, control, row, scratch.boundary)
+    >(
+        local_challenge,
+        challenges.boundary,
+        control,
+        row,
+        sparse_boundary_plan_witness<BabyBearExt4, L>(control, row),
+        scratch.boundary,
+    )
     if !product_evaluation.valid || !product_evaluation.folded.is_zero()
         || !round_evaluation.valid || !round_evaluation.folded.is_zero()
         || !linear_evaluation.valid || !linear_evaluation.folded.is_zero()
@@ -3335,6 +3356,10 @@ where
                 leaf.control,
                 leaf.row,
             ),
+            boundary_plan: sparse_boundary_plan_witness<
+                BabyBear,
+                L,
+            >(leaf.control, leaf.row),
         }
         base_frontier = push_frontier<
             Poseidon2Digest,
@@ -3533,6 +3558,7 @@ fn zero_sparse_base_air_row_field<F: Radix2Field>() -> SparseBaseAirRow<F> {
         control: zero_sparse_trace_control_field<F>(),
         witness: zero_sparse_trace_row_field<F>(),
         arithmetic_plan: zero_sparse_arithmetic_plan_witness<F>(),
+        boundary_plan: zero_sparse_boundary_plan_witness<F>(),
     }
 }
 
@@ -3676,6 +3702,10 @@ pub fn sparse_base_air_row_from_witness<const L: usize>(
         control: leaf.control,
         witness: leaf.row,
         arithmetic_plan: sparse_arithmetic_plan_witness(
+            leaf.control,
+            leaf.row,
+        ),
+        boundary_plan: sparse_boundary_plan_witness<BabyBear, L>(
             leaf.control,
             leaf.row,
         ),

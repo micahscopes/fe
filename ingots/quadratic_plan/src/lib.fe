@@ -13,14 +13,14 @@
 use canonical_words::{CanonicalWords, CanonicalWordsProvider}
 use precision::polynomial::Radix2Field
 
-pub struct QuadraticPlanWitness<F: Radix2Field, const N: usize> {
+pub struct QuadraticPlanWitness<F, const N: usize> {
     pub nodes: [F; N],
 }
 impl<F: Radix2Field, const N: usize> core::marker::Copy
     for QuadraticPlanWitness<F, N> {}
 derive CanonicalWords for QuadraticPlanWitness<F, N> using CanonicalWordsProvider
 
-pub struct QuadraticPlanResiduals<F: Radix2Field, const N: usize> {
+pub struct QuadraticPlanResiduals<F, const N: usize> {
     pub valid: bool,
     pub values: [F; N],
 }
@@ -38,6 +38,28 @@ impl<I: core::marker::Copy, F: Radix2Field> core::marker::Copy
 /// constant scaling remain ordinary field operations in the shared plan.
 pub trait QuadraticPlanInterpreter<F: Radix2Field>: core::marker::Copy {
     fn multiply(self, _ left: F, _ right: F) -> QuadraticPlanStep<Self, F>
+}
+
+/// Direct value interpretation of an authored plan. This lets callers expose
+/// the same typed expression as an ordinary value without maintaining a
+/// second unplanned implementation beside the witness and constraint forms.
+pub struct QuadraticValueInterpreter {
+    marker: u32,
+}
+impl core::marker::Copy for QuadraticValueInterpreter {}
+
+impl QuadraticValueInterpreter {
+    pub fn new() -> Self { Self { marker: 0 } }
+}
+
+impl<F: Radix2Field> QuadraticPlanInterpreter<F>
+    for QuadraticValueInterpreter {
+    fn multiply(self, _ left: F, _ right: F) -> QuadraticPlanStep<Self, F> {
+        QuadraticPlanStep {
+            interpreter: self,
+            value: left.radix2_mul(right),
+        }
+    }
 }
 
 pub struct QuadraticWitnessInterpreter<F: Radix2Field, const N: usize> {

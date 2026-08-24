@@ -1114,6 +1114,56 @@ fn expected_sparse_arithmetic_plan(control: [u32; 38], row: [u32; 6]) -> [u32; 7
     ]
 }
 
+fn expected_sparse_boundary_plan(control: [u32; 38], row: [u32; 6]) -> [u32; 14] {
+    let output_node = bb_mul(bb_sub(control[32], 18), bb_inverse(4));
+    let even_pair = bb_mul(bb_sub(output_node, 1), bb_sub(output_node, 3));
+    let even_product = bb_mul(even_pair, bb_sub(bb_mul(2, output_node), 1));
+    let even = bb_sub(0, bb_mul(even_product, bb_inverse(3)));
+    let computed = bb_mul(control[29], bb_sub(1, even));
+    let source_kind = bb_add(computed, control[22]);
+    let digit_source = bb_mul(control[1], source_kind);
+    let sign_source = bb_mul(control[2], source_kind);
+    let limb_consumer = control[12];
+    let sign_consumer = control[11];
+    let consumers = bb_add(limb_consumer, sign_consumer);
+    let computed_rank = bb_add(22, bb_mul(8, control[32]));
+    let claimed_rank = bb_add(4, control[32]);
+    [
+        even_pair,
+        even_product,
+        computed,
+        digit_source,
+        sign_source,
+        bb_mul(
+            digit_source,
+            bb_add(bb_mul(control[32], LIMBS as u32), control[33]),
+        ),
+        bb_mul(
+            sign_source,
+            bb_add(31 * LIMBS as u32, control[32]),
+        ),
+        bb_mul(
+            limb_consumer,
+            bb_add(bb_mul(computed_rank, LIMBS as u32), control[33]),
+        ),
+        bb_mul(
+            sign_consumer,
+            bb_add(31 * LIMBS as u32, computed_rank),
+        ),
+        bb_mul(sign_source, row[1]),
+        bb_mul(bb_add(digit_source, consumers), row[0]),
+        bb_mul(
+            limb_consumer,
+            bb_add(bb_mul(claimed_rank, LIMBS as u32), control[33]),
+        ),
+        bb_mul(
+            sign_consumer,
+            bb_add(31 * LIMBS as u32, claimed_rank),
+        ),
+        bb_mul(consumers, row[1]),
+    ]
+}
+
 fn bb_pow(mut base: u32, mut exponent: u32) -> u32 {
     let mut result = 1;
     while exponent != 0 {
@@ -2698,6 +2748,77 @@ fn production_arithmetic_plan_matches_independent_nodes_and_rejects_mutations() 
             assert_eq!(&mutated[..7], expected.as_slice());
             assert_eq!(mutated[7], 1, "plan node {mutation} must fail closed");
             assert_eq!(mutated[8], baseline[8]);
+        }
+    }
+}
+
+#[test]
+fn production_boundary_plan_matches_independent_nodes_and_rejects_mutations() {
+    let entry = "fixed_transition4_sparse_boundary_plan_audit";
+    let bytes = compile_fixture_entry(entry);
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, bytes)
+        .expect("focused boundary-plan Wasm module should load");
+    assert_eq!(
+        module.imports().count(),
+        0,
+        "fixture must remain zero-import"
+    );
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("focused boundary-plan fixture should instantiate");
+
+    let point = ComplexFx {
+        real: fixed(true, 3, 4),
+        imaginary: fixed(false, 1, 8),
+    };
+    let current = ComplexFx {
+        real: fixed(false, 5, 4),
+        imaginary: fixed(true, 3, 8),
+    };
+    let tasks = expected_sparse_transition_tasks(LIMBS as u32);
+    let source_index = tasks
+        .iter()
+        .position(|task| task[0] == 1 && task[1] == 22)
+        .expect("the production schedule must contain a computed boundary source");
+    let consumer_index = tasks
+        .iter()
+        .position(|task| task[0] == 12)
+        .expect("the production schedule must contain a boundary consumer");
+    let controls = expected_sparse_control_rows();
+    let rows = expected_sparse_rows(&point, &current);
+
+    for index in [source_index, consumer_index] {
+        let expected = expected_sparse_boundary_plan(controls[index], rows[index]);
+        for challenge in [3u32, 7, 31] {
+            let mut arguments = transition_arguments(&point, &current);
+            arguments.extend([index as u32, challenge, 0]);
+            let baseline = call(&mut store, &instance, entry, &arguments, 16);
+            assert_eq!(&baseline[..14], expected.as_slice());
+            assert_eq!(
+                baseline[14], 0,
+                "the clean boundary plan must satisfy the AIR"
+            );
+            assert_eq!(
+                baseline[15], 18,
+                "four port constraints plus fourteen plan nodes"
+            );
+        }
+
+        for mutation in 1..=14u32 {
+            let mut rejected = false;
+            for challenge in [3u32, 7, 31] {
+                let mut mutated_arguments = transition_arguments(&point, &current);
+                mutated_arguments.extend([index as u32, challenge, mutation]);
+                let mutated = call(&mut store, &instance, entry, &mutated_arguments, 16);
+                assert_eq!(&mutated[..14], expected.as_slice());
+                rejected |= mutated[14] == 1;
+                assert_eq!(mutated[15], 18);
+            }
+            assert!(
+                rejected,
+                "plan node {mutation} must fail under the independent challenge set"
+            );
         }
     }
 }
