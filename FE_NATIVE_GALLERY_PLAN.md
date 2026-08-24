@@ -2306,6 +2306,12 @@ Before deriving the production schedule, source-level review pinned sppark
     `Pair` exchange may use registers, shared memory, or optional subgroups.
     Hardware policy selects among exactness-gated interpretations and never
     becomes a second semantic prover.
+11. Preserve Elliott's composition-balanced `Bush` as a named scan/FFT family,
+    alongside right-associated DIT and left-associated DIF forms. Generalize
+    these into one typed factor tree so register, workgroup, and dispatch tiles
+    can follow arbitrary exact factorizations without restricting production
+    domains to the literal bush sizes `2^(2^N)`. Derive algorithm, work/depth,
+    fanout/communication, and placement from that tree, not from parallel tables.
 
 The detailed source audit and links live in
 `/workspace/scratch/mb2-cuda-proof-scheduling-audit-2026-08-24.md`; this durable
@@ -2429,6 +2435,21 @@ SSOT carries the architectural decisions and gates.
    abort, timeout, and backpressure effects exist. It should prove nested
    component and network lifecycles without expanding the fixed browser host
    into an application-aware data client.
+9. Add a deliberately small **Three Fe Backends** warmup in addition to the
+   full Mandelbrot proof capstone. One ordinary shared Fe kernel is evaluated
+   as a batch by WebGPU, checked by Fe Wasm, and accepted or rejected by a Fe
+   contract running inside revm-Wasm in the browser. Keep the application actor
+   generic over typed `Compute<Kernel, Input, Output>` and
+   `Verify<Claim, Output, Verdict>` effects. Provide at least two stacks:
+   `ScalarFeCompute + DirectFeVerify` for deterministic tests and
+   `WebGpuCompute + RevmWasmVerify` for the real browser path. Both stacks use
+   the same `Pending`/`Wait` lifecycle, even when the test provider completes
+   immediately, so switching providers requires no application branch or
+   numeric backend ID. The fixed host transports opaque buffers, raw EVM
+   runtime/calldata, and browser promise completion only; it contains no kernel,
+   verifier, ABI policy, or expected result. Gate real/test equivalence,
+   mutated-output rejection, zero application-specific JavaScript, and reuse of
+   these exact effects by the later Mandelbrot proof UI.
 
 Exit condition: the raw Fe demos are short and readable while expanding through
 CTFE/providers/reflection into the full typed program.
