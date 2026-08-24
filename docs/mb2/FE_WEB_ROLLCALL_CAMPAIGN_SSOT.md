@@ -356,7 +356,17 @@ existing Definition of done, not a second campaign checklist:
 - [ ] Establish cold, warm, and invalidation compile budgets. The 2026-08-15
   Rollcall evidence refresh took 5m 14s to rebuild a broad release codegen
   chain after a generator-only source edit, which is the current invalidation
-  baseline to beat.
+  baseline to beat. The 2026-08-24 compile-parallelism audit fixes the order of
+  work: add check-compatible phase and Salsa counters, remove repeated HIR,
+  voucher, dependency-digest, and duplicate gallery compile work, then pilot
+  bounded read-only concurrency. Use Salsa forks only outside tracked queries;
+  keep DOM planning/publication serial; begin with two owned-database web or
+  codegen workers and at most four analysis-only workers; retain a deterministic
+  `jobs = 1` reference. Gates require identical sorted diagnostics, artifacts,
+  proof words, roots, transcripts, challenges, codewords, and mutation matrices,
+  plus measured release median/p95 and peak RSS. The full evidence and five
+  landable slices are in
+  `/workspace/scratch/mb2-fe-compile-parallelism-audit-2026-08-24.md`.
 
 ## F. Rollcall cryptographic capstone
 

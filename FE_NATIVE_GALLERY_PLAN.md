@@ -1661,6 +1661,21 @@ NTT, portable stage-grid WebGPU NTT, typed proof regions, complete ordered
 receipt, recursive provider and interactive browser shell, with SourceAtlas
 inspection joining once real semantic, placement, and layout records exist.
 
+The compile-parallelism audit is recorded at
+`/workspace/scratch/mb2-fe-compile-parallelism-audit-2026-08-24.md`. Its order
+is binding for performance work: instrument both Cargo dev and release
+binaries, eliminate repeated semantic and diagnostic work, then add bounded
+parallelism only at already independent dependency, module, body-owner,
+artifact, or pure-oracle frontiers. Compiler query workers use Salsa forks
+outside tracked queries. Gallery compilation keeps DOM planning and publication
+serial, compiles deduplicated owned requests with at most two fresh-database
+workers initially, and publishes by source order. Analysis-only work starts at
+at most four workers. Every path retains a `jobs = 1` reference and must produce
+identical diagnostics, artifacts, proof values, and mutation results. Do not
+parallelize one mutable proof forest, one Wasmtime store, DOM mutation, or
+ordered transcript dependencies. This is a host implementation policy, not a
+second semantic schedule beside the Fe/Conal WebGPU program.
+
 | Utility family | Proven now | Possible-now consolidation | Ideal/compiler-enabled endpoint |
 | --- | --- | --- | --- |
 | Runtime control | Typed `Pending`, `TaskOutcome`, nominal `Suspend`, generated continuation states, resident/scoped actors, typed actor sinks, timer suspension | One `std::runtime` facade; reusable source-to-actor forwarding; explicit scope/supervision policies | ZIO-like typed environment/exit/scope in Fe without a boxed monadic runtime; compiler-derived task handles and exactly-once structured cancellation |
