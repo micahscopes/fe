@@ -1549,17 +1549,31 @@ Legend:
   the full production 4,096-row placement and 8,192-row LDE through
   zero-import 395,467-byte Wasm in 1,019.47 seconds.
 
+  Commit `7001de5b7` linearizes the terminal balance shared by all four copy
+  buses. Pair-row constraints already accumulate every preceding row, while
+  the independent control terminal and ordinary all-row constraints require
+  the final row to be canonical padding with zero port coefficients. The
+  terminal therefore checks the stored prefix accumulator directly instead of
+  recomputing a quadratic zero delta. A focused zero-import Fe/Wasm gate proves
+  all four padding-row deltas are zero and separately mutates the product,
+  round, linear, and boundary accumulators; every mutation fails exactly one
+  linear terminal equation. It passes in 620.55 seconds. The exact shape gate
+  passes in 693.76 seconds and confirms that the last-row family fell from
+  degree 2 to degree 1. A broad scalar receipt run independently reproduced the
+  product and round receipts before exposing stale pre-plan constraint-count
+  expectations; those counts now include every committed plan residual, while
+  the complete broad rerun remains part of final receipt revalidation.
+
   The exact production shape is now 586 constraints with family degrees
-  `[4, 6, 1, 2]`, component degrees `[3, 4, 2, 2, 2, 2]`, maximum expression
+  `[4, 6, 1, 1]`, component degrees `[3, 4, 2, 2, 2, 2]`, maximum expression
   degree 6, and composition-degree bound 20,475. This is a strict reduction
   from degree 19 and bound 73,709, but it still does not fit the 4,096-row
   trace-degree domain. The remaining target is explicit: all-row and pair-row
   expressions must be at most quadratic, while first-row and last-row
-  expressions must be linear. The arithmetic adjacency relation is the sole
-  degree-6 family, arithmetic rows remain degree 4, control remains degree 3,
-  and the terminal family must fall from degree 2 to degree 1. The next
-  reductions should linearize the padding-row copy-bus terminal convention,
-  then share explicit plans across arithmetic adjacency/rows and control.
+  expressions must be linear. Both boundary families now meet their target.
+  The arithmetic adjacency relation is the sole degree-6 family, arithmetic
+  rows remain degree 4, and control remains degree 3. The next reductions must
+  share explicit plans across arithmetic adjacency/rows and control.
   Only once the derived composition bound fits may the security
   profile be committed into the transcript. The
   assembled regression receipt still carries four queries. The compact
@@ -1697,9 +1711,9 @@ fallback. The semantic receipts are:
    hardware test binaries in the runbook remain to be executed without skips.
 2. Continue the quadratic reduction from maximum degree 6 and composition
    bound 20,475. The boundary, round, and linear copy interactions are now
-   degree 2. Linearize the last-row copy-bus terminal convention, then lower
-   the degree-6 arithmetic adjacency, degree-4 arithmetic rows, and degree-3
-   control expressions through
+   degree 2, and the last-row terminal is degree 1. Lower the degree-6
+   arithmetic adjacency, degree-4 arithmetic rows, and degree-3 control
+   expressions through
    compact Fe-authored plans and semantic roles. Keep every plan shared by
    witness generation, constraint evaluation, degree analysis, and later GPU
    schedules, with independent semantic and mutation gates. Once the derived
