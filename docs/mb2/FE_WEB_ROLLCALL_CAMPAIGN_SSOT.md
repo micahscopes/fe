@@ -1523,19 +1523,27 @@ Legend:
   that same Fe-authored expression. The independent BabyBear oracle
   reconstructs every node and requires each single-node mutation to fail
   under the independent challenge set. The exact shape gate confirms that the
-  boundary component fell from degree 7 to degree 2. The canonical base row is
-  now 65 fields wide. The production base-LDE checkpoint and assembled receipt
-  still need to be rerun against that widened schema.
+  boundary component fell from degree 7 to degree 2. At that checkpoint the
+  canonical base row became 65 fields wide; its assembled receipt remained to
+  be rerun against the widened schema.
 
-  The exact production shape is now 496 constraints with family degrees
-  `[7, 6, 1, 6]`, component degrees `[3, 4, 2, 7, 7, 2]`, maximum expression
+  Commit `421e93e2a` interprets the five rounding ports through one shared
+  thirty-eight-node quadratic plan. The independent BabyBear oracle matches
+  every node on guard, output-digit, current-sign, round-consumer, and
+  finish-consumer rows, then rejects all thirty-eight single-node mutations.
+  The production 4,096-row base placement and 8,192-row LDE execute through
+  zero-import Wasm with the widened 103-field base row. That exact production
+  gate passes in 768.09 seconds.
+
+  The exact production shape is now 534 constraints with family degrees
+  `[7, 6, 1, 6]`, component degrees `[3, 4, 2, 2, 7, 2]`, maximum expression
   degree 7, and composition-degree bound 24,569. This is a strict reduction
   from degree 19 and bound 73,709, but it still does not fit the 4,096-row
   trace-degree domain. The remaining target is explicit: all-row and pair-row
   expressions must be at most quadratic, while first-row and last-row
-  expressions must be linear. Round and linear copy interactions now share
-  the degree-7 maximum; the control row is degree 3 and arithmetic is degree
-  4. Only once the derived composition bound fits may the security
+  expressions must be linear. The linear copy interaction is now the sole
+  degree-7 component; the control row is degree 3 and arithmetic is degree 4.
+  Only once the derived composition bound fits may the security
   profile be committed into the transcript. The
   assembled regression receipt still carries four queries. The compact
   114-query range must subsequently drive real sampling, openings,
@@ -1671,8 +1679,8 @@ fallback. The semantic receipts are:
    Radeon 780M through RADV after the private-heap fix. The four standalone
    hardware test binaries in the runbook remain to be executed without skips.
 2. Continue the quadratic reduction from maximum degree 7 and composition
-   bound 24,569. The boundary copy interaction is now degree 2. Lower the
-   shared round and linear copy interactions, then the degree-4 arithmetic and
+   bound 24,569. The boundary and round copy interactions are now degree 2.
+   Lower the linear copy interaction, then the degree-4 arithmetic and
    degree-3 control expressions, through
    compact Fe-authored plans and semantic roles. Keep every plan shared by
    witness generation, constraint evaluation, degree analysis, and later GPU
