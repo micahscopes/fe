@@ -1578,18 +1578,37 @@ Legend:
   widened 171-field base row then executes full production 4,096-row placement
   and 8,192-row LDE through zero-import 395,467-byte Wasm in 690.37 seconds.
 
-  The exact production shape is now 602 constraints with family degrees
-  `[3, 6, 1, 1]`, component degrees `[3, 2, 2, 2, 2, 2]`, maximum expression
-  degree 6, and composition-degree bound 20,475. This is a strict reduction
-  from degree 19 and bound 73,709, but it still does not fit the 4,096-row
-  trace-degree domain. The remaining target is explicit: all-row and pair-row
-  expressions must be at most quadratic, while first-row and last-row
+  Commit `b974ed27e` expresses outgoing arithmetic adjacency as a second shared
+  eighteen-node DAG. It materializes phase-link selectors, carry reset and
+  retained state, product and rounding handoffs, and all three signed-linear
+  ripple links. An independent BabyBear oracle scans the actual production
+  schedule to prove every node has a nonzero semantic case, matches all nodes,
+  and rejects each single-node mutation under five challenges. That gate
+  passes in 99.11 seconds. A new pair-component structural report executes the
+  exact six production adjacency evaluators independently rather than hiding
+  them behind the family maximum. It proves arithmetic and every copy-bus
+  adjacency are degree 2, while control adjacency is degree 5. The exact shape
+  gate passes in 439.40 seconds. The widened 189-field base row then executes
+  the production 4,096-row placement and 8,192-row LDE through zero-import
+  395,467-byte Wasm in 658.72 seconds.
+
+  The exact production shape is now 620 constraints with family degrees
+  `[3, 5, 1, 1]`, all-row component degrees `[3, 2, 2, 2, 2, 2]`, and
+  pair-row component degrees `[5, 2, 2, 2, 2, 2]`. The maximum expression
+  degree is 5 and the composition-degree bound is 16,380. This is a strict
+  reduction from degree 19 and bound 73,709, but it still does not fit the
+  4,096-row trace-degree domain. The remaining target is explicit: all-row and
+  pair-row expressions must be at most quadratic, while first-row and last-row
   expressions must be linear. Both boundary families now meet their target.
-  Arithmetic rows now meet their target. The pair-row family still combines
-  high-degree arithmetic scan links with the control-state transition table,
-  and control-local expressions remain degree 3. The next reductions must
-  share explicit plans across arithmetic adjacency and control local/link
-  expressions.
+  Every non-control evaluator now meets its target. Control-local expressions
+  remain degree 3 and the deterministic control transition table remains
+  degree 5. The next reduction is therefore isolated to control. Two honest
+  implementations remain under audit: a shared local/link control DAG, or a
+  Fe-derived preprocessed control trace with a separately domain-tagged known
+  root and authenticated query openings. Preprocessing is acceptable only if
+  an independent root oracle, fixed-column authentication, and composition use
+  of the fixed LDE values remain explicit. It must not become an unbound host
+  constant or a way to omit the control proof obligation.
   Only once the derived composition bound fits may the security
   profile be committed into the transcript. The
   assembled regression receipt still carries four queries. The compact
@@ -1725,11 +1744,10 @@ fallback. The semantic receipts are:
    `mandelbrot_proof_gpu` clean and tampered Chromium modes now pass on AMD
    Radeon 780M through RADV after the private-heap fix. The four standalone
    hardware test binaries in the runbook remain to be executed without skips.
-2. Continue the quadratic reduction from maximum degree 6 and composition
-   bound 20,475. The boundary, round, linear copy, and arithmetic-row
-   expressions are now degree 2, and the last-row terminal is degree 1. Lower
-   the remaining degree-6 arithmetic/control adjacency and degree-3
-   control-local expressions through
+2. Continue the quadratic reduction from maximum degree 5 and composition
+   bound 16,380. Every non-control all-row and pair-row evaluator is now degree
+   2, and the last-row terminal is degree 1. Lower or preprocess the remaining
+   degree-5 control adjacency and degree-3 control-local expressions through
    compact Fe-authored plans and semantic roles. Keep every plan shared by
    witness generation, constraint evaluation, degree analysis, and later GPU
    schedules, with independent semantic and mutation gates. Once the derived
