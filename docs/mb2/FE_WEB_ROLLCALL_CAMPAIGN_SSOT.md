@@ -290,6 +290,20 @@ Legend:
   sole gallery source; `demos/gallery/`, its `copy-dir` declaration, and the
   legacy landing link are gone. Gate:
   `repository_has_one_canonical_gallery_source`.
+- [ ] Evolve SourceInspector into a rich Fe-owned source explorer without
+  discarding the existing fe-web component experience. Preserve syntax
+  highlighting, semantic links, fuzzy search, symbol outlines, documentation
+  and signatures, definitions/references/implementors, navigation history,
+  deep links, keyboard/focus behavior, and authored-source/WGSL/Wasm/generated
+  provenance views. The resident Fe actor must own query interpretation,
+  ranking, routing, selection, cross-link, outline, and explanation policy.
+  The fixed host may realize DOM ranges, scrolling, history, and raw standards
+  events, but must not acquire source-navigation policy. Feed the component a
+  typed, content-addressed compiler `SourceAtlas` or equivalent binary value,
+  never a caller-authored JSON manifest. First harden deterministic multi-file
+  semantic indexing and add real browser gates, then use this application to
+  drive ergonomic owned resident text, scoped browser handles, and rich-code
+  patch operations in Fe.
 - [~] The current compiler worktree again compiles all 12 canonical render
   actors in one sweep, plus all three resident actors and the Fe page
   projection. The perturbation regression was a redundant fresh-record
