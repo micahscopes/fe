@@ -2283,6 +2283,29 @@ Before deriving the production schedule, source-level review pinned sppark
    Fiat-Shamir fixes the indices.
 7. Reuse one balanced-reduction abstraction for Merkle layers and recursive
    Mandelbrot leaf/merge aggregation, with distinct typed domains and tags.
+8. Apply Elliott's two constructions separately and explicitly. The generic
+   scan/FFT construction supplies the type-factored radix-two algorithm and its
+   compositional work/depth analyses. Compiling to categories supplies multiple
+   homomorphic interpretations of ordinary Fe math. A typed proof DAG may be a
+   compiler/FCO artifact, but must not become an author-written deep embedding
+   or numeric instruction format that loses source sharing. Revisit the older
+   conclusion that scan had no near-term customer: the proof engine now supplies
+   exact-field batch inversion, root/twiddle power generation, and applicable
+   running-product columns. Keep ordered Merkle hashes and transcript sequencing
+   outside associative scan where their laws do not permit reassociation.
+9. Close the current NTT honesty gap before calling the GPU transform derived.
+   The production transform is field-generic and const-sized, but its internal
+   butterfly network remains an indexed loop; its `Radix2ColumnPlan` only types
+   the independent column batch. The old `ntt_par_exec.fe` also hand-matches
+   `Par` and `Comp`. Lift the internal network to the same genuinely type-driven
+   standard already demonstrated by `conal_scan_exec.fe`, then interpret that
+   one factorization as scalar, portable stage grid, and fused workgroup forms.
+10. Treat CUDA launch plans as measured placement evidence. Fused stage groups
+    are associations of consecutive `Comp` phases; a device dispatch realizes
+    an outer boundary, an in-workgroup barrier realizes a fused boundary, and a
+    `Pair` exchange may use registers, shared memory, or optional subgroups.
+    Hardware policy selects among exactness-gated interpretations and never
+    becomes a second semantic prover.
 
 The detailed source audit and links live in
 `/workspace/scratch/mb2-cuda-proof-scheduling-audit-2026-08-24.md`; this durable
