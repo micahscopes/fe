@@ -1564,16 +1564,32 @@ Legend:
   expectations; those counts now include every committed plan residual, while
   the complete broad rerun remains part of final receipt revalidation.
 
-  The exact production shape is now 586 constraints with family degrees
-  `[4, 6, 1, 1]`, component degrees `[3, 4, 2, 2, 2, 2]`, maximum expression
+  Commit `3d9429b7b` extends the arithmetic plan from its seven-node signed
+  finish graph into one shared twenty-three-node row-arithmetic DAG. It covers
+  bitness, radix reconstruction, carry reconstruction, convolution products,
+  product-sign selection, signed-linear magnitude selection, and the final
+  sign choice. The plan shares the radix `state_before * value` product with
+  signed-linear selection, expresses difference selection as one affine
+  adjustment, and reuses the accumulator bit-square in the finish balance.
+  An independent BabyBear reconstruction matches all twenty-three nodes and
+  rejects every single-node mutation; that focused gate passes in 116.70
+  seconds. The exact structural interpreter passes in 323.25 seconds and
+  proves the arithmetic all-row component fell from degree 4 to degree 2. The
+  widened 171-field base row then executes full production 4,096-row placement
+  and 8,192-row LDE through zero-import 395,467-byte Wasm in 690.37 seconds.
+
+  The exact production shape is now 602 constraints with family degrees
+  `[3, 6, 1, 1]`, component degrees `[3, 2, 2, 2, 2, 2]`, maximum expression
   degree 6, and composition-degree bound 20,475. This is a strict reduction
   from degree 19 and bound 73,709, but it still does not fit the 4,096-row
   trace-degree domain. The remaining target is explicit: all-row and pair-row
   expressions must be at most quadratic, while first-row and last-row
   expressions must be linear. Both boundary families now meet their target.
-  The arithmetic adjacency relation is the sole degree-6 family, arithmetic
-  rows remain degree 4, and control remains degree 3. The next reductions must
-  share explicit plans across arithmetic adjacency/rows and control.
+  Arithmetic rows now meet their target. The pair-row family still combines
+  high-degree arithmetic scan links with the control-state transition table,
+  and control-local expressions remain degree 3. The next reductions must
+  share explicit plans across arithmetic adjacency and control local/link
+  expressions.
   Only once the derived composition bound fits may the security
   profile be committed into the transcript. The
   assembled regression receipt still carries four queries. The compact
@@ -1710,10 +1726,10 @@ fallback. The semantic receipts are:
    Radeon 780M through RADV after the private-heap fix. The four standalone
    hardware test binaries in the runbook remain to be executed without skips.
 2. Continue the quadratic reduction from maximum degree 6 and composition
-   bound 20,475. The boundary, round, and linear copy interactions are now
-   degree 2, and the last-row terminal is degree 1. Lower the degree-6
-   arithmetic adjacency, degree-4 arithmetic rows, and degree-3 control
-   expressions through
+   bound 20,475. The boundary, round, linear copy, and arithmetic-row
+   expressions are now degree 2, and the last-row terminal is degree 1. Lower
+   the remaining degree-6 arithmetic/control adjacency and degree-3
+   control-local expressions through
    compact Fe-authored plans and semantic roles. Keep every plan shared by
    witness generation, constraint evaluation, degree analysis, and later GPU
    schedules, with independent semantic and mutation gates. Once the derived
