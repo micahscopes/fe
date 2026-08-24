@@ -5072,11 +5072,14 @@ pub fn evaluate_sparse_arithmetic_initial<F: Radix2Field>(
     }
 }
 
-struct SparseCopyPort<F: Radix2Field> {
-    selector: F,
-    coefficient: F,
-    address: F,
-    value: F,
+/// One typed copy-bus contribution. This is public so degree, witness,
+/// constraint, and later scheduling interpreters can inspect the same authored
+/// port expressions without copying their selector or address arithmetic.
+pub struct SparseCopyPort<F: Radix2Field> {
+    pub selector: F,
+    pub coefficient: F,
+    pub address: F,
+    pub value: F,
 }
 impl<F: Radix2Field> core::marker::Copy for SparseCopyPort<F> {}
 
@@ -5708,7 +5711,7 @@ fn sparse_round_nonzero_address<F: Radix2Field, const L: usize>(
     add(sparse_round_sign_address<F, L>(rank), natural<F>(11))
 }
 
-fn write_sparse_round_interaction_ports<F: Radix2Field, const L: usize>(
+pub fn write_sparse_round_interaction_ports<F: Radix2Field, const L: usize>(
     _ control: SparseControlRow<F>,
     _ next_control: SparseControlRow<F>,
     _ row: SparseTaskRow<F>,
@@ -6153,7 +6156,7 @@ fn sparse_linear_select_address<F: Radix2Field, const L: usize>(
     add(natural<F>(31 * L.downcast_truncate() + 74), node)
 }
 
-fn write_sparse_linear_interaction_ports<
+pub fn write_sparse_linear_interaction_ports<
     F: Radix2Field,
     const L: usize,
 >(
@@ -6601,7 +6604,7 @@ fn sparse_boundary_next_coordinate<F: Radix2Field>(
     control.range_roles.next_coordinate
 }
 
-fn write_sparse_boundary_interaction_ports<
+pub fn write_sparse_boundary_interaction_ports<
     F: Radix2Field,
     const L: usize,
 >(

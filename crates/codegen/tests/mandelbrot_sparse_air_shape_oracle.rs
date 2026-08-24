@@ -37,6 +37,59 @@ fn call_words(
         .collect()
 }
 
+fn assert_copy_port_degree_shapes(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    export: &str,
+    port_count: u32,
+) -> Vec<[u32; 9]> {
+    let mut shapes = Vec::new();
+    for index in 0..port_count {
+        let words = call_words(store, instance, export, &[index], 9);
+        let shape: [u32; 9] = words
+            .try_into()
+            .expect("copy-port degree shape has nine words");
+        assert_eq!(shape[0], 1, "{export} port {index} must be valid");
+
+        let selector = shape[1];
+        let coefficient = shape[2];
+        let address = shape[3];
+        let value = shape[4];
+        let compressed = address.max(value);
+        let selected_inverse_relation = compressed.saturating_add(1).max(selector);
+        let zero_inverse_relation = selector.saturating_add(1);
+        let inverse_relation = selected_inverse_relation.max(zero_inverse_relation);
+        let delta = coefficient.saturating_add(1);
+        let maximum = [
+            selector,
+            coefficient,
+            address,
+            value,
+            compressed,
+            inverse_relation,
+            delta,
+        ]
+        .into_iter()
+        .max()
+        .unwrap();
+
+        assert_eq!(shape[5], compressed, "{export} port {index} compression");
+        assert_eq!(
+            shape[6], inverse_relation,
+            "{export} port {index} inverse relation",
+        );
+        assert_eq!(shape[7], delta, "{export} port {index} accumulator delta");
+        assert_eq!(shape[8], maximum, "{export} port {index} maximum");
+        shapes.push(shape);
+    }
+    assert_eq!(
+        call_words(store, instance, export, &[port_count], 9),
+        vec![0; 9],
+        "{export} must fail closed outside its nominal port width",
+    );
+    shapes
+}
+
 fn quotient_degree_bound(trace_length: u32, expression_degree: u32, zerofier: u32) -> u32 {
     expression_degree
         .checked_mul(trace_length - 1)
@@ -144,4 +197,53 @@ fn exact_composition_interpreter_derives_the_audited_air_shape() {
         "component interpretation must retain exact validity and degrees",
     );
     assert_eq!(components[7], degrees[1]);
+
+    let round = assert_copy_port_degree_shapes(
+        &mut store,
+        &instance,
+        "sparse_round_port_degree_shape_l4",
+        5,
+    );
+    let linear = assert_copy_port_degree_shapes(
+        &mut store,
+        &instance,
+        "sparse_linear_port_degree_shape_l4",
+        8,
+    );
+    let boundary = assert_copy_port_degree_shapes(
+        &mut store,
+        &instance,
+        "sparse_boundary_port_degree_shape_l4",
+        2,
+    );
+    assert_eq!(
+        round,
+        vec![
+            [1, 4, 4, 6, 5, 6, 7, 5, 7],
+            [1, 2, 2, 4, 3, 4, 5, 3, 5],
+            [1, 2, 2, 4, 3, 4, 5, 3, 5],
+            [1, 2, 2, 4, 3, 4, 5, 3, 5],
+            [1, 1, 1, 3, 2, 3, 4, 2, 4],
+        ],
+        "round ports must retain their exact production degree attribution",
+    );
+    assert_eq!(
+        linear,
+        vec![
+            [1, 2, 5, 6, 1, 6, 7, 6, 7],
+            [1, 2, 5, 6, 1, 6, 7, 6, 7],
+            [1, 2, 2, 3, 3, 3, 4, 3, 4],
+            [1, 3, 3, 4, 1, 4, 5, 4, 5],
+            [1, 3, 3, 4, 4, 4, 5, 4, 5],
+            [1, 2, 2, 3, 1, 3, 4, 3, 4],
+            [1, 1, 1, 2, 4, 4, 5, 2, 5],
+            [1, 1, 1, 2, 2, 2, 3, 2, 3],
+        ],
+        "linear ports must retain their exact production degree attribution",
+    );
+    assert_eq!(
+        boundary,
+        vec![[1, 5, 5, 6, 6, 6, 7, 6, 7], [1, 1, 1, 2, 2, 2, 3, 2, 3],],
+        "boundary ports must retain their exact production degree attribution",
+    );
 }

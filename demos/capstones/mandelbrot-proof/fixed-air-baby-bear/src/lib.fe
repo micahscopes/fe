@@ -34,6 +34,7 @@ use mandelbrot_proof_fixed_air_core::{
     SparseArithmeticPlanWitness,
     SparseControlRow,
     SparseControlSelectors,
+    SparseCopyPort,
     SparseCopyChallenges,
     SparseCopyInteractionRow,
     SparseLimbPositionSelectors,
@@ -79,9 +80,12 @@ use mandelbrot_proof_fixed_air_core::{
     sparse_transition_task_count,
     sparse_transition_trace_length,
     write_sparse_boundary_interaction_row,
+    write_sparse_boundary_interaction_ports,
     write_sparse_linear_interaction_row,
+    write_sparse_linear_interaction_ports,
     write_sparse_product_interaction_row,
     write_sparse_round_interaction_row,
+    write_sparse_round_interaction_ports,
     zero_sparse_arithmetic_plan_witness,
     zero_sparse_product_interaction_row,
 }
@@ -879,6 +883,24 @@ pub struct SparseAirAllRowsDegreeShape {
 impl core::marker::Copy for SparseAirAllRowsDegreeShape {}
 derive CanonicalWords for SparseAirAllRowsDegreeShape using CanonicalWordsProvider
 
+/// Degree attribution for one exact authored copy-bus port. The report keeps
+/// the port expression, inverse relation, and accumulator contribution
+/// separate so a lowering plan can target the actual peak instead of copying
+/// or approximating the production port arithmetic.
+pub struct SparseCopyPortDegreeShape {
+    pub valid: bool,
+    pub selector: u32,
+    pub coefficient: u32,
+    pub address: u32,
+    pub value: u32,
+    pub compressed: u32,
+    pub inverse_relation: u32,
+    pub delta: u32,
+    pub maximum: u32,
+}
+impl core::marker::Copy for SparseCopyPortDegreeShape {}
+derive CanonicalWords for SparseCopyPortDegreeShape using CanonicalWordsProvider
+
 /// Consecutive composition powers continue across zerofier families, matching
 /// the established AIR composition convention while allowing each generic
 /// fixed-air evaluator to retain its own readable constraint fold.
@@ -1443,6 +1465,165 @@ where L > 1,
         boundary: boundary.folded.degree,
         maximum: maximum,
     }
+}
+
+fn invalid_sparse_copy_port_degree_shape() -> SparseCopyPortDegreeShape {
+    SparseCopyPortDegreeShape {
+        valid: false,
+        selector: 0,
+        coefficient: 0,
+        address: 0,
+        value: 0,
+        compressed: 0,
+        inverse_relation: 0,
+        delta: 0,
+        maximum: 0,
+    }
+}
+
+fn sparse_degree_copy_port() -> SparseCopyPort<AirPolynomialDegree> {
+    let constant = AirPolynomialDegree::constant()
+    SparseCopyPort {
+        selector: constant,
+        coefficient: constant,
+        address: constant,
+        value: constant,
+    }
+}
+
+fn sparse_copy_port_degree_shape(
+    _ port: SparseCopyPort<AirPolynomialDegree>,
+    _ inverse: AirPolynomialDegree,
+    _ schema_valid: bool,
+) -> SparseCopyPortDegreeShape {
+    let constant = AirPolynomialDegree::constant()
+    let compressed = constant.radix2_add(
+        port.address.radix2_add(constant.radix2_mul(port.value)),
+    )
+    let selected_inverse = compressed.radix2_mul(inverse).radix2_sub(
+        port.selector,
+    )
+    let zero_inverse = constant.radix2_sub(port.selector).radix2_mul(inverse)
+    let inverse_relation = selected_inverse.maximum(zero_inverse)
+    let delta = port.coefficient.radix2_mul(inverse)
+    let maximum = port.selector
+        .maximum(port.coefficient)
+        .maximum(port.address)
+        .maximum(port.value)
+        .maximum(compressed)
+        .maximum(inverse_relation)
+        .maximum(delta)
+    SparseCopyPortDegreeShape {
+        valid: schema_valid && maximum.valid,
+        selector: port.selector.degree,
+        coefficient: port.coefficient.degree,
+        address: port.address.degree,
+        value: port.value.degree,
+        compressed: compressed.degree,
+        inverse_relation: inverse_relation.degree,
+        delta: delta.degree,
+        maximum: maximum.degree,
+    }
+}
+
+fn sparse_degree_rows_valid(
+    _ base_source: AirPolynomialVariableSource,
+    _ interaction_source: AirPolynomialVariableSource,
+) -> bool {
+    base_source.valid
+        && interaction_source.valid
+        && base_source.cursor
+            == <SparseBaseAirRow<AirPolynomialDegree>
+                as CanonicalWords>::WORDS
+        && interaction_source.cursor
+            == <SparseInteractionTraceRow<AirPolynomialDegree>
+                as CanonicalWords>::WORDS
+}
+
+/// Attribute one of the five exact round copy ports by interpreting the
+/// production port writer over the degree semiring.
+pub fn sparse_round_port_degree_shape<const L: usize>(
+    _ index: u32,
+) -> SparseCopyPortDegreeShape
+where L > 1,
+{
+    if index >= 5 { return invalid_sparse_copy_port_degree_shape() }
+    let mut base = zero_sparse_base_air_row_field<AirPolynomialDegree>()
+    let base_source = base.decode(AirPolynomialVariableSource::new())
+    let mut interaction =
+        zero_sparse_interaction_trace_row_field<AirPolynomialDegree>()
+    let interaction_source = interaction.decode(
+        AirPolynomialVariableSource::new(),
+    )
+    let mut ports = [sparse_degree_copy_port(); 5]
+    write_sparse_round_interaction_ports<AirPolynomialDegree, L>(
+        base.control,
+        base.control,
+        base.witness,
+        mut ports,
+    )
+    sparse_copy_port_degree_shape(
+        ports[index as usize],
+        interaction.round.inverses[index as usize],
+        sparse_degree_rows_valid(base_source, interaction_source),
+    )
+}
+
+/// Attribute one of the eight exact signed-linear copy ports by interpreting
+/// the production port writer over the degree semiring.
+pub fn sparse_linear_port_degree_shape<const L: usize>(
+    _ index: u32,
+) -> SparseCopyPortDegreeShape
+where L > 1,
+{
+    if index >= 8 { return invalid_sparse_copy_port_degree_shape() }
+    let mut base = zero_sparse_base_air_row_field<AirPolynomialDegree>()
+    let base_source = base.decode(AirPolynomialVariableSource::new())
+    let mut interaction =
+        zero_sparse_interaction_trace_row_field<AirPolynomialDegree>()
+    let interaction_source = interaction.decode(
+        AirPolynomialVariableSource::new(),
+    )
+    let mut ports = [sparse_degree_copy_port(); 8]
+    write_sparse_linear_interaction_ports<AirPolynomialDegree, L>(
+        base.control,
+        base.control,
+        base.witness,
+        mut ports,
+    )
+    sparse_copy_port_degree_shape(
+        ports[index as usize],
+        interaction.linear.inverses[index as usize],
+        sparse_degree_rows_valid(base_source, interaction_source),
+    )
+}
+
+/// Attribute one of the two exact public-boundary copy ports by interpreting
+/// the production port writer over the degree semiring.
+pub fn sparse_boundary_port_degree_shape<const L: usize>(
+    _ index: u32,
+) -> SparseCopyPortDegreeShape
+where L > 1,
+{
+    if index >= 2 { return invalid_sparse_copy_port_degree_shape() }
+    let mut base = zero_sparse_base_air_row_field<AirPolynomialDegree>()
+    let base_source = base.decode(AirPolynomialVariableSource::new())
+    let mut interaction =
+        zero_sparse_interaction_trace_row_field<AirPolynomialDegree>()
+    let interaction_source = interaction.decode(
+        AirPolynomialVariableSource::new(),
+    )
+    let mut ports = [sparse_degree_copy_port(); 2]
+    write_sparse_boundary_interaction_ports<AirPolynomialDegree, L>(
+        base.control,
+        base.witness,
+        mut ports,
+    )
+    sparse_copy_port_degree_shape(
+        ports[index as usize],
+        interaction.boundary.inverses[index as usize],
+        sparse_degree_rows_valid(base_source, interaction_source),
+    )
 }
 
 /// Evaluate the complete sparse high-precision AIR composition at one opened
