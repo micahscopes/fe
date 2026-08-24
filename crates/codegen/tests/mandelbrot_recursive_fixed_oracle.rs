@@ -1164,6 +1164,106 @@ fn expected_sparse_boundary_plan(control: [u32; 38], row: [u32; 6]) -> [u32; 14]
     ]
 }
 
+fn expected_sparse_round_plan(
+    control: [u32; 38],
+    next_control: [u32; 38],
+    row: [u32; 6],
+) -> [u32; 38] {
+    let limbs = LIMBS as u32;
+    let range_current = bb_mul(control[21], bb_sub(control[32], 2));
+    let product_role = bb_add(bb_add(control[23], control[24]), control[25]);
+    let range_product = bb_mul(product_role, bb_sub(control[32], 4));
+    let range_rank = bb_add(range_current, range_product);
+    let range_digit_address = bb_add(bb_mul(range_rank, limbs), control[33]);
+    let range_bit_address = bb_add(
+        11 * limbs,
+        bb_add(
+            bb_mul(range_rank, limbs * 13),
+            bb_add(bb_mul(control[33], 13), control[34]),
+        ),
+    );
+
+    let guard_role = bb_mul(control[0], control[23]);
+    let guard_position = bb_mul(guard_role, control[30]);
+    let guard_source = bb_mul(guard_position, next_control[1]);
+    let low_role = bb_mul(control[1], control[23]);
+    let low_source = bb_mul(low_role, control[31]);
+    let high_role = bb_mul(control[1], control[24]);
+    let high_source = bb_mul(high_role, next_control[0]);
+    let retained_source = bb_add(low_source, high_source);
+    let first_source = bb_add(guard_source, retained_source);
+    let output_digit_source = bb_mul(control[1], control[25]);
+    let output_finish_source = bb_mul(control[2], control[25]);
+    let current_sign_source = bb_mul(control[2], control[21]);
+    let round_consumer = control[7];
+    let finish_consumer = control[8];
+
+    let product_low_rank = bb_add(2, bb_mul(3, control[32]));
+    let product_output_rank = bb_add(product_low_rank, 2);
+    let retained_limb = bb_add(bb_sub(limbs, 1), control[33]);
+    let retained_address = bb_add(bb_mul(product_low_rank, limbs), retained_limb);
+    let output_digit_address =
+        bb_add(bb_mul(product_output_rank, limbs), control[33]);
+    let guard_address = bb_add(
+        11 * limbs,
+        bb_add(
+            bb_mul(product_low_rank, limbs * 13),
+            bb_add(bb_mul(limbs - 2, 13), 12),
+        ),
+    );
+    let sign_base = 11 * limbs + 11 * limbs * 13;
+    let output_sign_address = bb_add(sign_base, product_output_rank);
+    let output_nonzero_address = bb_add(output_sign_address, 11);
+    let left_rank = bb_mul(control[32], bb_sub(2, control[32]));
+    let right_rank_pair = bb_mul(control[32], bb_sub(3, control[32]));
+    let right_rank = bb_mul(right_rank_pair, bb_inverse(2));
+    let left_sign_address = bb_add(sign_base, left_rank);
+    let right_sign_address = bb_add(sign_base, right_rank);
+    let range_sign_address = bb_add(sign_base, range_rank);
+    let range_nonzero_address = bb_add(range_sign_address, 11);
+
+    [
+        range_current,
+        range_product,
+        guard_role,
+        guard_position,
+        guard_source,
+        low_role,
+        low_source,
+        high_role,
+        high_source,
+        output_digit_source,
+        output_finish_source,
+        current_sign_source,
+        left_rank,
+        right_rank_pair,
+        bb_mul(guard_source, range_bit_address),
+        bb_mul(retained_source, range_digit_address),
+        bb_mul(round_consumer, retained_address),
+        bb_mul(finish_consumer, guard_address),
+        bb_mul(bb_add(first_source, round_consumer), row[0]),
+        bb_mul(finish_consumer, row[4]),
+        bb_mul(output_digit_source, range_digit_address),
+        bb_mul(output_finish_source, range_sign_address),
+        bb_mul(round_consumer, output_digit_address),
+        bb_mul(finish_consumer, output_sign_address),
+        bb_mul(output_digit_source, row[0]),
+        bb_mul(output_finish_source, row[1]),
+        bb_mul(round_consumer, row[1]),
+        bb_mul(finish_consumer, row[0]),
+        bb_mul(output_finish_source, range_nonzero_address),
+        bb_mul(finish_consumer, output_nonzero_address),
+        bb_mul(output_finish_source, row[0]),
+        bb_mul(finish_consumer, row[1]),
+        bb_mul(current_sign_source, range_sign_address),
+        bb_mul(finish_consumer, left_sign_address),
+        bb_mul(current_sign_source, row[1]),
+        bb_mul(finish_consumer, row[3]),
+        bb_mul(finish_consumer, right_sign_address),
+        bb_mul(finish_consumer, row[5]),
+    ]
+}
+
 fn bb_pow(mut base: u32, mut exponent: u32) -> u32 {
     let mut result = 1;
     while exponent != 0 {
@@ -2748,6 +2848,97 @@ fn production_arithmetic_plan_matches_independent_nodes_and_rejects_mutations() 
             assert_eq!(&mutated[..7], expected.as_slice());
             assert_eq!(mutated[7], 1, "plan node {mutation} must fail closed");
             assert_eq!(mutated[8], baseline[8]);
+        }
+    }
+}
+
+#[test]
+fn production_round_plan_matches_independent_nodes_and_rejects_mutations() {
+    let entry = "fixed_transition4_sparse_round_plan_audit";
+    let bytes = compile_fixture_entry(entry);
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, bytes)
+        .expect("focused round-plan Wasm module should load");
+    assert_eq!(
+        module.imports().count(),
+        0,
+        "fixture must remain zero-import"
+    );
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("focused round-plan fixture should instantiate");
+
+    let point = ComplexFx {
+        real: fixed(true, 3, 4),
+        imaginary: fixed(false, 1, 8),
+    };
+    let current = ComplexFx {
+        real: fixed(false, 5, 4),
+        imaginary: fixed(true, 3, 8),
+    };
+    let tasks = expected_sparse_transition_tasks(LIMBS as u32);
+    let semantic_indices = [
+        tasks
+            .iter()
+            .position(|task| {
+                task[0] == 0
+                    && task[1] == 6
+                    && task[2] + 2 == LIMBS as u32
+                    && task[3] == 12
+            })
+            .expect("the schedule must contain a rounding guard source"),
+        tasks
+            .iter()
+            .position(|task| task[0] == 1 && task[1] == 8)
+            .expect("the schedule must contain a rounded output digit source"),
+        tasks
+            .iter()
+            .position(|task| task[0] == 2 && task[1] == 2)
+            .expect("the schedule must contain a current-sign source"),
+        tasks
+            .iter()
+            .position(|task| task[0] == 7)
+            .expect("the schedule must contain a round consumer"),
+        tasks
+            .iter()
+            .position(|task| task[0] == 8)
+            .expect("the schedule must contain a round finish consumer"),
+    ];
+    let controls = expected_sparse_control_rows();
+    let rows = expected_sparse_rows(&point, &current);
+
+    for index in semantic_indices {
+        let expected = expected_sparse_round_plan(
+            controls[index],
+            controls[index + 1],
+            rows[index],
+        );
+        for challenge in [3u32, 7, 31, 127, 257] {
+            let mut arguments = transition_arguments(&point, &current);
+            arguments.extend([index as u32, challenge, 0]);
+            let baseline = call(&mut store, &instance, entry, &arguments, 40);
+            assert_eq!(&baseline[..38], expected.as_slice());
+            assert_eq!(baseline[38], 0, "the clean round plan must satisfy the AIR");
+            assert_eq!(
+                baseline[39], 48,
+                "ten port constraints plus thirty-eight plan nodes"
+            );
+        }
+
+        for mutation in 1..=38u32 {
+            let mut rejected = false;
+            for challenge in [3u32, 7, 31, 127, 257] {
+                let mut arguments = transition_arguments(&point, &current);
+                arguments.extend([index as u32, challenge, mutation]);
+                let mutated = call(&mut store, &instance, entry, &arguments, 40);
+                assert_eq!(&mutated[..38], expected.as_slice());
+                rejected |= mutated[38] == 1;
+                assert_eq!(mutated[39], 48);
+            }
+            assert!(
+                rejected,
+                "round plan node {mutation} must fail under the independent challenge set"
+            );
         }
     }
 }

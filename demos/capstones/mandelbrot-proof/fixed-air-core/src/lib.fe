@@ -401,6 +401,23 @@ pub fn zero_sparse_product_interaction_row<F: Radix2Field>()
 /// sign, output nonzero, and the two input signs.
 pub type SparseRoundInteractionRow<F> = SparseCopyInteractionRow<F, 5>
 
+/// The five rounding ports share one thirty-eight-node dependency plan. Its
+/// committed nodes keep every source, address, and value selection affine;
+/// each node is constrained by one quadratic multiplication residual.
+pub const SPARSE_ROUND_PORT_MULTIPLICATIONS: usize = 38
+
+pub type SparseRoundPlanWitness<F> = QuadraticPlanWitness<
+    F,
+    SPARSE_ROUND_PORT_MULTIPLICATIONS,
+>
+
+pub fn zero_sparse_round_plan_witness<F: Radix2Field>()
+    -> SparseRoundPlanWitness<F> {
+    QuadraticPlanWitness {
+        nodes: [zero<F>(); SPARSE_ROUND_PORT_MULTIPLICATIONS],
+    }
+}
+
 /// Linear rows need six consumer ports plus two simultaneously derived
 /// control values on each finish row.
 pub type SparseLinearInteractionRow<F> = SparseCopyInteractionRow<F, 8>
@@ -5679,21 +5696,6 @@ pub fn evaluate_sparse_product_interaction_terminal<
     }
 }
 
-fn sparse_round_range_rank<F: Radix2Field>(
-    _ control: SparseControlRow<F>,
-) -> F {
-    let roles = control.range_roles
-    let current = sparse_product_current_coordinate(control)
-    let product = add(
-        add(roles.product_low, roles.product_high),
-        roles.product_output,
-    )
-    add(
-        mul(current, sub(control.major, natural<F>(2))),
-        mul(product, sub(control.major, natural<F>(4))),
-    )
-}
-
 fn sparse_round_digit_address<F: Radix2Field, const L: usize>(
     _ rank: F,
     _ limb: F,
@@ -5737,6 +5739,45 @@ pub fn write_sparse_round_interaction_ports<F: Radix2Field, const L: usize>(
 )
 where L > 1,
 {
+    let planned = sparse_round_copy_plan<
+        QuadraticValueInterpreter,
+        F,
+        L,
+    >(
+        control,
+        next_control,
+        row,
+        QuadraticValueInterpreter::new(),
+    )
+    output = planned.ports
+}
+
+struct SparseRoundCopyPlan<
+    I: QuadraticPlanInterpreter<F>,
+    F: Radix2Field,
+> {
+    interpreter: I,
+    ports: [SparseCopyPort<F>; 5],
+}
+impl<I: QuadraticPlanInterpreter<F>, F: Radix2Field> core::marker::Copy
+    for SparseRoundCopyPlan<I, F> {}
+
+/// One authored dependency plan for all five rounding ports. The direct,
+/// witness, and constraint interpretations below differ only in how each
+/// multiplication node is realized.
+fn sparse_round_copy_plan<
+    I: QuadraticPlanInterpreter<F>,
+    F: Radix2Field,
+    const L: usize,
+>(
+    _ control: SparseControlRow<F>,
+    _ next_control: SparseControlRow<F>,
+    _ row: SparseTaskRow<F>,
+    _ interpreter: I,
+) -> SparseRoundCopyPlan<I, F>
+where L > 1,
+{
+    let mut interpreter = interpreter
     let selectors = control.selectors
     let roles = control.range_roles
     let positions = control.limb_positions
@@ -5745,7 +5786,22 @@ where L > 1,
     let zero = zero<F>()
     let limbs: u32 = L.downcast_truncate()
     let limb_count = natural<F>(limbs)
-    let range_rank = sparse_round_range_rank(control)
+    let current = sparse_product_current_coordinate(control)
+    let product = add(
+        add(roles.product_low, roles.product_high),
+        roles.product_output,
+    )
+    let current_rank_step = interpreter.multiply(
+        current,
+        sub(control.major, natural<F>(2)),
+    )
+    interpreter = current_rank_step.interpreter
+    let product_rank_step = interpreter.multiply(
+        product,
+        sub(control.major, natural<F>(4)),
+    )
+    interpreter = product_rank_step.interpreter
+    let range_rank = add(current_rank_step.value, product_rank_step.value)
     let range_digit_address = sparse_round_digit_address<F, L>(
         range_rank, control.minor,
     )
@@ -5753,34 +5809,63 @@ where L > 1,
         range_rank, control.minor, control.step,
     )
 
-    let guard_source = mul(
-        mul(
-            mul(selectors.radix_bit, roles.product_low),
-            positions.penultimate,
-        ),
+    let guard_role_step = interpreter.multiply(
+        selectors.radix_bit,
+        roles.product_low,
+    )
+    interpreter = guard_role_step.interpreter
+    let guard_position_step = interpreter.multiply(
+        guard_role_step.value,
+        positions.penultimate,
+    )
+    interpreter = guard_position_step.interpreter
+    let guard_source_step = interpreter.multiply(
+        guard_position_step.value,
         next_selectors.radix_limb,
     )
-    let low_retained_source = mul(
-        mul(selectors.radix_limb, roles.product_low),
+    interpreter = guard_source_step.interpreter
+    let guard_source = guard_source_step.value
+    let low_role_step = interpreter.multiply(
+        selectors.radix_limb,
+        roles.product_low,
+    )
+    interpreter = low_role_step.interpreter
+    let low_source_step = interpreter.multiply(
+        low_role_step.value,
         positions.last,
     )
-    let high_retained_source = mul(
-        mul(selectors.radix_limb, roles.product_high),
+    interpreter = low_source_step.interpreter
+    let low_retained_source = low_source_step.value
+    let high_role_step = interpreter.multiply(
+        selectors.radix_limb,
+        roles.product_high,
+    )
+    interpreter = high_role_step.interpreter
+    let high_source_step = interpreter.multiply(
+        high_role_step.value,
         next_selectors.radix_bit,
     )
+    interpreter = high_source_step.interpreter
+    let high_retained_source = high_source_step.value
     let retained_source = add(low_retained_source, high_retained_source)
     let first_source = add(guard_source, retained_source)
 
-    let output_digit_source = mul(
+    let output_digit_step = interpreter.multiply(
         selectors.radix_limb, roles.product_output,
     )
-    let output_finish_source = mul(
+    interpreter = output_digit_step.interpreter
+    let output_digit_source = output_digit_step.value
+    let output_finish_step = interpreter.multiply(
         selectors.radix_finish, roles.product_output,
     )
-    let current_sign_source = mul(
+    interpreter = output_finish_step.interpreter
+    let output_finish_source = output_finish_step.value
+    let current_sign_step = interpreter.multiply(
         selectors.radix_finish,
-        sparse_product_current_coordinate(control),
+        current,
     )
+    interpreter = current_sign_step.interpreter
+    let current_sign_source = current_sign_step.value
 
     let round_consumer = selectors.product_round
     let finish_consumer = selectors.product_finish
@@ -5808,79 +5893,180 @@ where L > 1,
     let output_nonzero_address = sparse_round_nonzero_address<F, L>(
         product_output_rank,
     )
+    let left_rank_step = interpreter.multiply(
+        control.major,
+        sub(natural<F>(2), control.major),
+    )
+    interpreter = left_rank_step.interpreter
+    let right_rank_pair_step = interpreter.multiply(
+        control.major,
+        sub(natural<F>(3), control.major),
+    )
+    interpreter = right_rank_pair_step.interpreter
+    let right_rank = mul(
+        right_rank_pair_step.value,
+        natural<F>(2).radix2_inverse_or_zero(),
+    )
     let left_sign_address = sparse_round_sign_address<F, L>(
-        sparse_product_left_rank(control.major),
+        left_rank_step.value,
     )
-    let right_sign_address = sparse_round_sign_address<F, L>(
-        sparse_product_right_rank(control.major),
-    )
+    let right_sign_address = sparse_round_sign_address<F, L>(right_rank)
 
     let first_consumers = add(round_consumer, finish_consumer)
+    let guard_source_address = interpreter.multiply(
+        guard_source,
+        range_bit_address,
+    )
+    interpreter = guard_source_address.interpreter
+    let retained_source_address = interpreter.multiply(
+        retained_source,
+        range_digit_address,
+    )
+    interpreter = retained_source_address.interpreter
+    let round_retained_address = interpreter.multiply(
+        round_consumer,
+        retained_address,
+    )
+    interpreter = round_retained_address.interpreter
+    let finish_guard_address = interpreter.multiply(
+        finish_consumer,
+        guard_address,
+    )
+    interpreter = finish_guard_address.interpreter
+    let first_source_value = interpreter.multiply(
+        add(first_source, round_consumer),
+        row.value,
+    )
+    interpreter = first_source_value.interpreter
+    let finish_guard_value = interpreter.multiply(
+        finish_consumer,
+        row.state_before,
+    )
+    interpreter = finish_guard_value.interpreter
     let first_port = SparseCopyPort {
         selector: add(first_source, first_consumers),
         coefficient: sub(first_source, first_consumers),
         address: add(
-            add(
-                mul(guard_source, range_bit_address),
-                mul(retained_source, range_digit_address),
-            ),
-            add(
-                mul(round_consumer, retained_address),
-                mul(finish_consumer, guard_address),
-            ),
+            add(guard_source_address.value, retained_source_address.value),
+            add(round_retained_address.value, finish_guard_address.value),
         ),
-        value: add(
-            mul(add(first_source, round_consumer), row.value),
-            mul(finish_consumer, row.state_before),
-        ),
+        value: add(first_source_value.value, finish_guard_value.value),
     }
 
     let second_sources = add(output_digit_source, output_finish_source)
     let second_consumers = add(round_consumer, finish_consumer)
+    let output_digit_source_address = interpreter.multiply(
+        output_digit_source,
+        range_digit_address,
+    )
+    interpreter = output_digit_source_address.interpreter
+    let output_finish_source_address = interpreter.multiply(
+        output_finish_source,
+        sparse_round_sign_address<F, L>(range_rank),
+    )
+    interpreter = output_finish_source_address.interpreter
+    let round_output_digit_address = interpreter.multiply(
+        round_consumer,
+        output_digit_address,
+    )
+    interpreter = round_output_digit_address.interpreter
+    let finish_output_sign_address = interpreter.multiply(
+        finish_consumer,
+        output_sign_address,
+    )
+    interpreter = finish_output_sign_address.interpreter
+    let output_digit_value = interpreter.multiply(
+        output_digit_source,
+        row.value,
+    )
+    interpreter = output_digit_value.interpreter
+    let output_finish_value = interpreter.multiply(
+        output_finish_source,
+        row.auxiliary,
+    )
+    interpreter = output_finish_value.interpreter
+    let round_output_value = interpreter.multiply(
+        round_consumer,
+        row.auxiliary,
+    )
+    interpreter = round_output_value.interpreter
+    let finish_output_value = interpreter.multiply(
+        finish_consumer,
+        row.value,
+    )
+    interpreter = finish_output_value.interpreter
     let second_port = SparseCopyPort {
         selector: add(second_sources, second_consumers),
         coefficient: sub(second_sources, second_consumers),
         address: add(
             add(
-                mul(output_digit_source, range_digit_address),
-                mul(
-                    output_finish_source,
-                    sparse_round_sign_address<F, L>(range_rank),
-                ),
+                output_digit_source_address.value,
+                output_finish_source_address.value,
             ),
             add(
-                mul(round_consumer, output_digit_address),
-                mul(finish_consumer, output_sign_address),
+                round_output_digit_address.value,
+                finish_output_sign_address.value,
             ),
         ),
         value: add(
-            add(
-                mul(output_digit_source, row.value),
-                mul(output_finish_source, row.auxiliary),
-            ),
-            add(
-                mul(round_consumer, row.auxiliary),
-                mul(finish_consumer, row.value),
-            ),
+            add(output_digit_value.value, output_finish_value.value),
+            add(round_output_value.value, finish_output_value.value),
         ),
     }
 
+    let output_nonzero_source_address = interpreter.multiply(
+        output_finish_source,
+        sparse_round_nonzero_address<F, L>(range_rank),
+    )
+    interpreter = output_nonzero_source_address.interpreter
+    let finish_output_nonzero_address = interpreter.multiply(
+        finish_consumer,
+        output_nonzero_address,
+    )
+    interpreter = finish_output_nonzero_address.interpreter
+    let output_nonzero_source_value = interpreter.multiply(
+        output_finish_source,
+        row.value,
+    )
+    interpreter = output_nonzero_source_value.interpreter
+    let finish_output_nonzero_value = interpreter.multiply(
+        finish_consumer,
+        row.auxiliary,
+    )
+    interpreter = finish_output_nonzero_value.interpreter
     let third_port = SparseCopyPort {
         selector: add(output_finish_source, finish_consumer),
         coefficient: sub(output_finish_source, finish_consumer),
         address: add(
-            mul(
-                output_finish_source,
-                sparse_round_nonzero_address<F, L>(range_rank),
-            ),
-            mul(finish_consumer, output_nonzero_address),
+            output_nonzero_source_address.value,
+            finish_output_nonzero_address.value,
         ),
         value: add(
-            mul(output_finish_source, row.value),
-            mul(finish_consumer, row.auxiliary),
+            output_nonzero_source_value.value,
+            finish_output_nonzero_value.value,
         ),
     }
 
+    let current_sign_source_address = interpreter.multiply(
+        current_sign_source,
+        sparse_round_sign_address<F, L>(range_rank),
+    )
+    interpreter = current_sign_source_address.interpreter
+    let finish_left_sign_address = interpreter.multiply(
+        finish_consumer,
+        left_sign_address,
+    )
+    interpreter = finish_left_sign_address.interpreter
+    let current_sign_value = interpreter.multiply(
+        current_sign_source,
+        row.auxiliary,
+    )
+    interpreter = current_sign_value.interpreter
+    let finish_left_sign_value = interpreter.multiply(
+        finish_consumer,
+        row.accumulator_after,
+    )
+    interpreter = finish_left_sign_value.interpreter
     let fourth_port = SparseCopyPort {
         selector: add(current_sign_source, finish_consumer),
         coefficient: sub(
@@ -5888,25 +6074,94 @@ where L > 1,
             finish_consumer,
         ),
         address: add(
-            mul(
-                current_sign_source,
-                sparse_round_sign_address<F, L>(range_rank),
-            ),
-            mul(finish_consumer, left_sign_address),
+            current_sign_source_address.value,
+            finish_left_sign_address.value,
         ),
         value: add(
-            mul(current_sign_source, row.auxiliary),
-            mul(finish_consumer, row.accumulator_after),
+            current_sign_value.value,
+            finish_left_sign_value.value,
         ),
     }
 
+    let finish_right_sign_address = interpreter.multiply(
+        finish_consumer,
+        right_sign_address,
+    )
+    interpreter = finish_right_sign_address.interpreter
+    let finish_right_sign_value = interpreter.multiply(
+        finish_consumer,
+        row.state_after,
+    )
+    interpreter = finish_right_sign_value.interpreter
     let fifth_port = SparseCopyPort {
         selector: finish_consumer,
         coefficient: sub(zero, finish_consumer),
-        address: mul(finish_consumer, right_sign_address),
-        value: mul(finish_consumer, row.state_after),
+        address: finish_right_sign_address.value,
+        value: finish_right_sign_value.value,
     }
-    output = [first_port, second_port, third_port, fourth_port, fifth_port]
+    SparseRoundCopyPlan {
+        interpreter: interpreter,
+        ports: [first_port, second_port, third_port, fourth_port, fifth_port],
+    }
+}
+
+pub fn sparse_round_plan_witness<F: Radix2Field, const L: usize>(
+    _ control: SparseControlRow<F>,
+    _ next_control: SparseControlRow<F>,
+    _ row: SparseTaskRow<F>,
+) -> SparseRoundPlanWitness<F>
+where L > 1,
+{
+    sparse_round_copy_plan<
+        QuadraticWitnessInterpreter<F, SPARSE_ROUND_PORT_MULTIPLICATIONS>,
+        F,
+        L,
+    >(
+        control,
+        next_control,
+        row,
+        QuadraticWitnessInterpreter::new(),
+    ).interpreter.finish()
+}
+
+struct SparseRoundConstrainedPorts<F: Radix2Field> {
+    valid: bool,
+    ports: [SparseCopyPort<F>; 5],
+    residuals: QuadraticPlanResiduals<
+        F,
+        SPARSE_ROUND_PORT_MULTIPLICATIONS,
+    >,
+}
+impl<F: Radix2Field> core::marker::Copy
+    for SparseRoundConstrainedPorts<F> {}
+
+fn sparse_round_constrained_ports<F: Radix2Field, const L: usize>(
+    _ control: SparseControlRow<F>,
+    _ next_control: SparseControlRow<F>,
+    _ row: SparseTaskRow<F>,
+    _ witness: SparseRoundPlanWitness<F>,
+) -> SparseRoundConstrainedPorts<F>
+where L > 1,
+{
+    let planned = sparse_round_copy_plan<
+        QuadraticConstraintInterpreter<
+            F,
+            SPARSE_ROUND_PORT_MULTIPLICATIONS,
+        >,
+        F,
+        L,
+    >(
+        control,
+        next_control,
+        row,
+        QuadraticConstraintInterpreter::new(witness),
+    )
+    let residuals = planned.interpreter.finish()
+    SparseRoundConstrainedPorts {
+        valid: residuals.valid,
+        ports: planned.ports,
+        residuals: residuals,
+    }
 }
 
 /// Derive the five-port rounding interaction witness from adjacent committed
@@ -5920,13 +6175,22 @@ pub fn sparse_round_interaction_row<F: Radix2Field, const L: usize>(
 ) -> SparseRoundInteractionRow<F>
 where L > 1,
 {
-    let mut ports = [zero_sparse_copy_port<F>(); 5]
-    write_sparse_round_interaction_ports<F, L>(
-        control, next_control, row, mut ports,
+    let planned = sparse_round_copy_plan<
+        QuadraticWitnessInterpreter<F, SPARSE_ROUND_PORT_MULTIPLICATIONS>,
+        F,
+        L,
+    >(
+        control,
+        next_control,
+        row,
+        QuadraticWitnessInterpreter::new(),
     )
     SparseCopyInteractionRow {
         accumulator: accumulator,
-        inverses: sparse_copy_interaction_inverses<F, 5>(challenges, ports),
+        inverses: sparse_copy_interaction_inverses<F, 5>(
+            challenges,
+            planned.ports,
+        ),
     }
 }
 
@@ -5943,13 +6207,19 @@ pub fn write_sparse_round_interaction_row<
 )
 where L > 1,
 {
-    let mut ports = [zero_sparse_copy_port<F>(); 5]
-    write_sparse_round_interaction_ports<F, L>(
-        control, next_control, row, mut ports,
+    let planned = sparse_round_copy_plan<
+        QuadraticWitnessInterpreter<F, SPARSE_ROUND_PORT_MULTIPLICATIONS>,
+        F,
+        L,
+    >(
+        control,
+        next_control,
+        row,
+        QuadraticWitnessInterpreter::new(),
     )
     interaction.accumulator = accumulator
     write_sparse_copy_interaction_inverses<F, 5>(
-        challenges, ref ports, mut interaction.inverses,
+        challenges, ref planned.ports, mut interaction.inverses,
     )
 }
 
@@ -5962,25 +6232,34 @@ pub fn evaluate_sparse_round_interaction_row<
     _ control: SparseControlRow<F>,
     _ next_control: SparseControlRow<F>,
     _ row: SparseTaskRow<F>,
+    _ plan: SparseRoundPlanWitness<F>,
     _ interaction: SparseRoundInteractionRow<F>,
 ) -> SparseInteractionEvaluation<F>
 where L > 1,
 {
-    let mut ports = [zero_sparse_copy_port<F>(); 5]
-    write_sparse_round_interaction_ports<F, L>(
-        control, next_control, row, mut ports,
+    let constrained = sparse_round_constrained_ports<F, L>(
+        control, next_control, row, plan,
     )
+    let mut fold = ConstraintFold<F>::new(challenge)
+    let mut index: usize = 0
+    while index < SPARSE_ROUND_PORT_MULTIPLICATIONS {
+        fold = fold.absorb(constrained.residuals.values[index])
+        index = index + 1
+    }
     let fold = absorb_sparse_copy_interaction<F, 5>(
-        ConstraintFold<F>::new(challenge),
+        fold,
         challenges,
-        ports,
+        constrained.ports,
         interaction.inverses,
     )
     SparseInteractionEvaluation {
-        valid: true,
+        valid: constrained.valid,
         constraints: fold.constraints,
         folded: fold.value,
-        delta: sparse_copy_interaction_delta<F, 5>(ports, interaction.inverses),
+        delta: sparse_copy_interaction_delta<F, 5>(
+            constrained.ports,
+            interaction.inverses,
+        ),
     }
 }
 
@@ -6004,24 +6283,24 @@ pub fn evaluate_sparse_round_interaction_link<
     _ current_control: SparseControlRow<F>,
     _ next_control: SparseControlRow<F>,
     _ current: SparseTaskRow<F>,
+    _ plan: SparseRoundPlanWitness<F>,
     _ current_interaction: SparseRoundInteractionRow<F>,
     _ next_interaction: SparseRoundInteractionRow<F>,
 ) -> FixedAirConstraintEvaluation<F>
 where L > 1,
 {
-    let mut ports = [zero_sparse_copy_port<F>(); 5]
-    write_sparse_round_interaction_ports<F, L>(
-        current_control, next_control, current, mut ports,
+    let constrained = sparse_round_constrained_ports<F, L>(
+        current_control, next_control, current, plan,
     )
     let delta = sparse_copy_interaction_delta<F, 5>(
-        ports, current_interaction.inverses,
+        constrained.ports, current_interaction.inverses,
     )
     let fold = ConstraintFold<F>::new(challenge).absorb(sub(
         next_interaction.accumulator,
         add(current_interaction.accumulator, delta),
     ))
     FixedAirConstraintEvaluation {
-        valid: true,
+        valid: constrained.valid,
         constraints: fold.constraints,
         folded: fold.value,
     }
@@ -6035,23 +6314,23 @@ pub fn evaluate_sparse_round_interaction_terminal<
     _ control: SparseControlRow<F>,
     _ next_control: SparseControlRow<F>,
     _ row: SparseTaskRow<F>,
+    _ plan: SparseRoundPlanWitness<F>,
     _ interaction: SparseRoundInteractionRow<F>,
 ) -> FixedAirConstraintEvaluation<F>
 where L > 1,
 {
-    let mut ports = [zero_sparse_copy_port<F>(); 5]
-    write_sparse_round_interaction_ports<F, L>(
-        control, next_control, row, mut ports,
+    let constrained = sparse_round_constrained_ports<F, L>(
+        control, next_control, row, plan,
     )
     let delta = sparse_copy_interaction_delta<F, 5>(
-        ports, interaction.inverses,
+        constrained.ports, interaction.inverses,
     )
     let fold = ConstraintFold<F>::new(challenge).absorb(add(
         interaction.accumulator,
         delta,
     ))
     FixedAirConstraintEvaluation {
-        valid: true,
+        valid: constrained.valid,
         constraints: fold.constraints,
         folded: fold.value,
     }
