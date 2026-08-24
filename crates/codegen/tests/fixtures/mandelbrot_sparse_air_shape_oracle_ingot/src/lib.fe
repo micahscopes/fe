@@ -1,6 +1,8 @@
 //! Executable boundary for the structurally derived sparse AIR shape.
 
 use mandelbrot_proof_fixed_air_baby_bear::{
+    SPARSE_BASE_AIR_FIELDS,
+    SPARSE_INTERACTION_AIR_FIELDS,
     SparseCopyPortDegreeShape,
     sparse_all_rows_degree_shape,
     sparse_boundary_port_degree_shape,
@@ -11,6 +13,13 @@ use mandelbrot_proof_fixed_air_baby_bear::{
 }
 
 const PRODUCTION_TRACE_LENGTH: u32 = 4096
+
+pub fn sparse_air_field_widths() -> (u32, u32) {
+    (
+        SPARSE_BASE_AIR_FIELDS.downcast_truncate(),
+        SPARSE_INTERACTION_AIR_FIELDS.downcast_truncate(),
+    )
+}
 
 pub fn sparse_air_shape_l4() -> (u32, u32, u32, u32, u32) {
     let shape = sparse_constraint_shape<4>()

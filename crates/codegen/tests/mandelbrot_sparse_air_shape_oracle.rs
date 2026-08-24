@@ -139,6 +139,16 @@ fn exact_composition_interpreter_derives_the_audited_air_shape() {
     let mut store = wasmtime::Store::new(&engine, ());
     let instance = wasmtime::Instance::new(&mut store, &module, &[])
         .expect("sparse AIR shape module should instantiate");
+    let widths = instance
+        .get_typed_func::<(), (i32, i32)>(&mut store, "sparse_air_field_widths")
+        .expect("sparse AIR field-width export")
+        .call(&mut store, ())
+        .expect("Fe field-width derivation should execute");
+    assert_eq!(
+        (widths.0 as u32, widths.1 as u32),
+        (51, 152),
+        "every committed quadratic-plan node must participate in the nominal AIR schema",
+    );
     let shape = instance
         .get_typed_func::<(), (i32, i32, i32, i32, i32)>(&mut store, "sparse_air_shape_l4")
         .expect("sparse AIR shape export")
