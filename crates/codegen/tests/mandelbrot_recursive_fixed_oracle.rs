@@ -1094,6 +1094,82 @@ fn expected_sparse_control_plan(control: [u32; 38]) -> [u32; 3] {
     ]
 }
 
+fn expected_sparse_control_link_plan(
+    current: [u32; 38],
+    next: [u32; 38],
+) -> [u32; 68] {
+    let mut nodes = [0u32; 68];
+    let phase_pairs = [
+        (0, 0), (0, 1), (1, 0), (1, 2), (2, 0), (2, 3),
+        (3, 3), (3, 4), (4, 3), (4, 5), (5, 5), (5, 6),
+        (6, 5), (6, 6), (6, 7), (7, 7), (7, 8), (8, 7),
+        (8, 9), (9, 9), (9, 10), (10, 9), (10, 11),
+    ];
+    for (index, (left, right)) in phase_pairs.into_iter().enumerate() {
+        nodes[index] = bb_mul(current[left], next[right]);
+    }
+    for (index, (left, right)) in [
+        (11, 12), (12, 12), (12, 11), (12, 13), (13, 14), (14, 14),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        nodes[23 + index] = bb_mul(current[left], next[right]);
+    }
+    nodes[29] = bb_mul(current[19], next[19]);
+    nodes[30] = bb_mul(current[19], next[23]);
+    nodes[31] = bb_mul(current[23], next[24]);
+    nodes[32] = bb_mul(current[24], next[25]);
+    nodes[33] = bb_mul(current[25], next[23]);
+    nodes[34] = bb_mul(current[25], next[26]);
+    nodes[35] = bb_mul(current[26], next[27]);
+    nodes[36] = bb_mul(current[27], next[28]);
+    nodes[37] = bb_mul(current[28], next[29]);
+    nodes[38] = bb_mul(current[29], next[26]);
+    nodes[39] = bb_mul(nodes[4], nodes[30]);
+    nodes[40] = bb_mul(nodes[4], nodes[34]);
+
+    let carry_reset = bb_sub(next[35], current[35]);
+    let carry_delta = bb_sub(next[32], current[32]);
+    nodes[41] = bb_mul(carry_reset, bb_sub(carry_reset, 1));
+    nodes[42] = bb_mul(current[35], bb_sub(1, next[35]));
+    nodes[43] = bb_mul(nodes[6], carry_reset);
+    nodes[44] = bb_mul(bb_sub(1, carry_reset), bb_add(current[34], 1));
+    nodes[45] = bb_mul(bb_sub(1, carry_reset), bb_mul(2, current[37]));
+    nodes[46] = bb_mul(carry_delta, bb_sub(carry_delta, 1));
+    nodes[47] = bb_mul(bb_sub(1, carry_delta), bb_add(current[33], 1));
+    nodes[48] = bb_mul(nodes[8], carry_delta);
+
+    let product_delta = bb_sub(next[32], current[32]);
+    let same_product = bb_sub(1, product_delta);
+    nodes[49] = bb_mul(product_delta, bb_sub(product_delta, 1));
+    nodes[50] = bb_mul(same_product, current[35]);
+    nodes[51] = bb_mul(nodes[50], bb_sub(1, next[35]));
+    nodes[52] = bb_mul(same_product, bb_sub(next[35], current[35]));
+    nodes[53] = bb_mul(nodes[12], nodes[52]);
+    nodes[54] = bb_mul(same_product, bb_add(current[33], 1));
+    nodes[55] = bb_mul(same_product, next[35]);
+    nodes[56] = bb_mul(
+        same_product,
+        bb_sub(bb_add(current[36], 1), bb_mul(2, next[35])),
+    );
+    nodes[57] = bb_mul(nodes[12], product_delta);
+
+    let linear_delta = bb_sub(next[33], current[33]);
+    let retained = bb_sub(1, linear_delta);
+    nodes[58] = bb_mul(linear_delta, bb_sub(linear_delta, 1));
+    nodes[59] = bb_mul(retained, bb_add(current[34], 1));
+    nodes[60] = bb_mul(nodes[19], linear_delta);
+    nodes[61] = bb_mul(retained, current[15]);
+    nodes[62] = bb_mul(retained, current[16]);
+    nodes[63] = bb_mul(linear_delta, current[15]);
+    nodes[64] = bb_mul(retained, current[17]);
+    nodes[65] = bb_mul(linear_delta, current[16]);
+    nodes[66] = bb_mul(retained, current[18]);
+    nodes[67] = bb_mul(linear_delta, current[17]);
+    nodes
+}
+
 fn expected_sparse_arithmetic_plan(control: [u32; 38], row: [u32; 6]) -> [u32; 23] {
     let two = 2;
     let right_flag_product = bb_mul(row[1], control[35]);
@@ -2675,6 +2751,10 @@ fn expected_sparse_air_prefix_words(
         );
         words.extend(controls[index]);
         words.extend(expected_sparse_control_plan(controls[index]));
+        words.extend(expected_sparse_control_link_plan(
+            controls[index],
+            controls[index + 1],
+        ));
         words.extend(rows[index]);
         words.extend(arithmetic);
         words.extend(expected_sparse_arithmetic_link_plan(
@@ -2760,13 +2840,13 @@ fn expected_sparse_air_prefix_words(
     ] {
         extend_ext4_words(&mut words, accumulator);
     }
-    assert_eq!(words.len(), 1_402, "sparse prefix schema must stay nominal");
+    assert_eq!(words.len(), 1_674, "sparse prefix schema must stay nominal");
     words
 }
 
 fn expected_sparse_air_lde_words(prefix: &[u32]) -> Vec<u32> {
-    assert_eq!(prefix.len(), 1_402, "sparse prefix input must stay nominal");
-    const BASE_FIELDS: usize = 192;
+    assert_eq!(prefix.len(), 1_674, "sparse prefix input must stay nominal");
+    const BASE_FIELDS: usize = 260;
     const INTERACTION_FIELDS: usize = 152;
     const TRACE: usize = 4;
     const LDE: usize = 16;
@@ -2798,12 +2878,12 @@ fn expected_sparse_air_lde_words(prefix: &[u32]) -> Vec<u32> {
     let mut words = vec![1];
     words.extend(base);
     words.extend(interaction);
-    assert_eq!(words.len(), 5_505, "sparse LDE schema must stay nominal");
+    assert_eq!(words.len(), 6_593, "sparse LDE schema must stay nominal");
     words
 }
 
 fn expected_sparse_base_lde_root(lde: &[u32], mutate: bool) -> [u32; 8] {
-    const BASE_FIELDS: usize = 192;
+    const BASE_FIELDS: usize = 260;
     const LDE: usize = 16;
     assert!(lde.len() >= 1 + LDE * BASE_FIELDS);
     assert_eq!(lde[0], 1, "base LDE must be valid before commitment");
@@ -5845,13 +5925,13 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
         &arguments,
     );
     let mut expected = expected_sparse_air_prefix_words(&point, &current, expected_base_root);
-    let first_base_fields = expected[10..202].to_vec();
-    let first_interaction_fields = expected[778..930].to_vec();
+    let first_base_fields = expected[10..270].to_vec();
+    let first_interaction_fields = expected[1050..1202].to_vec();
     let mut expected_lde = expected_sparse_air_lde_words(&expected);
     expected_lde.extend([1, 0]);
     assert_eq!(
         expected_lde.len(),
-        5_507,
+        6_595,
         "sparse LDE schema must stay nominal"
     );
     assert_eq!(lde_words.len(), expected_lde.len(), "sparse LDE length");
@@ -6133,7 +6213,7 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
         "unknown production mutation payload"
     );
 
-    const BASE_FIELDS: usize = 192;
+    const BASE_FIELDS: usize = 260;
     const INTERACTION_FIELDS: usize = 152;
     const LDE: usize = 16;
     const BASE_START: usize = 1;
@@ -6170,7 +6250,7 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
 
                 let row = evaluation as usize;
                 let next_row = ((evaluation + 4) & 15) as usize;
-                let mut expected_value = expected_lde[BASE_START + row * BASE_FIELDS + 41];
+                let mut expected_value = expected_lde[BASE_START + row * BASE_FIELDS + 109];
                 if mutation == 1 {
                     expected_value = bb_add(expected_value, 1);
                 }
@@ -6193,7 +6273,7 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
                 );
                 assert_eq!(
                     Ext4::from_words(&actual[31..35]),
-                    Ext4::from_base(expected_lde[BASE_START + next_row * BASE_FIELDS + 41]),
+                    Ext4::from_base(expected_lde[BASE_START + next_row * BASE_FIELDS + 109]),
                     "next base-row geometry, evaluation {evaluation}",
                 );
                 let next_interaction = INTERACTION_START + next_row * INTERACTION_FIELDS;
@@ -6246,7 +6326,7 @@ fn sparse_quartic_interaction_root_matches_independent_port_oracle() {
     expected.extend([0; 8]);
     assert_eq!(
         expected.len(),
-        1_648,
+        1_716,
         "sparse checkpoint schema must stay nominal"
     );
     assert_eq!(words.len(), expected.len(), "sparse checkpoint length");
@@ -6303,7 +6383,7 @@ fn sparse_production_lde_codewords_match_independent_oracle() {
 
 #[test]
 fn sparse_lde_multipaths_authenticate_production_codewords() {
-    const BASE_FIELDS: usize = 192;
+    const BASE_FIELDS: usize = 260;
     const INTERACTION_FIELDS: usize = 152;
     let bytes = compile_sparse_auth_fixture_entry(
         "fixed_transition4_sparse_lde_multipath_audit",
