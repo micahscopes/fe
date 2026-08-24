@@ -1592,23 +1592,53 @@ Legend:
   the production 4,096-row placement and 8,192-row LDE through zero-import
   395,467-byte Wasm in 658.72 seconds.
 
-  The exact production shape is now 620 constraints with family degrees
-  `[3, 5, 1, 1]`, all-row component degrees `[3, 2, 2, 2, 2, 2]`, and
+  The local-control increment now expresses the three coordinate-domain
+  polynomials through one shared three-node quadratic DAG. Witness generation,
+  constraint evaluation, degree analysis, and the committed base-row schema
+  consume that same Fe plan. The independent BabyBear oracle reconstructs all
+  three nodes on every one of the 4,096 production control rows and rejects
+  every directed node mutation under three challenges. That focused gate
+  passes in 184.92 seconds. The exact shape gate passes in 630.07 seconds and
+  proves the final control all-row component fell from degree 3 to degree 2.
+
+  The widened schema also received a decomposed transport audit instead of an
+  impractical monolithic receipt compile. An independent oracle derives the 17
+  product-address nodes that were missing from its stale 84-field interaction
+  model, then matches all 5,507 carrier words in the exact Fe-produced base and
+  interaction LDE codewords. The corrected nominal widths are 192 base fields
+  and 152 interaction fields. That exact codeword gate passes in 1,961.53
+  seconds. The production multipath gate generates each opening once, copies
+  it in Fe, and applies verifier-side mutations to those copies. This preserves
+  the clean and mutation semantics without regenerating the complete prover
+  eleven times. Clean authentication passes while mutations of opened values,
+  siblings, indices, unused capacity, the dependency-bound root, and requested
+  row selection all fail closed. That unoptimized semantic baseline passes in
+  2,940.80 seconds. Broad all-export compilation is no longer treated as
+  useful evidence: one attempt reached 12.65 GiB after 99 minutes, and the
+  older repeated-prover multipath form reached 9.8 GiB after 115 minutes.
+  Focused entry lowering and independently composed gates are required for
+  this slice. A separate performance fixture must opt into Sonatina's
+  optimization pipeline explicitly; Cargo release mode alone does not change
+  the default byte-equivalent Fe Wasm lowering.
+
+  The exact production shape is now 623 constraints with family degrees
+  `[2, 5, 1, 1]`, all-row component degrees `[2, 2, 2, 2, 2, 2]`, and
   pair-row component degrees `[5, 2, 2, 2, 2, 2]`. The maximum expression
   degree is 5 and the composition-degree bound is 16,380. This is a strict
   reduction from degree 19 and bound 73,709, but it still does not fit the
   4,096-row trace-degree domain. The remaining target is explicit: all-row and
   pair-row expressions must be at most quadratic, while first-row and last-row
   expressions must be linear. Both boundary families now meet their target.
-  Every non-control evaluator now meets its target. Control-local expressions
-  remain degree 3 and the deterministic control transition table remains
-  degree 5. The next reduction is therefore isolated to control. Two honest
-  implementations remain under audit: a shared local/link control DAG, or a
-  Fe-derived preprocessed control trace with a separately domain-tagged known
-  root and authenticated query openings. Preprocessing is acceptable only if
-  an independent root oracle, fixed-column authentication, and composition use
-  of the fixed LDE values remain explicit. It must not become an unbound host
-  constant or a way to omit the control proof obligation.
+  Every all-row evaluator and every non-control pair-row evaluator now meets
+  its target. Only the deterministic control transition remains degree 5. The
+  next reduction is therefore isolated to control adjacency. It will use named
+  shared Fe DAG families for phase edges, range-role transitions, limb and
+  carry geometry, product counters, linear roles, and boundary or padding
+  transitions. A fixed preprocessed control root was rejected for this slice:
+  it would add a verification-key and fixed-column authentication obligation,
+  while a prover-chosen fixed root would be unsound. Direct shared plans keep
+  the authored transition relation, witness, constraints, degree analysis, and
+  future GPU schedule structurally identical.
   Only once the derived composition bound fits may the security
   profile be committed into the transcript. The
   assembled regression receipt still carries four queries. The compact
@@ -1745,10 +1775,10 @@ fallback. The semantic receipts are:
    Radeon 780M through RADV after the private-heap fix. The four standalone
    hardware test binaries in the runbook remain to be executed without skips.
 2. Continue the quadratic reduction from maximum degree 5 and composition
-   bound 16,380. Every non-control all-row and pair-row evaluator is now degree
-   2, and the last-row terminal is degree 1. Lower or preprocess the remaining
-   degree-5 control adjacency and degree-3 control-local expressions through
-   compact Fe-authored plans and semantic roles. Keep every plan shared by
+   bound 16,380. Every all-row evaluator and every non-control pair-row
+   evaluator is now degree 2, and the last-row terminal is degree 1. Lower the
+   remaining degree-5 control adjacency through compact Fe-authored plans and
+   semantic roles. Keep every plan shared by
    witness generation, constraint evaluation, degree analysis, and later GPU
    schedules, with independent semantic and mutation gates. Once the derived
    composition bound fits the trace domain, bind every policy parameter into
