@@ -1644,6 +1644,23 @@ There must be no parallel runtime manifest. The current inspector and
 sequential activation policy remain useful Fe components while their raw
 command cell and string path protocol are replaced by those typed identities.
 
+The completed architecture concretization is recorded at
+`/workspace/scratch/mb2-gallery-architecture-concretization-2026-08-24.md`.
+It adopts the existing gallery audit, source-explorer audit, and CUDA/Conal
+scheduling audit rather than reopening them. The package decisions are:
+`parallel_structure` for factor trees and structural analyses, `parallel_ntt`
+for field-generic transform interpreters, `region_layout` for reflected typed
+storage regions, and `proof_transcript` for ordered absorb/challenge typestate.
+All four are focused ingots and may remain so permanently.
+
+Consume that architecture through six named gates in the authoritative
+campaign SSOT: G-NTT, G-LAYOUT, G-RECEIPT, G-RECURSE, G-BROWSER, and G-INSPECT.
+New implementation notes attach beneath one of those gates instead of growing
+another gallery-wide checklist. Their dependency order is scalar factor-tree
+NTT, portable stage-grid WebGPU NTT, typed proof regions, complete ordered
+receipt, recursive provider and interactive browser shell, with SourceAtlas
+inspection joining once real semantic, placement, and layout records exist.
+
 | Utility family | Proven now | Possible-now consolidation | Ideal/compiler-enabled endpoint |
 | --- | --- | --- | --- |
 | Runtime control | Typed `Pending`, `TaskOutcome`, nominal `Suspend`, generated continuation states, resident/scoped actors, typed actor sinks, timer suspension | One `std::runtime` facade; reusable source-to-actor forwarding; explicit scope/supervision policies | ZIO-like typed environment/exit/scope in Fe without a boxed monadic runtime; compiler-derived task handles and exactly-once structured cancellation |

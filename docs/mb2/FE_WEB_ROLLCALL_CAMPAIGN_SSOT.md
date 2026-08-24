@@ -31,6 +31,42 @@ Legend:
 - G5, boundary: the exact repository CI command is green:
   `cargo nextest run --release --workspace --all-features --no-fail-fast --locked --exclude fe-language-server --exclude fe-bench`.
 
+The completed gallery and architecture audits refine the remaining proof and
+inspection work into six convergence gates. These are subdivisions of the
+existing Definition of done, not a second campaign checklist:
+
+- [~] **G-NTT:** one exact factor tree drives scalar and portable stage-grid
+  WebGPU NTT/LDE interpretations. DIT, DIF, Bush where legal, and at least one
+  irregular factorization retain independent value gates. Real browser WebGPU
+  parity is required. A disposable API probe using the existing release
+  compiler identified as `fe 26.2.0 (4447fdd27)` established that
+  `RBin<Pair, 3>` normalization itself is cheap relative to loading `std`, while
+  a recursive scalar interpreter remains practical. Timings were 33.22 seconds
+  for a plain `std::conal` import, 26.84 seconds for normalization, 42.05
+  seconds when the interpreter derived depth in the same traversal, and 55.32
+  seconds when it also solved a separate recursive
+  `BalancedBinarySchedule` obligation. The debug baseline had not completed
+  after 378.15 seconds and was stopped. Therefore the public design should use
+  one product interpretation for execution plus analysis, and release compile
+  budgets must gate it. These timings are compiler-cost evidence, not semantic
+  correctness evidence. Future type-function, FCO, provider, and graph-
+  interpreter probes report both the user-facing release path and a bounded
+  debug/developer path when appropriate. Ordinary demo edits do not pay the
+  current multi-minute debug baseline merely to duplicate a release gate.
+- [ ] **G-LAYOUT:** compiler/FCO-derived typed regions replace application
+  proof-tape offsets, and an independent decoder checks every region and width.
+- [ ] **G-RECEIPT:** the complete nonrecursive BabyBear receipt accepts cleanly
+  and rejects claim, domain, transcript, query, path, and encoding mutations.
+- [ ] **G-RECURSE:** adjacent typed iteration chunks merge through the fixed
+  recursive interval topology, rejecting boundary and order mutations.
+- [ ] **G-BROWSER:** the Fe resident point-picker proves through WebGPU and
+  verifies through both Fe-Wasm and revm-Wasm with cancellation, backpressure,
+  mutation, timing, and device-loss evidence.
+- [ ] **G-INSPECT:** the Fe SourceInspector presents authored, semantic,
+  analysis, placement, ABI/layout, artifact, and evidence views from one
+  content-addressed `SourceAtlas`, with no gallery `docs.json` or runtime render
+  manifest.
+
 ## A. Shared precision axis
 
 - [x] Generic `Fixed<L>` integer fixed-point and GPU-faithful projection.
@@ -1795,21 +1831,32 @@ fallback. The semantic receipts are:
    `mandelbrot_proof_gpu` clean and tampered Chromium modes now pass on AMD
    Radeon 780M through RADV after the private-heap fix. The four standalone
    hardware test binaries in the runbook remain to be executed without skips.
-2. Revalidate the newly fitting `[2, 2, 1, 1]` AIR through exact codewords,
+2. Finish revalidating the newly fitting `[2, 2, 1, 1]` AIR through
    commitments, openings, authentication paths, FRI folds, and assembled
-   canonical mutations. Bind every policy parameter into the production
-   transcript and make the compact 114-query range drive real sampling. Pin
-   the required Sonatina revision. Preserve the four-query receipt as a
-   regression fixture, then execute a separate security-sized receipt rather
-   than silently changing the checkpoint's meaning.
-3. Lower the BabyBear leaf prover and recursive merges through Fe Conal/CTFE
-   WebGPU schedules, then run the complete progressive proof/verify/tamper page
-   through Chrome.
-4. With multiple nominal child namespaces landed, generalize the render-owned
+   canonical mutations. The widened 6,595-word base-LDE carrier and every
+   codeword passed its independent direct-DFT gate at `6a4b9eaec`; that focused
+   execution does not stand in for the remaining downstream gates. Bind every
+   policy parameter into the production transcript and make the compact
+   114-query range drive real sampling. Pin the required Sonatina revision.
+   Preserve the four-query receipt as a regression fixture, then execute a
+   separate security-sized receipt rather than silently changing the
+   checkpoint's meaning.
+3. Close G-NTT: derive the scalar factor-tree NTT from one typed structure,
+   recover existing independent vectors, then interpret it as a portable
+   stage-grid WebGPU schedule and run the real browser gate.
+4. Close G-LAYOUT and G-RECEIPT: derive typed proof regions, then finish the
+   complete ordered nonrecursive receipt without raw tape offsets or a second
+   transcript description.
+5. Close G-RECURSE and G-BROWSER: lower BabyBear leaf proofs and adjacent
+   recursive merges through Fe Conal/CTFE WebGPU schedules, then run the
+   complete progressive proof/verify/tamper page through Chrome, Fe-Wasm, and
+   revm-Wasm.
+6. With multiple nominal child namespaces landed, generalize the render-owned
    DEC path to rich canonical port payloads and nested scopes, then execute it
    in real Chromium.
-5. Delete the runtime manifest and finish the legacy disposition.
-6. Run the exact G5 command once at the final DONE gate.
+7. Close G-INSPECT, delete the runtime manifest, and finish the legacy
+   disposition.
+8. Run the exact G5 command once at the final DONE gate.
 
 The Definition of done is not yet met. In particular, the real-GPU gate,
 manifest deletion, Worker/DEC general messaging, complete legacy disposition,
