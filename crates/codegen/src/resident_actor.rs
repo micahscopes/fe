@@ -62,9 +62,22 @@ pub struct ResidentActorArtifact {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructuredChildActorArtifact {
     pub actor: String,
+    /// Closed canonical actor module. Its resettable arena is private to
+    /// request/response dispatch and therefore cannot invalidate suspended Fe
+    /// task values.
     pub wasm: Vec<u8>,
     pub interface: CanonicalInterfaceManifest,
     pub scope: StructuredChildScopeImports,
+    /// Fe scoped tasks owned by this child actor. These run in the child's
+    /// Worker and may supervise the recursively derived nominal children
+    /// below. The fixed host receives only their generated continuation
+    /// adapters.
+    pub scoped_tasks: Vec<WasmTaskAdapter>,
+    /// Separate continuation module for `scoped_tasks`. Suspended host values
+    /// use the checked canonical stack, whose lifetime cannot safely share the
+    /// canonical actor module's resettable request arena.
+    pub scoped_task_wasm: Option<Vec<u8>>,
+    pub structured_children: Vec<StructuredChildActorArtifact>,
 }
 
 /// Compiler-derived host import identities for one nominal child type.
@@ -483,17 +496,24 @@ fn wasm_imports(wasm: &[u8]) -> Result<Vec<String>, ResidentActorError> {
     Ok(imports)
 }
 
-fn compile_structured_children(
-    db: &DriverDataBase,
-    top_mod: TopLevelMod<'_>,
-    parent_package: mir::RuntimePackage<'_>,
+fn compile_structured_children_with_ancestry<'db>(
+    db: &'db DriverDataBase,
+    top_mod: TopLevelMod<'db>,
+    parent_package: mir::RuntimePackage<'db>,
     optimize: bool,
+    ancestry: &[TyId<'db>],
 ) -> Result<Vec<StructuredChildActorArtifact>, ResidentActorError> {
     let children = worker_scope_children(db, parent_package)?;
     let actors = semantic_actors(db, top_mod);
     let mut artifacts = Vec::with_capacity(children.len());
     for child in children {
         let child_ty = child.ty;
+        if ancestry.contains(&child_ty) {
+            return Err(ResidentActorError::Contract(format!(
+                "structured-child supervision cycle repeats nominal actor `{}`",
+                child_ty.pretty_print(db),
+            )));
+        }
         let actor = actor_for_nominal_ty(db, &actors, child_ty).ok_or_else(|| {
             ResidentActorError::Contract(format!(
                 "structured-child type `{}` is not the state type of an actor in this module",
@@ -511,7 +531,7 @@ fn compile_structured_children(
                 )
             })?;
         let mut declarations = Vec::new();
-        let mut entries = Vec::new();
+        let mut lane_entries = Vec::new();
         for behavior in &actor.behaviors {
             let name = behavior
                 .name(db)
@@ -550,7 +570,7 @@ fn compile_structured_children(
             let mut declaration = canonical_lane_decl_from_func(db, *behavior, &name, &lane)
                 .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
             declaration.export = Some(format!("fe_cabi_{lane}"));
-            entries.push(name);
+            lane_entries.push(name);
             declarations.push(declaration);
         }
         if declarations.is_empty() {
@@ -560,11 +580,65 @@ fn compile_structured_children(
         }
         let interface = CanonicalInterfaceManifest::build(declarations)
             .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
-        let package = mir::build_wasm_runtime_package_for_entries(db, top_mod, &entries)
+        let mut scoped_task_entries = Vec::new();
+        for task in actor
+            .behaviors
+            .iter()
+            .copied()
+            .filter(|behavior| behavior_is_scoped_task(db, *behavior))
+        {
+            let name = task
+                .name(db)
+                .to_opt()
+                .map(|name| name.data(db).to_owned())
+                .ok_or_else(|| {
+                    ResidentActorError::Contract(format!(
+                        "structured child actor `{actor_name}` has an unnamed scoped task"
+                    ))
+                })?;
+            if !task.arg_tys(db).is_empty() {
+                return Err(ResidentActorError::Contract(format!(
+                    "structured child actor `{actor_name}` scoped task `{name}` must be self-less until Worker-owned actor state is available",
+                )));
+            }
+            scoped_task_entries.push(name);
+        }
+        let actor_package = mir::build_wasm_runtime_package_for_entries(db, top_mod, &lane_entries)
             .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
+        let mut child_ancestry = ancestry.to_vec();
+        child_ancestry.push(child_ty);
+        let (scoped_tasks, scoped_task_wasm, structured_children) = if scoped_task_entries
+            .is_empty()
+        {
+            (Vec::new(), None, Vec::new())
+        } else {
+            let task_package =
+                mir::build_wasm_runtime_package_for_entries(db, top_mod, &scoped_task_entries)
+                    .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
+            let (scoped_tasks, structured_children) = compile_scoped_task_support_with_ancestry(
+                db,
+                top_mod,
+                task_package,
+                scoped_task_entries.len(),
+                optimize,
+                &child_ancestry,
+            )?;
+            let task_options =
+                WasmCompileOptions::default().with_canonical_stack_memory(["fe_cabi_post_return"]);
+            let task_options = if optimize {
+                task_options.with_optimization()
+            } else {
+                task_options
+            };
+            let task_wasm =
+                compile_runtime_package_wasm_with_options(db, &task_package, task_options)
+                    .map_err(ResidentActorError::Lower)?
+                    .bytes;
+            (scoped_tasks, Some(task_wasm), structured_children)
+        };
         let mut options =
             WasmCompileOptions::default().with_canonical_lanes(interface.lanes.clone());
-        for (source, lane) in entries.iter().zip(&interface.lanes) {
+        for (source, lane) in lane_entries.iter().zip(&interface.lanes) {
             options = options.with_export_alias(source, &lane.name);
         }
         let options = if optimize {
@@ -572,7 +646,7 @@ fn compile_structured_children(
         } else {
             options
         };
-        let wasm = compile_runtime_package_wasm_with_options(db, &package, options)
+        let wasm = compile_runtime_package_wasm_with_options(db, &actor_package, options)
             .map_err(ResidentActorError::Lower)?
             .bytes;
         verify_canonical_wasm_abi(&wasm, &interface)
@@ -589,6 +663,9 @@ fn compile_structured_children(
             wasm,
             interface,
             scope: child.scope,
+            scoped_tasks,
+            scoped_task_wasm,
+            structured_children,
         });
     }
     Ok(artifacts)
@@ -605,6 +682,24 @@ pub(crate) fn compile_scoped_task_support(
     expected_tasks: usize,
     optimize: bool,
 ) -> Result<(Vec<WasmTaskAdapter>, Vec<StructuredChildActorArtifact>), ResidentActorError> {
+    compile_scoped_task_support_with_ancestry(
+        db,
+        top_mod,
+        parent_package,
+        expected_tasks,
+        optimize,
+        &[],
+    )
+}
+
+fn compile_scoped_task_support_with_ancestry<'db>(
+    db: &'db DriverDataBase,
+    top_mod: TopLevelMod<'db>,
+    parent_package: mir::RuntimePackage<'db>,
+    expected_tasks: usize,
+    optimize: bool,
+    ancestry: &[TyId<'db>],
+) -> Result<(Vec<WasmTaskAdapter>, Vec<StructuredChildActorArtifact>), ResidentActorError> {
     validate_actor_mailbox_requests(db, top_mod, parent_package)?;
     let scoped_tasks =
         materialized_task_adapters(db, &parent_package).map_err(ResidentActorError::Lower)?;
@@ -614,7 +709,8 @@ pub(crate) fn compile_scoped_task_support(
             scoped_tasks.len(),
         )));
     }
-    let structured_children = compile_structured_children(db, top_mod, parent_package, optimize)?;
+    let structured_children =
+        compile_structured_children_with_ancestry(db, top_mod, parent_package, optimize, ancestry)?;
     Ok((scoped_tasks, structured_children))
 }
 

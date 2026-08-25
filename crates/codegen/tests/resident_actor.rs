@@ -189,6 +189,30 @@ fn two_structured_children_fixture() -> (DriverDataBase, common::file::File) {
     (db, file)
 }
 
+fn nested_structured_children_fixture() -> (DriverDataBase, common::file::File) {
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///web_component_nested_structured_children.fe").unwrap();
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(include_str!("fixtures/nested_structured_children.fe").to_owned()),
+    );
+    let file = db.workspace().get(&db, &url).unwrap();
+    (db, file)
+}
+
+fn nested_structured_child_cycle_fixture() -> (DriverDataBase, common::file::File) {
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///web_component_nested_structured_child_cycle.fe").unwrap();
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(include_str!("fixtures/nested_structured_child_cycle.fe").to_owned()),
+    );
+    let file = db.workspace().get(&db, &url).unwrap();
+    (db, file)
+}
+
 fn invalid_mailbox_fixture(
     supervised: bool,
     forged_response: bool,
@@ -1306,6 +1330,236 @@ if (lifecycle[0].length !== 3 || lifecycle[1].length !== 3) {{
         "two-child package failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
+fn resident_actor_recursively_materializes_and_executes_nested_fe_scopes() {
+    if !std::process::Command::new("bun")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        return;
+    }
+
+    let (db, file) = nested_structured_children_fixture();
+    let top_mod = db.top_mod(file);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "nested-child fixture diagnostics:\n{diagnostics}"
+    );
+    let artifact = compile_resident_actor(&db, top_mod)
+        .expect("compile nested nominal children")
+        .expect("role-selected nested-child resident actor");
+    let [middle] = artifact.structured_children.as_slice() else {
+        panic!(
+            "expected one compiler-derived middle artifact, found {}",
+            artifact.structured_children.len(),
+        )
+    };
+    let [leaf] = middle.structured_children.as_slice() else {
+        panic!(
+            "expected one compiler-derived leaf artifact, found {}",
+            middle.structured_children.len(),
+        )
+    };
+    assert_eq!(middle.scoped_tasks.len(), 2);
+    let middle_task_wasm = middle
+        .scoped_task_wasm
+        .as_deref()
+        .expect("middle child has a separate Fe task module");
+    assert!(leaf.scoped_tasks.is_empty());
+    assert!(leaf.scoped_task_wasm.is_none());
+    assert!(leaf.structured_children.is_empty());
+    assert_ne!(middle.scope.key, leaf.scope.key);
+
+    let middle_imports = wasmparser::Parser::new(0)
+        .parse_all(middle_task_wasm)
+        .filter_map(|payload| match payload.expect("valid middle task Wasm") {
+            wasmparser::Payload::ImportSection(reader) => Some(
+                reader
+                    .into_imports()
+                    .map(|import| {
+                        let import = import.expect("valid middle child import");
+                        (import.module.to_owned(), import.name.to_owned())
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+        .flatten()
+        .collect::<Vec<_>>();
+    for expected in [
+        leaf.scope.spawn.as_str(),
+        leaf.scope.failure.as_str(),
+        leaf.scope.close.as_str(),
+    ] {
+        assert!(
+            middle_imports
+                .iter()
+                .any(|(module, name)| module == "fe:worker-scope" && name == expected),
+            "middle child omitted nested lifecycle import {expected}",
+        );
+    }
+    assert!(
+        middle_imports
+            .iter()
+            .any(|(module, _)| module == "fe:worker-mailbox"),
+        "middle child omitted its typed nested mailbox",
+    );
+
+    let package =
+        materialize_scoped_task_package(&artifact.scoped_tasks, &artifact.structured_children)
+            .expect("materialize nested-child task package")
+            .expect("nested-child tasks require a package");
+    let middle_root = format!("children/{}", middle.scope.key);
+    let nested_root = format!("{middle_root}/tasks");
+    let leaf_root = format!("{nested_root}/children/{}", leaf.scope.key);
+    for expected in [
+        format!("{middle_root}/child.wasm"),
+        format!("{middle_root}/worker-host.js"),
+        format!("{nested_root}/tasks.js"),
+        format!("{nested_root}/task.wasm"),
+        format!("{leaf_root}/child.wasm"),
+        format!("{leaf_root}/worker-host.js"),
+    ] {
+        assert!(
+            package.files.iter().any(|file| file.path == expected),
+            "nested package omitted {expected}",
+        );
+    }
+    let middle_host = package
+        .files
+        .iter()
+        .find(|file| file.path == format!("{middle_root}/worker-host.js"))
+        .expect("middle worker host");
+    let middle_host = std::str::from_utf8(&middle_host.bytes).expect("UTF-8 middle worker host");
+    assert!(middle_host.contains("./tasks/tasks.js"));
+    assert!(middle_host.contains("./tasks/task.wasm"));
+    assert!(middle_host.contains("scopedTasks"));
+    assert!(!middle_host.contains("Middle"));
+    assert!(!middle_host.contains("Leaf"));
+
+    let scratch_root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/fe-test-scratch");
+    std::fs::create_dir_all(&scratch_root).expect("workspace test scratch directory");
+    let directory = tempfile::Builder::new()
+        .prefix("nested-structured-child-")
+        .tempdir_in(scratch_root)
+        .expect("workspace-backed nested-child execution directory");
+    for file in &package.files {
+        let path = directory.path().join(&file.path);
+        std::fs::create_dir_all(path.parent().expect("nested package file parent")).unwrap();
+        std::fs::write(path, &file.bytes).unwrap();
+    }
+    let parent_wasm = directory.path().join("parent.wasm");
+    std::fs::write(&parent_wasm, &artifact.wasm).unwrap();
+    let runner = directory.path().join("run-nested-children.mjs");
+    std::fs::write(
+        &runner,
+        format!(
+            r#"
+import {{
+  createHostCompletionBroker,
+  createMaterializedTaskRegistry,
+  createStructuredWorkerMailboxes,
+  createStructuredWorkerScopes,
+}} from "./tasks.js";
+
+const scopes = await createStructuredWorkerScopes();
+if (scopes.length !== 1) throw new Error("nested fixture requires one root child scope");
+let instance;
+let residentValue;
+const broker = createHostCompletionBroker({{
+  workerScopes: scopes,
+  actorEvents: {{
+    send(event, signal) {{
+      if (signal.aborted) throw new DOMException("cancelled", "AbortError");
+      residentValue = instance.exports.fe_actor_transition_v1(...event);
+    }},
+  }},
+}});
+const mailboxImports = createStructuredWorkerMailboxes(scopes, broker.completions);
+const parentBytes = await Bun.file({parent_wasm:?}).arrayBuffer();
+({{ instance }} = await WebAssembly.instantiate(
+  parentBytes,
+  Object.assign({{}}, broker.imports, mailboxImports),
+));
+const initialized = instance.exports.fe_actor_initialize_v1();
+const initialValue = Array.isArray(initialized) ? initialized[0] : initialized;
+if (initialValue !== 5) throw new Error(`bad nested initial state ${{initialized}}`);
+const tasks = createMaterializedTaskRegistry(instance.exports);
+
+const lifetime = new AbortController();
+let supervisorSettled = false;
+let supervisorError;
+const supervisor = broker.run(tasks.supervise_middle, [], {{ signal: lifetime.signal }}).then(
+  value => {{ supervisorSettled = true; return value; }},
+  error => {{ supervisorSettled = true; supervisorError = error; return null; }},
+);
+for (let attempt = 0; attempt < 400; attempt += 1) {{
+  if (scopes[0].scope.status().state === "ready") break;
+  await new Promise(resolve => setTimeout(resolve, 5));
+}}
+if (scopes[0].scope.status().state !== "ready") {{
+  throw new Error(`middle Fe scope did not become ready: ${{JSON.stringify(scopes[0].scope.status())}}`);
+}}
+
+const calculated = await broker.run(tasks.calculate, [initialValue]);
+if (calculated.length !== 1 || calculated[0] !== 8 || residentValue !== 13) {{
+  throw new Error(
+    `nested outer request drifted: ${{JSON.stringify({{ calculated, residentValue }})}}`,
+  );
+}}
+await new Promise(resolve => setTimeout(resolve, 1200));
+const stable = scopes[0].scope.status();
+if (supervisorSettled || stable.state !== "ready" || stable.epoch !== 0) {{
+  throw new Error(
+    `nested Fe scope did not remain stable: ${{JSON.stringify({{ stable, supervisorError }})}}`,
+  );
+}}
+
+lifetime.abort();
+await supervisor;
+if (supervisorError?.name !== "AbortError") {{
+  throw new Error(`nested supervisor cancellation drifted: ${{supervisorError}}`);
+}}
+if (broker.activeCount() !== 0) throw new Error("nested scope leaked completion tokens");
+"#,
+            parent_wasm = parent_wasm.display().to_string(),
+        ),
+    )
+    .unwrap();
+    let output = std::process::Command::new("bun")
+        .arg("run")
+        .arg(&runner)
+        .output()
+        .expect("run nested-child package under Bun");
+    assert!(
+        output.status.success(),
+        "nested-child package failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
+fn resident_actor_rejects_recursive_nominal_child_cycles() {
+    let (db, file) = nested_structured_child_cycle_fixture();
+    let top_mod = db.top_mod(file);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "nested child-cycle fixture diagnostics:\n{diagnostics}"
+    );
+    let error = compile_resident_actor(&db, top_mod)
+        .expect_err("recursive nominal child supervision must fail closed")
+        .to_string();
+    assert!(
+        error.contains("structured-child supervision cycle repeats nominal actor"),
+        "unexpected nested child-cycle diagnostic: {error}",
     );
 }
 

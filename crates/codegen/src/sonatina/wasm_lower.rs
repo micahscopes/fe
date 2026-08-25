@@ -3703,6 +3703,14 @@ where
             let start_symbol = format!("__fe_task_start_{authored_symbol}");
             func_symbols.insert(plan.body, start_symbol);
             let mut entry_body = machine.entry.body;
+            // Suspension materialization synthesizes fresh entry and resume
+            // bodies after the ordinary inline-body preparation pass. Reify
+            // any aggregate constants introduced into those bodies as value
+            // leaves before portable normalization, exactly as authored
+            // runtime bodies are handled above. Otherwise a self-less task
+            // starting from an ordinary record literal retains an EVM-style
+            // `ConstRef` handle that core Wasm intentionally cannot lower.
+            reify_inline_const_aggregates(db, &mut entry_body);
             normalize_portable_body(db, plan.body, &mut entry_body);
             prepared_bodies.insert(plan.body, entry_body);
             for continuation in machine.continuations {
@@ -3711,6 +3719,7 @@ where
                     continuation.continuation_state
                 );
                 let mut body = continuation.body;
+                reify_inline_const_aggregates(db, &mut body);
                 normalize_portable_body(db, plan.body, &mut body);
                 resumable_continuations.push(PreparedResumableContinuation {
                     symbol,

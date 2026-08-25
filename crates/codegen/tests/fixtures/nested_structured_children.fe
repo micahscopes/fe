@@ -1,0 +1,150 @@
+use core::Worker
+use core::actor::{
+    ActorMailbox, ActorSink, InitialState, ProjectState, ResidentTransition, ScopedTask,
+}
+use core::pending::{Pending, Suspend, TaskOutcome, Timer}
+use std::actor::{ActorMessage, BrowserActorSink}
+use std::host::{HostTimer, Resumable}
+use std::runtime::{BrowserActorMailbox, ChildScopeExit, supervise_browser_child}
+use std::wasm::WasmBackend
+
+pub struct LeafRequest { pub value: u32 }
+pub struct LeafResponse { pub value: u32 }
+pub struct MiddleRequest { pub value: u32 }
+pub struct MiddleResponse { pub value: u32 }
+pub struct ParentEvent { pub value: u32 }
+pub struct ParentState { pub value: u32 }
+pub struct ParentProjection { pub value: u32 }
+
+actor Leaf {
+    fn double(request: LeafRequest) -> LeafResponse uses (Worker) {
+        LeafResponse { value: request.value * 2 }
+    }
+}
+
+fn exercise_leaf_request() -> u32
+uses (
+    mailbox: mut ActorMailbox<WasmBackend, Leaf>,
+    timer: mut Timer<WasmBackend>,
+    suspend: Suspend<WasmBackend, u32>,
+)
+{
+    let mut attempt: u32 = 0
+    while attempt < 100 {
+        let request: Pending<WasmBackend, LeafResponse> = mailbox.ask(LeafRequest { value: 9 })
+        let response: TaskOutcome<u32, LeafResponse> = suspend.suspend(request)
+        match response {
+            TaskOutcome::Success(value,) => {
+                if value.value != 18 { core::panic() }
+                return value.value
+            }
+            TaskOutcome::Failure(_,) => {
+                let delay = timer.sleep_begin(10)
+                let waited: TaskOutcome<u32, u64> = suspend.suspend(delay)
+                match waited {
+                    TaskOutcome::Success(_,) => {}
+                    TaskOutcome::Failure(_,) => core::panic()
+                    TaskOutcome::Cancelled => return 0
+                }
+            }
+            TaskOutcome::Cancelled => return 0
+        }
+        attempt = attempt + 1
+    }
+    core::panic()
+}
+
+actor Middle {
+    fn offset(request: MiddleRequest) -> MiddleResponse uses (Worker) {
+        MiddleResponse { value: request.value + 3 }
+    }
+
+    fn supervise_leaf() -> u32 uses (ScopedTask) {
+        match supervise_browser_child(
+            child: Leaf {},
+            max_restarts: 1,
+            window_ms: 1000,
+            backoff_ms: 1,
+            startup_timeout_ms: 1000,
+        ) {
+            ChildScopeExit::Cancelled(epoch) => epoch
+            ChildScopeExit::Exhausted(_, _) => core::panic()
+            ChildScopeExit::TransportFailure(_, _) => core::panic()
+            ChildScopeExit::InvariantViolation(_, _) => core::panic()
+        }
+    }
+
+    fn exercise_leaf() -> u32 uses (ScopedTask) {
+        with (
+            ActorMailbox<WasmBackend, Leaf> = BrowserActorMailbox<Leaf> {},
+            Timer<WasmBackend> = HostTimer {},
+            Suspend<WasmBackend, u32> = Resumable {},
+        ) {
+            exercise_leaf_request()
+        }
+    }
+}
+
+fn request_middle(_ request: own MiddleRequest) -> TaskOutcome<u32, MiddleResponse>
+uses (
+    mailbox: mut ActorMailbox<WasmBackend, Middle>,
+    suspend: Suspend<WasmBackend, u32>,
+)
+{
+    let pending: Pending<WasmBackend, MiddleResponse> = mailbox.ask(request)
+    suspend.suspend(pending)
+}
+
+actor Parent {
+    value: u32,
+
+    fn initial() -> ParentState uses (InitialState) {
+        ParentState { value: 5 }
+    }
+
+    fn receive(self, event: ParentEvent) -> ParentState uses (ResidentTransition) {
+        ParentState { value: self.value + event.value }
+    }
+
+    fn project(self) -> ParentProjection uses (ProjectState) {
+        ParentProjection { value: self.value }
+    }
+
+    fn supervise_middle() -> u32 uses (ScopedTask) {
+        match supervise_browser_child(
+            child: Middle {},
+            max_restarts: 1,
+            window_ms: 1000,
+            backoff_ms: 1,
+            startup_timeout_ms: 1000,
+        ) {
+            ChildScopeExit::Cancelled(epoch) => epoch
+            ChildScopeExit::Exhausted(_, _) => core::panic()
+            ChildScopeExit::TransportFailure(_, _) => core::panic()
+            ChildScopeExit::InvariantViolation(_, _) => core::panic()
+        }
+    }
+
+    fn calculate(self) -> u32 uses (ScopedTask) {
+        let offset = with (
+            ActorMailbox<WasmBackend, Middle> = BrowserActorMailbox<Middle> {},
+            Suspend<WasmBackend, u32> = Resumable {},
+        ) {
+            match request_middle(MiddleRequest { value: self.value }) {
+                TaskOutcome::Success(response,) => response.value
+                TaskOutcome::Failure(error,) => 300 + error
+                TaskOutcome::Cancelled => 400
+            }
+        }
+        with (
+            ActorSink<WasmBackend, ParentEvent> = BrowserActorSink {},
+            Suspend<WasmBackend, u32> = Resumable {},
+        ) {
+            match ActorMessage::new(ParentEvent { value: offset }).send() {
+                TaskOutcome::Success(_,) => offset
+                TaskOutcome::Failure(error,) => 500 + error
+                TaskOutcome::Cancelled => 600
+            }
+        }
+    }
+}

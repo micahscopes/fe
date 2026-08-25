@@ -4,9 +4,108 @@ import { attachMessagePortActorHost } from "./message-port-actor.js";
 
 const INIT_ERROR = "FE_ACTOR_WORKER_INIT";
 
-const instantiateCanonicalWasm = async (wasm) => {
-  const instantiated = await WebAssembly.instantiate(wasm, {});
+const instantiateCanonicalWasm = async (wasm, imports = {}) => {
+  const instantiated = await WebAssembly.instantiate(wasm, imports);
   return instantiated.instance?.exports ?? instantiated.exports;
+};
+
+const mergeImports = (target, additions) => {
+  if (!additions) return;
+  for (const [moduleName, values] of Object.entries(additions)) {
+    const module = target[moduleName] ?? (target[moduleName] = Object.create(null));
+    for (const [name, value] of Object.entries(values)) {
+      if (Object.hasOwn(module, name) && module[name] !== value) {
+        throw new Error(`conflicting fixed Wasm import: ${moduleName}.${name}`);
+      }
+      module[name] = value;
+    }
+  }
+};
+
+const prepareCanonicalWorkerTasks = async (taskWasm, taskModule) => {
+  if (!taskModule && !taskWasm) {
+    return {
+      start() { return () => {}; },
+    };
+  }
+  if (!taskModule || !taskWasm) {
+    throw new Error("compiler-published child task adapter and Wasm must be paired");
+  }
+  const wasm = await taskWasm;
+  if (!(wasm instanceof WebAssembly.Module)) {
+    throw new TypeError("compiler-published child task Wasm must be a compiled module");
+  }
+  if (typeof taskModule.createMaterializedTaskRegistry !== "function"
+      || typeof taskModule.createHostCompletionBroker !== "function") {
+    throw new Error("compiler-published child task package has an invalid fixed interface");
+  }
+
+  const required = WebAssembly.Module.imports(wasm);
+  const needsWorkerScope = required.some(value => value.module === "fe:worker-scope");
+  const needsWorkerMailbox = required.some(value => value.module === "fe:worker-mailbox");
+  const brokerOptions = {};
+  let structuredWorkerScopes = [];
+  if (needsWorkerScope || needsWorkerMailbox) {
+    if (typeof taskModule.createStructuredWorkerScopes !== "function") {
+      throw new Error("nested Worker effects require compiler-derived child packages");
+    }
+    structuredWorkerScopes = await taskModule.createStructuredWorkerScopes();
+    brokerOptions.workerScopes = structuredWorkerScopes;
+  }
+  const broker = taskModule.createHostCompletionBroker(brokerOptions);
+  const imports = Object.create(null);
+  mergeImports(imports, broker.imports);
+  if (needsWorkerMailbox) {
+    if (typeof taskModule.createStructuredWorkerMailboxes !== "function") {
+      throw new Error("nested Worker mailbox effects require compiler-derived adapters");
+    }
+    mergeImports(
+      imports,
+      taskModule.createStructuredWorkerMailboxes(
+        structuredWorkerScopes,
+        broker.completions,
+      ),
+    );
+  }
+  for (const value of required) {
+    if (!Object.hasOwn(imports, value.module)
+        || !Object.hasOwn(imports[value.module], value.name)) {
+      throw new Error(`missing nested Worker Wasm import: ${value.module}.${value.name}`);
+    }
+  }
+  const exports = await instantiateCanonicalWasm(wasm, imports);
+
+  return {
+    start(fail) {
+      const registry = taskModule.createMaterializedTaskRegistry(exports);
+      const machines = Object.values(registry);
+      if (machines.length === 0) {
+        throw new Error("compiler-published child task package contains no task machines");
+      }
+      const lifetime = new AbortController();
+      try {
+        for (const machine of machines) {
+          const inputWidth = machine.inputWidth ?? 0;
+          if (inputWidth !== 0) {
+            throw new Error(
+              "structured child scoped tasks cannot receive Worker-owned actor state yet",
+            );
+          }
+          broker.run(machine, [], { signal: lifetime.signal }).catch(error => {
+            if (!lifetime.signal.aborted && error?.name !== "AbortError") fail(error);
+          });
+        }
+      } catch (error) {
+        lifetime.abort();
+        broker.cancelAll();
+        throw error;
+      }
+      return () => {
+        lifetime.abort();
+        broker.cancelAll();
+      };
+    },
+  };
 };
 
 const canonicalDispatchers = (adapter, wasmActor, gpu) => {
@@ -40,11 +139,12 @@ export async function attachCanonicalWorkerHost({
   gpuPort,
   wasm,
   actorEpoch,
-}, interfaceModule) {
+}, interfaceModule, taskModule = null, taskWasm = null) {
   const { compileActorAdapter, createActorAdapter } = interfaceModule ?? {};
   if (typeof compileActorAdapter !== "function" || typeof createActorAdapter !== "function") {
     throw new TypeError("canonical Worker host requires a compiler-derived interface");
   }
+  const tasks = await prepareCanonicalWorkerTasks(taskWasm, taskModule);
   const exports = await instantiateCanonicalWasm(wasm);
   const adapter = compileActorAdapter();
   const wasmActor = createActorAdapter(exports, { placement: "worker" });
@@ -57,17 +157,33 @@ export async function attachCanonicalWorkerHost({
     adapter,
     canonicalDispatchers(adapter, wasmActor, gpu),
   );
-  attachMessagePortActorHost(port, router.dispatch, {
+  let detachActor = () => {};
+  const stopTasks = tasks.start(error => {
+    detachActor();
+    queueMicrotask(() => { throw error; });
+  });
+  detachActor = attachMessagePortActorHost(port, router.dispatch, {
     transferResult: adapter.transferResult,
   });
   port.postMessage({ type: "ready" });
+  return Object.freeze({
+    close() {
+      detachActor();
+      stopTasks();
+    },
+  });
 }
 
-export function installCanonicalWorkerHost(interfaceModule, scope = globalThis) {
+export function installCanonicalWorkerHost(
+  interfaceModule,
+  scope = globalThis,
+  taskModule = null,
+  taskWasm = null,
+) {
   scope.addEventListener("message", async ({ data }) => {
     if (data?.type !== "init") return;
     try {
-      await attachCanonicalWorkerHost(data, interfaceModule);
+      await attachCanonicalWorkerHost(data, interfaceModule, taskModule, taskWasm);
     } catch (error) {
       console.error("canonical Worker initialization failed", error);
       data?.port?.postMessage({ type: "init-error", error: INIT_ERROR });

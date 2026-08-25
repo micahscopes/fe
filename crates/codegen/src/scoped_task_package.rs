@@ -210,17 +210,64 @@ import {
                 path: format!("children/{key}/interface.js"),
                 bytes: interface.into_bytes(),
             });
-            let worker_host =
-                r#"import { compileActorAdapter, createActorAdapter } from "./interface.js";
+            let nested =
+                materialize_scoped_task_package(&child.scoped_tasks, &child.structured_children)?;
+            let worker_host = match (&nested, &child.scoped_task_wasm) {
+                (Some(_), Some(_)) => {
+                    r#"import { compileActorAdapter, createActorAdapter } from "./interface.js";
+import { installCanonicalWorkerHost } from "../../runtime/worker-host-core.js";
+import * as scopedTasks from "./tasks/tasks.js";
+
+const scopedTaskWasm = (async () => {
+  const response = await fetch(new URL("./tasks/task.wasm", import.meta.url), {
+    mode: "cors",
+    credentials: "same-origin",
+  });
+  if (!response.ok) throw new Error("compiler-derived Worker task module could not be loaded");
+  return WebAssembly.compile(await response.arrayBuffer());
+})();
+
+installCanonicalWorkerHost(
+  { compileActorAdapter, createActorAdapter },
+  globalThis,
+  scopedTasks,
+  scopedTaskWasm,
+);
+"#
+                    .to_owned()
+                }
+                (None, None) => {
+                    r#"import { compileActorAdapter, createActorAdapter } from "./interface.js";
 import { installCanonicalWorkerHost } from "../../runtime/worker-host-core.js";
 
 installCanonicalWorkerHost({ compileActorAdapter, createActorAdapter });
 "#
-                .to_owned();
+                    .to_owned()
+                }
+                _ => {
+                    return Err(package_error(
+                        "structured child task adapters and continuation Wasm disagree",
+                    ));
+                }
+            };
             files.push(ScopedTaskPackageFile {
                 path: format!("children/{key}/worker-host.js"),
                 bytes: worker_host.into_bytes(),
             });
+            if let Some(nested) = nested {
+                for file in nested.files {
+                    files.push(ScopedTaskPackageFile {
+                        path: format!("children/{key}/tasks/{}", file.path),
+                        bytes: file.bytes,
+                    });
+                }
+            }
+            if let Some(task_wasm) = &child.scoped_task_wasm {
+                files.push(ScopedTaskPackageFile {
+                    path: format!("children/{key}/tasks/task.wasm"),
+                    bytes: task_wasm.clone(),
+                });
+            }
         }
         files.extend(
             browser_actor_runtime_files()

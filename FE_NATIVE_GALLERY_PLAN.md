@@ -2743,10 +2743,19 @@ order:
    both typed mailboxes, checks the independent `7 -> 14 -> 19 -> 26` semantic
    result, cancels both supervisors, closes the correct scopes, and observes no
    leaked token. No actor name, numeric selector, JSON, or runtime manifest
-   participates. Landed at `db088b0ea`. Next, compose recursive nested scopes,
-   attach opaque ports, and derive rich owned canonical payloads. Use that
-   completed control/reactive spine for shared interaction, GPU messages, and
-   the future proof queue.
+   participates. Landed at `db088b0ea`. Recursive nominal scopes now compose
+   through a compiler-derived acyclic child tree. Each nested Worker packages a
+   closed canonical actor Wasm separately from its checked-stack Fe task Wasm,
+   so actor request resets cannot invalidate suspended continuation values. The
+   fixed host derives imports from the task module and runs the generated task
+   machines; it receives no task manifest, actor selector, or application
+   route. The release gate executes Parent -> Middle -> Leaf supervision and a
+   typed nested request in generated Workers, observes stable epoch zero,
+   cancels without leaking tokens, and independently proves nominal cycles fail
+   closed. The complete 12-test resident-actor suite passes. Next, attach opaque
+   ports and derive rich owned canonical payloads. Use that completed
+   control/reactive spine for shared interaction, GPU messages, and the future
+   proof queue.
 
 Only then resume broad package cosmetics. Promote and split libraries when a
 shared abstraction has at least two real consumers and independent evidence;

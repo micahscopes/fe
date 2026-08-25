@@ -343,10 +343,29 @@ existing Definition of done, not a second campaign checklist:
   private generated transport names, fixed resident exports, the remaining
   spelling-based render compatibility paths, and the possible future omission
   of semantically unnecessary behavior names.
-  Remaining: compose recursive nested scopes, attach opaque ports, derive rich
-  descriptor-bearing canonical message values, and run the render-owned DEC
-  task path in real Chromium. Recursive resumable SCCs must remain explicitly
-  refused until linked affine frames are sound.
+  Recursive nominal scopes now compose through arbitrary acyclic package
+  depth. The compiler follows each child actor's own `ScopedTask` roots,
+  recursively derives its nominal children, materializes the nested package
+  tree, and rejects a repeated nominal actor in one supervision ancestry path.
+  Each nested Worker receives a closed canonical actor Wasm plus a separate Fe
+  continuation Wasm. This preserves the actor caller's resettable request arena
+  without invalidating suspended host values held by the task module's checked
+  canonical stack. No task manifest, actor selector, or authored route was
+  added. The fixed Worker host derives scope and mailbox imports from the task
+  Wasm, starts only compiler-published self-less task machines, binds their
+  lifetime to the Worker, and surfaces unexpected task failure to ordinary
+  Worker supervision. A real Bun package gate executes Parent -> Middle ->
+  Leaf supervision and a typed nested request, observes stable epoch zero, then
+  cancels with no leaked completion tokens. The complete 12-test
+  `resident_actor` release suite passes, including the sibling regression and
+  nominal-cycle rejection. Wasm preparation also now reifies aggregate
+  constants in synthesized task entry and continuation bodies, matching the
+  ordinary authored-body path instead of leaking target-specific `ConstRef`
+  handles into portable lowering.
+  Remaining: attach opaque ports, derive rich descriptor-bearing canonical
+  message values, and run the render-owned DEC task path in real Chromium.
+  Recursive resumable SCCs must remain explicitly refused until linked affine
+  frames are sound.
 
 ## C. GPU pass graphs and perturbation
 

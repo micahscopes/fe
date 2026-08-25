@@ -1,0 +1,82 @@
+use core::Worker
+use core::actor::{InitialState, ProjectState, ResidentTransition, ScopedTask}
+use std::runtime::{ChildScopeExit, supervise_browser_child}
+
+pub struct Request { pub value: u32 }
+pub struct Response { pub value: u32 }
+pub struct ParentEvent { pub value: u32 }
+pub struct ParentState { pub value: u32 }
+pub struct ParentProjection { pub value: u32 }
+
+actor First {
+    fn respond_first(request: Request) -> Response uses (Worker) {
+        Response { value: request.value + 1 }
+    }
+
+    fn supervise_second() -> u32 uses (ScopedTask) {
+        match supervise_browser_child(
+            child: Second {},
+            max_restarts: 1,
+            window_ms: 1000,
+            backoff_ms: 1,
+            startup_timeout_ms: 1000,
+        ) {
+            ChildScopeExit::Cancelled(epoch) => epoch
+            ChildScopeExit::Exhausted(epoch, _) => epoch
+            ChildScopeExit::TransportFailure(epoch, _) => epoch
+            ChildScopeExit::InvariantViolation(epoch, _) => epoch
+        }
+    }
+}
+
+actor Second {
+    fn respond_second(request: Request) -> Response uses (Worker) {
+        Response { value: request.value + 2 }
+    }
+
+    fn supervise_first_from_second() -> u32 uses (ScopedTask) {
+        match supervise_browser_child(
+            child: First {},
+            max_restarts: 1,
+            window_ms: 1000,
+            backoff_ms: 1,
+            startup_timeout_ms: 1000,
+        ) {
+            ChildScopeExit::Cancelled(epoch) => epoch
+            ChildScopeExit::Exhausted(epoch, _) => epoch
+            ChildScopeExit::TransportFailure(epoch, _) => epoch
+            ChildScopeExit::InvariantViolation(epoch, _) => epoch
+        }
+    }
+}
+
+actor Parent {
+    value: u32,
+
+    fn initial() -> ParentState uses (InitialState) {
+        ParentState { value: 0 }
+    }
+
+    fn receive(self, event: ParentEvent) -> ParentState uses (ResidentTransition) {
+        ParentState { value: self.value + event.value }
+    }
+
+    fn project(self) -> ParentProjection uses (ProjectState) {
+        ParentProjection { value: self.value }
+    }
+
+    fn supervise_first_from_parent() -> u32 uses (ScopedTask) {
+        match supervise_browser_child(
+            child: First {},
+            max_restarts: 1,
+            window_ms: 1000,
+            backoff_ms: 1,
+            startup_timeout_ms: 1000,
+        ) {
+            ChildScopeExit::Cancelled(epoch) => epoch
+            ChildScopeExit::Exhausted(epoch, _) => epoch
+            ChildScopeExit::TransportFailure(epoch, _) => epoch
+            ChildScopeExit::InvariantViolation(epoch, _) => epoch
+        }
+    }
+}
