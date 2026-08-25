@@ -1703,7 +1703,10 @@ convergence. The public receipt binds the disk, iteration bound, and predicate,
 while the exact point and orbit may remain private. A later attracting-fixed-
 point mode should prove an invariant neighborhood, strict contraction bound,
 and critical-orbit entry. Bare fixed-point existence is not useful because
-every quadratic `z^2 + c` has complex fixed points.
+every quadratic `z^2 + c` has complex fixed points. The fixed browser adapter
+reports raw pointer facts and realizes capture only. Fe owns pointer-down
+anchoring, click-versus-drag classification, disk geometry, live preview,
+release and cancellation, predicate selection, and proof scheduling.
 
 The compile-parallelism audit is recorded at
 `/workspace/scratch/mb2-fe-compile-parallelism-audit-2026-08-24.md`. Its order

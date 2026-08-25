@@ -94,8 +94,19 @@ existing Definition of done, not a second campaign checklist:
   Larger production domains, fused shared-memory or subgroup placements, and
   real Chrome hardware parity for this staged path remain open, so G-NTT stays
   partial.
-- [ ] **G-LAYOUT:** compiler/FCO-derived typed regions replace application
+- [~] **G-LAYOUT:** compiler/FCO-derived typed regions replace application
   proof-tape offsets, and an independent decoder checks every region and width.
+  Commit `143e0b799` establishes the reusable `region_layout` ingot and the
+  provider-privacy compiler floor it needs. An ordinary Fe record of
+  `Region<T>` fields now derives declaration-order offsets and total canonical
+  width from `CanonicalWords`; its physical coordinates remain private and its
+  checked relative accessors fail closed. Release gates prove the derived
+  layout against an independent Wasm decoder, reject direct field and private-
+  constructor forging plus cross-payload confusion, validate emitted
+  browser-profile WGSL, and execute typed stores on llvmpipe without allowing
+  an out-of-region write to reach the next region. The production Mandelbrot
+  proof tape still uses application constants, so migration and a full
+  receipt-wide independent decoder remain before this gate can close.
 - [ ] **G-RECEIPT:** the complete nonrecursive BabyBear receipt accepts cleanly
   and rejects claim, domain, transcript, query, path, and encoding mutations.
 - [ ] **G-RECURSE:** adjacent typed iteration chunks merge through the fixed
@@ -111,7 +122,10 @@ existing Definition of done, not a second campaign checklist:
   non-membership certificate; survival is only a finite bounded-prefix claim
   and must not be relabeled as full membership or convergence. A later
   attracting-fixed-point mode may instead prove a rigorous invariant-
-  neighborhood and contraction certificate.
+  neighborhood and contraction certificate. The fixed browser adapter reports
+  raw pointer facts and realizes Fe-requested capture; the Fe actor owns the
+  down/drag/up state machine, click-versus-drag threshold, center and radius
+  calculation, preview, cancellation, predicate choice, and proof scheduling.
 - [ ] **G-INSPECT:** the Fe SourceInspector presents authored, semantic,
   analysis, placement, ABI/layout, artifact, and evidence views from one
   content-addressed `SourceAtlas`, with no gallery `docs.json` or runtime render
