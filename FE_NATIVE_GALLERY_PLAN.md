@@ -1517,27 +1517,30 @@ done; do not derive a second master checklist from its historical ledger.
   `MessageChannel`. Worker/spawn placement must still supply this opaque
   capability through a structured Fe scope; no gallery application acquires a
   port through JavaScript glue.
-- The scalar half of the G-NTT convergence gate is now a real focused library
-  rather than another proof-demo loop. `parallel_structure` defines `Unit`,
-  `Pair`, ordered `Comp`, recursive `Dit`/`Dif`, composition-balanced `Bush`,
-  explicit irregular trees, and a single structural analysis. Equal-size DIT
-  and Bush plans retain distinct association depths while deriving the same
-  points, stage count, butterfly work, exchanges, dependency depth, fanout, and
-  live-value bound. `parallel_ntt` interprets that same type over the existing
-  field-generic `Radix2Field`: `Pair` owns exactly one scalar butterfly stage
-  and `Comp` recursively sequences its children, replacing the indexed outer
-  stage loop with per-constructor type-driven execution while leaving each
-  stage's independent butterflies placement-neutral. The public surface
-  includes forward and inverse transforms, coset LDE with separately typed
-  input/output plans, and a `ScalarTransform<Plan>` facade. Independent
-  zero-import Wasm gates pin DIT, DIF, Bush, and irregular normal forms and
-  compare their structural receipts with Rust arithmetic. A separate direct
-  polynomial oracle covers four 16-point associations, the established
-  BabyBear base-field NTT/INTT/LDE vectors, quartic-extension NTT/LDE vectors,
-  round trips, boundary words, and invalid coset shifts. Its two release tests
-  complete in 18.15 seconds on this host. No WebGPU claim follows from this:
-  production migration, the same-tree portable stage-grid interpreter, and
-  real browser parity are the remaining G-NTT work.
+- The reusable scalar and portable WebGPU baseline for the G-NTT convergence
+  gate is now a focused library rather than another proof-demo loop. At commits
+  `3a6a7f47f`, `051248e18`, and `9e356546a`, `parallel_structure` reuses the
+  canonical `std::conal::{Par, Pair, Comp}` constructors, names `Par` as `Unit`
+  inside the factor language, and makes `Dit<4>` definitionally identical to
+  the existing `RBin<Pair, 4>`. Recursive `Dit`/`Dif`, composition-balanced
+  `Bush`, explicit irregular trees, and one structural analysis derive points,
+  stage count, butterfly work, exchanges, dependency depth, association depth,
+  fanout, and live-value bounds. `parallel_ntt` supplies forward, inverse, and
+  coset-LDE scalar interpretations over the existing field-generic
+  `Radix2Field`. `parallel_ntt_webgpu` supplies a portable `StageGrid`
+  interpretation over the same constructors. Per-butterfly progress cursors
+  let repeated actor dispatches advance exact widths `2, 4, 8, 16` without a
+  racy shared or host-authored stage cursor. Independent zero-import and Rust
+  gates pin DIT, DIF, Bush, irregular, and Conal `RBin` normal forms; compare
+  scalar base-field and quartic-extension NTT/INTT/LDE results with direct
+  polynomial evaluation; and execute the compiler-derived browser-profile
+  WGSL for N=16 forward and inverse transforms on llvmpipe. The WebGPU oracle
+  checks direct-DFT values, canonical round trips, stage receipts, progress,
+  validity, and trap buffers across three vector families. The emitted prepare,
+  forward, and inverse shaders are 4,302, 38,868, and 41,987 bytes and require
+  no workgroup shared memory or barriers. Production `mandelbrot_proof_gpu`
+  NTT/LDE migration, larger domains, fused shared-memory or subgroup placement,
+  and real Chrome hardware parity remain open, so G-NTT stays partial.
 
 This ledger records achieved evidence, not a relaxation of the phases or the
 Definition of done below.

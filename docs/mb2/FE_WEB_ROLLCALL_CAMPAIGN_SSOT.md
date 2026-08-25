@@ -57,24 +57,35 @@ existing Definition of done, not a second campaign checklist:
   `mandelbrot_recursive_fixed_oracle` target is selected only by the
   `expensive-release-oracles` feature and rejects debug compilation. G5's
   release/all-features command includes it, while ordinary debug iteration
-  does not compile the target at all. The scalar half of this gate is now
-  implemented in the focused `parallel_structure` and `parallel_ntt` ingots.
-  Recursive Fe type functions derive `Dit`, `Dif`, and composition-balanced
-  `Bush` trees; explicit `Comp` nesting admits irregular factorizations. One
-  `FactorTree` interpretation derives points, factors, butterflies, pair
-  exchanges, dependency depth, association depth, composition nodes, fanout,
-  and live values. One separate scalar interpretation is implemented only for
-  `Unit`, `Pair`, and `Comp`: `Pair` executes one stage and `Comp` recursively
-  sequences its children, so there is no indexed outer stage loop or copied
-  width table. The zero-import `parallel_structure_oracle` pins DIT, DIF, Bush,
-  and irregular normal forms and independently checks their receipts. The
-  zero-import `parallel_ntt_oracle` checks all four 16-point policies, base-field
-  NTT/INTT and coset LDE, and quartic-extension NTT/LDE against direct
-  polynomial evaluation, including the established BabyBear vectors and
-  invalid-coset rejection. Its two release tests complete in 18.15 seconds on
-  this host. This is scalar exactness and structure evidence only. Production
-  call-path migration, the portable stage-grid interpretation, and real browser
-  WebGPU parity remain open, so G-NTT stays partial.
+  does not compile the target at all. The reusable scalar and portable WebGPU
+  baseline for this gate is now implemented in the focused
+  `parallel_structure`, `parallel_ntt`, and `parallel_ntt_webgpu` ingots at
+  commits `3a6a7f47f`, `051248e18`, and `9e356546a`. The factor policies reuse
+  the canonical `std::conal::{Par, Pair, Comp}` constructors, with `Unit` as a
+  factor-language name for `Par`; `Dit<4>` is definitionally the existing
+  `RBin<Pair, 4>`, rather than a numerically similar parallel type. Recursive
+  Fe type functions derive `Dit`, `Dif`, and composition-balanced `Bush` trees;
+  explicit `Comp` nesting admits irregular factorizations. One `FactorTree`
+  interpretation derives points, factors, butterflies, pair exchanges,
+  dependency depth, association depth, composition nodes, fanout, and live
+  values. A scalar interpreter and a portable `StageGrid` interpreter consume
+  the same constructors. The WebGPU interpretation gives each butterfly lane
+  its own progress cursor, so repeated actor dispatches advance exact widths
+  `2, 4, 8, 16` without a racy host or shared cursor. The zero-import
+  `parallel_structure_oracle` pins DIT, DIF, Bush, irregular, and Conal `RBin`
+  normal forms. The zero-import scalar oracle checks all four 16-point
+  policies, base-field NTT/INTT and coset LDE, and quartic-extension NTT/LDE
+  against direct polynomial evaluation. A separate Rust `wgpu` oracle compiles
+  compiler-derived browser-profile WGSL, executes forward and inverse N=16
+  transforms on llvmpipe, and checks direct-DFT values, canonical round trips,
+  stage receipts, progress, validity, and trap buffers across three vector
+  families. The emitted prepare, forward, and inverse shaders are 4,302,
+  38,868, and 41,987 bytes and require no workgroup shared memory or barriers.
+  Structural and stage receipts are analysis evidence only; the direct DFT is
+  the independent correctness oracle. Production `mandelbrot_proof_gpu`
+  NTT/LDE call-path migration, larger domains, fused shared-memory or subgroup
+  placements, and real Chrome hardware parity remain open, so G-NTT stays
+  partial.
 - [ ] **G-LAYOUT:** compiler/FCO-derived typed regions replace application
   proof-tape offsets, and an independent decoder checks every region and width.
 - [ ] **G-RECEIPT:** the complete nonrecursive BabyBear receipt accepts cleanly
@@ -1808,15 +1819,16 @@ existing Definition of done, not a second campaign checklist:
   placement checkpoint only. It does not satisfy authenticated FRI,
   recursion, interactive point selection, Wasm receipt verification, or the
   Mandelbrot verifier executed through the existing revm-in-Wasm rail.
-  The scheduling step must now consolidate that arithmetic plan with the two
-  existing, independently gated Conal strands:
-  `ntt_schedule.fe` derives the `RBin<Pair, k>` stage tree and
-  `BarrierReq<k>` from one type-level depth, while `ntt_par_exec.fe` executes
-  the corresponding explicit fork/barrier schedule under revm and checks it
-  against the sequential transform. The production arithmetic plan is not yet
-  an interpretation of that `RBin` schedule, and no workgroup/shared-memory
-  proof transform has executed. The remaining work is a backend interpreter
-  and placement policy over the shared plan, not a fresh NTT implementation.
+  The first reusable scheduling baseline now consolidates that arithmetic plan
+  with the existing Conal vocabulary. `parallel_structure::Dit<k>` is
+  definitionally `std::conal::RBin<Pair, k>`, and scalar plus portable WebGPU
+  interpreters consume the same `Par`, `Pair`, and `Comp` constructors.
+  Compiler-derived N=16 forward and inverse transforms execute on llvmpipe and
+  match an independent direct DFT. The production arithmetic plan is not yet
+  migrated to those interpreters, and no fused workgroup/shared-memory proof
+  transform has executed. The remaining work is production NTT/LDE placement
+  and device-tuned interpreters over the shared plan, not a fresh NTT
+  implementation.
 - [ ] Build and run the complete recursive proof experience in the canonical
   gallery after the BabyBear prover exists. The Fe-authored component lets a
   user select a high-precision Mandelbrot point and iteration bound, schedules
@@ -1890,9 +1902,9 @@ fallback. The semantic receipts are:
    the required Sonatina revision. Preserve the four-query receipt as a
    regression fixture, then execute a separate security-sized receipt rather
    than silently changing the checkpoint's meaning.
-3. Close G-NTT: derive the scalar factor-tree NTT from one typed structure,
-   recover existing independent vectors, then interpret it as a portable
-   stage-grid WebGPU schedule and run the real browser gate.
+3. Close G-NTT: migrate production NTT and coset-LDE call paths onto the now
+   gated scalar and portable stage-grid interpretations, preserve the existing
+   direct-DFT and commitment oracles, then run the real Chrome hardware gate.
 4. Close G-LAYOUT and G-RECEIPT: derive typed proof regions, then finish the
    complete ordered nonrecursive receipt without raw tape offsets or a second
    transcript description.
