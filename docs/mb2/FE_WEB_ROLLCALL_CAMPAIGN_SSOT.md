@@ -100,9 +100,14 @@ existing Definition of done, not a second campaign checklist:
   and rejects claim, domain, transcript, query, path, and encoding mutations.
 - [ ] **G-RECURSE:** adjacent typed iteration chunks merge through the fixed
   recursive interval topology, rejecting boundary and order mutations.
-- [ ] **G-BROWSER:** the Fe resident point-picker proves through WebGPU and
+- [ ] **G-BROWSER:** the Fe resident region picker proves through WebGPU and
   verifies through both Fe-Wasm and revm-Wasm with cancellation, backpressure,
-  mutation, timing, and device-loss evidence.
+  mutation, timing, and device-loss evidence. Its first honest public claim is
+  existential and finite: a private parameter `c` lies inside the user-drawn
+  disk and its critical orbit remains bounded through public iteration bound
+  `N`. The receipt must not relabel this as full Mandelbrot membership or
+  convergence. A later attracting-fixed-point mode may instead prove a
+  rigorous invariant-neighborhood and contraction certificate.
 - [ ] **G-INSPECT:** the Fe SourceInspector presents authored, semantic,
   analysis, placement, ABI/layout, artifact, and evidence views from one
   content-addressed `SourceAtlas`, with no gallery `docs.json` or runtime render
@@ -1841,13 +1846,19 @@ existing Definition of done, not a second campaign checklist:
   plan, not a fresh NTT implementation.
 - [ ] Build and run the complete recursive proof experience in the canonical
   gallery after the BabyBear prover exists. The Fe-authored component lets a
-  user select a high-precision Mandelbrot point and iteration bound, schedules
-  leaf chunks progressively on WebGPU, recursively merges adjacent certified
-  intervals, presents the typed receipt plus proof-size and timing evidence,
-  and verifies it in-browser through Fe. The Chrome gate must exercise point
-  selection, successful generation and verification, cancellation and
-  backpressure, deliberate receipt mutation rejection, and console and
-  device-loss recovery. Shader compilation alone cannot satisfy this gate.
+  user draw a disk, selects a private high-precision Mandelbrot parameter
+  inside it, and proves that its critical orbit remains bounded through a
+  public iteration bound. It schedules leaf chunks progressively on WebGPU,
+  recursively merges adjacent certified intervals, presents the typed receipt
+  plus proof-size and timing evidence, and verifies it in-browser through Fe.
+  The circle relation and orbit witness remain inside the same proof rather
+  than being checked by host code. A separate attracting-fixed-point mode may
+  later prove an invariant disk, contraction bound, and entry of the critical
+  orbit, which is meaningful in a way that bare existence of a complex fixed
+  point is not. The Chrome gate must exercise region selection, successful
+  generation and verification, cancellation and backpressure, deliberate
+  receipt mutation rejection, and console and device-loss recovery. Shader
+  compilation alone cannot satisfy this gate.
 - [x] Define a typed proof encoding and prove malformed-proof and mutation
   rejection in zero-import Fe Wasm against the independent bigint model.
   Browser/native parity for the eventual BabyBear protocol remains part of the

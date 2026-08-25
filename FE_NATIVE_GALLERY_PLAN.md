@@ -1691,6 +1691,17 @@ NTT, portable stage-grid WebGPU NTT, typed proof regions, complete ordered
 receipt, recursive provider and interactive browser shell, with SourceAtlas
 inspection joining once real semantic, placement, and layout records exist.
 
+The recursive browser shell should expose an honest geometric claim rather
+than raw receipt controls. Its first mode lets the user draw a public disk and
+proves that some private high-precision parameter `c` lies in that disk and
+has a critical orbit bounded through public iteration count `N`. Recursive
+leaves certify exact orbit chunks, ordered parents certify shared boundaries,
+and the outer proof constrains the private point against the public disk. This
+is a bounded-prefix statement, not full Mandelbrot membership or convergence.
+A later attracting-fixed-point mode should prove an invariant neighborhood,
+strict contraction bound, and critical-orbit entry. Bare fixed-point existence
+is not useful because every quadratic `z^2 + c` has complex fixed points.
+
 The compile-parallelism audit is recorded at
 `/workspace/scratch/mb2-fe-compile-parallelism-audit-2026-08-24.md`. Its order
 is binding for performance work: instrument both Cargo dev and release
