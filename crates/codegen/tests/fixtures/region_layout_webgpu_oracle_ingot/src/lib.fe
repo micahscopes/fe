@@ -1,8 +1,11 @@
 use canonical_words::{CanonicalWords, CanonicalWordsProvider}
 use region_layout::{
     Region,
+    RegionIndex,
     RegionSchema,
     RegionSchemaProvider,
+    cyclic_region_index,
+    store_region_indexed_word,
     store_region_word,
     subregion,
 }
@@ -17,13 +20,16 @@ impl core::marker::Copy for Query {}
 derive CanonicalWords for Query using CanonicalWordsProvider
 
 struct ProofRegions {
-    header: Region<Header>,
-    queries: Region<[Query; 2]>,
-    digest: Region<[u32; 8]>,
+    header: Region<ProofRegions, Header>,
+    queries: Region<ProofRegions, [Query; 2]>,
+    digest: Region<ProofRegions, [u32; 8]>,
 }
 derive RegionSchema for ProofRegions using RegionSchemaProvider
 
-struct QueryRegions { first: Region<Query>, second: Region<Query> }
+struct QueryRegions {
+    first: Region<QueryRegions, Query>,
+    second: Region<QueryRegions, Query>,
+}
 derive RegionSchema for QueryRegions using RegionSchemaProvider
 
 /// One physical invocation writes semantic regions through checked relative
@@ -32,10 +38,11 @@ pub fn write_regions(_ tape: StorageBuffer<u32, 18>) {
     let regions = <ProofRegions as RegionSchema>::regions()
     let query_regions = <QueryRegions as RegionSchema>::regions()
     let second_query = subregion(regions.queries, query_regions.second)
+    let wrapped_query_word: RegionIndex<Query> = cyclic_region_index(7)
     let header_ok = store_region_word(tape, regions.header, 0, 101)
         && store_region_word(tape, regions.header, 1, 102)
+    store_region_indexed_word(tape, second_query, wrapped_query_word, 208)
     let query_ok = store_region_word(tape, regions.queries, 0, 201)
-        && store_region_word(tape, second_query, 3, 208)
     let rejected = store_region_word(tape, second_query, 4, 999)
     let digest_ok = store_region_word(tape, regions.digest, 0, 301)
         && store_region_word(tape, regions.digest, 7, 308)

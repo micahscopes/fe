@@ -1,5 +1,11 @@
 use canonical_words::{CanonicalWords, CanonicalWordsProvider}
-use region_layout::{Region, RegionSchema, RegionSchemaProvider}
+use region_layout::{
+    Region,
+    RegionIndex,
+    RegionSchema,
+    RegionSchemaProvider,
+    subregion,
+}
 
 struct Header { value: u32 }
 impl core::marker::Copy for Header {}
@@ -9,20 +15,38 @@ struct Query { values: [u32; 2] }
 impl core::marker::Copy for Query {}
 derive CanonicalWords for Query using CanonicalWordsProvider
 
-struct Regions { header: Region<Header>, query: Region<Query> }
+struct Regions {
+    header: Region<Regions, Header>,
+    query: Region<Regions, Query>,
+}
 derive RegionSchema for Regions using RegionSchemaProvider
 
-fn require_header(_ region: Region<Header>) {}
+struct OversizedRegions {
+    all: Region<OversizedRegions, [Query; 2]>,
+}
+derive RegionSchema for OversizedRegions using RegionSchemaProvider
 
-pub fn forge_raw_offset() -> Region<Header> {
+fn require_header(_ region: Region<Regions, Header>) {}
+
+pub fn forge_raw_offset() -> Region<Regions, Header> {
     Region { offset: 7 }
 }
 
-pub fn forge_private_constructor() -> Region<Header> {
-    Region<Header>::from_derived_offset(7)
+pub fn forge_private_constructor() -> Region<Regions, Header> {
+    Region<Regions, Header>::from_derived_offset(7)
+}
+
+pub fn forge_bounded_index() -> RegionIndex<Query> {
+    RegionIndex { value: 1 }
 }
 
 pub fn confuse_region_types() {
     let regions = <Regions as RegionSchema>::regions()
     require_header(regions.query)
+}
+
+pub fn compose_oversized_schema() {
+    let regions = <Regions as RegionSchema>::regions()
+    let oversized = <OversizedRegions as RegionSchema>::regions()
+    subregion(regions.query, oversized.all)
 }

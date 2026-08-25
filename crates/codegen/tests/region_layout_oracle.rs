@@ -134,21 +134,10 @@ fn reflected_regions_match_an_independent_declaration_order_decoder() {
             "relative coordinate in a nested query region {index}",
         );
     }
-    assert_eq!(
-        call(
-            &mut store,
-            &instance,
-            "oversized_query_region_valid",
-            &[],
-            1,
-        ),
-        vec![0],
-        "an oversized child layout must fail closed",
-    );
 }
 
 #[test]
-fn raw_offsets_and_cross_region_type_confusion_are_rejected() {
+fn forged_mismatched_and_oversized_regions_are_rejected() {
     let url = Url::from_directory_path(rejected_fixture_path()).unwrap();
     let mut db = DriverDataBase::default();
     assert!(
@@ -169,8 +158,17 @@ fn raw_offsets_and_cross_region_type_confusion_are_rejected() {
         "the provider's constructor must remain invisible to ordinary Fe:\n{diagnostics}",
     );
     assert!(
-        diagnostics.contains("Region<Header>") && diagnostics.contains("Region<Query>"),
+        diagnostics.contains("`value` is not visible"),
+        "a bounded relative coordinate must not be forgeable:\n{diagnostics}",
+    );
+    assert!(
+        diagnostics.contains("Region<Regions, Header>")
+            && diagnostics.contains("Region<Regions, Query>"),
         "different semantic regions must not be interchangeable:\n{diagnostics}",
+    );
+    assert!(
+        diagnostics.contains("const predicate is not satisfied"),
+        "an oversized child schema must be rejected at compile time:\n{diagnostics}",
     );
 }
 
